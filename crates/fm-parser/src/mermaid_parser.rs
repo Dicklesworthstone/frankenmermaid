@@ -1,4 +1,4 @@
-use fm_core::{ArrowType, DiagramType, GraphDirection, NodeShape, Span};
+use fm_core::{ArrowType, DiagramType, GraphDirection, IrAttributeKey, IrNodeId, NodeShape, Span};
 use serde_json::Value;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -445,7 +445,7 @@ fn parse_mindmap(input: &str, builder: &mut IrBuilder) {
 }
 
 fn parse_er(input: &str, builder: &mut IrBuilder) {
-    let mut inside_entity_block = false;
+    let mut current_entity: Option<IrNodeId> = None;
 
     for (index, line) in input.lines().enumerate() {
         let line_number = index + 1;
@@ -458,29 +458,43 @@ fn parse_er(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
+        // Start of entity block: ENTITY_NAME {
         if trimmed.ends_with('{') {
             let entity_name = trimmed.trim_end_matches('{').trim();
             if let Some(node) = parse_node_token(entity_name) {
                 let span = span_for(line_number, line);
-                let _ = builder.intern_node(&node.id, node.label.as_deref(), NodeShape::Rect, span);
-                inside_entity_block = true;
+                current_entity =
+                    builder.intern_node(&node.id, node.label.as_deref(), NodeShape::Rect, span);
                 continue;
             }
         }
 
+        // End of entity block
         if trimmed.starts_with('}') {
-            inside_entity_block = false;
+            current_entity = None;
             continue;
         }
 
+        // Relationship line (outside entity block or mixed)
         if parse_er_relationship(trimmed, line_number, line, builder) {
             continue;
         }
 
-        if inside_entity_block {
-            continue;
+        // Inside entity block - parse attribute
+        if let Some(entity_id) = current_entity {
+            if let Some(attr) = parse_er_attribute(trimmed) {
+                builder.add_entity_attribute(
+                    entity_id,
+                    &attr.data_type,
+                    &attr.name,
+                    attr.key,
+                    attr.comment.as_deref(),
+                );
+                continue;
+            }
         }
 
+        // Standalone entity declaration
         if let Some(node) = parse_node_token(trimmed) {
             let span = span_for(line_number, line);
             let _ = builder.intern_node(&node.id, node.label.as_deref(), node.shape, span);
@@ -491,6 +505,105 @@ fn parse_er(input: &str, builder: &mut IrBuilder) {
             "Line {line_number}: unsupported er syntax: {trimmed}"
         ));
     }
+}
+
+/// Parsed ER attribute.
+struct ErAttribute {
+    data_type: String,
+    name: String,
+    key: IrAttributeKey,
+    comment: Option<String>,
+}
+
+/// Parse an ER entity attribute line.
+///
+/// Syntax: `type name [key] ["comment"]`
+/// Examples:
+/// - `int id PK`
+/// - `string name FK "references customer"`
+/// - `varchar(255) email UK`
+/// - `date created_at`
+fn parse_er_attribute(line: &str) -> Option<ErAttribute> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Split into parts, handling quoted comments
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut in_quote = false;
+    let mut quote_content = String::new();
+
+    for ch in trimmed.chars() {
+        if ch == '"' {
+            if in_quote {
+                // End of quoted string
+                parts.push(quote_content.clone());
+                quote_content.clear();
+                in_quote = false;
+            } else {
+                // Start of quoted string - save current if any
+                if !current.trim().is_empty() {
+                    for part in current.split_whitespace() {
+                        parts.push(part.to_string());
+                    }
+                    current.clear();
+                }
+                in_quote = true;
+            }
+        } else if in_quote {
+            quote_content.push(ch);
+        } else {
+            current.push(ch);
+        }
+    }
+
+    // Don't forget trailing content
+    if !current.trim().is_empty() {
+        for part in current.split_whitespace() {
+            parts.push(part.to_string());
+        }
+    }
+    if in_quote && !quote_content.is_empty() {
+        // Unclosed quote - still include it
+        parts.push(quote_content);
+    }
+
+    // Need at least type and name
+    if parts.len() < 2 {
+        return None;
+    }
+
+    let data_type = parts[0].clone();
+    let name = parts[1].clone();
+
+    // Check for key modifier and comment in remaining parts
+    let mut key = IrAttributeKey::None;
+    let mut comment = None;
+
+    for (i, part) in parts.iter().enumerate().skip(2) {
+        let upper = part.to_uppercase();
+        match upper.as_str() {
+            "PK" => key = IrAttributeKey::Pk,
+            "FK" => key = IrAttributeKey::Fk,
+            "UK" => key = IrAttributeKey::Uk,
+            _ => {
+                // If this is not a key and we haven't set a comment, it might be a comment
+                // (especially if it was quoted or is the last element)
+                if comment.is_none() && i >= 2 {
+                    comment = Some(part.clone());
+                }
+            }
+        }
+    }
+
+    Some(ErAttribute {
+        data_type,
+        name,
+        key,
+        comment,
+    })
 }
 
 fn parse_requirement_relation(
