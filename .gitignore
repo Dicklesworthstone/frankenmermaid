@@ -1,2 +1,5 @@
 # bv (beads viewer) local config and caches
 .bv/
+
+# macOS AppleDouble / resource fork files
+._*
