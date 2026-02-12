@@ -538,30 +538,63 @@ fn coordinate_assignment(
     spacing: LayoutSpacing,
 ) -> Vec<LayoutNodeBox> {
     let fallback_nodes_by_rank = nodes_by_rank(ir.nodes.len(), ranks);
-    let max_rank = ranks.values().copied().max().unwrap_or(0);
     let horizontal_ranks = matches!(ir.direction, GraphDirection::LR | GraphDirection::RL);
     let reverse_ranks = matches!(ir.direction, GraphDirection::RL | GraphDirection::BT);
+    let ordered_ranks: Vec<usize> = fallback_nodes_by_rank.keys().copied().collect();
+
+    let rank_to_index: BTreeMap<usize, usize> = ordered_ranks
+        .iter()
+        .enumerate()
+        .map(|(index, rank)| (*rank, index))
+        .collect();
+
+    let mut rank_span = vec![0.0_f32; ordered_ranks.len()];
+    for (rank_index, rank) in ordered_ranks.iter().copied().enumerate() {
+        let node_indexes = ordering_by_rank
+            .get(&rank)
+            .cloned()
+            .or_else(|| fallback_nodes_by_rank.get(&rank).cloned())
+            .unwrap_or_default();
+
+        let mut span = 0.0_f32;
+        for node_index in node_indexes {
+            let (width, height) = node_sizes.get(node_index).copied().unwrap_or((72.0, 40.0));
+            let primary_extent = if horizontal_ranks { width } else { height };
+            span = span.max(primary_extent);
+        }
+        rank_span[rank_index] = span.max(1.0);
+    }
+
+    let mut primary_offsets = vec![0.0_f32; ordered_ranks.len()];
+    let mut primary_cursor = 0.0_f32;
+    for (rank_index, span) in rank_span.into_iter().enumerate() {
+        primary_offsets[rank_index] = primary_cursor;
+        primary_cursor += span + spacing.rank_spacing;
+    }
 
     let mut output = Vec::with_capacity(ir.nodes.len());
     for (rank, fallback_node_indexes) in fallback_nodes_by_rank {
-        let rank_position = if reverse_ranks {
-            max_rank.saturating_sub(rank)
-        } else {
-            rank
+        let Some(rank_index) = rank_to_index.get(&rank).copied() else {
+            continue;
         };
+        let rank_position = if reverse_ranks {
+            ordered_ranks
+                .len()
+                .saturating_sub(1)
+                .saturating_sub(rank_index)
+        } else {
+            rank_index
+        };
+
         let node_indexes = ordering_by_rank
             .get(&rank)
             .cloned()
             .unwrap_or(fallback_node_indexes);
 
+        let primary = primary_offsets.get(rank_position).copied().unwrap_or(0.0);
         let mut secondary_cursor = 0.0_f32;
         for (order, node_index) in node_indexes.into_iter().enumerate() {
             let (width, height) = node_sizes.get(node_index).copied().unwrap_or((72.0, 40.0));
-            let primary = if horizontal_ranks {
-                (rank_position as f32) * (spacing.rank_spacing + width)
-            } else {
-                (rank_position as f32) * (spacing.rank_spacing + height)
-            };
             let (x, y) = if horizontal_ranks {
                 (primary, secondary_cursor)
             } else {
@@ -1072,7 +1105,10 @@ pub fn layout_stats_from(layout: &DiagramLayout) -> LayoutStats {
 
 #[cfg(test)]
 mod tests {
-    use super::{layout, layout_diagram, layout_diagram_traced, LayoutAlgorithm};
+    use super::{
+        LayoutAlgorithm, LayoutPoint, layout, layout_diagram, layout_diagram_traced,
+        route_edge_points,
+    };
     use fm_core::{
         ArrowType, DiagramType, GraphDirection, IrEdge, IrEndpoint, IrLabel, IrLabelId, IrNode,
         IrNodeId, MermaidDiagramIr,
@@ -1207,5 +1243,85 @@ mod tests {
         };
 
         assert!(b_node.bounds.x < a_node.bounds.x);
+    }
+
+    #[test]
+    fn vertical_routing_adds_turn_for_offset_nodes() {
+        let points = route_edge_points(
+            LayoutPoint { x: 10.0, y: 40.0 },
+            LayoutPoint { x: 100.0, y: 120.0 },
+            false,
+        );
+        assert_eq!(points.len(), 4);
+        assert_eq!(
+            points.first().copied(),
+            Some(LayoutPoint { x: 10.0, y: 40.0 })
+        );
+        assert_eq!(
+            points.last().copied(),
+            Some(LayoutPoint { x: 100.0, y: 120.0 })
+        );
+    }
+
+    #[test]
+    fn horizontal_routing_adds_turn_for_offset_nodes() {
+        let points = route_edge_points(
+            LayoutPoint { x: 40.0, y: 10.0 },
+            LayoutPoint { x: 120.0, y: 100.0 },
+            true,
+        );
+        assert_eq!(points.len(), 4);
+        assert_eq!(
+            points.first().copied(),
+            Some(LayoutPoint { x: 40.0, y: 10.0 })
+        );
+        assert_eq!(
+            points.last().copied(),
+            Some(LayoutPoint { x: 120.0, y: 100.0 })
+        );
+    }
+
+    #[test]
+    fn lr_same_rank_nodes_with_different_widths_share_column_position() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.direction = GraphDirection::LR;
+
+        for text in [
+            "root-one",
+            "root-two",
+            "narrow",
+            "this target label is intentionally much wider",
+        ] {
+            ir.labels.push(IrLabel {
+                text: text.to_string(),
+                ..IrLabel::default()
+            });
+        }
+
+        for (node_id, label_id) in [("R1", 0), ("R2", 1), ("A", 2), ("B", 3)] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                label: Some(IrLabelId(label_id)),
+                ..IrNode::default()
+            });
+        }
+
+        for (from, to) in [(0, 2), (1, 3)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let layout = layout_diagram(&ir);
+        let a_node = layout.nodes.iter().find(|node| node.node_id == "A");
+        let b_node = layout.nodes.iter().find(|node| node.node_id == "B");
+        let (Some(a_node), Some(b_node)) = (a_node, b_node) else {
+            panic!("expected A and B nodes in layout");
+        };
+
+        assert!((a_node.bounds.x - b_node.bounds.x).abs() < 0.001);
     }
 }

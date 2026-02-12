@@ -1,5 +1,12 @@
 #![forbid(unsafe_code)]
 
+mod font_metrics;
+
+pub use font_metrics::{
+    CharWidthClass, DiagnosticLevel, FontMetrics, FontMetricsConfig, FontMetricsDiagnostic,
+    FontPreset,
+};
+
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -252,6 +259,14 @@ pub enum NodeShape {
     Trapezoid,
     DoubleCircle,
     Note,
+    // Extended shapes for FrankenMermaid
+    InvTrapezoid,
+    Triangle,
+    Pentagon,
+    Star,
+    Cloud,
+    Tag,
+    CrossedCircle,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]

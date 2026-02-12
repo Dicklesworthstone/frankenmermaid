@@ -17,6 +17,10 @@ pub struct ParseResult {
 
 #[must_use]
 pub fn detect_type(input: &str) -> DiagramType {
+    if looks_like_dot(input) {
+        // DOT inputs are routed through the DOT parser and currently map to the Flowchart IR.
+        return DiagramType::Flowchart;
+    }
     mermaid_parser::detect_type(input)
 }
 
@@ -66,6 +70,11 @@ mod tests {
             detect_type("sequenceDiagram\nAlice->>Bob: Hello"),
             DiagramType::Sequence
         );
+    }
+
+    #[test]
+    fn detects_dot_inputs_as_flowchart() {
+        assert_eq!(detect_type("digraph G { a -> b; }"), DiagramType::Flowchart);
     }
 
     #[test]
