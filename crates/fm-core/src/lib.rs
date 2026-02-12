@@ -294,6 +294,33 @@ impl ArrowType {
     }
 }
 
+/// Key modifier for ER entity attributes.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+pub enum IrAttributeKey {
+    /// Primary key
+    Pk,
+    /// Foreign key
+    Fk,
+    /// Unique key
+    Uk,
+    /// No key modifier
+    #[default]
+    None,
+}
+
+/// An attribute/member of an ER entity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct IrEntityAttribute {
+    /// Data type of the attribute (e.g., "int", "string", "varchar(255)")
+    pub data_type: String,
+    /// Name of the attribute
+    pub name: String,
+    /// Key modifier (PK, FK, UK, or None)
+    pub key: IrAttributeKey,
+    /// Optional comment/description
+    pub comment: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct IrNode {
     pub id: String,
@@ -303,6 +330,9 @@ pub struct IrNode {
     pub span_primary: Span,
     pub span_all: Vec<Span>,
     pub implicit: bool,
+    /// Entity attributes/members (for ER diagrams)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<IrEntityAttribute>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

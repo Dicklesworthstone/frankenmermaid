@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
 use fm_core::{
-    ArrowType, DiagramType, GraphDirection, IrCluster, IrClusterId, IrEdge, IrEndpoint, IrLabel,
-    IrLabelId, IrNode, IrNodeId, MermaidDiagramIr, MermaidError, MermaidWarning,
-    MermaidWarningCode, NodeShape, Span,
+    ArrowType, DiagramType, GraphDirection, IrAttributeKey, IrCluster, IrClusterId, IrEdge,
+    IrEndpoint, IrEntityAttribute, IrLabel, IrLabelId, IrNode, IrNodeId, MermaidDiagramIr,
+    MermaidError, MermaidWarning, MermaidWarningCode, NodeShape, Span,
 };
 
 use crate::ParseResult;
@@ -180,6 +180,7 @@ impl IrBuilder {
             span_primary: span,
             span_all: vec![span],
             implicit: false,
+            members: Vec::new(),
         };
 
         self.ir.nodes.push(node);
@@ -209,6 +210,32 @@ impl IrBuilder {
         {
             node.classes.push(normalized_class.to_string());
         }
+    }
+
+    /// Add an entity attribute to a node (for ER diagrams).
+    pub(crate) fn add_entity_attribute(
+        &mut self,
+        node_id: IrNodeId,
+        data_type: &str,
+        name: &str,
+        key: IrAttributeKey,
+        comment: Option<&str>,
+    ) {
+        let Some(node) = self.ir.nodes.get_mut(node_id.0) else {
+            return;
+        };
+
+        node.members.push(IrEntityAttribute {
+            data_type: data_type.to_string(),
+            name: name.to_string(),
+            key,
+            comment: comment.map(|s| s.to_string()),
+        });
+    }
+
+    /// Get a node ID by key if it exists.
+    pub(crate) fn get_node_id(&self, key: &str) -> Option<IrNodeId> {
+        self.node_index_by_id.get(key.trim()).copied()
     }
 
     pub(crate) fn push_edge(
