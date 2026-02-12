@@ -6,11 +6,13 @@
 
 /// A 2D point for canvas operations.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[allow(dead_code)]
 pub struct Point {
     pub x: f64,
     pub y: f64,
 }
 
+#[allow(dead_code)]
 impl Point {
     #[must_use]
     pub const fn new(x: f64, y: f64) -> Self {
@@ -20,6 +22,7 @@ impl Point {
 
 /// A color representation for canvas operations.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub struct Color {
     pub r: u8,
     pub g: u8,
@@ -27,6 +30,7 @@ pub struct Color {
     pub a: f64,
 }
 
+#[allow(dead_code)]
 impl Color {
     #[must_use]
     pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
@@ -561,9 +565,10 @@ mod tests {
         ctx.set_fill_style("#00ff00");
         ctx.restore();
 
-        assert!(ctx
-            .operations()
-            .contains(&DrawOperation::SetFillStyle("#ff0000".into())));
+        assert!(
+            ctx.operations()
+                .contains(&DrawOperation::SetFillStyle("#ff0000".into()))
+        );
     }
 
     #[test]

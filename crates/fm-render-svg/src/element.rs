@@ -35,6 +35,8 @@ pub enum ElementKind {
     FeComposite,
     FeMerge,
     FeMergeNode,
+    Title,
+    Desc,
 }
 
 impl ElementKind {
@@ -67,6 +69,8 @@ impl ElementKind {
             Self::FeComposite => "feComposite",
             Self::FeMerge => "feMerge",
             Self::FeMergeNode => "feMergeNode",
+            Self::Title => "title",
+            Self::Desc => "desc",
         }
     }
 
@@ -192,6 +196,18 @@ impl Element {
     #[must_use]
     pub fn marker() -> Self {
         Self::new(ElementKind::Marker)
+    }
+
+    /// Create a title element for accessibility.
+    #[must_use]
+    pub fn title(text: &str) -> Self {
+        Self::new(ElementKind::Title).content(text)
+    }
+
+    /// Create a desc element for accessibility.
+    #[must_use]
+    pub fn desc(text: &str) -> Self {
+        Self::new(ElementKind::Desc).content(text)
     }
 
     // Common attribute setters

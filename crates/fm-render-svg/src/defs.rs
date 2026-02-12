@@ -175,6 +175,31 @@ impl ArrowheadMarker {
         }
     }
 
+    /// Create a diamond marker.
+    #[must_use]
+    pub fn diamond_marker(id: &str, fill: &str) -> Self {
+        let path = PathBuilder::new()
+            .move_to(5.0, 0.0)
+            .line_to(10.0, 5.0)
+            .line_to(5.0, 10.0)
+            .line_to(0.0, 5.0)
+            .close()
+            .build();
+
+        Self {
+            id: id.to_string(),
+            marker_width: 10.0,
+            marker_height: 10.0,
+            ref_x: 10.0,
+            ref_y: 5.0,
+            orient: MarkerOrient::Auto,
+            path,
+            fill: fill.to_string(),
+            stroke: None,
+            stroke_width: None,
+        }
+    }
+
     /// Render the marker to an SVG element.
     #[must_use]
     pub fn to_element(&self) -> Element {

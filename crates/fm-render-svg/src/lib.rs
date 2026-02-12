@@ -5,20 +5,24 @@
 //! Provides a lightweight, type-safe API for generating clean SVG output
 //! suitable for flowcharts, sequence diagrams, and other diagram types.
 
+mod a11y;
 mod attributes;
 mod defs;
 mod document;
 mod element;
 mod path;
 mod text;
+mod theme;
 mod transform;
 
+pub use a11y::{A11yConfig, accessibility_css, describe_diagram, describe_edge, describe_node};
 pub use attributes::{Attribute, AttributeValue, Attributes};
 pub use defs::{ArrowheadMarker, DefsBuilder, Filter, Gradient, GradientStop, MarkerOrient};
 pub use document::SvgDocument;
 pub use element::{Element, ElementKind};
 pub use path::{PathBuilder, PathCommand};
 pub use text::{TextAnchor, TextBuilder, TextMetrics};
+pub use theme::{FontConfig, Theme, ThemeColors, ThemePreset, generate_palette};
 pub use transform::{Transform, TransformBuilder};
 
 use fm_core::MermaidDiagramIr;
@@ -47,6 +51,12 @@ pub struct SvgRenderConfig {
     pub rounded_corners: f32,
     /// CSS classes to apply to the root SVG element.
     pub root_classes: Vec<String>,
+    /// Theme preset to use (default if not specified).
+    pub theme: ThemePreset,
+    /// Whether to embed theme CSS in the SVG.
+    pub embed_theme_css: bool,
+    /// Accessibility configuration.
+    pub a11y: A11yConfig,
 }
 
 impl Default for SvgRenderConfig {
@@ -62,6 +72,9 @@ impl Default for SvgRenderConfig {
             shadows: true,
             rounded_corners: 4.0,
             root_classes: Vec::new(),
+            theme: ThemePreset::Default,
+            embed_theme_css: true,
+            a11y: A11yConfig::full(),
         }
     }
 }
@@ -98,14 +111,17 @@ fn render_layout_to_svg(
     }
 
     if config.accessible {
-        doc = doc.accessible(
-            format!("{} diagram", ir.diagram_type.as_str()),
+        // Use enhanced accessibility description if ARIA labels are enabled
+        let desc = if config.a11y.aria_labels {
+            describe_diagram(ir)
+        } else {
             format!(
                 "Diagram with {} nodes and {} edges",
                 ir.nodes.len(),
                 ir.edges.len()
-            ),
-        );
+            )
+        };
+        doc = doc.accessible(format!("{} diagram", ir.diagram_type.as_str()), desc);
     }
 
     for class in &config.root_classes {
@@ -127,6 +143,7 @@ fn render_layout_to_svg(
     defs = defs.marker(ArrowheadMarker::open("arrow-open", "#333"));
     defs = defs.marker(ArrowheadMarker::circle_marker("arrow-circle", "#333"));
     defs = defs.marker(ArrowheadMarker::cross_marker("arrow-cross", "#333"));
+    defs = defs.marker(ArrowheadMarker::diamond_marker("arrow-diamond", "#333"));
 
     // Add drop shadow filter if enabled
     if config.shadows {
@@ -135,51 +152,138 @@ fn render_layout_to_svg(
 
     doc = doc.defs(defs);
 
+    // Embed theme CSS if enabled
+    if config.embed_theme_css {
+        let theme = Theme::from_preset(config.theme);
+        let mut css = theme.to_svg_style();
+
+        // Add accessibility CSS if enabled
+        if config.a11y.accessibility_css {
+            css.push_str(accessibility_css());
+        }
+
+        doc = doc.style(css);
+    } else if config.a11y.accessibility_css {
+        // Only add accessibility CSS
+        doc = doc.style(accessibility_css());
+    }
+
     // Offset for padding
     let offset_x = padding - layout.bounds.x;
     let offset_y = padding - layout.bounds.y;
 
     // Render clusters (subgraphs) as background rectangles
-    for cluster in &layout.clusters {
-        let rect = Element::rect()
+    // Sort clusters by size (largest first) for proper z-ordering of nested clusters
+    let mut sorted_clusters: Vec<_> = layout.clusters.iter().enumerate().collect();
+    sorted_clusters.sort_by(|a, b| {
+        let area_a = a.1.bounds.width * a.1.bounds.height;
+        let area_b = b.1.bounds.width * b.1.bounds.height;
+        area_b
+            .partial_cmp(&area_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    for (_sort_idx, cluster) in sorted_clusters {
+        let ir_cluster = ir.clusters.get(cluster.cluster_index);
+
+        // Detect cluster type from title for specialized styling
+        let title_text = ir_cluster
+            .and_then(|c| c.title)
+            .and_then(|tid| ir.labels.get(tid.0))
+            .map(|l| l.text.as_str())
+            .unwrap_or("");
+
+        let is_c4_boundary = title_text.contains("System_Boundary")
+            || title_text.contains("Container_Boundary")
+            || title_text.contains("Enterprise_Boundary")
+            || title_text.contains("Deployment_Node");
+
+        let is_swimlane = title_text.starts_with("swimlane:")
+            || title_text.contains("section ")
+            || ir.diagram_type.as_str() == "gantt"
+            || ir.diagram_type.as_str() == "kanban";
+
+        // Configure styling based on cluster type
+        let (fill_color, stroke_color, stroke_style, label_color) = if is_c4_boundary {
+            // C4 boundaries: dashed gray border, very light gray fill
+            ("rgba(128,128,128,0.05)", "#888", Some("4,2"), "#555")
+        } else if is_swimlane {
+            // Swimlanes: solid subtle border, alternating translucent fill
+            ("rgba(200,220,240,0.15)", "#b8c9db", None, "#4a6785")
+        } else {
+            // Standard clusters: translucent fill, subtle border
+            ("rgba(248,249,250,0.85)", "#dee2e6", None, "#6c757d")
+        };
+
+        let mut rect = Element::rect()
             .x(cluster.bounds.x + offset_x)
             .y(cluster.bounds.y + offset_y)
             .width(cluster.bounds.width)
             .height(cluster.bounds.height)
-            .fill("#f8f9fa")
-            .stroke("#dee2e6")
+            .fill(fill_color)
+            .stroke(stroke_color)
             .stroke_width(1.0)
-            .rx(config.rounded_corners)
-            .class("cluster");
+            .rx(if is_c4_boundary {
+                0.0
+            } else {
+                config.rounded_corners
+            })
+            .class("fm-cluster");
+
+        if let Some(dasharray) = stroke_style {
+            rect = rect.stroke_dasharray(dasharray);
+        }
+
+        if is_c4_boundary {
+            rect = rect.class("fm-cluster-c4");
+        } else if is_swimlane {
+            rect = rect.class("fm-cluster-swimlane");
+        }
+
         doc = doc.child(rect);
 
-        // Cluster label if present - get title from IR cluster
-        if let Some(ir_cluster) = ir.clusters.get(cluster.cluster_index) {
-            if let Some(title_id) = ir_cluster.title {
-                if let Some(label) = ir.labels.get(title_id.0) {
-                    let text = TextBuilder::new(&label.text)
-                        .x(cluster.bounds.x + offset_x + 8.0)
-                        .y(cluster.bounds.y + offset_y + 16.0)
-                        .font_family(&config.font_family)
-                        .font_size(config.font_size * 0.9)
-                        .fill("#6c757d")
-                        .class("cluster-label")
-                        .build();
-                    doc = doc.child(text);
-                }
+        // Cluster label if present
+        if !title_text.is_empty() {
+            // For C4 boundaries, strip the boundary type prefix for display
+            let display_title = if is_c4_boundary {
+                title_text
+                    .replace("System_Boundary", "")
+                    .replace("Container_Boundary", "")
+                    .replace("Enterprise_Boundary", "")
+                    .replace("Deployment_Node", "")
+                    .trim_matches(|c: char| c == '(' || c == ')' || c == ',' || c.is_whitespace())
+                    .to_string()
+            } else if is_swimlane && title_text.starts_with("swimlane:") {
+                title_text.trim_start_matches("swimlane:").to_string()
+            } else if is_swimlane && title_text.starts_with("section ") {
+                title_text.trim_start_matches("section ").to_string()
+            } else {
+                title_text.to_string()
+            };
+
+            if !display_title.is_empty() {
+                let text = TextBuilder::new(&display_title)
+                    .x(cluster.bounds.x + offset_x + 8.0)
+                    .y(cluster.bounds.y + offset_y + 16.0)
+                    .font_family(&config.font_family)
+                    .font_size(config.font_size * 0.9)
+                    .fill(label_color)
+                    .class("fm-cluster-label")
+                    .build();
+                doc = doc.child(text);
             }
         }
     }
 
     // Render edges
-    for (idx, edge_path) in layout.edges.iter().enumerate() {
-        let edge_elem = render_edge(edge_path, ir, idx, offset_x, offset_y, config);
+    for edge_path in &layout.edges {
+        let edge_elem = render_edge(edge_path, ir, offset_x, offset_y, config);
         doc = doc.child(edge_elem);
     }
 
     // Render nodes
-    for (idx, node_box) in layout.nodes.iter().enumerate() {
-        let node_elem = render_node(node_box, ir, idx, offset_x, offset_y, config);
+    for node_box in &layout.nodes {
+        let node_elem = render_node(node_box, ir, offset_x, offset_y, config);
         doc = doc.child(node_elem);
     }
 
@@ -190,15 +294,17 @@ fn render_layout_to_svg(
 fn render_node(
     node_box: &LayoutNodeBox,
     ir: &MermaidDiagramIr,
-    idx: usize,
     offset_x: f32,
     offset_y: f32,
     config: &SvgRenderConfig,
 ) -> Element {
     use fm_core::NodeShape;
 
-    let ir_node = ir.nodes.get(idx);
+    let ir_node = ir.nodes.get(node_box.node_index);
     let shape = ir_node.map_or(NodeShape::Rect, |n| n.shape);
+    let node_id = ir_node
+        .map(|node| node.id.as_str())
+        .unwrap_or_else(|| node_box.node_id.as_str());
 
     let x = node_box.bounds.x + offset_x;
     let y = node_box.bounds.y + offset_y;
@@ -217,8 +323,20 @@ fn render_node(
 
     // Create group for node shape + label
     let mut group = Element::group()
-        .class("node")
-        .data("id", ir_node.map_or("", |n| &n.id));
+        .class("fm-node")
+        .data("id", node_id)
+        .data("fm-node-id", node_id);
+
+    // Add accessibility attributes
+    if config.a11y.aria_labels {
+        group = group
+            .attr("role", "graphics-symbol")
+            .attr("aria-label", label_text);
+    }
+
+    if config.a11y.keyboard_nav {
+        group = group.attr("tabindex", "0");
+    }
 
     // Create shape element based on node type
     let shape_elem = match shape {
@@ -417,14 +535,176 @@ fn render_node(
                 .stroke("#333")
                 .stroke_width(1.0)
         }
+
+        // Extended shapes for FrankenMermaid
+        NodeShape::InvTrapezoid => {
+            let inset = w * 0.15;
+            let path = PathBuilder::new()
+                .move_to(x, y)
+                .line_to(x + w, y)
+                .line_to(x + w - inset, y + h)
+                .line_to(x + inset, y + h)
+                .close()
+                .build();
+            Element::path()
+                .d(&path)
+                .fill("#fff")
+                .stroke("#333")
+                .stroke_width(1.5)
+        }
+
+        NodeShape::Triangle => {
+            let path = PathBuilder::new()
+                .move_to(cx, y)
+                .line_to(x + w, y + h)
+                .line_to(x, y + h)
+                .close()
+                .build();
+            Element::path()
+                .d(&path)
+                .fill("#fff")
+                .stroke("#333")
+                .stroke_width(1.5)
+        }
+
+        NodeShape::Pentagon => {
+            // Regular pentagon (5 sides)
+            let angle_offset = -std::f32::consts::FRAC_PI_2; // Start at top
+            let r = w.min(h) / 2.0;
+            let mut path = PathBuilder::new();
+            for i in 0..5 {
+                let angle = angle_offset + (i as f32) * 2.0 * std::f32::consts::PI / 5.0;
+                let px = cx + r * angle.cos();
+                let py = cy + r * angle.sin();
+                if i == 0 {
+                    path = path.move_to(px, py);
+                } else {
+                    path = path.line_to(px, py);
+                }
+            }
+            Element::path()
+                .d(&path.close().build())
+                .fill("#fff")
+                .stroke("#333")
+                .stroke_width(1.5)
+        }
+
+        NodeShape::Star => {
+            // 5-pointed star
+            let outer_r = w.min(h) / 2.0;
+            let inner_r = outer_r * 0.4;
+            let angle_offset = -std::f32::consts::FRAC_PI_2;
+            let mut path = PathBuilder::new();
+            for i in 0..10 {
+                let r = if i % 2 == 0 { outer_r } else { inner_r };
+                let angle = angle_offset + (i as f32) * std::f32::consts::PI / 5.0;
+                let px = cx + r * angle.cos();
+                let py = cy + r * angle.sin();
+                if i == 0 {
+                    path = path.move_to(px, py);
+                } else {
+                    path = path.line_to(px, py);
+                }
+            }
+            Element::path()
+                .d(&path.close().build())
+                .fill("#fff")
+                .stroke("#333")
+                .stroke_width(1.5)
+        }
+
+        NodeShape::Cloud => {
+            // Simplified cloud shape using circles
+            let r = h / 3.0;
+            let path = PathBuilder::new()
+                .move_to(x + r, y + h * 0.6)
+                .arc_to(r, r, 0.0, true, true, x + r * 2.0, y + h * 0.3)
+                .arc_to(r * 0.8, r * 0.8, 0.0, true, true, x + w * 0.5, y + r * 0.5)
+                .arc_to(r, r, 0.0, true, true, x + w - r * 2.0, y + h * 0.3)
+                .arc_to(r, r, 0.0, true, true, x + w - r, y + h * 0.6)
+                .arc_to(r * 0.7, r * 0.7, 0.0, true, true, x + w - r, y + h * 0.8)
+                .line_to(x + r, y + h * 0.8)
+                .arc_to(r * 0.7, r * 0.7, 0.0, true, true, x + r, y + h * 0.6)
+                .close()
+                .build();
+            Element::path()
+                .d(&path)
+                .fill("#fff")
+                .stroke("#333")
+                .stroke_width(1.5)
+        }
+
+        NodeShape::Tag => {
+            // Tag/flag shape (rectangle with arrow point on right)
+            let point = w * 0.2;
+            let path = PathBuilder::new()
+                .move_to(x, y)
+                .line_to(x + w - point, y)
+                .line_to(x + w, cy)
+                .line_to(x + w - point, y + h)
+                .line_to(x, y + h)
+                .close()
+                .build();
+            Element::path()
+                .d(&path)
+                .fill("#fff")
+                .stroke("#333")
+                .stroke_width(1.5)
+        }
+
+        NodeShape::CrossedCircle => {
+            // Circle with X through it
+            let r = w.min(h) / 2.0;
+            let mut g = Element::group();
+            g = g.child(
+                Element::circle()
+                    .cx(cx)
+                    .cy(cy)
+                    .r(r)
+                    .fill("#fff")
+                    .stroke("#333")
+                    .stroke_width(1.5),
+            );
+            // Diagonal lines
+            let offset = r * 0.707; // r * cos(45°)
+            g = g.child(
+                Element::line()
+                    .x1(cx - offset)
+                    .y1(cy - offset)
+                    .x2(cx + offset)
+                    .y2(cy + offset)
+                    .stroke("#333")
+                    .stroke_width(1.5),
+            );
+            g = g.child(
+                Element::line()
+                    .x1(cx + offset)
+                    .y1(cy - offset)
+                    .x2(cx - offset)
+                    .y2(cy + offset)
+                    .stroke("#333")
+                    .stroke_width(1.5),
+            );
+            return group.child(g).child(
+                TextBuilder::new(label_text)
+                    .x(cx)
+                    .y(cy + config.font_size / 3.0)
+                    .font_family(&config.font_family)
+                    .font_size(config.font_size)
+                    .anchor(TextAnchor::Middle)
+                    .fill("#333")
+                    .build(),
+            );
+        }
     };
 
     // Apply shadow filter if enabled and this isn't a special composite shape
-    let shape_elem = if config.shadows && !matches!(shape, NodeShape::Subroutine) {
-        shape_elem.filter("url(#drop-shadow)")
-    } else {
-        shape_elem
-    };
+    let shape_elem =
+        if config.shadows && !matches!(shape, NodeShape::Subroutine | NodeShape::CrossedCircle) {
+            shape_elem.filter("url(#drop-shadow)")
+        } else {
+            shape_elem
+        };
 
     group = group.child(shape_elem);
 
@@ -439,6 +719,14 @@ fn render_node(
         .build();
     group = group.child(text_elem);
 
+    // Add title element for text alternatives
+    if config.a11y.text_alternatives {
+        if let Some(node) = ir_node {
+            let node_desc = describe_node(node, ir);
+            group = group.child(Element::title(&node_desc));
+        }
+    }
+
     group
 }
 
@@ -446,15 +734,16 @@ fn render_node(
 fn render_edge(
     edge_path: &LayoutEdgePath,
     ir: &MermaidDiagramIr,
-    idx: usize,
     offset_x: f32,
     offset_y: f32,
     config: &SvgRenderConfig,
 ) -> Element {
     use fm_core::ArrowType;
 
-    let ir_edge = ir.edges.get(idx);
+    let edge_index = edge_path.edge_index;
+    let ir_edge = ir.edges.get(edge_index);
     let arrow = ir_edge.map_or(ArrowType::Arrow, |e| e.arrow);
+    let is_back_edge = edge_path.reversed;
 
     // Build path from points
     let mut path_builder = PathBuilder::new();
@@ -472,14 +761,18 @@ fn render_edge(
 
     let path_str = path_builder.build();
 
-    // Determine stroke style and markers based on arrow type
-    let (stroke_dasharray, marker_end, stroke_color) = match arrow {
-        ArrowType::Line => (None, None, "#333"),
-        ArrowType::Arrow => (None, Some("url(#arrow-end)"), "#333"),
-        ArrowType::ThickArrow => (None, Some("url(#arrow-filled)"), "#333"),
-        ArrowType::DottedArrow => (Some("5,5"), Some("url(#arrow-end)"), "#666"),
-        ArrowType::Circle => (None, Some("url(#arrow-circle)"), "#333"),
-        ArrowType::Cross => (None, Some("url(#arrow-cross)"), "#333"),
+    // Back-edges get special treatment: dashed + muted color
+    let (base_dasharray, base_marker, base_color) = if is_back_edge {
+        (Some("4,4"), Some("url(#arrow-open)"), "#999")
+    } else {
+        match arrow {
+            ArrowType::Line => (None, None, "#333"),
+            ArrowType::Arrow => (None, Some("url(#arrow-end)"), "#333"),
+            ArrowType::ThickArrow => (None, Some("url(#arrow-filled)"), "#333"),
+            ArrowType::DottedArrow => (Some("5,5"), Some("url(#arrow-end)"), "#666"),
+            ArrowType::Circle => (None, Some("url(#arrow-circle)"), "#333"),
+            ArrowType::Cross => (None, Some("url(#arrow-cross)"), "#333"),
+        }
     };
 
     let stroke_width = match arrow {
@@ -487,18 +780,31 @@ fn render_edge(
         _ => 1.5,
     };
 
+    // Determine edge style class
+    let style_class = if is_back_edge {
+        "fm-edge-back"
+    } else {
+        match arrow {
+            ArrowType::DottedArrow => "fm-edge-dashed",
+            ArrowType::ThickArrow => "fm-edge-thick",
+            _ => "fm-edge-solid",
+        }
+    };
+
     let mut elem = Element::path()
         .d(&path_str)
         .fill("none")
-        .stroke(stroke_color)
+        .stroke(base_color)
         .stroke_width(stroke_width)
-        .class("edge");
+        .class("fm-edge")
+        .class(style_class)
+        .data("fm-edge-id", &edge_index.to_string());
 
-    if let Some(dasharray) = stroke_dasharray {
+    if let Some(dasharray) = base_dasharray {
         elem = elem.stroke_dasharray(dasharray);
     }
 
-    if let Some(marker) = marker_end {
+    if let Some(marker) = base_marker {
         elem = elem.marker_end(marker);
     }
 
@@ -512,7 +818,19 @@ fn render_edge(
                 let lx = mid_point.x + offset_x;
                 let ly = mid_point.y + offset_y - 8.0; // Offset above the line
 
-                let mut group = Element::group().class("edge-labeled");
+                let mut group = Element::group()
+                    .class("fm-edge-labeled")
+                    .data("fm-edge-id", &edge_index.to_string());
+
+                // Add accessibility attributes to group
+                if config.a11y.aria_labels {
+                    group = group.attr("role", "graphics-symbol");
+                }
+
+                if config.a11y.keyboard_nav {
+                    group = group.attr("tabindex", "0");
+                }
+
                 group = group.child(elem);
 
                 // Add background rect for label
@@ -542,9 +860,62 @@ fn render_edge(
                         .build(),
                 );
 
+                // Add title element for text alternatives
+                if config.a11y.text_alternatives {
+                    if let Some(edge) = ir_edge {
+                        let from_node = match &edge.from {
+                            fm_core::IrEndpoint::Node(nid) => ir.nodes.get(nid.0),
+                            _ => None,
+                        };
+                        let to_node = match &edge.to {
+                            fm_core::IrEndpoint::Node(nid) => ir.nodes.get(nid.0),
+                            _ => None,
+                        };
+                        let edge_desc =
+                            describe_edge(from_node, to_node, arrow, Some(&label.text), ir);
+                        group = group.child(Element::title(&edge_desc));
+                    }
+                }
+
                 return group;
             }
         }
+    }
+
+    // Add title element for text alternatives (unlabeled edges)
+    if config.a11y.text_alternatives {
+        if let Some(edge) = ir_edge {
+            let from_node = match &edge.from {
+                fm_core::IrEndpoint::Node(nid) => ir.nodes.get(nid.0),
+                _ => None,
+            };
+            let to_node = match &edge.to {
+                fm_core::IrEndpoint::Node(nid) => ir.nodes.get(nid.0),
+                _ => None,
+            };
+            let edge_desc = describe_edge(from_node, to_node, arrow, None, ir);
+            // Wrap in group to add title
+            let mut group = Element::group()
+                .class("fm-edge")
+                .data("fm-edge-id", &edge_index.to_string());
+            if config.a11y.aria_labels {
+                group = group.attr("role", "graphics-symbol");
+            }
+            if config.a11y.keyboard_nav {
+                group = group.attr("tabindex", "0");
+            }
+            group = group.child(elem);
+            group = group.child(Element::title(&edge_desc));
+            return group;
+        }
+    }
+
+    // Add accessibility attributes for unwrapped edges
+    if config.a11y.aria_labels {
+        elem = elem.attr("role", "graphics-symbol");
+    }
+    if config.a11y.keyboard_nav {
+        elem = elem.attr("tabindex", "0");
     }
 
     elem
@@ -553,7 +924,25 @@ fn render_edge(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fm_core::{DiagramType, MermaidDiagramIr};
+    use fm_core::{
+        DiagramType, IrCluster, IrClusterId, IrLabel, IrLabelId, MermaidDiagramIr, Span,
+    };
+
+    fn create_ir_with_cluster(title: &str) -> MermaidDiagramIr {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        let label_id = IrLabelId(0);
+        ir.labels.push(IrLabel {
+            text: title.to_string(),
+            span: Span::default(),
+        });
+        ir.clusters.push(IrCluster {
+            id: IrClusterId(0),
+            title: Some(label_id),
+            members: vec![],
+            span: Span::default(),
+        });
+        ir
+    }
 
     #[test]
     fn emits_svg_document() {
@@ -600,5 +989,65 @@ mod tests {
         };
         let svg = render_svg_with_config(&ir, &config);
         assert!(!svg.contains("drop-shadow"));
+    }
+
+    #[test]
+    fn renders_cluster_with_css_classes() {
+        let ir = create_ir_with_cluster("Test Subgraph");
+        let svg = render_svg(&ir);
+        assert!(svg.contains("class=\"fm-cluster\""));
+        assert!(svg.contains("class=\"fm-cluster-label\""));
+    }
+
+    #[test]
+    fn renders_c4_boundary_with_dashed_border() {
+        let ir = create_ir_with_cluster("System_Boundary(webapp, Web Application)");
+        let svg = render_svg(&ir);
+        assert!(svg.contains("fm-cluster-c4"));
+        assert!(svg.contains("stroke-dasharray"));
+    }
+
+    #[test]
+    fn renders_swimlane_cluster_style() {
+        let ir = create_ir_with_cluster("section Planning");
+        let svg = render_svg(&ir);
+        assert!(svg.contains("fm-cluster-swimlane"));
+    }
+
+    #[test]
+    fn cluster_uses_translucent_fill() {
+        let ir = create_ir_with_cluster("Regular Cluster");
+        let svg = render_svg(&ir);
+        // Standard clusters should have translucent fill
+        assert!(svg.contains("rgba("));
+    }
+
+    #[test]
+    fn includes_accessibility_css() {
+        let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        let svg = render_svg(&ir);
+        // Default config enables accessibility CSS
+        assert!(svg.contains("prefers-contrast"));
+        assert!(svg.contains("prefers-reduced-motion"));
+    }
+
+    #[test]
+    fn accessibility_enhanced_description() {
+        let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        let svg = render_svg(&ir);
+        // Enhanced description includes direction
+        assert!(svg.contains("flowing"));
+    }
+
+    #[test]
+    fn disabling_a11y_css() {
+        let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        let config = SvgRenderConfig {
+            a11y: A11yConfig::minimal(),
+            ..Default::default()
+        };
+        let svg = render_svg_with_config(&ir, &config);
+        // Minimal a11y should not include high contrast CSS
+        assert!(!svg.contains("prefers-contrast"));
     }
 }

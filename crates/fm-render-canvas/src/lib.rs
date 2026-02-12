@@ -25,7 +25,7 @@ pub use renderer::{Canvas2dRenderer, CanvasRenderConfig, CanvasRenderResult};
 pub use viewport::{Viewport, ViewportTransform};
 
 use fm_core::MermaidDiagramIr;
-use fm_layout::{layout_diagram, LayoutAlgorithm};
+use fm_layout::layout_diagram;
 
 /// Render a diagram to a Canvas2D context.
 ///
@@ -73,6 +73,9 @@ mod tests {
         let config = CanvasRenderConfig::default();
         let mut context = MockCanvas2dContext::new(800.0, 600.0);
         let result = render_to_canvas(&ir, &mut context, &config);
-        assert_eq!(result.draw_calls, 0);
+        // At minimum: clear_rect call
+        assert!(result.draw_calls >= 1);
+        assert_eq!(result.nodes_drawn, 0);
+        assert_eq!(result.edges_drawn, 0);
     }
 }
