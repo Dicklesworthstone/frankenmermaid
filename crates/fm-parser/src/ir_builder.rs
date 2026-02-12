@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use fm_core::{
-    ArrowType, DiagramType, GraphDirection, IrEdge, IrEndpoint, IrLabel, IrLabelId, IrNode,
-    IrNodeId, MermaidDiagramIr, NodeShape, Span,
+    ArrowType, DiagramType, GraphDirection, IrCluster, IrClusterId, IrEdge, IrEndpoint, IrLabel,
+    IrLabelId, IrNode, IrNodeId, MermaidDiagramIr, NodeShape, Span,
 };
 
 use crate::ParseResult;
@@ -10,6 +10,7 @@ use crate::ParseResult;
 pub(crate) struct IrBuilder {
     ir: MermaidDiagramIr,
     node_index_by_id: BTreeMap<String, IrNodeId>,
+    cluster_index_by_key: BTreeMap<String, usize>,
     warnings: Vec<String>,
 }
 
@@ -18,6 +19,7 @@ impl IrBuilder {
         Self {
             ir: MermaidDiagramIr::empty(diagram_type),
             node_index_by_id: BTreeMap::new(),
+            cluster_index_by_key: BTreeMap::new(),
             warnings: Vec::new(),
         }
     }
@@ -43,6 +45,51 @@ impl IrBuilder {
         ParseResult {
             ir: self.ir,
             warnings: self.warnings,
+        }
+    }
+
+    pub(crate) fn ensure_cluster(
+        &mut self,
+        key: &str,
+        title: Option<&str>,
+        span: Span,
+    ) -> Option<usize> {
+        let normalized_key = key.trim();
+        if normalized_key.is_empty() {
+            return None;
+        }
+
+        if let Some(existing_index) = self.cluster_index_by_key.get(normalized_key).copied() {
+            if let Some(cleaned_title) = clean_label(title) {
+                let label_id = self.intern_label(cleaned_title, span);
+                if let Some(existing_cluster) = self.ir.clusters.get_mut(existing_index) {
+                    if existing_cluster.title.is_none() {
+                        existing_cluster.title = Some(label_id);
+                    }
+                }
+            }
+            return Some(existing_index);
+        }
+
+        let title_id = clean_label(title).map(|value| self.intern_label(value, span));
+        let cluster_index = self.ir.clusters.len();
+        self.ir.clusters.push(IrCluster {
+            id: IrClusterId(cluster_index),
+            title: title_id,
+            members: Vec::new(),
+            span,
+        });
+        self.cluster_index_by_key
+            .insert(normalized_key.to_string(), cluster_index);
+        Some(cluster_index)
+    }
+
+    pub(crate) fn add_node_to_cluster(&mut self, cluster_index: usize, node_id: IrNodeId) {
+        let Some(cluster) = self.ir.clusters.get_mut(cluster_index) else {
+            return;
+        };
+        if !cluster.members.contains(&node_id) {
+            cluster.members.push(node_id);
         }
     }
 

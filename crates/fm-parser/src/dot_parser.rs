@@ -23,8 +23,10 @@ pub fn parse_dot(input: &str) -> ParseResult {
     let mut builder = IrBuilder::new(DiagramType::Flowchart);
     let directed = is_directed_graph(input);
     let body = extract_body(input);
+    let normalized_body = normalize_dot_body(body);
+    let mut active_clusters: Vec<usize> = Vec::new();
 
-    for (index, line) in body.lines().enumerate() {
+    for (index, line) in normalized_body.lines().enumerate() {
         let line_number = index + 1;
         let trimmed = strip_comments(line).trim();
         if trimmed.is_empty() {
@@ -36,10 +38,37 @@ pub fn parse_dot(input: &str) -> ParseResult {
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            if parse_dot_edge_statement(statement, directed, line_number, line, &mut builder) {
+            let close_count = statement.chars().take_while(|ch| *ch == '}').count();
+            for _ in 0..close_count {
+                let _ = active_clusters.pop();
+            }
+            let statement = statement.trim_start_matches('}').trim();
+            if statement.is_empty() {
                 continue;
             }
-            if parse_dot_node_statement(statement, line_number, line, &mut builder) {
+
+            if let Some((cluster_key, cluster_title, opens_scope)) = parse_subgraph_start(statement) {
+                if let Some(cluster_index) =
+                    builder.ensure_cluster(&cluster_key, cluster_title.as_deref(), span_for(line_number, line))
+                {
+                    if opens_scope {
+                        active_clusters.push(cluster_index);
+                    }
+                }
+                continue;
+            }
+
+            if parse_dot_edge_statement(
+                statement,
+                directed,
+                line_number,
+                line,
+                &active_clusters,
+                &mut builder,
+            ) {
+                continue;
+            }
+            if parse_dot_node_statement(statement, line_number, line, &active_clusters, &mut builder) {
                 continue;
             }
 
@@ -61,6 +90,7 @@ fn parse_dot_edge_statement(
     directed: bool,
     line_number: usize,
     source_line: &str,
+    active_clusters: &[usize],
     builder: &mut IrBuilder,
 ) -> bool {
     let operator = if statement.contains("->") {
@@ -113,6 +143,10 @@ fn parse_dot_edge_statement(
 
         if let (Some(from_id), Some(to_id)) = (from, to) {
             builder.push_edge(from_id, to_id, arrow, None, span);
+            for &cluster_index in active_clusters {
+                builder.add_node_to_cluster(cluster_index, from_id);
+                builder.add_node_to_cluster(cluster_index, to_id);
+            }
         }
     }
 
@@ -123,13 +157,19 @@ fn parse_dot_node_statement(
     statement: &str,
     line_number: usize,
     source_line: &str,
+    active_clusters: &[usize],
     builder: &mut IrBuilder,
 ) -> bool {
     let Some(node) = parse_dot_node_fragment(statement) else {
         return false;
     };
     let span = span_for(line_number, source_line);
-    let _ = builder.intern_node(&node.id, node.label.as_deref(), NodeShape::Rect, span);
+    let node_id = builder.intern_node(&node.id, node.label.as_deref(), NodeShape::Rect, span);
+    if let Some(node_id) = node_id {
+        for &cluster_index in active_clusters {
+            builder.add_node_to_cluster(cluster_index, node_id);
+        }
+    }
     true
 }
 
@@ -175,8 +215,14 @@ fn parse_dot_label(attributes: &str) -> Option<String> {
 
     if let Some(quoted) = value.strip_prefix('"') {
         let end = quoted.find('"')?;
-        let text = quoted[..end].trim();
-        return (!text.is_empty()).then_some(text.to_string());
+        let text = decode_escapes(quoted[..end].trim());
+        return (!text.is_empty()).then_some(text);
+    }
+
+    if let Some(html) = value.strip_prefix('<') {
+        let end = html.rfind('>')?;
+        let text = strip_html_tags(&html[..end]);
+        return (!text.is_empty()).then_some(text);
     }
 
     let token = value
@@ -185,7 +231,8 @@ fn parse_dot_label(attributes: &str) -> Option<String> {
         .unwrap_or_default()
         .trim()
         .trim_matches('"');
-    (!token.is_empty()).then_some(token.to_string())
+    let token = decode_escapes(token);
+    (!token.is_empty()).then_some(token)
 }
 
 fn normalize_identifier(raw: &str) -> String {
@@ -245,6 +292,119 @@ fn extract_body(input: &str) -> &str {
     &input[start + 1..end]
 }
 
+fn parse_subgraph_start(statement: &str) -> Option<(String, Option<String>, bool)> {
+    let body = statement.strip_prefix("subgraph ")?;
+    let opens_scope = statement.contains('{');
+    let body = body.trim().trim_end_matches('{').trim();
+    if body.is_empty() {
+        return None;
+    }
+
+    let key = normalize_identifier(body);
+    if key.is_empty() {
+        return None;
+    }
+    let title = clean_optional(body);
+    Some((key, title, opens_scope))
+}
+
+fn normalize_dot_body(body: &str) -> String {
+    let mut output = String::with_capacity(body.len().saturating_mul(2));
+    let mut quote_char: Option<char> = None;
+    let mut escaped = false;
+
+    for ch in body.chars() {
+        if let Some(active_quote) = quote_char {
+            output.push(ch);
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == active_quote {
+                quote_char = None;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' | '\'' => {
+                quote_char = Some(ch);
+                output.push(ch);
+            }
+            '{' | '}' => {
+                output.push(';');
+                output.push(ch);
+                output.push(';');
+            }
+            _ => output.push(ch),
+        }
+    }
+
+    output
+}
+
+fn clean_optional(raw: &str) -> Option<String> {
+    let cleaned = raw
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim();
+    (!cleaned.is_empty()).then_some(cleaned.to_string())
+}
+
+fn decode_escapes(raw: &str) -> String {
+    let mut output = String::with_capacity(raw.len());
+    let mut escaped = false;
+
+    for ch in raw.chars() {
+        if escaped {
+            let decoded = match ch {
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                '\\' => '\\',
+                '"' => '"',
+                '\'' => '\'',
+                other => other,
+            };
+            output.push(decoded);
+            escaped = false;
+            continue;
+        }
+
+        if ch == '\\' {
+            escaped = true;
+        } else {
+            output.push(ch);
+        }
+    }
+
+    if escaped {
+        output.push('\\');
+    }
+    output
+}
+
+fn strip_html_tags(raw: &str) -> String {
+    let mut output = String::with_capacity(raw.len());
+    let mut in_tag = false;
+
+    for ch in raw.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => output.push(ch),
+            _ => {}
+        }
+    }
+
+    output.trim().to_string()
+}
+
 fn span_for(line_number: usize, line: &str) -> Span {
     Span::at_line(line_number, line.chars().count())
 }
@@ -278,5 +438,26 @@ mod tests {
         assert_eq!(parsed.ir.nodes.len(), 2);
         assert_eq!(parsed.ir.labels.len(), 1);
         assert_eq!(parsed.ir.labels[0].text, "Alpha");
+    }
+
+    #[test]
+    fn parses_clusters_from_subgraph_blocks() {
+        let parsed = parse_dot("digraph G { subgraph cluster_0 { a; b; } a -> b; }");
+        assert_eq!(parsed.ir.clusters.len(), 1);
+        assert_eq!(parsed.ir.clusters[0].members.len(), 2);
+    }
+
+    #[test]
+    fn parses_html_labels() {
+        let parsed = parse_dot("digraph G { a [label=<b>Alpha</b>]; }");
+        assert_eq!(parsed.ir.labels.len(), 1);
+        assert_eq!(parsed.ir.labels[0].text, "Alpha");
+    }
+
+    #[test]
+    fn parses_escaped_labels() {
+        let parsed = parse_dot("digraph G { a [label=\"Line\\\\nBreak\"]; }");
+        assert_eq!(parsed.ir.labels.len(), 1);
+        assert!(parsed.ir.labels[0].text.contains('\n'));
     }
 }

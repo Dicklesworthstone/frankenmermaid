@@ -29,6 +29,13 @@ const CLASS_OPERATORS: [(&str, ArrowType); 6] = [
     ("--", ArrowType::Line),
 ];
 
+const PACKET_OPERATORS: [(&str, ArrowType); 4] = [
+    ("-->", ArrowType::Arrow),
+    ("->", ArrowType::Arrow),
+    ("--", ArrowType::Line),
+    ("==", ArrowType::ThickArrow),
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NodeToken {
     id: String,
@@ -103,6 +110,11 @@ pub fn parse_mermaid(input: &str) -> ParseResult {
         DiagramType::Flowchart => parse_flowchart(input, &mut builder),
         DiagramType::Sequence => parse_sequence(input, &mut builder),
         DiagramType::Class => parse_class(input, &mut builder),
+        DiagramType::State => parse_state(input, &mut builder),
+        DiagramType::PacketBeta => parse_packet(input, &mut builder),
+        DiagramType::Gantt => parse_gantt(input, &mut builder),
+        DiagramType::Pie => parse_pie(input, &mut builder),
+        DiagramType::QuadrantChart => parse_quadrant(input, &mut builder),
         DiagramType::Unknown => {
             builder
                 .add_warning("Unable to detect diagram type; using best-effort flowchart parsing");
@@ -249,6 +261,235 @@ fn parse_class(input: &str, builder: &mut IrBuilder) {
             ));
         }
     }
+}
+
+fn parse_state(input: &str, builder: &mut IrBuilder) {
+    for (index, line) in input.lines().enumerate() {
+        let line_number = index + 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || is_comment(trimmed) {
+            continue;
+        }
+
+        if trimmed.starts_with("stateDiagram") {
+            continue;
+        }
+
+        if trimmed.starts_with("direction ") {
+            if let Some(direction) = parse_graph_direction(trimmed) {
+                builder.set_direction(direction);
+            }
+            continue;
+        }
+
+        if trimmed == "[*]" || trimmed == "{" || trimmed == "}" {
+            continue;
+        }
+
+        if let Some(declaration) = trimmed.strip_prefix("state ") {
+            if register_state_declaration(declaration, line_number, line, builder) {
+                continue;
+            }
+        }
+
+        let mut parsed_line = false;
+        for statement in split_statements(trimmed) {
+            if parse_edge_statement(statement, line_number, line, &FLOW_OPERATORS, builder) {
+                parsed_line = true;
+                continue;
+            }
+            if let Some(node) = parse_node_token(statement) {
+                let span = span_for(line_number, line);
+                let _ = builder.intern_node(&node.id, node.label.as_deref(), node.shape, span);
+                parsed_line = true;
+            }
+        }
+
+        if !parsed_line {
+            builder.add_warning(format!(
+                "Line {line_number}: unsupported state syntax: {trimmed}"
+            ));
+        }
+    }
+}
+
+fn parse_packet(input: &str, builder: &mut IrBuilder) {
+    for (index, line) in input.lines().enumerate() {
+        let line_number = index + 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || is_comment(trimmed) {
+            continue;
+        }
+
+        if trimmed.starts_with("packet-beta") {
+            continue;
+        }
+
+        let mut parsed_line = false;
+        for statement in split_statements(trimmed) {
+            if parse_edge_statement(statement, line_number, line, &PACKET_OPERATORS, builder) {
+                parsed_line = true;
+                continue;
+            }
+            if let Some(node) = parse_node_token(statement) {
+                let span = span_for(line_number, line);
+                let _ = builder.intern_node(&node.id, node.label.as_deref(), node.shape, span);
+                parsed_line = true;
+            }
+        }
+
+        if !parsed_line {
+            builder.add_warning(format!(
+                "Line {line_number}: unsupported packet syntax: {trimmed}"
+            ));
+        }
+    }
+}
+
+fn parse_gantt(input: &str, builder: &mut IrBuilder) {
+    let mut current_section = String::new();
+
+    for (index, line) in input.lines().enumerate() {
+        let line_number = index + 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || is_comment(trimmed) {
+            continue;
+        }
+
+        if trimmed == "gantt" || trimmed.starts_with("title ") {
+            continue;
+        }
+        if trimmed.starts_with("dateFormat ")
+            || trimmed.starts_with("axisFormat ")
+            || trimmed.starts_with("tickInterval ")
+            || trimmed.starts_with("excludes ")
+        {
+            continue;
+        }
+
+        if let Some(section_name) = trimmed.strip_prefix("section ") {
+            current_section = section_name.trim().to_string();
+            continue;
+        }
+
+        let Some(task_name) = parse_name_before_colon(trimmed) else {
+            builder.add_warning(format!(
+                "Line {line_number}: unsupported gantt syntax: {trimmed}"
+            ));
+            continue;
+        };
+
+        let scoped_name = if current_section.is_empty() {
+            task_name.to_string()
+        } else {
+            format!("{current_section}/{task_name}")
+        };
+        let task_id = normalize_identifier(&scoped_name);
+        if task_id.is_empty() {
+            builder.add_warning(format!(
+                "Line {line_number}: task identifier could not be derived: {trimmed}"
+            ));
+            continue;
+        }
+
+        let span = span_for(line_number, line);
+        let _ = builder.intern_node(&task_id, Some(task_name), NodeShape::Rect, span);
+    }
+}
+
+fn parse_pie(input: &str, builder: &mut IrBuilder) {
+    for (index, line) in input.lines().enumerate() {
+        let line_number = index + 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || is_comment(trimmed) {
+            continue;
+        }
+        if trimmed.starts_with("pie") || trimmed.starts_with("title ") || trimmed.starts_with("showData") {
+            continue;
+        }
+
+        let Some(slice_name) = parse_name_before_colon(trimmed) else {
+            builder.add_warning(format!(
+                "Line {line_number}: unsupported pie syntax: {trimmed}"
+            ));
+            continue;
+        };
+
+        let slice_id = normalize_identifier(slice_name);
+        if slice_id.is_empty() {
+            builder.add_warning(format!(
+                "Line {line_number}: pie slice identifier could not be derived: {trimmed}"
+            ));
+            continue;
+        }
+        let span = span_for(line_number, line);
+        let _ = builder.intern_node(&slice_id, Some(slice_name), NodeShape::Circle, span);
+    }
+}
+
+fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
+    for (index, line) in input.lines().enumerate() {
+        let line_number = index + 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || is_comment(trimmed) {
+            continue;
+        }
+        if trimmed == "quadrantChart"
+            || trimmed.starts_with("x-axis ")
+            || trimmed.starts_with("y-axis ")
+            || trimmed.starts_with("quadrant-")
+            || trimmed.starts_with("title ")
+        {
+            continue;
+        }
+
+        let Some(point_name) = parse_name_before_colon(trimmed) else {
+            builder.add_warning(format!(
+                "Line {line_number}: unsupported quadrant syntax: {trimmed}"
+            ));
+            continue;
+        };
+
+        let point_id = normalize_identifier(point_name);
+        if point_id.is_empty() {
+            builder.add_warning(format!(
+                "Line {line_number}: quadrant point identifier could not be derived: {trimmed}"
+            ));
+            continue;
+        }
+        let span = span_for(line_number, line);
+        let _ = builder.intern_node(&point_id, Some(point_name), NodeShape::Circle, span);
+    }
+}
+
+fn register_state_declaration(
+    declaration: &str,
+    line_number: usize,
+    source_line: &str,
+    builder: &mut IrBuilder,
+) -> bool {
+    let body = declaration.trim().trim_end_matches('{').trim();
+    if body.is_empty() {
+        return false;
+    }
+
+    let (raw_id, raw_label) = if let Some((label_part, id_part)) = body.split_once(" as ") {
+        (id_part.trim(), Some(label_part.trim()))
+    } else {
+        (body, None)
+    };
+
+    let id = normalize_identifier(raw_id);
+    if id.is_empty() {
+        return false;
+    }
+
+    let label = raw_label
+        .and_then(|value| clean_label(Some(value)))
+        .or_else(|| clean_label(Some(raw_id)));
+    let span = span_for(line_number, source_line);
+    let _ = builder.intern_node(&id, label.as_deref(), NodeShape::Rounded, span);
+    true
 }
 
 fn register_participant(
@@ -421,6 +662,14 @@ fn parse_node_token(raw: &str) -> Option<NodeToken> {
         return None;
     }
 
+    if trimmed == "[*]" {
+        return Some(NodeToken {
+            id: "__state_start_end".to_string(),
+            label: Some("*".to_string()),
+            shape: NodeShape::Circle,
+        });
+    }
+
     let core = trimmed.split(":::").next().unwrap_or(trimmed).trim();
     if core.is_empty() {
         return None;
@@ -555,6 +804,12 @@ fn clean_label(raw: Option<&str>) -> Option<String> {
     }
 }
 
+fn parse_name_before_colon(line: &str) -> Option<&str> {
+    let (left, _) = line.split_once(':')?;
+    let candidate = left.trim().trim_matches('"').trim_matches('\'').trim();
+    (!candidate.is_empty()).then_some(candidate)
+}
+
 fn split_statements(line: &str) -> impl Iterator<Item = &str> {
     line.split(';')
         .map(str::trim)
@@ -640,6 +895,48 @@ mod tests {
         assert_eq!(parsed.ir.nodes.len(), 2);
         assert_eq!(parsed.ir.edges.len(), 1);
         assert!(parsed.warnings.is_empty());
+    }
+
+    #[test]
+    fn state_parses_declarations_and_transitions() {
+        let parsed = parse_mermaid("stateDiagram-v2\nstate Idle\n[*] --> Idle\nIdle --> Done");
+        assert_eq!(parsed.ir.diagram_type, DiagramType::State);
+        assert!(parsed.ir.nodes.len() >= 2);
+        assert_eq!(parsed.ir.edges.len(), 2);
+    }
+
+    #[test]
+    fn packet_beta_parses_connections() {
+        let parsed = parse_mermaid("packet-beta\nClient -> Gateway\nGateway -> Backend");
+        assert_eq!(parsed.ir.diagram_type, DiagramType::PacketBeta);
+        assert_eq!(parsed.ir.nodes.len(), 3);
+        assert_eq!(parsed.ir.edges.len(), 2);
+    }
+
+    #[test]
+    fn gantt_parses_tasks_as_nodes() {
+        let parsed = parse_mermaid(
+            "gantt\ntitle Release\nsection Phase 1\nDesign :a1, 2026-02-01, 3d\nBuild :a2, after a1, 5d",
+        );
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Gantt);
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 0);
+    }
+
+    #[test]
+    fn pie_parses_slice_entries() {
+        let parsed = parse_mermaid("pie\n\"Cats\" : 40\n\"Dogs\" : 60");
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Pie);
+        assert_eq!(parsed.ir.nodes.len(), 2);
+    }
+
+    #[test]
+    fn quadrant_parses_points() {
+        let parsed = parse_mermaid(
+            "quadrantChart\nx-axis Low --> High\ny-axis Slow --> Fast\nFeatureA: [0.2, 0.9]",
+        );
+        assert_eq!(parsed.ir.diagram_type, DiagramType::QuadrantChart);
+        assert_eq!(parsed.ir.nodes.len(), 1);
     }
 
     #[test]
