@@ -1,8 +1,9 @@
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
-use fm_core::{IrEndpoint, IrLabelId, MermaidDiagramIr};
+use fm_core::{GraphDirection, IrEndpoint, IrLabelId, MermaidDiagramIr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutAlgorithm {
@@ -153,7 +154,7 @@ pub fn layout_diagram_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         0,
     );
 
-    let crossing_count = crossing_minimization(ir, &ranks);
+    let (crossing_count, ordering_by_rank) = crossing_minimization(ir, &ranks);
     push_snapshot(
         &mut trace,
         "crossing_minimization",
@@ -163,7 +164,7 @@ pub fn layout_diagram_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         crossing_count,
     );
 
-    let nodes = coordinate_assignment(ir, &node_sizes, &ranks, spacing);
+    let nodes = coordinate_assignment(ir, &node_sizes, &ranks, &ordering_by_rank, spacing);
     let edges = build_edge_paths(ir, &nodes, &cycle_result.reversed_edge_indexes);
     let clusters = build_cluster_boxes(ir, &nodes, spacing);
     let bounds = compute_bounds(&nodes, &clusters, spacing);
@@ -223,15 +224,122 @@ struct CycleRemovalResult {
     reversed_edge_indexes: BTreeSet<usize>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OrientedEdge {
+    source: usize,
+    target: usize,
+    edge_index: usize,
+}
+
 fn cycle_removal(ir: &MermaidDiagramIr) -> CycleRemovalResult {
-    let reversed_edge_indexes = ir
-        .edges
-        .iter()
-        .enumerate()
-        .filter_map(|(index, edge)| {
-            let source = endpoint_node_index(ir, edge.from)?;
-            let target = endpoint_node_index(ir, edge.to)?;
-            (source > target).then_some(index)
+    let node_count = ir.nodes.len();
+    if node_count == 0 {
+        return CycleRemovalResult {
+            reversed_edge_indexes: BTreeSet::new(),
+        };
+    }
+
+    let edges = resolved_edges(ir);
+    if edges.is_empty() {
+        return CycleRemovalResult {
+            reversed_edge_indexes: BTreeSet::new(),
+        };
+    }
+
+    let node_priority = stable_node_priorities(ir);
+    let mut active_nodes: BTreeSet<usize> = (0..node_count).collect();
+    let mut in_degree = vec![0_usize; node_count];
+    let mut out_degree = vec![0_usize; node_count];
+    let mut incoming = vec![Vec::new(); node_count];
+    let mut outgoing = vec![Vec::new(); node_count];
+
+    for (edge_slot, edge) in edges.iter().enumerate() {
+        in_degree[edge.target] = in_degree[edge.target].saturating_add(1);
+        out_degree[edge.source] = out_degree[edge.source].saturating_add(1);
+        incoming[edge.target].push(edge_slot);
+        outgoing[edge.source].push(edge_slot);
+    }
+
+    let mut left_order = Vec::with_capacity(node_count);
+    let mut right_order = Vec::with_capacity(node_count);
+
+    while !active_nodes.is_empty() {
+        let mut sinks: Vec<usize> = active_nodes
+            .iter()
+            .copied()
+            .filter(|node| out_degree[*node] == 0)
+            .collect();
+        if !sinks.is_empty() {
+            sinks.sort_by(|left, right| compare_priority(*left, *right, &node_priority));
+            for node in sinks {
+                remove_node(
+                    node,
+                    &mut active_nodes,
+                    &incoming,
+                    &outgoing,
+                    &edges,
+                    &mut in_degree,
+                    &mut out_degree,
+                );
+                right_order.push(node);
+            }
+            continue;
+        }
+
+        let mut sources: Vec<usize> = active_nodes
+            .iter()
+            .copied()
+            .filter(|node| in_degree[*node] == 0)
+            .collect();
+        if !sources.is_empty() {
+            sources.sort_by(|left, right| compare_priority(*left, *right, &node_priority));
+            for node in sources {
+                remove_node(
+                    node,
+                    &mut active_nodes,
+                    &incoming,
+                    &outgoing,
+                    &edges,
+                    &mut in_degree,
+                    &mut out_degree,
+                );
+                left_order.push(node);
+            }
+            continue;
+        }
+
+        let Some(candidate) = active_nodes.iter().copied().max_by(|left, right| {
+            let left_score = out_degree[*left] as isize - in_degree[*left] as isize;
+            let right_score = out_degree[*right] as isize - in_degree[*right] as isize;
+            left_score
+                .cmp(&right_score)
+                .then_with(|| compare_priority(*right, *left, &node_priority))
+        }) else {
+            break;
+        };
+
+        remove_node(
+            candidate,
+            &mut active_nodes,
+            &incoming,
+            &outgoing,
+            &edges,
+            &mut in_degree,
+            &mut out_degree,
+        );
+        left_order.push(candidate);
+    }
+
+    left_order.extend(right_order.into_iter().rev());
+    let mut position = vec![0_usize; node_count];
+    for (order, node_index) in left_order.into_iter().enumerate() {
+        position[node_index] = order;
+    }
+
+    let reversed_edge_indexes = edges
+        .into_iter()
+        .filter_map(|edge| {
+            (position[edge.source] > position[edge.target]).then_some(edge.edge_index)
         })
         .collect();
 
@@ -241,63 +349,224 @@ fn cycle_removal(ir: &MermaidDiagramIr) -> CycleRemovalResult {
 }
 
 fn rank_assignment(ir: &MermaidDiagramIr, cycles: &CycleRemovalResult) -> BTreeMap<usize, usize> {
-    let mut ranks = BTreeMap::new();
-    for index in 0..ir.nodes.len() {
-        ranks.insert(index, 0_usize);
+    let node_count = ir.nodes.len();
+    let node_priority = stable_node_priorities(ir);
+    let edges = oriented_edges(ir, &cycles.reversed_edge_indexes);
+
+    let mut ranks = vec![0_usize; node_count];
+    let mut in_degree = vec![0_usize; node_count];
+    let mut outgoing: Vec<Vec<usize>> = vec![Vec::new(); node_count];
+
+    for edge in &edges {
+        if edge.source == edge.target {
+            continue;
+        }
+        in_degree[edge.target] = in_degree[edge.target].saturating_add(1);
+        outgoing[edge.source].push(edge.target);
     }
 
-    let mut changed = true;
-    let mut guard = 0_usize;
-    while changed && guard < ir.edges.len().saturating_mul(2).saturating_add(1) {
-        changed = false;
-        guard = guard.saturating_add(1);
+    for targets in &mut outgoing {
+        targets.sort_by(|left, right| compare_priority(*left, *right, &node_priority));
+        targets.dedup();
+    }
 
-        for (edge_index, edge) in ir.edges.iter().enumerate() {
-            let Some(mut source) = endpoint_node_index(ir, edge.from) else {
-                continue;
-            };
-            let Some(mut target) = endpoint_node_index(ir, edge.to) else {
-                continue;
-            };
-            if cycles.reversed_edge_indexes.contains(&edge_index) {
-                std::mem::swap(&mut source, &mut target);
-            }
+    let mut heap: BinaryHeap<Reverse<(usize, usize)>> = BinaryHeap::new();
+    for node_index in 0..node_count {
+        if in_degree[node_index] == 0 {
+            heap.push(Reverse((node_priority[node_index], node_index)));
+        }
+    }
 
-            let source_rank = ranks.get(&source).copied().unwrap_or(0);
+    let mut visited = 0_usize;
+    while let Some(Reverse((_priority, node_index))) = heap.pop() {
+        visited = visited.saturating_add(1);
+        let source_rank = ranks[node_index];
+
+        for target in outgoing[node_index].iter().copied() {
             let candidate_rank = source_rank.saturating_add(1);
-            let target_rank = ranks.get(&target).copied().unwrap_or(0);
-            if candidate_rank > target_rank {
-                ranks.insert(target, candidate_rank);
-                changed = true;
+            if candidate_rank > ranks[target] {
+                ranks[target] = candidate_rank;
+            }
+            in_degree[target] = in_degree[target].saturating_sub(1);
+            if in_degree[target] == 0 {
+                heap.push(Reverse((node_priority[target], target)));
             }
         }
     }
 
-    ranks
+    if visited < node_count {
+        // Residual cyclic components fallback to bounded longest-path relaxation.
+        let guard = edges.len().saturating_mul(2).saturating_add(1);
+        for _ in 0..guard {
+            let mut changed = false;
+            for edge in &edges {
+                if edge.source == edge.target {
+                    continue;
+                }
+                let candidate_rank = ranks[edge.source].saturating_add(1);
+                if candidate_rank > ranks[edge.target] {
+                    ranks[edge.target] = candidate_rank;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+
+    (0..node_count).map(|index| (index, ranks[index])).collect()
 }
 
-fn crossing_minimization(_ir: &MermaidDiagramIr, _ranks: &BTreeMap<usize, usize>) -> usize {
-    0
+fn resolved_edges(ir: &MermaidDiagramIr) -> Vec<OrientedEdge> {
+    ir.edges
+        .iter()
+        .enumerate()
+        .filter_map(|(edge_index, edge)| {
+            let source = endpoint_node_index(ir, edge.from)?;
+            let target = endpoint_node_index(ir, edge.to)?;
+            Some(OrientedEdge {
+                source,
+                target,
+                edge_index,
+            })
+        })
+        .collect()
+}
+
+fn oriented_edges(
+    ir: &MermaidDiagramIr,
+    reversed_edge_indexes: &BTreeSet<usize>,
+) -> Vec<OrientedEdge> {
+    resolved_edges(ir)
+        .into_iter()
+        .map(|mut edge| {
+            if reversed_edge_indexes.contains(&edge.edge_index) {
+                std::mem::swap(&mut edge.source, &mut edge.target);
+            }
+            edge
+        })
+        .collect()
+}
+
+fn stable_node_priorities(ir: &MermaidDiagramIr) -> Vec<usize> {
+    let mut node_indexes: Vec<usize> = (0..ir.nodes.len()).collect();
+    node_indexes.sort_by(|left, right| compare_node_indices(ir, *left, *right));
+
+    let mut priorities = vec![0_usize; ir.nodes.len()];
+    for (priority, node_index) in node_indexes.into_iter().enumerate() {
+        priorities[node_index] = priority;
+    }
+    priorities
+}
+
+fn compare_node_indices(ir: &MermaidDiagramIr, left: usize, right: usize) -> std::cmp::Ordering {
+    ir.nodes[left]
+        .id
+        .cmp(&ir.nodes[right].id)
+        .then_with(|| left.cmp(&right))
+}
+
+fn compare_priority(left: usize, right: usize, node_priority: &[usize]) -> std::cmp::Ordering {
+    node_priority[left]
+        .cmp(&node_priority[right])
+        .then_with(|| left.cmp(&right))
+}
+
+fn remove_node(
+    node: usize,
+    active_nodes: &mut BTreeSet<usize>,
+    incoming: &[Vec<usize>],
+    outgoing: &[Vec<usize>],
+    edges: &[OrientedEdge],
+    in_degree: &mut [usize],
+    out_degree: &mut [usize],
+) {
+    if !active_nodes.remove(&node) {
+        return;
+    }
+
+    for edge_slot in outgoing[node].iter().copied() {
+        let target = edges[edge_slot].target;
+        if active_nodes.contains(&target) {
+            in_degree[target] = in_degree[target].saturating_sub(1);
+        }
+    }
+
+    for edge_slot in incoming[node].iter().copied() {
+        let source = edges[edge_slot].source;
+        if active_nodes.contains(&source) {
+            out_degree[source] = out_degree[source].saturating_sub(1);
+        }
+    }
+}
+
+fn crossing_minimization(
+    ir: &MermaidDiagramIr,
+    ranks: &BTreeMap<usize, usize>,
+) -> (usize, BTreeMap<usize, Vec<usize>>) {
+    let mut ordering_by_rank = nodes_by_rank(ir.nodes.len(), ranks);
+    if ordering_by_rank.len() <= 1 {
+        return (0, ordering_by_rank);
+    }
+
+    // Deterministic barycenter sweeps: top-down then bottom-up.
+    let rank_keys: Vec<usize> = ordering_by_rank.keys().copied().collect();
+    for _ in 0..4 {
+        for index in 1..rank_keys.len() {
+            let rank = rank_keys[index];
+            let upper_rank = rank_keys[index - 1];
+            reorder_rank_by_barycenter(ir, ranks, &mut ordering_by_rank, rank, upper_rank, true);
+        }
+
+        for index in (0..rank_keys.len().saturating_sub(1)).rev() {
+            let rank = rank_keys[index];
+            let lower_rank = rank_keys[index + 1];
+            reorder_rank_by_barycenter(ir, ranks, &mut ordering_by_rank, rank, lower_rank, false);
+        }
+    }
+
+    let crossing_count = total_crossings(ir, ranks, &ordering_by_rank);
+    (crossing_count, ordering_by_rank)
 }
 
 fn coordinate_assignment(
     ir: &MermaidDiagramIr,
     node_sizes: &[(f32, f32)],
     ranks: &BTreeMap<usize, usize>,
+    ordering_by_rank: &BTreeMap<usize, Vec<usize>>,
     spacing: LayoutSpacing,
 ) -> Vec<LayoutNodeBox> {
-    let mut nodes_by_rank: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for node_index in 0..ir.nodes.len() {
-        let rank = ranks.get(&node_index).copied().unwrap_or(0);
-        nodes_by_rank.entry(rank).or_default().push(node_index);
-    }
+    let fallback_nodes_by_rank = nodes_by_rank(ir.nodes.len(), ranks);
+    let max_rank = ranks.values().copied().max().unwrap_or(0);
+    let horizontal_ranks = matches!(ir.direction, GraphDirection::LR | GraphDirection::RL);
+    let reverse_ranks = matches!(ir.direction, GraphDirection::RL | GraphDirection::BT);
 
     let mut output = Vec::with_capacity(ir.nodes.len());
-    for (rank, node_indexes) in nodes_by_rank {
+    for (rank, fallback_node_indexes) in fallback_nodes_by_rank {
+        let rank_position = if reverse_ranks {
+            max_rank.saturating_sub(rank)
+        } else {
+            rank
+        };
+        let node_indexes = ordering_by_rank
+            .get(&rank)
+            .cloned()
+            .unwrap_or(fallback_node_indexes);
+
+        let mut secondary_cursor = 0.0_f32;
         for (order, node_index) in node_indexes.into_iter().enumerate() {
             let (width, height) = node_sizes.get(node_index).copied().unwrap_or((72.0, 40.0));
-            let x = (order as f32) * (spacing.node_spacing + width);
-            let y = (rank as f32) * (spacing.rank_spacing + height);
+            let primary = if horizontal_ranks {
+                (rank_position as f32) * (spacing.rank_spacing + width)
+            } else {
+                (rank_position as f32) * (spacing.rank_spacing + height)
+            };
+            let (x, y) = if horizontal_ranks {
+                (primary, secondary_cursor)
+            } else {
+                (secondary_cursor, primary)
+            };
             let node_id = ir
                 .nodes
                 .get(node_index)
@@ -316,6 +585,9 @@ fn coordinate_assignment(
                     height,
                 },
             });
+
+            let secondary_extent = if horizontal_ranks { height } else { width };
+            secondary_cursor += secondary_extent + spacing.node_spacing;
         }
     }
 
@@ -323,11 +595,217 @@ fn coordinate_assignment(
     output
 }
 
+fn nodes_by_rank(node_count: usize, ranks: &BTreeMap<usize, usize>) -> BTreeMap<usize, Vec<usize>> {
+    let mut nodes_by_rank: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for node_index in 0..node_count {
+        let rank = ranks.get(&node_index).copied().unwrap_or(0);
+        nodes_by_rank.entry(rank).or_default().push(node_index);
+    }
+    nodes_by_rank
+}
+
+fn reorder_rank_by_barycenter(
+    ir: &MermaidDiagramIr,
+    ranks: &BTreeMap<usize, usize>,
+    ordering_by_rank: &mut BTreeMap<usize, Vec<usize>>,
+    rank: usize,
+    adjacent_rank: usize,
+    use_incoming: bool,
+) {
+    let Some(current_order) = ordering_by_rank.get(&rank).cloned() else {
+        return;
+    };
+    let Some(adjacent_order) = ordering_by_rank.get(&adjacent_rank) else {
+        return;
+    };
+
+    let adjacent_position: BTreeMap<usize, usize> = adjacent_order
+        .iter()
+        .enumerate()
+        .map(|(position, node)| (*node, position))
+        .collect();
+
+    let mut scored_nodes: Vec<(usize, Option<f32>, usize)> = current_order
+        .iter()
+        .enumerate()
+        .map(|(stable_idx, node_index)| {
+            let mut total_position = 0_usize;
+            let mut neighbor_count = 0_usize;
+
+            for edge in &ir.edges {
+                let Some(source) = endpoint_node_index(ir, edge.from) else {
+                    continue;
+                };
+                let Some(target) = endpoint_node_index(ir, edge.to) else {
+                    continue;
+                };
+
+                let neighbor = if use_incoming {
+                    if target == *node_index
+                        && ranks.get(&source).copied().unwrap_or(0) == adjacent_rank
+                    {
+                        Some(source)
+                    } else {
+                        None
+                    }
+                } else if source == *node_index
+                    && ranks.get(&target).copied().unwrap_or(0) == adjacent_rank
+                {
+                    Some(target)
+                } else {
+                    None
+                };
+
+                if let Some(adjacent_node) = neighbor {
+                    if let Some(position) = adjacent_position.get(&adjacent_node) {
+                        total_position = total_position.saturating_add(*position);
+                        neighbor_count = neighbor_count.saturating_add(1);
+                    }
+                }
+            }
+
+            let barycenter = if neighbor_count == 0 {
+                None
+            } else {
+                Some(total_position as f32 / neighbor_count as f32)
+            };
+            (*node_index, barycenter, stable_idx)
+        })
+        .collect();
+
+    scored_nodes.sort_by(|left, right| match (left.1, right.1) {
+        (Some(lhs), Some(rhs)) => lhs.total_cmp(&rhs).then_with(|| left.0.cmp(&right.0)),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => left.2.cmp(&right.2).then_with(|| left.0.cmp(&right.0)),
+    });
+
+    ordering_by_rank.insert(
+        rank,
+        scored_nodes
+            .into_iter()
+            .map(|(node_index, _, _)| node_index)
+            .collect(),
+    );
+}
+
+fn total_crossings(
+    ir: &MermaidDiagramIr,
+    ranks: &BTreeMap<usize, usize>,
+    ordering_by_rank: &BTreeMap<usize, Vec<usize>>,
+) -> usize {
+    let mut positions_by_rank: BTreeMap<usize, BTreeMap<usize, usize>> = BTreeMap::new();
+    for (rank, ordered_nodes) in ordering_by_rank {
+        positions_by_rank.insert(
+            *rank,
+            ordered_nodes
+                .iter()
+                .enumerate()
+                .map(|(position, node)| (*node, position))
+                .collect(),
+        );
+    }
+
+    let mut edges_by_layer_pair: BTreeMap<(usize, usize), Vec<(usize, usize)>> = BTreeMap::new();
+    for edge in &ir.edges {
+        let Some(mut source) = endpoint_node_index(ir, edge.from) else {
+            continue;
+        };
+        let Some(mut target) = endpoint_node_index(ir, edge.to) else {
+            continue;
+        };
+        let Some(mut source_rank) = ranks.get(&source).copied() else {
+            continue;
+        };
+        let Some(mut target_rank) = ranks.get(&target).copied() else {
+            continue;
+        };
+
+        if source_rank == target_rank {
+            continue;
+        }
+        if source_rank > target_rank {
+            std::mem::swap(&mut source, &mut target);
+            std::mem::swap(&mut source_rank, &mut target_rank);
+        }
+        if target_rank != source_rank.saturating_add(1) {
+            continue;
+        }
+
+        let Some(source_position) = positions_by_rank
+            .get(&source_rank)
+            .and_then(|positions| positions.get(&source))
+            .copied()
+        else {
+            continue;
+        };
+        let Some(target_position) = positions_by_rank
+            .get(&target_rank)
+            .and_then(|positions| positions.get(&target))
+            .copied()
+        else {
+            continue;
+        };
+
+        edges_by_layer_pair
+            .entry((source_rank, target_rank))
+            .or_default()
+            .push((source_position, target_position));
+    }
+
+    let mut total_crossings = 0_usize;
+    for (_layer_pair, mut edge_positions) in edges_by_layer_pair {
+        edge_positions
+            .sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+        let mut target_positions: Vec<usize> = edge_positions
+            .into_iter()
+            .map(|(_source_position, target_position)| target_position)
+            .collect();
+        total_crossings = total_crossings.saturating_add(count_inversions(&mut target_positions));
+    }
+
+    total_crossings
+}
+
+fn count_inversions(values: &mut [usize]) -> usize {
+    if values.len() <= 1 {
+        return 0;
+    }
+
+    let mid = values.len() / 2;
+    let mut inversions = 0_usize;
+    inversions = inversions.saturating_add(count_inversions(&mut values[..mid]));
+    inversions = inversions.saturating_add(count_inversions(&mut values[mid..]));
+
+    let mut merged = Vec::with_capacity(values.len());
+    let (left, right) = values.split_at(mid);
+    let mut left_idx = 0_usize;
+    let mut right_idx = 0_usize;
+
+    while left_idx < left.len() && right_idx < right.len() {
+        if left[left_idx] <= right[right_idx] {
+            merged.push(left[left_idx]);
+            left_idx = left_idx.saturating_add(1);
+        } else {
+            merged.push(right[right_idx]);
+            inversions = inversions.saturating_add(left.len().saturating_sub(left_idx));
+            right_idx = right_idx.saturating_add(1);
+        }
+    }
+
+    merged.extend_from_slice(&left[left_idx..]);
+    merged.extend_from_slice(&right[right_idx..]);
+    values.copy_from_slice(&merged);
+    inversions
+}
+
 fn build_edge_paths(
     ir: &MermaidDiagramIr,
     nodes: &[LayoutNodeBox],
     reversed_edge_indexes: &BTreeSet<usize>,
 ) -> Vec<LayoutEdgePath> {
+    let horizontal_ranks = matches!(ir.direction, GraphDirection::LR | GraphDirection::RL);
+
     ir.edges
         .iter()
         .enumerate()
@@ -336,14 +814,151 @@ fn build_edge_paths(
             let target = endpoint_node_index(ir, edge.to)?;
             let source_box = nodes.get(source)?;
             let target_box = nodes.get(target)?;
+            let (source_anchor, target_anchor) =
+                edge_anchors(source_box, target_box, horizontal_ranks);
+            let points = route_edge_points(source_anchor, target_anchor, horizontal_ranks);
 
             Some(LayoutEdgePath {
                 edge_index,
-                points: vec![source_box.bounds.center(), target_box.bounds.center()],
+                points,
                 reversed: reversed_edge_indexes.contains(&edge_index),
             })
         })
         .collect()
+}
+
+fn edge_anchors(
+    source_box: &LayoutNodeBox,
+    target_box: &LayoutNodeBox,
+    horizontal_ranks: bool,
+) -> (LayoutPoint, LayoutPoint) {
+    let source_center = source_box.bounds.center();
+    let target_center = target_box.bounds.center();
+
+    if horizontal_ranks {
+        let (source_x, target_x) = if target_center.x >= source_center.x {
+            (
+                source_box.bounds.x + source_box.bounds.width,
+                target_box.bounds.x,
+            )
+        } else {
+            (
+                source_box.bounds.x,
+                target_box.bounds.x + target_box.bounds.width,
+            )
+        };
+        (
+            LayoutPoint {
+                x: source_x,
+                y: source_center.y,
+            },
+            LayoutPoint {
+                x: target_x,
+                y: target_center.y,
+            },
+        )
+    } else {
+        let (source_y, target_y) = if target_center.y >= source_center.y {
+            (
+                source_box.bounds.y + source_box.bounds.height,
+                target_box.bounds.y,
+            )
+        } else {
+            (
+                source_box.bounds.y,
+                target_box.bounds.y + target_box.bounds.height,
+            )
+        };
+        (
+            LayoutPoint {
+                x: source_center.x,
+                y: source_y,
+            },
+            LayoutPoint {
+                x: target_center.x,
+                y: target_y,
+            },
+        )
+    }
+}
+
+fn route_edge_points(
+    source: LayoutPoint,
+    target: LayoutPoint,
+    horizontal_ranks: bool,
+) -> Vec<LayoutPoint> {
+    let epsilon = 0.001_f32;
+
+    let points = if horizontal_ranks {
+        if (source.y - target.y).abs() < epsilon {
+            vec![source, target]
+        } else {
+            let mid_x = (source.x + target.x) / 2.0;
+            vec![
+                source,
+                LayoutPoint {
+                    x: mid_x,
+                    y: source.y,
+                },
+                LayoutPoint {
+                    x: mid_x,
+                    y: target.y,
+                },
+                target,
+            ]
+        }
+    } else if (source.x - target.x).abs() < epsilon {
+        vec![source, target]
+    } else {
+        let mid_y = (source.y + target.y) / 2.0;
+        vec![
+            source,
+            LayoutPoint {
+                x: source.x,
+                y: mid_y,
+            },
+            LayoutPoint {
+                x: target.x,
+                y: mid_y,
+            },
+            target,
+        ]
+    };
+
+    simplify_polyline(points)
+}
+
+fn simplify_polyline(points: Vec<LayoutPoint>) -> Vec<LayoutPoint> {
+    if points.len() <= 2 {
+        return points;
+    }
+
+    let mut simplified = Vec::with_capacity(points.len());
+    for point in points {
+        if simplified.last() == Some(&point) {
+            continue;
+        }
+        simplified.push(point);
+
+        while simplified.len() >= 3 {
+            let c = simplified[simplified.len() - 1];
+            let b = simplified[simplified.len() - 2];
+            let a = simplified[simplified.len() - 3];
+            if is_axis_aligned_collinear(a, b, c) {
+                simplified.remove(simplified.len() - 2);
+            } else {
+                break;
+            }
+        }
+    }
+
+    simplified
+}
+
+fn is_axis_aligned_collinear(a: LayoutPoint, b: LayoutPoint, c: LayoutPoint) -> bool {
+    let epsilon = 0.001_f32;
+    ((a.x - b.x).abs() < epsilon && (b.x - c.x).abs() < epsilon)
+        || ((a.y - b.y).abs() < epsilon && (b.y - c.y).abs() < epsilon)
 }
 
 fn build_cluster_boxes(
@@ -457,7 +1072,7 @@ pub fn layout_stats_from(layout: &DiagramLayout) -> LayoutStats {
 
 #[cfg(test)]
 mod tests {
-    use super::{LayoutAlgorithm, layout, layout_diagram, layout_diagram_traced};
+    use super::{layout, layout_diagram, layout_diagram_traced, LayoutAlgorithm};
     use fm_core::{
         ArrowType, DiagramType, GraphDirection, IrEdge, IrEndpoint, IrLabel, IrLabelId, IrNode,
         IrNodeId, MermaidDiagramIr,
@@ -516,5 +1131,81 @@ mod tests {
         assert_eq!(layout.nodes.len(), 2);
         assert!(layout.bounds.width > 0.0);
         assert!(layout.bounds.height > 0.0);
+    }
+
+    #[test]
+    fn crossing_count_reports_layer_crossings() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for node_id in ["A", "B", "C", "D"] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..IrNode::default()
+            });
+        }
+
+        // K2,2 across adjacent layers: at least one crossing remains regardless ordering.
+        for (from, to) in [(0, 2), (0, 3), (1, 2), (1, 3)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let stats = layout(&ir, LayoutAlgorithm::Auto);
+        assert!(stats.crossing_count > 0);
+    }
+
+    #[test]
+    fn cycle_removal_marks_reversed_edges_for_simple_cycle() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for node_id in ["A", "B", "C"] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        for (from, to) in [(0, 1), (1, 2), (2, 0)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let stats = layout(&ir, LayoutAlgorithm::Auto);
+        assert!(stats.reversed_edges >= 1);
+    }
+
+    #[test]
+    fn bt_direction_reverses_vertical_rank_axis() {
+        let mut ir = sample_ir();
+        ir.direction = GraphDirection::BT;
+
+        let layout = layout_diagram(&ir);
+        let a_node = layout.nodes.iter().find(|node| node.node_id == "A");
+        let b_node = layout.nodes.iter().find(|node| node.node_id == "B");
+        let (Some(a_node), Some(b_node)) = (a_node, b_node) else {
+            panic!("expected A and B nodes in layout");
+        };
+
+        assert!(b_node.bounds.y < a_node.bounds.y);
+    }
+
+    #[test]
+    fn rl_direction_reverses_horizontal_rank_axis() {
+        let mut ir = sample_ir();
+        ir.direction = GraphDirection::RL;
+
+        let layout = layout_diagram(&ir);
+        let a_node = layout.nodes.iter().find(|node| node.node_id == "A");
+        let b_node = layout.nodes.iter().find(|node| node.node_id == "B");
+        let (Some(a_node), Some(b_node)) = (a_node, b_node) else {
+            panic!("expected A and B nodes in layout");
+        };
+
+        assert!(b_node.bounds.x < a_node.bounds.x);
     }
 }
