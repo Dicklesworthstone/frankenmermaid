@@ -390,12 +390,17 @@ mod tests {
     #[test]
     fn border_increases_dimensions() {
         let ir = sample_ir();
-        let mut config = MinimapConfig::default();
-        config.show_border = false;
-        let no_border = render_minimap(&ir, &config);
+        let config_no_border = MinimapConfig {
+            show_border: false,
+            ..Default::default()
+        };
+        let no_border = render_minimap(&ir, &config_no_border);
 
-        config.show_border = true;
-        let with_border = render_minimap(&ir, &config);
+        let config_with_border = MinimapConfig {
+            show_border: true,
+            ..Default::default()
+        };
+        let with_border = render_minimap(&ir, &config_with_border);
 
         assert_eq!(with_border.width, no_border.width + 2);
         assert_eq!(with_border.height, no_border.height + 2);

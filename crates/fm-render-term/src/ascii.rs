@@ -229,7 +229,7 @@ fn find_first_diagram_char(line: &str) -> Option<usize> {
 
 fn find_last_diagram_char(line: &str) -> Option<usize> {
     line.char_indices()
-        .filter(|(_, ch)| {
+        .rfind(|(_, ch)| {
             matches!(
                 classify_char(*ch),
                 CharClass::BoxDrawing
@@ -240,7 +240,6 @@ fn find_last_diagram_char(line: &str) -> Option<usize> {
                     | CharClass::Arrow
             )
         })
-        .next_back()
         .map(|(i, _)| i)
 }
 
