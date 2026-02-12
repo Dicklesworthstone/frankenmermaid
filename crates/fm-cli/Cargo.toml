@@ -4,15 +4,37 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+description = "FrankenMermaid CLI - render and validate Mermaid diagrams"
 
 [[bin]]
 name = "fm-cli"
 path = "src/main.rs"
 
+[features]
+default = []
+# Optional features for extended functionality
+watch = ["dep:notify"]
+serve = ["dep:tiny_http"]
+png = ["dep:resvg", "dep:usvg"]
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+fm-core.workspace = true
+fm-layout.workspace = true
 fm-parser.workspace = true
 fm-render-svg.workspace = true
+fm-render-term.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+# Optional dependencies
+notify = { version = "6.1", optional = true }
+tiny_http = { version = "0.12", optional = true }
+resvg = { version = "0.44", optional = true, default-features = false }
+usvg = { version = "0.44", optional = true, default-features = false }
+
+[dev-dependencies]
+tempfile = "3.15"

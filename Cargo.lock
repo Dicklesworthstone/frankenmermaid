@@ -125,8 +125,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "fm-core",
+ "fm-layout",
  "fm-parser",
  "fm-render-svg",
+ "fm-render-term",
  "tracing",
  "tracing-subscriber",
 ]
