@@ -652,9 +652,193 @@ pub struct MermaidDiagramMeta {
     pub guard: MermaidGuardReport,
 }
 
+/// Severity level for diagnostics.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, PartialOrd, Ord)]
+pub enum DiagnosticSeverity {
+    /// Informational hint (e.g., "consider using...")
+    Hint,
+    /// Something that works but could be improved
+    #[default]
+    Info,
+    /// Potential issue that was auto-recovered
+    Warning,
+    /// Serious issue that may affect output quality
+    Error,
+}
+
+impl DiagnosticSeverity {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Hint => "hint",
+            Self::Info => "info",
+            Self::Warning => "warning",
+            Self::Error => "error",
+        }
+    }
+
+    #[must_use]
+    pub const fn emoji(self) -> &'static str {
+        match self {
+            Self::Hint => "💡",
+            Self::Info => "ℹ️",
+            Self::Warning => "⚠️",
+            Self::Error => "❌",
+        }
+    }
+}
+
+/// Category of diagnostic for filtering and grouping.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum DiagnosticCategory {
+    /// Lexer/tokenization issues
+    Lexer,
+    /// Parser/syntax issues
+    #[default]
+    Parser,
+    /// Semantic/validation issues
+    Semantic,
+    /// Recovery action was taken
+    Recovery,
+    /// Intent inference was performed
+    Inference,
+    /// Compatibility with mermaid-js
+    Compatibility,
+}
+
+impl DiagnosticCategory {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Lexer => "lexer",
+            Self::Parser => "parser",
+            Self::Semantic => "semantic",
+            Self::Recovery => "recovery",
+            Self::Inference => "inference",
+            Self::Compatibility => "compatibility",
+        }
+    }
+}
+
+/// A diagnostic message with rich context for error reporting and recovery.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct Diagnostic {
+    /// Severity of the diagnostic
+    pub severity: DiagnosticSeverity,
+    /// Category for filtering/grouping
+    pub category: DiagnosticCategory,
+    /// Human-readable message
     pub message: String,
+    /// Source location where the issue occurred
+    pub span: Option<Span>,
+    /// Suggested fix or action
+    pub suggestion: Option<String>,
+    /// What was expected (for parse errors)
+    pub expected: Vec<String>,
+    /// What was found (for parse errors)
+    pub found: Option<String>,
+    /// Related diagnostics (e.g., "also defined here")
+    pub related: Vec<RelatedDiagnostic>,
+}
+
+/// A related diagnostic location (e.g., "also defined at...")
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct RelatedDiagnostic {
+    pub message: String,
+    pub span: Span,
+}
+
+impl Diagnostic {
+    /// Create a new diagnostic with the given severity and message.
+    #[must_use]
+    pub fn new(severity: DiagnosticSeverity, message: impl Into<String>) -> Self {
+        Self {
+            severity,
+            message: message.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Create an error diagnostic.
+    #[must_use]
+    pub fn error(message: impl Into<String>) -> Self {
+        Self::new(DiagnosticSeverity::Error, message)
+    }
+
+    /// Create a warning diagnostic.
+    #[must_use]
+    pub fn warning(message: impl Into<String>) -> Self {
+        Self::new(DiagnosticSeverity::Warning, message)
+    }
+
+    /// Create an info diagnostic.
+    #[must_use]
+    pub fn info(message: impl Into<String>) -> Self {
+        Self::new(DiagnosticSeverity::Info, message)
+    }
+
+    /// Create a hint diagnostic.
+    #[must_use]
+    pub fn hint(message: impl Into<String>) -> Self {
+        Self::new(DiagnosticSeverity::Hint, message)
+    }
+
+    /// Set the category.
+    #[must_use]
+    pub fn with_category(mut self, category: DiagnosticCategory) -> Self {
+        self.category = category;
+        self
+    }
+
+    /// Set the source span.
+    #[must_use]
+    pub fn with_span(mut self, span: Span) -> Self {
+        self.span = Some(span);
+        self
+    }
+
+    /// Set the suggestion.
+    #[must_use]
+    pub fn with_suggestion(mut self, suggestion: impl Into<String>) -> Self {
+        self.suggestion = Some(suggestion.into());
+        self
+    }
+
+    /// Set what was expected.
+    #[must_use]
+    pub fn with_expected(mut self, expected: Vec<String>) -> Self {
+        self.expected = expected;
+        self
+    }
+
+    /// Set what was found.
+    #[must_use]
+    pub fn with_found(mut self, found: impl Into<String>) -> Self {
+        self.found = Some(found.into());
+        self
+    }
+
+    /// Add a related diagnostic.
+    #[must_use]
+    pub fn with_related(mut self, message: impl Into<String>, span: Span) -> Self {
+        self.related.push(RelatedDiagnostic {
+            message: message.into(),
+            span,
+        });
+        self
+    }
+
+    /// Check if this is an error-level diagnostic.
+    #[must_use]
+    pub const fn is_error(&self) -> bool {
+        matches!(self.severity, DiagnosticSeverity::Error)
+    }
+
+    /// Check if this is a warning-level diagnostic.
+    #[must_use]
+    pub const fn is_warning(&self) -> bool {
+        matches!(self.severity, DiagnosticSeverity::Warning)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -694,6 +878,90 @@ impl MermaidDiagramIr {
             diagnostics: Vec::new(),
         }
     }
+
+    /// Add a diagnostic to this IR.
+    pub fn add_diagnostic(&mut self, diagnostic: Diagnostic) {
+        self.diagnostics.push(diagnostic);
+    }
+
+    /// Add multiple diagnostics.
+    pub fn add_diagnostics(&mut self, diagnostics: impl IntoIterator<Item = Diagnostic>) {
+        self.diagnostics.extend(diagnostics);
+    }
+
+    /// Check if there are any error-level diagnostics.
+    #[must_use]
+    pub fn has_errors(&self) -> bool {
+        self.diagnostics.iter().any(Diagnostic::is_error)
+    }
+
+    /// Check if there are any warning-level diagnostics.
+    #[must_use]
+    pub fn has_warnings(&self) -> bool {
+        self.diagnostics.iter().any(Diagnostic::is_warning)
+    }
+
+    /// Count diagnostics by severity.
+    #[must_use]
+    pub fn diagnostic_counts(&self) -> DiagnosticCounts {
+        let mut counts = DiagnosticCounts::default();
+        for diag in &self.diagnostics {
+            match diag.severity {
+                DiagnosticSeverity::Hint => counts.hints += 1,
+                DiagnosticSeverity::Info => counts.infos += 1,
+                DiagnosticSeverity::Warning => counts.warnings += 1,
+                DiagnosticSeverity::Error => counts.errors += 1,
+            }
+        }
+        counts
+    }
+
+    /// Get diagnostics filtered by severity.
+    #[must_use]
+    pub fn diagnostics_by_severity(&self, severity: DiagnosticSeverity) -> Vec<&Diagnostic> {
+        self.diagnostics
+            .iter()
+            .filter(|d| d.severity == severity)
+            .collect()
+    }
+
+    /// Get diagnostics filtered by category.
+    #[must_use]
+    pub fn diagnostics_by_category(&self, category: DiagnosticCategory) -> Vec<&Diagnostic> {
+        self.diagnostics
+            .iter()
+            .filter(|d| d.category == category)
+            .collect()
+    }
+
+    /// Find a node by ID, returning its index.
+    #[must_use]
+    pub fn find_node_index(&self, id: &str) -> Option<usize> {
+        self.nodes.iter().position(|n| n.id == id)
+    }
+
+    /// Find a node by ID.
+    #[must_use]
+    pub fn find_node(&self, id: &str) -> Option<&IrNode> {
+        self.nodes.iter().find(|n| n.id == id)
+    }
+}
+
+/// Counts of diagnostics by severity level.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DiagnosticCounts {
+    pub hints: usize,
+    pub infos: usize,
+    pub warnings: usize,
+    pub errors: usize,
+}
+
+impl DiagnosticCounts {
+    /// Total count of all diagnostics.
+    #[must_use]
+    pub const fn total(&self) -> usize {
+        self.hints + self.infos + self.warnings + self.errors
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -705,7 +973,10 @@ pub struct MermaidIrParse {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArrowType, DiagramType, GraphDirection, MermaidDiagramIr};
+    use super::{
+        ArrowType, Diagnostic, DiagnosticCategory, DiagnosticSeverity, DiagramType, GraphDirection,
+        MermaidDiagramIr, Span,
+    };
 
     #[test]
     fn creates_empty_ir() {
@@ -719,5 +990,64 @@ mod tests {
     #[test]
     fn arrow_type_string_mapping_is_stable() {
         assert_eq!(ArrowType::DottedArrow.as_str(), "-.->");
+    }
+
+    #[test]
+    fn diagnostic_builder_pattern() {
+        let diag = Diagnostic::error("Test error")
+            .with_category(DiagnosticCategory::Parser)
+            .with_span(Span::default())
+            .with_suggestion("Try this instead")
+            .with_expected(vec!["foo".to_string(), "bar".to_string()])
+            .with_found("baz");
+
+        assert_eq!(diag.severity, DiagnosticSeverity::Error);
+        assert_eq!(diag.category, DiagnosticCategory::Parser);
+        assert_eq!(diag.message, "Test error");
+        assert!(diag.span.is_some());
+        assert_eq!(diag.suggestion, Some("Try this instead".to_string()));
+        assert_eq!(diag.expected, vec!["foo", "bar"]);
+        assert_eq!(diag.found, Some("baz".to_string()));
+    }
+
+    #[test]
+    fn diagnostic_severity_levels() {
+        assert!(Diagnostic::error("e").is_error());
+        assert!(!Diagnostic::error("e").is_warning());
+        assert!(Diagnostic::warning("w").is_warning());
+        assert!(!Diagnostic::warning("w").is_error());
+    }
+
+    #[test]
+    fn ir_diagnostic_helpers() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        assert!(!ir.has_errors());
+        assert!(!ir.has_warnings());
+
+        ir.add_diagnostic(Diagnostic::warning("a warning"));
+        assert!(!ir.has_errors());
+        assert!(ir.has_warnings());
+
+        ir.add_diagnostic(Diagnostic::error("an error"));
+        assert!(ir.has_errors());
+
+        let counts = ir.diagnostic_counts();
+        assert_eq!(counts.warnings, 1);
+        assert_eq!(counts.errors, 1);
+        assert_eq!(counts.total(), 2);
+    }
+
+    #[test]
+    fn ir_diagnostic_filtering() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.add_diagnostic(Diagnostic::warning("w1").with_category(DiagnosticCategory::Parser));
+        ir.add_diagnostic(Diagnostic::warning("w2").with_category(DiagnosticCategory::Semantic));
+        ir.add_diagnostic(Diagnostic::error("e1").with_category(DiagnosticCategory::Parser));
+
+        let parser_diags = ir.diagnostics_by_category(DiagnosticCategory::Parser);
+        assert_eq!(parser_diags.len(), 2);
+
+        let warnings = ir.diagnostics_by_severity(DiagnosticSeverity::Warning);
+        assert_eq!(warnings.len(), 2);
     }
 }

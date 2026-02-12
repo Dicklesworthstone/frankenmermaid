@@ -1,6 +1,6 @@
 use fm_core::{ArrowType, DiagramType, NodeShape, Span};
 
-use crate::{ParseResult, ir_builder::IrBuilder};
+use crate::{DetectionMethod, ParseResult, ir_builder::IrBuilder};
 
 #[must_use]
 pub fn looks_like_dot(input: &str) -> bool {
@@ -94,7 +94,7 @@ pub fn parse_dot(input: &str) -> ParseResult {
         builder.add_warning("DOT input contained no parseable nodes or edges");
     }
 
-    builder.finish()
+    builder.finish(0.95, DetectionMethod::DotFormat)
 }
 
 fn parse_dot_edge_statement(

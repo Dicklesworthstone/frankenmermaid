@@ -2,7 +2,7 @@ use fm_core::{ArrowType, DiagramType, GraphDirection, IrAttributeKey, IrNodeId, 
 use serde_json::Value;
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::{ParseResult, ir_builder::IrBuilder};
+use crate::{DetectedType, ParseResult, ir_builder::IrBuilder};
 
 const FLOW_OPERATORS: [(&str, ArrowType); 6] = [
     ("-.->", ArrowType::DottedArrow),
@@ -62,7 +62,9 @@ struct NodeToken {
     shape: NodeShape,
 }
 
+/// Simple type detection (used by tests).
 #[must_use]
+#[allow(dead_code)] // Used by tests
 pub fn detect_type(input: &str) -> DiagramType {
     let Some(first_line) = first_significant_line(input) else {
         return DiagramType::Unknown;
@@ -120,10 +122,25 @@ pub fn detect_type(input: &str) -> DiagramType {
     }
 }
 
+/// Parse mermaid input (used by tests, delegates to parse_mermaid_with_detection).
 #[must_use]
+#[allow(dead_code)] // Used by tests
 pub fn parse_mermaid(input: &str) -> ParseResult {
-    let diagram_type = detect_type(input);
+    let detection = crate::detect_type_with_confidence(input);
+    parse_mermaid_with_detection(input, detection)
+}
+
+/// Parse mermaid input with pre-computed detection results.
+#[must_use]
+pub fn parse_mermaid_with_detection(input: &str, detection: DetectedType) -> ParseResult {
+    let diagram_type = detection.diagram_type;
     let mut builder = IrBuilder::new(diagram_type);
+
+    // Add detection warnings to builder
+    for warning in &detection.warnings {
+        builder.add_warning(warning.clone());
+    }
+
     parse_init_directives(input, &mut builder);
 
     match diagram_type {
@@ -158,7 +175,7 @@ pub fn parse_mermaid(input: &str) -> ParseResult {
         builder.add_warning("No parseable nodes or edges were found");
     }
 
-    builder.finish()
+    builder.finish(detection.confidence, detection.method)
 }
 
 fn parse_flowchart(input: &str, builder: &mut IrBuilder) {
@@ -1629,7 +1646,7 @@ fn span_for(line_number: usize, line: &str) -> Span {
     Span::at_line(line_number, line.chars().count())
 }
 
-fn first_significant_line(input: &str) -> Option<&str> {
+pub(crate) fn first_significant_line(input: &str) -> Option<&str> {
     input.lines().map(str::trim).find(|line| {
         !line.is_empty() && !is_comment(line) && !line.starts_with("%%{") && !line.ends_with("}%%")
     })
@@ -1781,6 +1798,128 @@ mod tests {
     }
 
     #[test]
+    fn er_parses_entity_attributes() {
+        use fm_core::IrAttributeKey;
+
+        let input = r#"erDiagram
+    CUSTOMER {
+        int id PK
+        string name
+        string email UK
+    }
+"#;
+        let parsed = parse_mermaid(input);
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Er);
+        assert_eq!(parsed.ir.nodes.len(), 1);
+
+        let customer = &parsed.ir.nodes[0];
+        assert_eq!(customer.id, "CUSTOMER");
+        assert_eq!(customer.members.len(), 3);
+
+        // Check first attribute: int id PK
+        assert_eq!(customer.members[0].data_type, "int");
+        assert_eq!(customer.members[0].name, "id");
+        assert_eq!(customer.members[0].key, IrAttributeKey::Pk);
+
+        // Check second attribute: string name
+        assert_eq!(customer.members[1].data_type, "string");
+        assert_eq!(customer.members[1].name, "name");
+        assert_eq!(customer.members[1].key, IrAttributeKey::None);
+
+        // Check third attribute: string email UK
+        assert_eq!(customer.members[2].data_type, "string");
+        assert_eq!(customer.members[2].name, "email");
+        assert_eq!(customer.members[2].key, IrAttributeKey::Uk);
+    }
+
+    #[test]
+    fn er_parses_attributes_with_comments() {
+        use fm_core::IrAttributeKey;
+
+        let input = r#"erDiagram
+    ORDER {
+        int order_id PK "unique identifier"
+        int customer_id FK "references CUSTOMER"
+        date created_at
+    }
+"#;
+        let parsed = parse_mermaid(input);
+        let order = &parsed.ir.nodes[0];
+        assert_eq!(order.members.len(), 3);
+
+        // Check FK with comment
+        assert_eq!(order.members[1].key, IrAttributeKey::Fk);
+        assert_eq!(
+            order.members[1].comment.as_deref(),
+            Some("references CUSTOMER")
+        );
+
+        // Check attribute without key
+        assert_eq!(order.members[2].data_type, "date");
+        assert_eq!(order.members[2].name, "created_at");
+        assert_eq!(order.members[2].key, IrAttributeKey::None);
+    }
+
+    #[test]
+    fn er_parses_complex_schema() {
+        let input = r#"erDiagram
+    CUSTOMER ||--o{ ORDER : places
+    ORDER ||--|{ LINE_ITEM : contains
+    CUSTOMER {
+        int id PK
+        string name
+    }
+    ORDER {
+        int id PK
+        int customer_id FK
+    }
+    LINE_ITEM {
+        int id PK
+        int order_id FK
+        int quantity
+    }
+"#;
+        let parsed = parse_mermaid(input);
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Er);
+        assert_eq!(parsed.ir.nodes.len(), 3);
+        assert_eq!(parsed.ir.edges.len(), 2);
+
+        // Check CUSTOMER has 2 attributes
+        let customer = parsed.ir.nodes.iter().find(|n| n.id == "CUSTOMER").unwrap();
+        assert_eq!(customer.members.len(), 2);
+
+        // Check ORDER has 2 attributes
+        let order = parsed.ir.nodes.iter().find(|n| n.id == "ORDER").unwrap();
+        assert_eq!(order.members.len(), 2);
+
+        // Check LINE_ITEM has 3 attributes
+        let line_item = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|n| n.id == "LINE_ITEM")
+            .unwrap();
+        assert_eq!(line_item.members.len(), 3);
+    }
+
+    #[test]
+    fn er_handles_complex_type_names() {
+        let input = r#"erDiagram
+    TABLE {
+        varchar(255) email
+        decimal(10,2) price
+        timestamp created_at
+    }
+"#;
+        let parsed = parse_mermaid(input);
+        let table = &parsed.ir.nodes[0];
+
+        assert_eq!(table.members[0].data_type, "varchar(255)");
+        assert_eq!(table.members[1].data_type, "decimal(10,2)");
+        assert_eq!(table.members[2].data_type, "timestamp");
+    }
+
+    #[test]
     fn journey_parses_steps_as_linear_edges() {
         let parsed = parse_mermaid("journey\nsection Sprint\nWrite code: 5: me\nShip: 3: me");
         assert_eq!(parsed.ir.diagram_type, DiagramType::Journey);
@@ -1906,11 +2045,22 @@ mod tests {
     }
 
     #[test]
-    fn unknown_uses_best_effort_flowchart_parser() {
+    fn content_heuristics_detects_flowchart_from_arrows() {
+        // With improved detection, "A --> B" is recognized as a flowchart via content heuristics
         let parsed = parse_mermaid("A --> B");
-        assert_eq!(parsed.ir.diagram_type, DiagramType::Unknown);
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Flowchart);
         assert_eq!(parsed.ir.nodes.len(), 2);
         assert_eq!(parsed.ir.edges.len(), 1);
-        assert_eq!(parsed.warnings.len(), 1);
+        // Should have a warning about detection method
+        assert!(!parsed.warnings.is_empty());
+    }
+
+    #[test]
+    fn truly_unknown_input_falls_back_gracefully() {
+        // Input with no recognizable patterns
+        let parsed = parse_mermaid("some random text\nmore text");
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Flowchart); // Falls back to flowchart
+        // Should have warnings about detection and empty parse
+        assert!(!parsed.warnings.is_empty());
     }
 }

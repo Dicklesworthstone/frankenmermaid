@@ -188,8 +188,10 @@ pub fn fit_to_viewport(
     canvas_height: f64,
     padding: f64,
 ) -> Viewport {
-    let available_width = canvas_width - 2.0 * padding;
-    let available_height = canvas_height - 2.0 * padding;
+    // Clamp available dimensions so pathological padding values can't produce
+    // negative scales/zooms (which would mirror the diagram).
+    let available_width = (canvas_width - 2.0 * padding).max(1.0);
+    let available_height = (canvas_height - 2.0 * padding).max(1.0);
 
     if diagram_width <= 0.0 || diagram_height <= 0.0 {
         return Viewport::new(canvas_width, canvas_height);
@@ -266,5 +268,13 @@ mod tests {
         let vp = fit_to_viewport(2000.0, 1000.0, 800.0, 600.0, 20.0);
         // Large diagram should zoom out to fit
         assert!(vp.zoom < 1.0);
+    }
+
+    #[test]
+    fn excessive_padding_does_not_produce_negative_zoom() {
+        let vp = fit_to_viewport(100.0, 100.0, 10.0, 10.0, 20.0);
+        assert!(vp.zoom.is_finite());
+        assert!(vp.zoom > 0.0);
+        assert!(vp.zoom <= 1.0);
     }
 }

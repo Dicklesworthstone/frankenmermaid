@@ -244,6 +244,7 @@ mod tests {
             span_primary: fm_core::Span::default(),
             span_all: vec![],
             implicit: false,
+            members: vec![],
         });
         ir.nodes.push(IrNode {
             id: "B".to_string(),
@@ -253,6 +254,7 @@ mod tests {
             span_primary: fm_core::Span::default(),
             span_all: vec![],
             implicit: false,
+            members: vec![],
         });
 
         ir

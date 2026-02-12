@@ -445,8 +445,8 @@ fn render_format(
             #[cfg(feature = "png")]
             {
                 let svg = render_svg(ir);
-                let png = svg_to_png(&svg, width, height)?;
-                Ok((png, width, height))
+                let (png, px_width, px_height) = svg_to_png(&svg, width, height)?;
+                Ok((png, Some(px_width), Some(px_height)))
             }
 
             #[cfg(not(feature = "png"))]
@@ -510,7 +510,7 @@ fn extract_svg_dimensions(svg: &str) -> (Option<u32>, Option<u32>) {
 }
 
 #[cfg(feature = "png")]
-fn svg_to_png(svg: &str, width: Option<u32>, height: Option<u32>) -> Result<Vec<u8>> {
+fn svg_to_png(svg: &str, width: Option<u32>, height: Option<u32>) -> Result<(Vec<u8>, u32, u32)> {
     use resvg::tiny_skia;
     use usvg::{Options, Transform, Tree};
 
@@ -543,12 +543,35 @@ fn svg_to_png(svg: &str, width: Option<u32>, height: Option<u32>) -> Result<Vec<
         &mut pixmap.as_mut(),
     );
 
-    pixmap.encode_png().context("Failed to encode PNG")
+    let bytes = pixmap.encode_png().context("Failed to encode PNG")?;
+    Ok((bytes, px_width, px_height))
 }
 
 // =============================================================================
 // Command: parse
 // =============================================================================
+
+#[cfg(all(test, feature = "png"))]
+mod png_tests {
+    use super::svg_to_png;
+
+    const SIMPLE_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><rect x="0" y="0" width="100" height="50" fill="#f00"/></svg>"##;
+
+    #[test]
+    fn png_dimensions_default_to_svg_size() {
+        let (_bytes, w, h) = svg_to_png(SIMPLE_SVG, None, None).expect("svg_to_png should succeed");
+        assert_eq!(w, 100);
+        assert_eq!(h, 50);
+    }
+
+    #[test]
+    fn png_dimensions_preserve_aspect_when_only_width_provided() {
+        let (_bytes, w, h) =
+            svg_to_png(SIMPLE_SVG, Some(200), None).expect("svg_to_png should succeed");
+        assert_eq!(w, 200);
+        assert_eq!(h, 100);
+    }
+}
 
 fn cmd_parse(input: &str, full: bool, pretty: bool) -> Result<()> {
     let source = load_input(input)?;

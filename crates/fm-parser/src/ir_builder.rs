@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
 use fm_core::{
-    ArrowType, DiagramType, GraphDirection, IrAttributeKey, IrCluster, IrClusterId, IrEdge,
-    IrEndpoint, IrEntityAttribute, IrLabel, IrLabelId, IrNode, IrNodeId, MermaidDiagramIr,
-    MermaidError, MermaidWarning, MermaidWarningCode, NodeShape, Span,
+    ArrowType, Diagnostic, DiagnosticCategory, DiagramType, GraphDirection, IrAttributeKey,
+    IrCluster, IrClusterId, IrEdge, IrEndpoint, IrEntityAttribute, IrLabel, IrLabelId, IrNode,
+    IrNodeId, MermaidDiagramIr, MermaidError, MermaidWarning, MermaidWarningCode, NodeShape, Span,
 };
 
 use crate::ParseResult;
@@ -13,6 +13,8 @@ pub(crate) struct IrBuilder {
     node_index_by_id: BTreeMap<String, IrNodeId>,
     cluster_index_by_key: BTreeMap<String, usize>,
     warnings: Vec<String>,
+    /// Track nodes that were auto-created (for dangling edge recovery)
+    auto_created_nodes: Vec<IrNodeId>,
 }
 
 impl IrBuilder {
@@ -22,6 +24,7 @@ impl IrBuilder {
             node_index_by_id: BTreeMap::new(),
             cluster_index_by_key: BTreeMap::new(),
             warnings: Vec::new(),
+            auto_created_nodes: Vec::new(),
         }
     }
 
@@ -73,6 +76,40 @@ impl IrBuilder {
         self.warnings.push(warning.into());
     }
 
+    /// Add a rich diagnostic to the IR.
+    #[allow(dead_code)] // Will be used by recovery features
+    pub(crate) fn add_diagnostic(&mut self, diagnostic: Diagnostic) {
+        self.ir.add_diagnostic(diagnostic);
+    }
+
+    /// Add an info-level recovery diagnostic.
+    #[allow(dead_code)] // Will be used by recovery features
+    pub(crate) fn add_recovery_info(&mut self, message: impl Into<String>, span: Option<Span>) {
+        let mut diag = Diagnostic::info(message).with_category(DiagnosticCategory::Recovery);
+        if let Some(s) = span {
+            diag = diag.with_span(s);
+        }
+        self.ir.add_diagnostic(diag);
+    }
+
+    /// Add a warning-level recovery diagnostic.
+    #[allow(dead_code)] // Will be used by recovery features
+    pub(crate) fn add_recovery_warning(
+        &mut self,
+        message: impl Into<String>,
+        span: Option<Span>,
+        suggestion: Option<String>,
+    ) {
+        let mut diag = Diagnostic::warning(message).with_category(DiagnosticCategory::Recovery);
+        if let Some(s) = span {
+            diag = diag.with_span(s);
+        }
+        if let Some(sug) = suggestion {
+            diag = diag.with_suggestion(sug);
+        }
+        self.ir.add_diagnostic(diag);
+    }
+
     pub(crate) fn node_count(&self) -> usize {
         self.ir.nodes.len()
     }
@@ -81,11 +118,138 @@ impl IrBuilder {
         self.ir.edges.len()
     }
 
-    pub(crate) fn finish(self) -> ParseResult {
+    /// Finish building the IR, applying semantic recovery.
+    pub(crate) fn finish(
+        mut self,
+        confidence: f32,
+        detection_method: crate::DetectionMethod,
+    ) -> ParseResult {
+        // Apply semantic recovery
+        self.apply_semantic_recovery();
+
         ParseResult {
             ir: self.ir,
             warnings: self.warnings,
+            confidence,
+            detection_method,
         }
+    }
+
+    /// Apply semantic recovery strategies.
+    fn apply_semantic_recovery(&mut self) {
+        // Report auto-created placeholder nodes
+        if !self.auto_created_nodes.is_empty() {
+            let count = self.auto_created_nodes.len();
+            let node_ids: Vec<String> = self
+                .auto_created_nodes
+                .iter()
+                .filter_map(|id| self.ir.nodes.get(id.0).map(|n| n.id.clone()))
+                .collect();
+            let message = if count == 1 {
+                format!(
+                    "Auto-created placeholder node '{}' for dangling edge reference",
+                    node_ids.first().unwrap_or(&String::new())
+                )
+            } else {
+                format!(
+                    "Auto-created {} placeholder nodes for dangling edge references: {}",
+                    count,
+                    node_ids.join(", ")
+                )
+            };
+            self.ir.add_diagnostic(
+                Diagnostic::info(message)
+                    .with_category(DiagnosticCategory::Recovery)
+                    .with_suggestion(
+                        "Define these nodes explicitly for better diagram quality".to_string(),
+                    ),
+            );
+        }
+
+        // Check for unresolved edges and report them
+        let unresolved_count = self
+            .ir
+            .edges
+            .iter()
+            .filter(|e| {
+                matches!(e.from, IrEndpoint::Unresolved) || matches!(e.to, IrEndpoint::Unresolved)
+            })
+            .count();
+
+        if unresolved_count > 0 {
+            self.ir.add_diagnostic(
+                Diagnostic::warning(format!(
+                    "{} edge(s) have unresolved endpoints",
+                    unresolved_count
+                ))
+                .with_category(DiagnosticCategory::Semantic),
+            );
+        }
+    }
+
+    /// Intern a node, optionally marking it as auto-created (for recovery).
+    pub(crate) fn intern_node_auto(
+        &mut self,
+        id: &str,
+        label: Option<&str>,
+        shape: NodeShape,
+        span: Span,
+        is_auto_created: bool,
+    ) -> Option<IrNodeId> {
+        let normalized_id = id.trim();
+        if normalized_id.is_empty() {
+            self.add_warning("Encountered empty node identifier; skipped node");
+            return None;
+        }
+
+        // Check if already exists
+        if let Some(existing_id) = self.node_index_by_id.get(normalized_id).copied() {
+            let resolved_label = if self
+                .ir
+                .nodes
+                .get(existing_id.0)
+                .and_then(|node| node.label)
+                .is_none()
+            {
+                clean_label(label).map(|cleaned_label| self.intern_label(cleaned_label, span))
+            } else {
+                None
+            };
+
+            if let Some(existing_node) = self.ir.nodes.get_mut(existing_id.0) {
+                if existing_node.label.is_none() {
+                    existing_node.label = resolved_label;
+                }
+                if existing_node.shape == NodeShape::Rect && shape != NodeShape::Rect {
+                    existing_node.shape = shape;
+                }
+            }
+            return Some(existing_id);
+        }
+
+        // Create new node
+        let label_id = clean_label(label).map(|value| self.intern_label(value, span));
+        let node_id = IrNodeId(self.ir.nodes.len());
+        let node = IrNode {
+            id: normalized_id.to_string(),
+            label: label_id,
+            shape,
+            classes: Vec::new(),
+            span_primary: span,
+            span_all: vec![span],
+            implicit: is_auto_created,
+            members: Vec::new(),
+        };
+
+        self.ir.nodes.push(node);
+        self.node_index_by_id
+            .insert(normalized_id.to_string(), node_id);
+
+        if is_auto_created {
+            self.auto_created_nodes.push(node_id);
+        }
+
+        Some(node_id)
     }
 
     pub(crate) fn ensure_cluster(
@@ -140,53 +304,13 @@ impl IrBuilder {
         shape: NodeShape,
         span: Span,
     ) -> Option<IrNodeId> {
-        let normalized_id = id.trim();
-        if normalized_id.is_empty() {
-            self.add_warning("Encountered empty node identifier; skipped node");
-            return None;
-        }
+        self.intern_node_auto(id, label, shape, span, false)
+    }
 
-        if let Some(existing_id) = self.node_index_by_id.get(normalized_id).copied() {
-            let resolved_label = if self
-                .ir
-                .nodes
-                .get(existing_id.0)
-                .and_then(|node| node.label)
-                .is_none()
-            {
-                clean_label(label).map(|cleaned_label| self.intern_label(cleaned_label, span))
-            } else {
-                None
-            };
-
-            if let Some(existing_node) = self.ir.nodes.get_mut(existing_id.0) {
-                if existing_node.label.is_none() {
-                    existing_node.label = resolved_label;
-                }
-                if existing_node.shape == NodeShape::Rect && shape != NodeShape::Rect {
-                    existing_node.shape = shape;
-                }
-            }
-            return Some(existing_id);
-        }
-
-        let label_id = clean_label(label).map(|value| self.intern_label(value, span));
-        let node_id = IrNodeId(self.ir.nodes.len());
-        let node = IrNode {
-            id: normalized_id.to_string(),
-            label: label_id,
-            shape,
-            classes: Vec::new(),
-            span_primary: span,
-            span_all: vec![span],
-            implicit: false,
-            members: Vec::new(),
-        };
-
-        self.ir.nodes.push(node);
-        self.node_index_by_id
-            .insert(normalized_id.to_string(), node_id);
-        Some(node_id)
+    /// Intern a node as a placeholder (auto-created for dangling edge recovery).
+    #[allow(dead_code)] // Will be used by recovery features
+    pub(crate) fn intern_placeholder_node(&mut self, id: &str, span: Span) -> Option<IrNodeId> {
+        self.intern_node_auto(id, Some(id), NodeShape::Rect, span, true)
     }
 
     pub(crate) fn add_class_to_node(&mut self, node_key: &str, class_name: &str, span: Span) {
@@ -231,11 +355,6 @@ impl IrBuilder {
             key,
             comment: comment.map(|s| s.to_string()),
         });
-    }
-
-    /// Get a node ID by key if it exists.
-    pub(crate) fn get_node_id(&self, key: &str) -> Option<IrNodeId> {
-        self.node_index_by_id.get(key.trim()).copied()
     }
 
     pub(crate) fn push_edge(

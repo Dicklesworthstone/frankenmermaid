@@ -131,9 +131,19 @@ impl Canvas2dRenderer {
             transform.f,
         );
 
-        // Offset for diagram bounds (convert f32 layout coords to f64)
-        let offset_x = self.config.padding - f64::from(layout.bounds.x);
-        let offset_y = self.config.padding - f64::from(layout.bounds.y);
+        // Offset for diagram bounds (convert f32 layout coords to f64).
+        //
+        // When `auto_fit` is enabled we already account for `padding` in the viewport
+        // (screen space). Adding `padding` again here (diagram space) causes the diagram
+        // to be mis-centered and margins to become asymmetric, especially when zoom != 1.
+        let (offset_x, offset_y) = if self.config.auto_fit {
+            (-f64::from(layout.bounds.x), -f64::from(layout.bounds.y))
+        } else {
+            (
+                self.config.padding - f64::from(layout.bounds.x),
+                self.config.padding - f64::from(layout.bounds.y),
+            )
+        };
 
         // Draw clusters (background)
         let clusters_drawn = self.draw_clusters(layout, ir, ctx, offset_x, offset_y);
@@ -403,7 +413,7 @@ impl Canvas2dRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::MockCanvas2dContext;
+    use crate::context::{DrawOperation, MockCanvas2dContext};
     use fm_core::DiagramType;
     use fm_layout::layout_diagram;
 
@@ -439,5 +449,85 @@ mod tests {
         assert!(!config.font_family.is_empty());
         assert!(config.font_size > 0.0);
         assert!(config.padding > 0.0);
+    }
+
+    #[test]
+    fn auto_fit_does_not_apply_padding_in_diagram_space() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.nodes.push(fm_core::IrNode {
+            id: "A".to_string(),
+            ..Default::default()
+        });
+        let layout = layout_diagram(&ir);
+
+        let config = CanvasRenderConfig {
+            auto_fit: true,
+            padding: 20.0,
+            ..Default::default()
+        };
+
+        let mut ctx = MockCanvas2dContext::new(800.0, 600.0);
+        let mut renderer = Canvas2dRenderer::new(config);
+        let _result = renderer.render(&layout, &ir, &mut ctx);
+
+        let node_box = layout
+            .nodes
+            .iter()
+            .find(|node| node.node_index == 0)
+            .expect("expected node 0 to be present in layout");
+
+        let (rect_x, rect_y) = ctx
+            .operations()
+            .iter()
+            .find_map(|op| match op {
+                DrawOperation::Rect(x, y, _w, _h) => Some((*x, *y)),
+                _ => None,
+            })
+            .expect("expected a Rect operation for node box");
+
+        let expected_x = f64::from(node_box.bounds.x - layout.bounds.x);
+        let expected_y = f64::from(node_box.bounds.y - layout.bounds.y);
+        assert!((rect_x - expected_x).abs() < 0.001);
+        assert!((rect_y - expected_y).abs() < 0.001);
+    }
+
+    #[test]
+    fn non_auto_fit_applies_padding_in_diagram_space() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.nodes.push(fm_core::IrNode {
+            id: "A".to_string(),
+            ..Default::default()
+        });
+        let layout = layout_diagram(&ir);
+
+        let config = CanvasRenderConfig {
+            auto_fit: false,
+            padding: 20.0,
+            ..Default::default()
+        };
+
+        let mut ctx = MockCanvas2dContext::new(800.0, 600.0);
+        let mut renderer = Canvas2dRenderer::new(config.clone());
+        let _result = renderer.render(&layout, &ir, &mut ctx);
+
+        let node_box = layout
+            .nodes
+            .iter()
+            .find(|node| node.node_index == 0)
+            .expect("expected node 0 to be present in layout");
+
+        let (rect_x, rect_y) = ctx
+            .operations()
+            .iter()
+            .find_map(|op| match op {
+                DrawOperation::Rect(x, y, _w, _h) => Some((*x, *y)),
+                _ => None,
+            })
+            .expect("expected a Rect operation for node box");
+
+        let expected_x = f64::from(node_box.bounds.x - layout.bounds.x) + config.padding;
+        let expected_y = f64::from(node_box.bounds.y - layout.bounds.y) + config.padding;
+        assert!((rect_x - expected_x).abs() < 0.001);
+        assert!((rect_y - expected_y).abs() < 0.001);
     }
 }
