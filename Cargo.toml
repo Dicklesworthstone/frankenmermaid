@@ -1,0 +1,53 @@
+[workspace]
+members = [
+    "crates/fm-core",
+    "crates/fm-parser",
+    "crates/fm-layout",
+    "crates/fm-render-svg",
+    "crates/fm-render-canvas",
+    "crates/fm-render-term",
+    "crates/fm-wasm",
+    "crates/fm-cli",
+]
+default-members = ["crates/fm-cli"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+
+[workspace.dependencies]
+fm-core = { path = "crates/fm-core" }
+fm-parser = { path = "crates/fm-parser" }
+fm-layout = { path = "crates/fm-layout" }
+fm-render-svg = { path = "crates/fm-render-svg" }
+fm-render-canvas = { path = "crates/fm-render-canvas" }
+fm-render-term = { path = "crates/fm-render-term" }
+fm-wasm = { path = "crates/fm-wasm" }
+
+anyhow = "1.0.98"
+clap = { version = "4.5.32", features = ["derive"] }
+js-sys = "0.3.77"
+serde = { version = "1.0.219", features = ["derive"] }
+serde-wasm-bindgen = "0.6.5"
+serde_json = "1.0.140"
+thiserror = "2.0.12"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
+wasm-bindgen = "0.2.100"
+web-sys = { version = "0.3.77", features = ["CanvasRenderingContext2d", "Document", "HtmlCanvasElement", "Window"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.release.package.fm-layout]
+opt-level = 3
+
+[profile.dev.package.fm-layout]
+opt-level = 3

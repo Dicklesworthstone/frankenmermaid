@@ -1,0 +1,10 @@
+[package]
+name = "fm-render-canvas"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+fm-core.workspace = true
+fm-layout.workspace = true

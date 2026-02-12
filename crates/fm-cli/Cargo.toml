@@ -1,0 +1,18 @@
+[package]
+name = "fm-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "fm-cli"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+fm-parser.workspace = true
+fm-render-svg.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
