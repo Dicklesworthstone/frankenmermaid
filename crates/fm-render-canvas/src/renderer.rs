@@ -230,8 +230,8 @@ impl Canvas2dRenderer {
     ) -> usize {
         let mut count = 0;
 
-        for (idx, edge_path) in layout.edges.iter().enumerate() {
-            let ir_edge = ir.edges.get(idx);
+        for edge_path in layout.edges.iter() {
+            let ir_edge = ir.edges.get(edge_path.edge_index);
             let arrow = ir_edge.map_or(ArrowType::Arrow, |e| e.arrow);
 
             if edge_path.points.len() < 2 {
@@ -347,8 +347,8 @@ impl Canvas2dRenderer {
     ) -> usize {
         let mut count = 0;
 
-        for (idx, node_box) in layout.nodes.iter().enumerate() {
-            let ir_node = ir.nodes.get(idx);
+        for node_box in layout.nodes.iter() {
+            let ir_node = ir.nodes.get(node_box.node_index);
             let shape = ir_node.map_or(NodeShape::Rect, |n| n.shape);
 
             let x = f64::from(node_box.bounds.x) + offset_x;
