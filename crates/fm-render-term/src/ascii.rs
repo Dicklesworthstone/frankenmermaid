@@ -253,15 +253,21 @@ pub fn align_right_border(lines: &[String]) -> Vec<String> {
         return Vec::new();
     }
 
-    // Find maximum significant width.
-    let max_width = lines.iter().map(|l| l.trim_end().len()).max().unwrap_or(0);
+    // Find maximum significant width (in characters, not bytes).
+    let max_chars = lines
+        .iter()
+        .map(|l| l.trim_end().chars().count())
+        .max()
+        .unwrap_or(0);
 
     lines
         .iter()
         .map(|line| {
             let trimmed = line.trim_end();
-            if trimmed.len() < max_width {
-                format!("{:width$}", trimmed, width = max_width)
+            let char_count = trimmed.chars().count();
+            if char_count < max_chars {
+                let padding = max_chars - char_count;
+                format!("{}{}", trimmed, " ".repeat(padding))
             } else {
                 trimmed.to_string()
             }
@@ -441,7 +447,9 @@ Some text after
             "└─┘".to_string(),
         ];
         let aligned = align_right_border(&lines);
-        assert!(aligned.iter().all(|l| l.len() == aligned[0].len()));
+        // Check all lines have the same character count.
+        let first_len = aligned[0].chars().count();
+        assert!(aligned.iter().all(|l| l.chars().count() == first_len));
     }
 
     #[test]
