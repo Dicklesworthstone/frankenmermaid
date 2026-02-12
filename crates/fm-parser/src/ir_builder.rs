@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 
 use fm_core::{
     ArrowType, DiagramType, GraphDirection, IrCluster, IrClusterId, IrEdge, IrEndpoint, IrLabel,
-    IrLabelId, IrNode, IrNodeId, MermaidDiagramIr, NodeShape, Span,
+    IrLabelId, IrNode, IrNodeId, MermaidDiagramIr, MermaidError, MermaidWarning,
+    MermaidWarningCode, NodeShape, Span,
 };
 
 use crate::ParseResult;
@@ -27,6 +28,45 @@ impl IrBuilder {
     pub(crate) fn set_direction(&mut self, direction: GraphDirection) {
         self.ir.direction = direction;
         self.ir.meta.direction = direction;
+    }
+
+    pub(crate) fn set_init_theme(&mut self, theme: String) {
+        self.ir.meta.init.config.theme = Some(theme.clone());
+        self.ir.meta.theme_overrides.theme = Some(theme);
+    }
+
+    pub(crate) fn insert_theme_variable(&mut self, key: String, value: String) {
+        self.ir
+            .meta
+            .init
+            .config
+            .theme_variables
+            .insert(key.clone(), value.clone());
+        self.ir
+            .meta
+            .theme_overrides
+            .theme_variables
+            .insert(key, value);
+    }
+
+    pub(crate) fn set_init_flowchart_direction(&mut self, direction: GraphDirection) {
+        self.ir.meta.init.config.flowchart_direction = Some(direction);
+    }
+
+    pub(crate) fn add_init_warning(&mut self, message: impl Into<String>, span: Span) {
+        self.ir.meta.init.warnings.push(MermaidWarning {
+            code: MermaidWarningCode::ParseRecovery,
+            message: message.into(),
+            span,
+        });
+    }
+
+    pub(crate) fn add_init_error(&mut self, message: impl Into<String>, span: Span) {
+        self.ir.meta.init.errors.push(MermaidError::Parse {
+            message: message.into(),
+            span,
+            expected: vec!["a valid Mermaid init JSON object".to_string()],
+        });
     }
 
     pub(crate) fn add_warning(&mut self, warning: impl Into<String>) {
@@ -146,6 +186,29 @@ impl IrBuilder {
         self.node_index_by_id
             .insert(normalized_id.to_string(), node_id);
         Some(node_id)
+    }
+
+    pub(crate) fn add_class_to_node(&mut self, node_key: &str, class_name: &str, span: Span) {
+        let normalized_class = class_name.trim();
+        if normalized_class.is_empty() {
+            return;
+        }
+
+        let Some(node_id) = self.intern_node(node_key, Some(node_key), NodeShape::Rect, span)
+        else {
+            return;
+        };
+
+        let Some(node) = self.ir.nodes.get_mut(node_id.0) else {
+            return;
+        };
+        if !node
+            .classes
+            .iter()
+            .any(|existing| existing == normalized_class)
+        {
+            node.classes.push(normalized_class.to_string());
+        }
     }
 
     pub(crate) fn push_edge(

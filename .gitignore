@@ -3,3 +3,11 @@
 
 # macOS AppleDouble / resource fork files
 ._*
+
+# Rust build artifacts
+target/
+
+# Web/WASM artifacts
+pkg/
+*.wasm
+node_modules/

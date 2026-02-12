@@ -5,6 +5,7 @@ mod ir_builder;
 mod mermaid_parser;
 
 use fm_core::{DiagramType, MermaidDiagramIr};
+use serde_json::json;
 
 pub use dot_parser::{looks_like_dot, parse_dot};
 
@@ -33,6 +34,20 @@ pub fn parse(input: &str) -> ParseResult {
     }
 
     mermaid_parser::parse_mermaid(input)
+}
+
+#[must_use]
+pub fn parse_evidence_json(parsed: &ParseResult) -> String {
+    json!({
+        "diagram_type": parsed.ir.diagram_type.as_str(),
+        "node_count": parsed.ir.nodes.len(),
+        "edge_count": parsed.ir.edges.len(),
+        "cluster_count": parsed.ir.clusters.len(),
+        "label_count": parsed.ir.labels.len(),
+        "warning_count": parsed.warnings.len(),
+        "warnings": parsed.warnings.clone(),
+    })
+    .to_string()
 }
 
 #[cfg(test)]
@@ -82,5 +97,14 @@ mod tests {
         assert_eq!(result.ir.nodes.len(), 2);
         assert_eq!(result.ir.edges.len(), 1);
         assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn evidence_json_contains_counts_and_type() {
+        let result = parse("flowchart LR\nA-->B");
+        let evidence = super::parse_evidence_json(&result);
+        assert!(evidence.contains("\"diagram_type\":\"flowchart\""));
+        assert!(evidence.contains("\"node_count\":2"));
+        assert!(evidence.contains("\"edge_count\":1"));
     }
 }

@@ -1,0 +1,5 @@
+# Ignore generated or non-production directories for UBS scans.
+tests/**
+benches/**
+**/tests/**
+**/benches/**

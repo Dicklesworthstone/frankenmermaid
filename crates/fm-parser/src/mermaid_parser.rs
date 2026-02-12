@@ -1,4 +1,6 @@
 use fm_core::{ArrowType, DiagramType, GraphDirection, NodeShape, Span};
+use serde_json::Value;
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{ParseResult, ir_builder::IrBuilder};
 
@@ -34,6 +36,23 @@ const PACKET_OPERATORS: [(&str, ArrowType); 4] = [
     ("->", ArrowType::Arrow),
     ("--", ArrowType::Line),
     ("==", ArrowType::ThickArrow),
+];
+
+const ER_OPERATORS: [(&str, ArrowType); 14] = [
+    ("||--o{", ArrowType::Arrow),
+    ("||--|{", ArrowType::Arrow),
+    ("}|--||", ArrowType::Arrow),
+    ("}o--||", ArrowType::Arrow),
+    ("|o--o|", ArrowType::Arrow),
+    ("}|..|{", ArrowType::DottedArrow),
+    ("||..||", ArrowType::DottedArrow),
+    ("||--||", ArrowType::Line),
+    ("o|--|{", ArrowType::Arrow),
+    ("}|--|{", ArrowType::Arrow),
+    ("|o--||", ArrowType::Arrow),
+    ("}o--o{", ArrowType::Arrow),
+    ("--", ArrowType::Line),
+    ("..", ArrowType::DottedArrow),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,12 +124,18 @@ pub fn detect_type(input: &str) -> DiagramType {
 pub fn parse_mermaid(input: &str) -> ParseResult {
     let diagram_type = detect_type(input);
     let mut builder = IrBuilder::new(diagram_type);
+    parse_init_directives(input, &mut builder);
 
     match diagram_type {
         DiagramType::Flowchart => parse_flowchart(input, &mut builder),
         DiagramType::Sequence => parse_sequence(input, &mut builder),
         DiagramType::Class => parse_class(input, &mut builder),
         DiagramType::State => parse_state(input, &mut builder),
+        DiagramType::Requirement => parse_requirement(input, &mut builder),
+        DiagramType::Mindmap => parse_mindmap(input, &mut builder),
+        DiagramType::Er => parse_er(input, &mut builder),
+        DiagramType::Journey => parse_journey(input, &mut builder),
+        DiagramType::Timeline => parse_timeline(input, &mut builder),
         DiagramType::PacketBeta => parse_packet(input, &mut builder),
         DiagramType::Gantt => parse_gantt(input, &mut builder),
         DiagramType::Pie => parse_pie(input, &mut builder),
@@ -151,7 +176,7 @@ fn parse_flowchart(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
-        if is_non_graph_statement(trimmed) {
+        if parse_flowchart_directive(trimmed, line_number, line, builder) {
             continue;
         }
 
@@ -175,6 +200,17 @@ fn parse_flowchart(input: &str, builder: &mut IrBuilder) {
             ));
         }
     }
+}
+
+fn parse_flowchart_directive(
+    statement: &str,
+    line_number: usize,
+    source_line: &str,
+    builder: &mut IrBuilder,
+) -> bool {
+    parse_class_assignment(statement, line_number, source_line, builder)
+        || parse_click_directive(statement, line_number, source_line, builder)
+        || is_non_graph_statement(statement)
 }
 
 fn parse_sequence(input: &str, builder: &mut IrBuilder) {
@@ -313,6 +349,463 @@ fn parse_state(input: &str, builder: &mut IrBuilder) {
     }
 }
 
+fn parse_requirement(input: &str, builder: &mut IrBuilder) {
+    let mut inside_requirement_block = false;
+
+    for (index, line) in input.lines().enumerate() {
+        let line_number = index + 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || is_comment(trimmed) {
+            continue;
+        }
+
+        if trimmed == "requirementDiagram" {
+            continue;
+        }
+
+        if let Some(requirement_decl) = trimmed.strip_prefix("requirement ") {
+            let requirement_name = requirement_decl.trim_end_matches('{').trim();
+            if let Some(node) = parse_node_token(requirement_name) {
+                let span = span_for(line_number, line);
+                let _ = builder.intern_node(&node.id, node.label.as_deref(), NodeShape::Rect, span);
+                inside_requirement_block = trimmed.ends_with('{');
+                continue;
+            }
+        }
+
+        if trimmed.starts_with('{') {
+            inside_requirement_block = true;
+            continue;
+        }
+        if trimmed.starts_with('}') {
+            inside_requirement_block = false;
+            continue;
+        }
+
+        if inside_requirement_block
+            && (trimmed.starts_with("id:")
+                || trimmed.starts_with("text:")
+                || trimmed.starts_with("risk:")
+                || trimmed.starts_with("verifymethod:"))
+        {
+            continue;
+        }
+
+        if parse_requirement_relation(trimmed, line_number, line, builder) {
+            continue;
+        }
+
+        builder.add_warning(format!(
+            "Line {line_number}: unsupported requirement syntax: {trimmed}"
+        ));
+    }
+}
+
+fn parse_mindmap(input: &str, builder: &mut IrBuilder) {
+    let mut ancestry: Vec<(usize, fm_core::IrNodeId)> = Vec::new();
+
+    for (index, line) in input.lines().enumerate() {
+        let line_number = index + 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || is_comment(trimmed) {
+            continue;
+        }
+        if trimmed == "mindmap" {
+            continue;
+        }
+
+        let depth = leading_indent_width(line);
+        let Some(node) = parse_node_token(trimmed) else {
+            builder.add_warning(format!(
+                "Line {line_number}: unsupported mindmap syntax: {trimmed}"
+            ));
+            continue;
+        };
+
+        let span = span_for(line_number, line);
+        let Some(node_id) = builder.intern_node(&node.id, node.label.as_deref(), node.shape, span)
+        else {
+            continue;
+        };
+
+        while let Some((ancestor_depth, _)) = ancestry.last() {
+            if *ancestor_depth >= depth {
+                let _ = ancestry.pop();
+            } else {
+                break;
+            }
+        }
+
+        if let Some((_, parent_id)) = ancestry.last().copied() {
+            builder.push_edge(parent_id, node_id, ArrowType::Line, None, span);
+        }
+
+        ancestry.push((depth, node_id));
+    }
+}
+
+fn parse_er(input: &str, builder: &mut IrBuilder) {
+    let mut inside_entity_block = false;
+
+    for (index, line) in input.lines().enumerate() {
+        let line_number = index + 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || is_comment(trimmed) {
+            continue;
+        }
+
+        if trimmed == "erDiagram" {
+            continue;
+        }
+
+        if trimmed.ends_with('{') {
+            let entity_name = trimmed.trim_end_matches('{').trim();
+            if let Some(node) = parse_node_token(entity_name) {
+                let span = span_for(line_number, line);
+                let _ = builder.intern_node(&node.id, node.label.as_deref(), NodeShape::Rect, span);
+                inside_entity_block = true;
+                continue;
+            }
+        }
+
+        if trimmed.starts_with('}') {
+            inside_entity_block = false;
+            continue;
+        }
+
+        if parse_er_relationship(trimmed, line_number, line, builder) {
+            continue;
+        }
+
+        if inside_entity_block {
+            continue;
+        }
+
+        if let Some(node) = parse_node_token(trimmed) {
+            let span = span_for(line_number, line);
+            let _ = builder.intern_node(&node.id, node.label.as_deref(), node.shape, span);
+            continue;
+        }
+
+        builder.add_warning(format!(
+            "Line {line_number}: unsupported er syntax: {trimmed}"
+        ));
+    }
+}
+
+fn parse_requirement_relation(
+    statement: &str,
+    line_number: usize,
+    source_line: &str,
+    builder: &mut IrBuilder,
+) -> bool {
+    let Some((left_raw, right_raw)) = statement.split_once("->") else {
+        return false;
+    };
+
+    let left_id = left_raw
+        .split_whitespace()
+        .next()
+        .map(normalize_identifier)
+        .unwrap_or_default();
+    let right_id = right_raw
+        .split_whitespace()
+        .next()
+        .map(normalize_identifier)
+        .unwrap_or_default();
+    if left_id.is_empty() || right_id.is_empty() {
+        return false;
+    }
+
+    let span = span_for(line_number, source_line);
+    let from = builder.intern_node(&left_id, Some(&left_id), NodeShape::Rect, span);
+    let to = builder.intern_node(&right_id, Some(&right_id), NodeShape::Rect, span);
+    match (from, to) {
+        (Some(from_id), Some(to_id)) => {
+            builder.push_edge(from_id, to_id, ArrowType::Arrow, None, span);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn parse_class_assignment(
+    statement: &str,
+    line_number: usize,
+    source_line: &str,
+    builder: &mut IrBuilder,
+) -> bool {
+    let Some(rest) = statement.strip_prefix("class ") else {
+        return false;
+    };
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return false;
+    }
+
+    let mut parts = rest.split_whitespace();
+    let Some(node_list_raw) = parts.next() else {
+        return false;
+    };
+    let class_list_raw = parts.collect::<Vec<_>>().join(" ");
+    if class_list_raw.is_empty() {
+        return false;
+    }
+
+    let classes: Vec<&str> = class_list_raw
+        .split(',')
+        .map(str::trim)
+        .filter(|class_name| !class_name.is_empty())
+        .collect();
+    if classes.is_empty() {
+        return false;
+    }
+
+    let span = span_for(line_number, source_line);
+    let mut assigned_any = false;
+    for raw_node in node_list_raw.split(',') {
+        let node_id = normalize_identifier(raw_node);
+        if node_id.is_empty() {
+            continue;
+        }
+        for class_name in &classes {
+            builder.add_class_to_node(&node_id, class_name, span);
+            assigned_any = true;
+        }
+    }
+    assigned_any
+}
+
+fn parse_click_directive(
+    statement: &str,
+    line_number: usize,
+    source_line: &str,
+    builder: &mut IrBuilder,
+) -> bool {
+    let Some(rest) = statement.strip_prefix("click ") else {
+        return false;
+    };
+    let span = span_for(line_number, source_line);
+
+    let Some((node_token, after_node)) = take_token(rest) else {
+        builder.add_warning(format!(
+            "Line {line_number}: malformed click directive (missing node id): {statement}"
+        ));
+        return true;
+    };
+    let node_id = normalize_identifier(node_token);
+    if node_id.is_empty() {
+        builder.add_warning(format!(
+            "Line {line_number}: malformed click directive (invalid node id): {statement}"
+        ));
+        return true;
+    }
+
+    let Some((target_token, after_target)) = take_token(after_node) else {
+        builder.add_warning(format!(
+            "Line {line_number}: malformed click directive (missing target): {statement}"
+        ));
+        return true;
+    };
+
+    let resolved_target = if target_token.eq_ignore_ascii_case("href") {
+        let Some((href_target, _)) = take_token(after_target) else {
+            builder.add_warning(format!(
+                "Line {line_number}: malformed click directive (missing href target): {statement}"
+            ));
+            return true;
+        };
+        href_target
+    } else if target_token.eq_ignore_ascii_case("call")
+        || target_token.eq_ignore_ascii_case("callback")
+    {
+        builder.add_warning(format!(
+            "Line {line_number}: click callbacks are not supported yet; keeping node without link metadata"
+        ));
+        return true;
+    } else {
+        target_token
+    };
+
+    let cleaned_target = resolved_target
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim_matches('`')
+        .trim();
+    if cleaned_target.is_empty() {
+        builder.add_warning(format!(
+            "Line {line_number}: click directive target is empty after normalization"
+        ));
+        return true;
+    }
+
+    if !is_safe_click_target(cleaned_target) {
+        builder.add_warning(format!(
+            "Line {line_number}: unsafe click link target blocked: {cleaned_target}"
+        ));
+        return true;
+    }
+
+    builder.add_class_to_node(&node_id, "has-link", span);
+    true
+}
+
+fn take_token(input: &str) -> Option<(&str, &str)> {
+    let trimmed = input.trim_start();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let first_char = trimmed.chars().next()?;
+    if matches!(first_char, '"' | '\'' | '`') {
+        for (idx, ch) in trimmed.char_indices().skip(1) {
+            if ch == first_char {
+                let token = &trimmed[..=idx];
+                let rest = &trimmed[idx + 1..];
+                return Some((token, rest));
+            }
+        }
+        return Some((trimmed, ""));
+    }
+
+    let split_idx = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+    let token = &trimmed[..split_idx];
+    let rest = &trimmed[split_idx..];
+    Some((token, rest))
+}
+
+fn is_safe_click_target(target: &str) -> bool {
+    let decoded = decode_percent_triplets(target);
+    let lower = decoded.to_ascii_lowercase();
+    if lower.starts_with("javascript:")
+        || lower.starts_with("data:")
+        || lower.starts_with("vbscript:")
+    {
+        return false;
+    }
+
+    lower.starts_with("https://")
+        || lower.starts_with("http://")
+        || lower.starts_with("mailto:")
+        || lower.starts_with("tel:")
+        || decoded.starts_with('/')
+        || decoded.starts_with('#')
+        || !lower.contains(':')
+}
+
+fn decode_percent_triplets(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let high = decode_hex_nibble(bytes[index + 1]);
+            let low = decode_hex_nibble(bytes[index + 2]);
+            if let (Some(high), Some(low)) = (high, low) {
+                decoded.push((high << 4) | low);
+                index += 3;
+                continue;
+            }
+        }
+
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+
+    String::from_utf8_lossy(&decoded).to_string()
+}
+
+const fn decode_hex_nibble(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn parse_journey(input: &str, builder: &mut IrBuilder) {
+    let mut previous_step = None;
+
+    for (index, line) in input.lines().enumerate() {
+        let line_number = index + 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || is_comment(trimmed) {
+            continue;
+        }
+
+        if trimmed == "journey" || trimmed.starts_with("title ") || trimmed.starts_with("section ")
+        {
+            continue;
+        }
+
+        let Some(step_name) = parse_name_before_colon(trimmed) else {
+            builder.add_warning(format!(
+                "Line {line_number}: unsupported journey syntax: {trimmed}"
+            ));
+            continue;
+        };
+        let step_id = normalize_identifier(step_name);
+        if step_id.is_empty() {
+            builder.add_warning(format!(
+                "Line {line_number}: journey step identifier could not be derived: {trimmed}"
+            ));
+            continue;
+        }
+
+        let span = span_for(line_number, line);
+        let current_step = builder.intern_node(&step_id, Some(step_name), NodeShape::Rounded, span);
+        if let (Some(prev), Some(current)) = (previous_step, current_step) {
+            builder.push_edge(prev, current, ArrowType::Line, None, span);
+        }
+        if current_step.is_some() {
+            previous_step = current_step;
+        }
+    }
+}
+
+fn parse_timeline(input: &str, builder: &mut IrBuilder) {
+    let mut previous_event = None;
+
+    for (index, line) in input.lines().enumerate() {
+        let line_number = index + 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || is_comment(trimmed) {
+            continue;
+        }
+
+        if trimmed == "timeline" || trimmed.starts_with("title ") || trimmed.starts_with("section ")
+        {
+            continue;
+        }
+
+        let Some(event_name) = parse_name_before_colon(trimmed) else {
+            builder.add_warning(format!(
+                "Line {line_number}: unsupported timeline syntax: {trimmed}"
+            ));
+            continue;
+        };
+        let event_id = normalize_identifier(event_name);
+        if event_id.is_empty() {
+            builder.add_warning(format!(
+                "Line {line_number}: timeline event identifier could not be derived: {trimmed}"
+            ));
+            continue;
+        }
+
+        let span = span_for(line_number, line);
+        let current_event = builder.intern_node(&event_id, Some(event_name), NodeShape::Rect, span);
+        if let (Some(prev), Some(current)) = (previous_event, current_event) {
+            builder.push_edge(prev, current, ArrowType::Line, None, span);
+        }
+        if current_event.is_some() {
+            previous_event = current_event;
+        }
+    }
+}
+
 fn parse_packet(input: &str, builder: &mut IrBuilder) {
     for (index, line) in input.lines().enumerate() {
         let line_number = index + 1;
@@ -343,6 +836,58 @@ fn parse_packet(input: &str, builder: &mut IrBuilder) {
                 "Line {line_number}: unsupported packet syntax: {trimmed}"
             ));
         }
+    }
+}
+
+fn parse_er_relationship(
+    statement: &str,
+    line_number: usize,
+    source_line: &str,
+    builder: &mut IrBuilder,
+) -> bool {
+    let (relation, label) = if let Some((left, right)) = statement.split_once(':') {
+        (left.trim(), clean_label(Some(right)))
+    } else {
+        (statement.trim(), None)
+    };
+
+    let Some((operator_idx, operator, arrow)) = find_operator(relation, &ER_OPERATORS) else {
+        return false;
+    };
+
+    let left_raw = relation[..operator_idx].trim();
+    let right_raw = relation[operator_idx + operator.len()..].trim();
+    if left_raw.is_empty() || right_raw.is_empty() {
+        return false;
+    }
+
+    let Some(left_node) = parse_node_token(left_raw) else {
+        return false;
+    };
+    let Some(right_node) = parse_node_token(right_raw) else {
+        return false;
+    };
+
+    let span = span_for(line_number, source_line);
+    let from = builder.intern_node(
+        &left_node.id,
+        left_node.label.as_deref(),
+        NodeShape::Rect,
+        span,
+    );
+    let to = builder.intern_node(
+        &right_node.id,
+        right_node.label.as_deref(),
+        NodeShape::Rect,
+        span,
+    );
+
+    match (from, to) {
+        (Some(from_node), Some(to_node)) => {
+            builder.push_edge(from_node, to_node, arrow, label.as_deref(), span);
+            true
+        }
+        _ => false,
     }
 }
 
@@ -379,12 +924,7 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
             continue;
         };
 
-        let scoped_name = if current_section.is_empty() {
-            task_name.to_string()
-        } else {
-            format!("{current_section}/{task_name}")
-        };
-        let task_id = normalize_identifier(&scoped_name);
+        let task_id = normalize_identifier(task_name);
         if task_id.is_empty() {
             builder.add_warning(format!(
                 "Line {line_number}: task identifier could not be derived: {trimmed}"
@@ -392,8 +932,13 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
+        let task_label = if current_section.is_empty() {
+            task_name.to_string()
+        } else {
+            format!("{current_section}: {task_name}")
+        };
         let span = span_for(line_number, line);
-        let _ = builder.intern_node(&task_id, Some(task_name), NodeShape::Rect, span);
+        let _ = builder.intern_node(&task_id, Some(&task_label), NodeShape::Rect, span);
     }
 }
 
@@ -404,7 +949,10 @@ fn parse_pie(input: &str, builder: &mut IrBuilder) {
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
-        if trimmed.starts_with("pie") || trimmed.starts_with("title ") || trimmed.starts_with("showData") {
+        if trimmed.starts_with("pie")
+            || trimmed.starts_with("title ")
+            || trimmed.starts_with("showData")
+        {
             continue;
         }
 
@@ -772,18 +1320,18 @@ fn normalize_identifier(raw: &str) -> String {
     }
 
     if out.is_empty() {
-        cleaned
-            .chars()
-            .map(|ch| {
-                if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-') {
-                    ch
-                } else {
-                    '_'
-                }
-            })
-            .collect::<String>()
-            .trim_matches('_')
-            .to_string()
+        let mut fallback = String::with_capacity(cleaned.len());
+        for grapheme in cleaned.graphemes(true) {
+            if grapheme
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+            {
+                fallback.push_str(grapheme);
+            } else {
+                fallback.push('_');
+            }
+        }
+        fallback.trim_matches('_').to_string()
     } else {
         out
     }
@@ -808,6 +1356,140 @@ fn parse_name_before_colon(line: &str) -> Option<&str> {
     let (left, _) = line.split_once(':')?;
     let candidate = left.trim().trim_matches('"').trim_matches('\'').trim();
     (!candidate.is_empty()).then_some(candidate)
+}
+
+fn parse_init_directives(input: &str, builder: &mut IrBuilder) {
+    for (index, line) in input.lines().enumerate() {
+        let line_number = index + 1;
+        let trimmed = line.trim();
+        let Some(payload) = extract_init_payload(trimmed) else {
+            continue;
+        };
+
+        let span = span_for(line_number, line);
+        let parsed_value = match parse_init_payload_value(payload) {
+            Ok(value) => value,
+            Err(error) => {
+                let message =
+                    format!("Line {line_number}: invalid init directive payload: {error}");
+                builder.add_warning(message.clone());
+                builder.add_init_error(message, span);
+                continue;
+            }
+        };
+
+        apply_init_value(parsed_value, line_number, span, builder);
+    }
+}
+
+fn extract_init_payload(trimmed: &str) -> Option<&str> {
+    if !(trimmed.starts_with("%%{") && trimmed.ends_with("}%%")) {
+        return None;
+    }
+    let inner = &trimmed[3..trimmed.len().saturating_sub(3)];
+    let (directive, payload) = inner.trim().split_once(':')?;
+    if !directive.trim().eq_ignore_ascii_case("init") {
+        return None;
+    }
+    let payload = payload.trim();
+    (!payload.is_empty()).then_some(payload)
+}
+
+fn parse_init_payload_value(payload: &str) -> Result<Value, String> {
+    serde_json::from_str::<Value>(payload).or_else(|json_error| {
+        json5::from_str::<Value>(payload).map_err(|json5_error| {
+            format!("JSON parse failed ({json_error}); JSON5 parse failed ({json5_error})")
+        })
+    })
+}
+
+fn apply_init_value(value: Value, line_number: usize, span: Span, builder: &mut IrBuilder) {
+    let Some(init_object) = value.as_object() else {
+        let message = format!("Line {line_number}: init directive must be a JSON object");
+        builder.add_warning(message.clone());
+        builder.add_init_error(message, span);
+        return;
+    };
+
+    if let Some(theme) = init_object.get("theme").and_then(Value::as_str) {
+        builder.set_init_theme(theme.to_string());
+    }
+
+    if let Some(theme_variables) = init_object.get("themeVariables") {
+        if let Some(theme_variables_obj) = theme_variables.as_object() {
+            for (key, raw_value) in theme_variables_obj {
+                if let Some(parsed_value) = json_value_to_string(raw_value) {
+                    builder.insert_theme_variable(key.clone(), parsed_value);
+                } else {
+                    let message = format!(
+                        "Line {line_number}: init.themeVariables.{key} must be a string, number, or boolean"
+                    );
+                    builder.add_warning(message.clone());
+                    builder.add_init_warning(message, span);
+                }
+            }
+        } else {
+            let message = format!("Line {line_number}: init.themeVariables must be an object");
+            builder.add_warning(message.clone());
+            builder.add_init_warning(message, span);
+        }
+    }
+
+    if let Some(flowchart_value) = init_object.get("flowchart") {
+        if let Some(flowchart_obj) = flowchart_value.as_object() {
+            let direction = flowchart_obj
+                .get("direction")
+                .or_else(|| flowchart_obj.get("rankDir"))
+                .and_then(Value::as_str);
+            if let Some(direction_token) = direction {
+                if let Some(parsed_direction) = parse_direction_token(direction_token) {
+                    builder.set_init_flowchart_direction(parsed_direction);
+                } else {
+                    let message = format!(
+                        "Line {line_number}: unsupported init.flowchart.direction value: {direction_token}"
+                    );
+                    builder.add_warning(message.clone());
+                    builder.add_init_warning(message, span);
+                }
+            }
+        } else {
+            let message = format!("Line {line_number}: init.flowchart must be an object");
+            builder.add_warning(message.clone());
+            builder.add_init_warning(message, span);
+        }
+    }
+}
+
+fn json_value_to_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Bool(flag) => Some(flag.to_string()),
+        Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    }
+}
+
+fn parse_direction_token(token: &str) -> Option<GraphDirection> {
+    match token.trim().to_ascii_uppercase().as_str() {
+        "LR" => Some(GraphDirection::LR),
+        "RL" => Some(GraphDirection::RL),
+        "TB" => Some(GraphDirection::TB),
+        "TD" => Some(GraphDirection::TD),
+        "BT" => Some(GraphDirection::BT),
+        _ => None,
+    }
+}
+
+fn leading_indent_width(line: &str) -> usize {
+    let mut width = 0_usize;
+    for ch in line.chars() {
+        match ch {
+            ' ' => width += 1,
+            '\t' => width += 2,
+            _ => break,
+        }
+    }
+    width
 }
 
 fn split_statements(line: &str) -> impl Iterator<Item = &str> {
@@ -848,8 +1530,6 @@ fn is_flowchart_header(line: &str) -> bool {
 fn is_non_graph_statement(line: &str) -> bool {
     line.starts_with("style ")
         || line.starts_with("classDef ")
-        || line.starts_with("class ")
-        || line.starts_with("click ")
         || line.starts_with("linkStyle ")
         || line.starts_with("subgraph ")
         || line == "end"
@@ -887,6 +1567,79 @@ mod tests {
     }
 
     #[test]
+    fn flowchart_class_directive_assigns_node_classes() {
+        let parsed = parse_mermaid("flowchart LR\nA-->B\nclass A,B critical,highlight");
+        let node_a = parsed.ir.nodes.iter().find(|node| node.id == "A");
+        let node_b = parsed.ir.nodes.iter().find(|node| node.id == "B");
+
+        assert!(node_a.is_some());
+        assert!(node_b.is_some());
+        let node_a = node_a.expect("node A should exist");
+        let node_b = node_b.expect("node B should exist");
+        assert!(
+            node_a
+                .classes
+                .iter()
+                .any(|class_name| class_name == "critical")
+        );
+        assert!(
+            node_a
+                .classes
+                .iter()
+                .any(|class_name| class_name == "highlight")
+        );
+        assert!(
+            node_b
+                .classes
+                .iter()
+                .any(|class_name| class_name == "critical")
+        );
+        assert!(
+            node_b
+                .classes
+                .iter()
+                .any(|class_name| class_name == "highlight")
+        );
+    }
+
+    #[test]
+    fn flowchart_click_directive_marks_safe_link_nodes() {
+        let parsed = parse_mermaid("flowchart LR\nA-->B\nclick A \"https://example.com/docs\"");
+        let node_a = parsed.ir.nodes.iter().find(|node| node.id == "A");
+
+        assert!(node_a.is_some());
+        let node_a = node_a.expect("node A should exist");
+        assert!(
+            node_a
+                .classes
+                .iter()
+                .any(|class_name| class_name == "has-link")
+        );
+    }
+
+    #[test]
+    fn flowchart_click_directive_warns_on_unsafe_links() {
+        let parsed = parse_mermaid("flowchart LR\nA-->B\nclick A \"javascript:alert(1)\"");
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("unsafe click link target blocked"))
+        );
+    }
+
+    #[test]
+    fn flowchart_click_directive_blocks_percent_encoded_scheme_bypass() {
+        let parsed = parse_mermaid("flowchart LR\nA-->B\nclick A \"javascript%3Aalert(1)\"");
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("unsafe click link target blocked"))
+        );
+    }
+
+    #[test]
     fn sequence_parses_messages() {
         let parsed = parse_mermaid(
             "sequenceDiagram\nparticipant Alice\nparticipant Bob\nAlice->>Bob: Hello",
@@ -903,6 +1656,31 @@ mod tests {
         assert_eq!(parsed.ir.diagram_type, DiagramType::State);
         assert!(parsed.ir.nodes.len() >= 2);
         assert_eq!(parsed.ir.edges.len(), 2);
+    }
+
+    #[test]
+    fn er_parses_entities_and_relationships() {
+        let parsed = parse_mermaid("erDiagram\nCUSTOMER ||--o{ ORDER : places");
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Er);
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 1);
+        assert_eq!(parsed.ir.labels.len(), 1);
+    }
+
+    #[test]
+    fn journey_parses_steps_as_linear_edges() {
+        let parsed = parse_mermaid("journey\nsection Sprint\nWrite code: 5: me\nShip: 3: me");
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Journey);
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 1);
+    }
+
+    #[test]
+    fn timeline_parses_events_as_linear_edges() {
+        let parsed = parse_mermaid("timeline\n2025 : kickoff\n2026 : launch");
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Timeline);
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 1);
     }
 
     #[test]
@@ -937,6 +1715,81 @@ mod tests {
         );
         assert_eq!(parsed.ir.diagram_type, DiagramType::QuadrantChart);
         assert_eq!(parsed.ir.nodes.len(), 1);
+    }
+
+    #[test]
+    fn requirement_parses_requirements_and_relations() {
+        let parsed = parse_mermaid(
+            "requirementDiagram\nrequirement REQ_1 {\n  id: 1\n}\nrequirement REQ_2 {\n  id: 2\n}\nREQ_1 -> REQ_2",
+        );
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Requirement);
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 1);
+    }
+
+    #[test]
+    fn mindmap_parses_indented_tree_structure() {
+        let parsed = parse_mermaid("mindmap\nRoot\n  BranchA\n    LeafA\n  BranchB");
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Mindmap);
+        assert_eq!(parsed.ir.nodes.len(), 4);
+        assert_eq!(parsed.ir.edges.len(), 3);
+    }
+
+    #[test]
+    fn init_directive_applies_theme_and_direction_hint() {
+        let parsed = parse_mermaid(
+            "%%{init: {\"theme\":\"dark\",\"themeVariables\":{\"primaryColor\":\"#fff\"},\"flowchart\":{\"direction\":\"RL\"}}}%%\nflowchart LR\nA-->B",
+        );
+        assert_eq!(parsed.ir.meta.init.config.theme.as_deref(), Some("dark"));
+        assert_eq!(
+            parsed.ir.meta.theme_overrides.theme.as_deref(),
+            Some("dark")
+        );
+        assert_eq!(
+            parsed
+                .ir
+                .meta
+                .theme_overrides
+                .theme_variables
+                .get("primaryColor")
+                .map(String::as_str),
+            Some("#fff")
+        );
+        assert_eq!(
+            parsed.ir.meta.init.config.flowchart_direction,
+            Some(GraphDirection::RL)
+        );
+        assert!(parsed.ir.meta.init.errors.is_empty());
+    }
+
+    #[test]
+    fn init_directive_accepts_json5_style_payload() {
+        let parsed = parse_mermaid(
+            "%%{init: { theme: 'dark', themeVariables: { primaryColor: '#0ff' }, flowchart: { direction: 'RL' } }}%%\nflowchart LR\nA-->B",
+        );
+        assert_eq!(parsed.ir.meta.init.config.theme.as_deref(), Some("dark"));
+        assert_eq!(
+            parsed
+                .ir
+                .meta
+                .theme_overrides
+                .theme_variables
+                .get("primaryColor")
+                .map(String::as_str),
+            Some("#0ff")
+        );
+        assert_eq!(
+            parsed.ir.meta.init.config.flowchart_direction,
+            Some(GraphDirection::RL)
+        );
+        assert!(parsed.ir.meta.init.errors.is_empty());
+    }
+
+    #[test]
+    fn invalid_init_directive_records_parse_error() {
+        let parsed = parse_mermaid("%%{init: {not_json}}%%\nflowchart LR\nA-->B");
+        assert_eq!(parsed.ir.meta.init.errors.len(), 1);
+        assert!(!parsed.warnings.is_empty());
     }
 
     #[test]

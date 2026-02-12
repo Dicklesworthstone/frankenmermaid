@@ -46,11 +46,17 @@ pub fn parse_dot(input: &str) -> ParseResult {
             if statement.is_empty() {
                 continue;
             }
+            if statement == "{" {
+                continue;
+            }
 
-            if let Some((cluster_key, cluster_title, opens_scope)) = parse_subgraph_start(statement) {
-                if let Some(cluster_index) =
-                    builder.ensure_cluster(&cluster_key, cluster_title.as_deref(), span_for(line_number, line))
-                {
+            if let Some((cluster_key, cluster_title, opens_scope)) = parse_subgraph_start(statement)
+            {
+                if let Some(cluster_index) = builder.ensure_cluster(
+                    &cluster_key,
+                    cluster_title.as_deref(),
+                    span_for(line_number, line),
+                ) {
                     if opens_scope {
                         active_clusters.push(cluster_index);
                     }
@@ -68,7 +74,13 @@ pub fn parse_dot(input: &str) -> ParseResult {
             ) {
                 continue;
             }
-            if parse_dot_node_statement(statement, line_number, line, &active_clusters, &mut builder) {
+            if parse_dot_node_statement(
+                statement,
+                line_number,
+                line,
+                &active_clusters,
+                &mut builder,
+            ) {
                 continue;
             }
 
@@ -118,20 +130,24 @@ fn parse_dot_edge_statement(
     let span = span_for(line_number, source_line);
 
     for window in parts.windows(2) {
-        let Some(from_node) = parse_dot_node_fragment(window[0]) else {
+        let (from_fragment, _from_attrs) = split_endpoint_and_attrs(window[0]);
+        let (to_fragment, to_attrs) = split_endpoint_and_attrs(window[1]);
+
+        let Some(from_node) = parse_dot_node_fragment(from_fragment) else {
             builder.add_warning(format!(
                 "Line {line_number}: invalid DOT edge source: {}",
                 window[0]
             ));
             continue;
         };
-        let Some(to_node) = parse_dot_node_fragment(window[1]) else {
+        let Some(to_node) = parse_dot_node_fragment(to_fragment) else {
             builder.add_warning(format!(
                 "Line {line_number}: invalid DOT edge target: {}",
                 window[1]
             ));
             continue;
         };
+        let edge_label = to_attrs.and_then(parse_dot_label);
 
         let from = builder.intern_node(
             &from_node.id,
@@ -142,7 +158,7 @@ fn parse_dot_edge_statement(
         let to = builder.intern_node(&to_node.id, to_node.label.as_deref(), NodeShape::Rect, span);
 
         if let (Some(from_id), Some(to_id)) = (from, to) {
-            builder.push_edge(from_id, to_id, arrow, None, span);
+            builder.push_edge(from_id, to_id, arrow, edge_label.as_deref(), span);
             for &cluster_index in active_clusters {
                 builder.add_node_to_cluster(cluster_index, from_id);
                 builder.add_node_to_cluster(cluster_index, to_id);
@@ -207,6 +223,23 @@ fn parse_dot_node_fragment(raw: &str) -> Option<DotNode> {
     Some(DotNode { id, label: None })
 }
 
+fn split_endpoint_and_attrs(fragment: &str) -> (&str, Option<&str>) {
+    let trimmed = fragment.trim();
+    let Some(open_idx) = trimmed.find('[') else {
+        return (trimmed, None);
+    };
+    let Some(close_idx) = trimmed.rfind(']') else {
+        return (trimmed, None);
+    };
+    if close_idx <= open_idx {
+        return (trimmed, None);
+    }
+
+    let endpoint = trimmed[..open_idx].trim();
+    let attrs = trimmed[open_idx + 1..close_idx].trim();
+    (endpoint, Some(attrs))
+}
+
 fn parse_dot_label(attributes: &str) -> Option<String> {
     let lower = attributes.to_ascii_lowercase();
     let label_idx = lower.find("label")?;
@@ -219,9 +252,9 @@ fn parse_dot_label(attributes: &str) -> Option<String> {
         return (!text.is_empty()).then_some(text);
     }
 
-    if let Some(html) = value.strip_prefix('<') {
-        let end = html.rfind('>')?;
-        let text = strip_html_tags(&html[..end]);
+    if value.starts_with('<') {
+        let end = value.rfind('>')?;
+        let text = strip_html_tags(&value[..=end]);
         return (!text.is_empty()).then_some(text);
     }
 
@@ -294,7 +327,7 @@ fn extract_body(input: &str) -> &str {
 
 fn parse_subgraph_start(statement: &str) -> Option<(String, Option<String>, bool)> {
     let body = statement.strip_prefix("subgraph ")?;
-    let opens_scope = statement.contains('{');
+    let opens_scope = true;
     let body = body.trim().trim_end_matches('{').trim();
     if body.is_empty() {
         return None;
@@ -348,11 +381,7 @@ fn normalize_dot_body(body: &str) -> String {
 }
 
 fn clean_optional(raw: &str) -> Option<String> {
-    let cleaned = raw
-        .trim()
-        .trim_matches('"')
-        .trim_matches('\'')
-        .trim();
+    let cleaned = raw.trim().trim_matches('"').trim_matches('\'').trim();
     (!cleaned.is_empty()).then_some(cleaned.to_string())
 }
 
@@ -433,6 +462,14 @@ mod tests {
     }
 
     #[test]
+    fn parses_edge_labels() {
+        let parsed = parse_dot("digraph G { a -> b [label=\"connects\"]; }");
+        assert_eq!(parsed.ir.edges.len(), 1);
+        assert_eq!(parsed.ir.labels.len(), 1);
+        assert_eq!(parsed.ir.labels[0].text, "connects");
+    }
+
+    #[test]
     fn parses_node_labels_from_attributes() {
         let parsed = parse_dot("graph G { a [label=\"Alpha\"]; a -- b; }");
         assert_eq!(parsed.ir.nodes.len(), 2);
@@ -456,7 +493,7 @@ mod tests {
 
     #[test]
     fn parses_escaped_labels() {
-        let parsed = parse_dot("digraph G { a [label=\"Line\\\\nBreak\"]; }");
+        let parsed = parse_dot("digraph G { a [label=\"Line\\nBreak\"]; }");
         assert_eq!(parsed.ir.labels.len(), 1);
         assert!(parsed.ir.labels[0].text.contains('\n'));
     }
