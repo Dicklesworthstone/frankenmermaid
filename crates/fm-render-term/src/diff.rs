@@ -385,13 +385,13 @@ fn endpoint_id(ir: &MermaidDiagramIr, endpoint: IrEndpoint) -> Option<String> {
 
 /// ANSI color codes for diff rendering.
 pub mod colors {
-    pub const ADDED: &str = "\x1b[32m";     // Green
-    pub const REMOVED: &str = "\x1b[31m";   // Red
-    pub const CHANGED: &str = "\x1b[33m";   // Yellow
+    pub const ADDED: &str = "\x1b[32m"; // Green
+    pub const REMOVED: &str = "\x1b[31m"; // Red
+    pub const CHANGED: &str = "\x1b[33m"; // Yellow
     pub const UNCHANGED: &str = "\x1b[90m"; // Gray
     pub const RESET: &str = "\x1b[0m";
 
-    pub const BG_ADDED: &str = "\x1b[42m";   // Green background
+    pub const BG_ADDED: &str = "\x1b[42m"; // Green background
     pub const BG_REMOVED: &str = "\x1b[41m"; // Red background
     pub const BG_CHANGED: &str = "\x1b[43m"; // Yellow background
 }
@@ -538,7 +538,7 @@ mod tests {
 
     #[test]
     fn detects_changed_node_labels() {
-        let mut old = make_ir_with_nodes(&["A"]);
+        let old = make_ir_with_nodes(&["A"]);
         let mut new = make_ir_with_nodes(&["A"]);
         new.labels[0].text = "Changed".to_string();
 
@@ -549,7 +549,7 @@ mod tests {
 
     #[test]
     fn detects_added_edges() {
-        let mut old = make_ir_with_nodes(&["A", "B"]);
+        let old = make_ir_with_nodes(&["A", "B"]);
         let mut new = make_ir_with_nodes(&["A", "B"]);
 
         new.edges.push(IrEdge {

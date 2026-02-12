@@ -3,8 +3,6 @@
 //! Provides utilities for detecting ASCII art diagrams in text and
 //! cleaning up right-border alignment issues.
 
-use std::collections::HashSet;
-
 /// Character classification for diagram detection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CharClass {
@@ -34,10 +32,11 @@ pub fn classify_char(ch: char) -> CharClass {
     match ch {
         // Unicode box-drawing.
         '─' | '━' | '═' | '│' | '┃' | '║' => CharClass::BoxDrawing,
-        '┌' | '┐' | '└' | '┘' | '┏' | '┓' | '┗' | '┛' | '╔' | '╗' | '╚' | '╝' | '╭' | '╮'
-        | '╰' | '╯' => CharClass::Junction,
-        '├' | '┤' | '┬' | '┴' | '┼' | '┣' | '┫' | '┳' | '┻' | '╋' | '╠' | '╣' | '╦' | '╩'
-        | '╬' => CharClass::Junction,
+        '┌' | '┐' | '└' | '┘' | '┏' | '┓' | '┗' | '┛' | '╔' | '╗' | '╚' | '╝' | '╭' | '╮' | '╰'
+        | '╯' => CharClass::Junction,
+        '├' | '┤' | '┬' | '┴' | '┼' | '┣' | '┫' | '┳' | '┻' | '╋' | '╠' | '╣' | '╦' | '╩' | '╬' => {
+            CharClass::Junction
+        }
 
         // ASCII box-drawing.
         '-' => CharClass::HorizontalLine,
@@ -46,8 +45,9 @@ pub fn classify_char(ch: char) -> CharClass {
         '/' | '\\' => CharClass::DiagonalLine,
 
         // Arrows.
-        '>' | '<' | '^' | 'v' | 'V' | '→' | '←' | '↑' | '↓' | '▶' | '◀' | '▲' | '▼' | '»'
-        | '«' => CharClass::Arrow,
+        '>' | '<' | '^' | 'v' | 'V' | '→' | '←' | '↑' | '↓' | '▶' | '◀' | '▲' | '▼' | '»' | '«' => {
+            CharClass::Arrow
+        }
 
         // Whitespace.
         ' ' | '\t' => CharClass::Whitespace,
@@ -197,10 +197,7 @@ pub fn detect_diagram_blocks(text: &str) -> Vec<DiagramBlock> {
 
     // Handle block at end of document.
     if in_block && lines.len() > block_start {
-        let block_lines: Vec<String> = lines[block_start..]
-            .iter()
-            .map(|l| l.to_string())
-            .collect();
+        let block_lines: Vec<String> = lines[block_start..].iter().map(|l| l.to_string()).collect();
 
         blocks.push(DiagramBlock {
             start_line: block_start,
@@ -243,7 +240,7 @@ fn find_last_diagram_char(line: &str) -> Option<usize> {
                     | CharClass::Arrow
             )
         })
-        .last()
+        .next_back()
         .map(|(i, _)| i)
 }
 
@@ -258,11 +255,7 @@ pub fn align_right_border(lines: &[String]) -> Vec<String> {
     }
 
     // Find maximum significant width.
-    let max_width = lines
-        .iter()
-        .map(|l| l.trim_end().len())
-        .max()
-        .unwrap_or(0);
+    let max_width = lines.iter().map(|l| l.trim_end().len()).max().unwrap_or(0);
 
     lines
         .iter()

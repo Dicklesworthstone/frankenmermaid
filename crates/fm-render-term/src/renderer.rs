@@ -1,8 +1,7 @@
 //! Core terminal diagram renderer.
 
 use fm_core::{
-    ArrowType, GraphDirection, IrLabelId, MermaidDiagramIr, MermaidGlyphMode, MermaidRenderMode,
-    MermaidTier, NodeShape,
+    ArrowType, GraphDirection, MermaidDiagramIr, MermaidRenderMode, MermaidTier, NodeShape,
 };
 use fm_layout::{DiagramLayout, LayoutClusterBox, LayoutEdgePath, LayoutNodeBox, layout_diagram};
 
@@ -275,6 +274,7 @@ impl TermRenderer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_line_cell(
         &self,
         buffer: &mut CellBuffer,
@@ -593,10 +593,7 @@ impl TermRenderer {
                     if node_box.node_id.len() <= self.config.max_label_chars {
                         node_box.node_id.clone()
                     } else {
-                        format!(
-                            "{}…",
-                            &node_box.node_id[..self.config.max_label_chars - 1]
-                        )
+                        format!("{}…", &node_box.node_id[..self.config.max_label_chars - 1])
                     }
                 });
 

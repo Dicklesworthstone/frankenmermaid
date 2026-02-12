@@ -149,9 +149,9 @@ pub fn render_minimap_from_layout(
     // Create canvas.
     let mut canvas = Canvas::new(cell_width, cell_height, config.render_mode);
 
-    // Offset to center diagram in canvas.
-    let offset_x = (layout.bounds.x * scale_x) as isize;
-    let offset_y = (layout.bounds.y * scale_y) as isize;
+    // Offset to center diagram in canvas (reserved for future use).
+    let _offset_x = (layout.bounds.x * scale_x) as isize;
+    let _offset_y = (layout.bounds.y * scale_y) as isize;
 
     // Draw nodes as dots or small rectangles.
     for node_box in &layout.nodes {
@@ -276,7 +276,11 @@ pub fn overlay_minimap(
     corner: MinimapCorner,
 ) -> String {
     let main_lines: Vec<Vec<char>> = main_output.lines().map(|l| l.chars().collect()).collect();
-    let minimap_lines: Vec<Vec<char>> = minimap.output.lines().map(|l| l.chars().collect()).collect();
+    let minimap_lines: Vec<Vec<char>> = minimap
+        .output
+        .lines()
+        .map(|l| l.chars().collect())
+        .collect();
 
     // Calculate placement.
     let (start_x, start_y) = match corner {
@@ -329,9 +333,7 @@ pub fn overlay_minimap(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fm_core::{
-        ArrowType, DiagramType, GraphDirection, IrEdge, IrEndpoint, IrNode, IrNodeId,
-    };
+    use fm_core::{ArrowType, DiagramType, GraphDirection, IrEdge, IrEndpoint, IrNode, IrNodeId};
 
     fn sample_ir() -> MermaidDiagramIr {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);

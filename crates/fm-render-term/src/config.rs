@@ -137,8 +137,13 @@ impl ResolvedConfig {
         // Adjust label limits based on tier.
         let (max_label_chars, max_label_lines) = match tier {
             MermaidTier::Compact => (config.max_label_chars.min(12), 1),
-            MermaidTier::Normal => (config.max_label_chars.min(24), config.max_label_lines.min(2)),
-            MermaidTier::Rich | MermaidTier::Auto => (config.max_label_chars, config.max_label_lines),
+            MermaidTier::Normal => (
+                config.max_label_chars.min(24),
+                config.max_label_lines.min(2),
+            ),
+            MermaidTier::Rich | MermaidTier::Auto => {
+                (config.max_label_chars, config.max_label_lines)
+            }
         };
 
         Self {
