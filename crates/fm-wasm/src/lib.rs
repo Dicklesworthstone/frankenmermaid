@@ -389,11 +389,11 @@ impl Canvas2dContext for WebCanvas2dContext {
     }
 
     fn set_fill_style(&mut self, color: &str) {
-        self.context.set_fill_style(&JsValue::from_str(color));
+        self.context.set_fill_style_str(color);
     }
 
     fn set_stroke_style(&mut self, color: &str) {
-        self.context.set_stroke_style(&JsValue::from_str(color));
+        self.context.set_stroke_style_str(color);
     }
 
     fn set_line_width(&mut self, width: f64) {
@@ -497,12 +497,8 @@ impl Canvas2dContext for WebCanvas2dContext {
     }
 
     fn measure_text(&self, text: &str) -> TextMetrics {
-        let width = match self.context.measure_text(text) {
-            Ok(metrics) => metrics.width(),
-            Err(_) => text.len() as f64 * 8.0,
-        };
         TextMetrics {
-            width,
+            width: text.chars().count() as f64 * 8.0,
             height: 14.0,
         }
     }
@@ -628,6 +624,13 @@ impl Diagram {
         Ok(())
     }
 
+    pub fn on(&self, event: &str, callback: &js_sys::Function) -> Result<(), JsValue> {
+        self.ensure_alive()?;
+        self.canvas
+            .add_event_listener_with_callback(event, callback)
+            .map_err(|err| js_error_with_value("failed to register canvas event listener", err))
+    }
+
     pub fn destroy(&mut self) {
         if self.destroyed {
             return;
@@ -657,6 +660,10 @@ impl Diagram {
     }
 
     pub fn set_theme(&mut self, _theme: &str) -> Result<(), JsValue> {
+        Err(js_error("Diagram is only available on wasm32 targets"))
+    }
+
+    pub fn on(&self, _event: &str, _callback: JsValue) -> Result<(), JsValue> {
         Err(js_error("Diagram is only available on wasm32 targets"))
     }
 

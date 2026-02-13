@@ -47,8 +47,13 @@ jobs:
       - name: Install wasm-pack
         uses: jetli/wasm-pack-action@v0.4.0
 
-      - name: Build fm-wasm for wasm32
-        run: cargo build -p fm-wasm --target wasm32-unknown-unknown
+      - name: Install wasm-opt (binaryen)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binaryen
+
+      - name: Build optimized WASM package
+        run: ./build-wasm.sh
 
   coverage:
     name: Coverage

@@ -157,6 +157,7 @@ pub fn parse_mermaid_with_detection(input: &str, detection: DetectedType) -> Par
         DiagramType::Gantt => parse_gantt(input, &mut builder),
         DiagramType::Pie => parse_pie(input, &mut builder),
         DiagramType::QuadrantChart => parse_quadrant(input, &mut builder),
+        DiagramType::GitGraph => parse_gitgraph(input, &mut builder),
         DiagramType::Unknown => {
             builder
                 .add_warning("Unable to detect diagram type; using best-effort flowchart parsing");
@@ -1140,6 +1141,388 @@ fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
     }
 }
 
+/// Git graph state tracker for parsing.
+struct GitGraphState {
+    /// Map of branch names to their current head commit node ID
+    branches: std::collections::BTreeMap<String, IrNodeId>,
+    /// Current branch name
+    current_branch: String,
+    /// Auto-generated commit counter for unnamed commits
+    commit_counter: usize,
+}
+
+impl GitGraphState {
+    fn new() -> Self {
+        Self {
+            branches: std::collections::BTreeMap::new(),
+            current_branch: "main".to_string(),
+            commit_counter: 0,
+        }
+    }
+
+    fn next_commit_id(&mut self) -> String {
+        self.commit_counter += 1;
+        format!("commit_{}", self.commit_counter)
+    }
+
+    fn current_head(&self) -> Option<IrNodeId> {
+        self.branches.get(&self.current_branch).copied()
+    }
+
+    fn set_head(&mut self, branch: &str, node_id: IrNodeId) {
+        self.branches.insert(branch.to_string(), node_id);
+    }
+}
+
+fn parse_gitgraph(input: &str, builder: &mut IrBuilder) {
+    let mut state = GitGraphState::new();
+
+    for (index, line) in input.lines().enumerate() {
+        let line_number = index + 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || is_comment(trimmed) {
+            continue;
+        }
+
+        // Skip header line (case-insensitive)
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.starts_with("gitgraph") {
+            // Check for options like LR, TB after gitGraph
+            if let Some(direction) = parse_gitgraph_direction(trimmed) {
+                builder.set_direction(direction);
+            }
+            continue;
+        }
+
+        // Parse git commands - require word boundary (space or end of line after command)
+        if let Some(rest) = strip_git_command(trimmed, "commit") {
+            parse_git_commit(rest, line_number, line, &mut state, builder);
+            continue;
+        }
+
+        if let Some(rest) = strip_git_command(trimmed, "branch") {
+            parse_git_branch(rest.trim(), line_number, line, &mut state, builder);
+            continue;
+        }
+
+        if let Some(rest) = strip_git_command(trimmed, "checkout") {
+            parse_git_checkout(rest.trim(), line_number, line, &mut state, builder);
+            continue;
+        }
+
+        if let Some(rest) = strip_git_command(trimmed, "merge") {
+            parse_git_merge(rest.trim(), line_number, line, &mut state, builder);
+            continue;
+        }
+
+        if let Some(rest) = strip_git_command(trimmed, "cherry-pick") {
+            parse_git_cherry_pick(rest.trim(), line_number, line, &mut state, builder);
+            continue;
+        }
+
+        builder.add_warning(format!(
+            "Line {line_number}: unsupported gitGraph syntax: {trimmed}"
+        ));
+    }
+}
+
+/// Strip a git command prefix, requiring a word boundary (space or end of string).
+fn strip_git_command<'a>(line: &'a str, command: &str) -> Option<&'a str> {
+    let lower = line.to_ascii_lowercase();
+    if !lower.starts_with(command) {
+        return None;
+    }
+    let rest = &line[command.len()..];
+    // Must be followed by whitespace, end of string, or certain punctuation
+    if rest.is_empty() {
+        return Some(rest);
+    }
+    let next_char = rest.chars().next()?;
+    if next_char.is_whitespace() || next_char == ':' {
+        Some(rest)
+    } else {
+        None
+    }
+}
+
+fn parse_gitgraph_direction(header: &str) -> Option<GraphDirection> {
+    // Parse direction from tokens after "gitGraph"
+    for token in header.split_whitespace().skip(1) {
+        let upper = token.to_ascii_uppercase();
+        match upper.as_str() {
+            "LR" => return Some(GraphDirection::LR),
+            "RL" => return Some(GraphDirection::RL),
+            "BT" => return Some(GraphDirection::BT),
+            "TB" | "TD" => return Some(GraphDirection::TB),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Parse a commit command and its options.
+///
+/// Syntax: `commit [id: "id"] [msg: "message"] [tag: "tag"] [type: NORMAL|REVERSE|HIGHLIGHT]`
+fn parse_git_commit(
+    rest: &str,
+    line_number: usize,
+    source_line: &str,
+    state: &mut GitGraphState,
+    builder: &mut IrBuilder,
+) {
+    let span = span_for(line_number, source_line);
+    let options = parse_git_commit_options(rest);
+
+    // Determine commit ID
+    let commit_id = options.id.unwrap_or_else(|| state.next_commit_id());
+
+    // Build label from message and/or tag
+    let label = match (&options.msg, &options.tag) {
+        (Some(msg), Some(tag)) => Some(format!("{msg} [{tag}]")),
+        (Some(msg), None) => Some(msg.clone()),
+        (None, Some(tag)) => Some(format!("[{tag}]")),
+        (None, None) => None,
+    };
+
+    // Create the commit node
+    let Some(node_id) = builder.intern_node(&commit_id, label.as_deref(), NodeShape::Circle, span)
+    else {
+        return;
+    };
+
+    // Link from current branch head if it exists
+    if let Some(parent_id) = state.current_head() {
+        builder.push_edge(parent_id, node_id, ArrowType::Line, None, span);
+    }
+
+    // Update current branch head
+    state.set_head(&state.current_branch.clone(), node_id);
+}
+
+/// Parsed git commit options.
+struct GitCommitOptions {
+    id: Option<String>,
+    msg: Option<String>,
+    tag: Option<String>,
+}
+
+fn parse_git_commit_options(rest: &str) -> GitCommitOptions {
+    let mut options = GitCommitOptions {
+        id: None,
+        msg: None,
+        tag: None,
+    };
+
+    let trimmed = rest.trim();
+    if trimmed.is_empty() {
+        return options;
+    }
+
+    // Parse key: "value" pairs
+    let mut remaining = trimmed;
+    while !remaining.is_empty() {
+        remaining = remaining.trim_start();
+
+        // Try to match id: "value"
+        if let Some(rest_after_id) = remaining.strip_prefix("id:") {
+            if let Some((value, rest)) = extract_quoted_value(rest_after_id.trim_start()) {
+                options.id = Some(value);
+                remaining = rest;
+                continue;
+            }
+        }
+
+        // Try to match msg: "value"
+        if let Some(rest_after_msg) = remaining.strip_prefix("msg:") {
+            if let Some((value, rest)) = extract_quoted_value(rest_after_msg.trim_start()) {
+                options.msg = Some(value);
+                remaining = rest;
+                continue;
+            }
+        }
+
+        // Try to match tag: "value"
+        if let Some(rest_after_tag) = remaining.strip_prefix("tag:") {
+            if let Some((value, rest)) = extract_quoted_value(rest_after_tag.trim_start()) {
+                options.tag = Some(value);
+                remaining = rest;
+                continue;
+            }
+        }
+
+        // Try to match type: VALUE (we acknowledge but don't store it for now)
+        if let Some(rest_after_type) = remaining.strip_prefix("type:") {
+            let type_rest = rest_after_type.trim_start();
+            // Skip type value (NORMAL, REVERSE, HIGHLIGHT)
+            let end = type_rest
+                .find(|c: char| c.is_whitespace())
+                .unwrap_or(type_rest.len());
+            remaining = &type_rest[end..];
+            continue;
+        }
+
+        // If we can't parse anything else, break to avoid infinite loop
+        break;
+    }
+
+    options
+}
+
+/// Extract a quoted string value, returning the value and remaining input.
+fn extract_quoted_value(input: &str) -> Option<(String, &str)> {
+    let trimmed = input.trim_start();
+    let quote_char = trimmed.chars().next()?;
+
+    if !matches!(quote_char, '"' | '\'') {
+        return None;
+    }
+
+    let content_start = 1;
+    let end_quote = trimmed[content_start..].find(quote_char)?;
+    let value = trimmed[content_start..content_start + end_quote].to_string();
+    let rest = &trimmed[content_start + end_quote + 1..];
+
+    Some((value, rest))
+}
+
+fn parse_git_branch(
+    branch_name: &str,
+    line_number: usize,
+    _source_line: &str,
+    state: &mut GitGraphState,
+    builder: &mut IrBuilder,
+) {
+    let normalized = normalize_identifier(branch_name);
+    if normalized.is_empty() {
+        builder.add_warning(format!("Line {line_number}: empty branch name in gitGraph"));
+        return;
+    }
+
+    // When creating a branch, it inherits the current head
+    if let Some(current_head) = state.current_head() {
+        state.set_head(&normalized, current_head);
+    }
+    // If no current head, the branch starts empty (first commit will set it)
+}
+
+fn parse_git_checkout(
+    branch_name: &str,
+    line_number: usize,
+    _source_line: &str,
+    state: &mut GitGraphState,
+    builder: &mut IrBuilder,
+) {
+    let normalized = normalize_identifier(branch_name);
+    if normalized.is_empty() {
+        builder.add_warning(format!("Line {line_number}: empty branch name in checkout"));
+        return;
+    }
+
+    // Allow checking out branches that don't exist yet (they'll be created on first commit)
+    state.current_branch = normalized;
+}
+
+fn parse_git_merge(
+    merge_spec: &str,
+    line_number: usize,
+    source_line: &str,
+    state: &mut GitGraphState,
+    builder: &mut IrBuilder,
+) {
+    let span = span_for(line_number, source_line);
+
+    // Parse branch name and optional tag/id
+    // Syntax: merge branch_name [tag: "tag"] [id: "id"]
+    let parts: Vec<&str> = merge_spec.split_whitespace().collect();
+    let branch_name = match parts.first() {
+        Some(name) => normalize_identifier(name),
+        None => {
+            builder.add_warning(format!("Line {line_number}: merge requires a branch name"));
+            return;
+        }
+    };
+
+    if branch_name.is_empty() {
+        builder.add_warning(format!("Line {line_number}: invalid branch name in merge"));
+        return;
+    }
+
+    // Get the head of the branch being merged
+    let merge_source = match state.branches.get(&branch_name).copied() {
+        Some(id) => id,
+        None => {
+            builder.add_warning(format!(
+                "Line {line_number}: cannot merge non-existent branch '{branch_name}'"
+            ));
+            return;
+        }
+    };
+
+    // Create a merge commit
+    let merge_id = state.next_commit_id();
+    let label = format!("merge {branch_name}");
+
+    let Some(merge_node) = builder.intern_node(&merge_id, Some(&label), NodeShape::Circle, span)
+    else {
+        return;
+    };
+
+    // Create edge from merge source to merge commit
+    builder.push_edge(merge_source, merge_node, ArrowType::DottedArrow, None, span);
+
+    // Create edge from current head to merge commit
+    if let Some(current_head) = state.current_head() {
+        builder.push_edge(current_head, merge_node, ArrowType::Line, None, span);
+    }
+
+    // Update current branch head
+    state.set_head(&state.current_branch.clone(), merge_node);
+}
+
+fn parse_git_cherry_pick(
+    cherry_pick_spec: &str,
+    line_number: usize,
+    source_line: &str,
+    state: &mut GitGraphState,
+    builder: &mut IrBuilder,
+) {
+    let span = span_for(line_number, source_line);
+
+    // Syntax: cherry-pick id: "commit_id" [tag: "tag"]
+    let id_prefix = "id:";
+    let Some(id_start) = cherry_pick_spec.find(id_prefix) else {
+        builder.add_warning(format!(
+            "Line {line_number}: cherry-pick requires id: parameter"
+        ));
+        return;
+    };
+
+    let rest = cherry_pick_spec[id_start + id_prefix.len()..].trim_start();
+    let Some((source_commit_id, _)) = extract_quoted_value(rest) else {
+        builder.add_warning(format!(
+            "Line {line_number}: cherry-pick id must be a quoted string"
+        ));
+        return;
+    };
+
+    // Create a new commit that references the cherry-picked one
+    let new_commit_id = state.next_commit_id();
+    let label = format!("cherry-pick {source_commit_id}");
+
+    let Some(new_node) = builder.intern_node(&new_commit_id, Some(&label), NodeShape::Circle, span)
+    else {
+        return;
+    };
+
+    // Link from current head
+    if let Some(current_head) = state.current_head() {
+        builder.push_edge(current_head, new_node, ArrowType::Line, None, span);
+    }
+
+    // Update current branch head
+    state.set_head(&state.current_branch.clone(), new_node);
+}
+
 fn register_state_declaration(
     declaration: &str,
     line_number: usize,
@@ -2062,5 +2445,168 @@ mod tests {
         assert_eq!(parsed.ir.diagram_type, DiagramType::Flowchart); // Falls back to flowchart
         // Should have warnings about detection and empty parse
         assert!(!parsed.warnings.is_empty());
+    }
+
+    #[test]
+    fn gitgraph_detects_type() {
+        assert_eq!(detect_type("gitGraph\ncommit"), DiagramType::GitGraph);
+        assert_eq!(detect_type("gitGraph LR\ncommit"), DiagramType::GitGraph);
+    }
+
+    #[test]
+    fn gitgraph_parses_simple_commits() {
+        let parsed = parse_mermaid("gitGraph\ncommit\ncommit\ncommit");
+        assert_eq!(parsed.ir.diagram_type, DiagramType::GitGraph);
+        assert_eq!(parsed.ir.nodes.len(), 3);
+        // 2 edges linking the 3 commits
+        assert_eq!(parsed.ir.edges.len(), 2);
+    }
+
+    #[test]
+    fn gitgraph_parses_commit_with_id_and_message() {
+        let parsed = parse_mermaid(
+            r#"gitGraph
+commit id: "abc123" msg: "Initial commit"
+commit id: "def456" msg: "Add feature""#,
+        );
+        assert_eq!(parsed.ir.diagram_type, DiagramType::GitGraph);
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 1);
+
+        // Check node IDs are as specified
+        let node1 = &parsed.ir.nodes[0];
+        assert_eq!(node1.id, "abc123");
+
+        let node2 = &parsed.ir.nodes[1];
+        assert_eq!(node2.id, "def456");
+    }
+
+    #[test]
+    fn gitgraph_parses_commit_with_tag() {
+        let parsed = parse_mermaid(
+            r#"gitGraph
+commit tag: "v1.0.0"
+commit msg: "Fix bug" tag: "v1.0.1""#,
+        );
+        assert_eq!(parsed.ir.diagram_type, DiagramType::GitGraph);
+        assert_eq!(parsed.ir.nodes.len(), 2);
+
+        // Labels should include tags
+        let label1 = parsed.ir.nodes[0]
+            .label
+            .and_then(|id| parsed.ir.labels.get(id.0))
+            .map(|l| l.text.as_str());
+        assert_eq!(label1, Some("[v1.0.0]"));
+
+        let label2 = parsed.ir.nodes[1]
+            .label
+            .and_then(|id| parsed.ir.labels.get(id.0))
+            .map(|l| l.text.as_str());
+        assert_eq!(label2, Some("Fix bug [v1.0.1]"));
+    }
+
+    #[test]
+    fn gitgraph_parses_branch_and_checkout() {
+        let parsed = parse_mermaid(
+            r#"gitGraph
+commit
+branch develop
+checkout develop
+commit
+checkout main
+commit"#,
+        );
+        assert_eq!(parsed.ir.diagram_type, DiagramType::GitGraph);
+        // 3 commits total
+        assert_eq!(parsed.ir.nodes.len(), 3);
+        // First commit links to both the develop commit and main commit
+        // develop branch commit links from first commit
+        // main branch commit links from first commit
+        assert_eq!(parsed.ir.edges.len(), 2);
+    }
+
+    #[test]
+    fn gitgraph_parses_merge() {
+        let parsed = parse_mermaid(
+            r#"gitGraph
+commit
+branch develop
+checkout develop
+commit
+checkout main
+merge develop"#,
+        );
+        assert_eq!(parsed.ir.diagram_type, DiagramType::GitGraph);
+        // 3 nodes: initial commit, develop commit, merge commit
+        assert_eq!(parsed.ir.nodes.len(), 3);
+        // Edges: initial->develop, initial->merge, develop->merge
+        assert_eq!(parsed.ir.edges.len(), 3);
+    }
+
+    #[test]
+    fn gitgraph_parses_cherry_pick() {
+        let parsed = parse_mermaid(
+            r#"gitGraph
+commit id: "abc"
+branch feature
+checkout feature
+commit id: "feat1"
+checkout main
+cherry-pick id: "feat1""#,
+        );
+        assert_eq!(parsed.ir.diagram_type, DiagramType::GitGraph);
+        // Nodes: abc, feat1, cherry-pick commit
+        assert_eq!(parsed.ir.nodes.len(), 3);
+        // Edges: abc->feat1 (branch), abc->cherry-pick (main)
+        assert_eq!(parsed.ir.edges.len(), 2);
+    }
+
+    #[test]
+    fn gitgraph_direction_lr() {
+        let parsed = parse_mermaid("gitGraph LR\ncommit");
+        assert_eq!(parsed.ir.direction, GraphDirection::LR);
+    }
+
+    #[test]
+    fn gitgraph_warns_on_unsupported_syntax() {
+        let parsed = parse_mermaid("gitGraph\ncommit\nunsupported command here");
+        assert!(!parsed.warnings.is_empty());
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|w| w.contains("unsupported gitGraph syntax"))
+        );
+    }
+
+    #[test]
+    fn gitgraph_case_insensitive_header() {
+        // All these should be recognized as gitGraph
+        let parsed1 = parse_mermaid("GITGRAPH\ncommit");
+        assert_eq!(parsed1.ir.diagram_type, DiagramType::GitGraph);
+        assert_eq!(parsed1.ir.nodes.len(), 1);
+
+        let parsed2 = parse_mermaid("GitGraph\ncommit");
+        assert_eq!(parsed2.ir.diagram_type, DiagramType::GitGraph);
+        assert_eq!(parsed2.ir.nodes.len(), 1);
+
+        let parsed3 = parse_mermaid("GITGRAPH LR\ncommit");
+        assert_eq!(parsed3.ir.diagram_type, DiagramType::GitGraph);
+        assert_eq!(parsed3.ir.direction, GraphDirection::LR);
+    }
+
+    #[test]
+    fn gitgraph_commit_word_boundary() {
+        // "committed" should NOT be parsed as "commit" + "ted"
+        let parsed = parse_mermaid("gitGraph\ncommitted something");
+        // Should have a warning about unsupported syntax
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|w| w.contains("unsupported gitGraph syntax"))
+        );
+        // No nodes should be created from "committed"
+        assert_eq!(parsed.ir.nodes.len(), 0);
     }
 }

@@ -926,7 +926,7 @@ fn render_and_output(
 
 #[cfg(feature = "serve")]
 fn cmd_serve(host: &str, port: u16, open: bool) -> Result<()> {
-    use tiny_http::{Header, Response, Server};
+    use tiny_http::{Response, Server};
 
     let addr = format!("{host}:{port}");
     let server = Server::http(&addr).map_err(|e| anyhow::anyhow!("Failed to start server: {e}"))?;
@@ -939,12 +939,12 @@ fn cmd_serve(host: &str, port: u16, open: bool) -> Result<()> {
         let _ = open_browser(&url);
     }
 
-    for request in server.incoming_requests() {
+    for mut request in server.incoming_requests() {
         let url_path = request.url();
 
         let response = match url_path {
             "/" => serve_playground_html(),
-            "/render" => handle_render_request(&request),
+            "/render" => handle_render_request(&mut request),
             _ => Response::from_string("Not Found").with_status_code(404),
         };
 
@@ -1038,7 +1038,7 @@ fn serve_playground_html() -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
 
 #[cfg(feature = "serve")]
 fn handle_render_request(
-    request: &tiny_http::Request,
+    request: &mut tiny_http::Request,
 ) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
     use tiny_http::{Header, Response};
 

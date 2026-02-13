@@ -19,11 +19,48 @@ pub enum LayoutAlgorithm {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CycleStrategy {
+    #[default]
+    Greedy,
+    DfsBack,
+    MfasApprox,
+    CycleAware,
+}
+
+impl CycleStrategy {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Greedy => "greedy",
+            Self::DfsBack => "dfs-back",
+            Self::MfasApprox => "mfas",
+            Self::CycleAware => "cycle-aware",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "greedy" => Some(Self::Greedy),
+            "dfs-back" | "dfs_back" | "dfs" => Some(Self::DfsBack),
+            "mfas" | "minimum-feedback-arc-set" | "minimum_feedback_arc_set" => {
+                Some(Self::MfasApprox)
+            }
+            "cycle-aware" | "cycle_aware" | "cycleaware" => Some(Self::CycleAware),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LayoutStats {
     pub node_count: usize,
     pub edge_count: usize,
     pub crossing_count: usize,
     pub reversed_edges: usize,
+    pub cycle_count: usize,
+    pub cycle_node_count: usize,
+    pub max_cycle_size: usize,
     pub phase_iterations: usize,
 }
 
@@ -130,11 +167,27 @@ pub fn layout_diagram(ir: &MermaidDiagramIr) -> DiagramLayout {
 }
 
 #[must_use]
+pub fn layout_diagram_with_cycle_strategy(
+    ir: &MermaidDiagramIr,
+    cycle_strategy: CycleStrategy,
+) -> DiagramLayout {
+    layout_diagram_traced_with_cycle_strategy(ir, cycle_strategy).layout
+}
+
+#[must_use]
 pub fn layout_diagram_traced(ir: &MermaidDiagramIr) -> TracedLayout {
+    layout_diagram_traced_with_cycle_strategy(ir, default_cycle_strategy())
+}
+
+#[must_use]
+pub fn layout_diagram_traced_with_cycle_strategy(
+    ir: &MermaidDiagramIr,
+    cycle_strategy: CycleStrategy,
+) -> TracedLayout {
     let mut trace = LayoutTrace::default();
     let spacing = LayoutSpacing::default();
     let node_sizes = compute_node_sizes(ir);
-    let cycle_result = cycle_removal(ir);
+    let cycle_result = cycle_removal(ir, cycle_strategy);
     push_snapshot(
         &mut trace,
         "cycle_removal",
@@ -165,7 +218,7 @@ pub fn layout_diagram_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     );
 
     let nodes = coordinate_assignment(ir, &node_sizes, &ranks, &ordering_by_rank, spacing);
-    let edges = build_edge_paths(ir, &nodes, &cycle_result.reversed_edge_indexes);
+    let edges = build_edge_paths(ir, &nodes, &cycle_result.highlighted_edge_indexes);
     let clusters = build_cluster_boxes(ir, &nodes, spacing);
     let bounds = compute_bounds(&nodes, &clusters, spacing);
 
@@ -183,6 +236,9 @@ pub fn layout_diagram_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         edge_count: ir.edges.len(),
         crossing_count,
         reversed_edges: cycle_result.reversed_edge_indexes.len(),
+        cycle_count: cycle_result.summary.cycle_count,
+        cycle_node_count: cycle_result.summary.cycle_node_count,
+        max_cycle_size: cycle_result.summary.max_cycle_size,
         phase_iterations: trace.snapshots.len(),
     };
 
@@ -222,6 +278,23 @@ fn label_length(ir: &MermaidDiagramIr, label: Option<IrLabelId>) -> usize {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CycleRemovalResult {
     reversed_edge_indexes: BTreeSet<usize>,
+    highlighted_edge_indexes: BTreeSet<usize>,
+    summary: CycleSummary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct CycleSummary {
+    cycle_count: usize,
+    cycle_node_count: usize,
+    max_cycle_size: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct CycleDetection {
+    components: Vec<Vec<usize>>,
+    node_to_component: Vec<Option<usize>>,
+    cyclic_component_indexes: BTreeSet<usize>,
+    summary: CycleSummary,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,11 +304,21 @@ struct OrientedEdge {
     edge_index: usize,
 }
 
-fn cycle_removal(ir: &MermaidDiagramIr) -> CycleRemovalResult {
+fn default_cycle_strategy() -> CycleStrategy {
+    std::env::var("FM_CYCLE_STRATEGY")
+        .ok()
+        .as_deref()
+        .and_then(CycleStrategy::parse)
+        .unwrap_or_default()
+}
+
+fn cycle_removal(ir: &MermaidDiagramIr, cycle_strategy: CycleStrategy) -> CycleRemovalResult {
     let node_count = ir.nodes.len();
     if node_count == 0 {
         return CycleRemovalResult {
             reversed_edge_indexes: BTreeSet::new(),
+            highlighted_edge_indexes: BTreeSet::new(),
+            summary: CycleSummary::default(),
         };
     }
 
@@ -243,10 +326,295 @@ fn cycle_removal(ir: &MermaidDiagramIr) -> CycleRemovalResult {
     if edges.is_empty() {
         return CycleRemovalResult {
             reversed_edge_indexes: BTreeSet::new(),
+            highlighted_edge_indexes: BTreeSet::new(),
+            summary: CycleSummary::default(),
         };
     }
 
     let node_priority = stable_node_priorities(ir);
+    let cycle_detection = detect_cycle_components(node_count, &edges, &node_priority);
+    let dfs_back_edges = cycle_removal_dfs_back(node_count, &edges, &node_priority);
+
+    let reversed_edge_indexes = match cycle_strategy {
+        CycleStrategy::Greedy => cycle_removal_greedy(node_count, &edges, &node_priority),
+        CycleStrategy::DfsBack => dfs_back_edges.clone(),
+        CycleStrategy::MfasApprox => {
+            cycle_removal_mfas_approx(node_count, &edges, &node_priority, &cycle_detection)
+        }
+        CycleStrategy::CycleAware => BTreeSet::new(),
+    };
+
+    let highlighted_edge_indexes = if matches!(cycle_strategy, CycleStrategy::CycleAware) {
+        dfs_back_edges
+    } else {
+        reversed_edge_indexes.clone()
+    };
+
+    CycleRemovalResult {
+        reversed_edge_indexes,
+        highlighted_edge_indexes,
+        summary: cycle_detection.summary,
+    }
+}
+
+fn detect_cycle_components(
+    node_count: usize,
+    edges: &[OrientedEdge],
+    node_priority: &[usize],
+) -> CycleDetection {
+    struct TarjanState<'a> {
+        index: usize,
+        indices: Vec<Option<usize>>,
+        lowlink: Vec<usize>,
+        stack: Vec<usize>,
+        on_stack: Vec<bool>,
+        components: Vec<Vec<usize>>,
+        outgoing_edge_slots: &'a [Vec<usize>],
+        edges: &'a [OrientedEdge],
+        node_priority: &'a [usize],
+    }
+
+    impl TarjanState<'_> {
+        fn strong_connect(&mut self, node: usize) {
+            self.indices[node] = Some(self.index);
+            self.lowlink[node] = self.index;
+            self.index = self.index.saturating_add(1);
+            self.stack.push(node);
+            self.on_stack[node] = true;
+
+            for edge_slot in self.outgoing_edge_slots[node].iter().copied() {
+                let next = self.edges[edge_slot].target;
+                if self.indices[next].is_none() {
+                    self.strong_connect(next);
+                    self.lowlink[node] = self.lowlink[node].min(self.lowlink[next]);
+                } else if self.on_stack[next] {
+                    self.lowlink[node] =
+                        self.lowlink[node].min(self.indices[next].unwrap_or(self.lowlink[node]));
+                }
+            }
+
+            if self.lowlink[node] == self.indices[node].unwrap_or(self.lowlink[node]) {
+                let mut component = Vec::new();
+                while let Some(top) = self.stack.pop() {
+                    self.on_stack[top] = false;
+                    component.push(top);
+                    if top == node {
+                        break;
+                    }
+                }
+                component
+                    .sort_by(|left, right| compare_priority(*left, *right, self.node_priority));
+                self.components.push(component);
+            }
+        }
+    }
+
+    let outgoing_edge_slots = sorted_outgoing_edge_slots(node_count, edges, node_priority);
+    let mut tarjan = TarjanState {
+        index: 0,
+        indices: vec![None; node_count],
+        lowlink: vec![0_usize; node_count],
+        stack: Vec::new(),
+        on_stack: vec![false; node_count],
+        components: Vec::new(),
+        outgoing_edge_slots: &outgoing_edge_slots,
+        edges,
+        node_priority,
+    };
+
+    let mut node_visit_order: Vec<usize> = (0..node_count).collect();
+    node_visit_order.sort_by(|left, right| compare_priority(*left, *right, node_priority));
+    for node in node_visit_order {
+        if tarjan.indices[node].is_none() {
+            tarjan.strong_connect(node);
+        }
+    }
+
+    let mut node_to_component = vec![None; node_count];
+    for (component_index, component_nodes) in tarjan.components.iter().enumerate() {
+        for node in component_nodes {
+            node_to_component[*node] = Some(component_index);
+        }
+    }
+
+    let mut cyclic_component_indexes = BTreeSet::new();
+    let mut cycle_node_count = 0_usize;
+    let mut max_cycle_size = 0_usize;
+    for (component_index, component_nodes) in tarjan.components.iter().enumerate() {
+        let is_cyclic = if component_nodes.len() > 1 {
+            true
+        } else {
+            let node = component_nodes[0];
+            edges
+                .iter()
+                .any(|edge| edge.source == node && edge.target == node)
+        };
+
+        if is_cyclic {
+            cyclic_component_indexes.insert(component_index);
+            cycle_node_count = cycle_node_count.saturating_add(component_nodes.len());
+            max_cycle_size = max_cycle_size.max(component_nodes.len());
+        }
+    }
+
+    CycleDetection {
+        components: tarjan.components,
+        node_to_component,
+        cyclic_component_indexes: cyclic_component_indexes.clone(),
+        summary: CycleSummary {
+            cycle_count: cyclic_component_indexes.len(),
+            cycle_node_count,
+            max_cycle_size,
+        },
+    }
+}
+
+fn cycle_removal_dfs_back(
+    node_count: usize,
+    edges: &[OrientedEdge],
+    node_priority: &[usize],
+) -> BTreeSet<usize> {
+    let outgoing_edge_slots = sorted_outgoing_edge_slots(node_count, edges, node_priority);
+    let mut state = vec![0_u8; node_count];
+    let mut reversed_edge_indexes = BTreeSet::new();
+
+    fn visit(
+        node: usize,
+        state: &mut [u8],
+        outgoing_edge_slots: &[Vec<usize>],
+        edges: &[OrientedEdge],
+        reversed_edge_indexes: &mut BTreeSet<usize>,
+    ) {
+        state[node] = 1;
+        for edge_slot in outgoing_edge_slots[node].iter().copied() {
+            let edge = edges[edge_slot];
+            match state[edge.target] {
+                0 => visit(
+                    edge.target,
+                    state,
+                    outgoing_edge_slots,
+                    edges,
+                    reversed_edge_indexes,
+                ),
+                1 => {
+                    reversed_edge_indexes.insert(edge.edge_index);
+                }
+                _ => {}
+            }
+        }
+        state[node] = 2;
+    }
+
+    let mut node_visit_order: Vec<usize> = (0..node_count).collect();
+    node_visit_order.sort_by(|left, right| compare_priority(*left, *right, node_priority));
+    for node in node_visit_order {
+        if state[node] == 0 {
+            visit(
+                node,
+                &mut state,
+                &outgoing_edge_slots,
+                edges,
+                &mut reversed_edge_indexes,
+            );
+        }
+    }
+
+    reversed_edge_indexes
+}
+
+fn cycle_removal_mfas_approx(
+    node_count: usize,
+    edges: &[OrientedEdge],
+    node_priority: &[usize],
+    cycle_detection: &CycleDetection,
+) -> BTreeSet<usize> {
+    if cycle_detection.summary.cycle_count == 0 {
+        return BTreeSet::new();
+    }
+
+    let mut reversed_edge_indexes = BTreeSet::new();
+
+    for component_index in &cycle_detection.cyclic_component_indexes {
+        let component_nodes = cycle_detection
+            .components
+            .get(*component_index)
+            .cloned()
+            .unwrap_or_default();
+        if component_nodes.is_empty() {
+            continue;
+        }
+
+        let mut in_degree = vec![0_usize; node_count];
+        let mut out_degree = vec![0_usize; node_count];
+
+        for edge in edges {
+            if cycle_detection.node_to_component[edge.source] == Some(*component_index)
+                && cycle_detection.node_to_component[edge.target] == Some(*component_index)
+            {
+                out_degree[edge.source] = out_degree[edge.source].saturating_add(1);
+                in_degree[edge.target] = in_degree[edge.target].saturating_add(1);
+            }
+        }
+
+        let mut component_order = component_nodes;
+        component_order.sort_by(|left, right| {
+            let left_score = out_degree[*left] as isize - in_degree[*left] as isize;
+            let right_score = out_degree[*right] as isize - in_degree[*right] as isize;
+            right_score
+                .cmp(&left_score)
+                .then_with(|| compare_priority(*left, *right, node_priority))
+        });
+
+        let mut position = BTreeMap::<usize, usize>::new();
+        for (index, node) in component_order.into_iter().enumerate() {
+            position.insert(node, index);
+        }
+
+        for edge in edges {
+            if cycle_detection.node_to_component[edge.source] == Some(*component_index)
+                && cycle_detection.node_to_component[edge.target] == Some(*component_index)
+                && position.get(&edge.source).copied().unwrap_or(0)
+                    > position.get(&edge.target).copied().unwrap_or(0)
+            {
+                reversed_edge_indexes.insert(edge.edge_index);
+            }
+        }
+    }
+
+    if reversed_edge_indexes.is_empty() {
+        return cycle_removal_dfs_back(node_count, edges, node_priority);
+    }
+
+    reversed_edge_indexes
+}
+
+fn sorted_outgoing_edge_slots(
+    node_count: usize,
+    edges: &[OrientedEdge],
+    node_priority: &[usize],
+) -> Vec<Vec<usize>> {
+    let mut outgoing_edge_slots = vec![Vec::new(); node_count];
+    for (edge_slot, edge) in edges.iter().enumerate() {
+        outgoing_edge_slots[edge.source].push(edge_slot);
+    }
+
+    for slots in &mut outgoing_edge_slots {
+        slots.sort_by(|left, right| {
+            let left_edge = edges[*left];
+            let right_edge = edges[*right];
+            compare_priority(left_edge.target, right_edge.target, node_priority)
+                .then_with(|| left_edge.edge_index.cmp(&right_edge.edge_index))
+        });
+    }
+
+    outgoing_edge_slots
+}
+
+fn cycle_removal_greedy(
+    node_count: usize,
+    edges: &[OrientedEdge],
+    node_priority: &[usize],
+) -> BTreeSet<usize> {
     let mut active_nodes: BTreeSet<usize> = (0..node_count).collect();
     let mut in_degree = vec![0_usize; node_count];
     let mut out_degree = vec![0_usize; node_count];
@@ -270,14 +638,14 @@ fn cycle_removal(ir: &MermaidDiagramIr) -> CycleRemovalResult {
             .filter(|node| out_degree[*node] == 0)
             .collect();
         if !sinks.is_empty() {
-            sinks.sort_by(|left, right| compare_priority(*left, *right, &node_priority));
+            sinks.sort_by(|left, right| compare_priority(*left, *right, node_priority));
             for node in sinks {
                 remove_node(
                     node,
                     &mut active_nodes,
                     &incoming,
                     &outgoing,
-                    &edges,
+                    edges,
                     &mut in_degree,
                     &mut out_degree,
                 );
@@ -292,14 +660,14 @@ fn cycle_removal(ir: &MermaidDiagramIr) -> CycleRemovalResult {
             .filter(|node| in_degree[*node] == 0)
             .collect();
         if !sources.is_empty() {
-            sources.sort_by(|left, right| compare_priority(*left, *right, &node_priority));
+            sources.sort_by(|left, right| compare_priority(*left, *right, node_priority));
             for node in sources {
                 remove_node(
                     node,
                     &mut active_nodes,
                     &incoming,
                     &outgoing,
-                    &edges,
+                    edges,
                     &mut in_degree,
                     &mut out_degree,
                 );
@@ -313,7 +681,7 @@ fn cycle_removal(ir: &MermaidDiagramIr) -> CycleRemovalResult {
             let right_score = out_degree[*right] as isize - in_degree[*right] as isize;
             left_score
                 .cmp(&right_score)
-                .then_with(|| compare_priority(*right, *left, &node_priority))
+                .then_with(|| compare_priority(*right, *left, node_priority))
         }) else {
             break;
         };
@@ -323,7 +691,7 @@ fn cycle_removal(ir: &MermaidDiagramIr) -> CycleRemovalResult {
             &mut active_nodes,
             &incoming,
             &outgoing,
-            &edges,
+            edges,
             &mut in_degree,
             &mut out_degree,
         );
@@ -336,16 +704,12 @@ fn cycle_removal(ir: &MermaidDiagramIr) -> CycleRemovalResult {
         position[node_index] = order;
     }
 
-    let reversed_edge_indexes = edges
-        .into_iter()
+    edges
+        .iter()
         .filter_map(|edge| {
             (position[edge.source] > position[edge.target]).then_some(edge.edge_index)
         })
-        .collect();
-
-    CycleRemovalResult {
-        reversed_edge_indexes,
-    }
+        .collect()
 }
 
 fn rank_assignment(ir: &MermaidDiagramIr, cycles: &CycleRemovalResult) -> BTreeMap<usize, usize> {
@@ -835,7 +1199,7 @@ fn count_inversions(values: &mut [usize]) -> usize {
 fn build_edge_paths(
     ir: &MermaidDiagramIr,
     nodes: &[LayoutNodeBox],
-    reversed_edge_indexes: &BTreeSet<usize>,
+    highlighted_edge_indexes: &BTreeSet<usize>,
 ) -> Vec<LayoutEdgePath> {
     let horizontal_ranks = matches!(ir.direction, GraphDirection::LR | GraphDirection::RL);
 
@@ -854,7 +1218,7 @@ fn build_edge_paths(
             Some(LayoutEdgePath {
                 edge_index,
                 points,
-                reversed: reversed_edge_indexes.contains(&edge_index),
+                reversed: highlighted_edge_indexes.contains(&edge_index),
             })
         })
         .collect()
@@ -1106,8 +1470,8 @@ pub fn layout_stats_from(layout: &DiagramLayout) -> LayoutStats {
 #[cfg(test)]
 mod tests {
     use super::{
-        LayoutAlgorithm, LayoutPoint, layout, layout_diagram, layout_diagram_traced,
-        route_edge_points,
+        CycleStrategy, LayoutAlgorithm, LayoutPoint, layout, layout_diagram, layout_diagram_traced,
+        layout_diagram_with_cycle_strategy, route_edge_points,
     };
     use fm_core::{
         ArrowType, DiagramType, GraphDirection, IrEdge, IrEndpoint, IrLabel, IrLabelId, IrNode,
@@ -1213,6 +1577,57 @@ mod tests {
 
         let stats = layout(&ir, LayoutAlgorithm::Auto);
         assert!(stats.reversed_edges >= 1);
+    }
+
+    #[test]
+    fn cycle_aware_marks_back_edges_without_reversal() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for node_id in ["A", "B", "C"] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        for (from, to) in [(0, 1), (1, 2), (2, 0)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let layout = layout_diagram_with_cycle_strategy(&ir, CycleStrategy::CycleAware);
+        assert_eq!(layout.stats.reversed_edges, 0);
+        assert_eq!(layout.stats.cycle_count, 1);
+        assert_eq!(layout.stats.cycle_node_count, 3);
+        assert_eq!(layout.stats.max_cycle_size, 3);
+        assert!(layout.edges.iter().any(|edge| edge.reversed));
+    }
+
+    #[test]
+    fn dfs_back_cycle_strategy_is_deterministic() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for node_id in ["A", "B", "C", "D"] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        for (from, to) in [(0, 1), (1, 2), (2, 0), (2, 3), (3, 1)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let first = layout_diagram_with_cycle_strategy(&ir, CycleStrategy::DfsBack);
+        let second = layout_diagram_with_cycle_strategy(&ir, CycleStrategy::DfsBack);
+        assert_eq!(first, second);
+        assert!(first.stats.reversed_edges >= 1);
+        assert!(first.edges.iter().any(|edge| edge.reversed));
     }
 
     #[test]
