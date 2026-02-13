@@ -118,6 +118,11 @@ impl IrBuilder {
         self.ir.edges.len()
     }
 
+    /// Get a node by its IrNodeId.
+    pub(crate) fn get_node_by_id(&self, id: IrNodeId) -> Option<&IrNode> {
+        self.ir.nodes.get(id.0)
+    }
+
     /// Finish building the IR, applying semantic recovery.
     pub(crate) fn finish(
         mut self,

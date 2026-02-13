@@ -421,6 +421,7 @@ fn parse_requirement(input: &str, builder: &mut IrBuilder) {
 
 fn parse_mindmap(input: &str, builder: &mut IrBuilder) {
     let mut ancestry: Vec<(usize, fm_core::IrNodeId)> = Vec::new();
+    let mut last_node_id: Option<fm_core::IrNodeId> = None;
 
     for (index, line) in input.lines().enumerate() {
         let line_number = index + 1;
@@ -432,8 +433,32 @@ fn parse_mindmap(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
+        // Handle icon directive (::icon(...)) - applies to last node
+        if trimmed.starts_with("::icon(") {
+            // Icons are visual metadata; we note them but don't store in IR yet
+            // Future: could add icon field to IrNode
+            continue;
+        }
+
+        // Handle class directive (:::class1 class2) - applies to last node
+        if let Some(class_suffix) = trimmed.strip_prefix(":::") {
+            let classes = class_suffix.trim();
+            if let Some(node_id) = last_node_id {
+                let span = span_for(line_number, line);
+                for class in classes.split_whitespace() {
+                    // Use a placeholder node key since we already have the id
+                    // The add_class_to_node function will look up by key
+                    if let Some(node) = builder.get_node_by_id(node_id) {
+                        let key = node.id.clone();
+                        builder.add_class_to_node(&key, class, span);
+                    }
+                }
+            }
+            continue;
+        }
+
         let depth = leading_indent_width(line);
-        let Some(node) = parse_node_token(trimmed) else {
+        let Some(node) = parse_mindmap_node_token(trimmed) else {
             builder.add_warning(format!(
                 "Line {line_number}: unsupported mindmap syntax: {trimmed}"
             ));
@@ -445,6 +470,8 @@ fn parse_mindmap(input: &str, builder: &mut IrBuilder) {
         else {
             continue;
         };
+
+        last_node_id = Some(node_id);
 
         while let Some((ancestor_depth, _)) = ancestry.last() {
             if *ancestor_depth >= depth {
@@ -460,6 +487,150 @@ fn parse_mindmap(input: &str, builder: &mut IrBuilder) {
 
         ancestry.push((depth, node_id));
     }
+}
+
+/// Parse a mindmap node token with mindmap-specific shapes.
+/// Mindmap supports: square [], rounded (), circle (()), bang ))((, cloud )(, hexagon {{}}
+fn parse_mindmap_node_token(raw: &str) -> Option<NodeToken> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Strip class suffix (:::class1 class2) from the node definition
+    let core = trimmed.split(":::").next().unwrap_or(trimmed).trim();
+    if core.is_empty() {
+        return None;
+    }
+
+    // Bang shape: id))text((
+    if let Some(parsed) = parse_mindmap_bang(core) {
+        return Some(parsed);
+    }
+
+    // Cloud shape: id)text(
+    if let Some(parsed) = parse_mindmap_cloud(core) {
+        return Some(parsed);
+    }
+
+    // Hexagon shape: id{{text}}
+    if let Some(parsed) = parse_mindmap_hexagon(core) {
+        return Some(parsed);
+    }
+
+    // Circle shape: id((text)) - reuse existing double-circle parser
+    if let Some(parsed) = parse_double_circle(core) {
+        // For mindmap, (( )) is just a circle, not double-circle
+        return Some(NodeToken {
+            id: parsed.id,
+            label: parsed.label,
+            shape: NodeShape::Circle,
+        });
+    }
+
+    // Rounded shape: id(text)
+    if let Some(parsed) = parse_wrapped(core, '(', ')', NodeShape::Rounded) {
+        return Some(parsed);
+    }
+
+    // Square shape: id[text]
+    if let Some(parsed) = parse_wrapped(core, '[', ']', NodeShape::Rect) {
+        return Some(parsed);
+    }
+
+    // Default shape: plain text (no delimiters)
+    let id = normalize_identifier(core);
+    if id.is_empty() {
+        return None;
+    }
+
+    let label = clean_label(Some(core)).filter(|value| value != &id);
+    Some(NodeToken {
+        id,
+        label,
+        shape: NodeShape::Rect,
+    })
+}
+
+/// Parse bang shape: id))text((
+fn parse_mindmap_bang(raw: &str) -> Option<NodeToken> {
+    let start = raw.find("))")?;
+    if !raw.ends_with("((") {
+        return None;
+    }
+
+    let id_raw = raw[..start].trim();
+    let label_raw = raw[start + 2..raw.len().saturating_sub(2)].trim();
+    let mut id = normalize_identifier(id_raw);
+    if id.is_empty() {
+        id = normalize_identifier(label_raw);
+    }
+    if id.is_empty() {
+        return None;
+    }
+
+    Some(NodeToken {
+        id,
+        label: clean_label(Some(label_raw)),
+        shape: NodeShape::Asymmetric,
+    })
+}
+
+/// Parse cloud shape: id)text(
+fn parse_mindmap_cloud(raw: &str) -> Option<NodeToken> {
+    // Must have ) followed by ( at the end, but NOT )) or ((
+    let start = raw.find(')')?;
+    if !raw.ends_with('(') {
+        return None;
+    }
+    // Exclude bang shape (starts with )))
+    if raw[start..].starts_with("))") {
+        return None;
+    }
+    // Exclude circle shape (ends with (()
+    if raw.ends_with("((") {
+        return None;
+    }
+
+    let id_raw = raw[..start].trim();
+    let label_raw = raw[start + 1..raw.len().saturating_sub(1)].trim();
+    let mut id = normalize_identifier(id_raw);
+    if id.is_empty() {
+        id = normalize_identifier(label_raw);
+    }
+    if id.is_empty() {
+        return None;
+    }
+
+    Some(NodeToken {
+        id,
+        label: clean_label(Some(label_raw)),
+        shape: NodeShape::Cloud,
+    })
+}
+
+/// Parse hexagon shape: id{{text}}
+fn parse_mindmap_hexagon(raw: &str) -> Option<NodeToken> {
+    let start = raw.find("{{")?;
+    if !raw.ends_with("}}") {
+        return None;
+    }
+
+    let id_raw = raw[..start].trim();
+    let label_raw = raw[start + 2..raw.len().saturating_sub(2)].trim();
+    let mut id = normalize_identifier(id_raw);
+    if id.is_empty() {
+        id = normalize_identifier(label_raw);
+    }
+    if id.is_empty() {
+        return None;
+    }
+
+    Some(NodeToken {
+        id,
+        label: clean_label(Some(label_raw)),
+        shape: NodeShape::Hexagon,
+    })
 }
 
 fn parse_er(input: &str, builder: &mut IrBuilder) {
@@ -898,7 +1069,9 @@ fn parse_journey(input: &str, builder: &mut IrBuilder) {
 }
 
 fn parse_timeline(input: &str, builder: &mut IrBuilder) {
-    let mut previous_event = None;
+    let mut previous_period: Option<IrNodeId> = None;
+    let mut current_period: Option<IrNodeId> = None;
+    let mut current_section: Option<usize> = None;
 
     for (index, line) in input.lines().enumerate() {
         let line_number = index + 1;
@@ -907,32 +1080,139 @@ fn parse_timeline(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
-        if trimmed == "timeline" || trimmed.starts_with("title ") || trimmed.starts_with("section ")
-        {
+        // Skip header
+        if trimmed == "timeline" {
             continue;
         }
 
-        let Some(event_name) = parse_name_before_colon(trimmed) else {
-            builder.add_warning(format!(
-                "Line {line_number}: unsupported timeline syntax: {trimmed}"
-            ));
+        // Handle title (currently just skip, could store in metadata)
+        if let Some(title_text) = trimmed.strip_prefix("title ") {
+            // Store title in IR metadata if needed
+            let _title = title_text.trim();
             continue;
-        };
-        let event_id = normalize_identifier(event_name);
-        if event_id.is_empty() {
-            builder.add_warning(format!(
-                "Line {line_number}: timeline event identifier could not be derived: {trimmed}"
-            ));
+        }
+
+        // Handle section
+        if let Some(section_name) = trimmed.strip_prefix("section ") {
+            let section_name = section_name.trim();
+            let span = span_for(line_number, line);
+            current_section = builder.ensure_cluster(section_name, Some(section_name), span);
             continue;
         }
 
         let span = span_for(line_number, line);
-        let current_event = builder.intern_node(&event_id, Some(event_name), NodeShape::Rect, span);
-        if let (Some(prev), Some(current)) = (previous_event, current_event) {
-            builder.push_edge(prev, current, ArrowType::Line, None, span);
+
+        // Check if this is a continuation event (starts with :)
+        if let Some(continuation) = trimmed.strip_prefix(':') {
+            // This is a continuation event for the current period
+            if let Some(period_id) = current_period {
+                let events_text = continuation.trim();
+                parse_timeline_events(events_text, period_id, line_number, line, builder);
+            } else {
+                builder.add_warning(format!(
+                    "Line {line_number}: continuation event without preceding time period: {trimmed}"
+                ));
+            }
+            continue;
         }
-        if current_event.is_some() {
-            previous_event = current_event;
+
+        // This should be a time period line: {period} : {event1} : {event2} ...
+        if let Some(colon_pos) = trimmed.find(':') {
+            let period_text = trimmed[..colon_pos].trim();
+            let events_text = trimmed[colon_pos + 1..].trim();
+
+            if period_text.is_empty() {
+                builder.add_warning(format!(
+                    "Line {line_number}: empty time period: {trimmed}"
+                ));
+                continue;
+            }
+
+            // Create time period node
+            let period_id = normalize_identifier(period_text);
+            if period_id.is_empty() {
+                builder.add_warning(format!(
+                    "Line {line_number}: could not derive identifier for time period: {period_text}"
+                ));
+                continue;
+            }
+
+            let period_node = builder.intern_node(&period_id, Some(period_text), NodeShape::Rect, span);
+
+            if let Some(period_node_id) = period_node {
+                // Add to current section if any
+                if let Some(section_idx) = current_section {
+                    builder.add_node_to_cluster(section_idx, period_node_id);
+                }
+
+                // Link to previous period (timeline sequence)
+                if let Some(prev_id) = previous_period {
+                    builder.push_edge(prev_id, period_node_id, ArrowType::Arrow, None, span);
+                }
+
+                previous_period = Some(period_node_id);
+                current_period = Some(period_node_id);
+
+                // Parse events for this period
+                if !events_text.is_empty() {
+                    parse_timeline_events(events_text, period_node_id, line_number, line, builder);
+                }
+            }
+        } else {
+            // Line without colon - treat as a time period with no events
+            let period_text = trimmed;
+            let period_id = normalize_identifier(period_text);
+            if period_id.is_empty() {
+                builder.add_warning(format!(
+                    "Line {line_number}: unsupported timeline syntax: {trimmed}"
+                ));
+                continue;
+            }
+
+            let period_node = builder.intern_node(&period_id, Some(period_text), NodeShape::Rect, span);
+
+            if let Some(period_node_id) = period_node {
+                if let Some(section_idx) = current_section {
+                    builder.add_node_to_cluster(section_idx, period_node_id);
+                }
+
+                if let Some(prev_id) = previous_period {
+                    builder.push_edge(prev_id, period_node_id, ArrowType::Arrow, None, span);
+                }
+
+                previous_period = Some(period_node_id);
+                current_period = Some(period_node_id);
+            }
+        }
+    }
+}
+
+/// Parse events from a timeline event string (possibly colon-separated).
+fn parse_timeline_events(
+    events_text: &str,
+    period_id: IrNodeId,
+    line_number: usize,
+    source_line: &str,
+    builder: &mut IrBuilder,
+) {
+    let span = span_for(line_number, source_line);
+
+    // Events can be separated by colons
+    for event_text in events_text.split(':') {
+        let event_text = event_text.trim();
+        if event_text.is_empty() {
+            continue;
+        }
+
+        let event_id = normalize_identifier(event_text);
+        if event_id.is_empty() {
+            continue;
+        }
+
+        // Create event node and link to period
+        if let Some(event_node_id) = builder.intern_node(&event_id, Some(event_text), NodeShape::Rounded, span) {
+            // Events are children of their time period
+            builder.push_edge(period_id, event_node_id, ArrowType::Line, None, span);
         }
     }
 }
@@ -2054,7 +2334,7 @@ fn is_comment(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use fm_core::{ArrowType, DiagramType, GraphDirection};
+    use fm_core::{ArrowType, DiagramType, GraphDirection, NodeShape};
 
     use super::{detect_type, parse_mermaid};
 
@@ -2311,11 +2591,13 @@ mod tests {
     }
 
     #[test]
-    fn timeline_parses_events_as_linear_edges() {
+    fn timeline_parses_periods_and_events() {
         let parsed = parse_mermaid("timeline\n2025 : kickoff\n2026 : launch");
         assert_eq!(parsed.ir.diagram_type, DiagramType::Timeline);
-        assert_eq!(parsed.ir.nodes.len(), 2);
-        assert_eq!(parsed.ir.edges.len(), 1);
+        // 2 time periods + 2 events = 4 nodes
+        assert_eq!(parsed.ir.nodes.len(), 4);
+        // 1 edge between periods (2025->2026) + 2 edges from periods to events = 3 edges
+        assert_eq!(parsed.ir.edges.len(), 3);
     }
 
     #[test]
@@ -2368,6 +2650,159 @@ mod tests {
         assert_eq!(parsed.ir.diagram_type, DiagramType::Mindmap);
         assert_eq!(parsed.ir.nodes.len(), 4);
         assert_eq!(parsed.ir.edges.len(), 3);
+    }
+
+    #[test]
+    fn mindmap_parses_square_shape() {
+        let parsed = parse_mermaid("mindmap\n  id[Square Node]");
+        assert_eq!(parsed.ir.nodes.len(), 1);
+        assert_eq!(parsed.ir.nodes[0].shape, NodeShape::Rect);
+        assert_eq!(parsed.ir.nodes[0].id, "id");
+    }
+
+    #[test]
+    fn mindmap_parses_rounded_shape() {
+        let parsed = parse_mermaid("mindmap\n  id(Rounded Node)");
+        assert_eq!(parsed.ir.nodes.len(), 1);
+        assert_eq!(parsed.ir.nodes[0].shape, NodeShape::Rounded);
+    }
+
+    #[test]
+    fn mindmap_parses_circle_shape() {
+        let parsed = parse_mermaid("mindmap\n  id((Circle Node))");
+        assert_eq!(parsed.ir.nodes.len(), 1);
+        assert_eq!(parsed.ir.nodes[0].shape, NodeShape::Circle);
+    }
+
+    #[test]
+    fn mindmap_parses_bang_shape() {
+        let parsed = parse_mermaid("mindmap\n  id))Bang Node((");
+        assert_eq!(parsed.ir.nodes.len(), 1);
+        assert_eq!(parsed.ir.nodes[0].shape, NodeShape::Asymmetric);
+        assert_eq!(parsed.ir.nodes[0].id, "id");
+    }
+
+    #[test]
+    fn mindmap_parses_cloud_shape() {
+        let parsed = parse_mermaid("mindmap\n  id)Cloud Node(");
+        assert_eq!(parsed.ir.nodes.len(), 1);
+        assert_eq!(parsed.ir.nodes[0].shape, NodeShape::Cloud);
+        assert_eq!(parsed.ir.nodes[0].id, "id");
+    }
+
+    #[test]
+    fn mindmap_parses_hexagon_shape() {
+        let parsed = parse_mermaid("mindmap\n  id{{Hexagon Node}}");
+        assert_eq!(parsed.ir.nodes.len(), 1);
+        assert_eq!(parsed.ir.nodes[0].shape, NodeShape::Hexagon);
+        assert_eq!(parsed.ir.nodes[0].id, "id");
+    }
+
+    #[test]
+    fn mindmap_handles_icon_directive() {
+        // Icons are recognized but currently not stored in IR
+        let parsed = parse_mermaid("mindmap\n  Root\n    Child\n    ::icon(fa fa-book)");
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert!(parsed.warnings.is_empty());
+    }
+
+    #[test]
+    fn mindmap_handles_class_directive() {
+        let parsed = parse_mermaid("mindmap\n  Root\n    A[Node A]\n    :::urgent large");
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        // Classes are applied to the previous node
+        let node_a = parsed.ir.nodes.iter().find(|n| n.id == "A").unwrap();
+        assert!(node_a.classes.contains(&"urgent".to_string()));
+        assert!(node_a.classes.contains(&"large".to_string()));
+    }
+
+    #[test]
+    fn mindmap_complex_hierarchy() {
+        let input = r#"mindmap
+  root((mindmap))
+    Origins
+      Long history
+      Popularisation
+        Tony Buzan
+    Research
+      On effectiveness
+    Tools
+      Pen and paper
+      Mermaid"#;
+        let parsed = parse_mermaid(input);
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Mindmap);
+        // root, Origins, Long history, Popularisation, Tony Buzan, Research, On effectiveness, Tools, Pen and paper, Mermaid = 10 nodes
+        assert_eq!(parsed.ir.nodes.len(), 10);
+        // Check root has circle shape
+        let root = parsed.ir.nodes.iter().find(|n| n.id == "root").unwrap();
+        assert_eq!(root.shape, NodeShape::Circle);
+    }
+
+    #[test]
+    fn timeline_parses_basic_structure() {
+        let input = r#"timeline
+    title History of Social Media
+    2002 : LinkedIn
+    2004 : Facebook
+    2005 : YouTube"#;
+        let parsed = parse_mermaid(input);
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Timeline);
+        // 3 time periods + 3 events = 6 nodes
+        assert_eq!(parsed.ir.nodes.len(), 6);
+        // Timeline sequence edges (2002->2004->2005) + event edges (period->event)
+        assert!(parsed.ir.edges.len() >= 5);
+    }
+
+    #[test]
+    fn timeline_parses_multiple_events_per_period() {
+        let input = "timeline\n    2004 : Facebook : Google";
+        let parsed = parse_mermaid(input);
+        // 1 time period + 2 events = 3 nodes
+        assert_eq!(parsed.ir.nodes.len(), 3);
+        // 2 edges from period to each event
+        assert_eq!(parsed.ir.edges.len(), 2);
+    }
+
+    #[test]
+    fn timeline_parses_continuation_events() {
+        let input = r#"timeline
+    2004 : Facebook
+         : Google
+         : Orkut"#;
+        let parsed = parse_mermaid(input);
+        // 1 time period + 3 events = 4 nodes
+        assert_eq!(parsed.ir.nodes.len(), 4);
+        // 3 edges from period to each event
+        assert_eq!(parsed.ir.edges.len(), 3);
+    }
+
+    #[test]
+    fn timeline_parses_sections() {
+        let input = r#"timeline
+    title Timeline
+    section Early Days
+        2002 : LinkedIn
+    section Growth Era
+        2004 : Facebook"#;
+        let parsed = parse_mermaid(input);
+        // 2 time periods + 2 events = 4 nodes
+        assert_eq!(parsed.ir.nodes.len(), 4);
+        // 2 clusters (sections)
+        assert_eq!(parsed.ir.clusters.len(), 2);
+    }
+
+    #[test]
+    fn timeline_events_have_rounded_shape() {
+        let parsed = parse_mermaid("timeline\n    2004 : Facebook");
+        let event = parsed.ir.nodes.iter().find(|n| n.id == "Facebook").unwrap();
+        assert_eq!(event.shape, NodeShape::Rounded);
+    }
+
+    #[test]
+    fn timeline_periods_have_rect_shape() {
+        let parsed = parse_mermaid("timeline\n    2004 : Facebook");
+        let period = parsed.ir.nodes.iter().find(|n| n.id == "2004").unwrap();
+        assert_eq!(period.shape, NodeShape::Rect);
     }
 
     #[test]
