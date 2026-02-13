@@ -21,8 +21,8 @@ mod shapes;
 mod viewport;
 
 pub use context::{
-    Canvas2dContext, Color, LineCap, LineJoin, MockCanvas2dContext, Point, TextAlign,
-    TextBaseline, TextMetrics,
+    Canvas2dContext, Color, LineCap, LineJoin, MockCanvas2dContext, Point, TextAlign, TextBaseline,
+    TextMetrics,
 };
 pub use renderer::{Canvas2dRenderer, CanvasRenderConfig, CanvasRenderResult};
 pub use viewport::{Viewport, ViewportTransform};
