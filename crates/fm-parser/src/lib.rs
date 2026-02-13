@@ -10,7 +10,7 @@ use serde_json::json;
 
 pub use dot_parser::{looks_like_dot, parse_dot};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ParseResult {
     pub ir: MermaidDiagramIr,
     pub warnings: Vec<String>,
