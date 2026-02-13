@@ -3,10 +3,10 @@
 use std::sync::{LazyLock, RwLock};
 
 use fm_layout::{LayoutAlgorithm, layout};
-use fm_parser::{detect_type_with_confidence, parse};
-use fm_render_canvas::CanvasRenderConfig;
 #[cfg(target_arch = "wasm32")]
 use fm_parser::ParseResult;
+use fm_parser::{detect_type_with_confidence, parse};
+use fm_render_canvas::CanvasRenderConfig;
 #[cfg(target_arch = "wasm32")]
 use fm_render_canvas::{
     Canvas2dContext, CanvasRenderResult, LineCap, LineJoin, TextAlign, TextBaseline, TextMetrics,
@@ -26,19 +26,10 @@ pub struct WasmRenderOutput {
     pub detected_type: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct RuntimeConfig {
     svg: SvgRenderConfig,
     canvas: CanvasRenderConfig,
-}
-
-impl Default for RuntimeConfig {
-    fn default() -> Self {
-        Self {
-            svg: SvgRenderConfig::default(),
-            canvas: CanvasRenderConfig::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
