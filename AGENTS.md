@@ -21,10 +21,10 @@ If I tell you to do something, even if it goes against what follows below, YOU M
 ## Irreversible Git & Filesystem Actions — DO NOT EVER BREAK GLASS
 
 1. **Absolutely forbidden commands:** `git reset --hard`, `git clean -fd`, `rm -rf`, or any command that can delete or overwrite code/data must never be run unless the user explicitly provides the exact command and states, in the same message, that they understand and want the irreversible consequences.
-2. **No guessing:** If there is any uncertainty about what a command might delete or overwrite, stop immediately and ask the user for specific approval.
-3. **Safer alternatives first:** When cleanup or rollbacks are needed, request permission to use non-destructive options (`git status`, `git diff`, `git stash`, backups) before considering destructive actions.
-4. **Mandatory explicit plan:** Even after explicit authorization, restate the command verbatim, list exactly what will be affected, and wait for confirmation.
-5. **Document the confirmation:** If a destructive command is approved and run, record the exact authorization text, command executed, and timestamp in session notes/final report.
+2. **No guessing:** If there is any uncertainty about what a command might delete or overwrite, stop immediately and ask the user for specific approval. "I think it's safe" is never acceptable.
+3. **Safer alternatives first:** When cleanup or rollbacks are needed, request permission to use non-destructive options (`git status`, `git diff`, `git stash`, copying to backups) before ever considering a destructive command.
+4. **Mandatory explicit plan:** Even after explicit user authorization, restate the command verbatim, list exactly what will be affected, and wait for a confirmation that your understanding is correct. Only then may you execute it—if anything remains ambiguous, refuse and escalate.
+5. **Document the confirmation:** When running any approved destructive command, record (in the session notes / final response) the exact user text that authorized it, the command actually run, and the execution time. If that record is absent, the operation did not happen.
 
 ---
 
@@ -32,27 +32,184 @@ If I tell you to do something, even if it goes against what follows below, YOU M
 
 **The default branch is `main`. The `master` branch exists only for legacy URL compatibility.**
 
-- **All work happens on `main`**
-- **Never reference `master` in code/docs**
-- **After pushing to `main`, keep `master` synced:**
+- **All work happens on `main`** — commits, PRs, feature branches all merge to `main`
+- **Never reference `master` in code or docs** — if you see `master` anywhere, it's a bug that needs fixing
+- **The `master` branch must stay synchronized with `main`** — after pushing to `main`, also push to `master`:
+  ```bash
+  git push origin main:master
+  ```
 
-```bash
-git push origin main:master
-```
-
-If you find `master` references in docs/scripts/config, update them to `main` unless explicitly required for legacy mirror behavior.
+**If you see `master` referenced anywhere:**
+1. Update it to `main`
+2. Ensure `master` is synchronized: `git push origin main:master`
 
 ---
 
-## FrankenMermaid Project Overview
+## Toolchain: Rust & Cargo
 
-`frankenmermaid` is a Rust-first Mermaid-compatible diagram engine with a shared IR pipeline for:
+We only use **Cargo** in this project, NEVER any other package manager.
 
-- CLI (`fm-cli`)
-- SVG renderer (`fm-render-svg`)
-- Terminal renderer (`fm-render-term`)
-- Canvas/Web rendering surface (`fm-render-canvas`)
-- WASM packaging (`fm-wasm`)
+- **Edition:** Rust 2024 (nightly required — see `rust-toolchain.toml`)
+- **Dependency versions:** Explicit versions for stability
+- **Configuration:** Cargo.toml workspace with `workspace = true` pattern
+- **Unsafe code:** Forbidden (`#![forbid(unsafe_code)]`)
+
+### Key Dependencies
+
+| Crate | Purpose |
+|-------|---------|
+| `serde` + `serde_json` | IR/config serialization and evidence output |
+| `thiserror` | Ergonomic error type derivation |
+| `clap` | CLI command parsing |
+| `unicode-segmentation` | Robust grapheme/token handling in parser |
+| `json5` | Mermaid init directive parsing fallback |
+| `tracing` + `tracing-subscriber` | Structured logging and diagnostics |
+| `wasm-bindgen` + `js-sys` + `web-sys` | WASM/browser integration surface |
+| `notify` | File watching for live reload (optional, `watch` feature) |
+| `tiny_http` | Local preview server (optional, `serve` feature) |
+| `resvg` + `usvg` | PNG rasterization from SVG (optional, `png` feature) |
+
+### Release Profile
+
+The release build optimizes for size (WASM target) with layout-critical crate overrides:
+
+```toml
+[profile.release]
+opt-level = "z"       # Optimize for binary size (WASM)
+lto = true            # Link-time optimization
+codegen-units = 1     # Single codegen unit for better optimization
+panic = "abort"       # No unwinding overhead
+strip = true          # Remove debug symbols
+
+[profile.release.package.fm-layout]
+opt-level = 3         # Maximum performance for layout engine
+```
+
+---
+
+## Code Editing Discipline
+
+### No Script-Based Changes
+
+**NEVER** run a script that processes/changes code files in this repo. Brittle regex-based transformations create far more problems than they solve.
+
+- **Always make code changes manually**, even when there are many instances
+- For many simple changes: use parallel subagents
+- For subtle/complex changes: do them methodically yourself
+
+### No File Proliferation
+
+If you want to change something or add a feature, **revise existing code files in place**.
+
+**NEVER** create variations like:
+- `layout_v2.rs`
+- `parser_new.rs`
+- `renderer_improved.rs`
+
+New files are reserved for **genuinely new functionality** that makes zero sense to include in any existing file. The bar for creating new files is **incredibly high**.
+
+---
+
+## Backwards Compatibility
+
+We do not care about backwards compatibility—we're in early development with no users. We want to do things the **RIGHT** way with **NO TECH DEBT**.
+
+- Never create "compatibility shims"
+- Never create wrapper functions for deprecated APIs
+- Just fix the code directly
+
+---
+
+## Compiler Checks (CRITICAL)
+
+**After any substantive code changes, you MUST verify no errors were introduced:**
+
+```bash
+# Check for compiler errors and warnings (workspace-wide)
+cargo check --workspace --all-targets
+
+# Check for clippy lints (pedantic + nursery are enabled)
+cargo clippy --workspace --all-targets -- -D warnings
+
+# Verify formatting
+cargo fmt --check
+```
+
+If you see errors, **carefully understand and resolve each issue**. Read sufficient context to fix them the RIGHT way.
+
+---
+
+## Testing
+
+### Testing Policy
+
+Every component crate includes inline `#[cfg(test)]` unit tests alongside the implementation. Tests must cover:
+- Happy path
+- Edge cases (empty input, max values, boundary conditions)
+- Error conditions
+
+Cross-component integration tests live in the workspace `tests/` directory.
+
+### Unit Tests
+
+```bash
+# Run all tests across the workspace
+cargo test --workspace
+
+# Run with output
+cargo test --workspace -- --nocapture
+
+# Run tests for a specific crate
+cargo test -p fm-core
+cargo test -p fm-parser
+cargo test -p fm-layout
+cargo test -p fm-render-svg
+cargo test -p fm-render-term
+cargo test -p fm-render-canvas
+cargo test -p fm-wasm
+cargo test -p fm-cli
+```
+
+### Test Categories
+
+| Crate | Focus Areas |
+|-------|-------------|
+| `fm-core` | IR types, config contracts, diagnostic formatting, error type serialization |
+| `fm-parser` | Mermaid syntax parsing, DOT bridge, recovery/warning diagnostics, edge cases |
+| `fm-layout` | Deterministic layout, node/edge geometry, stable tie-breaking, layout stats |
+| `fm-render-svg` | SVG document structure, element/path/text generation, defs system |
+| `fm-render-term` | Terminal rendering surface output |
+| `fm-render-canvas` | Canvas rendering surface output |
+| `fm-wasm` | WASM API contracts, parse/layout/render round-trip |
+| `fm-cli` | CLI subcommands (`detect`, `parse`, `render`), end-to-end smoke tests |
+
+### Parser/Renderer Smoke Checks
+
+```bash
+fm-cli detect "flowchart LR\nA-->B"
+fm-cli parse "flowchart LR\nA-->B"
+fm-cli render "flowchart LR\nA-->B"
+```
+
+### Determinism Checks
+
+For layout/render work, run the same input repeatedly and confirm stable output.
+
+---
+
+## Third-Party Library Usage
+
+If you aren't 100% sure how to use a third-party library, **SEARCH ONLINE** to find the latest documentation and current best practices.
+
+---
+
+## frankenmermaid — This Project
+
+**This is the project you're working on.** frankenmermaid is a Rust-first Mermaid-compatible diagram engine with a shared IR pipeline for CLI, SVG, terminal, canvas/web, and WASM targets.
+
+### What It Does
+
+Parses Mermaid-like diagram input robustly (best effort + diagnostics), produces deterministic layouts, and renders high-quality output across multiple targets (SVG, terminal, canvas, WASM).
 
 ### Core Goal
 
@@ -85,13 +242,9 @@ When extraction parity questions come up, use the FrankenTUI sources as behavior
 - Do not cargo-cult JS internals where a clean Rust-native design is better.
 - Use it for syntax/behavior edge-case validation only.
 
----
+### Architecture
 
-## Technical Architecture
-
-### High-Level Pipeline
-
-```text
+```
 Input text
   -> fm-parser (detect + parse + recovery + warnings)
   -> fm-core::MermaidDiagramIr
@@ -105,280 +258,493 @@ Input text
      - fm-wasm
 ```
 
-### Workspace Crate Map
+### Workspace Structure
 
-| Crate | Responsibility |
-|------|----------------|
-| `fm-core` | Shared IR/types/config/errors/diagnostics |
-| `fm-parser` | Diagram detection + Mermaid/DOT parsing + recovery |
-| `fm-layout` | Layout pipeline, node/edge geometry, stats/trace |
-| `fm-render-svg` | Zero-dependency SVG document/element/path/text/defs system + renderer |
-| `fm-render-term` | Terminal rendering surface (currently minimal baseline) |
-| `fm-render-canvas` | Canvas rendering surface (currently minimal baseline) |
-| `fm-wasm` | WASM-facing API wrapper around parse/layout/render |
-| `fm-cli` | CLI surface (`detect`, `parse`, `render`) |
+```
+frankenmermaid/
+├── Cargo.toml                         # Workspace root
+├── rust-toolchain.toml                # Nightly toolchain + components/targets
+├── crates/
+│   ├── fm-core/                       # Shared IR/types/config/errors/diagnostics
+│   ├── fm-parser/                     # Diagram detection + Mermaid/DOT parsing + recovery
+│   ├── fm-layout/                     # Layout pipeline, node/edge geometry, stats/trace
+│   ├── fm-render-svg/                 # Zero-dependency SVG document/element/path/text/defs system + renderer
+│   ├── fm-render-term/                # Terminal rendering surface
+│   ├── fm-render-canvas/              # Canvas rendering surface
+│   ├── fm-wasm/                       # WASM-facing API wrapper around parse/layout/render
+│   └── fm-cli/                        # CLI surface (detect, parse, render)
+├── legacy_mermaid_code/               # Format/compatibility reference corpus
+└── tests/                             # Cross-component integration tests
+```
 
-### Key Files
+### Key Files by Crate
 
-| File | Purpose |
-|------|---------|
-| `Cargo.toml` | Workspace members/dependencies/release profile |
-| `rust-toolchain.toml` | Nightly toolchain + components/target |
-| `crates/fm-core/src/lib.rs` | Core IR and config/diagnostic contracts |
-| `crates/fm-parser/src/mermaid_parser.rs` | Main Mermaid parser |
-| `crates/fm-parser/src/dot_parser.rs` | DOT bridge parser |
-| `crates/fm-layout/src/lib.rs` | Layout pipeline and layout stats |
-| `crates/fm-render-svg/src/lib.rs` | SVG rendering orchestration |
-| `crates/fm-cli/src/main.rs` | End-user CLI entrypoint |
-| `crates/fm-wasm/src/lib.rs` | WASM API entrypoint |
+| Crate | Key Files | Purpose |
+|-------|-----------|---------|
+| `fm-core` | `src/lib.rs` | Core IR and config/diagnostic contracts |
+| `fm-parser` | `src/mermaid_parser.rs` | Main Mermaid parser |
+| `fm-parser` | `src/dot_parser.rs` | DOT bridge parser |
+| `fm-layout` | `src/lib.rs` | Layout pipeline and layout stats |
+| `fm-render-svg` | `src/lib.rs` | SVG rendering orchestration |
+| `fm-render-term` | `src/lib.rs` | Terminal rendering surface |
+| `fm-render-canvas` | `src/lib.rs` | Canvas rendering surface |
+| `fm-wasm` | `src/lib.rs` | WASM API entrypoint |
+| `fm-cli` | `src/main.rs` | End-user CLI entrypoint |
 
----
-
-## Toolchain: Rust & Cargo
-
-We only use **Cargo** in this project.
-
-- **Edition:** Rust 2024
-- **Toolchain:** nightly (see `rust-toolchain.toml`)
-- **Unsafe code:** forbidden (`#![forbid(unsafe_code)]`)
-
-### Release Profile
+### Feature Flags
 
 ```toml
-[profile.release]
-opt-level = "z"
-lto = true
-codegen-units = 1
-panic = "abort"
-strip = true
+[features]
+default = []
+watch = ['dep:notify']                 # File watching for live reload
+serve = ['dep:tiny_http']              # Local preview server
+png = ['dep:resvg', 'dep:usvg']       # PNG rasterization from SVG
 ```
 
-### Key Dependencies
+### Key Design Decisions
 
-| Crate | Purpose |
-|------|---------|
-| `serde`, `serde_json` | IR/config serialization and evidence output |
-| `thiserror` | Error definitions |
-| `clap` | CLI command parsing |
-| `unicode-segmentation` | Robust grapheme/token handling in parser |
-| `json5` | Mermaid init directive parsing fallback |
-| `wasm-bindgen`, `js-sys`, `web-sys` | WASM/browser integration surface |
-| `tracing`, `tracing-subscriber` | Instrumentation and debug logging |
-
----
-
-## Code Editing Discipline
-
-### No Script-Based Bulk Rewrites
-
-**NEVER** run scripts that mass-edit code files via brittle regex transformations.
-
-- Make code changes intentionally and review context.
-- For repetitive simple edits: use careful, explicit tool-assisted edits.
-- For nuanced changes: modify manually with full context.
-
-### No File Proliferation
-
-Prefer editing existing files in place.
-
-Do **not** create clutter variants like:
-
-- `layout_v2.rs`
-- `parser_new.rs`
-- `renderer_improved.rs`
-
-Create new files only when introducing genuinely new modules that cannot cleanly fit existing structure.
+- **Best-effort parse with warnings** over hard failure when feasible
+- **Unsupported constructs degrade gracefully** with explicit diagnostics
+- **Deterministic layout is mandatory** — stable tie-breaking for ranks/order
+- **Reproducible output** for CI snapshot confidence
+- **Clean, inspectable output** — accessibility and metadata are part of correctness
+- **No unsafe/unsanitized output paths** in renderers
+- **Size-optimized release profile** (`opt-level = "z"`) for WASM target, with layout crate override (`opt-level = 3`) for performance
+- **Structured tracing** throughout — diagnostics via `tracing` crate
 
 ---
 
-## Backwards Compatibility
+## MCP Agent Mail — Multi-Agent Coordination
 
-Early-stage project rule: prioritize correctness and architecture quality over compatibility shims.
+A mail-like layer that lets coding agents coordinate asynchronously via MCP tools and resources. Provides identities, inbox/outbox, searchable threads, and advisory file reservations with human-auditable artifacts in Git.
 
-- No temporary wrapper layers for deprecated APIs
-- No dual-path legacy support unless explicitly requested
-- Fix APIs directly and keep design clean
+### Why It's Useful
+
+- **Prevents conflicts:** Explicit file reservations (leases) for files/globs
+- **Token-efficient:** Messages stored in per-project archive, not in context
+- **Quick reads:** `resource://inbox/...`, `resource://thread/...`
+
+### Same Repository Workflow
+
+1. **Register identity:**
+   ```
+   ensure_project(project_key=<abs-path>)
+   register_agent(project_key, program, model)
+   ```
+
+2. **Reserve files before editing:**
+   ```
+   file_reservation_paths(project_key, agent_name, ["src/**"], ttl_seconds=3600, exclusive=true)
+   ```
+
+3. **Communicate with threads:**
+   ```
+   send_message(..., thread_id="FEAT-123")
+   fetch_inbox(project_key, agent_name)
+   acknowledge_message(project_key, agent_name, message_id)
+   ```
+
+4. **Quick reads:**
+   ```
+   resource://inbox/{Agent}?project=<abs-path>&limit=20
+   resource://thread/{id}?project=<abs-path>&include_bodies=true
+   ```
+
+### Macros vs Granular Tools
+
+- **Prefer macros for speed:** `macro_start_session`, `macro_prepare_thread`, `macro_file_reservation_cycle`, `macro_contact_handshake`
+- **Use granular tools for control:** `register_agent`, `file_reservation_paths`, `send_message`, `fetch_inbox`, `acknowledge_message`
+
+### Common Pitfalls
+
+- `"from_agent not registered"`: Always `register_agent` in the correct `project_key` first
+- `"FILE_RESERVATION_CONFLICT"`: Adjust patterns, wait for expiry, or use non-exclusive reservation
+- **Auth errors:** If JWT+JWKS enabled, include bearer token with matching `kid`
 
 ---
 
-## Compiler Checks (CRITICAL)
+## Beads (br) — Dependency-Aware Issue Tracking
 
-After substantive changes, run:
+Beads provides a lightweight, dependency-aware issue database and CLI (`br` - beads_rust) for selecting "ready work," setting priorities, and tracking status. It complements MCP Agent Mail's messaging and file reservations.
+
+**Important:** `br` is non-invasive—it NEVER runs git commands automatically. You must manually commit changes after `br sync --flush-only`.
+
+### Conventions
+
+- **Single source of truth:** Beads for task status/priority/dependencies; Agent Mail for conversation and audit
+- **Shared identifiers:** Use Beads issue ID (e.g., `br-123`) as Mail `thread_id` and prefix subjects with `[br-123]`
+- **Reservations:** When starting a task, call `file_reservation_paths()` with the issue ID in `reason`
+
+### Typical Agent Flow
+
+1. **Pick ready work (Beads):**
+   ```bash
+   br ready --json  # Choose highest priority, no blockers
+   ```
+
+2. **Reserve edit surface (Mail):**
+   ```
+   file_reservation_paths(project_key, agent_name, ["src/**"], ttl_seconds=3600, exclusive=true, reason="br-123")
+   ```
+
+3. **Announce start (Mail):**
+   ```
+   send_message(..., thread_id="br-123", subject="[br-123] Start: <title>", ack_required=true)
+   ```
+
+4. **Work and update:** Reply in-thread with progress
+
+5. **Complete and release:**
+   ```bash
+   br close 123 --reason "Completed"
+   br sync --flush-only  # Export to JSONL (no git operations)
+   ```
+   ```
+   release_file_reservations(project_key, agent_name, paths=["src/**"])
+   ```
+   Final Mail reply: `[br-123] Completed` with summary
+
+### Mapping Cheat Sheet
+
+| Concept | Value |
+|---------|-------|
+| Mail `thread_id` | `br-###` |
+| Mail subject | `[br-###] ...` |
+| File reservation `reason` | `br-###` |
+| Commit messages | Include `br-###` for traceability |
+
+---
+
+## bv — Graph-Aware Triage Engine
+
+bv is a graph-aware triage engine for Beads projects (`.beads/beads.jsonl`). It computes PageRank, betweenness, critical path, cycles, HITS, eigenvector, and k-core metrics deterministically.
+
+**Scope boundary:** bv handles *what to work on* (triage, priority, planning). For agent-to-agent coordination (messaging, work claiming, file reservations), use MCP Agent Mail.
+
+**CRITICAL: Use ONLY `--robot-*` flags. Bare `bv` launches an interactive TUI that blocks your session.**
+
+### The Workflow: Start With Triage
+
+**`bv --robot-triage` is your single entry point.** It returns:
+- `quick_ref`: at-a-glance counts + top 3 picks
+- `recommendations`: ranked actionable items with scores, reasons, unblock info
+- `quick_wins`: low-effort high-impact items
+- `blockers_to_clear`: items that unblock the most downstream work
+- `project_health`: status/type/priority distributions, graph metrics
+- `commands`: copy-paste shell commands for next steps
 
 ```bash
-cargo check --all-targets
-cargo clippy --all-targets -- -D warnings
-cargo fmt --check
+bv --robot-triage        # THE MEGA-COMMAND: start here
+bv --robot-next          # Minimal: just the single top pick + claim command
 ```
 
-Resolve failures properly; do not suppress warnings casually.
+### Command Reference
+
+**Planning:**
+| Command | Returns |
+|---------|---------|
+| `--robot-plan` | Parallel execution tracks with `unblocks` lists |
+| `--robot-priority` | Priority misalignment detection with confidence |
+
+**Graph Analysis:**
+| Command | Returns |
+|---------|---------|
+| `--robot-insights` | Full metrics: PageRank, betweenness, HITS, eigenvector, critical path, cycles, k-core, articulation points, slack |
+| `--robot-label-health` | Per-label health: `health_level`, `velocity_score`, `staleness`, `blocked_count` |
+| `--robot-label-flow` | Cross-label dependency: `flow_matrix`, `dependencies`, `bottleneck_labels` |
+| `--robot-label-attention [--attention-limit=N]` | Attention-ranked labels |
+
+**History & Change Tracking:**
+| Command | Returns |
+|---------|---------|
+| `--robot-history` | Bead-to-commit correlations |
+| `--robot-diff --diff-since <ref>` | Changes since ref: new/closed/modified issues, cycles |
+
+**Other:**
+| Command | Returns |
+|---------|---------|
+| `--robot-burndown <sprint>` | Sprint burndown, scope changes, at-risk items |
+| `--robot-forecast <id\|all>` | ETA predictions with dependency-aware scheduling |
+| `--robot-alerts` | Stale issues, blocking cascades, priority mismatches |
+| `--robot-suggest` | Hygiene: duplicates, missing deps, label suggestions |
+| `--robot-graph [--graph-format=json\|dot\|mermaid]` | Dependency graph export |
+| `--export-graph <file.html>` | Interactive HTML visualization |
+
+### Scoping & Filtering
+
+```bash
+bv --robot-plan --label backend              # Scope to label's subgraph
+bv --robot-insights --as-of HEAD~30          # Historical point-in-time
+bv --recipe actionable --robot-plan          # Pre-filter: ready to work
+bv --recipe high-impact --robot-triage       # Pre-filter: top PageRank
+bv --robot-triage --robot-triage-by-track    # Group by parallel work streams
+bv --robot-triage --robot-triage-by-label    # Group by domain
+```
+
+### Understanding Robot Output
+
+**All robot JSON includes:**
+- `data_hash` — Fingerprint of source beads.jsonl
+- `status` — Per-metric state: `computed|approx|timeout|skipped` + elapsed ms
+- `as_of` / `as_of_commit` — Present when using `--as-of`
+
+**Two-phase analysis:**
+- **Phase 1 (instant):** degree, topo sort, density
+- **Phase 2 (async, 500ms timeout):** PageRank, betweenness, HITS, eigenvector, cycles
+
+### jq Quick Reference
+
+```bash
+bv --robot-triage | jq '.quick_ref'                        # At-a-glance summary
+bv --robot-triage | jq '.recommendations[0]'               # Top recommendation
+bv --robot-plan | jq '.plan.summary.highest_impact'        # Best unblock target
+bv --robot-insights | jq '.status'                         # Check metric readiness
+bv --robot-insights | jq '.Cycles'                         # Circular deps (must fix!)
+```
 
 ---
 
-## Testing Strategy
+## UBS — Ultimate Bug Scanner
 
-Use multiple levels of validation:
+**Golden Rule:** `ubs <changed-files>` before every commit. Exit 0 = safe. Exit >0 = fix & re-run.
 
-### 1. Workspace Unit Tests
-
-```bash
-cargo test --workspace --all-targets
-```
-
-### 2. Focused Crate Tests
+### Commands
 
 ```bash
-cargo test -p fm-core
-cargo test -p fm-parser
-cargo test -p fm-layout
-cargo test -p fm-render-svg
-cargo test -p fm-render-term
-cargo test -p fm-render-canvas
-cargo test -p fm-wasm
+ubs file.rs file2.rs                    # Specific files (< 1s) — USE THIS
+ubs $(git diff --name-only --cached)    # Staged files — before commit
+ubs --only=rust,toml src/               # Language filter (3-5x faster)
+ubs --ci --fail-on-warning .            # CI mode — before PR
+ubs .                                   # Whole project (ignores target/, Cargo.lock)
 ```
 
-### 3. Parser/Renderer Smoke Checks
+### Output Format
 
-```bash
-fm-cli detect "flowchart LR\nA-->B"
-fm-cli parse "flowchart LR\nA-->B"
-fm-cli render "flowchart LR\nA-->B"
+```
+⚠️  Category (N errors)
+    file.rs:42:5 – Issue description
+    💡 Suggested fix
+Exit code: 1
 ```
 
-### 4. Determinism Checks
+Parse: `file:line:col` → location | 💡 → how to fix | Exit 0/1 → pass/fail
 
-For layout/render work, run the same input repeatedly and confirm stable output.
+### Fix Workflow
+
+1. Read finding → category + fix suggestion
+2. Navigate `file:line:col` → view context
+3. Verify real issue (not false positive)
+4. Fix root cause (not symptom)
+5. Re-run `ubs <file>` → exit 0
+6. Commit
+
+### Bug Severity
+
+- **Critical (always fix):** Memory safety, use-after-free, data races, SQL injection
+- **Important (production):** Unwrap panics, resource leaks, overflow checks
+- **Contextual (judgment):** TODO/FIXME, println! debugging
 
 ---
 
-## CI/CD Pipeline
+## RCH — Remote Compilation Helper
 
-Workflow file: `.github/workflows/ci.yml`
+RCH offloads `cargo build`, `cargo test`, `cargo clippy`, and other compilation commands to a fleet of 8 remote Contabo VPS workers instead of building locally. This prevents compilation storms from overwhelming csd when many agents run simultaneously.
 
-### Jobs
+**RCH is installed at `~/.local/bin/rch` and is hooked into Claude Code's PreToolUse automatically.** Most of the time you don't need to do anything if you are Claude Code — builds are intercepted and offloaded transparently.
 
-| Job | Purpose |
-|-----|---------|
-| `check` | `fmt`, `clippy -D warnings`, `cargo test` |
-| `wasm-build` | Install `wasm-pack`, build `fm-wasm` for `wasm32-unknown-unknown` |
-| `coverage` | Run `cargo llvm-cov` and publish `lcov.info` artifact |
+To manually offload a build:
+```bash
+rch exec -- cargo build --release
+rch exec -- cargo test
+rch exec -- cargo clippy
+```
 
-### Local Repro of CI Core
+Quick commands:
+```bash
+rch doctor                    # Health check
+rch workers probe --all       # Test connectivity to all 8 workers
+rch status                    # Overview of current state
+rch queue                     # See active/waiting builds
+```
+
+If rch or its workers are unavailable, it fails open — builds run locally as normal.
+
+**Note for Codex/GPT-5.2:** Codex does not have the automatic PreToolUse hook, but you can (and should) still manually offload compute-intensive compilation commands using `rch exec -- <command>`. This avoids local resource contention when multiple agents are building simultaneously.
+
+---
+
+## ast-grep vs ripgrep
+
+**Use `ast-grep` when structure matters.** It parses code and matches AST nodes, ignoring comments/strings, and can **safely rewrite** code.
+
+- Refactors/codemods: rename APIs, change import forms
+- Policy checks: enforce patterns across a repo
+- Editor/automation: LSP mode, `--json` output
+
+**Use `ripgrep` when text is enough.** Fastest way to grep literals/regex.
+
+- Recon: find strings, TODOs, log lines, config values
+- Pre-filter: narrow candidate files before ast-grep
+
+### Rule of Thumb
+
+- Need correctness or **applying changes** → `ast-grep`
+- Need raw speed or **hunting text** → `rg`
+- Often combine: `rg` to shortlist files, then `ast-grep` to match/modify
+
+### Rust Examples
 
 ```bash
-cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --all-targets
+# Find structured code (ignores comments)
+ast-grep run -l Rust -p 'fn $NAME($$$ARGS) -> $RET { $$$BODY }'
+
+# Find all unwrap() calls
+ast-grep run -l Rust -p '$EXPR.unwrap()'
+
+# Quick textual hunt
+rg -n 'println!' -t rust
+
+# Combine speed + precision
+rg -l -t rust 'unwrap\(' | xargs ast-grep run -l Rust -p '$X.unwrap()' --json
 ```
 
 ---
 
-## Parser & Layout Notes
+## Morph Warp Grep — AI-Powered Code Search
 
-### Parser Principles
+**Use `mcp__morph-mcp__warp_grep` for exploratory "how does X work?" questions.** An AI agent expands your query, greps the codebase, reads relevant files, and returns precise line ranges with full context.
 
-- Best-effort parse with warnings over hard failure when feasible
-- Unsupported constructs should degrade gracefully with explicit diagnostics
-- Preserve enough structure in IR for downstream layout/rendering
+**Use `ripgrep` for targeted searches.** When you know exactly what you're looking for.
 
-### Layout Principles
+**Use `ast-grep` for structural patterns.** When you need AST precision for matching/rewriting.
 
-- Determinism is mandatory
-- Stable tie-breaking for ranks/order where choices exist
-- Preserve reproducible output for CI snapshot confidence
+### When to Use What
 
-### Rendering Principles
+| Scenario | Tool | Why |
+|----------|------|-----|
+| "How does the layout pipeline work?" | `warp_grep` | Exploratory; don't know where to start |
+| "Where is the SVG renderer implemented?" | `warp_grep` | Need to understand architecture |
+| "Find all uses of `MermaidDiagramIr`" | `ripgrep` | Targeted literal search |
+| "Find files with `println!`" | `ripgrep` | Simple pattern |
+| "Replace all `unwrap()` with `expect()`" | `ast-grep` | Structural refactor |
 
-- Keep output clean and inspectable
-- Accessibility and metadata are part of correctness
-- Avoid unsafe/unsanitized output paths
+### warp_grep Usage
+
+```
+mcp__morph-mcp__warp_grep(
+  repoPath: "/dp/frankenmermaid",
+  query: "How does the layout pipeline produce deterministic output?"
+)
+```
+
+Returns structured results with file paths, line ranges, and extracted code snippets.
+
+### Anti-Patterns
+
+- **Don't** use `warp_grep` to find a specific function name → use `ripgrep`
+- **Don't** use `ripgrep` to understand "how does X work" → wastes time with manual reads
+- **Don't** use `ripgrep` for codemods → risks collateral edits
+
+<!-- bv-agent-instructions-v1 -->
 
 ---
 
-## Beads (`br`) Workflow
+## Beads Workflow Integration
 
-This repo uses `beads_rust` as task source of truth.
+This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`) for issue tracking. Issues are stored in `.beads/` and tracked in git.
 
-### Core Commands
+**Important:** `br` is non-invasive—it NEVER executes git commands. After `br sync --flush-only`, you must manually run `git add .beads/ && git commit`.
+
+### Essential Commands
 
 ```bash
-br ready --json
-br list --status open
-br show <id>
-br update <id> --status in_progress
+# View issues (launches TUI - avoid in automated sessions)
+bv
+
+# CLI commands for agents (use these instead)
+br ready              # Show issues ready to work (no blockers)
+br list --status=open # All open issues
+br show <id>          # Full issue details with dependencies
+br create --title="..." --type=task --priority=2
+br update <id> --status=in_progress
 br close <id> --reason "Completed"
-br sync --flush-only
+br close <id1> <id2>  # Close multiple issues at once
+br sync --flush-only  # Export to JSONL (NO git operations)
 ```
 
-### Required Agent Behavior
+### Workflow Pattern
 
-1. Start with `br ready --json`
-2. Claim exactly one actionable issue (`in_progress`)
-3. Implement and validate
-4. Close issue with clear reason
-5. `br sync --flush-only` before handoff
+1. **Start**: Run `br ready` to find actionable work
+2. **Claim**: Use `br update <id> --status=in_progress`
+3. **Work**: Implement the task
+4. **Complete**: Use `br close <id>`
+5. **Sync**: Run `br sync --flush-only` then manually commit
 
-Use issue IDs (`bd-###`) in commit messages and coordination threads.
+### Key Concepts
 
----
+- **Dependencies**: Issues can block other issues. `br ready` shows only unblocked work.
+- **Priority**: P0=critical, P1=high, P2=medium, P3=low, P4=backlog (use numbers, not words)
+- **Types**: task, bug, feature, epic, question, docs
+- **Blocking**: `br dep add <issue> <depends-on>` to add dependencies
 
-## `bv` Prioritization (Robot Mode Only)
+### Session Protocol
 
-**Never run bare `bv` in agent sessions.**
-
-Use:
+**Before ending any session, run this checklist:**
 
 ```bash
-bv --robot-triage
-bv --robot-next
-bv --robot-plan
+git status              # Check what changed
+git add <files>         # Stage code changes
+br sync --flush-only    # Export beads to JSONL
+git add .beads/         # Stage beads changes
+git commit -m "..."     # Commit everything together
+git push                # Push to remote
 ```
 
-Use triage recommendations to pick highest-impact unblocked work.
+### Best Practices
+
+- Check `br ready` at session start to find available work
+- Update status as you work (in_progress → closed)
+- Create new issues with `br create` when you discover tasks
+- Use descriptive titles and set appropriate priority/type
+- Always `br sync --flush-only && git add .beads/` before ending session
+
+<!-- end-bv-agent-instructions -->
+
+## Landing the Plane (Session Completion)
+
+**When ending a work session**, you MUST complete ALL steps below.
+
+**MANDATORY WORKFLOW:**
+
+1. **File issues for remaining work** - Create issues for anything that needs follow-up
+2. **Run quality gates** (if code changed) - Tests, linters, builds
+3. **Update issue status** - Close finished work, update in-progress items
+4. **Sync beads** - `br sync --flush-only` to export to JSONL
+5. **Hand off** - Provide context for next session
+
 
 ---
 
-## MCP Agent Mail Coordination
+Note for Codex/GPT-5.2:
 
-When available, coordinate async with other agents:
+You constantly bother me and stop working with concerned questions that look similar to this:
 
-1. Register/start session
-2. Check inbox and acknowledge messages
-3. Announce issue claim/start
-4. Post completion notes
+```
+Unexpected changes (need guidance)
 
-If Agent Mail tools are unavailable, continue productive local progress and record the blocker clearly.
+- Working tree still shows edits I did not make in Cargo.toml, Cargo.lock, src/cli/commands/upgrade.rs, src/storage/sqlite.rs, tests/conformance.rs, tests/storage_deps.rs. Please advise whether to keep/commit/revert these before any further work. I did not touch them.
 
----
+Next steps (pick one)
 
-## Session Protocol (Landing the Plane)
-
-Before ending a work session:
-
-1. Ensure claimed bead statuses are accurate
-2. Run required quality gates for touched scope
-3. Sync beads state
-
-```bash
-br sync --flush-only
+1. Decide how to handle the unrelated modified files above so we can resume cleanly.
+2. Triage beads_rust-orko (clippy/cargo warnings) and beads_rust-ydqr (rustfmt failures).
+3. If you want a full suite run later, fix conformance/clippy blockers and re‑run cargo test --all.
 ```
 
-4. Verify git state and provide a concise handoff summary (what changed, what passed, what remains)
-
-If pushing/committing is explicitly requested, do not stop until push succeeds.
-
----
-
-## Practical Guardrails
-
-- Never revert or overwrite other agents' in-progress changes unless explicitly told.
-- Treat unrelated working-tree changes as shared parallel work, not anomalies.
-- Keep edits minimal, auditable, and aligned to the claimed bead.
-- Prefer concrete evidence (test output, check output, file paths) over vague status updates.
+NEVER EVER DO THAT AGAIN. The answer is literally ALWAYS the same: those are changes created by the potentially dozen of other agents working on the project at the same time. This is not only a common occurence, it happens multiple times PER MINUTE. The way to deal with it is simple: you NEVER, under ANY CIRCUMSTANCE, stash, revert, overwrite, or otherwise disturb in ANY way the work of other agents. Just treat those changes identically to changes that you yourself made. Just fool yourself into thinking YOU made the changes and simply don't recall it for some reason.
 
 ---
 
 ## Note on Built-in TODO Functionality
 
-If explicitly instructed by the user to use built-in TODO functionality, comply.
-
+Also, if I ask you to explicitly use your built-in TODO functionality, don't complain about this and say you need to use beads. You can use built-in TODOs if I tell you specifically to do so. Always comply with such orders.
