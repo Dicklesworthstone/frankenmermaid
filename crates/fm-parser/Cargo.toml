@@ -11,3 +11,4 @@ serde.workspace = true
 serde_json.workspace = true
 unicode-segmentation = "1.12.0"
 json5 = "1.3.1"
+chumsky.workspace = true

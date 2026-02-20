@@ -720,11 +720,11 @@ fn render_node(
     group = group.child(text_elem);
 
     // Add title element for text alternatives
-    if config.a11y.text_alternatives {
-        if let Some(node) = ir_node {
-            let node_desc = describe_node(node, ir);
-            group = group.child(Element::title(&node_desc));
-        }
+    if config.a11y.text_alternatives
+        && let Some(node) = ir_node
+    {
+        let node_desc = describe_node(node, ir);
+        group = group.child(Element::title(&node_desc));
     }
 
     group
@@ -809,82 +809,62 @@ fn render_edge(
     }
 
     // If edge has a label, wrap in group with text
-    if let Some(label_id) = ir_edge.and_then(|e| e.label) {
-        if let Some(label) = ir.labels.get(label_id.0) {
-            // Position label at midpoint of edge
-            if edge_path.points.len() >= 2 {
-                let mid_idx = edge_path.points.len() / 2;
-                let mid_point = &edge_path.points[mid_idx];
-                let lx = mid_point.x + offset_x;
-                let ly = mid_point.y + offset_y - 8.0; // Offset above the line
+    if let Some(label_id) = ir_edge.and_then(|e| e.label)
+        && let Some(label) = ir.labels.get(label_id.0)
+        && edge_path.points.len() >= 2
+    {
+        // Position label at midpoint of edge
+        let mid_idx = edge_path.points.len() / 2;
+        let mid_point = &edge_path.points[mid_idx];
+        let lx = mid_point.x + offset_x;
+        let ly = mid_point.y + offset_y - 8.0; // Offset above the line
 
-                let mut group = Element::group()
-                    .class("fm-edge-labeled")
-                    .data("fm-edge-id", &edge_index.to_string());
+        let mut group = Element::group()
+            .class("fm-edge-labeled")
+            .data("fm-edge-id", &edge_index.to_string());
 
-                // Add accessibility attributes to group
-                if config.a11y.aria_labels {
-                    group = group.attr("role", "graphics-symbol");
-                }
-
-                if config.a11y.keyboard_nav {
-                    group = group.attr("tabindex", "0");
-                }
-
-                group = group.child(elem);
-
-                // Add background rect for label
-                let label_width = label.text.len() as f32 * config.avg_char_width + 8.0;
-                let label_height = config.font_size + 4.0;
-                group = group.child(
-                    Element::rect()
-                        .x(lx - label_width / 2.0)
-                        .y(ly - label_height / 2.0 - 2.0)
-                        .width(label_width)
-                        .height(label_height)
-                        .fill("#fff")
-                        .stroke("none")
-                        .rx(2.0),
-                );
-
-                // Add label text
-                group = group.child(
-                    TextBuilder::new(&label.text)
-                        .x(lx)
-                        .y(ly + config.font_size / 4.0)
-                        .font_family(&config.font_family)
-                        .font_size(config.font_size * 0.85)
-                        .anchor(TextAnchor::Middle)
-                        .fill("#666")
-                        .class("edge-label")
-                        .build(),
-                );
-
-                // Add title element for text alternatives
-                if config.a11y.text_alternatives {
-                    if let Some(edge) = ir_edge {
-                        let from_node = match &edge.from {
-                            fm_core::IrEndpoint::Node(nid) => ir.nodes.get(nid.0),
-                            _ => None,
-                        };
-                        let to_node = match &edge.to {
-                            fm_core::IrEndpoint::Node(nid) => ir.nodes.get(nid.0),
-                            _ => None,
-                        };
-                        let edge_desc =
-                            describe_edge(from_node, to_node, arrow, Some(&label.text), ir);
-                        group = group.child(Element::title(&edge_desc));
-                    }
-                }
-
-                return group;
-            }
+        // Add accessibility attributes to group
+        if config.a11y.aria_labels {
+            group = group.attr("role", "graphics-symbol");
         }
-    }
 
-    // Add title element for text alternatives (unlabeled edges)
-    if config.a11y.text_alternatives {
-        if let Some(edge) = ir_edge {
+        if config.a11y.keyboard_nav {
+            group = group.attr("tabindex", "0");
+        }
+
+        group = group.child(elem);
+
+        // Add background rect for label
+        let label_width = label.text.len() as f32 * config.avg_char_width + 8.0;
+        let label_height = config.font_size + 4.0;
+        group = group.child(
+            Element::rect()
+                .x(lx - label_width / 2.0)
+                .y(ly - label_height / 2.0 - 2.0)
+                .width(label_width)
+                .height(label_height)
+                .fill("#fff")
+                .stroke("none")
+                .rx(2.0),
+        );
+
+        // Add label text
+        group = group.child(
+            TextBuilder::new(&label.text)
+                .x(lx)
+                .y(ly + config.font_size / 4.0)
+                .font_family(&config.font_family)
+                .font_size(config.font_size * 0.85)
+                .anchor(TextAnchor::Middle)
+                .fill("#666")
+                .class("edge-label")
+                .build(),
+        );
+
+        // Add title element for text alternatives
+        if config.a11y.text_alternatives
+            && let Some(edge) = ir_edge
+        {
             let from_node = match &edge.from {
                 fm_core::IrEndpoint::Node(nid) => ir.nodes.get(nid.0),
                 _ => None,
@@ -893,21 +873,39 @@ fn render_edge(
                 fm_core::IrEndpoint::Node(nid) => ir.nodes.get(nid.0),
                 _ => None,
             };
-            let edge_desc = describe_edge(from_node, to_node, arrow, None, ir);
-            // Wrap in group to add title
-            let mut group = Element::group()
-                .class("fm-edge")
-                .data("fm-edge-id", &edge_index.to_string());
-            if config.a11y.aria_labels {
-                group = group.attr("role", "graphics-symbol");
-            }
-            if config.a11y.keyboard_nav {
-                group = group.attr("tabindex", "0");
-            }
-            group = group.child(elem);
+            let edge_desc = describe_edge(from_node, to_node, arrow, Some(&label.text), ir);
             group = group.child(Element::title(&edge_desc));
-            return group;
         }
+
+        return group;
+    }
+
+    // Add title element for text alternatives (unlabeled edges)
+    if config.a11y.text_alternatives
+        && let Some(edge) = ir_edge
+    {
+        let from_node = match &edge.from {
+            fm_core::IrEndpoint::Node(nid) => ir.nodes.get(nid.0),
+            _ => None,
+        };
+        let to_node = match &edge.to {
+            fm_core::IrEndpoint::Node(nid) => ir.nodes.get(nid.0),
+            _ => None,
+        };
+        let edge_desc = describe_edge(from_node, to_node, arrow, None, ir);
+        // Wrap in group to add title
+        let mut group = Element::group()
+            .class("fm-edge")
+            .data("fm-edge-id", &edge_index.to_string());
+        if config.a11y.aria_labels {
+            group = group.attr("role", "graphics-symbol");
+        }
+        if config.a11y.keyboard_nav {
+            group = group.attr("tabindex", "0");
+        }
+        group = group.child(elem);
+        group = group.child(Element::title(&edge_desc));
+        return group;
     }
 
     // Add accessibility attributes for unwrapped edges

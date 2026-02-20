@@ -206,21 +206,20 @@ impl Canvas2dRenderer {
             self.draw_calls += 2;
 
             // Draw cluster label if present
-            if let Some(ir_cluster) = ir.clusters.get(cluster_box.cluster_index) {
-                if let Some(title_id) = ir_cluster.title {
-                    if let Some(label) = ir.labels.get(title_id.0) {
-                        ctx.set_fill_style("#6c757d");
-                        ctx.set_font(&format!(
-                            "{}px {}",
-                            self.config.font_size * 0.9,
-                            self.config.font_family
-                        ));
-                        ctx.set_text_align(TextAlign::Left);
-                        ctx.set_text_baseline(TextBaseline::Top);
-                        ctx.fill_text(&label.text, x + 8.0, y + 4.0);
-                        self.draw_calls += 1;
-                    }
-                }
+            if let Some(ir_cluster) = ir.clusters.get(cluster_box.cluster_index)
+                && let Some(title_id) = ir_cluster.title
+                && let Some(label) = ir.labels.get(title_id.0)
+            {
+                ctx.set_fill_style("#6c757d");
+                ctx.set_font(&format!(
+                    "{}px {}",
+                    self.config.font_size * 0.9,
+                    self.config.font_family
+                ));
+                ctx.set_text_align(TextAlign::Left);
+                ctx.set_text_baseline(TextBaseline::Top);
+                ctx.fill_text(&label.text, x + 8.0, y + 4.0);
+                self.draw_calls += 1;
             }
 
             count += 1;
@@ -301,41 +300,40 @@ impl Canvas2dRenderer {
             }
 
             // Draw edge label if present
-            if let Some(label_id) = ir_edge.and_then(|e| e.label) {
-                if let Some(label) = ir.labels.get(label_id.0) {
-                    if edge_path.points.len() >= 2 {
-                        let mid_idx = edge_path.points.len() / 2;
-                        let mid = &edge_path.points[mid_idx];
-                        let lx = f64::from(mid.x) + offset_x;
-                        let ly = f64::from(mid.y) + offset_y - 12.0;
+            if let Some(label_id) = ir_edge.and_then(|e| e.label)
+                && let Some(label) = ir.labels.get(label_id.0)
+                && edge_path.points.len() >= 2
+            {
+                let mid_idx = edge_path.points.len() / 2;
+                let mid = &edge_path.points[mid_idx];
+                let lx = f64::from(mid.x) + offset_x;
+                let ly = f64::from(mid.y) + offset_y - 12.0;
 
-                        // Background for label
-                        let text_metrics = ctx.measure_text(&label.text);
-                        let label_width = text_metrics.width + 8.0;
-                        let label_height = self.config.font_size + 4.0;
+                // Background for label
+                let text_metrics = ctx.measure_text(&label.text);
+                let label_width = text_metrics.width + 8.0;
+                let label_height = self.config.font_size + 4.0;
 
-                        ctx.set_fill_style("#ffffff");
-                        ctx.fill_rect(
-                            lx - label_width / 2.0,
-                            ly - label_height / 2.0,
-                            label_width,
-                            label_height,
-                        );
-                        self.draw_calls += 1;
+                ctx.set_fill_style("#ffffff");
+                ctx.fill_rect(
+                    lx - label_width / 2.0,
+                    ly - label_height / 2.0,
+                    label_width,
+                    label_height,
+                );
+                self.draw_calls += 1;
 
-                        // Label text
-                        ctx.set_fill_style("#666666");
-                        ctx.set_font(&format!(
-                            "{}px {}",
-                            self.config.font_size * 0.85,
-                            self.config.font_family
-                        ));
-                        ctx.set_text_align(TextAlign::Center);
-                        ctx.set_text_baseline(TextBaseline::Middle);
-                        ctx.fill_text(&label.text, lx, ly);
-                        self.draw_calls += 1;
-                    }
-                }
+                // Label text
+                ctx.set_fill_style("#666666");
+                ctx.set_font(&format!(
+                    "{}px {}",
+                    self.config.font_size * 0.85,
+                    self.config.font_family
+                ));
+                ctx.set_text_align(TextAlign::Center);
+                ctx.set_text_baseline(TextBaseline::Middle);
+                ctx.fill_text(&label.text, lx, ly);
+                self.draw_calls += 1;
             }
 
             // Reset dash pattern

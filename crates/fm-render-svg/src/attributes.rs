@@ -112,12 +112,12 @@ impl Attributes {
     pub fn class(mut self, class: &str) -> Self {
         // Look for existing class attribute and append
         for attr in &mut self.attrs {
-            if attr.name == "class" {
-                if let AttributeValue::String(ref mut s) = attr.value {
-                    s.push(' ');
-                    s.push_str(class);
-                    return self;
-                }
+            if attr.name == "class"
+                && let AttributeValue::String(ref mut s) = attr.value
+            {
+                s.push(' ');
+                s.push_str(class);
+                return self;
             }
         }
         self.set("class", class)

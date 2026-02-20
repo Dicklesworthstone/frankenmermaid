@@ -31,10 +31,10 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 # Optional dependencies
-notify = { version = "6.1", optional = true }
+notify = { version = "8.2", optional = true }
 tiny_http = { version = "0.12", optional = true }
-resvg = { version = "0.44", optional = true, default-features = false }
-usvg = { version = "0.44", optional = true, default-features = false }
+resvg = { version = "0.47", optional = true, default-features = false }
+usvg = { version = "0.47", optional = true, default-features = false }
 
 [dev-dependencies]
-tempfile = "3.15"
+tempfile = "3.25"

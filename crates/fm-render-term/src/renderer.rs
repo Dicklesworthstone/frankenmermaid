@@ -221,14 +221,13 @@ impl TermRenderer {
         buffer.set(x + w - 1, y + h - 1, glyphs.corner_br);
 
         // Cluster title if available.
-        if let Some(cluster) = ir.clusters.get(cluster_box.cluster_index) {
-            if let Some(label_id) = cluster.title {
-                if let Some(label) = ir.labels.get(label_id.0) {
-                    let title = self.truncate_label(&label.text);
-                    let title_x = x + 2;
-                    buffer.set_string(title_x, y, &title);
-                }
-            }
+        if let Some(cluster) = ir.clusters.get(cluster_box.cluster_index)
+            && let Some(label_id) = cluster.title
+            && let Some(label) = ir.labels.get(label_id.0)
+        {
+            let title = self.truncate_label(&label.text);
+            let title_x = x + 2;
+            buffer.set_string(title_x, y, &title);
         }
     }
 

@@ -56,10 +56,9 @@ pub fn parse_dot(input: &str) -> ParseResult {
                     &cluster_key,
                     cluster_title.as_deref(),
                     span_for(line_number, line),
-                ) {
-                    if opens_scope {
-                        active_clusters.push(cluster_index);
-                    }
+                ) && opens_scope
+                {
+                    active_clusters.push(cluster_index);
                 }
                 continue;
             }

@@ -271,10 +271,10 @@ impl IrBuilder {
         if let Some(existing_index) = self.cluster_index_by_key.get(normalized_key).copied() {
             if let Some(cleaned_title) = clean_label(title) {
                 let label_id = self.intern_label(cleaned_title, span);
-                if let Some(existing_cluster) = self.ir.clusters.get_mut(existing_index) {
-                    if existing_cluster.title.is_none() {
-                        existing_cluster.title = Some(label_id);
-                    }
+                if let Some(existing_cluster) = self.ir.clusters.get_mut(existing_index)
+                    && existing_cluster.title.is_none()
+                {
+                    existing_cluster.title = Some(label_id);
                 }
             }
             return Some(existing_index);

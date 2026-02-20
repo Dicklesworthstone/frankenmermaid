@@ -180,14 +180,14 @@ pub fn render_minimap_from_layout(
     }
 
     // Draw viewport rectangle if enabled.
-    if config.show_viewport {
-        if let Some(vp) = viewport {
-            let vp_x = (vp.x * pixel_width as f32) as usize;
-            let vp_y = (vp.y * pixel_height as f32) as usize;
-            let vp_w = (vp.width * pixel_width as f32) as usize;
-            let vp_h = (vp.height * pixel_height as f32) as usize;
-            canvas.draw_rect(vp_x, vp_y, vp_w.max(1), vp_h.max(1));
-        }
+    if config.show_viewport
+        && let Some(vp) = viewport
+    {
+        let vp_x = (vp.x * pixel_width as f32) as usize;
+        let vp_y = (vp.y * pixel_height as f32) as usize;
+        let vp_w = (vp.width * pixel_width as f32) as usize;
+        let vp_h = (vp.height * pixel_height as f32) as usize;
+        canvas.draw_rect(vp_x, vp_y, vp_w.max(1), vp_h.max(1));
     }
 
     // Render canvas to string.

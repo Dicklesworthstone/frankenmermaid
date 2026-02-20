@@ -1053,11 +1053,11 @@ fn reorder_rank_by_barycenter(
                     None
                 };
 
-                if let Some(adjacent_node) = neighbor {
-                    if let Some(position) = adjacent_position.get(&adjacent_node) {
-                        total_position = total_position.saturating_add(*position);
-                        neighbor_count = neighbor_count.saturating_add(1);
-                    }
+                if let Some(adjacent_node) = neighbor
+                    && let Some(position) = adjacent_position.get(&adjacent_node)
+                {
+                    total_position = total_position.saturating_add(*position);
+                    neighbor_count = neighbor_count.saturating_add(1);
                 }
             }
 

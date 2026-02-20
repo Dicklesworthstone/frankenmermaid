@@ -1,3 +1,4 @@
+use chumsky::prelude::*;
 use fm_core::{ArrowType, DiagramType, GraphDirection, IrAttributeKey, IrNodeId, NodeShape, Span};
 use serde_json::Value;
 use unicode_segmentation::UnicodeSegmentation;
@@ -179,6 +180,289 @@ pub fn parse_mermaid_with_detection(input: &str, detection: DetectedType) -> Par
     builder.finish(detection.confidence, detection.method)
 }
 
+// ---------------------------------------------------------------------------
+// Chumsky-based flowchart parser — intermediate AST
+// ---------------------------------------------------------------------------
+
+/// Intermediate AST node produced by the chumsky flowchart parser.
+/// Lowered to IR via [`lower_flowchart`].
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // Subgraph variant used in future expansion
+enum FlowAst {
+    Direction(GraphDirection),
+    Node(FlowAstNode),
+    Edge {
+        from: FlowAstNode,
+        arrow: ArrowType,
+        label: Option<String>,
+        to: FlowAstNode,
+    },
+    Subgraph {
+        id: String,
+        title: Option<String>,
+        body: Vec<FlowAst>,
+    },
+    ClassAssign {
+        nodes: Vec<String>,
+        class: String,
+    },
+    ClickDirective {
+        node: String,
+        target: String,
+    },
+    StyleOrLinkStyle,
+    ClassDef,
+}
+
+#[derive(Debug, Clone)]
+struct FlowAstNode {
+    id: String,
+    label: Option<String>,
+    shape: NodeShape,
+}
+
+// ---------------------------------------------------------------------------
+// Chumsky flowchart statement parser (character-level on &str)
+// ---------------------------------------------------------------------------
+// Parses a single semicolon-free statement (trimmed line or `;`-split segment).
+// Document structure (lines, comments, header) is handled by the outer loop.
+
+/// Build a chumsky parser for a single flowchart statement.
+fn flow_statement_parser<'a>() -> impl Parser<'a, &'a str, FlowAst, extra::Err<Rich<'a, char>>> {
+    // -- Whitespace helpers --------------------------------------------------
+    let ws_char = any().filter(|c: &char| *c == ' ' || *c == '\t');
+    let inline_ws = ws_char.repeated().to(());
+    let required_ws = ws_char.repeated().at_least(1).to(());
+
+    // -- Identifier (bare word) ---------------------------------------------
+    let ident = any()
+        .filter(|c: &char| c.is_ascii_alphanumeric() || matches!(*c, '_' | '-' | '.' | '/'))
+        .repeated()
+        .at_least(1)
+        .to_slice();
+
+    // -- Quoted string -------------------------------------------------------
+    let quoted_string = {
+        let double_q = just('"')
+            .ignore_then(any().filter(|c: &char| *c != '"').repeated().to_slice())
+            .then_ignore(just('"'));
+        let single_q = just('\'')
+            .ignore_then(any().filter(|c: &char| *c != '\'').repeated().to_slice())
+            .then_ignore(just('\''));
+        double_q.or(single_q)
+    };
+
+    // -- Node shapes ---------------------------------------------------------
+    // Multi-char delimiters must be tried before single-char ones.
+    let double_circle_content = just("((")
+        .ignore_then(any().and_is(just("))").not()).repeated().to_slice())
+        .then_ignore(just("))"));
+
+    let hexagon_content = just("{{")
+        .ignore_then(any().and_is(just("}}").not()).repeated().to_slice())
+        .then_ignore(just("}}"));
+
+    let rect_content = just('[')
+        .ignore_then(any().filter(|c: &char| *c != ']').repeated().to_slice())
+        .then_ignore(just(']'));
+
+    let rounded_content = just('(')
+        .ignore_then(any().filter(|c: &char| *c != ')').repeated().to_slice())
+        .then_ignore(just(')'));
+
+    let diamond_content = just('{')
+        .ignore_then(any().filter(|c: &char| *c != '}').repeated().to_slice())
+        .then_ignore(just('}'));
+
+    let node_shape = choice((
+        double_circle_content.map(|label: &str| (label, NodeShape::DoubleCircle)),
+        hexagon_content.map(|label: &str| (label, NodeShape::Hexagon)),
+        rect_content.map(|label: &str| (label, NodeShape::Rect)),
+        rounded_content.map(|label: &str| (label, NodeShape::Rounded)),
+        diamond_content.map(|label: &str| (label, NodeShape::Diamond)),
+    ));
+
+    let node = ident.then(node_shape.or_not()).map(
+        |(id_str, shape_opt): (&str, Option<(&str, NodeShape)>)| {
+            let id = id_str.to_string();
+            match shape_opt {
+                Some((label_raw, shape)) => {
+                    let trimmed = label_raw.trim();
+                    let label = (!trimmed.is_empty()).then(|| trimmed.to_string());
+                    FlowAstNode { id, label, shape }
+                }
+                None => FlowAstNode {
+                    id,
+                    label: None,
+                    shape: NodeShape::Rect,
+                },
+            }
+        },
+    );
+
+    // -- Arrow operators (longest-first) -------------------------------------
+    let arrow = choice((
+        just("-.->").to(ArrowType::DottedArrow),
+        just("==>").to(ArrowType::ThickArrow),
+        just("-->").to(ArrowType::Arrow),
+        just("---").to(ArrowType::Line),
+        just("--o").to(ArrowType::Circle),
+        just("--x").to(ArrowType::Cross),
+    ));
+
+    // -- Pipe label  |text| -------------------------------------------------
+    let pipe_label = just('|')
+        .ignore_then(any().filter(|c: &char| *c != '|').repeated().to_slice())
+        .then_ignore(just('|'))
+        .map(|s: &str| {
+            let t = s.trim();
+            (!t.is_empty()).then(|| t.to_string())
+        });
+
+    // -- Edge: node arrow [|label|] node ------------------------------------
+    let edge = node
+        .then_ignore(inline_ws)
+        .then(arrow)
+        .then_ignore(inline_ws)
+        .then(pipe_label.or_not())
+        .then_ignore(inline_ws)
+        .then(node)
+        .then_ignore(inline_ws)
+        .then_ignore(end())
+        .map(|(((from, arrow_type), label_opt), to)| FlowAst::Edge {
+            from,
+            arrow: arrow_type,
+            label: label_opt.flatten(),
+            to,
+        });
+
+    // -- class directive: class nodeA,nodeB className -----------------------
+    let class_assign = just("class")
+        .then(required_ws)
+        .ignore_then(
+            ident
+                .separated_by(just(','))
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        )
+        .then_ignore(required_ws)
+        .then(any().repeated().at_least(1).to_slice())
+        .then_ignore(end())
+        .map(|(node_ids, class_raw): (Vec<&str>, &str)| {
+            let nodes: Vec<String> = node_ids.iter().map(|s| s.to_string()).collect();
+            FlowAst::ClassAssign {
+                nodes,
+                class: class_raw.trim().to_string(),
+            }
+        });
+
+    // -- click directive: click nodeId target --------------------------------
+    let click_directive = just("click")
+        .then(required_ws)
+        .ignore_then(ident)
+        .then_ignore(required_ws)
+        .then(
+            quoted_string.map(|s: &str| s.to_string()).or(any()
+                .repeated()
+                .at_least(1)
+                .to_slice()
+                .map(|s: &str| s.to_string())),
+        )
+        .then_ignore(end())
+        .map(
+            |(node_id, target): (&str, String)| FlowAst::ClickDirective {
+                node: node_id.to_string(),
+                target,
+            },
+        );
+
+    // -- style/linkStyle/classDef (skip) ------------------------------------
+    let skip_directive = choice((
+        just("style ").to(()),
+        just("linkStyle ").to(()),
+        just("classDef ").to(()),
+    ))
+    .then(any().repeated())
+    .then_ignore(end())
+    .to(FlowAst::StyleOrLinkStyle);
+
+    // -- Statement: try edge first (more specific), then directives, then node
+    choice((
+        skip_directive,
+        class_assign,
+        click_directive,
+        edge,
+        node.then_ignore(inline_ws)
+            .then_ignore(end())
+            .map(FlowAst::Node),
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Lowering: FlowAst → IrBuilder calls
+// ---------------------------------------------------------------------------
+
+fn lower_flow_ast(ast: &FlowAst, line_number: usize, source_line: &str, builder: &mut IrBuilder) {
+    let span = span_for(line_number, source_line);
+
+    match ast {
+        FlowAst::Direction(dir) => {
+            builder.set_direction(*dir);
+        }
+        FlowAst::Node(n) => {
+            let _ = builder.intern_node(&n.id, n.label.as_deref(), n.shape, span);
+        }
+        FlowAst::Edge {
+            from,
+            arrow,
+            label,
+            to,
+        } => {
+            let from_id = builder.intern_node(&from.id, from.label.as_deref(), from.shape, span);
+            let to_id = builder.intern_node(&to.id, to.label.as_deref(), to.shape, span);
+            if let (Some(f), Some(t)) = (from_id, to_id) {
+                builder.push_edge(f, t, *arrow, label.as_deref(), span);
+            }
+        }
+        FlowAst::Subgraph { id, title, .. } => {
+            let _cluster = builder.ensure_cluster(id, title.as_deref(), span);
+        }
+        FlowAst::ClassAssign { nodes, class } => {
+            for class_name in class.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                for node_key in nodes {
+                    builder.add_class_to_node(node_key, class_name, span);
+                }
+            }
+        }
+        FlowAst::ClickDirective { node, target } => {
+            let cleaned = target
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .trim_matches('`')
+                .trim();
+            if cleaned.is_empty() {
+                builder.add_warning(format!(
+                    "Line {line_number}: click directive target is empty after normalization"
+                ));
+            } else if !is_safe_click_target(cleaned) {
+                builder.add_warning(format!(
+                    "Line {line_number}: unsafe click link target blocked: {cleaned}"
+                ));
+            } else {
+                builder.add_class_to_node(node, "has-link", span);
+            }
+        }
+        FlowAst::StyleOrLinkStyle | FlowAst::ClassDef => {
+            // Intentionally skipped — same as the hand-written parser
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Top-level parse_flowchart — line-by-line with chumsky statement parser
+// ---------------------------------------------------------------------------
+
 fn parse_flowchart(input: &str, builder: &mut IrBuilder) {
     for (index, line) in input.lines().enumerate() {
         let line_number = index + 1;
@@ -194,17 +478,37 @@ fn parse_flowchart(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
-        if parse_flowchart_directive(trimmed, line_number, line, builder) {
+        // Directives handled identically to the original parser
+        if is_non_graph_statement(trimmed) {
+            // For subgraph/end, skip (cluster support is a future extension).
+            // For style/linkStyle/classDef, skip.
             continue;
         }
 
         let mut parsed_line = false;
         for statement in split_statements(trimmed) {
-            if parse_edge_statement(statement, line_number, line, &FLOW_OPERATORS, builder) {
+            // Try the chumsky statement parser first
+            let (ast, errors) = flow_statement_parser()
+                .parse(statement)
+                .into_output_errors();
+            if errors.is_empty()
+                && let Some(ref ast_node) = ast
+            {
+                lower_flow_ast(ast_node, line_number, line, builder);
                 parsed_line = true;
                 continue;
             }
 
+            // Fallback: use the hand-written helpers for statements chumsky
+            // couldn't parse (e.g. class/click with complex quoting)
+            if parse_flowchart_directive(statement, line_number, line, builder) {
+                parsed_line = true;
+                continue;
+            }
+            if parse_edge_statement(statement, line_number, line, &FLOW_OPERATORS, builder) {
+                parsed_line = true;
+                continue;
+            }
             if let Some(node) = parse_node_token(statement) {
                 let span = span_for(line_number, line);
                 let _ = builder.intern_node(&node.id, node.label.as_deref(), node.shape, span);
@@ -340,10 +644,10 @@ fn parse_state(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
-        if let Some(declaration) = trimmed.strip_prefix("state ") {
-            if register_state_declaration(declaration, line_number, line, builder) {
-                continue;
-            }
+        if let Some(declaration) = trimmed.strip_prefix("state ")
+            && register_state_declaration(declaration, line_number, line, builder)
+        {
+            continue;
         }
 
         let mut parsed_line = false;
@@ -670,17 +974,17 @@ fn parse_er(input: &str, builder: &mut IrBuilder) {
         }
 
         // Inside entity block - parse attribute
-        if let Some(entity_id) = current_entity {
-            if let Some(attr) = parse_er_attribute(trimmed) {
-                builder.add_entity_attribute(
-                    entity_id,
-                    &attr.data_type,
-                    &attr.name,
-                    attr.key,
-                    attr.comment.as_deref(),
-                );
-                continue;
-            }
+        if let Some(entity_id) = current_entity
+            && let Some(attr) = parse_er_attribute(trimmed)
+        {
+            builder.add_entity_attribute(
+                entity_id,
+                &attr.data_type,
+                &attr.name,
+                attr.key,
+                attr.comment.as_deref(),
+            );
+            continue;
         }
 
         // Standalone entity declaration
@@ -1122,9 +1426,7 @@ fn parse_timeline(input: &str, builder: &mut IrBuilder) {
             let events_text = trimmed[colon_pos + 1..].trim();
 
             if period_text.is_empty() {
-                builder.add_warning(format!(
-                    "Line {line_number}: empty time period: {trimmed}"
-                ));
+                builder.add_warning(format!("Line {line_number}: empty time period: {trimmed}"));
                 continue;
             }
 
@@ -1137,7 +1439,8 @@ fn parse_timeline(input: &str, builder: &mut IrBuilder) {
                 continue;
             }
 
-            let period_node = builder.intern_node(&period_id, Some(period_text), NodeShape::Rect, span);
+            let period_node =
+                builder.intern_node(&period_id, Some(period_text), NodeShape::Rect, span);
 
             if let Some(period_node_id) = period_node {
                 // Add to current section if any
@@ -1169,7 +1472,8 @@ fn parse_timeline(input: &str, builder: &mut IrBuilder) {
                 continue;
             }
 
-            let period_node = builder.intern_node(&period_id, Some(period_text), NodeShape::Rect, span);
+            let period_node =
+                builder.intern_node(&period_id, Some(period_text), NodeShape::Rect, span);
 
             if let Some(period_node_id) = period_node {
                 if let Some(section_idx) = current_section {
@@ -1210,7 +1514,9 @@ fn parse_timeline_events(
         }
 
         // Create event node and link to period
-        if let Some(event_node_id) = builder.intern_node(&event_id, Some(event_text), NodeShape::Rounded, span) {
+        if let Some(event_node_id) =
+            builder.intern_node(&event_id, Some(event_text), NodeShape::Rounded, span)
+        {
             // Events are children of their time period
             builder.push_edge(period_id, event_node_id, ArrowType::Line, None, span);
         }
@@ -1604,30 +1910,30 @@ fn parse_git_commit_options(rest: &str) -> GitCommitOptions {
         remaining = remaining.trim_start();
 
         // Try to match id: "value"
-        if let Some(rest_after_id) = remaining.strip_prefix("id:") {
-            if let Some((value, rest)) = extract_quoted_value(rest_after_id.trim_start()) {
-                options.id = Some(value);
-                remaining = rest;
-                continue;
-            }
+        if let Some(rest_after_id) = remaining.strip_prefix("id:")
+            && let Some((value, rest)) = extract_quoted_value(rest_after_id.trim_start())
+        {
+            options.id = Some(value);
+            remaining = rest;
+            continue;
         }
 
         // Try to match msg: "value"
-        if let Some(rest_after_msg) = remaining.strip_prefix("msg:") {
-            if let Some((value, rest)) = extract_quoted_value(rest_after_msg.trim_start()) {
-                options.msg = Some(value);
-                remaining = rest;
-                continue;
-            }
+        if let Some(rest_after_msg) = remaining.strip_prefix("msg:")
+            && let Some((value, rest)) = extract_quoted_value(rest_after_msg.trim_start())
+        {
+            options.msg = Some(value);
+            remaining = rest;
+            continue;
         }
 
         // Try to match tag: "value"
-        if let Some(rest_after_tag) = remaining.strip_prefix("tag:") {
-            if let Some((value, rest)) = extract_quoted_value(rest_after_tag.trim_start()) {
-                options.tag = Some(value);
-                remaining = rest;
-                continue;
-            }
+        if let Some(rest_after_tag) = remaining.strip_prefix("tag:")
+            && let Some((value, rest)) = extract_quoted_value(rest_after_tag.trim_start())
+        {
+            options.tag = Some(value);
+            remaining = rest;
+            continue;
         }
 
         // Try to match type: VALUE (we acknowledge but don't store it for now)
