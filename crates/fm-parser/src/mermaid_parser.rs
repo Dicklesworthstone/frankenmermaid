@@ -2348,6 +2348,18 @@ fn parse_node_token(raw: &str) -> Option<NodeToken> {
     if let Some(parsed) = parse_wrapped_str(core, ">", "]", NodeShape::Asymmetric) {
         return Some(parsed);
     }
+    if let Some(parsed) = parse_wrapped_str(core, "[/", "/]", NodeShape::Parallelogram) {
+        return Some(parsed);
+    }
+    if let Some(parsed) = parse_wrapped_str(core, "[\\", "\\]", NodeShape::InvParallelogram) {
+        return Some(parsed);
+    }
+    if let Some(parsed) = parse_wrapped_str(core, "[/", "\\]", NodeShape::Trapezoid) {
+        return Some(parsed);
+    }
+    if let Some(parsed) = parse_wrapped_str(core, "[\\", "/]", NodeShape::InvTrapezoid) {
+        return Some(parsed);
+    }
 
     let id = normalize_identifier(core);
     if id.is_empty() {

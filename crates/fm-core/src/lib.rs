@@ -261,6 +261,8 @@ pub enum NodeShape {
     Note,
     // Extended shapes for FrankenMermaid
     InvTrapezoid,
+    Parallelogram,
+    InvParallelogram,
     Triangle,
     Pentagon,
     Star,

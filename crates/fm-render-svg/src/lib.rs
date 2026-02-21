@@ -563,6 +563,38 @@ fn render_node(
                 .stroke_width(1.5)
         }
 
+        NodeShape::Parallelogram => {
+            let inset = w * 0.15;
+            let path = PathBuilder::new()
+                .move_to(x + inset, y)
+                .line_to(x + w, y)
+                .line_to(x + w - inset, y + h)
+                .line_to(x, y + h)
+                .close()
+                .build();
+            Element::path()
+                .d(&path)
+                .fill("#fff")
+                .stroke("#333")
+                .stroke_width(1.5)
+        }
+
+        NodeShape::InvParallelogram => {
+            let inset = w * 0.15;
+            let path = PathBuilder::new()
+                .move_to(x, y)
+                .line_to(x + w - inset, y)
+                .line_to(x + w, y + h)
+                .line_to(x + inset, y + h)
+                .close()
+                .build();
+            Element::path()
+                .d(&path)
+                .fill("#fff")
+                .stroke("#333")
+                .stroke_width(1.5)
+        }
+
         NodeShape::Triangle => {
             let path = PathBuilder::new()
                 .move_to(cx, y)

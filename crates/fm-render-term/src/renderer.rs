@@ -556,6 +556,50 @@ impl TermRenderer {
                 canvas.draw_line(mid_x, bottom, left, mid_y);
                 canvas.draw_line(left, mid_y, mid_x, top);
             }
+            NodeShape::Parallelogram => {
+                let inset = (w as f32 * 0.15) as isize;
+                let top = y as isize;
+                let bottom = (y + h) as isize;
+                let left = x as isize;
+                let right = (x + w) as isize;
+                canvas.draw_line(left + inset, top, right, top);
+                canvas.draw_line(right, top, right - inset, bottom);
+                canvas.draw_line(right - inset, bottom, left, bottom);
+                canvas.draw_line(left, bottom, left + inset, top);
+            }
+            NodeShape::InvParallelogram => {
+                let inset = (w as f32 * 0.15) as isize;
+                let top = y as isize;
+                let bottom = (y + h) as isize;
+                let left = x as isize;
+                let right = (x + w) as isize;
+                canvas.draw_line(left, top, right - inset, top);
+                canvas.draw_line(right - inset, top, right, bottom);
+                canvas.draw_line(right, bottom, left + inset, bottom);
+                canvas.draw_line(left + inset, bottom, left, top);
+            }
+            NodeShape::Trapezoid => {
+                let inset = (w as f32 * 0.15) as isize;
+                let top = y as isize;
+                let bottom = (y + h) as isize;
+                let left = x as isize;
+                let right = (x + w) as isize;
+                canvas.draw_line(left + inset, top, right - inset, top);
+                canvas.draw_line(right - inset, top, right, bottom);
+                canvas.draw_line(right, bottom, left, bottom);
+                canvas.draw_line(left, bottom, left + inset, top);
+            }
+            NodeShape::InvTrapezoid => {
+                let inset = (w as f32 * 0.15) as isize;
+                let top = y as isize;
+                let bottom = (y + h) as isize;
+                let left = x as isize;
+                let right = (x + w) as isize;
+                canvas.draw_line(left, top, right, top);
+                canvas.draw_line(right, top, right - inset, bottom);
+                canvas.draw_line(right - inset, bottom, left + inset, bottom);
+                canvas.draw_line(left + inset, bottom, left, top);
+            }
             _ => {
                 canvas.draw_rect(x, y, w.max(1), h.max(1));
             }

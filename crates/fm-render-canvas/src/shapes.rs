@@ -37,6 +37,8 @@ pub fn draw_shape<C: Canvas2dContext>(
         NodeShape::Note => draw_note(ctx, x, y, width, height),
         // Extended shapes
         NodeShape::InvTrapezoid => draw_inv_trapezoid(ctx, x, y, width, height),
+        NodeShape::Parallelogram => draw_parallelogram(ctx, x, y, width, height),
+        NodeShape::InvParallelogram => draw_inv_parallelogram(ctx, x, y, width, height),
         NodeShape::Triangle => draw_triangle(ctx, x, y, width, height),
         NodeShape::Pentagon => draw_pentagon(ctx, x, y, width, height),
         NodeShape::Star => draw_star(ctx, x, y, width, height),
@@ -273,6 +275,34 @@ fn draw_inv_trapezoid<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h
     ctx.move_to(x, y);
     ctx.line_to(x + w, y);
     ctx.line_to(x + w - inset, y + h);
+    ctx.line_to(x + inset, y + h);
+    ctx.close_path();
+    ctx.fill();
+    ctx.stroke();
+}
+
+/// Draw a parallelogram shape.
+fn draw_parallelogram<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
+    let inset = w * 0.15;
+
+    ctx.begin_path();
+    ctx.move_to(x + inset, y);
+    ctx.line_to(x + w, y);
+    ctx.line_to(x + w - inset, y + h);
+    ctx.line_to(x, y + h);
+    ctx.close_path();
+    ctx.fill();
+    ctx.stroke();
+}
+
+/// Draw an inverted parallelogram shape.
+fn draw_inv_parallelogram<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
+    let inset = w * 0.15;
+
+    ctx.begin_path();
+    ctx.move_to(x, y);
+    ctx.line_to(x + w - inset, y);
+    ctx.line_to(x + w, y + h);
     ctx.line_to(x + inset, y + h);
     ctx.close_path();
     ctx.fill();
