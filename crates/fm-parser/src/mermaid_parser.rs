@@ -1641,13 +1641,14 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
             continue;
         };
 
-        let task_id = normalize_identifier(task_name);
-        if task_id.is_empty() {
+        let task_id_raw = normalize_identifier(task_name);
+        if task_id_raw.is_empty() {
             builder.add_warning(format!(
                 "Line {line_number}: task identifier could not be derived: {trimmed}"
             ));
             continue;
         }
+        let task_id = format!("{task_id_raw}_{line_number}");
 
         let task_label = if current_section.is_empty() {
             task_name.to_string()

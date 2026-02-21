@@ -304,10 +304,21 @@ impl Canvas2dRenderer {
                 && let Some(label) = ir.labels.get(label_id.0)
                 && edge_path.points.len() >= 2
             {
-                let mid_idx = edge_path.points.len() / 2;
-                let mid = &edge_path.points[mid_idx];
-                let lx = f64::from(mid.x) + offset_x;
-                let ly = f64::from(mid.y) + offset_y - 12.0;
+                let (lx, ly) = if edge_path.points.len() == 4 {
+                    let p1 = &edge_path.points[1];
+                    let p2 = &edge_path.points[2];
+                    (
+                        f64::from((p1.x + p2.x) / 2.0) + offset_x,
+                        f64::from((p1.y + p2.y) / 2.0) + offset_y - 12.0,
+                    )
+                } else {
+                    let mid_idx = edge_path.points.len() / 2;
+                    let mid = &edge_path.points[mid_idx];
+                    (
+                        f64::from(mid.x) + offset_x,
+                        f64::from(mid.y) + offset_y - 12.0,
+                    )
+                };
 
                 // Background for label
                 let lines: Vec<&str> = label.text.lines().collect();

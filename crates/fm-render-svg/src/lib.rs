@@ -719,11 +719,16 @@ fn render_node(
     group = group.child(shape_elem);
 
     // Add label text
+    let lines_count = label_text.lines().count().max(1) as f32;
+    let total_text_height = (lines_count - 1.0) * config.font_size * config.line_height;
+    let start_y = cy - (total_text_height / 2.0) + (config.font_size / 3.0);
+
     let text_elem = TextBuilder::new(label_text)
         .x(cx)
-        .y(cy + config.font_size / 3.0)
+        .y(start_y)
         .font_family(&config.font_family)
         .font_size(config.font_size)
+        .line_height(config.line_height)
         .anchor(TextAnchor::Middle)
         .fill("#333")
         .build();
@@ -823,11 +828,24 @@ fn render_edge(
         && let Some(label) = ir.labels.get(label_id.0)
         && edge_path.points.len() >= 2
     {
-        // Position label at midpoint of edge
-        let mid_idx = edge_path.points.len() / 2;
-        let mid_point = &edge_path.points[mid_idx];
-        let lx = mid_point.x + offset_x;
-        let ly = mid_point.y + offset_y - 8.0; // Offset above the line
+        // Position label at geometric midpoint of edge
+        let (lx, ly) = if edge_path.points.len() == 4 {
+            // For standard orthogonal paths, the center of the middle segment
+            let p1 = &edge_path.points[1];
+            let p2 = &edge_path.points[2];
+            (
+                (p1.x + p2.x) / 2.0 + offset_x,
+                (p1.y + p2.y) / 2.0 + offset_y - 8.0,
+            )
+        } else {
+            // Fallback for other path lengths
+            let mid_idx = edge_path.points.len() / 2;
+            let mid_point = &edge_path.points[mid_idx];
+            (
+                mid_point.x + offset_x,
+                mid_point.y + offset_y - 8.0,
+            )
+        };
 
         let mut group = Element::group()
             .class("fm-edge-labeled")
@@ -845,8 +863,16 @@ fn render_edge(
         group = group.child(elem);
 
         // Add background rect for label
-        let label_width = label.text.len() as f32 * config.avg_char_width + 8.0;
-        let label_height = config.font_size + 4.0;
+        let lines_count = label.text.lines().count().max(1) as f32;
+        let max_line_len = label.text.lines().map(|l| l.chars().count()).max().unwrap_or(0);
+        let label_width = (max_line_len as f32 * config.avg_char_width) + 8.0;
+        
+        let label_font_size = config.font_size * 0.85;
+        let total_text_height = (lines_count - 1.0) * label_font_size * config.line_height;
+        let label_height = total_text_height + label_font_size + 4.0;
+        
+        let start_y = ly - (total_text_height / 2.0) + (label_font_size / 4.0);
+
         group = group.child(
             Element::rect()
                 .x(lx - label_width / 2.0)
@@ -862,9 +888,10 @@ fn render_edge(
         group = group.child(
             TextBuilder::new(&label.text)
                 .x(lx)
-                .y(ly + config.font_size / 4.0)
+                .y(start_y)
                 .font_family(&config.font_family)
-                .font_size(config.font_size * 0.85)
+                .font_size(label_font_size)
+                .line_height(config.line_height)
                 .anchor(TextAnchor::Middle)
                 .fill("#666")
                 .class("edge-label")
