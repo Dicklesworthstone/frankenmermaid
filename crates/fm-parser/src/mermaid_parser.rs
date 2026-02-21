@@ -1124,8 +1124,8 @@ fn parse_requirement_relation(
     }
 
     let span = span_for(line_number, source_line);
-    let from = builder.intern_node(&left_id, Some(&left_id), NodeShape::Rect, span);
-    let to = builder.intern_node(&right_id, Some(&right_id), NodeShape::Rect, span);
+    let from = builder.intern_node(&left_id, None, NodeShape::Rect, span);
+    let to = builder.intern_node(&right_id, None, NodeShape::Rect, span);
     match (from, to) {
         (Some(from_id), Some(to_id)) => {
             builder.push_edge(from_id, to_id, ArrowType::Arrow, None, span);
@@ -2199,15 +2199,19 @@ fn parse_sequence_message(
     }
 
     let span = span_for(line_number, source_line);
+    
+    let left_label = clean_label(Some(left)).filter(|l| l != &from_id);
     let from = builder.intern_node(
         &from_id,
-        clean_label(Some(left)).as_deref(),
+        left_label.as_deref(),
         NodeShape::Rect,
         span,
     );
+    
+    let right_label = clean_label(Some(target_raw)).filter(|l| l != &to_id);
     let to = builder.intern_node(
         &to_id,
-        clean_label(Some(target_raw)).as_deref(),
+        right_label.as_deref(),
         NodeShape::Rect,
         span,
     );

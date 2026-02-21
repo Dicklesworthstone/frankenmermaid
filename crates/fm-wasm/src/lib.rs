@@ -497,9 +497,16 @@ impl Canvas2dContext for WebCanvas2dContext {
     }
 
     fn measure_text(&self, text: &str) -> TextMetrics {
-        TextMetrics {
-            width: text.chars().count() as f64 * 8.0,
-            height: 14.0,
+        if let Ok(metrics) = self.context.measure_text(text) {
+            TextMetrics {
+                width: metrics.width(),
+                height: 14.0,
+            }
+        } else {
+            TextMetrics {
+                width: text.chars().count() as f64 * 8.0,
+                height: 14.0,
+            }
         }
     }
 

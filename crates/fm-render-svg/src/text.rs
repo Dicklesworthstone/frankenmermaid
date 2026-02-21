@@ -323,7 +323,7 @@ impl TextBuilder {
                 let tspan = Element::tspan()
                     .x(self.x)
                     .attr_num("dy", dy)
-                    .content(escape_xml_text(line));
+                    .content(line);
                 elem = elem.child(tspan);
             }
         }

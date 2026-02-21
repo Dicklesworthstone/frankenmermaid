@@ -310,9 +310,17 @@ impl Canvas2dRenderer {
                 let ly = f64::from(mid.y) + offset_y - 12.0;
 
                 // Background for label
-                let text_metrics = ctx.measure_text(&label.text);
-                let label_width = text_metrics.width + 8.0;
-                let label_height = self.config.font_size + 4.0;
+                let lines: Vec<&str> = label.text.lines().collect();
+                let mut max_text_width = 0.0_f64;
+                for line in &lines {
+                    let text_metrics = ctx.measure_text(line);
+                    max_text_width = max_text_width.max(text_metrics.width);
+                }
+                
+                let label_width = max_text_width + 8.0;
+                let line_height = self.config.font_size * 1.2;
+                let total_height = lines.len() as f64 * line_height;
+                let label_height = total_height + 4.0;
 
                 ctx.set_fill_style("#ffffff");
                 ctx.fill_rect(
@@ -332,8 +340,12 @@ impl Canvas2dRenderer {
                 ));
                 ctx.set_text_align(TextAlign::Center);
                 ctx.set_text_baseline(TextBaseline::Middle);
-                ctx.fill_text(&label.text, lx, ly);
-                self.draw_calls += 1;
+                
+                let start_y = ly - (total_height / 2.0) + (line_height / 2.0);
+                for (i, line) in lines.iter().enumerate() {
+                    ctx.fill_text(line, lx, start_y + (*i as f64) * line_height);
+                    self.draw_calls += 1;
+                }
             }
 
             // Reset dash pattern
@@ -397,8 +409,21 @@ impl Canvas2dRenderer {
                 ));
                 ctx.set_text_align(TextAlign::Center);
                 ctx.set_text_baseline(TextBaseline::Middle);
-                ctx.fill_text(label_text, cx, cy);
-                self.draw_calls += 1;
+
+                let lines: Vec<&str> = label_text.lines().collect();
+                if lines.len() <= 1 {
+                    ctx.fill_text(label_text, cx, cy);
+                    self.draw_calls += 1;
+                } else {
+                    let line_height = self.config.font_size * 1.2;
+                    let total_height = lines.len() as f64 * line_height;
+                    let start_y = cy - (total_height / 2.0) + (line_height / 2.0);
+                    
+                    for (i, line) in lines.iter().enumerate() {
+                        ctx.fill_text(line, cx, start_y + (*i as f64) * line_height);
+                        self.draw_calls += 1;
+                    }
+                }
             }
 
             count += 1;

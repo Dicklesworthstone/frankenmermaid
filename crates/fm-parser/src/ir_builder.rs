@@ -324,7 +324,7 @@ impl IrBuilder {
             return;
         }
 
-        let Some(node_id) = self.intern_node(node_key, Some(node_key), NodeShape::Rect, span)
+        let Some(node_id) = self.intern_node(node_key, None, NodeShape::Rect, span)
         else {
             return;
         };

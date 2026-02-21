@@ -259,20 +259,25 @@ pub fn compute_node_sizes(ir: &MermaidDiagramIr) -> Vec<(f32, f32)> {
     ir.nodes
         .iter()
         .map(|node| {
-            let label_len = label_length(ir, node.label);
-            let label_width = (label_len.max(4) as f32) * 8.0;
+            let (max_len, lines) = label_length_and_lines(ir, node);
+            let label_width = (max_len.max(4) as f32) * 8.0;
             let width = label_width.max(72.0);
-            let height = 40.0;
+            let height = 40.0 + ((lines.saturating_sub(1) as f32) * 16.0);
             (width, height)
         })
         .collect()
 }
 
-fn label_length(ir: &MermaidDiagramIr, label: Option<IrLabelId>) -> usize {
-    label
+fn label_length_and_lines(ir: &MermaidDiagramIr, node: &fm_core::IrNode) -> (usize, usize) {
+    let text = node.label
         .and_then(|label_id| ir.labels.get(label_id.0))
-        .map(|value| value.text.chars().count())
-        .unwrap_or(0)
+        .map(|value| value.text.as_str())
+        .unwrap_or_else(|| node.id.as_str());
+        
+    let lines = text.lines().count().max(1);
+    let max_len = text.lines().map(|l| l.chars().count()).max().unwrap_or(0);
+    
+    (max_len, lines)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

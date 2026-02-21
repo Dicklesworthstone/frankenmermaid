@@ -1,3 +1,4 @@
+use unicode_segmentation::UnicodeSegmentation;
 use fm_core::{ArrowType, DiagramType, NodeShape, Span};
 
 use crate::{DetectionMethod, ParseResult, ir_builder::IrBuilder};
@@ -293,17 +294,54 @@ fn normalize_identifier(raw: &str) -> String {
             break;
         }
     }
-    out
+
+    if out.is_empty() {
+        let mut fallback = String::with_capacity(cleaned.len());
+        for grapheme in cleaned.graphemes(true) {
+            if grapheme
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+            {
+                fallback.push_str(grapheme);
+            } else {
+                fallback.push('_');
+            }
+        }
+        fallback.trim_matches('_').to_string()
+    } else {
+        out
+    }
 }
 
 fn strip_comments(line: &str) -> &str {
-    if let Some(idx) = line.find("//") {
-        &line[..idx]
-    } else if let Some(idx) = line.find('#') {
-        &line[..idx]
-    } else {
-        line
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('#') {
+        // DOT format macro preprocessor lines
+        return "";
     }
+    
+    let mut in_quote = false;
+    let mut escaped = false;
+    
+    for (i, ch) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == '"' || ch == '\'' {
+            in_quote = !in_quote;
+            continue;
+        }
+        if !in_quote && line[i..].starts_with("//") {
+            return &line[..i];
+        }
+    }
+    
+    line
 }
 
 fn is_directed_graph(input: &str) -> bool {
