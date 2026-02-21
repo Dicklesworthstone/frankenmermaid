@@ -471,7 +471,8 @@ fn render_format(
 
         OutputFormat::Ascii => {
             let (cols, rows) = terminal_size(width, height);
-            let config = TermRenderConfig::compact();
+            let mut config = TermRenderConfig::compact();
+            config.glyph_mode = fm_core::MermaidGlyphMode::Ascii;
             let result = render_term_with_config(ir, &config, cols, rows);
             Ok((
                 result.output.into_bytes(),

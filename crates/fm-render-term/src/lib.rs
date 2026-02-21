@@ -56,7 +56,6 @@ pub use minimap::{MinimapConfig, MinimapCorner, MinimapResult, Viewport, render_
 pub use renderer::{TermRenderResult, TermRenderer, render_diagram, render_diagram_with_config};
 
 use fm_core::MermaidDiagramIr;
-use fm_layout::{LayoutAlgorithm, layout};
 
 /// Render a diagram to terminal output with default settings.
 ///
@@ -114,8 +113,7 @@ pub fn render_term_with_config(
 /// Useful for quick metrics when full rendering is not needed.
 #[must_use]
 pub fn term_stats(ir: &MermaidDiagramIr) -> (usize, usize) {
-    let stats = layout(ir, LayoutAlgorithm::Auto);
-    (stats.node_count, stats.edge_count)
+    (ir.nodes.len(), ir.edges.len())
 }
 
 /// Render a diff between two diagrams.

@@ -2325,6 +2325,12 @@ fn parse_node_token(raw: &str) -> Option<NodeToken> {
     if let Some(parsed) = parse_double_circle(core) {
         return Some(parsed);
     }
+    if let Some(parsed) = parse_wrapped_str(core, "[(", ")]", NodeShape::Cylinder) {
+        return Some(parsed);
+    }
+    if let Some(parsed) = parse_wrapped_str(core, "[[", "]]", NodeShape::Subroutine) {
+        return Some(parsed);
+    }
     if let Some(parsed) = parse_wrapped(core, '[', ']', NodeShape::Rect) {
         return Some(parsed);
     }
@@ -2332,6 +2338,9 @@ fn parse_node_token(raw: &str) -> Option<NodeToken> {
         return Some(parsed);
     }
     if let Some(parsed) = parse_wrapped(core, '{', '}', NodeShape::Diamond) {
+        return Some(parsed);
+    }
+    if let Some(parsed) = parse_wrapped_str(core, ">", "]", NodeShape::Asymmetric) {
         return Some(parsed);
     }
 
@@ -2377,8 +2386,43 @@ fn parse_wrapped(raw: &str, open: char, close: char, shape: NodeShape) -> Option
         return None;
     }
 
+    let inner_start = start + 1;
+    let end = raw.len().saturating_sub(1);
+    if inner_start > end {
+        return None;
+    }
+
     let id_raw = raw[..start].trim();
-    let label_raw = raw[start + 1..raw.len().saturating_sub(1)].trim();
+    let label_raw = raw[inner_start..end].trim();
+    let mut id = normalize_identifier(id_raw);
+    if id.is_empty() {
+        id = normalize_identifier(label_raw);
+    }
+    if id.is_empty() {
+        return None;
+    }
+
+    Some(NodeToken {
+        id,
+        label: clean_label(Some(label_raw)),
+        shape,
+    })
+}
+
+fn parse_wrapped_str(raw: &str, open: &str, close: &str, shape: NodeShape) -> Option<NodeToken> {
+    let start = raw.find(open)?;
+    if !raw.ends_with(close) {
+        return None;
+    }
+
+    let inner_start = start + open.len();
+    let end = raw.len().saturating_sub(close.len());
+    if inner_start > end {
+        return None;
+    }
+
+    let id_raw = raw[..start].trim();
+    let label_raw = raw[inner_start..end].trim();
     let mut id = normalize_identifier(id_raw);
     if id.is_empty() {
         id = normalize_identifier(label_raw);
@@ -2592,9 +2636,32 @@ fn leading_indent_width(line: &str) -> usize {
 }
 
 fn split_statements(line: &str) -> impl Iterator<Item = &str> {
-    line.split(';')
-        .map(str::trim)
-        .filter(|segment| !segment.is_empty())
+    let mut statements = Vec::new();
+    let mut current_start = 0;
+    let mut in_quote: Option<char> = None;
+
+    for (i, c) in line.char_indices() {
+        if let Some(q) = in_quote {
+            if c == q {
+                in_quote = None;
+            }
+        } else if c == '"' || c == '\'' || c == '`' {
+            in_quote = Some(c);
+        } else if c == ';' {
+            let segment = line[current_start..i].trim();
+            if !segment.is_empty() {
+                statements.push(segment);
+            }
+            current_start = i + 1;
+        }
+    }
+
+    let remainder = line[current_start..].trim();
+    if !remainder.is_empty() {
+        statements.push(remainder);
+    }
+    
+    statements.into_iter()
 }
 
 fn parse_graph_direction(header: &str) -> Option<GraphDirection> {

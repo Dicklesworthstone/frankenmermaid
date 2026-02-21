@@ -112,7 +112,7 @@ fn parse_dot_edge_statement(
         return false;
     };
 
-    let parts: Vec<&str> = statement
+    let mut parts: Vec<&str> = statement
         .split(operator)
         .map(str::trim)
         .filter(|segment| !segment.is_empty())
@@ -128,25 +128,28 @@ fn parse_dot_edge_statement(
     };
     let span = span_for(line_number, source_line);
 
-    for window in parts.windows(2) {
-        let (from_fragment, _from_attrs) = split_endpoint_and_attrs(window[0]);
-        let (to_fragment, to_attrs) = split_endpoint_and_attrs(window[1]);
+    // Extract shared attributes from the last part
+    let last_part = parts.last_mut().unwrap();
+    let (last_fragment, shared_attrs) = split_endpoint_and_attrs(last_part);
+    *last_part = last_fragment;
+    
+    let edge_label_str = shared_attrs.and_then(parse_dot_label);
 
-        let Some(from_node) = parse_dot_node_fragment(from_fragment) else {
+    for window in parts.windows(2) {
+        let Some(from_node) = parse_dot_node_fragment(window[0]) else {
             builder.add_warning(format!(
                 "Line {line_number}: invalid DOT edge source: {}",
                 window[0]
             ));
             continue;
         };
-        let Some(to_node) = parse_dot_node_fragment(to_fragment) else {
+        let Some(to_node) = parse_dot_node_fragment(window[1]) else {
             builder.add_warning(format!(
                 "Line {line_number}: invalid DOT edge target: {}",
                 window[1]
             ));
             continue;
         };
-        let edge_label = to_attrs.and_then(parse_dot_label);
 
         let from = builder.intern_node(
             &from_node.id,
@@ -157,7 +160,7 @@ fn parse_dot_edge_statement(
         let to = builder.intern_node(&to_node.id, to_node.label.as_deref(), NodeShape::Rect, span);
 
         if let (Some(from_id), Some(to_id)) = (from, to) {
-            builder.push_edge(from_id, to_id, arrow, edge_label.as_deref(), span);
+            builder.push_edge(from_id, to_id, arrow, edge_label_str.as_deref(), span);
             for &cluster_index in active_clusters {
                 builder.add_node_to_cluster(cluster_index, from_id);
                 builder.add_node_to_cluster(cluster_index, to_id);

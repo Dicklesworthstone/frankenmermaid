@@ -731,7 +731,6 @@ fn rank_assignment(ir: &MermaidDiagramIr, cycles: &CycleRemovalResult) -> BTreeM
 
     for targets in &mut outgoing {
         targets.sort_by(|left, right| compare_priority(*left, *right, &node_priority));
-        targets.dedup();
     }
 
     let mut heap: BinaryHeap<Reverse<(usize, usize)>> = BinaryHeap::new();
@@ -931,9 +930,14 @@ fn coordinate_assignment(
 
     let mut primary_offsets = vec![0.0_f32; ordered_ranks.len()];
     let mut primary_cursor = 0.0_f32;
-    for (rank_index, span) in rank_span.into_iter().enumerate() {
+    let iter_order: Vec<usize> = if reverse_ranks {
+        (0..ordered_ranks.len()).rev().collect()
+    } else {
+        (0..ordered_ranks.len()).collect()
+    };
+    for rank_index in iter_order {
         primary_offsets[rank_index] = primary_cursor;
-        primary_cursor += span + spacing.rank_spacing;
+        primary_cursor += rank_span[rank_index] + spacing.rank_spacing;
     }
 
     let mut output = Vec::with_capacity(ir.nodes.len());
@@ -941,21 +945,13 @@ fn coordinate_assignment(
         let Some(rank_index) = rank_to_index.get(&rank).copied() else {
             continue;
         };
-        let rank_position = if reverse_ranks {
-            ordered_ranks
-                .len()
-                .saturating_sub(1)
-                .saturating_sub(rank_index)
-        } else {
-            rank_index
-        };
 
         let node_indexes = ordering_by_rank
             .get(&rank)
             .cloned()
             .unwrap_or(fallback_node_indexes);
 
-        let primary = primary_offsets.get(rank_position).copied().unwrap_or(0.0);
+        let primary = primary_offsets.get(rank_index).copied().unwrap_or(0.0);
         let mut secondary_cursor = 0.0_f32;
         for (order, node_index) in node_indexes.into_iter().enumerate() {
             let (width, height) = node_sizes.get(node_index).copied().unwrap_or((72.0, 40.0));

@@ -154,7 +154,17 @@ fn render_layout_to_svg(
 
     // Embed theme CSS if enabled
     if config.embed_theme_css {
-        let theme = Theme::from_preset(config.theme);
+        let preset = ir
+            .meta
+            .theme_overrides
+            .theme
+            .as_deref()
+            .and_then(|t| t.parse::<ThemePreset>().ok())
+            .unwrap_or(config.theme);
+
+        let mut theme = Theme::from_preset(preset);
+        theme.colors.apply_overrides(&ir.meta.theme_overrides.theme_variables);
+
         let mut css = theme.to_svg_style();
 
         // Add accessibility CSS if enabled
