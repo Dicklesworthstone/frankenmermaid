@@ -63,6 +63,8 @@ pub struct LayoutStats {
     pub node_count: usize,
     pub edge_count: usize,
     pub crossing_count: usize,
+    /// Crossing count after barycenter (before transpose/sifting refinement).
+    pub crossing_count_before_refinement: usize,
     pub reversed_edges: usize,
     pub cycle_count: usize,
     pub cycle_node_count: usize,
@@ -254,10 +256,22 @@ pub fn layout_diagram_traced_with_config(
         0,
     );
 
-    let (crossing_count, ordering_by_rank) = crossing_minimization(ir, &ranks);
+    let (crossing_count_before, ordering_by_rank) = crossing_minimization(ir, &ranks);
     push_snapshot(
         &mut trace,
         "crossing_minimization",
+        ir.nodes.len(),
+        ir.edges.len(),
+        cycle_result.reversed_edge_indexes.len(),
+        crossing_count_before,
+    );
+
+    // Refinement: transpose + sifting heuristics.
+    let (crossing_count, ordering_by_rank) =
+        crossing_refinement(ir, &ranks, ordering_by_rank, crossing_count_before);
+    push_snapshot(
+        &mut trace,
+        "crossing_refinement",
         ir.nodes.len(),
         ir.edges.len(),
         cycle_result.reversed_edge_indexes.len(),
@@ -295,6 +309,7 @@ pub fn layout_diagram_traced_with_config(
         node_count: ir.nodes.len(),
         edge_count: ir.edges.len(),
         crossing_count,
+        crossing_count_before_refinement: crossing_count_before,
         reversed_edges: cycle_result.reversed_edge_indexes.len(),
         cycle_count: cycle_result.summary.cycle_count,
         cycle_node_count: cycle_result.summary.cycle_node_count,
@@ -422,6 +437,7 @@ pub fn layout_diagram_force_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         node_count: n,
         edge_count: ir.edges.len(),
         crossing_count: 0, // Not computed for force-directed
+        crossing_count_before_refinement: 0,
         reversed_edges: 0,
         cycle_count: 0,
         cycle_node_count: 0,
@@ -1571,6 +1587,93 @@ fn crossing_minimization(
 
     let crossing_count = total_crossings(ir, ranks, &ordering_by_rank);
     (crossing_count, ordering_by_rank)
+}
+
+/// Apply transpose and sifting refinement heuristics to reduce crossings
+/// beyond what barycenter achieves alone.
+fn crossing_refinement(
+    ir: &MermaidDiagramIr,
+    ranks: &BTreeMap<usize, usize>,
+    mut ordering_by_rank: BTreeMap<usize, Vec<usize>>,
+    mut best_crossings: usize,
+) -> (usize, BTreeMap<usize, Vec<usize>>) {
+    if best_crossings == 0 {
+        return (0, ordering_by_rank);
+    }
+
+    // Phase 1: Transpose — swap adjacent nodes in each rank if it reduces crossings.
+    let mut improved = true;
+    for _pass in 0..10 {
+        if !improved {
+            break;
+        }
+        improved = false;
+        let rank_keys: Vec<usize> = ordering_by_rank.keys().copied().collect();
+        for &rank in &rank_keys {
+            let order = match ordering_by_rank.get(&rank) {
+                Some(o) if o.len() >= 2 => o.clone(),
+                _ => continue,
+            };
+            for i in 0..order.len() - 1 {
+                // Try swapping positions i and i+1.
+                let mut trial = ordering_by_rank.clone();
+                if let Some(rank_order) = trial.get_mut(&rank) {
+                    rank_order.swap(i, i + 1);
+                }
+                let trial_crossings = total_crossings(ir, ranks, &trial);
+                if trial_crossings < best_crossings {
+                    ordering_by_rank = trial;
+                    best_crossings = trial_crossings;
+                    improved = true;
+                    if best_crossings == 0 {
+                        return (0, ordering_by_rank);
+                    }
+                }
+            }
+        }
+    }
+
+    // Phase 2: Sifting — for each node in each rank, try every position in that rank.
+    let rank_keys: Vec<usize> = ordering_by_rank.keys().copied().collect();
+    for &rank in &rank_keys {
+        let order = match ordering_by_rank.get(&rank) {
+            Some(o) if o.len() >= 3 => o.clone(),
+            _ => continue,
+        };
+        let n = order.len();
+        for node_orig_pos in 0..n {
+            let node = order[node_orig_pos];
+            let mut best_pos = node_orig_pos;
+            for target_pos in 0..n {
+                if target_pos == best_pos {
+                    continue;
+                }
+                // Build trial ordering with node moved to target_pos.
+                let mut trial_order: Vec<usize> = order
+                    .iter()
+                    .copied()
+                    .filter(|&ni| ni != node)
+                    .collect();
+                trial_order.insert(target_pos.min(trial_order.len()), node);
+
+                let mut trial = ordering_by_rank.clone();
+                trial.insert(rank, trial_order);
+                let trial_crossings = total_crossings(ir, ranks, &trial);
+                if trial_crossings < best_crossings {
+                    best_crossings = trial_crossings;
+                    best_pos = target_pos;
+                    ordering_by_rank = trial;
+                    if best_crossings == 0 {
+                        return (0, ordering_by_rank);
+                    }
+                }
+            }
+            // If best_pos changed, update the reference order for subsequent nodes.
+            let _ = best_pos; // Already applied via ordering_by_rank = trial above.
+        }
+    }
+
+    (best_crossings, ordering_by_rank)
 }
 
 fn coordinate_assignment(
