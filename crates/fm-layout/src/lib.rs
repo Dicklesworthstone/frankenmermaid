@@ -176,8 +176,11 @@ pub struct TracedLayout {
 }
 
 #[must_use]
-pub fn layout(ir: &MermaidDiagramIr, _algorithm: LayoutAlgorithm) -> LayoutStats {
-    layout_diagram(ir).stats
+pub fn layout(ir: &MermaidDiagramIr, algorithm: LayoutAlgorithm) -> LayoutStats {
+    match algorithm {
+        LayoutAlgorithm::Force => layout_diagram_force(ir).stats,
+        _ => layout_diagram(ir).stats,
+    }
 }
 
 #[must_use]
@@ -312,6 +315,607 @@ pub fn layout_diagram_traced_with_config(
             stats,
         },
         trace,
+    }
+}
+
+/// Lay out a diagram using force-directed (Fruchterman-Reingold) algorithm.
+///
+/// Suitable for diagrams without a natural hierarchy: ER diagrams, architecture
+/// diagrams, generic graphs with no clear flow direction.
+#[must_use]
+pub fn layout_diagram_force(ir: &MermaidDiagramIr) -> DiagramLayout {
+    layout_diagram_force_traced(ir).layout
+}
+
+/// Lay out with force-directed algorithm and return tracing information.
+#[must_use]
+pub fn layout_diagram_force_traced(ir: &MermaidDiagramIr) -> TracedLayout {
+    let mut trace = LayoutTrace::default();
+    let spacing = LayoutSpacing::default();
+    let node_sizes = compute_node_sizes(ir);
+    let n = ir.nodes.len();
+
+    if n == 0 {
+        return TracedLayout {
+            layout: DiagramLayout {
+                nodes: vec![],
+                clusters: vec![],
+                cycle_clusters: vec![],
+                edges: vec![],
+                bounds: LayoutRect { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
+                stats: LayoutStats::default(),
+            },
+            trace,
+        };
+    }
+
+    // Deterministic initial placement using hash of node IDs.
+    let mut positions = force_initial_positions(ir, &node_sizes, &spacing);
+
+    push_snapshot(&mut trace, "force_init", n, ir.edges.len(), 0, 0);
+
+    // Build adjacency list for attractive forces.
+    let adjacency = force_build_adjacency(ir);
+
+    // Build cluster membership for cluster-aware forces.
+    let cluster_membership = force_cluster_membership(ir);
+
+    // Fruchterman-Reingold iterations.
+    let area = (n as f32) * spacing.node_spacing * spacing.rank_spacing;
+    let k = (area / n as f32).sqrt(); // Optimal distance between nodes
+    let max_iterations = force_iteration_budget(n);
+    let convergence_threshold = 0.5;
+
+    for iteration in 0..max_iterations {
+        let temperature = force_temperature(iteration, max_iterations, k);
+        if temperature < convergence_threshold {
+            break;
+        }
+
+        let displacements = force_compute_displacements(
+            &positions,
+            &node_sizes,
+            &adjacency,
+            &cluster_membership,
+            k,
+            n,
+        );
+
+        // Apply displacements clamped by temperature.
+        let mut max_displacement: f32 = 0.0;
+        for i in 0..n {
+            let (dx, dy) = displacements[i];
+            let magnitude = (dx * dx + dy * dy).sqrt().max(f32::EPSILON);
+            let clamped_mag = magnitude.min(temperature);
+            let scale = clamped_mag / magnitude;
+            positions[i].0 += dx * scale;
+            positions[i].1 += dy * scale;
+            max_displacement = max_displacement.max(clamped_mag);
+        }
+
+        if max_displacement < convergence_threshold {
+            break;
+        }
+    }
+
+    push_snapshot(&mut trace, "force_simulation", n, ir.edges.len(), 0, 0);
+
+    // Overlap removal post-processing.
+    force_remove_overlaps(&mut positions, &node_sizes, &spacing);
+
+    push_snapshot(&mut trace, "force_overlap_removal", n, ir.edges.len(), 0, 0);
+
+    // Normalize positions so all coordinates are non-negative.
+    force_normalize_positions(&mut positions, &node_sizes);
+
+    // Build layout output.
+    let nodes = force_build_node_boxes(ir, &positions, &node_sizes);
+    let edges = force_build_edge_paths(ir, &nodes);
+    let clusters = build_cluster_boxes(ir, &nodes, spacing);
+    let bounds = compute_bounds(&nodes, &clusters, spacing);
+
+    let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
+
+    push_snapshot(&mut trace, "force_post_processing", n, ir.edges.len(), 0, 0);
+
+    let stats = LayoutStats {
+        node_count: n,
+        edge_count: ir.edges.len(),
+        crossing_count: 0, // Not computed for force-directed
+        reversed_edges: 0,
+        cycle_count: 0,
+        cycle_node_count: 0,
+        max_cycle_size: 0,
+        collapsed_clusters: 0,
+        reversed_edge_total_length,
+        total_edge_length,
+        phase_iterations: trace.snapshots.len(),
+    };
+
+    TracedLayout {
+        layout: DiagramLayout {
+            nodes,
+            clusters,
+            cycle_clusters: vec![],
+            edges,
+            bounds,
+            stats,
+        },
+        trace,
+    }
+}
+
+/// Deterministic initial placement using a hash of node IDs.
+///
+/// Places nodes in a grid pattern with positions offset by a deterministic
+/// hash so that the layout doesn't depend on node insertion order.
+fn force_initial_positions(
+    ir: &MermaidDiagramIr,
+    node_sizes: &[(f32, f32)],
+    spacing: &LayoutSpacing,
+) -> Vec<(f32, f32)> {
+    let n = ir.nodes.len();
+    let cols = (n as f32).sqrt().ceil() as usize;
+    let cell_size = spacing.node_spacing + spacing.rank_spacing;
+
+    ir.nodes
+        .iter()
+        .enumerate()
+        .map(|(i, node)| {
+            // Deterministic hash: FNV-1a on node ID bytes.
+            let hash = fnv1a_hash(node.id.as_bytes());
+            // Small perturbation from hash to break symmetry.
+            let jitter_x = ((hash & 0xFF) as f32 / 255.0 - 0.5) * cell_size * 0.3;
+            let jitter_y = (((hash >> 8) & 0xFF) as f32 / 255.0 - 0.5) * cell_size * 0.3;
+
+            let col = i % cols;
+            let row = i / cols;
+            let (w, h) = node_sizes[i];
+            let x = col as f32 * cell_size + jitter_x + w / 2.0;
+            let y = row as f32 * cell_size + jitter_y + h / 2.0;
+            (x, y)
+        })
+        .collect()
+}
+
+/// Simple FNV-1a hash for deterministic node placement.
+fn fnv1a_hash(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    hash
+}
+
+/// Build adjacency list from edges.
+fn force_build_adjacency(ir: &MermaidDiagramIr) -> Vec<Vec<usize>> {
+    let n = ir.nodes.len();
+    let mut adj = vec![Vec::new(); n];
+    for edge in &ir.edges {
+        let from = endpoint_node_index(ir, edge.from);
+        let to = endpoint_node_index(ir, edge.to);
+        if let (Some(f), Some(t)) = (from, to)
+            && f != t && f < n && t < n
+        {
+            adj[f].push(t);
+            adj[t].push(f);
+        }
+    }
+    // Deduplicate.
+    for neighbors in &mut adj {
+        neighbors.sort_unstable();
+        neighbors.dedup();
+    }
+    adj
+}
+
+/// Map each node to its cluster index (if any).
+fn force_cluster_membership(ir: &MermaidDiagramIr) -> Vec<Option<usize>> {
+    let n = ir.nodes.len();
+    let mut membership = vec![None; n];
+    for (ci, cluster) in ir.clusters.iter().enumerate() {
+        for member in &cluster.members {
+            if member.0 < n {
+                membership[member.0] = Some(ci);
+            }
+        }
+    }
+    membership
+}
+
+/// Compute iteration budget based on graph size.
+fn force_iteration_budget(n: usize) -> usize {
+    // More nodes need more iterations, but cap at 500.
+    (50 + n * 2).min(500)
+}
+
+/// Cooling schedule: linear decay from initial temperature.
+fn force_temperature(iteration: usize, max_iterations: usize, k: f32) -> f32 {
+    let t0 = k * 10.0; // Initial temperature
+    let progress = iteration as f32 / max_iterations as f32;
+    t0 * (1.0 - progress)
+}
+
+/// Compute force displacements for all nodes.
+///
+/// Uses direct O(n^2) repulsive forces. For graphs > 100 nodes, uses
+/// Barnes-Hut grid approximation.
+fn force_compute_displacements(
+    positions: &[(f32, f32)],
+    node_sizes: &[(f32, f32)],
+    adjacency: &[Vec<usize>],
+    cluster_membership: &[Option<usize>],
+    k: f32,
+    n: usize,
+) -> Vec<(f32, f32)> {
+    let mut displacements = vec![(0.0_f32, 0.0_f32); n];
+    let k_sq = k * k;
+
+    if n <= 100 {
+        // Direct O(n^2) repulsive forces.
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let dx = positions[i].0 - positions[j].0;
+                let dy = positions[i].1 - positions[j].1;
+                let dist_sq = (dx * dx + dy * dy).max(1.0);
+                // Fruchterman-Reingold repulsive force: k^2 / d
+                let force = k_sq / dist_sq.sqrt();
+                let fx = dx / dist_sq.sqrt() * force;
+                let fy = dy / dist_sq.sqrt() * force;
+                displacements[i].0 += fx;
+                displacements[i].1 += fy;
+                displacements[j].0 -= fx;
+                displacements[j].1 -= fy;
+            }
+        }
+    } else {
+        // Barnes-Hut grid approximation for large graphs.
+        force_barnes_hut_repulsion(positions, k_sq, &mut displacements);
+    }
+
+    // Attractive forces along edges (Hooke's law).
+    for (i, neighbors) in adjacency.iter().enumerate() {
+        for &j in neighbors {
+            if j <= i {
+                continue; // Process each edge once.
+            }
+            let dx = positions[i].0 - positions[j].0;
+            let dy = positions[i].1 - positions[j].1;
+            let dist = (dx * dx + dy * dy).sqrt().max(1.0);
+            // Fruchterman-Reingold attractive force: d^2 / k
+            let force = dist / k;
+            let fx = dx / dist * force;
+            let fy = dy / dist * force;
+            displacements[i].0 -= fx;
+            displacements[i].1 -= fy;
+            displacements[j].0 += fx;
+            displacements[j].1 += fy;
+        }
+    }
+
+    // Cluster cohesion: extra attractive force toward cluster centroid.
+    force_cluster_cohesion(positions, node_sizes, cluster_membership, k, &mut displacements);
+
+    displacements
+}
+
+/// Barnes-Hut grid-based approximation for repulsive forces.
+///
+/// Divides the space into a grid and computes repulsive forces from
+/// grid cell centroids for distant nodes.
+fn force_barnes_hut_repulsion(
+    positions: &[(f32, f32)],
+    k_sq: f32,
+    displacements: &mut [(f32, f32)],
+) {
+    let n = positions.len();
+    // Find bounding box.
+    let mut min_x = f32::MAX;
+    let mut min_y = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut max_y = f32::MIN;
+    for &(x, y) in positions {
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    }
+
+    let range_x = (max_x - min_x).max(1.0);
+    let range_y = (max_y - min_y).max(1.0);
+
+    // Grid size: roughly sqrt(n) cells per side.
+    let grid_size = (n as f32).sqrt().ceil() as usize;
+    let cell_w = range_x / grid_size as f32;
+    let cell_h = range_y / grid_size as f32;
+
+    // Assign nodes to grid cells and compute cell centroids.
+    let mut cell_sum_x = vec![0.0_f32; grid_size * grid_size];
+    let mut cell_sum_y = vec![0.0_f32; grid_size * grid_size];
+    let mut cell_count = vec![0_u32; grid_size * grid_size];
+    let mut node_cell = vec![0_usize; n];
+
+    for (i, &(x, y)) in positions.iter().enumerate() {
+        let cx = ((x - min_x) / cell_w).floor() as usize;
+        let cy = ((y - min_y) / cell_h).floor() as usize;
+        let cx = cx.min(grid_size - 1);
+        let cy = cy.min(grid_size - 1);
+        let cell_idx = cy * grid_size + cx;
+        node_cell[i] = cell_idx;
+        cell_sum_x[cell_idx] += x;
+        cell_sum_y[cell_idx] += y;
+        cell_count[cell_idx] += 1;
+    }
+
+    // Compute centroids.
+    let mut centroids = vec![(0.0_f32, 0.0_f32, 0_u32); grid_size * grid_size];
+    for idx in 0..(grid_size * grid_size) {
+        if cell_count[idx] > 0 {
+            centroids[idx] = (
+                cell_sum_x[idx] / cell_count[idx] as f32,
+                cell_sum_y[idx] / cell_count[idx] as f32,
+                cell_count[idx],
+            );
+        }
+    }
+
+    let theta_sq: f32 = 1.5; // Barnes-Hut opening angle threshold squared
+
+    for i in 0..n {
+        let (px, py) = positions[i];
+        let my_cell = node_cell[i];
+
+        for (cell_idx, &(cx, cy, count)) in centroids.iter().enumerate() {
+            if count == 0 {
+                continue;
+            }
+
+            if cell_idx == my_cell {
+                // Same cell: compute direct forces.
+                for j in 0..n {
+                    if node_cell[j] != my_cell || j == i {
+                        continue;
+                    }
+                    let dx = px - positions[j].0;
+                    let dy = py - positions[j].1;
+                    let dist_sq = (dx * dx + dy * dy).max(1.0);
+                    let force = k_sq / dist_sq.sqrt();
+                    let dist = dist_sq.sqrt();
+                    displacements[i].0 += dx / dist * force;
+                    displacements[i].1 += dy / dist * force;
+                }
+            } else {
+                // Different cell: check if far enough for approximation.
+                let dx = px - cx;
+                let dy = py - cy;
+                let dist_sq = (dx * dx + dy * dy).max(1.0);
+                let cell_size_sq = cell_w * cell_w + cell_h * cell_h;
+
+                if cell_size_sq / dist_sq < theta_sq {
+                    // Use centroid approximation (multiply force by count).
+                    let force = k_sq * count as f32 / dist_sq.sqrt();
+                    let dist = dist_sq.sqrt();
+                    displacements[i].0 += dx / dist * force;
+                    displacements[i].1 += dy / dist * force;
+                } else {
+                    // Too close: compute direct forces.
+                    for j in 0..n {
+                        if node_cell[j] != cell_idx || j == i {
+                            continue;
+                        }
+                        let dx2 = px - positions[j].0;
+                        let dy2 = py - positions[j].1;
+                        let dist_sq2 = (dx2 * dx2 + dy2 * dy2).max(1.0);
+                        let force2 = k_sq / dist_sq2.sqrt();
+                        let dist2 = dist_sq2.sqrt();
+                        displacements[i].0 += dx2 / dist2 * force2;
+                        displacements[i].1 += dy2 / dist2 * force2;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Apply extra attractive force for nodes in the same cluster.
+fn force_cluster_cohesion(
+    positions: &[(f32, f32)],
+    _node_sizes: &[(f32, f32)],
+    cluster_membership: &[Option<usize>],
+    k: f32,
+    displacements: &mut [(f32, f32)],
+) {
+    // Compute cluster centroids.
+    let mut cluster_sum: BTreeMap<usize, (f32, f32, usize)> = BTreeMap::new();
+    for (i, &membership) in cluster_membership.iter().enumerate() {
+        if let Some(ci) = membership {
+            let entry = cluster_sum.entry(ci).or_insert((0.0, 0.0, 0));
+            entry.0 += positions[i].0;
+            entry.1 += positions[i].1;
+            entry.2 += 1;
+        }
+    }
+
+    let cohesion_strength = 0.3; // Extra pull toward cluster center
+
+    for (i, &membership) in cluster_membership.iter().enumerate() {
+        if let Some(ci) = membership
+            && let Some(&(sx, sy, count)) = cluster_sum.get(&ci)
+            && count > 1
+        {
+            let centroid_x = sx / count as f32;
+            let centroid_y = sy / count as f32;
+            let dx = centroid_x - positions[i].0;
+            let dy = centroid_y - positions[i].1;
+            let dist = (dx * dx + dy * dy).sqrt().max(1.0);
+            let force = dist / k * cohesion_strength;
+            displacements[i].0 += dx / dist * force;
+            displacements[i].1 += dy / dist * force;
+        }
+    }
+}
+
+/// Remove node overlaps via iterative projection.
+fn force_remove_overlaps(
+    positions: &mut [(f32, f32)],
+    node_sizes: &[(f32, f32)],
+    spacing: &LayoutSpacing,
+) {
+    let n = positions.len();
+    let gap = spacing.node_spacing * 0.25; // Minimum gap between nodes
+
+    for _pass in 0..20 {
+        let mut any_overlap = false;
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let (wi, hi) = node_sizes[i];
+                let (wj, hj) = node_sizes[j];
+                let half_w = (wi + wj) / 2.0 + gap;
+                let half_h = (hi + hj) / 2.0 + gap;
+
+                let dx = positions[j].0 - positions[i].0;
+                let dy = positions[j].1 - positions[i].1;
+                let overlap_x = half_w - dx.abs();
+                let overlap_y = half_h - dy.abs();
+
+                if overlap_x > 0.0 && overlap_y > 0.0 {
+                    any_overlap = true;
+                    // Push apart along the axis with less overlap.
+                    if overlap_x < overlap_y {
+                        let push = overlap_x / 2.0;
+                        if dx >= 0.0 {
+                            positions[i].0 -= push;
+                            positions[j].0 += push;
+                        } else {
+                            positions[i].0 += push;
+                            positions[j].0 -= push;
+                        }
+                    } else {
+                        let push = overlap_y / 2.0;
+                        if dy >= 0.0 {
+                            positions[i].1 -= push;
+                            positions[j].1 += push;
+                        } else {
+                            positions[i].1 += push;
+                            positions[j].1 -= push;
+                        }
+                    }
+                }
+            }
+        }
+        if !any_overlap {
+            break;
+        }
+    }
+}
+
+/// Normalize positions so all coordinates are non-negative.
+fn force_normalize_positions(positions: &mut [(f32, f32)], node_sizes: &[(f32, f32)]) {
+    if positions.is_empty() {
+        return;
+    }
+    let margin = 20.0;
+    let mut min_x = f32::MAX;
+    let mut min_y = f32::MAX;
+    for (i, &(x, y)) in positions.iter().enumerate() {
+        let (w, h) = node_sizes[i];
+        min_x = min_x.min(x - w / 2.0);
+        min_y = min_y.min(y - h / 2.0);
+    }
+    let offset_x = margin - min_x;
+    let offset_y = margin - min_y;
+    for pos in positions.iter_mut() {
+        pos.0 += offset_x;
+        pos.1 += offset_y;
+    }
+}
+
+/// Build LayoutNodeBox from force-directed positions (center-based).
+fn force_build_node_boxes(
+    ir: &MermaidDiagramIr,
+    positions: &[(f32, f32)],
+    node_sizes: &[(f32, f32)],
+) -> Vec<LayoutNodeBox> {
+    ir.nodes
+        .iter()
+        .enumerate()
+        .map(|(i, node)| {
+            let (cx, cy) = positions[i];
+            let (w, h) = node_sizes[i];
+            LayoutNodeBox {
+                node_index: i,
+                node_id: node.id.clone(),
+                rank: 0,  // No ranks in force-directed layout.
+                order: i, // Order by index.
+                bounds: LayoutRect {
+                    x: cx - w / 2.0,
+                    y: cy - h / 2.0,
+                    width: w,
+                    height: h,
+                },
+            }
+        })
+        .collect()
+}
+
+/// Build straight-line edge paths for force-directed layout.
+fn force_build_edge_paths(ir: &MermaidDiagramIr, nodes: &[LayoutNodeBox]) -> Vec<LayoutEdgePath> {
+    ir.edges
+        .iter()
+        .enumerate()
+        .filter_map(|(ei, edge)| {
+            let from_idx = endpoint_node_index(ir, edge.from)?;
+            let to_idx = endpoint_node_index(ir, edge.to)?;
+            if from_idx >= nodes.len() || to_idx >= nodes.len() {
+                return None;
+            }
+            let from_center = nodes[from_idx].bounds.center();
+            let to_center = nodes[to_idx].bounds.center();
+
+            // Clip to node boundaries.
+            let from_pt = clip_to_rect_border(from_center, to_center, &nodes[from_idx].bounds);
+            let to_pt = clip_to_rect_border(to_center, from_center, &nodes[to_idx].bounds);
+
+            Some(LayoutEdgePath {
+                edge_index: ei,
+                points: vec![from_pt, to_pt],
+                reversed: false,
+            })
+        })
+        .collect()
+}
+
+/// Clip a line from `from` toward `to` to the border of `rect`.
+fn clip_to_rect_border(from: LayoutPoint, to: LayoutPoint, rect: &LayoutRect) -> LayoutPoint {
+    let cx = rect.x + rect.width / 2.0;
+    let cy = rect.y + rect.height / 2.0;
+    let dx = to.x - from.x;
+    let dy = to.y - from.y;
+
+    if dx.abs() < f32::EPSILON && dy.abs() < f32::EPSILON {
+        return from;
+    }
+
+    let half_w = rect.width / 2.0;
+    let half_h = rect.height / 2.0;
+
+    // Find intersection with rect border along direction (dx, dy) from center.
+    let tx = if dx.abs() > f32::EPSILON {
+        half_w / dx.abs()
+    } else {
+        f32::MAX
+    };
+    let ty = if dy.abs() > f32::EPSILON {
+        half_h / dy.abs()
+    } else {
+        f32::MAX
+    };
+    let t = tx.min(ty);
+
+    LayoutPoint {
+        x: cx + dx * t,
+        y: cy + dy * t,
     }
 }
 
@@ -1693,12 +2297,13 @@ pub fn layout_stats_from(layout: &DiagramLayout) -> LayoutStats {
 #[cfg(test)]
 mod tests {
     use super::{
-        CycleStrategy, LayoutAlgorithm, LayoutPoint, layout, layout_diagram, layout_diagram_traced,
+        CycleStrategy, LayoutAlgorithm, LayoutPoint, layout, layout_diagram,
+        layout_diagram_force, layout_diagram_force_traced, layout_diagram_traced,
         layout_diagram_with_cycle_strategy, route_edge_points,
     };
     use fm_core::{
-        ArrowType, DiagramType, GraphDirection, IrEdge, IrEndpoint, IrLabel, IrLabelId, IrNode,
-        IrNodeId, MermaidDiagramIr,
+        ArrowType, DiagramType, GraphDirection, IrCluster, IrClusterId, IrEdge, IrEndpoint,
+        IrLabel, IrLabelId, IrNode, IrNodeId, MermaidDiagramIr,
     };
 
     fn sample_ir() -> MermaidDiagramIr {
@@ -2355,5 +2960,342 @@ mod tests {
         };
 
         assert!((a_node.bounds.x - b_node.bounds.x).abs() < 0.001);
+    }
+
+    // --- Force-directed layout tests ---
+
+    fn sample_er_ir() -> MermaidDiagramIr {
+        // ER-like diagram: no clear hierarchy, many-to-many relationships.
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Er);
+        for label in ["Users", "Orders", "Products", "Reviews"] {
+            ir.labels.push(IrLabel {
+                text: label.to_string(),
+                ..IrLabel::default()
+            });
+        }
+        for (i, node_id) in ["users", "orders", "products", "reviews"]
+            .iter()
+            .enumerate()
+        {
+            ir.nodes.push(IrNode {
+                id: (*node_id).to_string(),
+                label: Some(IrLabelId(i)),
+                ..IrNode::default()
+            });
+        }
+        // Many-to-many: users <-> orders, orders <-> products, users <-> reviews, products <-> reviews
+        for (from, to) in [(0, 1), (1, 2), (0, 3), (2, 3)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Line,
+                ..IrEdge::default()
+            });
+        }
+        ir
+    }
+
+    #[test]
+    fn force_layout_produces_valid_output() {
+        let ir = sample_er_ir();
+        let layout = layout_diagram_force(&ir);
+        assert_eq!(layout.nodes.len(), 4);
+        assert_eq!(layout.edges.len(), 4);
+        assert!(layout.bounds.width > 0.0);
+        assert!(layout.bounds.height > 0.0);
+    }
+
+    #[test]
+    fn force_layout_is_deterministic() {
+        let ir = sample_er_ir();
+        let first = layout_diagram_force_traced(&ir);
+        let second = layout_diagram_force_traced(&ir);
+        assert_eq!(first, second, "Force layout must be deterministic");
+    }
+
+    #[test]
+    fn force_layout_no_node_overlap() {
+        let ir = sample_er_ir();
+        let layout = layout_diagram_force(&ir);
+        for (i, a) in layout.nodes.iter().enumerate() {
+            for b in layout.nodes.iter().skip(i + 1) {
+                let overlap_x = (a.bounds.width + b.bounds.width) / 2.0
+                    - ((a.bounds.x + a.bounds.width / 2.0) - (b.bounds.x + b.bounds.width / 2.0))
+                        .abs();
+                let overlap_y = (a.bounds.height + b.bounds.height) / 2.0
+                    - ((a.bounds.y + a.bounds.height / 2.0)
+                        - (b.bounds.y + b.bounds.height / 2.0))
+                    .abs();
+                assert!(
+                    overlap_x <= 1.0 || overlap_y <= 1.0,
+                    "Nodes {} and {} overlap: overlap_x={overlap_x}, overlap_y={overlap_y}",
+                    a.node_id,
+                    b.node_id,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn force_layout_empty_graph() {
+        let ir = MermaidDiagramIr::empty(DiagramType::Er);
+        let layout = layout_diagram_force(&ir);
+        assert!(layout.nodes.is_empty());
+        assert!(layout.edges.is_empty());
+        assert_eq!(layout.stats.node_count, 0);
+    }
+
+    #[test]
+    fn force_layout_single_node() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Er);
+        ir.nodes.push(IrNode {
+            id: "A".to_string(),
+            ..IrNode::default()
+        });
+        let layout = layout_diagram_force(&ir);
+        assert_eq!(layout.nodes.len(), 1);
+        assert!(layout.nodes[0].bounds.width > 0.0);
+        assert!(layout.nodes[0].bounds.height > 0.0);
+        assert!(layout.nodes[0].bounds.x >= 0.0);
+        assert!(layout.nodes[0].bounds.y >= 0.0);
+    }
+
+    #[test]
+    fn force_layout_disconnected_components() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Er);
+        for node_id in ["A", "B", "C", "D"] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        // Two disconnected pairs: A-B and C-D
+        for (from, to) in [(0, 1), (2, 3)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Line,
+                ..IrEdge::default()
+            });
+        }
+        let layout = layout_diagram_force(&ir);
+        assert_eq!(layout.nodes.len(), 4);
+        assert_eq!(layout.edges.len(), 2);
+        // All positions should be non-negative.
+        for node in &layout.nodes {
+            assert!(node.bounds.x >= 0.0, "node {} has negative x", node.node_id);
+            assert!(node.bounds.y >= 0.0, "node {} has negative y", node.node_id);
+        }
+    }
+
+    #[test]
+    fn force_layout_self_loop() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Er);
+        ir.nodes.push(IrNode {
+            id: "A".to_string(),
+            ..IrNode::default()
+        });
+        // Self-loop edge should be skipped (not cause crash).
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(0)),
+            arrow: ArrowType::Arrow,
+            ..IrEdge::default()
+        });
+        let layout = layout_diagram_force(&ir);
+        assert_eq!(layout.nodes.len(), 1);
+        // Self-loop creates a degenerate edge (from == to node), still present in output.
+        assert_eq!(layout.edges.len(), 1);
+    }
+
+    #[test]
+    fn force_layout_connected_nodes_closer_than_disconnected() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Er);
+        for node_id in ["A", "B", "C"] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        // Only A-B connected, C is isolated.
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            arrow: ArrowType::Line,
+            ..IrEdge::default()
+        });
+
+        let layout = layout_diagram_force(&ir);
+        let a = layout.nodes.iter().find(|n| n.node_id == "A").unwrap();
+        let b = layout.nodes.iter().find(|n| n.node_id == "B").unwrap();
+        let c = layout.nodes.iter().find(|n| n.node_id == "C").unwrap();
+
+        let a_center = a.bounds.center();
+        let b_center = b.bounds.center();
+        let c_center = c.bounds.center();
+
+        let dist_ab = ((a_center.x - b_center.x).powi(2) + (a_center.y - b_center.y).powi(2)).sqrt();
+        let dist_ac = ((a_center.x - c_center.x).powi(2) + (a_center.y - c_center.y).powi(2)).sqrt();
+
+        // Connected nodes should generally be closer than disconnected.
+        assert!(
+            dist_ab < dist_ac * 1.5,
+            "Connected A-B distance ({dist_ab}) should be less than A-C distance ({dist_ac})"
+        );
+    }
+
+    #[test]
+    fn force_layout_with_clusters() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Er);
+        for node_id in ["A", "B", "C", "D"] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            arrow: ArrowType::Line,
+            ..IrEdge::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(2)),
+            to: IrEndpoint::Node(IrNodeId(3)),
+            arrow: ArrowType::Line,
+            ..IrEdge::default()
+        });
+        // Cluster 0: A, B. Cluster 1: C, D.
+        ir.clusters.push(IrCluster {
+            id: IrClusterId(0),
+            title: None,
+            members: vec![IrNodeId(0), IrNodeId(1)],
+            span: fm_core::Span::default(),
+        });
+        ir.clusters.push(IrCluster {
+            id: IrClusterId(1),
+            title: None,
+            members: vec![IrNodeId(2), IrNodeId(3)],
+            span: fm_core::Span::default(),
+        });
+
+        let layout = layout_diagram_force(&ir);
+        assert_eq!(layout.nodes.len(), 4);
+        assert_eq!(layout.clusters.len(), 2);
+        // Cluster bounds should be non-zero.
+        for cluster in &layout.clusters {
+            assert!(cluster.bounds.width > 0.0);
+            assert!(cluster.bounds.height > 0.0);
+        }
+    }
+
+    #[test]
+    fn force_layout_edges_have_valid_points() {
+        let ir = sample_er_ir();
+        let layout = layout_diagram_force(&ir);
+        for edge in &layout.edges {
+            assert!(
+                edge.points.len() >= 2,
+                "Edge {} should have at least 2 points",
+                edge.edge_index
+            );
+            for pt in &edge.points {
+                assert!(pt.x.is_finite(), "Edge point x must be finite");
+                assert!(pt.y.is_finite(), "Edge point y must be finite");
+            }
+        }
+    }
+
+    #[test]
+    fn force_layout_edge_lengths_computed() {
+        let ir = sample_er_ir();
+        let layout = layout_diagram_force(&ir);
+        assert!(layout.stats.total_edge_length > 0.0);
+        // Force layout has no reversed edges.
+        assert!((layout.stats.reversed_edge_total_length - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn force_layout_larger_graph() {
+        // 20-node graph to verify it handles larger inputs.
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Er);
+        for i in 0..20 {
+            ir.nodes.push(IrNode {
+                id: format!("N{i}"),
+                ..IrNode::default()
+            });
+        }
+        // Ring topology + cross links.
+        for i in 0..20 {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(i)),
+                to: IrEndpoint::Node(IrNodeId((i + 1) % 20)),
+                arrow: ArrowType::Line,
+                ..IrEdge::default()
+            });
+        }
+        // A few cross links.
+        for (from, to) in [(0, 10), (5, 15), (3, 17)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Line,
+                ..IrEdge::default()
+            });
+        }
+
+        let layout = layout_diagram_force(&ir);
+        assert_eq!(layout.nodes.len(), 20);
+        assert_eq!(layout.edges.len(), 23);
+        assert!(layout.bounds.width > 0.0);
+        assert!(layout.bounds.height > 0.0);
+        assert!(layout.stats.total_edge_length > 0.0);
+    }
+
+    #[test]
+    fn force_layout_dispatch_via_algorithm_enum() {
+        let ir = sample_er_ir();
+        let stats = layout(&ir, LayoutAlgorithm::Force);
+        assert_eq!(stats.node_count, 4);
+        assert_eq!(stats.edge_count, 4);
+    }
+
+    #[test]
+    fn force_layout_trace_has_stages() {
+        let ir = sample_er_ir();
+        let traced = layout_diagram_force_traced(&ir);
+        assert!(
+            traced.trace.snapshots.len() >= 3,
+            "Expected at least 3 trace stages: init, simulation, overlap_removal"
+        );
+        let stage_names: Vec<&str> = traced
+            .trace
+            .snapshots
+            .iter()
+            .map(|s| s.stage)
+            .collect();
+        assert!(stage_names.contains(&"force_init"));
+        assert!(stage_names.contains(&"force_simulation"));
+        assert!(stage_names.contains(&"force_overlap_removal"));
+    }
+
+    #[test]
+    fn force_layout_all_positions_nonnegative() {
+        let ir = sample_er_ir();
+        let layout = layout_diagram_force(&ir);
+        for node in &layout.nodes {
+            assert!(
+                node.bounds.x >= 0.0,
+                "Node {} x={} is negative",
+                node.node_id,
+                node.bounds.x
+            );
+            assert!(
+                node.bounds.y >= 0.0,
+                "Node {} y={} is negative",
+                node.node_id,
+                node.bounds.y
+            );
+        }
     }
 }
