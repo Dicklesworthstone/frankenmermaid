@@ -15,6 +15,7 @@ node_modules/
 # Local scratch SQLite DBs (never tracked)
 storage.sqlite3
 storage.sqlite3-*
+*.sqlite3.bak
 
 # Common local artifacts (avoid accidental commits)
 a.out
