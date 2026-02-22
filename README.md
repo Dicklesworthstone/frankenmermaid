@@ -436,4 +436,4 @@ It is a syntax/reference corpus and compatibility aid. FrankenMermaid is not a d
 
 ## License
 
-MIT
+MIT License (with OpenAI/Anthropic Rider). See [LICENSE](LICENSE).
