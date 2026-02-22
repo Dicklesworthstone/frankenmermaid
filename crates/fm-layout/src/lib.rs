@@ -116,11 +116,25 @@ pub struct LayoutClusterBox {
     pub bounds: LayoutRect,
 }
 
+/// Edge routing style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EdgeRouting {
+    /// Manhattan-style orthogonal routing (default).
+    #[default]
+    Orthogonal,
+    /// Cubic Bezier spline routing.
+    Spline,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayoutEdgePath {
     pub edge_index: usize,
     pub points: Vec<LayoutPoint>,
     pub reversed: bool,
+    /// True if this is a self-loop edge (source == target).
+    pub is_self_loop: bool,
+    /// Offset for parallel edges (0 for first edge, increments for duplicates).
+    pub parallel_offset: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -897,6 +911,8 @@ fn force_build_edge_paths(ir: &MermaidDiagramIr, nodes: &[LayoutNodeBox]) -> Vec
                 edge_index: ei,
                 points: vec![from_pt, to_pt],
                 reversed: false,
+                is_self_loop: from_idx == to_idx,
+                parallel_offset: 0.0,
             })
         })
         .collect()
@@ -1982,6 +1998,18 @@ fn build_edge_paths(
 ) -> Vec<LayoutEdgePath> {
     let horizontal_ranks = matches!(ir.direction, GraphDirection::LR | GraphDirection::RL);
 
+    // Track parallel edges: count edges between same (source, target) pair.
+    let mut edge_pair_count: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+    let mut edge_pair_index: Vec<usize> = Vec::with_capacity(ir.edges.len());
+    for edge in &ir.edges {
+        let source = endpoint_node_index(ir, edge.from).unwrap_or(usize::MAX);
+        let target = endpoint_node_index(ir, edge.to).unwrap_or(usize::MAX);
+        let key = (source.min(target), source.max(target));
+        let count = edge_pair_count.entry(key).or_insert(0);
+        edge_pair_index.push(*count);
+        *count += 1;
+    }
+
     ir.edges
         .iter()
         .enumerate()
@@ -1990,17 +2018,112 @@ fn build_edge_paths(
             let target = endpoint_node_index(ir, edge.to)?;
             let source_box = nodes.get(source)?;
             let target_box = nodes.get(target)?;
-            let (source_anchor, target_anchor) =
-                edge_anchors(source_box, target_box, horizontal_ranks);
-            let points = route_edge_points(source_anchor, target_anchor, horizontal_ranks);
+
+            let is_self_loop = source == target;
+            let key = (source.min(target), source.max(target));
+            let pair_total = edge_pair_count.get(&key).copied().unwrap_or(1);
+            let pair_idx = edge_pair_index.get(edge_index).copied().unwrap_or(0);
+            let parallel_offset = if pair_total > 1 {
+                let offset_step = 12.0_f32;
+                (pair_idx as f32 - (pair_total - 1) as f32 / 2.0) * offset_step
+            } else {
+                0.0
+            };
+
+            let points = if is_self_loop {
+                route_self_loop(source_box, horizontal_ranks)
+            } else {
+                let (source_anchor, target_anchor) =
+                    edge_anchors(source_box, target_box, horizontal_ranks);
+                let mut pts = route_edge_points(source_anchor, target_anchor, horizontal_ranks);
+                if parallel_offset.abs() > 0.01 {
+                    apply_parallel_offset(&mut pts, parallel_offset, horizontal_ranks);
+                }
+                pts
+            };
 
             Some(LayoutEdgePath {
                 edge_index,
                 points,
                 reversed: highlighted_edge_indexes.contains(&edge_index),
+                is_self_loop,
+                parallel_offset,
             })
         })
         .collect()
+}
+
+/// Route a self-loop edge: goes out one side and returns on another.
+fn route_self_loop(node_box: &LayoutNodeBox, horizontal_ranks: bool) -> Vec<LayoutPoint> {
+    let b = &node_box.bounds;
+    let loop_size = 24.0_f32;
+
+    if horizontal_ranks {
+        // Loop goes out the right side and returns from the top.
+        let start = LayoutPoint {
+            x: b.x + b.width,
+            y: b.y + b.height * 0.4,
+        };
+        let corner1 = LayoutPoint {
+            x: b.x + b.width + loop_size,
+            y: b.y + b.height * 0.4,
+        };
+        let corner2 = LayoutPoint {
+            x: b.x + b.width + loop_size,
+            y: b.y - loop_size,
+        };
+        let corner3 = LayoutPoint {
+            x: b.x + b.width * 0.6,
+            y: b.y - loop_size,
+        };
+        let end = LayoutPoint {
+            x: b.x + b.width * 0.6,
+            y: b.y,
+        };
+        vec![start, corner1, corner2, corner3, end]
+    } else {
+        // Loop goes out the bottom and returns from the right.
+        let start = LayoutPoint {
+            x: b.x + b.width * 0.6,
+            y: b.y + b.height,
+        };
+        let corner1 = LayoutPoint {
+            x: b.x + b.width * 0.6,
+            y: b.y + b.height + loop_size,
+        };
+        let corner2 = LayoutPoint {
+            x: b.x + b.width + loop_size,
+            y: b.y + b.height + loop_size,
+        };
+        let corner3 = LayoutPoint {
+            x: b.x + b.width + loop_size,
+            y: b.y + b.height * 0.4,
+        };
+        let end = LayoutPoint {
+            x: b.x + b.width,
+            y: b.y + b.height * 0.4,
+        };
+        vec![start, corner1, corner2, corner3, end]
+    }
+}
+
+/// Apply parallel offset to an edge path to distinguish parallel edges.
+fn apply_parallel_offset(
+    points: &mut [LayoutPoint],
+    offset: f32,
+    horizontal_ranks: bool,
+) {
+    if points.len() < 2 {
+        return;
+    }
+    // Offset perpendicular to the main routing direction.
+    for pt in points.iter_mut() {
+        if horizontal_ranks {
+            pt.y += offset;
+        } else {
+            pt.x += offset;
+        }
+    }
 }
 
 fn edge_anchors(
