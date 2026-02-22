@@ -354,7 +354,7 @@ impl Canvas2dRenderer {
                 
                 let start_y = ly - (total_height / 2.0) + (line_height / 2.0);
                 for (i, line) in lines.iter().enumerate() {
-                    ctx.fill_text(line, lx, start_y + (*i as f64) * line_height);
+                    ctx.fill_text(line, lx, start_y + (i as f64) * line_height);
                     self.draw_calls += 1;
                 }
             }
@@ -431,7 +431,7 @@ impl Canvas2dRenderer {
                     let start_y = cy - (total_height / 2.0) + (line_height / 2.0);
                     
                     for (i, line) in lines.iter().enumerate() {
-                        ctx.fill_text(line, cx, start_y + (*i as f64) * line_height);
+                        ctx.fill_text(line, cx, start_y + (i as f64) * line_height);
                         self.draw_calls += 1;
                     }
                 }

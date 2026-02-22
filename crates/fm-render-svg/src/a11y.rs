@@ -76,6 +76,8 @@ pub fn describe_node(node: &IrNode, ir: &MermaidDiagramIr) -> String {
         fm_core::NodeShape::Cloud => "cloud",
         fm_core::NodeShape::Tag => "tag",
         fm_core::NodeShape::CrossedCircle => "crossed circle",
+        fm_core::NodeShape::Parallelogram => "parallelogram",
+        fm_core::NodeShape::InvParallelogram => "inverted parallelogram",
     };
 
     format!("Node: {}, {}", label, shape_desc)

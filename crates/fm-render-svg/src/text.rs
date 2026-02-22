@@ -3,7 +3,6 @@
 //! Provides `TextBuilder` for creating text elements with multi-line support,
 //! and `TextMetrics` for estimating text dimensions.
 
-use crate::attributes::escape_xml_text;
 use crate::element::Element;
 
 /// Text anchor position.
@@ -323,7 +322,7 @@ impl TextBuilder {
                 let tspan = Element::tspan()
                     .x(self.x)
                     .attr_num("dy", dy)
-                    .content(line);
+                    .content(*line);
                 elem = elem.child(tspan);
             }
         }

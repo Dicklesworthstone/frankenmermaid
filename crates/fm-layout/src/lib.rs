@@ -3,7 +3,7 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
-use fm_core::{GraphDirection, IrEndpoint, IrLabelId, MermaidDiagramIr};
+use fm_core::{GraphDirection, IrEndpoint, MermaidDiagramIr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutAlgorithm {
@@ -53,6 +53,12 @@ impl CycleStrategy {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LayoutConfig {
+    pub cycle_strategy: CycleStrategy,
+    pub collapse_cycle_clusters: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct LayoutStats {
     pub node_count: usize,
     pub edge_count: usize,
@@ -61,6 +67,11 @@ pub struct LayoutStats {
     pub cycle_count: usize,
     pub cycle_node_count: usize,
     pub max_cycle_size: usize,
+    pub collapsed_clusters: usize,
+    /// Sum of Euclidean edge lengths for reversed (cycle-breaking) edges.
+    pub reversed_edge_total_length: f32,
+    /// Sum of Euclidean edge lengths for all edges.
+    pub total_edge_length: f32,
     pub phase_iterations: usize,
 }
 
@@ -142,9 +153,17 @@ pub struct LayoutTrace {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct LayoutCycleCluster {
+    pub head_node_index: usize,
+    pub member_node_indexes: Vec<usize>,
+    pub bounds: LayoutRect,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct DiagramLayout {
     pub nodes: Vec<LayoutNodeBox>,
     pub clusters: Vec<LayoutClusterBox>,
+    pub cycle_clusters: Vec<LayoutCycleCluster>,
     pub edges: Vec<LayoutEdgePath>,
     pub bounds: LayoutRect,
     pub stats: LayoutStats,
@@ -175,6 +194,11 @@ pub fn layout_diagram_with_cycle_strategy(
 }
 
 #[must_use]
+pub fn layout_diagram_with_config(ir: &MermaidDiagramIr, config: LayoutConfig) -> DiagramLayout {
+    layout_diagram_traced_with_config(ir, config).layout
+}
+
+#[must_use]
 pub fn layout_diagram_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     layout_diagram_traced_with_cycle_strategy(ir, default_cycle_strategy())
 }
@@ -184,10 +208,24 @@ pub fn layout_diagram_traced_with_cycle_strategy(
     ir: &MermaidDiagramIr,
     cycle_strategy: CycleStrategy,
 ) -> TracedLayout {
+    layout_diagram_traced_with_config(
+        ir,
+        LayoutConfig {
+            cycle_strategy,
+            collapse_cycle_clusters: false,
+        },
+    )
+}
+
+#[must_use]
+pub fn layout_diagram_traced_with_config(
+    ir: &MermaidDiagramIr,
+    config: LayoutConfig,
+) -> TracedLayout {
     let mut trace = LayoutTrace::default();
     let spacing = LayoutSpacing::default();
     let node_sizes = compute_node_sizes(ir);
-    let cycle_result = cycle_removal(ir, cycle_strategy);
+    let cycle_result = cycle_removal(ir, config.cycle_strategy);
     push_snapshot(
         &mut trace,
         "cycle_removal",
@@ -196,6 +234,12 @@ pub fn layout_diagram_traced_with_cycle_strategy(
         cycle_result.reversed_edge_indexes.len(),
         0,
     );
+
+    let collapse_map = if config.collapse_cycle_clusters {
+        Some(build_cycle_cluster_map(ir, &cycle_result))
+    } else {
+        None
+    };
 
     let ranks = rank_assignment(ir, &cycle_result);
     push_snapshot(
@@ -217,9 +261,20 @@ pub fn layout_diagram_traced_with_cycle_strategy(
         crossing_count,
     );
 
-    let nodes = coordinate_assignment(ir, &node_sizes, &ranks, &ordering_by_rank, spacing);
+    let mut nodes = coordinate_assignment(ir, &node_sizes, &ranks, &ordering_by_rank, spacing);
     let edges = build_edge_paths(ir, &nodes, &cycle_result.highlighted_edge_indexes);
-    let clusters = build_cluster_boxes(ir, &nodes, spacing);
+    let mut clusters = build_cluster_boxes(ir, &nodes, spacing);
+    let mut cycle_clusters = Vec::new();
+
+    // If cycle clusters are collapsed, group member nodes within their cluster head's bounds.
+    let collapsed_count = if let Some(ref collapse_map) = collapse_map {
+        let count = collapse_map.cluster_heads.len();
+        cycle_clusters = build_cycle_cluster_results(collapse_map, &mut nodes, &mut clusters, spacing);
+        count
+    } else {
+        0
+    };
+
     let bounds = compute_bounds(&nodes, &clusters, spacing);
 
     push_snapshot(
@@ -231,6 +286,8 @@ pub fn layout_diagram_traced_with_cycle_strategy(
         crossing_count,
     );
 
+    let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
+
     let stats = LayoutStats {
         node_count: ir.nodes.len(),
         edge_count: ir.edges.len(),
@@ -239,6 +296,9 @@ pub fn layout_diagram_traced_with_cycle_strategy(
         cycle_count: cycle_result.summary.cycle_count,
         cycle_node_count: cycle_result.summary.cycle_node_count,
         max_cycle_size: cycle_result.summary.max_cycle_size,
+        collapsed_clusters: collapsed_count,
+        reversed_edge_total_length,
+        total_edge_length,
         phase_iterations: trace.snapshots.len(),
     };
 
@@ -246,6 +306,7 @@ pub fn layout_diagram_traced_with_cycle_strategy(
         layout: DiagramLayout {
             nodes,
             clusters,
+            cycle_clusters,
             edges,
             bounds,
             stats,
@@ -300,6 +361,16 @@ struct CycleDetection {
     node_to_component: Vec<Option<usize>>,
     cyclic_component_indexes: BTreeSet<usize>,
     summary: CycleSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CycleClusterMap {
+    /// For each original node index, the representative node index (self if not collapsed).
+    node_representative: Vec<usize>,
+    /// The set of representative node indexes that are cycle cluster heads.
+    cluster_heads: BTreeSet<usize>,
+    /// For each cluster head, the list of member node indexes (including the head).
+    cluster_members: BTreeMap<usize, Vec<usize>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1438,6 +1509,157 @@ fn compute_bounds(
     }
 }
 
+fn compute_edge_length_metrics(edges: &[LayoutEdgePath]) -> (f32, f32) {
+    let mut total = 0.0_f32;
+    let mut reversed_total = 0.0_f32;
+
+    for edge in edges {
+        let length = polyline_length(&edge.points);
+        total += length;
+        if edge.reversed {
+            reversed_total += length;
+        }
+    }
+
+    (total, reversed_total)
+}
+
+fn polyline_length(points: &[LayoutPoint]) -> f32 {
+    points
+        .windows(2)
+        .map(|pair| {
+            let dx = pair[1].x - pair[0].x;
+            let dy = pair[1].y - pair[0].y;
+            (dx * dx + dy * dy).sqrt()
+        })
+        .sum()
+}
+
+fn build_cycle_cluster_map(
+    ir: &MermaidDiagramIr,
+    cycle_result: &CycleRemovalResult,
+) -> CycleClusterMap {
+    let node_count = ir.nodes.len();
+    let edges = resolved_edges(ir);
+    let node_priority = stable_node_priorities(ir);
+    let detection = detect_cycle_components(node_count, &edges, &node_priority);
+
+    let mut node_representative = (0..node_count).collect::<Vec<_>>();
+    let mut cluster_heads = BTreeSet::new();
+    let mut cluster_members = BTreeMap::new();
+
+    for component_index in &detection.cyclic_component_indexes {
+        let Some(component_nodes) = detection.components.get(*component_index) else {
+            continue;
+        };
+        if component_nodes.len() <= 1 {
+            // Skip self-loops for cluster collapse — they're single nodes.
+            continue;
+        }
+
+        // Choose the lowest-priority node as the representative (cluster head).
+        let head = *component_nodes
+            .iter()
+            .min_by(|a, b| compare_priority(**a, **b, &node_priority))
+            .unwrap_or(&component_nodes[0]);
+
+        cluster_heads.insert(head);
+        let mut members = component_nodes.clone();
+        members.sort_by(|a, b| compare_priority(*a, *b, &node_priority));
+        for &member in &members {
+            node_representative[member] = head;
+        }
+        cluster_members.insert(head, members);
+    }
+
+    let _ = cycle_result; // Used for type coherence; detection is recomputed for isolation.
+
+    CycleClusterMap {
+        node_representative,
+        cluster_heads,
+        cluster_members,
+    }
+}
+
+fn build_cycle_cluster_results(
+    collapse_map: &CycleClusterMap,
+    nodes: &mut [LayoutNodeBox],
+    clusters: &mut Vec<LayoutClusterBox>,
+    spacing: LayoutSpacing,
+) -> Vec<LayoutCycleCluster> {
+    let mut cycle_clusters = Vec::new();
+
+    for (head, members) in &collapse_map.cluster_members {
+        if members.len() <= 1 {
+            continue;
+        }
+
+        // Find the head node's bounding box (copy values to satisfy borrow checker).
+        let Some(head_box) = nodes.iter().find(|n| n.node_index == *head) else {
+            continue;
+        };
+        let base_x = head_box.bounds.x;
+        let base_y = head_box.bounds.y;
+        let head_height = head_box.bounds.height;
+
+        // Arrange member nodes (excluding head) in a compact grid within the cluster bounds.
+        let non_head_members: Vec<usize> = members.iter().copied().filter(|m| m != head).collect();
+        let member_count = non_head_members.len();
+        let cols = ((member_count as f32).sqrt().ceil() as usize).max(1);
+
+        let sub_spacing = spacing.node_spacing * 0.5;
+        for (idx, &member_index) in non_head_members.iter().enumerate() {
+            let col = idx % cols;
+            let row = idx / cols;
+            if let Some(member_box) = nodes.iter_mut().find(|n| n.node_index == member_index) {
+                member_box.bounds.x =
+                    base_x + (col as f32) * (member_box.bounds.width + sub_spacing);
+                member_box.bounds.y = base_y
+                    + head_height
+                    + spacing.cluster_padding
+                    + (row as f32) * (member_box.bounds.height + sub_spacing);
+            }
+        }
+
+        // Compute the cluster bounding box over all members.
+        let mut min_x = f32::MAX;
+        let mut min_y = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut max_y = f32::MIN;
+        for &member_index in members {
+            if let Some(member_box) = nodes.iter().find(|n| n.node_index == member_index) {
+                min_x = min_x.min(member_box.bounds.x);
+                min_y = min_y.min(member_box.bounds.y);
+                max_x = max_x.max(member_box.bounds.x + member_box.bounds.width);
+                max_y = max_y.max(member_box.bounds.y + member_box.bounds.height);
+            }
+        }
+
+        if min_x.is_finite() && min_y.is_finite() && max_x.is_finite() && max_y.is_finite() {
+            let cluster_bounds = LayoutRect {
+                x: min_x - spacing.cluster_padding,
+                y: min_y - spacing.cluster_padding,
+                width: (max_x - min_x) + (2.0 * spacing.cluster_padding),
+                height: (max_y - min_y) + (2.0 * spacing.cluster_padding),
+            };
+
+            cycle_clusters.push(LayoutCycleCluster {
+                head_node_index: *head,
+                member_node_indexes: members.clone(),
+                bounds: cluster_bounds,
+            });
+
+            // Also add as a regular cluster box for rendering consistency.
+            clusters.push(LayoutClusterBox {
+                cluster_index: clusters.len(),
+                bounds: cluster_bounds,
+            });
+        }
+    }
+
+    cycle_clusters
+}
+
 fn endpoint_node_index(ir: &MermaidDiagramIr, endpoint: IrEndpoint) -> Option<usize> {
     match endpoint {
         IrEndpoint::Node(node) => Some(node.0),
@@ -1695,6 +1917,400 @@ mod tests {
             points.last().copied(),
             Some(LayoutPoint { x: 120.0, y: 100.0 })
         );
+    }
+
+    #[test]
+    fn greedy_cycle_strategy_is_deterministic() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for node_id in ["A", "B", "C", "D"] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        for (from, to) in [(0, 1), (1, 2), (2, 0), (2, 3), (3, 1)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let first = layout_diagram_with_cycle_strategy(&ir, CycleStrategy::Greedy);
+        let second = layout_diagram_with_cycle_strategy(&ir, CycleStrategy::Greedy);
+        assert_eq!(first, second);
+        assert!(first.stats.reversed_edges >= 1);
+        assert!(first.edges.iter().any(|edge| edge.reversed));
+    }
+
+    #[test]
+    fn mfas_cycle_strategy_is_deterministic() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for node_id in ["A", "B", "C", "D"] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        for (from, to) in [(0, 1), (1, 2), (2, 0), (2, 3), (3, 1)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let first = layout_diagram_with_cycle_strategy(&ir, CycleStrategy::MfasApprox);
+        let second = layout_diagram_with_cycle_strategy(&ir, CycleStrategy::MfasApprox);
+        assert_eq!(first, second);
+        assert!(first.stats.reversed_edges >= 1);
+    }
+
+    #[test]
+    fn greedy_breaks_simple_cycle() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for node_id in ["A", "B", "C"] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        for (from, to) in [(0, 1), (1, 2), (2, 0)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let layout = layout_diagram_with_cycle_strategy(&ir, CycleStrategy::Greedy);
+        assert!(layout.stats.reversed_edges >= 1);
+        assert_eq!(layout.stats.cycle_count, 1);
+        assert_eq!(layout.stats.cycle_node_count, 3);
+    }
+
+    #[test]
+    fn mfas_breaks_simple_cycle() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for node_id in ["A", "B", "C"] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        for (from, to) in [(0, 1), (1, 2), (2, 0)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let layout = layout_diagram_with_cycle_strategy(&ir, CycleStrategy::MfasApprox);
+        assert!(layout.stats.reversed_edges >= 1);
+        assert_eq!(layout.stats.cycle_count, 1);
+    }
+
+    #[test]
+    fn self_loop_detected_as_cycle() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.nodes.push(IrNode {
+            id: "A".to_string(),
+            ..IrNode::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(0)),
+            arrow: ArrowType::Arrow,
+            ..IrEdge::default()
+        });
+
+        let layout = layout_diagram_with_cycle_strategy(&ir, CycleStrategy::DfsBack);
+        assert_eq!(layout.stats.cycle_count, 1);
+        assert_eq!(layout.stats.cycle_node_count, 1);
+        assert_eq!(layout.stats.max_cycle_size, 1);
+    }
+
+    #[test]
+    fn multiple_disconnected_cycles_detected() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        // Two separate triangles: A->B->C->A and D->E->F->D
+        for node_id in ["A", "B", "C", "D", "E", "F"] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        for (from, to) in [(0, 1), (1, 2), (2, 0), (3, 4), (4, 5), (5, 3)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let layout = layout_diagram_with_cycle_strategy(&ir, CycleStrategy::Greedy);
+        assert_eq!(layout.stats.cycle_count, 2);
+        assert_eq!(layout.stats.cycle_node_count, 6);
+        assert_eq!(layout.stats.max_cycle_size, 3);
+        assert!(layout.stats.reversed_edges >= 2);
+    }
+
+    #[test]
+    fn nested_cycles_handled_correctly() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        // A->B->C->A forms inner cycle, A->B->C->D->A forms outer cycle sharing edges
+        for node_id in ["A", "B", "C", "D"] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        for (from, to) in [(0, 1), (1, 2), (2, 0), (2, 3), (3, 0)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let layout = layout_diagram_with_cycle_strategy(&ir, CycleStrategy::DfsBack);
+        // All 4 nodes form one SCC due to shared edges
+        assert!(layout.stats.cycle_count >= 1);
+        assert!(layout.stats.cycle_node_count >= 3);
+        assert!(layout.stats.reversed_edges >= 1);
+    }
+
+    #[test]
+    fn acyclic_graph_has_no_reversals() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for node_id in ["A", "B", "C", "D"] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        for (from, to) in [(0, 1), (0, 2), (1, 3), (2, 3)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        for strategy in [
+            CycleStrategy::Greedy,
+            CycleStrategy::DfsBack,
+            CycleStrategy::MfasApprox,
+            CycleStrategy::CycleAware,
+        ] {
+            let layout = layout_diagram_with_cycle_strategy(&ir, strategy);
+            assert_eq!(
+                layout.stats.reversed_edges, 0,
+                "strategy {:?} should not reverse edges in acyclic graph",
+                strategy
+            );
+            assert_eq!(layout.stats.cycle_count, 0);
+            assert!(!layout.edges.iter().any(|e| e.reversed));
+        }
+    }
+
+    #[test]
+    fn all_strategies_produce_valid_layout_for_cyclic_graph() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for node_id in ["A", "B", "C"] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        for (from, to) in [(0, 1), (1, 2), (2, 0)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        for strategy in [
+            CycleStrategy::Greedy,
+            CycleStrategy::DfsBack,
+            CycleStrategy::MfasApprox,
+            CycleStrategy::CycleAware,
+        ] {
+            let layout = layout_diagram_with_cycle_strategy(&ir, strategy);
+            // All strategies should produce valid layout with 3 nodes and 3 edges
+            assert_eq!(layout.nodes.len(), 3, "strategy {:?}", strategy);
+            assert_eq!(layout.edges.len(), 3, "strategy {:?}", strategy);
+            assert!(layout.bounds.width > 0.0, "strategy {:?}", strategy);
+            assert!(layout.bounds.height > 0.0, "strategy {:?}", strategy);
+            // All strategies should detect the cycle
+            assert_eq!(layout.stats.cycle_count, 1, "strategy {:?}", strategy);
+        }
+    }
+
+    #[test]
+    fn cycle_strategy_parse_roundtrip() {
+        for strategy in [
+            CycleStrategy::Greedy,
+            CycleStrategy::DfsBack,
+            CycleStrategy::MfasApprox,
+            CycleStrategy::CycleAware,
+        ] {
+            let parsed = CycleStrategy::parse(strategy.as_str());
+            assert_eq!(
+                parsed,
+                Some(strategy),
+                "roundtrip failed for {:?}",
+                strategy
+            );
+        }
+    }
+
+    #[test]
+    fn cycle_cluster_collapse_groups_scc_members() {
+        use super::LayoutConfig;
+
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        // Build: A->B->C->A (cycle) + D (separate node connected from A)
+        for node_id in ["A", "B", "C", "D"] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        for (from, to) in [(0, 1), (1, 2), (2, 0), (0, 3)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let config = LayoutConfig {
+            cycle_strategy: CycleStrategy::Greedy,
+            collapse_cycle_clusters: true,
+        };
+        let layout = super::layout_diagram_with_config(&ir, config);
+
+        // Should have one collapsed cluster (the A->B->C cycle)
+        assert_eq!(layout.stats.collapsed_clusters, 1);
+        assert_eq!(layout.cycle_clusters.len(), 1);
+
+        let cluster = &layout.cycle_clusters[0];
+        assert_eq!(cluster.member_node_indexes.len(), 3);
+        assert!(cluster.bounds.width > 0.0);
+        assert!(cluster.bounds.height > 0.0);
+
+        // All 4 nodes should still be in the layout
+        assert_eq!(layout.nodes.len(), 4);
+    }
+
+    #[test]
+    fn edge_length_metrics_computed_for_cyclic_graph() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for node_id in ["A", "B", "C"] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        for (from, to) in [(0, 1), (1, 2), (2, 0)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let layout = layout_diagram_with_cycle_strategy(&ir, CycleStrategy::Greedy);
+        // Total edge length should be positive (3 edges)
+        assert!(layout.stats.total_edge_length > 0.0);
+        // At least one edge is reversed, so reversed_edge_total_length > 0
+        assert!(layout.stats.reversed_edge_total_length > 0.0);
+        // Reversed edge length should not exceed total
+        assert!(layout.stats.reversed_edge_total_length <= layout.stats.total_edge_length);
+    }
+
+    #[test]
+    fn edge_length_metrics_zero_for_acyclic_graph() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for node_id in ["A", "B", "C"] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        for (from, to) in [(0, 1), (1, 2)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let layout = layout_diagram(&ir);
+        assert!(layout.stats.total_edge_length > 0.0);
+        assert!((layout.stats.reversed_edge_total_length - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn cycle_cluster_collapse_disabled_produces_no_clusters() {
+        use super::LayoutConfig;
+
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for node_id in ["A", "B", "C"] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        for (from, to) in [(0, 1), (1, 2), (2, 0)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let config = LayoutConfig {
+            cycle_strategy: CycleStrategy::Greedy,
+            collapse_cycle_clusters: false,
+        };
+        let layout = super::layout_diagram_with_config(&ir, config);
+
+        assert_eq!(layout.stats.collapsed_clusters, 0);
+        assert!(layout.cycle_clusters.is_empty());
+    }
+
+    #[test]
+    fn cycle_strategy_parse_aliases() {
+        assert_eq!(CycleStrategy::parse("dfs"), Some(CycleStrategy::DfsBack));
+        assert_eq!(
+            CycleStrategy::parse("dfs_back"),
+            Some(CycleStrategy::DfsBack)
+        );
+        assert_eq!(
+            CycleStrategy::parse("minimum-feedback-arc-set"),
+            Some(CycleStrategy::MfasApprox)
+        );
+        assert_eq!(
+            CycleStrategy::parse("cycleaware"),
+            Some(CycleStrategy::CycleAware)
+        );
+        assert_eq!(CycleStrategy::parse("unknown"), None);
     }
 
     #[test]

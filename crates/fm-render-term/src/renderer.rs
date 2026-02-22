@@ -669,36 +669,36 @@ impl TermRenderer {
             if edge_path.points.len() < 2 {
                 continue;
             }
-            if let Some(label_id) = ir.edges.get(edge_path.edge_index).and_then(|e| e.label) {
-                if let Some(label) = ir.labels.get(label_id.0) {
-                    let truncated = self.truncate_label(&label.text);
-                    let label_lines: Vec<&str> = truncated.lines().collect();
-                    
-                    let (mid_x, mid_y) = if edge_path.points.len() == 4 {
-                        let p1 = &edge_path.points[1];
-                        let p2 = &edge_path.points[2];
-                        let px = (p1.x + p2.x) / 2.0;
-                        let py = (p1.y + p2.y) / 2.0;
-                        self.point_to_cells(&fm_layout::LayoutPoint { x: px, y: py })
-                    } else {
-                        let mid_idx = edge_path.points.len() / 2;
-                        self.point_to_cells(&edge_path.points[mid_idx])
-                    };
-                    
-                    let start_y = mid_y.saturating_sub(label_lines.len() / 2);
-                    
-                    for (i, line) in label_lines.iter().enumerate() {
-                        let label_chars: Vec<char> = line.chars().collect();
-                        let label_len = label_chars.len();
-                        let label_x = mid_x.saturating_sub(label_len / 2);
-                        let label_y = start_y + i;
+            if let Some(label_id) = ir.edges.get(edge_path.edge_index).and_then(|e| e.label)
+                && let Some(label) = ir.labels.get(label_id.0)
+            {
+                let truncated = self.truncate_label(&label.text);
+                let label_lines: Vec<&str> = truncated.lines().collect();
 
-                        if label_y < lines.len() {
-                            for (j, ch) in label_chars.into_iter().enumerate() {
-                                let col = label_x + j;
-                                if col < cell_width && col < lines[label_y].len() {
-                                    lines[label_y][col] = ch;
-                                }
+                let (mid_x, mid_y) = if edge_path.points.len() == 4 {
+                    let p1 = &edge_path.points[1];
+                    let p2 = &edge_path.points[2];
+                    let px = (p1.x + p2.x) / 2.0;
+                    let py = (p1.y + p2.y) / 2.0;
+                    self.point_to_cells(&fm_layout::LayoutPoint { x: px, y: py })
+                } else {
+                    let mid_idx = edge_path.points.len() / 2;
+                    self.point_to_cells(&edge_path.points[mid_idx])
+                };
+
+                let start_y = mid_y.saturating_sub(label_lines.len() / 2);
+
+                for (i, line) in label_lines.iter().enumerate() {
+                    let label_chars: Vec<char> = line.chars().collect();
+                    let label_len = label_chars.len();
+                    let label_x = mid_x.saturating_sub(label_len / 2);
+                    let label_y = start_y + i;
+
+                    if label_y < lines.len() {
+                        for (j, ch) in label_chars.into_iter().enumerate() {
+                            let col = label_x + j;
+                            if col < cell_width && col < lines[label_y].len() {
+                                lines[label_y][col] = ch;
                             }
                         }
                     }
