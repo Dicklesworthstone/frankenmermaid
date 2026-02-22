@@ -3401,4 +3401,159 @@ mod tests {
             );
         }
     }
+
+    // --- Crossing refinement tests ---
+
+    #[test]
+    fn refinement_improves_or_maintains_crossings() {
+        // K2,2: A->C, A->D, B->C, B->D — barycenter may not find optimal.
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for node_id in ["A", "B", "C", "D"] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        for (from, to) in [(0, 2), (0, 3), (1, 2), (1, 3)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let layout = layout_diagram(&ir);
+        // Refinement should never increase crossings over barycenter result.
+        assert!(
+            layout.stats.crossing_count <= layout.stats.crossing_count_before_refinement,
+            "Refinement should not increase crossings: before={}, after={}",
+            layout.stats.crossing_count_before_refinement,
+            layout.stats.crossing_count,
+        );
+    }
+
+    #[test]
+    fn refinement_handles_zero_crossings() {
+        // Linear chain: A->B->C — zero crossings, refinement should be a no-op.
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for node_id in ["A", "B", "C"] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        for (from, to) in [(0, 1), (1, 2)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let layout = layout_diagram(&ir);
+        assert_eq!(layout.stats.crossing_count, 0);
+        assert_eq!(layout.stats.crossing_count_before_refinement, 0);
+    }
+
+    #[test]
+    fn refinement_is_deterministic() {
+        // Dense graph where refinement has room to work.
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for node_id in ["A", "B", "C", "D", "E", "F"] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        // Layer 1: A, B, C. Layer 2: D, E, F. Cross-connected.
+        for (from, to) in [(0, 3), (0, 5), (1, 4), (1, 3), (2, 5), (2, 4)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let first = layout_diagram(&ir);
+        let second = layout_diagram(&ir);
+        assert_eq!(first.stats.crossing_count, second.stats.crossing_count);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn refinement_tracks_before_after_stats() {
+        // Graph where refinement might improve crossings.
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for node_id in ["A", "B", "C", "D", "E"] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        for (from, to) in [(0, 2), (0, 3), (0, 4), (1, 2), (1, 4)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let layout = layout_diagram(&ir);
+        // Before refinement count is recorded.
+        assert!(
+            layout.stats.crossing_count_before_refinement >= layout.stats.crossing_count,
+            "Before should be >= after: before={}, after={}",
+            layout.stats.crossing_count_before_refinement,
+            layout.stats.crossing_count,
+        );
+    }
+
+    #[test]
+    fn refinement_preserves_layout_validity() {
+        // Dense crossing graph.
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for i in 0..8 {
+            ir.nodes.push(IrNode {
+                id: format!("N{i}"),
+                ..IrNode::default()
+            });
+        }
+        // 4-source to 4-target with cross connections.
+        for from in 0..4 {
+            for to in 4..8 {
+                ir.edges.push(IrEdge {
+                    from: IrEndpoint::Node(IrNodeId(from)),
+                    to: IrEndpoint::Node(IrNodeId(to)),
+                    arrow: ArrowType::Arrow,
+                    ..IrEdge::default()
+                });
+            }
+        }
+
+        let layout = layout_diagram(&ir);
+        assert_eq!(layout.nodes.len(), 8);
+        assert_eq!(layout.edges.len(), 16);
+        assert!(layout.bounds.width > 0.0);
+        assert!(layout.bounds.height > 0.0);
+        // All nodes should have positive dimensions.
+        for node in &layout.nodes {
+            assert!(node.bounds.width > 0.0);
+            assert!(node.bounds.height > 0.0);
+        }
+    }
+
+    #[test]
+    fn trace_includes_refinement_stage() {
+        let ir = sample_ir();
+        let traced = layout_diagram_traced(&ir);
+        let stage_names: Vec<&str> = traced.trace.snapshots.iter().map(|s| s.stage).collect();
+        assert!(
+            stage_names.contains(&"crossing_refinement"),
+            "Trace should include crossing_refinement stage, got: {stage_names:?}"
+        );
+    }
 }
