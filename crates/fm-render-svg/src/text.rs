@@ -319,10 +319,7 @@ impl TextBuilder {
             // Multi-line text using tspan elements
             for (i, line) in lines.iter().enumerate() {
                 let dy = if i == 0 { 0.0 } else { line_height_px };
-                let tspan = Element::tspan()
-                    .x(self.x)
-                    .attr_num("dy", dy)
-                    .content(*line);
+                let tspan = Element::tspan().x(self.x).attr_num("dy", dy).content(*line);
                 elem = elem.child(tspan);
             }
         }

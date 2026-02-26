@@ -1508,13 +1508,37 @@ fn rank_assignment(ir: &MermaidDiagramIr, cycles: &CycleRemovalResult) -> BTreeM
     // Compact disconnected components along the rank axis so each component
     // gets an independent band instead of sharing rank-0/rank-1 globally.
     // This avoids pathological ultra-wide layouts for many disconnected chains.
-    let components = weakly_connected_components(node_count, &edges);
-    if components.len() > 1 {
+    let mut components = weakly_connected_components(node_count, &edges);
+    components.sort_by_key(|component| {
+        component
+            .iter()
+            .map(|node_index| node_priority[*node_index])
+            .min()
+            .unwrap_or(usize::MAX)
+    });
+
+    if components.len() > 1 && !edges.is_empty() {
         let mut compacted_ranks = ranks.clone();
+        let mut isolated_singletons = Vec::new();
+        let mut incident_edge_count = vec![0_usize; node_count];
+        for edge in &edges {
+            if edge.source < node_count {
+                incident_edge_count[edge.source] =
+                    incident_edge_count[edge.source].saturating_add(1);
+            }
+            if edge.target < node_count {
+                incident_edge_count[edge.target] =
+                    incident_edge_count[edge.target].saturating_add(1);
+            }
+        }
         let mut rank_cursor = 0_usize;
 
         for component in components {
             if component.is_empty() {
+                continue;
+            }
+            if component.len() == 1 && incident_edge_count[component[0]] == 0 {
+                isolated_singletons.push(component[0]);
                 continue;
             }
 
@@ -1538,6 +1562,12 @@ fn rank_assignment(ir: &MermaidDiagramIr, cycles: &CycleRemovalResult) -> BTreeM
             }
 
             rank_cursor = rank_cursor.saturating_add(span).saturating_add(1);
+        }
+
+        if !isolated_singletons.is_empty() {
+            for node_index in isolated_singletons {
+                compacted_ranks[node_index] = rank_cursor;
+            }
         }
 
         ranks = compacted_ranks;
@@ -1587,7 +1617,6 @@ fn weakly_connected_components(node_count: usize, edges: &[OrientedEdge]) -> Vec
         components.push(component);
     }
 
-    components.sort_by_key(|component| component.first().copied().unwrap_or(usize::MAX));
     components
 }
 
@@ -3309,6 +3338,80 @@ mod tests {
             "expected stacked components in TB layout, got width={} height={}",
             layout.bounds.width,
             layout.bounds.height,
+        );
+    }
+
+    #[test]
+    fn tb_isolated_nodes_remain_in_a_single_rank_band() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.direction = GraphDirection::TB;
+
+        for index in 0..6 {
+            ir.nodes.push(IrNode {
+                id: format!("N{index}"),
+                ..IrNode::default()
+            });
+        }
+
+        let layout = layout_diagram(&ir);
+        let distinct_ranks: std::collections::BTreeSet<usize> =
+            layout.nodes.iter().map(|node| node.rank).collect();
+        assert_eq!(
+            distinct_ranks.len(),
+            1,
+            "isolated nodes should stay in a shared rank band, got ranks {distinct_ranks:?}"
+        );
+    }
+
+    #[test]
+    fn tb_mixed_components_keep_isolates_outside_connected_rank_bands() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.direction = GraphDirection::TB;
+
+        for index in 0..5 {
+            ir.nodes.push(IrNode {
+                id: format!("A{index}"),
+                ..IrNode::default()
+            });
+            ir.nodes.push(IrNode {
+                id: format!("B{index}"),
+                ..IrNode::default()
+            });
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(index * 2)),
+                to: IrEndpoint::Node(IrNodeId(index * 2 + 1)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        for index in 0..10 {
+            ir.nodes.push(IrNode {
+                id: format!("Iso{index}"),
+                ..IrNode::default()
+            });
+        }
+
+        let layout = layout_diagram(&ir);
+        let mut connected_ranks = std::collections::BTreeSet::new();
+        let mut isolated_ranks = std::collections::BTreeSet::new();
+
+        for node in &layout.nodes {
+            if node.node_id.starts_with("Iso") {
+                isolated_ranks.insert(node.rank);
+            } else {
+                connected_ranks.insert(node.rank);
+            }
+        }
+
+        assert_eq!(
+            isolated_ranks.len(),
+            1,
+            "all isolated nodes should share one rank band, got {isolated_ranks:?}"
+        );
+        assert!(
+            connected_ranks.is_disjoint(&isolated_ranks),
+            "isolated and connected nodes should not share rank bands; connected={connected_ranks:?} isolated={isolated_ranks:?}"
         );
     }
 

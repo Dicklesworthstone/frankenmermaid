@@ -490,9 +490,22 @@ fn parse_flowchart(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
+        let uncommented_line = strip_flowchart_inline_comment(trimmed);
+        if uncommented_line.is_empty() {
+            continue;
+        }
+
         let mut parsed_line = false;
-        for statement in split_statements(trimmed) {
-            if let Some((cluster_key, cluster_title)) = parse_subgraph_statement(statement) {
+        for statement in split_statements(uncommented_line) {
+            let normalized_statement = statement.trim();
+            if normalized_statement.is_empty() {
+                parsed_line = true;
+                continue;
+            }
+
+            if let Some((cluster_key, cluster_title)) =
+                parse_subgraph_statement(normalized_statement)
+            {
                 let span = span_for(line_number, line);
                 if let Some(cluster_index) =
                     builder.ensure_cluster(&cluster_key, cluster_title.as_deref(), span)
@@ -503,7 +516,7 @@ fn parse_flowchart(input: &str, builder: &mut IrBuilder) {
                 continue;
             }
 
-            if statement.trim() == "end" {
+            if normalized_statement == "end" {
                 if active_clusters.pop().is_none() {
                     builder.add_warning(format!(
                         "Line {line_number}: encountered 'end' without matching 'subgraph'"
@@ -515,7 +528,7 @@ fn parse_flowchart(input: &str, builder: &mut IrBuilder) {
 
             // Try the chumsky statement parser first
             let (ast, errors) = flow_statement_parser()
-                .parse(statement)
+                .parse(normalized_statement)
                 .into_output_errors();
             if errors.is_empty()
                 && let Some(ref ast_node) = ast
@@ -527,12 +540,12 @@ fn parse_flowchart(input: &str, builder: &mut IrBuilder) {
 
             // Fallback: use the hand-written helpers for statements chumsky
             // couldn't parse (e.g. class/click with complex quoting)
-            if parse_flowchart_directive(statement, line_number, line, builder) {
+            if parse_flowchart_directive(normalized_statement, line_number, line, builder) {
                 parsed_line = true;
                 continue;
             }
             if let Some((from, to)) = parse_edge_statement_with_nodes(
-                statement,
+                normalized_statement,
                 line_number,
                 line,
                 &FLOW_OPERATORS,
@@ -543,7 +556,7 @@ fn parse_flowchart(input: &str, builder: &mut IrBuilder) {
                 parsed_line = true;
                 continue;
             }
-            if let Some(node) = parse_node_token(statement) {
+            if let Some(node) = parse_node_token(normalized_statement) {
                 let span = span_for(line_number, line);
                 if let Some(node_id) =
                     builder.intern_node(&node.id, node.label.as_deref(), node.shape, span)
@@ -591,10 +604,46 @@ fn add_node_to_active_clusters(
 }
 
 fn parse_subgraph_statement(statement: &str) -> Option<(String, Option<String>)> {
-    let body = statement.trim().strip_prefix("subgraph ")?;
-    let body = body.trim();
+    let statement = statement.trim_start();
+    let rest = statement.strip_prefix("subgraph")?;
+    let first = rest.chars().next()?;
+    if !first.is_whitespace() {
+        return None;
+    }
+
+    let body = rest.trim_start();
     if body.is_empty() {
         return None;
+    }
+
+    // Prefer explicit node-style labels (`id[Title]`, `id(Title)`, etc.) when
+    // delimiter characters are present. This preserves the same title
+    // normalization behavior as normal node parsing.
+    let has_explicit_label_delimiters =
+        body.contains('[') || body.contains('(') || body.contains('{') || body.contains('>');
+    if has_explicit_label_delimiters && let Some(node) = parse_node_token(body) {
+        let key = normalize_identifier(&node.id);
+        if !key.is_empty() {
+            return Some((key, node.label));
+        }
+    }
+
+    // Mermaid commonly supports `subgraph <id> <title>` and
+    // `subgraph <id> "<title>"`. Prefer this split form before trying
+    // compact node-like forms (`id[Title]`), otherwise the title may
+    // accidentally include the id token.
+    if let Some(split_index) = body.find(char::is_whitespace) {
+        let (candidate_key, candidate_title) = body.split_at(split_index);
+        let key = normalize_identifier(candidate_key);
+        let title = normalize_subgraph_title(candidate_title);
+        let title_has_wrappers = matches!(
+            candidate_title.trim_start().chars().next(),
+            Some('[' | '(' | '{' | '"' | '\'' | '`')
+        );
+        let key_is_structured = key.chars().any(|ch| !ch.is_ascii_alphabetic());
+        if !key.is_empty() && (title_has_wrappers || key_is_structured) {
+            return Some((key, title));
+        }
     }
 
     if let Some(node) = parse_node_token(body) {
@@ -604,20 +653,11 @@ fn parse_subgraph_statement(statement: &str) -> Option<(String, Option<String>)>
         }
     }
 
-    if let Some(split_index) = body.find(char::is_whitespace) {
-        let (candidate_key, candidate_title) = body.split_at(split_index);
-        let key = normalize_identifier(candidate_key);
-        let title = clean_label(Some(candidate_title));
-        if !key.is_empty() {
-            return Some((key, title));
-        }
-    }
-
     let key = normalize_identifier(body);
     if key.is_empty() {
         return None;
     }
-    let title = clean_label(Some(body)).filter(|value| value != &key);
+    let title = normalize_subgraph_title(body).filter(|value| value != &key);
     Some((key, title))
 }
 
@@ -2593,6 +2633,26 @@ fn clean_label(raw: Option<&str>) -> Option<String> {
     }
 }
 
+fn normalize_subgraph_title(raw: &str) -> Option<String> {
+    let title = clean_label(Some(raw))?;
+    let unwrapped = title
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .or_else(|| {
+            title
+                .strip_prefix('(')
+                .and_then(|value| value.strip_suffix(')'))
+        })
+        .or_else(|| {
+            title
+                .strip_prefix('{')
+                .and_then(|value| value.strip_suffix('}'))
+        })
+        .map(str::trim)
+        .unwrap_or(&title);
+    (!unwrapped.is_empty()).then_some(unwrapped.to_string())
+}
+
 fn parse_name_before_colon(line: &str) -> Option<&str> {
     let (left, _) = line.split_once(':')?;
     let candidate = left.trim().trim_matches('"').trim_matches('\'').trim();
@@ -2762,6 +2822,61 @@ fn split_statements(line: &str) -> impl Iterator<Item = &str> {
     statements.into_iter()
 }
 
+fn strip_flowchart_inline_comment(line: &str) -> &str {
+    let mut in_quote: Option<char> = None;
+    let mut escaped = false;
+    let mut square_depth = 0_usize;
+    let mut paren_depth = 0_usize;
+    let mut brace_depth = 0_usize;
+
+    for (idx, ch) in line.char_indices() {
+        if let Some(quote) = in_quote {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' && quote != '`' {
+                escaped = true;
+                continue;
+            }
+            if ch == quote {
+                in_quote = None;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' | '\'' | '`' => {
+                in_quote = Some(ch);
+            }
+            '[' => square_depth = square_depth.saturating_add(1),
+            ']' => square_depth = square_depth.saturating_sub(1),
+            '(' => paren_depth = paren_depth.saturating_add(1),
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '{' => brace_depth = brace_depth.saturating_add(1),
+            '}' => brace_depth = brace_depth.saturating_sub(1),
+            '%' => {
+                let rest = &line[idx..];
+                let prev_is_ws_or_start = match line[..idx].chars().next_back() {
+                    None => true,
+                    Some(prev) => prev.is_whitespace(),
+                };
+                if rest.starts_with("%%")
+                    && prev_is_ws_or_start
+                    && square_depth == 0
+                    && paren_depth == 0
+                    && brace_depth == 0
+                {
+                    return line[..idx].trim_end();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    line
+}
+
 fn parse_graph_direction(header: &str) -> Option<GraphDirection> {
     for token in header.split_whitespace() {
         match token {
@@ -2913,6 +3028,101 @@ mod tests {
         assert!(api_cluster.members.iter().any(|member| member.0 == b_idx));
         assert!(db_cluster.members.iter().any(|member| member.0 == c_idx));
         assert!(db_cluster.members.iter().any(|member| member.0 == d_idx));
+    }
+
+    #[test]
+    fn flowchart_subgraph_end_allows_inline_comment() {
+        let parsed =
+            parse_mermaid("flowchart TB\nsubgraph api [API]\nA-->B\nend %% close api\nC-->D");
+        assert!(
+            parsed.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            parsed.warnings
+        );
+        assert_eq!(parsed.ir.clusters.len(), 1);
+
+        let api_cluster = &parsed.ir.clusters[0];
+        let member_ids: std::collections::BTreeSet<String> = api_cluster
+            .members
+            .iter()
+            .filter_map(|member| parsed.ir.nodes.get(member.0).map(|node| node.id.clone()))
+            .collect();
+        assert_eq!(
+            member_ids,
+            std::collections::BTreeSet::from(["A".to_string(), "B".to_string()])
+        );
+    }
+
+    #[test]
+    fn flowchart_subgraph_parses_whitespace_and_quoted_title_forms() {
+        let parsed = parse_mermaid("flowchart TB\nsubgraph\tapi \"API Layer\"\nA-->B\nend");
+        assert!(
+            parsed.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            parsed.warnings
+        );
+        assert_eq!(parsed.ir.clusters.len(), 1);
+
+        let cluster = &parsed.ir.clusters[0];
+        let title = cluster
+            .title
+            .and_then(|title_id| parsed.ir.labels.get(title_id.0))
+            .map(|label| label.text.as_str());
+        assert_eq!(title, Some("API Layer"));
+    }
+
+    #[test]
+    fn flowchart_subgraph_title_only_preserves_full_title() {
+        let parsed = parse_mermaid("flowchart TB\nsubgraph API Layer\nA-->B\nend");
+        assert!(
+            parsed.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            parsed.warnings
+        );
+        assert_eq!(parsed.ir.clusters.len(), 1);
+
+        let cluster = &parsed.ir.clusters[0];
+        let title = cluster
+            .title
+            .and_then(|title_id| parsed.ir.labels.get(title_id.0))
+            .map(|label| label.text.as_str());
+        assert_eq!(title, Some("API Layer"));
+    }
+
+    #[test]
+    fn flowchart_inline_comment_does_not_strip_node_labels_with_percent_signs() {
+        let parsed = parse_mermaid("flowchart TB\nA[50%% done]-->B");
+        assert!(
+            parsed.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            parsed.warnings
+        );
+        assert_eq!(parsed.ir.edges.len(), 1);
+
+        let label = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "A")
+            .and_then(|node| node.label)
+            .and_then(|label_id| parsed.ir.labels.get(label_id.0))
+            .map(|label| label.text.as_str());
+        assert_eq!(label, Some("50%% done"));
+    }
+
+    #[test]
+    fn flowchart_inline_comment_terminates_the_line_before_statement_split() {
+        let parsed = parse_mermaid("flowchart TB\nA-->B %% note; C-->D");
+        assert!(
+            parsed.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            parsed.warnings
+        );
+        assert_eq!(parsed.ir.edges.len(), 1);
+        assert!(parsed.ir.nodes.iter().any(|node| node.id == "A"));
+        assert!(parsed.ir.nodes.iter().any(|node| node.id == "B"));
+        assert!(!parsed.ir.nodes.iter().any(|node| node.id == "C"));
+        assert!(!parsed.ir.nodes.iter().any(|node| node.id == "D"));
     }
 
     #[test]

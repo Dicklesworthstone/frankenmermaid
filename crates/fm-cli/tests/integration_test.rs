@@ -267,6 +267,11 @@ fn handles_subgraphs() {
 "#;
 
     let parse_result = parse(input);
+    assert!(
+        parse_result.warnings.is_empty(),
+        "Unexpected parse warnings: {:?}",
+        parse_result.warnings
+    );
     let ir = parse_result.ir;
 
     // Parser should preserve subgraph structure as clusters.
@@ -278,30 +283,69 @@ fn handles_subgraphs() {
     );
 
     // Nodes and edges within subgraphs should still be parsed.
-    assert!(
-        ir.nodes.len() >= 4,
-        "Expected at least 4 nodes from subgraph content"
+    assert_eq!(
+        ir.nodes.len(),
+        4,
+        "Expected exactly 4 nodes from subgraph content"
     );
-    assert!(
-        ir.edges.len() >= 3,
-        "Expected at least 3 edges from subgraph content"
+    assert_eq!(
+        ir.edges.len(),
+        3,
+        "Expected exactly 3 edges from subgraph content"
     );
 
-    // Cluster membership should include nodes declared inside each subgraph.
-    let cluster_sizes: Vec<usize> = ir
+    // Cluster membership should match node sets declared in each subgraph.
+    let node_index_by_id: std::collections::BTreeMap<String, usize> = ir
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(idx, node)| (node.id.clone(), idx))
+        .collect();
+
+    let cluster_members_by_title: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeSet<String>,
+    > = ir
         .clusters
         .iter()
-        .map(|cluster| cluster.members.len())
+        .filter_map(|cluster| {
+            let title = cluster
+                .title
+                .and_then(|title_id| ir.labels.get(title_id.0))
+                .map(|label| label.text.clone())?;
+            let members = cluster
+                .members
+                .iter()
+                .filter_map(|member| ir.nodes.get(member.0).map(|node| node.id.clone()))
+                .collect::<std::collections::BTreeSet<_>>();
+            Some((title, members))
+        })
         .collect();
-    assert!(
-        cluster_sizes.iter().all(|size| *size >= 2),
-        "Expected each subgraph cluster to include at least two member nodes, got {cluster_sizes:?}"
+    assert_eq!(
+        cluster_members_by_title.get("Cluster One"),
+        Some(&std::collections::BTreeSet::from([
+            "A".to_string(),
+            "B".to_string()
+        ]))
+    );
+    assert_eq!(
+        cluster_members_by_title.get("Cluster Two"),
+        Some(&std::collections::BTreeSet::from([
+            "C".to_string(),
+            "D".to_string()
+        ]))
+    );
+
+    assert_eq!(
+        node_index_by_id.len(),
+        4,
+        "Node index should include all parsed nodes"
     );
 
     // Layout should include clusters and remain valid.
     let layout = layout_diagram(&ir);
-    assert!(layout.nodes.len() >= 4, "Layout should include all nodes");
-    assert!(layout.edges.len() >= 3, "Layout should include all edges");
+    assert_eq!(layout.nodes.len(), 4, "Layout should include all nodes");
+    assert_eq!(layout.edges.len(), 3, "Layout should include all edges");
     assert_eq!(
         layout.clusters.len(),
         2,

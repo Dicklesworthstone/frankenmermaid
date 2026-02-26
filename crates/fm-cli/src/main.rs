@@ -433,21 +433,10 @@ fn render_format(
     width: Option<u32>,
     height: Option<u32>,
 ) -> Result<(Vec<u8>, Option<u32>, Option<u32>)> {
-    let mut svg_config = SvgRenderConfig::default();
-    match theme.parse::<ThemePreset>() {
-        Ok(theme_preset) => {
-            svg_config.theme = theme_preset;
-        }
-        Err(_err) => {
-            warn!(
-                "Unknown theme '{theme}', falling back to '{}'",
-                svg_config.theme.as_str()
-            );
-        }
-    }
-
     match format {
         OutputFormat::Svg => {
+            let mut svg_config = SvgRenderConfig::default();
+            svg_config.theme = resolve_theme_preset(theme, svg_config.theme);
             let svg = render_svg_with_config(ir, &svg_config);
             // Extract dimensions from SVG if available
             let (w, h) = extract_svg_dimensions(&svg);
@@ -457,6 +446,8 @@ fn render_format(
         OutputFormat::Png => {
             #[cfg(feature = "png")]
             {
+                let mut svg_config = SvgRenderConfig::default();
+                svg_config.theme = resolve_theme_preset(theme, svg_config.theme);
                 let svg = render_svg_with_config(ir, &svg_config);
                 let (png, px_width, px_height) = svg_to_png(&svg, width, height)?;
                 Ok((png, Some(px_width), Some(px_height)))
@@ -472,6 +463,7 @@ fn render_format(
         }
 
         OutputFormat::Term => {
+            warn_if_unknown_theme(theme);
             let (cols, rows) = terminal_size(width, height);
             let config = TermRenderConfig::rich();
             let result = render_term_with_config(ir, &config, cols, rows);
@@ -483,6 +475,7 @@ fn render_format(
         }
 
         OutputFormat::Ascii => {
+            warn_if_unknown_theme(theme);
             let (cols, rows) = terminal_size(width, height);
             let mut config = TermRenderConfig::compact();
             config.glyph_mode = fm_core::MermaidGlyphMode::Ascii;
@@ -493,6 +486,29 @@ fn render_format(
                 Some(result.height as u32),
             ))
         }
+    }
+}
+
+fn resolve_theme_preset(theme: &str, fallback: ThemePreset) -> ThemePreset {
+    match theme.parse::<ThemePreset>() {
+        Ok(theme_preset) => theme_preset,
+        Err(_err) => {
+            warn!(
+                "Unknown theme '{theme}', falling back to '{}'",
+                fallback.as_str()
+            );
+            fallback
+        }
+    }
+}
+
+fn warn_if_unknown_theme(theme: &str) {
+    let fallback = SvgRenderConfig::default().theme;
+    if theme.parse::<ThemePreset>().is_err() {
+        warn!(
+            "Unknown theme '{theme}', falling back to '{}'",
+            fallback.as_str()
+        );
     }
 }
 
@@ -1066,7 +1082,7 @@ fn handle_render_request(
     }
 
     let parsed = parse(&body);
-    let svg = render_svg(&parsed.ir);
+    let svg = render_svg_with_config(&parsed.ir, &SvgRenderConfig::default());
 
     let header = Header::from_bytes(&b"Content-Type"[..], &b"image/svg+xml"[..]).unwrap();
     Response::from_data(svg.into_bytes()).with_header(header)

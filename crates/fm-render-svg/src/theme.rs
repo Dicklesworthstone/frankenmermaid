@@ -317,13 +317,27 @@ impl ThemeColors {
 
     /// Apply theme variables mapping from standard Mermaid configs.
     pub fn apply_overrides(&mut self, vars: &std::collections::BTreeMap<String, String>) {
-        if let Some(v) = vars.get("background") { self.background = v.clone(); }
-        if let Some(v) = vars.get("primaryTextColor").or(vars.get("textColor")) { self.text = v.clone(); }
-        if let Some(v) = vars.get("primaryColor") { self.node_fill = v.clone(); }
-        if let Some(v) = vars.get("primaryBorderColor") { self.node_stroke = v.clone(); }
-        if let Some(v) = vars.get("lineColor") { self.edge = v.clone(); }
-        if let Some(v) = vars.get("clusterBkg") { self.cluster_fill = v.clone(); }
-        if let Some(v) = vars.get("clusterBorder") { self.cluster_stroke = v.clone(); }
+        if let Some(v) = vars.get("background") {
+            self.background = v.clone();
+        }
+        if let Some(v) = vars.get("primaryTextColor").or(vars.get("textColor")) {
+            self.text = v.clone();
+        }
+        if let Some(v) = vars.get("primaryColor") {
+            self.node_fill = v.clone();
+        }
+        if let Some(v) = vars.get("primaryBorderColor") {
+            self.node_stroke = v.clone();
+        }
+        if let Some(v) = vars.get("lineColor") {
+            self.edge = v.clone();
+        }
+        if let Some(v) = vars.get("clusterBkg") {
+            self.cluster_fill = v.clone();
+        }
+        if let Some(v) = vars.get("clusterBorder") {
+            self.cluster_stroke = v.clone();
+        }
     }
 
     /// Generate CSS custom properties for this theme.

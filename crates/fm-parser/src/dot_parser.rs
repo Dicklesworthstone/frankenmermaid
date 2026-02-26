@@ -1,5 +1,5 @@
-use unicode_segmentation::UnicodeSegmentation;
 use fm_core::{ArrowType, DiagramType, NodeShape, Span};
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{DetectionMethod, ParseResult, ir_builder::IrBuilder};
 
@@ -133,7 +133,7 @@ fn parse_dot_edge_statement(
     let last_part = parts.last_mut().unwrap();
     let (last_fragment, shared_attrs) = split_endpoint_and_attrs(last_part);
     *last_part = last_fragment;
-    
+
     let edge_label_str = shared_attrs.and_then(parse_dot_label);
 
     for window in parts.windows(2) {
@@ -319,10 +319,10 @@ fn strip_comments(line: &str) -> &str {
         // DOT format macro preprocessor lines
         return "";
     }
-    
+
     let mut in_quote = false;
     let mut escaped = false;
-    
+
     for (i, ch) in line.char_indices() {
         if escaped {
             escaped = false;
@@ -340,7 +340,7 @@ fn strip_comments(line: &str) -> &str {
             return &line[..i];
         }
     }
-    
+
     line
 }
 

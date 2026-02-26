@@ -327,7 +327,7 @@ impl Canvas2dRenderer {
                     let text_metrics = ctx.measure_text(line);
                     max_text_width = max_text_width.max(text_metrics.width);
                 }
-                
+
                 let label_width = max_text_width + 8.0;
                 let line_height = self.config.font_size * 1.2;
                 let total_height = lines.len() as f64 * line_height;
@@ -351,7 +351,7 @@ impl Canvas2dRenderer {
                 ));
                 ctx.set_text_align(TextAlign::Center);
                 ctx.set_text_baseline(TextBaseline::Middle);
-                
+
                 let start_y = ly - (total_height / 2.0) + (line_height / 2.0);
                 for (i, line) in lines.iter().enumerate() {
                     ctx.fill_text(line, lx, start_y + (i as f64) * line_height);
@@ -429,7 +429,7 @@ impl Canvas2dRenderer {
                     let line_height = self.config.font_size * 1.2;
                     let total_height = lines.len() as f64 * line_height;
                     let start_y = cy - (total_height / 2.0) + (line_height / 2.0);
-                    
+
                     for (i, line) in lines.iter().enumerate() {
                         ctx.fill_text(line, cx, start_y + (i as f64) * line_height);
                         self.draw_calls += 1;

@@ -163,7 +163,9 @@ fn render_layout_to_svg(
             .unwrap_or(config.theme);
 
         let mut theme = Theme::from_preset(preset);
-        theme.colors.apply_overrides(&ir.meta.theme_overrides.theme_variables);
+        theme
+            .colors
+            .apply_overrides(&ir.meta.theme_overrides.theme_variables);
 
         let mut css = theme.to_svg_style();
 
@@ -873,10 +875,7 @@ fn render_edge(
             // Fallback for other path lengths
             let mid_idx = edge_path.points.len() / 2;
             let mid_point = &edge_path.points[mid_idx];
-            (
-                mid_point.x + offset_x,
-                mid_point.y + offset_y - 8.0,
-            )
+            (mid_point.x + offset_x, mid_point.y + offset_y - 8.0)
         };
 
         let mut group = Element::group()
@@ -896,13 +895,18 @@ fn render_edge(
 
         // Add background rect for label
         let lines_count = label.text.lines().count().max(1) as f32;
-        let max_line_len = label.text.lines().map(|l| l.chars().count()).max().unwrap_or(0);
+        let max_line_len = label
+            .text
+            .lines()
+            .map(|l| l.chars().count())
+            .max()
+            .unwrap_or(0);
         let label_width = (max_line_len as f32 * config.avg_char_width) + 8.0;
-        
+
         let label_font_size = config.font_size * 0.85;
         let total_text_height = (lines_count - 1.0) * label_font_size * config.line_height;
         let label_height = total_text_height + label_font_size + 4.0;
-        
+
         let start_y = ly - (total_text_height / 2.0) + (label_font_size / 4.0);
 
         group = group.child(
