@@ -214,11 +214,14 @@ fn fuzzy_keyword_match(lower: &str) -> Option<DetectedType> {
     for (keyword, diagram_type) in DIAGRAM_KEYWORDS {
         let distance = levenshtein_distance(first_word, keyword);
         // Only consider matches with distance 1-2 (non-zero but close)
-        if distance > 0
-            && distance <= 2
-            && (best_match.is_none() || distance < best_match.unwrap().1)
-        {
-            best_match = Some((*diagram_type, distance));
+        if distance > 0 && distance <= 2 {
+            let is_better_match = match best_match {
+                Some((_, best_distance)) => distance < best_distance,
+                None => true,
+            };
+            if is_better_match {
+                best_match = Some((*diagram_type, distance));
+            }
         }
     }
 
