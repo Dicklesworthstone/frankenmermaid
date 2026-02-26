@@ -2391,17 +2391,23 @@ fn parse_edge_statement_with_nodes(
         .trim();
 
         if right_segment.is_empty() {
-            return None;
+            return (touched_nodes.len() > 1).then_some(touched_nodes);
         }
 
         let (edge_label, right_without_label) = extract_pipe_label(right_segment);
-        let right_node = parse_node_token(right_without_label)?;
-        let to_node = builder.intern_node(
+        let right_node = match parse_node_token(right_without_label) {
+            Some(node) => node,
+            None => return (touched_nodes.len() > 1).then_some(touched_nodes),
+        };
+        let to_node = match builder.intern_node(
             &right_node.id,
             right_node.label.as_deref(),
             right_node.shape,
             span,
-        )?;
+        ) {
+            Some(node_id) => node_id,
+            None => return (touched_nodes.len() > 1).then_some(touched_nodes),
+        };
 
         builder.push_edge(from_node, to_node, arrow, edge_label.as_deref(), span);
         touched_nodes.push(to_node);
@@ -3091,6 +3097,24 @@ mod tests {
             .and_then(|label_id| parsed.ir.labels.get(label_id.0))
             .map(|value| value.text.as_str());
         assert_eq!(label, Some("foo;bar"));
+    }
+
+    #[test]
+    fn flowchart_malformed_chain_keeps_parsed_prefix_in_cluster() {
+        let parsed = parse_mermaid("flowchart TB\nsubgraph g[Group]\nA-->B-->\nend");
+        assert_eq!(parsed.ir.edges.len(), 1);
+        assert!(parsed.ir.nodes.iter().any(|node| node.id == "A"));
+        assert!(parsed.ir.nodes.iter().any(|node| node.id == "B"));
+
+        assert_eq!(parsed.ir.clusters.len(), 1);
+        let cluster = &parsed.ir.clusters[0];
+        let member_ids: std::collections::BTreeSet<String> = cluster
+            .members
+            .iter()
+            .filter_map(|member| parsed.ir.nodes.get(member.0).map(|node| node.id.clone()))
+            .collect();
+        assert!(member_ids.contains("A"));
+        assert!(member_ids.contains("B"));
     }
 
     #[test]
