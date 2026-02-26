@@ -20,7 +20,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use fm_core::{DiagramType, MermaidDiagramIr};
 use fm_layout::layout_diagram;
 use fm_parser::{detect_type, parse, parse_evidence_json};
-use fm_render_svg::render_svg;
+use fm_render_svg::{SvgRenderConfig, ThemePreset, render_svg_with_config};
 use fm_render_term::{TermRenderConfig, render_term_with_config};
 use serde::Serialize;
 use tracing::{debug, info, warn};
@@ -429,13 +429,26 @@ fn cmd_render(
 fn render_format(
     ir: &MermaidDiagramIr,
     format: OutputFormat,
-    _theme: &str,
+    theme: &str,
     width: Option<u32>,
     height: Option<u32>,
 ) -> Result<(Vec<u8>, Option<u32>, Option<u32>)> {
+    let mut svg_config = SvgRenderConfig::default();
+    match theme.parse::<ThemePreset>() {
+        Ok(theme_preset) => {
+            svg_config.theme = theme_preset;
+        }
+        Err(_err) => {
+            warn!(
+                "Unknown theme '{theme}', falling back to '{}'",
+                svg_config.theme.as_str()
+            );
+        }
+    }
+
     match format {
         OutputFormat::Svg => {
-            let svg = render_svg(ir);
+            let svg = render_svg_with_config(ir, &svg_config);
             // Extract dimensions from SVG if available
             let (w, h) = extract_svg_dimensions(&svg);
             Ok((svg.into_bytes(), w, h))
@@ -444,7 +457,7 @@ fn render_format(
         OutputFormat::Png => {
             #[cfg(feature = "png")]
             {
-                let svg = render_svg(ir);
+                let svg = render_svg_with_config(ir, &svg_config);
                 let (png, px_width, px_height) = svg_to_png(&svg, width, height)?;
                 Ok((png, Some(px_width), Some(px_height)))
             }

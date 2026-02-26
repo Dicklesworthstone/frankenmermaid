@@ -300,7 +300,8 @@ pub fn layout_diagram_traced_with_config(
     // If cycle clusters are collapsed, group member nodes within their cluster head's bounds.
     let collapsed_count = if let Some(ref collapse_map) = collapse_map {
         let count = collapse_map.cluster_heads.len();
-        cycle_clusters = build_cycle_cluster_results(collapse_map, &mut nodes, &mut clusters, spacing);
+        cycle_clusters =
+            build_cycle_cluster_results(collapse_map, &mut nodes, &mut clusters, spacing);
         count
     } else {
         0
@@ -371,7 +372,12 @@ pub fn layout_diagram_force_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                 clusters: vec![],
                 cycle_clusters: vec![],
                 edges: vec![],
-                bounds: LayoutRect { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
+                bounds: LayoutRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.0,
+                    height: 0.0,
+                },
                 stats: LayoutStats::default(),
             },
             trace,
@@ -526,7 +532,9 @@ fn force_build_adjacency(ir: &MermaidDiagramIr) -> Vec<Vec<usize>> {
         let from = endpoint_node_index(ir, edge.from);
         let to = endpoint_node_index(ir, edge.to);
         if let (Some(f), Some(t)) = (from, to)
-            && f != t && f < n && t < n
+            && f != t
+            && f < n
+            && t < n
         {
             adj[f].push(t);
             adj[t].push(f);
@@ -625,7 +633,13 @@ fn force_compute_displacements(
     }
 
     // Cluster cohesion: extra attractive force toward cluster centroid.
-    force_cluster_cohesion(positions, node_sizes, cluster_membership, k, &mut displacements);
+    force_cluster_cohesion(
+        positions,
+        node_sizes,
+        cluster_membership,
+        k,
+        &mut displacements,
+    );
 
     displacements
 }
@@ -966,14 +980,15 @@ pub fn compute_node_sizes(ir: &MermaidDiagramIr) -> Vec<(f32, f32)> {
 }
 
 fn label_length_and_lines(ir: &MermaidDiagramIr, node: &fm_core::IrNode) -> (usize, usize) {
-    let text = node.label
+    let text = node
+        .label
         .and_then(|label_id| ir.labels.get(label_id.0))
         .map(|value| value.text.as_str())
         .unwrap_or_else(|| node.id.as_str());
-        
+
     let lines = text.lines().count().max(1);
     let max_len = text.lines().map(|l| l.chars().count()).max().unwrap_or(0);
-    
+
     (max_len, lines)
 }
 
@@ -1490,7 +1505,90 @@ fn rank_assignment(ir: &MermaidDiagramIr, cycles: &CycleRemovalResult) -> BTreeM
         }
     }
 
+    // Compact disconnected components along the rank axis so each component
+    // gets an independent band instead of sharing rank-0/rank-1 globally.
+    // This avoids pathological ultra-wide layouts for many disconnected chains.
+    let components = weakly_connected_components(node_count, &edges);
+    if components.len() > 1 {
+        let mut compacted_ranks = ranks.clone();
+        let mut rank_cursor = 0_usize;
+
+        for component in components {
+            if component.is_empty() {
+                continue;
+            }
+
+            let mut min_rank = usize::MAX;
+            let mut max_rank = 0_usize;
+            for &node_index in &component {
+                let rank = ranks[node_index];
+                min_rank = min_rank.min(rank);
+                max_rank = max_rank.max(rank);
+            }
+
+            if min_rank == usize::MAX {
+                continue;
+            }
+
+            let span = max_rank.saturating_sub(min_rank).saturating_add(1);
+            for &node_index in &component {
+                compacted_ranks[node_index] = ranks[node_index]
+                    .saturating_sub(min_rank)
+                    .saturating_add(rank_cursor);
+            }
+
+            rank_cursor = rank_cursor.saturating_add(span).saturating_add(1);
+        }
+
+        ranks = compacted_ranks;
+    }
+
     (0..node_count).map(|index| (index, ranks[index])).collect()
+}
+
+fn weakly_connected_components(node_count: usize, edges: &[OrientedEdge]) -> Vec<Vec<usize>> {
+    if node_count == 0 {
+        return Vec::new();
+    }
+
+    let mut adjacency: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); node_count];
+    for edge in edges {
+        if edge.source >= node_count || edge.target >= node_count {
+            continue;
+        }
+        adjacency[edge.source].insert(edge.target);
+        adjacency[edge.target].insert(edge.source);
+    }
+
+    let mut visited = vec![false; node_count];
+    let mut components = Vec::new();
+
+    for start in 0..node_count {
+        if visited[start] {
+            continue;
+        }
+
+        let mut stack = vec![start];
+        visited[start] = true;
+        let mut component = Vec::new();
+
+        while let Some(node_index) = stack.pop() {
+            component.push(node_index);
+            for &neighbor in adjacency[node_index].iter().rev() {
+                if visited[neighbor] {
+                    continue;
+                }
+                visited[neighbor] = true;
+                stack.push(neighbor);
+            }
+        }
+
+        component.sort_unstable();
+        components.push(component);
+    }
+
+    components.sort_by_key(|component| component.first().copied().unwrap_or(usize::MAX));
+    components
 }
 
 fn resolved_edges(ir: &MermaidDiagramIr) -> Vec<OrientedEdge> {
@@ -1665,11 +1763,8 @@ fn crossing_refinement(
                     continue;
                 }
                 // Build trial ordering with node moved to target_pos.
-                let mut trial_order: Vec<usize> = order
-                    .iter()
-                    .copied()
-                    .filter(|&ni| ni != node)
-                    .collect();
+                let mut trial_order: Vec<usize> =
+                    order.iter().copied().filter(|&ni| ni != node).collect();
                 trial_order.insert(target_pos.min(trial_order.len()), node);
 
                 let mut trial = ordering_by_rank.clone();
@@ -2108,11 +2203,7 @@ fn route_self_loop(node_box: &LayoutNodeBox, horizontal_ranks: bool) -> Vec<Layo
 }
 
 /// Apply parallel offset to an edge path to distinguish parallel edges.
-fn apply_parallel_offset(
-    points: &mut [LayoutPoint],
-    offset: f32,
-    horizontal_ranks: bool,
-) {
+fn apply_parallel_offset(points: &mut [LayoutPoint], offset: f32, horizontal_ranks: bool) {
     if points.len() < 2 {
         return;
     }
@@ -2523,9 +2614,9 @@ pub fn layout_stats_from(layout: &DiagramLayout) -> LayoutStats {
 #[cfg(test)]
 mod tests {
     use super::{
-        CycleStrategy, LayoutAlgorithm, LayoutPoint, layout, layout_diagram,
-        layout_diagram_force, layout_diagram_force_traced, layout_diagram_traced,
-        layout_diagram_with_cycle_strategy, route_edge_points,
+        CycleStrategy, LayoutAlgorithm, LayoutPoint, layout, layout_diagram, layout_diagram_force,
+        layout_diagram_force_traced, layout_diagram_traced, layout_diagram_with_cycle_strategy,
+        route_edge_points,
     };
     use fm_core::{
         ArrowType, DiagramType, GraphDirection, IrCluster, IrClusterId, IrEdge, IrEndpoint,
@@ -3150,8 +3241,7 @@ mod tests {
         ir.direction = GraphDirection::LR;
 
         for text in [
-            "root-one",
-            "root-two",
+            "root",
             "narrow",
             "this target label is intentionally much wider",
         ] {
@@ -3161,7 +3251,7 @@ mod tests {
             });
         }
 
-        for (node_id, label_id) in [("R1", 0), ("R2", 1), ("A", 2), ("B", 3)] {
+        for (node_id, label_id) in [("R", 0), ("A", 1), ("B", 2)] {
             ir.nodes.push(IrNode {
                 id: node_id.to_string(),
                 label: Some(IrLabelId(label_id)),
@@ -3169,7 +3259,7 @@ mod tests {
             });
         }
 
-        for (from, to) in [(0, 2), (1, 3)] {
+        for (from, to) in [(0, 1), (0, 2)] {
             ir.edges.push(IrEdge {
                 from: IrEndpoint::Node(IrNodeId(from)),
                 to: IrEndpoint::Node(IrNodeId(to)),
@@ -3186,6 +3276,40 @@ mod tests {
         };
 
         assert!((a_node.bounds.x - b_node.bounds.x).abs() < 0.001);
+    }
+
+    #[test]
+    fn tb_disconnected_components_do_not_collapse_into_horizontal_strip() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.direction = GraphDirection::TB;
+
+        // 20 disconnected 2-node chains (A_i -> B_i).
+        for index in 0..20 {
+            ir.nodes.push(IrNode {
+                id: format!("A{index}"),
+                ..IrNode::default()
+            });
+            ir.nodes.push(IrNode {
+                id: format!("B{index}"),
+                ..IrNode::default()
+            });
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(index * 2)),
+                to: IrEndpoint::Node(IrNodeId(index * 2 + 1)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let layout = layout_diagram(&ir);
+        assert_eq!(layout.nodes.len(), 40);
+        assert_eq!(layout.edges.len(), 20);
+        assert!(
+            layout.bounds.width < layout.bounds.height * 2.0,
+            "expected stacked components in TB layout, got width={} height={}",
+            layout.bounds.width,
+            layout.bounds.height,
+        );
     }
 
     // --- Force-directed layout tests ---
@@ -3249,9 +3373,8 @@ mod tests {
                     - ((a.bounds.x + a.bounds.width / 2.0) - (b.bounds.x + b.bounds.width / 2.0))
                         .abs();
                 let overlap_y = (a.bounds.height + b.bounds.height) / 2.0
-                    - ((a.bounds.y + a.bounds.height / 2.0)
-                        - (b.bounds.y + b.bounds.height / 2.0))
-                    .abs();
+                    - ((a.bounds.y + a.bounds.height / 2.0) - (b.bounds.y + b.bounds.height / 2.0))
+                        .abs();
                 assert!(
                     overlap_x <= 1.0 || overlap_y <= 1.0,
                     "Nodes {} and {} overlap: overlap_x={overlap_x}, overlap_y={overlap_y}",
@@ -3360,8 +3483,10 @@ mod tests {
         let b_center = b.bounds.center();
         let c_center = c.bounds.center();
 
-        let dist_ab = ((a_center.x - b_center.x).powi(2) + (a_center.y - b_center.y).powi(2)).sqrt();
-        let dist_ac = ((a_center.x - c_center.x).powi(2) + (a_center.y - c_center.y).powi(2)).sqrt();
+        let dist_ab =
+            ((a_center.x - b_center.x).powi(2) + (a_center.y - b_center.y).powi(2)).sqrt();
+        let dist_ac =
+            ((a_center.x - c_center.x).powi(2) + (a_center.y - c_center.y).powi(2)).sqrt();
 
         // Connected nodes should generally be closer than disconnected.
         assert!(
@@ -3494,12 +3619,7 @@ mod tests {
             traced.trace.snapshots.len() >= 3,
             "Expected at least 3 trace stages: init, simulation, overlap_removal"
         );
-        let stage_names: Vec<&str> = traced
-            .trace
-            .snapshots
-            .iter()
-            .map(|s| s.stage)
-            .collect();
+        let stage_names: Vec<&str> = traced.trace.snapshots.iter().map(|s| s.stage).collect();
         assert!(stage_names.contains(&"force_init"));
         assert!(stage_names.contains(&"force_simulation"));
         assert!(stage_names.contains(&"force_overlap_removal"));

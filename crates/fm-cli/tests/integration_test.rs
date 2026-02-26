@@ -254,10 +254,6 @@ fn parses_node_shapes() {
 }
 
 /// Test subgraph/cluster handling.
-///
-/// Note: Full subgraph parsing is not yet implemented in the mermaid parser.
-/// This test verifies that subgraph syntax doesn't crash and nodes/edges
-/// within subgraphs are still parsed correctly.
 #[test]
 fn handles_subgraphs() {
     let input = r#"flowchart TD
@@ -273,12 +269,15 @@ fn handles_subgraphs() {
     let parse_result = parse(input);
     let ir = parse_result.ir;
 
-    // Parser should handle subgraph syntax without crashing.
-    // Note: Full cluster extraction is TODO - currently subgraph lines are skipped.
+    // Parser should preserve subgraph structure as clusters.
     assert_eq!(ir.diagram_type, DiagramType::Flowchart);
+    assert_eq!(
+        ir.clusters.len(),
+        2,
+        "Expected two parsed subgraph clusters"
+    );
 
     // Nodes and edges within subgraphs should still be parsed.
-    // The parser extracts A, B, C, D nodes and A-->B, C-->D, B-->C edges.
     assert!(
         ir.nodes.len() >= 4,
         "Expected at least 4 nodes from subgraph content"
@@ -288,10 +287,26 @@ fn handles_subgraphs() {
         "Expected at least 3 edges from subgraph content"
     );
 
-    // Layout should work even without cluster information.
+    // Cluster membership should include nodes declared inside each subgraph.
+    let cluster_sizes: Vec<usize> = ir
+        .clusters
+        .iter()
+        .map(|cluster| cluster.members.len())
+        .collect();
+    assert!(
+        cluster_sizes.iter().all(|size| *size >= 2),
+        "Expected each subgraph cluster to include at least two member nodes, got {cluster_sizes:?}"
+    );
+
+    // Layout should include clusters and remain valid.
     let layout = layout_diagram(&ir);
     assert!(layout.nodes.len() >= 4, "Layout should include all nodes");
     assert!(layout.edges.len() >= 3, "Layout should include all edges");
+    assert_eq!(
+        layout.clusters.len(),
+        2,
+        "Expected two rendered layout clusters"
+    );
 
     // All nodes should have valid positions.
     for node in &layout.nodes {

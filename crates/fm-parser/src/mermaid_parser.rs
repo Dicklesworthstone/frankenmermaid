@@ -402,7 +402,13 @@ fn flow_statement_parser<'a>() -> impl Parser<'a, &'a str, FlowAst, extra::Err<R
 // Lowering: FlowAst → IrBuilder calls
 // ---------------------------------------------------------------------------
 
-fn lower_flow_ast(ast: &FlowAst, line_number: usize, source_line: &str, builder: &mut IrBuilder) {
+fn lower_flow_ast(
+    ast: &FlowAst,
+    line_number: usize,
+    source_line: &str,
+    builder: &mut IrBuilder,
+    active_clusters: &[usize],
+) {
     let span = span_for(line_number, source_line);
 
     match ast {
@@ -410,7 +416,9 @@ fn lower_flow_ast(ast: &FlowAst, line_number: usize, source_line: &str, builder:
             builder.set_direction(*dir);
         }
         FlowAst::Node(n) => {
-            let _ = builder.intern_node(&n.id, n.label.as_deref(), n.shape, span);
+            if let Some(node_id) = builder.intern_node(&n.id, n.label.as_deref(), n.shape, span) {
+                add_node_to_active_clusters(builder, active_clusters, node_id);
+            }
         }
         FlowAst::Edge {
             from,
@@ -421,6 +429,8 @@ fn lower_flow_ast(ast: &FlowAst, line_number: usize, source_line: &str, builder:
             let from_id = builder.intern_node(&from.id, from.label.as_deref(), from.shape, span);
             let to_id = builder.intern_node(&to.id, to.label.as_deref(), to.shape, span);
             if let (Some(f), Some(t)) = (from_id, to_id) {
+                add_node_to_active_clusters(builder, active_clusters, f);
+                add_node_to_active_clusters(builder, active_clusters, t);
                 builder.push_edge(f, t, *arrow, label.as_deref(), span);
             }
         }
@@ -464,6 +474,8 @@ fn lower_flow_ast(ast: &FlowAst, line_number: usize, source_line: &str, builder:
 // ---------------------------------------------------------------------------
 
 fn parse_flowchart(input: &str, builder: &mut IrBuilder) {
+    let mut active_clusters: Vec<usize> = Vec::new();
+
     for (index, line) in input.lines().enumerate() {
         let line_number = index + 1;
         let trimmed = line.trim();
@@ -478,15 +490,29 @@ fn parse_flowchart(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
-        // Directives handled identically to the original parser
-        if is_non_graph_statement(trimmed) {
-            // For subgraph/end, skip (cluster support is a future extension).
-            // For style/linkStyle/classDef, skip.
-            continue;
-        }
-
         let mut parsed_line = false;
         for statement in split_statements(trimmed) {
+            if let Some((cluster_key, cluster_title)) = parse_subgraph_statement(statement) {
+                let span = span_for(line_number, line);
+                if let Some(cluster_index) =
+                    builder.ensure_cluster(&cluster_key, cluster_title.as_deref(), span)
+                {
+                    active_clusters.push(cluster_index);
+                }
+                parsed_line = true;
+                continue;
+            }
+
+            if statement.trim() == "end" {
+                if active_clusters.pop().is_none() {
+                    builder.add_warning(format!(
+                        "Line {line_number}: encountered 'end' without matching 'subgraph'"
+                    ));
+                }
+                parsed_line = true;
+                continue;
+            }
+
             // Try the chumsky statement parser first
             let (ast, errors) = flow_statement_parser()
                 .parse(statement)
@@ -494,7 +520,7 @@ fn parse_flowchart(input: &str, builder: &mut IrBuilder) {
             if errors.is_empty()
                 && let Some(ref ast_node) = ast
             {
-                lower_flow_ast(ast_node, line_number, line, builder);
+                lower_flow_ast(ast_node, line_number, line, builder, &active_clusters);
                 parsed_line = true;
                 continue;
             }
@@ -505,13 +531,25 @@ fn parse_flowchart(input: &str, builder: &mut IrBuilder) {
                 parsed_line = true;
                 continue;
             }
-            if parse_edge_statement(statement, line_number, line, &FLOW_OPERATORS, builder) {
+            if let Some((from, to)) = parse_edge_statement_with_nodes(
+                statement,
+                line_number,
+                line,
+                &FLOW_OPERATORS,
+                builder,
+            ) {
+                add_node_to_active_clusters(builder, &active_clusters, from);
+                add_node_to_active_clusters(builder, &active_clusters, to);
                 parsed_line = true;
                 continue;
             }
             if let Some(node) = parse_node_token(statement) {
                 let span = span_for(line_number, line);
-                let _ = builder.intern_node(&node.id, node.label.as_deref(), node.shape, span);
+                if let Some(node_id) =
+                    builder.intern_node(&node.id, node.label.as_deref(), node.shape, span)
+                {
+                    add_node_to_active_clusters(builder, &active_clusters, node_id);
+                }
                 parsed_line = true;
             }
         }
@@ -521,6 +559,13 @@ fn parse_flowchart(input: &str, builder: &mut IrBuilder) {
                 "Line {line_number}: unsupported flowchart syntax: {trimmed}"
             ));
         }
+    }
+
+    if !active_clusters.is_empty() {
+        builder.add_warning(format!(
+            "Flowchart ended with {} unclosed subgraph block(s)",
+            active_clusters.len()
+        ));
     }
 }
 
@@ -533,6 +578,47 @@ fn parse_flowchart_directive(
     parse_class_assignment(statement, line_number, source_line, builder)
         || parse_click_directive(statement, line_number, source_line, builder)
         || is_non_graph_statement(statement)
+}
+
+fn add_node_to_active_clusters(
+    builder: &mut IrBuilder,
+    active_clusters: &[usize],
+    node_id: IrNodeId,
+) {
+    for &cluster_index in active_clusters {
+        builder.add_node_to_cluster(cluster_index, node_id);
+    }
+}
+
+fn parse_subgraph_statement(statement: &str) -> Option<(String, Option<String>)> {
+    let body = statement.trim().strip_prefix("subgraph ")?;
+    let body = body.trim();
+    if body.is_empty() {
+        return None;
+    }
+
+    if let Some(node) = parse_node_token(body) {
+        let key = normalize_identifier(&node.id);
+        if !key.is_empty() {
+            return Some((key, node.label));
+        }
+    }
+
+    if let Some(split_index) = body.find(char::is_whitespace) {
+        let (candidate_key, candidate_title) = body.split_at(split_index);
+        let key = normalize_identifier(candidate_key);
+        let title = clean_label(Some(candidate_title));
+        if !key.is_empty() {
+            return Some((key, title));
+        }
+    }
+
+    let key = normalize_identifier(body);
+    if key.is_empty() {
+        return None;
+    }
+    let title = clean_label(Some(body)).filter(|value| value != &key);
+    Some((key, title))
 }
 
 fn parse_sequence(input: &str, builder: &mut IrBuilder) {
@@ -2200,22 +2286,12 @@ fn parse_sequence_message(
     }
 
     let span = span_for(line_number, source_line);
-    
+
     let left_label = clean_label(Some(left)).filter(|l| l != &from_id);
-    let from = builder.intern_node(
-        &from_id,
-        left_label.as_deref(),
-        NodeShape::Rect,
-        span,
-    );
-    
+    let from = builder.intern_node(&from_id, left_label.as_deref(), NodeShape::Rect, span);
+
     let right_label = clean_label(Some(target_raw)).filter(|l| l != &to_id);
-    let to = builder.intern_node(
-        &to_id,
-        right_label.as_deref(),
-        NodeShape::Rect,
-        span,
-    );
+    let to = builder.intern_node(&to_id, right_label.as_deref(), NodeShape::Rect, span);
 
     match (from, to) {
         (Some(from_node), Some(to_node)) => {
@@ -2233,23 +2309,28 @@ fn parse_edge_statement(
     operators: &[(&str, ArrowType)],
     builder: &mut IrBuilder,
 ) -> bool {
-    let Some((operator_idx, operator, arrow)) = find_operator(statement, operators) else {
-        return false;
-    };
+    parse_edge_statement_with_nodes(statement, line_number, source_line, operators, builder)
+        .is_some()
+}
+
+fn parse_edge_statement_with_nodes(
+    statement: &str,
+    line_number: usize,
+    source_line: &str,
+    operators: &[(&str, ArrowType)],
+    builder: &mut IrBuilder,
+) -> Option<(IrNodeId, IrNodeId)> {
+    let (operator_idx, operator, arrow) = find_operator(statement, operators)?;
 
     let left_raw = statement[..operator_idx].trim();
     let right_raw = statement[operator_idx + operator.len()..].trim();
     if left_raw.is_empty() || right_raw.is_empty() {
-        return false;
+        return None;
     }
 
     let (edge_label, right_without_label) = extract_pipe_label(right_raw);
-    let Some(left_node) = parse_node_token(left_raw) else {
-        return false;
-    };
-    let Some(right_node) = parse_node_token(right_without_label) else {
-        return false;
-    };
+    let left_node = parse_node_token(left_raw)?;
+    let right_node = parse_node_token(right_without_label)?;
 
     let span = span_for(line_number, source_line);
     let from = builder.intern_node(
@@ -2268,9 +2349,9 @@ fn parse_edge_statement(
     match (from, to) {
         (Some(from_node), Some(to_node)) => {
             builder.push_edge(from_node, to_node, arrow, edge_label.as_deref(), span);
-            true
+            Some((from_node, to_node))
         }
-        _ => false,
+        _ => None,
     }
 }
 
@@ -2677,7 +2758,7 @@ fn split_statements(line: &str) -> impl Iterator<Item = &str> {
     if !remainder.is_empty() {
         statements.push(remainder);
     }
-    
+
     statements.into_iter()
 }
 
@@ -2711,11 +2792,7 @@ fn is_flowchart_header(line: &str) -> bool {
 }
 
 fn is_non_graph_statement(line: &str) -> bool {
-    line.starts_with("style ")
-        || line.starts_with("classDef ")
-        || line.starts_with("linkStyle ")
-        || line.starts_with("subgraph ")
-        || line == "end"
+    line.starts_with("style ") || line.starts_with("classDef ") || line.starts_with("linkStyle ")
 }
 
 fn is_comment(line: &str) -> bool {
@@ -2783,6 +2860,59 @@ mod tests {
                 .iter()
                 .any(|class_name| class_name == "highlight")
         );
+    }
+
+    #[test]
+    fn flowchart_subgraphs_populate_clusters_with_members() {
+        let parsed = parse_mermaid(
+            "flowchart TB\nsubgraph api [API Layer]\nA-->B\nend\nsubgraph db [DB Layer]\nC-->D\nend\nB-->C",
+        );
+
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Flowchart);
+        assert_eq!(parsed.ir.clusters.len(), 2);
+
+        let node_index_by_id: std::collections::BTreeMap<String, usize> = parsed
+            .ir
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(idx, node)| (node.id.clone(), idx))
+            .collect();
+
+        let api_cluster = parsed
+            .ir
+            .clusters
+            .iter()
+            .find(|cluster| {
+                cluster
+                    .title
+                    .and_then(|title_id| parsed.ir.labels.get(title_id.0))
+                    .map(|label| label.text.as_str() == "API Layer")
+                    .unwrap_or(false)
+            })
+            .expect("expected API Layer cluster");
+        let db_cluster = parsed
+            .ir
+            .clusters
+            .iter()
+            .find(|cluster| {
+                cluster
+                    .title
+                    .and_then(|title_id| parsed.ir.labels.get(title_id.0))
+                    .map(|label| label.text.as_str() == "DB Layer")
+                    .unwrap_or(false)
+            })
+            .expect("expected DB Layer cluster");
+
+        let a_idx = node_index_by_id.get("A").copied().expect("A should exist");
+        let b_idx = node_index_by_id.get("B").copied().expect("B should exist");
+        let c_idx = node_index_by_id.get("C").copied().expect("C should exist");
+        let d_idx = node_index_by_id.get("D").copied().expect("D should exist");
+
+        assert!(api_cluster.members.iter().any(|member| member.0 == a_idx));
+        assert!(api_cluster.members.iter().any(|member| member.0 == b_idx));
+        assert!(db_cluster.members.iter().any(|member| member.0 == c_idx));
+        assert!(db_cluster.members.iter().any(|member| member.0 == d_idx));
     }
 
     #[test]
