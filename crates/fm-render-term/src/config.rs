@@ -145,6 +145,8 @@ impl ResolvedConfig {
                 (config.max_label_chars, config.max_label_lines)
             }
         };
+        let max_label_chars = max_label_chars.max(1);
+        let max_label_lines = max_label_lines.max(1);
 
         Self {
             tier,

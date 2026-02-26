@@ -163,6 +163,8 @@ impl TermRenderer {
         direction: GraphDirection,
     ) -> (usize, usize) {
         let padding = self.config.padding * 2;
+        let max_width = self.config.cols.saturating_sub(padding).max(1);
+        let max_height = self.config.rows.saturating_sub(padding).max(1);
         let scale = match self.config.tier {
             MermaidTier::Compact => 0.15,
             MermaidTier::Normal => 0.2,
@@ -175,16 +177,19 @@ impl TermRenderer {
         // Adjust for direction (LR/RL diagrams are wider).
         let (width, height) = match direction {
             GraphDirection::LR | GraphDirection::RL => (
-                base_width.max(20).min(self.config.cols - padding),
-                base_height.max(10).min(self.config.rows - padding),
+                base_width.max(20).min(max_width),
+                base_height.max(10).min(max_height),
             ),
             _ => (
-                base_width.max(15).min(self.config.cols - padding),
-                base_height.max(15).min(self.config.rows - padding),
+                base_width.max(15).min(max_width),
+                base_height.max(15).min(max_height),
             ),
         };
 
-        (width + padding, height + padding)
+        (
+            width.saturating_add(padding),
+            height.saturating_add(padding),
+        )
     }
 
     fn render_cluster_cell(
@@ -396,7 +401,7 @@ impl TermRenderer {
             .and_then(|n| n.label)
             .and_then(|lid| ir.labels.get(lid.0))
             .map(|l| self.truncate_label(&l.text))
-            .unwrap_or_else(|| node_box.node_id.clone());
+            .unwrap_or_else(|| self.truncate_label(&node_box.node_id));
 
         // Center label in node.
         let lines: Vec<&str> = label.lines().collect();
@@ -636,13 +641,7 @@ impl TermRenderer {
                 .and_then(|n| n.label)
                 .and_then(|lid| ir.labels.get(lid.0))
                 .map(|l| self.truncate_label(&l.text))
-                .unwrap_or_else(|| {
-                    if node_box.node_id.len() <= self.config.max_label_chars {
-                        node_box.node_id.clone()
-                    } else {
-                        format!("{}…", &node_box.node_id[..self.config.max_label_chars - 1])
-                    }
-                });
+                .unwrap_or_else(|| self.truncate_label(&node_box.node_id));
 
             let label_lines: Vec<&str> = label.lines().collect();
             let start_y = y + (h.saturating_sub(label_lines.len())) / 2;
@@ -742,17 +741,39 @@ impl TermRenderer {
     }
 
     fn truncate_label(&self, text: &str) -> String {
-        let chars: Vec<char> = text.chars().collect();
-        if chars.len() <= self.config.max_label_chars {
-            text.to_string()
-        } else {
-            format!(
-                "{}…",
-                chars[..self.config.max_label_chars - 1]
-                    .iter()
-                    .collect::<String>()
-            )
+        let max_chars = self.config.max_label_chars.max(1);
+        let max_lines = self.config.max_label_lines.max(1);
+        let sanitized: String = text
+            .chars()
+            .map(|ch| match ch {
+                '\n' => '\n',
+                '\r' | '\t' => ' ',
+                other if other.is_control() => ' ',
+                other => other,
+            })
+            .collect();
+
+        let mut lines: Vec<String> = Vec::new();
+        let mut source_lines: Vec<&str> = sanitized.lines().collect();
+        if source_lines.is_empty() {
+            source_lines.push(sanitized.as_str());
         }
+
+        for line in source_lines.into_iter().take(max_lines) {
+            let chars: Vec<char> = line.chars().collect();
+            if chars.len() <= max_chars {
+                lines.push(line.to_string());
+            } else if max_chars == 1 {
+                lines.push("…".to_string());
+            } else {
+                lines.push(format!(
+                    "{}…",
+                    chars[..max_chars - 1].iter().collect::<String>()
+                ));
+            }
+        }
+
+        lines.join("\n")
     }
 }
 
@@ -878,5 +899,39 @@ mod tests {
         let result = render_diagram(&ir);
         // Should contain the labels or node IDs.
         assert!(result.output.contains("Start") || result.output.contains('A'));
+    }
+
+    #[test]
+    fn tiny_terminal_dimensions_do_not_underflow() {
+        let ir = sample_ir();
+        let config = TermRenderConfig::default();
+        let result = render_diagram_with_config(&ir, &config, 1, 1);
+        assert!(result.width >= 1);
+        assert!(result.height >= 1);
+    }
+
+    #[test]
+    fn zero_max_label_chars_is_clamped_and_safe() {
+        let mut ir = sample_ir();
+        if let Some(label) = ir.labels.get_mut(0) {
+            label.text = "VeryLongLabel".to_string();
+        }
+        let config = TermRenderConfig {
+            max_label_chars: 0,
+            max_label_lines: 1,
+            ..Default::default()
+        };
+        let result = render_diagram_with_config(&ir, &config, 80, 24);
+        assert!(!result.output.is_empty());
+    }
+
+    #[test]
+    fn strips_terminal_control_characters_from_labels() {
+        let mut ir = sample_ir();
+        if let Some(label) = ir.labels.get_mut(0) {
+            label.text = "Safe\u{1b}[31mText".to_string();
+        }
+        let result = render_diagram(&ir);
+        assert!(!result.output.contains('\u{1b}'));
     }
 }

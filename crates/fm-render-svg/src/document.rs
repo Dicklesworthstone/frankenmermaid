@@ -153,10 +153,10 @@ impl SvgDocument {
 
         // Add width/height
         if let Some(ref w) = self.width {
-            let _ = write!(output, " width=\"{w}\"");
+            let _ = write!(output, " width=\"{}\"", escape_xml_attr_value(w));
         }
         if let Some(ref h) = self.height {
-            let _ = write!(output, " height=\"{h}\"");
+            let _ = write!(output, " height=\"{}\"", escape_xml_attr_value(h));
         }
 
         // Add other attributes
@@ -176,7 +176,7 @@ impl SvgDocument {
 
         // Add inline style
         if let Some(ref css) = self.style {
-            let _ = write!(output, "<style>{css}</style>");
+            let _ = write!(output, "<style>{}</style>", escape_xml_text(css));
         }
 
         // Add defs section
@@ -211,6 +211,21 @@ impl fmt::Display for SvgDocument {
         self.write_to_string(&mut output);
         f.write_str(&output)
     }
+}
+
+fn escape_xml_attr_value(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 #[cfg(test)]
@@ -260,5 +275,25 @@ mod tests {
         let svg = doc.to_string();
         assert!(svg.contains("<title>A &amp; B</title>"));
         assert!(svg.contains("<desc>X &lt; Y &gt; Z</desc>"));
+    }
+
+    #[test]
+    fn escapes_width_and_height_attributes() {
+        let doc = SvgDocument::new()
+            .width("100\" onload=\"alert(1)")
+            .height("200&300");
+        let svg = doc.to_string();
+        assert!(svg.contains("width=\"100&quot; onload=&quot;alert(1)\""));
+        assert!(svg.contains("height=\"200&amp;300\""));
+    }
+
+    #[test]
+    fn escapes_inline_style_content() {
+        let doc = SvgDocument::new().style("g{fill:red;} </style><script>alert(1)</script>");
+        let svg = doc.to_string();
+        assert!(svg.contains(
+            "<style>g{fill:red;} &lt;/style&gt;&lt;script&gt;alert(1)&lt;/script&gt;</style>"
+        ));
+        assert!(!svg.contains("</style><script>"));
     }
 }

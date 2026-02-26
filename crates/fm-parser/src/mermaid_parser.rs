@@ -544,15 +544,16 @@ fn parse_flowchart(input: &str, builder: &mut IrBuilder) {
                 parsed_line = true;
                 continue;
             }
-            if let Some((from, to)) = parse_edge_statement_with_nodes(
+            if let Some(node_ids) = parse_edge_statement_with_nodes(
                 normalized_statement,
                 line_number,
                 line,
                 &FLOW_OPERATORS,
                 builder,
             ) {
-                add_node_to_active_clusters(builder, &active_clusters, from);
-                add_node_to_active_clusters(builder, &active_clusters, to);
+                for node_id in node_ids {
+                    add_node_to_active_clusters(builder, &active_clusters, node_id);
+                }
                 parsed_line = true;
                 continue;
             }
@@ -2359,60 +2360,157 @@ fn parse_edge_statement_with_nodes(
     source_line: &str,
     operators: &[(&str, ArrowType)],
     builder: &mut IrBuilder,
-) -> Option<(IrNodeId, IrNodeId)> {
-    let (operator_idx, operator, arrow) = find_operator(statement, operators)?;
-
-    let left_raw = statement[..operator_idx].trim();
-    let right_raw = statement[operator_idx + operator.len()..].trim();
-    if left_raw.is_empty() || right_raw.is_empty() {
+) -> Option<Vec<IrNodeId>> {
+    let (first_operator_idx, first_operator, first_arrow) = find_operator(statement, operators)?;
+    let left_raw = statement[..first_operator_idx].trim();
+    if left_raw.is_empty() {
         return None;
     }
 
-    let (edge_label, right_without_label) = extract_pipe_label(right_raw);
-    let left_node = parse_node_token(left_raw)?;
-    let right_node = parse_node_token(right_without_label)?;
-
     let span = span_for(line_number, source_line);
-    let from = builder.intern_node(
+    let left_node = parse_node_token(left_raw)?;
+    let mut from_node = builder.intern_node(
         &left_node.id,
         left_node.label.as_deref(),
         left_node.shape,
         span,
-    );
-    let to = builder.intern_node(
-        &right_node.id,
-        right_node.label.as_deref(),
-        right_node.shape,
-        span,
-    );
+    )?;
+    let mut touched_nodes = vec![from_node];
 
-    match (from, to) {
-        (Some(from_node), Some(to_node)) => {
-            builder.push_edge(from_node, to_node, arrow, edge_label.as_deref(), span);
-            Some((from_node, to_node))
+    let mut operator_idx = first_operator_idx;
+    let mut operator = first_operator;
+    let mut arrow = first_arrow;
+
+    loop {
+        let rhs_start = operator_idx + operator.len();
+        let next_operator = find_operator_from_index(statement, rhs_start, operators);
+        let right_segment = match next_operator {
+            Some((next_idx, _, _)) => &statement[rhs_start..next_idx],
+            None => &statement[rhs_start..],
         }
-        _ => None,
+        .trim();
+
+        if right_segment.is_empty() {
+            return None;
+        }
+
+        let (edge_label, right_without_label) = extract_pipe_label(right_segment);
+        let right_node = parse_node_token(right_without_label)?;
+        let to_node = builder.intern_node(
+            &right_node.id,
+            right_node.label.as_deref(),
+            right_node.shape,
+            span,
+        )?;
+
+        builder.push_edge(from_node, to_node, arrow, edge_label.as_deref(), span);
+        touched_nodes.push(to_node);
+
+        if let Some((next_idx, next_operator_token, next_arrow)) = next_operator {
+            from_node = to_node;
+            operator_idx = next_idx;
+            operator = next_operator_token;
+            arrow = next_arrow;
+            continue;
+        }
+
+        break;
     }
+
+    Some(touched_nodes)
 }
 
 fn find_operator<'a>(
     statement: &str,
     operators: &'a [(&'a str, ArrowType)],
 ) -> Option<(usize, &'a str, ArrowType)> {
-    let mut selected: Option<(usize, &'a str, ArrowType)> = None;
-    for (operator, arrow) in operators {
-        if let Some(index) = statement.find(operator) {
-            match selected {
-                Some((best_index, best_operator, _))
-                    if index > best_index
-                        || (index == best_index && operator.len() <= best_operator.len()) => {}
-                _ => {
-                    selected = Some((index, operator, *arrow));
+    find_operator_from_index(statement, 0, operators)
+}
+
+fn find_operator_from_index<'a>(
+    statement: &str,
+    start_index: usize,
+    operators: &'a [(&'a str, ArrowType)],
+) -> Option<(usize, &'a str, ArrowType)> {
+    let mut in_quote: Option<char> = None;
+    let mut escaped = false;
+    let mut square_depth = 0_usize;
+    let mut paren_depth = 0_usize;
+    let mut brace_depth = 0_usize;
+
+    for (idx, ch) in statement.char_indices() {
+        if idx < start_index {
+            continue;
+        }
+
+        if let Some(quote) = in_quote {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' && quote != '`' {
+                escaped = true;
+                continue;
+            }
+            if ch == quote {
+                in_quote = None;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' | '\'' | '`' => {
+                in_quote = Some(ch);
+                continue;
+            }
+            '[' => {
+                square_depth = square_depth.saturating_add(1);
+                continue;
+            }
+            ']' => {
+                square_depth = square_depth.saturating_sub(1);
+                continue;
+            }
+            '(' => {
+                paren_depth = paren_depth.saturating_add(1);
+                continue;
+            }
+            ')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                continue;
+            }
+            '{' => {
+                brace_depth = brace_depth.saturating_add(1);
+                continue;
+            }
+            '}' => {
+                brace_depth = brace_depth.saturating_sub(1);
+                continue;
+            }
+            _ => {}
+        }
+
+        if square_depth != 0 || paren_depth != 0 || brace_depth != 0 {
+            continue;
+        }
+
+        let tail = &statement[idx..];
+        let mut best_match: Option<(&str, ArrowType)> = None;
+        for (operator, arrow) in operators {
+            if tail.starts_with(operator) {
+                match best_match {
+                    Some((best_operator, _)) if operator.len() <= best_operator.len() => {}
+                    _ => best_match = Some((operator, *arrow)),
                 }
             }
         }
+
+        if let Some((operator, arrow)) = best_match {
+            return Some((idx, operator, arrow));
+        }
     }
-    selected
+
+    None
 }
 
 fn extract_pipe_label(right_hand_side: &str) -> (Option<String>, &str) {
@@ -2797,15 +2895,39 @@ fn split_statements(line: &str) -> impl Iterator<Item = &str> {
     let mut statements = Vec::new();
     let mut current_start = 0;
     let mut in_quote: Option<char> = None;
+    let mut escaped = false;
+    let mut square_depth = 0_usize;
+    let mut paren_depth = 0_usize;
+    let mut brace_depth = 0_usize;
 
     for (i, c) in line.char_indices() {
         if let Some(q) = in_quote {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if c == '\\' && q != '`' {
+                escaped = true;
+                continue;
+            }
             if c == q {
                 in_quote = None;
             }
         } else if c == '"' || c == '\'' || c == '`' {
             in_quote = Some(c);
-        } else if c == ';' {
+        } else if c == '[' {
+            square_depth = square_depth.saturating_add(1);
+        } else if c == ']' {
+            square_depth = square_depth.saturating_sub(1);
+        } else if c == '(' {
+            paren_depth = paren_depth.saturating_add(1);
+        } else if c == ')' {
+            paren_depth = paren_depth.saturating_sub(1);
+        } else if c == '{' {
+            brace_depth = brace_depth.saturating_add(1);
+        } else if c == '}' {
+            brace_depth = brace_depth.saturating_sub(1);
+        } else if c == ';' && square_depth == 0 && paren_depth == 0 && brace_depth == 0 {
             let segment = line[current_start..i].trim();
             if !segment.is_empty() {
                 statements.push(segment);
@@ -2939,6 +3061,36 @@ mod tests {
         assert_eq!(parsed.ir.edges.len(), 1);
         assert_eq!(parsed.ir.edges[0].arrow, ArrowType::Arrow);
         assert_eq!(parsed.ir.labels.len(), 3);
+    }
+
+    #[test]
+    fn flowchart_parses_chained_edges_left_to_right() {
+        let parsed = parse_mermaid("flowchart LR\nA-->B-->C");
+        assert!(
+            parsed.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            parsed.warnings
+        );
+        assert_eq!(parsed.ir.nodes.len(), 3);
+        assert_eq!(parsed.ir.edges.len(), 2);
+        assert!(parsed.ir.nodes.iter().any(|node| node.id == "A"));
+        assert!(parsed.ir.nodes.iter().any(|node| node.id == "B"));
+        assert!(parsed.ir.nodes.iter().any(|node| node.id == "C"));
+    }
+
+    #[test]
+    fn flowchart_does_not_split_statement_semicolons_inside_labels() {
+        let parsed = parse_mermaid("flowchart LR\nA[foo;bar] --> B");
+        assert_eq!(parsed.ir.edges.len(), 1);
+        let label = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "A")
+            .and_then(|node| node.label)
+            .and_then(|label_id| parsed.ir.labels.get(label_id.0))
+            .map(|value| value.text.as_str());
+        assert_eq!(label, Some("foo;bar"));
     }
 
     #[test]

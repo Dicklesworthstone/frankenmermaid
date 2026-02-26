@@ -1065,9 +1065,11 @@ fn serve_playground_html() -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
 </body>
 </html>"#;
 
-    let header =
-        Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).unwrap();
-    Response::from_data(html.as_bytes().to_vec()).with_header(header)
+    let mut response = Response::from_data(html.as_bytes().to_vec());
+    if let Ok(header) = Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]) {
+        response = response.with_header(header);
+    }
+    response
 }
 
 #[cfg(feature = "serve")]
@@ -1084,8 +1086,11 @@ fn handle_render_request(
     let parsed = parse(&body);
     let svg = render_svg_with_config(&parsed.ir, &SvgRenderConfig::default());
 
-    let header = Header::from_bytes(&b"Content-Type"[..], &b"image/svg+xml"[..]).unwrap();
-    Response::from_data(svg.into_bytes()).with_header(header)
+    let mut response = Response::from_data(svg.into_bytes());
+    if let Ok(header) = Header::from_bytes(&b"Content-Type"[..], &b"image/svg+xml"[..]) {
+        response = response.with_header(header);
+    }
+    response
 }
 
 #[cfg(feature = "serve")]

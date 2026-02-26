@@ -130,7 +130,9 @@ fn parse_dot_edge_statement(
     let span = span_for(line_number, source_line);
 
     // Extract shared attributes from the last part
-    let last_part = parts.last_mut().unwrap();
+    let Some(last_part) = parts.last_mut() else {
+        return false;
+    };
     let (last_fragment, shared_attrs) = split_endpoint_and_attrs(last_part);
     *last_part = last_fragment;
 
@@ -250,7 +252,7 @@ fn parse_dot_label(attributes: &str) -> Option<String> {
     let value = after_label.strip_prefix('=')?.trim_start();
 
     if let Some(quoted) = value.strip_prefix('"') {
-        let end = quoted.find('"')?;
+        let end = find_unescaped_quote_end(quoted)?;
         let text = decode_escapes(quoted[..end].trim());
         return (!text.is_empty()).then_some(text);
     }
@@ -269,6 +271,24 @@ fn parse_dot_label(attributes: &str) -> Option<String> {
         .trim_matches('"');
     let token = decode_escapes(token);
     (!token.is_empty()).then_some(token)
+}
+
+fn find_unescaped_quote_end(input: &str) -> Option<usize> {
+    let mut escaped = false;
+    for (idx, ch) in input.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == '"' {
+            return Some(idx);
+        }
+    }
+    None
 }
 
 fn normalize_identifier(raw: &str) -> String {
@@ -320,7 +340,7 @@ fn strip_comments(line: &str) -> &str {
         return "";
     }
 
-    let mut in_quote = false;
+    let mut in_quote: Option<char> = None;
     let mut escaped = false;
 
     for (i, ch) in line.char_indices() {
@@ -332,11 +352,17 @@ fn strip_comments(line: &str) -> &str {
             escaped = true;
             continue;
         }
-        if ch == '"' || ch == '\'' {
-            in_quote = !in_quote;
+        if let Some(quote) = in_quote {
+            if ch == quote {
+                in_quote = None;
+            }
             continue;
         }
-        if !in_quote && line[i..].starts_with("//") {
+        if ch == '"' || ch == '\'' {
+            in_quote = Some(ch);
+            continue;
+        }
+        if line[i..].starts_with("//") {
             return &line[..i];
         }
     }
@@ -536,5 +562,21 @@ mod tests {
         let parsed = parse_dot("digraph G { a [label=\"Line\\nBreak\"]; }");
         assert_eq!(parsed.ir.labels.len(), 1);
         assert!(parsed.ir.labels[0].text.contains('\n'));
+    }
+
+    #[test]
+    fn does_not_strip_comment_markers_inside_quoted_labels() {
+        let parsed = parse_dot("digraph G { a [label=\"Bob's // car\"]; }");
+        assert_eq!(parsed.ir.nodes.len(), 1);
+        assert_eq!(parsed.ir.labels.len(), 1);
+        assert_eq!(parsed.ir.labels[0].text, "Bob's // car");
+    }
+
+    #[test]
+    fn parses_escaped_quotes_inside_labels() {
+        let parsed = parse_dot("digraph G { a [label=\"a \\\"b\\\" c\"]; }");
+        assert_eq!(parsed.ir.nodes.len(), 1);
+        assert_eq!(parsed.ir.labels.len(), 1);
+        assert_eq!(parsed.ir.labels[0].text, "a \"b\" c");
     }
 }
