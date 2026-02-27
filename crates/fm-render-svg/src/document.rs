@@ -274,7 +274,7 @@ mod tests {
         let doc = SvgDocument::new().accessible("A & B", "X < Y > Z");
         let svg = doc.to_string();
         assert!(svg.contains("<title>A &amp; B</title>"));
-        assert!(svg.contains("<desc>X &lt; Y &gt; Z</desc>"));
+        assert!(svg.contains("<desc>X &lt; Y > Z</desc>"));
     }
 
     #[test]
@@ -291,9 +291,9 @@ mod tests {
     fn escapes_inline_style_content() {
         let doc = SvgDocument::new().style("g{fill:red;} </style><script>alert(1)</script>");
         let svg = doc.to_string();
-        assert!(svg.contains(
-            "<style>g{fill:red;} &lt;/style&gt;&lt;script&gt;alert(1)&lt;/script&gt;</style>"
-        ));
+        assert!(
+            svg.contains("<style>g{fill:red;} &lt;/style>&lt;script>alert(1)&lt;/script></style>")
+        );
         assert!(!svg.contains("</style><script>"));
     }
 }

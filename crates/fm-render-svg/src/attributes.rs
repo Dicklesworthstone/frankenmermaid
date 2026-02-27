@@ -203,7 +203,9 @@ pub fn escape_xml_text(s: &str) -> String {
         match c {
             '&' => result.push_str("&amp;"),
             '<' => result.push_str("&lt;"),
-            '>' => result.push_str("&gt;"),
+            // We intentionally do not escape '>' to '&gt;' here because it breaks
+            // CSS child combinators (e.g. `div > p`) when the SVG is embedded inline in HTML5.
+            // In standard XML, '>' only needs to be escaped if it is part of `]]>`.
             _ => result.push(c),
         }
     }

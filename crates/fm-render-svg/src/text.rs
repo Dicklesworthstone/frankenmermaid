@@ -383,7 +383,7 @@ mod tests {
     fn escapes_special_characters() {
         let elem = TextBuilder::new("A & B < C > D").build();
         let svg = elem.render();
-        assert!(svg.contains("A &amp; B &lt; C &gt; D"));
+        assert!(svg.contains("A &amp; B &lt; C > D"));
     }
 
     #[test]

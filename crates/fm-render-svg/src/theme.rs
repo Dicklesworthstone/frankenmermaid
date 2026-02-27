@@ -198,7 +198,7 @@ impl ThemeColors {
                 text: "#0f172a".into(),
                 node_fill: "#ffffff".into(),
                 node_stroke: "#93c5fd".into(), // blue-300
-                edge: "#64748b".into(), // slate-500
+                edge: "#64748b".into(),        // slate-500
                 cluster_fill: "rgba(239,246,255,0.6)".into(), // blue-50
                 cluster_stroke: "#bfdbfe".into(), // blue-200
                 accents: [
@@ -440,7 +440,7 @@ impl Theme {
         } else {
             ""
         };
-        
+
         let hover_shadow_filter = if shadows {
             "filter: drop-shadow(0 10px 15px rgba(0, 0, 0, 0.06)) drop-shadow(0 4px 6px rgba(0, 0, 0, 0.04));"
         } else {

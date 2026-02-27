@@ -25,7 +25,7 @@ pub use text::{TextAnchor, TextBuilder, TextMetrics};
 pub use theme::{FontConfig, Theme, ThemeColors, ThemePreset, generate_palette};
 pub use transform::{Transform, TransformBuilder};
 
-use fm_core::MermaidDiagramIr;
+use fm_core::{MermaidDiagramIr, MermaidTier};
 use fm_layout::{DiagramLayout, LayoutEdgePath, LayoutNodeBox, layout_diagram};
 
 /// Configuration for SVG rendering.
@@ -55,6 +55,12 @@ pub struct SvgRenderConfig {
     pub theme: ThemePreset,
     /// Whether to embed theme CSS in the SVG.
     pub embed_theme_css: bool,
+    /// Detail tier selection (`auto`, `compact`, `normal`, `rich`).
+    pub detail_tier: MermaidTier,
+    /// Minimum readable font size in pixels.
+    pub min_font_size: f32,
+    /// Whether to embed print-optimized CSS rules.
+    pub print_optimized: bool,
     /// Accessibility configuration.
     pub a11y: A11yConfig,
 }
@@ -76,9 +82,33 @@ impl Default for SvgRenderConfig {
             root_classes: Vec::new(),
             theme: ThemePreset::Default,
             embed_theme_css: true,
+            detail_tier: MermaidTier::Auto,
+            min_font_size: 8.0,
+            print_optimized: true,
             a11y: A11yConfig::full(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenderDetailTier {
+    Compact,
+    Normal,
+    Rich,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RenderDetailProfile {
+    tier: RenderDetailTier,
+    show_node_labels: bool,
+    show_edge_labels: bool,
+    show_cluster_labels: bool,
+    node_label_max_chars: Option<usize>,
+    edge_label_max_chars: Option<usize>,
+    node_font_size: f32,
+    edge_font_size: f32,
+    cluster_font_size: f32,
+    enable_shadows: bool,
 }
 
 /// Render an IR diagram to SVG string.
@@ -94,6 +124,120 @@ pub fn render_svg_with_config(ir: &MermaidDiagramIr, config: &SvgRenderConfig) -
     render_layout_to_svg(&layout, ir, config)
 }
 
+fn clamp_font_size(candidate: f32, min_font_size: f32) -> f32 {
+    candidate.max(min_font_size)
+}
+
+fn truncate_label(label: &str, max_chars: Option<usize>) -> String {
+    let Some(limit) = max_chars else {
+        return label.to_string();
+    };
+    let mut chars = label.chars();
+    let needs_truncation = chars.clone().count() > limit;
+    if !needs_truncation {
+        return label.to_string();
+    }
+    let mut text = String::new();
+    for _ in 0..limit.saturating_sub(1) {
+        let Some(ch) = chars.next() else {
+            break;
+        };
+        text.push(ch);
+    }
+    text.push('…');
+    text
+}
+
+fn detail_tier_name(tier: RenderDetailTier) -> &'static str {
+    match tier {
+        RenderDetailTier::Compact => "compact",
+        RenderDetailTier::Normal => "normal",
+        RenderDetailTier::Rich => "rich",
+    }
+}
+
+fn resolve_detail_profile(
+    width: f32,
+    height: f32,
+    config: &SvgRenderConfig,
+) -> RenderDetailProfile {
+    let area = width * height;
+    let tier = match config.detail_tier {
+        MermaidTier::Compact => RenderDetailTier::Compact,
+        MermaidTier::Normal => RenderDetailTier::Normal,
+        MermaidTier::Rich => RenderDetailTier::Rich,
+        MermaidTier::Auto => {
+            if area < 56_000.0 {
+                RenderDetailTier::Compact
+            } else if area < 220_000.0 {
+                RenderDetailTier::Normal
+            } else {
+                RenderDetailTier::Rich
+            }
+        }
+    };
+
+    match tier {
+        RenderDetailTier::Rich => RenderDetailProfile {
+            tier,
+            show_node_labels: true,
+            show_edge_labels: true,
+            show_cluster_labels: true,
+            node_label_max_chars: None,
+            edge_label_max_chars: None,
+            node_font_size: clamp_font_size(config.font_size, config.min_font_size),
+            edge_font_size: clamp_font_size(config.font_size * 0.85, config.min_font_size),
+            cluster_font_size: clamp_font_size(config.font_size * 0.9, config.min_font_size),
+            enable_shadows: config.shadows,
+        },
+        RenderDetailTier::Normal => RenderDetailProfile {
+            tier,
+            show_node_labels: true,
+            show_edge_labels: true,
+            show_cluster_labels: true,
+            node_label_max_chars: Some(48),
+            edge_label_max_chars: Some(40),
+            node_font_size: clamp_font_size(config.font_size * 0.92, config.min_font_size),
+            edge_font_size: clamp_font_size(config.font_size * 0.82, config.min_font_size),
+            cluster_font_size: clamp_font_size(config.font_size * 0.86, config.min_font_size),
+            enable_shadows: config.shadows,
+        },
+        RenderDetailTier::Compact => {
+            let show_node_labels = area >= 22_000.0;
+            RenderDetailProfile {
+                tier,
+                show_node_labels,
+                show_edge_labels: false,
+                show_cluster_labels: false,
+                node_label_max_chars: Some(20),
+                edge_label_max_chars: Some(24),
+                node_font_size: clamp_font_size(config.font_size * 0.78, config.min_font_size),
+                edge_font_size: clamp_font_size(config.font_size * 0.74, config.min_font_size),
+                cluster_font_size: clamp_font_size(config.font_size * 0.76, config.min_font_size),
+                enable_shadows: false,
+            }
+        }
+    }
+}
+
+fn print_css(min_font_size: f32) -> String {
+    format!(
+        "@media print {{
+  .fm-node text, .fm-edge-labeled text, .fm-cluster-label {{
+    font-size: {min_font_size:.1}px !important;
+    fill: #111 !important;
+  }}
+  .fm-node path, .fm-node rect, .fm-node circle, .fm-edge {{
+    stroke: #111 !important;
+  }}
+  .fm-cluster {{
+    fill: #fff !important;
+    stroke: #666 !important;
+  }}
+}}"
+    )
+}
+
 /// Render a computed layout to SVG.
 fn render_layout_to_svg(
     layout: &DiagramLayout,
@@ -103,6 +247,7 @@ fn render_layout_to_svg(
     let padding = config.padding;
     let width = layout.bounds.width + padding * 2.0;
     let height = layout.bounds.height + padding * 2.0;
+    let detail = resolve_detail_profile(width, height, config);
 
     let mut doc = SvgDocument::new()
         .viewbox(0.0, 0.0, width, height)
@@ -134,7 +279,8 @@ fn render_layout_to_svg(
     doc = doc
         .data("nodes", &ir.nodes.len().to_string())
         .data("edges", &ir.edges.len().to_string())
-        .data("type", ir.diagram_type.as_str());
+        .data("type", ir.diagram_type.as_str())
+        .data("detail-tier", detail_tier_name(detail.tier));
 
     // Build defs section
     let mut defs = DefsBuilder::new();
@@ -148,7 +294,7 @@ fn render_layout_to_svg(
     defs = defs.marker(ArrowheadMarker::diamond_marker("arrow-diamond", "#333"));
 
     // Add drop shadow filter if enabled
-    if config.shadows {
+    if detail.enable_shadows {
         defs = defs.filter(Filter::drop_shadow("drop-shadow", 2.0, 2.0, 3.0, 0.2));
     }
 
@@ -169,17 +315,27 @@ fn render_layout_to_svg(
             .colors
             .apply_overrides(&ir.meta.theme_overrides.theme_variables);
 
-        let mut css = theme.to_svg_style(config.shadows);
+        let mut css = theme.to_svg_style(detail.enable_shadows);
 
         // Add accessibility CSS if enabled
         if config.a11y.accessibility_css {
             css.push_str(accessibility_css());
         }
+        if config.print_optimized {
+            css.push_str(&print_css(config.min_font_size));
+        }
 
         doc = doc.style(css);
-    } else if config.a11y.accessibility_css {
-        // Only add accessibility CSS
-        doc = doc.style(accessibility_css());
+    } else if config.a11y.accessibility_css || config.print_optimized {
+        // Only add supplemental CSS (accessibility and/or print optimization).
+        let mut css = String::new();
+        if config.a11y.accessibility_css {
+            css.push_str(accessibility_css());
+        }
+        if config.print_optimized {
+            css.push_str(&print_css(config.min_font_size));
+        }
+        doc = doc.style(css);
     }
 
     // Offset for padding
@@ -257,7 +413,7 @@ fn render_layout_to_svg(
         doc = doc.child(rect);
 
         // Cluster label if present
-        if !title_text.is_empty() {
+        if detail.show_cluster_labels && !title_text.is_empty() {
             // For C4 boundaries, strip the boundary type prefix for display
             let display_title = if is_c4_boundary {
                 title_text
@@ -280,7 +436,7 @@ fn render_layout_to_svg(
                     .x(cluster.bounds.x + offset_x + 8.0)
                     .y(cluster.bounds.y + offset_y + 16.0)
                     .font_family(&config.font_family)
-                    .font_size(config.font_size * 0.9)
+                    .font_size(detail.cluster_font_size)
                     .fill(label_color)
                     .class("fm-cluster-label")
                     .build();
@@ -291,13 +447,13 @@ fn render_layout_to_svg(
 
     // Render edges
     for edge_path in &layout.edges {
-        let edge_elem = render_edge(edge_path, ir, offset_x, offset_y, config);
+        let edge_elem = render_edge(edge_path, ir, offset_x, offset_y, config, detail);
         doc = doc.child(edge_elem);
     }
 
     // Render nodes
     for node_box in &layout.nodes {
-        let node_elem = render_node(node_box, ir, offset_x, offset_y, config);
+        let node_elem = render_node(node_box, ir, offset_x, offset_y, config, detail);
         doc = doc.child(node_elem);
     }
 
@@ -311,6 +467,7 @@ fn render_node(
     offset_x: f32,
     offset_y: f32,
     config: &SvgRenderConfig,
+    detail: RenderDetailProfile,
 ) -> Element {
     use fm_core::NodeShape;
 
@@ -328,12 +485,14 @@ fn render_node(
     let cy = y + h / 2.0;
 
     // Get node label text
-    let label_text = ir_node
+    let raw_label_text = ir_node
         .and_then(|n| n.label)
         .and_then(|lid| ir.labels.get(lid.0))
         .map(|l| l.text.as_str())
         .or_else(|| ir_node.map(|n| n.id.as_str()))
         .unwrap_or("");
+    let label_text = truncate_label(raw_label_text, detail.node_label_max_chars);
+    let node_font_size = detail.node_font_size;
 
     let accent_class = format!("fm-node-accent-{}", stable_accent_index(node_id));
 
@@ -349,7 +508,7 @@ fn render_node(
     if config.a11y.aria_labels {
         group = group
             .attr("role", "graphics-symbol")
-            .attr("aria-label", label_text);
+            .attr("aria-label", raw_label_text);
     }
 
     if config.a11y.keyboard_nav {
@@ -444,7 +603,7 @@ fn render_node(
                 .move_to(x, y + ry)
                 .arc_to(w / 2.0, ry, 0.0, false, true, x + w, y + ry)
                 .line_to(x + w, y + h - ry)
-                .arc_to(w / 2.0, ry, 0.0, false, true, x, y + h - ry)
+                .arc_to(w / 2.0, ry, 0.0, false, false, x, y + h - ry)
                 .close()
                 .move_to(x, y + ry)
                 .arc_to(w / 2.0, ry, 0.0, false, false, x + w, y + ry)
@@ -506,16 +665,19 @@ fn render_node(
                     .stroke("#333")
                     .stroke_width(1.0),
             );
-            return group.child(g).child(
-                TextBuilder::new(label_text)
-                    .x(cx)
-                    .y(cy + config.font_size / 3.0)
-                    .font_family(&config.font_family)
-                    .font_size(config.font_size)
-                    .anchor(TextAnchor::Middle)
-                    .fill("#333")
-                    .build(),
-            );
+            if detail.show_node_labels {
+                return group.child(g).child(
+                    TextBuilder::new(&label_text)
+                        .x(cx)
+                        .y(cy + node_font_size / 3.0)
+                        .font_family(&config.font_family)
+                        .font_size(node_font_size)
+                        .anchor(TextAnchor::Middle)
+                        .fill("#333")
+                        .build(),
+                );
+            }
+            return group.child(g);
         }
 
         NodeShape::Asymmetric => {
@@ -736,44 +898,50 @@ fn render_node(
                     .stroke("#333")
                     .stroke_width(1.5),
             );
-            return group.child(g).child(
-                TextBuilder::new(label_text)
-                    .x(cx)
-                    .y(cy + config.font_size / 3.0)
-                    .font_family(&config.font_family)
-                    .font_size(config.font_size)
-                    .anchor(TextAnchor::Middle)
-                    .fill("#333")
-                    .build(),
-            );
+            if detail.show_node_labels {
+                return group.child(g).child(
+                    TextBuilder::new(&label_text)
+                        .x(cx)
+                        .y(cy + node_font_size / 3.0)
+                        .font_family(&config.font_family)
+                        .font_size(node_font_size)
+                        .anchor(TextAnchor::Middle)
+                        .fill("#333")
+                        .build(),
+                );
+            }
+            return group.child(g);
         }
     };
 
     // Apply shadow filter if enabled and this isn't a special composite shape
-    let shape_elem =
-        if config.shadows && !matches!(shape, NodeShape::Subroutine | NodeShape::CrossedCircle) {
-            shape_elem.filter("url(#drop-shadow)")
-        } else {
-            shape_elem
-        };
+    let shape_elem = if detail.enable_shadows
+        && !matches!(shape, NodeShape::Subroutine | NodeShape::CrossedCircle)
+    {
+        shape_elem.filter("url(#drop-shadow)")
+    } else {
+        shape_elem
+    };
 
     group = group.child(shape_elem);
 
     // Add label text
-    let lines_count = label_text.lines().count().max(1) as f32;
-    let total_text_height = (lines_count - 1.0) * config.font_size * config.line_height;
-    let start_y = cy - (total_text_height / 2.0) + (config.font_size / 3.0);
+    if detail.show_node_labels {
+        let lines_count = label_text.lines().count().max(1) as f32;
+        let total_text_height = (lines_count - 1.0) * node_font_size * config.line_height;
+        let start_y = cy - (total_text_height / 2.0) + (node_font_size / 3.0);
 
-    let text_elem = TextBuilder::new(label_text)
-        .x(cx)
-        .y(start_y)
-        .font_family(&config.font_family)
-        .font_size(config.font_size)
-        .line_height(config.line_height)
-        .anchor(TextAnchor::Middle)
-        .fill("#333")
-        .build();
-    group = group.child(text_elem);
+        let text_elem = TextBuilder::new(&label_text)
+            .x(cx)
+            .y(start_y)
+            .font_family(&config.font_family)
+            .font_size(node_font_size)
+            .line_height(config.line_height)
+            .anchor(TextAnchor::Middle)
+            .fill("#333")
+            .build();
+        group = group.child(text_elem);
+    }
 
     // Add title element for text alternatives
     if config.a11y.text_alternatives
@@ -783,19 +951,19 @@ fn render_node(
         group = group.child(Element::title(&node_desc));
     }
 
-    if let Some(node) = ir_node {
-        if let Some(href) = &node.href {
-            let mut a = Element::new(crate::element::ElementKind::A)
-                .attr("href", href)
-                .attr("target", "_blank")
-                .attr("rel", "noopener noreferrer");
-            
-            // Add a cursor pointer style
-            group = group.attr("style", "cursor: pointer;");
-            
-            a = a.child(group);
-            return a;
-        }
+    if let Some(node) = ir_node
+        && let Some(href) = &node.href
+    {
+        let mut a = Element::new(crate::element::ElementKind::A)
+            .attr("href", href)
+            .attr("target", "_blank")
+            .attr("rel", "noopener noreferrer");
+
+        // Add a cursor pointer style
+        group = group.attr("style", "cursor: pointer;");
+
+        a = a.child(group);
+        return a;
     }
 
     group
@@ -845,6 +1013,7 @@ fn render_edge(
     offset_x: f32,
     offset_y: f32,
     config: &SvgRenderConfig,
+    detail: RenderDetailProfile,
 ) -> Element {
     use fm_core::ArrowType;
 
@@ -917,10 +1086,13 @@ fn render_edge(
     }
 
     // If edge has a label, wrap in group with text
-    if let Some(label_id) = ir_edge.and_then(|e| e.label)
+    if detail.show_edge_labels
+        && let Some(label_id) = ir_edge.and_then(|e| e.label)
         && let Some(label) = ir.labels.get(label_id.0)
         && edge_path.points.len() >= 2
     {
+        let label_text = truncate_label(&label.text, detail.edge_label_max_chars);
+
         // Position label at geometric midpoint of edge
         let (lx, ly) = if edge_path.points.len() == 4 {
             // For standard orthogonal paths, the center of the middle segment
@@ -953,9 +1125,8 @@ fn render_edge(
         group = group.child(elem);
 
         // Add background rect for label
-        let lines_count = label.text.lines().count().max(1) as f32;
-        let max_line_len = label
-            .text
+        let lines_count = label_text.lines().count().max(1) as f32;
+        let max_line_len = label_text
             .lines()
             .map(|l| l.chars().count())
             .max()
@@ -964,7 +1135,7 @@ fn render_edge(
         let label_padding_x = 10.0;
         let label_width = label_text_width + (label_padding_x * 2.0);
 
-        let label_font_size = config.font_size * 0.85;
+        let label_font_size = detail.edge_font_size;
         let total_text_height = (lines_count - 1.0) * label_font_size * config.line_height;
         let label_height = total_text_height + label_font_size + 14.0;
 
@@ -984,7 +1155,7 @@ fn render_edge(
 
         // Add label text
         group = group.child(
-            TextBuilder::new(&label.text)
+            TextBuilder::new(&label_text)
                 .x(lx)
                 .y(start_y)
                 .font_family(&config.font_family)
@@ -1008,7 +1179,7 @@ fn render_edge(
                 fm_core::IrEndpoint::Node(nid) => ir.nodes.get(nid.0),
                 _ => None,
             };
-            let edge_desc = describe_edge(from_node, to_node, arrow, Some(&label.text), ir);
+            let edge_desc = describe_edge(from_node, to_node, arrow, Some(&label_text), ir);
             group = group.child(Element::title(&edge_desc));
         }
 
@@ -1058,8 +1229,8 @@ fn render_edge(
 mod tests {
     use super::*;
     use fm_core::{
-        DiagramType, IrCluster, IrClusterId, IrLabel, IrLabelId, IrNode, MermaidDiagramIr,
-        NodeShape, Span,
+        ArrowType, DiagramType, IrCluster, IrClusterId, IrEdge, IrEndpoint, IrLabel, IrLabelId,
+        IrNode, IrNodeId, MermaidDiagramIr, NodeShape, Span,
     };
 
     fn create_ir_with_cluster(title: &str) -> MermaidDiagramIr {
@@ -1089,6 +1260,40 @@ mod tests {
             id: node_id.to_string(),
             label: Some(label_id),
             shape,
+            ..Default::default()
+        });
+        ir
+    }
+
+    fn create_ir_with_labeled_edge() -> MermaidDiagramIr {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.labels.push(IrLabel {
+            text: "Start".to_string(),
+            span: Span::default(),
+        });
+        ir.labels.push(IrLabel {
+            text: "End".to_string(),
+            span: Span::default(),
+        });
+        ir.labels.push(IrLabel {
+            text: "edge label that can be truncated".to_string(),
+            span: Span::default(),
+        });
+        ir.nodes.push(IrNode {
+            id: "A".to_string(),
+            label: Some(IrLabelId(0)),
+            ..Default::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "B".to_string(),
+            label: Some(IrLabelId(1)),
+            ..Default::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            arrow: ArrowType::Arrow,
+            label: Some(IrLabelId(2)),
             ..Default::default()
         });
         ir
@@ -1215,5 +1420,57 @@ mod tests {
         let second = stable_accent_index("node-42");
         assert_eq!(first, second);
         assert!((1..=8).contains(&first));
+    }
+
+    #[test]
+    fn compact_tier_hides_edge_labels() {
+        let ir = create_ir_with_labeled_edge();
+        let config = SvgRenderConfig {
+            detail_tier: MermaidTier::Compact,
+            ..Default::default()
+        };
+        let svg = render_svg_with_config(&ir, &config);
+        assert!(!svg.contains("class=\"edge-label\""));
+    }
+
+    #[test]
+    fn rich_tier_preserves_edge_labels() {
+        let ir = create_ir_with_labeled_edge();
+        let config = SvgRenderConfig {
+            detail_tier: MermaidTier::Rich,
+            ..Default::default()
+        };
+        let svg = render_svg_with_config(&ir, &config);
+        assert!(svg.contains("class=\"edge-label\""));
+    }
+
+    #[test]
+    fn compact_tier_can_hide_node_text_for_tiny_layouts() {
+        let ir = create_ir_with_single_node("tiny-node", NodeShape::Rect);
+        let config = SvgRenderConfig {
+            detail_tier: MermaidTier::Compact,
+            padding: 0.0,
+            ..Default::default()
+        };
+        let svg = render_svg_with_config(&ir, &config);
+        assert!(!svg.contains("<text"));
+    }
+
+    #[test]
+    fn auto_tier_marks_detail_tier_data_attribute() {
+        let ir = create_ir_with_single_node("auto-tier", NodeShape::Rect);
+        let config = SvgRenderConfig {
+            padding: 0.0,
+            ..Default::default()
+        };
+        let svg = render_svg_with_config(&ir, &config);
+        assert!(svg.contains("data-detail-tier=\"compact\""));
+    }
+
+    #[test]
+    fn print_optimized_css_is_embedded_by_default() {
+        let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        let svg = render_svg(&ir);
+        assert!(svg.contains("@media print"));
     }
 }
