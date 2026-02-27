@@ -1,5 +1,8 @@
 use chumsky::prelude::*;
-use fm_core::{ArrowType, DiagramType, GraphDirection, IrAttributeKey, IrNodeId, NodeShape, Span};
+use fm_core::{
+    ArrowType, DiagramType, GraphDirection, IrAttributeKey, IrNodeId, NodeShape, Span,
+    parse_mermaid_js_config_value, to_init_parse,
+};
 use serde_json::Value;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -134,6 +137,7 @@ pub fn parse_mermaid(input: &str) -> ParseResult {
 /// Parse mermaid input with pre-computed detection results.
 #[must_use]
 pub fn parse_mermaid_with_detection(input: &str, detection: DetectedType) -> ParseResult {
+    let (content, front_matter_payload) = split_front_matter_block(input);
     let diagram_type = detection.diagram_type;
     let mut builder = IrBuilder::new(diagram_type);
 
@@ -142,34 +146,38 @@ pub fn parse_mermaid_with_detection(input: &str, detection: DetectedType) -> Par
         builder.add_warning(warning.clone());
     }
 
-    parse_init_directives(input, &mut builder);
+    if let Some(front_matter_payload) = front_matter_payload {
+        parse_front_matter_config(front_matter_payload, &mut builder);
+    }
+
+    parse_init_directives(content, &mut builder);
 
     match diagram_type {
-        DiagramType::Flowchart => parse_flowchart(input, &mut builder),
-        DiagramType::Sequence => parse_sequence(input, &mut builder),
-        DiagramType::Class => parse_class(input, &mut builder),
-        DiagramType::State => parse_state(input, &mut builder),
-        DiagramType::Requirement => parse_requirement(input, &mut builder),
-        DiagramType::Mindmap => parse_mindmap(input, &mut builder),
-        DiagramType::Er => parse_er(input, &mut builder),
-        DiagramType::Journey => parse_journey(input, &mut builder),
-        DiagramType::Timeline => parse_timeline(input, &mut builder),
-        DiagramType::PacketBeta => parse_packet(input, &mut builder),
-        DiagramType::Gantt => parse_gantt(input, &mut builder),
-        DiagramType::Pie => parse_pie(input, &mut builder),
-        DiagramType::QuadrantChart => parse_quadrant(input, &mut builder),
-        DiagramType::GitGraph => parse_gitgraph(input, &mut builder),
+        DiagramType::Flowchart => parse_flowchart(content, &mut builder),
+        DiagramType::Sequence => parse_sequence(content, &mut builder),
+        DiagramType::Class => parse_class(content, &mut builder),
+        DiagramType::State => parse_state(content, &mut builder),
+        DiagramType::Requirement => parse_requirement(content, &mut builder),
+        DiagramType::Mindmap => parse_mindmap(content, &mut builder),
+        DiagramType::Er => parse_er(content, &mut builder),
+        DiagramType::Journey => parse_journey(content, &mut builder),
+        DiagramType::Timeline => parse_timeline(content, &mut builder),
+        DiagramType::PacketBeta => parse_packet(content, &mut builder),
+        DiagramType::Gantt => parse_gantt(content, &mut builder),
+        DiagramType::Pie => parse_pie(content, &mut builder),
+        DiagramType::QuadrantChart => parse_quadrant(content, &mut builder),
+        DiagramType::GitGraph => parse_gitgraph(content, &mut builder),
         DiagramType::Unknown => {
             builder
                 .add_warning("Unable to detect diagram type; using best-effort flowchart parsing");
-            parse_flowchart(input, &mut builder);
+            parse_flowchart(content, &mut builder);
         }
         _ => {
             builder.add_warning(format!(
                 "Diagram type '{}' is not fully supported yet; using best-effort flowchart parsing",
                 diagram_type.as_str()
             ));
-            parse_flowchart(input, &mut builder);
+            parse_flowchart(content, &mut builder);
         }
     }
 
@@ -2785,8 +2793,85 @@ fn parse_init_directives(input: &str, builder: &mut IrBuilder) {
             }
         };
 
-        apply_init_value(parsed_value, line_number, span, builder);
+        apply_mermaid_config_value(parsed_value, &format!("Line {line_number}"), span, builder);
     }
+}
+
+fn parse_front_matter_config(front_matter_payload: &str, builder: &mut IrBuilder) {
+    let span = Span::at_line(1, front_matter_payload.chars().count());
+    let yaml_value = match serde_yaml::from_str::<Value>(front_matter_payload) {
+        Ok(value) => value,
+        Err(error) => {
+            let message = format!("Front matter: invalid YAML config: {error}");
+            builder.add_warning(message.clone());
+            builder.add_init_error(message, span);
+            return;
+        }
+    };
+
+    let config_value = yaml_value
+        .get("config")
+        .cloned()
+        .unwrap_or_else(|| yaml_value.clone());
+    apply_mermaid_config_value(config_value, "Front matter", span, builder);
+}
+
+fn apply_mermaid_config_value(value: Value, context: &str, span: Span, builder: &mut IrBuilder) {
+    let parsed = to_init_parse(parse_mermaid_js_config_value(&value));
+
+    if let Some(theme) = parsed.config.theme {
+        builder.set_init_theme(theme);
+    }
+    for (key, value) in parsed.config.theme_variables {
+        builder.insert_theme_variable(key, value);
+    }
+    if let Some(direction) = parsed.config.flowchart_direction {
+        builder.set_init_flowchart_direction(direction);
+    }
+    if let Some(curve) = parsed.config.flowchart_curve {
+        builder.set_init_flowchart_curve(curve);
+    }
+    if let Some(mirror_actors) = parsed.config.sequence_mirror_actors {
+        builder.set_init_sequence_mirror_actors(mirror_actors);
+    }
+
+    for warning in parsed.warnings {
+        let message = format!("{context}: {}", warning.message);
+        builder.add_warning(message.clone());
+        builder.add_init_warning(message, span);
+    }
+
+    for error in parsed.errors {
+        let message = format!("{context}: {error}");
+        builder.add_warning(message.clone());
+        builder.add_init_error(message, span);
+    }
+}
+
+fn split_front_matter_block(input: &str) -> (&str, Option<&str>) {
+    let mut segments = input.split_inclusive('\n');
+    let Some(first_segment) = segments.next() else {
+        return (input, None);
+    };
+    let first_line = first_segment.trim_end_matches(['\r', '\n']);
+    if first_line.trim() != "---" {
+        return (input, None);
+    }
+
+    let payload_start = first_segment.len();
+    let mut offset = payload_start;
+    for segment in segments {
+        let line = segment.trim_end_matches(['\r', '\n']);
+        let segment_start = offset;
+        offset += segment.len();
+        if line.trim() == "---" {
+            let payload = input[payload_start..segment_start].trim_matches(['\r', '\n']);
+            let body = &input[offset..];
+            return (body, Some(payload));
+        }
+    }
+
+    (input, None)
 }
 
 fn extract_init_payload(trimmed: &str) -> Option<&str> {
@@ -2808,83 +2893,6 @@ fn parse_init_payload_value(payload: &str) -> Result<Value, String> {
             format!("JSON parse failed ({json_error}); JSON5 parse failed ({json5_error})")
         })
     })
-}
-
-fn apply_init_value(value: Value, line_number: usize, span: Span, builder: &mut IrBuilder) {
-    let Some(init_object) = value.as_object() else {
-        let message = format!("Line {line_number}: init directive must be a JSON object");
-        builder.add_warning(message.clone());
-        builder.add_init_error(message, span);
-        return;
-    };
-
-    if let Some(theme) = init_object.get("theme").and_then(Value::as_str) {
-        builder.set_init_theme(theme.to_string());
-    }
-
-    if let Some(theme_variables) = init_object.get("themeVariables") {
-        if let Some(theme_variables_obj) = theme_variables.as_object() {
-            for (key, raw_value) in theme_variables_obj {
-                if let Some(parsed_value) = json_value_to_string(raw_value) {
-                    builder.insert_theme_variable(key.clone(), parsed_value);
-                } else {
-                    let message = format!(
-                        "Line {line_number}: init.themeVariables.{key} must be a string, number, or boolean"
-                    );
-                    builder.add_warning(message.clone());
-                    builder.add_init_warning(message, span);
-                }
-            }
-        } else {
-            let message = format!("Line {line_number}: init.themeVariables must be an object");
-            builder.add_warning(message.clone());
-            builder.add_init_warning(message, span);
-        }
-    }
-
-    if let Some(flowchart_value) = init_object.get("flowchart") {
-        if let Some(flowchart_obj) = flowchart_value.as_object() {
-            let direction = flowchart_obj
-                .get("direction")
-                .or_else(|| flowchart_obj.get("rankDir"))
-                .and_then(Value::as_str);
-            if let Some(direction_token) = direction {
-                if let Some(parsed_direction) = parse_direction_token(direction_token) {
-                    builder.set_init_flowchart_direction(parsed_direction);
-                } else {
-                    let message = format!(
-                        "Line {line_number}: unsupported init.flowchart.direction value: {direction_token}"
-                    );
-                    builder.add_warning(message.clone());
-                    builder.add_init_warning(message, span);
-                }
-            }
-        } else {
-            let message = format!("Line {line_number}: init.flowchart must be an object");
-            builder.add_warning(message.clone());
-            builder.add_init_warning(message, span);
-        }
-    }
-}
-
-fn json_value_to_string(value: &Value) -> Option<String> {
-    match value {
-        Value::String(text) => Some(text.clone()),
-        Value::Bool(flag) => Some(flag.to_string()),
-        Value::Number(number) => Some(number.to_string()),
-        _ => None,
-    }
-}
-
-fn parse_direction_token(token: &str) -> Option<GraphDirection> {
-    match token.trim().to_ascii_uppercase().as_str() {
-        "LR" => Some(GraphDirection::LR),
-        "RL" => Some(GraphDirection::RL),
-        "TB" => Some(GraphDirection::TB),
-        "TD" => Some(GraphDirection::TD),
-        "BT" => Some(GraphDirection::BT),
-        _ => None,
-    }
 }
 
 fn leading_indent_width(line: &str) -> usize {
@@ -3026,7 +3034,8 @@ fn span_for(line_number: usize, line: &str) -> Span {
 }
 
 pub(crate) fn first_significant_line(input: &str) -> Option<&str> {
-    input.lines().map(str::trim).find(|line| {
+    let (content, _) = split_front_matter_block(input);
+    content.lines().map(str::trim).find(|line| {
         !line.is_empty() && !is_comment(line) && !line.starts_with("%%{") && !line.ends_with("}%%")
     })
 }
@@ -3058,6 +3067,12 @@ mod tests {
             DiagramType::Sequence
         );
         assert_eq!(detect_type("classDiagram\nA -- B"), DiagramType::Class);
+    }
+
+    #[test]
+    fn detects_header_after_front_matter() {
+        let input = "---\nconfig:\n  theme: dark\n---\nsequenceDiagram\nAlice->>Bob: hi";
+        assert_eq!(detect_type(input), DiagramType::Sequence);
     }
 
     #[test]
@@ -3760,6 +3775,60 @@ mod tests {
             parsed.ir.meta.init.config.flowchart_direction,
             Some(GraphDirection::RL)
         );
+        assert!(parsed.ir.meta.init.errors.is_empty());
+    }
+
+    #[test]
+    fn init_directive_maps_curve_and_sequence_options() {
+        let parsed = parse_mermaid(
+            "%%{init: {\"flowchart\":{\"curve\":\"basis\",\"rankDir\":\"LR\"},\"sequence\":{\"mirrorActors\":true}}}%%\nflowchart TB\nA-->B",
+        );
+        assert_eq!(
+            parsed.ir.meta.init.config.flowchart_curve.as_deref(),
+            Some("basis")
+        );
+        assert_eq!(
+            parsed.ir.meta.init.config.flowchart_direction,
+            Some(GraphDirection::LR)
+        );
+        assert_eq!(
+            parsed.ir.meta.init.config.sequence_mirror_actors,
+            Some(true)
+        );
+        assert!(parsed.ir.meta.init.errors.is_empty());
+    }
+
+    #[test]
+    fn front_matter_yaml_config_is_applied_and_skipped_from_body() {
+        let parsed = parse_mermaid(
+            "---\nconfig:\n  theme: dark\n  themeVariables:\n    primaryColor: '#123456'\n  flowchart:\n    rankDir: RL\n    curve: linear\n  sequence:\n    mirrorActors: false\n---\nflowchart LR\nA-->B",
+        );
+
+        assert_eq!(parsed.ir.meta.init.config.theme.as_deref(), Some("dark"));
+        assert_eq!(
+            parsed
+                .ir
+                .meta
+                .theme_overrides
+                .theme_variables
+                .get("primaryColor")
+                .map(String::as_str),
+            Some("#123456")
+        );
+        assert_eq!(
+            parsed.ir.meta.init.config.flowchart_direction,
+            Some(GraphDirection::RL)
+        );
+        assert_eq!(
+            parsed.ir.meta.init.config.flowchart_curve.as_deref(),
+            Some("linear")
+        );
+        assert_eq!(
+            parsed.ir.meta.init.config.sequence_mirror_actors,
+            Some(false)
+        );
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 1);
         assert!(parsed.ir.meta.init.errors.is_empty());
     }
 

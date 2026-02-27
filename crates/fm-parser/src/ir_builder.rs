@@ -56,6 +56,14 @@ impl IrBuilder {
         self.ir.meta.init.config.flowchart_direction = Some(direction);
     }
 
+    pub(crate) fn set_init_flowchart_curve(&mut self, curve: String) {
+        self.ir.meta.init.config.flowchart_curve = Some(curve);
+    }
+
+    pub(crate) fn set_init_sequence_mirror_actors(&mut self, mirror_actors: bool) {
+        self.ir.meta.init.config.sequence_mirror_actors = Some(mirror_actors);
+    }
+
     pub(crate) fn add_init_warning(&mut self, message: impl Into<String>, span: Span) {
         self.ir.meta.init.warnings.push(MermaidWarning {
             code: MermaidWarningCode::ParseRecovery,

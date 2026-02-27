@@ -51,7 +51,8 @@ pub fn parse_dot(input: &str) -> ParseResult {
                 continue;
             }
 
-            if let Some((cluster_key, cluster_title, opens_scope)) = parse_subgraph_start(statement)
+            if let Some((cluster_key, cluster_title, opens_scope)) =
+                parse_subgraph_start(statement, line_number)
             {
                 if let Some(cluster_index) = builder.ensure_cluster(
                     &cluster_key,
@@ -343,27 +344,6 @@ fn strip_comments(line: &str) -> &str {
     let mut in_quote: Option<char> = None;
     let mut escaped = false;
 
-    // Handle block comments if they exist on a single line (basic heuristic)
-    // Note: multi-line block comments require a stateful parser across lines,
-    // which this doesn't currently do, but it strips same-line blocks.
-    let mut line = line;
-    if let Some(start) = line.find("/*") {
-        if let Some(end) = line[start + 2..].find("*/") {
-            // Strip the block comment out of the line entirely.
-            // This is a simplistic fix for single-line block comments.
-            let before = &line[..start];
-            let after = &line[start + 2 + end + 2..];
-            // Since we can't easily return an owned string here without changing the signature,
-            // we will just truncate at the start of the block comment to be safe if it's trailing,
-            // or just ignore it if it's mid-line (which requires allocation).
-            // For now, we'll just truncate at "/*" if we see one.
-            return &line[..start];
-        } else {
-            // Unclosed block comment, truncate the rest of the line
-            return &line[..start];
-        }
-    }
-
     for (i, ch) in line.char_indices() {
         if escaped {
             escaped = false;
@@ -383,7 +363,7 @@ fn strip_comments(line: &str) -> &str {
             in_quote = Some(ch);
             continue;
         }
-        if line[i..].starts_with("//") {
+        if line[i..].starts_with("//") || line[i..].starts_with("/*") {
             return &line[..i];
         }
     }
@@ -412,15 +392,26 @@ fn extract_body(input: &str) -> &str {
     &input[start + 1..end]
 }
 
-fn parse_subgraph_start(statement: &str) -> Option<(String, Option<String>, bool)> {
-    let body = statement.strip_prefix("subgraph ")?;
+fn parse_subgraph_start(
+    statement: &str,
+    line_number: usize,
+) -> Option<(String, Option<String>, bool)> {
+    let body = if let Some(rest) = statement.strip_prefix("subgraph ") {
+        rest
+    } else if statement == "subgraph" {
+        ""
+    } else {
+        return None;
+    };
     let opens_scope = true;
     let body = body.trim().trim_end_matches('{').trim();
-    if body.is_empty() {
-        return None;
-    }
 
-    let key = normalize_identifier(body);
+    let key = if body.is_empty() {
+        format!("cluster_anon_line_{line_number}")
+    } else {
+        normalize_identifier(body)
+    };
+
     if key.is_empty() {
         return None;
     }
