@@ -592,3 +592,12 @@ mod tests {
         assert_eq!(parsed.ir.labels[0].text, "a \"b\" c");
     }
 }
+
+#[test]
+fn parses_semicolon_in_label() {
+    let input = r#"digraph G { A -> B [label="foo; bar"]; }"#;
+    let result = parse_dot(input);
+    let edge = &result.ir.edges[0];
+    let label = result.ir.labels[edge.label.unwrap().0].text.clone();
+    assert_eq!(label, "foo; bar");
+}
