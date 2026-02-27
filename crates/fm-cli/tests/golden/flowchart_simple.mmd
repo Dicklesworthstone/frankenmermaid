@@ -1,0 +1,5 @@
+flowchart LR
+  A[Start] --> B{Validate}
+  B -->|yes| C[Ship]
+  B -->|no| D[Fix]
+  D --> B

@@ -383,6 +383,7 @@ pub enum FilterKind {
         dy: f32,
         std_dev: f32,
         opacity: f32,
+        color: Option<String>,
     },
     /// Gaussian blur effect.
     GaussianBlur { std_dev: f32 },
@@ -399,6 +400,29 @@ impl Filter {
                 dy,
                 std_dev,
                 opacity,
+                color: None,
+            },
+        }
+    }
+
+    /// Create a drop shadow filter with explicit flood color.
+    #[must_use]
+    pub fn drop_shadow_with_color(
+        id: &str,
+        dx: f32,
+        dy: f32,
+        std_dev: f32,
+        opacity: f32,
+        color: &str,
+    ) -> Self {
+        Self {
+            id: id.to_string(),
+            kind: FilterKind::DropShadow {
+                dx,
+                dy,
+                std_dev,
+                opacity,
+                color: Some(color.to_string()),
             },
         }
     }
@@ -428,13 +452,17 @@ impl Filter {
                 dy,
                 std_dev,
                 opacity,
+                color,
             } => {
                 // Use feDropShadow for modern browsers
-                let shadow = Element::new(crate::element::ElementKind::FeDropShadow)
+                let mut shadow = Element::new(crate::element::ElementKind::FeDropShadow)
                     .attr_num("dx", *dx)
                     .attr_num("dy", *dy)
                     .attr_num("stdDeviation", *std_dev)
                     .attr("flood-opacity", &format!("{:.2}", opacity));
+                if let Some(color) = color {
+                    shadow = shadow.attr("flood-color", color);
+                }
                 filter = filter.child(shadow);
             }
             FilterKind::GaussianBlur { std_dev } => {
@@ -615,6 +643,16 @@ mod tests {
         assert!(svg.contains("id=\"shadow\""));
         assert!(svg.contains("<feDropShadow"));
         assert!(svg.contains("stdDeviation=\"3\""));
+    }
+
+    #[test]
+    fn creates_colored_drop_shadow_filter() {
+        let filter = Filter::drop_shadow_with_color("shadow-color", 1.5, 2.5, 4.0, 0.4, "#ff3366");
+        let elem = filter.to_element();
+        let svg = elem.render();
+        assert!(svg.contains("id=\"shadow-color\""));
+        assert!(svg.contains("flood-color=\"#ff3366\""));
+        assert!(svg.contains("flood-opacity=\"0.40\""));
     }
 
     #[test]

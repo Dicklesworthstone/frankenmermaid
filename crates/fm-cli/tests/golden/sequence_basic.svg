@@ -1,0 +1,311 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 279.35 421" width="100%" height="100%" preserveAspectRatio="xMidYMid meet" role="img" data-nodes="2" data-edges="2" data-type="sequence" data-detail-tier="normal"><title>sequence diagram</title><desc>A sequence diagram with 2 nodes and 2 edges, flowing top to bottom</desc><style>:root {
+  --fm-bg: #f9fafb;
+  --fm-text-color: #111827;
+  --fm-node-fill: #ffffff;
+  --fm-node-stroke: #e5e7eb;
+  --fm-edge-color: #9ca3af;
+  --fm-cluster-fill: rgba(243,244,246,0.5);
+  --fm-cluster-stroke: #d1d5db;
+  --fm-accent-1: #3b82f6;
+  --fm-accent-2: #0ea5e9;
+  --fm-accent-3: #10b981;
+  --fm-accent-4: #8b5cf6;
+  --fm-accent-5: #f59e0b;
+  --fm-accent-6: #f43f5e;
+  --fm-accent-7: #14b8a6;
+  --fm-accent-8: #6366f1;
+}
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap');
+.fm-text {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  font-size: 15px;
+  font-weight: 500;
+}
+
+:root {
+  --fm-edge-muted: var(--fm-cluster-stroke);
+  --fm-edge-label-bg: var(--fm-bg);
+  --fm-edge-label-border: var(--fm-cluster-stroke);
+  --fm-edge-label-text: var(--fm-text-color);
+  --fm-cluster-label-color: var(--fm-text-color);
+  --fm-cluster-c4-fill: var(--fm-cluster-fill);
+  --fm-cluster-c4-stroke: var(--fm-cluster-stroke);
+  --fm-cluster-swimlane-fill: var(--fm-cluster-fill);
+  --fm-cluster-swimlane-stroke: var(--fm-cluster-stroke);
+  --fm-surface-shadow: rgba(15, 23, 42, 0.1);
+}
+svg {
+  background: var(--fm-bg);
+  background-image: linear-gradient(
+    180deg,
+    var(--fm-bg) 0%,
+    color-mix(in srgb, var(--fm-bg) 92%, var(--fm-node-stroke) 8%) 100%
+  );
+}
+.fm-node {
+  isolation: isolate;
+  --fm-node-accent: var(--fm-node-stroke);
+  --fm-node-hover-accent: var(--fm-edge-color);
+}
+.fm-node rect,
+.fm-node path,
+.fm-node circle,
+.fm-node ellipse,
+.fm-node polygon {
+  fill: var(--fm-node-fill);
+  stroke: var(--fm-node-accent);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+  shape-rendering: geometricPrecision;
+  filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.04)) drop-shadow(0 1px 3px rgba(0, 0, 0, 0.02));
+  transition: fill 200ms ease, stroke 200ms ease, filter 200ms ease, transform 200ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.fm-node line {
+  stroke: var(--fm-node-accent);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+.fm-node text {
+  fill: var(--fm-text-color);
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "kern" 1, "liga" 1;
+}
+.fm-node:hover rect,
+.fm-node:hover path,
+.fm-node:hover circle,
+.fm-node:hover ellipse,
+.fm-node:hover polygon {
+  stroke: var(--fm-node-hover-accent);
+  filter: drop-shadow(0 10px 15px rgba(0, 0, 0, 0.06)) drop-shadow(0 4px 6px rgba(0, 0, 0, 0.04));
+  transform: translateY(-1px);
+}
+.fm-node-accent-1 {
+  --fm-node-accent: var(--fm-node-stroke);
+  --fm-node-accent: color-mix(in srgb, var(--fm-accent-1) 50%, var(--fm-node-stroke));
+  --fm-node-hover-accent: var(--fm-accent-1);
+}
+.fm-node-accent-2 {
+  --fm-node-accent: var(--fm-node-stroke);
+  --fm-node-accent: color-mix(in srgb, var(--fm-accent-2) 50%, var(--fm-node-stroke));
+  --fm-node-hover-accent: var(--fm-accent-2);
+}
+.fm-node-accent-3 {
+  --fm-node-accent: var(--fm-node-stroke);
+  --fm-node-accent: color-mix(in srgb, var(--fm-accent-3) 50%, var(--fm-node-stroke));
+  --fm-node-hover-accent: var(--fm-accent-3);
+}
+.fm-node-accent-4 {
+  --fm-node-accent: var(--fm-node-stroke);
+  --fm-node-accent: color-mix(in srgb, var(--fm-accent-4) 50%, var(--fm-node-stroke));
+  --fm-node-hover-accent: var(--fm-accent-4);
+}
+.fm-node-accent-5 {
+  --fm-node-accent: var(--fm-node-stroke);
+  --fm-node-accent: color-mix(in srgb, var(--fm-accent-5) 50%, var(--fm-node-stroke));
+  --fm-node-hover-accent: var(--fm-accent-5);
+}
+.fm-node-accent-6 {
+  --fm-node-accent: var(--fm-node-stroke);
+  --fm-node-accent: color-mix(in srgb, var(--fm-accent-6) 50%, var(--fm-node-stroke));
+  --fm-node-hover-accent: var(--fm-accent-6);
+}
+.fm-node-accent-7 {
+  --fm-node-accent: var(--fm-node-stroke);
+  --fm-node-accent: color-mix(in srgb, var(--fm-accent-7) 50%, var(--fm-node-stroke));
+  --fm-node-hover-accent: var(--fm-accent-7);
+}
+.fm-node-accent-8 {
+  --fm-node-accent: var(--fm-node-stroke);
+  --fm-node-accent: color-mix(in srgb, var(--fm-accent-8) 50%, var(--fm-node-stroke));
+  --fm-node-hover-accent: var(--fm-accent-8);
+}
+.fm-node.fm-node-shape-note path,
+.fm-node.fm-node-shape-note rect {
+  fill: var(--fm-node-fill);
+  fill: color-mix(in srgb, #fef3c7 40%, var(--fm-node-fill));
+}
+.fm-node.fm-node-shape-cloud path {
+  fill: var(--fm-node-fill);
+  fill: color-mix(in srgb, var(--fm-accent-2) 15%, var(--fm-node-fill));
+}
+.fm-node.fm-node-shape-cylinder path {
+  fill: var(--fm-node-fill);
+  fill: color-mix(in srgb, var(--fm-accent-1) 12%, var(--fm-node-fill));
+}
+.fm-node.fm-node-shape-star path,
+.fm-node.fm-node-shape-pentagon path {
+  stroke-width: 1.8;
+}
+.fm-edge {
+  fill: none;
+  stroke: var(--fm-edge-color);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+  transition: stroke 200ms ease, opacity 200ms ease, stroke-width 200ms ease;
+  cursor: crosshair;
+}
+.fm-edge:hover {
+  stroke: var(--fm-accent-1);
+  stroke-width: 2.5;
+  opacity: 1;
+}
+.fm-edge-solid {
+  stroke-dasharray: none;
+}
+.fm-edge-dashed {
+  stroke-dasharray: 6 6;
+}
+.fm-edge-thick {
+  stroke-width: 2.5;
+}
+.fm-edge-thick:hover {
+  stroke-width: 3.5;
+}
+.fm-edge-back {
+  stroke: var(--fm-edge-muted);
+  opacity: 0.8;
+  stroke-dasharray: 4 4;
+}
+.fm-edge-labeled > rect {
+  fill: var(--fm-edge-label-bg);
+  stroke: var(--fm-edge-label-border);
+  stroke-width: 1.5;
+  rx: 6px;
+  ry: 6px;
+}
+/* Add a backdrop filter for modern glassmorphism effect on the rect */
+@supports (backdrop-filter: blur(4px)) {
+  .fm-edge-labeled > rect {
+    fill: color-mix(in srgb, var(--fm-edge-label-bg) 85%, transparent);
+    backdrop-filter: blur(8px);
+  }
+}
+.edge-label {
+  fill: var(--fm-edge-label-text);
+  font-weight: 500;
+  font-size: 0.95em;
+  letter-spacing: -0.01em;
+  text-rendering: optimizeLegibility;
+}
+marker#arrow-end path,
+marker#arrow-filled path,
+marker#arrow-circle path,
+marker#arrow-diamond path {
+  fill: var(--fm-edge-color);
+  stroke: none;
+  transition: fill 200ms ease;
+}
+.fm-edge:hover ~ marker#arrow-end path,
+.fm-edge:hover ~ marker#arrow-filled path,
+.fm-edge:hover ~ marker#arrow-circle path,
+.fm-edge:hover ~ marker#arrow-diamond path {
+  fill: var(--fm-accent-1);
+}
+marker#arrow-open path {
+  stroke: var(--fm-edge-muted);
+  fill: none;
+  stroke-width: 1.8;
+  transition: stroke 200ms ease;
+}
+marker#arrow-cross path {
+  stroke: var(--fm-edge-color);
+  fill: none;
+  stroke-width: 1.8;
+  transition: stroke 200ms ease;
+}
+.fm-cluster {
+  fill: var(--fm-cluster-fill);
+  stroke: var(--fm-cluster-stroke);
+  stroke-width: 1.5;
+  stroke-dasharray: 8 4;
+}
+.fm-cluster-label {
+  fill: var(--fm-cluster-label-color);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.fm-cluster-c4 {
+  fill: var(--fm-cluster-c4-fill);
+  stroke: var(--fm-cluster-c4-stroke);
+  stroke-dasharray: none;
+}
+.fm-cluster-swimlane {
+  fill: var(--fm-cluster-swimlane-fill);
+  stroke: var(--fm-cluster-swimlane-stroke);
+  stroke-dasharray: none;
+}
+.fm-label {
+  fill: var(--fm-text-color);
+}
+@media (prefers-reduced-motion: reduce) {
+  .fm-node rect,
+  .fm-node path,
+  .fm-node circle,
+  .fm-node ellipse,
+  .fm-node polygon,
+  .fm-edge {
+    transition: none;
+    transform: none;
+  }
+}
+
+/* High contrast mode support */
+@media (prefers-contrast: more) {
+  :root {
+    --fm-bg: #ffffff !important;
+    --fm-text-color: #000000 !important;
+    --fm-node-fill: #ffffff !important;
+    --fm-node-stroke: #000000 !important;
+    --fm-edge-color: #000000 !important;
+  }
+  .fm-node { stroke-width: 2px !important; }
+  .fm-edge { stroke-width: 2px !important; }
+}
+
+/* Reduced motion support */
+@media (prefers-reduced-motion: reduce) {
+  .fm-edge, .fm-node {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+/* Focus indicators for keyboard navigation */
+.fm-node:focus, .fm-edge:focus {
+  outline: 3px solid #0066cc;
+  outline-offset: 2px;
+}
+
+.fm-node:focus-visible, .fm-edge:focus-visible {
+  outline: 3px solid #0066cc;
+  outline-offset: 2px;
+}
+
+/* Screen reader only content */
+.fm-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+@media print {
+  .fm-node text, .fm-edge-labeled text, .fm-cluster-label {
+    font-size: 8.0px !important;
+    fill: #111 !important;
+  }
+  .fm-node path, .fm-node rect, .fm-node circle, .fm-edge {
+    stroke: #111 !important;
+  }
+  .fm-cluster {
+    fill: #fff !important;
+    stroke: #666 !important;
+  }
+}</style><defs><marker id="arrow-end" markerWidth="10" markerHeight="10" refX="10" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M0 0 L10 5 L0 10 Z" fill="#333"/></marker><marker id="arrow-filled" markerWidth="12" markerHeight="12" refX="12" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M0 0 L12 6 L0 12 L3 6 Z" fill="#333"/></marker><marker id="arrow-open" markerWidth="10" markerHeight="10" refX="10" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M0 0 L10 5 L0 10" fill="none" stroke="#333" stroke-width="1.50"/></marker><marker id="arrow-circle" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto" markerUnits="strokeWidth"><path d="M8 4 A4 4 0 1 1 8 4 Z" fill="#333"/></marker><marker id="arrow-cross" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto" markerUnits="strokeWidth"><path d="M0 0 L8 8 M8 0 L0 8" fill="none" stroke="#333" stroke-width="1.50"/></marker><marker id="arrow-diamond" markerWidth="10" markerHeight="10" refX="10" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M5 0 L10 5 L5 10 L0 5 Z" fill="#333"/></marker><filter id="drop-shadow" x="-50%" y="-50%" width="200%" height="200%"><feDropShadow dx="2" dy="2" stdDeviation="3" flood-opacity="0.20"/></filter></defs><g class="fm-edge-labeled" data-fm-edge-id="0" role="graphics-symbol" tabindex="0"><path d="M133.68 154.50 L133.68 210.50 L132 210.50 L132 266.50" fill="none" stroke="#333" stroke-width="1.50" class="fm-edge fm-edge-solid" data-fm-edge-id="0" marker-end="url(#arrow-end)"/><rect x="82.84" y="188.35" width="100" height="26.30" fill="#fff" stroke="#cbd5e1" stroke-width="1" rx="6"/><text x="132.84" y="205.57" text-anchor="middle" font-family="&#39;Inter&#39;, -apple-system, BlinkMacSystemFont, &#39;Segoe UI&#39;, Roboto, Helvetica, Arial, sans-serif" font-size="12.30" fill="#666" class="edge-label">Hello Bob</text><title>Alice points to Bob with label: Hello Bob</title></g><g class="fm-edge-labeled" data-fm-edge-id="1" role="graphics-symbol" tabindex="0"><path d="M144 266.50 L144 210.50 L145.68 210.50 L145.68 154.50" fill="none" stroke="#999" stroke-width="1.50" class="fm-edge fm-edge-back" data-fm-edge-id="1" stroke-dasharray="4,4" marker-end="url(#arrow-open)"/><rect x="98.84" y="188.35" width="92" height="26.30" fill="#fff" stroke="#cbd5e1" stroke-width="1" rx="6"/><text x="144.84" y="205.57" text-anchor="middle" font-family="&#39;Inter&#39;, -apple-system, BlinkMacSystemFont, &#39;Segoe UI&#39;, Roboto, Helvetica, Arial, sans-serif" font-size="12.30" fill="#666" class="edge-label">Hi Alice</text><title>Bob optionally points to Alice with label: Hi Alice</title></g><g class="fm-node fm-node-accent-8 fm-node-shape-rect" data-id="Alice" data-fm-node-id="Alice" role="graphics-symbol" aria-label="Alice" tabindex="0"><rect x="96" y="96" width="87.35" height="58.50" fill="#fff" stroke="#333" stroke-width="1.50" rx="6.60" filter="url(#drop-shadow)"/><text x="139.68" y="129.85" text-anchor="middle" font-family="&#39;Inter&#39;, -apple-system, BlinkMacSystemFont, &#39;Segoe UI&#39;, Roboto, Helvetica, Arial, sans-serif" font-size="13.80" fill="#333">Alice</text><title>Node: Alice, rectangle</title></g><g class="fm-node fm-node-accent-5 fm-node-shape-rect" data-id="Bob" data-fm-node-id="Bob" role="graphics-symbol" aria-label="Bob" tabindex="0"><rect x="96" y="266.50" width="84" height="58.50" fill="#fff" stroke="#333" stroke-width="1.50" rx="6.60" filter="url(#drop-shadow)"/><text x="138" y="300.35" text-anchor="middle" font-family="&#39;Inter&#39;, -apple-system, BlinkMacSystemFont, &#39;Segoe UI&#39;, Roboto, Helvetica, Arial, sans-serif" font-size="13.80" fill="#333">Bob</text><title>Node: Bob, rectangle</title></g></svg>

@@ -28,6 +28,18 @@ pub use transform::{Transform, TransformBuilder};
 use fm_core::{MermaidDiagramIr, MermaidTier};
 use fm_layout::{DiagramLayout, LayoutEdgePath, LayoutNodeBox, layout_diagram};
 
+/// Node fill gradient mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NodeGradientStyle {
+    /// Top-to-bottom linear gradient.
+    #[default]
+    LinearVertical,
+    /// Left-to-right linear gradient.
+    LinearHorizontal,
+    /// Center-weighted radial gradient.
+    Radial,
+}
+
 /// Configuration for SVG rendering.
 #[derive(Debug, Clone)]
 pub struct SvgRenderConfig {
@@ -47,6 +59,32 @@ pub struct SvgRenderConfig {
     pub padding: f32,
     /// Whether to include drop shadows.
     pub shadows: bool,
+    /// Shadow X offset in px.
+    pub shadow_offset_x: f32,
+    /// Shadow Y offset in px.
+    pub shadow_offset_y: f32,
+    /// Shadow blur radius.
+    pub shadow_blur: f32,
+    /// Shadow opacity [0.0, 1.0].
+    pub shadow_opacity: f32,
+    /// Shadow color.
+    pub shadow_color: String,
+    /// Whether to include node gradients.
+    pub node_gradients: bool,
+    /// Node gradient style.
+    pub node_gradient_style: NodeGradientStyle,
+    /// Whether highlighted nodes should get glow treatment.
+    pub glow_enabled: bool,
+    /// Glow blur radius.
+    pub glow_blur: f32,
+    /// Glow opacity [0.0, 1.0].
+    pub glow_opacity: f32,
+    /// Glow color.
+    pub glow_color: String,
+    /// Opacity for cluster backgrounds [0.0, 1.0].
+    pub cluster_fill_opacity: f32,
+    /// Opacity for dim/inactive elements [0.0, 1.0].
+    pub inactive_opacity: f32,
     /// Whether to use rounded corners on rectangles.
     pub rounded_corners: f32,
     /// CSS classes to apply to the root SVG element.
@@ -78,6 +116,19 @@ impl Default for SvgRenderConfig {
             line_height: 1.5,
             padding: 48.0,
             shadows: true,
+            shadow_offset_x: 2.0,
+            shadow_offset_y: 2.0,
+            shadow_blur: 4.0,
+            shadow_opacity: 0.20,
+            shadow_color: String::from("#000000"),
+            node_gradients: true,
+            node_gradient_style: NodeGradientStyle::LinearVertical,
+            glow_enabled: true,
+            glow_blur: 6.0,
+            glow_opacity: 0.35,
+            glow_color: String::from("#3b82f6"),
+            cluster_fill_opacity: 0.08,
+            inactive_opacity: 0.40,
             rounded_corners: 12.0,
             root_classes: Vec::new(),
             theme: ThemePreset::Default,
@@ -126,6 +177,23 @@ pub fn render_svg_with_config(ir: &MermaidDiagramIr, config: &SvgRenderConfig) -
 
 fn clamp_font_size(candidate: f32, min_font_size: f32) -> f32 {
     candidate.max(min_font_size)
+}
+
+fn clamp_unit_interval(value: f32) -> f32 {
+    value.clamp(0.0, 1.0)
+}
+
+fn sanitize_css_token(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect()
 }
 
 fn truncate_label(label: &str, max_chars: Option<usize>) -> String {
@@ -203,7 +271,7 @@ fn resolve_detail_profile(
             enable_shadows: config.shadows,
         },
         RenderDetailTier::Compact => {
-            let show_node_labels = area >= 30_000.0;
+            let show_node_labels = area >= 36_000.0 && width >= 240.0 && height >= 150.0;
             RenderDetailProfile {
                 tier,
                 show_node_labels,
@@ -218,6 +286,57 @@ fn resolve_detail_profile(
             }
         }
     }
+}
+
+fn node_gradient_for(config: &SvgRenderConfig, theme: &Theme) -> Option<Gradient> {
+    if !config.node_gradients {
+        return None;
+    }
+    let stops = vec![
+        GradientStop::with_opacity(0.0, &theme.colors.node_fill, 0.95),
+        GradientStop::with_opacity(1.0, &theme.colors.background, 0.88),
+    ];
+    let gradient = match config.node_gradient_style {
+        NodeGradientStyle::LinearVertical => {
+            Gradient::linear_with_coords("fm-node-gradient", 0.0, 0.0, 0.0, 1.0, stops)
+        }
+        NodeGradientStyle::LinearHorizontal => {
+            Gradient::linear_with_coords("fm-node-gradient", 0.0, 0.0, 1.0, 0.0, stops)
+        }
+        NodeGradientStyle::Radial => Gradient::radial("fm-node-gradient", 0.5, 0.45, 0.8, stops),
+    };
+    Some(gradient)
+}
+
+fn effects_css(config: &SvgRenderConfig) -> String {
+    let inactive_opacity = clamp_unit_interval(config.inactive_opacity);
+    let cluster_fill_opacity = clamp_unit_interval(config.cluster_fill_opacity);
+    format!(
+        ".fm-node-inactive {{ opacity: {inactive_opacity:.2}; }}\n\
+.fm-node-highlighted rect,\n\
+.fm-node-highlighted path,\n\
+.fm-node-highlighted circle,\n\
+.fm-node-highlighted ellipse,\n\
+.fm-node-highlighted polygon {{\n\
+  stroke-width: 2.4;\n\
+}}\n\
+.fm-node-highlighted text {{ font-weight: 600; }}\n\
+.fm-node-border-dashed rect,\n\
+.fm-node-border-dashed path,\n\
+.fm-node-border-dashed circle,\n\
+.fm-node-border-dashed ellipse,\n\
+.fm-node-border-dashed polygon {{\n\
+  stroke-dasharray: 6 4;\n\
+}}\n\
+.fm-node-border-double rect,\n\
+.fm-node-border-double path,\n\
+.fm-node-border-double circle,\n\
+.fm-node-border-double ellipse,\n\
+.fm-node-border-double polygon {{\n\
+  stroke-width: 2.9;\n\
+}}\n\
+.fm-cluster {{ fill-opacity: {cluster_fill_opacity:.2}; }}\n"
+    )
 }
 
 fn print_css(min_font_size: f32) -> String {
@@ -282,6 +401,22 @@ fn render_layout_to_svg(
         .data("type", ir.diagram_type.as_str())
         .data("detail-tier", detail_tier_name(detail.tier));
 
+    let preset = ir
+        .meta
+        .theme_overrides
+        .theme
+        .as_deref()
+        .and_then(|t| t.parse::<ThemePreset>().ok())
+        .unwrap_or(config.theme);
+    let mut theme = Theme::from_preset(preset);
+    theme
+        .colors
+        .apply_overrides(&ir.meta.theme_overrides.theme_variables);
+    let effects_enabled = config.node_gradients
+        || config.glow_enabled
+        || clamp_unit_interval(config.inactive_opacity) < 0.999
+        || clamp_unit_interval(config.cluster_fill_opacity) < 0.999;
+
     // Build defs section
     let mut defs = DefsBuilder::new();
 
@@ -295,27 +430,47 @@ fn render_layout_to_svg(
 
     // Add drop shadow filter if enabled
     if detail.enable_shadows {
-        defs = defs.filter(Filter::drop_shadow("drop-shadow", 2.0, 2.0, 3.0, 0.2));
+        if config.shadow_color.trim().is_empty() {
+            defs = defs.filter(Filter::drop_shadow(
+                "drop-shadow",
+                config.shadow_offset_x,
+                config.shadow_offset_y,
+                config.shadow_blur,
+                clamp_unit_interval(config.shadow_opacity),
+            ));
+        } else {
+            defs = defs.filter(Filter::drop_shadow_with_color(
+                "drop-shadow",
+                config.shadow_offset_x,
+                config.shadow_offset_y,
+                config.shadow_blur,
+                clamp_unit_interval(config.shadow_opacity),
+                &config.shadow_color,
+            ));
+        }
+    }
+    if config.glow_enabled {
+        defs = defs.filter(Filter::drop_shadow_with_color(
+            "node-glow",
+            0.0,
+            0.0,
+            config.glow_blur,
+            clamp_unit_interval(config.glow_opacity),
+            &config.glow_color,
+        ));
+    }
+    if let Some(gradient) = node_gradient_for(config, &theme) {
+        defs = defs.gradient(gradient);
     }
 
     doc = doc.defs(defs);
 
     // Embed theme CSS if enabled
     if config.embed_theme_css {
-        let preset = ir
-            .meta
-            .theme_overrides
-            .theme
-            .as_deref()
-            .and_then(|t| t.parse::<ThemePreset>().ok())
-            .unwrap_or(config.theme);
-
-        let mut theme = Theme::from_preset(preset);
-        theme
-            .colors
-            .apply_overrides(&ir.meta.theme_overrides.theme_variables);
-
         let mut css = theme.to_svg_style(detail.enable_shadows);
+        if effects_enabled {
+            css.push_str(&effects_css(config));
+        }
 
         // Add accessibility CSS if enabled
         if config.a11y.accessibility_css {
@@ -329,6 +484,9 @@ fn render_layout_to_svg(
     } else if config.a11y.accessibility_css || config.print_optimized {
         // Only add supplemental CSS (accessibility and/or print optimization).
         let mut css = String::new();
+        if effects_enabled {
+            css.push_str(&effects_css(config));
+        }
         if config.a11y.accessibility_css {
             css.push_str(accessibility_css());
         }
@@ -399,6 +557,12 @@ fn render_layout_to_svg(
                 config.rounded_corners
             })
             .class("fm-cluster");
+        if config.cluster_fill_opacity < 0.999 {
+            rect = rect.attr_num(
+                "fill-opacity",
+                clamp_unit_interval(config.cluster_fill_opacity),
+            );
+        }
 
         if let Some(dasharray) = stroke_style {
             rect = rect.stroke_dasharray(dasharray);
@@ -495,6 +659,10 @@ fn render_node(
     let node_font_size = detail.node_font_size;
 
     let accent_class = format!("fm-node-accent-{}", stable_accent_index(node_id));
+    let mut is_highlighted = false;
+    let mut is_inactive = false;
+    let mut dashed_border = false;
+    let mut double_border = false;
 
     // Create group for node shape + label
     let mut group = Element::group()
@@ -503,6 +671,49 @@ fn render_node(
         .class(node_shape_css_class(shape))
         .data("id", node_id)
         .data("fm-node-id", node_id);
+
+    if let Some(node) = ir_node {
+        for class in &node.classes {
+            let normalized = class.to_ascii_lowercase();
+            let sanitized = sanitize_css_token(class);
+            if !sanitized.is_empty() {
+                group = group.class(&format!("fm-node-user-{sanitized}"));
+            }
+            if normalized.contains("highlight")
+                || normalized.contains("selected")
+                || normalized.contains("active")
+                || normalized.contains("focus")
+                || normalized.contains("important")
+            {
+                is_highlighted = true;
+            }
+            if normalized.contains("inactive")
+                || normalized.contains("dim")
+                || normalized.contains("muted")
+                || normalized.contains("disabled")
+            {
+                is_inactive = true;
+            }
+            if normalized.contains("dashed-border") || normalized.contains("border-dashed") {
+                dashed_border = true;
+            }
+            if normalized.contains("double-border") || normalized.contains("border-double") {
+                double_border = true;
+            }
+        }
+    }
+    if is_highlighted {
+        group = group.class("fm-node-highlighted");
+    }
+    if is_inactive {
+        group = group.class("fm-node-inactive");
+    }
+    if dashed_border {
+        group = group.class("fm-node-border-dashed");
+    }
+    if double_border {
+        group = group.class("fm-node-border-double");
+    }
 
     // Add accessibility attributes
     if config.a11y.aria_labels {
@@ -640,7 +851,11 @@ fn render_node(
                     .y(y)
                     .width(w)
                     .height(h)
-                    .fill("#fff")
+                    .fill(if config.node_gradients {
+                        "url(#fm-node-gradient)"
+                    } else {
+                        "#fff"
+                    })
                     .stroke("#333")
                     .stroke_width(1.5)
                     .rx(config.rounded_corners * 0.45),
@@ -874,7 +1089,11 @@ fn render_node(
                     .cx(cx)
                     .cy(cy)
                     .r(r)
-                    .fill("#fff")
+                    .fill(if config.node_gradients {
+                        "url(#fm-node-gradient)"
+                    } else {
+                        "#fff"
+                    })
                     .stroke("#333")
                     .stroke_width(1.5),
             );
@@ -914,8 +1133,16 @@ fn render_node(
         }
     };
 
-    // Apply shadow filter if enabled and this isn't a special composite shape
+    let shape_elem = if config.node_gradients && !matches!(shape, NodeShape::Note) {
+        shape_elem.fill("url(#fm-node-gradient)")
+    } else {
+        shape_elem
+    };
+
+    // Apply shadow filter if enabled and this isn't a special composite shape.
+    // Highlighted nodes prefer glow so the effects don't visually muddy each other.
     let shape_elem = if detail.enable_shadows
+        && !(is_highlighted && config.glow_enabled)
         && !matches!(shape, NodeShape::Subroutine | NodeShape::CrossedCircle)
     {
         shape_elem.filter("url(#drop-shadow)")
@@ -924,6 +1151,9 @@ fn render_node(
     };
 
     group = group.child(shape_elem);
+    if is_highlighted && config.glow_enabled {
+        group = group.filter("url(#node-glow)");
+    }
 
     // Add label text
     if detail.show_node_labels {
@@ -1265,6 +1495,18 @@ mod tests {
         ir
     }
 
+    fn create_ir_with_single_node_classes(
+        node_id: &str,
+        shape: NodeShape,
+        classes: &[&str],
+    ) -> MermaidDiagramIr {
+        let mut ir = create_ir_with_single_node(node_id, shape);
+        if let Some(node) = ir.nodes.first_mut() {
+            node.classes = classes.iter().map(|value| (*value).to_string()).collect();
+        }
+        ir
+    }
+
     fn create_ir_with_labeled_edge() -> MermaidDiagramIr {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         ir.labels.push(IrLabel {
@@ -1472,5 +1714,63 @@ mod tests {
         let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         let svg = render_svg(&ir);
         assert!(svg.contains("@media print"));
+    }
+
+    #[test]
+    fn configurable_shadow_filter_is_emitted() {
+        let ir = create_ir_with_single_node("shadow-node", NodeShape::Rect);
+        let config = SvgRenderConfig {
+            shadow_offset_x: 4.0,
+            shadow_offset_y: 1.5,
+            shadow_blur: 5.0,
+            shadow_opacity: 0.45,
+            shadow_color: "#ff3366".to_string(),
+            ..Default::default()
+        };
+        let svg = render_svg_with_config(&ir, &config);
+        assert!(svg.contains("id=\"drop-shadow\""));
+        assert!(svg.contains("flood-color=\"#ff3366\""));
+        assert!(svg.contains("flood-opacity=\"0.45\""));
+    }
+
+    #[test]
+    fn node_gradient_defs_and_fill_are_emitted() {
+        let ir = create_ir_with_single_node("grad-node", NodeShape::Rect);
+        let config = SvgRenderConfig {
+            node_gradients: true,
+            node_gradient_style: NodeGradientStyle::LinearVertical,
+            ..Default::default()
+        };
+        let svg = render_svg_with_config(&ir, &config);
+        assert!(svg.contains("id=\"fm-node-gradient\""));
+        assert!(svg.contains("<linearGradient"));
+        assert!(svg.contains("fill=\"url(#fm-node-gradient)\""));
+    }
+
+    #[test]
+    fn highlighted_node_uses_glow_filter() {
+        let ir = create_ir_with_single_node_classes("focus-node", NodeShape::Rect, &["highlight"]);
+        let config = SvgRenderConfig {
+            glow_enabled: true,
+            ..Default::default()
+        };
+        let svg = render_svg_with_config(&ir, &config);
+        assert!(svg.contains("id=\"node-glow\""));
+        assert!(svg.contains("class=\"fm-node fm-node-accent-"));
+        assert!(svg.contains("fm-node-highlighted"));
+        assert!(svg.contains("filter=\"url(#node-glow)\""));
+    }
+
+    #[test]
+    fn inactive_node_class_is_preserved_for_opacity_layering() {
+        let ir =
+            create_ir_with_single_node_classes("inactive-node", NodeShape::Rect, &["inactive"]);
+        let config = SvgRenderConfig {
+            inactive_opacity: 0.35,
+            ..Default::default()
+        };
+        let svg = render_svg_with_config(&ir, &config);
+        assert!(svg.contains("fm-node-inactive"));
+        assert!(svg.contains(".fm-node-inactive { opacity: 0.35; }"));
     }
 }
