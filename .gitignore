@@ -24,3 +24,20 @@ screenshots_for_diagnostics/
 rustc-ice-*.txt
 reports/
 .agent-mail.yaml
+
+# Parser test output garbage (files created by malformed diagram parsing)
+B*nend*
+
+# Beads recovery artifacts
+.beads/*.orphan_*
+.beads/*.corrupt_*
+.beads/*.pre_recovery_*
+.beads/*.recover*.sql
+
+# Ephemeral agent session files
+SESSION_TODO.md
+SESSION_REPORT.md
+SESSION_*.md
+verify_*.sh
+newfile.txt
+repro_*.rs
