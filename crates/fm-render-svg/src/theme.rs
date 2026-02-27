@@ -706,7 +706,7 @@ pub fn generate_palette(base_hex: &str, count: usize) -> Vec<String> {
 /// Convert hex color to HSL.
 fn hex_to_hsl(hex: &str) -> (f32, f32, f32) {
     let hex = hex.trim_start_matches('#');
-    if hex.len() != 6 {
+    if hex.len() != 6 || !hex.is_ascii() {
         return (0.0, 0.0, 0.5); // fallback gray
     }
 

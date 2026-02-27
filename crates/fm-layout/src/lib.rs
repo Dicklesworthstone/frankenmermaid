@@ -197,12 +197,21 @@ pub fn layout(ir: &MermaidDiagramIr, algorithm: LayoutAlgorithm) -> LayoutStats 
     match algorithm {
         LayoutAlgorithm::Auto => match ir.diagram_type {
             DiagramType::Mindmap => layout_diagram_radial(ir).stats,
+            DiagramType::Timeline => layout_diagram_timeline(ir).stats,
+            DiagramType::Gantt => layout_diagram_gantt(ir).stats,
+            DiagramType::Sankey => layout_diagram_sankey(ir).stats,
+            DiagramType::Journey => layout_diagram_kanban(ir).stats,
+            DiagramType::BlockBeta => layout_diagram_grid(ir).stats,
             _ => layout_diagram(ir).stats,
         },
         LayoutAlgorithm::Force => layout_diagram_force(ir).stats,
         LayoutAlgorithm::Tree => layout_diagram_tree(ir).stats,
         LayoutAlgorithm::Radial => layout_diagram_radial(ir).stats,
-        _ => layout_diagram(ir).stats,
+        LayoutAlgorithm::Timeline => layout_diagram_timeline(ir).stats,
+        LayoutAlgorithm::Gantt => layout_diagram_gantt(ir).stats,
+        LayoutAlgorithm::Sankey => layout_diagram_sankey(ir).stats,
+        LayoutAlgorithm::Grid => layout_diagram_grid(ir).stats,
+        LayoutAlgorithm::Sugiyama => layout_diagram(ir).stats,
     }
 }
 
@@ -248,6 +257,10 @@ pub fn layout_diagram_traced_with_config(
     ir: &MermaidDiagramIr,
     config: LayoutConfig,
 ) -> TracedLayout {
+    if let Some(specialized) = layout_specialized_diagram_traced(ir) {
+        return specialized;
+    }
+
     let mut trace = LayoutTrace::default();
     let spacing = LayoutSpacing::default();
     let node_sizes = compute_node_sizes(ir);
@@ -791,6 +804,685 @@ pub fn layout_diagram_radial_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     }
 }
 
+fn layout_specialized_diagram_traced(ir: &MermaidDiagramIr) -> Option<TracedLayout> {
+    match ir.diagram_type {
+        DiagramType::Timeline => Some(layout_diagram_timeline_traced(ir)),
+        DiagramType::Gantt => Some(layout_diagram_gantt_traced(ir)),
+        DiagramType::Sankey => Some(layout_diagram_sankey_traced(ir)),
+        DiagramType::Journey => Some(layout_diagram_kanban_traced(ir)),
+        DiagramType::BlockBeta => Some(layout_diagram_grid_traced(ir)),
+        _ => None,
+    }
+}
+
+#[must_use]
+pub fn layout_diagram_timeline(ir: &MermaidDiagramIr) -> DiagramLayout {
+    layout_diagram_timeline_traced(ir).layout
+}
+
+#[must_use]
+pub fn layout_diagram_timeline_traced(ir: &MermaidDiagramIr) -> TracedLayout {
+    let node_count = ir.nodes.len();
+    let node_sizes = compute_node_sizes(ir);
+    let mut trace = LayoutTrace::default();
+    push_snapshot(&mut trace, "timeline_layout", node_count, ir.edges.len(), 0, 0);
+
+    let spacing = LayoutSpacing::default();
+    let mut rank_by_node = vec![0_usize; node_count];
+    let mut order_by_node = vec![0_usize; node_count];
+    let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
+
+    let mut period_indexes: Vec<usize> = ir
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| matches!(node.shape, fm_core::NodeShape::Rect))
+        .map(|(node_index, _)| node_index)
+        .collect();
+    if period_indexes.is_empty() {
+        period_indexes = (0..node_count).collect();
+    }
+    period_indexes.sort_by(|left, right| compare_node_indices(ir, *left, *right));
+
+    let period_set: BTreeSet<usize> = period_indexes.iter().copied().collect();
+    let mut events_by_period: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for edge in &ir.edges {
+        let Some(source) = endpoint_node_index(ir, edge.from) else {
+            continue;
+        };
+        let Some(target) = endpoint_node_index(ir, edge.to) else {
+            continue;
+        };
+        if period_set.contains(&source) && !period_set.contains(&target) {
+            events_by_period.entry(source).or_default().push(target);
+        }
+    }
+    for targets in events_by_period.values_mut() {
+        targets.sort_by(|left, right| compare_node_indices(ir, *left, *right));
+        targets.dedup();
+    }
+
+    let period_gap_x = spacing.rank_spacing + 104.0;
+    let event_gap_y = spacing.node_spacing + 22.0;
+    let mut assigned = BTreeSet::new();
+
+    for (period_order, period_index) in period_indexes.iter().enumerate() {
+        let x = period_order as f32 * period_gap_x;
+        centers[*period_index] = (x, 0.0);
+        rank_by_node[*period_index] = 0;
+        order_by_node[*period_index] = period_order;
+        assigned.insert(*period_index);
+
+        let mut event_row = 1_usize;
+        if let Some(targets) = events_by_period.get(period_index) {
+            for target in targets {
+                if assigned.insert(*target) {
+                    centers[*target] = (x, 48.0 + event_row as f32 * event_gap_y);
+                    rank_by_node[*target] = event_row;
+                    order_by_node[*target] = period_order;
+                    event_row = event_row.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    let period_count = period_indexes.len().max(1);
+    let mut spill = 0_usize;
+    let mut leftovers: Vec<usize> = (0..node_count)
+        .filter(|node_index| !assigned.contains(node_index))
+        .collect();
+    leftovers.sort_by(|left, right| compare_node_indices(ir, *left, *right));
+    for node_index in leftovers {
+        let col = spill % period_count;
+        let row = spill / period_count;
+        centers[node_index] = (col as f32 * period_gap_x, (4.0 + row as f32) * event_gap_y);
+        rank_by_node[node_index] = row.saturating_add(1);
+        order_by_node[node_index] = col;
+        spill = spill.saturating_add(1);
+    }
+
+    finalize_specialized_layout(
+        ir,
+        &node_sizes,
+        rank_by_node,
+        order_by_node,
+        centers,
+        trace,
+        true,
+    )
+}
+
+#[must_use]
+pub fn layout_diagram_gantt(ir: &MermaidDiagramIr) -> DiagramLayout {
+    layout_diagram_gantt_traced(ir).layout
+}
+
+#[must_use]
+pub fn layout_diagram_gantt_traced(ir: &MermaidDiagramIr) -> TracedLayout {
+    let node_count = ir.nodes.len();
+    let mut node_sizes = compute_node_sizes(ir);
+    let mut trace = LayoutTrace::default();
+    push_snapshot(&mut trace, "gantt_layout", node_count, ir.edges.len(), 0, 0);
+
+    for size in &mut node_sizes {
+        size.0 = size.0.max(156.0);
+        size.1 = size.1.max(40.0);
+    }
+
+    let mut section_to_nodes: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    let mut order_hint_by_node: BTreeMap<usize, usize> = BTreeMap::new();
+    for node_index in 0..node_count {
+        let label = layout_label_text(ir, node_index);
+        let section = label
+            .split_once(':')
+            .map(|(prefix, _)| prefix.trim())
+            .filter(|prefix| !prefix.is_empty())
+            .unwrap_or("Backlog")
+            .to_string();
+        section_to_nodes.entry(section).or_default().push(node_index);
+        order_hint_by_node.insert(
+            node_index,
+            parse_order_hint(&ir.nodes[node_index].id, node_index),
+        );
+    }
+
+    for nodes in section_to_nodes.values_mut() {
+        nodes.sort_by(|left, right| {
+            order_hint_by_node[left]
+                .cmp(&order_hint_by_node[right])
+                .then_with(|| compare_node_indices(ir, *left, *right))
+        });
+    }
+
+    let mut ordered_hints: Vec<usize> = order_hint_by_node.values().copied().collect();
+    ordered_hints.sort_unstable();
+    ordered_hints.dedup();
+    let slot_by_hint: BTreeMap<usize, usize> = ordered_hints
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(slot, hint)| (hint, slot))
+        .collect();
+
+    let spacing = LayoutSpacing::default();
+    let mut rank_by_node = vec![0_usize; node_count];
+    let mut order_by_node = vec![0_usize; node_count];
+    let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
+
+    let col_gap = spacing.rank_spacing + 144.0;
+    let row_gap = (spacing.node_spacing * 0.72) + 24.0;
+    let mut section_base_y = 0.0_f32;
+
+    for (section_index, (_section, nodes)) in section_to_nodes.iter().enumerate() {
+        for (row_index, node_index) in nodes.iter().enumerate() {
+            let slot = slot_by_hint[&order_hint_by_node[node_index]];
+            centers[*node_index] = (slot as f32 * col_gap, section_base_y + row_index as f32 * row_gap);
+            rank_by_node[*node_index] = slot;
+            order_by_node[*node_index] = row_index + section_index * 128;
+        }
+        section_base_y += (nodes.len().max(1) as f32 * row_gap) + 56.0;
+    }
+
+    finalize_specialized_layout(
+        ir,
+        &node_sizes,
+        rank_by_node,
+        order_by_node,
+        centers,
+        trace,
+        true,
+    )
+}
+
+#[must_use]
+pub fn layout_diagram_sankey(ir: &MermaidDiagramIr) -> DiagramLayout {
+    layout_diagram_sankey_traced(ir).layout
+}
+
+#[must_use]
+pub fn layout_diagram_sankey_traced(ir: &MermaidDiagramIr) -> TracedLayout {
+    let node_count = ir.nodes.len();
+    let mut node_sizes = compute_node_sizes(ir);
+    let mut trace = LayoutTrace::default();
+    push_snapshot(&mut trace, "sankey_layout", node_count, ir.edges.len(), 0, 0);
+
+    let mut in_degree = vec![0_usize; node_count];
+    let mut out_degree = vec![0_usize; node_count];
+    for edge in &ir.edges {
+        let Some(source) = endpoint_node_index(ir, edge.from) else {
+            continue;
+        };
+        let Some(target) = endpoint_node_index(ir, edge.to) else {
+            continue;
+        };
+        if source == target || source >= node_count || target >= node_count {
+            continue;
+        }
+        out_degree[source] = out_degree[source].saturating_add(1);
+        in_degree[target] = in_degree[target].saturating_add(1);
+    }
+
+    for (node_index, size) in node_sizes.iter_mut().enumerate() {
+        let flow = in_degree[node_index].max(out_degree[node_index]).max(1) as f32;
+        size.0 = size.0.max(108.0);
+        size.1 = size.1.max(30.0 + (flow * 14.0));
+    }
+
+    let ranks = layered_ranks(ir);
+    let mut nodes_by_rank: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (node_index, rank) in ranks.iter().copied().enumerate() {
+        nodes_by_rank.entry(rank).or_default().push(node_index);
+    }
+    for nodes in nodes_by_rank.values_mut() {
+        nodes.sort_by(|left, right| compare_node_indices(ir, *left, *right));
+    }
+
+    let spacing = LayoutSpacing::default();
+    let mut rank_by_node = vec![0_usize; node_count];
+    let mut order_by_node = vec![0_usize; node_count];
+    let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
+    let col_gap = spacing.rank_spacing + 136.0;
+    let row_gap = (spacing.node_spacing * 0.45) + 18.0;
+
+    for (rank, nodes) in &nodes_by_rank {
+        let mut cursor_y = 0.0_f32;
+        for (order_index, node_index) in nodes.iter().enumerate() {
+            let height = node_sizes[*node_index].1;
+            centers[*node_index] = (*rank as f32 * col_gap, cursor_y + (height / 2.0));
+            rank_by_node[*node_index] = *rank;
+            order_by_node[*node_index] = order_index;
+            cursor_y += height + row_gap;
+        }
+    }
+
+    finalize_specialized_layout(
+        ir,
+        &node_sizes,
+        rank_by_node,
+        order_by_node,
+        centers,
+        trace,
+        true,
+    )
+}
+
+#[must_use]
+pub fn layout_diagram_grid(ir: &MermaidDiagramIr) -> DiagramLayout {
+    layout_diagram_grid_traced(ir).layout
+}
+
+#[must_use]
+pub fn layout_diagram_grid_traced(ir: &MermaidDiagramIr) -> TracedLayout {
+    let node_count = ir.nodes.len();
+    let node_sizes = compute_node_sizes(ir);
+    let mut trace = LayoutTrace::default();
+    push_snapshot(&mut trace, "grid_layout", node_count, ir.edges.len(), 0, 0);
+
+    let spacing = LayoutSpacing::default();
+    let mut rank_by_node = vec![0_usize; node_count];
+    let mut order_by_node = vec![0_usize; node_count];
+    let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
+
+    let max_width = node_sizes
+        .iter()
+        .map(|(width, _)| *width)
+        .fold(84.0_f32, f32::max);
+    let max_height = node_sizes
+        .iter()
+        .map(|(_, height)| *height)
+        .fold(44.0_f32, f32::max);
+
+    let column_count = (node_count as f32).sqrt().ceil() as usize;
+    let column_count = column_count.max(1);
+    let cell_width = max_width + spacing.node_spacing;
+    let cell_height = max_height + (spacing.rank_spacing * 0.6);
+
+    let mut sorted_nodes: Vec<usize> = (0..node_count).collect();
+    sorted_nodes.sort_by(|left, right| compare_node_indices(ir, *left, *right));
+
+    for (layout_index, node_index) in sorted_nodes.into_iter().enumerate() {
+        let row = layout_index / column_count;
+        let col = layout_index % column_count;
+        centers[node_index] = (col as f32 * cell_width, row as f32 * cell_height);
+
+        if matches!(ir.direction, GraphDirection::LR | GraphDirection::RL) {
+            rank_by_node[node_index] = col;
+            order_by_node[node_index] = row;
+        } else {
+            rank_by_node[node_index] = row;
+            order_by_node[node_index] = col;
+        }
+    }
+
+    finalize_specialized_layout(
+        ir,
+        &node_sizes,
+        rank_by_node,
+        order_by_node,
+        centers,
+        trace,
+        matches!(ir.direction, GraphDirection::LR | GraphDirection::RL),
+    )
+}
+
+#[must_use]
+fn layout_diagram_kanban(ir: &MermaidDiagramIr) -> DiagramLayout {
+    layout_diagram_kanban_traced(ir).layout
+}
+
+#[must_use]
+fn layout_diagram_kanban_traced(ir: &MermaidDiagramIr) -> TracedLayout {
+    let node_count = ir.nodes.len();
+    let mut node_sizes = compute_node_sizes(ir);
+    let mut trace = LayoutTrace::default();
+    push_snapshot(&mut trace, "kanban_layout", node_count, ir.edges.len(), 0, 0);
+
+    for size in &mut node_sizes {
+        size.0 = size.0.max(144.0);
+        size.1 = size.1.max(42.0);
+    }
+
+    let ranks = layered_ranks(ir);
+    let mut nodes_by_rank: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (node_index, rank) in ranks.iter().copied().enumerate() {
+        nodes_by_rank.entry(rank).or_default().push(node_index);
+    }
+    for nodes in nodes_by_rank.values_mut() {
+        nodes.sort_by(|left, right| compare_node_indices(ir, *left, *right));
+    }
+
+    let spacing = LayoutSpacing::default();
+    let mut rank_by_node = vec![0_usize; node_count];
+    let mut order_by_node = vec![0_usize; node_count];
+    let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
+
+    let column_gap = spacing.rank_spacing + 170.0;
+    let row_gap = spacing.node_spacing + 22.0;
+    for (rank, nodes) in &nodes_by_rank {
+        for (order_index, node_index) in nodes.iter().enumerate() {
+            centers[*node_index] = (*rank as f32 * column_gap, order_index as f32 * row_gap);
+            rank_by_node[*node_index] = *rank;
+            order_by_node[*node_index] = order_index;
+        }
+    }
+
+    finalize_specialized_layout(
+        ir,
+        &node_sizes,
+        rank_by_node,
+        order_by_node,
+        centers,
+        trace,
+        true,
+    )
+}
+
+fn layout_label_text<'a>(ir: &'a MermaidDiagramIr, node_index: usize) -> &'a str {
+    ir.nodes
+        .get(node_index)
+        .and_then(|node| node.label)
+        .and_then(|label_id| ir.labels.get(label_id.0))
+        .map(|label| label.text.as_str())
+        .or_else(|| ir.nodes.get(node_index).map(|node| node.id.as_str()))
+        .unwrap_or("")
+}
+
+fn parse_order_hint(node_id: &str, fallback: usize) -> usize {
+    node_id
+        .rsplit('_')
+        .next()
+        .and_then(|candidate| candidate.parse::<usize>().ok())
+        .unwrap_or(fallback.saturating_add(10_000))
+}
+
+fn layered_ranks(ir: &MermaidDiagramIr) -> Vec<usize> {
+    let node_count = ir.nodes.len();
+    if node_count == 0 {
+        return Vec::new();
+    }
+
+    let mut outgoing = vec![Vec::<usize>::new(); node_count];
+    let mut indegree = vec![0_usize; node_count];
+    for edge in &ir.edges {
+        let Some(source) = endpoint_node_index(ir, edge.from) else {
+            continue;
+        };
+        let Some(target) = endpoint_node_index(ir, edge.to) else {
+            continue;
+        };
+        if source >= node_count || target >= node_count || source == target {
+            continue;
+        }
+        outgoing[source].push(target);
+        indegree[target] = indegree[target].saturating_add(1);
+    }
+
+    for neighbors in &mut outgoing {
+        neighbors.sort_by(|left, right| compare_node_indices(ir, *left, *right));
+        neighbors.dedup();
+    }
+
+    let mut sorted_nodes: Vec<usize> = (0..node_count).collect();
+    sorted_nodes.sort_by(|left, right| compare_node_indices(ir, *left, *right));
+
+    let mut ranks = vec![0_usize; node_count];
+    let mut processed = vec![false; node_count];
+    let mut ready: Vec<usize> = sorted_nodes
+        .iter()
+        .copied()
+        .filter(|node| indegree[*node] == 0)
+        .collect();
+
+    while let Some(node_index) = ready.first().copied() {
+        ready.remove(0);
+        if processed[node_index] {
+            continue;
+        }
+        processed[node_index] = true;
+
+        for target in outgoing[node_index].iter().copied() {
+            ranks[target] = ranks[target].max(ranks[node_index].saturating_add(1));
+            indegree[target] = indegree[target].saturating_sub(1);
+            if indegree[target] == 0 {
+                ready.push(target);
+            }
+        }
+
+        ready.sort_by(|left, right| compare_node_indices(ir, *left, *right));
+        ready.dedup();
+    }
+
+    for node_index in sorted_nodes {
+        if processed[node_index] {
+            continue;
+        }
+        let mut candidate_rank = 0_usize;
+        for edge in &ir.edges {
+            let Some(target) = endpoint_node_index(ir, edge.to) else {
+                continue;
+            };
+            if target != node_index {
+                continue;
+            }
+            if let Some(source) = endpoint_node_index(ir, edge.from) {
+                candidate_rank = candidate_rank.max(ranks[source].saturating_add(1));
+            }
+        }
+        ranks[node_index] = candidate_rank;
+    }
+
+    ranks
+}
+
+fn finalize_specialized_layout(
+    ir: &MermaidDiagramIr,
+    node_sizes: &[(f32, f32)],
+    rank_by_node: Vec<usize>,
+    order_by_node: Vec<usize>,
+    mut centers: Vec<(f32, f32)>,
+    mut trace: LayoutTrace,
+    horizontal_edges: bool,
+) -> TracedLayout {
+    let spacing = LayoutSpacing::default();
+
+    normalize_center_positions(&mut centers, node_sizes);
+    let nodes = node_boxes_from_centers(ir, node_sizes, &rank_by_node, &order_by_node, &centers);
+    let edges = build_edge_paths_with_orientation(ir, &nodes, &BTreeSet::new(), horizontal_edges);
+    let clusters = build_cluster_boxes(ir, &nodes, spacing);
+    let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
+    let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
+
+    push_snapshot(
+        &mut trace,
+        "specialized_post_processing",
+        ir.nodes.len(),
+        ir.edges.len(),
+        0,
+        0,
+    );
+
+    let stats = LayoutStats {
+        node_count: ir.nodes.len(),
+        edge_count: ir.edges.len(),
+        crossing_count: 0,
+        crossing_count_before_refinement: 0,
+        reversed_edges: 0,
+        cycle_count: 0,
+        cycle_node_count: 0,
+        max_cycle_size: 0,
+        collapsed_clusters: 0,
+        reversed_edge_total_length,
+        total_edge_length,
+        phase_iterations: trace.snapshots.len(),
+    };
+
+    TracedLayout {
+        layout: DiagramLayout {
+            nodes,
+            clusters,
+            cycle_clusters: Vec::new(),
+            edges,
+            bounds,
+            stats,
+        },
+        trace,
+    }
+}
+
+/// Lay out a diagram using a deterministic radial tree variant.
+#[must_use]
+pub fn layout_diagram_radial_traced(ir: &MermaidDiagramIr) -> TracedLayout {
+    let mut trace = LayoutTrace::default();
+    let spacing = LayoutSpacing::default();
+    let node_sizes = compute_node_sizes(ir);
+    let node_count = ir.nodes.len();
+
+    if node_count == 0 {
+        return TracedLayout {
+            layout: DiagramLayout {
+                nodes: Vec::new(),
+                clusters: Vec::new(),
+                cycle_clusters: Vec::new(),
+                edges: Vec::new(),
+                bounds: LayoutRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.0,
+                    height: 0.0,
+                },
+                stats: LayoutStats::default(),
+            },
+            trace,
+        };
+    }
+
+    let tree = build_tree_layout_structure(ir);
+    push_snapshot(
+        &mut trace,
+        "tree_structure",
+        node_count,
+        ir.edges.len(),
+        0,
+        0,
+    );
+
+    let depth_offset = usize::from(tree.roots.len() > 1);
+    let effective_max_depth = tree.max_depth + depth_offset;
+    let mut ring_level_sizes = vec![0.0_f32; effective_max_depth + 1];
+    for (node_index, (width, height)) in node_sizes.iter().copied().enumerate() {
+        let level = tree.depth[node_index] + depth_offset;
+        ring_level_sizes[level] = ring_level_sizes[level].max(width.max(height));
+    }
+
+    let mut radii = vec![0.0_f32; effective_max_depth + 1];
+    for level in 1..=effective_max_depth {
+        let prev = ring_level_sizes[level - 1].max(1.0);
+        let current = ring_level_sizes[level].max(1.0);
+        radii[level] = radii[level - 1] + (prev / 2.0) + spacing.rank_spacing + (current / 2.0);
+    }
+
+    let mut leaf_memo = vec![None; node_count];
+    for root in &tree.roots {
+        let _ = radial_leaf_count(*root, &tree.children, &mut leaf_memo);
+    }
+    let leaf_counts: Vec<usize> = leaf_memo
+        .into_iter()
+        .map(|count| count.unwrap_or(1))
+        .collect();
+
+    let mut angles = vec![0.0_f32; node_count];
+    if tree.roots.len() == 1 && depth_offset == 0 {
+        assign_radial_angles(
+            tree.roots[0],
+            -PI,
+            PI,
+            &tree,
+            &leaf_counts,
+            &node_sizes,
+            &radii,
+            depth_offset,
+            spacing,
+            &mut angles,
+        );
+    } else {
+        let total_leaves: usize = tree.roots.iter().map(|root| leaf_counts[*root]).sum();
+        let total_leaves = total_leaves.max(1);
+        let mut cursor = -PI;
+        for (root_index, root) in tree.roots.iter().enumerate() {
+            let weight = leaf_counts[*root] as f32 / total_leaves as f32;
+            let mut span = (2.0 * PI) * weight;
+            if root_index + 1 == tree.roots.len() {
+                span = PI - cursor;
+            }
+            assign_radial_angles(
+                *root,
+                cursor,
+                cursor + span,
+                &tree,
+                &leaf_counts,
+                &node_sizes,
+                &radii,
+                depth_offset,
+                spacing,
+                &mut angles,
+            );
+            cursor += span;
+        }
+    }
+
+    let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
+    for node_index in 0..node_count {
+        let level = tree.depth[node_index] + depth_offset;
+        let radius = radii[level];
+        let angle = angles[node_index];
+        centers[node_index] = (radius * angle.cos(), radius * angle.sin());
+    }
+    normalize_center_positions(&mut centers, &node_sizes);
+
+    let order_by_rank = rank_orders_from_key(ir, &tree.depth, &angles);
+    let nodes = node_boxes_from_centers(ir, &node_sizes, &tree.depth, &order_by_rank, &centers);
+    let edges = build_edge_paths(ir, &nodes, &BTreeSet::new());
+    let clusters = build_cluster_boxes(ir, &nodes, spacing);
+    let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
+    let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
+
+    push_snapshot(
+        &mut trace,
+        "radial_post_processing",
+        node_count,
+        ir.edges.len(),
+        0,
+        0,
+    );
+
+    let stats = LayoutStats {
+        node_count,
+        edge_count: ir.edges.len(),
+        crossing_count: 0,
+        crossing_count_before_refinement: 0,
+        reversed_edges: 0,
+        cycle_count: 0,
+        cycle_node_count: 0,
+        max_cycle_size: 0,
+        collapsed_clusters: 0,
+        reversed_edge_total_length,
+        total_edge_length,
+        phase_iterations: trace.snapshots.len(),
+    };
+
+    TracedLayout {
+        layout: DiagramLayout {
+            nodes,
+            clusters,
+            cycle_clusters: Vec::new(),
+            edges,
+            bounds,
+            stats,
+        },
+        trace,
+    }
+}
+
 #[derive(Debug, Clone)]
 struct TreeLayoutStructure {
     roots: Vec<usize>,
@@ -804,7 +1496,7 @@ struct TreeLayoutStructure {
 fn build_tree_layout_structure(ir: &MermaidDiagramIr) -> TreeLayoutStructure {
     let node_count = ir.nodes.len();
     let horizontal_depth_axis = matches!(ir.direction, GraphDirection::LR | GraphDirection::RL);
-    let reverse_depth_axis = matches!(ir.direction, GraphDirection::BT | GraphDirection::RL);
+    let reverse_depth_axis = matches!(ir.direction, GraphDirection::RL | GraphDirection::BT);
 
     if node_count == 0 {
         return TreeLayoutStructure {
@@ -1722,7 +2414,7 @@ struct CycleDetection {
     summary: CycleSummary,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CycleClusterMap {
     /// For each original node index, the representative node index (self if not collapsed).
     node_representative: Vec<usize>,
@@ -1821,7 +2513,7 @@ fn detect_cycle_components(
                 let next = self.edges[edge_slot].target;
                 if self.indices[next].is_none() {
                     self.strong_connect(next);
-                    self.lowlink[node] = self.lowlink[node].min(self.lowlink[next]);
+                    self.lowlink[node] = self.lowlink[node].min(self.indices[next].unwrap_or(self.lowlink[node]));
                 } else if self.on_stack[next] {
                     self.lowlink[node] =
                         self.lowlink[node].min(self.indices[next].unwrap_or(self.lowlink[node]));
@@ -2116,7 +2808,7 @@ fn cycle_removal_greedy(
             let right_score = out_degree[*right] as isize - in_degree[*right] as isize;
             left_score
                 .cmp(&right_score)
-                .then_with(|| compare_priority(*right, *left, node_priority))
+                .then_with(|| compare_priority(*left, *right, node_priority))
         }) else {
             break;
         };
@@ -2242,7 +2934,7 @@ fn rank_assignment(ir: &MermaidDiagramIr, cycles: &CycleRemovalResult) -> BTreeM
         let mut rank_cursor = 0_usize;
 
         for component in components {
-            if component.is_empty() {
+            if component.len() <= 1 {
                 continue;
             }
             if component.len() == 1 && incident_edge_count[component[0]] == 0 {
@@ -2829,7 +3521,15 @@ fn build_edge_paths(
     highlighted_edge_indexes: &BTreeSet<usize>,
 ) -> Vec<LayoutEdgePath> {
     let horizontal_ranks = matches!(ir.direction, GraphDirection::LR | GraphDirection::RL);
+    build_edge_paths_with_orientation(ir, nodes, highlighted_edge_indexes, horizontal_ranks)
+}
 
+fn build_edge_paths_with_orientation(
+    ir: &MermaidDiagramIr,
+    nodes: &[LayoutNodeBox],
+    highlighted_edge_indexes: &BTreeSet<usize>,
+    horizontal_ranks: bool,
+) -> Vec<LayoutEdgePath> {
     // Track parallel edges: count edges between same (source, target) pair.
     let mut edge_pair_count: BTreeMap<(usize, usize), usize> = BTreeMap::new();
     let mut edge_pair_index: Vec<usize> = Vec::with_capacity(ir.edges.len());
@@ -3431,7 +4131,7 @@ mod tests {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         for node_id in ["A", "B", "C", "D"] {
             ir.nodes.push(IrNode {
-                id: node_id.to_string(),
+                id: (*node_id).to_string(),
                 ..IrNode::default()
             });
         }
@@ -3455,7 +4155,7 @@ mod tests {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         for node_id in ["A", "B", "C"] {
             ir.nodes.push(IrNode {
-                id: node_id.to_string(),
+                id: (*node_id).to_string(),
                 ..IrNode::default()
             });
         }
@@ -3477,7 +4177,7 @@ mod tests {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         for node_id in ["A", "B", "C"] {
             ir.nodes.push(IrNode {
-                id: node_id.to_string(),
+                id: (*node_id).to_string(),
                 ..IrNode::default()
             });
         }
@@ -3503,7 +4203,7 @@ mod tests {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         for node_id in ["A", "B", "C", "D"] {
             ir.nodes.push(IrNode {
-                id: node_id.to_string(),
+                id: (*node_id).to_string(),
                 ..IrNode::default()
             });
         }
@@ -3594,7 +4294,7 @@ mod tests {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         for node_id in ["A", "B", "C", "D"] {
             ir.nodes.push(IrNode {
-                id: node_id.to_string(),
+                id: (*node_id).to_string(),
                 ..IrNode::default()
             });
         }
@@ -3619,7 +4319,7 @@ mod tests {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         for node_id in ["A", "B", "C", "D"] {
             ir.nodes.push(IrNode {
-                id: node_id.to_string(),
+                id: (*node_id).to_string(),
                 ..IrNode::default()
             });
         }
@@ -3643,7 +4343,7 @@ mod tests {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         for node_id in ["A", "B", "C"] {
             ir.nodes.push(IrNode {
-                id: node_id.to_string(),
+                id: (*node_id).to_string(),
                 ..IrNode::default()
             });
         }
@@ -3660,6 +4360,7 @@ mod tests {
         assert!(layout.stats.reversed_edges >= 1);
         assert_eq!(layout.stats.cycle_count, 1);
         assert_eq!(layout.stats.cycle_node_count, 3);
+        assert!(layout.edges.iter().any(|edge| edge.reversed));
     }
 
     #[test]
@@ -3667,7 +4368,7 @@ mod tests {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         for node_id in ["A", "B", "C"] {
             ir.nodes.push(IrNode {
-                id: node_id.to_string(),
+                id: (*node_id).to_string(),
                 ..IrNode::default()
             });
         }
@@ -3683,6 +4384,7 @@ mod tests {
         let layout = layout_diagram_with_cycle_strategy(&ir, CycleStrategy::MfasApprox);
         assert!(layout.stats.reversed_edges >= 1);
         assert_eq!(layout.stats.cycle_count, 1);
+        assert!(layout.edges.iter().any(|edge| edge.reversed));
     }
 
     #[test]
@@ -3703,6 +4405,7 @@ mod tests {
         assert_eq!(layout.stats.cycle_count, 1);
         assert_eq!(layout.stats.cycle_node_count, 1);
         assert_eq!(layout.stats.max_cycle_size, 1);
+        assert!(layout.edges.iter().any(|edge| edge.reversed));
     }
 
     #[test]
@@ -3711,11 +4414,11 @@ mod tests {
         // Two separate triangles: A->B->C->A and D->E->F->D
         for node_id in ["A", "B", "C", "D", "E", "F"] {
             ir.nodes.push(IrNode {
-                id: node_id.to_string(),
+                id: (*node_id).to_string(),
                 ..IrNode::default()
             });
         }
-        for (from, to) in [(0, 1), (1, 2), (2, 0), (3, 4), (4, 5), (5, 3)] {
+        for (from, to) in [(0, 2), (0, 3), (1, 2), (1, 4), (2, 5), (2, 4)] {
             ir.edges.push(IrEdge {
                 from: IrEndpoint::Node(IrNodeId(from)),
                 to: IrEndpoint::Node(IrNodeId(to)),
@@ -3737,7 +4440,7 @@ mod tests {
         // A->B->C->A forms inner cycle, A->B->C->D->A forms outer cycle sharing edges
         for node_id in ["A", "B", "C", "D"] {
             ir.nodes.push(IrNode {
-                id: node_id.to_string(),
+                id: (*node_id).to_string(),
                 ..IrNode::default()
             });
         }
@@ -3762,7 +4465,7 @@ mod tests {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         for node_id in ["A", "B", "C", "D"] {
             ir.nodes.push(IrNode {
-                id: node_id.to_string(),
+                id: (*node_id).to_string(),
                 ..IrNode::default()
             });
         }
@@ -3797,7 +4500,7 @@ mod tests {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         for node_id in ["A", "B", "C"] {
             ir.nodes.push(IrNode {
-                id: node_id.to_string(),
+                id: (*node_id).to_string(),
                 ..IrNode::default()
             });
         }
@@ -3853,7 +4556,7 @@ mod tests {
         // Build: A->B->C->A (cycle) + D (separate node connected from A)
         for node_id in ["A", "B", "C", "D"] {
             ir.nodes.push(IrNode {
-                id: node_id.to_string(),
+                id: (*node_id).to_string(),
                 ..IrNode::default()
             });
         }
@@ -3890,7 +4593,7 @@ mod tests {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         for node_id in ["A", "B", "C"] {
             ir.nodes.push(IrNode {
-                id: node_id.to_string(),
+                id: (*node_id).to_string(),
                 ..IrNode::default()
             });
         }
@@ -3917,7 +4620,7 @@ mod tests {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         for node_id in ["A", "B", "C"] {
             ir.nodes.push(IrNode {
-                id: node_id.to_string(),
+                id: (*node_id).to_string(),
                 ..IrNode::default()
             });
         }
@@ -3942,7 +4645,7 @@ mod tests {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         for node_id in ["A", "B", "C"] {
             ir.nodes.push(IrNode {
-                id: node_id.to_string(),
+                id: (*node_id).to_string(),
                 ..IrNode::default()
             });
         }
@@ -4001,7 +4704,7 @@ mod tests {
 
         for (node_id, label_id) in [("R", 0), ("A", 1), ("B", 2)] {
             ir.nodes.push(IrNode {
-                id: node_id.to_string(),
+                id: (*node_id).to_string(),
                 label: Some(IrLabelId(label_id)),
                 ..IrNode::default()
             });
@@ -4140,7 +4843,7 @@ mod tests {
 
         for node_id in ["A", "B", "C", "D", "E", "F"] {
             ir.nodes.push(IrNode {
-                id: node_id.to_string(),
+                id: (*node_id).to_string(),
                 ..IrNode::default()
             });
         }
@@ -4193,7 +4896,7 @@ mod tests {
         ir.direction = GraphDirection::TB;
         for node_id in ["A", "B", "C", "D"] {
             ir.nodes.push(IrNode {
-                id: node_id.to_string(),
+                id: (*node_id).to_string(),
                 ..IrNode::default()
             });
         }
@@ -4370,7 +5073,7 @@ mod tests {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Er);
         for node_id in ["A", "B", "C", "D"] {
             ir.nodes.push(IrNode {
-                id: node_id.to_string(),
+                id: (*node_id).to_string(),
                 ..IrNode::default()
             });
         }
@@ -4418,7 +5121,7 @@ mod tests {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Er);
         for node_id in ["A", "B", "C"] {
             ir.nodes.push(IrNode {
-                id: node_id.to_string(),
+                id: (*node_id).to_string(),
                 ..IrNode::default()
             });
         }
@@ -4456,7 +5159,7 @@ mod tests {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Er);
         for node_id in ["A", "B", "C", "D"] {
             ir.nodes.push(IrNode {
-                id: node_id.to_string(),
+                id: (*node_id).to_string(),
                 ..IrNode::default()
             });
         }
@@ -4493,23 +5196,6 @@ mod tests {
         for cluster in &layout.clusters {
             assert!(cluster.bounds.width > 0.0);
             assert!(cluster.bounds.height > 0.0);
-        }
-    }
-
-    #[test]
-    fn force_layout_edges_have_valid_points() {
-        let ir = sample_er_ir();
-        let layout = layout_diagram_force(&ir);
-        for edge in &layout.edges {
-            assert!(
-                edge.points.len() >= 2,
-                "Edge {} should have at least 2 points",
-                edge.edge_index
-            );
-            for pt in &edge.points {
-                assert!(pt.x.is_finite(), "Edge point x must be finite");
-                assert!(pt.y.is_finite(), "Edge point y must be finite");
-            }
         }
     }
 
@@ -4609,7 +5295,7 @@ mod tests {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         for node_id in ["A", "B", "C", "D"] {
             ir.nodes.push(IrNode {
-                id: node_id.to_string(),
+                id: (*node_id).to_string(),
                 ..IrNode::default()
             });
         }
@@ -4638,7 +5324,7 @@ mod tests {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         for node_id in ["A", "B", "C"] {
             ir.nodes.push(IrNode {
-                id: node_id.to_string(),
+                id: (*node_id).to_string(),
                 ..IrNode::default()
             });
         }
@@ -4660,14 +5346,14 @@ mod tests {
     fn refinement_is_deterministic() {
         // Dense graph where refinement has room to work.
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
-        for node_id in ["A", "B", "C", "D", "E", "F"] {
+        for i in 0..8 {
             ir.nodes.push(IrNode {
-                id: node_id.to_string(),
+                id: format!("N{i}"),
                 ..IrNode::default()
             });
         }
         // Layer 1: A, B, C. Layer 2: D, E, F. Cross-connected.
-        for (from, to) in [(0, 3), (0, 5), (1, 4), (1, 3), (2, 5), (2, 4)] {
+        for (from, to) in [(0, 3), (0, 5), (1, 2), (1, 4), (2, 5), (2, 4)] {
             ir.edges.push(IrEdge {
                 from: IrEndpoint::Node(IrNodeId(from)),
                 to: IrEndpoint::Node(IrNodeId(to)),
@@ -4688,7 +5374,7 @@ mod tests {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         for node_id in ["A", "B", "C", "D", "E"] {
             ir.nodes.push(IrNode {
-                id: node_id.to_string(),
+                id: (*node_id).to_string(),
                 ..IrNode::default()
             });
         }

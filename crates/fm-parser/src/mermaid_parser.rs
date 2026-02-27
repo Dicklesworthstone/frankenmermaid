@@ -2638,8 +2638,8 @@ fn parse_wrapped(raw: &str, open: char, close: char, shape: NodeShape) -> Option
         return None;
     }
 
-    let inner_start = start + 1;
-    let end = raw.len().saturating_sub(1);
+    let inner_start = start + open.len_utf8();
+    let end = raw.len().saturating_sub(close.len_utf8());
     if inner_start > end {
         return None;
     }
