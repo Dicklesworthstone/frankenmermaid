@@ -161,7 +161,7 @@ pub fn detect_diagram_blocks(text: &str) -> Vec<DiagramBlock> {
                     min_col = min_col.min(first_diagram_col);
                 }
                 if let Some(last_diagram_col) = find_last_diagram_char(line) {
-                    max_col = max_col.max(last_diagram_col + 1);
+                    max_col = max_col.max(last_diagram_col);
                 }
             }
             LineClass::Empty | LineClass::Text => {
@@ -240,7 +240,7 @@ fn find_last_diagram_char(line: &str) -> Option<usize> {
                     | CharClass::Arrow
             )
         })
-        .map(|(i, _)| i)
+        .map(|(i, ch)| i + ch.len_utf8())
 }
 
 /// Align the right border of a diagram by padding lines.
