@@ -34,11 +34,7 @@ pub fn parse_dot(input: &str) -> ParseResult {
             continue;
         }
 
-        for statement in trimmed
-            .split(';')
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
+        for statement in split_dot_by(trimmed, ";") {
             let close_count = statement.chars().take_while(|ch| *ch == '}').count();
             for _ in 0..close_count {
                 let _ = active_clusters.pop();
@@ -114,11 +110,7 @@ fn parse_dot_edge_statement(
         return false;
     };
 
-    let mut parts: Vec<&str> = statement
-        .split(operator)
-        .map(str::trim)
-        .filter(|segment| !segment.is_empty())
-        .collect();
+    let mut parts: Vec<&str> = split_dot_by(statement, operator);
     if parts.len() < 2 {
         return false;
     }
@@ -510,6 +502,50 @@ fn strip_html_tags(raw: &str) -> String {
     }
 
     output.trim().to_string()
+}
+
+fn split_dot_by<'a>(line: &'a str, separator: &str) -> Vec<&'a str> {
+    let mut parts = Vec::new();
+    let mut current_start = 0;
+    let mut in_quote = false;
+    let mut escaped = false;
+    let mut html_depth = 0_usize;
+
+    let chars: Vec<(usize, char)> = line.char_indices().collect();
+    let mut i = 0;
+    
+    while i < chars.len() {
+        let (byte_idx, c) = chars[i];
+        
+        if in_quote {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_quote = false;
+            }
+        } else {
+            if c == '"' {
+                in_quote = true;
+            } else if c == '<' {
+                html_depth = html_depth.saturating_add(1);
+            } else if c == '>' {
+                html_depth = html_depth.saturating_sub(1);
+            } else if html_depth == 0 && line[byte_idx..].starts_with(separator) {
+                parts.push(line[current_start..byte_idx].trim());
+                current_start = byte_idx + separator.len();
+                let sep_chars = separator.chars().count();
+                i += sep_chars.saturating_sub(1);
+            }
+        }
+        i += 1;
+    }
+
+    if current_start < line.len() {
+        parts.push(line[current_start..].trim());
+    }
+    parts.into_iter().filter(|s| !s.is_empty()).collect()
 }
 
 fn span_for(line_number: usize, line: &str) -> Span {

@@ -203,7 +203,7 @@ fn resolve_detail_profile(
             enable_shadows: config.shadows,
         },
         RenderDetailTier::Compact => {
-            let show_node_labels = area >= 22_000.0;
+            let show_node_labels = area >= 30_000.0;
             RenderDetailProfile {
                 tier,
                 show_node_labels,
