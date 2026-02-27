@@ -240,6 +240,7 @@ impl IrBuilder {
             label: label_id,
             shape,
             classes: Vec::new(),
+            href: None,
             span_primary: span,
             span_all: vec![span],
             implicit: is_auto_created,
@@ -337,6 +338,21 @@ impl IrBuilder {
             .any(|existing| existing == normalized_class)
         {
             node.classes.push(normalized_class.to_string());
+        }
+    }
+
+    pub(crate) fn set_node_link(&mut self, node_key: &str, target: &str, span: Span) {
+        let target = target.trim();
+        if target.is_empty() {
+            return;
+        }
+
+        let Some(node_id) = self.intern_node(node_key, None, NodeShape::Rect, span) else {
+            return;
+        };
+
+        if let Some(node) = self.ir.nodes.get_mut(node_id.0) {
+            node.href = Some(target.to_string());
         }
     }
 

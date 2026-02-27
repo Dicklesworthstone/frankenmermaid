@@ -329,6 +329,7 @@ pub struct IrNode {
     pub label: Option<IrLabelId>,
     pub shape: NodeShape,
     pub classes: Vec<String>,
+    pub href: Option<String>,
     pub span_primary: Span,
     pub span_all: Vec<Span>,
     pub implicit: bool,

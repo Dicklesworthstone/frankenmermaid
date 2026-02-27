@@ -88,8 +88,8 @@ impl Default for FontMetricsConfig {
     fn default() -> Self {
         Self {
             preset: FontPreset::SystemUi,
-            font_size: 14.0,
-            line_height: 1.4,
+            font_size: 15.0,
+            line_height: 1.5,
             fallback_chain: vec![FontPreset::SansSerif, FontPreset::Monospace],
             trace_fallbacks: false,
         }
@@ -376,7 +376,7 @@ mod tests {
     #[test]
     fn default_metrics_are_reasonable() {
         let metrics = FontMetrics::default();
-        assert_eq!(metrics.font_size(), 14.0);
+        assert_eq!(metrics.font_size(), 15.0);
         assert!(metrics.avg_char_width() > 5.0);
         assert!(metrics.avg_char_width() < 15.0);
     }

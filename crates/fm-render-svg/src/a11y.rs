@@ -242,21 +242,13 @@ mod tests {
             id: "A".to_string(),
             label: None,
             shape: NodeShape::Rect,
-            classes: vec![],
-            span_primary: fm_core::Span::default(),
-            span_all: vec![],
-            implicit: false,
-            members: vec![],
+            ..Default::default()
         });
         ir.nodes.push(IrNode {
             id: "B".to_string(),
             label: None,
             shape: NodeShape::Diamond,
-            classes: vec![],
-            span_primary: fm_core::Span::default(),
-            span_all: vec![],
-            implicit: false,
-            members: vec![],
+            ..Default::default()
         });
 
         ir

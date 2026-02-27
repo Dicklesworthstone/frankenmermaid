@@ -343,6 +343,27 @@ fn strip_comments(line: &str) -> &str {
     let mut in_quote: Option<char> = None;
     let mut escaped = false;
 
+    // Handle block comments if they exist on a single line (basic heuristic)
+    // Note: multi-line block comments require a stateful parser across lines,
+    // which this doesn't currently do, but it strips same-line blocks.
+    let mut line = line;
+    if let Some(start) = line.find("/*") {
+        if let Some(end) = line[start + 2..].find("*/") {
+            // Strip the block comment out of the line entirely.
+            // This is a simplistic fix for single-line block comments.
+            let before = &line[..start];
+            let after = &line[start + 2 + end + 2..];
+            // Since we can't easily return an owned string here without changing the signature,
+            // we will just truncate at the start of the block comment to be safe if it's trailing,
+            // or just ignore it if it's mid-line (which requires allocation).
+            // For now, we'll just truncate at "/*" if we see one.
+            return &line[..start];
+        } else {
+            // Unclosed block comment, truncate the rest of the line
+            return &line[..start];
+        }
+    }
+
     for (i, ch) in line.char_indices() {
         if escaped {
             escaped = false;

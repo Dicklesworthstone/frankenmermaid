@@ -114,42 +114,42 @@ impl ThemeColors {
     pub fn from_preset(preset: ThemePreset) -> Self {
         match preset {
             ThemePreset::Default => Self {
-                background: "#ffffff".into(),
-                text: "#333333".into(),
+                background: "#f9fafb".into(),
+                text: "#111827".into(),
                 node_fill: "#ffffff".into(),
-                node_stroke: "#333333".into(),
-                edge: "#333333".into(),
-                cluster_fill: "rgba(248,249,250,0.85)".into(),
-                cluster_stroke: "#dee2e6".into(),
+                node_stroke: "#e5e7eb".into(),
+                edge: "#9ca3af".into(),
+                cluster_fill: "rgba(243,244,246,0.5)".into(),
+                cluster_stroke: "#d1d5db".into(),
                 accents: [
-                    "#4285f4".into(), // Google blue
-                    "#34a853".into(), // Google green
-                    "#fbbc05".into(), // Google yellow
-                    "#ea4335".into(), // Google red
-                    "#9c27b0".into(), // Purple
-                    "#00bcd4".into(), // Cyan
-                    "#ff9800".into(), // Orange
-                    "#607d8b".into(), // Blue gray
+                    "#3b82f6".into(), // Blue
+                    "#0ea5e9".into(), // Sky
+                    "#10b981".into(), // Emerald
+                    "#8b5cf6".into(), // Violet
+                    "#f59e0b".into(), // Amber
+                    "#f43f5e".into(), // Rose
+                    "#14b8a6".into(), // Teal
+                    "#6366f1".into(), // Indigo
                 ],
             },
 
             ThemePreset::Dark => Self {
-                background: "#1a1a2e".into(),
-                text: "#eaeaea".into(),
-                node_fill: "#16213e".into(),
-                node_stroke: "#0f3460".into(),
-                edge: "#e94560".into(),
-                cluster_fill: "rgba(22,33,62,0.8)".into(),
-                cluster_stroke: "#0f3460".into(),
+                background: "#0f172a".into(),
+                text: "#f8fafc".into(),
+                node_fill: "#1e293b".into(),
+                node_stroke: "#334155".into(),
+                edge: "#94a3b8".into(),
+                cluster_fill: "rgba(30,41,59,0.6)".into(),
+                cluster_stroke: "#475569".into(),
                 accents: [
-                    "#e94560".into(),
-                    "#00d9ff".into(),
-                    "#ff6b6b".into(),
-                    "#ffd93d".into(),
-                    "#6bcb77".into(),
-                    "#ff8e72".into(),
-                    "#a855f7".into(),
-                    "#38bdf8".into(),
+                    "#38bdf8".into(), // Sky
+                    "#34d399".into(), // Emerald
+                    "#a78bfa".into(), // Violet
+                    "#fbbf24".into(), // Amber
+                    "#fb7185".into(), // Rose
+                    "#2dd4bf".into(), // Teal
+                    "#818cf8".into(), // Indigo
+                    "#f472b6".into(), // Pink
                 ],
             },
 
@@ -194,22 +194,22 @@ impl ThemeColors {
             },
 
             ThemePreset::Corporate => Self {
-                background: "#ffffff".into(),
-                text: "#1a365d".into(),
-                node_fill: "#ebf8ff".into(),
-                node_stroke: "#2b6cb0".into(),
-                edge: "#2c5282".into(),
-                cluster_fill: "rgba(235,248,255,0.7)".into(),
-                cluster_stroke: "#90cdf4".into(),
+                background: "#f8fafc".into(),
+                text: "#0f172a".into(),
+                node_fill: "#ffffff".into(),
+                node_stroke: "#93c5fd".into(), // blue-300
+                edge: "#64748b".into(), // slate-500
+                cluster_fill: "rgba(239,246,255,0.6)".into(), // blue-50
+                cluster_stroke: "#bfdbfe".into(), // blue-200
                 accents: [
-                    "#2b6cb0".into(),
-                    "#2f855a".into(),
-                    "#c05621".into(),
-                    "#744210".into(),
-                    "#553c9a".into(),
-                    "#234e52".into(),
-                    "#702459".into(),
-                    "#285e61".into(),
+                    "#1d4ed8".into(), // blue-700
+                    "#0369a1".into(), // sky-700
+                    "#0f766e".into(), // teal-700
+                    "#4338ca".into(), // indigo-700
+                    "#1e40af".into(), // blue-800
+                    "#0ea5e9".into(), // sky-500
+                    "#3b82f6".into(), // blue-500
+                    "#6366f1".into(), // indigo-500
                 ],
             },
 
@@ -379,10 +379,11 @@ pub struct FontConfig {
 impl Default for FontConfig {
     fn default() -> Self {
         Self {
-            family: "system-ui, -apple-system, sans-serif".into(),
-            size: 14.0,
-            weight: 400,
-            web_font_url: None,
+            family: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+                .into(),
+            size: 15.0,
+            weight: 500,
+            web_font_url: Some("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap".into()),
         }
     }
 }
@@ -429,19 +430,256 @@ impl Theme {
 
     /// Generate the complete CSS style block for embedding in SVG.
     #[must_use]
-    pub fn to_svg_style(&self) -> String {
-        let mut css = String::with_capacity(1024);
+    pub fn to_svg_style(&self, shadows: bool) -> String {
+        let mut css = String::with_capacity(4096);
         css.push_str(&self.colors.to_css_vars());
         css.push_str(&self.font.to_css());
 
+        let shadow_filter = if shadows {
+            "filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.04)) drop-shadow(0 1px 3px rgba(0, 0, 0, 0.02));"
+        } else {
+            ""
+        };
+        
+        let hover_shadow_filter = if shadows {
+            "filter: drop-shadow(0 10px 15px rgba(0, 0, 0, 0.06)) drop-shadow(0 4px 6px rgba(0, 0, 0, 0.04));"
+        } else {
+            ""
+        };
+
         // Add utility classes
         css.push_str(
-            r"
-.fm-node { fill: var(--fm-node-fill); stroke: var(--fm-node-stroke); }
-.fm-edge { stroke: var(--fm-edge-color); }
-.fm-cluster { fill: var(--fm-cluster-fill); stroke: var(--fm-cluster-stroke); }
-.fm-label { fill: var(--fm-text-color); }
-",
+            &format!(r#"
+:root {{
+  --fm-edge-muted: var(--fm-cluster-stroke);
+  --fm-edge-label-bg: var(--fm-bg);
+  --fm-edge-label-border: var(--fm-cluster-stroke);
+  --fm-edge-label-text: var(--fm-text-color);
+  --fm-cluster-label-color: var(--fm-text-color);
+  --fm-cluster-c4-fill: var(--fm-cluster-fill);
+  --fm-cluster-c4-stroke: var(--fm-cluster-stroke);
+  --fm-cluster-swimlane-fill: var(--fm-cluster-fill);
+  --fm-cluster-swimlane-stroke: var(--fm-cluster-stroke);
+  --fm-surface-shadow: rgba(15, 23, 42, 0.1);
+}}
+svg {{
+  background: var(--fm-bg);
+  background-image: linear-gradient(
+    180deg,
+    var(--fm-bg) 0%,
+    color-mix(in srgb, var(--fm-bg) 92%, var(--fm-node-stroke) 8%) 100%
+  );
+}}
+.fm-node {{
+  isolation: isolate;
+  --fm-node-accent: var(--fm-node-stroke);
+  --fm-node-hover-accent: var(--fm-edge-color);
+}}
+.fm-node rect,
+.fm-node path,
+.fm-node circle,
+.fm-node ellipse,
+.fm-node polygon {{
+  fill: var(--fm-node-fill);
+  stroke: var(--fm-node-accent);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+  shape-rendering: geometricPrecision;
+  {}
+  transition: fill 200ms ease, stroke 200ms ease, filter 200ms ease, transform 200ms cubic-bezier(0.4, 0, 0.2, 1);
+}}
+.fm-node line {{
+  stroke: var(--fm-node-accent);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}}
+.fm-node text {{
+  fill: var(--fm-text-color);
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "kern" 1, "liga" 1;
+}}
+.fm-node:hover rect,
+.fm-node:hover path,
+.fm-node:hover circle,
+.fm-node:hover ellipse,
+.fm-node:hover polygon {{
+  stroke: var(--fm-node-hover-accent);
+  {}
+  transform: translateY(-1px);
+}}
+.fm-node-accent-1 {{
+  --fm-node-accent: var(--fm-node-stroke);
+  --fm-node-accent: color-mix(in srgb, var(--fm-accent-1) 50%, var(--fm-node-stroke));
+  --fm-node-hover-accent: var(--fm-accent-1);
+}}
+.fm-node-accent-2 {{
+  --fm-node-accent: var(--fm-node-stroke);
+  --fm-node-accent: color-mix(in srgb, var(--fm-accent-2) 50%, var(--fm-node-stroke));
+  --fm-node-hover-accent: var(--fm-accent-2);
+}}
+.fm-node-accent-3 {{
+  --fm-node-accent: var(--fm-node-stroke);
+  --fm-node-accent: color-mix(in srgb, var(--fm-accent-3) 50%, var(--fm-node-stroke));
+  --fm-node-hover-accent: var(--fm-accent-3);
+}}
+.fm-node-accent-4 {{
+  --fm-node-accent: var(--fm-node-stroke);
+  --fm-node-accent: color-mix(in srgb, var(--fm-accent-4) 50%, var(--fm-node-stroke));
+  --fm-node-hover-accent: var(--fm-accent-4);
+}}
+.fm-node-accent-5 {{
+  --fm-node-accent: var(--fm-node-stroke);
+  --fm-node-accent: color-mix(in srgb, var(--fm-accent-5) 50%, var(--fm-node-stroke));
+  --fm-node-hover-accent: var(--fm-accent-5);
+}}
+.fm-node-accent-6 {{
+  --fm-node-accent: var(--fm-node-stroke);
+  --fm-node-accent: color-mix(in srgb, var(--fm-accent-6) 50%, var(--fm-node-stroke));
+  --fm-node-hover-accent: var(--fm-accent-6);
+}}
+.fm-node-accent-7 {{
+  --fm-node-accent: var(--fm-node-stroke);
+  --fm-node-accent: color-mix(in srgb, var(--fm-accent-7) 50%, var(--fm-node-stroke));
+  --fm-node-hover-accent: var(--fm-accent-7);
+}}
+.fm-node-accent-8 {{
+  --fm-node-accent: var(--fm-node-stroke);
+  --fm-node-accent: color-mix(in srgb, var(--fm-accent-8) 50%, var(--fm-node-stroke));
+  --fm-node-hover-accent: var(--fm-accent-8);
+}}
+.fm-node.fm-node-shape-note path,
+.fm-node.fm-node-shape-note rect {{
+  fill: var(--fm-node-fill);
+  fill: color-mix(in srgb, #fef3c7 40%, var(--fm-node-fill));
+}}
+.fm-node.fm-node-shape-cloud path {{
+  fill: var(--fm-node-fill);
+  fill: color-mix(in srgb, var(--fm-accent-2) 15%, var(--fm-node-fill));
+}}
+.fm-node.fm-node-shape-cylinder path {{
+  fill: var(--fm-node-fill);
+  fill: color-mix(in srgb, var(--fm-accent-1) 12%, var(--fm-node-fill));
+}}
+.fm-node.fm-node-shape-star path,
+.fm-node.fm-node-shape-pentagon path {{
+  stroke-width: 1.8;
+}}
+.fm-edge {{
+  fill: none;
+  stroke: var(--fm-edge-color);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+  transition: stroke 200ms ease, opacity 200ms ease, stroke-width 200ms ease;
+  cursor: crosshair;
+}}
+.fm-edge:hover {{
+  stroke: var(--fm-accent-1);
+  stroke-width: 2.5;
+  opacity: 1;
+}}
+.fm-edge-solid {{
+  stroke-dasharray: none;
+}}
+.fm-edge-dashed {{
+  stroke-dasharray: 6 6;
+}}
+.fm-edge-thick {{
+  stroke-width: 2.5;
+}}
+.fm-edge-thick:hover {{
+  stroke-width: 3.5;
+}}
+.fm-edge-back {{
+  stroke: var(--fm-edge-muted);
+  opacity: 0.8;
+  stroke-dasharray: 4 4;
+}}
+.fm-edge-labeled > rect {{
+  fill: var(--fm-edge-label-bg);
+  stroke: var(--fm-edge-label-border);
+  stroke-width: 1.5;
+  rx: 6px;
+  ry: 6px;
+}}
+/* Add a backdrop filter for modern glassmorphism effect on the rect */
+@supports (backdrop-filter: blur(4px)) {{
+  .fm-edge-labeled > rect {{
+    fill: color-mix(in srgb, var(--fm-edge-label-bg) 85%, transparent);
+    backdrop-filter: blur(8px);
+  }}
+}}
+.edge-label {{
+  fill: var(--fm-edge-label-text);
+  font-weight: 500;
+  font-size: 0.95em;
+  letter-spacing: -0.01em;
+  text-rendering: optimizeLegibility;
+}}
+marker#arrow-end path,
+marker#arrow-filled path,
+marker#arrow-circle path,
+marker#arrow-diamond path {{
+  fill: var(--fm-edge-color);
+  stroke: none;
+  transition: fill 200ms ease;
+}}
+.fm-edge:hover ~ marker#arrow-end path,
+.fm-edge:hover ~ marker#arrow-filled path,
+.fm-edge:hover ~ marker#arrow-circle path,
+.fm-edge:hover ~ marker#arrow-diamond path {{
+  fill: var(--fm-accent-1);
+}}
+marker#arrow-open path {{
+  stroke: var(--fm-edge-muted);
+  fill: none;
+  stroke-width: 1.8;
+  transition: stroke 200ms ease;
+}}
+marker#arrow-cross path {{
+  stroke: var(--fm-edge-color);
+  fill: none;
+  stroke-width: 1.8;
+  transition: stroke 200ms ease;
+}}
+.fm-cluster {{
+  fill: var(--fm-cluster-fill);
+  stroke: var(--fm-cluster-stroke);
+  stroke-width: 1.5;
+  stroke-dasharray: 8 4;
+}}
+.fm-cluster-label {{
+  fill: var(--fm-cluster-label-color);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}}
+.fm-cluster-c4 {{
+  fill: var(--fm-cluster-c4-fill);
+  stroke: var(--fm-cluster-c4-stroke);
+  stroke-dasharray: none;
+}}
+.fm-cluster-swimlane {{
+  fill: var(--fm-cluster-swimlane-fill);
+  stroke: var(--fm-cluster-swimlane-stroke);
+  stroke-dasharray: none;
+}}
+.fm-label {{
+  fill: var(--fm-text-color);
+}}
+@media (prefers-reduced-motion: reduce) {{
+  .fm-node rect,
+  .fm-node path,
+  .fm-node circle,
+  .fm-node ellipse,
+  .fm-node polygon,
+  .fm-edge {{
+    transition: none;
+    transform: none;
+  }}
+}}
+"#, shadow_filter, hover_shadow_filter)
         );
 
         css
@@ -609,11 +847,13 @@ mod tests {
     #[test]
     fn theme_generates_complete_style() {
         let theme = Theme::from_preset(ThemePreset::Default);
-        let style = theme.to_svg_style();
+        let style = theme.to_svg_style(true);
         assert!(style.contains(":root {"));
         assert!(style.contains(".fm-node"));
         assert!(style.contains(".fm-edge"));
         assert!(style.contains(".fm-cluster"));
+        assert!(style.contains(".fm-node-accent-1"));
+        assert!(style.contains(".fm-node.fm-node-shape-note"));
     }
 
     #[test]

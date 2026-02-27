@@ -40,17 +40,19 @@ pub struct CanvasRenderConfig {
 impl Default for CanvasRenderConfig {
     fn default() -> Self {
         Self {
-            font_family: String::from("system-ui, -apple-system, sans-serif"),
+            font_family: String::from(
+                "'Inter', 'Avenir Next', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif",
+            ),
             font_size: 14.0,
-            padding: 20.0,
+            padding: 28.0,
             node_fill: String::from("#ffffff"),
-            node_stroke: String::from("#333333"),
+            node_stroke: String::from("#94a3b8"),
             node_stroke_width: 1.5,
-            edge_stroke: String::from("#333333"),
+            edge_stroke: String::from("#475569"),
             edge_stroke_width: 1.5,
-            cluster_fill: String::from("#f8f9fa"),
-            cluster_stroke: String::from("#dee2e6"),
-            label_color: String::from("#333333"),
+            cluster_fill: String::from("rgba(226,232,240,0.44)"),
+            cluster_stroke: String::from("rgba(148,163,184,0.78)"),
+            label_color: String::from("#0f172a"),
             auto_fit: true,
         }
     }

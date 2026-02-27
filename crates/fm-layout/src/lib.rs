@@ -3,7 +3,7 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
-use fm_core::{GraphDirection, IrEndpoint, MermaidDiagramIr};
+use fm_core::{FontMetrics, GraphDirection, IrEndpoint, MermaidDiagramIr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutAlgorithm {
@@ -147,9 +147,9 @@ pub struct LayoutSpacing {
 impl Default for LayoutSpacing {
     fn default() -> Self {
         Self {
-            node_spacing: 48.0,
-            rank_spacing: 72.0,
-            cluster_padding: 24.0,
+            node_spacing: 72.0,
+            rank_spacing: 112.0,
+            cluster_padding: 48.0,
         }
     }
 }
@@ -967,29 +967,26 @@ fn clip_to_rect_border(from: LayoutPoint, to: LayoutPoint, rect: &LayoutRect) ->
 
 #[must_use]
 pub fn compute_node_sizes(ir: &MermaidDiagramIr) -> Vec<(f32, f32)> {
+    let metrics = FontMetrics::default_metrics();
     ir.nodes
         .iter()
         .map(|node| {
-            let (max_len, lines) = label_length_and_lines(ir, node);
-            let label_width = (max_len.max(4) as f32) * 8.0;
-            let width = label_width.max(72.0);
-            let height = 40.0 + ((lines.saturating_sub(1) as f32) * 16.0);
-            (width, height)
+            let text = node
+                .label
+                .and_then(|label_id| ir.labels.get(label_id.0))
+                .map(|value| value.text.as_str())
+                .unwrap_or_else(|| node.id.as_str());
+
+            let (label_width, label_height) = metrics.estimate_dimensions(text);
+            
+            // Add substantial padding to match the high-end Stripe/Vercel aesthetic
+            let width = label_width + 56.0;
+            let height = label_height + 36.0;
+
+            // Ensure minimal baseline dimensions
+            (width.max(84.0), height.max(44.0))
         })
         .collect()
-}
-
-fn label_length_and_lines(ir: &MermaidDiagramIr, node: &fm_core::IrNode) -> (usize, usize) {
-    let text = node
-        .label
-        .and_then(|label_id| ir.labels.get(label_id.0))
-        .map(|value| value.text.as_str())
-        .unwrap_or_else(|| node.id.as_str());
-
-    let lines = text.lines().count().max(1);
-    let max_len = text.lines().map(|l| l.chars().count()).max().unwrap_or(0);
-
-    (max_len, lines)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1844,7 +1841,7 @@ fn coordinate_assignment(
 
         let mut span = 0.0_f32;
         for node_index in node_indexes {
-            let (width, height) = node_sizes.get(node_index).copied().unwrap_or((72.0, 40.0));
+            let (width, height) = node_sizes.get(node_index).copied().unwrap_or((84.0, 44.0));
             let primary_extent = if horizontal_ranks { width } else { height };
             span = span.max(primary_extent);
         }
@@ -1877,7 +1874,7 @@ fn coordinate_assignment(
         let primary = primary_offsets.get(rank_index).copied().unwrap_or(0.0);
         let mut secondary_cursor = 0.0_f32;
         for (order, node_index) in node_indexes.into_iter().enumerate() {
-            let (width, height) = node_sizes.get(node_index).copied().unwrap_or((72.0, 40.0));
+            let (width, height) = node_sizes.get(node_index).copied().unwrap_or((84.0, 44.0));
             let (x, y) = if horizontal_ranks {
                 (primary, secondary_cursor)
             } else {

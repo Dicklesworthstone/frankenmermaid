@@ -461,6 +461,7 @@ fn lower_flow_ast(
                 ));
             } else {
                 builder.add_class_to_node(node, "has-link", span);
+                builder.set_node_link(node, cleaned, span);
             }
         }
         FlowAst::StyleOrLinkStyle | FlowAst::ClassDef => {
@@ -1381,6 +1382,7 @@ fn parse_click_directive(
     }
 
     builder.add_class_to_node(&node_id, "has-link", span);
+    builder.set_node_link(&node_id, cleaned_target, span);
     true
 }
 

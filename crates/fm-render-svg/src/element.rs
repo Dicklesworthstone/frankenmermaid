@@ -37,6 +37,7 @@ pub enum ElementKind {
     FeMergeNode,
     Title,
     Desc,
+    A,
 }
 
 impl ElementKind {
@@ -71,6 +72,7 @@ impl ElementKind {
             Self::FeMergeNode => "feMergeNode",
             Self::Title => "title",
             Self::Desc => "desc",
+            Self::A => "a",
         }
     }
 

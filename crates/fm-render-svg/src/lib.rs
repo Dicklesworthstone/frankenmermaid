@@ -64,13 +64,15 @@ impl Default for SvgRenderConfig {
         Self {
             responsive: true,
             accessible: true,
-            font_family: String::from("system-ui, -apple-system, sans-serif"),
-            font_size: 14.0,
+            font_family: String::from(
+                "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
+            ),
+            font_size: 15.0,
             avg_char_width: 8.0,
-            line_height: 1.4,
-            padding: 20.0,
+            line_height: 1.5,
+            padding: 48.0,
             shadows: true,
-            rounded_corners: 4.0,
+            rounded_corners: 12.0,
             root_classes: Vec::new(),
             theme: ThemePreset::Default,
             embed_theme_css: true,
@@ -167,7 +169,7 @@ fn render_layout_to_svg(
             .colors
             .apply_overrides(&ir.meta.theme_overrides.theme_variables);
 
-        let mut css = theme.to_svg_style();
+        let mut css = theme.to_svg_style(config.shadows);
 
         // Add accessibility CSS if enabled
         if config.a11y.accessibility_css {
@@ -333,9 +335,13 @@ fn render_node(
         .or_else(|| ir_node.map(|n| n.id.as_str()))
         .unwrap_or("");
 
+    let accent_class = format!("fm-node-accent-{}", stable_accent_index(node_id));
+
     // Create group for node shape + label
     let mut group = Element::group()
         .class("fm-node")
+        .class(&accent_class)
+        .class(node_shape_css_class(shape))
         .data("id", node_id)
         .data("fm-node-id", node_id);
 
@@ -360,7 +366,7 @@ fn render_node(
             .fill("#fff")
             .stroke("#333")
             .stroke_width(1.5)
-            .rx(0.0),
+            .rx(config.rounded_corners * 0.55),
 
         NodeShape::Rounded => Element::rect()
             .x(x)
@@ -477,7 +483,8 @@ fn render_node(
                     .height(h)
                     .fill("#fff")
                     .stroke("#333")
-                    .stroke_width(1.5),
+                    .stroke_width(1.5)
+                    .rx(config.rounded_corners * 0.45),
             );
             // Left vertical line
             g = g.child(
@@ -776,7 +783,59 @@ fn render_node(
         group = group.child(Element::title(&node_desc));
     }
 
+    if let Some(node) = ir_node {
+        if let Some(href) = &node.href {
+            let mut a = Element::new(crate::element::ElementKind::A)
+                .attr("href", href)
+                .attr("target", "_blank")
+                .attr("rel", "noopener noreferrer");
+            
+            // Add a cursor pointer style
+            group = group.attr("style", "cursor: pointer;");
+            
+            a = a.child(group);
+            return a;
+        }
+    }
+
     group
+}
+
+fn stable_accent_index(node_id: &str) -> usize {
+    // FNV-1a 32-bit hash for deterministic class assignment.
+    let mut hash: u32 = 0x811c9dc5;
+    for byte in node_id.bytes() {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(0x01000193);
+    }
+    (hash as usize % 8) + 1
+}
+
+const fn node_shape_css_class(shape: fm_core::NodeShape) -> &'static str {
+    use fm_core::NodeShape;
+    match shape {
+        NodeShape::Rect => "fm-node-shape-rect",
+        NodeShape::Rounded => "fm-node-shape-rounded",
+        NodeShape::Stadium => "fm-node-shape-stadium",
+        NodeShape::Subroutine => "fm-node-shape-subroutine",
+        NodeShape::Diamond => "fm-node-shape-diamond",
+        NodeShape::Hexagon => "fm-node-shape-hexagon",
+        NodeShape::Circle => "fm-node-shape-circle",
+        NodeShape::Asymmetric => "fm-node-shape-asymmetric",
+        NodeShape::Cylinder => "fm-node-shape-cylinder",
+        NodeShape::Trapezoid => "fm-node-shape-trapezoid",
+        NodeShape::DoubleCircle => "fm-node-shape-double-circle",
+        NodeShape::Note => "fm-node-shape-note",
+        NodeShape::InvTrapezoid => "fm-node-shape-inv-trapezoid",
+        NodeShape::Parallelogram => "fm-node-shape-parallelogram",
+        NodeShape::InvParallelogram => "fm-node-shape-inv-parallelogram",
+        NodeShape::Triangle => "fm-node-shape-triangle",
+        NodeShape::Pentagon => "fm-node-shape-pentagon",
+        NodeShape::Star => "fm-node-shape-star",
+        NodeShape::Cloud => "fm-node-shape-cloud",
+        NodeShape::Tag => "fm-node-shape-tag",
+        NodeShape::CrossedCircle => "fm-node-shape-crossed-circle",
+    }
 }
 
 /// Render a single edge to an SVG element.
@@ -901,23 +960,26 @@ fn render_edge(
             .map(|l| l.chars().count())
             .max()
             .unwrap_or(0);
-        let label_width = (max_line_len as f32 * config.avg_char_width) + 8.0;
+        let label_text_width = (max_line_len as f32 * config.avg_char_width) + 8.0;
+        let label_padding_x = 10.0;
+        let label_width = label_text_width + (label_padding_x * 2.0);
 
         let label_font_size = config.font_size * 0.85;
         let total_text_height = (lines_count - 1.0) * label_font_size * config.line_height;
-        let label_height = total_text_height + label_font_size + 4.0;
+        let label_height = total_text_height + label_font_size + 14.0;
 
         let start_y = ly - (total_text_height / 2.0) + (label_font_size / 4.0);
 
         group = group.child(
             Element::rect()
                 .x(lx - label_width / 2.0)
-                .y(ly - label_height / 2.0 - 2.0)
+                .y(ly - label_height / 2.0 - 1.0)
                 .width(label_width)
                 .height(label_height)
                 .fill("#fff")
-                .stroke("none")
-                .rx(2.0),
+                .stroke("#cbd5e1")
+                .stroke_width(1.0)
+                .rx(6.0),
         );
 
         // Add label text
@@ -996,7 +1058,8 @@ fn render_edge(
 mod tests {
     use super::*;
     use fm_core::{
-        DiagramType, IrCluster, IrClusterId, IrLabel, IrLabelId, MermaidDiagramIr, Span,
+        DiagramType, IrCluster, IrClusterId, IrLabel, IrLabelId, IrNode, MermaidDiagramIr,
+        NodeShape, Span,
     };
 
     fn create_ir_with_cluster(title: &str) -> MermaidDiagramIr {
@@ -1011,6 +1074,22 @@ mod tests {
             title: Some(label_id),
             members: vec![],
             span: Span::default(),
+        });
+        ir
+    }
+
+    fn create_ir_with_single_node(node_id: &str, shape: NodeShape) -> MermaidDiagramIr {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        let label_id = IrLabelId(0);
+        ir.labels.push(IrLabel {
+            text: "Single Node".to_string(),
+            span: Span::default(),
+        });
+        ir.nodes.push(IrNode {
+            id: node_id.to_string(),
+            label: Some(label_id),
+            shape,
+            ..Default::default()
         });
         ir
     }
@@ -1120,5 +1199,21 @@ mod tests {
         let svg = render_svg_with_config(&ir, &config);
         // Minimal a11y should not include high contrast CSS
         assert!(!svg.contains("prefers-contrast"));
+    }
+
+    #[test]
+    fn node_render_includes_deterministic_accent_and_shape_classes() {
+        let ir = create_ir_with_single_node("node-alpha", NodeShape::Diamond);
+        let svg = render_svg(&ir);
+        assert!(svg.contains("fm-node-accent-"));
+        assert!(svg.contains("fm-node-shape-diamond"));
+    }
+
+    #[test]
+    fn stable_accent_index_is_deterministic_and_bounded() {
+        let first = stable_accent_index("node-42");
+        let second = stable_accent_index("node-42");
+        assert_eq!(first, second);
+        assert!((1..=8).contains(&first));
     }
 }
