@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use fm_core::{DiagramType, MermaidDiagramIr};
+use fm_core::{DiagramType, MermaidDiagramIr, StructuredDiagnostic};
 use fm_layout::layout_diagram;
 use fm_parser::{detect_type, parse, parse_evidence_json};
 use fm_render_svg::{SvgRenderConfig, ThemePreset, render_svg_with_config};
@@ -113,13 +113,17 @@ enum Command {
         #[arg(default_value = "-")]
         input: String,
 
-        /// Output as JSON (structured diagnostics)
-        #[arg(long)]
-        json: bool,
+        /// Validation output format.
+        #[arg(long, value_enum, default_value = "text")]
+        format: ValidateOutputFormat,
 
-        /// Exit with non-zero status on warnings (not just errors)
+        /// Exit with non-zero status when diagnostics at this severity (or higher) exist.
+        #[arg(long, value_enum, default_value = "error")]
+        fail_on: FailOnSeverity,
+
+        /// Optional path to write machine-readable diagnostics JSON artifact.
         #[arg(long)]
-        strict: bool,
+        diagnostics_out: Option<String>,
     },
 
     /// Watch a file and re-render on changes (requires `watch` feature).
@@ -171,6 +175,39 @@ enum OutputFormat {
     Ascii,
 }
 
+/// Output format for validate command.
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+enum ValidateOutputFormat {
+    /// Human-readable text report.
+    Text,
+    /// Compact JSON.
+    Json,
+    /// Pretty-printed JSON.
+    Pretty,
+}
+
+/// Severity threshold used for CI validation failure gates.
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+enum FailOnSeverity {
+    None,
+    Hint,
+    Info,
+    Warning,
+    Error,
+}
+
+impl FailOnSeverity {
+    const fn rank(self) -> u8 {
+        match self {
+            Self::None => u8::MAX,
+            Self::Hint => 1,
+            Self::Info => 2,
+            Self::Warning => 3,
+            Self::Error => 4,
+        }
+    }
+}
+
 /// Result of rendering a diagram.
 #[derive(Debug, Serialize)]
 struct RenderResult {
@@ -205,23 +242,14 @@ struct ValidateResult {
     diagram_type: String,
     node_count: usize,
     edge_count: usize,
-    warnings: Vec<ValidationWarning>,
-    errors: Vec<ValidationError>,
+    diagnostics: Vec<ValidationDiagnostic>,
 }
 
-#[derive(Debug, Serialize)]
-struct ValidationWarning {
-    code: String,
-    message: String,
-    suggestion: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct ValidationError {
-    code: String,
-    message: String,
-    line: Option<usize>,
-    column: Option<usize>,
+#[derive(Debug, Clone, Serialize)]
+struct ValidationDiagnostic {
+    stage: String,
+    #[serde(flatten)]
+    payload: StructuredDiagnostic,
 }
 
 fn main() -> Result<()> {
@@ -258,9 +286,10 @@ fn main() -> Result<()> {
 
         Command::Validate {
             input,
-            json,
-            strict,
-        } => cmd_validate(&input, json, strict),
+            format,
+            fail_on,
+            diagnostics_out,
+        } => cmd_validate(&input, format, fail_on, diagnostics_out.as_deref()),
 
         #[cfg(feature = "watch")]
         Command::Watch {
@@ -748,92 +777,44 @@ fn get_support_level(diagram_type: DiagramType) -> &'static str {
 // Command: validate
 // =============================================================================
 
-fn cmd_validate(input: &str, json_output: bool, strict: bool) -> Result<()> {
+fn cmd_validate(
+    input: &str,
+    format: ValidateOutputFormat,
+    fail_on: FailOnSeverity,
+    diagnostics_out: Option<&str>,
+) -> Result<()> {
     let source = load_input(input)?;
     let parsed = parse(&source);
+    let layout = layout_diagram(&parsed.ir);
+    let svg_output = render_svg_with_config(&parsed.ir, &SvgRenderConfig::default());
 
-    // Convert parse warnings to validation warnings
-    let warnings: Vec<ValidationWarning> = parsed
-        .warnings
-        .iter()
-        .map(|msg| ValidationWarning {
-            code: categorize_warning(msg),
-            message: msg.clone(),
-            suggestion: suggest_fix(msg),
-        })
-        .collect();
+    let mut diagnostics = collect_parse_diagnostics(&parsed);
+    diagnostics.extend(collect_structural_diagnostics(&parsed));
+    diagnostics.extend(collect_layout_diagnostics(&layout));
+    diagnostics.extend(collect_render_diagnostics(&svg_output));
+    sort_diagnostics(&mut diagnostics);
 
-    // Check for structural issues
-    let mut errors: Vec<ValidationError> = Vec::new();
-
-    // Check for unknown diagram type
-    if parsed.ir.diagram_type == DiagramType::Unknown {
-        errors.push(ValidationError {
-            code: "E001".to_string(),
-            message: "Could not detect diagram type".to_string(),
-            line: Some(1),
-            column: None,
-        });
-    }
-
-    // Check for empty diagram
-    if parsed.ir.nodes.is_empty() && parsed.ir.edges.is_empty() {
-        errors.push(ValidationError {
-            code: "E002".to_string(),
-            message: "Diagram has no nodes or edges".to_string(),
-            line: None,
-            column: None,
-        });
-    }
-
-    // Check for orphaned edges (referencing non-existent nodes)
-    // This would require more sophisticated validation based on the IR structure
-
-    let valid = errors.is_empty() && (!strict || warnings.is_empty());
+    let valid = !should_fail_validation(&diagnostics, fail_on);
 
     let result = ValidateResult {
         valid,
         diagram_type: parsed.ir.diagram_type.as_str().to_string(),
         node_count: parsed.ir.nodes.len(),
         edge_count: parsed.ir.edges.len(),
-        warnings,
-        errors,
+        diagnostics,
     };
 
-    if json_output {
-        let output = serde_json::to_string_pretty(&result)?;
-        println!("{output}");
-    } else {
-        if result.valid {
-            println!("✓ Valid {} diagram", result.diagram_type);
-        } else {
-            println!("✗ Invalid diagram");
-        }
+    if let Some(path) = diagnostics_out {
+        let artifact = serde_json::to_string_pretty(&result)?;
+        std::fs::write(path, artifact)
+            .context(format!("Failed to write diagnostics file: {path}"))?;
+        info!("Wrote diagnostics artifact to: {path}");
+    }
 
-        println!("  Nodes: {}", result.node_count);
-        println!("  Edges: {}", result.edge_count);
-
-        if !result.errors.is_empty() {
-            println!("\nErrors:");
-            for err in &result.errors {
-                let location = match (err.line, err.column) {
-                    (Some(l), Some(c)) => format!(" (line {l}, col {c})"),
-                    (Some(l), None) => format!(" (line {l})"),
-                    _ => String::new(),
-                };
-                println!("  [{}] {}{}", err.code, err.message, location);
-            }
-        }
-
-        if !result.warnings.is_empty() {
-            println!("\nWarnings:");
-            for warn in &result.warnings {
-                println!("  [{}] {}", warn.code, warn.message);
-                if let Some(suggestion) = &warn.suggestion {
-                    println!("       → {suggestion}");
-                }
-            }
-        }
+    match format {
+        ValidateOutputFormat::Text => print_validate_text(&result, fail_on),
+        ValidateOutputFormat::Json => println!("{}", serde_json::to_string(&result)?),
+        ValidateOutputFormat::Pretty => println!("{}", serde_json::to_string_pretty(&result)?),
     }
 
     if !result.valid {
@@ -843,31 +824,374 @@ fn cmd_validate(input: &str, json_output: bool, strict: bool) -> Result<()> {
     Ok(())
 }
 
-fn categorize_warning(msg: &str) -> String {
-    let msg_lower = msg.to_lowercase();
+fn collect_parse_diagnostics(parsed: &fm_parser::ParseResult) -> Vec<ValidationDiagnostic> {
+    let mut diagnostics = Vec::new();
 
-    if msg_lower.contains("empty") {
-        "W001".to_string()
-    } else if msg_lower.contains("duplicate") {
-        "W002".to_string()
-    } else if msg_lower.contains("unknown") || msg_lower.contains("unrecognized") {
-        "W003".to_string()
-    } else if msg_lower.contains("deprecated") {
-        "W004".to_string()
-    } else {
-        "W000".to_string()
+    for warning in &parsed.ir.meta.init.warnings {
+        let payload = StructuredDiagnostic::from_warning(warning)
+            .with_rule_id("parse.init.warning")
+            .with_confidence(parsed.confidence);
+        diagnostics.push(ValidationDiagnostic {
+            stage: "parse".to_string(),
+            payload,
+        });
     }
+
+    for error in &parsed.ir.meta.init.errors {
+        let payload = StructuredDiagnostic::from_error(error)
+            .with_rule_id("parse.init.error")
+            .with_confidence(parsed.confidence);
+        diagnostics.push(ValidationDiagnostic {
+            stage: "parse".to_string(),
+            payload,
+        });
+    }
+
+    for diagnostic in &parsed.ir.diagnostics {
+        let payload = StructuredDiagnostic::from_diagnostic(diagnostic)
+            .with_rule_id(format!("parse.{}", diagnostic.category.as_str()))
+            .with_confidence(parsed.confidence);
+        diagnostics.push(ValidationDiagnostic {
+            stage: "parse".to_string(),
+            payload,
+        });
+    }
+
+    for warning_message in &parsed.warnings {
+        let payload = StructuredDiagnostic {
+            error_code: "mermaid/warn/unstructured-parse-warning".to_string(),
+            severity: "warning".to_string(),
+            message: warning_message.clone(),
+            span: None,
+            source_line: None,
+            source_column: None,
+            rule_id: Some("parse.unstructured.warning".to_string()),
+            confidence: Some(parsed.confidence),
+            remediation_hint: parse_warning_remediation_hint(warning_message),
+        };
+        diagnostics.push(ValidationDiagnostic {
+            stage: "parse".to_string(),
+            payload,
+        });
+    }
+
+    diagnostics
 }
 
-fn suggest_fix(msg: &str) -> Option<String> {
-    let msg_lower = msg.to_lowercase();
+fn collect_structural_diagnostics(parsed: &fm_parser::ParseResult) -> Vec<ValidationDiagnostic> {
+    let mut diagnostics = Vec::new();
 
-    if msg_lower.contains("empty") {
+    if parsed.ir.diagram_type == DiagramType::Unknown {
+        diagnostics.push(ValidationDiagnostic {
+            stage: "parse".to_string(),
+            payload: StructuredDiagnostic {
+                error_code: "mermaid/error/unknown-diagram-type".to_string(),
+                severity: "error".to_string(),
+                message: "Could not detect diagram type".to_string(),
+                span: None,
+                source_line: Some(1),
+                source_column: Some(1),
+                rule_id: Some("parse.detect.unknown_type".to_string()),
+                confidence: Some(parsed.confidence),
+                remediation_hint: Some(
+                    "Start the diagram with an explicit header such as 'flowchart LR'".to_string(),
+                ),
+            },
+        });
+    }
+
+    if parsed.ir.nodes.is_empty() && parsed.ir.edges.is_empty() {
+        diagnostics.push(ValidationDiagnostic {
+            stage: "parse".to_string(),
+            payload: StructuredDiagnostic {
+                error_code: "mermaid/error/empty-diagram".to_string(),
+                severity: "error".to_string(),
+                message: "Diagram has no parseable nodes or edges".to_string(),
+                span: None,
+                source_line: None,
+                source_column: None,
+                rule_id: Some("parse.structure.empty_diagram".to_string()),
+                confidence: Some(parsed.confidence),
+                remediation_hint: Some("Add at least one node and one edge".to_string()),
+            },
+        });
+    }
+
+    diagnostics
+}
+
+fn collect_layout_diagnostics(layout: &fm_layout::DiagramLayout) -> Vec<ValidationDiagnostic> {
+    let mut diagnostics = Vec::new();
+
+    if layout.bounds.width <= 0.0 || layout.bounds.height <= 0.0 {
+        diagnostics.push(ValidationDiagnostic {
+            stage: "layout".to_string(),
+            payload: StructuredDiagnostic {
+                error_code: "mermaid/error/layout-empty-bounds".to_string(),
+                severity: "error".to_string(),
+                message: "Layout produced empty bounds".to_string(),
+                span: None,
+                source_line: None,
+                source_column: None,
+                rule_id: Some("layout.bounds.empty".to_string()),
+                confidence: None,
+                remediation_hint: Some(
+                    "Verify parser output contains connected nodes and valid labels".to_string(),
+                ),
+            },
+        });
+    }
+
+    if layout.stats.reversed_edges > 0 {
+        diagnostics.push(ValidationDiagnostic {
+            stage: "layout".to_string(),
+            payload: StructuredDiagnostic {
+                error_code: "mermaid/warn/layout-cycle-reversal".to_string(),
+                severity: "warning".to_string(),
+                message: format!(
+                    "Layout reversed {} edge(s) to break cycle(s)",
+                    layout.stats.reversed_edges
+                ),
+                span: None,
+                source_line: None,
+                source_column: None,
+                rule_id: Some("layout.cycle.reversal".to_string()),
+                confidence: None,
+                remediation_hint: Some(
+                    "Consider tuning cycle strategy when preserving edge direction is important"
+                        .to_string(),
+                ),
+            },
+        });
+    }
+
+    diagnostics
+}
+
+fn collect_render_diagnostics(svg_output: &str) -> Vec<ValidationDiagnostic> {
+    let mut diagnostics = Vec::new();
+
+    if !svg_output.starts_with("<svg") || !svg_output.contains("</svg>") {
+        diagnostics.push(ValidationDiagnostic {
+            stage: "render".to_string(),
+            payload: StructuredDiagnostic {
+                error_code: "mermaid/error/render-svg-invalid".to_string(),
+                severity: "error".to_string(),
+                message: "Renderer produced invalid SVG envelope".to_string(),
+                span: None,
+                source_line: None,
+                source_column: None,
+                rule_id: Some("render.svg.envelope".to_string()),
+                confidence: None,
+                remediation_hint: Some(
+                    "Re-run with --verbose and inspect renderer output".to_string(),
+                ),
+            },
+        });
+    }
+
+    diagnostics
+}
+
+fn parse_warning_remediation_hint(message: &str) -> Option<String> {
+    let lower = message.to_ascii_lowercase();
+
+    if lower.contains("empty") {
         Some("Add nodes and edges to your diagram".to_string())
-    } else if msg_lower.contains("unknown") && msg_lower.contains("diagram") {
+    } else if lower.contains("unknown") && lower.contains("diagram") {
         Some("Start your diagram with a type declaration like 'flowchart LR'".to_string())
     } else {
         None
+    }
+}
+
+fn sort_diagnostics(diagnostics: &mut [ValidationDiagnostic]) {
+    diagnostics.sort_by(|left, right| {
+        right
+            .payload
+            .severity_rank()
+            .cmp(&left.payload.severity_rank())
+            .then_with(|| {
+                left.payload
+                    .source_line
+                    .unwrap_or(usize::MAX)
+                    .cmp(&right.payload.source_line.unwrap_or(usize::MAX))
+            })
+            .then_with(|| {
+                left.payload
+                    .source_column
+                    .unwrap_or(usize::MAX)
+                    .cmp(&right.payload.source_column.unwrap_or(usize::MAX))
+            })
+            .then_with(|| left.stage.cmp(&right.stage))
+            .then_with(|| left.payload.error_code.cmp(&right.payload.error_code))
+            .then_with(|| left.payload.message.cmp(&right.payload.message))
+    });
+}
+
+fn should_fail_validation(diagnostics: &[ValidationDiagnostic], threshold: FailOnSeverity) -> bool {
+    if threshold == FailOnSeverity::None {
+        return false;
+    }
+
+    let threshold_rank = threshold.rank();
+    diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.payload.severity_rank() >= threshold_rank)
+}
+
+fn print_validate_text(result: &ValidateResult, fail_on: FailOnSeverity) {
+    if result.valid {
+        println!("✓ Valid {} diagram", result.diagram_type);
+    } else {
+        println!("✗ Invalid {} diagram", result.diagram_type);
+    }
+
+    println!("  Nodes: {}", result.node_count);
+    println!("  Edges: {}", result.edge_count);
+    println!("  Diagnostics: {}", result.diagnostics.len());
+    println!("  Fail threshold: {:?}", fail_on);
+
+    if result.diagnostics.is_empty() {
+        return;
+    }
+
+    println!("\nDiagnostics:");
+    for diagnostic in &result.diagnostics {
+        let location = match (
+            diagnostic.payload.source_line,
+            diagnostic.payload.source_column,
+        ) {
+            (Some(line), Some(column)) => format!(" (line {line}, col {column})"),
+            (Some(line), None) => format!(" (line {line})"),
+            _ => String::new(),
+        };
+        println!(
+            "  [{}][{}][{}] {}{}",
+            diagnostic.stage,
+            diagnostic.payload.severity,
+            diagnostic.payload.error_code,
+            diagnostic.payload.message,
+            location
+        );
+        if let Some(rule_id) = &diagnostic.payload.rule_id {
+            println!("       rule_id: {rule_id}");
+        }
+        if let Some(hint) = &diagnostic.payload.remediation_hint {
+            println!("       remediation: {hint}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod validate_tests {
+    use super::{
+        FailOnSeverity, StructuredDiagnostic, ValidationDiagnostic, parse_warning_remediation_hint,
+        should_fail_validation, sort_diagnostics,
+    };
+
+    fn diagnostic(
+        stage: &str,
+        severity: &str,
+        source_line: Option<usize>,
+        error_code: &str,
+    ) -> ValidationDiagnostic {
+        ValidationDiagnostic {
+            stage: stage.to_string(),
+            payload: StructuredDiagnostic {
+                error_code: error_code.to_string(),
+                severity: severity.to_string(),
+                message: format!("{stage}:{severity}:{error_code}"),
+                span: None,
+                source_line,
+                source_column: None,
+                rule_id: None,
+                confidence: None,
+                remediation_hint: None,
+            },
+        }
+    }
+
+    #[test]
+    fn diagnostics_are_sorted_by_severity_then_location_then_code() {
+        let mut diagnostics = vec![
+            diagnostic("render", "warning", Some(2), "b"),
+            diagnostic("parse", "error", Some(5), "z"),
+            diagnostic("parse", "warning", Some(1), "a"),
+            diagnostic("layout", "info", Some(1), "a"),
+            diagnostic("parse", "error", Some(1), "a"),
+        ];
+
+        sort_diagnostics(&mut diagnostics);
+        let ordered: Vec<(String, String, Option<usize>, String)> = diagnostics
+            .iter()
+            .map(|diag| {
+                (
+                    diag.stage.clone(),
+                    diag.payload.severity.clone(),
+                    diag.payload.source_line,
+                    diag.payload.error_code.clone(),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            ordered,
+            vec![
+                (
+                    "parse".to_string(),
+                    "error".to_string(),
+                    Some(1),
+                    "a".to_string()
+                ),
+                (
+                    "parse".to_string(),
+                    "error".to_string(),
+                    Some(5),
+                    "z".to_string()
+                ),
+                (
+                    "parse".to_string(),
+                    "warning".to_string(),
+                    Some(1),
+                    "a".to_string()
+                ),
+                (
+                    "render".to_string(),
+                    "warning".to_string(),
+                    Some(2),
+                    "b".to_string()
+                ),
+                (
+                    "layout".to_string(),
+                    "info".to_string(),
+                    Some(1),
+                    "a".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn fail_threshold_respects_selected_severity() {
+        let diagnostics = vec![
+            diagnostic("parse", "info", Some(1), "i"),
+            diagnostic("layout", "warning", Some(2), "w"),
+        ];
+
+        assert!(should_fail_validation(
+            &diagnostics,
+            FailOnSeverity::Warning
+        ));
+        assert!(!should_fail_validation(&diagnostics, FailOnSeverity::Error));
+        assert!(should_fail_validation(&diagnostics, FailOnSeverity::Info));
+        assert!(!should_fail_validation(&diagnostics, FailOnSeverity::None));
+    }
+
+    #[test]
+    fn warning_hint_detects_unknown_diagram_message() {
+        let hint = parse_warning_remediation_hint("Unknown diagram type header");
+        assert!(hint.is_some_and(|value| value.contains("flowchart LR")));
     }
 }
 

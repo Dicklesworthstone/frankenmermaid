@@ -7,6 +7,9 @@ use fm_layout::{layout_diagram, layout_diagram_traced};
 use fm_parser::parse;
 use fm_render_svg::render_svg;
 use fm_render_term::render_term;
+use std::io::Write;
+use std::process::{Command, Stdio};
+use tempfile::NamedTempFile;
 
 /// Test that a simple flowchart parses and produces non-zero layout positions.
 #[test]
@@ -418,4 +421,106 @@ fn handles_all_directions() {
             expected_dir
         );
     }
+}
+
+fn run_cli(args: &[&str], stdin: &str) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_fm-cli"));
+    command.args(args);
+
+    if stdin.is_empty() {
+        command
+            .output()
+            .expect("failed to run fm-cli without stdin")
+    } else {
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to spawn fm-cli with stdin");
+        let Some(mut child_stdin) = child.stdin.take() else {
+            panic!("failed to open stdin pipe");
+        };
+        child_stdin
+            .write_all(stdin.as_bytes())
+            .expect("failed writing stdin to fm-cli");
+        drop(child_stdin);
+        child
+            .wait_with_output()
+            .expect("failed collecting fm-cli output")
+    }
+}
+
+#[test]
+fn validate_pretty_outputs_structured_diagnostics_payload() {
+    let input = "flowchart LR\nA-->B\nB-->A\n";
+    let output = run_cli(&["validate", "-", "--format", "pretty"], input);
+    assert!(
+        output.status.success(),
+        "validate should succeed at default fail-on=error; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout must be utf-8");
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("validate pretty must produce json");
+    assert!(json.get("diagnostics").is_some());
+    assert!(json["diagnostics"].is_array());
+    let first = json["diagnostics"]
+        .as_array()
+        .and_then(|items| items.first())
+        .cloned()
+        .expect("expected at least one diagnostic for cyclic graph");
+    assert!(first.get("stage").is_some());
+    assert!(first.get("error_code").is_some());
+    assert!(first.get("severity").is_some());
+    assert!(first.get("message").is_some());
+}
+
+#[test]
+fn validate_fail_on_warning_returns_nonzero() {
+    let input = "flowchart LR\nA-->B\nB-->A\n";
+    let output = run_cli(
+        &["validate", "-", "--format", "json", "--fail-on", "warning"],
+        input,
+    );
+    assert!(
+        !output.status.success(),
+        "expected non-zero exit when warning threshold is selected"
+    );
+}
+
+#[test]
+fn validate_diagnostics_out_writes_artifact_file() {
+    let input = "flowchart TD\nA-->B\n";
+    let diagnostics_file = NamedTempFile::new().expect("temp diagnostics file");
+    let diagnostics_path = diagnostics_file
+        .path()
+        .to_str()
+        .expect("temp path must be valid utf-8")
+        .to_string();
+
+    let output = run_cli(
+        &[
+            "validate",
+            "-",
+            "--format",
+            "json",
+            "--diagnostics-out",
+            &diagnostics_path,
+        ],
+        input,
+    );
+    assert!(
+        output.status.success(),
+        "validate with diagnostics-out should succeed; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let artifact_raw =
+        std::fs::read_to_string(&diagnostics_path).expect("failed to read diagnostics artifact");
+    let artifact_json: serde_json::Value =
+        serde_json::from_str(&artifact_raw).expect("artifact should be valid json");
+    assert!(artifact_json.get("valid").is_some());
+    assert!(artifact_json.get("diagnostics").is_some());
 }
