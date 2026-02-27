@@ -10,6 +10,7 @@ pub use font_metrics::{
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -107,6 +108,18 @@ pub enum MermaidWarningCode {
     UnsupportedStyle,
     UnsupportedLink,
     UnsupportedFeature,
+}
+
+impl MermaidWarningCode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ParseRecovery => "mermaid/warn/parse-recovery",
+            Self::UnsupportedStyle => "mermaid/warn/unsupported-style",
+            Self::UnsupportedLink => "mermaid/warn/unsupported-link",
+            Self::UnsupportedFeature => "mermaid/warn/unsupported-feature",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -490,6 +503,16 @@ pub struct MermaidConfig {
     pub capability_profile: Option<String>,
     pub debug_overlay: bool,
     pub palette: DiagramPalettePreset,
+    /// Mermaid-style theme name from `mermaid.initialize` / init directives.
+    pub theme: Option<String>,
+    /// Mermaid-style `themeVariables` overrides.
+    pub theme_variables: BTreeMap<String, String>,
+    /// Mermaid-style flowchart direction hint (`LR`, `TB`, etc.).
+    pub flowchart_direction: Option<GraphDirection>,
+    /// Mermaid-style flowchart curve mode (for example, `basis`, `linear`).
+    pub flowchart_curve: Option<String>,
+    /// Mermaid-style sequence mirror actors toggle.
+    pub sequence_mirror_actors: Option<bool>,
 }
 
 impl Default for MermaidConfig {
@@ -519,6 +542,11 @@ impl Default for MermaidConfig {
             capability_profile: None,
             debug_overlay: false,
             palette: DiagramPalettePreset::Default,
+            theme: None,
+            theme_variables: BTreeMap::new(),
+            flowchart_direction: None,
+            flowchart_curve: None,
+            sequence_mirror_actors: None,
         }
     }
 }
@@ -533,6 +561,7 @@ pub struct MermaidConfigError {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct MermaidConfigParse {
     pub config: MermaidConfig,
+    pub warnings: Vec<MermaidWarning>,
     pub errors: Vec<MermaidConfigError>,
 }
 
@@ -547,6 +576,8 @@ pub struct MermaidInitConfig {
     pub theme: Option<String>,
     pub theme_variables: BTreeMap<String, String>,
     pub flowchart_direction: Option<GraphDirection>,
+    pub flowchart_curve: Option<String>,
+    pub sequence_mirror_actors: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -554,6 +585,245 @@ pub struct MermaidInitParse {
     pub config: MermaidInitConfig,
     pub warnings: Vec<MermaidWarning>,
     pub errors: Vec<MermaidError>,
+}
+
+#[must_use]
+pub fn parse_mermaid_js_config_value(value: &Value) -> MermaidConfigParse {
+    let mut parsed = MermaidConfigParse::default();
+    let Some(config_obj) = value.as_object() else {
+        parsed.errors.push(MermaidConfigError {
+            field: "$".to_string(),
+            value: value.to_string(),
+            message: "Mermaid config root must be a JSON object".to_string(),
+        });
+        return parsed;
+    };
+
+    for (key, raw_value) in config_obj {
+        match key.as_str() {
+            "theme" => {
+                if let Some(theme) = raw_value.as_str() {
+                    parsed.config.theme = Some(theme.to_string());
+                    parsed.config.palette = palette_from_theme_name(theme);
+                } else {
+                    push_type_error(
+                        &mut parsed,
+                        "theme",
+                        raw_value,
+                        "must be a string (for example, \"default\" or \"dark\")",
+                    );
+                }
+            }
+            "themeVariables" => {
+                if let Some(theme_vars) = raw_value.as_object() {
+                    for (var_key, var_value) in theme_vars {
+                        if let Some(value_text) = json_scalar_to_string(var_value) {
+                            parsed
+                                .config
+                                .theme_variables
+                                .insert(var_key.clone(), value_text);
+                        } else {
+                            push_type_error(
+                                &mut parsed,
+                                &format!("themeVariables.{var_key}"),
+                                var_value,
+                                "must be a string, number, or boolean",
+                            );
+                        }
+                    }
+                } else {
+                    push_type_error(
+                        &mut parsed,
+                        "themeVariables",
+                        raw_value,
+                        "must be an object",
+                    );
+                }
+            }
+            "flowchart" => parse_flowchart_config(raw_value, &mut parsed),
+            "sequence" => parse_sequence_config(raw_value, &mut parsed),
+            "securityLevel" => {
+                if let Some(level) = raw_value.as_str() {
+                    match level.to_ascii_lowercase().as_str() {
+                        "strict" | "antiscript" => {
+                            parsed.config.sanitize_mode = MermaidSanitizeMode::Strict;
+                        }
+                        "loose" => {
+                            parsed.config.sanitize_mode = MermaidSanitizeMode::Lenient;
+                        }
+                        _ => {
+                            push_warning(
+                                &mut parsed,
+                                format!("Unsupported securityLevel '{level}' ignored"),
+                            );
+                        }
+                    }
+                } else {
+                    push_type_error(&mut parsed, "securityLevel", raw_value, "must be a string");
+                }
+            }
+            // Common Mermaid key, but currently no equivalent runtime behavior in fm-core.
+            "startOnLoad" => {
+                if !raw_value.is_boolean() {
+                    push_type_error(&mut parsed, "startOnLoad", raw_value, "must be a boolean");
+                }
+                push_warning(
+                    &mut parsed,
+                    "Config key 'startOnLoad' is accepted but currently ignored".to_string(),
+                );
+            }
+            other => push_warning(
+                &mut parsed,
+                format!("Unsupported Mermaid config key '{other}' ignored"),
+            ),
+        }
+    }
+
+    parsed
+}
+
+#[must_use]
+pub fn to_init_parse(parsed_config: MermaidConfigParse) -> MermaidInitParse {
+    let init_config = MermaidInitConfig {
+        theme: parsed_config.config.theme.clone(),
+        theme_variables: parsed_config.config.theme_variables.clone(),
+        flowchart_direction: parsed_config.config.flowchart_direction,
+        flowchart_curve: parsed_config.config.flowchart_curve.clone(),
+        sequence_mirror_actors: parsed_config.config.sequence_mirror_actors,
+    };
+
+    let errors = parsed_config
+        .errors
+        .into_iter()
+        .map(|error| MermaidError::Parse {
+            message: format!("Config field '{}': {}", error.field, error.message),
+            span: Span::default(),
+            expected: vec!["a valid Mermaid config value".to_string()],
+        })
+        .collect();
+
+    MermaidInitParse {
+        config: init_config,
+        warnings: parsed_config.warnings,
+        errors,
+    }
+}
+
+fn parse_flowchart_config(value: &Value, parsed: &mut MermaidConfigParse) {
+    let Some(obj) = value.as_object() else {
+        push_type_error(parsed, "flowchart", value, "must be an object");
+        return;
+    };
+
+    for (key, raw_value) in obj {
+        match key.as_str() {
+            "direction" | "rankDir" => {
+                if let Some(direction_text) = raw_value.as_str() {
+                    if let Some(direction) = parse_graph_direction_token(direction_text) {
+                        parsed.config.flowchart_direction = Some(direction);
+                    } else {
+                        push_warning(
+                            parsed,
+                            format!("Unsupported flowchart direction '{direction_text}' ignored"),
+                        );
+                    }
+                } else {
+                    push_type_error(
+                        parsed,
+                        &format!("flowchart.{key}"),
+                        raw_value,
+                        "must be a direction string (LR, RL, TB, TD, BT)",
+                    );
+                }
+            }
+            "curve" => {
+                if let Some(curve) = raw_value.as_str() {
+                    parsed.config.flowchart_curve = Some(curve.to_string());
+                } else {
+                    push_type_error(parsed, "flowchart.curve", raw_value, "must be a string");
+                }
+            }
+            other => push_warning(
+                parsed,
+                format!("Unsupported flowchart config key '{other}' ignored"),
+            ),
+        }
+    }
+}
+
+fn parse_sequence_config(value: &Value, parsed: &mut MermaidConfigParse) {
+    let Some(obj) = value.as_object() else {
+        push_type_error(parsed, "sequence", value, "must be an object");
+        return;
+    };
+
+    for (key, raw_value) in obj {
+        match key.as_str() {
+            "mirrorActors" => {
+                if let Some(mirror) = raw_value.as_bool() {
+                    parsed.config.sequence_mirror_actors = Some(mirror);
+                } else {
+                    push_type_error(
+                        parsed,
+                        "sequence.mirrorActors",
+                        raw_value,
+                        "must be a boolean",
+                    );
+                }
+            }
+            other => push_warning(
+                parsed,
+                format!("Unsupported sequence config key '{other}' ignored"),
+            ),
+        }
+    }
+}
+
+fn push_type_error(parsed: &mut MermaidConfigParse, field: &str, value: &Value, message: &str) {
+    parsed.errors.push(MermaidConfigError {
+        field: field.to_string(),
+        value: value.to_string(),
+        message: message.to_string(),
+    });
+}
+
+fn push_warning(parsed: &mut MermaidConfigParse, message: String) {
+    parsed.warnings.push(MermaidWarning {
+        code: MermaidWarningCode::UnsupportedFeature,
+        message,
+        span: Span::default(),
+    });
+}
+
+fn json_scalar_to_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Bool(flag) => Some(flag.to_string()),
+        Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    }
+}
+
+fn parse_graph_direction_token(token: &str) -> Option<GraphDirection> {
+    match token.trim().to_ascii_uppercase().as_str() {
+        "LR" => Some(GraphDirection::LR),
+        "RL" => Some(GraphDirection::RL),
+        "TB" => Some(GraphDirection::TB),
+        "TD" => Some(GraphDirection::TD),
+        "BT" => Some(GraphDirection::BT),
+        _ => None,
+    }
+}
+
+fn palette_from_theme_name(theme: &str) -> DiagramPalettePreset {
+    match theme.trim().to_ascii_lowercase().as_str() {
+        "corporate" => DiagramPalettePreset::Corporate,
+        "neon" => DiagramPalettePreset::Neon,
+        "monochrome" => DiagramPalettePreset::Monochrome,
+        "pastel" => DiagramPalettePreset::Pastel,
+        "highcontrast" | "high-contrast" => DiagramPalettePreset::HighContrast,
+        _ => DiagramPalettePreset::Default,
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -844,6 +1114,109 @@ impl Diagnostic {
     }
 }
 
+/// Stable, machine-readable diagnostics payload schema for automation surfaces.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct StructuredDiagnostic {
+    pub error_code: String,
+    pub severity: String,
+    pub message: String,
+    pub span: Option<Span>,
+    pub source_line: Option<usize>,
+    pub source_column: Option<usize>,
+    pub rule_id: Option<String>,
+    pub confidence: Option<f32>,
+    pub remediation_hint: Option<String>,
+}
+
+impl StructuredDiagnostic {
+    #[must_use]
+    pub fn from_diagnostic(diagnostic: &Diagnostic) -> Self {
+        let (source_line, source_column) = diagnostic
+            .span
+            .map(|span| (Some(span.start.line), Some(span.start.col)))
+            .unwrap_or((None, None));
+
+        Self {
+            error_code: format!("mermaid/diag/{}", diagnostic.category.as_str()),
+            severity: diagnostic.severity.as_str().to_string(),
+            message: diagnostic.message.clone(),
+            span: diagnostic.span,
+            source_line,
+            source_column,
+            rule_id: None,
+            confidence: None,
+            remediation_hint: diagnostic.suggestion.clone(),
+        }
+    }
+
+    #[must_use]
+    pub fn from_warning(warning: &MermaidWarning) -> Self {
+        Self {
+            error_code: warning.code.as_str().to_string(),
+            severity: DiagnosticSeverity::Warning.as_str().to_string(),
+            message: warning.message.clone(),
+            span: Some(warning.span),
+            source_line: Some(warning.span.start.line),
+            source_column: Some(warning.span.start.col),
+            rule_id: None,
+            confidence: None,
+            remediation_hint: None,
+        }
+    }
+
+    #[must_use]
+    pub fn from_error(error: &MermaidError) -> Self {
+        let span = error.span();
+        let remediation_hint = match error {
+            MermaidError::Parse { expected, .. } if !expected.is_empty() => {
+                Some(format!("Expected one of: {}", expected.join(", ")))
+            }
+            _ => None,
+        };
+
+        Self {
+            error_code: error.code().as_str().to_string(),
+            severity: DiagnosticSeverity::Error.as_str().to_string(),
+            message: error.to_string(),
+            span: Some(span),
+            source_line: Some(span.start.line),
+            source_column: Some(span.start.col),
+            rule_id: None,
+            confidence: None,
+            remediation_hint,
+        }
+    }
+
+    #[must_use]
+    pub fn with_rule_id(mut self, rule_id: impl Into<String>) -> Self {
+        self.rule_id = Some(rule_id.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_confidence(mut self, confidence: f32) -> Self {
+        self.confidence = Some(confidence);
+        self
+    }
+
+    #[must_use]
+    pub fn with_remediation_hint(mut self, remediation_hint: impl Into<String>) -> Self {
+        self.remediation_hint = Some(remediation_hint.into());
+        self
+    }
+
+    #[must_use]
+    pub fn severity_rank(&self) -> u8 {
+        match self.severity.as_str() {
+            "hint" => 1,
+            "info" => 2,
+            "warning" => 3,
+            "error" => 4,
+            _ => 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct MermaidDiagramIr {
     pub diagram_type: DiagramType,
@@ -976,9 +1349,12 @@ pub struct MermaidIrParse {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::{
         ArrowType, Diagnostic, DiagnosticCategory, DiagnosticSeverity, DiagramType, GraphDirection,
-        MermaidDiagramIr, Span,
+        MermaidDiagramIr, MermaidSanitizeMode, Span, StructuredDiagnostic,
+        parse_mermaid_js_config_value, to_init_parse,
     };
 
     #[test]
@@ -1052,5 +1428,160 @@ mod tests {
 
         let warnings = ir.diagnostics_by_severity(DiagnosticSeverity::Warning);
         assert_eq!(warnings.len(), 2);
+    }
+
+    #[test]
+    fn mermaid_js_config_adapter_maps_common_fields() {
+        let parsed = parse_mermaid_js_config_value(&json!({
+            "theme": "dark",
+            "themeVariables": {
+                "primaryColor": "#ffffff",
+                "lineColor": 12
+            },
+            "flowchart": {
+                "direction": "RL",
+                "curve": "basis"
+            },
+            "sequence": {
+                "mirrorActors": true
+            },
+            "securityLevel": "loose"
+        }));
+
+        assert!(
+            parsed.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parsed.errors
+        );
+        assert_eq!(parsed.config.theme.as_deref(), Some("dark"));
+        assert_eq!(
+            parsed
+                .config
+                .theme_variables
+                .get("primaryColor")
+                .map(String::as_str),
+            Some("#ffffff")
+        );
+        assert_eq!(
+            parsed
+                .config
+                .theme_variables
+                .get("lineColor")
+                .map(String::as_str),
+            Some("12")
+        );
+        assert_eq!(parsed.config.flowchart_direction, Some(GraphDirection::RL));
+        assert_eq!(parsed.config.flowchart_curve.as_deref(), Some("basis"));
+        assert_eq!(parsed.config.sequence_mirror_actors, Some(true));
+        assert_eq!(parsed.config.sanitize_mode, MermaidSanitizeMode::Lenient);
+    }
+
+    #[test]
+    fn mermaid_js_config_adapter_reports_unknown_and_type_issues() {
+        let parsed = parse_mermaid_js_config_value(&json!({
+            "theme": 42,
+            "flowchart": "not-an-object",
+            "sequence": { "mirrorActors": "yes" },
+            "unknownKey": true
+        }));
+
+        assert!(!parsed.errors.is_empty());
+        assert!(parsed.errors.iter().any(|e| e.field == "theme"));
+        assert!(parsed.errors.iter().any(|e| e.field == "flowchart"));
+        assert!(
+            parsed
+                .errors
+                .iter()
+                .any(|e| e.field == "sequence.mirrorActors")
+        );
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|w| w.message.contains("unknownKey"))
+        );
+    }
+
+    #[test]
+    fn mermaid_js_config_can_be_projected_to_init_parse() {
+        let parsed = parse_mermaid_js_config_value(&json!({
+            "theme": "corporate",
+            "themeVariables": { "primaryColor": "#0ff" },
+            "flowchart": { "rankDir": "LR", "curve": "linear" },
+            "sequence": { "mirrorActors": false }
+        }));
+        let init_parse = to_init_parse(parsed);
+
+        assert!(init_parse.errors.is_empty());
+        assert_eq!(init_parse.config.theme.as_deref(), Some("corporate"));
+        assert_eq!(
+            init_parse
+                .config
+                .theme_variables
+                .get("primaryColor")
+                .map(String::as_str),
+            Some("#0ff")
+        );
+        assert_eq!(
+            init_parse.config.flowchart_direction,
+            Some(GraphDirection::LR)
+        );
+        assert_eq!(init_parse.config.flowchart_curve.as_deref(), Some("linear"));
+        assert_eq!(init_parse.config.sequence_mirror_actors, Some(false));
+    }
+
+    #[test]
+    fn structured_diagnostic_from_warning_preserves_span_and_code() {
+        let warning = super::MermaidWarning {
+            code: super::MermaidWarningCode::UnsupportedFeature,
+            message: "unsupported directive".to_string(),
+            span: Span::at_line(3, 10),
+        };
+
+        let structured = StructuredDiagnostic::from_warning(&warning);
+        assert_eq!(
+            structured.error_code,
+            "mermaid/warn/unsupported-feature".to_string()
+        );
+        assert_eq!(structured.severity, "warning".to_string());
+        assert_eq!(structured.source_line, Some(3));
+        assert_eq!(structured.source_column, Some(1));
+    }
+
+    #[test]
+    fn structured_diagnostic_from_error_maps_expected_to_hint() {
+        let parse_error = super::MermaidError::Parse {
+            message: "unexpected token".to_string(),
+            span: Span::at_line(5, 4),
+            expected: vec!["node id".to_string(), "arrow".to_string()],
+        };
+        let structured = StructuredDiagnostic::from_error(&parse_error);
+        assert_eq!(structured.error_code, "mermaid/error/parse".to_string());
+        assert_eq!(structured.severity, "error".to_string());
+        assert!(
+            structured
+                .remediation_hint
+                .as_deref()
+                .is_some_and(|hint| hint.contains("Expected one of"))
+        );
+    }
+
+    #[test]
+    fn structured_diagnostic_rank_orders_by_severity() {
+        let hint = StructuredDiagnostic {
+            severity: "hint".to_string(),
+            ..Default::default()
+        };
+        let warning = StructuredDiagnostic {
+            severity: "warning".to_string(),
+            ..Default::default()
+        };
+        let error = StructuredDiagnostic {
+            severity: "error".to_string(),
+            ..Default::default()
+        };
+
+        assert!(hint.severity_rank() < warning.severity_rank());
+        assert!(warning.severity_rank() < error.severity_rank());
     }
 }
