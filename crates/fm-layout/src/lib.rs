@@ -2,8 +2,9 @@
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::f32::consts::PI;
 
-use fm_core::{FontMetrics, GraphDirection, IrEndpoint, MermaidDiagramIr};
+use fm_core::{DiagramType, FontMetrics, GraphDirection, IrEndpoint, MermaidDiagramIr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutAlgorithm {
@@ -194,7 +195,13 @@ pub struct TracedLayout {
 #[must_use]
 pub fn layout(ir: &MermaidDiagramIr, algorithm: LayoutAlgorithm) -> LayoutStats {
     match algorithm {
+        LayoutAlgorithm::Auto => match ir.diagram_type {
+            DiagramType::Mindmap => layout_diagram_radial(ir).stats,
+            _ => layout_diagram(ir).stats,
+        },
         LayoutAlgorithm::Force => layout_diagram_force(ir).stats,
+        LayoutAlgorithm::Tree => layout_diagram_tree(ir).stats,
+        LayoutAlgorithm::Radial => layout_diagram_radial(ir).stats,
         _ => layout_diagram(ir).stats,
     }
 }
@@ -307,7 +314,7 @@ pub fn layout_diagram_traced_with_config(
         0
     };
 
-    let bounds = compute_bounds(&nodes, &clusters, spacing);
+    let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
 
     push_snapshot(
         &mut trace,
@@ -447,7 +454,7 @@ pub fn layout_diagram_force_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let nodes = force_build_node_boxes(ir, &positions, &node_sizes);
     let edges = force_build_edge_paths(ir, &nodes);
     let clusters = build_cluster_boxes(ir, &nodes, spacing);
-    let bounds = compute_bounds(&nodes, &clusters, spacing);
+    let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
 
     let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
 
@@ -478,6 +485,711 @@ pub fn layout_diagram_force_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             stats,
         },
         trace,
+    }
+}
+
+/// Lay out a diagram using a deterministic tidy-tree algorithm.
+#[must_use]
+pub fn layout_diagram_tree(ir: &MermaidDiagramIr) -> DiagramLayout {
+    layout_diagram_tree_traced(ir).layout
+}
+
+/// Lay out using the tree algorithm and return tracing information.
+#[must_use]
+pub fn layout_diagram_tree_traced(ir: &MermaidDiagramIr) -> TracedLayout {
+    let mut trace = LayoutTrace::default();
+    let spacing = LayoutSpacing::default();
+    let node_sizes = compute_node_sizes(ir);
+    let node_count = ir.nodes.len();
+
+    if node_count == 0 {
+        return TracedLayout {
+            layout: DiagramLayout {
+                nodes: Vec::new(),
+                clusters: Vec::new(),
+                cycle_clusters: Vec::new(),
+                edges: Vec::new(),
+                bounds: LayoutRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.0,
+                    height: 0.0,
+                },
+                stats: LayoutStats::default(),
+            },
+            trace,
+        };
+    }
+
+    let tree = build_tree_layout_structure(ir);
+    push_snapshot(
+        &mut trace,
+        "tree_structure",
+        node_count,
+        ir.edges.len(),
+        0,
+        0,
+    );
+
+    let span_sizes: Vec<f32> = node_sizes
+        .iter()
+        .map(|(width, height)| {
+            if tree.horizontal_depth_axis {
+                *height
+            } else {
+                *width
+            }
+        })
+        .collect();
+
+    let mut span_memo = vec![None; node_count];
+    for root in &tree.roots {
+        let _ = tree_subtree_span(*root, &tree.children, &span_sizes, spacing, &mut span_memo);
+    }
+    let subtree_spans: Vec<f32> = span_memo
+        .into_iter()
+        .map(|span| span.unwrap_or(0.0))
+        .collect();
+
+    let mut span_centers = vec![0.0_f32; node_count];
+    let mut root_cursor = 0.0_f32;
+    for root in &tree.roots {
+        let root_span = subtree_spans[*root];
+        assign_tree_span_centers(
+            *root,
+            root_cursor,
+            &tree.children,
+            &subtree_spans,
+            spacing,
+            &mut span_centers,
+        );
+        root_cursor += root_span + (spacing.node_spacing * 1.5);
+    }
+
+    let depth_level_sizes = tree_depth_level_sizes(&tree, &node_sizes);
+    let depth_centers = depth_level_centers(&depth_level_sizes, spacing.rank_spacing);
+
+    let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
+    for node_index in 0..node_count {
+        let logical_depth = tree.depth[node_index];
+        let mapped_depth = if tree.reverse_depth_axis {
+            tree.max_depth.saturating_sub(logical_depth)
+        } else {
+            logical_depth
+        };
+        let depth_center = depth_centers[mapped_depth];
+        let span_center = span_centers[node_index];
+        centers[node_index] = if tree.horizontal_depth_axis {
+            (depth_center, span_center)
+        } else {
+            (span_center, depth_center)
+        };
+    }
+    normalize_center_positions(&mut centers, &node_sizes);
+
+    let order_by_rank = rank_orders_from_key(ir, &tree.depth, &span_centers);
+    let nodes = node_boxes_from_centers(ir, &node_sizes, &tree.depth, &order_by_rank, &centers);
+    let edges = build_edge_paths(ir, &nodes, &BTreeSet::new());
+    let clusters = build_cluster_boxes(ir, &nodes, spacing);
+    let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
+    let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
+
+    push_snapshot(
+        &mut trace,
+        "tree_post_processing",
+        node_count,
+        ir.edges.len(),
+        0,
+        0,
+    );
+
+    let stats = LayoutStats {
+        node_count,
+        edge_count: ir.edges.len(),
+        crossing_count: 0,
+        crossing_count_before_refinement: 0,
+        reversed_edges: 0,
+        cycle_count: 0,
+        cycle_node_count: 0,
+        max_cycle_size: 0,
+        collapsed_clusters: 0,
+        reversed_edge_total_length,
+        total_edge_length,
+        phase_iterations: trace.snapshots.len(),
+    };
+
+    TracedLayout {
+        layout: DiagramLayout {
+            nodes,
+            clusters,
+            cycle_clusters: Vec::new(),
+            edges,
+            bounds,
+            stats,
+        },
+        trace,
+    }
+}
+
+/// Lay out a diagram using a deterministic radial tree variant.
+#[must_use]
+pub fn layout_diagram_radial(ir: &MermaidDiagramIr) -> DiagramLayout {
+    layout_diagram_radial_traced(ir).layout
+}
+
+/// Lay out using the radial tree algorithm and return tracing information.
+#[must_use]
+pub fn layout_diagram_radial_traced(ir: &MermaidDiagramIr) -> TracedLayout {
+    let mut trace = LayoutTrace::default();
+    let spacing = LayoutSpacing::default();
+    let node_sizes = compute_node_sizes(ir);
+    let node_count = ir.nodes.len();
+
+    if node_count == 0 {
+        return TracedLayout {
+            layout: DiagramLayout {
+                nodes: Vec::new(),
+                clusters: Vec::new(),
+                cycle_clusters: Vec::new(),
+                edges: Vec::new(),
+                bounds: LayoutRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.0,
+                    height: 0.0,
+                },
+                stats: LayoutStats::default(),
+            },
+            trace,
+        };
+    }
+
+    let tree = build_tree_layout_structure(ir);
+    push_snapshot(
+        &mut trace,
+        "tree_structure",
+        node_count,
+        ir.edges.len(),
+        0,
+        0,
+    );
+
+    let depth_offset = usize::from(tree.roots.len() > 1);
+    let effective_max_depth = tree.max_depth + depth_offset;
+    let mut ring_level_sizes = vec![0.0_f32; effective_max_depth + 1];
+    for (node_index, (width, height)) in node_sizes.iter().copied().enumerate() {
+        let level = tree.depth[node_index] + depth_offset;
+        ring_level_sizes[level] = ring_level_sizes[level].max(width.max(height));
+    }
+
+    let mut radii = vec![0.0_f32; effective_max_depth + 1];
+    for level in 1..=effective_max_depth {
+        let prev = ring_level_sizes[level - 1].max(1.0);
+        let current = ring_level_sizes[level].max(1.0);
+        radii[level] = radii[level - 1] + (prev / 2.0) + spacing.rank_spacing + (current / 2.0);
+    }
+
+    let mut leaf_memo = vec![None; node_count];
+    for root in &tree.roots {
+        let _ = radial_leaf_count(*root, &tree.children, &mut leaf_memo);
+    }
+    let leaf_counts: Vec<usize> = leaf_memo
+        .into_iter()
+        .map(|count| count.unwrap_or(1))
+        .collect();
+
+    let mut angles = vec![0.0_f32; node_count];
+    if tree.roots.len() == 1 && depth_offset == 0 {
+        assign_radial_angles(
+            tree.roots[0],
+            -PI,
+            PI,
+            &tree,
+            &leaf_counts,
+            &node_sizes,
+            &radii,
+            depth_offset,
+            spacing,
+            &mut angles,
+        );
+    } else {
+        let total_leaves: usize = tree.roots.iter().map(|root| leaf_counts[*root]).sum();
+        let total_leaves = total_leaves.max(1);
+        let mut cursor = -PI;
+        for (root_index, root) in tree.roots.iter().enumerate() {
+            let weight = leaf_counts[*root] as f32 / total_leaves as f32;
+            let mut span = (2.0 * PI) * weight;
+            if root_index + 1 == tree.roots.len() {
+                span = PI - cursor;
+            }
+            assign_radial_angles(
+                *root,
+                cursor,
+                cursor + span,
+                &tree,
+                &leaf_counts,
+                &node_sizes,
+                &radii,
+                depth_offset,
+                spacing,
+                &mut angles,
+            );
+            cursor += span;
+        }
+    }
+
+    let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
+    for node_index in 0..node_count {
+        let level = tree.depth[node_index] + depth_offset;
+        let radius = radii[level];
+        let angle = angles[node_index];
+        centers[node_index] = (radius * angle.cos(), radius * angle.sin());
+    }
+    normalize_center_positions(&mut centers, &node_sizes);
+
+    let order_by_rank = rank_orders_from_key(ir, &tree.depth, &angles);
+    let nodes = node_boxes_from_centers(ir, &node_sizes, &tree.depth, &order_by_rank, &centers);
+    let edges = force_build_edge_paths(ir, &nodes);
+    let clusters = build_cluster_boxes(ir, &nodes, spacing);
+    let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
+    let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
+
+    push_snapshot(
+        &mut trace,
+        "radial_post_processing",
+        node_count,
+        ir.edges.len(),
+        0,
+        0,
+    );
+
+    let stats = LayoutStats {
+        node_count,
+        edge_count: ir.edges.len(),
+        crossing_count: 0,
+        crossing_count_before_refinement: 0,
+        reversed_edges: 0,
+        cycle_count: 0,
+        cycle_node_count: 0,
+        max_cycle_size: 0,
+        collapsed_clusters: 0,
+        reversed_edge_total_length,
+        total_edge_length,
+        phase_iterations: trace.snapshots.len(),
+    };
+
+    TracedLayout {
+        layout: DiagramLayout {
+            nodes,
+            clusters,
+            cycle_clusters: Vec::new(),
+            edges,
+            bounds,
+            stats,
+        },
+        trace,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TreeLayoutStructure {
+    roots: Vec<usize>,
+    children: Vec<Vec<usize>>,
+    depth: Vec<usize>,
+    max_depth: usize,
+    horizontal_depth_axis: bool,
+    reverse_depth_axis: bool,
+}
+
+fn build_tree_layout_structure(ir: &MermaidDiagramIr) -> TreeLayoutStructure {
+    let node_count = ir.nodes.len();
+    let horizontal_depth_axis = matches!(ir.direction, GraphDirection::LR | GraphDirection::RL);
+    let reverse_depth_axis = matches!(ir.direction, GraphDirection::BT | GraphDirection::RL);
+
+    if node_count == 0 {
+        return TreeLayoutStructure {
+            roots: Vec::new(),
+            children: Vec::new(),
+            depth: Vec::new(),
+            max_depth: 0,
+            horizontal_depth_axis,
+            reverse_depth_axis,
+        };
+    }
+
+    let mut outgoing = vec![Vec::new(); node_count];
+    let mut indegree = vec![0_usize; node_count];
+    for edge in &ir.edges {
+        let Some(source) = endpoint_node_index(ir, edge.from) else {
+            continue;
+        };
+        let Some(target) = endpoint_node_index(ir, edge.to) else {
+            continue;
+        };
+        if source >= node_count || target >= node_count || source == target {
+            continue;
+        }
+        outgoing[source].push(target);
+        indegree[target] = indegree[target].saturating_add(1);
+    }
+
+    for neighbors in &mut outgoing {
+        neighbors.sort_by(|left, right| compare_node_indices(ir, *left, *right));
+        neighbors.dedup();
+    }
+
+    let mut sorted_nodes: Vec<usize> = (0..node_count).collect();
+    sorted_nodes.sort_by(|left, right| compare_node_indices(ir, *left, *right));
+
+    let mut candidate_roots: Vec<usize> = sorted_nodes
+        .iter()
+        .copied()
+        .filter(|node| indegree[*node] == 0)
+        .collect();
+    if candidate_roots.is_empty()
+        && let Some(first_node) = sorted_nodes.first().copied()
+    {
+        candidate_roots.push(first_node);
+    }
+
+    let mut visited = vec![false; node_count];
+    let mut depth = vec![0_usize; node_count];
+    let mut children = vec![Vec::new(); node_count];
+    let mut roots = Vec::new();
+
+    for candidate in candidate_roots
+        .iter()
+        .copied()
+        .chain(sorted_nodes.iter().copied())
+    {
+        if visited[candidate] {
+            continue;
+        }
+
+        roots.push(candidate);
+        visited[candidate] = true;
+
+        let mut queue = vec![candidate];
+        let mut queue_index = 0_usize;
+        while let Some(node) = queue.get(queue_index).copied() {
+            queue_index = queue_index.saturating_add(1);
+            let child_depth = depth[node].saturating_add(1);
+
+            for &child in &outgoing[node] {
+                if visited[child] {
+                    continue;
+                }
+                visited[child] = true;
+                depth[child] = child_depth;
+                children[node].push(child);
+                queue.push(child);
+            }
+        }
+    }
+
+    for node_children in &mut children {
+        node_children.sort_by(|left, right| compare_node_indices(ir, *left, *right));
+    }
+
+    let max_depth = depth.iter().copied().max().unwrap_or(0);
+    TreeLayoutStructure {
+        roots,
+        children,
+        depth,
+        max_depth,
+        horizontal_depth_axis,
+        reverse_depth_axis,
+    }
+}
+
+fn tree_subtree_span(
+    node_index: usize,
+    children: &[Vec<usize>],
+    node_span_sizes: &[f32],
+    spacing: LayoutSpacing,
+    memo: &mut [Option<f32>],
+) -> f32 {
+    if let Some(cached) = memo[node_index] {
+        return cached;
+    }
+
+    let own_span = node_span_sizes[node_index].max(1.0);
+    let child_span_total = if children[node_index].is_empty() {
+        0.0
+    } else {
+        let subtree_span_sum: f32 = children[node_index]
+            .iter()
+            .map(|child| tree_subtree_span(*child, children, node_span_sizes, spacing, memo))
+            .sum();
+        let gaps = spacing.node_spacing * (children[node_index].len().saturating_sub(1) as f32);
+        subtree_span_sum + gaps
+    };
+
+    let span = own_span.max(child_span_total);
+    memo[node_index] = Some(span);
+    span
+}
+
+fn assign_tree_span_centers(
+    node_index: usize,
+    span_start: f32,
+    children: &[Vec<usize>],
+    subtree_spans: &[f32],
+    spacing: LayoutSpacing,
+    out_centers: &mut [f32],
+) {
+    let subtree_span = subtree_spans[node_index];
+    out_centers[node_index] = span_start + (subtree_span / 2.0);
+
+    if children[node_index].is_empty() {
+        return;
+    }
+
+    let child_total: f32 = children[node_index]
+        .iter()
+        .map(|child| subtree_spans[*child])
+        .sum::<f32>()
+        + spacing.node_spacing * (children[node_index].len().saturating_sub(1) as f32);
+    let mut child_cursor = span_start + ((subtree_span - child_total) / 2.0);
+
+    for child in &children[node_index] {
+        assign_tree_span_centers(
+            *child,
+            child_cursor,
+            children,
+            subtree_spans,
+            spacing,
+            out_centers,
+        );
+        child_cursor += subtree_spans[*child] + spacing.node_spacing;
+    }
+}
+
+fn tree_depth_level_sizes(tree: &TreeLayoutStructure, node_sizes: &[(f32, f32)]) -> Vec<f32> {
+    let mut level_sizes = vec![0.0_f32; tree.max_depth + 1];
+    for (node_index, &(width, height)) in node_sizes.iter().enumerate() {
+        let depth = tree.depth[node_index];
+        let axis_size = if tree.horizontal_depth_axis {
+            width
+        } else {
+            height
+        };
+        level_sizes[depth] = level_sizes[depth].max(axis_size.max(1.0));
+    }
+    level_sizes
+}
+
+fn depth_level_centers(level_sizes: &[f32], gap: f32) -> Vec<f32> {
+    let mut centers = vec![0.0_f32; level_sizes.len()];
+    let mut cursor = 0.0_f32;
+    for (index, level_size) in level_sizes.iter().copied().enumerate() {
+        let bounded_size = level_size.max(1.0);
+        centers[index] = cursor + (bounded_size / 2.0);
+        cursor += bounded_size + gap;
+    }
+    centers
+}
+
+fn normalize_center_positions(centers: &mut [(f32, f32)], node_sizes: &[(f32, f32)]) {
+    if centers.is_empty() {
+        return;
+    }
+
+    let margin = 20.0_f32;
+    let mut min_x = f32::MAX;
+    let mut min_y = f32::MAX;
+    for (node_index, &(center_x, center_y)) in centers.iter().enumerate() {
+        let (width, height) = node_sizes[node_index];
+        min_x = min_x.min(center_x - (width / 2.0));
+        min_y = min_y.min(center_y - (height / 2.0));
+    }
+
+    let offset_x = margin - min_x;
+    let offset_y = margin - min_y;
+    for (x, y) in centers {
+        *x += offset_x;
+        *y += offset_y;
+    }
+}
+
+fn rank_orders_from_key(
+    ir: &MermaidDiagramIr,
+    rank_by_node: &[usize],
+    key_by_node: &[f32],
+) -> Vec<usize> {
+    let mut by_rank: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (node_index, rank) in rank_by_node.iter().copied().enumerate() {
+        by_rank.entry(rank).or_default().push(node_index);
+    }
+
+    let mut order_by_node = vec![0_usize; rank_by_node.len()];
+    for (_rank, node_indexes) in by_rank {
+        let mut sorted = node_indexes;
+        sorted.sort_by(|left, right| {
+            key_by_node[*left]
+                .total_cmp(&key_by_node[*right])
+                .then_with(|| compare_node_indices(ir, *left, *right))
+        });
+        for (order, node_index) in sorted.into_iter().enumerate() {
+            order_by_node[node_index] = order;
+        }
+    }
+    order_by_node
+}
+
+fn node_boxes_from_centers(
+    ir: &MermaidDiagramIr,
+    node_sizes: &[(f32, f32)],
+    rank_by_node: &[usize],
+    order_by_node: &[usize],
+    centers: &[(f32, f32)],
+) -> Vec<LayoutNodeBox> {
+    ir.nodes
+        .iter()
+        .enumerate()
+        .map(|(node_index, node)| {
+            let (center_x, center_y) = centers[node_index];
+            let (width, height) = node_sizes[node_index];
+            LayoutNodeBox {
+                node_index,
+                node_id: node.id.clone(),
+                rank: rank_by_node[node_index],
+                order: order_by_node[node_index],
+                bounds: LayoutRect {
+                    x: center_x - (width / 2.0),
+                    y: center_y - (height / 2.0),
+                    width,
+                    height,
+                },
+            }
+        })
+        .collect()
+}
+
+fn radial_leaf_count(
+    node_index: usize,
+    children: &[Vec<usize>],
+    memo: &mut [Option<usize>],
+) -> usize {
+    if let Some(cached) = memo[node_index] {
+        return cached;
+    }
+
+    let count = if children[node_index].is_empty() {
+        1
+    } else {
+        children[node_index]
+            .iter()
+            .map(|child| radial_leaf_count(*child, children, memo))
+            .sum::<usize>()
+            .max(1)
+    };
+    memo[node_index] = Some(count);
+    count
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assign_radial_angles(
+    node_index: usize,
+    start_angle: f32,
+    end_angle: f32,
+    tree: &TreeLayoutStructure,
+    leaf_counts: &[usize],
+    node_sizes: &[(f32, f32)],
+    radii: &[f32],
+    depth_offset: usize,
+    spacing: LayoutSpacing,
+    angles: &mut [f32],
+) {
+    let children = &tree.children[node_index];
+    if children.is_empty() {
+        angles[node_index] = (start_angle + end_angle) / 2.0;
+        return;
+    }
+
+    let available = (end_angle - start_angle).max(0.0);
+    if available <= f32::EPSILON {
+        angles[node_index] = start_angle;
+        for child in children {
+            assign_radial_angles(
+                *child,
+                start_angle,
+                start_angle,
+                tree,
+                leaf_counts,
+                node_sizes,
+                radii,
+                depth_offset,
+                spacing,
+                angles,
+            );
+        }
+        return;
+    }
+
+    let total_child_leaves: usize = children.iter().map(|child| leaf_counts[*child]).sum();
+    let total_child_leaves = total_child_leaves.max(1);
+    let child_level = tree.depth[node_index] + depth_offset + 1;
+    let child_radius = radii.get(child_level).copied().unwrap_or(1.0).max(1.0);
+
+    let required_spans: Vec<f32> = children
+        .iter()
+        .map(|child| {
+            let (width, height) = node_sizes[*child];
+            ((width.max(height) + spacing.node_spacing * 0.35) / child_radius).min(PI)
+        })
+        .collect();
+
+    let required_sum: f32 = required_spans.iter().sum();
+    let mut spans = vec![0.0_f32; children.len()];
+    if required_sum >= available {
+        for (index, child) in children.iter().enumerate() {
+            let weight = leaf_counts[*child] as f32 / total_child_leaves as f32;
+            spans[index] = available * weight;
+        }
+    } else {
+        let extra = available - required_sum;
+        for (index, child) in children.iter().enumerate() {
+            let weight = leaf_counts[*child] as f32 / total_child_leaves as f32;
+            spans[index] = required_spans[index] + (extra * weight);
+        }
+    }
+
+    // Fix floating-point drift so child spans cover the requested range exactly.
+    let assigned: f32 = spans.iter().sum();
+    if let Some(last_span) = spans.last_mut() {
+        *last_span += available - assigned;
+    }
+
+    let mut cursor = start_angle;
+    for (index, child) in children.iter().enumerate() {
+        let child_start = cursor;
+        let child_end = if index + 1 == children.len() {
+            end_angle
+        } else {
+            cursor + spans[index]
+        };
+        assign_radial_angles(
+            *child,
+            child_start,
+            child_end,
+            tree,
+            leaf_counts,
+            node_sizes,
+            radii,
+            depth_offset,
+            spacing,
+            angles,
+        );
+        cursor = child_end;
+    }
+
+    let total_child_angle: f32 = children.iter().map(|child| angles[*child]).sum();
+    angles[node_index] = total_child_angle / children.len() as f32;
+
+    // Guard against NaN from any unexpected numerical instability.
+    if !angles[node_index].is_finite() {
+        angles[node_index] = (start_angle + end_angle) / 2.0;
     }
 }
 
@@ -679,6 +1391,7 @@ fn force_barnes_hut_repulsion(
     let mut cell_sum_y = vec![0.0_f32; grid_size * grid_size];
     let mut cell_count = vec![0_u32; grid_size * grid_size];
     let mut node_cell = vec![0_usize; n];
+    let mut nodes_in_cell = vec![Vec::new(); grid_size * grid_size];
 
     for (i, &(x, y)) in positions.iter().enumerate() {
         let cx = ((x - min_x) / cell_w).floor() as usize;
@@ -690,6 +1403,7 @@ fn force_barnes_hut_repulsion(
         cell_sum_x[cell_idx] += x;
         cell_sum_y[cell_idx] += y;
         cell_count[cell_idx] += 1;
+        nodes_in_cell[cell_idx].push(i);
     }
 
     // Compute centroids.
@@ -717,8 +1431,8 @@ fn force_barnes_hut_repulsion(
 
             if cell_idx == my_cell {
                 // Same cell: compute direct forces.
-                for j in 0..n {
-                    if node_cell[j] != my_cell || j == i {
+                for &j in &nodes_in_cell[my_cell] {
+                    if j == i {
                         continue;
                     }
                     let dx = px - positions[j].0;
@@ -744,10 +1458,7 @@ fn force_barnes_hut_repulsion(
                     displacements[i].1 += dy / dist * force;
                 } else {
                     // Too close: compute direct forces.
-                    for j in 0..n {
-                        if node_cell[j] != cell_idx || j == i {
-                            continue;
-                        }
+                    for &j in &nodes_in_cell[cell_idx] {
                         let dx2 = px - positions[j].0;
                         let dy2 = py - positions[j].1;
                         let dist_sq2 = (dx2 * dx2 + dy2 * dy2).max(1.0);
@@ -978,7 +1689,7 @@ pub fn compute_node_sizes(ir: &MermaidDiagramIr) -> Vec<(f32, f32)> {
                 .unwrap_or_else(|| node.id.as_str());
 
             let (label_width, label_height) = metrics.estimate_dimensions(text);
-            
+
             // Add substantial padding to match the high-end Stripe/Vercel aesthetic
             let width = label_width + 56.0;
             let height = label_height + 36.0;
@@ -2418,6 +3129,7 @@ fn build_cluster_boxes(
 fn compute_bounds(
     nodes: &[LayoutNodeBox],
     clusters: &[LayoutClusterBox],
+    edges: &[LayoutEdgePath],
     spacing: LayoutSpacing,
 ) -> LayoutRect {
     let mut min_x = f32::MAX;
@@ -2437,6 +3149,15 @@ fn compute_bounds(
         min_y = min_y.min(cluster.bounds.y);
         max_x = max_x.max(cluster.bounds.x + cluster.bounds.width);
         max_y = max_y.max(cluster.bounds.y + cluster.bounds.height);
+    }
+
+    for edge in edges {
+        for point in &edge.points {
+            min_x = min_x.min(point.x);
+            min_y = min_y.min(point.y);
+            max_x = max_x.max(point.x);
+            max_y = max_y.max(point.y);
+        }
     }
 
     if !min_x.is_finite() || !min_y.is_finite() || !max_x.is_finite() || !max_y.is_finite() {
@@ -2641,13 +3362,14 @@ pub fn layout_stats_from(layout: &DiagramLayout) -> LayoutStats {
 mod tests {
     use super::{
         CycleStrategy, LayoutAlgorithm, LayoutPoint, layout, layout_diagram, layout_diagram_force,
-        layout_diagram_force_traced, layout_diagram_traced, layout_diagram_with_cycle_strategy,
-        route_edge_points,
+        layout_diagram_force_traced, layout_diagram_radial, layout_diagram_traced,
+        layout_diagram_tree, layout_diagram_with_cycle_strategy, route_edge_points,
     };
     use fm_core::{
         ArrowType, DiagramType, GraphDirection, IrCluster, IrClusterId, IrEdge, IrEndpoint,
         IrLabel, IrLabelId, IrNode, IrNodeId, MermaidDiagramIr,
     };
+    use std::collections::BTreeMap;
 
     fn sample_ir() -> MermaidDiagramIr {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
@@ -3410,6 +4132,140 @@ mod tests {
             connected_ranks.is_disjoint(&isolated_ranks),
             "isolated and connected nodes should not share rank bands; connected={connected_ranks:?} isolated={isolated_ranks:?}"
         );
+    }
+
+    fn sample_tree_ir(direction: GraphDirection) -> MermaidDiagramIr {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.direction = direction;
+
+        for node_id in ["A", "B", "C", "D", "E", "F"] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..IrNode::default()
+            });
+        }
+
+        for (from, to) in [(0, 1), (0, 2), (1, 3), (1, 4), (2, 5)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        ir
+    }
+
+    #[test]
+    fn tree_layout_top_down_places_children_below_parents() {
+        let layout = layout_diagram_tree(&sample_tree_ir(GraphDirection::TB));
+        let mut centers = BTreeMap::new();
+        for node in &layout.nodes {
+            centers.insert(node.node_id.clone(), node.bounds.center());
+        }
+
+        let root = centers.get("A").expect("root center");
+        let child_b = centers.get("B").expect("child B center");
+        let child_c = centers.get("C").expect("child C center");
+        assert!(root.y < child_b.y, "B should be below A");
+        assert!(root.y < child_c.y, "C should be below A");
+    }
+
+    #[test]
+    fn tree_layout_lr_places_children_to_the_right() {
+        let layout = layout_diagram_tree(&sample_tree_ir(GraphDirection::LR));
+        let mut centers = BTreeMap::new();
+        for node in &layout.nodes {
+            centers.insert(node.node_id.clone(), node.bounds.center());
+        }
+
+        let root = centers.get("A").expect("root center");
+        let child_b = centers.get("B").expect("child B center");
+        let child_c = centers.get("C").expect("child C center");
+        assert!(root.x < child_b.x, "B should be to the right of A");
+        assert!(root.x < child_c.x, "C should be to the right of A");
+    }
+
+    #[test]
+    fn tree_layout_handles_multiple_roots_as_forest() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.direction = GraphDirection::TB;
+        for node_id in ["A", "B", "C", "D"] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        for (from, to) in [(0, 1), (2, 3)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let layout = layout_diagram_tree(&ir);
+        assert_eq!(layout.nodes.len(), 4);
+        assert_eq!(layout.edges.len(), 2);
+        let a = layout
+            .nodes
+            .iter()
+            .find(|node| node.node_id == "A")
+            .expect("A node");
+        let c = layout
+            .nodes
+            .iter()
+            .find(|node| node.node_id == "C")
+            .expect("C node");
+        assert!(
+            (a.bounds.center().x - c.bounds.center().x).abs() > 1.0,
+            "forest roots should not overlap"
+        );
+    }
+
+    #[test]
+    fn radial_layout_is_deterministic() {
+        let mut ir = sample_tree_ir(GraphDirection::TB);
+        ir.diagram_type = DiagramType::Mindmap;
+
+        let first = layout_diagram_radial(&ir);
+        let second = layout_diagram_radial(&ir);
+        assert_eq!(first, second, "radial layout must be deterministic");
+    }
+
+    #[test]
+    fn radial_layout_places_children_away_from_root() {
+        let mut ir = sample_tree_ir(GraphDirection::TB);
+        ir.diagram_type = DiagramType::Mindmap;
+        let layout = layout_diagram_radial(&ir);
+
+        let root = layout
+            .nodes
+            .iter()
+            .find(|node| node.node_id == "A")
+            .expect("root node")
+            .bounds
+            .center();
+
+        for node in &layout.nodes {
+            if node.node_id == "A" {
+                continue;
+            }
+            let center = node.bounds.center();
+            let distance = ((center.x - root.x).powi(2) + (center.y - root.y).powi(2)).sqrt();
+            assert!(distance > 1.0, "{} should be away from root", node.node_id);
+        }
+    }
+
+    #[test]
+    fn auto_layout_uses_radial_for_mindmap_diagrams() {
+        let mut ir = sample_tree_ir(GraphDirection::TB);
+        ir.diagram_type = DiagramType::Mindmap;
+        let auto_stats = layout(&ir, LayoutAlgorithm::Auto);
+        let radial_stats = layout(&ir, LayoutAlgorithm::Radial);
+        assert_eq!(auto_stats, radial_stats);
     }
 
     // --- Force-directed layout tests ---
