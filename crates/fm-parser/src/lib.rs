@@ -394,7 +394,8 @@ pub fn parse_evidence_json(parsed: &ParseResult) -> String {
 #[cfg(test)]
 mod tests {
     use super::{detect_type, parse};
-    use fm_core::{ArrowType, DiagramType, GraphDirection, IrEndpoint};
+    use fm_core::{ArrowType, DiagramType, GraphDirection, IrEndpoint, MermaidDiagramIr};
+    use proptest::prelude::*;
 
     #[test]
     fn detects_flowchart_keyword() {
@@ -580,5 +581,31 @@ mod tests {
         assert_eq!(result.ir.diagram_type, DiagramType::Flowchart);
         assert!(result.confidence > 0.9);
         assert_eq!(result.detection_method, DetectionMethod::DotFormat);
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn prop_parse_is_total_and_confidence_bounded(input in ".{0,256}") {
+            let result = parse(&input);
+            prop_assert!((0.0..=1.0).contains(&result.confidence));
+
+            let encoded = serde_json::to_string(&result.ir).expect("serialize parser IR");
+            let decoded: MermaidDiagramIr =
+                serde_json::from_str(&encoded).expect("deserialize parser IR");
+            prop_assert_eq!(decoded, result.ir);
+        }
+
+        #[test]
+        fn prop_detect_type_with_confidence_is_deterministic(input in ".{0,256}") {
+            let first = detect_type_with_confidence(&input);
+            let second = detect_type_with_confidence(&input);
+
+            prop_assert_eq!(first.diagram_type, second.diagram_type);
+            prop_assert_eq!(first.method, second.method);
+            prop_assert_eq!(first.confidence, second.confidence);
+            prop_assert_eq!(first.warnings, second.warnings);
+        }
     }
 }

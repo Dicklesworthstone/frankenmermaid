@@ -165,6 +165,7 @@ mod tests {
         ArrowType, DiagramType, GraphDirection, IrEdge, IrEndpoint, IrLabel, IrLabelId, IrNode,
         IrNodeId,
     };
+    use proptest::prelude::*;
 
     fn sample_ir() -> MermaidDiagramIr {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
@@ -193,6 +194,31 @@ mod tests {
             arrow: ArrowType::Arrow,
             ..Default::default()
         });
+        ir
+    }
+
+    fn linear_ir(node_count: usize) -> MermaidDiagramIr {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.direction = GraphDirection::LR;
+        for index in 0..node_count {
+            ir.labels.push(IrLabel {
+                text: format!("Node {index}"),
+                ..Default::default()
+            });
+            ir.nodes.push(IrNode {
+                id: format!("N{index}"),
+                label: Some(IrLabelId(index)),
+                ..Default::default()
+            });
+        }
+        for index in 1..node_count {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(index - 1)),
+                to: IrEndpoint::Node(IrNodeId(index)),
+                arrow: ArrowType::Arrow,
+                ..Default::default()
+            });
+        }
         ir
     }
 
@@ -250,5 +276,22 @@ mod tests {
 
         // Rich should generally produce more detailed output.
         assert!(rich.width >= compact.width || rich.height >= compact.height);
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(48))]
+
+        #[test]
+        fn prop_term_render_stays_within_requested_bounds(
+            node_count in 0usize..30,
+            cols in 40usize..180,
+            rows in 12usize..80
+        ) {
+            let ir = linear_ir(node_count);
+            let output = render_term_with_config(&ir, &TermRenderConfig::default(), cols, rows);
+
+            prop_assert!(output.width <= cols);
+            prop_assert!(output.height <= rows);
+        }
     }
 }

@@ -513,10 +513,10 @@ fn split_dot_by<'a>(line: &'a str, separator: &str) -> Vec<&'a str> {
 
     let chars: Vec<(usize, char)> = line.char_indices().collect();
     let mut i = 0;
-    
+
     while i < chars.len() {
         let (byte_idx, c) = chars[i];
-        
+
         if in_quote {
             if escaped {
                 escaped = false;

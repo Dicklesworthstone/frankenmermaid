@@ -7,3 +7,6 @@ rust-version.workspace = true
 
 [dependencies]
 fm-core.workspace = true
+
+[dev-dependencies]
+proptest = "1.6.0"

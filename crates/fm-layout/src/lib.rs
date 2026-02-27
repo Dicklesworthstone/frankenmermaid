@@ -825,7 +825,14 @@ pub fn layout_diagram_timeline_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let node_count = ir.nodes.len();
     let node_sizes = compute_node_sizes(ir);
     let mut trace = LayoutTrace::default();
-    push_snapshot(&mut trace, "timeline_layout", node_count, ir.edges.len(), 0, 0);
+    push_snapshot(
+        &mut trace,
+        "timeline_layout",
+        node_count,
+        ir.edges.len(),
+        0,
+        0,
+    );
 
     let spacing = LayoutSpacing::default();
     let mut rank_by_node = vec![0_usize; node_count];
@@ -939,7 +946,10 @@ pub fn layout_diagram_gantt_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             .filter(|prefix| !prefix.is_empty())
             .unwrap_or("Backlog")
             .to_string();
-        section_to_nodes.entry(section).or_default().push(node_index);
+        section_to_nodes
+            .entry(section)
+            .or_default()
+            .push(node_index);
         order_hint_by_node.insert(
             node_index,
             parse_order_hint(&ir.nodes[node_index].id, node_index),
@@ -976,7 +986,10 @@ pub fn layout_diagram_gantt_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     for (section_index, (_section, nodes)) in section_to_nodes.iter().enumerate() {
         for (row_index, node_index) in nodes.iter().enumerate() {
             let slot = slot_by_hint[&order_hint_by_node[node_index]];
-            centers[*node_index] = (slot as f32 * col_gap, section_base_y + row_index as f32 * row_gap);
+            centers[*node_index] = (
+                slot as f32 * col_gap,
+                section_base_y + row_index as f32 * row_gap,
+            );
             rank_by_node[*node_index] = slot;
             order_by_node[*node_index] = row_index + section_index * 128;
         }
@@ -1004,7 +1017,14 @@ pub fn layout_diagram_sankey_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let node_count = ir.nodes.len();
     let mut node_sizes = compute_node_sizes(ir);
     let mut trace = LayoutTrace::default();
-    push_snapshot(&mut trace, "sankey_layout", node_count, ir.edges.len(), 0, 0);
+    push_snapshot(
+        &mut trace,
+        "sankey_layout",
+        node_count,
+        ir.edges.len(),
+        0,
+        0,
+    );
 
     let mut in_degree = vec![0_usize; node_count];
     let mut out_degree = vec![0_usize; node_count];
@@ -1135,7 +1155,14 @@ fn layout_diagram_kanban_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let node_count = ir.nodes.len();
     let mut node_sizes = compute_node_sizes(ir);
     let mut trace = LayoutTrace::default();
-    push_snapshot(&mut trace, "kanban_layout", node_count, ir.edges.len(), 0, 0);
+    push_snapshot(
+        &mut trace,
+        "kanban_layout",
+        node_count,
+        ir.edges.len(),
+        0,
+        0,
+    );
 
     for size in &mut node_sizes {
         size.0 = size.0.max(144.0);
@@ -1177,7 +1204,7 @@ fn layout_diagram_kanban_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     )
 }
 
-fn layout_label_text<'a>(ir: &'a MermaidDiagramIr, node_index: usize) -> &'a str {
+fn layout_label_text(ir: &MermaidDiagramIr, node_index: usize) -> &str {
     ir.nodes
         .get(node_index)
         .and_then(|node| node.label)
@@ -1331,7 +1358,7 @@ fn finalize_specialized_layout(
 
 /// Lay out a diagram using a deterministic radial tree variant.
 #[must_use]
-pub fn layout_diagram_radial_traced(ir: &MermaidDiagramIr) -> TracedLayout {
+pub fn layout_diagram_radial_traced_dup(ir: &MermaidDiagramIr) -> TracedLayout {
     let mut trace = LayoutTrace::default();
     let spacing = LayoutSpacing::default();
     let node_sizes = compute_node_sizes(ir);
@@ -2026,7 +2053,7 @@ fn force_compute_displacements(
             let dy = positions[i].1 - positions[j].1;
             let dist = (dx * dx + dy * dy).sqrt().max(1.0);
             // Fruchterman-Reingold attractive force: d^2 / k
-            let force = dist / k;
+            let force = (dist * dist) / k;
             let fx = dx / dist * force;
             let fy = dy / dist * force;
             displacements[i].0 -= fx;
@@ -2414,7 +2441,7 @@ struct CycleDetection {
     summary: CycleSummary,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct CycleClusterMap {
     /// For each original node index, the representative node index (self if not collapsed).
     node_representative: Vec<usize>,
@@ -2513,7 +2540,7 @@ fn detect_cycle_components(
                 let next = self.edges[edge_slot].target;
                 if self.indices[next].is_none() {
                     self.strong_connect(next);
-                    self.lowlink[node] = self.lowlink[node].min(self.indices[next].unwrap_or(self.lowlink[node]));
+                    self.lowlink[node] = self.lowlink[node].min(self.lowlink[next]);
                 } else if self.on_stack[next] {
                     self.lowlink[node] =
                         self.lowlink[node].min(self.indices[next].unwrap_or(self.lowlink[node]));
@@ -2934,11 +2961,13 @@ fn rank_assignment(ir: &MermaidDiagramIr, cycles: &CycleRemovalResult) -> BTreeM
         let mut rank_cursor = 0_usize;
 
         for component in components {
-            if component.len() <= 1 {
+            if component.is_empty() {
                 continue;
             }
-            if component.len() == 1 && incident_edge_count[component[0]] == 0 {
-                isolated_singletons.push(component[0]);
+            if component.len() == 1 {
+                if incident_edge_count[component[0]] == 0 {
+                    isolated_singletons.push(component[0]);
+                }
                 continue;
             }
 
@@ -4069,6 +4098,7 @@ mod tests {
         ArrowType, DiagramType, GraphDirection, IrCluster, IrClusterId, IrEdge, IrEndpoint,
         IrLabel, IrLabelId, IrNode, IrNodeId, MermaidDiagramIr,
     };
+    use proptest::prelude::*;
     use std::collections::BTreeMap;
 
     fn sample_ir() -> MermaidDiagramIr {
@@ -4098,6 +4128,29 @@ mod tests {
             arrow: ArrowType::Arrow,
             ..IrEdge::default()
         });
+        ir
+    }
+
+    fn chain_ir(node_count: usize, direction: GraphDirection) -> MermaidDiagramIr {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.direction = direction;
+
+        for index in 0..node_count {
+            ir.nodes.push(IrNode {
+                id: format!("N{index}"),
+                ..IrNode::default()
+            });
+        }
+
+        for index in 1..node_count {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(index - 1)),
+                to: IrEndpoint::Node(IrNodeId(index)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
         ir
     }
 
@@ -4418,7 +4471,7 @@ mod tests {
                 ..IrNode::default()
             });
         }
-        for (from, to) in [(0, 2), (0, 3), (1, 2), (1, 4), (2, 5), (2, 4)] {
+        for (from, to) in [(0, 1), (1, 2), (2, 0), (3, 4), (4, 5), (5, 3)] {
             ir.edges.push(IrEdge {
                 from: IrEndpoint::Node(IrNodeId(from)),
                 to: IrEndpoint::Node(IrNodeId(to)),
@@ -5440,5 +5493,69 @@ mod tests {
             stage_names.contains(&"crossing_refinement"),
             "Trace should include crossing_refinement stage, got: {stage_names:?}"
         );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(48))]
+
+        #[test]
+        fn prop_chain_layout_is_deterministic_and_non_overlapping(
+            node_count in 1usize..20,
+            direction_token in 0usize..5
+        ) {
+            let direction = match direction_token {
+                0 => GraphDirection::TB,
+                1 => GraphDirection::TD,
+                2 => GraphDirection::LR,
+                3 => GraphDirection::RL,
+                _ => GraphDirection::BT,
+            };
+            let ir = chain_ir(node_count, direction);
+
+            let first = layout_diagram_traced(&ir);
+            let second = layout_diagram_traced(&ir);
+
+            prop_assert_eq!(&first, &second);
+            prop_assert_eq!(first.layout.nodes.len(), node_count);
+            prop_assert_eq!(first.layout.edges.len(), node_count.saturating_sub(1));
+
+            for node in &first.layout.nodes {
+                prop_assert!(node.bounds.width > 0.0, "node {} has non-positive width", node.node_id);
+                prop_assert!(node.bounds.height > 0.0, "node {} has non-positive height", node.node_id);
+            }
+
+            for left_index in 0..first.layout.nodes.len() {
+                for right_index in (left_index + 1)..first.layout.nodes.len() {
+                    let left = &first.layout.nodes[left_index];
+                    let right = &first.layout.nodes[right_index];
+
+                    let non_overlapping =
+                        left.bounds.x + left.bounds.width <= right.bounds.x + 0.5
+                            || right.bounds.x + right.bounds.width <= left.bounds.x + 0.5
+                            || left.bounds.y + left.bounds.height <= right.bounds.y + 0.5
+                            || right.bounds.y + right.bounds.height <= left.bounds.y + 0.5;
+
+                    prop_assert!(
+                        non_overlapping,
+                        "nodes {} and {} overlap: left={:?} right={:?}",
+                        left.node_id,
+                        right.node_id,
+                        left.bounds,
+                        right.bounds
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn prop_chain_layout_stats_are_non_negative(node_count in 1usize..30) {
+            let ir = chain_ir(node_count, GraphDirection::LR);
+            let layout = layout_diagram(&ir);
+
+            prop_assert!(layout.stats.total_edge_length >= 0.0);
+            prop_assert!(layout.stats.reversed_edge_total_length >= 0.0);
+            prop_assert!(layout.bounds.width >= 0.0);
+            prop_assert!(layout.bounds.height >= 0.0);
+        }
     }
 }

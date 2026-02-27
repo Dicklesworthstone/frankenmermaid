@@ -1462,6 +1462,7 @@ mod tests {
         ArrowType, DiagramType, IrCluster, IrClusterId, IrEdge, IrEndpoint, IrLabel, IrLabelId,
         IrNode, IrNodeId, MermaidDiagramIr, NodeShape, Span,
     };
+    use proptest::prelude::*;
 
     fn create_ir_with_cluster(title: &str) -> MermaidDiagramIr {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
@@ -1538,6 +1539,30 @@ mod tests {
             label: Some(IrLabelId(2)),
             ..Default::default()
         });
+        ir
+    }
+
+    fn create_linear_ir(node_count: usize) -> MermaidDiagramIr {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for index in 0..node_count {
+            ir.labels.push(IrLabel {
+                text: format!("N{index}"),
+                span: Span::default(),
+            });
+            ir.nodes.push(IrNode {
+                id: format!("N{index}"),
+                label: Some(IrLabelId(index)),
+                ..Default::default()
+            });
+        }
+        for index in 1..node_count {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(index - 1)),
+                to: IrEndpoint::Node(IrNodeId(index)),
+                arrow: ArrowType::Arrow,
+                ..Default::default()
+            });
+        }
         ir
     }
 
@@ -1772,5 +1797,22 @@ mod tests {
         let svg = render_svg_with_config(&ir, &config);
         assert!(svg.contains("fm-node-inactive"));
         assert!(svg.contains(".fm-node-inactive { opacity: 0.35; }"));
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(48))]
+
+        #[test]
+        fn prop_svg_render_is_total_and_counts_match(node_count in 0usize..20) {
+            let ir = create_linear_ir(node_count);
+            let svg = render_svg(&ir);
+            let expected_nodes_attr = format!("data-nodes=\"{}\"", node_count);
+            let expected_edges_attr = format!("data-edges=\"{}\"", node_count.saturating_sub(1));
+
+            prop_assert!(svg.starts_with("<svg"));
+            prop_assert!(svg.ends_with("</svg>"));
+            prop_assert!(svg.contains(&expected_nodes_attr));
+            prop_assert!(svg.contains(&expected_edges_attr));
+        }
     }
 }

@@ -1352,10 +1352,29 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        ArrowType, Diagnostic, DiagnosticCategory, DiagnosticSeverity, DiagramType, GraphDirection,
-        MermaidDiagramIr, MermaidSanitizeMode, Span, StructuredDiagnostic,
-        parse_mermaid_js_config_value, to_init_parse,
+        ArrowType, Diagnostic, DiagnosticCategory, DiagnosticSeverity, DiagramPalettePreset,
+        DiagramType, GraphDirection, IrAttributeKey, IrCluster, IrClusterId, IrEdge, IrEndpoint,
+        IrEntityAttribute, IrLabel, IrLabelId, IrNode, IrNodeId, IrPortId, IrPortSideHint,
+        MermaidConfig, MermaidDiagramIr, MermaidError, MermaidErrorCode, MermaidFallbackAction,
+        MermaidFallbackPolicy, MermaidSanitizeMode, MermaidSupportLevel, MermaidWarningCode,
+        NodeShape, Position, Span, StructuredDiagnostic, parse_mermaid_js_config_value,
+        to_init_parse,
     };
+
+    fn sample_span(line: usize, start_col: usize, end_col: usize) -> Span {
+        Span::new(
+            Position {
+                line,
+                col: start_col,
+                byte: 0,
+            },
+            Position {
+                line,
+                col: end_col,
+                byte: 0,
+            },
+        )
+    }
 
     #[test]
     fn creates_empty_ir() {
@@ -1583,5 +1602,567 @@ mod tests {
 
         assert!(hint.severity_rank() < warning.severity_rank());
         assert!(warning.severity_rank() < error.severity_rank());
+    }
+
+    #[test]
+    fn span_helpers_build_expected_positions() {
+        let span = sample_span(7, 3, 11);
+        assert_eq!(span.start.line, 7);
+        assert_eq!(span.start.col, 3);
+        assert_eq!(span.end.col, 11);
+
+        let line_span = Span::at_line(9, 0);
+        assert_eq!(line_span.start.line, 9);
+        assert_eq!(line_span.start.col, 1);
+        assert_eq!(line_span.end.col, 1);
+    }
+
+    #[test]
+    fn mermaid_error_code_strings_are_stable() {
+        let expectations = [
+            (MermaidErrorCode::Parse, "mermaid/error/parse"),
+            (MermaidErrorCode::Validation, "mermaid/error/validation"),
+            (MermaidErrorCode::Unsupported, "mermaid/error/unsupported"),
+        ];
+
+        for (code, expected) in expectations {
+            assert_eq!(code.as_str(), expected);
+        }
+    }
+
+    #[test]
+    fn mermaid_warning_code_strings_are_stable() {
+        let expectations = [
+            (
+                MermaidWarningCode::ParseRecovery,
+                "mermaid/warn/parse-recovery",
+            ),
+            (
+                MermaidWarningCode::UnsupportedStyle,
+                "mermaid/warn/unsupported-style",
+            ),
+            (
+                MermaidWarningCode::UnsupportedLink,
+                "mermaid/warn/unsupported-link",
+            ),
+            (
+                MermaidWarningCode::UnsupportedFeature,
+                "mermaid/warn/unsupported-feature",
+            ),
+        ];
+
+        for (code, expected) in expectations {
+            assert_eq!(code.as_str(), expected);
+        }
+    }
+
+    #[test]
+    fn mermaid_error_code_and_span_accessors_cover_variants() {
+        let span = sample_span(4, 2, 8);
+        let parse = MermaidError::Parse {
+            message: "parse".to_string(),
+            span,
+            expected: vec!["node".to_string()],
+        };
+        let validation = MermaidError::Validation {
+            message: "validation".to_string(),
+            span,
+        };
+        let unsupported = MermaidError::Unsupported {
+            message: "unsupported".to_string(),
+            span,
+        };
+
+        assert_eq!(parse.code(), MermaidErrorCode::Parse);
+        assert_eq!(validation.code(), MermaidErrorCode::Validation);
+        assert_eq!(unsupported.code(), MermaidErrorCode::Unsupported);
+        assert_eq!(parse.span(), span);
+        assert_eq!(validation.span(), span);
+        assert_eq!(unsupported.span(), span);
+    }
+
+    #[test]
+    fn diagram_type_string_mapping_is_exhaustive() {
+        let expectations = [
+            (DiagramType::Flowchart, "flowchart"),
+            (DiagramType::Sequence, "sequence"),
+            (DiagramType::State, "state"),
+            (DiagramType::Gantt, "gantt"),
+            (DiagramType::Class, "class"),
+            (DiagramType::Er, "er"),
+            (DiagramType::Mindmap, "mindmap"),
+            (DiagramType::Pie, "pie"),
+            (DiagramType::GitGraph, "gitGraph"),
+            (DiagramType::Journey, "journey"),
+            (DiagramType::Requirement, "requirementDiagram"),
+            (DiagramType::Timeline, "timeline"),
+            (DiagramType::QuadrantChart, "quadrantChart"),
+            (DiagramType::Sankey, "sankey"),
+            (DiagramType::XyChart, "xyChart"),
+            (DiagramType::BlockBeta, "block-beta"),
+            (DiagramType::PacketBeta, "packet-beta"),
+            (DiagramType::ArchitectureBeta, "architecture-beta"),
+            (DiagramType::C4Context, "C4Context"),
+            (DiagramType::C4Container, "C4Container"),
+            (DiagramType::C4Component, "C4Component"),
+            (DiagramType::C4Dynamic, "C4Dynamic"),
+            (DiagramType::C4Deployment, "C4Deployment"),
+            (DiagramType::Unknown, "unknown"),
+        ];
+
+        for (diagram_type, expected) in expectations {
+            assert_eq!(diagram_type.as_str(), expected);
+        }
+    }
+
+    #[test]
+    fn graph_direction_string_mapping_is_exhaustive() {
+        let expectations = [
+            (GraphDirection::TB, "TB"),
+            (GraphDirection::TD, "TD"),
+            (GraphDirection::LR, "LR"),
+            (GraphDirection::RL, "RL"),
+            (GraphDirection::BT, "BT"),
+        ];
+
+        for (direction, expected) in expectations {
+            assert_eq!(direction.as_str(), expected);
+        }
+    }
+
+    #[test]
+    fn ir_port_side_hint_tracks_graph_direction() {
+        assert_eq!(
+            IrPortSideHint::from_direction(GraphDirection::LR),
+            IrPortSideHint::Horizontal
+        );
+        assert_eq!(
+            IrPortSideHint::from_direction(GraphDirection::RL),
+            IrPortSideHint::Horizontal
+        );
+        assert_eq!(
+            IrPortSideHint::from_direction(GraphDirection::TB),
+            IrPortSideHint::Vertical
+        );
+        assert_eq!(
+            IrPortSideHint::from_direction(GraphDirection::TD),
+            IrPortSideHint::Vertical
+        );
+        assert_eq!(
+            IrPortSideHint::from_direction(GraphDirection::BT),
+            IrPortSideHint::Vertical
+        );
+    }
+
+    #[test]
+    fn arrow_type_string_mapping_is_complete() {
+        let expectations = [
+            (ArrowType::Line, "---"),
+            (ArrowType::Arrow, "-->"),
+            (ArrowType::ThickArrow, "==>"),
+            (ArrowType::DottedArrow, "-.->"),
+            (ArrowType::Circle, "--o"),
+            (ArrowType::Cross, "--x"),
+        ];
+
+        for (arrow, expected) in expectations {
+            assert_eq!(arrow.as_str(), expected);
+        }
+    }
+
+    #[test]
+    fn node_shape_roundtrip_covers_all_variants() {
+        let shapes = [
+            NodeShape::Rect,
+            NodeShape::Rounded,
+            NodeShape::Stadium,
+            NodeShape::Subroutine,
+            NodeShape::Diamond,
+            NodeShape::Hexagon,
+            NodeShape::Circle,
+            NodeShape::Asymmetric,
+            NodeShape::Cylinder,
+            NodeShape::Trapezoid,
+            NodeShape::DoubleCircle,
+            NodeShape::Note,
+            NodeShape::InvTrapezoid,
+            NodeShape::Parallelogram,
+            NodeShape::InvParallelogram,
+            NodeShape::Triangle,
+            NodeShape::Pentagon,
+            NodeShape::Star,
+            NodeShape::Cloud,
+            NodeShape::Tag,
+            NodeShape::CrossedCircle,
+        ];
+
+        for shape in shapes {
+            let encoded = serde_json::to_string(&shape).expect("serialize node shape");
+            let decoded: NodeShape =
+                serde_json::from_str(&encoded).expect("deserialize node shape");
+            assert_eq!(decoded, shape);
+        }
+    }
+
+    #[test]
+    fn diagram_palette_roundtrip_covers_all_variants() {
+        let palettes = [
+            DiagramPalettePreset::Default,
+            DiagramPalettePreset::Corporate,
+            DiagramPalettePreset::Neon,
+            DiagramPalettePreset::Monochrome,
+            DiagramPalettePreset::Pastel,
+            DiagramPalettePreset::HighContrast,
+        ];
+
+        for palette in palettes {
+            let encoded = serde_json::to_string(&palette).expect("serialize palette");
+            let decoded: DiagramPalettePreset =
+                serde_json::from_str(&encoded).expect("deserialize palette");
+            assert_eq!(decoded, palette);
+        }
+    }
+
+    #[test]
+    fn mermaid_config_default_values_are_stable() {
+        let config = MermaidConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.max_nodes, 200);
+        assert_eq!(config.max_edges, 400);
+        assert_eq!(config.route_budget, 4_000);
+        assert_eq!(config.layout_iteration_budget, 200);
+        assert_eq!(config.max_label_chars, 48);
+        assert_eq!(config.max_label_lines, 3);
+        assert_eq!(config.palette, DiagramPalettePreset::Default);
+        assert_eq!(config.sanitize_mode, MermaidSanitizeMode::Strict);
+        assert_eq!(config.theme, None);
+    }
+
+    #[test]
+    fn mermaid_config_roundtrip_preserves_theme_overrides() {
+        let mut config = MermaidConfig {
+            theme: Some("corporate".to_string()),
+            flowchart_direction: Some(GraphDirection::RL),
+            flowchart_curve: Some("basis".to_string()),
+            sequence_mirror_actors: Some(true),
+            ..MermaidConfig::default()
+        };
+        config
+            .theme_variables
+            .insert("lineColor".into(), "#00ff00".into());
+
+        let encoded = serde_json::to_string(&config).expect("serialize config");
+        let decoded: MermaidConfig = serde_json::from_str(&encoded).expect("deserialize config");
+
+        assert_eq!(decoded.theme.as_deref(), Some("corporate"));
+        assert_eq!(decoded.flowchart_direction, Some(GraphDirection::RL));
+        assert_eq!(decoded.flowchart_curve.as_deref(), Some("basis"));
+        assert_eq!(decoded.sequence_mirror_actors, Some(true));
+        assert_eq!(
+            decoded.theme_variables.get("lineColor").map(String::as_str),
+            Some("#00ff00")
+        );
+    }
+
+    #[test]
+    fn mermaid_fallback_policy_defaults_match_contract() {
+        let policy = MermaidFallbackPolicy::default();
+        assert_eq!(policy.unsupported_diagram, MermaidFallbackAction::Error);
+        assert_eq!(policy.unsupported_directive, MermaidFallbackAction::Warn);
+        assert_eq!(policy.unsupported_style, MermaidFallbackAction::Warn);
+        assert_eq!(policy.unsupported_link, MermaidFallbackAction::Warn);
+        assert_eq!(policy.unsupported_feature, MermaidFallbackAction::Warn);
+    }
+
+    #[test]
+    fn parse_mermaid_js_config_requires_object_root() {
+        let parsed = parse_mermaid_js_config_value(&json!("not-an-object"));
+        assert_eq!(parsed.errors.len(), 1);
+        assert_eq!(parsed.errors[0].field, "$");
+        assert!(parsed.errors[0].message.contains("JSON object"));
+    }
+
+    #[test]
+    fn parse_mermaid_js_config_accepts_case_insensitive_direction() {
+        let parsed = parse_mermaid_js_config_value(&json!({
+            "flowchart": { "direction": "lr" }
+        }));
+
+        assert!(parsed.errors.is_empty());
+        assert_eq!(parsed.config.flowchart_direction, Some(GraphDirection::LR));
+    }
+
+    #[test]
+    fn parse_mermaid_js_config_emits_warning_for_start_on_load() {
+        let parsed = parse_mermaid_js_config_value(&json!({
+            "startOnLoad": true
+        }));
+
+        assert!(parsed.errors.is_empty());
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.message.contains("startOnLoad"))
+        );
+    }
+
+    #[test]
+    fn parse_mermaid_js_config_maps_high_contrast_theme_to_palette() {
+        let parsed = parse_mermaid_js_config_value(&json!({
+            "theme": "high-contrast"
+        }));
+
+        assert!(parsed.errors.is_empty());
+        assert_eq!(parsed.config.palette, DiagramPalettePreset::HighContrast);
+    }
+
+    #[test]
+    fn to_init_parse_converts_config_errors_to_parse_errors() {
+        let parsed = parse_mermaid_js_config_value(&json!({
+            "theme": 123
+        }));
+        let init_parse = to_init_parse(parsed);
+
+        assert_eq!(init_parse.errors.len(), 1);
+        match &init_parse.errors[0] {
+            MermaidError::Parse {
+                message, expected, ..
+            } => {
+                assert!(message.contains("theme"));
+                assert_eq!(expected, &vec!["a valid Mermaid config value".to_string()]);
+            }
+            other => panic!("expected parse error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diagnostic_severity_string_and_emoji_mappings_are_stable() {
+        let expectations = [
+            (DiagnosticSeverity::Hint, "hint", "💡"),
+            (DiagnosticSeverity::Info, "info", "ℹ️"),
+            (DiagnosticSeverity::Warning, "warning", "⚠️"),
+            (DiagnosticSeverity::Error, "error", "❌"),
+        ];
+
+        for (severity, expected_str, expected_emoji) in expectations {
+            assert_eq!(severity.as_str(), expected_str);
+            assert_eq!(severity.emoji(), expected_emoji);
+        }
+    }
+
+    #[test]
+    fn diagnostic_category_string_mappings_are_stable() {
+        let expectations = [
+            (DiagnosticCategory::Lexer, "lexer"),
+            (DiagnosticCategory::Parser, "parser"),
+            (DiagnosticCategory::Semantic, "semantic"),
+            (DiagnosticCategory::Recovery, "recovery"),
+            (DiagnosticCategory::Inference, "inference"),
+            (DiagnosticCategory::Compatibility, "compatibility"),
+        ];
+
+        for (category, expected) in expectations {
+            assert_eq!(category.as_str(), expected);
+        }
+    }
+
+    #[test]
+    fn diagnostic_with_related_records_location() {
+        let related_span = sample_span(11, 2, 5);
+        let diagnostic = Diagnostic::warning("duplicate node")
+            .with_category(DiagnosticCategory::Semantic)
+            .with_related("first definition", related_span);
+
+        assert_eq!(diagnostic.related.len(), 1);
+        assert_eq!(diagnostic.related[0].message, "first definition");
+        assert_eq!(diagnostic.related[0].span, related_span);
+    }
+
+    #[test]
+    fn structured_diagnostic_from_diagnostic_sets_coordinates() {
+        let diagnostic = Diagnostic::warning("implicit edge recovered")
+            .with_category(DiagnosticCategory::Recovery)
+            .with_span(sample_span(12, 6, 9))
+            .with_suggestion("specify explicit arrow type");
+
+        let structured = StructuredDiagnostic::from_diagnostic(&diagnostic);
+        assert_eq!(structured.error_code, "mermaid/diag/recovery");
+        assert_eq!(structured.severity, "warning");
+        assert_eq!(structured.source_line, Some(12));
+        assert_eq!(structured.source_column, Some(6));
+        assert_eq!(
+            structured.remediation_hint.as_deref(),
+            Some("specify explicit arrow type")
+        );
+    }
+
+    #[test]
+    fn structured_diagnostic_builder_methods_are_chainable() {
+        let structured = StructuredDiagnostic::default()
+            .with_rule_id("FM001")
+            .with_confidence(0.92)
+            .with_remediation_hint("replace invalid arrow");
+
+        assert_eq!(structured.rule_id.as_deref(), Some("FM001"));
+        assert_eq!(structured.confidence, Some(0.92));
+        assert_eq!(
+            structured.remediation_hint.as_deref(),
+            Some("replace invalid arrow")
+        );
+    }
+
+    #[test]
+    fn structured_diagnostic_from_validation_error_has_no_expected_hint() {
+        let validation_error = MermaidError::Validation {
+            message: "invalid relationship cardinality".to_string(),
+            span: sample_span(3, 8, 11),
+        };
+        let structured = StructuredDiagnostic::from_error(&validation_error);
+        assert_eq!(structured.error_code, "mermaid/error/validation");
+        assert_eq!(structured.severity, "error");
+        assert_eq!(structured.remediation_hint, None);
+    }
+
+    #[test]
+    fn ir_helpers_find_node_and_batch_add_diagnostics() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.nodes.push(IrNode {
+            id: "A".to_string(),
+            ..Default::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "B".to_string(),
+            ..Default::default()
+        });
+        ir.add_diagnostics(vec![
+            Diagnostic::hint("hint"),
+            Diagnostic::info("info"),
+            Diagnostic::warning("warning"),
+            Diagnostic::error("error"),
+        ]);
+
+        assert_eq!(ir.find_node_index("A"), Some(0));
+        assert_eq!(ir.find_node("B").map(|node| node.id.as_str()), Some("B"));
+        assert_eq!(ir.find_node_index("missing"), None);
+
+        let counts = ir.diagnostic_counts();
+        assert_eq!(counts.hints, 1);
+        assert_eq!(counts.infos, 1);
+        assert_eq!(counts.warnings, 1);
+        assert_eq!(counts.errors, 1);
+        assert_eq!(counts.total(), 4);
+    }
+
+    #[test]
+    fn ir_roundtrip_single_node_and_edge() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.labels.push(IrLabel {
+            text: "hello".to_string(),
+            span: sample_span(1, 1, 5),
+        });
+        ir.nodes.push(IrNode {
+            id: "A".to_string(),
+            label: Some(IrLabelId(0)),
+            ..Default::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(0)),
+            arrow: ArrowType::Arrow,
+            label: Some(IrLabelId(0)),
+            span: sample_span(2, 1, 6),
+        });
+
+        let encoded = serde_json::to_string(&ir).expect("serialize ir");
+        let decoded: MermaidDiagramIr = serde_json::from_str(&encoded).expect("deserialize ir");
+        assert_eq!(decoded, ir);
+    }
+
+    #[test]
+    fn ir_roundtrip_handles_large_node_count() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for index in 0..1_000 {
+            ir.nodes.push(IrNode {
+                id: format!("N{index}"),
+                ..Default::default()
+            });
+        }
+
+        let encoded = serde_json::to_string(&ir).expect("serialize large ir");
+        let decoded: MermaidDiagramIr =
+            serde_json::from_str(&encoded).expect("deserialize large ir");
+        assert_eq!(decoded.nodes.len(), 1_000);
+        assert_eq!(decoded, ir);
+    }
+
+    #[test]
+    fn ir_node_members_support_er_attributes() {
+        let node = IrNode {
+            id: "User".to_string(),
+            members: vec![
+                IrEntityAttribute {
+                    data_type: "int".to_string(),
+                    name: "id".to_string(),
+                    key: IrAttributeKey::Pk,
+                    comment: Some("primary key".to_string()),
+                },
+                IrEntityAttribute {
+                    data_type: "varchar".to_string(),
+                    name: "name".to_string(),
+                    key: IrAttributeKey::None,
+                    comment: None,
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(node.members.len(), 2);
+        assert_eq!(node.members[0].key, IrAttributeKey::Pk);
+        assert_eq!(node.members[1].name, "name");
+    }
+
+    #[test]
+    fn ir_edge_supports_self_loop_and_port_endpoints() {
+        let edge = IrEdge {
+            from: IrEndpoint::Port(IrPortId(1)),
+            to: IrEndpoint::Port(IrPortId(1)),
+            arrow: ArrowType::Circle,
+            label: Some(IrLabelId(3)),
+            span: sample_span(6, 1, 9),
+        };
+
+        assert_eq!(edge.from, edge.to);
+        assert_eq!(edge.arrow, ArrowType::Circle);
+        assert_eq!(edge.label, Some(IrLabelId(3)));
+    }
+
+    #[test]
+    fn ir_cluster_supports_empty_and_single_member() {
+        let empty = IrCluster {
+            id: IrClusterId(0),
+            title: None,
+            members: Vec::new(),
+            span: sample_span(1, 1, 1),
+        };
+        let single = IrCluster {
+            id: IrClusterId(1),
+            title: Some(IrLabelId(2)),
+            members: vec![IrNodeId(9)],
+            span: sample_span(4, 1, 4),
+        };
+
+        assert!(empty.members.is_empty());
+        assert_eq!(single.members, vec![IrNodeId(9)]);
+        assert_eq!(single.title, Some(IrLabelId(2)));
+    }
+
+    #[test]
+    fn empty_ir_meta_matches_requested_diagram_type() {
+        let ir = MermaidDiagramIr::empty(DiagramType::Class);
+        assert_eq!(ir.diagram_type, DiagramType::Class);
+        assert_eq!(ir.meta.diagram_type, DiagramType::Class);
+        assert_eq!(ir.meta.direction, GraphDirection::TB);
+        assert_eq!(ir.meta.support_level, MermaidSupportLevel::Supported);
     }
 }
