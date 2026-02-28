@@ -26,7 +26,13 @@ pub use theme::{FontConfig, Theme, ThemeColors, ThemePreset, generate_palette};
 pub use transform::{Transform, TransformBuilder};
 
 use fm_core::{MermaidDiagramIr, MermaidTier};
-use fm_layout::{DiagramLayout, LayoutEdgePath, LayoutNodeBox, layout_diagram};
+use fm_layout::{
+    DiagramLayout, FillStyle, LayoutEdgePath, LayoutNodeBox, LineCap as RenderLineCap,
+    LineJoin as RenderLineJoin, PathCmd, RenderClip, RenderGroup, RenderItem, RenderPath,
+    RenderScene, RenderSource, RenderText, RenderTransform, StrokeStyle,
+    TextAlign as RenderTextAlign, TextBaseline as RenderTextBaseline, build_render_scene,
+    layout_diagram,
+};
 
 /// Node fill gradient mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -40,9 +46,21 @@ pub enum NodeGradientStyle {
     Radial,
 }
 
+/// Backend strategy used by SVG rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SvgBackend {
+    /// Existing layout-driven renderer.
+    #[default]
+    LegacyLayout,
+    /// Shared target-agnostic render scene backend.
+    Scene,
+}
+
 /// Configuration for SVG rendering.
 #[derive(Debug, Clone)]
 pub struct SvgRenderConfig {
+    /// Backend implementation used for rendering.
+    pub backend: SvgBackend,
     /// Whether to include responsive sizing attributes.
     pub responsive: bool,
     /// Whether to include accessibility attributes.
@@ -106,6 +124,7 @@ pub struct SvgRenderConfig {
 impl Default for SvgRenderConfig {
     fn default() -> Self {
         Self {
+            backend: SvgBackend::LegacyLayout,
             responsive: true,
             accessible: true,
             font_family: String::from(
@@ -172,7 +191,363 @@ pub fn render_svg(ir: &MermaidDiagramIr) -> String {
 #[must_use]
 pub fn render_svg_with_config(ir: &MermaidDiagramIr, config: &SvgRenderConfig) -> String {
     let layout = layout_diagram(ir);
-    render_layout_to_svg(&layout, ir, config)
+    match config.backend {
+        SvgBackend::LegacyLayout => render_layout_to_svg(&layout, ir, config),
+        SvgBackend::Scene => {
+            let scene = build_render_scene(ir, &layout);
+            render_scene_document_with_ir(&scene, config, Some(ir))
+        }
+    }
+}
+
+/// Render a target-agnostic scene to SVG string with custom configuration.
+#[must_use]
+pub fn render_scene_to_svg(scene: &RenderScene, config: &SvgRenderConfig) -> String {
+    render_scene_document(scene, config)
+}
+
+fn render_scene_document(scene: &RenderScene, config: &SvgRenderConfig) -> String {
+    render_scene_document_with_ir(scene, config, None)
+}
+
+fn render_scene_document_with_ir(
+    scene: &RenderScene,
+    config: &SvgRenderConfig,
+    ir: Option<&MermaidDiagramIr>,
+) -> String {
+    let padding = config.padding;
+    let width = (scene.bounds.width + padding * 2.0).max(1.0);
+    let height = (scene.bounds.height + padding * 2.0).max(1.0);
+
+    let mut doc = SvgDocument::new()
+        .viewbox(
+            scene.bounds.x - padding,
+            scene.bounds.y - padding,
+            width,
+            height,
+        )
+        .preserve_aspect_ratio("xMidYMid meet");
+
+    if config.responsive {
+        doc = doc.responsive();
+    }
+
+    let (group_count, path_count, text_count) = count_scene_items(&scene.root);
+
+    if config.accessible {
+        let title = ir.map_or_else(
+            || String::from("Render scene"),
+            |diagram_ir| format!("{} diagram", diagram_ir.diagram_type.as_str()),
+        );
+        let desc = ir.map_or_else(
+            || {
+                format!(
+                    "Target-agnostic render scene with {group_count} groups, {path_count} paths, and {text_count} text items"
+                )
+            },
+            describe_diagram,
+        );
+        doc = doc.accessible(title, desc);
+    }
+
+    for class in &config.root_classes {
+        doc = doc.class(class);
+    }
+
+    let scene_type = ir.map_or("scene", |diagram_ir| diagram_ir.diagram_type.as_str());
+    doc = doc
+        .data("type", scene_type)
+        .data("groups", &group_count.to_string())
+        .data("paths", &path_count.to_string())
+        .data("texts", &text_count.to_string());
+
+    let effects_enabled = clamp_unit_interval(config.inactive_opacity) < 0.999
+        || clamp_unit_interval(config.cluster_fill_opacity) < 0.999;
+
+    if config.embed_theme_css {
+        let mut css = Theme::from_preset(config.theme).to_svg_style(config.shadows);
+        if effects_enabled {
+            css.push_str(&effects_css(config));
+        }
+        if config.a11y.accessibility_css {
+            css.push_str(accessibility_css());
+        }
+        if config.print_optimized {
+            css.push_str(&print_css(config.min_font_size));
+        }
+        doc = doc.style(css);
+    } else if config.a11y.accessibility_css || config.print_optimized || effects_enabled {
+        let mut css = String::new();
+        if effects_enabled {
+            css.push_str(&effects_css(config));
+        }
+        if config.a11y.accessibility_css {
+            css.push_str(accessibility_css());
+        }
+        if config.print_optimized {
+            css.push_str(&print_css(config.min_font_size));
+        }
+        doc = doc.style(css);
+    }
+
+    let mut clip_defs = Vec::new();
+    let mut clip_id_counter = 0usize;
+    let scene_root = render_scene_group(&scene.root, config, &mut clip_defs, &mut clip_id_counter);
+
+    if !clip_defs.is_empty() {
+        let mut defs = DefsBuilder::new();
+        for clip in clip_defs {
+            defs = defs.custom(clip);
+        }
+        doc = doc.defs(defs);
+    }
+
+    doc.child(scene_root).to_string()
+}
+
+fn count_scene_items(group: &RenderGroup) -> (usize, usize, usize) {
+    let mut groups = 1usize;
+    let mut paths = 0usize;
+    let mut texts = 0usize;
+
+    for child in &group.children {
+        match child {
+            RenderItem::Group(nested) => {
+                let (nested_groups, nested_paths, nested_texts) = count_scene_items(nested);
+                groups += nested_groups;
+                paths += nested_paths;
+                texts += nested_texts;
+            }
+            RenderItem::Path(_) => paths += 1,
+            RenderItem::Text(_) => texts += 1,
+        }
+    }
+
+    (groups, paths, texts)
+}
+
+fn render_scene_group(
+    group: &RenderGroup,
+    config: &SvgRenderConfig,
+    clip_defs: &mut Vec<Element>,
+    clip_id_counter: &mut usize,
+) -> Element {
+    let mut elem = Element::group();
+
+    if let Some(id) = &group.id {
+        elem = elem.id(id);
+    }
+
+    if let Some(transform) = group.transform {
+        let transform_value = scene_transform_value(transform);
+        elem = elem.transform(&transform_value);
+    }
+
+    if let Some(clip) = &group.clip {
+        let clip_id = register_clip_path(clip_defs, clip, clip_id_counter);
+        elem = elem.clip_path_ref(&format!("url(#{clip_id})"));
+    }
+
+    for child in &group.children {
+        elem = elem.child(render_scene_item(child, config, clip_defs, clip_id_counter));
+    }
+
+    elem
+}
+
+fn render_scene_item(
+    item: &RenderItem,
+    config: &SvgRenderConfig,
+    clip_defs: &mut Vec<Element>,
+    clip_id_counter: &mut usize,
+) -> Element {
+    match item {
+        RenderItem::Group(group) => render_scene_group(group, config, clip_defs, clip_id_counter),
+        RenderItem::Path(path) => render_scene_path(path),
+        RenderItem::Text(text) => render_scene_text(text, config),
+    }
+}
+
+fn render_scene_path(path: &RenderPath) -> Element {
+    let mut elem = Element::path().d(&path_cmds_to_d(&path.commands));
+    elem = apply_source_metadata(elem, path.source);
+
+    if let Some(fill) = &path.fill {
+        elem = apply_fill_style(elem, fill);
+    } else {
+        elem = elem.fill("none");
+    }
+
+    if let Some(stroke) = &path.stroke {
+        elem = apply_stroke_style(elem, stroke);
+    } else {
+        elem = elem.stroke("none");
+    }
+
+    elem
+}
+
+fn render_scene_text(text: &RenderText, config: &SvgRenderConfig) -> Element {
+    let mut elem = TextBuilder::new(&text.text)
+        .x(text.x)
+        .y(text.y)
+        .font_family(&config.font_family)
+        .font_size(text.font_size)
+        .line_height(config.line_height)
+        .anchor(map_text_align(text.align))
+        .baseline(map_text_baseline(text.baseline))
+        .build();
+
+    elem = apply_fill_style(elem, &text.fill);
+    apply_source_metadata(elem, text.source)
+}
+
+fn apply_source_metadata(mut elem: Element, source: RenderSource) -> Element {
+    match source {
+        RenderSource::Diagram => {
+            elem = elem.data("fm-source-kind", "diagram");
+        }
+        RenderSource::Node(index) => {
+            elem = elem
+                .data("fm-source-kind", "node")
+                .data("fm-source-index", &index.to_string());
+        }
+        RenderSource::Edge(index) => {
+            elem = elem
+                .data("fm-source-kind", "edge")
+                .data("fm-source-index", &index.to_string());
+        }
+        RenderSource::Cluster(index) => {
+            elem = elem
+                .data("fm-source-kind", "cluster")
+                .data("fm-source-index", &index.to_string());
+        }
+    }
+
+    elem
+}
+
+fn register_clip_path(
+    clip_defs: &mut Vec<Element>,
+    clip: &RenderClip,
+    clip_id_counter: &mut usize,
+) -> String {
+    let clip_id = format!("fm-scene-clip-{clip_id_counter}");
+    *clip_id_counter += 1;
+
+    let shape = match clip {
+        RenderClip::Rect(rect) => Element::rect()
+            .x(rect.x)
+            .y(rect.y)
+            .width(rect.width)
+            .height(rect.height),
+        RenderClip::Path(commands) => Element::path().d(&path_cmds_to_d(commands)),
+    };
+
+    clip_defs.push(Element::clip_path().id(&clip_id).child(shape));
+    clip_id
+}
+
+fn scene_transform_value(transform: RenderTransform) -> String {
+    match transform {
+        RenderTransform::Matrix { a, b, c, d, e, f } => {
+            TransformBuilder::new().matrix(a, b, c, d, e, f).build()
+        }
+    }
+}
+
+fn path_cmds_to_d(commands: &[PathCmd]) -> String {
+    let mut builder = PathBuilder::new();
+    for command in commands {
+        builder = match *command {
+            PathCmd::MoveTo { x, y } => builder.move_to(x, y),
+            PathCmd::LineTo { x, y } => builder.line_to(x, y),
+            PathCmd::CubicTo {
+                c1x,
+                c1y,
+                c2x,
+                c2y,
+                x,
+                y,
+            } => builder.curve_to(c1x, c1y, c2x, c2y, x, y),
+            PathCmd::QuadTo { cx, cy, x, y } => builder.quadratic_to(cx, cy, x, y),
+            PathCmd::Close => builder.close(),
+        };
+    }
+    builder.build()
+}
+
+fn apply_fill_style(mut elem: Element, fill: &FillStyle) -> Element {
+    match fill {
+        FillStyle::Solid { color, opacity } => {
+            elem = elem.fill(color);
+            if *opacity < 0.999 {
+                elem = elem.fill_opacity(clamp_unit_interval(*opacity));
+            }
+        }
+    }
+    elem
+}
+
+fn apply_stroke_style(mut elem: Element, stroke: &StrokeStyle) -> Element {
+    elem = elem.stroke(&stroke.color).stroke_width(stroke.width);
+
+    if stroke.opacity < 0.999 {
+        elem = elem.stroke_opacity(clamp_unit_interval(stroke.opacity));
+    }
+
+    if !stroke.dash_array.is_empty() {
+        let dasharray = stroke
+            .dash_array
+            .iter()
+            .map(|value| fmt_svg_number(*value))
+            .collect::<Vec<_>>()
+            .join(",");
+        elem = elem.stroke_dasharray(&dasharray);
+    }
+
+    elem = elem.stroke_linecap(map_line_cap(stroke.line_cap));
+    elem.stroke_linejoin(map_line_join(stroke.line_join))
+}
+
+fn fmt_svg_number(value: f32) -> String {
+    if value.fract() == 0.0 {
+        format!("{}", value as i32)
+    } else {
+        format!("{value:.2}")
+    }
+}
+
+fn map_line_cap(cap: RenderLineCap) -> &'static str {
+    match cap {
+        RenderLineCap::Butt => "butt",
+        RenderLineCap::Round => "round",
+        RenderLineCap::Square => "square",
+    }
+}
+
+fn map_line_join(join: RenderLineJoin) -> &'static str {
+    match join {
+        RenderLineJoin::Miter => "miter",
+        RenderLineJoin::Round => "round",
+        RenderLineJoin::Bevel => "bevel",
+    }
+}
+
+fn map_text_align(align: RenderTextAlign) -> TextAnchor {
+    match align {
+        RenderTextAlign::Start => TextAnchor::Start,
+        RenderTextAlign::Middle => TextAnchor::Middle,
+        RenderTextAlign::End => TextAnchor::End,
+    }
+}
+
+fn map_text_baseline(baseline: RenderTextBaseline) -> text::DominantBaseline {
+    match baseline {
+        RenderTextBaseline::Top => text::DominantBaseline::Hanging,
+        RenderTextBaseline::Middle => text::DominantBaseline::Middle,
+        RenderTextBaseline::Bottom => text::DominantBaseline::Alphabetic,
+    }
 }
 
 fn clamp_font_size(candidate: f32, min_font_size: f32) -> f32 {
@@ -1462,6 +1837,12 @@ mod tests {
         ArrowType, DiagramType, IrCluster, IrClusterId, IrEdge, IrEndpoint, IrLabel, IrLabelId,
         IrNode, IrNodeId, MermaidDiagramIr, NodeShape, Span,
     };
+    use fm_layout::{
+        FillStyle, LineCap as RenderLineCap, LineJoin as RenderLineJoin, PathCmd, RenderClip,
+        RenderGroup, RenderItem, RenderPath, RenderRect, RenderScene, RenderSource, RenderText,
+        RenderTransform, StrokeStyle, TextAlign as RenderTextAlign,
+        TextBaseline as RenderTextBaseline,
+    };
     use proptest::prelude::*;
 
     fn create_ir_with_cluster(title: &str) -> MermaidDiagramIr {
@@ -1566,12 +1947,184 @@ mod tests {
         ir
     }
 
+    fn create_scene_with_path_and_text() -> RenderScene {
+        let mut root = RenderGroup::new(Some(String::from("scene-root")));
+        root.children.push(RenderItem::Path(RenderPath {
+            source: RenderSource::Node(0),
+            commands: vec![
+                PathCmd::MoveTo { x: 0.0, y: 0.0 },
+                PathCmd::LineTo { x: 10.0, y: 0.0 },
+                PathCmd::CubicTo {
+                    c1x: 15.0,
+                    c1y: 5.0,
+                    c2x: 20.0,
+                    c2y: 15.0,
+                    x: 25.0,
+                    y: 20.0,
+                },
+                PathCmd::QuadTo {
+                    cx: 30.0,
+                    cy: 25.0,
+                    x: 35.0,
+                    y: 20.0,
+                },
+                PathCmd::Close,
+            ],
+            fill: Some(FillStyle::Solid {
+                color: String::from("#ffeeaa"),
+                opacity: 0.25,
+            }),
+            stroke: Some(StrokeStyle {
+                color: String::from("#334455"),
+                width: 2.5,
+                opacity: 0.5,
+                dash_array: vec![6.0, 4.0],
+                line_cap: RenderLineCap::Round,
+                line_join: RenderLineJoin::Bevel,
+            }),
+        }));
+        root.children.push(RenderItem::Text(RenderText {
+            source: RenderSource::Edge(2),
+            text: String::from("scene-label"),
+            x: 12.0,
+            y: 18.0,
+            font_size: 13.0,
+            align: RenderTextAlign::Middle,
+            baseline: RenderTextBaseline::Middle,
+            fill: FillStyle::Solid {
+                color: String::from("#102030"),
+                opacity: 0.8,
+            },
+        }));
+
+        RenderScene {
+            bounds: RenderRect {
+                x: 0.0,
+                y: 0.0,
+                width: 64.0,
+                height: 40.0,
+            },
+            root,
+        }
+    }
+
+    fn create_scene_with_transform_and_clip() -> RenderScene {
+        let mut child = RenderGroup::new(Some(String::from("scene-child")));
+        child.transform = Some(RenderTransform::Matrix {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            e: 12.0,
+            f: 8.0,
+        });
+        child.clip = Some(RenderClip::Rect(RenderRect {
+            x: 1.0,
+            y: 2.0,
+            width: 30.0,
+            height: 18.0,
+        }));
+        child.children.push(RenderItem::Path(RenderPath {
+            source: RenderSource::Cluster(0),
+            commands: vec![
+                PathCmd::MoveTo { x: 0.0, y: 0.0 },
+                PathCmd::LineTo { x: 40.0, y: 0.0 },
+                PathCmd::LineTo { x: 40.0, y: 20.0 },
+                PathCmd::Close,
+            ],
+            fill: Some(FillStyle::Solid {
+                color: String::from("#ddeeff"),
+                opacity: 1.0,
+            }),
+            stroke: None,
+        }));
+
+        let mut root = RenderGroup::new(Some(String::from("scene-root")));
+        root.children.push(RenderItem::Group(child));
+
+        RenderScene {
+            bounds: RenderRect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 80.0,
+            },
+            root,
+        }
+    }
+
     #[test]
     fn emits_svg_document() {
         let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         let svg = render_svg(&ir);
         assert!(svg.starts_with("<svg"));
         assert!(svg.ends_with("</svg>"));
+    }
+
+    #[test]
+    fn explicit_legacy_backend_matches_default_output() {
+        let ir = create_ir_with_labeled_edge();
+        let default_svg = render_svg_with_config(&ir, &SvgRenderConfig::default());
+        let explicit_legacy = render_svg_with_config(
+            &ir,
+            &SvgRenderConfig {
+                backend: SvgBackend::LegacyLayout,
+                ..Default::default()
+            },
+        );
+        assert_eq!(default_svg, explicit_legacy);
+    }
+
+    #[test]
+    fn scene_backend_is_selectable_from_render_svg_with_config() {
+        let ir = create_ir_with_labeled_edge();
+        let scene_svg = render_svg_with_config(
+            &ir,
+            &SvgRenderConfig {
+                backend: SvgBackend::Scene,
+                ..Default::default()
+            },
+        );
+        assert!(scene_svg.starts_with("<svg"));
+        assert!(scene_svg.contains("data-type=\"flowchart\""));
+        assert!(scene_svg.contains("fm-source-kind=\"node\""));
+    }
+
+    #[test]
+    fn render_scene_to_svg_emits_paths_text_and_source_metadata() {
+        let scene = create_scene_with_path_and_text();
+        let svg = render_scene_to_svg(&scene, &SvgRenderConfig::default());
+        assert!(svg.contains("data-type=\"scene\""));
+        assert!(svg.contains("<path"));
+        assert!(svg.contains("<text"));
+        assert!(svg.contains("scene-label"));
+        assert!(svg.contains("fm-source-kind=\"node\""));
+        assert!(svg.contains("fm-source-kind=\"edge\""));
+        assert!(svg.contains("C15 5,20 15,25 20"));
+        assert!(svg.contains("Q30 25,35 20"));
+    }
+
+    #[test]
+    fn render_scene_to_svg_supports_transform_and_clip_path() {
+        let scene = create_scene_with_transform_and_clip();
+        let svg = render_scene_to_svg(&scene, &SvgRenderConfig::default());
+        assert!(svg.contains("transform=\"matrix(1,0,0,1,12,8)\""));
+        assert!(svg.contains("<clipPath id=\"fm-scene-clip-0\""));
+        assert!(svg.contains("clip-path=\"url(#fm-scene-clip-0)\""));
+    }
+
+    #[test]
+    fn render_scene_to_svg_preserves_fill_and_stroke_styles() {
+        let scene = create_scene_with_path_and_text();
+        let svg = render_scene_to_svg(&scene, &SvgRenderConfig::default());
+        assert!(svg.contains("fill=\"#ffeeaa\""));
+        assert!(svg.contains("fill-opacity=\"0.25\""));
+        assert!(svg.contains("stroke=\"#334455\""));
+        assert!(svg.contains("stroke-width=\"2.50\""));
+        assert!(svg.contains("stroke-opacity=\"0.50\""));
+        assert!(svg.contains("stroke-dasharray=\"6,4\""));
+        assert!(svg.contains("stroke-linecap=\"round\""));
+        assert!(svg.contains("stroke-linejoin=\"bevel\""));
     }
 
     #[test]

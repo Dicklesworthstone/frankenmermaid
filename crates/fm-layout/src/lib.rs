@@ -192,6 +192,507 @@ pub struct TracedLayout {
     pub trace: LayoutTrace,
 }
 
+/// Target-agnostic render scene produced from diagram IR + layout geometry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderScene {
+    pub bounds: RenderRect,
+    pub root: RenderGroup,
+}
+
+/// Rectangle used by render IR primitives.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RenderRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl From<LayoutRect> for RenderRect {
+    fn from(value: LayoutRect) -> Self {
+        Self {
+            x: value.x,
+            y: value.y,
+            width: value.width,
+            height: value.height,
+        }
+    }
+}
+
+/// Generic affine transform for backend-agnostic rendering.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RenderTransform {
+    Matrix {
+        a: f32,
+        b: f32,
+        c: f32,
+        d: f32,
+        e: f32,
+        f: f32,
+    },
+}
+
+/// Optional clipping shape for groups.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RenderClip {
+    Rect(RenderRect),
+    Path(Vec<PathCmd>),
+}
+
+/// A group of render items with optional transform/clip state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderGroup {
+    pub id: Option<String>,
+    pub transform: Option<RenderTransform>,
+    pub clip: Option<RenderClip>,
+    pub children: Vec<RenderItem>,
+}
+
+impl RenderGroup {
+    #[must_use]
+    pub fn new(id: Option<String>) -> Self {
+        Self {
+            id,
+            transform: None,
+            clip: None,
+            children: Vec::new(),
+        }
+    }
+}
+
+/// Source element a render primitive came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderSource {
+    Diagram,
+    Node(usize),
+    Edge(usize),
+    Cluster(usize),
+}
+
+/// Paint source for fills.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FillStyle {
+    Solid { color: String, opacity: f32 },
+}
+
+/// Stroke cap style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LineCap {
+    #[default]
+    Butt,
+    Round,
+    Square,
+}
+
+/// Stroke join style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LineJoin {
+    #[default]
+    Miter,
+    Round,
+    Bevel,
+}
+
+/// Stroke style for path primitives.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StrokeStyle {
+    pub color: String,
+    pub width: f32,
+    pub opacity: f32,
+    pub dash_array: Vec<f32>,
+    pub line_cap: LineCap,
+    pub line_join: LineJoin,
+}
+
+impl StrokeStyle {
+    #[must_use]
+    pub fn solid(color: impl Into<String>, width: f32) -> Self {
+        Self {
+            color: color.into(),
+            width,
+            opacity: 1.0,
+            dash_array: Vec::new(),
+            line_cap: LineCap::Butt,
+            line_join: LineJoin::Miter,
+        }
+    }
+}
+
+/// Path drawing commands used by all backends.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PathCmd {
+    MoveTo {
+        x: f32,
+        y: f32,
+    },
+    LineTo {
+        x: f32,
+        y: f32,
+    },
+    CubicTo {
+        c1x: f32,
+        c1y: f32,
+        c2x: f32,
+        c2y: f32,
+        x: f32,
+        y: f32,
+    },
+    QuadTo {
+        cx: f32,
+        cy: f32,
+        x: f32,
+        y: f32,
+    },
+    Close,
+}
+
+/// A path primitive in the shared render IR.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderPath {
+    pub source: RenderSource,
+    pub commands: Vec<PathCmd>,
+    pub fill: Option<FillStyle>,
+    pub stroke: Option<StrokeStyle>,
+}
+
+/// Horizontal alignment for text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextAlign {
+    #[default]
+    Start,
+    Middle,
+    End,
+}
+
+/// Vertical alignment baseline for text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextBaseline {
+    Top,
+    #[default]
+    Middle,
+    Bottom,
+}
+
+/// Text primitive in the shared render IR.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderText {
+    pub source: RenderSource,
+    pub text: String,
+    pub x: f32,
+    pub y: f32,
+    pub font_size: f32,
+    pub align: TextAlign,
+    pub baseline: TextBaseline,
+    pub fill: FillStyle,
+}
+
+/// A render IR item.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RenderItem {
+    Group(RenderGroup),
+    Path(RenderPath),
+    Text(RenderText),
+}
+
+/// Build a target-agnostic render scene from semantic IR and computed layout.
+#[must_use]
+pub fn build_render_scene(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderScene {
+    let bounds = RenderRect::from(layout.bounds);
+
+    let mut root = RenderGroup::new(Some(String::from("diagram-root")));
+    root.transform = Some(RenderTransform::Matrix {
+        a: 1.0,
+        b: 0.0,
+        c: 0.0,
+        d: 1.0,
+        e: 0.0,
+        f: 0.0,
+    });
+    root.clip = Some(RenderClip::Rect(bounds));
+    root.children
+        .push(RenderItem::Group(build_cluster_layer(layout)));
+    root.children
+        .push(RenderItem::Group(build_edge_layer(ir, layout)));
+    root.children
+        .push(RenderItem::Group(build_node_layer(ir, layout)));
+    root.children
+        .push(RenderItem::Group(build_label_layer(ir, layout)));
+
+    RenderScene { bounds, root }
+}
+
+fn build_cluster_layer(layout: &DiagramLayout) -> RenderGroup {
+    let mut layer = RenderGroup::new(Some(String::from("clusters")));
+
+    for cluster in &layout.clusters {
+        layer.children.push(RenderItem::Path(RenderPath {
+            source: RenderSource::Cluster(cluster.cluster_index),
+            commands: rounded_rect_path(cluster.bounds, 8.0),
+            fill: Some(FillStyle::Solid {
+                color: String::from("#e2e8f0"),
+                opacity: 0.24,
+            }),
+            stroke: Some(StrokeStyle::solid("#94a3b8", 1.0)),
+        }));
+    }
+
+    if !layout.clusters.is_empty() {
+        layer.clip = Some(RenderClip::Rect(RenderRect::from(layout.bounds)));
+    }
+
+    layer
+}
+
+fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGroup {
+    let mut layer = RenderGroup::new(Some(String::from("edges")));
+
+    for edge in &layout.edges {
+        if edge.points.len() < 2 {
+            continue;
+        }
+
+        let mut commands = Vec::with_capacity(edge.points.len());
+        commands.push(PathCmd::MoveTo {
+            x: edge.points[0].x,
+            y: edge.points[0].y,
+        });
+
+        for point in &edge.points[1..] {
+            commands.push(PathCmd::LineTo {
+                x: point.x,
+                y: point.y,
+            });
+        }
+
+        let mut stroke = StrokeStyle::solid("#475569", 1.5);
+        if let Some(ir_edge) = ir.edges.get(edge.edge_index) {
+            match ir_edge.arrow {
+                fm_core::ArrowType::ThickArrow => {
+                    stroke.width = 2.5;
+                }
+                fm_core::ArrowType::DottedArrow => {
+                    stroke.dash_array = vec![6.0, 4.0];
+                    stroke.line_cap = LineCap::Round;
+                }
+                _ => {}
+            }
+        }
+
+        layer.children.push(RenderItem::Path(RenderPath {
+            source: RenderSource::Edge(edge.edge_index),
+            commands,
+            fill: None,
+            stroke: Some(stroke),
+        }));
+    }
+
+    layer
+}
+
+fn build_node_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGroup {
+    let mut layer = RenderGroup::new(Some(String::from("nodes")));
+
+    for node_box in &layout.nodes {
+        let shape = ir
+            .nodes
+            .get(node_box.node_index)
+            .map_or(fm_core::NodeShape::Rect, |node| node.shape);
+
+        layer.children.push(RenderItem::Path(RenderPath {
+            source: RenderSource::Node(node_box.node_index),
+            commands: node_path(node_box.bounds, shape),
+            fill: Some(FillStyle::Solid {
+                color: String::from("#ffffff"),
+                opacity: 1.0,
+            }),
+            stroke: Some(StrokeStyle::solid("#94a3b8", 1.5)),
+        }));
+    }
+
+    layer
+}
+
+fn build_label_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGroup {
+    let mut layer = RenderGroup::new(Some(String::from("labels")));
+
+    for node_box in &layout.nodes {
+        let Some(node) = ir.nodes.get(node_box.node_index) else {
+            continue;
+        };
+        let label_text = node
+            .label
+            .and_then(|label_id| ir.labels.get(label_id.0))
+            .map_or_else(|| node.id.clone(), |label| label.text.clone());
+
+        layer.children.push(RenderItem::Text(RenderText {
+            source: RenderSource::Node(node_box.node_index),
+            text: label_text,
+            x: node_box.bounds.x + (node_box.bounds.width / 2.0),
+            y: node_box.bounds.y + (node_box.bounds.height / 2.0),
+            font_size: 14.0,
+            align: TextAlign::Middle,
+            baseline: TextBaseline::Middle,
+            fill: FillStyle::Solid {
+                color: String::from("#0f172a"),
+                opacity: 1.0,
+            },
+        }));
+    }
+
+    for edge in &layout.edges {
+        let Some(label) = ir
+            .edges
+            .get(edge.edge_index)
+            .and_then(|edge_ir| edge_ir.label)
+            .and_then(|label_id| ir.labels.get(label_id.0))
+        else {
+            continue;
+        };
+
+        let midpoint = edge_label_position(edge);
+        layer.children.push(RenderItem::Text(RenderText {
+            source: RenderSource::Edge(edge.edge_index),
+            text: label.text.clone(),
+            x: midpoint.x,
+            y: midpoint.y,
+            font_size: 12.0,
+            align: TextAlign::Middle,
+            baseline: TextBaseline::Middle,
+            fill: FillStyle::Solid {
+                color: String::from("#334155"),
+                opacity: 1.0,
+            },
+        }));
+    }
+
+    for cluster in &layout.clusters {
+        let Some(title) = ir
+            .clusters
+            .get(cluster.cluster_index)
+            .and_then(|cluster_ir| cluster_ir.title)
+            .and_then(|label_id| ir.labels.get(label_id.0))
+        else {
+            continue;
+        };
+
+        layer.children.push(RenderItem::Text(RenderText {
+            source: RenderSource::Cluster(cluster.cluster_index),
+            text: title.text.clone(),
+            x: cluster.bounds.x + 10.0,
+            y: cluster.bounds.y + 8.0,
+            font_size: 12.0,
+            align: TextAlign::Start,
+            baseline: TextBaseline::Top,
+            fill: FillStyle::Solid {
+                color: String::from("#64748b"),
+                opacity: 1.0,
+            },
+        }));
+    }
+
+    layer
+}
+
+fn node_path(bounds: LayoutRect, shape: fm_core::NodeShape) -> Vec<PathCmd> {
+    match shape {
+        fm_core::NodeShape::Circle
+        | fm_core::NodeShape::DoubleCircle
+        | fm_core::NodeShape::CrossedCircle => polygon_ellipse_path(bounds, 18),
+        fm_core::NodeShape::Diamond => diamond_path(bounds),
+        _ => rounded_rect_path(bounds, 8.0),
+    }
+}
+
+fn rounded_rect_path(bounds: LayoutRect, radius: f32) -> Vec<PathCmd> {
+    let mut commands = Vec::with_capacity(10);
+    let r = radius.min(bounds.width / 2.0).min(bounds.height / 2.0);
+    let x = bounds.x;
+    let y = bounds.y;
+    let w = bounds.width;
+    let h = bounds.height;
+
+    commands.push(PathCmd::MoveTo { x: x + r, y });
+    commands.push(PathCmd::LineTo { x: x + w - r, y });
+    commands.push(PathCmd::QuadTo {
+        cx: x + w,
+        cy: y,
+        x: x + w,
+        y: y + r,
+    });
+    commands.push(PathCmd::LineTo {
+        x: x + w,
+        y: y + h - r,
+    });
+    commands.push(PathCmd::QuadTo {
+        cx: x + w,
+        cy: y + h,
+        x: x + w - r,
+        y: y + h,
+    });
+    commands.push(PathCmd::LineTo { x: x + r, y: y + h });
+    commands.push(PathCmd::QuadTo {
+        cx: x,
+        cy: y + h,
+        x,
+        y: y + h - r,
+    });
+    commands.push(PathCmd::LineTo { x, y: y + r });
+    commands.push(PathCmd::QuadTo {
+        cx: x,
+        cy: y,
+        x: x + r,
+        y,
+    });
+    commands.push(PathCmd::Close);
+
+    commands
+}
+
+fn diamond_path(bounds: LayoutRect) -> Vec<PathCmd> {
+    let cx = bounds.x + (bounds.width / 2.0);
+    let cy = bounds.y + (bounds.height / 2.0);
+    vec![
+        PathCmd::MoveTo { x: cx, y: bounds.y },
+        PathCmd::LineTo {
+            x: bounds.x + bounds.width,
+            y: cy,
+        },
+        PathCmd::LineTo {
+            x: cx,
+            y: bounds.y + bounds.height,
+        },
+        PathCmd::LineTo { x: bounds.x, y: cy },
+        PathCmd::Close,
+    ]
+}
+
+fn polygon_ellipse_path(bounds: LayoutRect, segments: usize) -> Vec<PathCmd> {
+    let segment_count = segments.max(8);
+    let cx = bounds.x + (bounds.width / 2.0);
+    let cy = bounds.y + (bounds.height / 2.0);
+    let rx = bounds.width / 2.0;
+    let ry = bounds.height / 2.0;
+
+    let mut commands = Vec::with_capacity(segment_count + 2);
+    for index in 0..segment_count {
+        let theta = (index as f32 / segment_count as f32) * 2.0 * PI;
+        let x = cx + (rx * theta.cos());
+        let y = cy + (ry * theta.sin());
+        if index == 0 {
+            commands.push(PathCmd::MoveTo { x, y });
+        } else {
+            commands.push(PathCmd::LineTo { x, y });
+        }
+    }
+    commands.push(PathCmd::Close);
+    commands
+}
+
+fn edge_label_position(edge_path: &LayoutEdgePath) -> LayoutPoint {
+    let midpoint_index = edge_path.points.len() / 2;
+    edge_path.points[midpoint_index]
+}
+
 #[must_use]
 pub fn layout(ir: &MermaidDiagramIr, algorithm: LayoutAlgorithm) -> LayoutStats {
     match algorithm {
@@ -4090,7 +4591,8 @@ pub fn layout_stats_from(layout: &DiagramLayout) -> LayoutStats {
 #[cfg(test)]
 mod tests {
     use super::{
-        CycleStrategy, LayoutAlgorithm, LayoutPoint, layout, layout_diagram, layout_diagram_force,
+        CycleStrategy, LayoutAlgorithm, LayoutPoint, RenderClip, RenderItem, RenderSource,
+        build_render_scene, layout, layout_diagram, layout_diagram_force,
         layout_diagram_force_traced, layout_diagram_radial, layout_diagram_traced,
         layout_diagram_tree, layout_diagram_with_cycle_strategy, route_edge_points,
     };
@@ -4168,6 +4670,99 @@ mod tests {
         let first = layout_diagram_traced(&ir);
         let second = layout_diagram_traced(&ir);
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn render_scene_builder_is_deterministic() {
+        let ir = sample_ir();
+        let layout = layout_diagram(&ir);
+        let first = build_render_scene(&ir, &layout);
+        let second = build_render_scene(&ir, &layout);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn render_scene_contains_expected_layers_and_primitives() {
+        let mut ir = sample_ir();
+        ir.labels.push(IrLabel {
+            text: "A->B".to_string(),
+            ..IrLabel::default()
+        });
+        if let Some(edge) = ir.edges.get_mut(0) {
+            edge.label = Some(IrLabelId(2));
+        }
+
+        let layout = layout_diagram(&ir);
+        let scene = build_render_scene(&ir, &layout);
+        assert!(matches!(scene.root.clip, Some(RenderClip::Rect(_))));
+
+        let layer_ids: Vec<&str> = scene
+            .root
+            .children
+            .iter()
+            .map(|item| match item {
+                RenderItem::Group(group) => group.id.as_deref().unwrap_or(""),
+                _ => "",
+            })
+            .collect();
+        assert_eq!(layer_ids, vec!["clusters", "edges", "nodes", "labels"]);
+
+        let mut path_count = 0usize;
+        let mut text_count = 0usize;
+        for layer in &scene.root.children {
+            if let RenderItem::Group(group) = layer {
+                for child in &group.children {
+                    match child {
+                        RenderItem::Path(_) => path_count += 1,
+                        RenderItem::Text(_) => text_count += 1,
+                        RenderItem::Group(_) => {}
+                    }
+                }
+            }
+        }
+
+        assert!(path_count >= layout.nodes.len() + layout.edges.len());
+        assert!(text_count >= 3);
+    }
+
+    #[test]
+    fn render_scene_paths_reference_node_edge_and_cluster_sources() {
+        let mut ir = sample_ir();
+        ir.labels.push(IrLabel {
+            text: "Cluster".to_string(),
+            ..IrLabel::default()
+        });
+        ir.clusters.push(IrCluster {
+            id: IrClusterId(0),
+            title: Some(IrLabelId(2)),
+            members: vec![IrNodeId(0), IrNodeId(1)],
+            ..IrCluster::default()
+        });
+
+        let layout = layout_diagram(&ir);
+        let scene = build_render_scene(&ir, &layout);
+
+        let mut saw_node = false;
+        let mut saw_edge = false;
+        let mut saw_cluster = false;
+        for layer in &scene.root.children {
+            if let RenderItem::Group(group) = layer {
+                for child in &group.children {
+                    if let RenderItem::Path(path) = child {
+                        match path.source {
+                            RenderSource::Node(_) => saw_node = true,
+                            RenderSource::Edge(_) => saw_edge = true,
+                            RenderSource::Cluster(_) => saw_cluster = true,
+                            RenderSource::Diagram => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(saw_node);
+        assert!(saw_edge);
+        assert!(saw_cluster);
     }
 
     #[test]

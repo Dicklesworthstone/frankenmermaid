@@ -2,11 +2,16 @@
 //!
 //! Draws diagrams to Canvas2D contexts using computed layouts.
 
-use crate::context::{Canvas2dContext, TextAlign, TextBaseline};
+use crate::context::{Canvas2dContext, LineCap, LineJoin, TextAlign, TextBaseline};
 use crate::shapes::{draw_arrowhead, draw_circle_marker, draw_cross_marker, draw_shape};
 use crate::viewport::{Viewport, fit_to_viewport};
 use fm_core::{ArrowType, MermaidDiagramIr, NodeShape};
-use fm_layout::DiagramLayout;
+use fm_layout::{
+    DiagramLayout, FillStyle, LineCap as IrLineCap, LineJoin as IrLineJoin, PathCmd, RenderClip,
+    RenderGroup, RenderItem, RenderPath, RenderScene, RenderSource, RenderText, RenderTransform,
+    StrokeStyle, TextAlign as IrTextAlign, TextBaseline as IrTextBaseline,
+};
+use std::collections::BTreeSet;
 
 /// Configuration for Canvas2D rendering.
 #[derive(Debug, Clone)]
@@ -80,6 +85,14 @@ pub struct CanvasRenderResult {
 pub struct Canvas2dRenderer {
     config: CanvasRenderConfig,
     draw_calls: usize,
+}
+
+#[derive(Debug, Default)]
+struct SceneRenderStats {
+    node_sources: BTreeSet<usize>,
+    edge_sources: BTreeSet<usize>,
+    cluster_sources: BTreeSet<usize>,
+    labels_drawn: usize,
 }
 
 impl Canvas2dRenderer {
@@ -165,6 +178,307 @@ impl Canvas2dRenderer {
             clusters_drawn,
             labels_drawn: nodes_drawn + edges_drawn, // Each node/edge may have a label
             viewport,
+        }
+    }
+
+    /// Render a target-agnostic render scene to a Canvas2D context.
+    pub fn render_scene<C: Canvas2dContext>(
+        &mut self,
+        scene: &RenderScene,
+        ctx: &mut C,
+    ) -> CanvasRenderResult {
+        self.draw_calls = 0;
+
+        let canvas_width = ctx.width();
+        let canvas_height = ctx.height();
+
+        let viewport = if self.config.auto_fit {
+            fit_to_viewport(
+                f64::from(scene.bounds.width),
+                f64::from(scene.bounds.height),
+                canvas_width,
+                canvas_height,
+                self.config.padding,
+            )
+        } else {
+            Viewport::new(canvas_width, canvas_height)
+        };
+
+        ctx.clear_rect(0.0, 0.0, canvas_width, canvas_height);
+        self.draw_calls += 1;
+
+        ctx.save();
+        let transform = viewport.transform();
+        ctx.set_transform(
+            transform.a,
+            transform.b,
+            transform.c,
+            transform.d,
+            transform.e,
+            transform.f,
+        );
+
+        let (offset_x, offset_y) = if self.config.auto_fit {
+            (-f64::from(scene.bounds.x), -f64::from(scene.bounds.y))
+        } else {
+            (
+                self.config.padding - f64::from(scene.bounds.x),
+                self.config.padding - f64::from(scene.bounds.y),
+            )
+        };
+
+        let mut stats = SceneRenderStats::default();
+        self.render_group(&scene.root, ctx, offset_x, offset_y, &mut stats);
+
+        ctx.restore();
+
+        CanvasRenderResult {
+            draw_calls: self.draw_calls,
+            nodes_drawn: stats.node_sources.len(),
+            edges_drawn: stats.edge_sources.len(),
+            clusters_drawn: stats.cluster_sources.len(),
+            labels_drawn: stats.labels_drawn,
+            viewport,
+        }
+    }
+
+    fn render_group<C: Canvas2dContext>(
+        &mut self,
+        group: &RenderGroup,
+        ctx: &mut C,
+        offset_x: f64,
+        offset_y: f64,
+        stats: &mut SceneRenderStats,
+    ) {
+        ctx.save();
+
+        if let Some(transform) = group.transform {
+            self.apply_render_transform(ctx, transform);
+        }
+
+        if let Some(clip) = &group.clip {
+            self.apply_render_clip(ctx, clip, offset_x, offset_y);
+        }
+
+        for child in &group.children {
+            match child {
+                RenderItem::Group(nested) => {
+                    self.render_group(nested, ctx, offset_x, offset_y, stats);
+                }
+                RenderItem::Path(path) => {
+                    self.render_path_item(path, ctx, offset_x, offset_y, stats);
+                }
+                RenderItem::Text(text) => {
+                    self.render_text_item(text, ctx, offset_x, offset_y, stats);
+                }
+            }
+        }
+
+        ctx.restore();
+    }
+
+    fn apply_render_transform<C: Canvas2dContext>(
+        &mut self,
+        ctx: &mut C,
+        transform: RenderTransform,
+    ) {
+        match transform {
+            RenderTransform::Matrix { a, b, c, d, e, f } => {
+                if (a - 1.0).abs() < f32::EPSILON
+                    && b.abs() < f32::EPSILON
+                    && c.abs() < f32::EPSILON
+                    && (d - 1.0).abs() < f32::EPSILON
+                    && e.abs() < f32::EPSILON
+                    && f.abs() < f32::EPSILON
+                {
+                    return;
+                }
+
+                if b.abs() < f32::EPSILON && c.abs() < f32::EPSILON {
+                    ctx.translate(f64::from(e), f64::from(f));
+                    ctx.scale(f64::from(a), f64::from(d));
+                }
+
+                // For arbitrary affine matrices, defer transformation for now.
+                // Using `set_transform` here would replace the active viewport transform.
+            }
+        }
+    }
+
+    fn apply_render_clip<C: Canvas2dContext>(
+        &mut self,
+        ctx: &mut C,
+        clip: &RenderClip,
+        offset_x: f64,
+        offset_y: f64,
+    ) {
+        ctx.begin_path();
+        match clip {
+            RenderClip::Rect(rect) => {
+                ctx.rect(
+                    f64::from(rect.x) + offset_x,
+                    f64::from(rect.y) + offset_y,
+                    f64::from(rect.width),
+                    f64::from(rect.height),
+                );
+            }
+            RenderClip::Path(commands) => {
+                self.emit_path_commands(ctx, commands, offset_x, offset_y);
+            }
+        }
+        ctx.clip();
+        self.draw_calls += 1;
+    }
+
+    fn render_path_item<C: Canvas2dContext>(
+        &mut self,
+        path: &RenderPath,
+        ctx: &mut C,
+        offset_x: f64,
+        offset_y: f64,
+        stats: &mut SceneRenderStats,
+    ) {
+        ctx.begin_path();
+        self.emit_path_commands(ctx, &path.commands, offset_x, offset_y);
+
+        if let Some(fill) = &path.fill {
+            self.apply_fill(ctx, fill);
+            ctx.fill();
+            self.draw_calls += 1;
+            ctx.set_global_alpha(1.0);
+        }
+
+        if let Some(stroke) = &path.stroke {
+            self.apply_stroke(ctx, stroke);
+            ctx.stroke();
+            self.draw_calls += 1;
+            ctx.set_line_dash(&[]);
+            ctx.set_global_alpha(1.0);
+        }
+
+        match path.source {
+            RenderSource::Node(index) => {
+                stats.node_sources.insert(index);
+            }
+            RenderSource::Edge(index) => {
+                stats.edge_sources.insert(index);
+            }
+            RenderSource::Cluster(index) => {
+                stats.cluster_sources.insert(index);
+            }
+            RenderSource::Diagram => {}
+        }
+    }
+
+    fn render_text_item<C: Canvas2dContext>(
+        &mut self,
+        text: &RenderText,
+        ctx: &mut C,
+        offset_x: f64,
+        offset_y: f64,
+        stats: &mut SceneRenderStats,
+    ) {
+        self.apply_fill(ctx, &text.fill);
+        ctx.set_font(&format!("{}px {}", text.font_size, self.config.font_family));
+        ctx.set_text_align(match text.align {
+            IrTextAlign::Start => TextAlign::Left,
+            IrTextAlign::Middle => TextAlign::Center,
+            IrTextAlign::End => TextAlign::Right,
+        });
+        ctx.set_text_baseline(match text.baseline {
+            IrTextBaseline::Top => TextBaseline::Top,
+            IrTextBaseline::Middle => TextBaseline::Middle,
+            IrTextBaseline::Bottom => TextBaseline::Bottom,
+        });
+        ctx.fill_text(
+            &text.text,
+            f64::from(text.x) + offset_x,
+            f64::from(text.y) + offset_y,
+        );
+        self.draw_calls += 1;
+        stats.labels_drawn += 1;
+        ctx.set_global_alpha(1.0);
+    }
+
+    fn apply_fill<C: Canvas2dContext>(&self, ctx: &mut C, fill: &FillStyle) {
+        match fill {
+            FillStyle::Solid { color, opacity } => {
+                ctx.set_fill_style(color);
+                ctx.set_global_alpha(f64::from(*opacity));
+            }
+        }
+    }
+
+    fn apply_stroke<C: Canvas2dContext>(&self, ctx: &mut C, stroke: &StrokeStyle) {
+        ctx.set_stroke_style(&stroke.color);
+        ctx.set_line_width(f64::from(stroke.width));
+        ctx.set_global_alpha(f64::from(stroke.opacity));
+        if stroke.dash_array.is_empty() {
+            ctx.set_line_dash(&[]);
+        } else {
+            let dash: Vec<f64> = stroke
+                .dash_array
+                .iter()
+                .map(|value| f64::from(*value))
+                .collect();
+            ctx.set_line_dash(&dash);
+        }
+        ctx.set_line_cap(match stroke.line_cap {
+            IrLineCap::Butt => LineCap::Butt,
+            IrLineCap::Round => LineCap::Round,
+            IrLineCap::Square => LineCap::Square,
+        });
+        ctx.set_line_join(match stroke.line_join {
+            IrLineJoin::Miter => LineJoin::Miter,
+            IrLineJoin::Round => LineJoin::Round,
+            IrLineJoin::Bevel => LineJoin::Bevel,
+        });
+    }
+
+    fn emit_path_commands<C: Canvas2dContext>(
+        &self,
+        ctx: &mut C,
+        commands: &[PathCmd],
+        offset_x: f64,
+        offset_y: f64,
+    ) {
+        for command in commands {
+            match command {
+                PathCmd::MoveTo { x, y } => {
+                    ctx.move_to(f64::from(*x) + offset_x, f64::from(*y) + offset_y);
+                }
+                PathCmd::LineTo { x, y } => {
+                    ctx.line_to(f64::from(*x) + offset_x, f64::from(*y) + offset_y);
+                }
+                PathCmd::CubicTo {
+                    c1x,
+                    c1y,
+                    c2x,
+                    c2y,
+                    x,
+                    y,
+                } => {
+                    ctx.bezier_curve_to(
+                        f64::from(*c1x) + offset_x,
+                        f64::from(*c1y) + offset_y,
+                        f64::from(*c2x) + offset_x,
+                        f64::from(*c2y) + offset_y,
+                        f64::from(*x) + offset_x,
+                        f64::from(*y) + offset_y,
+                    );
+                }
+                PathCmd::QuadTo { cx, cy, x, y } => {
+                    ctx.quadratic_curve_to(
+                        f64::from(*cx) + offset_x,
+                        f64::from(*cy) + offset_y,
+                        f64::from(*x) + offset_x,
+                        f64::from(*y) + offset_y,
+                    );
+                }
+                PathCmd::Close => {
+                    ctx.close_path();
+                }
+            }
         }
     }
 
@@ -451,7 +765,7 @@ mod tests {
     use super::*;
     use crate::context::{DrawOperation, MockCanvas2dContext};
     use fm_core::DiagramType;
-    use fm_layout::layout_diagram;
+    use fm_layout::{build_render_scene, layout_diagram};
 
     #[test]
     fn renderer_handles_empty_diagram() {
@@ -565,5 +879,50 @@ mod tests {
         let expected_y = f64::from(node_box.bounds.y - layout.bounds.y) + config.padding;
         assert!((rect_x - expected_x).abs() < 0.001);
         assert!((rect_y - expected_y).abs() < 0.001);
+    }
+
+    #[test]
+    fn render_scene_draws_expected_sources() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.labels.push(fm_core::IrLabel {
+            text: "A".to_string(),
+            ..Default::default()
+        });
+        ir.labels.push(fm_core::IrLabel {
+            text: "B".to_string(),
+            ..Default::default()
+        });
+        ir.nodes.push(fm_core::IrNode {
+            id: "A".to_string(),
+            label: Some(fm_core::IrLabelId(0)),
+            ..Default::default()
+        });
+        ir.nodes.push(fm_core::IrNode {
+            id: "B".to_string(),
+            label: Some(fm_core::IrLabelId(1)),
+            ..Default::default()
+        });
+        ir.edges.push(fm_core::IrEdge {
+            from: fm_core::IrEndpoint::Node(fm_core::IrNodeId(0)),
+            to: fm_core::IrEndpoint::Node(fm_core::IrNodeId(1)),
+            arrow: fm_core::ArrowType::Arrow,
+            ..Default::default()
+        });
+
+        let layout = layout_diagram(&ir);
+        let scene = build_render_scene(&ir, &layout);
+        let mut ctx = MockCanvas2dContext::new(800.0, 600.0);
+        let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig::default());
+
+        let result = renderer.render_scene(&scene, &mut ctx);
+        assert_eq!(result.nodes_drawn, 2);
+        assert_eq!(result.edges_drawn, 1);
+        assert!(result.labels_drawn >= 2);
+        assert!(ctx.operation_count() > 1);
+        assert!(
+            ctx.operations()
+                .iter()
+                .any(|operation| matches!(operation, DrawOperation::FillText(_, _, _)))
+        );
     }
 }

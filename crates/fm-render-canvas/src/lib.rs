@@ -28,7 +28,7 @@ pub use renderer::{Canvas2dRenderer, CanvasRenderConfig, CanvasRenderResult};
 pub use viewport::{Viewport, ViewportTransform};
 
 use fm_core::MermaidDiagramIr;
-use fm_layout::layout_diagram;
+use fm_layout::{RenderScene, layout_diagram};
 
 /// Render a diagram to a Canvas2D context.
 ///
@@ -42,6 +42,16 @@ pub fn render_to_canvas<C: Canvas2dContext>(
     let layout = layout_diagram(ir);
     let mut renderer = Canvas2dRenderer::new(config.clone());
     renderer.render(&layout, ir, context)
+}
+
+/// Render an explicit shared render scene to a Canvas2D context.
+pub fn render_scene_to_canvas<C: Canvas2dContext>(
+    scene: &RenderScene,
+    context: &mut C,
+    config: &CanvasRenderConfig,
+) -> CanvasRenderResult {
+    let mut renderer = Canvas2dRenderer::new(config.clone());
+    renderer.render_scene(scene, context)
 }
 
 /// Legacy function for backwards compatibility.
