@@ -591,3 +591,19 @@ fn render_json_writes_artifact_and_stdout_metadata() {
     assert!(artifact.starts_with("<svg"));
     assert!(artifact.contains("</svg>"));
 }
+
+#[test]
+fn detect_reports_gitgraph_as_basic_support() {
+    let output = run_cli(&["detect", "-", "--json"], "gitGraph\ncommit\n");
+    assert!(
+        output.status.success(),
+        "detect --json should succeed; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout must be utf-8");
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("detect --json must print valid JSON");
+    assert_eq!(json["diagram_type"], "gitGraph");
+    assert_eq!(json["support_level"], "basic");
+}

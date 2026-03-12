@@ -764,7 +764,7 @@ fn get_support_level(diagram_type: DiagramType) -> &'static str {
         DiagramType::Timeline => "basic",
         DiagramType::QuadrantChart => "basic",
         DiagramType::Requirement => "basic",
-        DiagramType::GitGraph => "unsupported",
+        DiagramType::GitGraph => "basic",
         DiagramType::C4Context
         | DiagramType::C4Container
         | DiagramType::C4Component
