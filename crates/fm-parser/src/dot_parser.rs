@@ -634,6 +634,28 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_dot_subgraph_keys_remain_distinct_groups() {
+        let parsed =
+            parse_dot("digraph G { subgraph cluster_0 { a; } subgraph cluster_0 { b; } a -> b; }");
+
+        assert_eq!(parsed.ir.clusters.len(), 2);
+        assert_eq!(parsed.ir.graph.subgraphs.len(), 2);
+        assert_eq!(parsed.ir.graph.subgraphs[0].key, "cluster_0");
+        assert_eq!(parsed.ir.graph.subgraphs[1].key, "cluster_0");
+        assert_eq!(parsed.ir.graph.subgraphs[0].members.len(), 1);
+        assert_eq!(parsed.ir.graph.subgraphs[1].members.len(), 1);
+
+        let first_member = parsed.ir.nodes[parsed.ir.graph.subgraphs[0].members[0].0]
+            .id
+            .as_str();
+        let second_member = parsed.ir.nodes[parsed.ir.graph.subgraphs[1].members[0].0]
+            .id
+            .as_str();
+        assert_eq!(first_member, "a");
+        assert_eq!(second_member, "b");
+    }
+
+    #[test]
     fn parses_html_labels() {
         let parsed = parse_dot("digraph G { a [label=<b>Alpha</b>]; }");
         assert_eq!(parsed.ir.labels.len(), 1);

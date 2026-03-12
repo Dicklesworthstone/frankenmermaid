@@ -492,7 +492,19 @@ impl MermaidGraphIr {
     }
 
     #[must_use]
-    pub fn find_subgraph_by_key(&self, key: &str) -> Option<&IrSubgraph> {
+    pub fn subgraphs_by_key(&self, key: &str) -> Vec<&IrSubgraph> {
+        self.subgraphs
+            .iter()
+            .filter(|subgraph| subgraph.key == key)
+            .collect()
+    }
+
+    /// Returns the first matching subgraph for a key.
+    ///
+    /// Mermaid and DOT can legally contain multiple subgraphs with the same key, so
+    /// callers that need exhaustive lookup should use [`Self::subgraphs_by_key`].
+    #[must_use]
+    pub fn first_subgraph_by_key(&self, key: &str) -> Option<&IrSubgraph> {
         self.subgraphs.iter().find(|subgraph| subgraph.key == key)
     }
 
@@ -2551,10 +2563,11 @@ mod tests {
         );
         assert_eq!(
             ir.graph
-                .find_subgraph_by_key("root")
+                .first_subgraph_by_key("root")
                 .map(|subgraph| subgraph.id),
             Some(IrSubgraphId(0))
         );
+        assert_eq!(ir.graph.subgraphs_by_key("root").len(), 1);
         assert_eq!(ir.graph.root_subgraphs().len(), 1);
         assert_eq!(ir.graph.leaf_subgraphs().len(), 1);
         assert_eq!(
@@ -2726,10 +2739,11 @@ mod tests {
         assert_eq!(round_trip, graph);
         assert_eq!(
             round_trip
-                .find_subgraph_by_key("root")
+                .first_subgraph_by_key("root")
                 .map(|subgraph| subgraph.id),
             Some(IrSubgraphId(0))
         );
+        assert_eq!(round_trip.subgraphs_by_key("root").len(), 1);
         assert_eq!(
             round_trip.subgraph_members_recursive(IrSubgraphId(0)),
             vec![IrNodeId(0)]

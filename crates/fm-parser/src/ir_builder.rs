@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use fm_core::{
     ArrowType, Diagnostic, DiagnosticCategory, DiagramType, GraphDirection, IrAttributeKey,
     IrCluster, IrClusterId, IrEdge, IrEdgeKind, IrEndpoint, IrEntityAttribute, IrGraphCluster,
@@ -12,9 +10,7 @@ use crate::ParseResult;
 
 pub(crate) struct IrBuilder {
     ir: MermaidDiagramIr,
-    node_index_by_id: BTreeMap<String, IrNodeId>,
-    cluster_index_by_key: BTreeMap<String, usize>,
-    subgraph_index_by_key: BTreeMap<String, usize>,
+    node_index_by_id: std::collections::BTreeMap<String, IrNodeId>,
     warnings: Vec<String>,
     /// Track nodes that were auto-created (for dangling edge recovery)
     auto_created_nodes: Vec<IrNodeId>,
@@ -24,9 +20,7 @@ impl IrBuilder {
     pub(crate) fn new(diagram_type: DiagramType) -> Self {
         Self {
             ir: MermaidDiagramIr::empty(diagram_type),
-            node_index_by_id: BTreeMap::new(),
-            cluster_index_by_key: BTreeMap::new(),
-            subgraph_index_by_key: BTreeMap::new(),
+            node_index_by_id: std::collections::BTreeMap::new(),
             warnings: Vec::new(),
             auto_created_nodes: Vec::new(),
         }
@@ -287,23 +281,6 @@ impl IrBuilder {
             return None;
         }
 
-        if let Some(existing_index) = self.cluster_index_by_key.get(normalized_key).copied() {
-            if let Some(cleaned_title) = clean_label(title) {
-                let label_id = self.intern_label(cleaned_title, span);
-                if let Some(existing_cluster) = self.ir.clusters.get_mut(existing_index)
-                    && existing_cluster.title.is_none()
-                {
-                    existing_cluster.title = Some(label_id);
-                }
-                if let Some(existing_cluster) = self.ir.graph.clusters.get_mut(existing_index)
-                    && existing_cluster.title.is_none()
-                {
-                    existing_cluster.title = Some(label_id);
-                }
-            }
-            return Some(existing_index);
-        }
-
         let title_id = clean_label(title).map(|value| self.intern_label(value, span));
         let cluster_index = self.ir.clusters.len();
         self.ir.clusters.push(IrCluster {
@@ -319,8 +296,6 @@ impl IrBuilder {
             subgraph: None,
             span,
         });
-        self.cluster_index_by_key
-            .insert(normalized_key.to_string(), cluster_index);
         Some(cluster_index)
     }
 
@@ -357,38 +332,6 @@ impl IrBuilder {
             return None;
         }
 
-        if let Some(existing_index) = self.subgraph_index_by_key.get(normalized_key).copied() {
-            if let Some(cleaned_title) = clean_label(title) {
-                let label_id = self.intern_label(cleaned_title, span);
-                if let Some(existing) = self.ir.graph.subgraphs.get_mut(existing_index)
-                    && existing.title.is_none()
-                {
-                    existing.title = Some(label_id);
-                }
-            }
-            if let Some(parent_index) = parent {
-                let parent_id = IrSubgraphId(parent_index);
-                if let Some(existing) = self.ir.graph.subgraphs.get_mut(existing_index)
-                    && existing.parent.is_none()
-                {
-                    existing.parent = Some(parent_id);
-                }
-                if let Some(parent_graph) = self.ir.graph.subgraphs.get_mut(parent_index) {
-                    let child_id = IrSubgraphId(existing_index);
-                    if !parent_graph.children.contains(&child_id) {
-                        parent_graph.children.push(child_id);
-                    }
-                }
-            }
-            if let Some(cluster_index) = cluster_index
-                && let Some(existing_cluster) = self.ir.graph.clusters.get_mut(cluster_index)
-                && existing_cluster.subgraph.is_none()
-            {
-                existing_cluster.subgraph = Some(IrSubgraphId(existing_index));
-            }
-            return Some(existing_index);
-        }
-
         let title_id = clean_label(title).map(|value| self.intern_label(value, span));
         let subgraph_index = self.ir.graph.subgraphs.len();
         let parent_id = parent.map(IrSubgraphId);
@@ -413,8 +356,6 @@ impl IrBuilder {
         {
             graph_cluster.subgraph = Some(IrSubgraphId(subgraph_index));
         }
-        self.subgraph_index_by_key
-            .insert(normalized_key.to_string(), subgraph_index);
         Some(subgraph_index)
     }
 

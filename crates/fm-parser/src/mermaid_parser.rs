@@ -3412,6 +3412,47 @@ mod tests {
     }
 
     #[test]
+    fn flowchart_duplicate_subgraph_keys_remain_distinct_groups() {
+        let parsed = parse_mermaid(
+            "flowchart TB\nsubgraph api [First]\nA-->B\nend\nsubgraph api [Second]\nC-->D\nend",
+        );
+
+        assert_eq!(parsed.ir.clusters.len(), 2);
+        assert_eq!(parsed.ir.graph.subgraphs.len(), 2);
+
+        let first_cluster = &parsed.ir.clusters[0];
+        let second_cluster = &parsed.ir.clusters[1];
+        assert_ne!(first_cluster.id, second_cluster.id);
+
+        let first_members: std::collections::BTreeSet<String> = first_cluster
+            .members
+            .iter()
+            .filter_map(|member| parsed.ir.nodes.get(member.0).map(|node| node.id.clone()))
+            .collect();
+        let second_members: std::collections::BTreeSet<String> = second_cluster
+            .members
+            .iter()
+            .filter_map(|member| parsed.ir.nodes.get(member.0).map(|node| node.id.clone()))
+            .collect();
+        assert_eq!(
+            first_members,
+            std::collections::BTreeSet::from(["A".to_string(), "B".to_string()])
+        );
+        assert_eq!(
+            second_members,
+            std::collections::BTreeSet::from(["C".to_string(), "D".to_string()])
+        );
+
+        let first_subgraph = &parsed.ir.graph.subgraphs[0];
+        let second_subgraph = &parsed.ir.graph.subgraphs[1];
+        assert_eq!(first_subgraph.key, "api");
+        assert_eq!(second_subgraph.key, "api");
+        assert_eq!(first_subgraph.members.len(), 2);
+        assert_eq!(second_subgraph.members.len(), 2);
+        assert_ne!(first_subgraph.members, second_subgraph.members);
+    }
+
+    #[test]
     fn flowchart_inline_comment_does_not_strip_node_labels_with_percent_signs() {
         let parsed = parse_mermaid("flowchart TB\nA[50%% done]-->B");
         assert!(
@@ -3844,16 +3885,14 @@ mod tests {
         assert_eq!(parsed.ir.graph.subgraphs.len(), 2);
         assert_eq!(parsed.ir.graph.clusters.len(), 2);
 
-        let early_days = parsed
-            .ir
-            .graph
-            .find_subgraph_by_key("Early Days")
-            .expect("Early Days subgraph should exist");
-        let growth_era = parsed
-            .ir
-            .graph
-            .find_subgraph_by_key("Growth Era")
-            .expect("Growth Era subgraph should exist");
+        let early_days = parsed.ir.graph.subgraphs_by_key("Early Days");
+        let growth_era = parsed.ir.graph.subgraphs_by_key("Growth Era");
+
+        assert_eq!(early_days.len(), 1);
+        assert_eq!(growth_era.len(), 1);
+
+        let early_days = early_days[0];
+        let growth_era = growth_era[0];
 
         assert_eq!(early_days.parent, None);
         assert_eq!(growth_era.parent, None);
