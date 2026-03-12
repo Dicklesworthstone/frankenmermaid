@@ -650,7 +650,13 @@ fn parse_flowchart_document_items(
         }
 
         if is_flowchart_header(trimmed) {
-            *header_direction = parse_graph_direction(trimmed);
+            if stop_on_end {
+                warnings.push(format!(
+                    "Line {line_number}: nested flowchart header ignored inside subgraph"
+                ));
+            } else {
+                *header_direction = parse_graph_direction(trimmed);
+            }
             continue;
         }
 
@@ -3645,6 +3651,17 @@ mod tests {
         assert_eq!(parsed.ir.meta.direction, GraphDirection::LR);
         assert_eq!(parsed.ir.nodes.len(), 2);
         assert_eq!(parsed.ir.edges.len(), 1);
+    }
+
+    #[test]
+    fn flowchart_nested_header_does_not_override_top_level_direction() {
+        let parsed =
+            parse_mermaid("flowchart TB\nsubgraph api [API]\nflowchart RL\nA-->B\nend\nB-->C");
+        assert_eq!(parsed.ir.direction, GraphDirection::TB);
+        assert_eq!(parsed.ir.meta.direction, GraphDirection::TB);
+        assert!(parsed.warnings.iter().any(|warning| {
+            warning.contains("nested flowchart header ignored inside subgraph")
+        }));
     }
 
     #[test]
