@@ -541,3 +541,53 @@ fn validate_diagnostics_out_writes_artifact_file() {
     assert!(artifact_json.get("valid").is_some());
     assert!(artifact_json.get("diagnostics").is_some());
 }
+
+#[test]
+fn render_json_requires_output_path() {
+    let output = run_cli(&["render", "-", "--json"], "flowchart LR\nA-->B\n");
+    assert!(
+        !output.status.success(),
+        "render --json without --output should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--json requires --output"));
+}
+
+#[test]
+fn render_json_writes_artifact_and_stdout_metadata() {
+    let output_file = NamedTempFile::new().expect("temp render output file");
+    let output_path = output_file
+        .path()
+        .to_str()
+        .expect("temp path must be valid utf-8")
+        .to_string();
+
+    let output = run_cli(
+        &[
+            "render",
+            "-",
+            "--format",
+            "svg",
+            "--json",
+            "--output",
+            &output_path,
+        ],
+        "flowchart LR\nA-->B\n",
+    );
+    assert!(
+        output.status.success(),
+        "render --json with --output should succeed; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout must be utf-8");
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("render --json must print metadata JSON to stdout");
+    assert_eq!(json["format"], "svg");
+    assert_eq!(json["diagram_type"], "flowchart");
+    assert!(json["output_bytes"].as_u64().is_some_and(|value| value > 0));
+
+    let artifact = std::fs::read_to_string(&output_path).expect("failed to read rendered svg");
+    assert!(artifact.starts_with("<svg"));
+    assert!(artifact.contains("</svg>"));
+}

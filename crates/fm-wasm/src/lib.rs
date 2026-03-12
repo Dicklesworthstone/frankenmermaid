@@ -2,17 +2,19 @@
 
 use std::sync::{LazyLock, RwLock};
 
-use fm_layout::{LayoutAlgorithm, layout};
+use fm_layout::layout_diagram;
 #[cfg(target_arch = "wasm32")]
 use fm_parser::ParseResult;
 use fm_parser::{detect_type_with_confidence, parse};
 use fm_render_canvas::CanvasRenderConfig;
 #[cfg(target_arch = "wasm32")]
+use fm_render_canvas::render_to_canvas_with_layout;
+#[cfg(target_arch = "wasm32")]
 use fm_render_canvas::{
     Canvas2dContext, CanvasRenderResult, LineCap, LineJoin, TextAlign, TextBaseline, TextMetrics,
     render_to_canvas,
 };
-use fm_render_svg::{SvgRenderConfig, ThemePreset, render_svg_with_config};
+use fm_render_svg::{SvgRenderConfig, ThemePreset, render_svg_with_layout};
 use serde::{Deserialize, Serialize};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
@@ -313,11 +315,11 @@ fn merge_canvas_config(
 pub fn render(input: &str) -> WasmRenderOutput {
     let parsed = parse(input);
     let runtime = read_runtime_config();
-    let _stats = layout(&parsed.ir, LayoutAlgorithm::Auto);
+    let layout = layout_diagram(&parsed.ir);
 
     WasmRenderOutput {
-        svg: render_svg_with_config(&parsed.ir, &runtime.svg),
-        detected_type: format!("{:?}", parsed.ir.diagram_type),
+        svg: render_svg_with_layout(&parsed.ir, &layout, &runtime.svg),
+        detected_type: parsed.ir.diagram_type.as_str().to_string(),
     }
 }
 
@@ -341,7 +343,8 @@ pub fn render_svg_js(input: &str, config: Option<JsValue>) -> Result<String, JsV
     let runtime = read_runtime_config();
     let svg_config = merge_svg_config(&runtime.svg, &overrides.svg, overrides.theme.as_deref())?;
     let parsed = parse(input);
-    Ok(render_svg_with_config(&parsed.ir, &svg_config))
+    let layout = layout_diagram(&parsed.ir);
+    Ok(render_svg_with_layout(&parsed.ir, &layout, &svg_config))
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = detectType))]
@@ -608,10 +611,12 @@ impl Diagram {
         let next_canvas = merge_canvas_config(&self.canvas_config, &overrides.canvas);
 
         let parsed = parse(input);
-        let svg = render_svg_with_config(&parsed.ir, &next_svg);
+        let layout = layout_diagram(&parsed.ir);
+        let svg = render_svg_with_layout(&parsed.ir, &layout, &next_svg);
 
         let mut web_canvas = WebCanvas2dContext::new(self.canvas.clone(), self.context.clone());
-        let canvas_result = render_to_canvas(&parsed.ir, &mut web_canvas, &next_canvas);
+        let canvas_result =
+            render_to_canvas_with_layout(&parsed.ir, &layout, &mut web_canvas, &next_canvas);
 
         self.svg_config = next_svg;
         self.canvas_config = next_canvas;
@@ -686,7 +691,7 @@ mod tests {
     fn render_returns_svg_and_type() {
         let output = render("flowchart LR\nA-->B");
         assert!(output.svg.starts_with("<svg"));
-        assert_eq!(output.detected_type, "Flowchart");
+        assert_eq!(output.detected_type, "flowchart");
     }
 
     #[test]

@@ -191,10 +191,20 @@ pub fn render_svg(ir: &MermaidDiagramIr) -> String {
 #[must_use]
 pub fn render_svg_with_config(ir: &MermaidDiagramIr, config: &SvgRenderConfig) -> String {
     let layout = layout_diagram(ir);
+    render_svg_with_layout(ir, &layout, config)
+}
+
+/// Render an IR diagram to SVG string with a pre-computed layout.
+#[must_use]
+pub fn render_svg_with_layout(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    config: &SvgRenderConfig,
+) -> String {
     match config.backend {
-        SvgBackend::LegacyLayout => render_layout_to_svg(&layout, ir, config),
+        SvgBackend::LegacyLayout => render_layout_to_svg(layout, ir, config),
         SvgBackend::Scene => {
-            let scene = build_render_scene(ir, &layout);
+            let scene = build_render_scene(ir, layout);
             render_scene_document_with_ir(&scene, config, Some(ir))
         }
     }
@@ -2073,6 +2083,18 @@ mod tests {
             },
         );
         assert_eq!(default_svg, explicit_legacy);
+    }
+
+    #[test]
+    fn precomputed_layout_matches_default_render_output() {
+        let ir = create_ir_with_labeled_edge();
+        let config = SvgRenderConfig::default();
+        let layout = layout_diagram(&ir);
+
+        let default_svg = render_svg_with_config(&ir, &config);
+        let precomputed_svg = render_svg_with_layout(&ir, &layout, &config);
+
+        assert_eq!(default_svg, precomputed_svg);
     }
 
     #[test]

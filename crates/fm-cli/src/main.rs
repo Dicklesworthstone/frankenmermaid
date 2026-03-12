@@ -20,7 +20,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use fm_core::{DiagramType, MermaidDiagramIr, StructuredDiagnostic};
 use fm_layout::layout_diagram;
 use fm_parser::{detect_type, parse, parse_evidence_json};
-use fm_render_svg::{SvgRenderConfig, ThemePreset, render_svg_with_config};
+use fm_render_svg::{SvgRenderConfig, ThemePreset, render_svg_with_layout};
 use fm_render_term::{TermRenderConfig, render_term_with_config};
 use serde::Serialize;
 use tracing::{debug, info, warn};
@@ -77,6 +77,7 @@ enum Command {
         height: Option<u32>,
 
         /// Output as JSON with metadata (timing, dimensions, etc.)
+        /// Requires `--output` so stdout can remain machine-readable.
         #[arg(long)]
         json: bool,
     },
@@ -380,6 +381,10 @@ fn cmd_render(
     height: Option<u32>,
     json_output: bool,
 ) -> Result<()> {
+    if json_output && output.is_none() {
+        anyhow::bail!("--json requires --output so rendered output does not mix with metadata");
+    }
+
     let total_start = Instant::now();
 
     // Parse
@@ -413,7 +418,7 @@ fn cmd_render(
     // Render
     let render_start = Instant::now();
     let (rendered, actual_width, actual_height) =
-        render_format(&parsed.ir, format, theme, width, height)?;
+        render_format(&parsed.ir, &layout, format, theme, width, height)?;
     let render_time = render_start.elapsed();
 
     let total_time = total_start.elapsed();
@@ -435,7 +440,7 @@ fn cmd_render(
         };
 
         let json_str = serde_json::to_string_pretty(&result)?;
-        eprintln!("{json_str}");
+        println!("{json_str}");
     }
 
     // Write output
@@ -457,6 +462,7 @@ fn cmd_render(
 
 fn render_format(
     ir: &MermaidDiagramIr,
+    layout: &fm_layout::DiagramLayout,
     format: OutputFormat,
     theme: &str,
     width: Option<u32>,
@@ -466,7 +472,7 @@ fn render_format(
         OutputFormat::Svg => {
             let mut svg_config = SvgRenderConfig::default();
             svg_config.theme = resolve_theme_preset(theme, svg_config.theme);
-            let svg = render_svg_with_config(ir, &svg_config);
+            let svg = render_svg_with_layout(ir, layout, &svg_config);
             // Extract dimensions from SVG if available
             let (w, h) = extract_svg_dimensions(&svg);
             Ok((svg.into_bytes(), w, h))
@@ -477,7 +483,7 @@ fn render_format(
             {
                 let mut svg_config = SvgRenderConfig::default();
                 svg_config.theme = resolve_theme_preset(theme, svg_config.theme);
-                let svg = render_svg_with_config(ir, &svg_config);
+                let svg = render_svg_with_layout(ir, layout, &svg_config);
                 let (png, px_width, px_height) = svg_to_png(&svg, width, height)?;
                 Ok((png, Some(px_width), Some(px_height)))
             }
@@ -786,7 +792,7 @@ fn cmd_validate(
     let source = load_input(input)?;
     let parsed = parse(&source);
     let layout = layout_diagram(&parsed.ir);
-    let svg_output = render_svg_with_config(&parsed.ir, &SvgRenderConfig::default());
+    let svg_output = render_svg_with_layout(&parsed.ir, &layout, &SvgRenderConfig::default());
 
     let mut diagnostics = collect_parse_diagnostics(&parsed);
     diagnostics.extend(collect_structural_diagnostics(&parsed));
