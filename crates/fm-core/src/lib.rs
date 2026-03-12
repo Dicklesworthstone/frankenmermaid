@@ -385,6 +385,17 @@ pub enum IrEndpoint {
     Port(IrPortId),
 }
 
+impl IrEndpoint {
+    #[must_use]
+    pub fn resolved_node_id(self, ports: &[IrPort]) -> Option<IrNodeId> {
+        match self {
+            Self::Unresolved => None,
+            Self::Node(node_id) => Some(node_id),
+            Self::Port(port_id) => ports.get(port_id.0).map(|port| port.node),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct IrEdge {
     pub from: IrEndpoint,
@@ -490,6 +501,14 @@ impl MermaidGraphIr {
         self.subgraphs
             .iter()
             .filter(|subgraph| subgraph.parent.is_none())
+            .collect()
+    }
+
+    #[must_use]
+    pub fn leaf_subgraphs(&self) -> Vec<&IrSubgraph> {
+        self.subgraphs
+            .iter()
+            .filter(|subgraph| subgraph.children.is_empty())
             .collect()
     }
 
@@ -1534,6 +1553,62 @@ impl MermaidDiagramIr {
     pub fn graph_subgraph(&self, subgraph_id: IrSubgraphId) -> Option<&IrSubgraph> {
         self.graph.subgraph(subgraph_id)
     }
+
+    #[must_use]
+    pub fn resolve_endpoint_node(&self, endpoint: IrEndpoint) -> Option<IrNodeId> {
+        endpoint.resolved_node_id(&self.ports)
+    }
+
+    #[must_use]
+    pub fn graph_incident_edges(&self, node_id: IrNodeId) -> Vec<&IrGraphEdge> {
+        self.graph
+            .edges
+            .iter()
+            .filter(|edge| {
+                self.resolve_endpoint_node(edge.from) == Some(node_id)
+                    || self.resolve_endpoint_node(edge.to) == Some(node_id)
+            })
+            .collect()
+    }
+
+    #[must_use]
+    pub fn graph_outgoing_edges(&self, node_id: IrNodeId) -> Vec<&IrGraphEdge> {
+        self.graph
+            .edges
+            .iter()
+            .filter(|edge| self.resolve_endpoint_node(edge.from) == Some(node_id))
+            .collect()
+    }
+
+    #[must_use]
+    pub fn graph_incoming_edges(&self, node_id: IrNodeId) -> Vec<&IrGraphEdge> {
+        self.graph
+            .edges
+            .iter()
+            .filter(|edge| self.resolve_endpoint_node(edge.to) == Some(node_id))
+            .collect()
+    }
+
+    #[must_use]
+    pub fn graph_neighbors(&self, node_id: IrNodeId) -> Vec<IrNodeId> {
+        let mut neighbors = Vec::new();
+
+        for edge in self.graph_incident_edges(node_id) {
+            let Some(from) = self.resolve_endpoint_node(edge.from) else {
+                continue;
+            };
+            let Some(to) = self.resolve_endpoint_node(edge.to) else {
+                continue;
+            };
+
+            let candidate = if from == node_id { to } else { from };
+            if !neighbors.contains(&candidate) {
+                neighbors.push(candidate);
+            }
+        }
+
+        neighbors
+    }
 }
 
 /// Counts of diagnostics by severity level.
@@ -1568,7 +1643,7 @@ mod tests {
         ArrowType, Diagnostic, DiagnosticCategory, DiagnosticSeverity, DiagramPalettePreset,
         DiagramType, GraphDirection, IrAttributeKey, IrCluster, IrClusterId, IrEdge, IrEdgeKind,
         IrEndpoint, IrEntityAttribute, IrGraphCluster, IrGraphEdge, IrGraphNode, IrLabel,
-        IrLabelId, IrNode, IrNodeId, IrNodeKind, IrPortId, IrPortSideHint, IrSubgraph,
+        IrLabelId, IrNode, IrNodeId, IrNodeKind, IrPort, IrPortId, IrPortSideHint, IrSubgraph,
         IrSubgraphId, MermaidConfig, MermaidDiagramIr, MermaidError, MermaidErrorCode,
         MermaidFallbackAction, MermaidFallbackPolicy, MermaidSanitizeMode, MermaidSupportLevel,
         MermaidWarningCode, NodeShape, Position, Span, StructuredDiagnostic,
@@ -2481,6 +2556,7 @@ mod tests {
             Some(IrSubgraphId(0))
         );
         assert_eq!(ir.graph.root_subgraphs().len(), 1);
+        assert_eq!(ir.graph.leaf_subgraphs().len(), 1);
         assert_eq!(
             ir.graph_subgraph(IrSubgraphId(0))
                 .map(|subgraph| subgraph.key.as_str()),
@@ -2580,6 +2656,14 @@ mod tests {
             vec!["child", "leaf"]
         );
         assert_eq!(
+            ir.graph
+                .leaf_subgraphs()
+                .into_iter()
+                .map(|subgraph| subgraph.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["leaf"]
+        );
+        assert_eq!(
             ir.graph.subgraph_members_recursive(IrSubgraphId(0)),
             vec![IrNodeId(0), IrNodeId(1), IrNodeId(2)]
         );
@@ -2649,6 +2733,64 @@ mod tests {
         assert_eq!(
             round_trip.subgraph_members_recursive(IrSubgraphId(0)),
             vec![IrNodeId(0)]
+        );
+    }
+
+    #[test]
+    fn endpoint_resolution_and_graph_adjacency_helpers_handle_ports() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.ports.push(IrPort {
+            node: IrNodeId(1),
+            name: "out".to_string(),
+            side_hint: IrPortSideHint::Horizontal,
+            span: sample_span(1, 1, 1),
+        });
+        ir.ports.push(IrPort {
+            node: IrNodeId(2),
+            name: "in".to_string(),
+            side_hint: IrPortSideHint::Horizontal,
+            span: sample_span(1, 1, 1),
+        });
+        ir.graph.edges.push(IrGraphEdge {
+            edge_id: 0,
+            kind: IrEdgeKind::Generic,
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Port(IrPortId(0)),
+            span: sample_span(1, 1, 1),
+        });
+        ir.graph.edges.push(IrGraphEdge {
+            edge_id: 1,
+            kind: IrEdgeKind::Generic,
+            from: IrEndpoint::Port(IrPortId(0)),
+            to: IrEndpoint::Port(IrPortId(1)),
+            span: sample_span(1, 1, 1),
+        });
+        ir.graph.edges.push(IrGraphEdge {
+            edge_id: 2,
+            kind: IrEdgeKind::Generic,
+            from: IrEndpoint::Node(IrNodeId(2)),
+            to: IrEndpoint::Node(IrNodeId(0)),
+            span: sample_span(1, 1, 1),
+        });
+
+        assert_eq!(
+            IrEndpoint::Port(IrPortId(0)).resolved_node_id(&ir.ports),
+            Some(IrNodeId(1))
+        );
+        assert_eq!(
+            ir.resolve_endpoint_node(IrEndpoint::Port(IrPortId(1))),
+            Some(IrNodeId(2))
+        );
+        assert_eq!(ir.graph_incident_edges(IrNodeId(0)).len(), 2);
+        assert_eq!(ir.graph_outgoing_edges(IrNodeId(1)).len(), 1);
+        assert_eq!(ir.graph_incoming_edges(IrNodeId(2)).len(), 1);
+        assert_eq!(
+            ir.graph_neighbors(IrNodeId(0)),
+            vec![IrNodeId(1), IrNodeId(2)]
+        );
+        assert_eq!(
+            ir.graph_neighbors(IrNodeId(1)),
+            vec![IrNodeId(0), IrNodeId(2)]
         );
     }
 
