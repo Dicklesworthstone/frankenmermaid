@@ -155,7 +155,7 @@ fn exact_keyword_match(lower: &str, original: &str) -> Option<DetectedType> {
             (DiagramType::Sankey, 1.0)
         } else if lower.starts_with("xychart") {
             (DiagramType::XyChart, 1.0)
-        } else if lower.starts_with("block-beta") {
+        } else if lower.starts_with("block-beta") || lower.starts_with("block") {
             (DiagramType::BlockBeta, 1.0)
         } else if lower.starts_with("packet-beta") {
             (DiagramType::PacketBeta, 1.0)
@@ -533,6 +533,8 @@ mod tests {
             ("mindmap\nroot", DiagramType::Mindmap),
             ("timeline\ntitle History", DiagramType::Timeline),
             ("journey\ntitle Journey", DiagramType::Journey),
+            ("block-beta\nA", DiagramType::BlockBeta),
+            ("block\nA", DiagramType::BlockBeta),
         ];
 
         for (input, expected_type) in test_cases {

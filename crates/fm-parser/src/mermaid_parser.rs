@@ -114,7 +114,7 @@ pub fn detect_type(input: &str) -> DiagramType {
         DiagramType::Sankey
     } else if lower.starts_with("xychart") {
         DiagramType::XyChart
-    } else if lower.starts_with("block-beta") {
+    } else if lower.starts_with("block-beta") || lower.starts_with("block") {
         DiagramType::BlockBeta
     } else if lower.starts_with("packet-beta") {
         DiagramType::PacketBeta

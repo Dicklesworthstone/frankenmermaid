@@ -737,6 +737,8 @@ fn analyze_detection_confidence(
         || first_line.starts_with("mindmap")
         || first_line.starts_with("timeline")
         || first_line.starts_with("quadrantchart")
+        || first_line.starts_with("block-beta")
+        || first_line.starts_with("block")
         || first_line.starts_with("requirement")
         || first_line.starts_with("digraph")
         || first_line.starts_with("graph {")
@@ -772,7 +774,7 @@ fn get_support_level(diagram_type: DiagramType) -> &'static str {
         | DiagramType::C4Deployment => "unsupported",
         DiagramType::Sankey => "unsupported",
         DiagramType::XyChart => "unsupported",
-        DiagramType::BlockBeta => "unsupported",
+        DiagramType::BlockBeta => "basic",
         DiagramType::PacketBeta => "basic",
         DiagramType::ArchitectureBeta => "unsupported",
         DiagramType::Unknown => "unknown",
