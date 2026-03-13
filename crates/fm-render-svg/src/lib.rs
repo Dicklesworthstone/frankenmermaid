@@ -1866,6 +1866,7 @@ mod tests {
             id: IrClusterId(0),
             title: Some(label_id),
             members: vec![],
+            grid_span: 1,
             span: Span::default(),
         });
         ir

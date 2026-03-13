@@ -19,6 +19,12 @@ pub enum LayoutAlgorithm {
     Grid,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockBetaGridItem {
+    Node(usize),
+    Group(fm_core::IrSubgraphId),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CycleStrategy {
     #[default]
@@ -1643,40 +1649,54 @@ pub fn layout_diagram_grid_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         sorted_nodes.sort_by(|left, right| compare_node_indices(ir, *left, *right));
     }
 
-    let mut row = 0_usize;
-    let mut col = 0_usize;
-    for node_index in sorted_nodes {
-        let span = if ir.diagram_type == DiagramType::BlockBeta {
-            block_beta_node_span(&ir.nodes[node_index])
-                .min(column_count)
-                .max(1)
-        } else {
-            1
-        };
+    if ir.diagram_type == DiagramType::BlockBeta
+        && layout_block_beta_grouped_items(
+            ir,
+            column_count,
+            cell_width,
+            cell_height,
+            &mut rank_by_node,
+            &mut order_by_node,
+            &mut centers,
+        )
+    {
+        // Grouped placement already populated node centers/ranks/orders.
+    } else {
+        let mut row = 0_usize;
+        let mut col = 0_usize;
+        for node_index in sorted_nodes {
+            let span = if ir.diagram_type == DiagramType::BlockBeta {
+                block_beta_node_span(&ir.nodes[node_index])
+                    .min(column_count)
+                    .max(1)
+            } else {
+                1
+            };
 
-        if col != 0 && col + span > column_count {
-            row += 1;
-            col = 0;
-        }
+            if col != 0 && col + span > column_count {
+                row += 1;
+                col = 0;
+            }
 
-        centers[node_index] = (
-            col as f32 * cell_width + ((span - 1) as f32 * cell_width / 2.0),
-            row as f32 * cell_height,
-        );
+            centers[node_index] = (
+                col as f32 * cell_width + ((span - 1) as f32 * cell_width / 2.0),
+                row as f32 * cell_height,
+            );
 
-        if matches!(ir.direction, GraphDirection::LR | GraphDirection::RL) {
-            rank_by_node[node_index] = col;
-            order_by_node[node_index] = row;
-        } else {
-            rank_by_node[node_index] = row;
-            order_by_node[node_index] = col;
-        }
+            if matches!(ir.direction, GraphDirection::LR | GraphDirection::RL) {
+                rank_by_node[node_index] = col;
+                order_by_node[node_index] = row;
+            } else {
+                rank_by_node[node_index] = row;
+                order_by_node[node_index] = col;
+            }
 
-        if col + span >= column_count {
-            row += 1;
-            col = 0;
-        } else {
-            col += span;
+            if col + span >= column_count {
+                row += 1;
+                col = 0;
+            } else {
+                col += span;
+            }
         }
     }
 
@@ -3684,6 +3704,265 @@ fn block_beta_node_span(node: &IrNode) -> usize {
         .unwrap_or(1)
 }
 
+fn layout_block_beta_grouped_items(
+    ir: &MermaidDiagramIr,
+    column_count: usize,
+    cell_width: f32,
+    cell_height: f32,
+    rank_by_node: &mut [usize],
+    order_by_node: &mut [usize],
+    centers: &mut [(f32, f32)],
+) -> bool {
+    let items = block_beta_direct_items(ir, None);
+    if items.is_empty() {
+        return false;
+    }
+
+    place_block_beta_items(
+        ir,
+        &items,
+        column_count,
+        0,
+        0,
+        cell_width,
+        cell_height,
+        rank_by_node,
+        order_by_node,
+        centers,
+    );
+    true
+}
+
+fn block_beta_direct_items(
+    ir: &MermaidDiagramIr,
+    parent: Option<fm_core::IrSubgraphId>,
+) -> Vec<BlockBetaGridItem> {
+    let mut items = Vec::new();
+
+    if let Some(parent_id) = parent {
+        if let Some(subgraph) = ir.graph.subgraph(parent_id) {
+            items.extend(
+                subgraph
+                    .children
+                    .iter()
+                    .copied()
+                    .map(BlockBetaGridItem::Group),
+            );
+        }
+    } else {
+        items.extend(
+            ir.graph
+                .root_subgraphs()
+                .into_iter()
+                .map(|subgraph| BlockBetaGridItem::Group(subgraph.id)),
+        );
+    }
+
+    items.extend(
+        ir.graph
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(
+                |(node_index, graph_node)| match graph_node.subgraphs.last().copied() {
+                    Some(subgraph_id) if Some(subgraph_id) == parent => {
+                        Some(BlockBetaGridItem::Node(node_index))
+                    }
+                    None if parent.is_none() => Some(BlockBetaGridItem::Node(node_index)),
+                    _ => None,
+                },
+            ),
+    );
+
+    items.sort_by(|left, right| compare_block_beta_items(ir, *left, *right));
+    items
+}
+
+fn compare_block_beta_items(
+    ir: &MermaidDiagramIr,
+    left: BlockBetaGridItem,
+    right: BlockBetaGridItem,
+) -> std::cmp::Ordering {
+    let left_anchor = block_beta_item_anchor(ir, left);
+    let right_anchor = block_beta_item_anchor(ir, right);
+
+    left_anchor
+        .cmp(&right_anchor)
+        .then_with(|| match (left, right) {
+            (BlockBetaGridItem::Node(left), BlockBetaGridItem::Node(right)) => left.cmp(&right),
+            (BlockBetaGridItem::Group(left), BlockBetaGridItem::Group(right)) => {
+                left.0.cmp(&right.0)
+            }
+            (BlockBetaGridItem::Group(_), BlockBetaGridItem::Node(_)) => std::cmp::Ordering::Less,
+            (BlockBetaGridItem::Node(_), BlockBetaGridItem::Group(_)) => {
+                std::cmp::Ordering::Greater
+            }
+        })
+}
+
+fn block_beta_item_anchor(ir: &MermaidDiagramIr, item: BlockBetaGridItem) -> (String, usize) {
+    match item {
+        BlockBetaGridItem::Node(node_index) => (ir.nodes[node_index].id.clone(), node_index),
+        BlockBetaGridItem::Group(subgraph_id) => ir
+            .graph
+            .subgraph_members_recursive(subgraph_id)
+            .into_iter()
+            .map(|node_id| node_id.0)
+            .min_by(|left, right| compare_node_indices(ir, *left, *right))
+            .map(|node_index| (ir.nodes[node_index].id.clone(), node_index))
+            .unwrap_or_else(|| (format!("~group-{}", subgraph_id.0), subgraph_id.0)),
+    }
+}
+
+fn block_beta_item_span(
+    ir: &MermaidDiagramIr,
+    item: BlockBetaGridItem,
+    available_columns: usize,
+) -> usize {
+    match item {
+        BlockBetaGridItem::Node(node_index) => block_beta_node_span(&ir.nodes[node_index]),
+        BlockBetaGridItem::Group(subgraph_id) => ir
+            .graph
+            .subgraph(subgraph_id)
+            .map(|subgraph| subgraph.grid_span)
+            .unwrap_or(1),
+    }
+    .min(available_columns)
+    .max(1)
+}
+
+fn block_beta_item_rows(
+    ir: &MermaidDiagramIr,
+    item: BlockBetaGridItem,
+    available_columns: usize,
+) -> usize {
+    match item {
+        BlockBetaGridItem::Node(_) => 1,
+        BlockBetaGridItem::Group(subgraph_id) => {
+            let group_columns = block_beta_item_span(ir, item, available_columns);
+            let children = block_beta_direct_items(ir, Some(subgraph_id));
+            if children.is_empty() {
+                1
+            } else {
+                block_beta_rows_required(ir, &children, group_columns)
+            }
+        }
+    }
+}
+
+fn block_beta_rows_required(
+    ir: &MermaidDiagramIr,
+    items: &[BlockBetaGridItem],
+    available_columns: usize,
+) -> usize {
+    let mut row_offset = 0_usize;
+    let mut col = 0_usize;
+    let mut row_height = 1_usize;
+
+    for &item in items {
+        let span = block_beta_item_span(ir, item, available_columns);
+        let item_rows = block_beta_item_rows(ir, item, span);
+
+        if col != 0 && col + span > available_columns {
+            row_offset += row_height;
+            col = 0;
+            row_height = 1;
+        }
+
+        row_height = row_height.max(item_rows);
+
+        if col + span >= available_columns {
+            row_offset += row_height;
+            col = 0;
+            row_height = 1;
+        } else {
+            col += span;
+        }
+    }
+
+    if col == 0 {
+        row_offset
+    } else {
+        row_offset + row_height
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn place_block_beta_items(
+    ir: &MermaidDiagramIr,
+    items: &[BlockBetaGridItem],
+    available_columns: usize,
+    base_col: usize,
+    start_row: usize,
+    cell_width: f32,
+    cell_height: f32,
+    rank_by_node: &mut [usize],
+    order_by_node: &mut [usize],
+    centers: &mut [(f32, f32)],
+) -> usize {
+    let mut row_offset = 0_usize;
+    let mut col = 0_usize;
+    let mut row_height = 1_usize;
+
+    for &item in items {
+        let span = block_beta_item_span(ir, item, available_columns);
+        let item_rows = block_beta_item_rows(ir, item, span);
+
+        if col != 0 && col + span > available_columns {
+            row_offset += row_height;
+            col = 0;
+            row_height = 1;
+        }
+
+        let item_col = base_col + col;
+        let item_row = start_row + row_offset;
+
+        match item {
+            BlockBetaGridItem::Node(node_index) => {
+                centers[node_index] = (
+                    item_col as f32 * cell_width + ((span - 1) as f32 * cell_width / 2.0),
+                    item_row as f32 * cell_height,
+                );
+                rank_by_node[node_index] = item_row;
+                order_by_node[node_index] = item_col;
+            }
+            BlockBetaGridItem::Group(subgraph_id) => {
+                let child_items = block_beta_direct_items(ir, Some(subgraph_id));
+                if !child_items.is_empty() {
+                    place_block_beta_items(
+                        ir,
+                        &child_items,
+                        span,
+                        item_col,
+                        item_row,
+                        cell_width,
+                        cell_height,
+                        rank_by_node,
+                        order_by_node,
+                        centers,
+                    );
+                }
+            }
+        }
+
+        row_height = row_height.max(item_rows);
+
+        if col + span >= available_columns {
+            row_offset += row_height;
+            col = 0;
+            row_height = 1;
+        } else {
+            col += span;
+        }
+    }
+
+    if col == 0 {
+        row_offset
+    } else {
+        row_offset + row_height
+    }
+}
+
 fn compare_node_indices(ir: &MermaidDiagramIr, left: usize, right: usize) -> std::cmp::Ordering {
     ir.nodes[left]
         .id
@@ -4806,20 +5085,20 @@ mod tests {
         ir.graph.nodes[2].subgraphs.push(IrSubgraphId(0));
 
         let layout = layout_diagram_grid(&ir);
-        let mut ordered_ids: Vec<(f32, f32, &str)> = layout
+        let positions = layout
             .nodes
             .iter()
-            .map(|node| (node.bounds.y, node.bounds.x, node.node_id.as_str()))
-            .collect::<Vec<_>>();
-        ordered_ids.sort_by(|left, right| {
-            left.0
-                .partial_cmp(&right.0)
-                .unwrap()
-                .then_with(|| left.1.partial_cmp(&right.1).unwrap())
-        });
-        let ordered_ids: Vec<&str> = ordered_ids.into_iter().map(|(_, _, id)| id).collect();
+            .map(|node| (node.node_id.as_str(), (node.bounds.x, node.bounds.y)))
+            .collect::<BTreeMap<_, _>>();
 
-        assert_eq!(ordered_ids, vec!["A", "C", "B"]);
+        let a = positions.get("A").unwrap();
+        let b = positions.get("B").unwrap();
+        let c = positions.get("C").unwrap();
+
+        assert_eq!(a.0, c.0);
+        assert!(c.1 > a.1);
+        assert!(b.0 > a.0);
+        assert_eq!(a.1, b.1);
     }
 
     #[test]
@@ -4882,20 +5161,22 @@ mod tests {
         }
 
         let layout = layout_diagram_grid(&ir);
-        let mut ordered_ids: Vec<(f32, f32, &str)> = layout
+        let positions = layout
             .nodes
             .iter()
-            .map(|node| (node.bounds.y, node.bounds.x, node.node_id.as_str()))
-            .collect::<Vec<_>>();
-        ordered_ids.sort_by(|left, right| {
-            left.0
-                .partial_cmp(&right.0)
-                .unwrap()
-                .then_with(|| left.1.partial_cmp(&right.1).unwrap())
-        });
-        let ordered_ids: Vec<&str> = ordered_ids.into_iter().map(|(_, _, id)| id).collect();
+            .map(|node| (node.node_id.as_str(), (node.bounds.x, node.bounds.y)))
+            .collect::<BTreeMap<_, _>>();
 
-        assert_eq!(ordered_ids, vec!["A", "C", "B", "D"]);
+        let a = positions.get("A").unwrap();
+        let b = positions.get("B").unwrap();
+        let c = positions.get("C").unwrap();
+        let d = positions.get("D").unwrap();
+
+        assert_eq!(a.0, c.0);
+        assert_eq!(b.0, d.0);
+        assert!(b.0 > a.0);
+        assert_eq!(a.1, b.1);
+        assert_eq!(c.1, d.1);
     }
 
     #[test]
@@ -4947,6 +5228,79 @@ mod tests {
         assert_eq!(a.1, b.1);
         assert!(c.1 > a.1);
         assert!(a.2 > b.2);
+    }
+
+    #[test]
+    fn block_beta_group_span_shapes_grouped_layout() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::BlockBeta);
+        ir.meta.block_beta_columns = Some(3);
+
+        for node_id in ["A", "B", "C"] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                classes: vec!["block-beta".to_string()],
+                ..IrNode::default()
+            });
+            ir.graph.nodes.push(IrGraphNode {
+                node_id: IrNodeId(ir.graph.nodes.len()),
+                kind: fm_core::IrNodeKind::Generic,
+                clusters: Vec::new(),
+                subgraphs: Vec::new(),
+            });
+        }
+
+        ir.clusters.push(IrCluster {
+            id: IrClusterId(0),
+            members: vec![IrNodeId(0), IrNodeId(1)],
+            grid_span: 2,
+            ..IrCluster::default()
+        });
+        ir.graph.clusters.push(IrGraphCluster {
+            cluster_id: IrClusterId(0),
+            members: vec![IrNodeId(0), IrNodeId(1)],
+            subgraph: Some(IrSubgraphId(0)),
+            grid_span: 2,
+            ..IrGraphCluster::default()
+        });
+        ir.graph.subgraphs.push(IrSubgraph {
+            id: IrSubgraphId(0),
+            key: "api".to_string(),
+            members: vec![IrNodeId(0), IrNodeId(1)],
+            cluster: Some(IrClusterId(0)),
+            grid_span: 2,
+            ..IrSubgraph::default()
+        });
+
+        ir.graph.nodes[0].clusters.push(IrClusterId(0));
+        ir.graph.nodes[0].subgraphs.push(IrSubgraphId(0));
+        ir.graph.nodes[1].clusters.push(IrClusterId(0));
+        ir.graph.nodes[1].subgraphs.push(IrSubgraphId(0));
+
+        let layout = layout_diagram_grid(&ir);
+        let positions = layout
+            .nodes
+            .iter()
+            .map(|node| {
+                (
+                    node.node_id.as_str(),
+                    (
+                        node.bounds.x + (node.bounds.width / 2.0),
+                        node.bounds.y + (node.bounds.height / 2.0),
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        let a = positions.get("A").unwrap();
+        let b = positions.get("B").unwrap();
+        let c = positions.get("C").unwrap();
+        let cluster = &layout.clusters[0];
+
+        assert_eq!(a.1, b.1);
+        assert_eq!(a.1, c.1);
+        assert!(a.0 < b.0);
+        assert!(b.0 < c.0);
+        assert!(cluster.bounds.width > layout.nodes[2].bounds.width);
     }
 
     #[test]
@@ -6105,12 +6459,14 @@ mod tests {
             id: IrClusterId(0),
             title: None,
             members: vec![IrNodeId(0), IrNodeId(1)],
+            grid_span: 1,
             span: fm_core::Span::default(),
         });
         ir.clusters.push(IrCluster {
             id: IrClusterId(1),
             title: None,
             members: vec![IrNodeId(2), IrNodeId(3)],
+            grid_span: 1,
             span: fm_core::Span::default(),
         });
 

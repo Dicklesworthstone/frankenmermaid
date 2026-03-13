@@ -2453,12 +2453,14 @@ mod tests {
             id: IrClusterId(0),
             title: None,
             members: Vec::new(),
+            grid_span: 1,
             span: sample_span(1, 1, 1),
         };
         let single = IrCluster {
             id: IrClusterId(1),
             title: Some(IrLabelId(2)),
             members: vec![IrNodeId(9)],
+            grid_span: 1,
             span: sample_span(4, 1, 4),
         };
 
@@ -2477,6 +2479,7 @@ mod tests {
             children: vec![IrSubgraphId(1)],
             members: vec![IrNodeId(0), IrNodeId(1)],
             cluster: Some(IrClusterId(0)),
+            grid_span: 1,
             span: sample_span(1, 1, 3),
         };
         let child = IrSubgraph {
@@ -2487,6 +2490,7 @@ mod tests {
             children: Vec::new(),
             members: vec![IrNodeId(1)],
             cluster: Some(IrClusterId(1)),
+            grid_span: 1,
             span: sample_span(2, 1, 3),
         };
         let graph_node = IrGraphNode {
@@ -2507,6 +2511,7 @@ mod tests {
             title: Some(IrLabelId(1)),
             members: vec![IrNodeId(1)],
             subgraph: Some(IrSubgraphId(1)),
+            grid_span: 1,
             span: sample_span(2, 1, 3),
         };
 
@@ -2539,6 +2544,7 @@ mod tests {
             title: None,
             members: vec![IrNodeId(0)],
             subgraph: Some(IrSubgraphId(0)),
+            grid_span: 1,
             span: sample_span(1, 1, 1),
         });
         ir.graph.subgraphs.push(IrSubgraph {
@@ -2549,6 +2555,7 @@ mod tests {
             children: Vec::new(),
             members: vec![IrNodeId(0)],
             cluster: Some(IrClusterId(0)),
+            grid_span: 1,
             span: sample_span(1, 1, 1),
         });
 
@@ -2610,6 +2617,7 @@ mod tests {
             title: None,
             members: vec![IrNodeId(0), IrNodeId(1), IrNodeId(2)],
             subgraph: Some(IrSubgraphId(0)),
+            grid_span: 1,
             span: sample_span(1, 1, 1),
         });
         ir.graph.clusters.push(IrGraphCluster {
@@ -2617,6 +2625,7 @@ mod tests {
             title: None,
             members: vec![IrNodeId(1), IrNodeId(2)],
             subgraph: Some(IrSubgraphId(1)),
+            grid_span: 1,
             span: sample_span(2, 1, 1),
         });
         ir.graph.clusters.push(IrGraphCluster {
@@ -2624,6 +2633,7 @@ mod tests {
             title: None,
             members: vec![IrNodeId(2)],
             subgraph: Some(IrSubgraphId(2)),
+            grid_span: 1,
             span: sample_span(3, 1, 1),
         });
         ir.graph.subgraphs.push(IrSubgraph {
@@ -2634,6 +2644,7 @@ mod tests {
             children: vec![IrSubgraphId(1)],
             members: vec![IrNodeId(0), IrNodeId(1)],
             cluster: Some(IrClusterId(0)),
+            grid_span: 1,
             span: sample_span(1, 1, 1),
         });
         ir.graph.subgraphs.push(IrSubgraph {
@@ -2644,6 +2655,7 @@ mod tests {
             children: vec![IrSubgraphId(2)],
             members: vec![IrNodeId(1), IrNodeId(2)],
             cluster: Some(IrClusterId(1)),
+            grid_span: 1,
             span: sample_span(2, 1, 1),
         });
         ir.graph.subgraphs.push(IrSubgraph {
@@ -2654,6 +2666,7 @@ mod tests {
             children: Vec::new(),
             members: vec![IrNodeId(2)],
             cluster: Some(IrClusterId(2)),
+            grid_span: 1,
             span: sample_span(3, 1, 1),
         });
 
@@ -2724,6 +2737,7 @@ mod tests {
             title: Some(IrLabelId(0)),
             members: vec![IrNodeId(0)],
             subgraph: Some(IrSubgraphId(0)),
+            grid_span: 1,
             span: sample_span(1, 1, 1),
         });
         graph.subgraphs.push(IrSubgraph {
@@ -2734,6 +2748,7 @@ mod tests {
             children: Vec::new(),
             members: vec![IrNodeId(0)],
             cluster: Some(IrClusterId(0)),
+            grid_span: 1,
             span: sample_span(1, 1, 1),
         });
 
