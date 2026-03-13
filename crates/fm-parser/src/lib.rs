@@ -155,7 +155,7 @@ fn exact_keyword_match(lower: &str, original: &str) -> Option<DetectedType> {
             (DiagramType::Sankey, 1.0)
         } else if lower.starts_with("xychart") {
             (DiagramType::XyChart, 1.0)
-        } else if lower.starts_with("block-beta") || lower.starts_with("block") {
+        } else if is_block_beta_header(lower) {
             (DiagramType::BlockBeta, 1.0)
         } else if lower.starts_with("packet-beta") {
             (DiagramType::PacketBeta, 1.0)
@@ -202,6 +202,18 @@ const DIAGRAM_KEYWORDS: &[(&str, DiagramType)] = &[
     ("sankey", DiagramType::Sankey),
     ("xychart", DiagramType::XyChart),
 ];
+
+fn is_block_beta_header(line: &str) -> bool {
+    matches_keyword_header(line, "block-beta") || matches_keyword_header(line, "block")
+}
+
+fn matches_keyword_header(line: &str, keyword: &str) -> bool {
+    line == keyword
+        || line
+            .strip_prefix(keyword)
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(char::is_whitespace)
+}
 
 /// Fuzzy keyword matching using Levenshtein distance.
 fn fuzzy_keyword_match(lower: &str) -> Option<DetectedType> {
@@ -547,6 +559,12 @@ mod tests {
             );
             assert_eq!(result.method, DetectionMethod::ExactKeyword);
         }
+    }
+
+    #[test]
+    fn block_alias_requires_word_boundary() {
+        let result = detect_type_with_confidence("blockquote\nalpha[Alpha]");
+        assert_ne!(result.diagram_type, DiagramType::BlockBeta);
     }
 
     #[test]

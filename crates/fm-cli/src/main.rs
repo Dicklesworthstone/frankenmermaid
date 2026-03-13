@@ -737,8 +737,7 @@ fn analyze_detection_confidence(
         || first_line.starts_with("mindmap")
         || first_line.starts_with("timeline")
         || first_line.starts_with("quadrantchart")
-        || first_line.starts_with("block-beta")
-        || first_line.starts_with("block")
+        || is_block_beta_header(&first_line)
         || first_line.starts_with("requirement")
         || first_line.starts_with("digraph")
         || first_line.starts_with("graph {")
@@ -779,6 +778,18 @@ fn get_support_level(diagram_type: DiagramType) -> &'static str {
         DiagramType::ArchitectureBeta => "unsupported",
         DiagramType::Unknown => "unknown",
     }
+}
+
+fn is_block_beta_header(line: &str) -> bool {
+    matches_keyword_header(line, "block-beta") || matches_keyword_header(line, "block")
+}
+
+fn matches_keyword_header(line: &str, keyword: &str) -> bool {
+    line == keyword
+        || line
+            .strip_prefix(keyword)
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(char::is_whitespace)
 }
 
 // =============================================================================

@@ -114,7 +114,7 @@ pub fn detect_type(input: &str) -> DiagramType {
         DiagramType::Sankey
     } else if lower.starts_with("xychart") {
         DiagramType::XyChart
-    } else if lower.starts_with("block-beta") || lower.starts_with("block") {
+    } else if is_block_beta_header(&lower) {
         DiagramType::BlockBeta
     } else if lower.starts_with("packet-beta") {
         DiagramType::PacketBeta
@@ -2109,9 +2109,13 @@ fn parse_block_beta(input: &str, builder: &mut IrBuilder) {
         let span = span_for(line_number, line);
 
         if let Some(columns) = parse_block_beta_columns(trimmed) {
-            builder.add_warning(format!(
-                "Line {line_number}: block-beta columns {columns} recognized but column layout metadata is not implemented yet"
-            ));
+            if columns == 0 {
+                builder.add_warning(format!(
+                    "Line {line_number}: block-beta columns must be >= 1"
+                ));
+            } else {
+                builder.set_block_beta_columns(columns);
+            }
             continue;
         }
 
@@ -2185,10 +2189,6 @@ fn parse_block_beta(input: &str, builder: &mut IrBuilder) {
                         &format!("block-beta-span-{}", block.span_cols),
                         span,
                     );
-                    builder.add_warning(format!(
-                        "Line {line_number}: block-beta block '{}' span {} recognized but span-aware layout is not implemented yet",
-                        block.id, block.span_cols
-                    ));
                 }
 
                 for (cluster_index, subgraph_index) in &active_groups {
@@ -3539,6 +3539,18 @@ fn parse_graph_direction(header: &str) -> Option<GraphDirection> {
     None
 }
 
+fn is_block_beta_header(line: &str) -> bool {
+    matches_keyword_header(line, "block-beta") || matches_keyword_header(line, "block")
+}
+
+fn matches_keyword_header(line: &str, keyword: &str) -> bool {
+    line == keyword
+        || line
+            .strip_prefix(keyword)
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(char::is_whitespace)
+}
+
 fn span_for(line_number: usize, line: &str) -> Span {
     Span::at_line(line_number, line.chars().count())
 }
@@ -3577,6 +3589,11 @@ mod tests {
             DiagramType::Sequence
         );
         assert_eq!(detect_type("classDiagram\nA -- B"), DiagramType::Class);
+    }
+
+    #[test]
+    fn block_alias_requires_word_boundary_for_light_detector() {
+        assert_ne!(detect_type("blockquote\nA"), DiagramType::BlockBeta);
     }
 
     #[test]
@@ -4152,6 +4169,7 @@ mod tests {
     fn block_beta_parses_basic_blocks_without_flowchart_fallback_warning() {
         let parsed = parse_mermaid("block-beta\ncolumns 2\nalpha[Alpha]\nbeta[Beta]");
         assert_eq!(parsed.ir.diagram_type, DiagramType::BlockBeta);
+        assert_eq!(parsed.ir.meta.block_beta_columns, Some(2));
         assert_eq!(parsed.ir.nodes.len(), 2);
         assert_eq!(parsed.ir.edges.len(), 0);
         assert!(
@@ -4188,7 +4206,7 @@ mod tests {
             parsed
                 .warnings
                 .iter()
-                .any(|warning| { warning.contains("block-beta columns 2 recognized") })
+                .all(|warning| !warning.contains("block-beta columns"))
         );
     }
 
@@ -4265,9 +4283,13 @@ mod tests {
                 .iter()
                 .any(|class_name| class_name == "block-beta-space")
         );
-        assert!(parsed.warnings.iter().any(|warning| {
-            warning.contains("span 2 recognized but span-aware layout is not implemented yet")
-        }));
+        assert_eq!(parsed.ir.meta.block_beta_columns, None);
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .all(|warning| !warning.contains("span-aware layout is not implemented yet"))
+        );
     }
 
     #[test]

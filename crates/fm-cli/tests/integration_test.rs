@@ -641,3 +641,18 @@ fn detect_accepts_block_alias_as_block_beta() {
     assert_eq!(json["support_level"], "basic");
     assert_eq!(json["confidence"], "high");
 }
+
+#[test]
+fn detect_does_not_treat_blockquote_as_block_beta() {
+    let output = run_cli(&["detect", "-", "--json"], "blockquote\nalpha[Alpha]\n");
+    assert!(
+        output.status.success(),
+        "detect --json should succeed; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout must be utf-8");
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("detect --json must print valid JSON");
+    assert_ne!(json["diagram_type"], "block-beta");
+}

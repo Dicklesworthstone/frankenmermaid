@@ -31,6 +31,10 @@ impl IrBuilder {
         self.ir.meta.direction = direction;
     }
 
+    pub(crate) fn set_block_beta_columns(&mut self, columns: usize) {
+        self.ir.meta.block_beta_columns = Some(columns.max(1));
+    }
+
     pub(crate) fn set_init_theme(&mut self, theme: String) {
         self.ir.meta.init.config.theme = Some(theme.clone());
         self.ir.meta.theme_overrides.theme = Some(theme);

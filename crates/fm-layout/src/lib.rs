@@ -4,7 +4,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::f32::consts::PI;
 
-use fm_core::{DiagramType, FontMetrics, GraphDirection, IrEndpoint, MermaidDiagramIr};
+use fm_core::{DiagramType, FontMetrics, GraphDirection, IrEndpoint, IrNode, MermaidDiagramIr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutAlgorithm {
@@ -1595,7 +1595,7 @@ pub fn layout_diagram_grid(ir: &MermaidDiagramIr) -> DiagramLayout {
 #[must_use]
 pub fn layout_diagram_grid_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let node_count = ir.nodes.len();
-    let node_sizes = compute_node_sizes(ir);
+    let mut node_sizes = compute_node_sizes(ir);
     let mut trace = LayoutTrace::default();
     push_snapshot(&mut trace, "grid_layout", node_count, ir.edges.len(), 0, 0);
 
@@ -1604,7 +1604,7 @@ pub fn layout_diagram_grid_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let mut order_by_node = vec![0_usize; node_count];
     let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
 
-    let max_width = node_sizes
+    let base_max_width = node_sizes
         .iter()
         .map(|(width, _)| *width)
         .fold(84.0_f32, f32::max);
@@ -1613,18 +1613,56 @@ pub fn layout_diagram_grid_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         .map(|(_, height)| *height)
         .fold(44.0_f32, f32::max);
 
-    let column_count = (node_count as f32).sqrt().ceil() as usize;
+    let mut column_count = if ir.diagram_type == DiagramType::BlockBeta {
+        ir.meta.block_beta_columns.unwrap_or(0)
+    } else {
+        0
+    };
+    if column_count == 0 {
+        column_count = (node_count as f32).sqrt().ceil() as usize;
+    }
     let column_count = column_count.max(1);
-    let cell_width = max_width + spacing.node_spacing;
+    let cell_width = base_max_width + spacing.node_spacing;
     let cell_height = max_height + (spacing.rank_spacing * 0.6);
 
-    let mut sorted_nodes: Vec<usize> = (0..node_count).collect();
-    sorted_nodes.sort_by(|left, right| compare_node_indices(ir, *left, *right));
+    if ir.diagram_type == DiagramType::BlockBeta {
+        for (node_index, node) in ir.nodes.iter().enumerate() {
+            let span = block_beta_node_span(node).min(column_count).max(1);
+            if span > 1 {
+                node_sizes[node_index].0 = node_sizes[node_index]
+                    .0
+                    .max(base_max_width * span as f32 + spacing.node_spacing * (span - 1) as f32);
+            }
+        }
+    }
 
-    for (layout_index, node_index) in sorted_nodes.into_iter().enumerate() {
-        let row = layout_index / column_count;
-        let col = layout_index % column_count;
-        centers[node_index] = (col as f32 * cell_width, row as f32 * cell_height);
+    let mut sorted_nodes: Vec<usize> = (0..node_count).collect();
+    if ir.diagram_type == DiagramType::BlockBeta {
+        sorted_nodes.sort_by(|left, right| compare_block_beta_grid_node_indices(ir, *left, *right));
+    } else {
+        sorted_nodes.sort_by(|left, right| compare_node_indices(ir, *left, *right));
+    }
+
+    let mut row = 0_usize;
+    let mut col = 0_usize;
+    for node_index in sorted_nodes {
+        let span = if ir.diagram_type == DiagramType::BlockBeta {
+            block_beta_node_span(&ir.nodes[node_index])
+                .min(column_count)
+                .max(1)
+        } else {
+            1
+        };
+
+        if col != 0 && col + span > column_count {
+            row += 1;
+            col = 0;
+        }
+
+        centers[node_index] = (
+            col as f32 * cell_width + ((span - 1) as f32 * cell_width / 2.0),
+            row as f32 * cell_height,
+        );
 
         if matches!(ir.direction, GraphDirection::LR | GraphDirection::RL) {
             rank_by_node[node_index] = col;
@@ -1632,6 +1670,13 @@ pub fn layout_diagram_grid_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         } else {
             rank_by_node[node_index] = row;
             order_by_node[node_index] = col;
+        }
+
+        if col + span >= column_count {
+            row += 1;
+            col = 0;
+        } else {
+            col += span;
         }
     }
 
@@ -3592,6 +3637,53 @@ fn stable_node_priorities(ir: &MermaidDiagramIr) -> Vec<usize> {
     priorities
 }
 
+fn compare_block_beta_grid_node_indices(
+    ir: &MermaidDiagramIr,
+    left: usize,
+    right: usize,
+) -> std::cmp::Ordering {
+    let left_path = block_beta_group_identity_path(ir, left);
+    let right_path = block_beta_group_identity_path(ir, right);
+
+    left_path
+        .is_empty()
+        .cmp(&right_path.is_empty())
+        .then_with(|| left_path.cmp(&right_path))
+        .then_with(|| compare_node_indices(ir, left, right))
+}
+
+fn block_beta_group_identity_path(ir: &MermaidDiagramIr, node_index: usize) -> Vec<usize> {
+    let Some(graph_node) = ir.graph.nodes.get(node_index) else {
+        return Vec::new();
+    };
+    let Some(mut current_subgraph) = graph_node.subgraphs.last().copied() else {
+        return Vec::new();
+    };
+
+    let mut path = Vec::new();
+    while let Some(subgraph) = ir.graph.subgraphs.get(current_subgraph.0) {
+        path.push(subgraph.id.0);
+
+        let Some(parent) = subgraph.parent else {
+            break;
+        };
+        current_subgraph = parent;
+    }
+    path.reverse();
+    path
+}
+
+fn block_beta_node_span(node: &IrNode) -> usize {
+    node.classes
+        .iter()
+        .find_map(|class_name| {
+            class_name
+                .strip_prefix("block-beta-span-")
+                .and_then(|value| value.parse::<usize>().ok())
+        })
+        .unwrap_or(1)
+}
+
 fn compare_node_indices(ir: &MermaidDiagramIr, left: usize, right: usize) -> std::cmp::Ordering {
     ir.nodes[left]
         .id
@@ -4593,12 +4685,14 @@ mod tests {
     use super::{
         CycleStrategy, LayoutAlgorithm, LayoutPoint, RenderClip, RenderItem, RenderSource,
         build_render_scene, layout, layout_diagram, layout_diagram_force,
-        layout_diagram_force_traced, layout_diagram_radial, layout_diagram_traced,
-        layout_diagram_tree, layout_diagram_with_cycle_strategy, route_edge_points,
+        layout_diagram_force_traced, layout_diagram_grid, layout_diagram_radial,
+        layout_diagram_traced, layout_diagram_tree, layout_diagram_with_cycle_strategy,
+        route_edge_points,
     };
     use fm_core::{
         ArrowType, DiagramType, GraphDirection, IrCluster, IrClusterId, IrEdge, IrEndpoint,
-        IrLabel, IrLabelId, IrNode, IrNodeId, MermaidDiagramIr,
+        IrGraphCluster, IrGraphNode, IrLabel, IrLabelId, IrNode, IrNodeId, IrSubgraph,
+        IrSubgraphId, MermaidDiagramIr,
     };
     use proptest::prelude::*;
     use std::collections::BTreeMap;
@@ -4670,6 +4764,189 @@ mod tests {
         let first = layout_diagram_traced(&ir);
         let second = layout_diagram_traced(&ir);
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn block_beta_grid_layout_keeps_group_members_together() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::BlockBeta);
+        for node_id in ["A", "B", "C"] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..IrNode::default()
+            });
+            ir.graph.nodes.push(IrGraphNode {
+                node_id: IrNodeId(ir.graph.nodes.len()),
+                kind: fm_core::IrNodeKind::Generic,
+                clusters: Vec::new(),
+                subgraphs: Vec::new(),
+            });
+        }
+
+        ir.clusters.push(IrCluster {
+            id: IrClusterId(0),
+            members: vec![IrNodeId(0), IrNodeId(2)],
+            ..IrCluster::default()
+        });
+        ir.graph.clusters.push(IrGraphCluster {
+            cluster_id: IrClusterId(0),
+            members: vec![IrNodeId(0), IrNodeId(2)],
+            subgraph: Some(IrSubgraphId(0)),
+            ..IrGraphCluster::default()
+        });
+        ir.graph.subgraphs.push(IrSubgraph {
+            id: IrSubgraphId(0),
+            key: "api".to_string(),
+            members: vec![IrNodeId(0), IrNodeId(2)],
+            cluster: Some(IrClusterId(0)),
+            ..IrSubgraph::default()
+        });
+        ir.graph.nodes[0].clusters.push(IrClusterId(0));
+        ir.graph.nodes[0].subgraphs.push(IrSubgraphId(0));
+        ir.graph.nodes[2].clusters.push(IrClusterId(0));
+        ir.graph.nodes[2].subgraphs.push(IrSubgraphId(0));
+
+        let layout = layout_diagram_grid(&ir);
+        let mut ordered_ids: Vec<(f32, f32, &str)> = layout
+            .nodes
+            .iter()
+            .map(|node| (node.bounds.y, node.bounds.x, node.node_id.as_str()))
+            .collect::<Vec<_>>();
+        ordered_ids.sort_by(|left, right| {
+            left.0
+                .partial_cmp(&right.0)
+                .unwrap()
+                .then_with(|| left.1.partial_cmp(&right.1).unwrap())
+        });
+        let ordered_ids: Vec<&str> = ordered_ids.into_iter().map(|(_, _, id)| id).collect();
+
+        assert_eq!(ordered_ids, vec!["A", "C", "B"]);
+    }
+
+    #[test]
+    fn block_beta_grid_layout_distinguishes_groups_with_same_visible_name() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::BlockBeta);
+        for node_id in ["A", "B", "C", "D"] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..IrNode::default()
+            });
+            ir.graph.nodes.push(IrGraphNode {
+                node_id: IrNodeId(ir.graph.nodes.len()),
+                kind: fm_core::IrNodeKind::Generic,
+                clusters: Vec::new(),
+                subgraphs: Vec::new(),
+            });
+        }
+
+        ir.labels.push(IrLabel {
+            text: "api".to_string(),
+            ..IrLabel::default()
+        });
+
+        for (cluster_index, members) in [
+            vec![IrNodeId(0), IrNodeId(2)],
+            vec![IrNodeId(1), IrNodeId(3)],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let cluster_id = IrClusterId(cluster_index);
+            let subgraph_id = IrSubgraphId(cluster_index);
+
+            ir.clusters.push(IrCluster {
+                id: cluster_id,
+                title: Some(IrLabelId(0)),
+                members: members.clone(),
+                ..IrCluster::default()
+            });
+            ir.graph.clusters.push(IrGraphCluster {
+                cluster_id,
+                title: Some(IrLabelId(0)),
+                members: members.clone(),
+                subgraph: Some(subgraph_id),
+                ..IrGraphCluster::default()
+            });
+            ir.graph.subgraphs.push(IrSubgraph {
+                id: subgraph_id,
+                key: "api".to_string(),
+                title: Some(IrLabelId(0)),
+                members: members.clone(),
+                cluster: Some(cluster_id),
+                ..IrSubgraph::default()
+            });
+
+            for member in members {
+                ir.graph.nodes[member.0].clusters.push(cluster_id);
+                ir.graph.nodes[member.0].subgraphs.push(subgraph_id);
+            }
+        }
+
+        let layout = layout_diagram_grid(&ir);
+        let mut ordered_ids: Vec<(f32, f32, &str)> = layout
+            .nodes
+            .iter()
+            .map(|node| (node.bounds.y, node.bounds.x, node.node_id.as_str()))
+            .collect::<Vec<_>>();
+        ordered_ids.sort_by(|left, right| {
+            left.0
+                .partial_cmp(&right.0)
+                .unwrap()
+                .then_with(|| left.1.partial_cmp(&right.1).unwrap())
+        });
+        let ordered_ids: Vec<&str> = ordered_ids.into_iter().map(|(_, _, id)| id).collect();
+
+        assert_eq!(ordered_ids, vec!["A", "C", "B", "D"]);
+    }
+
+    #[test]
+    fn block_beta_grid_layout_honors_columns_and_node_spans() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::BlockBeta);
+        ir.meta.block_beta_columns = Some(3);
+
+        for (node_id, classes) in [
+            (
+                "A",
+                vec!["block-beta".to_string(), "block-beta-span-2".to_string()],
+            ),
+            ("B", vec!["block-beta".to_string()]),
+            ("C", vec!["block-beta".to_string()]),
+        ] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                classes,
+                ..IrNode::default()
+            });
+            ir.graph.nodes.push(IrGraphNode {
+                node_id: IrNodeId(ir.graph.nodes.len()),
+                kind: fm_core::IrNodeKind::Generic,
+                clusters: Vec::new(),
+                subgraphs: Vec::new(),
+            });
+        }
+
+        let layout = layout_diagram_grid(&ir);
+        let positions = layout
+            .nodes
+            .iter()
+            .map(|node| {
+                (
+                    node.node_id.as_str(),
+                    (
+                        node.bounds.x + (node.bounds.width / 2.0),
+                        node.bounds.y + (node.bounds.height / 2.0),
+                        node.bounds.width,
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        let a = positions.get("A").unwrap();
+        let b = positions.get("B").unwrap();
+        let c = positions.get("C").unwrap();
+
+        assert_eq!(a.1, b.1);
+        assert!(c.1 > a.1);
+        assert!(a.2 > b.2);
     }
 
     #[test]
