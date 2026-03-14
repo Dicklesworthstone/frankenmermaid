@@ -21,7 +21,7 @@ use fm_core::{
     DiagramType, MermaidDiagramIr, MermaidParseMode, StructuredDiagnostic, capability_matrix,
     capability_matrix_json_pretty,
 };
-use fm_layout::layout_diagram;
+use fm_layout::{LayoutAlgorithm, TracedLayout, layout_diagram_traced_with_algorithm};
 use fm_parser::{detect_type_with_confidence, parse_evidence_json, parse_with_mode};
 use fm_render_svg::{SvgRenderConfig, ThemePreset, render_svg_with_layout};
 use fm_render_term::{TermRenderConfig, render_term_with_config};
@@ -62,6 +62,10 @@ enum Command {
         /// Parser support contract mode.
         #[arg(long, value_enum, default_value = "compat")]
         parse_mode: ParseModeArg,
+
+        /// Requested layout algorithm family.
+        #[arg(long, value_enum, default_value = "auto")]
+        layout_algorithm: LayoutAlgorithmArg,
 
         /// Output format
         #[arg(short, long, value_enum, default_value = "svg")]
@@ -128,6 +132,10 @@ enum Command {
         /// Parser support contract mode.
         #[arg(long, value_enum, default_value = "compat")]
         parse_mode: ParseModeArg,
+
+        /// Requested layout algorithm family for validation/layout evidence.
+        #[arg(long, value_enum, default_value = "auto")]
+        layout_algorithm: LayoutAlgorithmArg,
 
         /// Validation output format.
         #[arg(long, value_enum, default_value = "text")]
@@ -240,6 +248,37 @@ impl ParseModeArg {
     }
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+enum LayoutAlgorithmArg {
+    Auto,
+    Sugiyama,
+    Force,
+    Tree,
+    Radial,
+    Timeline,
+    Gantt,
+    Sankey,
+    Kanban,
+    Grid,
+}
+
+impl LayoutAlgorithmArg {
+    const fn to_layout(self) -> LayoutAlgorithm {
+        match self {
+            Self::Auto => LayoutAlgorithm::Auto,
+            Self::Sugiyama => LayoutAlgorithm::Sugiyama,
+            Self::Force => LayoutAlgorithm::Force,
+            Self::Tree => LayoutAlgorithm::Tree,
+            Self::Radial => LayoutAlgorithm::Radial,
+            Self::Timeline => LayoutAlgorithm::Timeline,
+            Self::Gantt => LayoutAlgorithm::Gantt,
+            Self::Sankey => LayoutAlgorithm::Sankey,
+            Self::Kanban => LayoutAlgorithm::Kanban,
+            Self::Grid => LayoutAlgorithm::Grid,
+        }
+    }
+}
+
 impl FailOnSeverity {
     const fn rank(self) -> u8 {
         match self {
@@ -257,6 +296,8 @@ impl FailOnSeverity {
 struct RenderResult {
     format: String,
     parse_mode: String,
+    layout_requested: String,
+    layout_selected: String,
     diagram_type: String,
     node_count: usize,
     edge_count: usize,
@@ -268,6 +309,17 @@ struct RenderResult {
     render_time_ms: f64,
     total_time_ms: f64,
     warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RenderCommandOptions<'a> {
+    parse_mode: MermaidParseMode,
+    layout_algorithm: LayoutAlgorithm,
+    format: OutputFormat,
+    theme: &'a str,
+    output: Option<&'a str>,
+    dimensions: (Option<u32>, Option<u32>),
+    json_output: bool,
 }
 
 /// Result of detecting diagram type.
@@ -285,6 +337,8 @@ struct DetectResult {
 struct ValidateResult {
     valid: bool,
     parse_mode: String,
+    layout_requested: String,
+    layout_selected: String,
     diagram_type: String,
     node_count: usize,
     edge_count: usize,
@@ -307,6 +361,7 @@ fn main() -> Result<()> {
         Command::Render {
             input,
             parse_mode,
+            layout_algorithm,
             format,
             theme,
             output,
@@ -315,12 +370,15 @@ fn main() -> Result<()> {
             json,
         } => cmd_render(
             &input,
-            parse_mode.to_core(),
-            format,
-            &theme,
-            output.as_deref(),
-            (width, height),
-            json,
+            RenderCommandOptions {
+                parse_mode: parse_mode.to_core(),
+                layout_algorithm: layout_algorithm.to_layout(),
+                format,
+                theme: &theme,
+                output: output.as_deref(),
+                dimensions: (width, height),
+                json_output: json,
+            },
         ),
 
         Command::Parse {
@@ -335,12 +393,14 @@ fn main() -> Result<()> {
         Command::Validate {
             input,
             parse_mode,
+            layout_algorithm,
             format,
             fail_on,
             diagnostics_out,
         } => cmd_validate(
             &input,
             parse_mode.to_core(),
+            layout_algorithm.to_layout(),
             format,
             fail_on,
             diagnostics_out.as_deref(),
@@ -438,15 +498,16 @@ fn cmd_capabilities(pretty: bool, output: Option<&str>) -> Result<()> {
 // Command: render
 // =============================================================================
 
-fn cmd_render(
-    input: &str,
-    parse_mode: MermaidParseMode,
-    format: OutputFormat,
-    theme: &str,
-    output: Option<&str>,
-    dimensions: (Option<u32>, Option<u32>),
-    json_output: bool,
-) -> Result<()> {
+fn cmd_render(input: &str, options: RenderCommandOptions<'_>) -> Result<()> {
+    let RenderCommandOptions {
+        parse_mode,
+        layout_algorithm,
+        format,
+        theme,
+        output,
+        dimensions,
+        json_output,
+    } = options;
     let (width, height) = dimensions;
     if json_output && output.is_none() {
         anyhow::bail!("--json requires --output so rendered output does not mix with metadata");
@@ -474,18 +535,23 @@ fn cmd_render(
 
     // Layout
     let layout_start = Instant::now();
-    let layout = layout_diagram(&parsed.ir);
+    let traced_layout = layout_diagram_traced_with_algorithm(&parsed.ir, layout_algorithm);
+    let layout = &traced_layout.layout;
     let layout_time = layout_start.elapsed();
 
     debug!(
-        "Layout: bounds={}x{}, crossings={}",
-        layout.bounds.width, layout.bounds.height, layout.stats.crossing_count
+        "Layout: requested={}, selected={}, bounds={}x{}, crossings={}",
+        traced_layout.trace.dispatch.requested.as_str(),
+        traced_layout.trace.dispatch.selected.as_str(),
+        layout.bounds.width,
+        layout.bounds.height,
+        layout.stats.crossing_count
     );
 
     // Render
     let render_start = Instant::now();
     let (rendered, actual_width, actual_height) =
-        render_format(&parsed.ir, &layout, format, theme, width, height)?;
+        render_format(&parsed.ir, layout, format, theme, width, height)?;
     let render_time = render_start.elapsed();
 
     let total_time = total_start.elapsed();
@@ -494,6 +560,8 @@ fn cmd_render(
         let result = RenderResult {
             format: format!("{format:?}").to_lowercase(),
             parse_mode: parse_mode.as_str().to_string(),
+            layout_requested: traced_layout.trace.dispatch.requested.as_str().to_string(),
+            layout_selected: traced_layout.trace.dispatch.selected.as_str().to_string(),
             diagram_type: parsed.ir.diagram_type.as_str().to_string(),
             node_count: parsed.ir.nodes.len(),
             edge_count: parsed.ir.edges.len(),
@@ -518,8 +586,10 @@ fn cmd_render(
     }
 
     info!(
-        "Rendered {} {} nodes, {} edges in {:.2}ms",
+        "Rendered {} via layout {}->{} with {} nodes, {} edges in {:.2}ms",
         parsed.ir.diagram_type.as_str(),
+        traced_layout.trace.dispatch.requested.as_str(),
+        traced_layout.trace.dispatch.selected.as_str(),
         parsed.ir.nodes.len(),
         parsed.ir.edges.len(),
         total_time.as_secs_f64() * 1000.0
@@ -799,18 +869,20 @@ fn confidence_label(confidence: f32) -> &'static str {
 fn cmd_validate(
     input: &str,
     parse_mode: MermaidParseMode,
+    layout_algorithm: LayoutAlgorithm,
     format: ValidateOutputFormat,
     fail_on: FailOnSeverity,
     diagnostics_out: Option<&str>,
 ) -> Result<()> {
     let source = load_input(input)?;
     let parsed = parse_with_mode(&source, parse_mode);
-    let layout = layout_diagram(&parsed.ir);
-    let svg_output = render_svg_with_layout(&parsed.ir, &layout, &SvgRenderConfig::default());
+    let traced_layout = layout_diagram_traced_with_algorithm(&parsed.ir, layout_algorithm);
+    let layout = &traced_layout.layout;
+    let svg_output = render_svg_with_layout(&parsed.ir, layout, &SvgRenderConfig::default());
 
     let mut diagnostics = collect_parse_diagnostics(&parsed);
     diagnostics.extend(collect_structural_diagnostics(&parsed));
-    diagnostics.extend(collect_layout_diagnostics(&layout));
+    diagnostics.extend(collect_layout_diagnostics(&traced_layout));
     diagnostics.extend(collect_render_diagnostics(&svg_output));
     sort_diagnostics(&mut diagnostics);
 
@@ -819,6 +891,8 @@ fn cmd_validate(
     let result = ValidateResult {
         valid,
         parse_mode: parse_mode.as_str().to_string(),
+        layout_requested: traced_layout.trace.dispatch.requested.as_str().to_string(),
+        layout_selected: traced_layout.trace.dispatch.selected.as_str().to_string(),
         diagram_type: parsed.ir.diagram_type.as_str().to_string(),
         node_count: parsed.ir.nodes.len(),
         edge_count: parsed.ir.edges.len(),
@@ -941,8 +1015,44 @@ fn collect_structural_diagnostics(parsed: &fm_parser::ParseResult) -> Vec<Valida
     diagnostics
 }
 
-fn collect_layout_diagnostics(layout: &fm_layout::DiagramLayout) -> Vec<ValidationDiagnostic> {
+fn collect_layout_diagnostics(traced: &TracedLayout) -> Vec<ValidationDiagnostic> {
     let mut diagnostics = Vec::new();
+    let layout = &traced.layout;
+    let dispatch = traced.trace.dispatch;
+
+    let severity = if dispatch.capability_unavailable {
+        "warning"
+    } else {
+        "info"
+    };
+    let remediation_hint = if dispatch.capability_unavailable {
+        Some(format!(
+            "Requested '{}' is unavailable for this diagram family; using '{}'",
+            dispatch.requested.as_str(),
+            dispatch.selected.as_str()
+        ))
+    } else {
+        None
+    };
+    diagnostics.push(ValidationDiagnostic {
+        stage: "layout".to_string(),
+        payload: StructuredDiagnostic {
+            error_code: "mermaid/info/layout-dispatch".to_string(),
+            severity: severity.to_string(),
+            message: format!(
+                "Layout dispatch requested '{}' and selected '{}' ({})",
+                dispatch.requested.as_str(),
+                dispatch.selected.as_str(),
+                dispatch.reason
+            ),
+            span: None,
+            source_line: None,
+            source_column: None,
+            rule_id: Some("layout.dispatch.selection".to_string()),
+            confidence: None,
+            remediation_hint,
+        },
+    });
 
     if layout.bounds.width <= 0.0 || layout.bounds.height <= 0.0 {
         diagnostics.push(ValidationDiagnostic {

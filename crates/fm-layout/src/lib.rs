@@ -16,7 +16,26 @@ pub enum LayoutAlgorithm {
     Timeline,
     Gantt,
     Sankey,
+    Kanban,
     Grid,
+}
+
+impl LayoutAlgorithm {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Sugiyama => "sugiyama",
+            Self::Force => "force",
+            Self::Tree => "tree",
+            Self::Radial => "radial",
+            Self::Timeline => "timeline",
+            Self::Gantt => "gantt",
+            Self::Sankey => "sankey",
+            Self::Kanban => "kanban",
+            Self::Grid => "grid",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,7 +191,27 @@ pub struct LayoutStageSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct LayoutTrace {
+    pub dispatch: LayoutDispatch,
     pub snapshots: Vec<LayoutStageSnapshot>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayoutDispatch {
+    pub requested: LayoutAlgorithm,
+    pub selected: LayoutAlgorithm,
+    pub capability_unavailable: bool,
+    pub reason: &'static str,
+}
+
+impl Default for LayoutDispatch {
+    fn default() -> Self {
+        Self {
+            requested: LayoutAlgorithm::Auto,
+            selected: LayoutAlgorithm::Sugiyama,
+            capability_unavailable: false,
+            reason: "legacy_default",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -701,25 +740,9 @@ fn edge_label_position(edge_path: &LayoutEdgePath) -> LayoutPoint {
 
 #[must_use]
 pub fn layout(ir: &MermaidDiagramIr, algorithm: LayoutAlgorithm) -> LayoutStats {
-    match algorithm {
-        LayoutAlgorithm::Auto => match ir.diagram_type {
-            DiagramType::Mindmap => layout_diagram_radial(ir).stats,
-            DiagramType::Timeline => layout_diagram_timeline(ir).stats,
-            DiagramType::Gantt => layout_diagram_gantt(ir).stats,
-            DiagramType::Sankey => layout_diagram_sankey(ir).stats,
-            DiagramType::Journey => layout_diagram_kanban(ir).stats,
-            DiagramType::BlockBeta => layout_diagram_grid(ir).stats,
-            _ => layout_diagram(ir).stats,
-        },
-        LayoutAlgorithm::Force => layout_diagram_force(ir).stats,
-        LayoutAlgorithm::Tree => layout_diagram_tree(ir).stats,
-        LayoutAlgorithm::Radial => layout_diagram_radial(ir).stats,
-        LayoutAlgorithm::Timeline => layout_diagram_timeline(ir).stats,
-        LayoutAlgorithm::Gantt => layout_diagram_gantt(ir).stats,
-        LayoutAlgorithm::Sankey => layout_diagram_sankey(ir).stats,
-        LayoutAlgorithm::Grid => layout_diagram_grid(ir).stats,
-        LayoutAlgorithm::Sugiyama => layout_diagram(ir).stats,
-    }
+    layout_diagram_traced_with_algorithm(ir, algorithm)
+        .layout
+        .stats
 }
 
 #[must_use]
@@ -737,12 +760,16 @@ pub fn layout_diagram_with_cycle_strategy(
 
 #[must_use]
 pub fn layout_diagram_with_config(ir: &MermaidDiagramIr, config: LayoutConfig) -> DiagramLayout {
-    layout_diagram_traced_with_config(ir, config).layout
+    layout_diagram_traced_with_config(ir, LayoutAlgorithm::Auto, config).layout
 }
 
 #[must_use]
 pub fn layout_diagram_traced(ir: &MermaidDiagramIr) -> TracedLayout {
-    layout_diagram_traced_with_cycle_strategy(ir, default_cycle_strategy())
+    layout_diagram_traced_with_algorithm_and_cycle_strategy(
+        ir,
+        LayoutAlgorithm::Auto,
+        default_cycle_strategy(),
+    )
 }
 
 #[must_use]
@@ -750,8 +777,30 @@ pub fn layout_diagram_traced_with_cycle_strategy(
     ir: &MermaidDiagramIr,
     cycle_strategy: CycleStrategy,
 ) -> TracedLayout {
+    layout_diagram_traced_with_algorithm_and_cycle_strategy(
+        ir,
+        LayoutAlgorithm::Auto,
+        cycle_strategy,
+    )
+}
+
+#[must_use]
+pub fn layout_diagram_traced_with_algorithm(
+    ir: &MermaidDiagramIr,
+    algorithm: LayoutAlgorithm,
+) -> TracedLayout {
+    layout_diagram_traced_with_algorithm_and_cycle_strategy(ir, algorithm, default_cycle_strategy())
+}
+
+#[must_use]
+pub fn layout_diagram_traced_with_algorithm_and_cycle_strategy(
+    ir: &MermaidDiagramIr,
+    algorithm: LayoutAlgorithm,
+    cycle_strategy: CycleStrategy,
+) -> TracedLayout {
     layout_diagram_traced_with_config(
         ir,
+        algorithm,
         LayoutConfig {
             cycle_strategy,
             collapse_cycle_clusters: false,
@@ -762,12 +811,94 @@ pub fn layout_diagram_traced_with_cycle_strategy(
 #[must_use]
 pub fn layout_diagram_traced_with_config(
     ir: &MermaidDiagramIr,
+    algorithm: LayoutAlgorithm,
     config: LayoutConfig,
 ) -> TracedLayout {
-    if let Some(specialized) = layout_specialized_diagram_traced(ir) {
-        return specialized;
-    }
+    let dispatch = dispatch_layout_algorithm(ir, algorithm);
+    let mut traced = match dispatch.selected {
+        LayoutAlgorithm::Sugiyama => layout_diagram_sugiyama_traced_with_config(ir, config),
+        LayoutAlgorithm::Force => layout_diagram_force_traced(ir),
+        LayoutAlgorithm::Tree => layout_diagram_tree_traced(ir),
+        LayoutAlgorithm::Radial => layout_diagram_radial_traced(ir),
+        LayoutAlgorithm::Timeline => layout_diagram_timeline_traced(ir),
+        LayoutAlgorithm::Gantt => layout_diagram_gantt_traced(ir),
+        LayoutAlgorithm::Sankey => layout_diagram_sankey_traced(ir),
+        LayoutAlgorithm::Kanban => layout_diagram_kanban_traced(ir),
+        LayoutAlgorithm::Grid => layout_diagram_grid_traced(ir),
+        LayoutAlgorithm::Auto => unreachable!("dispatch must resolve auto to a concrete layout"),
+    };
+    traced.trace.dispatch = dispatch;
+    traced.trace.snapshots.insert(
+        0,
+        LayoutStageSnapshot {
+            stage: "dispatch",
+            reversed_edges: 0,
+            crossing_count: 0,
+            node_count: ir.nodes.len(),
+            edge_count: ir.edges.len(),
+        },
+    );
+    traced.layout.stats.phase_iterations = traced.trace.snapshots.len();
+    traced
+}
 
+fn dispatch_layout_algorithm(ir: &MermaidDiagramIr, requested: LayoutAlgorithm) -> LayoutDispatch {
+    match requested {
+        LayoutAlgorithm::Auto => LayoutDispatch {
+            requested,
+            selected: preferred_layout_algorithm(ir),
+            capability_unavailable: false,
+            reason: "auto_selected_from_diagram_type",
+        },
+        explicit => {
+            if algorithm_available_for_diagram(ir.diagram_type, explicit) {
+                LayoutDispatch {
+                    requested,
+                    selected: explicit,
+                    capability_unavailable: false,
+                    reason: "explicit_request_honored",
+                }
+            } else {
+                LayoutDispatch {
+                    requested,
+                    selected: preferred_layout_algorithm(ir),
+                    capability_unavailable: true,
+                    reason: "requested_algorithm_capability_unavailable_for_diagram_type",
+                }
+            }
+        }
+    }
+}
+
+fn preferred_layout_algorithm(ir: &MermaidDiagramIr) -> LayoutAlgorithm {
+    match ir.diagram_type {
+        DiagramType::Mindmap => LayoutAlgorithm::Radial,
+        DiagramType::Timeline => LayoutAlgorithm::Timeline,
+        DiagramType::Gantt => LayoutAlgorithm::Gantt,
+        DiagramType::Sankey => LayoutAlgorithm::Sankey,
+        DiagramType::Journey => LayoutAlgorithm::Kanban,
+        DiagramType::BlockBeta => LayoutAlgorithm::Grid,
+        _ => LayoutAlgorithm::Sugiyama,
+    }
+}
+
+fn algorithm_available_for_diagram(diagram_type: DiagramType, algorithm: LayoutAlgorithm) -> bool {
+    match algorithm {
+        LayoutAlgorithm::Auto => true,
+        LayoutAlgorithm::Sugiyama | LayoutAlgorithm::Force | LayoutAlgorithm::Tree => true,
+        LayoutAlgorithm::Radial => matches!(diagram_type, DiagramType::Mindmap),
+        LayoutAlgorithm::Timeline => matches!(diagram_type, DiagramType::Timeline),
+        LayoutAlgorithm::Gantt => matches!(diagram_type, DiagramType::Gantt),
+        LayoutAlgorithm::Sankey => matches!(diagram_type, DiagramType::Sankey),
+        LayoutAlgorithm::Kanban => matches!(diagram_type, DiagramType::Journey),
+        LayoutAlgorithm::Grid => matches!(diagram_type, DiagramType::BlockBeta),
+    }
+}
+
+fn layout_diagram_sugiyama_traced_with_config(
+    ir: &MermaidDiagramIr,
+    config: LayoutConfig,
+) -> TracedLayout {
     let mut trace = LayoutTrace::default();
     let spacing = LayoutSpacing::default();
     let node_sizes = compute_node_sizes(ir);
@@ -1311,17 +1442,6 @@ pub fn layout_diagram_radial_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     }
 }
 
-fn layout_specialized_diagram_traced(ir: &MermaidDiagramIr) -> Option<TracedLayout> {
-    match ir.diagram_type {
-        DiagramType::Timeline => Some(layout_diagram_timeline_traced(ir)),
-        DiagramType::Gantt => Some(layout_diagram_gantt_traced(ir)),
-        DiagramType::Sankey => Some(layout_diagram_sankey_traced(ir)),
-        DiagramType::Journey => Some(layout_diagram_kanban_traced(ir)),
-        DiagramType::BlockBeta => Some(layout_diagram_grid_traced(ir)),
-        _ => None,
-    }
-}
-
 #[must_use]
 pub fn layout_diagram_timeline(ir: &MermaidDiagramIr) -> DiagramLayout {
     layout_diagram_timeline_traced(ir).layout
@@ -1709,11 +1829,6 @@ pub fn layout_diagram_grid_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         trace,
         matches!(ir.direction, GraphDirection::LR | GraphDirection::RL),
     )
-}
-
-#[must_use]
-fn layout_diagram_kanban(ir: &MermaidDiagramIr) -> DiagramLayout {
-    layout_diagram_kanban_traced(ir).layout
 }
 
 #[must_use]
@@ -4969,14 +5084,15 @@ mod tests {
     use super::{
         CycleStrategy, LayoutAlgorithm, LayoutPoint, RenderClip, RenderItem, RenderSource,
         build_render_scene, layout, layout_diagram, layout_diagram_force,
-        layout_diagram_force_traced, layout_diagram_grid, layout_diagram_radial,
-        layout_diagram_traced, layout_diagram_tree, layout_diagram_with_cycle_strategy,
-        route_edge_points,
+        layout_diagram_force_traced, layout_diagram_gantt, layout_diagram_grid,
+        layout_diagram_radial, layout_diagram_sankey, layout_diagram_timeline,
+        layout_diagram_traced, layout_diagram_traced_with_algorithm, layout_diagram_tree,
+        layout_diagram_with_cycle_strategy, route_edge_points,
     };
     use fm_core::{
         ArrowType, DiagramType, GraphDirection, IrCluster, IrClusterId, IrEdge, IrEndpoint,
         IrGraphCluster, IrGraphNode, IrLabel, IrLabelId, IrNode, IrNodeId, IrSubgraph,
-        IrSubgraphId, MermaidDiagramIr,
+        IrSubgraphId, MermaidDiagramIr, NodeShape,
     };
     use proptest::prelude::*;
     use std::collections::BTreeMap;
@@ -5380,6 +5496,198 @@ mod tests {
         assert!(b.bounds.x > a.bounds.x);
         assert_eq!(a.bounds.y, b.bounds.y);
         assert!(c.bounds.y > a.bounds.y);
+    }
+
+    #[test]
+    fn timeline_layout_keeps_periods_on_baseline_and_stacks_events() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Timeline);
+        for label in ["2024", "2025", "Kickoff", "Launch", "Retro"] {
+            ir.labels.push(IrLabel {
+                text: label.to_string(),
+                ..IrLabel::default()
+            });
+        }
+        ir.nodes.push(IrNode {
+            id: "period_2024".to_string(),
+            label: Some(IrLabelId(0)),
+            shape: NodeShape::Rect,
+            ..IrNode::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "period_2025".to_string(),
+            label: Some(IrLabelId(1)),
+            shape: NodeShape::Rect,
+            ..IrNode::default()
+        });
+        for (node_id, label_id) in [
+            ("kickoff", IrLabelId(2)),
+            ("launch", IrLabelId(3)),
+            ("retro", IrLabelId(4)),
+        ] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                label: Some(label_id),
+                shape: NodeShape::Rounded,
+                ..IrNode::default()
+            });
+        }
+        for (from, to) in [(0, 2), (0, 3), (1, 4)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let layout = layout_diagram_timeline(&ir);
+        let centers = layout
+            .nodes
+            .iter()
+            .map(|node| (node.node_id.as_str(), node.bounds.center()))
+            .collect::<BTreeMap<_, _>>();
+
+        let period_2024 = centers.get("period_2024").expect("2024 period");
+        let period_2025 = centers.get("period_2025").expect("2025 period");
+        let kickoff = centers.get("kickoff").expect("kickoff event");
+        let launch = centers.get("launch").expect("launch event");
+        let retro = centers.get("retro").expect("retro event");
+
+        assert!((period_2024.y - period_2025.y).abs() < 0.001);
+        assert!(period_2024.x < period_2025.x);
+        assert!((kickoff.x - period_2024.x).abs() < 0.001);
+        assert!((launch.x - period_2024.x).abs() < 0.001);
+        assert!((retro.x - period_2025.x).abs() < 0.001);
+        assert!(kickoff.y > period_2024.y);
+        assert!(launch.y > kickoff.y);
+        assert!(retro.y > period_2025.y);
+    }
+
+    #[test]
+    fn gantt_layout_groups_tasks_by_section_and_orders_slots_horizontally() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Gantt);
+        for label in ["Planning: Scope", "Planning: Estimate", "Delivery: Build"] {
+            ir.labels.push(IrLabel {
+                text: label.to_string(),
+                ..IrLabel::default()
+            });
+        }
+        for (node_id, label) in [
+            ("task_1", IrLabelId(0)),
+            ("task_3", IrLabelId(1)),
+            ("task_2", IrLabelId(2)),
+        ] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                label: Some(label),
+                ..IrNode::default()
+            });
+        }
+
+        let layout = layout_diagram_gantt(&ir);
+        let nodes = layout
+            .nodes
+            .iter()
+            .map(|node| (node.node_id.as_str(), node))
+            .collect::<BTreeMap<_, _>>();
+
+        let task_1 = nodes.get("task_1").expect("task_1");
+        let task_2 = nodes.get("task_2").expect("task_2");
+        let task_3 = nodes.get("task_3").expect("task_3");
+
+        assert!(task_1.bounds.width >= 156.0);
+        assert!(task_1.bounds.center().x < task_2.bounds.center().x);
+        assert!(task_1.bounds.center().x < task_3.bounds.center().x);
+        assert!(task_3.bounds.center().y > task_1.bounds.center().y);
+        assert!((task_1.bounds.center().y - task_2.bounds.center().y).abs() > 10.0);
+    }
+
+    #[test]
+    fn sankey_layout_preserves_columns_for_sources_hub_and_sinks() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Sankey);
+        for node_id in [
+            "left_source",
+            "right_source",
+            "hub",
+            "left_sink",
+            "right_sink",
+        ] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        for (from, to) in [(0, 2), (1, 2), (2, 3), (2, 4)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let layout = layout_diagram_sankey(&ir);
+        let nodes = layout
+            .nodes
+            .iter()
+            .map(|node| (node.node_id.as_str(), node))
+            .collect::<BTreeMap<_, _>>();
+
+        let left_source = nodes.get("left_source").expect("left_source");
+        let right_source = nodes.get("right_source").expect("right_source");
+        let hub = nodes.get("hub").expect("hub");
+        let left_sink = nodes.get("left_sink").expect("left_sink");
+        let right_sink = nodes.get("right_sink").expect("right_sink");
+
+        assert!(hub.bounds.width >= 108.0);
+        assert!(hub.bounds.height >= 30.0);
+        assert!(left_source.bounds.height >= 30.0);
+        assert!(left_sink.bounds.height >= 30.0);
+        assert!((left_source.bounds.height - right_source.bounds.height).abs() < 0.001);
+        assert!((left_sink.bounds.height - right_sink.bounds.height).abs() < 0.001);
+        assert!((left_source.bounds.center().x - right_source.bounds.center().x).abs() < 0.001);
+        assert!((left_sink.bounds.center().x - right_sink.bounds.center().x).abs() < 0.001);
+        assert!(left_source.bounds.center().x < hub.bounds.center().x);
+        assert!(right_source.bounds.center().x < hub.bounds.center().x);
+        assert!(hub.bounds.center().x < left_sink.bounds.center().x);
+        assert!(hub.bounds.center().x < right_sink.bounds.center().x);
+    }
+
+    #[test]
+    fn kanban_layout_stacks_cards_within_columns() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Journey);
+        for node_id in ["backlog_a", "backlog_b", "doing_a", "doing_b"] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        for (from, to) in [(0, 2), (1, 3)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let layout = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Kanban).layout;
+        let nodes = layout
+            .nodes
+            .iter()
+            .map(|node| (node.node_id.as_str(), node.bounds.center()))
+            .collect::<BTreeMap<_, _>>();
+
+        let backlog_a = nodes.get("backlog_a").expect("backlog_a");
+        let backlog_b = nodes.get("backlog_b").expect("backlog_b");
+        let doing_a = nodes.get("doing_a").expect("doing_a");
+        let doing_b = nodes.get("doing_b").expect("doing_b");
+
+        assert!((backlog_a.x - backlog_b.x).abs() < 0.001);
+        assert!(backlog_b.y > backlog_a.y);
+        assert!((doing_a.x - doing_b.x).abs() < 0.001);
+        assert!(doing_b.y > doing_a.y);
+        assert!(doing_a.x > backlog_a.x);
     }
 
     #[test]
@@ -6327,6 +6635,40 @@ mod tests {
         let auto_stats = layout(&ir, LayoutAlgorithm::Auto);
         let radial_stats = layout(&ir, LayoutAlgorithm::Radial);
         assert_eq!(auto_stats, radial_stats);
+        let traced = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Auto);
+        assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Radial);
+        assert!(!traced.trace.dispatch.capability_unavailable);
+    }
+
+    #[test]
+    fn auto_layout_uses_kanban_for_journey_diagrams() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Journey);
+        ir.labels.push(IrLabel {
+            text: "Backlog".to_string(),
+            ..IrLabel::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "backlog".to_string(),
+            label: Some(IrLabelId(0)),
+            ..IrNode::default()
+        });
+
+        let traced = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Auto);
+        assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Kanban);
+        assert_eq!(traced.layout.nodes.len(), 1);
+    }
+
+    #[test]
+    fn unavailable_specialized_request_falls_back_deterministically() {
+        let ir = sample_ir();
+        let traced = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Timeline);
+        assert_eq!(traced.trace.dispatch.requested, LayoutAlgorithm::Timeline);
+        assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Sugiyama);
+        assert!(traced.trace.dispatch.capability_unavailable);
+        assert_eq!(
+            traced.trace.dispatch.reason,
+            "requested_algorithm_capability_unavailable_for_diagram_type"
+        );
     }
 
     // --- Force-directed layout tests ---

@@ -587,11 +587,66 @@ fn render_json_writes_artifact_and_stdout_metadata() {
         serde_json::from_str(&stdout).expect("render --json must print metadata JSON to stdout");
     assert_eq!(json["format"], "svg");
     assert_eq!(json["diagram_type"], "flowchart");
+    assert_eq!(json["layout_requested"], "auto");
+    assert_eq!(json["layout_selected"], "sugiyama");
     assert!(json["output_bytes"].as_u64().is_some_and(|value| value > 0));
 
     let artifact = std::fs::read_to_string(&output_path).expect("failed to read rendered svg");
     assert!(artifact.starts_with("<svg"));
     assert!(artifact.contains("</svg>"));
+}
+
+#[test]
+fn render_json_reports_specialized_auto_layout_selection() {
+    let cases = [
+        (
+            "timeline\ntitle Roadmap\n2024 : Kickoff\n2025 : Launch\n",
+            "timeline",
+        ),
+        (
+            "gantt\ntitle Ship\nsection Planning\nScope: task_1, 2024-01-01, 1d\n",
+            "gantt",
+        ),
+        (
+            "journey\ntitle Sprint\nsection Board\nBacklog: 5: Alice\n",
+            "kanban",
+        ),
+        ("sankey-beta\nA, B, 3\nB, C, 2\n", "sankey"),
+        ("block-beta\ncolumns 2\nA\nB\n", "grid"),
+    ];
+
+    for (input, expected_layout) in cases {
+        let output_file = NamedTempFile::new().expect("temp render output file");
+        let output_path = output_file
+            .path()
+            .to_str()
+            .expect("temp path must be valid utf-8")
+            .to_string();
+
+        let output = run_cli(
+            &[
+                "render",
+                "-",
+                "--format",
+                "svg",
+                "--json",
+                "--output",
+                &output_path,
+            ],
+            input,
+        );
+        assert!(
+            output.status.success(),
+            "render --json should succeed for specialized layout; stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let stdout = String::from_utf8(output.stdout).expect("stdout must be utf-8");
+        let json: serde_json::Value =
+            serde_json::from_str(&stdout).expect("render --json must print metadata JSON");
+        assert_eq!(json["layout_requested"], "auto");
+        assert_eq!(json["layout_selected"], expected_layout);
+    }
 }
 
 #[test]
@@ -755,6 +810,40 @@ fn validate_strict_mode_fails_unsupported_family_with_compatibility_diagnostic()
     assert!(json["diagnostics"].as_array().is_some_and(|diagnostics| {
         diagnostics.iter().any(|diagnostic| {
             diagnostic["rule_id"] == "parse.compatibility" && diagnostic["severity"] == "error"
+        })
+    }));
+}
+
+#[test]
+fn validate_reports_layout_dispatch_fallback_when_requested_family_is_unavailable() {
+    let output = run_cli(
+        &[
+            "validate",
+            "-",
+            "--layout-algorithm",
+            "timeline",
+            "--format",
+            "json",
+            "--fail-on",
+            "none",
+        ],
+        "flowchart LR\nA-->B\n",
+    );
+    assert!(
+        output.status.success(),
+        "validate should succeed with fail-on none; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout must be utf-8");
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("validate json must print valid JSON");
+    assert_eq!(json["layout_requested"], "timeline");
+    assert_eq!(json["layout_selected"], "sugiyama");
+    assert!(json["diagnostics"].as_array().is_some_and(|diagnostics| {
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic["rule_id"] == "layout.dispatch.selection"
+                && diagnostic["severity"] == "warning"
         })
     }));
 }
