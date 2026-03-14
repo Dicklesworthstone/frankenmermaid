@@ -2120,6 +2120,14 @@ impl GitGraphState {
     }
 }
 
+enum GitGraphCommand {
+    Commit(GitCommitOptions),
+    Branch(String),
+    Checkout(String),
+    Merge(GitMergeOptions),
+    CherryPick(String),
+}
+
 fn parse_block_beta(input: &str, builder: &mut IrBuilder) {
     let document = parse_block_beta_document(input);
     for warning in &document.warnings {
@@ -2520,35 +2528,72 @@ fn parse_gitgraph(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
-        // Parse git commands - require word boundary (space or end of line after command)
-        if let Some(rest) = strip_git_command(trimmed, "commit") {
-            parse_git_commit(rest, line_number, line, &mut state, builder);
-            continue;
-        }
-
-        if let Some(rest) = strip_git_command(trimmed, "branch") {
-            parse_git_branch(rest.trim(), line_number, line, &mut state, builder);
-            continue;
-        }
-
-        if let Some(rest) = strip_git_command(trimmed, "checkout") {
-            parse_git_checkout(rest.trim(), line_number, line, &mut state, builder);
-            continue;
-        }
-
-        if let Some(rest) = strip_git_command(trimmed, "merge") {
-            parse_git_merge(rest.trim(), line_number, line, &mut state, builder);
-            continue;
-        }
-
-        if let Some(rest) = strip_git_command(trimmed, "cherry-pick") {
-            parse_git_cherry_pick(rest.trim(), line_number, line, &mut state, builder);
+        if let Some(command) = parse_gitgraph_command(trimmed) {
+            lower_gitgraph_command(command, line_number, line, &mut state, builder);
             continue;
         }
 
         builder.add_warning(format!(
             "Line {line_number}: unsupported gitGraph syntax: {trimmed}"
         ));
+    }
+}
+
+fn parse_gitgraph_command(line: &str) -> Option<GitGraphCommand> {
+    if let Some(rest) = strip_git_command(line, "commit") {
+        return Some(GitGraphCommand::Commit(parse_git_commit_options(rest)));
+    }
+
+    if let Some(rest) = strip_git_command(line, "branch") {
+        return Some(GitGraphCommand::Branch(rest.trim().to_string()));
+    }
+
+    if let Some(rest) = strip_git_command(line, "checkout") {
+        return Some(GitGraphCommand::Checkout(rest.trim().to_string()));
+    }
+
+    if let Some(rest) = strip_git_command(line, "switch") {
+        return Some(GitGraphCommand::Checkout(rest.trim().to_string()));
+    }
+
+    if let Some(rest) = strip_git_command(line, "merge")
+        && let Some(options) = parse_git_merge_options(rest.trim())
+    {
+        return Some(GitGraphCommand::Merge(options));
+    }
+
+    if let Some(rest) = strip_git_command(line, "cherry-pick")
+        && let Some(commit_id) = parse_git_cherry_pick_id(rest.trim())
+    {
+        return Some(GitGraphCommand::CherryPick(commit_id));
+    }
+
+    None
+}
+
+fn lower_gitgraph_command(
+    command: GitGraphCommand,
+    line_number: usize,
+    source_line: &str,
+    state: &mut GitGraphState,
+    builder: &mut IrBuilder,
+) {
+    match command {
+        GitGraphCommand::Commit(options) => {
+            parse_git_commit(options, line_number, source_line, state, builder);
+        }
+        GitGraphCommand::Branch(branch_name) => {
+            parse_git_branch(&branch_name, line_number, source_line, state, builder);
+        }
+        GitGraphCommand::Checkout(branch_name) => {
+            parse_git_checkout(&branch_name, line_number, source_line, state, builder);
+        }
+        GitGraphCommand::Merge(options) => {
+            parse_git_merge(options, line_number, source_line, state, builder);
+        }
+        GitGraphCommand::CherryPick(commit_id) => {
+            parse_git_cherry_pick(&commit_id, line_number, source_line, state, builder);
+        }
     }
 }
 
@@ -2590,14 +2635,13 @@ fn parse_gitgraph_direction(header: &str) -> Option<GraphDirection> {
 ///
 /// Syntax: `commit [id: "id"] [msg: "message"] [tag: "tag"] [type: NORMAL|REVERSE|HIGHLIGHT]`
 fn parse_git_commit(
-    rest: &str,
+    options: GitCommitOptions,
     line_number: usize,
     source_line: &str,
     state: &mut GitGraphState,
     builder: &mut IrBuilder,
 ) {
     let span = span_for(line_number, source_line);
-    let options = parse_git_commit_options(rest);
 
     // Determine commit ID
     let commit_id = options.id.unwrap_or_else(|| state.next_commit_id());
@@ -2632,6 +2676,12 @@ struct GitCommitOptions {
     tag: Option<String>,
 }
 
+struct GitMergeOptions {
+    branch: String,
+    id: Option<String>,
+    tag: Option<String>,
+}
+
 fn parse_git_commit_options(rest: &str) -> GitCommitOptions {
     let mut options = GitCommitOptions {
         id: None,
@@ -2651,7 +2701,7 @@ fn parse_git_commit_options(rest: &str) -> GitCommitOptions {
 
         // Try to match id: "value"
         if let Some(rest_after_id) = remaining.strip_prefix("id:")
-            && let Some((value, rest)) = extract_quoted_value(rest_after_id.trim_start())
+            && let Some((value, rest)) = extract_quoted_or_word(rest_after_id.trim_start())
         {
             options.id = Some(value);
             remaining = rest;
@@ -2660,7 +2710,7 @@ fn parse_git_commit_options(rest: &str) -> GitCommitOptions {
 
         // Try to match msg: "value"
         if let Some(rest_after_msg) = remaining.strip_prefix("msg:")
-            && let Some((value, rest)) = extract_quoted_value(rest_after_msg.trim_start())
+            && let Some((value, rest)) = extract_quoted_or_word(rest_after_msg.trim_start())
         {
             options.msg = Some(value);
             remaining = rest;
@@ -2669,7 +2719,7 @@ fn parse_git_commit_options(rest: &str) -> GitCommitOptions {
 
         // Try to match tag: "value"
         if let Some(rest_after_tag) = remaining.strip_prefix("tag:")
-            && let Some((value, rest)) = extract_quoted_value(rest_after_tag.trim_start())
+            && let Some((value, rest)) = extract_quoted_or_word(rest_after_tag.trim_start())
         {
             options.tag = Some(value);
             remaining = rest;
@@ -2711,6 +2761,23 @@ fn extract_quoted_value(input: &str) -> Option<(String, &str)> {
     Some((value, rest))
 }
 
+fn extract_quoted_or_word(input: &str) -> Option<(String, &str)> {
+    if let Some(parsed) = extract_quoted_value(input) {
+        return Some(parsed);
+    }
+
+    let trimmed = input.trim_start();
+    let end = trimmed
+        .find(|ch: char| ch.is_whitespace())
+        .unwrap_or(trimmed.len());
+    let value = trimmed[..end].trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    Some((value.to_string(), &trimmed[end..]))
+}
+
 fn parse_git_branch(
     branch_name: &str,
     line_number: usize,
@@ -2749,29 +2816,18 @@ fn parse_git_checkout(
 }
 
 fn parse_git_merge(
-    merge_spec: &str,
+    options: GitMergeOptions,
     line_number: usize,
     source_line: &str,
     state: &mut GitGraphState,
     builder: &mut IrBuilder,
 ) {
     let span = span_for(line_number, source_line);
-
-    // Parse branch name and optional tag/id
-    // Syntax: merge branch_name [tag: "tag"] [id: "id"]
-    let parts: Vec<&str> = merge_spec.split_whitespace().collect();
-    let branch_name = match parts.first() {
-        Some(name) => normalize_identifier(name),
-        None => {
-            builder.add_warning(format!("Line {line_number}: merge requires a branch name"));
-            return;
-        }
-    };
-
-    if branch_name.is_empty() {
-        builder.add_warning(format!("Line {line_number}: invalid branch name in merge"));
-        return;
-    }
+    let GitMergeOptions {
+        branch: branch_name,
+        id,
+        tag,
+    } = options;
 
     // Get the head of the branch being merged
     let merge_source = match state.branches.get(&branch_name).copied() {
@@ -2784,9 +2840,8 @@ fn parse_git_merge(
         }
     };
 
-    // Create a merge commit
-    let merge_id = state.next_commit_id();
-    let label = format!("merge {branch_name}");
+    let merge_id = id.unwrap_or_else(|| state.next_commit_id());
+    let label = tag.unwrap_or_else(|| format!("merge {branch_name}"));
 
     let Some(merge_node) = builder.intern_node(&merge_id, Some(&label), NodeShape::Circle, span)
     else {
@@ -2794,7 +2849,13 @@ fn parse_git_merge(
     };
 
     // Create edge from merge source to merge commit
-    builder.push_edge(merge_source, merge_node, ArrowType::DottedArrow, None, span);
+    builder.push_edge(
+        merge_source,
+        merge_node,
+        ArrowType::DottedArrow,
+        Some(&label),
+        span,
+    );
 
     // Create edge from current head to merge commit
     if let Some(current_head) = state.current_head() {
@@ -2805,32 +2866,56 @@ fn parse_git_merge(
     state.set_head(&state.current_branch.clone(), merge_node);
 }
 
+fn parse_git_merge_options(spec: &str) -> Option<GitMergeOptions> {
+    let mut parts = spec.trim().splitn(2, char::is_whitespace);
+    let branch = normalize_identifier(parts.next()?.trim());
+    if branch.is_empty() {
+        return None;
+    }
+
+    let mut options = GitMergeOptions {
+        branch,
+        id: None,
+        tag: None,
+    };
+
+    let mut remaining = parts.next().unwrap_or_default().trim();
+    while !remaining.is_empty() {
+        remaining = remaining.trim_start();
+
+        if let Some(rest_after_id) = remaining.strip_prefix("id:")
+            && let Some((value, rest)) = extract_quoted_or_word(rest_after_id.trim_start())
+        {
+            options.id = Some(value);
+            remaining = rest;
+            continue;
+        }
+
+        if let Some(rest_after_tag) = remaining.strip_prefix("tag:")
+            && let Some((value, rest)) = extract_quoted_or_word(rest_after_tag.trim_start())
+        {
+            options.tag = Some(value);
+            remaining = rest;
+            continue;
+        }
+
+        let end = remaining
+            .find(|ch: char| ch.is_whitespace())
+            .unwrap_or(remaining.len());
+        remaining = &remaining[end..];
+    }
+
+    Some(options)
+}
+
 fn parse_git_cherry_pick(
-    cherry_pick_spec: &str,
+    source_commit_id: &str,
     line_number: usize,
     source_line: &str,
     state: &mut GitGraphState,
     builder: &mut IrBuilder,
 ) {
     let span = span_for(line_number, source_line);
-
-    // Syntax: cherry-pick id: "commit_id" [tag: "tag"]
-    let id_prefix = "id:";
-    let Some(id_start) = cherry_pick_spec.find(id_prefix) else {
-        builder.add_warning(format!(
-            "Line {line_number}: cherry-pick requires id: parameter"
-        ));
-        return;
-    };
-
-    let rest = cherry_pick_spec[id_start + id_prefix.len()..].trim_start();
-    let Some((source_commit_id, _)) = extract_quoted_value(rest) else {
-        builder.add_warning(format!(
-            "Line {line_number}: cherry-pick id must be a quoted string"
-        ));
-        return;
-    };
-
     // Create a new commit that references the cherry-picked one
     let new_commit_id = state.next_commit_id();
     let label = format!("cherry-pick {source_commit_id}");
@@ -2847,6 +2932,14 @@ fn parse_git_cherry_pick(
 
     // Update current branch head
     state.set_head(&state.current_branch.clone(), new_node);
+}
+
+fn parse_git_cherry_pick_id(spec: &str) -> Option<String> {
+    let id_prefix = "id:";
+    let id_start = spec.find(id_prefix)?;
+    let rest = spec[id_start + id_prefix.len()..].trim_start();
+    let (commit_id, _) = extract_quoted_or_word(rest)?;
+    (!commit_id.is_empty()).then_some(commit_id)
 }
 
 fn register_state_declaration(
@@ -4944,6 +5037,39 @@ merge develop"#,
     }
 
     #[test]
+    fn gitgraph_merge_preserves_explicit_id_and_tag() {
+        let parsed = parse_mermaid(
+            r#"gitGraph
+commit id: root
+branch develop
+checkout develop
+commit id: feature
+checkout main
+merge develop id: merge1 tag: release"#,
+        );
+
+        let merge_node = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "merge1")
+            .expect("merge node should keep explicit id");
+        let merge_label = merge_node
+            .label
+            .and_then(|id| parsed.ir.labels.get(id.0))
+            .map(|label| label.text.as_str());
+        assert_eq!(merge_label, Some("release"));
+        assert!(
+            parsed.ir.edges.iter().any(|edge| {
+                edge.label
+                    .and_then(|id| parsed.ir.labels.get(id.0))
+                    .is_some_and(|label| label.text == "release")
+            }),
+            "merge source edge should keep tag label"
+        );
+    }
+
+    #[test]
     fn gitgraph_parses_cherry_pick() {
         let parsed = parse_mermaid(
             r#"gitGraph
@@ -4959,6 +5085,28 @@ cherry-pick id: "feat1""#,
         assert_eq!(parsed.ir.nodes.len(), 3);
         // Edges: abc->feat1 (branch), abc->cherry-pick (main)
         assert_eq!(parsed.ir.edges.len(), 2);
+    }
+
+    #[test]
+    fn gitgraph_accepts_switch_alias_and_unquoted_ids() {
+        let parsed = parse_mermaid(
+            r#"gitGraph
+commit id: root
+branch feature
+switch feature
+commit id: feat1
+switch main
+cherry-pick id: feat1"#,
+        );
+        assert_eq!(parsed.ir.diagram_type, DiagramType::GitGraph);
+        assert_eq!(parsed.ir.nodes.len(), 3);
+        assert_eq!(parsed.ir.edges.len(), 2);
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .all(|warning| !warning.contains("unsupported gitGraph syntax"))
+        );
     }
 
     #[test]
