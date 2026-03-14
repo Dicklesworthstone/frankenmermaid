@@ -1,6 +1,7 @@
 use chumsky::prelude::*;
 use fm_core::{
-    ArrowType, DiagramType, GraphDirection, IrAttributeKey, IrNodeId, NodeShape, Span,
+    ArrowType, Diagnostic, DiagnosticCategory, DiagramType, GraphDirection, IrAttributeKey,
+    IrNodeId, MermaidParseMode, MermaidSupportLevel, NodeShape, Span,
     parse_mermaid_js_config_value, to_init_parse,
 };
 use serde_json::Value;
@@ -155,15 +156,20 @@ pub fn detect_type(input: &str) -> DiagramType {
 #[allow(dead_code)] // Used by tests
 pub fn parse_mermaid(input: &str) -> ParseResult {
     let detection = crate::detect_type_with_confidence(input);
-    parse_mermaid_with_detection(input, detection)
+    parse_mermaid_with_detection(input, detection, MermaidParseMode::Compat)
 }
 
 /// Parse mermaid input with pre-computed detection results.
 #[must_use]
-pub fn parse_mermaid_with_detection(input: &str, detection: DetectedType) -> ParseResult {
+pub fn parse_mermaid_with_detection(
+    input: &str,
+    detection: DetectedType,
+    parse_mode: MermaidParseMode,
+) -> ParseResult {
     let (content, front_matter_payload) = split_front_matter_block(input);
     let diagram_type = detection.diagram_type;
     let mut builder = IrBuilder::new(diagram_type);
+    builder.set_parse_mode(parse_mode);
 
     // Add detection warnings to builder
     for warning in &detection.warnings {
@@ -193,16 +199,10 @@ pub fn parse_mermaid_with_detection(input: &str, detection: DetectedType) -> Par
         DiagramType::GitGraph => parse_gitgraph(content, &mut builder),
         DiagramType::BlockBeta => parse_block_beta(content, &mut builder),
         DiagramType::Unknown => {
-            builder
-                .add_warning("Unable to detect diagram type; using best-effort flowchart parsing");
-            parse_flowchart(content, &mut builder);
+            apply_unknown_contract(content, &mut builder, parse_mode);
         }
         _ => {
-            builder.add_warning(format!(
-                "Diagram type '{}' is not fully supported yet; using best-effort flowchart parsing",
-                diagram_type.as_str()
-            ));
-            parse_flowchart(content, &mut builder);
+            apply_support_contract(content, &mut builder, diagram_type, parse_mode);
         }
     }
 
@@ -211,6 +211,126 @@ pub fn parse_mermaid_with_detection(input: &str, detection: DetectedType) -> Par
     }
 
     builder.finish(detection.confidence, detection.method)
+}
+
+fn apply_unknown_contract(content: &str, builder: &mut IrBuilder, parse_mode: MermaidParseMode) {
+    match parse_mode {
+        MermaidParseMode::Strict => {
+            builder.add_diagnostic(
+                Diagnostic::error(
+                    "Unable to detect a supported diagram family in strict mode; refusing fallback",
+                )
+                .with_category(DiagnosticCategory::Compatibility)
+                .with_suggestion(
+                    "Add an explicit Mermaid diagram header or switch to --parse-mode compat/recover"
+                        .to_string(),
+                ),
+            );
+        }
+        MermaidParseMode::Compat => {
+            builder.add_diagnostic(
+                Diagnostic::warning(
+                    "Unable to detect diagram family; attempting compatibility-mode flowchart salvage",
+                )
+                .with_category(DiagnosticCategory::Compatibility)
+                .with_suggestion(
+                    "Add an explicit Mermaid header to avoid compatibility fallback".to_string(),
+                ),
+            );
+            builder.add_warning(
+                "Unable to detect diagram type; using compatibility-mode flowchart salvage",
+            );
+            parse_flowchart(content, builder);
+        }
+        MermaidParseMode::Recover => {
+            builder.add_diagnostic(
+                Diagnostic::warning(
+                    "Unable to detect diagram family; falling back to flowchart-style recovery",
+                )
+                .with_category(DiagnosticCategory::Recovery)
+                .with_suggestion(
+                    "Add an explicit Mermaid header to reduce recovery guesswork".to_string(),
+                ),
+            );
+            builder.add_warning(
+                "Unable to detect diagram type; using recovery-mode flowchart salvage",
+            );
+            parse_flowchart(content, builder);
+        }
+    }
+}
+
+fn apply_support_contract(
+    content: &str,
+    builder: &mut IrBuilder,
+    diagram_type: DiagramType,
+    parse_mode: MermaidParseMode,
+) {
+    let support_level = diagram_type.support_level();
+    if support_level != MermaidSupportLevel::Unsupported {
+        builder.add_diagnostic(
+            Diagnostic::info(format!(
+                "Diagram family '{}' is parsed with declared support level '{}'",
+                diagram_type.as_str(),
+                diagram_type.support_label()
+            ))
+            .with_category(DiagnosticCategory::Compatibility),
+        );
+        parse_flowchart(content, builder);
+        return;
+    }
+
+    match parse_mode {
+        MermaidParseMode::Strict => {
+            builder.add_diagnostic(
+                Diagnostic::error(format!(
+                    "Diagram family '{}' is unsupported in strict mode; no fallback applied",
+                    diagram_type.as_str()
+                ))
+                .with_category(DiagnosticCategory::Compatibility)
+                .with_suggestion(
+                    "Choose a supported family or switch to --parse-mode compat/recover"
+                        .to_string(),
+                ),
+            );
+        }
+        MermaidParseMode::Compat => {
+            builder.add_diagnostic(
+                Diagnostic::warning(format!(
+                    "Diagram family '{}' is unsupported; applying best-effort flowchart salvage",
+                    diagram_type.as_str()
+                ))
+                .with_category(DiagnosticCategory::Compatibility)
+                .with_suggestion(
+                    "Treat this output as degraded compatibility mode, not full semantic support"
+                        .to_string(),
+                ),
+            );
+            builder.add_warning(format!(
+                "Diagram type '{}' is unsupported; using compatibility-mode flowchart salvage",
+                diagram_type.as_str()
+            ));
+            parse_flowchart(content, builder);
+        }
+        MermaidParseMode::Recover => {
+            builder.add_diagnostic(
+                Diagnostic::warning(format!(
+                    "Diagram family '{}' is unsupported; applying recovery-mode flowchart salvage",
+                    diagram_type.as_str()
+                ))
+                .with_category(DiagnosticCategory::Recovery)
+                .with_suggestion(
+                    "Expect partial semantics; recovery mode prioritizes extracting structure"
+                        .to_string(),
+                ),
+            );
+            builder.add_warning(format!(
+                "Diagram type '{}' is unsupported; using recovery-mode flowchart salvage",
+                diagram_type.as_str()
+            ));
+            parse_flowchart(content, builder);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

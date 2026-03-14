@@ -4,7 +4,7 @@ mod dot_parser;
 mod ir_builder;
 mod mermaid_parser;
 
-use fm_core::{DiagramType, MermaidDiagramIr};
+use fm_core::{DiagramType, MermaidDiagramIr, MermaidParseMode};
 use serde::Serialize;
 use serde_json::json;
 
@@ -18,6 +18,13 @@ pub struct ParseResult {
     pub confidence: f32,
     /// Method used for type detection
     pub detection_method: DetectionMethod,
+}
+
+impl ParseResult {
+    #[must_use]
+    pub fn parse_mode(&self) -> MermaidParseMode {
+        self.ir.meta.parse_mode
+    }
 }
 
 /// Method used to detect diagram type.
@@ -366,9 +373,16 @@ pub fn detect_type(input: &str) -> DiagramType {
 
 #[must_use]
 pub fn parse(input: &str) -> ParseResult {
+    parse_with_mode(input, MermaidParseMode::Compat)
+}
+
+#[must_use]
+pub fn parse_with_mode(input: &str, parse_mode: MermaidParseMode) -> ParseResult {
     if input.trim().is_empty() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Unknown);
+        ir.meta.parse_mode = parse_mode;
         return ParseResult {
-            ir: MermaidDiagramIr::empty(DiagramType::Unknown),
+            ir,
             warnings: vec!["Input was empty; returning empty IR".to_string()],
             confidence: 0.0,
             detection_method: DetectionMethod::Fallback,
@@ -383,20 +397,24 @@ pub fn parse(input: &str) -> ParseResult {
         let mut result = parse_dot(input);
         result.confidence = detection.confidence;
         result.detection_method = detection.method;
+        result.ir.meta.parse_mode = parse_mode;
         return result;
     }
 
-    mermaid_parser::parse_mermaid_with_detection(input, detection)
+    mermaid_parser::parse_mermaid_with_detection(input, detection, parse_mode)
 }
 
 #[must_use]
 pub fn parse_evidence_json(parsed: &ParseResult) -> String {
     json!({
         "diagram_type": parsed.ir.diagram_type.as_str(),
+        "parse_mode": parsed.parse_mode().as_str(),
+        "support_level": parsed.ir.meta.support_level,
         "node_count": parsed.ir.nodes.len(),
         "edge_count": parsed.ir.edges.len(),
         "cluster_count": parsed.ir.clusters.len(),
         "label_count": parsed.ir.labels.len(),
+        "diagnostic_count": parsed.ir.diagnostics.len(),
         "warning_count": parsed.warnings.len(),
         "warnings": parsed.warnings.clone(),
     })
@@ -405,8 +423,11 @@ pub fn parse_evidence_json(parsed: &ParseResult) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{detect_type, parse};
-    use fm_core::{ArrowType, DiagramType, GraphDirection, IrEndpoint, MermaidDiagramIr};
+    use super::{detect_type, parse, parse_with_mode};
+    use fm_core::{
+        ArrowType, DiagnosticCategory, DiagnosticSeverity, DiagramType, GraphDirection, IrEndpoint,
+        MermaidDiagramIr, MermaidParseMode,
+    };
     use proptest::prelude::*;
 
     #[test]
@@ -456,6 +477,55 @@ mod tests {
         assert_eq!(result.ir.nodes.len(), 2);
         assert_eq!(result.ir.edges.len(), 1);
         assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn strict_mode_rejects_unsupported_diagram_family_without_flowchart_salvage() {
+        let result = parse_with_mode("architecture-beta\nservice api\n", MermaidParseMode::Strict);
+        assert_eq!(result.ir.diagram_type, DiagramType::ArchitectureBeta);
+        assert_eq!(result.parse_mode(), MermaidParseMode::Strict);
+        assert!(result.ir.nodes.is_empty());
+        assert!(result.ir.edges.is_empty());
+        assert!(result.ir.has_errors());
+        assert!(result.ir.diagnostics.iter().any(|diagnostic| {
+            diagnostic.category == DiagnosticCategory::Compatibility
+                && diagnostic.severity == DiagnosticSeverity::Error
+        }));
+    }
+
+    #[test]
+    fn compat_mode_emits_machine_readable_degradation_diagnostic() {
+        let result = parse_with_mode("architecture-beta\nservice api\n", MermaidParseMode::Compat);
+        assert_eq!(result.ir.diagram_type, DiagramType::ArchitectureBeta);
+        assert_eq!(result.parse_mode(), MermaidParseMode::Compat);
+        assert!(result.ir.diagnostics.iter().any(|diagnostic| {
+            diagnostic.category == DiagnosticCategory::Compatibility
+                && diagnostic.severity == DiagnosticSeverity::Warning
+                && diagnostic.message.contains("best-effort flowchart salvage")
+        }));
+    }
+
+    #[test]
+    fn recover_mode_marks_unknown_detection_as_recovery() {
+        let detection = super::DetectedType {
+            diagram_type: DiagramType::Unknown,
+            confidence: 0.1,
+            method: super::DetectionMethod::Fallback,
+            warnings: vec!["forced unknown detection for contract coverage".to_string()],
+        };
+        let result = crate::mermaid_parser::parse_mermaid_with_detection(
+            "???\nthis is not mermaid\n",
+            detection,
+            MermaidParseMode::Recover,
+        );
+        assert_eq!(result.parse_mode(), MermaidParseMode::Recover);
+        assert_eq!(result.ir.diagram_type, DiagramType::Unknown);
+        assert!(result.ir.diagnostics.iter().any(|diagnostic| {
+            diagnostic.category == DiagnosticCategory::Recovery
+                && diagnostic
+                    .message
+                    .contains("falling back to flowchart-style recovery")
+        }));
     }
 
     #[test]

@@ -2,8 +2,8 @@ use fm_core::{
     ArrowType, Diagnostic, DiagnosticCategory, DiagramType, GraphDirection, IrAttributeKey,
     IrCluster, IrClusterId, IrEdge, IrEdgeKind, IrEndpoint, IrEntityAttribute, IrGraphCluster,
     IrGraphEdge, IrGraphNode, IrLabel, IrLabelId, IrNode, IrNodeId, IrNodeKind, IrSubgraph,
-    IrSubgraphId, MermaidDiagramIr, MermaidError, MermaidWarning, MermaidWarningCode, NodeShape,
-    Span,
+    IrSubgraphId, MermaidDiagramIr, MermaidError, MermaidParseMode, MermaidWarning,
+    MermaidWarningCode, NodeShape, Span,
 };
 
 use crate::ParseResult;
@@ -29,6 +29,10 @@ impl IrBuilder {
     pub(crate) fn set_direction(&mut self, direction: GraphDirection) {
         self.ir.direction = direction;
         self.ir.meta.direction = direction;
+    }
+
+    pub(crate) fn set_parse_mode(&mut self, parse_mode: MermaidParseMode) {
+        self.ir.meta.parse_mode = parse_mode;
     }
 
     pub(crate) fn set_block_beta_columns(&mut self, columns: usize) {

@@ -707,3 +707,54 @@ fn parse_full_reports_canonical_core_support_level() {
         serde_json::from_str(&stdout).expect("parse --full must print valid JSON");
     assert_eq!(json["meta"]["support_level"], "Partial");
 }
+
+#[test]
+fn parse_summary_reports_parse_mode_and_support_level_for_unsupported_family() {
+    let output = run_cli(
+        &["parse", "-", "--parse-mode", "compat", "--pretty"],
+        "architecture-beta\nservice api\n",
+    );
+    assert!(
+        output.status.success(),
+        "parse summary should succeed in compat mode; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout must be utf-8");
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("parse summary must print valid JSON");
+    assert_eq!(json["diagram_type"], "architecture-beta");
+    assert_eq!(json["parse_mode"], "compat");
+    assert_eq!(json["support_level"], "Unsupported");
+    assert!(json["diagnostic_count"].as_u64().unwrap_or(0) >= 1);
+}
+
+#[test]
+fn validate_strict_mode_fails_unsupported_family_with_compatibility_diagnostic() {
+    let output = run_cli(
+        &[
+            "validate",
+            "-",
+            "--parse-mode",
+            "strict",
+            "--format",
+            "json",
+        ],
+        "architecture-beta\nservice api\n",
+    );
+    assert!(
+        !output.status.success(),
+        "validate strict should fail for unsupported family"
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout must be utf-8");
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("validate json must print valid JSON");
+    assert_eq!(json["valid"], false);
+    assert_eq!(json["parse_mode"], "strict");
+    assert!(json["diagnostics"].as_array().is_some_and(|diagnostics| {
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic["rule_id"] == "parse.compatibility" && diagnostic["severity"] == "error"
+        })
+    }));
+}

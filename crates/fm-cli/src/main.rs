@@ -18,11 +18,11 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use fm_core::{
-    DiagramType, MermaidDiagramIr, StructuredDiagnostic, capability_matrix,
+    DiagramType, MermaidDiagramIr, MermaidParseMode, StructuredDiagnostic, capability_matrix,
     capability_matrix_json_pretty,
 };
 use fm_layout::layout_diagram;
-use fm_parser::{detect_type_with_confidence, parse, parse_evidence_json};
+use fm_parser::{detect_type_with_confidence, parse_evidence_json, parse_with_mode};
 use fm_render_svg::{SvgRenderConfig, ThemePreset, render_svg_with_layout};
 use fm_render_term::{TermRenderConfig, render_term_with_config};
 use serde::Serialize;
@@ -59,6 +59,10 @@ enum Command {
         #[arg(default_value = "-")]
         input: String,
 
+        /// Parser support contract mode.
+        #[arg(long, value_enum, default_value = "compat")]
+        parse_mode: ParseModeArg,
+
         /// Output format
         #[arg(short, long, value_enum, default_value = "svg")]
         format: OutputFormat,
@@ -91,6 +95,10 @@ enum Command {
         #[arg(default_value = "-")]
         input: String,
 
+        /// Parser support contract mode.
+        #[arg(long, value_enum, default_value = "compat")]
+        parse_mode: ParseModeArg,
+
         /// Output full IR (default is summary)
         #[arg(long)]
         full: bool,
@@ -116,6 +124,10 @@ enum Command {
         /// Input file path or "-" for stdin.
         #[arg(default_value = "-")]
         input: String,
+
+        /// Parser support contract mode.
+        #[arg(long, value_enum, default_value = "compat")]
+        parse_mode: ParseModeArg,
 
         /// Validation output format.
         #[arg(long, value_enum, default_value = "text")]
@@ -211,6 +223,23 @@ enum FailOnSeverity {
     Error,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+enum ParseModeArg {
+    Strict,
+    Compat,
+    Recover,
+}
+
+impl ParseModeArg {
+    const fn to_core(self) -> MermaidParseMode {
+        match self {
+            Self::Strict => MermaidParseMode::Strict,
+            Self::Compat => MermaidParseMode::Compat,
+            Self::Recover => MermaidParseMode::Recover,
+        }
+    }
+}
+
 impl FailOnSeverity {
     const fn rank(self) -> u8 {
         match self {
@@ -227,6 +256,7 @@ impl FailOnSeverity {
 #[derive(Debug, Serialize)]
 struct RenderResult {
     format: String,
+    parse_mode: String,
     diagram_type: String,
     node_count: usize,
     edge_count: usize,
@@ -254,6 +284,7 @@ struct DetectResult {
 #[derive(Debug, Serialize)]
 struct ValidateResult {
     valid: bool,
+    parse_mode: String,
     diagram_type: String,
     node_count: usize,
     edge_count: usize,
@@ -275,6 +306,7 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Render {
             input,
+            parse_mode,
             format,
             theme,
             output,
@@ -283,28 +315,36 @@ fn main() -> Result<()> {
             json,
         } => cmd_render(
             &input,
+            parse_mode.to_core(),
             format,
             &theme,
             output.as_deref(),
-            width,
-            height,
+            (width, height),
             json,
         ),
 
         Command::Parse {
             input,
+            parse_mode,
             full,
             pretty,
-        } => cmd_parse(&input, full, pretty),
+        } => cmd_parse(&input, parse_mode.to_core(), full, pretty),
 
         Command::Detect { input, json } => cmd_detect(&input, json),
 
         Command::Validate {
             input,
+            parse_mode,
             format,
             fail_on,
             diagnostics_out,
-        } => cmd_validate(&input, format, fail_on, diagnostics_out.as_deref()),
+        } => cmd_validate(
+            &input,
+            parse_mode.to_core(),
+            format,
+            fail_on,
+            diagnostics_out.as_deref(),
+        ),
 
         Command::Capabilities { pretty, output } => cmd_capabilities(pretty, output.as_deref()),
 
@@ -335,6 +375,7 @@ fn init_tracing(verbose: u8, quiet: bool) {
 
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
+        .with_writer(std::io::stderr)
         .without_time()
         .try_init();
 }
@@ -399,13 +440,14 @@ fn cmd_capabilities(pretty: bool, output: Option<&str>) -> Result<()> {
 
 fn cmd_render(
     input: &str,
+    parse_mode: MermaidParseMode,
     format: OutputFormat,
     theme: &str,
     output: Option<&str>,
-    width: Option<u32>,
-    height: Option<u32>,
+    dimensions: (Option<u32>, Option<u32>),
     json_output: bool,
 ) -> Result<()> {
+    let (width, height) = dimensions;
     if json_output && output.is_none() {
         anyhow::bail!("--json requires --output so rendered output does not mix with metadata");
     }
@@ -415,7 +457,7 @@ fn cmd_render(
     // Parse
     let parse_start = Instant::now();
     let source = load_input(input)?;
-    let parsed = parse(&source);
+    let parsed = parse_with_mode(&source, parse_mode);
     let parse_time = parse_start.elapsed();
 
     debug!(
@@ -451,6 +493,7 @@ fn cmd_render(
     if json_output {
         let result = RenderResult {
             format: format!("{format:?}").to_lowercase(),
+            parse_mode: parse_mode.as_str().to_string(),
             diagram_type: parsed.ir.diagram_type.as_str().to_string(),
             node_count: parsed.ir.nodes.len(),
             edge_count: parsed.ir.edges.len(),
@@ -663,9 +706,9 @@ mod png_tests {
     }
 }
 
-fn cmd_parse(input: &str, full: bool, pretty: bool) -> Result<()> {
+fn cmd_parse(input: &str, parse_mode: MermaidParseMode, full: bool, pretty: bool) -> Result<()> {
     let source = load_input(input)?;
-    let parsed = parse(&source);
+    let parsed = parse_with_mode(&source, parse_mode);
 
     let output = if full {
         // Full IR output
@@ -755,12 +798,13 @@ fn confidence_label(confidence: f32) -> &'static str {
 
 fn cmd_validate(
     input: &str,
+    parse_mode: MermaidParseMode,
     format: ValidateOutputFormat,
     fail_on: FailOnSeverity,
     diagnostics_out: Option<&str>,
 ) -> Result<()> {
     let source = load_input(input)?;
-    let parsed = parse(&source);
+    let parsed = parse_with_mode(&source, parse_mode);
     let layout = layout_diagram(&parsed.ir);
     let svg_output = render_svg_with_layout(&parsed.ir, &layout, &SvgRenderConfig::default());
 
@@ -774,6 +818,7 @@ fn cmd_validate(
 
     let result = ValidateResult {
         valid,
+        parse_mode: parse_mode.as_str().to_string(),
         diagram_type: parsed.ir.diagram_type.as_str().to_string(),
         node_count: parsed.ir.nodes.len(),
         edge_count: parsed.ir.edges.len(),
