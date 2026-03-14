@@ -82,6 +82,14 @@ enum SequenceStatement {
     Message(String),
 }
 
+#[derive(Debug, Clone)]
+enum ClassStatement {
+    BlockStart(String),
+    Ast(FlowAst),
+    Node(NodeToken),
+    End,
+}
+
 /// Simple type detection (used by tests).
 #[must_use]
 #[allow(dead_code)] // Used by tests
@@ -978,37 +986,72 @@ fn parse_class(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
-        if trimmed.starts_with("class ") && trimmed.ends_with('{') {
-            let class_name = trimmed
-                .trim_start_matches("class")
-                .trim()
-                .trim_end_matches('{')
-                .trim();
-            if let Some(node) = parse_node_token(class_name) {
-                let span = span_for(line_number, line);
-                let _ = builder.intern_node(&node.id, node.label.as_deref(), node.shape, span);
-            }
-            continue;
-        }
-
-        let mut parsed_line = false;
-        for statement in split_statements(trimmed) {
-            if parse_edge_statement(statement, line_number, line, &CLASS_OPERATORS, builder) {
-                parsed_line = true;
-                continue;
-            }
-            if let Some(node) = parse_node_token(statement) {
-                let span = span_for(line_number, line);
-                let _ = builder.intern_node(&node.id, node.label.as_deref(), node.shape, span);
-                parsed_line = true;
-            }
-        }
-
-        if !parsed_line && !trimmed.starts_with('}') {
+        let Some(statements) = parse_class_statements(trimmed) else {
             builder.add_warning(format!(
                 "Line {line_number}: unsupported class syntax: {trimmed}"
             ));
+            continue;
+        };
+
+        for statement in statements {
+            lower_class_statement(statement, line_number, line, builder);
         }
+    }
+}
+
+fn parse_class_statements(line: &str) -> Option<Vec<ClassStatement>> {
+    if line.starts_with("class ") && line.ends_with('{') {
+        let class_name = line
+            .trim_start_matches("class")
+            .trim()
+            .trim_end_matches('{')
+            .trim();
+        return Some(vec![ClassStatement::BlockStart(class_name.to_string())]);
+    }
+
+    if line.starts_with('}') {
+        return Some(vec![ClassStatement::End]);
+    }
+
+    let mut statements = Vec::new();
+    for statement in split_statements(line) {
+        if let Some(ast) = parse_class_assignment_ast(statement) {
+            statements.push(ClassStatement::Ast(ast));
+            continue;
+        }
+        if let Some(asts) = parse_edge_statement_asts(statement, &CLASS_OPERATORS) {
+            statements.extend(asts.into_iter().map(ClassStatement::Ast));
+            continue;
+        }
+        if let Some(node) = parse_node_token(statement) {
+            statements.push(ClassStatement::Node(node));
+        }
+    }
+
+    (!statements.is_empty()).then_some(statements)
+}
+
+fn lower_class_statement(
+    statement: ClassStatement,
+    line_number: usize,
+    source_line: &str,
+    builder: &mut IrBuilder,
+) {
+    match statement {
+        ClassStatement::BlockStart(class_name) => {
+            if let Some(node) = parse_node_token(&class_name) {
+                let span = span_for(line_number, source_line);
+                let _ = builder.intern_node(&node.id, node.label.as_deref(), node.shape, span);
+            }
+        }
+        ClassStatement::Ast(ast) => {
+            lower_flow_ast(&ast, line_number, source_line, builder, &[], &[]);
+        }
+        ClassStatement::Node(node) => {
+            let span = span_for(line_number, source_line);
+            let _ = builder.intern_node(&node.id, node.label.as_deref(), node.shape, span);
+        }
+        ClassStatement::End => {}
     }
 }
 
@@ -4364,6 +4407,37 @@ mod tests {
                 .warnings
                 .iter()
                 .any(|warning| warning.contains("unable to parse actor declaration"))
+        );
+    }
+
+    #[test]
+    fn class_parses_nodes_edges_and_assignments() {
+        let parsed = parse_mermaid("classDiagram\nA -- B\nclass A critical");
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Class);
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 1);
+
+        let node = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "A")
+            .expect("class node A should exist");
+        assert!(
+            node.classes
+                .iter()
+                .any(|class_name| class_name == "critical")
+        );
+    }
+
+    #[test]
+    fn class_preserves_unsupported_warning() {
+        let parsed = parse_mermaid("classDiagram\n???");
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("unsupported class syntax"))
         );
     }
 
