@@ -255,6 +255,390 @@ pub enum MermaidSupportLevel {
     Unsupported,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityStatus {
+    Implemented,
+    Partial,
+    Experimental,
+    Planned,
+    Unsupported,
+}
+
+impl CapabilityStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Implemented => "implemented",
+            Self::Partial => "partial",
+            Self::Experimental => "experimental",
+            Self::Planned => "planned",
+            Self::Unsupported => "unsupported",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CapabilityEvidence {
+    pub kind: String,
+    pub reference: String,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CapabilityClaim {
+    pub id: String,
+    pub category: String,
+    pub title: String,
+    pub status: CapabilityStatus,
+    pub advertised_in: Vec<String>,
+    pub code_paths: Vec<String>,
+    pub evidence: Vec<CapabilityEvidence>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CapabilityMatrix {
+    pub schema_version: u32,
+    pub project: String,
+    pub status_counts: BTreeMap<String, usize>,
+    pub claims: Vec<CapabilityClaim>,
+}
+
+#[must_use]
+pub fn capability_matrix() -> CapabilityMatrix {
+    let mut claims = documented_diagram_type_claims();
+    claims.extend(surface_capability_claims());
+
+    let mut status_counts = BTreeMap::new();
+    for claim in &claims {
+        *status_counts
+            .entry(claim.status.as_str().to_string())
+            .or_insert(0) += 1;
+    }
+
+    CapabilityMatrix {
+        schema_version: 1,
+        project: String::from("frankenmermaid"),
+        status_counts,
+        claims,
+    }
+}
+
+pub fn capability_matrix_json_pretty() -> Result<String, serde_json::Error> {
+    serde_json::to_string_pretty(&capability_matrix())
+}
+
+fn documented_diagram_type_claims() -> Vec<CapabilityClaim> {
+    documented_diagram_types()
+        .iter()
+        .map(|diagram_type| CapabilityClaim {
+            id: format!("diagram-type/{}", diagram_type.as_str()),
+            category: String::from("diagram_type"),
+            title: format!("Support {} diagrams", diagram_type.as_str()),
+            status: match diagram_type.support_level() {
+                MermaidSupportLevel::Supported => CapabilityStatus::Implemented,
+                MermaidSupportLevel::Partial => CapabilityStatus::Partial,
+                MermaidSupportLevel::Unsupported => CapabilityStatus::Unsupported,
+            },
+            advertised_in: vec![String::from("README.md#supported-diagram-types")],
+            code_paths: vec![
+                String::from("crates/fm-core/src/lib.rs::DiagramType"),
+                String::from("crates/fm-parser/src/lib.rs::detect_type_with_confidence"),
+            ],
+            evidence: vec![
+                CapabilityEvidence {
+                    kind: String::from("code_path"),
+                    reference: String::from("crates/fm-core/src/lib.rs::DiagramType::support_level"),
+                    note: Some(String::from("Source-of-truth support taxonomy")),
+                },
+                CapabilityEvidence {
+                    kind: String::from("test"),
+                    reference: String::from(
+                        "crates/fm-core/src/lib.rs::tests::diagram_type_support_contract_matches_surface_expectations",
+                    ),
+                    note: Some(String::from("Verifies advertised support level mapping")),
+                },
+            ],
+            notes: vec![format!(
+                "README advertises this family; current code marks it as {} capability",
+                diagram_type.support_label()
+            )],
+        })
+        .collect()
+}
+
+fn surface_capability_claims() -> Vec<CapabilityClaim> {
+    vec![
+        CapabilityClaim {
+            id: String::from("surface/cli-detect"),
+            category: String::from("surface"),
+            title: String::from("CLI detect command"),
+            status: CapabilityStatus::Implemented,
+            advertised_in: vec![
+                String::from("README.md#quick-example"),
+                String::from("README.md#command-reference"),
+            ],
+            code_paths: vec![
+                String::from("crates/fm-cli/src/main.rs::Command::Detect"),
+                String::from("crates/fm-parser/src/lib.rs::detect_type_with_confidence"),
+            ],
+            evidence: vec![
+                CapabilityEvidence {
+                    kind: String::from("test"),
+                    reference: String::from(
+                        "crates/fm-parser/src/lib.rs::tests::detects_flowchart_keyword",
+                    ),
+                    note: Some(String::from("Smoke coverage for type detection")),
+                },
+                CapabilityEvidence {
+                    kind: String::from("code_path"),
+                    reference: String::from("crates/fm-cli/src/main.rs::cmd_detect"),
+                    note: None,
+                },
+            ],
+            notes: vec![],
+        },
+        CapabilityClaim {
+            id: String::from("surface/cli-parse"),
+            category: String::from("surface"),
+            title: String::from("CLI parse command with IR JSON evidence"),
+            status: CapabilityStatus::Implemented,
+            advertised_in: vec![
+                String::from("README.md#quick-example"),
+                String::from("README.md#command-reference"),
+            ],
+            code_paths: vec![
+                String::from("crates/fm-cli/src/main.rs::Command::Parse"),
+                String::from("crates/fm-parser/src/lib.rs::parse_evidence_json"),
+            ],
+            evidence: vec![CapabilityEvidence {
+                kind: String::from("test"),
+                reference: String::from(
+                    "crates/fm-parser/src/lib.rs::tests::parse_flowchart_extracts_nodes_edges_and_direction",
+                ),
+                note: Some(String::from(
+                    "Validates parse output contains structural IR",
+                )),
+            }],
+            notes: vec![],
+        },
+        CapabilityClaim {
+            id: String::from("surface/cli-render-svg"),
+            category: String::from("surface"),
+            title: String::from("CLI SVG rendering"),
+            status: CapabilityStatus::Implemented,
+            advertised_in: vec![
+                String::from("README.md#quick-example"),
+                String::from("README.md#command-reference"),
+            ],
+            code_paths: vec![
+                String::from("crates/fm-cli/src/main.rs::Command::Render"),
+                String::from("crates/fm-render-svg/src/lib.rs::render_svg_with_layout"),
+            ],
+            evidence: vec![CapabilityEvidence {
+                kind: String::from("test"),
+                reference: String::from(
+                    "crates/fm-render-svg/src/lib.rs::tests::prop_svg_render_is_total_and_counts_match",
+                ),
+                note: Some(String::from("SVG renderer smoke coverage")),
+            }],
+            notes: vec![],
+        },
+        CapabilityClaim {
+            id: String::from("surface/cli-render-term"),
+            category: String::from("surface"),
+            title: String::from("CLI terminal rendering"),
+            status: CapabilityStatus::Implemented,
+            advertised_in: vec![
+                String::from("README.md#quick-example"),
+                String::from("README.md#command-reference"),
+            ],
+            code_paths: vec![
+                String::from("crates/fm-cli/src/main.rs::Command::Render"),
+                String::from("crates/fm-render-term/src/lib.rs::render_term_with_config"),
+            ],
+            evidence: vec![CapabilityEvidence {
+                kind: String::from("test"),
+                reference: String::from(
+                    "crates/fm-render-term/src/lib.rs::tests::render_term_produces_output",
+                ),
+                note: Some(String::from("Terminal renderer smoke coverage")),
+            }],
+            notes: vec![],
+        },
+        CapabilityClaim {
+            id: String::from("surface/cli-validate"),
+            category: String::from("surface"),
+            title: String::from("CLI validate command with structured diagnostics"),
+            status: CapabilityStatus::Implemented,
+            advertised_in: vec![
+                String::from("README.md#quick-example"),
+                String::from("README.md#command-reference"),
+            ],
+            code_paths: vec![
+                String::from("crates/fm-cli/src/main.rs::Command::Validate"),
+                String::from("crates/fm-core/src/lib.rs::StructuredDiagnostic"),
+            ],
+            evidence: vec![CapabilityEvidence {
+                kind: String::from("test"),
+                reference: String::from(
+                    "crates/fm-cli/src/main.rs::tests::collect_validation_diagnostics_includes_parse_warnings",
+                ),
+                note: Some(String::from("Validate path emits structured diagnostics")),
+            }],
+            notes: vec![],
+        },
+        CapabilityClaim {
+            id: String::from("surface/wasm-svg"),
+            category: String::from("surface"),
+            title: String::from("WASM API renders SVG"),
+            status: CapabilityStatus::Implemented,
+            advertised_in: vec![
+                String::from("README.md#javascript--wasm-api"),
+                String::from("README.md#technical-architecture"),
+            ],
+            code_paths: vec![
+                String::from("crates/fm-wasm/src/lib.rs::render"),
+                String::from("crates/fm-wasm/src/lib.rs::render_with_config"),
+            ],
+            evidence: vec![CapabilityEvidence {
+                kind: String::from("test"),
+                reference: String::from(
+                    "crates/fm-wasm/src/lib.rs::tests::render_returns_svg_and_type",
+                ),
+                note: Some(String::from("WASM facade smoke coverage")),
+            }],
+            notes: vec![],
+        },
+        CapabilityClaim {
+            id: String::from("surface/canvas"),
+            category: String::from("surface"),
+            title: String::from("Canvas rendering backend"),
+            status: CapabilityStatus::Implemented,
+            advertised_in: vec![
+                String::from("README.md#why-use-frankenmermaid"),
+                String::from("README.md#technical-architecture"),
+            ],
+            code_paths: vec![
+                String::from("crates/fm-render-canvas/src/lib.rs::render_to_canvas"),
+                String::from("crates/fm-wasm/src/lib.rs::Diagram::render"),
+            ],
+            evidence: vec![CapabilityEvidence {
+                kind: String::from("test"),
+                reference: String::from(
+                    "crates/fm-render-canvas/src/lib.rs::tests::render_with_mock_context",
+                ),
+                note: Some(String::from("Canvas backend exercises draw pipeline")),
+            }],
+            notes: vec![],
+        },
+        CapabilityClaim {
+            id: String::from("layout/deterministic"),
+            category: String::from("layout"),
+            title: String::from("Deterministic layout output"),
+            status: CapabilityStatus::Implemented,
+            advertised_in: vec![
+                String::from("README.md#design-philosophy"),
+                String::from("README.md#faq"),
+            ],
+            code_paths: vec![
+                String::from("crates/fm-layout/src/lib.rs::layout_diagram_traced"),
+                String::from("crates/fm-layout/src/lib.rs::crossing_refinement"),
+            ],
+            evidence: vec![CapabilityEvidence {
+                kind: String::from("test"),
+                reference: String::from(
+                    "crates/fm-layout/src/lib.rs::tests::traced_layout_is_deterministic",
+                ),
+                note: Some(String::from(
+                    "Checks full traced layout equality across runs",
+                )),
+            }],
+            notes: vec![],
+        },
+        CapabilityClaim {
+            id: String::from("parser/recovery"),
+            category: String::from("parser"),
+            title: String::from("Best-effort parse with warnings instead of hard failure"),
+            status: CapabilityStatus::Partial,
+            advertised_in: vec![
+                String::from("README.md#tl-dr"),
+                String::from("README.md#design-philosophy"),
+            ],
+            code_paths: vec![
+                String::from("crates/fm-parser/src/lib.rs::parse"),
+                String::from("crates/fm-core/src/lib.rs::MermaidWarning"),
+            ],
+            evidence: vec![CapabilityEvidence {
+                kind: String::from("test"),
+                reference: String::from(
+                    "crates/fm-parser/src/lib.rs::tests::empty_input_returns_warning",
+                ),
+                note: Some(String::from(
+                    "Current coverage proves warning-based fallback for empty input",
+                )),
+            }],
+            notes: vec![String::from(
+                "Recovery exists, but README claims are broader than current automated evidence",
+            )],
+        },
+        CapabilityClaim {
+            id: String::from("runtime/guard-report"),
+            category: String::from("runtime"),
+            title: String::from("Guard and degradation report types exist in shared IR"),
+            status: CapabilityStatus::Experimental,
+            advertised_in: vec![
+                String::from("AGENTS.md#key-design-decisions"),
+                String::from("README.md#technical-architecture"),
+            ],
+            code_paths: vec![
+                String::from("crates/fm-core/src/lib.rs::MermaidGuardReport"),
+                String::from("crates/fm-core/src/lib.rs::MermaidDegradationPlan"),
+            ],
+            evidence: vec![CapabilityEvidence {
+                kind: String::from("code_path"),
+                reference: String::from("crates/fm-core/src/lib.rs::MermaidDiagramMeta"),
+                note: Some(String::from(
+                    "Types are threaded into IR metadata but not yet fully activated",
+                )),
+            }],
+            notes: vec![String::from(
+                "Data model exists; cross-pipeline activation is still an open backlog item",
+            )],
+        },
+    ]
+}
+
+fn documented_diagram_types() -> &'static [DiagramType] {
+    const DOCUMENTED: &[DiagramType] = &[
+        DiagramType::Flowchart,
+        DiagramType::Sequence,
+        DiagramType::Class,
+        DiagramType::State,
+        DiagramType::Er,
+        DiagramType::C4Context,
+        DiagramType::C4Container,
+        DiagramType::C4Component,
+        DiagramType::C4Dynamic,
+        DiagramType::C4Deployment,
+        DiagramType::ArchitectureBeta,
+        DiagramType::BlockBeta,
+        DiagramType::Gantt,
+        DiagramType::Timeline,
+        DiagramType::Journey,
+        DiagramType::GitGraph,
+        DiagramType::Sankey,
+        DiagramType::Mindmap,
+        DiagramType::Pie,
+        DiagramType::QuadrantChart,
+        DiagramType::XyChart,
+        DiagramType::Requirement,
+        DiagramType::PacketBeta,
+    ];
+    DOCUMENTED
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum GraphDirection {
     #[default]
@@ -1720,8 +2104,9 @@ mod tests {
         IrLabelId, IrNode, IrNodeId, IrNodeKind, IrPort, IrPortId, IrPortSideHint, IrSubgraph,
         IrSubgraphId, MermaidConfig, MermaidDiagramIr, MermaidError, MermaidErrorCode,
         MermaidFallbackAction, MermaidFallbackPolicy, MermaidSanitizeMode, MermaidSupportLevel,
-        MermaidWarningCode, NodeShape, Position, Span, StructuredDiagnostic,
-        parse_mermaid_js_config_value, to_init_parse,
+        MermaidWarningCode, NodeShape, Position, Span, StructuredDiagnostic, capability_matrix,
+        capability_matrix_json_pretty, documented_diagram_types, parse_mermaid_js_config_value,
+        to_init_parse,
     };
 
     fn sample_span(line: usize, start_col: usize, end_col: usize) -> Span {
@@ -2919,5 +3304,30 @@ mod tests {
             MermaidSupportLevel::Unsupported
         );
         assert_eq!(DiagramType::Unknown.support_label(), "unknown");
+    }
+
+    #[test]
+    fn capability_matrix_is_deterministic_and_has_versioned_claims() {
+        let first = capability_matrix();
+        let second = capability_matrix();
+
+        assert_eq!(first, second);
+        assert_eq!(first.schema_version, 1);
+        assert_eq!(first.project, "frankenmermaid");
+        assert!(first.claims.len() >= documented_diagram_types().len());
+        assert!(first.status_counts.contains_key("implemented"));
+    }
+
+    #[test]
+    fn capability_matrix_json_matches_checked_in_artifact() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let artifact_path = manifest_dir.join("../../evidence/capability_matrix.json");
+        let expected = std::fs::read_to_string(&artifact_path)
+            .expect("capability matrix artifact should exist");
+
+        assert_eq!(
+            capability_matrix_json_pretty().expect("matrix JSON should serialize"),
+            expected
+        );
     }
 }

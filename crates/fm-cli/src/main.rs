@@ -17,7 +17,10 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use fm_core::{DiagramType, MermaidDiagramIr, StructuredDiagnostic};
+use fm_core::{
+    DiagramType, MermaidDiagramIr, StructuredDiagnostic, capability_matrix,
+    capability_matrix_json_pretty,
+};
 use fm_layout::layout_diagram;
 use fm_parser::{detect_type_with_confidence, parse, parse_evidence_json};
 use fm_render_svg::{SvgRenderConfig, ThemePreset, render_svg_with_layout};
@@ -125,6 +128,17 @@ enum Command {
         /// Optional path to write machine-readable diagnostics JSON artifact.
         #[arg(long)]
         diagnostics_out: Option<String>,
+    },
+
+    /// Emit the executable capability claim matrix as JSON.
+    Capabilities {
+        /// Pretty-print JSON output.
+        #[arg(long)]
+        pretty: bool,
+
+        /// Optional path to write the JSON artifact.
+        #[arg(short, long)]
+        output: Option<String>,
     },
 
     /// Watch a file and re-render on changes (requires `watch` feature).
@@ -292,6 +306,8 @@ fn main() -> Result<()> {
             diagnostics_out,
         } => cmd_validate(&input, format, fail_on, diagnostics_out.as_deref()),
 
+        Command::Capabilities { pretty, output } => cmd_capabilities(pretty, output.as_deref()),
+
         #[cfg(feature = "watch")]
         Command::Watch {
             input,
@@ -366,6 +382,15 @@ fn write_output_bytes(output: Option<&str>, content: &[u8]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn cmd_capabilities(pretty: bool, output: Option<&str>) -> Result<()> {
+    let json = if pretty {
+        capability_matrix_json_pretty()?
+    } else {
+        serde_json::to_string(&capability_matrix())?
+    };
+    write_output(output, &json)
 }
 
 // =============================================================================
@@ -1037,9 +1062,10 @@ fn print_validate_text(result: &ValidateResult, fail_on: FailOnSeverity) {
 #[cfg(test)]
 mod validate_tests {
     use super::{
-        FailOnSeverity, StructuredDiagnostic, ValidationDiagnostic, parse_warning_remediation_hint,
-        should_fail_validation, sort_diagnostics,
+        FailOnSeverity, StructuredDiagnostic, ValidationDiagnostic, collect_parse_diagnostics,
+        parse_warning_remediation_hint, should_fail_validation, sort_diagnostics,
     };
+    use fm_parser::parse;
 
     fn diagnostic(
         stage: &str,
@@ -1143,6 +1169,19 @@ mod validate_tests {
     fn warning_hint_detects_unknown_diagram_message() {
         let hint = parse_warning_remediation_hint("Unknown diagram type header");
         assert!(hint.is_some_and(|value| value.contains("flowchart LR")));
+    }
+
+    #[test]
+    fn collect_validation_diagnostics_includes_parse_warnings() {
+        let parsed = parse("");
+        let diagnostics = collect_parse_diagnostics(&parsed);
+
+        assert!(!diagnostics.is_empty());
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diag| diag.payload.severity == "warning")
+        );
     }
 }
 
