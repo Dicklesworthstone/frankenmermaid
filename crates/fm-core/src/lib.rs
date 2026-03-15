@@ -1679,6 +1679,10 @@ pub struct MermaidGuardReport {
     pub budget_exceeded: bool,
     pub route_ops_estimate: usize,
     pub layout_iterations_estimate: usize,
+    pub layout_time_estimate_ms: usize,
+    pub layout_requested_algorithm: Option<String>,
+    pub layout_selected_algorithm: Option<String>,
+    pub guard_reason: Option<String>,
     pub degradation: MermaidDegradationPlan,
 }
 

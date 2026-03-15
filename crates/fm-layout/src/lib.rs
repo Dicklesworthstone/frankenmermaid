@@ -5,7 +5,8 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::f32::consts::PI;
 
 use fm_core::{
-    DiagramType, FontMetrics, GraphDirection, IrEndpoint, IrNode, MermaidConfig, MermaidDiagramIr,
+    DiagramType, FontMetrics, GraphDirection, IrEndpoint, IrNode, MermaidComplexity, MermaidConfig,
+    MermaidDiagramIr, MermaidFidelity, MermaidGlyphMode, MermaidGuardReport,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5611,13 +5612,89 @@ pub fn layout_stats_from(layout: &DiagramLayout) -> LayoutStats {
     layout.stats
 }
 
+#[must_use]
+pub fn build_layout_guard_report(
+    ir: &MermaidDiagramIr,
+    traced: &TracedLayout,
+) -> MermaidGuardReport {
+    let complexity = MermaidComplexity {
+        nodes: ir.nodes.len(),
+        edges: ir.edges.len(),
+        labels: ir.labels.len(),
+        clusters: ir.clusters.len(),
+        ports: ir.ports.len(),
+        style_refs: ir.nodes.iter().map(|node| node.classes.len()).sum(),
+        score: ir
+            .nodes
+            .len()
+            .saturating_mul(4)
+            .saturating_add(ir.edges.len().saturating_mul(3))
+            .saturating_add(ir.labels.len().saturating_mul(2))
+            .saturating_add(ir.clusters.len().saturating_mul(5))
+            .saturating_add(ir.ports.len()),
+    };
+
+    let max_nodes = MermaidConfig::default().max_nodes;
+    let max_edges = MermaidConfig::default().max_edges;
+    let max_label_chars = MermaidConfig::default().max_label_chars;
+    let max_label_lines = MermaidConfig::default().max_label_lines;
+    let label_chars_over = ir
+        .labels
+        .iter()
+        .map(|label| label.text.chars().count().saturating_sub(max_label_chars))
+        .sum();
+    let label_lines_over = ir
+        .labels
+        .iter()
+        .map(|label| label.text.lines().count().saturating_sub(max_label_lines))
+        .sum();
+    let guard = traced.trace.guard;
+    let budget_exceeded = guard.time_budget_exceeded
+        || guard.iteration_budget_exceeded
+        || guard.route_budget_exceeded;
+
+    MermaidGuardReport {
+        complexity,
+        label_chars_over,
+        label_lines_over,
+        node_limit_exceeded: ir.nodes.len() > max_nodes,
+        edge_limit_exceeded: ir.edges.len() > max_edges,
+        label_limit_exceeded: label_chars_over > 0 || label_lines_over > 0,
+        route_budget_exceeded: guard.route_budget_exceeded,
+        layout_budget_exceeded: guard.time_budget_exceeded || guard.iteration_budget_exceeded,
+        limits_exceeded: ir.nodes.len() > max_nodes
+            || ir.edges.len() > max_edges
+            || label_chars_over > 0
+            || label_lines_over > 0,
+        budget_exceeded,
+        route_ops_estimate: guard.estimated_route_ops,
+        layout_iterations_estimate: guard.estimated_layout_iterations,
+        layout_time_estimate_ms: guard.estimated_layout_time_ms,
+        layout_requested_algorithm: Some(traced.trace.dispatch.requested.as_str().to_string()),
+        layout_selected_algorithm: Some(traced.trace.dispatch.selected.as_str().to_string()),
+        guard_reason: Some(guard.reason.to_string()),
+        degradation: fm_core::MermaidDegradationPlan {
+            target_fidelity: if budget_exceeded {
+                MermaidFidelity::Compact
+            } else {
+                MermaidFidelity::Normal
+            },
+            hide_labels: false,
+            collapse_clusters: false,
+            simplify_routing: guard.route_budget_exceeded,
+            reduce_decoration: budget_exceeded,
+            force_glyph_mode: budget_exceeded.then_some(MermaidGlyphMode::Ascii),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         CycleStrategy, LayoutAlgorithm, LayoutGuardrails, LayoutPoint, RenderClip, RenderItem,
-        RenderSource, build_render_scene, layout, layout_diagram, layout_diagram_force,
-        layout_diagram_force_traced, layout_diagram_gantt, layout_diagram_grid,
-        layout_diagram_radial, layout_diagram_sankey, layout_diagram_timeline,
+        RenderSource, build_layout_guard_report, build_render_scene, layout, layout_diagram,
+        layout_diagram_force, layout_diagram_force_traced, layout_diagram_gantt,
+        layout_diagram_grid, layout_diagram_radial, layout_diagram_sankey, layout_diagram_timeline,
         layout_diagram_traced, layout_diagram_traced_with_algorithm,
         layout_diagram_traced_with_algorithm_and_guardrails, layout_diagram_tree,
         layout_diagram_with_cycle_strategy, route_edge_points,
@@ -7261,6 +7338,30 @@ mod tests {
             guardrails,
         );
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn guard_report_reflects_fallback_metadata() {
+        let ir = sample_er_ir();
+        let traced = layout_diagram_traced_with_algorithm_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Force,
+            LayoutGuardrails {
+                max_layout_time_ms: 1,
+                max_layout_iterations: 1,
+                max_route_ops: 1,
+            },
+        );
+        let report = build_layout_guard_report(&ir, &traced);
+        assert!(report.budget_exceeded);
+        assert!(report.layout_budget_exceeded);
+        assert!(report.route_budget_exceeded);
+        assert_eq!(report.layout_requested_algorithm.as_deref(), Some("force"));
+        assert_eq!(report.layout_selected_algorithm.as_deref(), Some("tree"));
+        assert_eq!(
+            report.guard_reason.as_deref(),
+            Some(traced.trace.guard.reason)
+        );
     }
 
     // --- Force-directed layout tests ---

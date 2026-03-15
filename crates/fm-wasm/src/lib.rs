@@ -2,8 +2,8 @@
 
 use std::sync::{LazyLock, RwLock};
 
-use fm_core::capability_matrix;
-use fm_layout::layout_diagram;
+use fm_core::{MermaidGuardReport, capability_matrix};
+use fm_layout::{build_layout_guard_report, layout_diagram_traced};
 #[cfg(target_arch = "wasm32")]
 use fm_parser::ParseResult;
 use fm_parser::{detect_type_with_confidence, parse};
@@ -27,6 +27,7 @@ use wasm_bindgen::prelude::wasm_bindgen;
 pub struct WasmRenderOutput {
     pub svg: String,
     pub detected_type: String,
+    pub guard: MermaidGuardReport,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -84,17 +85,24 @@ struct DiagramRenderOutput {
     detected_type: String,
     confidence: f32,
     warnings: Vec<String>,
+    guard: MermaidGuardReport,
     canvas: CanvasRenderSummary,
 }
 
 #[cfg(target_arch = "wasm32")]
 impl DiagramRenderOutput {
-    fn new(svg: String, parsed: &ParseResult, canvas: &CanvasRenderResult) -> Self {
+    fn new(
+        svg: String,
+        parsed: &ParseResult,
+        guard: MermaidGuardReport,
+        canvas: &CanvasRenderResult,
+    ) -> Self {
         Self {
             svg,
             detected_type: parsed.ir.diagram_type.as_str().to_string(),
             confidence: parsed.confidence,
             warnings: parsed.warnings.clone(),
+            guard,
             canvas: CanvasRenderSummary::from(canvas),
         }
     }
@@ -316,11 +324,13 @@ fn merge_canvas_config(
 pub fn render(input: &str) -> WasmRenderOutput {
     let parsed = parse(input);
     let runtime = read_runtime_config();
-    let layout = layout_diagram(&parsed.ir);
+    let traced_layout = layout_diagram_traced(&parsed.ir);
+    let guard = build_layout_guard_report(&parsed.ir, &traced_layout);
 
     WasmRenderOutput {
-        svg: render_svg_with_layout(&parsed.ir, &layout, &runtime.svg),
+        svg: render_svg_with_layout(&parsed.ir, &traced_layout.layout, &runtime.svg),
         detected_type: parsed.ir.diagram_type.as_str().to_string(),
+        guard,
     }
 }
 
@@ -344,8 +354,12 @@ pub fn render_svg_js(input: &str, config: Option<JsValue>) -> Result<String, JsV
     let runtime = read_runtime_config();
     let svg_config = merge_svg_config(&runtime.svg, &overrides.svg, overrides.theme.as_deref())?;
     let parsed = parse(input);
-    let layout = layout_diagram(&parsed.ir);
-    Ok(render_svg_with_layout(&parsed.ir, &layout, &svg_config))
+    let traced_layout = layout_diagram_traced(&parsed.ir);
+    Ok(render_svg_with_layout(
+        &parsed.ir,
+        &traced_layout.layout,
+        &svg_config,
+    ))
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = detectType))]
@@ -617,17 +631,22 @@ impl Diagram {
         let next_canvas = merge_canvas_config(&self.canvas_config, &overrides.canvas);
 
         let parsed = parse(input);
-        let layout = layout_diagram(&parsed.ir);
-        let svg = render_svg_with_layout(&parsed.ir, &layout, &next_svg);
+        let traced_layout = layout_diagram_traced(&parsed.ir);
+        let guard = build_layout_guard_report(&parsed.ir, &traced_layout);
+        let svg = render_svg_with_layout(&parsed.ir, &traced_layout.layout, &next_svg);
 
         let mut web_canvas = WebCanvas2dContext::new(self.canvas.clone(), self.context.clone());
-        let canvas_result =
-            render_to_canvas_with_layout(&parsed.ir, &layout, &mut web_canvas, &next_canvas);
+        let canvas_result = render_to_canvas_with_layout(
+            &parsed.ir,
+            &traced_layout.layout,
+            &mut web_canvas,
+            &next_canvas,
+        );
 
         self.svg_config = next_svg;
         self.canvas_config = next_canvas;
 
-        let output = DiagramRenderOutput::new(svg, &parsed, &canvas_result);
+        let output = DiagramRenderOutput::new(svg, &parsed, guard, &canvas_result);
         to_js_value(&output)
     }
 
@@ -698,6 +717,11 @@ mod tests {
         let output = render("flowchart LR\nA-->B");
         assert!(output.svg.starts_with("<svg"));
         assert_eq!(output.detected_type, "flowchart");
+        assert_eq!(
+            output.guard.layout_selected_algorithm.as_deref(),
+            Some("sugiyama")
+        );
+        assert_eq!(output.guard.guard_reason.as_deref(), Some("within_budget"));
     }
 
     #[test]
