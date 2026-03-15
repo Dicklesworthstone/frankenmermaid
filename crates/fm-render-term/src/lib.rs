@@ -50,9 +50,16 @@ pub mod renderer;
 
 // Re-exports for convenient access.
 pub use config::{ResolvedConfig, TermRenderConfig};
-pub use diff::{DiagramDiff, DiffEdge, DiffNode, DiffStatus, diff_diagrams, render_diff_summary};
+pub use diff::{
+    DiagramDiff, DiffEdge, DiffNode, DiffStatus, diff_diagrams, render_diff_plain,
+    render_diff_summary, render_diff_terminal, render_diff_terminal_with_config,
+};
 pub use glyphs::{BoxGlyphs, ClusterGlyphs, EdgeGlyphs, ShapeGlyphs};
-pub use minimap::{MinimapConfig, MinimapCorner, MinimapResult, Viewport, render_minimap};
+pub use minimap::{
+    MinimapConfig, MinimapCorner, MinimapDensity, MinimapDetailLevel, MinimapRect, MinimapResult,
+    Viewport, minimap_cell_to_layout_point, render_minimap, render_minimap_ascii,
+    render_minimap_colored, viewport_to_minimap_rect,
+};
 pub use renderer::{TermRenderResult, TermRenderer, render_diagram, render_diagram_with_config};
 
 use fm_core::MermaidDiagramIr;
@@ -133,7 +140,11 @@ pub fn term_stats(ir: &MermaidDiagramIr) -> (usize, usize) {
 #[must_use]
 pub fn render_diff(old: &MermaidDiagramIr, new: &MermaidDiagramIr, use_colors: bool) -> String {
     let diff = diff_diagrams(old, new);
-    render_diff_summary(&diff, use_colors)
+    if use_colors {
+        render_diff_terminal(old, new, 120, 40, true)
+    } else {
+        render_diff_plain(&diff)
+    }
 }
 
 /// Render a minimap of a diagram.

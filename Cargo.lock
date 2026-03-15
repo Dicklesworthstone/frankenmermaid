@@ -367,6 +367,7 @@ dependencies = [
  "fm-core",
  "fm-layout",
  "proptest",
+ "serde",
 ]
 
 [[package]]

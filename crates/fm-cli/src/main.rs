@@ -11,7 +11,7 @@
 //! - `watch`: Re-render on file change (requires `watch` feature)
 //! - `serve`: Start local HTTP server with live-reload playground (requires `serve` feature)
 
-use std::io::{self, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::Path;
 use std::time::Instant;
 
@@ -24,7 +24,10 @@ use fm_core::{
 use fm_layout::{LayoutAlgorithm, TracedLayout, layout_diagram_traced_with_algorithm};
 use fm_parser::{detect_type_with_confidence, parse_evidence_json, parse_with_mode};
 use fm_render_svg::{SvgRenderConfig, ThemePreset, render_svg_with_layout};
-use fm_render_term::{TermRenderConfig, render_term_with_config};
+use fm_render_term::{
+    TermRenderConfig, diff_diagrams, render_diff_plain, render_diff_summary,
+    render_diff_terminal_with_config, render_term_with_config,
+};
 use serde::Serialize;
 use tracing::{debug, info, warn};
 
@@ -123,6 +126,39 @@ enum Command {
         json: bool,
     },
 
+    /// Compare two Mermaid diagrams and emit a diff.
+    Diff {
+        /// Old input file path, inline diagram text, or "-" for stdin.
+        old_input: String,
+
+        /// New input file path or inline diagram text.
+        new_input: String,
+
+        /// Parser support contract mode.
+        #[arg(long, value_enum, default_value = "compat")]
+        parse_mode: ParseModeArg,
+
+        /// Diff output format.
+        #[arg(long, value_enum, default_value = "terminal")]
+        format: DiffOutputFormat,
+
+        /// Color mode for terminal/summary output.
+        #[arg(long, value_enum, default_value = "auto")]
+        color: ColorChoice,
+
+        /// Output width for side-by-side terminal rendering.
+        #[arg(short = 'W', long)]
+        width: Option<u32>,
+
+        /// Output height for side-by-side terminal rendering.
+        #[arg(short = 'H', long)]
+        height: Option<u32>,
+
+        /// Output file path. If omitted, writes to stdout.
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+
     /// Validate a diagram and report diagnostics.
     Validate {
         /// Input file path or "-" for stdin.
@@ -219,6 +255,21 @@ enum ValidateOutputFormat {
     Json,
     /// Pretty-printed JSON.
     Pretty,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+enum DiffOutputFormat {
+    Summary,
+    Plain,
+    Terminal,
+    Json,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+enum ColorChoice {
+    Auto,
+    Always,
+    Never,
 }
 
 /// Severity threshold used for CI validation failure gates.
@@ -335,6 +386,15 @@ struct RenderCommandOptions<'a> {
     json_output: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DiffCommandOptions<'a> {
+    parse_mode: MermaidParseMode,
+    format: DiffOutputFormat,
+    color: ColorChoice,
+    dimensions: (Option<u32>, Option<u32>),
+    output: Option<&'a str>,
+}
+
 /// Result of detecting diagram type.
 #[derive(Debug, Serialize)]
 struct DetectResult {
@@ -415,6 +475,27 @@ fn main() -> Result<()> {
         } => cmd_parse(&input, parse_mode.to_core(), full, pretty),
 
         Command::Detect { input, json } => cmd_detect(&input, json),
+
+        Command::Diff {
+            old_input,
+            new_input,
+            parse_mode,
+            format,
+            color,
+            width,
+            height,
+            output,
+        } => cmd_diff(
+            &old_input,
+            &new_input,
+            DiffCommandOptions {
+                parse_mode: parse_mode.to_core(),
+                format,
+                color,
+                dimensions: (width, height),
+                output: output.as_deref(),
+            },
+        ),
 
         Command::Validate {
             input,
@@ -921,6 +1002,56 @@ fn confidence_label(confidence: f32) -> &'static str {
     } else {
         "low"
     }
+}
+
+fn cmd_diff(old_input: &str, new_input: &str, options: DiffCommandOptions<'_>) -> Result<()> {
+    let DiffCommandOptions {
+        parse_mode,
+        format,
+        color,
+        dimensions,
+        output,
+    } = options;
+    let (width, height) = dimensions;
+
+    let old_source = load_input(old_input)?;
+    let new_source = load_input(new_input)?;
+
+    let old_parsed = parse_with_mode(&old_source, parse_mode);
+    let new_parsed = parse_with_mode(&new_source, parse_mode);
+
+    for warning in &old_parsed.warnings {
+        warn!("Old parse warning: {warning}");
+    }
+    for warning in &new_parsed.warnings {
+        warn!("New parse warning: {warning}");
+    }
+
+    let diff = diff_diagrams(&old_parsed.ir, &new_parsed.ir);
+    let use_colors = match color {
+        ColorChoice::Always => true,
+        ColorChoice::Never => false,
+        ColorChoice::Auto => io::stdout().is_terminal(),
+    };
+
+    let rendered = match format {
+        DiffOutputFormat::Summary => render_diff_summary(&diff, use_colors),
+        DiffOutputFormat::Plain => render_diff_plain(&diff),
+        DiffOutputFormat::Terminal => {
+            let (cols, rows) = terminal_size(width, height);
+            render_diff_terminal_with_config(
+                &old_parsed.ir,
+                &new_parsed.ir,
+                &TermRenderConfig::rich(),
+                cols,
+                rows,
+                use_colors,
+            )
+        }
+        DiffOutputFormat::Json => serde_json::to_string_pretty(&diff)?,
+    };
+
+    write_output(output, &rendered)
 }
 
 // =============================================================================
