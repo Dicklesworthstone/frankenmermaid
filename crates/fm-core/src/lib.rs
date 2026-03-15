@@ -207,15 +207,15 @@ impl DiagramType {
             | Self::GitGraph
             | Self::BlockBeta
             | Self::PacketBeta
-            | Self::Sankey => MermaidSupportLevel::Partial,
-            Self::C4Context
+            | Self::Sankey
+            | Self::C4Context
             | Self::C4Container
             | Self::C4Component
             | Self::C4Dynamic
-            | Self::C4Deployment
-            | Self::XyChart
-            | Self::ArchitectureBeta
-            | Self::Unknown => MermaidSupportLevel::Unsupported,
+            | Self::C4Deployment => MermaidSupportLevel::Partial,
+            Self::XyChart | Self::ArchitectureBeta | Self::Unknown => {
+                MermaidSupportLevel::Unsupported
+            }
         }
     }
 
@@ -234,14 +234,13 @@ impl DiagramType {
             | Self::GitGraph
             | Self::BlockBeta
             | Self::PacketBeta
-            | Self::Sankey => "basic",
-            Self::C4Context
+            | Self::Sankey
+            | Self::C4Context
             | Self::C4Container
             | Self::C4Component
             | Self::C4Dynamic
-            | Self::C4Deployment
-            | Self::XyChart
-            | Self::ArchitectureBeta => "unsupported",
+            | Self::C4Deployment => "basic",
+            Self::XyChart | Self::ArchitectureBeta => "unsupported",
             Self::Unknown => "unknown",
         }
     }
@@ -3429,6 +3428,12 @@ mod tests {
             MermaidSupportLevel::Partial
         );
         assert_eq!(DiagramType::GitGraph.support_label(), "basic");
+
+        assert_eq!(
+            DiagramType::C4Context.support_level(),
+            MermaidSupportLevel::Partial
+        );
+        assert_eq!(DiagramType::C4Context.support_label(), "basic");
 
         assert_eq!(
             DiagramType::ArchitectureBeta.support_level(),

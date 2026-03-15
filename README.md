@@ -117,11 +117,11 @@ Typography, spacing, theming, accessibility, and responsive behavior are part of
 | `class` | Partial |
 | `state` | Partial |
 | `er` | Partial |
-| `C4Context` | Unsupported |
-| `C4Container` | Unsupported |
-| `C4Component` | Unsupported |
-| `C4Dynamic` | Unsupported |
-| `C4Deployment` | Unsupported |
+| `C4Context` | Partial |
+| `C4Container` | Partial |
+| `C4Component` | Partial |
+| `C4Dynamic` | Partial |
+| `C4Deployment` | Partial |
 | `architecture-beta` | Unsupported |
 | `block-beta` | Partial |
 | `gantt` | Partial |

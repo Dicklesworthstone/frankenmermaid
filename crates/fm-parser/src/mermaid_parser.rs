@@ -193,6 +193,11 @@ pub fn parse_mermaid_with_detection(
         DiagramType::Journey => parse_journey(content, &mut builder),
         DiagramType::Timeline => parse_timeline(content, &mut builder),
         DiagramType::Sankey => parse_sankey(content, &mut builder),
+        DiagramType::C4Context
+        | DiagramType::C4Container
+        | DiagramType::C4Component
+        | DiagramType::C4Dynamic
+        | DiagramType::C4Deployment => parse_c4(content, &mut builder),
         DiagramType::PacketBeta => parse_packet(content, &mut builder),
         DiagramType::Gantt => parse_gantt(content, &mut builder),
         DiagramType::Pie => parse_pie(content, &mut builder),
@@ -2378,6 +2383,96 @@ fn parse_sankey(input: &str, builder: &mut IrBuilder) {
     }
 }
 
+fn parse_c4(input: &str, builder: &mut IrBuilder) {
+    let mut boundary_stack: Vec<(usize, usize)> = Vec::new();
+
+    for (index, raw_line) in input.lines().enumerate() {
+        let line_number = index + 1;
+        let trimmed = strip_flowchart_inline_comment(raw_line).trim();
+        if trimmed.is_empty() || is_comment(trimmed) {
+            continue;
+        }
+
+        if is_c4_header(trimmed)
+            || trimmed.starts_with("title ")
+            || matches!(
+                trimmed,
+                "LAYOUT_TOP_DOWN()" | "LAYOUT_LEFT_RIGHT()" | "SHOW_LEGEND()" | "HIDE_LEGEND()"
+            )
+            || trimmed.starts_with("UpdateLayoutConfig(")
+        {
+            continue;
+        }
+
+        if trimmed == "}" {
+            let _ = boundary_stack.pop();
+            continue;
+        }
+
+        let Some((function_name, arguments, opens_block)) = parse_function_call(trimmed) else {
+            builder.add_warning(format!(
+                "Line {line_number}: unsupported C4 syntax: {trimmed}"
+            ));
+            continue;
+        };
+
+        let span = span_for(line_number, raw_line);
+        match function_name.as_str() {
+            "Person" | "Person_Ext" | "System" | "System_Ext" | "SystemDb" | "SystemQueue"
+            | "Container" | "Container_Ext" | "ContainerDb" | "ContainerQueue" | "Component"
+            | "Component_Ext" | "ComponentDb" | "ComponentQueue" => {
+                if let Some(node_id) = parse_c4_node(&function_name, &arguments, span, builder) {
+                    add_node_to_active_c4_boundaries(&boundary_stack, node_id, builder);
+                } else {
+                    builder.add_warning(format!(
+                        "Line {line_number}: malformed C4 element declaration: {trimmed}"
+                    ));
+                }
+            }
+            "Rel" | "BiRel" | "Rel_Back" | "Rel_L" | "Rel_R" | "Rel_U" | "Rel_D" => {
+                if !parse_c4_relationship(&function_name, &arguments, span, builder) {
+                    builder.add_warning(format!(
+                        "Line {line_number}: malformed C4 relationship declaration: {trimmed}"
+                    ));
+                }
+            }
+            "System_Boundary"
+            | "Container_Boundary"
+            | "Enterprise_Boundary"
+            | "Boundary"
+            | "Deployment_Node" => {
+                if !opens_block {
+                    builder.add_warning(format!(
+                        "Line {line_number}: C4 boundary should open a block with '{{': {trimmed}"
+                    ));
+                    continue;
+                }
+
+                let Some(boundary) = parse_c4_boundary(
+                    &function_name,
+                    &arguments,
+                    span,
+                    boundary_stack
+                        .last()
+                        .map(|(_, subgraph_index)| *subgraph_index),
+                    builder,
+                ) else {
+                    builder.add_warning(format!(
+                        "Line {line_number}: malformed C4 boundary declaration: {trimmed}"
+                    ));
+                    continue;
+                };
+                boundary_stack.push(boundary);
+            }
+            _ => {
+                builder.add_warning(format!(
+                    "Line {line_number}: unsupported C4 directive '{function_name}'"
+                ));
+            }
+        }
+    }
+}
+
 /// Git graph state tracker for parsing.
 struct GitGraphState {
     /// Map of branch names to their current head commit node ID
@@ -4098,6 +4193,248 @@ fn split_csv_fields(line: &str) -> Option<Vec<String>> {
     Some(fields)
 }
 
+fn parse_function_call(line: &str) -> Option<(String, Vec<String>, bool)> {
+    let open_paren = line.find('(')?;
+    let function_name = line[..open_paren].trim();
+    if function_name.is_empty() {
+        return None;
+    }
+
+    let close_paren = find_matching_paren(line, open_paren)?;
+    let arguments = split_top_level_arguments(&line[open_paren + 1..close_paren]);
+    let remainder = line[close_paren + 1..].trim();
+    let opens_block = remainder == "{";
+
+    Some((function_name.to_string(), arguments, opens_block))
+}
+
+fn find_matching_paren(line: &str, open_paren: usize) -> Option<usize> {
+    let mut depth = 0_usize;
+    let mut in_quote: Option<char> = None;
+    let mut escaped = false;
+
+    for (index, ch) in line.char_indices().skip_while(|(idx, _)| *idx < open_paren) {
+        if let Some(quote) = in_quote {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' && quote != '`' {
+                escaped = true;
+                continue;
+            }
+            if ch == quote {
+                in_quote = None;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' | '\'' | '`' => in_quote = Some(ch),
+            '(' => depth = depth.saturating_add(1),
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn split_top_level_arguments(raw: &str) -> Vec<String> {
+    let mut arguments = Vec::new();
+    let mut current = String::new();
+    let mut in_quote: Option<char> = None;
+    let mut escaped = false;
+    let mut nested_parens = 0_usize;
+
+    for ch in raw.chars() {
+        if let Some(quote) = in_quote {
+            if escaped {
+                current.push(ch);
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' && quote != '`' {
+                current.push(ch);
+                escaped = true;
+                continue;
+            }
+            if ch == quote {
+                in_quote = None;
+            }
+            current.push(ch);
+            continue;
+        }
+
+        match ch {
+            '"' | '\'' | '`' => {
+                in_quote = Some(ch);
+                current.push(ch);
+            }
+            '(' => {
+                nested_parens = nested_parens.saturating_add(1);
+                current.push(ch);
+            }
+            ')' => {
+                nested_parens = nested_parens.saturating_sub(1);
+                current.push(ch);
+            }
+            ',' if nested_parens == 0 => {
+                arguments.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if !current.trim().is_empty() {
+        arguments.push(current.trim().to_string());
+    }
+
+    arguments
+}
+
+fn is_c4_header(line: &str) -> bool {
+    matches!(
+        line,
+        "C4Context" | "C4Container" | "C4Component" | "C4Dynamic" | "C4Deployment"
+    )
+}
+
+fn parse_c4_node(
+    function_name: &str,
+    arguments: &[String],
+    span: Span,
+    builder: &mut IrBuilder,
+) -> Option<IrNodeId> {
+    let node_id = clean_label(arguments.first().map(String::as_str))?;
+    let label =
+        clean_label(arguments.get(1).map(String::as_str)).unwrap_or_else(|| node_id.clone());
+    let shape = c4_node_shape(function_name);
+    let node_id_value = builder.intern_node(&node_id, Some(&label), shape, span)?;
+
+    for class_name in c4_node_classes(function_name) {
+        builder.add_class_to_node(&node_id, class_name, span);
+    }
+
+    Some(node_id_value)
+}
+
+fn c4_node_shape(function_name: &str) -> NodeShape {
+    if function_name.ends_with("Db") {
+        NodeShape::Cylinder
+    } else if function_name.contains("Queue") {
+        NodeShape::Stadium
+    } else if function_name.starts_with("Person") {
+        NodeShape::Rounded
+    } else {
+        NodeShape::Rect
+    }
+}
+
+fn c4_node_classes(function_name: &str) -> &'static [&'static str] {
+    match function_name {
+        "Person" => &["c4", "c4-person"],
+        "Person_Ext" => &["c4", "c4-person", "c4-external"],
+        "System" => &["c4", "c4-system"],
+        "System_Ext" => &["c4", "c4-system", "c4-external"],
+        "SystemDb" => &["c4", "c4-system", "c4-database"],
+        "SystemQueue" => &["c4", "c4-system", "c4-queue"],
+        "Container" => &["c4", "c4-container"],
+        "Container_Ext" => &["c4", "c4-container", "c4-external"],
+        "ContainerDb" => &["c4", "c4-container", "c4-database"],
+        "ContainerQueue" => &["c4", "c4-container", "c4-queue"],
+        "Component" => &["c4", "c4-component"],
+        "Component_Ext" => &["c4", "c4-component", "c4-external"],
+        "ComponentDb" => &["c4", "c4-component", "c4-database"],
+        "ComponentQueue" => &["c4", "c4-component", "c4-queue"],
+        _ => &["c4"],
+    }
+}
+
+fn parse_c4_relationship(
+    function_name: &str,
+    arguments: &[String],
+    span: Span,
+    builder: &mut IrBuilder,
+) -> bool {
+    let Some(from_id) = clean_label(arguments.first().map(String::as_str)) else {
+        return false;
+    };
+    let Some(to_id) = clean_label(arguments.get(1).map(String::as_str)) else {
+        return false;
+    };
+
+    let description = clean_label(arguments.get(2).map(String::as_str));
+    let technology = clean_label(arguments.get(3).map(String::as_str));
+    let combined_label = match (description, technology) {
+        (Some(description), Some(technology)) => Some(format!("{description} ({technology})")),
+        (Some(description), None) => Some(description),
+        (None, Some(technology)) => Some(technology),
+        (None, None) => None,
+    };
+
+    let Some(from_node) = builder.intern_node(&from_id, Some(&from_id), NodeShape::Rect, span)
+    else {
+        return false;
+    };
+    let Some(to_node) = builder.intern_node(&to_id, Some(&to_id), NodeShape::Rect, span) else {
+        return false;
+    };
+
+    let (actual_from, actual_to, arrow) = match function_name {
+        "BiRel" => (from_node, to_node, ArrowType::Line),
+        "Rel_Back" => (to_node, from_node, ArrowType::Arrow),
+        _ => (from_node, to_node, ArrowType::Arrow),
+    };
+    builder.push_edge(
+        actual_from,
+        actual_to,
+        arrow,
+        combined_label.as_deref(),
+        span,
+    );
+    true
+}
+
+fn parse_c4_boundary(
+    function_name: &str,
+    arguments: &[String],
+    span: Span,
+    parent_subgraph: Option<usize>,
+    builder: &mut IrBuilder,
+) -> Option<(usize, usize)> {
+    let boundary_key = clean_label(arguments.first().map(String::as_str))?;
+    let display_label =
+        clean_label(arguments.get(1).map(String::as_str)).unwrap_or_else(|| boundary_key.clone());
+    let title = format!("{function_name}({boundary_key}, {display_label})");
+    let cluster_index = builder.ensure_cluster(&boundary_key, Some(&title), span)?;
+    let subgraph_index = builder.ensure_subgraph(
+        &boundary_key,
+        Some(&title),
+        span,
+        parent_subgraph,
+        Some(cluster_index),
+    )?;
+    Some((cluster_index, subgraph_index))
+}
+
+fn add_node_to_active_c4_boundaries(
+    boundary_stack: &[(usize, usize)],
+    node_id: IrNodeId,
+    builder: &mut IrBuilder,
+) {
+    for (cluster_index, subgraph_index) in boundary_stack {
+        builder.add_node_to_cluster(*cluster_index, node_id);
+        builder.add_node_to_subgraph(*subgraph_index, node_id);
+    }
+}
+
 fn strip_flowchart_inline_comment(line: &str) -> &str {
     let mut in_quote: Option<char> = None;
     let mut escaped = false;
@@ -5671,5 +6008,87 @@ cherry-pick id: feat1"#,
                 .iter()
                 .any(|warning| warning.contains("sankey flow value is not numeric"))
         );
+    }
+
+    #[test]
+    fn c4_parses_people_systems_relationships_and_boundaries() {
+        let parsed = parse_mermaid(
+            r#"C4Context
+Person(customer, "Customer")
+System_Boundary(bank, "Banking System") {
+    System(core, "Core Banking")
+}
+Rel(customer, core, "Uses", "HTTPS")"#,
+        );
+        assert_eq!(parsed.ir.diagram_type, DiagramType::C4Context);
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 1);
+        assert_eq!(parsed.ir.clusters.len(), 1);
+        assert_eq!(parsed.ir.graph.subgraphs.len(), 1);
+
+        let customer = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "customer")
+            .expect("customer node");
+        assert!(
+            customer
+                .classes
+                .iter()
+                .any(|class_name| class_name == "c4-person")
+        );
+
+        let core = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "core")
+            .expect("core node");
+        assert!(
+            core.classes
+                .iter()
+                .any(|class_name| class_name == "c4-system")
+        );
+
+        let cluster_title = parsed.ir.clusters[0]
+            .title
+            .and_then(|label_id| parsed.ir.labels.get(label_id.0))
+            .map(|label| label.text.as_str());
+        assert_eq!(cluster_title, Some("System_Boundary(bank, Banking System)"));
+
+        let edge_label = parsed.ir.edges[0]
+            .label
+            .and_then(|label_id| parsed.ir.labels.get(label_id.0))
+            .map(|label| label.text.as_str());
+        assert_eq!(edge_label, Some("Uses (HTTPS)"));
+    }
+
+    #[test]
+    fn c4_birel_and_back_rel_map_to_expected_edges() {
+        let parsed = parse_mermaid(
+            r#"C4Dynamic
+Person(user, "User")
+System(app, "App")
+System(db, "Database")
+BiRel(user, app, "Browses")
+Rel_Back(db, app, "Responds")"#,
+        );
+        assert_eq!(parsed.ir.diagram_type, DiagramType::C4Dynamic);
+        assert_eq!(parsed.ir.nodes.len(), 3);
+        assert_eq!(parsed.ir.edges.len(), 2);
+        assert_eq!(parsed.ir.edges[0].arrow, ArrowType::Line);
+
+        let back_edge = &parsed.ir.edges[1];
+        let from_index = match back_edge.from {
+            fm_core::IrEndpoint::Node(node_id) => node_id.0,
+            _ => panic!("expected node endpoint"),
+        };
+        let to_index = match back_edge.to {
+            fm_core::IrEndpoint::Node(node_id) => node_id.0,
+            _ => panic!("expected node endpoint"),
+        };
+        assert_eq!(parsed.ir.nodes[from_index].id, "app");
+        assert_eq!(parsed.ir.nodes[to_index].id, "db");
     }
 }
