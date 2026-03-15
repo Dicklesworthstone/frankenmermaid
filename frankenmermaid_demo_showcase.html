@@ -1,0 +1,967 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FrankenMermaid Demo Showcase</title>
+  <meta
+    name="description"
+    content="Standalone frankenmermaid showcase that loads browser libraries from CDNs, attempts to load the frankenmermaid WASM runtime from GitHub-backed URLs, and compares the current runtime contract to Mermaid."
+  >
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            ink: "#07111f",
+            panel: "#0e1a2f",
+            mist: "#dff3ff",
+            flare: "#ff7a18",
+            mint: "#7af5c7",
+            cobalt: "#4cc9ff",
+            blush: "#ff9ab7"
+          },
+          boxShadow: {
+            glow: "0 24px 80px rgba(76, 201, 255, 0.18)",
+            panel: "0 18px 60px rgba(3, 11, 23, 0.38)"
+          },
+          backgroundImage: {
+            halo:
+              "radial-gradient(circle at top left, rgba(76, 201, 255, 0.24), transparent 32%), radial-gradient(circle at top right, rgba(255, 122, 24, 0.18), transparent 30%), linear-gradient(135deg, #07111f 0%, #0c1d34 52%, #13284a 100%)"
+          }
+        }
+      }
+    };
+  </script>
+  <style>
+    :root {
+      color-scheme: dark;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at 15% 10%, rgba(122, 245, 199, 0.08), transparent 24%),
+        radial-gradient(circle at 85% 5%, rgba(255, 154, 183, 0.10), transparent 26%),
+        linear-gradient(135deg, #07111f 0%, #0c1d34 52%, #13284a 100%);
+      min-height: 100vh;
+    }
+
+    pre,
+    code,
+    textarea {
+      font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+    }
+
+    .glass {
+      background: linear-gradient(180deg, rgba(18, 32, 56, 0.88), rgba(11, 22, 40, 0.92));
+      backdrop-filter: blur(22px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    .gridline {
+      background-image:
+        linear-gradient(rgba(255, 255, 255, 0.04) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.04) 1px, transparent 1px);
+      background-size: 28px 28px;
+    }
+
+    .code-fade {
+      mask-image: linear-gradient(to bottom, black 74%, transparent 100%);
+    }
+
+    .pill {
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    .badge-implemented {
+      background: rgba(122, 245, 199, 0.16);
+      color: #7af5c7;
+      border-color: rgba(122, 245, 199, 0.24);
+    }
+
+    .badge-partial {
+      background: rgba(255, 190, 92, 0.14);
+      color: #ffd089;
+      border-color: rgba(255, 190, 92, 0.24);
+    }
+
+    .badge-experimental {
+      background: rgba(255, 154, 183, 0.16);
+      color: #ffb8ca;
+      border-color: rgba(255, 154, 183, 0.24);
+    }
+
+    .badge-unsupported {
+      background: rgba(255, 89, 94, 0.12);
+      color: #ff9b9e;
+      border-color: rgba(255, 89, 94, 0.24);
+    }
+
+    .sample-button.active {
+      background: linear-gradient(135deg, rgba(76, 201, 255, 0.18), rgba(122, 245, 199, 0.16));
+      border-color: rgba(76, 201, 255, 0.35);
+      color: white;
+    }
+
+    .viz-card svg {
+      width: 100%;
+      height: auto;
+      max-height: 540px;
+    }
+
+    .mermaid-card svg {
+      max-width: 100%;
+      height: auto;
+    }
+
+    .scrollbar-thin::-webkit-scrollbar {
+      width: 10px;
+      height: 10px;
+    }
+
+    .scrollbar-thin::-webkit-scrollbar-thumb {
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.14);
+    }
+  </style>
+</head>
+<body class="text-slate-100">
+  <div class="relative overflow-hidden">
+    <div class="pointer-events-none absolute inset-0 opacity-60 gridline"></div>
+    <div class="relative mx-auto max-w-7xl px-6 pb-20 pt-8 lg:px-8">
+      <header class="mb-12">
+        <div class="glass shadow-glow rounded-[2rem] border border-white/10 px-7 py-6 lg:px-10">
+          <div class="flex flex-col gap-8 lg:flex-row lg:items-end lg:justify-between">
+            <div class="max-w-3xl">
+              <p class="mb-4 inline-flex items-center gap-2 rounded-full border border-cobalt/30 bg-cobalt/10 px-4 py-1 text-xs font-semibold uppercase tracking-[0.32em] text-cobalt">
+                frankenmermaid standalone showcase
+              </p>
+              <h1 class="max-w-4xl text-4xl font-black tracking-tight text-white sm:text-5xl lg:text-6xl">
+                Mermaid compatibility, but with a stricter architecture and a wider surface area.
+              </h1>
+              <p class="mt-5 max-w-3xl text-base leading-7 text-slate-300 sm:text-lg">
+                This single HTML file works from <code>file://</code>, loads browser libraries from CDNs, and attempts to boot the
+                frankenmermaid WASM runtime from GitHub-backed URLs. It demonstrates the actual browser API contract that exists in the repo today:
+                <code>init</code>, <code>renderSvg</code>, <code>detectType</code>, <code>parse</code>, <code>sourceSpans</code>,
+                <code>capabilityMatrix</code>, and the canvas-backed <code>Diagram</code> class.
+              </p>
+            </div>
+            <div class="grid w-full max-w-xl grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+              <div class="glass rounded-2xl p-4">
+                <div class="text-3xl font-black text-cobalt">11</div>
+                <div class="mt-1 text-slate-300">Implemented capability claims</div>
+              </div>
+              <div class="glass rounded-2xl p-4">
+                <div class="text-3xl font-black text-amber-300">22</div>
+                <div class="mt-1 text-slate-300">Partial claims</div>
+              </div>
+              <div class="glass rounded-2xl p-4">
+                <div class="text-3xl font-black text-blush">1</div>
+                <div class="mt-1 text-slate-300">Experimental runtime claim</div>
+              </div>
+              <div class="glass rounded-2xl p-4">
+                <div class="text-3xl font-black text-mint">7</div>
+                <div class="mt-1 text-slate-300">Browser-side API entry points</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <main class="space-y-8">
+        <section class="grid gap-8 lg:grid-cols-[1.1fr_0.9fr]">
+          <div class="glass rounded-[2rem] p-6 shadow-panel sm:p-8">
+            <div class="flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <p class="text-xs font-semibold uppercase tracking-[0.28em] text-cobalt">Live runtime status</p>
+                <h2 class="mt-2 text-2xl font-bold text-white">GitHub-backed WASM bootstrap</h2>
+              </div>
+              <button
+                id="retry-runtime"
+                class="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm font-semibold text-white transition hover:bg-white/10"
+                type="button"
+              >
+                Retry runtime load
+              </button>
+            </div>
+
+            <div id="runtime-banner" class="mt-6 rounded-3xl border border-white/10 bg-white/5 p-5">
+              <div class="text-sm text-slate-300">Checking GitHub-backed frankenmermaid runtime endpoints...</div>
+            </div>
+
+            <div class="mt-6 grid gap-4 sm:grid-cols-2">
+              <div class="rounded-3xl border border-white/10 bg-slate-950/40 p-5">
+                <div class="text-xs font-semibold uppercase tracking-[0.26em] text-slate-400">Primary source</div>
+                <div id="runtime-source" class="mt-3 break-all text-sm text-white">Pending</div>
+                <div id="runtime-mode" class="mt-4 inline-flex rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em]">
+                  unresolved
+                </div>
+              </div>
+              <div class="rounded-3xl border border-white/10 bg-slate-950/40 p-5">
+                <div class="text-xs font-semibold uppercase tracking-[0.26em] text-slate-400">Why this matters</div>
+                <p class="mt-3 text-sm leading-6 text-slate-300">
+                  The page is intentionally honest. If GitHub does not actually host the generated JS glue and WASM binary, it shows the precise failure
+                  instead of pretending the web surface is published.
+                </p>
+              </div>
+            </div>
+
+            <div class="mt-6 rounded-3xl border border-white/10 bg-slate-950/40 p-5">
+              <div class="flex items-center justify-between gap-3">
+                <div class="text-xs font-semibold uppercase tracking-[0.26em] text-slate-400">Endpoint diagnostics</div>
+                <div class="text-xs text-slate-500">GitHub-backed URLs only</div>
+              </div>
+              <div id="runtime-endpoints" class="mt-4 space-y-3 text-sm text-slate-200"></div>
+            </div>
+          </div>
+
+          <div class="glass rounded-[2rem] p-6 shadow-panel sm:p-8">
+            <p class="text-xs font-semibold uppercase tracking-[0.28em] text-mint">What is different from Mermaid?</p>
+            <h2 class="mt-2 text-2xl font-bold text-white">The project is not trying to be a browser-only clone.</h2>
+            <div class="mt-6 space-y-4">
+              <div class="rounded-3xl border border-white/10 bg-white/5 p-5">
+                <div class="text-sm font-semibold text-white">Shared IR pipeline</div>
+                <p class="mt-2 text-sm leading-6 text-slate-300">
+                  Frankenmermaid runs parse → deterministic layout → renderer surfaces from one Rust-first pipeline, instead of a browser-first engine with
+                  secondary integrations.
+                </p>
+              </div>
+              <div class="rounded-3xl border border-white/10 bg-white/5 p-5">
+                <div class="text-sm font-semibold text-white">Source spans and diagnostics</div>
+                <p class="mt-2 text-sm leading-6 text-slate-300">
+                  The WASM surface includes <code>sourceSpans()</code> and structured parse results, making editor tooling and click-to-source workflows
+                  possible without scraping rendered output.
+                </p>
+              </div>
+              <div class="rounded-3xl border border-white/10 bg-white/5 p-5">
+                <div class="text-sm font-semibold text-white">Capability metadata is explicit</div>
+                <p class="mt-2 text-sm leading-6 text-slate-300">
+                  Support is tracked with a capability matrix instead of vague blanket claims. Flowcharts are marked implemented; many diagram families are
+                  currently partial by design and are labeled that way here.
+                </p>
+              </div>
+              <div class="rounded-3xl border border-white/10 bg-white/5 p-5">
+                <div class="text-sm font-semibold text-white">Multi-surface output</div>
+                <p class="mt-2 text-sm leading-6 text-slate-300">
+                  The same engine targets CLI, SVG, terminal, canvas, and WASM. Mermaid mostly stops at browser rendering; frankenmermaid is being built
+                  as a shared rendering core.
+                </p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="glass rounded-[2rem] p-6 shadow-panel sm:p-8">
+          <div class="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
+            <div class="max-w-3xl">
+              <p class="text-xs font-semibold uppercase tracking-[0.28em] text-cobalt">Live playground</p>
+              <h2 class="mt-2 text-2xl font-bold text-white">One editor, two engines, six API surfaces</h2>
+              <p class="mt-3 text-sm leading-6 text-slate-300">
+                Select a sample, then inspect type detection, parse output, source spans, the capability matrix, SVG output, and the canvas surface. Mermaid
+                is rendered on the right as a baseline comparison.
+              </p>
+            </div>
+            <div class="flex flex-wrap gap-2" id="sample-buttons"></div>
+          </div>
+
+          <div class="mt-7 grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
+            <div class="space-y-6">
+              <div class="rounded-[1.75rem] border border-white/10 bg-slate-950/40 p-4">
+                <div class="mb-3 flex items-center justify-between gap-3">
+                  <label for="diagram-input" class="text-sm font-semibold text-white">Diagram source</label>
+                  <button
+                    id="render-button"
+                    class="rounded-full border border-cobalt/30 bg-cobalt/15 px-4 py-2 text-sm font-semibold text-cobalt transition hover:bg-cobalt/25"
+                    type="button"
+                  >
+                    Render again
+                  </button>
+                </div>
+                <textarea
+                  id="diagram-input"
+                  class="scrollbar-thin h-[22rem] w-full rounded-[1.25rem] border border-white/10 bg-[#07101e] p-4 text-sm leading-6 text-slate-100 outline-none transition focus:border-cobalt/40"
+                  spellcheck="false"
+                ></textarea>
+              </div>
+
+              <div class="grid gap-4 md:grid-cols-2">
+                <div class="rounded-[1.75rem] border border-white/10 bg-slate-950/40 p-5">
+                  <div class="text-xs font-semibold uppercase tracking-[0.24em] text-slate-400">detectType()</div>
+                  <pre id="detect-output" class="mt-3 whitespace-pre-wrap text-sm leading-6 text-slate-200"></pre>
+                </div>
+                <div class="rounded-[1.75rem] border border-white/10 bg-slate-950/40 p-5">
+                  <div class="text-xs font-semibold uppercase tracking-[0.24em] text-slate-400">sourceSpans()</div>
+                  <pre id="span-output" class="scrollbar-thin mt-3 max-h-64 overflow-auto whitespace-pre-wrap text-xs leading-6 text-slate-200"></pre>
+                </div>
+              </div>
+
+              <div class="rounded-[1.75rem] border border-white/10 bg-slate-950/40 p-5">
+                <div class="flex items-center justify-between gap-3">
+                  <div class="text-xs font-semibold uppercase tracking-[0.24em] text-slate-400">parse()</div>
+                  <div id="parse-summary" class="text-xs text-slate-500">Pending</div>
+                </div>
+                <pre id="parse-output" class="scrollbar-thin mt-3 max-h-[26rem] overflow-auto whitespace-pre-wrap text-xs leading-6 text-slate-200"></pre>
+              </div>
+            </div>
+
+            <div class="space-y-6">
+              <div class="grid gap-4 md:grid-cols-2">
+                <div class="viz-card rounded-[1.75rem] border border-white/10 bg-slate-950/40 p-5">
+                  <div class="flex items-center justify-between gap-3">
+                    <div>
+                      <div class="text-xs font-semibold uppercase tracking-[0.24em] text-slate-400">frankenmermaid renderSvg()</div>
+                      <div class="mt-1 text-sm text-slate-300">Deterministic SVG from the Rust pipeline</div>
+                    </div>
+                    <div id="fm-render-chip" class="rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em]">
+                      pending
+                    </div>
+                  </div>
+                  <div id="fm-svg" class="scrollbar-thin mt-4 max-h-[32rem] overflow-auto rounded-[1.25rem] border border-white/10 bg-white p-4 text-slate-900"></div>
+                </div>
+
+                <div class="mermaid-card rounded-[1.75rem] border border-white/10 bg-slate-950/40 p-5">
+                  <div class="flex items-center justify-between gap-3">
+                    <div>
+                      <div class="text-xs font-semibold uppercase tracking-[0.24em] text-slate-400">Mermaid baseline</div>
+                      <div class="mt-1 text-sm text-slate-300">Reference browser renderer from CDN</div>
+                    </div>
+                    <div id="mermaid-chip" class="rounded-full border border-mint/20 bg-mint/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-mint">
+                      ready
+                    </div>
+                  </div>
+                  <div id="mermaid-svg" class="scrollbar-thin mt-4 max-h-[32rem] overflow-auto rounded-[1.25rem] border border-white/10 bg-white p-4 text-slate-900"></div>
+                </div>
+              </div>
+
+              <div class="grid gap-4 md:grid-cols-[1fr_0.9fr]">
+                <div class="rounded-[1.75rem] border border-white/10 bg-slate-950/40 p-5">
+                  <div class="flex items-center justify-between gap-3">
+                    <div>
+                      <div class="text-xs font-semibold uppercase tracking-[0.24em] text-slate-400">Diagram(canvas).render()</div>
+                      <div class="mt-1 text-sm text-slate-300">Canvas-backed browser surface</div>
+                    </div>
+                    <div id="canvas-chip" class="rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em]">
+                      pending
+                    </div>
+                  </div>
+                  <div class="mt-4 rounded-[1.25rem] border border-white/10 bg-[#08101d] p-3">
+                    <canvas id="diagram-canvas" width="900" height="460" class="w-full rounded-2xl bg-[#08101d]"></canvas>
+                  </div>
+                </div>
+
+                <div class="rounded-[1.75rem] border border-white/10 bg-slate-950/40 p-5">
+                  <div class="text-xs font-semibold uppercase tracking-[0.24em] text-slate-400">capabilityMatrix()</div>
+                  <div id="capability-summary" class="mt-3 text-sm leading-6 text-slate-300"></div>
+                  <div id="capability-badges" class="mt-4 flex flex-wrap gap-2"></div>
+                  <div id="capability-table" class="scrollbar-thin mt-4 max-h-64 overflow-auto rounded-[1.25rem] border border-white/10 bg-[#08101d] p-3"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="grid gap-8 lg:grid-cols-[0.95fr_1.05fr]">
+          <div class="glass rounded-[2rem] p-6 shadow-panel sm:p-8">
+            <p class="text-xs font-semibold uppercase tracking-[0.28em] text-cobalt">Support reality</p>
+            <h2 class="mt-2 text-2xl font-bold text-white">Current diagram support from the checked-in capability artifact</h2>
+            <div id="support-grid" class="mt-6 grid gap-3 sm:grid-cols-2"></div>
+          </div>
+
+          <div class="glass rounded-[2rem] p-6 shadow-panel sm:p-8">
+            <p class="text-xs font-semibold uppercase tracking-[0.28em] text-flare">What still blocks the perfect demo</p>
+            <h2 class="mt-2 text-2xl font-bold text-white">The current deployment gap is packaging, not browser UX.</h2>
+            <div class="mt-6 space-y-4">
+              <div class="rounded-3xl border border-white/10 bg-white/5 p-5">
+                <div class="text-sm font-semibold text-white">1. The WASM browser API exists in source</div>
+                <p class="mt-2 text-sm leading-6 text-slate-300">
+                  The repo exposes a browser contract in <code>crates/fm-wasm/src/lib.rs</code>, including SVG, parse, detection, source span, capability,
+                  and canvas methods.
+                </p>
+              </div>
+              <div class="rounded-3xl border border-white/10 bg-white/5 p-5">
+                <div class="text-sm font-semibold text-white">2. The generated browser package is not published</div>
+                <p class="mt-2 text-sm leading-6 text-slate-300">
+                  There is no <code>pkg/frankenmermaid.js</code> or <code>pkg/frankenmermaid_bg.wasm</code> on the repo’s default branch, no tags, and no
+                  GitHub release assets. This page reports that directly.
+                </p>
+              </div>
+              <div class="rounded-3xl border border-white/10 bg-white/5 p-5">
+                <div class="text-sm font-semibold text-white">3. Once published, this page will auto-upgrade</div>
+                <p class="mt-2 text-sm leading-6 text-slate-300">
+                  The bootstrap logic already tries GitHub-backed artifact URLs. As soon as the built package is committed or released, the same file becomes
+                  a live browser demo without needing a local server.
+                </p>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+    import { animate, stagger } from "https://cdn.jsdelivr.net/npm/motion@12.23.24/+esm";
+
+    const capabilityArtifact = {
+      schema_version: 1,
+      project: "frankenmermaid",
+      status_counts: {
+        experimental: 1,
+        implemented: 11,
+        partial: 22,
+        unsupported: 1
+      },
+      claims: [
+        ["flowchart", "implemented", "full"],
+        ["sequence", "partial", "partial"],
+        ["class", "partial", "partial"],
+        ["state", "partial", "partial"],
+        ["er", "partial", "partial"],
+        ["C4Context", "partial", "basic"],
+        ["C4Container", "partial", "basic"],
+        ["C4Component", "partial", "basic"],
+        ["C4Dynamic", "partial", "basic"],
+        ["C4Deployment", "partial", "basic"],
+        ["architecture-beta", "partial", "basic"],
+        ["block-beta", "partial", "basic"],
+        ["gantt", "partial", "basic"],
+        ["timeline", "partial", "basic"],
+        ["journey", "partial", "basic"],
+        ["gitGraph", "partial", "basic"],
+        ["sankey", "partial", "basic"],
+        ["mindmap", "partial", "basic"],
+        ["pie", "partial", "basic"],
+        ["quadrantChart", "partial", "basic"],
+        ["xyChart", "partial", "basic"],
+        ["requirementDiagram", "partial", "basic"],
+        ["packet-beta", "partial", "basic"]
+      ]
+    };
+
+    const runtimeCandidates = [
+      {
+        label: "jsDelivr from GitHub main",
+        kind: "github-backed-cdn",
+        moduleUrl: "https://cdn.jsdelivr.net/gh/Dicklesworthstone/frankenmermaid@main/pkg/frankenmermaid.js",
+        wasmUrl: "https://cdn.jsdelivr.net/gh/Dicklesworthstone/frankenmermaid@main/pkg/frankenmermaid_bg.wasm"
+      },
+      {
+        label: "raw.githubusercontent main branch",
+        kind: "github-raw",
+        moduleUrl: "https://raw.githubusercontent.com/Dicklesworthstone/frankenmermaid/main/pkg/frankenmermaid.js",
+        wasmUrl: "https://raw.githubusercontent.com/Dicklesworthstone/frankenmermaid/main/pkg/frankenmermaid_bg.wasm"
+      }
+    ];
+
+    const samples = [
+      {
+        id: "flowchart",
+        label: "Flowchart",
+        description: "Implemented",
+        code: `flowchart LR
+    Start([Request]) --> Parse{detectType}
+    Parse -->|flowchart| IR[Shared IR]
+    IR --> Layout[Deterministic layout]
+    Layout --> Svg[SVG renderer]
+    Layout --> Term[Terminal renderer]
+    Layout --> Canvas[Canvas renderer]
+    Canvas --> Wasm[WASM browser surface]`
+      },
+      {
+        id: "sequence",
+        label: "Sequence",
+        description: "Partial",
+        code: `sequenceDiagram
+    participant User
+    participant Browser
+    participant FrankenMermaid
+    User->>Browser: open showcase.html
+    Browser->>FrankenMermaid: init({ theme: "corporate" })
+    FrankenMermaid-->>Browser: renderSvg()
+    Browser-->>User: inline SVG preview`
+      },
+      {
+        id: "class",
+        label: "Class",
+        description: "Partial",
+        code: `classDiagram
+    class MermaidDiagramIr {
+      +diagram_type
+      +nodes
+      +edges
+      +diagnostics
+    }
+    class DiagramLayout {
+      +nodes
+      +edges
+      +bounds
+      +stats
+    }
+    MermaidDiagramIr --> DiagramLayout`
+      },
+      {
+        id: "state",
+        label: "State",
+        description: "Partial",
+        code: `stateDiagram-v2
+    [*] --> Detect
+    Detect --> Parse
+    Parse --> Layout
+    Layout --> Render
+    Render --> [*]`
+      },
+      {
+        id: "er",
+        label: "ER",
+        description: "Partial",
+        code: `erDiagram
+    ENGINE {
+      string runtime "fm-wasm"
+      string target "web"
+    }
+    SHOWCASE {
+      string source "file://"
+      bool standalone
+    }
+    ENGINE ||--|| SHOWCASE : powers`
+      },
+      {
+        id: "gantt",
+        label: "Gantt",
+        description: "Partial/basic",
+        code: `gantt
+    title Browser packaging gap
+    dateFormat  YYYY-MM-DD
+    section Runtime
+    WASM source exists       :done, a1, 2026-03-01, 3d
+    GitHub pkg published     :crit, a2, 2026-03-05, 2d
+    Standalone demo file     :active, a3, 2026-03-15, 1d`
+      },
+      {
+        id: "journey",
+        label: "Journey",
+        description: "Partial/basic",
+        code: `journey
+    title Why this project exists
+    section Browser demos
+      mermaid browser baseline: 5: User
+      deterministic Rust core: 4: User
+      terminal renderer: 5: User
+      explicit capability matrix: 5: User`
+      }
+    ];
+
+    const els = {
+      sampleButtons: document.getElementById("sample-buttons"),
+      input: document.getElementById("diagram-input"),
+      renderButton: document.getElementById("render-button"),
+      retryRuntime: document.getElementById("retry-runtime"),
+      runtimeBanner: document.getElementById("runtime-banner"),
+      runtimeSource: document.getElementById("runtime-source"),
+      runtimeMode: document.getElementById("runtime-mode"),
+      runtimeEndpoints: document.getElementById("runtime-endpoints"),
+      fmSvg: document.getElementById("fm-svg"),
+      mermaidSvg: document.getElementById("mermaid-svg"),
+      detectOutput: document.getElementById("detect-output"),
+      parseOutput: document.getElementById("parse-output"),
+      parseSummary: document.getElementById("parse-summary"),
+      spanOutput: document.getElementById("span-output"),
+      capabilitySummary: document.getElementById("capability-summary"),
+      capabilityBadges: document.getElementById("capability-badges"),
+      capabilityTable: document.getElementById("capability-table"),
+      fmRenderChip: document.getElementById("fm-render-chip"),
+      mermaidChip: document.getElementById("mermaid-chip"),
+      canvasChip: document.getElementById("canvas-chip"),
+      canvas: document.getElementById("diagram-canvas"),
+      supportGrid: document.getElementById("support-grid")
+    };
+
+    let frankenRuntime = null;
+    let diagramInstance = null;
+    let currentSample = samples[0];
+
+    mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: "loose",
+      theme: "default",
+      flowchart: {
+        useMaxWidth: true
+      }
+    });
+
+    function badgeClass(status) {
+      switch (status) {
+        case "implemented":
+          return "badge-implemented";
+        case "partial":
+          return "badge-partial";
+        case "experimental":
+          return "badge-experimental";
+        default:
+          return "badge-unsupported";
+      }
+    }
+
+    function setChip(el, text, cls) {
+      el.textContent = text;
+      el.className = `rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] ${cls}`;
+    }
+
+    function pretty(value) {
+      return JSON.stringify(value, null, 2);
+    }
+
+    function createSampleButtons() {
+      els.sampleButtons.innerHTML = "";
+      for (const sample of samples) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.dataset.sample = sample.id;
+        button.className =
+          "sample-button rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:border-cobalt/30 hover:bg-cobalt/10";
+        button.innerHTML = `<span>${sample.label}</span><span class="ml-2 text-xs text-slate-400">${sample.description}</span>`;
+        button.addEventListener("click", () => {
+          currentSample = sample;
+          els.input.value = sample.code;
+          updateActiveSample();
+          renderAll();
+        });
+        els.sampleButtons.appendChild(button);
+      }
+      updateActiveSample();
+    }
+
+    function updateActiveSample() {
+      for (const button of els.sampleButtons.querySelectorAll("button")) {
+        button.classList.toggle("active", button.dataset.sample === currentSample.id);
+      }
+    }
+
+    function renderSupportGrid() {
+      els.supportGrid.innerHTML = "";
+      for (const [name, status, level] of capabilityArtifact.claims) {
+        const card = document.createElement("div");
+        card.className = "rounded-3xl border border-white/10 bg-white/5 p-4";
+        card.innerHTML = `
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <div class="text-sm font-semibold text-white">${name}</div>
+              <div class="mt-1 text-xs uppercase tracking-[0.18em] text-slate-400">${level}</div>
+            </div>
+            <div class="pill ${badgeClass(status)} rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em]">${status}</div>
+          </div>
+        `;
+        els.supportGrid.appendChild(card);
+      }
+    }
+
+    function renderCapabilityPanel(matrix) {
+      const counts = matrix.status_counts || capabilityArtifact.status_counts;
+      els.capabilitySummary.innerHTML = `
+        <div><span class="font-semibold text-white">${matrix.project || "frankenmermaid"}</span> publishes a versioned capability matrix instead of claiming blanket support.</div>
+        <div class="mt-2">Implemented: <span class="text-mint">${counts.implemented ?? 0}</span> · Partial: <span class="text-amber-300">${counts.partial ?? 0}</span> · Experimental: <span class="text-blush">${counts.experimental ?? 0}</span> · Unsupported: <span class="text-rose-300">${counts.unsupported ?? 0}</span></div>
+      `;
+
+      els.capabilityBadges.innerHTML = "";
+      for (const [name, status] of capabilityArtifact.claims.slice(0, 8)) {
+        const badge = document.createElement("div");
+        badge.className = `pill ${badgeClass(status)} rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em]`;
+        badge.textContent = `${name} · ${status}`;
+        els.capabilityBadges.appendChild(badge);
+      }
+
+      const rows = capabilityArtifact.claims
+        .map(
+          ([name, status, level]) => `
+            <tr class="border-b border-white/5">
+              <td class="px-3 py-2 font-medium text-white">${name}</td>
+              <td class="px-3 py-2">
+                <span class="pill ${badgeClass(status)} rounded-full px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.18em]">${status}</span>
+              </td>
+              <td class="px-3 py-2 text-slate-300">${level}</td>
+            </tr>
+          `
+        )
+        .join("");
+
+      els.capabilityTable.innerHTML = `
+        <table class="min-w-full text-left text-xs">
+          <thead class="sticky top-0 bg-[#08101d] text-slate-400">
+            <tr>
+              <th class="px-3 py-2 font-semibold uppercase tracking-[0.18em]">Diagram</th>
+              <th class="px-3 py-2 font-semibold uppercase tracking-[0.18em]">Status</th>
+              <th class="px-3 py-2 font-semibold uppercase tracking-[0.18em]">Level</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      `;
+    }
+
+    async function probeUrl(url, expectBinary = false) {
+      try {
+        const response = await fetch(url, { method: "GET", cache: "no-store" });
+        return {
+          ok: response.ok,
+          status: response.status,
+          type: response.headers.get("content-type") || "unknown",
+          detail: expectBinary ? "binary probe" : "module probe"
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          status: "network",
+          type: "unavailable",
+          detail: error instanceof Error ? error.message : String(error)
+        };
+      }
+    }
+
+    async function loadFrankenRuntime() {
+      frankenRuntime = null;
+      if (diagramInstance && typeof diagramInstance.destroy === "function") {
+        diagramInstance.destroy();
+      }
+      diagramInstance = null;
+
+      els.runtimeBanner.innerHTML = `<div class="text-sm text-slate-300">Checking GitHub-backed runtime endpoints and attempting dynamic import...</div>`;
+      els.runtimeEndpoints.innerHTML = "";
+      setChip(els.fmRenderChip, "waiting", "border-white/10 bg-white/5 text-slate-300");
+      setChip(els.canvasChip, "waiting", "border-white/10 bg-white/5 text-slate-300");
+
+      const diagnostics = [];
+
+      for (const candidate of runtimeCandidates) {
+        const jsProbe = await probeUrl(candidate.moduleUrl);
+        const wasmProbe = await probeUrl(candidate.wasmUrl, true);
+        diagnostics.push({ candidate, jsProbe, wasmProbe });
+
+        const item = document.createElement("div");
+        item.className = "rounded-2xl border border-white/10 bg-white/5 p-4";
+        item.innerHTML = `
+          <div class="font-semibold text-white">${candidate.label}</div>
+          <div class="mt-2 text-xs leading-6 text-slate-300">
+            <div><span class="text-slate-500">JS:</span> ${candidate.moduleUrl}</div>
+            <div><span class="text-slate-500">WASM:</span> ${candidate.wasmUrl}</div>
+          </div>
+          <div class="mt-3 grid gap-2 text-xs sm:grid-cols-2">
+            <div class="rounded-xl border border-white/10 bg-slate-950/40 p-3">
+              <div class="font-semibold text-slate-200">JS probe</div>
+              <div class="mt-1 text-slate-400">status: ${jsProbe.status}</div>
+              <div class="text-slate-400">type: ${jsProbe.type}</div>
+            </div>
+            <div class="rounded-xl border border-white/10 bg-slate-950/40 p-3">
+              <div class="font-semibold text-slate-200">WASM probe</div>
+              <div class="mt-1 text-slate-400">status: ${wasmProbe.status}</div>
+              <div class="text-slate-400">type: ${wasmProbe.type}</div>
+            </div>
+          </div>
+        `;
+        els.runtimeEndpoints.appendChild(item);
+
+        if (!jsProbe.ok || !wasmProbe.ok) {
+          continue;
+        }
+
+        try {
+          const runtime = await import(candidate.moduleUrl);
+          if (!runtime || typeof runtime.default !== "function" || typeof runtime.init !== "function") {
+            throw new Error("module imported but did not expose expected frankenmermaid bindings");
+          }
+          await runtime.default(candidate.wasmUrl);
+          await runtime.init({ theme: "corporate" });
+          frankenRuntime = { ...runtime, source: candidate };
+          els.runtimeBanner.innerHTML = `
+            <div class="rounded-3xl border border-mint/20 bg-mint/10 p-5">
+              <div class="text-sm font-semibold text-mint">Runtime online</div>
+              <div class="mt-2 text-sm leading-6 text-slate-200">
+                Successfully loaded frankenmermaid from <span class="font-semibold text-white">${candidate.label}</span>.
+              </div>
+            </div>
+          `;
+          els.runtimeSource.textContent = candidate.moduleUrl;
+          setChip(els.runtimeMode, "live runtime", "border-mint/20 bg-mint/10 text-mint");
+          return;
+        } catch (error) {
+          diagnostics.push({
+            candidate,
+            importError: error instanceof Error ? error.message : String(error)
+          });
+        }
+      }
+
+      els.runtimeBanner.innerHTML = `
+        <div class="rounded-3xl border border-rose-400/20 bg-rose-400/10 p-5">
+          <div class="text-sm font-semibold text-rose-200">Runtime unavailable on GitHub right now</div>
+          <div class="mt-2 text-sm leading-6 text-slate-200">
+            This page could not find a published frankenmermaid browser package on the repo branch or a GitHub-backed CDN mirror. That is a packaging/publishing gap, not a UI limitation of this showcase file.
+          </div>
+        </div>
+      `;
+      els.runtimeSource.textContent = "No published JS/WASM artifact detected";
+      setChip(els.runtimeMode, "artifact missing", "border-rose-300/20 bg-rose-300/10 text-rose-200");
+    }
+
+    async function renderWithMermaid(source) {
+      try {
+        const id = `mermaid-${crypto.randomUUID()}`;
+        const { svg } = await mermaid.render(id, source);
+        els.mermaidSvg.innerHTML = svg;
+        setChip(els.mermaidChip, "ready", "border-mint/20 bg-mint/10 text-mint");
+      } catch (error) {
+        els.mermaidSvg.innerHTML = `<div class="rounded-2xl border border-rose-300/20 bg-rose-300/10 p-4 text-sm text-rose-200">${String(error)}</div>`;
+        setChip(els.mermaidChip, "render error", "border-rose-300/20 bg-rose-300/10 text-rose-200");
+      }
+    }
+
+    async function renderWithFranken(source) {
+      if (!frankenRuntime) {
+        els.fmSvg.innerHTML = `
+          <div class="rounded-2xl border border-amber-300/20 bg-amber-300/10 p-4 text-sm leading-6 text-amber-100">
+            <div class="font-semibold">frankenmermaid browser package is not published on GitHub yet.</div>
+            <div class="mt-2">
+              The showcase is wired to the real API contract, but the generated <code>pkg/frankenmermaid.js</code> and <code>pkg/frankenmermaid_bg.wasm</code> assets are missing from the repository branch/release surface, so live WASM rendering cannot boot from remote URLs today.
+            </div>
+          </div>
+        `;
+        els.detectOutput.textContent = pretty({
+          status: "runtime_unavailable",
+          reason: "No GitHub-hosted frankenmermaid browser bundle could be loaded."
+        });
+        els.parseOutput.textContent = pretty({
+          status: "runtime_unavailable",
+          expectedSurface: ["init", "renderSvg", "detectType", "parse", "sourceSpans", "capabilityMatrix", "Diagram"]
+        });
+        els.spanOutput.textContent = pretty({
+          status: "runtime_unavailable"
+        });
+        els.parseSummary.textContent = "Parse skipped because runtime was unavailable";
+        renderCapabilityPanel(capabilityArtifact);
+        setChip(els.fmRenderChip, "artifact missing", "border-rose-300/20 bg-rose-300/10 text-rose-200");
+        setChip(els.canvasChip, "artifact missing", "border-rose-300/20 bg-rose-300/10 text-rose-200");
+        const ctx = els.canvas.getContext("2d");
+        ctx.clearRect(0, 0, els.canvas.width, els.canvas.height);
+        ctx.fillStyle = "#0b1526";
+        ctx.fillRect(0, 0, els.canvas.width, els.canvas.height);
+        ctx.fillStyle = "#ffd089";
+        ctx.font = "600 22px IBM Plex Sans, sans-serif";
+        ctx.fillText("Canvas surface waiting on published frankenmermaid WASM", 28, 48);
+        ctx.fillStyle = "#c6d4e1";
+        ctx.font = "16px IBM Plex Sans, sans-serif";
+        ctx.fillText("The runtime contract exists in source, but the browser package is not hosted on GitHub yet.", 28, 84);
+        return;
+      }
+
+      try {
+        const svg = await frankenRuntime.renderSvg(source, { theme: "corporate" });
+        els.fmSvg.innerHTML = svg;
+        setChip(els.fmRenderChip, "live", "border-mint/20 bg-mint/10 text-mint");
+      } catch (error) {
+        els.fmSvg.innerHTML = `<div class="rounded-2xl border border-rose-300/20 bg-rose-300/10 p-4 text-sm text-rose-200">${String(error)}</div>`;
+        setChip(els.fmRenderChip, "render error", "border-rose-300/20 bg-rose-300/10 text-rose-200");
+      }
+
+      try {
+        const detected = await frankenRuntime.detectType(source);
+        els.detectOutput.textContent = pretty(detected);
+      } catch (error) {
+        els.detectOutput.textContent = pretty({ error: String(error) });
+      }
+
+      try {
+        const parsed = await frankenRuntime.parse(source);
+        els.parseOutput.textContent = pretty(parsed);
+        const warningCount = Array.isArray(parsed?.warnings) ? parsed.warnings.length : 0;
+        const nodeCount = parsed?.ir?.nodes?.length ?? 0;
+        const edgeCount = parsed?.ir?.edges?.length ?? 0;
+        els.parseSummary.textContent = `nodes ${nodeCount} · edges ${edgeCount} · warnings ${warningCount}`;
+      } catch (error) {
+        els.parseOutput.textContent = pretty({ error: String(error) });
+        els.parseSummary.textContent = "Parse failed";
+      }
+
+      try {
+        const spans = await frankenRuntime.sourceSpans(source);
+        els.spanOutput.textContent = pretty(spans);
+      } catch (error) {
+        els.spanOutput.textContent = pretty({ error: String(error) });
+      }
+
+      try {
+        const matrix = await frankenRuntime.capabilityMatrix();
+        renderCapabilityPanel(matrix);
+      } catch (error) {
+        renderCapabilityPanel(capabilityArtifact);
+      }
+
+      try {
+        if (diagramInstance && typeof diagramInstance.destroy === "function") {
+          diagramInstance.destroy();
+        }
+        diagramInstance = new frankenRuntime.Diagram(els.canvas, { theme: "corporate" });
+        const renderResult = await diagramInstance.render(source, { theme: "corporate" });
+        setChip(els.canvasChip, "live", "border-mint/20 bg-mint/10 text-mint");
+        if (renderResult?.canvas) {
+          els.canvasChip.title = pretty(renderResult.canvas);
+        }
+      } catch (error) {
+        const ctx = els.canvas.getContext("2d");
+        ctx.clearRect(0, 0, els.canvas.width, els.canvas.height);
+        ctx.fillStyle = "#0b1526";
+        ctx.fillRect(0, 0, els.canvas.width, els.canvas.height);
+        ctx.fillStyle = "#ff9b9e";
+        ctx.font = "600 22px IBM Plex Sans, sans-serif";
+        ctx.fillText("Canvas render failed", 28, 48);
+        ctx.fillStyle = "#c6d4e1";
+        ctx.font = "16px IBM Plex Sans, sans-serif";
+        ctx.fillText(String(error), 28, 84);
+        setChip(els.canvasChip, "render error", "border-rose-300/20 bg-rose-300/10 text-rose-200");
+      }
+    }
+
+    async function renderAll() {
+      const source = els.input.value;
+      await Promise.all([renderWithMermaid(source), renderWithFranken(source)]);
+    }
+
+    async function boot() {
+      createSampleButtons();
+      renderSupportGrid();
+      renderCapabilityPanel(capabilityArtifact);
+      els.input.value = currentSample.code;
+      await loadFrankenRuntime();
+      await renderAll();
+
+      animate("header .glass", { opacity: [0, 1], y: [24, 0] }, { duration: 0.7, easing: [0.22, 1, 0.36, 1] });
+      animate("main > section", { opacity: [0, 1], y: [28, 0] }, { delay: stagger(0.08), duration: 0.7, easing: [0.22, 1, 0.36, 1] });
+    }
+
+    els.renderButton.addEventListener("click", () => {
+      renderAll();
+    });
+
+    els.retryRuntime.addEventListener("click", async () => {
+      await loadFrankenRuntime();
+      await renderAll();
+    });
+
+    let debounced;
+    els.input.addEventListener("input", () => {
+      window.clearTimeout(debounced);
+      debounced = window.setTimeout(() => {
+        renderAll();
+      }, 260);
+    });
+
+    boot();
+  </script>
+</body>
+</html>

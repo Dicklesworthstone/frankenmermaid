@@ -1,0 +1,16 @@
+{
+  "name": "fm-wasm",
+  "type": "module",
+  "version": "0.1.0",
+  "license": "MIT",
+  "files": [
+    "frankenmermaid_bg.wasm",
+    "frankenmermaid.js",
+    "frankenmermaid.d.ts"
+  ],
+  "main": "frankenmermaid.js",
+  "types": "frankenmermaid.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
