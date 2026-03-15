@@ -1885,6 +1885,8 @@ const fn decode_hex_nibble(value: u8) -> Option<u8> {
 
 fn parse_journey(input: &str, builder: &mut IrBuilder) {
     let mut previous_step = None;
+    let mut current_section: Option<usize> = None;
+    let mut current_section_subgraph: Option<usize> = None;
 
     for (index, line) in input.lines().enumerate() {
         let line_number = index + 1;
@@ -1893,18 +1895,57 @@ fn parse_journey(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
-        if trimmed == "journey" || trimmed.starts_with("title ") || trimmed.starts_with("section ")
-        {
+        if trimmed == "journey" || trimmed.starts_with("title ") {
             continue;
         }
 
-        let Some(step_name) = parse_name_before_colon(trimmed) else {
+        let span = span_for(line_number, line);
+
+        if let Some(section_name) = trimmed.strip_prefix("section ") {
+            let Some(section_title) = clean_label(Some(section_name)) else {
+                builder.add_warning(format!(
+                    "Line {line_number}: journey section name is empty: {trimmed}"
+                ));
+                current_section = None;
+                current_section_subgraph = None;
+                continue;
+            };
+            let section_key = format!(
+                "journey-section-{}",
+                normalize_compound_identifier(&section_title)
+            );
+            let Some(cluster_index) =
+                builder.ensure_cluster(&section_key, Some(&section_title), span)
+            else {
+                builder.add_warning(format!(
+                    "Line {line_number}: invalid journey section identifier: {trimmed}"
+                ));
+                current_section = None;
+                current_section_subgraph = None;
+                continue;
+            };
+            let Some(subgraph_index) =
+                builder.ensure_subgraph(&section_key, Some(&section_title), span, None, Some(cluster_index))
+            else {
+                builder.add_warning(format!(
+                    "Line {line_number}: invalid journey section declaration: {trimmed}"
+                ));
+                current_section = None;
+                current_section_subgraph = None;
+                continue;
+            };
+            current_section = Some(cluster_index);
+            current_section_subgraph = Some(subgraph_index);
+            continue;
+        }
+
+        let Some(step) = parse_journey_step(trimmed) else {
             builder.add_warning(format!(
                 "Line {line_number}: unsupported journey syntax: {trimmed}"
             ));
             continue;
         };
-        let step_id = normalize_identifier(step_name);
+        let step_id = normalize_compound_identifier(&step.name);
         if step_id.is_empty() {
             builder.add_warning(format!(
                 "Line {line_number}: journey step identifier could not be derived: {trimmed}"
@@ -1912,8 +1953,27 @@ fn parse_journey(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
-        let span = span_for(line_number, line);
-        let current_step = builder.intern_node(&step_id, Some(step_name), NodeShape::Rounded, span);
+        let current_step = builder.intern_node(&step_id, Some(&step.name), NodeShape::Rounded, span);
+        if let Some(step_node) = current_step {
+            builder.add_class_to_node(&step_id, "journey-step", span);
+            if let Some(score) = step.score {
+                builder.add_class_to_node(&step_id, &format!("journey-score-{score}"), span);
+            }
+            for actor in &step.actors {
+                builder.add_class_to_node(&step_id, "journey-actor", span);
+                builder.add_class_to_node(
+                    &step_id,
+                    &format!("journey-actor-{}", normalize_compound_identifier(actor)),
+                    span,
+                );
+            }
+            if let Some(section_idx) = current_section {
+                builder.add_node_to_cluster(section_idx, step_node);
+            }
+            if let Some(subgraph_idx) = current_section_subgraph {
+                builder.add_node_to_subgraph(subgraph_idx, step_node);
+            }
+        }
         if let (Some(prev), Some(current)) = (previous_step, current_step) {
             builder.push_edge(prev, current, ArrowType::Line, None, span);
         }
@@ -1921,6 +1981,33 @@ fn parse_journey(input: &str, builder: &mut IrBuilder) {
             previous_step = current_step;
         }
     }
+}
+
+struct JourneyStep {
+    name: String,
+    score: Option<u8>,
+    actors: Vec<String>,
+}
+
+fn parse_journey_step(line: &str) -> Option<JourneyStep> {
+    let mut segments = line.split(':').map(str::trim);
+    let name = clean_label(segments.next())?;
+
+    let score = segments.next().and_then(|raw| raw.parse::<u8>().ok());
+    let actors = segments
+        .next()
+        .map(|raw| {
+            raw.split(',')
+                .filter_map(|actor| clean_label(Some(actor)))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Some(JourneyStep {
+        name,
+        score,
+        actors,
+    })
 }
 
 fn parse_timeline(input: &str, builder: &mut IrBuilder) {
@@ -4055,6 +4142,32 @@ fn normalize_identifier(raw: &str) -> String {
     }
 }
 
+fn normalize_compound_identifier(raw: &str) -> String {
+    let cleaned = raw
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim_matches('`')
+        .trim();
+    if cleaned.is_empty() {
+        return String::new();
+    }
+
+    let mut normalized = String::with_capacity(cleaned.len());
+    let mut previous_was_sep = false;
+    for ch in cleaned.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/') {
+            normalized.push(ch);
+            previous_was_sep = false;
+        } else if !previous_was_sep {
+            normalized.push('_');
+            previous_was_sep = true;
+        }
+    }
+
+    normalized.trim_matches('_').to_string()
+}
+
 fn clean_label(raw: Option<&str>) -> Option<String> {
     let raw = raw?;
     let cleaned = raw
@@ -5445,6 +5558,63 @@ mod tests {
         assert_eq!(parsed.ir.diagram_type, DiagramType::Journey);
         assert_eq!(parsed.ir.nodes.len(), 2);
         assert_eq!(parsed.ir.edges.len(), 1);
+
+        let write_code = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "Write")
+            .expect("journey step node");
+        assert!(
+            write_code
+                .classes
+                .iter()
+                .any(|class_name| class_name == "journey-score-5")
+        );
+        assert!(
+            write_code
+                .classes
+                .iter()
+                .any(|class_name| class_name == "journey-actor-me")
+        );
+        assert_eq!(parsed.ir.clusters.len(), 1);
+        assert_eq!(parsed.ir.graph.subgraphs.len(), 1);
+    }
+
+    #[test]
+    fn journey_sections_group_steps_and_keep_multiple_actors() {
+        let parsed = parse_mermaid(
+            "journey\nsection Board\nBacklog: 5: Alice, Bob\nsection Ship\nRelease: 4: Alice",
+        );
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Journey);
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 1);
+        assert_eq!(parsed.ir.clusters.len(), 2);
+        assert_eq!(parsed.ir.graph.subgraphs.len(), 2);
+
+        let backlog = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "Backlog")
+            .expect("backlog node");
+        assert!(
+            backlog
+                .classes
+                .iter()
+                .any(|class_name| class_name == "journey-actor-Alice")
+        );
+        assert!(
+            backlog
+                .classes
+                .iter()
+                .any(|class_name| class_name == "journey-actor-Bob")
+        );
+
+        let first_section = &parsed.ir.graph.subgraphs[0];
+        let second_section = &parsed.ir.graph.subgraphs[1];
+        assert_eq!(first_section.members.len(), 1);
+        assert_eq!(second_section.members.len(), 1);
     }
 
     #[test]

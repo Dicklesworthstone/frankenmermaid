@@ -820,7 +820,7 @@ fn detect_reports_architecture_as_basic_support() {
     let json: serde_json::Value =
         serde_json::from_str(&stdout).expect("detect --json must print valid JSON");
     assert_eq!(json["diagram_type"], "architecture-beta");
-    assert_eq!(json["support_level"], "Partial");
+    assert_eq!(json["support_level"], "basic");
 }
 
 #[test]
