@@ -917,7 +917,30 @@ fn parse_summary_reports_c4_counts_without_compatibility_fallback() {
 }
 
 #[test]
-fn validate_strict_mode_fails_unsupported_family_with_compatibility_diagnostic() {
+fn parse_summary_reports_xychart_counts_without_compatibility_fallback() {
+    let output = run_cli(
+        &["parse", "-", "--parse-mode", "strict", "--pretty"],
+        "xychart-beta\nx-axis [Q1, Q2, Q3]\nline Revenue [1,2,3]\nbar Forecast [2,3,4]\n",
+    );
+    assert!(
+        output.status.success(),
+        "parse summary should succeed for xychart; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout must be utf-8");
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("parse summary must print valid JSON");
+    assert_eq!(json["diagram_type"], "xyChart");
+    assert_eq!(json["parse_mode"], "strict");
+    assert_eq!(json["support_level"], "Partial");
+    assert_eq!(json["node_count"], 6);
+    assert_eq!(json["edge_count"], 2);
+    assert_eq!(json["diagnostic_count"], 0);
+}
+
+#[test]
+fn validate_strict_mode_accepts_xychart_without_compatibility_error() {
     let output = run_cli(
         &[
             "validate",
@@ -927,22 +950,24 @@ fn validate_strict_mode_fails_unsupported_family_with_compatibility_diagnostic()
             "--format",
             "json",
         ],
-        "xychart-beta\nline [1,2,3]\n",
+        "xychart-beta\nx-axis [Q1, Q2, Q3]\nline Revenue [1,2,3]\n",
     );
     assert!(
-        !output.status.success(),
-        "validate strict should fail for unsupported family"
+        output.status.success(),
+        "validate strict should succeed for xychart; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
     );
 
     let stdout = String::from_utf8(output.stdout).expect("stdout must be utf-8");
     let json: serde_json::Value =
         serde_json::from_str(&stdout).expect("validate json must print valid JSON");
-    assert_eq!(json["valid"], false);
+    assert_eq!(json["valid"], true);
     assert_eq!(json["parse_mode"], "strict");
-    assert!(json["diagnostics"].as_array().is_some_and(|diagnostics| {
-        diagnostics.iter().any(|diagnostic| {
-            diagnostic["rule_id"] == "parse.compatibility" && diagnostic["severity"] == "error"
-        })
+    assert_eq!(json["diagram_type"], "xyChart");
+    assert!(json["diagnostics"].as_array().is_some_and(|items| {
+        items
+            .iter()
+            .all(|diagnostic| diagnostic["rule_id"] != "parse.compatibility")
     }));
 }
 

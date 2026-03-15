@@ -236,8 +236,9 @@ impl DiagramType {
             | Self::C4Container
             | Self::C4Component
             | Self::C4Dynamic
-            | Self::C4Deployment => MermaidSupportLevel::Partial,
-            Self::XyChart | Self::Unknown => MermaidSupportLevel::Unsupported,
+            | Self::C4Deployment
+            | Self::XyChart => MermaidSupportLevel::Partial,
+            Self::Unknown => MermaidSupportLevel::Unsupported,
         }
     }
 
@@ -262,8 +263,8 @@ impl DiagramType {
             | Self::C4Container
             | Self::C4Component
             | Self::C4Dynamic
-            | Self::C4Deployment => "basic",
-            Self::XyChart => "unsupported",
+            | Self::C4Deployment
+            | Self::XyChart => "basic",
             Self::Unknown => "unknown",
         }
     }

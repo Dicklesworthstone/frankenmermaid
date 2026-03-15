@@ -202,6 +202,7 @@ pub fn parse_mermaid_with_detection(
         | DiagramType::C4Dynamic
         | DiagramType::C4Deployment => parse_c4(content, &mut builder),
         DiagramType::PacketBeta => parse_packet(content, &mut builder),
+        DiagramType::XyChart => parse_xychart(content, &mut builder),
         DiagramType::Gantt => parse_gantt(content, &mut builder),
         DiagramType::Pie => parse_pie(content, &mut builder),
         DiagramType::QuadrantChart => parse_quadrant(content, &mut builder),
@@ -209,9 +210,6 @@ pub fn parse_mermaid_with_detection(
         DiagramType::BlockBeta => parse_block_beta(content, &mut builder),
         DiagramType::Unknown => {
             apply_unknown_contract(content, &mut builder, parse_mode);
-        }
-        _ => {
-            apply_support_contract(content, &mut builder, diagram_type, parse_mode);
         }
     }
 
@@ -269,6 +267,7 @@ fn apply_unknown_contract(content: &str, builder: &mut IrBuilder, parse_mode: Me
     }
 }
 
+#[allow(dead_code)] // Reserved for future detectible diagram families that still need fallback handling.
 fn apply_support_contract(
     content: &str,
     builder: &mut IrBuilder,
@@ -2411,6 +2410,78 @@ fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
     }
 }
 
+fn parse_xychart(input: &str, builder: &mut IrBuilder) {
+    let mut x_labels: Vec<String> = Vec::new();
+
+    for (index, line) in input.lines().enumerate() {
+        let line_number = index + 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || is_comment(trimmed) {
+            continue;
+        }
+
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.starts_with("xychart") || lower.starts_with("title ") {
+            continue;
+        }
+
+        if lower.starts_with("x-axis ") {
+            if let Some(raw_labels) = bracket_contents(trimmed) {
+                x_labels = parse_chart_value_list(raw_labels);
+            }
+            continue;
+        }
+
+        if lower.starts_with("y-axis ") {
+            continue;
+        }
+
+        let Some((series_kind, series_name, raw_values)) = parse_xychart_series(trimmed) else {
+            builder.add_warning(format!(
+                "Line {line_number}: unsupported xychart syntax: {trimmed}"
+            ));
+            continue;
+        };
+
+        let values = parse_chart_value_list(raw_values);
+        if values.is_empty() {
+            builder.add_warning(format!(
+                "Line {line_number}: xychart series is missing values: {trimmed}"
+            ));
+            continue;
+        }
+
+        let span = span_for(line_number, line);
+        let base_name = series_name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .unwrap_or(series_kind);
+        let base_id = normalize_compound_identifier(base_name);
+        let mut previous_node = None;
+
+        for (point_index, value) in values.iter().enumerate() {
+            let x_label = x_labels
+                .get(point_index)
+                .cloned()
+                .unwrap_or_else(|| (point_index + 1).to_string());
+            let node_label = format!("{base_name} {x_label}: {value}");
+            let node_id = format!("{base_id}_{}", point_index + 1);
+            let Some(node) =
+                builder.intern_node(&node_id, Some(&node_label), NodeShape::Circle, span)
+            else {
+                continue;
+            };
+
+            if matches!(series_kind, "line" | "area")
+                && let Some(previous) = previous_node
+            {
+                builder.push_edge(previous, node, ArrowType::Line, None, span);
+            }
+            previous_node = Some(node);
+        }
+    }
+}
+
 fn parse_sankey(input: &str, builder: &mut IrBuilder) {
     for (index, line) in input.lines().enumerate() {
         let line_number = index + 1;
@@ -4214,6 +4285,38 @@ fn parse_name_before_colon(line: &str) -> Option<&str> {
     (!candidate.is_empty()).then_some(candidate)
 }
 
+fn bracket_contents(line: &str) -> Option<&str> {
+    let start = line.find('[')?;
+    let end = line.rfind(']')?;
+    (end > start).then_some(&line[start + 1..end])
+}
+
+fn parse_chart_value_list(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.trim_matches('"').trim_matches('\'').to_string())
+        .collect()
+}
+
+fn parse_xychart_series(line: &str) -> Option<(&str, Option<String>, &str)> {
+    let (series_kind, remainder) = line.split_once(char::is_whitespace)?;
+    let series_kind = series_kind.trim();
+    if !matches!(series_kind, "line" | "bar" | "area") {
+        return None;
+    }
+
+    let values = bracket_contents(remainder)?;
+    let name_segment = remainder.split_once('[').map(|(left, _)| left.trim())?;
+    let series_name = (!name_segment.is_empty()).then(|| {
+        name_segment
+            .trim_matches('"')
+            .trim_matches('\'')
+            .to_string()
+    });
+    Some((series_kind, series_name, values))
+}
+
 fn parse_init_directives(input: &str, builder: &mut IrBuilder) {
     for (index, line) in input.lines().enumerate() {
         let line_number = index + 1;
@@ -5854,6 +5957,18 @@ mod tests {
         );
         assert_eq!(parsed.ir.diagram_type, DiagramType::QuadrantChart);
         assert_eq!(parsed.ir.nodes.len(), 1);
+    }
+
+    #[test]
+    fn xychart_parses_series_into_points_and_edges() {
+        let parsed = parse_mermaid(
+            "xychart-beta\ntitle \"Quarterly\"\nx-axis [Q1, Q2, Q3]\nbar Revenue [12, 18, 24]\nline Target [10, 15, 20]",
+        );
+        assert_eq!(parsed.ir.diagram_type, DiagramType::XyChart);
+        assert_eq!(parsed.ir.nodes.len(), 6);
+        assert_eq!(parsed.ir.edges.len(), 2);
+        assert!(parsed.ir.nodes.iter().any(|node| node.id == "Revenue_1"));
+        assert!(parsed.ir.nodes.iter().any(|node| node.id == "Target_3"));
     }
 
     #[test]
