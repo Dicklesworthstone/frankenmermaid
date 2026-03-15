@@ -128,7 +128,7 @@ Typography, spacing, theming, accessibility, and responsive behavior are part of
 | `timeline` | Partial |
 | `journey` | Partial |
 | `gitGraph` | Partial |
-| `sankey` | Unsupported |
+| `sankey` | Partial |
 | `mindmap` | Partial |
 | `pie` | Partial |
 | `quadrantChart` | Partial |

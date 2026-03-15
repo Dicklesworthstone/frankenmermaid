@@ -192,6 +192,7 @@ pub fn parse_mermaid_with_detection(
         DiagramType::Er => parse_er(content, &mut builder),
         DiagramType::Journey => parse_journey(content, &mut builder),
         DiagramType::Timeline => parse_timeline(content, &mut builder),
+        DiagramType::Sankey => parse_sankey(content, &mut builder),
         DiagramType::PacketBeta => parse_packet(content, &mut builder),
         DiagramType::Gantt => parse_gantt(content, &mut builder),
         DiagramType::Pie => parse_pie(content, &mut builder),
@@ -2310,6 +2311,73 @@ fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
     }
 }
 
+fn parse_sankey(input: &str, builder: &mut IrBuilder) {
+    for (index, line) in input.lines().enumerate() {
+        let line_number = index + 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || is_comment(trimmed) {
+            continue;
+        }
+
+        let lower = trimmed.to_ascii_lowercase();
+        if is_sankey_header(&lower) || lower.starts_with("title ") {
+            continue;
+        }
+
+        let Some((source, target, value)) = parse_sankey_record(trimmed) else {
+            builder.add_warning(format!(
+                "Line {line_number}: unsupported sankey syntax: {trimmed}"
+            ));
+            continue;
+        };
+
+        let span = span_for(line_number, line);
+        let Some(source_label) = clean_label(Some(&source)) else {
+            builder.add_warning(format!(
+                "Line {line_number}: sankey row is missing a source label: {trimmed}"
+            ));
+            continue;
+        };
+        let Some(target_label) = clean_label(Some(&target)) else {
+            builder.add_warning(format!(
+                "Line {line_number}: sankey row is missing a target label: {trimmed}"
+            ));
+            continue;
+        };
+
+        if value.parse::<f64>().is_err() {
+            builder.add_warning(format!(
+                "Line {line_number}: sankey flow value is not numeric; preserving raw label '{value}'"
+            ));
+        }
+
+        let Some(source_node) =
+            builder.intern_node(&source_label, Some(&source_label), NodeShape::Rect, span)
+        else {
+            builder.add_warning(format!(
+                "Line {line_number}: sankey source node could not be created: {trimmed}"
+            ));
+            continue;
+        };
+        let Some(target_node) =
+            builder.intern_node(&target_label, Some(&target_label), NodeShape::Rect, span)
+        else {
+            builder.add_warning(format!(
+                "Line {line_number}: sankey target node could not be created: {trimmed}"
+            ));
+            continue;
+        };
+
+        builder.push_edge(
+            source_node,
+            target_node,
+            ArrowType::Arrow,
+            Some(&value),
+            span,
+        );
+    }
+}
+
 /// Git graph state tracker for parsing.
 struct GitGraphState {
     /// Map of branch names to their current head commit node ID
@@ -3978,6 +4046,58 @@ fn split_statements(line: &str) -> impl Iterator<Item = &str> {
     statements.into_iter()
 }
 
+fn parse_sankey_record(line: &str) -> Option<(String, String, String)> {
+    let fields = split_csv_fields(line)?;
+    if fields.len() != 3 {
+        return None;
+    }
+
+    Some((
+        fields[0].trim().to_string(),
+        fields[1].trim().to_string(),
+        fields[2].trim().to_string(),
+    ))
+}
+
+fn split_csv_fields(line: &str) -> Option<Vec<String>> {
+    let mut fields = Vec::new();
+    let mut current = String::new();
+    let mut in_quote: Option<char> = None;
+    let mut chars = line.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if let Some(quote) = in_quote {
+            if ch == quote {
+                if chars.peek().copied() == Some(quote) {
+                    current.push(quote);
+                    let _ = chars.next();
+                } else {
+                    in_quote = None;
+                }
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+
+        match ch {
+            '"' | '\'' => in_quote = Some(ch),
+            ',' => {
+                fields.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if in_quote.is_some() {
+        return None;
+    }
+
+    fields.push(current.trim().to_string());
+    Some(fields)
+}
+
 fn strip_flowchart_inline_comment(line: &str) -> &str {
     let mut in_quote: Option<char> = None;
     let mut escaped = false;
@@ -4049,6 +4169,19 @@ fn parse_graph_direction(header: &str) -> Option<GraphDirection> {
 
 fn is_block_beta_header(line: &str) -> bool {
     matches_keyword_header(line, "block-beta") || matches_keyword_header(line, "block")
+}
+
+fn is_sankey_header(line: &str) -> bool {
+    line == "sankey"
+        || line == "sankey-beta"
+        || line
+            .strip_prefix("sankey")
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(char::is_whitespace)
+        || line
+            .strip_prefix("sankey-beta")
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(char::is_whitespace)
 }
 
 fn matches_keyword_header(line: &str, keyword: &str) -> bool {
@@ -5498,5 +5631,45 @@ cherry-pick id: feat1"#,
         );
         // No nodes should be created from "committed"
         assert_eq!(parsed.ir.nodes.len(), 0);
+    }
+
+    #[test]
+    fn sankey_parses_nodes_edges_and_flow_values() {
+        let parsed = parse_mermaid("sankey-beta\nA, B, 3\nB, C, 2.5\n");
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Sankey);
+        assert_eq!(parsed.ir.nodes.len(), 3);
+        assert_eq!(parsed.ir.edges.len(), 2);
+        assert!(
+            parsed.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            parsed.warnings
+        );
+
+        let edge_labels = parsed
+            .ir
+            .edges
+            .iter()
+            .filter_map(|edge| edge.label)
+            .filter_map(|label_id| parsed.ir.labels.get(label_id.0))
+            .map(|label| label.text.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(edge_labels, vec!["3", "2.5"]);
+        assert!(parsed.ir.nodes.iter().any(|node| node.id == "A"));
+        assert!(parsed.ir.nodes.iter().any(|node| node.id == "B"));
+        assert!(parsed.ir.nodes.iter().any(|node| node.id == "C"));
+    }
+
+    #[test]
+    fn sankey_warns_on_non_numeric_flow_but_keeps_edge() {
+        let parsed = parse_mermaid("sankey-beta\nA, B, many\n");
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Sankey);
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 1);
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("sankey flow value is not numeric"))
+        );
     }
 }

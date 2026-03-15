@@ -670,6 +670,23 @@ fn detect_reports_gitgraph_as_basic_support() {
 }
 
 #[test]
+fn detect_reports_sankey_as_basic_support() {
+    let output = run_cli(&["detect", "-", "--json"], "sankey-beta\nA, B, 3\n");
+    assert!(
+        output.status.success(),
+        "detect --json should succeed; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout must be utf-8");
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("detect --json must print valid JSON");
+    assert_eq!(json["diagram_type"], "sankey");
+    assert_eq!(json["support_level"], "basic");
+    assert_eq!(json["confidence"], "high");
+}
+
+#[test]
 fn detect_reports_block_beta_as_basic_support() {
     let output = run_cli(&["detect", "-", "--json"], "block-beta\nalpha[Alpha]\n");
     assert!(
@@ -786,6 +803,29 @@ fn parse_summary_reports_parse_mode_and_support_level_for_unsupported_family() {
     assert_eq!(json["parse_mode"], "compat");
     assert_eq!(json["support_level"], "Unsupported");
     assert!(json["diagnostic_count"].as_u64().unwrap_or(0) >= 1);
+}
+
+#[test]
+fn parse_summary_reports_sankey_counts_without_compatibility_fallback() {
+    let output = run_cli(
+        &["parse", "-", "--parse-mode", "compat", "--pretty"],
+        "sankey-beta\nA, B, 3\nB, C, 2\n",
+    );
+    assert!(
+        output.status.success(),
+        "parse summary should succeed for sankey; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout must be utf-8");
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("parse summary must print valid JSON");
+    assert_eq!(json["diagram_type"], "sankey");
+    assert_eq!(json["parse_mode"], "compat");
+    assert_eq!(json["support_level"], "Partial");
+    assert_eq!(json["node_count"], 3);
+    assert_eq!(json["edge_count"], 2);
+    assert_eq!(json["diagnostic_count"], 0);
 }
 
 #[test]

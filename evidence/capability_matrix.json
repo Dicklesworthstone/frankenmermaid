@@ -4,8 +4,8 @@
   "status_counts": {
     "experimental": 1,
     "implemented": 11,
-    "partial": 15,
-    "unsupported": 8
+    "partial": 16,
+    "unsupported": 7
   },
   "claims": [
     {
@@ -152,7 +152,7 @@
       "id": "diagram-type/C4Context",
       "category": "diagram_type",
       "title": "Support C4Context diagrams",
-      "status": "unsupported",
+      "status": "partial",
       "advertised_in": [
         "README.md#supported-diagram-types"
       ],
@@ -173,7 +173,7 @@
         }
       ],
       "notes": [
-        "README advertises this family; current code marks it as unsupported capability"
+        "README advertises this family; current code marks it as partial capability"
       ]
     },
     {

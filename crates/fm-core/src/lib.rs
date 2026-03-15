@@ -206,13 +206,13 @@ impl DiagramType {
             | Self::Requirement
             | Self::GitGraph
             | Self::BlockBeta
-            | Self::PacketBeta => MermaidSupportLevel::Partial,
+            | Self::PacketBeta
+            | Self::Sankey => MermaidSupportLevel::Partial,
             Self::C4Context
             | Self::C4Container
             | Self::C4Component
             | Self::C4Dynamic
             | Self::C4Deployment
-            | Self::Sankey
             | Self::XyChart
             | Self::ArchitectureBeta
             | Self::Unknown => MermaidSupportLevel::Unsupported,
@@ -233,13 +233,13 @@ impl DiagramType {
             | Self::Requirement
             | Self::GitGraph
             | Self::BlockBeta
-            | Self::PacketBeta => "basic",
+            | Self::PacketBeta
+            | Self::Sankey => "basic",
             Self::C4Context
             | Self::C4Container
             | Self::C4Component
             | Self::C4Dynamic
             | Self::C4Deployment
-            | Self::Sankey
             | Self::XyChart
             | Self::ArchitectureBeta => "unsupported",
             Self::Unknown => "unknown",
