@@ -179,9 +179,9 @@ pub struct LayoutSpacing {
 impl Default for LayoutSpacing {
     fn default() -> Self {
         Self {
-            node_spacing: 72.0,
-            rank_spacing: 112.0,
-            cluster_padding: 48.0,
+            node_spacing: 80.0,
+            rank_spacing: 120.0,
+            cluster_padding: 52.0,
         }
     }
 }
@@ -3629,12 +3629,12 @@ pub fn compute_node_sizes(ir: &MermaidDiagramIr) -> Vec<(f32, f32)> {
 
             let (label_width, label_height) = metrics.estimate_dimensions(text);
 
-            // Add substantial padding to match the high-end Stripe/Vercel aesthetic
-            let width = label_width + 56.0;
-            let height = label_height + 36.0;
+            // Generous padding for readable, premium-looking nodes
+            let width = label_width + 72.0;
+            let height = label_height + 44.0;
 
-            // Ensure minimal baseline dimensions
-            (width.max(84.0), height.max(44.0))
+            // Ensure generous baseline dimensions
+            (width.max(100.0), height.max(52.0))
         })
         .collect()
 }

@@ -55,22 +55,23 @@ pub struct ArrowheadMarker {
 }
 
 impl ArrowheadMarker {
-    /// Create a standard filled arrowhead (triangle pointing right).
+    /// Create a standard filled arrowhead (chevron pointing right).
     #[must_use]
     pub fn standard(id: &str, fill: &str) -> Self {
         let path = PathBuilder::new()
             .move_to(0.0, 0.0)
-            .line_to(10.0, 5.0)
-            .line_to(0.0, 10.0)
+            .line_to(8.0, 3.5)
+            .line_to(0.0, 7.0)
+            .line_to(2.0, 3.5)
             .close()
             .build();
 
         Self {
             id: id.to_string(),
-            marker_width: 10.0,
-            marker_height: 10.0,
-            ref_x: 10.0,
-            ref_y: 5.0,
+            marker_width: 8.0,
+            marker_height: 7.0,
+            ref_x: 8.0,
+            ref_y: 3.5,
             orient: MarkerOrient::Auto,
             path,
             fill: fill.to_string(),
@@ -79,23 +80,23 @@ impl ArrowheadMarker {
         }
     }
 
-    /// Create a filled arrowhead (solid triangle).
+    /// Create a filled arrowhead (solid chevron).
     #[must_use]
     pub fn filled(id: &str, fill: &str) -> Self {
         let path = PathBuilder::new()
             .move_to(0.0, 0.0)
-            .line_to(12.0, 6.0)
-            .line_to(0.0, 12.0)
-            .line_to(3.0, 6.0)
+            .line_to(9.0, 4.0)
+            .line_to(0.0, 8.0)
+            .line_to(2.5, 4.0)
             .close()
             .build();
 
         Self {
             id: id.to_string(),
-            marker_width: 12.0,
-            marker_height: 12.0,
-            ref_x: 12.0,
-            ref_y: 6.0,
+            marker_width: 9.0,
+            marker_height: 8.0,
+            ref_x: 9.0,
+            ref_y: 4.0,
             orient: MarkerOrient::Auto,
             path,
             fill: fill.to_string(),
@@ -108,22 +109,22 @@ impl ArrowheadMarker {
     #[must_use]
     pub fn open(id: &str, stroke: &str) -> Self {
         let path = PathBuilder::new()
-            .move_to(0.0, 0.0)
-            .line_to(10.0, 5.0)
-            .line_to(0.0, 10.0)
+            .move_to(0.0, 0.5)
+            .line_to(7.0, 3.5)
+            .line_to(0.0, 6.5)
             .build();
 
         Self {
             id: id.to_string(),
-            marker_width: 10.0,
-            marker_height: 10.0,
-            ref_x: 10.0,
-            ref_y: 5.0,
+            marker_width: 8.0,
+            marker_height: 7.0,
+            ref_x: 7.0,
+            ref_y: 3.5,
             orient: MarkerOrient::Auto,
             path,
             fill: String::from("none"),
             stroke: Some(stroke.to_string()),
-            stroke_width: Some(1.5),
+            stroke_width: Some(1.2),
         }
     }
 
@@ -132,17 +133,17 @@ impl ArrowheadMarker {
     pub fn circle_marker(id: &str, fill: &str) -> Self {
         // Use a path to approximate a circle
         let path = PathBuilder::new()
-            .move_to(8.0, 4.0)
-            .arc_to(4.0, 4.0, 0.0, true, true, 8.0, 4.0)
+            .move_to(6.0, 3.0)
+            .arc_to(3.0, 3.0, 0.0, true, true, 6.0, 3.0)
             .close()
             .build();
 
         Self {
             id: id.to_string(),
-            marker_width: 8.0,
-            marker_height: 8.0,
-            ref_x: 4.0,
-            ref_y: 4.0,
+            marker_width: 6.0,
+            marker_height: 6.0,
+            ref_x: 3.0,
+            ref_y: 3.0,
             orient: MarkerOrient::Auto,
             path,
             fill: fill.to_string(),
@@ -156,22 +157,22 @@ impl ArrowheadMarker {
     pub fn cross_marker(id: &str, stroke: &str) -> Self {
         let path = PathBuilder::new()
             .move_to(0.0, 0.0)
-            .line_to(8.0, 8.0)
-            .move_to(8.0, 0.0)
-            .line_to(0.0, 8.0)
+            .line_to(6.0, 6.0)
+            .move_to(6.0, 0.0)
+            .line_to(0.0, 6.0)
             .build();
 
         Self {
             id: id.to_string(),
-            marker_width: 8.0,
-            marker_height: 8.0,
-            ref_x: 4.0,
-            ref_y: 4.0,
+            marker_width: 6.0,
+            marker_height: 6.0,
+            ref_x: 3.0,
+            ref_y: 3.0,
             orient: MarkerOrient::Auto,
             path,
             fill: String::from("none"),
             stroke: Some(stroke.to_string()),
-            stroke_width: Some(1.5),
+            stroke_width: Some(1.2),
         }
     }
 
@@ -179,19 +180,19 @@ impl ArrowheadMarker {
     #[must_use]
     pub fn diamond_marker(id: &str, fill: &str) -> Self {
         let path = PathBuilder::new()
-            .move_to(5.0, 0.0)
-            .line_to(10.0, 5.0)
-            .line_to(5.0, 10.0)
-            .line_to(0.0, 5.0)
+            .move_to(4.0, 0.0)
+            .line_to(8.0, 4.0)
+            .line_to(4.0, 8.0)
+            .line_to(0.0, 4.0)
             .close()
             .build();
 
         Self {
             id: id.to_string(),
-            marker_width: 10.0,
-            marker_height: 10.0,
-            ref_x: 10.0,
-            ref_y: 5.0,
+            marker_width: 8.0,
+            marker_height: 8.0,
+            ref_x: 8.0,
+            ref_y: 4.0,
             orient: MarkerOrient::Auto,
             path,
             fill: fill.to_string(),
