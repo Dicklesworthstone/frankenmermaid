@@ -8,6 +8,10 @@
     name="description"
     content="Standalone frankenmermaid showcase that loads browser libraries from CDNs, attempts to load the frankenmermaid WASM runtime from GitHub-backed URLs, and compares the current runtime contract to Mermaid."
   >
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧜</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
     tailwind.config = {
@@ -58,6 +62,14 @@
       font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
     }
 
+    :not(pre) > code {
+      padding: 0.15em 0.4em;
+      border-radius: 0.3em;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      font-size: 0.875em;
+    }
+
     .glass {
       background: linear-gradient(180deg, rgba(18, 32, 56, 0.88), rgba(11, 22, 40, 0.92));
       border: 1px solid rgba(255, 255, 255, 0.08);
@@ -68,10 +80,6 @@
         linear-gradient(rgba(255, 255, 255, 0.04) 1px, transparent 1px),
         linear-gradient(90deg, rgba(255, 255, 255, 0.04) 1px, transparent 1px);
       background-size: 28px 28px;
-    }
-
-    .code-fade {
-      mask-image: linear-gradient(to bottom, black 74%, transparent 100%);
     }
 
     .pill {
@@ -121,11 +129,11 @@
     }
 
     .stage {
-      min-height: 40rem;
+      min-height: 18rem;
     }
 
     .gallery-stage {
-      min-height: 30rem;
+      min-height: 12rem;
     }
 
     .gallery-stage svg {
@@ -140,7 +148,7 @@
     }
 
     .spotlight-stage {
-      min-height: 46rem;
+      min-height: 20rem;
     }
 
     .spotlight-stage svg {
@@ -191,6 +199,11 @@
       }
     }
 
+    .scrollbar-thin {
+      scrollbar-width: thin;
+      scrollbar-color: rgba(255, 255, 255, 0.14) transparent;
+    }
+
     .scrollbar-thin::-webkit-scrollbar {
       width: 10px;
       height: 10px;
@@ -200,9 +213,358 @@
       border-radius: 999px;
       background: rgba(255, 255, 255, 0.14);
     }
+
+    /* --- Scroll progress bar --- */
+    #scroll-progress {
+      position: fixed;
+      top: 0;
+      left: 0;
+      height: 3px;
+      width: 0%;
+      background: linear-gradient(90deg, #4cc9ff, #7af5c7, #ff7a18);
+      z-index: 9999;
+      transition: width 60ms linear;
+      border-radius: 0 2px 2px 0;
+    }
+
+    /* --- Sticky nav --- */
+    #sticky-nav {
+      position: fixed;
+      top: 3px;
+      left: 0;
+      right: 0;
+      z-index: 900;
+      backdrop-filter: blur(20px) saturate(1.6);
+      -webkit-backdrop-filter: blur(20px) saturate(1.6);
+      background: rgba(7, 17, 31, 0.78);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      transform: translateY(-100%);
+      transition: transform 280ms cubic-bezier(0.22, 1, 0.36, 1), opacity 280ms ease;
+      opacity: 0;
+    }
+
+    #sticky-nav.visible {
+      transform: translateY(0);
+      opacity: 1;
+    }
+
+    #sticky-nav .nav-link {
+      position: relative;
+      padding: 0.5rem 0.75rem;
+      font-size: 0.8125rem;
+      font-weight: 600;
+      color: rgba(255, 255, 255, 0.55);
+      white-space: nowrap;
+      transition: color 160ms ease;
+      border-radius: 0.5rem;
+      text-decoration: none;
+    }
+
+    #sticky-nav .nav-link:hover {
+      color: rgba(255, 255, 255, 0.9);
+    }
+
+    #sticky-nav .nav-link.active {
+      color: #4cc9ff;
+    }
+
+    #sticky-nav .nav-link.active::after {
+      content: "";
+      position: absolute;
+      bottom: 0;
+      left: 0.75rem;
+      right: 0.75rem;
+      height: 2px;
+      background: #4cc9ff;
+      border-radius: 1px;
+    }
+
+    /* --- Back to top button --- */
+    #back-to-top {
+      position: fixed;
+      bottom: 2rem;
+      right: 2rem;
+      z-index: 800;
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, rgba(76, 201, 255, 0.2), rgba(122, 245, 199, 0.15));
+      border: 1px solid rgba(76, 201, 255, 0.3);
+      backdrop-filter: blur(12px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(16px);
+      transition: opacity 240ms ease, transform 240ms ease, background 160ms ease, box-shadow 160ms ease;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+    }
+
+    #back-to-top.visible {
+      opacity: 1;
+      pointer-events: auto;
+      transform: translateY(0);
+    }
+
+    #back-to-top:hover {
+      background: linear-gradient(135deg, rgba(76, 201, 255, 0.35), rgba(122, 245, 199, 0.25));
+      box-shadow: 0 12px 40px rgba(76, 201, 255, 0.2);
+    }
+
+    #back-to-top svg {
+      width: 20px;
+      height: 20px;
+      color: #4cc9ff;
+    }
+
+    /* --- Shimmer loading --- */
+    @keyframes shimmer {
+      0% { background-position: -200% 0; }
+      100% { background-position: 200% 0; }
+    }
+
+    .shimmer {
+      background: linear-gradient(90deg, rgba(255,255,255,0.04) 25%, rgba(255,255,255,0.08) 50%, rgba(255,255,255,0.04) 75%);
+      background-size: 200% 100%;
+      animation: shimmer 1.8s ease-in-out infinite;
+      border-radius: 0.75rem;
+    }
+
+    .shimmer-light {
+      background: linear-gradient(90deg, #f1f5f9 25%, #e2e8f0 50%, #f1f5f9 75%);
+      background-size: 200% 100%;
+      animation: shimmer 1.8s ease-in-out infinite;
+      border-radius: 0.75rem;
+    }
+
+    /* --- Details chevron --- */
+    details summary {
+      position: relative;
+      padding-right: 2.5rem !important;
+    }
+
+    details summary::after {
+      content: "";
+      position: absolute;
+      right: 1rem;
+      top: 50%;
+      transform: translateY(-50%) rotate(0deg);
+      width: 0;
+      height: 0;
+      border-left: 5px solid transparent;
+      border-right: 5px solid transparent;
+      border-top: 6px solid rgba(255, 255, 255, 0.4);
+      transition: transform 200ms ease;
+    }
+
+    details[open] summary {
+      background: rgba(255, 255, 255, 0.03);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    details[open] summary::after {
+      transform: translateY(-50%) rotate(180deg);
+    }
+
+    /* --- Button press feedback --- */
+    /* Scoped to inline buttons only; excludes back-to-top (has its own transform) and gallery cards */
+    .glass button:active:not(:disabled),
+    .gallery-card button:active:not(:disabled) {
+      transform: scale(0.97);
+    }
+
+    .gallery-card:active {
+      transform: translateY(-2px) scale(0.995);
+    }
+
+    /* --- Category color indicators --- */
+    .category-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      display: inline-block;
+      flex-shrink: 0;
+    }
+
+    .category-dot-flowchart { background: #7af5c7; }
+    .category-dot-sequence { background: #4cc9ff; }
+    .category-dot-class { background: #a78bfa; }
+    .category-dot-state { background: #ff7a18; }
+    .category-dot-er { background: #ff9ab7; }
+    .category-dot-gantt { background: #fbbf24; }
+    .category-dot-journey { background: #34d399; }
+    .category-dot-timeline { background: #60a5fa; }
+    .category-dot-pie { background: #f472b6; }
+    .category-dot-gitGraph { background: #c084fc; }
+
+    /* --- Mobile min-height reductions --- */
+    @media (max-width: 767px) {
+      .spotlight-stage {
+        min-height: 10rem;
+      }
+
+      .stage {
+        min-height: 10rem;
+      }
+
+      .gallery-stage {
+        min-height: 8rem;
+      }
+    }
+
+    /* --- Feature strip mobile scroll --- */
+    @media (max-width: 1023px) {
+      #feature-strip {
+        display: flex !important;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        scroll-snap-type: x mandatory;
+        gap: 0.75rem;
+        padding-bottom: 0.5rem;
+      }
+
+      #feature-strip > * {
+        min-width: 280px;
+        flex-shrink: 0;
+        scroll-snap-align: start;
+      }
+    }
+
+    /* --- Gallery filter scroll on mobile --- */
+    @media (max-width: 767px) {
+      #gallery-filters {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        flex-wrap: nowrap !important;
+        padding-bottom: 0.25rem;
+        scrollbar-width: none;
+      }
+
+      #gallery-filters::-webkit-scrollbar {
+        display: none;
+      }
+
+      #gallery-filters > * {
+        flex-shrink: 0;
+      }
+    }
+
+    /* --- Search input icon --- */
+    .search-wrapper {
+      position: relative;
+    }
+
+    .search-wrapper svg {
+      position: absolute;
+      left: 1rem;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 16px;
+      height: 16px;
+      color: rgba(255, 255, 255, 0.3);
+      pointer-events: none;
+    }
+
+    .search-wrapper input {
+      padding-left: 2.75rem;
+    }
+
+    /* --- Disabled button style --- */
+    #render-button:disabled {
+      opacity: 0.6;
+      cursor: wait;
+    }
+
+    /* --- Textarea focus glow --- */
+    #diagram-input:focus {
+      box-shadow: 0 0 20px rgba(76, 201, 255, 0.08);
+    }
+
+    /* --- Keyboard shortcut hint --- */
+    .kbd {
+      display: inline-flex;
+      align-items: center;
+      padding: 0.125rem 0.375rem;
+      font-size: 0.6875rem;
+      font-family: "IBM Plex Mono", monospace;
+      font-weight: 500;
+      color: rgba(255, 255, 255, 0.4);
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 0.25rem;
+      line-height: 1.4;
+    }
+
+    /* --- Footer --- */
+    footer a {
+      color: #4cc9ff;
+      text-decoration: none;
+      transition: color 160ms ease;
+    }
+
+    footer a:hover {
+      color: #7af5c7;
+    }
+
+    /* --- Empty state --- */
+    .gallery-empty {
+      grid-column: 1 / -1;
+      text-align: center;
+      padding: 4rem 2rem;
+    }
+
+    /* --- Mobile header stat improvements --- */
+    @media (max-width: 639px) {
+      .stat-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+      }
+
+      .stat-grid > div {
+        padding: 0.75rem !important;
+      }
+
+      .stat-grid .text-3xl {
+        font-size: 1.5rem !important;
+      }
+    }
+
+    /* --- Tooltip for keyboard shortcuts --- */
+    .shortcut-hint {
+      opacity: 0;
+      transition: opacity 200ms ease;
+    }
+
+    button:hover .shortcut-hint,
+    button:focus .shortcut-hint {
+      opacity: 1;
+    }
   </style>
 </head>
 <body class="text-slate-100">
+  <div id="scroll-progress"></div>
+
+  <nav id="sticky-nav" aria-label="Section navigation">
+    <div class="mx-auto flex max-w-7xl items-center gap-1 overflow-x-auto px-4 py-2 scrollbar-thin lg:px-6">
+      <a href="#" class="mr-2 flex items-center gap-2 text-sm font-black text-white no-underline">
+        <span class="text-lg">🧜</span>
+        <span class="hidden sm:inline">FrankenMermaid</span>
+      </a>
+      <a href="#section-runtime" class="nav-link" data-nav="section-runtime">Runtime</a>
+      <a href="#section-showcase" class="nav-link" data-nav="section-showcase">Showcase</a>
+      <a href="#section-gallery" class="nav-link" data-nav="section-gallery">Gallery</a>
+      <a href="#section-playground" class="nav-link" data-nav="section-playground">Playground</a>
+      <a href="#section-support" class="nav-link" data-nav="section-support">Support</a>
+    </div>
+  </nav>
+
+  <button id="back-to-top" type="button" aria-label="Back to top" title="Back to top">
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 15.75l7.5-7.5 7.5 7.5" />
+    </svg>
+  </button>
+
   <div class="relative overflow-hidden">
     <div class="pointer-events-none absolute inset-0 opacity-60 gridline"></div>
     <div class="relative mx-auto max-w-7xl px-6 pb-20 pt-8 lg:px-8">
@@ -223,7 +585,7 @@
                 <code>capabilityMatrix</code>, and the canvas-backed <code>Diagram</code> class.
               </p>
             </div>
-            <div class="grid w-full max-w-xl grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+            <div class="stat-grid grid w-full max-w-xl grid-cols-2 gap-3 text-sm sm:grid-cols-4">
               <div class="glass rounded-2xl p-4">
                 <div class="text-3xl font-black text-cobalt">11</div>
                 <div class="mt-1 text-slate-300">Implemented capability claims</div>
@@ -246,7 +608,7 @@
       </header>
 
       <main class="space-y-8">
-        <section class="grid gap-8 lg:grid-cols-[1.1fr_0.9fr]">
+        <section id="section-runtime" class="scroll-mt-16 grid gap-8 lg:grid-cols-[1.1fr_0.9fr]">
           <div class="glass rounded-[2rem] p-6 shadow-panel sm:p-8">
             <div class="flex flex-wrap items-center justify-between gap-4">
               <div>
@@ -255,15 +617,19 @@
               </div>
               <button
                 id="retry-runtime"
-                class="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm font-semibold text-white transition hover:bg-white/10"
+                class="flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm font-semibold text-white transition hover:bg-white/10"
                 type="button"
               >
-                Retry runtime load
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="h-4 w-4"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182" /></svg>
+                Retry
               </button>
             </div>
 
             <div id="runtime-banner" class="mt-6 rounded-3xl border border-white/10 bg-white/5 p-5">
-              <div class="text-sm text-slate-300">Checking GitHub-backed frankenmermaid runtime endpoints...</div>
+              <div class="flex items-center gap-3 text-sm text-slate-300">
+                <div class="h-4 w-4 animate-spin rounded-full border-2 border-cobalt/30 border-t-cobalt"></div>
+                Checking GitHub-backed frankenmermaid runtime endpoints...
+              </div>
             </div>
 
             <div class="mt-6 grid gap-4 sm:grid-cols-2">
@@ -328,7 +694,7 @@
           </div>
         </section>
 
-        <section class="glass rounded-[2rem] p-6 shadow-panel sm:p-8">
+        <section id="section-showcase" class="scroll-mt-16 glass rounded-[2rem] p-6 shadow-panel sm:p-8">
           <div class="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
             <div class="max-w-4xl">
               <p class="text-xs font-semibold uppercase tracking-[0.28em] text-cobalt">Showcase atlas</p>
@@ -370,8 +736,9 @@
                 <button
                   id="spotlight-open-editor"
                   type="button"
-                  class="rounded-full border border-cobalt/30 bg-cobalt/15 px-4 py-2 text-sm font-semibold text-cobalt transition hover:bg-cobalt/25"
+                  class="flex items-center gap-2 rounded-full border border-cobalt/30 bg-cobalt/15 px-4 py-2 text-sm font-semibold text-cobalt transition hover:bg-cobalt/25"
                 >
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="h-4 w-4"><path stroke-linecap="round" stroke-linejoin="round" d="M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5" /></svg>
                   Open In Editor
                 </button>
               </div>
@@ -389,9 +756,10 @@
                     <button
                       id="spotlight-copy-source"
                       type="button"
-                      class="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.16em] text-slate-200 transition hover:bg-white/10"
+                      class="flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.16em] text-slate-200 transition hover:bg-white/10"
                     >
-                      Copy source
+                      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="h-3.5 w-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9.75a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184" /></svg>
+                      <span id="spotlight-copy-label">Copy</span>
                     </button>
                   </div>
                   <pre id="spotlight-source" class="scrollbar-thin mt-3 max-h-72 overflow-auto whitespace-pre-wrap text-xs leading-6 text-slate-300"></pre>
@@ -406,7 +774,7 @@
                     <div class="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Featured families</div>
                     <div class="mt-1 text-lg font-bold text-white">One strong sample per category</div>
                   </div>
-                  <div class="text-xs text-slate-500">click to swap spotlight</div>
+                  <div class="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-400">click to swap spotlight</div>
                 </div>
                 <div id="feature-strip" class="mt-4 grid gap-3"></div>
               </div>
@@ -423,7 +791,7 @@
           </div>
         </section>
 
-        <section class="glass rounded-[2rem] p-6 shadow-panel sm:p-8">
+        <section id="section-gallery" class="scroll-mt-16 glass rounded-[2rem] p-6 shadow-panel sm:p-8">
           <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
             <div class="max-w-3xl">
               <p class="text-xs font-semibold uppercase tracking-[0.28em] text-mint">Rendered gallery</p>
@@ -440,13 +808,16 @@
 
           <div class="mt-6 flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
             <div id="gallery-filters" class="flex flex-wrap gap-2"></div>
-            <label class="block xl:w-[24rem]">
+            <label class="search-wrapper block xl:w-[24rem]">
               <span class="sr-only">Search gallery</span>
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+              </svg>
               <input
                 id="gallery-search"
                 type="search"
-                placeholder="Search examples, categories, and realistic use cases"
-                class="w-full rounded-full border border-white/10 bg-slate-950/40 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-cobalt/40"
+                placeholder="Search examples, categories, and use cases..."
+                class="w-full rounded-full border border-white/10 bg-slate-950/40 py-3 pr-4 text-sm text-slate-100 outline-none transition focus:border-cobalt/40 focus:ring-1 focus:ring-cobalt/20"
               >
             </label>
           </div>
@@ -454,7 +825,7 @@
           <div id="gallery-grid" class="diagram-wall mt-8"></div>
         </section>
 
-        <section class="glass rounded-[2rem] p-6 shadow-panel sm:p-8">
+        <section id="section-playground" class="scroll-mt-16 glass rounded-[2rem] p-6 shadow-panel sm:p-8">
           <div class="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
             <div class="max-w-3xl">
               <p class="text-xs font-semibold uppercase tracking-[0.28em] text-cobalt">Live playground</p>
@@ -474,16 +845,19 @@
                   <label for="diagram-input" class="text-sm font-semibold text-white">Diagram source</label>
                   <button
                     id="render-button"
-                    class="rounded-full border border-cobalt/30 bg-cobalt/15 px-4 py-2 text-sm font-semibold text-cobalt transition hover:bg-cobalt/25"
+                    class="flex items-center gap-2 rounded-full border border-cobalt/30 bg-cobalt/15 px-4 py-2 text-sm font-semibold text-cobalt transition hover:bg-cobalt/25"
                     type="button"
+                    title="Render diagram (Ctrl+Enter)"
                   >
-                    Render again
+                    Render
+                    <span class="kbd shortcut-hint">Ctrl+Enter</span>
                   </button>
                 </div>
                 <textarea
                   id="diagram-input"
-                  class="scrollbar-thin h-[22rem] w-full rounded-[1.25rem] border border-white/10 bg-[#07101e] p-4 text-sm leading-6 text-slate-100 outline-none transition focus:border-cobalt/40"
+                  class="scrollbar-thin h-[22rem] w-full rounded-[1.25rem] border border-white/10 bg-[#07101e] p-4 text-sm leading-6 text-slate-100 outline-none transition focus:border-cobalt/40 focus:ring-1 focus:ring-cobalt/20"
                   spellcheck="false"
+                  placeholder="Type or paste Mermaid diagram syntax here..."
                 ></textarea>
               </div>
 
@@ -563,7 +937,7 @@
           </div>
         </section>
 
-        <section class="grid gap-8 lg:grid-cols-[0.95fr_1.05fr]">
+        <section id="section-support" class="scroll-mt-16 grid gap-8 lg:grid-cols-[0.95fr_1.05fr]">
           <div class="glass rounded-[2rem] p-6 shadow-panel sm:p-8">
             <p class="text-xs font-semibold uppercase tracking-[0.28em] text-cobalt">Support reality</p>
             <h2 class="mt-2 text-2xl font-bold text-white">Current diagram support from the checked-in capability artifact</h2>
@@ -596,6 +970,30 @@
           </div>
         </section>
       </main>
+
+      <footer class="mt-16 rounded-[2rem] border border-white/10 bg-white/[0.02] px-8 py-10">
+        <div class="flex flex-col items-center gap-6 text-center sm:flex-row sm:justify-between sm:text-left">
+          <div>
+            <div class="flex items-center justify-center gap-3 sm:justify-start">
+              <span class="text-2xl">🧜</span>
+              <span class="text-lg font-black text-white">FrankenMermaid</span>
+            </div>
+            <p class="mt-2 max-w-md text-sm leading-6 text-slate-400">
+              Rust-first Mermaid-compatible diagram engine. Smarter parsing, deterministic layouts, and higher-quality output across CLI, SVG, terminal, and web.
+            </p>
+          </div>
+          <div class="flex flex-wrap items-center justify-center gap-4 text-sm text-slate-400 sm:justify-end">
+            <a href="https://github.com/Dicklesworthstone/frankenmermaid" target="_blank" rel="noopener">GitHub</a>
+            <span class="hidden sm:inline text-white/10">|</span>
+            <a href="https://github.com/Dicklesworthstone/frankenmermaid/issues" target="_blank" rel="noopener">Issues</a>
+            <span class="hidden sm:inline text-white/10">|</span>
+            <span class="text-slate-500">MIT License</span>
+          </div>
+        </div>
+        <div class="mt-6 border-t border-white/5 pt-5 text-center text-xs text-slate-500">
+          Built with Rust, WASM, and an unhealthy attention to detail.
+        </div>
+      </footer>
     </div>
   </div>
 
@@ -1120,8 +1518,9 @@
         const button = document.createElement("button");
         button.type = "button";
         button.dataset.filter = category;
-        button.className = "filter-chip rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:border-cobalt/30 hover:bg-cobalt/10";
-        button.innerHTML = `<span>${category === "all" ? "All families" : category}</span><span class="ml-2 text-xs text-slate-400">${count}</span>`;
+        button.className = "filter-chip flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:border-cobalt/30 hover:bg-cobalt/10";
+        const dotHtml = category !== "all" ? `<span class="category-dot category-dot-${category}"></span>` : "";
+        button.innerHTML = `${dotHtml}<span>${category === "all" ? "All families" : category}</span><span class="ml-2 text-xs text-slate-400">${count}</span>`;
         if (category === galleryFilter) {
           button.classList.add("active");
         }
@@ -1146,7 +1545,7 @@
         }
         tile.innerHTML = `
           <div class="flex items-center justify-between gap-3">
-            <div class="text-sm font-semibold text-white">${sample.label}</div>
+            <div class="flex items-center gap-2"><span class="category-dot category-dot-${sample.category}"></span><span class="text-sm font-semibold text-white">${sample.label}</span></div>
             <div class="text-[11px] uppercase tracking-[0.18em] text-slate-400">${sample.category}</div>
           </div>
           <div class="mt-2 text-sm leading-6 text-slate-300">${spotlightReasons[sample.category] || sample.description}</div>
@@ -1181,9 +1580,7 @@
       }
 
       els.spotlightStage.innerHTML = `
-        <div class="rounded-3xl border border-slate-200 bg-slate-50 p-5 text-sm leading-6 text-slate-500">
-          Rendering ${sample.label}...
-        </div>
+        <div class="space-y-4 p-4"><div class="shimmer-light h-8 w-2/3"></div><div class="shimmer-light h-64"></div><div class="shimmer-light h-5 w-1/2"></div></div>
       `;
 
       try {
@@ -1237,6 +1634,21 @@
         galleryObserver = null;
       }
 
+      if (visibleSamples.length === 0) {
+        els.galleryGrid.innerHTML = `
+          <div class="gallery-empty">
+            <div class="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full border border-white/10 bg-white/5">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="h-8 w-8 text-slate-500">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+              </svg>
+            </div>
+            <div class="text-lg font-semibold text-slate-300">No matching examples</div>
+            <p class="mt-2 text-sm text-slate-500">Try a different search term or category filter.</p>
+          </div>
+        `;
+        return;
+      }
+
       for (const sample of visibleSamples) {
         const card = document.createElement("article");
         card.className = "gallery-card rounded-[1.75rem] border border-white/10 bg-slate-950/40 p-5";
@@ -1245,28 +1657,34 @@
             <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <div>
                 <div class="flex flex-wrap items-center gap-2">
+                  <span class="category-dot category-dot-${sample.category}"></span>
                   <h3 class="text-xl font-bold text-white">${sample.label}</h3>
                   <span class="pill ${badgeClass(sample.description.toLowerCase().includes("implemented") ? "implemented" : "partial")} rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em]">${sample.description}</span>
                 </div>
-                <p class="mt-2 text-sm leading-6 text-slate-300">${sample.category} · ${sample.code.split("\n")[0]}</p>
+                <p class="mt-2 text-sm leading-6 text-slate-300"><span class="font-medium text-slate-200">${sample.category}</span> · ${sample.code.split("\n")[0]}</p>
               </div>
-              <button
-                type="button"
-                data-gallery-sample="${sample.id}"
-                class="rounded-full border border-cobalt/30 bg-cobalt/15 px-4 py-2 text-sm font-semibold text-cobalt transition hover:bg-cobalt/25"
-              >
-                Open In Editor
-              </button>
+              <div class="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  data-gallery-spotlight="${sample.id}"
+                  class="flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:border-mint/30 hover:bg-mint/10 hover:text-mint"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="h-3.5 w-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15" /></svg>
+                  Spotlight
+                </button>
+                <button
+                  type="button"
+                  data-gallery-sample="${sample.id}"
+                  class="flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:border-cobalt/30 hover:bg-cobalt/10 hover:text-cobalt"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="h-3.5 w-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5" /></svg>
+                  Editor
+                </button>
+              </div>
             </div>
-            <button
-              type="button"
-              data-gallery-spotlight="${sample.id}"
-              class="w-full text-left"
-            >
-              <div class="gallery-stage scrollbar-thin overflow-auto rounded-[1.25rem] border border-white/10 bg-white p-4 text-slate-900" data-gallery-render="${sample.id}">
-                <div class="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm leading-6 text-slate-500">Queued render for ${sample.label}. This card renders when it nears the viewport so the gallery can hold 80 large examples without bogging the page down.</div>
-              </div>
-            </button>
+            <div class="gallery-stage scrollbar-thin overflow-auto rounded-[1.25rem] border border-white/10 bg-white p-4 text-slate-900" data-gallery-render="${sample.id}">
+              <div class="space-y-3 p-2"><div class="shimmer-light h-6 w-3/4"></div><div class="shimmer-light h-40"></div><div class="shimmer-light h-4 w-1/2"></div></div>
+            </div>
             <details class="rounded-[1.25rem] border border-white/10 bg-[#08101d]">
               <summary class="cursor-pointer px-4 py-3 text-sm font-semibold text-slate-200 transition hover:bg-white/5">
                 Show source
@@ -1291,7 +1709,7 @@
           renderFeatureStrip();
           renderSpotlight();
           renderAll();
-          window.scrollTo({ top: els.input.getBoundingClientRect().top + window.scrollY - 96, behavior: "smooth" });
+          document.getElementById("section-playground").scrollIntoView({ behavior: "smooth", block: "start" });
         });
       }
 
@@ -1440,7 +1858,7 @@
       }
       diagramInstance = null;
 
-      els.runtimeBanner.innerHTML = `<div class="text-sm text-slate-300">Checking GitHub-backed runtime endpoints and attempting dynamic import...</div>`;
+      els.runtimeBanner.innerHTML = `<div class="flex items-center gap-3 text-sm text-slate-300"><div class="h-4 w-4 animate-spin rounded-full border-2 border-cobalt/30 border-t-cobalt"></div>Checking GitHub-backed runtime endpoints and attempting dynamic import...</div>`;
       els.runtimeEndpoints.innerHTML = "";
       setChip(els.fmRenderChip, "waiting", "border-white/10 bg-white/5 text-slate-300");
       setChip(els.canvasChip, "waiting", "border-white/10 bg-white/5 text-slate-300");
@@ -1656,8 +2074,17 @@
       animate("main > section", { opacity: [0, 1], y: [28, 0] }, { delay: stagger(0.08), duration: 0.7, easing: [0.22, 1, 0.36, 1] });
     }
 
-    els.renderButton.addEventListener("click", () => {
-      renderAll();
+    els.renderButton.addEventListener("click", async () => {
+      const btn = els.renderButton;
+      const origHTML = btn.innerHTML;
+      btn.disabled = true;
+      btn.innerHTML = `<div class="h-4 w-4 animate-spin rounded-full border-2 border-cobalt/30 border-t-cobalt"></div> Rendering...`;
+      try {
+        await renderAll();
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = origHTML;
+      }
     });
 
     els.retryRuntime.addEventListener("click", async () => {
@@ -1672,24 +2099,33 @@
       els.input.value = spotlightSample.code;
       updateActiveSample();
       renderAll();
-      window.scrollTo({ top: els.input.getBoundingClientRect().top + window.scrollY - 96, behavior: "smooth" });
+      document.getElementById("section-playground").scrollIntoView({ behavior: "smooth", block: "start" });
     });
 
     els.spotlightCopySource.addEventListener("click", async () => {
+      const label = document.getElementById("spotlight-copy-label");
       try {
         await navigator.clipboard.writeText(spotlightSample.code);
-        els.spotlightCopySource.textContent = "Copied";
+        label.textContent = "Copied!";
+        els.spotlightCopySource.style.borderColor = "rgba(122, 245, 199, 0.3)";
+        els.spotlightCopySource.style.color = "#7af5c7";
       } catch (_error) {
-        els.spotlightCopySource.textContent = "Copy failed";
+        label.textContent = "Failed";
       }
       window.setTimeout(() => {
-        els.spotlightCopySource.textContent = "Copy source";
-      }, 1200);
+        label.textContent = "Copy";
+        els.spotlightCopySource.style.borderColor = "";
+        els.spotlightCopySource.style.color = "";
+      }, 1500);
     });
 
+    let galleryDebounced;
     els.gallerySearch.addEventListener("input", () => {
       galleryQuery = els.gallerySearch.value;
-      renderGallery();
+      window.clearTimeout(galleryDebounced);
+      galleryDebounced = window.setTimeout(() => {
+        renderGallery();
+      }, 180);
     });
 
     let debounced;
@@ -1701,6 +2137,71 @@
     });
 
     boot();
+
+    /* --- Scroll progress bar --- */
+    const progressBar = document.getElementById("scroll-progress");
+    const stickyNav = document.getElementById("sticky-nav");
+    const backToTop = document.getElementById("back-to-top");
+    const navLinks = stickyNav.querySelectorAll(".nav-link");
+    const sections = ["section-runtime", "section-showcase", "section-gallery", "section-playground", "section-support"]
+      .map((id) => document.getElementById(id))
+      .filter(Boolean);
+
+    function updateScrollUI() {
+      const scrollTop = window.scrollY;
+      const docHeight = document.documentElement.scrollHeight - window.innerHeight;
+      const progress = docHeight > 0 ? (scrollTop / docHeight) * 100 : 0;
+      progressBar.style.width = `${Math.min(progress, 100)}%`;
+
+      if (scrollTop > 400) {
+        stickyNav.classList.add("visible");
+        backToTop.classList.add("visible");
+      } else {
+        stickyNav.classList.remove("visible");
+        backToTop.classList.remove("visible");
+      }
+
+      let activeId = "";
+      for (const section of sections) {
+        const rect = section.getBoundingClientRect();
+        if (rect.top <= 120) {
+          activeId = section.id;
+        }
+      }
+      for (const link of navLinks) {
+        link.classList.toggle("active", link.dataset.nav === activeId);
+      }
+    }
+
+    let scrollTicking = false;
+    window.addEventListener("scroll", () => {
+      if (!scrollTicking) {
+        requestAnimationFrame(() => {
+          updateScrollUI();
+          scrollTicking = false;
+        });
+        scrollTicking = true;
+      }
+    }, { passive: true });
+
+    backToTop.addEventListener("click", () => {
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    });
+
+    /* --- Keyboard shortcut: Ctrl/Cmd+Enter to render --- */
+    document.addEventListener("keydown", (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+        event.preventDefault();
+        renderAll();
+      }
+    });
+
+    /* --- Update Ctrl vs Cmd label based on platform --- */
+    const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+    const kbdHints = document.querySelectorAll(".kbd.shortcut-hint");
+    for (const hint of kbdHints) {
+      hint.textContent = isMac ? "\u2318+Enter" : "Ctrl+Enter";
+    }
   </script>
 </body>
 </html>
