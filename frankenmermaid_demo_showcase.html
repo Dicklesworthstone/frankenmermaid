@@ -1863,13 +1863,10 @@
     }
 
     els.galleryGrid.addEventListener('click', (e) => {
+        if (e.target.closest('a, button, summary, details, pre')) return;
         const stage = e.target.closest('.gallery-stage');
         if (!stage) return;
-        if (stage.style.position === 'fixed') {
-            stage.style.cssText = '';
-            return;
-        }
-        stage.style.cssText = 'position:fixed;inset:1rem;z-index:9999;border-radius:1rem;cursor:zoom-out;max-height:none;background:#fff;padding:2rem;overflow:auto;';
+        toggleZoom(stage);
     });
 
     function renderCapabilityPanel(matrix) {
@@ -2202,12 +2199,40 @@
       }, 1500);
     });
 
-    els.spotlightStage.addEventListener('click', () => {
-        if (els.spotlightStage.style.position === 'fixed') {
-            els.spotlightStage.style.cssText = '';
-            return;
-        }
-        els.spotlightStage.style.cssText = 'position:fixed;inset:1rem;z-index:9999;border-radius:1rem;cursor:zoom-out;max-height:none;';
+    let zoomCooldown = false;
+    function toggleZoom(el) {
+      // Prevent rapid toggling that causes flashing
+      if (zoomCooldown) return;
+      zoomCooldown = true;
+      window.setTimeout(() => { zoomCooldown = false; }, 350);
+
+      if (el.dataset.zoomed === 'true') {
+        el.dataset.zoomed = '';
+        el.style.cssText = '';
+        const svg = el.querySelector('svg');
+        if (svg) svg.style.cssText = '';
+        return;
+      }
+      // Close any other zoomed element first
+      const prev = document.querySelector('[data-zoomed="true"]');
+      if (prev && prev !== el) {
+        prev.dataset.zoomed = '';
+        prev.style.cssText = '';
+        const prevSvg = prev.querySelector('svg');
+        if (prevSvg) prevSvg.style.cssText = '';
+      }
+      el.dataset.zoomed = 'true';
+      el.style.cssText = 'position:fixed;inset:1rem;z-index:9999;border-radius:1rem;cursor:zoom-out;max-height:none;background:linear-gradient(to bottom,#fff,#f8fafc);padding:2rem;overflow:auto;display:flex;align-items:center;justify-content:center;box-shadow:0 25px 80px rgba(0,0,0,0.3);';
+      const svg = el.querySelector('svg');
+      if (svg) {
+        svg.style.cssText = 'max-width:100%;max-height:calc(100vh - 6rem);width:auto;height:auto;';
+      }
+    }
+
+    els.spotlightStage.addEventListener('click', (e) => {
+      // Only respond to clicks directly on the stage or its SVG, not on nested interactive elements
+      if (e.target.closest('a, button')) return;
+      toggleZoom(els.spotlightStage);
     });
 
     let galleryDebounced;
@@ -2279,11 +2304,19 @@
       window.scrollTo({ top: 0, behavior: "smooth" });
     });
 
-    /* --- Keyboard shortcut: Ctrl/Cmd+Enter to render --- */
+    /* --- Keyboard shortcuts --- */
     document.addEventListener("keydown", (event) => {
       if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
         event.preventDefault();
         renderAll();
+      }
+      // Escape closes any zoomed diagram
+      if (event.key === "Escape") {
+        const zoomed = document.querySelector('[data-zoomed="true"]');
+        if (zoomed) {
+          toggleZoom(zoomed);
+          event.preventDefault();
+        }
       }
     });
 
