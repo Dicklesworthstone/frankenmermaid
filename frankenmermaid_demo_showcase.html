@@ -288,7 +288,7 @@
               <p class="text-xs font-semibold uppercase tracking-[0.28em] text-mint">Rendered gallery</p>
               <h2 class="mt-2 text-3xl font-black text-white">Large, readable examples of the actual output</h2>
               <p class="mt-3 text-sm leading-6 text-slate-300">
-                The main page now leads with a proper render gallery. These cards use the live frankenmermaid WASM runtime so you can judge the diagrams themselves instead of squinting at tiny comparison boxes.
+                The main page now leads with an 80-example render gallery. These cards use the live frankenmermaid WASM runtime so you can judge the diagrams themselves instead of squinting at tiny comparison boxes.
               </p>
             </div>
             <div class="rounded-3xl border border-white/10 bg-white/5 px-5 py-4 text-sm leading-6 text-slate-300">
@@ -512,103 +512,315 @@
       return candidates;
     })();
 
-    const samples = [
-      {
-        id: "flowchart",
-        label: "Flowchart",
-        description: "Implemented",
-        code: `flowchart LR
-    Start([Request]) --> Parse{detectType}
-    Parse -->|flowchart| IR[Shared IR]
-    IR --> Layout[Deterministic layout]
-    Layout --> Svg[SVG renderer]
-    Layout --> Term[Terminal renderer]
-    Layout --> Canvas[Canvas renderer]
-    Canvas --> Wasm[WASM browser surface]`
-      },
-      {
-        id: "sequence",
-        label: "Sequence",
-        description: "Partial",
-        code: `sequenceDiagram
-    participant User
-    participant Browser
-    participant FrankenMermaid
-    User->>Browser: open showcase.html
-    Browser->>FrankenMermaid: init({ theme: "corporate" })
-    FrankenMermaid-->>Browser: renderSvg()
-    Browser-->>User: inline SVG preview`
-      },
-      {
-        id: "class",
-        label: "Class",
-        description: "Partial",
-        code: `classDiagram
-    class MermaidDiagramIr {
-      +diagram_type
-      +nodes
-      +edges
-      +diagnostics
+    function slug(value) {
+      return value
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "");
     }
-    class DiagramLayout {
-      +nodes
-      +edges
-      +bounds
-      +stats
+
+    function sample(category, index, title, description, code, featured = false) {
+      return {
+        id: `${category}-${index + 1}-${slug(title)}`,
+        category,
+        label: title,
+        description,
+        code,
+        featured
+      };
     }
-    MermaidDiagramIr --> DiagramLayout`
-      },
-      {
-        id: "state",
-        label: "State",
-        description: "Partial",
-        code: `stateDiagram-v2
-    [*] --> Detect
-    Detect --> Parse
-    Parse --> Layout
-    Layout --> Render
-    Render --> [*]`
-      },
-      {
-        id: "er",
-        label: "ER",
-        description: "Partial",
-        code: `erDiagram
-    ENGINE {
-      string runtime "fm-wasm"
-      string target "web"
+
+    function buildFlowchartScenario(s) {
+      return `flowchart LR
+    subgraph Intake
+      A[${s.entry}] --> B[Normalize signal]
+      B --> C{${s.check}}
+    end
+    subgraph Analysis
+      C -->|valid| D[${s.assess}]
+      C -->|noise| E[Close alert]
+      D --> F{${s.decision}}
+    end
+    subgraph Response
+      F -->|automate| G[${s.automate}]
+      F -->|coordinate| H[${s.coordinate}]
+      G --> I[${s.verify}]
+      H --> I
+    end
+    subgraph Learning
+      I --> J[${s.document}]
+      J --> K[${s.retrospective}]
+    end`;
     }
-    SHOWCASE {
-      string source "file://"
-      bool standalone
+
+    function buildSequenceScenario(s) {
+      return `sequenceDiagram
+    participant User as ${s.user}
+    participant Portal as ${s.portal}
+    participant Api as ${s.api}
+    participant Queue as ${s.queue}
+    participant Worker as ${s.worker}
+    participant Store as ${s.store}
+    User->>Portal: ${s.open}
+    Portal->>Api: ${s.submit}
+    Api->>Queue: ${s.enqueue}
+    Queue->>Worker: ${s.execute}
+    Worker->>Store: ${s.persist}
+    Store-->>Api: ${s.ack}
+    Api-->>Portal: ${s.respond}
+    Portal-->>User: ${s.complete}`;
     }
-    ENGINE ||--|| SHOWCASE : powers`
-      },
-      {
-        id: "gantt",
-        label: "Gantt",
-        description: "Partial/basic",
-        code: `gantt
-    title Browser packaging gap
+
+    function buildClassScenario(s) {
+      return `classDiagram
+    class ${s.root} {
+      +id: UUID
+      +status: String
+      +createdAt: DateTime
+    }
+    class ${s.policy} {
+      +evaluate()
+      +explain()
+    }
+    class ${s.service} {
+      +plan()
+      +dispatch()
+    }
+    class ${s.step} {
+      +name: String
+      +owner: String
+      +deadline: DateTime
+    }
+    class ${s.event} {
+      +kind: String
+      +payload: Json
+    }
+    class ${s.repo} {
+      +load()
+      +save()
+    }
+    ${s.root} --> ${s.policy} : checks
+    ${s.root} --> ${s.service} : executes
+    ${s.service} --> ${s.step} : emits
+    ${s.step} --> ${s.event} : records
+    ${s.service} --> ${s.repo} : persists`;
+    }
+
+    function buildStateScenario(s) {
+      return `stateDiagram-v2
+    [*] --> ${s.start}
+    ${s.start} --> ${s.review} : submit
+    ${s.review} --> ${s.blocked} : missing evidence
+    ${s.blocked} --> ${s.review} : evidence added
+    ${s.review} --> ${s.approved} : approve
+    ${s.review} --> ${s.rejected} : reject
+    ${s.approved} --> ${s.executing} : schedule
+    ${s.executing} --> ${s.verifying} : complete work
+    ${s.verifying} --> ${s.closed} : pass checks
+    ${s.verifying} --> ${s.rollback} : fail checks
+    ${s.rollback} --> ${s.closed} : restore baseline
+    ${s.rejected} --> [*]
+    ${s.closed} --> [*]`;
+    }
+
+    function buildErScenario(s) {
+      return `erDiagram
+    ${s.owner} {
+      string id
+      string name
+      string region
+    }
+    ${s.primary} {
+      string id
+      string status
+      datetime opened_at
+    }
+    ${s.secondary} {
+      string id
+      string type
+      string priority
+    }
+    ${s.audit} {
+      string id
+      string actor
+      datetime recorded_at
+    }
+    ${s.owner} ||--o{ ${s.primary} : owns
+    ${s.primary} ||--o{ ${s.secondary} : includes
+    ${s.primary} ||--o{ ${s.audit} : emits
+    ${s.secondary} }o--|| ${s.owner} : assigned_to`;
+    }
+
+    function buildGanttScenario(s) {
+      return `gantt
+    title ${s.title}
     dateFormat  YYYY-MM-DD
-    section Runtime
-    WASM source exists       :done, a1, 2026-03-01, 3d
-    GitHub pkg published     :crit, a2, 2026-03-05, 2d
-    Standalone demo file     :active, a3, 2026-03-15, 1d`
-      },
-      {
-        id: "journey",
-        label: "Journey",
-        description: "Partial/basic",
-        code: `journey
-    title Why this project exists
-    section Browser demos
-      mermaid browser baseline: 5: User
-      deterministic Rust core: 4: User
-      terminal renderer: 5: User
-      explicit capability matrix: 5: User`
-      }
+    section Discovery
+    ${s.discovery1} :done, ${s.id}a, ${s.start}, 3d
+    ${s.discovery2} :done, ${s.id}b, after ${s.id}a, 2d
+    section Build
+    ${s.build1} :active, ${s.id}c, after ${s.id}b, 4d
+    ${s.build2} :${s.flag}, ${s.id}d, after ${s.id}c, 3d
+    section Launch
+    ${s.launch1} :${s.launchFlag}, ${s.id}e, after ${s.id}d, 2d
+    ${s.launch2} :${s.closeFlag}, ${s.id}f, after ${s.id}e, 2d`;
+    }
+
+    function buildJourneyScenario(s) {
+      return `journey
+    title ${s.title}
+    section ${s.section1}
+      ${s.step1}: ${s.score1}: ${s.actor}
+      ${s.step2}: ${s.score2}: ${s.actor}
+    section ${s.section2}
+      ${s.step3}: ${s.score3}: ${s.actor}
+      ${s.step4}: ${s.score4}: ${s.actor}
+    section ${s.section3}
+      ${s.step5}: ${s.score5}: ${s.actor}
+      ${s.step6}: ${s.score6}: ${s.actor}`;
+    }
+
+    function buildTimelineScenario(s) {
+      return `timeline
+    title ${s.title}
+    ${s.year1} : ${s.event1}
+    ${s.year2} : ${s.event2}
+    ${s.year3} : ${s.event3}
+    ${s.year4} : ${s.event4}
+    ${s.year5} : ${s.event5}`;
+    }
+
+    function buildPieScenario(s) {
+      return `pie
+    title ${s.title}
+    "${s.slice1}" : ${s.value1}
+    "${s.slice2}" : ${s.value2}
+    "${s.slice3}" : ${s.value3}
+    "${s.slice4}" : ${s.value4}`;
+    }
+
+    function buildGitGraphScenario(s) {
+      return `gitGraph
+    commit id: "${s.c1}"
+    branch ${s.branch}
+    checkout ${s.branch}
+    commit id: "${s.c2}"
+    commit id: "${s.c3}"
+    checkout main
+    merge ${s.branch}
+    commit id: "${s.c4}"
+    branch ${s.hotfix}
+    checkout ${s.hotfix}
+    commit id: "${s.c5}"
+    checkout main
+    merge ${s.hotfix}
+    commit id: "${s.c6}"`;
+    }
+
+    const gallerySamples = [
+      ...[
+        { title: "Incident Response Escalation", entry: "PagerDuty sev-1", check: "Correlate alerts?", assess: "Assemble incident room", decision: "Mitigation path", automate: "Run edge traffic shift", coordinate: "Page platform + product leads", verify: "Validate latency and error budgets", document: "Capture incident timeline", retrospective: "Publish corrective actions" },
+        { title: "Customer Onboarding Workflow", entry: "Signed contract", check: "Compliance package complete?", assess: "Create workspace + SSO profile", decision: "Provisioning strategy", automate: "Create default environment", coordinate: "Route legal gaps to onboarding team", verify: "Run acceptance checklist", document: "Store launch packet", retrospective: "Measure time-to-value" },
+        { title: "Change Approval Pipeline", entry: "RFC submitted", check: "Owner + risk score present?", assess: "Generate deployment plan", decision: "Execution mode", automate: "Schedule controlled rollout", coordinate: "Open CAB review lane", verify: "Confirm health checks", document: "Snapshot decision log", retrospective: "Review rollback readiness" },
+        { title: "ML Feature Store Refresh", entry: "Daily retrain trigger", check: "Fresh source data landed?", assess: "Materialize candidate features", decision: "Publish threshold met", automate: "Promote feature set", coordinate: "Open analyst review", verify: "Compare offline metrics", document: "Write lineage note", retrospective: "Tune freshness policy" },
+        { title: "Billing Failure Recovery", entry: "Invoice payment failed", check: "Card updater succeeded?", assess: "Classify account risk", decision: "Recovery branch", automate: "Trigger smart retry", coordinate: "Notify finance + CSM", verify: "Confirm payment settled", document: "Append account journal", retrospective: "Update dunning copy" },
+        { title: "Security Exception Intake", entry: "Exception request opened", check: "Threat model attached?", assess: "Score exposure window", decision: "Approval path", automate: "Create temporary policy waiver", coordinate: "Escalate to security council", verify: "Confirm compensating controls", document: "Store waiver evidence", retrospective: "Retire exception on schedule" },
+        { title: "Warehouse Restock Planner", entry: "Inventory falls below target", check: "Demand forecast stable?", assess: "Generate purchase options", decision: "Supplier route", automate: "Place replenishment order", coordinate: "Escalate to sourcing lead", verify: "Confirm ASN received", document: "Update planning workbook", retrospective: "Tune reorder levels" },
+        { title: "Partner API Migration", entry: "Deprecation notice arrives", check: "Client inventory complete?", assess: "Map compatibility gaps", decision: "Migration strategy", automate: "Generate SDK upgrade PRs", coordinate: "Coordinate vendor office hours", verify: "Replay contract tests", document: "Publish migration bulletin", retrospective: "Archive sunset metrics" }
+      ].map((s, index) => sample("flowchart", index, s.title, "Implemented", buildFlowchartScenario(s), index === 0)),
+      ...[
+        { title: "Checkout Risk Review", user: "Fraud Analyst", portal: "Risk Console", api: "Risk API", queue: "Decision Queue", worker: "Scoring Worker", store: "Ledger Store", open: "Open charge review", submit: "Fetch order + customer context", enqueue: "Queue secondary scoring", execute: "Recompute risk profile", persist: "Persist case evidence", ack: "Store versioned result", respond: "Return approve/hold recommendation", complete: "Display reviewer action panel" },
+        { title: "Claims Triage Pipeline", user: "Claims Lead", portal: "Claims Workspace", api: "Claims API", queue: "Routing Queue", worker: "Triage Worker", store: "Case Vault", open: "Inspect newly filed claim", submit: "Submit policy + incident payload", enqueue: "Route to adjudication lane", execute: "Evaluate claimant history", persist: "Write evidence bundle", ack: "Acknowledge saved record", respond: "Return triage priority", complete: "Show next handling steps" },
+        { title: "Observability Burn Review", user: "SRE", portal: "Ops Dashboard", api: "Incident API", queue: "Runbook Queue", worker: "Automation Bot", store: "Evidence Store", open: "Open noisy service incident", submit: "Request correlated traces", enqueue: "Schedule remediation job", execute: "Apply safe recovery runbook", persist: "Write audit event", ack: "Confirm event durability", respond: "Return service health state", complete: "Surface follow-up tasks" },
+        { title: "Regulatory Filing Assembly", user: "Compliance Manager", portal: "Filing Portal", api: "Filing API", queue: "Document Queue", worker: "Assembler", store: "Record Archive", open: "Start quarterly filing", submit: "Collect source entities", enqueue: "Request document assembly", execute: "Build regulator packet", persist: "Archive signed filing", ack: "Confirm immutable record", respond: "Return filing reference", complete: "Download submission receipt" },
+        { title: "Data Export Access Review", user: "Privacy Officer", portal: "Privacy Console", api: "Export API", queue: "Approval Queue", worker: "Policy Worker", store: "Access Ledger", open: "Open export request", submit: "Load requester + scope", enqueue: "Queue policy validation", execute: "Evaluate data handling rules", persist: "Record approval artifact", ack: "Return evidence key", respond: "Emit release decision", complete: "Unlock export package" },
+        { title: "Marketplace Listing Publish", user: "Merchandiser", portal: "Catalog Studio", api: "Catalog API", queue: "Publish Queue", worker: "Indexer", store: "Catalog Store", open: "Review draft listing", submit: "Send listing payload", enqueue: "Queue enrichment pass", execute: "Compute taxonomy + search facets", persist: "Save enriched listing", ack: "Confirm write revision", respond: "Return publish eligibility", complete: "Show channel status board" },
+        { title: "Loan Underwriting Sync", user: "Underwriter", portal: "Credit Workbench", api: "Underwriting API", queue: "Decision Queue", worker: "Rules Engine", store: "Credit Vault", open: "Open loan application", submit: "Request bureau + banking data", enqueue: "Queue policy pass", execute: "Score affordability and fraud", persist: "Store decision package", ack: "Return package id", respond: "Emit approve/decline range", complete: "Present recommendation summary" },
+        { title: "Media Render Dispatch", user: "Producer", portal: "Render Studio", api: "Render API", queue: "Render Queue", worker: "Transcode Worker", store: "Asset Archive", open: "Submit campaign cut", submit: "Register source asset", enqueue: "Queue renditions", execute: "Render channel variants", persist: "Store final assets", ack: "Confirm output manifest", respond: "Return delivery map", complete: "Open publish checklist" }
+      ].map((s, index) => sample("sequence", index, s.title, "Partial", buildSequenceScenario(s), index === 0)),
+      ...[
+        { title: "Change Management Domain", root: "ChangeRequest", policy: "ApprovalPolicy", service: "ExecutionService", step: "ExecutionStep", event: "AuditEvent", repo: "ChangeRepository" },
+        { title: "Subscription Lifecycle Domain", root: "Subscription", policy: "EntitlementPolicy", service: "BillingService", step: "InvoiceRun", event: "LedgerEvent", repo: "SubscriptionRepository" },
+        { title: "Experiment Delivery Domain", root: "Experiment", policy: "TargetingPolicy", service: "VariantService", step: "ExposureWindow", event: "ExposureEvent", repo: "ExperimentRepository" },
+        { title: "Fulfillment Planning Domain", root: "ShipmentPlan", policy: "AllocationPolicy", service: "RoutingService", step: "PickWave", event: "WarehouseEvent", repo: "FulfillmentRepository" },
+        { title: "Identity Governance Domain", root: "AccessRequest", policy: "ReviewPolicy", service: "ProvisioningService", step: "ApprovalStep", event: "AccessEvent", repo: "IdentityRepository" },
+        { title: "Support Escalation Domain", root: "SupportCase", policy: "EscalationPolicy", service: "AssignmentService", step: "HandlingStep", event: "CaseEvent", repo: "SupportRepository" },
+        { title: "Portfolio Rebalance Domain", root: "RebalancePlan", policy: "RiskPolicy", service: "ExecutionDesk", step: "TradeBatch", event: "TradeEvent", repo: "PortfolioRepository" },
+        { title: "Manufacturing Release Domain", root: "ReleaseOrder", policy: "QualityPolicy", service: "SchedulingService", step: "WorkCenterStep", event: "ProductionEvent", repo: "ReleaseRepository" }
+      ].map((s, index) => sample("class", index, s.title, "Partial", buildClassScenario(s), index === 0)),
+      ...[
+        { title: "Security Exception Lifecycle", start: "Draft", review: "Review", blocked: "WaitingForEvidence", approved: "Approved", rejected: "Rejected", executing: "InEffect", verifying: "Validating", rollback: "Revoking", closed: "Closed" },
+        { title: "Invoice Dispute Lifecycle", start: "Opened", review: "Triage", blocked: "AwaitingDocuments", approved: "Accepted", rejected: "Declined", executing: "AdjustingLedger", verifying: "RecheckingBalances", rollback: "Reversal", closed: "Resolved" },
+        { title: "Feature Flag Release Lifecycle", start: "Draft", review: "Reviewing", blocked: "BlockedByRisk", approved: "Approved", rejected: "Rejected", executing: "RollingOut", verifying: "Monitoring", rollback: "RollingBack", closed: "Archived" },
+        { title: "Supplier Onboarding Lifecycle", start: "Invited", review: "Screening", blocked: "MissingTaxForms", approved: "Approved", rejected: "Rejected", executing: "Provisioning", verifying: "VerifyingConnections", rollback: "Deprovisioning", closed: "Live" },
+        { title: "Loan Review Lifecycle", start: "ApplicationReceived", review: "UnderReview", blocked: "NeedMoreInfo", approved: "Approved", rejected: "Declined", executing: "Funding", verifying: "QualityControl", rollback: "Cancelling", closed: "Booked" },
+        { title: "Dataset Publication Lifecycle", start: "Draft", review: "GovernanceReview", blocked: "BlockedByPII", approved: "Approved", rejected: "Rejected", executing: "Publishing", verifying: "VerifyingContracts", rollback: "Unpublishing", closed: "Available" },
+        { title: "Warehouse Recall Lifecycle", start: "Detected", review: "Investigating", blocked: "WaitingForVendor", approved: "Approved", rejected: "Cancelled", executing: "Recalling", verifying: "InspectingReturns", rollback: "ResumeShipping", closed: "Contained" },
+        { title: "Partner Integration Lifecycle", start: "Proposed", review: "Evaluating", blocked: "WaitingOnSandbox", approved: "Approved", rejected: "Declined", executing: "Implementing", verifying: "Certifying", rollback: "Suspending", closed: "Operational" }
+      ].map((s, index) => sample("state", index, s.title, "Partial", buildStateScenario(s), index === 0)),
+      ...[
+        { title: "Incident Ownership Model", owner: "TEAM", primary: "INCIDENT", secondary: "ACTION_ITEM", audit: "AUDIT_LOG" },
+        { title: "Subscription Billing Model", owner: "ACCOUNT", primary: "SUBSCRIPTION", secondary: "INVOICE", audit: "LEDGER_EVENT" },
+        { title: "Catalog Curation Model", owner: "MERCHANT", primary: "LISTING", secondary: "VARIANT", audit: "REVIEW_EVENT" },
+        { title: "Fraud Investigation Model", owner: "ANALYST", primary: "CASE", secondary: "SIGNAL", audit: "CASE_NOTE" },
+        { title: "Manufacturing Release Model", owner: "PLANT", primary: "RELEASE_ORDER", secondary: "WORK_STEP", audit: "QUALITY_EVENT" },
+        { title: "Clinical Scheduling Model", owner: "CLINIC", primary: "APPOINTMENT", secondary: "PROCEDURE", audit: "ACCESS_LOG" },
+        { title: "Loan Servicing Model", owner: "SERVICER", primary: "LOAN", secondary: "PAYMENT_PLAN", audit: "SERVICING_EVENT" },
+        { title: "Education Program Model", owner: "INSTITUTION", primary: "COHORT", secondary: "LESSON_PLAN", audit: "ENGAGEMENT_EVENT" }
+      ].map((s, index) => sample("er", index, s.title, "Partial", buildErScenario(s), index === 0)),
+      ...[
+        { id: "gm1", title: "Q2 Reliability Hardening", start: "2026-04-01", discovery1: "Stabilize alert topology", discovery2: "Review runbook gaps", build1: "Automate remediation hooks", build2: "Refactor canary policies", launch1: "Gradual enablement", launch2: "Ops handoff", flag: "crit", launchFlag: "active", closeFlag: "milestone" },
+        { id: "gm2", title: "Enterprise Onboarding Program", start: "2026-05-03", discovery1: "Map tenant requirements", discovery2: "Approve compliance checklist", build1: "Implement SSO templates", build2: "Provision default spaces", launch1: "Pilot first account", launch2: "Rollout playbook", flag: "active", launchFlag: "crit", closeFlag: "milestone" },
+        { id: "gm3", title: "Partner API Migration", start: "2026-06-10", discovery1: "Inventory client calls", discovery2: "Draft compatibility matrix", build1: "Ship SDK adapters", build2: "Replay contract suite", launch1: "Cut traffic over", launch2: "Remove legacy paths", flag: "crit", launchFlag: "active", closeFlag: "milestone" },
+        { id: "gm4", title: "Warehouse Slotting Refresh", start: "2026-07-08", discovery1: "Analyze pick density", discovery2: "Lock wave strategy", build1: "Rebuild slotting plans", build2: "Rebalance labor cells", launch1: "Test new lanes", launch2: "Measure throughput", flag: "active", launchFlag: "active", closeFlag: "milestone" },
+        { id: "gm5", title: "Clinical Scheduling Revamp", start: "2026-08-04", discovery1: "Audit booking patterns", discovery2: "Review staff constraints", build1: "Implement routing rules", build2: "Deploy reminder flows", launch1: "Open new booking paths", launch2: "Retune utilization", flag: "crit", launchFlag: "active", closeFlag: "milestone" },
+        { id: "gm6", title: "Credit Decisioning Upgrade", start: "2026-09-01", discovery1: "Validate data contracts", discovery2: "Approve model guardrails", build1: "Integrate new scorecards", build2: "Backfill decision traces", launch1: "Canary underwriting", launch2: "Roll operator training", flag: "crit", launchFlag: "active", closeFlag: "milestone" },
+        { id: "gm7", title: "Media Delivery Platform", start: "2026-10-06", discovery1: "Map channel requirements", discovery2: "Define asset taxonomy", build1: "Scale rendition pipeline", build2: "Automate approval routing", launch1: "Launch creator beta", launch2: "Open self-service ingest", flag: "active", launchFlag: "active", closeFlag: "milestone" },
+        { id: "gm8", title: "Data Governance Rollout", start: "2026-11-02", discovery1: "Classify datasets", discovery2: "Review retention policy", build1: "Enforce access tiers", build2: "Backfill lineage views", launch1: "Enable steward dashboards", launch2: "Publish governance scorecard", flag: "crit", launchFlag: "active", closeFlag: "milestone" }
+      ].map((s, index) => sample("gantt", index, s.title, "Partial/basic", buildGanttScenario(s), index === 0)),
+      ...[
+        { title: "New Customer Launch Journey", actor: "Customer", section1: "Discovery", step1: "Understand offer", score1: 4, step2: "Evaluate security posture", score2: 3, section2: "Implementation", step3: "Configure workspace", score3: 5, step4: "Connect identity provider", score4: 3, section3: "Adoption", step5: "Train operators", score5: 4, step6: "Review first month results", score6: 5 },
+        { title: "Incident Commander Journey", actor: "Commander", section1: "Triage", step1: "Assess alert burst", score1: 2, step2: "Open command channel", score2: 4, section2: "Containment", step3: "Delegate mitigation lanes", score3: 4, step4: "Track customer impact", score4: 3, section3: "Closure", step5: "Verify recovery", score5: 5, step6: "Publish postmortem", score6: 4 },
+        { title: "Analyst Review Journey", actor: "Analyst", section1: "Intake", step1: "Open evidence packet", score1: 3, step2: "Check policy matches", score2: 4, section2: "Decision", step3: "Compare historical context", score3: 5, step4: "Escalate edge cases", score4: 2, section3: "Follow-up", step5: "Record rationale", score5: 4, step6: "Send handoff summary", score6: 5 },
+        { title: "Fulfillment Manager Journey", actor: "Manager", section1: "Planning", step1: "Review demand spikes", score1: 4, step2: "Adjust labor plan", score2: 3, section2: "Execution", step3: "Release wave schedule", score3: 5, step4: "Handle exceptions", score4: 2, section3: "Optimization", step5: "Compare throughput", score5: 4, step6: "Tune slotting rules", score6: 4 },
+        { title: "Privacy Request Journey", actor: "Requester", section1: "Request", step1: "Find request portal", score1: 3, step2: "Submit identity proof", score2: 2, section2: "Processing", step3: "Track status", score3: 4, step4: "Clarify data scope", score4: 3, section3: "Completion", step5: "Download export", score5: 5, step6: "Close request", score6: 5 },
+        { title: "Partner Enablement Journey", actor: "Partner", section1: "Qualification", step1: "Review sandbox docs", score1: 4, step2: "Map feature gaps", score2: 3, section2: "Build", step3: "Implement integration", score3: 5, step4: "Certify contract tests", score4: 4, section3: "Go-live", step5: "Cut traffic", score5: 3, step6: "Monitor first week", score6: 4 },
+        { title: "Research Program Journey", actor: "Researcher", section1: "Planning", step1: "Draft study plan", score1: 4, step2: "Secure approvals", score2: 2, section2: "Execution", step3: "Recruit participants", score3: 3, step4: "Capture findings", score4: 5, section3: "Synthesis", step5: "Publish readout", score5: 4, step6: "Prioritize next bets", score6: 5 },
+        { title: "RevOps Forecast Journey", actor: "Operator", section1: "Preparation", step1: "Load pipeline snapshot", score1: 4, step2: "Normalize territories", score2: 3, section2: "Forecasting", step3: "Adjust commit bands", score3: 5, step4: "Review downside cases", score4: 3, section3: "Communication", step5: "Present scenario deck", score5: 4, step6: "Update plan of record", score6: 5 }
+      ].map((s, index) => sample("journey", index, s.title, "Partial/basic", buildJourneyScenario(s), index === 0)),
+      ...[
+        { title: "Platform Reliability Roadmap", year1: "2022", event1: "Consolidated alerting layers", year2: "2023", event2: "Introduced runbook automation", year3: "2024", event3: "Added deterministic deployment gates", year4: "2025", event4: "Unified incident evidence model", year5: "2026", event5: "Rolled out live browser diagnostics" },
+        { title: "Identity Program Timeline", year1: "2021", event1: "Migrated to central SSO", year2: "2022", event2: "Added step-up auth", year3: "2023", event3: "Shipped just-in-time provisioning", year4: "2024", event4: "Enforced admin review rules", year5: "2025", event5: "Published access lineage dashboard" },
+        { title: "Fulfillment Modernization", year1: "2020", event1: "Rebuilt pick routing", year2: "2021", event2: "Introduced wave planning", year3: "2022", event3: "Opened robotics lane", year4: "2024", event4: "Connected carrier exception feeds", year5: "2026", event5: "Added throughput planning simulator" },
+        { title: "Clinical Scheduling Evolution", year1: "2019", event1: "Unified intake forms", year2: "2020", event2: "Launched waitlist engine", year3: "2022", event3: "Automated reminders", year4: "2024", event4: "Added no-show prediction", year5: "2026", event5: "Optimized provider utilization" },
+        { title: "Data Governance Milestones", year1: "2021", event1: "Defined classification tiers", year2: "2022", event2: "Mapped source ownership", year3: "2023", event3: "Activated retention rules", year4: "2025", event4: "Deployed lineage explorer", year5: "2026", event5: "Introduced policy simulation" },
+        { title: "Revenue Architecture Timeline", year1: "2020", event1: "Retired spreadsheet quotas", year2: "2021", event2: "Standardized territory rules", year3: "2023", event3: "Built forecast review boards", year4: "2024", event4: "Connected finance actuals", year5: "2026", event5: "Shipped scenario planning modeler" },
+        { title: "Partner Ecosystem Timeline", year1: "2018", event1: "Opened developer sandbox", year2: "2020", event2: "Added certification program", year3: "2022", event3: "Introduced versioned contracts", year4: "2025", event4: "Enabled self-service keys", year5: "2026", event5: "Published migration command center" },
+        { title: "Fraud Ops Timeline", year1: "2021", event1: "Centralized case handling", year2: "2022", event2: "Added customer graph lookups", year3: "2023", event3: "Automated queue prioritization", year4: "2024", event4: "Linked external consortium data", year5: "2026", event5: "Released analyst copilot views" }
+      ].map((s, index) => sample("timeline", index, s.title, "Partial/basic", buildTimelineScenario(s), index === 0)),
+      ...[
+        { title: "Cloud Cost Composition", slice1: "Compute", value1: 38, slice2: "Storage", value2: 22, slice3: "Data Transfer", value3: 18, slice4: "Observability", value4: 22 },
+        { title: "Support Ticket Mix", slice1: "Integrations", value1: 27, slice2: "Billing", value2: 18, slice3: "Provisioning", value3: 31, slice4: "Reporting", value4: 24 },
+        { title: "Product Adoption Drivers", slice1: "Automation", value1: 34, slice2: "Visibility", value2: 26, slice3: "Collaboration", value3: 19, slice4: "Compliance", value4: 21 },
+        { title: "Warehouse Delay Causes", slice1: "Carrier Capacity", value1: 29, slice2: "Labor Shortage", value2: 21, slice3: "Inventory Drift", value3: 24, slice4: "Weather", value4: 26 },
+        { title: "Forecast Variance Split", slice1: "Pipeline Timing", value1: 33, slice2: "Pricing", value2: 17, slice3: "Expansion", value3: 28, slice4: "Churn", value4: 22 },
+        { title: "Clinical Intake Mix", slice1: "New Visits", value1: 41, slice2: "Follow-up", value2: 27, slice3: "Diagnostics", value3: 16, slice4: "Urgent Care", value4: 16 },
+        { title: "Portfolio Risk Allocation", slice1: "Credit", value1: 36, slice2: "Liquidity", value2: 18, slice3: "Market", value3: 26, slice4: "Operational", value4: 20 },
+        { title: "Security Findings Breakdown", slice1: "Identity", value1: 24, slice2: "Network", value2: 19, slice3: "Application", value3: 37, slice4: "Secrets", value4: 20 }
+      ].map((s, index) => sample("pie", index, s.title, "Partial/basic", buildPieScenario(s), index === 0)),
+      ...[
+        { title: "Release Train Alpha", branch: "payments-redesign", hotfix: "hotfix-tax", c1: "baseline", c2: "pricing-api", c3: "checkout-ui", c4: "alpha-cut", c5: "tax-fix", c6: "alpha.1" },
+        { title: "Release Train Bravo", branch: "identity-refresh", hotfix: "hotfix-session", c1: "mainline", c2: "sso-rules", c3: "audit-hooks", c4: "beta-cut", c5: "session-patch", c6: "beta.1" },
+        { title: "Release Train Charlie", branch: "warehouse-routing", hotfix: "hotfix-picker", c1: "init", c2: "lane-engine", c3: "wave-tuner", c4: "pilot-cut", c5: "picker-fix", c6: "pilot.1" },
+        { title: "Release Train Delta", branch: "forecast-model", hotfix: "hotfix-commit", c1: "seed", c2: "scenario-board", c3: "quota-sync", c4: "preview-cut", c5: "commit-fix", c6: "preview.1" },
+        { title: "Release Train Echo", branch: "partner-migration", hotfix: "hotfix-headers", c1: "origin", c2: "contract-v2", c3: "sdk-registry", c4: "wave-1", c5: "header-fix", c6: "wave-1.1" },
+        { title: "Release Train Foxtrot", branch: "governance-ui", hotfix: "hotfix-lineage", c1: "start", c2: "policy-panels", c3: "retention-jobs", c4: "governance-cut", c5: "lineage-fix", c6: "governance.1" },
+        { title: "Release Train Golf", branch: "claims-ops", hotfix: "hotfix-docs", c1: "root", c2: "triage-queue", c3: "evidence-pack", c4: "claims-cut", c5: "docs-fix", c6: "claims.1" },
+        { title: "Release Train Hotel", branch: "media-dispatch", hotfix: "hotfix-codec", c1: "boot", c2: "render-farm", c3: "delivery-rules", c4: "creator-cut", c5: "codec-fix", c6: "creator.1" }
+      ].map((s, index) => sample("gitGraph", index, s.title, "Partial/basic", buildGitGraphScenario(s), index === 0))
     ];
+
+    const editorSamples = gallerySamples.filter((entry) => entry.featured);
 
     const els = {
       sampleButtons: document.getElementById("sample-buttons"),
@@ -638,7 +850,8 @@
 
     let frankenRuntime = null;
     let diagramInstance = null;
-    let currentSample = samples[0];
+    let currentSample = editorSamples[0];
+    let galleryObserver = null;
 
     mermaid.initialize({
       startOnLoad: false,
@@ -671,9 +884,16 @@
       return JSON.stringify(value, null, 2);
     }
 
+    function escapeHtml(value) {
+      return value
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+    }
+
     function createSampleButtons() {
       els.sampleButtons.innerHTML = "";
-      for (const sample of samples) {
+      for (const sample of editorSamples) {
         const button = document.createElement("button");
         button.type = "button";
         button.dataset.sample = sample.id;
@@ -718,7 +938,12 @@
     async function renderGallery() {
       els.galleryGrid.innerHTML = "";
 
-      for (const sample of samples) {
+      if (galleryObserver) {
+        galleryObserver.disconnect();
+        galleryObserver = null;
+      }
+
+      for (const sample of gallerySamples) {
         const card = document.createElement("article");
         card.className = "rounded-[1.75rem] border border-white/10 bg-slate-950/40 p-5";
         card.innerHTML = `
@@ -729,7 +954,7 @@
                   <h3 class="text-xl font-bold text-white">${sample.label}</h3>
                   <span class="pill ${badgeClass(sample.description.toLowerCase().includes("implemented") ? "implemented" : "partial")} rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em]">${sample.description}</span>
                 </div>
-                <p class="mt-2 text-sm leading-6 text-slate-300">${sample.code.split("\n")[0]}</p>
+                <p class="mt-2 text-sm leading-6 text-slate-300">${sample.category} · ${sample.code.split("\n")[0]}</p>
               </div>
               <button
                 type="button"
@@ -740,9 +965,9 @@
               </button>
             </div>
             <div class="gallery-stage scrollbar-thin overflow-auto rounded-[1.25rem] border border-white/10 bg-white p-4 text-slate-900" data-gallery-render="${sample.id}">
-              <div class="text-sm text-slate-500">Rendering ${sample.label}...</div>
+              <div class="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm leading-6 text-slate-500">Queued render for ${sample.label}. This card renders when it nears the viewport so the gallery can hold 80 large examples without bogging the page down.</div>
             </div>
-            <pre class="scrollbar-thin max-h-56 overflow-auto rounded-[1.25rem] border border-white/10 bg-[#08101d] p-4 text-xs leading-6 text-slate-300">${sample.code.replace(/</g, "&lt;")}</pre>
+            <pre class="scrollbar-thin max-h-56 overflow-auto rounded-[1.25rem] border border-white/10 bg-[#08101d] p-4 text-xs leading-6 text-slate-300">${escapeHtml(sample.code)}</pre>
           </div>
         `;
         els.galleryGrid.appendChild(card);
@@ -750,7 +975,7 @@
 
       for (const button of els.galleryGrid.querySelectorAll("[data-gallery-sample]")) {
         button.addEventListener("click", () => {
-          const sample = samples.find((entry) => entry.id === button.dataset.gallerySample);
+          const sample = gallerySamples.find((entry) => entry.id === button.dataset.gallerySample);
           if (!sample) {
             return;
           }
@@ -762,10 +987,9 @@
         });
       }
 
-      for (const sample of samples) {
-        const target = els.galleryGrid.querySelector(`[data-gallery-render="${sample.id}"]`);
-        if (!target) {
-          continue;
+      const renderCard = async (sample, target) => {
+        if (!target || target.dataset.rendered === "true") {
+          return;
         }
 
         if (!frankenRuntime) {
@@ -774,8 +998,11 @@
               frankenmermaid runtime unavailable for this gallery card.
             </div>
           `;
-          continue;
+          target.dataset.rendered = "true";
+          return;
         }
+
+        target.innerHTML = `<div class="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm leading-6 text-slate-500">Rendering ${sample.label}...</div>`;
 
         try {
           const svg = await frankenRuntime.renderSvg(sample.code, { theme: "corporate" });
@@ -786,6 +1013,32 @@
               ${String(error)}
             </div>
           `;
+        }
+
+        target.dataset.rendered = "true";
+      };
+
+      galleryObserver = new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries) {
+            if (!entry.isIntersecting) {
+              continue;
+            }
+            const target = entry.target;
+            const sample = gallerySamples.find((item) => item.id === target.dataset.galleryRender);
+            if (sample) {
+              renderCard(sample, target);
+            }
+            galleryObserver.unobserve(target);
+          }
+        },
+        { rootMargin: "600px 0px" }
+      );
+
+      for (const sample of gallerySamples) {
+        const target = els.galleryGrid.querySelector(`[data-gallery-render="${sample.id}"]`);
+        if (target) {
+          galleryObserver.observe(target);
         }
       }
     }
