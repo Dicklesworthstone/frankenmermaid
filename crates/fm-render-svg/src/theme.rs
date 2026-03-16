@@ -114,22 +114,22 @@ impl ThemeColors {
     pub fn from_preset(preset: ThemePreset) -> Self {
         match preset {
             ThemePreset::Default => Self {
-                background: "#f9fafb".into(),
-                text: "#111827".into(),
+                background: "#fafbfc".into(),
+                text: "#1a1a2e".into(),
                 node_fill: "#ffffff".into(),
-                node_stroke: "#e5e7eb".into(),
-                edge: "#9ca3af".into(),
-                cluster_fill: "rgba(243,244,246,0.5)".into(),
-                cluster_stroke: "#d1d5db".into(),
+                node_stroke: "#e2e8f0".into(),
+                edge: "#94a3b8".into(),
+                cluster_fill: "rgba(241,245,249,0.6)".into(),
+                cluster_stroke: "#cbd5e1".into(),
                 accents: [
+                    "#6366f1".into(), // Indigo - primary
                     "#3b82f6".into(), // Blue
-                    "#0ea5e9".into(), // Sky
-                    "#10b981".into(), // Emerald
+                    "#06b6d4".into(), // Cyan
                     "#8b5cf6".into(), // Violet
                     "#f59e0b".into(), // Amber
+                    "#ec4899".into(), // Pink
+                    "#10b981".into(), // Emerald
                     "#f43f5e".into(), // Rose
-                    "#14b8a6".into(), // Teal
-                    "#6366f1".into(), // Indigo
                 ],
             },
 
@@ -197,19 +197,19 @@ impl ThemeColors {
                 background: "#f8fafc".into(),
                 text: "#0f172a".into(),
                 node_fill: "#ffffff".into(),
-                node_stroke: "#93c5fd".into(), // blue-300
-                edge: "#64748b".into(),        // slate-500
-                cluster_fill: "rgba(239,246,255,0.6)".into(), // blue-50
-                cluster_stroke: "#bfdbfe".into(), // blue-200
+                node_stroke: "#cbd5e1".into(),
+                edge: "#64748b".into(),
+                cluster_fill: "rgba(241,245,249,0.5)".into(),
+                cluster_stroke: "#94a3b8".into(),
                 accents: [
-                    "#1d4ed8".into(), // blue-700
-                    "#0369a1".into(), // sky-700
-                    "#0f766e".into(), // teal-700
-                    "#4338ca".into(), // indigo-700
-                    "#1e40af".into(), // blue-800
-                    "#0ea5e9".into(), // sky-500
-                    "#3b82f6".into(), // blue-500
-                    "#6366f1".into(), // indigo-500
+                    "#2563eb".into(), // Blue-600
+                    "#0284c7".into(), // Sky-600
+                    "#0891b2".into(), // Cyan-600
+                    "#4f46e5".into(), // Indigo-600
+                    "#7c3aed".into(), // Violet-600
+                    "#0d9488".into(), // Teal-600
+                    "#2563eb".into(), // Blue-600
+                    "#4338ca".into(), // Indigo-700
                 ],
             },
 
@@ -465,11 +465,9 @@ impl Theme {
 svg {{
   shape-rendering: geometricPrecision;
   background: var(--fm-bg);
-  background-image: linear-gradient(
-    180deg,
-    var(--fm-bg) 0%,
-    color-mix(in srgb, var(--fm-bg) 95%, var(--fm-node-stroke) 5%) 100%
-  );
+  background-image:
+    radial-gradient(ellipse at 20% 0%, color-mix(in srgb, var(--fm-accent-1) 4%, transparent) 0%, transparent 50%),
+    linear-gradient(180deg, var(--fm-bg) 0%, color-mix(in srgb, var(--fm-bg) 96%, var(--fm-node-stroke) 4%) 100%);
 }}
 .fm-node {{
   isolation: isolate;
@@ -488,6 +486,7 @@ svg {{
   shape-rendering: geometricPrecision;
   {}
   transition: fill 200ms ease, stroke 200ms ease, filter 200ms ease, transform 200ms cubic-bezier(0.4, 0, 0.2, 1);
+  paint-order: normal;
 }}
 .fm-node line {{
   stroke: var(--fm-node-accent);
@@ -496,10 +495,10 @@ svg {{
 }}
 .fm-node text {{
   fill: var(--fm-text-color);
-  font-weight: 500;
-  letter-spacing: -0.01em;
+  font-weight: 600;
+  letter-spacing: -0.02em;
   text-rendering: optimizeLegibility;
-  font-feature-settings: "kern" 1, "liga" 1;
+  font-feature-settings: "kern" 1, "liga" 1, "calt" 1;
 }}
 .fm-node:hover rect,
 .fm-node:hover path,
@@ -508,7 +507,8 @@ svg {{
 .fm-node:hover polygon {{
   stroke: var(--fm-node-hover-accent);
   {}
-  transform: translateY(-2px);
+  transform: translateY(-2px) scale(1.01);
+  transform-origin: center;
 }}
 .fm-node-accent-1 {{
   --fm-node-accent: var(--fm-node-stroke);
@@ -615,8 +615,8 @@ svg {{
 }}
 .edge-label {{
   fill: var(--fm-edge-label-text);
-  font-weight: 500;
-  font-size: 0.95em;
+  font-weight: 600;
+  font-size: 0.88em;
   letter-spacing: -0.01em;
   text-rendering: optimizeLegibility;
 }}
@@ -649,13 +649,17 @@ marker#arrow-cross path {{
 .fm-cluster {{
   fill: var(--fm-cluster-fill);
   stroke: var(--fm-cluster-stroke);
-  stroke-width: 1.2;
-  stroke-dasharray: 6 3;
+  stroke-width: 1;
+  stroke-dasharray: 5 3;
+  rx: 12;
+  ry: 12;
 }}
 .fm-cluster-label {{
   fill: var(--fm-cluster-label-color);
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  font-weight: 700;
+  font-size: 0.85em;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
 }}
 .fm-cluster-c4 {{
   fill: var(--fm-cluster-c4-fill);
@@ -680,6 +684,11 @@ marker#arrow-cross path {{
     transition: none;
     transform: none;
   }}
+}}
+.fm-node:focus-visible {{
+  outline: 2px solid var(--fm-accent-1);
+  outline-offset: 3px;
+  border-radius: 4px;
 }}
 "#, shadow_filter, hover_shadow_filter)
         );

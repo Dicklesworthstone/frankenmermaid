@@ -141,7 +141,7 @@ impl Default for SvgRenderConfig {
             shadow_offset_y: 2.0,
             shadow_blur: 6.0,
             shadow_opacity: 0.15,
-            shadow_color: String::from("#000000"),
+            shadow_color: String::from("#0f172a"),
             node_gradients: true,
             node_gradient_style: NodeGradientStyle::LinearVertical,
             glow_enabled: true,
@@ -741,8 +741,9 @@ fn node_gradient_for(config: &SvgRenderConfig, theme: &Theme) -> Option<Gradient
         return None;
     }
     let stops = vec![
-        GradientStop::with_opacity(0.0, &theme.colors.node_fill, 0.95),
-        GradientStop::with_opacity(1.0, &theme.colors.background, 0.88),
+        GradientStop::with_opacity(0.0, &theme.colors.node_fill, 1.0),
+        GradientStop::with_opacity(0.55, &theme.colors.node_fill, 0.97),
+        GradientStop::with_opacity(1.0, &theme.colors.background, 0.92),
     ];
     let gradient = match config.node_gradient_style {
         NodeGradientStyle::LinearVertical => {
@@ -1221,7 +1222,7 @@ fn render_node(
             .height(h)
             .fill(&colors.node_fill)
             .stroke(&colors.node_stroke)
-            .stroke_width(1.5)
+            .stroke_width(1.6)
             .rx(config.rounded_corners * 0.55),
 
         NodeShape::Rounded => Element::rect()
@@ -1231,7 +1232,7 @@ fn render_node(
             .height(h)
             .fill(&colors.node_fill)
             .stroke(&colors.node_stroke)
-            .stroke_width(1.5)
+            .stroke_width(1.6)
             .rx(config.rounded_corners),
 
         NodeShape::Stadium => Element::rect()
@@ -1241,7 +1242,7 @@ fn render_node(
             .height(h)
             .fill(&colors.node_fill)
             .stroke(&colors.node_stroke)
-            .stroke_width(1.5)
+            .stroke_width(1.6)
             .rx(h / 2.0),
 
         NodeShape::Diamond => {
@@ -1256,7 +1257,7 @@ fn render_node(
                 .d(&path)
                 .fill(&colors.node_fill)
                 .stroke(&colors.node_stroke)
-                .stroke_width(1.5)
+                .stroke_width(1.6)
         }
 
         NodeShape::Hexagon => {
@@ -1274,7 +1275,7 @@ fn render_node(
                 .d(&path)
                 .fill(&colors.node_fill)
                 .stroke(&colors.node_stroke)
-                .stroke_width(1.5)
+                .stroke_width(1.6)
         }
 
         NodeShape::Circle | NodeShape::DoubleCircle => {
@@ -1285,7 +1286,7 @@ fn render_node(
                 .r(r)
                 .fill(&colors.node_fill)
                 .stroke(&colors.node_stroke)
-                .stroke_width(1.5);
+                .stroke_width(1.6);
 
             if shape == NodeShape::DoubleCircle {
                 // For double circle, we'll use a slightly smaller stroke
@@ -1309,7 +1310,7 @@ fn render_node(
                 .d(&path)
                 .fill(&colors.node_fill)
                 .stroke(&colors.node_stroke)
-                .stroke_width(1.5)
+                .stroke_width(1.6)
         }
 
         NodeShape::Trapezoid => {
@@ -1325,7 +1326,7 @@ fn render_node(
                 .d(&path)
                 .fill(&colors.node_fill)
                 .stroke(&colors.node_stroke)
-                .stroke_width(1.5)
+                .stroke_width(1.6)
         }
 
         NodeShape::Subroutine => {
@@ -1343,7 +1344,7 @@ fn render_node(
                         colors.node_fill.as_str()
                     })
                     .stroke(&colors.node_stroke)
-                    .stroke_width(1.5)
+                    .stroke_width(1.6)
                     .rx(config.rounded_corners * 0.45),
             );
             // Left vertical line
@@ -1395,7 +1396,7 @@ fn render_node(
                 .d(&path)
                 .fill(&colors.node_fill)
                 .stroke(&colors.node_stroke)
-                .stroke_width(1.5)
+                .stroke_width(1.6)
         }
 
         NodeShape::Note => {
@@ -1432,7 +1433,7 @@ fn render_node(
                 .d(&path)
                 .fill(&colors.node_fill)
                 .stroke(&colors.node_stroke)
-                .stroke_width(1.5)
+                .stroke_width(1.6)
         }
 
         NodeShape::Parallelogram => {
@@ -1448,7 +1449,7 @@ fn render_node(
                 .d(&path)
                 .fill(&colors.node_fill)
                 .stroke(&colors.node_stroke)
-                .stroke_width(1.5)
+                .stroke_width(1.6)
         }
 
         NodeShape::InvParallelogram => {
@@ -1464,7 +1465,7 @@ fn render_node(
                 .d(&path)
                 .fill(&colors.node_fill)
                 .stroke(&colors.node_stroke)
-                .stroke_width(1.5)
+                .stroke_width(1.6)
         }
 
         NodeShape::Triangle => {
@@ -1478,7 +1479,7 @@ fn render_node(
                 .d(&path)
                 .fill(&colors.node_fill)
                 .stroke(&colors.node_stroke)
-                .stroke_width(1.5)
+                .stroke_width(1.6)
         }
 
         NodeShape::Pentagon => {
@@ -1500,7 +1501,7 @@ fn render_node(
                 .d(&path.close().build())
                 .fill(&colors.node_fill)
                 .stroke(&colors.node_stroke)
-                .stroke_width(1.5)
+                .stroke_width(1.6)
         }
 
         NodeShape::Star => {
@@ -1524,7 +1525,7 @@ fn render_node(
                 .d(&path.close().build())
                 .fill(&colors.node_fill)
                 .stroke(&colors.node_stroke)
-                .stroke_width(1.5)
+                .stroke_width(1.6)
         }
 
         NodeShape::Cloud => {
@@ -1545,7 +1546,7 @@ fn render_node(
                 .d(&path)
                 .fill(&colors.node_fill)
                 .stroke(&colors.node_stroke)
-                .stroke_width(1.5)
+                .stroke_width(1.6)
         }
 
         NodeShape::Tag => {
@@ -1563,7 +1564,7 @@ fn render_node(
                 .d(&path)
                 .fill(&colors.node_fill)
                 .stroke(&colors.node_stroke)
-                .stroke_width(1.5)
+                .stroke_width(1.6)
         }
 
         NodeShape::CrossedCircle => {
@@ -1581,7 +1582,7 @@ fn render_node(
                         colors.node_fill.as_str()
                     })
                     .stroke(&colors.node_stroke)
-                    .stroke_width(1.5),
+                    .stroke_width(1.6),
             );
             // Diagonal lines
             let offset = r * 0.707; // r * cos(45°)
@@ -1592,7 +1593,7 @@ fn render_node(
                     .x2(cx + offset)
                     .y2(cy + offset)
                     .stroke(&colors.node_stroke)
-                    .stroke_width(1.5),
+                    .stroke_width(1.6),
             );
             g = g.child(
                 Element::line()
@@ -1601,7 +1602,7 @@ fn render_node(
                     .x2(cx - offset)
                     .y2(cy + offset)
                     .stroke(&colors.node_stroke)
-                    .stroke_width(1.5),
+                    .stroke_width(1.6),
             );
             if detail.show_node_labels {
                 return group.child(g).child(
@@ -1923,8 +1924,9 @@ fn render_edge(
                 .height(label_height)
                 .fill(&colors.background)
                 .stroke(&colors.cluster_stroke)
-                .stroke_width(1.0)
-                .rx(6.0),
+                .stroke_width(0.75)
+                .rx(6.0)
+                .ry(6.0),
         );
 
         // Add label text

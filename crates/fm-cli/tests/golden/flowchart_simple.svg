@@ -1,19 +1,19 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 696.2 381" width="100%" height="100%" preserveAspectRatio="xMidYMid meet" role="img" data-nodes="4" data-edges="4" data-type="flowchart" data-detail-tier="rich"><title>flowchart diagram</title><desc>A flowchart diagram with 4 nodes and 4 edges, flowing left to right</desc><style>:root {
-  --fm-bg: #f9fafb;
-  --fm-text-color: #111827;
+  --fm-bg: #fafbfc;
+  --fm-text-color: #1a1a2e;
   --fm-node-fill: #ffffff;
-  --fm-node-stroke: #e5e7eb;
-  --fm-edge-color: #9ca3af;
-  --fm-cluster-fill: rgba(243,244,246,0.5);
-  --fm-cluster-stroke: #d1d5db;
-  --fm-accent-1: #3b82f6;
-  --fm-accent-2: #0ea5e9;
-  --fm-accent-3: #10b981;
+  --fm-node-stroke: #e2e8f0;
+  --fm-edge-color: #94a3b8;
+  --fm-cluster-fill: rgba(241,245,249,0.6);
+  --fm-cluster-stroke: #cbd5e1;
+  --fm-accent-1: #6366f1;
+  --fm-accent-2: #3b82f6;
+  --fm-accent-3: #06b6d4;
   --fm-accent-4: #8b5cf6;
   --fm-accent-5: #f59e0b;
-  --fm-accent-6: #f43f5e;
-  --fm-accent-7: #14b8a6;
-  --fm-accent-8: #6366f1;
+  --fm-accent-6: #ec4899;
+  --fm-accent-7: #10b981;
+  --fm-accent-8: #f43f5e;
 }
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap');
 .fm-text {
@@ -37,11 +37,9 @@
 svg {
   shape-rendering: geometricPrecision;
   background: var(--fm-bg);
-  background-image: linear-gradient(
-    180deg,
-    var(--fm-bg) 0%,
-    color-mix(in srgb, var(--fm-bg) 95%, var(--fm-node-stroke) 5%) 100%
-  );
+  background-image:
+    radial-gradient(ellipse at 20% 0%, color-mix(in srgb, var(--fm-accent-1) 4%, transparent) 0%, transparent 50%),
+    linear-gradient(180deg, var(--fm-bg) 0%, color-mix(in srgb, var(--fm-bg) 96%, var(--fm-node-stroke) 4%) 100%);
 }
 .fm-node {
   isolation: isolate;
@@ -60,6 +58,7 @@ svg {
   shape-rendering: geometricPrecision;
   filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.10)) drop-shadow(0 1px 3px rgba(0, 0, 0, 0.06));
   transition: fill 200ms ease, stroke 200ms ease, filter 200ms ease, transform 200ms cubic-bezier(0.4, 0, 0.2, 1);
+  paint-order: normal;
 }
 .fm-node line {
   stroke: var(--fm-node-accent);
@@ -68,10 +67,10 @@ svg {
 }
 .fm-node text {
   fill: var(--fm-text-color);
-  font-weight: 500;
-  letter-spacing: -0.01em;
+  font-weight: 600;
+  letter-spacing: -0.02em;
   text-rendering: optimizeLegibility;
-  font-feature-settings: "kern" 1, "liga" 1;
+  font-feature-settings: "kern" 1, "liga" 1, "calt" 1;
 }
 .fm-node:hover rect,
 .fm-node:hover path,
@@ -80,7 +79,8 @@ svg {
 .fm-node:hover polygon {
   stroke: var(--fm-node-hover-accent);
   filter: drop-shadow(0 8px 20px rgba(0, 0, 0, 0.14)) drop-shadow(0 3px 8px rgba(0, 0, 0, 0.08));
-  transform: translateY(-2px);
+  transform: translateY(-2px) scale(1.01);
+  transform-origin: center;
 }
 .fm-node-accent-1 {
   --fm-node-accent: var(--fm-node-stroke);
@@ -187,8 +187,8 @@ svg {
 }
 .edge-label {
   fill: var(--fm-edge-label-text);
-  font-weight: 500;
-  font-size: 0.95em;
+  font-weight: 600;
+  font-size: 0.88em;
   letter-spacing: -0.01em;
   text-rendering: optimizeLegibility;
 }
@@ -221,13 +221,17 @@ marker#arrow-cross path {
 .fm-cluster {
   fill: var(--fm-cluster-fill);
   stroke: var(--fm-cluster-stroke);
-  stroke-width: 1.2;
-  stroke-dasharray: 6 3;
+  stroke-width: 1;
+  stroke-dasharray: 5 3;
+  rx: 12;
+  ry: 12;
 }
 .fm-cluster-label {
   fill: var(--fm-cluster-label-color);
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  font-weight: 700;
+  font-size: 0.85em;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
 }
 .fm-cluster-c4 {
   fill: var(--fm-cluster-c4-fill);
@@ -252,6 +256,11 @@ marker#arrow-cross path {
     transition: none;
     transform: none;
   }
+}
+.fm-node:focus-visible {
+  outline: 2px solid var(--fm-accent-1);
+  outline-offset: 3px;
+  border-radius: 4px;
 }
 
 /* High contrast mode support */
@@ -310,4 +319,4 @@ marker#arrow-cross path {
     fill: #fff !important;
     stroke: #666 !important;
   }
-}</style><defs><marker id="arrow-end" markerWidth="10" markerHeight="10" refX="10" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M0 0 L10 5 L0 10 Z" fill="#9ca3af"/></marker><marker id="arrow-filled" markerWidth="12" markerHeight="12" refX="12" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M0 0 L12 6 L0 12 L3 6 Z" fill="#9ca3af"/></marker><marker id="arrow-open" markerWidth="10" markerHeight="10" refX="10" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M0 0 L10 5 L0 10" fill="none" stroke="#9ca3af" stroke-width="1.50"/></marker><marker id="arrow-circle" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto" markerUnits="strokeWidth"><path d="M8 4 A4 4 0 1 1 8 4 Z" fill="#9ca3af"/></marker><marker id="arrow-cross" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto" markerUnits="strokeWidth"><path d="M0 0 L8 8 M8 0 L0 8" fill="none" stroke="#9ca3af" stroke-width="1.50"/></marker><marker id="arrow-diamond" markerWidth="10" markerHeight="10" refX="10" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M5 0 L10 5 L5 10 L0 5 Z" fill="#9ca3af"/></marker><filter id="drop-shadow" x="-50%" y="-50%" width="200%" height="200%"><feDropShadow dx="2" dy="2" stdDeviation="3" flood-opacity="0.15"/></filter></defs><g class="fm-edge" data-fm-edge-id="0" role="graphics-symbol" tabindex="0"><path d="M183.35 125.25 L295.35 125.25" fill="none" stroke="#9ca3af" stroke-width="1.50" class="fm-edge fm-edge-solid" data-fm-edge-id="0" marker-end="url(#arrow-end)"/><title>Start points to Validate</title></g><g class="fm-edge-labeled" data-fm-edge-id="1" role="graphics-symbol" tabindex="0"><path d="M404.15 125.25 L516.15 125.25" fill="none" stroke="#9ca3af" stroke-width="1.50" class="fm-edge fm-edge-solid" data-fm-edge-id="1" marker-end="url(#arrow-end)"/><rect x="490.15" y="102.88" width="52" height="26.75" fill="#f9fafb" stroke="#d1d5db" stroke-width="1" rx="6"/><text x="516.15" y="120.44" text-anchor="middle" font-family="&#39;Inter&#39;, -apple-system, BlinkMacSystemFont, &#39;Segoe UI&#39;, Roboto, Helvetica, Arial, sans-serif" font-size="12.75" fill="#111827" class="edge-label">yes</text><title>Validate points to Ship with label: yes</title></g><g class="fm-edge-labeled" data-fm-edge-id="2" role="graphics-symbol" tabindex="0"><path d="M295.35 119.25 C280.93 119.25,252.09 86.62,237.68 119.25 C223.26 151.88,252.09 217.12,237.68 249.75 C223.26 282.38,194.42 249.75,180 249.75" fill="none" stroke="#d1d5db" stroke-width="1.50" class="fm-edge fm-edge-back" data-fm-edge-id="2" stroke-dasharray="4,4" marker-end="url(#arrow-open)"/><rect x="215.68" y="162.12" width="44" height="26.75" fill="#f9fafb" stroke="#d1d5db" stroke-width="1" rx="6"/><text x="237.68" y="179.69" text-anchor="middle" font-family="&#39;Inter&#39;, -apple-system, BlinkMacSystemFont, &#39;Segoe UI&#39;, Roboto, Helvetica, Arial, sans-serif" font-size="12.75" fill="#111827" class="edge-label">no</text><title>Validate points to Fix with label: no</title></g><g class="fm-edge" data-fm-edge-id="3" role="graphics-symbol" tabindex="0"><path d="M180 261.75 C194.42 261.75,223.26 294.38,237.68 261.75 C252.09 229.12,223.26 163.88,237.68 131.25 C252.09 98.62,280.93 131.25,295.35 131.25" fill="none" stroke="#9ca3af" stroke-width="1.50" class="fm-edge fm-edge-solid" data-fm-edge-id="3" marker-end="url(#arrow-end)"/><title>Fix points to Validate</title></g><g class="fm-node fm-node-accent-5 fm-node-shape-rect" data-id="A" data-fm-node-id="A" role="graphics-symbol" aria-label="Start" tabindex="0"><rect x="96" y="96" width="87.35" height="58.50" fill="#ffffff" stroke="#e5e7eb" stroke-width="1.50" rx="5.50" filter="url(#drop-shadow)"/><text x="139.68" y="130.25" text-anchor="middle" font-family="&#39;Inter&#39;, -apple-system, BlinkMacSystemFont, &#39;Segoe UI&#39;, Roboto, Helvetica, Arial, sans-serif" font-size="15" fill="#111827">Start</text><title>Node: Start, rectangle</title></g><g class="fm-node fm-node-accent-6 fm-node-shape-diamond" data-id="B" data-fm-node-id="B" role="graphics-symbol" aria-label="Validate" tabindex="0"><path d="M349.75 96 L404.15 125.25 L349.75 154.50 L295.35 125.25 Z" fill="#ffffff" stroke="#e5e7eb" stroke-width="1.50" filter="url(#drop-shadow)"/><text x="349.75" y="130.25" text-anchor="middle" font-family="&#39;Inter&#39;, -apple-system, BlinkMacSystemFont, &#39;Segoe UI&#39;, Roboto, Helvetica, Arial, sans-serif" font-size="15" fill="#111827">Validate</text><title>Node: Validate, diamond</title></g><g class="fm-node fm-node-accent-3 fm-node-shape-rect" data-id="C" data-fm-node-id="C" role="graphics-symbol" aria-label="Ship" tabindex="0"><rect x="516.15" y="96" width="84.05" height="58.50" fill="#ffffff" stroke="#e5e7eb" stroke-width="1.50" rx="5.50" filter="url(#drop-shadow)"/><text x="558.18" y="130.25" text-anchor="middle" font-family="&#39;Inter&#39;, -apple-system, BlinkMacSystemFont, &#39;Segoe UI&#39;, Roboto, Helvetica, Arial, sans-serif" font-size="15" fill="#111827">Ship</text><title>Node: Ship, rectangle</title></g><g class="fm-node fm-node-accent-4 fm-node-shape-rect" data-id="D" data-fm-node-id="D" role="graphics-symbol" aria-label="Fix" tabindex="0"><rect x="96" y="226.50" width="84" height="58.50" fill="#ffffff" stroke="#e5e7eb" stroke-width="1.50" rx="5.50" filter="url(#drop-shadow)"/><text x="138" y="260.75" text-anchor="middle" font-family="&#39;Inter&#39;, -apple-system, BlinkMacSystemFont, &#39;Segoe UI&#39;, Roboto, Helvetica, Arial, sans-serif" font-size="15" fill="#111827">Fix</text><title>Node: Fix, rectangle</title></g></svg>
+}</style><defs><marker id="arrow-end" markerWidth="10" markerHeight="10" refX="10" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M0 0 L10 5 L0 10 Z" fill="#94a3b8"/></marker><marker id="arrow-filled" markerWidth="12" markerHeight="12" refX="12" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M0 0 L12 6 L0 12 L3 6 Z" fill="#94a3b8"/></marker><marker id="arrow-open" markerWidth="10" markerHeight="10" refX="10" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M0 0 L10 5 L0 10" fill="none" stroke="#94a3b8" stroke-width="1.50"/></marker><marker id="arrow-circle" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto" markerUnits="strokeWidth"><path d="M8 4 A4 4 0 1 1 8 4 Z" fill="#94a3b8"/></marker><marker id="arrow-cross" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto" markerUnits="strokeWidth"><path d="M0 0 L8 8 M8 0 L0 8" fill="none" stroke="#94a3b8" stroke-width="1.50"/></marker><marker id="arrow-diamond" markerWidth="10" markerHeight="10" refX="10" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M5 0 L10 5 L5 10 L0 5 Z" fill="#94a3b8"/></marker><filter id="drop-shadow" x="-50%" y="-50%" width="200%" height="200%"><feDropShadow dx="2" dy="2" stdDeviation="3" flood-opacity="0.15"/></filter></defs><g class="fm-edge" data-fm-edge-id="0" role="graphics-symbol" tabindex="0"><path d="M183.35 125.25 L295.35 125.25" fill="none" stroke="#94a3b8" stroke-width="1.50" class="fm-edge fm-edge-solid" data-fm-edge-id="0" marker-end="url(#arrow-end)"/><title>Start points to Validate</title></g><g class="fm-edge-labeled" data-fm-edge-id="1" role="graphics-symbol" tabindex="0"><path d="M404.15 125.25 L516.15 125.25" fill="none" stroke="#94a3b8" stroke-width="1.50" class="fm-edge fm-edge-solid" data-fm-edge-id="1" marker-end="url(#arrow-end)"/><rect x="490.15" y="102.88" width="52" height="26.75" fill="#fafbfc" stroke="#cbd5e1" stroke-width="0.75" rx="6" ry="6"/><text x="516.15" y="120.44" text-anchor="middle" font-family="&#39;Inter&#39;, -apple-system, BlinkMacSystemFont, &#39;Segoe UI&#39;, Roboto, Helvetica, Arial, sans-serif" font-size="12.75" fill="#1a1a2e" class="edge-label">yes</text><title>Validate points to Ship with label: yes</title></g><g class="fm-edge-labeled" data-fm-edge-id="2" role="graphics-symbol" tabindex="0"><path d="M295.35 119.25 C280.93 119.25,252.09 86.62,237.68 119.25 C223.26 151.88,252.09 217.12,237.68 249.75 C223.26 282.38,194.42 249.75,180 249.75" fill="none" stroke="#cbd5e1" stroke-width="1.50" class="fm-edge fm-edge-back" data-fm-edge-id="2" stroke-dasharray="4,4" marker-end="url(#arrow-open)"/><rect x="215.68" y="162.12" width="44" height="26.75" fill="#fafbfc" stroke="#cbd5e1" stroke-width="0.75" rx="6" ry="6"/><text x="237.68" y="179.69" text-anchor="middle" font-family="&#39;Inter&#39;, -apple-system, BlinkMacSystemFont, &#39;Segoe UI&#39;, Roboto, Helvetica, Arial, sans-serif" font-size="12.75" fill="#1a1a2e" class="edge-label">no</text><title>Validate points to Fix with label: no</title></g><g class="fm-edge" data-fm-edge-id="3" role="graphics-symbol" tabindex="0"><path d="M180 261.75 C194.42 261.75,223.26 294.38,237.68 261.75 C252.09 229.12,223.26 163.88,237.68 131.25 C252.09 98.62,280.93 131.25,295.35 131.25" fill="none" stroke="#94a3b8" stroke-width="1.50" class="fm-edge fm-edge-solid" data-fm-edge-id="3" marker-end="url(#arrow-end)"/><title>Fix points to Validate</title></g><g class="fm-node fm-node-accent-5 fm-node-shape-rect" data-id="A" data-fm-node-id="A" role="graphics-symbol" aria-label="Start" tabindex="0"><rect x="96" y="96" width="87.35" height="58.50" fill="#ffffff" stroke="#e2e8f0" stroke-width="1.60" rx="5.50" filter="url(#drop-shadow)"/><text x="139.68" y="130.25" text-anchor="middle" font-family="&#39;Inter&#39;, -apple-system, BlinkMacSystemFont, &#39;Segoe UI&#39;, Roboto, Helvetica, Arial, sans-serif" font-size="15" fill="#1a1a2e">Start</text><title>Node: Start, rectangle</title></g><g class="fm-node fm-node-accent-6 fm-node-shape-diamond" data-id="B" data-fm-node-id="B" role="graphics-symbol" aria-label="Validate" tabindex="0"><path d="M349.75 96 L404.15 125.25 L349.75 154.50 L295.35 125.25 Z" fill="#ffffff" stroke="#e2e8f0" stroke-width="1.60" filter="url(#drop-shadow)"/><text x="349.75" y="130.25" text-anchor="middle" font-family="&#39;Inter&#39;, -apple-system, BlinkMacSystemFont, &#39;Segoe UI&#39;, Roboto, Helvetica, Arial, sans-serif" font-size="15" fill="#1a1a2e">Validate</text><title>Node: Validate, diamond</title></g><g class="fm-node fm-node-accent-3 fm-node-shape-rect" data-id="C" data-fm-node-id="C" role="graphics-symbol" aria-label="Ship" tabindex="0"><rect x="516.15" y="96" width="84.05" height="58.50" fill="#ffffff" stroke="#e2e8f0" stroke-width="1.60" rx="5.50" filter="url(#drop-shadow)"/><text x="558.18" y="130.25" text-anchor="middle" font-family="&#39;Inter&#39;, -apple-system, BlinkMacSystemFont, &#39;Segoe UI&#39;, Roboto, Helvetica, Arial, sans-serif" font-size="15" fill="#1a1a2e">Ship</text><title>Node: Ship, rectangle</title></g><g class="fm-node fm-node-accent-4 fm-node-shape-rect" data-id="D" data-fm-node-id="D" role="graphics-symbol" aria-label="Fix" tabindex="0"><rect x="96" y="226.50" width="84" height="58.50" fill="#ffffff" stroke="#e2e8f0" stroke-width="1.60" rx="5.50" filter="url(#drop-shadow)"/><text x="138" y="260.75" text-anchor="middle" font-family="&#39;Inter&#39;, -apple-system, BlinkMacSystemFont, &#39;Segoe UI&#39;, Roboto, Helvetica, Arial, sans-serif" font-size="15" fill="#1a1a2e">Fix</text><title>Node: Fix, rectangle</title></g></svg>
