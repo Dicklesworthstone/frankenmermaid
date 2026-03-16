@@ -139,9 +139,55 @@
       gap: 1.5rem;
     }
 
+    .spotlight-stage {
+      min-height: 46rem;
+    }
+
+    .spotlight-stage svg {
+      width: 100%;
+      height: auto;
+      max-height: none;
+    }
+
+    .gallery-card {
+      transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+    }
+
+    .gallery-card:hover {
+      transform: translateY(-3px);
+      border-color: rgba(76, 201, 255, 0.28);
+      box-shadow: 0 18px 44px rgba(4, 16, 35, 0.28);
+    }
+
+    .filter-chip.active {
+      background: linear-gradient(135deg, rgba(76, 201, 255, 0.2), rgba(122, 245, 199, 0.14));
+      border-color: rgba(76, 201, 255, 0.38);
+      color: #ffffff;
+    }
+
+    .feature-tile.active {
+      border-color: rgba(122, 245, 199, 0.3);
+      background: linear-gradient(180deg, rgba(18, 40, 59, 0.95), rgba(10, 21, 37, 0.98));
+      box-shadow: 0 20px 44px rgba(5, 16, 31, 0.34);
+    }
+
+    details > summary {
+      list-style: none;
+    }
+
+    details > summary::-webkit-details-marker {
+      display: none;
+    }
+
     @media (min-width: 1024px) {
       .diagram-wall {
         grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    @media (min-width: 1536px) {
+      .diagram-wall {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
       }
     }
 
@@ -283,18 +329,126 @@
         </section>
 
         <section class="glass rounded-[2rem] p-6 shadow-panel sm:p-8">
+          <div class="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+            <div class="max-w-4xl">
+              <p class="text-xs font-semibold uppercase tracking-[0.28em] text-cobalt">Showcase atlas</p>
+              <h2 class="mt-2 text-3xl font-black text-white">Big, realistic diagrams first. Everything else is secondary.</h2>
+              <p class="mt-3 text-sm leading-6 text-slate-300">
+                This section leads with large live renders from the frankenmermaid browser runtime. It spotlights one serious sample from every major diagram family so the page proves visual output immediately instead of burying it under tooling panels.
+              </p>
+            </div>
+            <div class="grid gap-3 sm:grid-cols-3">
+              <div class="rounded-3xl border border-white/10 bg-white/5 px-5 py-4">
+                <div class="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Example corpus</div>
+                <div class="mt-2 text-3xl font-black text-white">80</div>
+                <div class="mt-1 text-sm text-slate-300">large, realistic scenarios</div>
+              </div>
+              <div class="rounded-3xl border border-white/10 bg-white/5 px-5 py-4">
+                <div class="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Families shown</div>
+                <div class="mt-2 text-3xl font-black text-white">10</div>
+                <div class="mt-1 text-sm text-slate-300">flowchart through gitGraph</div>
+              </div>
+              <div class="rounded-3xl border border-white/10 bg-white/5 px-5 py-4">
+                <div class="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Runtime mode</div>
+                <div class="mt-2 text-3xl font-black text-mint">Live</div>
+                <div class="mt-1 text-sm text-slate-300">real WASM output, not screenshots</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="mt-8 grid gap-6 xl:grid-cols-[1.25fr_0.75fr]">
+            <div class="rounded-[1.75rem] border border-white/10 bg-slate-950/40 p-5">
+              <div class="flex flex-wrap items-start justify-between gap-4">
+                <div>
+                  <div class="flex flex-wrap items-center gap-3">
+                    <h3 id="spotlight-title" class="text-2xl font-black text-white">Loading spotlight…</h3>
+                    <span id="spotlight-status" class="pill rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em]">pending</span>
+                    <span id="spotlight-category" class="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-slate-200">category</span>
+                  </div>
+                  <p id="spotlight-description" class="mt-3 max-w-3xl text-sm leading-6 text-slate-300"></p>
+                </div>
+                <button
+                  id="spotlight-open-editor"
+                  type="button"
+                  class="rounded-full border border-cobalt/30 bg-cobalt/15 px-4 py-2 text-sm font-semibold text-cobalt transition hover:bg-cobalt/25"
+                >
+                  Open In Editor
+                </button>
+              </div>
+
+              <div id="spotlight-stage" class="spotlight-stage scrollbar-thin mt-5 overflow-auto rounded-[1.25rem] border border-white/10 bg-white p-4 text-slate-900"></div>
+
+              <div class="mt-5 grid gap-4 lg:grid-cols-[0.85fr_1.15fr]">
+                <div class="rounded-[1.25rem] border border-white/10 bg-[#08101d] p-4">
+                  <div class="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Why this sample matters</div>
+                  <div id="spotlight-why" class="mt-3 text-sm leading-6 text-slate-300"></div>
+                </div>
+                <div class="rounded-[1.25rem] border border-white/10 bg-[#08101d] p-4">
+                  <div class="flex items-center justify-between gap-3">
+                    <div class="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Spotlight source</div>
+                    <button
+                      id="spotlight-copy-source"
+                      type="button"
+                      class="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.16em] text-slate-200 transition hover:bg-white/10"
+                    >
+                      Copy source
+                    </button>
+                  </div>
+                  <pre id="spotlight-source" class="scrollbar-thin mt-3 max-h-72 overflow-auto whitespace-pre-wrap text-xs leading-6 text-slate-300"></pre>
+                </div>
+              </div>
+            </div>
+
+            <div class="space-y-4">
+              <div class="rounded-[1.75rem] border border-white/10 bg-slate-950/40 p-5">
+                <div class="flex items-center justify-between gap-3">
+                  <div>
+                    <div class="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Featured families</div>
+                    <div class="mt-1 text-lg font-bold text-white">One strong sample per category</div>
+                  </div>
+                  <div class="text-xs text-slate-500">click to swap spotlight</div>
+                </div>
+                <div id="feature-strip" class="mt-4 grid gap-3"></div>
+              </div>
+
+              <div class="rounded-[1.75rem] border border-white/10 bg-slate-950/40 p-5">
+                <div class="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">What this proves</div>
+                <div class="mt-3 space-y-3 text-sm leading-6 text-slate-300">
+                  <div class="rounded-2xl border border-white/10 bg-white/5 p-4">The browser package is a real GitHub-hosted WASM runtime, not a mock surface.</div>
+                  <div class="rounded-2xl border border-white/10 bg-white/5 p-4">The examples are realistic workflows in ops, product, finance, healthcare, identity, and delivery systems.</div>
+                  <div class="rounded-2xl border border-white/10 bg-white/5 p-4">The atlas below shows breadth; the spotlight here makes render quality legible at a serious size.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="glass rounded-[2rem] p-6 shadow-panel sm:p-8">
           <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
             <div class="max-w-3xl">
               <p class="text-xs font-semibold uppercase tracking-[0.28em] text-mint">Rendered gallery</p>
-              <h2 class="mt-2 text-3xl font-black text-white">Large, readable examples of the actual output</h2>
+              <h2 class="mt-2 text-3xl font-black text-white">80-example render atlas</h2>
               <p class="mt-3 text-sm leading-6 text-slate-300">
-                The main page now leads with an 80-example render gallery. These cards use the live frankenmermaid WASM runtime so you can judge the diagrams themselves instead of squinting at tiny comparison boxes.
+                Browse the whole corpus by category or search term. The renders stay large, the code stays collapsed until you need it, and any card can jump back into the spotlight or the editor.
               </p>
             </div>
             <div class="rounded-3xl border border-white/10 bg-white/5 px-5 py-4 text-sm leading-6 text-slate-300">
-              <div class="font-semibold text-white">Gallery controls</div>
-              <div class="mt-1">Each card can be sent straight into the editor below for deeper comparison and API inspection.</div>
+              <div class="font-semibold text-white">Atlas status</div>
+              <div id="gallery-count" class="mt-1">Loading examples…</div>
             </div>
+          </div>
+
+          <div class="mt-6 flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+            <div id="gallery-filters" class="flex flex-wrap gap-2"></div>
+            <label class="block xl:w-[24rem]">
+              <span class="sr-only">Search gallery</span>
+              <input
+                id="gallery-search"
+                type="search"
+                placeholder="Search examples, categories, and realistic use cases"
+                class="w-full rounded-full border border-white/10 bg-slate-950/40 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-cobalt/40"
+              >
+            </label>
           </div>
 
           <div id="gallery-grid" class="diagram-wall mt-8"></div>
@@ -821,6 +975,19 @@
     ];
 
     const editorSamples = gallerySamples.filter((entry) => entry.featured);
+    const galleryCategories = ["all", ...new Set(gallerySamples.map((entry) => entry.category))];
+    const spotlightReasons = {
+      flowchart: "Shows the strongest currently implemented family with multi-stage operational flows and readable subgraphs.",
+      sequence: "Exercises participant orchestration and message flow for real application and service interactions.",
+      class: "Surfaces structural modeling for realistic domain objects instead of toy inheritance examples.",
+      state: "Makes lifecycle and rollback behavior visible in the kinds of approval systems real teams run.",
+      er: "Shows data relationships people use for platform, billing, audit, and operations models.",
+      gantt: "Demonstrates time-based planning views with realistic delivery programs and multi-phase execution.",
+      journey: "Covers user and operator experience mapping rather than only engineering process diagrams.",
+      timeline: "Shows narrative milestone views that product and operations teams actually present.",
+      pie: "Covers summary visualization families people still expect from Mermaid-compatible tooling.",
+      gitGraph: "Tests branch and merge storytelling that release engineering teams genuinely use."
+    };
 
     const els = {
       sampleButtons: document.getElementById("sample-buttons"),
@@ -831,6 +998,19 @@
       runtimeSource: document.getElementById("runtime-source"),
       runtimeMode: document.getElementById("runtime-mode"),
       runtimeEndpoints: document.getElementById("runtime-endpoints"),
+      spotlightTitle: document.getElementById("spotlight-title"),
+      spotlightStatus: document.getElementById("spotlight-status"),
+      spotlightCategory: document.getElementById("spotlight-category"),
+      spotlightDescription: document.getElementById("spotlight-description"),
+      spotlightStage: document.getElementById("spotlight-stage"),
+      spotlightWhy: document.getElementById("spotlight-why"),
+      spotlightSource: document.getElementById("spotlight-source"),
+      spotlightOpenEditor: document.getElementById("spotlight-open-editor"),
+      spotlightCopySource: document.getElementById("spotlight-copy-source"),
+      featureStrip: document.getElementById("feature-strip"),
+      galleryFilters: document.getElementById("gallery-filters"),
+      gallerySearch: document.getElementById("gallery-search"),
+      galleryCount: document.getElementById("gallery-count"),
       galleryGrid: document.getElementById("gallery-grid"),
       fmSvg: document.getElementById("fm-svg"),
       mermaidSvg: document.getElementById("mermaid-svg"),
@@ -851,7 +1031,10 @@
     let frankenRuntime = null;
     let diagramInstance = null;
     let currentSample = editorSamples[0];
+    let spotlightSample = editorSamples[0];
     let galleryObserver = null;
+    let galleryFilter = "all";
+    let galleryQuery = "";
 
     mermaid.initialize({
       startOnLoad: false,
@@ -911,6 +1094,115 @@
       updateActiveSample();
     }
 
+    function filteredGallerySamples() {
+      const query = galleryQuery.trim().toLowerCase();
+      return gallerySamples.filter((entry) => {
+        const categoryMatch = galleryFilter === "all" || entry.category === galleryFilter;
+        if (!categoryMatch) {
+          return false;
+        }
+        if (!query) {
+          return true;
+        }
+        return [entry.label, entry.description, entry.category, entry.code]
+          .join("\n")
+          .toLowerCase()
+          .includes(query);
+      });
+    }
+
+    function renderFilterControls() {
+      els.galleryFilters.innerHTML = "";
+      for (const category of galleryCategories) {
+        const count = category === "all"
+          ? gallerySamples.length
+          : gallerySamples.filter((entry) => entry.category === category).length;
+        const button = document.createElement("button");
+        button.type = "button";
+        button.dataset.filter = category;
+        button.className = "filter-chip rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:border-cobalt/30 hover:bg-cobalt/10";
+        button.innerHTML = `<span>${category === "all" ? "All families" : category}</span><span class="ml-2 text-xs text-slate-400">${count}</span>`;
+        if (category === galleryFilter) {
+          button.classList.add("active");
+        }
+        button.addEventListener("click", () => {
+          galleryFilter = category;
+          renderFilterControls();
+          renderGallery();
+        });
+        els.galleryFilters.appendChild(button);
+      }
+    }
+
+    function renderFeatureStrip() {
+      els.featureStrip.innerHTML = "";
+      for (const sample of editorSamples) {
+        const tile = document.createElement("button");
+        tile.type = "button";
+        tile.dataset.feature = sample.id;
+        tile.className = "feature-tile rounded-[1.25rem] border border-white/10 bg-white/5 p-4 text-left transition hover:border-mint/30 hover:bg-white/10";
+        if (sample.id === spotlightSample.id) {
+          tile.classList.add("active");
+        }
+        tile.innerHTML = `
+          <div class="flex items-center justify-between gap-3">
+            <div class="text-sm font-semibold text-white">${sample.label}</div>
+            <div class="text-[11px] uppercase tracking-[0.18em] text-slate-400">${sample.category}</div>
+          </div>
+          <div class="mt-2 text-sm leading-6 text-slate-300">${spotlightReasons[sample.category] || sample.description}</div>
+        `;
+        tile.addEventListener("click", () => {
+          spotlightSample = sample;
+          renderFeatureStrip();
+          renderSpotlight();
+        });
+        els.featureStrip.appendChild(tile);
+      }
+    }
+
+    async function renderSpotlight() {
+      const sample = spotlightSample;
+      const status = sample.description.toLowerCase().includes("implemented") ? "implemented" : "partial";
+      els.spotlightTitle.textContent = sample.label;
+      els.spotlightDescription.textContent = `${sample.category} diagram with a realistic, non-toy scenario. ${sample.description} support in the current capability matrix.`;
+      els.spotlightCategory.textContent = sample.category;
+      els.spotlightSource.textContent = sample.code;
+      els.spotlightWhy.textContent = spotlightReasons[sample.category] || "Shows a meaningful real-world slice of the current diagram family.";
+      els.spotlightStatus.className = `pill ${badgeClass(status)} rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em]`;
+      els.spotlightStatus.textContent = sample.description;
+
+      if (!frankenRuntime) {
+        els.spotlightStage.innerHTML = `
+          <div class="rounded-3xl border border-amber-300/20 bg-amber-300/10 p-5 text-sm leading-6 text-amber-100">
+            frankenmermaid runtime unavailable for the spotlight render.
+          </div>
+        `;
+        return;
+      }
+
+      els.spotlightStage.innerHTML = `
+        <div class="rounded-3xl border border-slate-200 bg-slate-50 p-5 text-sm leading-6 text-slate-500">
+          Rendering ${sample.label}...
+        </div>
+      `;
+
+      try {
+        const svg = await frankenRuntime.renderSvg(sample.code, { theme: "corporate" });
+        els.spotlightStage.innerHTML = svg;
+        animate(
+          "#spotlight-stage > *",
+          { opacity: [0.55, 1], y: [12, 0] },
+          { duration: 0.38, easing: "ease-out" }
+        );
+      } catch (error) {
+        els.spotlightStage.innerHTML = `
+          <div class="rounded-3xl border border-rose-300/20 bg-rose-300/10 p-5 text-sm leading-6 text-rose-200">
+            ${String(error)}
+          </div>
+        `;
+      }
+    }
+
     function updateActiveSample() {
       for (const button of els.sampleButtons.querySelectorAll("button")) {
         button.classList.toggle("active", button.dataset.sample === currentSample.id);
@@ -937,15 +1229,17 @@
 
     async function renderGallery() {
       els.galleryGrid.innerHTML = "";
+      const visibleSamples = filteredGallerySamples();
+      els.galleryCount.textContent = `${visibleSamples.length} examples visible${galleryFilter === "all" ? "" : ` in ${galleryFilter}`}${galleryQuery ? ` matching "${galleryQuery}"` : ""}.`;
 
       if (galleryObserver) {
         galleryObserver.disconnect();
         galleryObserver = null;
       }
 
-      for (const sample of gallerySamples) {
+      for (const sample of visibleSamples) {
         const card = document.createElement("article");
-        card.className = "rounded-[1.75rem] border border-white/10 bg-slate-950/40 p-5";
+        card.className = "gallery-card rounded-[1.75rem] border border-white/10 bg-slate-950/40 p-5";
         card.innerHTML = `
           <div class="flex flex-col gap-4">
             <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -964,10 +1258,21 @@
                 Open In Editor
               </button>
             </div>
-            <div class="gallery-stage scrollbar-thin overflow-auto rounded-[1.25rem] border border-white/10 bg-white p-4 text-slate-900" data-gallery-render="${sample.id}">
-              <div class="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm leading-6 text-slate-500">Queued render for ${sample.label}. This card renders when it nears the viewport so the gallery can hold 80 large examples without bogging the page down.</div>
-            </div>
-            <pre class="scrollbar-thin max-h-56 overflow-auto rounded-[1.25rem] border border-white/10 bg-[#08101d] p-4 text-xs leading-6 text-slate-300">${escapeHtml(sample.code)}</pre>
+            <button
+              type="button"
+              data-gallery-spotlight="${sample.id}"
+              class="w-full text-left"
+            >
+              <div class="gallery-stage scrollbar-thin overflow-auto rounded-[1.25rem] border border-white/10 bg-white p-4 text-slate-900" data-gallery-render="${sample.id}">
+                <div class="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm leading-6 text-slate-500">Queued render for ${sample.label}. This card renders when it nears the viewport so the gallery can hold 80 large examples without bogging the page down.</div>
+              </div>
+            </button>
+            <details class="rounded-[1.25rem] border border-white/10 bg-[#08101d]">
+              <summary class="cursor-pointer px-4 py-3 text-sm font-semibold text-slate-200 transition hover:bg-white/5">
+                Show source
+              </summary>
+              <pre class="scrollbar-thin max-h-56 overflow-auto border-t border-white/10 p-4 text-xs leading-6 text-slate-300">${escapeHtml(sample.code)}</pre>
+            </details>
           </div>
         `;
         els.galleryGrid.appendChild(card);
@@ -980,10 +1285,26 @@
             return;
           }
           currentSample = sample;
+          spotlightSample = sample;
           els.input.value = sample.code;
           updateActiveSample();
+          renderFeatureStrip();
+          renderSpotlight();
           renderAll();
           window.scrollTo({ top: els.input.getBoundingClientRect().top + window.scrollY - 96, behavior: "smooth" });
+        });
+      }
+
+      for (const button of els.galleryGrid.querySelectorAll("[data-gallery-spotlight]")) {
+        button.addEventListener("click", () => {
+          const sample = gallerySamples.find((entry) => entry.id === button.dataset.gallerySpotlight);
+          if (!sample) {
+            return;
+          }
+          spotlightSample = sample;
+          renderFeatureStrip();
+          renderSpotlight();
+          window.scrollTo({ top: els.spotlightStage.getBoundingClientRect().top + window.scrollY - 110, behavior: "smooth" });
         });
       }
 
@@ -1035,12 +1356,19 @@
         { rootMargin: "600px 0px" }
       );
 
-      for (const sample of gallerySamples) {
+      for (const sample of visibleSamples) {
         const target = els.galleryGrid.querySelector(`[data-gallery-render="${sample.id}"]`);
         if (target) {
           galleryObserver.observe(target);
         }
       }
+
+      const cardSelector = visibleSamples.length <= 12 ? "#gallery-grid article" : "#gallery-grid article:nth-child(-n+12)";
+      animate(
+        cardSelector,
+        { opacity: [0.6, 1], y: [18, 0] },
+        { duration: 0.35, delay: stagger(0.035), easing: "ease-out" }
+      );
     }
 
     function renderCapabilityPanel(matrix) {
@@ -1314,10 +1642,13 @@
 
     async function boot() {
       createSampleButtons();
+      renderFeatureStrip();
+      renderFilterControls();
       renderSupportGrid();
       renderCapabilityPanel(capabilityArtifact);
       els.input.value = currentSample.code;
       await loadFrankenRuntime();
+      await renderSpotlight();
       await renderGallery();
       await renderAll();
 
@@ -1331,8 +1662,34 @@
 
     els.retryRuntime.addEventListener("click", async () => {
       await loadFrankenRuntime();
+      await renderSpotlight();
       await renderGallery();
       await renderAll();
+    });
+
+    els.spotlightOpenEditor.addEventListener("click", () => {
+      currentSample = spotlightSample;
+      els.input.value = spotlightSample.code;
+      updateActiveSample();
+      renderAll();
+      window.scrollTo({ top: els.input.getBoundingClientRect().top + window.scrollY - 96, behavior: "smooth" });
+    });
+
+    els.spotlightCopySource.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(spotlightSample.code);
+        els.spotlightCopySource.textContent = "Copied";
+      } catch (_error) {
+        els.spotlightCopySource.textContent = "Copy failed";
+      }
+      window.setTimeout(() => {
+        els.spotlightCopySource.textContent = "Copy source";
+      }, 1200);
+    });
+
+    els.gallerySearch.addEventListener("input", () => {
+      galleryQuery = els.gallerySearch.value;
+      renderGallery();
     });
 
     let debounced;
