@@ -4928,12 +4928,12 @@ fn crossing_refinement(
 // across ranks, reducing edge bends compared to simple sequential placement.
 // ---------------------------------------------------------------------------
 
-/// For each node, collect its neighbours in each adjacent rank.
-/// Returns a map: node_index -> Vec<(neighbour_index, neighbour_position_in_its_rank)>.
+/// For each node, collect its neighbours in the specified adjacent rank.
+/// Uses pre-built adjacency for O(1) neighbour lookup per node.
 fn bk_upper_neighbours(
-    ir: &MermaidDiagramIr,
+    adjacency: &[BTreeSet<usize>],
     ranks: &BTreeMap<usize, usize>,
-    ordering_by_rank: &BTreeMap<usize, Vec<usize>>,
+    pos_map: &BTreeMap<usize, usize>,
     node_index: usize,
     node_rank: usize,
     upper: bool,
@@ -4947,56 +4947,17 @@ fn bk_upper_neighbours(
         node_rank + 1
     };
 
-    let Some(adjacent_nodes) = ordering_by_rank.get(&adjacent_rank) else {
-        return Vec::new();
-    };
-    let pos_map: BTreeMap<usize, usize> = adjacent_nodes
-        .iter()
-        .enumerate()
-        .map(|(pos, &n)| (n, pos))
-        .collect();
-
     let mut neighbours = Vec::new();
-    for edge in &ir.edges {
-        let Some(source) = endpoint_node_index(ir, edge.from) else {
-            continue;
-        };
-        let Some(target) = endpoint_node_index(ir, edge.to) else {
-            continue;
-        };
-
-        let neighbour = if upper {
-            // Looking for edges arriving at node_index from adjacent_rank.
-            if target == node_index && ranks.get(&source).copied().unwrap_or(0) == adjacent_rank {
-                Some(source)
-            } else if source == node_index
-                && ranks.get(&target).copied().unwrap_or(0) == adjacent_rank
-            {
-                Some(target)
-            } else {
-                None
+    if let Some(nodes) = adjacency.get(node_index) {
+        for &n in nodes {
+            if ranks.get(&n).copied().unwrap_or(0) == adjacent_rank {
+                if let Some(&pos) = pos_map.get(&n) {
+                    neighbours.push((n, pos));
+                }
             }
-        } else {
-            // Looking for edges leaving node_index to adjacent_rank.
-            if source == node_index && ranks.get(&target).copied().unwrap_or(0) == adjacent_rank {
-                Some(target)
-            } else if target == node_index
-                && ranks.get(&source).copied().unwrap_or(0) == adjacent_rank
-            {
-                Some(source)
-            } else {
-                None
-            }
-        };
-
-        if let Some(n) = neighbour
-            && let Some(&pos) = pos_map.get(&n)
-        {
-            neighbours.push((n, pos));
         }
     }
 
-    // Deduplicate and sort by position for stable median computation.
     neighbours.sort_by_key(|&(_, pos)| pos);
     neighbours.dedup();
     neighbours
@@ -5008,14 +4969,15 @@ fn bk_upper_neighbours(
 /// - `root[v]` is the root of the block containing v.
 /// - `align[v]` is the next node in the block chain; `align[v] == v` at the terminal.
 fn bk_vertical_alignment(
-    ir: &MermaidDiagramIr,
+    n: usize,
+    adjacency: &[BTreeSet<usize>],
+    rank_pos_maps: &BTreeMap<usize, BTreeMap<usize, usize>>,
     ranks: &BTreeMap<usize, usize>,
     ordering_by_rank: &BTreeMap<usize, Vec<usize>>,
     ordered_ranks: &[usize],
     top_to_bottom: bool,
     left_to_right: bool,
 ) -> (Vec<usize>, Vec<usize>) {
-    let n = ir.nodes.len();
     let mut root: Vec<usize> = (0..n).collect();
     let mut align: Vec<usize> = (0..n).collect();
 
@@ -5042,8 +5004,21 @@ fn bk_vertical_alignment(
 
         for v in node_iter {
             let v_rank = ranks.get(&v).copied().unwrap_or(0);
+            let adjacent_rank = if top_to_bottom {
+                if v_rank == 0 {
+                    continue;
+                }
+                v_rank - 1
+            } else {
+                v_rank + 1
+            };
+
+            let Some(pos_map) = rank_pos_maps.get(&adjacent_rank) else {
+                continue;
+            };
+
             let neighbours =
-                bk_upper_neighbours(ir, ranks, ordering_by_rank, v, v_rank, top_to_bottom);
+                bk_upper_neighbours(adjacency, ranks, pos_map, v, v_rank, top_to_bottom);
 
             if neighbours.is_empty() {
                 continue;
@@ -5266,6 +5241,30 @@ fn brandes_kopf_secondary_coords(
 
     let ordered_ranks: Vec<usize> = ordering_by_rank.keys().copied().collect();
 
+    // Pre-build undirected adjacency for O(1) neighbour lookup.
+    let mut adjacency = vec![BTreeSet::new(); n];
+    for edge in &ir.edges {
+        if let Some(s) = endpoint_node_index(ir, edge.from)
+            && let Some(t) = endpoint_node_index(ir, edge.to)
+        {
+            if s < n && t < n && s != t {
+                adjacency[s].insert(t);
+                adjacency[t].insert(s);
+            }
+        }
+    }
+
+    // Pre-build position maps for each rank.
+    let mut rank_pos_maps: BTreeMap<usize, BTreeMap<usize, usize>> = BTreeMap::new();
+    for (&rank, nodes) in ordering_by_rank {
+        let pos_map: BTreeMap<usize, usize> = nodes
+            .iter()
+            .enumerate()
+            .map(|(pos, &node)| (node, pos))
+            .collect();
+        rank_pos_maps.insert(rank, pos_map);
+    }
+
     // Four alignment passes: (top_to_bottom, left_to_right).
     let directions = [
         (true, true),   // upper-left
@@ -5278,7 +5277,9 @@ fn brandes_kopf_secondary_coords(
 
     for &(top_to_bottom, left_to_right) in &directions {
         let (root, align) = bk_vertical_alignment(
-            ir,
+            n,
+            &adjacency,
+            &rank_pos_maps,
             ranks,
             ordering_by_rank,
             &ordered_ranks,
