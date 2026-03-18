@@ -1,11 +1,11 @@
 use fm_core::{
-    ArrowType, Diagnostic, DiagnosticCategory, DiagramType, FragmentAlternative, FragmentKind,
-    GraphDirection, IrActivation, IrAttributeKey, IrCluster, IrClusterId, IrEdge, IrEdgeKind,
-    IrEndpoint, IrEntityAttribute, IrGraphCluster, IrGraphEdge, IrGraphNode, IrLabel, IrLabelId,
-    IrLifecycleEvent, IrNode, IrNodeId, IrNodeKind, IrParticipantGroup, IrSequenceFragment,
-    IrSequenceMeta, IrSequenceNote, IrSubgraph, IrSubgraphId, LifecycleEventKind, MermaidDiagramIr,
-    MermaidError, MermaidParseMode, MermaidWarning, MermaidWarningCode, NodeShape, NotePosition,
-    Span,
+    ArrowType, ClassMemberKind, ClassStereotype, Diagnostic, DiagnosticCategory, DiagramType,
+    FragmentAlternative, FragmentKind, GraphDirection, IrActivation, IrAttributeKey, IrClassMember,
+    IrClassNodeMeta, IrCluster, IrClusterId, IrEdge, IrEdgeKind, IrEndpoint, IrEntityAttribute,
+    IrGraphCluster, IrGraphEdge, IrGraphNode, IrLabel, IrLabelId, IrLifecycleEvent, IrNode,
+    IrNodeId, IrNodeKind, IrParticipantGroup, IrSequenceFragment, IrSequenceMeta, IrSequenceNote,
+    IrSubgraph, IrSubgraphId, LifecycleEventKind, MermaidDiagramIr, MermaidError, MermaidParseMode,
+    MermaidWarning, MermaidWarningCode, NodeShape, NotePosition, Span,
 };
 
 use crate::ParseResult;
@@ -31,6 +31,8 @@ pub(crate) struct IrBuilder {
     current_participant_group: Option<(String, Option<String>, Vec<String>)>,
     /// Stack of open fragments
     fragment_stack: Vec<OpenFragment>,
+    /// Currently open class block (for member accumulation)
+    current_class: Option<String>,
 }
 
 impl IrBuilder {
@@ -43,6 +45,7 @@ impl IrBuilder {
             activation_stacks: std::collections::BTreeMap::new(),
             current_participant_group: None,
             fragment_stack: Vec::new(),
+            current_class: None,
         }
     }
 
@@ -217,6 +220,43 @@ impl IrBuilder {
                 participant: node_id,
                 at_edge,
             });
+    }
+
+    pub(crate) fn set_current_class(&mut self, name: &str) {
+        self.current_class = Some(name.to_string());
+    }
+
+    pub(crate) fn clear_current_class(&mut self) {
+        self.current_class = None;
+    }
+
+    pub(crate) fn add_class_member(&mut self, member: IrClassMember) {
+        let Some(class_name) = self.current_class.as_ref() else {
+            return;
+        };
+        let Some(&node_id) = self.node_index_by_id.get(class_name) else {
+            return;
+        };
+        let Some(node) = self.ir.nodes.get_mut(node_id.0) else {
+            return;
+        };
+        let meta = node.class_meta.get_or_insert_with(IrClassNodeMeta::default);
+        match member.kind {
+            ClassMemberKind::Attribute => meta.attributes.push(member),
+            ClassMemberKind::Method => meta.methods.push(member),
+        }
+    }
+
+    pub(crate) fn set_class_stereotype(&mut self, class_name: &str, stereotype: ClassStereotype) {
+        let Some(&node_id) = self.node_index_by_id.get(class_name) else {
+            return;
+        };
+        let Some(node) = self.ir.nodes.get_mut(node_id.0) else {
+            return;
+        };
+        node.class_meta
+            .get_or_insert_with(IrClassNodeMeta::default)
+            .stereotype = Some(stereotype);
     }
 
     pub(crate) fn begin_fragment(&mut self, kind: FragmentKind, label: String) {
@@ -488,6 +528,7 @@ impl IrBuilder {
             span_all: vec![span],
             implicit: is_auto_created,
             members: Vec::new(),
+            class_meta: None,
         };
 
         self.ir.nodes.push(node);

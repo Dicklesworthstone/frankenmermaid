@@ -112,6 +112,8 @@ enum ClassStatement {
     BlockStart(String),
     Ast(FlowAst),
     Node(NodeToken),
+    Member(fm_core::IrClassMember),
+    Stereotype(String, fm_core::ClassStereotype),
     End,
 }
 
@@ -1352,6 +1354,8 @@ fn lower_sequence_statement(
 }
 
 fn parse_class(input: &str, builder: &mut IrBuilder) {
+    let mut in_block: Option<String> = None; // Currently open class block name
+
     for (index, line) in input.lines().enumerate() {
         let line_number = index + 1;
         let trimmed = line.trim();
@@ -1363,6 +1367,20 @@ fn parse_class(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
+        // Inside a class block: parse member declarations
+        if let Some(ref class_name) = in_block {
+            if trimmed == "}" {
+                in_block = None;
+                continue;
+            }
+            if let Some(member) = parse_class_member(trimmed) {
+                let cn = class_name.clone();
+                lower_class_statement(ClassStatement::Member(member), line_number, line, builder);
+                let _ = cn; // class_name is used via the builder's current_class context
+            }
+            continue;
+        }
+
         let Some(statements) = parse_class_statements(trimmed) else {
             builder.add_warning(format!(
                 "Line {line_number}: unsupported class syntax: {trimmed}"
@@ -1371,9 +1389,80 @@ fn parse_class(input: &str, builder: &mut IrBuilder) {
         };
 
         for statement in statements {
+            if let ClassStatement::BlockStart(ref name) = statement {
+                in_block = Some(name.clone());
+            }
             lower_class_statement(statement, line_number, line, builder);
         }
     }
+}
+
+/// Parse a class member declaration like `+String name`, `-int age`, `#doSomething() void`.
+fn parse_class_member(line: &str) -> Option<fm_core::IrClassMember> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Parse visibility prefix
+    let (visibility, rest) = match trimmed.as_bytes().first() {
+        Some(b'+') => (fm_core::ClassVisibility::Public, &trimmed[1..]),
+        Some(b'-') => (fm_core::ClassVisibility::Private, &trimmed[1..]),
+        Some(b'#') => (fm_core::ClassVisibility::Protected, &trimmed[1..]),
+        Some(b'~') => (fm_core::ClassVisibility::Package, &trimmed[1..]),
+        _ => (fm_core::ClassVisibility::Public, trimmed),
+    };
+
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return None;
+    }
+
+    // Check if it's a method (contains parentheses)
+    let is_method = rest.contains('(');
+
+    // Check for static ($) and abstract (*) markers at end
+    let is_static = rest.ends_with('$');
+    let is_abstract = rest.ends_with('*');
+    let rest = rest.trim_end_matches('$').trim_end_matches('*').trim();
+
+    // Parse type annotation
+    let (name_part, return_type) = if let Some((name, typ)) = rest.rsplit_once(':') {
+        // Colon-separated: `name : Type` or `method() : ReturnType`
+        (name.trim(), Some(typ.trim().to_string()))
+    } else if is_method {
+        // For methods without colon, check for return type after closing paren
+        // e.g., `eat() void` → name="eat()", return_type=Some("void")
+        if let Some(paren_end) = rest.rfind(')') {
+            let after_paren = rest[paren_end + 1..].trim();
+            if after_paren.is_empty() {
+                (rest, None)
+            } else {
+                (&rest[..=paren_end], Some(after_paren.to_string()))
+            }
+        } else {
+            (rest, None)
+        }
+    } else {
+        (rest, None)
+    };
+
+    let name = name_part.to_string();
+
+    let kind = if is_method {
+        fm_core::ClassMemberKind::Method
+    } else {
+        fm_core::ClassMemberKind::Attribute
+    };
+
+    Some(fm_core::IrClassMember {
+        visibility,
+        kind,
+        name,
+        return_type,
+        is_static,
+        is_abstract,
+    })
 }
 
 fn parse_class_statements(line: &str) -> Option<Vec<ClassStatement>> {
@@ -1386,8 +1475,39 @@ fn parse_class_statements(line: &str) -> Option<Vec<ClassStatement>> {
         return Some(vec![ClassStatement::BlockStart(class_name.to_string())]);
     }
 
+    // `class Name` without braces: declare a class node
+    if line.starts_with("class ") && !line.contains('{') {
+        let rest = line.strip_prefix("class ").unwrap_or("").trim();
+        if !rest.is_empty()
+            && !rest.contains("--")
+            && !rest.contains("..")
+            && let Some(node) = parse_node_token(rest)
+        {
+            return Some(vec![ClassStatement::Node(node)]);
+        }
+    }
+
     if line.starts_with('}') {
         return Some(vec![ClassStatement::End]);
+    }
+
+    // Parse stereotype annotations: `<<interface>> ClassName` or
+    // `class ClassName` followed by `<<stereotype>>`
+    if line.starts_with("<<")
+        && let Some(end) = line.find(">>")
+    {
+        let annotation = &line[2..end];
+        let class_name = line[end + 2..].trim().to_string();
+        let stereotype = match annotation.to_lowercase().as_str() {
+            "interface" => fm_core::ClassStereotype::Interface,
+            "abstract" => fm_core::ClassStereotype::Abstract,
+            "enum" | "enumeration" => fm_core::ClassStereotype::Enum,
+            "service" => fm_core::ClassStereotype::Service,
+            _ => fm_core::ClassStereotype::Custom(annotation.to_string()),
+        };
+        if !class_name.is_empty() {
+            return Some(vec![ClassStatement::Stereotype(class_name, stereotype)]);
+        }
     }
 
     let mut statements = Vec::new();
@@ -1419,6 +1539,7 @@ fn lower_class_statement(
             if let Some(node) = parse_node_token(&class_name) {
                 let span = span_for(line_number, source_line);
                 let _ = builder.intern_node(&node.id, node.label.as_deref(), node.shape, span);
+                builder.set_current_class(&node.id);
             }
         }
         ClassStatement::Ast(ast) => {
@@ -1428,7 +1549,15 @@ fn lower_class_statement(
             let span = span_for(line_number, source_line);
             let _ = builder.intern_node(&node.id, node.label.as_deref(), node.shape, span);
         }
-        ClassStatement::End => {}
+        ClassStatement::Member(member) => {
+            builder.add_class_member(member);
+        }
+        ClassStatement::Stereotype(class_name, stereotype) => {
+            builder.set_class_stereotype(&class_name, stereotype);
+        }
+        ClassStatement::End => {
+            builder.clear_current_class();
+        }
     }
 }
 
@@ -7544,5 +7673,65 @@ Rel_Back(db, app, "Responds")"#,
             frag_warnings.is_empty(),
             "Fragments should not produce warnings, got: {frag_warnings:?}"
         );
+    }
+
+    // ── Class diagram member parsing tests ─────────────────────────────
+
+    #[test]
+    fn class_block_with_members() {
+        let input = "classDiagram\n  class Animal {\n    +String name\n    -int age\n    +eat() void\n    -sleep()\n  }";
+        let parsed = parse_mermaid(input);
+        let animal = parsed.ir.nodes.iter().find(|n| n.id == "Animal");
+        assert!(animal.is_some(), "Should find Animal node");
+        let meta = animal
+            .unwrap()
+            .class_meta
+            .as_ref()
+            .expect("Should have class_meta");
+        assert_eq!(meta.attributes.len(), 2, "Should have 2 attributes");
+        assert_eq!(meta.methods.len(), 2, "Should have 2 methods");
+        assert_eq!(meta.attributes[0].name, "String name");
+        assert_eq!(
+            meta.attributes[0].visibility,
+            fm_core::ClassVisibility::Public
+        );
+        assert_eq!(
+            meta.attributes[1].visibility,
+            fm_core::ClassVisibility::Private
+        );
+        assert_eq!(meta.methods[0].return_type, Some("void".to_string()));
+    }
+
+    #[test]
+    fn class_member_visibility_markers() {
+        let input = "classDiagram\n  class Foo {\n    +pub_attr\n    -priv_attr\n    #prot_attr\n    ~pkg_attr\n  }";
+        let parsed = parse_mermaid(input);
+        let foo = parsed.ir.nodes.iter().find(|n| n.id == "Foo").unwrap();
+        let meta = foo.class_meta.as_ref().expect("class_meta");
+        assert_eq!(
+            meta.attributes[0].visibility,
+            fm_core::ClassVisibility::Public
+        );
+        assert_eq!(
+            meta.attributes[1].visibility,
+            fm_core::ClassVisibility::Private
+        );
+        assert_eq!(
+            meta.attributes[2].visibility,
+            fm_core::ClassVisibility::Protected
+        );
+        assert_eq!(
+            meta.attributes[3].visibility,
+            fm_core::ClassVisibility::Package
+        );
+    }
+
+    #[test]
+    fn class_stereotype_annotation() {
+        let input = "classDiagram\n  class Duck\n  <<interface>> Duck";
+        let parsed = parse_mermaid(input);
+        let duck = parsed.ir.nodes.iter().find(|n| n.id == "Duck").unwrap();
+        let meta = duck.class_meta.as_ref().expect("class_meta");
+        assert_eq!(meta.stereotype, Some(fm_core::ClassStereotype::Interface));
     }
 }

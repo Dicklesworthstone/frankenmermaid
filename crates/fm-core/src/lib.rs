@@ -941,6 +941,59 @@ pub struct IrEntityAttribute {
     pub comment: Option<String>,
 }
 
+// ── Class-diagram member types ─────────────────────────────────────────
+
+/// Visibility modifier for a class member.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+pub enum ClassVisibility {
+    #[default]
+    Public,
+    Private,
+    Protected,
+    Package,
+}
+
+/// Whether a class member is an attribute (field) or a method (operation).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+pub enum ClassMemberKind {
+    #[default]
+    Attribute,
+    Method,
+}
+
+/// A single class member (attribute or method).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct IrClassMember {
+    pub visibility: ClassVisibility,
+    pub kind: ClassMemberKind,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_type: Option<String>,
+    pub is_static: bool,
+    pub is_abstract: bool,
+}
+
+/// Stereotype annotation for a class (e.g., `<<interface>>`, `<<abstract>>`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum ClassStereotype {
+    Interface,
+    Abstract,
+    Enum,
+    Service,
+    Custom(String),
+}
+
+/// Class-diagram-specific metadata for a node.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct IrClassNodeMeta {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attributes: Vec<IrClassMember>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub methods: Vec<IrClassMember>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stereotype: Option<ClassStereotype>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct IrNode {
     pub id: String,
@@ -954,6 +1007,9 @@ pub struct IrNode {
     /// Entity attributes/members (for ER diagrams)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub members: Vec<IrEntityAttribute>,
+    /// Class-diagram-specific metadata (attributes, methods, stereotypes)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class_meta: Option<IrClassNodeMeta>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
