@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": "1.0.0",
   "project": "frankenmermaid",
   "status_counts": {
     "experimental": 1,

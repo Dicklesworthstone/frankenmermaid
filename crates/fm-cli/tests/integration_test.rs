@@ -441,8 +441,15 @@ fn handles_all_directions() {
 }
 
 fn run_cli(args: &[&str], stdin: &str) -> std::process::Output {
+    run_cli_with_env(args, stdin, &[])
+}
+
+fn run_cli_with_env(args: &[&str], stdin: &str, envs: &[(&str, &str)]) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_fm-cli"));
     command.args(args);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
 
     if stdin.is_empty() {
         command
@@ -594,6 +601,15 @@ fn render_json_writes_artifact_and_stdout_metadata() {
     assert_eq!(json["source_span_node_count"], 2);
     assert_eq!(json["source_span_edge_count"], 1);
     assert_eq!(json["source_span_cluster_count"], 0);
+    assert!(json["pressure_source"].is_string());
+    assert!(json["pressure_tier"].is_string());
+    assert!(json["pressure_telemetry_available"].is_boolean());
+    assert!(json["pressure_conservative_fallback"].is_boolean());
+    assert!(json["pressure_score_permille"].is_u64());
+    assert!(json["trace_id"].is_string());
+    assert!(json["decision_id"].is_string());
+    assert!(json["policy_id"].is_string());
+    assert_eq!(json["schema_version"], "1.0.0");
     assert!(json["output_bytes"].as_u64().is_some_and(|value| value > 0));
 
     let artifact = std::fs::read_to_string(&output_path).expect("failed to read rendered svg");
@@ -620,6 +636,41 @@ fn validate_json_reports_source_span_counts() {
     assert_eq!(json["source_span_node_count"], 2);
     assert_eq!(json["source_span_edge_count"], 1);
     assert_eq!(json["source_span_cluster_count"], 1);
+    assert!(json["pressure_source"].is_string());
+    assert!(json["pressure_tier"].is_string());
+    assert!(json["pressure_telemetry_available"].is_boolean());
+    assert!(json["trace_id"].is_string());
+    assert!(json["decision_id"].is_string());
+    assert!(json["policy_id"].is_string());
+    assert_eq!(json["schema_version"], "1.0.0");
+}
+
+#[test]
+fn validate_json_honors_native_pressure_env_overrides() {
+    let output = run_cli_with_env(
+        &["validate", "-", "--format", "json"],
+        "flowchart LR\nA-->B\n",
+        &[
+            ("FM_PRESSURE_CPU_PERMILLE", "920"),
+            ("FM_PRESSURE_MEMORY_PERMILLE", "300"),
+            ("FM_PRESSURE_AVAILABLE_PARALLELISM", "1"),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "validate with explicit pressure env should succeed; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout must be utf-8");
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("validate json must print valid JSON");
+    assert_eq!(json["pressure_source"], "native");
+    assert_eq!(json["pressure_tier"], "critical");
+    assert_eq!(json["pressure_telemetry_available"], true);
+    assert_eq!(json["pressure_score_permille"], 920);
+    assert_eq!(json["policy_id"], "fm.layout.guard@v1");
+    assert_eq!(json["schema_version"], "1.0.0");
 }
 
 #[test]
