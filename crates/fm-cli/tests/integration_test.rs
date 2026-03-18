@@ -681,7 +681,11 @@ fn validate_json_honors_native_pressure_env_overrides() {
     assert_eq!(json["pressure_score_permille"], 920);
     assert_eq!(json["policy_id"], "fm.layout.guard@v1");
     assert_eq!(json["schema_version"], "1.0.0");
-    assert!(json["layout_budget_ms"].as_u64().is_some_and(|value| value > 0));
+    assert!(
+        json["layout_budget_ms"]
+            .as_u64()
+            .is_some_and(|value| value > 0)
+    );
 }
 
 #[test]

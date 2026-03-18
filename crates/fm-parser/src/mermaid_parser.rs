@@ -2284,21 +2284,29 @@ fn take_token(input: &str) -> Option<(&str, &str)> {
 
 fn is_safe_click_target(target: &str) -> bool {
     let decoded = decode_percent_triplets(target);
-    let lower = decoded.to_ascii_lowercase();
-    if lower.starts_with("javascript:")
-        || lower.starts_with("data:")
-        || lower.starts_with("vbscript:")
+    // Trim leading/trailing whitespace and control characters that browsers might ignore
+    let trimmed = decoded.trim_matches(|c: char| c.is_whitespace() || c.is_control());
+    let lower = trimmed.to_ascii_lowercase();
+
+    // Explicitly reject dangerous schemes
+    if lower.contains("javascript:")
+        || lower.contains("data:")
+        || lower.contains("vbscript:")
+        || lower.contains("file:")
     {
         return false;
     }
 
+    // Explicitly allow only safe schemes or absolute/relative paths
     lower.starts_with("https://")
         || lower.starts_with("http://")
         || lower.starts_with("mailto:")
         || lower.starts_with("tel:")
-        || decoded.starts_with('/')
-        || decoded.starts_with('#')
-        || !lower.contains(':')
+        || trimmed.starts_with('/')
+        || trimmed.starts_with('#')
+        || trimmed.starts_with("./")
+        || trimmed.starts_with("../")
+        || (!lower.contains(':') && !trimmed.is_empty())
 }
 
 fn decode_percent_triplets(input: &str) -> String {

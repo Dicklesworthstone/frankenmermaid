@@ -95,12 +95,8 @@ pub fn mermaid_layout_guard_observability(
     let cx = mermaid_root_cx(trace_id, budget_ms);
     let policy_id = mermaid_layout_guard_policy_id();
     let cx_trace_id = cx.trace_id();
-    let decision_id = mermaid_decision_id(
-        cx_trace_id,
-        &policy_id,
-        "layout.guard",
-        selected_algorithm,
-    );
+    let decision_id =
+        mermaid_decision_id(cx_trace_id, &policy_id, "layout.guard", selected_algorithm);
     (
         cx,
         MermaidObservabilityIds {
@@ -923,7 +919,9 @@ impl GraphDirection {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, Default,
+)]
 pub struct IrNodeId(pub usize);
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
@@ -3538,6 +3536,25 @@ mod tests {
     }
 
     #[test]
+    fn budget_broker_rebalances_after_parse_and_tracks_exhaustion() {
+        let pressure = MermaidNativePressureSignals {
+            cpu_pressure_permille: Some(910),
+            ..MermaidNativePressureSignals::default()
+        }
+        .into_report();
+        let mut broker = crate::MermaidBudgetLedger::new(&pressure);
+
+        assert_eq!(broker.total_budget_ms, 80);
+        broker.record_parse(30);
+        assert!(broker.parse.exceeded);
+        assert!(broker.layout.allocated_ms > broker.render.allocated_ms);
+
+        broker.record_layout(40);
+        broker.record_render(20);
+        assert!(broker.exhausted);
+    }
+
+    #[test]
     fn mermaid_fallback_policy_defaults_match_contract() {
         let policy = MermaidFallbackPolicy::default();
         assert_eq!(policy.unsupported_diagram, MermaidFallbackAction::Error);
@@ -4264,35 +4281,82 @@ mod tests {
     fn capability_matrix_json_matches_checked_in_artifact() {
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let artifact_path = manifest_dir.join("../../evidence/capability_matrix.json");
+
+        let actual = capability_matrix_json_pretty().expect("matrix JSON should serialize");
+        if std::env::var("BLESS").is_ok() {
+            std::fs::write(&artifact_path, &actual).unwrap();
+        }
+
         let expected = std::fs::read_to_string(&artifact_path)
             .expect("capability matrix artifact should exist");
 
-        assert_eq!(
-            capability_matrix_json_pretty().expect("matrix JSON should serialize"),
-            expected
-        );
+        assert_eq!(actual, expected);
     }
 
     #[test]
     fn readme_supported_diagram_types_block_matches_generated_markdown() {
-        let readme = load_readme();
-        let actual = extract_generated_readme_block(&readme, "supported-diagram-types");
+        let actual = capability_readme_supported_diagram_types_markdown();
 
+        if std::env::var("BLESS").is_ok() {
+            let mut readme = load_readme();
+            let start_marker = "<!-- BEGIN GENERATED: supported-diagram-types -->";
+            let end_marker = "<!-- END GENERATED: supported-diagram-types -->";
+            if let Some(start) = readme.find(start_marker) {
+                if let Some(end) = readme[start..].find(end_marker) {
+                    let full_start = start + start_marker.len();
+                    let full_end = start + end;
+                    readme.replace_range(full_start..full_end, &format!("\n{actual}\n"));
+                    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+                    let readme_path = manifest_dir.join("../../README.md");
+                    std::fs::write(&readme_path, readme).unwrap();
+                }
+            }
+        }
+
+        let readme = load_readme();
+        let expected = extract_generated_readme_block(&readme, "supported-diagram-types");
         assert_eq!(
-            actual,
-            capability_readme_supported_diagram_types_markdown(),
+            actual, expected,
             "README supported diagram types block drifted from capability source of truth"
         );
     }
 
     #[test]
     fn readme_runtime_capability_metadata_block_matches_generated_markdown() {
+        let actual = capability_readme_surface_markdown();
+
+        if std::env::var("BLESS").is_ok() {
+            let mut readme = load_readme();
+            let start_marker = "<!-- BEGIN GENERATED: runtime-capability-metadata -->";
+            let end_marker = "<!-- END GENERATED: runtime-capability-metadata -->";
+            if let Some(start) = readme.find(start_marker) {
+                if let Some(end) = readme[start..].find(end_marker) {
+                    let full_start = start + start_marker.len();
+                    let full_end = start + end;
+                    readme.replace_range(full_start..full_end, &format!("\n{actual}\n"));
+                    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+                    let readme_path = manifest_dir.join("../../README.md");
+                    std::fs::write(&readme_path, readme).unwrap();
+                }
+            } else {
+                readme.push_str("\n");
+                readme.push_str(start_marker);
+                readme.push_str("\n");
+                readme.push_str(&actual);
+                readme.push_str("\n");
+                readme.push_str(end_marker);
+                readme.push_str("\n");
+                let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+                let readme_path = manifest_dir.join("../../README.md");
+                std::fs::write(&readme_path, readme).unwrap();
+            }
+        }
+
         let readme = load_readme();
-        let actual = extract_generated_readme_block(&readme, "runtime-capability-metadata");
+        let expected = extract_generated_readme_block(&readme, "runtime-capability-metadata");
 
         assert_eq!(
-            actual,
-            capability_readme_surface_markdown(),
+            actual, expected,
             "README runtime capability metadata block drifted from capability source of truth"
         );
     }

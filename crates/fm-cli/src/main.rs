@@ -18,13 +18,12 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use fm_core::{
-    DiagramType, MermaidBudgetLedger, MermaidDiagramIr, MermaidNativePressureSignals, MermaidParseMode,
-    StructuredDiagnostic, capability_matrix, capability_matrix_json_pretty,
+    DiagramType, MermaidBudgetLedger, MermaidDiagramIr, MermaidNativePressureSignals,
+    MermaidParseMode, StructuredDiagnostic, capability_matrix, capability_matrix_json_pretty,
     mermaid_layout_guard_observability,
 };
 use fm_layout::{
     LayoutAlgorithm, LayoutGuardrails, TracedLayout, build_layout_guard_report_with_pressure,
-    layout_diagram_traced_with_algorithm,
     layout_diagram_traced_with_algorithm_and_guardrails,
 };
 use fm_parser::{detect_type_with_confidence, parse_evidence_json, parse_with_mode};
@@ -653,13 +652,13 @@ fn cmd_render(input: &str, options: RenderCommandOptions<'_>) -> Result<()> {
         anyhow::bail!("--json requires --output so rendered output does not mix with metadata");
     }
 
+    let source = load_input(input)?;
     let total_start = Instant::now();
     let pressure = MermaidNativePressureSignals::sample().into_report();
     let mut budget_broker = MermaidBudgetLedger::new(&pressure);
 
     // Parse
     let parse_start = Instant::now();
-    let source = load_input(input)?;
     let parsed = parse_with_mode(&source, parse_mode);
     let parse_time = parse_start.elapsed();
     budget_broker.record_parse(parse_time.as_millis().min(u128::from(u64::MAX)) as u64);
@@ -1143,12 +1142,12 @@ fn cmd_validate(
     fail_on: FailOnSeverity,
     diagnostics_out: Option<&str>,
 ) -> Result<()> {
+    let source = load_input(input)?;
     let total_start = Instant::now();
     let pressure = MermaidNativePressureSignals::sample().into_report();
     let mut budget_broker = MermaidBudgetLedger::new(&pressure);
 
     let parse_start = Instant::now();
-    let source = load_input(input)?;
     let parsed = parse_with_mode(&source, parse_mode);
     let parse_time = parse_start.elapsed();
     budget_broker.record_parse(parse_time.as_millis().min(u128::from(u64::MAX)) as u64);
