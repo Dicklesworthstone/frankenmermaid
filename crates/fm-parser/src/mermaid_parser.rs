@@ -493,13 +493,30 @@ fn flow_statement_parser<'a>() -> impl Parser<'a, &'a str, FlowAst, extra::Err<R
 
     // -- Quoted string -------------------------------------------------------
     let quoted_string = {
+        let esc = just('\\').ignore_then(any());
         let double_q = just('"')
-            .ignore_then(any().filter(|c: &char| *c != '"').repeated().to_slice())
+            .ignore_then(
+                choice((esc, any().filter(|c: &char| *c != '"')))
+                    .repeated()
+                    .collect::<String>(),
+            )
             .then_ignore(just('"'));
         let single_q = just('\'')
-            .ignore_then(any().filter(|c: &char| *c != '\'').repeated().to_slice())
+            .ignore_then(
+                choice((esc, any().filter(|c: &char| *c != '\'')))
+                    .repeated()
+                    .collect::<String>(),
+            )
             .then_ignore(just('\''));
-        double_q.or(single_q)
+        let back_q = just('`')
+            .ignore_then(
+                any()
+                    .filter(|c: &char| *c != '`')
+                    .repeated()
+                    .collect::<String>(),
+            )
+            .then_ignore(just('`'));
+        double_q.or(single_q).or(back_q)
     };
 
     // -- Node shapes ---------------------------------------------------------
@@ -626,7 +643,7 @@ fn flow_statement_parser<'a>() -> impl Parser<'a, &'a str, FlowAst, extra::Err<R
         .ignore_then(ident)
         .then_ignore(required_ws)
         .then(
-            quoted_string.map(|s: &str| s.to_string()).or(any()
+            quoted_string.or(any()
                 .repeated()
                 .at_least(1)
                 .to_slice()
@@ -1280,7 +1297,7 @@ fn lower_sequence_statement(
     builder: &mut IrBuilder,
 ) {
     match statement {
-        SequenceStatement::Participant(declaration) | SequenceStatement::Actor(declaration) => {
+        SequenceStatement::Participant(declaration) => {
             if register_participant(&declaration, line_number, source_line, builder) {
                 // Track in current box group if one is open
                 let id = declaration
@@ -1291,6 +1308,21 @@ fn lower_sequence_statement(
             } else {
                 builder.add_warning(format!(
                     "Line {line_number}: unable to parse participant declaration: {}",
+                    source_line.trim()
+                ));
+            }
+        }
+        SequenceStatement::Actor(declaration) => {
+            if register_participant(&declaration, line_number, source_line, builder) {
+                // Track in current box group if one is open
+                let id = declaration
+                    .split_once(" as ")
+                    .map_or(declaration.as_str(), |(left, _)| left)
+                    .trim();
+                builder.track_participant_in_group(id);
+            } else {
+                builder.add_warning(format!(
+                    "Line {line_number}: unable to parse actor declaration: {}",
                     source_line.trim()
                 ));
             }
@@ -1475,18 +1507,6 @@ fn parse_class_statements(line: &str) -> Option<Vec<ClassStatement>> {
         return Some(vec![ClassStatement::BlockStart(class_name.to_string())]);
     }
 
-    // `class Name` without braces: declare a class node
-    if line.starts_with("class ") && !line.contains('{') {
-        let rest = line.strip_prefix("class ").unwrap_or("").trim();
-        if !rest.is_empty()
-            && !rest.contains("--")
-            && !rest.contains("..")
-            && let Some(node) = parse_node_token(rest)
-        {
-            return Some(vec![ClassStatement::Node(node)]);
-        }
-    }
-
     if line.starts_with('}') {
         return Some(vec![ClassStatement::End]);
     }
@@ -1516,6 +1536,20 @@ fn parse_class_statements(line: &str) -> Option<Vec<ClassStatement>> {
             statements.push(ClassStatement::Ast(ast));
             continue;
         }
+
+        // `class Name` without braces: declare a class node
+        if statement.starts_with("class ") {
+            let rest = statement.strip_prefix("class ").unwrap_or("").trim();
+            if !rest.is_empty()
+                && !rest.contains("--")
+                && !rest.contains("..")
+                && let Some(node) = parse_node_token(rest)
+            {
+                statements.push(ClassStatement::Node(node));
+                continue;
+            }
+        }
+
         if let Some(asts) = parse_edge_statement_asts(statement, &CLASS_OPERATORS) {
             statements.extend(asts.into_iter().map(ClassStatement::Ast));
             continue;
@@ -2050,45 +2084,26 @@ fn parse_er_attribute(line: &str) -> Option<ErAttribute> {
         return None;
     }
 
-    // Split into parts, handling quoted comments
+    // Split into parts using robust quoted value extraction to handle escapes correctly
     let mut parts = Vec::new();
-    let mut current = String::new();
-    let mut in_quote = false;
-    let mut quote_content = String::new();
+    let mut remaining = trimmed;
 
-    for ch in trimmed.chars() {
-        if ch == '"' {
-            if in_quote {
-                // End of quoted string
-                parts.push(quote_content.clone());
-                quote_content.clear();
-                in_quote = false;
-            } else {
-                // Start of quoted string - save current if any
-                if !current.trim().is_empty() {
-                    for part in current.split_whitespace() {
-                        parts.push(part.to_string());
-                    }
-                    current.clear();
-                }
-                in_quote = true;
-            }
-        } else if in_quote {
-            quote_content.push(ch);
+    while !remaining.is_empty() {
+        remaining = remaining.trim_start();
+        if remaining.is_empty() {
+            break;
+        }
+
+        if let Some((value, rest)) = extract_quoted_value(remaining) {
+            parts.push(value);
+            remaining = rest;
         } else {
-            current.push(ch);
+            let end = remaining
+                .find(|c: char| c.is_whitespace())
+                .unwrap_or(remaining.len());
+            parts.push(remaining[..end].to_string());
+            remaining = &remaining[end..];
         }
-    }
-
-    // Don't forget trailing content
-    if !current.trim().is_empty() {
-        for part in current.split_whitespace() {
-            parts.push(part.to_string());
-        }
-    }
-    if in_quote && !quote_content.is_empty() {
-        // Unclosed quote - still include it
-        parts.push(quote_content);
     }
 
     // Need at least type and name
@@ -2111,7 +2126,6 @@ fn parse_er_attribute(line: &str) -> Option<ErAttribute> {
             "UK" => key = IrAttributeKey::Uk,
             _ => {
                 // If this is not a key and we haven't set a comment, it might be a comment
-                // (especially if it was quoted or is the last element)
                 if comment.is_none() && i >= 2 {
                     comment = Some(part.clone());
                 }
@@ -4034,12 +4048,26 @@ fn extract_quoted_value(input: &str) -> Option<(String, &str)> {
         return None;
     }
 
-    let content_start = 1;
-    let end_quote = trimmed[content_start..].find(quote_char)?;
-    let value = trimmed[content_start..content_start + end_quote].to_string();
-    let rest = &trimmed[content_start + end_quote + 1..];
+    let mut value = String::new();
+    let mut escaped = false;
+    let mut consumed_bytes = quote_char.len_utf8();
 
-    Some((value, rest))
+    for ch in trimmed[consumed_bytes..].chars() {
+        consumed_bytes += ch.len_utf8();
+        if escaped {
+            value.push(ch);
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == quote_char {
+            let rest = &trimmed[consumed_bytes..];
+            return Some((value, rest));
+        } else {
+            value.push(ch);
+        }
+    }
+
+    None // Unclosed quote
 }
 
 fn extract_quoted_or_word(input: &str) -> Option<(String, &str)> {
@@ -7847,5 +7875,424 @@ Rel_Back(db, app, "Responds")"#,
             note_warnings.is_empty(),
             "State notes should not produce warnings, got: {note_warnings:?}"
         );
+    }
+
+    // --- Detection tests per diagram type ---
+
+    #[test]
+    fn detect_sequence_keyword() {
+        let parsed = parse_mermaid("sequenceDiagram\n  Alice->>Bob: Hello");
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Sequence);
+    }
+
+    #[test]
+    fn detect_class_keyword() {
+        let parsed = parse_mermaid("classDiagram\n  class Animal");
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Class);
+    }
+
+    #[test]
+    fn detect_state_keyword() {
+        let parsed = parse_mermaid("stateDiagram-v2\n  [*] --> Active");
+        assert_eq!(parsed.ir.diagram_type, DiagramType::State);
+    }
+
+    #[test]
+    fn detect_er_keyword() {
+        let parsed = parse_mermaid("erDiagram\n  CUSTOMER ||--o{ ORDER : places");
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Er);
+    }
+
+    #[test]
+    fn detect_gantt_keyword() {
+        let parsed =
+            parse_mermaid("gantt\n  title A Gantt\n  section A\n  Task1 :a1, 2024-01-01, 30d");
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Gantt);
+    }
+
+    #[test]
+    fn detect_pie_keyword() {
+        let parsed = parse_mermaid("pie\n  \"A\" : 40\n  \"B\" : 60");
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Pie);
+    }
+
+    #[test]
+    fn detect_mindmap_keyword() {
+        let parsed = parse_mermaid("mindmap\n  root\n    Child");
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Mindmap);
+    }
+
+    #[test]
+    fn detect_timeline_keyword() {
+        let parsed = parse_mermaid("timeline\n  title History\n  2023 : Event");
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Timeline);
+    }
+
+    #[test]
+    fn detect_quadrant_keyword() {
+        let parsed = parse_mermaid("quadrantChart\n  x-axis Low --> High");
+        assert_eq!(parsed.ir.diagram_type, DiagramType::QuadrantChart);
+    }
+
+    #[test]
+    fn detect_sankey_keyword() {
+        let parsed = parse_mermaid("sankey-beta\n  A,B,10");
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Sankey);
+    }
+
+    #[test]
+    fn detect_xychart_keyword() {
+        let parsed = parse_mermaid("xychart-beta\n  x-axis [a, b, c]");
+        assert_eq!(parsed.ir.diagram_type, DiagramType::XyChart);
+    }
+
+    #[test]
+    fn detect_requirement_keyword() {
+        let parsed = parse_mermaid("requirementDiagram\n  requirement test_req { }");
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Requirement);
+    }
+
+    #[test]
+    fn detect_kanban_keyword() {
+        let parsed = parse_mermaid("kanban\n  Todo\n    task1");
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Kanban);
+    }
+
+    // --- Gantt parser tests ---
+
+    #[test]
+    fn gantt_parses_sections() {
+        let input = "gantt\n  title Project\n  dateFormat YYYY-MM-DD\n  section Alpha\n  Task1 :a1, 2024-01-01, 30d\n  section Beta\n  Task2 :a2, after a1, 15d";
+        let parsed = parse_mermaid(input);
+        assert!(
+            parsed.ir.nodes.len() >= 2,
+            "Should have at least 2 tasks, got {}",
+            parsed.ir.nodes.len()
+        );
+    }
+
+    #[test]
+    fn gantt_parses_milestones() {
+        let input =
+            "gantt\n  title Plan\n  section S1\n  Milestone1 :milestone, m1, 2024-06-01, 0d";
+        let parsed = parse_mermaid(input);
+        assert!(
+            !parsed.ir.nodes.is_empty(),
+            "Should parse milestone as node"
+        );
+    }
+
+    #[test]
+    fn gantt_parses_done_and_active_tasks() {
+        let input = "gantt\n  section S1\n  Done task :done, d1, 2024-01-01, 10d\n  Active task :active, a1, 2024-01-11, 10d\n  Future task :f1, after a1, 5d";
+        let parsed = parse_mermaid(input);
+        assert!(
+            parsed.ir.nodes.len() >= 3,
+            "Should have 3 tasks, got {}",
+            parsed.ir.nodes.len()
+        );
+    }
+
+    // --- Pie parser tests ---
+
+    #[test]
+    fn pie_parses_title() {
+        let input = "pie title Favorite Pets\n  \"Dogs\" : 386\n  \"Cats\" : 85\n  \"Rats\" : 15";
+        let parsed = parse_mermaid(input);
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Pie);
+        assert!(
+            parsed.ir.nodes.len() >= 3,
+            "Should have 3 slices, got {}",
+            parsed.ir.nodes.len()
+        );
+    }
+
+    #[test]
+    fn pie_handles_showdata() {
+        let input = "pie showData\n  \"A\" : 40\n  \"B\" : 60";
+        let parsed = parse_mermaid(input);
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Pie);
+        assert_eq!(parsed.ir.nodes.len(), 2);
+    }
+
+    #[test]
+    fn pie_ignores_empty_lines() {
+        let input = "pie\n\n  \"Only\" : 100\n\n";
+        let parsed = parse_mermaid(input);
+        assert_eq!(parsed.ir.nodes.len(), 1);
+    }
+
+    // --- C4 parser tests ---
+
+    #[test]
+    fn c4_context_parses_external_system() {
+        let input = "C4Context\n  Person(user, \"User\")\n  System_Ext(ext, \"External\")\n  Rel(user, ext, \"Uses\")";
+        let parsed = parse_mermaid(input);
+        assert_eq!(parsed.ir.diagram_type, DiagramType::C4Context);
+        assert!(
+            parsed.ir.nodes.len() >= 2,
+            "Should have person + system, got {}",
+            parsed.ir.nodes.len()
+        );
+        assert!(!parsed.ir.edges.is_empty(), "Should have relationship edge");
+    }
+
+    #[test]
+    fn c4_container_diagram() {
+        let input = "C4Container\n  Container(api, \"API\", \"Go\")\n  ContainerDb(db, \"Database\", \"PostgreSQL\")";
+        let parsed = parse_mermaid(input);
+        assert_eq!(parsed.ir.diagram_type, DiagramType::C4Container);
+        assert_eq!(parsed.ir.nodes.len(), 2);
+    }
+
+    #[test]
+    fn c4_component_diagram() {
+        let input = "C4Component\n  Component(svc, \"Service\", \"Handles requests\")";
+        let parsed = parse_mermaid(input);
+        assert_eq!(parsed.ir.diagram_type, DiagramType::C4Component);
+        assert_eq!(parsed.ir.nodes.len(), 1);
+    }
+
+    #[test]
+    fn c4_dynamic_diagram() {
+        let input = "C4Dynamic\n  Person(user, \"User\")\n  System(sys, \"System\")\n  Rel(user, sys, \"1. Request\")";
+        let parsed = parse_mermaid(input);
+        assert_eq!(parsed.ir.diagram_type, DiagramType::C4Dynamic);
+    }
+
+    #[test]
+    fn c4_deployment_diagram() {
+        let input = "C4Deployment\n  Deployment_Node(server, \"Server\")";
+        let parsed = parse_mermaid(input);
+        assert_eq!(parsed.ir.diagram_type, DiagramType::C4Deployment);
+    }
+
+    // --- Error recovery tests ---
+
+    #[test]
+    fn empty_input_does_not_panic() {
+        let parsed = parse_mermaid("");
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Unknown);
+    }
+
+    #[test]
+    fn whitespace_only_input_does_not_panic() {
+        let parsed = parse_mermaid("   \n\n  \t  \n");
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Unknown);
+    }
+
+    #[test]
+    fn garbage_input_does_not_panic() {
+        let parsed = parse_mermaid("!!!@#$%^&*()_+\nrandom garbage\n12345");
+        // Should not panic; falls back to Unknown or Flowchart.
+        assert!(
+            parsed.ir.diagram_type == DiagramType::Unknown
+                || parsed.ir.diagram_type == DiagramType::Flowchart
+        );
+    }
+
+    #[test]
+    fn dangling_edge_creates_placeholder() {
+        let input = "flowchart LR\n  A --> B\n  C --> ";
+        let parsed = parse_mermaid(input);
+        // Should still parse A --> B successfully.
+        assert!(!parsed.ir.nodes.is_empty());
+    }
+
+    #[test]
+    fn misspelled_keyword_detected_via_fuzzy() {
+        let input = "flwchart LR\n  A --> B";
+        let parsed = parse_mermaid(input);
+        // Fuzzy detection should catch "flwchart" as flowchart.
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Flowchart);
+    }
+
+    #[test]
+    fn mixed_diagram_types_uses_first_header() {
+        let input = "sequenceDiagram\n  Alice->>Bob: Hi\nflowchart LR\n  A-->B";
+        let parsed = parse_mermaid(input);
+        // First header wins.
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Sequence);
+    }
+
+    #[test]
+    fn extremely_long_node_id_does_not_panic() {
+        let long_id = "A".repeat(10_000);
+        let input = format!("flowchart LR\n  {long_id} --> B");
+        let parsed = parse_mermaid(&input);
+        assert!(!parsed.ir.nodes.is_empty());
+    }
+
+    #[test]
+    fn deeply_nested_subgraphs_do_not_panic() {
+        let mut input = String::from("flowchart TB\n");
+        for i in 0..20 {
+            input.push_str(&format!("{}subgraph sg{i}\n", "  ".repeat(i)));
+        }
+        for i in (0..20).rev() {
+            input.push_str(&format!("{}end\n", "  ".repeat(i)));
+        }
+        let parsed = parse_mermaid(&input);
+        // Should parse without panicking.
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Flowchart);
+    }
+
+    // --- Flowchart arrow type tests ---
+
+    #[test]
+    fn flowchart_all_arrow_types() {
+        let input =
+            "flowchart LR\n  A --> B\n  C --- D\n  E -.-> F\n  G ==> H\n  I --o J\n  K --x L";
+        let parsed = parse_mermaid(input);
+        assert!(
+            parsed.ir.edges.len() >= 6,
+            "Should have 6 edges for 6 arrow types, got {}",
+            parsed.ir.edges.len()
+        );
+    }
+
+    #[test]
+    fn flowchart_thick_arrow_with_label() {
+        let input = "flowchart LR\n  A ==>|label| B";
+        let parsed = parse_mermaid(input);
+        assert_eq!(parsed.ir.edges.len(), 1);
+    }
+
+    #[test]
+    fn flowchart_dotted_arrow_with_label() {
+        let input = "flowchart LR\n  A -.->|label| B";
+        let parsed = parse_mermaid(input);
+        assert_eq!(parsed.ir.edges.len(), 1);
+    }
+
+    // --- Flowchart node shape tests ---
+
+    #[test]
+    fn flowchart_node_shapes_basic() {
+        let input = "flowchart TB\n  A[Rectangle]\n  B(Rounded)\n  C{Diamond}\n  D([Stadium])\n  E[[Subroutine]]\n  F[(Database)]\n  G((Circle))\n  H>Asymmetric]";
+        let parsed = parse_mermaid(input);
+        assert!(
+            parsed.ir.nodes.len() >= 8,
+            "Should have 8 shaped nodes, got {}",
+            parsed.ir.nodes.len()
+        );
+    }
+
+    #[test]
+    fn flowchart_hexagon_and_parallelogram_shapes() {
+        let input = "flowchart TB\n  A{{Hexagon}}\n  B[/Parallelogram/]\n  C[\\Parallelogram\\]";
+        let parsed = parse_mermaid(input);
+        assert!(
+            parsed.ir.nodes.len() >= 3,
+            "Should have 3 shaped nodes, got {}",
+            parsed.ir.nodes.len()
+        );
+    }
+
+    // --- XY chart tests ---
+
+    #[test]
+    fn xychart_with_bar_series() {
+        let input = "xychart-beta\n  x-axis [Jan, Feb, Mar]\n  y-axis \"Sales\" 0 --> 100\n  bar [10, 30, 50]";
+        let parsed = parse_mermaid(input);
+        assert_eq!(parsed.ir.diagram_type, DiagramType::XyChart);
+    }
+
+    #[test]
+    fn xychart_with_line_series() {
+        let input = "xychart-beta\n  x-axis [A, B, C]\n  line [5, 15, 25]";
+        let parsed = parse_mermaid(input);
+        assert_eq!(parsed.ir.diagram_type, DiagramType::XyChart);
+    }
+
+    // --- Architecture tests ---
+
+    #[test]
+    fn architecture_parses_junction_nodes() {
+        let input =
+            "architecture-beta\n  service api(server)[API]\n  junction junc\n  api:R -- junc:L";
+        let parsed = parse_mermaid(input);
+        assert!(parsed.ir.nodes.len() >= 2, "Should have service + junction");
+    }
+
+    // --- Quadrant chart tests ---
+
+    #[test]
+    fn quadrant_parses_axis_labels() {
+        let input = "quadrantChart\n  x-axis Low Reach --> High Reach\n  y-axis Low Engagement --> High Engagement\n  quadrant-1 We should expand\n  Campaign A: [0.3, 0.6]";
+        let parsed = parse_mermaid(input);
+        assert_eq!(parsed.ir.diagram_type, DiagramType::QuadrantChart);
+    }
+
+    // --- Requirement diagram tests ---
+
+    #[test]
+    fn requirement_parses_requirement_block() {
+        let input = "requirementDiagram\n  requirement test_req {\n    id: 1\n    text: The system shall do X\n    risk: high\n    verifymethod: test\n  }";
+        let parsed = parse_mermaid(input);
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Requirement);
+        assert!(!parsed.ir.nodes.is_empty());
+    }
+
+    #[test]
+    fn requirement_parses_element_and_relationship() {
+        let input = "requirementDiagram\n  requirement test_req {\n    id: 1\n    text: test\n  }\n  element test_entity {\n    type: simulation\n  }\n  test_entity - satisfies -> test_req";
+        let parsed = parse_mermaid(input);
+        assert!(!parsed.ir.edges.is_empty(), "Should have relationship edge");
+    }
+
+    // --- Block-beta tests ---
+
+    #[test]
+    fn block_beta_columns_directive() {
+        let input = "block-beta\n  columns 3\n  a b c\n  d e f";
+        let parsed = parse_mermaid(input);
+        assert_eq!(parsed.ir.diagram_type, DiagramType::BlockBeta);
+        assert!(
+            parsed.ir.nodes.len() >= 6,
+            "Should have 6 blocks, got {}",
+            parsed.ir.nodes.len()
+        );
+    }
+
+    // --- Packet-beta tests ---
+
+    #[test]
+    fn packet_parses_bit_fields() {
+        let input = "packet-beta\n  0-3: \"Version\"\n  4-7: \"IHL\"\n  8-15: \"Type of Service\"";
+        let parsed = parse_mermaid(input);
+        assert_eq!(parsed.ir.diagram_type, DiagramType::PacketBeta);
+    }
+
+    // --- DOT format detection ---
+
+    #[test]
+    fn dot_digraph_detected() {
+        let input = "digraph G {\n  a -> b;\n  b -> c;\n}";
+        let parsed = parse_mermaid(input);
+        // DOT graphs should be detected and parsed.
+        assert!(!parsed.ir.nodes.is_empty());
+    }
+
+    #[test]
+    fn dot_undirected_graph_detected() {
+        let input = "graph G {\n  a -- b;\n}";
+        let parsed = parse_mermaid(input);
+        assert!(!parsed.ir.nodes.is_empty());
+    }
+
+    // --- Determinism tests ---
+
+    #[test]
+    fn parser_output_is_deterministic() {
+        let input =
+            "flowchart LR\n  A --> B\n  B --> C\n  A --> C\n  subgraph sg1\n    D --> E\n  end";
+        let r1 = parse_mermaid(input);
+        let r2 = parse_mermaid(input);
+        assert_eq!(r1.ir.nodes.len(), r2.ir.nodes.len());
+        assert_eq!(r1.ir.edges.len(), r2.ir.edges.len());
+        for (n1, n2) in r1.ir.nodes.iter().zip(r2.ir.nodes.iter()) {
+            assert_eq!(n1.id, n2.id, "Node IDs should match");
+        }
     }
 }

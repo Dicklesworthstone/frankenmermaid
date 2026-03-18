@@ -8,10 +8,109 @@ pub use font_metrics::{
 };
 
 use std::collections::BTreeMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
+pub use franken_kernel::{Budget, Cx, DecisionId, NoCaps, PolicyId, SchemaVersion, TraceId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
+
+pub const MERMAID_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(1, 0, 0);
+
+#[must_use]
+pub fn mermaid_layout_guard_policy_id() -> PolicyId {
+    PolicyId::new("fm.layout.guard", 1)
+}
+
+#[must_use]
+pub fn mermaid_root_cx(trace_id: TraceId, budget_ms: u64) -> Cx<'static, NoCaps> {
+    Cx::new(trace_id, Budget::new(budget_ms), NoCaps)
+}
+
+#[must_use]
+pub fn mermaid_trace_id(surface: &str, source: &str) -> TraceId {
+    TraceId::from_raw(stable_u128_hash("trace", &[surface, source]))
+}
+
+#[must_use]
+pub fn mermaid_decision_id(
+    trace_id: TraceId,
+    policy_id: &PolicyId,
+    phase: &str,
+    detail: &str,
+) -> DecisionId {
+    let trace = trace_id.to_string();
+    let version = policy_id.version().to_string();
+    DecisionId::from_raw(stable_u128_hash(
+        "decision",
+        &[&trace, policy_id.name(), &version, phase, detail],
+    ))
+}
+
+fn stable_u128_hash(domain: &str, parts: &[&str]) -> u128 {
+    let upper = stable_u64_hash("upper", domain, parts);
+    let lower = stable_u64_hash("lower", domain, parts);
+    ((upper as u128) << 64) | (lower as u128)
+}
+
+fn stable_u64_hash(salt: &str, domain: &str, parts: &[&str]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    salt.hash(&mut hasher);
+    domain.hash(&mut hasher);
+    for part in parts {
+        part.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MermaidObservabilityIds {
+    pub trace_id: TraceId,
+    pub decision_id: DecisionId,
+    pub policy_id: PolicyId,
+    #[serde(with = "schema_version_semver")]
+    pub schema_version: SchemaVersion,
+}
+
+impl Default for MermaidObservabilityIds {
+    fn default() -> Self {
+        Self {
+            trace_id: TraceId::from_raw(0),
+            decision_id: DecisionId::from_raw(0),
+            policy_id: mermaid_layout_guard_policy_id(),
+            schema_version: MERMAID_SCHEMA_VERSION,
+        }
+    }
+}
+
+#[must_use]
+pub fn mermaid_layout_guard_observability(
+    surface: &str,
+    source: &str,
+    selected_algorithm: &str,
+    budget_ms: u64,
+) -> (Cx<'static, NoCaps>, MermaidObservabilityIds) {
+    let trace_id = mermaid_trace_id(surface, source);
+    let cx = mermaid_root_cx(trace_id, budget_ms);
+    let policy_id = mermaid_layout_guard_policy_id();
+    let cx_trace_id = cx.trace_id();
+    let decision_id = mermaid_decision_id(
+        cx_trace_id,
+        &policy_id,
+        "layout.guard",
+        selected_algorithm,
+    );
+    (
+        cx,
+        MermaidObservabilityIds {
+            trace_id: cx_trace_id,
+            decision_id,
+            policy_id,
+            schema_version: MERMAID_SCHEMA_VERSION,
+        },
+    )
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct Position {
@@ -346,7 +445,8 @@ pub struct CapabilityClaim {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CapabilityMatrix {
-    pub schema_version: u32,
+    #[serde(with = "schema_version_semver")]
+    pub schema_version: SchemaVersion,
     pub project: String,
     pub status_counts: BTreeMap<String, usize>,
     pub claims: Vec<CapabilityClaim>,
@@ -365,7 +465,7 @@ pub fn capability_matrix() -> CapabilityMatrix {
     }
 
     CapabilityMatrix {
-        schema_version: 1,
+        schema_version: MERMAID_SCHEMA_VERSION,
         project: String::from("frankenmermaid"),
         status_counts,
         claims,
@@ -1731,6 +1831,276 @@ pub struct MermaidComplexity {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum MermaidPressureSource {
+    #[default]
+    Unavailable,
+    Native,
+    Wasm,
+}
+
+impl MermaidPressureSource {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unavailable => "unavailable",
+            Self::Native => "native",
+            Self::Wasm => "wasm",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum MermaidPressureTier {
+    #[default]
+    Unknown,
+    Nominal,
+    Elevated,
+    High,
+    Critical,
+}
+
+impl MermaidPressureTier {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Nominal => "nominal",
+            Self::Elevated => "elevated",
+            Self::High => "high",
+            Self::Critical => "critical",
+        }
+    }
+
+    #[must_use]
+    pub const fn from_quantized_score(score_permille: u16, telemetry_available: bool) -> Self {
+        if !telemetry_available {
+            return Self::Unknown;
+        }
+        match score_permille {
+            0..=349 => Self::Nominal,
+            350..=649 => Self::Elevated,
+            650..=849 => Self::High,
+            _ => Self::Critical,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct MermaidPressureReport {
+    pub source: MermaidPressureSource,
+    pub telemetry_available: bool,
+    pub conservative_fallback: bool,
+    pub tier: MermaidPressureTier,
+    pub quantized_score_permille: u16,
+    pub cpu_pressure_permille: Option<u16>,
+    pub memory_pressure_permille: Option<u16>,
+    pub io_pressure_permille: Option<u16>,
+    pub available_parallelism: Option<usize>,
+    pub rss_mib: Option<u64>,
+    pub frame_budget_ms: Option<u16>,
+    pub frame_time_ms: Option<u16>,
+    pub event_loop_lag_ms: Option<u16>,
+    pub worker_saturation_permille: Option<u16>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct MermaidNativePressureSignals {
+    pub cpu_pressure_permille: Option<u16>,
+    pub memory_pressure_permille: Option<u16>,
+    pub io_pressure_permille: Option<u16>,
+    pub available_parallelism: Option<usize>,
+    pub rss_mib: Option<u64>,
+}
+
+impl MermaidNativePressureSignals {
+    #[must_use]
+    pub fn sample() -> Self {
+        Self {
+            cpu_pressure_permille: env_permille("FM_PRESSURE_CPU_PERMILLE"),
+            memory_pressure_permille: env_permille("FM_PRESSURE_MEMORY_PERMILLE"),
+            io_pressure_permille: env_permille("FM_PRESSURE_IO_PERMILLE"),
+            available_parallelism: env_usize("FM_PRESSURE_AVAILABLE_PARALLELISM")
+                .or_else(|| std::thread::available_parallelism().ok().map(usize::from)),
+            rss_mib: env_u64("FM_PRESSURE_RSS_MIB").or_else(read_process_rss_mib),
+        }
+    }
+
+    #[must_use]
+    pub fn into_report(self) -> MermaidPressureReport {
+        let parallelism_pressure =
+            self.available_parallelism
+                .map(|parallelism| match parallelism {
+                    0..=1 => 900,
+                    2 => 700,
+                    3..=4 => 450,
+                    5..=8 => 250,
+                    _ => 100,
+                });
+        let rss_pressure = self.rss_mib.map(|rss_mib| match rss_mib {
+            0..=255 => 120,
+            256..=511 => 320,
+            512..=1023 => 560,
+            1024..=2047 => 760,
+            _ => 920,
+        });
+        let quantized_score_permille = [
+            self.cpu_pressure_permille,
+            self.memory_pressure_permille,
+            self.io_pressure_permille,
+            parallelism_pressure,
+            rss_pressure,
+        ]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or(0);
+        let telemetry_available = self.cpu_pressure_permille.is_some()
+            || self.memory_pressure_permille.is_some()
+            || self.io_pressure_permille.is_some()
+            || self.available_parallelism.is_some()
+            || self.rss_mib.is_some();
+        let mut notes = Vec::new();
+        if !telemetry_available {
+            notes.push(String::from(
+                "native telemetry unavailable; pressure tier is unknown and callers should use a conservative policy",
+            ));
+        }
+        if self.available_parallelism.is_none() {
+            notes.push(String::from("available parallelism probe unavailable"));
+        }
+        if self.rss_mib.is_none() {
+            notes.push(String::from("rss probe unavailable"));
+        }
+        MermaidPressureReport {
+            source: if telemetry_available {
+                MermaidPressureSource::Native
+            } else {
+                MermaidPressureSource::Unavailable
+            },
+            telemetry_available,
+            conservative_fallback: !telemetry_available,
+            tier: MermaidPressureTier::from_quantized_score(
+                quantized_score_permille,
+                telemetry_available,
+            ),
+            quantized_score_permille,
+            cpu_pressure_permille: self.cpu_pressure_permille,
+            memory_pressure_permille: self.memory_pressure_permille,
+            io_pressure_permille: self.io_pressure_permille,
+            available_parallelism: self.available_parallelism,
+            rss_mib: self.rss_mib,
+            frame_budget_ms: None,
+            frame_time_ms: None,
+            event_loop_lag_ms: None,
+            worker_saturation_permille: None,
+            notes,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct MermaidWasmPressureSignals {
+    pub frame_budget_ms: Option<u16>,
+    pub frame_time_ms: Option<u16>,
+    pub event_loop_lag_ms: Option<u16>,
+    pub worker_saturation_permille: Option<u16>,
+}
+
+impl MermaidWasmPressureSignals {
+    #[must_use]
+    pub fn into_report(self) -> MermaidPressureReport {
+        let frame_pressure = match (self.frame_budget_ms, self.frame_time_ms) {
+            (Some(budget), Some(frame_time)) if budget > 0 => {
+                let scaled = (u32::from(frame_time) * 1_000) / u32::from(budget);
+                Some(scaled.min(1_000) as u16)
+            }
+            _ => None,
+        };
+        let lag_pressure = self
+            .event_loop_lag_ms
+            .map(|lag_ms| (u32::from(lag_ms) * 50).min(1_000) as u16);
+        let quantized_score_permille = [
+            frame_pressure,
+            lag_pressure,
+            self.worker_saturation_permille
+                .map(|value| value.min(1_000)),
+        ]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or(0);
+        let telemetry_available = self.frame_budget_ms.is_some()
+            || self.frame_time_ms.is_some()
+            || self.event_loop_lag_ms.is_some()
+            || self.worker_saturation_permille.is_some();
+        let mut notes = Vec::new();
+        if !telemetry_available {
+            notes.push(String::from(
+                "wasm telemetry unavailable; pressure tier is unknown and callers should use a conservative policy",
+            ));
+        } else if self.frame_budget_ms.is_none() || self.frame_time_ms.is_none() {
+            notes.push(String::from(
+                "frame budget telemetry incomplete; using event-loop and worker proxies only",
+            ));
+        }
+        MermaidPressureReport {
+            source: if telemetry_available {
+                MermaidPressureSource::Wasm
+            } else {
+                MermaidPressureSource::Unavailable
+            },
+            telemetry_available,
+            conservative_fallback: !telemetry_available,
+            tier: MermaidPressureTier::from_quantized_score(
+                quantized_score_permille,
+                telemetry_available,
+            ),
+            quantized_score_permille,
+            cpu_pressure_permille: None,
+            memory_pressure_permille: None,
+            io_pressure_permille: None,
+            available_parallelism: None,
+            rss_mib: None,
+            frame_budget_ms: self.frame_budget_ms,
+            frame_time_ms: self.frame_time_ms,
+            event_loop_lag_ms: self.event_loop_lag_ms,
+            worker_saturation_permille: self.worker_saturation_permille,
+            notes,
+        }
+    }
+}
+
+fn env_permille(key: &str) -> Option<u16> {
+    env_u16(key).map(|value| value.min(1_000))
+}
+
+fn env_u16(key: &str) -> Option<u16> {
+    std::env::var(key).ok()?.trim().parse().ok()
+}
+
+fn env_u64(key: &str) -> Option<u64> {
+    std::env::var(key).ok()?.trim().parse().ok()
+}
+
+fn env_usize(key: &str) -> Option<usize> {
+    std::env::var(key).ok()?.trim().parse().ok()
+}
+
+fn read_process_rss_mib() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            let kib = rest
+                .split_whitespace()
+                .find_map(|token| token.parse::<u64>().ok())?;
+            return Some(kib.div_ceil(1024));
+        }
+    }
+    None
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum MermaidFidelity {
     Rich,
     #[default]
@@ -1767,6 +2137,8 @@ pub struct MermaidGuardReport {
     pub layout_requested_algorithm: Option<String>,
     pub layout_selected_algorithm: Option<String>,
     pub guard_reason: Option<String>,
+    pub observability: MermaidObservabilityIds,
+    pub pressure: MermaidPressureReport,
     pub degradation: MermaidDegradationPlan,
 }
 
@@ -2423,6 +2795,29 @@ pub struct MermaidIrParse {
     pub errors: Vec<MermaidError>,
 }
 
+mod schema_version_semver {
+    use serde::{self, Deserialize, Deserializer, Serializer};
+
+    use crate::SchemaVersion;
+
+    pub fn serialize<S>(value: &SchemaVersion, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&value.to_string())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<SchemaVersion, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        value
+            .parse()
+            .map_err(|_| serde::de::Error::custom(format!("invalid schema version: {value}")))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -2434,12 +2829,14 @@ mod tests {
         IrGraphCluster, IrGraphEdge, IrGraphNode, IrLabel, IrLabelId, IrLifecycleEvent, IrNode,
         IrNodeId, IrNodeKind, IrParticipantGroup, IrPort, IrPortId, IrPortSideHint,
         IrSequenceFragment, IrSequenceMeta, IrSequenceNote, IrSubgraph, IrSubgraphId,
-        LifecycleEventKind, MermaidConfig, MermaidDiagramIr, MermaidError, MermaidErrorCode,
-        MermaidFallbackAction, MermaidFallbackPolicy, MermaidSanitizeMode, MermaidSupportLevel,
-        MermaidWarningCode, NodeShape, NotePosition, Position, Span, StructuredDiagnostic,
-        capability_matrix, capability_matrix_json_pretty,
-        capability_readme_supported_diagram_types_markdown, capability_readme_surface_markdown,
-        documented_diagram_types, parse_mermaid_js_config_value, to_init_parse,
+        LifecycleEventKind, MERMAID_SCHEMA_VERSION, MermaidConfig, MermaidDiagramIr, MermaidError,
+        MermaidErrorCode, MermaidFallbackAction, MermaidFallbackPolicy,
+        MermaidNativePressureSignals, MermaidPressureTier, MermaidSanitizeMode,
+        MermaidSupportLevel, MermaidWarningCode, MermaidWasmPressureSignals, NodeShape,
+        NotePosition, Position, Span, StructuredDiagnostic, capability_matrix,
+        capability_matrix_json_pretty, capability_readme_supported_diagram_types_markdown,
+        capability_readme_surface_markdown, documented_diagram_types,
+        mermaid_layout_guard_observability, parse_mermaid_js_config_value, to_init_parse,
     };
 
     fn sample_span(line: usize, start_col: usize, end_col: usize) -> Span {
@@ -2946,6 +3343,50 @@ mod tests {
         assert_eq!(
             decoded.theme_variables.get("lineColor").map(String::as_str),
             Some("#00ff00")
+        );
+    }
+
+    #[test]
+    fn native_pressure_quantization_prefers_highest_observed_signal() {
+        let report = MermaidNativePressureSignals {
+            cpu_pressure_permille: Some(410),
+            memory_pressure_permille: Some(880),
+            io_pressure_permille: Some(300),
+            available_parallelism: Some(8),
+            rss_mib: Some(256),
+        }
+        .into_report();
+        assert!(report.telemetry_available);
+        assert_eq!(report.quantized_score_permille, 880);
+        assert_eq!(report.tier, MermaidPressureTier::Critical);
+    }
+
+    #[test]
+    fn wasm_pressure_quantization_uses_frame_and_worker_signals() {
+        let report = MermaidWasmPressureSignals {
+            frame_budget_ms: Some(16),
+            frame_time_ms: Some(12),
+            event_loop_lag_ms: Some(4),
+            worker_saturation_permille: Some(720),
+        }
+        .into_report();
+        assert!(report.telemetry_available);
+        assert_eq!(report.source.as_str(), "wasm");
+        assert_eq!(report.quantized_score_permille, 750);
+        assert_eq!(report.tier, MermaidPressureTier::High);
+    }
+
+    #[test]
+    fn unavailable_pressure_signal_produces_conservative_unknown_report() {
+        let report = MermaidNativePressureSignals::default().into_report();
+        assert!(!report.telemetry_available);
+        assert!(report.conservative_fallback);
+        assert_eq!(report.tier, MermaidPressureTier::Unknown);
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.contains("telemetry unavailable"))
         );
     }
 
@@ -3651,10 +4092,25 @@ mod tests {
         let second = capability_matrix();
 
         assert_eq!(first, second);
-        assert_eq!(first.schema_version, 1);
+        assert_eq!(first.schema_version, MERMAID_SCHEMA_VERSION);
         assert_eq!(first.project, "frankenmermaid");
         assert!(first.claims.len() >= documented_diagram_types().len());
         assert!(first.status_counts.contains_key("implemented"));
+    }
+
+    #[test]
+    fn layout_guard_observability_is_deterministic_and_uses_kernel_types() {
+        let (_cx, first) =
+            mermaid_layout_guard_observability("cli.render", "flowchart LR\nA-->B", "sugiyama", 25);
+        let (_cx, second) =
+            mermaid_layout_guard_observability("cli.render", "flowchart LR\nA-->B", "sugiyama", 25);
+
+        assert_eq!(first, second);
+        assert_eq!(first.schema_version, MERMAID_SCHEMA_VERSION);
+        assert_eq!(first.policy_id.name(), "fm.layout.guard");
+        assert_eq!(first.policy_id.version(), 1);
+        assert_ne!(first.trace_id.as_u128(), 0);
+        assert_ne!(first.decision_id.as_u128(), 0);
     }
 
     #[test]

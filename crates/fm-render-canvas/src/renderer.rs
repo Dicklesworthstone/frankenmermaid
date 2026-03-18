@@ -627,6 +627,13 @@ impl Canvas2dRenderer {
                         f64::from((p1.x + p2.x) / 2.0) + offset_x,
                         f64::from((p1.y + p2.y) / 2.0) + offset_y - 12.0,
                     )
+                } else if edge_path.points.len() == 2 {
+                    let p1 = &edge_path.points[0];
+                    let p2 = &edge_path.points[1];
+                    (
+                        f64::from((p1.x + p2.x) / 2.0) + offset_x,
+                        f64::from((p1.y + p2.y) / 2.0) + offset_y - 12.0,
+                    )
                 } else {
                     let mid_idx = edge_path.points.len() / 2;
                     let mid = &edge_path.points[mid_idx];

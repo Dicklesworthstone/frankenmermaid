@@ -18,10 +18,14 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use fm_core::{
-    DiagramType, MermaidDiagramIr, MermaidParseMode, StructuredDiagnostic, capability_matrix,
-    capability_matrix_json_pretty,
+    DiagramType, MermaidDiagramIr, MermaidNativePressureSignals, MermaidParseMode,
+    StructuredDiagnostic, capability_matrix, capability_matrix_json_pretty,
+    mermaid_layout_guard_observability,
 };
-use fm_layout::{LayoutAlgorithm, TracedLayout, layout_diagram_traced_with_algorithm};
+use fm_layout::{
+    LayoutAlgorithm, TracedLayout, build_layout_guard_report_with_pressure,
+    layout_diagram_traced_with_algorithm,
+};
 use fm_parser::{detect_type_with_confidence, parse_evidence_json, parse_with_mode};
 use fm_render_svg::{SvgRenderConfig, ThemePreset, render_svg_with_layout};
 use fm_render_term::{
@@ -365,6 +369,15 @@ struct RenderResult {
     diagram_type: String,
     node_count: usize,
     edge_count: usize,
+    pressure_source: String,
+    pressure_tier: String,
+    pressure_telemetry_available: bool,
+    pressure_conservative_fallback: bool,
+    pressure_score_permille: u16,
+    trace_id: String,
+    decision_id: String,
+    policy_id: String,
+    schema_version: String,
     output_bytes: usize,
     width: Option<u32>,
     height: Option<u32>,
@@ -428,6 +441,15 @@ struct ValidateResult {
     diagram_type: String,
     node_count: usize,
     edge_count: usize,
+    pressure_source: String,
+    pressure_tier: String,
+    pressure_telemetry_available: bool,
+    pressure_conservative_fallback: bool,
+    pressure_score_permille: u16,
+    trace_id: String,
+    decision_id: String,
+    policy_id: String,
+    schema_version: String,
     diagnostics: Vec<ValidationDiagnostic>,
 }
 
@@ -645,6 +667,16 @@ fn cmd_render(input: &str, options: RenderCommandOptions<'_>) -> Result<()> {
     let traced_layout = layout_diagram_traced_with_algorithm(&parsed.ir, layout_algorithm);
     let layout = &traced_layout.layout;
     let layout_time = layout_start.elapsed();
+    let pressure = MermaidNativePressureSignals::sample().into_report();
+    let mut guard_report =
+        build_layout_guard_report_with_pressure(&parsed.ir, &traced_layout, pressure);
+    let (_cx, observability) = mermaid_layout_guard_observability(
+        "cli.render",
+        &source,
+        traced_layout.trace.dispatch.selected.as_str(),
+        traced_layout.trace.guard.estimated_layout_time_ms.max(1) as u64,
+    );
+    guard_report.observability = observability;
 
     debug!(
         "Layout: requested={}, selected={}, bounds={}x{}, crossings={}",
@@ -699,6 +731,15 @@ fn cmd_render(input: &str, options: RenderCommandOptions<'_>) -> Result<()> {
             diagram_type: parsed.ir.diagram_type.as_str().to_string(),
             node_count: parsed.ir.nodes.len(),
             edge_count: parsed.ir.edges.len(),
+            pressure_source: guard_report.pressure.source.as_str().to_string(),
+            pressure_tier: guard_report.pressure.tier.as_str().to_string(),
+            pressure_telemetry_available: guard_report.pressure.telemetry_available,
+            pressure_conservative_fallback: guard_report.pressure.conservative_fallback,
+            pressure_score_permille: guard_report.pressure.quantized_score_permille,
+            trace_id: guard_report.observability.trace_id.to_string(),
+            decision_id: guard_report.observability.decision_id.to_string(),
+            policy_id: guard_report.observability.policy_id.to_string(),
+            schema_version: guard_report.observability.schema_version.to_string(),
             output_bytes: rendered.len(),
             width: actual_width,
             height: actual_height,
@@ -1069,6 +1110,16 @@ fn cmd_validate(
     let source = load_input(input)?;
     let parsed = parse_with_mode(&source, parse_mode);
     let traced_layout = layout_diagram_traced_with_algorithm(&parsed.ir, layout_algorithm);
+    let pressure = MermaidNativePressureSignals::sample().into_report();
+    let mut guard_report =
+        build_layout_guard_report_with_pressure(&parsed.ir, &traced_layout, pressure);
+    let (_cx, observability) = mermaid_layout_guard_observability(
+        "cli.validate",
+        &source,
+        traced_layout.trace.dispatch.selected.as_str(),
+        traced_layout.trace.guard.estimated_layout_time_ms.max(1) as u64,
+    );
+    guard_report.observability = observability;
     let layout = &traced_layout.layout;
     let svg_config = SvgRenderConfig {
         include_source_spans: true,
@@ -1105,6 +1156,15 @@ fn cmd_validate(
         diagram_type: parsed.ir.diagram_type.as_str().to_string(),
         node_count: parsed.ir.nodes.len(),
         edge_count: parsed.ir.edges.len(),
+        pressure_source: guard_report.pressure.source.as_str().to_string(),
+        pressure_tier: guard_report.pressure.tier.as_str().to_string(),
+        pressure_telemetry_available: guard_report.pressure.telemetry_available,
+        pressure_conservative_fallback: guard_report.pressure.conservative_fallback,
+        pressure_score_permille: guard_report.pressure.quantized_score_permille,
+        trace_id: guard_report.observability.trace_id.to_string(),
+        decision_id: guard_report.observability.decision_id.to_string(),
+        policy_id: guard_report.observability.policy_id.to_string(),
+        schema_version: guard_report.observability.schema_version.to_string(),
         diagnostics,
     };
 

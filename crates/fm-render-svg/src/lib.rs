@@ -1881,6 +1881,14 @@ fn render_edge(
                 (p1.x + p2.x) / 2.0 + offset_x,
                 (p1.y + p2.y) / 2.0 + offset_y - 8.0,
             )
+        } else if edge_path.points.len() == 2 {
+            // For straight lines, geometric center
+            let p1 = &edge_path.points[0];
+            let p2 = &edge_path.points[1];
+            (
+                (p1.x + p2.x) / 2.0 + offset_x,
+                (p1.y + p2.y) / 2.0 + offset_y - 8.0,
+            )
         } else {
             // Fallback for other path lengths
             let mid_idx = edge_path.points.len() / 2;

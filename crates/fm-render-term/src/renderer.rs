@@ -680,6 +680,12 @@ impl TermRenderer {
                     let px = (p1.x + p2.x) / 2.0;
                     let py = (p1.y + p2.y) / 2.0;
                     self.point_to_cells(&fm_layout::LayoutPoint { x: px, y: py })
+                } else if edge_path.points.len() == 2 {
+                    let p1 = &edge_path.points[0];
+                    let p2 = &edge_path.points[1];
+                    let px = (p1.x + p2.x) / 2.0;
+                    let py = (p1.y + p2.y) / 2.0;
+                    self.point_to_cells(&fm_layout::LayoutPoint { x: px, y: py })
                 } else {
                     let mid_idx = edge_path.points.len() / 2;
                     self.point_to_cells(&edge_path.points[mid_idx])

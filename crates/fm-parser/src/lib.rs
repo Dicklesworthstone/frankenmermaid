@@ -132,53 +132,63 @@ pub fn detect_type_with_confidence(input: &str) -> DetectedType {
 /// Exact keyword matching for diagram type detection.
 fn exact_keyword_match(lower: &str, original: &str) -> Option<DetectedType> {
     let (diagram_type, confidence) =
-        if lower.starts_with("flowchart") || lower == "graph" || lower.starts_with("graph ") {
+        if matches_keyword_header(lower, "flowchart") || matches_keyword_header(lower, "graph") {
             (DiagramType::Flowchart, 1.0)
-        } else if lower.starts_with("sequencediagram") {
+        } else if matches_keyword_header(lower, "sequencediagram") {
             (DiagramType::Sequence, 1.0)
-        } else if lower.starts_with("classdiagram") {
+        } else if matches_keyword_header(lower, "classdiagram") {
             (DiagramType::Class, 1.0)
-        } else if lower.starts_with("statediagram") {
+        } else if matches_keyword_header(lower, "statediagram") {
             (DiagramType::State, 1.0)
-        } else if lower.starts_with("gantt") {
+        } else if matches_keyword_header(lower, "gantt") {
             (DiagramType::Gantt, 1.0)
-        } else if lower.starts_with("erdiagram") {
+        } else if matches_keyword_header(lower, "erdiagram") {
             (DiagramType::Er, 1.0)
-        } else if lower.starts_with("mindmap") {
+        } else if matches_keyword_header(lower, "mindmap") {
             (DiagramType::Mindmap, 1.0)
-        } else if lower.starts_with("pie") {
+        } else if matches_keyword_header(lower, "pie") {
             (DiagramType::Pie, 1.0)
-        } else if lower.starts_with("gitgraph") {
+        } else if matches_keyword_header(lower, "gitgraph") {
             (DiagramType::GitGraph, 1.0)
-        } else if lower.starts_with("journey") {
+        } else if matches_keyword_header(lower, "journey") {
             (DiagramType::Journey, 1.0)
-        } else if lower.starts_with("requirementdiagram") {
+        } else if matches_keyword_header(lower, "requirementdiagram") {
             (DiagramType::Requirement, 1.0)
-        } else if lower.starts_with("timeline") {
+        } else if matches_keyword_header(lower, "timeline") {
             (DiagramType::Timeline, 1.0)
-        } else if lower.starts_with("quadrantchart") {
+        } else if matches_keyword_header(lower, "quadrantchart") {
             (DiagramType::QuadrantChart, 1.0)
-        } else if lower.starts_with("sankey") {
+        } else if matches_keyword_header(lower, "sankey") {
             (DiagramType::Sankey, 1.0)
-        } else if lower.starts_with("xychart") {
+        } else if matches_keyword_header(lower, "xychart") {
             (DiagramType::XyChart, 1.0)
         } else if is_block_beta_header(lower) {
             (DiagramType::BlockBeta, 1.0)
-        } else if lower.starts_with("packet-beta") {
+        } else if matches_keyword_header(lower, "packet-beta") {
             (DiagramType::PacketBeta, 1.0)
-        } else if lower.starts_with("architecture-beta") {
+        } else if matches_keyword_header(lower, "architecture-beta") {
             (DiagramType::ArchitectureBeta, 1.0)
-        } else if original.starts_with("C4Context") {
+        } else if matches_keyword_header(original, "C4Context")
+            || matches_keyword_header(lower, "c4context")
+        {
             (DiagramType::C4Context, 1.0)
-        } else if original.starts_with("C4Container") {
+        } else if matches_keyword_header(original, "C4Container")
+            || matches_keyword_header(lower, "c4container")
+        {
             (DiagramType::C4Container, 1.0)
-        } else if original.starts_with("C4Component") {
+        } else if matches_keyword_header(original, "C4Component")
+            || matches_keyword_header(lower, "c4component")
+        {
             (DiagramType::C4Component, 1.0)
-        } else if original.starts_with("C4Dynamic") {
+        } else if matches_keyword_header(original, "C4Dynamic")
+            || matches_keyword_header(lower, "c4dynamic")
+        {
             (DiagramType::C4Dynamic, 1.0)
-        } else if original.starts_with("C4Deployment") {
+        } else if matches_keyword_header(original, "C4Deployment")
+            || matches_keyword_header(lower, "c4deployment")
+        {
             (DiagramType::C4Deployment, 1.0)
-        } else if lower.starts_with("kanban") {
+        } else if matches_keyword_header(lower, "kanban") {
             (DiagramType::Kanban, 1.0)
         } else {
             return None;
@@ -222,7 +232,7 @@ fn matches_keyword_header(line: &str, keyword: &str) -> bool {
         || line
             .strip_prefix(keyword)
             .and_then(|rest| rest.chars().next())
-            .is_some_and(char::is_whitespace)
+            .is_some_and(|c| c.is_whitespace() || c == '-')
 }
 
 /// Fuzzy keyword matching using Levenshtein distance.

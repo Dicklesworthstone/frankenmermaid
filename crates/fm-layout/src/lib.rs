@@ -6,7 +6,8 @@ use std::f32::consts::PI;
 
 use fm_core::{
     DiagramType, FontMetrics, GraphDirection, IrEndpoint, IrNode, MermaidComplexity, MermaidConfig,
-    MermaidDiagramIr, MermaidFidelity, MermaidGlyphMode, MermaidGuardReport, Span,
+    MermaidDiagramIr, MermaidFidelity, MermaidGlyphMode, MermaidGuardReport, MermaidPressureReport,
+    Span,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -825,8 +826,24 @@ fn polygon_ellipse_path(bounds: LayoutRect, segments: usize) -> Vec<PathCmd> {
 }
 
 fn edge_label_position(edge_path: &LayoutEdgePath) -> LayoutPoint {
-    let midpoint_index = edge_path.points.len() / 2;
-    edge_path.points[midpoint_index]
+    if edge_path.points.len() == 4 {
+        let p1 = &edge_path.points[1];
+        let p2 = &edge_path.points[2];
+        LayoutPoint {
+            x: (p1.x + p2.x) / 2.0,
+            y: (p1.y + p2.y) / 2.0,
+        }
+    } else if edge_path.points.len() == 2 {
+        let p1 = &edge_path.points[0];
+        let p2 = &edge_path.points[1];
+        LayoutPoint {
+            x: (p1.x + p2.x) / 2.0,
+            y: (p1.y + p2.y) / 2.0,
+        }
+    } else {
+        let midpoint_index = edge_path.points.len() / 2;
+        edge_path.points[midpoint_index]
+    }
 }
 
 #[must_use]
@@ -1065,9 +1082,9 @@ fn estimate_layout_cost(ir: &MermaidDiagramIr, algorithm: LayoutAlgorithm) -> La
         LayoutAlgorithm::Sugiyama => LayoutCostEstimate {
             time_ms: nodes
                 .saturating_mul(edges.max(1))
-                .saturating_mul(2)
-                .saturating_add(ranks_hint.saturating_mul(20))
-                .saturating_add(25),
+                .div_ceil(50)
+                .saturating_add(ranks_hint.saturating_mul(5))
+                .saturating_add(10),
             iterations: ranks_hint.saturating_mul(10).saturating_add(24),
             route_ops: edges
                 .saturating_mul(24)
@@ -2746,14 +2763,16 @@ fn layered_ranks(ir: &MermaidDiagramIr) -> Vec<usize> {
 
     let mut ranks = vec![0_usize; node_count];
     let mut processed = vec![false; node_count];
-    let mut ready: Vec<usize> = sorted_nodes
-        .iter()
-        .copied()
-        .filter(|node| indegree[*node] == 0)
-        .collect();
 
-    while let Some(node_index) = ready.first().copied() {
-        ready.remove(0);
+    // Use BinaryHeap for O(N log N) performance and stable tie-breaking by node ID
+    let mut heap = std::collections::BinaryHeap::new();
+    for node_index in sorted_nodes.iter().copied() {
+        if indegree[node_index] == 0 {
+            heap.push(std::cmp::Reverse((&ir.nodes[node_index].id, node_index)));
+        }
+    }
+
+    while let Some(std::cmp::Reverse((_, node_index))) = heap.pop() {
         if processed[node_index] {
             continue;
         }
@@ -2763,14 +2782,12 @@ fn layered_ranks(ir: &MermaidDiagramIr) -> Vec<usize> {
             ranks[target] = ranks[target].max(ranks[node_index].saturating_add(1));
             indegree[target] = indegree[target].saturating_sub(1);
             if indegree[target] == 0 {
-                ready.push(target);
+                heap.push(std::cmp::Reverse((&ir.nodes[target].id, target)));
             }
         }
-
-        ready.sort_by(|left, right| compare_node_indices(ir, *left, *right));
-        ready.dedup();
     }
 
+    // Assign ranks to nodes that were not reached (e.g. part of cycles that weren't fully broken)
     for node_index in sorted_nodes {
         if processed[node_index] {
             continue;
@@ -2822,162 +2839,6 @@ fn finalize_specialized_layout(
 
     let stats = LayoutStats {
         node_count: ir.nodes.len(),
-        edge_count: ir.edges.len(),
-        crossing_count: 0,
-        crossing_count_before_refinement: 0,
-        reversed_edges: 0,
-        cycle_count: 0,
-        cycle_node_count: 0,
-        max_cycle_size: 0,
-        collapsed_clusters: 0,
-        reversed_edge_total_length,
-        total_edge_length,
-        phase_iterations: trace.snapshots.len(),
-    };
-
-    TracedLayout {
-        layout: DiagramLayout {
-            nodes,
-            clusters,
-            cycle_clusters: Vec::new(),
-            edges,
-            bounds,
-            stats,
-            extensions: LayoutExtensions::default(),
-        },
-        trace,
-    }
-}
-
-/// Lay out a diagram using a deterministic radial tree variant.
-#[must_use]
-pub fn layout_diagram_radial_traced_dup(ir: &MermaidDiagramIr) -> TracedLayout {
-    let mut trace = LayoutTrace::default();
-    let spacing = LayoutSpacing::default();
-    let node_sizes = compute_node_sizes(ir);
-    let node_count = ir.nodes.len();
-
-    if node_count == 0 {
-        return TracedLayout {
-            layout: DiagramLayout {
-                nodes: Vec::new(),
-                clusters: Vec::new(),
-                cycle_clusters: Vec::new(),
-                edges: Vec::new(),
-                bounds: LayoutRect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: 0.0,
-                    height: 0.0,
-                },
-                stats: LayoutStats::default(),
-                extensions: LayoutExtensions::default(),
-            },
-            trace,
-        };
-    }
-
-    let tree = build_tree_layout_structure(ir);
-    push_snapshot(
-        &mut trace,
-        "tree_structure",
-        node_count,
-        ir.edges.len(),
-        0,
-        0,
-    );
-
-    let depth_offset = usize::from(tree.roots.len() > 1);
-    let effective_max_depth = tree.max_depth + depth_offset;
-    let mut ring_level_sizes = vec![0.0_f32; effective_max_depth + 1];
-    for (node_index, (width, height)) in node_sizes.iter().copied().enumerate() {
-        let level = tree.depth[node_index] + depth_offset;
-        ring_level_sizes[level] = ring_level_sizes[level].max(width.max(height));
-    }
-
-    let mut radii = vec![0.0_f32; effective_max_depth + 1];
-    for level in 1..=effective_max_depth {
-        let prev = ring_level_sizes[level - 1].max(1.0);
-        let current = ring_level_sizes[level].max(1.0);
-        radii[level] = radii[level - 1] + (prev / 2.0) + spacing.rank_spacing + (current / 2.0);
-    }
-
-    let mut leaf_memo = vec![None; node_count];
-    for root in &tree.roots {
-        let _ = radial_leaf_count(*root, &tree.children, &mut leaf_memo);
-    }
-    let leaf_counts: Vec<usize> = leaf_memo
-        .into_iter()
-        .map(|count| count.unwrap_or(1))
-        .collect();
-
-    let mut angles = vec![0.0_f32; node_count];
-    if tree.roots.len() == 1 && depth_offset == 0 {
-        assign_radial_angles(
-            tree.roots[0],
-            -PI,
-            PI,
-            &tree,
-            &leaf_counts,
-            &node_sizes,
-            &radii,
-            depth_offset,
-            spacing,
-            &mut angles,
-        );
-    } else {
-        let total_leaves: usize = tree.roots.iter().map(|root| leaf_counts[*root]).sum();
-        let total_leaves = total_leaves.max(1);
-        let mut cursor = -PI;
-        for (root_index, root) in tree.roots.iter().enumerate() {
-            let weight = leaf_counts[*root] as f32 / total_leaves as f32;
-            let mut span = (2.0 * PI) * weight;
-            if root_index + 1 == tree.roots.len() {
-                span = PI - cursor;
-            }
-            assign_radial_angles(
-                *root,
-                cursor,
-                cursor + span,
-                &tree,
-                &leaf_counts,
-                &node_sizes,
-                &radii,
-                depth_offset,
-                spacing,
-                &mut angles,
-            );
-            cursor += span;
-        }
-    }
-
-    let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
-    for node_index in 0..node_count {
-        let level = tree.depth[node_index] + depth_offset;
-        let radius = radii[level];
-        let angle = angles[node_index];
-        centers[node_index] = (radius * angle.cos(), radius * angle.sin());
-    }
-    normalize_center_positions(&mut centers, &node_sizes);
-
-    let order_by_rank = rank_orders_from_key(ir, &tree.depth, &angles);
-    let nodes = node_boxes_from_centers(ir, &node_sizes, &tree.depth, &order_by_rank, &centers);
-    let edges = build_edge_paths(ir, &nodes, &BTreeSet::new());
-    let clusters = build_cluster_boxes(ir, &nodes, spacing);
-    let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
-    let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
-
-    push_snapshot(
-        &mut trace,
-        "radial_post_processing",
-        node_count,
-        ir.edges.len(),
-        0,
-        0,
-    );
-
-    let stats = LayoutStats {
-        node_count,
         edge_count: ir.edges.len(),
         crossing_count: 0,
         crossing_count_before_refinement: 0,
@@ -3525,9 +3386,10 @@ fn force_compute_displacements(
                 let dy = positions[i].1 - positions[j].1;
                 let dist_sq = (dx * dx + dy * dy).max(1.0);
                 // Fruchterman-Reingold repulsive force: k^2 / d
-                let force = k_sq / dist_sq.sqrt();
-                let fx = dx / dist_sq.sqrt() * force;
-                let fy = dy / dist_sq.sqrt() * force;
+                // Vector component: (dx / d) * (k^2 / d) = dx * k^2 / d^2
+                let force_over_d = k_sq / dist_sq;
+                let fx = dx * force_over_d;
+                let fy = dy * force_over_d;
                 displacements[i].0 += fx;
                 displacements[i].1 += fy;
                 displacements[j].0 -= fx;
@@ -3549,9 +3411,10 @@ fn force_compute_displacements(
             let dy = positions[i].1 - positions[j].1;
             let dist = (dx * dx + dy * dy).sqrt().max(1.0);
             // Fruchterman-Reingold attractive force: d^2 / k
-            let force = (dist * dist) / k;
-            let fx = dx / dist * force;
-            let fy = dy / dist * force;
+            // Vector component: (dx / d) * (d^2 / k) = dx * d / k
+            let force_over_d = dist / k;
+            let fx = dx * force_over_d;
+            let fy = dy * force_over_d;
             displacements[i].0 -= fx;
             displacements[i].1 -= fy;
             displacements[j].0 += fx;
@@ -4442,9 +4305,11 @@ fn rank_assignment(ir: &MermaidDiagramIr, cycles: &CycleRemovalResult) -> BTreeM
             .unwrap_or(usize::MAX)
     });
 
-    if components.len() > 1 && !edges.is_empty() {
+    if components.len() > 1 {
         let mut compacted_ranks = ranks.clone();
+        let mut rank_cursor = 0_usize;
         let mut isolated_singletons = Vec::new();
+
         let mut incident_edge_count = vec![0_usize; node_count];
         for edge in &edges {
             if edge.source < node_count {
@@ -4456,16 +4321,15 @@ fn rank_assignment(ir: &MermaidDiagramIr, cycles: &CycleRemovalResult) -> BTreeM
                     incident_edge_count[edge.target].saturating_add(1);
             }
         }
-        let mut rank_cursor = 0_usize;
 
         for component in components {
             if component.is_empty() {
                 continue;
             }
-            if component.len() == 1 {
-                if incident_edge_count[component[0]] == 0 {
-                    isolated_singletons.push(component[0]);
-                }
+
+            // Treat isolated singletons specially: they will be grouped in a single rank band at the end
+            if component.len() == 1 && incident_edge_count[component[0]] == 0 {
+                isolated_singletons.push(component[0]);
                 continue;
             }
 
@@ -4491,6 +4355,7 @@ fn rank_assignment(ir: &MermaidDiagramIr, cycles: &CycleRemovalResult) -> BTreeM
             rank_cursor = rank_cursor.saturating_add(span).saturating_add(1);
         }
 
+        // Place all isolated singletons in the next available rank band
         if !isolated_singletons.is_empty() {
             for node_index in isolated_singletons {
                 compacted_ranks[node_index] = rank_cursor;
@@ -5054,6 +4919,385 @@ fn crossing_refinement(
     (best_crossings, ordering_by_rank)
 }
 
+// ---------------------------------------------------------------------------
+// Brandes-Köpf coordinate assignment (2001)
+//
+// Computes secondary-axis (within-rank) coordinates by running four alignment
+// passes (upper-left, upper-right, lower-left, lower-right) and taking the
+// median of the four positions for each node.  This aligns connected nodes
+// across ranks, reducing edge bends compared to simple sequential placement.
+// ---------------------------------------------------------------------------
+
+/// For each node, collect its neighbours in each adjacent rank.
+/// Returns a map: node_index -> Vec<(neighbour_index, neighbour_position_in_its_rank)>.
+fn bk_upper_neighbours(
+    ir: &MermaidDiagramIr,
+    ranks: &BTreeMap<usize, usize>,
+    ordering_by_rank: &BTreeMap<usize, Vec<usize>>,
+    node_index: usize,
+    node_rank: usize,
+    upper: bool,
+) -> Vec<(usize, usize)> {
+    let adjacent_rank = if upper {
+        if node_rank == 0 {
+            return Vec::new();
+        }
+        node_rank - 1
+    } else {
+        node_rank + 1
+    };
+
+    let Some(adjacent_nodes) = ordering_by_rank.get(&adjacent_rank) else {
+        return Vec::new();
+    };
+    let pos_map: BTreeMap<usize, usize> = adjacent_nodes
+        .iter()
+        .enumerate()
+        .map(|(pos, &n)| (n, pos))
+        .collect();
+
+    let mut neighbours = Vec::new();
+    for edge in &ir.edges {
+        let Some(source) = endpoint_node_index(ir, edge.from) else {
+            continue;
+        };
+        let Some(target) = endpoint_node_index(ir, edge.to) else {
+            continue;
+        };
+
+        let neighbour = if upper {
+            // Looking for edges arriving at node_index from adjacent_rank.
+            if target == node_index && ranks.get(&source).copied().unwrap_or(0) == adjacent_rank {
+                Some(source)
+            } else if source == node_index
+                && ranks.get(&target).copied().unwrap_or(0) == adjacent_rank
+            {
+                Some(target)
+            } else {
+                None
+            }
+        } else {
+            // Looking for edges leaving node_index to adjacent_rank.
+            if source == node_index && ranks.get(&target).copied().unwrap_or(0) == adjacent_rank {
+                Some(target)
+            } else if target == node_index
+                && ranks.get(&source).copied().unwrap_or(0) == adjacent_rank
+            {
+                Some(source)
+            } else {
+                None
+            }
+        };
+
+        if let Some(n) = neighbour
+            && let Some(&pos) = pos_map.get(&n)
+        {
+            neighbours.push((n, pos));
+        }
+    }
+
+    // Deduplicate and sort by position for stable median computation.
+    neighbours.sort_by_key(|&(_, pos)| pos);
+    neighbours.dedup();
+    neighbours
+}
+
+/// Brandes-Köpf vertical alignment for one of the four directions.
+///
+/// Returns `(root, align)` arrays indexed by node_index.
+/// - `root[v]` is the root of the block containing v.
+/// - `align[v]` is the next node in the block (circular chain ending at root).
+fn bk_vertical_alignment(
+    ir: &MermaidDiagramIr,
+    ranks: &BTreeMap<usize, usize>,
+    ordering_by_rank: &BTreeMap<usize, Vec<usize>>,
+    ordered_ranks: &[usize],
+    top_to_bottom: bool,
+    left_to_right: bool,
+) -> (Vec<usize>, Vec<usize>) {
+    let n = ir.nodes.len();
+    let mut root: Vec<usize> = (0..n).collect();
+    let mut align: Vec<usize> = (0..n).collect();
+
+    // Build position-in-rank lookup.
+    let mut pos_in_rank: BTreeMap<usize, usize> = BTreeMap::new();
+    for nodes in ordering_by_rank.values() {
+        for (pos, &node) in nodes.iter().enumerate() {
+            pos_in_rank.insert(node, pos);
+        }
+    }
+
+    // Process ranks in the specified vertical order.
+    let rank_iter: Vec<usize> = if top_to_bottom {
+        ordered_ranks.to_vec()
+    } else {
+        ordered_ranks.iter().copied().rev().collect()
+    };
+
+    for &rank in &rank_iter {
+        let Some(rank_nodes) = ordering_by_rank.get(&rank) else {
+            continue;
+        };
+
+        // Track the rightmost (or leftmost) aligned position to prevent conflicts.
+        let mut threshold: i64 = if left_to_right { -1 } else { i64::MAX };
+
+        let node_iter: Vec<usize> = if left_to_right {
+            rank_nodes.clone()
+        } else {
+            rank_nodes.iter().copied().rev().collect()
+        };
+
+        for v in node_iter {
+            let v_rank = ranks.get(&v).copied().unwrap_or(0);
+            let neighbours =
+                bk_upper_neighbours(ir, ranks, ordering_by_rank, v, v_rank, top_to_bottom);
+
+            if neighbours.is_empty() {
+                continue;
+            }
+
+            // Compute median neighbour(s).  For even count, try both medians.
+            let median_indices = if neighbours.len() % 2 == 1 {
+                vec![neighbours.len() / 2]
+            } else {
+                vec![neighbours.len() / 2 - 1, neighbours.len() / 2]
+            };
+
+            let candidates: Vec<usize> = if left_to_right {
+                median_indices
+            } else {
+                median_indices.into_iter().rev().collect()
+            };
+
+            for mi in candidates {
+                let (u, u_pos) = neighbours[mi];
+                // Only align if v is not yet aligned and the neighbour position
+                // doesn't conflict with a previously aligned neighbour.
+                if align[v] != v {
+                    continue;
+                }
+                let u_pos_i64 = u_pos as i64;
+                let no_conflict = if left_to_right {
+                    u_pos_i64 > threshold
+                } else {
+                    u_pos_i64 < threshold
+                };
+                if no_conflict {
+                    align[u] = v;
+                    root[v] = root[u];
+                    threshold = u_pos_i64;
+                }
+            }
+        }
+    }
+
+    (root, align)
+}
+
+/// Brandes-Köpf horizontal compaction for one alignment.
+///
+/// Returns secondary-axis coordinates indexed by node_index.
+fn bk_horizontal_compaction(
+    node_count: usize,
+    node_sizes: &[(f32, f32)],
+    ordering_by_rank: &BTreeMap<usize, Vec<usize>>,
+    root: &[usize],
+    align: &[usize],
+    node_spacing: f32,
+    horizontal_ranks: bool,
+) -> Vec<f32> {
+    let mut x = vec![f32::NEG_INFINITY; node_count];
+    let mut sink: Vec<usize> = (0..node_count).collect();
+    let mut shift = vec![f32::INFINITY; node_count];
+
+    // Build position-in-rank and rank-nodes lookup.
+    let mut pos_in_rank: Vec<usize> = vec![0; node_count];
+    for nodes in ordering_by_rank.values() {
+        for (pos, &node) in nodes.iter().enumerate() {
+            if node < node_count {
+                pos_in_rank[node] = pos;
+            }
+        }
+    }
+
+    // Build predecessor-in-rank lookup: for each node, its left neighbour in the same rank.
+    let mut pred_in_rank: Vec<Option<usize>> = vec![None; node_count];
+    for nodes in ordering_by_rank.values() {
+        for i in 1..nodes.len() {
+            if nodes[i] < node_count {
+                pred_in_rank[nodes[i]] = Some(nodes[i - 1]);
+            }
+        }
+    }
+
+    /// Minimum separation between two adjacent nodes in the same rank.
+    fn delta(
+        u: usize,
+        w: usize,
+        node_sizes: &[(f32, f32)],
+        node_spacing: f32,
+        horizontal_ranks: bool,
+    ) -> f32 {
+        let u_extent = node_sizes
+            .get(u)
+            .map(|&(width, height)| if horizontal_ranks { height } else { width })
+            .unwrap_or(84.0);
+        let w_extent = node_sizes
+            .get(w)
+            .map(|&(width, height)| if horizontal_ranks { height } else { width })
+            .unwrap_or(84.0);
+        (u_extent / 2.0) + node_spacing + (w_extent / 2.0)
+    }
+
+    // Place blocks using iterative (non-recursive) approach to avoid stack overflow.
+    // Process all block roots in rank order to ensure predecessors are placed first.
+    let mut ordered_roots: Vec<usize> = Vec::new();
+    for rank_key in ordering_by_rank.keys() {
+        if let Some(nodes) = ordering_by_rank.get(rank_key) {
+            for &v in nodes {
+                if v < node_count && root[v] == v {
+                    ordered_roots.push(v);
+                }
+            }
+        }
+    }
+
+    for &block_root in &ordered_roots {
+        if x[block_root] > f32::NEG_INFINITY {
+            continue; // Already placed.
+        }
+        x[block_root] = 0.0;
+
+        // Walk the block chain: block_root -> align[block_root] -> ... -> block_root.
+        let mut w = block_root;
+        loop {
+            if let Some(pred) = pred_in_rank[w] {
+                let pred_root = root[pred];
+                // Ensure predecessor block is placed.
+                if x[pred_root] <= f32::NEG_INFINITY {
+                    x[pred_root] = 0.0;
+                }
+                if sink[block_root] == block_root {
+                    sink[block_root] = sink[pred_root];
+                }
+                let sep = delta(pred, w, node_sizes, node_spacing, horizontal_ranks);
+                if sink[block_root] != sink[pred_root] {
+                    shift[sink[pred_root]] =
+                        shift[sink[pred_root]].min(x[block_root] - x[pred_root] - sep);
+                } else {
+                    x[block_root] = x[block_root].max(x[pred_root] + sep);
+                }
+            }
+            let next = align[w];
+            if next == w {
+                break; // End of block chain (self-referencing terminal).
+            }
+            w = next;
+        }
+    }
+
+    // Propagate block root coordinates to all block members.
+    for v in 0..node_count {
+        x[v] = x[root[v]];
+    }
+
+    // Apply class shifts.
+    for v in 0..node_count {
+        if root[v] == v {
+            let s = shift[sink[v]];
+            if s < f32::INFINITY {
+                x[v] += s;
+            }
+        }
+    }
+    // Re-propagate after shift application.
+    for v in 0..node_count {
+        x[v] = x[root[v]];
+        let s = shift[sink[root[v]]];
+        if s < f32::INFINITY {
+            x[v] += s;
+        }
+    }
+
+    x
+}
+
+/// Run Brandes-Köpf algorithm: four alignment passes, then take the median.
+fn brandes_kopf_secondary_coords(
+    ir: &MermaidDiagramIr,
+    node_sizes: &[(f32, f32)],
+    ranks: &BTreeMap<usize, usize>,
+    ordering_by_rank: &BTreeMap<usize, Vec<usize>>,
+    spacing: LayoutSpacing,
+    horizontal_ranks: bool,
+) -> Vec<f32> {
+    let n = ir.nodes.len();
+    if n == 0 {
+        return Vec::new();
+    }
+
+    let ordered_ranks: Vec<usize> = ordering_by_rank.keys().copied().collect();
+
+    // Four alignment passes: (top_to_bottom, left_to_right).
+    let directions = [
+        (true, true),   // upper-left
+        (true, false),  // upper-right
+        (false, true),  // lower-left
+        (false, false), // lower-right
+    ];
+
+    let mut all_coords: Vec<Vec<f32>> = Vec::with_capacity(4);
+
+    for &(top_to_bottom, left_to_right) in &directions {
+        let (root, align) = bk_vertical_alignment(
+            ir,
+            ranks,
+            ordering_by_rank,
+            &ordered_ranks,
+            top_to_bottom,
+            left_to_right,
+        );
+
+        let coords = bk_horizontal_compaction(
+            n,
+            node_sizes,
+            ordering_by_rank,
+            &root,
+            &align,
+            spacing.node_spacing,
+            horizontal_ranks,
+        );
+
+        all_coords.push(coords);
+    }
+
+    // Normalize each pass so that the minimum coordinate is 0.
+    for coords in &mut all_coords {
+        let min_val = coords
+            .iter()
+            .copied()
+            .filter(|v| v.is_finite())
+            .fold(f32::INFINITY, f32::min);
+        if min_val.is_finite() {
+            for c in coords.iter_mut() {
+                *c -= min_val;
+            }
+        }
+    }
+
+    // Median of four positions for each node.
+    let mut result = vec![0.0_f32; n];
+    for v in 0..n {
+        let mut vals: Vec<f32> = all_coords.iter().map(|c| c[v]).collect();
+        vals.sort_by(|a, b| a.total_cmp(b));
+        // Median of 4 values: average of the two middle values.
+        result[v] = (vals[1] + vals[2]) / 2.0;
+    }
+
+    result
+}
+
 fn coordinate_assignment(
     ir: &MermaidDiagramIr,
     node_sizes: &[(f32, f32)],
@@ -5072,6 +5316,7 @@ fn coordinate_assignment(
         .map(|(index, rank)| (*rank, index))
         .collect();
 
+    // Compute primary offsets (rank positions) — unchanged from before.
     let mut rank_span = vec![0.0_f32; ordered_ranks.len()];
     for (rank_index, rank) in ordered_ranks.iter().copied().enumerate() {
         let node_indexes = ordering_by_rank
@@ -5101,25 +5346,37 @@ fn coordinate_assignment(
         primary_cursor += rank_span[rank_index] + spacing.rank_spacing;
     }
 
+    // Compute secondary coordinates using Brandes-Köpf 4-way alignment.
+    let secondary_coords = brandes_kopf_secondary_coords(
+        ir,
+        node_sizes,
+        ranks,
+        ordering_by_rank,
+        spacing,
+        horizontal_ranks,
+    );
+
+    // Build output using primary offsets and Brandes-Köpf secondary coordinates.
     let mut output = Vec::with_capacity(ir.nodes.len());
-    for (rank, fallback_node_indexes) in fallback_nodes_by_rank {
-        let Some(rank_index) = rank_to_index.get(&rank).copied() else {
+    for (rank, fallback_node_indexes) in &fallback_nodes_by_rank {
+        let Some(rank_index) = rank_to_index.get(rank).copied() else {
             continue;
         };
 
         let node_indexes = ordering_by_rank
-            .get(&rank)
+            .get(rank)
             .cloned()
-            .unwrap_or(fallback_node_indexes);
+            .unwrap_or_else(|| fallback_node_indexes.clone());
 
         let primary = primary_offsets.get(rank_index).copied().unwrap_or(0.0);
-        let mut secondary_cursor = 0.0_f32;
         for (order, node_index) in node_indexes.into_iter().enumerate() {
             let (width, height) = node_sizes.get(node_index).copied().unwrap_or((84.0, 44.0));
+            let secondary = secondary_coords.get(node_index).copied().unwrap_or(0.0);
+
             let (x, y) = if horizontal_ranks {
-                (primary, secondary_cursor)
+                (primary, secondary)
             } else {
-                (secondary_cursor, primary)
+                (secondary, primary)
             };
             let node_id = ir
                 .nodes
@@ -5130,7 +5387,7 @@ fn coordinate_assignment(
             output.push(LayoutNodeBox {
                 node_index,
                 node_id,
-                rank,
+                rank: *rank,
                 order,
                 span: ir
                     .nodes
@@ -5143,9 +5400,6 @@ fn coordinate_assignment(
                     height,
                 },
             });
-
-            let secondary_extent = if horizontal_ranks { height } else { width };
-            secondary_cursor += secondary_extent + spacing.node_spacing;
         }
     }
 
@@ -5914,6 +6168,15 @@ pub fn build_layout_guard_report(
     ir: &MermaidDiagramIr,
     traced: &TracedLayout,
 ) -> MermaidGuardReport {
+    build_layout_guard_report_with_pressure(ir, traced, MermaidPressureReport::default())
+}
+
+#[must_use]
+pub fn build_layout_guard_report_with_pressure(
+    ir: &MermaidDiagramIr,
+    traced: &TracedLayout,
+    pressure: MermaidPressureReport,
+) -> MermaidGuardReport {
     let complexity = MermaidComplexity {
         nodes: ir.nodes.len(),
         edges: ir.edges.len(),
@@ -5970,6 +6233,8 @@ pub fn build_layout_guard_report(
         layout_requested_algorithm: Some(traced.trace.dispatch.requested.as_str().to_string()),
         layout_selected_algorithm: Some(traced.trace.dispatch.selected.as_str().to_string()),
         guard_reason: Some(guard.reason.to_string()),
+        observability: fm_core::MermaidObservabilityIds::default(),
+        pressure,
         degradation: fm_core::MermaidDegradationPlan {
             target_fidelity: if budget_exceeded {
                 MermaidFidelity::Compact
@@ -7596,7 +7861,7 @@ mod tests {
     }
 
     #[test]
-    fn tight_force_guardrails_fall_back_to_tree_deterministically() {
+    fn tight_force_guardrails_fall_back_deterministically() {
         let ir = sample_er_ir();
         let traced = layout_diagram_traced_with_algorithm_and_guardrails(
             &ir,
@@ -7608,7 +7873,9 @@ mod tests {
             },
         );
         assert_eq!(traced.trace.guard.initial_algorithm, LayoutAlgorithm::Force);
-        assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Tree);
+        // With updated cost estimates Sugiyama is cheaper than Tree for small
+        // graphs, so the guardrail selects it as the lowest-cost fallback.
+        assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Sugiyama);
         assert!(traced.trace.guard.fallback_applied);
         assert!(traced.trace.guard.time_budget_exceeded);
         assert!(traced.trace.guard.iteration_budget_exceeded);
@@ -7654,7 +7921,10 @@ mod tests {
         assert!(report.layout_budget_exceeded);
         assert!(report.route_budget_exceeded);
         assert_eq!(report.layout_requested_algorithm.as_deref(), Some("force"));
-        assert_eq!(report.layout_selected_algorithm.as_deref(), Some("tree"));
+        assert_eq!(
+            report.layout_selected_algorithm.as_deref(),
+            Some("sugiyama")
+        );
         assert_eq!(
             report.guard_reason.as_deref(),
             Some(traced.trace.guard.reason)
@@ -8434,6 +8704,250 @@ mod tests {
                 "Message y={} should be below header bottom={}",
                 edge.points[0].y,
                 header_bottom
+            );
+        }
+    }
+
+    // --- Brandes-Köpf coordinate assignment tests ---
+
+    #[test]
+    fn bk_linear_chain_aligns_connected_nodes() {
+        // A -> B -> C should have all three nodes aligned (same secondary coordinate).
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.direction = GraphDirection::TB;
+        for id in ["A", "B", "C"] {
+            ir.nodes.push(IrNode {
+                id: id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            arrow: ArrowType::Arrow,
+            ..IrEdge::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(1)),
+            to: IrEndpoint::Node(IrNodeId(2)),
+            arrow: ArrowType::Arrow,
+            ..IrEdge::default()
+        });
+
+        let layout = layout_diagram(&ir);
+        // In TB direction, secondary coordinate is X.
+        // All three nodes in a linear chain should share the same X center.
+        let centers: Vec<f32> = layout
+            .nodes
+            .iter()
+            .map(|n| n.bounds.x + n.bounds.width / 2.0)
+            .collect();
+        assert!(
+            (centers[0] - centers[1]).abs() < 1.0,
+            "A and B should be aligned, got x={:.1} vs {:.1}",
+            centers[0],
+            centers[1]
+        );
+        assert!(
+            (centers[1] - centers[2]).abs() < 1.0,
+            "B and C should be aligned, got x={:.1} vs {:.1}",
+            centers[1],
+            centers[2]
+        );
+    }
+
+    #[test]
+    fn bk_diamond_graph_produces_deterministic_layout() {
+        // Diamond: A -> B, A -> C, B -> D, C -> D
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.direction = GraphDirection::TB;
+        for id in ["A", "B", "C", "D"] {
+            ir.nodes.push(IrNode {
+                id: id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        for (from, to) in [(0, 1), (0, 2), (1, 3), (2, 3)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let layout1 = layout_diagram(&ir);
+        let layout2 = layout_diagram(&ir);
+        // Determinism: same input => identical output.
+        for (n1, n2) in layout1.nodes.iter().zip(layout2.nodes.iter()) {
+            assert_eq!(n1.bounds, n2.bounds, "Node {} positions differ", n1.node_id);
+        }
+    }
+
+    #[test]
+    fn bk_no_horizontal_overlap_within_ranks() {
+        // Multiple nodes in the same rank should not overlap in the secondary axis.
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.direction = GraphDirection::TB;
+        // Root A, with 4 children B, C, D, E (all in same rank).
+        for id in ["A", "B", "C", "D", "E"] {
+            ir.nodes.push(IrNode {
+                id: id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        for child in 1..5 {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(0)),
+                to: IrEndpoint::Node(IrNodeId(child)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let layout = layout_diagram(&ir);
+        // Group nodes by rank, check no overlaps within each rank.
+        let mut by_rank: BTreeMap<usize, Vec<(f32, f32)>> = BTreeMap::new();
+        for node in &layout.nodes {
+            by_rank
+                .entry(node.rank)
+                .or_default()
+                .push((node.bounds.x, node.bounds.x + node.bounds.width));
+        }
+        for (_rank, intervals) in &by_rank {
+            let mut sorted = intervals.clone();
+            sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
+            for pair in sorted.windows(2) {
+                assert!(
+                    pair[1].0 >= pair[0].1,
+                    "Overlap: node ending at {:.1} overlaps with node starting at {:.1}",
+                    pair[0].1,
+                    pair[1].0,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bk_four_way_median_is_deterministic_for_wide_graph() {
+        // Wide graph: 3 ranks, rank 0 has 1 node, rank 1 has 5, rank 2 has 1.
+        // Tests that the 4-way median produces stable results.
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.direction = GraphDirection::TB;
+        ir.nodes.push(IrNode {
+            id: "root".to_string(),
+            ..IrNode::default()
+        });
+        for i in 0..5 {
+            ir.nodes.push(IrNode {
+                id: format!("mid{i}"),
+                ..IrNode::default()
+            });
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(0)),
+                to: IrEndpoint::Node(IrNodeId(i + 1)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+        ir.nodes.push(IrNode {
+            id: "sink".to_string(),
+            ..IrNode::default()
+        });
+        for i in 0..5 {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(i + 1)),
+                to: IrEndpoint::Node(IrNodeId(6)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let results: Vec<_> = (0..10).map(|_| layout_diagram(&ir)).collect();
+        for (i, layout) in results.iter().enumerate().skip(1) {
+            for (n1, n2) in results[0].nodes.iter().zip(layout.nodes.iter()) {
+                assert_eq!(
+                    n1.bounds, n2.bounds,
+                    "Run {i} differs for node {}",
+                    n1.node_id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bk_lr_direction_uses_horizontal_ranks() {
+        // LR direction: primary axis is X (columns), secondary is Y.
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.direction = GraphDirection::LR;
+        for id in ["A", "B"] {
+            ir.nodes.push(IrNode {
+                id: id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            arrow: ArrowType::Arrow,
+            ..IrEdge::default()
+        });
+
+        let layout = layout_diagram(&ir);
+        let a = &layout.nodes[0];
+        let b = &layout.nodes[1];
+        // In LR, B should be to the right of A.
+        assert!(
+            b.bounds.x > a.bounds.x,
+            "In LR, B.x={:.1} should be > A.x={:.1}",
+            b.bounds.x,
+            a.bounds.x
+        );
+        // And they should be vertically aligned (same Y center).
+        let a_cy = a.bounds.y + a.bounds.height / 2.0;
+        let b_cy = b.bounds.y + b.bounds.height / 2.0;
+        assert!(
+            (a_cy - b_cy).abs() < 1.0,
+            "A and B should be vertically aligned in LR, got y={:.1} vs {:.1}",
+            a_cy,
+            b_cy
+        );
+    }
+
+    #[test]
+    fn bk_all_coords_are_finite() {
+        // Property: all coordinates produced by Brandes-Köpf must be finite.
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.direction = GraphDirection::TB;
+        for i in 0..8 {
+            ir.nodes.push(IrNode {
+                id: format!("N{i}"),
+                ..IrNode::default()
+            });
+        }
+        // Create a mix of edges: chain + branches.
+        for (from, to) in [(0, 1), (1, 2), (2, 3), (0, 4), (4, 5), (0, 6), (6, 7)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let layout = layout_diagram(&ir);
+        for node in &layout.nodes {
+            assert!(
+                node.bounds.x.is_finite(),
+                "Node {} has non-finite x={}",
+                node.node_id,
+                node.bounds.x
+            );
+            assert!(
+                node.bounds.y.is_finite(),
+                "Node {} has non-finite y={}",
+                node.node_id,
+                node.bounds.y
             );
         }
     }

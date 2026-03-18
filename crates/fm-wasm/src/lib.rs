@@ -2,8 +2,11 @@
 
 use std::sync::{LazyLock, RwLock};
 
-use fm_core::{MermaidDiagramIr, MermaidGuardReport, Span, capability_matrix};
-use fm_layout::{DiagramLayout, build_layout_guard_report, layout_diagram_traced};
+use fm_core::{
+    MermaidDiagramIr, MermaidGuardReport, MermaidWasmPressureSignals, Span, capability_matrix,
+    mermaid_layout_guard_observability,
+};
+use fm_layout::{DiagramLayout, build_layout_guard_report_with_pressure, layout_diagram_traced};
 #[cfg(target_arch = "wasm32")]
 use fm_parser::ParseResult;
 use fm_parser::{detect_type_with_confidence, parse};
@@ -28,6 +31,10 @@ use wasm_bindgen::prelude::wasm_bindgen;
 pub struct WasmRenderOutput {
     pub svg: String,
     pub detected_type: String,
+    pub trace_id: String,
+    pub decision_id: String,
+    pub policy_id: String,
+    pub schema_version: String,
     pub guard: MermaidGuardReport,
     pub source_spans: Vec<SourceSpanRecord>,
 }
@@ -45,6 +52,7 @@ pub struct SourceSpanRecord {
 struct RuntimeConfig {
     svg: SvgRenderConfig,
     canvas: CanvasRenderConfig,
+    pressure: MermaidWasmPressureSignals,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -53,6 +61,7 @@ struct RuntimeInitConfig {
     theme: Option<String>,
     svg: SvgConfigOverrides,
     canvas: CanvasConfigOverrides,
+    pressure: PressureConfigOverrides,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -88,6 +97,15 @@ struct CanvasConfigOverrides {
     auto_fit: Option<bool>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct PressureConfigOverrides {
+    frame_budget_ms: Option<u16>,
+    frame_time_ms: Option<u16>,
+    event_loop_lag_ms: Option<u16>,
+    worker_saturation_permille: Option<u16>,
+}
+
 #[cfg(target_arch = "wasm32")]
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -96,6 +114,10 @@ struct DiagramRenderOutput {
     detected_type: String,
     confidence: f32,
     warnings: Vec<String>,
+    trace_id: String,
+    decision_id: String,
+    policy_id: String,
+    schema_version: String,
     guard: MermaidGuardReport,
     source_spans: Vec<SourceSpanRecord>,
     canvas: CanvasRenderSummary,
@@ -115,6 +137,10 @@ impl DiagramRenderOutput {
             detected_type: parsed.ir.diagram_type.as_str().to_string(),
             confidence: parsed.confidence,
             warnings: parsed.warnings.clone(),
+            trace_id: guard.observability.trace_id.to_string(),
+            decision_id: guard.observability.decision_id.to_string(),
+            policy_id: guard.observability.policy_id.to_string(),
+            schema_version: guard.observability.schema_version.to_string(),
             guard,
             source_spans: collect_source_spans(&parsed.ir, layout),
             canvas: CanvasRenderSummary::from(canvas),
@@ -385,12 +411,40 @@ fn merge_canvas_config(
     merged
 }
 
+fn merge_pressure_config(
+    base: &MermaidWasmPressureSignals,
+    overrides: &PressureConfigOverrides,
+) -> MermaidWasmPressureSignals {
+    let mut merged = *base;
+    if let Some(value) = overrides.frame_budget_ms {
+        merged.frame_budget_ms = Some(value);
+    }
+    if let Some(value) = overrides.frame_time_ms {
+        merged.frame_time_ms = Some(value);
+    }
+    if let Some(value) = overrides.event_loop_lag_ms {
+        merged.event_loop_lag_ms = Some(value);
+    }
+    if let Some(value) = overrides.worker_saturation_permille {
+        merged.worker_saturation_permille = Some(value.min(1_000));
+    }
+    merged
+}
+
 #[must_use]
 pub fn render(input: &str) -> WasmRenderOutput {
     let parsed = parse(input);
     let runtime = read_runtime_config();
     let traced_layout = layout_diagram_traced(&parsed.ir);
-    let guard = build_layout_guard_report(&parsed.ir, &traced_layout);
+    let pressure = runtime.pressure.into_report();
+    let mut guard = build_layout_guard_report_with_pressure(&parsed.ir, &traced_layout, pressure);
+    let (_cx, observability) = mermaid_layout_guard_observability(
+        "wasm.render",
+        input,
+        traced_layout.trace.dispatch.selected.as_str(),
+        traced_layout.trace.guard.estimated_layout_time_ms.max(1) as u64,
+    );
+    guard.observability = observability;
     let source_spans = collect_source_spans(&parsed.ir, &traced_layout.layout);
     let svg_config = SvgRenderConfig {
         include_source_spans: true,
@@ -400,6 +454,10 @@ pub fn render(input: &str) -> WasmRenderOutput {
     WasmRenderOutput {
         svg: render_svg_with_layout(&parsed.ir, &traced_layout.layout, &svg_config),
         detected_type: parsed.ir.diagram_type.as_str().to_string(),
+        trace_id: guard.observability.trace_id.to_string(),
+        decision_id: guard.observability.decision_id.to_string(),
+        policy_id: guard.observability.policy_id.to_string(),
+        schema_version: guard.observability.schema_version.to_string(),
         guard,
         source_spans,
     }
@@ -413,6 +471,7 @@ pub fn init(config: Option<JsValue>) -> Result<(), JsValue> {
     let next = RuntimeConfig {
         svg: merge_svg_config(&current.svg, &overrides.svg, overrides.theme.as_deref())?,
         canvas: merge_canvas_config(&current.canvas, &overrides.canvas),
+        pressure: merge_pressure_config(&current.pressure, &overrides.pressure),
     };
 
     write_runtime_config(next);
@@ -429,6 +488,15 @@ pub fn render_svg_js(input: &str, config: Option<JsValue>) -> Result<String, JsV
     };
     let parsed = parse(input);
     let traced_layout = layout_diagram_traced(&parsed.ir);
+    let pressure = merge_pressure_config(&runtime.pressure, &overrides.pressure).into_report();
+    let mut _guard = build_layout_guard_report_with_pressure(&parsed.ir, &traced_layout, pressure);
+    let (_cx, observability) = mermaid_layout_guard_observability(
+        "wasm.renderSvg",
+        input,
+        traced_layout.trace.dispatch.selected.as_str(),
+        traced_layout.trace.guard.estimated_layout_time_ms.max(1) as u64,
+    );
+    _guard.observability = observability;
     Ok(render_svg_with_layout(
         &parsed.ir,
         &traced_layout.layout,
@@ -659,6 +727,7 @@ pub struct Diagram {
     context: web_sys::CanvasRenderingContext2d,
     svg_config: SvgRenderConfig,
     canvas_config: CanvasRenderConfig,
+    pressure_config: MermaidWasmPressureSignals,
     destroyed: bool,
 }
 
@@ -693,12 +762,14 @@ impl Diagram {
         let svg_config =
             merge_svg_config(&runtime.svg, &overrides.svg, overrides.theme.as_deref())?;
         let canvas_config = merge_canvas_config(&runtime.canvas, &overrides.canvas);
+        let pressure_config = merge_pressure_config(&runtime.pressure, &overrides.pressure);
 
         Ok(Self {
             canvas,
             context,
             svg_config,
             canvas_config,
+            pressure_config,
             destroyed: false,
         })
     }
@@ -714,10 +785,22 @@ impl Diagram {
             ..next_svg.clone()
         };
         let next_canvas = merge_canvas_config(&self.canvas_config, &overrides.canvas);
+        let next_pressure = merge_pressure_config(&self.pressure_config, &overrides.pressure);
 
         let parsed = parse(input);
         let traced_layout = layout_diagram_traced(&parsed.ir);
-        let guard = build_layout_guard_report(&parsed.ir, &traced_layout);
+        let mut guard = build_layout_guard_report_with_pressure(
+            &parsed.ir,
+            &traced_layout,
+            next_pressure.into_report(),
+        );
+        let (_cx, observability) = mermaid_layout_guard_observability(
+            "wasm.diagram.render",
+            input,
+            traced_layout.trace.dispatch.selected.as_str(),
+            traced_layout.trace.guard.estimated_layout_time_ms.max(1) as u64,
+        );
+        guard.observability = observability;
         let svg = render_svg_with_layout(&parsed.ir, &traced_layout.layout, &render_svg_config);
 
         let mut web_canvas = WebCanvas2dContext::new(self.canvas.clone(), self.context.clone());
@@ -730,6 +813,7 @@ impl Diagram {
 
         self.svg_config = next_svg;
         self.canvas_config = next_canvas;
+        self.pressure_config = next_pressure;
 
         let output =
             DiagramRenderOutput::new(svg, &parsed, &traced_layout.layout, guard, &canvas_result);
@@ -795,7 +879,11 @@ impl Diagram {
 
 #[cfg(test)]
 mod tests {
-    use super::{SvgConfigOverrides, ThemePreset, collect_source_spans, merge_svg_config, render};
+    use super::{
+        PressureConfigOverrides, SvgConfigOverrides, ThemePreset, collect_source_spans,
+        merge_pressure_config, merge_svg_config, render,
+    };
+    use fm_core::{MermaidPressureTier, MermaidWasmPressureSignals};
     use fm_layout::layout_diagram_traced;
     use fm_parser::parse;
     use fm_render_svg::SvgRenderConfig;
@@ -805,11 +893,16 @@ mod tests {
         let output = render("flowchart LR\nA-->B");
         assert!(output.svg.starts_with("<svg"));
         assert_eq!(output.detected_type, "flowchart");
+        assert!(!output.trace_id.is_empty());
+        assert!(!output.decision_id.is_empty());
+        assert_eq!(output.policy_id, "fm.layout.guard@v1");
+        assert_eq!(output.schema_version, "1.0.0");
         assert_eq!(
             output.guard.layout_selected_algorithm.as_deref(),
             Some("sugiyama")
         );
         assert_eq!(output.guard.guard_reason.as_deref(), Some("within_budget"));
+        assert_eq!(output.guard.pressure.tier, MermaidPressureTier::Unknown);
         assert!(output.source_spans.iter().any(|span| span.kind == "node"));
         assert!(output.source_spans.iter().any(|span| span.kind == "edge"));
     }
@@ -835,6 +928,25 @@ mod tests {
         assert_eq!(merged.theme, ThemePreset::Dark);
     }
 
+    #[test]
+    fn merge_pressure_config_applies_runtime_overrides() {
+        let base = MermaidWasmPressureSignals {
+            frame_budget_ms: Some(16),
+            ..MermaidWasmPressureSignals::default()
+        };
+        let overrides = PressureConfigOverrides {
+            frame_time_ms: Some(24),
+            worker_saturation_permille: Some(910),
+            ..PressureConfigOverrides::default()
+        };
+        let merged = merge_pressure_config(&base, &overrides);
+        assert_eq!(merged.frame_budget_ms, Some(16));
+        assert_eq!(merged.frame_time_ms, Some(24));
+        assert_eq!(merged.worker_saturation_permille, Some(910));
+        let report = merged.into_report();
+        assert_eq!(report.tier, MermaidPressureTier::Critical);
+    }
+
     #[cfg(target_arch = "wasm32")]
     #[test]
     fn capability_matrix_js_returns_matrix_payload() {
@@ -845,7 +957,7 @@ mod tests {
         let payload: serde_json::Value =
             serde_json::from_str(&json).expect("payload should parse as JSON");
         assert_eq!(payload["project"], "frankenmermaid");
-        assert_eq!(payload["schema_version"], 1);
+        assert_eq!(payload["schema_version"], "1.0.0");
         assert!(
             payload["claims"]
                 .as_array()

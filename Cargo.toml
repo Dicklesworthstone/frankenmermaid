@@ -26,6 +26,7 @@ fm-render-svg = { path = "crates/fm-render-svg" }
 fm-render-canvas = { path = "crates/fm-render-canvas" }
 fm-render-term = { path = "crates/fm-render-term" }
 fm-wasm = { path = "crates/fm-wasm" }
+franken-kernel = { path = "/data/projects/asupersync/franken_kernel", package = "franken-kernel" }
 
 anyhow = "1.0.102"
 chumsky = { version = "0.10", default-features = false, features = ["std"] }
