@@ -420,45 +420,45 @@ A --> B
 ### Pipeline
 
 ```
-              Mermaid / DOT text
-                      |
-                      v
-        +---------------------------+
-        | fm-parser                 |
-        | - type detection          |  25 diagram types
-        | - fuzzy matching          |  Levenshtein + heuristics
-        | - recovery + warnings     |  best-effort, never crashes
-        +---------------------------+
-                      |
-                      v
-        +---------------------------+
-        | fm-core                   |
-        | MermaidDiagramIr          |  nodes, edges, clusters,
-        |                           |  labels, subgraphs, ports
-        +---------------------------+
-                      |
-                      v
-        +---------------------------+
-        | fm-layout                 |
-        | - auto algorithm select   |  10 algorithms available
-        | - cycle strategy          |  4 cycle-breaking modes
-        | - crossing minimization   |  barycenter + transpose
-        +---------------------------+
-                      |
-                      v
-        +---------------------------+
-        | DiagramLayout + stats     |
-        | nodes, edges, clusters    |
-        | bounds, cycle info        |
-        +--------+--------+--------+
-                 |        |        |
-                 v        v        v
-           +---------+ +------+ +--------+
-           |   SVG   | | Term | | Canvas |
-           +---------+ +------+ +--------+
-               |                     |
-               v                     v
-          SVG / PNG           WASM + browser
+            Mermaid / DOT text
+                    |
+                    v
+      +----------------------------+
+      | fm-parser                  |
+      |  - type detection          |  25 diagram types
+      |  - fuzzy matching          |  Levenshtein + heuristics
+      |  - recovery + warnings     |  best-effort, never crashes
+      +----------------------------+
+                    |
+                    v
+      +----------------------------+
+      | fm-core                    |
+      |  MermaidDiagramIr          |  nodes, edges, clusters,
+      |                            |  labels, subgraphs, ports
+      +----------------------------+
+                    |
+                    v
+      +----------------------------+
+      | fm-layout                  |
+      |  - auto algorithm select   |  10 algorithms available
+      |  - cycle strategy          |  4 cycle-breaking modes
+      |  - crossing minimization   |  barycenter + transpose
+      +----------------------------+
+                    |
+                    v
+      +----------------------------+
+      | DiagramLayout + stats      |
+      |  nodes, edges, clusters    |
+      |  bounds, cycle info        |
+      +---------+---------+--------+
+               |         |        |
+               v         v        v
+         +---------+ +------+ +--------+
+         |   SVG   | | Term | | Canvas |
+         +---------+ +------+ +--------+
+              |                    |
+              v                    v
+         SVG / PNG          WASM + browser
 ```
 
 ### Feature Flags
@@ -481,25 +481,25 @@ The parser uses a **five-tier detection pipeline** to identify diagram types, th
 Input text
     |
     v
-+-----------------------------------------------+
-| 1. DOT Format Detection          conf: 0.95   |
++------------------------------------------------+
+| 1. DOT Format Detection          conf: 0.95    |
 |    digraph/graph keyword + braces              |
-+-----------------------------------------------+
-| 2. Exact Keyword Match           conf: 1.0    |
++------------------------------------------------+
+| 2. Exact Keyword Match            conf: 1.0    |
 |    "flowchart", "sequenceDiagram",             |
 |    "classDiagram", "gantt", etc.               |
-+-----------------------------------------------+
-| 3. Fuzzy Keyword Match           conf: 0.70+  |
++------------------------------------------------+
+| 3. Fuzzy Keyword Match          conf: 0.70+    |
 |    Levenshtein distance 1-2                    |
 |    "flowchrt" -> "flowchart"                   |
-+-----------------------------------------------+
-| 4. Content Heuristics            conf: 0.60+  |
++------------------------------------------------+
+| 4. Content Heuristics           conf: 0.60+    |
 |    Arrow patterns: -->  ->>  ||--o{            |
-|    Keywords: participant, state                 |
-+-----------------------------------------------+
-| 5. Fallback                      conf: 0.30   |
+|    Keywords: participant, state                |
++------------------------------------------------+
+| 5. Fallback                      conf: 0.30    |
 |    Default to Flowchart + warning              |
-+-----------------------------------------------+
++------------------------------------------------+
 ```
 
 Each tier is tried in order; the first match wins. The confidence score tells downstream consumers how certain the detection was, so tooling can surface low-confidence detections as warnings.
