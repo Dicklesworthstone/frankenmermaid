@@ -1,0 +1,70 @@
+{
+  "description": "Golden layout checksums for deterministic layout verification. Regenerate with BLESS_LAYOUT=1.",
+  "entries": {
+    "class_basic": {
+      "edge_count": 1,
+      "layout_algorithm": "auto",
+      "layout_checksum": "aa06723272d8625d",
+      "layout_height": 357.0,
+      "layout_width": 271.700012,
+      "node_count": 2
+    },
+    "flowchart_cycle": {
+      "edge_count": 3,
+      "layout_algorithm": "auto",
+      "layout_checksum": "a72e2b20a21ff43c",
+      "layout_height": 543.5,
+      "layout_width": 204.0,
+      "node_count": 3
+    },
+    "flowchart_simple": {
+      "edge_count": 4,
+      "layout_algorithm": "auto",
+      "layout_checksum": "4ac6d797262a162b",
+      "layout_height": 317.0,
+      "layout_width": 672.200012,
+      "node_count": 4
+    },
+    "gantt_basic": {
+      "edge_count": 0,
+      "layout_algorithm": "auto",
+      "layout_checksum": "bf04b333af677112",
+      "layout_height": 252.100006,
+      "layout_width": 524.0,
+      "node_count": 2
+    },
+    "malformed_recovery": {
+      "edge_count": 2,
+      "layout_algorithm": "auto",
+      "layout_checksum": "6a899c2815faff7d",
+      "layout_height": 170.5,
+      "layout_width": 1180.025024,
+      "node_count": 4
+    },
+    "pie_basic": {
+      "edge_count": 0,
+      "layout_algorithm": "auto",
+      "layout_checksum": "20dcff1163c40c26",
+      "layout_height": 170.5,
+      "layout_width": 629.325012,
+      "node_count": 3
+    },
+    "sequence_basic": {
+      "edge_count": 2,
+      "layout_algorithm": "auto",
+      "layout_checksum": "a900b4292e5e58b7",
+      "layout_height": 486.5,
+      "layout_width": 363.350006,
+      "node_count": 2
+    },
+    "state_basic": {
+      "edge_count": 3,
+      "layout_algorithm": "auto",
+      "layout_checksum": "41c4f4e0f3fcd4b3",
+      "layout_height": 357.0,
+      "layout_width": 485.549988,
+      "node_count": 3
+    }
+  },
+  "version": 1
+}
