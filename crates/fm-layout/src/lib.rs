@@ -4950,11 +4950,10 @@ fn bk_upper_neighbours(
     let mut neighbours = Vec::new();
     if let Some(nodes) = adjacency.get(node_index) {
         for &n in nodes {
-            if ranks.get(&n).copied().unwrap_or(0) == adjacent_rank {
-                if let Some(&pos) = pos_map.get(&n) {
+            if ranks.get(&n).copied().unwrap_or(0) == adjacent_rank
+                && let Some(&pos) = pos_map.get(&n) {
                     neighbours.push((n, pos));
                 }
-            }
         }
     }
 
@@ -5237,12 +5236,10 @@ fn brandes_kopf_secondary_coords(
     for edge in &ir.edges {
         if let Some(s) = endpoint_node_index(ir, edge.from)
             && let Some(t) = endpoint_node_index(ir, edge.to)
-        {
-            if s < n && t < n && s != t {
+            && s < n && t < n && s != t {
                 adjacency[s].insert(t);
                 adjacency[t].insert(s);
             }
-        }
     }
 
     // Pre-build position maps for each rank.
