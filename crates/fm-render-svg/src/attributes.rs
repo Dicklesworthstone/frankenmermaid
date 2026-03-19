@@ -24,8 +24,14 @@ impl fmt::Display for AttributeValue {
         match self {
             Self::String(s) => write!(f, "{}", escape_xml_attr(s)),
             Self::Number(n) => {
-                // Format with reasonable precision, trim trailing zeros
-                if n.fract() == 0.0 {
+                // Format with reasonable precision, trim trailing zeros.
+                // Use integer formatting only for values that fit in i32 range
+                // to avoid truncation overflow on extreme coordinates.
+                if n.fract() == 0.0
+                    && n.is_finite()
+                    && *n >= i32::MIN as f32
+                    && *n <= i32::MAX as f32
+                {
                     write!(f, "{}", *n as i32)
                 } else {
                     write!(f, "{:.2}", n)
