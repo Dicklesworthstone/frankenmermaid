@@ -7869,7 +7869,7 @@ Rel_Back(db, app, "Responds")"#,
     fn state_transition_with_label() {
         let input = "stateDiagram-v2\n  Idle --> Active : start";
         let parsed = parse_mermaid(input);
-        assert!(parsed.ir.edges.len() >= 1);
+        assert!(!parsed.ir.edges.is_empty());
     }
 
     #[test]

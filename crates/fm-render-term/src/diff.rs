@@ -267,28 +267,30 @@ fn diff_edges(
     old: &MermaidDiagramIr,
     new: &MermaidDiagramIr,
 ) -> (Vec<DiffEdge>, (usize, usize, usize, usize)) {
-    // Build edge identity maps.
-    let old_edges: BTreeMap<(String, String), &_> = old
-        .edges
-        .iter()
-        .filter_map(|e| {
-            let from_id = endpoint_id(old, e.from)?;
-            let to_id = endpoint_id(old, e.to)?;
-            Some(((from_id, to_id), e))
-        })
-        .collect();
+    // Build edge identity maps with occurrence indexing to handle parallel edges.
+    let mut old_edges: BTreeMap<(String, String, usize), &fm_core::IrEdge> = BTreeMap::new();
+    let mut old_pair_counts: BTreeMap<(String, String), usize> = BTreeMap::new();
+    for e in &old.edges {
+        if let (Some(from_id), Some(to_id)) = (endpoint_id(old, e.from), endpoint_id(old, e.to)) {
+            let pair_key = (from_id.clone(), to_id.clone());
+            let count = old_pair_counts.entry(pair_key).or_insert(0);
+            old_edges.insert((from_id, to_id, *count), e);
+            *count += 1;
+        }
+    }
 
-    let new_edges: BTreeMap<(String, String), &_> = new
-        .edges
-        .iter()
-        .filter_map(|e| {
-            let from_id = endpoint_id(new, e.from)?;
-            let to_id = endpoint_id(new, e.to)?;
-            Some(((from_id, to_id), e))
-        })
-        .collect();
+    let mut new_edges: BTreeMap<(String, String, usize), &fm_core::IrEdge> = BTreeMap::new();
+    let mut new_pair_counts: BTreeMap<(String, String), usize> = BTreeMap::new();
+    for e in &new.edges {
+        if let (Some(from_id), Some(to_id)) = (endpoint_id(new, e.from), endpoint_id(new, e.to)) {
+            let pair_key = (from_id.clone(), to_id.clone());
+            let count = new_pair_counts.entry(pair_key).or_insert(0);
+            new_edges.insert((from_id, to_id, *count), e);
+            *count += 1;
+        }
+    }
 
-    let all_keys: BTreeSet<(String, String)> = old_edges
+    let all_keys: BTreeSet<(String, String, usize)> = old_edges
         .keys()
         .cloned()
         .chain(new_edges.keys().cloned())
@@ -921,5 +923,36 @@ mod tests {
         assert!(rendered.contains("Diagram Diff"));
         assert!(rendered.contains("Old"));
         assert!(rendered.contains("| New"));
+    }
+
+    #[test]
+    fn handles_parallel_edges() {
+        let mut old_ir = make_ir_with_nodes(&["A", "B"]);
+        // Add two identical edges A -> B.
+        for _ in 0..2 {
+            old_ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(0)),
+                to: IrEndpoint::Node(IrNodeId(1)),
+                arrow: ArrowType::Arrow,
+                ..Default::default()
+            });
+        }
+
+        let mut new_ir = make_ir_with_nodes(&["A", "B"]);
+        // New IR has three edges A -> B.
+        for _ in 0..3 {
+            new_ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(0)),
+                to: IrEndpoint::Node(IrNodeId(1)),
+                arrow: ArrowType::Arrow,
+                ..Default::default()
+            });
+        }
+
+        let diff = diff_diagrams(&old_ir, &new_ir);
+        // Should detect 1 added edge, 2 unchanged edges.
+        assert_eq!(diff.added_edges, 1);
+        assert_eq!(diff.unchanged_edges, 2);
+        assert_eq!(diff.removed_edges, 0);
     }
 }

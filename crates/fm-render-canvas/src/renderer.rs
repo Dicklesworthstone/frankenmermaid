@@ -356,6 +356,11 @@ impl Canvas2dRenderer {
             ctx.set_global_alpha(1.0);
         }
 
+        // Marker drawing for Scene backend on Canvas is currently unimplemented.
+        // It requires calculating path tangents at endpoints.
+        let _ = path.marker_start;
+        let _ = path.marker_end;
+
         match path.source {
             RenderSource::Node(index) => {
                 stats.node_sources.insert(index);

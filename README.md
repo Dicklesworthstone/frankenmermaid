@@ -114,32 +114,31 @@ fm-cli render diagrams/process.mmd --format svg --theme dark --output out/proces
 ## Supported Diagram Types
 
 <!-- BEGIN GENERATED: supported-diagram-types -->
-| Diagram Type | Parse | Layout | SVG Render | Status |
-|--------------|-------|--------|------------|--------|
-| `flowchart` | Full | Sugiyama + Force + Tree | Full | Implemented |
-| `sequence` | Basic | Sequence-specific | Basic | Partial |
-| `class` | Basic | Sugiyama | Basic | Partial |
-| `state` | Basic | Sugiyama | Basic | Partial |
-| `er` | Full | Sugiyama | Full | Partial |
-| `gantt` | Basic | Gantt-specific | Basic | Partial |
-| `pie` | Full | Pie-specific | Full | Partial |
-| `gitGraph` | Full | Tree | Basic | Partial |
-| `journey` | Full | Kanban | Basic | Partial |
-| `mindmap` | Full | Radial | Basic | Partial |
-| `timeline` | Full | Timeline-specific | Basic | Partial |
-| `sankey` | Full | Sankey-specific | Basic | Partial |
-| `quadrantChart` | Basic | Grid | Basic | Partial |
-| `xyChart` | Basic | Sugiyama (fallback) | Minimal | Unsupported |
-| `block-beta` | Full | Grid | Basic | Partial |
-| `packet-beta` | Basic | Sugiyama | Basic | Partial |
-| `architecture-beta` | Basic | Sugiyama | Basic | Partial |
-| `C4Context` | Full | Sugiyama | Basic | Partial |
-| `C4Container` | Full | Sugiyama | Basic | Partial |
-| `C4Component` | Full | Sugiyama | Basic | Partial |
-| `C4Dynamic` | Full | Sugiyama | Basic | Partial |
-| `C4Deployment` | Full | Sugiyama | Basic | Partial |
-| `requirementDiagram` | Basic | Sugiyama | Basic | Partial |
-| `kanban` | Full | Kanban | Basic | Partial |
+| Diagram Type | Runtime Status |
+|--------------|----------------|
+| `flowchart` | Implemented |
+| `sequence` | Partial |
+| `class` | Partial |
+| `state` | Partial |
+| `er` | Partial |
+| `C4Context` | Partial |
+| `C4Container` | Partial |
+| `C4Component` | Partial |
+| `C4Dynamic` | Partial |
+| `C4Deployment` | Partial |
+| `architecture-beta` | Partial |
+| `block-beta` | Partial |
+| `gantt` | Partial |
+| `timeline` | Partial |
+| `journey` | Partial |
+| `gitGraph` | Partial |
+| `sankey` | Partial |
+| `mindmap` | Partial |
+| `pie` | Partial |
+| `quadrantChart` | Partial |
+| `xyChart` | Partial |
+| `requirementDiagram` | Partial |
+| `packet-beta` | Partial |
 <!-- END GENERATED: supported-diagram-types -->
 
 **Key:** Full = complete syntax coverage. Basic = core syntax works, advanced features in progress. Minimal = parsed but rendering needs dedicated work.

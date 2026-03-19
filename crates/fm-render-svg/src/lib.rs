@@ -303,6 +303,36 @@ fn render_scene_document_with_ir(
         doc = doc.style(css);
     }
 
+    let preset = ir
+        .and_then(|diagram_ir| diagram_ir.meta.theme_overrides.theme.as_deref())
+        .and_then(|t| t.parse::<ThemePreset>().ok())
+        .unwrap_or(config.theme);
+    let mut theme = Theme::from_preset(preset);
+    if let Some(diagram_ir) = ir {
+        theme
+            .colors
+            .apply_overrides(&diagram_ir.meta.theme_overrides.theme_variables);
+    }
+
+    let mut defs = DefsBuilder::new();
+
+    // Add standard arrowhead markers
+    defs = defs.marker(ArrowheadMarker::standard("arrow-end", &theme.colors.edge));
+    defs = defs.marker(ArrowheadMarker::filled("arrow-filled", &theme.colors.edge));
+    defs = defs.marker(ArrowheadMarker::open("arrow-open", &theme.colors.edge));
+    defs = defs.marker(ArrowheadMarker::circle_marker(
+        "arrow-circle",
+        &theme.colors.edge,
+    ));
+    defs = defs.marker(ArrowheadMarker::cross_marker(
+        "arrow-cross",
+        &theme.colors.edge,
+    ));
+    defs = defs.marker(ArrowheadMarker::diamond_marker(
+        "arrow-diamond",
+        &theme.colors.edge,
+    ));
+
     let mut clip_defs = Vec::new();
     let mut clip_id_counter = 0usize;
     let scene_root = render_scene_group(
@@ -313,13 +343,11 @@ fn render_scene_document_with_ir(
         &mut clip_id_counter,
     );
 
-    if !clip_defs.is_empty() {
-        let mut defs = DefsBuilder::new();
-        for clip in clip_defs {
-            defs = defs.custom(clip);
-        }
-        doc = doc.defs(defs);
+    for clip in clip_defs {
+        defs = defs.custom(clip);
     }
+
+    doc = doc.defs(defs);
 
     doc.child(scene_root).to_string()
 }
@@ -417,7 +445,29 @@ fn render_scene_path(
         elem = elem.stroke("none");
     }
 
+    if path.marker_start != MarkerKind::None {
+        elem = elem.marker_start(map_marker_kind(path.marker_start));
+    }
+
+    if path.marker_end != MarkerKind::None {
+        elem = elem.marker_end(map_marker_kind(path.marker_end));
+    }
+
     elem
+}
+
+fn map_marker_kind(kind: fm_layout::MarkerKind) -> &'static str {
+    use fm_layout::MarkerKind;
+    match kind {
+        MarkerKind::None => "",
+        MarkerKind::Arrow => "url(#arrow-end)",
+        MarkerKind::ThickArrow => "url(#arrow-filled)",
+        MarkerKind::DottedArrow => "url(#arrow-end)",
+        MarkerKind::Circle => "url(#arrow-circle)",
+        MarkerKind::Cross => "url(#arrow-cross)",
+        MarkerKind::Diamond => "url(#arrow-diamond)",
+        MarkerKind::Open => "url(#arrow-open)",
+    }
 }
 
 fn render_scene_text(
@@ -1243,7 +1293,7 @@ fn render_node(
             .fill(&colors.node_fill)
             .stroke(&colors.node_stroke)
             .stroke_width(1.6)
-            .rx(h / 2.0),
+            .rx(w.min(h) / 2.0),
 
         NodeShape::Diamond => {
             let path = PathBuilder::new()
