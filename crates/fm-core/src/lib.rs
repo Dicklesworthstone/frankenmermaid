@@ -2123,7 +2123,7 @@ pub struct MermaidBudgetLedger {
 
 impl Default for MermaidBudgetLedger {
     fn default() -> Self {
-        Self::new(&MermaidPressureReport::default())
+        Self::new(&MermaidNativePressureSignals::default().into_report())
     }
 }
 

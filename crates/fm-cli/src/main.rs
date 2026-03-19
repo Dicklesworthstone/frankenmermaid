@@ -1796,8 +1796,9 @@ fn render_and_output(
     }
 
     let source = load_input(input)?;
-    let parsed = parse(&source);
-    let (rendered, _, _) = render_format(&parsed.ir, format, "default", None, None)?;
+    let parsed = fm_parser::parse(&source);
+    let layout = fm_layout::layout_diagram(&parsed.ir);
+    let (rendered, _, _) = render_format(&parsed.ir, &layout, format, "default", None, None)?;
 
     match format {
         OutputFormat::Png => write_output_bytes(output, &rendered)?,
@@ -1943,8 +1944,9 @@ fn handle_render_request(
         return Response::from_string(format!("Failed to read body: {e}")).with_status_code(400);
     }
 
-    let parsed = parse(&body);
-    let svg = render_svg_with_config(&parsed.ir, &SvgRenderConfig::default());
+    let parsed = fm_parser::parse(&body);
+    let layout = fm_layout::layout_diagram(&parsed.ir);
+    let svg = render_svg_with_layout(&parsed.ir, &layout, &SvgRenderConfig::default());
 
     let mut response = Response::from_data(svg.into_bytes());
     if let Ok(header) = Header::from_bytes(&b"Content-Type"[..], &b"image/svg+xml"[..]) {
