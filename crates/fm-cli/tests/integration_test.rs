@@ -1070,3 +1070,301 @@ fn validate_reports_layout_dispatch_fallback_when_requested_family_is_unavailabl
         })
     }));
 }
+
+// ── E2E pipeline tests for all diagram types (bd-3ac.5) ──────────────
+
+/// Verify that a given Mermaid input round-trips through parse → layout → SVG render
+/// and parse → layout → terminal render without panicking, producing valid output.
+fn assert_pipeline_roundtrip(input: &str, expected_type: DiagramType, label: &str) {
+    // Parse
+    let result = parse(input);
+    assert_eq!(
+        result.ir.diagram_type, expected_type,
+        "[{label}] expected diagram type {expected_type:?}, got {:?}",
+        result.ir.diagram_type
+    );
+
+    let ir = &result.ir;
+
+    // Layout
+    let layout = layout_diagram(ir);
+    assert!(
+        layout.bounds.width >= 0.0 && layout.bounds.height >= 0.0,
+        "[{label}] layout bounds must be non-negative: {:?}",
+        layout.bounds
+    );
+
+    // SVG render
+    let svg = render_svg(ir);
+    assert!(
+        svg.starts_with("<svg") || svg.starts_with("<?xml"),
+        "[{label}] SVG output must start with <svg or <?xml, got: {}",
+        &svg[..svg.len().min(40)]
+    );
+    assert!(
+        svg.contains("</svg>"),
+        "[{label}] SVG output must contain closing </svg>"
+    );
+
+    // Terminal render
+    let term = render_term(ir);
+    // Terminal output should be non-empty for any non-trivial diagram.
+    if !ir.nodes.is_empty() {
+        assert!(
+            !term.trim().is_empty(),
+            "[{label}] terminal output should be non-empty for diagram with {} nodes",
+            ir.nodes.len()
+        );
+    }
+}
+
+#[test]
+fn e2e_pipeline_flowchart() {
+    assert_pipeline_roundtrip(
+        "flowchart TD\n  A[Start] --> B{Decision}\n  B -->|Yes| C[Action]\n  B -->|No| D[Skip]\n  C --> E[End]\n  D --> E",
+        DiagramType::Flowchart,
+        "flowchart",
+    );
+}
+
+#[test]
+fn e2e_pipeline_sequence() {
+    assert_pipeline_roundtrip(
+        "sequenceDiagram\n  Alice->>Bob: Hello\n  Bob-->>Alice: Hi back",
+        DiagramType::Sequence,
+        "sequence",
+    );
+}
+
+#[test]
+fn e2e_pipeline_class() {
+    assert_pipeline_roundtrip(
+        "classDiagram\n  Animal <|-- Duck\n  Animal <|-- Fish\n  Animal : +int age\n  Animal : +String gender",
+        DiagramType::Class,
+        "class",
+    );
+}
+
+#[test]
+fn e2e_pipeline_state() {
+    assert_pipeline_roundtrip(
+        "stateDiagram-v2\n  [*] --> Still\n  Still --> Moving\n  Moving --> Still\n  Moving --> Crash\n  Crash --> [*]",
+        DiagramType::State,
+        "state",
+    );
+}
+
+#[test]
+fn e2e_pipeline_er() {
+    assert_pipeline_roundtrip(
+        "erDiagram\n  CUSTOMER ||--o{ ORDER : places\n  ORDER ||--|{ LINE-ITEM : contains",
+        DiagramType::Er,
+        "er",
+    );
+}
+
+#[test]
+fn e2e_pipeline_gantt() {
+    assert_pipeline_roundtrip(
+        "gantt\n  title Project Plan\n  dateFormat YYYY-MM-DD\n  section Design\n  Task A :a1, 2024-01-01, 7d\n  section Build\n  Task B :b1, after a1, 5d",
+        DiagramType::Gantt,
+        "gantt",
+    );
+}
+
+#[test]
+fn e2e_pipeline_pie() {
+    assert_pipeline_roundtrip(
+        "pie title Languages\n  \"Rust\" : 45\n  \"Go\" : 30\n  \"Python\" : 25",
+        DiagramType::Pie,
+        "pie",
+    );
+}
+
+#[test]
+fn e2e_pipeline_gitgraph() {
+    assert_pipeline_roundtrip(
+        "gitGraph\n  commit\n  branch develop\n  checkout develop\n  commit\n  checkout main\n  merge develop",
+        DiagramType::GitGraph,
+        "gitgraph",
+    );
+}
+
+#[test]
+fn e2e_pipeline_journey() {
+    assert_pipeline_roundtrip(
+        "journey\n  title My Day\n  section Morning\n    Wake up: 5: Me\n    Shower: 3: Me\n  section Work\n    Code: 8: Me",
+        DiagramType::Journey,
+        "journey",
+    );
+}
+
+#[test]
+fn e2e_pipeline_mindmap() {
+    assert_pipeline_roundtrip(
+        "mindmap\n  root((mindmap))\n    Origins\n      Long history\n    Research\n      Effectiveness",
+        DiagramType::Mindmap,
+        "mindmap",
+    );
+}
+
+#[test]
+fn e2e_pipeline_timeline() {
+    assert_pipeline_roundtrip(
+        "timeline\n  title History\n  2020 : Event A\n  2021 : Event B\n  2022 : Event C",
+        DiagramType::Timeline,
+        "timeline",
+    );
+}
+
+#[test]
+fn e2e_pipeline_sankey() {
+    assert_pipeline_roundtrip(
+        "sankey-beta\n\nSource,Target,5\nTarget,Sink,3\n",
+        DiagramType::Sankey,
+        "sankey",
+    );
+}
+
+#[test]
+fn e2e_pipeline_quadrant_chart() {
+    assert_pipeline_roundtrip(
+        "quadrantChart\n  title Priorities\n  x-axis Low --> High\n  y-axis Low --> High\n  A: [0.3, 0.6]\n  B: [0.7, 0.8]",
+        DiagramType::QuadrantChart,
+        "quadrant",
+    );
+}
+
+#[test]
+fn e2e_pipeline_xychart() {
+    assert_pipeline_roundtrip(
+        "xychart-beta\n  title Sales\n  x-axis [jan, feb, mar]\n  y-axis \"Revenue\" 0 --> 100\n  bar [30, 50, 70]",
+        DiagramType::XyChart,
+        "xychart",
+    );
+}
+
+#[test]
+fn e2e_pipeline_block_beta() {
+    assert_pipeline_roundtrip(
+        "block-beta\n  columns 3\n  a[\"Block A\"]:2\n  b[\"Block B\"]\n  c[\"Block C\"]:3",
+        DiagramType::BlockBeta,
+        "block-beta",
+    );
+}
+
+#[test]
+fn e2e_pipeline_packet_beta() {
+    assert_pipeline_roundtrip(
+        "packet-beta\n  0-15: \"Header\"\n  16-31: \"Payload\"",
+        DiagramType::PacketBeta,
+        "packet-beta",
+    );
+}
+
+#[test]
+fn e2e_pipeline_architecture_beta() {
+    assert_pipeline_roundtrip(
+        "architecture-beta\n  service api(API)\n  service db(DB)\n  api --> db",
+        DiagramType::ArchitectureBeta,
+        "architecture-beta",
+    );
+}
+
+#[test]
+fn e2e_pipeline_c4_context() {
+    assert_pipeline_roundtrip(
+        "C4Context\n  Person(user, \"User\")\n  System(system, \"System\")\n  Rel(user, system, \"Uses\")",
+        DiagramType::C4Context,
+        "c4context",
+    );
+}
+
+#[test]
+fn e2e_pipeline_c4_container() {
+    assert_pipeline_roundtrip(
+        "C4Container\n  Container(web, \"Web App\")\n  Container(api, \"API\")\n  Rel(web, api, \"Calls\")",
+        DiagramType::C4Container,
+        "c4container",
+    );
+}
+
+#[test]
+fn e2e_pipeline_c4_component() {
+    assert_pipeline_roundtrip(
+        "C4Component\n  Component(auth, \"Auth Module\")\n  Component(db, \"Database\")\n  Rel(auth, db, \"Reads\")",
+        DiagramType::C4Component,
+        "c4component",
+    );
+}
+
+#[test]
+fn e2e_pipeline_c4_dynamic() {
+    assert_pipeline_roundtrip(
+        "C4Dynamic\n  Person(user, \"User\")\n  System(sys, \"System\")\n  Rel(user, sys, \"1. Request\")",
+        DiagramType::C4Dynamic,
+        "c4dynamic",
+    );
+}
+
+#[test]
+fn e2e_pipeline_c4_deployment() {
+    assert_pipeline_roundtrip(
+        "C4Deployment\n  Deployment_Node(server, \"Server\")\n  Container(app, \"App\")\n  Rel(server, app, \"Hosts\")",
+        DiagramType::C4Deployment,
+        "c4deployment",
+    );
+}
+
+#[test]
+fn e2e_pipeline_requirement() {
+    assert_pipeline_roundtrip(
+        "requirementDiagram\n  requirement test_req {\n    id: 1\n    text: Must work\n  }",
+        DiagramType::Requirement,
+        "requirement",
+    );
+}
+
+#[test]
+fn e2e_pipeline_kanban() {
+    assert_pipeline_roundtrip(
+        "kanban\n  Todo\n    Task A\n    Task B\n  Done\n    Task C",
+        DiagramType::Kanban,
+        "kanban",
+    );
+}
+
+#[test]
+fn e2e_pipeline_dot_format() {
+    // DOT input should be detected and parsed via the DOT bridge.
+    let input = "digraph G {\n  A -> B;\n  B -> C;\n}";
+    let result = parse(input);
+    assert_eq!(result.ir.diagram_type, DiagramType::Flowchart);
+
+    let layout = layout_diagram(&result.ir);
+    assert!(layout.bounds.width >= 0.0);
+
+    let svg = render_svg(&result.ir);
+    assert!(svg.contains("</svg>"));
+}
+
+/// Verify that the pipeline is deterministic: same input produces identical SVG.
+#[test]
+fn e2e_pipeline_determinism_all_types() {
+    let inputs = [
+        ("flowchart LR\n  A-->B-->C", "flowchart"),
+        ("sequenceDiagram\n  A->>B: msg", "sequence"),
+        ("classDiagram\n  A <|-- B", "class"),
+        ("stateDiagram-v2\n  [*] --> S1\n  S1 --> S2", "state"),
+        ("erDiagram\n  A ||--o{ B : has", "er"),
+        ("gantt\n  section S\n  T1 :a1, 2024-01-01, 3d", "gantt"),
+        ("pie\n  \"A\" : 50\n  \"B\" : 50", "pie"),
+        ("mindmap\n  root\n    A\n    B", "mindmap"),
+    ];
+
+    for (input, label) in &inputs {
+        let svg1 = render_svg(&parse(input).ir);
+        let svg2 = render_svg(&parse(input).ir);
+        assert_eq!(svg1, svg2, "[{label}] SVG output must be deterministic");
+    }
+}
