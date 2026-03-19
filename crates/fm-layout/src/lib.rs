@@ -5122,7 +5122,8 @@ fn bk_horizontal_compaction(
     }
 
     /// Place a single block root and all predecessor blocks it depends on.
-    /// Uses an explicit stack to avoid recursion.
+    /// Recurses into unplaced predecessors; terminates because each block
+    /// root sets `x[block_root] = 0.0` on entry, preventing re-entry.
     fn place_block(
         block_root: usize,
         x: &mut [f32],
@@ -6186,7 +6187,11 @@ pub fn build_layout_guard_report(
     ir: &MermaidDiagramIr,
     traced: &TracedLayout,
 ) -> MermaidGuardReport {
-    build_layout_guard_report_with_pressure(ir, traced, MermaidPressureReport::default())
+    build_layout_guard_report_with_pressure(
+        ir,
+        traced,
+        fm_core::MermaidNativePressureSignals::default().into_report(),
+    )
 }
 
 #[must_use]
@@ -6283,7 +6288,7 @@ mod tests {
     use fm_core::{
         ArrowType, DiagramType, GraphDirection, IrCluster, IrClusterId, IrEdge, IrEndpoint,
         IrGraphCluster, IrGraphNode, IrLabel, IrLabelId, IrNode, IrNodeId, IrSubgraph,
-        IrSubgraphId, MermaidDiagramIr, NodeShape, Span,
+        IrSubgraphId, MermaidDiagramIr, MermaidPressureTier, NodeShape, Span,
     };
     use proptest::prelude::*;
     use std::collections::BTreeMap;
@@ -7947,6 +7952,15 @@ mod tests {
         assert_eq!(
             report.guard_reason.as_deref(),
             Some(traced.trace.guard.reason)
+        );
+        assert_eq!(report.pressure.tier, MermaidPressureTier::Unknown);
+        assert!(report.pressure.conservative_fallback);
+        assert!(
+            report
+                .budget_broker
+                .notes
+                .iter()
+                .any(|note| note.contains("telemetry unavailable"))
         );
     }
 
