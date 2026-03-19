@@ -339,7 +339,10 @@ impl GraphMetrics {
             .max()
             .unwrap_or(1);
 
-        let is_tree_like = back_edge_count == 0 && root_count == 1;
+        let is_tree_like = node_count > 0
+            && back_edge_count == 0
+            && root_count == 1
+            && edge_count == node_count - 1;
         let is_sparse = edge_to_node_ratio < 1.2;
         let is_dense = edge_to_node_ratio > 2.0;
 
@@ -603,6 +606,20 @@ pub enum PathCmd {
     Close,
 }
 
+/// Marker kind for path endpoints (e.g. arrowheads).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MarkerKind {
+    #[default]
+    None,
+    Arrow,
+    ThickArrow,
+    DottedArrow,
+    Circle,
+    Cross,
+    Diamond,
+    Open,
+}
+
 /// A path primitive in the shared render IR.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderPath {
@@ -610,6 +627,8 @@ pub struct RenderPath {
     pub commands: Vec<PathCmd>,
     pub fill: Option<FillStyle>,
     pub stroke: Option<StrokeStyle>,
+    pub marker_start: MarkerKind,
+    pub marker_end: MarkerKind,
 }
 
 /// Horizontal alignment for text.
@@ -690,6 +709,8 @@ fn build_cluster_layer(layout: &DiagramLayout) -> RenderGroup {
                 opacity: 0.24,
             }),
             stroke: Some(StrokeStyle::solid("#94a3b8", 1.0)),
+            marker_start: MarkerKind::None,
+            marker_end: MarkerKind::None,
         }));
     }
 
@@ -708,30 +729,72 @@ fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
             continue;
         }
 
-        let mut commands = Vec::with_capacity(edge.points.len());
+        let mut commands = Vec::with_capacity(edge.points.len() * 2);
+        let n = edge.points.len();
+
+        // Implement smoothing logic (Catmull-Rom to Cubic Bezier)
         commands.push(PathCmd::MoveTo {
             x: edge.points[0].x,
             y: edge.points[0].y,
         });
 
-        for point in &edge.points[1..] {
+        if n == 2 {
             commands.push(PathCmd::LineTo {
-                x: point.x,
-                y: point.y,
+                x: edge.points[1].x,
+                y: edge.points[1].y,
             });
+        } else {
+            let t: f32 = 0.25; // Tension factor matching legacy renderer
+            for i in 0..(n - 1) {
+                let p_prev = if i == 0 {
+                    edge.points[0]
+                } else {
+                    edge.points[i - 1]
+                };
+                let p_cur = edge.points[i];
+                let p_next = edge.points[i + 1];
+                let p_next2 = if i + 2 < n {
+                    edge.points[i + 2]
+                } else {
+                    edge.points[n - 1]
+                };
+
+                commands.push(PathCmd::CubicTo {
+                    c1x: p_cur.x + (p_next.x - p_prev.x) * t,
+                    c1y: p_cur.y + (p_next.y - p_prev.y) * t,
+                    c2x: p_next.x - (p_next2.x - p_cur.x) * t,
+                    c2y: p_next.y - (p_next2.y - p_cur.y) * t,
+                    x: p_next.x,
+                    y: p_next.y,
+                });
+            }
         }
 
         let mut stroke = StrokeStyle::solid("#475569", 1.5);
+        let mut marker_end = MarkerKind::None;
+        let mut marker_start = MarkerKind::None;
+
         if let Some(ir_edge) = ir.edges.get(edge.edge_index) {
-            match ir_edge.arrow {
-                fm_core::ArrowType::ThickArrow => {
-                    stroke.width = 2.5;
+            if edge.reversed {
+                stroke.dash_array = vec![4.0, 4.0];
+                stroke.color = String::from("#94a3b8");
+                marker_end = MarkerKind::Open;
+            } else {
+                match ir_edge.arrow {
+                    fm_core::ArrowType::Line => marker_end = MarkerKind::None,
+                    fm_core::ArrowType::Arrow => marker_end = MarkerKind::Arrow,
+                    fm_core::ArrowType::ThickArrow => {
+                        stroke.width = 2.5;
+                        marker_end = MarkerKind::ThickArrow;
+                    }
+                    fm_core::ArrowType::DottedArrow => {
+                        stroke.dash_array = vec![6.0, 4.0];
+                        stroke.line_cap = LineCap::Round;
+                        marker_end = MarkerKind::Arrow;
+                    }
+                    fm_core::ArrowType::Circle => marker_end = MarkerKind::Circle,
+                    fm_core::ArrowType::Cross => marker_end = MarkerKind::Cross,
                 }
-                fm_core::ArrowType::DottedArrow => {
-                    stroke.dash_array = vec![6.0, 4.0];
-                    stroke.line_cap = LineCap::Round;
-                }
-                _ => {}
             }
         }
 
@@ -740,6 +803,8 @@ fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
             commands,
             fill: None,
             stroke: Some(stroke),
+            marker_start,
+            marker_end,
         }));
     }
 
@@ -763,6 +828,8 @@ fn build_node_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
                 opacity: 1.0,
             }),
             stroke: Some(StrokeStyle::solid("#94a3b8", 1.5)),
+            marker_start: MarkerKind::None,
+            marker_end: MarkerKind::None,
         }));
     }
 
@@ -851,13 +918,329 @@ fn build_label_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGro
 }
 
 fn node_path(bounds: LayoutRect, shape: fm_core::NodeShape) -> Vec<PathCmd> {
+    use fm_core::NodeShape;
     match shape {
-        fm_core::NodeShape::Circle
-        | fm_core::NodeShape::DoubleCircle
-        | fm_core::NodeShape::CrossedCircle => polygon_ellipse_path(bounds, 18),
-        fm_core::NodeShape::Diamond => diamond_path(bounds),
-        _ => rounded_rect_path(bounds, 8.0),
+        NodeShape::Rect => rounded_rect_path(bounds, 5.0),
+        NodeShape::Rounded => rounded_rect_path(bounds, 10.0),
+        NodeShape::Stadium => stadium_path(bounds),
+        NodeShape::Diamond => diamond_path(bounds),
+        NodeShape::Hexagon => hexagon_path(bounds),
+        NodeShape::Circle | NodeShape::DoubleCircle => polygon_ellipse_path(bounds, 24),
+        NodeShape::Cylinder => cylinder_path(bounds),
+        NodeShape::Trapezoid => trapezoid_path(bounds),
+        NodeShape::InvTrapezoid => inv_trapezoid_path(bounds),
+        NodeShape::Parallelogram => parallelogram_path(bounds),
+        NodeShape::InvParallelogram => inv_parallelogram_path(bounds),
+        NodeShape::Asymmetric => asymmetric_path(bounds),
+        NodeShape::Note => note_path(bounds),
+        NodeShape::Triangle => triangle_path(bounds),
+        NodeShape::Pentagon => polygon_path(bounds, 5, -std::f32::consts::FRAC_PI_2),
+        NodeShape::Star => star_path(bounds, 5),
+        NodeShape::Cloud => cloud_path(bounds),
+        NodeShape::Tag => tag_path(bounds),
+        NodeShape::Subroutine | NodeShape::CrossedCircle => {
+            // For composite shapes, we use the primary boundary path.
+            // Inner lines are added by specialized render logic if needed,
+            // but for simple path representation we return the outer box.
+            rounded_rect_path(bounds, 4.0)
+        }
     }
+}
+
+fn stadium_path(bounds: LayoutRect) -> Vec<PathCmd> {
+    let r = bounds.width.min(bounds.height) / 2.0;
+    rounded_rect_path(bounds, r)
+}
+
+fn hexagon_path(bounds: LayoutRect) -> Vec<PathCmd> {
+    let x = bounds.x;
+    let y = bounds.y;
+    let w = bounds.width;
+    let h = bounds.height;
+    let cx = x + w / 2.0;
+    let cy = y + h / 2.0;
+    let inset = w * 0.15;
+    vec![
+        PathCmd::MoveTo { x: x + inset, y },
+        PathCmd::LineTo {
+            x: x + w - inset,
+            y,
+        },
+        PathCmd::LineTo { x: x + w, y: cy },
+        PathCmd::LineTo {
+            x: x + w - inset,
+            y: y + h,
+        },
+        PathCmd::LineTo {
+            x: x + inset,
+            y: y + h,
+        },
+        PathCmd::LineTo { x, y: cy },
+        PathCmd::Close,
+    ]
+}
+
+fn cylinder_path(bounds: LayoutRect) -> Vec<PathCmd> {
+    let x = bounds.x;
+    let y = bounds.y;
+    let w = bounds.width;
+    let h = bounds.height;
+    let ry = h * 0.1;
+    let rx = w / 2.0;
+    let cx = x + rx;
+
+    let mut cmds = Vec::new();
+    // Top ellipse
+    cmds.push(PathCmd::MoveTo { x, y: y + ry });
+    // Approximate arcs with Cubic Bezier if needed, but for now we simplify
+    // to maintaining the outer boundary.
+    cmds.push(PathCmd::LineTo {
+        x: x + w,
+        y: y + ry,
+    });
+    cmds.push(PathCmd::LineTo {
+        x: x + w,
+        y: y + h - ry,
+    });
+    cmds.push(PathCmd::LineTo { x, y: y + h - ry });
+    cmds.push(PathCmd::Close);
+    cmds
+}
+
+fn trapezoid_path(bounds: LayoutRect) -> Vec<PathCmd> {
+    let x = bounds.x;
+    let y = bounds.y;
+    let w = bounds.width;
+    let h = bounds.height;
+    let inset = w * 0.15;
+    vec![
+        PathCmd::MoveTo { x: x + inset, y },
+        PathCmd::LineTo {
+            x: x + w - inset,
+            y,
+        },
+        PathCmd::LineTo { x: x + w, y: y + h },
+        PathCmd::LineTo { x, y: y + h },
+        PathCmd::Close,
+    ]
+}
+
+fn inv_trapezoid_path(bounds: LayoutRect) -> Vec<PathCmd> {
+    let x = bounds.x;
+    let y = bounds.y;
+    let w = bounds.width;
+    let h = bounds.height;
+    let inset = w * 0.15;
+    vec![
+        PathCmd::MoveTo { x, y },
+        PathCmd::LineTo { x: x + w, y },
+        PathCmd::LineTo {
+            x: x + w - inset,
+            y: y + h,
+        },
+        PathCmd::LineTo {
+            x: x + inset,
+            y: y + h,
+        },
+        PathCmd::Close,
+    ]
+}
+
+fn parallelogram_path(bounds: LayoutRect) -> Vec<PathCmd> {
+    let x = bounds.x;
+    let y = bounds.y;
+    let w = bounds.width;
+    let h = bounds.height;
+    let inset = w * 0.15;
+    vec![
+        PathCmd::MoveTo { x: x + inset, y },
+        PathCmd::LineTo { x: x + w, y },
+        PathCmd::LineTo {
+            x: x + w - inset,
+            y: y + h,
+        },
+        PathCmd::LineTo { x, y: y + h },
+        PathCmd::Close,
+    ]
+}
+
+fn inv_parallelogram_path(bounds: LayoutRect) -> Vec<PathCmd> {
+    let x = bounds.x;
+    let y = bounds.y;
+    let w = bounds.width;
+    let h = bounds.height;
+    let inset = w * 0.15;
+    vec![
+        PathCmd::MoveTo { x, y },
+        PathCmd::LineTo {
+            x: x + w - inset,
+            y,
+        },
+        PathCmd::LineTo { x: x + w, y: y + h },
+        PathCmd::LineTo {
+            x: x + inset,
+            y: y + h,
+        },
+        PathCmd::Close,
+    ]
+}
+
+fn asymmetric_path(bounds: LayoutRect) -> Vec<PathCmd> {
+    let x = bounds.x;
+    let y = bounds.y;
+    let w = bounds.width;
+    let h = bounds.height;
+    let flag = w * 0.15;
+    let cy = y + h / 2.0;
+    vec![
+        PathCmd::MoveTo { x, y },
+        PathCmd::LineTo { x: x + w - flag, y },
+        PathCmd::LineTo { x: x + w, y: cy },
+        PathCmd::LineTo {
+            x: x + w - flag,
+            y: y + h,
+        },
+        PathCmd::LineTo { x, y: y + h },
+        PathCmd::Close,
+    ]
+}
+
+fn note_path(bounds: LayoutRect) -> Vec<PathCmd> {
+    let x = bounds.x;
+    let y = bounds.y;
+    let w = bounds.width;
+    let h = bounds.height;
+    let fold = 10.0;
+    vec![
+        PathCmd::MoveTo { x, y },
+        PathCmd::LineTo { x: x + w - fold, y },
+        PathCmd::LineTo {
+            x: x + w,
+            y: y + fold,
+        },
+        PathCmd::LineTo { x: x + w, y: y + h },
+        PathCmd::LineTo { x, y: y + h },
+        PathCmd::Close,
+    ]
+}
+
+fn triangle_path(bounds: LayoutRect) -> Vec<PathCmd> {
+    let x = bounds.x;
+    let y = bounds.y;
+    let w = bounds.width;
+    let h = bounds.height;
+    let cx = x + w / 2.0;
+    vec![
+        PathCmd::MoveTo { x: cx, y },
+        PathCmd::LineTo { x: x + w, y: y + h },
+        PathCmd::LineTo { x, y: y + h },
+        PathCmd::Close,
+    ]
+}
+
+fn polygon_path(bounds: LayoutRect, sides: usize, angle_offset: f32) -> Vec<PathCmd> {
+    let cx = bounds.x + (bounds.width / 2.0);
+    let cy = bounds.y + (bounds.height / 2.0);
+    let r = bounds.width.min(bounds.height) / 2.0;
+    let mut cmds = Vec::with_capacity(sides + 1);
+    for i in 0..sides {
+        let angle = angle_offset + (i as f32) * 2.0 * std::f32::consts::PI / (sides as f32);
+        let px = cx + r * angle.cos();
+        let py = cy + r * angle.sin();
+        if i == 0 {
+            cmds.push(PathCmd::MoveTo { x: px, y: py });
+        } else {
+            cmds.push(PathCmd::LineTo { x: px, y: py });
+        }
+    }
+    cmds.push(PathCmd::Close);
+    cmds
+}
+
+fn star_path(bounds: LayoutRect, points: usize) -> Vec<PathCmd> {
+    let cx = bounds.x + (bounds.width / 2.0);
+    let cy = bounds.y + (bounds.height / 2.0);
+    let outer_r = bounds.width.min(bounds.height) / 2.0;
+    let inner_r = outer_r * 0.4;
+    let angle_offset = -std::f32::consts::FRAC_PI_2;
+    let total_points = points * 2;
+    let mut cmds = Vec::with_capacity(total_points + 1);
+    for i in 0..total_points {
+        let r = if i % 2 == 0 { outer_r } else { inner_r };
+        let angle = angle_offset + (i as f32) * std::f32::consts::PI / (points as f32);
+        let px = cx + r * angle.cos();
+        let py = cy + r * angle.sin();
+        if i == 0 {
+            cmds.push(PathCmd::MoveTo { x: px, y: py });
+        } else {
+            cmds.push(PathCmd::LineTo { x: px, y: py });
+        }
+    }
+    cmds.push(PathCmd::Close);
+    cmds
+}
+
+fn cloud_path(bounds: LayoutRect) -> Vec<PathCmd> {
+    let x = bounds.x;
+    let y = bounds.y;
+    let w = bounds.width;
+    let h = bounds.height;
+    let r = h / 3.0;
+    // Simplified cloud path
+    vec![
+        PathCmd::MoveTo {
+            x: x + r,
+            y: y + h * 0.6,
+        },
+        PathCmd::LineTo {
+            x: x + r * 2.0,
+            y: y + h * 0.3,
+        },
+        PathCmd::LineTo {
+            x: x + w * 0.5,
+            y: y + r * 0.5,
+        },
+        PathCmd::LineTo {
+            x: x + w - r * 2.0,
+            y: y + h * 0.3,
+        },
+        PathCmd::LineTo {
+            x: x + w - r,
+            y: y + h * 0.6,
+        },
+        PathCmd::LineTo {
+            x: x + w - r,
+            y: y + h * 0.8,
+        },
+        PathCmd::LineTo {
+            x: x + r,
+            y: y + h * 0.8,
+        },
+        PathCmd::Close,
+    ]
+}
+
+fn tag_path(bounds: LayoutRect) -> Vec<PathCmd> {
+    let x = bounds.x;
+    let y = bounds.y;
+    let w = bounds.width;
+    let h = bounds.height;
+    let point = w * 0.2;
+    let cy = y + h / 2.0;
+    vec![
+        PathCmd::MoveTo { x, y },
+        PathCmd::LineTo {
+            x: x + w - point,
+            y,
+        },
+        PathCmd::LineTo { x: x + w, y: cy },
+        PathCmd::LineTo {
+            x: x + w - point,
+            y: y + h,
+        },
+        PathCmd::LineTo { x, y: y + h },
+        PathCmd::Close,
+    ]
 }
 
 fn rounded_rect_path(bounds: LayoutRect, radius: f32) -> Vec<PathCmd> {
@@ -1193,25 +1576,26 @@ fn select_general_graph_algorithm(ir: &MermaidDiagramIr) -> LayoutAlgorithm {
     }
 
     // Perfect tree: use Tree layout for cleaner hierarchical rendering.
-    if metrics.is_tree_like {
+    // Only for larger trees where tidy-tree shows significant benefit.
+    if metrics.is_tree_like && metrics.node_count > 10 {
         return LayoutAlgorithm::Tree;
     }
 
     // Dense graphs with many crossings: force-directed avoids excessive crossing
     // minimization cost and often produces better results for hairball graphs.
     // Only apply to larger graphs where Sugiyama performance starts to degrade.
-    if metrics.is_dense && metrics.node_count > 20 {
+    if metrics.is_dense && metrics.node_count > 30 {
         return LayoutAlgorithm::Force;
     }
 
-    // Very sparse disconnected graphs: force-directed handles disconnected
-    // components naturally via repulsion, spreading them out.
-    // Only apply to larger graphs to maintain Sugiyama's rank-based stability for small ones.
-    if metrics.is_sparse && metrics.root_count > metrics.node_count / 2 && metrics.node_count > 10 {
+    // Very sparse disconnected graphs with MANY components: force-directed can handle
+    // them naturally, but Sugiyama's component compaction is usually cleaner for small/medium graphs.
+    // Only switch to Force if the graph is both large and has many back-edges (cycles).
+    if metrics.node_count > 50 && metrics.back_edge_count > 5 {
         return LayoutAlgorithm::Force;
     }
 
-    // Default: Sugiyama produces clean hierarchical layouts for most DAG-like graphs.
+    // Default: Sugiyama produces clean hierarchical layouts for most DAG-like graphs and forests.
     LayoutAlgorithm::Sugiyama
 }
 
@@ -5039,23 +5423,29 @@ fn crossing_refinement(
         improved = false;
         let rank_keys: Vec<usize> = ordering_by_rank.keys().copied().collect();
         for &rank in &rank_keys {
-            let order = match ordering_by_rank.get(&rank) {
-                Some(o) if o.len() >= 2 => o.clone(),
-                _ => continue,
+            let n = match ordering_by_rank.get(&rank) {
+                Some(o) => o.len(),
+                _ => 0,
             };
-            for i in 0..order.len() - 1 {
-                // Try swapping positions i and i+1.
-                let mut trial = ordering_by_rank.clone();
-                if let Some(rank_order) = trial.get_mut(&rank) {
+            if n < 2 {
+                continue;
+            }
+            for i in 0..n - 1 {
+                // Try swapping positions i and i+1 in-place.
+                if let Some(rank_order) = ordering_by_rank.get_mut(&rank) {
                     rank_order.swap(i, i + 1);
                 }
-                let trial_crossings = total_crossings(ir, ranks, &trial);
+                let trial_crossings = total_crossings(ir, ranks, &ordering_by_rank);
                 if trial_crossings < best_crossings {
-                    ordering_by_rank = trial;
                     best_crossings = trial_crossings;
                     improved = true;
                     if best_crossings == 0 {
                         return (0, ordering_by_rank);
+                    }
+                } else {
+                    // Swap back if not improved.
+                    if let Some(rank_order) = ordering_by_rank.get_mut(&rank) {
+                        rank_order.swap(i, i + 1);
                     }
                 }
             }
@@ -5070,32 +5460,42 @@ fn crossing_refinement(
             _ => continue,
         };
         let n = order.len();
-        for node_orig_pos in 0..n {
-            let node = order[node_orig_pos];
-            let mut best_pos = node_orig_pos;
+        for node in order {
+            // Find current position of node in the (potentially modified) rank order.
+            let mut current_pos = match ordering_by_rank.get(&rank) {
+                Some(o) => match o.iter().position(|&ni| ni == node) {
+                    Some(pos) => pos,
+                    None => continue,
+                },
+                None => continue,
+            };
+
             for target_pos in 0..n {
-                if target_pos == best_pos {
+                if target_pos == current_pos {
                     continue;
                 }
-                // Build trial ordering with node moved to target_pos.
-                let mut trial_order: Vec<usize> =
-                    order.iter().copied().filter(|&ni| ni != node).collect();
-                trial_order.insert(target_pos.min(trial_order.len()), node);
 
-                let mut trial = ordering_by_rank.clone();
-                trial.insert(rank, trial_order);
-                let trial_crossings = total_crossings(ir, ranks, &trial);
+                // Move node from current_pos to target_pos in-place.
+                if let Some(rank_order) = ordering_by_rank.get_mut(&rank) {
+                    let element = rank_order.remove(current_pos);
+                    rank_order.insert(target_pos, element);
+                }
+
+                let trial_crossings = total_crossings(ir, ranks, &ordering_by_rank);
                 if trial_crossings < best_crossings {
                     best_crossings = trial_crossings;
-                    best_pos = target_pos;
-                    ordering_by_rank = trial;
+                    current_pos = target_pos;
                     if best_crossings == 0 {
                         return (0, ordering_by_rank);
                     }
+                } else {
+                    // Move back if not improved.
+                    if let Some(rank_order) = ordering_by_rank.get_mut(&rank) {
+                        let element = rank_order.remove(target_pos);
+                        rank_order.insert(current_pos, element);
+                    }
                 }
             }
-            // If best_pos changed, update the reference order for subsequent nodes.
-            let _ = best_pos; // Already applied via ordering_by_rank = trial above.
         }
     }
 
@@ -5223,9 +5623,10 @@ fn bk_vertical_alignment(
 
             for mi in candidates {
                 let (u, u_pos) = neighbours[mi];
-                // Only align if v is not yet aligned and the neighbour position
-                // doesn't conflict with a previously aligned neighbour.
-                if align[v] != v {
+                // Only align if:
+                // 1. u is not yet aligned with any successor (align[u] == u).
+                // 2. The neighbour position doesn't conflict with a previously aligned neighbour in the rank.
+                if align[u] != u {
                     continue;
                 }
                 let u_pos_i64 = u_pos as i64;
@@ -5238,6 +5639,7 @@ fn bk_vertical_alignment(
                     align[u] = v;
                     root[v] = root[u];
                     threshold = u_pos_i64;
+                    break;
                 }
             }
         }
@@ -9364,7 +9766,27 @@ mod tests {
 
     #[test]
     fn auto_select_tree_like_flowchart_uses_tree() {
-        let ir = graph_ir(DiagramType::Flowchart, 5, &[(0, 1), (0, 2), (1, 3), (2, 4)]);
+        // Use 15 nodes to exceed the threshold (> 10) for Tree layout.
+        let ir = graph_ir(
+            DiagramType::Flowchart,
+            15,
+            &[
+                (0, 1),
+                (0, 2),
+                (1, 3),
+                (1, 4),
+                (2, 5),
+                (2, 6),
+                (3, 7),
+                (4, 8),
+                (5, 9),
+                (6, 10),
+                (7, 11),
+                (8, 12),
+                (9, 13),
+                (10, 14),
+            ],
+        );
         let dispatch = dispatch_layout_algorithm(&ir, LayoutAlgorithm::Auto);
         assert_eq!(dispatch.selected, LayoutAlgorithm::Tree);
         assert_eq!(dispatch.reason, "auto_metrics_tree_like");
@@ -9372,35 +9794,27 @@ mod tests {
 
     #[test]
     fn auto_select_dense_flowchart_uses_force() {
-        let ir = graph_ir(
-            DiagramType::Flowchart,
-            5,
-            &[
-                (0, 1),
-                (0, 2),
-                (0, 3),
-                (0, 4),
-                (1, 2),
-                (1, 3),
-                (1, 4),
-                (2, 3),
-                (2, 4),
-                (3, 4),
-                (3, 0),
-                (4, 1),
-            ],
-        );
+        // Use 35 nodes to exceed the threshold (> 30) for Force layout on dense graphs.
+        let mut edges = Vec::new();
+        for i in 0..35 {
+            for j in (i + 1)..35 {
+                if edges.len() < 100 {
+                    edges.push((i, j));
+                }
+            }
+        }
+        let ir = graph_ir(DiagramType::Flowchart, 35, &edges);
         let dispatch = dispatch_layout_algorithm(&ir, LayoutAlgorithm::Auto);
         assert_eq!(dispatch.selected, LayoutAlgorithm::Force);
         assert_eq!(dispatch.reason, "auto_metrics_dense_graph");
     }
 
     #[test]
-    fn auto_select_sparse_disconnected_uses_force() {
+    fn auto_select_sparse_disconnected_uses_sugiyama_for_small_graphs() {
+        // 6 nodes is below the threshold (> 50) for Force layout on sparse disconnected graphs.
         let ir = graph_ir(DiagramType::Flowchart, 6, &[(0, 1), (2, 3)]);
         let dispatch = dispatch_layout_algorithm(&ir, LayoutAlgorithm::Auto);
-        assert_eq!(dispatch.selected, LayoutAlgorithm::Force);
-        assert_eq!(dispatch.reason, "auto_metrics_sparse_disconnected");
+        assert_eq!(dispatch.selected, LayoutAlgorithm::Sugiyama);
     }
 
     #[test]
@@ -9451,7 +9865,8 @@ mod tests {
         let ir = graph_ir(DiagramType::Flowchart, 3, &[(0, 1), (1, 2)]);
         let dispatch = dispatch_layout_algorithm(&ir, LayoutAlgorithm::Radial);
         assert!(dispatch.capability_unavailable);
-        assert_eq!(dispatch.selected, LayoutAlgorithm::Tree);
+        // Falls back to Sugiyama now for small graphs.
+        assert_eq!(dispatch.selected, LayoutAlgorithm::Sugiyama);
     }
 
     #[test]
@@ -9544,8 +9959,344 @@ mod tests {
 
     #[test]
     fn auto_select_state_tree_uses_tree() {
-        let ir = graph_ir(DiagramType::State, 4, &[(0, 1), (0, 2), (1, 3)]);
+        // Use 12 nodes to exceed the threshold (> 10) for Tree layout.
+        let mut edges = Vec::new();
+        for i in 1..12 {
+            edges.push((0, i));
+        }
+        let ir = graph_ir(DiagramType::State, 12, &edges);
         let dispatch = dispatch_layout_algorithm(&ir, LayoutAlgorithm::Auto);
         assert_eq!(dispatch.selected, LayoutAlgorithm::Tree);
+    }
+
+    // ── Algorithm-family dispatch parity tests (bd-3uz.17) ─────────────
+
+    /// Verify that requesting each algorithm for its native diagram type results
+    /// in the requested algorithm actually being selected and executed.
+    #[test]
+    fn dispatch_parity_sugiyama_for_flowchart() {
+        let ir = graph_ir(DiagramType::Flowchart, 4, &[(0, 1), (1, 2), (2, 3)]);
+        let traced = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Sugiyama);
+        assert_eq!(traced.trace.dispatch.requested, LayoutAlgorithm::Sugiyama);
+        assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Sugiyama);
+        assert_eq!(traced.trace.dispatch.reason, "explicit_request_honored");
+        assert!(!traced.trace.dispatch.capability_unavailable);
+    }
+
+    #[test]
+    fn dispatch_parity_force_for_flowchart() {
+        let ir = graph_ir(DiagramType::Flowchart, 4, &[(0, 1), (1, 2), (2, 3)]);
+        let traced = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Force);
+        assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Force);
+        assert_eq!(traced.trace.dispatch.reason, "explicit_request_honored");
+    }
+
+    #[test]
+    fn dispatch_parity_tree_for_flowchart() {
+        let ir = graph_ir(DiagramType::Flowchart, 4, &[(0, 1), (1, 2), (2, 3)]);
+        let traced = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Tree);
+        assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Tree);
+        assert_eq!(traced.trace.dispatch.reason, "explicit_request_honored");
+    }
+
+    #[test]
+    fn dispatch_parity_radial_for_mindmap() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Mindmap);
+        for i in 0..4 {
+            ir.nodes.push(IrNode {
+                id: format!("N{i}"),
+                ..IrNode::default()
+            });
+        }
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            arrow: ArrowType::Arrow,
+            ..IrEdge::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(2)),
+            arrow: ArrowType::Arrow,
+            ..IrEdge::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(3)),
+            arrow: ArrowType::Arrow,
+            ..IrEdge::default()
+        });
+        let traced = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Radial);
+        assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Radial);
+    }
+
+    #[test]
+    fn dispatch_parity_sequence_for_sequence() {
+        let ir = sequence_ir(&["Alice", "Bob", "Carol"], &[(0, 1), (1, 2)]);
+        let traced = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Sequence);
+        assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Sequence);
+    }
+
+    #[test]
+    fn dispatch_parity_timeline_for_timeline() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Timeline);
+        ir.nodes.push(IrNode {
+            id: "T1".to_string(),
+            ..IrNode::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "T2".to_string(),
+            ..IrNode::default()
+        });
+        let traced = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Timeline);
+        assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Timeline);
+    }
+
+    #[test]
+    fn dispatch_parity_gantt_for_gantt() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Gantt);
+        ir.nodes.push(IrNode {
+            id: "G1".to_string(),
+            ..IrNode::default()
+        });
+        let traced = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Gantt);
+        assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Gantt);
+    }
+
+    #[test]
+    fn dispatch_parity_sankey_for_sankey() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Sankey);
+        ir.nodes.push(IrNode {
+            id: "S1".to_string(),
+            ..IrNode::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "S2".to_string(),
+            ..IrNode::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            arrow: ArrowType::Arrow,
+            ..IrEdge::default()
+        });
+        let traced = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Sankey);
+        assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Sankey);
+    }
+
+    #[test]
+    fn dispatch_parity_kanban_for_journey() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Journey);
+        ir.nodes.push(IrNode {
+            id: "J1".to_string(),
+            ..IrNode::default()
+        });
+        let traced = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Kanban);
+        assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Kanban);
+    }
+
+    #[test]
+    fn dispatch_parity_grid_for_block_beta() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::BlockBeta);
+        ir.nodes.push(IrNode {
+            id: "B1".to_string(),
+            ..IrNode::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "B2".to_string(),
+            ..IrNode::default()
+        });
+        let traced = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Grid);
+        assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Grid);
+    }
+
+    /// Verify that requesting an unavailable algorithm falls back with capability_unavailable.
+    #[test]
+    fn dispatch_unavailable_radial_for_flowchart_falls_back() {
+        let ir = graph_ir(DiagramType::Flowchart, 3, &[(0, 1), (1, 2)]);
+        let traced = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Radial);
+        assert!(traced.trace.dispatch.capability_unavailable);
+        assert_ne!(traced.trace.dispatch.selected, LayoutAlgorithm::Radial);
+        assert_eq!(
+            traced.trace.dispatch.reason,
+            "requested_algorithm_capability_unavailable_for_diagram_type"
+        );
+        // Layout should still complete successfully.
+        assert!(!traced.layout.nodes.is_empty());
+    }
+
+    #[test]
+    fn dispatch_unavailable_timeline_for_class_falls_back() {
+        let ir = graph_ir(DiagramType::Class, 3, &[(0, 1), (1, 2)]);
+        let traced = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Timeline);
+        assert!(traced.trace.dispatch.capability_unavailable);
+        assert_ne!(traced.trace.dispatch.selected, LayoutAlgorithm::Timeline);
+    }
+
+    #[test]
+    fn dispatch_unavailable_gantt_for_er_falls_back() {
+        let ir = graph_ir(DiagramType::Er, 2, &[(0, 1)]);
+        let traced = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Gantt);
+        assert!(traced.trace.dispatch.capability_unavailable);
+        assert_ne!(traced.trace.dispatch.selected, LayoutAlgorithm::Gantt);
+    }
+
+    #[test]
+    fn dispatch_unavailable_sequence_for_state_falls_back() {
+        let ir = graph_ir(DiagramType::State, 3, &[(0, 1), (1, 2)]);
+        let traced = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Sequence);
+        assert!(traced.trace.dispatch.capability_unavailable);
+    }
+
+    /// Verify auto-selection is deterministic across a mixed corpus of diagram types.
+    #[test]
+    fn dispatch_auto_deterministic_mixed_corpus() {
+        let corpus: Vec<MermaidDiagramIr> = vec![
+            graph_ir(DiagramType::Flowchart, 5, &[(0, 1), (0, 2), (1, 3), (2, 4)]),
+            graph_ir(
+                DiagramType::Flowchart,
+                8,
+                &[
+                    (0, 1),
+                    (0, 2),
+                    (1, 3),
+                    (2, 3),
+                    (3, 4),
+                    (4, 5),
+                    (5, 6),
+                    (6, 7),
+                ],
+            ),
+            graph_ir(DiagramType::Class, 4, &[(0, 1), (1, 2), (2, 3), (3, 0)]),
+            graph_ir(DiagramType::State, 3, &[(0, 1), (0, 2)]),
+            graph_ir(DiagramType::Er, 6, &[(0, 1), (2, 3), (4, 5)]),
+            {
+                let mut ir = MermaidDiagramIr::empty(DiagramType::Mindmap);
+                for i in 0..3 {
+                    ir.nodes.push(IrNode {
+                        id: format!("M{i}"),
+                        ..IrNode::default()
+                    });
+                }
+                ir
+            },
+            MermaidDiagramIr::empty(DiagramType::Gantt),
+            MermaidDiagramIr::empty(DiagramType::Sequence),
+        ];
+
+        for ir in &corpus {
+            let t1 = layout_diagram_traced(ir);
+            let t2 = layout_diagram_traced(ir);
+            assert_eq!(
+                t1.trace.dispatch.selected, t2.trace.dispatch.selected,
+                "Auto-selection must be deterministic for {:?}",
+                ir.diagram_type
+            );
+            assert_eq!(t1.trace.dispatch.reason, t2.trace.dispatch.reason);
+        }
+    }
+
+    /// Verify that guardrail fallback produces a valid layout with fallback_applied flag.
+    #[test]
+    fn dispatch_guardrail_fallback_produces_valid_layout() {
+        // Use tight guardrails to force fallback.
+        let ir = graph_ir(
+            DiagramType::Flowchart,
+            20,
+            &[
+                (0, 1),
+                (1, 2),
+                (2, 3),
+                (3, 4),
+                (4, 5),
+                (5, 6),
+                (6, 7),
+                (7, 8),
+                (8, 9),
+                (9, 10),
+                (10, 11),
+                (11, 12),
+                (12, 13),
+                (13, 14),
+                (14, 15),
+                (15, 16),
+                (16, 17),
+                (17, 18),
+                (18, 19),
+            ],
+        );
+        let tight_guardrails = LayoutGuardrails {
+            max_layout_time_ms: 1,
+            max_layout_iterations: 5,
+            max_route_ops: 10,
+        };
+        let traced = layout_diagram_traced_with_algorithm_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Force,
+            tight_guardrails,
+        );
+        // Force layout is expensive; guardrails should trigger fallback to Tree or Grid.
+        assert!(
+            traced.trace.guard.fallback_applied,
+            "Tight guardrails should trigger fallback from Force"
+        );
+        // But layout should still be valid.
+        assert!(
+            traced.layout.bounds.width >= 0.0,
+            "Fallback layout must have non-negative width"
+        );
+        assert!(
+            traced.layout.bounds.height >= 0.0,
+            "Fallback layout must have non-negative height"
+        );
+        assert_eq!(traced.layout.nodes.len(), 20);
+    }
+
+    /// Verify auto dispatch traces include informative reason strings.
+    #[test]
+    fn dispatch_auto_reasons_are_descriptive() {
+        let cases: Vec<(MermaidDiagramIr, &str)> = vec![
+            (
+                MermaidDiagramIr::empty(DiagramType::Mindmap),
+                "auto_diagram_type_mindmap",
+            ),
+            (
+                MermaidDiagramIr::empty(DiagramType::Timeline),
+                "auto_diagram_type_timeline",
+            ),
+            (
+                MermaidDiagramIr::empty(DiagramType::Gantt),
+                "auto_diagram_type_gantt",
+            ),
+            (
+                MermaidDiagramIr::empty(DiagramType::Sankey),
+                "auto_diagram_type_sankey",
+            ),
+            (
+                MermaidDiagramIr::empty(DiagramType::Journey),
+                "auto_diagram_type_kanban",
+            ),
+            (
+                MermaidDiagramIr::empty(DiagramType::BlockBeta),
+                "auto_diagram_type_block_beta",
+            ),
+            (
+                MermaidDiagramIr::empty(DiagramType::Sequence),
+                "auto_diagram_type_sequence",
+            ),
+            (
+                graph_ir(DiagramType::Flowchart, 2, &[(0, 1)]),
+                "auto_metrics_default_sugiyama",
+            ),
+        ];
+
+        for (ir, expected_reason) in &cases {
+            let traced = layout_diagram_traced(ir);
+            assert_eq!(
+                traced.trace.dispatch.reason, *expected_reason,
+                "Wrong reason for {:?}: got {}",
+                ir.diagram_type, traced.trace.dispatch.reason
+            );
+        }
     }
 }
