@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use chumsky::prelude::*;
 use fm_core::{
@@ -3372,7 +3372,7 @@ fn parse_architecture(input: &str, builder: &mut IrBuilder) {
 /// Git graph state tracker for parsing.
 struct GitGraphState {
     /// Map of branch names to their current head commit node ID
-    branches: std::collections::BTreeMap<String, IrNodeId>,
+    branches: HashMap<String, IrNodeId>,
     /// Current branch name
     current_branch: String,
     /// Auto-generated commit counter for unnamed commits
@@ -3382,7 +3382,7 @@ struct GitGraphState {
 impl GitGraphState {
     fn new() -> Self {
         Self {
-            branches: std::collections::BTreeMap::new(),
+            branches: HashMap::new(),
             current_branch: "main".to_string(),
             commit_counter: 0,
         }

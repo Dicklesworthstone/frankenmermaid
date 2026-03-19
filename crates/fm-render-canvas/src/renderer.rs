@@ -395,12 +395,30 @@ impl Canvas2dRenderer {
             IrTextBaseline::Middle => TextBaseline::Middle,
             IrTextBaseline::Bottom => TextBaseline::Bottom,
         });
-        ctx.fill_text(
-            &text.text,
-            f64::from(text.x) + offset_x,
-            f64::from(text.y) + offset_y,
-        );
-        self.draw_calls += 1;
+
+        let lines: Vec<&str> = text.text.lines().collect();
+        let line_height = f64::from(text.font_size) * 1.2;
+        let total_height = line_height * lines.len() as f64;
+        let mut current_y = f64::from(text.y) + offset_y;
+
+        if lines.len() > 1 {
+            match text.baseline {
+                IrTextBaseline::Top => {}
+                IrTextBaseline::Middle => {
+                    current_y -= (total_height - line_height) / 2.0;
+                }
+                IrTextBaseline::Bottom => {
+                    current_y -= total_height - line_height;
+                }
+            }
+        }
+
+        for line in lines {
+            ctx.fill_text(line, f64::from(text.x) + offset_x, current_y);
+            current_y += line_height;
+            self.draw_calls += 1;
+        }
+
         stats.labels_drawn += 1;
         ctx.set_global_alpha(1.0);
     }

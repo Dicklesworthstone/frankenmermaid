@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, HashMap};
+
 use fm_core::{
     ArrowType, ClassMemberKind, ClassStereotype, Diagnostic, DiagnosticCategory, DiagramType,
     FragmentAlternative, FragmentKind, GraphDirection, IrActivation, IrAttributeKey, IrClassMember,
@@ -21,12 +23,14 @@ type OpenFragment = (
 
 pub(crate) struct IrBuilder {
     ir: MermaidDiagramIr,
-    node_index_by_id: std::collections::BTreeMap<String, IrNodeId>,
+    // `std::collections::HashMap` uses a SwissTable backend, so this keeps
+    // node lookup fast without affecting deterministic output ordering.
+    node_index_by_id: HashMap<String, IrNodeId>,
     warnings: Vec<String>,
     /// Track nodes that were auto-created (for dangling edge recovery)
     auto_created_nodes: Vec<IrNodeId>,
     /// Stack of open activations per participant name: (node_id, start_edge_index, depth)
-    activation_stacks: std::collections::BTreeMap<String, Vec<(IrNodeId, usize)>>,
+    activation_stacks: BTreeMap<String, Vec<(IrNodeId, usize)>>,
     /// Currently open participant group (label, color, collected participant names)
     current_participant_group: Option<(String, Option<String>, Vec<String>)>,
     /// Stack of open fragments
@@ -39,10 +43,10 @@ impl IrBuilder {
     pub(crate) fn new(diagram_type: DiagramType) -> Self {
         Self {
             ir: MermaidDiagramIr::empty(diagram_type),
-            node_index_by_id: std::collections::BTreeMap::new(),
+            node_index_by_id: HashMap::new(),
             warnings: Vec::new(),
             auto_created_nodes: Vec::new(),
-            activation_stacks: std::collections::BTreeMap::new(),
+            activation_stacks: BTreeMap::new(),
             current_participant_group: None,
             fragment_stack: Vec::new(),
             current_class: None,
@@ -838,5 +842,56 @@ fn clean_label(input: Option<&str>) -> Option<String> {
         None
     } else {
         Some(cleaned.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::IrBuilder;
+    use fm_core::{DiagramType, NodeShape, Span};
+
+    #[test]
+    fn intern_node_reuses_existing_lookup_entry() {
+        let mut builder = IrBuilder::new(DiagramType::Flowchart);
+        let span = Span::default();
+
+        let first = builder
+            .intern_node("A", None, NodeShape::Rect, span)
+            .expect("first node should be created");
+        let second = builder
+            .intern_node("A", Some("Alpha"), NodeShape::Diamond, span)
+            .expect("existing node should be reused");
+
+        assert_eq!(first, second);
+
+        let node = builder.get_node_by_id(first).expect("node should exist");
+        assert_eq!(node.shape, NodeShape::Diamond);
+        assert!(
+            node.label.is_some(),
+            "missing label should be upgraded in place"
+        );
+    }
+
+    #[test]
+    fn finish_flushes_activation_stacks_in_name_order() {
+        let mut builder = IrBuilder::new(DiagramType::Sequence);
+        let span = Span::default();
+
+        let _ = builder.intern_node("beta", Some("beta"), NodeShape::Rect, span);
+        let _ = builder.intern_node("alpha", Some("alpha"), NodeShape::Rect, span);
+
+        builder.activate_participant("beta");
+        builder.activate_participant("alpha");
+
+        let result = builder.finish(1.0, crate::DetectionMethod::ExactKeyword);
+        let activations = &result
+            .ir
+            .sequence_meta
+            .expect("sequence metadata should exist")
+            .activations;
+
+        assert_eq!(activations.len(), 2);
+        assert_eq!(activations[0].participant.0, 1);
+        assert_eq!(activations[1].participant.0, 0);
     }
 }

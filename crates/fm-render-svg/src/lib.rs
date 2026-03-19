@@ -28,8 +28,8 @@ pub use transform::{Transform, TransformBuilder};
 use fm_core::{MermaidDiagramIr, MermaidTier, Span};
 use fm_layout::{
     DiagramLayout, FillStyle, LayoutEdgePath, LayoutNodeBox, LineCap as RenderLineCap,
-    LineJoin as RenderLineJoin, PathCmd, RenderClip, RenderGroup, RenderItem, RenderPath,
-    RenderScene, RenderSource, RenderText, RenderTransform, StrokeStyle,
+    LineJoin as RenderLineJoin, MarkerKind, PathCmd, RenderClip, RenderGroup, RenderItem,
+    RenderPath, RenderScene, RenderSource, RenderText, RenderTransform, StrokeStyle,
     TextAlign as RenderTextAlign, TextBaseline as RenderTextBaseline, build_render_scene,
     layout_diagram,
 };
@@ -2222,6 +2222,8 @@ mod tests {
                 line_cap: RenderLineCap::Round,
                 line_join: RenderLineJoin::Bevel,
             }),
+            marker_start: MarkerKind::None,
+            marker_end: MarkerKind::None,
         }));
         root.children.push(RenderItem::Text(RenderText {
             source: RenderSource::Edge(2),
@@ -2277,6 +2279,8 @@ mod tests {
                 opacity: 1.0,
             }),
             stroke: None,
+            marker_start: MarkerKind::None,
+            marker_end: MarkerKind::None,
         }));
 
         let mut root = RenderGroup::new(Some(String::from("scene-root")));
