@@ -2091,10 +2091,25 @@ mod tests {
             text: title.to_string(),
             span: Span::default(),
         });
+        // Clusters need member nodes to produce layout cluster boxes.
+        ir.nodes.push(IrNode {
+            id: "A".to_string(),
+            ..IrNode::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "B".to_string(),
+            ..IrNode::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            arrow: ArrowType::Arrow,
+            ..IrEdge::default()
+        });
         ir.clusters.push(IrCluster {
             id: IrClusterId(0),
             title: Some(label_id),
-            members: vec![],
+            members: vec![IrNodeId(0), IrNodeId(1)],
             grid_span: 1,
             span: Span::default(),
         });
