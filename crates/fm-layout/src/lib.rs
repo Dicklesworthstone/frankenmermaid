@@ -10476,4 +10476,252 @@ mod tests {
         assert!(force_ns < 500_000_000);
         assert!(tree_ns < 500_000_000);
     }
+
+    // ── Mathematical invariant proptests (bd-17e4.4) ──────────────────
+
+    /// Build a random DAG from a seed. Nodes are numbered 0..n. Edges go from
+    /// lower to higher indices (guaranteeing acyclicity).
+    fn random_dag(node_count: usize, edge_seed: u64, density: usize) -> MermaidDiagramIr {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.direction = GraphDirection::TB;
+        for i in 0..node_count {
+            ir.nodes.push(IrNode {
+                id: format!("N{i}"),
+                ..IrNode::default()
+            });
+        }
+        let mut val = edge_seed;
+        let target_edges = node_count
+            .saturating_mul(density)
+            .min(node_count * (node_count - 1) / 2);
+        let mut added = 0_usize;
+        for _ in 0..target_edges.saturating_mul(3) {
+            if added >= target_edges {
+                break;
+            }
+            val = val.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let from = (val as usize) % node_count;
+            val = val.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let to = (val as usize) % node_count;
+            // Edges always go from lower to higher index → acyclic.
+            let (lo, hi) = if from < to { (from, to) } else { (to, from) };
+            if lo != hi {
+                ir.edges.push(IrEdge {
+                    from: IrEndpoint::Node(IrNodeId(lo)),
+                    to: IrEndpoint::Node(IrNodeId(hi)),
+                    arrow: ArrowType::Arrow,
+                    ..IrEdge::default()
+                });
+                added += 1;
+            }
+        }
+        ir
+    }
+
+    /// Build a star graph: one center node connected to n-1 leaves.
+    fn star_ir(leaf_count: usize) -> MermaidDiagramIr {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.direction = GraphDirection::TB;
+        ir.nodes.push(IrNode {
+            id: "center".to_string(),
+            ..IrNode::default()
+        });
+        for i in 0..leaf_count {
+            ir.nodes.push(IrNode {
+                id: format!("L{i}"),
+                ..IrNode::default()
+            });
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(0)),
+                to: IrEndpoint::Node(IrNodeId(i + 1)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+        ir
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// Invariant #1: Determinism — layout(G) == layout(G) for random DAGs.
+        #[test]
+        fn prop_invariant_determinism_random_dag(
+            node_count in 3usize..25,
+            edge_seed in 0u64..500,
+            density in 1usize..3,
+        ) {
+            let ir = random_dag(node_count, edge_seed, density);
+            let first = layout_diagram_traced(&ir);
+            let second = layout_diagram_traced(&ir);
+            prop_assert_eq!(&first, &second, "Layout must be deterministic for random DAG");
+        }
+
+        /// Invariant #1b: Determinism for star graphs.
+        #[test]
+        fn prop_invariant_determinism_star(leaf_count in 1usize..20) {
+            let ir = star_ir(leaf_count);
+            let first = layout_diagram(&ir);
+            let second = layout_diagram(&ir);
+            for (n1, n2) in first.nodes.iter().zip(second.nodes.iter()) {
+                prop_assert_eq!(n1.bounds, n2.bounds, "Star node {} differs", n1.node_id);
+            }
+        }
+
+        /// Invariant #2: Rank consistency — for every edge (u,v) in a DAG,
+        /// rank(u) <= rank(v) (layered layouts assign monotonically increasing ranks).
+        #[test]
+        fn prop_invariant_rank_consistency_dag(
+            node_count in 3usize..20,
+            edge_seed in 0u64..300,
+        ) {
+            let ir = random_dag(node_count, edge_seed, 1);
+            let layout = layout_diagram(&ir);
+            // Build rank lookup from layout nodes.
+            let rank_of: BTreeMap<&str, usize> = layout
+                .nodes
+                .iter()
+                .map(|n| (n.node_id.as_str(), n.rank))
+                .collect();
+            // For each non-reversed edge, source rank should be <= target rank.
+            for edge in &layout.edges {
+                if edge.reversed {
+                    continue; // Reversed edges are cycle-breaking — skip.
+                }
+                // Look up source/target from the IR edge.
+                if edge.edge_index < ir.edges.len() {
+                    let ir_edge = &ir.edges[edge.edge_index];
+                    if let (IrEndpoint::Node(from_id), IrEndpoint::Node(to_id)) =
+                        (ir_edge.from, ir_edge.to)
+                        && let (Some(from_node), Some(to_node)) =
+                            (ir.nodes.get(from_id.0), ir.nodes.get(to_id.0))
+                        && let (Some(&from_rank), Some(&to_rank)) =
+                            (rank_of.get(from_node.id.as_str()), rank_of.get(to_node.id.as_str()))
+                    {
+                        prop_assert!(
+                            from_rank <= to_rank,
+                            "Rank consistency violated: {} (rank {}) -> {} (rank {})",
+                            from_node.id,
+                            from_rank,
+                            to_node.id,
+                            to_rank
+                        );
+                    }
+                }
+            }
+        }
+
+        /// Invariant #3: Non-overlap — for random DAGs, no two nodes overlap.
+        #[test]
+        fn prop_invariant_non_overlap_random_dag(
+            node_count in 3usize..20,
+            edge_seed in 0u64..200,
+        ) {
+            let ir = random_dag(node_count, edge_seed, 1);
+            let layout = layout_diagram(&ir);
+            for i in 0..layout.nodes.len() {
+                for j in (i + 1)..layout.nodes.len() {
+                    let a = &layout.nodes[i];
+                    let b = &layout.nodes[j];
+                    let non_overlapping =
+                        a.bounds.x + a.bounds.width <= b.bounds.x + 0.5
+                            || b.bounds.x + b.bounds.width <= a.bounds.x + 0.5
+                            || a.bounds.y + a.bounds.height <= b.bounds.y + 0.5
+                            || b.bounds.y + b.bounds.height <= a.bounds.y + 0.5;
+                    prop_assert!(
+                        non_overlapping,
+                        "Nodes {} and {} overlap: {:?} vs {:?}",
+                        a.node_id,
+                        b.node_id,
+                        a.bounds,
+                        b.bounds
+                    );
+                }
+            }
+        }
+
+        /// Invariant #4: Connectivity preservation — layout does not lose nodes or edges.
+        #[test]
+        fn prop_invariant_connectivity_preservation(
+            node_count in 2usize..15,
+            edge_seed in 0u64..300,
+        ) {
+            let ir = random_dag(node_count, edge_seed, 2);
+            let layout = layout_diagram(&ir);
+            prop_assert_eq!(
+                layout.nodes.len(),
+                ir.nodes.len(),
+                "Layout must preserve node count"
+            );
+            // All edge indices in the layout should reference valid IR edges.
+            for layout_edge in &layout.edges {
+                prop_assert!(
+                    layout_edge.edge_index < ir.edges.len(),
+                    "Layout edge index {} out of range (IR has {} edges)",
+                    layout_edge.edge_index,
+                    ir.edges.len()
+                );
+            }
+        }
+
+        /// Invariant #5: Boundedness — all coordinates are finite (no NaN, no Infinity).
+        #[test]
+        fn prop_invariant_boundedness_all_finite(
+            node_count in 1usize..25,
+            edge_seed in 0u64..400,
+        ) {
+            let ir = random_dag(node_count, edge_seed, 2);
+            let layout = layout_diagram(&ir);
+            for node in &layout.nodes {
+                prop_assert!(node.bounds.x.is_finite(), "Node {} x is not finite", node.node_id);
+                prop_assert!(node.bounds.y.is_finite(), "Node {} y is not finite", node.node_id);
+                prop_assert!(node.bounds.width.is_finite(), "Node {} width is not finite", node.node_id);
+                prop_assert!(node.bounds.height.is_finite(), "Node {} height is not finite", node.node_id);
+                prop_assert!(node.bounds.width >= 0.0, "Node {} has negative width", node.node_id);
+                prop_assert!(node.bounds.height >= 0.0, "Node {} has negative height", node.node_id);
+            }
+            for edge in &layout.edges {
+                for (pi, point) in edge.points.iter().enumerate() {
+                    prop_assert!(point.x.is_finite(), "Edge {} point {pi} x is not finite", edge.edge_index);
+                    prop_assert!(point.y.is_finite(), "Edge {} point {pi} y is not finite", edge.edge_index);
+                }
+            }
+            prop_assert!(layout.bounds.width.is_finite(), "Layout width is not finite");
+            prop_assert!(layout.bounds.height.is_finite(), "Layout height is not finite");
+            prop_assert!(layout.bounds.width >= 0.0, "Layout has negative width");
+            prop_assert!(layout.bounds.height >= 0.0, "Layout has negative height");
+        }
+
+        /// Invariant #5b: Boundedness for star graphs (wide fan-out).
+        #[test]
+        fn prop_invariant_boundedness_star(leaf_count in 1usize..30) {
+            let ir = star_ir(leaf_count);
+            let layout = layout_diagram(&ir);
+            for node in &layout.nodes {
+                prop_assert!(node.bounds.x.is_finite());
+                prop_assert!(node.bounds.y.is_finite());
+                prop_assert!(node.bounds.width > 0.0);
+                prop_assert!(node.bounds.height > 0.0);
+            }
+        }
+
+        /// Combined: random DAG through force-directed layout also satisfies invariants.
+        #[test]
+        fn prop_invariant_force_layout_bounded_and_finite(
+            node_count in 3usize..15,
+            edge_seed in 0u64..200,
+        ) {
+            let ir = random_dag(node_count, edge_seed, 1);
+            let layout = layout_diagram_force(&ir);
+            prop_assert_eq!(layout.nodes.len(), ir.nodes.len());
+            for node in &layout.nodes {
+                prop_assert!(node.bounds.x.is_finite(), "Force node {} x not finite", node.node_id);
+                prop_assert!(node.bounds.y.is_finite(), "Force node {} y not finite", node.node_id);
+                prop_assert!(node.bounds.width > 0.0);
+                prop_assert!(node.bounds.height > 0.0);
+            }
+            prop_assert!(layout.bounds.width >= 0.0);
+            prop_assert!(layout.bounds.height >= 0.0);
+        }
+    }
 }
