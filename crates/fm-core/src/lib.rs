@@ -2326,6 +2326,7 @@ impl MermaidBudgetLedger {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn push_stage_event(
         &mut self,
         kind: &str,
@@ -4502,15 +4503,15 @@ mod tests {
             let mut readme = load_readme();
             let start_marker = "<!-- BEGIN GENERATED: supported-diagram-types -->";
             let end_marker = "<!-- END GENERATED: supported-diagram-types -->";
-            if let Some(start) = readme.find(start_marker) {
-                if let Some(end) = readme[start..].find(end_marker) {
-                    let full_start = start + start_marker.len();
-                    let full_end = start + end;
-                    readme.replace_range(full_start..full_end, &format!("\n{actual}\n"));
-                    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-                    let readme_path = manifest_dir.join("../../README.md");
-                    std::fs::write(&readme_path, readme).unwrap();
-                }
+            if let Some(start) = readme.find(start_marker)
+                && let Some(end) = readme[start..].find(end_marker)
+            {
+                let full_start = start + start_marker.len();
+                let full_end = start + end;
+                readme.replace_range(full_start..full_end, &format!("\n{actual}\n"));
+                let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+                let readme_path = manifest_dir.join("../../README.md");
+                std::fs::write(&readme_path, readme).unwrap();
             }
         }
 
@@ -4530,23 +4531,23 @@ mod tests {
             let mut readme = load_readme();
             let start_marker = "<!-- BEGIN GENERATED: runtime-capability-metadata -->";
             let end_marker = "<!-- END GENERATED: runtime-capability-metadata -->";
-            if let Some(start) = readme.find(start_marker) {
-                if let Some(end) = readme[start..].find(end_marker) {
-                    let full_start = start + start_marker.len();
-                    let full_end = start + end;
-                    readme.replace_range(full_start..full_end, &format!("\n{actual}\n"));
-                    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-                    let readme_path = manifest_dir.join("../../README.md");
-                    std::fs::write(&readme_path, readme).unwrap();
-                }
+            if let Some(start) = readme.find(start_marker)
+                && let Some(end) = readme[start..].find(end_marker)
+            {
+                let full_start = start + start_marker.len();
+                let full_end = start + end;
+                readme.replace_range(full_start..full_end, &format!("\n{actual}\n"));
+                let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+                let readme_path = manifest_dir.join("../../README.md");
+                std::fs::write(&readme_path, readme).unwrap();
             } else {
-                readme.push_str("\n");
+                readme.push('\n');
                 readme.push_str(start_marker);
-                readme.push_str("\n");
+                readme.push('\n');
                 readme.push_str(&actual);
-                readme.push_str("\n");
+                readme.push('\n');
                 readme.push_str(end_marker);
-                readme.push_str("\n");
+                readme.push('\n');
                 let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
                 let readme_path = manifest_dir.join("../../README.md");
                 std::fs::write(&readme_path, readme).unwrap();
@@ -4710,6 +4711,412 @@ mod tests {
             let json = serde_json::to_string(&kind).expect("serialize");
             let deser: LifecycleEventKind = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(kind, deser);
+        }
+    }
+
+    // ── Graph IR operations tests (bd-1c5.6) ──────────────────────────
+
+    #[test]
+    fn ir_empty_has_no_nodes_or_edges() {
+        let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        assert!(ir.nodes.is_empty());
+        assert!(ir.edges.is_empty());
+        assert!(ir.clusters.is_empty());
+        assert!(ir.labels.is_empty());
+        assert!(ir.ports.is_empty());
+        assert!(ir.graph.nodes.is_empty());
+        assert!(ir.graph.edges.is_empty());
+        assert!(ir.graph.clusters.is_empty());
+        assert!(ir.graph.subgraphs.is_empty());
+    }
+
+    #[test]
+    fn ir_add_nodes_and_query() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.nodes.push(IrNode {
+            id: "A".to_string(),
+            shape: NodeShape::Rect,
+            ..IrNode::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "B".to_string(),
+            shape: NodeShape::Diamond,
+            ..IrNode::default()
+        });
+        assert_eq!(ir.nodes.len(), 2);
+        assert_eq!(ir.nodes[0].id, "A");
+        assert_eq!(ir.nodes[0].shape, NodeShape::Rect);
+        assert_eq!(ir.nodes[1].id, "B");
+        assert_eq!(ir.nodes[1].shape, NodeShape::Diamond);
+    }
+
+    #[test]
+    fn ir_add_edges_with_endpoints() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.nodes.push(IrNode {
+            id: "A".to_string(),
+            ..IrNode::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "B".to_string(),
+            ..IrNode::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            arrow: ArrowType::Arrow,
+            ..IrEdge::default()
+        });
+        assert_eq!(ir.edges.len(), 1);
+        assert_eq!(ir.edges[0].from, IrEndpoint::Node(IrNodeId(0)));
+        assert_eq!(ir.edges[0].to, IrEndpoint::Node(IrNodeId(1)));
+        assert_eq!(ir.edges[0].arrow, ArrowType::Arrow);
+    }
+
+    #[test]
+    fn ir_endpoint_resolution() {
+        let ports = vec![IrPort {
+            node: IrNodeId(2),
+            name: "port1".to_string(),
+            ..IrPort::default()
+        }];
+        assert_eq!(
+            IrEndpoint::Node(IrNodeId(5)).resolved_node_id(&ports),
+            Some(IrNodeId(5))
+        );
+        assert_eq!(
+            IrEndpoint::Port(IrPortId(0)).resolved_node_id(&ports),
+            Some(IrNodeId(2))
+        );
+        assert_eq!(IrEndpoint::Unresolved.resolved_node_id(&ports), None);
+        assert_eq!(
+            IrEndpoint::Port(IrPortId(99)).resolved_node_id(&ports),
+            None
+        );
+    }
+
+    #[test]
+    fn ir_labels_interning() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.labels.push(IrLabel {
+            text: "Start".to_string(),
+            ..IrLabel::default()
+        });
+        ir.labels.push(IrLabel {
+            text: "End".to_string(),
+            ..IrLabel::default()
+        });
+
+        ir.nodes.push(IrNode {
+            id: "A".to_string(),
+            label: Some(IrLabelId(0)),
+            ..IrNode::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "B".to_string(),
+            label: Some(IrLabelId(1)),
+            ..IrNode::default()
+        });
+
+        assert_eq!(ir.labels[ir.nodes[0].label.unwrap().0].text, "Start");
+        assert_eq!(ir.labels[ir.nodes[1].label.unwrap().0].text, "End");
+    }
+
+    #[test]
+    fn ir_cluster_members() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.nodes.push(IrNode {
+            id: "A".to_string(),
+            ..IrNode::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "B".to_string(),
+            ..IrNode::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "C".to_string(),
+            ..IrNode::default()
+        });
+
+        ir.clusters.push(IrCluster {
+            id: IrClusterId(0),
+            title: None,
+            members: vec![IrNodeId(0), IrNodeId(1)],
+            grid_span: 0,
+            span: Span::default(),
+        });
+        assert_eq!(ir.clusters[0].members.len(), 2);
+        assert_eq!(ir.clusters[0].members[0], IrNodeId(0));
+        assert_eq!(ir.clusters[0].members[1], IrNodeId(1));
+    }
+
+    #[test]
+    fn ir_subgraph_parent_child_hierarchy() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.graph.subgraphs.push(IrSubgraph {
+            id: IrSubgraphId(0),
+            key: "root".to_string(),
+            parent: None,
+            children: vec![IrSubgraphId(1)],
+            ..IrSubgraph::default()
+        });
+        ir.graph.subgraphs.push(IrSubgraph {
+            id: IrSubgraphId(1),
+            key: "child".to_string(),
+            parent: Some(IrSubgraphId(0)),
+            children: vec![],
+            ..IrSubgraph::default()
+        });
+
+        let roots = ir.graph.root_subgraphs();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].key, "root");
+
+        let leaves = ir.graph.leaf_subgraphs();
+        assert_eq!(leaves.len(), 1);
+        assert_eq!(leaves[0].key, "child");
+    }
+
+    #[test]
+    fn graph_ir_node_query_by_id() {
+        let mut graph = super::MermaidGraphIr::default();
+        graph.nodes.push(IrGraphNode {
+            node_id: IrNodeId(0),
+            kind: IrNodeKind::Generic,
+            clusters: vec![],
+            subgraphs: vec![],
+        });
+        graph.nodes.push(IrGraphNode {
+            node_id: IrNodeId(1),
+            kind: IrNodeKind::Entity,
+            clusters: vec![],
+            subgraphs: vec![],
+        });
+        assert_eq!(graph.node(IrNodeId(0)).unwrap().kind, IrNodeKind::Generic);
+        assert_eq!(graph.node(IrNodeId(1)).unwrap().kind, IrNodeKind::Entity);
+        assert!(graph.node(IrNodeId(99)).is_none());
+    }
+
+    #[test]
+    fn graph_ir_edge_query() {
+        let mut graph = super::MermaidGraphIr::default();
+        graph.edges.push(IrGraphEdge {
+            edge_id: 0,
+            kind: IrEdgeKind::Generic,
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            span: Span::default(),
+        });
+        assert_eq!(graph.edge(0).unwrap().kind, IrEdgeKind::Generic);
+        assert!(graph.edge(99).is_none());
+    }
+
+    #[test]
+    fn graph_ir_cluster_query() {
+        let mut graph = super::MermaidGraphIr::default();
+        graph.clusters.push(IrGraphCluster {
+            cluster_id: IrClusterId(0),
+            title: None,
+            members: vec![IrNodeId(0), IrNodeId(1)],
+            subgraph: None,
+            grid_span: 0,
+            span: Span::default(),
+        });
+        let cluster = graph.cluster(IrClusterId(0)).unwrap();
+        assert_eq!(cluster.members.len(), 2);
+        assert!(graph.cluster(IrClusterId(99)).is_none());
+    }
+
+    #[test]
+    fn graph_ir_subgraph_by_key() {
+        let mut graph = super::MermaidGraphIr::default();
+        graph.subgraphs.push(IrSubgraph {
+            id: IrSubgraphId(0),
+            key: "alpha".to_string(),
+            ..IrSubgraph::default()
+        });
+        graph.subgraphs.push(IrSubgraph {
+            id: IrSubgraphId(1),
+            key: "beta".to_string(),
+            ..IrSubgraph::default()
+        });
+        graph.subgraphs.push(IrSubgraph {
+            id: IrSubgraphId(2),
+            key: "alpha".to_string(),
+            ..IrSubgraph::default()
+        });
+
+        let alpha = graph.subgraphs_by_key("alpha");
+        assert_eq!(alpha.len(), 2);
+        assert_eq!(
+            graph.first_subgraph_by_key("beta").unwrap().id,
+            IrSubgraphId(1)
+        );
+        assert!(graph.first_subgraph_by_key("missing").is_none());
+    }
+
+    #[test]
+    fn graph_ir_node_clusters_and_subgraphs() {
+        let mut graph = super::MermaidGraphIr::default();
+        graph.nodes.push(IrGraphNode {
+            node_id: IrNodeId(0),
+            kind: IrNodeKind::Generic,
+            clusters: vec![IrClusterId(0)],
+            subgraphs: vec![IrSubgraphId(0)],
+        });
+        graph.clusters.push(IrGraphCluster {
+            cluster_id: IrClusterId(0),
+            title: None,
+            members: vec![IrNodeId(0)],
+            subgraph: Some(IrSubgraphId(0)),
+            grid_span: 0,
+            span: Span::default(),
+        });
+        graph.subgraphs.push(IrSubgraph {
+            id: IrSubgraphId(0),
+            key: "sub1".to_string(),
+            members: vec![IrNodeId(0)],
+            cluster: Some(IrClusterId(0)),
+            ..IrSubgraph::default()
+        });
+
+        let node_clusters = graph.node_clusters(IrNodeId(0));
+        assert_eq!(node_clusters.len(), 1);
+        let node_subgraphs = graph.node_subgraphs(IrNodeId(0));
+        assert_eq!(node_subgraphs.len(), 1);
+        assert_eq!(node_subgraphs[0].key, "sub1");
+    }
+
+    #[test]
+    fn ir_serde_roundtrip_preserves_all_fields() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.direction = GraphDirection::LR;
+        ir.labels.push(IrLabel {
+            text: "Hello".to_string(),
+            ..IrLabel::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "A".to_string(),
+            label: Some(IrLabelId(0)),
+            shape: NodeShape::Diamond,
+            implicit: true,
+            ..IrNode::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(0)),
+            arrow: ArrowType::DottedArrow,
+            ..IrEdge::default()
+        });
+
+        let json = serde_json::to_string(&ir).expect("serialize");
+        let deser: MermaidDiagramIr = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(deser.diagram_type, DiagramType::Flowchart);
+        assert_eq!(deser.direction, GraphDirection::LR);
+        assert_eq!(deser.nodes.len(), 1);
+        assert_eq!(deser.nodes[0].id, "A");
+        assert_eq!(deser.nodes[0].shape, NodeShape::Diamond);
+        assert!(deser.nodes[0].implicit);
+        assert_eq!(deser.edges.len(), 1);
+        assert_eq!(deser.edges[0].arrow, ArrowType::DottedArrow);
+        assert_eq!(deser.labels.len(), 1);
+        assert_eq!(deser.labels[0].text, "Hello");
+    }
+
+    #[test]
+    fn ir_diagnostics_add_and_filter() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.add_diagnostic(Diagnostic {
+            severity: DiagnosticSeverity::Warning,
+            category: DiagnosticCategory::Recovery,
+            message: "auto-created node".to_string(),
+            ..Diagnostic::default()
+        });
+        ir.add_diagnostic(Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            category: DiagnosticCategory::Parser,
+            message: "syntax error".to_string(),
+            ..Diagnostic::default()
+        });
+        ir.add_diagnostic(Diagnostic {
+            severity: DiagnosticSeverity::Info,
+            category: DiagnosticCategory::Inference,
+            message: "fuzzy match".to_string(),
+            ..Diagnostic::default()
+        });
+
+        assert_eq!(ir.diagnostics.len(), 3);
+        assert!(ir.has_errors());
+        let warnings: Vec<_> = ir
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == DiagnosticSeverity::Warning)
+            .collect();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].message, "auto-created node");
+    }
+
+    #[test]
+    fn ir_implicit_node_flag() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.nodes.push(IrNode {
+            id: "Explicit".to_string(),
+            implicit: false,
+            ..IrNode::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "Implicit".to_string(),
+            implicit: true,
+            ..IrNode::default()
+        });
+        let implicit_count = ir.nodes.iter().filter(|n| n.implicit).count();
+        assert_eq!(implicit_count, 1);
+    }
+
+    #[test]
+    fn ir_edge_kinds_are_distinct() {
+        let kinds = [
+            IrEdgeKind::Generic,
+            IrEdgeKind::Relationship,
+            IrEdgeKind::Message,
+            IrEdgeKind::Timeline,
+            IrEdgeKind::Dependency,
+            IrEdgeKind::Commit,
+        ];
+        for (i, a) in kinds.iter().enumerate() {
+            for (j, b) in kinds.iter().enumerate() {
+                if i == j {
+                    assert_eq!(a, b);
+                } else {
+                    assert_ne!(a, b);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ir_node_kinds_are_distinct() {
+        let kinds = [
+            IrNodeKind::Generic,
+            IrNodeKind::Entity,
+            IrNodeKind::Participant,
+            IrNodeKind::State,
+            IrNodeKind::Task,
+            IrNodeKind::Event,
+            IrNodeKind::Commit,
+            IrNodeKind::Requirement,
+            IrNodeKind::Slice,
+            IrNodeKind::Point,
+        ];
+        for (i, a) in kinds.iter().enumerate() {
+            for (j, b) in kinds.iter().enumerate() {
+                if i == j {
+                    assert_eq!(a, b);
+                } else {
+                    assert_ne!(a, b);
+                }
+            }
         }
     }
 }
