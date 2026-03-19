@@ -772,7 +772,7 @@ fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
 
         let mut stroke = StrokeStyle::solid("#475569", 1.5);
         let mut marker_end = MarkerKind::None;
-        let mut marker_start = MarkerKind::None;
+        let marker_start = MarkerKind::None;
 
         if let Some(ir_edge) = ir.edges.get(edge.edge_index) {
             if edge.reversed {
@@ -957,7 +957,6 @@ fn hexagon_path(bounds: LayoutRect) -> Vec<PathCmd> {
     let y = bounds.y;
     let w = bounds.width;
     let h = bounds.height;
-    let cx = x + w / 2.0;
     let cy = y + h / 2.0;
     let inset = w * 0.15;
     vec![
@@ -986,25 +985,23 @@ fn cylinder_path(bounds: LayoutRect) -> Vec<PathCmd> {
     let w = bounds.width;
     let h = bounds.height;
     let ry = h * 0.1;
-    let rx = w / 2.0;
-    let cx = x + rx;
 
-    let mut cmds = Vec::new();
-    // Top ellipse
-    cmds.push(PathCmd::MoveTo { x, y: y + ry });
-    // Approximate arcs with Cubic Bezier if needed, but for now we simplify
-    // to maintaining the outer boundary.
-    cmds.push(PathCmd::LineTo {
-        x: x + w,
-        y: y + ry,
-    });
-    cmds.push(PathCmd::LineTo {
-        x: x + w,
-        y: y + h - ry,
-    });
-    cmds.push(PathCmd::LineTo { x, y: y + h - ry });
-    cmds.push(PathCmd::Close);
-    cmds
+    vec![
+        // Top ellipse
+        PathCmd::MoveTo { x, y: y + ry },
+        // Approximate arcs with Cubic Bezier if needed, but for now we simplify
+        // to maintaining the outer boundary.
+        PathCmd::LineTo {
+            x: x + w,
+            y: y + ry,
+        },
+        PathCmd::LineTo {
+            x: x + w,
+            y: y + h - ry,
+        },
+        PathCmd::LineTo { x, y: y + h - ry },
+        PathCmd::Close,
+    ]
 }
 
 fn trapezoid_path(bounds: LayoutRect) -> Vec<PathCmd> {
@@ -10298,5 +10295,185 @@ mod tests {
                 ir.diagram_type, traced.trace.dispatch.reason
             );
         }
+    }
+
+    // ── Performance baseline tests (bd-17e4.1) ────────────────────────
+
+    /// Build a synthetic DAG with controlled density.
+    fn synthetic_dag(node_count: usize, edges_per_node: usize) -> MermaidDiagramIr {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.direction = GraphDirection::TB;
+        for i in 0..node_count {
+            ir.nodes.push(IrNode {
+                id: format!("N{i}"),
+                ..IrNode::default()
+            });
+        }
+        for i in 0..node_count {
+            for j in 1..=edges_per_node {
+                let target = (i + j) % node_count;
+                if target != i && target > i {
+                    ir.edges.push(IrEdge {
+                        from: IrEndpoint::Node(IrNodeId(i)),
+                        to: IrEndpoint::Node(IrNodeId(target)),
+                        arrow: ArrowType::Arrow,
+                        ..IrEdge::default()
+                    });
+                }
+            }
+        }
+        ir
+    }
+
+    fn measure_layout_ns(ir: &MermaidDiagramIr, algorithm: LayoutAlgorithm) -> u128 {
+        let start = std::time::Instant::now();
+        let _traced = layout_diagram_traced_with_algorithm(ir, algorithm);
+        start.elapsed().as_nanos()
+    }
+
+    #[test]
+    fn perf_baseline_sugiyama_small() {
+        let ir = synthetic_dag(20, 2);
+        let ns = measure_layout_ns(&ir, LayoutAlgorithm::Sugiyama);
+        println!(
+            "{{\"benchmark\":\"sugiyama_small\",\"nodes\":20,\"edges\":{},\"ns\":{ns}}}",
+            ir.edges.len()
+        );
+        // Sanity: small graph should complete in under 100ms.
+        assert!(ns < 100_000_000, "Sugiyama 20-node took {ns}ns (>100ms)");
+    }
+
+    #[test]
+    fn perf_baseline_sugiyama_medium() {
+        let ir = synthetic_dag(100, 2);
+        let ns = measure_layout_ns(&ir, LayoutAlgorithm::Sugiyama);
+        println!(
+            "{{\"benchmark\":\"sugiyama_medium\",\"nodes\":100,\"edges\":{},\"ns\":{ns}}}",
+            ir.edges.len()
+        );
+        assert!(ns < 500_000_000, "Sugiyama 100-node took {ns}ns (>500ms)");
+    }
+
+    #[test]
+    fn perf_baseline_sugiyama_large() {
+        let ir = synthetic_dag(500, 2);
+        let ns = measure_layout_ns(&ir, LayoutAlgorithm::Sugiyama);
+        println!(
+            "{{\"benchmark\":\"sugiyama_large\",\"nodes\":500,\"edges\":{},\"ns\":{ns}}}",
+            ir.edges.len()
+        );
+        assert!(ns < 2_000_000_000, "Sugiyama 500-node took {ns}ns (>2s)");
+    }
+
+    #[test]
+    fn perf_baseline_force_small() {
+        let ir = synthetic_dag(20, 2);
+        let ns = measure_layout_ns(&ir, LayoutAlgorithm::Force);
+        println!(
+            "{{\"benchmark\":\"force_small\",\"nodes\":20,\"edges\":{},\"ns\":{ns}}}",
+            ir.edges.len()
+        );
+        assert!(ns < 200_000_000, "Force 20-node took {ns}ns (>200ms)");
+    }
+
+    #[test]
+    fn perf_baseline_force_medium() {
+        let ir = synthetic_dag(100, 2);
+        let ns = measure_layout_ns(&ir, LayoutAlgorithm::Force);
+        println!(
+            "{{\"benchmark\":\"force_medium\",\"nodes\":100,\"edges\":{},\"ns\":{ns}}}",
+            ir.edges.len()
+        );
+        assert!(ns < 1_000_000_000, "Force 100-node took {ns}ns (>1s)");
+    }
+
+    #[test]
+    fn perf_baseline_tree_small() {
+        let ir = synthetic_dag(20, 1);
+        let ns = measure_layout_ns(&ir, LayoutAlgorithm::Tree);
+        println!(
+            "{{\"benchmark\":\"tree_small\",\"nodes\":20,\"edges\":{},\"ns\":{ns}}}",
+            ir.edges.len()
+        );
+        assert!(ns < 50_000_000, "Tree 20-node took {ns}ns (>50ms)");
+    }
+
+    #[test]
+    fn perf_baseline_tree_medium() {
+        let ir = synthetic_dag(100, 1);
+        let ns = measure_layout_ns(&ir, LayoutAlgorithm::Tree);
+        println!(
+            "{{\"benchmark\":\"tree_medium\",\"nodes\":100,\"edges\":{},\"ns\":{ns}}}",
+            ir.edges.len()
+        );
+        assert!(ns < 200_000_000, "Tree 100-node took {ns}ns (>200ms)");
+    }
+
+    #[test]
+    fn perf_baseline_tree_large() {
+        let ir = synthetic_dag(500, 1);
+        let ns = measure_layout_ns(&ir, LayoutAlgorithm::Tree);
+        println!(
+            "{{\"benchmark\":\"tree_large\",\"nodes\":500,\"edges\":{},\"ns\":{ns}}}",
+            ir.edges.len()
+        );
+        assert!(ns < 500_000_000, "Tree 500-node took {ns}ns (>500ms)");
+    }
+
+    #[test]
+    fn perf_baseline_radial() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Mindmap);
+        ir.direction = GraphDirection::TB;
+        ir.nodes.push(IrNode {
+            id: "root".to_string(),
+            ..IrNode::default()
+        });
+        for i in 0..50 {
+            ir.nodes.push(IrNode {
+                id: format!("L{i}"),
+                ..IrNode::default()
+            });
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(0)),
+                to: IrEndpoint::Node(IrNodeId(i + 1)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+        let ns = measure_layout_ns(&ir, LayoutAlgorithm::Radial);
+        println!("{{\"benchmark\":\"radial_50\",\"nodes\":51,\"edges\":50,\"ns\":{ns}}}");
+        assert!(ns < 200_000_000, "Radial 51-node took {ns}ns (>200ms)");
+    }
+
+    #[test]
+    fn perf_baseline_grid() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::BlockBeta);
+        ir.direction = GraphDirection::TB;
+        for i in 0..100 {
+            ir.nodes.push(IrNode {
+                id: format!("B{i}"),
+                ..IrNode::default()
+            });
+        }
+        let ns = measure_layout_ns(&ir, LayoutAlgorithm::Grid);
+        println!("{{\"benchmark\":\"grid_100\",\"nodes\":100,\"edges\":0,\"ns\":{ns}}}");
+        assert!(ns < 100_000_000, "Grid 100-node took {ns}ns (>100ms)");
+    }
+
+    /// Compare algorithm families on the same input to establish relative cost.
+    #[test]
+    fn perf_baseline_algorithm_comparison() {
+        let ir = synthetic_dag(50, 2);
+        let sugiyama_ns = measure_layout_ns(&ir, LayoutAlgorithm::Sugiyama);
+        let force_ns = measure_layout_ns(&ir, LayoutAlgorithm::Force);
+        let tree_ns = measure_layout_ns(&ir, LayoutAlgorithm::Tree);
+        println!(
+            "{{\"benchmark\":\"comparison_50\",\"sugiyama_ns\":{sugiyama_ns},\"force_ns\":{force_ns},\"tree_ns\":{tree_ns}}}"
+        );
+        // Tree should be fastest for chain-like graphs.
+        // Just verify all complete in bounded time.
+        assert!(sugiyama_ns < 500_000_000);
+        assert!(force_ns < 500_000_000);
+        assert!(tree_ns < 500_000_000);
     }
 }
