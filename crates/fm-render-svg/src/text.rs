@@ -1,7 +1,6 @@
 //! SVG text rendering utilities.
 //!
-//! Provides `TextBuilder` for creating text elements with multi-line support,
-//! and `TextMetrics` for estimating text dimensions.
+//! Provides `TextBuilder` for creating text elements with multi-line support.
 
 use crate::element::Element;
 
@@ -59,90 +58,6 @@ impl DominantBaseline {
             Self::Alphabetic => "alphabetic",
             Self::Mathematical => "mathematical",
         }
-    }
-}
-
-/// Text metrics for estimating text dimensions.
-///
-/// Since we don't have access to font metrics in pure Rust without dependencies,
-/// we use a character-count heuristic with configurable average character width.
-#[derive(Debug, Clone)]
-pub struct TextMetrics {
-    /// Average character width in pixels.
-    pub avg_char_width: f32,
-    /// Font size in pixels.
-    pub font_size: f32,
-    /// Line height multiplier.
-    pub line_height: f32,
-}
-
-impl Default for TextMetrics {
-    fn default() -> Self {
-        Self {
-            avg_char_width: 8.0,
-            font_size: 14.0,
-            line_height: 1.4,
-        }
-    }
-}
-
-impl TextMetrics {
-    /// Create new text metrics with the given parameters.
-    #[must_use]
-    pub fn new(avg_char_width: f32, font_size: f32, line_height: f32) -> Self {
-        Self {
-            avg_char_width,
-            font_size,
-            line_height,
-        }
-    }
-
-    /// Estimate the width of a single line of text.
-    #[must_use]
-    pub fn estimate_width(&self, text: &str) -> f32 {
-        // Count characters, weighting for typical character widths
-        let mut width = 0.0;
-        for c in text.chars() {
-            width += match c {
-                'W' | 'M' | '@' | '%' => self.avg_char_width * 1.5,
-                'w' | 'm' => self.avg_char_width * 1.2,
-                'i' | 'l' | '|' | '!' | '\'' | '.' | ',' => self.avg_char_width * 0.4,
-                'I' | 'j' | 't' | 'f' => self.avg_char_width * 0.6,
-                ' ' => self.avg_char_width * 0.5,
-                _ => self.avg_char_width,
-            };
-        }
-        width
-    }
-
-    /// Estimate the width of multi-line text (returns max line width).
-    #[must_use]
-    pub fn estimate_multiline_width(&self, text: &str) -> f32 {
-        text.lines()
-            .map(|line| self.estimate_width(line))
-            .fold(0.0_f32, |acc, w| acc.max(w))
-    }
-
-    /// Estimate the height of a single line of text.
-    #[must_use]
-    pub fn line_height_px(&self) -> f32 {
-        self.font_size * self.line_height
-    }
-
-    /// Estimate the height of multi-line text.
-    #[must_use]
-    pub fn estimate_height(&self, text: &str) -> f32 {
-        let line_count = text.lines().count().max(1);
-        line_count as f32 * self.line_height_px()
-    }
-
-    /// Estimate both width and height.
-    #[must_use]
-    pub fn estimate_dimensions(&self, text: &str) -> (f32, f32) {
-        (
-            self.estimate_multiline_width(text),
-            self.estimate_height(text),
-        )
     }
 }
 
@@ -384,25 +299,5 @@ mod tests {
         let elem = TextBuilder::new("A & B < C > D").build();
         let svg = elem.render();
         assert!(svg.contains("A &amp; B &lt; C > D"));
-    }
-
-    #[test]
-    fn estimates_text_width() {
-        let metrics = TextMetrics::default();
-        let width = metrics.estimate_width("Hello");
-        assert!(width > 0.0);
-
-        // Wider characters should give larger width
-        let wide = metrics.estimate_width("WWWWW");
-        let narrow = metrics.estimate_width("iiiii");
-        assert!(wide > narrow);
-    }
-
-    #[test]
-    fn estimates_multiline_dimensions() {
-        let metrics = TextMetrics::default();
-        let (width, height) = metrics.estimate_dimensions("Line 1\nLine 2\nLine 3");
-        assert!(width > 0.0);
-        assert!(height > metrics.font_size * 2.0); // At least 2+ lines
     }
 }

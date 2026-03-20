@@ -469,6 +469,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_flowchart_reopened_subgraph_does_not_duplicate_ir_entries() {
+        let input = "flowchart TD\nsubgraph S1\n  A\nend\nsubgraph S1\n  B\nend";
+        let result = parse(input);
+        
+        // Should only have 1 cluster and 1 subgraph entry
+        assert_eq!(result.ir.clusters.len(), 1, "Should only have 1 cluster");
+        assert_eq!(result.ir.graph.subgraphs.len(), 1, "Should only have 1 subgraph");
+        
+        let cluster = &result.ir.clusters[0];
+        assert_eq!(cluster.members.len(), 2, "Cluster should have 2 members (A and B)");
+    }
+
+    #[test]
     fn parse_flowchart_extracts_nodes_edges_and_direction() {
         let result = parse("flowchart LR\nA[Start] --> B(End)");
         assert_eq!(result.ir.diagram_type, DiagramType::Flowchart);

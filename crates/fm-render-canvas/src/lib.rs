@@ -39,7 +39,11 @@ pub fn render_to_canvas<C: Canvas2dContext>(
     context: &mut C,
     config: &CanvasRenderConfig,
 ) -> CanvasRenderResult {
-    let layout = layout_diagram(ir);
+    let layout_config = fm_layout::LayoutConfig {
+        font_metrics: Some(config.font_metrics()),
+        ..Default::default()
+    };
+    let layout = fm_layout::layout_diagram_with_config(ir, layout_config);
     render_to_canvas_with_layout(ir, &layout, context, config)
 }
 

@@ -1056,12 +1056,16 @@ fn parse_subgraph_statement(statement: &str) -> Option<(String, Option<String>)>
         let key = normalize_identifier(&key_raw);
         if !key.is_empty() {
             let title_raw = rest.trim();
-            let title = if title_raw.is_empty() {
-                None
-            } else {
-                normalize_subgraph_title(title_raw)
-            };
-            return Some((key, title));
+            let explicit_title =
+                matches!(title_raw.chars().next(), Some('"') | Some('\'') | Some('`'));
+            if title_raw.is_empty() || explicit_title || looks_like_explicit_subgraph_id(&key_raw) {
+                let title = if title_raw.is_empty() {
+                    None
+                } else {
+                    normalize_subgraph_title(title_raw)
+                };
+                return Some((key, title));
+            }
         }
     }
 
@@ -1078,6 +1082,18 @@ fn parse_subgraph_statement(statement: &str) -> Option<(String, Option<String>)>
     }
     let title = normalize_subgraph_title(body).filter(|value| value != &key);
     Some((key, title))
+}
+
+fn looks_like_explicit_subgraph_id(raw: &str) -> bool {
+    let trimmed = raw
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim_matches('`');
+    !trimmed.is_empty()
+        && trimmed.chars().all(|ch| {
+            ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '_' | '-' | '.' | '/')
+        })
 }
 
 fn parse_sequence(input: &str, builder: &mut IrBuilder) {
@@ -4803,7 +4819,7 @@ fn parse_wrapped_str(raw: &str, open: &str, close: &str, shape: NodeShape) -> Op
     })
 }
 
-fn normalize_identifier(raw: &str) -> String {
+pub(crate) fn normalize_identifier(raw: &str) -> String {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return String::new();
@@ -5910,6 +5926,24 @@ mod tests {
     #[test]
     fn flowchart_subgraph_title_only_preserves_full_title() {
         let parsed = parse_mermaid("flowchart TB\nsubgraph API Layer\nA-->B\nend");
+        assert!(
+            parsed.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            parsed.warnings
+        );
+        assert_eq!(parsed.ir.clusters.len(), 1);
+
+        let cluster = &parsed.ir.clusters[0];
+        let title = cluster
+            .title
+            .and_then(|title_id| parsed.ir.labels.get(title_id.0))
+            .map(|label| label.text.as_str());
+        assert_eq!(title, Some("API Layer"));
+    }
+
+    #[test]
+    fn flowchart_subgraph_explicit_key_preserves_unquoted_title() {
+        let parsed = parse_mermaid("flowchart TB\nsubgraph api API Layer\nA-->B\nend");
         assert!(
             parsed.warnings.is_empty(),
             "unexpected warnings: {:?}",
@@ -7585,6 +7619,29 @@ Rel_Back(db, app, "Responds")"#,
     }
 
     #[test]
+    fn sequence_quoted_participant_references_resolve_metadata() {
+        let input = "sequenceDiagram\n  box Services\n    participant \"Bob Service\"\n  end\n  Note over \"Bob Service\": Warm cache\n  activate \"Bob Service\"\n  \"Bob Service\"-->>\"Bob Service\": Pong\n  deactivate \"Bob Service\"\n  destroy \"Bob Service\"";
+        let parsed = parse_mermaid(input);
+        let meta = parsed
+            .ir
+            .sequence_meta
+            .expect("sequence_meta should be set");
+
+        assert_eq!(meta.participant_groups.len(), 1);
+        assert_eq!(meta.participant_groups[0].participants.len(), 1);
+        assert_eq!(meta.notes.len(), 1);
+        assert_eq!(meta.notes[0].participants.len(), 1);
+        assert_eq!(meta.activations.len(), 1);
+        assert_eq!(
+            meta.lifecycle_events
+                .iter()
+                .filter(|event| event.kind == fm_core::LifecycleEventKind::Destroy)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn sequence_activate_plus_minus_syntax() {
         let input = "sequenceDiagram\n  participant Alice\n  participant Bob\n  Alice->>+Bob: Request\n  Bob-->>-Alice: Response";
         let parsed = parse_mermaid(input);
@@ -7674,6 +7731,22 @@ Rel_Back(db, app, "Responds")"#,
     #[test]
     fn sequence_create_participant() {
         let input = "sequenceDiagram\n  participant Alice\n  Alice->>Bob: Hello\n  create participant Carol\n  Bob->>Carol: Welcome";
+        let parsed = parse_mermaid(input);
+        let meta = parsed
+            .ir
+            .sequence_meta
+            .expect("sequence_meta should be set");
+        let creates: Vec<_> = meta
+            .lifecycle_events
+            .iter()
+            .filter(|e| e.kind == fm_core::LifecycleEventKind::Create)
+            .collect();
+        assert_eq!(creates.len(), 1, "Should have one create event");
+    }
+
+    #[test]
+    fn sequence_create_quoted_participant_records_lifecycle_event() {
+        let input = "sequenceDiagram\n  participant Alice\n  create participant \"Carol Service\"\n  Alice->>\"Carol Service\": Welcome";
         let parsed = parse_mermaid(input);
         let meta = parsed
             .ir

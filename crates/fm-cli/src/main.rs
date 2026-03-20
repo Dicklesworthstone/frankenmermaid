@@ -23,8 +23,8 @@ use fm_core::{
     capability_matrix_json_pretty, mermaid_layout_guard_observability,
 };
 use fm_layout::{
-    LayoutAlgorithm, LayoutGuardrails, TracedLayout, build_layout_decision_ledger,
-    build_layout_guard_report_with_pressure, layout_diagram_traced_with_algorithm_and_guardrails,
+    LayoutAlgorithm, LayoutConfig, LayoutGuardrails, TracedLayout, build_layout_decision_ledger,
+    build_layout_guard_report_with_pressure, layout_diagram_traced_with_config_and_guardrails,
 };
 use fm_parser::{detect_type_with_confidence, parse_evidence_json, parse_with_mode};
 use fm_render_svg::{SvgRenderConfig, ThemePreset, render_svg_with_layout};
@@ -687,9 +687,15 @@ fn cmd_render(input: &str, options: RenderCommandOptions<'_>) -> Result<()> {
             .layout_iteration_budget(LayoutGuardrails::default().max_layout_iterations),
         max_route_ops: budget_broker.route_budget(LayoutGuardrails::default().max_route_ops),
     };
-    let traced_layout = layout_diagram_traced_with_algorithm_and_guardrails(
+    // FIXME: Allow passing custom font metrics from CLI
+    let layout_config = LayoutConfig {
+        font_metrics: None,
+        ..Default::default()
+    };
+    let traced_layout = fm_layout::layout_diagram_traced_with_config_and_guardrails(
         &parsed.ir,
         layout_algorithm,
+        layout_config,
         layout_guardrails,
     );
     let layout = &traced_layout.layout;
@@ -1168,9 +1174,14 @@ fn cmd_validate(
             .layout_iteration_budget(LayoutGuardrails::default().max_layout_iterations),
         max_route_ops: budget_broker.route_budget(LayoutGuardrails::default().max_route_ops),
     };
-    let traced_layout = layout_diagram_traced_with_algorithm_and_guardrails(
+    let layout_config = LayoutConfig {
+        font_metrics: None,
+        ..Default::default()
+    };
+    let traced_layout = layout_diagram_traced_with_config_and_guardrails(
         &parsed.ir,
         layout_algorithm,
+        layout_config,
         layout_guardrails,
     );
     let layout_time = layout_start.elapsed();

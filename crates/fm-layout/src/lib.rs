@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::f32::consts::PI;
 
 use fm_core::{
-    DiagramType, FontMetrics, GraphDirection, IrEndpoint, IrNode, MermaidComplexity, MermaidConfig,
+    DiagramType, GraphDirection, IrEndpoint, IrNode, MermaidComplexity, MermaidConfig,
     MermaidDiagramIr, MermaidFidelity, MermaidGlyphMode, MermaidGuardReport,
     MermaidLayoutDecisionAlternative, MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord,
     MermaidPressureReport, MermaidPressureTier, Span,
@@ -86,10 +86,11 @@ impl CycleStrategy {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct LayoutConfig {
     pub cycle_strategy: CycleStrategy,
     pub collapse_cycle_clusters: bool,
+    pub font_metrics: Option<fm_core::FontMetrics>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -505,6 +506,7 @@ pub enum RenderClip {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderGroup {
     pub id: Option<String>,
+    pub source: RenderSource,
     pub transform: Option<RenderTransform>,
     pub clip: Option<RenderClip>,
     pub children: Vec<RenderItem>,
@@ -515,10 +517,17 @@ impl RenderGroup {
     pub fn new(id: Option<String>) -> Self {
         Self {
             id,
+            source: RenderSource::Diagram,
             transform: None,
             clip: None,
             children: Vec::new(),
         }
+    }
+
+    #[must_use]
+    pub fn with_source(mut self, source: RenderSource) -> Self {
+        self.source = source;
+        self
     }
 }
 
@@ -677,7 +686,7 @@ pub enum RenderItem {
 pub fn build_render_scene(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderScene {
     let bounds = RenderRect::from(layout.bounds);
 
-    let mut root = RenderGroup::new(Some(String::from("diagram-root")));
+    let mut root = RenderGroup::new(Some(String::from("diagram-root"))).with_source(RenderSource::Diagram);
     root.transform = Some(RenderTransform::Matrix {
         a: 1.0,
         b: 0.0,
@@ -700,7 +709,7 @@ pub fn build_render_scene(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> Rend
 }
 
 fn build_cluster_layer(layout: &DiagramLayout) -> RenderGroup {
-    let mut layer = RenderGroup::new(Some(String::from("clusters")));
+    let mut layer = RenderGroup::new(Some(String::from("clusters"))).with_source(RenderSource::Diagram);
 
     for cluster in &layout.clusters {
         layer.children.push(RenderItem::Path(RenderPath {
@@ -724,7 +733,7 @@ fn build_cluster_layer(layout: &DiagramLayout) -> RenderGroup {
 }
 
 fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGroup {
-    let mut layer = RenderGroup::new(Some(String::from("edges")));
+    let mut layer = RenderGroup::new(Some(String::from("edges"))).with_source(RenderSource::Diagram);
 
     for edge in &layout.edges {
         if edge.points.len() < 2 {
@@ -814,7 +823,7 @@ fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
 }
 
 fn build_node_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGroup {
-    let mut layer = RenderGroup::new(Some(String::from("nodes")));
+    let mut layer = RenderGroup::new(Some(String::from("nodes"))).with_source(RenderSource::Diagram);
 
     for node_box in &layout.nodes {
         let shape = ir
@@ -839,7 +848,7 @@ fn build_node_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
 }
 
 fn build_label_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGroup {
-    let mut layer = RenderGroup::new(Some(String::from("labels")));
+    let mut layer = RenderGroup::new(Some(String::from("labels"))).with_source(RenderSource::Diagram);
 
     for node_box in &layout.nodes {
         let Some(node) = ir.nodes.get(node_box.node_index) else {
@@ -1414,6 +1423,7 @@ pub fn layout_diagram_traced_with_algorithm_and_guardrails(
         LayoutConfig {
             cycle_strategy: default_cycle_strategy(),
             collapse_cycle_clusters: false,
+            font_metrics: None,
         },
         guardrails,
     )
@@ -1431,6 +1441,7 @@ pub fn layout_diagram_traced_with_algorithm_and_cycle_strategy(
         LayoutConfig {
             cycle_strategy,
             collapse_cycle_clusters: false,
+            font_metrics: None,
         },
     )
 }
@@ -1915,7 +1926,8 @@ fn layout_diagram_sugiyama_traced_with_config(
 ) -> TracedLayout {
     let mut trace = LayoutTrace::default();
     let spacing = LayoutSpacing::default();
-    let node_sizes = compute_node_sizes(ir);
+    let metrics = config.font_metrics.clone().unwrap_or_else(fm_core::FontMetrics::default_metrics);
+    let node_sizes = compute_node_sizes(ir, &metrics);
     let cycle_result = cycle_removal(ir, config.cycle_strategy);
     push_snapshot(
         &mut trace,
@@ -1990,14 +2002,25 @@ fn layout_diagram_sugiyama_traced_with_config(
         crossing_count,
     );
 
-    let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
+    let (total_edge_length, measured_reversed_edge_total_length) =
+        compute_edge_length_metrics(&edges);
+    let reversed_edges = if matches!(config.cycle_strategy, CycleStrategy::CycleAware) {
+        0
+    } else {
+        cycle_result.reversed_edge_indexes.len()
+    };
+    let reversed_edge_total_length = if matches!(config.cycle_strategy, CycleStrategy::CycleAware) {
+        0.0
+    } else {
+        measured_reversed_edge_total_length
+    };
 
     let stats = LayoutStats {
         node_count: ir.nodes.len(),
         edge_count: ir.edges.len(),
         crossing_count,
         crossing_count_before_refinement: crossing_count_before,
-        reversed_edges: cycle_result.reversed_edge_indexes.len(),
+        reversed_edges,
         cycle_count: cycle_result.summary.cycle_count,
         cycle_node_count: cycle_result.summary.cycle_node_count,
         max_cycle_size: cycle_result.summary.max_cycle_size,
@@ -2035,7 +2058,8 @@ pub fn layout_diagram_force(ir: &MermaidDiagramIr) -> DiagramLayout {
 pub fn layout_diagram_force_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let mut trace = LayoutTrace::default();
     let spacing = LayoutSpacing::default();
-    let node_sizes = compute_node_sizes(ir);
+    let metrics = fm_core::FontMetrics::default_metrics();
+    let node_sizes = compute_node_sizes(ir, &metrics);
     let n = ir.nodes.len();
 
     if n == 0 {
@@ -2167,7 +2191,7 @@ pub fn layout_diagram_tree(ir: &MermaidDiagramIr) -> DiagramLayout {
 pub fn layout_diagram_tree_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let mut trace = LayoutTrace::default();
     let spacing = LayoutSpacing::default();
-    let node_sizes = compute_node_sizes(ir);
+    let node_sizes = compute_node_sizes(ir, &fm_core::FontMetrics::default_metrics());
     let node_count = ir.nodes.len();
 
     if node_count == 0 {
@@ -2312,7 +2336,7 @@ pub fn layout_diagram_radial(ir: &MermaidDiagramIr) -> DiagramLayout {
 pub fn layout_diagram_radial_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let mut trace = LayoutTrace::default();
     let spacing = LayoutSpacing::default();
-    let node_sizes = compute_node_sizes(ir);
+    let node_sizes = compute_node_sizes(ir, &fm_core::FontMetrics::default_metrics());
     let node_count = ir.nodes.len();
 
     if node_count == 0 {
@@ -2471,7 +2495,7 @@ pub fn layout_diagram_timeline(ir: &MermaidDiagramIr) -> DiagramLayout {
 #[must_use]
 pub fn layout_diagram_timeline_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let node_count = ir.nodes.len();
-    let node_sizes = compute_node_sizes(ir);
+    let node_sizes = compute_node_sizes(ir, &fm_core::FontMetrics::default_metrics());
     let mut trace = LayoutTrace::default();
     push_snapshot(
         &mut trace,
@@ -2615,7 +2639,7 @@ pub fn layout_diagram_sequence(ir: &MermaidDiagramIr) -> DiagramLayout {
 #[must_use]
 pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let node_count = ir.nodes.len();
-    let node_sizes = compute_node_sizes(ir);
+    let node_sizes = compute_node_sizes(ir, &fm_core::FontMetrics::default_metrics());
     let mut trace = LayoutTrace::default();
     push_snapshot(
         &mut trace,
@@ -2874,7 +2898,7 @@ pub fn layout_diagram_gantt(ir: &MermaidDiagramIr) -> DiagramLayout {
 #[must_use]
 pub fn layout_diagram_gantt_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let node_count = ir.nodes.len();
-    let mut node_sizes = compute_node_sizes(ir);
+    let mut node_sizes = compute_node_sizes(ir, &fm_core::FontMetrics::default_metrics());
     let mut trace = LayoutTrace::default();
     push_snapshot(&mut trace, "gantt_layout", node_count, ir.edges.len(), 0, 0);
 
@@ -2985,7 +3009,7 @@ pub fn layout_diagram_sankey(ir: &MermaidDiagramIr) -> DiagramLayout {
 #[must_use]
 pub fn layout_diagram_sankey_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let node_count = ir.nodes.len();
-    let mut node_sizes = compute_node_sizes(ir);
+    let mut node_sizes = compute_node_sizes(ir, &fm_core::FontMetrics::default_metrics());
     let mut trace = LayoutTrace::default();
     push_snapshot(
         &mut trace,
@@ -3078,7 +3102,7 @@ pub fn layout_diagram_grid(ir: &MermaidDiagramIr) -> DiagramLayout {
 #[must_use]
 pub fn layout_diagram_grid_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let node_count = ir.nodes.len();
-    let mut node_sizes = compute_node_sizes(ir);
+    let mut node_sizes = compute_node_sizes(ir, &fm_core::FontMetrics::default_metrics());
     let mut trace = LayoutTrace::default();
     push_snapshot(&mut trace, "grid_layout", node_count, ir.edges.len(), 0, 0);
 
@@ -3191,7 +3215,7 @@ pub fn layout_diagram_grid_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 #[must_use]
 fn layout_diagram_kanban_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let node_count = ir.nodes.len();
-    let mut node_sizes = compute_node_sizes(ir);
+    let mut node_sizes = compute_node_sizes(ir, &fm_core::FontMetrics::default_metrics());
     let mut trace = LayoutTrace::default();
     push_snapshot(
         &mut trace,
@@ -4353,8 +4377,7 @@ fn clip_to_rect_border(from: LayoutPoint, to: LayoutPoint, rect: &LayoutRect) ->
 }
 
 #[must_use]
-pub fn compute_node_sizes(ir: &MermaidDiagramIr) -> Vec<(f32, f32)> {
-    let metrics = FontMetrics::default_metrics();
+pub fn compute_node_sizes(ir: &MermaidDiagramIr, metrics: &fm_core::FontMetrics) -> Vec<(f32, f32)> {
     ir.nodes
         .iter()
         .map(|node| {
@@ -6508,7 +6531,32 @@ fn route_edge_points_with_obstacles(
 
     let points = if horizontal_ranks {
         if (source.y - target.y).abs() < epsilon {
-            vec![source, target]
+            let segment = (
+                LayoutPoint {
+                    x: source.x.min(target.x),
+                    y: source.y,
+                },
+                LayoutPoint {
+                    x: source.x.max(target.x),
+                    y: target.y,
+                },
+            );
+            if let Some(nudge) = find_obstacle_nudge_y(segment, source.y, obstacles) {
+                vec![
+                    source,
+                    LayoutPoint {
+                        x: source.x,
+                        y: nudge,
+                    },
+                    LayoutPoint {
+                        x: target.x,
+                        y: nudge,
+                    },
+                    target,
+                ]
+            } else {
+                vec![source, target]
+            }
         } else {
             let mid_x = (source.x + target.x) / 2.0;
             let mid_segment = (
@@ -6552,7 +6600,32 @@ fn route_edge_points_with_obstacles(
             }
         }
     } else if (source.x - target.x).abs() < epsilon {
-        vec![source, target]
+        let segment = (
+            LayoutPoint {
+                x: source.x,
+                y: source.y.min(target.y),
+            },
+            LayoutPoint {
+                x: target.x,
+                y: source.y.max(target.y),
+            },
+        );
+        if let Some(nudge) = find_obstacle_nudge_x(segment, source.x, obstacles) {
+            vec![
+                source,
+                LayoutPoint {
+                    x: nudge,
+                    y: source.y,
+                },
+                LayoutPoint {
+                    x: nudge,
+                    y: target.y,
+                },
+                target,
+            ]
+        } else {
+            vec![source, target]
+        }
     } else {
         let mid_y = (source.y + target.y) / 2.0;
         let mid_segment = (
@@ -7117,10 +7190,10 @@ pub fn build_layout_decision_ledger(
     MermaidLayoutDecisionLedger {
         entries: vec![MermaidLayoutDecisionRecord {
             kind: String::from("layout_decision"),
-            trace_id: guard_report.observability.trace_id.clone(),
-            decision_id: guard_report.observability.decision_id.clone(),
+            trace_id: guard_report.observability.trace_id,
+            decision_id: guard_report.observability.decision_id,
             policy_id: guard_report.observability.policy_id.clone(),
-            schema_version: guard_report.observability.schema_version.clone(),
+            schema_version: guard_report.observability.schema_version,
             requested_algorithm: dispatch.requested.as_str().to_string(),
             selected_algorithm: dispatch.selected.as_str().to_string(),
             capability_unavailable: dispatch.capability_unavailable,
@@ -8023,6 +8096,7 @@ mod tests {
 
         let layout = layout_diagram_with_cycle_strategy(&ir, CycleStrategy::CycleAware);
         assert_eq!(layout.stats.reversed_edges, 0);
+        assert!((layout.stats.reversed_edge_total_length - 0.0).abs() < f32::EPSILON);
         assert_eq!(layout.stats.cycle_count, 1);
         assert_eq!(layout.stats.cycle_node_count, 3);
         assert_eq!(layout.stats.max_cycle_size, 3);
@@ -8135,10 +8209,26 @@ mod tests {
             false,
             &[obstacle],
         );
-        // With obstacle at x=30..70, the midpoint y=105 passes through it.
-        // The route should be direct (aligned x), since the midpoint segment is vertical
-        // and both source/target have the same x. Actually for same-x, it's a straight line.
-        // Let me test an offset case where midpoint goes through obstacle.
+        assert_eq!(points.len(), 4);
+        assert_ne!(points[1].x, 50.0);
+        for pt in &points {
+            let inside = pt.x >= obstacle.x
+                && pt.x <= obstacle.x + obstacle.width
+                && pt.y >= obstacle.y
+                && pt.y <= obstacle.y + obstacle.height;
+            assert!(
+                !inside,
+                "Waypoint ({:.1}, {:.1}) is inside obstacle ({:.0}..{:.0}, {:.0}..{:.0})",
+                pt.x,
+                pt.y,
+                obstacle.x,
+                obstacle.x + obstacle.width,
+                obstacle.y,
+                obstacle.y + obstacle.height,
+            );
+        }
+
+        // Also verify the offset-path case where the midpoint segment is horizontal.
         let points2 = route_edge_points_with_obstacles(
             LayoutPoint { x: 10.0, y: 10.0 },
             LayoutPoint { x: 100.0, y: 200.0 },
@@ -8483,6 +8573,7 @@ mod tests {
         let config = LayoutConfig {
             cycle_strategy: CycleStrategy::Greedy,
             collapse_cycle_clusters: true,
+            font_metrics: None,
         };
         let layout = super::layout_diagram_with_config(&ir, config);
 
@@ -8572,6 +8663,7 @@ mod tests {
         let config = LayoutConfig {
             cycle_strategy: CycleStrategy::Greedy,
             collapse_cycle_clusters: false,
+            font_metrics: None,
         };
         let layout = super::layout_diagram_with_config(&ir, config);
 

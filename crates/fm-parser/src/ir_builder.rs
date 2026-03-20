@@ -11,6 +11,7 @@ use fm_core::{
 };
 
 use crate::ParseResult;
+use crate::mermaid_parser::normalize_identifier;
 
 /// Open fragment entry: (kind, label, start_edge, alternatives, child_fragment_indices).
 type OpenFragment = (
@@ -23,9 +24,11 @@ type OpenFragment = (
 
 pub(crate) struct IrBuilder {
     ir: MermaidDiagramIr,
-    // `std::collections::HashMap` uses a SwissTable backend, so this keeps
-    // node lookup fast without affecting deterministic output ordering.
+    // Lookups for uniqueness
     node_index_by_id: HashMap<String, IrNodeId>,
+    cluster_index_by_key: HashMap<String, usize>,
+    subgraph_index_by_key: HashMap<String, usize>,
+
     warnings: Vec<String>,
     /// Track nodes that were auto-created (for dangling edge recovery)
     auto_created_nodes: Vec<IrNodeId>,
@@ -44,6 +47,8 @@ impl IrBuilder {
         Self {
             ir: MermaidDiagramIr::empty(diagram_type),
             node_index_by_id: HashMap::new(),
+            cluster_index_by_key: HashMap::new(),
+            subgraph_index_by_key: HashMap::new(),
             warnings: Vec::new(),
             auto_created_nodes: Vec::new(),
             activation_stacks: BTreeMap::new(),
@@ -113,7 +118,10 @@ impl IrBuilder {
         // Resolve participant names to node IDs
         let participants: Vec<IrNodeId> = participant_names
             .iter()
-            .filter_map(|name| self.node_index_by_id.get(name).copied())
+            .filter_map(|name| {
+                let normalized = normalize_identifier(name);
+                self.node_index_by_id.get(&normalized).copied()
+            })
             .collect();
 
         self.ir
@@ -128,18 +136,20 @@ impl IrBuilder {
     }
 
     pub(crate) fn activate_participant(&mut self, name: &str) {
-        let Some(&node_id) = self.node_index_by_id.get(name) else {
+        let normalized = normalize_identifier(name);
+        let Some(&node_id) = self.node_index_by_id.get(&normalized) else {
             return;
         };
         let edge_index = self.ir.edges.len().saturating_sub(1);
         self.activation_stacks
-            .entry(name.to_string())
+            .entry(normalized)
             .or_default()
             .push((node_id, edge_index));
     }
 
     pub(crate) fn deactivate_participant(&mut self, name: &str) {
-        let Some(stack) = self.activation_stacks.get_mut(name) else {
+        let normalized = normalize_identifier(name);
+        let Some(stack) = self.activation_stacks.get_mut(&normalized) else {
             return;
         };
         let Some((node_id, start_edge)) = stack.pop() else {
@@ -190,12 +200,16 @@ impl IrBuilder {
     /// Record that a participant declared inside a box group should be tracked.
     pub(crate) fn track_participant_in_group(&mut self, name: &str) {
         if let Some((_, _, ref mut names)) = self.current_participant_group {
-            names.push(name.to_string());
+            let normalized = normalize_identifier(name);
+            if !normalized.is_empty() {
+                names.push(normalized);
+            }
         }
     }
 
     pub(crate) fn add_lifecycle_create(&mut self, name: &str) {
-        let Some(&node_id) = self.node_index_by_id.get(name) else {
+        let normalized = normalize_identifier(name);
+        let Some(&node_id) = self.node_index_by_id.get(&normalized) else {
             return;
         };
         let at_edge = self.ir.edges.len();
@@ -211,7 +225,8 @@ impl IrBuilder {
     }
 
     pub(crate) fn add_lifecycle_destroy(&mut self, name: &str) {
-        let Some(&node_id) = self.node_index_by_id.get(name) else {
+        let normalized = normalize_identifier(name);
+        let Some(&node_id) = self.node_index_by_id.get(&normalized) else {
             return;
         };
         let at_edge = self.ir.edges.len().saturating_sub(1);

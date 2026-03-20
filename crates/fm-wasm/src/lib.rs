@@ -8,8 +8,8 @@ use fm_core::{
     capability_matrix, mermaid_layout_guard_observability,
 };
 use fm_layout::{
-    DiagramLayout, LayoutGuardrails, build_layout_guard_report_with_pressure,
-    layout_diagram_traced, layout_diagram_traced_with_algorithm_and_guardrails,
+    DiagramLayout, LayoutConfig, LayoutGuardrails, build_layout_guard_report_with_pressure,
+    layout_diagram_traced, layout_diagram_traced_with_config_and_guardrails,
 };
 #[cfg(target_arch = "wasm32")]
 use fm_parser::ParseResult;
@@ -459,9 +459,14 @@ pub fn render(input: &str) -> WasmRenderOutput {
         max_route_ops: budget_broker.route_budget(LayoutGuardrails::default().max_route_ops),
     };
     let layout_start = Instant::now();
-    let traced_layout = layout_diagram_traced_with_algorithm_and_guardrails(
+    let layout_config = LayoutConfig {
+        font_metrics: Some(runtime.svg.font_metrics()),
+        ..Default::default()
+    };
+    let traced_layout = layout_diagram_traced_with_config_and_guardrails(
         &parsed.ir,
         fm_layout::LayoutAlgorithm::Auto,
+        layout_config,
         layout_guardrails,
     );
     budget_broker
@@ -846,9 +851,14 @@ impl Diagram {
             max_route_ops: budget_broker.route_budget(LayoutGuardrails::default().max_route_ops),
         };
         let layout_start = Instant::now();
-        let traced_layout = layout_diagram_traced_with_algorithm_and_guardrails(
+        let layout_config = LayoutConfig {
+            font_metrics: Some(next_svg.font_metrics()),
+            ..Default::default()
+        };
+        let traced_layout = fm_layout::layout_diagram_traced_with_config_and_guardrails(
             &parsed.ir,
             fm_layout::LayoutAlgorithm::Auto,
+            layout_config,
             layout_guardrails,
         );
         budget_broker

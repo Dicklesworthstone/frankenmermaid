@@ -21,7 +21,7 @@ pub use defs::{ArrowheadMarker, DefsBuilder, Filter, Gradient, GradientStop, Mar
 pub use document::SvgDocument;
 pub use element::{Element, ElementKind};
 pub use path::{PathBuilder, PathCommand};
-pub use text::{TextAnchor, TextBuilder, TextMetrics};
+pub use text::{TextAnchor, TextBuilder};
 pub use theme::{FontConfig, Theme, ThemeColors, ThemePreset, generate_palette};
 pub use transform::{Transform, TransformBuilder};
 
@@ -31,7 +31,6 @@ use fm_layout::{
     LineJoin as RenderLineJoin, MarkerKind, PathCmd, RenderClip, RenderGroup, RenderItem,
     RenderPath, RenderScene, RenderSource, RenderText, RenderTransform, StrokeStyle,
     TextAlign as RenderTextAlign, TextBaseline as RenderTextBaseline, build_render_scene,
-    layout_diagram,
 };
 
 /// Node fill gradient mode.
@@ -123,6 +122,20 @@ pub struct SvgRenderConfig {
     pub include_source_spans: bool,
 }
 
+impl SvgRenderConfig {
+    /// Get the font metrics based on this configuration.
+    #[must_use]
+    pub fn font_metrics(&self) -> fm_core::FontMetrics {
+        fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+            preset: fm_core::FontPreset::from_family(&self.font_family),
+            font_size: self.font_size,
+            line_height: self.line_height,
+            fallback_chain: vec![fm_core::FontPreset::SansSerif, fm_core::FontPreset::Monospace],
+            trace_fallbacks: false,
+        })
+    }
+}
+
 impl Default for SvgRenderConfig {
     fn default() -> Self {
         Self {
@@ -193,7 +206,11 @@ pub fn render_svg(ir: &MermaidDiagramIr) -> String {
 /// Render an IR diagram to SVG string with custom configuration.
 #[must_use]
 pub fn render_svg_with_config(ir: &MermaidDiagramIr, config: &SvgRenderConfig) -> String {
-    let layout = layout_diagram(ir);
+    let layout_config = fm_layout::LayoutConfig {
+        font_metrics: Some(config.font_metrics()),
+        ..Default::default()
+    };
+    let layout = fm_layout::layout_diagram_with_config(ir, layout_config);
     render_svg_with_layout(ir, &layout, config)
 }
 
@@ -221,6 +238,20 @@ pub fn render_scene_to_svg(scene: &RenderScene, config: &SvgRenderConfig) -> Str
 
 fn render_scene_document(scene: &RenderScene, config: &SvgRenderConfig) -> String {
     render_scene_document_with_ir(scene, config, None)
+}
+
+fn resolve_theme(ir: Option<&MermaidDiagramIr>, config: &SvgRenderConfig) -> Theme {
+    let preset = ir
+        .and_then(|i| i.meta.theme_overrides.theme.as_deref())
+        .and_then(|t| t.parse::<ThemePreset>().ok())
+        .unwrap_or(config.theme);
+    let mut theme = Theme::from_preset(preset);
+    if let Some(i) = ir {
+        theme
+            .colors
+            .apply_overrides(&i.meta.theme_overrides.theme_variables);
+    }
+    theme
 }
 
 fn render_scene_document_with_ir(
@@ -277,8 +308,10 @@ fn render_scene_document_with_ir(
     let effects_enabled = clamp_unit_interval(config.inactive_opacity) < 0.999
         || clamp_unit_interval(config.cluster_fill_opacity) < 0.999;
 
+    let theme = resolve_theme(ir, config);
+
     if config.embed_theme_css {
-        let mut css = Theme::from_preset(config.theme).to_svg_style(config.shadows);
+        let mut css = theme.to_svg_style(config.shadows);
         if effects_enabled {
             css.push_str(&effects_css(config));
         }
@@ -301,17 +334,6 @@ fn render_scene_document_with_ir(
             css.push_str(&print_css(config.min_font_size));
         }
         doc = doc.style(css);
-    }
-
-    let preset = ir
-        .and_then(|diagram_ir| diagram_ir.meta.theme_overrides.theme.as_deref())
-        .and_then(|t| t.parse::<ThemePreset>().ok())
-        .unwrap_or(config.theme);
-    let mut theme = Theme::from_preset(preset);
-    if let Some(diagram_ir) = ir {
-        theme
-            .colors
-            .apply_overrides(&diagram_ir.meta.theme_overrides.theme_variables);
     }
 
     let mut defs = DefsBuilder::new();
@@ -384,6 +406,12 @@ fn render_scene_group(
 
     if let Some(id) = &group.id {
         elem = elem.id(id);
+    }
+
+    elem = apply_source_metadata(elem, group.source, config.include_source_spans, ir);
+
+    if config.a11y.keyboard_nav && matches!(group.source, RenderSource::Node(_) | RenderSource::Edge(_)) {
+        elem = elem.attr("tabindex", "0");
     }
 
     if let Some(transform) = group.transform {
@@ -513,6 +541,42 @@ fn apply_source_metadata(
             elem = elem
                 .data("fm-source-kind", "cluster")
                 .data("fm-source-index", &index.to_string());
+        }
+    }
+
+    if let Some(diagram_ir) = ir {
+        match source {
+            RenderSource::Node(index) => {
+                if let Some(node) = diagram_ir.nodes.get(index) {
+                    elem = elem
+                        .attr("role", "graphics-symbol")
+                        .attr("aria-label", &crate::a11y::describe_node(node, diagram_ir));
+                }
+            }
+            RenderSource::Edge(index) => {
+                if let Some(edge) = diagram_ir.edges.get(index) {
+                    let from_node = diagram_ir.resolve_endpoint_node(edge.from)
+                        .and_then(|id| diagram_ir.nodes.get(id.0));
+                    let to_node = diagram_ir.resolve_endpoint_node(edge.to)
+                        .and_then(|id| diagram_ir.nodes.get(id.0));
+                    let label = edge
+                        .label
+                        .and_then(|lid| diagram_ir.labels.get(lid.0))
+                        .map(|l| l.text.as_str());
+
+                    elem = elem.attr("role", "graphics-symbol").attr(
+                        "aria-label",
+                        &crate::a11y::describe_edge(
+                            from_node,
+                            to_node,
+                            edge.arrow,
+                            label,
+                            diagram_ir,
+                        ),
+                    );
+                }
+            }
+            _ => {}
         }
     }
 
@@ -900,17 +964,7 @@ fn render_layout_to_svg(
         .data("type", ir.diagram_type.as_str())
         .data("detail-tier", detail_tier_name(detail.tier));
 
-    let preset = ir
-        .meta
-        .theme_overrides
-        .theme
-        .as_deref()
-        .and_then(|t| t.parse::<ThemePreset>().ok())
-        .unwrap_or(config.theme);
-    let mut theme = Theme::from_preset(preset);
-    theme
-        .colors
-        .apply_overrides(&ir.meta.theme_overrides.theme_variables);
+    let theme = resolve_theme(Some(ir), config);
     let effects_enabled = config.node_gradients
         || config.glow_enabled
         || clamp_unit_interval(config.inactive_opacity) < 0.999
@@ -2203,7 +2257,7 @@ mod tests {
     }
 
     fn create_scene_with_path_and_text() -> RenderScene {
-        let mut root = RenderGroup::new(Some(String::from("scene-root")));
+        let mut root = RenderGroup::new(Some(String::from("scene-root"))).with_source(RenderSource::Diagram);
         root.children.push(RenderItem::Path(RenderPath {
             source: RenderSource::Node(0),
             commands: vec![
@@ -2266,7 +2320,7 @@ mod tests {
     }
 
     fn create_scene_with_transform_and_clip() -> RenderScene {
-        let mut child = RenderGroup::new(Some(String::from("scene-child")));
+        let mut child = RenderGroup::new(Some(String::from("scene-child"))).with_source(RenderSource::Diagram);
         child.transform = Some(RenderTransform::Matrix {
             a: 1.0,
             b: 0.0,
@@ -2298,7 +2352,7 @@ mod tests {
             marker_end: MarkerKind::None,
         }));
 
-        let mut root = RenderGroup::new(Some(String::from("scene-root")));
+        let mut root = RenderGroup::new(Some(String::from("scene-root"))).with_source(RenderSource::Diagram);
         root.children.push(RenderItem::Group(child));
 
         RenderScene {
