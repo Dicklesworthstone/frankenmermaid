@@ -2135,6 +2135,7 @@ mod tests {
         RenderGroup, RenderItem, RenderPath, RenderRect, RenderScene, RenderSource, RenderText,
         RenderTransform, StrokeStyle, TextAlign as RenderTextAlign,
         TextBaseline as RenderTextBaseline,
+        layout_diagram,
     };
     use proptest::prelude::*;
 

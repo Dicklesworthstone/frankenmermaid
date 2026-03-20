@@ -385,11 +385,6 @@ enum FlowAst {
         label: Option<String>,
         to: FlowAstNode,
     },
-    Subgraph {
-        id: String,
-        title: Option<String>,
-        body: Vec<FlowAst>,
-    },
     ClassAssign {
         nodes: Vec<String>,
         class: String,
@@ -717,10 +712,6 @@ fn lower_flow_ast(
                 builder.push_edge(f, t, *arrow, label.as_deref(), span);
             }
         }
-        FlowAst::Subgraph { id, title, .. } => {
-            let cluster_index = builder.ensure_cluster(id, title.as_deref(), span);
-            let _ = builder.ensure_subgraph(id, title.as_deref(), span, None, cluster_index);
-        }
         FlowAst::ClassAssign { nodes, class } => {
             for class_name in class.split(',').map(str::trim).filter(|s| !s.is_empty()) {
                 for node_key in nodes {
@@ -840,7 +831,7 @@ fn parse_flowchart_document(input: &str) -> FlowDocumentParseResult {
     let (items, unclosed_subgraphs) = parse_flowchart_document_items(
         &lines,
         &mut next_index,
-        false,
+        true,
         &mut warnings,
         &mut header_direction,
     );
@@ -860,7 +851,7 @@ fn parse_flowchart_document(input: &str) -> FlowDocumentParseResult {
 fn parse_flowchart_document_items(
     lines: &[(usize, &str)],
     next_index: &mut usize,
-    stop_on_end: bool,
+    is_root: bool,
     warnings: &mut Vec<String>,
     header_direction: &mut Option<GraphDirection>,
 ) -> (Vec<FlowDocumentItem>, usize) {
@@ -876,7 +867,7 @@ fn parse_flowchart_document_items(
         }
 
         if is_flowchart_header(trimmed) {
-            if stop_on_end {
+            if !is_root {
                 warnings.push(format!(
                     "Line {line_number}: nested flowchart header ignored inside subgraph"
                 ));
@@ -907,7 +898,7 @@ fn parse_flowchart_document_items(
                 let (body, child_unclosed) = parse_flowchart_document_items(
                     lines,
                     next_index,
-                    true,
+                    false,
                     warnings,
                     header_direction,
                 );
@@ -924,7 +915,7 @@ fn parse_flowchart_document_items(
             }
 
             if normalized_statement == "end" {
-                if stop_on_end {
+                if !is_root {
                     items.extend(line_items);
                     return (items, unclosed_subgraphs);
                 }
@@ -956,7 +947,7 @@ fn parse_flowchart_document_items(
         items.extend(line_items);
     }
 
-    if stop_on_end {
+    if !is_root {
         unclosed_subgraphs += 1;
     }
 

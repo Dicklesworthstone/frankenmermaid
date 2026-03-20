@@ -696,11 +696,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_escaped_quotes_inside_labels() {
-        let parsed = parse_dot("digraph G { a [label=\"a \\\"b\\\" c\"]; }");
+    fn parses_multiple_attribute_blocks() {
+        let parsed = parse_dot("digraph G { a [color=red] [label=\"Double\"]; }");
         assert_eq!(parsed.ir.nodes.len(), 1);
         assert_eq!(parsed.ir.labels.len(), 1);
-        assert_eq!(parsed.ir.labels[0].text, "a \"b\" c");
+        assert_eq!(parsed.ir.labels[0].text, "Double");
     }
 }
 

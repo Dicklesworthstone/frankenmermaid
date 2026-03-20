@@ -609,15 +609,15 @@ impl IrBuilder {
 
                 if existing_title.is_none() || graph_title.is_none() {
                     let label_id = self.intern_label(title_text, span);
-                    if let Some(cluster) = self.ir.clusters.get_mut(existing_index) {
-                        if cluster.title.is_none() {
-                            cluster.title = Some(label_id);
-                        }
+                    if let Some(cluster) = self.ir.clusters.get_mut(existing_index)
+                        && cluster.title.is_none()
+                    {
+                        cluster.title = Some(label_id);
                     }
-                    if let Some(graph_cluster) = self.ir.graph.clusters.get_mut(existing_index) {
-                        if graph_cluster.title.is_none() {
-                            graph_cluster.title = Some(label_id);
-                        }
+                    if let Some(graph_cluster) = self.ir.graph.clusters.get_mut(existing_index)
+                        && graph_cluster.title.is_none()
+                    {
+                        graph_cluster.title = Some(label_id);
                     }
                 }
             }
