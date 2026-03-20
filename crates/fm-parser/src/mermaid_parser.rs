@@ -776,11 +776,15 @@ fn lower_flow_document_item(
             body,
         } => {
             let span = span_for(*line_number, source_line);
-            let Some(cluster_index) = builder.ensure_cluster(id, title.as_deref(), span) else {
+            let lookup_key = flow_subgraph_lookup_key(id, title.as_deref());
+            let Some(cluster_index) =
+                builder.ensure_cluster(&lookup_key, title.as_deref(), span)
+            else {
                 return;
             };
             let parent_subgraph = active_subgraphs.last().copied();
             let Some(subgraph_index) = builder.ensure_subgraph(
+                &lookup_key,
                 id,
                 title.as_deref(),
                 span,
@@ -799,6 +803,13 @@ fn lower_flow_document_item(
                 lower_flow_document_item(child, builder, &child_clusters, &child_subgraphs);
             }
         }
+    }
+}
+
+fn flow_subgraph_lookup_key(id: &str, title: Option<&str>) -> String {
+    match clean_label(title) {
+        Some(title_text) => format!("{id}@title:{title_text}"),
+        None => id.to_string(),
     }
 }
 

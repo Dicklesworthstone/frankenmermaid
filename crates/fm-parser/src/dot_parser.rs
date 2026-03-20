@@ -52,13 +52,15 @@ pub fn parse_dot(input: &str) -> ParseResult {
             if let Some((cluster_key, cluster_title, opens_scope)) =
                 parse_subgraph_start(statement, line_number)
             {
+                let lookup_key = format!("{cluster_key}@dot:{line_number}");
                 if let Some(cluster_index) = builder.ensure_cluster(
-                    &cluster_key,
+                    &lookup_key,
                     cluster_title.as_deref(),
                     span_for(line_number, line),
                 ) {
                     let parent_subgraph = active_subgraphs.last().copied();
                     let subgraph_index = builder.ensure_subgraph(
+                        &lookup_key,
                         &cluster_key,
                         cluster_title.as_deref(),
                         span_for(line_number, line),

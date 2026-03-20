@@ -591,11 +591,11 @@ impl IrBuilder {
 
     pub(crate) fn ensure_cluster(
         &mut self,
-        key: &str,
+        lookup_key: &str,
         title: Option<&str>,
         span: Span,
     ) -> Option<usize> {
-        let normalized_key = key.trim();
+        let normalized_key = lookup_key.trim();
         if normalized_key.is_empty() {
             return None;
         }
@@ -668,21 +668,28 @@ impl IrBuilder {
 
     pub(crate) fn ensure_subgraph(
         &mut self,
-        key: &str,
+        lookup_key: &str,
+        public_key: &str,
         title: Option<&str>,
         span: Span,
         parent: Option<usize>,
         cluster_index: Option<usize>,
     ) -> Option<usize> {
-        let normalized_key = key.trim();
-        if normalized_key.is_empty() {
+        let normalized_lookup_key = lookup_key.trim();
+        let normalized_public_key = public_key.trim();
+        if normalized_lookup_key.is_empty() || normalized_public_key.is_empty() {
             return None;
         }
 
-        if let Some(&existing_index) = self.subgraph_index_by_key.get(normalized_key) {
+        if let Some(&existing_index) = self.subgraph_index_by_key.get(normalized_lookup_key) {
             // Update title if needed
             if let Some(title_text) = clean_label(title) {
-                let existing_title = self.ir.graph.subgraphs.get(existing_index).and_then(|s| s.title);
+                let existing_title = self
+                    .ir
+                    .graph
+                    .subgraphs
+                    .get(existing_index)
+                    .and_then(|s| s.title);
                 if existing_title.is_none() {
                     let label_id = self.intern_label(title_text, span);
                     if let Some(subgraph) = self.ir.graph.subgraphs.get_mut(existing_index) {
@@ -699,7 +706,7 @@ impl IrBuilder {
         let cluster_id = cluster_index.map(IrClusterId);
         self.ir.graph.subgraphs.push(IrSubgraph {
             id: IrSubgraphId(subgraph_index),
-            key: normalized_key.to_string(),
+            key: normalized_public_key.to_string(),
             title: title_id,
             parent: parent_id,
             children: Vec::new(),
@@ -719,7 +726,7 @@ impl IrBuilder {
             graph_cluster.subgraph = Some(IrSubgraphId(subgraph_index));
         }
         self.subgraph_index_by_key
-            .insert(normalized_key.to_string(), subgraph_index);
+            .insert(normalized_lookup_key.to_string(), subgraph_index);
         Some(subgraph_index)
     }
 
