@@ -7067,6 +7067,7 @@ mod tests {
     };
     use proptest::prelude::*;
     use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
 
     fn sample_ir() -> MermaidDiagramIr {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
@@ -10991,6 +10992,183 @@ mod tests {
             }
             prop_assert!(layout.bounds.width >= 0.0);
             prop_assert!(layout.bounds.height >= 0.0);
+        }
+    }
+
+    // ── Logging spec enforcement tests (bd-gy4.12) ────────────────────
+
+    /// Capture tracing events emitted during layout and verify mandatory fields.
+    ///
+    /// Mandatory fields for layout tracing events:
+    /// - `layout.dispatch`: requested, selected, reason, diagram_type, node_count, edge_count
+    /// - `layout.guardrail.*`: algorithm, reason
+    /// - `layout.cycle_removal`: strategy
+    /// - `layout.crossing_minimization`: crossings_after_barycenter
+    #[test]
+    fn tracing_dispatch_event_contains_mandatory_fields() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = Arc::clone(&captured);
+
+        // Build a subscriber that captures JSON output.
+        let fmt_layer = tracing_subscriber::fmt::layer()
+            .json()
+            .with_writer(move || {
+                let captured = Arc::clone(&captured_clone);
+                CaptureWriter(captured)
+            })
+            .with_target(false)
+            .with_level(true);
+
+        let subscriber = tracing_subscriber::registry().with(fmt_layer);
+
+        // Run layout under the subscriber.
+        let ir = graph_ir(DiagramType::Flowchart, 5, &[(0, 1), (1, 2), (2, 3), (3, 4)]);
+        tracing::subscriber::with_default(subscriber, || {
+            let _traced = layout_diagram_traced(&ir);
+        });
+
+        let events = captured.lock().unwrap();
+        assert!(
+            !events.is_empty(),
+            "Layout should emit at least one tracing event"
+        );
+
+        // Find the dispatch event.
+        let dispatch_event = events
+            .iter()
+            .find(|e| e.contains("layout.dispatch"))
+            .expect("Should emit a layout.dispatch event");
+
+        let json: serde_json::Value =
+            serde_json::from_str(dispatch_event).expect("Event must be valid JSON");
+        let fields = &json["fields"];
+
+        // Verify mandatory fields.
+        assert!(
+            fields.get("requested").is_some(),
+            "dispatch event missing 'requested' field: {dispatch_event}"
+        );
+        assert!(
+            fields.get("selected").is_some(),
+            "dispatch event missing 'selected' field: {dispatch_event}"
+        );
+        assert!(
+            fields.get("reason").is_some(),
+            "dispatch event missing 'reason' field: {dispatch_event}"
+        );
+        assert!(
+            fields.get("diagram_type").is_some(),
+            "dispatch event missing 'diagram_type' field: {dispatch_event}"
+        );
+        assert!(
+            fields.get("node_count").is_some(),
+            "dispatch event missing 'node_count' field: {dispatch_event}"
+        );
+        assert!(
+            fields.get("edge_count").is_some(),
+            "dispatch event missing 'edge_count' field: {dispatch_event}"
+        );
+    }
+
+    #[test]
+    fn tracing_cycle_removal_event_contains_strategy() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = Arc::clone(&captured);
+
+        let fmt_layer = tracing_subscriber::fmt::layer()
+            .json()
+            .with_writer(move || {
+                let captured = Arc::clone(&captured_clone);
+                CaptureWriter(captured)
+            })
+            .with_target(false)
+            .with_level(true);
+
+        let subscriber = tracing_subscriber::registry().with(fmt_layer);
+
+        // Use a cyclic graph to trigger the cycle_removal info event.
+        let ir = graph_ir(DiagramType::Flowchart, 3, &[(0, 1), (1, 2), (2, 0)]);
+        tracing::subscriber::with_default(subscriber, || {
+            let _traced = layout_diagram_traced(&ir);
+        });
+
+        let events = captured.lock().unwrap();
+        let cycle_event = events
+            .iter()
+            .find(|e| e.contains("layout.cycle_removal") && !e.contains("acyclic"));
+
+        if let Some(event) = cycle_event {
+            let json: serde_json::Value =
+                serde_json::from_str(event).expect("Event must be valid JSON");
+            let fields = &json["fields"];
+            assert!(
+                fields.get("strategy").is_some(),
+                "cycle_removal event missing 'strategy' field: {event}"
+            );
+        }
+    }
+
+    #[test]
+    fn tracing_guardrail_event_contains_algorithm_and_reason() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = Arc::clone(&captured);
+
+        let fmt_layer = tracing_subscriber::fmt::layer()
+            .json()
+            .with_writer(move || {
+                let captured = Arc::clone(&captured_clone);
+                CaptureWriter(captured)
+            })
+            .with_target(false)
+            .with_level(true);
+
+        let subscriber = tracing_subscriber::registry().with(fmt_layer);
+
+        let ir = graph_ir(DiagramType::Flowchart, 4, &[(0, 1), (1, 2), (2, 3)]);
+        tracing::subscriber::with_default(subscriber, || {
+            let _traced = layout_diagram_traced(&ir);
+        });
+
+        let events = captured.lock().unwrap();
+        let guardrail_event = events.iter().find(|e| e.contains("layout.guardrail"));
+
+        if let Some(event) = guardrail_event {
+            let json: serde_json::Value =
+                serde_json::from_str(event).expect("Event must be valid JSON");
+            let fields = &json["fields"];
+            assert!(
+                fields.get("algorithm").is_some() || fields.get("initial_algorithm").is_some(),
+                "guardrail event missing algorithm field: {event}"
+            );
+            assert!(
+                fields.get("reason").is_some(),
+                "guardrail event missing 'reason' field: {event}"
+            );
+        }
+    }
+
+    /// Writer that captures output into a shared Vec.
+    struct CaptureWriter(Arc<Mutex<Vec<String>>>);
+
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if let Ok(s) = std::str::from_utf8(buf) {
+                let trimmed = s.trim();
+                if !trimmed.is_empty() {
+                    self.0.lock().unwrap().push(trimmed.to_string());
+                }
+            }
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
         }
     }
 }
