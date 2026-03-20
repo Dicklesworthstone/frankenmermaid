@@ -28,6 +28,7 @@ pub(crate) struct IrBuilder {
     node_index_by_id: HashMap<String, IrNodeId>,
     cluster_index_by_key: HashMap<String, usize>,
     subgraph_index_by_key: HashMap<String, usize>,
+    label_index_by_text: HashMap<String, IrLabelId>,
 
     warnings: Vec<String>,
     /// Track nodes that were auto-created (for dangling edge recovery)
@@ -49,6 +50,7 @@ impl IrBuilder {
             node_index_by_id: HashMap::new(),
             cluster_index_by_key: HashMap::new(),
             subgraph_index_by_key: HashMap::new(),
+            label_index_by_text: HashMap::new(),
             warnings: Vec::new(),
             auto_created_nodes: Vec::new(),
             activation_stacks: BTreeMap::new(),
@@ -598,6 +600,30 @@ impl IrBuilder {
             return None;
         }
 
+        if let Some(&existing_index) = self.cluster_index_by_key.get(normalized_key) {
+            // If the re-opened cluster has a title but the existing one doesn't,
+            // update it.
+            if let Some(title_text) = clean_label(title) {
+                let existing_title = self.ir.clusters.get(existing_index).and_then(|c| c.title);
+                let graph_title = self.ir.graph.clusters.get(existing_index).and_then(|c| c.title);
+
+                if existing_title.is_none() || graph_title.is_none() {
+                    let label_id = self.intern_label(title_text, span);
+                    if let Some(cluster) = self.ir.clusters.get_mut(existing_index) {
+                        if cluster.title.is_none() {
+                            cluster.title = Some(label_id);
+                        }
+                    }
+                    if let Some(graph_cluster) = self.ir.graph.clusters.get_mut(existing_index) {
+                        if graph_cluster.title.is_none() {
+                            graph_cluster.title = Some(label_id);
+                        }
+                    }
+                }
+            }
+            return Some(existing_index);
+        }
+
         let title_id = clean_label(title).map(|value| self.intern_label(value, span));
         let cluster_index = self.ir.clusters.len();
         self.ir.clusters.push(IrCluster {
@@ -615,6 +641,8 @@ impl IrBuilder {
             grid_span: 1,
             span,
         });
+        self.cluster_index_by_key
+            .insert(normalized_key.to_string(), cluster_index);
         Some(cluster_index)
     }
 
@@ -651,6 +679,20 @@ impl IrBuilder {
             return None;
         }
 
+        if let Some(&existing_index) = self.subgraph_index_by_key.get(normalized_key) {
+            // Update title if needed
+            if let Some(title_text) = clean_label(title) {
+                let existing_title = self.ir.graph.subgraphs.get(existing_index).and_then(|s| s.title);
+                if existing_title.is_none() {
+                    let label_id = self.intern_label(title_text, span);
+                    if let Some(subgraph) = self.ir.graph.subgraphs.get_mut(existing_index) {
+                        subgraph.title = Some(label_id);
+                    }
+                }
+            }
+            return Some(existing_index);
+        }
+
         let title_id = clean_label(title).map(|value| self.intern_label(value, span));
         let subgraph_index = self.ir.graph.subgraphs.len();
         let parent_id = parent.map(IrSubgraphId);
@@ -676,6 +718,8 @@ impl IrBuilder {
         {
             graph_cluster.subgraph = Some(IrSubgraphId(subgraph_index));
         }
+        self.subgraph_index_by_key
+            .insert(normalized_key.to_string(), subgraph_index);
         Some(subgraph_index)
     }
 
@@ -811,8 +855,16 @@ impl IrBuilder {
     }
 
     fn intern_label(&mut self, text: String, span: Span) -> IrLabelId {
+        if let Some(&existing_id) = self.label_index_by_text.get(&text) {
+            return existing_id;
+        }
+
         let label_id = IrLabelId(self.ir.labels.len());
-        self.ir.labels.push(IrLabel { text, span });
+        self.ir.labels.push(IrLabel {
+            text: text.clone(),
+            span,
+        });
+        self.label_index_by_text.insert(text, label_id);
         label_id
     }
 }
