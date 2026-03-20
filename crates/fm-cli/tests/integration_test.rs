@@ -549,6 +549,8 @@ fn validate_diagnostics_out_writes_artifact_file() {
         serde_json::from_str(&artifact_raw).expect("artifact should be valid json");
     assert!(artifact_json.get("valid").is_some());
     assert!(artifact_json.get("diagnostics").is_some());
+    assert!(artifact_json.get("layout_decision_ledger").is_some());
+    assert!(artifact_json.get("layout_decision_ledger_jsonl").is_some());
 }
 
 #[test]
@@ -610,6 +612,12 @@ fn render_json_writes_artifact_and_stdout_metadata() {
     assert!(json["decision_id"].is_string());
     assert!(json["policy_id"].is_string());
     assert_eq!(json["schema_version"], "1.0.0");
+    assert!(json["layout_decision_ledger"]["entries"].is_array());
+    assert_eq!(
+        json["layout_decision_ledger"]["entries"][0]["kind"],
+        "layout_decision"
+    );
+    assert!(json["layout_decision_ledger_jsonl"].is_string());
     assert!(json["budget_total_ms"].is_u64());
     assert!(json["parse_budget_ms"].is_u64());
     assert!(json["layout_budget_ms"].is_u64());
@@ -648,6 +656,12 @@ fn validate_json_reports_source_span_counts() {
     assert!(json["decision_id"].is_string());
     assert!(json["policy_id"].is_string());
     assert_eq!(json["schema_version"], "1.0.0");
+    assert!(json["layout_decision_ledger"]["entries"].is_array());
+    assert_eq!(
+        json["layout_decision_ledger"]["entries"][0]["kind"],
+        "layout_decision"
+    );
+    assert!(json["layout_decision_ledger_jsonl"].is_string());
     assert!(json["budget_total_ms"].is_u64());
     assert!(json["parse_budget_ms"].is_u64());
     assert!(json["layout_budget_ms"].is_u64());
