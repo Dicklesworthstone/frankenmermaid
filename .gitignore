@@ -56,6 +56,10 @@ SESSION_*.md
 verify_*.sh
 newfile.txt
 repro_*.rs
+reproduce_*.rs
 
 # Test output binaries/files (parser test artifacts at repo root)
 /test_*
+
+# Debug rendering output
+debug_output.svg
