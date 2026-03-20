@@ -227,26 +227,16 @@ fn parse_dot_node_fragment(raw: &str) -> Option<DotNode> {
         return None;
     }
 
-    if let Some(open_idx) = trimmed.find('[') {
-        let close_idx = trimmed.rfind(']')?;
-        let id = normalize_identifier(trimmed[..open_idx].trim());
-        if id.is_empty() {
-            return None;
-        }
-        let attrs = &trimmed[open_idx + 1..close_idx];
-        return Some(DotNode {
-            id,
-            label: parse_dot_label(attrs),
-        });
-    }
-
-    let id_token = trimmed.split_whitespace().next().unwrap_or_default();
-    let id = normalize_identifier(id_token);
+    let (id_part, attrs) = split_endpoint_and_attrs(trimmed);
+    let id = normalize_identifier(id_part);
     if id.is_empty() {
         return None;
     }
 
-    Some(DotNode { id, label: None })
+    Some(DotNode {
+        id,
+        label: attrs.and_then(parse_dot_label),
+    })
 }
 
 fn split_endpoint_and_attrs(fragment: &str) -> (&str, Option<&str>) {

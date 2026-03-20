@@ -955,4 +955,38 @@ mod tests {
         assert_eq!(diff.unchanged_edges, 2);
         assert_eq!(diff.removed_edges, 0);
     }
+
+    #[test]
+    fn parallel_edges_insertion_order_stability() {
+        let mut old_ir = make_ir_with_nodes(&["A", "B"]);
+        old_ir.edges.push(fm_core::IrEdge {
+            from: fm_core::IrEndpoint::Node(fm_core::IrNodeId(0)),
+            to: fm_core::IrEndpoint::Node(fm_core::IrNodeId(1)),
+            arrow: fm_core::ArrowType::Arrow,
+            ..Default::default()
+        });
+
+        let mut new_ir = make_ir_with_nodes(&["A", "B"]);
+        // PREPEND a different edge
+        new_ir.edges.push(fm_core::IrEdge {
+            from: fm_core::IrEndpoint::Node(fm_core::IrNodeId(0)),
+            to: fm_core::IrEndpoint::Node(fm_core::IrNodeId(1)),
+            arrow: fm_core::ArrowType::Line,
+            ..Default::default()
+        });
+        // Then the original edge
+        new_ir.edges.push(fm_core::IrEdge {
+            from: fm_core::IrEndpoint::Node(fm_core::IrNodeId(0)),
+            to: fm_core::IrEndpoint::Node(fm_core::IrNodeId(1)),
+            arrow: fm_core::ArrowType::Arrow,
+            ..Default::default()
+        });
+
+        let diff = diff_diagrams(&old_ir, &new_ir);
+        // Desired: 1 added (the Line one), 1 unchanged (the Arrow one).
+        // Current implementation: 1 changed (Arrow -> Line), 1 added (Arrow).
+        assert_eq!(diff.unchanged_edges, 1, "The Arrow edge should be matched as unchanged");
+        assert_eq!(diff.added_edges, 1, "The Line edge should be seen as added");
+        assert_eq!(diff.changed_edges, 0, "No edges should be seen as changed");
+    }
 }
