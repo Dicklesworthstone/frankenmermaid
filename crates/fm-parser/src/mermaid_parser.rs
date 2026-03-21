@@ -2400,6 +2400,7 @@ fn parse_journey(input: &str, builder: &mut IrBuilder) {
             };
             let Some(subgraph_index) = builder.ensure_subgraph(
                 &section_key,
+                &section_key,
                 Some(&section_title),
                 span,
                 None,
@@ -2548,6 +2549,7 @@ fn parse_kanban(input: &str, builder: &mut IrBuilder) {
             };
             let Some(subgraph_index) = builder.ensure_subgraph(
                 &column_key,
+                &column_key,
                 Some(&item_label),
                 span,
                 None,
@@ -2653,6 +2655,7 @@ fn parse_timeline(input: &str, builder: &mut IrBuilder) {
             current_section = builder.ensure_cluster(section_name, Some(section_name), span);
             current_section_subgraph = current_section.and_then(|section_idx| {
                 builder.ensure_subgraph(
+                    section_name,
                     section_name,
                     Some(section_name),
                     span,
@@ -3285,6 +3288,7 @@ fn parse_architecture(input: &str, builder: &mut IrBuilder) {
             }
             let Some(subgraph_index) = builder.ensure_subgraph(
                 &declaration.id,
+                &declaration.id,
                 title,
                 span,
                 parent_subgraph,
@@ -3652,7 +3656,14 @@ fn lower_block_beta_document_item(
             };
             let parent_subgraph = active_subgraphs.last().copied();
             let Some(subgraph_index) =
-                builder.ensure_subgraph(id, Some(id), span, parent_subgraph, Some(cluster_index))
+                builder.ensure_subgraph(
+                    id,
+                    id,
+                    Some(id),
+                    span,
+                    parent_subgraph,
+                    Some(cluster_index),
+                )
             else {
                 builder.add_warning(format!(
                     "Line {line_number}: invalid block-beta group identifier: {}",
@@ -5444,6 +5455,7 @@ fn parse_c4_boundary(
     let title = format!("{function_name}({boundary_key}, {display_label})");
     let cluster_index = builder.ensure_cluster(&boundary_key, Some(&title), span)?;
     let subgraph_index = builder.ensure_subgraph(
+        &boundary_key,
         &boundary_key,
         Some(&title),
         span,

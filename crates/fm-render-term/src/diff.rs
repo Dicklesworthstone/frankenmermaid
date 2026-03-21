@@ -3,8 +3,8 @@
 //! Compares two `MermaidDiagramIr` instances and produces a diff result
 //! that identifies added, removed, changed, and unchanged elements.
 
-use crate::{TermRenderConfig, render_diagram_with_config};
-use fm_core::{ArrowType, IrEndpoint, IrNode, IrNodeId, MermaidDiagramIr, NodeShape};
+use crate::{render_diagram_with_config, TermRenderConfig};
+use fm_core::{ArrowType, IrEndpoint, IrNode, MermaidDiagramIr, NodeShape};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -295,8 +295,12 @@ fn diff_edges(
     let mut unchanged = 0_usize;
 
     for (from_id, to_id) in all_pairs {
-        let mut old_list = old_groups.remove(&(from_id.clone(), to_id.clone())).unwrap_or_default();
-        let mut new_list = new_groups.remove(&(from_id.clone(), to_id.clone())).unwrap_or_default();
+        let mut old_list = old_groups
+            .remove(&(from_id.clone(), to_id.clone()))
+            .unwrap_or_default();
+        let mut new_list = new_groups
+            .remove(&(from_id.clone(), to_id.clone()))
+            .unwrap_or_default();
 
         // 1. Match identical edges first (Unchanged)
         let mut i = 0;
@@ -408,15 +412,9 @@ fn compare_edges(
 }
 
 fn endpoint_id(ir: &MermaidDiagramIr, endpoint: IrEndpoint) -> Option<String> {
-    match endpoint {
-        IrEndpoint::Node(IrNodeId(idx)) => ir.nodes.get(idx).map(|n| n.id.clone()),
-        IrEndpoint::Port(port_id) => ir
-            .ports
-            .get(port_id.0)
-            .and_then(|p| ir.nodes.get(p.node.0))
-            .map(|n| n.id.clone()),
-        IrEndpoint::Unresolved => None,
-    }
+    ir.resolve_endpoint_node(endpoint)
+        .and_then(|id| ir.node(id))
+        .map(|n| n.id.clone())
 }
 
 fn node_member_strings(node: &IrNode) -> Vec<String> {
@@ -686,7 +684,33 @@ fn colorize_marker(marker: char, status: DiffStatus, use_colors: bool) -> String
 }
 
 fn display_width(value: &str) -> usize {
-    value.chars().count()
+    strip_ansi(value).chars().count()
+}
+
+fn strip_ansi(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut in_escape = false;
+    let mut in_bracket = false;
+
+    for c in input.chars() {
+        if in_escape {
+            if c == '[' {
+                in_bracket = true;
+                in_escape = false;
+            } else {
+                in_escape = false;
+            }
+        } else if in_bracket {
+            if c.is_ascii_alphabetic() {
+                in_bracket = false;
+            }
+        } else if c == '\x1b' {
+            in_escape = true;
+        } else {
+            result.push(c);
+        }
+    }
+    result
 }
 
 fn truncate_display(value: &str, max_width: usize) -> String {
@@ -744,18 +768,9 @@ fn align_rendered_lines(old_output: &str, new_output: &str) -> Vec<AlignedDiffLi
 }
 
 fn align_changed_block(old_lines: &[&str], new_lines: &[&str]) -> Vec<AlignedDiffLine> {
-    let shared = old_lines.len().min(new_lines.len());
     let mut aligned = Vec::new();
 
-    for index in 0..shared {
-        aligned.push(AlignedDiffLine {
-            status: DiffStatus::Changed,
-            old_line: Some(old_lines[index].to_string()),
-            new_line: Some(new_lines[index].to_string()),
-        });
-    }
-
-    for line in &old_lines[shared..] {
+    for line in old_lines {
         aligned.push(AlignedDiffLine {
             status: DiffStatus::Removed,
             old_line: Some((*line).to_string()),
@@ -763,7 +778,7 @@ fn align_changed_block(old_lines: &[&str], new_lines: &[&str]) -> Vec<AlignedDif
         });
     }
 
-    for line in &new_lines[shared..] {
+    for line in new_lines {
         aligned.push(AlignedDiffLine {
             status: DiffStatus::Added,
             old_line: None,
@@ -810,6 +825,7 @@ mod tests {
     use super::*;
     use fm_core::{
         DiagramType, GraphDirection, IrAttributeKey, IrEdge, IrEntityAttribute, IrLabel, IrLabelId,
+        IrNodeId,
     };
 
     fn make_ir_with_nodes(node_ids: &[&str]) -> MermaidDiagramIr {
@@ -995,5 +1011,12 @@ mod tests {
         assert_eq!(diff.changed_edges, 1);
         assert_eq!(diff.added_edges, 0);
         assert_eq!(diff.removed_edges, 0);
+    }
+
+    #[test]
+    fn display_width_ignores_ansi_codes() {
+        let colored = format!("{}Added{}", colors::ADDED, colors::RESET);
+        assert_eq!(display_width(&colored), 5);
+        assert_eq!(display_width("Plain"), 5);
     }
 }

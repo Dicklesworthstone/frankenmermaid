@@ -1,7 +1,7 @@
 use fm_core::{ArrowType, DiagramType, NodeShape, Span};
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::{DetectionMethod, ParseResult, ir_builder::IrBuilder};
+use crate::{ir_builder::IrBuilder, DetectionMethod, ParseResult};
 
 #[must_use]
 pub fn looks_like_dot(input: &str) -> bool {
@@ -27,6 +27,7 @@ pub fn parse_dot(input: &str) -> ParseResult {
     let normalized_body = normalize_dot_body(body);
     let mut active_clusters: Vec<usize> = Vec::new();
     let mut active_subgraphs: Vec<usize> = Vec::new();
+    let mut subgraph_serial = 0usize;
 
     for (index, line) in normalized_body.lines().enumerate() {
         let line_number = index + 1;
@@ -52,7 +53,8 @@ pub fn parse_dot(input: &str) -> ParseResult {
             if let Some((cluster_key, cluster_title, opens_scope)) =
                 parse_subgraph_start(statement, line_number)
             {
-                let lookup_key = format!("{cluster_key}@dot:{line_number}");
+                subgraph_serial += 1;
+                let lookup_key = format!("{cluster_key}@dot:{subgraph_serial}");
                 if let Some(cluster_index) = builder.ensure_cluster(
                     &lookup_key,
                     cluster_title.as_deref(),

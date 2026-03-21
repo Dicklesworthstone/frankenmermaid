@@ -4,31 +4,33 @@ use std::sync::{LazyLock, RwLock};
 use std::time::Instant;
 
 use fm_core::{
-    MermaidBudgetLedger, MermaidDiagramIr, MermaidGuardReport, MermaidWasmPressureSignals, Span,
-    capability_matrix, mermaid_layout_guard_observability,
+    capability_matrix, mermaid_layout_guard_observability, MermaidBudgetLedger, MermaidDiagramIr,
+    MermaidGuardReport, MermaidWasmPressureSignals, Span,
 };
 use fm_layout::{
-    DiagramLayout, LayoutConfig, LayoutGuardrails, build_layout_guard_report_with_pressure,
-    layout_diagram_traced, layout_diagram_traced_with_config_and_guardrails,
+    build_layout_guard_report_with_pressure, layout_diagram_traced,
+    layout_diagram_traced_with_algorithm_and_guardrails,
+    layout_diagram_traced_with_config_and_guardrails, DiagramLayout, LayoutConfig,
+    LayoutGuardrails,
 };
 #[cfg(target_arch = "wasm32")]
 use fm_parser::ParseResult;
 use fm_parser::{detect_type_with_confidence, parse};
-use fm_render_canvas::CanvasRenderConfig;
 #[cfg(target_arch = "wasm32")]
 use fm_render_canvas::render_to_canvas_with_layout;
+use fm_render_canvas::CanvasRenderConfig;
 #[cfg(target_arch = "wasm32")]
 use fm_render_canvas::{
-    Canvas2dContext, CanvasRenderResult, LineCap, LineJoin, TextAlign, TextBaseline, TextMetrics,
-    render_to_canvas,
+    render_to_canvas, Canvas2dContext, CanvasRenderResult, LineCap, LineJoin, TextAlign,
+    TextBaseline, TextMetrics,
 };
-use fm_render_svg::{SvgRenderConfig, ThemePreset, render_svg_with_layout};
+use fm_render_svg::{render_svg_with_layout, SvgRenderConfig, ThemePreset};
 use serde::{Deserialize, Serialize};
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::wasm_bindgen;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
-#[cfg(target_arch = "wasm32")]
-use wasm_bindgen::prelude::wasm_bindgen;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -958,8 +960,8 @@ impl Diagram {
 #[cfg(test)]
 mod tests {
     use super::{
-        PressureConfigOverrides, SvgConfigOverrides, ThemePreset, apply_budget_svg_simplifications,
-        collect_source_spans, merge_pressure_config, merge_svg_config, render,
+        apply_budget_svg_simplifications, collect_source_spans, merge_pressure_config,
+        merge_svg_config, render, PressureConfigOverrides, SvgConfigOverrides, ThemePreset,
     };
     use fm_core::{MermaidPressureTier, MermaidWasmPressureSignals};
     use fm_layout::layout_diagram_traced;
@@ -1066,10 +1068,8 @@ mod tests {
             serde_json::from_str(&json).expect("payload should parse as JSON");
         assert_eq!(payload["project"], "frankenmermaid");
         assert_eq!(payload["schema_version"], "1.0.0");
-        assert!(
-            payload["claims"]
-                .as_array()
-                .is_some_and(|claims| !claims.is_empty())
-        );
+        assert!(payload["claims"]
+            .as_array()
+            .is_some_and(|claims| !claims.is_empty()));
     }
 }
