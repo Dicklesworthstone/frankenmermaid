@@ -2176,6 +2176,11 @@ fn render_edge(
         .class(style_class)
         .data("fm-edge-id", &edge_index.to_string());
 
+    // Apply inline style from linkStyle directives if present.
+    if let Some(inline_style) = resolve_edge_inline_style(ir, edge_index) {
+        elem = elem.attr("style", &inline_style);
+    }
+
     if let Some(marker) = marker_start {
         elem = elem.marker_start(marker);
     }

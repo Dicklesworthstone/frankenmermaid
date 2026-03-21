@@ -117,6 +117,11 @@ pub fn describe_edge(
         fm_core::ArrowType::DottedArrow => "optionally points to",
         fm_core::ArrowType::Circle => "relates to",
         fm_core::ArrowType::Cross => "blocks",
+        fm_core::ArrowType::ThickLine => "strongly connects to",
+        fm_core::ArrowType::DottedLine => "optionally connects to",
+        fm_core::ArrowType::DoubleArrow => "points both ways to",
+        fm_core::ArrowType::DoubleThickArrow => "strongly points both ways to",
+        fm_core::ArrowType::DoubleDottedArrow => "optionally points both ways to",
     };
 
     if let Some(label_text) = label {

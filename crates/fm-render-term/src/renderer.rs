@@ -262,6 +262,22 @@ impl TermRenderer {
             self.draw_line_cell(buffer, x0, y0, x1, y1, glyphs, edge_path.reversed, arrow);
         }
 
+        // Draw arrowhead at start for double arrows.
+        if matches!(
+            arrow,
+            ArrowType::DoubleArrow | ArrowType::DoubleThickArrow | ArrowType::DoubleDottedArrow
+        ) {
+            if let Some(first) = edge_path.points.first() {
+                let (x, y) = self.point_to_cells(first);
+                if edge_path.points.len() >= 2 {
+                    let next = &edge_path.points[1];
+                    let (nx, ny) = self.point_to_cells(next);
+                    let arrow_char = self.arrowhead_for_direction(nx, ny, x, y, glyphs, arrow);
+                    buffer.set(x, y, arrow_char);
+                }
+            }
+        }
+
         // Draw arrowhead at end.
         if let Some(last) = edge_path.points.last() {
             let (x, y) = self.point_to_cells(last);
@@ -272,7 +288,10 @@ impl TermRenderer {
             } else {
                 glyphs.arrow_right
             };
-            if !matches!(arrow, ArrowType::Line) {
+            if !matches!(
+                arrow,
+                ArrowType::Line | ArrowType::ThickLine | ArrowType::DottedLine
+            ) {
                 buffer.set(x, y, arrow_char);
             }
         }
@@ -290,7 +309,11 @@ impl TermRenderer {
         reversed: bool,
         arrow: ArrowType,
     ) {
-        let line_char = if reversed || matches!(arrow, ArrowType::DottedArrow) {
+        let line_char = if reversed
+            || matches!(
+                arrow,
+                ArrowType::DottedArrow | ArrowType::DottedLine | ArrowType::DoubleDottedArrow
+            ) {
             if x0 == x1 {
                 glyphs.dotted_v
             } else {

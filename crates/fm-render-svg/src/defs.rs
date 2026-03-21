@@ -201,6 +201,13 @@ impl ArrowheadMarker {
         }
     }
 
+    /// Set the orientation of the marker.
+    #[must_use]
+    pub fn with_orient(mut self, orient: MarkerOrient) -> Self {
+        self.orient = orient;
+        self
+    }
+
     /// Render the marker to an SVG element.
     #[must_use]
     pub fn to_element(&self) -> Element {
