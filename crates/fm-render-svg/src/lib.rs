@@ -1289,6 +1289,28 @@ fn render_layout_to_svg(
         }
     }
 
+    for divider in &layout.extensions.cluster_dividers {
+        let cluster_span = ir
+            .clusters
+            .get(divider.cluster_index)
+            .map_or(Span::default(), |cluster| cluster.span);
+        let mut line = Element::line()
+            .x1(divider.start.x + offset_x)
+            .y1(divider.start.y + offset_y)
+            .x2(divider.end.x + offset_x)
+            .y2(divider.end.y + offset_y)
+            .stroke("#64748b")
+            .stroke_width(1.0)
+            .stroke_dasharray("6,4")
+            .class("fm-cluster-divider");
+
+        if config.include_source_spans {
+            line = apply_span_metadata(line, cluster_span);
+        }
+
+        doc = doc.child(line);
+    }
+
     // Render edges
     for edge_path in &layout.edges {
         let edge_elem = render_edge(
@@ -2579,8 +2601,9 @@ fn render_edge(
 mod tests {
     use super::*;
     use fm_core::{
-        ArrowType, DiagramType, IrCluster, IrClusterId, IrEdge, IrEndpoint, IrLabel, IrLabelId,
-        IrNode, IrNodeId, MermaidDiagramIr, NodeShape, Span,
+        ArrowType, DiagramType, IrCluster, IrClusterId, IrEdge, IrEndpoint, IrGraphCluster,
+        IrGraphNode, IrLabel, IrLabelId, IrNode, IrNodeId, IrSubgraph, IrSubgraphId,
+        MermaidDiagramIr, NodeShape, Span,
     };
     use fm_layout::{
         FillStyle, LayoutAxisTick, LayoutBand, LayoutBandKind, LineCap as RenderLineCap,
@@ -2647,6 +2670,78 @@ mod tests {
         if let Some(node) = ir.nodes.first_mut() {
             node.classes = classes.iter().map(|value| (*value).to_string()).collect();
         }
+        ir
+    }
+
+    fn create_state_ir_with_concurrent_regions() -> MermaidDiagramIr {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::State);
+        let label_id = IrLabelId(0);
+        ir.labels.push(IrLabel {
+            text: "Active Mode".to_string(),
+            span: Span::default(),
+        });
+        ir.nodes.push(IrNode {
+            id: "Processing".to_string(),
+            ..IrNode::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "Monitoring".to_string(),
+            ..IrNode::default()
+        });
+        ir.graph.nodes.push(IrGraphNode {
+            node_id: IrNodeId(0),
+            kind: fm_core::IrNodeKind::State,
+            clusters: vec![IrClusterId(0)],
+            subgraphs: vec![IrSubgraphId(0), IrSubgraphId(1)],
+        });
+        ir.graph.nodes.push(IrGraphNode {
+            node_id: IrNodeId(1),
+            kind: fm_core::IrNodeKind::State,
+            clusters: vec![IrClusterId(0)],
+            subgraphs: vec![IrSubgraphId(0), IrSubgraphId(2)],
+        });
+        ir.clusters.push(IrCluster {
+            id: IrClusterId(0),
+            title: Some(label_id),
+            members: vec![IrNodeId(0), IrNodeId(1)],
+            grid_span: 2,
+            span: Span::default(),
+        });
+        ir.graph.clusters.push(IrGraphCluster {
+            cluster_id: IrClusterId(0),
+            title: Some(label_id),
+            members: vec![IrNodeId(0), IrNodeId(1)],
+            subgraph: Some(IrSubgraphId(0)),
+            grid_span: 2,
+            span: Span::default(),
+        });
+        ir.graph.subgraphs.push(IrSubgraph {
+            id: IrSubgraphId(0),
+            key: "Active".to_string(),
+            title: Some(label_id),
+            children: vec![IrSubgraphId(1), IrSubgraphId(2)],
+            members: vec![IrNodeId(0), IrNodeId(1)],
+            cluster: Some(IrClusterId(0)),
+            grid_span: 2,
+            span: Span::default(),
+            ..IrSubgraph::default()
+        });
+        ir.graph.subgraphs.push(IrSubgraph {
+            id: IrSubgraphId(1),
+            key: "__state_region_1".to_string(),
+            parent: Some(IrSubgraphId(0)),
+            members: vec![IrNodeId(0)],
+            span: Span::default(),
+            ..IrSubgraph::default()
+        });
+        ir.graph.subgraphs.push(IrSubgraph {
+            id: IrSubgraphId(2),
+            key: "__state_region_2".to_string(),
+            parent: Some(IrSubgraphId(0)),
+            members: vec![IrNodeId(1)],
+            span: Span::default(),
+            ..IrSubgraph::default()
+        });
         ir
     }
 
@@ -2967,6 +3062,15 @@ mod tests {
         let ir = create_ir_with_cluster("section Planning");
         let svg = render_svg(&ir);
         assert!(svg.contains("fm-cluster-swimlane"));
+    }
+
+    #[test]
+    fn renders_state_cluster_concurrency_divider() {
+        let ir = create_state_ir_with_concurrent_regions();
+        let layout = layout_diagram(&ir);
+        let svg = render_svg_with_layout(&ir, &layout, &SvgRenderConfig::default());
+        assert!(svg.contains("Active Mode"));
+        assert!(svg.contains("stroke-dasharray=\"6,4\""));
     }
 
     #[test]

@@ -117,7 +117,8 @@ enum SequenceStatement {
 
 #[derive(Debug, Clone)]
 enum ClassStatement {
-    BlockStart(String),
+    /// Class block start with name and optional generic type parameters.
+    BlockStart(String, Vec<String>),
     Ast(FlowAst),
     Node(NodeToken),
     Member(fm_core::IrClassMember),
@@ -1452,12 +1453,35 @@ fn parse_class(input: &str, builder: &mut IrBuilder) {
         };
 
         for statement in statements {
-            if let ClassStatement::BlockStart(ref name) = statement {
+            if let ClassStatement::BlockStart(ref name, _) = statement {
                 in_block = Some(name.clone());
             }
             lower_class_statement(statement, line_number, line, builder);
         }
     }
+}
+
+/// Extract generic type parameters from a class name using `~T~` syntax.
+///
+/// Examples:
+/// - `"List~T~"` → `("List", vec!["T"])`
+/// - `"Map~K,V~"` → `("Map", vec!["K", "V"])`
+/// - `"Animal"` → `("Animal", vec![])`
+fn extract_class_generics(raw_name: &str) -> (&str, Vec<String>) {
+    let Some(tilde_start) = raw_name.find('~') else {
+        return (raw_name, Vec::new());
+    };
+    let Some(tilde_end) = raw_name[tilde_start + 1..].find('~') else {
+        return (raw_name, Vec::new());
+    };
+    let class_name = &raw_name[..tilde_start];
+    let generics_str = &raw_name[tilde_start + 1..tilde_start + 1 + tilde_end];
+    let generics: Vec<String> = generics_str
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    (class_name, generics)
 }
 
 /// Parse a class member declaration like `+String name`, `-int age`, `#doSomething() void`.
@@ -1530,12 +1554,16 @@ fn parse_class_member(line: &str) -> Option<fm_core::IrClassMember> {
 
 fn parse_class_statements(line: &str) -> Option<Vec<ClassStatement>> {
     if line.starts_with("class ") && line.ends_with('{') {
-        let class_name = line
+        let raw_name = line
             .trim_start_matches("class")
             .trim()
             .trim_end_matches('{')
             .trim();
-        return Some(vec![ClassStatement::BlockStart(class_name.to_string())]);
+        let (class_name, generics) = extract_class_generics(raw_name);
+        return Some(vec![ClassStatement::BlockStart(
+            class_name.to_string(),
+            generics,
+        )]);
     }
 
     if line.starts_with('}') {
@@ -1568,16 +1596,21 @@ fn parse_class_statements(line: &str) -> Option<Vec<ClassStatement>> {
             continue;
         }
 
-        // `class Name` without braces: declare a class node
+        // `class Name` or `class Name~T~` without braces: declare a class node
         if statement.starts_with("class ") {
             let rest = statement.strip_prefix("class ").unwrap_or("").trim();
-            if !rest.is_empty()
-                && !rest.contains("--")
-                && !rest.contains("..")
-                && let Some(node) = parse_node_token(rest)
-            {
-                statements.push(ClassStatement::Node(node));
-                continue;
+            if !rest.is_empty() && !rest.contains("--") && !rest.contains("..") {
+                let (clean_name, generics) = extract_class_generics(rest);
+                if let Some(node) = parse_node_token(clean_name) {
+                    if generics.is_empty() {
+                        statements.push(ClassStatement::Node(node));
+                    } else {
+                        // For inline generics, use BlockStart+End to carry them.
+                        statements.push(ClassStatement::BlockStart(node.id.clone(), generics));
+                        statements.push(ClassStatement::End);
+                    }
+                    continue;
+                }
             }
         }
 
@@ -1600,11 +1633,14 @@ fn lower_class_statement(
     builder: &mut IrBuilder,
 ) {
     match statement {
-        ClassStatement::BlockStart(class_name) => {
+        ClassStatement::BlockStart(class_name, generics) => {
             if let Some(node) = parse_node_token(&class_name) {
                 let span = span_for(line_number, source_line);
                 let _ = builder.intern_node(&node.id, node.label.as_deref(), node.shape, span);
                 builder.set_current_class(&node.id);
+                if !generics.is_empty() {
+                    builder.set_class_generics(&node.id, generics);
+                }
             }
         }
         ClassStatement::Ast(ast) => {
