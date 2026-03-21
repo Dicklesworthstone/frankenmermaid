@@ -2,13 +2,12 @@ use std::collections::{BTreeMap, HashMap};
 
 use fm_core::{
     ArrowType, ClassMemberKind, ClassStereotype, Diagnostic, DiagnosticCategory, DiagramType,
-    FragmentAlternative, FragmentKind, GraphDirection, IrActivation, IrAttributeKey,
-    IrClassMember, IrClassNodeMeta, IrCluster, IrClusterId, IrEdge, IrEdgeKind, IrEndpoint,
-    IrEntityAttribute, IrGanttMeta, IrGraphCluster, IrGraphEdge, IrGraphNode, IrLabel, IrLabelId,
-    IrLifecycleEvent, IrNode, IrNodeId, IrNodeKind, IrParticipantGroup, IrSequenceFragment,
-    IrSequenceMeta, IrSequenceNote, IrSubgraph, IrSubgraphId, LifecycleEventKind,
-    MermaidDiagramIr, MermaidError, MermaidParseMode, MermaidWarning, MermaidWarningCode,
-    NodeShape, NotePosition, Span,
+    FragmentAlternative, FragmentKind, GraphDirection, IrActivation, IrAttributeKey, IrClassMember,
+    IrClassNodeMeta, IrCluster, IrClusterId, IrEdge, IrEdgeKind, IrEndpoint, IrEntityAttribute,
+    IrGanttMeta, IrGraphCluster, IrGraphEdge, IrGraphNode, IrLabel, IrLabelId, IrLifecycleEvent,
+    IrNode, IrNodeId, IrNodeKind, IrParticipantGroup, IrSequenceFragment, IrSequenceMeta,
+    IrSequenceNote, IrSubgraph, IrSubgraphId, LifecycleEventKind, MermaidDiagramIr, MermaidError,
+    MermaidParseMode, MermaidWarning, MermaidWarningCode, NodeShape, NotePosition, Span,
 };
 
 use crate::ParseResult;
@@ -610,7 +609,12 @@ impl IrBuilder {
             // update it.
             if let Some(title_text) = clean_label(title) {
                 let existing_title = self.ir.clusters.get(existing_index).and_then(|c| c.title);
-                let graph_title = self.ir.graph.clusters.get(existing_index).and_then(|c| c.title);
+                let graph_title = self
+                    .ir
+                    .graph
+                    .clusters
+                    .get(existing_index)
+                    .and_then(|c| c.title);
 
                 if existing_title.is_none() || graph_title.is_none() {
                     let label_id = self.intern_label(title_text, span);

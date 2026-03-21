@@ -2941,7 +2941,7 @@ pub struct IrGanttSection {
 }
 
 /// A single Gantt task with parsed scheduling metadata.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct IrGanttTask {
     pub node: IrNodeId,
     pub section_idx: usize,
@@ -4847,6 +4847,60 @@ mod tests {
         let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         let json = serde_json::to_string(&ir).expect("serialize");
         assert!(!json.contains("sequence_meta"));
+    }
+
+    #[test]
+    fn gantt_meta_serde_round_trip() {
+        let meta = IrGanttMeta {
+            title: Some("Release Train".to_string()),
+            date_format: Some("YYYY-MM-DD".to_string()),
+            axis_format: Some("%m/%d".to_string()),
+            tick_interval: Some("1week".to_string()),
+            excludes: vec!["weekends".to_string()],
+            sections: vec![IrGanttSection {
+                name: "Planning".to_string(),
+            }],
+            tasks: vec![IrGanttTask {
+                node: IrNodeId(0),
+                section_idx: 0,
+                meta: "done, plan_1, 2026-02-01, 2d".to_string(),
+                task_id: Some("plan_1".to_string()),
+                after_task_id: None,
+                start_date: Some("2026-02-01".to_string()),
+                duration_days: Some(2),
+                milestone: false,
+                active: false,
+                done: true,
+                critical: false,
+            }],
+        };
+
+        let json = serde_json::to_string(&meta).expect("serialize");
+        let deser: IrGanttMeta = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(meta, deser);
+    }
+
+    #[test]
+    fn ir_with_gantt_meta_round_trip() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Gantt);
+        ir.gantt_meta = Some(IrGanttMeta {
+            sections: vec![IrGanttSection {
+                name: "Delivery".to_string(),
+            }],
+            tasks: vec![IrGanttTask {
+                node: IrNodeId(0),
+                section_idx: 0,
+                task_id: Some("ship".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        let json = serde_json::to_string(&ir).expect("serialize");
+        assert!(json.contains("gantt_meta"));
+        let deser: MermaidDiagramIr = serde_json::from_str(&json).expect("deserialize");
+        assert!(deser.gantt_meta.is_some());
+        assert_eq!(deser.gantt_meta.unwrap().sections[0].name, "Delivery");
     }
 
     #[test]

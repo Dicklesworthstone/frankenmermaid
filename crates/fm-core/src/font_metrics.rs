@@ -72,7 +72,6 @@ impl FontPreset {
 /// Configuration for deterministic font metrics.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FontMetricsConfig {
-
     /// The font preset to use for base measurements.
     pub preset: FontPreset,
     /// Font size in pixels.

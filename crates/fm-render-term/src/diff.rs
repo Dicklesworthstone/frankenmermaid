@@ -3,7 +3,7 @@
 //! Compares two `MermaidDiagramIr` instances and produces a diff result
 //! that identifies added, removed, changed, and unchanged elements.
 
-use crate::{render_diagram_with_config, TermRenderConfig};
+use crate::{TermRenderConfig, render_diagram_with_config};
 use fm_core::{ArrowType, IrEndpoint, IrNode, MermaidDiagramIr, NodeShape};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};

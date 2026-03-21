@@ -1,7 +1,7 @@
 use fm_core::{ArrowType, DiagramType, NodeShape, Span};
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::{ir_builder::IrBuilder, DetectionMethod, ParseResult};
+use crate::{DetectionMethod, ParseResult, ir_builder::IrBuilder};
 
 #[must_use]
 pub fn looks_like_dot(input: &str) -> bool {

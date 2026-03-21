@@ -2227,10 +2227,10 @@ mod tests {
         IrNode, IrNodeId, MermaidDiagramIr, NodeShape, Span,
     };
     use fm_layout::{
-        FillStyle, LineCap as RenderLineCap, LineJoin as RenderLineJoin, PathCmd, RenderClip,
-        RenderGroup, RenderItem, RenderPath, RenderRect, RenderScene, RenderSource, RenderText,
-        RenderTransform, StrokeStyle, TextAlign as RenderTextAlign,
-        TextBaseline as RenderTextBaseline, layout_diagram,
+        FillStyle, LayoutAxisTick, LayoutBand, LayoutBandKind, LineCap as RenderLineCap,
+        LineJoin as RenderLineJoin, PathCmd, RenderClip, RenderGroup, RenderItem, RenderPath,
+        RenderRect, RenderScene, RenderSource, RenderText, RenderTransform, StrokeStyle,
+        TextAlign as RenderTextAlign, TextBaseline as RenderTextBaseline, layout_diagram,
     };
     use proptest::prelude::*;
 
@@ -2619,6 +2619,27 @@ mod tests {
         let svg = render_svg(&ir);
         // Standard clusters should have translucent fill
         assert!(svg.contains("rgba("));
+    }
+
+    #[test]
+    fn renders_layout_extensions_for_bands_and_axis_ticks() {
+        let ir = MermaidDiagramIr::empty(DiagramType::Gantt);
+        let mut layout = layout_diagram(&ir);
+        layout.extensions.bands.push(LayoutBand {
+            kind: LayoutBandKind::Section,
+            label: "Planning".to_string(),
+            bounds: fm_layout::LayoutRect::new(0.0, 20.0, 180.0, 80.0),
+        });
+        layout.extensions.axis_ticks.push(LayoutAxisTick {
+            label: "2026-02-01".to_string(),
+            position: 24.0,
+        });
+
+        let svg = render_svg_with_layout(&ir, &layout, &SvgRenderConfig::default());
+        assert!(svg.contains("fm-band-section"));
+        assert!(svg.contains("fm-band-label"));
+        assert!(svg.contains("fm-axis-tick"));
+        assert!(svg.contains("2026-02-01"));
     }
 
     #[test]

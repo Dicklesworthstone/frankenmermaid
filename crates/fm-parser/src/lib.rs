@@ -472,26 +472,41 @@ mod tests {
     fn parse_flowchart_deduplicates_identical_labels() {
         let input = "flowchart TD\nA[Same Label]\nB[Same Label]";
         let result = parse(input);
-        
+
         assert_eq!(result.ir.nodes.len(), 2);
-        assert_eq!(result.ir.labels.len(), 1, "Identical label text should be deduplicated");
-        
+        assert_eq!(
+            result.ir.labels.len(),
+            1,
+            "Identical label text should be deduplicated"
+        );
+
         let label_id_a = result.ir.nodes[0].label.expect("A should have label");
         let label_id_b = result.ir.nodes[1].label.expect("B should have label");
-        assert_eq!(label_id_a, label_id_b, "Both nodes should point to the same label entry");
+        assert_eq!(
+            label_id_a, label_id_b,
+            "Both nodes should point to the same label entry"
+        );
     }
 
     #[test]
     fn parse_flowchart_reopened_subgraph_does_not_duplicate_ir_entries() {
         let input = "flowchart TD\nsubgraph S1\n  A\nend\nsubgraph S1\n  B\nend";
         let result = parse(input);
-        
+
         // Should only have 1 cluster and 1 subgraph entry
         assert_eq!(result.ir.clusters.len(), 1, "Should only have 1 cluster");
-        assert_eq!(result.ir.graph.subgraphs.len(), 1, "Should only have 1 subgraph");
-        
+        assert_eq!(
+            result.ir.graph.subgraphs.len(),
+            1,
+            "Should only have 1 subgraph"
+        );
+
         let cluster = &result.ir.clusters[0];
-        assert_eq!(cluster.members.len(), 2, "Cluster should have 2 members (A and B)");
+        assert_eq!(
+            cluster.members.len(),
+            2,
+            "Cluster should have 2 members (A and B)"
+        );
     }
 
     #[test]

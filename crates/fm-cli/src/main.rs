@@ -701,7 +701,7 @@ fn cmd_render(input: &str, options: RenderCommandOptions<'_>) -> Result<()> {
             ..Default::default()
         })
     });
-    
+
     let layout_config = LayoutConfig {
         font_metrics,
         ..Default::default()
@@ -749,8 +749,15 @@ fn cmd_render(input: &str, options: RenderCommandOptions<'_>) -> Result<()> {
     } else {
         theme
     };
-    let (rendered, actual_width, actual_height) =
-        render_format(&parsed.ir, layout, format, effective_theme, font_size, width, height)?;
+    let (rendered, actual_width, actual_height) = render_format(
+        &parsed.ir,
+        layout,
+        format,
+        effective_theme,
+        font_size,
+        width,
+        height,
+    )?;
     let render_time = render_start.elapsed();
     budget_broker.record_render(render_time.as_millis().min(u128::from(u64::MAX)) as u64);
     guard_report.budget_broker = budget_broker.clone();

@@ -50,7 +50,10 @@ impl CanvasRenderConfig {
             preset: fm_core::FontPreset::from_family(&self.font_family),
             font_size: self.font_size as f32,
             line_height: 1.4, // Matches CanvasRenderConfig default implicitly
-            fallback_chain: vec![fm_core::FontPreset::SansSerif, fm_core::FontPreset::Monospace],
+            fallback_chain: vec![
+                fm_core::FontPreset::SansSerif,
+                fm_core::FontPreset::Monospace,
+            ],
             trace_fallbacks: false,
         })
     }
