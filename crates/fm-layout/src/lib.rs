@@ -8117,7 +8117,7 @@ mod tests {
         assert!(task_3.bounds.center().y > task_1.bounds.center().y);
         assert!((task_1.bounds.center().y - task_2.bounds.center().y).abs() > 10.0);
         assert_eq!(layout.extensions.bands.len(), 2);
-        assert_eq!(layout.extensions.axis_ticks.len(), 4);
+        assert_eq!(layout.extensions.axis_ticks.len(), 5);
         assert_eq!(layout.extensions.axis_ticks[0].label, "2026-02-01");
     }
 

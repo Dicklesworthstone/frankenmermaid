@@ -2628,7 +2628,12 @@ mod tests {
         layout.extensions.bands.push(LayoutBand {
             kind: LayoutBandKind::Section,
             label: "Planning".to_string(),
-            bounds: fm_layout::LayoutRect::new(0.0, 20.0, 180.0, 80.0),
+            bounds: fm_layout::LayoutRect {
+                x: 0.0,
+                y: 20.0,
+                width: 180.0,
+                height: 80.0,
+            },
         });
         layout.extensions.axis_ticks.push(LayoutAxisTick {
             label: "2026-02-01".to_string(),
