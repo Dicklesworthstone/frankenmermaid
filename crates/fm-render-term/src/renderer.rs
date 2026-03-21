@@ -266,15 +266,14 @@ impl TermRenderer {
         if matches!(
             arrow,
             ArrowType::DoubleArrow | ArrowType::DoubleThickArrow | ArrowType::DoubleDottedArrow
-        ) {
-            if let Some(first) = edge_path.points.first() {
-                let (x, y) = self.point_to_cells(first);
-                if edge_path.points.len() >= 2 {
-                    let next = &edge_path.points[1];
-                    let (nx, ny) = self.point_to_cells(next);
-                    let arrow_char = self.arrowhead_for_direction(nx, ny, x, y, glyphs, arrow);
-                    buffer.set(x, y, arrow_char);
-                }
+        ) && let Some(first) = edge_path.points.first()
+        {
+            let (x, y) = self.point_to_cells(first);
+            if edge_path.points.len() >= 2 {
+                let next = &edge_path.points[1];
+                let (nx, ny) = self.point_to_cells(next);
+                let arrow_char = self.arrowhead_for_direction(nx, ny, x, y, glyphs, arrow);
+                buffer.set(x, y, arrow_char);
             }
         }
 

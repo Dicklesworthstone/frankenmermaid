@@ -4665,12 +4665,19 @@ pub fn compute_node_sizes(
                         (24.0, 24.0)
                     } else {
                         let (label_width, label_height) = metrics.estimate_dimensions(&text);
-                        ((label_width + 52.0).max(42.0), (label_height + 30.0).max(42.0))
+                        (
+                            (label_width + 52.0).max(42.0),
+                            (label_height + 30.0).max(42.0),
+                        )
                     }
                 }
                 fm_core::NodeShape::HorizontalBar => (72.0, 16.0),
                 _ => {
-                    let text = if text.is_empty() { node.id.as_str() } else { &text };
+                    let text = if text.is_empty() {
+                        node.id.as_str()
+                    } else {
+                        &text
+                    };
                     let (label_width, label_height) = metrics.estimate_dimensions(text);
                     let width = label_width + 72.0;
                     let height = label_height + 44.0;
@@ -10562,6 +10569,31 @@ mod tests {
                 node.bounds.y
             );
         }
+    }
+
+    #[test]
+    fn pseudo_state_node_sizes_use_specialized_geometry() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::State);
+        ir.nodes.push(IrNode {
+            id: "__state_start".to_string(),
+            shape: NodeShape::FilledCircle,
+            ..IrNode::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "__state_end".to_string(),
+            shape: NodeShape::DoubleCircle,
+            ..IrNode::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "fork_state".to_string(),
+            shape: NodeShape::HorizontalBar,
+            ..IrNode::default()
+        });
+
+        let sizes = crate::compute_node_sizes(&ir, &fm_core::FontMetrics::default_metrics());
+        assert_eq!(sizes[0], (20.0, 20.0));
+        assert_eq!(sizes[1], (24.0, 24.0));
+        assert_eq!(sizes[2], (72.0, 16.0));
     }
 
     // ── Auto algorithm selection tests (bd-vb9.7) ──────────────────────

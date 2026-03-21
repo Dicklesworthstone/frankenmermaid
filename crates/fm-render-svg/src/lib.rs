@@ -798,10 +798,10 @@ fn resolve_node_inline_style(ir: &MermaidDiagramIr, node_index: usize) -> Option
 
     // Layer 2: direct `style nodeId` overrides.
     for sr in &ir.style_refs {
-        if let IrStyleTarget::Node(target_id) = sr.target {
-            if target_id == node_id {
-                parts.push(sr.style.as_str());
-            }
+        if let IrStyleTarget::Node(target_id) = sr.target
+            && target_id == node_id
+        {
+            parts.push(sr.style.as_str());
         }
     }
 
@@ -826,10 +826,10 @@ fn resolve_edge_inline_style(ir: &MermaidDiagramIr, edge_index: usize) -> Option
     let mut parts: Vec<&str> = Vec::new();
 
     for sr in &ir.style_refs {
-        if let IrStyleTarget::Link(link_idx) = sr.target {
-            if link_idx == edge_index {
-                parts.push(sr.style.as_str());
-            }
+        if let IrStyleTarget::Link(link_idx) = sr.target
+            && link_idx == edge_index
+        {
+            parts.push(sr.style.as_str());
         }
     }
 
@@ -1935,8 +1935,10 @@ fn render_node(
     };
 
     let shape_elem = if config.node_gradients
-        && !matches!(shape, NodeShape::Note | NodeShape::FilledCircle | NodeShape::HorizontalBar)
-    {
+        && !matches!(
+            shape,
+            NodeShape::Note | NodeShape::FilledCircle | NodeShape::HorizontalBar
+        ) {
         shape_elem.fill("url(#fm-node-gradient)")
     } else {
         shape_elem
@@ -1952,8 +1954,7 @@ fn render_node(
                 | NodeShape::CrossedCircle
                 | NodeShape::FilledCircle
                 | NodeShape::HorizontalBar
-        )
-    {
+        ) {
         shape_elem.filter("url(#drop-shadow)")
     } else {
         shape_elem
@@ -1972,22 +1973,41 @@ fn render_node(
         group = group.filter("url(#node-glow)");
     }
 
-    // Add label text
+    // Add label text — with three-compartment rendering for class diagrams.
     if detail.show_node_labels {
-        let lines_count = label_text.lines().count().max(1) as f32;
-        let total_text_height = (lines_count - 1.0) * node_font_size * config.line_height;
-        let start_y = cy - (total_text_height / 2.0) + (node_font_size / 3.0);
+        let has_class_meta = ir_node
+            .and_then(|n| n.class_meta.as_ref())
+            .is_some_and(|m| !m.attributes.is_empty() || !m.methods.is_empty());
 
-        let text_elem = TextBuilder::new(&label_text)
-            .x(cx)
-            .y(start_y)
-            .font_family(&config.font_family)
-            .font_size(node_font_size)
-            .line_height(config.line_height)
-            .anchor(TextAnchor::Middle)
-            .fill(&colors.text)
-            .build();
-        group = group.child(text_elem);
+        if has_class_meta {
+            group = render_class_compartments(
+                group,
+                ir_node.unwrap(),
+                ir,
+                x,
+                y,
+                w,
+                h,
+                node_font_size,
+                config,
+                colors,
+            );
+        } else {
+            let lines_count = label_text.lines().count().max(1) as f32;
+            let total_text_height = (lines_count - 1.0) * node_font_size * config.line_height;
+            let start_y = cy - (total_text_height / 2.0) + (node_font_size / 3.0);
+
+            let text_elem = TextBuilder::new(&label_text)
+                .x(cx)
+                .y(start_y)
+                .font_family(&config.font_family)
+                .font_size(node_font_size)
+                .line_height(config.line_height)
+                .anchor(TextAnchor::Middle)
+                .fill(&colors.text)
+                .build();
+            group = group.child(text_elem);
+        }
     }
 
     // Add title element for text alternatives
@@ -2024,6 +2044,165 @@ fn stable_accent_index(node_id: &str) -> usize {
         hash = hash.wrapping_mul(0x01000193);
     }
     (hash as usize % 8) + 1
+}
+
+/// Render a UML three-compartment class box: header | attributes | methods.
+///
+/// Adds separator lines and member text elements to the node group.
+#[allow(clippy::too_many_arguments)]
+fn render_class_compartments(
+    mut group: Element,
+    node: &fm_core::IrNode,
+    ir: &MermaidDiagramIr,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    font_size: f32,
+    config: &SvgRenderConfig,
+    colors: &ThemeColors,
+) -> Element {
+    let meta = match &node.class_meta {
+        Some(m) => m,
+        None => return group,
+    };
+
+    let line_h = font_size * config.line_height;
+    let padding_x = 8.0;
+    let text_x = x + padding_x;
+    let mut cursor_y = y + line_h;
+
+    // Header: class name (centered, bold).
+    let class_name = node
+        .label
+        .and_then(|lid| ir.labels.get(lid.0))
+        .map(|l| l.text.as_str())
+        .unwrap_or(&node.id);
+
+    // Stereotype above class name if present.
+    if let Some(ref stereotype) = meta.stereotype {
+        let stereo_text = match stereotype {
+            fm_core::ClassStereotype::Interface => "<<interface>>",
+            fm_core::ClassStereotype::Abstract => "<<abstract>>",
+            fm_core::ClassStereotype::Enum => "<<enumeration>>",
+            fm_core::ClassStereotype::Service => "<<service>>",
+            fm_core::ClassStereotype::Custom(s) => s.as_str(),
+        };
+        let stereo_elem = TextBuilder::new(stereo_text)
+            .x(x + w / 2.0)
+            .y(cursor_y)
+            .font_family(&config.font_family)
+            .font_size(font_size * 0.85)
+            .anchor(TextAnchor::Middle)
+            .italic()
+            .fill(&colors.text)
+            .build();
+        group = group.child(stereo_elem);
+        cursor_y += line_h;
+    }
+
+    let name_elem = TextBuilder::new(class_name)
+        .x(x + w / 2.0)
+        .y(cursor_y)
+        .font_family(&config.font_family)
+        .font_size(font_size)
+        .anchor(TextAnchor::Middle)
+        .bold()
+        .fill(&colors.text)
+        .build();
+    group = group.child(name_elem);
+    cursor_y += line_h * 0.5;
+
+    // Separator line after header.
+    let sep1 = Element::new(crate::element::ElementKind::Line)
+        .attr_num("x1", x)
+        .attr_num("y1", cursor_y)
+        .attr_num("x2", x + w)
+        .attr_num("y2", cursor_y)
+        .stroke(&colors.node_stroke)
+        .stroke_width(1.0);
+    group = group.child(sep1);
+    cursor_y += line_h * 0.3;
+
+    // Attributes compartment.
+    let member_font_size = font_size * 0.9;
+    for attr in &meta.attributes {
+        if cursor_y > y + h - line_h {
+            break;
+        }
+        cursor_y += member_font_size * config.line_height * 0.9;
+        let vis = visibility_symbol(attr.visibility);
+        let text = if let Some(ref ret) = attr.return_type {
+            format!("{vis}{}: {ret}", attr.name)
+        } else {
+            format!("{vis}{}", attr.name)
+        };
+        let elem = TextBuilder::new(&text)
+            .x(text_x)
+            .y(cursor_y)
+            .font_family(&config.font_family)
+            .font_size(member_font_size)
+            .anchor(TextAnchor::Start)
+            .fill(&colors.text)
+            .build();
+        group = group.child(elem);
+    }
+
+    // Separator before methods (only if both sections present).
+    if !meta.attributes.is_empty() && !meta.methods.is_empty() {
+        cursor_y += line_h * 0.3;
+        let sep2 = Element::new(crate::element::ElementKind::Line)
+            .attr_num("x1", x)
+            .attr_num("y1", cursor_y)
+            .attr_num("x2", x + w)
+            .attr_num("y2", cursor_y)
+            .stroke(&colors.node_stroke)
+            .stroke_width(1.0);
+        group = group.child(sep2);
+        cursor_y += line_h * 0.3;
+    }
+
+    // Methods compartment.
+    for method in &meta.methods {
+        if cursor_y > y + h - line_h * 0.5 {
+            break;
+        }
+        cursor_y += member_font_size * config.line_height * 0.9;
+        let vis = visibility_symbol(method.visibility);
+        let suffix = if method.is_abstract {
+            "*"
+        } else if method.is_static {
+            "$"
+        } else {
+            ""
+        };
+        let ret = method
+            .return_type
+            .as_deref()
+            .map(|t| format!(": {t}"))
+            .unwrap_or_default();
+        let text = format!("{vis}{}{suffix}{ret}", method.name);
+        let elem = TextBuilder::new(&text)
+            .x(text_x)
+            .y(cursor_y)
+            .font_family(&config.font_family)
+            .font_size(member_font_size)
+            .anchor(TextAnchor::Start)
+            .fill(&colors.text)
+            .build();
+        group = group.child(elem);
+    }
+
+    group
+}
+
+fn visibility_symbol(vis: fm_core::ClassVisibility) -> &'static str {
+    match vis {
+        fm_core::ClassVisibility::Public => "+",
+        fm_core::ClassVisibility::Private => "-",
+        fm_core::ClassVisibility::Protected => "#",
+        fm_core::ClassVisibility::Package => "~",
+    }
 }
 
 const fn node_shape_css_class(shape: fm_core::NodeShape) -> &'static str {

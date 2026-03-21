@@ -29,9 +29,15 @@ pub fn draw_shape<C: Canvas2dContext>(
         NodeShape::Stadium => draw_stadium(ctx, x, y, width, height),
         NodeShape::Diamond => draw_diamond(ctx, x, y, width, height),
         NodeShape::Hexagon => draw_hexagon(ctx, x, y, width, height),
-        NodeShape::Circle | NodeShape::DoubleCircle => draw_circle(ctx, x, y, width, height),
+        NodeShape::Circle | NodeShape::FilledCircle | NodeShape::DoubleCircle => {
+            if shape == NodeShape::FilledCircle {
+                ctx.set_fill_style(stroke);
+            }
+            draw_circle(ctx, x, y, width, height)
+        }
         NodeShape::Cylinder => draw_cylinder(ctx, x, y, width, height),
         NodeShape::Trapezoid => draw_trapezoid(ctx, x, y, width, height),
+        NodeShape::HorizontalBar => draw_rect(ctx, x, y + height * 0.25, width, height * 0.5, 4.0),
         NodeShape::Subroutine => draw_subroutine(ctx, x, y, width, height),
         NodeShape::Asymmetric => draw_asymmetric(ctx, x, y, width, height),
         NodeShape::Note => draw_note(ctx, x, y, width, height),

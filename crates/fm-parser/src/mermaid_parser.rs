@@ -1638,8 +1638,8 @@ fn parse_state(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
-        // Skip bare braces (handled by composite state logic)
-        if trimmed == "{" || trimmed == "}" {
+        // Skip bare opening braces (composite state starts are handled on the declaration line).
+        if trimmed == "{" {
             continue;
         }
 
@@ -1745,7 +1745,7 @@ fn lower_state_statement(
             }
         }
         StateStatement::Node(node) => {
-            lower_state_node(&node, builder, span);
+            lower_state_node(&node.id, node.label.as_deref(), node.shape, builder, span);
         }
         StateStatement::CompositeStart(name) => {
             builder.begin_state_cluster(&name, span);
@@ -1772,7 +1772,7 @@ fn lower_state_flow_ast(
 ) {
     match ast {
         FlowAst::Node(node) => {
-            lower_state_node(node, builder, span);
+            lower_state_node(&node.id, node.label.as_deref(), node.shape, builder, span);
         }
         FlowAst::Edge {
             from,
@@ -1780,16 +1780,12 @@ fn lower_state_flow_ast(
             label,
             to,
         } => {
-            let from_node = state_edge_endpoint_token(from, true);
-            let to_node = state_edge_endpoint_token(to, false);
-            let from_id = builder.intern_node(
-                &from_node.id,
-                from_node.label.as_deref(),
-                from_node.shape,
-                span,
-            );
-            let to_id =
-                builder.intern_node(&to_node.id, to_node.label.as_deref(), to_node.shape, span);
+            let (from_id_key, from_label, from_shape) =
+                state_edge_endpoint(&from.id, from.label.as_deref(), from.shape, true);
+            let (to_id_key, to_label, to_shape) =
+                state_edge_endpoint(&to.id, to.label.as_deref(), to.shape, false);
+            let from_id = builder.intern_node(from_id_key, from_label, from_shape, span);
+            let to_id = builder.intern_node(to_id_key, to_label, to_shape, span);
             if let (Some(f), Some(t)) = (from_id, to_id) {
                 builder.push_edge(f, t, *arrow, label.as_deref(), span);
             }
@@ -1800,41 +1796,35 @@ fn lower_state_flow_ast(
     }
 }
 
-fn lower_state_node(node: &NodeToken, builder: &mut IrBuilder, span: Span) {
-    let normalized = if node.id == STATE_PSEUDO_TOKEN {
-        NodeToken {
-            id: STATE_START_NODE_ID.to_string(),
-            label: None,
-            shape: NodeShape::FilledCircle,
-        }
+fn lower_state_node(
+    id: &str,
+    label: Option<&str>,
+    shape: NodeShape,
+    builder: &mut IrBuilder,
+    span: Span,
+) {
+    let (id, label, shape) = if id == STATE_PSEUDO_TOKEN {
+        (STATE_START_NODE_ID, None, NodeShape::FilledCircle)
     } else {
-        node.clone()
+        (id, label, shape)
     };
-    let _ = builder.intern_node(
-        &normalized.id,
-        normalized.label.as_deref(),
-        normalized.shape,
-        span,
-    );
+    let _ = builder.intern_node(id, label, shape, span);
 }
 
-fn state_edge_endpoint_token(node: &NodeToken, is_source: bool) -> NodeToken {
-    if node.id != STATE_PSEUDO_TOKEN {
-        return node.clone();
+fn state_edge_endpoint<'a>(
+    id: &'a str,
+    label: Option<&'a str>,
+    shape: NodeShape,
+    is_source: bool,
+) -> (&'a str, Option<&'a str>, NodeShape) {
+    if id != STATE_PSEUDO_TOKEN {
+        return (id, label, shape);
     }
 
     if is_source {
-        NodeToken {
-            id: STATE_START_NODE_ID.to_string(),
-            label: None,
-            shape: NodeShape::FilledCircle,
-        }
+        (STATE_START_NODE_ID, None, NodeShape::FilledCircle)
     } else {
-        NodeToken {
-            id: STATE_END_NODE_ID.to_string(),
-            label: None,
-            shape: NodeShape::DoubleCircle,
-        }
+        (STATE_END_NODE_ID, None, NodeShape::DoubleCircle)
     }
 }
 
@@ -4605,6 +4595,7 @@ fn register_state_declaration(
         return false;
     }
 
+    let explicit_label = raw_label.is_some();
     let label = raw_label
         .and_then(|value| clean_label(Some(value)))
         .or_else(|| clean_label(Some(raw_id)));
@@ -4614,11 +4605,19 @@ fn register_state_declaration(
         Some(StatePseudoState::Choice) => (NodeShape::Diamond, label),
         Some(StatePseudoState::History) => (
             NodeShape::Circle,
-            label.or_else(|| Some(String::from("H"))),
+            if explicit_label {
+                label
+            } else {
+                Some(String::from("H"))
+            },
         ),
         Some(StatePseudoState::DeepHistory) => (
             NodeShape::DoubleCircle,
-            label.or_else(|| Some(String::from("H*"))),
+            if explicit_label {
+                label
+            } else {
+                Some(String::from("H*"))
+            },
         ),
         None => (NodeShape::Rounded, label),
     };
@@ -6112,14 +6111,15 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
             if let Some((target, style)) = rest.split_once(' ') {
                 let target = target.trim();
                 let style = style.trim();
-                if !target.is_empty() && !style.is_empty() {
-                    if let Some(&node_id) = builder.node_id_by_key(target) {
-                        builder.push_style_ref(
-                            fm_core::IrStyleTarget::Node(node_id),
-                            style.to_string(),
-                            span,
-                        );
-                    }
+                if !target.is_empty()
+                    && !style.is_empty()
+                    && let Some(&node_id) = builder.node_id_by_key(target)
+                {
+                    builder.push_style_ref(
+                        fm_core::IrStyleTarget::Node(node_id),
+                        style.to_string(),
+                        span,
+                    );
                 }
             }
         } else if let Some(rest) = line.strip_prefix("linkStyle ") {
@@ -6128,14 +6128,14 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
             if let Some((index_str, style)) = rest.split_once(' ') {
                 let index_str = index_str.trim();
                 let style = style.trim();
-                if let Ok(link_index) = index_str.parse::<usize>() {
-                    if !style.is_empty() {
-                        builder.push_style_ref(
-                            fm_core::IrStyleTarget::Link(link_index),
-                            style.to_string(),
-                            span,
-                        );
-                    }
+                if let Ok(link_index) = index_str.parse::<usize>()
+                    && !style.is_empty()
+                {
+                    builder.push_style_ref(
+                        fm_core::IrStyleTarget::Link(link_index),
+                        style.to_string(),
+                        span,
+                    );
                 }
             }
         }
@@ -8395,13 +8395,13 @@ Rel_Back(db, app, "Responds")"#,
             .ir
             .nodes
             .iter()
-            .find(|node| node.id == STATE_START_NODE_ID)
+            .find(|node| node.id == "__state_start")
             .expect("state start node");
         let end = parsed
             .ir
             .nodes
             .iter()
-            .find(|node| node.id == STATE_END_NODE_ID)
+            .find(|node| node.id == "__state_end")
             .expect("state end node");
         assert_eq!(start.shape, NodeShape::FilledCircle);
         assert_eq!(end.shape, NodeShape::DoubleCircle);
@@ -8447,10 +8447,30 @@ Rel_Back(db, app, "Responds")"#,
         let input = "stateDiagram-v2\n  state fork_state <<fork>>\n  state join_state <<join>>\n  state chooser <<choice>>\n  state hist <<history>>\n  state deep_hist <<deepHistory>>";
         let parsed = parse_mermaid(input);
 
-        let fork = parsed.ir.nodes.iter().find(|node| node.id == "fork_state").unwrap();
-        let join = parsed.ir.nodes.iter().find(|node| node.id == "join_state").unwrap();
-        let choice = parsed.ir.nodes.iter().find(|node| node.id == "chooser").unwrap();
-        let history = parsed.ir.nodes.iter().find(|node| node.id == "hist").unwrap();
+        let fork = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "fork_state")
+            .unwrap();
+        let join = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "join_state")
+            .unwrap();
+        let choice = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "chooser")
+            .unwrap();
+        let history = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "hist")
+            .unwrap();
         let deep_history = parsed
             .ir
             .nodes

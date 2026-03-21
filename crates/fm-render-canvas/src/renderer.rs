@@ -640,7 +640,14 @@ impl Canvas2dRenderer {
 
                 match arrow {
                     ArrowType::Line => {}
-                    ArrowType::Arrow | ArrowType::ThickArrow | ArrowType::DottedArrow => {
+                    ArrowType::Arrow
+                    | ArrowType::ThickArrow
+                    | ArrowType::DottedArrow
+                    | ArrowType::ThickLine
+                    | ArrowType::DottedLine
+                    | ArrowType::DoubleArrow
+                    | ArrowType::DoubleThickArrow
+                    | ArrowType::DoubleDottedArrow => {
                         draw_arrowhead(ctx, ex, ey, angle, 10.0, &self.config.edge_stroke);
                         self.draw_calls += 1;
                     }
