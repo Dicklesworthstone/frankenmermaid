@@ -387,10 +387,6 @@ impl TermRenderer {
             } else {
                 glyphs.line_diag_ne
             }
-        } else if x0 == x1 {
-            glyphs.line_v
-        } else if y0 == y1 {
-            glyphs.line_h
         } else {
             // Default to horizontal for mixed diagonal segments in cell mode
             glyphs.line_h
@@ -770,6 +766,7 @@ impl TermRenderer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_node_canvas(
         &self,
         canvas: &mut Canvas,
@@ -949,6 +946,7 @@ impl TermRenderer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn overlay_labels(
         &self,
         base: String,

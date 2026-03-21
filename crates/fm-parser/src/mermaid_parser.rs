@@ -4885,8 +4885,7 @@ fn parse_edge_statement_asts(
         let mut current_arrow = arrow;
 
         // Check for A -- label --> B syntax
-        if is_arrow_prefix(operator) && next_operator.is_some() {
-            let (n_idx, n_op, n_arrow) = next_operator.unwrap();
+        if is_arrow_prefix(operator) && let Some((n_idx, n_op, n_arrow)) = next_operator {
             let label_part = statement[rhs_start..n_idx].trim();
             edge_label = clean_label(Some(label_part));
             current_arrow = n_arrow;
@@ -6150,7 +6149,7 @@ fn is_non_graph_statement(line: &str) -> bool {
             && line
                 .as_bytes()
                 .get(keyword.len())
-                .map_or(true, |&c| (c as char).is_whitespace())
+                .is_none_or(|&c| (c as char).is_whitespace())
     };
     check(line, "style") || check(line, "classDef") || check(line, "linkStyle")
 }
