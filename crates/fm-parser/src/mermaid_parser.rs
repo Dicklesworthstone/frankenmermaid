@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, HashMap};
 use chumsky::prelude::*;
 use fm_core::{
     ArrowType, Diagnostic, DiagnosticCategory, DiagramType, GraphDirection, IrAttributeKey,
-    IrNodeId, MermaidParseMode, MermaidSupportLevel, NodeShape, Span,
-    parse_mermaid_js_config_value, to_init_parse,
+    IrGanttMeta, IrGanttSection, IrGanttTask, IrNodeId, MermaidParseMode, MermaidSupportLevel,
+    NodeShape, Span, parse_mermaid_js_config_value, to_init_parse,
 };
 use serde_json::Value;
 use unicode_segmentation::UnicodeSegmentation;
@@ -777,8 +777,7 @@ fn lower_flow_document_item(
         } => {
             let span = span_for(*line_number, source_line);
             let lookup_key = flow_subgraph_lookup_key(id, title.as_deref());
-            let Some(cluster_index) =
-                builder.ensure_cluster(&lookup_key, title.as_deref(), span)
+            let Some(cluster_index) = builder.ensure_cluster(&lookup_key, title.as_deref(), span)
             else {
                 return;
             };
@@ -2901,7 +2900,10 @@ fn parse_er_relationship(
 }
 
 fn parse_gantt(input: &str, builder: &mut IrBuilder) {
-    let mut current_section = String::new();
+    let mut gantt_meta = IrGanttMeta::default();
+    let mut current_section_idx = 0_usize;
+    let mut task_ids_to_nodes: HashMap<String, IrNodeId> = HashMap::new();
+    let mut pending_dependencies: Vec<(IrNodeId, String, Span)> = Vec::new();
 
     for (index, line) in input.lines().enumerate() {
         let line_number = index + 1;
@@ -2910,30 +2912,66 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
-        if trimmed == "gantt" || trimmed.starts_with("title ") {
+        if trimmed == "gantt" {
             continue;
         }
-        if trimmed.starts_with("dateFormat ")
-            || trimmed.starts_with("axisFormat ")
-            || trimmed.starts_with("tickInterval ")
-            || trimmed.starts_with("excludes ")
-        {
+
+        if let Some(title) = trimmed.strip_prefix("title ") {
+            gantt_meta.title = clean_label(Some(title));
+            continue;
+        }
+
+        if let Some(date_format) = trimmed.strip_prefix("dateFormat ") {
+            gantt_meta.date_format = clean_label(Some(date_format));
+            continue;
+        }
+
+        if let Some(axis_format) = trimmed.strip_prefix("axisFormat ") {
+            gantt_meta.axis_format = clean_label(Some(axis_format));
+            continue;
+        }
+
+        if let Some(tick_interval) = trimmed.strip_prefix("tickInterval ") {
+            gantt_meta.tick_interval = clean_label(Some(tick_interval));
+            continue;
+        }
+
+        if let Some(excludes) = trimmed.strip_prefix("excludes ") {
+            gantt_meta.excludes = excludes
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .collect();
             continue;
         }
 
         if let Some(section_name) = trimmed.strip_prefix("section ") {
-            current_section = section_name.trim().to_string();
+            let Some(section_name) = clean_label(Some(section_name)) else {
+                builder.add_warning(format!("Line {line_number}: gantt section name is empty"));
+                continue;
+            };
+            current_section_idx = gantt_meta.sections.len();
+            gantt_meta
+                .sections
+                .push(IrGanttSection { name: section_name });
             continue;
         }
 
-        let Some(task_name) = parse_name_before_colon(trimmed) else {
+        let Some((task_name, raw_meta)) = trimmed.split_once(':') else {
             builder.add_warning(format!(
                 "Line {line_number}: unsupported gantt syntax: {trimmed}"
             ));
             continue;
         };
+        let Some(task_name) = clean_label(Some(task_name)) else {
+            builder.add_warning(format!(
+                "Line {line_number}: task identifier could not be derived: {trimmed}"
+            ));
+            continue;
+        };
 
-        let task_id_raw = normalize_identifier(task_name);
+        let task_id_raw = normalize_identifier(&task_name);
         if task_id_raw.is_empty() {
             builder.add_warning(format!(
                 "Line {line_number}: task identifier could not be derived: {trimmed}"
@@ -2942,14 +2980,168 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
         }
         let task_id = format!("{task_id_raw}_{line_number}");
 
-        let task_label = if current_section.is_empty() {
-            task_name.to_string()
-        } else {
-            format!("{current_section}: {task_name}")
-        };
         let span = span_for(line_number, line);
-        let _ = builder.intern_node(&task_id, Some(&task_label), NodeShape::Rect, span);
+        let Some(node) = builder.intern_node(&task_id, Some(&task_name), NodeShape::Rect, span)
+        else {
+            continue;
+        };
+
+        let parsed_meta = parse_gantt_task_metadata(raw_meta);
+        if let Some(task_id_ref) = parsed_meta.task_id.as_ref() {
+            task_ids_to_nodes.entry(task_id_ref.clone()).or_insert(node);
+        }
+        if let Some(after_task_id) = parsed_meta.after_task_id.as_ref() {
+            pending_dependencies.push((node, after_task_id.clone(), span));
+        }
+
+        let mut classes = Vec::new();
+        if parsed_meta.done {
+            classes.push("gantt-done");
+        }
+        if parsed_meta.active {
+            classes.push("gantt-active");
+        }
+        if parsed_meta.critical {
+            classes.push("gantt-critical");
+        }
+        if parsed_meta.milestone {
+            classes.push("gantt-milestone");
+        }
+        for class_name in classes {
+            builder.add_class_to_node(&task_id, class_name, span);
+        }
+
+        gantt_meta.tasks.push(IrGanttTask {
+            node,
+            section_idx: current_section_idx,
+            meta: raw_meta.trim().to_string(),
+            task_id: parsed_meta.task_id,
+            after_task_id: parsed_meta.after_task_id,
+            start_date: parsed_meta.start_date,
+            duration_days: parsed_meta.duration_days,
+            milestone: parsed_meta.milestone,
+            active: parsed_meta.active,
+            done: parsed_meta.done,
+            critical: parsed_meta.critical,
+        });
     }
+
+    for (node, dependency, span) in pending_dependencies {
+        if let Some(from) = task_ids_to_nodes.get(&dependency).copied() {
+            builder.push_edge(from, node, ArrowType::Arrow, None, span);
+        } else {
+            builder.add_warning(format!("Unresolved gantt dependency 'after {dependency}'"));
+        }
+    }
+
+    if !gantt_meta.sections.is_empty()
+        || !gantt_meta.tasks.is_empty()
+        || gantt_meta.title.is_some()
+        || gantt_meta.date_format.is_some()
+        || gantt_meta.axis_format.is_some()
+        || gantt_meta.tick_interval.is_some()
+        || !gantt_meta.excludes.is_empty()
+    {
+        builder.set_gantt_meta(gantt_meta);
+    }
+}
+
+#[derive(Debug, Default)]
+struct ParsedGanttTaskMeta {
+    task_id: Option<String>,
+    after_task_id: Option<String>,
+    start_date: Option<String>,
+    duration_days: Option<u32>,
+    milestone: bool,
+    active: bool,
+    done: bool,
+    critical: bool,
+}
+
+fn parse_gantt_task_metadata(raw_meta: &str) -> ParsedGanttTaskMeta {
+    let mut parsed = ParsedGanttTaskMeta::default();
+
+    for token in raw_meta
+        .split(',')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        let lower = token.to_ascii_lowercase();
+        match lower.as_str() {
+            "milestone" => {
+                parsed.milestone = true;
+                continue;
+            }
+            "active" => {
+                parsed.active = true;
+                continue;
+            }
+            "done" => {
+                parsed.done = true;
+                continue;
+            }
+            "crit" | "critical" => {
+                parsed.critical = true;
+                continue;
+            }
+            _ => {}
+        }
+
+        if let Some(after) = lower.strip_prefix("after ") {
+            let dependency = normalize_compound_identifier(after);
+            if !dependency.is_empty() {
+                parsed.after_task_id = Some(dependency);
+            }
+            continue;
+        }
+
+        if parsed.start_date.is_none() && is_iso_date(token) {
+            parsed.start_date = Some(token.to_string());
+            continue;
+        }
+
+        if parsed.duration_days.is_none()
+            && let Some(duration_days) = parse_gantt_duration_days(token)
+        {
+            parsed.duration_days = Some(duration_days);
+            continue;
+        }
+
+        if parsed.task_id.is_none() {
+            let task_id = normalize_compound_identifier(token);
+            if !task_id.is_empty() {
+                parsed.task_id = Some(task_id);
+            }
+        }
+    }
+
+    parsed
+}
+
+fn is_iso_date(token: &str) -> bool {
+    let bytes = token.trim().as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+    bytes[0..4].iter().all(u8::is_ascii_digit)
+        && bytes[5..7].iter().all(u8::is_ascii_digit)
+        && bytes[8..10].iter().all(u8::is_ascii_digit)
+}
+
+fn parse_gantt_duration_days(token: &str) -> Option<u32> {
+    let token = token.trim();
+    if token.is_empty() {
+        return None;
+    }
+
+    let lower = token.to_ascii_lowercase();
+    if let Some(days) = lower.strip_suffix('d') {
+        return days.trim().parse::<u32>().ok();
+    }
+    if let Some(weeks) = lower.strip_suffix('w') {
+        return weeks.trim().parse::<u32>().ok().map(|weeks| weeks * 7);
+    }
+    None
 }
 
 fn parse_pie(input: &str, builder: &mut IrBuilder) {
@@ -3655,16 +3847,14 @@ fn lower_block_beta_document_item(
                 return;
             };
             let parent_subgraph = active_subgraphs.last().copied();
-            let Some(subgraph_index) =
-                builder.ensure_subgraph(
-                    id,
-                    id,
-                    Some(id),
-                    span,
-                    parent_subgraph,
-                    Some(cluster_index),
-                )
-            else {
+            let Some(subgraph_index) = builder.ensure_subgraph(
+                id,
+                id,
+                Some(id),
+                span,
+                parent_subgraph,
+                Some(cluster_index),
+            ) else {
                 builder.add_warning(format!(
                     "Line {line_number}: invalid block-beta group identifier: {}",
                     source_line.trim()
@@ -6636,7 +6826,19 @@ mod tests {
         );
         assert_eq!(parsed.ir.diagram_type, DiagramType::Gantt);
         assert_eq!(parsed.ir.nodes.len(), 2);
-        assert_eq!(parsed.ir.edges.len(), 0);
+        assert_eq!(parsed.ir.edges.len(), 1);
+        let gantt_meta = parsed.ir.gantt_meta.as_ref().expect("gantt meta");
+        assert_eq!(gantt_meta.title.as_deref(), Some("Release"));
+        assert_eq!(gantt_meta.sections.len(), 1);
+        assert_eq!(gantt_meta.sections[0].name, "Phase 1");
+        assert_eq!(gantt_meta.tasks.len(), 2);
+        assert_eq!(gantt_meta.tasks[0].task_id.as_deref(), Some("a1"));
+        assert_eq!(
+            gantt_meta.tasks[0].start_date.as_deref(),
+            Some("2026-02-01")
+        );
+        assert_eq!(gantt_meta.tasks[0].duration_days, Some(3));
+        assert_eq!(gantt_meta.tasks[1].after_task_id.as_deref(), Some("a1"));
     }
 
     #[test]
@@ -8081,11 +8283,13 @@ Rel_Back(db, app, "Responds")"#,
     fn gantt_parses_sections() {
         let input = "gantt\n  title Project\n  dateFormat YYYY-MM-DD\n  section Alpha\n  Task1 :a1, 2024-01-01, 30d\n  section Beta\n  Task2 :a2, after a1, 15d";
         let parsed = parse_mermaid(input);
-        assert!(
-            parsed.ir.nodes.len() >= 2,
-            "Should have at least 2 tasks, got {}",
-            parsed.ir.nodes.len()
-        );
+        let gantt_meta = parsed.ir.gantt_meta.as_ref().expect("gantt meta");
+        assert_eq!(gantt_meta.date_format.as_deref(), Some("YYYY-MM-DD"));
+        assert_eq!(gantt_meta.sections.len(), 2);
+        assert_eq!(gantt_meta.sections[0].name, "Alpha");
+        assert_eq!(gantt_meta.sections[1].name, "Beta");
+        assert_eq!(gantt_meta.tasks[0].section_idx, 0);
+        assert_eq!(gantt_meta.tasks[1].section_idx, 1);
     }
 
     #[test]
@@ -8093,20 +8297,33 @@ Rel_Back(db, app, "Responds")"#,
         let input =
             "gantt\n  title Plan\n  section S1\n  Milestone1 :milestone, m1, 2024-06-01, 0d";
         let parsed = parse_mermaid(input);
-        assert!(
-            !parsed.ir.nodes.is_empty(),
-            "Should parse milestone as node"
-        );
+        let gantt_meta = parsed.ir.gantt_meta.as_ref().expect("gantt meta");
+        assert!(gantt_meta.tasks[0].milestone);
+        assert_eq!(gantt_meta.tasks[0].task_id.as_deref(), Some("m1"));
+        assert_eq!(gantt_meta.tasks[0].duration_days, Some(0));
     }
 
     #[test]
     fn gantt_parses_done_and_active_tasks() {
         let input = "gantt\n  section S1\n  Done task :done, d1, 2024-01-01, 10d\n  Active task :active, a1, 2024-01-11, 10d\n  Future task :f1, after a1, 5d";
         let parsed = parse_mermaid(input);
+        let gantt_meta = parsed.ir.gantt_meta.as_ref().expect("gantt meta");
+        assert!(gantt_meta.tasks[0].done);
+        assert!(gantt_meta.tasks[1].active);
+        assert_eq!(gantt_meta.tasks[2].after_task_id.as_deref(), Some("a1"));
+        let done_node = &parsed.ir.nodes[gantt_meta.tasks[0].node.0];
+        let active_node = &parsed.ir.nodes[gantt_meta.tasks[1].node.0];
         assert!(
-            parsed.ir.nodes.len() >= 3,
-            "Should have 3 tasks, got {}",
-            parsed.ir.nodes.len()
+            done_node
+                .classes
+                .iter()
+                .any(|class_name| class_name == "gantt-done")
+        );
+        assert!(
+            active_node
+                .classes
+                .iter()
+                .any(|class_name| class_name == "gantt-active")
         );
     }
 

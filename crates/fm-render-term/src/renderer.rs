@@ -427,7 +427,6 @@ impl TermRenderer {
 
         match shape {
             NodeShape::Diamond => {
-                // Diamond shape: /\ on top, \/ on bottom
                 let mid_x = x + w / 2;
                 let mid_y = y + h / 2;
                 buffer.set(mid_x, y, '/');
@@ -437,53 +436,205 @@ impl TermRenderer {
                 buffer.set(mid_x, y + h - 1, '\\');
                 buffer.set(mid_x + 1, y + h - 1, '/');
             }
-            NodeShape::Circle | NodeShape::DoubleCircle => {
-                // Circle approximation.
+            NodeShape::Circle | NodeShape::DoubleCircle | NodeShape::CrossedCircle => {
                 let mid_y = y + h / 2;
                 buffer.set(x, mid_y, '(');
                 buffer.set(x + w - 1, mid_y, ')');
-                for dx in 1..w - 1 {
+                for dx in 1..w.saturating_sub(1) {
                     buffer.set(x + dx, y, glyphs.horizontal);
-                    buffer.set(x + dx, y + h - 1, glyphs.horizontal);
+                    buffer.set(x + dx, y + h.saturating_sub(1), glyphs.horizontal);
                 }
             }
-            NodeShape::Rounded | NodeShape::Stadium => {
-                // Rounded rectangle.
+            NodeShape::Rounded | NodeShape::Stadium | NodeShape::Cloud => {
                 buffer.set(x, y, '(');
-                buffer.set(x + w - 1, y, ')');
-                buffer.set(x, y + h - 1, '(');
-                buffer.set(x + w - 1, y + h - 1, ')');
-                for dx in 1..w - 1 {
+                buffer.set(x + w.saturating_sub(1), y, ')');
+                buffer.set(x, y + h.saturating_sub(1), '(');
+                buffer.set(x + w.saturating_sub(1), y + h.saturating_sub(1), ')');
+                for dx in 1..w.saturating_sub(1) {
                     buffer.set(x + dx, y, glyphs.horizontal);
-                    buffer.set(x + dx, y + h - 1, glyphs.horizontal);
+                    buffer.set(x + dx, y + h.saturating_sub(1), glyphs.horizontal);
                 }
-                for dy in 1..h - 1 {
+                for dy in 1..h.saturating_sub(1) {
                     buffer.set(x, y + dy, glyphs.vertical);
-                    buffer.set(x + w - 1, y + dy, glyphs.vertical);
+                    buffer.set(x + w.saturating_sub(1), y + dy, glyphs.vertical);
                 }
             }
             NodeShape::Hexagon => {
-                // Hexagon.
                 buffer.set(x, y + h / 2, '<');
-                buffer.set(x + w - 1, y + h / 2, '>');
-                for dx in 1..w - 1 {
+                buffer.set(x + w.saturating_sub(1), y + h / 2, '>');
+                for dx in 1..w.saturating_sub(1) {
                     buffer.set(x + dx, y, glyphs.horizontal);
-                    buffer.set(x + dx, y + h - 1, glyphs.horizontal);
+                    buffer.set(x + dx, y + h.saturating_sub(1), glyphs.horizontal);
+                }
+            }
+            NodeShape::Subroutine => {
+                // Double vertical borders on left and right.
+                buffer.set(x, y, glyphs.top_left);
+                buffer.set(x + w.saturating_sub(1), y, glyphs.top_right);
+                buffer.set(x, y + h.saturating_sub(1), glyphs.bottom_left);
+                buffer.set(
+                    x + w.saturating_sub(1),
+                    y + h.saturating_sub(1),
+                    glyphs.bottom_right,
+                );
+                for dx in 1..w.saturating_sub(1) {
+                    buffer.set(x + dx, y, glyphs.horizontal);
+                    buffer.set(x + dx, y + h.saturating_sub(1), glyphs.horizontal);
+                }
+                for dy in 1..h.saturating_sub(1) {
+                    buffer.set(x, y + dy, glyphs.vertical);
+                    buffer.set(x + w.saturating_sub(1), y + dy, glyphs.vertical);
+                    // Inner vertical lines for subroutine double-border.
+                    if w > 3 {
+                        buffer.set(x + 1, y + dy, glyphs.vertical);
+                        buffer.set(x + w.saturating_sub(2), y + dy, glyphs.vertical);
+                    }
+                }
+            }
+            NodeShape::Asymmetric | NodeShape::Tag => {
+                // Flag/tag shape: rectangle with pointed right side.
+                buffer.set(x, y, glyphs.top_left);
+                buffer.set(x, y + h.saturating_sub(1), glyphs.bottom_left);
+                buffer.set(x + w.saturating_sub(1), y + h / 2, '>');
+                for dx in 1..w.saturating_sub(1) {
+                    buffer.set(x + dx, y, glyphs.horizontal);
+                    buffer.set(x + dx, y + h.saturating_sub(1), glyphs.horizontal);
+                }
+                for dy in 1..h.saturating_sub(1) {
+                    buffer.set(x, y + dy, glyphs.vertical);
+                }
+            }
+            NodeShape::Cylinder => {
+                // Database cylinder: curved top/bottom, straight sides.
+                buffer.set(x, y, '(');
+                buffer.set(x + w.saturating_sub(1), y, ')');
+                buffer.set(x, y + h.saturating_sub(1), '(');
+                buffer.set(x + w.saturating_sub(1), y + h.saturating_sub(1), ')');
+                for dx in 1..w.saturating_sub(1) {
+                    buffer.set(x + dx, y, glyphs.horizontal);
+                    // Double line at top to suggest cylinder cap.
+                    if h > 2 {
+                        buffer.set(x + dx, y + 1, glyphs.horizontal);
+                    }
+                    buffer.set(x + dx, y + h.saturating_sub(1), glyphs.horizontal);
+                }
+                for dy in 2..h.saturating_sub(1) {
+                    buffer.set(x, y + dy, glyphs.vertical);
+                    buffer.set(x + w.saturating_sub(1), y + dy, glyphs.vertical);
+                }
+            }
+            NodeShape::Trapezoid => {
+                // Wider top, narrower bottom.
+                let inset = w / 6;
+                buffer.set(x, y, '/');
+                buffer.set(x + w.saturating_sub(1), y, '\\');
+                buffer.set(x + inset, y + h.saturating_sub(1), '\\');
+                buffer.set(
+                    x + w.saturating_sub(1).saturating_sub(inset),
+                    y + h.saturating_sub(1),
+                    '/',
+                );
+                for dx in 1..w.saturating_sub(1) {
+                    buffer.set(x + dx, y, glyphs.horizontal);
+                }
+                for dx in (inset + 1)..w.saturating_sub(1).saturating_sub(inset) {
+                    buffer.set(x + dx, y + h.saturating_sub(1), glyphs.horizontal);
+                }
+            }
+            NodeShape::InvTrapezoid => {
+                // Narrower top, wider bottom.
+                let inset = w / 6;
+                buffer.set(x + inset, y, '\\');
+                buffer.set(x + w.saturating_sub(1).saturating_sub(inset), y, '/');
+                buffer.set(x, y + h.saturating_sub(1), '\\');
+                buffer.set(x + w.saturating_sub(1), y + h.saturating_sub(1), '/');
+                for dx in (inset + 1)..w.saturating_sub(1).saturating_sub(inset) {
+                    buffer.set(x + dx, y, glyphs.horizontal);
+                }
+                for dx in 1..w.saturating_sub(1) {
+                    buffer.set(x + dx, y + h.saturating_sub(1), glyphs.horizontal);
+                }
+            }
+            NodeShape::Parallelogram => {
+                let inset = w / 5;
+                for dx in inset..w.saturating_sub(1) {
+                    buffer.set(x + dx, y, glyphs.horizontal);
+                }
+                for dx in 0..w.saturating_sub(inset) {
+                    buffer.set(x + dx, y + h.saturating_sub(1), glyphs.horizontal);
+                }
+                buffer.set(x + inset, y, '/');
+                buffer.set(x, y + h.saturating_sub(1), '/');
+            }
+            NodeShape::InvParallelogram => {
+                let inset = w / 5;
+                for dx in 0..w.saturating_sub(inset) {
+                    buffer.set(x + dx, y, glyphs.horizontal);
+                }
+                for dx in inset..w.saturating_sub(1) {
+                    buffer.set(x + dx, y + h.saturating_sub(1), glyphs.horizontal);
+                }
+                buffer.set(x + w.saturating_sub(1).saturating_sub(inset), y, '\\');
+                buffer.set(x + w.saturating_sub(1), y + h.saturating_sub(1), '\\');
+            }
+            NodeShape::Triangle => {
+                let mid_x = x + w / 2;
+                buffer.set(mid_x, y, '^');
+                for dx in 0..w {
+                    buffer.set(x + dx, y + h.saturating_sub(1), glyphs.horizontal);
+                }
+                buffer.set(x, y + h.saturating_sub(1), '/');
+                buffer.set(x + w.saturating_sub(1), y + h.saturating_sub(1), '\\');
+            }
+            NodeShape::Pentagon | NodeShape::Star => {
+                // Pentagon/star approximation: use hexagon-like shape.
+                buffer.set(x, y + h / 2, '<');
+                buffer.set(x + w.saturating_sub(1), y + h / 2, '>');
+                for dx in 1..w.saturating_sub(1) {
+                    buffer.set(x + dx, y, glyphs.horizontal);
+                    buffer.set(x + dx, y + h.saturating_sub(1), glyphs.horizontal);
+                }
+                for dy in 1..h.saturating_sub(1) {
+                    buffer.set(x, y + dy, glyphs.vertical);
+                    buffer.set(x + w.saturating_sub(1), y + dy, glyphs.vertical);
+                }
+            }
+            NodeShape::Note => {
+                // Note shape: rectangle with folded corner.
+                buffer.set(x, y, glyphs.top_left);
+                buffer.set(x + w.saturating_sub(1), y, '+');
+                buffer.set(x, y + h.saturating_sub(1), glyphs.bottom_left);
+                buffer.set(
+                    x + w.saturating_sub(1),
+                    y + h.saturating_sub(1),
+                    glyphs.bottom_right,
+                );
+                for dx in 1..w.saturating_sub(1) {
+                    buffer.set(x + dx, y, glyphs.horizontal);
+                    buffer.set(x + dx, y + h.saturating_sub(1), glyphs.horizontal);
+                }
+                for dy in 1..h.saturating_sub(1) {
+                    buffer.set(x, y + dy, glyphs.vertical);
+                    buffer.set(x + w.saturating_sub(1), y + dy, glyphs.vertical);
                 }
             }
             _ => {
-                // Standard rectangle.
+                // Standard rectangle (Rect and any unhandled shapes).
                 buffer.set(x, y, glyphs.top_left);
-                buffer.set(x + w - 1, y, glyphs.top_right);
-                buffer.set(x, y + h - 1, glyphs.bottom_left);
-                buffer.set(x + w - 1, y + h - 1, glyphs.bottom_right);
-                for dx in 1..w - 1 {
+                buffer.set(x + w.saturating_sub(1), y, glyphs.top_right);
+                buffer.set(x, y + h.saturating_sub(1), glyphs.bottom_left);
+                buffer.set(
+                    x + w.saturating_sub(1),
+                    y + h.saturating_sub(1),
+                    glyphs.bottom_right,
+                );
+                for dx in 1..w.saturating_sub(1) {
                     buffer.set(x + dx, y, glyphs.horizontal);
-                    buffer.set(x + dx, y + h - 1, glyphs.horizontal);
+                    buffer.set(x + dx, y + h.saturating_sub(1), glyphs.horizontal);
                 }
-                for dy in 1..h - 1 {
+                for dy in 1..h.saturating_sub(1) {
                     buffer.set(x, y + dy, glyphs.vertical);
-                    buffer.set(x + w - 1, y + dy, glyphs.vertical);
+                    buffer.set(x + w.saturating_sub(1), y + dy, glyphs.vertical);
                 }
             }
         }
@@ -604,6 +755,94 @@ impl TermRenderer {
                 canvas.draw_line(right, top, right - inset, bottom);
                 canvas.draw_line(right - inset, bottom, left + inset, bottom);
                 canvas.draw_line(left + inset, bottom, left, top);
+            }
+            NodeShape::Hexagon => {
+                let inset = (w as f32 * 0.15) as isize;
+                let top = y as isize;
+                let bottom = (y + h) as isize;
+                let left = x as isize;
+                let right = (x + w) as isize;
+                let mid_y = (y + h / 2) as isize;
+                canvas.draw_line(left + inset, top, right - inset, top);
+                canvas.draw_line(right - inset, top, right, mid_y);
+                canvas.draw_line(right, mid_y, right - inset, bottom);
+                canvas.draw_line(right - inset, bottom, left + inset, bottom);
+                canvas.draw_line(left + inset, bottom, left, mid_y);
+                canvas.draw_line(left, mid_y, left + inset, top);
+            }
+            NodeShape::Rounded | NodeShape::Stadium | NodeShape::Cloud => {
+                // Rounded rectangle: draw rect + round the corners with arcs.
+                canvas.draw_rect(x, y, w.max(1), h.max(1));
+            }
+            NodeShape::Subroutine => {
+                // Double-bordered rectangle.
+                canvas.draw_rect(x, y, w.max(1), h.max(1));
+                if w > 4 {
+                    let inner_x = x + 2;
+                    canvas.draw_line(
+                        inner_x as isize,
+                        y as isize,
+                        inner_x as isize,
+                        (y + h) as isize,
+                    );
+                    let inner_right = x + w - 2;
+                    canvas.draw_line(
+                        inner_right as isize,
+                        y as isize,
+                        inner_right as isize,
+                        (y + h) as isize,
+                    );
+                }
+            }
+            NodeShape::Asymmetric | NodeShape::Tag => {
+                // Flag shape: rect with pointed right side.
+                let top = y as isize;
+                let bottom = (y + h) as isize;
+                let left = x as isize;
+                let right = (x + w) as isize;
+                let mid_y = (y + h / 2) as isize;
+                let point = (w as f32 * 0.2) as isize;
+                canvas.draw_line(left, top, right - point, top);
+                canvas.draw_line(right - point, top, right, mid_y);
+                canvas.draw_line(right, mid_y, right - point, bottom);
+                canvas.draw_line(right - point, bottom, left, bottom);
+                canvas.draw_line(left, bottom, left, top);
+            }
+            NodeShape::Cylinder => {
+                // Database shape: rect with elliptical top.
+                canvas.draw_rect(x, y, w.max(1), h.max(1));
+                // Draw second horizontal line near top to suggest cylinder cap.
+                if h > 3 {
+                    canvas.draw_line(
+                        x as isize,
+                        (y + 2) as isize,
+                        (x + w) as isize,
+                        (y + 2) as isize,
+                    );
+                }
+            }
+            NodeShape::Triangle => {
+                let mid_x = (x + w / 2) as isize;
+                let top = y as isize;
+                let bottom = (y + h) as isize;
+                let left = x as isize;
+                let right = (x + w) as isize;
+                canvas.draw_line(mid_x, top, right, bottom);
+                canvas.draw_line(right, bottom, left, bottom);
+                canvas.draw_line(left, bottom, mid_x, top);
+            }
+            NodeShape::Note => {
+                // Rectangle with folded corner.
+                let fold = (w.min(h) as f32 * 0.2) as isize;
+                let top = y as isize;
+                let bottom = (y + h) as isize;
+                let left = x as isize;
+                let right = (x + w) as isize;
+                canvas.draw_line(left, top, right - fold, top);
+                canvas.draw_line(right - fold, top, right, top + fold);
+                canvas.draw_line(right, top + fold, right, bottom);
+                canvas.draw_line(right, bottom, left, bottom);
+                canvas.draw_line(left, bottom, left, top);
             }
             _ => {
                 canvas.draw_rect(x, y, w.max(1), h.max(1));
@@ -765,22 +1004,90 @@ impl TermRenderer {
             source_lines.push(sanitized.as_str());
         }
 
-        for line in source_lines.into_iter().take(max_lines) {
-            let chars: Vec<char> = line.chars().collect();
-            if chars.len() <= max_chars {
-                lines.push(line.to_string());
-            } else if max_chars == 1 {
-                lines.push("…".to_string());
-            } else {
-                lines.push(format!(
-                    "{}…",
-                    chars[..max_chars - 1].iter().collect::<String>()
-                ));
+        for line in source_lines {
+            if lines.len() >= max_lines {
+                break;
+            }
+            // Word-wrap long lines at word boundaries.
+            let wrapped = wrap_text(line, max_chars);
+            for wrapped_line in wrapped {
+                if lines.len() >= max_lines {
+                    // Truncate the last line with ellipsis if there's more content.
+                    if let Some(last) = lines.last_mut() {
+                        let chars: Vec<char> = last.chars().collect();
+                        if chars.len() >= max_chars {
+                            *last = format!(
+                                "{}…",
+                                chars[..max_chars.saturating_sub(1)]
+                                    .iter()
+                                    .collect::<String>()
+                            );
+                        }
+                    }
+                    break;
+                }
+                lines.push(wrapped_line);
             }
         }
 
         lines.join("\n")
     }
+}
+
+/// Wrap text at word boundaries to fit within `max_width` characters per line.
+///
+/// Uses greedy word-fit: words are placed on the current line until the next
+/// word would exceed the width. A single word wider than the target is placed
+/// on its own line and truncated with ellipsis.
+fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+
+    let max_width = max_width.max(1);
+    let mut lines: Vec<String> = Vec::new();
+    let mut current_line = String::new();
+
+    for word in text.split_whitespace() {
+        let word_len = word.chars().count();
+
+        if current_line.is_empty() {
+            // First word on line — always place it, truncate if needed.
+            if word_len <= max_width {
+                current_line.push_str(word);
+            } else {
+                let truncated: String = word.chars().take(max_width.saturating_sub(1)).collect();
+                current_line = format!("{truncated}…");
+            }
+        } else {
+            let current_len = current_line.chars().count();
+            // Check if word fits on current line (+ 1 for space).
+            if current_len + 1 + word_len <= max_width {
+                current_line.push(' ');
+                current_line.push_str(word);
+            } else {
+                // Word doesn't fit — push current line and start new one.
+                lines.push(current_line);
+                if word_len <= max_width {
+                    current_line = word.to_string();
+                } else {
+                    let truncated: String =
+                        word.chars().take(max_width.saturating_sub(1)).collect();
+                    current_line = format!("{truncated}…");
+                }
+            }
+        }
+    }
+
+    if !current_line.is_empty() {
+        lines.push(current_line);
+    }
+
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+
+    lines
 }
 
 /// Simple character cell buffer for cell-mode rendering.

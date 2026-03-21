@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::f32::consts::PI;
 
 use fm_core::{
-    DiagramType, GraphDirection, IrEndpoint, IrNode, MermaidComplexity, MermaidConfig,
+    DiagramType, GraphDirection, IrEndpoint, IrGanttMeta, IrNode, MermaidComplexity, MermaidConfig,
     MermaidDiagramIr, MermaidFidelity, MermaidGlyphMode, MermaidGuardReport,
     MermaidLayoutDecisionAlternative, MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord,
     MermaidPressureReport, MermaidPressureTier, Span,
@@ -686,7 +686,8 @@ pub enum RenderItem {
 pub fn build_render_scene(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderScene {
     let bounds = RenderRect::from(layout.bounds);
 
-    let mut root = RenderGroup::new(Some(String::from("diagram-root"))).with_source(RenderSource::Diagram);
+    let mut root =
+        RenderGroup::new(Some(String::from("diagram-root"))).with_source(RenderSource::Diagram);
     root.transform = Some(RenderTransform::Matrix {
         a: 1.0,
         b: 0.0,
@@ -709,7 +710,8 @@ pub fn build_render_scene(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> Rend
 }
 
 fn build_cluster_layer(layout: &DiagramLayout) -> RenderGroup {
-    let mut layer = RenderGroup::new(Some(String::from("clusters"))).with_source(RenderSource::Diagram);
+    let mut layer =
+        RenderGroup::new(Some(String::from("clusters"))).with_source(RenderSource::Diagram);
 
     for cluster in &layout.clusters {
         layer.children.push(RenderItem::Path(RenderPath {
@@ -733,7 +735,8 @@ fn build_cluster_layer(layout: &DiagramLayout) -> RenderGroup {
 }
 
 fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGroup {
-    let mut layer = RenderGroup::new(Some(String::from("edges"))).with_source(RenderSource::Diagram);
+    let mut layer =
+        RenderGroup::new(Some(String::from("edges"))).with_source(RenderSource::Diagram);
 
     for edge in &layout.edges {
         if edge.points.len() < 2 {
@@ -823,7 +826,8 @@ fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
 }
 
 fn build_node_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGroup {
-    let mut layer = RenderGroup::new(Some(String::from("nodes"))).with_source(RenderSource::Diagram);
+    let mut layer =
+        RenderGroup::new(Some(String::from("nodes"))).with_source(RenderSource::Diagram);
 
     for node_box in &layout.nodes {
         let shape = ir
@@ -848,7 +852,8 @@ fn build_node_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
 }
 
 fn build_label_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGroup {
-    let mut layer = RenderGroup::new(Some(String::from("labels"))).with_source(RenderSource::Diagram);
+    let mut layer =
+        RenderGroup::new(Some(String::from("labels"))).with_source(RenderSource::Diagram);
 
     for node_box in &layout.nodes {
         let Some(node) = ir.nodes.get(node_box.node_index) else {
@@ -1926,7 +1931,10 @@ fn layout_diagram_sugiyama_traced_with_config(
 ) -> TracedLayout {
     let mut trace = LayoutTrace::default();
     let spacing = LayoutSpacing::default();
-    let metrics = config.font_metrics.clone().unwrap_or_else(fm_core::FontMetrics::default_metrics);
+    let metrics = config
+        .font_metrics
+        .clone()
+        .unwrap_or_else(fm_core::FontMetrics::default_metrics);
     let node_sizes = compute_node_sizes(ir, &metrics);
     let cycle_result = cycle_removal(ir, config.cycle_strategy);
     push_snapshot(
@@ -2897,6 +2905,14 @@ pub fn layout_diagram_gantt(ir: &MermaidDiagramIr) -> DiagramLayout {
 
 #[must_use]
 pub fn layout_diagram_gantt_traced(ir: &MermaidDiagramIr) -> TracedLayout {
+    if let Some(gantt_meta) = ir.gantt_meta.as_ref().filter(|meta| !meta.tasks.is_empty()) {
+        return layout_diagram_gantt_from_meta(ir, gantt_meta);
+    }
+
+    layout_diagram_gantt_fallback(ir)
+}
+
+fn layout_diagram_gantt_fallback(ir: &MermaidDiagramIr) -> TracedLayout {
     let node_count = ir.nodes.len();
     let mut node_sizes = compute_node_sizes(ir, &fm_core::FontMetrics::default_metrics());
     let mut trace = LayoutTrace::default();
@@ -2999,6 +3015,231 @@ pub fn layout_diagram_gantt_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         })
         .collect();
     traced
+}
+
+fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMeta) -> TracedLayout {
+    let node_count = ir.nodes.len();
+    let mut node_sizes = compute_node_sizes(ir, &fm_core::FontMetrics::default_metrics());
+    let mut trace = LayoutTrace::default();
+    push_snapshot(&mut trace, "gantt_layout", node_count, ir.edges.len(), 0, 0);
+
+    for size in &mut node_sizes {
+        size.0 = size.0.max(156.0);
+        size.1 = size.1.max(40.0);
+    }
+
+    let spacing = LayoutSpacing::default();
+    let base_col_width = 48.0_f32;
+    let row_gap = (spacing.node_spacing * 0.72) + 24.0;
+    let section_gap = 56.0_f32;
+
+    let mut rank_by_node = vec![0_usize; node_count];
+    let mut order_by_node = vec![0_usize; node_count];
+    let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
+    let mut section_to_nodes: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+
+    let task_count = gantt_meta.tasks.len();
+    let mut explicit_starts = vec![None; task_count];
+    let mut durations = vec![1_i32; task_count];
+    let mut milestones = vec![false; task_count];
+    let mut task_id_to_idx = BTreeMap::new();
+
+    for (task_idx, task) in gantt_meta.tasks.iter().enumerate() {
+        explicit_starts[task_idx] = task.start_date.as_deref().and_then(parse_iso_day_number);
+        durations[task_idx] = if task.milestone {
+            0
+        } else {
+            i32::try_from(task.duration_days.unwrap_or(1)).unwrap_or(i32::MAX)
+        };
+        milestones[task_idx] = task.milestone || durations[task_idx] == 0;
+        if let Some(task_id) = task.task_id.as_ref() {
+            task_id_to_idx.entry(task_id.clone()).or_insert(task_idx);
+        }
+    }
+
+    let base_start_day = explicit_starts.iter().flatten().copied().min().unwrap_or(0);
+    let section_count = gantt_meta.sections.len().max(1);
+    let mut start_days = vec![base_start_day; task_count];
+    let mut end_exclusive_days = vec![base_start_day; task_count];
+
+    for _ in 0..=task_count {
+        let mut changed = false;
+        let mut section_end = vec![base_start_day; section_count];
+
+        for (task_idx, task) in gantt_meta.tasks.iter().enumerate() {
+            let section_idx = task.section_idx.min(section_count.saturating_sub(1));
+            let start = if let Some(explicit) = explicit_starts[task_idx] {
+                explicit
+            } else if let Some(after_task_id) = task.after_task_id.as_ref() {
+                task_id_to_idx
+                    .get(after_task_id)
+                    .and_then(|dep_idx| end_exclusive_days.get(*dep_idx).copied())
+                    .unwrap_or(section_end[section_idx])
+            } else {
+                section_end[section_idx]
+            };
+            let end_exclusive = start.saturating_add(durations[task_idx].max(0));
+
+            if start_days[task_idx] != start {
+                start_days[task_idx] = start;
+                changed = true;
+            }
+            if end_exclusive_days[task_idx] != end_exclusive {
+                end_exclusive_days[task_idx] = end_exclusive;
+                changed = true;
+            }
+            section_end[section_idx] = end_exclusive;
+        }
+
+        if !changed {
+            break;
+        }
+    }
+
+    let min_start_day = start_days.iter().copied().min().unwrap_or(base_start_day);
+    let max_last_day = start_days
+        .iter()
+        .copied()
+        .zip(durations.iter().copied())
+        .map(|(start, duration)| {
+            if duration > 0 {
+                start.saturating_add(duration.saturating_sub(1))
+            } else {
+                start
+            }
+        })
+        .max()
+        .unwrap_or(min_start_day);
+    let total_span_days = usize::try_from((max_last_day - min_start_day).max(1)).unwrap_or(1);
+
+    let mut section_base_y = 0.0_f32;
+    let mut per_section_counts = vec![0_usize; section_count];
+    for (task_idx, task) in gantt_meta.tasks.iter().enumerate() {
+        let node_index = task.node.0;
+        if node_index >= node_count {
+            continue;
+        }
+
+        let section_idx = task.section_idx.min(section_count.saturating_sub(1));
+        let section_label = gantt_meta
+            .sections
+            .get(section_idx)
+            .map(|section| section.name.clone())
+            .unwrap_or_else(|| "Backlog".to_string());
+
+        while section_to_nodes.len() <= section_idx {
+            let idx = section_to_nodes.len();
+            let label = gantt_meta
+                .sections
+                .get(idx)
+                .map(|section| section.name.clone())
+                .unwrap_or_else(|| format!("Section {}", idx + 1));
+            section_to_nodes.entry(label).or_default();
+        }
+
+        let row_index = per_section_counts[section_idx];
+        let start_offset_days = (start_days[task_idx] - min_start_day).max(0) as f32;
+        let duration_days = durations[task_idx].max(1) as f32;
+        node_sizes[node_index].0 = node_sizes[node_index]
+            .0
+            .max(duration_days * base_col_width)
+            .max(if milestones[task_idx] { 72.0 } else { 156.0 });
+
+        let x = start_offset_days * base_col_width;
+        let y = section_base_y + row_index as f32 * row_gap;
+        centers[node_index] = (x, y);
+        rank_by_node[node_index] =
+            usize::try_from((start_days[task_idx] - min_start_day).max(0)).unwrap_or(0);
+        order_by_node[node_index] = row_index + section_idx * 128;
+        section_to_nodes
+            .entry(section_label)
+            .or_default()
+            .push(node_index);
+        per_section_counts[section_idx] += 1;
+
+        let next_is_new_section = gantt_meta
+            .tasks
+            .get(task_idx + 1)
+            .map(|next| next.section_idx != section_idx)
+            .unwrap_or(true);
+        if next_is_new_section {
+            section_base_y +=
+                (per_section_counts[section_idx].max(1) as f32 * row_gap) + section_gap;
+        }
+    }
+
+    let mut traced = finalize_specialized_layout(
+        ir,
+        &node_sizes,
+        rank_by_node,
+        order_by_node,
+        centers,
+        trace,
+        true,
+    );
+
+    traced.layout.extensions.axis_ticks = (0..=total_span_days)
+        .map(|day_offset| LayoutAxisTick {
+            label: format_gantt_axis_tick(min_start_day.saturating_add(day_offset as i32)),
+            position: day_offset as f32 * base_col_width,
+        })
+        .collect();
+    traced.layout.extensions.bands = section_to_nodes
+        .iter()
+        .filter_map(|(section, node_indexes)| {
+            let bounds = layout_bounds_for_nodes(&traced.layout, node_indexes, 24.0)?;
+            Some(LayoutBand {
+                kind: LayoutBandKind::Section,
+                label: section.clone(),
+                bounds,
+            })
+        })
+        .collect();
+    traced
+}
+
+fn parse_iso_day_number(value: &str) -> Option<i32> {
+    let value = value.trim();
+    let bytes = value.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return None;
+    }
+
+    let year: i32 = value[0..4].parse().ok()?;
+    let month: u8 = value[5..7].parse().ok()?;
+    let day: u8 = value[8..10].parse().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+
+    let month_i32 = i32::from(month);
+    let day_i32 = i32::from(day);
+    let adjusted_year = year - if month_i32 <= 2 { 1 } else { 0 };
+    let era = if adjusted_year >= 0 {
+        adjusted_year
+    } else {
+        adjusted_year - 399
+    } / 400;
+    let year_of_era = adjusted_year - era * 400;
+    let month_prime = month_i32 + if month_i32 > 2 { -3 } else { 9 };
+    let day_of_year = (153 * month_prime + 2) / 5 + day_i32 - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    Some(era * 146_097 + day_of_era - 719_468)
+}
+
+fn format_gantt_axis_tick(days_since_epoch: i32) -> String {
+    let z = days_since_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    let year = year + if month <= 2 { 1 } else { 0 };
+    format!("{year:04}-{month:02}-{day:02}")
 }
 
 #[must_use]
@@ -4377,7 +4618,10 @@ fn clip_to_rect_border(from: LayoutPoint, to: LayoutPoint, rect: &LayoutRect) ->
 }
 
 #[must_use]
-pub fn compute_node_sizes(ir: &MermaidDiagramIr, metrics: &fm_core::FontMetrics) -> Vec<(f32, f32)> {
+pub fn compute_node_sizes(
+    ir: &MermaidDiagramIr,
+    metrics: &fm_core::FontMetrics,
+) -> Vec<(f32, f32)> {
     ir.nodes
         .iter()
         .map(|node| {
@@ -7294,8 +7538,9 @@ mod tests {
     };
     use fm_core::{
         ArrowType, DiagramType, GraphDirection, IrCluster, IrClusterId, IrEdge, IrEndpoint,
-        IrGraphCluster, IrGraphNode, IrLabel, IrLabelId, IrNode, IrNodeId, IrSubgraph,
-        IrSubgraphId, MermaidDiagramIr, MermaidPressureTier, NodeShape, Span,
+        IrGanttMeta, IrGanttSection, IrGanttTask, IrGraphCluster, IrGraphNode, IrLabel, IrLabelId,
+        IrNode, IrNodeId, IrSubgraph, IrSubgraphId, MermaidDiagramIr, MermaidPressureTier,
+        NodeShape, Span,
     };
     use proptest::prelude::*;
     use std::collections::BTreeMap;
@@ -7800,7 +8045,7 @@ mod tests {
     #[test]
     fn gantt_layout_groups_tasks_by_section_and_orders_slots_horizontally() {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Gantt);
-        for label in ["Planning: Scope", "Planning: Estimate", "Delivery: Build"] {
+        for label in ["Scope", "Estimate", "Build"] {
             ir.labels.push(IrLabel {
                 text: label.to_string(),
                 ..IrLabel::default()
@@ -7817,6 +8062,43 @@ mod tests {
                 ..IrNode::default()
             });
         }
+        ir.gantt_meta = Some(IrGanttMeta {
+            sections: vec![
+                IrGanttSection {
+                    name: "Planning".to_string(),
+                },
+                IrGanttSection {
+                    name: "Delivery".to_string(),
+                },
+            ],
+            tasks: vec![
+                IrGanttTask {
+                    node: IrNodeId(0),
+                    section_idx: 0,
+                    task_id: Some("task_1".to_string()),
+                    start_date: Some("2026-02-01".to_string()),
+                    duration_days: Some(2),
+                    ..Default::default()
+                },
+                IrGanttTask {
+                    node: IrNodeId(1),
+                    section_idx: 0,
+                    task_id: Some("task_3".to_string()),
+                    start_date: Some("2026-02-03".to_string()),
+                    duration_days: Some(3),
+                    ..Default::default()
+                },
+                IrGanttTask {
+                    node: IrNodeId(2),
+                    section_idx: 1,
+                    task_id: Some("task_2".to_string()),
+                    start_date: Some("2026-02-04".to_string()),
+                    duration_days: Some(2),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
 
         let layout = layout_diagram_gantt(&ir);
         let nodes = layout
@@ -7835,7 +8117,8 @@ mod tests {
         assert!(task_3.bounds.center().y > task_1.bounds.center().y);
         assert!((task_1.bounds.center().y - task_2.bounds.center().y).abs() > 10.0);
         assert_eq!(layout.extensions.bands.len(), 2);
-        assert_eq!(layout.extensions.axis_ticks.len(), 3);
+        assert_eq!(layout.extensions.axis_ticks.len(), 4);
+        assert_eq!(layout.extensions.axis_ticks[0].label, "2026-02-01");
     }
 
     #[test]

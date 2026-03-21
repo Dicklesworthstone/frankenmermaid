@@ -27,10 +27,11 @@ pub use transform::{Transform, TransformBuilder};
 
 use fm_core::{MermaidDiagramIr, MermaidTier, Span};
 use fm_layout::{
-    DiagramLayout, FillStyle, LayoutEdgePath, LayoutNodeBox, LineCap as RenderLineCap,
-    LineJoin as RenderLineJoin, MarkerKind, PathCmd, RenderClip, RenderGroup, RenderItem,
-    RenderPath, RenderScene, RenderSource, RenderText, RenderTransform, StrokeStyle,
-    TextAlign as RenderTextAlign, TextBaseline as RenderTextBaseline, build_render_scene,
+    DiagramLayout, FillStyle, LayoutBand, LayoutBandKind, LayoutEdgePath, LayoutNodeBox,
+    LineCap as RenderLineCap, LineJoin as RenderLineJoin, MarkerKind, PathCmd, RenderClip,
+    RenderGroup, RenderItem, RenderPath, RenderScene, RenderSource, RenderText, RenderTransform,
+    StrokeStyle, TextAlign as RenderTextAlign, TextBaseline as RenderTextBaseline,
+    build_render_scene,
 };
 
 /// Node fill gradient mode.
@@ -130,7 +131,10 @@ impl SvgRenderConfig {
             preset: fm_core::FontPreset::from_family(&self.font_family),
             font_size: self.font_size,
             line_height: self.line_height,
-            fallback_chain: vec![fm_core::FontPreset::SansSerif, fm_core::FontPreset::Monospace],
+            fallback_chain: vec![
+                fm_core::FontPreset::SansSerif,
+                fm_core::FontPreset::Monospace,
+            ],
             trace_fallbacks: false,
         })
     }
@@ -410,7 +414,9 @@ fn render_scene_group(
 
     elem = apply_source_metadata(elem, group.source, config.include_source_spans, ir);
 
-    if config.a11y.keyboard_nav && matches!(group.source, RenderSource::Node(_) | RenderSource::Edge(_)) {
+    if config.a11y.keyboard_nav
+        && matches!(group.source, RenderSource::Node(_) | RenderSource::Edge(_))
+    {
         elem = elem.attr("tabindex", "0");
     }
 
@@ -555,9 +561,11 @@ fn apply_source_metadata(
             }
             RenderSource::Edge(index) => {
                 if let Some(edge) = diagram_ir.edges.get(index) {
-                    let from_node = diagram_ir.resolve_endpoint_node(edge.from)
+                    let from_node = diagram_ir
+                        .resolve_endpoint_node(edge.from)
                         .and_then(|id| diagram_ir.nodes.get(id.0));
-                    let to_node = diagram_ir.resolve_endpoint_node(edge.to)
+                    let to_node = diagram_ir
+                        .resolve_endpoint_node(edge.to)
                         .and_then(|id| diagram_ir.nodes.get(id.0));
                     let label = edge
                         .label
@@ -567,11 +575,7 @@ fn apply_source_metadata(
                     elem = elem.attr("role", "graphics-symbol").attr(
                         "aria-label",
                         &crate::a11y::describe_edge(
-                            from_node,
-                            to_node,
-                            edge.arrow,
-                            label,
-                            diagram_ir,
+                            from_node, to_node, edge.arrow, label, diagram_ir,
                         ),
                     );
                 }
@@ -1062,6 +1066,18 @@ fn render_layout_to_svg(
     let offset_x = padding - layout.bounds.x;
     let offset_y = padding - layout.bounds.y;
 
+    for band in &layout.extensions.bands {
+        doc = doc.child(render_layout_band(band, offset_x, offset_y, config));
+    }
+    for tick in &layout.extensions.axis_ticks {
+        doc = doc.child(render_layout_axis_tick(
+            tick.label.as_str(),
+            tick.position + offset_x,
+            layout.bounds.y + offset_y - 12.0,
+            config,
+        ));
+    }
+
     // Render clusters (subgraphs) as background rectangles
     // Sort clusters by size (largest first) for proper z-ordering of nested clusters
     let mut sorted_clusters: Vec<_> = layout.clusters.iter().enumerate().collect();
@@ -1209,6 +1225,86 @@ fn render_layout_to_svg(
     }
 
     doc.to_string()
+}
+
+fn render_layout_band(
+    band: &LayoutBand,
+    offset_x: f32,
+    offset_y: f32,
+    config: &SvgRenderConfig,
+) -> Element {
+    let (fill, stroke, class_name) = match band.kind {
+        LayoutBandKind::Section => (
+            "rgba(191,219,254,0.18)",
+            "#bfd7ff",
+            "fm-band fm-band-section",
+        ),
+        LayoutBandKind::Lane => ("rgba(196,181,253,0.14)", "#c4b5fd", "fm-band fm-band-lane"),
+        LayoutBandKind::Column => (
+            "rgba(254,240,138,0.16)",
+            "#fde68a",
+            "fm-band fm-band-column",
+        ),
+    };
+
+    let mut group = Element::group().class(class_name);
+    let rect = Element::rect()
+        .x(band.bounds.x + offset_x)
+        .y(band.bounds.y + offset_y)
+        .width(band.bounds.width)
+        .height(band.bounds.height)
+        .rx(config.rounded_corners.max(4.0))
+        .fill(fill)
+        .stroke(stroke)
+        .stroke_width(1.0)
+        .stroke_dasharray("6,4")
+        .fill_opacity(0.8)
+        .stroke_opacity(0.9);
+    group = group.child(rect);
+
+    if !band.label.is_empty() {
+        group = group.child(
+            TextBuilder::new(&band.label)
+                .x(band.bounds.x + offset_x + 8.0)
+                .y(band.bounds.y + offset_y + 16.0)
+                .font_family(&config.font_family)
+                .font_size(clamp_font_size(
+                    config.font_size * 0.82,
+                    config.min_font_size,
+                ))
+                .fill("#4a5568")
+                .class("fm-band-label")
+                .build(),
+        );
+    }
+
+    group
+}
+
+fn render_layout_axis_tick(label: &str, x: f32, y: f32, config: &SvgRenderConfig) -> Element {
+    let mut group = Element::group().class("fm-axis-tick");
+    group = group.child(
+        Element::line()
+            .x1(x)
+            .y1(y + 4.0)
+            .x2(x)
+            .y2(y + 16.0)
+            .stroke("#94a3b8")
+            .stroke_width(1.0),
+    );
+    group.child(
+        TextBuilder::new(label)
+            .x(x + 3.0)
+            .y(y)
+            .font_family(&config.font_family)
+            .font_size(clamp_font_size(
+                config.font_size * 0.72,
+                config.min_font_size,
+            ))
+            .fill("#64748b")
+            .class("fm-axis-tick-label")
+            .build(),
+    )
 }
 
 /// Render a single node to an SVG element.
@@ -2134,8 +2230,7 @@ mod tests {
         FillStyle, LineCap as RenderLineCap, LineJoin as RenderLineJoin, PathCmd, RenderClip,
         RenderGroup, RenderItem, RenderPath, RenderRect, RenderScene, RenderSource, RenderText,
         RenderTransform, StrokeStyle, TextAlign as RenderTextAlign,
-        TextBaseline as RenderTextBaseline,
-        layout_diagram,
+        TextBaseline as RenderTextBaseline, layout_diagram,
     };
     use proptest::prelude::*;
 
@@ -2258,7 +2353,8 @@ mod tests {
     }
 
     fn create_scene_with_path_and_text() -> RenderScene {
-        let mut root = RenderGroup::new(Some(String::from("scene-root"))).with_source(RenderSource::Diagram);
+        let mut root =
+            RenderGroup::new(Some(String::from("scene-root"))).with_source(RenderSource::Diagram);
         root.children.push(RenderItem::Path(RenderPath {
             source: RenderSource::Node(0),
             commands: vec![
@@ -2321,7 +2417,8 @@ mod tests {
     }
 
     fn create_scene_with_transform_and_clip() -> RenderScene {
-        let mut child = RenderGroup::new(Some(String::from("scene-child"))).with_source(RenderSource::Diagram);
+        let mut child =
+            RenderGroup::new(Some(String::from("scene-child"))).with_source(RenderSource::Diagram);
         child.transform = Some(RenderTransform::Matrix {
             a: 1.0,
             b: 0.0,
@@ -2353,7 +2450,8 @@ mod tests {
             marker_end: MarkerKind::None,
         }));
 
-        let mut root = RenderGroup::new(Some(String::from("scene-root"))).with_source(RenderSource::Diagram);
+        let mut root =
+            RenderGroup::new(Some(String::from("scene-root"))).with_source(RenderSource::Diagram);
         root.children.push(RenderItem::Group(child));
 
         RenderScene {
