@@ -1251,6 +1251,33 @@ fn e2e_pipeline_state() {
 }
 
 #[test]
+fn e2e_pipeline_state_pseudo_states_render_distinct_shapes() {
+    let input = "stateDiagram-v2\n  [*] --> fork_state\n  state fork_state <<fork>>\n  fork_state --> chooser\n  state chooser <<choice>>\n  chooser --> Done\n  Done --> [*]";
+    let output_file = NamedTempFile::new().expect("temp render output file");
+    let output_path = output_file
+        .path()
+        .to_str()
+        .expect("temp path must be valid utf-8")
+        .to_string();
+
+    let output = run_cli(
+        &["render", "-", "--format", "svg", "--output", &output_path],
+        input,
+    );
+    assert!(
+        output.status.success(),
+        "state pseudo-state render should succeed; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let svg = std::fs::read_to_string(output_path).expect("read svg output");
+    assert!(svg.contains("fm-node-shape-filled-circle"));
+    assert!(svg.contains("fm-node-shape-horizontal-bar"));
+    assert!(svg.contains("fm-node-shape-diamond"));
+    assert!(svg.contains("fm-node-shape-double-circle"));
+}
+
+#[test]
 fn e2e_pipeline_er() {
     assert_pipeline_roundtrip(
         "erDiagram\n  CUSTOMER ||--o{ ORDER : places\n  ORDER ||--|{ LINE-ITEM : contains",

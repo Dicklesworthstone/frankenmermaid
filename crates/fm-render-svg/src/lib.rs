@@ -2978,6 +2978,44 @@ mod tests {
     }
 
     #[test]
+    fn renders_state_pseudo_state_shapes_without_fallback_ids_as_labels() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::State);
+        ir.nodes.push(IrNode {
+            id: "__state_start".to_string(),
+            shape: NodeShape::FilledCircle,
+            ..IrNode::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "fork_state".to_string(),
+            shape: NodeShape::HorizontalBar,
+            ..IrNode::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "chooser".to_string(),
+            shape: NodeShape::Diamond,
+            ..IrNode::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            arrow: ArrowType::Arrow,
+            ..IrEdge::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(1)),
+            to: IrEndpoint::Node(IrNodeId(2)),
+            arrow: ArrowType::Arrow,
+            ..IrEdge::default()
+        });
+
+        let svg = render_svg(&ir);
+        assert!(svg.contains("fm-node-shape-filled-circle"));
+        assert!(svg.contains("fm-node-shape-horizontal-bar"));
+        assert!(svg.contains("fm-node-shape-diamond"));
+        assert!(!svg.contains(">__state_start<"));
+    }
+
+    #[test]
     fn svg_emits_source_span_metadata_for_layout_elements() {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         let node_span = Span::at_line(2, 4);
