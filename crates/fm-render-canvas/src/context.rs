@@ -316,8 +316,10 @@ pub enum DrawOperation {
     ClosePath,
     MoveTo(f64, f64),
     LineTo(f64, f64),
+    QuadraticCurveTo(f64, f64, f64, f64),
     BezierCurveTo(f64, f64, f64, f64, f64, f64),
     Arc(f64, f64, f64, f64, f64),
+    ArcTo(f64, f64, f64, f64, f64),
     Rect(f64, f64, f64, f64),
     Fill,
     Stroke,
@@ -325,6 +327,9 @@ pub enum DrawOperation {
     StrokeRect(f64, f64, f64, f64),
     ClearRect(f64, f64, f64, f64),
     FillText(String, f64, f64),
+    StrokeText(String, f64, f64),
+    SetTransform(f64, f64, f64, f64, f64, f64),
+    ResetTransform,
     Translate(f64, f64),
     Scale(f64, f64),
     Rotate(f64),
@@ -456,7 +461,10 @@ impl Canvas2dContext for MockCanvas2dContext {
         self.operations.push(DrawOperation::LineTo(x, y));
     }
 
-    fn quadratic_curve_to(&mut self, _cpx: f64, _cpy: f64, _x: f64, _y: f64) {}
+    fn quadratic_curve_to(&mut self, cpx: f64, cpy: f64, x: f64, y: f64) {
+        self.operations
+            .push(DrawOperation::QuadraticCurveTo(cpx, cpy, x, y));
+    }
 
     fn bezier_curve_to(&mut self, cp1x: f64, cp1y: f64, cp2x: f64, cp2y: f64, x: f64, y: f64) {
         self.operations
@@ -468,7 +476,10 @@ impl Canvas2dContext for MockCanvas2dContext {
             .push(DrawOperation::Arc(x, y, radius, start_angle, end_angle));
     }
 
-    fn arc_to(&mut self, _x1: f64, _y1: f64, _x2: f64, _y2: f64, _radius: f64) {}
+    fn arc_to(&mut self, x1: f64, y1: f64, x2: f64, y2: f64, radius: f64) {
+        self.operations
+            .push(DrawOperation::ArcTo(x1, y1, x2, y2, radius));
+    }
 
     fn rect(&mut self, x: f64, y: f64, width: f64, height: f64) {
         self.operations
@@ -503,7 +514,10 @@ impl Canvas2dContext for MockCanvas2dContext {
             .push(DrawOperation::FillText(text.to_string(), x, y));
     }
 
-    fn stroke_text(&mut self, _text: &str, _x: f64, _y: f64) {}
+    fn stroke_text(&mut self, text: &str, x: f64, y: f64) {
+        self.operations
+            .push(DrawOperation::StrokeText(text.to_string(), x, y));
+    }
 
     fn measure_text(&self, text: &str) -> TextMetrics {
         // Estimate text width based on character count
@@ -514,8 +528,13 @@ impl Canvas2dContext for MockCanvas2dContext {
         }
     }
 
-    fn set_transform(&mut self, _a: f64, _b: f64, _c: f64, _d: f64, _e: f64, _f: f64) {}
-    fn reset_transform(&mut self) {}
+    fn set_transform(&mut self, a: f64, b: f64, c: f64, d: f64, e: f64, f: f64) {
+        self.operations
+            .push(DrawOperation::SetTransform(a, b, c, d, e, f));
+    }
+    fn reset_transform(&mut self) {
+        self.operations.push(DrawOperation::ResetTransform);
+    }
 
     fn translate(&mut self, x: f64, y: f64) {
         self.operations.push(DrawOperation::Translate(x, y));

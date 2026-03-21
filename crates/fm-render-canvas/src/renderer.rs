@@ -180,6 +180,9 @@ impl Canvas2dRenderer {
         // Draw clusters (background)
         let clusters_drawn = self.draw_clusters(layout, ir, ctx, offset_x, offset_y);
 
+        // Draw layout bands (sequence lifelines, gantt sections, etc.)
+        self.draw_bands(layout, ctx, offset_x, offset_y);
+
         // Draw edges
         let edges_drawn = self.draw_edges(layout, ir, ctx, offset_x, offset_y);
 
@@ -582,6 +585,66 @@ impl Canvas2dRenderer {
         }
 
         count
+    }
+
+    /// Draw layout extension bands (sequence lifelines, gantt sections, etc.).
+    fn draw_bands<C: Canvas2dContext>(
+        &mut self,
+        layout: &DiagramLayout,
+        ctx: &mut C,
+        offset_x: f64,
+        offset_y: f64,
+    ) {
+        use fm_layout::LayoutBandKind;
+        for band in &layout.extensions.bands {
+            let x = f64::from(band.bounds.x) + offset_x;
+            let y = f64::from(band.bounds.y) + offset_y;
+            let w = f64::from(band.bounds.width);
+            let h = f64::from(band.bounds.height);
+
+            match band.kind {
+                LayoutBandKind::Lane => {
+                    // Sequence lifeline: dashed vertical center line.
+                    let cx = x + w / 2.0;
+                    ctx.set_stroke_style("#94a3b8");
+                    ctx.set_line_width(1.0);
+                    ctx.set_line_dash(&[6.0, 4.0]);
+                    ctx.begin_path();
+                    ctx.move_to(cx, y);
+                    ctx.line_to(cx, y + h);
+                    ctx.stroke();
+                    ctx.set_line_dash(&[]);
+                    self.draw_calls += 1;
+                }
+                LayoutBandKind::Section => {
+                    // Gantt section: light background band.
+                    ctx.set_fill_style("rgba(226,232,240,0.3)");
+                    ctx.fill_rect(x, y, w, h);
+                    if !band.label.is_empty() {
+                        ctx.set_fill_style("#6c757d");
+                        ctx.set_font(&format!(
+                            "bold {}px {}",
+                            self.config.font_size * 0.85,
+                            self.config.font_family
+                        ));
+                        ctx.set_text_align(TextAlign::Left);
+                        ctx.set_text_baseline(TextBaseline::Top);
+                        ctx.fill_text(&band.label, x + 4.0, y + 2.0);
+                    }
+                    self.draw_calls += 1;
+                }
+                LayoutBandKind::Column => {
+                    // Kanban column: subtle vertical separator.
+                    ctx.set_stroke_style("rgba(148,163,184,0.4)");
+                    ctx.set_line_width(1.0);
+                    ctx.begin_path();
+                    ctx.move_to(x + w, y);
+                    ctx.line_to(x + w, y + h);
+                    ctx.stroke();
+                    self.draw_calls += 1;
+                }
+            }
+        }
     }
 
     /// Draw all edges.
