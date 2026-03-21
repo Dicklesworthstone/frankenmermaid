@@ -23,6 +23,16 @@ type OpenFragment = (
     Vec<usize>,
 );
 
+#[derive(Debug, Clone)]
+struct StateCompositeContext {
+    lookup_key: String,
+    cluster_index: usize,
+    subgraph_index: usize,
+    region_count: usize,
+    current_region_subgraph: Option<usize>,
+    pending_region_members: Vec<IrNodeId>,
+}
+
 pub(crate) struct IrBuilder {
     ir: MermaidDiagramIr,
     // Lookups for uniqueness
@@ -42,6 +52,8 @@ pub(crate) struct IrBuilder {
     fragment_stack: Vec<OpenFragment>,
     /// Currently open class block (for member accumulation)
     current_class: Option<String>,
+    /// Stack of open composite states for state diagrams.
+    state_stack: Vec<StateCompositeContext>,
 }
 
 impl IrBuilder {
@@ -58,6 +70,7 @@ impl IrBuilder {
             current_participant_group: None,
             fragment_stack: Vec::new(),
             current_class: None,
+            state_stack: Vec::new(),
         }
     }
 
@@ -285,24 +298,125 @@ impl IrBuilder {
             .stereotype = Some(stereotype);
     }
 
-    pub(crate) fn begin_state_cluster(&mut self, name: &str, span: Span) {
-        // Create the state node if it doesn't exist
-        let _ = self.intern_node(name, None, NodeShape::Rounded, span);
-        // Start a cluster for nested states
-        let cluster_id = IrClusterId(self.ir.clusters.len());
-        let label_id = self.intern_label(name.to_string(), span);
-        self.ir.clusters.push(IrCluster {
-            id: cluster_id,
-            title: Some(label_id),
-            members: Vec::new(),
-            grid_span: 1,
+    pub(crate) fn set_class_generics(&mut self, class_name: &str, generics: Vec<String>) {
+        let Some(&node_id) = self.node_index_by_id.get(class_name) else {
+            return;
+        };
+        let Some(node) = self.ir.nodes.get_mut(node_id.0) else {
+            return;
+        };
+        node.class_meta
+            .get_or_insert_with(IrClassNodeMeta::default)
+            .generics = generics;
+    }
+
+    pub(crate) fn begin_state_cluster(&mut self, name: &str, title: Option<&str>, span: Span) {
+        let parent_subgraph = self
+            .state_stack
+            .last()
+            .map(|context| context.subgraph_index);
+        let lookup_key = self
+            .state_stack
+            .last()
+            .map(|context| format!("{}/{}", context.lookup_key, name))
+            .unwrap_or_else(|| format!("state/{name}"));
+
+        let Some(cluster_index) = self.ensure_cluster(&lookup_key, title.or(Some(name)), span)
+        else {
+            return;
+        };
+        let Some(subgraph_index) = self.ensure_subgraph(
+            &lookup_key,
+            name,
+            title.or(Some(name)),
             span,
+            parent_subgraph,
+            Some(cluster_index),
+        ) else {
+            return;
+        };
+
+        self.state_stack.push(StateCompositeContext {
+            lookup_key,
+            cluster_index,
+            subgraph_index,
+            region_count: 0,
+            current_region_subgraph: None,
+            pending_region_members: Vec::new(),
         });
     }
 
-    pub(crate) fn end_state_cluster(&mut self) {
-        // Cluster was already pushed; nothing to close for now.
-        // Future: track cluster stack for proper nesting.
+    pub(crate) fn end_state_cluster(&mut self) -> bool {
+        self.state_stack.pop().is_some()
+    }
+
+    pub(crate) fn advance_state_region(&mut self, span: Span) -> bool {
+        let Some(mut context) = self.state_stack.pop() else {
+            return false;
+        };
+
+        if context.region_count == 0 {
+            let Some(first_region_subgraph) = self.ensure_subgraph(
+                &format!("{}/__region_1", context.lookup_key),
+                "__state_region_1",
+                None,
+                span,
+                Some(context.subgraph_index),
+                None,
+            ) else {
+                self.state_stack.push(context);
+                return false;
+            };
+            for node_id in context.pending_region_members.iter().copied() {
+                self.add_node_to_subgraph(first_region_subgraph, node_id);
+            }
+        }
+
+        let next_region_number = context.region_count + 2;
+        let Some(next_region_subgraph) = self.ensure_subgraph(
+            &format!("{}/__region_{next_region_number}", context.lookup_key),
+            &format!("__state_region_{next_region_number}"),
+            None,
+            span,
+            Some(context.subgraph_index),
+            None,
+        ) else {
+            self.state_stack.push(context);
+            return false;
+        };
+
+        context.region_count += 1;
+        let total_regions = context.region_count + 1;
+        self.set_cluster_grid_span(context.cluster_index, total_regions);
+        self.set_subgraph_grid_span(context.subgraph_index, total_regions);
+        context.current_region_subgraph = Some(next_region_subgraph);
+        context.pending_region_members.clear();
+        self.state_stack.push(context);
+        true
+    }
+
+    pub(crate) fn attach_state_node(&mut self, node_id: IrNodeId) {
+        for context_index in 0..self.state_stack.len() {
+            let (cluster_index, subgraph_index, current_region_subgraph, should_track_member) = {
+                let context = &self.state_stack[context_index];
+                (
+                    context.cluster_index,
+                    context.subgraph_index,
+                    context.current_region_subgraph,
+                    !context.pending_region_members.contains(&node_id),
+                )
+            };
+
+            self.add_node_to_cluster(cluster_index, node_id);
+            self.add_node_to_subgraph(subgraph_index, node_id);
+            if let Some(region_subgraph_index) = current_region_subgraph {
+                self.add_node_to_subgraph(region_subgraph_index, node_id);
+            }
+
+            if should_track_member && let Some(context) = self.state_stack.get_mut(context_index) {
+                context.pending_region_members.push(node_id);
+            }
+        }
     }
 
     pub(crate) fn begin_fragment(&mut self, kind: FragmentKind, label: String) {
