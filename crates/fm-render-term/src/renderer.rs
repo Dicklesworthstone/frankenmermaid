@@ -190,6 +190,28 @@ impl TermRenderer {
             canvas.draw_rect(bx, by, bw.max(1), bh.max(1));
         }
 
+        // Render sequence fragment boxes (loop/alt/par, etc.).
+        for fragment in &layout.extensions.sequence_fragments {
+            let fx = (fragment.bounds.x * pixel_scale_x) as usize + padding_x;
+            let fy = (fragment.bounds.y * pixel_scale_y) as usize + padding_y;
+            let fw = (fragment.bounds.width * pixel_scale_x) as usize;
+            let fh = (fragment.bounds.height * pixel_scale_y) as usize;
+            if fw > 2 && fh > 2 {
+                canvas.draw_rect(fx, fy, fw, fh);
+            }
+        }
+
+        // Render sequence notes as small rectangles.
+        for note in &layout.extensions.sequence_notes {
+            let nx = (note.bounds.x * pixel_scale_x) as usize + padding_x;
+            let ny = (note.bounds.y * pixel_scale_y) as usize + padding_y;
+            let nw = (note.bounds.width * pixel_scale_x) as usize;
+            let nh = (note.bounds.height * pixel_scale_y) as usize;
+            if nw > 1 && nh > 1 {
+                canvas.draw_rect(nx, ny, nw.max(1), nh.max(1));
+            }
+        }
+
         // Render edges.
         for edge_path in &layout.edges {
             self.render_edge_canvas(

@@ -188,6 +188,10 @@ impl Canvas2dRenderer {
         // Draw sequence activation bars.
         self.draw_activation_bars(layout, ctx, offset_x, offset_y);
 
+        // Draw sequence notes and fragments.
+        self.draw_sequence_fragments(layout, ctx, offset_x, offset_y);
+        self.draw_sequence_notes(layout, ctx, offset_x, offset_y, &mut labels_drawn);
+
         // Draw edges
         let edges_drawn = self.draw_edges(layout, ir, ctx, offset_x, offset_y, &mut labels_drawn);
 
@@ -683,6 +687,102 @@ impl Canvas2dRenderer {
         }
     }
 
+    /// Draw sequence diagram interaction fragment boxes (loop, alt, par, etc.).
+    fn draw_sequence_fragments<C: Canvas2dContext>(
+        &mut self,
+        layout: &DiagramLayout,
+        ctx: &mut C,
+        offset_x: f64,
+        offset_y: f64,
+    ) {
+        for fragment in &layout.extensions.sequence_fragments {
+            let x = f64::from(fragment.bounds.x) + offset_x;
+            let y = f64::from(fragment.bounds.y) + offset_y;
+            let w = f64::from(fragment.bounds.width);
+            let h = f64::from(fragment.bounds.height);
+
+            // Semi-transparent background.
+            ctx.set_fill_style("rgba(226,232,240,0.2)");
+            ctx.fill_rect(x, y, w, h);
+
+            // Dashed border.
+            ctx.set_stroke_style("#94a3b8");
+            ctx.set_line_width(1.0);
+            ctx.set_line_dash(&[4.0, 4.0]);
+            ctx.stroke_rect(x, y, w, h);
+            ctx.set_line_dash(&[]);
+
+            // Kind label in top-left corner.
+            if !fragment.label.is_empty() {
+                let label = format!(
+                    "[{}] {}",
+                    fragment_kind_label(fragment.kind),
+                    fragment.label
+                );
+                ctx.set_fill_style("#475569");
+                ctx.set_font(&format!(
+                    "bold {}px {}",
+                    self.config.font_size * 0.8,
+                    self.config.font_family
+                ));
+                ctx.set_text_align(TextAlign::Left);
+                ctx.set_text_baseline(TextBaseline::Top);
+                ctx.fill_text(&label, x + 6.0, y + 4.0);
+            } else {
+                let label = fragment_kind_label(fragment.kind);
+                ctx.set_fill_style("#475569");
+                ctx.set_font(&format!(
+                    "bold {}px {}",
+                    self.config.font_size * 0.8,
+                    self.config.font_family
+                ));
+                ctx.set_text_align(TextAlign::Left);
+                ctx.set_text_baseline(TextBaseline::Top);
+                ctx.fill_text(label, x + 6.0, y + 4.0);
+            }
+            self.draw_calls += 3;
+        }
+    }
+
+    /// Draw sequence diagram notes.
+    fn draw_sequence_notes<C: Canvas2dContext>(
+        &mut self,
+        layout: &DiagramLayout,
+        ctx: &mut C,
+        offset_x: f64,
+        offset_y: f64,
+        labels_drawn: &mut usize,
+    ) {
+        for note in &layout.extensions.sequence_notes {
+            let x = f64::from(note.bounds.x) + offset_x;
+            let y = f64::from(note.bounds.y) + offset_y;
+            let w = f64::from(note.bounds.width);
+            let h = f64::from(note.bounds.height);
+
+            // Note background (light yellow).
+            ctx.set_fill_style("rgba(254,249,195,0.9)");
+            ctx.fill_rect(x, y, w, h);
+            ctx.set_stroke_style("#ca8a04");
+            ctx.set_line_width(1.0);
+            ctx.stroke_rect(x, y, w, h);
+
+            // Note text.
+            if !note.text.is_empty() {
+                ctx.set_fill_style("#713f12");
+                ctx.set_font(&format!(
+                    "{}px {}",
+                    self.config.font_size * 0.85,
+                    self.config.font_family
+                ));
+                ctx.set_text_align(TextAlign::Center);
+                ctx.set_text_baseline(TextBaseline::Middle);
+                ctx.fill_text(&note.text, x + w / 2.0, y + h / 2.0);
+                *labels_drawn += 1;
+            }
+            self.draw_calls += 3;
+        }
+    }
+
     /// Draw all edges.
     fn draw_edges<C: Canvas2dContext>(
         &mut self,
@@ -1016,6 +1116,18 @@ impl Canvas2dRenderer {
         }
 
         count
+    }
+}
+
+fn fragment_kind_label(kind: fm_core::FragmentKind) -> &'static str {
+    match kind {
+        fm_core::FragmentKind::Loop => "loop",
+        fm_core::FragmentKind::Alt => "alt",
+        fm_core::FragmentKind::Opt => "opt",
+        fm_core::FragmentKind::Par => "par",
+        fm_core::FragmentKind::Critical => "critical",
+        fm_core::FragmentKind::Break => "break",
+        fm_core::FragmentKind::Rect => "rect",
     }
 }
 
