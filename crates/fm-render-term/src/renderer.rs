@@ -149,20 +149,35 @@ impl TermRenderer {
             }
         }
 
-        // Render layout bands (sequence lifelines, gantt sections, etc.).
+        // Render layout bands based on their kind.
         for band in &layout.extensions.bands {
+            use fm_layout::LayoutBandKind;
             let bx = (band.bounds.x * pixel_scale_x) as isize + padding_x as isize;
             let by = (band.bounds.y * pixel_scale_y) as isize + padding_y as isize;
+            let bw = (band.bounds.width * pixel_scale_x) as isize;
             let bh = (band.bounds.height * pixel_scale_y) as isize;
-            // Lifeline: dashed vertical line at band center.
-            let cx = bx + (band.bounds.width * pixel_scale_x) as isize / 2;
-            // Draw dashed line by alternating drawn/skipped segments.
-            let dash = 3_isize;
-            let mut y_pos = by;
-            while y_pos < by + bh {
-                let end = (y_pos + dash).min(by + bh);
-                canvas.draw_line(cx, y_pos, cx, end);
-                y_pos += dash * 2;
+
+            match band.kind {
+                LayoutBandKind::Lane => {
+                    // Sequence lifeline: dashed vertical line at band center.
+                    let cx = bx + bw / 2;
+                    let dash = 3_isize;
+                    let mut y_pos = by;
+                    while y_pos < by + bh {
+                        let end = (y_pos + dash).min(by + bh);
+                        canvas.draw_line(cx, y_pos, cx, end);
+                        y_pos += dash * 2;
+                    }
+                }
+                LayoutBandKind::Section => {
+                    // Gantt section: horizontal top/bottom border lines.
+                    canvas.draw_line(bx, by, bx + bw, by);
+                    canvas.draw_line(bx, by + bh, bx + bw, by + bh);
+                }
+                LayoutBandKind::Column => {
+                    // Kanban column: vertical separator on right edge.
+                    canvas.draw_line(bx + bw, by, bx + bw, by + bh);
+                }
             }
         }
 
