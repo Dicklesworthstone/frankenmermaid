@@ -187,9 +187,7 @@ impl TermRenderer {
             let by = (bar.bounds.y * pixel_scale_y) as usize + padding_y;
             let bw = (bar.bounds.width * pixel_scale_x) as usize;
             let bh = (bar.bounds.height * pixel_scale_y) as usize;
-            if bw > 0 && bh > 0 {
-                canvas.draw_rect(bx, by, bw.max(1), bh.max(1));
-            }
+            canvas.draw_rect(bx, by, bw.max(1), bh.max(1));
         }
 
         // Render edges.
@@ -1455,6 +1453,7 @@ pub fn render_diagram_with_layout_and_config(
 mod tests {
     use super::*;
     use fm_core::{DiagramType, IrEdge, IrEndpoint, IrLabel, IrLabelId, IrNode, IrNodeId};
+    use fm_layout::{LayoutActivationBar, LayoutExtensions, LayoutRect, LayoutStats};
 
     fn sample_ir() -> MermaidDiagramIr {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
@@ -1544,5 +1543,45 @@ mod tests {
         }
         let result = render_diagram(&ir);
         assert!(!result.output.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn tiny_scaled_activation_bars_still_render() {
+        let ir = MermaidDiagramIr::empty(DiagramType::Sequence);
+        let layout = DiagramLayout {
+            nodes: Vec::new(),
+            clusters: Vec::new(),
+            cycle_clusters: Vec::new(),
+            edges: Vec::new(),
+            bounds: LayoutRect {
+                x: 0.0,
+                y: 0.0,
+                width: 1_000.0,
+                height: 1_000.0,
+            },
+            stats: LayoutStats::default(),
+            extensions: LayoutExtensions {
+                activation_bars: vec![LayoutActivationBar {
+                    participant_index: 0,
+                    depth: 0,
+                    bounds: LayoutRect {
+                        x: 100.0,
+                        y: 100.0,
+                        width: 10.0,
+                        height: 10.0,
+                    },
+                }],
+                ..Default::default()
+            },
+        };
+        let config = TermRenderConfig {
+            tier: MermaidTier::Normal,
+            render_mode: MermaidRenderMode::Block,
+            ..Default::default()
+        };
+
+        let result = render_diagram_with_layout_and_config(&ir, &layout, &config, 10, 10);
+
+        assert!(result.output.chars().any(|ch| !ch.is_whitespace()));
     }
 }
