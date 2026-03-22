@@ -1196,6 +1196,23 @@ fn render_layout_to_svg(
         ));
     }
 
+    // Render sequence diagram activation bars.
+    for bar in &layout.extensions.activation_bars {
+        let mut rect = Element::rect()
+            .x(bar.bounds.x + offset_x)
+            .y(bar.bounds.y + offset_y)
+            .width(bar.bounds.width)
+            .height(bar.bounds.height)
+            .fill(&theme.colors.node_fill)
+            .stroke(&theme.colors.node_stroke)
+            .stroke_width(1.2)
+            .class("fm-activation-bar");
+        if bar.depth > 0 {
+            rect = rect.class("fm-activation-nested");
+        }
+        doc = doc.child(rect);
+    }
+
     // Render clusters (subgraphs) as background rectangles
     // Sort clusters by size (largest first) for proper z-ordering of nested clusters
     let mut sorted_clusters: Vec<_> = layout.clusters.iter().enumerate().collect();

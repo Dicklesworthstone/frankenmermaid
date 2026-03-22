@@ -426,6 +426,20 @@ pub struct LayoutExtensions {
     pub bands: Vec<LayoutBand>,
     pub axis_ticks: Vec<LayoutAxisTick>,
     pub cluster_dividers: Vec<LayoutClusterDivider>,
+    /// Activation bars for sequence diagrams — narrow rectangles on lifelines
+    /// indicating when a participant is active (processing a message).
+    pub activation_bars: Vec<LayoutActivationBar>,
+}
+
+/// A sequence diagram activation bar positioned on a participant's lifeline.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayoutActivationBar {
+    /// The participant node index this bar belongs to.
+    pub participant_index: usize,
+    /// Nesting depth (0 = outermost activation).
+    pub depth: usize,
+    /// The bounding rectangle of the bar on the lifeline.
+    pub bounds: LayoutRect,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2676,17 +2690,16 @@ pub fn layout_diagram_timeline_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     );
     traced.layout.extensions.axis_ticks = period_indexes
         .into_iter()
-        .map(|node_index| {
+        .filter_map(|node_index| {
             let node = traced
                 .layout
                 .nodes
                 .iter()
-                .find(|node| node.node_index == node_index)
-                .expect("timeline period node should exist in layout");
-            LayoutAxisTick {
+                .find(|node| node.node_index == node_index)?;
+            Some(LayoutAxisTick {
                 label: layout_label_text(ir, node_index).to_string(),
                 position: node.bounds.center().x,
-            }
+            })
         })
         .collect();
     traced.layout.extensions.bands = traced
@@ -2958,6 +2971,41 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         })
         .collect();
 
+    // Build activation bars from sequence metadata.
+    let activation_bars: Vec<LayoutActivationBar> = ir
+        .sequence_meta
+        .as_ref()
+        .map(|meta| {
+            meta.activations
+                .iter()
+                .filter_map(|activation| {
+                    let participant_index = activation.participant.0;
+                    let cx = participant_x_centers.get(participant_index).copied()?;
+                    let start_y = message_y_positions
+                        .get(activation.start_edge)
+                        .copied()
+                        .unwrap_or(first_message_y);
+                    let end_y = message_y_positions
+                        .get(activation.end_edge)
+                        .copied()
+                        .unwrap_or(diagram_bottom - message_gap * 0.5);
+                    let bar_width = 10.0;
+                    let depth_offset = activation.depth as f32 * 4.0;
+                    Some(LayoutActivationBar {
+                        participant_index,
+                        depth: activation.depth,
+                        bounds: LayoutRect {
+                            x: cx - bar_width / 2.0 + depth_offset,
+                            y: start_y,
+                            width: bar_width,
+                            height: (end_y - start_y).max(message_gap * 0.3),
+                        },
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     TracedLayout {
         layout: DiagramLayout {
             nodes,
@@ -2970,6 +3018,7 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                 bands: lifeline_bands,
                 axis_ticks: Vec::new(),
                 cluster_dividers: Vec::new(),
+                activation_bars,
             },
         },
         trace,
