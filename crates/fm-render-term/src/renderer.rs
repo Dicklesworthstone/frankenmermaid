@@ -1202,6 +1202,8 @@ impl TermRenderer {
         };
 
         let mut row = y + 1; // Start inside the top border.
+        // Content must stay above the bottom border row.
+        let max_content_row = if h >= 2 { y + h - 1 } else { y + h };
 
         // Header: class name (centered).
         let class_name = node
@@ -1216,14 +1218,14 @@ impl TermRenderer {
         row += 1;
 
         // Separator after header.
-        if row < y + h.saturating_sub(1) {
+        if row < max_content_row {
             draw_separator(grid, row);
             row += 1;
         }
 
         // Attributes compartment.
         for attr in &meta.attributes {
-            if row >= y + h.saturating_sub(1) {
+            if row >= max_content_row {
                 break;
             }
             let vis = visibility_char(attr.visibility);
@@ -1233,15 +1235,14 @@ impl TermRenderer {
         }
 
         // Separator before methods (only if we have both attributes and methods).
-        if !meta.attributes.is_empty() && !meta.methods.is_empty() && row < y + h.saturating_sub(1)
-        {
+        if !meta.attributes.is_empty() && !meta.methods.is_empty() && row < max_content_row {
             draw_separator(grid, row);
             row += 1;
         }
 
         // Methods compartment.
         for method in &meta.methods {
-            if row >= y + h.saturating_sub(1) {
+            if row >= max_content_row {
                 break;
             }
             let vis = visibility_char(method.visibility);

@@ -817,7 +817,11 @@ fn resolve_node_inline_style(ir: &MermaidDiagramIr, node_index: usize) -> Option
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("; ");
-    Some(inline)
+    if inline.is_empty() {
+        None
+    } else {
+        Some(inline)
+    }
 }
 
 /// Resolve inline style for an edge based on `linkStyle` directives.
@@ -844,7 +848,11 @@ fn resolve_edge_inline_style(ir: &MermaidDiagramIr, edge_index: usize) -> Option
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("; ");
-    Some(inline)
+    if inline.is_empty() {
+        None
+    } else {
+        Some(inline)
+    }
 }
 
 fn truncate_label(label: &str, max_chars: Option<usize>) -> String {
