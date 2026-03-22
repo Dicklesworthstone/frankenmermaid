@@ -8,8 +8,12 @@ on:
 
 jobs:
   check:
-    name: Check
+    name: Check (${{ matrix.fnx_mode }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        fnx_mode: [off, on]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,11 +30,21 @@ jobs:
       - name: Format
         run: cargo fmt --check
 
-      - name: Clippy
+      - name: Clippy (fnx off)
+        if: matrix.fnx_mode == 'off'
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Test
+      - name: Clippy (fnx on)
+        if: matrix.fnx_mode == 'on'
+        run: cargo clippy --workspace --all-targets --features fnx-integration -- -D warnings
+
+      - name: Test (fnx off)
+        if: matrix.fnx_mode == 'off'
         run: cargo test --workspace --all-targets
+
+      - name: Test (fnx on)
+        if: matrix.fnx_mode == 'on'
+        run: cargo test --workspace --all-targets --features fnx-integration
 
   wasm-build:
     name: WASM Build

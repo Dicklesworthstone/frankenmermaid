@@ -726,6 +726,24 @@ impl Canvas2dRenderer {
                         self.draw_calls += 1;
                     }
                 }
+
+                // Draw arrowhead at start for double arrows
+                if matches!(
+                    arrow,
+                    ArrowType::DoubleArrow
+                        | ArrowType::DoubleThickArrow
+                        | ArrowType::DoubleDottedArrow
+                ) {
+                    let start = &edge_path.points[0];
+                    let next = &edge_path.points[1];
+                    let start_angle =
+                        f64::from(start.y - next.y).atan2(f64::from(start.x - next.x));
+                    let sx = f64::from(start.x) + offset_x;
+                    let sy = f64::from(start.y) + offset_y;
+
+                    draw_arrowhead(ctx, sx, sy, start_angle, 10.0, &self.config.edge_stroke);
+                    self.draw_calls += 1;
+                }
             }
 
             // Draw edge label if present

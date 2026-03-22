@@ -16,6 +16,8 @@ default = []
 watch = ["dep:notify"]
 serve = ["dep:tiny_http"]
 png = ["dep:resvg", "dep:usvg"]
+fnx-integration = ["fm-layout/fnx-integration"]
+fnx-experimental-directed = ["fm-layout/fnx-experimental-directed"]
 
 [dependencies]
 anyhow.workspace = true

@@ -327,6 +327,10 @@ name = "fm-layout"
 version = "0.1.0"
 dependencies = [
  "fm-core",
+ "fnx-algorithms",
+ "fnx-classes",
+ "fnx-runtime",
+ "fnx-views",
  "proptest",
  "serde_json",
  "tracing",
@@ -398,6 +402,43 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
+name = "fnx-algorithms"
+version = "0.1.0"
+source = "git+https://github.com/Dicklesworthstone/franken_networkx.git?rev=cb8bdb590573b9de5ddbc26b948279057ac4049e#cb8bdb590573b9de5ddbc26b948279057ac4049e"
+dependencies = [
+ "fnx-classes",
+ "mwmatching",
+ "serde",
+]
+
+[[package]]
+name = "fnx-classes"
+version = "0.1.0"
+source = "git+https://github.com/Dicklesworthstone/franken_networkx.git?rev=cb8bdb590573b9de5ddbc26b948279057ac4049e#cb8bdb590573b9de5ddbc26b948279057ac4049e"
+dependencies = [
+ "fnx-runtime",
+ "indexmap",
+ "serde",
+]
+
+[[package]]
+name = "fnx-runtime"
+version = "0.1.0"
+source = "git+https://github.com/Dicklesworthstone/franken_networkx.git?rev=cb8bdb590573b9de5ddbc26b948279057ac4049e#cb8bdb590573b9de5ddbc26b948279057ac4049e"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "fnx-views"
+version = "0.1.0"
+source = "git+https://github.com/Dicklesworthstone/franken_networkx.git?rev=cb8bdb590573b9de5ddbc26b948279057ac4049e#cb8bdb590573b9de5ddbc26b948279057ac4049e"
+dependencies = [
+ "fnx-classes",
+]
+
+[[package]]
 name = "foldhash"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -405,7 +446,7 @@ checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
 name = "franken-kernel"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "serde",
 ]
@@ -646,6 +687,12 @@ dependencies = [
  "wasi",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "mwmatching"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f13b50448d988736cc2c938a76ae336241fcb31a225017c0e3121bd349e7dc06"
 
 [[package]]
 name = "notify"

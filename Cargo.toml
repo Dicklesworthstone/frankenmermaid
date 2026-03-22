@@ -27,6 +27,10 @@ fm-render-canvas = { path = "crates/fm-render-canvas" }
 fm-render-term = { path = "crates/fm-render-term" }
 fm-wasm = { path = "crates/fm-wasm" }
 franken-kernel = { path = "/data/projects/asupersync/franken_kernel", package = "franken-kernel" }
+fnx-runtime = { git = "https://github.com/Dicklesworthstone/franken_networkx.git", rev = "cb8bdb590573b9de5ddbc26b948279057ac4049e", default-features = false }
+fnx-classes = { git = "https://github.com/Dicklesworthstone/franken_networkx.git", rev = "cb8bdb590573b9de5ddbc26b948279057ac4049e", default-features = false }
+fnx-algorithms = { git = "https://github.com/Dicklesworthstone/franken_networkx.git", rev = "cb8bdb590573b9de5ddbc26b948279057ac4049e", default-features = false }
+fnx-views = { git = "https://github.com/Dicklesworthstone/franken_networkx.git", rev = "cb8bdb590573b9de5ddbc26b948279057ac4049e", default-features = false }
 
 anyhow = "1.0.102"
 chumsky = { version = "0.10", default-features = false, features = ["std"] }

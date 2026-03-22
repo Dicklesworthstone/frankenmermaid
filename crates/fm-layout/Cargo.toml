@@ -5,9 +5,23 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+fnx-integration = [
+    "dep:fnx-runtime",
+    "dep:fnx-classes",
+    "dep:fnx-algorithms",
+    "dep:fnx-views",
+]
+fnx-experimental-directed = ["fnx-integration"]
+
 [dependencies]
 fm-core.workspace = true
 tracing.workspace = true
+fnx-runtime = { workspace = true, optional = true }
+fnx-classes = { workspace = true, optional = true }
+fnx-algorithms = { workspace = true, optional = true }
+fnx-views = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = "1.6.0"

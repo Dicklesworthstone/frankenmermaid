@@ -12,6 +12,173 @@ use fm_core::{
 };
 use tracing::{debug, info, trace, warn};
 
+/// Design contract for subgraph-level incremental invalidation (`bd-20fq.1`).
+///
+/// The current layout engine is a whole-graph pipeline, but the existing IR already exposes
+/// enough hierarchy to plan a future incremental mode around *regions* that can be invalidated
+/// independently and then recomposed. The intended flow is:
+///
+/// 1. Build regions from explicit Mermaid subgraphs first.
+/// 2. Split the remaining graph into connected-component fragments using articulation points.
+/// 3. Fall back to coarse spatial buckets only when the graph has no meaningful hierarchy.
+///
+/// This ordering keeps user-authored boundaries authoritative, preserves semantic grouping for
+/// layout quality, and only introduces geometric partitioning as a last resort. The region graph
+/// is explicitly query-shaped: each region owns a bounded slice of nodes/edges plus dependency
+/// edges to upstream regions whose rank assignment, crossing minimization, or routing channels
+/// influence its output.
+///
+/// To satisfy the `O(log N)` dirty-set lookup requirement from the bead, a concrete implementation
+/// is expected to maintain B-tree indexes from node IDs, edge indexes, and subgraph IDs to region
+/// IDs. Dirty-set expansion is then just a deterministic graph walk over region dependencies.
+///
+/// Memory budget target: the dependency graph should stay under 10% of layout-state size by
+/// storing compact region summaries and indexes, not per-phase duplicated geometry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct SubgraphRegionId(pub usize);
+
+/// Region construction strategy for incremental layout invalidation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubgraphRegionKind {
+    /// User-authored Mermaid `subgraph` / cluster boundary.
+    ExplicitSubgraph,
+    /// Connected-component fragment after articulation-point splitting.
+    ConnectivityFragment,
+    /// Coarse spatial fallback when no semantic partition is available.
+    SpatialPartition,
+}
+
+impl Default for SubgraphRegionKind {
+    fn default() -> Self {
+        Self::ExplicitSubgraph
+    }
+}
+
+/// Input keys that can invalidate a region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RegionInput {
+    Node(usize),
+    Edge(usize),
+    Subgraph(usize),
+}
+
+/// A single invalidation unit for future incremental layout work.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SubgraphRegion {
+    pub id: SubgraphRegionId,
+    pub kind: SubgraphRegionKind,
+    /// Human-readable rationale such as `subgraph:api`, `component:3`, or `grid-cell:1,2`.
+    pub label: String,
+    /// Stable membership used to scope recomputation.
+    pub node_indexes: BTreeSet<usize>,
+    pub edge_indexes: BTreeSet<usize>,
+    pub subgraph_indexes: BTreeSet<usize>,
+    /// Other regions whose outputs this region depends on.
+    pub depends_on: BTreeSet<SubgraphRegionId>,
+    /// Reverse edges for fast downstream invalidation.
+    pub dependents: BTreeSet<SubgraphRegionId>,
+    /// Direct lookup keys for `O(log N)` dirty-region discovery.
+    pub inputs: BTreeSet<RegionInput>,
+    /// Upper bound used to enforce the "< 10% of layout data" design target.
+    pub estimated_bytes: usize,
+}
+
+/// Edit operations that can invalidate a subset of layout regions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutEdit {
+    NodeAdded { node_index: usize },
+    NodeRemoved { node_index: usize },
+    NodeMoved { node_index: usize },
+    EdgeAdded { edge_index: usize },
+    EdgeRemoved { edge_index: usize },
+    SubgraphChanged { subgraph_index: usize },
+}
+
+impl LayoutEdit {
+    #[must_use]
+    pub const fn input(self) -> RegionInput {
+        match self {
+            Self::NodeAdded { node_index }
+            | Self::NodeRemoved { node_index }
+            | Self::NodeMoved { node_index } => RegionInput::Node(node_index),
+            Self::EdgeAdded { edge_index } | Self::EdgeRemoved { edge_index } => {
+                RegionInput::Edge(edge_index)
+            }
+            Self::SubgraphChanged { subgraph_index } => RegionInput::Subgraph(subgraph_index),
+        }
+    }
+}
+
+/// Deterministic set of dirty regions returned by incremental invalidation queries.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DirtySet {
+    pub regions: BTreeSet<SubgraphRegionId>,
+}
+
+impl DirtySet {
+    #[must_use]
+    pub fn from_region(id: SubgraphRegionId) -> Self {
+        let mut regions = BTreeSet::new();
+        regions.insert(id);
+        Self { regions }
+    }
+
+    pub fn insert(&mut self, id: SubgraphRegionId) -> bool {
+        self.regions.insert(id)
+    }
+
+    pub fn extend<I>(&mut self, ids: I)
+    where
+        I: IntoIterator<Item = SubgraphRegionId>,
+    {
+        self.regions.extend(ids);
+    }
+
+    #[must_use]
+    pub fn contains(&self, id: SubgraphRegionId) -> bool {
+        self.regions.contains(&id)
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.regions.is_empty()
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.regions.len()
+    }
+}
+
+/// Trait contract for future subgraph-level invalidation engines.
+///
+/// Implementations are expected to:
+/// - resolve direct edits to seed regions in `O(log N)` via deterministic indexes,
+/// - propagate downstream invalidation through the region dependency DAG,
+/// - report memory overhead so callers can refuse plans that exceed the 10% budget target.
+pub trait DependencyGraph {
+    fn regions(&self) -> &BTreeMap<SubgraphRegionId, SubgraphRegion>;
+
+    fn locate_dirty_regions(&self, edit: LayoutEdit) -> DirtySet;
+
+    fn propagate_dirty(&self, dirty: &DirtySet) -> DirtySet;
+
+    fn estimated_overhead_bytes(&self) -> usize;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RegionMemoryBudget {
+    pub layout_bytes: usize,
+    pub dependency_graph_bytes: usize,
+}
+
+impl RegionMemoryBudget {
+    #[must_use]
+    pub const fn within_target(self) -> bool {
+        self.dependency_graph_bytes.saturating_mul(10) <= self.layout_bytes
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutAlgorithm {
     Auto,
@@ -8042,11 +8209,13 @@ fn layout_decision_confidence_permille(
 #[cfg(test)]
 mod tests {
     use super::{
-        CycleStrategy, GraphMetrics, LayoutAlgorithm, LayoutGuardrails, LayoutPoint, LayoutRect,
-        RenderClip, RenderItem, RenderSource, build_layout_decision_ledger,
-        build_layout_guard_report, build_render_scene, dispatch_layout_algorithm, layout,
-        layout_diagram, layout_diagram_force, layout_diagram_force_traced, layout_diagram_gantt,
-        layout_diagram_grid, layout_diagram_radial, layout_diagram_sankey, layout_diagram_sequence,
+        CycleStrategy, DependencyGraph, DirtySet, GraphMetrics, LayoutAlgorithm, LayoutEdit,
+        LayoutGuardrails, LayoutPoint, LayoutRect, RegionInput, RegionMemoryBudget, RenderClip,
+        RenderItem, RenderSource, SubgraphRegion, SubgraphRegionId, SubgraphRegionKind,
+        build_layout_decision_ledger, build_layout_guard_report, build_render_scene,
+        dispatch_layout_algorithm, layout, layout_diagram, layout_diagram_force,
+        layout_diagram_force_traced, layout_diagram_gantt, layout_diagram_grid,
+        layout_diagram_radial, layout_diagram_sankey, layout_diagram_sequence,
         layout_diagram_sequence_traced, layout_diagram_timeline, layout_diagram_traced,
         layout_diagram_traced_with_algorithm, layout_diagram_traced_with_algorithm_and_guardrails,
         layout_diagram_tree, layout_diagram_with_cycle_strategy, layout_diagram_xychart,
@@ -8059,8 +8228,52 @@ mod tests {
         IrXySeriesKind, MermaidDiagramIr, MermaidPressureTier, NodeShape, Span,
     };
     use proptest::prelude::*;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::sync::{Arc, Mutex};
+
+    #[derive(Debug, Clone, Default)]
+    struct TestDependencyGraph {
+        regions: BTreeMap<SubgraphRegionId, SubgraphRegion>,
+        index: BTreeMap<RegionInput, BTreeSet<SubgraphRegionId>>,
+        estimated_overhead_bytes: usize,
+    }
+
+    impl DependencyGraph for TestDependencyGraph {
+        fn regions(&self) -> &BTreeMap<SubgraphRegionId, SubgraphRegion> {
+            &self.regions
+        }
+
+        fn locate_dirty_regions(&self, edit: LayoutEdit) -> DirtySet {
+            let ids = self
+                .index
+                .get(&edit.input())
+                .cloned()
+                .unwrap_or_default()
+                .into_iter();
+            let mut dirty = DirtySet::default();
+            dirty.extend(ids);
+            dirty
+        }
+
+        fn propagate_dirty(&self, dirty: &DirtySet) -> DirtySet {
+            let mut expanded = dirty.clone();
+            let mut stack: Vec<_> = dirty.regions.iter().copied().collect();
+            while let Some(region_id) = stack.pop() {
+                if let Some(region) = self.regions.get(&region_id) {
+                    for dependent in &region.dependents {
+                        if expanded.insert(*dependent) {
+                            stack.push(*dependent);
+                        }
+                    }
+                }
+            }
+            expanded
+        }
+
+        fn estimated_overhead_bytes(&self) -> usize {
+            self.estimated_overhead_bytes
+        }
+    }
 
     fn sample_ir() -> MermaidDiagramIr {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
@@ -8090,6 +8303,96 @@ mod tests {
             ..IrEdge::default()
         });
         ir
+    }
+
+    fn sample_dependency_graph() -> TestDependencyGraph {
+        let root = SubgraphRegion {
+            id: SubgraphRegionId(0),
+            kind: SubgraphRegionKind::ExplicitSubgraph,
+            label: "subgraph:api".to_string(),
+            node_indexes: [0, 1].into_iter().collect(),
+            edge_indexes: [0].into_iter().collect(),
+            subgraph_indexes: [0].into_iter().collect(),
+            depends_on: BTreeSet::new(),
+            dependents: [SubgraphRegionId(1)].into_iter().collect(),
+            inputs: [RegionInput::Node(0), RegionInput::Edge(0)]
+                .into_iter()
+                .collect(),
+            estimated_bytes: 96,
+        };
+        let child = SubgraphRegion {
+            id: SubgraphRegionId(1),
+            kind: SubgraphRegionKind::ConnectivityFragment,
+            label: "component:1".to_string(),
+            node_indexes: [2, 3].into_iter().collect(),
+            edge_indexes: [1].into_iter().collect(),
+            subgraph_indexes: BTreeSet::new(),
+            depends_on: [SubgraphRegionId(0)].into_iter().collect(),
+            dependents: BTreeSet::new(),
+            inputs: [RegionInput::Node(2), RegionInput::Edge(1)]
+                .into_iter()
+                .collect(),
+            estimated_bytes: 72,
+        };
+
+        let mut regions = BTreeMap::new();
+        regions.insert(root.id, root.clone());
+        regions.insert(child.id, child.clone());
+
+        let mut index = BTreeMap::new();
+        for region in [root, child] {
+            for input in &region.inputs {
+                index
+                    .entry(*input)
+                    .or_insert_with(BTreeSet::new)
+                    .insert(region.id);
+            }
+        }
+
+        TestDependencyGraph {
+            regions,
+            index,
+            estimated_overhead_bytes: 168,
+        }
+    }
+
+    #[test]
+    fn dependency_graph_locates_dirty_regions_via_deterministic_indexes() {
+        let graph = sample_dependency_graph();
+        let dirty = graph.locate_dirty_regions(LayoutEdit::NodeMoved { node_index: 0 });
+        assert_eq!(
+            dirty.regions.into_iter().collect::<Vec<_>>(),
+            vec![SubgraphRegionId(0)]
+        );
+    }
+
+    #[test]
+    fn dependency_graph_propagates_to_dependents() {
+        let graph = sample_dependency_graph();
+        let seed = DirtySet::from_region(SubgraphRegionId(0));
+        let dirty = graph.propagate_dirty(&seed);
+        assert_eq!(
+            dirty.regions.into_iter().collect::<Vec<_>>(),
+            vec![SubgraphRegionId(0), SubgraphRegionId(1)]
+        );
+    }
+
+    #[test]
+    fn region_memory_budget_enforces_ten_percent_target() {
+        assert!(
+            RegionMemoryBudget {
+                layout_bytes: 2_000,
+                dependency_graph_bytes: 200,
+            }
+            .within_target()
+        );
+        assert!(
+            !RegionMemoryBudget {
+                layout_bytes: 1_999,
+                dependency_graph_bytes: 200,
+            }
+            .within_target()
+        );
     }
 
     fn sample_xychart_ir() -> MermaidDiagramIr {

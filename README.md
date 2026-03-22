@@ -174,6 +174,39 @@ cargo build --release --workspace
 
 **Note:** Requires Rust nightly (see `rust-toolchain.toml`). The project uses Rust 2024 edition features.
 
+### Optional FNX Integration
+
+The canonical FNX dependency model is a pinned Git dependency on
+[`franken_networkx`](https://github.com/Dicklesworthstone/franken_networkx),
+with the integration disabled by default.
+
+- `fnx-integration`: enables the Phase 1 undirected/advisory integration surface
+- `fnx-experimental-directed`: extends `fnx-integration` for future directed-only work; keep this off outside explicit experiments
+
+Default builds remain FNX-free:
+
+```bash
+cargo build --workspace
+```
+
+Opt into the pinned FNX graph-intelligence stack when you want to validate the
+integration path:
+
+```bash
+cargo build -p fm-cli --features fnx-integration
+cargo build -p fm-wasm --features fnx-integration
+```
+
+Why this model:
+
+- Local path dependencies would tightly couple frankenmermaid releases to one workstation layout.
+- Published crates do not exist yet, so crates.io is not an option.
+- A Git dependency pinned to a specific commit is reproducible in CI and release packaging while keeping the default build independent.
+
+If you are developing `frankenmermaid` and `franken_networkx` together, prefer a
+local developer-only Cargo patch override instead of committing path
+dependencies into this repo.
+
 ## Quick Start
 
 1. **Create** a Mermaid file:
