@@ -149,6 +149,34 @@ impl TermRenderer {
             }
         }
 
+        // Render layout bands (sequence lifelines, gantt sections, etc.).
+        for band in &layout.extensions.bands {
+            let bx = (band.bounds.x * pixel_scale_x) as isize + padding_x as isize;
+            let by = (band.bounds.y * pixel_scale_y) as isize + padding_y as isize;
+            let bh = (band.bounds.height * pixel_scale_y) as isize;
+            // Lifeline: dashed vertical line at band center.
+            let cx = bx + (band.bounds.width * pixel_scale_x) as isize / 2;
+            // Draw dashed line by alternating drawn/skipped segments.
+            let dash = 3_isize;
+            let mut y_pos = by;
+            while y_pos < by + bh {
+                let end = (y_pos + dash).min(by + bh);
+                canvas.draw_line(cx, y_pos, cx, end);
+                y_pos += dash * 2;
+            }
+        }
+
+        // Render activation bars on sequence lifelines.
+        for bar in &layout.extensions.activation_bars {
+            let bx = (bar.bounds.x * pixel_scale_x) as usize + padding_x;
+            let by = (bar.bounds.y * pixel_scale_y) as usize + padding_y;
+            let bw = (bar.bounds.width * pixel_scale_x) as usize;
+            let bh = (bar.bounds.height * pixel_scale_y) as usize;
+            if bw > 0 && bh > 0 {
+                canvas.draw_rect(bx, by, bw.max(1), bh.max(1));
+            }
+        }
+
         // Render edges.
         for edge_path in &layout.edges {
             self.render_edge_canvas(
