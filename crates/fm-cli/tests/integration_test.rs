@@ -1572,3 +1572,41 @@ fn e2e_pipeline_determinism_all_types() {
         assert_eq!(svg1, svg2, "[{label}] SVG output must be deterministic");
     }
 }
+
+#[test]
+fn determinism_manifest_cli_is_stable_and_finite() {
+    let binary = env!("CARGO_BIN_EXE_fm-cli");
+
+    let run_manifest = || {
+        let output = Command::new(binary)
+            .arg("determinism-manifest")
+            .output()
+            .expect("run determinism-manifest");
+        assert!(
+            output.status.success(),
+            "determinism-manifest failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).expect("parse manifest json")
+    };
+
+    let first = run_manifest();
+    let second = run_manifest();
+    assert_eq!(first, second, "manifest output must be byte-stable");
+
+    let cases = first["cases"].as_array().expect("cases array");
+    assert!(!cases.is_empty(), "manifest should include golden cases");
+    for case in cases {
+        assert_eq!(
+            case["non_finite_value_count"].as_u64().unwrap_or_default(),
+            0,
+            "manifest case has non-finite values: {case:?}"
+        );
+        assert!(
+            case["layout_sha256"]
+                .as_str()
+                .is_some_and(|value| value.len() == 64),
+            "layout SHA-256 digest missing or malformed: {case:?}"
+        );
+    }
+}

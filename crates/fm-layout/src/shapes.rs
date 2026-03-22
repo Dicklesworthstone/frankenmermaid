@@ -1,6 +1,6 @@
-use std::f32::consts::PI;
-use fm_core::NodeShape;
 use crate::{LayoutRect, PathCmd};
+use fm_core::NodeShape;
+use std::f32::consts::PI;
 
 #[must_use]
 pub fn node_path(bounds: LayoutRect, shape: NodeShape) -> Vec<PathCmd> {

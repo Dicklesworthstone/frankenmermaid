@@ -38,20 +38,15 @@ use tracing::{debug, info, trace, warn};
 pub struct SubgraphRegionId(pub usize);
 
 /// Region construction strategy for incremental layout invalidation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SubgraphRegionKind {
     /// User-authored Mermaid `subgraph` / cluster boundary.
+    #[default]
     ExplicitSubgraph,
     /// Connected-component fragment after articulation-point splitting.
     ConnectivityFragment,
     /// Coarse spatial fallback when no semantic partition is available.
     SpatialPartition,
-}
-
-impl Default for SubgraphRegionKind {
-    fn default() -> Self {
-        Self::ExplicitSubgraph
-    }
 }
 
 /// Input keys that can invalidate a region.
@@ -2913,7 +2908,7 @@ fn build_sequence_note_geometry(
     meta.notes
         .iter()
         .enumerate()
-        .filter_map(|(note_index, note)| {
+        .map(|(note_index, note)| {
             // Position the note at the edge after which it appears.
             // Notes are interleaved with messages, so use note_index as edge hint.
             let y = message_y_positions
@@ -2957,7 +2952,7 @@ fn build_sequence_note_geometry(
                 _ => note_width,
             };
 
-            Some(LayoutSequenceNote {
+            LayoutSequenceNote {
                 position: note.position,
                 text: note.text.clone(),
                 bounds: LayoutRect {
@@ -2966,7 +2961,7 @@ fn build_sequence_note_geometry(
                     width: w,
                     height: note_height,
                 },
-            })
+            }
         })
         .collect()
 }
@@ -2998,7 +2993,7 @@ fn build_sequence_fragment_geometry(
 
     meta.fragments
         .iter()
-        .filter_map(|fragment| {
+        .map(|fragment| {
             let start_y = message_y_positions
                 .get(fragment.start_edge)
                 .copied()
@@ -3009,7 +3004,7 @@ fn build_sequence_fragment_geometry(
                 .unwrap_or(diagram_bottom - message_gap * 0.5);
 
             let padding = 20.0;
-            Some(LayoutSequenceFragment {
+            LayoutSequenceFragment {
                 kind: fragment.kind,
                 label: fragment.label.clone(),
                 bounds: LayoutRect {
@@ -3018,7 +3013,7 @@ fn build_sequence_fragment_geometry(
                     width: total_width + padding * 2.0,
                     height: (end_y - start_y + message_gap * 0.6).max(message_gap * 0.5),
                 },
-            })
+            }
         })
         .collect()
 }

@@ -7988,7 +7988,7 @@ Rel(customer, core, "Uses", "HTTPS")"#,
             .and_then(|label_id| parsed.ir.labels.get(label_id.0))
             .map(|label| label.text.as_str());
         assert_eq!(edge_label, Some("Uses [HTTPS]"));
-        }
+    }
 
     #[test]
     fn c4_container_preserves_technology_and_description_in_node_meta() {

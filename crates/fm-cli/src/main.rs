@@ -35,6 +35,7 @@ use fm_render_term::{
     render_diff_terminal_with_config, render_term_with_layout_and_config,
 };
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
 /// FrankenMermaid CLI - render and validate Mermaid diagrams.
@@ -206,6 +207,10 @@ enum Command {
         #[arg(short, long)]
         output: Option<String>,
     },
+
+    /// Emit a canonical layout determinism manifest for the embedded golden corpus.
+    #[command(hide = true)]
+    DeterminismManifest,
 
     /// Watch a file and re-render on changes (requires `watch` feature).
     #[cfg(feature = "watch")]
@@ -481,6 +486,70 @@ struct ValidationDiagnostic {
     payload: StructuredDiagnostic,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct DeterminismManifest {
+    version: u8,
+    target_arch: &'static str,
+    target_os: &'static str,
+    target_env: &'static str,
+    case_count: usize,
+    corpus_sha256: String,
+    cases: Vec<DeterminismManifestCase>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DeterminismManifestCase {
+    case_id: &'static str,
+    diagram_type: String,
+    node_count: usize,
+    edge_count: usize,
+    layout_width: f64,
+    layout_height: f64,
+    non_finite_value_count: usize,
+    subnormal_value_count: usize,
+    layout_sha256: String,
+}
+
+const DETERMINISM_CASES: [(&str, &str); 10] = [
+    (
+        "dense_flowchart_stress",
+        include_str!("../tests/golden/dense_flowchart_stress.mmd"),
+    ),
+    (
+        "flowchart_simple",
+        include_str!("../tests/golden/flowchart_simple.mmd"),
+    ),
+    (
+        "flowchart_cycle",
+        include_str!("../tests/golden/flowchart_cycle.mmd"),
+    ),
+    (
+        "fuzzy_keyword_recovery",
+        include_str!("../tests/golden/fuzzy_keyword_recovery.mmd"),
+    ),
+    (
+        "sequence_basic",
+        include_str!("../tests/golden/sequence_basic.mmd"),
+    ),
+    (
+        "class_basic",
+        include_str!("../tests/golden/class_basic.mmd"),
+    ),
+    (
+        "state_basic",
+        include_str!("../tests/golden/state_basic.mmd"),
+    ),
+    (
+        "gantt_basic",
+        include_str!("../tests/golden/gantt_basic.mmd"),
+    ),
+    ("pie_basic", include_str!("../tests/golden/pie_basic.mmd")),
+    (
+        "malformed_recovery",
+        include_str!("../tests/golden/malformed_recovery.mmd"),
+    ),
+];
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -559,6 +628,8 @@ fn main() -> Result<()> {
         ),
 
         Command::Capabilities { pretty, output } => cmd_capabilities(pretty, output.as_deref()),
+
+        Command::DeterminismManifest => cmd_determinism_manifest(),
 
         #[cfg(feature = "watch")]
         Command::Watch {
@@ -644,6 +715,146 @@ fn cmd_capabilities(pretty: bool, output: Option<&str>) -> Result<()> {
         serde_json::to_string(&capability_matrix())?
     };
     write_output(output, &json)
+}
+
+fn cmd_determinism_manifest() -> Result<()> {
+    let manifest = build_determinism_manifest();
+    for case in &manifest.cases {
+        anyhow::ensure!(
+            case.non_finite_value_count == 0,
+            "non-finite layout values detected for {}",
+            case.case_id
+        );
+    }
+    let json = serde_json::to_string_pretty(&manifest)?;
+    write_output(None, &json)?;
+    io::stdout().write_all(b"\n")?;
+    Ok(())
+}
+
+fn build_determinism_manifest() -> DeterminismManifest {
+    let cases: Vec<DeterminismManifestCase> = DETERMINISM_CASES
+        .iter()
+        .map(|(case_id, input)| determinism_manifest_case(case_id, input))
+        .collect();
+    let joined = cases
+        .iter()
+        .map(|case| format!("{}:{}", case.case_id, case.layout_sha256))
+        .collect::<Vec<_>>()
+        .join("\n");
+    DeterminismManifest {
+        version: 1,
+        target_arch: std::env::consts::ARCH,
+        target_os: std::env::consts::OS,
+        target_env: option_env!("CARGO_CFG_TARGET_ENV").unwrap_or("unknown"),
+        case_count: cases.len(),
+        corpus_sha256: sha256_hex(joined.as_bytes()),
+        cases,
+    }
+}
+
+fn determinism_manifest_case(case_id: &'static str, input: &str) -> DeterminismManifestCase {
+    let parsed = parse_with_mode(input, MermaidParseMode::Compat);
+    let canonical = canonical_layout(&parsed.ir);
+    let layout = fm_layout::layout_diagram(&parsed.ir);
+    let (non_finite_value_count, subnormal_value_count) = layout_float_anomalies(&layout);
+    DeterminismManifestCase {
+        case_id,
+        diagram_type: parsed.ir.diagram_type.as_str().to_string(),
+        node_count: parsed.ir.nodes.len(),
+        edge_count: parsed.ir.edges.len(),
+        layout_width: round6(layout.bounds.width),
+        layout_height: round6(layout.bounds.height),
+        non_finite_value_count,
+        subnormal_value_count,
+        layout_sha256: sha256_hex(canonical.as_bytes()),
+    }
+}
+
+fn round6(v: f32) -> f64 {
+    (f64::from(v) * 1_000_000.0).round() / 1_000_000.0
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+fn canonical_layout(ir: &MermaidDiagramIr) -> String {
+    let layout = fm_layout::layout_diagram(ir);
+    let mut lines: Vec<String> = Vec::new();
+
+    let mut nodes: Vec<_> = layout.nodes.iter().collect();
+    nodes.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+    for node in &nodes {
+        lines.push(format!(
+            "node:{} x={:.6} y={:.6} w={:.6} h={:.6}",
+            node.node_id,
+            round6(node.bounds.x),
+            round6(node.bounds.y),
+            round6(node.bounds.width),
+            round6(node.bounds.height),
+        ));
+    }
+
+    let mut edges: Vec<_> = layout.edges.iter().collect();
+    edges.sort_by_key(|edge| edge.edge_index);
+    for edge in &edges {
+        let points = edge
+            .points
+            .iter()
+            .map(|point| format!("{:.6},{:.6}", round6(point.x), round6(point.y)))
+            .collect::<Vec<_>>()
+            .join(";");
+        lines.push(format!(
+            "edge:{} reversed={} pts={}",
+            edge.edge_index, edge.reversed, points
+        ));
+    }
+
+    lines.push(format!(
+        "bounds: x={:.6} y={:.6} w={:.6} h={:.6}",
+        round6(layout.bounds.x),
+        round6(layout.bounds.y),
+        round6(layout.bounds.width),
+        round6(layout.bounds.height),
+    ));
+
+    lines.join("\n")
+}
+
+fn layout_float_anomalies(layout: &fm_layout::DiagramLayout) -> (usize, usize) {
+    let mut non_finite = 0_usize;
+    let mut subnormal = 0_usize;
+    let mut inspect = |value: f32| {
+        if !value.is_finite() {
+            non_finite += 1;
+        } else if value != 0.0 && value.is_subnormal() {
+            subnormal += 1;
+        }
+    };
+
+    inspect(layout.bounds.x);
+    inspect(layout.bounds.y);
+    inspect(layout.bounds.width);
+    inspect(layout.bounds.height);
+
+    for node in &layout.nodes {
+        inspect(node.bounds.x);
+        inspect(node.bounds.y);
+        inspect(node.bounds.width);
+        inspect(node.bounds.height);
+    }
+
+    for edge in &layout.edges {
+        for point in &edge.points {
+            inspect(point.x);
+            inspect(point.y);
+        }
+    }
+
+    (non_finite, subnormal)
 }
 
 // =============================================================================

@@ -156,6 +156,127 @@ jobs:
       - name: Run pipeline determinism smoke
         run: cargo test -p fm-cli --test integration_test e2e_pipeline_determinism_all_types -- --nocapture
 
+  cross-platform-determinism-native:
+    name: Cross-Platform Determinism (Native ${{ matrix.label }})
+    needs: quality-gate-config
+    if: needs.quality-gate-config.outputs.determinism_enabled == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: x86_64
+            runs_on: ubuntu-latest
+          - label: arm64
+            runs_on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs_on }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache Cargo Artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Emit determinism manifest
+        run: cargo run -p fm-cli -- determinism-manifest > determinism-manifest-${{ matrix.label }}.json
+
+      - name: Upload determinism manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: determinism-manifest-${{ matrix.label }}
+          path: determinism-manifest-${{ matrix.label }}.json
+
+  cross-platform-determinism-wasm:
+    name: Cross-Platform Determinism (WASI)
+    needs: quality-gate-config
+    if: needs.quality-gate-config.outputs.determinism_enabled == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: wasm32-wasip1
+
+      - name: Cache Cargo Artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Wasmtime
+        uses: bytecodealliance/actions/wasmtime/setup@v1
+
+      - name: Build fm-cli for wasm32-wasip1
+        run: cargo build -p fm-cli --target wasm32-wasip1
+
+      - name: Emit WASI determinism manifest
+        run: wasmtime run target/wasm32-wasip1/debug/fm-cli.wasm determinism-manifest > determinism-manifest-wasm32-wasip1.json
+
+      - name: Upload WASI determinism manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: determinism-manifest-wasm32-wasip1
+          path: determinism-manifest-wasm32-wasip1.json
+
+  cross-platform-determinism-compare:
+    name: Cross-Platform Determinism Compare
+    needs:
+      - quality-gate-config
+      - cross-platform-determinism-native
+      - cross-platform-determinism-wasm
+    if: needs.quality-gate-config.outputs.determinism_enabled == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download x86_64 manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: determinism-manifest-x86_64
+          path: artifacts/x86_64
+
+      - name: Download arm64 manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: determinism-manifest-arm64
+          path: artifacts/arm64
+
+      - name: Download wasm manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: determinism-manifest-wasm32-wasip1
+          path: artifacts/wasm32-wasip1
+
+      - name: Compare cross-platform manifests
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          base = json.loads(Path("artifacts/x86_64/determinism-manifest-x86_64.json").read_text())
+          arm = json.loads(Path("artifacts/arm64/determinism-manifest-arm64.json").read_text())
+          wasm = json.loads(Path("artifacts/wasm32-wasip1/determinism-manifest-wasm32-wasip1.json").read_text())
+
+          def comparable(manifest):
+              return {
+                  "version": manifest["version"],
+                  "case_count": manifest["case_count"],
+                  "corpus_sha256": manifest["corpus_sha256"],
+                  "cases": manifest["cases"],
+              }
+
+          base_cmp = comparable(base)
+          for label, candidate in [("arm64", arm), ("wasm32-wasip1", wasm)]:
+              candidate_cmp = comparable(candidate)
+              if candidate_cmp != base_cmp:
+                  raise SystemExit(
+                      f"determinism manifest mismatch for {label}\n"
+                      f"base={json.dumps(base_cmp, indent=2)}\n"
+                      f"candidate={json.dumps(candidate_cmp, indent=2)}"
+                  )
+          PY
+
   performance-regression-guard:
     name: Performance Regression Guard
     needs: quality-gate-config
@@ -215,6 +336,9 @@ jobs:
       - golden-checksum-guard
       - property-test-guard
       - determinism-guard
+      - cross-platform-determinism-native
+      - cross-platform-determinism-wasm
+      - cross-platform-determinism-compare
       - performance-regression-guard
       - evidence-ledger-guard
       - decision-contract-guard
@@ -235,6 +359,9 @@ jobs:
             echo "| golden-checksum-guard | ${{ needs.golden-checksum-guard.result }} |"
             echo "| property-test-guard | ${{ needs.property-test-guard.result }} |"
             echo "| determinism-guard | ${{ needs.determinism-guard.result }} |"
+            echo "| cross-platform-determinism-native | ${{ needs.cross-platform-determinism-native.result }} |"
+            echo "| cross-platform-determinism-wasm | ${{ needs.cross-platform-determinism-wasm.result }} |"
+            echo "| cross-platform-determinism-compare | ${{ needs.cross-platform-determinism-compare.result }} |"
             echo "| performance-regression-guard | ${{ needs.performance-regression-guard.result }} |"
             echo "| evidence-ledger-guard | ${{ needs.evidence-ledger-guard.result }} |"
             echo "| decision-contract-guard | ${{ needs.decision-contract-guard.result }} |"
@@ -251,6 +378,9 @@ jobs:
             "${{ needs.golden-checksum-guard.result }}" \
             "${{ needs.property-test-guard.result }}" \
             "${{ needs.determinism-guard.result }}" \
+            "${{ needs.cross-platform-determinism-native.result }}" \
+            "${{ needs.cross-platform-determinism-wasm.result }}" \
+            "${{ needs.cross-platform-determinism-compare.result }}" \
             "${{ needs.performance-regression-guard.result }}" \
             "${{ needs.wasm-build.result }}" \
             "${{ needs.coverage.result }}"; do
