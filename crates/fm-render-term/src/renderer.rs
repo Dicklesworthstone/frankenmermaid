@@ -323,11 +323,16 @@ impl TermRenderer {
         buffer.set(x + w - 1, y + h - 1, glyphs.corner_br);
 
         // Cluster title if available.
-        if let Some(cluster) = ir.clusters.get(cluster_box.cluster_index)
-            && let Some(label_id) = cluster.title
-            && let Some(label) = ir.labels.get(label_id.0)
-        {
-            let title = self.truncate_label(&label.text);
+        let title_text = cluster_box.title.as_deref().or_else(|| {
+            ir.clusters
+                .get(cluster_box.cluster_index)
+                .and_then(|cluster| cluster.title)
+                .and_then(|label_id| ir.labels.get(label_id.0))
+                .map(|label| label.text.as_str())
+        });
+
+        if let Some(title_text) = title_text {
+            let title = self.truncate_label(title_text);
             let title_x = x + 2;
             buffer.set_string(title_x, y, &title);
         }
@@ -1453,7 +1458,9 @@ pub fn render_diagram_with_layout_and_config(
 mod tests {
     use super::*;
     use fm_core::{DiagramType, IrEdge, IrEndpoint, IrLabel, IrLabelId, IrNode, IrNodeId};
-    use fm_layout::{LayoutActivationBar, LayoutExtensions, LayoutRect, LayoutStats};
+    use fm_layout::{
+        LayoutActivationBar, LayoutClusterBox, LayoutExtensions, LayoutRect, LayoutStats,
+    };
 
     fn sample_ir() -> MermaidDiagramIr {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
@@ -1543,6 +1550,42 @@ mod tests {
         }
         let result = render_diagram(&ir);
         assert!(!result.output.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn renders_sequence_origin_cluster_titles_in_cell_mode() {
+        let ir = MermaidDiagramIr::empty(DiagramType::Sequence);
+        let layout = DiagramLayout {
+            nodes: Vec::new(),
+            clusters: vec![LayoutClusterBox {
+                cluster_index: 0,
+                span: Default::default(),
+                title: Some("Backend".to_string()),
+                bounds: LayoutRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 80.0,
+                    height: 40.0,
+                },
+            }],
+            cycle_clusters: Vec::new(),
+            edges: Vec::new(),
+            bounds: LayoutRect {
+                x: 0.0,
+                y: 0.0,
+                width: 80.0,
+                height: 40.0,
+            },
+            stats: LayoutStats::default(),
+            extensions: LayoutExtensions::default(),
+        };
+        let config = TermRenderConfig {
+            render_mode: MermaidRenderMode::CellOnly,
+            ..Default::default()
+        };
+
+        let result = render_diagram_with_layout_and_config(&ir, &layout, &config, 40, 12);
+        assert!(result.output.contains("Backend"));
     }
 
     #[test]

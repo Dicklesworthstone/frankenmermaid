@@ -11203,6 +11203,34 @@ mod tests {
     }
 
     #[test]
+    fn sequence_layout_participant_groups_become_clusters() {
+        let mut ir = sequence_ir(&["Alice", "Bob", "Carol"], &[(0, 1), (1, 2)]);
+        ir.sequence_meta = Some(IrSequenceMeta {
+            participant_groups: vec![IrParticipantGroup {
+                label: "Backend".to_string(),
+                color: Some("#aaf".to_string()),
+                participants: vec![IrNodeId(0), IrNodeId(1)],
+            }],
+            ..Default::default()
+        });
+
+        let layout = layout_diagram_sequence(&ir);
+        let cluster = layout
+            .clusters
+            .first()
+            .expect("sequence participant group should create a layout cluster");
+
+        assert_eq!(cluster.title.as_deref(), Some("Backend"));
+        assert!(cluster.bounds.y < 0.0, "group should reserve label space above headers");
+        assert!(cluster.bounds.x <= layout.nodes[0].bounds.x);
+        assert!(
+            cluster.bounds.x + cluster.bounds.width
+                >= layout.nodes[1].bounds.x + layout.nodes[1].bounds.width
+        );
+        assert!(layout.bounds.y <= cluster.bounds.y);
+    }
+
+    #[test]
     fn sequence_layout_auto_dispatch_selects_sequence() {
         let ir = sequence_ir(&["Alice", "Bob"], &[(0, 1)]);
         let traced = layout_diagram_traced(&ir);

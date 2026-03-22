@@ -570,10 +570,15 @@ impl Canvas2dRenderer {
             self.draw_calls += 2;
 
             // Draw cluster label if present
-            if let Some(ir_cluster) = ir.clusters.get(cluster_box.cluster_index)
-                && let Some(title_id) = ir_cluster.title
-                && let Some(label) = ir.labels.get(title_id.0)
-            {
+            let title_text = cluster_box.title.as_deref().or_else(|| {
+                ir.clusters
+                    .get(cluster_box.cluster_index)
+                    .and_then(|ir_cluster| ir_cluster.title)
+                    .and_then(|title_id| ir.labels.get(title_id.0))
+                    .map(|label| label.text.as_str())
+            });
+
+            if let Some(title_text) = title_text {
                 ctx.set_fill_style("#6c757d");
                 ctx.set_font(&format!(
                     "{}px {}",
@@ -582,7 +587,7 @@ impl Canvas2dRenderer {
                 ));
                 ctx.set_text_align(TextAlign::Left);
                 ctx.set_text_baseline(TextBaseline::Top);
-                ctx.fill_text(&label.text, x + 8.0, y + 4.0);
+                ctx.fill_text(title_text, x + 8.0, y + 4.0);
                 self.draw_calls += 1;
             }
 

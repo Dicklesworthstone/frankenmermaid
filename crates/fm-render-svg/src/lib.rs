@@ -1263,11 +1263,16 @@ fn render_layout_to_svg(
     for (_sort_idx, cluster) in sorted_clusters {
         let ir_cluster = ir.clusters.get(cluster.cluster_index);
 
-        // Detect cluster type from title for specialized styling
-        let title_text = ir_cluster
-            .and_then(|c| c.title)
-            .and_then(|tid| ir.labels.get(tid.0))
-            .map(|l| l.text.as_str())
+        // Detect cluster type from title for specialized styling.
+        let title_text = cluster
+            .title
+            .as_deref()
+            .or_else(|| {
+                ir_cluster
+                    .and_then(|c| c.title)
+                    .and_then(|tid| ir.labels.get(tid.0))
+                    .map(|l| l.text.as_str())
+            })
             .unwrap_or("");
 
         let is_c4_boundary = title_text.contains("System_Boundary")
@@ -3023,10 +3028,11 @@ mod tests {
         NodeShape, Span,
     };
     use fm_layout::{
-        FillStyle, LayoutAxisTick, LayoutBand, LayoutBandKind, LineCap as RenderLineCap,
-        LineJoin as RenderLineJoin, PathCmd, RenderClip, RenderGroup, RenderItem, RenderPath,
-        RenderRect, RenderScene, RenderSource, RenderText, RenderTransform, StrokeStyle,
-        TextAlign as RenderTextAlign, TextBaseline as RenderTextBaseline, layout_diagram,
+        FillStyle, LayoutAxisTick, LayoutBand, LayoutBandKind, LayoutClusterBox,
+        LineCap as RenderLineCap, LineJoin as RenderLineJoin, PathCmd, RenderClip, RenderGroup,
+        RenderItem, RenderPath, RenderRect, RenderScene, RenderSource, RenderText,
+        RenderTransform, StrokeStyle, TextAlign as RenderTextAlign,
+        TextBaseline as RenderTextBaseline, layout_diagram,
     };
     use proptest::prelude::*;
 
@@ -3521,6 +3527,39 @@ mod tests {
         let svg = render_svg(&ir);
         assert!(svg.contains("class=\"fm-cluster\""));
         assert!(svg.contains("class=\"fm-cluster-label\""));
+    }
+
+    #[test]
+    fn renders_sequence_origin_cluster_title_from_layout() {
+        let ir = MermaidDiagramIr::empty(DiagramType::Sequence);
+        let layout = DiagramLayout {
+            nodes: Vec::new(),
+            clusters: vec![LayoutClusterBox {
+                cluster_index: 0,
+                span: Span::default(),
+                title: Some("Backend".to_string()),
+                bounds: LayoutRect {
+                    x: 10.0,
+                    y: -20.0,
+                    width: 120.0,
+                    height: 160.0,
+                },
+            }],
+            cycle_clusters: Vec::new(),
+            edges: Vec::new(),
+            bounds: LayoutRect {
+                x: 0.0,
+                y: -20.0,
+                width: 140.0,
+                height: 180.0,
+            },
+            stats: Default::default(),
+            extensions: Default::default(),
+        };
+
+        let svg = render_svg_with_layout(&ir, &layout, &SvgRenderConfig::default());
+        assert!(svg.contains("Backend"));
+        assert!(svg.contains("fm-cluster-label"));
     }
 
     #[test]
