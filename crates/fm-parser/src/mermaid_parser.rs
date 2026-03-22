@@ -3,8 +3,9 @@ use std::collections::{BTreeMap, HashMap};
 use chumsky::prelude::*;
 use fm_core::{
     ArrowType, Diagnostic, DiagnosticCategory, DiagramType, GraphDirection, IrAttributeKey,
-    IrGanttMeta, IrGanttSection, IrGanttTask, IrNodeId, MermaidParseMode, MermaidSupportLevel,
-    NodeShape, Span, parse_mermaid_js_config_value, to_init_parse,
+    IrGanttMeta, IrGanttSection, IrGanttTask, IrNodeId, IrXyAxis, IrXyChartMeta, IrXySeries,
+    IrXySeriesKind, MermaidParseMode, MermaidSupportLevel, NodeShape, Span,
+    parse_mermaid_js_config_value, to_init_parse,
 };
 use serde_json::Value;
 use unicode_segmentation::UnicodeSegmentation;
@@ -2433,25 +2434,21 @@ fn is_safe_click_target(target: &str) -> bool {
     let trimmed = decoded.trim_matches(|c: char| c.is_whitespace() || c.is_control());
     let lower = trimmed.to_ascii_lowercase();
 
-    // Explicitly reject dangerous schemes
-    if lower.contains("javascript:")
-        || lower.contains("data:")
-        || lower.contains("vbscript:")
-        || lower.contains("file:")
-    {
-        return false;
+    if let Some(colon_idx) = lower.find(':') {
+        let scheme = &lower[..colon_idx];
+        // Only allow explicitly safe schemes.
+        // This naturally rejects any scheme that contains entities (e.g. `java&#115;cript`)
+        // or whitespace (e.g. `java script`) because it won't match the strict string literals.
+        matches!(scheme, "http" | "https" | "mailto" | "tel")
+    } else {
+        // No literal colon found, so it must be a relative path.
+        // We must ensure it doesn't hide a colon via XML entities, which the browser
+        // would decode and potentially treat as a dangerous scheme.
+        if lower.contains("&#") || lower.contains("&colon") {
+            return false;
+        }
+        !trimmed.is_empty()
     }
-
-    // Explicitly allow only safe schemes or absolute/relative paths
-    lower.starts_with("https://")
-        || lower.starts_with("http://")
-        || lower.starts_with("mailto:")
-        || lower.starts_with("tel:")
-        || trimmed.starts_with('/')
-        || trimmed.starts_with('#')
-        || trimmed.starts_with("./")
-        || trimmed.starts_with("../")
-        || (!lower.contains(':') && !trimmed.is_empty())
 }
 
 fn decode_percent_triplets(input: &str) -> String {
@@ -3343,7 +3340,7 @@ fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
 }
 
 fn parse_xychart(input: &str, builder: &mut IrBuilder) {
-    let mut x_labels: Vec<String> = Vec::new();
+    let mut xy_chart_meta = IrXyChartMeta::default();
 
     for (index, line) in input.lines().enumerate() {
         let line_number = index + 1;
@@ -3353,18 +3350,22 @@ fn parse_xychart(input: &str, builder: &mut IrBuilder) {
         }
 
         let lower = trimmed.to_ascii_lowercase();
-        if lower.starts_with("xychart") || lower.starts_with("title ") {
+        if lower.starts_with("xychart") {
+            continue;
+        }
+
+        if let Some(title) = trimmed.strip_prefix("title ") {
+            xy_chart_meta.title = clean_label(Some(title));
             continue;
         }
 
         if lower.starts_with("x-axis ") {
-            if let Some(raw_labels) = bracket_contents(trimmed) {
-                x_labels = parse_chart_value_list(raw_labels);
-            }
+            xy_chart_meta.x_axis = parse_xychart_axis(&trimmed["x-axis ".len()..]);
             continue;
         }
 
         if lower.starts_with("y-axis ") {
+            xy_chart_meta.y_axis = parse_xychart_axis(&trimmed["y-axis ".len()..]);
             continue;
         }
 
@@ -3375,7 +3376,7 @@ fn parse_xychart(input: &str, builder: &mut IrBuilder) {
             continue;
         };
 
-        let values = parse_chart_value_list(raw_values);
+        let values = parse_xychart_numeric_values(raw_values, line_number, trimmed, builder);
         if values.is_empty() {
             builder.add_warning(format!(
                 "Line {line_number}: xychart series is missing values: {trimmed}"
@@ -3390,19 +3391,26 @@ fn parse_xychart(input: &str, builder: &mut IrBuilder) {
             .unwrap_or(series_kind);
         let base_id = normalize_compound_identifier(base_name);
         let mut previous_node = None;
+        let mut series_nodes = Vec::with_capacity(values.len());
 
         for (point_index, value) in values.iter().enumerate() {
-            let x_label = x_labels
+            let x_label = xy_chart_meta
+                .x_axis
+                .categories
                 .get(point_index)
                 .cloned()
                 .unwrap_or_else(|| (point_index + 1).to_string());
             let node_label = format!("{base_name} {x_label}: {value}");
             let node_id = format!("{base_id}_{}", point_index + 1);
-            let Some(node) =
-                builder.intern_node(&node_id, Some(&node_label), NodeShape::Circle, span)
-            else {
+            let shape = match series_kind {
+                "bar" => NodeShape::Rect,
+                "line" | "area" => NodeShape::Circle,
+                _ => NodeShape::Circle,
+            };
+            let Some(node) = builder.intern_node(&node_id, Some(&node_label), shape, span) else {
                 continue;
             };
+            series_nodes.push(node);
 
             if matches!(series_kind, "line" | "area")
                 && let Some(previous) = previous_node
@@ -3411,6 +3419,30 @@ fn parse_xychart(input: &str, builder: &mut IrBuilder) {
             }
             previous_node = Some(node);
         }
+
+        xy_chart_meta.series.push(IrXySeries {
+            kind: match series_kind {
+                "bar" => IrXySeriesKind::Bar,
+                "line" => IrXySeriesKind::Line,
+                "area" => IrXySeriesKind::Area,
+                _ => IrXySeriesKind::Bar,
+            },
+            name: series_name,
+            values,
+            nodes: series_nodes,
+        });
+    }
+
+    if xy_chart_meta.title.is_some()
+        || !xy_chart_meta.x_axis.categories.is_empty()
+        || xy_chart_meta.x_axis.min.is_some()
+        || xy_chart_meta.x_axis.max.is_some()
+        || xy_chart_meta.y_axis.label.is_some()
+        || xy_chart_meta.y_axis.min.is_some()
+        || xy_chart_meta.y_axis.max.is_some()
+        || !xy_chart_meta.series.is_empty()
+    {
+        builder.set_xy_chart_meta(xy_chart_meta);
     }
 }
 
@@ -4885,7 +4917,9 @@ fn parse_edge_statement_asts(
         let mut current_arrow = arrow;
 
         // Check for A -- label --> B syntax
-        if is_arrow_prefix(operator) && let Some((n_idx, n_op, n_arrow)) = next_operator {
+        if is_arrow_prefix(operator)
+            && let Some((n_idx, n_op, n_arrow)) = next_operator
+        {
             let label_part = statement[rhs_start..n_idx].trim();
             edge_label = clean_label(Some(label_part));
             current_arrow = n_arrow;
@@ -5414,6 +5448,61 @@ fn parse_chart_value_list(raw: &str) -> Vec<String> {
         .collect()
 }
 
+fn parse_xychart_numeric_values(
+    raw: &str,
+    line_number: usize,
+    line: &str,
+    builder: &mut IrBuilder,
+) -> Vec<f32> {
+    let mut values = Vec::new();
+    for raw_value in parse_chart_value_list(raw) {
+        match raw_value.parse::<f32>() {
+            Ok(value) if value.is_finite() => values.push(value),
+            _ => builder.add_warning(format!(
+                "Line {line_number}: invalid xychart numeric value '{raw_value}' in {line}"
+            )),
+        }
+    }
+    values
+}
+
+fn parse_xychart_axis(raw: &str) -> IrXyAxis {
+    let trimmed = raw.trim();
+    if let Some(categories) = bracket_contents(trimmed) {
+        return IrXyAxis {
+            categories: parse_chart_value_list(categories),
+            ..Default::default()
+        };
+    }
+
+    let mut axis = IrXyAxis::default();
+    let mut remaining = trimmed;
+
+    if let Some((label, rest)) = extract_quoted_value(remaining) {
+        axis.label = Some(label);
+        remaining = rest.trim();
+    }
+
+    if let Some((range_start, range_end)) = parse_axis_range(remaining) {
+        axis.min = Some(range_start);
+        axis.max = Some(range_end);
+        return axis;
+    }
+
+    if axis.label.is_none() && !remaining.is_empty() {
+        axis.label = clean_label(Some(remaining));
+    }
+
+    axis
+}
+
+fn parse_axis_range(raw: &str) -> Option<(f32, f32)> {
+    let (start, end) = raw.split_once("-->")?;
+    let start = start.trim().parse::<f32>().ok()?;
+    let end = end.trim().parse::<f32>().ok()?;
+    Some((start, end))
+}
+
 fn parse_xychart_series(line: &str) -> Option<(&str, Option<String>, &str)> {
     let (series_kind, remainder) = line.split_once(char::is_whitespace)?;
     let series_kind = series_kind.trim();
@@ -5868,6 +5957,7 @@ fn parse_c4_relationship(
     let (actual_from, actual_to, arrow) = match function_name {
         "BiRel" => (from_node, to_node, ArrowType::Line),
         "Rel_Back" => (to_node, from_node, ArrowType::Arrow),
+        "Rel_L" | "Rel_R" | "Rel_U" | "Rel_D" | "Rel" => (from_node, to_node, ArrowType::Arrow),
         _ => (from_node, to_node, ArrowType::Arrow),
     };
     builder.push_edge(
@@ -6131,7 +6221,7 @@ fn span_for(line_number: usize, line: &str) -> Span {
     Span::at_line(line_number, line.chars().count())
 }
 
-pub(crate) fn first_significant_line(input: &str) -> Option<&str> {
+pub fn first_significant_line(input: &str) -> Option<&str> {
     let (content, _) = split_front_matter_block(input);
     content.lines().map(str::trim).find(|line| {
         !line.is_empty() && !is_comment(line) && !line.starts_with("%%{") && !line.ends_with("}%%")
@@ -6218,7 +6308,7 @@ fn is_comment(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use fm_core::{ArrowType, DiagramType, GraphDirection, NodeShape};
+    use fm_core::{ArrowType, DiagramType, GraphDirection, IrXySeriesKind, NodeShape};
 
     use super::{detect_type, parse_mermaid};
 
@@ -7165,9 +7255,20 @@ mod tests {
     #[test]
     fn xychart_parses_series_into_points_and_edges() {
         let parsed = parse_mermaid(
-            "xychart-beta\ntitle \"Quarterly\"\nx-axis [Q1, Q2, Q3]\nbar Revenue [12, 18, 24]\nline Target [10, 15, 20]",
+            "xychart-beta\ntitle \"Quarterly\"\nx-axis [Q1, Q2, Q3]\ny-axis \"Revenue\" 0 --> 30\nbar Revenue [12, 18, 24]\nline Target [10, 15, 20]",
         );
         assert_eq!(parsed.ir.diagram_type, DiagramType::XyChart);
+        let xy_meta = parsed.ir.xy_chart_meta.as_ref().expect("xy chart meta");
+        assert_eq!(xy_meta.title.as_deref(), Some("Quarterly"));
+        assert_eq!(xy_meta.x_axis.categories, vec!["Q1", "Q2", "Q3"]);
+        assert_eq!(xy_meta.y_axis.label.as_deref(), Some("Revenue"));
+        assert_eq!(xy_meta.y_axis.min, Some(0.0));
+        assert_eq!(xy_meta.y_axis.max, Some(30.0));
+        assert_eq!(xy_meta.series.len(), 2);
+        assert_eq!(xy_meta.series[0].kind, IrXySeriesKind::Bar);
+        assert_eq!(xy_meta.series[1].kind, IrXySeriesKind::Line);
+        assert_eq!(xy_meta.series[0].values, vec![12.0, 18.0, 24.0]);
+        assert_eq!(xy_meta.series[1].values, vec![10.0, 15.0, 20.0]);
         assert_eq!(parsed.ir.nodes.len(), 6);
         assert_eq!(parsed.ir.edges.len(), 2);
         assert!(parsed.ir.nodes.iter().any(|node| node.id == "Revenue_1"));
@@ -8950,6 +9051,11 @@ Rel_Back(db, app, "Responds")"#,
         let input = "xychart-beta\n  x-axis [Jan, Feb, Mar]\n  y-axis \"Sales\" 0 --> 100\n  bar [10, 30, 50]";
         let parsed = parse_mermaid(input);
         assert_eq!(parsed.ir.diagram_type, DiagramType::XyChart);
+        let xy_meta = parsed.ir.xy_chart_meta.as_ref().expect("xy chart meta");
+        assert_eq!(xy_meta.y_axis.label.as_deref(), Some("Sales"));
+        assert_eq!(xy_meta.y_axis.min, Some(0.0));
+        assert_eq!(xy_meta.y_axis.max, Some(100.0));
+        assert_eq!(xy_meta.series[0].values, vec![10.0, 30.0, 50.0]);
     }
 
     #[test]
@@ -8957,6 +9063,10 @@ Rel_Back(db, app, "Responds")"#,
         let input = "xychart-beta\n  x-axis [A, B, C]\n  line [5, 15, 25]";
         let parsed = parse_mermaid(input);
         assert_eq!(parsed.ir.diagram_type, DiagramType::XyChart);
+        let xy_meta = parsed.ir.xy_chart_meta.as_ref().expect("xy chart meta");
+        assert_eq!(xy_meta.x_axis.categories, vec!["A", "B", "C"]);
+        assert_eq!(xy_meta.series[0].kind, IrXySeriesKind::Line);
+        assert_eq!(xy_meta.series[0].values, vec![5.0, 15.0, 25.0]);
     }
 
     // --- Architecture tests ---

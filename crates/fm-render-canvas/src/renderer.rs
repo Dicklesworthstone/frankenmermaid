@@ -177,6 +177,8 @@ impl Canvas2dRenderer {
             )
         };
 
+        let mut labels_drawn = 0;
+
         // Draw clusters (background)
         let clusters_drawn = self.draw_clusters(layout, ir, ctx, offset_x, offset_y);
 
@@ -184,10 +186,10 @@ impl Canvas2dRenderer {
         self.draw_bands(layout, ctx, offset_x, offset_y);
 
         // Draw edges
-        let edges_drawn = self.draw_edges(layout, ir, ctx, offset_x, offset_y);
+        let edges_drawn = self.draw_edges(layout, ir, ctx, offset_x, offset_y, &mut labels_drawn);
 
         // Draw nodes
-        let nodes_drawn = self.draw_nodes(layout, ir, ctx, offset_x, offset_y);
+        let nodes_drawn = self.draw_nodes(layout, ir, ctx, offset_x, offset_y, &mut labels_drawn);
 
         ctx.restore();
 
@@ -196,7 +198,7 @@ impl Canvas2dRenderer {
             nodes_drawn,
             edges_drawn,
             clusters_drawn,
-            labels_drawn: nodes_drawn + edges_drawn, // Each node/edge may have a label
+            labels_drawn,
             viewport,
         }
     }
@@ -655,6 +657,7 @@ impl Canvas2dRenderer {
         ctx: &mut C,
         offset_x: f64,
         offset_y: f64,
+        labels_drawn: &mut usize,
     ) -> usize {
         let mut count = 0;
 
@@ -730,26 +733,27 @@ impl Canvas2dRenderer {
                 && let Some(label) = ir.labels.get(label_id.0)
                 && edge_path.points.len() >= 2
             {
+                let label_offset = self.config.font_size * 0.8;
                 let (lx, ly) = if edge_path.points.len() == 4 {
                     let p1 = &edge_path.points[1];
                     let p2 = &edge_path.points[2];
                     (
                         f64::from((p1.x + p2.x) / 2.0) + offset_x,
-                        f64::from((p1.y + p2.y) / 2.0) + offset_y - 12.0,
+                        f64::from((p1.y + p2.y) / 2.0) + offset_y - label_offset,
                     )
                 } else if edge_path.points.len() == 2 {
                     let p1 = &edge_path.points[0];
                     let p2 = &edge_path.points[1];
                     (
                         f64::from((p1.x + p2.x) / 2.0) + offset_x,
-                        f64::from((p1.y + p2.y) / 2.0) + offset_y - 12.0,
+                        f64::from((p1.y + p2.y) / 2.0) + offset_y - label_offset,
                     )
                 } else {
                     let mid_idx = edge_path.points.len() / 2;
                     let mid = &edge_path.points[mid_idx];
                     (
                         f64::from(mid.x) + offset_x,
-                        f64::from(mid.y) + offset_y - 12.0,
+                        f64::from(mid.y) + offset_y - label_offset,
                     )
                 };
 
@@ -789,6 +793,7 @@ impl Canvas2dRenderer {
                 for (i, line) in lines.iter().enumerate() {
                     ctx.fill_text(line, lx, start_y + (i as f64) * line_height);
                     self.draw_calls += 1;
+                    *labels_drawn += 1;
                 }
             }
 
@@ -808,6 +813,7 @@ impl Canvas2dRenderer {
         ctx: &mut C,
         offset_x: f64,
         offset_y: f64,
+        labels_drawn: &mut usize,
     ) -> usize {
         let mut count = 0;
 
@@ -835,13 +841,10 @@ impl Canvas2dRenderer {
             self.draw_calls += 1;
 
             // Check for class diagram three-compartment rendering.
-            let has_class_meta = ir_node
-                .and_then(|n| n.class_meta.as_ref())
-                .is_some_and(|m| !m.attributes.is_empty() || !m.methods.is_empty());
-
-            if has_class_meta {
-                let node = ir_node.unwrap();
-                let meta = node.class_meta.as_ref().unwrap();
+            if let Some(node) = ir_node
+                && let Some(ref meta) = node.class_meta
+                && (!meta.attributes.is_empty() || !meta.methods.is_empty())
+            {
                 let line_h = self.config.font_size * 1.3;
                 let member_font = self.config.font_size * 0.9;
                 let padding = 6.0;
@@ -869,6 +872,7 @@ impl Canvas2dRenderer {
                 let mut cursor_y = y + line_h;
                 ctx.fill_text(&display_name, x + w / 2.0, cursor_y);
                 self.draw_calls += 1;
+                *labels_drawn += 1;
                 cursor_y += line_h * 0.5;
 
                 // Separator line.
@@ -890,6 +894,7 @@ impl Canvas2dRenderer {
                     let text = format!("{vis}{}", attr.name);
                     ctx.fill_text(&text, x + padding, cursor_y);
                     self.draw_calls += 1;
+                    *labels_drawn += 1;
                     cursor_y += member_font * 1.2;
                 }
 
@@ -912,6 +917,7 @@ impl Canvas2dRenderer {
                     let text = format!("{vis}{}", method.name);
                     ctx.fill_text(&text, x + padding, cursor_y);
                     self.draw_calls += 1;
+                    *labels_drawn += 1;
                     cursor_y += member_font * 1.2;
                 }
             } else {
@@ -939,6 +945,7 @@ impl Canvas2dRenderer {
                     if lines.len() <= 1 {
                         ctx.fill_text(label_text, cx, cy);
                         self.draw_calls += 1;
+                        *labels_drawn += 1;
                     } else {
                         let line_height = self.config.font_size * 1.2;
                         let total_height = lines.len() as f64 * line_height;
@@ -947,6 +954,7 @@ impl Canvas2dRenderer {
                         for (i, line) in lines.iter().enumerate() {
                             ctx.fill_text(line, cx, start_y + (i as f64) * line_height);
                             self.draw_calls += 1;
+                            *labels_drawn += 1;
                         }
                     }
                 }

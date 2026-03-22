@@ -219,12 +219,15 @@ impl FontMetrics {
     /// Estimate the width of a single line of text.
     #[must_use]
     pub fn estimate_width(&self, text: &str) -> f32 {
-        text.chars()
-            .map(|c| {
-                let class = CharWidthClass::classify(c);
-                self.avg_char_width * class.multiplier()
-            })
-            .sum()
+        text.chars().map(|c| self.char_width(c)).sum()
+    }
+
+    fn char_width(&self, c: char) -> f32 {
+        if self.config.preset == FontPreset::Monospace {
+            self.avg_char_width
+        } else {
+            self.avg_char_width * CharWidthClass::classify(c).multiplier()
+        }
     }
 
     /// Estimate the width of multi-line text (returns max line width).
@@ -302,7 +305,7 @@ impl FontMetrics {
         let mut current_width = 0.0;
 
         for c in text.chars() {
-            let char_width = self.avg_char_width * CharWidthClass::classify(c).multiplier();
+            let char_width = self.char_width(c);
             if current_width + char_width > available_width {
                 break;
             }
@@ -411,8 +414,8 @@ mod tests {
         let narrow_width = metrics.estimate_width("iii");
         let wide_width = metrics.estimate_width("mmm");
 
-        // Monospace still uses character classes, but ratio is different
-        assert!(wide_width > narrow_width);
+        // Monospace should have consistent width for all characters
+        assert_eq!(wide_width, narrow_width);
     }
 
     #[test]

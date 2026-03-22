@@ -26,7 +26,9 @@ use fm_layout::{
     LayoutAlgorithm, LayoutConfig, LayoutGuardrails, TracedLayout, build_layout_decision_ledger,
     build_layout_guard_report_with_pressure, layout_diagram_traced_with_config_and_guardrails,
 };
-use fm_parser::{detect_type_with_confidence, parse_evidence_json, parse_with_mode};
+use fm_parser::{
+    detect_type_with_confidence, first_significant_line, parse_evidence_json, parse_with_mode,
+};
 use fm_render_svg::{SvgRenderConfig, ThemePreset, render_svg_with_layout};
 use fm_render_term::{
     TermRenderConfig, diff_diagrams, render_diff_plain, render_diff_summary,
@@ -1073,11 +1075,7 @@ fn cmd_detect(input: &str, json_output: bool) -> Result<()> {
     let detection = detect_type_with_confidence(&source);
     let diagram_type = detection.diagram_type;
 
-    let first_line = source
-        .lines()
-        .find(|l| !l.trim().is_empty() && !l.trim().starts_with("%%"))
-        .unwrap_or("")
-        .trim();
+    let first_line = first_significant_line(&source).unwrap_or("").trim();
 
     let confidence = confidence_label(detection.confidence);
     let detection_method = detection.method.as_str();

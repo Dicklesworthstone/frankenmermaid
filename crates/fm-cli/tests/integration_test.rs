@@ -1393,6 +1393,28 @@ fn e2e_pipeline_xychart() {
 }
 
 #[test]
+fn e2e_pipeline_xychart_renders_axes_and_mixed_series() {
+    let input = "xychart-beta\n  title Sales Revenue\n  x-axis [jan, feb, mar]\n  y-axis \"Revenue\" 0 --> 100\n  bar Revenue [30, 50, 70]\n  line Target [40, 60, 80]";
+    let parse_result = parse(input);
+    assert!(
+        parse_result.warnings.is_empty(),
+        "xychart should parse cleanly: {:?}",
+        parse_result.warnings
+    );
+
+    let ir = parse_result.ir;
+    let svg = render_svg(&ir);
+
+    assert!(svg.contains("fm-xychart-axis"));
+    assert!(svg.contains("fm-xychart-gridline"));
+    assert!(svg.contains("fm-xychart-bar"));
+    assert!(svg.contains("fm-xychart-line"));
+    assert!(svg.contains("Sales Revenue"));
+    assert!(svg.contains(">jan<"));
+    assert!(svg.contains(">Revenue<"));
+}
+
+#[test]
 fn e2e_pipeline_block_beta() {
     assert_pipeline_roundtrip(
         "block-beta\n  columns 3\n  a[\"Block A\"]:2\n  b[\"Block B\"]\n  c[\"Block C\"]:3",

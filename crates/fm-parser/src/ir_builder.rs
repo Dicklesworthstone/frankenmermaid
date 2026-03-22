@@ -6,9 +6,9 @@ use fm_core::{
     IrClassNodeMeta, IrCluster, IrClusterId, IrEdge, IrEdgeKind, IrEndpoint, IrEntityAttribute,
     IrGanttMeta, IrGraphCluster, IrGraphEdge, IrGraphNode, IrLabel, IrLabelId, IrLifecycleEvent,
     IrNode, IrNodeId, IrNodeKind, IrParticipantGroup, IrSequenceFragment, IrSequenceMeta,
-    IrSequenceNote, IrStyleRef, IrStyleTarget, IrSubgraph, IrSubgraphId, LifecycleEventKind,
-    MermaidDiagramIr, MermaidError, MermaidParseMode, MermaidWarning, MermaidWarningCode,
-    NodeShape, NotePosition, Span,
+    IrSequenceNote, IrStyleRef, IrStyleTarget, IrSubgraph, IrSubgraphId, IrXyChartMeta,
+    LifecycleEventKind, MermaidDiagramIr, MermaidError, MermaidParseMode, MermaidWarning,
+    MermaidWarningCode, NodeShape, NotePosition, Span,
 };
 
 use crate::ParseResult;
@@ -89,6 +89,10 @@ impl IrBuilder {
 
     pub(crate) fn set_gantt_meta(&mut self, gantt_meta: IrGanttMeta) {
         self.ir.gantt_meta = Some(gantt_meta);
+    }
+
+    pub(crate) fn set_xy_chart_meta(&mut self, xy_chart_meta: IrXyChartMeta) {
+        self.ir.xy_chart_meta = Some(xy_chart_meta);
     }
 
     pub(crate) fn set_init_theme(&mut self, theme: String) {

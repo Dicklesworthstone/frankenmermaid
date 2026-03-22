@@ -3018,6 +3018,49 @@ pub struct IrGanttMeta {
     pub tasks: Vec<IrGanttTask>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum IrXySeriesKind {
+    #[default]
+    Bar,
+    Line,
+    Area,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct IrXyAxis {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub categories: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct IrXySeries {
+    pub kind: IrXySeriesKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<f32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<IrNodeId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct IrXyChartMeta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub x_axis: IrXyAxis,
+    #[serde(default)]
+    pub y_axis: IrXyAxis,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub series: Vec<IrXySeries>,
+}
+
 /// Sequence-diagram-specific metadata that extends the generic IR.
 ///
 /// Captures all advanced sequence constructs (activations, notes, fragments,
@@ -3059,6 +3102,8 @@ pub struct MermaidDiagramIr {
     pub sequence_meta: Option<IrSequenceMeta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gantt_meta: Option<IrGanttMeta>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xy_chart_meta: Option<IrXyChartMeta>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -3088,6 +3133,7 @@ impl MermaidDiagramIr {
             },
             sequence_meta: None,
             gantt_meta: None,
+            xy_chart_meta: None,
             diagnostics: Vec::new(),
         }
     }
@@ -3289,12 +3335,13 @@ mod tests {
         IrGanttMeta, IrGanttSection, IrGanttTask, IrGraphCluster, IrGraphEdge, IrGraphNode,
         IrLabel, IrLabelId, IrLifecycleEvent, IrNode, IrNodeId, IrNodeKind, IrParticipantGroup,
         IrPort, IrPortId, IrPortSideHint, IrSequenceFragment, IrSequenceMeta, IrSequenceNote,
-        IrSubgraph, IrSubgraphId, LifecycleEventKind, MERMAID_SCHEMA_VERSION, MermaidConfig,
-        MermaidDiagramIr, MermaidError, MermaidErrorCode, MermaidFallbackAction,
-        MermaidFallbackPolicy, MermaidLayoutDecisionAlternative, MermaidLayoutDecisionLedger,
-        MermaidLayoutDecisionRecord, MermaidNativePressureSignals, MermaidPressureTier,
-        MermaidSanitizeMode, MermaidSupportLevel, MermaidWarningCode, MermaidWasmPressureSignals,
-        NodeShape, NotePosition, Position, Span, StructuredDiagnostic, capability_matrix,
+        IrSubgraph, IrSubgraphId, IrXyAxis, IrXyChartMeta, IrXySeries, IrXySeriesKind,
+        LifecycleEventKind, MERMAID_SCHEMA_VERSION, MermaidConfig, MermaidDiagramIr, MermaidError,
+        MermaidErrorCode, MermaidFallbackAction, MermaidFallbackPolicy,
+        MermaidLayoutDecisionAlternative, MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord,
+        MermaidNativePressureSignals, MermaidPressureTier, MermaidSanitizeMode,
+        MermaidSupportLevel, MermaidWarningCode, MermaidWasmPressureSignals, NodeShape,
+        NotePosition, Position, Span, StructuredDiagnostic, capability_matrix,
         capability_matrix_json_pretty, capability_readme_supported_diagram_types_markdown,
         capability_readme_surface_markdown, documented_diagram_types,
         mermaid_layout_guard_observability, parse_mermaid_js_config_value, to_init_parse,
@@ -4947,6 +4994,68 @@ mod tests {
         let deser: MermaidDiagramIr = serde_json::from_str(&json).expect("deserialize");
         assert!(deser.gantt_meta.is_some());
         assert_eq!(deser.gantt_meta.unwrap().sections[0].name, "Delivery");
+    }
+
+    #[test]
+    fn xy_chart_meta_serde_round_trip() {
+        let meta = IrXyChartMeta {
+            title: Some("Revenue".to_string()),
+            x_axis: IrXyAxis {
+                categories: vec!["Jan".to_string(), "Feb".to_string(), "Mar".to_string()],
+                ..Default::default()
+            },
+            y_axis: IrXyAxis {
+                label: Some("USD".to_string()),
+                min: Some(0.0),
+                max: Some(100.0),
+                ..Default::default()
+            },
+            series: vec![
+                IrXySeries {
+                    kind: IrXySeriesKind::Bar,
+                    name: Some("Actual".to_string()),
+                    values: vec![30.0, 50.0, 70.0],
+                    nodes: vec![IrNodeId(0), IrNodeId(1), IrNodeId(2)],
+                },
+                IrXySeries {
+                    kind: IrXySeriesKind::Line,
+                    name: Some("Target".to_string()),
+                    values: vec![40.0, 55.0, 80.0],
+                    nodes: vec![IrNodeId(3), IrNodeId(4), IrNodeId(5)],
+                },
+            ],
+        };
+
+        let json = serde_json::to_string(&meta).expect("serialize");
+        let deser: IrXyChartMeta = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(meta, deser);
+    }
+
+    #[test]
+    fn ir_with_xy_chart_meta_round_trip() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::XyChart);
+        ir.xy_chart_meta = Some(IrXyChartMeta {
+            x_axis: IrXyAxis {
+                categories: vec!["Q1".to_string(), "Q2".to_string()],
+                ..Default::default()
+            },
+            series: vec![IrXySeries {
+                kind: IrXySeriesKind::Bar,
+                values: vec![10.0, 12.0],
+                nodes: vec![IrNodeId(0), IrNodeId(1)],
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        let json = serde_json::to_string(&ir).expect("serialize");
+        assert!(json.contains("xy_chart_meta"));
+        let deser: MermaidDiagramIr = serde_json::from_str(&json).expect("deserialize");
+        assert!(deser.xy_chart_meta.is_some());
+        assert_eq!(
+            deser.xy_chart_meta.unwrap().x_axis.categories,
+            vec!["Q1".to_string(), "Q2".to_string()]
+        );
     }
 
     #[test]

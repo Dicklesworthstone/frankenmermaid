@@ -25,7 +25,7 @@ pub use text::{TextAnchor, TextBuilder};
 pub use theme::{FontConfig, Theme, ThemeColors, ThemePreset, generate_palette};
 pub use transform::{Transform, TransformBuilder};
 
-use fm_core::{MermaidDiagramIr, MermaidTier, Span};
+use fm_core::{IrXyChartMeta, IrXySeriesKind, MermaidDiagramIr, MermaidTier, Span};
 use fm_layout::{
     DiagramLayout, FillStyle, LayoutBand, LayoutBandKind, LayoutEdgePath, LayoutNodeBox,
     LineCap as RenderLineCap, LineJoin as RenderLineJoin, MarkerKind, PathCmd, RenderClip,
@@ -1159,6 +1159,23 @@ fn render_layout_to_svg(
     let offset_x = padding - layout.bounds.x;
     let offset_y = padding - layout.bounds.y;
 
+    if let Some(xy_chart_meta) = ir
+        .xy_chart_meta
+        .as_ref()
+        .filter(|meta| !meta.series.is_empty())
+    {
+        doc = render_xychart_svg(
+            doc,
+            layout,
+            xy_chart_meta,
+            offset_x,
+            offset_y,
+            config,
+            &theme,
+        );
+        return doc.to_string();
+    }
+
     for band in &layout.extensions.bands {
         doc = doc.child(render_layout_band(band, offset_x, offset_y, config));
     }
@@ -1420,6 +1437,345 @@ fn render_layout_axis_tick(label: &str, x: f32, y: f32, config: &SvgRenderConfig
             .class("fm-axis-tick-label")
             .build(),
     )
+}
+
+fn render_xychart_svg(
+    mut doc: SvgDocument,
+    layout: &DiagramLayout,
+    xy_chart_meta: &IrXyChartMeta,
+    offset_x: f32,
+    offset_y: f32,
+    config: &SvgRenderConfig,
+    theme: &Theme,
+) -> SvgDocument {
+    let plot_bounds = xychart_plot_bounds(layout);
+    let plot_x = plot_bounds.x + offset_x;
+    let plot_y = plot_bounds.y + offset_y;
+    let plot_bottom = plot_y + plot_bounds.height;
+    let plot_right = plot_x + plot_bounds.width;
+    let (y_min, y_max) = resolve_xychart_y_domain(xy_chart_meta);
+    let baseline_value = y_min.min(0.0).max(y_max.min(0.0));
+    let baseline_y = xychart_value_to_y(baseline_value, y_min, y_max, plot_bounds) + offset_y;
+    let categories = xychart_categories(xy_chart_meta);
+    let palette = theme.colors.accents.clone();
+
+    doc = doc.child(
+        Element::rect()
+            .x(plot_x)
+            .y(plot_y)
+            .width(plot_bounds.width)
+            .height(plot_bounds.height)
+            .fill("rgba(148,163,184,0.06)")
+            .stroke("rgba(148,163,184,0.16)")
+            .stroke_width(1.0)
+            .rx(config.rounded_corners.max(6.0))
+            .class("fm-xychart-plot"),
+    );
+
+    for tick_index in 0..=4 {
+        let tick_ratio = tick_index as f32 / 4.0;
+        let tick_y = plot_y + plot_bounds.height - (plot_bounds.height * tick_ratio);
+        let tick_value = y_min + (y_max - y_min) * tick_ratio;
+        doc = doc.child(
+            Element::line()
+                .x1(plot_x)
+                .y1(tick_y)
+                .x2(plot_right)
+                .y2(tick_y)
+                .stroke("rgba(148,163,184,0.35)")
+                .stroke_width(1.0)
+                .stroke_dasharray("4,4")
+                .class("fm-xychart-gridline"),
+        );
+        doc = doc.child(
+            TextBuilder::new(&format_xychart_tick_value(tick_value))
+                .x(plot_x - 10.0)
+                .y(tick_y + 4.0)
+                .anchor(TextAnchor::End)
+                .font_family(&config.font_family)
+                .font_size(clamp_font_size(
+                    config.font_size * 0.72,
+                    config.min_font_size,
+                ))
+                .fill(&theme.colors.edge)
+                .class("fm-xychart-y-tick")
+                .build(),
+        );
+    }
+
+    doc = doc.child(
+        Element::line()
+            .x1(plot_x)
+            .y1(plot_bottom)
+            .x2(plot_right)
+            .y2(plot_bottom)
+            .stroke(&theme.colors.edge)
+            .stroke_width(1.5)
+            .class("fm-xychart-axis fm-xychart-axis-x"),
+    );
+    doc = doc.child(
+        Element::line()
+            .x1(plot_x)
+            .y1(plot_y)
+            .x2(plot_x)
+            .y2(plot_bottom)
+            .stroke(&theme.colors.edge)
+            .stroke_width(1.5)
+            .class("fm-xychart-axis fm-xychart-axis-y"),
+    );
+
+    let band_width = plot_bounds.width / categories.len().max(1) as f32;
+    for (index, category) in categories.iter().enumerate() {
+        let x = plot_x + band_width * (index as f32 + 0.5);
+        doc = doc.child(
+            TextBuilder::new(category)
+                .x(x)
+                .y(plot_bottom + 24.0)
+                .anchor(TextAnchor::Middle)
+                .font_family(&config.font_family)
+                .font_size(clamp_font_size(
+                    config.font_size * 0.74,
+                    config.min_font_size,
+                ))
+                .fill(&theme.colors.text)
+                .class("fm-xychart-x-tick")
+                .build(),
+        );
+    }
+
+    if let Some(title) = xy_chart_meta.title.as_deref() {
+        doc = doc.child(
+            TextBuilder::new(title)
+                .x((layout.bounds.width / 2.0) + offset_x)
+                .y(plot_y - 34.0)
+                .anchor(TextAnchor::Middle)
+                .font_family(&config.font_family)
+                .font_size(clamp_font_size(
+                    config.font_size * 1.18,
+                    config.min_font_size,
+                ))
+                .font_weight("600")
+                .fill(&theme.colors.text)
+                .class("fm-xychart-title")
+                .build(),
+        );
+    }
+
+    if let Some(y_label) = xy_chart_meta.y_axis.label.as_deref() {
+        doc = doc.child(
+            TextBuilder::new(y_label)
+                .x(plot_x - 52.0)
+                .y(plot_y - 12.0)
+                .font_family(&config.font_family)
+                .font_size(clamp_font_size(
+                    config.font_size * 0.76,
+                    config.min_font_size,
+                ))
+                .fill(&theme.colors.text)
+                .class("fm-xychart-y-label")
+                .build(),
+        );
+    }
+
+    for (series_index, series) in xy_chart_meta.series.iter().enumerate() {
+        let color = &palette[series_index % palette.len()];
+        let series_nodes: Vec<_> = series
+            .nodes
+            .iter()
+            .filter_map(|node_id| {
+                layout
+                    .nodes
+                    .iter()
+                    .find(|node| node.node_index == node_id.0)
+            })
+            .collect();
+
+        match series.kind {
+            IrXySeriesKind::Bar => {
+                for node in series_nodes {
+                    let mut rect = Element::rect()
+                        .x(node.bounds.x + offset_x)
+                        .y(node.bounds.y + offset_y)
+                        .width(node.bounds.width)
+                        .height(node.bounds.height)
+                        .fill(color)
+                        .fill_opacity(0.78)
+                        .stroke(color)
+                        .stroke_width(1.0)
+                        .rx((config.rounded_corners * 0.45).max(3.0))
+                        .class("fm-xychart-bar");
+                    if config.include_source_spans {
+                        rect = apply_span_metadata(rect, node.span);
+                    }
+                    doc = doc.child(rect);
+                }
+            }
+            IrXySeriesKind::Line | IrXySeriesKind::Area => {
+                if series_nodes.is_empty() {
+                    continue;
+                }
+                let points: Vec<(f32, f32)> = series_nodes
+                    .iter()
+                    .map(|node| {
+                        let center = node.bounds.center();
+                        (center.x + offset_x, center.y + offset_y)
+                    })
+                    .collect();
+
+                if matches!(series.kind, IrXySeriesKind::Area) {
+                    let first_x = points.first().map_or(plot_x, |point| point.0);
+                    let last_x = points.last().map_or(plot_x, |point| point.0);
+                    let mut fill_points = vec![(first_x, baseline_y)];
+                    fill_points.extend(points.iter().copied());
+                    fill_points.push((last_x, baseline_y));
+                    let mut area_path =
+                        PathBuilder::new().move_to(fill_points[0].0, fill_points[0].1);
+                    for point in fill_points.iter().skip(1) {
+                        area_path = area_path.line_to(point.0, point.1);
+                    }
+                    area_path = area_path.close();
+                    doc = doc.child(
+                        Element::path()
+                            .d(&area_path.build())
+                            .fill(color)
+                            .fill_opacity(0.16)
+                            .stroke("none")
+                            .class("fm-xychart-area"),
+                    );
+                }
+
+                let mut line_path = PathBuilder::new().move_to(points[0].0, points[0].1);
+                for point in points.iter().skip(1) {
+                    line_path = line_path.line_to(point.0, point.1);
+                }
+                doc = doc.child(
+                    Element::path()
+                        .d(&line_path.build())
+                        .fill("none")
+                        .stroke(color)
+                        .stroke_width(3.0)
+                        .stroke_linecap("round")
+                        .stroke_linejoin("round")
+                        .class("fm-xychart-line"),
+                );
+
+                for node in series_nodes {
+                    let center = node.bounds.center();
+                    let mut point = Element::circle()
+                        .cx(center.x + offset_x)
+                        .cy(center.y + offset_y)
+                        .r((node.bounds.width.min(node.bounds.height) / 2.0).max(3.5))
+                        .fill(color)
+                        .stroke(&theme.colors.background)
+                        .stroke_width(2.0)
+                        .class("fm-xychart-point");
+                    if config.include_source_spans {
+                        point = apply_span_metadata(point, node.span);
+                    }
+                    doc = doc.child(point);
+                }
+            }
+        }
+    }
+
+    doc
+}
+
+fn xychart_plot_bounds(layout: &DiagramLayout) -> fm_layout::LayoutRect {
+    const LEFT_MARGIN: f32 = 88.0;
+    const TOP_MARGIN: f32 = 84.0;
+    const RIGHT_MARGIN: f32 = 36.0;
+    const BOTTOM_MARGIN: f32 = 76.0;
+
+    fm_layout::LayoutRect {
+        x: layout.bounds.x + LEFT_MARGIN,
+        y: layout.bounds.y + TOP_MARGIN,
+        width: (layout.bounds.width - LEFT_MARGIN - RIGHT_MARGIN).max(1.0),
+        height: (layout.bounds.height - TOP_MARGIN - BOTTOM_MARGIN).max(1.0),
+    }
+}
+
+fn xychart_categories(xy_chart_meta: &IrXyChartMeta) -> Vec<String> {
+    if !xy_chart_meta.x_axis.categories.is_empty() {
+        return xy_chart_meta.x_axis.categories.clone();
+    }
+
+    let count = xy_chart_meta
+        .series
+        .iter()
+        .map(|series| series.values.len())
+        .max()
+        .unwrap_or(0);
+    let (x_min, x_max) = resolve_xychart_x_domain(xy_chart_meta, count);
+    if count <= 1 {
+        return vec![format_xychart_tick_value(x_min)];
+    }
+    let step = (x_max - x_min) / (count.saturating_sub(1) as f32).max(1.0);
+    (0..count)
+        .map(|index| format_xychart_tick_value(x_min + step * index as f32))
+        .collect()
+}
+
+fn resolve_xychart_x_domain(xy_chart_meta: &IrXyChartMeta, count: usize) -> (f32, f32) {
+    let min = xy_chart_meta.x_axis.min.unwrap_or(0.0);
+    let max = xy_chart_meta
+        .x_axis
+        .max
+        .unwrap_or_else(|| count.saturating_sub(1) as f32);
+    if (max - min).abs() < f32::EPSILON {
+        (min, min + 1.0)
+    } else {
+        (min, max)
+    }
+}
+
+fn resolve_xychart_y_domain(xy_chart_meta: &IrXyChartMeta) -> (f32, f32) {
+    let mut min_value = xy_chart_meta.y_axis.min.unwrap_or(f32::INFINITY);
+    let mut max_value = xy_chart_meta.y_axis.max.unwrap_or(f32::NEG_INFINITY);
+
+    if xy_chart_meta.y_axis.min.is_none() || xy_chart_meta.y_axis.max.is_none() {
+        for value in xy_chart_meta
+            .series
+            .iter()
+            .flat_map(|series| series.values.iter().copied())
+        {
+            min_value = min_value.min(value);
+            max_value = max_value.max(value);
+        }
+    }
+
+    if !min_value.is_finite() || !max_value.is_finite() {
+        return (0.0, 1.0);
+    }
+    if xy_chart_meta.y_axis.min.is_none() && min_value > 0.0 {
+        min_value = 0.0;
+    }
+    if xy_chart_meta.y_axis.max.is_none() && max_value < 0.0 {
+        max_value = 0.0;
+    }
+    if (max_value - min_value).abs() < f32::EPSILON {
+        max_value += 1.0;
+    }
+    (min_value, max_value)
+}
+
+fn xychart_value_to_y(
+    value: f32,
+    y_min: f32,
+    y_max: f32,
+    plot_bounds: fm_layout::LayoutRect,
+) -> f32 {
+    let range = (y_max - y_min).max(f32::EPSILON);
+    let ratio = ((value - y_min) / range).clamp(0.0, 1.0);
+    plot_bounds.y + plot_bounds.height - (ratio * plot_bounds.height)
+}
+
+fn format_xychart_tick_value(value: f32) -> String {
+    if (value - value.round()).abs() < 0.0001 {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.1}")
+    }
 }
 
 /// Render a single node to an SVG element.
@@ -1997,14 +2353,13 @@ fn render_node(
 
     // Add label text — with three-compartment rendering for class diagrams.
     if detail.show_node_labels {
-        let has_class_meta = ir_node
-            .and_then(|n| n.class_meta.as_ref())
-            .is_some_and(|m| !m.attributes.is_empty() || !m.methods.is_empty());
-
-        if has_class_meta {
+        if let Some(node) = ir_node
+            && let Some(ref meta) = node.class_meta
+            && (!meta.attributes.is_empty() || !meta.methods.is_empty())
+        {
             group = render_class_compartments(
                 group,
-                ir_node.unwrap(),
+                node,
                 ir,
                 x,
                 y,
@@ -2602,8 +2957,8 @@ mod tests {
     use super::*;
     use fm_core::{
         ArrowType, DiagramType, IrCluster, IrClusterId, IrEdge, IrEndpoint, IrGraphCluster,
-        IrGraphNode, IrLabel, IrLabelId, IrNode, IrNodeId, IrSubgraph, IrSubgraphId,
-        MermaidDiagramIr, NodeShape, Span,
+        IrGraphNode, IrLabel, IrLabelId, IrNode, IrNodeId, IrSubgraph, IrSubgraphId, IrXyAxis,
+        IrXyChartMeta, IrXySeries, IrXySeriesKind, MermaidDiagramIr, NodeShape, Span,
     };
     use fm_layout::{
         FillStyle, LayoutAxisTick, LayoutBand, LayoutBandKind, LineCap as RenderLineCap,
@@ -2775,6 +3130,63 @@ mod tests {
             arrow: ArrowType::Arrow,
             label: Some(IrLabelId(2)),
             ..Default::default()
+        });
+        ir
+    }
+
+    fn create_xychart_ir() -> MermaidDiagramIr {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::XyChart);
+        for node_id in [
+            "Revenue_1",
+            "Revenue_2",
+            "Revenue_3",
+            "Target_1",
+            "Target_2",
+            "Target_3",
+        ] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..Default::default()
+            });
+        }
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(3)),
+            to: IrEndpoint::Node(IrNodeId(4)),
+            arrow: ArrowType::Line,
+            ..Default::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(4)),
+            to: IrEndpoint::Node(IrNodeId(5)),
+            arrow: ArrowType::Line,
+            ..Default::default()
+        });
+        ir.xy_chart_meta = Some(IrXyChartMeta {
+            title: Some("Sales Revenue".to_string()),
+            x_axis: IrXyAxis {
+                categories: vec!["Jan".to_string(), "Feb".to_string(), "Mar".to_string()],
+                ..Default::default()
+            },
+            y_axis: IrXyAxis {
+                label: Some("Revenue".to_string()),
+                min: Some(0.0),
+                max: Some(100.0),
+                ..Default::default()
+            },
+            series: vec![
+                IrXySeries {
+                    kind: IrXySeriesKind::Bar,
+                    name: Some("Revenue".to_string()),
+                    values: vec![30.0, 50.0, 70.0],
+                    nodes: vec![IrNodeId(0), IrNodeId(1), IrNodeId(2)],
+                },
+                IrXySeries {
+                    kind: IrXySeriesKind::Line,
+                    name: Some("Target".to_string()),
+                    values: vec![40.0, 60.0, 80.0],
+                    nodes: vec![IrNodeId(3), IrNodeId(4), IrNodeId(5)],
+                },
+            ],
         });
         ir
     }
@@ -3105,6 +3517,21 @@ mod tests {
         assert!(svg.contains("fm-band-label"));
         assert!(svg.contains("fm-axis-tick"));
         assert!(svg.contains("2026-02-01"));
+    }
+
+    #[test]
+    fn renders_xychart_axes_bars_and_line_series() {
+        let ir = create_xychart_ir();
+        let svg = render_svg_with_config(&ir, &SvgRenderConfig::default());
+
+        assert!(svg.contains("fm-xychart-axis"));
+        assert!(svg.contains("fm-xychart-gridline"));
+        assert!(svg.contains("fm-xychart-bar"));
+        assert!(svg.contains("fm-xychart-line"));
+        assert!(svg.contains("fm-xychart-point"));
+        assert!(svg.contains("Sales Revenue"));
+        assert!(svg.contains(">Jan<"));
+        assert!(svg.contains(">Revenue<"));
     }
 
     #[test]

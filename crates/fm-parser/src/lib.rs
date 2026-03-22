@@ -9,6 +9,7 @@ use serde::Serialize;
 use serde_json::json;
 
 pub use dot_parser::{looks_like_dot, parse_dot};
+pub use mermaid_parser::first_significant_line;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ParseResult {

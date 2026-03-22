@@ -382,24 +382,12 @@ fn draw_cloud<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
     let cy = y + h / 2.0;
     let r = h / 3.0;
 
-    // Simplified cloud as overlapping circles
     ctx.begin_path();
+    // Simplified cloud as overlapping circles in a single path
     ctx.arc(x + r * 1.2, cy, r, 0.0, 2.0 * PI);
-    ctx.fill();
-    ctx.stroke();
-
-    ctx.begin_path();
     ctx.arc(cx, y + r * 0.8, r * 0.9, 0.0, 2.0 * PI);
-    ctx.fill();
-    ctx.stroke();
-
-    ctx.begin_path();
     ctx.arc(x + w - r * 1.2, cy, r, 0.0, 2.0 * PI);
-    ctx.fill();
-    ctx.stroke();
-
     // Bottom connecting rect
-    ctx.begin_path();
     ctx.rect(x + r * 0.5, cy, w - r, h * 0.4);
     ctx.fill();
     ctx.stroke();

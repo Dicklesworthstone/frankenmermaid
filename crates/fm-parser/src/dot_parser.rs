@@ -24,14 +24,15 @@ pub fn parse_dot(input: &str) -> ParseResult {
     let mut builder = IrBuilder::new(DiagramType::Flowchart);
     let directed = is_directed_graph(input);
     let body = extract_body(input);
-    let normalized_body = normalize_dot_body(body);
+    let body_without_comments = strip_all_comments(body);
+    let normalized_body = normalize_dot_body(&body_without_comments);
     let mut active_clusters: Vec<usize> = Vec::new();
     let mut active_subgraphs: Vec<usize> = Vec::new();
     let mut subgraph_serial = 0usize;
 
     for (index, line) in normalized_body.lines().enumerate() {
         let line_number = index + 1;
-        let trimmed = strip_comments(line).trim();
+        let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
@@ -128,6 +129,81 @@ pub fn parse_dot(input: &str) -> ParseResult {
     }
 
     builder.finish(0.95, DetectionMethod::DotFormat)
+}
+
+fn strip_all_comments(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut in_quote: Option<char> = None;
+    let mut escaped = false;
+    let mut in_multiline_comment = false;
+    let mut in_singleline_comment = false;
+
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+
+        if in_multiline_comment {
+            if c == '*' && i + 1 < chars.len() && chars[i + 1] == '/' {
+                in_multiline_comment = false;
+                i += 2;
+            } else {
+                if c == '\n' {
+                    output.push('\n');
+                }
+                i += 1;
+            }
+            continue;
+        }
+
+        if in_singleline_comment {
+            if c == '\n' {
+                in_singleline_comment = false;
+                output.push('\n');
+            }
+            i += 1;
+            continue;
+        }
+
+        if let Some(q) = in_quote {
+            output.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == q {
+                in_quote = None;
+            }
+            i += 1;
+            continue;
+        }
+
+        if c == '/' && i + 1 < chars.len() {
+            if chars[i + 1] == '/' {
+                in_singleline_comment = true;
+                i += 2;
+                continue;
+            } else if chars[i + 1] == '*' {
+                in_multiline_comment = true;
+                i += 2;
+                continue;
+            }
+        }
+
+        if c == '#' && (i == 0 || chars[i - 1] == '\n') {
+            in_singleline_comment = true;
+            i += 1;
+            continue;
+        }
+
+        if c == '"' || c == '\'' {
+            in_quote = Some(c);
+        }
+
+        output.push(c);
+        i += 1;
+    }
+    output
 }
 
 fn parse_dot_edge_statement(
@@ -420,43 +496,6 @@ fn normalize_identifier(raw: &str) -> String {
         result = fallback.trim_matches('_').to_string();
     }
     result
-}
-
-fn strip_comments(line: &str) -> &str {
-    let trimmed = line.trim_start();
-    if trimmed.starts_with('#') {
-        // DOT format macro preprocessor lines
-        return "";
-    }
-
-    let mut in_quote: Option<char> = None;
-    let mut escaped = false;
-
-    for (i, ch) in line.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' {
-            escaped = true;
-            continue;
-        }
-        if let Some(quote) = in_quote {
-            if ch == quote {
-                in_quote = None;
-            }
-            continue;
-        }
-        if ch == '"' || ch == '\'' {
-            in_quote = Some(ch);
-            continue;
-        }
-        if line[i..].starts_with("//") || line[i..].starts_with("/*") {
-            return &line[..i];
-        }
-    }
-
-    line
 }
 
 fn is_directed_graph(input: &str) -> bool {

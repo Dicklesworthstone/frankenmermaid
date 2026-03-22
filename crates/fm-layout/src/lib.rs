@@ -5,10 +5,10 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::f32::consts::PI;
 
 use fm_core::{
-    DiagramType, GraphDirection, IrEndpoint, IrGanttMeta, IrNode, MermaidComplexity, MermaidConfig,
-    MermaidDiagramIr, MermaidFidelity, MermaidGlyphMode, MermaidGuardReport,
-    MermaidLayoutDecisionAlternative, MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord,
-    MermaidPressureReport, MermaidPressureTier, Span,
+    DiagramType, GraphDirection, IrEndpoint, IrGanttMeta, IrNode, IrXyChartMeta, IrXySeriesKind,
+    MermaidComplexity, MermaidConfig, MermaidDiagramIr, MermaidFidelity, MermaidGlyphMode,
+    MermaidGuardReport, MermaidLayoutDecisionAlternative, MermaidLayoutDecisionLedger,
+    MermaidLayoutDecisionRecord, MermaidPressureReport, MermaidPressureTier, Span,
 };
 use tracing::{debug, info, trace, warn};
 
@@ -21,6 +21,7 @@ pub enum LayoutAlgorithm {
     Radial,
     Timeline,
     Gantt,
+    XyChart,
     Sankey,
     Kanban,
     Grid,
@@ -38,6 +39,7 @@ impl LayoutAlgorithm {
             Self::Radial => "radial",
             Self::Timeline => "timeline",
             Self::Gantt => "gantt",
+            Self::XyChart => "xychart",
             Self::Sankey => "sankey",
             Self::Kanban => "kanban",
             Self::Grid => "grid",
@@ -1548,6 +1550,7 @@ pub fn layout_diagram_traced_with_config_and_guardrails(
         LayoutAlgorithm::Radial => layout_diagram_radial_traced(ir),
         LayoutAlgorithm::Timeline => layout_diagram_timeline_traced(ir),
         LayoutAlgorithm::Gantt => layout_diagram_gantt_traced(ir),
+        LayoutAlgorithm::XyChart => layout_diagram_xychart_traced(ir),
         LayoutAlgorithm::Sankey => layout_diagram_sankey_traced(ir),
         LayoutAlgorithm::Kanban => layout_diagram_kanban_traced(ir),
         LayoutAlgorithm::Grid => layout_diagram_grid_traced(ir),
@@ -1619,6 +1622,7 @@ fn auto_selection_reason(ir: &MermaidDiagramIr, selected: LayoutAlgorithm) -> &'
         DiagramType::Mindmap => return "auto_diagram_type_mindmap",
         DiagramType::Timeline => return "auto_diagram_type_timeline",
         DiagramType::Gantt => return "auto_diagram_type_gantt",
+        DiagramType::XyChart => return "auto_diagram_type_xychart",
         DiagramType::Sankey => return "auto_diagram_type_sankey",
         DiagramType::Journey | DiagramType::Kanban => return "auto_diagram_type_kanban",
         DiagramType::BlockBeta => return "auto_diagram_type_block_beta",
@@ -1644,6 +1648,7 @@ fn preferred_layout_algorithm(ir: &MermaidDiagramIr) -> LayoutAlgorithm {
         DiagramType::Mindmap => LayoutAlgorithm::Radial,
         DiagramType::Timeline => LayoutAlgorithm::Timeline,
         DiagramType::Gantt => LayoutAlgorithm::Gantt,
+        DiagramType::XyChart => LayoutAlgorithm::XyChart,
         DiagramType::Sankey => LayoutAlgorithm::Sankey,
         DiagramType::Journey | DiagramType::Kanban => LayoutAlgorithm::Kanban,
         DiagramType::BlockBeta => LayoutAlgorithm::Grid,
@@ -1693,6 +1698,7 @@ fn algorithm_available_for_diagram(diagram_type: DiagramType, algorithm: LayoutA
         LayoutAlgorithm::Radial => matches!(diagram_type, DiagramType::Mindmap),
         LayoutAlgorithm::Timeline => matches!(diagram_type, DiagramType::Timeline),
         LayoutAlgorithm::Gantt => matches!(diagram_type, DiagramType::Gantt),
+        LayoutAlgorithm::XyChart => matches!(diagram_type, DiagramType::XyChart),
         LayoutAlgorithm::Sankey => matches!(diagram_type, DiagramType::Sankey),
         LayoutAlgorithm::Kanban => {
             matches!(diagram_type, DiagramType::Journey | DiagramType::Kanban)
@@ -1778,6 +1784,7 @@ fn estimate_layout_cost(ir: &MermaidDiagramIr, algorithm: LayoutAlgorithm) -> La
         },
         LayoutAlgorithm::Timeline
         | LayoutAlgorithm::Gantt
+        | LayoutAlgorithm::XyChart
         | LayoutAlgorithm::Kanban
         | LayoutAlgorithm::Grid
         | LayoutAlgorithm::Sequence => LayoutCostEstimate {
@@ -1822,6 +1829,11 @@ fn fallback_candidates(ir: &MermaidDiagramIr, selected: LayoutAlgorithm) -> Vec<
         DiagramType::Timeline => [
             LayoutAlgorithm::Timeline,
             LayoutAlgorithm::Tree,
+            LayoutAlgorithm::Sugiyama,
+        ],
+        DiagramType::XyChart => [
+            LayoutAlgorithm::XyChart,
+            LayoutAlgorithm::Grid,
             LayoutAlgorithm::Sugiyama,
         ],
         DiagramType::Gantt => [
@@ -3262,6 +3274,289 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
         })
         .collect();
     traced
+}
+
+#[must_use]
+pub fn layout_diagram_xychart(ir: &MermaidDiagramIr) -> DiagramLayout {
+    layout_diagram_xychart_traced(ir).layout
+}
+
+#[must_use]
+pub fn layout_diagram_xychart_traced(ir: &MermaidDiagramIr) -> TracedLayout {
+    if let Some(xy_chart_meta) = ir
+        .xy_chart_meta
+        .as_ref()
+        .filter(|meta| !meta.series.is_empty())
+    {
+        return layout_diagram_xychart_from_meta(ir, xy_chart_meta);
+    }
+
+    let mut trace = LayoutTrace::default();
+    push_snapshot(
+        &mut trace,
+        "xychart_layout_empty",
+        ir.nodes.len(),
+        ir.edges.len(),
+        0,
+        0,
+    );
+    TracedLayout {
+        layout: DiagramLayout {
+            nodes: Vec::new(),
+            clusters: Vec::new(),
+            cycle_clusters: Vec::new(),
+            edges: Vec::new(),
+            bounds: LayoutRect {
+                x: 0.0,
+                y: 0.0,
+                width: 320.0,
+                height: 240.0,
+            },
+            stats: LayoutStats {
+                node_count: 0,
+                edge_count: 0,
+                crossing_count: 0,
+                crossing_count_before_refinement: 0,
+                reversed_edges: 0,
+                cycle_count: 0,
+                cycle_node_count: 0,
+                max_cycle_size: 0,
+                collapsed_clusters: 0,
+                reversed_edge_total_length: 0.0,
+                total_edge_length: 0.0,
+                phase_iterations: trace.snapshots.len(),
+            },
+            extensions: LayoutExtensions::default(),
+        },
+        trace,
+    }
+}
+
+fn layout_diagram_xychart_from_meta(
+    ir: &MermaidDiagramIr,
+    xy_chart_meta: &IrXyChartMeta,
+) -> TracedLayout {
+    let mut trace = LayoutTrace::default();
+    push_snapshot(
+        &mut trace,
+        "xychart_layout",
+        ir.nodes.len(),
+        ir.edges.len(),
+        0,
+        0,
+    );
+
+    const LEFT_MARGIN: f32 = 88.0;
+    const TOP_MARGIN: f32 = 84.0;
+    const RIGHT_MARGIN: f32 = 36.0;
+    const BOTTOM_MARGIN: f32 = 76.0;
+    const PLOT_HEIGHT: f32 = 320.0;
+    const MIN_PLOT_WIDTH: f32 = 240.0;
+    const CATEGORY_STEP: f32 = 88.0;
+    const POINT_DIAMETER: f32 = 12.0;
+
+    let category_count = xy_chart_category_count(xy_chart_meta).max(1);
+    let plot_width = (category_count as f32 * CATEGORY_STEP).max(MIN_PLOT_WIDTH);
+    let plot_bounds = LayoutRect {
+        x: LEFT_MARGIN,
+        y: TOP_MARGIN,
+        width: plot_width,
+        height: PLOT_HEIGHT,
+    };
+    let bounds = LayoutRect {
+        x: 0.0,
+        y: 0.0,
+        width: LEFT_MARGIN + plot_width + RIGHT_MARGIN,
+        height: TOP_MARGIN + PLOT_HEIGHT + BOTTOM_MARGIN,
+    };
+
+    let (y_min, y_max) = resolve_xychart_y_domain(xy_chart_meta);
+    let baseline_value = y_min.min(0.0).max(y_max.min(0.0));
+    let baseline_y = xychart_value_to_y(baseline_value, y_min, y_max, plot_bounds);
+    let band_width = plot_bounds.width / category_count as f32;
+    let bar_series_count = xy_chart_meta
+        .series
+        .iter()
+        .filter(|series| matches!(series.kind, IrXySeriesKind::Bar))
+        .count()
+        .max(1);
+
+    let mut nodes = Vec::with_capacity(ir.nodes.len());
+    let mut edges = Vec::new();
+    let mut bar_slot = 0_usize;
+
+    for (series_index, series) in xy_chart_meta.series.iter().enumerate() {
+        let is_bar = matches!(series.kind, IrXySeriesKind::Bar);
+        let local_bar_slot = if is_bar {
+            let slot = bar_slot;
+            bar_slot = bar_slot.saturating_add(1);
+            slot
+        } else {
+            0
+        };
+
+        for (point_index, node_id) in series.nodes.iter().copied().enumerate() {
+            let Some(&value) = series.values.get(point_index) else {
+                continue;
+            };
+            let x_band_start = plot_bounds.x + point_index as f32 * band_width;
+            let x_center = x_band_start + band_width / 2.0;
+            let value_y = xychart_value_to_y(value, y_min, y_max, plot_bounds);
+            let node_bounds = if is_bar {
+                let bar_width =
+                    (band_width * 0.72 / bar_series_count as f32).clamp(10.0, band_width * 0.78);
+                let group_width = bar_width * bar_series_count as f32;
+                let group_start = x_band_start + (band_width - group_width) / 2.0;
+                let x = group_start + local_bar_slot as f32 * bar_width;
+                let y = value_y.min(baseline_y);
+                let height = (baseline_y - value_y).abs().max(1.0);
+                LayoutRect {
+                    x,
+                    y,
+                    width: bar_width,
+                    height,
+                }
+            } else {
+                LayoutRect {
+                    x: x_center - POINT_DIAMETER / 2.0,
+                    y: value_y - POINT_DIAMETER / 2.0,
+                    width: POINT_DIAMETER,
+                    height: POINT_DIAMETER,
+                }
+            };
+
+            nodes.push(LayoutNodeBox {
+                node_index: node_id.0,
+                node_id: ir.nodes[node_id.0].id.clone(),
+                rank: point_index,
+                order: series_index,
+                span: ir.nodes[node_id.0].span_primary,
+                bounds: node_bounds,
+            });
+        }
+
+        if matches!(series.kind, IrXySeriesKind::Line | IrXySeriesKind::Area) {
+            for edge_index in ir
+                .edges
+                .iter()
+                .enumerate()
+                .filter_map(|(edge_index, edge)| {
+                    let source = endpoint_node_index(ir, edge.from)?;
+                    let target = endpoint_node_index(ir, edge.to)?;
+                    if series.nodes.iter().any(|node| node.0 == source)
+                        && series.nodes.iter().any(|node| node.0 == target)
+                    {
+                        Some((edge_index, source, target, edge.span))
+                    } else {
+                        None
+                    }
+                })
+            {
+                let (edge_index, source, target, span) = edge_index;
+                let Some(source_bounds) = nodes.iter().find(|node| node.node_index == source)
+                else {
+                    continue;
+                };
+                let Some(target_bounds) = nodes.iter().find(|node| node.node_index == target)
+                else {
+                    continue;
+                };
+                edges.push(LayoutEdgePath {
+                    edge_index,
+                    span,
+                    points: vec![source_bounds.bounds.center(), target_bounds.bounds.center()],
+                    reversed: false,
+                    is_self_loop: false,
+                    parallel_offset: 0.0,
+                });
+            }
+        }
+    }
+
+    nodes.sort_by_key(|node| node.node_index);
+    edges.sort_by_key(|edge| edge.edge_index);
+    push_snapshot(
+        &mut trace,
+        "xychart_geometry",
+        nodes.len(),
+        edges.len(),
+        0,
+        0,
+    );
+    let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
+
+    TracedLayout {
+        layout: DiagramLayout {
+            nodes,
+            clusters: Vec::new(),
+            cycle_clusters: Vec::new(),
+            edges,
+            bounds,
+            stats: LayoutStats {
+                node_count: ir.nodes.len(),
+                edge_count: ir.edges.len(),
+                crossing_count: 0,
+                crossing_count_before_refinement: 0,
+                reversed_edges: 0,
+                cycle_count: 0,
+                cycle_node_count: 0,
+                max_cycle_size: 0,
+                collapsed_clusters: 0,
+                reversed_edge_total_length,
+                total_edge_length,
+                phase_iterations: trace.snapshots.len(),
+            },
+            extensions: LayoutExtensions::default(),
+        },
+        trace,
+    }
+}
+
+fn xy_chart_category_count(xy_chart_meta: &IrXyChartMeta) -> usize {
+    xy_chart_meta.x_axis.categories.len().max(
+        xy_chart_meta
+            .series
+            .iter()
+            .map(|series| series.values.len())
+            .max()
+            .unwrap_or(0),
+    )
+}
+
+fn resolve_xychart_y_domain(xy_chart_meta: &IrXyChartMeta) -> (f32, f32) {
+    let mut min_value = xy_chart_meta.y_axis.min.unwrap_or(f32::INFINITY);
+    let mut max_value = xy_chart_meta.y_axis.max.unwrap_or(f32::NEG_INFINITY);
+
+    if xy_chart_meta.y_axis.min.is_none() || xy_chart_meta.y_axis.max.is_none() {
+        for value in xy_chart_meta
+            .series
+            .iter()
+            .flat_map(|series| series.values.iter().copied())
+        {
+            min_value = min_value.min(value);
+            max_value = max_value.max(value);
+        }
+    }
+
+    if !min_value.is_finite() || !max_value.is_finite() {
+        return (0.0, 1.0);
+    }
+    if xy_chart_meta.y_axis.min.is_none() && min_value > 0.0 {
+        min_value = 0.0;
+    }
+    if xy_chart_meta.y_axis.max.is_none() && max_value < 0.0 {
+        max_value = 0.0;
+    }
+    if (max_value - min_value).abs() < f32::EPSILON {
+        max_value += 1.0;
+    }
+    (min_value, max_value)
+}
+
+fn xychart_value_to_y(value: f32, y_min: f32, y_max: f32, plot_bounds: LayoutRect) -> f32 {
+    let range = (y_max - y_min).max(f32::EPSILON);
+    let ratio = ((value - y_min) / range).clamp(0.0, 1.0);
+    plot_bounds.y + plot_bounds.height - (ratio * plot_bounds.height)
 }
 
 fn parse_iso_day_number(value: &str) -> Option<i32> {
@@ -7632,7 +7927,7 @@ pub fn build_layout_decision_ledger(
     }
 }
 
-fn concrete_layout_algorithms() -> [LayoutAlgorithm; 10] {
+fn concrete_layout_algorithms() -> [LayoutAlgorithm; 11] {
     [
         LayoutAlgorithm::Sugiyama,
         LayoutAlgorithm::Force,
@@ -7640,6 +7935,7 @@ fn concrete_layout_algorithms() -> [LayoutAlgorithm; 10] {
         LayoutAlgorithm::Radial,
         LayoutAlgorithm::Timeline,
         LayoutAlgorithm::Gantt,
+        LayoutAlgorithm::XyChart,
         LayoutAlgorithm::Sankey,
         LayoutAlgorithm::Kanban,
         LayoutAlgorithm::Grid,
@@ -7663,6 +7959,7 @@ fn layout_decision_confidence_permille(
                 LayoutAlgorithm::Sequence
                 | LayoutAlgorithm::Timeline
                 | LayoutAlgorithm::Gantt
+                | LayoutAlgorithm::XyChart
                 | LayoutAlgorithm::Sankey
                 | LayoutAlgorithm::Kanban
                 | LayoutAlgorithm::Grid
@@ -7703,14 +8000,14 @@ mod tests {
         layout_diagram_grid, layout_diagram_radial, layout_diagram_sankey, layout_diagram_sequence,
         layout_diagram_sequence_traced, layout_diagram_timeline, layout_diagram_traced,
         layout_diagram_traced_with_algorithm, layout_diagram_traced_with_algorithm_and_guardrails,
-        layout_diagram_tree, layout_diagram_with_cycle_strategy, route_edge_points,
-        route_edge_points_with_obstacles,
+        layout_diagram_tree, layout_diagram_with_cycle_strategy, layout_diagram_xychart,
+        route_edge_points, route_edge_points_with_obstacles,
     };
     use fm_core::{
         ArrowType, DiagramType, GraphDirection, IrCluster, IrClusterId, IrEdge, IrEndpoint,
         IrGanttMeta, IrGanttSection, IrGanttTask, IrGraphCluster, IrGraphNode, IrLabel, IrLabelId,
-        IrNode, IrNodeId, IrSubgraph, IrSubgraphId, MermaidDiagramIr, MermaidPressureTier,
-        NodeShape, Span,
+        IrNode, IrNodeId, IrSubgraph, IrSubgraphId, IrXyAxis, IrXyChartMeta, IrXySeries,
+        IrXySeriesKind, MermaidDiagramIr, MermaidPressureTier, NodeShape, Span,
     };
     use proptest::prelude::*;
     use std::collections::BTreeMap;
@@ -7742,6 +8039,63 @@ mod tests {
             to: IrEndpoint::Node(IrNodeId(1)),
             arrow: ArrowType::Arrow,
             ..IrEdge::default()
+        });
+        ir
+    }
+
+    fn sample_xychart_ir() -> MermaidDiagramIr {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::XyChart);
+        for node_id in [
+            "Revenue_1",
+            "Revenue_2",
+            "Revenue_3",
+            "Target_1",
+            "Target_2",
+            "Target_3",
+        ] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(3)),
+            to: IrEndpoint::Node(IrNodeId(4)),
+            arrow: ArrowType::Line,
+            ..IrEdge::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(4)),
+            to: IrEndpoint::Node(IrNodeId(5)),
+            arrow: ArrowType::Line,
+            ..IrEdge::default()
+        });
+        ir.xy_chart_meta = Some(IrXyChartMeta {
+            title: Some("Revenue".to_string()),
+            x_axis: IrXyAxis {
+                categories: vec!["Jan".to_string(), "Feb".to_string(), "Mar".to_string()],
+                ..Default::default()
+            },
+            y_axis: IrXyAxis {
+                label: Some("USD".to_string()),
+                min: Some(0.0),
+                max: Some(100.0),
+                ..Default::default()
+            },
+            series: vec![
+                IrXySeries {
+                    kind: IrXySeriesKind::Bar,
+                    name: Some("Revenue".to_string()),
+                    values: vec![30.0, 50.0, 70.0],
+                    nodes: vec![IrNodeId(0), IrNodeId(1), IrNodeId(2)],
+                },
+                IrXySeries {
+                    kind: IrXySeriesKind::Line,
+                    name: Some("Target".to_string()),
+                    values: vec![40.0, 60.0, 80.0],
+                    nodes: vec![IrNodeId(3), IrNodeId(4), IrNodeId(5)],
+                },
+            ],
         });
         ir
     }
@@ -8289,6 +8643,41 @@ mod tests {
         assert_eq!(layout.extensions.bands.len(), 2);
         assert_eq!(layout.extensions.axis_ticks.len(), 5);
         assert_eq!(layout.extensions.axis_ticks[0].label, "2026-02-01");
+    }
+
+    #[test]
+    fn xychart_layout_positions_bars_and_line_points_inside_plot() {
+        let layout = layout_diagram_xychart(&sample_xychart_ir());
+
+        assert_eq!(layout.nodes.len(), 6);
+        assert_eq!(layout.edges.len(), 2);
+        assert!(layout.bounds.width > 300.0);
+        assert!(layout.bounds.height > 300.0);
+
+        let revenue_1 = layout
+            .nodes
+            .iter()
+            .find(|node| node.node_id == "Revenue_1")
+            .expect("Revenue_1 should exist");
+        let revenue_3 = layout
+            .nodes
+            .iter()
+            .find(|node| node.node_id == "Revenue_3")
+            .expect("Revenue_3 should exist");
+        let target_1 = layout
+            .nodes
+            .iter()
+            .find(|node| node.node_id == "Target_1")
+            .expect("Target_1 should exist");
+        let target_3 = layout
+            .nodes
+            .iter()
+            .find(|node| node.node_id == "Target_3")
+            .expect("Target_3 should exist");
+
+        assert!(revenue_3.bounds.height > revenue_1.bounds.height);
+        assert!(target_3.bounds.center().y < target_1.bounds.center().y);
+        assert!(revenue_3.bounds.center().x > revenue_1.bounds.center().x);
     }
 
     #[test]
@@ -10883,6 +11272,14 @@ mod tests {
     }
 
     #[test]
+    fn auto_select_xychart_uses_xychart() {
+        let ir = MermaidDiagramIr::empty(DiagramType::XyChart);
+        let dispatch = dispatch_layout_algorithm(&ir, LayoutAlgorithm::Auto);
+        assert_eq!(dispatch.selected, LayoutAlgorithm::XyChart);
+        assert_eq!(dispatch.reason, "auto_diagram_type_xychart");
+    }
+
+    #[test]
     fn auto_select_tree_like_flowchart_uses_tree() {
         // Use 15 nodes to exceed the threshold (> 10) for Tree layout.
         let ir = graph_ir(
@@ -11168,6 +11565,13 @@ mod tests {
         });
         let traced = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Timeline);
         assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Timeline);
+    }
+
+    #[test]
+    fn dispatch_parity_xychart_for_xychart() {
+        let traced =
+            layout_diagram_traced_with_algorithm(&sample_xychart_ir(), LayoutAlgorithm::XyChart);
+        assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::XyChart);
     }
 
     #[test]
