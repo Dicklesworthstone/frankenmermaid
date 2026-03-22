@@ -319,6 +319,7 @@ pub struct LayoutNodeBox {
 pub struct LayoutClusterBox {
     pub cluster_index: usize,
     pub span: Span,
+    pub title: Option<String>,
     pub bounds: LayoutRect,
 }
 
@@ -3086,13 +3087,6 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         0.0
     };
 
-    let bounds = LayoutRect {
-        x: 0.0,
-        y: 0.0,
-        width: total_width,
-        height: diagram_bottom,
-    };
-
     push_snapshot(
         &mut trace,
         "sequence_post_processing",
@@ -3173,10 +3167,88 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         })
         .unwrap_or_default();
 
+    let participant_group_clusters: Vec<LayoutClusterBox> = ir
+        .sequence_meta
+        .as_ref()
+        .map(|meta| {
+            meta.participant_groups
+                .iter()
+                .enumerate()
+                .filter_map(|(group_index, group)| {
+                    let member_indexes: Vec<usize> =
+                        group.participants.iter().map(|participant| participant.0).collect();
+                    let first_member = member_indexes.first().copied()?;
+                    let last_member = member_indexes.last().copied()?;
+                    let first_box = nodes.get(first_member)?;
+                    let last_box = nodes.get(last_member)?;
+
+                    let x_padding = spacing.cluster_padding * 0.45;
+                    let top_padding = spacing.cluster_padding * 0.7;
+                    let bottom_padding = spacing.cluster_padding * 0.3;
+                    let min_x = first_box.bounds.x - x_padding;
+                    let max_x = last_box.bounds.x + last_box.bounds.width + x_padding;
+                    let min_y = header_y - top_padding;
+                    let max_y = diagram_bottom + bottom_padding;
+
+                    Some(LayoutClusterBox {
+                        cluster_index: group_index,
+                        span: Span::default(),
+                        title: (!group.label.is_empty()).then_some(group.label.clone()),
+                        bounds: LayoutRect {
+                            x: min_x,
+                            y: min_y,
+                            width: max_x - min_x,
+                            height: max_y - min_y,
+                        },
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let cluster_bounds = participant_group_clusters.iter().fold(None, |acc, cluster| {
+        let cluster_max_x = cluster.bounds.x + cluster.bounds.width;
+        let cluster_max_y = cluster.bounds.y + cluster.bounds.height;
+        Some(match acc {
+            Some((min_x, min_y, max_x, max_y)) => (
+                min_x.min(cluster.bounds.x),
+                min_y.min(cluster.bounds.y),
+                max_x.max(cluster_max_x),
+                max_y.max(cluster_max_y),
+            ),
+            None => (
+                cluster.bounds.x,
+                cluster.bounds.y,
+                cluster_max_x,
+                cluster_max_y,
+            ),
+        })
+    });
+
+    let bounds = if let Some((cluster_min_x, cluster_min_y, cluster_max_x, cluster_max_y)) =
+        cluster_bounds
+    {
+        let min_x = cluster_min_x.min(0.0);
+        let min_y = cluster_min_y.min(0.0);
+        LayoutRect {
+            x: min_x,
+            y: min_y,
+            width: total_width.max(cluster_max_x) - min_x,
+            height: diagram_bottom.max(cluster_max_y) - min_y,
+        }
+    } else {
+        LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            width: total_width,
+            height: diagram_bottom,
+        }
+    };
+
     TracedLayout {
         layout: DiagramLayout {
             nodes,
-            clusters: Vec::new(),
+            clusters: participant_group_clusters,
             cycle_clusters: Vec::new(),
             edges,
             bounds,
@@ -7642,6 +7714,10 @@ fn build_cluster_boxes(
                         .clusters
                         .get(cluster_index)
                         .map_or(Span::default(), |cluster| cluster.span),
+                    title: cluster
+                        .title
+                        .and_then(|label_id| ir.labels.get(label_id.0))
+                        .map(|label| label.text.clone()),
                     bounds: LayoutRect {
                         x: min_x - spacing.cluster_padding,
                         y: min_y - spacing.cluster_padding,
@@ -7924,6 +8000,7 @@ fn build_cycle_cluster_results(
             clusters.push(LayoutClusterBox {
                 cluster_index: clusters.len(),
                 span: Span::default(),
+                title: None,
                 bounds: cluster_bounds,
             });
         }
