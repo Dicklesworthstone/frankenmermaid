@@ -1000,8 +1000,10 @@ pub enum ArrowType {
     #[default]
     Line,
     Arrow,
+    OpenArrow,
     ThickArrow,
     DottedArrow,
+    DottedOpenArrow,
     Circle,
     Cross,
     ThickLine,
@@ -1017,8 +1019,10 @@ impl ArrowType {
         match self {
             Self::Line => "---",
             Self::Arrow => "-->",
+            Self::OpenArrow => "-)",
             Self::ThickArrow => "==>",
             Self::DottedArrow => "-.->",
+            Self::DottedOpenArrow => "--)",
             Self::Circle => "--o",
             Self::Cross => "--x",
             Self::ThickLine => "===",
@@ -1193,6 +1197,9 @@ pub struct IrEdge {
     pub arrow: ArrowType,
     pub label: Option<IrLabelId>,
     pub span: Span,
+    /// Raw ER cardinality operator (e.g., `"||--o{"`), stored only for ER diagrams.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub er_notation: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
@@ -3880,8 +3887,10 @@ mod tests {
         let expectations = [
             (ArrowType::Line, "---"),
             (ArrowType::Arrow, "-->"),
+            (ArrowType::OpenArrow, "-)"),
             (ArrowType::ThickArrow, "==>"),
             (ArrowType::DottedArrow, "-.->"),
+            (ArrowType::DottedOpenArrow, "--)"),
             (ArrowType::Circle, "--o"),
             (ArrowType::Cross, "--x"),
             (ArrowType::ThickLine, "==="),
@@ -4311,6 +4320,7 @@ mod tests {
             arrow: ArrowType::Arrow,
             label: Some(IrLabelId(0)),
             span: sample_span(2, 1, 6),
+            er_notation: None,
         });
 
         let encoded = serde_json::to_string(&ir).expect("serialize ir");
@@ -4369,6 +4379,7 @@ mod tests {
             arrow: ArrowType::Circle,
             label: Some(IrLabelId(3)),
             span: sample_span(6, 1, 9),
+            er_notation: None,
         };
 
         assert_eq!(edge.from, edge.to);

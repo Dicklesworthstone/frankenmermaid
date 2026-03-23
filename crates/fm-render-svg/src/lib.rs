@@ -1434,8 +1434,11 @@ fn render_layout_to_svg(
         doc = doc.child(line);
     }
 
-    // Render edges
+    // Render edges (skip edges absorbed into bundles).
     for edge_path in &layout.edges {
+        if edge_path.bundled {
+            continue;
+        }
         let edge_elem = render_edge(
             edge_path,
             ir,
@@ -1446,6 +1449,53 @@ fn render_layout_to_svg(
             &theme.colors,
         );
         doc = doc.child(edge_elem);
+    }
+
+    // Render ER cardinality labels near edge endpoints.
+    if ir.diagram_type == fm_core::DiagramType::Er {
+        for edge_path in &layout.edges {
+            if let Some(ir_edge) = ir.edges.get(edge_path.edge_index)
+                && let Some(notation) = &ir_edge.er_notation
+                && edge_path.points.len() >= 2
+            {
+                let (left_label, right_label) = parse_er_cardinality(notation);
+                let font_size = config.font_size * 0.7;
+
+                // Left cardinality near first waypoint.
+                if !left_label.is_empty() {
+                    let p = &edge_path.points[0];
+                    doc = doc.child(
+                        Element::text()
+                            .x(p.x + offset_x + 8.0)
+                            .y(p.y + offset_y - 8.0)
+                            .content(left_label)
+                            .attr("text-anchor", "start")
+                            .attr("dominant-baseline", "auto")
+                            .attr_num("font-size", font_size)
+                            .attr("font-family", &config.font_family)
+                            .fill(&theme.colors.text)
+                            .class("fm-er-cardinality"),
+                    );
+                }
+
+                // Right cardinality near last waypoint.
+                if !right_label.is_empty() {
+                    let p = &edge_path.points[edge_path.points.len() - 1];
+                    doc = doc.child(
+                        Element::text()
+                            .x(p.x + offset_x + 8.0)
+                            .y(p.y + offset_y - 8.0)
+                            .content(right_label)
+                            .attr("text-anchor", "start")
+                            .attr("dominant-baseline", "auto")
+                            .attr_num("font-size", font_size)
+                            .attr("font-family", &config.font_family)
+                            .fill(&theme.colors.text)
+                            .class("fm-er-cardinality"),
+                    );
+                }
+            }
+        }
     }
 
     // Render nodes
@@ -1555,6 +1605,39 @@ fn render_layout_axis_tick(label: &str, x: f32, y: f32, config: &SvgRenderConfig
             .class("fm-axis-tick-label")
             .build(),
     )
+}
+
+/// Parse an ER cardinality notation string (e.g., `"||--o{"`) into display labels
+/// for the left and right endpoints.
+fn parse_er_cardinality(notation: &str) -> (&str, &str) {
+    // Find the connector: `--`, `..`, or `==`.
+    let connector_idx = notation
+        .find("--")
+        .or_else(|| notation.find(".."))
+        .or_else(|| notation.find("=="));
+
+    let Some(idx) = connector_idx else {
+        return ("", "");
+    };
+
+    let connector_len = 2;
+    let left = notation[..idx].trim();
+    let right = notation[idx + connector_len..].trim();
+
+    (er_marker_to_label(left), er_marker_to_label(right))
+}
+
+fn er_marker_to_label(marker: &str) -> &str {
+    match marker {
+        "||" => "1",
+        "o|" | "|o" => "0..1",
+        "o{" | "}o" => "0..*",
+        "|{" | "}|" => "1..*",
+        _ if marker.contains('{') || marker.contains('}') => "*",
+        _ if marker.contains('|') => "1",
+        _ if marker.contains('o') => "0",
+        _ => "",
+    }
 }
 
 fn render_quadrant_svg(
@@ -3483,8 +3566,12 @@ fn render_edge(
         match arrow {
             ArrowType::Line => (None, None, None, &colors.edge),
             ArrowType::Arrow => (None, None, Some("url(#arrow-end)"), &colors.edge),
+            ArrowType::OpenArrow => (None, None, Some("url(#arrow-open)"), &colors.edge),
             ArrowType::ThickArrow => (None, None, Some("url(#arrow-filled)"), &colors.edge),
             ArrowType::DottedArrow => (Some("5,5"), None, Some("url(#arrow-end)"), &colors.edge),
+            ArrowType::DottedOpenArrow => {
+                (Some("5,5"), None, Some("url(#arrow-open)"), &colors.edge)
+            }
             ArrowType::Circle => (None, None, Some("url(#arrow-circle)"), &colors.edge),
             ArrowType::Cross => (None, None, Some("url(#arrow-cross)"), &colors.edge),
             ArrowType::ThickLine => (None, None, None, &colors.edge),
@@ -3520,9 +3607,10 @@ fn render_edge(
         "fm-edge-back"
     } else {
         match arrow {
-            ArrowType::DottedArrow | ArrowType::DottedLine | ArrowType::DoubleDottedArrow => {
-                "fm-edge-dashed"
-            }
+            ArrowType::DottedArrow
+            | ArrowType::DottedOpenArrow
+            | ArrowType::DottedLine
+            | ArrowType::DoubleDottedArrow => "fm-edge-dashed",
             ArrowType::ThickArrow | ArrowType::DoubleThickArrow | ArrowType::ThickLine => {
                 "fm-edge-thick"
             }

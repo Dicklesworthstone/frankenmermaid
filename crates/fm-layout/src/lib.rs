@@ -344,6 +344,10 @@ pub struct LayoutEdgePath {
     pub is_self_loop: bool,
     /// Offset for parallel edges (0 for first edge, increments for duplicates).
     pub parallel_offset: f32,
+    /// Number of edges in this bundle (1 = unbundled, >1 = representative of a bundle).
+    pub bundle_count: usize,
+    /// True if this edge was absorbed into another edge's bundle and should not be rendered.
+    pub bundled: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1036,6 +1040,7 @@ fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
                 match ir_edge.arrow {
                     fm_core::ArrowType::Line => marker_end = MarkerKind::None,
                     fm_core::ArrowType::Arrow => marker_end = MarkerKind::Arrow,
+                    fm_core::ArrowType::OpenArrow => marker_end = MarkerKind::Open,
                     fm_core::ArrowType::ThickArrow => {
                         stroke.width = 2.5;
                         marker_end = MarkerKind::ThickArrow;
@@ -1044,6 +1049,11 @@ fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
                         stroke.dash_array = vec![6.0, 4.0];
                         stroke.line_cap = LineCap::Round;
                         marker_end = MarkerKind::Arrow;
+                    }
+                    fm_core::ArrowType::DottedOpenArrow => {
+                        stroke.dash_array = vec![6.0, 4.0];
+                        stroke.line_cap = LineCap::Round;
+                        marker_end = MarkerKind::Open;
                     }
                     fm_core::ArrowType::Circle => marker_end = MarkerKind::Circle,
                     fm_core::ArrowType::Cross => marker_end = MarkerKind::Cross,
@@ -1883,7 +1893,8 @@ fn layout_diagram_sugiyama_traced_with_config(
     );
 
     let mut nodes = coordinate_assignment(ir, &node_sizes, &ranks, &ordering_by_rank, spacing);
-    let edges = build_edge_paths(ir, &nodes, &cycle_result.highlighted_edge_indexes);
+    let mut edges = build_edge_paths(ir, &nodes, &cycle_result.highlighted_edge_indexes);
+    bundle_parallel_edges(ir, &mut edges);
     let mut clusters = build_cluster_boxes(ir, &nodes, spacing);
     let cluster_dividers = build_state_cluster_dividers(ir, &nodes, &clusters);
     let mut cycle_clusters = Vec::new();
@@ -2717,6 +2728,8 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                 reversed: false,
                 is_self_loop,
                 parallel_offset: 0.0,
+                bundle_count: 1,
+                bundled: false,
             }
         })
         .collect();
@@ -3549,6 +3562,8 @@ fn layout_diagram_xychart_from_meta(
                     reversed: false,
                     is_self_loop: false,
                     parallel_offset: 0.0,
+                    bundle_count: 1,
+                    bundled: false,
                 });
             }
         }
@@ -5294,6 +5309,8 @@ fn force_build_edge_paths(ir: &MermaidDiagramIr, nodes: &[LayoutNodeBox]) -> Vec
                 reversed: false,
                 is_self_loop: from_idx == to_idx,
                 parallel_offset: 0.0,
+                bundle_count: 1,
+                bundled: false,
             })
         })
         .collect()
@@ -7422,6 +7439,8 @@ fn build_edge_paths_with_orientation(
                 reversed: highlighted_edge_indexes.contains(&edge_index),
                 is_self_loop,
                 parallel_offset,
+                bundle_count: 1,
+                bundled: false,
             })
         })
         .collect()
@@ -7975,6 +7994,48 @@ fn compute_bounds(
         y: min_y - spacing.cluster_padding,
         width: (max_x - min_x) + (2.0 * spacing.cluster_padding),
         height: (max_y - min_y) + (2.0 * spacing.cluster_padding),
+    }
+}
+
+/// Bundle parallel edges that share the same (source, target) node pair and arrow type.
+/// Edges with ≥ `min_bundle` duplicates are collapsed: the first edge becomes the
+/// representative with `bundle_count` set to the group size, and the remaining edges
+/// are marked `bundled = true` so renderers can skip them.
+fn bundle_parallel_edges(ir: &MermaidDiagramIr, edges: &mut [LayoutEdgePath]) {
+    let min_bundle = 2_usize;
+
+    // Group edge indices by (source_node, target_node, arrow_type).
+    let mut groups: BTreeMap<(usize, usize, &str), Vec<usize>> = BTreeMap::new();
+
+    for (path_idx, path) in edges.iter().enumerate() {
+        if path.is_self_loop || path.bundled {
+            continue;
+        }
+        let Some(edge) = ir.edges.get(path.edge_index) else {
+            continue;
+        };
+        let Some(source) = endpoint_node_index(ir, edge.from) else {
+            continue;
+        };
+        let Some(target) = endpoint_node_index(ir, edge.to) else {
+            continue;
+        };
+        let key = (source.min(target), source.max(target), edge.arrow.as_str());
+        groups.entry(key).or_default().push(path_idx);
+    }
+
+    for indices in groups.values() {
+        if indices.len() < min_bundle {
+            continue;
+        }
+        // First edge becomes the bundle representative.
+        let representative = indices[0];
+        edges[representative].bundle_count = indices.len();
+
+        // Mark remaining edges as absorbed into the bundle.
+        for &idx in &indices[1..] {
+            edges[idx].bundled = true;
+        }
     }
 }
 

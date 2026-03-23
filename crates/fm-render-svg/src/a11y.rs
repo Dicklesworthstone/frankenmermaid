@@ -124,6 +124,8 @@ pub fn describe_edge(
         fm_core::ArrowType::DoubleArrow => "points both ways to",
         fm_core::ArrowType::DoubleThickArrow => "strongly points both ways to",
         fm_core::ArrowType::DoubleDottedArrow => "optionally points both ways to",
+        fm_core::ArrowType::OpenArrow => "sends to",
+        fm_core::ArrowType::DottedOpenArrow => "optionally sends to",
     };
 
     if let Some(label_text) = label {

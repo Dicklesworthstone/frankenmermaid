@@ -437,7 +437,10 @@ impl TermRenderer {
         let line_char = if reversed
             || matches!(
                 arrow,
-                ArrowType::DottedArrow | ArrowType::DottedLine | ArrowType::DoubleDottedArrow
+                ArrowType::DottedArrow
+                    | ArrowType::DottedOpenArrow
+                    | ArrowType::DottedLine
+                    | ArrowType::DoubleDottedArrow
             ) {
             if x0 == x1 {
                 glyphs.dotted_v

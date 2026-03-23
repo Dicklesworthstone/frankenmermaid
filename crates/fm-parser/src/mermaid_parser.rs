@@ -31,11 +31,15 @@ const FLOW_OPERATORS: [(&str, ArrowType); 14] = [
     ("..", ArrowType::DottedLine),
 ];
 
-const SEQUENCE_OPERATORS: [(&str, ArrowType); 6] = [
+const SEQUENCE_OPERATORS: [(&str, ArrowType); 10] = [
+    ("<<-->>", ArrowType::DoubleDottedArrow),
+    ("<<->>", ArrowType::DoubleArrow),
     ("-->>", ArrowType::DottedArrow),
     ("->>", ArrowType::Arrow),
-    ("-->", ArrowType::DottedArrow),
-    ("->", ArrowType::Arrow),
+    ("--)", ArrowType::DottedOpenArrow),
+    ("-)", ArrowType::OpenArrow),
+    ("-->", ArrowType::DottedLine),
+    ("->", ArrowType::Line),
     ("--x", ArrowType::Cross),
     ("-x", ArrowType::Cross),
 ];
@@ -2969,6 +2973,7 @@ fn parse_er_relationship(
     match (from, to) {
         (Some(from_node), Some(to_node)) => {
             builder.push_edge(from_node, to_node, arrow, label.as_deref(), span);
+            builder.set_last_edge_er_notation(operator);
             true
         }
         _ => false,
@@ -6827,6 +6832,45 @@ mod tests {
         assert_eq!(parsed.ir.nodes.len(), 2);
         assert_eq!(parsed.ir.edges.len(), 1);
         assert!(parsed.warnings.is_empty());
+    }
+
+    #[test]
+    fn sequence_supports_solid_line_without_arrowhead() {
+        let parsed = parse_mermaid("sequenceDiagram\nAlice->Bob: Ping");
+        assert_eq!(parsed.ir.edges.len(), 1);
+        assert_eq!(parsed.ir.edges[0].arrow, ArrowType::Line);
+    }
+
+    #[test]
+    fn sequence_supports_dotted_line_without_arrowhead() {
+        let parsed = parse_mermaid("sequenceDiagram\nAlice-->Bob: Ping");
+        assert_eq!(parsed.ir.edges.len(), 1);
+        assert_eq!(parsed.ir.edges[0].arrow, ArrowType::DottedLine);
+    }
+
+    #[test]
+    fn sequence_supports_bidirectional_arrowheads() {
+        let parsed = parse_mermaid("sequenceDiagram\nAlice<<->>Bob: Sync");
+        assert_eq!(parsed.ir.edges.len(), 1);
+        assert_eq!(parsed.ir.edges[0].arrow, ArrowType::DoubleArrow);
+    }
+
+    #[test]
+    fn sequence_supports_dotted_bidirectional_arrowheads() {
+        let parsed = parse_mermaid("sequenceDiagram\nAlice<<-->>Bob: Sync");
+        assert_eq!(parsed.ir.edges.len(), 1);
+        assert_eq!(parsed.ir.edges[0].arrow, ArrowType::DoubleDottedArrow);
+    }
+
+    #[test]
+    fn sequence_supports_async_open_arrowheads() {
+        let parsed = parse_mermaid("sequenceDiagram\nAlice-)Bob: Async");
+        assert_eq!(parsed.ir.edges.len(), 1);
+        assert_eq!(parsed.ir.edges[0].arrow, ArrowType::OpenArrow);
+
+        let dotted = parse_mermaid("sequenceDiagram\nAlice--)Bob: Async");
+        assert_eq!(dotted.ir.edges.len(), 1);
+        assert_eq!(dotted.ir.edges[0].arrow, ArrowType::DottedOpenArrow);
     }
 
     #[test]

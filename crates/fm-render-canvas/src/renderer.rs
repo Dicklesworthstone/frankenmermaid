@@ -859,6 +859,10 @@ impl Canvas2dRenderer {
                         draw_cross_marker(ctx, ex, ey, 8.0, &self.config.edge_stroke);
                         self.draw_calls += 1;
                     }
+                    ArrowType::OpenArrow | ArrowType::DottedOpenArrow => {
+                        draw_arrowhead(ctx, ex, ey, angle, 10.0, &self.config.edge_stroke);
+                        self.draw_calls += 1;
+                    }
                 }
 
                 // Draw arrowhead at start for double arrows

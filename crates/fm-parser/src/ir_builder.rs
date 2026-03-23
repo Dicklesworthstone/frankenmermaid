@@ -1039,6 +1039,7 @@ impl IrBuilder {
             arrow,
             label: label_id,
             span,
+            er_notation: None,
         });
         self.ir.graph.edges.push(IrGraphEdge {
             edge_id: self.ir.edges.len() - 1,
@@ -1047,6 +1048,13 @@ impl IrBuilder {
             to: IrEndpoint::Node(to),
             span,
         });
+    }
+
+    /// Set the ER cardinality notation on the last-pushed edge.
+    pub(crate) fn set_last_edge_er_notation(&mut self, notation: &str) {
+        if let Some(edge) = self.ir.edges.last_mut() {
+            edge.er_notation = Some(notation.to_string());
+        }
     }
 
     fn intern_label(&mut self, text: String, span: Span) -> IrLabelId {
