@@ -535,29 +535,26 @@ impl TermRenderer {
         scale_x: f32,
         scale_y: f32,
     ) {
+        let ir_node = ir.nodes.get(node_box.node_index);
+        if ir_node.is_some_and(is_block_beta_space_node) {
+            return;
+        }
+
         let (x, y, w, h) = self.bounds_to_cells(&node_box.bounds, scale_x, scale_y);
         if w < 3 || h < 1 {
             return;
         }
 
         // Get node shape.
-        let shape = ir
-            .nodes
-            .get(node_box.node_index)
-            .map(|n| n.shape)
-            .unwrap_or(NodeShape::Rect);
+        let shape = ir_node.map(|n| n.shape).unwrap_or(NodeShape::Rect);
 
         // Draw shape border.
         self.draw_shape_border(buffer, x, y, w, h, shape);
 
         // Get label.
-        let label = ir
-            .nodes
-            .get(node_box.node_index)
-            .and_then(|n| n.label)
-            .and_then(|lid| ir.labels.get(lid.0))
-            .map(|l| self.truncate_label(&l.text))
-            .unwrap_or_else(|| self.truncate_label(&node_box.node_id));
+        let Some(label) = self.node_display_label(ir, ir_node, &node_box.node_id) else {
+            return;
+        };
 
         // Center label in node.
         let lines: Vec<&str> = label.lines().collect();
@@ -845,16 +842,17 @@ impl TermRenderer {
         padding_x: usize,
         padding_y: usize,
     ) {
+        let ir_node = ir.nodes.get(node_box.node_index);
+        if ir_node.is_some_and(is_block_beta_space_node) {
+            return;
+        }
+
         let x = (node_box.bounds.x * scale_x) as usize + padding_x;
         let y = (node_box.bounds.y * scale_y) as usize + padding_y;
         let w = (node_box.bounds.width * scale_x) as usize;
         let h = (node_box.bounds.height * scale_y) as usize;
 
-        let shape = ir
-            .nodes
-            .get(node_box.node_index)
-            .map(|n| n.shape)
-            .unwrap_or(NodeShape::Rect);
+        let shape = ir_node.map(|n| n.shape).unwrap_or(NodeShape::Rect);
 
         match shape {
             NodeShape::Circle | NodeShape::DoubleCircle => {
@@ -1042,6 +1040,10 @@ impl TermRenderer {
             let (x, y, w, h) = self.bounds_to_cells(&node_box.bounds, scale_x, scale_y);
             let ir_node = ir.nodes.get(node_box.node_index);
 
+            if ir_node.is_some_and(is_block_beta_space_node) {
+                continue;
+            }
+
             // Class diagram nodes with class_meta get three-compartment rendering.
             if let Some(node) = ir_node
                 && let Some(ref meta) = node.class_meta
@@ -1051,11 +1053,9 @@ impl TermRenderer {
                 continue;
             }
 
-            let label = ir_node
-                .and_then(|n| n.label)
-                .and_then(|lid| ir.labels.get(lid.0))
-                .map(|l| self.truncate_label(&l.text))
-                .unwrap_or_else(|| self.truncate_label(&node_box.node_id));
+            let Some(label) = self.node_display_label(ir, ir_node, &node_box.node_id) else {
+                continue;
+            };
 
             let label_lines: Vec<&str> = label.lines().collect();
             let start_y = y + (h.saturating_sub(label_lines.len())) / 2;
@@ -1204,6 +1204,25 @@ impl TermRenderer {
         }
 
         lines.join("\n")
+    }
+
+    fn node_display_label(
+        &self,
+        ir: &MermaidDiagramIr,
+        ir_node: Option<&fm_core::IrNode>,
+        fallback_id: &str,
+    ) -> Option<String> {
+        let node = ir_node?;
+        if is_block_beta_space_node(node) {
+            return None;
+        }
+
+        Some(
+            node.label
+                .and_then(|lid| ir.labels.get(lid.0))
+                .map(|label| self.truncate_label(&label.text))
+                .unwrap_or_else(|| self.truncate_label(fallback_id)),
+        )
     }
 
     /// Render a UML-style three-compartment class box into the character grid.
@@ -1476,6 +1495,14 @@ pub fn render_diagram_with_layout_and_config(
     renderer.render_layout(ir, layout)
 }
 
+fn is_block_beta_space_node(node: &fm_core::IrNode) -> bool {
+    node.id.starts_with("__space_")
+        || node
+            .classes
+            .iter()
+            .any(|class_name| class_name.eq_ignore_ascii_case("block-beta-space"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1639,5 +1666,35 @@ mod tests {
         let result = render_diagram_with_layout_and_config(&ir, &layout, &config, 10, 10);
 
         assert!(result.output.chars().any(|ch| !ch.is_whitespace()));
+    }
+
+    #[test]
+    fn block_beta_space_nodes_are_hidden_in_compact_term_output() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::BlockBeta);
+        ir.nodes.push(IrNode {
+            id: "__space_12".to_string(),
+            classes: vec!["block-beta".to_string(), "block-beta-space".to_string()],
+            ..IrNode::default()
+        });
+
+        let config = TermRenderConfig::compact();
+        let result = render_diagram_with_config(&ir, &config, 40, 12);
+        assert!(!result.output.contains("__space_12"));
+        assert!(!result.output.chars().any(|ch| !ch.is_whitespace()));
+    }
+
+    #[test]
+    fn block_beta_space_nodes_are_hidden_in_rich_term_output() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::BlockBeta);
+        ir.nodes.push(IrNode {
+            id: "__space_34".to_string(),
+            classes: vec!["block-beta".to_string(), "block-beta-space".to_string()],
+            ..IrNode::default()
+        });
+
+        let config = TermRenderConfig::rich();
+        let result = render_diagram_with_config(&ir, &config, 40, 12);
+        assert!(!result.output.contains("__space_34"));
+        assert!(!result.output.chars().any(|ch| !ch.is_whitespace()));
     }
 }

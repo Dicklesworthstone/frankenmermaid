@@ -1651,6 +1651,11 @@ fn fallback_candidates(ir: &MermaidDiagramIr, selected: LayoutAlgorithm) -> Vec<
             LayoutAlgorithm::Grid,
             LayoutAlgorithm::Sugiyama,
         ],
+        DiagramType::Pie => [
+            LayoutAlgorithm::Pie,
+            LayoutAlgorithm::Grid,
+            LayoutAlgorithm::Sugiyama,
+        ],
         _ => [selected, LayoutAlgorithm::Tree, LayoutAlgorithm::Sugiyama],
     };
 
@@ -3866,6 +3871,86 @@ pub fn layout_diagram_grid_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 }
 
 #[must_use]
+/// Lay out a pie chart: compute wedge angles and position label nodes around
+/// the perimeter.  Each node in the IR corresponds to one slice.
+fn layout_diagram_pie_traced(ir: &MermaidDiagramIr) -> TracedLayout {
+    let mut trace = LayoutTrace::default();
+    let metrics = fm_core::FontMetrics::default_metrics();
+    let node_count = ir.nodes.len();
+
+    // Sizing constants.
+    let radius = 140.0_f32;
+    let label_radius = radius + 60.0;
+    let cx = radius + 80.0;
+    let cy = radius + 60.0;
+
+    // Compute total value from pie metadata (fall back to equal slices).
+    let values: Vec<f32> = if let Some(pie) = &ir.pie_meta {
+        pie.slices.iter().map(|s| s.value.max(0.0)).collect()
+    } else {
+        vec![1.0; node_count]
+    };
+    let total: f32 = values.iter().sum::<f32>().max(f32::EPSILON);
+
+    // Position each node at the midpoint angle of its wedge.
+    let mut nodes = Vec::with_capacity(node_count);
+    let mut angle_cursor = -PI / 2.0; // start at 12 o'clock
+
+    for (i, node) in ir.nodes.iter().enumerate() {
+        let value = values.get(i).copied().unwrap_or(1.0);
+        let sweep = (value / total) * 2.0 * PI;
+        let mid_angle = angle_cursor + sweep / 2.0;
+
+        let (label_w, label_h) = metrics.estimate_dimensions(&display_node_label(ir, node));
+        let node_w = label_w + 24.0;
+        let node_h = label_h + 16.0;
+
+        let node_x = cx + label_radius * mid_angle.cos() - node_w / 2.0;
+        let node_y = cy + label_radius * mid_angle.sin() - node_h / 2.0;
+
+        nodes.push(LayoutNodeBox {
+            id: i,
+            bounds: LayoutRect {
+                x: node_x,
+                y: node_y,
+                width: node_w,
+                height: node_h,
+            },
+            rank: 0,
+            order: i,
+        });
+
+        angle_cursor += sweep;
+    }
+
+    push_snapshot(
+        &mut trace,
+        "pie_layout",
+        node_count,
+        ir.edges.len(),
+        0,
+        0,
+    );
+
+    let bounds = compute_bounds(&nodes, &[], &[], LayoutSpacing::default());
+
+    TracedLayout {
+        layout: DiagramLayout {
+            nodes,
+            clusters: Vec::new(),
+            cycle_clusters: Vec::new(),
+            edges: Vec::new(),
+            bounds,
+            stats: LayoutStats {
+                node_count,
+                ..LayoutStats::default()
+            },
+            extensions: LayoutExtensions::default(),
+        },
+        trace,
+    }
+}
+
 fn layout_diagram_kanban_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let node_count = ir.nodes.len();
     let mut node_sizes = compute_node_sizes(ir, &fm_core::FontMetrics::default_metrics());
@@ -8019,7 +8104,8 @@ fn layout_decision_confidence_permille(
                 | LayoutAlgorithm::Sankey
                 | LayoutAlgorithm::Kanban
                 | LayoutAlgorithm::Grid
-                | LayoutAlgorithm::Radial => 900,
+                | LayoutAlgorithm::Radial
+                | LayoutAlgorithm::Pie => 900,
                 LayoutAlgorithm::Tree if metrics.is_tree_like => 880,
                 LayoutAlgorithm::Force if metrics.is_dense || metrics.back_edge_count > 0 => 760,
                 LayoutAlgorithm::Sugiyama => 820,
