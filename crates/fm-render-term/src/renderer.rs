@@ -439,6 +439,14 @@ impl TermRenderer {
                 arrow,
                 ArrowType::DottedArrow
                     | ArrowType::DottedOpenArrow
+                    | ArrowType::HalfArrowTopDotted
+                    | ArrowType::HalfArrowBottomDotted
+                    | ArrowType::HalfArrowTopReverseDotted
+                    | ArrowType::HalfArrowBottomReverseDotted
+                    | ArrowType::StickArrowTopDotted
+                    | ArrowType::StickArrowBottomDotted
+                    | ArrowType::StickArrowTopReverseDotted
+                    | ArrowType::StickArrowBottomReverseDotted
                     | ArrowType::DottedLine
                     | ArrowType::DoubleDottedArrow
             ) {

@@ -1001,9 +1001,25 @@ pub enum ArrowType {
     Line,
     Arrow,
     OpenArrow,
+    HalfArrowTop,
+    HalfArrowBottom,
+    HalfArrowTopReverse,
+    HalfArrowBottomReverse,
+    StickArrowTop,
+    StickArrowBottom,
+    StickArrowTopReverse,
+    StickArrowBottomReverse,
     ThickArrow,
     DottedArrow,
     DottedOpenArrow,
+    HalfArrowTopDotted,
+    HalfArrowBottomDotted,
+    HalfArrowTopReverseDotted,
+    HalfArrowBottomReverseDotted,
+    StickArrowTopDotted,
+    StickArrowBottomDotted,
+    StickArrowTopReverseDotted,
+    StickArrowBottomReverseDotted,
     Circle,
     Cross,
     ThickLine,
@@ -1020,9 +1036,25 @@ impl ArrowType {
             Self::Line => "---",
             Self::Arrow => "-->",
             Self::OpenArrow => "-)",
+            Self::HalfArrowTop => "-|\\",
+            Self::HalfArrowBottom => "-|/",
+            Self::HalfArrowTopReverse => "/|-",
+            Self::HalfArrowBottomReverse => "\\|-",
+            Self::StickArrowTop => "-\\\\",
+            Self::StickArrowBottom => "-//",
+            Self::StickArrowTopReverse => "//-",
+            Self::StickArrowBottomReverse => "\\\\-",
             Self::ThickArrow => "==>",
             Self::DottedArrow => "-.->",
             Self::DottedOpenArrow => "--)",
+            Self::HalfArrowTopDotted => "--|\\",
+            Self::HalfArrowBottomDotted => "--|/",
+            Self::HalfArrowTopReverseDotted => "/|--",
+            Self::HalfArrowBottomReverseDotted => "\\|--",
+            Self::StickArrowTopDotted => "--\\\\",
+            Self::StickArrowBottomDotted => "--//",
+            Self::StickArrowTopReverseDotted => "//--",
+            Self::StickArrowBottomReverseDotted => "\\\\--",
             Self::Circle => "--o",
             Self::Cross => "--x",
             Self::ThickLine => "===",
@@ -1134,6 +1166,9 @@ pub struct IrNode {
     pub shape: NodeShape,
     pub classes: Vec<String>,
     pub href: Option<String>,
+    /// Tooltip text from `click nodeId "url" "tooltip"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tooltip: Option<String>,
     pub span_primary: Span,
     pub span_all: Vec<Span>,
     pub implicit: bool,
@@ -1143,6 +1178,9 @@ pub struct IrNode {
     /// Class-diagram-specific metadata (attributes, methods, stereotypes)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub class_meta: Option<IrClassNodeMeta>,
+    /// Requirement-diagram metadata (type, id, text, risk, verifymethod)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requirement_meta: Option<IrRequirementNodeMeta>,
     /// C4-diagram-specific metadata (element type, technology, description)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub c4_meta: Option<IrC4NodeMeta>,
@@ -3131,6 +3169,26 @@ pub struct IrPieMeta {
     pub slices: Vec<IrPieSlice>,
 }
 
+/// Requirement-diagram-specific metadata for a node.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct IrRequirementNodeMeta {
+    /// The requirement category (e.g., "requirement", "functionalRequirement").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requirement_type: Option<String>,
+    /// Unique identifier from the `id:` field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub req_id: Option<String>,
+    /// Human-readable text from the `text:` field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// Risk level from the `risk:` field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<String>,
+    /// Verification method from the `verifymethod:` field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify_method: Option<String>,
+}
+
 /// A data point in a quadrant chart with normalized [0, 1] coordinates.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IrQuadrantPoint {
@@ -3888,9 +3946,25 @@ mod tests {
             (ArrowType::Line, "---"),
             (ArrowType::Arrow, "-->"),
             (ArrowType::OpenArrow, "-)"),
+            (ArrowType::HalfArrowTop, "-|\\"),
+            (ArrowType::HalfArrowBottom, "-|/"),
+            (ArrowType::HalfArrowTopReverse, "/|-"),
+            (ArrowType::HalfArrowBottomReverse, "\\|-"),
+            (ArrowType::StickArrowTop, "-\\\\"),
+            (ArrowType::StickArrowBottom, "-//"),
+            (ArrowType::StickArrowTopReverse, "//-"),
+            (ArrowType::StickArrowBottomReverse, "\\\\-"),
             (ArrowType::ThickArrow, "==>"),
             (ArrowType::DottedArrow, "-.->"),
             (ArrowType::DottedOpenArrow, "--)"),
+            (ArrowType::HalfArrowTopDotted, "--|\\"),
+            (ArrowType::HalfArrowBottomDotted, "--|/"),
+            (ArrowType::HalfArrowTopReverseDotted, "/|--"),
+            (ArrowType::HalfArrowBottomReverseDotted, "\\|--"),
+            (ArrowType::StickArrowTopDotted, "--\\\\"),
+            (ArrowType::StickArrowBottomDotted, "--//"),
+            (ArrowType::StickArrowTopReverseDotted, "//--"),
+            (ArrowType::StickArrowBottomReverseDotted, "\\\\--"),
             (ArrowType::Circle, "--o"),
             (ArrowType::Cross, "--x"),
             (ArrowType::ThickLine, "==="),

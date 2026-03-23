@@ -731,11 +731,13 @@ impl IrBuilder {
             shape,
             classes: Vec::new(),
             href: None,
+            tooltip: None,
             span_primary: span,
             span_all: vec![span],
             implicit: is_auto_created,
             members: Vec::new(),
             class_meta: None,
+            requirement_meta: None,
             c4_meta: None,
         };
 
@@ -986,6 +988,19 @@ impl IrBuilder {
         if let Some(node) = self.ir.nodes.get_mut(node_id.0) {
             node.href = Some(target.to_string());
         }
+    }
+
+    pub(crate) fn set_node_tooltip(&mut self, node_key: &str, tooltip: &str, span: Span) {
+        let Some(node_id) = self.intern_node(node_key, None, NodeShape::Rect, span) else {
+            return;
+        };
+        if let Some(node) = self.ir.nodes.get_mut(node_id.0) {
+            node.tooltip = Some(tooltip.to_string());
+        }
+    }
+
+    pub(crate) fn node_mut(&mut self, node_id: IrNodeId) -> Option<&mut fm_core::IrNode> {
+        self.ir.nodes.get_mut(node_id.0)
     }
 
     pub(crate) fn set_c4_node_meta(&mut self, node_id: IrNodeId, meta: IrC4NodeMeta) {

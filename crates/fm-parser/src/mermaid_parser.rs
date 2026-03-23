@@ -31,11 +31,27 @@ const FLOW_OPERATORS: [(&str, ArrowType); 14] = [
     ("..", ArrowType::DottedLine),
 ];
 
-const SEQUENCE_OPERATORS: [(&str, ArrowType); 10] = [
+const SEQUENCE_OPERATORS: [(&str, ArrowType); 26] = [
     ("<<-->>", ArrowType::DoubleDottedArrow),
     ("<<->>", ArrowType::DoubleArrow),
+    ("--|\\", ArrowType::HalfArrowTopDotted),
+    ("--|/", ArrowType::HalfArrowBottomDotted),
+    ("--\\\\", ArrowType::StickArrowTopDotted),
+    ("--//", ArrowType::StickArrowBottomDotted),
+    ("/|--", ArrowType::HalfArrowTopReverseDotted),
+    ("\\|--", ArrowType::HalfArrowBottomReverseDotted),
+    ("//--", ArrowType::StickArrowTopReverseDotted),
+    ("\\\\--", ArrowType::StickArrowBottomReverseDotted),
     ("-->>", ArrowType::DottedArrow),
     ("->>", ArrowType::Arrow),
+    ("-|\\", ArrowType::HalfArrowTop),
+    ("-|/", ArrowType::HalfArrowBottom),
+    ("-\\\\", ArrowType::StickArrowTop),
+    ("-//", ArrowType::StickArrowBottom),
+    ("/|-", ArrowType::HalfArrowTopReverse),
+    ("\\|-", ArrowType::HalfArrowBottomReverse),
+    ("//-", ArrowType::StickArrowTopReverse),
+    ("\\\\-", ArrowType::StickArrowBottomReverse),
     ("--)", ArrowType::DottedOpenArrow),
     ("-)", ArrowType::OpenArrow),
     ("-->", ArrowType::DottedLine),
@@ -349,6 +365,7 @@ enum FlowAst {
     ClickDirective {
         node: String,
         target: String,
+        tooltip: Option<String>,
     },
     StyleOrLinkStyle,
     ClassDef,
@@ -589,7 +606,7 @@ fn flow_statement_parser<'a>() -> impl Parser<'a, &'a str, FlowAst, extra::Err<R
             }
         });
 
-    // -- click directive: click nodeId target --------------------------------
+    // -- click directive: click nodeId target ["tooltip"] ---------------------
     let click_directive = just("click")
         .then(required_ws)
         .ignore_then(ident)
@@ -601,11 +618,15 @@ fn flow_statement_parser<'a>() -> impl Parser<'a, &'a str, FlowAst, extra::Err<R
                 .to_slice()
                 .map(|s: &str| s.to_string())),
         )
+        .then(required_ws.ignore_then(quoted_string).or_not())
         .then_ignore(end())
         .map(
-            |(node_id, target): (&str, String)| FlowAst::ClickDirective {
-                node: node_id.to_string(),
-                target,
+            |((node_id, target), tooltip): ((&str, String), Option<String>)| {
+                FlowAst::ClickDirective {
+                    node: node_id.to_string(),
+                    target,
+                    tooltip,
+                }
             },
         );
 
@@ -682,7 +703,11 @@ fn lower_flow_ast(
                 }
             }
         }
-        FlowAst::ClickDirective { node, target } => {
+        FlowAst::ClickDirective {
+            node,
+            target,
+            tooltip,
+        } => {
             let cleaned = target
                 .trim()
                 .trim_matches('"')
@@ -700,6 +725,17 @@ fn lower_flow_ast(
             } else {
                 builder.add_class_to_node(node, "has-link", span);
                 builder.set_node_link(node, cleaned, span);
+                if let Some(tip) = tooltip {
+                    let tip_cleaned = tip
+                        .trim()
+                        .trim_matches('"')
+                        .trim_matches('\'')
+                        .trim_matches('`')
+                        .trim();
+                    if !tip_cleaned.is_empty() {
+                        builder.set_node_tooltip(node, tip_cleaned, span);
+                    }
+                }
             }
         }
         FlowAst::StyleOrLinkStyle | FlowAst::ClassDef => {
@@ -1834,6 +1870,18 @@ fn state_edge_endpoint<'a>(
 
 fn parse_requirement(input: &str, builder: &mut IrBuilder) {
     let mut inside_requirement_block = false;
+    let mut current_req_node: Option<fm_core::IrNodeId> = None;
+    let mut current_req_type: Option<String> = None;
+
+    let requirement_keywords = [
+        "requirement ",
+        "functionalRequirement ",
+        "performanceRequirement ",
+        "interfaceRequirement ",
+        "physicalRequirement ",
+        "designConstraint ",
+        "element ",
+    ];
 
     for (index, line) in input.lines().enumerate() {
         let line_number = index + 1;
@@ -1846,14 +1894,24 @@ fn parse_requirement(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
-        if let Some(requirement_decl) = trimmed.strip_prefix("requirement ") {
-            let requirement_name = requirement_decl.trim_end_matches('{').trim();
-            if let Some(node) = parse_node_token(requirement_name) {
-                let span = span_for(line_number, line);
-                let _ = builder.intern_node(&node.id, node.label.as_deref(), NodeShape::Rect, span);
-                inside_requirement_block = trimmed.ends_with('{');
-                continue;
+        // Check for any requirement block start.
+        let mut matched_keyword = false;
+        for keyword in &requirement_keywords {
+            if let Some(rest) = trimmed.strip_prefix(keyword) {
+                let requirement_name = rest.trim_end_matches('{').trim();
+                if let Some(node) = parse_node_token(requirement_name) {
+                    let span = span_for(line_number, line);
+                    current_req_node =
+                        builder.intern_node(&node.id, node.label.as_deref(), NodeShape::Rect, span);
+                    current_req_type = Some(keyword.trim().to_string());
+                    inside_requirement_block = trimmed.ends_with('{');
+                    matched_keyword = true;
+                    break;
+                }
             }
+        }
+        if matched_keyword {
+            continue;
         }
 
         if trimmed.starts_with('{') {
@@ -1861,17 +1919,65 @@ fn parse_requirement(input: &str, builder: &mut IrBuilder) {
             continue;
         }
         if trimmed.starts_with('}') {
+            // Finalize the requirement block: store accumulated metadata.
+            if let Some(node_id) = current_req_node
+                && let Some(node) = builder.node_mut(node_id)
+            {
+                let meta = node
+                    .requirement_meta
+                    .get_or_insert_with(fm_core::IrRequirementNodeMeta::default);
+                if meta.requirement_type.is_none() {
+                    meta.requirement_type = current_req_type.take();
+                }
+            }
             inside_requirement_block = false;
+            current_req_node = None;
+            current_req_type = None;
             continue;
         }
 
-        if inside_requirement_block
-            && (trimmed.starts_with("id:")
-                || trimmed.starts_with("text:")
-                || trimmed.starts_with("risk:")
-                || trimmed.starts_with("verifymethod:"))
-        {
-            continue;
+        // Extract metadata fields inside a requirement block.
+        if inside_requirement_block {
+            if let Some(rest) = trimmed.strip_prefix("id:")
+                && let Some(node_id) = current_req_node
+                && let Some(node) = builder.node_mut(node_id)
+            {
+                let meta = node
+                    .requirement_meta
+                    .get_or_insert_with(fm_core::IrRequirementNodeMeta::default);
+                meta.req_id = Some(rest.trim().to_string());
+                continue;
+            }
+            if let Some(rest) = trimmed.strip_prefix("text:")
+                && let Some(node_id) = current_req_node
+                && let Some(node) = builder.node_mut(node_id)
+            {
+                let meta = node
+                    .requirement_meta
+                    .get_or_insert_with(fm_core::IrRequirementNodeMeta::default);
+                meta.text = Some(rest.trim().to_string());
+                continue;
+            }
+            if let Some(rest) = trimmed.strip_prefix("risk:")
+                && let Some(node_id) = current_req_node
+                && let Some(node) = builder.node_mut(node_id)
+            {
+                let meta = node
+                    .requirement_meta
+                    .get_or_insert_with(fm_core::IrRequirementNodeMeta::default);
+                meta.risk = Some(rest.trim().to_string());
+                continue;
+            }
+            if let Some(rest) = trimmed.strip_prefix("verifymethod:")
+                && let Some(node_id) = current_req_node
+                && let Some(node) = builder.node_mut(node_id)
+            {
+                let meta = node
+                    .requirement_meta
+                    .get_or_insert_with(fm_core::IrRequirementNodeMeta::default);
+                meta.verify_method = Some(rest.trim().to_string());
+                continue;
+            }
         }
 
         if parse_requirement_relation(trimmed, line_number, line, builder) {
@@ -2335,14 +2441,14 @@ fn parse_click_directive_ast(
         return Some(FlowAst::StyleOrLinkStyle);
     };
 
-    let target = if target_token.eq_ignore_ascii_case("href") {
-        let Some((href_target, _)) = take_token(after_target) else {
+    let (target, remaining) = if target_token.eq_ignore_ascii_case("href") {
+        let Some((href_target, remaining)) = take_token(after_target) else {
             warnings.push(format!(
                 "Line {line_number}: malformed click directive (missing href target): {statement}"
             ));
             return Some(FlowAst::StyleOrLinkStyle);
         };
-        href_target.to_string()
+        (href_target.to_string(), remaining)
     } else if target_token.eq_ignore_ascii_case("call")
         || target_token.eq_ignore_ascii_case("callback")
     {
@@ -2351,10 +2457,22 @@ fn parse_click_directive_ast(
         ));
         return Some(FlowAst::StyleOrLinkStyle);
     } else {
-        target_token.to_string()
+        (target_token.to_string(), after_target)
     };
 
-    Some(FlowAst::ClickDirective { node, target })
+    // Optional tooltip: `click nodeId "url" "tooltip"`
+    let tooltip = take_token(remaining).map(|(tok, _)| {
+        tok.trim_matches('"')
+            .trim_matches('\'')
+            .trim_matches('`')
+            .to_string()
+    });
+
+    Some(FlowAst::ClickDirective {
+        node,
+        target,
+        tooltip,
+    })
 }
 
 fn take_token(input: &str) -> Option<(&str, &str)> {
@@ -4887,6 +5005,8 @@ fn parse_sequence_message_ast(statement: &str) -> Option<String> {
         .split_once(':')
         .map_or(right, |(target, _)| target)
         .trim();
+    let left = strip_sequence_central_suffix(left);
+    let target_raw = strip_sequence_central_prefix(target_raw);
     let from_id = normalize_identifier(left);
     let to_id = normalize_identifier(target_raw);
     if from_id.is_empty() || to_id.is_empty() {
@@ -4918,6 +5038,9 @@ fn lower_sequence_message(
     } else {
         (right, None)
     };
+
+    let left = strip_sequence_central_suffix(left);
+    let target_raw = strip_sequence_central_prefix(target_raw);
 
     // Check for +/- activation modifiers on target
     let (target_clean, activate_target, deactivate_target) =
@@ -4956,6 +5079,18 @@ fn lower_sequence_message(
         }
         _ => false,
     }
+}
+
+fn strip_sequence_central_prefix(raw: &str) -> &str {
+    raw.trim()
+        .strip_prefix("()")
+        .map_or(raw.trim(), str::trim_start)
+}
+
+fn strip_sequence_central_suffix(raw: &str) -> &str {
+    raw.trim()
+        .strip_suffix("()")
+        .map_or(raw.trim(), str::trim_end)
 }
 
 fn parse_edge_statement(
@@ -6871,6 +7006,66 @@ mod tests {
         let dotted = parse_mermaid("sequenceDiagram\nAlice--)Bob: Async");
         assert_eq!(dotted.ir.edges.len(), 1);
         assert_eq!(dotted.ir.edges[0].arrow, ArrowType::DottedOpenArrow);
+    }
+
+    #[test]
+    fn sequence_supports_half_arrow_variants() {
+        let top = parse_mermaid("sequenceDiagram\nAlice-|\\Bob: HalfTop");
+        assert_eq!(top.ir.edges[0].arrow, ArrowType::HalfArrowTop);
+
+        let bottom = parse_mermaid("sequenceDiagram\nAlice--|/Bob: HalfBottom");
+        assert_eq!(bottom.ir.edges[0].arrow, ArrowType::HalfArrowBottomDotted);
+
+        let reverse_top = parse_mermaid("sequenceDiagram\nAlice/|-Bob: ReverseTop");
+        assert_eq!(
+            reverse_top.ir.edges[0].arrow,
+            ArrowType::HalfArrowTopReverse
+        );
+
+        let reverse_bottom = parse_mermaid("sequenceDiagram\nAlice\\|--Bob: ReverseBottom");
+        assert_eq!(
+            reverse_bottom.ir.edges[0].arrow,
+            ArrowType::HalfArrowBottomReverseDotted
+        );
+    }
+
+    #[test]
+    fn sequence_supports_stick_half_arrow_variants() {
+        let top = parse_mermaid("sequenceDiagram\nAlice-\\\\Bob: StickTop");
+        assert_eq!(top.ir.edges[0].arrow, ArrowType::StickArrowTop);
+
+        let bottom = parse_mermaid("sequenceDiagram\nAlice--//Bob: StickBottom");
+        assert_eq!(bottom.ir.edges[0].arrow, ArrowType::StickArrowBottomDotted);
+
+        let reverse_top = parse_mermaid("sequenceDiagram\nAlice//-Bob: ReverseStickTop");
+        assert_eq!(
+            reverse_top.ir.edges[0].arrow,
+            ArrowType::StickArrowTopReverse
+        );
+
+        let reverse_bottom = parse_mermaid("sequenceDiagram\nAlice\\\\--Bob: ReverseStickBottom");
+        assert_eq!(
+            reverse_bottom.ir.edges[0].arrow,
+            ArrowType::StickArrowBottomReverseDotted
+        );
+    }
+
+    #[test]
+    fn sequence_supports_central_connection_syntax() {
+        let right = parse_mermaid("sequenceDiagram\nAlice->>()John: Hello");
+        assert_eq!(right.ir.edges.len(), 1);
+        assert_eq!(right.ir.edges[0].arrow, ArrowType::Arrow);
+        assert!(right.warnings.is_empty());
+
+        let left = parse_mermaid("sequenceDiagram\nAlice()->>John: How are you?");
+        assert_eq!(left.ir.edges.len(), 1);
+        assert_eq!(left.ir.edges[0].arrow, ArrowType::Arrow);
+        assert!(left.warnings.is_empty());
+
+        let dual = parse_mermaid("sequenceDiagram\nJohn()->>()Alice: Great!");
+        assert_eq!(dual.ir.edges.len(), 1);
+        assert_eq!(dual.ir.edges[0].arrow, ArrowType::Arrow);
+        assert!(dual.warnings.is_empty());
     }
 
     #[test]

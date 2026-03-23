@@ -863,6 +863,11 @@ impl Canvas2dRenderer {
                         draw_arrowhead(ctx, ex, ey, angle, 10.0, &self.config.edge_stroke);
                         self.draw_calls += 1;
                     }
+                    // All other arrow types (half arrows, stick arrows, etc.) — render as standard arrowhead.
+                    _ => {
+                        draw_arrowhead(ctx, ex, ey, angle, 10.0, &self.config.edge_stroke);
+                        self.draw_calls += 1;
+                    }
                 }
 
                 // Draw arrowhead at start for double arrows

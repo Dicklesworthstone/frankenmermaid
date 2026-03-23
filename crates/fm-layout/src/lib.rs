@@ -191,6 +191,7 @@ pub enum LayoutAlgorithm {
     Pie,
     Quadrant,
     GitGraph,
+    Packet,
 }
 
 impl LayoutAlgorithm {
@@ -212,6 +213,7 @@ impl LayoutAlgorithm {
             Self::Pie => "pie",
             Self::Quadrant => "quadrant",
             Self::GitGraph => "gitgraph",
+            Self::Packet => "packet",
         }
     }
 }
@@ -840,6 +842,10 @@ pub enum MarkerKind {
     #[default]
     None,
     Arrow,
+    HalfArrowTop,
+    HalfArrowBottom,
+    StickArrowTop,
+    StickArrowBottom,
     ThickArrow,
     DottedArrow,
     Circle,
@@ -1041,6 +1047,26 @@ fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
                     fm_core::ArrowType::Line => marker_end = MarkerKind::None,
                     fm_core::ArrowType::Arrow => marker_end = MarkerKind::Arrow,
                     fm_core::ArrowType::OpenArrow => marker_end = MarkerKind::Open,
+                    fm_core::ArrowType::HalfArrowTop => marker_end = MarkerKind::HalfArrowTop,
+                    fm_core::ArrowType::HalfArrowBottom => {
+                        marker_end = MarkerKind::HalfArrowBottom;
+                    }
+                    fm_core::ArrowType::HalfArrowTopReverse => {
+                        marker_start = MarkerKind::HalfArrowBottom;
+                    }
+                    fm_core::ArrowType::HalfArrowBottomReverse => {
+                        marker_start = MarkerKind::HalfArrowTop;
+                    }
+                    fm_core::ArrowType::StickArrowTop => marker_end = MarkerKind::StickArrowTop,
+                    fm_core::ArrowType::StickArrowBottom => {
+                        marker_end = MarkerKind::StickArrowBottom;
+                    }
+                    fm_core::ArrowType::StickArrowTopReverse => {
+                        marker_start = MarkerKind::StickArrowBottom;
+                    }
+                    fm_core::ArrowType::StickArrowBottomReverse => {
+                        marker_start = MarkerKind::StickArrowTop;
+                    }
                     fm_core::ArrowType::ThickArrow => {
                         stroke.width = 2.5;
                         marker_end = MarkerKind::ThickArrow;
@@ -1054,6 +1080,46 @@ fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
                         stroke.dash_array = vec![6.0, 4.0];
                         stroke.line_cap = LineCap::Round;
                         marker_end = MarkerKind::Open;
+                    }
+                    fm_core::ArrowType::HalfArrowTopDotted => {
+                        stroke.dash_array = vec![6.0, 4.0];
+                        stroke.line_cap = LineCap::Round;
+                        marker_end = MarkerKind::HalfArrowTop;
+                    }
+                    fm_core::ArrowType::HalfArrowBottomDotted => {
+                        stroke.dash_array = vec![6.0, 4.0];
+                        stroke.line_cap = LineCap::Round;
+                        marker_end = MarkerKind::HalfArrowBottom;
+                    }
+                    fm_core::ArrowType::HalfArrowTopReverseDotted => {
+                        stroke.dash_array = vec![6.0, 4.0];
+                        stroke.line_cap = LineCap::Round;
+                        marker_start = MarkerKind::HalfArrowBottom;
+                    }
+                    fm_core::ArrowType::HalfArrowBottomReverseDotted => {
+                        stroke.dash_array = vec![6.0, 4.0];
+                        stroke.line_cap = LineCap::Round;
+                        marker_start = MarkerKind::HalfArrowTop;
+                    }
+                    fm_core::ArrowType::StickArrowTopDotted => {
+                        stroke.dash_array = vec![6.0, 4.0];
+                        stroke.line_cap = LineCap::Round;
+                        marker_end = MarkerKind::StickArrowTop;
+                    }
+                    fm_core::ArrowType::StickArrowBottomDotted => {
+                        stroke.dash_array = vec![6.0, 4.0];
+                        stroke.line_cap = LineCap::Round;
+                        marker_end = MarkerKind::StickArrowBottom;
+                    }
+                    fm_core::ArrowType::StickArrowTopReverseDotted => {
+                        stroke.dash_array = vec![6.0, 4.0];
+                        stroke.line_cap = LineCap::Round;
+                        marker_start = MarkerKind::StickArrowBottom;
+                    }
+                    fm_core::ArrowType::StickArrowBottomReverseDotted => {
+                        stroke.dash_array = vec![6.0, 4.0];
+                        stroke.line_cap = LineCap::Round;
+                        marker_start = MarkerKind::StickArrowTop;
                     }
                     fm_core::ArrowType::Circle => marker_end = MarkerKind::Circle,
                     fm_core::ArrowType::Cross => marker_end = MarkerKind::Cross,
@@ -1362,6 +1428,7 @@ pub fn layout_diagram_traced_with_config_and_guardrails(
         LayoutAlgorithm::Pie => layout_diagram_pie_traced(ir),
         LayoutAlgorithm::Quadrant => layout_diagram_quadrant_traced(ir),
         LayoutAlgorithm::GitGraph => layout_diagram_gitgraph_traced(ir),
+        LayoutAlgorithm::Packet => layout_diagram_grid_traced(ir), // Reuse grid layout for packet
         LayoutAlgorithm::Auto => unreachable!("dispatch must resolve auto to a concrete layout"),
     };
     traced.trace.dispatch = guarded_dispatch;
@@ -1432,6 +1499,7 @@ fn auto_selection_reason(ir: &MermaidDiagramIr, selected: LayoutAlgorithm) -> &'
         DiagramType::Pie => return "auto_diagram_type_pie",
         DiagramType::QuadrantChart => return "auto_diagram_type_quadrant",
         DiagramType::GitGraph => return "auto_diagram_type_gitgraph",
+        DiagramType::PacketBeta => return "auto_diagram_type_packet",
         DiagramType::XyChart => return "auto_diagram_type_xychart",
         DiagramType::Sankey => return "auto_diagram_type_sankey",
         DiagramType::Journey | DiagramType::Kanban => return "auto_diagram_type_kanban",
@@ -1466,6 +1534,7 @@ fn preferred_layout_algorithm(ir: &MermaidDiagramIr) -> LayoutAlgorithm {
         DiagramType::Pie => LayoutAlgorithm::Pie,
         DiagramType::QuadrantChart => LayoutAlgorithm::Quadrant,
         DiagramType::GitGraph => LayoutAlgorithm::GitGraph,
+        DiagramType::PacketBeta => LayoutAlgorithm::Packet,
         _ => select_general_graph_algorithm(ir),
     }
 }
@@ -1521,6 +1590,7 @@ fn algorithm_available_for_diagram(diagram_type: DiagramType, algorithm: LayoutA
         LayoutAlgorithm::Pie => matches!(diagram_type, DiagramType::Pie),
         LayoutAlgorithm::Quadrant => matches!(diagram_type, DiagramType::QuadrantChart),
         LayoutAlgorithm::GitGraph => matches!(diagram_type, DiagramType::GitGraph),
+        LayoutAlgorithm::Packet => matches!(diagram_type, DiagramType::PacketBeta),
     }
 }
 
@@ -1606,7 +1676,8 @@ fn estimate_layout_cost(ir: &MermaidDiagramIr, algorithm: LayoutAlgorithm) -> La
         | LayoutAlgorithm::Sequence
         | LayoutAlgorithm::Pie
         | LayoutAlgorithm::Quadrant
-        | LayoutAlgorithm::GitGraph => LayoutCostEstimate {
+        | LayoutAlgorithm::GitGraph
+        | LayoutAlgorithm::Packet => LayoutCostEstimate {
             time_ms: nodes
                 .saturating_mul(3)
                 .saturating_add(edges.saturating_mul(2))
@@ -1688,6 +1759,11 @@ fn fallback_candidates(ir: &MermaidDiagramIr, selected: LayoutAlgorithm) -> Vec<
         DiagramType::GitGraph => [
             LayoutAlgorithm::GitGraph,
             LayoutAlgorithm::Tree,
+            LayoutAlgorithm::Sugiyama,
+        ],
+        DiagramType::PacketBeta => [
+            LayoutAlgorithm::Packet,
+            LayoutAlgorithm::Grid,
             LayoutAlgorithm::Sugiyama,
         ],
         _ => [selected, LayoutAlgorithm::Tree, LayoutAlgorithm::Sugiyama],
@@ -8443,7 +8519,8 @@ fn layout_decision_confidence_permille(
                 | LayoutAlgorithm::Radial
                 | LayoutAlgorithm::Pie
                 | LayoutAlgorithm::Quadrant
-                | LayoutAlgorithm::GitGraph => 900,
+                | LayoutAlgorithm::GitGraph
+                | LayoutAlgorithm::Packet => 900,
                 LayoutAlgorithm::Tree if metrics.is_tree_like => 880,
                 LayoutAlgorithm::Force if metrics.is_dense || metrics.back_edge_count > 0 => 760,
                 LayoutAlgorithm::Sugiyama => 820,

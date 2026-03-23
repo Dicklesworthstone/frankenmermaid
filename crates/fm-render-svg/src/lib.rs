@@ -346,6 +346,22 @@ fn render_scene_document_with_ir(
     defs = defs.marker(ArrowheadMarker::standard("arrow-end", &theme.colors.edge));
     defs = defs.marker(ArrowheadMarker::filled("arrow-filled", &theme.colors.edge));
     defs = defs.marker(ArrowheadMarker::open("arrow-open", &theme.colors.edge));
+    defs = defs.marker(ArrowheadMarker::half_top(
+        "arrow-half-top",
+        &theme.colors.edge,
+    ));
+    defs = defs.marker(ArrowheadMarker::half_bottom(
+        "arrow-half-bottom",
+        &theme.colors.edge,
+    ));
+    defs = defs.marker(ArrowheadMarker::stick_top(
+        "arrow-stick-top",
+        &theme.colors.edge,
+    ));
+    defs = defs.marker(ArrowheadMarker::stick_bottom(
+        "arrow-stick-bottom",
+        &theme.colors.edge,
+    ));
     defs = defs.marker(
         ArrowheadMarker::standard("arrow-start", &theme.colors.edge)
             .with_orient(crate::defs::MarkerOrient::AutoStartReverse),
@@ -503,6 +519,10 @@ fn map_marker_kind(kind: fm_layout::MarkerKind) -> &'static str {
     match kind {
         MarkerKind::None => "",
         MarkerKind::Arrow => "url(#arrow-end)",
+        MarkerKind::HalfArrowTop => "url(#arrow-half-top)",
+        MarkerKind::HalfArrowBottom => "url(#arrow-half-bottom)",
+        MarkerKind::StickArrowTop => "url(#arrow-stick-top)",
+        MarkerKind::StickArrowBottom => "url(#arrow-stick-bottom)",
         MarkerKind::ThickArrow => "url(#arrow-filled)",
         MarkerKind::DottedArrow => "url(#arrow-end)",
         MarkerKind::Circle => "url(#arrow-circle)",
@@ -1138,6 +1158,22 @@ fn render_layout_to_svg(
     defs = defs.marker(ArrowheadMarker::standard("arrow-end", &theme.colors.edge));
     defs = defs.marker(ArrowheadMarker::filled("arrow-filled", &theme.colors.edge));
     defs = defs.marker(ArrowheadMarker::open("arrow-open", &theme.colors.edge));
+    defs = defs.marker(ArrowheadMarker::half_top(
+        "arrow-half-top",
+        &theme.colors.edge,
+    ));
+    defs = defs.marker(ArrowheadMarker::half_bottom(
+        "arrow-half-bottom",
+        &theme.colors.edge,
+    ));
+    defs = defs.marker(ArrowheadMarker::stick_top(
+        "arrow-stick-top",
+        &theme.colors.edge,
+    ));
+    defs = defs.marker(ArrowheadMarker::stick_bottom(
+        "arrow-stick-bottom",
+        &theme.colors.edge,
+    ));
     defs = defs.marker(
         ArrowheadMarker::standard("arrow-start", &theme.colors.edge)
             .with_orient(crate::defs::MarkerOrient::AutoStartReverse),
@@ -1449,6 +1485,28 @@ fn render_layout_to_svg(
             &theme.colors,
         );
         doc = doc.child(edge_elem);
+    }
+
+    // Render bundle count labels for bundled edges (e.g., "×3").
+    for edge_path in &layout.edges {
+        if edge_path.bundle_count > 1 && edge_path.points.len() >= 2 {
+            let mid_idx = edge_path.points.len() / 2;
+            let mid_pt = &edge_path.points[mid_idx];
+            let label = format!("\u{00d7}{}", edge_path.bundle_count);
+            doc = doc.child(
+                Element::text()
+                    .x(mid_pt.x + offset_x + 6.0)
+                    .y(mid_pt.y + offset_y - 12.0)
+                    .content(&label)
+                    .attr("text-anchor", "start")
+                    .attr("dominant-baseline", "auto")
+                    .attr_num("font-size", config.font_size * 0.65)
+                    .attr("font-family", &config.font_family)
+                    .fill(&theme.colors.edge)
+                    .attr("fill-opacity", "0.7")
+                    .class("fm-bundle-count"),
+            );
+        }
     }
 
     // Render ER cardinality labels near edge endpoints.
@@ -3567,11 +3625,79 @@ fn render_edge(
             ArrowType::Line => (None, None, None, &colors.edge),
             ArrowType::Arrow => (None, None, Some("url(#arrow-end)"), &colors.edge),
             ArrowType::OpenArrow => (None, None, Some("url(#arrow-open)"), &colors.edge),
+            ArrowType::HalfArrowTop => (None, None, Some("url(#arrow-half-top)"), &colors.edge),
+            ArrowType::HalfArrowBottom => {
+                (None, None, Some("url(#arrow-half-bottom)"), &colors.edge)
+            }
+            ArrowType::HalfArrowTopReverse => {
+                (None, Some("url(#arrow-half-bottom)"), None, &colors.edge)
+            }
+            ArrowType::HalfArrowBottomReverse => {
+                (None, Some("url(#arrow-half-top)"), None, &colors.edge)
+            }
+            ArrowType::StickArrowTop => (None, None, Some("url(#arrow-stick-top)"), &colors.edge),
+            ArrowType::StickArrowBottom => {
+                (None, None, Some("url(#arrow-stick-bottom)"), &colors.edge)
+            }
+            ArrowType::StickArrowTopReverse => {
+                (None, Some("url(#arrow-stick-bottom)"), None, &colors.edge)
+            }
+            ArrowType::StickArrowBottomReverse => {
+                (None, Some("url(#arrow-stick-top)"), None, &colors.edge)
+            }
             ArrowType::ThickArrow => (None, None, Some("url(#arrow-filled)"), &colors.edge),
             ArrowType::DottedArrow => (Some("5,5"), None, Some("url(#arrow-end)"), &colors.edge),
             ArrowType::DottedOpenArrow => {
                 (Some("5,5"), None, Some("url(#arrow-open)"), &colors.edge)
             }
+            ArrowType::HalfArrowTopDotted => (
+                Some("5,5"),
+                None,
+                Some("url(#arrow-half-top)"),
+                &colors.edge,
+            ),
+            ArrowType::HalfArrowBottomDotted => (
+                Some("5,5"),
+                None,
+                Some("url(#arrow-half-bottom)"),
+                &colors.edge,
+            ),
+            ArrowType::HalfArrowTopReverseDotted => (
+                Some("5,5"),
+                Some("url(#arrow-half-bottom)"),
+                None,
+                &colors.edge,
+            ),
+            ArrowType::HalfArrowBottomReverseDotted => (
+                Some("5,5"),
+                Some("url(#arrow-half-top)"),
+                None,
+                &colors.edge,
+            ),
+            ArrowType::StickArrowTopDotted => (
+                Some("5,5"),
+                None,
+                Some("url(#arrow-stick-top)"),
+                &colors.edge,
+            ),
+            ArrowType::StickArrowBottomDotted => (
+                Some("5,5"),
+                None,
+                Some("url(#arrow-stick-bottom)"),
+                &colors.edge,
+            ),
+            ArrowType::StickArrowTopReverseDotted => (
+                Some("5,5"),
+                Some("url(#arrow-stick-bottom)"),
+                None,
+                &colors.edge,
+            ),
+            ArrowType::StickArrowBottomReverseDotted => (
+                Some("5,5"),
+                Some("url(#arrow-stick-top)"),
+                None,
+                &colors.edge,
+            ),
             ArrowType::Circle => (None, None, Some("url(#arrow-circle)"), &colors.edge),
             ArrowType::Cross => (None, None, Some("url(#arrow-cross)"), &colors.edge),
             ArrowType::ThickLine => (None, None, None, &colors.edge),
@@ -3609,6 +3735,14 @@ fn render_edge(
         match arrow {
             ArrowType::DottedArrow
             | ArrowType::DottedOpenArrow
+            | ArrowType::HalfArrowTopDotted
+            | ArrowType::HalfArrowBottomDotted
+            | ArrowType::HalfArrowTopReverseDotted
+            | ArrowType::HalfArrowBottomReverseDotted
+            | ArrowType::StickArrowTopDotted
+            | ArrowType::StickArrowBottomDotted
+            | ArrowType::StickArrowTopReverseDotted
+            | ArrowType::StickArrowBottomReverseDotted
             | ArrowType::DottedLine
             | ArrowType::DoubleDottedArrow => "fm-edge-dashed",
             ArrowType::ThickArrow | ArrowType::DoubleThickArrow | ArrowType::ThickLine => {
@@ -4344,6 +4478,16 @@ mod tests {
     }
 
     #[test]
+    fn includes_half_arrow_marker_defs() {
+        let ir = MermaidDiagramIr::empty(DiagramType::Sequence);
+        let svg = render_svg(&ir);
+        assert!(svg.contains("id=\"arrow-half-top\""));
+        assert!(svg.contains("id=\"arrow-half-bottom\""));
+        assert!(svg.contains("id=\"arrow-stick-top\""));
+        assert!(svg.contains("id=\"arrow-stick-bottom\""));
+    }
+
+    #[test]
     fn custom_config_disables_shadows() {
         let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         let config = SvgRenderConfig {
@@ -4793,6 +4937,36 @@ mod tests {
         assert!(svg.contains("data-fm-source-span=\"2:1-2:4@0-0\""));
         assert!(svg.contains("data-fm-source-span=\"3:1-3:6@0-0\""));
         assert!(svg.contains("data-fm-source-span=\"1:1-1:10@0-0\""));
+    }
+
+    #[test]
+    fn renders_half_arrow_markers_on_edges() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Sequence);
+        ir.nodes.push(IrNode {
+            id: "Alice".to_string(),
+            ..IrNode::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "Bob".to_string(),
+            ..IrNode::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            arrow: ArrowType::HalfArrowTop,
+            ..IrEdge::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(1)),
+            to: IrEndpoint::Node(IrNodeId(0)),
+            arrow: ArrowType::StickArrowBottomReverseDotted,
+            ..IrEdge::default()
+        });
+
+        let svg = render_svg(&ir);
+        assert!(svg.contains("marker-end=\"url(#arrow-half-top)\""));
+        assert!(svg.contains("marker-start=\"url(#arrow-stick-top)\""));
+        assert!(svg.contains("stroke-dasharray=\"5,5\""));
     }
 
     proptest! {

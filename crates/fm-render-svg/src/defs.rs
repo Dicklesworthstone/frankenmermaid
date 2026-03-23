@@ -128,6 +128,98 @@ impl ArrowheadMarker {
         }
     }
 
+    /// Create a filled top half arrowhead.
+    #[must_use]
+    pub fn half_top(id: &str, fill: &str) -> Self {
+        let path = PathBuilder::new()
+            .move_to(0.0, 0.0)
+            .line_to(10.0, 8.0)
+            .line_to(0.0, 8.0)
+            .close()
+            .build();
+
+        Self {
+            id: id.to_string(),
+            marker_width: 12.0,
+            marker_height: 12.0,
+            ref_x: 7.9,
+            ref_y: 7.25,
+            orient: MarkerOrient::AutoStartReverse,
+            path,
+            fill: fill.to_string(),
+            stroke: None,
+            stroke_width: None,
+        }
+    }
+
+    /// Create a filled bottom half arrowhead.
+    #[must_use]
+    pub fn half_bottom(id: &str, fill: &str) -> Self {
+        let path = PathBuilder::new()
+            .move_to(0.0, 0.0)
+            .line_to(10.0, 0.0)
+            .line_to(0.0, 8.0)
+            .close()
+            .build();
+
+        Self {
+            id: id.to_string(),
+            marker_width: 12.0,
+            marker_height: 12.0,
+            ref_x: 7.9,
+            ref_y: 0.75,
+            orient: MarkerOrient::AutoStartReverse,
+            path,
+            fill: fill.to_string(),
+            stroke: None,
+            stroke_width: None,
+        }
+    }
+
+    /// Create a top stick half arrowhead.
+    #[must_use]
+    pub fn stick_top(id: &str, stroke: &str) -> Self {
+        let path = PathBuilder::new()
+            .move_to(0.0, 0.0)
+            .line_to(7.0, 7.0)
+            .build();
+
+        Self {
+            id: id.to_string(),
+            marker_width: 12.0,
+            marker_height: 12.0,
+            ref_x: 7.5,
+            ref_y: 7.0,
+            orient: MarkerOrient::AutoStartReverse,
+            path,
+            fill: String::from("none"),
+            stroke: Some(stroke.to_string()),
+            stroke_width: Some(1.5),
+        }
+    }
+
+    /// Create a bottom stick half arrowhead.
+    #[must_use]
+    pub fn stick_bottom(id: &str, stroke: &str) -> Self {
+        let path = PathBuilder::new()
+            .move_to(0.0, 7.0)
+            .line_to(7.0, 0.0)
+            .build();
+
+        Self {
+            id: id.to_string(),
+            marker_width: 12.0,
+            marker_height: 12.0,
+            ref_x: 7.5,
+            ref_y: 0.0,
+            orient: MarkerOrient::AutoStartReverse,
+            path,
+            fill: String::from("none"),
+            stroke: Some(stroke.to_string()),
+            stroke_width: Some(1.5),
+        }
+    }
+
     /// Create a circle marker.
     #[must_use]
     pub fn circle_marker(id: &str, fill: &str) -> Self {
