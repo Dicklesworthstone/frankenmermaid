@@ -1825,7 +1825,8 @@ fn layout_diagram_sugiyama_traced_with_config(
         None
     };
 
-    let ranks = rank_assignment(ir, &cycle_result);
+    let mut ranks = rank_assignment(ir, &cycle_result);
+    apply_ir_constraints(ir, &mut ranks);
     push_snapshot(
         &mut trace,
         "rank_assignment",
@@ -3909,7 +3910,9 @@ fn layout_diagram_pie_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         let node_y = cy + label_radius * mid_angle.sin() - node_h / 2.0;
 
         nodes.push(LayoutNodeBox {
-            id: i,
+            node_index: i,
+            node_id: node.id.clone(),
+            span: node.span_primary,
             bounds: LayoutRect {
                 x: node_x,
                 y: node_y,
@@ -3923,14 +3926,7 @@ fn layout_diagram_pie_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         angle_cursor += sweep;
     }
 
-    push_snapshot(
-        &mut trace,
-        "pie_layout",
-        node_count,
-        ir.edges.len(),
-        0,
-        0,
-    );
+    push_snapshot(&mut trace, "pie_layout", node_count, ir.edges.len(), 0, 0);
 
     let bounds = compute_bounds(&nodes, &[], &[], LayoutSpacing::default());
 
@@ -5634,6 +5630,62 @@ fn cycle_removal_greedy(
             (position[edge.source] > position[edge.target]).then_some(edge.edge_index)
         })
         .collect()
+}
+
+/// Apply IR constraints (SameRank, MinLength) to adjust rank assignments.
+fn apply_ir_constraints(ir: &MermaidDiagramIr, ranks: &mut BTreeMap<usize, usize>) {
+    use fm_core::IrConstraint;
+
+    // Build node-id-to-index lookup.
+    let id_to_index: BTreeMap<&str, usize> = ir
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, node)| (node.id.as_str(), i))
+        .collect();
+
+    for constraint in &ir.constraints {
+        match constraint {
+            IrConstraint::SameRank { node_ids, .. } => {
+                // Force all named nodes to share the same rank (the minimum among them).
+                let target_rank = node_ids
+                    .iter()
+                    .filter_map(|id| id_to_index.get(id.as_str()))
+                    .filter_map(|idx| ranks.get(idx).copied())
+                    .min();
+                if let Some(target) = target_rank {
+                    for id in node_ids {
+                        if let Some(&idx) = id_to_index.get(id.as_str()) {
+                            ranks.insert(idx, target);
+                        }
+                    }
+                }
+            }
+            IrConstraint::MinLength {
+                from_id,
+                to_id,
+                min_len,
+                ..
+            } => {
+                // Ensure the target node is at least min_len ranks below the source.
+                if let (Some(&from_idx), Some(&to_idx)) = (
+                    id_to_index.get(from_id.as_str()),
+                    id_to_index.get(to_id.as_str()),
+                ) {
+                    let from_rank = ranks.get(&from_idx).copied().unwrap_or(0);
+                    let to_rank = ranks.get(&to_idx).copied().unwrap_or(0);
+                    let required = from_rank.saturating_add(*min_len);
+                    if to_rank < required {
+                        ranks.insert(to_idx, required);
+                    }
+                }
+            }
+            IrConstraint::Pin { .. } | IrConstraint::OrderInRank { .. } => {
+                // Pin and OrderInRank are applied during coordinate assignment,
+                // not during rank assignment.
+            }
+        }
+    }
 }
 
 fn rank_assignment(ir: &MermaidDiagramIr, cycles: &CycleRemovalResult) -> BTreeMap<usize, usize> {

@@ -1440,6 +1440,8 @@ pub enum IrStyleTarget {
     Node(IrNodeId),
     /// `linkStyle 0 stroke:#f00` — applies CSS to an edge by index.
     Link(usize),
+    /// `linkStyle default stroke:#f00` — default style for all edges.
+    LinkDefault,
 }
 
 /// A style reference from a `classDef`, `style`, or `linkStyle` directive.

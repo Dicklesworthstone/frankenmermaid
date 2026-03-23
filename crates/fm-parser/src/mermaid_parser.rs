@@ -3260,8 +3260,8 @@ fn parse_pie(input: &str, builder: &mut IrBuilder) {
 
         // Extract numeric value after the colon.
         let value = trimmed
-            .splitn(2, ':')
-            .nth(1)
+            .split_once(':')
+            .map(|(_, v)| v)
             .and_then(|v| v.trim().parse::<f32>().ok())
             .unwrap_or(0.0);
 
@@ -6239,14 +6239,20 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
             if let Some((index_str, style)) = rest.split_once(' ') {
                 let index_str = index_str.trim();
                 let style = style.trim();
-                if let Ok(link_index) = index_str.parse::<usize>()
-                    && !style.is_empty()
-                {
-                    builder.push_style_ref(
-                        fm_core::IrStyleTarget::Link(link_index),
-                        style.to_string(),
-                        span,
-                    );
+                if !style.is_empty() {
+                    if index_str.eq_ignore_ascii_case("default") {
+                        builder.push_style_ref(
+                            fm_core::IrStyleTarget::LinkDefault,
+                            style.to_string(),
+                            span,
+                        );
+                    } else if let Ok(link_index) = index_str.parse::<usize>() {
+                        builder.push_style_ref(
+                            fm_core::IrStyleTarget::Link(link_index),
+                            style.to_string(),
+                            span,
+                        );
+                    }
                 }
             }
         }

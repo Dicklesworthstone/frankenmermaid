@@ -1241,6 +1241,12 @@ fn render_layout_to_svg(
         return doc.to_string();
     }
 
+    // Pie chart rendering: draw wedges from pie metadata.
+    if let Some(pie_meta) = ir.pie_meta.as_ref().filter(|meta| !meta.slices.is_empty()) {
+        doc = render_pie_svg(doc, layout, pie_meta, offset_x, offset_y, config, &theme);
+        return doc.to_string();
+    }
+
     for band in &layout.extensions.bands {
         doc = doc.child(render_layout_band(band, offset_x, offset_y, config));
     }
@@ -1536,6 +1542,114 @@ fn render_layout_axis_tick(label: &str, x: f32, y: f32, config: &SvgRenderConfig
             .class("fm-axis-tick-label")
             .build(),
     )
+}
+
+fn render_pie_svg(
+    mut doc: SvgDocument,
+    layout: &DiagramLayout,
+    pie_meta: &fm_core::IrPieMeta,
+    offset_x: f32,
+    offset_y: f32,
+    config: &SvgRenderConfig,
+    theme: &Theme,
+) -> SvgDocument {
+    use std::f32::consts::PI;
+
+    let accent_colors: Vec<&str> = theme.colors.accents.iter().map(String::as_str).collect();
+
+    // Pie geometry: centered in layout bounds.
+    let bounds = &layout.bounds;
+    let cx = bounds.x + bounds.width / 2.0 + offset_x;
+    let cy = bounds.y + bounds.height / 2.0 + offset_y;
+    let radius = (bounds.width.min(bounds.height) / 2.0 - 40.0).max(40.0);
+
+    let total: f32 = pie_meta
+        .slices
+        .iter()
+        .map(|s| s.value.max(0.0))
+        .sum::<f32>()
+        .max(f32::EPSILON);
+
+    // Title.
+    if let Some(title) = &pie_meta.title {
+        doc = doc.child(
+            Element::text()
+                .x(cx)
+                .y(cy - radius - 20.0)
+                .content(title)
+                .attr("text-anchor", "middle")
+                .attr("dominant-baseline", "auto")
+                .attr_num("font-size", config.font_size + 4.0)
+                .attr("font-family", &config.font_family)
+                .fill(&theme.colors.text)
+                .class("fm-pie-title"),
+        );
+    }
+
+    let mut angle = -PI / 2.0; // start at 12 o'clock
+
+    for (i, slice) in pie_meta.slices.iter().enumerate() {
+        let value = slice.value.max(0.0);
+        let sweep = (value / total) * 2.0 * PI;
+        let color = accent_colors[i % accent_colors.len()];
+
+        // Compute arc endpoints.
+        let x1 = cx + radius * angle.cos();
+        let y1 = cy + radius * angle.sin();
+        let x2 = cx + radius * (angle + sweep).cos();
+        let y2 = cy + radius * (angle + sweep).sin();
+        let large_arc = if sweep > PI { 1 } else { 0 };
+
+        // SVG arc path: M cx,cy L x1,y1 A rx ry 0 large_arc 1 x2,y2 Z
+        let d = format!("M {cx} {cy} L {x1} {y1} A {radius} {radius} 0 {large_arc} 1 {x2} {y2} Z");
+
+        let wedge = Element::path()
+            .d(&d)
+            .fill(color)
+            .stroke(&theme.colors.background)
+            .stroke_width(2.0)
+            .class("fm-pie-slice");
+
+        doc = doc.child(wedge);
+
+        // Label at mid-angle, outside the wedge.
+        let mid_angle = angle + sweep / 2.0;
+        let label_radius = radius + 24.0;
+        let lx = cx + label_radius * mid_angle.cos();
+        let ly = cy + label_radius * mid_angle.sin();
+        let pct = (value / total) * 100.0;
+
+        let label_text = if pie_meta.show_data {
+            format!("{} ({:.1}%)", slice.label, pct)
+        } else {
+            format!("{} {:.1}%", slice.label, pct)
+        };
+
+        let anchor = if mid_angle.cos() < -0.1 {
+            "end"
+        } else if mid_angle.cos() > 0.1 {
+            "start"
+        } else {
+            "middle"
+        };
+
+        doc = doc.child(
+            Element::text()
+                .x(lx)
+                .y(ly)
+                .content(&label_text)
+                .attr("text-anchor", anchor)
+                .attr("dominant-baseline", "middle")
+                .attr_num("font-size", config.font_size * 0.85)
+                .attr("font-family", &config.font_family)
+                .fill(&theme.colors.text)
+                .class("fm-pie-label"),
+        );
+
+        angle += sweep;
+    }
+
+    doc
 }
 
 fn render_xychart_svg(
