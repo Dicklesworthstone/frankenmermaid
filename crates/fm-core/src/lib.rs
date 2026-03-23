@@ -3095,6 +3095,24 @@ pub struct IrSequenceMeta {
     pub lifecycle_events: Vec<IrLifecycleEvent>,
 }
 
+/// A single slice in a pie chart.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IrPieSlice {
+    pub label: String,
+    pub value: f32,
+}
+
+/// Pie-chart-specific metadata that extends the generic IR.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct IrPieMeta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub show_data: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slices: Vec<IrPieSlice>,
+}
+
 // ── Main IR container ──────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -3118,6 +3136,8 @@ pub struct MermaidDiagramIr {
     pub gantt_meta: Option<IrGanttMeta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub xy_chart_meta: Option<IrXyChartMeta>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pie_meta: Option<IrPieMeta>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -3149,6 +3169,7 @@ impl MermaidDiagramIr {
             sequence_meta: None,
             gantt_meta: None,
             xy_chart_meta: None,
+            pie_meta: None,
             diagnostics: Vec::new(),
         }
     }

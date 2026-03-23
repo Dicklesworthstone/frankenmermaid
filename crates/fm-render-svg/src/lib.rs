@@ -1012,6 +1012,21 @@ fn effects_css(config: &SvgRenderConfig) -> String {
     let cluster_fill_opacity = clamp_unit_interval(config.cluster_fill_opacity);
     format!(
         ".fm-node-inactive {{ opacity: {inactive_opacity:.2}; }}\n\
+.fm-node-block-beta rect,\n\
+.fm-node-block-beta path,\n\
+.fm-node-block-beta circle,\n\
+.fm-node-block-beta ellipse,\n\
+.fm-node-block-beta polygon {{\n\
+  fill: #546e7a;\n\
+  stroke: #455a64;\n\
+}}\n\
+.fm-node-block-beta text {{\n\
+  fill: #f8fafc;\n\
+}}\n\
+.fm-node-block-beta-space {{\n\
+  opacity: 0;\n\
+  pointer-events: none;\n\
+}}\n\
 .fm-node-highlighted rect,\n\
 .fm-node-highlighted path,\n\
 .fm-node-highlighted circle,\n\
@@ -1888,19 +1903,24 @@ fn render_node(
     let cy = y + h / 2.0;
 
     // Get node label text
-    let raw_label_text = ir_node
-        .and_then(|n| n.label)
-        .and_then(|lid| ir.labels.get(lid.0))
-        .map(|l| l.text.as_str())
-        .or_else(|| {
-            ir_node.and_then(|node| match node.shape {
-                NodeShape::FilledCircle => None,
-                NodeShape::DoubleCircle if node.label.is_none() => None,
-                NodeShape::HorizontalBar => None,
-                _ => Some(node.id.as_str()),
+    let placeholder_space_node = ir_node.is_some_and(is_block_beta_space_node);
+    let raw_label_text = if placeholder_space_node {
+        ""
+    } else {
+        ir_node
+            .and_then(|n| n.label)
+            .and_then(|lid| ir.labels.get(lid.0))
+            .map(|l| l.text.as_str())
+            .or_else(|| {
+                ir_node.and_then(|node| match node.shape {
+                    NodeShape::FilledCircle => None,
+                    NodeShape::DoubleCircle if node.label.is_none() => None,
+                    NodeShape::HorizontalBar => None,
+                    _ => Some(node.id.as_str()),
+                })
             })
-        })
-        .unwrap_or("");
+            .unwrap_or("")
+    };
     let label_text = truncate_label(raw_label_text, detail.node_label_max_chars);
     let node_font_size = detail.node_font_size;
 
@@ -1909,6 +1929,8 @@ fn render_node(
     let mut is_inactive = false;
     let mut dashed_border = false;
     let mut double_border = false;
+    let mut is_block_beta = false;
+    let mut is_block_beta_space = false;
 
     // Create group for node shape + label
     let mut group = Element::group()
@@ -1952,6 +1974,12 @@ fn render_node(
             if normalized.contains("double-border") || normalized.contains("border-double") {
                 double_border = true;
             }
+            if normalized == "block-beta" {
+                is_block_beta = true;
+            }
+            if normalized == "block-beta-space" {
+                is_block_beta_space = true;
+            }
         }
     }
     if is_highlighted {
@@ -1965,6 +1993,12 @@ fn render_node(
     }
     if double_border {
         group = group.class("fm-node-border-double");
+    }
+    if is_block_beta {
+        group = group.class("fm-node-block-beta");
+    }
+    if is_block_beta_space {
+        group = group.class("fm-node-block-beta-space");
     }
 
     // Add accessibility attributes
@@ -2514,6 +2548,14 @@ fn render_node(
     }
 
     group
+}
+
+fn is_block_beta_space_node(node: &fm_core::IrNode) -> bool {
+    node.id.starts_with("__space_")
+        || node
+            .classes
+            .iter()
+            .any(|class_name| class_name.eq_ignore_ascii_case("block-beta-space"))
 }
 
 fn stable_accent_index(node_id: &str) -> usize {
@@ -4250,6 +4292,36 @@ mod tests {
         let svg = render_svg_with_config(&ir, &config);
         assert!(svg.contains("fm-node-inactive"));
         assert!(svg.contains(".fm-node-inactive { opacity: 0.35; }"));
+    }
+
+    #[test]
+    fn block_beta_nodes_emit_family_specific_svg_classes_and_css() {
+        let ir = create_ir_with_single_node_classes(
+            "service",
+            NodeShape::Rect,
+            &["block-beta", "block-beta-span-2"],
+        );
+        let svg = render_svg(&ir);
+        assert!(svg.contains("fm-node-block-beta"));
+        assert!(svg.contains(".fm-node-block-beta rect,"));
+        assert!(svg.contains(".fm-node-block-beta text {"));
+    }
+
+    #[test]
+    fn block_beta_space_nodes_do_not_render_synthetic_placeholder_labels() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::BlockBeta);
+        ir.nodes.push(IrNode {
+            id: "__space_12".to_string(),
+            shape: NodeShape::Rect,
+            classes: vec!["block-beta".to_string(), "block-beta-space".to_string()],
+            ..IrNode::default()
+        });
+
+        let svg = render_svg(&ir);
+        assert!(svg.contains("fm-node-block-beta-space"));
+        assert!(svg.contains(".fm-node-block-beta-space {"));
+        assert!(!svg.contains("__space_12</text>"));
+        assert!(!svg.contains("aria-label=\"__space_12\""));
     }
 
     #[test]
