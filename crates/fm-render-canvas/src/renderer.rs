@@ -1382,6 +1382,7 @@ mod tests {
                 cluster_index: 0,
                 span: Default::default(),
                 title: Some("Backend".to_string()),
+                color: None,
                 bounds: LayoutRect {
                     x: 5.0,
                     y: 10.0,

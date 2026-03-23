@@ -1190,18 +1190,32 @@ fn parse_sequence_statement(line: &str) -> Option<SequenceStatement> {
         return Some(frag);
     }
 
-    // Fragment else/and/option dividers
-    if let Some(rest) = line.strip_prefix("else") {
-        let label = rest.trim().to_string();
-        return Some(SequenceStatement::FragmentElse { label });
+    // Fragment else/and/option dividers — require word boundary (space or end-of-line)
+    // to avoid matching e.g. "elsewhere" or "android".
+    if line == "else" {
+        return Some(SequenceStatement::FragmentElse {
+            label: String::new(),
+        });
     }
-    if let Some(rest) = line.strip_prefix("and") {
-        let label = rest.trim().to_string();
-        return Some(SequenceStatement::FragmentElse { label });
+    if let Some(rest) = line.strip_prefix("else ") {
+        return Some(SequenceStatement::FragmentElse {
+            label: rest.trim().to_string(),
+        });
     }
-    if let Some(rest) = line.strip_prefix("option") {
-        let label = rest.trim().to_string();
-        return Some(SequenceStatement::FragmentElse { label });
+    if line == "and" || line == "option" {
+        return Some(SequenceStatement::FragmentElse {
+            label: String::new(),
+        });
+    }
+    if let Some(rest) = line.strip_prefix("and ") {
+        return Some(SequenceStatement::FragmentElse {
+            label: rest.trim().to_string(),
+        });
+    }
+    if let Some(rest) = line.strip_prefix("option ") {
+        return Some(SequenceStatement::FragmentElse {
+            label: rest.trim().to_string(),
+        });
     }
 
     if let Some(rest) = line.strip_prefix("box ") {
@@ -1237,11 +1251,17 @@ fn parse_sequence_statement(line: &str) -> Option<SequenceStatement> {
     }
 
     if let Some(rest) = line.strip_prefix("participant ") {
-        return Some(SequenceStatement::Participant(rest.trim().to_string()));
+        let name = rest.trim();
+        if !name.is_empty() {
+            return Some(SequenceStatement::Participant(name.to_string()));
+        }
     }
 
     if let Some(rest) = line.strip_prefix("actor ") {
-        return Some(SequenceStatement::Actor(rest.trim().to_string()));
+        let name = rest.trim();
+        if !name.is_empty() {
+            return Some(SequenceStatement::Actor(name.to_string()));
+        }
     }
 
     parse_sequence_message_ast(line).map(SequenceStatement::Message)
@@ -1352,25 +1372,219 @@ fn parse_sequence_actor_menu(line: &str) -> Option<SequenceStatement> {
 /// Parse `box [color] Label` into a BoxStart statement.
 /// Color can be a CSS color name, hex (#abc), rgb(), etc.
 fn parse_sequence_box_start(rest: &str) -> SequenceStatement {
-    // Try to detect a leading color token
-    let (color, label) =
-        if rest.starts_with('#') || rest.starts_with("rgb") || rest.starts_with("hsl") {
-            // Color value followed by label
-            if let Some(space_idx) = rest.find(' ') {
-                (
-                    Some(rest[..space_idx].to_string()),
-                    rest[space_idx..].trim().to_string(),
-                )
-            } else {
-                // Just a color, no label
-                (Some(rest.to_string()), String::new())
-            }
-        } else {
-            // No explicit color, entire string is the label
-            (None, rest.to_string())
-        };
+    let rest = rest.trim();
+    let (color, label) = if let Some((color, label)) = extract_sequence_box_color(rest) {
+        (Some(color), label.to_string())
+    } else {
+        (None, rest.to_string())
+    };
 
     SequenceStatement::BoxStart { label, color }
+}
+
+fn extract_sequence_box_color(rest: &str) -> Option<(String, &str)> {
+    let rest = rest.trim_start();
+    if rest.is_empty() {
+        return None;
+    }
+
+    if rest.starts_with('#') {
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let color = &rest[..end];
+        return Some((color.to_string(), rest[end..].trim_start()));
+    }
+
+    let lower = rest.to_ascii_lowercase();
+    for prefix in ["rgba(", "rgb(", "hsla(", "hsl("] {
+        if lower.starts_with(prefix)
+            && let Some(color_len) = consume_css_function(rest)
+        {
+            let color = &rest[..color_len];
+            return Some((color.to_string(), rest[color_len..].trim_start()));
+        }
+    }
+
+    let token_end = rest
+        .find(|ch: char| ch.is_whitespace())
+        .unwrap_or(rest.len());
+    let token = &rest[..token_end];
+    if is_css_named_color(token) {
+        return Some((token.to_string(), rest[token_end..].trim_start()));
+    }
+
+    None
+}
+
+fn consume_css_function(value: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (idx, ch) in value.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(idx + ch.len_utf8());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn is_css_named_color(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "aliceblue"
+            | "antiquewhite"
+            | "aqua"
+            | "aquamarine"
+            | "azure"
+            | "beige"
+            | "bisque"
+            | "black"
+            | "blanchedalmond"
+            | "blue"
+            | "blueviolet"
+            | "brown"
+            | "burlywood"
+            | "cadetblue"
+            | "chartreuse"
+            | "chocolate"
+            | "coral"
+            | "cornflowerblue"
+            | "cornsilk"
+            | "crimson"
+            | "cyan"
+            | "darkblue"
+            | "darkcyan"
+            | "darkgoldenrod"
+            | "darkgray"
+            | "darkgreen"
+            | "darkgrey"
+            | "darkkhaki"
+            | "darkmagenta"
+            | "darkolivegreen"
+            | "darkorange"
+            | "darkorchid"
+            | "darkred"
+            | "darksalmon"
+            | "darkseagreen"
+            | "darkslateblue"
+            | "darkslategray"
+            | "darkslategrey"
+            | "darkturquoise"
+            | "darkviolet"
+            | "deeppink"
+            | "deepskyblue"
+            | "dimgray"
+            | "dimgrey"
+            | "dodgerblue"
+            | "firebrick"
+            | "floralwhite"
+            | "forestgreen"
+            | "fuchsia"
+            | "gainsboro"
+            | "ghostwhite"
+            | "gold"
+            | "goldenrod"
+            | "gray"
+            | "green"
+            | "greenyellow"
+            | "grey"
+            | "honeydew"
+            | "hotpink"
+            | "indianred"
+            | "indigo"
+            | "ivory"
+            | "khaki"
+            | "lavender"
+            | "lavenderblush"
+            | "lawngreen"
+            | "lemonchiffon"
+            | "lightblue"
+            | "lightcoral"
+            | "lightcyan"
+            | "lightgoldenrodyellow"
+            | "lightgray"
+            | "lightgreen"
+            | "lightgrey"
+            | "lightpink"
+            | "lightsalmon"
+            | "lightseagreen"
+            | "lightskyblue"
+            | "lightslategray"
+            | "lightslategrey"
+            | "lightsteelblue"
+            | "lightyellow"
+            | "lime"
+            | "limegreen"
+            | "linen"
+            | "magenta"
+            | "maroon"
+            | "mediumaquamarine"
+            | "mediumblue"
+            | "mediumorchid"
+            | "mediumpurple"
+            | "mediumseagreen"
+            | "mediumslateblue"
+            | "mediumspringgreen"
+            | "mediumturquoise"
+            | "mediumvioletred"
+            | "midnightblue"
+            | "mintcream"
+            | "mistyrose"
+            | "moccasin"
+            | "navajowhite"
+            | "navy"
+            | "oldlace"
+            | "olive"
+            | "olivedrab"
+            | "orange"
+            | "orangered"
+            | "orchid"
+            | "palegoldenrod"
+            | "palegreen"
+            | "paleturquoise"
+            | "palevioletred"
+            | "papayawhip"
+            | "peachpuff"
+            | "peru"
+            | "pink"
+            | "plum"
+            | "powderblue"
+            | "purple"
+            | "rebeccapurple"
+            | "red"
+            | "rosybrown"
+            | "royalblue"
+            | "saddlebrown"
+            | "salmon"
+            | "sandybrown"
+            | "seagreen"
+            | "seashell"
+            | "sienna"
+            | "silver"
+            | "skyblue"
+            | "slateblue"
+            | "slategray"
+            | "slategrey"
+            | "snow"
+            | "springgreen"
+            | "steelblue"
+            | "tan"
+            | "teal"
+            | "thistle"
+            | "tomato"
+            | "transparent"
+            | "turquoise"
+            | "violet"
+            | "wheat"
+            | "white"
+            | "whitesmoke"
+            | "yellow"
+            | "yellowgreen"
+    )
 }
 
 /// Parse fragment start keywords: loop, alt, opt, par, critical, break, rect.
@@ -1513,7 +1727,11 @@ fn lower_sequence_statement(
             builder.add_lifecycle_destroy(&name);
         }
         SequenceStatement::FragmentStart { kind, label } => {
-            builder.begin_fragment(kind, label);
+            if kind == fm_core::FragmentKind::Rect {
+                builder.begin_fragment(kind, String::new(), Some(label));
+            } else {
+                builder.begin_fragment(kind, label, None);
+            }
         }
         SequenceStatement::FragmentElse { label } => {
             builder.add_fragment_alternative(label);
@@ -9020,14 +9238,14 @@ Rel_Back(db, app, "Responds")"#,
 
     #[test]
     fn sequence_box_grouping() {
-        let input = "sequenceDiagram\n  box Blue Team\n    participant Alice\n    participant Bob\n  end\n  Alice->>Bob: Hello";
+        let input = "sequenceDiagram\n  box Backend Team\n    participant Alice\n    participant Bob\n  end\n  Alice->>Bob: Hello";
         let parsed = parse_mermaid(input);
         let meta = parsed
             .ir
             .sequence_meta
             .expect("sequence_meta should be set");
         assert_eq!(meta.participant_groups.len(), 1);
-        assert_eq!(meta.participant_groups[0].label, "Blue Team");
+        assert_eq!(meta.participant_groups[0].label, "Backend Team");
         assert_eq!(meta.participant_groups[0].participants.len(), 2);
     }
 
@@ -9042,6 +9260,35 @@ Rel_Back(db, app, "Responds")"#,
         assert_eq!(meta.participant_groups.len(), 1);
         assert_eq!(meta.participant_groups[0].color, Some("#aaf".to_string()));
         assert_eq!(meta.participant_groups[0].label, "Backend");
+    }
+
+    #[test]
+    fn sequence_box_with_named_color() {
+        let input = "sequenceDiagram\n  box Aqua Backend Team\n    participant API\n    participant DB\n  end\n  API->>DB: Query";
+        let parsed = parse_mermaid(input);
+        let meta = parsed
+            .ir
+            .sequence_meta
+            .expect("sequence_meta should be set");
+        assert_eq!(meta.participant_groups.len(), 1);
+        assert_eq!(meta.participant_groups[0].color, Some("Aqua".to_string()));
+        assert_eq!(meta.participant_groups[0].label, "Backend Team");
+    }
+
+    #[test]
+    fn sequence_box_transparent_keeps_color_name_as_label() {
+        let input = "sequenceDiagram\n  box transparent Aqua\n    participant API\n  end\n  API->>API: Self";
+        let parsed = parse_mermaid(input);
+        let meta = parsed
+            .ir
+            .sequence_meta
+            .expect("sequence_meta should be set");
+        assert_eq!(meta.participant_groups.len(), 1);
+        assert_eq!(
+            meta.participant_groups[0].color,
+            Some("transparent".to_string())
+        );
+        assert_eq!(meta.participant_groups[0].label, "Aqua");
     }
 
     #[test]

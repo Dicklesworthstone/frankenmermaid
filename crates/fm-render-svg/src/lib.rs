@@ -793,6 +793,194 @@ fn sanitize_css_token(value: &str) -> String {
         .collect()
 }
 
+fn sanitize_svg_paint(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    if is_css_named_color(&lower) {
+        return Some(lower);
+    }
+
+    if trimmed.starts_with('#')
+        && trimmed[1..].chars().all(|ch| ch.is_ascii_hexdigit())
+        && matches!(trimmed.len(), 4 | 5 | 7 | 9)
+    {
+        return Some(trimmed.to_string());
+    }
+
+    for prefix in ["rgb(", "rgba(", "hsl(", "hsla("] {
+        if lower.starts_with(prefix)
+            && lower.ends_with(')')
+            && trimmed.chars().all(|ch| {
+                ch.is_ascii_alphanumeric()
+                    || matches!(ch, '(' | ')' | ',' | '.' | '%' | '/' | ' ' | '+' | '-')
+            })
+        {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    None
+}
+
+fn is_css_named_color(value: &str) -> bool {
+    matches!(
+        value,
+        "aliceblue"
+            | "antiquewhite"
+            | "aqua"
+            | "aquamarine"
+            | "azure"
+            | "beige"
+            | "bisque"
+            | "black"
+            | "blanchedalmond"
+            | "blue"
+            | "blueviolet"
+            | "brown"
+            | "burlywood"
+            | "cadetblue"
+            | "chartreuse"
+            | "chocolate"
+            | "coral"
+            | "cornflowerblue"
+            | "cornsilk"
+            | "crimson"
+            | "cyan"
+            | "darkblue"
+            | "darkcyan"
+            | "darkgoldenrod"
+            | "darkgray"
+            | "darkgreen"
+            | "darkgrey"
+            | "darkkhaki"
+            | "darkmagenta"
+            | "darkolivegreen"
+            | "darkorange"
+            | "darkorchid"
+            | "darkred"
+            | "darksalmon"
+            | "darkseagreen"
+            | "darkslateblue"
+            | "darkslategray"
+            | "darkslategrey"
+            | "darkturquoise"
+            | "darkviolet"
+            | "deeppink"
+            | "deepskyblue"
+            | "dimgray"
+            | "dimgrey"
+            | "dodgerblue"
+            | "firebrick"
+            | "floralwhite"
+            | "forestgreen"
+            | "fuchsia"
+            | "gainsboro"
+            | "ghostwhite"
+            | "gold"
+            | "goldenrod"
+            | "gray"
+            | "green"
+            | "greenyellow"
+            | "grey"
+            | "honeydew"
+            | "hotpink"
+            | "indianred"
+            | "indigo"
+            | "ivory"
+            | "khaki"
+            | "lavender"
+            | "lavenderblush"
+            | "lawngreen"
+            | "lemonchiffon"
+            | "lightblue"
+            | "lightcoral"
+            | "lightcyan"
+            | "lightgoldenrodyellow"
+            | "lightgray"
+            | "lightgreen"
+            | "lightgrey"
+            | "lightpink"
+            | "lightsalmon"
+            | "lightseagreen"
+            | "lightskyblue"
+            | "lightslategray"
+            | "lightslategrey"
+            | "lightsteelblue"
+            | "lightyellow"
+            | "lime"
+            | "limegreen"
+            | "linen"
+            | "magenta"
+            | "maroon"
+            | "mediumaquamarine"
+            | "mediumblue"
+            | "mediumorchid"
+            | "mediumpurple"
+            | "mediumseagreen"
+            | "mediumslateblue"
+            | "mediumspringgreen"
+            | "mediumturquoise"
+            | "mediumvioletred"
+            | "midnightblue"
+            | "mintcream"
+            | "mistyrose"
+            | "moccasin"
+            | "navajowhite"
+            | "navy"
+            | "oldlace"
+            | "olive"
+            | "olivedrab"
+            | "orange"
+            | "orangered"
+            | "orchid"
+            | "palegoldenrod"
+            | "palegreen"
+            | "paleturquoise"
+            | "palevioletred"
+            | "papayawhip"
+            | "peachpuff"
+            | "peru"
+            | "pink"
+            | "plum"
+            | "powderblue"
+            | "purple"
+            | "rebeccapurple"
+            | "red"
+            | "rosybrown"
+            | "royalblue"
+            | "saddlebrown"
+            | "salmon"
+            | "sandybrown"
+            | "seagreen"
+            | "seashell"
+            | "sienna"
+            | "silver"
+            | "skyblue"
+            | "slateblue"
+            | "slategray"
+            | "slategrey"
+            | "snow"
+            | "springgreen"
+            | "steelblue"
+            | "tan"
+            | "teal"
+            | "thistle"
+            | "tomato"
+            | "transparent"
+            | "turquoise"
+            | "violet"
+            | "wheat"
+            | "white"
+            | "whitesmoke"
+            | "yellow"
+            | "yellowgreen"
+    )
+}
+
 fn split_inline_style_declarations(style: &str) -> Vec<&str> {
     let mut declarations = Vec::new();
     let mut start = 0_usize;
@@ -1402,21 +1590,41 @@ fn render_layout_to_svg(
         let fw = fragment.bounds.width;
         let fh = fragment.bounds.height;
 
-        // Fragment background.
-        doc = doc.child(
-            Element::rect()
-                .x(fx)
-                .y(fy)
-                .width(fw)
-                .height(fh)
-                .rx(2.0)
-                .ry(2.0)
+        let mut fragment_rect = Element::rect()
+            .x(fx)
+            .y(fy)
+            .width(fw)
+            .height(fh)
+            .rx(2.0)
+            .ry(2.0)
+            .class("fm-sequence-fragment");
+        if fragment.kind == fm_core::FragmentKind::Rect {
+            let fill = fragment
+                .color
+                .as_deref()
+                .and_then(sanitize_svg_paint)
+                .unwrap_or_else(|| "transparent".to_string());
+            let stroke = if fill == "transparent" {
+                theme.colors.cluster_stroke.clone()
+            } else {
+                fill.clone()
+            };
+            fragment_rect = fragment_rect
+                .fill(&fill)
+                .stroke(&stroke)
+                .stroke_width(1.0);
+        } else {
+            fragment_rect = fragment_rect
                 .fill("none")
                 .stroke(&theme.colors.cluster_stroke)
                 .stroke_width(1.0)
-                .stroke_dasharray("6,4")
-                .class("fm-sequence-fragment"),
-        );
+                .stroke_dasharray("6,4");
+        }
+        doc = doc.child(fragment_rect);
+
+        if fragment.kind == fm_core::FragmentKind::Rect {
+            continue;
+        }
 
         // Fragment kind label in top-left corner.
         let kind_label = match fragment.kind {
@@ -1501,13 +1709,40 @@ fn render_layout_to_svg(
         // Configure styling based on cluster type
         let (fill_color, stroke_color, stroke_style, label_color) = if is_c4_boundary {
             // C4 boundaries: dashed gray border, very light gray fill
-            ("rgba(128,128,128,0.05)", "#888", Some("4,2"), "#555")
+            (
+                "rgba(128,128,128,0.05)".to_string(),
+                "#888".to_string(),
+                Some("4,2"),
+                "#555".to_string(),
+            )
         } else if is_swimlane {
             // Swimlanes: solid subtle border, alternating translucent fill
-            ("rgba(200,220,240,0.15)", "#b8c9db", None, "#4a6785")
+            (
+                "rgba(200,220,240,0.15)".to_string(),
+                "#b8c9db".to_string(),
+                None,
+                "#4a6785".to_string(),
+            )
+        } else if let Some(color) = cluster.color.as_deref().and_then(sanitize_svg_paint) {
+            let fill_color = if color == "transparent" {
+                "transparent".to_string()
+            } else {
+                color.clone()
+            };
+            let stroke_color = if color == "transparent" {
+                "#dee2e6".to_string()
+            } else {
+                color
+            };
+            (fill_color, stroke_color, None, "#6c757d".to_string())
         } else {
             // Standard clusters: translucent fill, subtle border
-            ("rgba(248,249,250,0.85)", "#dee2e6", None, "#6c757d")
+            (
+                "rgba(248,249,250,0.85)".to_string(),
+                "#dee2e6".to_string(),
+                None,
+                "#6c757d".to_string(),
+            )
         };
 
         let mut rect = Element::rect()
@@ -1515,8 +1750,8 @@ fn render_layout_to_svg(
             .y(cluster.bounds.y + offset_y)
             .width(cluster.bounds.width)
             .height(cluster.bounds.height)
-            .fill(fill_color)
-            .stroke(stroke_color)
+            .fill(&fill_color)
+            .stroke(&stroke_color)
             .stroke_width(1.0)
             .rx(if is_c4_boundary {
                 0.0
@@ -1572,7 +1807,7 @@ fn render_layout_to_svg(
                     .y(cluster.bounds.y + offset_y + 16.0)
                     .font_family(&config.font_family)
                     .font_size(detail.cluster_font_size)
-                    .fill(label_color)
+                    .fill(&label_color)
                     .class("fm-cluster-label")
                     .build();
                 let text = if config.include_source_spans {
@@ -4687,6 +4922,7 @@ mod tests {
                 cluster_index: 0,
                 span: Span::default(),
                 title: Some("Backend".to_string()),
+                color: None,
                 bounds: LayoutRect {
                     x: 10.0,
                     y: -20.0,
@@ -4756,6 +4992,152 @@ mod tests {
         let svg = render_svg(&ir);
         // Standard clusters should have translucent fill
         assert!(svg.contains("rgba("));
+    }
+
+    #[test]
+    fn renders_sequence_participant_group_named_color() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Sequence);
+        ir.nodes.push(IrNode {
+            id: "API".to_string(),
+            ..Default::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "DB".to_string(),
+            ..Default::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            arrow: ArrowType::Arrow,
+            ..Default::default()
+        });
+        ir.sequence_meta = Some(IrSequenceMeta {
+            participant_groups: vec![fm_core::IrParticipantGroup {
+                label: "Backend".to_string(),
+                color: Some("Aqua".to_string()),
+                participants: vec![IrNodeId(0), IrNodeId(1)],
+            }],
+            ..Default::default()
+        });
+
+        let svg = render_svg(&ir);
+        assert!(svg.contains("fill=\"aqua\""));
+        assert!(svg.contains("stroke=\"aqua\""));
+    }
+
+    #[test]
+    fn renders_sequence_rect_fragment_as_highlight() {
+        let layout = DiagramLayout {
+            nodes: Vec::new(),
+            clusters: Vec::new(),
+            cycle_clusters: Vec::new(),
+            edges: Vec::new(),
+            bounds: LayoutRect {
+                x: 0.0,
+                y: 0.0,
+                width: 160.0,
+                height: 120.0,
+            },
+            stats: Default::default(),
+            extensions: fm_layout::LayoutExtensions {
+                sequence_fragments: vec![fm_layout::LayoutSequenceFragment {
+                    kind: fm_core::FragmentKind::Rect,
+                    label: String::new(),
+                    color: Some("rgba(200, 220, 240, 0.4)".to_string()),
+                    bounds: LayoutRect {
+                        x: 10.0,
+                        y: 20.0,
+                        width: 120.0,
+                        height: 60.0,
+                    },
+                }],
+                ..Default::default()
+            },
+        };
+
+        let svg = render_svg_with_layout(
+            &MermaidDiagramIr::empty(DiagramType::Sequence),
+            &layout,
+            &SvgRenderConfig::default(),
+        );
+        assert!(svg.contains("fill=\"rgba(200, 220, 240, 0.4)\""));
+        assert!(!svg.contains("rect ["));
+        assert!(!svg.contains("fm-sequence-fragment-label"));
+    }
+
+    #[test]
+    fn renders_sequence_rect_fragment_transparent_without_opaque_fill() {
+        let layout = DiagramLayout {
+            nodes: Vec::new(),
+            clusters: Vec::new(),
+            cycle_clusters: Vec::new(),
+            edges: Vec::new(),
+            bounds: LayoutRect {
+                x: 0.0,
+                y: 0.0,
+                width: 160.0,
+                height: 120.0,
+            },
+            stats: Default::default(),
+            extensions: fm_layout::LayoutExtensions {
+                sequence_fragments: vec![fm_layout::LayoutSequenceFragment {
+                    kind: fm_core::FragmentKind::Rect,
+                    label: String::new(),
+                    color: Some("transparent".to_string()),
+                    bounds: LayoutRect {
+                        x: 10.0,
+                        y: 20.0,
+                        width: 120.0,
+                        height: 60.0,
+                    },
+                }],
+                ..Default::default()
+            },
+        };
+
+        let svg = render_svg_with_layout(
+            &MermaidDiagramIr::empty(DiagramType::Sequence),
+            &layout,
+            &SvgRenderConfig::default(),
+        );
+        assert!(svg.contains("fill=\"transparent\""));
+    }
+
+    #[test]
+    fn sequence_participant_group_color_is_sanitized() {
+        let layout = DiagramLayout {
+            nodes: Vec::new(),
+            clusters: vec![LayoutClusterBox {
+                cluster_index: 0,
+                span: Span::default(),
+                title: Some("Unsafe".to_string()),
+                color: Some("url(javascript:alert(1))".to_string()),
+                bounds: LayoutRect {
+                    x: 10.0,
+                    y: -20.0,
+                    width: 120.0,
+                    height: 160.0,
+                },
+            }],
+            cycle_clusters: Vec::new(),
+            edges: Vec::new(),
+            bounds: LayoutRect {
+                x: 0.0,
+                y: -20.0,
+                width: 140.0,
+                height: 180.0,
+            },
+            stats: Default::default(),
+            extensions: Default::default(),
+        };
+
+        let svg = render_svg_with_layout(
+            &MermaidDiagramIr::empty(DiagramType::Sequence),
+            &layout,
+            &SvgRenderConfig::default(),
+        );
+        assert!(!svg.contains("url(javascript:alert(1))"));
+        assert!(svg.contains("stroke=\"#dee2e6\""));
     }
 
     #[test]

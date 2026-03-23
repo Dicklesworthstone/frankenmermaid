@@ -1707,6 +1707,7 @@ mod tests {
             cluster_index: 0,
             span: Default::default(),
             title: Some("Ops".to_string()),
+            color: None,
             bounds: LayoutRect {
                 x: 0.0,
                 y: 0.0,

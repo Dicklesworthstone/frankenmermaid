@@ -323,6 +323,7 @@ pub struct LayoutClusterBox {
     pub cluster_index: usize,
     pub span: Span,
     pub title: Option<String>,
+    pub color: Option<String>,
     pub bounds: LayoutRect,
 }
 
@@ -627,6 +628,7 @@ pub struct LayoutSequenceNote {
 pub struct LayoutSequenceFragment {
     pub kind: fm_core::FragmentKind,
     pub label: String,
+    pub color: Option<String>,
     pub bounds: LayoutRect,
 }
 
@@ -3082,6 +3084,7 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                         cluster_index: group_index,
                         span: Span::default(),
                         title: (!group.label.is_empty()).then_some(group.label.clone()),
+                        color: group.color.clone(),
                         bounds: LayoutRect {
                             x: min_x,
                             y: min_y,
@@ -3314,6 +3317,7 @@ fn build_sequence_fragment_geometry(
             LayoutSequenceFragment {
                 kind: fragment.kind,
                 label: fragment.label.clone(),
+                color: fragment.color.clone(),
                 bounds: LayoutRect {
                     x: -padding,
                     y: start_y - message_gap * 0.3,
@@ -8103,6 +8107,7 @@ fn build_cluster_boxes(
                         .title
                         .and_then(|label_id| ir.labels.get(label_id.0))
                         .map(|label| label.text.clone()),
+                    color: None,
                     bounds: LayoutRect {
                         x: min_x - spacing.cluster_padding,
                         y: min_y - spacing.cluster_padding,
@@ -8428,6 +8433,7 @@ fn build_cycle_cluster_results(
                 cluster_index: clusters.len(),
                 span: Span::default(),
                 title: None,
+                color: None,
                 bounds: cluster_bounds,
             });
         }
@@ -11768,6 +11774,7 @@ mod tests {
             .expect("sequence participant group should create a layout cluster");
 
         assert_eq!(cluster.title.as_deref(), Some("Backend"));
+        assert_eq!(cluster.color.as_deref(), Some("#aaf"));
         assert!(
             cluster.bounds.y < 0.0,
             "group should reserve label space above headers"
