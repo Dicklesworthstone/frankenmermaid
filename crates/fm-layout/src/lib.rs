@@ -2875,13 +2875,13 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         lifeline_start_y[participant_order] = header_y + header_height;
     }
 
-    let mut lifecycle_markers = Vec::new();
+    let mut destroy_marker_participants = vec![false; node_count];
     if let Some(meta) = &ir.sequence_meta {
         for event in &meta.lifecycle_events {
             let participant_index = event.participant.0;
-            let Some(&cx) = participant_x_centers.get(participant_index) else {
+            if participant_x_centers.get(participant_index).is_none() {
                 continue;
-            };
+            }
             let event_y =
                 message_y_positions
                     .get(event.at_edge)
@@ -2900,12 +2900,7 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                 fm_core::LifecycleEventKind::Destroy => {
                     if let Some(end_y) = lifeline_end_y.get_mut(participant_index) {
                         *end_y = (*end_y).min(event_y);
-                        lifecycle_markers.push(LayoutSequenceLifecycleMarker {
-                            participant_index,
-                            kind: LayoutSequenceLifecycleMarkerKind::Destroy,
-                            center: LayoutPoint { x: cx, y: *end_y },
-                            size: 12.0,
-                        });
+                        destroy_marker_participants[participant_index] = true;
                     }
                 }
             }
@@ -2916,6 +2911,23 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         if lifeline_end_y[participant_order] < lifeline_start_y[participant_order] {
             lifeline_end_y[participant_order] = lifeline_start_y[participant_order];
         }
+    }
+
+    let mut lifecycle_markers = Vec::new();
+    for participant_order in 0..node_count {
+        if !destroy_marker_participants[participant_order] {
+            continue;
+        }
+        let cx = participant_x_centers[participant_order];
+        lifecycle_markers.push(LayoutSequenceLifecycleMarker {
+            participant_index: participant_order,
+            kind: LayoutSequenceLifecycleMarkerKind::Destroy,
+            center: LayoutPoint {
+                x: cx,
+                y: lifeline_end_y[participant_order],
+            },
+            size: 12.0,
+        });
     }
 
     let lifeline_bands: Vec<LayoutBand> = (0..node_count)
@@ -11585,6 +11597,34 @@ mod tests {
         assert!((marker.center.y - (bob_band.bounds.y + bob_band.bounds.height)).abs() < 1.0);
         assert!(bob_band.bounds.height > 0.0);
         assert!(bob_band.bounds.height < layout.extensions.bands[0].bounds.height);
+    }
+
+    #[test]
+    fn sequence_layout_coalesces_multiple_destroy_events_for_one_participant() {
+        let mut ir = sequence_ir(&["Alice", "Bob"], &[(0, 1), (1, 0), (0, 1)]);
+        ir.sequence_meta = Some(IrSequenceMeta {
+            lifecycle_events: vec![
+                IrLifecycleEvent {
+                    kind: fm_core::LifecycleEventKind::Destroy,
+                    participant: IrNodeId(1),
+                    at_edge: 2,
+                },
+                IrLifecycleEvent {
+                    kind: fm_core::LifecycleEventKind::Destroy,
+                    participant: IrNodeId(1),
+                    at_edge: 0,
+                },
+            ],
+            ..Default::default()
+        });
+
+        let layout = layout_diagram_sequence(&ir);
+        let bob_band = &layout.extensions.bands[1];
+
+        assert_eq!(layout.extensions.sequence_lifecycle_markers.len(), 1);
+        let marker = &layout.extensions.sequence_lifecycle_markers[0];
+        assert_eq!(marker.participant_index, 1);
+        assert!((marker.center.y - (bob_band.bounds.y + bob_band.bounds.height)).abs() < 1.0);
     }
 
     #[test]
