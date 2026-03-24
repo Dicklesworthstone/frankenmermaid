@@ -3213,11 +3213,20 @@ fn build_sequence_note_geometry(
         return Vec::new();
     };
     let note_width = 120.0_f32;
-    let note_height = message_gap * 0.7;
+    let base_note_height = message_gap * 0.7;
+    let note_line_height = 16.0_f32;
+    let note_vertical_padding = 12.0_f32;
 
     meta.notes
         .iter()
         .map(|note| {
+            let line_count = note.text.lines().count().max(1) as f32;
+            let note_height = if line_count <= 1.0 {
+                base_note_height
+            } else {
+                base_note_height + (line_count - 1.0) * note_line_height + note_vertical_padding
+            };
+
             // Position the note at the edge after which it appears.
             let y = message_y_positions
                 .get(note.after_edge)
@@ -4224,7 +4233,19 @@ fn layout_diagram_pie_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 
     push_snapshot(&mut trace, "pie_layout", node_count, ir.edges.len(), 0, 0);
 
-    let bounds = compute_bounds(&nodes, &[], &[], LayoutSpacing::default());
+    let mut bounds = compute_bounds(&nodes, &[], &[], LayoutSpacing::default());
+    if let Some(pie) = &ir.pie_meta {
+        let legend_label_width = pie
+            .slices
+            .iter()
+            .map(|slice| metrics.estimate_dimensions(&slice.label).0)
+            .fold(0.0_f32, f32::max);
+        let legend_width = (legend_label_width + 86.0).clamp(136.0, 280.0);
+        let title_height = if pie.title.is_some() { 44.0 } else { 0.0 };
+        bounds.y -= title_height;
+        bounds.height += title_height;
+        bounds.width += legend_width + 28.0;
+    }
 
     TracedLayout {
         layout: DiagramLayout {
@@ -8737,9 +8758,9 @@ mod tests {
     use fm_core::{
         ArrowType, DiagramType, GraphDirection, IrCluster, IrClusterId, IrEdge, IrEndpoint,
         IrGanttMeta, IrGanttSection, IrGanttTask, IrGraphCluster, IrGraphNode, IrLabel, IrLabelId,
-        IrLifecycleEvent, IrNode, IrNodeId, IrParticipantGroup, IrSequenceMeta, IrSubgraph,
-        IrSubgraphId, IrXyAxis, IrXyChartMeta, IrXySeries, IrXySeriesKind, MermaidDiagramIr,
-        MermaidPressureTier, NodeShape, Span,
+        IrLifecycleEvent, IrNode, IrNodeId, IrParticipantGroup, IrPieMeta, IrPieSlice,
+        IrSequenceMeta, IrSequenceNote, IrSubgraph, IrSubgraphId, IrXyAxis, IrXyChartMeta,
+        IrXySeries, IrXySeriesKind, MermaidDiagramIr, MermaidPressureTier, NodeShape, Span,
     };
     use proptest::prelude::*;
     use std::collections::{BTreeMap, BTreeSet};
@@ -11637,6 +11658,84 @@ mod tests {
         for band in &layout.extensions.bands {
             assert!(band.bounds.height > 0.0, "Lifeline should have height");
         }
+    }
+
+    #[test]
+    fn sequence_layout_multiline_notes_grow_note_box_height() {
+        let mut ir = sequence_ir(&["Alice", "Bob"], &[(0, 1)]);
+        ir.sequence_meta = Some(IrSequenceMeta {
+            notes: vec![
+                IrSequenceNote {
+                    position: fm_core::NotePosition::Over,
+                    participants: vec![IrNodeId(0)],
+                    text: "Single line".to_string(),
+                    after_edge: 0,
+                },
+                IrSequenceNote {
+                    position: fm_core::NotePosition::Over,
+                    participants: vec![IrNodeId(1)],
+                    text: "Line 1\nLine 2\nLine 3".to_string(),
+                    after_edge: 0,
+                },
+            ],
+            ..Default::default()
+        });
+
+        let layout = layout_diagram_sequence(&ir);
+        assert_eq!(layout.extensions.sequence_notes.len(), 2);
+
+        let single_line_note = &layout.extensions.sequence_notes[0];
+        let multiline_note = &layout.extensions.sequence_notes[1];
+
+        assert!(multiline_note.bounds.height > single_line_note.bounds.height);
+    }
+
+    #[test]
+    fn pie_layout_reserves_space_for_title_and_legend() {
+        let mut baseline = MermaidDiagramIr::empty(DiagramType::Pie);
+        baseline.pie_meta = Some(IrPieMeta {
+            title: None,
+            show_data: false,
+            slices: vec![
+                IrPieSlice {
+                    label: "Chrome".to_string(),
+                    value: 50.0,
+                },
+                IrPieSlice {
+                    label: "Firefox ESR".to_string(),
+                    value: 30.0,
+                },
+                IrPieSlice {
+                    label: "Safari".to_string(),
+                    value: 20.0,
+                },
+            ],
+        });
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Pie);
+        ir.pie_meta = Some(IrPieMeta {
+            title: Some("Browser Usage".to_string()),
+            show_data: true,
+            slices: vec![
+                IrPieSlice {
+                    label: "Chrome".to_string(),
+                    value: 50.0,
+                },
+                IrPieSlice {
+                    label: "Firefox ESR".to_string(),
+                    value: 30.0,
+                },
+                IrPieSlice {
+                    label: "Safari".to_string(),
+                    value: 20.0,
+                },
+            ],
+        });
+
+        let baseline_layout = layout_diagram(&baseline);
+        let layout = layout_diagram(&ir);
+
+        assert!(layout.bounds.height > baseline_layout.bounds.height);
+        assert!(layout.bounds.y < baseline_layout.bounds.y);
     }
 
     #[test]

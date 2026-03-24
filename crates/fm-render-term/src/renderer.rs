@@ -117,6 +117,8 @@ impl TermRenderer {
             self::render_pie_cell(&mut buffer, pie_meta, cell_width, cell_height);
         } else if ir.diagram_type == fm_core::DiagramType::Gantt && ir.gantt_meta.is_some() {
             render_gantt_cell(&mut buffer, ir, cell_width, cell_height);
+        } else if ir.diagram_type == fm_core::DiagramType::XyChart && ir.xy_chart_meta.is_some() {
+            render_xychart_cell(&mut buffer, ir, cell_width, cell_height);
         } else {
             // Render nodes (foreground).
             for node_box in &layout.nodes {
@@ -1685,12 +1687,9 @@ fn render_pie_cell(
         let ch = slice_chars[i % slice_chars.len()];
         let pct = (slice.value.max(0.0) / total) * 100.0;
         let entry = format!("{ch} {:.0}% {}", pct, slice.label);
-        let truncated = if entry.len() > legend_width {
-            &entry[..legend_width]
-        } else {
-            &entry
-        };
-        buffer.set_string(legend_x, row, truncated);
+        // Truncate by character count (not byte count) to avoid UTF-8 boundary panics.
+        let truncated: String = entry.chars().take(legend_width).collect();
+        buffer.set_string(legend_x, row, &truncated);
     }
 }
 
@@ -1731,13 +1730,9 @@ fn render_gantt_cell(
         if row >= cell_height {
             break;
         }
-        // Section header
-        let header = if section.name.len() > label_width {
-            &section.name[..label_width]
-        } else {
-            &section.name
-        };
-        buffer.set_string(0, row, header);
+        // Section header (truncated by char count for UTF-8 safety).
+        let header: String = section.name.chars().take(label_width).collect();
+        buffer.set_string(0, row, &header);
         // Separator line
         for col in label_width + 1..cell_width {
             buffer.set(col, row, '\u{2500}'); // ─
@@ -1758,12 +1753,8 @@ fn render_gantt_cell(
                 .get(task.node.0)
                 .map(|n| n.id.as_str())
                 .unwrap_or("task");
-            let task_label = if task_name.len() > label_width {
-                &task_name[..label_width]
-            } else {
-                task_name
-            };
-            buffer.set_string(0, row, task_label);
+            let task_label: String = task_name.chars().take(label_width).collect();
+            buffer.set_string(0, row, &task_label);
 
             // Task bar — position proportionally in the bar area.
             let bar_start = label_width + 2 + (task_idx * bar_area_width) / task_count;
@@ -1779,6 +1770,83 @@ fn render_gantt_cell(
                 buffer.set(col, row, bar_char);
             }
             row += 1;
+        }
+    }
+}
+
+/// Render an XY chart with ASCII axes, category labels, and data bars.
+fn render_xychart_cell(
+    buffer: &mut CellBuffer,
+    ir: &MermaidDiagramIr,
+    cell_width: usize,
+    cell_height: usize,
+) {
+    let Some(xy_meta) = &ir.xy_chart_meta else {
+        return;
+    };
+
+    let label_margin = 8_usize;
+    let chart_left = label_margin + 1;
+    let chart_right = cell_width.saturating_sub(2);
+    let chart_top = 2_usize;
+    let chart_bottom = cell_height.saturating_sub(3);
+    let chart_w = chart_right.saturating_sub(chart_left);
+    let chart_h = chart_bottom.saturating_sub(chart_top);
+
+    if chart_w < 4 || chart_h < 4 {
+        return;
+    }
+
+    // Title
+    if let Some(title) = &xy_meta.title {
+        let tx = cell_width.saturating_sub(title.len()) / 2;
+        buffer.set_string(tx, 0, title);
+    }
+
+    // Y axis (vertical line).
+    for row in chart_top..=chart_bottom {
+        buffer.set(chart_left, row, '\u{2502}'); // │
+    }
+
+    // X axis (horizontal line).
+    for col in chart_left..=chart_right {
+        buffer.set(col, chart_bottom, '\u{2500}'); // ─
+    }
+    buffer.set(chart_left, chart_bottom, '\u{2514}'); // └ corner
+
+    // Category labels along x axis.
+    let categories = &xy_meta.x_axis.categories;
+    if !categories.is_empty() {
+        let cat_spacing = chart_w / categories.len().max(1);
+        for (i, cat) in categories.iter().enumerate() {
+            let x = chart_left + 1 + i * cat_spacing;
+            let label: String = cat.chars().take(cat_spacing.saturating_sub(1)).collect();
+            buffer.set_string(x, chart_bottom + 1, &label);
+        }
+    }
+
+    // Render data series as vertical bar characters.
+    let bar_chars: &[char] = &['\u{2588}', '\u{2593}', '\u{2592}', '\u{2591}']; // █ ▓ ▒ ░
+    for (series_idx, series) in xy_meta.series.iter().enumerate() {
+        let bar_ch = bar_chars[series_idx % bar_chars.len()];
+        let max_val = series
+            .values
+            .iter()
+            .copied()
+            .fold(0.0_f32, f32::max)
+            .max(f32::EPSILON);
+        let val_count = series.values.len().max(1);
+        let bar_spacing = chart_w / val_count;
+
+        for (i, &val) in series.values.iter().enumerate() {
+            let bar_height = ((val / max_val) * chart_h as f32) as usize;
+            let x = chart_left + 1 + i * bar_spacing;
+            for h in 0..bar_height.min(chart_h) {
+                let y = chart_bottom.saturating_sub(1 + h);
+                if y >= chart_top && x < chart_right {
+                    buffer.set(x, y, bar_ch);
+                }
+            }
         }
     }
 }

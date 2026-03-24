@@ -1569,16 +1569,19 @@ fn render_layout_to_svg(
 
         // Note text.
         if !note.text.is_empty() {
+            let note_font_size = config.font_size * 0.8;
             doc = doc.child(
-                Element::text()
-                    .x(nx + 6.0)
-                    .y(ny + nh / 2.0)
-                    .content(&note.text)
-                    .attr("dominant-baseline", "middle")
-                    .attr_num("font-size", config.font_size * 0.8)
-                    .attr("font-family", &config.font_family)
+                TextBuilder::new(&note.text)
+                    .x(nx + 8.0)
+                    .y(ny + 8.0)
+                    .font_family(&config.font_family)
+                    .font_size(note_font_size)
+                    .line_height(config.line_height)
+                    .baseline(text::DominantBaseline::Hanging)
+                    .anchor(TextAnchor::Start)
                     .fill(&theme.colors.text)
-                    .class("fm-sequence-note-text"),
+                    .class("fm-sequence-note-text")
+                    .build(),
             );
         }
     }
@@ -2268,13 +2271,30 @@ fn render_pie_svg(
 ) -> SvgDocument {
     use std::f32::consts::PI;
 
-    let accent_colors: Vec<&str> = theme.colors.accents.iter().map(String::as_str).collect();
-
-    // Pie geometry: centered in layout bounds.
     let bounds = &layout.bounds;
-    let cx = bounds.x + bounds.width / 2.0 + offset_x;
-    let cy = bounds.y + bounds.height / 2.0 + offset_y;
-    let radius = (bounds.width.min(bounds.height) / 2.0 - 40.0).max(40.0);
+    let accent_colors: Vec<&str> = theme.colors.accents.iter().map(String::as_str).collect();
+    let legend_label_width = pie_meta
+        .slices
+        .iter()
+        .map(|slice| {
+            (slice.label.chars().count() as f32) * (config.avg_char_width * 0.9)
+                + if pie_meta.show_data { 88.0 } else { 0.0 }
+        })
+        .fold(0.0_f32, f32::max);
+    let legend_width = (legend_label_width + 56.0).clamp(136.0, 280.0);
+    let title_height = if pie_meta.title.is_some() {
+        config.font_size + 22.0
+    } else {
+        0.0
+    };
+    let chart_gap = 24.0;
+    let chart_left = bounds.x + offset_x;
+    let chart_top = bounds.y + offset_y + title_height;
+    let chart_width = (bounds.width - legend_width - chart_gap).max(160.0);
+    let chart_height = (bounds.height - title_height).max(160.0);
+    let cx = chart_left + chart_width / 2.0;
+    let cy = chart_top + chart_height / 2.0;
+    let radius = (chart_width.min(chart_height) / 2.0 - 36.0).max(40.0);
 
     let total: f32 = pie_meta
         .slices
@@ -2283,49 +2303,61 @@ fn render_pie_svg(
         .sum::<f32>()
         .max(f32::EPSILON);
 
-    // Title.
     if let Some(title) = &pie_meta.title {
         doc = doc.child(
-            Element::text()
+            TextBuilder::new(title)
                 .x(cx)
-                .y(cy - radius - 20.0)
-                .content(title)
-                .attr("text-anchor", "middle")
-                .attr("dominant-baseline", "auto")
-                .attr_num("font-size", config.font_size + 4.0)
-                .attr("font-family", &config.font_family)
+                .y(bounds.y + offset_y + config.font_size + 2.0)
+                .anchor(TextAnchor::Middle)
+                .font_family(&config.font_family)
+                .font_size(config.font_size + 4.0)
+                .font_weight("600")
                 .fill(&theme.colors.text)
-                .class("fm-pie-title"),
+                .class("fm-pie-title")
+                .build(),
         );
     }
 
-    let mut angle = -PI / 2.0; // start at 12 o'clock
+    let mut angle = -PI / 2.0;
 
     for (i, slice) in pie_meta.slices.iter().enumerate() {
         let value = slice.value.max(0.0);
         let sweep = (value / total) * 2.0 * PI;
         let color = accent_colors[i % accent_colors.len()];
 
-        // Compute arc endpoints.
-        let x1 = cx + radius * angle.cos();
-        let y1 = cy + radius * angle.sin();
-        let x2 = cx + radius * (angle + sweep).cos();
-        let y2 = cy + radius * (angle + sweep).sin();
-        let large_arc = if sweep > PI { 1 } else { 0 };
-
-        // SVG arc path: M cx,cy L x1,y1 A rx ry 0 large_arc 1 x2,y2 Z
-        let d = format!("M {cx} {cy} L {x1} {y1} A {radius} {radius} 0 {large_arc} 1 {x2} {y2} Z");
-
-        let wedge = Element::path()
-            .d(&d)
-            .fill(color)
-            .stroke(&theme.colors.background)
-            .stroke_width(2.0)
-            .class("fm-pie-slice");
+        let wedge = if value <= f32::EPSILON {
+            Element::path()
+                .d("")
+                .fill("none")
+                .stroke("none")
+                .class("fm-pie-slice fm-pie-slice-zero")
+        } else if (sweep - 2.0 * PI).abs() <= 0.0001 {
+            Element::circle()
+                .cx(cx)
+                .cy(cy)
+                .r(radius)
+                .fill(color)
+                .stroke(&theme.colors.background)
+                .stroke_width(2.0)
+                .class("fm-pie-slice fm-pie-slice-full")
+        } else {
+            let x1 = cx + radius * angle.cos();
+            let y1 = cy + radius * angle.sin();
+            let x2 = cx + radius * (angle + sweep).cos();
+            let y2 = cy + radius * (angle + sweep).sin();
+            let large_arc = if sweep > PI { 1 } else { 0 };
+            let d =
+                format!("M {cx} {cy} L {x1} {y1} A {radius} {radius} 0 {large_arc} 1 {x2} {y2} Z");
+            Element::path()
+                .d(&d)
+                .fill(color)
+                .stroke(&theme.colors.background)
+                .stroke_width(2.0)
+                .class("fm-pie-slice")
+        };
 
         doc = doc.child(wedge);
 
-        // Label at mid-angle, outside the wedge.
         let mid_angle = angle + sweep / 2.0;
         let label_radius = radius + 24.0;
         let lx = cx + label_radius * mid_angle.cos();
@@ -2333,34 +2365,108 @@ fn render_pie_svg(
         let pct = (value / total) * 100.0;
 
         let label_text = if pie_meta.show_data {
-            format!("{} ({:.1}%)", slice.label, pct)
+            format!("{}: {:.0} ({:.1}%)", slice.label, value, pct)
         } else {
-            format!("{} {:.1}%", slice.label, pct)
+            slice.label.clone()
         };
 
         let anchor = if mid_angle.cos() < -0.1 {
-            "end"
+            TextAnchor::End
         } else if mid_angle.cos() > 0.1 {
-            "start"
+            TextAnchor::Start
         } else {
-            "middle"
+            TextAnchor::Middle
         };
 
         doc = doc.child(
-            Element::text()
+            TextBuilder::new(&label_text)
                 .x(lx)
                 .y(ly)
-                .content(&label_text)
-                .attr("text-anchor", anchor)
-                .attr("dominant-baseline", "middle")
-                .attr_num("font-size", config.font_size * 0.85)
-                .attr("font-family", &config.font_family)
+                .anchor(anchor)
+                .baseline(crate::text::DominantBaseline::Middle)
+                .font_family(&config.font_family)
+                .font_size(clamp_font_size(
+                    config.font_size * 0.85,
+                    config.min_font_size,
+                ))
                 .fill(&theme.colors.text)
-                .class("fm-pie-label"),
+                .class("fm-pie-label")
+                .build(),
         );
 
         angle += sweep;
     }
+
+    let legend_x = chart_left + chart_width + chart_gap;
+    let legend_y = chart_top + 12.0;
+    let legend_height = (pie_meta.slices.len() as f32 * 24.0 + 44.0).max(64.0);
+
+    let mut legend = Element::group().class("fm-pie-legend");
+    legend = legend.child(
+        Element::rect()
+            .x(legend_x)
+            .y(legend_y)
+            .width(legend_width)
+            .height(legend_height)
+            .rx(config.rounded_corners.max(6.0))
+            .fill(&theme.colors.node_fill)
+            .stroke(&theme.colors.node_stroke)
+            .stroke_width(1.2)
+            .class("fm-pie-legend-box"),
+    );
+    legend = legend.child(
+        TextBuilder::new("Legend")
+            .x(legend_x + 14.0)
+            .y(legend_y + 18.0)
+            .font_family(&config.font_family)
+            .font_size(clamp_font_size(
+                config.font_size * 0.82,
+                config.min_font_size,
+            ))
+            .font_weight("600")
+            .fill(&theme.colors.text)
+            .class("fm-pie-legend-title")
+            .build(),
+    );
+
+    for (index, slice) in pie_meta.slices.iter().enumerate() {
+        let row_y = legend_y + 34.0 + index as f32 * 24.0;
+        let color = accent_colors[index % accent_colors.len()];
+        let pct = (slice.value.max(0.0) / total) * 100.0;
+        let entry_label = if pie_meta.show_data {
+            format!("{}: {:.0} ({:.1}%)", slice.label, slice.value.max(0.0), pct)
+        } else {
+            slice.label.clone()
+        };
+        legend = legend.child(
+            Element::rect()
+                .x(legend_x + 14.0)
+                .y(row_y - 9.0)
+                .width(12.0)
+                .height(12.0)
+                .rx(2.0)
+                .fill(color)
+                .stroke(&theme.colors.background)
+                .stroke_width(1.0)
+                .class("fm-pie-legend-swatch"),
+        );
+        legend = legend.child(
+            TextBuilder::new(&entry_label)
+                .x(legend_x + 34.0)
+                .y(row_y)
+                .baseline(crate::text::DominantBaseline::Middle)
+                .font_family(&config.font_family)
+                .font_size(clamp_font_size(
+                    config.font_size * 0.8,
+                    config.min_font_size,
+                ))
+                .fill(&theme.colors.text)
+                .class("fm-pie-legend-entry")
+                .build(),
+        );
+    }
+
+    doc = doc.child(legend);
 
     doc
 }
@@ -4353,8 +4459,8 @@ mod tests {
     use fm_core::{
         ArrowType, DiagramType, IrC4NodeMeta, IrCluster, IrClusterId, IrEdge, IrEndpoint,
         IrGraphCluster, IrGraphNode, IrLabel, IrLabelId, IrLifecycleEvent, IrNode, IrNodeId,
-        IrSequenceMeta, IrStyleRef, IrStyleTarget, IrSubgraph, IrSubgraphId, IrXyAxis,
-        IrXyChartMeta, IrXySeries, IrXySeriesKind, MermaidDiagramIr, NodeShape, Span,
+        IrPieMeta, IrPieSlice, IrSequenceMeta, IrStyleRef, IrStyleTarget, IrSubgraph, IrSubgraphId,
+        IrXyAxis, IrXyChartMeta, IrXySeries, IrXySeriesKind, MermaidDiagramIr, NodeShape, Span,
     };
     use fm_layout::{
         FillStyle, LayoutAxisTick, LayoutBand, LayoutBandKind, LayoutClusterBox, LayoutRect,
@@ -4463,6 +4569,29 @@ mod tests {
                 description: Some("External user".to_string()),
             }),
             ..IrNode::default()
+        });
+        ir
+    }
+
+    fn create_pie_ir(show_data: bool) -> MermaidDiagramIr {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Pie);
+        ir.pie_meta = Some(IrPieMeta {
+            title: Some("Browser Usage".to_string()),
+            show_data,
+            slices: vec![
+                IrPieSlice {
+                    label: "Chrome".to_string(),
+                    value: 50.0,
+                },
+                IrPieSlice {
+                    label: "Firefox".to_string(),
+                    value: 30.0,
+                },
+                IrPieSlice {
+                    label: "Safari".to_string(),
+                    value: 20.0,
+                },
+            ],
         });
         ir
     }
@@ -4908,6 +5037,66 @@ mod tests {
         let svg = render_svg(&ir);
         assert!(svg.contains("class=\"fm-cluster\""));
         assert!(svg.contains("class=\"fm-cluster-label\""));
+    }
+
+    #[test]
+    fn renders_pie_title_legend_and_showdata_values() {
+        let ir = create_pie_ir(true);
+        let svg = render_svg(&ir);
+
+        assert!(svg.contains("fm-pie-title"));
+        assert!(svg.contains("Browser Usage"));
+        assert!(svg.contains("fm-pie-legend"));
+        assert!(svg.contains("fm-pie-legend-entry"));
+        assert!(svg.contains("Chrome: 50 (50.0%)"));
+        assert!(svg.contains("Firefox: 30 (30.0%)"));
+    }
+
+    #[test]
+    fn pie_without_showdata_omits_value_and_percentage_labels() {
+        let ir = create_pie_ir(false);
+        let svg = render_svg(&ir);
+
+        assert!(svg.contains(">Chrome<"));
+        assert!(svg.contains(">Firefox<"));
+        assert!(!svg.contains("Chrome: 50"));
+        assert!(!svg.contains("50.0%"));
+    }
+
+    #[test]
+    fn renders_single_slice_pie_as_full_circle() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Pie);
+        ir.pie_meta = Some(IrPieMeta {
+            title: Some("Only One".to_string()),
+            show_data: true,
+            slices: vec![IrPieSlice {
+                label: "Only".to_string(),
+                value: 100.0,
+            }],
+        });
+
+        let svg = render_svg(&ir);
+
+        assert!(svg.contains("fm-pie-slice-full"));
+        assert!(svg.contains("<circle"));
+    }
+
+    #[test]
+    fn pie_theme_variables_override_slice_palette() {
+        let mut ir = create_pie_ir(false);
+        ir.meta
+            .theme_overrides
+            .theme_variables
+            .insert("pie1".to_string(), "#123456".to_string());
+        ir.meta
+            .theme_overrides
+            .theme_variables
+            .insert("pie2".to_string(), "#abcdef".to_string());
+
+        let svg = render_svg(&ir);
+
+        assert!(svg.contains("fill=\"#123456\""));
+        assert!(svg.contains("fill=\"#abcdef\""));
     }
 
     #[test]
@@ -5571,6 +5760,46 @@ mod tests {
 
         let svg = render_svg(&ir);
         assert!(svg.contains("fm-sequence-destroy-marker"));
+    }
+
+    #[test]
+    fn renders_sequence_note_text_with_multiline_tspans() {
+        let layout = fm_layout::DiagramLayout {
+            bounds: LayoutRect {
+                x: 0.0,
+                y: 0.0,
+                width: 220.0,
+                height: 140.0,
+            },
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            clusters: Vec::new(),
+            cycle_clusters: Vec::new(),
+            stats: fm_layout::LayoutStats::default(),
+            extensions: fm_layout::LayoutExtensions {
+                sequence_notes: vec![fm_layout::LayoutSequenceNote {
+                    position: fm_core::NotePosition::Over,
+                    text: "Line 1\nLine 2".to_string(),
+                    bounds: LayoutRect {
+                        x: 20.0,
+                        y: 30.0,
+                        width: 120.0,
+                        height: 44.0,
+                    },
+                }],
+                ..Default::default()
+            },
+        };
+
+        let svg = render_svg_with_layout(
+            &MermaidDiagramIr::empty(DiagramType::Sequence),
+            &layout,
+            &SvgRenderConfig::default(),
+        );
+        assert!(svg.contains("fm-sequence-note-text"));
+        assert!(svg.contains("<tspan"));
+        assert!(svg.contains(">Line 1<"));
+        assert!(svg.contains(">Line 2<"));
     }
 
     #[test]

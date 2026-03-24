@@ -338,6 +338,12 @@ impl ThemeColors {
         if let Some(v) = vars.get("clusterBorder") {
             self.cluster_stroke = v.clone();
         }
+        for (index, accent) in self.accents.iter_mut().enumerate() {
+            let key = format!("pie{}", index + 1);
+            if let Some(v) = vars.get(&key) {
+                *accent = v.clone();
+            }
+        }
     }
 
     /// Generate CSS custom properties for this theme.
