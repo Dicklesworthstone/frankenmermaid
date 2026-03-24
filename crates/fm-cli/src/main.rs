@@ -958,7 +958,7 @@ fn cmd_render(input: &str, options: RenderCommandOptions<'_>) -> Result<()> {
     // Render
     let render_start = Instant::now();
     let effective_theme = if budget_broker.should_simplify_render() {
-        "plain"
+        "monochrome"
     } else {
         theme
     };
