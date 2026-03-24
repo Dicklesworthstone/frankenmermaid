@@ -1334,8 +1334,18 @@ fn decode_mermaid_entities(text: &str) -> String {
     let mut decoded = String::with_capacity(text.len());
     let mut cursor = 0usize;
 
-    while let Some(relative_start) = text[cursor..].find('&') {
-        let start = cursor + relative_start;
+    while cursor < text.len() {
+        let amp_start = text[cursor..].find('&').map(|offset| cursor + offset);
+        let hash_start = text[cursor..].find('#').map(|offset| cursor + offset);
+        let Some(start) = (match (amp_start, hash_start) {
+            (Some(left), Some(right)) => Some(left.min(right)),
+            (Some(left), None) => Some(left),
+            (None, Some(right)) => Some(right),
+            (None, None) => None,
+        }) else {
+            break;
+        };
+
         decoded.push_str(&text[cursor..start]);
 
         let Some(relative_end) = text[start..].find(';') else {
@@ -1343,7 +1353,11 @@ fn decode_mermaid_entities(text: &str) -> String {
             return decoded;
         };
         let end = start + relative_end;
-        let token = &text[start + 1..end];
+        let token = if text[start..].starts_with('&') {
+            &text[start + 1..end]
+        } else {
+            &text[start..end]
+        };
 
         if let Some(ch) = decode_mermaid_entity_token(token) {
             decoded.push(ch);
@@ -1372,19 +1386,21 @@ fn decode_mermaid_entity_token(token: &str) -> Option<char> {
         return None;
     }
 
-    let numeric = token.strip_prefix('#')?;
+    let bare = token.strip_prefix('#').unwrap_or(token);
 
-    if let Some(hex) = numeric.strip_prefix(['x', 'X']) {
-        let value = u32::from_str_radix(hex, 16).ok()?;
-        return char::from_u32(value);
+    if let Some(numeric) = token.strip_prefix('#') {
+        if let Some(hex) = numeric.strip_prefix(['x', 'X']) {
+            let value = u32::from_str_radix(hex, 16).ok()?;
+            return char::from_u32(value);
+        }
+
+        if numeric.chars().all(|ch| ch.is_ascii_digit()) {
+            let value = numeric.parse::<u32>().ok()?;
+            return char::from_u32(value);
+        }
     }
 
-    if numeric.chars().all(|ch| ch.is_ascii_digit()) {
-        let value = numeric.parse::<u32>().ok()?;
-        return char::from_u32(value);
-    }
-
-    match token {
+    match bare {
         "amp" => Some('&'),
         "apos" => Some('\''),
         "copy" => Some('©'),
