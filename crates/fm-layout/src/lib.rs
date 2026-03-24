@@ -5,10 +5,11 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::f32::consts::PI;
 
 use fm_core::{
-    DiagramType, GraphDirection, IrEndpoint, IrGanttMeta, IrNode, IrXyChartMeta, IrXySeriesKind,
-    MermaidComplexity, MermaidConfig, MermaidDiagramIr, MermaidFidelity, MermaidGlyphMode,
-    MermaidGuardReport, MermaidLayoutDecisionAlternative, MermaidLayoutDecisionLedger,
-    MermaidLayoutDecisionRecord, MermaidPressureReport, MermaidPressureTier, Span,
+    DiagramType, GanttDate, GanttExclude, GanttTaskType, GraphDirection, IrEndpoint, IrGanttMeta,
+    IrNode, IrXyChartMeta, IrXySeriesKind, MermaidComplexity, MermaidConfig, MermaidDiagramIr,
+    MermaidFidelity, MermaidGlyphMode, MermaidGuardReport, MermaidLayoutDecisionAlternative,
+    MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord, MermaidPressureReport,
+    MermaidPressureTier, Span,
 };
 use tracing::{debug, info, trace, warn};
 
@@ -3482,15 +3483,18 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
     let mut durations = vec![1_i32; task_count];
     let mut milestones = vec![false; task_count];
     let mut task_id_to_idx = BTreeMap::new();
+    let excluded_dates = expand_gantt_excluded_dates(gantt_meta);
+    let skip_weekends = gantt_meta
+        .excludes
+        .iter()
+        .any(|exclude| matches!(exclude, GanttExclude::Weekends));
+    let inclusive_end_dates = gantt_meta.inclusive_end_dates;
 
     for (task_idx, task) in gantt_meta.tasks.iter().enumerate() {
-        explicit_starts[task_idx] = task.start_date.as_deref().and_then(parse_iso_day_number);
-        durations[task_idx] = if task.milestone {
-            0
-        } else {
-            i32::try_from(task.duration_days.unwrap_or(1)).unwrap_or(i32::MAX)
-        };
-        milestones[task_idx] = task.milestone || durations[task_idx] == 0;
+        explicit_starts[task_idx] = gantt_task_absolute_start(task);
+        durations[task_idx] = gantt_task_duration_days(task, inclusive_end_dates);
+        milestones[task_idx] =
+            matches!(task.task_type, GanttTaskType::Milestone) || durations[task_idx] == 0;
         if let Some(task_id) = task.task_id.as_ref() {
             task_id_to_idx.entry(task_id.clone()).or_insert(task_idx);
         }
@@ -3509,7 +3513,7 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
             let section_idx = task.section_idx.min(section_count.saturating_sub(1));
             let start = if let Some(explicit) = explicit_starts[task_idx] {
                 explicit
-            } else if let Some(after_task_id) = task.after_task_id.as_ref() {
+            } else if let Some(after_task_id) = gantt_task_primary_dependency(task) {
                 task_id_to_idx
                     .get(after_task_id)
                     .and_then(|dep_idx| end_exclusive_days.get(*dep_idx).copied())
@@ -3517,7 +3521,13 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
             } else {
                 section_end[section_idx]
             };
-            let end_exclusive = start.saturating_add(durations[task_idx].max(0));
+            let start = advance_gantt_start_day(start, skip_weekends, &excluded_dates);
+            let end_exclusive = advance_gantt_end_day(
+                start,
+                durations[task_idx].max(0),
+                skip_weekends,
+                &excluded_dates,
+            );
 
             if start_days[task_idx] != start {
                 start_days[task_idx] = start;
@@ -3949,6 +3959,102 @@ fn parse_iso_day_number(value: &str) -> Option<i32> {
     let day_of_year = (153 * month_prime + 2) / 5 + day_i32 - 1;
     let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     Some(era * 146_097 + day_of_era - 719_468)
+}
+
+fn gantt_task_absolute_start(task: &fm_core::IrGanttTask) -> Option<i32> {
+    match task.start.as_ref() {
+        Some(GanttDate::Absolute(value)) => parse_iso_day_number(value),
+        _ => None,
+    }
+}
+
+fn gantt_task_primary_dependency(task: &fm_core::IrGanttTask) -> Option<&str> {
+    if let Some(GanttDate::AfterTask(dependency)) = task.start.as_ref() {
+        return Some(dependency.as_str());
+    }
+    task.depends_on.first().map(String::as_str)
+}
+
+fn gantt_task_duration_days(task: &fm_core::IrGanttTask, inclusive_end_dates: bool) -> i32 {
+    match task.end.as_ref() {
+        Some(GanttDate::DurationDays(days)) => i32::try_from(*days).unwrap_or(i32::MAX),
+        Some(GanttDate::Absolute(end)) => {
+            let Some(start) = gantt_task_absolute_start(task) else {
+                return 1;
+            };
+            let Some(end) = parse_iso_day_number(end) else {
+                return 1;
+            };
+            let span = end.saturating_sub(start);
+            if inclusive_end_dates {
+                span.saturating_add(1).max(0)
+            } else {
+                span.max(0)
+            }
+        }
+        Some(GanttDate::AfterTask(_)) => 1,
+        None => {
+            if matches!(task.task_type, GanttTaskType::Milestone) {
+                0
+            } else {
+                1
+            }
+        }
+    }
+}
+
+fn expand_gantt_excluded_dates(gantt_meta: &IrGanttMeta) -> BTreeSet<i32> {
+    let mut excluded = BTreeSet::new();
+    for exclude in &gantt_meta.excludes {
+        if let GanttExclude::Dates(values) = exclude {
+            for value in values {
+                if let Some(day) = parse_iso_day_number(value) {
+                    excluded.insert(day);
+                }
+            }
+        }
+    }
+    excluded
+}
+
+fn advance_gantt_start_day(
+    mut day: i32,
+    skip_weekends: bool,
+    excluded_dates: &BTreeSet<i32>,
+) -> i32 {
+    while gantt_day_is_excluded(day, skip_weekends, excluded_dates) {
+        day = day.saturating_add(1);
+    }
+    day
+}
+
+fn advance_gantt_end_day(
+    start: i32,
+    duration_days: i32,
+    skip_weekends: bool,
+    excluded_dates: &BTreeSet<i32>,
+) -> i32 {
+    if duration_days <= 0 {
+        return start;
+    }
+
+    let mut day = start;
+    let mut scheduled = 0_i32;
+    while scheduled < duration_days {
+        if !gantt_day_is_excluded(day, skip_weekends, excluded_dates) {
+            scheduled += 1;
+        }
+        day = day.saturating_add(1);
+    }
+    day
+}
+
+fn gantt_day_is_excluded(day: i32, skip_weekends: bool, excluded_dates: &BTreeSet<i32>) -> bool {
+    excluded_dates.contains(&day) || (skip_weekends && is_weekend_day_number(day))
+}
+
+fn is_weekend_day_number(day: i32) -> bool {
+    matches!(day.rem_euclid(7), 0 | 6)
 }
 
 fn format_gantt_axis_tick(days_since_epoch: i32) -> String {
@@ -9099,11 +9205,12 @@ mod tests {
         route_edge_points, route_edge_points_with_obstacles,
     };
     use fm_core::{
-        ArrowType, DiagramType, GraphDirection, IrCluster, IrClusterId, IrEdge, IrEndpoint,
-        IrGanttMeta, IrGanttSection, IrGanttTask, IrGraphCluster, IrGraphNode, IrLabel, IrLabelId,
-        IrLifecycleEvent, IrNode, IrNodeId, IrParticipantGroup, IrPieMeta, IrPieSlice,
-        IrSequenceMeta, IrSequenceNote, IrSubgraph, IrSubgraphId, IrXyAxis, IrXyChartMeta,
-        IrXySeries, IrXySeriesKind, MermaidDiagramIr, MermaidPressureTier, NodeShape, Span,
+        ArrowType, DiagramType, GanttDate, GanttExclude, GraphDirection, IrCluster, IrClusterId,
+        IrEdge, IrEndpoint, IrGanttMeta, IrGanttSection, IrGanttTask, IrGraphCluster, IrGraphNode,
+        IrLabel, IrLabelId, IrLifecycleEvent, IrNode, IrNodeId, IrParticipantGroup, IrPieMeta,
+        IrPieSlice, IrSequenceMeta, IrSequenceNote, IrSubgraph, IrSubgraphId, IrXyAxis,
+        IrXyChartMeta, IrXySeries, IrXySeriesKind, MermaidDiagramIr, MermaidPressureTier,
+        NodeShape, Span,
     };
     use proptest::prelude::*;
     use std::collections::{BTreeMap, BTreeSet};
@@ -9830,24 +9937,24 @@ mod tests {
                     node: IrNodeId(0),
                     section_idx: 0,
                     task_id: Some("task_1".to_string()),
-                    start_date: Some("2026-02-01".to_string()),
-                    duration_days: Some(2),
+                    start: Some(GanttDate::Absolute("2026-02-01".to_string())),
+                    end: Some(GanttDate::DurationDays(2)),
                     ..Default::default()
                 },
                 IrGanttTask {
                     node: IrNodeId(1),
                     section_idx: 0,
                     task_id: Some("task_3".to_string()),
-                    start_date: Some("2026-02-03".to_string()),
-                    duration_days: Some(3),
+                    start: Some(GanttDate::Absolute("2026-02-03".to_string())),
+                    end: Some(GanttDate::DurationDays(3)),
                     ..Default::default()
                 },
                 IrGanttTask {
                     node: IrNodeId(2),
                     section_idx: 1,
                     task_id: Some("task_2".to_string()),
-                    start_date: Some("2026-02-04".to_string()),
-                    duration_days: Some(2),
+                    start: Some(GanttDate::Absolute("2026-02-04".to_string())),
+                    end: Some(GanttDate::DurationDays(2)),
                     ..Default::default()
                 },
             ],
@@ -9873,6 +9980,63 @@ mod tests {
         assert_eq!(layout.extensions.bands.len(), 2);
         assert_eq!(layout.extensions.axis_ticks.len(), 5);
         assert_eq!(layout.extensions.axis_ticks[0].label, "2026-02-01");
+    }
+
+    #[test]
+    fn gantt_layout_honors_inclusive_end_dates_and_excludes() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Gantt);
+        for label in ["Build", "Verify"] {
+            ir.labels.push(IrLabel {
+                text: label.to_string(),
+                ..IrLabel::default()
+            });
+        }
+        for (node_id, label) in [("build", IrLabelId(0)), ("verify", IrLabelId(1))] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                label: Some(label),
+                ..IrNode::default()
+            });
+        }
+        ir.gantt_meta = Some(IrGanttMeta {
+            inclusive_end_dates: true,
+            excludes: vec![GanttExclude::Weekends],
+            sections: vec![IrGanttSection {
+                name: "Alpha".to_string(),
+            }],
+            tasks: vec![
+                IrGanttTask {
+                    node: IrNodeId(0),
+                    section_idx: 0,
+                    task_id: Some("build".to_string()),
+                    start: Some(GanttDate::Absolute("2026-02-06".to_string())),
+                    end: Some(GanttDate::Absolute("2026-02-09".to_string())),
+                    ..Default::default()
+                },
+                IrGanttTask {
+                    node: IrNodeId(1),
+                    section_idx: 0,
+                    task_id: Some("verify".to_string()),
+                    start: Some(GanttDate::AfterTask("build".to_string())),
+                    end: Some(GanttDate::DurationDays(1)),
+                    depends_on: vec!["build".to_string()],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+
+        let layout = layout_diagram_gantt(&ir);
+        let nodes = layout
+            .nodes
+            .iter()
+            .map(|node| (node.node_id.as_str(), node))
+            .collect::<BTreeMap<_, _>>();
+
+        let build = nodes.get("build").expect("build");
+        let verify = nodes.get("verify").expect("verify");
+        assert!(build.bounds.width > 3.5 * 48.0);
+        assert!(verify.bounds.center().x > build.bounds.center().x);
     }
 
     #[test]

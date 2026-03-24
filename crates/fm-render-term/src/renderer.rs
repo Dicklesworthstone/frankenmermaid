@@ -1,7 +1,8 @@
 //! Core terminal diagram renderer.
 
 use fm_core::{
-    ArrowType, GraphDirection, MermaidDiagramIr, MermaidRenderMode, MermaidTier, NodeShape,
+    ArrowType, GanttTaskType, GraphDirection, MermaidDiagramIr, MermaidRenderMode, MermaidTier,
+    NodeShape,
 };
 use fm_layout::{DiagramLayout, LayoutClusterBox, LayoutEdgePath, LayoutNodeBox, layout_diagram};
 
@@ -1771,9 +1772,9 @@ fn render_gantt_cell(
             // Task bar — position proportionally in the bar area.
             let bar_start = label_width + 2 + (task_idx * bar_area_width) / task_count;
             let bar_end = label_width + 2 + ((task_idx + 1) * bar_area_width) / task_count;
-            let bar_char = if task.critical {
+            let bar_char = if matches!(task.task_type, GanttTaskType::Critical) {
                 '\u{2593}' // ▓
-            } else if task.done {
+            } else if matches!(task.task_type, GanttTaskType::Done) {
                 '\u{2591}' // ░
             } else {
                 '\u{2588}' // █

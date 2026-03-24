@@ -2,10 +2,11 @@ use std::collections::{BTreeMap, HashMap};
 
 use chumsky::prelude::*;
 use fm_core::{
-    ArrowType, Diagnostic, DiagnosticCategory, DiagramType, GraphDirection, IrAttributeKey,
-    IrC4NodeMeta, IrGanttMeta, IrGanttSection, IrGanttTask, IrLabelSegment, IrNodeId, IrXyAxis,
-    IrXyChartMeta, IrXySeries, IrXySeriesKind, MermaidParseMode, MermaidSupportLevel, NodeShape,
-    Span, parse_mermaid_js_config_value, to_init_parse,
+    ArrowType, Diagnostic, DiagnosticCategory, DiagramType, GanttDate, GanttExclude, GanttTaskType,
+    GanttTickInterval, GraphDirection, IrAttributeKey, IrC4NodeMeta, IrGanttMeta, IrGanttSection,
+    IrGanttTask, IrLabelSegment, IrNodeId, IrXyAxis, IrXyChartMeta, IrXySeries, IrXySeriesKind,
+    MermaidParseMode, MermaidSupportLevel, NodeShape, Span, parse_mermaid_js_config_value,
+    to_init_parse,
 };
 use serde_json::Value;
 
@@ -3590,17 +3591,42 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
         }
 
         if let Some(tick_interval) = trimmed.strip_prefix("tickInterval ") {
-            gantt_meta.tick_interval = clean_label(Some(tick_interval));
+            gantt_meta.tick_interval = parse_gantt_tick_interval(tick_interval);
+            if gantt_meta.tick_interval.is_none() {
+                builder.add_warning(format!(
+                    "Line {line_number}: unsupported gantt tickInterval: {tick_interval}"
+                ));
+            }
             continue;
         }
 
         if let Some(excludes) = trimmed.strip_prefix("excludes ") {
-            gantt_meta.excludes = excludes
-                .split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned)
-                .collect();
+            gantt_meta.excludes = parse_gantt_excludes(excludes, gantt_meta.date_format.as_deref());
+            if gantt_meta.excludes.is_empty() {
+                builder.add_warning(format!(
+                    "Line {line_number}: gantt excludes directive is empty"
+                ));
+            }
+            continue;
+        }
+
+        if let Some(style) = trimmed.strip_prefix("todayMarker ") {
+            gantt_meta.today_marker_style = clean_label(Some(style));
+            continue;
+        }
+
+        if trimmed == "inclusiveEndDates" {
+            gantt_meta.inclusive_end_dates = true;
+            continue;
+        }
+
+        if let Some(weekday) = trimmed.strip_prefix("weekday ") {
+            gantt_meta.weekday_start = parse_gantt_weekday(weekday);
+            if gantt_meta.weekday_start.is_none() {
+                builder.add_warning(format!(
+                    "Line {line_number}: unsupported gantt weekday: {weekday}"
+                ));
+            }
             continue;
         }
 
@@ -3644,26 +3670,21 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
             continue;
         };
 
-        let parsed_meta = parse_gantt_task_metadata(raw_meta);
+        let parsed_meta = parse_gantt_task_metadata(raw_meta, gantt_meta.date_format.as_deref());
         if let Some(task_id_ref) = parsed_meta.task_id.as_ref() {
             task_ids_to_nodes.entry(task_id_ref.clone()).or_insert(node);
         }
-        if let Some(after_task_id) = parsed_meta.after_task_id.as_ref() {
+        if let Some(after_task_id) = parsed_meta.depends_on.first() {
             pending_dependencies.push((node, after_task_id.clone(), span));
         }
 
         let mut classes = Vec::new();
-        if parsed_meta.done {
-            classes.push("gantt-done");
-        }
-        if parsed_meta.active {
-            classes.push("gantt-active");
-        }
-        if parsed_meta.critical {
-            classes.push("gantt-critical");
-        }
-        if parsed_meta.milestone {
-            classes.push("gantt-milestone");
+        match parsed_meta.task_type {
+            GanttTaskType::Done => classes.push("gantt-done"),
+            GanttTaskType::Active => classes.push("gantt-active"),
+            GanttTaskType::Critical => classes.push("gantt-critical"),
+            GanttTaskType::Milestone => classes.push("gantt-milestone"),
+            GanttTaskType::Normal => {}
         }
         for class_name in classes {
             builder.add_class_to_node(&task_id, class_name, span);
@@ -3674,13 +3695,11 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
             section_idx: current_section_idx,
             meta: raw_meta.trim().to_string(),
             task_id: parsed_meta.task_id,
-            after_task_id: parsed_meta.after_task_id,
-            start_date: parsed_meta.start_date,
-            duration_days: parsed_meta.duration_days,
-            milestone: parsed_meta.milestone,
-            active: parsed_meta.active,
-            done: parsed_meta.done,
-            critical: parsed_meta.critical,
+            start: parsed_meta.start,
+            end: parsed_meta.end,
+            depends_on: parsed_meta.depends_on,
+            progress: parsed_meta.progress,
+            task_type: parsed_meta.task_type,
         });
     }
 
@@ -3707,16 +3726,14 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
 #[derive(Debug, Default)]
 struct ParsedGanttTaskMeta {
     task_id: Option<String>,
-    after_task_id: Option<String>,
-    start_date: Option<String>,
-    duration_days: Option<u32>,
-    milestone: bool,
-    active: bool,
-    done: bool,
-    critical: bool,
+    start: Option<GanttDate>,
+    end: Option<GanttDate>,
+    depends_on: Vec<String>,
+    progress: Option<f32>,
+    task_type: GanttTaskType,
 }
 
-fn parse_gantt_task_metadata(raw_meta: &str) -> ParsedGanttTaskMeta {
+fn parse_gantt_task_metadata(raw_meta: &str, date_format: Option<&str>) -> ParsedGanttTaskMeta {
     let mut parsed = ParsedGanttTaskMeta::default();
 
     for token in raw_meta
@@ -3727,19 +3744,19 @@ fn parse_gantt_task_metadata(raw_meta: &str) -> ParsedGanttTaskMeta {
         let lower = token.to_ascii_lowercase();
         match lower.as_str() {
             "milestone" => {
-                parsed.milestone = true;
+                parsed.task_type = GanttTaskType::Milestone;
                 continue;
             }
             "active" => {
-                parsed.active = true;
+                parsed.task_type = GanttTaskType::Active;
                 continue;
             }
             "done" => {
-                parsed.done = true;
+                parsed.task_type = GanttTaskType::Done;
                 continue;
             }
             "crit" | "critical" => {
-                parsed.critical = true;
+                parsed.task_type = GanttTaskType::Critical;
                 continue;
             }
             _ => {}
@@ -3748,20 +3765,39 @@ fn parse_gantt_task_metadata(raw_meta: &str) -> ParsedGanttTaskMeta {
         if let Some(after) = lower.strip_prefix("after ") {
             let dependency = normalize_compound_identifier(after);
             if !dependency.is_empty() {
-                parsed.after_task_id = Some(dependency);
+                if parsed.start.is_none() {
+                    parsed.start = Some(GanttDate::AfterTask(dependency.clone()));
+                }
+                parsed.depends_on.push(dependency);
             }
             continue;
         }
 
-        if parsed.start_date.is_none() && is_iso_date(token) {
-            parsed.start_date = Some(token.to_string());
+        if parsed.start.is_none()
+            && let Some(date) = parse_gantt_absolute_date(token, date_format)
+        {
+            parsed.start = Some(GanttDate::Absolute(date));
             continue;
         }
 
-        if parsed.duration_days.is_none()
+        if parsed.end.is_none()
             && let Some(duration_days) = parse_gantt_duration_days(token)
         {
-            parsed.duration_days = Some(duration_days);
+            parsed.end = Some(GanttDate::DurationDays(duration_days));
+            continue;
+        }
+
+        if parsed.end.is_none()
+            && let Some(date) = parse_gantt_absolute_date(token, date_format)
+        {
+            parsed.end = Some(GanttDate::Absolute(date));
+            continue;
+        }
+
+        if parsed.progress.is_none()
+            && let Some(progress) = parse_gantt_progress(token)
+        {
+            parsed.progress = Some(progress);
             continue;
         }
 
@@ -3776,14 +3812,49 @@ fn parse_gantt_task_metadata(raw_meta: &str) -> ParsedGanttTaskMeta {
     parsed
 }
 
-fn is_iso_date(token: &str) -> bool {
-    let bytes = token.trim().as_bytes();
-    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
-        return false;
+fn parse_gantt_absolute_date(token: &str, date_format: Option<&str>) -> Option<String> {
+    normalize_gantt_date_with_format(token, date_format.unwrap_or("YYYY-MM-DD"))
+        .or_else(|| normalize_gantt_date_with_format(token, "YYYY-MM-DD"))
+}
+
+fn normalize_gantt_date_with_format(token: &str, date_format: &str) -> Option<String> {
+    let format_parts = split_gantt_date_parts(date_format, |ch| ch.is_ascii_alphabetic())?;
+    let token_parts = split_gantt_date_parts(token, |ch| ch.is_ascii_digit())?;
+    if format_parts.len() != 3 || token_parts.len() != 3 || format_parts.len() != token_parts.len()
+    {
+        return None;
     }
-    bytes[0..4].iter().all(u8::is_ascii_digit)
-        && bytes[5..7].iter().all(u8::is_ascii_digit)
-        && bytes[8..10].iter().all(u8::is_ascii_digit)
+
+    let mut year = None;
+    let mut month = None;
+    let mut day = None;
+    for (format_part, token_part) in format_parts.iter().zip(token_parts.iter()) {
+        match *format_part {
+            "YYYY" => year = token_part.parse::<u32>().ok(),
+            "MM" => month = token_part.parse::<u32>().ok(),
+            "DD" => day = token_part.parse::<u32>().ok(),
+            _ => return None,
+        }
+    }
+
+    let (year, month, day) = (year?, month?, day?);
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+
+    Some(format!("{year:04}-{month:02}-{day:02}"))
+}
+
+fn split_gantt_date_parts<F>(value: &str, predicate: F) -> Option<Vec<&str>>
+where
+    F: Fn(char) -> bool,
+{
+    let parts = value
+        .trim()
+        .split(|ch: char| !predicate(ch))
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.is_empty() { None } else { Some(parts) }
 }
 
 fn parse_gantt_duration_days(token: &str) -> Option<u32> {
@@ -3800,6 +3871,61 @@ fn parse_gantt_duration_days(token: &str) -> Option<u32> {
         return weeks.trim().parse::<u32>().ok().map(|weeks| weeks * 7);
     }
     None
+}
+
+fn parse_gantt_progress(token: &str) -> Option<f32> {
+    let value = token.trim().strip_suffix('%')?.trim();
+    let percentage = value.parse::<f32>().ok()?;
+    Some((percentage / 100.0).clamp(0.0, 1.0))
+}
+
+fn parse_gantt_tick_interval(token: &str) -> Option<GanttTickInterval> {
+    match token.trim().to_ascii_lowercase().as_str() {
+        "1day" | "day" | "daily" => Some(GanttTickInterval::Day),
+        "1week" | "week" | "weekly" => Some(GanttTickInterval::Week),
+        "1month" | "month" | "monthly" => Some(GanttTickInterval::Month),
+        "1quarter" | "quarter" | "quarterly" => Some(GanttTickInterval::Quarter),
+        "1year" | "year" | "yearly" => Some(GanttTickInterval::Year),
+        _ => None,
+    }
+}
+
+fn parse_gantt_excludes(raw: &str, date_format: Option<&str>) -> Vec<GanttExclude> {
+    let mut excludes = Vec::new();
+    let mut dates = Vec::new();
+
+    for token in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        if token.eq_ignore_ascii_case("weekends") {
+            excludes.push(GanttExclude::Weekends);
+        } else {
+            dates.push(
+                parse_gantt_absolute_date(token, date_format).unwrap_or_else(|| token.to_string()),
+            );
+        }
+    }
+
+    if !dates.is_empty() {
+        excludes.push(GanttExclude::Dates(dates));
+    }
+
+    excludes
+}
+
+fn parse_gantt_weekday(token: &str) -> Option<u8> {
+    match token.trim().to_ascii_lowercase().as_str() {
+        "sunday" => Some(0),
+        "monday" => Some(1),
+        "tuesday" => Some(2),
+        "wednesday" => Some(3),
+        "thursday" => Some(4),
+        "friday" => Some(5),
+        "saturday" => Some(6),
+        _ => None,
+    }
 }
 
 fn parse_pie(input: &str, builder: &mut IrBuilder) {
@@ -7338,8 +7464,8 @@ fn is_comment(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use fm_core::{
-        ArrowType, DiagramType, GraphDirection, IrEndpoint, IrLabelSegment, IrXySeriesKind,
-        NodeShape,
+        ArrowType, DiagramType, GanttDate, GanttExclude, GanttTaskType, GanttTickInterval,
+        GraphDirection, IrEndpoint, IrLabelSegment, IrXySeriesKind, NodeShape,
     };
 
     use super::parse_mermaid;
@@ -8576,11 +8702,11 @@ mod tests {
         assert_eq!(gantt_meta.tasks.len(), 2);
         assert_eq!(gantt_meta.tasks[0].task_id.as_deref(), Some("a1"));
         assert_eq!(
-            gantt_meta.tasks[0].start_date.as_deref(),
-            Some("2026-02-01")
+            gantt_meta.tasks[0].start,
+            Some(GanttDate::Absolute("2026-02-01".to_string()))
         );
-        assert_eq!(gantt_meta.tasks[0].duration_days, Some(3));
-        assert_eq!(gantt_meta.tasks[1].after_task_id.as_deref(), Some("a1"));
+        assert_eq!(gantt_meta.tasks[0].end, Some(GanttDate::DurationDays(3)));
+        assert_eq!(gantt_meta.tasks[1].depends_on, vec!["a1".to_string()]);
     }
 
     #[test]
@@ -10537,9 +10663,9 @@ Rel_Back(db, app, "Responds")"#,
             "gantt\n  title Plan\n  section S1\n  Milestone1 :milestone, m1, 2024-06-01, 0d";
         let parsed = parse_mermaid(input);
         let gantt_meta = parsed.ir.gantt_meta.as_ref().expect("gantt meta");
-        assert!(gantt_meta.tasks[0].milestone);
+        assert_eq!(gantt_meta.tasks[0].task_type, GanttTaskType::Milestone);
         assert_eq!(gantt_meta.tasks[0].task_id.as_deref(), Some("m1"));
-        assert_eq!(gantt_meta.tasks[0].duration_days, Some(0));
+        assert_eq!(gantt_meta.tasks[0].end, Some(GanttDate::DurationDays(0)));
     }
 
     #[test]
@@ -10547,9 +10673,9 @@ Rel_Back(db, app, "Responds")"#,
         let input = "gantt\n  section S1\n  Done task :done, d1, 2024-01-01, 10d\n  Active task :active, a1, 2024-01-11, 10d\n  Future task :f1, after a1, 5d";
         let parsed = parse_mermaid(input);
         let gantt_meta = parsed.ir.gantt_meta.as_ref().expect("gantt meta");
-        assert!(gantt_meta.tasks[0].done);
-        assert!(gantt_meta.tasks[1].active);
-        assert_eq!(gantt_meta.tasks[2].after_task_id.as_deref(), Some("a1"));
+        assert_eq!(gantt_meta.tasks[0].task_type, GanttTaskType::Done);
+        assert_eq!(gantt_meta.tasks[1].task_type, GanttTaskType::Active);
+        assert_eq!(gantt_meta.tasks[2].depends_on, vec!["a1".to_string()]);
         let done_node = &parsed.ir.nodes[gantt_meta.tasks[0].node.0];
         let active_node = &parsed.ir.nodes[gantt_meta.tasks[1].node.0];
         assert!(
@@ -10564,6 +10690,57 @@ Rel_Back(db, app, "Responds")"#,
                 .iter()
                 .any(|class_name| class_name == "gantt-active")
         );
+    }
+
+    #[test]
+    fn gantt_parses_extended_directives_into_typed_meta() {
+        let input = "gantt\n  dateFormat YYYY-MM-DD\n  axisFormat %Y-%m-%d\n  tickInterval 1month\n  todayMarker stroke-width:5px,stroke:#0f0,opacity:0.5\n  inclusiveEndDates\n  weekday monday\n  excludes weekends, 2026-02-14, 2026-02-15\n  section Alpha\n  Ship :crit, release, 2026-02-10, 2026-02-12";
+        let parsed = parse_mermaid(input);
+        let gantt_meta = parsed.ir.gantt_meta.as_ref().expect("gantt meta");
+
+        assert_eq!(gantt_meta.tick_interval, Some(GanttTickInterval::Month));
+        assert_eq!(
+            gantt_meta.today_marker_style.as_deref(),
+            Some("stroke-width:5px,stroke:#0f0,opacity:0.5")
+        );
+        assert!(gantt_meta.inclusive_end_dates);
+        assert_eq!(gantt_meta.weekday_start, Some(1));
+        assert_eq!(
+            gantt_meta.excludes,
+            vec![
+                GanttExclude::Weekends,
+                GanttExclude::Dates(vec!["2026-02-14".to_string(), "2026-02-15".to_string()])
+            ]
+        );
+        assert_eq!(gantt_meta.tasks[0].task_type, GanttTaskType::Critical);
+        assert_eq!(
+            gantt_meta.tasks[0].end,
+            Some(GanttDate::Absolute("2026-02-12".to_string()))
+        );
+    }
+
+    #[test]
+    fn gantt_date_format_normalizes_non_iso_dates() {
+        let input = "gantt\n  dateFormat DD/MM/YYYY\n  excludes weekends, 14/02/2026\n  section Alpha\n  Build :build1, 06/02/2026, 09/02/2026\n  Verify :verify1, after build1, 2d";
+        let parsed = parse_mermaid(input);
+        let gantt_meta = parsed.ir.gantt_meta.as_ref().expect("gantt meta");
+
+        assert_eq!(
+            gantt_meta.tasks[0].start,
+            Some(GanttDate::Absolute("2026-02-06".to_string()))
+        );
+        assert_eq!(
+            gantt_meta.tasks[0].end,
+            Some(GanttDate::Absolute("2026-02-09".to_string()))
+        );
+        assert_eq!(
+            gantt_meta.excludes,
+            vec![
+                GanttExclude::Weekends,
+                GanttExclude::Dates(vec!["2026-02-14".to_string()])
+            ]
+        );
+        assert_eq!(gantt_meta.tasks[1].depends_on, vec!["build1".to_string()]);
     }
 
     // --- Pie parser tests ---

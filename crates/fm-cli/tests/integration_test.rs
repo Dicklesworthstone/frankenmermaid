@@ -2,7 +2,10 @@
 //!
 //! These tests verify the end-to-end flow from parsing to layout to rendering.
 
-use fm_core::{DiagramType, GraphDirection, MermaidTier};
+use fm_core::{
+    DiagramType, GanttDate, GanttExclude, GanttTaskType, GanttTickInterval, GraphDirection,
+    MermaidTier,
+};
 use fm_layout::{layout_diagram, layout_diagram_traced};
 use fm_parser::parse;
 use fm_render_svg::{SvgBackend, SvgRenderConfig, render_svg, render_svg_with_config};
@@ -1332,6 +1335,60 @@ fn gantt_inline_title_renders_as_generic_diagram_title() {
     let svg = render_svg(&result.ir);
     assert!(svg.contains(">Roadmap<"));
     assert!(svg.contains("fm-diagram-title"));
+}
+
+#[test]
+fn gantt_extended_meta_flows_through_parse_and_layout() {
+    let input = "gantt\n  dateFormat YYYY-MM-DD\n  tickInterval 1week\n  todayMarker stroke-width:4px,stroke:#f00\n  inclusiveEndDates\n  excludes weekends, 2026-02-10\n  section Alpha\n  Build :active, build1, 2026-02-06, 2026-02-09\n  Verify :crit, verify1, after build1, 2d";
+    let result = parse(input);
+    let gantt_meta = result.ir.gantt_meta.as_ref().expect("gantt meta");
+
+    assert_eq!(gantt_meta.tick_interval, Some(GanttTickInterval::Week));
+    assert_eq!(
+        gantt_meta.today_marker_style.as_deref(),
+        Some("stroke-width:4px,stroke:#f00")
+    );
+    assert!(gantt_meta.inclusive_end_dates);
+    assert_eq!(
+        gantt_meta.excludes,
+        vec![
+            GanttExclude::Weekends,
+            GanttExclude::Dates(vec!["2026-02-10".to_string()])
+        ]
+    );
+    assert_eq!(gantt_meta.tasks[0].task_type, GanttTaskType::Active);
+    assert_eq!(
+        gantt_meta.tasks[0].start,
+        Some(GanttDate::Absolute("2026-02-06".to_string()))
+    );
+    assert_eq!(
+        gantt_meta.tasks[0].end,
+        Some(GanttDate::Absolute("2026-02-09".to_string()))
+    );
+    assert_eq!(gantt_meta.tasks[1].depends_on, vec!["build1".to_string()]);
+
+    let layout = layout_diagram(&result.ir);
+    assert_eq!(layout.nodes.len(), 2);
+}
+
+#[test]
+fn gantt_date_format_allows_non_iso_dates_through_full_pipeline() {
+    let input = "gantt\n  dateFormat DD/MM/YYYY\n  section Alpha\n  Build :build1, 06/02/2026, 09/02/2026\n  Verify :verify1, after build1, 2d";
+    let result = parse(input);
+    let gantt_meta = result.ir.gantt_meta.as_ref().expect("gantt meta");
+
+    assert_eq!(
+        gantt_meta.tasks[0].start,
+        Some(GanttDate::Absolute("2026-02-06".to_string()))
+    );
+    assert_eq!(
+        gantt_meta.tasks[0].end,
+        Some(GanttDate::Absolute("2026-02-09".to_string()))
+    );
+
+    let layout = layout_diagram(&result.ir);
+    assert_eq!(layout.nodes.len(), 2);
+    assert!(layout.nodes[1].bounds.center().x > layout.nodes[0].bounds.center().x);
 }
 
 #[test]

@@ -3095,8 +3095,40 @@ pub struct IrGanttSection {
     pub name: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum GanttTaskType {
+    #[default]
+    Normal,
+    Critical,
+    Done,
+    Active,
+    Milestone,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum GanttDate {
+    Absolute(String),
+    AfterTask(String),
+    DurationDays(u32),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum GanttExclude {
+    Weekends,
+    Dates(Vec<String>),
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum GanttTickInterval {
+    Day,
+    Week,
+    Month,
+    Quarter,
+    Year,
+}
+
 /// A single Gantt task with parsed scheduling metadata.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct IrGanttTask {
     pub node: IrNodeId,
     pub section_idx: usize,
@@ -3104,23 +3136,19 @@ pub struct IrGanttTask {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub after_task_id: Option<String>,
+    pub start: Option<GanttDate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub start_date: Option<String>,
+    pub end: Option<GanttDate>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub duration_days: Option<u32>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub milestone: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub active: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub done: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub critical: bool,
+    pub progress: Option<f32>,
+    #[serde(default, skip_serializing_if = "is_default_gantt_task_type")]
+    pub task_type: GanttTaskType,
 }
 
 /// Gantt-diagram-specific metadata that extends the generic IR.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct IrGanttMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -3129,13 +3157,23 @@ pub struct IrGanttMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub axis_format: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tick_interval: Option<String>,
+    pub tick_interval: Option<GanttTickInterval>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub today_marker_style: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inclusive_end_dates: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weekday_start: Option<u8>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub excludes: Vec<String>,
+    pub excludes: Vec<GanttExclude>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sections: Vec<IrGanttSection>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tasks: Vec<IrGanttTask>,
+}
+
+const fn is_default_gantt_task_type(value: &GanttTaskType) -> bool {
+    matches!(value, GanttTaskType::Normal)
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -3587,21 +3625,22 @@ mod tests {
 
     use super::{
         ArrowType, Diagnostic, DiagnosticCategory, DiagnosticSeverity, DiagramPalettePreset,
-        DiagramType, FragmentAlternative, FragmentKind, GraphDirection, IrActivation,
-        IrAttributeKey, IrCluster, IrClusterId, IrEdge, IrEdgeKind, IrEndpoint, IrEntityAttribute,
-        IrGanttMeta, IrGanttSection, IrGanttTask, IrGraphCluster, IrGraphEdge, IrGraphNode,
-        IrLabel, IrLabelId, IrLifecycleEvent, IrNode, IrNodeId, IrNodeKind, IrParticipantGroup,
-        IrPort, IrPortId, IrPortSideHint, IrSequenceFragment, IrSequenceMeta, IrSequenceNote,
-        IrSubgraph, IrSubgraphId, IrXyAxis, IrXyChartMeta, IrXySeries, IrXySeriesKind,
-        LifecycleEventKind, MERMAID_SCHEMA_VERSION, MermaidConfig, MermaidDiagramIr, MermaidError,
-        MermaidErrorCode, MermaidFallbackAction, MermaidFallbackPolicy,
-        MermaidLayoutDecisionAlternative, MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord,
-        MermaidNativePressureSignals, MermaidPressureTier, MermaidSanitizeMode,
-        MermaidSupportLevel, MermaidWarningCode, MermaidWasmPressureSignals, NodeShape,
-        NotePosition, Position, Span, StructuredDiagnostic, capability_matrix,
-        capability_matrix_json_pretty, capability_readme_supported_diagram_types_markdown,
-        capability_readme_surface_markdown, documented_diagram_types,
-        mermaid_layout_guard_observability, parse_mermaid_js_config_value, to_init_parse,
+        DiagramType, FragmentAlternative, FragmentKind, GanttDate, GanttExclude, GanttTaskType,
+        GanttTickInterval, GraphDirection, IrActivation, IrAttributeKey, IrCluster, IrClusterId,
+        IrEdge, IrEdgeKind, IrEndpoint, IrEntityAttribute, IrGanttMeta, IrGanttSection,
+        IrGanttTask, IrGraphCluster, IrGraphEdge, IrGraphNode, IrLabel, IrLabelId,
+        IrLifecycleEvent, IrNode, IrNodeId, IrNodeKind, IrParticipantGroup, IrPort, IrPortId,
+        IrPortSideHint, IrSequenceFragment, IrSequenceMeta, IrSequenceNote, IrSubgraph,
+        IrSubgraphId, IrXyAxis, IrXyChartMeta, IrXySeries, IrXySeriesKind, LifecycleEventKind,
+        MERMAID_SCHEMA_VERSION, MermaidConfig, MermaidDiagramIr, MermaidError, MermaidErrorCode,
+        MermaidFallbackAction, MermaidFallbackPolicy, MermaidLayoutDecisionAlternative,
+        MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord, MermaidNativePressureSignals,
+        MermaidPressureTier, MermaidSanitizeMode, MermaidSupportLevel, MermaidWarningCode,
+        MermaidWasmPressureSignals, NodeShape, NotePosition, Position, Span, StructuredDiagnostic,
+        capability_matrix, capability_matrix_json_pretty,
+        capability_readme_supported_diagram_types_markdown, capability_readme_surface_markdown,
+        documented_diagram_types, mermaid_layout_guard_observability,
+        parse_mermaid_js_config_value, to_init_parse,
     };
 
     fn sample_span(line: usize, start_col: usize, end_col: usize) -> Span {
@@ -5280,8 +5319,11 @@ mod tests {
             title: Some("Release Train".to_string()),
             date_format: Some("YYYY-MM-DD".to_string()),
             axis_format: Some("%m/%d".to_string()),
-            tick_interval: Some("1week".to_string()),
-            excludes: vec!["weekends".to_string()],
+            tick_interval: Some(GanttTickInterval::Week),
+            today_marker_style: Some("stroke:#f97316,stroke-width:2px".to_string()),
+            inclusive_end_dates: true,
+            weekday_start: Some(1),
+            excludes: vec![GanttExclude::Weekends],
             sections: vec![IrGanttSection {
                 name: "Planning".to_string(),
             }],
@@ -5290,13 +5332,11 @@ mod tests {
                 section_idx: 0,
                 meta: "done, plan_1, 2026-02-01, 2d".to_string(),
                 task_id: Some("plan_1".to_string()),
-                after_task_id: None,
-                start_date: Some("2026-02-01".to_string()),
-                duration_days: Some(2),
-                milestone: false,
-                active: false,
-                done: true,
-                critical: false,
+                start: Some(GanttDate::Absolute("2026-02-01".to_string())),
+                end: Some(GanttDate::DurationDays(2)),
+                depends_on: Vec::new(),
+                progress: Some(0.5),
+                task_type: GanttTaskType::Done,
             }],
         };
 
