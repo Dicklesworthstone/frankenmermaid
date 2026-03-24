@@ -52,11 +52,23 @@ pub struct SourceSpanRecord {
     span: Span,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct RuntimeConfig {
     svg: SvgRenderConfig,
     canvas: CanvasRenderConfig,
     pressure: MermaidWasmPressureSignals,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        let svg = SvgRenderConfig::default();
+        let canvas = align_canvas_typography_with_svg(CanvasRenderConfig::default(), &svg);
+        Self {
+            svg,
+            canvas,
+            pressure: MermaidWasmPressureSignals::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -427,6 +439,15 @@ fn merge_canvas_config(
     merged
 }
 
+fn align_canvas_typography_with_svg(
+    mut canvas: CanvasRenderConfig,
+    svg: &SvgRenderConfig,
+) -> CanvasRenderConfig {
+    canvas.font_family = svg.font_family.clone();
+    canvas.font_size = f64::from(svg.font_size);
+    canvas
+}
+
 fn merge_pressure_config(
     base: &MermaidWasmPressureSignals,
     overrides: &PressureConfigOverrides,
@@ -518,10 +539,14 @@ pub fn render(input: &str) -> WasmRenderOutput {
 pub fn init(config: Option<JsValue>) -> Result<(), JsValue> {
     let overrides: RuntimeInitConfig = parse_js_value_or_default(config)?;
     let current = read_runtime_config();
+    let svg = merge_svg_config(&current.svg, &overrides.svg, overrides.theme.as_deref())?;
 
     let next = RuntimeConfig {
-        svg: merge_svg_config(&current.svg, &overrides.svg, overrides.theme.as_deref())?,
-        canvas: merge_canvas_config(&current.canvas, &overrides.canvas),
+        canvas: align_canvas_typography_with_svg(
+            merge_canvas_config(&current.canvas, &overrides.canvas),
+            &svg,
+        ),
+        svg,
         pressure: merge_pressure_config(&current.pressure, &overrides.pressure),
     };
 
@@ -834,7 +859,10 @@ impl Diagram {
         let runtime = read_runtime_config();
         let svg_config =
             merge_svg_config(&runtime.svg, &overrides.svg, overrides.theme.as_deref())?;
-        let canvas_config = merge_canvas_config(&runtime.canvas, &overrides.canvas);
+        let canvas_config = align_canvas_typography_with_svg(
+            merge_canvas_config(&runtime.canvas, &overrides.canvas),
+            &svg_config,
+        );
         let pressure_config = merge_pressure_config(&runtime.pressure, &overrides.pressure);
 
         Ok(Self {
@@ -856,7 +884,10 @@ impl Diagram {
         let next_pressure = merge_pressure_config(&self.pressure_config, &overrides.pressure);
         let pressure_report = next_pressure.into_report();
         let mut budget_broker = MermaidBudgetLedger::new(&pressure_report);
-        let next_canvas = merge_canvas_config(&self.canvas_config, &overrides.canvas);
+        let next_canvas = align_canvas_typography_with_svg(
+            merge_canvas_config(&self.canvas_config, &overrides.canvas),
+            &next_svg,
+        );
         let parse_start = Instant::now();
         let parsed = parse(input);
         budget_broker
@@ -976,12 +1007,14 @@ impl Diagram {
 mod tests {
     use super::{
         PressureConfigOverrides, RuntimeConfig, SvgConfigOverrides, ThemePreset,
-        apply_budget_svg_simplifications, collect_source_spans, merge_pressure_config,
-        merge_svg_config, read_runtime_config, render, render_svg_js, write_runtime_config,
+        align_canvas_typography_with_svg, apply_budget_svg_simplifications, collect_source_spans,
+        merge_pressure_config, merge_svg_config, read_runtime_config, render, render_svg_js,
+        write_runtime_config,
     };
     use fm_core::{MermaidPressureTier, MermaidWasmPressureSignals};
     use fm_layout::layout_diagram_traced;
     use fm_parser::parse;
+    use fm_render_canvas::CanvasRenderConfig;
     use fm_render_svg::SvgRenderConfig;
 
     #[test]
@@ -1042,6 +1075,36 @@ mod tests {
         assert_eq!(merged.worker_saturation_permille, Some(910));
         let report = merged.into_report();
         assert_eq!(report.tier, MermaidPressureTier::Critical);
+    }
+
+    #[test]
+    fn runtime_default_keeps_canvas_typography_aligned_with_svg_layout() {
+        let runtime = RuntimeConfig::default();
+        assert_eq!(runtime.canvas.font_family, runtime.svg.font_family);
+        assert_eq!(runtime.canvas.font_size, f64::from(runtime.svg.font_size));
+    }
+
+    #[test]
+    fn align_canvas_typography_with_svg_preserves_non_typography_canvas_settings() {
+        let canvas = CanvasRenderConfig {
+            padding: 12.0,
+            node_fill: "#123456".to_string(),
+            edge_stroke_width: 3.0,
+            ..CanvasRenderConfig::default()
+        };
+        let svg = SvgRenderConfig {
+            font_family: "Test Font".to_string(),
+            font_size: 22.0,
+            ..SvgRenderConfig::default()
+        };
+
+        let aligned = align_canvas_typography_with_svg(canvas, &svg);
+
+        assert_eq!(aligned.font_family, "Test Font");
+        assert_eq!(aligned.font_size, 22.0);
+        assert_eq!(aligned.padding, 12.0);
+        assert_eq!(aligned.node_fill, "#123456");
+        assert_eq!(aligned.edge_stroke_width, 3.0);
     }
 
     #[test]

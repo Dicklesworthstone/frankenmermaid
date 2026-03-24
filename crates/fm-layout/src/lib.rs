@@ -5644,9 +5644,15 @@ fn force_normalize_positions(positions: &mut [(f32, f32)], node_sizes: &[(f32, f
     let mut min_x = f32::MAX;
     let mut min_y = f32::MAX;
     for (i, &(x, y)) in positions.iter().enumerate() {
+        if !x.is_finite() || !y.is_finite() {
+            continue;
+        }
         let (w, h) = node_sizes[i];
         min_x = min_x.min(x - w / 2.0);
         min_y = min_y.min(y - h / 2.0);
+    }
+    if !min_x.is_finite() || !min_y.is_finite() {
+        return;
     }
     let offset_x = margin - min_x;
     let offset_y = margin - min_y;
@@ -7209,7 +7215,7 @@ fn bk_horizontal_compaction(
     let mut pred_in_rank: Vec<Option<usize>> = vec![None; node_count];
     for nodes in ordering_by_rank.values() {
         for i in 1..nodes.len() {
-            if nodes[i] < node_count {
+            if nodes[i] < node_count && nodes[i - 1] < node_count {
                 pred_in_rank[nodes[i]] = Some(nodes[i - 1]);
             }
         }
