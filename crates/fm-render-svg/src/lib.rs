@@ -247,6 +247,35 @@ fn render_scene_document(scene: &RenderScene, config: &SvgRenderConfig) -> Strin
     render_scene_document_with_ir(scene, config, None)
 }
 
+fn resolve_accessibility_text(
+    ir: Option<&MermaidDiagramIr>,
+    config: &SvgRenderConfig,
+    fallback_desc: impl FnOnce() -> String,
+) -> (String, String) {
+    match ir {
+        Some(diagram_ir) => {
+            let title = diagram_ir
+                .meta
+                .acc_title
+                .clone()
+                .unwrap_or_else(|| format!("{} diagram", diagram_ir.diagram_type.as_str()));
+            let desc = diagram_ir.meta.acc_descr.clone().unwrap_or_else(|| {
+                if config.a11y.aria_labels {
+                    describe_diagram(diagram_ir)
+                } else {
+                    fallback_desc()
+                }
+            });
+            (title, desc)
+        }
+        None => (String::from("Render scene"), fallback_desc()),
+    }
+}
+
+fn diagram_title<'a>(ir: &'a MermaidDiagramIr, explicit: Option<&'a str>) -> Option<&'a str> {
+    ir.meta.title.as_deref().or(explicit)
+}
+
 fn resolve_theme(ir: Option<&MermaidDiagramIr>, config: &SvgRenderConfig) -> Theme {
     let preset = ir
         .and_then(|i| i.meta.theme_overrides.theme.as_deref())
@@ -267,13 +296,19 @@ fn render_scene_document_with_ir(
     ir: Option<&MermaidDiagramIr>,
 ) -> String {
     let padding = config.padding;
+    let visible_title = ir.and_then(|diagram_ir| diagram_ir.meta.title.as_deref());
+    let title_height = if visible_title.is_some() {
+        config.font_size + 22.0
+    } else {
+        0.0
+    };
     let width = (scene.bounds.width + padding * 2.0).max(1.0);
-    let height = (scene.bounds.height + padding * 2.0).max(1.0);
+    let height = (scene.bounds.height + padding * 2.0 + title_height).max(1.0);
 
     let mut doc = SvgDocument::new()
         .viewbox(
             scene.bounds.x - padding,
-            scene.bounds.y - padding,
+            scene.bounds.y - padding - title_height,
             width,
             height,
         )
@@ -286,19 +321,27 @@ fn render_scene_document_with_ir(
     let (group_count, path_count, text_count) = count_scene_items(&scene.root);
 
     if config.accessible {
-        let title = ir.map_or_else(
-            || String::from("Render scene"),
-            |diagram_ir| format!("{} diagram", diagram_ir.diagram_type.as_str()),
-        );
-        let desc = ir.map_or_else(
-            || {
-                format!(
-                    "Target-agnostic render scene with {group_count} groups, {path_count} paths, and {text_count} text items"
-                )
-            },
-            describe_diagram,
-        );
+        let (title, desc) = resolve_accessibility_text(ir, config, || {
+            format!(
+                "Target-agnostic render scene with {group_count} groups, {path_count} paths, and {text_count} text items"
+            )
+        });
         doc = doc.accessible(title, desc);
+    }
+
+    if let Some(title) = visible_title {
+        doc = doc.child(
+            TextBuilder::new(title)
+                .x(scene.bounds.x + scene.bounds.width / 2.0)
+                .y(scene.bounds.y - 8.0)
+                .anchor(TextAnchor::Middle)
+                .font_family(&config.font_family)
+                .font_size(config.font_size + 4.0)
+                .font_weight("600")
+                .fill("#1f2937")
+                .class("fm-diagram-title")
+                .build(),
+        );
     }
 
     for class in &config.root_classes {
@@ -1292,8 +1335,29 @@ fn render_layout_to_svg(
     let legend_enabled = is_c4_legend_enabled(ir);
     let legend_width = if legend_enabled { 320.0 } else { 0.0 };
     let legend_height = if legend_enabled { 128.0 } else { 0.0 };
+    let has_specialized_title_renderer = ir
+        .xy_chart_meta
+        .as_ref()
+        .filter(|meta| !meta.series.is_empty())
+        .is_some()
+        || ir
+            .pie_meta
+            .as_ref()
+            .filter(|meta| !meta.slices.is_empty())
+            .is_some()
+        || ir.quadrant_meta.is_some();
+    let generic_title = if has_specialized_title_renderer {
+        None
+    } else {
+        ir.meta.title.as_deref()
+    };
+    let title_height = if generic_title.is_some() {
+        config.font_size + 22.0
+    } else {
+        0.0
+    };
     let width = (layout.bounds.width + padding * 2.0).max(legend_width + padding * 2.0);
-    let height = layout.bounds.height + padding * 2.0 + legend_height;
+    let height = layout.bounds.height + padding * 2.0 + legend_height + title_height;
     let detail = resolve_detail_profile(width, height, config);
 
     let mut doc = SvgDocument::new()
@@ -1305,22 +1369,12 @@ fn render_layout_to_svg(
     }
 
     if config.accessible {
-        // Prefer explicit accTitle/accDescr directives, falling back to auto-generated.
-        let title = ir
-            .meta
-            .acc_title
-            .clone()
-            .unwrap_or_else(|| format!("{} diagram", ir.diagram_type.as_str()));
-        let desc = ir.meta.acc_descr.clone().unwrap_or_else(|| {
-            if config.a11y.aria_labels {
-                describe_diagram(ir)
-            } else {
-                format!(
-                    "Diagram with {} nodes and {} edges",
-                    ir.nodes.len(),
-                    ir.edges.len()
-                )
-            }
+        let (title, desc) = resolve_accessibility_text(Some(ir), config, || {
+            format!(
+                "Diagram with {} nodes and {} edges",
+                ir.nodes.len(),
+                ir.edges.len()
+            )
         });
         doc = doc.accessible(title, desc);
     }
@@ -1456,7 +1510,7 @@ fn render_layout_to_svg(
 
     // Offset for padding
     let offset_x = padding - layout.bounds.x;
-    let offset_y = padding - layout.bounds.y;
+    let offset_y = padding - layout.bounds.y + title_height;
 
     if let Some(xy_chart_meta) = ir
         .xy_chart_meta
@@ -1465,6 +1519,7 @@ fn render_layout_to_svg(
     {
         doc = render_xychart_svg(
             doc,
+            ir,
             layout,
             xy_chart_meta,
             offset_x,
@@ -1477,14 +1532,33 @@ fn render_layout_to_svg(
 
     // Pie chart rendering: draw wedges from pie metadata.
     if let Some(pie_meta) = ir.pie_meta.as_ref().filter(|meta| !meta.slices.is_empty()) {
-        doc = render_pie_svg(doc, layout, pie_meta, offset_x, offset_y, config, &theme);
+        doc = render_pie_svg(
+            doc, ir, layout, pie_meta, offset_x, offset_y, config, &theme,
+        );
         return doc.to_string();
     }
 
     // Quadrant chart rendering.
     if let Some(quad_meta) = ir.quadrant_meta.as_ref() {
-        doc = render_quadrant_svg(doc, layout, quad_meta, offset_x, offset_y, config, &theme);
+        doc = render_quadrant_svg(
+            doc, ir, layout, quad_meta, offset_x, offset_y, config, &theme,
+        );
         return doc.to_string();
+    }
+
+    if let Some(title) = generic_title {
+        doc = doc.child(
+            TextBuilder::new(title)
+                .x(width / 2.0)
+                .y(padding + config.font_size + 2.0)
+                .anchor(TextAnchor::Middle)
+                .font_family(&config.font_family)
+                .font_size(config.font_size + 4.0)
+                .font_weight("600")
+                .fill(&theme.colors.text)
+                .class("fm-diagram-title")
+                .build(),
+        );
     }
 
     for band in &layout.extensions.bands {
@@ -2086,8 +2160,10 @@ fn er_marker_to_label(marker: &str) -> &str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_quadrant_svg(
     mut doc: SvgDocument,
+    ir: &MermaidDiagramIr,
     layout: &DiagramLayout,
     quad_meta: &fm_core::IrQuadrantMeta,
     offset_x: f32,
@@ -2211,7 +2287,7 @@ fn render_quadrant_svg(
     }
 
     // Title.
-    if let Some(title) = &quad_meta.title {
+    if let Some(title) = diagram_title(ir, quad_meta.title.as_deref()) {
         doc = doc.child(
             Element::text()
                 .x(margin_left + half_w)
@@ -2263,8 +2339,10 @@ fn render_quadrant_svg(
     doc
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_pie_svg(
     mut doc: SvgDocument,
+    ir: &MermaidDiagramIr,
     layout: &DiagramLayout,
     pie_meta: &fm_core::IrPieMeta,
     offset_x: f32,
@@ -2285,7 +2363,8 @@ fn render_pie_svg(
         })
         .fold(0.0_f32, f32::max);
     let legend_width = (legend_label_width + 56.0).clamp(136.0, 280.0);
-    let title_height = if pie_meta.title.is_some() {
+    let title = diagram_title(ir, pie_meta.title.as_deref());
+    let title_height = if title.is_some() {
         config.font_size + 22.0
     } else {
         0.0
@@ -2306,7 +2385,7 @@ fn render_pie_svg(
         .sum::<f32>()
         .max(f32::EPSILON);
 
-    if let Some(title) = &pie_meta.title {
+    if let Some(title) = title {
         doc = doc.child(
             TextBuilder::new(title)
                 .x(cx)
@@ -2474,8 +2553,10 @@ fn render_pie_svg(
     doc
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_xychart_svg(
     mut doc: SvgDocument,
+    ir: &MermaidDiagramIr,
     layout: &DiagramLayout,
     xy_chart_meta: &IrXyChartMeta,
     offset_x: f32,
@@ -2578,7 +2659,7 @@ fn render_xychart_svg(
         );
     }
 
-    if let Some(title) = xy_chart_meta.title.as_deref() {
+    if let Some(title) = diagram_title(ir, xy_chart_meta.title.as_deref()) {
         doc = doc.child(
             TextBuilder::new(title)
                 .x((layout.bounds.width / 2.0) + offset_x)
@@ -5108,6 +5189,67 @@ mod tests {
     }
 
     #[test]
+    fn explicit_accessibility_directives_override_legacy_svg_metadata() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.meta.acc_title = Some(String::from("Custom Title"));
+        ir.meta.acc_descr = Some(String::from("Custom Description"));
+
+        let svg = render_svg(&ir);
+
+        assert!(svg.contains("<title>Custom Title</title>"));
+        assert!(svg.contains("<desc>Custom Description</desc>"));
+    }
+
+    #[test]
+    fn explicit_accessibility_directives_override_scene_svg_metadata() {
+        let mut ir = create_ir_with_labeled_edge();
+        ir.meta.acc_title = Some(String::from("Scene Title"));
+        ir.meta.acc_descr = Some(String::from("Scene Description"));
+
+        let svg = render_svg_with_config(
+            &ir,
+            &SvgRenderConfig {
+                backend: SvgBackend::Scene,
+                ..Default::default()
+            },
+        );
+
+        assert!(svg.contains("<title>Scene Title</title>"));
+        assert!(svg.contains("<desc>Scene Description</desc>"));
+    }
+
+    #[test]
+    fn generic_diagram_title_renders_above_flowchart_content() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.meta.title = Some(String::from("Flow Title"));
+
+        let svg = render_svg(&ir);
+
+        assert!(svg.contains(">Flow Title<"));
+        assert!(svg.contains("fm-diagram-title"));
+    }
+
+    #[test]
+    fn front_matter_title_is_used_by_scene_xychart_renderer() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::XyChart);
+        ir.meta.title = Some(String::from("Shared Title"));
+        ir.xy_chart_meta = Some(IrXyChartMeta {
+            title: None,
+            ..IrXyChartMeta::default()
+        });
+
+        let svg = render_svg_with_config(
+            &ir,
+            &SvgRenderConfig {
+                backend: SvgBackend::Scene,
+                ..Default::default()
+            },
+        );
+
+        assert!(svg.contains(">Shared Title<"));
+    }
+
+    #[test]
     fn includes_defs_section() {
         let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         let svg = render_svg(&ir);
@@ -6201,5 +6343,40 @@ mod tests {
                 "SVG output should never contain Infinity values"
             );
         }
+    }
+
+    #[test]
+    fn er_cardinality_one_to_many() {
+        let (left, right) = parse_er_cardinality("||--o{");
+        assert_eq!(left, "1");
+        assert_eq!(right, "0..*");
+    }
+
+    #[test]
+    fn er_cardinality_many_to_one() {
+        let (left, right) = parse_er_cardinality("}|--||");
+        assert_eq!(left, "1..*");
+        assert_eq!(right, "1");
+    }
+
+    #[test]
+    fn er_cardinality_one_to_one() {
+        let (left, right) = parse_er_cardinality("||--||");
+        assert_eq!(left, "1");
+        assert_eq!(right, "1");
+    }
+
+    #[test]
+    fn er_cardinality_dotted() {
+        let (left, right) = parse_er_cardinality("}|..|{");
+        assert_eq!(left, "1..*");
+        assert_eq!(right, "1..*");
+    }
+
+    #[test]
+    fn er_cardinality_no_connector() {
+        let (left, right) = parse_er_cardinality("unknown");
+        assert_eq!(left, "");
+        assert_eq!(right, "");
     }
 }

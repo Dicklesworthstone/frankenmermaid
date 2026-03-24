@@ -2698,6 +2698,9 @@ pub struct MermaidDiagramMeta {
     pub theme_overrides: MermaidThemeOverrides,
     pub c4_show_legend: bool,
     pub guard: MermaidGuardReport,
+    /// Visible diagram title from front matter `title:` or inline `title ...` directives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// Accessibility title from `accTitle: ...` directive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acc_title: Option<String>,
@@ -3379,6 +3382,7 @@ impl MermaidDiagramIr {
                 theme_overrides: MermaidThemeOverrides::default(),
                 c4_show_legend: false,
                 guard: MermaidGuardReport::default(),
+                title: None,
                 acc_title: None,
                 acc_descr: None,
             },

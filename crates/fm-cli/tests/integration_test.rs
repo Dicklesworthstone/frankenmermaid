@@ -5,7 +5,7 @@
 use fm_core::{DiagramType, GraphDirection, MermaidTier};
 use fm_layout::{layout_diagram, layout_diagram_traced};
 use fm_parser::parse;
-use fm_render_svg::{SvgRenderConfig, render_svg, render_svg_with_config};
+use fm_render_svg::{SvgBackend, SvgRenderConfig, render_svg, render_svg_with_config};
 use fm_render_term::render_term;
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -1288,6 +1288,50 @@ fn flowchart_markdown_backtick_labels_render_styled_svg() {
     assert!(svg.contains(">Bold<"));
     assert!(svg.contains(">italic<"));
     assert!(svg.contains(">next<"));
+}
+
+#[test]
+fn accessibility_directives_flow_through_scene_svg_backend() {
+    let input = "flowchart LR\n  accTitle: Accessible Flow\n  accDescr: Explicit accessible description\n  A --> B";
+    let result = parse(input);
+    assert!(
+        result.warnings.is_empty(),
+        "warnings: {:?}",
+        result.warnings
+    );
+
+    let svg = render_svg_with_config(
+        &result.ir,
+        &SvgRenderConfig {
+            backend: SvgBackend::Scene,
+            ..SvgRenderConfig::default()
+        },
+    );
+
+    assert!(svg.contains("<title>Accessible Flow</title>"));
+    assert!(svg.contains("<desc>Explicit accessible description</desc>"));
+}
+
+#[test]
+fn front_matter_title_renders_in_flowchart_svg() {
+    let input = "---\ntitle: Release Overview\n---\nflowchart LR\n  A --> B";
+    let result = parse(input);
+    assert_eq!(result.ir.meta.title.as_deref(), Some("Release Overview"));
+
+    let svg = render_svg(&result.ir);
+    assert!(svg.contains(">Release Overview<"));
+    assert!(svg.contains("fm-diagram-title"));
+}
+
+#[test]
+fn gantt_inline_title_renders_as_generic_diagram_title() {
+    let input = "gantt\n  title Roadmap\n  section Alpha\n  Ship :a1, 2024-01-01, 2d";
+    let result = parse(input);
+    assert_eq!(result.ir.meta.title.as_deref(), Some("Roadmap"));
+
+    let svg = render_svg(&result.ir);
+    assert!(svg.contains(">Roadmap<"));
+    assert!(svg.contains("fm-diagram-title"));
 }
 
 #[test]

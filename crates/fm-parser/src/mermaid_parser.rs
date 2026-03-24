@@ -3014,7 +3014,14 @@ fn parse_journey(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
-        if trimmed == "journey" || trimmed.starts_with("title ") {
+        if trimmed == "journey" {
+            continue;
+        }
+
+        if let Some(title) = trimmed.strip_prefix("title ")
+            && let Some(title) = clean_label(Some(title))
+        {
+            builder.set_title(title);
             continue;
         }
 
@@ -3286,10 +3293,10 @@ fn parse_timeline(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
-        // Handle title (currently just skip, could store in metadata)
         if let Some(title_text) = trimmed.strip_prefix("title ") {
-            // Store title in IR metadata if needed
-            let _title = title_text.trim();
+            if let Some(title) = clean_label(Some(title_text)) {
+                builder.set_title(title);
+            }
             continue;
         }
 
@@ -3564,7 +3571,11 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
         }
 
         if let Some(title) = trimmed.strip_prefix("title ") {
-            gantt_meta.title = clean_label(Some(title));
+            let title = clean_label(Some(title));
+            gantt_meta.title = title.clone();
+            if let Some(title) = title {
+                builder.set_title(title);
+            }
             continue;
         }
 
@@ -3801,10 +3812,18 @@ fn parse_pie(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
-        // Header line — may include "showData" on the same line.
+        // Header line — may include "showData" and/or "title ..." on the same line.
         if trimmed.starts_with("pie") {
             if trimmed.contains("showData") {
                 pie_meta.show_data = true;
+            }
+            // Extract inline title: "pie title My Chart"
+            if let Some(title_start) = trimmed.find("title ") {
+                let title = trimmed[title_start + "title ".len()..].trim();
+                if !title.is_empty() {
+                    pie_meta.title = Some(title.to_string());
+                    builder.set_title(title.to_string());
+                }
             }
             continue;
         }
@@ -3814,6 +3833,7 @@ fn parse_pie(input: &str, builder: &mut IrBuilder) {
             let title = rest.trim();
             if !title.is_empty() {
                 pie_meta.title = Some(title.to_string());
+                builder.set_title(title.to_string());
             }
             continue;
         }
@@ -3884,6 +3904,7 @@ fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
             let title = rest.trim();
             if !title.is_empty() {
                 meta.title = Some(title.to_string());
+                builder.set_title(title.to_string());
             }
             continue;
         }
@@ -3986,7 +4007,11 @@ fn parse_xychart(input: &str, builder: &mut IrBuilder) {
         }
 
         if let Some(title) = trimmed.strip_prefix("title ") {
-            xy_chart_meta.title = clean_label(Some(title));
+            let title = clean_label(Some(title));
+            xy_chart_meta.title = title.clone();
+            if let Some(title) = title {
+                builder.set_title(title);
+            }
             continue;
         }
 
@@ -6473,6 +6498,12 @@ fn parse_front_matter_config(front_matter_payload: &str, builder: &mut IrBuilder
             return;
         }
     };
+
+    if let Some(title) = yaml_value.get("title").and_then(Value::as_str)
+        && let Some(title) = clean_label(Some(title))
+    {
+        builder.set_title(title);
+    }
 
     let config_value = yaml_value
         .get("config")
@@ -10845,5 +10876,187 @@ Rel_Back(db, app, "Responds")"#,
         for (n1, n2) in r1.ir.nodes.iter().zip(r2.ir.nodes.iter()) {
             assert_eq!(n1.id, n2.id, "Node IDs should match");
         }
+    }
+
+    // ── Pie chart parser tests ─────────────────────────────────────────
+
+    #[test]
+    fn pie_parser_extracts_slice_values() {
+        let parsed = parse_mermaid("pie\n  \"Dogs\" : 386\n  \"Cats\" : 85\n  \"Rats\" : 15");
+        let pie = parsed.ir.pie_meta.expect("pie_meta should be set");
+        assert_eq!(pie.slices.len(), 3);
+        assert_eq!(pie.slices[0].label, "Dogs");
+        assert!((pie.slices[0].value - 386.0).abs() < f32::EPSILON);
+        assert_eq!(pie.slices[1].label, "Cats");
+        assert!((pie.slices[1].value - 85.0).abs() < f32::EPSILON);
+        assert_eq!(pie.slices[2].label, "Rats");
+        assert!((pie.slices[2].value - 15.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn pie_parser_extracts_title() {
+        let parsed = parse_mermaid("pie title Pets\n  \"Dogs\" : 50\n  \"Cats\" : 50");
+        let pie = parsed.ir.pie_meta.expect("pie_meta should be set");
+        assert_eq!(pie.title.as_deref(), Some("Pets"));
+    }
+
+    #[test]
+    fn pie_parser_extracts_show_data() {
+        let parsed = parse_mermaid("pie showData\n  \"A\" : 10");
+        let pie = parsed.ir.pie_meta.expect("pie_meta should be set");
+        assert!(pie.show_data);
+    }
+
+    #[test]
+    fn pie_parser_warns_on_invalid_value() {
+        let parsed = parse_mermaid("pie\n  \"Bad\" : xyz");
+        assert!(
+            parsed.warnings.iter().any(|w| w.contains("invalid")),
+            "should warn about invalid value: {:?}",
+            parsed.warnings
+        );
+    }
+
+    // ── Quadrant chart parser tests ────────────────────────────────────
+
+    #[test]
+    fn quadrant_parser_extracts_axes_and_points() {
+        let input = "quadrantChart\n  x-axis Low --> High\n  y-axis Weak --> Strong\n  quadrant-1 Go\n  quadrant-2 Wait\n  A: [0.3, 0.7]\n  B: [0.8, 0.2]";
+        let parsed = parse_mermaid(input);
+        let quad = parsed
+            .ir
+            .quadrant_meta
+            .expect("quadrant_meta should be set");
+        assert_eq!(quad.x_axis_left.as_deref(), Some("Low"));
+        assert_eq!(quad.x_axis_right.as_deref(), Some("High"));
+        assert_eq!(quad.y_axis_bottom.as_deref(), Some("Weak"));
+        assert_eq!(quad.y_axis_top.as_deref(), Some("Strong"));
+        assert_eq!(quad.quadrant_labels.len(), 2);
+        assert_eq!(quad.quadrant_labels[0], "Go");
+        assert_eq!(quad.points.len(), 2);
+        assert!((quad.points[0].x - 0.3).abs() < 0.01);
+        assert!((quad.points[0].y - 0.7).abs() < 0.01);
+    }
+
+    // ── Accessibility directive tests ──────────────────────────────────
+
+    #[test]
+    fn acc_title_parsed_from_any_diagram() {
+        let parsed = parse_mermaid("flowchart LR\n  accTitle: My Title\n  A --> B");
+        assert_eq!(parsed.ir.meta.acc_title.as_deref(), Some("My Title"));
+    }
+
+    #[test]
+    fn acc_descr_single_line() {
+        let parsed = parse_mermaid("flowchart LR\n  accDescr: A brief description\n  A --> B");
+        assert_eq!(
+            parsed.ir.meta.acc_descr.as_deref(),
+            Some("A brief description")
+        );
+    }
+
+    #[test]
+    fn acc_descr_multi_line_block() {
+        let parsed =
+            parse_mermaid("flowchart LR\n  accDescr {\n    Line 1\n    Line 2\n  }\n  A --> B");
+        let descr = parsed.ir.meta.acc_descr.expect("acc_descr should be set");
+        assert!(descr.contains("Line 1"));
+        assert!(descr.contains("Line 2"));
+    }
+
+    #[test]
+    fn acc_descr_unclosed_block_still_captured() {
+        let parsed = parse_mermaid("flowchart LR\n  accDescr {\n    Unclosed content");
+        assert!(
+            parsed.ir.meta.acc_descr.is_some(),
+            "unclosed accDescr block should still be captured"
+        );
+    }
+
+    #[test]
+    fn front_matter_title_is_promoted_to_diagram_meta() {
+        let parsed = parse_mermaid("---\ntitle: Front Matter Title\n---\nflowchart LR\nA --> B");
+        assert_eq!(parsed.ir.meta.title.as_deref(), Some("Front Matter Title"));
+    }
+
+    #[test]
+    fn timeline_inline_title_is_promoted_to_diagram_meta() {
+        let parsed = parse_mermaid("timeline\n  title Shipping History\n  2024 : Launch");
+        assert_eq!(parsed.ir.meta.title.as_deref(), Some("Shipping History"));
+    }
+
+    #[test]
+    fn gantt_inline_title_overrides_front_matter_title() {
+        let parsed = parse_mermaid(
+            "---\ntitle: Front Matter\n---\ngantt\n  title Inline Gantt\n  section Alpha\n  Task :a1, 2024-01-01, 1d",
+        );
+        assert_eq!(parsed.ir.meta.title.as_deref(), Some("Inline Gantt"));
+        assert_eq!(
+            parsed
+                .ir
+                .gantt_meta
+                .as_ref()
+                .and_then(|meta| meta.title.as_deref()),
+            Some("Inline Gantt")
+        );
+    }
+
+    // ── Click tooltip tests ────────────────────────────────────────────
+
+    #[test]
+    fn click_directive_extracts_tooltip() {
+        let parsed = parse_mermaid(
+            "flowchart LR\n  A[Node]\n  click A \"https://example.com\" \"My Tooltip\"",
+        );
+        let node = parsed.ir.nodes.iter().find(|n| n.id == "A").unwrap();
+        assert_eq!(node.href.as_deref(), Some("https://example.com"));
+        assert_eq!(node.tooltip.as_deref(), Some("My Tooltip"));
+    }
+
+    // ── linkStyle default tests ────────────────────────────────────────
+
+    #[test]
+    fn linkstyle_default_creates_link_default_style_ref() {
+        let parsed = parse_mermaid(
+            "flowchart LR\n  A --> B\n  linkStyle default stroke:#f00,stroke-width:2",
+        );
+        let has_default = parsed
+            .ir
+            .style_refs
+            .iter()
+            .any(|sr| sr.target == fm_core::IrStyleTarget::LinkDefault);
+        assert!(has_default, "should have LinkDefault style ref");
+    }
+
+    // ── Requirement metadata tests ─────────────────────────────────────
+
+    #[test]
+    fn requirement_parser_extracts_metadata() {
+        let input = "requirementDiagram\n  requirement MyReq {\n    id: REQ-001\n    text: Must do X\n    risk: High\n    verifymethod: Test\n  }";
+        let parsed = parse_mermaid(input);
+        let req_node = parsed.ir.nodes.iter().find(|n| n.id == "MyReq");
+        assert!(req_node.is_some(), "should find MyReq node");
+        let meta = req_node
+            .unwrap()
+            .requirement_meta
+            .as_ref()
+            .expect("requirement_meta should be set");
+        assert_eq!(meta.req_id.as_deref(), Some("REQ-001"));
+        assert_eq!(meta.text.as_deref(), Some("Must do X"));
+        assert_eq!(meta.risk.as_deref(), Some("High"));
+        assert_eq!(meta.verify_method.as_deref(), Some("Test"));
+    }
+
+    // ── ER notation storage tests ──────────────────────────────────────
+
+    #[test]
+    fn er_edge_stores_notation() {
+        let parsed = parse_mermaid("erDiagram\n  USER ||--o{ ORDER : places");
+        assert!(!parsed.ir.edges.is_empty(), "should have edges");
+        let edge = &parsed.ir.edges[0];
+        assert!(
+            edge.er_notation.is_some(),
+            "er_notation should be set on ER edges"
+        );
     }
 }

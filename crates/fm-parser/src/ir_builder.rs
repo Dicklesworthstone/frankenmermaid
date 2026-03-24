@@ -136,6 +136,10 @@ impl IrBuilder {
         self.ir.meta.acc_title = Some(title);
     }
 
+    pub(crate) fn set_title(&mut self, title: String) {
+        self.ir.meta.title = Some(title);
+    }
+
     pub(crate) fn set_acc_descr(&mut self, descr: String) {
         self.ir.meta.acc_descr = Some(descr);
     }
