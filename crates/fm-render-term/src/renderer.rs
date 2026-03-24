@@ -119,6 +119,18 @@ impl TermRenderer {
             render_gantt_cell(&mut buffer, ir, cell_width, cell_height);
         } else if ir.diagram_type == fm_core::DiagramType::XyChart && ir.xy_chart_meta.is_some() {
             render_xychart_cell(&mut buffer, ir, cell_width, cell_height);
+        } else if ir.diagram_type == fm_core::DiagramType::QuadrantChart
+            && ir.quadrant_meta.is_some()
+        {
+            render_quadrant_cell(
+                &mut buffer,
+                ir,
+                layout,
+                cell_width,
+                cell_height,
+                scale_x,
+                scale_y,
+            );
         } else {
             // Render nodes (foreground).
             for node_box in &layout.nodes {
@@ -1847,6 +1859,101 @@ fn render_xychart_cell(
                     buffer.set(x, y, bar_ch);
                 }
             }
+        }
+    }
+}
+
+/// Render a quadrant chart with ASCII axes, quadrant labels, and data points.
+fn render_quadrant_cell(
+    buffer: &mut CellBuffer,
+    ir: &MermaidDiagramIr,
+    layout: &fm_layout::DiagramLayout,
+    cell_width: usize,
+    cell_height: usize,
+    scale_x: f32,
+    scale_y: f32,
+) {
+    let Some(quad_meta) = &ir.quadrant_meta else {
+        return;
+    };
+
+    let margin_left = 2_usize;
+    let margin_top = 2_usize;
+    let chart_w = cell_width.saturating_sub(margin_left + 2);
+    let chart_h = cell_height.saturating_sub(margin_top + 3);
+
+    if chart_w < 6 || chart_h < 6 {
+        return;
+    }
+
+    let mid_x = margin_left + chart_w / 2;
+    let mid_y = margin_top + chart_h / 2;
+
+    // Title.
+    if let Some(title) = &quad_meta.title {
+        let tx = cell_width.saturating_sub(title.len()) / 2;
+        buffer.set_string(tx, 0, title);
+    }
+
+    // Vertical center axis.
+    for row in margin_top..margin_top + chart_h {
+        buffer.set(mid_x, row, '\u{2502}'); // │
+    }
+
+    // Horizontal center axis.
+    for col in margin_left..margin_left + chart_w {
+        buffer.set(col, mid_y, '\u{2500}'); // ─
+    }
+
+    // Center cross.
+    buffer.set(mid_x, mid_y, '\u{253c}'); // ┼
+
+    // Quadrant labels in the four corners.
+    let labels = &quad_meta.quadrant_labels;
+    if let Some(q1) = labels.first() {
+        // Q1: top-right
+        let x = mid_x + 2;
+        let y = margin_top + 1;
+        let label: String = q1.chars().take(chart_w / 2 - 3).collect();
+        buffer.set_string(x.min(cell_width.saturating_sub(1)), y, &label);
+    }
+    if let Some(q2) = labels.get(1) {
+        // Q2: top-left
+        let label: String = q2.chars().take(chart_w / 2 - 3).collect();
+        let x = mid_x.saturating_sub(2 + label.len());
+        buffer.set_string(x, margin_top + 1, &label);
+    }
+    if let Some(q3) = labels.get(2) {
+        // Q3: bottom-left
+        let label: String = q3.chars().take(chart_w / 2 - 3).collect();
+        let x = mid_x.saturating_sub(2 + label.len());
+        buffer.set_string(x, mid_y + 2, &label);
+    }
+    if let Some(q4) = labels.get(3) {
+        // Q4: bottom-right
+        let x = mid_x + 2;
+        let label: String = q4.chars().take(chart_w / 2 - 3).collect();
+        buffer.set_string(x.min(cell_width.saturating_sub(1)), mid_y + 2, &label);
+    }
+
+    // X-axis labels.
+    if let Some(left) = &quad_meta.x_axis_left {
+        let label: String = left.chars().take(chart_w / 3).collect();
+        buffer.set_string(margin_left, margin_top + chart_h + 1, &label);
+    }
+    if let Some(right) = &quad_meta.x_axis_right {
+        let label: String = right.chars().take(chart_w / 3).collect();
+        let x = (margin_left + chart_w).saturating_sub(label.len());
+        buffer.set_string(x, margin_top + chart_h + 1, &label);
+    }
+
+    // Data points: render from layout node positions.
+    let point_chars: &[char] = &['\u{25cf}', '\u{25cb}', '\u{25c6}', '\u{25a0}']; // ● ○ ◆ ■
+    for (i, node_box) in layout.nodes.iter().enumerate() {
+        let x = (node_box.bounds.x * scale_x) as usize + node_box.bounds.width as usize / 2;
+        let y = (node_box.bounds.y * scale_y) as usize + node_box.bounds.height as usize / 2;
+        if x < cell_width && y < cell_height {
+            buffer.set(x, y, point_chars[i % point_chars.len()]);
         }
     }
 }

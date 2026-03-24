@@ -2037,6 +2037,7 @@ fn layout_diagram_sugiyama_traced_with_config(
     );
 
     let mut nodes = coordinate_assignment(ir, &node_sizes, &ranks, &ordering_by_rank, spacing);
+    apply_subgraph_direction_overrides(ir, &node_sizes, &mut nodes, spacing);
     let mut edges = build_edge_paths(ir, &nodes, &cycle_result.highlighted_edge_indexes);
     bundle_parallel_edges(ir, &mut edges);
     let mut clusters = build_cluster_boxes(ir, &nodes, spacing);
@@ -7421,6 +7422,348 @@ fn coordinate_assignment(
     output
 }
 
+fn apply_subgraph_direction_overrides(
+    ir: &MermaidDiagramIr,
+    node_sizes: &[(f32, f32)],
+    nodes: &mut [LayoutNodeBox],
+    spacing: LayoutSpacing,
+) {
+    if ir.diagram_type != DiagramType::Flowchart || ir.graph.subgraphs.is_empty() {
+        return;
+    }
+
+    let mut overridden_subgraphs: Vec<_> = ir
+        .graph
+        .subgraphs
+        .iter()
+        .filter_map(|subgraph| {
+            subgraph
+                .direction
+                .map(|direction| (subgraph_depth(ir, subgraph.id), subgraph.id, direction))
+        })
+        .collect();
+
+    overridden_subgraphs
+        .sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.0.cmp(&right.1.0)));
+
+    for (_depth, subgraph_id, direction) in overridden_subgraphs {
+        apply_subgraph_direction_override(ir, subgraph_id, direction, node_sizes, nodes, spacing);
+    }
+}
+
+fn subgraph_depth(ir: &MermaidDiagramIr, subgraph_id: fm_core::IrSubgraphId) -> usize {
+    let mut depth = 0usize;
+    let mut current = ir
+        .graph
+        .subgraph(subgraph_id)
+        .and_then(|subgraph| subgraph.parent);
+    while let Some(parent) = current {
+        depth = depth.saturating_add(1);
+        current = ir
+            .graph
+            .subgraph(parent)
+            .and_then(|subgraph| subgraph.parent);
+    }
+    depth
+}
+
+fn apply_subgraph_direction_override(
+    ir: &MermaidDiagramIr,
+    subgraph_id: fm_core::IrSubgraphId,
+    direction: GraphDirection,
+    node_sizes: &[(f32, f32)],
+    nodes: &mut [LayoutNodeBox],
+    spacing: LayoutSpacing,
+) {
+    let mut member_indexes: Vec<_> = ir
+        .graph
+        .subgraph_members_recursive(subgraph_id)
+        .into_iter()
+        .map(|node_id| node_id.0)
+        .collect();
+    member_indexes.sort_unstable();
+    member_indexes.dedup();
+
+    if member_indexes.len() < 2 {
+        return;
+    }
+
+    let Some(previous_bounds) = layout_bounds_for_members(&member_indexes, nodes) else {
+        return;
+    };
+    let Some(local_layout) =
+        build_subgraph_local_layout(ir, &member_indexes, direction, node_sizes, nodes, spacing)
+    else {
+        return;
+    };
+    let Some(local_bounds) = layout_bounds_for_entries(&local_layout) else {
+        return;
+    };
+
+    let dx = previous_bounds.center().x - local_bounds.center().x;
+    let dy = previous_bounds.center().y - local_bounds.center().y;
+
+    for (node_index, bounds, rank, order) in local_layout {
+        let Some(node_box) = nodes.get_mut(node_index) else {
+            continue;
+        };
+        node_box.bounds.x = bounds.x + dx;
+        node_box.bounds.y = bounds.y + dy;
+        node_box.rank = rank;
+        node_box.order = order;
+    }
+}
+
+fn layout_bounds_for_members(
+    member_indexes: &[usize],
+    nodes: &[LayoutNodeBox],
+) -> Option<LayoutRect> {
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+
+    for &node_index in member_indexes {
+        let Some(node_box) = nodes.get(node_index) else {
+            continue;
+        };
+        min_x = min_x.min(node_box.bounds.x);
+        min_y = min_y.min(node_box.bounds.y);
+        max_x = max_x.max(node_box.bounds.x + node_box.bounds.width);
+        max_y = max_y.max(node_box.bounds.y + node_box.bounds.height);
+    }
+
+    (min_x.is_finite() && min_y.is_finite() && max_x.is_finite() && max_y.is_finite()).then_some(
+        LayoutRect {
+            x: min_x,
+            y: min_y,
+            width: max_x - min_x,
+            height: max_y - min_y,
+        },
+    )
+}
+
+fn layout_bounds_for_entries(entries: &[(usize, LayoutRect, usize, usize)]) -> Option<LayoutRect> {
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+
+    for (_, bounds, _, _) in entries {
+        min_x = min_x.min(bounds.x);
+        min_y = min_y.min(bounds.y);
+        max_x = max_x.max(bounds.x + bounds.width);
+        max_y = max_y.max(bounds.y + bounds.height);
+    }
+
+    (min_x.is_finite() && min_y.is_finite() && max_x.is_finite() && max_y.is_finite()).then_some(
+        LayoutRect {
+            x: min_x,
+            y: min_y,
+            width: max_x - min_x,
+            height: max_y - min_y,
+        },
+    )
+}
+
+fn build_subgraph_local_layout(
+    ir: &MermaidDiagramIr,
+    member_indexes: &[usize],
+    direction: GraphDirection,
+    node_sizes: &[(f32, f32)],
+    nodes: &[LayoutNodeBox],
+    spacing: LayoutSpacing,
+) -> Option<Vec<(usize, LayoutRect, usize, usize)>> {
+    let horizontal_ranks = matches!(direction, GraphDirection::LR | GraphDirection::RL);
+    let reverse_ranks = matches!(direction, GraphDirection::RL | GraphDirection::BT);
+    let member_set: BTreeSet<_> = member_indexes.iter().copied().collect();
+
+    let mut indegree: BTreeMap<usize, usize> = member_indexes.iter().map(|&idx| (idx, 0)).collect();
+    let mut outgoing: BTreeMap<usize, Vec<usize>> = member_indexes
+        .iter()
+        .map(|&idx| (idx, Vec::new()))
+        .collect();
+    let mut local_rank: BTreeMap<usize, usize> =
+        member_indexes.iter().map(|&idx| (idx, 0)).collect();
+
+    for edge in &ir.edges {
+        let Some(source) = endpoint_node_index(ir, edge.from) else {
+            continue;
+        };
+        let Some(target) = endpoint_node_index(ir, edge.to) else {
+            continue;
+        };
+        if !member_set.contains(&source) || !member_set.contains(&target) || source == target {
+            continue;
+        }
+
+        outgoing.entry(source).or_default().push(target);
+        if let Some(value) = indegree.get_mut(&target) {
+            *value = value.saturating_add(1);
+        }
+    }
+
+    for targets in outgoing.values_mut() {
+        targets.sort_by(|left, right| {
+            subgraph_position_key(*left, nodes, horizontal_ranks).cmp(&subgraph_position_key(
+                *right,
+                nodes,
+                horizontal_ranks,
+            ))
+        });
+        targets.dedup();
+    }
+
+    let mut scheduled = BTreeSet::new();
+    let mut topological_order = Vec::with_capacity(member_indexes.len());
+
+    while topological_order.len() < member_indexes.len() {
+        let mut ready: Vec<_> = indegree
+            .iter()
+            .filter(|(node_index, degree)| **degree == 0 && !scheduled.contains(*node_index))
+            .map(|(node_index, _)| *node_index)
+            .collect();
+
+        if ready.is_empty() {
+            ready.extend(
+                member_indexes
+                    .iter()
+                    .copied()
+                    .filter(|node_index| !scheduled.contains(node_index)),
+            );
+        }
+
+        ready.sort_by(|left, right| {
+            subgraph_position_key(*left, nodes, horizontal_ranks).cmp(&subgraph_position_key(
+                *right,
+                nodes,
+                horizontal_ranks,
+            ))
+        });
+
+        let node_index = ready[0];
+        scheduled.insert(node_index);
+        topological_order.push(node_index);
+
+        let base_rank = local_rank.get(&node_index).copied().unwrap_or(0);
+        if let Some(targets) = outgoing.get(&node_index) {
+            for &target in targets {
+                if let Some(value) = indegree.get_mut(&target) {
+                    *value = value.saturating_sub(1);
+                }
+                if let Some(rank) = local_rank.get_mut(&target) {
+                    *rank = (*rank).max(base_rank.saturating_add(1));
+                }
+            }
+        }
+    }
+
+    let mut nodes_by_rank: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for node_index in topological_order {
+        let rank = local_rank.get(&node_index).copied().unwrap_or(0);
+        nodes_by_rank.entry(rank).or_default().push(node_index);
+    }
+
+    for rank_nodes in nodes_by_rank.values_mut() {
+        rank_nodes.sort_by(|left, right| {
+            subgraph_secondary_key(*left, nodes, horizontal_ranks).cmp(&subgraph_secondary_key(
+                *right,
+                nodes,
+                horizontal_ranks,
+            ))
+        });
+    }
+
+    let mut ordered_ranks: Vec<_> = nodes_by_rank.keys().copied().collect();
+    if reverse_ranks {
+        ordered_ranks.reverse();
+    }
+
+    let mut entries = Vec::with_capacity(member_indexes.len());
+    let mut primary_cursor = 0.0_f32;
+
+    for (display_rank, rank) in ordered_ranks.into_iter().enumerate() {
+        let rank_nodes = nodes_by_rank.get(&rank)?;
+        let primary_span = rank_nodes
+            .iter()
+            .map(|&node_index| {
+                let (width, height) = node_sizes.get(node_index).copied().unwrap_or((84.0, 44.0));
+                if horizontal_ranks { width } else { height }
+            })
+            .fold(0.0_f32, f32::max)
+            .max(1.0);
+
+        let mut secondary_cursor = 0.0_f32;
+        for (order, &node_index) in rank_nodes.iter().enumerate() {
+            let (width, height) = node_sizes.get(node_index).copied().unwrap_or((84.0, 44.0));
+            let bounds = if horizontal_ranks {
+                let rect = LayoutRect {
+                    x: primary_cursor,
+                    y: secondary_cursor,
+                    width,
+                    height,
+                };
+                secondary_cursor += height + spacing.node_spacing;
+                rect
+            } else {
+                let rect = LayoutRect {
+                    x: secondary_cursor,
+                    y: primary_cursor,
+                    width,
+                    height,
+                };
+                secondary_cursor += width + spacing.node_spacing;
+                rect
+            };
+
+            entries.push((node_index, bounds, display_rank, order));
+        }
+
+        primary_cursor += primary_span + spacing.rank_spacing;
+    }
+
+    Some(entries)
+}
+
+fn subgraph_position_key(
+    node_index: usize,
+    nodes: &[LayoutNodeBox],
+    horizontal_ranks: bool,
+) -> (i32, i32, usize) {
+    let Some(node_box) = nodes.get(node_index) else {
+        return (0, 0, node_index);
+    };
+    if horizontal_ranks {
+        (
+            (node_box.bounds.x * 100.0).round() as i32,
+            (node_box.bounds.y * 100.0).round() as i32,
+            node_index,
+        )
+    } else {
+        (
+            (node_box.bounds.y * 100.0).round() as i32,
+            (node_box.bounds.x * 100.0).round() as i32,
+            node_index,
+        )
+    }
+}
+
+fn subgraph_secondary_key(
+    node_index: usize,
+    nodes: &[LayoutNodeBox],
+    horizontal_ranks: bool,
+) -> (i32, usize) {
+    let Some(node_box) = nodes.get(node_index) else {
+        return (0, node_index);
+    };
+    let secondary = if horizontal_ranks {
+        node_box.bounds.y
+    } else {
+        node_box.bounds.x
+    };
+    (((secondary * 100.0).round() as i32), node_index)
+}
+
 fn nodes_by_rank(node_count: usize, ranks: &BTreeMap<usize, usize>) -> BTreeMap<usize, Vec<usize>> {
     let mut nodes_by_rank: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for node_index in 0..node_count {
@@ -11936,6 +12279,93 @@ mod tests {
                 header_bottom
             );
         }
+    }
+
+    #[test]
+    fn sugiyama_subgraph_direction_override_reorients_members() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.direction = GraphDirection::LR;
+        ir.meta.direction = GraphDirection::LR;
+
+        for id in ["A", "B", "C"] {
+            ir.nodes.push(IrNode {
+                id: id.to_string(),
+                ..IrNode::default()
+            });
+            ir.graph.nodes.push(IrGraphNode {
+                node_id: IrNodeId(ir.graph.nodes.len()),
+                kind: fm_core::IrNodeKind::Generic,
+                clusters: Vec::new(),
+                subgraphs: Vec::new(),
+            });
+        }
+
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            arrow: ArrowType::Arrow,
+            ..IrEdge::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(1)),
+            to: IrEndpoint::Node(IrNodeId(2)),
+            arrow: ArrowType::Arrow,
+            ..IrEdge::default()
+        });
+
+        ir.clusters.push(IrCluster {
+            id: IrClusterId(0),
+            members: vec![IrNodeId(0), IrNodeId(1)],
+            ..IrCluster::default()
+        });
+        ir.graph.clusters.push(IrGraphCluster {
+            cluster_id: IrClusterId(0),
+            members: vec![IrNodeId(0), IrNodeId(1)],
+            subgraph: Some(IrSubgraphId(0)),
+            ..IrGraphCluster::default()
+        });
+        ir.graph.subgraphs.push(IrSubgraph {
+            id: IrSubgraphId(0),
+            key: "api".to_string(),
+            members: vec![IrNodeId(0), IrNodeId(1)],
+            cluster: Some(IrClusterId(0)),
+            direction: Some(GraphDirection::TB),
+            ..IrSubgraph::default()
+        });
+        ir.graph.nodes[0].clusters.push(IrClusterId(0));
+        ir.graph.nodes[0].subgraphs.push(IrSubgraphId(0));
+        ir.graph.nodes[1].clusters.push(IrClusterId(0));
+        ir.graph.nodes[1].subgraphs.push(IrSubgraphId(0));
+
+        let layout = layout_diagram(&ir);
+        let node_a = layout
+            .nodes
+            .iter()
+            .find(|node| node.node_id == "A")
+            .unwrap();
+        let node_b = layout
+            .nodes
+            .iter()
+            .find(|node| node.node_id == "B")
+            .unwrap();
+        let node_c = layout
+            .nodes
+            .iter()
+            .find(|node| node.node_id == "C")
+            .unwrap();
+
+        let dx_ab = (node_a.bounds.x - node_b.bounds.x).abs();
+        let dy_ab = (node_a.bounds.y - node_b.bounds.y).abs();
+
+        assert!(
+            dy_ab > dx_ab,
+            "subgraph override should stack A/B vertically, got dx={dx_ab}, dy={dy_ab}"
+        );
+        assert!(node_b.bounds.y > node_a.bounds.y);
+        assert!(
+            node_c.bounds.x > node_a.bounds.x,
+            "global LR flow should still place C to the right"
+        );
     }
 
     // --- Brandes-Köpf coordinate assignment tests ---

@@ -933,7 +933,9 @@ pub struct IrNodeId(pub usize);
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 pub struct IrPortId(pub usize);
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, Default,
+)]
 pub struct IrLabelId(pub usize);
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
@@ -964,6 +966,18 @@ impl IrPortSideHint {
 pub struct IrLabel {
     pub text: String,
     pub span: Span,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum IrLabelSegment {
+    Text {
+        text: String,
+        bold: bool,
+        italic: bool,
+        code: bool,
+        strike: bool,
+    },
+    LineBreak,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
@@ -3320,6 +3334,8 @@ pub struct MermaidDiagramIr {
     pub clusters: Vec<IrCluster>,
     pub graph: MermaidGraphIr,
     pub labels: Vec<IrLabel>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub label_markup: BTreeMap<IrLabelId, Vec<IrLabelSegment>>,
     pub constraints: Vec<IrConstraint>,
     /// Style references from `classDef`, `style`, and `linkStyle` directives.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -3350,6 +3366,7 @@ impl MermaidDiagramIr {
             clusters: Vec::new(),
             graph: MermaidGraphIr::default(),
             labels: Vec::new(),
+            label_markup: BTreeMap::new(),
             constraints: Vec::new(),
             style_refs: Vec::new(),
             meta: MermaidDiagramMeta {

@@ -3,15 +3,16 @@ use std::collections::{BTreeMap, HashMap};
 use chumsky::prelude::*;
 use fm_core::{
     ArrowType, Diagnostic, DiagnosticCategory, DiagramType, GraphDirection, IrAttributeKey,
-    IrC4NodeMeta, IrGanttMeta, IrGanttSection, IrGanttTask, IrNodeId, IrXyAxis, IrXyChartMeta,
-    IrXySeries, IrXySeriesKind, MermaidParseMode, MermaidSupportLevel, NodeShape, Span,
-    parse_mermaid_js_config_value, to_init_parse,
+    IrC4NodeMeta, IrGanttMeta, IrGanttSection, IrGanttTask, IrLabelSegment, IrNodeId, IrXyAxis,
+    IrXyChartMeta, IrXySeries, IrXySeriesKind, MermaidParseMode, MermaidSupportLevel, NodeShape,
+    Span, parse_mermaid_js_config_value, to_init_parse,
 };
 use serde_json::Value;
 
 use crate::{
-    DetectedType, ParseResult, ir_builder::IrBuilder, is_sankey_header, matches_keyword_header,
-    normalize_identifier,
+    DetectedType, ParseResult,
+    ir_builder::{IrBuilder, ParsedLabel},
+    is_sankey_header, matches_keyword_header, normalize_identifier,
 };
 
 const FLOW_OPERATORS: [(&str, ArrowType); 14] = [
@@ -96,7 +97,7 @@ const ER_OPERATORS: [(&str, ArrowType); 14] = [
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NodeToken {
     id: String,
-    label: Option<String>,
+    label: Option<ParsedLabel>,
     shape: NodeShape,
 }
 
@@ -112,7 +113,7 @@ struct BlockDef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SequenceParticipantDeclaration {
     id: String,
-    label: Option<String>,
+    label: Option<ParsedLabel>,
     shape: NodeShape,
     classes: Vec<&'static str>,
 }
@@ -395,7 +396,7 @@ enum FlowAst {
 #[derive(Debug, Clone)]
 struct FlowAstNode {
     id: String,
-    label: Option<String>,
+    label: Option<ParsedLabel>,
     shape: NodeShape,
 }
 
@@ -545,7 +546,7 @@ fn flow_statement_parser<'a>() -> impl Parser<'a, &'a str, FlowAst, extra::Err<R
             match shape_opt {
                 Some((label_raw, shape)) => {
                     let trimmed = label_raw.trim();
-                    let label = (!trimmed.is_empty()).then(|| trimmed.to_string());
+                    let label = parse_label((!trimmed.is_empty()).then_some(trimmed));
                     FlowAstNode { id, label, shape }
                 }
                 None => FlowAstNode {
@@ -699,7 +700,8 @@ fn lower_flow_ast(
             }
         }
         FlowAst::Node(n) => {
-            if let Some(node_id) = builder.intern_node(&n.id, n.label.as_deref(), n.shape, span) {
+            if let Some(node_id) = builder.intern_node_label(&n.id, n.label.as_ref(), n.shape, span)
+            {
                 add_node_to_active_groups(builder, active_clusters, active_subgraphs, node_id);
             }
         }
@@ -709,8 +711,9 @@ fn lower_flow_ast(
             label,
             to,
         } => {
-            let from_id = builder.intern_node(&from.id, from.label.as_deref(), from.shape, span);
-            let to_id = builder.intern_node(&to.id, to.label.as_deref(), to.shape, span);
+            let from_id =
+                builder.intern_node_label(&from.id, from.label.as_ref(), from.shape, span);
+            let to_id = builder.intern_node_label(&to.id, to.label.as_ref(), to.shape, span);
             if let (Some(f), Some(t)) = (from_id, to_id) {
                 add_node_to_active_groups(builder, active_clusters, active_subgraphs, f);
                 add_node_to_active_groups(builder, active_clusters, active_subgraphs, t);
@@ -1016,7 +1019,7 @@ fn parse_flowchart_statement_asts(
         // but the side effect populates ir.style_refs via the builder.
         return Some(vec![FlowAst::StyleOrLinkStyle]);
     }
-    if let Some(asts) = parse_edge_statement_asts(statement, &FLOW_OPERATORS) {
+    if let Some(asts) = parse_edge_statement_asts(statement, &FLOW_OPERATORS, true) {
         return Some(asts);
     }
     if let Some(node) = parse_node_token(statement) {
@@ -1074,7 +1077,7 @@ fn parse_subgraph_statement(statement: &str) -> Option<(String, Option<String>)>
     if has_explicit_label_delimiters && let Some(node) = parse_node_token(body) {
         let key = normalize_identifier(&node.id);
         if !key.is_empty() {
-            return Some((key, node.label));
+            return Some((key, node.label.map(|label| label.text)));
         }
     }
 
@@ -1101,7 +1104,7 @@ fn parse_subgraph_statement(statement: &str) -> Option<(String, Option<String>)>
     if let Some(node) = parse_node_token(body) {
         let key = normalize_identifier(&node.id);
         if !key.is_empty() {
-            return Some((key, node.label));
+            return Some((key, node.label.map(|label| label.text)));
         }
     }
 
@@ -1331,7 +1334,7 @@ fn decode_mermaid_entities(text: &str) -> String {
     let mut decoded = String::with_capacity(text.len());
     let mut cursor = 0usize;
 
-    while let Some(relative_start) = text[cursor..].find('#') {
+    while let Some(relative_start) = text[cursor..].find('&') {
         let start = cursor + relative_start;
         decoded.push_str(&text[cursor..start]);
 
@@ -1369,13 +1372,15 @@ fn decode_mermaid_entity_token(token: &str) -> Option<char> {
         return None;
     }
 
-    if let Some(hex) = token.strip_prefix(['x', 'X']) {
+    let numeric = token.strip_prefix('#')?;
+
+    if let Some(hex) = numeric.strip_prefix(['x', 'X']) {
         let value = u32::from_str_radix(hex, 16).ok()?;
         return char::from_u32(value);
     }
 
-    if token.chars().all(|ch| ch.is_ascii_digit()) {
-        let value = token.parse::<u32>().ok()?;
+    if numeric.chars().all(|ch| ch.is_ascii_digit()) {
+        let value = numeric.parse::<u32>().ok()?;
         return char::from_u32(value);
     }
 
@@ -2006,7 +2011,7 @@ fn parse_class_statements(line: &str) -> Option<Vec<ClassStatement>> {
             }
         }
 
-        if let Some(asts) = parse_edge_statement_asts(statement, &CLASS_OPERATORS) {
+        if let Some(asts) = parse_edge_statement_asts(statement, &CLASS_OPERATORS, false) {
             statements.extend(asts.into_iter().map(ClassStatement::Ast));
             continue;
         }
@@ -2028,7 +2033,7 @@ fn lower_class_statement(
         ClassStatement::BlockStart(class_name, generics) => {
             if let Some(node) = parse_node_token(&class_name) {
                 let span = span_for(line_number, source_line);
-                let _ = builder.intern_node(&node.id, node.label.as_deref(), node.shape, span);
+                let _ = builder.intern_node_label(&node.id, node.label.as_ref(), node.shape, span);
                 builder.set_current_class(&node.id);
                 if !generics.is_empty() {
                     builder.set_class_generics(&node.id, generics);
@@ -2040,7 +2045,7 @@ fn lower_class_statement(
         }
         ClassStatement::Node(node) => {
             let span = span_for(line_number, source_line);
-            let _ = builder.intern_node(&node.id, node.label.as_deref(), node.shape, span);
+            let _ = builder.intern_node_label(&node.id, node.label.as_ref(), node.shape, span);
         }
         ClassStatement::Member(member) => {
             builder.add_class_member(member);
@@ -2124,7 +2129,7 @@ fn parse_state_statements(line: &str) -> Option<Vec<StateStatement>> {
     // `[*]` standalone is handled as a node in the edge parsing
     let mut statements = Vec::new();
     for statement in split_statements(line) {
-        if let Some(asts) = parse_edge_statement_asts(statement, &FLOW_OPERATORS) {
+        if let Some(asts) = parse_edge_statement_asts(statement, &FLOW_OPERATORS, false) {
             statements.push(StateStatement::Edge(asts));
             continue;
         }
@@ -2172,7 +2177,13 @@ fn lower_state_statement(
             }
         }
         StateStatement::Node(node) => {
-            lower_state_node(&node.id, node.label.as_deref(), node.shape, builder, span);
+            lower_state_node(
+                &node.id,
+                node.label.as_ref().map(ParsedLabel::as_str),
+                node.shape,
+                builder,
+                span,
+            );
         }
         StateStatement::CompositeStart(composite) => {
             builder.begin_state_cluster(&composite.id, composite.title.as_deref(), span);
@@ -2210,7 +2221,13 @@ fn lower_state_flow_ast(
 ) {
     match ast {
         FlowAst::Node(node) => {
-            lower_state_node(&node.id, node.label.as_deref(), node.shape, builder, span);
+            lower_state_node(
+                &node.id,
+                node.label.as_ref().map(ParsedLabel::as_str),
+                node.shape,
+                builder,
+                span,
+            );
         }
         FlowAst::Edge {
             from,
@@ -2218,10 +2235,18 @@ fn lower_state_flow_ast(
             label,
             to,
         } => {
-            let (from_id_key, from_label, from_shape) =
-                state_edge_endpoint(&from.id, from.label.as_deref(), from.shape, true);
-            let (to_id_key, to_label, to_shape) =
-                state_edge_endpoint(&to.id, to.label.as_deref(), to.shape, false);
+            let (from_id_key, from_label, from_shape) = state_edge_endpoint(
+                &from.id,
+                from.label.as_ref().map(ParsedLabel::as_str),
+                from.shape,
+                true,
+            );
+            let (to_id_key, to_label, to_shape) = state_edge_endpoint(
+                &to.id,
+                to.label.as_ref().map(ParsedLabel::as_str),
+                to.shape,
+                false,
+            );
             let from_id = builder.intern_node(from_id_key, from_label, from_shape, span);
             let to_id = builder.intern_node(to_id_key, to_label, to_shape, span);
             if let (Some(f), Some(t)) = (from_id, to_id) {
@@ -2303,8 +2328,12 @@ fn parse_requirement(input: &str, builder: &mut IrBuilder) {
                 let requirement_name = rest.trim_end_matches('{').trim();
                 if let Some(node) = parse_node_token(requirement_name) {
                     let span = span_for(line_number, line);
-                    current_req_node =
-                        builder.intern_node(&node.id, node.label.as_deref(), NodeShape::Rect, span);
+                    current_req_node = builder.intern_node_label(
+                        &node.id,
+                        node.label.as_ref(),
+                        NodeShape::Rect,
+                        span,
+                    );
                     current_req_type = Some(keyword.trim().to_string());
                     inside_requirement_block = trimmed.ends_with('{');
                     matched_keyword = true;
@@ -2439,7 +2468,8 @@ fn parse_mindmap(input: &str, builder: &mut IrBuilder) {
         };
 
         let span = span_for(line_number, line);
-        let Some(node_id) = builder.intern_node(&node.id, node.label.as_deref(), node.shape, span)
+        let Some(node_id) =
+            builder.intern_node_label(&node.id, node.label.as_ref(), node.shape, span)
         else {
             continue;
         };
@@ -2517,7 +2547,7 @@ fn parse_mindmap_node_token(raw: &str) -> Option<NodeToken> {
         return None;
     }
 
-    let label = clean_label(Some(core)).filter(|value| value != &id);
+    let label = parse_label(Some(core)).filter(|value| value.text != id);
     Some(NodeToken {
         id,
         label,
@@ -2544,7 +2574,7 @@ fn parse_mindmap_bang(raw: &str) -> Option<NodeToken> {
 
     Some(NodeToken {
         id,
-        label: clean_label(Some(label_raw)),
+        label: parse_label(Some(label_raw)),
         shape: NodeShape::Asymmetric,
     })
 }
@@ -2577,7 +2607,7 @@ fn parse_mindmap_cloud(raw: &str) -> Option<NodeToken> {
 
     Some(NodeToken {
         id,
-        label: clean_label(Some(label_raw)),
+        label: parse_label(Some(label_raw)),
         shape: NodeShape::Cloud,
     })
 }
@@ -2601,7 +2631,7 @@ fn parse_mindmap_hexagon(raw: &str) -> Option<NodeToken> {
 
     Some(NodeToken {
         id,
-        label: clean_label(Some(label_raw)),
+        label: parse_label(Some(label_raw)),
         shape: NodeShape::Hexagon,
     })
 }
@@ -2626,7 +2656,7 @@ fn parse_er(input: &str, builder: &mut IrBuilder) {
             if let Some(node) = parse_node_token(entity_name) {
                 let span = span_for(line_number, line);
                 current_entity =
-                    builder.intern_node(&node.id, node.label.as_deref(), NodeShape::Rect, span);
+                    builder.intern_node_label(&node.id, node.label.as_ref(), NodeShape::Rect, span);
                 continue;
             }
         }
@@ -2659,7 +2689,7 @@ fn parse_er(input: &str, builder: &mut IrBuilder) {
         // Standalone entity declaration
         if let Some(node) = parse_node_token(trimmed) {
             let span = span_for(line_number, line);
-            let _ = builder.intern_node(&node.id, node.label.as_deref(), node.shape, span);
+            let _ = builder.intern_node_label(&node.id, node.label.as_ref(), node.shape, span);
             continue;
         }
 
@@ -3434,7 +3464,7 @@ fn parse_packet(input: &str, builder: &mut IrBuilder) {
             }
             if let Some(node) = parse_node_token(statement) {
                 let span = span_for(line_number, line);
-                let _ = builder.intern_node(&node.id, node.label.as_deref(), node.shape, span);
+                let _ = builder.intern_node_label(&node.id, node.label.as_ref(), node.shape, span);
                 parsed_line = true;
             }
         }
@@ -3477,15 +3507,15 @@ fn parse_er_relationship(
     };
 
     let span = span_for(line_number, source_line);
-    let from = builder.intern_node(
+    let from = builder.intern_node_label(
         &left_node.id,
-        left_node.label.as_deref(),
+        left_node.label.as_ref(),
         NodeShape::Rect,
         span,
     );
-    let to = builder.intern_node(
+    let to = builder.intern_node_label(
         &right_node.id,
-        right_node.label.as_deref(),
+        right_node.label.as_ref(),
         NodeShape::Rect,
         span,
     );
@@ -4492,7 +4522,7 @@ fn parse_block_beta_document_items(
             continue;
         }
 
-        if let Some(asts) = parse_edge_statement_asts(trimmed, &FLOW_OPERATORS) {
+        if let Some(asts) = parse_edge_statement_asts(trimmed, &FLOW_OPERATORS, false) {
             items.push(BlockBetaDocumentItem::Statement {
                 statement: BlockBetaStatement::Edges(asts),
                 line_number,
@@ -4786,7 +4816,7 @@ fn try_parse_block_beta_def(token: &str) -> Option<BlockDef> {
     let node = parse_node_token(core)?;
     Some(BlockDef {
         id: node.id,
-        label: node.label,
+        label: node.label.map(|label| label.text),
         shape: node.shape,
         span_cols,
         is_space: false,
@@ -5384,7 +5414,7 @@ fn register_participant(
     };
     let span = span_for(line_number, source_line);
     let Some(node_id) =
-        builder.intern_node(&parsed.id, parsed.label.as_deref(), parsed.shape, span)
+        builder.intern_node_label(&parsed.id, parsed.label.as_ref(), parsed.shape, span)
     else {
         return false;
     };
@@ -5412,7 +5442,11 @@ fn parse_sequence_participant_declaration(
         } else {
             (
                 left.trim_end(),
-                clean_label(Some(right)).map(|value| normalize_sequence_display_text(&value)),
+                parse_label(Some(right)).map(|mut value| {
+                    value.text = normalize_sequence_display_text(&value.text);
+                    value.segments.clear();
+                    value
+                }),
             )
         }
     } else {
@@ -5441,17 +5475,25 @@ fn parse_sequence_participant_declaration(
         .and_then(Value::as_object)
         .and_then(|obj| obj.get("alias"))
         .and_then(Value::as_str)
-        .and_then(|value| clean_label(Some(value)))
-        .map(|value| normalize_sequence_display_text(&value));
+        .and_then(|value| parse_label(Some(value)))
+        .map(|mut value| {
+            value.text = normalize_sequence_display_text(&value.text);
+            value.segments.clear();
+            value
+        });
     let participant_type = config
         .as_ref()
         .and_then(Value::as_object)
         .and_then(|obj| obj.get("type"))
         .and_then(Value::as_str);
 
-    let label = external_alias
-        .or(inline_alias)
-        .or_else(|| clean_label(Some(raw_id)).map(|value| normalize_sequence_display_text(&value)));
+    let label = external_alias.or(inline_alias).or_else(|| {
+        parse_label(Some(raw_id)).map(|mut value| {
+            value.text = normalize_sequence_display_text(&value.text);
+            value.segments.clear();
+            value
+        })
+    });
     let (shape, mut classes) = sequence_participant_visuals(participant_type, actor_keyword);
     classes.insert(0, "sequence-participant");
     if actor_keyword {
@@ -5570,11 +5612,11 @@ fn lower_sequence_message(
 
     let span = span_for(line_number, source_line);
 
-    let left_label = clean_label(Some(left)).filter(|l| l != &from_id);
-    let from = builder.intern_node(&from_id, left_label.as_deref(), NodeShape::Rect, span);
+    let left_label = parse_label(Some(left)).filter(|label| label.text != from_id);
+    let from = builder.intern_node_label(&from_id, left_label.as_ref(), NodeShape::Rect, span);
 
-    let right_label = clean_label(Some(target_clean)).filter(|l| l != &to_id);
-    let to = builder.intern_node(&to_id, right_label.as_deref(), NodeShape::Rect, span);
+    let right_label = parse_label(Some(target_clean)).filter(|label| label.text != to_id);
+    let to = builder.intern_node_label(&to_id, right_label.as_ref(), NodeShape::Rect, span);
 
     match (from, to) {
         (Some(from_node), Some(to_node)) => {
@@ -5617,6 +5659,7 @@ fn parse_edge_statement(
 fn parse_edge_statement_asts(
     statement: &str,
     operators: &[(&str, ArrowType)],
+    allow_parallel_node_lists: bool,
 ) -> Option<Vec<FlowAst>> {
     let (first_operator_idx, first_operator, first_arrow) = find_operator(statement, operators)?;
     let left_raw = statement[..first_operator_idx].trim();
@@ -5624,7 +5667,7 @@ fn parse_edge_statement_asts(
         return None;
     }
 
-    let mut from_node = parse_node_token(left_raw)?;
+    let mut from_nodes = parse_node_list(left_raw, allow_parallel_node_lists)?;
     let mut asts = Vec::new();
     let mut operator_idx = first_operator_idx;
     let mut operator = first_operator;
@@ -5670,20 +5713,24 @@ fn parse_edge_statement_asts(
             right_without_label = target;
         }
 
-        let to_node = match parse_node_token(right_without_label) {
-            Some(node) => node,
+        let to_nodes = match parse_node_list(right_without_label, allow_parallel_node_lists) {
+            Some(nodes) => nodes,
             None => return (!asts.is_empty()).then_some(asts),
         };
 
-        asts.push(FlowAst::Edge {
-            from: from_node.clone().into(),
-            arrow: current_arrow,
-            label: edge_label,
-            to: to_node.clone().into(),
-        });
+        for from_node in &from_nodes {
+            for to_node in &to_nodes {
+                asts.push(FlowAst::Edge {
+                    from: from_node.clone().into(),
+                    arrow: current_arrow,
+                    label: edge_label.clone(),
+                    to: to_node.clone().into(),
+                });
+            }
+        }
 
         if let Some((next_idx, next_operator_token, next_arrow)) = next_operator {
-            from_node = to_node;
+            from_nodes = to_nodes;
             operator_idx = next_idx;
             operator = next_operator_token;
             arrow = next_arrow;
@@ -5694,6 +5741,98 @@ fn parse_edge_statement_asts(
     }
 
     (!asts.is_empty()).then_some(asts)
+}
+
+fn parse_node_list(raw: &str, allow_parallel_node_lists: bool) -> Option<Vec<NodeToken>> {
+    if !allow_parallel_node_lists && contains_top_level_ampersand(raw) {
+        return None;
+    }
+
+    let parts = split_top_level_ampersands(raw);
+    if parts.is_empty() {
+        return None;
+    }
+
+    let mut nodes = Vec::with_capacity(parts.len());
+    for part in parts {
+        let trimmed = part.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        nodes.push(parse_node_token(trimmed)?);
+    }
+    Some(nodes)
+}
+
+fn contains_top_level_ampersand(raw: &str) -> bool {
+    split_top_level_ampersands(raw).len() > 1
+}
+
+fn split_top_level_ampersands(raw: &str) -> Vec<&str> {
+    let mut in_quote: Option<char> = None;
+    let mut escaped = false;
+    let mut square_depth = 0_usize;
+    let mut paren_depth = 0_usize;
+    let mut brace_depth = 0_usize;
+    let mut last_start = 0_usize;
+    let mut parts = Vec::new();
+
+    for (idx, ch) in raw.char_indices() {
+        if let Some(quote) = in_quote {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' && quote != '`' {
+                escaped = true;
+                continue;
+            }
+            if ch == quote {
+                in_quote = None;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' | '\'' | '`' => {
+                in_quote = Some(ch);
+                continue;
+            }
+            '[' => {
+                square_depth = square_depth.saturating_add(1);
+                continue;
+            }
+            ']' => {
+                square_depth = square_depth.saturating_sub(1);
+                continue;
+            }
+            '(' => {
+                paren_depth = paren_depth.saturating_add(1);
+                continue;
+            }
+            ')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                continue;
+            }
+            '{' => {
+                brace_depth = brace_depth.saturating_add(1);
+                continue;
+            }
+            '}' => {
+                brace_depth = brace_depth.saturating_sub(1);
+                continue;
+            }
+            '&' if square_depth == 0 && paren_depth == 0 && brace_depth == 0 => {
+                parts.push(&raw[last_start..idx]);
+                last_start = idx + ch.len_utf8();
+                continue;
+            }
+            _ => {}
+        }
+    }
+
+    parts.push(&raw[last_start..]);
+    parts
 }
 
 fn is_arrow_prefix(op: &str) -> bool {
@@ -5715,9 +5854,9 @@ fn parse_edge_statement_with_nodes(
 
     let span = span_for(line_number, source_line);
     let left_node = parse_node_token(left_raw)?;
-    let mut from_node = builder.intern_node(
+    let mut from_node = builder.intern_node_label(
         &left_node.id,
-        left_node.label.as_deref(),
+        left_node.label.as_ref(),
         left_node.shape,
         span,
     )?;
@@ -5745,9 +5884,9 @@ fn parse_edge_statement_with_nodes(
             Some(node) => node,
             None => return (touched_nodes.len() > 1).then_some(touched_nodes),
         };
-        let to_node = match builder.intern_node(
+        let to_node = match builder.intern_node_label(
             &right_node.id,
-            right_node.label.as_deref(),
+            right_node.label.as_ref(),
             right_node.shape,
             span,
         ) {
@@ -5937,7 +6076,7 @@ fn parse_node_token(raw: &str) -> Option<NodeToken> {
         return None;
     }
 
-    let label = clean_label(Some(core)).filter(|value| value != &id);
+    let label = parse_label(Some(core)).filter(|value| value.text != id);
     Some(NodeToken {
         id,
         label,
@@ -5963,7 +6102,7 @@ fn parse_double_circle(raw: &str) -> Option<NodeToken> {
 
     Some(NodeToken {
         id,
-        label: clean_label(Some(label_raw)),
+        label: parse_label(Some(label_raw)),
         shape: NodeShape::DoubleCircle,
     })
 }
@@ -5992,7 +6131,7 @@ fn parse_wrapped(raw: &str, open: char, close: char, shape: NodeShape) -> Option
 
     Some(NodeToken {
         id,
-        label: clean_label(Some(label_raw)),
+        label: parse_label(Some(label_raw)),
         shape,
     })
 }
@@ -6021,7 +6160,7 @@ fn parse_wrapped_str(raw: &str, open: &str, close: &str, shape: NodeShape) -> Op
 
     Some(NodeToken {
         id,
-        label: clean_label(Some(label_raw)),
+        label: parse_label(Some(label_raw)),
         shape,
     })
 }
@@ -6053,18 +6192,121 @@ fn normalize_compound_identifier(raw: &str) -> String {
 }
 
 fn clean_label(raw: Option<&str>) -> Option<String> {
+    parse_label(raw).map(|label| label.text)
+}
+
+fn parse_label(raw: Option<&str>) -> Option<ParsedLabel> {
     let raw = raw?;
-    let cleaned = raw
-        .trim()
-        .trim_matches('"')
-        .trim_matches('\'')
-        .trim_matches('`')
-        .trim();
-    if cleaned.is_empty() {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let without_quotes = trimmed.trim_matches('"').trim_matches('\'').trim();
+    if without_quotes.is_empty() {
+        return None;
+    }
+
+    if let Some(markdown_body) = without_quotes
+        .strip_prefix('`')
+        .and_then(|value| value.strip_suffix('`'))
+    {
+        let normalized = markdown_body
+            .trim()
+            .replace("<br/>", "\n")
+            .replace("<br>", "\n")
+            .replace("<br />", "\n");
+        let decoded = decode_mermaid_entities(&normalized);
+        let segments = parse_markdown_label_segments(&decoded);
+        let text = flatten_label_segments(&segments);
+        if text.trim().is_empty() {
+            return None;
+        }
+        return Some(ParsedLabel { text, segments });
+    }
+
+    let decoded = decode_mermaid_entities(without_quotes.trim());
+    if decoded.is_empty() {
         None
     } else {
-        Some(cleaned.to_string())
+        Some(ParsedLabel::plain(decoded))
     }
+}
+
+fn parse_markdown_label_segments(text: &str) -> Vec<IrLabelSegment> {
+    let mut segments = Vec::new();
+    let mut buffer = String::new();
+    let mut bold = false;
+    let mut italic = false;
+    let mut code = false;
+    let mut strike = false;
+    let chars: Vec<char> = text.chars().collect();
+    let mut idx = 0usize;
+
+    let flush = |segments: &mut Vec<IrLabelSegment>,
+                 buffer: &mut String,
+                 bold: bool,
+                 italic: bool,
+                 code: bool,
+                 strike: bool| {
+        if !buffer.is_empty() {
+            segments.push(IrLabelSegment::Text {
+                text: std::mem::take(buffer),
+                bold,
+                italic,
+                code,
+                strike,
+            });
+        }
+    };
+
+    while idx < chars.len() {
+        match chars[idx] {
+            '\n' => {
+                flush(&mut segments, &mut buffer, bold, italic, code, strike);
+                segments.push(IrLabelSegment::LineBreak);
+                idx += 1;
+            }
+            '~' if !code && chars.get(idx + 1) == Some(&'~') => {
+                flush(&mut segments, &mut buffer, bold, italic, code, strike);
+                strike = !strike;
+                idx += 2;
+            }
+            '*' if !code && chars.get(idx + 1) == Some(&'*') => {
+                flush(&mut segments, &mut buffer, bold, italic, code, strike);
+                bold = !bold;
+                idx += 2;
+            }
+            '*' if !code => {
+                flush(&mut segments, &mut buffer, bold, italic, code, strike);
+                italic = !italic;
+                idx += 1;
+            }
+            '`' => {
+                flush(&mut segments, &mut buffer, bold, italic, code, strike);
+                code = !code;
+                idx += 1;
+            }
+            ch => {
+                buffer.push(ch);
+                idx += 1;
+            }
+        }
+    }
+
+    flush(&mut segments, &mut buffer, bold, italic, code, strike);
+    segments
+}
+
+fn flatten_label_segments(segments: &[IrLabelSegment]) -> String {
+    let mut text = String::new();
+    for segment in segments {
+        match segment {
+            IrLabelSegment::Text { text: value, .. } => text.push_str(value),
+            IrLabelSegment::LineBreak => text.push('\n'),
+        }
+    }
+    text
 }
 
 fn normalize_subgraph_title(raw: &str) -> Option<String> {
@@ -7048,7 +7290,10 @@ fn is_comment(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use fm_core::{ArrowType, DiagramType, GraphDirection, IrXySeriesKind, NodeShape};
+    use fm_core::{
+        ArrowType, DiagramType, GraphDirection, IrEndpoint, IrLabelSegment, IrXySeriesKind,
+        NodeShape,
+    };
 
     use super::parse_mermaid;
     use crate::detect_type;
@@ -7098,6 +7343,194 @@ mod tests {
         assert!(parsed.ir.nodes.iter().any(|node| node.id == "A"));
         assert!(parsed.ir.nodes.iter().any(|node| node.id == "B"));
         assert!(parsed.ir.nodes.iter().any(|node| node.id == "C"));
+    }
+
+    #[test]
+    fn flowchart_parallel_edge_sources_expand_cartesian_product() {
+        let parsed = parse_mermaid("flowchart LR\nA & B --> C");
+        assert!(
+            parsed.warnings.is_empty(),
+            "warnings: {:?}",
+            parsed.warnings
+        );
+        assert_eq!(parsed.ir.edges.len(), 2);
+
+        let edges: std::collections::BTreeSet<(String, String)> = parsed
+            .ir
+            .edges
+            .iter()
+            .map(|edge| {
+                let from = match edge.from {
+                    IrEndpoint::Node(node_id) => parsed.ir.nodes[node_id.0].id.clone(),
+                    _ => panic!("expected node source"),
+                };
+                let to = match edge.to {
+                    IrEndpoint::Node(node_id) => parsed.ir.nodes[node_id.0].id.clone(),
+                    _ => panic!("expected node target"),
+                };
+                (from, to)
+            })
+            .collect();
+
+        assert_eq!(
+            edges,
+            std::collections::BTreeSet::from([
+                ("A".to_string(), "C".to_string()),
+                ("B".to_string(), "C".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn flowchart_parallel_edge_targets_expand_cartesian_product() {
+        let parsed = parse_mermaid("flowchart LR\nA --> B & C");
+        assert!(
+            parsed.warnings.is_empty(),
+            "warnings: {:?}",
+            parsed.warnings
+        );
+        assert_eq!(parsed.ir.edges.len(), 2);
+
+        let edges: std::collections::BTreeSet<(String, String)> = parsed
+            .ir
+            .edges
+            .iter()
+            .map(|edge| {
+                let from = match edge.from {
+                    IrEndpoint::Node(node_id) => parsed.ir.nodes[node_id.0].id.clone(),
+                    _ => panic!("expected node source"),
+                };
+                let to = match edge.to {
+                    IrEndpoint::Node(node_id) => parsed.ir.nodes[node_id.0].id.clone(),
+                    _ => panic!("expected node target"),
+                };
+                (from, to)
+            })
+            .collect();
+
+        assert_eq!(
+            edges,
+            std::collections::BTreeSet::from([
+                ("A".to_string(), "B".to_string()),
+                ("A".to_string(), "C".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn flowchart_parallel_edges_expand_both_sides_and_chain_forward() {
+        let parsed = parse_mermaid("flowchart LR\nA & B --> C & D --> E");
+        assert!(
+            parsed.warnings.is_empty(),
+            "warnings: {:?}",
+            parsed.warnings
+        );
+        assert_eq!(parsed.ir.edges.len(), 6);
+
+        let edges: std::collections::BTreeSet<(String, String)> = parsed
+            .ir
+            .edges
+            .iter()
+            .map(|edge| {
+                let from = match edge.from {
+                    IrEndpoint::Node(node_id) => parsed.ir.nodes[node_id.0].id.clone(),
+                    _ => panic!("expected node source"),
+                };
+                let to = match edge.to {
+                    IrEndpoint::Node(node_id) => parsed.ir.nodes[node_id.0].id.clone(),
+                    _ => panic!("expected node target"),
+                };
+                (from, to)
+            })
+            .collect();
+
+        assert_eq!(
+            edges,
+            std::collections::BTreeSet::from([
+                ("A".to_string(), "C".to_string()),
+                ("A".to_string(), "D".to_string()),
+                ("B".to_string(), "C".to_string()),
+                ("B".to_string(), "D".to_string()),
+                ("C".to_string(), "E".to_string()),
+                ("D".to_string(), "E".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn flowchart_ampersand_inside_node_label_does_not_split_parallel_edges() {
+        let parsed = parse_mermaid("flowchart LR\nA[Research & Dev] --> B");
+        assert_eq!(parsed.ir.edges.len(), 1);
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        let label = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "A")
+            .and_then(|node| node.label)
+            .and_then(|label_id| parsed.ir.labels.get(label_id.0))
+            .map(|value| value.text.as_str());
+        assert_eq!(label, Some("Research & Dev"));
+    }
+
+    #[test]
+    fn flowchart_markdown_backtick_label_preserves_plain_text_and_markup() {
+        let parsed = parse_mermaid(
+            "flowchart LR\nA[\"`**Bold** and *italic* `code` ~~gone~~ &#9829;<br/>next`\"]",
+        );
+        let node = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "A")
+            .expect("node A");
+        let label_id = node.label.expect("markdown label");
+        let label = &parsed.ir.labels[label_id.0];
+        assert_eq!(label.text, "Bold and italic code gone ♥\nnext");
+
+        let segments = parsed
+            .ir
+            .label_markup
+            .get(&label_id)
+            .expect("rich label markup");
+        assert!(segments.iter().any(|segment| matches!(
+            segment,
+            IrLabelSegment::Text { text, bold: true, .. } if text == "Bold"
+        )));
+        assert!(segments.iter().any(|segment| matches!(
+            segment,
+            IrLabelSegment::Text {
+                text,
+                italic: true,
+                ..
+            } if text == "italic"
+        )));
+        assert!(segments.iter().any(|segment| matches!(
+            segment,
+            IrLabelSegment::Text { text, code: true, .. } if text == "code"
+        )));
+        assert!(segments.iter().any(|segment| matches!(
+            segment,
+            IrLabelSegment::Text {
+                text,
+                strike: true,
+                ..
+            } if text == "gone"
+        )));
+        assert!(segments.contains(&IrLabelSegment::LineBreak));
+    }
+
+    #[test]
+    fn state_diagram_parallel_edge_syntax_does_not_create_edges() {
+        // Parallel edge syntax (`A & B --> C`) is a flowchart feature.
+        // In state diagrams, the `&` is not a recognized operator and the
+        // line is treated as a single malformed transition.
+        let parsed = parse_mermaid("stateDiagram-v2\nA & B --> C");
+        assert_eq!(
+            parsed.ir.edges.len(),
+            0,
+            "state diagram should not expand & into parallel edges"
+        );
     }
 
     #[test]
@@ -7440,6 +7873,24 @@ mod tests {
         assert!(parsed.warnings.iter().any(|warning| {
             warning.contains("nested flowchart header ignored inside subgraph")
         }));
+    }
+
+    #[test]
+    fn flowchart_subgraph_direction_statement_is_stored_on_subgraph() {
+        let parsed =
+            parse_mermaid("flowchart LR\nsubgraph api [API]\n  direction TB\n  A-->B\nend\nB-->C");
+        let subgraph = parsed.ir.graph.root_subgraphs().into_iter().next();
+
+        assert!(
+            parsed.warnings.is_empty(),
+            "warnings: {:?}",
+            parsed.warnings
+        );
+        assert_eq!(parsed.ir.direction, GraphDirection::LR);
+        assert_eq!(
+            subgraph.and_then(|value| value.direction),
+            Some(GraphDirection::TB)
+        );
     }
 
     #[test]

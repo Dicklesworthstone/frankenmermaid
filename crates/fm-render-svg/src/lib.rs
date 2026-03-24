@@ -25,7 +25,10 @@ pub use text::{TextAnchor, TextBuilder};
 pub use theme::{FontConfig, Theme, ThemeColors, ThemePreset, generate_palette};
 pub use transform::{Transform, TransformBuilder};
 
-use fm_core::{DiagramType, IrXyChartMeta, IrXySeriesKind, MermaidDiagramIr, MermaidTier, Span};
+use fm_core::{
+    DiagramType, IrLabelId, IrLabelSegment, IrXyChartMeta, IrXySeriesKind, MermaidDiagramIr,
+    MermaidTier, Span,
+};
 use fm_layout::{
     DiagramLayout, FillStyle, LayoutBand, LayoutBandKind, LayoutEdgePath, LayoutNodeBox,
     LineCap as RenderLineCap, LineJoin as RenderLineJoin, MarkerKind, PathCmd, RenderClip,
@@ -2837,11 +2840,11 @@ fn render_node(
 
     // Get node label text
     let placeholder_space_node = ir_node.is_some_and(is_block_beta_space_node);
+    let label_id = ir_node.and_then(|node| node.label);
     let raw_label_text = if placeholder_space_node {
         ""
     } else {
-        ir_node
-            .and_then(|n| n.label)
+        label_id
             .and_then(|lid| ir.labels.get(lid.0))
             .map(|l| l.text.as_str())
             .or_else(|| {
@@ -3114,16 +3117,16 @@ fn render_node(
                     .stroke_width(1.0),
             );
             if detail.show_node_labels {
-                return group.child(g).child(
-                    TextBuilder::new(&label_text)
-                        .x(cx)
-                        .y(cy + node_font_size / 3.0)
-                        .font_family(&config.font_family)
-                        .font_size(node_font_size)
-                        .anchor(TextAnchor::Middle)
-                        .fill(&colors.text)
-                        .build(),
-                );
+                return group.child(g).child(render_node_label_text(
+                    ir,
+                    label_id,
+                    &label_text,
+                    cx,
+                    cy + node_font_size / 3.0,
+                    node_font_size,
+                    config,
+                    colors,
+                ));
             }
             return group.child(g);
         }
@@ -3351,16 +3354,16 @@ fn render_node(
                     .stroke_width(1.6),
             );
             if detail.show_node_labels {
-                return group.child(g).child(
-                    TextBuilder::new(&label_text)
-                        .x(cx)
-                        .y(cy + node_font_size / 3.0)
-                        .font_family(&config.font_family)
-                        .font_size(node_font_size)
-                        .anchor(TextAnchor::Middle)
-                        .fill(&colors.text)
-                        .build(),
-                );
+                return group.child(g).child(render_node_label_text(
+                    ir,
+                    label_id,
+                    &label_text,
+                    cx,
+                    cy + node_font_size / 3.0,
+                    node_font_size,
+                    config,
+                    colors,
+                ));
             }
             return group.child(g);
         }
@@ -3444,15 +3447,20 @@ fn render_node(
             let total_text_height = (lines_count - 1.0) * node_font_size * config.line_height;
             let start_y = cy - (total_text_height / 2.0) + (node_font_size / 3.0);
 
-            let text_elem = TextBuilder::new(&label_text)
-                .x(cx)
-                .y(start_y)
-                .font_family(&config.font_family)
-                .font_size(node_font_size)
-                .line_height(config.line_height)
-                .anchor(TextAnchor::Middle)
-                .fill(&colors.text)
-                .build();
+            let text_elem = render_node_label_text(
+                ir,
+                if detail.node_label_max_chars.is_none() {
+                    label_id
+                } else {
+                    None
+                },
+                &label_text,
+                cx,
+                start_y,
+                node_font_size,
+                config,
+                colors,
+            );
             group = group.child(text_elem);
         }
     }
@@ -3862,6 +3870,104 @@ fn wrap_text_to_lines(text: &str, max_width: f32, avg_char_width: f32) -> Vec<St
     }
 
     lines
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_node_label_text(
+    ir: &MermaidDiagramIr,
+    label_id: Option<IrLabelId>,
+    label_text: &str,
+    x: f32,
+    y: f32,
+    font_size: f32,
+    config: &SvgRenderConfig,
+    colors: &ThemeColors,
+) -> Element {
+    if let Some(label_id) = label_id
+        && let Some(segments) = ir.label_markup.get(&label_id)
+        && !segments.is_empty()
+    {
+        return render_markdown_text_segments(
+            segments,
+            x,
+            y,
+            font_size,
+            config,
+            colors.text.as_str(),
+        );
+    }
+
+    TextBuilder::new(label_text)
+        .x(x)
+        .y(y)
+        .font_family(&config.font_family)
+        .font_size(font_size)
+        .line_height(config.line_height)
+        .anchor(TextAnchor::Middle)
+        .fill(&colors.text)
+        .build()
+}
+
+fn render_markdown_text_segments(
+    segments: &[IrLabelSegment],
+    x: f32,
+    y: f32,
+    font_size: f32,
+    config: &SvgRenderConfig,
+    fill: &str,
+) -> Element {
+    let line_height_px = font_size * config.line_height;
+    let monospace_family = "'JetBrains Mono', 'Fira Code', 'SFMono-Regular', Consolas, monospace";
+
+    let mut text = Element::text()
+        .x(x)
+        .y(y)
+        .attr("text-anchor", TextAnchor::Middle.as_str())
+        .attr("font-family", &config.font_family)
+        .attr_num("font-size", font_size)
+        .fill(fill);
+
+    let mut first_in_line = true;
+    let mut line_index = 0usize;
+
+    for segment in segments {
+        match segment {
+            IrLabelSegment::LineBreak => {
+                first_in_line = true;
+                line_index += 1;
+            }
+            IrLabelSegment::Text {
+                text: value,
+                bold,
+                italic,
+                code,
+                strike,
+            } => {
+                let dy = if first_in_line {
+                    if line_index == 0 { 0.0 } else { line_height_px }
+                } else {
+                    0.0
+                };
+                let mut tspan = Element::tspan().x(x).attr_num("dy", dy).content(value);
+                if *bold {
+                    tspan = tspan.attr("font-weight", "700");
+                }
+                if *italic {
+                    tspan = tspan.attr("font-style", "italic");
+                }
+                if *strike {
+                    tspan = tspan.attr("text-decoration", "line-through");
+                }
+                if *code {
+                    tspan = tspan.attr("font-family", monospace_family);
+                }
+                text = text.child(tspan);
+                first_in_line = false;
+            }
+        }
+    }
+
+    text
 }
 
 fn is_c4_legend_enabled(ir: &MermaidDiagramIr) -> bool {
@@ -4458,9 +4564,10 @@ mod tests {
     use super::*;
     use fm_core::{
         ArrowType, DiagramType, IrC4NodeMeta, IrCluster, IrClusterId, IrEdge, IrEndpoint,
-        IrGraphCluster, IrGraphNode, IrLabel, IrLabelId, IrLifecycleEvent, IrNode, IrNodeId,
-        IrPieMeta, IrPieSlice, IrSequenceMeta, IrStyleRef, IrStyleTarget, IrSubgraph, IrSubgraphId,
-        IrXyAxis, IrXyChartMeta, IrXySeries, IrXySeriesKind, MermaidDiagramIr, NodeShape, Span,
+        IrGraphCluster, IrGraphNode, IrLabel, IrLabelId, IrLabelSegment, IrLifecycleEvent, IrNode,
+        IrNodeId, IrPieMeta, IrPieSlice, IrSequenceMeta, IrStyleRef, IrStyleTarget, IrSubgraph,
+        IrSubgraphId, IrXyAxis, IrXyChartMeta, IrXySeries, IrXySeriesKind, MermaidDiagramIr,
+        NodeShape, Span,
     };
     use fm_layout::{
         FillStyle, LayoutAxisTick, LayoutBand, LayoutBandKind, LayoutClusterBox, LayoutRect,
@@ -5969,6 +6076,67 @@ mod tests {
         let svg = render_svg(&ir);
         assert!(svg.contains(">Line 1<"));
         assert!(svg.contains(">Line 2<"));
+    }
+
+    #[test]
+    fn renders_flowchart_markdown_node_labels_with_styled_tspans() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.labels.push(fm_core::IrLabel {
+            text: "Bold and italic\nnext".to_string(),
+            ..Default::default()
+        });
+        ir.label_markup.insert(
+            IrLabelId(0),
+            vec![
+                IrLabelSegment::Text {
+                    text: "Bold".to_string(),
+                    bold: true,
+                    italic: false,
+                    code: false,
+                    strike: false,
+                },
+                IrLabelSegment::Text {
+                    text: " and ".to_string(),
+                    bold: false,
+                    italic: false,
+                    code: false,
+                    strike: false,
+                },
+                IrLabelSegment::Text {
+                    text: "italic".to_string(),
+                    bold: false,
+                    italic: true,
+                    code: false,
+                    strike: false,
+                },
+                IrLabelSegment::LineBreak,
+                IrLabelSegment::Text {
+                    text: "next".to_string(),
+                    bold: false,
+                    italic: false,
+                    code: false,
+                    strike: false,
+                },
+            ],
+        );
+        ir.nodes.push(IrNode {
+            id: "A".to_string(),
+            label: Some(IrLabelId(0)),
+            ..Default::default()
+        });
+
+        let svg = render_svg_with_config(
+            &ir,
+            &SvgRenderConfig {
+                detail_tier: MermaidTier::Rich,
+                ..SvgRenderConfig::default()
+            },
+        );
+        assert!(svg.contains("font-weight=\"700\""));
+        assert!(svg.contains("font-style=\"italic\""));
+        assert!(svg.contains(">Bold<"));
+        assert!(svg.contains(">italic<"));
+        assert!(svg.contains(">next<"));
     }
 
     proptest! {

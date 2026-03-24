@@ -1258,6 +1258,78 @@ fn e2e_pipeline_flowchart() {
 }
 
 #[test]
+fn flowchart_markdown_backtick_labels_render_styled_svg() {
+    let input = "flowchart LR\n  A[\"`**Bold** and *italic* &#9829;<br/>next`\"] --> B[Done]";
+    let result = parse(input);
+    assert!(
+        result.warnings.is_empty(),
+        "warnings: {:?}",
+        result.warnings
+    );
+
+    let a_node = result
+        .ir
+        .nodes
+        .iter()
+        .find(|node| node.id == "A")
+        .expect("node A");
+    let label_id = a_node.label.expect("label id");
+    assert_eq!(result.ir.labels[label_id.0].text, "Bold and italic ♥\nnext");
+
+    let svg = render_svg_with_config(
+        &result.ir,
+        &SvgRenderConfig {
+            detail_tier: MermaidTier::Rich,
+            ..SvgRenderConfig::default()
+        },
+    );
+    assert!(svg.contains("font-weight=\"700\""));
+    assert!(svg.contains("font-style=\"italic\""));
+    assert!(svg.contains(">Bold<"));
+    assert!(svg.contains(">italic<"));
+    assert!(svg.contains(">next<"));
+}
+
+#[test]
+fn flowchart_subgraph_direction_override_lays_out_child_nodes_vertically() {
+    let input =
+        "flowchart LR\n  subgraph api [API]\n    direction TB\n    A --> B\n  end\n  B --> C";
+    let result = parse(input);
+    assert!(
+        result.warnings.is_empty(),
+        "warnings: {:?}",
+        result.warnings
+    );
+
+    let layout = layout_diagram(&result.ir);
+    let node_a = layout
+        .nodes
+        .iter()
+        .find(|node| node.node_id == "A")
+        .unwrap();
+    let node_b = layout
+        .nodes
+        .iter()
+        .find(|node| node.node_id == "B")
+        .unwrap();
+    let node_c = layout
+        .nodes
+        .iter()
+        .find(|node| node.node_id == "C")
+        .unwrap();
+
+    let dx_ab = (node_a.bounds.x - node_b.bounds.x).abs();
+    let dy_ab = (node_a.bounds.y - node_b.bounds.y).abs();
+
+    assert!(
+        dy_ab > dx_ab,
+        "expected A/B to be vertically stacked inside the subgraph, got dx={dx_ab}, dy={dy_ab}"
+    );
+    assert!(node_b.bounds.y > node_a.bounds.y);
+    assert!(node_c.bounds.x > node_a.bounds.x);
+}
+
+#[test]
 fn e2e_pipeline_sequence() {
     assert_pipeline_roundtrip(
         "sequenceDiagram\n  Alice->>Bob: Hello\n  Bob-->>Alice: Hi back",

@@ -5,10 +5,10 @@ use fm_core::{
     FragmentAlternative, FragmentKind, GraphDirection, IrActivation, IrAttributeKey, IrC4NodeMeta,
     IrClassMember, IrClassNodeMeta, IrCluster, IrClusterId, IrEdge, IrEdgeKind, IrEndpoint,
     IrEntityAttribute, IrGanttMeta, IrGraphCluster, IrGraphEdge, IrGraphNode, IrLabel, IrLabelId,
-    IrLifecycleEvent, IrNode, IrNodeId, IrNodeKind, IrParticipantGroup, IrSequenceFragment,
-    IrSequenceMeta, IrSequenceNote, IrStyleRef, IrStyleTarget, IrSubgraph, IrSubgraphId,
-    IrXyChartMeta, LifecycleEventKind, MermaidDiagramIr, MermaidError, MermaidParseMode,
-    MermaidWarning, MermaidWarningCode, NodeShape, NotePosition, Span,
+    IrLabelSegment, IrLifecycleEvent, IrNode, IrNodeId, IrNodeKind, IrParticipantGroup,
+    IrSequenceFragment, IrSequenceMeta, IrSequenceNote, IrStyleRef, IrStyleTarget, IrSubgraph,
+    IrSubgraphId, IrXyChartMeta, LifecycleEventKind, MermaidDiagramIr, MermaidError,
+    MermaidParseMode, MermaidWarning, MermaidWarningCode, NodeShape, NotePosition, Span,
 };
 
 use crate::ParseResult;
@@ -39,7 +39,7 @@ pub(crate) struct IrBuilder {
     node_index_by_id: HashMap<String, IrNodeId>,
     cluster_index_by_key: HashMap<String, usize>,
     subgraph_index_by_key: HashMap<String, usize>,
-    label_index_by_text: HashMap<String, IrLabelId>,
+    label_index_by_text: HashMap<(String, Vec<IrLabelSegment>), IrLabelId>,
 
     warnings: Vec<String>,
     /// Track nodes that were auto-created (for dangling edge recovery)
@@ -54,6 +54,25 @@ pub(crate) struct IrBuilder {
     current_class: Option<String>,
     /// Stack of open composite states for state diagrams.
     state_stack: Vec<StateCompositeContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ParsedLabel {
+    pub(crate) text: String,
+    pub(crate) segments: Vec<IrLabelSegment>,
+}
+
+impl ParsedLabel {
+    pub(crate) fn plain(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            segments: Vec::new(),
+        }
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.text
+    }
 }
 
 impl IrBuilder {
@@ -720,7 +739,7 @@ impl IrBuilder {
     pub(crate) fn intern_node_auto(
         &mut self,
         id: &str,
-        label: Option<&str>,
+        label: Option<&ParsedLabel>,
         shape: NodeShape,
         span: Span,
         is_auto_created: bool,
@@ -740,7 +759,7 @@ impl IrBuilder {
                 .and_then(|node| node.label)
                 .is_none()
             {
-                clean_label(label).map(|cleaned_label| self.intern_label(cleaned_label, span))
+                label.map(|value| self.intern_label(value, span))
             } else {
                 None
             };
@@ -766,7 +785,7 @@ impl IrBuilder {
         }
 
         // Create new node
-        let label_id = clean_label(label).map(|value| self.intern_label(value, span));
+        let label_id = label.map(|value| self.intern_label(value, span));
         let node_id = IrNodeId(self.ir.nodes.len());
         let node = IrNode {
             id: normalized_id.to_string(),
@@ -826,7 +845,8 @@ impl IrBuilder {
                     .and_then(|c| c.title);
 
                 if existing_title.is_none() || graph_title.is_none() {
-                    let label_id = self.intern_label(title_text, span);
+                    let label = ParsedLabel::plain(title_text);
+                    let label_id = self.intern_label(&label, span);
                     if let Some(cluster) = self.ir.clusters.get_mut(existing_index)
                         && cluster.title.is_none()
                     {
@@ -842,7 +862,10 @@ impl IrBuilder {
             return Some(existing_index);
         }
 
-        let title_id = clean_label(title).map(|value| self.intern_label(value, span));
+        let title_label = clean_label(title).map(ParsedLabel::plain);
+        let title_id = title_label
+            .as_ref()
+            .map(|value| self.intern_label(value, span));
         let cluster_index = self.ir.clusters.len();
         self.ir.clusters.push(IrCluster {
             id: IrClusterId(cluster_index),
@@ -909,7 +932,8 @@ impl IrBuilder {
                     .get(existing_index)
                     .and_then(|s| s.title);
                 if existing_title.is_none() {
-                    let label_id = self.intern_label(title_text, span);
+                    let label = ParsedLabel::plain(title_text);
+                    let label_id = self.intern_label(&label, span);
                     if let Some(subgraph) = self.ir.graph.subgraphs.get_mut(existing_index) {
                         subgraph.title = Some(label_id);
                     }
@@ -918,7 +942,10 @@ impl IrBuilder {
             return Some(existing_index);
         }
 
-        let title_id = clean_label(title).map(|value| self.intern_label(value, span));
+        let title_label = clean_label(title).map(ParsedLabel::plain);
+        let title_id = title_label
+            .as_ref()
+            .map(|value| self.intern_label(value, span));
         let subgraph_index = self.ir.graph.subgraphs.len();
         let parent_id = parent.map(IrSubgraphId);
         let cluster_id = cluster_index.map(IrClusterId);
@@ -981,6 +1008,16 @@ impl IrBuilder {
         }
     }
 
+    pub(crate) fn intern_node_label(
+        &mut self,
+        id: &str,
+        label: Option<&ParsedLabel>,
+        shape: NodeShape,
+        span: Span,
+    ) -> Option<IrNodeId> {
+        self.intern_node_auto(id, label, shape, span, false)
+    }
+
     pub(crate) fn intern_node(
         &mut self,
         id: &str,
@@ -988,13 +1025,15 @@ impl IrBuilder {
         shape: NodeShape,
         span: Span,
     ) -> Option<IrNodeId> {
-        self.intern_node_auto(id, label, shape, span, false)
+        let parsed_label = label.map(ParsedLabel::plain);
+        self.intern_node_auto(id, parsed_label.as_ref(), shape, span, false)
     }
 
     /// Intern a node as a placeholder (auto-created for dangling edge recovery).
     #[allow(dead_code)] // Will be used by recovery features
     pub(crate) fn intern_placeholder_node(&mut self, id: &str, span: Span) -> Option<IrNodeId> {
-        self.intern_node_auto(id, Some(id), NodeShape::Rect, span, true)
+        let label = ParsedLabel::plain(id);
+        self.intern_node_auto(id, Some(&label), NodeShape::Rect, span, true)
     }
 
     pub(crate) fn add_class_to_node(&mut self, node_key: &str, class_name: &str, span: Span) {
@@ -1117,7 +1156,10 @@ impl IrBuilder {
         label: Option<&str>,
         span: Span,
     ) {
-        let label_id = clean_label(label).map(|value| self.intern_label(value, span));
+        let parsed_label = clean_label(label).map(ParsedLabel::plain);
+        let label_id = parsed_label
+            .as_ref()
+            .map(|value| self.intern_label(value, span));
         self.ir.edges.push(IrEdge {
             from: IrEndpoint::Node(from),
             to: IrEndpoint::Node(to),
@@ -1142,17 +1184,23 @@ impl IrBuilder {
         }
     }
 
-    fn intern_label(&mut self, text: String, span: Span) -> IrLabelId {
-        if let Some(&existing_id) = self.label_index_by_text.get(&text) {
+    fn intern_label(&mut self, label: &ParsedLabel, span: Span) -> IrLabelId {
+        let key = (label.text.clone(), label.segments.clone());
+        if let Some(&existing_id) = self.label_index_by_text.get(&key) {
             return existing_id;
         }
 
         let label_id = IrLabelId(self.ir.labels.len());
         self.ir.labels.push(IrLabel {
-            text: text.clone(),
+            text: label.text.clone(),
             span,
         });
-        self.label_index_by_text.insert(text, label_id);
+        if !label.segments.is_empty() {
+            self.ir
+                .label_markup
+                .insert(label_id, label.segments.clone());
+        }
+        self.label_index_by_text.insert(key, label_id);
         label_id
     }
 }
