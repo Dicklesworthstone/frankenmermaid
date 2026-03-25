@@ -2171,10 +2171,10 @@ fn render_quadrant_svg(
     config: &SvgRenderConfig,
     theme: &Theme,
 ) -> SvgDocument {
-    let _bounds = &layout.bounds;
-    let chart_w = 400.0_f32;
-    let chart_h = 400.0_f32;
-    let margin_left = 80.0_f32 + offset_x;
+    // Derive chart dimensions from layout bounds for consistency with adaptive layout.
+    let chart_w = (layout.bounds.width - 120.0).max(200.0);
+    let chart_h = (layout.bounds.height - 100.0).max(200.0);
+    let margin_left = ((layout.bounds.width - chart_w) / 2.0).max(40.0) + offset_x;
     let margin_top = 60.0_f32 + offset_y;
 
     let quadrant_fills: [&str; 4] = [

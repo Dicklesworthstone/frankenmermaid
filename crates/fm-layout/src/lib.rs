@@ -4411,10 +4411,10 @@ fn layout_diagram_pie_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             .iter()
             .map(|slice| metrics.estimate_dimensions(&slice.label).0)
             .fold(0.0_f32, f32::max);
-        let legend_width = (legend_label_width + spacing.chart_legend_padding).clamp(
-            spacing.chart_legend_min_width,
-            spacing.chart_legend_max_width,
-        );
+        let legend_min = spacing.chart_legend_min_width;
+        let legend_max = spacing.chart_legend_max_width.max(legend_min);
+        let legend_width =
+            (legend_label_width + spacing.chart_legend_padding).clamp(legend_min, legend_max);
         let title_height = if pie.title.is_some() {
             spacing.chart_title_height
         } else {
