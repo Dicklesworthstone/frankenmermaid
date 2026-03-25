@@ -199,7 +199,9 @@ impl Canvas2dRenderer {
         let nodes_drawn = self.draw_nodes(layout, ir, ctx, offset_x, offset_y, &mut labels_drawn);
 
         ctx.restore();
-        self.draw_generic_diagram_title(ctx, ir, canvas_width);
+        if self.draw_generic_diagram_title(ctx, ir, canvas_width) {
+            labels_drawn += 1;
+        }
 
         CanvasRenderResult {
             draw_calls: self.draw_calls,
@@ -216,9 +218,9 @@ impl Canvas2dRenderer {
         ctx: &mut C,
         ir: &MermaidDiagramIr,
         canvas_width: f64,
-    ) {
+    ) -> bool {
         let Some(title) = generic_canvas_diagram_title(ir) else {
-            return;
+            return false;
         };
 
         ctx.set_fill_style(&self.config.label_color);
@@ -234,6 +236,7 @@ impl Canvas2dRenderer {
             (self.config.padding * 0.5).max(self.config.font_size * 0.5),
         );
         self.draw_calls += 1;
+        true
     }
 
     /// Render a target-agnostic render scene to a Canvas2D context.
@@ -1380,20 +1383,9 @@ fn class_vis_char(vis: fm_core::ClassVisibility) -> char {
 }
 
 fn generic_canvas_diagram_title(ir: &MermaidDiagramIr) -> Option<&str> {
-    let has_specialized_title_renderer = (ir.diagram_type == fm_core::DiagramType::Pie
-        && ir
-            .pie_meta
-            .as_ref()
-            .is_some_and(|meta| !meta.slices.is_empty()))
-        || (ir.diagram_type == fm_core::DiagramType::Gantt && ir.gantt_meta.is_some())
-        || (ir.diagram_type == fm_core::DiagramType::XyChart && ir.xy_chart_meta.is_some())
-        || (ir.diagram_type == fm_core::DiagramType::QuadrantChart && ir.quadrant_meta.is_some());
-
-    if has_specialized_title_renderer {
-        None
-    } else {
-        ir.meta.title.as_deref()
-    }
+    // Unlike SVG/terminal, the canvas backend does not yet have dedicated chart renderers
+    // for pie/gantt/xy/quadrant titles, so the generic title path must remain enabled.
+    ir.meta.title.as_deref()
 }
 
 #[cfg(test)]
@@ -1635,6 +1627,53 @@ mod tests {
             |operation| matches!(operation, DrawOperation::FillText(text, _, _)
                 if text == "Shipping History")
         ));
+    }
+
+    #[test]
+    fn render_draws_chart_title_via_generic_canvas_title_path() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Pie);
+        ir.meta.title = Some("Revenue".to_string());
+        ir.pie_meta = Some(fm_core::IrPieMeta {
+            title: Some("Revenue".to_string()),
+            slices: vec![fm_core::IrPieSlice {
+                label: "A".to_string(),
+                value: 1.0,
+            }],
+            ..Default::default()
+        });
+        ir.nodes.push(fm_core::IrNode {
+            id: "slice_a".to_string(),
+            ..Default::default()
+        });
+
+        let layout = layout_diagram(&ir);
+        let mut ctx = MockCanvas2dContext::new(800.0, 600.0);
+        let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig::default());
+
+        let _result = renderer.render(&layout, &ir, &mut ctx);
+
+        assert!(ctx.operations().iter().any(
+            |operation| matches!(operation, DrawOperation::FillText(text, _, _)
+                if text == "Revenue")
+        ));
+    }
+
+    #[test]
+    fn render_counts_generic_diagram_title_as_label() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.meta.title = Some("Shipping History".to_string());
+        ir.nodes.push(fm_core::IrNode {
+            id: "A".to_string(),
+            ..Default::default()
+        });
+
+        let layout = layout_diagram(&ir);
+        let mut ctx = MockCanvas2dContext::new(800.0, 600.0);
+        let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig::default());
+
+        let result = renderer.render(&layout, &ir, &mut ctx);
+
+        assert!(result.labels_drawn >= 1);
     }
 
     #[test]

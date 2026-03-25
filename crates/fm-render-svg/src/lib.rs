@@ -2171,10 +2171,19 @@ fn render_quadrant_svg(
     config: &SvgRenderConfig,
     theme: &Theme,
 ) -> SvgDocument {
-    // Derive chart dimensions from layout bounds for consistency with adaptive layout.
-    let chart_w = (layout.bounds.width - 120.0).max(200.0);
-    let chart_h = (layout.bounds.height - 100.0).max(200.0);
-    let margin_left = ((layout.bounds.width - chart_w) / 2.0).max(40.0) + offset_x;
+    // Replicate the exact chart dimensions from the layout engine so axes align
+    // with the node positions computed by layout_diagram_quadrant_traced().
+    let metrics = fm_core::FontMetrics::default_metrics();
+    let node_count = layout.nodes.len();
+    let base_size = 300.0_f32 + (node_count as f32 * 15.0).min(200.0);
+    let chart_w = base_size.clamp(200.0, 600.0);
+    let chart_h = chart_w;
+    let axis_label_width = quad_meta
+        .x_axis_left
+        .as_ref()
+        .map(|label| metrics.estimate_dimensions(label).0)
+        .unwrap_or(0.0);
+    let margin_left = (axis_label_width + 20.0).clamp(50.0, 120.0) + offset_x;
     let margin_top = 60.0_f32 + offset_y;
 
     let quadrant_fills: [&str; 4] = [
