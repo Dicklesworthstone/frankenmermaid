@@ -1353,11 +1353,7 @@ fn cmd_diff(old_input: &str, new_input: &str, options: DiffCommandOptions<'_>) -
     }
 
     let diff = diff_diagrams(&old_parsed.ir, &new_parsed.ir);
-    let use_colors = match color {
-        ColorChoice::Always => true,
-        ColorChoice::Never => false,
-        ColorChoice::Auto => io::stdout().is_terminal(),
-    };
+    let use_colors = diff_use_colors(color, output.is_none());
 
     let rendered = match format {
         DiffOutputFormat::Summary => render_diff_summary(&diff, use_colors),
@@ -1377,6 +1373,14 @@ fn cmd_diff(old_input: &str, new_input: &str, options: DiffCommandOptions<'_>) -
     };
 
     write_output(output, &rendered)
+}
+
+fn diff_use_colors(color: ColorChoice, writing_to_stdout: bool) -> bool {
+    match color {
+        ColorChoice::Always => true,
+        ColorChoice::Never => false,
+        ColorChoice::Auto => writing_to_stdout && io::stdout().is_terminal(),
+    }
 }
 
 // =============================================================================
@@ -1960,7 +1964,10 @@ mod validate_tests {
 
 #[cfg(test)]
 mod render_tests {
-    use super::{OutputFormat, ThemePreset, build_svg_render_config, render_format};
+    use super::{
+        ColorChoice, OutputFormat, ThemePreset, build_svg_render_config, diff_use_colors,
+        render_format,
+    };
     use fm_layout::layout_diagram;
     use fm_parser::parse;
 
@@ -1996,6 +2003,13 @@ mod render_tests {
         assert_eq!(config.theme, ThemePreset::Dark);
         assert_eq!(config.font_size, 22.0);
         assert!(config.include_source_spans);
+    }
+
+    #[test]
+    fn diff_color_auto_disables_ansi_when_writing_to_file() {
+        assert!(!diff_use_colors(ColorChoice::Auto, false));
+        assert!(diff_use_colors(ColorChoice::Always, false));
+        assert!(!diff_use_colors(ColorChoice::Never, true));
     }
 }
 
