@@ -499,6 +499,16 @@ fn requested_theme_preset(overrides: &RuntimeInitConfig) -> Result<Option<ThemeP
         .transpose()
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
+fn canvas_font_size_px(font: &str) -> f64 {
+    font.split_whitespace()
+        .next()
+        .and_then(|token| token.strip_suffix("px"))
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(14.0)
+}
+
 fn apply_budget_svg_simplifications(
     config: &mut SvgRenderConfig,
     budget_broker: &MermaidBudgetLedger,
@@ -666,12 +676,17 @@ pub fn capability_matrix_js() -> Result<JsValue, JsValue> {
 struct WebCanvas2dContext {
     canvas: web_sys::HtmlCanvasElement,
     context: web_sys::CanvasRenderingContext2d,
+    current_font: String,
 }
 
 #[cfg(target_arch = "wasm32")]
 impl WebCanvas2dContext {
     fn new(canvas: web_sys::HtmlCanvasElement, context: web_sys::CanvasRenderingContext2d) -> Self {
-        Self { canvas, context }
+        Self {
+            canvas,
+            context,
+            current_font: "14px sans-serif".to_string(),
+        }
     }
 }
 
@@ -726,6 +741,7 @@ impl Canvas2dContext for WebCanvas2dContext {
     }
 
     fn set_font(&mut self, font: &str) {
+        self.current_font = font.to_string();
         self.context.set_font(font);
     }
 
@@ -805,12 +821,13 @@ impl Canvas2dContext for WebCanvas2dContext {
         if let Ok(metrics) = self.context.measure_text(text) {
             TextMetrics {
                 width: metrics.width(),
-                height: 14.0,
+                height: canvas_font_size_px(&self.current_font),
             }
         } else {
+            let font_size = canvas_font_size_px(&self.current_font);
             TextMetrics {
-                width: text.chars().count() as f64 * 8.0,
-                height: 14.0,
+                width: text.chars().count() as f64 * (font_size * 0.57),
+                height: font_size,
             }
         }
     }
@@ -1057,9 +1074,9 @@ mod tests {
     use super::{
         CanvasConfigOverrides, PressureConfigOverrides, RuntimeConfig, RuntimeInitConfig,
         SvgConfigOverrides, ThemePreset, align_canvas_typography_with_svg,
-        apply_budget_svg_simplifications, apply_canvas_theme_preset, collect_source_spans,
-        merge_canvas_config, merge_pressure_config, merge_svg_config, read_runtime_config, render,
-        render_svg_js, requested_theme_preset, write_runtime_config,
+        apply_budget_svg_simplifications, apply_canvas_theme_preset, canvas_font_size_px,
+        collect_source_spans, merge_canvas_config, merge_pressure_config, merge_svg_config,
+        read_runtime_config, render, render_svg_js, requested_theme_preset, write_runtime_config,
     };
     use fm_core::{MermaidPressureTier, MermaidWasmPressureSignals};
     use fm_layout::layout_diagram_traced;
@@ -1155,6 +1172,13 @@ mod tests {
         assert_eq!(merged.node_fill, "#1e293b");
         assert_eq!(merged.label_color, "#f8fafc");
         assert_eq!(merged.edge_stroke, "#ff00aa");
+    }
+
+    #[test]
+    fn canvas_font_size_px_parses_css_font_prefix() {
+        assert_eq!(canvas_font_size_px("18px Inter, sans-serif"), 18.0);
+        assert_eq!(canvas_font_size_px("12.5px serif"), 12.5);
+        assert_eq!(canvas_font_size_px("bad-font-value"), 14.0);
     }
 
     #[test]
