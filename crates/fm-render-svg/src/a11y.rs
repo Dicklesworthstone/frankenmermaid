@@ -3,10 +3,20 @@
 //! Provides ARIA attributes, text alternatives, and accessibility CSS utilities.
 
 use fm_core::{IrNode, MermaidDiagramIr};
+use fm_layout::DiagramLayout;
 
 /// Generate an accessible description for a diagram.
 #[must_use]
 pub fn describe_diagram(ir: &MermaidDiagramIr) -> String {
+    describe_diagram_with_layout(ir, None)
+}
+
+/// Generate an accessible description for a diagram with optional layout context.
+#[must_use]
+pub fn describe_diagram_with_layout(
+    ir: &MermaidDiagramIr,
+    layout: Option<&DiagramLayout>,
+) -> String {
     let mut parts = Vec::new();
 
     let type_desc = match ir.diagram_type.as_str() {
@@ -24,27 +34,126 @@ pub fn describe_diagram(ir: &MermaidDiagramIr) -> String {
         _ => "diagram",
     };
 
+    let diagnostics = ir.diagnostic_counts();
     parts.push(format!(
-        "A {} with {} nodes and {} edges",
-        type_desc,
+        "{} with {} nodes and {} edges",
+        leading_type_phrase(type_desc),
         ir.nodes.len(),
         ir.edges.len()
     ));
 
     if !ir.clusters.is_empty() {
-        parts.push(format!(", organized in {} groups", ir.clusters.len()));
+        parts.push(format!("organized in {} groups", ir.clusters.len()));
     }
 
-    // Add direction hint
     let direction_desc = match ir.direction {
         fm_core::GraphDirection::LR => "flowing left to right",
         fm_core::GraphDirection::RL => "flowing right to left",
         fm_core::GraphDirection::TB | fm_core::GraphDirection::TD => "flowing top to bottom",
         fm_core::GraphDirection::BT => "flowing bottom to top",
     };
-    parts.push(format!(", {}", direction_desc));
+    parts.push(direction_desc.to_string());
 
-    parts.join("")
+    let key_nodes = summarize_key_nodes(ir);
+    if !key_nodes.is_empty() {
+        parts.push(format!("Key nodes: {}.", key_nodes.join(", ")));
+    }
+
+    let relationships = summarize_key_relationships(ir);
+    if !relationships.is_empty() {
+        parts.push(format!("Key relationships: {}.", relationships.join("; ")));
+    }
+
+    if diagnostics.warnings > 0 || diagnostics.errors > 0 {
+        let mut diag_parts = Vec::new();
+        if diagnostics.warnings > 0 {
+            diag_parts.push(format!(
+                "{} warning{}",
+                diagnostics.warnings,
+                plural_suffix(diagnostics.warnings)
+            ));
+        }
+        if diagnostics.errors > 0 {
+            diag_parts.push(format!(
+                "{} error{}",
+                diagnostics.errors,
+                plural_suffix(diagnostics.errors)
+            ));
+        }
+        parts.push(format!("Diagnostics: {}.", diag_parts.join(", ")));
+    }
+
+    if let Some(layout) = layout {
+        parts.push(format!(
+            "Layout spans {:.0} by {:.0} units with {} rendered node boxes and {} routed edge paths.",
+            layout.bounds.width,
+            layout.bounds.height,
+            layout.nodes.len(),
+            layout.edges.len()
+        ));
+        if layout.stats.crossing_count > 0 {
+            parts.push(format!(
+                "The layout currently contains {} edge crossing{}.",
+                layout.stats.crossing_count,
+                plural_suffix(layout.stats.crossing_count)
+            ));
+        }
+    }
+
+    parts.join(". ")
+}
+
+fn leading_type_phrase(type_desc: &str) -> String {
+    if type_desc.starts_with("A ") || type_desc.starts_with("a ") {
+        type_desc.to_string()
+    } else {
+        format!("A {type_desc}")
+    }
+}
+
+fn plural_suffix(count: usize) -> &'static str {
+    if count == 1 { "" } else { "s" }
+}
+
+fn summarize_key_nodes(ir: &MermaidDiagramIr) -> Vec<String> {
+    ir.nodes
+        .iter()
+        .filter_map(|node| node_label(node, ir))
+        .filter(|label| !label.is_empty())
+        .take(3)
+        .collect()
+}
+
+fn summarize_key_relationships(ir: &MermaidDiagramIr) -> Vec<String> {
+    ir.edges
+        .iter()
+        .filter_map(|edge| {
+            let from = ir
+                .resolve_endpoint_node(edge.from)
+                .and_then(|id| ir.nodes.get(id.0))?;
+            let to = ir
+                .resolve_endpoint_node(edge.to)
+                .and_then(|id| ir.nodes.get(id.0))?;
+            Some(describe_edge(
+                Some(from),
+                Some(to),
+                edge.arrow,
+                edge.label
+                    .and_then(|label_id| ir.labels.get(label_id.0))
+                    .map(|label| label.text.as_str()),
+                ir,
+            ))
+        })
+        .take(3)
+        .collect()
+}
+
+fn node_label(node: &IrNode, ir: &MermaidDiagramIr) -> Option<String> {
+    node.label
+        .and_then(|lid| ir.labels.get(lid.0))
+        .map(|label| label.text.trim().to_string())
+        .filter(|label| !label.is_empty())
+        .or_else(|| (!node.id.is_empty()).then(|| node.id.clone()))
 }
 
 /// Generate a text alternative for a node.
@@ -272,6 +381,25 @@ mod tests {
         assert!(desc.contains("0 edges"));
         assert!(desc.contains("flowchart"));
         assert!(desc.contains("left to right"));
+    }
+
+    #[test]
+    fn describe_diagram_with_layout_mentions_relationships_and_layout() {
+        use fm_core::{ArrowType, IrEdge, IrEndpoint, IrNodeId};
+
+        let mut ir = create_test_ir();
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            arrow: ArrowType::Arrow,
+            ..Default::default()
+        });
+
+        let layout = fm_layout::layout_diagram(&ir);
+        let desc = describe_diagram_with_layout(&ir, Some(&layout));
+        assert!(desc.contains("Key nodes"));
+        assert!(desc.contains("Key relationships"));
+        assert!(desc.contains("Layout spans"));
     }
 
     #[test]

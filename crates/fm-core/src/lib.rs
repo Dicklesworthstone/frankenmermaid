@@ -3569,6 +3569,119 @@ impl MermaidDiagramIr {
 
         neighbors
     }
+
+    #[must_use]
+    pub fn source_map(&self) -> MermaidSourceMap {
+        let mut entries = Vec::new();
+
+        for (index, node) in self.nodes.iter().enumerate() {
+            if node.span_primary.is_unknown() {
+                continue;
+            }
+
+            entries.push(MermaidSourceMapEntry {
+                kind: MermaidSourceMapKind::Node,
+                index,
+                element_id: mermaid_node_element_id(&node.id, index),
+                source_id: (!node.id.is_empty()).then(|| node.id.clone()),
+                span: node.span_primary,
+            });
+        }
+
+        for (index, edge) in self.edges.iter().enumerate() {
+            if edge.span.is_unknown() {
+                continue;
+            }
+
+            entries.push(MermaidSourceMapEntry {
+                kind: MermaidSourceMapKind::Edge,
+                index,
+                element_id: mermaid_edge_element_id(index),
+                source_id: None,
+                span: edge.span,
+            });
+        }
+
+        for (index, cluster) in self.clusters.iter().enumerate() {
+            if cluster.span.is_unknown() {
+                continue;
+            }
+
+            entries.push(MermaidSourceMapEntry {
+                kind: MermaidSourceMapKind::Cluster,
+                index,
+                element_id: mermaid_cluster_element_id(index),
+                source_id: Some(cluster.id.0.to_string()),
+                span: cluster.span,
+            });
+        }
+
+        MermaidSourceMap {
+            diagram_type: self.diagram_type,
+            entries,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MermaidSourceMapKind {
+    Node,
+    Edge,
+    Cluster,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MermaidSourceMapEntry {
+    pub kind: MermaidSourceMapKind,
+    pub index: usize,
+    pub element_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MermaidSourceMap {
+    pub diagram_type: DiagramType,
+    pub entries: Vec<MermaidSourceMapEntry>,
+}
+
+fn sanitize_render_element_fragment(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut last_was_dash = false;
+
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            last_was_dash = false;
+        } else if !last_was_dash && !out.is_empty() {
+            out.push('-');
+            last_was_dash = true;
+        }
+    }
+
+    out.trim_matches('-').to_string()
+}
+
+#[must_use]
+pub fn mermaid_node_element_id(node_id: &str, index: usize) -> String {
+    let fragment = sanitize_render_element_fragment(node_id);
+    if fragment.is_empty() {
+        format!("fm-node-{index}")
+    } else {
+        format!("fm-node-{fragment}-{index}")
+    }
+}
+
+#[must_use]
+pub fn mermaid_edge_element_id(index: usize) -> String {
+    format!("fm-edge-{index}")
+}
+
+#[must_use]
+pub fn mermaid_cluster_element_id(index: usize) -> String {
+    format!("fm-cluster-{index}")
 }
 
 /// Counts of diagnostics by severity level.

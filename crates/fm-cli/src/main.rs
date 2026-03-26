@@ -29,7 +29,9 @@ use fm_layout::{
 use fm_parser::{
     detect_type_with_confidence, first_significant_line, parse_evidence_json, parse_with_mode,
 };
-use fm_render_svg::{SvgRenderConfig, ThemePreset, render_svg_with_layout};
+use fm_render_svg::{
+    SvgRenderConfig, ThemePreset, describe_diagram_with_layout, render_svg_with_layout,
+};
 use fm_render_term::{
     TermRenderConfig, diff_diagrams, render_diff_plain, render_diff_summary,
     render_diff_terminal_with_config, render_term_with_layout_and_config,
@@ -131,6 +133,18 @@ enum Command {
         /// Requires `--output` so stdout can remain machine-readable.
         #[arg(long)]
         json: bool,
+
+        /// Embed source-span metadata attributes in SVG output.
+        #[arg(long, default_value_t = false)]
+        embed_source_spans: bool,
+
+        /// Suppress embedded source-span metadata in SVG output.
+        #[arg(long, default_value_t = false)]
+        no_embed_source_spans: bool,
+
+        /// Optional JSON artifact path mapping rendered SVG element IDs back to input spans.
+        #[arg(long)]
+        source_map_out: Option<String>,
     },
 
     /// Parse a diagram and output its IR as JSON.
@@ -388,6 +402,8 @@ impl FailOnSeverity {
 struct RenderResult {
     format: String,
     parse_mode: String,
+    embedded_source_spans: bool,
+    accessibility_summary: String,
     layout_requested: String,
     layout_selected: String,
     layout_guard_reason: String,
@@ -403,6 +419,8 @@ struct RenderResult {
     source_span_node_count: usize,
     source_span_edge_count: usize,
     source_span_cluster_count: usize,
+    source_map_entry_count: usize,
+    source_map_out: Option<String>,
     diagram_type: String,
     node_count: usize,
     edge_count: usize,
@@ -440,6 +458,8 @@ struct RenderCommandOptions<'a> {
     theme: &'a str,
     font_size: Option<f32>,
     output: Option<&'a str>,
+    embed_source_spans: bool,
+    source_map_out: Option<&'a str>,
     dimensions: (Option<u32>, Option<u32>),
     json_output: bool,
 }
@@ -451,6 +471,14 @@ struct DiffCommandOptions<'a> {
     color: ColorChoice,
     dimensions: (Option<u32>, Option<u32>),
     output: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RenderSurfaceOptions<'a> {
+    theme: &'a str,
+    font_size: Option<f32>,
+    embed_source_spans: bool,
+    dimensions: (Option<u32>, Option<u32>),
 }
 
 /// Result of detecting diagram type.
@@ -468,6 +496,7 @@ struct DetectResult {
 struct ValidateResult {
     valid: bool,
     parse_mode: String,
+    accessibility_summary: String,
     layout_requested: String,
     layout_selected: String,
     layout_guard_reason: String,
@@ -593,6 +622,9 @@ fn main() -> Result<()> {
             width,
             height,
             json,
+            embed_source_spans,
+            no_embed_source_spans,
+            source_map_out,
         } => cmd_render(
             &input,
             RenderCommandOptions {
@@ -602,6 +634,12 @@ fn main() -> Result<()> {
                 theme: &theme,
                 font_size,
                 output: output.as_deref(),
+                embed_source_spans: if no_embed_source_spans {
+                    false
+                } else {
+                    embed_source_spans || format == OutputFormat::Svg
+                },
+                source_map_out: source_map_out.as_deref(),
                 dimensions: (width, height),
                 json_output: json,
             },
@@ -895,12 +933,17 @@ fn cmd_render(input: &str, options: RenderCommandOptions<'_>) -> Result<()> {
         theme,
         font_size,
         output,
+        embed_source_spans,
+        source_map_out,
         dimensions,
         json_output,
     } = options;
     let (width, height) = dimensions;
     if json_output && output.is_none() {
         anyhow::bail!("--json requires --output so rendered output does not mix with metadata");
+    }
+    if source_map_out.is_some() && format != OutputFormat::Svg {
+        anyhow::bail!("--source-map-out is only supported with --format svg");
     }
 
     let source = load_input(input)?;
@@ -993,10 +1036,12 @@ fn cmd_render(input: &str, options: RenderCommandOptions<'_>) -> Result<()> {
         &parsed.ir,
         layout,
         format,
-        effective_theme,
-        font_size,
-        width,
-        height,
+        RenderSurfaceOptions {
+            theme: effective_theme,
+            font_size,
+            embed_source_spans,
+            dimensions: (width, height),
+        },
     )?;
     let render_time = render_start.elapsed();
     budget_broker.record_render(render_time.as_millis().min(u128::from(u64::MAX)) as u64);
@@ -1006,11 +1051,22 @@ fn cmd_render(input: &str, options: RenderCommandOptions<'_>) -> Result<()> {
     let layout_decision_ledger_jsonl = layout_decision_ledger.to_jsonl()?;
 
     let total_time = total_start.elapsed();
+    let source_map = parsed.ir.source_map();
+    let accessibility_summary = describe_diagram_with_layout(&parsed.ir, Some(layout));
+
+    if let Some(path) = source_map_out {
+        let artifact = serde_json::to_string_pretty(&source_map)?;
+        std::fs::write(path, artifact)
+            .context(format!("Failed to write source map file: {path}"))?;
+        info!("Wrote source map artifact to: {path}");
+    }
 
     if json_output {
         let result = RenderResult {
             format: format!("{format:?}").to_lowercase(),
             parse_mode: parse_mode.as_str().to_string(),
+            embedded_source_spans: embed_source_spans,
+            accessibility_summary,
             layout_requested: traced_layout.trace.dispatch.requested.as_str().to_string(),
             layout_selected: traced_layout.trace.dispatch.selected.as_str().to_string(),
             layout_guard_reason: traced_layout.trace.guard.reason.to_string(),
@@ -1032,6 +1088,8 @@ fn cmd_render(input: &str, options: RenderCommandOptions<'_>) -> Result<()> {
             source_span_node_count: count_known_node_spans(layout),
             source_span_edge_count: count_known_edge_spans(layout),
             source_span_cluster_count: count_known_cluster_spans(layout),
+            source_map_entry_count: source_map.entries.len(),
+            source_map_out: source_map_out.map(str::to_string),
             diagram_type: parsed.ir.diagram_type.as_str().to_string(),
             node_count: parsed.ir.nodes.len(),
             edge_count: parsed.ir.edges.len(),
@@ -1088,14 +1146,17 @@ fn render_format(
     ir: &MermaidDiagramIr,
     layout: &fm_layout::DiagramLayout,
     format: OutputFormat,
-    theme: &str,
-    font_size: Option<f32>,
-    width: Option<u32>,
-    height: Option<u32>,
+    options: RenderSurfaceOptions<'_>,
 ) -> Result<(Vec<u8>, Option<u32>, Option<u32>)> {
+    let RenderSurfaceOptions {
+        theme,
+        font_size,
+        embed_source_spans,
+        dimensions: (width, height),
+    } = options;
     match format {
         OutputFormat::Svg => {
-            let svg_config = build_svg_render_config(theme, font_size);
+            let svg_config = build_svg_render_config(theme, font_size, embed_source_spans);
             let svg = render_svg_with_layout(ir, layout, &svg_config);
             // Extract dimensions from SVG if available
             let (w, h) = extract_svg_dimensions(&svg);
@@ -1105,7 +1166,7 @@ fn render_format(
         OutputFormat::Png => {
             #[cfg(feature = "png")]
             {
-                let svg_config = build_svg_render_config(theme, font_size);
+                let svg_config = build_svg_render_config(theme, font_size, embed_source_spans);
                 let svg = render_svg_with_layout(ir, layout, &svg_config);
                 let (png, px_width, px_height) = svg_to_png(&svg, width, height)?;
                 Ok((png, Some(px_width), Some(px_height)))
@@ -1147,11 +1208,15 @@ fn render_format(
     }
 }
 
-fn build_svg_render_config(theme: &str, font_size: Option<f32>) -> SvgRenderConfig {
+fn build_svg_render_config(
+    theme: &str,
+    font_size: Option<f32>,
+    embed_source_spans: bool,
+) -> SvgRenderConfig {
     let base = SvgRenderConfig::default();
     let mut svg_config = SvgRenderConfig {
         theme: resolve_theme_preset(theme, base.theme),
-        include_source_spans: true,
+        include_source_spans: embed_source_spans,
         ..base
     };
     if let Some(size) = normalize_positive_font_size(font_size) {
@@ -1530,6 +1595,7 @@ fn cmd_validate(
     let result = ValidateResult {
         valid,
         parse_mode: parse_mode.as_str().to_string(),
+        accessibility_summary: describe_diagram_with_layout(&parsed.ir, Some(layout)),
         layout_requested: traced_layout.trace.dispatch.requested.as_str().to_string(),
         layout_selected: traced_layout.trace.dispatch.selected.as_str().to_string(),
         layout_guard_reason: traced_layout.trace.guard.reason.to_string(),
@@ -2036,9 +2102,9 @@ mod validate_tests {
 #[cfg(test)]
 mod render_tests {
     use super::{
-        ColorChoice, OutputFormat, ThemePreset, build_svg_render_config, diff_use_colors,
-        extract_svg_dimensions, normalize_positive_font_size, parse_positive_dimension_arg,
-        parse_positive_font_size_arg, render_format, terminal_size,
+        ColorChoice, OutputFormat, RenderSurfaceOptions, ThemePreset, build_svg_render_config,
+        diff_use_colors, extract_svg_dimensions, normalize_positive_font_size,
+        parse_positive_dimension_arg, parse_positive_font_size_arg, render_format, terminal_size,
     };
     use fm_layout::layout_diagram;
     use fm_parser::parse;
@@ -2057,10 +2123,12 @@ mod render_tests {
             &parsed.ir,
             &empty_layout,
             OutputFormat::Term,
-            "default",
-            None,
-            Some(80),
-            Some(24),
+            RenderSurfaceOptions {
+                theme: "default",
+                font_size: None,
+                embed_source_spans: false,
+                dimensions: (Some(80), Some(24)),
+            },
         )
         .expect("terminal render should succeed");
 
@@ -2071,7 +2139,7 @@ mod render_tests {
 
     #[test]
     fn svg_render_config_applies_font_size_for_all_svg_based_outputs() {
-        let config = build_svg_render_config("dark", Some(22.0));
+        let config = build_svg_render_config("dark", Some(22.0), true);
         assert_eq!(config.theme, ThemePreset::Dark);
         assert_eq!(config.font_size, 22.0);
         assert!(config.include_source_spans);
@@ -2079,17 +2147,17 @@ mod render_tests {
 
     #[test]
     fn svg_render_config_ignores_invalid_font_sizes() {
-        let default_font_size = build_svg_render_config("default", None).font_size;
+        let default_font_size = build_svg_render_config("default", None, true).font_size;
         assert_eq!(
-            build_svg_render_config("default", Some(0.0)).font_size,
+            build_svg_render_config("default", Some(0.0), true).font_size,
             default_font_size
         );
         assert_eq!(
-            build_svg_render_config("default", Some(-5.0)).font_size,
+            build_svg_render_config("default", Some(-5.0), true).font_size,
             default_font_size
         );
         assert_eq!(
-            build_svg_render_config("default", Some(f32::NAN)).font_size,
+            build_svg_render_config("default", Some(f32::NAN), true).font_size,
             default_font_size
         );
     }
@@ -2209,7 +2277,17 @@ fn render_and_output(
     let source = load_input(input)?;
     let parsed = fm_parser::parse(&source);
     let layout = fm_layout::layout_diagram(&parsed.ir);
-    let (rendered, _, _) = render_format(&parsed.ir, &layout, format, "default", None, None, None)?;
+    let (rendered, _, _) = render_format(
+        &parsed.ir,
+        &layout,
+        format,
+        RenderSurfaceOptions {
+            theme: "default",
+            font_size: None,
+            embed_source_spans: false,
+            dimensions: (None, None),
+        },
+    )?;
 
     match format {
         OutputFormat::Png => write_output_bytes(output, &rendered)?,

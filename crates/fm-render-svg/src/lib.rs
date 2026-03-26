@@ -15,7 +15,10 @@ mod text;
 mod theme;
 mod transform;
 
-pub use a11y::{A11yConfig, accessibility_css, describe_diagram, describe_edge, describe_node};
+pub use a11y::{
+    A11yConfig, accessibility_css, describe_diagram, describe_diagram_with_layout, describe_edge,
+    describe_node,
+};
 pub use attributes::{Attribute, AttributeValue, Attributes};
 pub use defs::{ArrowheadMarker, DefsBuilder, Filter, Gradient, GradientStop, MarkerOrient};
 pub use document::SvgDocument;
@@ -27,7 +30,8 @@ pub use transform::{Transform, TransformBuilder};
 
 use fm_core::{
     DiagramType, IrLabelId, IrLabelSegment, IrXyChartMeta, IrXySeriesKind, MermaidDiagramIr,
-    MermaidTier, Span,
+    MermaidTier, Span, mermaid_cluster_element_id, mermaid_edge_element_id,
+    mermaid_node_element_id,
 };
 use fm_layout::{
     DiagramLayout, FillStyle, LayoutBand, LayoutBandKind, LayoutEdgePath, LayoutNodeBox,
@@ -249,6 +253,7 @@ fn render_scene_document(scene: &RenderScene, config: &SvgRenderConfig) -> Strin
 
 fn resolve_accessibility_text(
     ir: Option<&MermaidDiagramIr>,
+    layout: Option<&DiagramLayout>,
     config: &SvgRenderConfig,
     fallback_desc: impl FnOnce() -> String,
 ) -> (String, String) {
@@ -261,7 +266,7 @@ fn resolve_accessibility_text(
                 .unwrap_or_else(|| format!("{} diagram", diagram_ir.diagram_type.as_str()));
             let desc = diagram_ir.meta.acc_descr.clone().unwrap_or_else(|| {
                 if config.a11y.aria_labels {
-                    describe_diagram(diagram_ir)
+                    describe_diagram_with_layout(diagram_ir, layout)
                 } else {
                     fallback_desc()
                 }
@@ -321,7 +326,7 @@ fn render_scene_document_with_ir(
     let (group_count, path_count, text_count) = count_scene_items(&scene.root);
 
     if config.accessible {
-        let (title, desc) = resolve_accessibility_text(ir, config, || {
+        let (title, desc) = resolve_accessibility_text(ir, None, config, || {
             format!(
                 "Target-agnostic render scene with {group_count} groups, {path_count} paths, and {text_count} text items"
             )
@@ -1369,7 +1374,7 @@ fn render_layout_to_svg(
     }
 
     if config.accessible {
-        let (title, desc) = resolve_accessibility_text(Some(ir), config, || {
+        let (title, desc) = resolve_accessibility_text(Some(ir), Some(layout), config, || {
             format!(
                 "Diagram with {} nodes and {} edges",
                 ir.nodes.len(),
@@ -1823,6 +1828,7 @@ fn render_layout_to_svg(
         };
 
         let mut rect = Element::rect()
+            .id(&mermaid_cluster_element_id(cluster.cluster_index))
             .x(cluster.bounds.x + offset_x)
             .y(cluster.bounds.y + offset_y)
             .width(cluster.bounds.width)
@@ -2965,6 +2971,7 @@ fn render_node(
 
     // Create group for node shape + label
     let mut group = Element::group()
+        .id(&mermaid_node_element_id(node_id, node_box.node_index))
         .class("fm-node")
         .class(&accent_class)
         .class(node_shape_css_class(shape))
@@ -4532,6 +4539,7 @@ fn render_edge(
         };
 
         let mut group = Element::group()
+            .id(&mermaid_edge_element_id(edge_index))
             .class("fm-edge-labeled")
             .data("fm-edge-id", &edge_index.to_string());
         if config.include_source_spans {
@@ -4627,6 +4635,7 @@ fn render_edge(
         let edge_desc = describe_edge(from_node, to_node, arrow, None, ir);
         // Wrap in group to add title
         let mut group = Element::group()
+            .id(&mermaid_edge_element_id(edge_index))
             .class("fm-edge")
             .data("fm-edge-id", &edge_index.to_string());
         if config.include_source_spans {
@@ -4650,6 +4659,8 @@ fn render_edge(
     if config.a11y.keyboard_nav {
         elem = elem.attr("tabindex", "0");
     }
+
+    elem = elem.id(&mermaid_edge_element_id(edge_index));
 
     elem
 }

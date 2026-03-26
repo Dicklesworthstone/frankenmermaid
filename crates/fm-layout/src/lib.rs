@@ -6020,8 +6020,7 @@ fn detect_cycle_components(
                         self.on_stack[next] = true;
                         call_stack.push((next, 0));
                     } else if self.on_stack[next] {
-                        self.lowlink[node] = self
-                            .lowlink[node]
+                        self.lowlink[node] = self.lowlink[node]
                             .min(self.indices[next].unwrap_or(self.lowlink[node]));
                     }
                 } else {

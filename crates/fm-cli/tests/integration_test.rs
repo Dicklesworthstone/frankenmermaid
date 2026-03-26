@@ -673,6 +673,11 @@ fn render_json_writes_artifact_and_stdout_metadata() {
     assert_eq!(json["source_span_node_count"], 2);
     assert_eq!(json["source_span_edge_count"], 1);
     assert_eq!(json["source_span_cluster_count"], 0);
+    assert!(
+        json["accessibility_summary"]
+            .as_str()
+            .is_some_and(|value| value.contains("Key relationships"))
+    );
     assert!(json["pressure_source"].is_string());
     assert!(json["pressure_tier"].is_string());
     assert!(json["pressure_telemetry_available"].is_boolean());
@@ -702,6 +707,159 @@ fn render_json_writes_artifact_and_stdout_metadata() {
 }
 
 #[test]
+fn render_svg_can_disable_embedded_source_spans() {
+    let output_file = NamedTempFile::new().expect("temp render output file");
+    let output_path = output_file
+        .path()
+        .to_str()
+        .expect("temp path must be valid utf-8")
+        .to_string();
+
+    let output = run_cli(
+        &[
+            "render",
+            "-",
+            "--format",
+            "svg",
+            "--no-embed-source-spans",
+            "--output",
+            &output_path,
+        ],
+        "flowchart LR\nA-->B\n",
+    );
+    assert!(
+        output.status.success(),
+        "render --no-embed-source-spans should succeed; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let artifact = std::fs::read_to_string(&output_path).expect("failed to read rendered svg");
+    assert!(!artifact.contains("data-fm-source-span="));
+}
+
+#[test]
+fn render_svg_writes_source_map_artifact() {
+    let output_file = NamedTempFile::new().expect("temp render output file");
+    let source_map_file = NamedTempFile::new().expect("temp source map file");
+    let output_path = output_file
+        .path()
+        .to_str()
+        .expect("temp path must be valid utf-8")
+        .to_string();
+    let source_map_path = source_map_file
+        .path()
+        .to_str()
+        .expect("temp path must be valid utf-8")
+        .to_string();
+
+    let output = run_cli(
+        &[
+            "render",
+            "-",
+            "--format",
+            "svg",
+            "--json",
+            "--output",
+            &output_path,
+            "--source-map-out",
+            &source_map_path,
+        ],
+        "flowchart LR\nA-->B\n",
+    );
+    assert!(
+        output.status.success(),
+        "render --source-map-out should succeed; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout must be utf-8");
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("render --json must print metadata JSON to stdout");
+    assert_eq!(json["embedded_source_spans"], true);
+    assert_eq!(json["source_map_entry_count"], 3);
+    assert_eq!(json["source_map_out"], source_map_path);
+
+    let artifact =
+        std::fs::read_to_string(&source_map_path).expect("failed to read source map artifact");
+    let source_map: serde_json::Value =
+        serde_json::from_str(&artifact).expect("source map artifact must be valid json");
+    assert_eq!(source_map["diagram_type"], "Flowchart");
+    assert_eq!(source_map["entries"].as_array().map(Vec::len), Some(3));
+    assert!(
+        source_map["entries"]
+            .as_array()
+            .expect("entries array")
+            .iter()
+            .any(|entry| entry["element_id"] == "fm-node-a-0")
+    );
+    assert!(
+        source_map["entries"]
+            .as_array()
+            .expect("entries array")
+            .iter()
+            .any(|entry| entry["element_id"] == "fm-edge-0")
+    );
+
+    let svg = std::fs::read_to_string(&output_path).expect("failed to read rendered svg");
+    assert!(svg.contains("id=\"fm-node-a-0\""));
+    assert!(svg.contains("id=\"fm-edge-0\""));
+}
+
+#[test]
+fn render_svg_source_map_survives_recovered_input() {
+    let output_file = NamedTempFile::new().expect("temp render output file");
+    let source_map_file = NamedTempFile::new().expect("temp source map file");
+    let output_path = output_file
+        .path()
+        .to_str()
+        .expect("temp path must be valid utf-8")
+        .to_string();
+    let source_map_path = source_map_file
+        .path()
+        .to_str()
+        .expect("temp path must be valid utf-8")
+        .to_string();
+
+    let output = run_cli(
+        &[
+            "render",
+            "-",
+            "--format",
+            "svg",
+            "--output",
+            &output_path,
+            "--source-map-out",
+            &source_map_path,
+        ],
+        "flowchrt LR\nA-->B\n",
+    );
+    assert!(
+        output.status.success(),
+        "render recovered input with --source-map-out should succeed; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let artifact =
+        std::fs::read_to_string(&source_map_path).expect("failed to read source map artifact");
+    let source_map: serde_json::Value =
+        serde_json::from_str(&artifact).expect("source map artifact must be valid json");
+    assert!(
+        source_map["entries"]
+            .as_array()
+            .expect("entries array")
+            .iter()
+            .any(|entry| entry["kind"] == "node")
+    );
+    assert!(
+        source_map["entries"]
+            .as_array()
+            .expect("entries array")
+            .iter()
+            .any(|entry| entry["kind"] == "edge")
+    );
+}
+
+#[test]
 fn validate_json_reports_source_span_counts() {
     let output = run_cli(
         &["validate", "-", "--format", "json"],
@@ -716,6 +874,11 @@ fn validate_json_reports_source_span_counts() {
     let stdout = String::from_utf8(output.stdout).expect("stdout must be utf-8");
     let json: serde_json::Value =
         serde_json::from_str(&stdout).expect("validate --format json must print valid JSON");
+    assert!(
+        json["accessibility_summary"]
+            .as_str()
+            .is_some_and(|value| value.contains("Layout spans"))
+    );
     assert_eq!(json["source_span_node_count"], 2);
     assert_eq!(json["source_span_edge_count"], 1);
     assert_eq!(json["source_span_cluster_count"], 1);

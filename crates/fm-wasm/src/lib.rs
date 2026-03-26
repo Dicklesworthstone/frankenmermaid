@@ -4,8 +4,8 @@ use std::sync::{LazyLock, RwLock};
 use std::time::Instant;
 
 use fm_core::{
-    MermaidBudgetLedger, MermaidDiagramIr, MermaidGuardReport, MermaidWasmPressureSignals, Span,
-    capability_matrix, mermaid_layout_guard_observability,
+    MermaidBudgetLedger, MermaidDiagramIr, MermaidGuardReport, MermaidSourceMapKind,
+    MermaidWasmPressureSignals, Span, capability_matrix, mermaid_layout_guard_observability,
 };
 use fm_layout::{
     DiagramLayout, LayoutConfig, LayoutGuardrails, build_layout_guard_report_with_pressure,
@@ -22,7 +22,9 @@ use fm_render_canvas::{
     Canvas2dContext, CanvasRenderResult, LineCap, LineJoin, TextAlign, TextBaseline, TextMetrics,
     render_to_canvas,
 };
-use fm_render_svg::{SvgRenderConfig, ThemeColors, ThemePreset, render_svg_with_layout};
+use fm_render_svg::{
+    SvgRenderConfig, ThemeColors, ThemePreset, describe_diagram_with_layout, render_svg_with_layout,
+};
 use serde::{Deserialize, Serialize};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
@@ -35,6 +37,7 @@ use wasm_bindgen::prelude::wasm_bindgen;
 pub struct WasmRenderOutput {
     pub svg: String,
     pub detected_type: String,
+    pub accessibility_summary: String,
     pub trace_id: String,
     pub decision_id: String,
     pub policy_id: String,
@@ -49,6 +52,7 @@ pub struct SourceSpanRecord {
     kind: &'static str,
     index: usize,
     id: Option<String>,
+    element_id: String,
     span: Span,
 }
 
@@ -213,54 +217,22 @@ static RUNTIME_CONFIG: LazyLock<RwLock<RuntimeConfig>> =
     LazyLock::new(|| RwLock::new(RuntimeConfig::default()));
 
 fn collect_source_spans(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> Vec<SourceSpanRecord> {
-    let mut spans = Vec::new();
-
-    spans.extend(
-        layout
-            .nodes
-            .iter()
-            .filter(|node| !node.span.is_unknown())
-            .map(|node| SourceSpanRecord {
-                kind: "node",
-                index: node.node_index,
-                id: Some(node.node_id.clone()),
-                span: node.span,
-            }),
-    );
-
-    spans.extend(
-        layout
-            .edges
-            .iter()
-            .filter(|edge| !edge.span.is_unknown())
-            .map(|edge| SourceSpanRecord {
-                kind: "edge",
-                index: edge.edge_index,
-                id: None,
-                span: edge.span,
-            }),
-    );
-
-    spans.extend(
-        layout
-            .clusters
-            .iter()
-            .filter(|cluster| !cluster.span.is_unknown())
-            .map(|cluster| {
-                let id = ir
-                    .clusters
-                    .get(cluster.cluster_index)
-                    .map(|cluster_ir| cluster_ir.id.0.to_string());
-                SourceSpanRecord {
-                    kind: "cluster",
-                    index: cluster.cluster_index,
-                    id,
-                    span: cluster.span,
-                }
-            }),
-    );
-
-    spans
+    let _ = layout;
+    ir.source_map()
+        .entries
+        .into_iter()
+        .map(|entry| SourceSpanRecord {
+            kind: match entry.kind {
+                MermaidSourceMapKind::Node => "node",
+                MermaidSourceMapKind::Edge => "edge",
+                MermaidSourceMapKind::Cluster => "cluster",
+            },
+            index: entry.index,
+            id: entry.source_id,
+            element_id: entry.element_id,
+            span: entry.span,
+        })
+        .collect()
 }
 
 fn read_runtime_config() -> RuntimeConfig {
@@ -582,6 +554,10 @@ pub fn render(input: &str) -> WasmRenderOutput {
     WasmRenderOutput {
         svg,
         detected_type: parsed.ir.diagram_type.as_str().to_string(),
+        accessibility_summary: describe_diagram_with_layout(
+            &parsed.ir,
+            Some(&traced_layout.layout),
+        ),
         trace_id: guard.observability.trace_id.to_string(),
         decision_id: guard.observability.decision_id.to_string(),
         policy_id: guard.observability.policy_id.to_string(),
@@ -679,6 +655,16 @@ pub fn source_spans_js(input: &str) -> Result<JsValue, JsValue> {
     let parsed = parse(input);
     let traced_layout = layout_diagram_traced(&parsed.ir);
     to_js_value(&collect_source_spans(&parsed.ir, &traced_layout.layout))
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = describeDiagram))]
+pub fn describe_diagram_js(input: &str) -> Result<String, JsValue> {
+    let parsed = parse(input);
+    let traced_layout = layout_diagram_traced(&parsed.ir);
+    Ok(describe_diagram_with_layout(
+        &parsed.ir,
+        Some(&traced_layout.layout),
+    ))
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = capabilityMatrix))]
@@ -1090,8 +1076,9 @@ mod tests {
         CanvasConfigOverrides, PressureConfigOverrides, RuntimeConfig, RuntimeInitConfig,
         SvgConfigOverrides, ThemePreset, align_canvas_typography_with_svg,
         apply_budget_svg_simplifications, apply_canvas_theme_preset, canvas_font_size_px,
-        collect_source_spans, merge_canvas_config, merge_pressure_config, merge_svg_config,
-        read_runtime_config, render, render_svg_js, requested_theme_preset, write_runtime_config,
+        collect_source_spans, describe_diagram_js, merge_canvas_config, merge_pressure_config,
+        merge_svg_config, read_runtime_config, render, render_svg_js, requested_theme_preset,
+        write_runtime_config,
     };
     use fm_core::{MermaidPressureTier, MermaidWasmPressureSignals};
     use fm_layout::layout_diagram_traced;
@@ -1104,6 +1091,7 @@ mod tests {
         let output = render("flowchart LR\nA-->B");
         assert!(output.svg.starts_with("<svg"));
         assert_eq!(output.detected_type, "flowchart");
+        assert!(output.accessibility_summary.contains("Key relationships"));
         assert!(!output.trace_id.is_empty());
         assert!(!output.decision_id.is_empty());
         assert_eq!(output.policy_id, "fm.layout.guard@v1");
@@ -1127,6 +1115,14 @@ mod tests {
         assert!(spans.iter().any(|span| span.kind == "node"));
         assert!(spans.iter().any(|span| span.kind == "edge"));
         assert!(spans.iter().any(|span| span.kind == "cluster"));
+    }
+
+    #[test]
+    fn describe_diagram_js_returns_layout_aware_summary() {
+        let summary =
+            describe_diagram_js("flowchart LR\nA[Start]-->B[End]").expect("summary should succeed");
+        assert!(summary.contains("Key nodes"));
+        assert!(summary.contains("Layout spans"));
     }
 
     #[test]
