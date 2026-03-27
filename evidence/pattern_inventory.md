@@ -433,6 +433,26 @@ Immediate unblock implications:
 - `bd-2u0.5.6.1` and `bd-2u0.5.4.3` should share one event/evidence model derived from P5 and P6.
 - `bd-2u0.5.8.1` should treat P9 as a constraint, not a promise, while defining shared core contracts.
 
+## Adoption and Divergence Decision Log
+
+| Decision ID | Pattern(s) | Decision | Rationale | Execution beads |
+|---|---|---|---|---|
+| D1 | P1, P3 | Adopt now | FrankenMermaid needs a journey-first showcase flow immediately because the project’s strongest value is not raw parity breadth; it is resilience, shared-engine leverage, and inspectable proof. | `bd-2u0.5.3.1`, `bd-2u0.5.7.1` |
+| D2 | P2 | Adopt now | The sticky shell pattern already matches the current standalone page and reduces future drift between `/web`, `/web_react`, and the evidence-driven narrative. | `bd-2u0.5.3.1`, `bd-2u0.5.3.2` |
+| D3 | P4, P10 | Adopt now | Scenario IDs and curated-vs-coverage separation are necessary to keep the demo honest about partial support while still showing breadth. | `bd-2u0.5.2.2`, `bd-2u0.5.5.4`, `bd-2u0.5.6.2` |
+| D4 | P5, P6 | Adopt now | FrankenMermaid’s differentiators are inspectability and explicit diagnostics, so status/evidence surfaces must be product features rather than hidden debug views. | `bd-2u0.5.4.3`, `bd-2u0.5.6.1`, `bd-2u0.5.7.2` |
+| D5 | P7 | Adopt now | The architecture explanation is part of the product story because shared-pipeline design is a buyer-facing advantage here, not an internal implementation detail. | `bd-2u0.5.3.1`, `bd-2u0.5.10.3`, `bd-2u0.5.7.1` |
+| D6 | P8, P13 | Adopt later | Try-before-install and hosted static deployment hardening matter for public launch, but they should not outrun the shell, scenario inventory, and validation model. | `bd-2u0.5.8.2.1`, `bd-2u0.5.7.3`, `bd-2u0.5.6.4` |
+| D7 | P9 | Adopt later with constraints | An integrator-specific surface is valuable, but FrankenMermaid should not imply a mature embed platform before the shared showcase core contracts are stabilized. | `bd-2u0.5.8.1`, `bd-2u0.5.8.3.1`, `bd-2u0.5.5.3` |
+| D8 | P11 | Delay schema formalization | A machine-readable manifest is desirable, but the team should first stabilize journey structure and proof surfaces to avoid premature schema churn. | `bd-2u0.5.7.2`, `bd-2u0.5.7.3`, `bd-2u0.5.10.3` |
+| D9 | P3, P10 | Intentional divergence from FrankenTUI mega-showcase emphasis | FrankenTUI can lean harder into a broad “coverage lab” because it already has a richer showcase/testing stack. FrankenMermaid should lead with curated proof first and only then reveal breadth. | `bd-2u0.5.2.2`, `bd-2u0.5.5.4` |
+| D10 | P8, P9 | Intentional divergence from website-style expansion | FrankenMermaid should not yet split into many polished marketing-style pages. The current priority is one evidence-heavy showcase surface that can later branch into `/web` and `/web_react`. | `bd-2u0.5.8.1`, `bd-2u0.5.8.2.1`, `bd-2u0.5.8.3.1` |
+
+Decision principles:
+- Adopt patterns that strengthen honesty, inspectability, and deterministic proof immediately.
+- Delay patterns that imply product-surface maturity beyond current repo truth.
+- Diverge on sequencing when FrankenMermaid’s strongest current assets differ from FrankenTUI or the website’s more polished publication posture.
+
 ## Validation Checklist
 
 - `evidence/demo_strategy.md` cites this artifact in its evidence basis.

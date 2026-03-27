@@ -146,6 +146,12 @@
       color: #ffd0dc;
     }
 
+    .shell-share {
+      border-color: rgba(76, 201, 255, 0.3);
+      background: rgba(76, 201, 255, 0.12);
+      color: #dff3ff;
+    }
+
     .shell-grid {
       display: grid;
       gap: 1.5rem;
@@ -1031,6 +1037,7 @@
                 <button type="button" class="shell-toggle" data-shell-target="playground" data-shell-balance="balanced" aria-pressed="true">Balanced</button>
                 <button type="button" class="shell-toggle" data-shell-target="playground" data-shell-balance="wide-right" aria-pressed="false">Output First</button>
                 <button type="button" class="shell-rail-toggle" data-shell-target="playground" data-shell-rail="expanded">Collapse Rail</button>
+                <button type="button" id="copy-state-link" class="shell-toggle shell-share">Copy Link</button>
               </div>
             </div>
           </div>
@@ -1764,7 +1771,8 @@
       canvas: document.getElementById("diagram-canvas"),
       supportGrid: document.getElementById("support-grid"),
       coverageSummary: document.getElementById("coverage-summary"),
-      coverageTable: document.getElementById("coverage-table")
+      coverageTable: document.getElementById("coverage-table"),
+      copyStateLink: document.getElementById("copy-state-link")
     };
 
     let frankenRuntime = null;
@@ -1775,6 +1783,8 @@
     let galleryObserver = null;
     let galleryFilter = "all";
     let galleryQuery = "";
+    let suppressUrlSync = false;
+    let lastStateUrl = "";
 
     mermaid.initialize({
       startOnLoad: false,
@@ -1840,6 +1850,7 @@
           }
           shell.dataset.balance = balanceButton.dataset.shellBalance;
           applyShellState(shell);
+          syncUrlState("replace");
           return;
         }
 
@@ -1851,6 +1862,7 @@
           }
           shell.dataset.rail = shell.dataset.rail === "collapsed" ? "expanded" : "collapsed";
           applyShellState(shell);
+          syncUrlState("replace");
         }
       });
     }
@@ -1866,6 +1878,118 @@
         .replace(/>/g, "&gt;");
     }
 
+    function findSampleById(sampleId, fallback = editorSamples[0]) {
+      return gallerySamples.find((entry) => entry.id === sampleId) || fallback;
+    }
+
+    function collectShellState() {
+      const state = {};
+      for (const shell of document.querySelectorAll("[data-shell]")) {
+        state[shell.dataset.shell] = {
+          balance: shell.dataset.balance || "balanced",
+          rail: shell.dataset.rail || "expanded"
+        };
+      }
+      return state;
+    }
+
+    function applyShellStateSnapshot(shellState) {
+      if (!shellState || typeof shellState !== "object") {
+        return;
+      }
+      for (const shell of document.querySelectorAll("[data-shell]")) {
+        const next = shellState[shell.dataset.shell];
+        if (!next) {
+          continue;
+        }
+        if (typeof next.balance === "string") {
+          shell.dataset.balance = next.balance;
+        }
+        if (typeof next.rail === "string") {
+          shell.dataset.rail = next.rail;
+        }
+        applyShellState(shell);
+      }
+    }
+
+    function collectUrlState() {
+      return {
+        sample: currentSample?.id || editorSamples[0]?.id || "",
+        spotlight: spotlightSample?.id || currentSample?.id || "",
+        galleryFilter,
+        galleryQuery,
+        source: els.input.value,
+        shells: collectShellState()
+      };
+    }
+
+    function buildStateUrl() {
+      const url = new URL(window.location.href);
+      const state = collectUrlState();
+      url.searchParams.set("sample", state.sample);
+      url.searchParams.set("spotlight", state.spotlight);
+      url.searchParams.set("filter", state.galleryFilter);
+      if (state.galleryQuery) {
+        url.searchParams.set("q", state.galleryQuery);
+      } else {
+        url.searchParams.delete("q");
+      }
+      if (state.source && state.sample && state.source !== findSampleById(state.sample, currentSample).code) {
+        url.searchParams.set("source", state.source);
+      } else {
+        url.searchParams.delete("source");
+      }
+      url.searchParams.set("shells", JSON.stringify(state.shells));
+      return url;
+    }
+
+    function syncUrlState(mode = "replace") {
+      if (suppressUrlSync) {
+        return;
+      }
+      const url = buildStateUrl();
+      const next = url.toString();
+      if (next === lastStateUrl) {
+        return;
+      }
+      lastStateUrl = next;
+      if (mode === "push") {
+        history.pushState(null, "", url);
+      } else {
+        history.replaceState(null, "", url);
+      }
+    }
+
+    function restoreUrlState() {
+      const url = new URL(window.location.href);
+      const sample = findSampleById(url.searchParams.get("sample"), editorSamples[0]);
+      const spotlight = findSampleById(url.searchParams.get("spotlight"), sample);
+      const requestedFilter = url.searchParams.get("filter");
+      const query = url.searchParams.get("q") || "";
+      const sourceOverride = url.searchParams.get("source");
+      const shellJson = url.searchParams.get("shells");
+
+      suppressUrlSync = true;
+      currentSample = sample;
+      spotlightSample = spotlight;
+      galleryFilter = galleryCategories.includes(requestedFilter) ? requestedFilter : "all";
+      galleryQuery = query;
+      els.input.value = sourceOverride || sample.code;
+      els.gallerySearch.value = query;
+
+      if (shellJson) {
+        try {
+          applyShellStateSnapshot(JSON.parse(shellJson));
+        } catch (_error) {
+          // Ignore malformed shell state and keep defaults.
+        }
+      }
+
+      suppressUrlSync = false;
+      lastStateUrl = buildStateUrl().toString();
+      history.replaceState(null, "", buildStateUrl());
+    }
+
     function createSampleButtons() {
       els.sampleButtons.innerHTML = "";
       for (const sample of editorSamples) {
@@ -1879,6 +2003,7 @@
           currentSample = sample;
           els.input.value = sample.code;
           updateActiveSample();
+          syncUrlState("push");
           renderAll();
         });
         els.sampleButtons.appendChild(button);
@@ -1921,6 +2046,7 @@
         button.addEventListener("click", () => {
           galleryFilter = category;
           renderFilterControls();
+          syncUrlState("push");
           renderGallery();
         });
         els.galleryFilters.appendChild(button);
@@ -1947,6 +2073,7 @@
         tile.addEventListener("click", () => {
           spotlightSample = sample;
           renderFeatureStrip();
+          syncUrlState("push");
           renderSpotlight();
         });
         els.featureStrip.appendChild(tile);
@@ -2105,6 +2232,7 @@
           els.input.value = sample.code;
           updateActiveSample();
           renderFeatureStrip();
+          syncUrlState("push");
           renderSpotlight();
           renderAll();
           document.getElementById("section-playground").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -2119,6 +2247,7 @@
           }
           spotlightSample = sample;
           renderFeatureStrip();
+          syncUrlState("push");
           renderSpotlight();
           document.getElementById("section-showcase").scrollIntoView({ behavior: "smooth", block: "start" });
         });
@@ -2588,17 +2717,21 @@
     async function boot() {
       await loadCoverageArtifact();
       initShellControls();
+      restoreUrlState();
       createSampleButtons();
       renderFeatureStrip();
       renderFilterControls();
       renderSupportGrid();
       renderCapabilityPanel(capabilityArtifact);
       renderCoverageMatrix(coverageArtifact);
-      els.input.value = currentSample.code;
+      if (!els.input.value) {
+        els.input.value = currentSample.code;
+      }
       await loadFrankenRuntime();
       await renderSpotlight();
       await renderGallery();
       await renderAll();
+      syncUrlState("replace");
 
       animate("header .glass", { opacity: [0, 1], y: [24, 0] }, { duration: 0.7, easing: [0.22, 1, 0.36, 1] });
       animate("main > section", { opacity: [0, 1], y: [28, 0] }, { delay: stagger(0.08), duration: 0.7, easing: [0.22, 1, 0.36, 1] });
@@ -2622,12 +2755,14 @@
       await renderSpotlight();
       await renderGallery();
       await renderAll();
+      syncUrlState("replace");
     });
 
     els.spotlightOpenEditor.addEventListener("click", () => {
       currentSample = spotlightSample;
       els.input.value = spotlightSample.code;
       updateActiveSample();
+      syncUrlState("push");
       renderAll();
       document.getElementById("section-playground").scrollIntoView({ behavior: "smooth", block: "start" });
     });
@@ -2690,6 +2825,7 @@
       galleryQuery = els.gallerySearch.value;
       window.clearTimeout(galleryDebounced);
       galleryDebounced = window.setTimeout(() => {
+        syncUrlState("replace");
         renderGallery();
       }, 180);
     });
@@ -2698,8 +2834,33 @@
     els.input.addEventListener("input", () => {
       window.clearTimeout(debounced);
       debounced = window.setTimeout(() => {
+        syncUrlState("replace");
         renderAll();
       }, 260);
+    });
+
+    els.copyStateLink.addEventListener("click", async () => {
+      const url = buildStateUrl().toString();
+      const original = els.copyStateLink.textContent;
+      try {
+        await navigator.clipboard.writeText(url);
+        els.copyStateLink.textContent = "Copied";
+      } catch (_error) {
+        els.copyStateLink.textContent = "Copy Failed";
+      }
+      window.setTimeout(() => {
+        els.copyStateLink.textContent = original;
+      }, 1400);
+    });
+
+    window.addEventListener("popstate", async () => {
+      restoreUrlState();
+      createSampleButtons();
+      renderFeatureStrip();
+      renderFilterControls();
+      await renderSpotlight();
+      await renderGallery();
+      await renderAll();
     });
 
     boot();

@@ -2079,3 +2079,79 @@ fn evidence_report_flags_uncovered_closed_alien_cs_beads() {
         .expect("report should still be written");
     assert!(report.contains("bd-missing"));
 }
+
+// ── Adversarial Security Test Corpus ───────────────────────────────
+// Cross-crate tests verifying that malicious input cannot produce
+// exploitable SVG output.
+
+#[test]
+fn adversarial_xss_in_node_label_is_escaped_in_svg() {
+    let input = "flowchart LR\n  A[<script>alert(1)</script>] --> B";
+    let result = fm_parser::parse(input);
+    let svg = fm_render_svg::render_svg(&result.ir);
+    assert!(
+        !svg.contains("<script>"),
+        "SVG must not contain raw <script> tags"
+    );
+}
+
+#[test]
+fn adversarial_xss_in_edge_label_is_escaped_in_svg() {
+    let input = "flowchart LR\n  A -->|<img onerror=alert(1)>| B";
+    let result = fm_parser::parse(input);
+    let svg = fm_render_svg::render_svg(&result.ir);
+    // The raw `<img` must be escaped to `&lt;img` — check that unescaped HTML tags don't appear.
+    assert!(
+        !svg.contains("<img "),
+        "SVG must not contain raw <img> tags in edge labels"
+    );
+}
+
+#[test]
+fn adversarial_svg_injection_via_class_name_blocked() {
+    let input = "flowchart LR\n  A[Node]:::\"onload=alert(1)";
+    let result = fm_parser::parse(input);
+    let svg = fm_render_svg::render_svg(&result.ir);
+    assert!(
+        !svg.contains("onload="),
+        "SVG must not contain injected event handlers via class names"
+    );
+}
+
+#[test]
+fn adversarial_full_pipeline_never_produces_nan_in_svg() {
+    let inputs = [
+        "flowchart LR\n  A --> B",
+        "sequenceDiagram\n  Alice->>Bob: Hi",
+        "pie\n  \"A\" : 0\n  \"B\" : 0",
+        "quadrantChart\n  A: [0.5, 0.5]",
+        "erDiagram\n  A ||--o{ B : rel",
+    ];
+    for input in &inputs {
+        let result = fm_parser::parse(input);
+        let svg = fm_render_svg::render_svg(&result.ir);
+        assert!(
+            !svg.contains("NaN"),
+            "SVG must never contain NaN for input: {input}"
+        );
+        assert!(
+            !svg.contains("Infinity"),
+            "SVG must never contain Infinity for input: {input}"
+        );
+    }
+}
+
+#[test]
+fn adversarial_er_notation_injection_blocked() {
+    let input = "erDiagram\n  A ||--o{ B : rel";
+    let result = fm_parser::parse(input);
+    let svg = fm_render_svg::render_svg(&result.ir);
+    // ER notation should produce cardinality labels as properly escaped text
+    // content, not as raw HTML attributes. Verify the SVG is well-formed
+    // and does not contain unescaped script tags.
+    assert!(
+        !svg.contains("<script"),
+        "ER cardinality must not produce script tags"
+    );
+    assert!(svg.contains("<svg"), "SVG must be well-formed");
+}
