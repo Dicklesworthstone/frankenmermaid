@@ -2014,6 +2014,10 @@
     let galleryQuery = "";
     let suppressUrlSync = false;
     let lastStateUrl = "";
+    let renderRevision = 0;
+    let latestCommittedRevision = 0;
+    let renderDebounceTimer = 0;
+    const pendingRenderJobs = new Map();
 
     mermaid.initialize({
       startOnLoad: false,
@@ -2045,6 +2049,13 @@
     function setChip(el, text, cls) {
       el.textContent = text;
       el.className = `rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] ${cls}`;
+    }
+
+    function setRenderButtonState(isBusy, label = "Render") {
+      els.renderButton.disabled = isBusy;
+      els.renderButton.innerHTML = isBusy
+        ? `<div class="h-4 w-4 animate-spin rounded-full border-2 border-cobalt/30 border-t-cobalt"></div> ${label}`
+        : `Render <span class="kbd shortcut-hint">${isMac ? "\u2318+Enter" : "Ctrl+Enter"}</span>`;
     }
 
     function applyShellState(shell) {
@@ -2215,6 +2226,87 @@
         : (currentIndex + direction + list.length) % list.length;
       const nextSample = list[nextIndex];
       setCurrentSample(nextSample, { pushHistory: true, render: true, syncInput: true });
+    }
+
+    function finalizeOlderRenderJobs(currentRevision) {
+      for (const [revision, resolver] of pendingRenderJobs.entries()) {
+        if (revision >= currentRevision) {
+          continue;
+        }
+        resolver.resolve({ status: "superseded", revision });
+        pendingRenderJobs.delete(revision);
+      }
+    }
+
+    function scheduleRender(reason = "manual", { immediate = false } = {}) {
+      const revision = ++renderRevision;
+      const source = els.input.value;
+      const delay = immediate ? 0 : 220;
+      finalizeOlderRenderJobs(revision);
+
+      if (renderDebounceTimer) {
+        window.clearTimeout(renderDebounceTimer);
+      }
+
+      setRenderButtonState(true, delay > 0 ? "Queued" : "Rendering...");
+      els.parseSummary.textContent = delay > 0
+        ? `Queued ${reason} run · revision ${revision} · ${delay}ms debounce`
+        : `Starting ${reason} run · revision ${revision}`;
+      setChip(els.fmRenderChip, "queued", "border-cobalt/20 bg-cobalt/10 text-cobalt");
+      setChip(els.mermaidChip, "queued", "border-cobalt/20 bg-cobalt/10 text-cobalt");
+      setChip(els.canvasChip, "queued", "border-cobalt/20 bg-cobalt/10 text-cobalt");
+
+      const promise = new Promise((resolve, reject) => {
+        pendingRenderJobs.set(revision, { resolve, reject });
+      });
+
+      renderDebounceTimer = window.setTimeout(() => {
+        renderDebounceTimer = 0;
+        executeRenderPipeline(revision, source, reason);
+      }, delay);
+
+      return promise;
+    }
+
+    async function measureStage(label, timings, fn) {
+      const start = performance.now();
+      try {
+        const value = await fn();
+        timings[label] = Math.round(performance.now() - start);
+        return value;
+      } catch (error) {
+        timings[label] = Math.round(performance.now() - start);
+        throw error;
+      }
+    }
+
+    function buildCanvasFallbackSnapshot(lines, accent = "#ffd089") {
+      return {
+        mode: "fallback",
+        accent,
+        lines
+      };
+    }
+
+    function commitCanvasSnapshot(snapshot) {
+      const ctx = els.canvas.getContext("2d");
+      ctx.clearRect(0, 0, els.canvas.width, els.canvas.height);
+
+      if (snapshot.mode === "bitmap") {
+        ctx.drawImage(snapshot.canvas, 0, 0);
+        return;
+      }
+
+      ctx.fillStyle = "#0b1526";
+      ctx.fillRect(0, 0, els.canvas.width, els.canvas.height);
+      ctx.fillStyle = snapshot.accent;
+      ctx.font = "600 22px IBM Plex Sans, sans-serif";
+      ctx.fillText(snapshot.lines[0] || "Canvas pending", 28, 48);
+      ctx.fillStyle = "#c6d4e1";
+      ctx.font = "16px IBM Plex Sans, sans-serif";
+      for (const [index, line] of snapshot.lines.slice(1).entries()) {
+        ctx.fillText(String(line), 28, 84 + (index * 28));
+      }
     }
 
     function findSampleById(sampleId, fallback = editorSamples[0]) {
@@ -2939,125 +3031,229 @@
     }
 
     async function renderWithMermaid(source) {
+      const timings = {};
       try {
-        const id = `mermaid-${crypto.randomUUID()}`;
-        const { svg } = await mermaid.render(id, source);
-        els.mermaidSvg.innerHTML = svg;
-        setChip(els.mermaidChip, "ready", "border-mint/20 bg-mint/10 text-mint");
+        const rendered = await measureStage("mermaid", timings, async () => {
+          const id = `mermaid-${crypto.randomUUID()}`;
+          return mermaid.render(id, source);
+        });
+        return {
+          html: rendered.svg,
+          chipText: `${timings.mermaid}ms`,
+          chipClass: "border-mint/20 bg-mint/10 text-mint",
+          title: `Mermaid render completed in ${timings.mermaid}ms`,
+          timings
+        };
       } catch (error) {
-        els.mermaidSvg.innerHTML = `<div class="rounded-2xl border border-rose-300/20 bg-rose-300/10 p-4 text-sm text-rose-200">${String(error)}</div>`;
-        setChip(els.mermaidChip, "render error", "border-rose-300/20 bg-rose-300/10 text-rose-200");
+        return {
+          html: `<div class="rounded-2xl border border-rose-300/20 bg-rose-300/10 p-4 text-sm text-rose-200">${String(error)}</div>`,
+          chipText: "render error",
+          chipClass: "border-rose-300/20 bg-rose-300/10 text-rose-200",
+          title: `Mermaid render failed after ${timings.mermaid ?? 0}ms`,
+          timings,
+          error: String(error)
+        };
       }
     }
 
     async function renderWithFranken(source) {
+      const timings = {};
+
       if (!frankenRuntime) {
-        els.fmSvg.innerHTML = `
-          <div class="rounded-2xl border border-amber-300/20 bg-amber-300/10 p-4 text-sm leading-6 text-amber-100">
-            <div class="font-semibold">frankenmermaid browser package is not published on GitHub yet.</div>
-            <div class="mt-2">
-              The showcase is wired to the real API contract, but the generated <code>pkg/frankenmermaid.js</code> and <code>pkg/frankenmermaid_bg.wasm</code> assets are missing from the repository branch/release surface, so live WASM rendering cannot boot from remote URLs today.
+        return {
+          fmHtml: `
+            <div class="rounded-2xl border border-amber-300/20 bg-amber-300/10 p-4 text-sm leading-6 text-amber-100">
+              <div class="font-semibold">frankenmermaid browser package is not published on GitHub yet.</div>
+              <div class="mt-2">
+                The showcase is wired to the real API contract, but the generated <code>pkg/frankenmermaid.js</code> and <code>pkg/frankenmermaid_bg.wasm</code> assets are missing from the repository branch/release surface, so live WASM rendering cannot boot from remote URLs today.
+              </div>
             </div>
-          </div>
-        `;
-        els.detectOutput.textContent = pretty({
-          status: "runtime_unavailable",
-          reason: "No GitHub-hosted frankenmermaid browser bundle could be loaded."
-        });
-        els.parseOutput.textContent = pretty({
-          status: "runtime_unavailable",
-          expectedSurface: ["init", "renderSvg", "detectType", "parse", "sourceSpans", "capabilityMatrix", "Diagram"]
-        });
-        els.spanOutput.textContent = pretty({
-          status: "runtime_unavailable"
-        });
-        els.parseSummary.textContent = "Parse skipped because runtime was unavailable";
-        renderCapabilityPanel(capabilityArtifact);
-        setChip(els.fmRenderChip, "artifact missing", "border-rose-300/20 bg-rose-300/10 text-rose-200");
-        setChip(els.canvasChip, "artifact missing", "border-rose-300/20 bg-rose-300/10 text-rose-200");
-        const ctx = els.canvas.getContext("2d");
-        ctx.clearRect(0, 0, els.canvas.width, els.canvas.height);
-        ctx.fillStyle = "#0b1526";
-        ctx.fillRect(0, 0, els.canvas.width, els.canvas.height);
-        ctx.fillStyle = "#ffd089";
-        ctx.font = "600 22px IBM Plex Sans, sans-serif";
-        ctx.fillText("Canvas surface waiting on published frankenmermaid WASM", 28, 48);
-        ctx.fillStyle = "#c6d4e1";
-        ctx.font = "16px IBM Plex Sans, sans-serif";
-        ctx.fillText("The runtime contract exists in source, but the browser package is not hosted on GitHub yet.", 28, 84);
+          `,
+          detectText: pretty({
+            status: "runtime_unavailable",
+            reason: "No GitHub-hosted frankenmermaid browser bundle could be loaded."
+          }),
+          parseText: pretty({
+            status: "runtime_unavailable",
+            expectedSurface: ["init", "renderSvg", "detectType", "parse", "sourceSpans", "capabilityMatrix", "Diagram"]
+          }),
+          spanText: pretty({
+            status: "runtime_unavailable"
+          }),
+          parseSummary: "Parse skipped because runtime was unavailable",
+          capabilityMatrix: capabilityArtifact,
+          fmChipText: "artifact missing",
+          fmChipClass: "border-rose-300/20 bg-rose-300/10 text-rose-200",
+          fmChipTitle: "frankenmermaid runtime artifact unavailable",
+          canvasChipText: "artifact missing",
+          canvasChipClass: "border-rose-300/20 bg-rose-300/10 text-rose-200",
+          canvasChipTitle: "Canvas render unavailable without frankenmermaid runtime",
+          canvasSnapshot: buildCanvasFallbackSnapshot([
+            "Canvas surface waiting on published frankenmermaid WASM",
+            "The runtime contract exists in source, but the browser package is not hosted on GitHub yet."
+          ]),
+          timings
+        };
+      }
+
+      let parseStats = {
+        nodes: 0,
+        edges: 0,
+        warnings: 0
+      };
+
+      const result = {
+        capabilityMatrix: capabilityArtifact,
+        timings
+      };
+
+      try {
+        result.fmHtml = await measureStage("svg", timings, () => frankenRuntime.renderSvg(source, { theme: "corporate" }));
+        result.fmChipText = `${timings.svg}ms`;
+        result.fmChipClass = "border-mint/20 bg-mint/10 text-mint";
+        result.fmChipTitle = `SVG render completed in ${timings.svg}ms`;
+      } catch (error) {
+        result.fmHtml = `<div class="rounded-2xl border border-rose-300/20 bg-rose-300/10 p-4 text-sm text-rose-200">${String(error)}</div>`;
+        result.fmChipText = "render error";
+        result.fmChipClass = "border-rose-300/20 bg-rose-300/10 text-rose-200";
+        result.fmChipTitle = `SVG render failed after ${timings.svg ?? 0}ms`;
+      }
+
+      try {
+        const detected = await measureStage("detect", timings, () => frankenRuntime.detectType(source));
+        result.detectText = pretty(detected);
+      } catch (error) {
+        result.detectText = pretty({ error: String(error) });
+      }
+
+      try {
+        const parsed = await measureStage("parse", timings, () => frankenRuntime.parse(source));
+        result.parseText = pretty(parsed);
+        parseStats = {
+          warnings: Array.isArray(parsed?.warnings) ? parsed.warnings.length : 0,
+          nodes: parsed?.ir?.nodes?.length ?? 0,
+          edges: parsed?.ir?.edges?.length ?? 0
+        };
+      } catch (error) {
+        result.parseText = pretty({ error: String(error) });
+        result.parseError = String(error);
+      }
+
+      try {
+        const spans = await measureStage("spans", timings, () => frankenRuntime.sourceSpans(source));
+        result.spanText = pretty(spans);
+      } catch (error) {
+        result.spanText = pretty({ error: String(error) });
+      }
+
+      try {
+        result.capabilityMatrix = await measureStage("matrix", timings, () => frankenRuntime.capabilityMatrix());
+      } catch (error) {
+        result.capabilityMatrix = capabilityArtifact;
+      }
+
+      try {
+        const offscreen = document.createElement("canvas");
+        offscreen.width = els.canvas.width;
+        offscreen.height = els.canvas.height;
+        let workingDiagram = null;
+        try {
+          workingDiagram = new frankenRuntime.Diagram(offscreen, { theme: "corporate" });
+          const renderResult = await measureStage("canvas", timings, () => workingDiagram.render(source, { theme: "corporate" }));
+          result.canvasSnapshot = {
+            mode: "bitmap",
+            canvas: offscreen
+          };
+          result.canvasChipText = `${timings.canvas}ms`;
+          result.canvasChipClass = "border-mint/20 bg-mint/10 text-mint";
+          result.canvasChipTitle = renderResult?.canvas
+            ? pretty(renderResult.canvas)
+            : `Canvas render completed in ${timings.canvas}ms`;
+        } finally {
+          if (workingDiagram && typeof workingDiagram.destroy === "function") {
+            workingDiagram.destroy();
+          }
+        }
+      } catch (error) {
+        result.canvasSnapshot = buildCanvasFallbackSnapshot([
+          "Canvas render failed",
+          String(error)
+        ], "#ff9b9e");
+        result.canvasChipText = "render error";
+        result.canvasChipClass = "border-rose-300/20 bg-rose-300/10 text-rose-200";
+        result.canvasChipTitle = `Canvas render failed after ${timings.canvas ?? 0}ms`;
+      }
+
+      result.parseSummary = result.parseError
+        ? `parse failed · detect ${timings.detect ?? 0}ms · parse ${timings.parse ?? 0}ms`
+        : `nodes ${parseStats.nodes} · edges ${parseStats.edges} · warnings ${parseStats.warnings} · detect ${timings.detect ?? 0}ms · parse ${timings.parse ?? 0}ms · svg ${timings.svg ?? 0}ms · canvas ${timings.canvas ?? 0}ms`;
+
+      result.detectText ||= pretty({ status: "unavailable" });
+      result.parseText ||= pretty({ status: "unavailable" });
+      result.spanText ||= pretty({ status: "unavailable" });
+      result.canvasSnapshot ||= buildCanvasFallbackSnapshot([
+        "Canvas render pending",
+        "No committed canvas snapshot was produced for this revision."
+      ]);
+
+      return result;
+    }
+
+    async function executeRenderPipeline(revision, source, reason) {
+      if (revision !== renderRevision) {
+        const stale = pendingRenderJobs.get(revision);
+        stale?.resolve({ status: "superseded", revision });
+        pendingRenderJobs.delete(revision);
         return;
       }
 
-      try {
-        const svg = await frankenRuntime.renderSvg(source, { theme: "corporate" });
-        els.fmSvg.innerHTML = svg;
-        setChip(els.fmRenderChip, "live", "border-mint/20 bg-mint/10 text-mint");
-      } catch (error) {
-        els.fmSvg.innerHTML = `<div class="rounded-2xl border border-rose-300/20 bg-rose-300/10 p-4 text-sm text-rose-200">${String(error)}</div>`;
-        setChip(els.fmRenderChip, "render error", "border-rose-300/20 bg-rose-300/10 text-rose-200");
+      setRenderButtonState(true, "Rendering...");
+      els.parseSummary.textContent = `Running ${reason} pipeline · revision ${revision}`;
+      setChip(els.fmRenderChip, "running", "border-cobalt/20 bg-cobalt/10 text-cobalt");
+      setChip(els.mermaidChip, "running", "border-cobalt/20 bg-cobalt/10 text-cobalt");
+      setChip(els.canvasChip, "running", "border-cobalt/20 bg-cobalt/10 text-cobalt");
+
+      const startedAt = performance.now();
+      const [mermaidResult, frankenResult] = await Promise.all([
+        renderWithMermaid(source),
+        renderWithFranken(source)
+      ]);
+
+      if (revision !== renderRevision) {
+        const stale = pendingRenderJobs.get(revision);
+        stale?.resolve({ status: "superseded", revision });
+        pendingRenderJobs.delete(revision);
+        return;
       }
 
-      try {
-        const detected = await frankenRuntime.detectType(source);
-        els.detectOutput.textContent = pretty(detected);
-      } catch (error) {
-        els.detectOutput.textContent = pretty({ error: String(error) });
-      }
+      latestCommittedRevision = revision;
+      const totalMs = Math.round(performance.now() - startedAt);
 
-      try {
-        const parsed = await frankenRuntime.parse(source);
-        els.parseOutput.textContent = pretty(parsed);
-        const warningCount = Array.isArray(parsed?.warnings) ? parsed.warnings.length : 0;
-        const nodeCount = parsed?.ir?.nodes?.length ?? 0;
-        const edgeCount = parsed?.ir?.edges?.length ?? 0;
-        els.parseSummary.textContent = `nodes ${nodeCount} · edges ${edgeCount} · warnings ${warningCount}`;
-      } catch (error) {
-        els.parseOutput.textContent = pretty({ error: String(error) });
-        els.parseSummary.textContent = "Parse failed";
-      }
+      els.mermaidSvg.innerHTML = mermaidResult.html;
+      setChip(els.mermaidChip, mermaidResult.chipText, mermaidResult.chipClass);
+      els.mermaidChip.title = `${mermaidResult.title} · revision ${revision}`;
 
-      try {
-        const spans = await frankenRuntime.sourceSpans(source);
-        els.spanOutput.textContent = pretty(spans);
-      } catch (error) {
-        els.spanOutput.textContent = pretty({ error: String(error) });
-      }
+      els.fmSvg.innerHTML = frankenResult.fmHtml;
+      setChip(els.fmRenderChip, frankenResult.fmChipText, frankenResult.fmChipClass);
+      els.fmRenderChip.title = `${frankenResult.fmChipTitle} · revision ${revision}`;
 
-      try {
-        const matrix = await frankenRuntime.capabilityMatrix();
-        renderCapabilityPanel(matrix);
-      } catch (error) {
-        renderCapabilityPanel(capabilityArtifact);
-      }
+      els.detectOutput.textContent = frankenResult.detectText;
+      els.parseOutput.textContent = frankenResult.parseText;
+      els.spanOutput.textContent = frankenResult.spanText;
+      renderCapabilityPanel(frankenResult.capabilityMatrix);
+      commitCanvasSnapshot(frankenResult.canvasSnapshot);
+      setChip(els.canvasChip, frankenResult.canvasChipText, frankenResult.canvasChipClass);
+      els.canvasChip.title = `${frankenResult.canvasChipTitle} · revision ${revision}`;
+      els.parseSummary.textContent = `${frankenResult.parseSummary} · mermaid ${mermaidResult.timings.mermaid ?? 0}ms · total ${totalMs}ms · revision ${revision}`;
 
-      try {
-        if (diagramInstance && typeof diagramInstance.destroy === "function") {
-          diagramInstance.destroy();
-        }
-        diagramInstance = new frankenRuntime.Diagram(els.canvas, { theme: "corporate" });
-        const renderResult = await diagramInstance.render(source, { theme: "corporate" });
-        setChip(els.canvasChip, "live", "border-mint/20 bg-mint/10 text-mint");
-        if (renderResult?.canvas) {
-          els.canvasChip.title = pretty(renderResult.canvas);
-        }
-      } catch (error) {
-        const ctx = els.canvas.getContext("2d");
-        ctx.clearRect(0, 0, els.canvas.width, els.canvas.height);
-        ctx.fillStyle = "#0b1526";
-        ctx.fillRect(0, 0, els.canvas.width, els.canvas.height);
-        ctx.fillStyle = "#ff9b9e";
-        ctx.font = "600 22px IBM Plex Sans, sans-serif";
-        ctx.fillText("Canvas render failed", 28, 48);
-        ctx.fillStyle = "#c6d4e1";
-        ctx.font = "16px IBM Plex Sans, sans-serif";
-        ctx.fillText(String(error), 28, 84);
-        setChip(els.canvasChip, "render error", "border-rose-300/20 bg-rose-300/10 text-rose-200");
-      }
+      setRenderButtonState(false);
+      const resolver = pendingRenderJobs.get(revision);
+      resolver?.resolve({ status: "committed", revision, totalMs });
+      pendingRenderJobs.delete(revision);
     }
 
-    async function renderAll() {
-      const source = els.input.value;
-      await Promise.all([renderWithMermaid(source), renderWithFranken(source)]);
+    function renderAll(options = {}) {
+      return scheduleRender(options.reason ?? "manual", { immediate: options.immediate ?? true });
     }
 
     async function boot() {
@@ -3077,7 +3273,7 @@
       await loadFrankenRuntime();
       await renderSpotlight();
       await renderGallery();
-      await renderAll();
+      await renderAll({ reason: "boot", immediate: true });
       syncUrlState("replace");
 
       animate("header .glass", { opacity: [0, 1], y: [24, 0] }, { duration: 0.7, easing: [0.22, 1, 0.36, 1] });
@@ -3085,28 +3281,18 @@
     }
 
     els.renderButton.addEventListener("click", async () => {
-      const btn = els.renderButton;
-      const origHTML = btn.innerHTML;
-      btn.disabled = true;
-      btn.innerHTML = `<div class="h-4 w-4 animate-spin rounded-full border-2 border-cobalt/30 border-t-cobalt"></div> Rendering...`;
-      try {
-        await renderAll();
-      } finally {
-        btn.disabled = false;
-        btn.innerHTML = origHTML;
-      }
+      await renderAll({ reason: "manual", immediate: true });
     });
 
     els.retryRuntime.addEventListener("click", async () => {
       await loadFrankenRuntime();
       await renderSpotlight();
       await renderGallery();
-      await renderAll();
+      await renderAll({ reason: "runtime-retry", immediate: true });
       syncUrlState("replace");
     });
 
     els.spotlightOpenEditor.addEventListener("click", () => {
-      currentSample = spotlightSample;
       setCurrentSample(spotlightSample, { pushHistory: true, render: true, syncInput: true });
       document.getElementById("section-playground").scrollIntoView({ behavior: "smooth", block: "start" });
     });
@@ -3174,14 +3360,10 @@
       }, 180);
     });
 
-    let debounced;
     els.input.addEventListener("input", () => {
       updateEditorChrome();
-      window.clearTimeout(debounced);
-      debounced = window.setTimeout(() => {
-        syncUrlState("replace");
-        renderAll();
-      }, 260);
+      syncUrlState("replace");
+      renderAll({ reason: "edit", immediate: false });
     });
 
     els.input.addEventListener("scroll", syncEditorScroll);
@@ -3215,7 +3397,7 @@
       renderFilterControls();
       await renderSpotlight();
       await renderGallery();
-      await renderAll();
+      await renderAll({ reason: "popstate", immediate: true });
     });
 
     boot();
@@ -3274,7 +3456,7 @@
     document.addEventListener("keydown", (event) => {
       if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
         event.preventDefault();
-        renderAll();
+        renderAll({ reason: "keyboard", immediate: true });
       }
       if (event.altKey && !event.ctrlKey && !event.metaKey && event.key === "ArrowLeft") {
         event.preventDefault();

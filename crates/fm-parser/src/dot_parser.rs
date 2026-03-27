@@ -269,18 +269,58 @@ fn parse_dot_edge_statement(
 
     let edge_label_str = shared_attrs.and_then(parse_dot_label);
 
+    // Expand edge groups: "A -> {B C D}" becomes ["A -> B", "A -> C", "A -> D"].
+    // Check each window for brace groups and expand them.
     for window in parts.windows(2) {
-        let Some(from_node) = parse_dot_node_fragment(window[0]) else {
+        let from_text = window[0].trim();
+        let to_text = window[1].trim();
+
+        // Handle edge groups: A -> {B C D}
+        if to_text.starts_with('{') && to_text.ends_with('}') {
+            let inner = to_text[1..to_text.len() - 1].trim();
+            let group_members: Vec<&str> = inner
+                .split_whitespace()
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !group_members.is_empty() {
+                let Some(from_node) = parse_dot_node_fragment(from_text) else {
+                    continue;
+                };
+                let from = builder.intern_node(
+                    &from_node.id,
+                    from_node.label.as_deref(),
+                    NodeShape::Rect,
+                    span,
+                );
+                for member in &group_members {
+                    let Some(to_node) = parse_dot_node_fragment(member) else {
+                        continue;
+                    };
+                    let to = builder.intern_node(
+                        &to_node.id,
+                        to_node.label.as_deref(),
+                        NodeShape::Rect,
+                        span,
+                    );
+                    if let (Some(from_id), Some(to_id)) = (from, to) {
+                        builder.push_edge(from_id, to_id, arrow, edge_label_str.as_deref(), span);
+                        add_node_to_active_groups(builder, active_clusters, active_subgraphs, from_id);
+                        add_node_to_active_groups(builder, active_clusters, active_subgraphs, to_id);
+                    }
+                }
+                continue;
+            }
+        }
+
+        let Some(from_node) = parse_dot_node_fragment(from_text) else {
             builder.add_warning(format!(
-                "Line {line_number}: invalid DOT edge source: {}",
-                window[0]
+                "Line {line_number}: invalid DOT edge source: {from_text}"
             ));
             continue;
         };
-        let Some(to_node) = parse_dot_node_fragment(window[1]) else {
+        let Some(to_node) = parse_dot_node_fragment(to_text) else {
             builder.add_warning(format!(
-                "Line {line_number}: invalid DOT edge target: {}",
-                window[1]
+                "Line {line_number}: invalid DOT edge target: {to_text}"
             ));
             continue;
         };
@@ -350,7 +390,10 @@ fn parse_dot_node_fragment(raw: &str) -> Option<DotNode> {
     }
 
     let (id_part, attrs) = split_endpoint_and_attrs(trimmed);
-    let id = normalize_identifier(id_part);
+    // Strip DOT port/compass suffixes: "node:port:n" → "node".
+    // Ports use colon syntax: id:port or id:port:compass.
+    let id_without_port = id_part.split(':').next().unwrap_or(id_part);
+    let id = normalize_identifier(id_without_port);
     if id.is_empty() {
         return None;
     }
@@ -824,4 +867,39 @@ fn parses_semicolon_in_label() {
     let edge = &result.ir.edges[0];
     let label = result.ir.labels[edge.label.unwrap().0].text.clone();
     assert_eq!(label, "foo; bar");
+}
+
+#[test]
+fn dot_port_syntax_stripped_from_node_ids() {
+    let input = "digraph G { A:port1 -> B:port2:n; }";
+    let result = parse_dot(input);
+    assert_eq!(result.ir.edges.len(), 1, "should parse edge");
+    let node_ids: Vec<&str> = result.ir.nodes.iter().map(|n| n.id.as_str()).collect();
+    assert!(node_ids.contains(&"A"), "node A should exist (port stripped)");
+    assert!(node_ids.contains(&"B"), "node B should exist (port stripped)");
+}
+
+#[test]
+fn dot_edge_group_expands_to_multiple_edges() {
+    let input = "digraph G { A -> {B C D}; }";
+    let result = parse_dot(input);
+    assert_eq!(
+        result.ir.edges.len(),
+        3,
+        "A -> {{B C D}} should expand to 3 edges"
+    );
+    let node_ids: Vec<&str> = result.ir.nodes.iter().map(|n| n.id.as_str()).collect();
+    assert!(node_ids.contains(&"A"));
+    assert!(node_ids.contains(&"B"));
+    assert!(node_ids.contains(&"C"));
+    assert!(node_ids.contains(&"D"));
+}
+
+#[test]
+fn dot_compass_points_stripped() {
+    let input = "digraph G { A:n -> B:s; }";
+    let result = parse_dot(input);
+    assert_eq!(result.ir.edges.len(), 1);
+    assert!(result.ir.nodes.iter().any(|n| n.id == "A"));
+    assert!(result.ir.nodes.iter().any(|n| n.id == "B"));
 }

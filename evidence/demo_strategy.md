@@ -263,6 +263,7 @@ Playground section:
 - Right column owns rendered outputs and matrix-backed evidence: FrankenMermaid SVG, Mermaid baseline, canvas surface, capability summary, and capability table.
 - Render actions must be explicit and reproducible; any debounced or cancellable pipeline later added must preserve the current "what output corresponds to what input" clarity.
 - The editor surface should expose authoring affordances directly in the page: syntax lens, structural hints, sample-cycling shortcuts, and URL-safe source overrides that survive deep-link restoration.
+- The live authoring loop should be latest-edit-wins: stale async runs must be discarded, and visible stage timing/error state should explain what actually rendered.
 - The section should function as the home for future telemetry, determinism, diagnostics, and export labs rather than scattering those surfaces across the page.
 
 Support Evidence section:
