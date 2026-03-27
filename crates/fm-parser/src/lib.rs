@@ -1217,4 +1217,149 @@ mod tests {
         let result = parse(&input);
         assert!(!result.ir.nodes.is_empty());
     }
+
+    // ── Adversarial input test corpus ──────────────────────────────────
+    // These tests verify the parser handles malicious, malformed, and
+    // pathological inputs without panicking, producing NaN, or generating
+    // exploitable output (XSS in SVG, injection via labels, etc.).
+
+    #[test]
+    fn adversarial_xss_in_node_label_is_escaped() {
+        let input = "flowchart LR\n  A[<script>alert(1)</script>] --> B";
+        let result = parse(input);
+        let svg = fm_render_svg::render_svg(&result.ir);
+        assert!(
+            !svg.contains("<script>"),
+            "SVG must not contain raw <script> tags"
+        );
+        assert!(
+            svg.contains("&lt;script&gt;") || !svg.contains("script"),
+            "script tag must be escaped or absent"
+        );
+    }
+
+    #[test]
+    fn adversarial_xss_in_edge_label_is_escaped() {
+        let input = "flowchart LR\n  A -->|<img onerror=alert(1)>| B";
+        let result = parse(input);
+        let svg = fm_render_svg::render_svg(&result.ir);
+        assert!(
+            !svg.contains("onerror="),
+            "SVG must not contain onerror event handlers"
+        );
+    }
+
+    #[test]
+    fn adversarial_javascript_url_in_click_blocked() {
+        let input =
+            "flowchart LR\n  A[Node]\n  click A \"javascript:alert(document.cookie)\"";
+        let result = parse(input);
+        let node = result.ir.nodes.iter().find(|n| n.id == "A");
+        if let Some(node) = node {
+            assert!(
+                node.href.is_none() || !node.href.as_ref().unwrap().contains("javascript:"),
+                "javascript: URLs must be blocked"
+            );
+        }
+    }
+
+    #[test]
+    fn adversarial_deeply_nested_subgraphs_no_stack_overflow() {
+        let mut input = String::from("flowchart LR\n");
+        for i in 0..200 {
+            let _ = writeln!(input, "  subgraph S{i}");
+        }
+        input.push_str("    A --> B\n");
+        for _ in 0..200 {
+            input.push_str("  end\n");
+        }
+        let result = parse(&input);
+        // Must not stack overflow — just produce some output.
+        assert!(result.confidence > 0.0);
+    }
+
+    #[test]
+    fn adversarial_extremely_long_node_id_no_panic() {
+        let long_id: String = "A".repeat(100_000);
+        let input = format!("flowchart LR\n  {long_id} --> B");
+        let result = parse(&input);
+        assert!(result.confidence > 0.0);
+    }
+
+    #[test]
+    fn adversarial_null_bytes_in_input_no_panic() {
+        let input = "flowchart LR\n  A\0B --> C\0D";
+        let result = parse(input);
+        assert!(result.confidence > 0.0);
+    }
+
+    #[test]
+    fn adversarial_unicode_bidi_override_no_panic() {
+        let input = "flowchart LR\n  A[\u{202e}reversed\u{202c}] --> B";
+        let result = parse(input);
+        assert!(result.confidence > 0.0);
+    }
+
+    #[test]
+    fn adversarial_svg_injection_via_class_name() {
+        let input = "flowchart LR\n  A[Node]:::\"onload=alert(1)";
+        let result = parse(input);
+        let svg = fm_render_svg::render_svg(&result.ir);
+        assert!(
+            !svg.contains("onload="),
+            "SVG must not contain injected event handlers via class names"
+        );
+    }
+
+    #[test]
+    fn adversarial_many_parallel_edges_no_quadratic_blowup() {
+        let mut input = String::from("flowchart LR\n");
+        for _ in 0..500 {
+            input.push_str("  A --> B\n");
+        }
+        let result = parse(&input);
+        // Should complete in reasonable time (< 5 seconds).
+        assert!(result.ir.edges.len() >= 1);
+    }
+
+    #[test]
+    fn adversarial_er_notation_injection() {
+        let input = "erDiagram\n  A ||--\"onload=alert(1)\"|| B : rel";
+        let result = parse(input);
+        let svg = fm_render_svg::render_svg(&result.ir);
+        assert!(
+            !svg.contains("onload="),
+            "ER notation must not allow attribute injection"
+        );
+    }
+
+    #[test]
+    fn adversarial_full_pipeline_never_produces_nan() {
+        let inputs = [
+            "flowchart LR\n  A --> B",
+            "sequenceDiagram\n  Alice->>Bob: Hi",
+            "pie\n  \"A\" : 0\n  \"B\" : 0",
+            "quadrantChart\n  A: [NaN, NaN]",
+            "gantt\n  title T\n  section S\n  Task :a1, 2024-01-01, 0d",
+        ];
+        for input in &inputs {
+            let result = parse(input);
+            let svg = fm_render_svg::render_svg(&result.ir);
+            assert!(
+                !svg.contains("NaN"),
+                "SVG must never contain NaN for input: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn adversarial_empty_and_whitespace_inputs() {
+        for input in ["", " ", "\n", "\t", "\r\n", "   \n   \n   "] {
+            let result = parse(input);
+            assert!(
+                result.confidence >= 0.0,
+                "empty/whitespace input must not crash"
+            );
+        }
+    }
 }
