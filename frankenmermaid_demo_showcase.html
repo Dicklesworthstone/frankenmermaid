@@ -1417,14 +1417,15 @@
         .replace(/^-+|-+$/g, "");
     }
 
-    function sample(category, index, title, description, code, featured = false) {
+    function sample(category, index, title, description, code, featured = false, narrative = null) {
       return {
         id: `${category}-${index + 1}-${slug(title)}`,
         category,
         label: title,
         description,
         code,
-        featured
+        featured,
+        narrative
       };
     }
 
@@ -1625,7 +1626,11 @@
         { title: "Security Exception Intake", entry: "Exception request opened", check: "Threat model attached?", assess: "Score exposure window", decision: "Approval path", automate: "Create temporary policy waiver", coordinate: "Escalate to security council", verify: "Confirm compensating controls", document: "Store waiver evidence", retrospective: "Retire exception on schedule" },
         { title: "Warehouse Restock Planner", entry: "Inventory falls below target", check: "Demand forecast stable?", assess: "Generate purchase options", decision: "Supplier route", automate: "Place replenishment order", coordinate: "Escalate to sourcing lead", verify: "Confirm ASN received", document: "Update planning workbook", retrospective: "Tune reorder levels" },
         { title: "Partner API Migration", entry: "Deprecation notice arrives", check: "Client inventory complete?", assess: "Map compatibility gaps", decision: "Migration strategy", automate: "Generate SDK upgrade PRs", coordinate: "Coordinate vendor office hours", verify: "Replay contract tests", document: "Publish migration bulletin", retrospective: "Archive sunset metrics" }
-      ].map((s, index) => sample("flowchart", index, s.title, "Implemented", buildFlowchartScenario(s), index === 0)),
+      ].map((s, index) => sample("flowchart", index, s.title, "Implemented", buildFlowchartScenario(s), index === 0, index === 0 ? {
+        headline: "Best recovery-and-operations proof in the current repo.",
+        lookFor: "Dense but still readable routing, explicit decision diamonds, and a believable escalation flow that makes the flowchart renderer look production-oriented instead of toy-like.",
+        proves: ["J1 messy-input-to-useful-output anchor", "J2 shared-engine story anchor", "strongest currently implemented family"]
+      } : null)),
       ...[
         { title: "Checkout Risk Review", user: "Fraud Analyst", portal: "Risk Console", api: "Risk API", queue: "Decision Queue", worker: "Scoring Worker", store: "Ledger Store", open: "Open charge review", submit: "Fetch order + customer context", enqueue: "Queue secondary scoring", execute: "Recompute risk profile", persist: "Persist case evidence", ack: "Store versioned result", respond: "Return approve/hold recommendation", complete: "Display reviewer action panel" },
         { title: "Claims Triage Pipeline", user: "Claims Lead", portal: "Claims Workspace", api: "Claims API", queue: "Routing Queue", worker: "Triage Worker", store: "Case Vault", open: "Inspect newly filed claim", submit: "Submit policy + incident payload", enqueue: "Route to adjudication lane", execute: "Evaluate claimant history", persist: "Write evidence bundle", ack: "Acknowledge saved record", respond: "Return triage priority", complete: "Show next handling steps" },
@@ -1635,7 +1640,11 @@
         { title: "Marketplace Listing Publish", user: "Merchandiser", portal: "Catalog Studio", api: "Catalog API", queue: "Publish Queue", worker: "Indexer", store: "Catalog Store", open: "Review draft listing", submit: "Send listing payload", enqueue: "Queue enrichment pass", execute: "Compute taxonomy + search facets", persist: "Save enriched listing", ack: "Confirm write revision", respond: "Return publish eligibility", complete: "Show channel status board" },
         { title: "Loan Underwriting Sync", user: "Underwriter", portal: "Credit Workbench", api: "Underwriting API", queue: "Decision Queue", worker: "Rules Engine", store: "Credit Vault", open: "Open loan application", submit: "Request bureau + banking data", enqueue: "Queue policy pass", execute: "Score affordability and fraud", persist: "Store decision package", ack: "Return package id", respond: "Emit approve/decline range", complete: "Present recommendation summary" },
         { title: "Media Render Dispatch", user: "Producer", portal: "Render Studio", api: "Render API", queue: "Render Queue", worker: "Transcode Worker", store: "Asset Archive", open: "Submit campaign cut", submit: "Register source asset", enqueue: "Queue renditions", execute: "Render channel variants", persist: "Store final assets", ack: "Confirm output manifest", respond: "Return delivery map", complete: "Open publish checklist" }
-      ].map((s, index) => sample("sequence", index, s.title, "Partial", buildSequenceScenario(s), index === 0)),
+      ].map((s, index) => sample("sequence", index, s.title, "Partial", buildSequenceScenario(s), index === 0, index === 0 ? {
+        headline: "Best message-flow narrative for cross-surface comparison.",
+        lookFor: "Clear participant orchestration, request/queue/worker boundaries, and a scenario that feels like a real fraud-review system rather than a tutorial.",
+        proves: ["J2 multi-surface breadth", "partial-family honesty with still-useful output", "browser baseline comparison value"]
+      } : null)),
       ...[
         { title: "Change Management Domain", root: "ChangeRequest", policy: "ApprovalPolicy", service: "ExecutionService", step: "ExecutionStep", event: "AuditEvent", repo: "ChangeRepository" },
         { title: "Subscription Lifecycle Domain", root: "Subscription", policy: "EntitlementPolicy", service: "BillingService", step: "InvoiceRun", event: "LedgerEvent", repo: "SubscriptionRepository" },
@@ -1655,7 +1664,11 @@
         { title: "Dataset Publication Lifecycle", start: "Draft", review: "GovernanceReview", blocked: "BlockedByPII", approved: "Approved", rejected: "Rejected", executing: "Publishing", verifying: "VerifyingContracts", rollback: "Unpublishing", closed: "Available" },
         { title: "Warehouse Recall Lifecycle", start: "Detected", review: "Investigating", blocked: "WaitingForVendor", approved: "Approved", rejected: "Cancelled", executing: "Recalling", verifying: "InspectingReturns", rollback: "ResumeShipping", closed: "Contained" },
         { title: "Partner Integration Lifecycle", start: "Proposed", review: "Evaluating", blocked: "WaitingOnSandbox", approved: "Approved", rejected: "Declined", executing: "Implementing", verifying: "Certifying", rollback: "Suspending", closed: "Operational" }
-      ].map((s, index) => sample("state", index, s.title, "Partial", buildStateScenario(s), index === 0)),
+      ].map((s, index) => sample("state", index, s.title, "Partial", buildStateScenario(s), index === 0, index === 0 ? {
+        headline: "Best lifecycle and rollback story among partial families.",
+        lookFor: "Approval, blocked, verification, rollback, and closure states that show the renderer can carry operational lifecycle semantics without collapsing into noise.",
+        proves: ["J4 terminal/operator storytelling candidate", "cycle/rollback readability", "partial-family seriousness"]
+      } : null)),
       ...[
         { title: "Incident Ownership Model", owner: "TEAM", primary: "INCIDENT", secondary: "ACTION_ITEM", audit: "AUDIT_LOG" },
         { title: "Subscription Billing Model", owner: "ACCOUNT", primary: "SUBSCRIPTION", secondary: "INVOICE", audit: "LEDGER_EVENT" },
@@ -1675,7 +1688,11 @@
         { id: "gm6", title: "Credit Decisioning Upgrade", start: "2026-09-01", discovery1: "Validate data contracts", discovery2: "Approve model guardrails", build1: "Integrate new scorecards", build2: "Backfill decision traces", launch1: "Canary underwriting", launch2: "Roll operator training", flag: "crit", launchFlag: "active", closeFlag: "milestone" },
         { id: "gm7", title: "Media Delivery Platform", start: "2026-10-06", discovery1: "Map channel requirements", discovery2: "Define asset taxonomy", build1: "Scale rendition pipeline", build2: "Automate approval routing", launch1: "Launch creator beta", launch2: "Open self-service ingest", flag: "active", launchFlag: "active", closeFlag: "milestone" },
         { id: "gm8", title: "Data Governance Rollout", start: "2026-11-02", discovery1: "Classify datasets", discovery2: "Review retention policy", build1: "Enforce access tiers", build2: "Backfill lineage views", launch1: "Enable steward dashboards", launch2: "Publish governance scorecard", flag: "crit", launchFlag: "active", closeFlag: "milestone" }
-      ].map((s, index) => sample("gantt", index, s.title, "Partial/basic", buildGanttScenario(s), index === 0)),
+      ].map((s, index) => sample("gantt", index, s.title, "Partial/basic", buildGanttScenario(s), index === 0, index === 0 ? {
+        headline: "Best schedule-oriented proof for deterministic review and release narratives.",
+        lookFor: "A plausible program plan with discovery, build, and launch sections that can anchor CI/review trust even before full parity is reached.",
+        proves: ["J3 deterministic/reviewable evidence story", "J5 browser-runtime proof support", "time-based planning coverage"]
+      } : null)),
       ...[
         { title: "New Customer Launch Journey", actor: "Customer", section1: "Discovery", step1: "Understand offer", score1: 4, step2: "Evaluate security posture", score2: 3, section2: "Implementation", step3: "Configure workspace", score3: 5, step4: "Connect identity provider", score4: 3, section3: "Adoption", step5: "Train operators", score5: 4, step6: "Review first month results", score6: 5 },
         { title: "Incident Commander Journey", actor: "Commander", section1: "Triage", step1: "Assess alert burst", score1: 2, step2: "Open command channel", score2: 4, section2: "Containment", step3: "Delegate mitigation lanes", score3: 4, step4: "Track customer impact", score4: 3, section3: "Closure", step5: "Verify recovery", score5: 5, step6: "Publish postmortem", score6: 4 },
@@ -1685,7 +1702,11 @@
         { title: "Partner Enablement Journey", actor: "Partner", section1: "Qualification", step1: "Review sandbox docs", score1: 4, step2: "Map feature gaps", score2: 3, section2: "Build", step3: "Implement integration", score3: 5, step4: "Certify contract tests", score4: 4, section3: "Go-live", step5: "Cut traffic", score5: 3, step6: "Monitor first week", score6: 4 },
         { title: "Research Program Journey", actor: "Researcher", section1: "Planning", step1: "Draft study plan", score1: 4, step2: "Secure approvals", score2: 2, section2: "Execution", step3: "Recruit participants", score3: 3, step4: "Capture findings", score4: 5, section3: "Synthesis", step5: "Publish readout", score5: 4, step6: "Prioritize next bets", score6: 5 },
         { title: "RevOps Forecast Journey", actor: "Operator", section1: "Preparation", step1: "Load pipeline snapshot", score1: 4, step2: "Normalize territories", score2: 3, section2: "Forecasting", step3: "Adjust commit bands", score3: 5, step4: "Review downside cases", score4: 3, section3: "Communication", step5: "Present scenario deck", score5: 4, step6: "Update plan of record", score6: 5 }
-      ].map((s, index) => sample("journey", index, s.title, "Partial/basic", buildJourneyScenario(s), index === 0)),
+      ].map((s, index) => sample("journey", index, s.title, "Partial/basic", buildJourneyScenario(s), index === 0, index === 0 ? {
+        headline: "Best user-facing narrative example in the current featured set.",
+        lookFor: "A customer journey that broadens the product story beyond engineering workflows while still staying concrete and reviewable.",
+        proves: ["J5 metadata/embed story support", "accessibility/inspectability relevance", "non-ops narrative breadth"]
+      } : null)),
       ...[
         { title: "Platform Reliability Roadmap", year1: "2022", event1: "Consolidated alerting layers", year2: "2023", event2: "Introduced runbook automation", year3: "2024", event3: "Added deterministic deployment gates", year4: "2025", event4: "Unified incident evidence model", year5: "2026", event5: "Rolled out live browser diagnostics" },
         { title: "Identity Program Timeline", year1: "2021", event1: "Migrated to central SSO", year2: "2022", event2: "Added step-up auth", year3: "2023", event3: "Shipped just-in-time provisioning", year4: "2024", event4: "Enforced admin review rules", year5: "2025", event5: "Published access lineage dashboard" },
@@ -1715,7 +1736,11 @@
         { title: "Release Train Foxtrot", branch: "governance-ui", hotfix: "hotfix-lineage", c1: "start", c2: "policy-panels", c3: "retention-jobs", c4: "governance-cut", c5: "lineage-fix", c6: "governance.1" },
         { title: "Release Train Golf", branch: "claims-ops", hotfix: "hotfix-docs", c1: "root", c2: "triage-queue", c3: "evidence-pack", c4: "claims-cut", c5: "docs-fix", c6: "claims.1" },
         { title: "Release Train Hotel", branch: "media-dispatch", hotfix: "hotfix-codec", c1: "boot", c2: "render-farm", c3: "delivery-rules", c4: "creator-cut", c5: "codec-fix", c6: "creator.1" }
-      ].map((s, index) => sample("gitGraph", index, s.title, "Partial/basic", buildGitGraphScenario(s), index === 0))
+      ].map((s, index) => sample("gitGraph", index, s.title, "Partial/basic", buildGitGraphScenario(s), index === 0, index === 0 ? {
+        headline: "Best release-engineering story for branch/merge readability.",
+        lookFor: "A branch-and-hotfix path that makes release storytelling legible at a glance and supports operational review conversations.",
+        proves: ["J3 reviewability support", "release-train storytelling", "gallery breadth with credible workflow context"]
+      } : null))
     ];
 
     const editorSamples = gallerySamples.filter((entry) => entry.featured);
@@ -2084,10 +2109,22 @@
       const sample = spotlightSample;
       const status = sample.description.toLowerCase().includes("implemented") ? "implemented" : "partial";
       els.spotlightTitle.textContent = sample.label;
-      els.spotlightDescription.textContent = `${sample.category} diagram with a realistic, non-toy scenario. ${sample.description} support in the current capability matrix.`;
+      const narrative = sample.narrative;
+      els.spotlightDescription.textContent = narrative?.headline
+        ? `${narrative.headline} ${sample.description} support in the current capability matrix.`
+        : `${sample.category} diagram with a realistic, non-toy scenario. ${sample.description} support in the current capability matrix.`;
       els.spotlightCategory.textContent = sample.category;
       els.spotlightSource.textContent = sample.code;
-      els.spotlightWhy.textContent = spotlightReasons[sample.category] || "Shows a meaningful real-world slice of the current diagram family.";
+      const whyParts = [];
+      if (narrative?.lookFor) {
+        whyParts.push(narrative.lookFor);
+      } else {
+        whyParts.push(spotlightReasons[sample.category] || "Shows a meaningful real-world slice of the current diagram family.");
+      }
+      if (Array.isArray(narrative?.proves) && narrative.proves.length > 0) {
+        whyParts.push(`Proof points: ${narrative.proves.join(" · ")}.`);
+      }
+      els.spotlightWhy.textContent = whyParts.join(" ");
       els.spotlightStatus.className = `pill ${badgeClass(status)} rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em]`;
       els.spotlightStatus.textContent = sample.description;
 
@@ -2187,6 +2224,7 @@
                   <span class="pill ${badgeClass(sample.description.toLowerCase().includes("implemented") ? "implemented" : "partial")} rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em]">${sample.description}</span>
                 </div>
                 <p class="mt-2 text-sm leading-6 text-slate-300"><span class="font-medium text-slate-200">${sample.category}</span> · ${sample.code.split("\n").length} lines</p>
+                ${sample.narrative?.headline ? `<p class="mt-2 text-sm leading-6 text-slate-300">${sample.narrative.headline}</p>` : ""}
               </div>
               <div class="flex flex-wrap gap-2">
                 <button
@@ -2207,6 +2245,7 @@
                 </button>
               </div>
             </div>
+            ${sample.narrative?.proves?.length ? `<div class="flex flex-wrap gap-2">${sample.narrative.proves.map((point) => `<span class="pill rounded-full px-3 py-1 text-[11px] font-semibold tracking-[0.14em] text-slate-200">${escapeHtml(point)}</span>`).join("")}</div>` : ""}
             <div class="gallery-stage scrollbar-thin overflow-auto rounded-2xl border border-slate-200/40 bg-gradient-to-b from-white to-slate-50 p-6 text-slate-900 shadow-sm" data-gallery-render="${sample.id}">
               <div class="space-y-3 p-2"><div class="shimmer-light h-6 w-3/4"></div><div class="shimmer-light h-40"></div><div class="shimmer-light h-4 w-1/2"></div></div>
             </div>

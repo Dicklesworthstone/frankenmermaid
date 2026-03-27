@@ -369,6 +369,13 @@
       "title": "Incident Response Escalation",
       "kind": "showcase-featured",
       "diagram_family": "flowchart",
+      "narrative_headline": "Best recovery-and-operations proof in the current repo.",
+      "narrative_focus": "Dense but still readable routing, explicit decision diamonds, and a believable escalation flow that makes the flowchart renderer look production-oriented instead of toy-like.",
+      "proof_points": [
+        "J1 messy-input-to-useful-output anchor",
+        "J2 shared-engine story anchor",
+        "strongest currently implemented family"
+      ],
       "source_refs": [
         "frankenmermaid_demo_showcase.html"
       ],
@@ -411,6 +418,13 @@
       "title": "Checkout Risk Review",
       "kind": "showcase-featured",
       "diagram_family": "sequence",
+      "narrative_headline": "Best message-flow narrative for cross-surface comparison.",
+      "narrative_focus": "Clear participant orchestration, request/queue/worker boundaries, and a scenario that feels like a real fraud-review system rather than a tutorial.",
+      "proof_points": [
+        "J2 multi-surface breadth",
+        "partial-family honesty with still-useful output",
+        "browser baseline comparison value"
+      ],
       "source_refs": [
         "frankenmermaid_demo_showcase.html"
       ],
@@ -424,6 +438,13 @@
       "title": "Security Exception Lifecycle",
       "kind": "showcase-featured",
       "diagram_family": "state",
+      "narrative_headline": "Best lifecycle and rollback story among partial families.",
+      "narrative_focus": "Approval, blocked, verification, rollback, and closure states that show the renderer can carry operational lifecycle semantics without collapsing into noise.",
+      "proof_points": [
+        "J4 terminal/operator storytelling candidate",
+        "cycle/rollback readability",
+        "partial-family seriousness"
+      ],
       "source_refs": [
         "frankenmermaid_demo_showcase.html"
       ],
@@ -437,6 +458,13 @@
       "title": "Q2 Reliability Hardening",
       "kind": "showcase-featured",
       "diagram_family": "gantt",
+      "narrative_headline": "Best schedule-oriented proof for deterministic review and release narratives.",
+      "narrative_focus": "A plausible program plan with discovery, build, and launch sections that can anchor CI/review trust even before full parity is reached.",
+      "proof_points": [
+        "J3 deterministic/reviewable evidence story",
+        "J5 browser-runtime proof support",
+        "time-based planning coverage"
+      ],
       "source_refs": [
         "frankenmermaid_demo_showcase.html"
       ],
@@ -463,6 +491,13 @@
       "title": "New Customer Launch Journey",
       "kind": "showcase-featured",
       "diagram_family": "journey",
+      "narrative_headline": "Best user-facing narrative example in the current featured set.",
+      "narrative_focus": "A customer journey that broadens the product story beyond engineering workflows while still staying concrete and reviewable.",
+      "proof_points": [
+        "J5 metadata/embed story support",
+        "accessibility/inspectability relevance",
+        "non-ops narrative breadth"
+      ],
       "source_refs": [
         "frankenmermaid_demo_showcase.html"
       ],
@@ -476,6 +511,13 @@
       "title": "Release Train Alpha",
       "kind": "showcase-featured",
       "diagram_family": "gitGraph",
+      "narrative_headline": "Best release-engineering story for branch/merge readability.",
+      "narrative_focus": "A branch-and-hotfix path that makes release storytelling legible at a glance and supports operational review conversations.",
+      "proof_points": [
+        "J3 reviewability support",
+        "release-train storytelling",
+        "gallery breadth with credible workflow context"
+      ],
       "source_refs": [
         "frankenmermaid_demo_showcase.html"
       ],
