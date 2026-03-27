@@ -53,12 +53,12 @@ fn stable_u128_hash(domain: &str, parts: &[&str]) -> u128 {
 }
 
 fn stable_u64_hash(salt: &str, domain: &str, parts: &[&str]) -> u64 {
-    let mut hash = 0xcbf29ce484222325_u64;
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
 
     let mut update = |s: &str| {
         for byte in s.as_bytes() {
             hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x100000001b3);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
         }
     };
 

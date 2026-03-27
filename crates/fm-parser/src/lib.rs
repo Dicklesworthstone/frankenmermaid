@@ -521,6 +521,8 @@ pub fn parse_evidence_json(parsed: &ParseResult) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write;
+
     use super::{detect_type, parse, parse_with_mode};
     use fm_core::{
         ArrowType, DiagnosticCategory, DiagramType, GraphDirection, IrEndpoint, MermaidDiagramIr,
@@ -1095,10 +1097,10 @@ mod tests {
         let count = 1000;
         let mut input = String::from("flowchart TD\n");
         for i in 0..count {
-            input.push_str(&format!("  N{i}[Node {i}]\n"));
+            let _ = writeln!(input, "  N{i}[Node {i}]");
         }
         for i in 1..count {
-            input.push_str(&format!("  N{} --> N{i}\n", i - 1));
+            let _ = writeln!(input, "  N{} --> N{i}", i - 1);
         }
         let result = parse(&input);
         assert!(result.ir.nodes.len() >= count);
@@ -1204,7 +1206,7 @@ mod tests {
     #[test]
     fn adversarial_binary_content_does_not_panic() {
         // Simulate feeding binary data to the parser.
-        let input: String = (0..256).map(|b| char::from(b as u8)).collect();
+        let input: String = (0..=255_u8).map(char::from).collect();
         let _result = parse(&input);
     }
 

@@ -12,7 +12,7 @@ use fm_render_svg::{SvgBackend, SvgRenderConfig, render_svg, render_svg_with_con
 use fm_render_term::render_term;
 use std::io::Write;
 use std::process::{Command, Stdio};
-use tempfile::NamedTempFile;
+use tempfile::{NamedTempFile, TempDir};
 
 /// Test that a simple flowchart parses and produces non-zero layout positions.
 #[test]
@@ -512,6 +512,20 @@ fn run_cli_with_env(args: &[&str], stdin: &str, envs: &[(&str, &str)]) -> std::p
             .wait_with_output()
             .expect("failed collecting fm-cli output")
     }
+}
+
+fn run_evidence(args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_evidence"))
+        .args(args)
+        .output()
+        .expect("failed to run evidence binary")
+}
+
+fn write_evidence_root_fixture() -> TempDir {
+    let temp = TempDir::new().expect("temp evidence root");
+    std::fs::create_dir_all(temp.path().join("evidence/ledger")).expect("create ledger dir");
+    std::fs::create_dir_all(temp.path().join(".beads")).expect("create beads dir");
+    temp
 }
 
 fn render_json_metadata(input: &str) -> (serde_json::Value, String) {
@@ -1945,4 +1959,123 @@ fn determinism_manifest_cli_is_stable_and_finite() {
             "layout SHA-256 digest missing or malformed: {case:?}"
         );
     }
+}
+
+#[test]
+fn evidence_add_creates_seeded_entry() {
+    let temp = write_evidence_root_fixture();
+    let root = temp.path().to_str().expect("root path utf-8");
+
+    let output = run_evidence(&["--root", root, "add", "egraph-crossing-min"]);
+    assert!(
+        output.status.success(),
+        "evidence add failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let entry =
+        std::fs::read_to_string(temp.path().join("evidence/ledger/egraph-crossing-min.toml"))
+            .expect("seeded ledger entry");
+    assert!(entry.contains("concept_name = \"E-Graphs for Crossing Minimization\""));
+    assert!(entry.contains("status = \"pending\""));
+}
+
+#[test]
+fn evidence_update_writes_metrics_and_beads() {
+    let temp = write_evidence_root_fixture();
+    let root = temp.path().to_str().expect("root path utf-8");
+
+    let add_output = run_evidence(&["--root", root, "add", "egraph-crossing-min"]);
+    assert!(
+        add_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&add_output.stderr)
+    );
+
+    let update_output = run_evidence(&[
+        "--root",
+        root,
+        "update",
+        "egraph-crossing-min",
+        "--baseline-date",
+        "2026-03-26",
+        "--baseline-commit",
+        "abc123",
+        "--baseline-metric",
+        "crossing_count=42",
+        "--add-bead",
+        "bd-1xma.5",
+        "--decision",
+        "adopt",
+        "--decision-rationale",
+        "Improvement threshold cleared.",
+    ]);
+    assert!(
+        update_output.status.success(),
+        "evidence update failed: {}",
+        String::from_utf8_lossy(&update_output.stderr)
+    );
+
+    let entry =
+        std::fs::read_to_string(temp.path().join("evidence/ledger/egraph-crossing-min.toml"))
+            .expect("updated ledger entry");
+    assert!(entry.contains("date = \"2026-03-26\""));
+    assert!(entry.contains("commit = \"abc123\""));
+    assert!(entry.contains("crossing_count = 42.0"));
+    assert!(entry.contains("beads = [\"bd-1xma.5\"]"));
+    assert!(entry.contains("status = \"adopt\""));
+}
+
+#[test]
+fn evidence_report_flags_uncovered_closed_alien_cs_beads() {
+    let temp = write_evidence_root_fixture();
+    let root = temp.path().to_str().expect("root path utf-8");
+
+    let add_output = run_evidence(&["--root", root, "add", "egraph-crossing-min"]);
+    assert!(
+        add_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&add_output.stderr)
+    );
+
+    std::fs::write(
+        temp.path().join(".beads/issues.jsonl"),
+        concat!(
+            "{\"id\":\"bd-covered\",\"title\":\"Covered alien task\",\"status\":\"closed\",\"labels\":[\"alien-cs\"]}\n",
+            "{\"id\":\"bd-missing\",\"title\":\"Missing alien task\",\"status\":\"closed\",\"labels\":[\"alien-cs\"]}\n"
+        ),
+    )
+    .expect("write beads jsonl");
+
+    let update_output = run_evidence(&[
+        "--root",
+        root,
+        "update",
+        "egraph-crossing-min",
+        "--add-bead",
+        "bd-covered",
+    ]);
+    assert!(
+        update_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&update_output.stderr)
+    );
+
+    let report_output = run_evidence(&[
+        "--root",
+        root,
+        "report",
+        "--check-beads",
+        "--fail-on-missing-beads",
+    ]);
+    assert!(
+        !report_output.status.success(),
+        "report should fail when uncovered alien-cs beads remain"
+    );
+    let stderr = String::from_utf8_lossy(&report_output.stderr);
+    assert!(stderr.contains("without ledger coverage"));
+
+    let report = std::fs::read_to_string(temp.path().join("evidence/ledger/README.md"))
+        .expect("report should still be written");
+    assert!(report.contains("bd-missing"));
 }

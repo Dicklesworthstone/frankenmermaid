@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 839.65 1276" width="100%" height="100%" preserveAspectRatio="xMidYMid meet" role="img" data-nodes="10" data-edges="9" data-type="flowchart" data-detail-tier="rich"><title>flowchart diagram</title><desc>A flowchart diagram with 10 nodes and 9 edges, flowing left to right</desc><style>:root {
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 839.65 1276" width="100%" height="100%" preserveAspectRatio="xMidYMid meet" role="img" data-nodes="10" data-edges="9" data-type="flowchart" data-detail-tier="rich"><title>flowchart diagram</title><desc>A flowchart diagram with 10 nodes and 9 edges. flowing left to right. Key nodes: Start, Arrow, Line.. Key relationships: Start points to Arrow; Start connects to Line; Start optionally points to Dotted Arrow.. Layout spans 760 by 1196 units with 10 rendered node boxes and 9 routed edge paths.</desc><style>:root {
   --fm-bg: #fafbfc;
   --fm-text-color: #1a1a2e;
   --fm-node-fill: #ffffff;

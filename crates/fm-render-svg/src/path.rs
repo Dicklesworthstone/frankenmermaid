@@ -93,28 +93,28 @@ impl PathCommand {
     fn render(&self, output: &mut String) {
         match self {
             Self::MoveTo { x, y } => {
-                let _ = write!(output, "M{} {}", fmt_num(*x), fmt_num(*y));
+                let _ = write!(output, "M{} {}", FmtNum(*x), FmtNum(*y));
             }
             Self::MoveToRel { dx, dy } => {
-                let _ = write!(output, "m{} {}", fmt_num(*dx), fmt_num(*dy));
+                let _ = write!(output, "m{} {}", FmtNum(*dx), FmtNum(*dy));
             }
             Self::LineTo { x, y } => {
-                let _ = write!(output, "L{} {}", fmt_num(*x), fmt_num(*y));
+                let _ = write!(output, "L{} {}", FmtNum(*x), FmtNum(*y));
             }
             Self::LineToRel { dx, dy } => {
-                let _ = write!(output, "l{} {}", fmt_num(*dx), fmt_num(*dy));
+                let _ = write!(output, "l{} {}", FmtNum(*dx), FmtNum(*dy));
             }
             Self::HorizontalTo { x } => {
-                let _ = write!(output, "H{}", fmt_num(*x));
+                let _ = write!(output, "H{}", FmtNum(*x));
             }
             Self::HorizontalToRel { dx } => {
-                let _ = write!(output, "h{}", fmt_num(*dx));
+                let _ = write!(output, "h{}", FmtNum(*dx));
             }
             Self::VerticalTo { y } => {
-                let _ = write!(output, "V{}", fmt_num(*y));
+                let _ = write!(output, "V{}", FmtNum(*y));
             }
             Self::VerticalToRel { dy } => {
-                let _ = write!(output, "v{}", fmt_num(*dy));
+                let _ = write!(output, "v{}", FmtNum(*dy));
             }
             Self::CurveTo {
                 x1,
@@ -127,12 +127,12 @@ impl PathCommand {
                 let _ = write!(
                     output,
                     "C{} {},{} {},{} {}",
-                    fmt_num(*x1),
-                    fmt_num(*y1),
-                    fmt_num(*x2),
-                    fmt_num(*y2),
-                    fmt_num(*x),
-                    fmt_num(*y)
+                    FmtNum(*x1),
+                    FmtNum(*y1),
+                    FmtNum(*x2),
+                    FmtNum(*y2),
+                    FmtNum(*x),
+                    FmtNum(*y)
                 );
             }
             Self::CurveToRel {
@@ -146,59 +146,59 @@ impl PathCommand {
                 let _ = write!(
                     output,
                     "c{} {},{} {},{} {}",
-                    fmt_num(*dx1),
-                    fmt_num(*dy1),
-                    fmt_num(*dx2),
-                    fmt_num(*dy2),
-                    fmt_num(*dx),
-                    fmt_num(*dy)
+                    FmtNum(*dx1),
+                    FmtNum(*dy1),
+                    FmtNum(*dx2),
+                    FmtNum(*dy2),
+                    FmtNum(*dx),
+                    FmtNum(*dy)
                 );
             }
             Self::SmoothCurveTo { x2, y2, x, y } => {
                 let _ = write!(
                     output,
                     "S{} {},{} {}",
-                    fmt_num(*x2),
-                    fmt_num(*y2),
-                    fmt_num(*x),
-                    fmt_num(*y)
+                    FmtNum(*x2),
+                    FmtNum(*y2),
+                    FmtNum(*x),
+                    FmtNum(*y)
                 );
             }
             Self::SmoothCurveToRel { dx2, dy2, dx, dy } => {
                 let _ = write!(
                     output,
                     "s{} {},{} {}",
-                    fmt_num(*dx2),
-                    fmt_num(*dy2),
-                    fmt_num(*dx),
-                    fmt_num(*dy)
+                    FmtNum(*dx2),
+                    FmtNum(*dy2),
+                    FmtNum(*dx),
+                    FmtNum(*dy)
                 );
             }
             Self::QuadraticTo { x1, y1, x, y } => {
                 let _ = write!(
                     output,
                     "Q{} {},{} {}",
-                    fmt_num(*x1),
-                    fmt_num(*y1),
-                    fmt_num(*x),
-                    fmt_num(*y)
+                    FmtNum(*x1),
+                    FmtNum(*y1),
+                    FmtNum(*x),
+                    FmtNum(*y)
                 );
             }
             Self::QuadraticToRel { dx1, dy1, dx, dy } => {
                 let _ = write!(
                     output,
                     "q{} {},{} {}",
-                    fmt_num(*dx1),
-                    fmt_num(*dy1),
-                    fmt_num(*dx),
-                    fmt_num(*dy)
+                    FmtNum(*dx1),
+                    FmtNum(*dy1),
+                    FmtNum(*dx),
+                    FmtNum(*dy)
                 );
             }
             Self::SmoothQuadraticTo { x, y } => {
-                let _ = write!(output, "T{} {}", fmt_num(*x), fmt_num(*y));
+                let _ = write!(output, "T{} {}", FmtNum(*x), FmtNum(*y));
             }
             Self::SmoothQuadraticToRel { dx, dy } => {
-                let _ = write!(output, "t{} {}", fmt_num(*dx), fmt_num(*dy));
+                let _ = write!(output, "t{} {}", FmtNum(*dx), FmtNum(*dy));
             }
             Self::Arc {
                 rx,
@@ -212,13 +212,13 @@ impl PathCommand {
                 let _ = write!(
                     output,
                     "A{} {} {} {} {} {} {}",
-                    fmt_num(*rx),
-                    fmt_num(*ry),
-                    fmt_num(*x_rotation),
+                    FmtNum(*rx),
+                    FmtNum(*ry),
+                    FmtNum(*x_rotation),
                     if *large_arc { 1 } else { 0 },
                     if *sweep { 1 } else { 0 },
-                    fmt_num(*x),
-                    fmt_num(*y)
+                    FmtNum(*x),
+                    FmtNum(*y)
                 );
             }
             Self::ArcRel {
@@ -233,13 +233,13 @@ impl PathCommand {
                 let _ = write!(
                     output,
                     "a{} {} {} {} {} {} {}",
-                    fmt_num(*rx),
-                    fmt_num(*ry),
-                    fmt_num(*x_rotation),
+                    FmtNum(*rx),
+                    FmtNum(*ry),
+                    FmtNum(*x_rotation),
                     if *large_arc { 1 } else { 0 },
                     if *sweep { 1 } else { 0 },
-                    fmt_num(*dx),
-                    fmt_num(*dy)
+                    FmtNum(*dx),
+                    FmtNum(*dy)
                 );
             }
             Self::Close => output.push('Z'),
@@ -247,15 +247,20 @@ impl PathCommand {
     }
 }
 
-/// Format a number for SVG path output.
-fn fmt_num(n: f32) -> String {
-    if !n.is_finite() {
-        return "0".to_string();
-    }
-    if n.fract() == 0.0 && n >= i32::MIN as f32 && n <= i32::MAX as f32 {
-        format!("{}", n as i32)
-    } else {
-        format!("{:.2}", n)
+/// Helper for efficient, zero-allocation number formatting in SVG.
+struct FmtNum(f32);
+
+impl std::fmt::Display for FmtNum {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let n = self.0;
+        if !n.is_finite() {
+            return f.write_str("0");
+        }
+        if n.fract() == 0.0 && n >= i32::MIN as f32 && n <= i32::MAX as f32 {
+            write!(f, "{}", n as i32)
+        } else {
+            write!(f, "{:.2}", n)
+        }
     }
 }
 

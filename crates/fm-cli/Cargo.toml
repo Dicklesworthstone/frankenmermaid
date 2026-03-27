@@ -10,6 +10,10 @@ description = "FrankenMermaid CLI - render and validate Mermaid diagrams"
 name = "fm-cli"
 path = "src/main.rs"
 
+[[bin]]
+name = "evidence"
+path = "src/bin/evidence.rs"
+
 [features]
 default = []
 # Optional features for extended functionality
@@ -30,6 +34,7 @@ fm-render-term.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10.9"
+toml = "0.8.23"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

@@ -30,7 +30,7 @@ pub fn node_path(bounds: LayoutRect, shape: NodeShape) -> Vec<PathCmd> {
             // For composite shapes, we use the primary boundary path.
             // Inner lines are added by specialized render logic if needed,
             // but for simple path representation we return the outer box.
-            rounded_rect_path(bounds, 4.0)
+            rounded_rect_path(bounds, 0.0)
         }
         NodeShape::CrossedCircle => polygon_ellipse_path(bounds, 24),
     }
