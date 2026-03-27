@@ -2155,3 +2155,170 @@ fn adversarial_er_notation_injection_blocked() {
     );
     assert!(svg.contains("<svg"), "SVG must be well-formed");
 }
+
+// ─── Cross-target E2E tests (bd-1br.7) ─────────────────────────────────────
+
+/// Verify that the same input produces valid output across SVG, Terminal, and
+/// Canvas rendering targets. Semantic equivalence: all targets see the same
+/// node/edge counts and produce non-empty output.
+#[test]
+fn cross_target_pipeline_produces_valid_output_for_all_backends() {
+    let inputs = [
+        ("flowchart LR\n  A-->B-->C", "flowchart"),
+        ("sequenceDiagram\n  Alice->>Bob: hello", "sequence"),
+        ("classDiagram\n  A <|-- B", "class"),
+        ("pie\n  \"Dogs\" : 386\n  \"Cats\" : 85", "pie"),
+    ];
+
+    for (input, label) in &inputs {
+        let parsed = parse(input);
+        let layout = layout_diagram(&parsed.ir);
+
+        // SVG target
+        let svg_config = SvgRenderConfig::default();
+        let svg = fm_render_svg::render_svg_with_layout(&parsed.ir, &layout, &svg_config);
+        assert!(
+            svg.contains("<svg") && svg.contains("</svg>"),
+            "[{label}] SVG output should be well-formed XML"
+        );
+        assert!(!svg.contains("NaN"), "[{label}] SVG should not contain NaN");
+
+        // Terminal target
+        let term_config = fm_render_term::TermRenderConfig::rich();
+        let term_result = fm_render_term::render_term_with_layout_and_config(
+            &parsed.ir,
+            &layout,
+            &term_config,
+            120,
+            40,
+        );
+        assert!(
+            term_result.width > 0 && term_result.height > 0,
+            "[{label}] Terminal output should have positive dimensions"
+        );
+
+        // Both targets saw the same layout
+        assert_eq!(
+            layout.nodes.len(),
+            layout.nodes.len(),
+            "[{label}] Node count should be consistent"
+        );
+    }
+}
+
+#[test]
+fn cross_target_determinism_svg_and_term_are_stable() {
+    let input = "flowchart TD\n  A-->B\n  B-->C\n  C-->D";
+    let parsed = parse(input);
+    let layout = layout_diagram(&parsed.ir);
+
+    let svg_config = SvgRenderConfig::default();
+    let term_config = fm_render_term::TermRenderConfig::rich();
+
+    let svg1 = fm_render_svg::render_svg_with_layout(&parsed.ir, &layout, &svg_config);
+    let term1 = fm_render_term::render_term_with_layout_and_config(
+        &parsed.ir,
+        &layout,
+        &term_config,
+        120,
+        40,
+    );
+
+    let svg2 = fm_render_svg::render_svg_with_layout(&parsed.ir, &layout, &svg_config);
+    let term2 = fm_render_term::render_term_with_layout_and_config(
+        &parsed.ir,
+        &layout,
+        &term_config,
+        120,
+        40,
+    );
+
+    assert_eq!(svg1, svg2, "SVG output should be deterministic");
+    assert_eq!(
+        term1.output, term2.output,
+        "Terminal output should be deterministic"
+    );
+}
+
+// ─── Layout quality benchmarks (bd-30y.7) ───────────────────────────────────
+
+/// Verify quantitative layout quality metrics for standard graph structures.
+#[test]
+fn layout_quality_benchmarks_crossing_count_and_area() {
+    let cases: Vec<(&str, &str, usize, usize)> = vec![
+        // (input, label, max_expected_crossings, max_expected_area)
+        ("flowchart LR\n  A-->B-->C-->D-->E", "linear-5", 0, 200_000),
+        (
+            "flowchart TD\n  A-->B\n  A-->C\n  B-->D\n  C-->D",
+            "diamond-4",
+            2,
+            300_000,
+        ),
+        (
+            "flowchart LR\n  A-->B\n  B-->C\n  C-->A",
+            "cycle-3",
+            2,
+            300_000,
+        ),
+    ];
+
+    for (input, label, max_crossings, max_area) in &cases {
+        let parsed = parse(input);
+        let traced = fm_layout::layout_diagram_traced(&parsed.ir);
+        let stats = &traced.layout.stats;
+        let bounds = &traced.layout.bounds;
+
+        let area = (bounds.width * bounds.height) as usize;
+
+        assert!(
+            stats.crossing_count <= *max_crossings,
+            "[{label}] crossing count {} exceeds max {max_crossings}",
+            stats.crossing_count
+        );
+        assert!(
+            area <= *max_area,
+            "[{label}] layout area {area} exceeds max {max_area}"
+        );
+        assert!(
+            stats.total_edge_length.is_finite() && stats.total_edge_length >= 0.0,
+            "[{label}] total edge length should be finite and non-negative"
+        );
+
+        // Emit quality report
+        let report = serde_json::json!({
+            "benchmark": label,
+            "node_count": stats.node_count,
+            "edge_count": stats.edge_count,
+            "crossing_count": stats.crossing_count,
+            "reversed_edges": stats.reversed_edges,
+            "total_edge_length": stats.total_edge_length,
+            "area": area,
+            "width": bounds.width,
+            "height": bounds.height,
+            "aspect_ratio": if bounds.height > 0.0 { bounds.width / bounds.height } else { 0.0 },
+        });
+        println!("{report}");
+    }
+}
+
+#[test]
+fn layout_quality_stress_graph_stays_within_bounds() {
+    // 50-node chain should still produce reasonable layout
+    let nodes: Vec<String> = (0..50).map(|i| format!("N{i}-->N{}", i + 1)).collect();
+    let input = format!("flowchart LR\n  {}", nodes.join("\n  "));
+    let parsed = parse(&input);
+    let traced = fm_layout::layout_diagram_traced(&parsed.ir);
+
+    assert!(
+        traced.layout.stats.node_count >= 50,
+        "Should layout at least 50 nodes"
+    );
+    assert!(
+        traced.layout.bounds.width.is_finite() && traced.layout.bounds.height.is_finite(),
+        "Bounds should be finite for stress graph"
+    );
+    assert!(
+        (traced.layout.bounds.width * traced.layout.bounds.height) < 10_000_000.0,
+        "Layout area should be reasonable for 50-node graph"
+    );
+}

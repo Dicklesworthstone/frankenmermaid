@@ -779,6 +779,62 @@
       gap: 0.5rem;
     }
 
+    .studio-grid {
+      display: grid;
+      gap: 1rem;
+      grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+    }
+
+    .studio-field {
+      display: flex;
+      flex-direction: column;
+      gap: 0.45rem;
+    }
+
+    .studio-field label,
+    .studio-check span {
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: #94a3b8;
+    }
+
+    .studio-field input,
+    .studio-field select {
+      width: 100%;
+      border-radius: 1rem;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      background: rgba(8, 16, 29, 0.8);
+      color: #e2e8f0;
+      padding: 0.75rem 0.9rem;
+      font-size: 0.95rem;
+    }
+
+    .studio-field input[type="range"] {
+      padding: 0;
+      accent-color: #4cc9ff;
+      background: transparent;
+      border: none;
+    }
+
+    .studio-check {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      border-radius: 1rem;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(255, 255, 255, 0.04);
+      padding: 0.9rem 1rem;
+    }
+
+    .studio-check input {
+      height: 1rem;
+      width: 1rem;
+      accent-color: #7af5c7;
+    }
+
     .diagnostic-card {
       border: 1px solid rgba(255, 255, 255, 0.08);
       border-radius: 1.5rem;
@@ -1340,6 +1396,57 @@
                     </div>
                   </div>
                 </div>
+
+                <div class="editor-note mt-4">
+                  <div class="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <h3>Theme and style studio</h3>
+                      <div class="mt-2 text-sm leading-6 text-slate-300">Preset-backed styling controls for the FrankenMermaid runtime, with reset semantics and URL-safe state.</div>
+                    </div>
+                    <button type="button" id="style-reset" class="shell-toggle">Reset Studio</button>
+                  </div>
+                  <div class="studio-grid mt-4">
+                    <div class="studio-field">
+                      <label for="style-preset">Preset</label>
+                      <select id="style-preset">
+                        <option value="default">default</option>
+                        <option value="dark">dark</option>
+                        <option value="forest">forest</option>
+                        <option value="neutral">neutral</option>
+                        <option value="corporate">corporate</option>
+                        <option value="neon">neon</option>
+                        <option value="pastel">pastel</option>
+                        <option value="high-contrast">high-contrast</option>
+                        <option value="monochrome">monochrome</option>
+                        <option value="blueprint">blueprint</option>
+                      </select>
+                    </div>
+                    <div class="studio-field">
+                      <label for="style-font-size">Font size <span id="style-font-size-value">15px</span></label>
+                      <input id="style-font-size" type="range" min="11" max="24" step="1" value="15">
+                    </div>
+                    <div class="studio-field">
+                      <label for="style-padding">Padding <span id="style-padding-value">40px</span></label>
+                      <input id="style-padding" type="range" min="16" max="72" step="2" value="40">
+                    </div>
+                    <div class="studio-field">
+                      <label for="style-radius">Corner radius <span id="style-radius-value">10px</span></label>
+                      <input id="style-radius" type="range" min="0" max="28" step="1" value="10">
+                    </div>
+                  </div>
+                  <div class="studio-grid mt-4">
+                    <label class="studio-check" for="style-shadows">
+                      <span>Drop shadows</span>
+                      <input id="style-shadows" type="checkbox" checked>
+                    </label>
+                    <label class="studio-check" for="style-embed-css">
+                      <span>Embed theme CSS</span>
+                      <input id="style-embed-css" type="checkbox" checked>
+                    </label>
+                  </div>
+                  <div id="style-summary" class="mt-4 text-sm leading-6 text-slate-300">Preset-backed style state pending.</div>
+                  <div id="style-delta" class="mt-4 flex flex-wrap gap-2"></div>
+                </div>
               </div>
 
               <div class="grid gap-4 md:grid-cols-2">
@@ -1435,8 +1542,31 @@
                     <div id="fallback-chip" class="rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em]">
                       pending
                     </div>
+                    </div>
+                    <div id="fallback-preview" class="fallback-stage scrollbar-thin mt-4 overflow-auto rounded-2xl border border-slate-200/40 bg-gradient-to-b from-white to-slate-50 p-6 text-slate-900 shadow-sm"></div>
+                </div>
+
+                <div class="rounded-[1.75rem] border border-white/10 bg-slate-950/40 p-5">
+                  <div class="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <div class="text-xs font-semibold uppercase tracking-[0.24em] text-slate-400">layoutCycleLab()</div>
+                      <div class="mt-1 text-sm text-slate-300">Read-only runtime inspection of algorithm dispatch, cycle handling, crossings, and routing pressure for the current revision.</div>
+                    </div>
+                    <div class="text-[11px] uppercase tracking-[0.18em] text-slate-500">analysis controls only</div>
                   </div>
-                  <div id="fallback-preview" class="fallback-stage scrollbar-thin mt-4 overflow-auto rounded-2xl border border-slate-200/40 bg-gradient-to-b from-white to-slate-50 p-6 text-slate-900 shadow-sm"></div>
+                  <div id="layout-lab-controls" class="mt-4 flex flex-wrap gap-2">
+                    <button type="button" class="shell-toggle" data-layout-focus="overview" aria-pressed="true">Overview</button>
+                    <button type="button" class="shell-toggle" data-layout-focus="cycles" aria-pressed="false">Cycles</button>
+                    <button type="button" class="shell-toggle" data-layout-focus="crossings" aria-pressed="false">Crossings</button>
+                    <button type="button" class="shell-toggle" data-layout-focus="budget" aria-pressed="false">Budget</button>
+                    <button type="button" class="shell-toggle" data-layout-focus="legibility" aria-pressed="false">Legibility</button>
+                  </div>
+                  <div id="layout-lab-summary" class="mt-4 text-sm leading-6 text-slate-300">Waiting for runtime layout data.</div>
+                  <div id="layout-lab-badges" class="mt-4 flex flex-wrap gap-2"></div>
+                  <div id="layout-lab-grid" class="mt-4 grid gap-4 md:grid-cols-2"></div>
+                  <div id="layout-lab-note" class="mt-4 rounded-[1.25rem] border border-white/10 bg-white/5 p-4 text-sm leading-6 text-slate-300">
+                    This lab changes the inspection lens only. The current browser runtime still chooses the algorithm and cycle strategy internally.
+                  </div>
                 </div>
               </div>
             </div>
@@ -2069,6 +2199,18 @@
       editorMeta: document.getElementById("editor-meta"),
       editorHints: document.getElementById("editor-hints"),
       editorFamilyChip: document.getElementById("editor-family-chip"),
+      stylePreset: document.getElementById("style-preset"),
+      styleFontSize: document.getElementById("style-font-size"),
+      styleFontSizeValue: document.getElementById("style-font-size-value"),
+      stylePadding: document.getElementById("style-padding"),
+      stylePaddingValue: document.getElementById("style-padding-value"),
+      styleRadius: document.getElementById("style-radius"),
+      styleRadiusValue: document.getElementById("style-radius-value"),
+      styleShadows: document.getElementById("style-shadows"),
+      styleEmbedCss: document.getElementById("style-embed-css"),
+      styleSummary: document.getElementById("style-summary"),
+      styleDelta: document.getElementById("style-delta"),
+      styleReset: document.getElementById("style-reset"),
       samplePrev: document.getElementById("sample-prev"),
       sampleNext: document.getElementById("sample-next"),
       diagnosticsSummary: document.getElementById("diagnostics-summary"),
@@ -2103,6 +2245,11 @@
       capabilitySummary: document.getElementById("capability-summary"),
       capabilityBadges: document.getElementById("capability-badges"),
       capabilityTable: document.getElementById("capability-table"),
+      layoutLabControls: document.getElementById("layout-lab-controls"),
+      layoutLabSummary: document.getElementById("layout-lab-summary"),
+      layoutLabBadges: document.getElementById("layout-lab-badges"),
+      layoutLabGrid: document.getElementById("layout-lab-grid"),
+      layoutLabNote: document.getElementById("layout-lab-note"),
       fallbackSummary: document.getElementById("fallback-summary"),
       fallbackChip: document.getElementById("fallback-chip"),
       fallbackPreview: document.getElementById("fallback-preview"),
@@ -2124,6 +2271,18 @@
     let galleryObserver = null;
     let galleryFilter = "all";
     let galleryQuery = "";
+    let layoutLabFocus = "overview";
+    let latestLayoutLabModel = null;
+    const defaultStudioState = Object.freeze({
+      preset: "corporate",
+      fontSize: 15,
+      padding: 40,
+      radius: 10,
+      shadows: true,
+      embedCss: true
+    });
+    let studioState = { ...defaultStudioState };
+    let studioDebounceTimer = 0;
     let suppressUrlSync = false;
     let lastStateUrl = "";
     let renderRevision = 0;
@@ -2436,6 +2595,316 @@
         .replace(/>/g, "&gt;");
     }
 
+    function formatMetricNumber(value) {
+      const numeric = Number(value ?? 0);
+      return Number.isFinite(numeric) ? numeric.toLocaleString("en-US") : "0";
+    }
+
+    function formatMetricFloat(value) {
+      const numeric = Number(value ?? 0);
+      if (!Number.isFinite(numeric)) {
+        return "0.0";
+      }
+      return Math.abs(numeric) >= 100 ? numeric.toFixed(0) : numeric.toFixed(1);
+    }
+
+    function setLayoutLabFocusButtons() {
+      for (const button of els.layoutLabControls.querySelectorAll("[data-layout-focus]")) {
+        const active = button.dataset.layoutFocus === layoutLabFocus;
+        button.setAttribute("aria-pressed", String(active));
+        button.className = active
+          ? "shell-toggle border-cobalt/30 bg-cobalt/15 text-cobalt"
+          : "shell-toggle";
+      }
+    }
+
+    function normalizeStudioState(candidate = {}) {
+      const allowedPresets = ["default", "dark", "forest", "neutral", "corporate", "neon", "pastel", "high-contrast", "monochrome", "blueprint"];
+      const preset = allowedPresets.includes(candidate.preset) ? candidate.preset : defaultStudioState.preset;
+      const fontSize = Math.min(24, Math.max(11, Number(candidate.fontSize ?? defaultStudioState.fontSize) || defaultStudioState.fontSize));
+      const padding = Math.min(72, Math.max(16, Number(candidate.padding ?? defaultStudioState.padding) || defaultStudioState.padding));
+      const radius = Math.min(28, Math.max(0, Number(candidate.radius ?? defaultStudioState.radius) || defaultStudioState.radius));
+      return {
+        preset,
+        fontSize,
+        padding,
+        radius,
+        shadows: candidate.shadows ?? defaultStudioState.shadows,
+        embedCss: candidate.embedCss ?? defaultStudioState.embedCss
+      };
+    }
+
+    function buildRuntimeSvgOptions() {
+      return {
+        theme: studioState.preset,
+        svg: {
+          theme: studioState.preset,
+          fontSize: studioState.fontSize,
+          padding: studioState.padding,
+          roundedCorners: studioState.radius,
+          shadows: studioState.shadows,
+          embedThemeCss: studioState.embedCss
+        }
+      };
+    }
+
+    function buildRuntimeDiagramOptions() {
+      return {
+        theme: studioState.preset,
+        svg: {
+          theme: studioState.preset,
+          fontSize: studioState.fontSize,
+          padding: studioState.padding,
+          roundedCorners: studioState.radius,
+          shadows: studioState.shadows,
+          embedThemeCss: studioState.embedCss
+        },
+        canvas: {
+          fontSize: studioState.fontSize,
+          padding: studioState.padding
+        }
+      };
+    }
+
+    function renderStyleStudio() {
+      els.stylePreset.value = studioState.preset;
+      els.styleFontSize.value = String(studioState.fontSize);
+      els.stylePadding.value = String(studioState.padding);
+      els.styleRadius.value = String(studioState.radius);
+      els.styleShadows.checked = studioState.shadows;
+      els.styleEmbedCss.checked = studioState.embedCss;
+      els.styleFontSizeValue.textContent = `${studioState.fontSize}px`;
+      els.stylePaddingValue.textContent = `${studioState.padding}px`;
+      els.styleRadiusValue.textContent = `${studioState.radius}px`;
+
+      const deltas = [];
+      if (studioState.preset !== defaultStudioState.preset) deltas.push(`preset ${defaultStudioState.preset} → ${studioState.preset}`);
+      if (studioState.fontSize !== defaultStudioState.fontSize) deltas.push(`font ${defaultStudioState.fontSize}px → ${studioState.fontSize}px`);
+      if (studioState.padding !== defaultStudioState.padding) deltas.push(`padding ${defaultStudioState.padding}px → ${studioState.padding}px`);
+      if (studioState.radius !== defaultStudioState.radius) deltas.push(`radius ${defaultStudioState.radius}px → ${studioState.radius}px`);
+      if (studioState.shadows !== defaultStudioState.shadows) deltas.push(`shadows ${defaultStudioState.shadows ? "on" : "off"} → ${studioState.shadows ? "on" : "off"}`);
+      if (studioState.embedCss !== defaultStudioState.embedCss) deltas.push(`embed CSS ${defaultStudioState.embedCss ? "on" : "off"} → ${studioState.embedCss ? "on" : "off"}`);
+
+      els.styleSummary.textContent = deltas.length === 0
+        ? "Before: corporate default styling. After: unchanged. Reset returns the runtime to this exact baseline."
+        : `Before: corporate default styling. After: ${studioState.preset} with ${studioState.fontSize}px text, ${studioState.padding}px padding, ${studioState.radius}px corners, shadows ${studioState.shadows ? "on" : "off"}, embedded CSS ${studioState.embedCss ? "on" : "off"}.`;
+      els.styleDelta.innerHTML = (deltas.length ? deltas : ["baseline unchanged"])
+        .map((delta) => `<span class="pill rounded-full px-3 py-1 text-[11px] font-semibold tracking-[0.14em] text-slate-200">${escapeHtml(delta)}</span>`)
+        .join("");
+    }
+
+    function buildLayoutLabModel(result) {
+      const guard = result.guardValue;
+      const layout = result.layoutValue;
+      if (!guard || !layout) {
+        return null;
+      }
+
+      const requestedAlgorithm = guard.layout_requested_algorithm || "auto";
+      const selectedAlgorithm = guard.layout_selected_algorithm || requestedAlgorithm;
+      const guardReason = guard.guard_reason || "within_budget";
+      const pressureTier = guard.pressure?.tier || "unknown";
+      const crossingsBefore = layout.crossingCountBeforeRefinement ?? 0;
+      const crossingsAfter = layout.crossingCount ?? 0;
+      const crossingDelta = Math.max(0, crossingsBefore - crossingsAfter);
+      const crossingDeltaRatio = crossingsBefore > 0 ? crossingDelta / crossingsBefore : 0;
+      const avgEdgeLength = layout.edgeCount > 0 ? layout.totalEdgeLength / layout.edgeCount : 0;
+      const reversedShare = layout.edgeCount > 0 ? layout.reversedEdges / layout.edgeCount : 0;
+
+      return {
+        revision: result.revision,
+        requestedAlgorithm,
+        selectedAlgorithm,
+        guardReason,
+        pressureTier,
+        layout,
+        canvas: result.canvasValue || null,
+        guard,
+        crossingsBefore,
+        crossingsAfter,
+        crossingDelta,
+        crossingDeltaRatio,
+        avgEdgeLength,
+        reversedShare
+      };
+    }
+
+    function renderLayoutLab(result) {
+      latestLayoutLabModel = buildLayoutLabModel(result);
+      setLayoutLabFocusButtons();
+
+      if (!latestLayoutLabModel) {
+        els.layoutLabSummary.textContent = result.runtimeUnavailable
+          ? "Layout lab is waiting on the published browser runtime."
+          : "Layout lab is waiting for a successful Diagram(canvas).render() result.";
+        els.layoutLabBadges.innerHTML = "";
+        els.layoutLabGrid.innerHTML = `
+          <div class="rounded-[1.25rem] border border-amber-300/20 bg-amber-300/10 p-4 text-sm leading-6 text-amber-100 md:col-span-2">
+            The current revision did not produce runtime layout stats. Render a healthy sample to populate algorithm dispatch, cycle counts, and crossing metrics.
+          </div>
+        `;
+        els.layoutLabNote.textContent = "This lab changes the inspection lens only. The current browser runtime still chooses the algorithm and cycle strategy internally.";
+        return;
+      }
+
+      const model = latestLayoutLabModel;
+      const focus = layoutLabFocus;
+      const focusSummaries = {
+        overview: `Revision ${model.revision} requested ${model.requestedAlgorithm} and selected ${model.selectedAlgorithm} with ${model.layout.cycleStrategy} cycle handling. Compare the FrankenMermaid SVG against Mermaid baseline first, then use the badges below to inspect why the layout looks the way it does.`,
+        cycles: model.layout.cycleCount > 0
+          ? `The runtime detected ${formatMetricNumber(model.layout.cycleCount)} cycle component${model.layout.cycleCount === 1 ? "" : "s"} across ${formatMetricNumber(model.layout.cycleNodeCount)} node${model.layout.cycleNodeCount === 1 ? "" : "s"}. Compare the FrankenMermaid SVG and canvas views for edge reversals and local congestion around those loop-heavy regions.`
+          : "No cycles were detected in this revision, so the cycle strategy remained dormant. Use this lens to confirm the sample is genuinely acyclic rather than merely low-density.",
+        crossings: `Crossings dropped from ${formatMetricNumber(model.crossingsBefore)} before refinement to ${formatMetricNumber(model.crossingsAfter)} after refinement. Compare the central junctions in FrankenMermaid SVG against Mermaid baseline to judge whether the reduced crossing pressure improves scanability.`,
+        budget: `Guard reason is ${model.guardReason} with pressure tier ${model.pressureTier}. This lens is for judging whether the selected algorithm, time estimate, and route estimate stayed within budget without hiding too much detail.`,
+        legibility: `Legibility combines structure and output cost: ${formatMetricNumber(model.layout.nodeCount)} nodes, ${formatMetricNumber(model.layout.edgeCount)} edges, about ${formatMetricFloat(model.avgEdgeLength)}px average edge length, and ${formatMetricNumber(model.canvas?.drawCalls ?? 0)} canvas draw calls. Compare SVG and canvas for whether density still reads cleanly at the current viewport.`
+      };
+
+      const focusNotes = {
+        overview: "These controls do not change the runtime. They only change which metrics and reading instructions are emphasized for the already-rendered revision.",
+        cycles: "Cycle handling is runtime-selected today. The browser surface reports the chosen cycle strategy and resulting cycle stats, but it does not yet let you override that strategy interactively.",
+        crossings: "Crossing counts come from the real layout stats emitted by WASM. Use the before/after pair to judge refinement effectiveness rather than treating a low absolute count as universally good.",
+        budget: "Guard metadata is authoritative for this surface: requested algorithm, selected algorithm, pressure tier, and degradation flags come from the render result rather than page-side heuristics.",
+        legibility: "Legibility is comparative here, not absolute. The lab surfaces density, edge length, and draw-call load so reviewers can interpret the SVG and canvas outputs with context."
+      };
+
+      const cardsByFocus = {
+        overview: [
+          {
+            title: "Runtime dispatch",
+            value: `${model.requestedAlgorithm} → ${model.selectedAlgorithm}`,
+            detail: `Guard reason ${model.guardReason} · pressure ${model.pressureTier}`
+          },
+          {
+            title: "Cycle posture",
+            value: `${model.layout.cycleStrategy} strategy`,
+            detail: `${formatMetricNumber(model.layout.cycleCount)} cycles · ${formatMetricNumber(model.layout.reversedEdges)} reversed edges · ${formatMetricNumber(model.layout.maxCycleSize)} max cycle size`
+          },
+          {
+            title: "Crossing refinement",
+            value: `${formatMetricNumber(model.crossingsAfter)} final crossings`,
+            detail: `${formatMetricNumber(model.crossingsBefore)} before refinement · ${formatMetricNumber(model.crossingDelta)} crossings removed`
+          },
+          {
+            title: "Render load",
+            value: `${formatMetricNumber(model.canvas?.drawCalls ?? 0)} draw calls`,
+            detail: `${formatMetricNumber(model.layout.phaseIterations)} layout iterations · ${formatMetricFloat(model.avgEdgeLength)}px avg edge length`
+          }
+        ],
+        cycles: [
+          {
+            title: "Cycle count",
+            value: formatMetricNumber(model.layout.cycleCount),
+            detail: `${formatMetricNumber(model.layout.cycleNodeCount)} nodes participate in cycles`
+          },
+          {
+            title: "Cycle strategy",
+            value: model.layout.cycleStrategy,
+            detail: model.layout.cycleClustersCollapsed ? "Cycle clusters were collapsed" : "Cycle clusters stayed expanded"
+          },
+          {
+            title: "Reversed edges",
+            value: formatMetricNumber(model.layout.reversedEdges),
+            detail: `${formatMetricFloat(model.reversedShare * 100)}% of edges were reversed for cycle breaking`
+          },
+          {
+            title: "Largest cycle",
+            value: `${formatMetricNumber(model.layout.maxCycleSize)} nodes`,
+            detail: `${formatMetricFloat(model.layout.reversedEdgeTotalLength)}px reversed-edge path length`
+          }
+        ],
+        crossings: [
+          {
+            title: "Before refinement",
+            value: formatMetricNumber(model.crossingsBefore),
+            detail: "Crossings after initial ordering, before local refinement"
+          },
+          {
+            title: "After refinement",
+            value: formatMetricNumber(model.crossingsAfter),
+            detail: "Crossings in the committed layout"
+          },
+          {
+            title: "Crossings removed",
+            value: formatMetricNumber(model.crossingDelta),
+            detail: `${formatMetricFloat(model.crossingDeltaRatio * 100)}% reduction through refinement`
+          },
+          {
+            title: "Routing length",
+            value: `${formatMetricFloat(model.layout.totalEdgeLength)}px`,
+            detail: `Across ${formatMetricNumber(model.layout.edgeCount)} routed edges`
+          }
+        ],
+        budget: [
+          {
+            title: "Guard reason",
+            value: model.guardReason,
+            detail: `Requested ${model.requestedAlgorithm} · selected ${model.selectedAlgorithm}`
+          },
+          {
+            title: "Time estimate",
+            value: `${formatMetricNumber(model.guard.layout_time_estimate_ms)}ms`,
+            detail: model.guard.layout_budget_exceeded ? "Layout budget exceeded" : "Layout budget stayed within guardrails"
+          },
+          {
+            title: "Iteration estimate",
+            value: formatMetricNumber(model.guard.layout_iterations_estimate),
+            detail: `${formatMetricNumber(model.layout.phaseIterations)} actual phase iterations surfaced to the browser`
+          },
+          {
+            title: "Route estimate",
+            value: formatMetricNumber(model.guard.route_ops_estimate),
+            detail: model.guard.route_budget_exceeded ? "Route budget exceeded" : "Route budget stayed within guardrails"
+          }
+        ],
+        legibility: [
+          {
+            title: "Graph density",
+            value: `${formatMetricNumber(model.layout.nodeCount)} nodes / ${formatMetricNumber(model.layout.edgeCount)} edges`,
+            detail: `Pressure tier ${model.pressureTier} · guard ${model.guardReason}`
+          },
+          {
+            title: "Average edge length",
+            value: `${formatMetricFloat(model.avgEdgeLength)}px`,
+            detail: `${formatMetricFloat(model.layout.totalEdgeLength)}px total routed length`
+          },
+          {
+            title: "Canvas load",
+            value: `${formatMetricNumber(model.canvas?.drawCalls ?? 0)} draw calls`,
+            detail: `${formatMetricNumber(model.canvas?.labelsDrawn ?? 0)} labels · ${formatMetricNumber(model.canvas?.edgesDrawn ?? 0)} edges drawn`
+          },
+          {
+            title: "Refinement overhead",
+            value: `${formatMetricNumber(model.layout.phaseIterations)} phases`,
+            detail: `${formatMetricNumber(model.crossingDelta)} crossings removed over the refinement pass`
+          }
+        ]
+      };
+
+      const badges = [
+        `algorithm ${model.selectedAlgorithm}`,
+        `cycle ${model.layout.cycleStrategy}`,
+        `pressure ${model.pressureTier}`,
+        `cycles ${formatMetricNumber(model.layout.cycleCount)}`,
+        `crossings ${formatMetricNumber(model.crossingsAfter)}`,
+        model.guard.budget_exceeded ? "budget exceeded" : "within budget"
+      ];
+
+      els.layoutLabSummary.textContent = focusSummaries[focus] || focusSummaries.overview;
+      els.layoutLabBadges.innerHTML = badges
+        .map((badge) => `<span class="pill rounded-full px-3 py-1 text-[11px] font-semibold tracking-[0.14em] text-slate-200">${escapeHtml(badge)}</span>`)
+        .join("");
+      els.layoutLabGrid.innerHTML = (cardsByFocus[focus] || cardsByFocus.overview)
+        .map((card) => `
+          <div class="rounded-[1.25rem] border border-white/10 bg-[#08101d] p-4">
+            <div class="text-xs font-semibold uppercase tracking-[0.22em] text-slate-400">${escapeHtml(card.title)}</div>
+            <div class="mt-3 text-2xl font-semibold text-white">${escapeHtml(card.value)}</div>
+            <div class="mt-2 text-sm leading-6 text-slate-300">${escapeHtml(card.detail)}</div>
+          </div>
+        `)
+        .join("");
+      els.layoutLabNote.textContent = focusNotes[focus] || focusNotes.overview;
+    }
+
     function diagnosticEmoji(severity) {
       switch (severity) {
         case "error":
@@ -2685,6 +3154,8 @@
         spotlight: spotlightSample?.id || currentSample?.id || "",
         galleryFilter,
         galleryQuery,
+        layoutLabFocus,
+        studio: { ...studioState },
         source: els.input.value,
         shells: collectShellState()
       };
@@ -2696,6 +3167,8 @@
       url.searchParams.set("sample", state.sample);
       url.searchParams.set("spotlight", state.spotlight);
       url.searchParams.set("filter", state.galleryFilter);
+      url.searchParams.set("lab", state.layoutLabFocus);
+      url.searchParams.set("studio", JSON.stringify(state.studio));
       if (state.galleryQuery) {
         url.searchParams.set("q", state.galleryQuery);
       } else {
@@ -2732,6 +3205,8 @@
       const sample = findSampleById(url.searchParams.get("sample"), editorSamples[0]);
       const spotlight = findSampleById(url.searchParams.get("spotlight"), sample);
       const requestedFilter = url.searchParams.get("filter");
+      const requestedLabFocus = url.searchParams.get("lab");
+      const studioJson = url.searchParams.get("studio");
       const query = url.searchParams.get("q") || "";
       const sourceOverride = url.searchParams.get("source");
       const shellJson = url.searchParams.get("shells");
@@ -2740,9 +3215,19 @@
       currentSample = sample;
       spotlightSample = spotlight;
       galleryFilter = galleryCategories.includes(requestedFilter) ? requestedFilter : "all";
+      layoutLabFocus = ["overview", "cycles", "crossings", "budget", "legibility"].includes(requestedLabFocus) ? requestedLabFocus : "overview";
+      studioState = { ...defaultStudioState };
       galleryQuery = query;
       els.input.value = sourceOverride || sample.code;
       els.gallerySearch.value = query;
+
+      if (studioJson) {
+        try {
+          studioState = normalizeStudioState(JSON.parse(studioJson));
+        } catch (_error) {
+          studioState = { ...defaultStudioState };
+        }
+      }
 
       if (shellJson) {
         try {
@@ -2756,6 +3241,7 @@
       lastStateUrl = buildStateUrl().toString();
       history.replaceState(null, "", buildStateUrl());
       updateEditorChrome();
+      renderStyleStudio();
     }
 
     function createSampleButtons() {
@@ -2874,7 +3360,7 @@
           <div class="space-y-4 p-4"><div class="shimmer-light h-8 w-2/3"></div><div class="shimmer-light h-64"></div><div class="shimmer-light h-5 w-1/2"></div></div>
         `;
         try {
-          const svg = await frankenRuntime.renderSvg(sample.code, { theme: "corporate" });
+          const svg = await frankenRuntime.renderSvg(sample.code, buildRuntimeSvgOptions());
           els.spotlightStage.innerHTML = svg;
           animate(
             "#spotlight-stage > *",
@@ -3037,7 +3523,7 @@
         if (useFranken) {
           target.innerHTML = `<div class="space-y-3 p-2"><div class="shimmer-light h-6 w-1/2"></div><div class="shimmer-light h-32"></div><div class="shimmer-light h-4 w-1/3"></div></div>`;
           try {
-            const svg = await frankenRuntime.renderSvg(sample.code, { theme: "corporate" });
+            const svg = await frankenRuntime.renderSvg(sample.code, buildRuntimeSvgOptions());
             target.innerHTML = svg;
             target.dataset.rendered = "true";
             return;
@@ -3333,7 +3819,7 @@
             throw new Error("module imported but did not expose expected frankenmermaid bindings");
           }
           await runtime.default(candidate.wasmUrl);
-          await runtime.init({ theme: "corporate" });
+          await runtime.init(buildRuntimeDiagramOptions());
           frankenRuntime = { ...runtime, source: candidate };
           els.runtimeBanner.innerHTML = `
             <div class="rounded-3xl border border-mint/20 bg-mint/10 p-5">
@@ -3449,7 +3935,7 @@
       };
 
       try {
-        result.fmHtml = await measureStage("svg", timings, () => frankenRuntime.renderSvg(source, { theme: "corporate" }));
+        result.fmHtml = await measureStage("svg", timings, () => frankenRuntime.renderSvg(source, buildRuntimeSvgOptions()));
         result.fmChipText = `${timings.svg}ms`;
         result.fmChipClass = "border-mint/20 bg-mint/10 text-mint";
         result.fmChipTitle = `SVG render completed in ${timings.svg}ms`;
@@ -3503,8 +3989,11 @@
         offscreen.height = els.canvas.height;
         let workingDiagram = null;
         try {
-          workingDiagram = new frankenRuntime.Diagram(offscreen, { theme: "corporate" });
-          const renderResult = await measureStage("canvas", timings, () => workingDiagram.render(source, { theme: "corporate" }));
+          workingDiagram = new frankenRuntime.Diagram(offscreen, buildRuntimeDiagramOptions());
+          const renderResult = await measureStage("canvas", timings, () => workingDiagram.render(source, buildRuntimeDiagramOptions()));
+          result.canvasValue = renderResult?.canvas || null;
+          result.guardValue = renderResult?.guard || null;
+          result.layoutValue = renderResult?.layout || null;
           result.canvasSnapshot = {
             mode: "bitmap",
             canvas: offscreen
@@ -3598,6 +4087,7 @@
       els.canvasChip.title = `${frankenResult.canvasChipTitle} · revision ${revision}`;
       els.parseSummary.textContent = `${frankenResult.parseSummary} · mermaid ${mermaidResult.timings.mermaid ?? 0}ms · total ${totalMs}ms · revision ${revision}`;
       renderDiagnosticsPanel(frankenResult.diagnostics, frankenResult);
+      renderLayoutLab(frankenResult);
       renderFallbackPreview(frankenResult);
       updateEditorChrome();
 
@@ -3611,10 +4101,23 @@
       return scheduleRender(options.reason ?? "manual", { immediate: options.immediate ?? true });
     }
 
+    async function applyStudioState(reason = "style-change") {
+      renderStyleStudio();
+      syncUrlState("replace");
+      if (frankenRuntime) {
+        await frankenRuntime.init(buildRuntimeDiagramOptions());
+        await renderSpotlight();
+        await renderGallery();
+      }
+      await renderAll({ reason, immediate: true });
+    }
+
     async function boot() {
       await loadCoverageArtifact();
       initShellControls();
       restoreUrlState();
+      setLayoutLabFocusButtons();
+      renderStyleStudio();
       createSampleButtons();
       renderFeatureStrip();
       renderFilterControls();
@@ -3639,11 +4142,70 @@
       await renderAll({ reason: "manual", immediate: true });
     });
 
+    function queueStudioApply(reason = "style-change") {
+      renderStyleStudio();
+      syncUrlState("replace");
+      if (studioDebounceTimer) {
+        window.clearTimeout(studioDebounceTimer);
+      }
+      studioDebounceTimer = window.setTimeout(() => {
+        studioDebounceTimer = 0;
+        applyStudioState(reason);
+      }, 140);
+    }
+
+    els.stylePreset.addEventListener("change", () => {
+      studioState = normalizeStudioState({ ...studioState, preset: els.stylePreset.value });
+      queueStudioApply("style-preset");
+    });
+    els.styleFontSize.addEventListener("input", () => {
+      studioState = normalizeStudioState({ ...studioState, fontSize: Number(els.styleFontSize.value) });
+      queueStudioApply("style-font-size");
+    });
+    els.stylePadding.addEventListener("input", () => {
+      studioState = normalizeStudioState({ ...studioState, padding: Number(els.stylePadding.value) });
+      queueStudioApply("style-padding");
+    });
+    els.styleRadius.addEventListener("input", () => {
+      studioState = normalizeStudioState({ ...studioState, radius: Number(els.styleRadius.value) });
+      queueStudioApply("style-radius");
+    });
+    els.styleShadows.addEventListener("change", () => {
+      studioState = normalizeStudioState({ ...studioState, shadows: els.styleShadows.checked });
+      queueStudioApply("style-shadows");
+    });
+    els.styleEmbedCss.addEventListener("change", () => {
+      studioState = normalizeStudioState({ ...studioState, embedCss: els.styleEmbedCss.checked });
+      queueStudioApply("style-embed-css");
+    });
+    els.styleReset.addEventListener("click", () => {
+      studioState = { ...defaultStudioState };
+      queueStudioApply("style-reset");
+    });
+
     els.retryRuntime.addEventListener("click", async () => {
       await loadFrankenRuntime();
       await renderSpotlight();
       await renderGallery();
       await renderAll({ reason: "runtime-retry", immediate: true });
+      syncUrlState("replace");
+    });
+
+    els.layoutLabControls.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-layout-focus]");
+      if (!button) {
+        return;
+      }
+      layoutLabFocus = button.dataset.layoutFocus;
+      setLayoutLabFocusButtons();
+      if (latestLayoutLabModel) {
+        renderLayoutLab({
+          revision: latestLayoutLabModel.revision,
+          guardValue: latestLayoutLabModel.guard,
+          layoutValue: latestLayoutLabModel.layout,
+          canvasValue: latestLayoutLabModel.canvas
+        });
+      }
       syncUrlState("replace");
     });
 

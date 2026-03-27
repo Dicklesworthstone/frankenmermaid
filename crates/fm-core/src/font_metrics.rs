@@ -6,6 +6,41 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Returns true for characters that occupy approximately 2 columns in
+/// monospace/proportional fonts — CJK ideographs, fullwidth forms, and
+/// common emoji. Based on UAX #11 East Asian Width property (W/F categories).
+fn is_east_asian_wide(c: char) -> bool {
+    let cp = c as u32;
+    matches!(cp,
+        // CJK Unified Ideographs
+        0x4E00..=0x9FFF
+        // CJK Unified Ideographs Extension A
+        | 0x3400..=0x4DBF
+        // CJK Compatibility Ideographs
+        | 0xF900..=0xFAFF
+        // CJK Unified Ideographs Extension B+
+        | 0x20000..=0x2FA1F
+        // Hangul Syllables
+        | 0xAC00..=0xD7AF
+        // Fullwidth Forms
+        | 0xFF01..=0xFF60
+        | 0xFFE0..=0xFFE6
+        // Katakana / Hiragana
+        | 0x3040..=0x309F
+        | 0x30A0..=0x30FF
+        // CJK Symbols and Punctuation
+        | 0x3000..=0x303F
+        // Enclosed CJK Letters
+        | 0x3200..=0x33FF
+        // CJK Compatibility
+        | 0xFE30..=0xFE4F
+        // Common emoji (Miscellaneous Symbols + Dingbats + Emoticons + Transport)
+        | 0x1F300..=0x1F9FF
+        // Regional indicator symbols (flags)
+        | 0x1F1E0..=0x1F1FF
+    )
+}
+
 /// Font metrics preset for known font families.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum FontPreset {
@@ -111,6 +146,8 @@ pub enum CharWidthClass {
     Wide,
     /// Very wide characters: W, M, @, %
     VeryWide,
+    /// Full-width: CJK ideographs, emoji, East Asian wide characters
+    FullWidth,
 }
 
 impl CharWidthClass {
@@ -123,6 +160,7 @@ impl CharWidthClass {
             ' ' => Self::Half,
             'w' | 'm' => Self::Wide,
             'W' | 'M' | '@' | '%' | '&' => Self::VeryWide,
+            c if is_east_asian_wide(c) => Self::FullWidth,
             _ => Self::Normal,
         }
     }
@@ -137,6 +175,7 @@ impl CharWidthClass {
             Self::Normal => 1.0,
             Self::Wide => 1.2,
             Self::VeryWide => 1.5,
+            Self::FullWidth => 2.0,
         }
     }
 }
@@ -502,5 +541,42 @@ mod tests {
 
         assert_eq!(metrics.diagnostics().len(), 1);
         assert!(metrics.diagnostics()[0].message.contains("CustomFont"));
+    }
+
+    #[test]
+    fn cjk_characters_classified_as_fullwidth() {
+        // CJK Unified Ideographs
+        assert_eq!(CharWidthClass::classify('中'), CharWidthClass::FullWidth);
+        assert_eq!(CharWidthClass::classify('文'), CharWidthClass::FullWidth);
+        assert_eq!(CharWidthClass::classify('字'), CharWidthClass::FullWidth);
+        // Hiragana
+        assert_eq!(CharWidthClass::classify('あ'), CharWidthClass::FullWidth);
+        // Katakana
+        assert_eq!(CharWidthClass::classify('ア'), CharWidthClass::FullWidth);
+        // Hangul
+        assert_eq!(CharWidthClass::classify('한'), CharWidthClass::FullWidth);
+    }
+
+    #[test]
+    fn fullwidth_multiplier_is_two() {
+        assert!((CharWidthClass::FullWidth.multiplier() - 2.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn cjk_text_is_wider_than_latin() {
+        let metrics = FontMetrics::default();
+        let latin = metrics.estimate_width("ABC");
+        let cjk = metrics.estimate_width("中文字");
+        assert!(
+            cjk > latin,
+            "CJK text ({cjk}) should be wider than Latin ({latin})"
+        );
+    }
+
+    #[test]
+    fn emoji_classified_as_fullwidth() {
+        assert_eq!(CharWidthClass::classify('😀'), CharWidthClass::FullWidth);
+        assert_eq!(CharWidthClass::classify('🎉'), CharWidthClass::FullWidth);
+        assert_eq!(CharWidthClass::classify('🚀'), CharWidthClass::FullWidth);
     }
 }

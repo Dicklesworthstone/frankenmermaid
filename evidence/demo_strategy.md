@@ -265,6 +265,8 @@ Playground section:
 - The editor surface should expose authoring affordances directly in the page: syntax lens, structural hints, sample-cycling shortcuts, and URL-safe source overrides that survive deep-link restoration.
 - The live authoring loop should be latest-edit-wins: stale async runs must be discarded, and visible stage timing/error state should explain what actually rendered.
 - Diagnostics should be first-class in the playground: line-linked markers, remediation hints, and preserved safe fallback preview should keep bad inputs navigable instead of collapsing the page into opaque errors.
+- The playground should include a layout/cycle lab driven by real runtime metadata: algorithm dispatch, cycle strategy, crossings, and guard/budget facts should be inspectable per revision, while any analysis controls remain explicitly read-only unless the browser runtime later exposes writable layout knobs.
+- The playground should include a theme/style studio that is constrained to runtime-backed knobs only, persists its state in shareable links, and can always reset to a known baseline so before/after comparisons stay reviewable.
 - The section should function as the home for future telemetry, determinism, diagnostics, and export labs rather than scattering those surfaces across the page.
 
 Support Evidence section:

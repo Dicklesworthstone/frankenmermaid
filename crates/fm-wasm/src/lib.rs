@@ -32,7 +32,7 @@ use wasm_bindgen::JsValue;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::wasm_bindgen;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WasmRenderOutput {
     pub svg: String,
@@ -43,6 +43,7 @@ pub struct WasmRenderOutput {
     pub policy_id: String,
     pub schema_version: String,
     pub guard: MermaidGuardReport,
+    pub layout: LayoutRuntimeSummary,
     pub source_spans: Vec<SourceSpanRecord>,
 }
 
@@ -139,6 +140,7 @@ struct DiagramRenderOutput {
     policy_id: String,
     schema_version: String,
     guard: MermaidGuardReport,
+    layout: LayoutRuntimeSummary,
     source_spans: Vec<SourceSpanRecord>,
     canvas: CanvasRenderSummary,
 }
@@ -149,6 +151,7 @@ impl DiagramRenderOutput {
         svg: String,
         parsed: &ParseResult,
         layout: &DiagramLayout,
+        layout_config: &LayoutConfig,
         guard: MermaidGuardReport,
         canvas: &CanvasRenderResult,
     ) -> Self {
@@ -161,9 +164,50 @@ impl DiagramRenderOutput {
             decision_id: guard.observability.decision_id.to_string(),
             policy_id: guard.observability.policy_id.to_string(),
             schema_version: guard.observability.schema_version.to_string(),
+            layout: LayoutRuntimeSummary::new(layout, layout_config),
             guard,
             source_spans: collect_source_spans(&parsed.ir, layout),
             canvas: CanvasRenderSummary::from(canvas),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LayoutRuntimeSummary {
+    cycle_strategy: String,
+    cycle_clusters_collapsed: bool,
+    node_count: usize,
+    edge_count: usize,
+    crossing_count: usize,
+    crossing_count_before_refinement: usize,
+    reversed_edges: usize,
+    cycle_count: usize,
+    cycle_node_count: usize,
+    max_cycle_size: usize,
+    collapsed_clusters: usize,
+    reversed_edge_total_length: f32,
+    total_edge_length: f32,
+    phase_iterations: usize,
+}
+
+impl LayoutRuntimeSummary {
+    fn new(layout: &DiagramLayout, layout_config: &LayoutConfig) -> Self {
+        Self {
+            cycle_strategy: layout_config.cycle_strategy.as_str().to_string(),
+            cycle_clusters_collapsed: layout_config.collapse_cycle_clusters,
+            node_count: layout.stats.node_count,
+            edge_count: layout.stats.edge_count,
+            crossing_count: layout.stats.crossing_count,
+            crossing_count_before_refinement: layout.stats.crossing_count_before_refinement,
+            reversed_edges: layout.stats.reversed_edges,
+            cycle_count: layout.stats.cycle_count,
+            cycle_node_count: layout.stats.cycle_node_count,
+            max_cycle_size: layout.stats.max_cycle_size,
+            collapsed_clusters: layout.stats.collapsed_clusters,
+            reversed_edge_total_length: layout.stats.reversed_edge_total_length,
+            total_edge_length: layout.stats.total_edge_length,
+            phase_iterations: layout.stats.phase_iterations,
         }
     }
 }
@@ -534,7 +578,7 @@ pub fn render(input: &str) -> WasmRenderOutput {
     let traced_layout = layout_diagram_traced_with_config_and_guardrails(
         &parsed.ir,
         fm_layout::LayoutAlgorithm::Auto,
-        layout_config,
+        layout_config.clone(),
         layout_guardrails,
     );
     budget_broker
@@ -571,6 +615,7 @@ pub fn render(input: &str) -> WasmRenderOutput {
         policy_id: guard.observability.policy_id.to_string(),
         schema_version: guard.observability.schema_version.to_string(),
         guard,
+        layout: LayoutRuntimeSummary::new(&traced_layout.layout, &layout_config),
         source_spans,
     }
 }
@@ -1012,8 +1057,14 @@ impl Diagram {
         self.canvas_config = next_canvas;
         self.pressure_config = next_pressure;
 
-        let output =
-            DiagramRenderOutput::new(svg, &parsed, &traced_layout.layout, guard, &canvas_result);
+        let output = DiagramRenderOutput::new(
+            svg,
+            &parsed,
+            &traced_layout.layout,
+            &layout_config,
+            guard,
+            &canvas_result,
+        );
         to_js_value(&output)
     }
 
@@ -1113,6 +1164,10 @@ mod tests {
         );
         assert_eq!(output.guard.guard_reason.as_deref(), Some("within_budget"));
         assert_eq!(output.guard.pressure.tier, MermaidPressureTier::Unknown);
+        assert_eq!(output.layout.cycle_strategy, "greedy");
+        assert_eq!(output.layout.node_count, 2);
+        assert_eq!(output.layout.edge_count, 1);
+        assert_eq!(output.layout.crossing_count, 0);
         assert!(output.source_spans.iter().any(|span| span.kind == "node"));
         assert!(output.source_spans.iter().any(|span| span.kind == "edge"));
     }

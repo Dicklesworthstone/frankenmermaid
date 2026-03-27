@@ -6559,4 +6559,108 @@ mod tests {
         assert_eq!(config.glow_enabled, original.glow_enabled);
         assert_eq!(config.detail_tier, original.detail_tier);
     }
+
+    // ─── Property-based render completeness tests (bd-1br.8) ────────────
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(48))]
+
+        #[test]
+        fn prop_svg_node_count_matches_data_attribute(node_count in 1_usize..15) {
+            let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+            for i in 0..node_count {
+                ir.nodes.push(IrNode {
+                    id: format!("N{i}"),
+                    ..IrNode::default()
+                });
+            }
+            for i in 0..node_count.saturating_sub(1) {
+                ir.edges.push(fm_core::IrEdge {
+                    from: IrEndpoint::Node(fm_core::IrNodeId(i)),
+                    to: IrEndpoint::Node(fm_core::IrNodeId(i + 1)),
+                    ..fm_core::IrEdge::default()
+                });
+            }
+            let layout = layout_diagram(&ir);
+            let config = SvgRenderConfig::default();
+            let svg = render_svg_with_layout(&ir, &layout, &config);
+
+            // SVG root data-nodes attribute should match node count
+            let expected_attr = format!("data-nodes=\"{node_count}\"");
+            prop_assert!(
+                svg.contains(&expected_attr),
+                "SVG missing data-nodes=\"{}\" ({} nodes)",
+                node_count,
+                node_count
+            );
+            // Each node should produce at least one shape element
+            // (rect, circle, polygon, or path in the SVG)
+            let shape_count = svg.matches("<rect").count()
+                + svg.matches("<circle").count()
+                + svg.matches("<polygon").count();
+            prop_assert!(
+                shape_count >= node_count,
+                "Expected at least {} shape elements, found {} ({} nodes)",
+                node_count,
+                shape_count,
+                node_count
+            );
+        }
+
+        #[test]
+        fn prop_svg_no_nan_or_infinity(node_count in 0_usize..20) {
+            let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+            for i in 0..node_count {
+                ir.nodes.push(IrNode {
+                    id: format!("N{i}"),
+                    ..IrNode::default()
+                });
+            }
+            let layout = layout_diagram(&ir);
+            let config = SvgRenderConfig::default();
+            let svg = render_svg_with_layout(&ir, &layout, &config);
+            prop_assert!(
+                !svg.contains("NaN"),
+                "SVG contains NaN with {} nodes",
+                node_count
+            );
+            prop_assert!(
+                !svg.contains("Infinity"),
+                "SVG contains Infinity with {} nodes",
+                node_count
+            );
+        }
+
+        #[test]
+        fn prop_svg_is_valid_xml(node_count in 1_usize..10) {
+            let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+            for i in 0..node_count {
+                ir.nodes.push(IrNode {
+                    id: format!("N{i}"),
+                    ..IrNode::default()
+                });
+            }
+            for i in 0..node_count.saturating_sub(1) {
+                ir.edges.push(fm_core::IrEdge {
+                    from: IrEndpoint::Node(fm_core::IrNodeId(i)),
+                    to: IrEndpoint::Node(fm_core::IrNodeId(i + 1)),
+                    ..fm_core::IrEdge::default()
+                });
+            }
+            let layout = layout_diagram(&ir);
+            let config = SvgRenderConfig::default();
+            let svg = render_svg_with_layout(&ir, &layout, &config);
+
+            // Basic XML validation: must start with <svg and contain </svg>
+            prop_assert!(
+                svg.contains("<svg") && svg.contains("</svg>"),
+                "SVG output is not well-formed XML"
+            );
+            // Must contain viewBox
+            prop_assert!(
+                svg.contains("viewBox"),
+                "SVG missing viewBox attribute"
+            );
+        }
+    }
 }

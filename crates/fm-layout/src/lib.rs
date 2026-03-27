@@ -14398,4 +14398,153 @@ mod tests {
             );
         }
     }
+
+    // ─── Property-based layout invariant tests (bd-30y.13) ──────────────
+
+    #[allow(unused_imports)]
+    mod proptest_layout {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn random_flowchart(node_count: usize) -> fm_core::MermaidDiagramIr {
+            let mut ir = fm_core::MermaidDiagramIr::empty(fm_core::DiagramType::Flowchart);
+            for i in 0..node_count {
+                ir.nodes.push(fm_core::IrNode {
+                    id: format!("N{i}"),
+                    ..fm_core::IrNode::default()
+                });
+            }
+            // Add edges: each node connects to the next, plus some extra
+            for i in 0..node_count.saturating_sub(1) {
+                ir.edges.push(fm_core::IrEdge {
+                    from: fm_core::IrEndpoint::Node(fm_core::IrNodeId(i)),
+                    to: fm_core::IrEndpoint::Node(fm_core::IrNodeId(i + 1)),
+                    ..fm_core::IrEdge::default()
+                });
+            }
+            ir
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(48))]
+
+            #[test]
+            fn prop_layout_coordinates_are_always_finite(node_count in 0_usize..30) {
+                let ir = random_flowchart(node_count);
+                let layout = layout_diagram(&ir);
+                for node in &layout.nodes {
+                    prop_assert!(
+                        node.bounds.x.is_finite()
+                            && node.bounds.y.is_finite()
+                            && node.bounds.width.is_finite()
+                            && node.bounds.height.is_finite(),
+                        "Non-finite coordinates for node {} with {} nodes",
+                        node.node_id,
+                        node_count
+                    );
+                    prop_assert!(
+                        node.bounds.width >= 0.0 && node.bounds.height >= 0.0,
+                        "Negative dimensions for node {}",
+                        node.node_id
+                    );
+                }
+                for edge in &layout.edges {
+                    for pt in &edge.points {
+                        prop_assert!(
+                            pt.x.is_finite() && pt.y.is_finite(),
+                            "Non-finite edge point"
+                        );
+                    }
+                }
+            }
+
+            #[test]
+            fn prop_layout_no_node_overlap(node_count in 2_usize..20) {
+                let ir = random_flowchart(node_count);
+                let layout = layout_diagram(&ir);
+                for (i, a) in layout.nodes.iter().enumerate() {
+                    for b in layout.nodes.iter().skip(i + 1) {
+                        let overlap_x = a.bounds.x < b.bounds.x + b.bounds.width
+                            && a.bounds.x + a.bounds.width > b.bounds.x;
+                        let overlap_y = a.bounds.y < b.bounds.y + b.bounds.height
+                            && a.bounds.y + a.bounds.height > b.bounds.y;
+                        prop_assert!(
+                            !(overlap_x && overlap_y),
+                            "Nodes {} and {} overlap",
+                            a.node_id,
+                            b.node_id
+                        );
+                    }
+                }
+            }
+
+            #[test]
+            fn prop_layout_bounds_contain_all_nodes(node_count in 1_usize..25) {
+                let ir = random_flowchart(node_count);
+                let layout = layout_diagram(&ir);
+                for node in &layout.nodes {
+                    prop_assert!(
+                        node.bounds.x >= layout.bounds.x,
+                        "Node {} x={} outside bounds x={}",
+                        node.node_id,
+                        node.bounds.x,
+                        layout.bounds.x
+                    );
+                    prop_assert!(
+                        node.bounds.y >= layout.bounds.y,
+                        "Node {} y={} outside bounds y={}",
+                        node.node_id,
+                        node.bounds.y,
+                        layout.bounds.y
+                    );
+                    prop_assert!(
+                        node.bounds.x + node.bounds.width
+                            <= layout.bounds.x + layout.bounds.width + 1.0,
+                        "Node {} right edge outside layout bounds",
+                        node.node_id
+                    );
+                    prop_assert!(
+                        node.bounds.y + node.bounds.height
+                            <= layout.bounds.y + layout.bounds.height + 1.0,
+                        "Node {} bottom edge outside layout bounds",
+                        node.node_id
+                    );
+                }
+            }
+
+            #[test]
+            fn prop_layout_is_deterministic(node_count in 1_usize..15) {
+                let ir = random_flowchart(node_count);
+                let layout1 = layout_diagram(&ir);
+                let layout2 = layout_diagram(&ir);
+                prop_assert_eq!(layout1.nodes.len(), layout2.nodes.len());
+                prop_assert_eq!(layout1.edges.len(), layout2.edges.len());
+                for (a, b) in layout1.nodes.iter().zip(layout2.nodes.iter()) {
+                    prop_assert_eq!(&a.node_id, &b.node_id);
+                    prop_assert!(
+                        (a.bounds.x - b.bounds.x).abs() < 0.001,
+                        "Determinism violation: node {} x differs",
+                        a.node_id
+                    );
+                    prop_assert!(
+                        (a.bounds.y - b.bounds.y).abs() < 0.001,
+                        "Determinism violation: node {} y differs",
+                        a.node_id
+                    );
+                }
+            }
+
+            #[test]
+            fn prop_layout_edge_count_matches_ir(node_count in 1_usize..20) {
+                let ir = random_flowchart(node_count);
+                let edge_count = ir.edges.len();
+                let layout = layout_diagram(&ir);
+                prop_assert_eq!(
+                    layout.edges.len(),
+                    edge_count,
+                    "Layout edge count should match IR edge count"
+                );
+            }
+        }
+    }
 }
