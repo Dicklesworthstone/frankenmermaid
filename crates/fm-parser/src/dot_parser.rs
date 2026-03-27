@@ -886,7 +886,10 @@ fn dot_edge_group_expands_to_multiple_edges() {
     assert_eq!(
         result.ir.edges.len(),
         3,
-        "A -> {{B C D}} should expand to 3 edges"
+        "A -> {{B C D}} should expand to 3 edges, got {} edges, {} nodes, warnings: {:?}",
+        result.ir.edges.len(),
+        result.ir.nodes.len(),
+        result.warnings,
     );
     let node_ids: Vec<&str> = result.ir.nodes.iter().map(|n| n.id.as_str()).collect();
     assert!(node_ids.contains(&"A"));
