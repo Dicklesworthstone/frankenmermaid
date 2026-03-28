@@ -850,16 +850,16 @@ mod tests {
         ) {
             let mut input = String::from("flowchart LR\n");
             for i in 0..node_count {
-                input.push_str(&format!("  N{i}[Node {i}]\n"));
+                write!(input, "  N{i}[Node {i}]\n").unwrap();
             }
             let mut val = edge_seed;
             for _ in 0..node_count {
                 val = val.wrapping_mul(6364136223846793005).wrapping_add(1);
-                let from = (val as usize) % node_count;
+                let from = usize::try_from(val).unwrap_or(0) % node_count;
                 val = val.wrapping_mul(6364136223846793005).wrapping_add(1);
-                let to = (val as usize) % node_count;
+                let to = usize::try_from(val).unwrap_or(0) % node_count;
                 if from != to {
-                    input.push_str(&format!("  N{from} --> N{to}\n"));
+                    write!(input, "  N{from} --> N{to}\n").unwrap();
                 }
             }
 
@@ -882,7 +882,7 @@ mod tests {
         ) {
             let mut input = String::from("flowchart TB\n");
             for i in 0..node_count {
-                input.push_str(&format!("  N{i} --> N{}\n", (i + 1) % node_count));
+                write!(input, "  N{i} --> N{}\n", (i + 1) % node_count).unwrap();
             }
             let result = parse(&input);
             // All edge endpoints should reference existing nodes.
@@ -925,16 +925,16 @@ mod tests {
         ) {
             let mut input = String::from("flowchart TD\n");
             for i in 0..node_count {
-                input.push_str(&format!("  N{i}[Node {i}]\n"));
+                write!(input, "  N{i}[Node {i}]\n").unwrap();
             }
             let mut val = edge_seed;
             for _ in 0..node_count.min(8) {
                 val = val.wrapping_mul(6364136223846793005).wrapping_add(1);
-                let from = (val as usize) % node_count;
+                let from = usize::try_from(val).unwrap_or(0) % node_count;
                 val = val.wrapping_mul(6364136223846793005).wrapping_add(1);
-                let to = (val as usize) % node_count;
+                let to = usize::try_from(val).unwrap_or(0) % node_count;
                 if from != to {
-                    input.push_str(&format!("  N{from} --> N{to}\n"));
+                    write!(input, "  N{from} --> N{to}\n").unwrap();
                 }
             }
 
@@ -970,10 +970,10 @@ mod tests {
                 .collect();
             let mut input = String::from("sequenceDiagram\n");
             for name in &names {
-                input.push_str(&format!("  participant {name}\n"));
+                write!(input, "  participant {name}\n").unwrap();
             }
             for i in 0..participant_count.saturating_sub(1) {
-                input.push_str(&format!("  {}->>{}:msg{i}\n", names[i], names[i + 1]));
+                write!(input, "  {}->>{}:msg{i}\n", names[i], names[i + 1]).unwrap();
             }
 
             let result = parse(&input);
@@ -990,10 +990,10 @@ mod tests {
         fn prop_class_diagram_roundtrip(class_count in 2usize..6) {
             let mut input = String::from("classDiagram\n");
             for i in 0..class_count {
-                input.push_str(&format!("  class C{i}\n"));
+                write!(input, "  class C{i}\n").unwrap();
             }
             for i in 1..class_count {
-                input.push_str(&format!("  C0 <|-- C{i}\n"));
+                write!(input, "  C0 <|-- C{i}\n").unwrap();
             }
 
             let result = parse(&input);
@@ -1010,9 +1010,9 @@ mod tests {
             let mut input = String::from("stateDiagram-v2\n");
             input.push_str("  [*] --> S0\n");
             for i in 1..state_count {
-                input.push_str(&format!("  S{} --> S{i}\n", i - 1));
+                write!(input, "  S{} --> S{i}\n", i - 1).unwrap();
             }
-            input.push_str(&format!("  S{} --> [*]\n", state_count - 1));
+            write!(input, "  S{} --> [*]\n", state_count - 1).unwrap();
 
             let result = parse(&input);
             prop_assert_eq!(result.ir.diagram_type, DiagramType::State);
@@ -1072,10 +1072,10 @@ mod tests {
         let depth = 200;
         let mut input = String::from("flowchart TD\n");
         for i in 0..depth {
-            input.push_str(&format!("{}subgraph sg{i}\n", "  ".repeat(i + 1)));
+            write!(input, "{}subgraph sg{i}\n", "  ".repeat(i + 1)).unwrap();
         }
         for i in (0..depth).rev() {
-            input.push_str(&format!("{}end\n", "  ".repeat(i + 1)));
+            write!(input, "{}end\n", "  ".repeat(i + 1)).unwrap();
         }
         let result = parse(&input);
         assert_eq!(result.ir.diagram_type, DiagramType::Flowchart);

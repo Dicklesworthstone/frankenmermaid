@@ -282,7 +282,7 @@ impl FontMetrics {
     pub fn estimate_multiline_width(&self, text: &str) -> f32 {
         text.lines()
             .map(|line| self.estimate_width(line))
-            .fold(0.0_f32, |acc, w| acc.max(w))
+            .fold(0.0_f32, f32::max)
     }
 
     /// Get the height of a single line.
@@ -295,7 +295,7 @@ impl FontMetrics {
     #[must_use]
     pub fn estimate_height(&self, text: &str) -> f32 {
         let line_count = text.lines().count().max(1);
-        line_count as f32 * self.line_height_px()
+        u32::try_from(line_count).unwrap_or(u32::MAX) as f32 * self.line_height_px()
     }
 
     /// Estimate both width and height.

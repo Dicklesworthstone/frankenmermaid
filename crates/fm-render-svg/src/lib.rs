@@ -6334,7 +6334,7 @@ mod tests {
         fn prop_svg_render_is_total_and_counts_match(node_count in 0usize..20) {
             let ir = create_linear_ir(node_count);
             let svg = render_svg(&ir);
-            let expected_nodes_attr = format!("data-nodes=\"{}\"", node_count);
+            let expected_nodes_attr = format!("data-nodes=\"{node_count}\"");
             let expected_edges_attr = format!("data-edges=\"{}\"", node_count.saturating_sub(1));
 
             prop_assert!(svg.starts_with("<svg"));

@@ -7827,8 +7827,7 @@ mod tests {
                 cluster
                     .title
                     .and_then(|title_id| parsed.ir.labels.get(title_id.0))
-                    .map(|label| label.text.as_str() == "API Layer")
-                    .unwrap_or(false)
+                    .is_some_and(|label| label.text.as_str() == "API Layer")
             })
             .expect("expected API Layer cluster");
         let db_cluster = parsed
@@ -10916,14 +10915,16 @@ Rel_Back(db, app, "Responds")"#,
         assert!(!parsed.ir.nodes.is_empty());
     }
 
+    use std::fmt::Write;
+
     #[test]
     fn deeply_nested_subgraphs_do_not_panic() {
         let mut input = String::from("flowchart TB\n");
         for i in 0..20 {
-            input.push_str(&format!("{}subgraph sg{i}\n", "  ".repeat(i)));
+            write!(input, "{}subgraph sg{i}\n", "  ".repeat(i)).unwrap();
         }
         for i in (0..20).rev() {
-            input.push_str(&format!("{}end\n", "  ".repeat(i)));
+            write!(input, "{}end\n", "  ".repeat(i)).unwrap();
         }
         let parsed = parse_mermaid(&input);
         // Should parse without panicking.

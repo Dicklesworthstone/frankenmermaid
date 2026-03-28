@@ -265,7 +265,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let root = canonicalize_root(&cli.root)?;
     match cli.command {
-        Command::Add(args) => add_command(&root, args),
+        Command::Add(args) => add_command(&root, &args),
         Command::Update(args) => update_command(&root, *args),
         Command::Report(args) => report_command(&root, args),
     }
@@ -280,7 +280,7 @@ fn canonicalize_root(path: &Path) -> Result<PathBuf> {
     }
 }
 
-fn add_command(root: &Path, args: AddArgs) -> Result<()> {
+fn add_command(root: &Path, args: &AddArgs) -> Result<()> {
     ensure_ledger_dir(root)?;
     if args.concept_id == "all" {
         for seed in SEEDS {

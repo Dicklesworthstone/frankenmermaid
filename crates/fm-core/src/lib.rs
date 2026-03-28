@@ -474,6 +474,11 @@ pub fn capability_matrix() -> CapabilityMatrix {
     }
 }
 
+/// Returns the capability matrix as a pretty-printed JSON string.
+///
+/// # Errors
+///
+/// Returns a `serde_json::Error` if the internal capability matrix fails to serialize.
 pub fn capability_matrix_json_pretty() -> Result<String, serde_json::Error> {
     serde_json::to_string_pretty(&capability_matrix())
 }
@@ -574,6 +579,7 @@ fn documented_diagram_type_claims() -> Vec<CapabilityClaim> {
         .collect()
 }
 
+#[allow(clippy::too_many_lines)]
 fn surface_capability_claims() -> Vec<CapabilityClaim> {
     vec![
         CapabilityClaim {
@@ -2733,6 +2739,7 @@ impl DegradationOperator {
 
 /// Input signals that drive degradation operator selection.
 #[derive(Debug, Clone, Default)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct DegradationContext {
     pub pressure_tier: MermaidPressureTier,
     pub route_budget_exceeded: bool,
@@ -2766,8 +2773,9 @@ pub fn compute_degradation_plan(ctx: &DegradationContext) -> MermaidDegradationP
                     )
             }
             DegradationOperator::SimplifyRouting => ctx.route_budget_exceeded,
-            DegradationOperator::ForceAsciiGlyphs => any_budget_exceeded,
-            DegradationOperator::DowngradeToCompact => any_budget_exceeded,
+            DegradationOperator::ForceAsciiGlyphs | DegradationOperator::DowngradeToCompact => {
+                any_budget_exceeded
+            }
             DegradationOperator::CollapseClusters => ctx.node_limit_exceeded && any_budget_exceeded,
             DegradationOperator::HideLabels => ctx.node_limit_exceeded && ctx.time_budget_exceeded,
             DegradationOperator::DowngradeToOutline => {
@@ -2804,8 +2812,9 @@ pub fn compute_degradation_plan_with_trace(
                     )
             }
             DegradationOperator::SimplifyRouting => ctx.route_budget_exceeded,
-            DegradationOperator::ForceAsciiGlyphs => any_budget_exceeded,
-            DegradationOperator::DowngradeToCompact => any_budget_exceeded,
+            DegradationOperator::ForceAsciiGlyphs | DegradationOperator::DowngradeToCompact => {
+                any_budget_exceeded
+            }
             DegradationOperator::CollapseClusters => ctx.node_limit_exceeded && any_budget_exceeded,
             DegradationOperator::HideLabels => ctx.node_limit_exceeded && ctx.time_budget_exceeded,
             DegradationOperator::DowngradeToOutline => {

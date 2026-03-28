@@ -471,8 +471,7 @@ fn handles_all_directions() {
         let result = parse(input);
         assert_eq!(
             result.ir.direction, expected_dir,
-            "Failed for direction {:?}",
-            expected_dir
+            "Failed for direction {expected_dir:?}"
         );
     }
 }
@@ -2268,7 +2267,7 @@ fn layout_quality_benchmarks_crossing_count_and_area() {
         let stats = &traced.layout.stats;
         let bounds = &traced.layout.bounds;
 
-        let area = (bounds.width * bounds.height) as usize;
+        let area = usize::try_from((bounds.width * bounds.height) as u64).unwrap_or(usize::MAX);
 
         assert!(
             stats.crossing_count <= *max_crossings,
