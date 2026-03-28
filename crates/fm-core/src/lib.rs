@@ -49,7 +49,7 @@ pub fn mermaid_decision_id(
 fn stable_u128_hash(domain: &str, parts: &[&str]) -> u128 {
     let upper = stable_u64_hash("upper", domain, parts);
     let lower = stable_u64_hash("lower", domain, parts);
-    ((upper as u128) << 64) | (lower as u128)
+    (u128::from(upper) << 64) | u128::from(lower)
 }
 
 fn stable_u64_hash(salt: &str, domain: &str, parts: &[&str]) -> u64 {
@@ -2394,7 +2394,7 @@ impl MermaidBudgetLedger {
 
     #[must_use]
     pub fn layout_time_budget_ms(&self) -> usize {
-        self.layout.allocated_ms.max(1) as usize
+        usize::try_from(self.layout.allocated_ms.max(1)).unwrap_or(usize::MAX)
     }
 
     #[must_use]

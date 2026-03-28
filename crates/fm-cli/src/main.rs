@@ -974,7 +974,7 @@ fn cmd_render(input: &str, options: RenderCommandOptions<'_>) -> Result<()> {
     let parse_start = Instant::now();
     let parsed = parse_with_mode(&source, parse_mode);
     let parse_time = parse_start.elapsed();
-    budget_broker.record_parse(parse_time.as_millis().min(u128::from(u64::MAX)) as u64);
+    budget_broker.record_parse(u64::try_from(parse_time.as_millis()).unwrap_or(u64::MAX));
 
     debug!(
         "Parsed: type={:?}, nodes={}, edges={}, warnings={}",
@@ -1224,8 +1224,8 @@ fn render_format(
             let result = render_term_with_layout_and_config(ir, layout, &config, cols, rows);
             Ok((
                 result.output.into_bytes(),
-                Some(result.width as u32),
-                Some(result.height as u32),
+                Some(u32::try_from(result.width).unwrap_or(u32::MAX)),
+                Some(u32::try_from(result.height).unwrap_or(u32::MAX)),
             ))
         }
 
@@ -1238,8 +1238,8 @@ fn render_format(
             let result = render_term_with_layout_and_config(ir, layout, &config, cols, rows);
             Ok((
                 result.output.into_bytes(),
-                Some(result.width as u32),
-                Some(result.height as u32),
+                Some(u32::try_from(result.width).unwrap_or(u32::MAX)),
+                Some(u32::try_from(result.height).unwrap_or(u32::MAX)),
             ))
         }
     }
@@ -1296,8 +1296,7 @@ fn terminal_size(width: Option<u32>, height: Option<u32>) -> (usize, usize) {
     (
         width
             .filter(|value| *value > 0)
-            .map(|w| w as usize)
-            .unwrap_or(default_cols),
+            .map_or(default_cols, |w| w as usize),
         height
             .filter(|value| *value > 0)
             .map(|h| h as usize)
@@ -1576,7 +1575,7 @@ fn cmd_validate(
     let parse_start = Instant::now();
     let parsed = parse_with_mode(&source, parse_mode);
     let parse_time = parse_start.elapsed();
-    budget_broker.record_parse(parse_time.as_millis().min(u128::from(u64::MAX)) as u64);
+    budget_broker.record_parse(u64::try_from(parse_time.as_millis()).unwrap_or(u64::MAX));
 
     let layout_start = Instant::now();
     let layout_guardrails = LayoutGuardrails {
@@ -2011,7 +2010,7 @@ fn print_validate_text(result: &ValidateResult, fail_on: FailOnSeverity) {
         );
     }
     println!("  Diagnostics: {}", result.diagnostics.len());
-    println!("  Fail threshold: {:?}", fail_on);
+    println!("  Fail threshold: {fail_on:?}");
 
     if result.diagnostics.is_empty() {
         return;
