@@ -345,9 +345,7 @@ fn fuzzy_keyword_match(lower: &str) -> Option<DetectedType> {
             diagram_type,
             confidence,
             method: DetectionMethod::FuzzyKeyword,
-            warnings: vec![format!(
-                "Fuzzy match: possible typo in diagram type declaration"
-            )],
+            warnings: vec!["Fuzzy match: possible typo in diagram type declaration".to_string()],
         }
     })
 }
