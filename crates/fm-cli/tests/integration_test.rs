@@ -2322,3 +2322,72 @@ fn layout_quality_stress_graph_stays_within_bounds() {
         "Layout area should be reasonable for 50-node graph"
     );
 }
+
+// ─── Stress scenarios (bd-1c5.7) ────────────────────────────────────────────
+
+#[test]
+fn stress_1k_nodes_completes_without_panic() {
+    let nodes: Vec<String> = (0..1000).map(|i| format!("N{i}[Node {i}]")).collect();
+    let edges: Vec<String> = (0..999).map(|i| format!("N{i}-->N{}", i + 1)).collect();
+    let input = format!(
+        "flowchart LR\n  {}\n  {}",
+        nodes.join("\n  "),
+        edges.join("\n  ")
+    );
+
+    let parsed = parse(&input);
+    assert!(parsed.ir.nodes.len() >= 1000, "Should parse 1000+ nodes");
+
+    let layout = layout_diagram(&parsed.ir);
+    assert!(layout.nodes.len() >= 1000, "Should layout 1000+ nodes");
+    assert!(
+        layout.bounds.width.is_finite() && layout.bounds.height.is_finite(),
+        "Bounds must be finite for 1K-node graph"
+    );
+
+    let config = SvgRenderConfig::default();
+    let svg = fm_render_svg::render_svg_with_layout(&parsed.ir, &layout, &config);
+    assert!(svg.contains("<svg"), "SVG must be well-formed for 1K nodes");
+    assert!(!svg.contains("NaN"), "No NaN in 1K-node SVG");
+
+    let report = serde_json::json!({
+        "scenario": "stress_1k",
+        "node_count": layout.nodes.len(),
+        "edge_count": layout.edges.len(),
+        "svg_bytes": svg.len(),
+        "bounds_width": layout.bounds.width,
+        "bounds_height": layout.bounds.height,
+    });
+    println!("{report}");
+}
+
+#[test]
+fn stress_dense_graph_100_nodes_with_cross_edges() {
+    let mut lines = vec![String::from("flowchart TD")];
+    for i in 0..100 {
+        lines.push(format!("  N{i}[N{i}]"));
+    }
+    for i in 0..100 {
+        lines.push(format!("  N{i}-->N{}", (i + 1) % 100));
+        if i % 3 == 0 {
+            lines.push(format!("  N{i}-->N{}", (i + 7) % 100));
+        }
+        if i % 5 == 0 {
+            lines.push(format!("  N{i}-->N{}", (i + 13) % 100));
+        }
+    }
+    let input = lines.join("\n");
+    let parsed = parse(&input);
+    let layout = layout_diagram(&parsed.ir);
+
+    assert!(layout.nodes.len() >= 100);
+    assert!(
+        layout.bounds.width.is_finite() && layout.bounds.height.is_finite(),
+        "Dense graph must produce finite bounds"
+    );
+
+    let config = SvgRenderConfig::default();
+    let svg = fm_render_svg::render_svg_with_layout(&parsed.ir, &layout, &config);
+    assert!(svg.contains("<svg"));
+    assert!(!svg.contains("NaN"));
+}

@@ -3606,10 +3606,110 @@
       }
     }
 
+    async function renderSampleStage(sample, target) {
+      if (!target) {
+        return;
+      }
+
+      const useFranken = frankenRuntime && shouldUseFranken(sample.category);
+
+      if (useFranken) {
+        target.innerHTML = `<div class="space-y-3 p-2"><div class="shimmer-light h-6 w-1/2"></div><div class="shimmer-light h-32"></div><div class="shimmer-light h-4 w-1/3"></div></div>`;
+        try {
+          const svg = await frankenRuntime.renderSvg(sample.code, buildRuntimeSvgOptions());
+          target.innerHTML = svg;
+          target.dataset.rendered = "true";
+          return;
+        } catch (_fmError) {
+          // Fall through to mermaid baseline for partial or failed runtime output.
+        }
+      }
+
+      try {
+        const mId = `mstage-${crypto.randomUUID()}`;
+        const { svg } = await mermaid.render(mId, sample.code);
+        target.innerHTML = svg;
+      } catch (_err) {
+        target.innerHTML = `
+          <div class="rounded-2xl border border-amber-300/20 bg-amber-300/10 p-4 text-sm leading-6 text-amber-100">
+            Diagram could not be rendered.
+          </div>
+        `;
+      }
+
+      target.dataset.rendered = "true";
+    }
+
+    function compareCallouts(samples) {
+      const callouts = [];
+      for (const sample of samples) {
+        callouts.push(`${sample.category} · ${sample.description}`);
+        if (sample.narrative?.headline) {
+          callouts.push(sample.narrative.headline);
+        }
+        if (Array.isArray(sample.narrative?.proves)) {
+          callouts.push(...sample.narrative.proves);
+        }
+      }
+      return [...new Set(callouts)].slice(0, 10);
+    }
+
+    async function renderComparePanel() {
+      const selected = compareSampleIds
+        .map((id) => gallerySamples.find((entry) => entry.id === id))
+        .filter(Boolean);
+
+      els.galleryCompareSummary.textContent = selected.length === 0
+        ? "Select up to two gallery scenarios to compare their render behavior, support posture, and narrative significance."
+        : selected.length === 1
+          ? `One scenario selected for compare: ${selected[0].label}. Pick one more card to unlock side-by-side comparison.`
+          : `Comparing ${selected[0].label} against ${selected[1].label}. Use the callouts below to understand why each scenario matters.`;
+
+      els.galleryCompareCallouts.innerHTML = compareCallouts(selected)
+        .map((callout) => `<span class="pill rounded-full px-3 py-1 text-[11px] font-semibold tracking-[0.14em] text-slate-200">${escapeHtml(callout)}</span>`)
+        .join("");
+
+      if (selected.length === 0) {
+        els.galleryCompareGrid.innerHTML = `
+          <div class="rounded-[1.25rem] border border-white/10 bg-[#08101d] p-5 text-sm leading-6 text-slate-300 xl:col-span-2">
+            Compare mode is idle. Use the <code>Compare</code> action on any gallery card to stage a side-by-side review without losing the spotlight flow.
+          </div>
+        `;
+        return;
+      }
+
+      els.galleryCompareGrid.innerHTML = selected.map((sample) => `
+        <article class="rounded-[1.5rem] border border-white/10 bg-[#08101d] p-4">
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div class="flex flex-wrap items-center gap-2">
+                <span class="category-dot category-dot-${sample.category}"></span>
+                <div class="text-lg font-bold text-white">${escapeHtml(sample.label)}</div>
+                <span class="pill ${badgeClass(sample.description.toLowerCase().includes("implemented") ? "implemented" : "partial")} rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em]">${escapeHtml(sample.description)}</span>
+              </div>
+              <div class="mt-2 text-sm leading-6 text-slate-300">${escapeHtml(sample.narrative?.headline || sample.description)}</div>
+            </div>
+            <div class="flex flex-wrap gap-2">
+              <button type="button" class="shell-toggle" data-gallery-spotlight="${sample.id}">Spotlight</button>
+              <button type="button" class="shell-toggle" data-gallery-sample="${sample.id}">Editor</button>
+            </div>
+          </div>
+          <div class="gallery-stage scrollbar-thin mt-4 overflow-auto rounded-2xl border border-slate-200/40 bg-gradient-to-b from-white to-slate-50 p-6 text-slate-900 shadow-sm" data-compare-render="${sample.id}"></div>
+          <div class="mt-4 text-sm leading-6 text-slate-300">${escapeHtml((sample.narrative?.proves || [spotlightReasons[sample.category] || sample.description]).join(" · "))}</div>
+        </article>
+      `).join("");
+
+      for (const sample of selected) {
+        const target = els.galleryCompareGrid.querySelector(`[data-compare-render="${sample.id}"]`);
+        await renderSampleStage(sample, target);
+      }
+    }
+
     async function renderGallery() {
+      await renderComparePanel();
       els.galleryGrid.innerHTML = "";
       const visibleSamples = filteredGallerySamples();
-      els.galleryCount.textContent = `${visibleSamples.length} examples visible${galleryFilter === "all" ? "" : ` in ${galleryFilter}`}${galleryQuery ? ` matching "${galleryQuery}"` : ""}.`;
+      els.galleryCount.textContent = `${visibleSamples.length} examples visible${galleryFilter === "all" ? "" : ` in ${galleryFilter}`}${galleryQuery ? ` matching "${galleryQuery}"` : ""}${compareSampleIds.length ? ` · ${compareSampleIds.length} staged for compare` : ""}.`;
 
       if (galleryObserver) {
         galleryObserver.disconnect();
@@ -3663,6 +3763,14 @@
                   <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="h-3.5 w-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5" /></svg>
                   Editor
                 </button>
+                <button
+                  type="button"
+                  data-gallery-compare="${sample.id}"
+                  class="flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:border-flare/30 hover:bg-flare/10 hover:text-white"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="h-3.5 w-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 7.5l-4.5 4.5 4.5 4.5m7.5-9l4.5 4.5-4.5 4.5M14.25 4.5l-4.5 15" /></svg>
+                  ${compareSampleIds.includes(sample.id) ? "Comparing" : "Compare"}
+                </button>
               </div>
             </div>
             ${sample.narrative?.proves?.length ? `<div class="flex flex-wrap gap-2">${sample.narrative.proves.map((point) => `<span class="pill rounded-full px-3 py-1 text-[11px] font-semibold tracking-[0.14em] text-slate-200">${escapeHtml(point)}</span>`).join("")}</div>` : ""}
@@ -3694,6 +3802,22 @@
         });
       }
 
+      for (const button of els.galleryGrid.querySelectorAll("[data-gallery-compare]")) {
+        button.addEventListener("click", async () => {
+          const sampleId = button.dataset.galleryCompare;
+          if (compareSampleIds.includes(sampleId)) {
+            compareSampleIds = compareSampleIds.filter((id) => id !== sampleId);
+          } else if (compareSampleIds.length >= 2) {
+            compareSampleIds = [compareSampleIds[1], sampleId];
+          } else {
+            compareSampleIds = [...compareSampleIds, sampleId];
+          }
+          syncUrlState("push");
+          await renderComparePanel();
+          await renderGallery();
+        });
+      }
+
       for (const button of els.galleryGrid.querySelectorAll("[data-gallery-spotlight]")) {
         button.addEventListener("click", () => {
           const sample = gallerySamples.find((entry) => entry.id === button.dataset.gallerySpotlight);
@@ -3708,41 +3832,6 @@
         });
       }
 
-      const renderCard = async (sample, target) => {
-        if (!target || target.dataset.rendered === "true") {
-          return;
-        }
-
-        const useFranken = frankenRuntime && shouldUseFranken(sample.category);
-
-        if (useFranken) {
-          target.innerHTML = `<div class="space-y-3 p-2"><div class="shimmer-light h-6 w-1/2"></div><div class="shimmer-light h-32"></div><div class="shimmer-light h-4 w-1/3"></div></div>`;
-          try {
-            const svg = await frankenRuntime.renderSvg(sample.code, buildRuntimeSvgOptions());
-            target.innerHTML = svg;
-            target.dataset.rendered = "true";
-            return;
-          } catch (_fmError) {
-            // Fall through to mermaid
-          }
-        }
-
-        // Use mermaid.js (primary for non-flowchart, or fallback)
-        try {
-          const mId = `mgallery-${crypto.randomUUID()}`;
-          const { svg } = await mermaid.render(mId, sample.code);
-          target.innerHTML = svg;
-        } catch (_err) {
-          target.innerHTML = `
-            <div class="rounded-2xl border border-amber-300/20 bg-amber-300/10 p-4 text-sm leading-6 text-amber-100">
-              Diagram could not be rendered.
-            </div>
-          `;
-        }
-
-        target.dataset.rendered = "true";
-      };
-
       galleryObserver = new IntersectionObserver(
         (entries) => {
           for (const entry of entries) {
@@ -3752,7 +3841,7 @@
             const target = entry.target;
             const sample = gallerySamples.find((item) => item.id === target.dataset.galleryRender);
             if (sample) {
-              renderCard(sample, target);
+              renderSampleStage(sample, target);
             }
             galleryObserver.unobserve(target);
           }
@@ -3780,6 +3869,38 @@
         const stage = e.target.closest('.gallery-stage');
         if (!stage) return;
         toggleZoom(stage);
+    });
+
+    els.galleryCompareGrid.addEventListener("click", (event) => {
+      const sampleButton = event.target.closest("[data-gallery-sample]");
+      if (sampleButton) {
+        const sample = gallerySamples.find((entry) => entry.id === sampleButton.dataset.gallerySample);
+        if (sample) {
+          spotlightSample = sample;
+          setCurrentSample(sample, { pushHistory: true, render: true, syncInput: true });
+          renderFeatureStrip();
+          renderSpotlight();
+          document.getElementById("section-playground").scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+        return;
+      }
+      const spotlightButton = event.target.closest("[data-gallery-spotlight]");
+      if (spotlightButton) {
+        const sample = gallerySamples.find((entry) => entry.id === spotlightButton.dataset.gallerySpotlight);
+        if (sample) {
+          spotlightSample = sample;
+          renderFeatureStrip();
+          syncUrlState("push");
+          renderSpotlight();
+          document.getElementById("section-showcase").scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+        return;
+      }
+      if (event.target.closest('a, button, summary, details, pre')) return;
+      const stage = event.target.closest('.gallery-stage');
+      if (stage) {
+        toggleZoom(stage);
+      }
     });
 
     function renderCapabilityPanel(matrix) {
@@ -4346,6 +4467,13 @@
         return;
       }
       exportArtifact(button.dataset.artifactExport);
+    });
+
+    els.galleryCompareClear.addEventListener("click", async () => {
+      compareSampleIds = [];
+      syncUrlState("replace");
+      await renderComparePanel();
+      await renderGallery();
     });
 
     function queueStudioApply(reason = "style-change") {

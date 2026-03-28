@@ -257,6 +257,7 @@ Gallery section:
 - Grid owns broad capability discoverability and navigation back to the spotlight/editor.
 - Gallery cards should default to visual output first and source second.
 - Gallery state must stay subordinate to canonical scenario IDs from `evidence/capability_scenario_matrix.json`.
+- Compare mode should let the user stage up to two scenarios side-by-side with guided callouts, without displacing the spotlight-first narrative or inventing renderer claims the current browser surface cannot support.
 
 Playground section:
 - Left column owns authoring and raw API inspection: source editor, `detectType()`, `sourceSpans()`, and `parse()`.
