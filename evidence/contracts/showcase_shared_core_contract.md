@@ -27,6 +27,15 @@ sample: canonical scenario id for the editor/playground source
 spotlight: canonical scenario id for the hero artifact
 galleryFilter: category filter or "all"
 galleryQuery: free-text gallery query
+compare: ordered list of up to two canonical scenario ids staged for gallery compare mode
+layoutLabFocus: active inspection lens for the layout/cycle lab
+studio: runtime-backed style studio state
+  preset
+  fontSize
+  padding
+  radius
+  shadows
+  embedCss
 source: optional source override when the current editor text differs from the canonical sample
 shells: per-section shell state
   showcase.balance / showcase.rail
@@ -37,6 +46,7 @@ shells: per-section shell state
 Rules:
 
 - The same state snapshot must resolve to the same scenario meaning on every host.
+- `compare`, `layoutLabFocus`, and `studio` are portable shared state, not host-local decoration.
 - `source` is an override layer, never a new canonical scenario identity.
 - Hosts may add ephemeral UI state locally, but they must not serialize non-portable host-only state into the shared URL contract.
 
@@ -51,6 +61,7 @@ Responsibilities:
 - own canonical scenario IDs
 - resolve spotlight/editor/gallery samples
 - provide category metadata and narrative annotations
+- provide compare-mode eligibility and canonical compare ordering
 - guarantee that later hosts reuse the same sample identity map
 
 Inputs:
@@ -72,6 +83,7 @@ Responsibilities:
 - collect state from current showcase state
 - build and restore URL snapshots
 - enforce canonical fallback behavior when invalid IDs or malformed shell state appear
+- validate compare-mode selection cardinality and de-duplicate compare scenario ids
 
 Required guarantees:
 
@@ -85,6 +97,7 @@ Responsibilities:
 - normalize split-shell balance and rail state
 - expose per-section shell state transitions
 - keep button state and section dataset state semantically aligned
+- leave compare-mode, lab-focus, and style-studio state to the URL codec / shared state layer rather than embedding it in host-only shell state
 
 The React host may implement this as hooks/components; the static host may keep DOM dataset wiring. Semantics must remain identical.
 
@@ -217,6 +230,7 @@ Must not own:
 
 - Canonical scenario catalog extracted from standalone page logic
 - Shared URL codec defined and independently testable
+- Portable compare-mode, layout-lab, and style-studio state captured in the shared snapshot
 - Shared render pipeline controller defined with snapshot commit semantics
 - Shared diagnostics projector defined with stable severity schema
 - Shared fallback controller defined with last-healthy preservation policy
