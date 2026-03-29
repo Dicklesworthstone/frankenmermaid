@@ -859,7 +859,7 @@ mod tests {
                 val = val.wrapping_mul(6364136223846793005).wrapping_add(1);
                 let to = usize::try_from(val).unwrap_or(0) % node_count;
                 if from != to {
-                    write!(input, "  N{from} --> N{to}\n").unwrap();
+                    writeln!(input, "  N{from} --> N{to}").unwrap();
                 }
             }
 
@@ -934,7 +934,7 @@ mod tests {
                 val = val.wrapping_mul(6364136223846793005).wrapping_add(1);
                 let to = usize::try_from(val).unwrap_or(0) % node_count;
                 if from != to {
-                    write!(input, "  N{from} --> N{to}\n").unwrap();
+                    writeln!(input, "  N{from} --> N{to}").unwrap();
                 }
             }
 
@@ -973,7 +973,7 @@ mod tests {
                 write!(input, "  participant {name}\n").unwrap();
             }
             for i in 0..participant_count.saturating_sub(1) {
-                write!(input, "  {}->>{}:msg{i}\n", names[i], names[i + 1]).unwrap();
+                writeln!(input, "  {}->>{}:msg{i}", names[i], names[i + 1]).unwrap();
             }
 
             let result = parse(&input);
@@ -993,7 +993,7 @@ mod tests {
                 write!(input, "  class C{i}\n").unwrap();
             }
             for i in 1..class_count {
-                write!(input, "  C0 <|-- C{i}\n").unwrap();
+                writeln!(input, "  C0 <|-- C{i}").unwrap();
             }
 
             let result = parse(&input);
@@ -1072,7 +1072,7 @@ mod tests {
         let depth = 200;
         let mut input = String::from("flowchart TD\n");
         for i in 0..depth {
-            write!(input, "{}subgraph sg{i}\n", "  ".repeat(i + 1)).unwrap();
+            writeln!(input, "{}subgraph sg{i}", "  ".repeat(i + 1)).unwrap();
         }
         for i in (0..depth).rev() {
             write!(input, "{}end\n", "  ".repeat(i + 1)).unwrap();

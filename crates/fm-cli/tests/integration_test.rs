@@ -1,4 +1,4 @@
-//! Integration tests for the FrankenMermaid pipeline.
+//! Integration tests for the `FrankenMermaid` pipeline.
 //!
 //! These tests verify the end-to-end flow from parsing to layout to rendering.
 
@@ -17,10 +17,10 @@ use tempfile::{NamedTempFile, TempDir};
 /// Test that a simple flowchart parses and produces non-zero layout positions.
 #[test]
 fn flowchart_parses_and_lays_out_with_nonzero_positions() {
-    let input = r#"flowchart LR
+    let input = r"flowchart LR
     A[Start] --> B[Process]
     B --> C[End]
-"#;
+";
 
     let parse_result = parse(input);
     // ParseResult has warnings, not errors. Check warnings for critical issues.
@@ -144,12 +144,12 @@ Rel(customer, api, "Uses", "HTTPS")"#;
 /// Test determinism: same input produces same layout.
 #[test]
 fn layout_is_deterministic() {
-    let input = r#"flowchart TD
+    let input = r"flowchart TD
     A[Alpha] --> B[Beta]
     A --> C[Gamma]
     B --> D[Delta]
     C --> D
-"#;
+";
 
     let parse_result = parse(input);
     let ir = parse_result.ir;
@@ -188,11 +188,11 @@ fn layout_is_deterministic() {
 /// Test that cycles are handled gracefully.
 #[test]
 fn handles_cyclic_graph() {
-    let input = r#"flowchart LR
+    let input = r"flowchart LR
     A --> B
     B --> C
     C --> A
-"#;
+";
 
     let parse_result = parse(input);
     assert!(
@@ -251,10 +251,10 @@ fn detects_diagram_types_correctly() {
 /// Test edge label handling.
 #[test]
 fn handles_edge_labels() {
-    let input = r#"flowchart LR
+    let input = r"flowchart LR
     A -->|label1| B
     B -->|label2| C
-"#;
+";
 
     let parse_result = parse(input);
     let ir = parse_result.ir;
@@ -273,12 +273,12 @@ fn handles_edge_labels() {
 /// Test node shape parsing.
 #[test]
 fn parses_node_shapes() {
-    let input = r#"flowchart LR
+    let input = r"flowchart LR
     A[Rectangle]
     B(Rounded)
     C((Circle))
     D{Diamond}
-"#;
+";
 
     let parse_result = parse(input);
     let ir = parse_result.ir;
@@ -296,7 +296,7 @@ fn parses_node_shapes() {
 /// Test subgraph/cluster handling.
 #[test]
 fn handles_subgraphs() {
-    let input = r#"flowchart TD
+    let input = r"flowchart TD
     subgraph cluster1 [Cluster One]
         A --> B
     end
@@ -304,7 +304,7 @@ fn handles_subgraphs() {
         C --> D
     end
     B --> C
-"#;
+";
 
     let parse_result = parse(input);
     assert!(
@@ -423,7 +423,7 @@ fn handles_subgraphs() {
 #[test]
 fn handles_long_labels() {
     let long_label = "A".repeat(200);
-    let input = format!("flowchart LR\n    A[{}]", long_label);
+    let input = format!("flowchart LR\n    A[{long_label}]");
 
     let parse_result = parse(&input);
     assert!(
@@ -1005,12 +1005,12 @@ fn render_json_reports_specialized_auto_layout_selection() {
 
 #[test]
 fn render_json_replay_keeps_ledger_trace_continuity_and_stable_outputs() {
-    let input = r#"flowchart LR
+    let input = r"flowchart LR
     Start[Start] --> Parse[Parse]
     Parse --> Layout[Layout]
     Layout --> Render[Render]
     Render --> Done[Done]
-"#;
+";
 
     let (first_json, first_svg) = render_json_metadata(input);
     let (second_json, second_svg) = render_json_metadata(input);

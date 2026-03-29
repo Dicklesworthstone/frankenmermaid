@@ -331,6 +331,12 @@ Non-negotiable responsive rules:
 
 - The concrete shared-core boundary map now lives in `evidence/contracts/showcase_shared_core_contract.md`.
 - `/web` and `/web_react` should treat that file as the adapter contract for scenario catalog, URL codec, shell controller, render pipeline, diagnostics projector, fallback preservation, and host-service boundaries.
+- The static `/web` entry semantics now live in `evidence/contracts/showcase_static_entrypoint_contract.md`.
+- `/web` should treat that file as the contract for route prefixing, relative asset resolution, bootstrap ordering, standalone-file fallback behavior, and deep-link restoration.
+- The first concrete static host container now lives at `web/index.html`, with route-local cache policy in `web/_headers`.
+- That container should stay deliberately thin: it inherits the standalone showcase behavior, preserves the original relative asset semantics under `/web`, and should not fork the showcase logic into a second independent implementation.
+- The `/web_react` component and service boundary now lives in `evidence/contracts/showcase_react_embedding_contract.md`.
+- `/web_react` should treat that file as the normative contract for provider/root props, route adapter ownership, telemetry/state callbacks, and the split between shared-core state and React host composition.
 - The shared validation contract now lives in `evidence/contracts/showcase_test_taxonomy_and_logging_schema.md`.
 - Showcase-related beads should emit evidence against that taxonomy and schema rather than defining bead-local logging conventions.
 

@@ -308,7 +308,7 @@ fn js_error_with_value(prefix: &str, value: JsValue) -> JsValue {
     js_error(format!("{prefix}: {detail}"))
 }
 
-fn parse_js_value_or_default<T>(value: Option<JsValue>) -> Result<T, JsValue>
+fn parse_js_value_or_default<T>(value: Option<JsValue>) -> T
 where
     T: for<'de> Deserialize<'de> + Default,
 {
@@ -626,9 +626,7 @@ pub fn init(config: Option<JsValue>) -> Result<(), JsValue> {
     let current = read_runtime_config();
     let requested_theme = requested_theme_preset(&overrides)?;
     let svg = merge_svg_config(&current.svg, &overrides.svg, overrides.theme.as_deref())?;
-    let canvas_base = requested_theme
-        .map(|preset| apply_canvas_theme_preset(current.canvas.clone(), preset))
-        .unwrap_or_else(|| current.canvas.clone());
+    let canvas_base = requested_theme.map_or_else(|| current.canvas.clone(), |preset| apply_canvas_theme_preset(current.canvas.clone(), preset));
 
     let next = RuntimeConfig {
         canvas: align_canvas_typography_with_svg(

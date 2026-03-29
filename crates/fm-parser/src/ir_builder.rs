@@ -700,7 +700,7 @@ impl IrBuilder {
             let message = if count == 1 {
                 format!(
                     "Auto-created placeholder node '{}' for dangling edge reference",
-                    node_ids.first().unwrap_or(&String::new())
+                    node_ids.first().map(String::as_str).unwrap_or("")
                 )
             } else {
                 format!(

@@ -137,6 +137,8 @@ These fields are also required for showcase work even when the original bead tex
 - `runtime_mode`
   Values: `live`, `artifact-missing`, `fallback-only`, `mock-forbidden`
 
+Replay/profile-oriented suites may add host-specific fields such as `profile`, `run_index`, `window_size`, or other execution metadata, but these must be additive. They must not replace or redefine the required core fields above.
+
 ## Degradation Tier Semantics
 
 - `healthy`: all claimed surfaces for the run behaved as intended
@@ -191,6 +193,7 @@ Artifacts that cannot be traced back to those fields do not count as reviewable 
 
 ## Downstream Adoption Checklist
 
+- The reusable validation entrypoint now lives at `scripts/showcase_harness.py`; downstream demo beads should extend or call it instead of inventing bead-local schema/host validators.
 - `bd-2u0.5.11.2` should implement helpers against this schema rather than inventing a parallel one.
 - `bd-2u0.5.5.*` showcase feature modules should log with this schema for UI-side evidence runs.
 - `bd-2u0.5.8.*` static/React host beads should keep host-specific fields additive only.

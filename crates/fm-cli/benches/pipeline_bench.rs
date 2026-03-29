@@ -1,4 +1,4 @@
-//! Performance benchmarks for the FrankenMermaid pipeline (bd-2xl.4).
+//! Performance benchmarks for the `FrankenMermaid` pipeline (bd-2xl.4).
 //!
 //! Run with: `cargo bench -p fm-cli`
 //!
@@ -162,7 +162,7 @@ fn bench_full_pipeline(c: &mut Criterion) {
     }
 
     // Typical real-world diagram
-    let typical = r#"flowchart TD
+    let typical = r"flowchart TD
     A[Start] --> B{Decision}
     B -->|Yes| C[Process A]
     B -->|No| D[Process B]
@@ -173,7 +173,7 @@ fn bench_full_pipeline(c: &mut Criterion) {
         B
         C
         D
-    end"#;
+    end";
     group.bench_with_input(
         BenchmarkId::new("parse_layout_svg", "typical_7_nodes"),
         &typical,

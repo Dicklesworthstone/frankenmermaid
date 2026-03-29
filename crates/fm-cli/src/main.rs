@@ -1300,8 +1300,7 @@ fn terminal_size(width: Option<u32>, height: Option<u32>) -> (usize, usize) {
             .map_or(default_cols, |w| w as usize),
         height
             .filter(|value| *value > 0)
-            .map(|h| h as usize)
-            .unwrap_or(default_rows),
+            .map_or(default_rows, |h| h as usize),
     )
 }
 
@@ -1331,7 +1330,11 @@ fn parse_svg_dimension_value(value: &str) -> Option<u32> {
         .parse::<f32>()
         .ok()
         .filter(|parsed| parsed.is_finite() && *parsed > 0.0)
-        .map(|parsed| parsed.ceil() as u32)
+        .map(|parsed| {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let res = parsed.ceil() as u32;
+            res
+        })
 }
 
 fn extract_viewbox_dimensions(svg: &str) -> Option<(Option<u32>, Option<u32>)> {

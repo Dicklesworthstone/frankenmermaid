@@ -7838,8 +7838,7 @@ mod tests {
                 cluster
                     .title
                     .and_then(|title_id| parsed.ir.labels.get(title_id.0))
-                    .map(|label| label.text.as_str() == "DB Layer")
-                    .unwrap_or(false)
+                    .is_some_and(|label| label.text.as_str() == "DB Layer")
             })
             .expect("expected DB Layer cluster");
 
@@ -10924,7 +10923,7 @@ Rel_Back(db, app, "Responds")"#,
             write!(input, "{}subgraph sg{i}\n", "  ".repeat(i)).unwrap();
         }
         for i in (0..20).rev() {
-            write!(input, "{}end\n", "  ".repeat(i)).unwrap();
+            writeln!(input, "{}end", "  ".repeat(i)).unwrap();
         }
         let parsed = parse_mermaid(&input);
         // Should parse without panicking.
