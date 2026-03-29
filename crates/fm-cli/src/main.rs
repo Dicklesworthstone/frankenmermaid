@@ -503,6 +503,7 @@ struct DetectResult {
 
 /// Result of validating a diagram.
 #[derive(Debug, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
 struct ValidateResult {
     valid: bool,
     parse_mode: String,

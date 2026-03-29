@@ -2515,8 +2515,8 @@ impl MermaidBudgetLedger {
 
 fn scale_budget(default_budget: usize, allocated_ms: u64, baseline_ms: u64) -> usize {
     let numerator = (default_budget as u128)
-        .saturating_mul(allocated_ms.max(1) as u128)
-        .div_ceil(baseline_ms.max(1) as u128);
+        .saturating_mul(u128::from(allocated_ms.max(1)))
+        .div_ceil(u128::from(baseline_ms.max(1)));
     numerator.max(1).min(usize::MAX as u128) as usize
 }
 
@@ -2585,6 +2585,7 @@ impl MermaidQualityMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct MermaidDegradationPlan {
     pub target_fidelity: MermaidFidelity,
     pub hide_labels: bool,
@@ -3526,6 +3527,7 @@ const fn default_sequence_autonumber_increment() -> u32 {
     1
 }
 
+#[allow(clippy::trivially_copy_pass_by_ref)]
 const fn is_default_sequence_autonumber_start(value: &u32) -> bool {
     *value == default_sequence_autonumber_start()
 }

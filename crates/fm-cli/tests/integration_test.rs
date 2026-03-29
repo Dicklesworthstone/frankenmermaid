@@ -2267,6 +2267,7 @@ fn layout_quality_benchmarks_crossing_count_and_area() {
         let stats = &traced.layout.stats;
         let bounds = &traced.layout.bounds;
 
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let area = usize::try_from((bounds.width * bounds.height) as u64).unwrap_or(usize::MAX);
 
         assert!(

@@ -5302,7 +5302,7 @@ fn assign_radial_angles(
     }
 
     let total_child_angle: f32 = children.iter().map(|child| angles[*child]).sum();
-    angles[node_index] = total_child_angle / children.len() as f32;
+    angles[node_index] = total_child_angle / children.len().max(1) as f32;
 
     // Guard against NaN from any unexpected numerical instability.
     if !angles[node_index].is_finite() {
@@ -5320,7 +5320,7 @@ fn force_initial_positions(
     spacing: &LayoutSpacing,
 ) -> Vec<(f32, f32)> {
     let n = ir.nodes.len();
-    let cols = (n as f32).sqrt().ceil() as usize;
+    let cols = ((n as f32).sqrt().ceil() as usize).max(1);
     let cell_size = spacing.node_spacing + spacing.rank_spacing;
 
     ir.nodes
