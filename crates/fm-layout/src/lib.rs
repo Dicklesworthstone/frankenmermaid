@@ -6128,44 +6128,35 @@ fn cycle_removal_dfs_back(
     let mut state = vec![0_u8; node_count];
     let mut reversed_edge_indexes = BTreeSet::new();
 
-    fn visit(
-        node: usize,
-        state: &mut [u8],
-        outgoing_edge_slots: &[Vec<usize>],
-        edges: &[OrientedEdge],
-        reversed_edge_indexes: &mut BTreeSet<usize>,
-    ) {
-        state[node] = 1;
-        for edge_slot in outgoing_edge_slots[node].iter().copied() {
-            let edge = edges[edge_slot];
-            match state[edge.target] {
-                0 => visit(
-                    edge.target,
-                    state,
-                    outgoing_edge_slots,
-                    edges,
-                    reversed_edge_indexes,
-                ),
-                1 => {
-                    reversed_edge_indexes.insert(edge.edge_index);
-                }
-                _ => {}
-            }
-        }
-        state[node] = 2;
-    }
-
     let mut node_visit_order: Vec<usize> = (0..node_count).collect();
     node_visit_order.sort_by(|left, right| compare_priority(*left, *right, node_priority));
-    for node in node_visit_order {
-        if state[node] == 0 {
-            visit(
-                node,
-                &mut state,
-                &outgoing_edge_slots,
-                edges,
-                &mut reversed_edge_indexes,
-            );
+
+    for start_node in node_visit_order {
+        if state[start_node] != 0 {
+            continue;
+        }
+
+        let mut stack = vec![(start_node, 0)];
+        state[start_node] = 1;
+
+        while let Some((node, edge_idx)) = stack.pop() {
+            let slots = &outgoing_edge_slots[node];
+            if edge_idx < slots.len() {
+                stack.push((node, edge_idx + 1));
+                let edge = edges[slots[edge_idx]];
+                match state[edge.target] {
+                    0 => {
+                        state[edge.target] = 1;
+                        stack.push((edge.target, 0));
+                    }
+                    1 => {
+                        reversed_edge_indexes.insert(edge.edge_index);
+                    }
+                    _ => {}
+                }
+            } else {
+                state[node] = 2;
+            }
         }
     }
 
