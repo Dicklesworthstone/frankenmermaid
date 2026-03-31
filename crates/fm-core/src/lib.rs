@@ -2708,7 +2708,7 @@ impl MermaidBudgetLedger {
             .saturating_sub(self.current_used_total_ms())
     }
 
-    fn current_used_total_ms(&self) -> u64 {
+    const fn current_used_total_ms(&self) -> u64 {
         self.parse
             .used_ms
             .saturating_add(self.layout.used_ms)
@@ -2917,7 +2917,7 @@ impl DegradationOperator {
     }
 
     /// Apply this operator to a mutable degradation plan.
-    pub fn apply(self, plan: &mut MermaidDegradationPlan) {
+    pub const fn apply(self, plan: &mut MermaidDegradationPlan) {
         match self {
             Self::ReduceDecoration => plan.reduce_decoration = true,
             Self::SimplifyRouting => plan.simplify_routing = true,
@@ -3643,7 +3643,7 @@ pub struct IrGanttMeta {
     pub tasks: Vec<IrGanttTask>,
 }
 
-const fn is_default_gantt_task_type(value: &GanttTaskType) -> bool {
+const fn is_default_gantt_task_type(value: GanttTaskType) -> bool {
     matches!(value, GanttTaskType::Normal)
 }
 

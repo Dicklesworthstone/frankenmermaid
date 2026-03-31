@@ -99,6 +99,12 @@ struct SvgConfigOverrides {
     shadows: Option<bool>,
     rounded_corners: Option<f32>,
     embed_theme_css: Option<bool>,
+    animations_enabled: Option<bool>,
+    animation_duration_ms: Option<u32>,
+    animation_stagger_ms: Option<u32>,
+    flow_animation_duration_ms: Option<u32>,
+    flow_dash_pattern: Option<String>,
+    hover_scale: Option<f32>,
     node_icon_position: Option<String>,
     custom_icons: Option<std::collections::BTreeMap<String, SvgCustomIconOverride>>,
     theme: Option<String>,
@@ -412,6 +418,33 @@ fn merge_svg_config(
     }
     if let Some(value) = overrides.embed_theme_css {
         merged.embed_theme_css = value;
+    }
+    if let Some(value) = overrides.animations_enabled {
+        merged.animations_enabled = value;
+    }
+    if let Some(value) = overrides.animation_duration_ms
+        && value > 0
+    {
+        merged.animation_duration_ms = value;
+    }
+    if let Some(value) = overrides.animation_stagger_ms {
+        merged.animation_stagger_ms = value;
+    }
+    if let Some(value) = overrides.flow_animation_duration_ms
+        && value > 0
+    {
+        merged.flow_animation_duration_ms = value;
+    }
+    if let Some(value) = overrides.flow_dash_pattern.as_ref()
+        && !value.trim().is_empty()
+    {
+        merged.flow_dash_pattern = value.trim().to_string();
+    }
+    if let Some(value) = overrides.hover_scale
+        && value.is_finite()
+        && value >= 1.0
+    {
+        merged.hover_scale = value;
     }
     if let Some(value) = overrides.node_icon_position.as_deref() {
         merged.node_icon_position = parse_node_icon_position(value)?;
@@ -1324,6 +1357,12 @@ mod tests {
     fn merge_svg_config_accepts_icon_position_and_custom_icons() {
         let base = SvgRenderConfig::default();
         let overrides = SvgConfigOverrides {
+            animations_enabled: Some(true),
+            animation_duration_ms: Some(640),
+            animation_stagger_ms: Some(120),
+            flow_animation_duration_ms: Some(2100),
+            flow_dash_pattern: Some("4 10".to_string()),
+            hover_scale: Some(1.08),
             node_icon_position: Some("left".to_string()),
             custom_icons: Some(std::collections::BTreeMap::from([(
                 "chip-core".to_string(),
@@ -1341,6 +1380,12 @@ mod tests {
 
         let merged = merge_svg_config(&base, &overrides, None).expect("merge should succeed");
 
+        assert!(merged.animations_enabled);
+        assert_eq!(merged.animation_duration_ms, 640);
+        assert_eq!(merged.animation_stagger_ms, 120);
+        assert_eq!(merged.flow_animation_duration_ms, 2100);
+        assert_eq!(merged.flow_dash_pattern, "4 10");
+        assert_eq!(merged.hover_scale, 1.08);
         assert_eq!(
             merged.node_icon_position,
             fm_render_svg::NodeIconPosition::Left

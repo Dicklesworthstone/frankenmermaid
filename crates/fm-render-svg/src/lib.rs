@@ -152,6 +152,18 @@ pub struct SvgRenderConfig {
     pub theme: ThemePreset,
     /// Whether to embed theme CSS in the SVG.
     pub embed_theme_css: bool,
+    /// Whether CSS-only diagram animations should be emitted.
+    pub animations_enabled: bool,
+    /// Duration for node/edge entrance and transition effects in milliseconds.
+    pub animation_duration_ms: u32,
+    /// Sequential stagger between animated items in milliseconds.
+    pub animation_stagger_ms: u32,
+    /// Duration for dashed edge flow animation in milliseconds.
+    pub flow_animation_duration_ms: u32,
+    /// Stroke-dasharray pattern used by animated flow edges.
+    pub flow_dash_pattern: String,
+    /// Hover scale factor for animated node hover effects.
+    pub hover_scale: f32,
     /// Position for node icons relative to the label.
     pub node_icon_position: NodeIconPosition,
     /// User-provided custom icon definitions keyed by normalized icon name.
@@ -237,6 +249,12 @@ impl Default for SvgRenderConfig {
             root_classes: Vec::new(),
             theme: ThemePreset::Default,
             embed_theme_css: true,
+            animations_enabled: false,
+            animation_duration_ms: 420,
+            animation_stagger_ms: 80,
+            flow_animation_duration_ms: 1400,
+            flow_dash_pattern: String::from("8 6"),
+            hover_scale: 1.03,
             node_icon_position: NodeIconPosition::Above,
             custom_icons: BTreeMap::new(),
             detail_tier: MermaidTier::Auto,
@@ -413,6 +431,9 @@ fn render_scene_document_with_ir(
     for class in &config.root_classes {
         doc = doc.class(class);
     }
+    if config.animations_enabled {
+        doc = doc.class("fm-animations-enabled");
+    }
 
     let scene_type = ir.map_or("scene", |diagram_ir| diagram_ir.diagram_type.as_str());
     doc = doc
@@ -431,6 +452,9 @@ fn render_scene_document_with_ir(
         if effects_enabled {
             css.push_str(&effects_css(config));
         }
+        if config.animations_enabled {
+            css.push_str(&animation_css(config));
+        }
         if config.a11y.accessibility_css {
             css.push_str(accessibility_css());
         }
@@ -438,10 +462,17 @@ fn render_scene_document_with_ir(
             css.push_str(&print_css(config.min_font_size));
         }
         doc = doc.style(css);
-    } else if config.a11y.accessibility_css || config.print_optimized || effects_enabled {
+    } else if config.a11y.accessibility_css
+        || config.print_optimized
+        || effects_enabled
+        || config.animations_enabled
+    {
         let mut css = String::new();
         if effects_enabled {
             css.push_str(&effects_css(config));
+        }
+        if config.animations_enabled {
+            css.push_str(&animation_css(config));
         }
         if config.a11y.accessibility_css {
             css.push_str(accessibility_css());
@@ -1373,6 +1404,68 @@ fn effects_css(config: &SvgRenderConfig) -> String {
     )
 }
 
+fn animation_css(config: &SvgRenderConfig) -> String {
+    let hover_scale = config.hover_scale.clamp(1.0, 1.2);
+    let transition_seconds = config.animation_duration_ms as f32 / 1000.0;
+    let flow_seconds = config.flow_animation_duration_ms as f32 / 1000.0;
+    format!(
+        ".fm-animations-enabled {{\n\
+  --fm-anim-duration: {transition_seconds:.2}s;\n\
+  --fm-stagger-ms: {stagger_ms}ms;\n\
+  --fm-flow-duration: {flow_seconds:.2}s;\n\
+}}\n\
+.fm-animations-enabled .fm-node,\n\
+.fm-animations-enabled .fm-edge,\n\
+.fm-animations-enabled .fm-edge-labeled {{\n\
+  animation: fm-enter-diagram var(--fm-anim-duration) ease-out both;\n\
+  animation-delay: calc(var(--fm-enter-order, 0) * var(--fm-stagger-ms));\n\
+  transition: transform var(--fm-anim-duration) ease, opacity var(--fm-anim-duration) ease, filter var(--fm-anim-duration) ease, stroke var(--fm-anim-duration) ease;\n\
+}}\n\
+.fm-animations-enabled .fm-node {{\n\
+  transform-box: fill-box;\n\
+  transform-origin: center;\n\
+}}\n\
+.fm-animations-enabled .fm-node:hover {{\n\
+  transform: scale({hover_scale:.3});\n\
+}}\n\
+.fm-animations-enabled .fm-node-highlighted {{\n\
+  animation: fm-enter-diagram var(--fm-anim-duration) ease-out both,\n\
+             fm-node-pulse calc(var(--fm-anim-duration) * 2.8) ease-in-out infinite;\n\
+  animation-delay: calc(var(--fm-enter-order, 0) * var(--fm-stagger-ms)), calc(var(--fm-enter-order, 0) * var(--fm-stagger-ms) + var(--fm-anim-duration));\n\
+}}\n\
+.fm-animations-enabled .fm-edge-dashed,\n\
+.fm-animations-enabled .fm-edge-flow-animated {{\n\
+  stroke-dasharray: {dash_pattern};\n\
+  animation: fm-enter-diagram var(--fm-anim-duration) ease-out both,\n\
+             fm-edge-flow var(--fm-flow-duration) linear infinite;\n\
+  animation-delay: calc(var(--fm-enter-order, 0) * var(--fm-stagger-ms)), 0s;\n\
+}}\n\
+@keyframes fm-enter-diagram {{\n\
+  0% {{ opacity: 0; transform: translateY(8px); }}\n\
+  100% {{ opacity: 1; transform: translateY(0); }}\n\
+}}\n\
+@keyframes fm-edge-flow {{\n\
+  from {{ stroke-dashoffset: 0; }}\n\
+  to {{ stroke-dashoffset: -28; }}\n\
+}}\n\
+@keyframes fm-node-pulse {{\n\
+  0%, 100% {{ opacity: 1; }}\n\
+  50% {{ opacity: 0.82; }}\n\
+}}\n\
+@media (prefers-reduced-motion: reduce) {{\n\
+  .fm-animations-enabled .fm-node,\n\
+  .fm-animations-enabled .fm-edge,\n\
+  .fm-animations-enabled .fm-edge-labeled {{\n\
+    animation: none !important;\n\
+    transition: none !important;\n\
+    transform: none !important;\n\
+  }}\n\
+}}\n",
+        stagger_ms = config.animation_stagger_ms,
+        dash_pattern = config.flow_dash_pattern
+    )
+}
+
 fn print_css(min_font_size: f32) -> String {
     format!(
         "@media print {{
@@ -1389,6 +1482,29 @@ fn print_css(min_font_size: f32) -> String {
   }}
 }}"
     )
+}
+
+fn animation_style_attr(order: usize) -> String {
+    format!("--fm-enter-order:{order};")
+}
+
+fn node_animation_order(node_box: &LayoutNodeBox) -> usize {
+    node_box.rank.saturating_mul(1000) + node_box.node_index
+}
+
+fn edge_animation_order(edge_path: &LayoutEdgePath, ir: &MermaidDiagramIr) -> usize {
+    let Some(edge) = ir.edges.get(edge_path.edge_index) else {
+        return edge_path.edge_index;
+    };
+    let from_index = match edge.from {
+        fm_core::IrEndpoint::Node(node_id) => node_id.0,
+        _ => 0,
+    };
+    let to_index = match edge.to {
+        fm_core::IrEndpoint::Node(node_id) => node_id.0,
+        _ => from_index,
+    };
+    from_index.max(to_index).saturating_add(1)
 }
 
 /// Render a computed layout to SVG.
@@ -1549,6 +1665,9 @@ fn render_layout_to_svg(
         if effects_enabled {
             css.push_str(&effects_css(config));
         }
+        if config.animations_enabled {
+            css.push_str(&animation_css(config));
+        }
 
         // Add accessibility CSS if enabled
         if config.a11y.accessibility_css {
@@ -1559,11 +1678,14 @@ fn render_layout_to_svg(
         }
 
         doc = doc.style(css);
-    } else if config.a11y.accessibility_css || config.print_optimized {
+    } else if config.a11y.accessibility_css || config.print_optimized || config.animations_enabled {
         // Only add supplemental CSS (accessibility and/or print optimization).
         let mut css = String::new();
         if effects_enabled {
             css.push_str(&effects_css(config));
+        }
+        if config.animations_enabled {
+            css.push_str(&animation_css(config));
         }
         if config.a11y.accessibility_css {
             css.push_str(accessibility_css());
@@ -3085,6 +3207,12 @@ fn render_node(
         .class(node_shape_css_class(shape))
         .data("id", node_id)
         .data("fm-node-id", node_id);
+    if config.animations_enabled {
+        group = group.attr(
+            "style",
+            &animation_style_attr(node_animation_order(node_box)),
+        );
+    }
     if let Some(icon) = node_icon {
         group = group.class("fm-node-has-icon");
         let icon_token = sanitize_css_token(&normalize_icon_token(icon));
@@ -5087,10 +5215,22 @@ fn render_edge(
         .class("fm-edge")
         .class(style_class)
         .data("fm-edge-id", &edge_index.to_string());
+    let animation_style = config
+        .animations_enabled
+        .then(|| animation_style_attr(edge_animation_order(edge_path, ir)));
+    if config.animations_enabled && base_dasharray.is_some() {
+        elem = elem.class("fm-edge-flow-animated");
+    }
 
     // Apply inline style from linkStyle directives if present.
     if let Some(inline_style) = resolve_edge_inline_style(ir, edge_index) {
-        elem = elem.attr("style", &inline_style);
+        let merged_style = animation_style.as_ref().map_or_else(
+            || inline_style.clone(),
+            |extra| format!("{inline_style};{extra}"),
+        );
+        elem = elem.attr("style", &merged_style);
+    } else if let Some(extra) = animation_style.as_deref() {
+        elem = elem.attr("style", extra);
     }
 
     if let Some(marker) = marker_start {
@@ -5155,6 +5295,9 @@ fn render_edge(
             .id(&mermaid_edge_element_id(edge_index))
             .class("fm-edge-labeled")
             .data("fm-edge-id", &edge_index.to_string());
+        if let Some(extra) = animation_style.as_deref() {
+            group = group.attr("style", extra);
+        }
         if config.include_source_spans {
             group = apply_span_metadata(group, edge_path.span);
         }
@@ -5251,6 +5394,9 @@ fn render_edge(
             .id(&mermaid_edge_element_id(edge_index))
             .class("fm-edge")
             .data("fm-edge-id", &edge_index.to_string());
+        if let Some(extra) = animation_style.as_deref() {
+            group = group.attr("style", extra);
+        }
         if config.include_source_spans {
             group = apply_span_metadata(group, edge_path.span);
         }
@@ -7211,6 +7357,49 @@ mod tests {
 
         assert!(svg.contains("fm-node-icon-pos-left"));
         assert!(svg.contains("fm-node-icon-queue"));
+    }
+
+    #[test]
+    fn animations_are_disabled_by_default() {
+        let ir = create_ir_with_single_node("plain", NodeShape::Rect);
+        let svg = render_svg(&ir);
+        assert!(!svg.contains("fm-animations-enabled"));
+        assert!(!svg.contains("@keyframes fm-enter-diagram"));
+    }
+
+    #[test]
+    fn animations_emit_css_and_order_variables_when_enabled() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.nodes.push(IrNode {
+            id: "A".to_string(),
+            classes: vec!["highlight".to_string()],
+            ..IrNode::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "B".to_string(),
+            ..IrNode::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            arrow: ArrowType::DottedArrow,
+            ..IrEdge::default()
+        });
+        let config = SvgRenderConfig {
+            animations_enabled: true,
+            flow_dash_pattern: "3 9".to_string(),
+            ..SvgRenderConfig::default()
+        };
+
+        let svg = render_svg_with_config(&ir, &config);
+
+        assert!(svg.contains("fm-animations-enabled"));
+        assert!(svg.contains("@keyframes fm-enter-diagram"));
+        assert!(svg.contains("@keyframes fm-edge-flow"));
+        assert!(svg.contains("prefers-reduced-motion"));
+        assert!(svg.contains("fm-edge-flow-animated"));
+        assert!(svg.contains("--fm-enter-order:"));
+        assert!(svg.contains("stroke-dasharray: 3 9"));
     }
 
     // ─── Property-based render completeness tests (bd-1br.8) ────────────

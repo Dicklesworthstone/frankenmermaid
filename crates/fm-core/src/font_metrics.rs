@@ -309,7 +309,7 @@ impl FontMetrics {
 
     /// Get the font size.
     #[must_use]
-    pub fn font_size(&self) -> f32 {
+    pub const fn font_size(&self) -> f32 {
         self.config.font_size
     }
 
