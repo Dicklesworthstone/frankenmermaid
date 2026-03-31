@@ -5862,13 +5862,34 @@ pub fn compute_node_sizes(
                         &text
                     };
                     let (label_width, label_height) = metrics.estimate_dimensions(text);
-                    let width = label_width + 72.0;
-                    let height = label_height + 44.0;
+                    let (icon_width, icon_height) = icon_dimensions(node, metrics);
+                    let width = label_width.max(icon_width) + 72.0;
+                    let height = label_height + icon_height + 44.0;
                     (width.max(100.0), height.max(52.0))
                 }
             }
         })
         .collect()
+}
+
+fn icon_dimensions(node: &IrNode, metrics: &fm_core::FontMetrics) -> (f32, f32) {
+    let Some(icon) = node
+        .icon
+        .as_deref()
+        .map(str::trim)
+        .filter(|icon| !icon.is_empty())
+    else {
+        return (0.0, 0.0);
+    };
+
+    let looks_like_glyph = icon.chars().count() <= 4 && !icon.is_ascii();
+    if looks_like_glyph {
+        let (width, height) = metrics.estimate_dimensions(icon);
+        (width.max(metrics.font_size()), height + 10.0)
+    } else {
+        let icon_size = (metrics.font_size() * 1.35).max(18.0);
+        (icon_size + 12.0, icon_size + 12.0)
+    }
 }
 
 fn display_node_label(ir: &MermaidDiagramIr, node: &IrNode) -> String {
@@ -14411,6 +14432,35 @@ mod tests {
                 "Event {i} missing 'level': {event}"
             );
         }
+    }
+
+    #[test]
+    fn compute_node_sizes_reserves_space_for_icons() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.nodes.push(IrNode {
+            id: "plain".to_string(),
+            label: Some(IrLabelId(0)),
+            ..IrNode::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "icon".to_string(),
+            label: Some(IrLabelId(1)),
+            icon: Some("server".to_string()),
+            ..IrNode::default()
+        });
+        ir.labels.push(IrLabel {
+            text: "Service".to_string(),
+            span: Span::default(),
+        });
+        ir.labels.push(IrLabel {
+            text: "Service".to_string(),
+            span: Span::default(),
+        });
+
+        let sizes = crate::compute_node_sizes(&ir, &fm_core::FontMetrics::default_metrics());
+
+        assert_eq!(sizes.len(), 2);
+        assert!(sizes[1].1 > sizes[0].1);
     }
 
     // ─── Property-based layout invariant tests (bd-30y.13) ──────────────

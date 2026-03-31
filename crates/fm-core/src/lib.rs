@@ -1192,6 +1192,9 @@ pub struct IrNode {
     pub id: String,
     pub label: Option<IrLabelId>,
     pub shape: NodeShape,
+    /// Optional icon metadata attached to the node (`::icon(...)`, architecture icons, etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
     pub classes: Vec<String>,
     pub href: Option<String>,
     /// Tooltip text from `click nodeId "url" "tooltip"`.
@@ -1271,6 +1274,18 @@ pub struct IrEdge {
     /// Raw ER cardinality operator (e.g., `"||--o{"`), stored only for ER diagrams.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub er_notation: Option<String>,
+    /// Source-side cardinality label (e.g., `"1"`, `"0..*"`) for class diagrams.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_cardinality: Option<String>,
+    /// Target-side cardinality label (e.g., `"*"`, `"1..*"`) for class diagrams.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_cardinality: Option<String>,
+    /// Guard condition on a state transition (e.g., `[isValid]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<String>,
+    /// Action on a state transition (e.g., `cleanup()`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
     /// Parsed inline style from `linkStyle N ...` directives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline_style: Option<IrInlineStyle>,
@@ -3820,6 +3835,20 @@ pub struct IrQuadrantMeta {
     pub points: Vec<IrQuadrantPoint>,
 }
 
+// ── State diagram note ────────────────────────────────────────────────
+
+/// A note attached to a state node.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct IrStateNote {
+    /// Target state name the note is attached to.
+    pub target: String,
+    /// Position relative to the state: `"right"` or `"left"`.
+    pub position: String,
+    /// Note text content (may be multi-line).
+    pub text: String,
+    pub span: Span,
+}
+
 // ── Main IR container ──────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -3852,6 +3881,9 @@ pub struct MermaidDiagramIr {
     pub pie_meta: Option<IrPieMeta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quadrant_meta: Option<IrQuadrantMeta>,
+    /// Notes attached to state diagram nodes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub state_notes: Vec<IrStateNote>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -3890,6 +3922,7 @@ impl MermaidDiagramIr {
             xy_chart_meta: None,
             pie_meta: None,
             quadrant_meta: None,
+            state_notes: Vec::new(),
             diagnostics: Vec::new(),
         }
     }
@@ -5655,6 +5688,10 @@ mod tests {
             label: Some(IrLabelId(0)),
             span: sample_span(2, 1, 6),
             er_notation: None,
+            source_cardinality: None,
+            target_cardinality: None,
+            guard: None,
+            action: None,
             inline_style: None,
         });
 
@@ -5715,6 +5752,10 @@ mod tests {
             label: Some(IrLabelId(3)),
             span: sample_span(6, 1, 9),
             er_notation: None,
+            source_cardinality: None,
+            target_cardinality: None,
+            guard: None,
+            action: None,
             inline_style: None,
         };
 

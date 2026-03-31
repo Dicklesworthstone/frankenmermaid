@@ -2037,6 +2037,48 @@ fn render_layout_to_svg(
         }
     }
 
+    // Render class diagram cardinality labels near edge endpoints.
+    for edge_path in &layout.edges {
+        if let Some(ir_edge) = ir.edges.get(edge_path.edge_index)
+            && (ir_edge.source_cardinality.is_some() || ir_edge.target_cardinality.is_some())
+            && edge_path.points.len() >= 2
+        {
+            let font_size = config.font_size * 0.7;
+
+            if let Some(card) = &ir_edge.source_cardinality {
+                let p = &edge_path.points[0];
+                doc = doc.child(
+                    Element::text()
+                        .x(p.x + offset_x + 8.0)
+                        .y(p.y + offset_y - 8.0)
+                        .content(card)
+                        .attr("text-anchor", "start")
+                        .attr("dominant-baseline", "auto")
+                        .attr_num("font-size", font_size)
+                        .attr("font-family", &config.font_family)
+                        .fill(&theme.colors.text)
+                        .class("fm-class-cardinality"),
+                );
+            }
+
+            if let Some(card) = &ir_edge.target_cardinality {
+                let p = &edge_path.points[edge_path.points.len() - 1];
+                doc = doc.child(
+                    Element::text()
+                        .x(p.x + offset_x + 8.0)
+                        .y(p.y + offset_y - 8.0)
+                        .content(card)
+                        .attr("text-anchor", "start")
+                        .attr("dominant-baseline", "auto")
+                        .attr_num("font-size", font_size)
+                        .attr("font-family", &config.font_family)
+                        .fill(&theme.colors.text)
+                        .class("fm-class-cardinality"),
+                );
+            }
+        }
+    }
+
     // Render nodes
     for node_box in &layout.nodes {
         let node_elem = render_node(
@@ -2986,6 +3028,11 @@ fn render_node(
     };
     let label_text = truncate_label(raw_label_text, detail.node_label_max_chars);
     let node_font_size = detail.node_font_size;
+    let node_icon = ir_node
+        .and_then(|node| node.icon.as_deref())
+        .map(str::trim)
+        .filter(|icon| !icon.is_empty())
+        .filter(|_| ir_node.is_none_or(|node| node.class_meta.is_none() && node.c4_meta.is_none()));
 
     let accent_class = format!("fm-node-accent-{}", stable_accent_index(node_id));
     let mut is_highlighted = false;
@@ -3003,6 +3050,13 @@ fn render_node(
         .class(node_shape_css_class(shape))
         .data("id", node_id)
         .data("fm-node-id", node_id);
+    if let Some(icon) = node_icon {
+        group = group.class("fm-node-has-icon");
+        let icon_token = sanitize_css_token(&normalize_icon_token(icon));
+        if !icon_token.is_empty() {
+            group = group.class(&format!("fm-node-icon-{icon_token}"));
+        }
+    }
     if config.include_source_spans {
         group = apply_span_metadata(group, node_box.span);
     }
@@ -3536,6 +3590,25 @@ fn render_node(
         group = group.filter("url(#node-glow)");
     }
 
+    let icon_size = clamp_font_size(node_font_size * 1.35, config.min_font_size + 2.0);
+    let icon_reserved_height = node_icon.map_or(0.0, |_| icon_size + 10.0);
+    if let Some(icon) = node_icon
+        && let Some(icon_elem) = render_node_icon(
+            icon,
+            cx,
+            if detail.show_node_labels {
+                y + (icon_reserved_height * 0.5) + 2.0
+            } else {
+                cy
+            },
+            icon_size,
+            config,
+            colors,
+        )
+    {
+        group = group.child(icon_elem);
+    }
+
     // Add label text — with three-compartment rendering for class diagrams.
     if detail.show_node_labels {
         if let Some(node) = ir_node
@@ -3573,7 +3646,10 @@ fn render_node(
         } else {
             let lines_count = label_text.lines().count().max(1) as f32;
             let total_text_height = (lines_count - 1.0) * node_font_size * config.line_height;
-            let start_y = cy - (total_text_height / 2.0) + (node_font_size / 3.0);
+            let content_top = y + icon_reserved_height;
+            let content_height = (h - icon_reserved_height).max(node_font_size);
+            let start_y = content_top + (content_height / 2.0) - (total_text_height / 2.0)
+                + (node_font_size / 3.0);
 
             let text_elem = render_node_label_text(
                 ir,
@@ -3966,6 +4042,415 @@ fn render_c4_person_icon(x: f32, y: f32, stroke: &str) -> Element {
             .stroke(stroke)
             .stroke_width(1.1),
     )
+}
+
+fn normalize_icon_token(raw_icon: &str) -> String {
+    let trimmed = raw_icon.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let normalized = trimmed
+        .strip_prefix("fa:")
+        .unwrap_or(trimmed)
+        .strip_prefix("fa-")
+        .unwrap_or(trimmed)
+        .replace("fa ", "")
+        .replace(['_', ' '], "-")
+        .to_ascii_lowercase();
+
+    match normalized.as_str() {
+        "fa-book" => "book".to_string(),
+        "fa-cloud" => "cloud".to_string(),
+        "fa-database" => "database".to_string(),
+        "fa-server" => "server".to_string(),
+        "fa-user" => "user".to_string(),
+        "fa-lock" => "lock".to_string(),
+        "fa-mobile" | "fa-mobile-alt" => "mobile".to_string(),
+        "fa-desktop" => "desktop".to_string(),
+        "fa-cubes" | "docker" => "container".to_string(),
+        "fa-list" => "queue".to_string(),
+        "fa-balance-scale" => "load-balancer".to_string(),
+        "fa-gear" | "fa-cog" => "gear".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn render_node_icon(
+    raw_icon: &str,
+    cx: f32,
+    cy: f32,
+    size: f32,
+    config: &SvgRenderConfig,
+    colors: &ThemeColors,
+) -> Option<Element> {
+    let trimmed = raw_icon.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let looks_like_emoji = trimmed.chars().count() <= 4 && !trimmed.is_ascii();
+    if looks_like_emoji {
+        return Some(
+            TextBuilder::new(trimmed)
+                .x(cx)
+                .y(cy + size * 0.18)
+                .font_family(&config.font_family)
+                .font_size(size)
+                .anchor(TextAnchor::Middle)
+                .class("fm-node-icon")
+                .class("fm-node-icon-emoji")
+                .build(),
+        );
+    }
+
+    let normalized = normalize_icon_token(trimmed);
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let half = size / 2.0;
+    let x = cx - half;
+    let y = cy - half;
+    let stroke = colors.node_stroke.as_str();
+    let fill = colors.node_fill.as_str();
+    let mut icon = Element::group()
+        .class("fm-node-icon")
+        .class(&format!("fm-node-icon-{}", sanitize_css_token(&normalized)));
+
+    match normalized.as_str() {
+        "person" | "user" => {
+            icon = icon.child(render_c4_person_icon(cx, cy, stroke));
+        }
+        "server" => {
+            icon = icon.child(
+                Element::rect()
+                    .x(x)
+                    .y(y - 1.0)
+                    .width(size)
+                    .height(size * 0.72)
+                    .rx(2.0)
+                    .fill(fill)
+                    .stroke(stroke)
+                    .stroke_width(1.1),
+            );
+            icon = icon.child(
+                Element::line()
+                    .x1(x + size * 0.18)
+                    .y1(y + size * 0.2)
+                    .x2(x + size * 0.82)
+                    .y2(y + size * 0.2)
+                    .stroke(stroke)
+                    .stroke_width(1.0),
+            );
+            icon = icon.child(
+                Element::line()
+                    .x1(x + size * 0.18)
+                    .y1(y + size * 0.38)
+                    .x2(x + size * 0.82)
+                    .y2(y + size * 0.38)
+                    .stroke(stroke)
+                    .stroke_width(1.0),
+            );
+        }
+        "database" => {
+            let ry = size * 0.14;
+            let path = PathBuilder::new()
+                .move_to(x, y + ry)
+                .arc_to(size / 2.0, ry, 0.0, false, true, x + size, y + ry)
+                .line_to(x + size, y + size - ry)
+                .arc_to(size / 2.0, ry, 0.0, false, false, x, y + size - ry)
+                .close()
+                .move_to(x, y + ry)
+                .arc_to(size / 2.0, ry, 0.0, false, false, x + size, y + ry)
+                .build();
+            icon = icon.child(
+                Element::path()
+                    .d(&path)
+                    .fill(fill)
+                    .stroke(stroke)
+                    .stroke_width(1.1),
+            );
+        }
+        "cloud" => {
+            let r = size / 3.0;
+            let path = PathBuilder::new()
+                .move_to(x + r, y + size * 0.65)
+                .arc_to(r, r, 0.0, true, true, x + r * 2.0, y + size * 0.35)
+                .arc_to(
+                    r * 0.85,
+                    r * 0.85,
+                    0.0,
+                    true,
+                    true,
+                    x + size * 0.52,
+                    y + r * 0.45,
+                )
+                .arc_to(r, r, 0.0, true, true, x + size - r * 2.0, y + size * 0.35)
+                .arc_to(r, r, 0.0, true, true, x + size - r, y + size * 0.65)
+                .arc_to(r * 0.65, r * 0.65, 0.0, true, true, x + r, y + size * 0.65)
+                .close()
+                .build();
+            icon = icon.child(
+                Element::path()
+                    .d(&path)
+                    .fill(fill)
+                    .stroke(stroke)
+                    .stroke_width(1.1),
+            );
+        }
+        "lock" | "security" => {
+            icon = icon.child(
+                Element::rect()
+                    .x(x + size * 0.16)
+                    .y(y + size * 0.42)
+                    .width(size * 0.68)
+                    .height(size * 0.46)
+                    .rx(2.0)
+                    .fill(fill)
+                    .stroke(stroke)
+                    .stroke_width(1.1),
+            );
+            icon = icon.child(
+                Element::path()
+                    .d(&PathBuilder::new()
+                        .move_to(x + size * 0.3, y + size * 0.42)
+                        .line_to(x + size * 0.3, y + size * 0.26)
+                        .arc_to(
+                            size * 0.2,
+                            size * 0.2,
+                            0.0,
+                            false,
+                            true,
+                            x + size * 0.7,
+                            y + size * 0.26,
+                        )
+                        .line_to(x + size * 0.7, y + size * 0.42)
+                        .build())
+                    .fill("none")
+                    .stroke(stroke)
+                    .stroke_width(1.1),
+            );
+        }
+        "gear" | "settings" => {
+            icon = icon.child(
+                Element::circle()
+                    .cx(cx)
+                    .cy(cy)
+                    .r(size * 0.2)
+                    .fill(fill)
+                    .stroke(stroke)
+                    .stroke_width(1.1),
+            );
+            for (dx, dy) in [
+                (0.0, -0.42),
+                (0.3, -0.3),
+                (0.42, 0.0),
+                (0.3, 0.3),
+                (0.0, 0.42),
+                (-0.3, 0.3),
+                (-0.42, 0.0),
+                (-0.3, -0.3),
+            ] {
+                icon = icon.child(
+                    Element::line()
+                        .x1(cx + size * dx * 0.55)
+                        .y1(cy + size * dy * 0.55)
+                        .x2(cx + size * dx * 0.78)
+                        .y2(cy + size * dy * 0.78)
+                        .stroke(stroke)
+                        .stroke_width(1.0),
+                );
+            }
+        }
+        "api" => {
+            icon = icon.child(
+                TextBuilder::new("</>")
+                    .x(cx)
+                    .y(cy + size * 0.16)
+                    .font_family(
+                        "'JetBrains Mono', 'Fira Code', 'SFMono-Regular', Consolas, monospace",
+                    )
+                    .font_size(size * 0.72)
+                    .anchor(TextAnchor::Middle)
+                    .fill(stroke)
+                    .build(),
+            );
+        }
+        "mobile" | "phone" => {
+            icon = icon.child(
+                Element::rect()
+                    .x(x + size * 0.22)
+                    .y(y)
+                    .width(size * 0.56)
+                    .height(size)
+                    .rx(4.0)
+                    .fill(fill)
+                    .stroke(stroke)
+                    .stroke_width(1.1),
+            );
+            icon = icon.child(
+                Element::circle()
+                    .cx(cx)
+                    .cy(y + size * 0.86)
+                    .r(size * 0.04)
+                    .fill(stroke),
+            );
+        }
+        "desktop" => {
+            icon = icon.child(
+                Element::rect()
+                    .x(x)
+                    .y(y)
+                    .width(size)
+                    .height(size * 0.64)
+                    .rx(2.0)
+                    .fill(fill)
+                    .stroke(stroke)
+                    .stroke_width(1.1),
+            );
+            icon = icon.child(
+                Element::line()
+                    .x1(cx)
+                    .y1(y + size * 0.64)
+                    .x2(cx)
+                    .y2(y + size * 0.84)
+                    .stroke(stroke)
+                    .stroke_width(1.0),
+            );
+            icon = icon.child(
+                Element::line()
+                    .x1(x + size * 0.28)
+                    .y1(y + size * 0.84)
+                    .x2(x + size * 0.72)
+                    .y2(y + size * 0.84)
+                    .stroke(stroke)
+                    .stroke_width(1.0),
+            );
+        }
+        "container" | "docker" => {
+            for (dx, dy) in [(0.0, 0.14), (0.24, 0.14), (0.12, 0.38)] {
+                icon = icon.child(
+                    Element::rect()
+                        .x(x + size * dx)
+                        .y(y + size * dy)
+                        .width(size * 0.28)
+                        .height(size * 0.22)
+                        .rx(1.0)
+                        .fill(fill)
+                        .stroke(stroke)
+                        .stroke_width(1.0),
+                );
+            }
+        }
+        "queue" => {
+            for offset in [0.18, 0.42, 0.66] {
+                icon = icon.child(
+                    Element::line()
+                        .x1(x + size * 0.12)
+                        .y1(y + size * offset)
+                        .x2(x + size * 0.88)
+                        .y2(y + size * offset)
+                        .stroke(stroke)
+                        .stroke_width(1.2),
+                );
+            }
+        }
+        "cache" => {
+            for inset in [0.0, 0.1, 0.2] {
+                icon = icon.child(
+                    Element::rect()
+                        .x(x + size * inset)
+                        .y(y + size * inset)
+                        .width(size * 0.62)
+                        .height(size * 0.46)
+                        .rx(2.0)
+                        .fill(fill)
+                        .stroke(stroke)
+                        .stroke_width(1.0),
+                );
+            }
+        }
+        "load-balancer" | "loadbalancer" => {
+            icon = icon.child(
+                Element::line()
+                    .x1(cx)
+                    .y1(y + size * 0.1)
+                    .x2(cx)
+                    .y2(y + size * 0.85)
+                    .stroke(stroke)
+                    .stroke_width(1.1),
+            );
+            for end_x in [x + size * 0.18, x + size * 0.82] {
+                icon = icon.child(
+                    Element::line()
+                        .x1(cx)
+                        .y1(y + size * 0.28)
+                        .x2(end_x)
+                        .y2(y + size * 0.5)
+                        .stroke(stroke)
+                        .stroke_width(1.1),
+                );
+                icon = icon.child(
+                    Element::line()
+                        .x1(cx)
+                        .y1(y + size * 0.58)
+                        .x2(end_x)
+                        .y2(y + size * 0.8)
+                        .stroke(stroke)
+                        .stroke_width(1.1),
+                );
+            }
+        }
+        "book" => {
+            icon = icon.child(
+                Element::rect()
+                    .x(x + size * 0.08)
+                    .y(y)
+                    .width(size * 0.84)
+                    .height(size * 0.9)
+                    .rx(2.0)
+                    .fill(fill)
+                    .stroke(stroke)
+                    .stroke_width(1.1),
+            );
+            icon = icon.child(
+                Element::line()
+                    .x1(cx)
+                    .y1(y + size * 0.08)
+                    .x2(cx)
+                    .y2(y + size * 0.82)
+                    .stroke(stroke)
+                    .stroke_width(1.0),
+            );
+        }
+        _ => {
+            let fallback = normalized
+                .split('-')
+                .filter(|segment| !segment.is_empty())
+                .take(2)
+                .map(|segment| {
+                    segment
+                        .chars()
+                        .next()
+                        .unwrap_or_default()
+                        .to_ascii_uppercase()
+                })
+                .collect::<String>();
+            icon = icon.child(
+                TextBuilder::new(if fallback.is_empty() { "?" } else { &fallback })
+                    .x(cx)
+                    .y(cy + size * 0.16)
+                    .font_family(&config.font_family)
+                    .font_size(size * 0.62)
+                    .anchor(TextAnchor::Middle)
+                    .fill(stroke)
+                    .build(),
+            );
+        }
+    }
+
+    Some(icon)
 }
 
 fn wrap_text_to_lines(text: &str, max_width: f32, avg_char_width: f32) -> Vec<String> {
@@ -6563,6 +7048,28 @@ mod tests {
         assert_eq!(config.node_gradients, original.node_gradients);
         assert_eq!(config.glow_enabled, original.glow_enabled);
         assert_eq!(config.detail_tier, original.detail_tier);
+    }
+
+    #[test]
+    fn renders_named_node_icon_with_icon_classes() {
+        let mut ir = create_ir_with_single_node("api", NodeShape::Rect);
+        ir.nodes[0].icon = Some("server".to_string());
+
+        let svg = render_svg(&ir);
+
+        assert!(svg.contains("fm-node-has-icon"));
+        assert!(svg.contains("fm-node-icon-server"));
+    }
+
+    #[test]
+    fn renders_emoji_node_icon_as_text() {
+        let mut ir = create_ir_with_single_node("spark", NodeShape::Rounded);
+        ir.nodes[0].icon = Some("🚀".to_string());
+
+        let svg = render_svg(&ir);
+
+        assert!(svg.contains("fm-node-icon-emoji"));
+        assert!(svg.contains("🚀"));
     }
 
     // ─── Property-based render completeness tests (bd-1br.8) ────────────

@@ -169,6 +169,8 @@ enum ClassStatement {
     Node(NodeToken),
     Member(fm_core::IrClassMember),
     Stereotype(String, fm_core::ClassStereotype),
+    /// Cardinality labels to attach to the most recently created edge.
+    Cardinality(Option<String>, Option<String>),
     End,
 }
 
@@ -1833,6 +1835,8 @@ fn lower_sequence_statement(
 
 fn parse_class(input: &str, builder: &mut IrBuilder) {
     let mut in_block: Option<String> = None; // Currently open class block name
+    // Stack of (namespace_name, subgraph_index) for nested namespace blocks.
+    let mut namespace_stack: Vec<(String, usize)> = Vec::new();
 
     for (index, line) in input.lines().enumerate() {
         let line_number = index + 1;
@@ -1845,12 +1849,44 @@ fn parse_class(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
+        // Handle namespace blocks: `namespace Name {`
+        if trimmed.starts_with("namespace ") && trimmed.ends_with('{') {
+            let ns_name = trimmed
+                .strip_prefix("namespace")
+                .unwrap_or("")
+                .trim()
+                .trim_end_matches('{')
+                .trim();
+            if !ns_name.is_empty() {
+                let span = span_for(line_number, line);
+                let parent = namespace_stack.last().map(|(_, idx)| *idx);
+                let cluster_index = builder.ensure_cluster(ns_name, Some(ns_name), span);
+                if let Some(sg_idx) = builder.ensure_subgraph(
+                    ns_name,
+                    ns_name,
+                    Some(ns_name),
+                    span,
+                    parent,
+                    cluster_index,
+                ) {
+                    namespace_stack.push((ns_name.to_string(), sg_idx));
+                }
+            }
+            continue;
+        }
+
+        // Close namespace or class block
+        if trimmed == "}" {
+            if in_block.is_some() {
+                in_block = None;
+            } else if !namespace_stack.is_empty() {
+                namespace_stack.pop();
+            }
+            continue;
+        }
+
         // Inside a class block: parse member declarations
         if let Some(ref class_name) = in_block {
-            if trimmed == "}" {
-                in_block = None;
-                continue;
-            }
             if let Some(member) = parse_class_member(trimmed) {
                 let cn = class_name.clone();
                 lower_class_statement(ClassStatement::Member(member), line_number, line, builder);
@@ -1870,7 +1906,22 @@ fn parse_class(input: &str, builder: &mut IrBuilder) {
             if let ClassStatement::BlockStart(ref name, _) = statement {
                 in_block = Some(name.clone());
             }
+
+            // If inside a namespace, track node key to add to subgraph after lowering.
+            let ns_node_key = match (&statement, namespace_stack.last()) {
+                (ClassStatement::Node(node), Some(_)) => Some(node.id.clone()),
+                (ClassStatement::BlockStart(name, _), Some(_)) => Some(name.clone()),
+                _ => None,
+            };
+            let ns_sg_idx = namespace_stack.last().map(|(_, idx)| *idx);
+
             lower_class_statement(statement, line_number, line, builder);
+
+            if let (Some(key), Some(sg_idx)) = (ns_node_key, ns_sg_idx)
+                && let Some(node_id) = builder.node_id_by_key(&key).copied()
+            {
+                builder.add_node_to_subgraph(sg_idx, node_id);
+            }
         }
     }
 }
@@ -1966,6 +2017,63 @@ fn parse_class_member(line: &str) -> Option<fm_core::IrClassMember> {
     })
 }
 
+/// Strip quoted cardinality labels from a class-diagram relationship line.
+///
+/// Input:  `ClassA "1" --> "*" ClassB : label`
+/// Output: `("ClassA --> ClassB : label", Some("1"), Some("*"))`
+///
+/// The source cardinality is a quoted string after the left-hand class name
+/// and before the operator.  The target cardinality is a quoted string after
+/// the operator and before the right-hand class name.
+fn strip_class_cardinality(statement: &str) -> (String, Option<String>, Option<String>) {
+    let mut source_card = None;
+    let mut target_card = None;
+
+    // Find operator position.
+    let op_pos = find_operator(statement, &CLASS_OPERATORS);
+    let Some((op_idx, op_str, _)) = op_pos else {
+        return (statement.to_string(), None, None);
+    };
+
+    let left = &statement[..op_idx];
+    let right = &statement[op_idx + op_str.len()..];
+
+    // Extract source cardinality from left side: `ClassA "1"` → `ClassA`, `"1"`
+    let cleaned_left;
+    if let Some(q_start) = left.rfind('"') {
+        let before_last_quote = &left[..q_start];
+        if let Some(q_open) = before_last_quote.rfind('"') {
+            source_card = Some(left[q_open + 1..q_start].to_string());
+            cleaned_left = format!("{}{}", left[..q_open].trim_end(), " ");
+        } else {
+            cleaned_left = left.to_string();
+        }
+    } else {
+        cleaned_left = left.to_string();
+    }
+
+    // Extract target cardinality from right side: `"*" ClassB : label` → `ClassB : label`, `"*"`
+    let cleaned_right;
+    let trimmed_right = right.trim_start();
+    if let Some(after_quote) = trimmed_right.strip_prefix('"') {
+        if let Some(close_quote) = after_quote.find('"') {
+            target_card = Some(after_quote[..close_quote].to_string());
+            cleaned_right = after_quote[close_quote + 1..].to_string();
+        } else {
+            cleaned_right = right.to_string();
+        }
+    } else {
+        cleaned_right = right.to_string();
+    }
+
+    if source_card.is_none() && target_card.is_none() {
+        return (statement.to_string(), None, None);
+    }
+
+    let result = format!("{}{}{}", cleaned_left.trim_end(), op_str, cleaned_right);
+    (result, source_card, target_card)
+}
+
 fn parse_class_statements(line: &str) -> Option<Vec<ClassStatement>> {
     if line.starts_with("class ") && line.ends_with('{') {
         let raw_name = line
@@ -2028,8 +2136,24 @@ fn parse_class_statements(line: &str) -> Option<Vec<ClassStatement>> {
             }
         }
 
-        if let Some(asts) = parse_edge_statement_asts(statement, &CLASS_OPERATORS, false) {
-            statements.extend(asts.into_iter().map(ClassStatement::Ast));
+        // Try edge parsing — first strip cardinality labels if present.
+        let (cleaned_statement, source_card, target_card) = strip_class_cardinality(statement);
+        let edge_input = if source_card.is_some() || target_card.is_some() {
+            cleaned_statement.as_str()
+        } else {
+            statement
+        };
+        if let Some(asts) = parse_edge_statement_asts(edge_input, &CLASS_OPERATORS, false) {
+            for ast in asts {
+                statements.push(ClassStatement::Ast(ast));
+                // Attach cardinality to this edge in lower_class_statement.
+                if source_card.is_some() || target_card.is_some() {
+                    statements.push(ClassStatement::Cardinality(
+                        source_card.clone(),
+                        target_card.clone(),
+                    ));
+                }
+            }
             continue;
         }
         if let Some(node) = parse_node_token(statement) {
@@ -2070,6 +2194,9 @@ fn lower_class_statement(
         ClassStatement::Stereotype(class_name, stereotype) => {
             builder.set_class_stereotype(&class_name, stereotype);
         }
+        ClassStatement::Cardinality(source, target) => {
+            builder.set_last_edge_cardinality(source.as_deref(), target.as_deref());
+        }
         ClassStatement::End => {
             builder.clear_current_class();
         }
@@ -2077,9 +2204,32 @@ fn lower_class_statement(
 }
 
 fn parse_state(input: &str, builder: &mut IrBuilder) {
+    // Multi-line note accumulator: (target, position, lines, start_line_number)
+    let mut note_block: Option<(String, String, Vec<String>, usize)> = None;
+
     for (index, line) in input.lines().enumerate() {
         let line_number = index + 1;
         let trimmed = line.trim();
+
+        // Inside a multi-line note block: collect until `end note`.
+        if let Some((ref _target, ref _position, ref mut lines, _start)) = note_block {
+            if trimmed == "end note" {
+                let (target, position, lines, start) = note_block.take().unwrap();
+                let text = lines.join("\n");
+                let span = span_for(start, "");
+                builder.ir_mut().state_notes.push(fm_core::IrStateNote {
+                    target: target.clone(),
+                    position,
+                    text,
+                    span,
+                });
+                let _ = builder.intern_node(&target, None, NodeShape::Rounded, span);
+                continue;
+            }
+            lines.push(trimmed.to_string());
+            continue;
+        }
+
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
@@ -2091,6 +2241,24 @@ fn parse_state(input: &str, builder: &mut IrBuilder) {
         // Skip bare opening braces (composite state starts are handled on the declaration line).
         if trimmed == "{" {
             continue;
+        }
+
+        // Check for multi-line note start: `note right of StateName` (no colon)
+        if trimmed.starts_with("note ") && !trimmed.contains(':') {
+            let rest = trimmed.strip_prefix("note ").unwrap_or("");
+            let (position, after_pos) = if let Some(r) = rest.strip_prefix("right of ") {
+                ("right".to_string(), r)
+            } else if let Some(r) = rest.strip_prefix("left of ") {
+                ("left".to_string(), r)
+            } else {
+                // Not a recognized note format, fall through to normal parsing.
+                ("right".to_string(), rest)
+            };
+            let target = after_pos.trim().to_string();
+            if !target.is_empty() {
+                note_block = Some((target, position, Vec::new(), line_number));
+                continue;
+            }
         }
 
         let Some(statements) = parse_state_statements(trimmed) else {
@@ -2219,12 +2387,19 @@ fn lower_state_statement(
                 ));
             }
         }
-        StateStatement::Note { target, text, .. } => {
-            // State notes are stored as diagnostics for now
-            // (full note rendering would use IrSequenceNote-like types)
+        StateStatement::Note {
+            target,
+            position,
+            text,
+        } => {
             let span = span_for(line_number, source_line);
             let _ = builder.intern_node(&target, None, NodeShape::Rounded, span);
-            let _ = text; // Note text available for future rendering
+            builder.ir_mut().state_notes.push(fm_core::IrStateNote {
+                target,
+                position,
+                text,
+                span,
+            });
         }
     }
 }
@@ -2269,13 +2444,74 @@ fn lower_state_flow_ast(
             if let (Some(f), Some(t)) = (from_id, to_id) {
                 builder.attach_state_node(f);
                 builder.attach_state_node(t);
-                builder.push_edge(f, t, *arrow, label.as_deref(), span);
+
+                // Extract guard [condition] and action / action() from label.
+                let (clean_label, guard, action) = extract_state_guard_action(label.as_deref());
+                builder.push_edge(f, t, *arrow, clean_label.as_deref(), span);
+                if (guard.is_some() || action.is_some())
+                    && let Some(edge) = builder.ir_mut().edges.last_mut()
+                {
+                    edge.guard = guard;
+                    edge.action = action;
+                }
             }
         }
         _ => {
             lower_flow_ast(ast, line_number, source_line, builder, &[], &[]);
         }
     }
+}
+
+/// Extract guard `[condition]` and action `/ action()` from a state transition label.
+///
+/// Input:  `"complete [isValid] / cleanup()"`
+/// Output: `(Some("complete"), Some("isValid"), Some("cleanup()"))`
+fn extract_state_guard_action(
+    label: Option<&str>,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let Some(label) = label else {
+        return (None, None, None);
+    };
+    let label = label.trim();
+    if label.is_empty() {
+        return (None, None, None);
+    }
+
+    let mut clean = label.to_string();
+    let mut guard = None;
+    let mut action = None;
+
+    // Extract guard: [condition]
+    if let Some(bracket_start) = clean.find('[')
+        && let Some(bracket_end) = clean[bracket_start..].find(']')
+    {
+        guard = Some(
+            clean[bracket_start + 1..bracket_start + bracket_end]
+                .trim()
+                .to_string(),
+        );
+        clean = format!(
+            "{}{}",
+            clean[..bracket_start].trim_end(),
+            clean[bracket_start + bracket_end + 1..].trim_start()
+        );
+    }
+
+    // Extract action: / action()
+    if let Some(slash_pos) = clean.find(" / ") {
+        action = Some(clean[slash_pos + 3..].trim().to_string());
+        clean = clean[..slash_pos].trim().to_string();
+    } else if let Some(slash_pos) = clean.find('/') {
+        // Also handle without spaces: "/action"
+        let after = clean[slash_pos + 1..].trim();
+        if !after.is_empty() {
+            action = Some(after.to_string());
+            clean = clean[..slash_pos].trim().to_string();
+        }
+    }
+
+    let clean_label = if clean.is_empty() { None } else { Some(clean) };
+    (clean_label, guard, action)
 }
 
 fn lower_state_node(
@@ -2454,8 +2690,13 @@ fn parse_mindmap(input: &str, builder: &mut IrBuilder) {
 
         // Handle icon directive (::icon(...)) - applies to last node
         if trimmed.starts_with("::icon(") {
-            // Icons are visual metadata; we note them but don't store in IR yet
-            // Future: could add icon field to IrNode
+            if let Some(node_id) = last_node_id
+                && let Some(rest) = trimmed.strip_prefix("::icon(")
+                && let Some(icon_body) = rest.strip_suffix(')')
+                && let Some(icon) = clean_label(Some(icon_body))
+            {
+                builder.set_node_icon(node_id, &icon);
+            }
             continue;
         }
 
@@ -4500,6 +4741,7 @@ fn parse_architecture(input: &str, builder: &mut IrBuilder) {
             builder.add_class_to_node(&declaration.id, "architecture", span);
             builder.add_class_to_node(&declaration.id, "architecture-service", span);
             if let Some(icon) = declaration.icon.as_deref() {
+                builder.set_node_icon(node_id, icon);
                 builder.add_class_to_node(
                     &declaration.id,
                     &format!("architecture-icon-{icon}"),
@@ -8844,10 +9086,16 @@ mod tests {
 
     #[test]
     fn mindmap_handles_icon_directive() {
-        // Icons are recognized but currently not stored in IR
         let parsed = parse_mermaid("mindmap\n  Root\n    Child\n    ::icon(fa fa-book)");
         assert_eq!(parsed.ir.nodes.len(), 2);
         assert!(parsed.warnings.is_empty());
+        let child = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "Child")
+            .unwrap();
+        assert_eq!(child.icon.as_deref(), Some("fa fa-book"));
     }
 
     #[test]
@@ -9486,6 +9734,7 @@ fan_in:B --> T:db"#,
                 .iter()
                 .any(|class_name| class_name == "architecture-icon-server")
         );
+        assert_eq!(api.icon.as_deref(), Some("server"));
 
         let junction = parsed
             .ir
@@ -11416,5 +11665,127 @@ Rel_Back(db, app, "Responds")"#,
         assert_eq!(parsed.ir.style_defs[0].name, "unused");
         // No nodes have this class, so no inline_style applied
         assert!(parsed.ir.nodes[0].inline_style.is_none());
+    }
+
+    // ── Class diagram cardinality and namespace tests ─────────────────
+
+    #[test]
+    fn class_cardinality_labels_parsed() {
+        let parsed = parse_mermaid("classDiagram\n  Dog \"1\" --> \"*\" Cat : chases");
+        assert!(!parsed.ir.edges.is_empty(), "should have edges");
+        let edge = &parsed.ir.edges[0];
+        assert_eq!(edge.source_cardinality.as_deref(), Some("1"));
+        assert_eq!(edge.target_cardinality.as_deref(), Some("*"));
+    }
+
+    #[test]
+    fn class_cardinality_complex_labels() {
+        let parsed = parse_mermaid("classDiagram\n  Vehicle \"1\" *-- \"0..*\" Wheel");
+        assert!(!parsed.ir.edges.is_empty(), "should have edges");
+        let edge = &parsed.ir.edges[0];
+        assert_eq!(edge.source_cardinality.as_deref(), Some("1"));
+        assert_eq!(edge.target_cardinality.as_deref(), Some("0..*"));
+    }
+
+    #[test]
+    fn class_no_cardinality_preserves_none() {
+        let parsed = parse_mermaid("classDiagram\n  Dog --> Cat");
+        assert!(!parsed.ir.edges.is_empty());
+        let edge = &parsed.ir.edges[0];
+        assert!(edge.source_cardinality.is_none());
+        assert!(edge.target_cardinality.is_none());
+    }
+
+    #[test]
+    fn class_cardinality_with_label() {
+        let parsed = parse_mermaid("classDiagram\n  Student \"1\" --> \"*\" Course : enrolls");
+        assert!(!parsed.ir.edges.is_empty(), "should have an edge");
+        let edge = &parsed.ir.edges[0];
+        assert_eq!(edge.source_cardinality.as_deref(), Some("1"));
+        assert_eq!(edge.target_cardinality.as_deref(), Some("*"));
+    }
+
+    #[test]
+    fn class_namespace_creates_subgraph() {
+        let parsed =
+            parse_mermaid("classDiagram\n  namespace Animals {\n    class Dog\n    class Cat\n  }");
+        assert!(
+            !parsed.ir.graph.subgraphs.is_empty(),
+            "should have subgraphs from namespace"
+        );
+        let sg = &parsed.ir.graph.subgraphs[0];
+        assert_eq!(sg.key, "Animals");
+        assert!(
+            !sg.members.is_empty(),
+            "namespace subgraph should have members"
+        );
+    }
+
+    #[test]
+    fn class_namespace_clusters_nodes() {
+        let parsed = parse_mermaid(
+            "classDiagram\n  namespace Animals {\n    class Dog\n    class Cat\n  }\n  Dog --> Cat",
+        );
+        assert!(!parsed.ir.clusters.is_empty(), "should have clusters");
+        let cluster = &parsed.ir.clusters[0];
+        assert!(cluster.title.is_some());
+    }
+
+    // ── State diagram notes, guards, and actions ─────────────────────
+
+    #[test]
+    fn state_single_line_note_stored() {
+        let parsed = parse_mermaid(
+            "stateDiagram-v2\n  state Active\n  note right of Active: This is active",
+        );
+        assert_eq!(parsed.ir.state_notes.len(), 1);
+        assert_eq!(parsed.ir.state_notes[0].target, "Active");
+        assert_eq!(parsed.ir.state_notes[0].position, "right");
+        assert_eq!(parsed.ir.state_notes[0].text, "This is active");
+    }
+
+    #[test]
+    fn state_multi_line_note_stored() {
+        let parsed = parse_mermaid(
+            "stateDiagram-v2\n  state Active\n  note right of Active\n    Line one\n    Line two\n  end note",
+        );
+        assert_eq!(parsed.ir.state_notes.len(), 1);
+        assert_eq!(parsed.ir.state_notes[0].target, "Active");
+        assert!(parsed.ir.state_notes[0].text.contains("Line one"));
+        assert!(parsed.ir.state_notes[0].text.contains("Line two"));
+    }
+
+    #[test]
+    fn state_guard_condition_extracted() {
+        let parsed = parse_mermaid("stateDiagram-v2\n  Active --> Done : complete [isValid]");
+        assert!(!parsed.ir.edges.is_empty());
+        let edge = &parsed.ir.edges[0];
+        assert_eq!(edge.guard.as_deref(), Some("isValid"));
+    }
+
+    #[test]
+    fn state_action_extracted() {
+        let parsed = parse_mermaid("stateDiagram-v2\n  Active --> Done : complete / cleanup()");
+        assert!(!parsed.ir.edges.is_empty());
+        let edge = &parsed.ir.edges[0];
+        assert_eq!(edge.action.as_deref(), Some("cleanup()"));
+    }
+
+    #[test]
+    fn state_guard_and_action_extracted() {
+        let parsed =
+            parse_mermaid("stateDiagram-v2\n  Active --> Done : complete [isValid] / cleanup()");
+        assert!(!parsed.ir.edges.is_empty());
+        let edge = &parsed.ir.edges[0];
+        assert_eq!(edge.guard.as_deref(), Some("isValid"));
+        assert_eq!(edge.action.as_deref(), Some("cleanup()"));
+    }
+
+    #[test]
+    fn state_no_guard_or_action_preserves_none() {
+        let parsed = parse_mermaid("stateDiagram-v2\n  Active --> Done : complete");
+        let edge = &parsed.ir.edges[0];
+        assert!(edge.guard.is_none());
+        assert!(edge.action.is_none());
     }
 }

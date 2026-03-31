@@ -627,6 +627,11 @@ impl IrBuilder {
         self.ir.add_diagnostic(diag);
     }
 
+    /// Mutable access to the IR for direct field manipulation.
+    pub(crate) fn ir_mut(&mut self) -> &mut MermaidDiagramIr {
+        &mut self.ir
+    }
+
     pub(crate) fn node_count(&self) -> usize {
         self.ir.nodes.len()
     }
@@ -798,6 +803,7 @@ impl IrBuilder {
             id: normalized_id.to_string(),
             label: label_id,
             shape,
+            icon: None,
             classes: Vec::new(),
             href: None,
             tooltip: None,
@@ -1066,6 +1072,16 @@ impl IrBuilder {
         }
     }
 
+    pub(crate) fn set_node_icon(&mut self, node_id: IrNodeId, icon: &str) {
+        let icon = icon.trim();
+        if icon.is_empty() {
+            return;
+        }
+        if let Some(node) = self.ir.nodes.get_mut(node_id.0) {
+            node.icon = Some(icon.to_string());
+        }
+    }
+
     pub(crate) fn set_node_link(&mut self, node_key: &str, target: &str, span: Span) {
         let target = target.trim();
         if target.is_empty() {
@@ -1175,6 +1191,10 @@ impl IrBuilder {
             label: label_id,
             span,
             er_notation: None,
+            source_cardinality: None,
+            target_cardinality: None,
+            guard: None,
+            action: None,
             inline_style: None,
         });
         self.ir.graph.edges.push(IrGraphEdge {
@@ -1190,6 +1210,18 @@ impl IrBuilder {
     pub(crate) fn set_last_edge_er_notation(&mut self, notation: &str) {
         if let Some(edge) = self.ir.edges.last_mut() {
             edge.er_notation = Some(notation.to_string());
+        }
+    }
+
+    /// Set cardinality labels on the most recently pushed edge.
+    pub(crate) fn set_last_edge_cardinality(&mut self, source: Option<&str>, target: Option<&str>) {
+        if let Some(edge) = self.ir.edges.last_mut() {
+            if let Some(s) = source {
+                edge.source_cardinality = Some(s.to_string());
+            }
+            if let Some(t) = target {
+                edge.target_cardinality = Some(t.to_string());
+            }
         }
     }
 

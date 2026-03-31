@@ -191,7 +191,7 @@ pub struct FontMetrics {
 }
 
 /// Diagnostic information about font metric calculations.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FontMetricsDiagnostic {
     /// Diagnostic level.
     pub level: DiagnosticLevel,
@@ -315,7 +315,7 @@ impl FontMetrics {
 
     /// Get the average character width.
     #[must_use]
-    pub fn avg_char_width(&self) -> f32 {
+    pub const fn avg_char_width(&self) -> f32 {
         self.avg_char_width
     }
 
