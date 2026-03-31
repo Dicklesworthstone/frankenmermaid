@@ -104,7 +104,7 @@ struct SvgConfigOverrides {
     theme: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 struct SvgCustomIconOverride {
     path_data: String,
@@ -113,19 +113,6 @@ struct SvgCustomIconOverride {
     fill: Option<String>,
     stroke: Option<String>,
     stroke_width: Option<f32>,
-}
-
-impl Default for SvgCustomIconOverride {
-    fn default() -> Self {
-        Self {
-            path_data: String::new(),
-            view_box_width: None,
-            view_box_height: None,
-            fill: None,
-            stroke: None,
-            stroke_width: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
