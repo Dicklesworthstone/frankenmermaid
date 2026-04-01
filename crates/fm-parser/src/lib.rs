@@ -856,11 +856,9 @@ mod tests {
             }
             let mut val = edge_seed;
             for _ in 0..node_count {
-                #[allow(clippy::unreadable_literal)]
-                val = val.wrapping_mul(6364136223846793005).wrapping_add(1);
+                val = val.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
                 let from = usize::try_from(val).unwrap_or(0) % node_count;
-                #[allow(clippy::unreadable_literal)]
-                val = val.wrapping_mul(6364136223846793005).wrapping_add(1);
+                val = val.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
                 let to = usize::try_from(val).unwrap_or(0) % node_count;
                 if from != to {
                     writeln!(input, "  N{from} --> N{to}").unwrap();
@@ -933,11 +931,9 @@ mod tests {
             }
             let mut val = edge_seed;
             for _ in 0..node_count.min(8) {
-                #[allow(clippy::unreadable_literal)]
-                val = val.wrapping_mul(6364136223846793005).wrapping_add(1);
+                val = val.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
                 let from = usize::try_from(val).unwrap_or(0) % node_count;
-                #[allow(clippy::unreadable_literal)]
-                val = val.wrapping_mul(6364136223846793005).wrapping_add(1);
+                val = val.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
                 let to = usize::try_from(val).unwrap_or(0) % node_count;
                 if from != to {
                     writeln!(input, "  N{from} --> N{to}").unwrap();

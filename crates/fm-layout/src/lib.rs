@@ -98,6 +98,7 @@ pub enum LayoutEdit {
 impl LayoutEdit {
     #[must_use]
     pub const fn input(self) -> RegionInput {
+        #[allow(clippy::match_same_arms)]
         match self {
             Self::NodeAdded { node_index }
             | Self::NodeRemoved { node_index }
@@ -203,6 +204,7 @@ pub enum LayoutAlgorithm {
 impl LayoutAlgorithm {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
+        #[allow(clippy::match_same_arms)]
         match self {
             Self::Auto => "auto",
             Self::Sugiyama => "sugiyama",
@@ -242,6 +244,7 @@ pub enum CycleStrategy {
 impl CycleStrategy {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
+        #[allow(clippy::match_same_arms)]
         match self {
             Self::Greedy => "greedy",
             Self::DfsBack => "dfs-back",
@@ -364,7 +367,7 @@ pub struct LayoutSpacing {
     pub node_spacing: f32,
     pub rank_spacing: f32,
     pub cluster_padding: f32,
-    /// Extra horizontal gap added between sequence diagram participants beyond node_spacing.
+    /// Extra horizontal gap added between sequence diagram participants beyond `node_spacing`.
     pub sequence_participant_gap_extra: f32,
     /// Minimum vertical gap between sequence diagram messages.
     pub sequence_min_message_gap: f32,
@@ -400,7 +403,7 @@ impl Default for LayoutSpacing {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayoutStageSnapshot {
     pub stage: &'static str,
     pub reversed_edges: usize,
@@ -409,7 +412,7 @@ pub struct LayoutStageSnapshot {
     pub edge_count: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LayoutTrace {
     pub dispatch: LayoutDispatch,
     pub guard: LayoutGuardDecision,
@@ -799,7 +802,7 @@ pub struct RenderGroup {
 
 impl RenderGroup {
     #[must_use]
-    pub fn new(id: Option<String>) -> Self {
+    pub const fn new(id: Option<String>) -> Self {
         Self {
             id,
             source: RenderSource::Diagram,
@@ -810,7 +813,7 @@ impl RenderGroup {
     }
 
     #[must_use]
-    pub fn with_source(mut self, source: RenderSource) -> Self {
+    pub const fn with_source(mut self, source: RenderSource) -> Self {
         self.source = source;
         self
     }
@@ -1089,10 +1092,10 @@ fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
                 };
 
                 commands.push(PathCmd::CubicTo {
-                    c1x: p_cur.x + (p_next.x - p_prev.x) * t,
-                    c1y: p_cur.y + (p_next.y - p_prev.y) * t,
-                    c2x: p_next.x - (p_next2.x - p_cur.x) * t,
-                    c2y: p_next.y - (p_next2.y - p_cur.y) * t,
+                    c1x: (p_next.x - p_prev.x).mul_add(t, p_cur.x),
+                    c1y: (p_next.y - p_prev.y).mul_add(t, p_cur.y),
+                    c2x: (p_next2.x - p_cur.x).mul_add(-t, p_next.x),
+                    c2y: (p_next2.y - p_cur.y).mul_add(-t, p_next.y),
                     x: p_next.x,
                     y: p_next.y,
                 });
@@ -1391,15 +1394,15 @@ fn edge_label_position(edge_path: &LayoutEdgePath) -> LayoutPoint {
         let p1 = &edge_path.points[1];
         let p2 = &edge_path.points[2];
         LayoutPoint {
-            x: (p1.x + p2.x) / 2.0,
-            y: (p1.y + p2.y) / 2.0,
+            x: f32::midpoint(p1.x, p2.x),
+            y: f32::midpoint(p1.y, p2.y),
         }
     } else if edge_path.points.len() == 2 {
         let p1 = &edge_path.points[0];
         let p2 = &edge_path.points[1];
         LayoutPoint {
-            x: (p1.x + p2.x) / 2.0,
-            y: (p1.y + p2.y) / 2.0,
+            x: f32::midpoint(p1.x, p2.x),
+            y: f32::midpoint(p1.y, p2.y),
         }
     } else if edge_path.points.is_empty() {
         LayoutPoint { x: 0.0, y: 0.0 }
@@ -1580,20 +1583,7 @@ fn dispatch_layout_algorithm(ir: &MermaidDiagramIr, requested: LayoutAlgorithm) 
                 selected.capability_unavailable = true;
                 selected.decision_mode = "requested_capability_fallback";
                 selected.reason = "requested_algorithm_capability_unavailable_for_diagram_type";
-                LayoutDispatch {
-                    requested: selected.requested,
-                    selected: selected.selected,
-                    capability_unavailable: selected.capability_unavailable,
-                    decision_mode: selected.decision_mode,
-                    reason: selected.reason,
-                    selected_expected_loss_permille: selected.selected_expected_loss_permille,
-                    posterior_tree_like_permille: selected.posterior_tree_like_permille,
-                    posterior_dense_graph_permille: selected.posterior_dense_graph_permille,
-                    posterior_layered_permille: selected.posterior_layered_permille,
-                    sugiyama_expected_loss_permille: selected.sugiyama_expected_loss_permille,
-                    tree_expected_loss_permille: selected.tree_expected_loss_permille,
-                    force_expected_loss_permille: selected.force_expected_loss_permille,
-                }
+                selected
             }
         }
     };
@@ -1722,8 +1712,7 @@ fn select_general_graph_algorithm(ir: &MermaidDiagramIr) -> LayoutDispatch {
     ]
     .into_iter()
     .min_by_key(|(algorithm, loss)| (*loss, algorithm.as_str()))
-    .map(|(algorithm, _)| algorithm)
-    .unwrap_or(LayoutAlgorithm::Sugiyama);
+    .map_or(LayoutAlgorithm::Sugiyama, |(algorithm, _)| algorithm);
 
     let selected_expected_loss_permille = match selected {
         LayoutAlgorithm::Sugiyama => sugiyama_loss,
@@ -1748,7 +1737,7 @@ fn select_general_graph_algorithm(ir: &MermaidDiagramIr) -> LayoutDispatch {
     }
 }
 
-fn algorithm_available_for_diagram(diagram_type: DiagramType, algorithm: LayoutAlgorithm) -> bool {
+const fn algorithm_available_for_diagram(diagram_type: DiagramType, algorithm: LayoutAlgorithm) -> bool {
     match algorithm {
         LayoutAlgorithm::Auto => true,
         LayoutAlgorithm::Sugiyama | LayoutAlgorithm::Force | LayoutAlgorithm::Tree => true,
@@ -1792,8 +1781,8 @@ fn general_graph_posterior_permille(metrics: GraphMetrics) -> (u16, u16, u16) {
         + if metrics.node_count > 30 { 70 } else { 0 };
 
     let layered_score = 160_i32
-        + if !metrics.is_tree_like { 110 } else { 0 }
-        + if !metrics.is_dense { 90 } else { 0 }
+        + if metrics.is_tree_like { 0 } else { 110 }
+        + if metrics.is_dense { 0 } else { 90 }
         + if metrics.back_edge_count <= 5 { 70 } else { 25 }
         + if (0.8..=2.2).contains(&metrics.edge_to_node_ratio) {
             120
@@ -1819,8 +1808,7 @@ fn normalize_three_scores_permille(a: i32, b: i32, c: i32) -> (u16, u16, u16) {
         .iter()
         .enumerate()
         .max_by_key(|(_, value)| *value)
-        .map(|(index, _)| index)
-        .unwrap_or(2);
+        .map_or(2, |(index, _)| index);
     normalized[max_index] = normalized[max_index].saturating_add(remainder);
     (
         normalized[0] as u16,
@@ -1860,7 +1848,7 @@ struct LayoutCostEstimate {
 
 impl LayoutCostEstimate {
     #[must_use]
-    fn exceeds(self, guardrails: LayoutGuardrails) -> (bool, bool, bool) {
+    const fn exceeds(self, guardrails: LayoutGuardrails) -> (bool, bool, bool) {
         (
             self.time_ms > guardrails.max_layout_time_ms,
             self.iterations > guardrails.max_layout_iterations,
@@ -2051,7 +2039,7 @@ fn fallback_candidates(ir: &MermaidDiagramIr, selected: LayoutAlgorithm) -> Vec<
     candidates
 }
 
-fn guardrail_reason(
+const fn guardrail_reason(
     time_budget_exceeded: bool,
     iteration_budget_exceeded: bool,
     route_budget_exceeded: bool,
@@ -2373,11 +2361,11 @@ pub fn layout_diagram_force_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         let mut max_displacement: f32 = 0.0;
         for i in 0..n {
             let (dx, dy) = displacements[i];
-            let magnitude = (dx * dx + dy * dy).sqrt().max(f32::EPSILON);
+            let magnitude = dx.hypot(dy).max(f32::EPSILON);
             let clamped_mag = magnitude.min(temperature);
             let scale = clamped_mag / magnitude;
-            positions[i].0 += dx * scale;
-            positions[i].1 += dy * scale;
+            positions[i].0 = dx.mul_add(scale, positions[i].0);
+            positions[i].1 = dy.mul_add(scale, positions[i].1);
             max_displacement = max_displacement.max(clamped_mag);
         }
 
@@ -2809,7 +2797,7 @@ pub fn layout_diagram_timeline_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         if let Some(targets) = events_by_period.get(period_index) {
             for target in targets {
                 if assigned.insert(*target) {
-                    centers[*target] = (x, 48.0 + event_row as f32 * event_gap_y);
+                    centers[*target] = (x, (event_row as f32).mul_add(event_gap_y, 48.0));
                     rank_by_node[*target] = event_row;
                     order_by_node[*target] = period_order;
                     event_row = event_row.saturating_add(1);
@@ -2988,7 +2976,7 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     }
 
     // Total sequence content height before optional mirrored participant headers.
-    let lifeline_bottom = y_cursor + message_gap * 0.5;
+    let lifeline_bottom = message_gap.mul_add(0.5, y_cursor);
 
     // ── Phase 3: build layout nodes (participant boxes at the top) ──────
     let nodes: Vec<LayoutNodeBox> = (0..node_count)
@@ -3414,7 +3402,7 @@ fn build_sequence_note_geometry(
             let note_height = if line_count <= 1.0 {
                 base_note_height
             } else {
-                base_note_height + (line_count - 1.0) * note_line_height + note_vertical_padding
+                (line_count - 1.0).mul_add(note_line_height, base_note_height) + note_vertical_padding
             };
             // Adaptive note width from content: use the widest line + padding.
             let max_line_chars = note
@@ -3424,17 +3412,17 @@ fn build_sequence_note_geometry(
                 .max()
                 .unwrap_or(0);
             let note_width =
-                ((max_line_chars as f32 * avg_char_w) + 24.0).clamp(80.0, default_note_width * 2.5);
+                (max_line_chars as f32).mul_add(avg_char_w, 24.0).clamp(80.0, default_note_width * 2.5);
 
             // Position the note at the edge after which it appears.
             let y = message_y_positions
                 .get(note.after_edge)
                 .copied()
-                .unwrap_or(first_message_y + note.after_edge as f32 * message_gap);
+                .unwrap_or((note.after_edge as f32).mul_add(message_gap, first_message_y));
 
             // Determine x position based on participants and note position.
-            let first_pid = note.participants.first().map(|p| p.0).unwrap_or(0);
-            let last_pid = note.participants.last().map(|p| p.0).unwrap_or(first_pid);
+            let first_pid = note.participants.first().map_or(0, |p| p.0);
+            let last_pid = note.participants.last().map_or(first_pid, |p| p.0);
             let first_cx = participant_x_centers.get(first_pid).copied().unwrap_or(0.0);
             let last_cx = participant_x_centers
                 .get(last_pid)
@@ -3442,21 +3430,19 @@ fn build_sequence_note_geometry(
                 .unwrap_or(first_cx);
             let first_half_w = node_sizes
                 .get(first_pid)
-                .map(|(w, _)| w / 2.0)
-                .unwrap_or(50.0);
+                .map_or(50.0, |(w, _)| w / 2.0);
 
             let x = match note.position {
                 fm_core::NotePosition::LeftOf => first_cx - first_half_w - note_width - 10.0,
                 fm_core::NotePosition::RightOf => {
                     let last_half_w = node_sizes
                         .get(last_pid)
-                        .map(|(w, _)| w / 2.0)
-                        .unwrap_or(50.0);
+                        .map_or(50.0, |(w, _)| w / 2.0);
                     last_cx + last_half_w + 10.0
                 }
                 fm_core::NotePosition::Over => {
                     let span_width = (last_cx - first_cx).abs() + note_width;
-                    let center = (first_cx + last_cx) / 2.0;
+                    let center = f32::midpoint(first_cx, last_cx);
                     center - span_width / 2.0
                 }
             };
@@ -3502,8 +3488,7 @@ fn build_sequence_fragment_geometry(
         let last_cx = participant_x_centers[last_idx];
         let last_half_w = node_sizes
             .get(last_idx)
-            .map(|(w, _)| w / 2.0)
-            .unwrap_or(50.0);
+            .map_or(50.0, |(w, _)| w / 2.0);
         last_cx + last_half_w
     };
 
@@ -3517,7 +3502,7 @@ fn build_sequence_fragment_geometry(
             let end_y = message_y_positions
                 .get(fragment.end_edge)
                 .copied()
-                .unwrap_or(diagram_bottom - message_gap * 0.5);
+                .unwrap_or(message_gap.mul_add(-0.5, diagram_bottom));
 
             let padding = message_gap * 0.35;
             LayoutSequenceFragment {
@@ -3526,9 +3511,9 @@ fn build_sequence_fragment_geometry(
                 color: fragment.color.clone(),
                 bounds: LayoutRect {
                     x: -padding,
-                    y: start_y - message_gap * 0.3,
+                    y: message_gap.mul_add(-0.3, start_y),
                     width: total_width + padding * 2.0,
-                    height: (end_y - start_y + message_gap * 0.6).max(message_gap * 0.5),
+                    height: message_gap.mul_add(0.6, end_y - start_y).max(message_gap * 0.5),
                 },
             }
         })
@@ -3604,7 +3589,7 @@ fn layout_diagram_gantt_fallback(ir: &MermaidDiagramIr) -> TracedLayout {
     let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
 
     let col_gap = spacing.rank_spacing + 144.0;
-    let row_gap = (spacing.node_spacing * 0.72) + 24.0;
+    let row_gap = spacing.node_spacing.mul_add(0.72, 24.0);
     let mut section_base_y = 0.0_f32;
 
     for (section_index, (_section, nodes)) in section_to_nodes.iter().enumerate() {
@@ -3612,12 +3597,12 @@ fn layout_diagram_gantt_fallback(ir: &MermaidDiagramIr) -> TracedLayout {
             let slot = slot_by_hint[&order_hint_by_node[node_index]];
             centers[*node_index] = (
                 slot as f32 * col_gap,
-                section_base_y + row_index as f32 * row_gap,
+                (row_index as f32).mul_add(row_gap, section_base_y),
             );
             rank_by_node[*node_index] = slot;
             order_by_node[*node_index] = row_index + section_index * 128;
         }
-        section_base_y += (nodes.len().max(1) as f32 * row_gap) + 56.0;
+        section_base_y += (nodes.len().max(1) as f32).mul_add(row_gap, 56.0);
     }
 
     let mut traced = finalize_specialized_layout(
@@ -3667,7 +3652,7 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
 
     let spacing = LayoutSpacing::default();
     let base_col_width = 48.0_f32;
-    let row_gap = (spacing.node_spacing * 0.72) + 24.0;
+    let row_gap = spacing.node_spacing.mul_add(0.72, 24.0);
     let section_gap = 56.0_f32;
 
     let mut rank_by_node = vec![0_usize; node_count];
@@ -3769,17 +3754,13 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
         let section_idx = task.section_idx.min(section_count.saturating_sub(1));
         let section_label = gantt_meta
             .sections
-            .get(section_idx)
-            .map(|section| section.name.clone())
-            .unwrap_or_else(|| "Backlog".to_string());
+            .get(section_idx).map_or_else(|| "Backlog".to_string(), |section| section.name.clone());
 
         while section_to_nodes.len() <= section_idx {
             let idx = section_to_nodes.len();
             let label = gantt_meta
                 .sections
-                .get(idx)
-                .map(|section| section.name.clone())
-                .unwrap_or_else(|| format!("Section {}", idx + 1));
+                .get(idx).map_or_else(|| format!("Section {}", idx + 1), |section| section.name.clone());
             section_to_nodes.entry(label).or_default();
         }
 
@@ -3792,7 +3773,7 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
             .max(if milestones[task_idx] { 72.0 } else { 156.0 });
 
         let x = start_offset_days * base_col_width;
-        let y = section_base_y + row_index as f32 * row_gap;
+        let y = (row_index as f32).mul_add(row_gap, section_base_y);
         centers[node_index] = (x, y);
         rank_by_node[node_index] =
             usize::try_from((start_days[task_idx] - min_start_day).max(0)).unwrap_or(0);
@@ -3806,11 +3787,10 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
         let next_is_new_section = gantt_meta
             .tasks
             .get(task_idx + 1)
-            .map(|next| next.section_idx != section_idx)
-            .unwrap_or(true);
+            .is_none_or(|next| next.section_idx != section_idx);
         if next_is_new_section {
             section_base_y +=
-                (per_section_counts[section_idx].max(1) as f32 * row_gap) + section_gap;
+                (per_section_counts[section_idx].max(1) as f32).mul_add(row_gap, section_gap);
         }
     }
 
@@ -3967,7 +3947,7 @@ fn layout_diagram_xychart_from_meta(
             let Some(&value) = series.values.get(point_index) else {
                 continue;
             };
-            let x_band_start = plot_bounds.x + point_index as f32 * band_width;
+            let x_band_start = (point_index as f32).mul_add(band_width, plot_bounds.x);
             let x_center = x_band_start + band_width / 2.0;
             let value_y = xychart_value_to_y(value, y_min, y_max, plot_bounds);
             let node_bounds = if is_bar {
@@ -3975,7 +3955,7 @@ fn layout_diagram_xychart_from_meta(
                     .clamp(10.0, (band_width * 0.78).max(10.0));
                 let group_width = bar_width * bar_series_count as f32;
                 let group_start = x_band_start + (band_width - group_width) / 2.0;
-                let x = group_start + local_bar_slot as f32 * bar_width;
+                let x = (local_bar_slot as f32).mul_add(bar_width, group_start);
                 let y = value_y.min(baseline_y);
                 let height = (baseline_y - value_y).abs().max(1.0);
                 LayoutRect {
@@ -4145,7 +4125,7 @@ fn parse_iso_day_number(value: &str) -> Option<i32> {
 
     let month_i32 = i32::from(month);
     let day_i32 = i32::from(day);
-    let adjusted_year = year - if month_i32 <= 2 { 1 } else { 0 };
+    let adjusted_year = year - i32::from(month_i32 <= 2);
     let era = if adjusted_year >= 0 {
         adjusted_year
     } else {
@@ -4165,7 +4145,7 @@ fn is_valid_iso_calendar_date(year: i32, month: u8, day: u8) -> bool {
     (1..=max_day).contains(&day)
 }
 
-fn iso_days_in_month(year: i32, month: u8) -> Option<u8> {
+const fn iso_days_in_month(year: i32, month: u8) -> Option<u8> {
     let max_day = match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
@@ -4181,7 +4161,7 @@ fn iso_days_in_month(year: i32, month: u8) -> Option<u8> {
     Some(max_day)
 }
 
-fn is_iso_leap_year(year: i32) -> bool {
+const fn is_iso_leap_year(year: i32) -> bool {
     (year.rem_euclid(4) == 0 && year.rem_euclid(100) != 0) || year.rem_euclid(400) == 0
 }
 
@@ -4218,11 +4198,7 @@ fn gantt_task_duration_days(task: &fm_core::IrGanttTask, inclusive_end_dates: bo
         }
         Some(GanttDate::AfterTask(_)) => 1,
         None => {
-            if matches!(task.task_type, GanttTaskType::Milestone) {
-                0
-            } else {
-                1
-            }
+            i32::from(!matches!(task.task_type, GanttTaskType::Milestone))
         }
     }
 }
@@ -4277,7 +4253,7 @@ fn gantt_day_is_excluded(day: i32, skip_weekends: bool, excluded_dates: &BTreeSe
     excluded_dates.contains(&day) || (skip_weekends && is_weekend_day_number(day))
 }
 
-fn is_weekend_day_number(day: i32) -> bool {
+const fn is_weekend_day_number(day: i32) -> bool {
     matches!(day.rem_euclid(7), 0 | 6)
 }
 
@@ -4292,7 +4268,7 @@ fn format_gantt_axis_tick(days_since_epoch: i32) -> String {
     let month_prime = (5 * day_of_year + 2) / 153;
     let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
     let month = month_prime + if month_prime < 10 { 3 } else { -9 };
-    let year = year + if month <= 2 { 1 } else { 0 };
+    let year = year + i32::from(month <= 2);
     format!("{year:04}-{month:02}-{day:02}")
 }
 
@@ -4351,7 +4327,7 @@ pub fn layout_diagram_sankey_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let mut order_by_node = vec![0_usize; node_count];
     let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
     let col_gap = spacing.rank_spacing + 136.0;
-    let row_gap = (spacing.node_spacing * 0.45) + 18.0;
+    let row_gap = spacing.node_spacing.mul_add(0.45, 18.0);
 
     for (rank, nodes) in &nodes_by_rank {
         let mut cursor_y = 0.0_f32;
@@ -4425,7 +4401,7 @@ pub fn layout_diagram_grid_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     }
     let column_count = column_count.max(1);
     let cell_width = base_max_width + spacing.node_spacing;
-    let cell_height = max_height + (spacing.rank_spacing * 0.6);
+    let cell_height = spacing.rank_spacing.mul_add(0.6, max_height);
 
     if ir.diagram_type == DiagramType::BlockBeta {
         for (node_index, node) in ir.nodes.iter().enumerate() {
@@ -4433,7 +4409,7 @@ pub fn layout_diagram_grid_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             if span > 1 {
                 node_sizes[node_index].0 = node_sizes[node_index]
                     .0
-                    .max(base_max_width * span as f32 + spacing.node_spacing * (span - 1) as f32);
+                    .max(spacing.node_spacing.mul_add((span - 1) as f32, base_max_width * span as f32));
             }
         }
     }
@@ -4475,7 +4451,7 @@ pub fn layout_diagram_grid_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             }
 
             centers[node_index] = (
-                col as f32 * cell_width + ((span - 1) as f32 * cell_width / 2.0),
+                (col as f32).mul_add(cell_width, (span - 1) as f32 * cell_width / 2.0),
                 row as f32 * cell_height,
             );
 
@@ -4619,8 +4595,7 @@ fn layout_diagram_quadrant_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         .quadrant_meta
         .as_ref()
         .and_then(|m| m.x_axis_left.as_ref())
-        .map(|label| metrics.estimate_dimensions(label).0)
-        .unwrap_or(0.0);
+        .map_or(0.0, |label| metrics.estimate_dimensions(label).0);
     let margin_left = (axis_label_width + 20.0).clamp(50.0, 120.0);
     let margin_top = 60.0_f32;
 
@@ -4725,7 +4700,7 @@ fn layout_diagram_gitgraph_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let lane_width =
         node_sizes.iter().map(|(w, _)| *w).fold(0.0_f32, f32::max) + spacing.node_spacing;
     let row_height =
-        node_sizes.iter().map(|(_, h)| *h).fold(0.0_f32, f32::max) + spacing.rank_spacing * 0.6;
+        spacing.rank_spacing.mul_add(0.6, node_sizes.iter().map(|(_, h)| *h).fold(0.0_f32, f32::max));
 
     let mut lane_map: BTreeMap<usize, usize> = BTreeMap::new();
     let mut next_lane = 0_usize;
@@ -4736,8 +4711,7 @@ fn layout_diagram_gitgraph_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             .iter()
             .enumerate()
             .find(|(_, c)| c.members.contains(&fm_core::IrNodeId(i)))
-            .map(|(ci, _)| ci)
-            .unwrap_or(usize::MAX);
+            .map_or(usize::MAX, |(ci, _)| ci);
         let lane = *lane_map.entry(cluster_id).or_insert_with(|| {
             let l = next_lane;
             next_lane += 1;
@@ -4901,8 +4875,8 @@ fn layout_bounds_for_nodes(
     Some(LayoutRect {
         x: min_x - padding,
         y: min_y - padding,
-        width: (max_x - min_x) + (padding * 2.0),
-        height: (max_y - min_y) + (padding * 2.0),
+        width: padding.mul_add(2.0, max_x - min_x),
+        height: padding.mul_add(2.0, max_y - min_y),
     })
 }
 
@@ -5237,7 +5211,7 @@ fn compute_all_tree_span_centers(
     let mut root_cursor = 0.0_f32;
     for &root in roots {
         queue.push((root, root_cursor));
-        root_cursor += subtree_spans[root] + (spacing.node_spacing * 1.5);
+        root_cursor += spacing.node_spacing.mul_add(1.5, subtree_spans[root]);
     }
 
     let mut queue_idx = 0;
@@ -5250,11 +5224,10 @@ fn compute_all_tree_span_centers(
             continue;
         }
 
-        let child_total: f32 = children[node]
+        let child_total: f32 = spacing.node_spacing.mul_add(children[node].len().saturating_sub(1) as f32, children[node]
             .iter()
             .map(|child| subtree_spans[*child])
-            .sum::<f32>()
-            + spacing.node_spacing * (children[node].len().saturating_sub(1) as f32);
+            .sum::<f32>());
         let mut child_cursor = span_start + ((subtree_span - child_total) / 2.0);
 
         for &child in &children[node] {
@@ -5403,7 +5376,7 @@ fn assign_radial_angles(
 ) {
     let children = &tree.children[node_index];
     if children.is_empty() {
-        angles[node_index] = (start_angle + end_angle) / 2.0;
+        angles[node_index] = f32::midpoint(start_angle, end_angle);
         return;
     }
 
@@ -5436,7 +5409,7 @@ fn assign_radial_angles(
         .iter()
         .map(|child| {
             let (width, height) = node_sizes[*child];
-            ((width.max(height) + spacing.node_spacing * 0.35) / child_radius).min(PI)
+            (spacing.node_spacing.mul_add(0.35, width.max(height)) / child_radius).min(PI)
         })
         .collect();
 
@@ -5489,7 +5462,7 @@ fn assign_radial_angles(
 
     // Guard against NaN from any unexpected numerical instability.
     if !angles[node_index].is_finite() {
-        angles[node_index] = (start_angle + end_angle) / 2.0;
+        angles[node_index] = f32::midpoint(start_angle, end_angle);
     }
 }
 
@@ -5519,8 +5492,8 @@ fn force_initial_positions(
             let col = i % cols;
             let row = i / cols;
             let (w, h) = node_sizes[i];
-            let x = col as f32 * cell_size + jitter_x + w / 2.0;
-            let y = row as f32 * cell_size + jitter_y + h / 2.0;
+            let x = (col as f32).mul_add(cell_size, jitter_x) + w / 2.0;
+            let y = (row as f32).mul_add(cell_size, jitter_y) + h / 2.0;
             (x, y)
         })
         .collect()
@@ -5530,7 +5503,7 @@ fn force_initial_positions(
 fn fnv1a_hash(bytes: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for &b in bytes {
-        hash ^= b as u64;
+        hash ^= u64::from(b);
         hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
     hash
@@ -5608,7 +5581,7 @@ fn force_compute_displacements(
             for j in (i + 1)..n {
                 let dx = positions[i].0 - positions[j].0;
                 let dy = positions[i].1 - positions[j].1;
-                let dist_sq = (dx * dx + dy * dy).max(1.0);
+                let dist_sq = dy.mul_add(dy, dx * dx).max(1.0);
                 // Fruchterman-Reingold repulsive force: k^2 / d
                 // Vector component: (dx / d) * (k^2 / d) = dx * k^2 / d^2
                 let force_over_d = k_sq / dist_sq;
@@ -5633,7 +5606,7 @@ fn force_compute_displacements(
             }
             let dx = positions[i].0 - positions[j].0;
             let dy = positions[i].1 - positions[j].1;
-            let dist = (dx * dx + dy * dy).sqrt().max(1.0);
+            let dist = dx.hypot(dy).max(1.0);
             // Fruchterman-Reingold attractive force: d^2 / k
             // Vector component: (dx / d) * (d^2 / k) = dx * d / k
             let force_over_d = dist / k;
@@ -5742,35 +5715,35 @@ fn force_barnes_hut_repulsion(
                     }
                     let dx = px - positions[j].0;
                     let dy = py - positions[j].1;
-                    let dist_sq = (dx * dx + dy * dy).max(1.0);
+                    let dist_sq = dy.mul_add(dy, dx * dx).max(1.0);
                     let force = k_sq / dist_sq.sqrt();
                     let dist = dist_sq.sqrt();
-                    displacements[i].0 += dx / dist * force;
-                    displacements[i].1 += dy / dist * force;
+                    displacements[i].0 = (dx / dist).mul_add(force, displacements[i].0);
+                    displacements[i].1 = (dy / dist).mul_add(force, displacements[i].1);
                 }
             } else {
                 // Different cell: check if far enough for approximation.
                 let dx = px - cx;
                 let dy = py - cy;
-                let dist_sq = (dx * dx + dy * dy).max(1.0);
+                let dist_sq = dy.mul_add(dy, dx * dx).max(1.0);
                 let cell_size_sq = cell_w * cell_w + cell_h * cell_h;
 
                 if cell_size_sq / dist_sq < theta_sq {
                     // Use centroid approximation (multiply force by count).
                     let force = k_sq * count as f32 / dist_sq.sqrt();
                     let dist = dist_sq.sqrt();
-                    displacements[i].0 += dx / dist * force;
-                    displacements[i].1 += dy / dist * force;
+                    displacements[i].0 = (dx / dist).mul_add(force, displacements[i].0);
+                    displacements[i].1 = (dy / dist).mul_add(force, displacements[i].1);
                 } else {
                     // Too close: compute direct forces.
                     for &j in &nodes_in_cell[cell_idx] {
                         let dx2 = px - positions[j].0;
                         let dy2 = py - positions[j].1;
-                        let dist_sq2 = (dx2 * dx2 + dy2 * dy2).max(1.0);
+                        let dist_sq2 = dy2.mul_add(dy2, dx2 * dx2).max(1.0);
                         let force2 = k_sq / dist_sq2.sqrt();
                         let dist2 = dist_sq2.sqrt();
-                        displacements[i].0 += dx2 / dist2 * force2;
-                        displacements[i].1 += dy2 / dist2 * force2;
+                        displacements[i].0 = (dx2 / dist2).mul_add(force2, displacements[i].0);
+                        displacements[i].1 = (dy2 / dist2).mul_add(force2, displacements[i].1);
                     }
                 }
             }
@@ -5808,10 +5781,10 @@ fn force_cluster_cohesion(
             let centroid_y = sy / count as f32;
             let dx = centroid_x - positions[i].0;
             let dy = centroid_y - positions[i].1;
-            let dist = (dx * dx + dy * dy).sqrt().max(1.0);
+            let dist = dx.hypot(dy).max(1.0);
             let force = dist / k * cohesion_strength;
-            displacements[i].0 += dx / dist * force;
-            displacements[i].1 += dy / dist * force;
+            displacements[i].0 = (dx / dist).mul_add(force, displacements[i].0);
+            displacements[i].1 = (dy / dist).mul_add(force, displacements[i].1);
         }
     }
 }
@@ -5831,8 +5804,8 @@ fn force_remove_overlaps(
             for j in (i + 1)..n {
                 let (wi, hi) = node_sizes[i];
                 let (wj, hj) = node_sizes[j];
-                let half_w = (wi + wj) / 2.0 + gap;
-                let half_h = (hi + hj) / 2.0 + gap;
+                let half_w = f32::midpoint(wi, wj) + gap;
+                let half_h = f32::midpoint(hi, hj) + gap;
 
                 let dx = positions[j].0 - positions[i].0;
                 let dy = positions[j].1 - positions[i].1;
@@ -5897,7 +5870,7 @@ fn force_normalize_positions(positions: &mut [(f32, f32)], node_sizes: &[(f32, f
     }
 }
 
-/// Build LayoutNodeBox from force-directed positions (center-based).
+/// Build `LayoutNodeBox` from force-directed positions (center-based).
 fn force_build_node_boxes(
     ir: &MermaidDiagramIr,
     positions: &[(f32, f32)],
@@ -5986,8 +5959,8 @@ fn clip_to_rect_border(from: LayoutPoint, to: LayoutPoint, rect: &LayoutRect) ->
     let t = tx.min(ty);
 
     LayoutPoint {
-        x: cx + dx * t,
-        y: cy + dy * t,
+        x: dx.mul_add(t, cx),
+        y: dy.mul_add(t, cy),
     }
 }
 
@@ -6025,7 +5998,7 @@ pub fn compute_node_sizes(
                     let (icon_width, icon_height) = icon_dimensions(node, metrics);
                     let width = label_width
                         .max(icon_width)
-                        .max(label_width + (icon_width * 0.85))
+                        .max(icon_width.mul_add(0.85, label_width))
                         + 72.0;
                     let height = label_height + icon_height + 44.0;
                     (width.max(100.0), height.max(52.0))
@@ -6547,7 +6520,7 @@ fn cycle_removal_greedy(
         .collect()
 }
 
-/// Apply IR constraints (SameRank, MinLength) to adjust rank assignments.
+/// Apply IR constraints (`SameRank`, `MinLength`) to adjust rank assignments.
 fn apply_ir_constraints(ir: &MermaidDiagramIr, ranks: &mut BTreeMap<usize, usize>) {
     use fm_core::IrConstraint;
 
@@ -6987,9 +6960,7 @@ fn block_beta_item_anchor(ir: &MermaidDiagramIr, item: BlockBetaGridItem) -> (St
             .subgraph_members_recursive(subgraph_id)
             .into_iter()
             .map(|node_id| node_id.0)
-            .min_by(|left, right| compare_node_indices(ir, *left, *right))
-            .map(|node_index| (ir.nodes[node_index].id.clone(), node_index))
-            .unwrap_or_else(|| (format!("~group-{}", subgraph_id.0), subgraph_id.0)),
+            .min_by(|left, right| compare_node_indices(ir, *left, *right)).map_or_else(|| (format!("~group-{}", subgraph_id.0), subgraph_id.0), |node_index| (ir.nodes[node_index].id.clone(), node_index)),
     }
 }
 
@@ -7003,8 +6974,7 @@ fn block_beta_item_span(
         BlockBetaGridItem::Group(subgraph_id) => ir
             .graph
             .subgraph(subgraph_id)
-            .map(|subgraph| subgraph.grid_span)
-            .unwrap_or(1),
+            .map_or(1, |subgraph| subgraph.grid_span),
     }
     .min(available_columns)
     .max(1)
@@ -7099,7 +7069,7 @@ fn place_block_beta_items(
         match item {
             BlockBetaGridItem::Node(node_index) => {
                 centers[node_index] = (
-                    item_col as f32 * cell_width + ((span - 1) as f32 * cell_width / 2.0),
+                    (item_col as f32).mul_add(cell_width, (span - 1) as f32 * cell_width / 2.0),
                     item_row as f32 * cell_height,
                 );
                 if matches!(ir.direction, GraphDirection::LR | GraphDirection::RL) {
@@ -7368,7 +7338,7 @@ fn bk_upper_neighbours(
 
 /// Brandes-Köpf vertical alignment for one of the four directions.
 ///
-/// Returns `(root, align)` arrays indexed by node_index.
+/// Returns `(root, align)` arrays indexed by `node_index`.
 /// - `root[v]` is the root of the block containing v.
 /// - `align[v]` is the next node in the block chain; `align[v] == v` at the terminal.
 #[allow(clippy::too_many_arguments)]
@@ -7470,7 +7440,7 @@ fn bk_vertical_alignment(
 
 /// Brandes-Köpf horizontal compaction for one alignment.
 ///
-/// Returns secondary-axis coordinates indexed by node_index.
+/// Returns secondary-axis coordinates indexed by `node_index`.
 fn bk_horizontal_compaction(
     node_count: usize,
     node_sizes: &[(f32, f32)],
@@ -7504,12 +7474,10 @@ fn bk_horizontal_compaction(
     ) -> f32 {
         let u_extent = node_sizes
             .get(u)
-            .map(|&(width, height)| if horizontal_ranks { height } else { width })
-            .unwrap_or(84.0);
+            .map_or(84.0, |&(width, height)| if horizontal_ranks { height } else { width });
         let w_extent = node_sizes
             .get(w)
-            .map(|&(width, height)| if horizontal_ranks { height } else { width })
-            .unwrap_or(84.0);
+            .map_or(84.0, |&(width, height)| if horizontal_ranks { height } else { width });
         (u_extent / 2.0) + node_spacing + (w_extent / 2.0)
     }
 
@@ -7575,11 +7543,11 @@ fn bk_horizontal_compaction(
                     sink[block_root] = sink[pred_root];
                 }
                 let sep = delta(pred, w, node_sizes, node_spacing, horizontal_ranks);
-                if sink[block_root] != sink[pred_root] {
+                if sink[block_root] == sink[pred_root] {
+                    x[block_root] = x[block_root].max(x[pred_root] + sep);
+                } else {
                     shift[sink[pred_root]] =
                         shift[sink[pred_root]].min(x[block_root] - x[pred_root] - sep);
-                } else {
-                    x[block_root] = x[block_root].max(x[pred_root] + sep);
                 }
             }
             let next = align[w];
@@ -7717,9 +7685,9 @@ fn brandes_kopf_secondary_coords(
     let mut result = vec![0.0_f32; n];
     for v in 0..n {
         let mut vals: Vec<f32> = all_coords.iter().map(|c| c[v]).collect();
-        vals.sort_by(|a, b| a.total_cmp(b));
+        vals.sort_by(f32::total_cmp);
         // Median of 4 values: average of the two middle values.
-        result[v] = (vals[1] + vals[2]) / 2.0;
+        result[v] = f32::midpoint(vals[1], vals[2]);
     }
 
     result
@@ -8477,33 +8445,33 @@ fn route_self_loop(node_box: &LayoutNodeBox, horizontal_ranks: bool) -> Vec<Layo
         // Loop goes out the right side and returns from the top.
         let start = LayoutPoint {
             x: b.x + b.width,
-            y: b.y + b.height * 0.4,
+            y: b.height.mul_add(0.4, b.y),
         };
         let corner1 = LayoutPoint {
             x: b.x + b.width + loop_size,
-            y: b.y + b.height * 0.4,
+            y: b.height.mul_add(0.4, b.y),
         };
         let corner2 = LayoutPoint {
             x: b.x + b.width + loop_size,
             y: b.y - loop_size,
         };
         let corner3 = LayoutPoint {
-            x: b.x + b.width * 0.6,
+            x: b.width.mul_add(0.6, b.x),
             y: b.y - loop_size,
         };
         let end = LayoutPoint {
-            x: b.x + b.width * 0.6,
+            x: b.width.mul_add(0.6, b.x),
             y: b.y,
         };
         vec![start, corner1, corner2, corner3, end]
     } else {
         // Loop goes out the bottom and returns from the right.
         let start = LayoutPoint {
-            x: b.x + b.width * 0.6,
+            x: b.width.mul_add(0.6, b.x),
             y: b.y + b.height,
         };
         let corner1 = LayoutPoint {
-            x: b.x + b.width * 0.6,
+            x: b.width.mul_add(0.6, b.x),
             y: b.y + b.height + loop_size,
         };
         let corner2 = LayoutPoint {
@@ -8512,11 +8480,11 @@ fn route_self_loop(node_box: &LayoutNodeBox, horizontal_ranks: bool) -> Vec<Layo
         };
         let corner3 = LayoutPoint {
             x: b.x + b.width + loop_size,
-            y: b.y + b.height * 0.4,
+            y: b.height.mul_add(0.4, b.y),
         };
         let end = LayoutPoint {
             x: b.x + b.width,
-            y: b.y + b.height * 0.4,
+            y: b.height.mul_add(0.4, b.y),
         };
         vec![start, corner1, corner2, corner3, end]
     }
@@ -8642,7 +8610,7 @@ fn route_edge_points_with_obstacles(
                 vec![source, target]
             }
         } else {
-            let mid_x = (source.x + target.x) / 2.0;
+            let mid_x = f32::midpoint(source.x, target.x);
             let mid_segment = (
                 LayoutPoint {
                     x: mid_x,
@@ -8711,7 +8679,7 @@ fn route_edge_points_with_obstacles(
             vec![source, target]
         }
     } else {
-        let mid_y = (source.y + target.y) / 2.0;
+        let mid_y = f32::midpoint(source.y, target.y);
         let mid_segment = (
             LayoutPoint {
                 x: source.x.min(target.x),
@@ -8885,8 +8853,8 @@ fn build_cluster_boxes(
                     bounds: LayoutRect {
                         x: min_x - spacing.cluster_padding,
                         y: min_y - spacing.cluster_padding,
-                        width: (max_x - min_x) + (2.0 * spacing.cluster_padding),
-                        height: (max_y - min_y) + (2.0 * spacing.cluster_padding),
+                        width: 2.0f32.mul_add(spacing.cluster_padding, max_x - min_x),
+                        height: 2.0f32.mul_add(spacing.cluster_padding, max_y - min_y),
                     },
                 })
         })
@@ -9015,8 +8983,8 @@ fn compute_bounds(
     LayoutRect {
         x: min_x - spacing.cluster_padding,
         y: min_y - spacing.cluster_padding,
-        width: (max_x - min_x) + (2.0 * spacing.cluster_padding),
-        height: (max_y - min_y) + (2.0 * spacing.cluster_padding),
+        width: 2.0f32.mul_add(spacing.cluster_padding, max_x - min_x),
+        height: 2.0f32.mul_add(spacing.cluster_padding, max_y - min_y),
     }
 }
 
@@ -9083,7 +9051,7 @@ fn polyline_length(points: &[LayoutPoint]) -> f32 {
         .map(|pair| {
             let dx = pair[1].x - pair[0].x;
             let dy = pair[1].y - pair[0].y;
-            (dx * dx + dy * dy).sqrt()
+            dx.hypot(dy)
         })
         .sum()
 }
@@ -9166,11 +9134,9 @@ fn build_cycle_cluster_results(
             let row = idx / cols;
             if let Some(member_box) = nodes.iter_mut().find(|n| n.node_index == member_index) {
                 member_box.bounds.x =
-                    base_x + (col as f32) * (member_box.bounds.width + sub_spacing);
-                member_box.bounds.y = base_y
-                    + head_height
-                    + spacing.cluster_padding
-                    + (row as f32) * (member_box.bounds.height + sub_spacing);
+                    (col as f32).mul_add(member_box.bounds.width + sub_spacing, base_x);
+                member_box.bounds.y = (row as f32).mul_add(member_box.bounds.height + sub_spacing, base_y
+                    + head_height + spacing.cluster_padding);
             }
         }
 
@@ -9192,8 +9158,8 @@ fn build_cycle_cluster_results(
             let cluster_bounds = LayoutRect {
                 x: min_x - spacing.cluster_padding,
                 y: min_y - spacing.cluster_padding,
-                width: (max_x - min_x) + (2.0 * spacing.cluster_padding),
-                height: (max_y - min_y) + (2.0 * spacing.cluster_padding),
+                width: 2.0f32.mul_add(spacing.cluster_padding, max_x - min_x),
+                height: 2.0f32.mul_add(spacing.cluster_padding, max_y - min_y),
             };
 
             cycle_clusters.push(LayoutCycleCluster {
@@ -9255,7 +9221,7 @@ fn push_snapshot(
 }
 
 #[must_use]
-pub fn layout_stats_from(layout: &DiagramLayout) -> LayoutStats {
+pub const fn layout_stats_from(layout: &DiagramLayout) -> LayoutStats {
     layout.stats
 }
 
@@ -9352,6 +9318,7 @@ pub fn build_layout_guard_report_with_pressure(
 }
 
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn build_layout_decision_ledger(
     ir: &MermaidDiagramIr,
     traced: &TracedLayout,
@@ -9470,7 +9437,7 @@ pub fn build_layout_decision_ledger(
     }
 }
 
-fn concrete_layout_algorithms() -> [LayoutAlgorithm; 12] {
+const fn concrete_layout_algorithms() -> [LayoutAlgorithm; 12] {
     [
         LayoutAlgorithm::Sugiyama,
         LayoutAlgorithm::Force,
@@ -9540,6 +9507,7 @@ fn layout_decision_confidence_permille(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::float_cmp, clippy::similar_names, clippy::many_single_char_names)]
     use super::{
         CycleStrategy, DependencyGraph, DirtySet, GraphMetrics, LayoutAlgorithm, LayoutEdit,
         LayoutGuardrails, LayoutPoint, LayoutRect, LayoutSequenceLifecycleMarkerKind, RegionInput,
@@ -9645,6 +9613,8 @@ mod tests {
             kind: SubgraphRegionKind::ExplicitSubgraph,
             label: "subgraph:api".to_string(),
             node_indexes: [0, 1].into_iter().collect(),
+            #[allow(clippy::iter_on_single_items)]
+            #[allow(clippy::iter_on_single_items)]
             edge_indexes: [0].into_iter().collect(),
             subgraph_indexes: [0].into_iter().collect(),
             depends_on: BTreeSet::new(),
@@ -9659,9 +9629,9 @@ mod tests {
             kind: SubgraphRegionKind::ConnectivityFragment,
             label: "component:1".to_string(),
             node_indexes: [2, 3].into_iter().collect(),
-            edge_indexes: [1].into_iter().collect(),
+            edge_indexes: std::iter::once(1).collect(),
             subgraph_indexes: BTreeSet::new(),
-            depends_on: [SubgraphRegionId(0)].into_iter().collect(),
+            depends_on: std::iter::once(SubgraphRegionId(0)).collect(),
             dependents: BTreeSet::new(),
             inputs: [RegionInput::Node(2), RegionInput::Edge(1)]
                 .into_iter()
@@ -10113,6 +10083,7 @@ mod tests {
         let cluster = &layout.clusters[0];
 
         assert_eq!(a.1, b.1);
+        
         assert_eq!(a.1, c.1);
         assert!(a.0 < b.0);
         assert!(b.0 < c.0);
@@ -10856,9 +10827,9 @@ mod tests {
             );
         }
         // Verify route still connects source to target.
-        assert_eq!(points2.first().unwrap().x, 10.0);
+        assert!((points2.first().unwrap().x - 10.0).abs() < f32::EPSILON);
         assert_eq!(points2.first().unwrap().y, 10.0);
-        assert_eq!(points2.last().unwrap().x, 100.0);
+        assert!((points2.last().unwrap().x - 100.0).abs() < f32::EPSILON);
         assert_eq!(points2.last().unwrap().y, 200.0);
     }
 
@@ -11088,8 +11059,7 @@ mod tests {
             let layout = layout_diagram_with_cycle_strategy(&ir, strategy);
             assert_eq!(
                 layout.stats.reversed_edges, 0,
-                "strategy {:?} should not reverse edges in acyclic graph",
-                strategy
+                "strategy {strategy:?} should not reverse edges in acyclic graph"
             );
             assert_eq!(layout.stats.cycle_count, 0);
             assert!(!layout.edges.iter().any(|e| e.reversed));
@@ -11122,12 +11092,12 @@ mod tests {
         ] {
             let layout = layout_diagram_with_cycle_strategy(&ir, strategy);
             // All strategies should produce valid layout with 3 nodes and 3 edges
-            assert_eq!(layout.nodes.len(), 3, "strategy {:?}", strategy);
-            assert_eq!(layout.edges.len(), 3, "strategy {:?}", strategy);
-            assert!(layout.bounds.width > 0.0, "strategy {:?}", strategy);
-            assert!(layout.bounds.height > 0.0, "strategy {:?}", strategy);
+            assert_eq!(layout.nodes.len(), 3, "strategy {strategy:?}");
+            assert_eq!(layout.edges.len(), 3, "strategy {strategy:?}");
+            assert!(layout.bounds.width > 0.0, "strategy {strategy:?}");
+            assert!(layout.bounds.height > 0.0, "strategy {strategy:?}");
             // All strategies should detect the cycle
-            assert_eq!(layout.stats.cycle_count, 1, "strategy {:?}", strategy);
+            assert_eq!(layout.stats.cycle_count, 1, "strategy {strategy:?}");
         }
     }
 
@@ -11143,8 +11113,7 @@ mod tests {
             assert_eq!(
                 parsed,
                 Some(strategy),
-                "roundtrip failed for {:?}",
-                strategy
+                "roundtrip failed for {strategy:?}"
             );
         }
     }
@@ -11560,7 +11529,7 @@ mod tests {
                 continue;
             }
             let center = node.bounds.center();
-            let distance = ((center.x - root.x).powi(2) + (center.y - root.y).powi(2)).sqrt();
+            let distance = (center.x - root.x).hypot(center.y - root.y);
             assert!(distance > 1.0, "{} should be away from root", node.node_id);
         }
     }
@@ -11757,10 +11726,10 @@ mod tests {
         let layout = layout_diagram_force(&ir);
         for (i, a) in layout.nodes.iter().enumerate() {
             for b in layout.nodes.iter().skip(i + 1) {
-                let overlap_x = (a.bounds.width + b.bounds.width) / 2.0
+                let overlap_x = f32::midpoint(a.bounds.width, b.bounds.width)
                     - ((a.bounds.x + a.bounds.width / 2.0) - (b.bounds.x + b.bounds.width / 2.0))
                         .abs();
-                let overlap_y = (a.bounds.height + b.bounds.height) / 2.0
+                let overlap_y = f32::midpoint(a.bounds.height, b.bounds.height)
                     - ((a.bounds.y + a.bounds.height / 2.0) - (b.bounds.y + b.bounds.height / 2.0))
                         .abs();
                 assert!(
@@ -11872,9 +11841,9 @@ mod tests {
         let c_center = c.bounds.center();
 
         let dist_ab =
-            ((a_center.x - b_center.x).powi(2) + (a_center.y - b_center.y).powi(2)).sqrt();
+            (a_center.x - b_center.x).hypot(a_center.y - b_center.y);
         let dist_ac =
-            ((a_center.x - c_center.x).powi(2) + (a_center.y - c_center.y).powi(2)).sqrt();
+            (a_center.x - c_center.x).hypot(a_center.y - c_center.y);
 
         // Connected nodes should generally be closer than disconnected.
         assert!(
@@ -12467,7 +12436,7 @@ mod tests {
         let y0 = layout.nodes[0].bounds.y;
         let y1 = layout.nodes[1].bounds.y;
         let y2 = layout.nodes[2].bounds.y;
-        assert_eq!(y0, y1);
+        assert!((y0 - y1).abs() < f32::EPSILON);
         assert_eq!(y1, y2);
     }
 
@@ -13096,9 +13065,7 @@ mod tests {
         let b_cy = b.bounds.y + b.bounds.height / 2.0;
         assert!(
             (a_cy - b_cy).abs() < 1.0,
-            "A and B should be vertically aligned in LR, got y={:.1} vs {:.1}",
-            a_cy,
-            b_cy
+            "A and B should be vertically aligned in LR, got y={a_cy:.1} vs {b_cy:.1}"
         );
     }
 
@@ -13463,7 +13430,7 @@ mod tests {
         let metrics = GraphMetrics::from_ir(&ir);
         assert_eq!(metrics.node_count, 0);
         assert_eq!(metrics.edge_count, 0);
-        assert_eq!(metrics.edge_to_node_ratio, 0.0);
+        assert!((metrics.edge_to_node_ratio - 0.0).abs() < f32::EPSILON);
         assert_eq!(metrics.back_edge_count, 0);
         assert_eq!(metrics.scc_count, 0);
         assert_eq!(metrics.root_count, 0);
@@ -13705,7 +13672,7 @@ mod tests {
         assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Grid);
     }
 
-    /// Verify that requesting an unavailable algorithm falls back with capability_unavailable.
+    /// Verify that requesting an unavailable algorithm falls back with `capability_unavailable`.
     #[test]
     fn dispatch_unavailable_radial_for_flowchart_falls_back() {
         let ir = graph_ir(DiagramType::Flowchart, 3, &[(0, 1), (1, 2)]);
@@ -13791,7 +13758,7 @@ mod tests {
         }
     }
 
-    /// Verify that guardrail fallback produces a valid layout with fallback_applied flag.
+    /// Verify that guardrail fallback produces a valid layout with `fallback_applied` flag.
     #[test]
     fn dispatch_guardrail_fallback_produces_valid_layout() {
         // Use tight guardrails to force fallback.
@@ -14331,10 +14298,10 @@ mod tests {
     /// Capture tracing events emitted during layout and verify mandatory fields.
     ///
     /// Mandatory fields for layout tracing events:
-    /// - `layout.dispatch`: requested, selected, reason, diagram_type, node_count, edge_count
+    /// - `layout.dispatch`: requested, selected, reason, `diagram_type`, `node_count`, `edge_count`
     /// - `layout.guardrail.*`: algorithm, reason
     /// - `layout.cycle_removal`: strategy
-    /// - `layout.crossing_minimization`: crossings_after_barycenter
+    /// - `layout.crossing_minimization`: `crossings_after_barycenter`
     #[test]
     fn tracing_dispatch_event_contains_mandatory_fields() {
         use tracing_subscriber::layer::SubscriberExt;
@@ -14360,7 +14327,7 @@ mod tests {
             let _traced = layout_diagram_traced(&ir);
         });
 
-        let events = captured.lock().unwrap();
+        let events = captured.lock().unwrap().clone();
         assert!(
             !events.is_empty(),
             "Layout should emit at least one tracing event"
@@ -14427,14 +14394,11 @@ mod tests {
             let _traced = layout_diagram_traced(&ir);
         });
 
-        let events = captured.lock().unwrap();
-        let cycle_event = events
-            .iter()
-            .find(|e| e.contains("layout.cycle_removal") && !e.contains("acyclic"));
+        let cycle_event = captured.lock().unwrap().clone().into_iter().find(|e| e.contains("layout.cycle_removal") && !e.contains("acyclic"));
 
         if let Some(event) = cycle_event {
             let json: serde_json::Value =
-                serde_json::from_str(event).expect("Event must be valid JSON");
+                serde_json::from_str(&event).expect("Event must be valid JSON");
             let fields = &json["fields"];
             assert!(
                 fields.get("strategy").is_some(),
@@ -14466,12 +14430,11 @@ mod tests {
             let _traced = layout_diagram_traced(&ir);
         });
 
-        let events = captured.lock().unwrap();
-        let guardrail_event = events.iter().find(|e| e.contains("layout.guardrail"));
+        let guardrail_event = captured.lock().unwrap().clone().into_iter().find(|e| e.contains("layout.guardrail"));
 
         if let Some(event) = guardrail_event {
             let json: serde_json::Value =
-                serde_json::from_str(event).expect("Event must be valid JSON");
+                serde_json::from_str(&event).expect("Event must be valid JSON");
             let fields = &json["fields"];
             assert!(
                 fields.get("algorithm").is_some() || fields.get("initial_algorithm").is_some(),

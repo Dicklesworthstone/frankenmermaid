@@ -302,36 +302,37 @@ pub fn cloud_path(bounds: LayoutRect) -> Vec<PathCmd> {
     let y = bounds.y;
     let w = bounds.width;
     let h = bounds.height;
+    #[allow(clippy::many_single_char_names)]
     let r = h / 3.0;
     // Simplified cloud path
     vec![
         PathCmd::MoveTo {
             x: x + r,
-            y: y + h * 0.6,
+            y: h.mul_add(0.6, y),
         },
         PathCmd::LineTo {
             x: x + r * 2.0,
-            y: y + h * 0.3,
+            y: h.mul_add(0.3, y),
         },
         PathCmd::LineTo {
-            x: x + w * 0.5,
+            x: w.mul_add(0.5, x),
             y: y + r * 0.5,
         },
         PathCmd::LineTo {
             x: x + w - r * 2.0,
-            y: y + h * 0.3,
+            y: h.mul_add(0.3, y),
         },
         PathCmd::LineTo {
             x: x + w - r,
-            y: y + h * 0.6,
+            y: h.mul_add(0.6, y),
         },
         PathCmd::LineTo {
             x: x + w - r,
-            y: y + h * 0.8,
+            y: h.mul_add(0.8, y),
         },
         PathCmd::LineTo {
             x: x + r,
-            y: y + h * 0.8,
+            y: h.mul_add(0.8, y),
         },
         PathCmd::Close,
     ]
@@ -362,6 +363,7 @@ pub fn tag_path(bounds: LayoutRect) -> Vec<PathCmd> {
 }
 
 #[must_use]
+#[allow(clippy::many_single_char_names)]
 pub fn rounded_rect_path(bounds: LayoutRect, radius: f32) -> Vec<PathCmd> {
     let mut commands = Vec::with_capacity(10);
     let r = radius.min(bounds.width / 2.0).min(bounds.height / 2.0);
