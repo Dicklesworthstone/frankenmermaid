@@ -4304,13 +4304,13 @@ pub fn layout_diagram_sankey_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         if source == target || source >= node_count || target >= node_count {
             continue;
         }
-        
+
         let flow_val = edge
             .label
             .and_then(|label_id| ir.labels.get(label_id.0))
             .and_then(|label| label.text.parse::<f32>().ok())
             .unwrap_or(1.0);
-            
+
         out_flow[source] += flow_val;
         in_flow[target] += flow_val;
     }

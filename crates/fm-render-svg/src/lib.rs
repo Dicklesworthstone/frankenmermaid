@@ -1734,6 +1734,12 @@ fn render_layout_to_svg(
         return doc.to_string();
     }
 
+    // Gantt chart: type-based task bar colors and section headers.
+    if ir.diagram_type == fm_core::DiagramType::Gantt && ir.gantt_meta.is_some() {
+        doc = render_gantt_svg(doc, ir, layout, offset_x, offset_y, config, &theme);
+        return doc.to_string();
+    }
+
     if let Some(title) = generic_title {
         doc = doc.child(
             TextBuilder::new(title)
@@ -2639,6 +2645,209 @@ fn render_quadrant_svg(
                 .fill(&theme.colors.text)
                 .class("fm-quadrant-point-label"),
         );
+    }
+
+    doc
+}
+
+/// Render a gantt chart with type-based task bar colors, section headers,
+/// and dependency arrows.
+#[allow(clippy::too_many_arguments)]
+fn render_gantt_svg(
+    mut doc: SvgDocument,
+    ir: &MermaidDiagramIr,
+    layout: &fm_layout::DiagramLayout,
+    offset_x: f32,
+    offset_y: f32,
+    config: &SvgRenderConfig,
+    theme: &Theme,
+) -> SvgDocument {
+    let gantt_meta = match ir.gantt_meta.as_ref() {
+        Some(m) => m,
+        None => return doc,
+    };
+
+    // Title.
+    if let Some(title) = diagram_title(ir, None) {
+        doc = doc.child(
+            TextBuilder::new(title)
+                .x(layout.bounds.width / 2.0 + offset_x)
+                .y(offset_y + config.font_size + 4.0)
+                .anchor(TextAnchor::Middle)
+                .font_family(&config.font_family)
+                .font_size(config.font_size + 4.0)
+                .font_weight("600")
+                .fill(&theme.colors.text)
+                .class("fm-diagram-title")
+                .build(),
+        );
+    }
+
+    // Section background bands (alternating fills).
+    let section_fills = ["#f0f4ff", "#fff8f0", "#f0fff4", "#fff0f8"];
+    for (cluster_idx, cluster) in layout.clusters.iter().enumerate() {
+        let fill = section_fills[cluster_idx % section_fills.len()];
+        doc = doc.child(
+            Element::rect()
+                .x(cluster.bounds.x + offset_x)
+                .y(cluster.bounds.y + offset_y)
+                .width(cluster.bounds.width)
+                .height(cluster.bounds.height)
+                .fill(fill)
+                .attr("fill-opacity", "0.5")
+                .rx(4.0)
+                .class("fm-gantt-section-bg"),
+        );
+        if let Some(section) = gantt_meta.sections.get(cluster_idx) {
+            doc = doc.child(
+                Element::text()
+                    .x(cluster.bounds.x + offset_x + 6.0)
+                    .y(cluster.bounds.y + offset_y + config.font_size * 0.9)
+                    .content(&section.name)
+                    .attr("text-anchor", "start")
+                    .attr("font-weight", "600")
+                    .attr_num("font-size", config.font_size * 0.85)
+                    .attr("font-family", &config.font_family)
+                    .fill(&theme.colors.text)
+                    .class("fm-gantt-section-label"),
+            );
+        }
+    }
+
+    // Task bars with type-based coloring.
+    let task_color = |task_type: &fm_core::GanttTaskType| -> &str {
+        match task_type {
+            fm_core::GanttTaskType::Done => "#86efac",
+            fm_core::GanttTaskType::Active => "#94a3b8",
+            fm_core::GanttTaskType::Critical => "#fca5a5",
+            fm_core::GanttTaskType::Milestone => "#c4b5fd",
+            fm_core::GanttTaskType::Normal => "#93c5fd",
+        }
+    };
+
+    for (node_idx, node_box) in layout.nodes.iter().enumerate() {
+        let x = node_box.bounds.x + offset_x;
+        let y = node_box.bounds.y + offset_y;
+        let w = node_box.bounds.width;
+        let h = node_box.bounds.height;
+
+        let task_type = gantt_meta
+            .tasks
+            .get(node_idx)
+            .map(|t| &t.task_type)
+            .unwrap_or(&fm_core::GanttTaskType::Normal);
+        let fill = task_color(task_type);
+        let is_milestone = matches!(task_type, fm_core::GanttTaskType::Milestone);
+
+        if is_milestone {
+            let cx = x + w / 2.0;
+            let cy = y + h / 2.0;
+            let r = h.min(w) * 0.4;
+            let d = format!(
+                "M{},{} L{},{} L{},{} L{},{} Z",
+                cx,
+                cy - r,
+                cx + r,
+                cy,
+                cx,
+                cy + r,
+                cx - r,
+                cy
+            );
+            doc = doc.child(
+                Element::path()
+                    .d(&d)
+                    .fill(fill)
+                    .stroke(&theme.colors.node_stroke)
+                    .stroke_width(1.5)
+                    .class("fm-gantt-milestone"),
+            );
+        } else {
+            let type_class = match task_type {
+                fm_core::GanttTaskType::Done => "fm-gantt-task-done",
+                fm_core::GanttTaskType::Active => "fm-gantt-task-active",
+                fm_core::GanttTaskType::Critical => "fm-gantt-task-critical",
+                fm_core::GanttTaskType::Milestone => "fm-gantt-task-milestone",
+                fm_core::GanttTaskType::Normal => "fm-gantt-task-normal",
+            };
+            doc = doc.child(
+                Element::rect()
+                    .x(x)
+                    .y(y)
+                    .width(w)
+                    .height(h)
+                    .fill(fill)
+                    .stroke(&theme.colors.node_stroke)
+                    .stroke_width(1.0)
+                    .rx(3.0)
+                    .class("fm-gantt-task")
+                    .class(type_class),
+            );
+
+            // Progress bar overlay.
+            if let Some(task) = gantt_meta.tasks.get(node_idx)
+                && let Some(progress) = task.progress
+                && progress > 0.0
+            {
+                let progress_w = w * progress.clamp(0.0, 1.0);
+                doc = doc.child(
+                    Element::rect()
+                        .x(x)
+                        .y(y)
+                        .width(progress_w)
+                        .height(h)
+                        .fill(fill)
+                        .attr("fill-opacity", "0.6")
+                        .rx(3.0)
+                        .class("fm-gantt-progress"),
+                );
+            }
+        }
+
+        // Task label.
+        let label_text = ir
+            .nodes
+            .get(node_box.node_index)
+            .and_then(|n| n.label)
+            .and_then(|lid| ir.labels.get(lid.0))
+            .map(|l| l.text.as_str())
+            .or_else(|| ir.nodes.get(node_box.node_index).map(|n| n.id.as_str()))
+            .unwrap_or("");
+        if !label_text.is_empty() {
+            doc = doc.child(
+                Element::text()
+                    .x(x + w / 2.0)
+                    .y(y + h / 2.0 + config.font_size * 0.3)
+                    .content(label_text)
+                    .attr("text-anchor", "middle")
+                    .attr("dominant-baseline", "central")
+                    .attr_num("font-size", config.font_size * 0.8)
+                    .attr("font-family", &config.font_family)
+                    .fill(&theme.colors.text)
+                    .class("fm-gantt-task-label"),
+            );
+        }
+    }
+
+    // Dependency arrows.
+    for edge_path in &layout.edges {
+        if edge_path.points.len() >= 2 {
+            let pts: Vec<(f32, f32)> = edge_path
+                .points
+                .iter()
+                .map(|p| (p.x + offset_x, p.y + offset_y))
+                .collect();
+            let path_d = smooth_edge_path(&pts, edge_path.is_self_loop);
+            doc = doc.child(
+                Element::path()
+                    .d(&path_d)
+                    .fill("none")
+                    .stroke(&theme.colors.edge)
+                    .stroke_width(1.2)
+                    .attr("marker-end", "url(#arrowhead)")
+                    .class("fm-gantt-dependency"),
+            );
+        }
     }
 
     doc
