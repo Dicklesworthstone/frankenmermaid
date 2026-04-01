@@ -192,7 +192,8 @@ pub fn parse_mermaid_with_detection(
 ) -> ParseResult {
     let (content, front_matter_payload) = split_front_matter_block(input);
     let diagram_type = detection.diagram_type;
-    let mut builder = IrBuilder::new(diagram_type);
+    let input_lines = content.lines().count();
+    let mut builder = IrBuilder::with_capacity_hint(diagram_type, input_lines);
     builder.set_parse_mode(parse_mode);
 
     // Add detection warnings to builder

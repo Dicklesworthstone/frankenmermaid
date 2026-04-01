@@ -1148,7 +1148,7 @@ fn detect_reports_gitgraph_as_basic_support() {
     let json: serde_json::Value =
         serde_json::from_str(&stdout).expect("detect --json must print valid JSON");
     assert_eq!(json["diagram_type"], "gitGraph");
-    assert_eq!(json["support_level"], "basic");
+    assert_eq!(json["support_level"], "full");
 }
 
 #[test]
@@ -1164,7 +1164,7 @@ fn detect_reports_sankey_as_basic_support() {
     let json: serde_json::Value =
         serde_json::from_str(&stdout).expect("detect --json must print valid JSON");
     assert_eq!(json["diagram_type"], "sankey");
-    assert_eq!(json["support_level"], "basic");
+    assert_eq!(json["support_level"], "full");
     assert_eq!(json["confidence"], "high");
 }
 
@@ -1201,7 +1201,7 @@ fn detect_reports_block_beta_as_basic_support() {
     let json: serde_json::Value =
         serde_json::from_str(&stdout).expect("detect --json must print valid JSON");
     assert_eq!(json["diagram_type"], "block-beta");
-    assert_eq!(json["support_level"], "basic");
+    assert_eq!(json["support_level"], "full");
     assert_eq!(json["confidence"], "high");
 }
 
@@ -1218,7 +1218,7 @@ fn detect_accepts_block_alias_as_block_beta() {
     let json: serde_json::Value =
         serde_json::from_str(&stdout).expect("detect --json must print valid JSON");
     assert_eq!(json["diagram_type"], "block-beta");
-    assert_eq!(json["support_level"], "basic");
+    assert_eq!(json["support_level"], "full");
     assert_eq!(json["confidence"], "high");
 }
 
@@ -1283,7 +1283,7 @@ fn parse_full_reports_canonical_core_support_level() {
     let stdout = String::from_utf8(output.stdout).expect("stdout must be utf-8");
     let json: serde_json::Value =
         serde_json::from_str(&stdout).expect("parse --full must print valid JSON");
-    assert_eq!(json["meta"]["support_level"], "Partial");
+    assert_eq!(json["meta"]["support_level"], "Supported");
 }
 
 #[test]
@@ -1302,7 +1302,7 @@ fn detect_reports_architecture_as_basic_support() {
     let json: serde_json::Value =
         serde_json::from_str(&stdout).expect("detect --json must print valid JSON");
     assert_eq!(json["diagram_type"], "architecture-beta");
-    assert_eq!(json["support_level"], "basic");
+    assert_eq!(json["support_level"], "full");
 }
 
 #[test]
@@ -1322,7 +1322,7 @@ fn parse_summary_reports_architecture_counts_without_compatibility_fallback() {
         serde_json::from_str(&stdout).expect("parse summary must print valid JSON");
     assert_eq!(json["diagram_type"], "architecture-beta");
     assert_eq!(json["parse_mode"], "compat");
-    assert_eq!(json["support_level"], "Partial");
+    assert_eq!(json["support_level"], "Supported");
     assert_eq!(json["node_count"], 2);
     assert_eq!(json["edge_count"], 1);
     assert_eq!(json["diagnostic_count"], 0);
@@ -1345,7 +1345,7 @@ fn parse_summary_reports_sankey_counts_without_compatibility_fallback() {
         serde_json::from_str(&stdout).expect("parse summary must print valid JSON");
     assert_eq!(json["diagram_type"], "sankey");
     assert_eq!(json["parse_mode"], "compat");
-    assert_eq!(json["support_level"], "Partial");
+    assert_eq!(json["support_level"], "Supported");
     assert_eq!(json["node_count"], 3);
     assert_eq!(json["edge_count"], 2);
     assert_eq!(json["diagnostic_count"], 0);

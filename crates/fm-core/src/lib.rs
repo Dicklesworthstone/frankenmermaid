@@ -334,12 +334,10 @@ impl DiagramType {
     #[must_use]
     pub const fn support_level(self) -> MermaidSupportLevel {
         match self {
-            Self::Flowchart => MermaidSupportLevel::Supported,
-            Self::Sequence
+            Self::Flowchart
             | Self::Class
             | Self::State
             | Self::Er
-            | Self::Pie
             | Self::Gantt
             | Self::Journey
             | Self::Mindmap
@@ -351,13 +349,15 @@ impl DiagramType {
             | Self::PacketBeta
             | Self::Sankey
             | Self::ArchitectureBeta
+            | Self::Kanban => MermaidSupportLevel::Supported,
+            Self::Sequence
+            | Self::Pie
             | Self::C4Context
             | Self::C4Container
             | Self::C4Component
             | Self::C4Dynamic
             | Self::C4Deployment
-            | Self::XyChart
-            | Self::Kanban => MermaidSupportLevel::Partial,
+            | Self::XyChart => MermaidSupportLevel::Partial,
             Self::Unknown => MermaidSupportLevel::Unsupported,
         }
     }
@@ -365,9 +365,10 @@ impl DiagramType {
     #[must_use]
     pub const fn support_label(self) -> &'static str {
         match self {
-            Self::Flowchart => "full",
-            Self::Sequence | Self::Class | Self::State | Self::Er => "partial",
-            Self::Pie
+            Self::Flowchart
+            | Self::Class
+            | Self::State
+            | Self::Er
             | Self::Gantt
             | Self::Journey
             | Self::Mindmap
@@ -379,13 +380,14 @@ impl DiagramType {
             | Self::PacketBeta
             | Self::Sankey
             | Self::ArchitectureBeta
-            | Self::C4Context
+            | Self::Kanban => "full",
+            Self::Sequence | Self::Pie => "partial",
+            Self::C4Context
             | Self::C4Container
             | Self::C4Component
             | Self::C4Dynamic
             | Self::C4Deployment
-            | Self::XyChart
-            | Self::Kanban => "basic",
+            | Self::XyChart => "basic",
             Self::Unknown => "unknown",
         }
     }
@@ -3961,6 +3963,19 @@ impl MermaidDiagramIr {
         }
     }
 
+    /// Pre-size internal vectors for the estimated graph cardinalities.
+    ///
+    /// Call this after constructing an empty IR if you know the approximate
+    /// number of nodes, edges, and labels. Avoids repeated `Vec` reallocation
+    /// during incremental graph construction.
+    pub fn reserve_capacity(&mut self, nodes: usize, edges: usize, labels: usize) {
+        self.nodes.reserve(nodes);
+        self.edges.reserve(edges);
+        self.labels.reserve(labels);
+        self.graph.nodes.reserve(nodes);
+        self.graph.edges.reserve(edges);
+    }
+
     /// Add a diagnostic to this IR.
     pub fn add_diagnostic(&mut self, diagnostic: Diagnostic) {
         self.diagnostics.push(diagnostic);
@@ -6222,7 +6237,7 @@ mod tests {
         assert_eq!(ir.diagram_type, DiagramType::Class);
         assert_eq!(ir.meta.diagram_type, DiagramType::Class);
         assert_eq!(ir.meta.direction, GraphDirection::TB);
-        assert_eq!(ir.meta.support_level, MermaidSupportLevel::Partial);
+        assert_eq!(ir.meta.support_level, MermaidSupportLevel::Supported);
     }
 
     #[test]
@@ -6235,9 +6250,9 @@ mod tests {
 
         assert_eq!(
             DiagramType::GitGraph.support_level(),
-            MermaidSupportLevel::Partial
+            MermaidSupportLevel::Supported
         );
-        assert_eq!(DiagramType::GitGraph.support_label(), "basic");
+        assert_eq!(DiagramType::GitGraph.support_label(), "full");
 
         assert_eq!(
             DiagramType::C4Context.support_level(),
@@ -6247,9 +6262,9 @@ mod tests {
 
         assert_eq!(
             DiagramType::ArchitectureBeta.support_level(),
-            MermaidSupportLevel::Partial
+            MermaidSupportLevel::Supported
         );
-        assert_eq!(DiagramType::ArchitectureBeta.support_label(), "basic");
+        assert_eq!(DiagramType::ArchitectureBeta.support_label(), "full");
 
         assert_eq!(
             DiagramType::Unknown.support_level(),

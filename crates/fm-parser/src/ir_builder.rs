@@ -93,6 +93,31 @@ impl IrBuilder {
         }
     }
 
+    /// Create a builder with pre-sized IR vectors based on input line count.
+    ///
+    /// Heuristic: each non-empty input line produces ~0.5 nodes and ~0.3 edges.
+    pub(crate) fn with_capacity_hint(diagram_type: DiagramType, input_lines: usize) -> Self {
+        let estimated_nodes = (input_lines / 2).max(4);
+        let estimated_edges = (input_lines / 3).max(2);
+        let estimated_labels = estimated_nodes;
+        let mut ir = MermaidDiagramIr::empty(diagram_type);
+        ir.reserve_capacity(estimated_nodes, estimated_edges, estimated_labels);
+        Self {
+            ir,
+            node_index_by_id: BTreeMap::new(),
+            cluster_index_by_key: BTreeMap::new(),
+            subgraph_index_by_key: BTreeMap::new(),
+            label_index_by_text: BTreeMap::new(),
+            warnings: Vec::new(),
+            auto_created_nodes: Vec::new(),
+            activation_stacks: BTreeMap::new(),
+            current_participant_group: None,
+            fragment_stack: Vec::new(),
+            current_class: None,
+            state_stack: Vec::new(),
+        }
+    }
+
     pub(crate) const fn set_direction(&mut self, direction: GraphDirection) {
         self.ir.direction = direction;
         self.ir.meta.direction = direction;

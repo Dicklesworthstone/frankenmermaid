@@ -3,8 +3,8 @@
   "project": "frankenmermaid",
   "status_counts": {
     "experimental": 1,
-    "implemented": 11,
-    "partial": 23
+    "implemented": 25,
+    "partial": 9
   },
   "claims": [
     {
@@ -67,7 +67,7 @@
       "id": "diagram-type/class",
       "category": "diagram_type",
       "title": "Support class diagrams",
-      "status": "partial",
+      "status": "implemented",
       "advertised_in": [
         "README.md#supported-diagram-types"
       ],
@@ -88,14 +88,14 @@
         }
       ],
       "notes": [
-        "README advertises this family; current code marks it as partial capability"
+        "README advertises this family; current code marks it as full capability"
       ]
     },
     {
       "id": "diagram-type/state",
       "category": "diagram_type",
       "title": "Support state diagrams",
-      "status": "partial",
+      "status": "implemented",
       "advertised_in": [
         "README.md#supported-diagram-types"
       ],
@@ -116,14 +116,14 @@
         }
       ],
       "notes": [
-        "README advertises this family; current code marks it as partial capability"
+        "README advertises this family; current code marks it as full capability"
       ]
     },
     {
       "id": "diagram-type/er",
       "category": "diagram_type",
       "title": "Support er diagrams",
-      "status": "partial",
+      "status": "implemented",
       "advertised_in": [
         "README.md#supported-diagram-types"
       ],
@@ -144,7 +144,7 @@
         }
       ],
       "notes": [
-        "README advertises this family; current code marks it as partial capability"
+        "README advertises this family; current code marks it as full capability"
       ]
     },
     {
@@ -291,7 +291,7 @@
       "id": "diagram-type/architecture-beta",
       "category": "diagram_type",
       "title": "Support architecture-beta diagrams",
-      "status": "partial",
+      "status": "implemented",
       "advertised_in": [
         "README.md#supported-diagram-types"
       ],
@@ -312,14 +312,14 @@
         }
       ],
       "notes": [
-        "README advertises this family; current code marks it as basic capability"
+        "README advertises this family; current code marks it as full capability"
       ]
     },
     {
       "id": "diagram-type/block-beta",
       "category": "diagram_type",
       "title": "Support block-beta diagrams",
-      "status": "partial",
+      "status": "implemented",
       "advertised_in": [
         "README.md#supported-diagram-types"
       ],
@@ -340,14 +340,14 @@
         }
       ],
       "notes": [
-        "README advertises this family; current code marks it as basic capability"
+        "README advertises this family; current code marks it as full capability"
       ]
     },
     {
       "id": "diagram-type/gantt",
       "category": "diagram_type",
       "title": "Support gantt diagrams",
-      "status": "partial",
+      "status": "implemented",
       "advertised_in": [
         "README.md#supported-diagram-types"
       ],
@@ -368,14 +368,14 @@
         }
       ],
       "notes": [
-        "README advertises this family; current code marks it as basic capability"
+        "README advertises this family; current code marks it as full capability"
       ]
     },
     {
       "id": "diagram-type/timeline",
       "category": "diagram_type",
       "title": "Support timeline diagrams",
-      "status": "partial",
+      "status": "implemented",
       "advertised_in": [
         "README.md#supported-diagram-types"
       ],
@@ -396,14 +396,14 @@
         }
       ],
       "notes": [
-        "README advertises this family; current code marks it as basic capability"
+        "README advertises this family; current code marks it as full capability"
       ]
     },
     {
       "id": "diagram-type/journey",
       "category": "diagram_type",
       "title": "Support journey diagrams",
-      "status": "partial",
+      "status": "implemented",
       "advertised_in": [
         "README.md#supported-diagram-types"
       ],
@@ -424,14 +424,14 @@
         }
       ],
       "notes": [
-        "README advertises this family; current code marks it as basic capability"
+        "README advertises this family; current code marks it as full capability"
       ]
     },
     {
       "id": "diagram-type/gitGraph",
       "category": "diagram_type",
       "title": "Support gitGraph diagrams",
-      "status": "partial",
+      "status": "implemented",
       "advertised_in": [
         "README.md#supported-diagram-types"
       ],
@@ -452,14 +452,14 @@
         }
       ],
       "notes": [
-        "README advertises this family; current code marks it as basic capability"
+        "README advertises this family; current code marks it as full capability"
       ]
     },
     {
       "id": "diagram-type/sankey",
       "category": "diagram_type",
       "title": "Support sankey diagrams",
-      "status": "partial",
+      "status": "implemented",
       "advertised_in": [
         "README.md#supported-diagram-types"
       ],
@@ -480,14 +480,14 @@
         }
       ],
       "notes": [
-        "README advertises this family; current code marks it as basic capability"
+        "README advertises this family; current code marks it as full capability"
       ]
     },
     {
       "id": "diagram-type/mindmap",
       "category": "diagram_type",
       "title": "Support mindmap diagrams",
-      "status": "partial",
+      "status": "implemented",
       "advertised_in": [
         "README.md#supported-diagram-types"
       ],
@@ -508,7 +508,7 @@
         }
       ],
       "notes": [
-        "README advertises this family; current code marks it as basic capability"
+        "README advertises this family; current code marks it as full capability"
       ]
     },
     {
@@ -536,14 +536,14 @@
         }
       ],
       "notes": [
-        "README advertises this family; current code marks it as basic capability"
+        "README advertises this family; current code marks it as partial capability"
       ]
     },
     {
       "id": "diagram-type/quadrantChart",
       "category": "diagram_type",
       "title": "Support quadrantChart diagrams",
-      "status": "partial",
+      "status": "implemented",
       "advertised_in": [
         "README.md#supported-diagram-types"
       ],
@@ -564,7 +564,7 @@
         }
       ],
       "notes": [
-        "README advertises this family; current code marks it as basic capability"
+        "README advertises this family; current code marks it as full capability"
       ]
     },
     {
@@ -599,7 +599,7 @@
       "id": "diagram-type/requirementDiagram",
       "category": "diagram_type",
       "title": "Support requirementDiagram diagrams",
-      "status": "partial",
+      "status": "implemented",
       "advertised_in": [
         "README.md#supported-diagram-types"
       ],
@@ -620,14 +620,14 @@
         }
       ],
       "notes": [
-        "README advertises this family; current code marks it as basic capability"
+        "README advertises this family; current code marks it as full capability"
       ]
     },
     {
       "id": "diagram-type/packet-beta",
       "category": "diagram_type",
       "title": "Support packet-beta diagrams",
-      "status": "partial",
+      "status": "implemented",
       "advertised_in": [
         "README.md#supported-diagram-types"
       ],
@@ -648,7 +648,7 @@
         }
       ],
       "notes": [
-        "README advertises this family; current code marks it as basic capability"
+        "README advertises this family; current code marks it as full capability"
       ]
     },
     {

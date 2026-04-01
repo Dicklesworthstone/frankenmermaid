@@ -115,27 +115,27 @@ fm-cli render diagrams/process.mmd --format svg --theme dark --output out/proces
 |--------------|----------------|
 | `flowchart` | Implemented |
 | `sequence` | Partial |
-| `class` | Partial |
-| `state` | Partial |
-| `er` | Partial |
+| `class` | Implemented |
+| `state` | Implemented |
+| `er` | Implemented |
 | `C4Context` | Partial |
 | `C4Container` | Partial |
 | `C4Component` | Partial |
 | `C4Dynamic` | Partial |
 | `C4Deployment` | Partial |
-| `architecture-beta` | Partial |
-| `block-beta` | Partial |
-| `gantt` | Partial |
-| `timeline` | Partial |
-| `journey` | Partial |
-| `gitGraph` | Partial |
-| `sankey` | Partial |
-| `mindmap` | Partial |
+| `architecture-beta` | Implemented |
+| `block-beta` | Implemented |
+| `gantt` | Implemented |
+| `timeline` | Implemented |
+| `journey` | Implemented |
+| `gitGraph` | Implemented |
+| `sankey` | Implemented |
+| `mindmap` | Implemented |
 | `pie` | Partial |
-| `quadrantChart` | Partial |
+| `quadrantChart` | Implemented |
 | `xyChart` | Partial |
-| `requirementDiagram` | Partial |
-| `packet-beta` | Partial |
+| `requirementDiagram` | Implemented |
+| `packet-beta` | Implemented |
 <!-- END GENERATED: supported-diagram-types -->
 
 **Key:** Full = complete syntax coverage. Basic = core syntax works, advanced features in progress. Minimal = parsed but rendering needs dedicated work.
@@ -1800,4 +1800,6 @@ MIT License (with OpenAI/Anthropic Rider). See [LICENSE](LICENSE).
 | WASM API renders SVG | Implemented | 1 evidence refs |
 | WASM API exposes capability matrix metadata | Implemented | 1 evidence refs |
 | Canvas rendering backend | Implemented | 1 evidence refs |
+<!-- END GENERATED: runtime-capability-metadata -->
+s |
 <!-- END GENERATED: runtime-capability-metadata -->
