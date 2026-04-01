@@ -15,13 +15,20 @@ jobs:
       benchmark_command: ${{ steps.parse.outputs.benchmark_command }}
       benchmark_warn_pct: ${{ steps.parse.outputs.benchmark_warn_pct }}
       benchmark_fail_pct: ${{ steps.parse.outputs.benchmark_fail_pct }}
+      benchmark_sample_count: ${{ steps.parse.outputs.benchmark_sample_count }}
+      benchmark_baseline_path: ${{ steps.parse.outputs.benchmark_baseline_path }}
+      invariant_command: ${{ steps.parse.outputs.invariant_command }}
       determinism_command: ${{ steps.parse.outputs.determinism_command }}
+      degradation_command: ${{ steps.parse.outputs.degradation_command }}
       golden_enabled: ${{ steps.parse.outputs.golden_enabled }}
       property_enabled: ${{ steps.parse.outputs.property_enabled }}
+      invariant_enabled: ${{ steps.parse.outputs.invariant_enabled }}
       performance_enabled: ${{ steps.parse.outputs.performance_enabled }}
       determinism_enabled: ${{ steps.parse.outputs.determinism_enabled }}
       evidence_enabled: ${{ steps.parse.outputs.evidence_enabled }}
       decision_enabled: ${{ steps.parse.outputs.decision_enabled }}
+      degradation_enabled: ${{ steps.parse.outputs.degradation_enabled }}
+      override_policy_enabled: ${{ steps.parse.outputs.override_policy_enabled }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,13 +48,20 @@ jobs:
               "benchmark_command": config["performance_regression"]["benchmark_command"],
               "benchmark_warn_pct": str(config["performance_regression"]["warn_threshold_pct"]),
               "benchmark_fail_pct": str(config["performance_regression"]["fail_threshold_pct"]),
+              "benchmark_sample_count": str(config["performance_regression"]["sample_count"]),
+              "benchmark_baseline_path": config["performance_regression"]["baseline_path"],
+              "invariant_command": config["invariant_proof"]["command"],
               "determinism_command": config["determinism"]["command"],
+              "degradation_command": config["degradation"]["command"],
               "golden_enabled": str(config["golden_checksum"]["enabled"]).lower(),
               "property_enabled": str(config["property_test"]["enabled"]).lower(),
+              "invariant_enabled": str(config["invariant_proof"]["enabled"]).lower(),
               "performance_enabled": str(config["performance_regression"]["enabled"]).lower(),
               "determinism_enabled": str(config["determinism"]["enabled"]).lower(),
               "evidence_enabled": str(config["evidence_ledger"]["enabled"]).lower(),
               "decision_enabled": str(config["decision_contract"]["enabled"]).lower(),
+              "degradation_enabled": str(config["degradation"]["enabled"]).lower(),
+              "override_policy_enabled": str(config["release_gate_overrides"]["enabled"]).lower(),
           }
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
               for key, value in outputs.items():
@@ -134,6 +148,35 @@ jobs:
 
       - name: Run property-heavy workspace tests
         run: cargo test --workspace --all-targets -- --nocapture
+
+  invariant-proof-guard:
+    name: Invariant Proof Guard
+    needs: quality-gate-config
+    if: needs.quality-gate-config.outputs.invariant_enabled == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache Cargo Artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run invariant proof harness
+        shell: bash
+        run: |
+          mkdir -p artifacts/evidence/slo
+          ${{ needs.quality-gate-config.outputs.invariant_command }} \
+            | tee artifacts/evidence/slo/invariant-proof.log
+
+      - name: Upload invariant proof artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: invariant-proof-log
+          path: artifacts/evidence/slo/invariant-proof.log
+          retention-days: 90
 
   determinism-guard:
     name: Determinism Guard
@@ -292,26 +335,151 @@ jobs:
       - name: Cache Cargo Artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Run benchmark evidence command
-        run: ${{ needs.quality-gate-config.outputs.benchmark_command }}
+      - name: Collect repeated benchmark samples
+        shell: bash
+        run: |
+          mkdir -p artifacts/evidence/perf
+          : > artifacts/evidence/perf/layout-benchmark.log
+          for run in $(seq 1 "${{ needs.quality-gate-config.outputs.benchmark_sample_count }}"); do
+            echo "# benchmark_run=${run}" | tee -a artifacts/evidence/perf/layout-benchmark.log
+            ${{ needs.quality-gate-config.outputs.benchmark_command }} \
+              | tee -a artifacts/evidence/perf/layout-benchmark.log
+          done
+
+      - name: Summarize statistical benchmark evidence
+        shell: bash
+        run: |
+          cargo run -p fm-cli --bin evidence -- --root . perf-report \
+            --input artifacts/evidence/perf/layout-benchmark.log \
+            --out-dir artifacts/evidence/perf \
+            --baseline "${{ needs.quality-gate-config.outputs.benchmark_baseline_path }}" \
+            --warn-threshold-pct "${{ needs.quality-gate-config.outputs.benchmark_warn_pct }}" \
+            --fail-threshold-pct "${{ needs.quality-gate-config.outputs.benchmark_fail_pct }}"
+
+      - name: Upload performance evidence artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-benchmark-evidence
+          path: artifacts/evidence/perf
+          retention-days: 90
+
+  degradation-guard:
+    name: Degradation Guard
+    needs: quality-gate-config
+    if: needs.quality-gate-config.outputs.degradation_enabled == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache Cargo Artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run degradation SLO harness
+        shell: bash
+        run: |
+          mkdir -p artifacts/evidence/slo
+          ${{ needs.quality-gate-config.outputs.degradation_command }} \
+            | tee artifacts/evidence/slo/degradation.log
+
+      - name: Upload degradation artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: degradation-slo-log
+          path: artifacts/evidence/slo/degradation.log
+          retention-days: 90
 
   evidence-ledger-guard:
     name: Evidence Ledger Guard
     needs: quality-gate-config
     if: needs.quality-gate-config.outputs.evidence_enabled == 'true'
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Verify evidence corpus exists
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache Cargo Artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Capture SVG golden evidence log
         shell: bash
         run: |
-          test -d evidence
-          test -f evidence/TEMPLATE.md
-          test -d evidence/contracts
-          find evidence/contracts -maxdepth 1 -name '*.md' | grep -q .
+          mkdir -p artifacts/evidence/logs artifacts/evidence/proofs
+          cargo test -p fm-cli --test golden_svg_test svg_golden_snapshots_are_stable -- --nocapture \
+            | tee artifacts/evidence/logs/svg-golden.log
+
+      - name: Capture layout golden evidence log
+        shell: bash
+        run: |
+          cargo test -p fm-cli --test golden_layout_test -- --nocapture \
+            | tee artifacts/evidence/logs/layout-golden.log
+
+      - name: Capture determinism evidence log
+        shell: bash
+        run: |
+          ${{ needs.quality-gate-config.outputs.determinism_command }} \
+            | tee artifacts/evidence/logs/determinism.log
+
+      - name: Emit x86_64 determinism manifest
+        shell: bash
+        run: |
+          cargo run -p fm-cli -- determinism-manifest \
+            > artifacts/evidence/proofs/determinism-manifest-x86_64.json
+
+      - name: Refresh ledger report with bead coverage
+        shell: bash
+        run: |
+          cargo run -p fm-cli --bin evidence -- --root . report --check-beads --fail-on-missing-beads
+
+      - name: Build release evidence bundle
+        shell: bash
+        run: |
+          bundle_dir="$(
+            cargo run -p fm-cli --bin evidence -- --root . bundle \
+              --out-dir artifacts/release-evidence \
+              --release-ref "${GITHUB_REF_NAME:-${GITHUB_SHA}}" \
+              --retention-days 90 \
+              --artifact artifacts/evidence/logs/svg-golden.log \
+              --artifact artifacts/evidence/logs/layout-golden.log \
+              --artifact artifacts/evidence/logs/determinism.log \
+              --artifact artifacts/evidence/proofs/determinism-manifest-x86_64.json
+          )"
+          echo "bundle_dir=$bundle_dir" >> "$GITHUB_ENV"
+          echo "bundle_name=$(basename "$bundle_dir")" >> "$GITHUB_ENV"
+
+      - name: Verify release evidence bundle integrity
+        shell: bash
+        run: |
+          cargo run -p fm-cli --bin evidence -- --root . verify-bundle \
+            --manifest "${bundle_dir}/manifest.json" \
+            --require-kind ledger-report \
+            --require-kind ledger-entry \
+            --require-kind decision-contract \
+            --require-kind ci-artifact
+
+      - name: Publish release evidence bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.bundle_name }}
+          path: ${{ env.bundle_dir }}
+          retention-days: 90
+
+      - name: Summarize release evidence bundle
+        shell: bash
+        run: |
+          {
+            echo "### Evidence Bundle"
+            echo ""
+            echo "- Artifact path: \`${bundle_dir}\`"
+            echo "- Retention: \`90 days\`"
+            echo "- Manifest: \`${bundle_dir}/manifest.json\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   decision-contract-guard:
     name: Decision Contract Guard
@@ -328,6 +496,35 @@ jobs:
         run: |
           find evidence/contracts -maxdepth 1 -name '*.md' | grep -q .
 
+  release-gate-override-guard:
+    name: Release Gate Override Guard
+    needs: quality-gate-config
+    if: needs.quality-gate-config.outputs.override_policy_enabled == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache Cargo Artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Validate release-gate override ledger
+        shell: bash
+        run: |
+          mkdir -p artifacts/evidence/policies
+          cargo run -p fm-cli --bin evidence -- --root . verify-overrides \
+            > artifacts/evidence/policies/release-gate-override-summary.json
+
+      - name: Upload override summary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-gate-override-summary
+          path: artifacts/evidence/policies/release-gate-override-summary.json
+          retention-days: 90
+
   quality-summary:
     name: Quality Summary
     needs:
@@ -335,13 +532,16 @@ jobs:
       - core-check
       - golden-checksum-guard
       - property-test-guard
+      - invariant-proof-guard
       - determinism-guard
       - cross-platform-determinism-native
       - cross-platform-determinism-wasm
       - cross-platform-determinism-compare
       - performance-regression-guard
+      - degradation-guard
       - evidence-ledger-guard
       - decision-contract-guard
+      - release-gate-override-guard
       - wasm-build
       - coverage
     if: always()
@@ -358,37 +558,134 @@ jobs:
             echo "| core-check | ${{ needs.core-check.result }} |"
             echo "| golden-checksum-guard | ${{ needs.golden-checksum-guard.result }} |"
             echo "| property-test-guard | ${{ needs.property-test-guard.result }} |"
+            echo "| invariant-proof-guard | ${{ needs.invariant-proof-guard.result }} |"
             echo "| determinism-guard | ${{ needs.determinism-guard.result }} |"
             echo "| cross-platform-determinism-native | ${{ needs.cross-platform-determinism-native.result }} |"
             echo "| cross-platform-determinism-wasm | ${{ needs.cross-platform-determinism-wasm.result }} |"
             echo "| cross-platform-determinism-compare | ${{ needs.cross-platform-determinism-compare.result }} |"
             echo "| performance-regression-guard | ${{ needs.performance-regression-guard.result }} |"
+            echo "| degradation-guard | ${{ needs.degradation-guard.result }} |"
             echo "| evidence-ledger-guard | ${{ needs.evidence-ledger-guard.result }} |"
             echo "| decision-contract-guard | ${{ needs.decision-contract-guard.result }} |"
+            echo "| release-gate-override-guard | ${{ needs.release-gate-override-guard.result }} |"
             echo "| wasm-build | ${{ needs.wasm-build.result }} |"
             echo "| coverage | ${{ needs.coverage.result }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache Cargo Artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Generate release SLO summary
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import subprocess
+
+          results = {
+              "core-check": "${{ needs.core-check.result }}",
+              "golden-checksum-guard": "${{ needs.golden-checksum-guard.result }}",
+              "property-test-guard": "${{ needs.property-test-guard.result }}",
+              "invariant-proof-guard": "${{ needs.invariant-proof-guard.result }}",
+              "determinism-guard": "${{ needs.determinism-guard.result }}",
+              "cross-platform-determinism-native": "${{ needs.cross-platform-determinism-native.result }}",
+              "cross-platform-determinism-wasm": "${{ needs.cross-platform-determinism-wasm.result }}",
+              "cross-platform-determinism-compare": "${{ needs.cross-platform-determinism-compare.result }}",
+              "performance-regression-guard": "${{ needs.performance-regression-guard.result }}",
+              "degradation-guard": "${{ needs.degradation-guard.result }}",
+              "release-gate-override-guard": "${{ needs.release-gate-override-guard.result }}",
+              "wasm-build": "${{ needs.wasm-build.result }}",
+              "coverage": "${{ needs.coverage.result }}",
+          }
+          summary = json.loads(
+              subprocess.check_output(
+                  [
+                      "cargo",
+                      "run",
+                      "-p",
+                      "fm-cli",
+                      "--bin",
+                      "evidence",
+                      "--",
+                      "--root",
+                      ".",
+                      "verify-overrides",
+                  ],
+                  text=True,
+              )
+          )
+          active_gates = set(summary["active_gates"])
+          overridden = []
+          failures = []
+          passed = []
+          for gate, result in results.items():
+              if result == "success":
+                  passed.append(gate)
+                  continue
+              if gate in active_gates:
+                  overridden.append(gate)
+              else:
+                  failures.append(gate)
+
+          slo_summary = {
+              "policy_id": summary["policy_id"],
+              "active_override_gates": sorted(active_gates),
+              "passed_gates": passed,
+              "overridden_failing_gates": overridden,
+              "uncovered_failing_gates": failures,
+              "release_blocking_pass": len(failures) == 0,
+              "gate_results": results,
+              "threshold_notes": [
+                  "All blocking quality gates must report success unless a valid active override explicitly scopes the failing gate.",
+                  "Invariant proof guard supplies correctness evidence.",
+                  "Determinism guards supply repeated-run and cross-platform drift evidence.",
+                  "Performance regression guard supplies benchmark budget evidence.",
+                  "Degradation guard supplies pressure-tier graceful-degradation evidence.",
+              ],
+          }
+          out_dir = Path("artifacts/evidence/slo")
+          out_dir.mkdir(parents=True, exist_ok=True)
+          out_path = out_dir / "release-slo-summary.json"
+          out_path.write_text(json.dumps(slo_summary, indent=2), encoding="utf-8")
+          print(json.dumps(slo_summary, indent=2))
+          PY
+
+      - name: Upload release SLO summary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-slo-summary
+          path: artifacts/evidence/slo/release-slo-summary.json
+          retention-days: 90
+
       - name: Enforce blocking gate status
         shell: bash
         run: |
-          failures=0
-          for result in \
-            "${{ needs.core-check.result }}" \
-            "${{ needs.golden-checksum-guard.result }}" \
-            "${{ needs.property-test-guard.result }}" \
-            "${{ needs.determinism-guard.result }}" \
-            "${{ needs.cross-platform-determinism-native.result }}" \
-            "${{ needs.cross-platform-determinism-wasm.result }}" \
-            "${{ needs.cross-platform-determinism-compare.result }}" \
-            "${{ needs.performance-regression-guard.result }}" \
-            "${{ needs.wasm-build.result }}" \
-            "${{ needs.coverage.result }}"; do
-            if [ "$result" != "success" ]; then
-              failures=1
-            fi
-          done
-          exit "$failures"
+          python3 - <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          summary = json.loads(
+              Path("artifacts/evidence/slo/release-slo-summary.json").read_text()
+          )
+          print("Active override gates:", summary["active_override_gates"])
+          if summary["overridden_failing_gates"]:
+              print("Overridden failing gates:", summary["overridden_failing_gates"])
+          if summary["uncovered_failing_gates"]:
+              print(
+                  "Blocking gate failures without valid override:",
+                  summary["uncovered_failing_gates"],
+                  file=sys.stderr,
+              )
+              raise SystemExit(1)
+          PY
 
   wasm-build:
     name: WASM Build

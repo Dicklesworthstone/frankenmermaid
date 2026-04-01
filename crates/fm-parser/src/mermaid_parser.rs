@@ -239,6 +239,13 @@ pub fn parse_mermaid_with_detection(
     // Extract accessibility directives (accTitle / accDescr) from any diagram type.
     extract_accessibility_directives(content, &mut builder);
 
+    // Extract style/classDef/linkStyle directives for all diagram types.
+    // (Previously only called from parse_flowchart; now runs generically
+    // so that class, state, block-beta, etc. all support styling.)
+    if diagram_type != DiagramType::Flowchart {
+        extract_style_directives(content, &mut builder);
+    }
+
     if builder.node_count() == 0 && builder.edge_count() == 0 {
         builder.add_warning("No parseable nodes or edges were found");
     }
@@ -2707,6 +2714,11 @@ fn parse_requirement(input: &str, builder: &mut IrBuilder) {
 fn parse_mindmap(input: &str, builder: &mut IrBuilder) {
     let mut ancestry: Vec<(usize, fm_core::IrNodeId)> = Vec::new();
     let mut last_node_id: Option<fm_core::IrNodeId> = None;
+    // Track which top-level branch index each node belongs to.
+    let mut root_seen = false;
+    let mut branch_index: usize = 0;
+    // Map from first-level children: depth of root, branch counter.
+    let mut root_depth: Option<usize> = None;
 
     for (index, line) in input.lines().enumerate() {
         let line_number = index + 1;
@@ -2736,8 +2748,6 @@ fn parse_mindmap(input: &str, builder: &mut IrBuilder) {
             if let Some(node_id) = last_node_id {
                 let span = span_for(line_number, line);
                 for class in classes.split_whitespace() {
-                    // Use a placeholder node key since we already have the id
-                    // The add_class_to_node function will look up by key
                     if let Some(node) = builder.get_node_by_id(node_id) {
                         let key = node.id.clone();
                         builder.add_class_to_node(&key, class, span);
@@ -2775,6 +2785,22 @@ fn parse_mindmap(input: &str, builder: &mut IrBuilder) {
         }
 
         ancestry.push((depth, node_id));
+
+        // Assign branch colors: root node is branch 0, each first-level child
+        // increments the branch index.
+        if !root_seen {
+            root_seen = true;
+            root_depth = Some(depth);
+            builder.add_class_to_node(&node.id, "mindmap-root", span);
+        } else if let Some(rd) = root_depth {
+            // First-level children: one indent deeper than root.
+            if ancestry.len() <= 2 && depth > rd {
+                branch_index += 1;
+            }
+        }
+        // Apply branch color class to all nodes.
+        let branch_class = format!("mindmap-branch-{}", branch_index % 8);
+        builder.add_class_to_node(&node.id, &branch_class, span);
     }
 }
 
@@ -3085,11 +3111,28 @@ fn parse_requirement_relation(
     source_line: &str,
     builder: &mut IrBuilder,
 ) -> bool {
+    // Mermaid requirement relationship syntax:
+    //   `A - satisfies -> B`  or  `A -> B`
+    // The relationship type label appears between `- ` and ` ->`.
+
     let Some((left_raw, right_raw)) = statement.split_once("->") else {
         return false;
     };
 
-    let left_id = left_raw
+    // Extract relationship type from `A - type ` prefix.
+    let (left_part, relation_label) = if let Some(dash_pos) = left_raw.rfind(" - ") {
+        let rel_type = left_raw[dash_pos + 3..].trim();
+        let left = left_raw[..dash_pos].trim();
+        if rel_type.is_empty() {
+            (left_raw.trim(), None)
+        } else {
+            (left, Some(rel_type))
+        }
+    } else {
+        (left_raw.trim(), None)
+    };
+
+    let left_id = left_part
         .split_whitespace()
         .next()
         .map(normalize_identifier)
@@ -3103,12 +3146,19 @@ fn parse_requirement_relation(
         return false;
     }
 
+    // Map relationship type to arrow style for visual differentiation.
+    let arrow = match relation_label {
+        Some("contains") => ArrowType::ThickArrow,
+        Some("copies" | "derives" | "refines") => ArrowType::DottedArrow,
+        _ => ArrowType::Arrow,
+    };
+
     let span = span_for(line_number, source_line);
     let from = builder.intern_node(&left_id, None, NodeShape::Rect, span);
     let to = builder.intern_node(&right_id, None, NodeShape::Rect, span);
     match (from, to) {
         (Some(from_id), Some(to_id)) => {
-            builder.push_edge(from_id, to_id, ArrowType::Arrow, None, span);
+            builder.push_edge(from_id, to_id, arrow, relation_label, span);
             true
         }
         _ => false,
@@ -4774,8 +4824,14 @@ fn parse_architecture(input: &str, builder: &mut IrBuilder) {
                 .label
                 .as_deref()
                 .or(Some(declaration.id.as_str()));
-            let Some(node_id) = builder.intern_node(&declaration.id, label, NodeShape::Rect, span)
-            else {
+            // Map well-known icons to appropriate shapes.
+            let shape = match declaration.icon.as_deref() {
+                Some("database" | "db" | "disk") => NodeShape::Cylinder,
+                Some("cloud") => NodeShape::Rounded,
+                Some("server" | "compute") => NodeShape::Rect,
+                _ => NodeShape::Rect,
+            };
+            let Some(node_id) = builder.intern_node(&declaration.id, label, shape, span) else {
                 builder.add_warning(format!(
                     "Line {line_number}: invalid architecture service declaration: {trimmed}"
                 ));
@@ -4864,6 +4920,8 @@ struct GitGraphState {
     current_branch: String,
     /// Auto-generated commit counter for unnamed commits
     commit_counter: usize,
+    /// Ordered list of branch names for color indexing.
+    branch_order: Vec<String>,
 }
 
 impl GitGraphState {
@@ -4872,7 +4930,16 @@ impl GitGraphState {
             branches: BTreeMap::new(),
             current_branch: "main".to_string(),
             commit_counter: 0,
+            branch_order: vec!["main".to_string()],
         }
+    }
+
+    /// Get the color index for a branch (stable ordering).
+    fn branch_index(&self, branch: &str) -> usize {
+        self.branch_order
+            .iter()
+            .position(|b| b == branch)
+            .unwrap_or(0)
     }
 
     fn next_commit_id(&mut self) -> String {
@@ -5457,11 +5524,34 @@ fn parse_git_commit(
         (None, None) => None,
     };
 
+    // Map commit type to shape: REVERSE uses filled circle, HIGHLIGHT uses double circle.
+    let shape = match options.commit_type.as_deref() {
+        Some("REVERSE") => NodeShape::FilledCircle,
+        Some("HIGHLIGHT") => NodeShape::DoubleCircle,
+        _ => NodeShape::Circle,
+    };
+
     // Create the commit node
-    let Some(node_id) = builder.intern_node(&commit_id, label.as_deref(), NodeShape::Circle, span)
-    else {
+    let Some(node_id) = builder.intern_node(&commit_id, label.as_deref(), shape, span) else {
         return;
     };
+
+    // Apply commit type CSS class.
+    if let Some(ref commit_type) = options.commit_type {
+        builder.add_class_to_node(
+            &commit_id,
+            &format!("git-commit-{}", commit_type.to_ascii_lowercase()),
+            span,
+        );
+    }
+
+    // Apply branch color class.
+    let branch_index = state.branch_index(&state.current_branch.clone());
+    builder.add_class_to_node(
+        &commit_id,
+        &format!("git-branch-{}", branch_index % 8),
+        span,
+    );
 
     // Link from current branch head if it exists
     if let Some(parent_id) = state.current_head() {
@@ -5477,6 +5567,7 @@ struct GitCommitOptions {
     id: Option<String>,
     msg: Option<String>,
     tag: Option<String>,
+    commit_type: Option<String>,
 }
 
 struct GitMergeOptions {
@@ -5490,6 +5581,7 @@ fn parse_git_commit_options(rest: &str) -> GitCommitOptions {
         id: None,
         msg: None,
         tag: None,
+        commit_type: None,
     };
 
     let trimmed = rest.trim();
@@ -5529,13 +5621,16 @@ fn parse_git_commit_options(rest: &str) -> GitCommitOptions {
             continue;
         }
 
-        // Try to match type: VALUE (we acknowledge but don't store it for now)
+        // Try to match type: VALUE (NORMAL, REVERSE, HIGHLIGHT)
         if let Some(rest_after_type) = remaining.strip_prefix("type:") {
             let type_rest = rest_after_type.trim_start();
-            // Skip type value (NORMAL, REVERSE, HIGHLIGHT)
             let end = type_rest
                 .find(|c: char| c.is_whitespace())
                 .unwrap_or(type_rest.len());
+            let type_value = type_rest[..end].trim();
+            if !type_value.is_empty() {
+                options.commit_type = Some(type_value.to_ascii_uppercase());
+            }
             remaining = &type_rest[end..];
             continue;
         }
@@ -5606,6 +5701,11 @@ fn parse_git_branch(
     if normalized.is_empty() {
         builder.add_warning(format!("Line {line_number}: empty branch name in gitGraph"));
         return;
+    }
+
+    // Track branch ordering for color assignment.
+    if !state.branch_order.contains(&normalized) {
+        state.branch_order.push(normalized.clone());
     }
 
     // When creating a branch, it inherits the current head
@@ -7788,6 +7888,20 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
                             style.to_string(),
                             span,
                         );
+                    }
+                }
+            }
+        } else if let Some(rest) = line.strip_prefix("class ") {
+            // class nodeA,nodeB className — assign CSS class to nodes.
+            let rest = rest.trim();
+            if let Some((nodes_raw, class_name)) = rest.rsplit_once(' ') {
+                let class_name = class_name.trim();
+                if !class_name.is_empty() {
+                    for node_key in nodes_raw.split(',') {
+                        let node_key = node_key.trim();
+                        if !node_key.is_empty() {
+                            builder.add_class_to_node(node_key, class_name, span);
+                        }
                     }
                 }
             }
@@ -11944,5 +12058,246 @@ Rel_Back(db, app, "Responds")"#,
         assert!(label.is_none());
         assert!(guard.is_none());
         assert!(action.is_none());
+    }
+
+    // ── Requirement diagram tests ─────────────────────────────────────
+
+    #[test]
+    fn requirement_relation_captures_type_label() {
+        let parsed = parse_mermaid(
+            "requirementDiagram\n  requirement MyReq {\n    id: REQ-001\n    text: Must do X\n    risk: High\n    verifymethod: Test\n  }\n  element MyElem {\n  }\n  MyElem - satisfies -> MyReq",
+        );
+        assert!(!parsed.ir.edges.is_empty(), "should have edges");
+        let edge = &parsed.ir.edges[0];
+        assert!(edge.label.is_some(), "edge should have relation label");
+        let label_text = edge
+            .label
+            .and_then(|lid| parsed.ir.labels.get(lid.0))
+            .map(|l| l.text.as_str());
+        assert_eq!(label_text, Some("satisfies"));
+    }
+
+    #[test]
+    fn requirement_relation_without_type() {
+        let parsed = parse_mermaid(
+            "requirementDiagram\n  requirement A {\n  }\n  element B {\n  }\n  B -> A",
+        );
+        assert!(!parsed.ir.edges.is_empty());
+        let edge = &parsed.ir.edges[0];
+        assert!(edge.label.is_none(), "plain -> should have no label");
+    }
+
+    #[test]
+    fn requirement_meta_risk_preserved() {
+        let parsed = parse_mermaid(
+            "requirementDiagram\n  requirement MyReq {\n    id: R1\n    text: Test\n    risk: High\n    verifymethod: Analysis\n  }",
+        );
+        let node = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|n| n.id == "MyReq")
+            .expect("should find MyReq");
+        let meta = node.requirement_meta.as_ref().expect("should have meta");
+        assert_eq!(meta.risk.as_deref(), Some("High"));
+        assert_eq!(meta.verify_method.as_deref(), Some("Analysis"));
+    }
+
+    #[test]
+    fn requirement_contains_uses_thick_arrow() {
+        let parsed = parse_mermaid(
+            "requirementDiagram\n  requirement A {\n  }\n  requirement B {\n  }\n  A - contains -> B",
+        );
+        assert!(!parsed.ir.edges.is_empty());
+        assert_eq!(parsed.ir.edges[0].arrow, fm_core::ArrowType::ThickArrow);
+    }
+
+    #[test]
+    fn requirement_derives_uses_dotted_arrow() {
+        let parsed = parse_mermaid(
+            "requirementDiagram\n  requirement A {\n  }\n  requirement B {\n  }\n  A - derives -> B",
+        );
+        assert!(!parsed.ir.edges.is_empty());
+        assert_eq!(parsed.ir.edges[0].arrow, fm_core::ArrowType::DottedArrow);
+    }
+
+    // ── Architecture-beta service icon shape mapping ──────────────────
+
+    #[test]
+    fn architecture_database_icon_uses_cylinder_shape() {
+        let parsed = parse_mermaid("architecture-beta\n  service db(database)[My DB]");
+        let node = parsed.ir.nodes.iter().find(|n| n.id == "db").unwrap();
+        assert_eq!(node.shape, fm_core::NodeShape::Cylinder);
+    }
+
+    #[test]
+    fn architecture_cloud_icon_uses_rounded_shape() {
+        let parsed = parse_mermaid("architecture-beta\n  service cdn(cloud)[CDN]");
+        let node = parsed.ir.nodes.iter().find(|n| n.id == "cdn").unwrap();
+        assert_eq!(node.shape, fm_core::NodeShape::Rounded);
+    }
+
+    #[test]
+    fn architecture_default_service_uses_rect() {
+        let parsed = parse_mermaid("architecture-beta\n  service api(server)[API]");
+        let node = parsed.ir.nodes.iter().find(|n| n.id == "api").unwrap();
+        assert_eq!(node.shape, fm_core::NodeShape::Rect);
+    }
+
+    // ── Cross-diagram style directive support ─────────────────────────
+
+    #[test]
+    fn block_beta_supports_classdef_directives() {
+        let parsed = parse_mermaid(
+            "block-beta\n  columns 2\n  A B\n  classDef highlight fill:#f9f\n  class A highlight",
+        );
+        assert!(
+            !parsed.ir.style_defs.is_empty(),
+            "block-beta should parse classDef"
+        );
+        let node_a = parsed.ir.nodes.iter().find(|n| n.id == "A").unwrap();
+        assert!(
+            node_a.inline_style.is_some(),
+            "node A should have inline_style from classDef"
+        );
+    }
+
+    #[test]
+    fn class_diagram_supports_style_directives() {
+        let parsed =
+            parse_mermaid("classDiagram\n  class Dog\n  classDef pet fill:#efe\n  class Dog pet");
+        assert!(
+            !parsed.ir.style_defs.is_empty(),
+            "class diagram should parse classDef"
+        );
+    }
+
+    #[test]
+    fn state_diagram_supports_style_directives() {
+        let parsed = parse_mermaid(
+            "stateDiagram-v2\n  state Active\n  classDef active fill:#afa\n  class Active active",
+        );
+        assert!(
+            !parsed.ir.style_defs.is_empty(),
+            "state diagram should parse classDef"
+        );
+    }
+
+    // ── ER diagram attribute tests ────────────────────────────────────
+
+    #[test]
+    fn er_entity_attributes_with_keys_stored() {
+        let parsed = parse_mermaid(
+            "erDiagram\n  USER {\n    int id PK\n    varchar name\n    int dept_id FK\n  }",
+        );
+        let user = parsed.ir.nodes.iter().find(|n| n.id == "USER").unwrap();
+        assert_eq!(user.members.len(), 3);
+        assert_eq!(user.members[0].key, fm_core::IrAttributeKey::Pk);
+        assert_eq!(user.members[0].data_type, "int");
+        assert_eq!(user.members[0].name, "id");
+        assert_eq!(user.members[2].key, fm_core::IrAttributeKey::Fk);
+    }
+
+    #[test]
+    fn er_entity_attribute_comments_preserved() {
+        let parsed = parse_mermaid("erDiagram\n  USER {\n    int id PK \"primary key\"\n  }");
+        let user = parsed.ir.nodes.iter().find(|n| n.id == "USER").unwrap();
+        assert_eq!(user.members.len(), 1);
+        assert_eq!(user.members[0].comment.as_deref(), Some("primary key"));
+    }
+
+    // ── Mindmap branch color tests ────────────────────────────────────
+
+    #[test]
+    fn mindmap_assigns_branch_color_classes() {
+        let parsed =
+            parse_mermaid("mindmap\n  Root\n    Branch1\n      Leaf1\n    Branch2\n      Leaf2");
+        // Root gets branch-0, Branch1 gets branch-1, Branch2 gets branch-2.
+        let root = parsed.ir.nodes.iter().find(|n| n.id == "Root").unwrap();
+        assert!(
+            root.classes.iter().any(|c| c == "mindmap-root"),
+            "root should have mindmap-root class"
+        );
+
+        let branch1 = parsed.ir.nodes.iter().find(|n| n.id == "Branch1").unwrap();
+        assert!(
+            branch1
+                .classes
+                .iter()
+                .any(|c| c.starts_with("mindmap-branch-")),
+            "branch nodes should have mindmap-branch-N class"
+        );
+
+        let branch2 = parsed.ir.nodes.iter().find(|n| n.id == "Branch2").unwrap();
+        assert!(
+            branch2
+                .classes
+                .iter()
+                .any(|c| c.starts_with("mindmap-branch-")),
+            "branch nodes should have mindmap-branch-N class"
+        );
+
+        // Branch1 and Branch2 should have different branch indices.
+        let b1_class = branch1
+            .classes
+            .iter()
+            .find(|c| c.starts_with("mindmap-branch-"))
+            .unwrap();
+        let b2_class = branch2
+            .classes
+            .iter()
+            .find(|c| c.starts_with("mindmap-branch-"))
+            .unwrap();
+        assert_ne!(
+            b1_class, b2_class,
+            "different branches should have different color classes"
+        );
+    }
+
+    // ── GitGraph commit type and branch color tests ───────────────────
+
+    #[test]
+    fn gitgraph_commit_type_maps_to_shape_and_class() {
+        let parsed =
+            parse_mermaid("gitGraph\n  commit\n  commit type: REVERSE\n  commit type: HIGHLIGHT");
+        assert_eq!(parsed.ir.nodes.len(), 3);
+        // Normal commit = Circle
+        assert_eq!(parsed.ir.nodes[0].shape, fm_core::NodeShape::Circle);
+        // REVERSE = FilledCircle
+        assert_eq!(parsed.ir.nodes[1].shape, fm_core::NodeShape::FilledCircle);
+        assert!(
+            parsed.ir.nodes[1]
+                .classes
+                .iter()
+                .any(|c| c == "git-commit-reverse")
+        );
+        // HIGHLIGHT = DoubleCircle
+        assert_eq!(parsed.ir.nodes[2].shape, fm_core::NodeShape::DoubleCircle);
+        assert!(
+            parsed.ir.nodes[2]
+                .classes
+                .iter()
+                .any(|c| c == "git-commit-highlight")
+        );
+    }
+
+    #[test]
+    fn gitgraph_branch_color_classes_assigned() {
+        let parsed = parse_mermaid(
+            "gitGraph\n  commit\n  branch dev\n  checkout dev\n  commit\n  checkout main\n  commit",
+        );
+        // Commits on main should have git-branch-0
+        let main_commit = &parsed.ir.nodes[0];
+        assert!(
+            main_commit.classes.iter().any(|c| c == "git-branch-0"),
+            "main commits should have git-branch-0"
+        );
+
+        // Commits on dev should have git-branch-1
+        let dev_commit = &parsed.ir.nodes[1];
+        assert!(
+            dev_commit.classes.iter().any(|c| c == "git-branch-1"),
+            "dev commits should have git-branch-1"
+        );
     }
 }

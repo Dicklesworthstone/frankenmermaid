@@ -523,7 +523,74 @@ fn run_evidence(args: &[&str]) -> std::process::Output {
 fn write_evidence_root_fixture() -> TempDir {
     let temp = TempDir::new().expect("temp evidence root");
     std::fs::create_dir_all(temp.path().join("evidence/ledger")).expect("create ledger dir");
+    std::fs::create_dir_all(temp.path().join("evidence/contracts")).expect("create contracts dir");
     std::fs::create_dir_all(temp.path().join(".beads")).expect("create beads dir");
+    std::fs::create_dir_all(temp.path().join(".ci")).expect("create ci dir");
+    std::fs::write(
+        temp.path().join("evidence/TEMPLATE.md"),
+        "# Evidence Template\n",
+    )
+    .expect("write evidence template");
+    std::fs::write(
+        temp.path().join("evidence/capability_matrix.json"),
+        "{\"capabilities\":[]}\n",
+    )
+    .expect("write capability matrix");
+    std::fs::write(
+        temp.path().join("evidence/capability_scenario_matrix.json"),
+        "{\"scenarios\":[]}\n",
+    )
+    .expect("write capability scenario matrix");
+    std::fs::write(
+        temp.path()
+            .join("evidence/demo_resilience_fixture_suite.json"),
+        "{\"fixtures\":[]}\n",
+    )
+    .expect("write resilience fixture suite");
+    std::fs::write(
+        temp.path().join("evidence/demo_strategy.md"),
+        "# Demo Strategy\n",
+    )
+    .expect("write demo strategy");
+    std::fs::write(
+        temp.path().join("evidence/pattern_inventory.md"),
+        "# Pattern Inventory\n",
+    )
+    .expect("write pattern inventory");
+    std::fs::write(
+        temp.path()
+            .join("evidence/contracts/e-graphs-crossing-minimization.md"),
+        "# E-Graphs Contract\n",
+    )
+    .expect("write e-graphs contract");
+    std::fs::write(
+        temp.path()
+            .join("evidence/contracts/fnx-deterministic-decision-contract.md"),
+        "# FNX Decision Contract\n",
+    )
+    .expect("write fnx contract");
+    std::fs::write(
+        temp.path().join(".ci/quality-gates.toml"),
+        concat!(
+            "[evidence_ledger]\n",
+            "enabled = true\n",
+            "blocking = false\n\n",
+            "[release_gate_overrides]\n",
+            "enabled = true\n",
+            "policy_id = \"fm.release-gate.override@v1\"\n",
+            "allowed_approvers = [\"Dicklesworthstone\"]\n",
+            "max_override_days = 14\n",
+            "require_retro_bead = true\n",
+            "require_fix_bead = true\n",
+            "overrides_path = \".ci/release-gate-overrides.toml\"\n",
+        ),
+    )
+    .expect("write quality gates");
+    std::fs::write(
+        temp.path().join(".ci/release-gate-overrides.toml"),
+        "schema_version = 1\noverrides = []\n",
+    )
+    .expect("write release gate overrides");
     temp
 }
 
@@ -2112,6 +2179,385 @@ fn evidence_report_includes_checked_in_fnx_contract_entry() {
     let report = std::fs::read_to_string(report_path).expect("checked-in report");
     assert!(report.contains("FNX Deterministic Decision Contract"));
     assert!(report.contains("evidence/contracts/fnx-deterministic-decision-contract.md"));
+}
+
+#[test]
+fn evidence_bundle_creates_manifest_and_copies_required_files() {
+    let temp = write_evidence_root_fixture();
+    let root = temp.path().to_str().expect("root path utf-8");
+
+    let add_output = run_evidence(&["--root", root, "add", "egraph-crossing-min"]);
+    assert!(
+        add_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&add_output.stderr)
+    );
+
+    let extra_artifact_dir = temp.path().join("artifacts/evidence/logs");
+    std::fs::create_dir_all(&extra_artifact_dir).expect("create artifact dir");
+    std::fs::write(
+        extra_artifact_dir.join("golden-svg.log"),
+        "{\"surface\":\"svg\"}\n",
+    )
+    .expect("write ci artifact");
+
+    let output = run_evidence(&[
+        "--root",
+        root,
+        "bundle",
+        "--out-dir",
+        "bundles",
+        "--bundle-version",
+        "1.2.3",
+        "--release-ref",
+        "release-42",
+        "--artifact",
+        "artifacts/evidence/logs/golden-svg.log",
+    ]);
+    assert!(
+        output.status.success(),
+        "evidence bundle failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let bundle_dir = String::from_utf8(output.stdout)
+        .expect("bundle stdout utf-8")
+        .trim()
+        .to_string();
+    assert!(bundle_dir.ends_with("frankenmermaid-evidence-v1-2-3-release-42"));
+
+    let manifest_path = temp.path().join(&bundle_dir).join("manifest.json");
+    let manifest_raw = std::fs::read_to_string(&manifest_path).expect("read manifest");
+    let manifest: serde_json::Value = serde_json::from_str(&manifest_raw).expect("manifest json");
+    assert_eq!(manifest["bundle_version"], "1.2.3");
+    assert_eq!(manifest["release_ref"], "release-42");
+    assert_eq!(manifest["retention_days"], 90);
+    assert!(
+        manifest["summary"]["ci_artifact_count"]
+            .as_u64()
+            .expect("ci artifact count")
+            >= 1
+    );
+
+    let readme_path = temp.path().join(&bundle_dir).join("README.md");
+    let readme = std::fs::read_to_string(&readme_path).expect("read bundle readme");
+    assert!(readme.contains("files/evidence/ledger/README.md"));
+
+    let copied_artifact = temp
+        .path()
+        .join(&bundle_dir)
+        .join("files/artifacts/evidence/logs/golden-svg.log");
+    assert!(copied_artifact.exists(), "copied CI artifact should exist");
+}
+
+#[test]
+fn evidence_verify_bundle_detects_tampering() {
+    let temp = write_evidence_root_fixture();
+    let root = temp.path().to_str().expect("root path utf-8");
+
+    let add_output = run_evidence(&["--root", root, "add", "egraph-crossing-min"]);
+    assert!(
+        add_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&add_output.stderr)
+    );
+
+    let extra_artifact_dir = temp.path().join("artifacts/evidence/logs");
+    std::fs::create_dir_all(&extra_artifact_dir).expect("create artifact dir");
+    std::fs::write(
+        extra_artifact_dir.join("golden-layout.log"),
+        "{\"surface\":\"layout\"}\n",
+    )
+    .expect("write ci artifact");
+
+    let bundle_output = run_evidence(&[
+        "--root",
+        root,
+        "bundle",
+        "--out-dir",
+        "bundles",
+        "--release-ref",
+        "verify-me",
+        "--artifact",
+        "artifacts/evidence/logs/golden-layout.log",
+    ]);
+    assert!(
+        bundle_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&bundle_output.stderr)
+    );
+
+    let bundle_dir = String::from_utf8(bundle_output.stdout)
+        .expect("bundle stdout utf-8")
+        .trim()
+        .to_string();
+    let copied_artifact = temp
+        .path()
+        .join(&bundle_dir)
+        .join("files/artifacts/evidence/logs/golden-layout.log");
+    std::fs::write(&copied_artifact, "{\"surface\":\"tampered\"}\n").expect("tamper artifact");
+
+    let verify_output = run_evidence(&[
+        "--root",
+        root,
+        "verify-bundle",
+        "--manifest",
+        &format!("{bundle_dir}/manifest.json"),
+        "--require-kind",
+        "ci-artifact",
+        "--require-kind",
+        "decision-contract",
+    ]);
+    assert!(
+        !verify_output.status.success(),
+        "verify-bundle should fail after tampering"
+    );
+    let stderr = String::from_utf8_lossy(&verify_output.stderr);
+    assert!(stderr.contains("sha256 mismatch"));
+}
+
+#[test]
+fn evidence_perf_report_writes_summary_and_supporting_artifacts() {
+    let temp = write_evidence_root_fixture();
+    let root = temp.path().to_str().expect("root path utf-8");
+
+    std::fs::write(
+        temp.path().join(".ci/perf-baseline.json"),
+        r#"{
+  "schema_version": 1,
+  "benchmarks": {
+    "sugiyama_small": { "p99_ns": 20000000 },
+    "comparison_50.sugiyama": { "p99_ns": 70000000 }
+  }
+}
+"#,
+    )
+    .expect("write perf baseline");
+    std::fs::write(
+        temp.path().join("perf.log"),
+        concat!(
+            "{\"benchmark\":\"sugiyama_small\",\"nodes\":20,\"edges\":38,\"ns\":10000000}\n",
+            "{\"benchmark\":\"sugiyama_small\",\"nodes\":20,\"edges\":38,\"ns\":12000000}\n",
+            "{\"benchmark\":\"sugiyama_small\",\"nodes\":20,\"edges\":38,\"ns\":11000000}\n",
+            "{\"benchmark\":\"comparison_50\",\"sugiyama_ns\":50000000,\"force_ns\":30000000,\"tree_ns\":10000000}\n",
+            "{\"benchmark\":\"comparison_50\",\"sugiyama_ns\":52000000,\"force_ns\":31000000,\"tree_ns\":9000000}\n"
+        ),
+    )
+    .expect("write perf log");
+
+    let output = run_evidence(&[
+        "--root",
+        root,
+        "perf-report",
+        "--input",
+        "perf.log",
+        "--out-dir",
+        "artifacts/evidence/perf",
+        "--baseline",
+        ".ci/perf-baseline.json",
+        "--warn-threshold-pct",
+        "5",
+        "--fail-threshold-pct",
+        "10",
+    ]);
+    assert!(
+        output.status.success(),
+        "perf-report failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let summary: serde_json::Value = serde_json::from_slice(&output.stdout).expect("summary json");
+    assert_eq!(summary["schema_version"], 1);
+    assert_eq!(summary["benchmark_count"], 4);
+    assert_eq!(summary["release_blocking_pass"], true);
+
+    let summary_path = temp.path().join("artifacts/evidence/perf/summary.json");
+    let env_path = temp.path().join("artifacts/evidence/perf/env.json");
+    let corpus_path = temp
+        .path()
+        .join("artifacts/evidence/perf/corpus_manifest.json");
+    assert!(summary_path.exists(), "summary artifact should exist");
+    assert!(env_path.exists(), "env fingerprint should exist");
+    assert!(corpus_path.exists(), "corpus manifest should exist");
+
+    let summary_file: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(summary_path).expect("read summary artifact"),
+    )
+    .expect("parse summary artifact");
+    assert_eq!(
+        summary_file["benchmarks"]
+            .as_array()
+            .expect("benchmarks")
+            .len(),
+        4
+    );
+}
+
+#[test]
+fn evidence_perf_report_fails_on_tail_regression() {
+    let temp = write_evidence_root_fixture();
+    let root = temp.path().to_str().expect("root path utf-8");
+
+    std::fs::write(
+        temp.path().join(".ci/perf-baseline.json"),
+        r#"{
+  "schema_version": 1,
+  "benchmarks": {
+    "sugiyama_small": { "p99_ns": 10000000 }
+  }
+}
+"#,
+    )
+    .expect("write perf baseline");
+    std::fs::write(
+        temp.path().join("perf.log"),
+        concat!(
+            "{\"benchmark\":\"sugiyama_small\",\"nodes\":20,\"edges\":38,\"ns\":20000000}\n",
+            "{\"benchmark\":\"sugiyama_small\",\"nodes\":20,\"edges\":38,\"ns\":22000000}\n",
+            "{\"benchmark\":\"sugiyama_small\",\"nodes\":20,\"edges\":38,\"ns\":24000000}\n"
+        ),
+    )
+    .expect("write perf log");
+
+    let output = run_evidence(&[
+        "--root",
+        root,
+        "perf-report",
+        "--input",
+        "perf.log",
+        "--out-dir",
+        "artifacts/evidence/perf",
+        "--baseline",
+        ".ci/perf-baseline.json",
+        "--warn-threshold-pct",
+        "5",
+        "--fail-threshold-pct",
+        "10",
+    ]);
+    assert!(
+        !output.status.success(),
+        "perf-report should fail when p99 regression exceeds threshold"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("performance regression exceeded fail threshold"));
+}
+
+#[test]
+fn evidence_verify_overrides_accepts_authorized_active_override() {
+    let temp = write_evidence_root_fixture();
+    let root = temp.path().to_str().expect("root path utf-8");
+
+    std::fs::write(
+        temp.path().join(".ci/release-gate-overrides.toml"),
+        concat!(
+            "schema_version = 1\n\n",
+            "[[overrides]]\n",
+            "id = \"ovr-001\"\n",
+            "approver = \"Dicklesworthstone\"\n",
+            "created_by = \"BlackShore\"\n",
+            "created_at = \"2026-03-31T10:00:00Z\"\n",
+            "reason = \"Emergency release needed while determinism compare is flaky.\"\n",
+            "scope = [\"cross-platform-determinism-compare\", \"coverage\"]\n",
+            "expires_at = \"2026-04-02T10:00:00Z\"\n",
+            "retro_bead = \"bd-retro.1\"\n",
+            "fix_bead = \"bd-fix.1\"\n",
+        ),
+    )
+    .expect("write override ledger");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_evidence"))
+        .env("EVIDENCE_OVERRIDE_NOW", "2026-03-31T12:00:00Z")
+        .args(["--root", root, "verify-overrides"])
+        .output()
+        .expect("run verify-overrides");
+    assert!(
+        output.status.success(),
+        "verify-overrides failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf-8");
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("summary json");
+    assert_eq!(json["policy_id"], "fm.release-gate.override@v1");
+    assert_eq!(json["active_override_count"], 1);
+    assert!(
+        json["active_gates"]
+            .as_array()
+            .expect("active gates array")
+            .iter()
+            .any(|value| value == "cross-platform-determinism-compare")
+    );
+}
+
+#[test]
+fn evidence_verify_overrides_rejects_unauthorized_approver() {
+    let temp = write_evidence_root_fixture();
+    let root = temp.path().to_str().expect("root path utf-8");
+
+    std::fs::write(
+        temp.path().join(".ci/release-gate-overrides.toml"),
+        concat!(
+            "schema_version = 1\n\n",
+            "[[overrides]]\n",
+            "id = \"ovr-unauthorized\"\n",
+            "approver = \"Mallory\"\n",
+            "created_by = \"BlackShore\"\n",
+            "created_at = \"2026-03-31T10:00:00Z\"\n",
+            "reason = \"Trying to bypass a release gate without approved authority.\"\n",
+            "scope = [\"coverage\"]\n",
+            "expires_at = \"2026-04-01T10:00:00Z\"\n",
+            "retro_bead = \"bd-retro.2\"\n",
+            "fix_bead = \"bd-fix.2\"\n",
+        ),
+    )
+    .expect("write override ledger");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_evidence"))
+        .env("EVIDENCE_OVERRIDE_NOW", "2026-03-31T12:00:00Z")
+        .args(["--root", root, "verify-overrides"])
+        .output()
+        .expect("run verify-overrides");
+    assert!(
+        !output.status.success(),
+        "verify-overrides should reject unauthorized approver"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("is not authorized"));
+}
+
+#[test]
+fn evidence_verify_overrides_rejects_expired_override() {
+    let temp = write_evidence_root_fixture();
+    let root = temp.path().to_str().expect("root path utf-8");
+
+    std::fs::write(
+        temp.path().join(".ci/release-gate-overrides.toml"),
+        concat!(
+            "schema_version = 1\n\n",
+            "[[overrides]]\n",
+            "id = \"ovr-expired\"\n",
+            "approver = \"Dicklesworthstone\"\n",
+            "created_by = \"BlackShore\"\n",
+            "created_at = \"2026-03-20T10:00:00Z\"\n",
+            "reason = \"Expired emergency override should now be rejected by policy.\"\n",
+            "scope = [\"coverage\"]\n",
+            "expires_at = \"2026-03-25T10:00:00Z\"\n",
+            "retro_bead = \"bd-retro.3\"\n",
+            "fix_bead = \"bd-fix.3\"\n",
+        ),
+    )
+    .expect("write override ledger");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_evidence"))
+        .env("EVIDENCE_OVERRIDE_NOW", "2026-03-31T12:00:00Z")
+        .args(["--root", root, "verify-overrides"])
+        .output()
+        .expect("run verify-overrides");
+    assert!(
+        !output.status.success(),
+        "verify-overrides should reject expired overrides"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("has expired"));
 }
 
 // ── Adversarial Security Test Corpus ───────────────────────────────

@@ -12,14 +12,21 @@ blocking = true
 paths = ["crates/fm-layout/**", "crates/fm-core/**", "crates/fm-parser/**"]
 warn_threshold_pct = 5.0
 fail_threshold_pct = 10.0
+sample_count = 15
+baseline_path = ".ci/perf-baseline.json"
 allow_commit_tag_prefix = "[perf-regression-ok:"
-benchmark_command = "cargo test -p fm-layout benchmark -- --nocapture"
+benchmark_command = "cargo test -p fm-layout perf_baseline_ -- --nocapture"
 
 [property_test]
 enabled = true
 blocking = true
 cases = 10000
 command = "cargo test --workspace --all-targets"
+
+[invariant_proof]
+enabled = true
+blocking = true
+command = "cargo test -p fm-cli --test invariant_proof_harness -- --nocapture"
 
 [evidence_ledger]
 enabled = true
@@ -39,3 +46,17 @@ command = "cargo test -p fm-cli --test golden_layout_test layout_golden_cases_ar
 enabled = true
 blocking = false
 contracts_dir = "evidence/contracts"
+
+[degradation]
+enabled = true
+blocking = true
+command = "cargo test -p fm-cli --test invariant_proof_harness deg_ -- --nocapture"
+
+[release_gate_overrides]
+enabled = true
+policy_id = "fm.release-gate.override@v1"
+allowed_approvers = ["Dicklesworthstone"]
+max_override_days = 14
+require_retro_bead = true
+require_fix_bead = true
+overrides_path = ".ci/release-gate-overrides.toml"

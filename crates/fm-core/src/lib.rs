@@ -207,7 +207,7 @@ pub enum MermaidError {
 
 impl MermaidError {
     #[must_use]
-    pub fn code(&self) -> MermaidErrorCode {
+    pub const fn code(&self) -> MermaidErrorCode {
         match self {
             Self::Parse { .. } => MermaidErrorCode::Parse,
             Self::Validation { .. } => MermaidErrorCode::Validation,
@@ -530,7 +530,7 @@ pub fn capability_readme_surface_markdown() -> String {
     lines.join("\n")
 }
 
-fn capability_status_label(status: CapabilityStatus) -> &'static str {
+const fn capability_status_label(status: CapabilityStatus) -> &'static str {
     match status {
         CapabilityStatus::Implemented => "Implemented",
         CapabilityStatus::Partial => "Partial",
@@ -879,7 +879,7 @@ fn surface_capability_claims() -> Vec<CapabilityClaim> {
     ]
 }
 
-fn documented_diagram_types() -> &'static [DiagramType] {
+const fn documented_diagram_types() -> &'static [DiagramType] {
     const DOCUMENTED: &[DiagramType] = &[
         DiagramType::Flowchart,
         DiagramType::Sequence,
@@ -1804,6 +1804,7 @@ pub enum MermaidErrorMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct MermaidConfig {
     pub enabled: bool,
     pub glyph_mode: MermaidGlyphMode,
@@ -2443,7 +2444,7 @@ impl MermaidStageBudgetLedger {
         }
     }
 
-    pub fn consume(&mut self, used_ms: u64) {
+    pub const fn consume(&mut self, used_ms: u64) {
         self.used_ms = used_ms;
         self.remaining_ms = self.allocated_ms.saturating_sub(used_ms);
         self.exceeded = used_ms > self.allocated_ms;
@@ -2703,7 +2704,7 @@ impl MermaidBudgetLedger {
         });
     }
 
-    fn snapshot_remaining_total_ms(&self) -> u64 {
+    const fn snapshot_remaining_total_ms(&self) -> u64 {
         self.total_budget_ms
             .saturating_sub(self.current_used_total_ms())
     }
@@ -2801,7 +2802,7 @@ pub struct MermaidDegradationPlan {
 impl MermaidDegradationPlan {
     /// Returns true if any degradation operator is active.
     #[must_use]
-    pub fn is_degraded(&self) -> bool {
+    pub const fn is_degraded(&self) -> bool {
         !matches!(
             self.target_fidelity,
             MermaidFidelity::Normal | MermaidFidelity::Rich
@@ -2961,6 +2962,7 @@ pub struct DegradationContext {
 #[must_use]
 pub fn compute_degradation_plan(ctx: &DegradationContext) -> MermaidDegradationPlan {
     let mut plan = MermaidDegradationPlan::default();
+    #[allow(clippy::collection_is_never_read)]
     let mut applied = Vec::new();
 
     let any_budget_exceeded =
@@ -3035,6 +3037,7 @@ pub fn compute_degradation_plan_with_trace(
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct MermaidGuardReport {
     pub complexity: MermaidComplexity,
     pub label_chars_over: usize,
@@ -3103,10 +3106,14 @@ pub struct MermaidLayoutDecisionLedger {
 
 impl MermaidLayoutDecisionLedger {
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns a `serde_json::Error` if any entry cannot be serialized.
     pub fn to_jsonl(&self) -> serde_json::Result<String> {
         let mut lines = Vec::with_capacity(self.entries.len());
         for entry in &self.entries {
@@ -3313,14 +3320,14 @@ impl Diagnostic {
 
     /// Set the category.
     #[must_use]
-    pub fn with_category(mut self, category: DiagnosticCategory) -> Self {
+    pub const fn with_category(mut self, category: DiagnosticCategory) -> Self {
         self.category = category;
         self
     }
 
     /// Set the source span.
     #[must_use]
-    pub fn with_span(mut self, span: Span) -> Self {
+    pub const fn with_span(mut self, span: Span) -> Self {
         self.span = Some(span);
         self
     }
@@ -3386,10 +3393,9 @@ pub struct StructuredDiagnostic {
 impl StructuredDiagnostic {
     #[must_use]
     pub fn from_diagnostic(diagnostic: &Diagnostic) -> Self {
-        let (source_line, source_column) = diagnostic
-            .span
-            .map(|span| (Some(span.start.line), Some(span.start.col)))
-            .unwrap_or((None, None));
+        let (source_line, source_column) = diagnostic.span.map_or((None, None), |span| {
+            (Some(span.start.line), Some(span.start.col))
+        });
 
         Self {
             error_code: format!("mermaid/diag/{}", diagnostic.category.as_str()),
@@ -3449,7 +3455,7 @@ impl StructuredDiagnostic {
     }
 
     #[must_use]
-    pub fn with_confidence(mut self, confidence: f32) -> Self {
+    pub const fn with_confidence(mut self, confidence: f32) -> Self {
         self.confidence = Some(confidence);
         self
     }
@@ -3643,7 +3649,8 @@ pub struct IrGanttMeta {
     pub tasks: Vec<IrGanttTask>,
 }
 
-const fn is_default_gantt_task_type(value: GanttTaskType) -> bool {
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_default_gantt_task_type(value: &GanttTaskType) -> bool {
     matches!(value, GanttTaskType::Normal)
 }
 
@@ -3735,6 +3742,7 @@ const fn is_default_sequence_autonumber_start(value: &u32) -> bool {
     *value == default_sequence_autonumber_start()
 }
 
+#[allow(clippy::trivially_copy_pass_by_ref)]
 const fn is_default_sequence_autonumber_increment(value: &u32) -> bool {
     *value == default_sequence_autonumber_increment()
 }
@@ -5125,13 +5133,11 @@ mod tests {
         assert!(broker.exhausted);
         assert_eq!(broker.remaining_total_ms, 0);
         // Event trail records exhaustion
-        let exhaustion_events: Vec<_> = broker
-            .events
-            .iter()
-            .filter(|e| e.kind == "accounting" && e.exceeded)
-            .collect();
         assert!(
-            !exhaustion_events.is_empty(),
+            broker
+                .events
+                .iter()
+                .any(|e| e.kind == "accounting" && e.exceeded),
             "should have at least one exhaustion accounting event"
         );
     }
@@ -5912,6 +5918,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn graph_ir_traversal_helpers_follow_hierarchy_deterministically() {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         ir.graph.nodes.push(IrGraphNode {
@@ -6281,9 +6288,6 @@ mod tests {
                 let full_start = start + start_marker.len();
                 let full_end = start + end;
                 readme.replace_range(full_start..full_end, &format!("\n{actual}\n"));
-                let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-                let readme_path = manifest_dir.join("../../README.md");
-                std::fs::write(&readme_path, readme).unwrap();
             } else {
                 readme.push('\n');
                 readme.push_str(start_marker);
@@ -6292,10 +6296,10 @@ mod tests {
                 readme.push('\n');
                 readme.push_str(end_marker);
                 readme.push('\n');
-                let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-                let readme_path = manifest_dir.join("../../README.md");
-                std::fs::write(&readme_path, readme).unwrap();
             }
+            let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+            let readme_path = manifest_dir.join("../../README.md");
+            std::fs::write(&readme_path, readme).unwrap();
         }
 
         let readme = load_readme();
@@ -6323,8 +6327,10 @@ mod tests {
         let end = readme
             .get(body_start..)
             .and_then(|s| s.find(&end_marker))
-            .map(|offset| body_start + offset)
-            .unwrap_or_else(|| panic!("missing end marker for {block_name}"));
+            .map_or_else(
+                || panic!("missing end marker for {block_name}"),
+                |offset| body_start + offset,
+            );
 
         readme.get(body_start..end).unwrap_or("").trim().to_string()
     }

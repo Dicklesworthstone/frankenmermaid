@@ -34,6 +34,7 @@ fm-render-term.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10.9"
+time = { version = "0.3.41", features = ["formatting", "parsing"] }
 toml = "0.8.23"
 tracing.workspace = true
 tracing-subscriber.workspace = true

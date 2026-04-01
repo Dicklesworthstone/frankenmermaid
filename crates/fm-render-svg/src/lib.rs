@@ -3286,6 +3286,43 @@ fn render_node(
         group = group.class("fm-node-block-beta-space");
     }
 
+    // Requirement diagram: add risk level and requirement type CSS classes.
+    let req_risk_fill: Option<&str> = ir_node
+        .and_then(|n| n.requirement_meta.as_ref())
+        .and_then(|meta| meta.risk.as_ref())
+        .and_then(|risk| match risk.to_ascii_lowercase().as_str() {
+            "high" => Some("#fca5a5"),
+            "medium" => Some("#fde68a"),
+            "low" => Some("#bbf7d0"),
+            _ => None,
+        });
+
+    // Journey score → color fill (1=red, 2=orange, 3=yellow, 4=light green, 5=green).
+    let journey_score_fill: Option<&str> = ir_node.and_then(|n| {
+        n.classes.iter().find_map(|c| match c.as_str() {
+            "journey-score-1" => Some("#fca5a5"),
+            "journey-score-2" => Some("#fdba74"),
+            "journey-score-3" => Some("#fde68a"),
+            "journey-score-4" => Some("#bef264"),
+            "journey-score-5" => Some("#86efac"),
+            _ => None,
+        })
+    });
+    if let Some(meta) = ir_node.and_then(|n| n.requirement_meta.as_ref()) {
+        if let Some(ref risk) = meta.risk {
+            group = group.class(&format!("fm-req-risk-{}", risk.to_ascii_lowercase()));
+        }
+        if let Some(ref req_type) = meta.requirement_type {
+            let type_class = req_type
+                .replace(|c: char| !c.is_ascii_alphanumeric(), "-")
+                .to_ascii_lowercase();
+            group = group.class(&format!("fm-req-type-{type_class}"));
+        }
+        if meta.verify_method.is_some() {
+            group = group.class("fm-req-has-verify");
+        }
+    }
+
     // Add accessibility attributes
     if config.a11y.aria_labels {
         group = group
@@ -3748,6 +3785,12 @@ fn render_node(
     let shape_elem = if let Some(inline_style) = resolve_node_inline_style(ir, node_box.node_index)
     {
         shape_elem.attr("style", &inline_style)
+    } else if let Some(risk_fill) = req_risk_fill {
+        // Requirement risk-level fill when no explicit style override.
+        shape_elem.attr("style", &format!("fill: {risk_fill}"))
+    } else if let Some(score_fill) = journey_score_fill {
+        // Journey score-based fill color.
+        shape_elem.attr("style", &format!("fill: {score_fill}"))
     } else {
         shape_elem
     };
@@ -3809,6 +3852,141 @@ fn render_node(
                 config,
                 colors,
             );
+        } else if let Some(node) = ir_node
+            && let Some(ref req_meta) = node.requirement_meta
+            && (req_meta.requirement_type.is_some()
+                || req_meta.risk.is_some()
+                || req_meta.verify_method.is_some())
+        {
+            // Requirement node: multi-line content with type, label, metadata.
+            let subtitle_font_size = clamp_font_size(node_font_size * 0.75, config.min_font_size);
+            let mut text_y = y + h * 0.25 + node_font_size * 0.35;
+
+            // Requirement type header (e.g., "<<requirement>>")
+            if let Some(ref req_type) = req_meta.requirement_type {
+                let type_label = format!("\u{00ab}{req_type}\u{00bb}");
+                group = group.child(
+                    Element::text()
+                        .x(cx)
+                        .y(text_y)
+                        .content(&type_label)
+                        .attr("text-anchor", "middle")
+                        .attr("dominant-baseline", "central")
+                        .attr_num("font-size", subtitle_font_size)
+                        .attr("font-style", "italic")
+                        .attr("font-family", &config.font_family)
+                        .fill(&colors.text)
+                        .class("fm-req-type-label"),
+                );
+                text_y += node_font_size * 0.85;
+            }
+
+            // Main label
+            let text_elem = render_node_label_text(
+                ir,
+                if detail.node_label_max_chars.is_none() {
+                    label_id
+                } else {
+                    None
+                },
+                &label_text,
+                cx,
+                text_y,
+                node_font_size,
+                config,
+                colors,
+            );
+            group = group.child(text_elem);
+            text_y += node_font_size * 0.85;
+
+            // Risk + verify method subtitle
+            let mut info_parts = Vec::new();
+            if let Some(ref risk) = req_meta.risk {
+                info_parts.push(format!("Risk: {risk}"));
+            }
+            if let Some(ref vm) = req_meta.verify_method {
+                info_parts.push(format!("Verify: {vm}"));
+            }
+            if !info_parts.is_empty() {
+                let info_text = info_parts.join(" | ");
+                group = group.child(
+                    Element::text()
+                        .x(cx)
+                        .y(text_y)
+                        .content(&info_text)
+                        .attr("text-anchor", "middle")
+                        .attr("dominant-baseline", "central")
+                        .attr_num("font-size", subtitle_font_size)
+                        .attr("font-family", &config.font_family)
+                        .fill(&colors.text)
+                        .attr("opacity", "0.7")
+                        .class("fm-req-metadata"),
+                );
+            }
+        } else if let Some(node) = ir_node
+            && !node.members.is_empty()
+            && ir.diagram_type == fm_core::DiagramType::Er
+        {
+            // ER entity: render name + attribute list.
+            let attr_font_size = clamp_font_size(node_font_size * 0.8, config.min_font_size);
+            let header_height = node_font_size * 1.5;
+
+            // Entity name header
+            group = group.child(
+                Element::text()
+                    .x(cx)
+                    .y(y + header_height * 0.6)
+                    .content(&label_text)
+                    .attr("text-anchor", "middle")
+                    .attr("dominant-baseline", "central")
+                    .attr_num("font-size", node_font_size)
+                    .attr("font-weight", "bold")
+                    .attr("font-family", &config.font_family)
+                    .fill(&colors.text)
+                    .class("fm-er-entity-name"),
+            );
+
+            // Divider line
+            group = group.child(
+                Element::line()
+                    .x1(x + 2.0)
+                    .y1(y + header_height)
+                    .x2(x + w - 2.0)
+                    .y2(y + header_height)
+                    .stroke(&colors.node_stroke)
+                    .stroke_width(0.8),
+            );
+
+            // Attribute list
+            let mut attr_y = y + header_height + attr_font_size * 0.9;
+            for attr in &node.members {
+                let key_prefix = match attr.key {
+                    fm_core::IrAttributeKey::Pk => "PK ",
+                    fm_core::IrAttributeKey::Fk => "FK ",
+                    fm_core::IrAttributeKey::Uk => "UK ",
+                    fm_core::IrAttributeKey::None => "",
+                };
+                let attr_text = format!("{key_prefix}{} {}", attr.data_type, attr.name);
+                let font_weight = if attr.key != fm_core::IrAttributeKey::None {
+                    "bold"
+                } else {
+                    "normal"
+                };
+                group = group.child(
+                    Element::text()
+                        .x(x + 8.0)
+                        .y(attr_y)
+                        .content(&attr_text)
+                        .attr("text-anchor", "start")
+                        .attr("dominant-baseline", "central")
+                        .attr_num("font-size", attr_font_size)
+                        .attr("font-weight", font_weight)
+                        .attr("font-family", &config.font_family)
+                        .fill(&colors.text)
+                        .class("fm-er-attribute"),
+                );
+                attr_y += attr_font_size * 1.3;
+            }
         } else if let Some(node) = ir_node
             && let Some(ref c4_meta) = node.c4_meta
         {

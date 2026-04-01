@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 /// Returns true for characters that occupy approximately 2 columns in
 /// monospace/proportional fonts — CJK ideographs, fullwidth forms, and
 /// common emoji. Based on UAX #11 East Asian Width property (W/F categories).
-fn is_east_asian_wide(c: char) -> bool {
+const fn is_east_asian_wide(c: char) -> bool {
     let cp = c as u32;
     matches!(cp,
         // CJK Unified Ideographs
@@ -153,7 +153,7 @@ pub enum CharWidthClass {
 impl CharWidthClass {
     /// Classify a character into a width class.
     #[must_use]
-    pub fn classify(c: char) -> Self {
+    pub const fn classify(c: char) -> Self {
         match c {
             'i' | 'l' | '|' | '!' | '\'' | '.' | ',' | ':' | ';' => Self::VeryNarrow,
             'I' | 'j' | 't' | 'f' | 'r' | '(' | ')' | '[' | ']' => Self::Narrow,
@@ -295,7 +295,9 @@ impl FontMetrics {
     #[must_use]
     pub fn estimate_height(&self, text: &str) -> f32 {
         let line_count = text.lines().count().max(1);
-        u32::try_from(line_count).unwrap_or(u32::MAX) as f32 * self.line_height_px()
+        #[allow(clippy::cast_precision_loss)]
+        let line_count_f32 = u32::try_from(line_count).unwrap_or(u32::MAX) as f32;
+        line_count_f32 * self.line_height_px()
     }
 
     /// Estimate both width and height.
@@ -426,7 +428,7 @@ mod tests {
     #[test]
     fn default_metrics_are_reasonable() {
         let metrics = FontMetrics::default();
-        assert_eq!(metrics.font_size(), 15.0);
+        assert!((metrics.font_size() - 15.0).abs() < f32::EPSILON);
         assert!(metrics.avg_char_width() > 5.0);
         assert!(metrics.avg_char_width() < 15.0);
     }
@@ -462,7 +464,7 @@ mod tests {
         let wide_width = metrics.estimate_width("mmm");
 
         // Monospace should have consistent width for all characters
-        assert_eq!(wide_width, narrow_width);
+        assert!((wide_width - narrow_width).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -527,7 +529,7 @@ mod tests {
         let w1 = metrics.estimate_width(text);
         let w2 = metrics.estimate_width(text);
 
-        assert_eq!(w1, w2);
+        assert!((w1 - w2).abs() < f32::EPSILON);
     }
 
     #[test]
