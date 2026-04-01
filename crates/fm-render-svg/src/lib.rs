@@ -2503,6 +2503,38 @@ fn render_quadrant_svg(
             .class("fm-quadrant-axis"),
     );
 
+    // Grid lines at 25% intervals.
+    let grid_color = axis_color;
+    for i in 1..4 {
+        let frac = i as f32 / 4.0;
+        // Vertical grid lines.
+        doc = doc.child(
+            Element::line()
+                .x1(margin_left + chart_w * frac)
+                .y1(margin_top)
+                .x2(margin_left + chart_w * frac)
+                .y2(margin_top + chart_h)
+                .stroke(grid_color)
+                .stroke_width(0.5)
+                .attr("stroke-dasharray", "4,4")
+                .attr("opacity", "0.3")
+                .class("fm-quadrant-grid"),
+        );
+        // Horizontal grid lines.
+        doc = doc.child(
+            Element::line()
+                .x1(margin_left)
+                .y1(margin_top + chart_h * frac)
+                .x2(margin_left + chart_w)
+                .y2(margin_top + chart_h * frac)
+                .stroke(grid_color)
+                .stroke_width(0.5)
+                .attr("stroke-dasharray", "4,4")
+                .attr("opacity", "0.3")
+                .class("fm-quadrant-grid"),
+        );
+    }
+
     // Axis labels.
     if let Some(left) = &quad_meta.x_axis_left {
         doc = doc.child(
@@ -2523,6 +2555,34 @@ fn render_quadrant_svg(
                 .x(margin_left + chart_w)
                 .y(margin_top + chart_h + 20.0)
                 .content(right)
+                .attr("text-anchor", "end")
+                .attr_num("font-size", config.font_size * 0.8)
+                .attr("font-family", &config.font_family)
+                .fill(&theme.colors.text)
+                .class("fm-quadrant-axis-label"),
+        );
+    }
+
+    // Y-axis labels.
+    if let Some(bottom) = &quad_meta.y_axis_bottom {
+        doc = doc.child(
+            Element::text()
+                .x(margin_left - 10.0)
+                .y(margin_top + chart_h)
+                .content(bottom)
+                .attr("text-anchor", "end")
+                .attr_num("font-size", config.font_size * 0.8)
+                .attr("font-family", &config.font_family)
+                .fill(&theme.colors.text)
+                .class("fm-quadrant-axis-label"),
+        );
+    }
+    if let Some(top) = &quad_meta.y_axis_top {
+        doc = doc.child(
+            Element::text()
+                .x(margin_left - 10.0)
+                .y(margin_top + config.font_size * 0.3)
+                .content(top)
                 .attr("text-anchor", "end")
                 .attr_num("font-size", config.font_size * 0.8)
                 .attr("font-family", &config.font_family)

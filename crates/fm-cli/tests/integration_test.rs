@@ -8,7 +8,9 @@ use fm_core::{
 };
 use fm_layout::{layout_diagram, layout_diagram_traced};
 use fm_parser::parse;
-use fm_render_svg::{SvgBackend, SvgRenderConfig, render_svg, render_svg_with_config};
+use fm_render_svg::{
+    SvgBackend, SvgRenderConfig, render_svg, render_svg_with_config, render_svg_with_layout,
+};
 use fm_render_term::render_term;
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -575,6 +577,15 @@ fn write_evidence_root_fixture() -> TempDir {
             "[evidence_ledger]\n",
             "enabled = true\n",
             "blocking = false\n\n",
+            "[performance_regression]\n",
+            "enabled = true\n",
+            "blocking = true\n",
+            "warn_threshold_pct = 5.0\n",
+            "fail_threshold_pct = 10.0\n",
+            "sample_count = 3\n",
+            "baseline_path = \".ci/perf-baseline.json\"\n",
+            "slo_path = \".ci/slo.yaml\"\n",
+            "benchmark_commands = [\"cargo test -p fm-layout perf_baseline_ -- --nocapture\"]\n\n",
             "[release_gate_overrides]\n",
             "enabled = true\n",
             "policy_id = \"fm.release-gate.override@v1\"\n",
@@ -591,6 +602,11 @@ fn write_evidence_root_fixture() -> TempDir {
         "schema_version = 1\noverrides = []\n",
     )
     .expect("write release gate overrides");
+    std::fs::write(
+        temp.path().join(".ci/slo.yaml"),
+        "schema_version: 1\nbenchmarks: {}\n",
+    )
+    .expect("write perf slo policy");
     temp
 }
 
@@ -2334,6 +2350,17 @@ fn evidence_perf_report_writes_summary_and_supporting_artifacts() {
     )
     .expect("write perf baseline");
     std::fs::write(
+        temp.path().join(".ci/slo.yaml"),
+        r#"schema_version: 1
+benchmarks:
+  sugiyama_small:
+    max_p99_ns: 20000000
+  comparison_50.sugiyama:
+    max_p99_ns: 70000000
+"#,
+    )
+    .expect("write perf slo policy");
+    std::fs::write(
         temp.path().join("perf.log"),
         concat!(
             "{\"benchmark\":\"sugiyama_small\",\"nodes\":20,\"edges\":38,\"ns\":10000000}\n",
@@ -2355,6 +2382,8 @@ fn evidence_perf_report_writes_summary_and_supporting_artifacts() {
         "artifacts/evidence/perf",
         "--baseline",
         ".ci/perf-baseline.json",
+        "--slo-policy",
+        ".ci/slo.yaml",
         "--warn-threshold-pct",
         "5",
         "--fail-threshold-pct",
@@ -2367,9 +2396,15 @@ fn evidence_perf_report_writes_summary_and_supporting_artifacts() {
     );
 
     let summary: serde_json::Value = serde_json::from_slice(&output.stdout).expect("summary json");
+    let expected_slo_path = temp.path().join(".ci/slo.yaml").display().to_string();
     assert_eq!(summary["schema_version"], 1);
     assert_eq!(summary["benchmark_count"], 4);
+    assert_eq!(summary["failed_benchmark_count"], 0);
     assert_eq!(summary["release_blocking_pass"], true);
+    assert_eq!(
+        summary["slo_policy_path"].as_str(),
+        Some(expected_slo_path.as_str())
+    );
 
     let summary_path = temp.path().join("artifacts/evidence/perf/summary.json");
     let env_path = temp.path().join("artifacts/evidence/perf/env.json");
@@ -2410,6 +2445,15 @@ fn evidence_perf_report_fails_on_tail_regression() {
     )
     .expect("write perf baseline");
     std::fs::write(
+        temp.path().join(".ci/slo.yaml"),
+        r#"schema_version: 1
+benchmarks:
+  sugiyama_small:
+    max_p99_ns: 15000000
+"#,
+    )
+    .expect("write perf slo policy");
+    std::fs::write(
         temp.path().join("perf.log"),
         concat!(
             "{\"benchmark\":\"sugiyama_small\",\"nodes\":20,\"edges\":38,\"ns\":20000000}\n",
@@ -2429,6 +2473,8 @@ fn evidence_perf_report_fails_on_tail_regression() {
         "artifacts/evidence/perf",
         "--baseline",
         ".ci/perf-baseline.json",
+        "--slo-policy",
+        ".ci/slo.yaml",
         "--warn-threshold-pct",
         "5",
         "--fail-threshold-pct",
@@ -2437,6 +2483,49 @@ fn evidence_perf_report_fails_on_tail_regression() {
     assert!(
         !output.status.success(),
         "perf-report should fail when p99 regression exceeds threshold"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("performance regression exceeded fail threshold"));
+}
+
+#[test]
+fn evidence_perf_report_fails_when_slo_throughput_floor_is_breached() {
+    let temp = write_evidence_root_fixture();
+    let root = temp.path().to_str().expect("root path utf-8");
+
+    std::fs::write(
+        temp.path().join(".ci/slo.yaml"),
+        r#"schema_version: 1
+benchmarks:
+  render_svg_small:
+    min_median_ops_per_sec: 500.0
+"#,
+    )
+    .expect("write perf slo policy");
+    std::fs::write(
+        temp.path().join("perf.log"),
+        concat!(
+            "{\"benchmark\":\"render_svg_small\",\"nodes\":20,\"edges\":19,\"ns\":5000000}\n",
+            "{\"benchmark\":\"render_svg_small\",\"nodes\":20,\"edges\":19,\"ns\":6000000}\n",
+            "{\"benchmark\":\"render_svg_small\",\"nodes\":20,\"edges\":19,\"ns\":5500000}\n"
+        ),
+    )
+    .expect("write perf log");
+
+    let output = run_evidence(&[
+        "--root",
+        root,
+        "perf-report",
+        "--input",
+        "perf.log",
+        "--out-dir",
+        "artifacts/evidence/perf",
+        "--slo-policy",
+        ".ci/slo.yaml",
+    ]);
+    assert!(
+        !output.status.success(),
+        "perf-report should fail when throughput SLO is breached"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("performance regression exceeded fail threshold"));
@@ -2721,6 +2810,95 @@ fn cross_target_determinism_svg_and_term_are_stable() {
 }
 
 // ─── Layout quality benchmarks (bd-30y.7) ───────────────────────────────────
+
+fn perf_slo_flowchart(node_count: usize) -> String {
+    let mut lines = vec![String::from("flowchart LR")];
+    for i in 0..node_count {
+        lines.push(format!("  N{i}[Node {i}]"));
+    }
+    for i in 0..node_count.saturating_sub(1) {
+        lines.push(format!("  N{i}-->N{}", i + 1));
+    }
+    if node_count > 4 {
+        lines.push(format!("  N0-->N{}", node_count / 2));
+        lines.push(format!("  N{}-->N{}", node_count / 3, node_count - 1));
+    }
+    lines.join("\n")
+}
+
+fn perf_slo_average_ns(iterations: usize, mut op: impl FnMut()) -> u128 {
+    let start = std::time::Instant::now();
+    for _ in 0..iterations {
+        op();
+    }
+    start.elapsed().as_nanos() / iterations.max(1) as u128
+}
+
+fn perf_slo_emit_parse_benchmark(label: &str, input: &str, iterations: usize, max_ns: u128) {
+    let parsed = parse(input);
+    let ns = perf_slo_average_ns(iterations, || {
+        let parsed = parse(input);
+        std::hint::black_box(parsed.ir.nodes.len());
+    });
+    println!(
+        "{{\"benchmark\":\"{label}\",\"nodes\":{},\"edges\":{},\"ns\":{ns}}}",
+        parsed.ir.nodes.len(),
+        parsed.ir.edges.len()
+    );
+    assert!(ns < max_ns, "{label} took {ns}ns (> {max_ns}ns)");
+}
+
+fn perf_slo_emit_render_benchmark(label: &str, input: &str, iterations: usize, max_ns: u128) {
+    let parsed = parse(input);
+    let layout = layout_diagram(&parsed.ir);
+    let config = SvgRenderConfig::default();
+    let ns = perf_slo_average_ns(iterations, || {
+        let svg = render_svg_with_layout(&parsed.ir, &layout, &config);
+        std::hint::black_box(svg.len());
+    });
+    println!(
+        "{{\"benchmark\":\"{label}\",\"nodes\":{},\"edges\":{},\"ns\":{ns}}}",
+        parsed.ir.nodes.len(),
+        parsed.ir.edges.len()
+    );
+    assert!(ns < max_ns, "{label} took {ns}ns (> {max_ns}ns)");
+}
+
+#[test]
+fn perf_slo_parse_flowchart_small() {
+    let input = perf_slo_flowchart(20);
+    perf_slo_emit_parse_benchmark("parse_flowchart_small", &input, 200, 10_000_000);
+}
+
+#[test]
+fn perf_slo_parse_flowchart_medium() {
+    let input = perf_slo_flowchart(100);
+    perf_slo_emit_parse_benchmark("parse_flowchart_medium", &input, 50, 50_000_000);
+}
+
+#[test]
+fn perf_slo_parse_flowchart_large() {
+    let input = perf_slo_flowchart(500);
+    perf_slo_emit_parse_benchmark("parse_flowchart_large", &input, 5, 250_000_000);
+}
+
+#[test]
+fn perf_slo_render_svg_small() {
+    let input = perf_slo_flowchart(20);
+    perf_slo_emit_render_benchmark("render_svg_small", &input, 100, 20_000_000);
+}
+
+#[test]
+fn perf_slo_render_svg_medium() {
+    let input = perf_slo_flowchart(100);
+    perf_slo_emit_render_benchmark("render_svg_medium", &input, 20, 100_000_000);
+}
+
+#[test]
+fn perf_slo_render_svg_large() {
+    let input = perf_slo_flowchart(500);
+    perf_slo_emit_render_benchmark("render_svg_large", &input, 3, 500_000_000);
+}
 
 /// Verify quantitative layout quality metrics for standard graph structures.
 #[test]

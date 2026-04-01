@@ -17,6 +17,7 @@ pub use mermaid_parser::first_significant_line;
 ///
 /// This ensures consistent node identity across the engine and safe identifiers
 /// for backend layout engines and rendering formats.
+#[must_use]
 pub fn normalize_identifier(raw: &str) -> String {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -93,7 +94,7 @@ pub struct ParseResult {
 
 impl ParseResult {
     #[must_use]
-    pub fn parse_mode(&self) -> MermaidParseMode {
+    pub const fn parse_mode(&self) -> MermaidParseMode {
         self.ir.meta.parse_mode
     }
 }
@@ -394,7 +395,7 @@ fn content_heuristics(input: &str) -> Option<DetectedType> {
     // Class diagram patterns
     if content.contains("<|--")
         || content.contains("--|>")
-        || (content.contains("class ") && content.contains("{"))
+        || (content.contains("class ") && content.contains('{'))
     {
         return Some(DetectedType {
             diagram_type: DiagramType::Class,
@@ -449,7 +450,7 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
         curr_row[0] = i + 1;
 
         for (j, b_char) in b_chars.iter().enumerate() {
-            let cost = if a_char == b_char { 0 } else { 1 };
+            let cost = usize::from(a_char != b_char);
             curr_row[j + 1] = (prev_row[j + 1] + 1) // deletion
                 .min(curr_row[j] + 1) // insertion
                 .min(prev_row[j] + cost); // substitution

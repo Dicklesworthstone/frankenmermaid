@@ -18,8 +18,10 @@ const BUNDLE_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_OVERRIDE_POLICY_PATH: &str = ".ci/quality-gates.toml";
 const DEFAULT_OVERRIDE_LEDGER_PATH: &str = ".ci/release-gate-overrides.toml";
 const DEFAULT_PERF_BASELINE_PATH: &str = ".ci/perf-baseline.json";
+const DEFAULT_PERF_SLO_PATH: &str = ".ci/slo.yaml";
 const OVERRIDE_SCHEMA_VERSION: u32 = 1;
 const PERF_BASELINE_SCHEMA_VERSION: u32 = 1;
+const PERF_SLO_SCHEMA_VERSION: u32 = 1;
 const PERF_BOOTSTRAP_ITERATIONS: usize = 200;
 const MIN_OVERRIDE_REASON_LEN: usize = 16;
 const KNOWN_RELEASE_GATES: &[&str] = &[
@@ -219,6 +221,10 @@ struct PerfReportArgs {
     #[arg(long)]
     baseline: Option<PathBuf>,
 
+    /// Optional SLO policy used for latency/throughput enforcement.
+    #[arg(long)]
+    slo_policy: Option<PathBuf>,
+
     /// Warning threshold for p99 regressions vs baseline.
     #[arg(long, default_value_t = 5.0)]
     warn_threshold_pct: f64,
@@ -378,6 +384,24 @@ struct PerfBaselineEntry {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+struct PerfSloPolicyFile {
+    schema_version: u32,
+    benchmarks: BTreeMap<String, PerfSloEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PerfSloEntry {
+    #[serde(default)]
+    max_p50_ns: Option<u64>,
+    #[serde(default)]
+    max_p95_ns: Option<u64>,
+    #[serde(default)]
+    max_p99_ns: Option<u64>,
+    #[serde(default)]
+    min_median_ops_per_sec: Option<f64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct PerfLogRecord {
     benchmark: String,
     #[serde(default)]
@@ -401,10 +425,12 @@ struct PerfSummaryReport {
     input_path: String,
     input_sha256: String,
     baseline_path: Option<String>,
+    slo_policy_path: Option<String>,
     warn_threshold_pct: f64,
     fail_threshold_pct: f64,
     release_blocking_pass: bool,
     benchmark_count: usize,
+    failed_benchmark_count: usize,
     benchmarks: Vec<PerfBenchmarkSummary>,
 }
 
@@ -420,13 +446,26 @@ struct PerfBenchmarkSummary {
     median_ns: u64,
     p95_ns: u64,
     p99_ns: u64,
+    median_ops_per_sec: f64,
     median_ci_low_ns: u64,
     median_ci_high_ns: u64,
     p99_ci_low_ns: u64,
     p99_ci_high_ns: u64,
     baseline_p99_ns: Option<u64>,
     regression_vs_baseline_pct: Option<f64>,
+    baseline_gate_status: PerfGateStatus,
+    slo_gate_status: PerfGateStatus,
+    slo: Option<PerfSloEvaluation>,
     gate_status: PerfGateStatus,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PerfSloEvaluation {
+    max_p50_ns: Option<u64>,
+    max_p95_ns: Option<u64>,
+    max_p99_ns: Option<u64>,
+    min_median_ops_per_sec: Option<f64>,
+    violations: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -994,11 +1033,25 @@ fn perf_report_command(root: &Path, args: PerfReportArgs) -> Result<()> {
     } else {
         None
     };
+    let slo_path = args
+        .slo_policy
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_PERF_SLO_PATH));
+    let slo_path = resolve_from_root(root, &slo_path);
+    let slo_policy = if slo_path.exists() {
+        Some(load_perf_slo_policy(&slo_path)?)
+    } else {
+        None
+    };
 
     let mut release_blocking_pass = true;
+    let mut failed_benchmark_count = 0;
     let mut summaries = Vec::new();
     for (benchmark, bucket) in &buckets {
         let baseline_entry = baseline
+            .as_ref()
+            .and_then(|file| file.benchmarks.get(benchmark))
+            .cloned();
+        let slo_entry = slo_policy
             .as_ref()
             .and_then(|file| file.benchmarks.get(benchmark))
             .cloned();
@@ -1006,11 +1059,13 @@ fn perf_report_command(root: &Path, args: PerfReportArgs) -> Result<()> {
             benchmark,
             bucket,
             baseline_entry,
+            slo_entry,
             args.warn_threshold_pct,
             args.fail_threshold_pct,
         )?;
         if summary.gate_status == PerfGateStatus::Fail {
             release_blocking_pass = false;
+            failed_benchmark_count += 1;
         }
         summaries.push(summary);
     }
@@ -1023,10 +1078,12 @@ fn perf_report_command(root: &Path, args: PerfReportArgs) -> Result<()> {
         baseline_path: baseline
             .as_ref()
             .map(|_| baseline_path.display().to_string()),
+        slo_policy_path: slo_policy.as_ref().map(|_| slo_path.display().to_string()),
         warn_threshold_pct: args.warn_threshold_pct,
         fail_threshold_pct: args.fail_threshold_pct,
         release_blocking_pass,
         benchmark_count: summaries.len(),
+        failed_benchmark_count,
         benchmarks: summaries,
     };
 
@@ -1172,6 +1229,7 @@ fn collect_bundle_sources(
         PathBuf::from("evidence/pattern_inventory.md"),
         PathBuf::from(".ci/quality-gates.toml"),
         PathBuf::from(".ci/release-gate-overrides.toml"),
+        PathBuf::from(".ci/slo.yaml"),
     ] {
         let source = root.join(&relative);
         if source.exists() {
@@ -1179,6 +1237,7 @@ fn collect_bundle_sources(
                 relative.as_path(),
                 path if path == Path::new(".ci/quality-gates.toml")
                     || path == Path::new(".ci/release-gate-overrides.toml")
+                    || path == Path::new(".ci/slo.yaml")
             ) {
                 EvidenceFileKind::Policy
             } else {
@@ -1500,6 +1559,20 @@ fn load_perf_baseline(path: &Path) -> Result<PerfBaselineFile> {
     Ok(baseline)
 }
 
+fn load_perf_slo_policy(path: &Path) -> Result<PerfSloPolicyFile> {
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("failed to read perf slo policy {}", path.display()))?;
+    let policy: PerfSloPolicyFile = serde_yaml::from_str(&raw)
+        .with_context(|| format!("failed to parse perf slo policy {}", path.display()))?;
+    if policy.schema_version != PERF_SLO_SCHEMA_VERSION {
+        bail!(
+            "unexpected perf slo schema version {}",
+            policy.schema_version
+        );
+    }
+    Ok(policy)
+}
+
 fn parse_perf_log(raw: &str) -> Result<BTreeMap<String, PerfSampleBucket>> {
     let mut buckets = BTreeMap::<String, PerfSampleBucket>::new();
     for line in raw.lines() {
@@ -1563,6 +1636,7 @@ fn summarize_perf_bucket(
     benchmark: &str,
     bucket: &PerfSampleBucket,
     baseline: Option<PerfBaselineEntry>,
+    slo: Option<PerfSloEntry>,
     warn_threshold_pct: f64,
     fail_threshold_pct: f64,
 ) -> Result<PerfBenchmarkSummary> {
@@ -1575,10 +1649,11 @@ fn summarize_perf_bucket(
     let median_ns = percentile_u64(&sorted, 0.50);
     let p95_ns = percentile_u64(&sorted, 0.95);
     let p99_ns = percentile_u64(&sorted, 0.99);
+    let median_ops_per_sec = ops_per_sec_from_ns(median_ns);
     let (median_ci_low_ns, median_ci_high_ns) = bootstrap_interval(&sorted, 0.50);
     let (p99_ci_low_ns, p99_ci_high_ns) = bootstrap_interval(&sorted, 0.99);
 
-    let (baseline_p99_ns, regression_vs_baseline_pct, gate_status) =
+    let (baseline_p99_ns, regression_vs_baseline_pct, baseline_gate_status) =
         if let Some(baseline) = baseline {
             let pct = if baseline.p99_ns == 0 {
                 0.0
@@ -1596,6 +1671,8 @@ fn summarize_perf_bucket(
         } else {
             (None, None, PerfGateStatus::NoBaseline)
         };
+    let (slo_gate_status, slo) = evaluate_slo(benchmark, slo, median_ns, p95_ns, p99_ns)?;
+    let gate_status = combine_gate_statuses(baseline_gate_status, slo_gate_status);
 
     Ok(PerfBenchmarkSummary {
         benchmark: benchmark.to_string(),
@@ -1608,14 +1685,94 @@ fn summarize_perf_bucket(
         median_ns,
         p95_ns,
         p99_ns,
+        median_ops_per_sec,
         median_ci_low_ns,
         median_ci_high_ns,
         p99_ci_low_ns,
         p99_ci_high_ns,
         baseline_p99_ns,
         regression_vs_baseline_pct,
+        baseline_gate_status,
+        slo_gate_status,
+        slo,
         gate_status,
     })
+}
+
+fn evaluate_slo(
+    benchmark: &str,
+    slo: Option<PerfSloEntry>,
+    median_ns: u64,
+    p95_ns: u64,
+    p99_ns: u64,
+) -> Result<(PerfGateStatus, Option<PerfSloEvaluation>)> {
+    let Some(slo) = slo else {
+        return Ok((PerfGateStatus::NoBaseline, None));
+    };
+    let mut violations = Vec::new();
+    if let Some(max_p50_ns) = slo.max_p50_ns
+        && median_ns > max_p50_ns
+    {
+        violations.push(format!(
+            "{benchmark} median_ns={median_ns} exceeded max_p50_ns={max_p50_ns}"
+        ));
+    }
+    if let Some(max_p95_ns) = slo.max_p95_ns
+        && p95_ns > max_p95_ns
+    {
+        violations.push(format!(
+            "{benchmark} p95_ns={p95_ns} exceeded max_p95_ns={max_p95_ns}"
+        ));
+    }
+    if let Some(max_p99_ns) = slo.max_p99_ns
+        && p99_ns > max_p99_ns
+    {
+        violations.push(format!(
+            "{benchmark} p99_ns={p99_ns} exceeded max_p99_ns={max_p99_ns}"
+        ));
+    }
+    let median_ops_per_sec = ops_per_sec_from_ns(median_ns);
+    if let Some(min_median_ops_per_sec) = slo.min_median_ops_per_sec
+        && median_ops_per_sec < min_median_ops_per_sec
+    {
+        violations.push(format!(
+            "{benchmark} median_ops_per_sec={median_ops_per_sec:.2} fell below min_median_ops_per_sec={min_median_ops_per_sec:.2}"
+        ));
+    }
+    let gate_status = if violations.is_empty() {
+        PerfGateStatus::Pass
+    } else {
+        PerfGateStatus::Fail
+    };
+    Ok((
+        gate_status,
+        Some(PerfSloEvaluation {
+            max_p50_ns: slo.max_p50_ns,
+            max_p95_ns: slo.max_p95_ns,
+            max_p99_ns: slo.max_p99_ns,
+            min_median_ops_per_sec: slo.min_median_ops_per_sec,
+            violations,
+        }),
+    ))
+}
+
+fn combine_gate_statuses(left: PerfGateStatus, right: PerfGateStatus) -> PerfGateStatus {
+    use PerfGateStatus::{Fail, NoBaseline, Pass, Warn};
+
+    match (left, right) {
+        (Fail, _) | (_, Fail) => Fail,
+        (Warn, _) | (_, Warn) => Warn,
+        (Pass, Pass) => Pass,
+        (NoBaseline, Pass) | (Pass, NoBaseline) => Pass,
+        (NoBaseline, NoBaseline) => NoBaseline,
+    }
+}
+
+fn ops_per_sec_from_ns(ns: u64) -> f64 {
+    if ns == 0 {
+        return f64::INFINITY;
+    }
+    1_000_000_000.0 / ns as f64
 }
 
 fn percentile_u64(sorted: &[u64], quantile: f64) -> u64 {

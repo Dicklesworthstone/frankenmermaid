@@ -14,7 +14,7 @@ use fm_core::{
 use crate::ParseResult;
 use crate::normalize_identifier;
 
-/// Open fragment entry: (kind, label, start_edge, alternatives, child_fragment_indices).
+/// Open fragment entry: (kind, label, `start_edge`, alternatives, `child_fragment_indices`).
 type OpenFragment = (
     FragmentKind,
     String,
@@ -33,7 +33,7 @@ struct StateCompositeContext {
     pending_region_members: Vec<IrNodeId>,
 }
 
-pub(crate) struct IrBuilder {
+pub struct IrBuilder {
     ir: MermaidDiagramIr,
     // Lookups for uniqueness
     node_index_by_id: BTreeMap<String, IrNodeId>,
@@ -44,7 +44,7 @@ pub(crate) struct IrBuilder {
     warnings: Vec<String>,
     /// Track nodes that were auto-created (for dangling edge recovery)
     auto_created_nodes: Vec<IrNodeId>,
-    /// Stack of open activations per participant name: (node_id, start_edge_index, depth)
+    /// Stack of open activations per participant name: (`node_id`, `start_edge_index`, depth)
     activation_stacks: BTreeMap<String, Vec<(IrNodeId, usize)>>,
     /// Currently open participant group (label, color, collected participant names)
     current_participant_group: Option<(String, Option<String>, Vec<String>)>,
@@ -57,7 +57,7 @@ pub(crate) struct IrBuilder {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ParsedLabel {
+pub struct ParsedLabel {
     pub(crate) text: String,
     pub(crate) segments: Vec<IrLabelSegment>,
 }
@@ -93,7 +93,7 @@ impl IrBuilder {
         }
     }
 
-    pub(crate) fn set_direction(&mut self, direction: GraphDirection) {
+    pub(crate) const fn set_direction(&mut self, direction: GraphDirection) {
         self.ir.direction = direction;
         self.ir.meta.direction = direction;
     }
@@ -108,7 +108,7 @@ impl IrBuilder {
         }
     }
 
-    pub(crate) fn set_parse_mode(&mut self, parse_mode: MermaidParseMode) {
+    pub(crate) const fn set_parse_mode(&mut self, parse_mode: MermaidParseMode) {
         self.ir.meta.parse_mode = parse_mode;
     }
 
@@ -163,7 +163,7 @@ impl IrBuilder {
             .insert(key, value);
     }
 
-    pub(crate) fn set_init_flowchart_direction(&mut self, direction: GraphDirection) {
+    pub(crate) const fn set_init_flowchart_direction(&mut self, direction: GraphDirection) {
         self.ir.meta.init.config.flowchart_direction = Some(direction);
     }
 
@@ -171,7 +171,7 @@ impl IrBuilder {
         self.ir.meta.init.config.flowchart_curve = Some(curve);
     }
 
-    pub(crate) fn set_init_sequence_mirror_actors(&mut self, mirror_actors: bool) {
+    pub(crate) const fn set_init_sequence_mirror_actors(&mut self, mirror_actors: bool) {
         self.ir.meta.init.config.sequence_mirror_actors = Some(mirror_actors);
     }
 
@@ -182,7 +182,7 @@ impl IrBuilder {
         }
     }
 
-    pub(crate) fn set_c4_show_legend(&mut self, show_legend: bool) {
+    pub(crate) const fn set_c4_show_legend(&mut self, show_legend: bool) {
         self.ir.meta.c4_show_legend = show_legend;
     }
 
@@ -395,11 +395,10 @@ impl IrBuilder {
             .state_stack
             .last()
             .map(|context| context.subgraph_index);
-        let lookup_key = self
-            .state_stack
-            .last()
-            .map(|context| format!("{}/{}", context.lookup_key, name))
-            .unwrap_or_else(|| format!("state/{name}"));
+        let lookup_key = self.state_stack.last().map_or_else(
+            || format!("state/{name}"),
+            |context| format!("{}/{}", context.lookup_key, name),
+        );
 
         let Some(cluster_index) = self.ensure_cluster(&lookup_key, title.or(Some(name)), span)
         else {
@@ -628,15 +627,15 @@ impl IrBuilder {
     }
 
     /// Mutable access to the IR for direct field manipulation.
-    pub(crate) fn ir_mut(&mut self) -> &mut MermaidDiagramIr {
+    pub(crate) const fn ir_mut(&mut self) -> &mut MermaidDiagramIr {
         &mut self.ir
     }
 
-    pub(crate) fn node_count(&self) -> usize {
+    pub(crate) const fn node_count(&self) -> usize {
         self.ir.nodes.len()
     }
 
-    pub(crate) fn edge_count(&self) -> usize {
+    pub(crate) const fn edge_count(&self) -> usize {
         self.ir.edges.len()
     }
 
@@ -645,7 +644,7 @@ impl IrBuilder {
         self.node_index_by_id.get(key)
     }
 
-    /// Get a node by its IrNodeId.
+    /// Get a node by its `IrNodeId`.
     pub(crate) fn get_node_by_id(&self, id: IrNodeId) -> Option<&IrNode> {
         self.ir.nodes.get(id.0)
     }
@@ -708,7 +707,7 @@ impl IrBuilder {
             let message = if count == 1 {
                 format!(
                     "Auto-created placeholder node '{}' for dangling edge reference",
-                    node_ids.first().map(String::as_str).unwrap_or("")
+                    node_ids.first().map_or("", String::as_str)
                 )
             } else {
                 format!(
@@ -739,8 +738,7 @@ impl IrBuilder {
         if unresolved_count > 0 {
             self.ir.add_diagnostic(
                 Diagnostic::warning(format!(
-                    "{} edge(s) have unresolved endpoints",
-                    unresolved_count
+                    "{unresolved_count} edge(s) have unresolved endpoints"
                 ))
                 .with_category(DiagnosticCategory::Semantic),
             );
@@ -1160,7 +1158,7 @@ impl IrBuilder {
             data_type: data_type.to_string(),
             name: name.to_string(),
             key,
-            comment: comment.map(|s| s.to_string()),
+            comment: comment.map(std::string::ToString::to_string),
         });
     }
 
@@ -1247,7 +1245,7 @@ impl IrBuilder {
 }
 
 impl IrBuilder {
-    fn node_kind(&self) -> IrNodeKind {
+    const fn node_kind(&self) -> IrNodeKind {
         match self.ir.diagram_type {
             DiagramType::Er => IrNodeKind::Entity,
             DiagramType::Sequence => IrNodeKind::Participant,
@@ -1262,7 +1260,7 @@ impl IrBuilder {
         }
     }
 
-    fn edge_kind(&self) -> IrEdgeKind {
+    const fn edge_kind(&self) -> IrEdgeKind {
         match self.ir.diagram_type {
             DiagramType::Er => IrEdgeKind::Relationship,
             DiagramType::Sequence => IrEdgeKind::Message,

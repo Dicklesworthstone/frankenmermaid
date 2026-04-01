@@ -384,7 +384,7 @@ fn parse_dot_shape(attributes: &str) -> Option<NodeShape> {
     dot_shape_to_node_shape(&token)
 }
 
-/// Map DOT shape names to frankenmermaid NodeShape.
+/// Map DOT shape names to frankenmermaid `NodeShape`.
 fn dot_shape_to_node_shape(name: &str) -> Option<NodeShape> {
     Some(match name {
         "box" | "rect" | "rectangle" | "square" => NodeShape::Rect,
@@ -532,9 +532,7 @@ fn normalize_identifier(raw: &str) -> String {
 
 fn is_directed_graph(input: &str) -> bool {
     let first_line = input.lines().map(str::trim).find(|line| !line.is_empty());
-    first_line
-        .map(|line| line.to_ascii_lowercase().contains("digraph"))
-        .unwrap_or(false)
+    first_line.is_some_and(|line| line.to_ascii_lowercase().contains("digraph"))
         || input.contains("->")
 }
 

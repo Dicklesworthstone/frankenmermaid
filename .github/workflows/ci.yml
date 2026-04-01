@@ -12,11 +12,12 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       proptest_cases: ${{ steps.parse.outputs.proptest_cases }}
-      benchmark_command: ${{ steps.parse.outputs.benchmark_command }}
+      benchmark_commands_json: ${{ steps.parse.outputs.benchmark_commands_json }}
       benchmark_warn_pct: ${{ steps.parse.outputs.benchmark_warn_pct }}
       benchmark_fail_pct: ${{ steps.parse.outputs.benchmark_fail_pct }}
       benchmark_sample_count: ${{ steps.parse.outputs.benchmark_sample_count }}
       benchmark_baseline_path: ${{ steps.parse.outputs.benchmark_baseline_path }}
+      benchmark_slo_path: ${{ steps.parse.outputs.benchmark_slo_path }}
       invariant_command: ${{ steps.parse.outputs.invariant_command }}
       determinism_command: ${{ steps.parse.outputs.determinism_command }}
       degradation_command: ${{ steps.parse.outputs.degradation_command }}
@@ -39,17 +40,19 @@ jobs:
         run: |
           python3 - <<'PY'
           import os
+          import json
           import tomllib
           from pathlib import Path
 
           config = tomllib.loads(Path(".ci/quality-gates.toml").read_text())
           outputs = {
               "proptest_cases": str(config["property_test"]["cases"]),
-              "benchmark_command": config["performance_regression"]["benchmark_command"],
+              "benchmark_commands_json": json.dumps(config["performance_regression"]["benchmark_commands"]),
               "benchmark_warn_pct": str(config["performance_regression"]["warn_threshold_pct"]),
               "benchmark_fail_pct": str(config["performance_regression"]["fail_threshold_pct"]),
               "benchmark_sample_count": str(config["performance_regression"]["sample_count"]),
               "benchmark_baseline_path": config["performance_regression"]["baseline_path"],
+              "benchmark_slo_path": config["performance_regression"]["slo_path"],
               "invariant_command": config["invariant_proof"]["command"],
               "determinism_command": config["determinism"]["command"],
               "degradation_command": config["degradation"]["command"],
@@ -338,13 +341,45 @@ jobs:
       - name: Collect repeated benchmark samples
         shell: bash
         run: |
-          mkdir -p artifacts/evidence/perf
-          : > artifacts/evidence/perf/layout-benchmark.log
-          for run in $(seq 1 "${{ needs.quality-gate-config.outputs.benchmark_sample_count }}"); do
-            echo "# benchmark_run=${run}" | tee -a artifacts/evidence/perf/layout-benchmark.log
-            ${{ needs.quality-gate-config.outputs.benchmark_command }} \
-              | tee -a artifacts/evidence/perf/layout-benchmark.log
-          done
+          export FM_BENCHMARK_COMMANDS_JSON='${{ needs.quality-gate-config.outputs.benchmark_commands_json }}'
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import subprocess
+
+          out_dir = pathlib.Path("artifacts/evidence/perf")
+          out_dir.mkdir(parents=True, exist_ok=True)
+          log_path = out_dir / "layout-benchmark.log"
+          commands = json.loads(os.environ["FM_BENCHMARK_COMMANDS_JSON"])
+          sample_count = int("${{ needs.quality-gate-config.outputs.benchmark_sample_count }}")
+
+          with log_path.open("w", encoding="utf-8") as fh:
+              for run in range(1, sample_count + 1):
+                  header = f"# benchmark_run={run}\n"
+                  print(header, end="")
+                  fh.write(header)
+                  fh.flush()
+                  for command in commands:
+                      proc = subprocess.run(
+                          command,
+                          shell=True,
+                          text=True,
+                          capture_output=True,
+                          check=False,
+                      )
+                      if proc.stdout:
+                          print(proc.stdout, end="")
+                          fh.write(proc.stdout)
+                      if proc.stderr:
+                          print(proc.stderr, end="")
+                          fh.write(proc.stderr)
+                      fh.flush()
+                      if proc.returncode != 0:
+                          raise SystemExit(
+                              f"benchmark command failed ({proc.returncode}): {command}"
+                          )
+          PY
 
       - name: Summarize statistical benchmark evidence
         shell: bash
@@ -353,6 +388,7 @@ jobs:
             --input artifacts/evidence/perf/layout-benchmark.log \
             --out-dir artifacts/evidence/perf \
             --baseline "${{ needs.quality-gate-config.outputs.benchmark_baseline_path }}" \
+            --slo-policy "${{ needs.quality-gate-config.outputs.benchmark_slo_path }}" \
             --warn-threshold-pct "${{ needs.quality-gate-config.outputs.benchmark_warn_pct }}" \
             --fail-threshold-pct "${{ needs.quality-gate-config.outputs.benchmark_fail_pct }}"
 

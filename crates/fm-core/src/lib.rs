@@ -3070,6 +3070,12 @@ pub struct MermaidLayoutDecisionAlternative {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MermaidDecisionWeight {
+    pub key: String,
+    pub value_permille: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MermaidLayoutDecisionRecord {
     pub kind: String,
     pub trace_id: TraceId,
@@ -3080,10 +3086,12 @@ pub struct MermaidLayoutDecisionRecord {
     pub requested_algorithm: String,
     pub selected_algorithm: String,
     pub capability_unavailable: bool,
+    pub decision_mode: String,
     pub dispatch_reason: String,
     pub guard_reason: String,
     pub fallback_applied: bool,
     pub confidence_permille: u16,
+    pub selected_expected_loss_permille: u32,
     pub node_count: usize,
     pub edge_count: usize,
     pub crossing_count: usize,
@@ -3095,6 +3103,8 @@ pub struct MermaidLayoutDecisionRecord {
     pub pressure_tier: MermaidPressureTier,
     pub budget_total_ms: u64,
     pub budget_exhausted: bool,
+    pub state_posterior: Vec<MermaidDecisionWeight>,
+    pub expected_loss: Vec<MermaidDecisionWeight>,
     pub alternatives: Vec<MermaidLayoutDecisionAlternative>,
     pub notes: Vec<String>,
 }
@@ -4329,17 +4339,18 @@ mod tests {
         IrParticipantGroup, IrPort, IrPortId, IrPortSideHint, IrSequenceFragment, IrSequenceMeta,
         IrSequenceNote, IrStyleDef, IrStyleRef, IrStyleTarget, IrSubgraph, IrSubgraphId, IrXyAxis,
         IrXyChartMeta, IrXySeries, IrXySeriesKind, LifecycleEventKind, MERMAID_SCHEMA_VERSION,
-        MermaidBudgetLedger, MermaidConfig, MermaidDegradationPlan, MermaidDiagramIr, MermaidError,
-        MermaidErrorCode, MermaidFallbackAction, MermaidFallbackPolicy, MermaidFidelity,
-        MermaidGlyphMode, MermaidGuardReport, MermaidLayoutDecisionAlternative,
-        MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord, MermaidNativePressureSignals,
-        MermaidPressureReport, MermaidPressureTier, MermaidQualityMode, MermaidSanitizeMode,
-        MermaidSupportLevel, MermaidWarningCode, MermaidWasmPressureSignals, NodeShape,
-        NotePosition, Position, Span, StructuredDiagnostic, capability_matrix,
-        capability_matrix_json_pretty, capability_readme_supported_diagram_types_markdown,
-        capability_readme_surface_markdown, documented_diagram_types, is_allowed_style_property,
-        mermaid_layout_guard_observability, parse_mermaid_js_config_value, parse_style_string,
-        sanitize_style_value, scale_budget, to_init_parse,
+        MermaidBudgetLedger, MermaidConfig, MermaidDecisionWeight, MermaidDegradationPlan,
+        MermaidDiagramIr, MermaidError, MermaidErrorCode, MermaidFallbackAction,
+        MermaidFallbackPolicy, MermaidFidelity, MermaidGlyphMode, MermaidGuardReport,
+        MermaidLayoutDecisionAlternative, MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord,
+        MermaidNativePressureSignals, MermaidPressureReport, MermaidPressureTier,
+        MermaidQualityMode, MermaidSanitizeMode, MermaidSupportLevel, MermaidWarningCode,
+        MermaidWasmPressureSignals, NodeShape, NotePosition, Position, Span, StructuredDiagnostic,
+        capability_matrix, capability_matrix_json_pretty,
+        capability_readme_supported_diagram_types_markdown, capability_readme_surface_markdown,
+        documented_diagram_types, is_allowed_style_property, mermaid_layout_guard_observability,
+        parse_mermaid_js_config_value, parse_style_string, sanitize_style_value, scale_budget,
+        to_init_parse,
     };
 
     fn sample_span(line: usize, start_col: usize, end_col: usize) -> Span {
@@ -4419,10 +4430,12 @@ mod tests {
                 requested_algorithm: "auto".to_string(),
                 selected_algorithm: "sugiyama".to_string(),
                 capability_unavailable: false,
+                decision_mode: "expected_loss_general_graph_v1".to_string(),
                 dispatch_reason: "auto_selected_for_flowchart".to_string(),
                 guard_reason: "within_budget".to_string(),
                 fallback_applied: false,
                 confidence_permille: 820,
+                selected_expected_loss_permille: 140,
                 node_count: 2,
                 edge_count: 1,
                 crossing_count: 0,
@@ -4434,6 +4447,34 @@ mod tests {
                 pressure_tier: MermaidPressureTier::Nominal,
                 budget_total_ms: 250,
                 budget_exhausted: false,
+                state_posterior: vec![
+                    MermaidDecisionWeight {
+                        key: "tree_like".to_string(),
+                        value_permille: 120,
+                    },
+                    MermaidDecisionWeight {
+                        key: "dense_graph".to_string(),
+                        value_permille: 80,
+                    },
+                    MermaidDecisionWeight {
+                        key: "layered_general".to_string(),
+                        value_permille: 800,
+                    },
+                ],
+                expected_loss: vec![
+                    MermaidDecisionWeight {
+                        key: "sugiyama".to_string(),
+                        value_permille: 140,
+                    },
+                    MermaidDecisionWeight {
+                        key: "tree".to_string(),
+                        value_permille: 500,
+                    },
+                    MermaidDecisionWeight {
+                        key: "force".to_string(),
+                        value_permille: 620,
+                    },
+                ],
                 alternatives: vec![MermaidLayoutDecisionAlternative {
                     algorithm: "sugiyama".to_string(),
                     selected: true,

@@ -14,8 +14,12 @@ warn_threshold_pct = 5.0
 fail_threshold_pct = 10.0
 sample_count = 15
 baseline_path = ".ci/perf-baseline.json"
+slo_path = ".ci/slo.yaml"
 allow_commit_tag_prefix = "[perf-regression-ok:"
-benchmark_command = "cargo test -p fm-layout perf_baseline_ -- --nocapture"
+benchmark_commands = [
+  "cargo test -p fm-layout perf_baseline_ -- --nocapture",
+  "cargo test -p fm-cli --test integration_test perf_slo_ -- --nocapture",
+]
 
 [property_test]
 enabled = true

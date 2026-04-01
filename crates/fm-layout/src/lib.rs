@@ -11,9 +11,10 @@ use std::f32::consts::PI;
 
 use fm_core::{
     DiagramType, GanttDate, GanttExclude, GanttTaskType, GraphDirection, IrEndpoint, IrGanttMeta,
-    IrNode, IrXyChartMeta, IrXySeriesKind, MermaidComplexity, MermaidConfig, MermaidDiagramIr,
-    MermaidGuardReport, MermaidLayoutDecisionAlternative, MermaidLayoutDecisionLedger,
-    MermaidLayoutDecisionRecord, MermaidPressureReport, MermaidPressureTier, Span,
+    IrNode, IrXyChartMeta, IrXySeriesKind, MermaidComplexity, MermaidConfig, MermaidDecisionWeight,
+    MermaidDiagramIr, MermaidGuardReport, MermaidLayoutDecisionAlternative,
+    MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord, MermaidPressureReport,
+    MermaidPressureTier, Span,
 };
 use tracing::{debug, info, trace, warn};
 
@@ -475,7 +476,15 @@ pub struct LayoutDispatch {
     pub requested: LayoutAlgorithm,
     pub selected: LayoutAlgorithm,
     pub capability_unavailable: bool,
+    pub decision_mode: &'static str,
     pub reason: &'static str,
+    pub selected_expected_loss_permille: u32,
+    pub posterior_tree_like_permille: u16,
+    pub posterior_dense_graph_permille: u16,
+    pub posterior_layered_permille: u16,
+    pub sugiyama_expected_loss_permille: u32,
+    pub tree_expected_loss_permille: u32,
+    pub force_expected_loss_permille: u32,
 }
 
 impl Default for LayoutDispatch {
@@ -484,7 +493,15 @@ impl Default for LayoutDispatch {
             requested: LayoutAlgorithm::Auto,
             selected: LayoutAlgorithm::Sugiyama,
             capability_unavailable: false,
+            decision_mode: "legacy_default",
             reason: "legacy_default",
+            selected_expected_loss_permille: 0,
+            posterior_tree_like_permille: 0,
+            posterior_dense_graph_permille: 0,
+            posterior_layered_permille: 0,
+            sugiyama_expected_loss_permille: 0,
+            tree_expected_loss_permille: 0,
+            force_expected_loss_permille: 0,
         }
     }
 }
@@ -1546,30 +1563,36 @@ pub fn layout_diagram_traced_with_config_and_guardrails(
 
 fn dispatch_layout_algorithm(ir: &MermaidDiagramIr, requested: LayoutAlgorithm) -> LayoutDispatch {
     let dispatch = match requested {
-        LayoutAlgorithm::Auto => {
-            let selected = preferred_layout_algorithm(ir);
-            LayoutDispatch {
-                requested,
-                selected,
-                capability_unavailable: false,
-                reason: auto_selection_reason(ir, selected),
-            }
-        }
+        LayoutAlgorithm::Auto => preferred_layout_algorithm(ir),
         explicit => {
             if algorithm_available_for_diagram(ir.diagram_type, explicit) {
                 LayoutDispatch {
                     requested,
                     selected: explicit,
                     capability_unavailable: false,
+                    decision_mode: "explicit_request",
                     reason: "explicit_request_honored",
+                    ..LayoutDispatch::default()
                 }
             } else {
-                let selected = preferred_layout_algorithm(ir);
+                let mut selected = preferred_layout_algorithm(ir);
+                selected.requested = requested;
+                selected.capability_unavailable = true;
+                selected.decision_mode = "requested_capability_fallback";
+                selected.reason = "requested_algorithm_capability_unavailable_for_diagram_type";
                 LayoutDispatch {
-                    requested,
-                    selected,
-                    capability_unavailable: true,
-                    reason: "requested_algorithm_capability_unavailable_for_diagram_type",
+                    requested: selected.requested,
+                    selected: selected.selected,
+                    capability_unavailable: selected.capability_unavailable,
+                    decision_mode: selected.decision_mode,
+                    reason: selected.reason,
+                    selected_expected_loss_permille: selected.selected_expected_loss_permille,
+                    posterior_tree_like_permille: selected.posterior_tree_like_permille,
+                    posterior_dense_graph_permille: selected.posterior_dense_graph_permille,
+                    posterior_layered_permille: selected.posterior_layered_permille,
+                    sugiyama_expected_loss_permille: selected.sugiyama_expected_loss_permille,
+                    tree_expected_loss_permille: selected.tree_expected_loss_permille,
+                    force_expected_loss_permille: selected.force_expected_loss_permille,
                 }
             }
         }
@@ -1578,7 +1601,9 @@ fn dispatch_layout_algorithm(ir: &MermaidDiagramIr, requested: LayoutAlgorithm) 
         requested = dispatch.requested.as_str(),
         selected = dispatch.selected.as_str(),
         capability_unavailable = dispatch.capability_unavailable,
+        decision_mode = dispatch.decision_mode,
         reason = dispatch.reason,
+        selected_expected_loss_permille = dispatch.selected_expected_loss_permille,
         diagram_type = ir.diagram_type.as_str(),
         node_count = ir.nodes.len(),
         edge_count = ir.edges.len(),
@@ -1618,8 +1643,8 @@ fn auto_selection_reason(ir: &MermaidDiagramIr, selected: LayoutAlgorithm) -> &'
     }
 }
 
-fn preferred_layout_algorithm(ir: &MermaidDiagramIr) -> LayoutAlgorithm {
-    match ir.diagram_type {
+fn preferred_layout_algorithm(ir: &MermaidDiagramIr) -> LayoutDispatch {
+    let selected = match ir.diagram_type {
         DiagramType::Mindmap => LayoutAlgorithm::Radial,
         DiagramType::Timeline => LayoutAlgorithm::Timeline,
         DiagramType::Gantt => LayoutAlgorithm::Gantt,
@@ -1632,42 +1657,95 @@ fn preferred_layout_algorithm(ir: &MermaidDiagramIr) -> LayoutAlgorithm {
         DiagramType::QuadrantChart => LayoutAlgorithm::Quadrant,
         DiagramType::GitGraph => LayoutAlgorithm::GitGraph,
         DiagramType::PacketBeta => LayoutAlgorithm::Packet,
-        _ => select_general_graph_algorithm(ir),
+        _ => return select_general_graph_algorithm(ir),
+    };
+    LayoutDispatch {
+        requested: LayoutAlgorithm::Auto,
+        selected,
+        capability_unavailable: false,
+        decision_mode: "diagram_type_specialized",
+        reason: auto_selection_reason(ir, selected),
+        ..LayoutDispatch::default()
     }
 }
 
 /// For general graph types (Flowchart, Class, State, ER, C4, Requirement, etc.),
 /// analyze graph topology metrics to choose between Sugiyama, Tree, and Force.
-fn select_general_graph_algorithm(ir: &MermaidDiagramIr) -> LayoutAlgorithm {
+fn select_general_graph_algorithm(ir: &MermaidDiagramIr) -> LayoutDispatch {
     let metrics = GraphMetrics::from_ir(ir);
 
     // Trivial graphs: Sugiyama handles them efficiently.
     if metrics.node_count <= 2 {
-        return LayoutAlgorithm::Sugiyama;
+        return LayoutDispatch {
+            requested: LayoutAlgorithm::Auto,
+            selected: LayoutAlgorithm::Sugiyama,
+            capability_unavailable: false,
+            decision_mode: "expected_loss_general_graph_v1",
+            reason: "auto_metrics_default_sugiyama",
+            posterior_tree_like_permille: 50,
+            posterior_dense_graph_permille: 50,
+            posterior_layered_permille: 900,
+            selected_expected_loss_permille: 135,
+            sugiyama_expected_loss_permille: 135,
+            tree_expected_loss_permille: 540,
+            force_expected_loss_permille: 610,
+        };
     }
 
-    // Perfect tree: use Tree layout for cleaner hierarchical rendering.
-    // Only for larger trees where tidy-tree shows significant benefit.
-    if metrics.is_tree_like && metrics.node_count > 10 {
-        return LayoutAlgorithm::Tree;
-    }
+    let (tree_like, dense_graph, layered_general) = general_graph_posterior_permille(metrics);
+    let sugiyama_loss = expected_loss_permille(
+        ir,
+        LayoutAlgorithm::Sugiyama,
+        tree_like,
+        dense_graph,
+        layered_general,
+    );
+    let tree_loss = expected_loss_permille(
+        ir,
+        LayoutAlgorithm::Tree,
+        tree_like,
+        dense_graph,
+        layered_general,
+    );
+    let force_loss = expected_loss_permille(
+        ir,
+        LayoutAlgorithm::Force,
+        tree_like,
+        dense_graph,
+        layered_general,
+    );
 
-    // Dense graphs with many crossings: force-directed avoids excessive crossing
-    // minimization cost and often produces better results for hairball graphs.
-    // Only apply to larger graphs where Sugiyama performance starts to degrade.
-    if metrics.is_dense && metrics.node_count > 30 {
-        return LayoutAlgorithm::Force;
-    }
+    let selected = [
+        (LayoutAlgorithm::Sugiyama, sugiyama_loss),
+        (LayoutAlgorithm::Tree, tree_loss),
+        (LayoutAlgorithm::Force, force_loss),
+    ]
+    .into_iter()
+    .min_by_key(|(algorithm, loss)| (*loss, algorithm.as_str()))
+    .map(|(algorithm, _)| algorithm)
+    .unwrap_or(LayoutAlgorithm::Sugiyama);
 
-    // Very sparse disconnected graphs with MANY components: force-directed can handle
-    // them naturally, but Sugiyama's component compaction is usually cleaner for small/medium graphs.
-    // Only switch to Force if the graph is both large and has many back-edges (cycles).
-    if metrics.node_count > 50 && metrics.back_edge_count > 5 {
-        return LayoutAlgorithm::Force;
-    }
+    let selected_expected_loss_permille = match selected {
+        LayoutAlgorithm::Sugiyama => sugiyama_loss,
+        LayoutAlgorithm::Tree => tree_loss,
+        LayoutAlgorithm::Force => force_loss,
+        _ => sugiyama_loss,
+    };
 
-    // Default: Sugiyama produces clean hierarchical layouts for most DAG-like graphs and forests.
-    LayoutAlgorithm::Sugiyama
+    LayoutDispatch {
+        requested: LayoutAlgorithm::Auto,
+        selected,
+        capability_unavailable: false,
+        decision_mode: "expected_loss_general_graph_v1",
+        reason: auto_selection_reason(ir, selected),
+        selected_expected_loss_permille,
+        posterior_tree_like_permille: tree_like,
+        posterior_dense_graph_permille: dense_graph,
+        posterior_layered_permille: layered_general,
+        sugiyama_expected_loss_permille: sugiyama_loss,
+        tree_expected_loss_permille: tree_loss,
+        force_expected_loss_permille: force_loss,
+    }
 }
 
 fn algorithm_available_for_diagram(diagram_type: DiagramType, algorithm: LayoutAlgorithm) -> bool {
@@ -1689,6 +1767,88 @@ fn algorithm_available_for_diagram(diagram_type: DiagramType, algorithm: LayoutA
         LayoutAlgorithm::GitGraph => matches!(diagram_type, DiagramType::GitGraph),
         LayoutAlgorithm::Packet => matches!(diagram_type, DiagramType::PacketBeta),
     }
+}
+
+fn general_graph_posterior_permille(metrics: GraphMetrics) -> (u16, u16, u16) {
+    if metrics.is_tree_like && metrics.node_count > 10 {
+        return (930, 10, 60);
+    }
+
+    let tree_score = 40_i32
+        + if metrics.is_tree_like { 980 } else { 0 }
+        + if metrics.root_count == 1 { 70 } else { 0 }
+        + if metrics.back_edge_count == 0 { 30 } else { 0 }
+        - if metrics.is_dense { 180 } else { 0 }
+        - (metrics.back_edge_count.min(6) as i32 * 45)
+        - (metrics.max_scc_size.saturating_sub(1).min(4) as i32 * 20);
+
+    let dense_ratio_bonus =
+        ((metrics.edge_to_node_ratio - 1.2_f32).max(0.0) * 220.0_f32).round() as i32;
+    let dense_score = 50_i32
+        + dense_ratio_bonus.min(620)
+        + if metrics.is_dense { 260 } else { 0 }
+        + (metrics.back_edge_count.min(8) as i32 * 18)
+        + (metrics.scc_count.min(4) as i32 * 22)
+        + if metrics.node_count > 30 { 70 } else { 0 };
+
+    let layered_score = 160_i32
+        + if !metrics.is_tree_like { 110 } else { 0 }
+        + if !metrics.is_dense { 90 } else { 0 }
+        + if metrics.back_edge_count <= 5 { 70 } else { 25 }
+        + if (0.8..=2.2).contains(&metrics.edge_to_node_ratio) {
+            120
+        } else {
+            20
+        }
+        + if metrics.root_count > 0 { 25 } else { 0 };
+
+    normalize_three_scores_permille(tree_score, dense_score, layered_score)
+}
+
+fn normalize_three_scores_permille(a: i32, b: i32, c: i32) -> (u16, u16, u16) {
+    let raw = [a.max(1) as u32, b.max(1) as u32, c.max(1) as u32];
+    let total = raw.iter().sum::<u32>().max(1);
+    let mut normalized = [
+        (raw[0] * 1000) / total,
+        (raw[1] * 1000) / total,
+        (raw[2] * 1000) / total,
+    ];
+    let assigned = normalized.iter().sum::<u32>();
+    let remainder = 1000_u32.saturating_sub(assigned);
+    let max_index = raw
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, value)| *value)
+        .map(|(index, _)| index)
+        .unwrap_or(2);
+    normalized[max_index] = normalized[max_index].saturating_add(remainder);
+    (
+        normalized[0] as u16,
+        normalized[1] as u16,
+        normalized[2] as u16,
+    )
+}
+
+fn expected_loss_permille(
+    ir: &MermaidDiagramIr,
+    algorithm: LayoutAlgorithm,
+    tree_like: u16,
+    dense_graph: u16,
+    layered_general: u16,
+) -> u32 {
+    let (loss_tree_like, loss_dense_graph, loss_layered_general) = match algorithm {
+        LayoutAlgorithm::Sugiyama => (240_u32, 620_u32, 120_u32),
+        LayoutAlgorithm::Tree => (70_u32, 920_u32, 700_u32),
+        LayoutAlgorithm::Force => (560_u32, 140_u32, 500_u32),
+        _ => (500_u32, 500_u32, 500_u32),
+    };
+
+    let weighted_quality_loss = (loss_tree_like * u32::from(tree_like)
+        + loss_dense_graph * u32::from(dense_graph)
+        + loss_layered_general * u32::from(layered_general))
+        / 1000;
+    let compute_penalty = estimate_layout_cost(ir, algorithm).time_ms as u32 / 20;
+    weighted_quality_loss.saturating_add(compute_penalty)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -9259,10 +9419,12 @@ pub fn build_layout_decision_ledger(
             requested_algorithm: dispatch.requested.as_str().to_string(),
             selected_algorithm: dispatch.selected.as_str().to_string(),
             capability_unavailable: dispatch.capability_unavailable,
+            decision_mode: dispatch.decision_mode.to_string(),
             dispatch_reason: dispatch.reason.to_string(),
             guard_reason: guard.reason.to_string(),
             fallback_applied: guard.fallback_applied,
             confidence_permille,
+            selected_expected_loss_permille: dispatch.selected_expected_loss_permille,
             node_count: traced.layout.nodes.len(),
             edge_count: traced.layout.edges.len(),
             crossing_count: traced.layout.stats.crossing_count,
@@ -9274,6 +9436,34 @@ pub fn build_layout_decision_ledger(
             pressure_tier: guard_report.pressure.tier,
             budget_total_ms: guard_report.budget_broker.total_budget_ms,
             budget_exhausted: guard_report.budget_broker.exhausted,
+            state_posterior: vec![
+                MermaidDecisionWeight {
+                    key: String::from("tree_like"),
+                    value_permille: u32::from(dispatch.posterior_tree_like_permille),
+                },
+                MermaidDecisionWeight {
+                    key: String::from("dense_graph"),
+                    value_permille: u32::from(dispatch.posterior_dense_graph_permille),
+                },
+                MermaidDecisionWeight {
+                    key: String::from("layered_general"),
+                    value_permille: u32::from(dispatch.posterior_layered_permille),
+                },
+            ],
+            expected_loss: vec![
+                MermaidDecisionWeight {
+                    key: String::from("sugiyama"),
+                    value_permille: dispatch.sugiyama_expected_loss_permille,
+                },
+                MermaidDecisionWeight {
+                    key: String::from("tree"),
+                    value_permille: dispatch.tree_expected_loss_permille,
+                },
+                MermaidDecisionWeight {
+                    key: String::from("force"),
+                    value_permille: dispatch.force_expected_loss_permille,
+                },
+            ],
             alternatives,
             notes,
         }],
@@ -9641,6 +9831,13 @@ mod tests {
             record.selected_algorithm,
             traced.trace.dispatch.selected.as_str()
         );
+        assert_eq!(record.decision_mode, traced.trace.dispatch.decision_mode);
+        assert_eq!(
+            record.selected_expected_loss_permille,
+            traced.trace.dispatch.selected_expected_loss_permille
+        );
+        assert_eq!(record.state_posterior.len(), 3);
+        assert_eq!(record.expected_loss.len(), 3);
         assert!(record.alternatives.iter().any(|alt| alt.selected));
 
         let jsonl = ledger.to_jsonl().expect("ledger should serialize");
@@ -13194,6 +13391,8 @@ mod tests {
         let dispatch = dispatch_layout_algorithm(&ir, LayoutAlgorithm::Auto);
         assert_eq!(dispatch.selected, LayoutAlgorithm::Force);
         assert_eq!(dispatch.reason, "auto_metrics_dense_graph");
+        assert_eq!(dispatch.decision_mode, "expected_loss_general_graph_v1");
+        assert!(dispatch.force_expected_loss_permille < dispatch.sugiyama_expected_loss_permille);
     }
 
     #[test]
@@ -13214,6 +13413,8 @@ mod tests {
         let dispatch = dispatch_layout_algorithm(&ir, LayoutAlgorithm::Auto);
         assert_eq!(dispatch.selected, LayoutAlgorithm::Sugiyama);
         assert_eq!(dispatch.reason, "auto_metrics_default_sugiyama");
+        assert!(dispatch.sugiyama_expected_loss_permille <= dispatch.tree_expected_loss_permille);
+        assert!(dispatch.sugiyama_expected_loss_permille <= dispatch.force_expected_loss_permille);
     }
 
     #[test]

@@ -175,7 +175,7 @@ enum ClassStatement {
     End,
 }
 
-/// Parse mermaid input (used by tests, delegates to parse_mermaid_with_detection).
+/// Parse mermaid input (used by tests, delegates to `parse_mermaid_with_detection`).
 #[must_use]
 #[allow(dead_code)] // Used by tests
 pub fn parse_mermaid(input: &str) -> ParseResult {
@@ -435,7 +435,7 @@ enum FlowDocumentItem {
         title: Option<String>,
         line_number: usize,
         source_line: String,
-        body: Vec<FlowDocumentItem>,
+        body: Vec<Self>,
     },
 }
 
@@ -465,7 +465,7 @@ enum BlockBetaDocumentItem {
         span_cols: Option<usize>,
         line_number: usize,
         source_line: String,
-        body: Vec<BlockBetaDocumentItem>,
+        body: Vec<Self>,
     },
 }
 
@@ -642,7 +642,10 @@ fn flow_statement_parser<'a>() -> impl Parser<'a, &'a str, FlowAst, extra::Err<R
         .then(any().repeated().at_least(1).to_slice())
         .then_ignore(end())
         .map(|(node_ids, class_raw): (Vec<&str>, &str)| {
-            let nodes: Vec<String> = node_ids.iter().map(|s| s.to_string()).collect();
+            let nodes: Vec<String> = node_ids
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect();
             FlowAst::ClassAssign {
                 nodes,
                 class: class_raw.trim().to_string(),
@@ -893,8 +896,7 @@ fn parse_flowchart_document(input: &str) -> FlowDocumentParseResult {
     );
     if unclosed_subgraphs > 0 {
         warnings.push(format!(
-            "Flowchart ended with {} unclosed subgraph block(s)",
-            unclosed_subgraphs
+            "Flowchart ended with {unclosed_subgraphs} unclosed subgraph block(s)"
         ));
     }
     FlowDocumentParseResult {
@@ -1128,8 +1130,7 @@ fn parse_subgraph_statement(statement: &str) -> Option<(String, Option<String>)>
         let key = normalize_identifier(&key_raw);
         if !key.is_empty() {
             let title_raw = rest.trim();
-            let explicit_title =
-                matches!(title_raw.chars().next(), Some('"') | Some('\'') | Some('`'));
+            let explicit_title = matches!(title_raw.chars().next(), Some('"' | '\'' | '`'));
             if title_raw.is_empty() || explicit_title || looks_like_explicit_subgraph_id(&key_raw) {
                 let title = if title_raw.is_empty() {
                     None
@@ -1493,8 +1494,8 @@ fn parse_sequence_actor_menu(line: &str) -> Option<SequenceStatement> {
     None
 }
 
-/// Parse `box [color] Label` into a BoxStart statement.
-/// Color can be a CSS color name, hex (#abc), rgb(), etc.
+/// Parse `box [color] Label` into a `BoxStart` statement.
+/// Color can be a CSS color name, hex (#abc), `rgb()`, etc.
 fn parse_sequence_box_start(rest: &str) -> SequenceStatement {
     let rest = rest.trim();
     let (color, label) = if let Some((color, label)) = extract_sequence_box_color(rest) {
@@ -1783,17 +1784,17 @@ fn lower_sequence_statement(
             builder.hide_sequence_footbox();
         }
         SequenceStatement::Link { actor, label, url } => {
-            if !is_safe_click_target(&url) {
-                builder.add_warning(format!(
-                    "Line {line_number}: unsafe sequence actor menu link blocked: {url}"
-                ));
-            } else {
+            if is_safe_click_target(&url) {
                 builder.add_node_menu_link(
                     &actor,
                     &label,
                     &url,
                     span_for(line_number, source_line),
                 );
+            } else {
+                builder.add_warning(format!(
+                    "Line {line_number}: unsafe sequence actor menu link blocked: {url}"
+                ));
             }
         }
         SequenceStatement::Links { actor, entries } => {
@@ -3700,6 +3701,16 @@ fn parse_timeline(input: &str, builder: &mut IrBuilder) {
                 builder.intern_node(&period_id, Some(period_text), NodeShape::Rect, span);
 
             if let Some(period_node_id) = period_node {
+                builder.add_class_to_node(&period_id, "timeline-period", span);
+                // Section color class for background band differentiation.
+                if current_section.is_some() {
+                    builder.add_class_to_node(
+                        &period_id,
+                        &format!("timeline-section-{}", current_section.unwrap_or(0) % 8),
+                        span,
+                    );
+                }
+
                 // Add to current section if any
                 if let Some(section_idx) = current_section {
                     builder.add_node_to_cluster(section_idx, period_node_id);
@@ -3790,8 +3801,14 @@ fn parse_timeline_events(
         if let Some(event_node_id) =
             builder.intern_node(&event_id, Some(event_text), NodeShape::Rounded, span)
         {
+            builder.add_class_to_node(&event_id, "timeline-event", span);
             if let Some(section_idx) = current_section {
                 builder.add_node_to_cluster(section_idx, event_node_id);
+                builder.add_class_to_node(
+                    &event_id,
+                    &format!("timeline-section-{}", section_idx % 8),
+                    span,
+                );
             }
             if let Some(subgraph_idx) = current_section_subgraph {
                 builder.add_node_to_subgraph(subgraph_idx, event_node_id);
@@ -4186,7 +4203,7 @@ fn is_valid_gantt_calendar_date(year: u32, month: u32, day: u32) -> bool {
     (1..=max_day).contains(&day)
 }
 
-fn gantt_days_in_month(year: u32, month: u32) -> Option<u32> {
+const fn gantt_days_in_month(year: u32, month: u32) -> Option<u32> {
     let max_day = match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
@@ -4202,7 +4219,7 @@ fn gantt_days_in_month(year: u32, month: u32) -> Option<u32> {
     Some(max_day)
 }
 
-fn is_gantt_leap_year(year: u32) -> bool {
+const fn is_gantt_leap_year(year: u32) -> bool {
     (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
@@ -4347,15 +4364,16 @@ fn parse_pie(input: &str, builder: &mut IrBuilder) {
 
         // Extract numeric value after the colon.
         let value = match trimmed.split_once(':').map(|(_, v)| v.trim()) {
-            Some(v) if !v.is_empty() => match v.parse::<f32>() {
-                Ok(n) => n,
-                Err(_) => {
+            Some(v) if !v.is_empty() => {
+                if let Ok(n) = v.parse::<f32>() {
+                    n
+                } else {
                     builder.add_warning(format!(
                         "Line {line_number}: invalid pie slice value '{v}', defaulting to 0"
                     ));
                     0.0
                 }
-            },
+            }
             _ => 0.0,
         };
 
@@ -4446,7 +4464,7 @@ fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
         }
 
         // Parse "[x, y]" after the colon.
-        let coords = trimmed.split_once(':').map(|(_, v)| v.trim()).unwrap_or("");
+        let coords = trimmed.split_once(':').map_or("", |(_, v)| v.trim());
         let coords = coords.trim_start_matches('[').trim_end_matches(']').trim();
         let (x, y) = if let Some((xs, ys)) = coords.split_once(',') {
             (
@@ -5006,8 +5024,7 @@ fn parse_block_beta_document(input: &str) -> BlockBetaDocumentParseResult {
         parse_block_beta_document_items(&lines, &mut next_index, false, &mut warnings);
     if unclosed_groups > 0 {
         warnings.push(format!(
-            "Block-beta diagram ended with {} unclosed block group(s)",
-            unclosed_groups
+            "Block-beta diagram ended with {unclosed_groups} unclosed block group(s)"
         ));
     }
     BlockBetaDocumentParseResult { items, warnings }
@@ -5747,14 +5764,13 @@ fn parse_git_merge(
     } = options;
 
     // Get the head of the branch being merged
-    let merge_source = match state.branches.get(&branch_name).copied() {
-        Some(id) => id,
-        None => {
-            builder.add_warning(format!(
-                "Line {line_number}: cannot merge non-existent branch '{branch_name}'"
-            ));
-            return;
-        }
+    let merge_source = if let Some(id) = state.branches.get(&branch_name).copied() {
+        id
+    } else {
+        builder.add_warning(format!(
+            "Line {line_number}: cannot merge non-existent branch '{branch_name}'"
+        ));
+        return;
     };
 
     let merge_id = id.unwrap_or_else(|| state.next_commit_id());
@@ -6110,7 +6126,7 @@ fn sequence_participant_visuals(
         Some("control") => (NodeShape::Circle, vec!["sequence-participant-control"]),
         Some("entity") => (NodeShape::Rect, vec!["sequence-participant-entity"]),
         Some("database") => (NodeShape::Cylinder, vec!["sequence-participant-database"]),
-        Some("collections") | Some("collection") => (
+        Some("collections" | "collection") => (
             NodeShape::Subroutine,
             vec!["sequence-participant-collections"],
         ),
@@ -6976,8 +6992,7 @@ fn normalize_subgraph_title(raw: &str) -> Option<String> {
                 .strip_prefix('{')
                 .and_then(|value| value.strip_suffix('}'))
         })
-        .map(str::trim)
-        .unwrap_or(&title);
+        .map_or(title.as_str(), str::trim);
     (!unwrapped.is_empty()).then_some(unwrapped.to_string())
 }
 
@@ -8798,13 +8813,13 @@ mod tests {
     fn er_parses_entity_attributes() {
         use fm_core::IrAttributeKey;
 
-        let input = r#"erDiagram
+        let input = r"erDiagram
     CUSTOMER {
         int id PK
         string name
         string email UK
     }
-"#;
+";
         let parsed = parse_mermaid(input);
         assert_eq!(parsed.ir.diagram_type, DiagramType::Er);
         assert_eq!(parsed.ir.nodes.len(), 1);
@@ -8859,7 +8874,7 @@ mod tests {
 
     #[test]
     fn er_parses_complex_schema() {
-        let input = r#"erDiagram
+        let input = r"erDiagram
     CUSTOMER ||--o{ ORDER : places
     ORDER ||--|{ LINE_ITEM : contains
     CUSTOMER {
@@ -8875,7 +8890,7 @@ mod tests {
         int order_id FK
         int quantity
     }
-"#;
+";
         let parsed = parse_mermaid(input);
         assert_eq!(parsed.ir.diagram_type, DiagramType::Er);
         assert_eq!(parsed.ir.nodes.len(), 3);
@@ -8901,13 +8916,13 @@ mod tests {
 
     #[test]
     fn er_handles_complex_type_names() {
-        let input = r#"erDiagram
+        let input = r"erDiagram
     TABLE {
         varchar(255) email
         decimal(10,2) price
         timestamp created_at
     }
-"#;
+";
         let parsed = parse_mermaid(input);
         let table = &parsed.ir.nodes[0];
 
@@ -9364,7 +9379,7 @@ mod tests {
 
     #[test]
     fn mindmap_complex_hierarchy() {
-        let input = r#"mindmap
+        let input = r"mindmap
   root((mindmap))
     Origins
       Long history
@@ -9374,7 +9389,7 @@ mod tests {
       On effectiveness
     Tools
       Pen and paper
-      Mermaid"#;
+      Mermaid";
         let parsed = parse_mermaid(input);
         assert_eq!(parsed.ir.diagram_type, DiagramType::Mindmap);
         // root, Origins, Long history, Popularisation, Tony Buzan, Research, On effectiveness, Tools, Pen and paper, Mermaid = 10 nodes
@@ -9386,11 +9401,11 @@ mod tests {
 
     #[test]
     fn timeline_parses_basic_structure() {
-        let input = r#"timeline
+        let input = r"timeline
     title History of Social Media
     2002 : LinkedIn
     2004 : Facebook
-    2005 : YouTube"#;
+    2005 : YouTube";
         let parsed = parse_mermaid(input);
         assert_eq!(parsed.ir.diagram_type, DiagramType::Timeline);
         // 3 time periods + 3 events = 6 nodes
@@ -9411,10 +9426,10 @@ mod tests {
 
     #[test]
     fn timeline_parses_continuation_events() {
-        let input = r#"timeline
+        let input = r"timeline
     2004 : Facebook
          : Google
-         : Orkut"#;
+         : Orkut";
         let parsed = parse_mermaid(input);
         // 1 time period + 3 events = 4 nodes
         assert_eq!(parsed.ir.nodes.len(), 4);
@@ -9424,12 +9439,12 @@ mod tests {
 
     #[test]
     fn timeline_parses_sections() {
-        let input = r#"timeline
+        let input = r"timeline
     title Timeline
     section Early Days
         2002 : LinkedIn
     section Growth Era
-        2004 : Facebook"#;
+        2004 : Facebook";
         let parsed = parse_mermaid(input);
         // 2 time periods + 2 events = 4 nodes
         assert_eq!(parsed.ir.nodes.len(), 4);
@@ -9731,13 +9746,13 @@ commit msg: "Fix bug" tag: "v1.0.1""#,
     #[test]
     fn gitgraph_parses_branch_and_checkout() {
         let parsed = parse_mermaid(
-            r#"gitGraph
+            r"gitGraph
 commit
 branch develop
 checkout develop
 commit
 checkout main
-commit"#,
+commit",
         );
         assert_eq!(parsed.ir.diagram_type, DiagramType::GitGraph);
         // 3 commits total
@@ -9751,13 +9766,13 @@ commit"#,
     #[test]
     fn gitgraph_parses_merge() {
         let parsed = parse_mermaid(
-            r#"gitGraph
+            r"gitGraph
 commit
 branch develop
 checkout develop
 commit
 checkout main
-merge develop"#,
+merge develop",
         );
         assert_eq!(parsed.ir.diagram_type, DiagramType::GitGraph);
         // 3 nodes: initial commit, develop commit, merge commit
@@ -9769,13 +9784,13 @@ merge develop"#,
     #[test]
     fn gitgraph_merge_preserves_explicit_id_and_tag() {
         let parsed = parse_mermaid(
-            r#"gitGraph
+            r"gitGraph
 commit id: root
 branch develop
 checkout develop
 commit id: feature
 checkout main
-merge develop id: merge1 tag: release"#,
+merge develop id: merge1 tag: release",
         );
 
         let merge_node = parsed
@@ -9820,13 +9835,13 @@ cherry-pick id: "feat1""#,
     #[test]
     fn gitgraph_accepts_switch_alias_and_unquoted_ids() {
         let parsed = parse_mermaid(
-            r#"gitGraph
+            r"gitGraph
 commit id: root
 branch feature
 switch feature
 commit id: feat1
 switch main
-cherry-pick id: feat1"#,
+cherry-pick id: feat1",
         );
         assert_eq!(parsed.ir.diagram_type, DiagramType::GitGraph);
         assert_eq!(parsed.ir.nodes.len(), 3);
@@ -9953,13 +9968,13 @@ cherry-pick id: feat1"#,
     #[test]
     fn architecture_parses_services_groups_junctions_and_edges() {
         let parsed = parse_mermaid(
-            r#"architecture-beta
+            r"architecture-beta
 group platform(cloud)[Platform]
 service api(server)[API] in platform
 junction fan_in in platform
 service db(database)[DB] in platform
 api:R --> L:fan_in
-fan_in:B --> T:db"#,
+fan_in:B --> T:db",
         );
         assert_eq!(parsed.ir.diagram_type, DiagramType::ArchitectureBeta);
         assert_eq!(parsed.ir.nodes.len(), 3);
@@ -10010,11 +10025,11 @@ fan_in:B --> T:db"#,
     #[test]
     fn architecture_reverse_and_bidirectional_edges_map_cleanly() {
         let parsed = parse_mermaid(
-            r#"architecture-beta
+            r"architecture-beta
 service api[API]
 service db[DB]
 db <-- api
-api <--> db"#,
+api <--> db",
         );
         assert_eq!(parsed.ir.diagram_type, DiagramType::ArchitectureBeta);
         assert_eq!(parsed.ir.nodes.len(), 2);
@@ -10763,12 +10778,14 @@ Rel_Back(db, app, "Responds")"#,
             .ir
             .sequence_meta
             .expect("sequence_meta should be set");
-        let destroys: Vec<_> = meta
-            .lifecycle_events
-            .iter()
-            .filter(|e| e.kind == fm_core::LifecycleEventKind::Destroy)
-            .collect();
-        assert_eq!(destroys.len(), 1, "Should have one destroy event");
+        assert_eq!(
+            meta.lifecycle_events
+                .iter()
+                .filter(|e| e.kind == fm_core::LifecycleEventKind::Destroy)
+                .count(),
+            1,
+            "Should have one destroy event"
+        );
     }
 
     // ── Sequence fragment tests ────────────────────────────────────────
