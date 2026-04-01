@@ -1169,7 +1169,7 @@ fn detect_reports_sankey_as_basic_support() {
 }
 
 #[test]
-fn detect_reports_c4_context_as_basic_support() {
+fn detect_reports_c4_context_as_full_support() {
     let output = run_cli(
         &["detect", "-", "--json"],
         "C4Context\nPerson(user, \"User\")\nSystem(app, \"App\")\n",
@@ -1184,7 +1184,7 @@ fn detect_reports_c4_context_as_basic_support() {
     let json: serde_json::Value =
         serde_json::from_str(&stdout).expect("detect --json must print valid JSON");
     assert_eq!(json["diagram_type"], "C4Context");
-    assert_eq!(json["support_level"], "basic");
+    assert_eq!(json["support_level"], "full");
     assert_eq!(json["confidence"], "high");
 }
 
@@ -1368,7 +1368,7 @@ fn parse_summary_reports_c4_counts_without_compatibility_fallback() {
         serde_json::from_str(&stdout).expect("parse summary must print valid JSON");
     assert_eq!(json["diagram_type"], "C4Context");
     assert_eq!(json["parse_mode"], "compat");
-    assert_eq!(json["support_level"], "Partial");
+    assert_eq!(json["support_level"], "Supported");
     assert_eq!(json["node_count"], 2);
     assert_eq!(json["edge_count"], 1);
     assert_eq!(json["diagnostic_count"], 0);

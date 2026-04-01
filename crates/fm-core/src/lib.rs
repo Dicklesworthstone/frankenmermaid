@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod cga;
 mod font_metrics;
 
 pub use font_metrics::{
@@ -349,15 +350,13 @@ impl DiagramType {
             | Self::PacketBeta
             | Self::Sankey
             | Self::ArchitectureBeta
-            | Self::Kanban => MermaidSupportLevel::Supported,
-            Self::Sequence
-            | Self::Pie
             | Self::C4Context
             | Self::C4Container
             | Self::C4Component
             | Self::C4Dynamic
             | Self::C4Deployment
-            | Self::XyChart => MermaidSupportLevel::Partial,
+            | Self::Kanban => MermaidSupportLevel::Supported,
+            Self::Sequence | Self::Pie | Self::XyChart => MermaidSupportLevel::Partial,
             Self::Unknown => MermaidSupportLevel::Unsupported,
         }
     }
@@ -380,14 +379,14 @@ impl DiagramType {
             | Self::PacketBeta
             | Self::Sankey
             | Self::ArchitectureBeta
-            | Self::Kanban => "full",
-            Self::Sequence | Self::Pie => "partial",
-            Self::C4Context
+            | Self::C4Context
             | Self::C4Container
             | Self::C4Component
             | Self::C4Dynamic
             | Self::C4Deployment
-            | Self::XyChart => "basic",
+            | Self::Kanban => "full",
+            Self::Sequence | Self::Pie => "partial",
+            Self::XyChart => "basic",
             Self::Unknown => "unknown",
         }
     }
@@ -6256,9 +6255,9 @@ mod tests {
 
         assert_eq!(
             DiagramType::C4Context.support_level(),
-            MermaidSupportLevel::Partial
+            MermaidSupportLevel::Supported
         );
-        assert_eq!(DiagramType::C4Context.support_label(), "basic");
+        assert_eq!(DiagramType::C4Context.support_label(), "full");
 
         assert_eq!(
             DiagramType::ArchitectureBeta.support_level(),

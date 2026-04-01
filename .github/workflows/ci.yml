@@ -30,6 +30,9 @@ jobs:
       decision_enabled: ${{ steps.parse.outputs.decision_enabled }}
       degradation_enabled: ${{ steps.parse.outputs.degradation_enabled }}
       override_policy_enabled: ${{ steps.parse.outputs.override_policy_enabled }}
+      demo_evidence_enabled: ${{ steps.parse.outputs.demo_evidence_enabled }}
+      demo_static_repeat: ${{ steps.parse.outputs.demo_static_repeat }}
+      demo_react_repeat: ${{ steps.parse.outputs.demo_react_repeat }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -65,6 +68,9 @@ jobs:
               "decision_enabled": str(config["decision_contract"]["enabled"]).lower(),
               "degradation_enabled": str(config["degradation"]["enabled"]).lower(),
               "override_policy_enabled": str(config["release_gate_overrides"]["enabled"]).lower(),
+              "demo_evidence_enabled": str(config["demo_evidence"]["enabled"]).lower(),
+              "demo_static_repeat": str(config["demo_evidence"]["static_repeat"]),
+              "demo_react_repeat": str(config["demo_evidence"]["react_repeat"]),
           }
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
               for key, value in outputs.items():
@@ -468,6 +474,13 @@ jobs:
           cargo run -p fm-cli -- determinism-manifest \
             > artifacts/evidence/proofs/determinism-manifest-x86_64.json
 
+      - name: Download demo evidence artifacts
+        if: needs.quality-gate-config.outputs.demo_evidence_enabled == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: demo-evidence-replays
+          path: artifacts/evidence/demo
+
       - name: Refresh ledger report with bead coverage
         shell: bash
         run: |
@@ -484,7 +497,12 @@ jobs:
               --artifact artifacts/evidence/logs/svg-golden.log \
               --artifact artifacts/evidence/logs/layout-golden.log \
               --artifact artifacts/evidence/logs/determinism.log \
-              --artifact artifacts/evidence/proofs/determinism-manifest-x86_64.json
+              --artifact artifacts/evidence/proofs/determinism-manifest-x86_64.json \
+              --artifact artifacts/evidence/demo/demo-evidence-summary.json \
+              --artifact artifacts/evidence/demo/static-replay/replay_manifest.json \
+              --artifact artifacts/evidence/demo/static-replay/replay_suite.sh \
+              --artifact artifacts/evidence/demo/react-replay/replay_manifest.json \
+              --artifact artifacts/evidence/demo/react-replay/replay_suite.sh
           )"
           echo "bundle_dir=$bundle_dir" >> "$GITHUB_ENV"
           echo "bundle_name=$(basename "$bundle_dir")" >> "$GITHUB_ENV"
@@ -561,6 +579,104 @@ jobs:
           path: artifacts/evidence/policies/release-gate-override-summary.json
           retention-days: 90
 
+  demo-evidence-guard:
+    name: Demo Evidence Guard
+    needs: quality-gate-config
+    if: needs.quality-gate-config.outputs.demo_evidence_enabled == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Chromium
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y chromium
+
+      - name: Run static and React demo replay suites
+        shell: bash
+        run: |
+          mkdir -p artifacts/evidence/demo
+          CHROMIUM_BIN="$(command -v chromium || command -v chromium-browser || command -v google-chrome)"
+          python3 scripts/run_static_web_e2e.py \
+            --bead-id ci-demo-static \
+            --repo-root . \
+            --output-root artifacts/evidence/demo/static \
+            --route-prefix /web \
+            --surface web \
+            --host-kind static-web \
+            --scenario-prefix static-web \
+            --chromium "$CHROMIUM_BIN" \
+            --repeat "${{ needs.quality-gate-config.outputs.demo_static_repeat }}" \
+            --replay-bundle-dir artifacts/evidence/demo/static-replay
+          python3 scripts/run_static_web_e2e.py \
+            --bead-id ci-demo-react \
+            --repo-root . \
+            --output-root artifacts/evidence/demo/react \
+            --route-prefix /web_react \
+            --surface web_react \
+            --host-kind react-web \
+            --scenario-prefix react-web \
+            --chromium "$CHROMIUM_BIN" \
+            --repeat "${{ needs.quality-gate-config.outputs.demo_react_repeat }}" \
+            --replay-bundle-dir artifacts/evidence/demo/react-replay
+
+      - name: Validate demo evidence summaries and replay bundles
+        shell: bash
+        run: |
+          static_summary="$(find artifacts/evidence/demo/static -maxdepth 1 -name '*__determinism__summary.json' | sort | tail -n 1)"
+          react_summary="$(find artifacts/evidence/demo/react -maxdepth 1 -name '*__determinism__summary.json' | sort | tail -n 1)"
+          python3 scripts/showcase_harness.py validate-e2e-summary \
+            --summary "$static_summary" \
+            --repo-root . \
+            --require-replay-bundle
+          python3 scripts/showcase_harness.py validate-e2e-summary \
+            --summary "$react_summary" \
+            --repo-root . \
+            --require-replay-bundle
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          static_summary = Path(sorted(Path("artifacts/evidence/demo/static").glob("*__determinism__summary.json"))[-1])
+          react_summary = Path(sorted(Path("artifacts/evidence/demo/react").glob("*__determinism__summary.json"))[-1])
+          static_payload = json.loads(static_summary.read_text())
+          react_payload = json.loads(react_summary.read_text())
+
+          def stable_counts(payload):
+              total = len(payload["determinism"])
+              stable_output = sum(1 for item in payload["determinism"] if item["stable_output_hash"])
+              stable_normalized = sum(1 for item in payload["determinism"] if item["stable_normalized_log"])
+              return {
+                  "total_groups": total,
+                  "stable_output_groups": stable_output,
+                  "stable_normalized_groups": stable_normalized,
+              }
+
+          combined = {
+              "schema_version": 1,
+              "static_summary": str(static_summary),
+              "react_summary": str(react_summary),
+              "static": stable_counts(static_payload),
+              "react": stable_counts(react_payload),
+              "replay_bundles": {
+                  "static_manifest": static_payload["replay_bundle"]["manifest_path"],
+                  "react_manifest": react_payload["replay_bundle"]["manifest_path"],
+              },
+          }
+          out_path = Path("artifacts/evidence/demo/demo-evidence-summary.json")
+          out_path.write_text(json.dumps(combined, indent=2) + "\n", encoding="utf-8")
+          print(json.dumps(combined, indent=2))
+          PY
+
+      - name: Upload demo evidence artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-evidence-replays
+          path: artifacts/evidence/demo
+          retention-days: 90
+
   quality-summary:
     name: Quality Summary
     needs:
@@ -578,6 +694,7 @@ jobs:
       - evidence-ledger-guard
       - decision-contract-guard
       - release-gate-override-guard
+      - demo-evidence-guard
       - wasm-build
       - coverage
     if: always()
@@ -604,6 +721,7 @@ jobs:
             echo "| evidence-ledger-guard | ${{ needs.evidence-ledger-guard.result }} |"
             echo "| decision-contract-guard | ${{ needs.decision-contract-guard.result }} |"
             echo "| release-gate-override-guard | ${{ needs.release-gate-override-guard.result }} |"
+            echo "| demo-evidence-guard | ${{ needs.demo-evidence-guard.result }} |"
             echo "| wasm-build | ${{ needs.wasm-build.result }} |"
             echo "| coverage | ${{ needs.coverage.result }} |"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -637,6 +755,7 @@ jobs:
               "performance-regression-guard": "${{ needs.performance-regression-guard.result }}",
               "degradation-guard": "${{ needs.degradation-guard.result }}",
               "release-gate-override-guard": "${{ needs.release-gate-override-guard.result }}",
+              "demo-evidence-guard": "${{ needs.demo-evidence-guard.result }}",
               "wasm-build": "${{ needs.wasm-build.result }}",
               "coverage": "${{ needs.coverage.result }}",
           }

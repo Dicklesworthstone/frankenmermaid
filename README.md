@@ -118,11 +118,11 @@ fm-cli render diagrams/process.mmd --format svg --theme dark --output out/proces
 | `class` | Implemented |
 | `state` | Implemented |
 | `er` | Implemented |
-| `C4Context` | Partial |
-| `C4Container` | Partial |
-| `C4Component` | Partial |
-| `C4Dynamic` | Partial |
-| `C4Deployment` | Partial |
+| `C4Context` | Implemented |
+| `C4Container` | Implemented |
+| `C4Component` | Implemented |
+| `C4Dynamic` | Implemented |
+| `C4Deployment` | Implemented |
 | `architecture-beta` | Implemented |
 | `block-beta` | Implemented |
 | `gantt` | Implemented |

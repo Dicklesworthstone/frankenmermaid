@@ -5176,16 +5176,16 @@ fn compute_tree_subtree_spans(
 ) {
     let node_count = children.len();
     let mut post_order = Vec::with_capacity(node_count);
-    
+
     let mut state = vec![0_u8; node_count];
     for &start_node in roots {
         if state[start_node] != 0 {
             continue;
         }
-        
+
         let mut stack = vec![(start_node, 0)];
         state[start_node] = 1;
-        
+
         while let Some((node, child_idx)) = stack.pop() {
             let node_children = &children[node];
             if child_idx < node_children.len() {

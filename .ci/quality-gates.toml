@@ -64,3 +64,9 @@ max_override_days = 14
 require_retro_bead = true
 require_fix_bead = true
 overrides_path = ".ci/release-gate-overrides.toml"
+
+[demo_evidence]
+enabled = true
+blocking = true
+static_repeat = 5
+react_repeat = 5
