@@ -1737,7 +1737,10 @@ fn select_general_graph_algorithm(ir: &MermaidDiagramIr) -> LayoutDispatch {
     }
 }
 
-const fn algorithm_available_for_diagram(diagram_type: DiagramType, algorithm: LayoutAlgorithm) -> bool {
+const fn algorithm_available_for_diagram(
+    diagram_type: DiagramType,
+    algorithm: LayoutAlgorithm,
+) -> bool {
     match algorithm {
         LayoutAlgorithm::Auto => true,
         LayoutAlgorithm::Sugiyama | LayoutAlgorithm::Force | LayoutAlgorithm::Tree => true,
@@ -3402,7 +3405,8 @@ fn build_sequence_note_geometry(
             let note_height = if line_count <= 1.0 {
                 base_note_height
             } else {
-                (line_count - 1.0).mul_add(note_line_height, base_note_height) + note_vertical_padding
+                (line_count - 1.0).mul_add(note_line_height, base_note_height)
+                    + note_vertical_padding
             };
             // Adaptive note width from content: use the widest line + padding.
             let max_line_chars = note
@@ -3411,8 +3415,9 @@ fn build_sequence_note_geometry(
                 .map(|line| line.chars().count())
                 .max()
                 .unwrap_or(0);
-            let note_width =
-                (max_line_chars as f32).mul_add(avg_char_w, 24.0).clamp(80.0, default_note_width * 2.5);
+            let note_width = (max_line_chars as f32)
+                .mul_add(avg_char_w, 24.0)
+                .clamp(80.0, default_note_width * 2.5);
 
             // Position the note at the edge after which it appears.
             let y = message_y_positions
@@ -3428,16 +3433,12 @@ fn build_sequence_note_geometry(
                 .get(last_pid)
                 .copied()
                 .unwrap_or(first_cx);
-            let first_half_w = node_sizes
-                .get(first_pid)
-                .map_or(50.0, |(w, _)| w / 2.0);
+            let first_half_w = node_sizes.get(first_pid).map_or(50.0, |(w, _)| w / 2.0);
 
             let x = match note.position {
                 fm_core::NotePosition::LeftOf => first_cx - first_half_w - note_width - 10.0,
                 fm_core::NotePosition::RightOf => {
-                    let last_half_w = node_sizes
-                        .get(last_pid)
-                        .map_or(50.0, |(w, _)| w / 2.0);
+                    let last_half_w = node_sizes.get(last_pid).map_or(50.0, |(w, _)| w / 2.0);
                     last_cx + last_half_w + 10.0
                 }
                 fm_core::NotePosition::Over => {
@@ -3486,9 +3487,7 @@ fn build_sequence_fragment_geometry(
     } else {
         let last_idx = participant_x_centers.len() - 1;
         let last_cx = participant_x_centers[last_idx];
-        let last_half_w = node_sizes
-            .get(last_idx)
-            .map_or(50.0, |(w, _)| w / 2.0);
+        let last_half_w = node_sizes.get(last_idx).map_or(50.0, |(w, _)| w / 2.0);
         last_cx + last_half_w
     };
 
@@ -3513,7 +3512,9 @@ fn build_sequence_fragment_geometry(
                     x: -padding,
                     y: message_gap.mul_add(-0.3, start_y),
                     width: total_width + padding * 2.0,
-                    height: message_gap.mul_add(0.6, end_y - start_y).max(message_gap * 0.5),
+                    height: message_gap
+                        .mul_add(0.6, end_y - start_y)
+                        .max(message_gap * 0.5),
                 },
             }
         })
@@ -3754,13 +3755,15 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
         let section_idx = task.section_idx.min(section_count.saturating_sub(1));
         let section_label = gantt_meta
             .sections
-            .get(section_idx).map_or_else(|| "Backlog".to_string(), |section| section.name.clone());
+            .get(section_idx)
+            .map_or_else(|| "Backlog".to_string(), |section| section.name.clone());
 
         while section_to_nodes.len() <= section_idx {
             let idx = section_to_nodes.len();
-            let label = gantt_meta
-                .sections
-                .get(idx).map_or_else(|| format!("Section {}", idx + 1), |section| section.name.clone());
+            let label = gantt_meta.sections.get(idx).map_or_else(
+                || format!("Section {}", idx + 1),
+                |section| section.name.clone(),
+            );
             section_to_nodes.entry(label).or_default();
         }
 
@@ -4197,9 +4200,7 @@ fn gantt_task_duration_days(task: &fm_core::IrGanttTask, inclusive_end_dates: bo
             }
         }
         Some(GanttDate::AfterTask(_)) => 1,
-        None => {
-            i32::from(!matches!(task.task_type, GanttTaskType::Milestone))
-        }
+        None => i32::from(!matches!(task.task_type, GanttTaskType::Milestone)),
     }
 }
 
@@ -4291,8 +4292,8 @@ pub fn layout_diagram_sankey_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         0,
     );
 
-    let mut in_degree = vec![0_usize; node_count];
-    let mut out_degree = vec![0_usize; node_count];
+    let mut in_flow = vec![0.0_f32; node_count];
+    let mut out_flow = vec![0.0_f32; node_count];
     for edge in &ir.edges {
         let Some(source) = endpoint_node_index(ir, edge.from) else {
             continue;
@@ -4303,12 +4304,19 @@ pub fn layout_diagram_sankey_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         if source == target || source >= node_count || target >= node_count {
             continue;
         }
-        out_degree[source] = out_degree[source].saturating_add(1);
-        in_degree[target] = in_degree[target].saturating_add(1);
+        
+        let flow_val = edge
+            .label
+            .and_then(|label_id| ir.labels.get(label_id.0))
+            .and_then(|label| label.text.parse::<f32>().ok())
+            .unwrap_or(1.0);
+            
+        out_flow[source] += flow_val;
+        in_flow[target] += flow_val;
     }
 
     for (node_index, size) in node_sizes.iter_mut().enumerate() {
-        let flow = in_degree[node_index].max(out_degree[node_index]).max(1) as f32;
+        let flow = in_flow[node_index].max(out_flow[node_index]).max(1.0);
         size.0 = size.0.max(108.0);
         size.1 = size.1.max(30.0 + (flow * 14.0));
     }
@@ -4407,9 +4415,11 @@ pub fn layout_diagram_grid_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         for (node_index, node) in ir.nodes.iter().enumerate() {
             let span = block_beta_node_span(node).min(column_count).max(1);
             if span > 1 {
-                node_sizes[node_index].0 = node_sizes[node_index]
-                    .0
-                    .max(spacing.node_spacing.mul_add((span - 1) as f32, base_max_width * span as f32));
+                node_sizes[node_index].0 = node_sizes[node_index].0.max(
+                    spacing
+                        .node_spacing
+                        .mul_add((span - 1) as f32, base_max_width * span as f32),
+                );
             }
         }
     }
@@ -4699,8 +4709,10 @@ fn layout_diagram_gitgraph_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let horizontal = matches!(ir.direction, GraphDirection::LR | GraphDirection::RL);
     let lane_width =
         node_sizes.iter().map(|(w, _)| *w).fold(0.0_f32, f32::max) + spacing.node_spacing;
-    let row_height =
-        spacing.rank_spacing.mul_add(0.6, node_sizes.iter().map(|(_, h)| *h).fold(0.0_f32, f32::max));
+    let row_height = spacing.rank_spacing.mul_add(
+        0.6,
+        node_sizes.iter().map(|(_, h)| *h).fold(0.0_f32, f32::max),
+    );
 
     let mut lane_map: BTreeMap<usize, usize> = BTreeMap::new();
     let mut next_lane = 0_usize;
@@ -5224,10 +5236,13 @@ fn compute_all_tree_span_centers(
             continue;
         }
 
-        let child_total: f32 = spacing.node_spacing.mul_add(children[node].len().saturating_sub(1) as f32, children[node]
-            .iter()
-            .map(|child| subtree_spans[*child])
-            .sum::<f32>());
+        let child_total: f32 = spacing.node_spacing.mul_add(
+            children[node].len().saturating_sub(1) as f32,
+            children[node]
+                .iter()
+                .map(|child| subtree_spans[*child])
+                .sum::<f32>(),
+        );
         let mut child_cursor = span_start + ((subtree_span - child_total) / 2.0);
 
         for &child in &children[node] {
@@ -6960,7 +6975,11 @@ fn block_beta_item_anchor(ir: &MermaidDiagramIr, item: BlockBetaGridItem) -> (St
             .subgraph_members_recursive(subgraph_id)
             .into_iter()
             .map(|node_id| node_id.0)
-            .min_by(|left, right| compare_node_indices(ir, *left, *right)).map_or_else(|| (format!("~group-{}", subgraph_id.0), subgraph_id.0), |node_index| (ir.nodes[node_index].id.clone(), node_index)),
+            .min_by(|left, right| compare_node_indices(ir, *left, *right))
+            .map_or_else(
+                || (format!("~group-{}", subgraph_id.0), subgraph_id.0),
+                |node_index| (ir.nodes[node_index].id.clone(), node_index),
+            ),
     }
 }
 
@@ -7472,12 +7491,16 @@ fn bk_horizontal_compaction(
         node_spacing: f32,
         horizontal_ranks: bool,
     ) -> f32 {
-        let u_extent = node_sizes
-            .get(u)
-            .map_or(84.0, |&(width, height)| if horizontal_ranks { height } else { width });
-        let w_extent = node_sizes
-            .get(w)
-            .map_or(84.0, |&(width, height)| if horizontal_ranks { height } else { width });
+        let u_extent =
+            node_sizes.get(u).map_or(
+                84.0,
+                |&(width, height)| if horizontal_ranks { height } else { width },
+            );
+        let w_extent =
+            node_sizes.get(w).map_or(
+                84.0,
+                |&(width, height)| if horizontal_ranks { height } else { width },
+            );
         (u_extent / 2.0) + node_spacing + (w_extent / 2.0)
     }
 
@@ -9135,8 +9158,10 @@ fn build_cycle_cluster_results(
             if let Some(member_box) = nodes.iter_mut().find(|n| n.node_index == member_index) {
                 member_box.bounds.x =
                     (col as f32).mul_add(member_box.bounds.width + sub_spacing, base_x);
-                member_box.bounds.y = (row as f32).mul_add(member_box.bounds.height + sub_spacing, base_y
-                    + head_height + spacing.cluster_padding);
+                member_box.bounds.y = (row as f32).mul_add(
+                    member_box.bounds.height + sub_spacing,
+                    base_y + head_height + spacing.cluster_padding,
+                );
             }
         }
 
@@ -9507,7 +9532,11 @@ fn layout_decision_confidence_permille(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::float_cmp, clippy::similar_names, clippy::many_single_char_names)]
+    #![allow(
+        clippy::float_cmp,
+        clippy::similar_names,
+        clippy::many_single_char_names
+    )]
     use super::{
         CycleStrategy, DependencyGraph, DirtySet, GraphMetrics, LayoutAlgorithm, LayoutEdit,
         LayoutGuardrails, LayoutPoint, LayoutRect, LayoutSequenceLifecycleMarkerKind, RegionInput,
@@ -10083,7 +10112,7 @@ mod tests {
         let cluster = &layout.clusters[0];
 
         assert_eq!(a.1, b.1);
-        
+
         assert_eq!(a.1, c.1);
         assert!(a.0 < b.0);
         assert!(b.0 < c.0);
@@ -11110,11 +11139,7 @@ mod tests {
             CycleStrategy::CycleAware,
         ] {
             let parsed = CycleStrategy::parse(strategy.as_str());
-            assert_eq!(
-                parsed,
-                Some(strategy),
-                "roundtrip failed for {strategy:?}"
-            );
+            assert_eq!(parsed, Some(strategy), "roundtrip failed for {strategy:?}");
         }
     }
 
@@ -11840,10 +11865,8 @@ mod tests {
         let b_center = b.bounds.center();
         let c_center = c.bounds.center();
 
-        let dist_ab =
-            (a_center.x - b_center.x).hypot(a_center.y - b_center.y);
-        let dist_ac =
-            (a_center.x - c_center.x).hypot(a_center.y - c_center.y);
+        let dist_ab = (a_center.x - b_center.x).hypot(a_center.y - b_center.y);
+        let dist_ac = (a_center.x - c_center.x).hypot(a_center.y - c_center.y);
 
         // Connected nodes should generally be closer than disconnected.
         assert!(
@@ -14394,7 +14417,12 @@ mod tests {
             let _traced = layout_diagram_traced(&ir);
         });
 
-        let cycle_event = captured.lock().unwrap().clone().into_iter().find(|e| e.contains("layout.cycle_removal") && !e.contains("acyclic"));
+        let cycle_event = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .into_iter()
+            .find(|e| e.contains("layout.cycle_removal") && !e.contains("acyclic"));
 
         if let Some(event) = cycle_event {
             let json: serde_json::Value =
@@ -14430,7 +14458,12 @@ mod tests {
             let _traced = layout_diagram_traced(&ir);
         });
 
-        let guardrail_event = captured.lock().unwrap().clone().into_iter().find(|e| e.contains("layout.guardrail"));
+        let guardrail_event = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .into_iter()
+            .find(|e| e.contains("layout.guardrail"));
 
         if let Some(event) = guardrail_event {
             let json: serde_json::Value =

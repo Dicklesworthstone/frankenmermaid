@@ -3899,6 +3899,9 @@ fn parse_timeline_events(
 }
 
 fn parse_packet(input: &str, builder: &mut IrBuilder) {
+    let mut field_index = 0_usize;
+    let mut previous_field: Option<IrNodeId> = None;
+
     for (index, line) in input.lines().enumerate() {
         let line_number = index + 1;
         let trimmed = line.trim();
@@ -3910,6 +3913,59 @@ fn parse_packet(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
+        let span = span_for(line_number, line);
+
+        // Parse packet field: `0-7: "Source Port"` or `0-31: Source Port`
+        if let Some((range_part, label_part)) = trimmed.split_once(':') {
+            let range = range_part.trim();
+            let label = label_part
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .trim();
+            if !label.is_empty() {
+                let field_id = format!("pkt-field-{field_index}");
+                let display_label = if range.contains('-') {
+                    format!("{label}\n[{range}]")
+                } else {
+                    label.to_string()
+                };
+
+                if let Some(node_id) =
+                    builder.intern_node(&field_id, Some(&display_label), NodeShape::Rect, span)
+                {
+                    builder.add_class_to_node(&field_id, "packet-field", span);
+
+                    // Parse bit range for width hint.
+                    if let Some((start_str, end_str)) = range.split_once('-')
+                        && let (Ok(start), Ok(end)) = (
+                            start_str.trim().parse::<usize>(),
+                            end_str.trim().parse::<usize>(),
+                        )
+                    {
+                        let bit_width = end.saturating_sub(start) + 1;
+                        builder.add_class_to_node(
+                            &field_id,
+                            &format!("packet-bits-{bit_width}"),
+                            span,
+                        );
+                        if bit_width > 8 {
+                            builder.add_class_to_node(&field_id, "packet-field-wide", span);
+                        }
+                    }
+
+                    // Chain fields sequentially.
+                    if let Some(prev) = previous_field {
+                        builder.push_edge(prev, node_id, ArrowType::Line, None, span);
+                    }
+                    previous_field = Some(node_id);
+                    field_index += 1;
+                }
+                continue;
+            }
+        }
+
+        // Fallback: try generic node/edge parsing.
         let mut parsed_line = false;
         for statement in split_statements(trimmed) {
             if parse_edge_statement(statement, line_number, line, &PACKET_OPERATORS, builder) {
@@ -3917,7 +3973,6 @@ fn parse_packet(input: &str, builder: &mut IrBuilder) {
                 continue;
             }
             if let Some(node) = parse_node_token(statement) {
-                let span = span_for(line_number, line);
                 let _ = intern_node_token(builder, &node, span);
                 parsed_line = true;
             }
@@ -12474,5 +12529,41 @@ Rel_Back(db, app, "Responds")"#,
         let (text, meta) = super::strip_kanban_metadata("In Progress @{ wip: 3 }");
         assert_eq!(text, "In Progress");
         assert_eq!(meta.wip, Some(3));
+    }
+
+    // ── Packet-beta field parsing tests ───────────────────────────────
+
+    #[test]
+    fn packet_beta_parses_bit_range_fields() {
+        let parsed = parse_mermaid(
+            "packet-beta\n  0-7: \"Source Port\"\n  8-15: \"Dest Port\"\n  16-31: \"Length\"",
+        );
+        assert_eq!(parsed.ir.nodes.len(), 3, "should have 3 packet fields");
+        let first = &parsed.ir.nodes[0];
+        assert!(
+            first.classes.iter().any(|c| c == "packet-field"),
+            "fields should have packet-field class"
+        );
+    }
+
+    #[test]
+    fn packet_beta_wide_fields_get_class() {
+        let parsed = parse_mermaid("packet-beta\n  0-31: \"Sequence Number\"");
+        assert_eq!(parsed.ir.nodes.len(), 1);
+        let node = &parsed.ir.nodes[0];
+        assert!(
+            node.classes.iter().any(|c| c == "packet-field-wide"),
+            "32-bit field should have packet-field-wide class"
+        );
+        assert!(
+            node.classes.iter().any(|c| c == "packet-bits-32"),
+            "should have packet-bits-32 class"
+        );
+    }
+
+    #[test]
+    fn packet_beta_fields_linked_sequentially() {
+        let parsed = parse_mermaid("packet-beta\n  0-7: \"A\"\n  8-15: \"B\"\n  16-23: \"C\"");
+        assert_eq!(parsed.ir.edges.len(), 2, "3 fields should produce 2 edges");
     }
 }

@@ -10,9 +10,25 @@ pub use font_metrics::{
 use std::collections::BTreeMap;
 
 pub use franken_kernel::{Budget, Cx, DecisionId, NoCaps, PolicyId, SchemaVersion, TraceId};
+pub use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
+
+// ── Fast hash collections for internal graph IDs ─────────────────────
+//
+// NodeId and EdgeId are sequential integers assigned by the parser. We use
+// FxHash (multiply-shift) instead of SipHash since HashDoS is not a concern
+// for internally-generated keys. This yields ~7-10x faster hash throughput.
+
+/// A `HashMap` optimised for [`IrNodeId`] keys (FxHash).
+pub type NodeMap<V> = FxHashMap<IrNodeId, V>;
+
+/// A `HashSet` optimised for [`IrNodeId`] values (FxHash).
+pub type NodeSet = FxHashSet<IrNodeId>;
+
+/// A `HashMap` optimised for `usize` edge-index keys (FxHash).
+pub type EdgeMap<V> = FxHashMap<usize, V>;
 
 pub const MERMAID_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(1, 0, 0);
 
@@ -4331,22 +4347,22 @@ mod tests {
 
     use super::{
         ArrowType, DegradationContext, DegradationOperator, Diagnostic, DiagnosticCategory,
-        DiagnosticSeverity, DiagramPalettePreset, DiagramType, FragmentAlternative, FragmentKind,
-        GanttDate, GanttExclude, GanttTaskType, GanttTickInterval, GraphDirection, IrActivation,
-        IrAttributeKey, IrCluster, IrClusterId, IrEdge, IrEdgeKind, IrEndpoint, IrEntityAttribute,
-        IrGanttMeta, IrGanttSection, IrGanttTask, IrGraphCluster, IrGraphEdge, IrGraphNode,
-        IrInlineStyle, IrLabel, IrLabelId, IrLifecycleEvent, IrNode, IrNodeId, IrNodeKind,
-        IrParticipantGroup, IrPort, IrPortId, IrPortSideHint, IrSequenceFragment, IrSequenceMeta,
-        IrSequenceNote, IrStyleDef, IrStyleRef, IrStyleTarget, IrSubgraph, IrSubgraphId, IrXyAxis,
-        IrXyChartMeta, IrXySeries, IrXySeriesKind, LifecycleEventKind, MERMAID_SCHEMA_VERSION,
-        MermaidBudgetLedger, MermaidConfig, MermaidDecisionWeight, MermaidDegradationPlan,
-        MermaidDiagramIr, MermaidError, MermaidErrorCode, MermaidFallbackAction,
-        MermaidFallbackPolicy, MermaidFidelity, MermaidGlyphMode, MermaidGuardReport,
-        MermaidLayoutDecisionAlternative, MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord,
-        MermaidNativePressureSignals, MermaidPressureReport, MermaidPressureTier,
-        MermaidQualityMode, MermaidSanitizeMode, MermaidSupportLevel, MermaidWarningCode,
-        MermaidWasmPressureSignals, NodeShape, NotePosition, Position, Span, StructuredDiagnostic,
-        capability_matrix, capability_matrix_json_pretty,
+        DiagnosticSeverity, DiagramPalettePreset, DiagramType, EdgeMap, FragmentAlternative,
+        FragmentKind, GanttDate, GanttExclude, GanttTaskType, GanttTickInterval, GraphDirection,
+        IrActivation, IrAttributeKey, IrCluster, IrClusterId, IrEdge, IrEdgeKind, IrEndpoint,
+        IrEntityAttribute, IrGanttMeta, IrGanttSection, IrGanttTask, IrGraphCluster, IrGraphEdge,
+        IrGraphNode, IrInlineStyle, IrLabel, IrLabelId, IrLifecycleEvent, IrNode, IrNodeId,
+        IrNodeKind, IrParticipantGroup, IrPort, IrPortId, IrPortSideHint, IrSequenceFragment,
+        IrSequenceMeta, IrSequenceNote, IrStyleDef, IrStyleRef, IrStyleTarget, IrSubgraph,
+        IrSubgraphId, IrXyAxis, IrXyChartMeta, IrXySeries, IrXySeriesKind, LifecycleEventKind,
+        MERMAID_SCHEMA_VERSION, MermaidBudgetLedger, MermaidConfig, MermaidDecisionWeight,
+        MermaidDegradationPlan, MermaidDiagramIr, MermaidError, MermaidErrorCode,
+        MermaidFallbackAction, MermaidFallbackPolicy, MermaidFidelity, MermaidGlyphMode,
+        MermaidGuardReport, MermaidLayoutDecisionAlternative, MermaidLayoutDecisionLedger,
+        MermaidLayoutDecisionRecord, MermaidNativePressureSignals, MermaidPressureReport,
+        MermaidPressureTier, MermaidQualityMode, MermaidSanitizeMode, MermaidSupportLevel,
+        MermaidWarningCode, MermaidWasmPressureSignals, NodeMap, NodeSet, NodeShape, NotePosition,
+        Position, Span, StructuredDiagnostic, capability_matrix, capability_matrix_json_pretty,
         capability_readme_supported_diagram_types_markdown, capability_readme_surface_markdown,
         documented_diagram_types, is_allowed_style_property, mermaid_layout_guard_observability,
         parse_mermaid_js_config_value, parse_style_string, sanitize_style_value, scale_budget,
@@ -7333,5 +7349,32 @@ mod tests {
         let deser: MermaidDiagramIr = serde_json::from_str(&json).unwrap();
         let node_style = deser.nodes[0].inline_style.as_ref().unwrap();
         assert_eq!(node_style.properties.get("fill").unwrap(), "#abc");
+    }
+
+    // ── FxHash collection type tests ─────────────────────────────────
+
+    #[test]
+    fn node_map_and_set_work_with_sequential_ids() {
+        let mut map: NodeMap<&str> = NodeMap::default();
+        map.insert(IrNodeId(0), "alpha");
+        map.insert(IrNodeId(1), "beta");
+        map.insert(IrNodeId(2), "gamma");
+        assert_eq!(map.len(), 3);
+        assert_eq!(map.get(&IrNodeId(1)), Some(&"beta"));
+
+        let mut set: NodeSet = NodeSet::default();
+        set.insert(IrNodeId(0));
+        set.insert(IrNodeId(5));
+        assert!(set.contains(&IrNodeId(0)));
+        assert!(!set.contains(&IrNodeId(3)));
+    }
+
+    #[test]
+    fn edge_map_works_with_index_keys() {
+        let mut map: EdgeMap<f32> = EdgeMap::default();
+        map.insert(0, 1.5);
+        map.insert(42, 2.7);
+        assert_eq!(map.get(&0), Some(&1.5));
+        assert_eq!(map.get(&42), Some(&2.7));
     }
 }
