@@ -6,14 +6,21 @@ use fm_core::{
     DiagramType, GanttDate, GanttExclude, GanttTaskType, GanttTickInterval, GraphDirection,
     MermaidTier,
 };
-use fm_layout::{layout_diagram, layout_diagram_traced};
+use fm_layout::{
+    IncrementalLayoutEngine, IncrementalLayoutSession, LayoutAlgorithm, LayoutConfig,
+    LayoutGuardrails, layout_diagram, layout_diagram_incremental_traced_with_config_and_guardrails,
+    layout_diagram_traced, layout_diagram_traced_with_config_and_guardrails,
+};
 use fm_parser::parse;
 use fm_render_svg::{
     SvgBackend, SvgRenderConfig, render_svg, render_svg_with_config, render_svg_with_layout,
 };
 use fm_render_term::render_term;
+use std::cell::RefCell;
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::rc::Rc;
+use std::time::Instant;
 use tempfile::{NamedTempFile, TempDir};
 
 /// Test that a simple flowchart parses and produces non-zero layout positions.
@@ -476,6 +483,266 @@ fn handles_all_directions() {
             "Failed for direction {expected_dir:?}"
         );
     }
+}
+
+fn build_incremental_stress_input(node_count: usize) -> String {
+    let mut lines = vec!["flowchart LR".to_string()];
+    for index in 0..node_count {
+        lines.push(format!("    N{index}[Widget {index}]"));
+    }
+    for index in 0..node_count.saturating_sub(1) {
+        lines.push(format!("    N{index} --> N{}", index + 1));
+    }
+    for index in 0..node_count.saturating_sub(3) {
+        if index % 3 == 0 {
+            lines.push(format!("    N{index} --> N{}", index + 3));
+        }
+    }
+    for index in 0..node_count.saturating_sub(8) {
+        if index % 5 == 0 {
+            lines.push(format!("    N{index} --> N{}", index + 8));
+        }
+    }
+    lines.join("\n")
+}
+
+fn mutate_ir_for_incremental_step(
+    ir: &mut fm_core::MermaidDiagramIr,
+    step: usize,
+    state: &mut u64,
+) {
+    *state = state
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1_442_695_040_888_963_407);
+    let node_index = (*state as usize) % ir.nodes.len();
+    let label_index = ir.nodes[node_index]
+        .label
+        .expect("stress graph should assign every node a label")
+        .0;
+
+    if step.is_multiple_of(2) {
+        ir.labels[label_index].text = format!("Widget {node_index} rev {}", step % 17);
+        return;
+    }
+
+    let from = node_index;
+    let mut to = ((*state >> 16) as usize) % ir.nodes.len();
+    if from == to {
+        to = (to + 1) % ir.nodes.len();
+    }
+    let from_endpoint = fm_core::IrEndpoint::Node(fm_core::IrNodeId(from));
+    let to_endpoint = fm_core::IrEndpoint::Node(fm_core::IrNodeId(to));
+
+    if let Some(edge_index) = ir
+        .edges
+        .iter()
+        .position(|edge| edge.from == from_endpoint && edge.to == to_endpoint)
+    {
+        ir.edges.remove(edge_index);
+    } else {
+        ir.edges.push(fm_core::IrEdge {
+            from: from_endpoint,
+            to: to_endpoint,
+            arrow: fm_core::ArrowType::Arrow,
+            ..fm_core::IrEdge::default()
+        });
+    }
+}
+
+#[test]
+fn incremental_layout_matches_full_recompute_for_complex_svg_outputs() {
+    let input = build_incremental_stress_input(64);
+    let parsed = parse(&input);
+    let mut edited_ir = parsed.ir.clone();
+    let session = Rc::new(RefCell::new(IncrementalLayoutSession::new()));
+    let mut engine = IncrementalLayoutEngine::default();
+    let config = LayoutConfig::default();
+    let guardrails = LayoutGuardrails::default();
+    let svg_config = SvgRenderConfig {
+        backend: SvgBackend::LegacyLayout,
+        ..SvgRenderConfig::default()
+    };
+
+    let _warm_summary = layout_diagram_incremental_traced_with_config_and_guardrails(
+        &session,
+        &edited_ir,
+        LayoutAlgorithm::Auto,
+        config.clone(),
+        guardrails,
+    );
+    let _warm_engine = engine.layout_diagram_traced_with_config_and_guardrails(
+        &edited_ir,
+        LayoutAlgorithm::Auto,
+        config.clone(),
+        guardrails,
+    );
+
+    let mut rng_state = 0x5eed_f00d_dead_beef_u64;
+    mutate_ir_for_incremental_step(&mut edited_ir, 1, &mut rng_state);
+
+    let incremental = layout_diagram_incremental_traced_with_config_and_guardrails(
+        &session,
+        &edited_ir,
+        LayoutAlgorithm::Auto,
+        config.clone(),
+        guardrails,
+    );
+    let incremental_svg =
+        render_svg_with_layout(&edited_ir, &incremental.traced.layout, &svg_config);
+
+    let full = layout_diagram_traced_with_config_and_guardrails(
+        &edited_ir,
+        LayoutAlgorithm::Auto,
+        config.clone(),
+        guardrails,
+    );
+    let full_svg = render_svg_with_layout(&edited_ir, &full.layout, &svg_config);
+
+    assert_eq!(incremental.traced.layout, full.layout);
+    assert_eq!(incremental_svg, full_svg);
+    assert!(
+        incremental.incremental.cache_hits > 0,
+        "expected incremental session to reuse cached query results"
+    );
+    assert!(
+        incremental
+            .incremental
+            .queries
+            .iter()
+            .any(|query| query.cache_hit),
+        "expected at least one cache-hit query summary"
+    );
+}
+
+#[test]
+fn incremental_layout_e2e_stress_matches_full_recompute_and_records_reuse() {
+    let input = build_incremental_stress_input(56);
+    let parsed = parse(&input);
+    let mut ir = parsed.ir.clone();
+    let session = Rc::new(RefCell::new(IncrementalLayoutSession::new()));
+    let config = LayoutConfig::default();
+    let guardrails = LayoutGuardrails::default();
+    let svg_config = SvgRenderConfig::default();
+
+    let _warm = layout_diagram_incremental_traced_with_config_and_guardrails(
+        &session,
+        &ir,
+        LayoutAlgorithm::Auto,
+        config.clone(),
+        guardrails,
+    );
+
+    let mut rng_state = 0x1234_5678_9abc_def0_u64;
+    let mut total_cache_hits = 0_usize;
+    for step in 0..1_000 {
+        mutate_ir_for_incremental_step(&mut ir, step, &mut rng_state);
+        let incremental = layout_diagram_incremental_traced_with_config_and_guardrails(
+            &session,
+            &ir,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+        let full = layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+
+        let incremental_svg = render_svg_with_layout(&ir, &incremental.traced.layout, &svg_config);
+        let full_svg = render_svg_with_layout(&ir, &full.layout, &svg_config);
+        assert_eq!(
+            incremental_svg, full_svg,
+            "incremental SVG diverged from full recompute on stress step {step}"
+        );
+        total_cache_hits = total_cache_hits.saturating_add(incremental.incremental.cache_hits);
+    }
+
+    assert!(
+        total_cache_hits > 0,
+        "expected incremental stress run to record cache hits"
+    );
+}
+
+#[test]
+fn incremental_layout_rerender_after_small_change_is_faster_than_full_recompute() {
+    let input = build_incremental_stress_input(72);
+    let parsed = parse(&input);
+    let config = LayoutConfig::default();
+    let guardrails = LayoutGuardrails::default();
+    let mut engine = IncrementalLayoutEngine::default();
+    let base_ir = parsed.ir.clone();
+
+    let _warm = engine.layout_diagram_traced_with_config_and_guardrails(
+        &base_ir,
+        LayoutAlgorithm::Auto,
+        config.clone(),
+        guardrails,
+    );
+
+    let mut edited_ir = base_ir.clone();
+    let mut rng_state = 0xa5a5_5a5a_dead_beef_u64;
+    mutate_ir_for_incremental_step(&mut edited_ir, 0, &mut rng_state);
+
+    let first_changed = engine.layout_diagram_traced_with_config_and_guardrails(
+        &edited_ir,
+        LayoutAlgorithm::Auto,
+        config.clone(),
+        guardrails,
+    );
+    let first_changed_full = layout_diagram_traced_with_config_and_guardrails(
+        &edited_ir,
+        LayoutAlgorithm::Auto,
+        config.clone(),
+        guardrails,
+    );
+    assert_eq!(first_changed.layout, first_changed_full.layout);
+
+    let mut incremental_durations = Vec::new();
+    let mut full_durations = Vec::new();
+
+    for step in 0..12 {
+        let incremental_start = Instant::now();
+        let incremental = engine.layout_diagram_traced_with_config_and_guardrails(
+            &edited_ir,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+        incremental_durations.push(incremental_start.elapsed());
+        assert!(
+            incremental.trace.incremental.cache_hit,
+            "expected memoized incremental rerender on repeat step {step}"
+        );
+        assert_eq!(
+            incremental.trace.incremental.query_type,
+            "layout_memoized_reuse"
+        );
+
+        let full_start = Instant::now();
+        let full = layout_diagram_traced_with_config_and_guardrails(
+            &edited_ir,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+        full_durations.push(full_start.elapsed());
+
+        assert_eq!(incremental.layout, full.layout);
+    }
+
+    incremental_durations.sort_unstable();
+    full_durations.sort_unstable();
+    let median_incremental = incremental_durations[incremental_durations.len() / 2];
+    let median_full = full_durations[full_durations.len() / 2];
+
+    assert!(
+        median_incremental < median_full,
+        "expected incremental median duration {:?} to be lower than full recompute {:?}",
+        median_incremental,
+        median_full
+    );
 }
 
 fn run_cli(args: &[&str], stdin: &str) -> std::process::Output {

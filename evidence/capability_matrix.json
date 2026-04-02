@@ -3,8 +3,8 @@
   "project": "frankenmermaid",
   "status_counts": {
     "experimental": 1,
-    "implemented": 25,
-    "partial": 9
+    "implemented": 30,
+    "partial": 4
   },
   "claims": [
     {
@@ -151,7 +151,7 @@
       "id": "diagram-type/C4Context",
       "category": "diagram_type",
       "title": "Support C4Context diagrams",
-      "status": "partial",
+      "status": "implemented",
       "advertised_in": [
         "README.md#supported-diagram-types"
       ],
@@ -172,14 +172,14 @@
         }
       ],
       "notes": [
-        "README advertises this family; current code marks it as basic capability"
+        "README advertises this family; current code marks it as full capability"
       ]
     },
     {
       "id": "diagram-type/C4Container",
       "category": "diagram_type",
       "title": "Support C4Container diagrams",
-      "status": "partial",
+      "status": "implemented",
       "advertised_in": [
         "README.md#supported-diagram-types"
       ],
@@ -200,14 +200,14 @@
         }
       ],
       "notes": [
-        "README advertises this family; current code marks it as basic capability"
+        "README advertises this family; current code marks it as full capability"
       ]
     },
     {
       "id": "diagram-type/C4Component",
       "category": "diagram_type",
       "title": "Support C4Component diagrams",
-      "status": "partial",
+      "status": "implemented",
       "advertised_in": [
         "README.md#supported-diagram-types"
       ],
@@ -228,14 +228,14 @@
         }
       ],
       "notes": [
-        "README advertises this family; current code marks it as basic capability"
+        "README advertises this family; current code marks it as full capability"
       ]
     },
     {
       "id": "diagram-type/C4Dynamic",
       "category": "diagram_type",
       "title": "Support C4Dynamic diagrams",
-      "status": "partial",
+      "status": "implemented",
       "advertised_in": [
         "README.md#supported-diagram-types"
       ],
@@ -256,14 +256,14 @@
         }
       ],
       "notes": [
-        "README advertises this family; current code marks it as basic capability"
+        "README advertises this family; current code marks it as full capability"
       ]
     },
     {
       "id": "diagram-type/C4Deployment",
       "category": "diagram_type",
       "title": "Support C4Deployment diagrams",
-      "status": "partial",
+      "status": "implemented",
       "advertised_in": [
         "README.md#supported-diagram-types"
       ],
@@ -284,7 +284,7 @@
         }
       ],
       "notes": [
-        "README advertises this family; current code marks it as basic capability"
+        "README advertises this family; current code marks it as full capability"
       ]
     },
     {

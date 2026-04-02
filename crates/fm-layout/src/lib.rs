@@ -1314,8 +1314,11 @@ pub fn build_render_scene(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> Rend
     RenderScene { bounds, root }
 }
 
+pub mod cache_oblivious;
+pub mod delta_debug;
 pub mod persistence;
 pub mod shapes;
+pub mod spatial;
 pub mod spectral;
 
 use shapes::{node_path, rounded_rect_path};
