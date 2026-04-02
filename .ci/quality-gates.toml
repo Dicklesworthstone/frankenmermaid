@@ -65,6 +65,10 @@ require_retro_bead = true
 require_fix_bead = true
 overrides_path = ".ci/release-gate-overrides.toml"
 
+[release_signoff]
+enabled = true
+spec_path = ".ci/release-signoff.toml"
+
 [demo_evidence]
 enabled = true
 blocking = true

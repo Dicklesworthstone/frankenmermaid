@@ -17,6 +17,7 @@ fnx-experimental-directed = ["fnx-integration"]
 
 [dependencies]
 fm-core.workspace = true
+nalgebra.workspace = true
 tracing.workspace = true
 fnx-runtime = { workspace = true, optional = true }
 fnx-classes = { workspace = true, optional = true }

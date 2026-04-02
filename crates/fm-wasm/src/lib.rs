@@ -7,9 +7,12 @@ use fm_core::{
     MermaidBudgetLedger, MermaidDiagramIr, MermaidGuardReport, MermaidSourceMapKind,
     MermaidWasmPressureSignals, Span, capability_matrix, mermaid_layout_guard_observability,
 };
+#[cfg(target_arch = "wasm32")]
+use fm_layout::IncrementalLayoutEngine;
 use fm_layout::{
-    DiagramLayout, LayoutConfig, LayoutGuardrails, build_layout_guard_report_with_pressure,
-    layout_diagram_traced, layout_diagram_traced_with_config_and_guardrails,
+    DiagramLayout, LayoutConfig, LayoutGuardrails, TracedLayout,
+    build_layout_guard_report_with_pressure, layout_diagram_traced,
+    layout_diagram_traced_with_config_and_guardrails,
 };
 #[cfg(target_arch = "wasm32")]
 use fm_parser::ParseResult;
@@ -170,7 +173,7 @@ impl DiagramRenderOutput {
     fn new(
         svg: String,
         parsed: &ParseResult,
-        layout: &DiagramLayout,
+        traced_layout: &TracedLayout,
         layout_config: &LayoutConfig,
         guard: MermaidGuardReport,
         canvas: &CanvasRenderResult,
@@ -184,9 +187,9 @@ impl DiagramRenderOutput {
             decision_id: guard.observability.decision_id.to_string(),
             policy_id: guard.observability.policy_id.to_string(),
             schema_version: guard.observability.schema_version.to_string(),
-            layout: LayoutRuntimeSummary::new(layout, layout_config),
+            layout: LayoutRuntimeSummary::new(traced_layout, layout_config),
             guard,
-            source_spans: collect_source_spans(&parsed.ir, layout),
+            source_spans: collect_source_spans(&parsed.ir, &traced_layout.layout),
             canvas: CanvasRenderSummary::from(canvas),
         }
     }
@@ -197,6 +200,11 @@ impl DiagramRenderOutput {
 pub struct LayoutRuntimeSummary {
     cycle_strategy: String,
     cycle_clusters_collapsed: bool,
+    incremental_query_type: String,
+    incremental_cache_hit: bool,
+    incremental_recomputed_nodes: usize,
+    incremental_total_nodes: usize,
+    incremental_recompute_duration_us: u64,
     node_count: usize,
     edge_count: usize,
     crossing_count: usize,
@@ -212,10 +220,19 @@ pub struct LayoutRuntimeSummary {
 }
 
 impl LayoutRuntimeSummary {
-    fn new(layout: &DiagramLayout, layout_config: &LayoutConfig) -> Self {
+    fn new(traced_layout: &TracedLayout, layout_config: &LayoutConfig) -> Self {
+        let layout = &traced_layout.layout;
         Self {
             cycle_strategy: layout_config.cycle_strategy.as_str().to_string(),
             cycle_clusters_collapsed: layout_config.collapse_cycle_clusters,
+            incremental_query_type: traced_layout.trace.incremental.query_type.to_string(),
+            incremental_cache_hit: traced_layout.trace.incremental.cache_hit,
+            incremental_recomputed_nodes: traced_layout.trace.incremental.recomputed_nodes,
+            incremental_total_nodes: traced_layout.trace.incremental.total_nodes,
+            incremental_recompute_duration_us: traced_layout
+                .trace
+                .incremental
+                .recompute_duration_us,
             node_count: layout.stats.node_count,
             edge_count: layout.stats.edge_count,
             crossing_count: layout.stats.crossing_count,
@@ -713,7 +730,7 @@ pub fn render(input: &str) -> WasmRenderOutput {
         policy_id: guard.observability.policy_id.to_string(),
         schema_version: guard.observability.schema_version.to_string(),
         guard,
-        layout: LayoutRuntimeSummary::new(&traced_layout.layout, &layout_config),
+        layout: LayoutRuntimeSummary::new(&traced_layout, &layout_config),
         source_spans,
     }
 }
@@ -1048,6 +1065,7 @@ pub struct Diagram {
     svg_config: SvgRenderConfig,
     canvas_config: CanvasRenderConfig,
     pressure_config: MermaidWasmPressureSignals,
+    layout_engine: IncrementalLayoutEngine,
     destroyed: bool,
 }
 
@@ -1097,6 +1115,7 @@ impl Diagram {
             svg_config,
             canvas_config,
             pressure_config,
+            layout_engine: IncrementalLayoutEngine::default(),
             destroyed: false,
         })
     }
@@ -1139,12 +1158,14 @@ impl Diagram {
             font_metrics: Some(next_svg.font_metrics()),
             ..Default::default()
         };
-        let traced_layout = fm_layout::layout_diagram_traced_with_config_and_guardrails(
-            &parsed.ir,
-            fm_layout::LayoutAlgorithm::Auto,
-            layout_config,
-            layout_guardrails,
-        );
+        let traced_layout = self
+            .layout_engine
+            .layout_diagram_traced_with_config_and_guardrails(
+                &parsed.ir,
+                fm_layout::LayoutAlgorithm::Auto,
+                layout_config,
+                layout_guardrails,
+            );
         budget_broker.record_layout(
             layout_start
                 .elapsed()
@@ -1191,7 +1212,7 @@ impl Diagram {
         let output = DiagramRenderOutput::new(
             svg,
             &parsed,
-            &traced_layout.layout,
+            &traced_layout,
             &layout_config,
             guard,
             &canvas_result,
@@ -1296,6 +1317,13 @@ mod tests {
         assert_eq!(output.guard.guard_reason.as_deref(), Some("within_budget"));
         assert_eq!(output.guard.pressure.tier, MermaidPressureTier::Unknown);
         assert_eq!(output.layout.cycle_strategy, "greedy");
+        assert_eq!(
+            output.layout.incremental_query_type,
+            "layout_full_recompute"
+        );
+        assert!(!output.layout.incremental_cache_hit);
+        assert_eq!(output.layout.incremental_recomputed_nodes, 2);
+        assert_eq!(output.layout.incremental_total_nodes, 2);
         assert_eq!(output.layout.node_count, 2);
         assert_eq!(output.layout.edge_count, 1);
         assert_eq!(output.layout.crossing_count, 0);

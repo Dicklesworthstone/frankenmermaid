@@ -5,9 +5,12 @@
     clippy::cast_precision_loss
 )]
 
+use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::f32::consts::PI;
+use std::rc::Rc;
+use std::time::Instant;
 
 use fm_core::{
     DiagramType, GanttDate, GanttExclude, GanttTaskType, GraphDirection, IrEndpoint, IrGanttMeta,
@@ -178,6 +181,152 @@ impl RegionMemoryBudget {
     #[must_use]
     pub const fn within_target(self) -> bool {
         self.dependency_graph_bytes.saturating_mul(10) <= self.layout_bytes
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncrementalQuerySummary {
+    pub query_type: &'static str,
+    pub cache_hit: bool,
+    pub recomputed_nodes: usize,
+    pub total_nodes: usize,
+    pub recompute_duration_us: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct IncrementalLayoutSummary {
+    pub cache_hits: usize,
+    pub cache_misses: usize,
+    pub recomputed_nodes: usize,
+    pub total_nodes: usize,
+    pub queries: Vec<IncrementalQuerySummary>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CachedNodeSize {
+    key: u64,
+    size: (f32, f32),
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+struct IncrementalCacheState {
+    graph_metrics_cache: Option<(u64, GraphMetrics)>,
+    node_size_cache: BTreeMap<String, CachedNodeSize>,
+    current_summary: IncrementalLayoutSummary,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct IncrementalLayoutSession {
+    state: IncrementalCacheState,
+}
+
+impl IncrementalLayoutSession {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+pub type SharedIncrementalLayoutSession = Rc<RefCell<IncrementalLayoutSession>>;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct IncrementalTracedLayout {
+    pub traced: TracedLayout,
+    pub incremental: IncrementalLayoutSummary,
+}
+
+impl IncrementalCacheState {
+    fn begin_pass(&mut self) {
+        self.current_summary = IncrementalLayoutSummary::default();
+    }
+
+    fn record_query(&mut self, summary: IncrementalQuerySummary) {
+        if summary.cache_hit {
+            self.current_summary.cache_hits = self.current_summary.cache_hits.saturating_add(1);
+        } else {
+            self.current_summary.cache_misses = self.current_summary.cache_misses.saturating_add(1);
+        }
+        self.current_summary.recomputed_nodes = self
+            .current_summary
+            .recomputed_nodes
+            .max(summary.recomputed_nodes);
+        self.current_summary.total_nodes =
+            self.current_summary.total_nodes.max(summary.total_nodes);
+        self.current_summary.queries.push(summary);
+    }
+}
+
+thread_local! {
+    static ACTIVE_INCREMENTAL_STATE: RefCell<Option<IncrementalCacheState>> = const { RefCell::new(None) };
+    static ACTIVE_INCREMENTAL_SESSION: RefCell<Option<SharedIncrementalLayoutSession>> = const { RefCell::new(None) };
+}
+
+struct ActiveIncrementalStateGuard;
+
+impl ActiveIncrementalStateGuard {
+    fn install(state: IncrementalCacheState) -> Self {
+        ACTIVE_INCREMENTAL_STATE.with(|slot| {
+            *slot.borrow_mut() = Some(state);
+        });
+        Self
+    }
+
+    fn finish(self) -> IncrementalCacheState {
+        ACTIVE_INCREMENTAL_STATE.with(|slot| slot.borrow_mut().take().unwrap_or_default())
+    }
+}
+
+impl Drop for ActiveIncrementalStateGuard {
+    fn drop(&mut self) {
+        ACTIVE_INCREMENTAL_STATE.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
+    }
+}
+
+struct ActiveIncrementalSessionGuard {
+    session: SharedIncrementalLayoutSession,
+    finished: bool,
+}
+
+impl ActiveIncrementalSessionGuard {
+    fn install(session: SharedIncrementalLayoutSession) -> Self {
+        let state = session.borrow().state.clone();
+        ACTIVE_INCREMENTAL_SESSION.with(|slot| {
+            *slot.borrow_mut() = Some(Rc::clone(&session));
+        });
+        ACTIVE_INCREMENTAL_STATE.with(|slot| {
+            *slot.borrow_mut() = Some(state);
+        });
+        Self {
+            session,
+            finished: false,
+        }
+    }
+
+    fn finish(mut self) -> IncrementalCacheState {
+        let state =
+            ACTIVE_INCREMENTAL_STATE.with(|slot| slot.borrow_mut().take().unwrap_or_default());
+        self.session.borrow_mut().state = state.clone();
+        ACTIVE_INCREMENTAL_SESSION.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
+        self.finished = true;
+        state
+    }
+}
+
+impl Drop for ActiveIncrementalSessionGuard {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        ACTIVE_INCREMENTAL_SESSION.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
+        ACTIVE_INCREMENTAL_STATE.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
     }
 }
 
@@ -417,6 +566,62 @@ pub struct LayoutTrace {
     pub dispatch: LayoutDispatch,
     pub guard: LayoutGuardDecision,
     pub snapshots: Vec<LayoutStageSnapshot>,
+    pub incremental: IncrementalRecomputeTrace,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncrementalRecomputeTrace {
+    pub query_type: &'static str,
+    pub cache_hit: bool,
+    pub recomputed_nodes: usize,
+    pub total_nodes: usize,
+    pub recompute_duration_us: u64,
+}
+
+impl Default for IncrementalRecomputeTrace {
+    fn default() -> Self {
+        Self {
+            query_type: "layout_full_recompute",
+            cache_hit: false,
+            recomputed_nodes: 0,
+            total_nodes: 0,
+            recompute_duration_us: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CachedTracedLayout {
+    key: LayoutMemoKey,
+    traced: TracedLayout,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LayoutMemoKey {
+    ir_fingerprint: u64,
+    algorithm: LayoutAlgorithm,
+    cycle_strategy: CycleStrategy,
+    collapse_cycle_clusters: bool,
+    font_size_bits: u32,
+    avg_char_width_bits: u32,
+    line_height_bits: u32,
+    max_layout_time_ms: usize,
+    max_layout_iterations: usize,
+    max_route_ops: usize,
+}
+
+/// Coarse-grained incremental engine for repeated layout requests.
+///
+/// This is the first practical wedge for `bd-2re.1`: it memoizes the last traced layout using a
+/// deterministic key over the layout-relevant request surface so stateful callers can avoid a full
+/// re-run when the layout inputs have not changed. On cache misses it also preserves memoized
+/// graph-metric and node-size query state so repeated edits only recompute changed query inputs
+/// before the broader layout pass runs.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct IncrementalLayoutEngine {
+    cached: Option<CachedTracedLayout>,
+    graph_metrics_cache: Option<(u64, GraphMetrics)>,
+    node_size_cache: BTreeMap<String, CachedNodeSize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -541,6 +746,11 @@ impl GraphMetrics {
     /// detection in O(V+E) time, so this is cheap relative to actual layout.
     #[must_use]
     pub fn from_ir(ir: &MermaidDiagramIr) -> Self {
+        if let Some(cached) = try_graph_metrics_cache_hit(ir) {
+            return cached;
+        }
+
+        let start = Instant::now();
         let node_count = ir.nodes.len();
         let edges = resolved_edges(ir);
         let edge_count = edges.len();
@@ -576,7 +786,7 @@ impl GraphMetrics {
         let is_sparse = edge_to_node_ratio < 1.2;
         let is_dense = edge_to_node_ratio > 2.0;
 
-        Self {
+        let metrics = Self {
             node_count,
             edge_count,
             edge_to_node_ratio,
@@ -587,7 +797,110 @@ impl GraphMetrics {
             is_tree_like,
             is_sparse,
             is_dense,
+        };
+
+        record_graph_metrics_cache_miss(ir, metrics, start.elapsed(), node_count);
+        metrics
+    }
+}
+
+fn try_graph_metrics_cache_hit(ir: &MermaidDiagramIr) -> Option<GraphMetrics> {
+    ACTIVE_INCREMENTAL_STATE.with(|slot| {
+        let mut state = slot.borrow_mut();
+        let state = state.as_mut()?;
+        let topology_key = graph_metrics_cache_key(ir);
+        if let Some((cached_key, cached_metrics)) = state.graph_metrics_cache
+            && cached_key == topology_key
+        {
+            let total_nodes = ir.nodes.len();
+            let summary = IncrementalQuerySummary {
+                query_type: "graph_metrics",
+                cache_hit: true,
+                recomputed_nodes: 0,
+                total_nodes,
+                recompute_duration_us: 0,
+            };
+            trace!(
+                query_type = summary.query_type,
+                cache_hit = summary.cache_hit,
+                recomputed_nodes = summary.recomputed_nodes,
+                total_nodes = summary.total_nodes,
+                recompute_duration_us = summary.recompute_duration_us,
+                "incremental.recompute"
+            );
+            state.record_query(summary);
+            return Some(cached_metrics);
         }
+        None
+    })
+}
+
+fn record_graph_metrics_cache_miss(
+    ir: &MermaidDiagramIr,
+    metrics: GraphMetrics,
+    duration: std::time::Duration,
+    total_nodes: usize,
+) {
+    ACTIVE_INCREMENTAL_STATE.with(|slot| {
+        let mut state = slot.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return;
+        };
+        let topology_key = graph_metrics_cache_key(ir);
+        let recompute_duration_us = duration.as_micros().try_into().unwrap_or(u64::MAX);
+        state.graph_metrics_cache = Some((topology_key, metrics));
+        let summary = IncrementalQuerySummary {
+            query_type: "graph_metrics",
+            cache_hit: false,
+            recomputed_nodes: total_nodes,
+            total_nodes,
+            recompute_duration_us,
+        };
+        debug!(
+            query_type = summary.query_type,
+            total_nodes, "incremental.cache_miss"
+        );
+        trace!(
+            query_type = summary.query_type,
+            dependency = "graph_topology",
+            topology_key,
+            "incremental.dependency_update"
+        );
+        trace!(
+            query_type = summary.query_type,
+            cache_hit = summary.cache_hit,
+            recomputed_nodes = summary.recomputed_nodes,
+            total_nodes = summary.total_nodes,
+            recompute_duration_us = summary.recompute_duration_us,
+            "incremental.recompute"
+        );
+        state.record_query(summary);
+    });
+}
+
+fn graph_metrics_cache_key(ir: &MermaidDiagramIr) -> u64 {
+    let edges = resolved_edges(ir);
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    hash_u64(&mut hash, ir.nodes.len() as u64);
+    hash_u64(&mut hash, edges.len() as u64);
+    for edge in edges {
+        hash_u64(&mut hash, edge.source as u64);
+        hash_u64(&mut hash, edge.target as u64);
+    }
+    hash
+}
+
+fn hash_u64(hash: &mut u64, value: u64) {
+    for byte in value.to_le_bytes() {
+        *hash ^= u64::from(byte);
+        *hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+}
+
+fn hash_str(hash: &mut u64, value: &str) {
+    for byte in value.as_bytes() {
+        *hash ^= u64::from(*byte);
+        *hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
 }
 
@@ -1001,7 +1314,9 @@ pub fn build_render_scene(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> Rend
     RenderScene { bounds, root }
 }
 
+pub mod persistence;
 pub mod shapes;
+pub mod spectral;
 
 use shapes::{node_path, rounded_rect_path};
 
@@ -1522,6 +1837,57 @@ pub fn layout_diagram_traced_with_config_and_guardrails(
     config: LayoutConfig,
     guardrails: LayoutGuardrails,
 ) -> TracedLayout {
+    let start = std::time::Instant::now();
+    let mut traced =
+        compute_traced_layout_with_config_and_guardrails(ir, algorithm, config, guardrails);
+    let recompute_duration_us = saturating_elapsed_micros(start.elapsed());
+    traced.trace.incremental = IncrementalRecomputeTrace {
+        query_type: "layout_full_recompute",
+        cache_hit: false,
+        recomputed_nodes: ir.nodes.len(),
+        total_nodes: ir.nodes.len(),
+        recompute_duration_us: 0,
+    };
+    debug!(
+        query_type = traced.trace.incremental.query_type,
+        cache_hit = traced.trace.incremental.cache_hit,
+        recomputed_nodes = traced.trace.incremental.recomputed_nodes,
+        total_nodes = traced.trace.incremental.total_nodes,
+        recompute_duration_us,
+        "incremental.recompute"
+    );
+    traced
+}
+
+#[must_use]
+pub fn layout_diagram_incremental_traced_with_config_and_guardrails(
+    session: &SharedIncrementalLayoutSession,
+    ir: &MermaidDiagramIr,
+    algorithm: LayoutAlgorithm,
+    config: LayoutConfig,
+    guardrails: LayoutGuardrails,
+) -> IncrementalTracedLayout {
+    let session_guard = ActiveIncrementalSessionGuard::install(Rc::clone(session));
+    ACTIVE_INCREMENTAL_STATE.with(|slot| {
+        if let Some(state) = slot.borrow_mut().as_mut() {
+            state.begin_pass();
+        }
+    });
+    let traced =
+        layout_diagram_traced_with_config_and_guardrails(ir, algorithm, config, guardrails);
+    let incremental = session_guard.finish().current_summary;
+    IncrementalTracedLayout {
+        traced,
+        incremental,
+    }
+}
+
+fn compute_traced_layout_with_config_and_guardrails(
+    ir: &MermaidDiagramIr,
+    algorithm: LayoutAlgorithm,
+    config: LayoutConfig,
+    guardrails: LayoutGuardrails,
+) -> TracedLayout {
     let dispatch = dispatch_layout_algorithm(ir, algorithm);
     let guard = evaluate_layout_guardrails(ir, dispatch.selected, guardrails);
     let mut guarded_dispatch = dispatch;
@@ -1562,6 +1928,160 @@ pub fn layout_diagram_traced_with_config_and_guardrails(
     );
     traced.layout.stats.phase_iterations = traced.trace.snapshots.len();
     traced
+}
+
+impl IncrementalLayoutEngine {
+    #[must_use]
+    pub fn layout_diagram_traced_with_config_and_guardrails(
+        &mut self,
+        ir: &MermaidDiagramIr,
+        algorithm: LayoutAlgorithm,
+        config: LayoutConfig,
+        guardrails: LayoutGuardrails,
+    ) -> TracedLayout {
+        let start = std::time::Instant::now();
+        let key = layout_memo_key(ir, algorithm, &config, guardrails);
+
+        if let Some(cached) = &self.cached
+            && cached.key == key
+        {
+            let mut traced = cached.traced.clone();
+            let recompute_duration_us = saturating_elapsed_micros(start.elapsed());
+            traced.trace.incremental = IncrementalRecomputeTrace {
+                query_type: "layout_memoized_reuse",
+                cache_hit: true,
+                recomputed_nodes: 0,
+                total_nodes: ir.nodes.len(),
+                recompute_duration_us,
+            };
+            debug!(
+                query_type = traced.trace.incremental.query_type,
+                cache_hit = traced.trace.incremental.cache_hit,
+                recomputed_nodes = traced.trace.incremental.recomputed_nodes,
+                total_nodes = traced.trace.incremental.total_nodes,
+                recompute_duration_us,
+                "incremental.recompute"
+            );
+            return traced;
+        }
+
+        trace!(
+            ir_fingerprint = key.ir_fingerprint,
+            algorithm = algorithm.as_str(),
+            "incremental.cache_miss"
+        );
+        let recompute_duration_us = saturating_elapsed_micros(start.elapsed());
+        let mut incremental_state = IncrementalCacheState {
+            graph_metrics_cache: self.graph_metrics_cache,
+            node_size_cache: self.node_size_cache.clone(),
+            current_summary: IncrementalLayoutSummary::default(),
+        };
+        incremental_state.begin_pass();
+        let state_guard = ActiveIncrementalStateGuard::install(incremental_state);
+        let mut traced =
+            compute_traced_layout_with_config_and_guardrails(ir, algorithm, config, guardrails);
+        let incremental_state = state_guard.finish();
+        self.graph_metrics_cache = incremental_state.graph_metrics_cache;
+        self.node_size_cache = incremental_state.node_size_cache;
+        traced.trace.incremental = IncrementalRecomputeTrace {
+            query_type: if incremental_state.current_summary.cache_hits > 0 {
+                "layout_full_recompute_with_query_reuse"
+            } else {
+                "layout_full_recompute"
+            },
+            cache_hit: false,
+            recomputed_nodes: if incremental_state.current_summary.recomputed_nodes > 0 {
+                incremental_state.current_summary.recomputed_nodes
+            } else {
+                ir.nodes.len()
+            },
+            total_nodes: incremental_state
+                .current_summary
+                .total_nodes
+                .max(ir.nodes.len()),
+            recompute_duration_us,
+        };
+        debug!(
+            query_type = traced.trace.incremental.query_type,
+            cache_hit = traced.trace.incremental.cache_hit,
+            recomputed_nodes = traced.trace.incremental.recomputed_nodes,
+            total_nodes = traced.trace.incremental.total_nodes,
+            recompute_duration_us,
+            "incremental.recompute"
+        );
+        self.cached = Some(CachedTracedLayout {
+            key,
+            traced: traced.clone(),
+        });
+        traced
+    }
+
+    pub fn clear(&mut self) {
+        self.cached = None;
+        self.graph_metrics_cache = None;
+        self.node_size_cache.clear();
+    }
+}
+
+fn layout_memo_key(
+    ir: &MermaidDiagramIr,
+    algorithm: LayoutAlgorithm,
+    config: &LayoutConfig,
+    guardrails: LayoutGuardrails,
+) -> LayoutMemoKey {
+    let metrics = config
+        .font_metrics
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(fm_core::FontMetrics::default_metrics);
+    let ir_fingerprint = stable_layout_request_hash(ir, algorithm, config, guardrails, &metrics);
+    LayoutMemoKey {
+        ir_fingerprint,
+        algorithm,
+        cycle_strategy: config.cycle_strategy,
+        collapse_cycle_clusters: config.collapse_cycle_clusters,
+        font_size_bits: metrics.font_size().to_bits(),
+        avg_char_width_bits: metrics.avg_char_width().to_bits(),
+        line_height_bits: metrics.line_height_px().to_bits(),
+        max_layout_time_ms: guardrails.max_layout_time_ms,
+        max_layout_iterations: guardrails.max_layout_iterations,
+        max_route_ops: guardrails.max_route_ops,
+    }
+}
+
+fn stable_layout_request_hash(
+    ir: &MermaidDiagramIr,
+    algorithm: LayoutAlgorithm,
+    config: &LayoutConfig,
+    guardrails: LayoutGuardrails,
+    metrics: &fm_core::FontMetrics,
+) -> u64 {
+    let descriptor = format!(
+        "{ir:?}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        algorithm.as_str(),
+        config.cycle_strategy.as_str(),
+        config.collapse_cycle_clusters,
+        metrics.font_size(),
+        metrics.avg_char_width(),
+        metrics.line_height_px(),
+        guardrails.max_layout_time_ms,
+        guardrails.max_layout_iterations,
+        guardrails.max_route_ops,
+    );
+    stable_u64_hash(descriptor.as_bytes())
+}
+
+fn stable_u64_hash(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    hash
+}
+
+fn saturating_elapsed_micros(duration: std::time::Duration) -> u64 {
+    duration.as_micros().min(u128::from(u64::MAX)) as u64
 }
 
 fn dispatch_layout_algorithm(ir: &MermaidDiagramIr, requested: LayoutAlgorithm) -> LayoutDispatch {
@@ -5996,43 +6516,127 @@ pub fn compute_node_sizes(
     ir: &MermaidDiagramIr,
     metrics: &fm_core::FontMetrics,
 ) -> Vec<(f32, f32)> {
-    ir.nodes
-        .iter()
-        .map(|node| {
-            let text = display_node_label(ir, node);
+    ACTIVE_INCREMENTAL_STATE.with(|slot| {
+        let mut state = slot.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return ir
+                .nodes
+                .iter()
+                .map(|node| compute_node_size(ir, node, metrics))
+                .collect();
+        };
 
-            match node.shape {
-                fm_core::NodeShape::FilledCircle => (20.0, 20.0),
-                fm_core::NodeShape::DoubleCircle => {
-                    if text.is_empty() {
-                        (24.0, 24.0)
-                    } else {
-                        let (label_width, label_height) = metrics.estimate_dimensions(&text);
-                        (
-                            (label_width + 52.0).max(42.0),
-                            (label_height + 30.0).max(42.0),
-                        )
-                    }
+        let start = Instant::now();
+        let total_nodes = ir.nodes.len();
+        let mut recomputed_nodes = 0_usize;
+        let sizes = ir
+            .nodes
+            .iter()
+            .map(|node| {
+                let cache_key = node_size_cache_key(ir, node, metrics);
+                if let Some(entry) = state.node_size_cache.get(&node.id)
+                    && entry.key == cache_key
+                {
+                    return entry.size;
                 }
-                fm_core::NodeShape::HorizontalBar => (72.0, 16.0),
-                _ => {
-                    let text = if text.is_empty() {
-                        node.id.as_str()
-                    } else {
-                        &text
-                    };
-                    let (label_width, label_height) = metrics.estimate_dimensions(text);
-                    let (icon_width, icon_height) = icon_dimensions(node, metrics);
-                    let width = label_width
-                        .max(icon_width)
-                        .max(icon_width.mul_add(0.85, label_width))
-                        + 72.0;
-                    let height = label_height + icon_height + 44.0;
-                    (width.max(100.0), height.max(52.0))
-                }
+
+                recomputed_nodes = recomputed_nodes.saturating_add(1);
+                debug!(
+                    query_type = "node_sizes",
+                    node_id = %node.id,
+                    "incremental.cache_miss"
+                );
+                trace!(
+                    query_type = "node_sizes",
+                    node_id = %node.id,
+                    cache_key,
+                    "incremental.dependency_update"
+                );
+                let size = compute_node_size(ir, node, metrics);
+                state.node_size_cache.insert(
+                    node.id.clone(),
+                    CachedNodeSize {
+                        key: cache_key,
+                        size,
+                    },
+                );
+                size
+            })
+            .collect();
+
+        let summary = IncrementalQuerySummary {
+            query_type: "node_sizes",
+            cache_hit: recomputed_nodes == 0,
+            recomputed_nodes,
+            total_nodes,
+            recompute_duration_us: start.elapsed().as_micros().try_into().unwrap_or(u64::MAX),
+        };
+        trace!(
+            query_type = summary.query_type,
+            cache_hit = summary.cache_hit,
+            recomputed_nodes = summary.recomputed_nodes,
+            total_nodes = summary.total_nodes,
+            recompute_duration_us = summary.recompute_duration_us,
+            "incremental.recompute"
+        );
+        state.record_query(summary);
+        sizes
+    })
+}
+
+fn compute_node_size(
+    ir: &MermaidDiagramIr,
+    node: &IrNode,
+    metrics: &fm_core::FontMetrics,
+) -> (f32, f32) {
+    let text = display_node_label(ir, node);
+
+    match node.shape {
+        fm_core::NodeShape::FilledCircle => (20.0, 20.0),
+        fm_core::NodeShape::DoubleCircle => {
+            if text.is_empty() {
+                (24.0, 24.0)
+            } else {
+                let (label_width, label_height) = metrics.estimate_dimensions(&text);
+                (
+                    (label_width + 52.0).max(42.0),
+                    (label_height + 30.0).max(42.0),
+                )
             }
-        })
-        .collect()
+        }
+        fm_core::NodeShape::HorizontalBar => (72.0, 16.0),
+        _ => {
+            let text = if text.is_empty() {
+                node.id.as_str()
+            } else {
+                &text
+            };
+            let (label_width, label_height) = metrics.estimate_dimensions(text);
+            let (icon_width, icon_height) = icon_dimensions(node, metrics);
+            let width = label_width
+                .max(icon_width)
+                .max(icon_width.mul_add(0.85, label_width))
+                + 72.0;
+            let height = label_height + icon_height + 44.0;
+            (width.max(100.0), height.max(52.0))
+        }
+    }
+}
+
+fn node_size_cache_key(
+    ir: &MermaidDiagramIr,
+    node: &IrNode,
+    metrics: &fm_core::FontMetrics,
+) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    hash_str(&mut hash, &node.id);
+    hash_u64(&mut hash, node.shape as u64);
+    hash_str(&mut hash, &display_node_label(ir, node));
+    hash_str(&mut hash, node.icon.as_deref().unwrap_or_default());
+    hash_u64(&mut hash, u64::from(metrics.font_size().to_bits()));
+    hash_u64(&mut hash, u64::from(metrics.avg_char_width().to_bits()));
+    hash_u64(&mut hash, u64::from(metrics.line_height_px().to_bits()));
+    hash
 }
 
 fn icon_dimensions(node: &IrNode, metrics: &fm_core::FontMetrics) -> (f32, f32) {
@@ -9550,17 +10154,19 @@ mod tests {
         clippy::many_single_char_names
     )]
     use super::{
-        CycleStrategy, DependencyGraph, DirtySet, GraphMetrics, LayoutAlgorithm, LayoutEdit,
-        LayoutGuardrails, LayoutPoint, LayoutRect, LayoutSequenceLifecycleMarkerKind, RegionInput,
-        RegionMemoryBudget, RenderClip, RenderItem, RenderSource, SubgraphRegion, SubgraphRegionId,
-        SubgraphRegionKind, build_layout_decision_ledger, build_layout_guard_report,
-        build_render_scene, dispatch_layout_algorithm, layout, layout_diagram,
-        layout_diagram_force, layout_diagram_force_traced, layout_diagram_gantt,
-        layout_diagram_grid, layout_diagram_radial, layout_diagram_sankey, layout_diagram_sequence,
+        CycleStrategy, DependencyGraph, DirtySet, GraphMetrics, IncrementalLayoutEngine,
+        LayoutAlgorithm, LayoutEdit, LayoutGuardrails, LayoutPoint, LayoutRect,
+        LayoutSequenceLifecycleMarkerKind, RegionInput, RegionMemoryBudget, RenderClip, RenderItem,
+        RenderSource, SubgraphRegion, SubgraphRegionId, SubgraphRegionKind,
+        build_layout_decision_ledger, build_layout_guard_report, build_render_scene,
+        dispatch_layout_algorithm, layout, layout_diagram, layout_diagram_force,
+        layout_diagram_force_traced, layout_diagram_gantt, layout_diagram_grid,
+        layout_diagram_radial, layout_diagram_sankey, layout_diagram_sequence,
         layout_diagram_sequence_traced, layout_diagram_timeline, layout_diagram_traced,
         layout_diagram_traced_with_algorithm, layout_diagram_traced_with_algorithm_and_guardrails,
-        layout_diagram_tree, layout_diagram_with_cycle_strategy, layout_diagram_xychart,
-        route_edge_points, route_edge_points_with_obstacles,
+        layout_diagram_traced_with_config_and_guardrails, layout_diagram_tree,
+        layout_diagram_with_cycle_strategy, layout_diagram_xychart, route_edge_points,
+        route_edge_points_with_obstacles,
     };
     use fm_core::{
         ArrowType, DiagramType, GanttDate, GanttExclude, GraphDirection, IrCluster, IrClusterId,
@@ -9646,6 +10252,35 @@ mod tests {
             ..IrEdge::default()
         });
         ir
+    }
+
+    fn labeled_graph_ir(node_count: usize, edges: &[(usize, usize)]) -> MermaidDiagramIr {
+        let mut ir = graph_ir(DiagramType::Flowchart, node_count, edges);
+        for index in 0..node_count {
+            ir.labels.push(IrLabel {
+                text: format!("Node {index}"),
+                span: Span::default(),
+            });
+            ir.nodes[index].label = Some(IrLabelId(index));
+        }
+        ir
+    }
+
+    fn toggle_edge(ir: &mut MermaidDiagramIr, from: usize, to: usize) {
+        if let Some(index) = ir.edges.iter().position(|edge| {
+            edge.from == IrEndpoint::Node(IrNodeId(from))
+                && edge.to == IrEndpoint::Node(IrNodeId(to))
+        }) {
+            ir.edges.remove(index);
+            return;
+        }
+
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(from)),
+            to: IrEndpoint::Node(IrNodeId(to)),
+            arrow: ArrowType::Arrow,
+            ..IrEdge::default()
+        });
     }
 
     fn sample_dependency_graph() -> TestDependencyGraph {
@@ -9738,6 +10373,163 @@ mod tests {
             }
             .within_target()
         );
+    }
+
+    #[test]
+    fn incremental_layout_engine_reuses_graph_metrics_and_node_sizes_for_identical_inputs() {
+        let ir = sample_ir();
+        let mut engine = IncrementalLayoutEngine::default();
+        let config = super::LayoutConfig::default();
+
+        let first = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            LayoutGuardrails::default(),
+        );
+
+        let second = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            config,
+            LayoutGuardrails::default(),
+        );
+
+        assert_eq!(second.layout, first.layout);
+        assert!(second.trace.incremental.cache_hit);
+        assert_eq!(second.trace.incremental.query_type, "layout_memoized_reuse");
+        assert_eq!(second.trace.incremental.recomputed_nodes, 0);
+    }
+
+    #[test]
+    fn incremental_layout_engine_only_recomputes_changed_node_sizes_when_topology_is_stable() {
+        let mut engine = IncrementalLayoutEngine::default();
+        let mut baseline = sample_ir();
+        baseline.labels[0].text = "Initial".to_string();
+
+        let _warm = engine.layout_diagram_traced_with_config_and_guardrails(
+            &baseline,
+            LayoutAlgorithm::Auto,
+            super::LayoutConfig::default(),
+            LayoutGuardrails::default(),
+        );
+
+        let mut edited = baseline.clone();
+        edited.labels[0].text = "Initial but longer".to_string();
+        let rerun = engine.layout_diagram_traced_with_config_and_guardrails(
+            &edited,
+            LayoutAlgorithm::Auto,
+            super::LayoutConfig::default(),
+            LayoutGuardrails::default(),
+        );
+        assert!(!rerun.trace.incremental.cache_hit);
+        assert_eq!(
+            rerun.trace.incremental.query_type,
+            "layout_full_recompute_with_query_reuse"
+        );
+        assert_eq!(rerun.trace.incremental.recomputed_nodes, 1);
+        assert_eq!(rerun.trace.incremental.total_nodes, edited.nodes.len());
+    }
+
+    #[test]
+    fn incremental_layout_engine_topology_changes_invalidate_all_topology_queries() {
+        let mut engine = IncrementalLayoutEngine::default();
+        let baseline = labeled_graph_ir(4, &[(0, 1), (1, 2), (2, 3)]);
+        let _warm = engine.layout_diagram_traced_with_config_and_guardrails(
+            &baseline,
+            LayoutAlgorithm::Auto,
+            super::LayoutConfig::default(),
+            LayoutGuardrails::default(),
+        );
+
+        let mut edited = baseline.clone();
+        toggle_edge(&mut edited, 0, 3);
+
+        let rerun = engine.layout_diagram_traced_with_config_and_guardrails(
+            &edited,
+            LayoutAlgorithm::Auto,
+            super::LayoutConfig::default(),
+            LayoutGuardrails::default(),
+        );
+        let full = layout_diagram_traced_with_config_and_guardrails(
+            &edited,
+            LayoutAlgorithm::Auto,
+            super::LayoutConfig::default(),
+            LayoutGuardrails::default(),
+        );
+
+        assert_eq!(rerun.layout, full.layout);
+        assert!(!rerun.trace.incremental.cache_hit);
+        assert_eq!(
+            rerun.trace.incremental.query_type,
+            "layout_full_recompute_with_query_reuse"
+        );
+        assert_eq!(rerun.trace.incremental.recomputed_nodes, edited.nodes.len());
+        assert_eq!(rerun.trace.incremental.total_nodes, edited.nodes.len());
+    }
+
+    proptest! {
+        #[test]
+        fn incremental_layout_engine_matches_full_recompute_for_random_edit_sequences(
+            operations in proptest::collection::vec((any::<u8>(), any::<u8>(), any::<u8>()), 1..32)
+        ) {
+            let mut engine = IncrementalLayoutEngine::default();
+            let mut ir = labeled_graph_ir(5, &[(0, 1), (1, 2), (2, 3), (3, 4)]);
+            let config = super::LayoutConfig::default();
+            let guardrails = LayoutGuardrails::default();
+
+            let initial_incremental = engine.layout_diagram_traced_with_config_and_guardrails(
+                &ir,
+                LayoutAlgorithm::Auto,
+                config.clone(),
+                guardrails,
+            );
+            let initial_full = layout_diagram_traced_with_config_and_guardrails(
+                &ir,
+                LayoutAlgorithm::Auto,
+                config.clone(),
+                guardrails,
+            );
+            prop_assert_eq!(initial_incremental.layout, initial_full.layout);
+
+            for (step, (op_kind, a, b)) in operations.into_iter().enumerate() {
+                if op_kind % 2 == 0 {
+                    let node_index = usize::from(a) % ir.nodes.len();
+                    let label_index = ir.nodes[node_index]
+                        .label
+                        .expect("labeled graph should assign every node a label")
+                        .0;
+                    ir.labels[label_index].text = format!("Node {node_index} step {step} variant {b}");
+                } else {
+                    let from = usize::from(a) % ir.nodes.len();
+                    let mut to = usize::from(b) % ir.nodes.len();
+                    if from == to {
+                        to = (to + 1) % ir.nodes.len();
+                    }
+                    toggle_edge(&mut ir, from, to);
+                }
+
+                let incremental = engine.layout_diagram_traced_with_config_and_guardrails(
+                    &ir,
+                    LayoutAlgorithm::Auto,
+                    config.clone(),
+                    guardrails,
+                );
+                let full = layout_diagram_traced_with_config_and_guardrails(
+                    &ir,
+                    LayoutAlgorithm::Auto,
+                    config.clone(),
+                    guardrails,
+                );
+
+                prop_assert_eq!(incremental.layout, full.layout);
+                prop_assert_eq!(incremental.trace.incremental.total_nodes, ir.nodes.len());
+                prop_assert!(
+                    !incremental.trace.incremental.query_type.is_empty(),
+                    "incremental query type should be populated after edit step {step}"
+                );
+            }
+        }
     }
 
     fn sample_xychart_ir() -> MermaidDiagramIr {
@@ -14512,6 +15304,165 @@ mod tests {
     }
 
     // ── Observability output format tests (bd-gy4.8) ──────────────────
+
+    #[test]
+    fn incremental_layout_engine_reuses_identical_requests() {
+        let ir = sample_ir();
+        let mut engine = IncrementalLayoutEngine::default();
+        let config = super::LayoutConfig::default();
+        let guardrails = LayoutGuardrails::default();
+
+        let first = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+        let second = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            config,
+            guardrails,
+        );
+
+        assert!(!first.trace.incremental.cache_hit);
+        assert_eq!(first.trace.incremental.query_type, "layout_full_recompute");
+        assert!(second.trace.incremental.cache_hit);
+        assert_eq!(second.trace.incremental.query_type, "layout_memoized_reuse");
+        assert_eq!(first.layout, second.layout);
+    }
+
+    #[test]
+    fn incremental_layout_engine_invalidates_changed_requests() {
+        let first_ir = sample_ir();
+        let mut second_ir = sample_ir();
+        second_ir.labels.push(IrLabel {
+            text: String::from("new label"),
+            span: Span::default(),
+        });
+        second_ir.nodes[0].label = Some(IrLabelId(second_ir.labels.len() - 1));
+
+        let mut engine = IncrementalLayoutEngine::default();
+        let config = super::LayoutConfig::default();
+        let guardrails = LayoutGuardrails::default();
+
+        let _ = engine.layout_diagram_traced_with_config_and_guardrails(
+            &first_ir,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+        let second = engine.layout_diagram_traced_with_config_and_guardrails(
+            &second_ir,
+            LayoutAlgorithm::Auto,
+            config,
+            guardrails,
+        );
+
+        assert!(!second.trace.incremental.cache_hit);
+        assert_eq!(
+            second.trace.incremental.query_type,
+            "layout_full_recompute_with_query_reuse"
+        );
+        assert_eq!(second.trace.incremental.recomputed_nodes, 1);
+        assert_eq!(second.trace.incremental.total_nodes, second_ir.nodes.len());
+    }
+
+    #[test]
+    fn incremental_recompute_events_report_cache_hit_and_required_fields() {
+        use tracing_subscriber::Layer;
+        use tracing_subscriber::filter::LevelFilter;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = Arc::clone(&captured);
+
+        let fmt_layer = tracing_subscriber::fmt::layer()
+            .json()
+            .with_writer(move || CaptureWriter(Arc::clone(&captured_clone)))
+            .with_target(false)
+            .with_level(true)
+            .with_filter(LevelFilter::TRACE);
+
+        let subscriber = tracing_subscriber::registry().with(fmt_layer);
+
+        let ir = labeled_graph_ir(4, &[(0, 1), (1, 2), (2, 3)]);
+        tracing::subscriber::with_default(subscriber, || {
+            let mut engine = IncrementalLayoutEngine::default();
+            let _first = engine.layout_diagram_traced_with_config_and_guardrails(
+                &ir,
+                LayoutAlgorithm::Auto,
+                super::LayoutConfig::default(),
+                LayoutGuardrails::default(),
+            );
+            let _second = engine.layout_diagram_traced_with_config_and_guardrails(
+                &ir,
+                LayoutAlgorithm::Auto,
+                super::LayoutConfig::default(),
+                LayoutGuardrails::default(),
+            );
+        });
+
+        let recompute_events: Vec<serde_json::Value> = captured
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event.contains("incremental.recompute"))
+            .map(|event| serde_json::from_str(event).expect("Event must be valid JSON"))
+            .collect();
+
+        assert!(
+            !recompute_events.is_empty(),
+            "incremental layout should emit incremental.recompute events"
+        );
+
+        let mut saw_cache_miss = false;
+        let mut saw_cache_hit = false;
+
+        for event in &recompute_events {
+            let fields = &event["fields"];
+            assert!(
+                fields.get("query_type").is_some(),
+                "incremental.recompute event missing query_type field: {event}"
+            );
+            assert!(
+                fields.get("cache_hit").is_some(),
+                "incremental.recompute event missing cache_hit field: {event}"
+            );
+            assert!(
+                fields.get("recomputed_nodes").is_some(),
+                "incremental.recompute event missing recomputed_nodes field: {event}"
+            );
+            assert!(
+                fields.get("total_nodes").is_some(),
+                "incremental.recompute event missing total_nodes field: {event}"
+            );
+            assert!(
+                fields.get("recompute_duration_us").is_some(),
+                "incremental.recompute event missing recompute_duration_us field: {event}"
+            );
+
+            let cache_hit = fields.get("cache_hit").and_then(|value| {
+                value
+                    .as_bool()
+                    .or_else(|| value.as_str().and_then(|raw| raw.parse::<bool>().ok()))
+            });
+            match cache_hit {
+                Some(true) => saw_cache_hit = true,
+                Some(false) => saw_cache_miss = true,
+                None => {}
+            }
+        }
+
+        assert!(
+            saw_cache_miss,
+            "expected at least one incremental cache miss event"
+        );
+        assert!(
+            saw_cache_hit,
+            "expected at least one incremental cache hit event"
+        );
+    }
 
     #[test]
     fn guard_report_contains_all_mandatory_fields() {

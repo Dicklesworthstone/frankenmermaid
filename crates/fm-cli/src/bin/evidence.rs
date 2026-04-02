@@ -17,9 +17,11 @@ const DEFAULT_BUNDLE_RETENTION_DAYS: u32 = 90;
 const BUNDLE_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_OVERRIDE_POLICY_PATH: &str = ".ci/quality-gates.toml";
 const DEFAULT_OVERRIDE_LEDGER_PATH: &str = ".ci/release-gate-overrides.toml";
+const DEFAULT_RELEASE_SIGNOFF_SPEC_PATH: &str = ".ci/release-signoff.toml";
 const DEFAULT_PERF_BASELINE_PATH: &str = ".ci/perf-baseline.json";
 const DEFAULT_PERF_SLO_PATH: &str = ".ci/slo.yaml";
 const OVERRIDE_SCHEMA_VERSION: u32 = 1;
+const RELEASE_SIGNOFF_SCHEMA_VERSION: u32 = 1;
 const PERF_BASELINE_SCHEMA_VERSION: u32 = 1;
 const PERF_SLO_SCHEMA_VERSION: u32 = 1;
 const PERF_BOOTSTRAP_ITERATIONS: usize = 200;
@@ -38,6 +40,7 @@ const KNOWN_RELEASE_GATES: &[&str] = &[
     "evidence-ledger-guard",
     "decision-contract-guard",
     "release-gate-override-guard",
+    "demo-evidence-guard",
     "wasm-build",
     "coverage",
 ];
@@ -71,6 +74,8 @@ enum Command {
     VerifyBundle(VerifyBundleArgs),
     /// Validate release-gate emergency overrides and emit active scope summary.
     VerifyOverrides(VerifyOverridesArgs),
+    /// Generate a release signoff checklist and E2E validation matrix artifact.
+    ReleaseSignoff(ReleaseSignoffArgs),
     /// Summarize repeated performance samples into benchmark evidence artifacts.
     PerfReport(PerfReportArgs),
 }
@@ -208,6 +213,29 @@ struct VerifyOverridesArgs {
 }
 
 #[derive(Debug, Args)]
+struct ReleaseSignoffArgs {
+    /// Path to the checked-in release signoff spec.
+    #[arg(long)]
+    spec_path: Option<PathBuf>,
+
+    /// Path to a previously generated release-gate override summary JSON.
+    #[arg(long)]
+    override_summary: Option<PathBuf>,
+
+    /// Path to the combined demo evidence summary JSON.
+    #[arg(long)]
+    demo_evidence_summary: Option<PathBuf>,
+
+    /// Gate results in the form `gate=success|failure|cancelled|skipped`.
+    #[arg(long = "gate-result", value_parser = parse_gate_result_assignment)]
+    gate_results: Vec<(String, GateResult)>,
+
+    /// Directory that will receive `summary.json` and `README.md`.
+    #[arg(long, default_value = "artifacts/evidence/signoff")]
+    out_dir: PathBuf,
+}
+
+#[derive(Debug, Args)]
 struct PerfReportArgs {
     /// Path to a log file containing benchmark JSON lines.
     #[arg(long)]
@@ -317,6 +345,9 @@ struct ReleaseEvidenceFile {
 struct QualityGatePolicyFile {
     #[serde(default)]
     release_gate_overrides: Option<ReleaseGateOverridePolicy>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    release_signoff: Option<ReleaseSignoffPolicy>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -328,6 +359,13 @@ struct ReleaseGateOverridePolicy {
     require_retro_bead: bool,
     require_fix_bead: bool,
     overrides_path: Option<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+struct ReleaseSignoffPolicy {
+    enabled: bool,
+    spec_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -352,7 +390,7 @@ struct ReleaseGateOverrideRecord {
     exception_key: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ReleaseGateOverrideSummary {
     enabled: bool,
     policy_id: String,
@@ -362,13 +400,173 @@ struct ReleaseGateOverrideSummary {
     overrides: Vec<ReleaseGateOverrideStatus>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ReleaseGateOverrideStatus {
     id: String,
     approver: String,
     scope: Vec<String>,
     expires_at: String,
     active: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum GateResult {
+    Success,
+    Failure,
+    Cancelled,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ReleaseSignoffSpec {
+    schema_version: u32,
+    #[serde(default)]
+    checklist: Vec<ReleaseChecklistSpec>,
+    #[serde(default)]
+    validation_matrix: Vec<ReleaseMatrixSpec>,
+    #[serde(default)]
+    risks: Vec<ReleaseRiskSpec>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ReleaseChecklistSpec {
+    id: String,
+    title: String,
+    owner: String,
+    source: String,
+    criterion: String,
+    playbook: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ReleaseMatrixSpec {
+    id: String,
+    title: String,
+    owner: String,
+    source: String,
+    surface: String,
+    host_kind: String,
+    criterion: String,
+    playbook: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ReleaseRiskSpec {
+    id: String,
+    title: String,
+    owner: String,
+    trigger: String,
+    mitigation_playbook: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ReleaseSignoffReport {
+    schema_version: u32,
+    generated_at: String,
+    spec_path: String,
+    overall_pass: bool,
+    gate_summary: ReleaseGateStatusSummary,
+    checklist: Vec<ReleaseChecklistResult>,
+    validation_matrix: Vec<ReleaseValidationMatrixResult>,
+    risks: Vec<ReleaseRiskResult>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ReleaseGateStatusSummary {
+    passed_gates: Vec<String>,
+    overridden_failing_gates: Vec<String>,
+    uncovered_failing_gates: Vec<String>,
+    skipped_gates: Vec<String>,
+    active_override_gates: Vec<String>,
+    release_blocking_pass: bool,
+    gate_results: BTreeMap<String, GateResult>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ReleaseChecklistResult {
+    id: String,
+    title: String,
+    owner: String,
+    source: String,
+    criterion: String,
+    playbook: String,
+    pass: bool,
+    evidence_path: String,
+    detail: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ReleaseValidationMatrixResult {
+    id: String,
+    title: String,
+    owner: String,
+    source: String,
+    surface: String,
+    host_kind: String,
+    criterion: String,
+    playbook: String,
+    pass: bool,
+    evidence_path: String,
+    scenario_count: usize,
+    profile_count: usize,
+    repeat_count: usize,
+    total_groups: usize,
+    stable_output_groups: usize,
+    stable_normalized_groups: usize,
+    replay_manifest_path: String,
+    detail: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ReleaseRiskResult {
+    id: String,
+    title: String,
+    owner: String,
+    trigger: String,
+    mitigation_playbook: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DemoEvidenceSummary {
+    schema_version: u32,
+    static_summary: String,
+    react_summary: String,
+    #[serde(rename = "static")]
+    r#static: DemoEvidenceCounts,
+    react: DemoEvidenceCounts,
+    replay_bundles: DemoReplayBundles,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DemoEvidenceCounts {
+    total_groups: usize,
+    stable_output_groups: usize,
+    stable_normalized_groups: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DemoReplayBundles {
+    static_manifest: String,
+    react_manifest: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct E2eSummaryArtifact {
+    surface: String,
+    host_kind: String,
+    repeat: usize,
+    #[serde(default)]
+    profiles: Vec<String>,
+    #[serde(default)]
+    scenarios: Vec<String>,
+    #[serde(default)]
+    replay_bundle: Option<E2eReplayBundle>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct E2eReplayBundle {
+    manifest_path: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -643,6 +841,7 @@ fn main() -> Result<()> {
         Command::Bundle(args) => bundle_command(&root, args),
         Command::VerifyBundle(args) => verify_bundle_command(&root, args),
         Command::VerifyOverrides(args) => verify_overrides_command(&root, args),
+        Command::ReleaseSignoff(args) => release_signoff_command(&root, args),
         Command::PerfReport(args) => perf_report_command(&root, args),
     }
 }
@@ -1001,6 +1200,98 @@ fn verify_overrides_command(root: &Path, args: VerifyOverridesArgs) -> Result<()
     Ok(())
 }
 
+fn release_signoff_command(root: &Path, args: ReleaseSignoffArgs) -> Result<()> {
+    let spec_path = root.join(
+        args.spec_path
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_RELEASE_SIGNOFF_SPEC_PATH)),
+    );
+    let spec = load_release_signoff_spec(&spec_path)?;
+
+    let override_summary_path = root.join(args.override_summary.unwrap_or_else(|| {
+        PathBuf::from("artifacts/evidence/policies/release-gate-override-summary.json")
+    }));
+    let override_summary = load_override_summary(&override_summary_path)?;
+
+    let demo_summary_path = root
+        .join(args.demo_evidence_summary.unwrap_or_else(|| {
+            PathBuf::from("artifacts/evidence/demo/demo-evidence-summary.json")
+        }));
+    let demo_summary = load_demo_evidence_summary(&demo_summary_path)?;
+
+    let gate_summary = summarize_gate_results(&args.gate_results, &override_summary)?;
+    let checklist = evaluate_release_checklist(
+        root,
+        &spec,
+        &gate_summary,
+        &override_summary_path,
+        &override_summary,
+        &demo_summary_path,
+        &demo_summary,
+    )?;
+    let validation_matrix =
+        evaluate_release_matrix(root, &spec, &demo_summary_path, &demo_summary)?;
+    let risks = spec
+        .risks
+        .iter()
+        .map(|risk| ReleaseRiskResult {
+            id: risk.id.clone(),
+            title: risk.title.clone(),
+            owner: risk.owner.clone(),
+            trigger: risk.trigger.clone(),
+            mitigation_playbook: risk.mitigation_playbook.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    let overall_pass = checklist.iter().all(|item| item.pass)
+        && validation_matrix.iter().all(|row| row.pass)
+        && gate_summary.release_blocking_pass;
+
+    let report = ReleaseSignoffReport {
+        schema_version: RELEASE_SIGNOFF_SCHEMA_VERSION,
+        generated_at: OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .context("format generated_at")?,
+        spec_path: path_to_unix_string(spec_path.strip_prefix(root).unwrap_or(&spec_path)),
+        overall_pass,
+        gate_summary,
+        checklist,
+        validation_matrix,
+        risks,
+    };
+
+    let out_dir = root.join(args.out_dir);
+    fs::create_dir_all(&out_dir)
+        .with_context(|| format!("failed to create {}", out_dir.display()))?;
+    let summary_path = out_dir.join("summary.json");
+    fs::write(
+        &summary_path,
+        serde_json::to_string_pretty(&report).context("serialize release signoff summary")?,
+    )
+    .with_context(|| format!("failed to write {}", summary_path.display()))?;
+    let readme_path = out_dir.join("README.md");
+    fs::write(&readme_path, render_release_signoff_readme(&report))
+        .with_context(|| format!("failed to write {}", readme_path.display()))?;
+
+    if !report.overall_pass {
+        bail!(
+            "release signoff failed: uncovered failing gates={}, failing checklist items={}, failing matrix rows={}",
+            report.gate_summary.uncovered_failing_gates.join(", "),
+            report.checklist.iter().filter(|item| !item.pass).count(),
+            report
+                .validation_matrix
+                .iter()
+                .filter(|row| !row.pass)
+                .count()
+        );
+    }
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report).context("serialize release signoff stdout")?
+    );
+    Ok(())
+}
+
 fn perf_report_command(root: &Path, args: PerfReportArgs) -> Result<()> {
     if !(0.0..=1000.0).contains(&args.warn_threshold_pct) {
         bail!("warn_threshold_pct must be between 0 and 1000");
@@ -1102,6 +1393,336 @@ fn perf_report_command(root: &Path, args: PerfReportArgs) -> Result<()> {
         bail!("performance regression exceeded fail threshold");
     }
     Ok(())
+}
+
+fn load_release_signoff_spec(path: &Path) -> Result<ReleaseSignoffSpec> {
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("failed to read release signoff spec {}", path.display()))?;
+    let spec: ReleaseSignoffSpec = toml::from_str(&raw)
+        .with_context(|| format!("failed to parse release signoff spec {}", path.display()))?;
+    if spec.schema_version != RELEASE_SIGNOFF_SCHEMA_VERSION {
+        bail!(
+            "unexpected release signoff spec schema version {}",
+            spec.schema_version
+        );
+    }
+    Ok(spec)
+}
+
+fn load_override_summary(path: &Path) -> Result<ReleaseGateOverrideSummary> {
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("failed to read override summary {}", path.display()))?;
+    serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse override summary {}", path.display()))
+}
+
+fn load_demo_evidence_summary(path: &Path) -> Result<DemoEvidenceSummary> {
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("failed to read demo evidence summary {}", path.display()))?;
+    let summary: DemoEvidenceSummary = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse demo evidence summary {}", path.display()))?;
+    if summary.schema_version != 1 {
+        bail!(
+            "unexpected demo evidence summary schema version {}",
+            summary.schema_version
+        );
+    }
+    Ok(summary)
+}
+
+fn summarize_gate_results(
+    gate_results: &[(String, GateResult)],
+    override_summary: &ReleaseGateOverrideSummary,
+) -> Result<ReleaseGateStatusSummary> {
+    let known_gates: BTreeSet<&str> = KNOWN_RELEASE_GATES.iter().copied().collect();
+    let active_override_gates: BTreeSet<String> =
+        override_summary.active_gates.iter().cloned().collect();
+    let mut results = BTreeMap::new();
+    let mut passed = Vec::new();
+    let mut overridden = Vec::new();
+    let mut uncovered = Vec::new();
+    let mut skipped = Vec::new();
+
+    for (gate, result) in gate_results {
+        if !known_gates.contains(gate.as_str()) {
+            bail!("release signoff received unknown gate result {gate}");
+        }
+        if results.insert(gate.clone(), *result).is_some() {
+            bail!("duplicate release signoff gate result {gate}");
+        }
+    }
+
+    for (gate, result) in &results {
+        match result {
+            GateResult::Success => passed.push(gate.clone()),
+            GateResult::Failure | GateResult::Cancelled => {
+                if active_override_gates.contains(gate) {
+                    overridden.push(gate.clone());
+                } else {
+                    uncovered.push(gate.clone());
+                }
+            }
+            GateResult::Skipped => skipped.push(gate.clone()),
+        }
+    }
+
+    Ok(ReleaseGateStatusSummary {
+        passed_gates: passed,
+        overridden_failing_gates: overridden,
+        uncovered_failing_gates: uncovered.clone(),
+        skipped_gates: skipped,
+        active_override_gates: active_override_gates.into_iter().collect(),
+        release_blocking_pass: uncovered.is_empty(),
+        gate_results: results,
+    })
+}
+
+fn evaluate_release_checklist(
+    _root: &Path,
+    spec: &ReleaseSignoffSpec,
+    gate_summary: &ReleaseGateStatusSummary,
+    override_summary_path: &Path,
+    override_summary: &ReleaseGateOverrideSummary,
+    demo_summary_path: &Path,
+    demo_summary: &DemoEvidenceSummary,
+) -> Result<Vec<ReleaseChecklistResult>> {
+    let mut results = Vec::new();
+    for item in &spec.checklist {
+        let (pass, evidence_path, detail) = match item.source.as_str() {
+            "gate_summary" => (
+                gate_summary.release_blocking_pass,
+                path_to_unix_string(
+                    override_summary_path
+                        .parent()
+                        .unwrap_or(override_summary_path),
+                ),
+                if gate_summary.release_blocking_pass {
+                    format!(
+                        "{} gates passed, {} overridden, {} skipped",
+                        gate_summary.passed_gates.len(),
+                        gate_summary.overridden_failing_gates.len(),
+                        gate_summary.skipped_gates.len()
+                    )
+                } else {
+                    format!(
+                        "uncovered failing gates: {}",
+                        gate_summary.uncovered_failing_gates.join(", ")
+                    )
+                },
+            ),
+            "override_summary" => (
+                override_summary.enabled,
+                path_to_unix_string(override_summary_path),
+                format!(
+                    "{} active overrides across {} gates",
+                    override_summary.active_override_count,
+                    override_summary.active_gates.len()
+                ),
+            ),
+            "demo_evidence" => {
+                let pass = demo_summary.r#static.total_groups > 0
+                    && demo_summary.react.total_groups > 0
+                    && demo_summary.r#static.stable_normalized_groups
+                        == demo_summary.r#static.total_groups
+                    && demo_summary.react.stable_normalized_groups
+                        == demo_summary.react.total_groups;
+                (
+                    pass,
+                    path_to_unix_string(demo_summary_path),
+                    format!(
+                        "static normalized stability: {}/{}; react normalized stability: {}/{}",
+                        demo_summary.r#static.stable_normalized_groups,
+                        demo_summary.r#static.total_groups,
+                        demo_summary.react.stable_normalized_groups,
+                        demo_summary.react.total_groups
+                    ),
+                )
+            }
+            other => bail!("unknown release checklist source {other}"),
+        };
+        results.push(ReleaseChecklistResult {
+            id: item.id.clone(),
+            title: item.title.clone(),
+            owner: item.owner.clone(),
+            source: item.source.clone(),
+            criterion: item.criterion.clone(),
+            playbook: item.playbook.clone(),
+            pass,
+            evidence_path,
+            detail,
+        });
+    }
+    Ok(results)
+}
+
+fn evaluate_release_matrix(
+    root: &Path,
+    spec: &ReleaseSignoffSpec,
+    demo_summary_path: &Path,
+    demo_summary: &DemoEvidenceSummary,
+) -> Result<Vec<ReleaseValidationMatrixResult>> {
+    let static_summary = load_e2e_summary(root, &demo_summary.static_summary)?;
+    let react_summary = load_e2e_summary(root, &demo_summary.react_summary)?;
+    let static_manifest = resolve_report_path(root, &demo_summary.replay_bundles.static_manifest);
+    let react_manifest = resolve_report_path(root, &demo_summary.replay_bundles.react_manifest);
+
+    let mut rows = Vec::new();
+    for item in &spec.validation_matrix {
+        let (artifact, counts, manifest_path) = match item.source.as_str() {
+            "demo_static" => (&static_summary, &demo_summary.r#static, &static_manifest),
+            "demo_react" => (&react_summary, &demo_summary.react, &react_manifest),
+            other => bail!("unknown release validation matrix source {other}"),
+        };
+        if artifact.surface != item.surface {
+            bail!(
+                "validation matrix {} expected surface {} but found {}",
+                item.id,
+                item.surface,
+                artifact.surface
+            );
+        }
+        if artifact.host_kind != item.host_kind {
+            bail!(
+                "validation matrix {} expected host_kind {} but found {}",
+                item.id,
+                item.host_kind,
+                artifact.host_kind
+            );
+        }
+        let replay_manifest = artifact
+            .replay_bundle
+            .as_ref()
+            .map(|bundle| resolve_report_path(root, &bundle.manifest_path))
+            .unwrap_or_else(|| manifest_path.clone());
+        let pass = counts.total_groups > 0
+            && counts.stable_normalized_groups == counts.total_groups
+            && replay_manifest.exists();
+        rows.push(ReleaseValidationMatrixResult {
+            id: item.id.clone(),
+            title: item.title.clone(),
+            owner: item.owner.clone(),
+            source: item.source.clone(),
+            surface: artifact.surface.clone(),
+            host_kind: artifact.host_kind.clone(),
+            criterion: item.criterion.clone(),
+            playbook: item.playbook.clone(),
+            pass,
+            evidence_path: path_to_unix_string(demo_summary_path),
+            scenario_count: artifact.scenarios.len(),
+            profile_count: artifact.profiles.len(),
+            repeat_count: artifact.repeat,
+            total_groups: counts.total_groups,
+            stable_output_groups: counts.stable_output_groups,
+            stable_normalized_groups: counts.stable_normalized_groups,
+            replay_manifest_path: path_to_unix_string(
+                replay_manifest
+                    .strip_prefix(root)
+                    .unwrap_or(&replay_manifest),
+            ),
+            detail: format!(
+                "{} scenarios x {} profiles; normalized stability {}/{}",
+                artifact.scenarios.len(),
+                artifact.profiles.len(),
+                counts.stable_normalized_groups,
+                counts.total_groups
+            ),
+        });
+    }
+    Ok(rows)
+}
+
+fn load_e2e_summary(root: &Path, path: &str) -> Result<E2eSummaryArtifact> {
+    let resolved = resolve_report_path(root, path);
+    let raw = fs::read_to_string(&resolved)
+        .with_context(|| format!("failed to read {}", resolved.display()))?;
+    serde_json::from_str(&raw).with_context(|| format!("failed to parse {}", resolved.display()))
+}
+
+fn resolve_report_path(root: &Path, path: &str) -> PathBuf {
+    let candidate = PathBuf::from(path);
+    if candidate.is_absolute() {
+        candidate
+    } else {
+        root.join(candidate)
+    }
+}
+
+fn render_release_signoff_readme(report: &ReleaseSignoffReport) -> String {
+    let mut lines = vec![
+        "# Release Signoff Checklist and Validation Matrix".to_string(),
+        String::new(),
+        format!("Overall pass: `{}`", report.overall_pass),
+        format!("Spec: `{}`", report.spec_path),
+        String::new(),
+        "## Checklist".to_string(),
+        String::new(),
+        "| Item | Owner | Status | Evidence | Detail |".to_string(),
+        "|------|-------|--------|----------|--------|".to_string(),
+    ];
+    for item in &report.checklist {
+        lines.push(format!(
+            "| {} | {} | {} | `{}` | {} |",
+            item.title,
+            item.owner,
+            if item.pass { "Pass" } else { "Fail" },
+            item.evidence_path,
+            item.detail
+        ));
+        lines.push(format!("Criterion: {}", item.criterion));
+        lines.push(format!("Playbook: {}", item.playbook));
+    }
+    lines.push(String::new());
+    lines.push("## Validation Matrix".to_string());
+    lines.push(String::new());
+    lines.push("| Surface | Owner | Status | Groups | Replay Manifest |".to_string());
+    lines.push("|---------|-------|--------|--------|-----------------|".to_string());
+    for row in &report.validation_matrix {
+        lines.push(format!(
+            "| {} ({}) | {} | {} | {}/{} normalized | `{}` |",
+            row.surface,
+            row.host_kind,
+            row.owner,
+            if row.pass { "Pass" } else { "Fail" },
+            row.stable_normalized_groups,
+            row.total_groups,
+            row.replay_manifest_path
+        ));
+        lines.push(format!("Criterion: {}", row.criterion));
+        lines.push(format!("Playbook: {}", row.playbook));
+    }
+    lines.push(String::new());
+    lines.push("## Risks".to_string());
+    lines.push(String::new());
+    for risk in &report.risks {
+        lines.push(format!(
+            "- {} ({}) — Trigger: {}. Playbook: {}",
+            risk.title, risk.owner, risk.trigger, risk.mitigation_playbook
+        ));
+    }
+    lines.push(String::new());
+    lines.push("## Gate Summary".to_string());
+    lines.push(String::new());
+    lines.push(format!(
+        "- Passed gates: {}",
+        report.gate_summary.passed_gates.join(", ")
+    ));
+    lines.push(format!(
+        "- Overridden failing gates: {}",
+        if report.gate_summary.overridden_failing_gates.is_empty() {
+            "none".to_string()
+        } else {
+            report.gate_summary.overridden_failing_gates.join(", ")
+        }
+    ));
+    lines.push(format!(
+        "- Uncovered failing gates: {}",
+        if report.gate_summary.uncovered_failing_gates.is_empty() {
+            "none".to_string()
+        } else {
+            report.gate_summary.uncovered_failing_gates.join(", ")
+        }
+    ));
+    lines.join("\n")
 }
 
 fn render_report(entries: &[EvidenceEntry], warnings: &[AlienBeadGap]) -> String {
@@ -1229,6 +1850,7 @@ fn collect_bundle_sources(
         PathBuf::from("evidence/pattern_inventory.md"),
         PathBuf::from(".ci/quality-gates.toml"),
         PathBuf::from(".ci/release-gate-overrides.toml"),
+        PathBuf::from(".ci/release-signoff.toml"),
         PathBuf::from(".ci/slo.yaml"),
     ] {
         let source = root.join(&relative);
@@ -1237,6 +1859,7 @@ fn collect_bundle_sources(
                 relative.as_path(),
                 path if path == Path::new(".ci/quality-gates.toml")
                     || path == Path::new(".ci/release-gate-overrides.toml")
+                    || path == Path::new(".ci/release-signoff.toml")
                     || path == Path::new(".ci/slo.yaml")
             ) {
                 EvidenceFileKind::Policy
@@ -2073,6 +2696,24 @@ fn parse_metric_assignment(input: &str) -> Result<(String, f64), String> {
     Ok((key.trim().to_string(), metric))
 }
 
+fn parse_gate_result_assignment(input: &str) -> Result<(String, GateResult), String> {
+    let (gate, value) = input
+        .split_once('=')
+        .ok_or_else(|| "gate result must be gate=result".to_string())?;
+    let parsed = match value.trim() {
+        "success" => GateResult::Success,
+        "failure" => GateResult::Failure,
+        "cancelled" => GateResult::Cancelled,
+        "skipped" => GateResult::Skipped,
+        other => {
+            return Err(format!(
+                "gate result must be one of success|failure|cancelled|skipped: {other}"
+            ));
+        }
+    };
+    Ok((gate.trim().to_string(), parsed))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2082,6 +2723,14 @@ mod tests {
         let (key, value) = parse_metric_assignment("crossing_count=42").expect("metric");
         assert_eq!(key, "crossing_count");
         assert_eq!(value, 42.0);
+    }
+
+    #[test]
+    fn parse_gate_result_assignment_accepts_known_statuses() {
+        let (gate, result) =
+            parse_gate_result_assignment("core-check=success").expect("gate result");
+        assert_eq!(gate, "core-check");
+        assert_eq!(result, GateResult::Success);
     }
 
     #[test]

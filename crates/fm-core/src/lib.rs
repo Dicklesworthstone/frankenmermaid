@@ -2,6 +2,7 @@
 
 pub mod cga;
 mod font_metrics;
+pub mod quotient_filter;
 
 pub use font_metrics::{
     CharWidthClass, DiagnosticLevel, FontMetrics, FontMetricsConfig, FontMetricsDiagnostic,

@@ -603,6 +603,64 @@ fn write_evidence_root_fixture() -> TempDir {
     )
     .expect("write release gate overrides");
     std::fs::write(
+        temp.path().join(".ci/release-signoff.toml"),
+        concat!(
+            "schema_version = 1\n\n",
+            "[[checklist]]\n",
+            "id = \"blocking-quality-gates\"\n",
+            "title = \"Blocking quality gates pass\"\n",
+            "owner = \"runtime\"\n",
+            "source = \"gate_summary\"\n",
+            "criterion = \"No uncovered failing gates remain after valid overrides are applied.\"\n",
+            "playbook = \"Inspect uncovered_failing_gates, fix the gate, or add a valid time-boxed override.\"\n\n",
+            "[[checklist]]\n",
+            "id = \"override-ledger\"\n",
+            "title = \"Override ledger remains explicit and valid\"\n",
+            "owner = \"release-manager\"\n",
+            "source = \"override_summary\"\n",
+            "criterion = \"Override summary parses cleanly and only authorized active overrides remain in scope.\"\n",
+            "playbook = \"Update .ci/release-gate-overrides.toml, then re-run verify-overrides before signoff.\"\n\n",
+            "[[checklist]]\n",
+            "id = \"demo-evidence\"\n",
+            "title = \"Hosted demo evidence remains stable\"\n",
+            "owner = \"demo\"\n",
+            "source = \"demo_evidence\"\n",
+            "criterion = \"Static and React release summaries both validate with replay bundles and full normalized-log stability.\"\n",
+            "playbook = \"Rerun the release-grade browser suites and inspect replay bundles plus determinism logs.\"\n\n",
+            "[[validation_matrix]]\n",
+            "id = \"static-web\"\n",
+            "title = \"Static /web release replay\"\n",
+            "owner = \"demo\"\n",
+            "source = \"demo_static\"\n",
+            "surface = \"web\"\n",
+            "host_kind = \"static-web\"\n",
+            "criterion = \"Every static-web scenario/profile group keeps stable normalized logs and retains a replay manifest.\"\n",
+            "playbook = \"Rerun scripts/run_static_web_e2e.py for /web and inspect the static replay bundle.\"\n\n",
+            "[[validation_matrix]]\n",
+            "id = \"react-web\"\n",
+            "title = \"React /web_react release replay\"\n",
+            "owner = \"demo\"\n",
+            "source = \"demo_react\"\n",
+            "surface = \"web_react\"\n",
+            "host_kind = \"react-web\"\n",
+            "criterion = \"Every react-web scenario/profile group keeps stable normalized logs and retains a replay manifest.\"\n",
+            "playbook = \"Rerun scripts/run_static_web_e2e.py for /web_react and inspect the React replay bundle.\"\n\n",
+            "[[risks]]\n",
+            "id = \"override-drift\"\n",
+            "title = \"Emergency override drift\"\n",
+            "owner = \"release-manager\"\n",
+            "trigger = \"Overrides remain active without fix/retro follow-through.\"\n",
+            "mitigation_playbook = \"Expire the override, prioritize the linked fix bead, and close the retro bead before the next release.\"\n\n",
+            "[[risks]]\n",
+            "id = \"browser-replay-drift\"\n",
+            "title = \"Hosted replay drift\"\n",
+            "owner = \"demo\"\n",
+            "trigger = \"Normalized logs stop matching across repeated static or React runs.\"\n",
+            "mitigation_playbook = \"Use the replay bundle to isolate the scenario/profile pair, then inspect the captured HTML and logs for the first divergent run.\"\n",
+        ),
+    )
+    .expect("write release signoff spec");
+    std::fs::write(
         temp.path().join(".ci/slo.yaml"),
         "schema_version: 1\nbenchmarks: {}\n",
     )
@@ -2647,6 +2705,273 @@ fn evidence_verify_overrides_rejects_expired_override() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("has expired"));
+}
+
+#[test]
+fn evidence_release_signoff_writes_summary_and_markdown() {
+    let temp = write_evidence_root_fixture();
+    let root = temp.path().to_str().expect("root path utf-8");
+
+    std::fs::create_dir_all(temp.path().join("artifacts/evidence/policies"))
+        .expect("create policies dir");
+    std::fs::create_dir_all(temp.path().join("artifacts/evidence/demo/static-replay"))
+        .expect("create static replay dir");
+    std::fs::create_dir_all(temp.path().join("artifacts/evidence/demo/react-replay"))
+        .expect("create react replay dir");
+    std::fs::write(
+        temp.path()
+            .join("artifacts/evidence/policies/release-gate-override-summary.json"),
+        r#"{
+  "enabled": true,
+  "policy_id": "fm.release-gate.override@v1",
+  "overrides_path": ".ci/release-gate-overrides.toml",
+  "active_override_count": 0,
+  "active_gates": [],
+  "overrides": []
+}
+"#,
+    )
+    .expect("write override summary");
+    std::fs::write(
+        temp.path()
+            .join("artifacts/evidence/demo/static-summary.json"),
+        r#"{
+  "surface": "web",
+  "host_kind": "static-web",
+  "repeat": 5,
+  "profiles": ["desktop-default", "desktop-reduced-motion", "mobile-narrow"],
+  "scenarios": ["static-web-determinism-check", "static-web-compare-export"],
+  "replay_bundle": {
+    "manifest_path": "artifacts/evidence/demo/static-replay/replay_manifest.json"
+  }
+}
+"#,
+    )
+    .expect("write static summary");
+    std::fs::write(
+        temp.path()
+            .join("artifacts/evidence/demo/react-summary.json"),
+        r#"{
+  "surface": "web_react",
+  "host_kind": "react-web",
+  "repeat": 5,
+  "profiles": ["desktop-default", "desktop-reduced-motion", "mobile-narrow"],
+  "scenarios": ["react-web-determinism-check", "react-web-compare-export"],
+  "replay_bundle": {
+    "manifest_path": "artifacts/evidence/demo/react-replay/replay_manifest.json"
+  }
+}
+"#,
+    )
+    .expect("write react summary");
+    std::fs::write(
+        temp.path()
+            .join("artifacts/evidence/demo/static-replay/replay_manifest.json"),
+        "{\"scenario_commands\": [1, 2]}\n",
+    )
+    .expect("write static replay manifest");
+    std::fs::write(
+        temp.path()
+            .join("artifacts/evidence/demo/react-replay/replay_manifest.json"),
+        "{\"scenario_commands\": [1, 2]}\n",
+    )
+    .expect("write react replay manifest");
+    std::fs::write(
+        temp.path()
+            .join("artifacts/evidence/demo/demo-evidence-summary.json"),
+        r#"{
+  "schema_version": 1,
+  "static_summary": "artifacts/evidence/demo/static-summary.json",
+  "react_summary": "artifacts/evidence/demo/react-summary.json",
+  "static": {
+    "total_groups": 6,
+    "stable_output_groups": 4,
+    "stable_normalized_groups": 6
+  },
+  "react": {
+    "total_groups": 6,
+    "stable_output_groups": 4,
+    "stable_normalized_groups": 6
+  },
+  "replay_bundles": {
+    "static_manifest": "artifacts/evidence/demo/static-replay/replay_manifest.json",
+    "react_manifest": "artifacts/evidence/demo/react-replay/replay_manifest.json"
+  }
+}
+"#,
+    )
+    .expect("write demo evidence summary");
+
+    let output = run_evidence(&[
+        "--root",
+        root,
+        "release-signoff",
+        "--gate-result",
+        "core-check=success",
+        "--gate-result",
+        "golden-checksum-guard=success",
+        "--gate-result",
+        "property-test-guard=success",
+        "--gate-result",
+        "invariant-proof-guard=success",
+        "--gate-result",
+        "determinism-guard=success",
+        "--gate-result",
+        "cross-platform-determinism-native=success",
+        "--gate-result",
+        "cross-platform-determinism-wasm=success",
+        "--gate-result",
+        "cross-platform-determinism-compare=success",
+        "--gate-result",
+        "performance-regression-guard=success",
+        "--gate-result",
+        "degradation-guard=success",
+        "--gate-result",
+        "decision-contract-guard=success",
+        "--gate-result",
+        "demo-evidence-guard=success",
+        "--gate-result",
+        "wasm-build=success",
+        "--gate-result",
+        "coverage=success",
+    ]);
+    assert!(
+        output.status.success(),
+        "release-signoff failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let summary: serde_json::Value = serde_json::from_slice(&output.stdout).expect("summary json");
+    assert_eq!(summary["overall_pass"], true);
+    assert_eq!(
+        summary["validation_matrix"]
+            .as_array()
+            .expect("matrix")
+            .len(),
+        2
+    );
+    assert_eq!(
+        summary["gate_summary"]["release_blocking_pass"],
+        serde_json::Value::Bool(true)
+    );
+
+    let summary_path = temp.path().join("artifacts/evidence/signoff/summary.json");
+    let readme_path = temp.path().join("artifacts/evidence/signoff/README.md");
+    assert!(summary_path.exists(), "signoff summary should exist");
+    assert!(readme_path.exists(), "signoff markdown should exist");
+    let readme = std::fs::read_to_string(readme_path).expect("read signoff readme");
+    assert!(readme.contains("Release Signoff Checklist and Validation Matrix"));
+    assert!(readme.contains("web (static-web)"));
+}
+
+#[test]
+fn evidence_release_signoff_fails_when_gate_is_uncovered() {
+    let temp = write_evidence_root_fixture();
+    let root = temp.path().to_str().expect("root path utf-8");
+
+    std::fs::create_dir_all(temp.path().join("artifacts/evidence/policies"))
+        .expect("create policies dir");
+    std::fs::create_dir_all(temp.path().join("artifacts/evidence/demo/static-replay"))
+        .expect("create static replay dir");
+    std::fs::create_dir_all(temp.path().join("artifacts/evidence/demo/react-replay"))
+        .expect("create react replay dir");
+    std::fs::write(
+        temp.path()
+            .join("artifacts/evidence/policies/release-gate-override-summary.json"),
+        r#"{
+  "enabled": true,
+  "policy_id": "fm.release-gate.override@v1",
+  "overrides_path": ".ci/release-gate-overrides.toml",
+  "active_override_count": 0,
+  "active_gates": [],
+  "overrides": []
+}
+"#,
+    )
+    .expect("write override summary");
+    std::fs::write(
+        temp.path()
+            .join("artifacts/evidence/demo/static-summary.json"),
+        r#"{
+  "surface": "web",
+  "host_kind": "static-web",
+  "repeat": 5,
+  "profiles": ["desktop-default"],
+  "scenarios": ["static-web-determinism-check"],
+  "replay_bundle": {
+    "manifest_path": "artifacts/evidence/demo/static-replay/replay_manifest.json"
+  }
+}
+"#,
+    )
+    .expect("write static summary");
+    std::fs::write(
+        temp.path()
+            .join("artifacts/evidence/demo/react-summary.json"),
+        r#"{
+  "surface": "web_react",
+  "host_kind": "react-web",
+  "repeat": 5,
+  "profiles": ["desktop-default"],
+  "scenarios": ["react-web-determinism-check"],
+  "replay_bundle": {
+    "manifest_path": "artifacts/evidence/demo/react-replay/replay_manifest.json"
+  }
+}
+"#,
+    )
+    .expect("write react summary");
+    std::fs::write(
+        temp.path()
+            .join("artifacts/evidence/demo/static-replay/replay_manifest.json"),
+        "{\"scenario_commands\": [1]}\n",
+    )
+    .expect("write static replay manifest");
+    std::fs::write(
+        temp.path()
+            .join("artifacts/evidence/demo/react-replay/replay_manifest.json"),
+        "{\"scenario_commands\": [1]}\n",
+    )
+    .expect("write react replay manifest");
+    std::fs::write(
+        temp.path()
+            .join("artifacts/evidence/demo/demo-evidence-summary.json"),
+        r#"{
+  "schema_version": 1,
+  "static_summary": "artifacts/evidence/demo/static-summary.json",
+  "react_summary": "artifacts/evidence/demo/react-summary.json",
+  "static": {
+    "total_groups": 1,
+    "stable_output_groups": 1,
+    "stable_normalized_groups": 1
+  },
+  "react": {
+    "total_groups": 1,
+    "stable_output_groups": 1,
+    "stable_normalized_groups": 1
+  },
+  "replay_bundles": {
+    "static_manifest": "artifacts/evidence/demo/static-replay/replay_manifest.json",
+    "react_manifest": "artifacts/evidence/demo/react-replay/replay_manifest.json"
+  }
+}
+"#,
+    )
+    .expect("write demo evidence summary");
+
+    let output = run_evidence(&[
+        "--root",
+        root,
+        "release-signoff",
+        "--gate-result",
+        "core-check=failure",
+    ]);
+    assert!(
+        !output.status.success(),
+        "release-signoff should reject uncovered gate failures"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("uncovered failing gates"));
 }
 
 // ── Adversarial Security Test Corpus ───────────────────────────────

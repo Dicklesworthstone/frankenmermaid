@@ -30,6 +30,8 @@ jobs:
       decision_enabled: ${{ steps.parse.outputs.decision_enabled }}
       degradation_enabled: ${{ steps.parse.outputs.degradation_enabled }}
       override_policy_enabled: ${{ steps.parse.outputs.override_policy_enabled }}
+      release_signoff_enabled: ${{ steps.parse.outputs.release_signoff_enabled }}
+      release_signoff_spec_path: ${{ steps.parse.outputs.release_signoff_spec_path }}
       demo_evidence_enabled: ${{ steps.parse.outputs.demo_evidence_enabled }}
       demo_static_repeat: ${{ steps.parse.outputs.demo_static_repeat }}
       demo_react_repeat: ${{ steps.parse.outputs.demo_react_repeat }}
@@ -68,6 +70,8 @@ jobs:
               "decision_enabled": str(config["decision_contract"]["enabled"]).lower(),
               "degradation_enabled": str(config["degradation"]["enabled"]).lower(),
               "override_policy_enabled": str(config["release_gate_overrides"]["enabled"]).lower(),
+              "release_signoff_enabled": str(config["release_signoff"]["enabled"]).lower(),
+              "release_signoff_spec_path": config["release_signoff"]["spec_path"],
               "demo_evidence_enabled": str(config["demo_evidence"]["enabled"]).lower(),
               "demo_static_repeat": str(config["demo_evidence"]["static_repeat"]),
               "demo_react_repeat": str(config["demo_evidence"]["react_repeat"]),
@@ -436,8 +440,23 @@ jobs:
 
   evidence-ledger-guard:
     name: Evidence Ledger Guard
-    needs: quality-gate-config
-    if: needs.quality-gate-config.outputs.evidence_enabled == 'true'
+    needs:
+      - quality-gate-config
+      - core-check
+      - golden-checksum-guard
+      - property-test-guard
+      - invariant-proof-guard
+      - determinism-guard
+      - cross-platform-determinism-native
+      - cross-platform-determinism-wasm
+      - cross-platform-determinism-compare
+      - performance-regression-guard
+      - degradation-guard
+      - decision-contract-guard
+      - demo-evidence-guard
+      - wasm-build
+      - coverage
+    if: always() && needs.quality-gate-config.outputs.evidence_enabled == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -486,6 +505,33 @@ jobs:
         run: |
           cargo run -p fm-cli --bin evidence -- --root . report --check-beads --fail-on-missing-beads
 
+      - name: Generate release signoff checklist and validation matrix
+        if: needs.quality-gate-config.outputs.release_signoff_enabled == 'true'
+        shell: bash
+        run: |
+          mkdir -p artifacts/evidence/signoff artifacts/evidence/policies
+          cargo run -p fm-cli --bin evidence -- --root . verify-overrides \
+            > artifacts/evidence/policies/release-gate-override-summary.json
+          cargo run -p fm-cli --bin evidence -- --root . release-signoff \
+            --spec-path "${{ needs.quality-gate-config.outputs.release_signoff_spec_path }}" \
+            --override-summary artifacts/evidence/policies/release-gate-override-summary.json \
+            --demo-evidence-summary artifacts/evidence/demo/demo-evidence-summary.json \
+            --gate-result "core-check=${{ needs.core-check.result }}" \
+            --gate-result "golden-checksum-guard=${{ needs.golden-checksum-guard.result }}" \
+            --gate-result "property-test-guard=${{ needs.property-test-guard.result }}" \
+            --gate-result "invariant-proof-guard=${{ needs.invariant-proof-guard.result }}" \
+            --gate-result "determinism-guard=${{ needs.determinism-guard.result }}" \
+            --gate-result "cross-platform-determinism-native=${{ needs.cross-platform-determinism-native.result }}" \
+            --gate-result "cross-platform-determinism-wasm=${{ needs.cross-platform-determinism-wasm.result }}" \
+            --gate-result "cross-platform-determinism-compare=${{ needs.cross-platform-determinism-compare.result }}" \
+            --gate-result "performance-regression-guard=${{ needs.performance-regression-guard.result }}" \
+            --gate-result "degradation-guard=${{ needs.degradation-guard.result }}" \
+            --gate-result "decision-contract-guard=${{ needs.decision-contract-guard.result }}" \
+            --gate-result "demo-evidence-guard=${{ needs.demo-evidence-guard.result }}" \
+            --gate-result "wasm-build=${{ needs.wasm-build.result }}" \
+            --gate-result "coverage=${{ needs.coverage.result }}" \
+            > artifacts/evidence/signoff/summary.stdout.json
+
       - name: Build release evidence bundle
         shell: bash
         run: |
@@ -498,6 +544,9 @@ jobs:
               --artifact artifacts/evidence/logs/layout-golden.log \
               --artifact artifacts/evidence/logs/determinism.log \
               --artifact artifacts/evidence/proofs/determinism-manifest-x86_64.json \
+              --artifact artifacts/evidence/policies/release-gate-override-summary.json \
+              --artifact artifacts/evidence/signoff/summary.json \
+              --artifact artifacts/evidence/signoff/README.md \
               --artifact artifacts/evidence/demo/demo-evidence-summary.json \
               --artifact artifacts/evidence/demo/static-replay/replay_manifest.json \
               --artifact artifacts/evidence/demo/static-replay/replay_suite.sh \
