@@ -368,19 +368,92 @@ fn parse_dot_node_fragment(raw: &str) -> Option<DotNode> {
     Some(DotNode { id, label, shape })
 }
 
+fn extract_dot_attribute_raw(attributes: &str, key: &str) -> Option<String> {
+    let lower_key = key.to_ascii_lowercase();
+    let mut in_quote = false;
+    let mut html_depth = 0;
+    let mut escaped = false;
+    let mut current_key = String::new();
+    let mut current_val = String::new();
+    let mut parsing_key = true;
+
+    for ch in attributes.chars() {
+        if escaped {
+            if parsing_key {
+                current_key.push(ch);
+            } else {
+                current_val.push(ch);
+            }
+            escaped = false;
+            continue;
+        }
+
+        if ch == '\\' {
+            escaped = true;
+            if parsing_key {
+                current_key.push(ch);
+            } else {
+                current_val.push(ch);
+            }
+            continue;
+        }
+
+        if ch == '"' && html_depth == 0 {
+            in_quote = !in_quote;
+            if parsing_key {
+                current_key.push(ch);
+            } else {
+                current_val.push(ch);
+            }
+            continue;
+        }
+
+        if !in_quote {
+            if ch == '<' {
+                html_depth += 1;
+            } else if ch == '>' && html_depth > 0 {
+                html_depth -= 1;
+            }
+        }
+
+        if !in_quote
+            && html_depth == 0
+            && (ch == ',' || ch == ']' || ch == '[' || ch == ' ' || ch == '\t')
+        {
+            if !current_key.trim().is_empty() && current_key.trim().eq_ignore_ascii_case(&lower_key)
+            {
+                return Some(current_val.trim().to_string());
+            }
+            if !parsing_key || !current_key.trim().is_empty() {
+                current_key.clear();
+                current_val.clear();
+                parsing_key = true;
+            }
+            continue;
+        }
+
+        if !in_quote && html_depth == 0 && ch == '=' && parsing_key {
+            parsing_key = false;
+            continue;
+        }
+
+        if parsing_key {
+            current_key.push(ch);
+        } else {
+            current_val.push(ch);
+        }
+    }
+
+    if current_key.trim().eq_ignore_ascii_case(&lower_key) {
+        return Some(current_val.trim().to_string());
+    }
+    None
+}
+
 /// Extract `shape=...` from DOT attribute list and map to `NodeShape`.
 fn parse_dot_shape(attributes: &str) -> Option<NodeShape> {
-    let lower = attributes.to_ascii_lowercase();
-    let idx = lower.find("shape")?;
-    let after = attributes[idx + "shape".len()..].trim_start();
-    let value = after.strip_prefix('=')?.trim_start();
-    let token = value
-        .split([',', ']', ' ', '\t'])
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .trim_matches('"')
-        .to_ascii_lowercase();
+    let value = extract_dot_attribute_raw(attributes, "shape")?;
+    let token = value.trim().trim_matches('"').to_ascii_lowercase();
     dot_shape_to_node_shape(&token)
 }
 
@@ -424,10 +497,8 @@ fn split_endpoint_and_attrs(fragment: &str) -> (&str, Option<&str>) {
 }
 
 fn parse_dot_label(attributes: &str) -> Option<String> {
-    let lower = attributes.to_ascii_lowercase();
-    let label_idx = lower.find("label")?;
-    let after_label = attributes[label_idx + "label".len()..].trim_start();
-    let value = after_label.strip_prefix('=')?.trim_start();
+    let value = extract_dot_attribute_raw(attributes, "label")?;
+    let value = value.trim();
 
     if let Some(quoted) = value.strip_prefix('"') {
         let end = find_unescaped_quote_end(quoted)?;
@@ -441,12 +512,7 @@ fn parse_dot_label(attributes: &str) -> Option<String> {
         return (!text.is_empty()).then_some(text);
     }
 
-    let token = value
-        .split([',', ']'])
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .trim_matches('"');
+    let token = value.trim_matches('"');
     let token = decode_escapes(token);
     (!token.is_empty()).then_some(token)
 }

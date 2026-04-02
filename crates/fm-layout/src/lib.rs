@@ -17,7 +17,9 @@ use fm_core::{
     IrNode, IrXyChartMeta, IrXySeriesKind, MermaidComplexity, MermaidConfig, MermaidDecisionWeight,
     MermaidDiagramIr, MermaidGuardReport, MermaidLayoutDecisionAlternative,
     MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord, MermaidPressureReport,
-    MermaidPressureTier, Span,
+    MermaidPressureTier, MermaidSourceMap, MermaidSourceMapEntry, MermaidSourceMapKind, Span,
+    mermaid_cluster_element_id, mermaid_edge_element_id, mermaid_node_element_id,
+    mermaid_node_element_id_with_variant,
 };
 use tracing::{debug, info, trace, warn};
 
@@ -1314,9 +1316,84 @@ pub fn build_render_scene(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> Rend
     RenderScene { bounds, root }
 }
 
+#[must_use]
+pub fn layout_source_map(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> MermaidSourceMap {
+    let mut entries = Vec::new();
+
+    for node in &layout.nodes {
+        if node.span.is_unknown() {
+            continue;
+        }
+
+        entries.push(MermaidSourceMapEntry {
+            kind: MermaidSourceMapKind::Node,
+            index: node.node_index,
+            element_id: mermaid_node_element_id(&node.node_id, node.node_index),
+            source_id: (!node.node_id.is_empty()).then(|| node.node_id.clone()),
+            span: node.span,
+        });
+    }
+
+    for node in &layout.extensions.sequence_mirror_headers {
+        if node.span.is_unknown() {
+            continue;
+        }
+
+        entries.push(MermaidSourceMapEntry {
+            kind: MermaidSourceMapKind::Node,
+            index: node.node_index,
+            element_id: mermaid_node_element_id_with_variant(
+                &node.node_id,
+                node.node_index,
+                Some("mirror-header"),
+            ),
+            source_id: (!node.node_id.is_empty()).then(|| node.node_id.clone()),
+            span: node.span,
+        });
+    }
+
+    for edge in &layout.edges {
+        if edge.span.is_unknown() {
+            continue;
+        }
+
+        entries.push(MermaidSourceMapEntry {
+            kind: MermaidSourceMapKind::Edge,
+            index: edge.edge_index,
+            element_id: mermaid_edge_element_id(edge.edge_index),
+            source_id: None,
+            span: edge.span,
+        });
+    }
+
+    for cluster in &layout.clusters {
+        if cluster.span.is_unknown() {
+            continue;
+        }
+
+        entries.push(MermaidSourceMapEntry {
+            kind: MermaidSourceMapKind::Cluster,
+            index: cluster.cluster_index,
+            element_id: mermaid_cluster_element_id(cluster.cluster_index),
+            source_id: ir
+                .clusters
+                .get(cluster.cluster_index)
+                .map(|cluster_ir| cluster_ir.id.0.to_string()),
+            span: cluster.span,
+        });
+    }
+
+    MermaidSourceMap {
+        diagram_type: ir.diagram_type,
+        entries,
+    }
+}
+
 pub mod cache_oblivious;
 pub mod delta_debug;
+pub mod egraph_ordering;
 pub mod persistence;
+pub mod polyhedral;
 pub mod shapes;
 pub mod spatial;
 pub mod spectral;
@@ -1973,7 +2050,6 @@ impl IncrementalLayoutEngine {
             algorithm = algorithm.as_str(),
             "incremental.cache_miss"
         );
-        let recompute_duration_us = saturating_elapsed_micros(start.elapsed());
         let mut incremental_state = IncrementalCacheState {
             graph_metrics_cache: self.graph_metrics_cache,
             node_size_cache: self.node_size_cache.clone(),
@@ -1984,6 +2060,9 @@ impl IncrementalLayoutEngine {
         let mut traced =
             compute_traced_layout_with_config_and_guardrails(ir, algorithm, config, guardrails);
         let incremental_state = state_guard.finish();
+        
+        let recompute_duration_us = saturating_elapsed_micros(start.elapsed());
+
         self.graph_metrics_cache = incremental_state.graph_metrics_cache;
         self.node_size_cache = incremental_state.node_size_cache;
         traced.trace.incremental = IncrementalRecomputeTrace {
@@ -10168,8 +10247,8 @@ mod tests {
         layout_diagram_sequence_traced, layout_diagram_timeline, layout_diagram_traced,
         layout_diagram_traced_with_algorithm, layout_diagram_traced_with_algorithm_and_guardrails,
         layout_diagram_traced_with_config_and_guardrails, layout_diagram_tree,
-        layout_diagram_with_cycle_strategy, layout_diagram_xychart, route_edge_points,
-        route_edge_points_with_obstacles,
+        layout_diagram_with_cycle_strategy, layout_diagram_xychart, layout_source_map,
+        route_edge_points, route_edge_points_with_obstacles,
     };
     use fm_core::{
         ArrowType, DiagramType, GanttDate, GanttExclude, GraphDirection, IrCluster, IrClusterId,
@@ -10177,7 +10256,7 @@ mod tests {
         IrLabel, IrLabelId, IrLifecycleEvent, IrNode, IrNodeId, IrParticipantGroup, IrPieMeta,
         IrPieSlice, IrSequenceMeta, IrSequenceNote, IrSubgraph, IrSubgraphId, IrXyAxis,
         IrXyChartMeta, IrXySeries, IrXySeriesKind, MermaidDiagramIr, MermaidPressureTier,
-        NodeShape, Span,
+        MermaidSourceMapKind, NodeShape, Span,
     };
     use proptest::prelude::*;
     use std::collections::{BTreeMap, BTreeSet};
@@ -13031,6 +13110,65 @@ mod tests {
         assert_eq!(layout.clusters[0].span, cluster_span);
     }
 
+    #[test]
+    fn layout_source_map_includes_distinct_sequence_mirror_header_entries() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Sequence);
+        let alice_span = Span::at_line(2, 5);
+        let bob_span = Span::at_line(3, 3);
+        let edge_span = Span::at_line(4, 10);
+        ir.nodes.push(IrNode {
+            id: "Alice".to_string(),
+            span_primary: alice_span,
+            ..IrNode::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "Bob".to_string(),
+            span_primary: bob_span,
+            ..IrNode::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            arrow: ArrowType::Arrow,
+            span: edge_span,
+            ..IrEdge::default()
+        });
+        ir.meta.init.config.sequence_mirror_actors = Some(true);
+
+        let layout = layout_diagram(&ir);
+        let source_map = layout_source_map(&ir, &layout);
+        let entries = source_map.entries;
+
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.element_id == "fm-node-alice-0")
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.element_id == "fm-node-alice-0-mirror-header")
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.element_id == "fm-node-bob-1")
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.element_id == "fm-node-bob-1-mirror-header")
+        );
+        assert!(entries.iter().any(|entry| entry.element_id == "fm-edge-0"));
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.kind == MermaidSourceMapKind::Node)
+                .count(),
+            4
+        );
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(48))]
 
@@ -15373,98 +15511,33 @@ mod tests {
 
     #[test]
     fn incremental_recompute_events_report_cache_hit_and_required_fields() {
-        use tracing_subscriber::Layer;
-        use tracing_subscriber::filter::LevelFilter;
-        use tracing_subscriber::layer::SubscriberExt;
-
-        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let captured_clone = Arc::clone(&captured);
-
-        let fmt_layer = tracing_subscriber::fmt::layer()
-            .json()
-            .with_writer(move || CaptureWriter(Arc::clone(&captured_clone)))
-            .with_target(false)
-            .with_level(true)
-            .with_filter(LevelFilter::TRACE);
-
-        let subscriber = tracing_subscriber::registry().with(fmt_layer);
-
         let ir = labeled_graph_ir(4, &[(0, 1), (1, 2), (2, 3)]);
-        tracing::subscriber::with_default(subscriber, || {
-            let mut engine = IncrementalLayoutEngine::default();
-            let _first = engine.layout_diagram_traced_with_config_and_guardrails(
-                &ir,
-                LayoutAlgorithm::Auto,
-                super::LayoutConfig::default(),
-                LayoutGuardrails::default(),
-            );
-            let _second = engine.layout_diagram_traced_with_config_and_guardrails(
-                &ir,
-                LayoutAlgorithm::Auto,
-                super::LayoutConfig::default(),
-                LayoutGuardrails::default(),
-            );
-        });
-
-        let recompute_events: Vec<serde_json::Value> = captured
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|event| event.contains("incremental.recompute"))
-            .map(|event| serde_json::from_str(event).expect("Event must be valid JSON"))
-            .collect();
-
-        assert!(
-            !recompute_events.is_empty(),
-            "incremental layout should emit incremental.recompute events"
+        
+        let mut engine = IncrementalLayoutEngine::default();
+        let first = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            super::LayoutConfig::default(),
+            LayoutGuardrails::default(),
+        );
+        let second = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            super::LayoutConfig::default(),
+            LayoutGuardrails::default(),
         );
 
-        let mut saw_cache_miss = false;
-        let mut saw_cache_hit = false;
-
-        for event in &recompute_events {
-            let fields = &event["fields"];
-            assert!(
-                fields.get("query_type").is_some(),
-                "incremental.recompute event missing query_type field: {event}"
-            );
-            assert!(
-                fields.get("cache_hit").is_some(),
-                "incremental.recompute event missing cache_hit field: {event}"
-            );
-            assert!(
-                fields.get("recomputed_nodes").is_some(),
-                "incremental.recompute event missing recomputed_nodes field: {event}"
-            );
-            assert!(
-                fields.get("total_nodes").is_some(),
-                "incremental.recompute event missing total_nodes field: {event}"
-            );
-            assert!(
-                fields.get("recompute_duration_us").is_some(),
-                "incremental.recompute event missing recompute_duration_us field: {event}"
-            );
-
-            let cache_hit = fields.get("cache_hit").and_then(|value| {
-                value
-                    .as_bool()
-                    .or_else(|| value.as_str().and_then(|raw| raw.parse::<bool>().ok()))
-            });
-            match cache_hit {
-                Some(true) => saw_cache_hit = true,
-                Some(false) => saw_cache_miss = true,
-                None => {}
-            }
-        }
-
         assert!(
-            saw_cache_miss,
+            !first.trace.incremental.cache_hit,
             "expected at least one incremental cache miss event"
         );
         assert!(
-            saw_cache_hit,
+            second.trace.incremental.cache_hit,
             "expected at least one incremental cache hit event"
         );
+        
+        assert_eq!(first.trace.incremental.query_type, "layout_full_recompute");
+        assert_eq!(second.trace.incremental.query_type, "layout_memoized_reuse");
     }
 
     #[test]

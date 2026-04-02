@@ -12,7 +12,7 @@ use fm_layout::IncrementalLayoutEngine;
 use fm_layout::{
     DiagramLayout, LayoutConfig, LayoutGuardrails, TracedLayout,
     build_layout_guard_report_with_pressure, layout_diagram_traced,
-    layout_diagram_traced_with_config_and_guardrails,
+    layout_diagram_traced_with_config_and_guardrails, layout_source_map,
 };
 #[cfg(target_arch = "wasm32")]
 use fm_parser::ParseResult;
@@ -298,8 +298,7 @@ static RUNTIME_CONFIG: LazyLock<RwLock<RuntimeConfig>> =
     LazyLock::new(|| RwLock::new(RuntimeConfig::default()));
 
 fn collect_source_spans(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> Vec<SourceSpanRecord> {
-    let _ = layout;
-    ir.source_map()
+    layout_source_map(ir, layout)
         .entries
         .into_iter()
         .map(|entry| SourceSpanRecord {

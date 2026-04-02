@@ -3,6 +3,7 @@
 pub mod art;
 pub mod cga;
 mod font_metrics;
+pub mod leapfrog;
 pub mod quotient_filter;
 pub mod succinct;
 
@@ -4272,6 +4273,169 @@ pub struct MermaidSourceMap {
     pub entries: Vec<MermaidSourceMapEntry>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MermaidTextRange {
+    pub start_byte: usize,
+    pub end_byte: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MermaidLensBinding {
+    pub kind: MermaidSourceMapKind,
+    pub index: usize,
+    pub element_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
+    pub span: Span,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_range: Option<MermaidTextRange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MermaidLensEdit {
+    pub element_id: String,
+    pub replacement: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MermaidLensEditResult {
+    pub element_id: String,
+    pub replaced_range: MermaidTextRange,
+    pub previous_snippet: String,
+    pub replacement: String,
+    pub updated_source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Error)]
+pub enum MermaidLensError {
+    #[error("source element '{0}' was not found in the source map")]
+    ElementNotFound(String),
+    #[error("source span for element '{0}' could not be resolved against the current source text")]
+    UnresolvedSpan(String),
+}
+
+#[must_use]
+pub fn build_lens_bindings(source: &str, source_map: &MermaidSourceMap) -> Vec<MermaidLensBinding> {
+    source_map
+        .entries
+        .iter()
+        .map(|entry| {
+            let text_range = resolve_span_text_range(source, entry.span);
+            let snippet = text_range
+                .as_ref()
+                .and_then(|range| source.get(range.start_byte..range.end_byte))
+                .map(str::to_string);
+            MermaidLensBinding {
+                kind: entry.kind,
+                index: entry.index,
+                element_id: entry.element_id.clone(),
+                source_id: entry.source_id.clone(),
+                span: entry.span,
+                text_range,
+                snippet,
+            }
+        })
+        .collect()
+}
+
+pub fn apply_lens_edit(
+    source: &str,
+    source_map: &MermaidSourceMap,
+    edit: &MermaidLensEdit,
+) -> Result<MermaidLensEditResult, MermaidLensError> {
+    let binding = build_lens_bindings(source, source_map)
+        .into_iter()
+        .find(|binding| binding.element_id == edit.element_id)
+        .ok_or_else(|| MermaidLensError::ElementNotFound(edit.element_id.clone()))?;
+    let replaced_range = binding
+        .text_range
+        .ok_or_else(|| MermaidLensError::UnresolvedSpan(edit.element_id.clone()))?;
+    let previous_snippet = binding
+        .snippet
+        .clone()
+        .ok_or_else(|| MermaidLensError::UnresolvedSpan(edit.element_id.clone()))?;
+
+    let mut updated_source = source.to_string();
+    updated_source.replace_range(
+        replaced_range.start_byte..replaced_range.end_byte,
+        &edit.replacement,
+    );
+
+    Ok(MermaidLensEditResult {
+        element_id: binding.element_id,
+        replaced_range,
+        previous_snippet,
+        replacement: edit.replacement.clone(),
+        updated_source,
+    })
+}
+
+#[must_use]
+pub fn resolve_span_text_range(source: &str, span: Span) -> Option<MermaidTextRange> {
+    if span.is_unknown() {
+        return None;
+    }
+
+    if span.end.byte > span.start.byte {
+        return Some(MermaidTextRange {
+            start_byte: span.start.byte,
+            end_byte: span.end.byte,
+        });
+    }
+
+    let line_starts = source_line_starts(source);
+    let start_byte = byte_index_for_line_col(source, &line_starts, span.start.line, span.start.col)?;
+    let end_col_exclusive = span.end.col.saturating_add(1);
+    let end_byte = byte_index_for_line_col(source, &line_starts, span.end.line, end_col_exclusive)?;
+    (end_byte >= start_byte).then_some(MermaidTextRange {
+        start_byte,
+        end_byte,
+    })
+}
+
+fn source_line_starts(source: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    for (idx, ch) in source.char_indices() {
+        if ch == '\n' {
+            starts.push(idx + ch.len_utf8());
+        }
+    }
+    starts
+}
+
+fn byte_index_for_line_col(
+    source: &str,
+    line_starts: &[usize],
+    line: usize,
+    col: usize,
+) -> Option<usize> {
+    if line == 0 || col == 0 {
+        return None;
+    }
+
+    let line_start = *line_starts.get(line - 1)?;
+    let mut line_end = line_starts.get(line).copied().unwrap_or(source.len());
+    if source.as_bytes().get(line_end.wrapping_sub(1)) == Some(&b'\n') {
+        line_end -= 1;
+    }
+    if source.as_bytes().get(line_end.wrapping_sub(1)) == Some(&b'\r') {
+        line_end -= 1;
+    }
+
+    let line_slice = source.get(line_start..line_end)?;
+    let mut current_col = 1;
+    for (offset, _) in line_slice.char_indices() {
+        if current_col == col {
+            return Some(line_start + offset);
+        }
+        current_col += 1;
+    }
+
+    (current_col == col).then_some(line_end)
+}
+
 fn sanitize_render_element_fragment(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut last_was_dash = false;
@@ -4291,12 +4455,31 @@ fn sanitize_render_element_fragment(raw: &str) -> String {
 
 #[must_use]
 pub fn mermaid_node_element_id(node_id: &str, index: usize) -> String {
+    mermaid_node_element_id_with_variant(node_id, index, None)
+}
+
+#[must_use]
+pub fn mermaid_node_element_id_with_variant(
+    node_id: &str,
+    index: usize,
+    variant: Option<&str>,
+) -> String {
     let fragment = sanitize_render_element_fragment(node_id);
-    if fragment.is_empty() {
+    let mut id = if fragment.is_empty() {
         format!("fm-node-{index}")
     } else {
         format!("fm-node-{fragment}-{index}")
+    };
+
+    if let Some(variant) = variant
+        .map(sanitize_render_element_fragment)
+        .filter(|v| !v.is_empty())
+    {
+        id.push('-');
+        id.push_str(&variant);
     }
+
+    id
 }
 
 #[must_use]

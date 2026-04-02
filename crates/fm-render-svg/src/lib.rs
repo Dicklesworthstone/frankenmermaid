@@ -38,7 +38,7 @@ use std::collections::BTreeMap;
 use fm_core::{
     DiagramType, IrLabelId, IrLabelSegment, IrXyChartMeta, IrXySeriesKind, MermaidDiagramIr,
     MermaidTier, Span, mermaid_cluster_element_id, mermaid_edge_element_id,
-    mermaid_node_element_id,
+    mermaid_node_element_id, mermaid_node_element_id_with_variant,
 };
 use fm_layout::{
     DiagramLayout, FillStyle, LayoutBand, LayoutBandKind, LayoutEdgePath, LayoutNodeBox,
@@ -2265,7 +2265,12 @@ fn render_layout_to_svg(
             config,
             detail,
             &theme.colors,
-        );
+        )
+        .id(&mermaid_node_element_id_with_variant(
+            &node_box.node_id,
+            node_box.node_index,
+            Some("mirror-header"),
+        ));
         doc = doc.child(node_elem.class("fm-sequence-mirror-header"));
     }
 
@@ -7318,6 +7323,13 @@ mod tests {
         assert!(svg.contains("fm-sequence-mirror-header"));
         assert!(svg.matches("Alice").count() >= 2);
         assert!(svg.matches("Bob").count() >= 2);
+        assert_eq!(svg.matches("id=\"fm-node-alice-0\"").count(), 1);
+        assert_eq!(
+            svg.matches("id=\"fm-node-alice-0-mirror-header\"").count(),
+            1
+        );
+        assert_eq!(svg.matches("id=\"fm-node-bob-1\"").count(), 1);
+        assert_eq!(svg.matches("id=\"fm-node-bob-1-mirror-header\"").count(), 1);
     }
 
     #[test]

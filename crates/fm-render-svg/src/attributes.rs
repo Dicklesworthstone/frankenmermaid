@@ -82,8 +82,10 @@ impl Attributes {
     /// Add an attribute.
     #[must_use]
     pub fn set<K: Into<String>, V: Into<AttributeValue>>(mut self, name: K, value: V) -> Self {
+        let name = name.into();
+        self.attrs.retain(|attr| attr.name != name);
         self.attrs.push(Attribute {
-            name: name.into(),
+            name,
             value: value.into(),
         });
         self

@@ -30,6 +30,7 @@ use fm_core::{
 use fm_layout::{
     LayoutAlgorithm, LayoutConfig, LayoutGuardrails, TracedLayout, build_layout_decision_ledger,
     build_layout_guard_report_with_pressure, layout_diagram_traced_with_config_and_guardrails,
+    layout_source_map,
 };
 use fm_parser::{
     detect_type_with_confidence, first_significant_line, parse_evidence_json, parse_with_mode,
@@ -1077,7 +1078,7 @@ fn cmd_render(input: &str, options: RenderCommandOptions<'_>) -> Result<()> {
     let layout_decision_ledger_jsonl = layout_decision_ledger.to_jsonl()?;
 
     let total_time = total_start.elapsed();
-    let source_map = parsed.ir.source_map();
+    let source_map = layout_source_map(&parsed.ir, layout);
     let accessibility_summary = describe_diagram_with_layout(&parsed.ir, Some(layout));
 
     if let Some(path) = source_map_out {

@@ -1281,6 +1281,82 @@ fn render_svg_source_map_survives_recovered_input() {
 }
 
 #[test]
+fn render_svg_source_map_tracks_sequence_mirror_headers_as_distinct_elements() {
+    let output_file = NamedTempFile::new().expect("temp render output file");
+    let source_map_file = NamedTempFile::new().expect("temp source map file");
+    let output_path = output_file
+        .path()
+        .to_str()
+        .expect("temp path must be valid utf-8")
+        .to_string();
+    let source_map_path = source_map_file
+        .path()
+        .to_str()
+        .expect("temp path must be valid utf-8")
+        .to_string();
+
+    let output = run_cli(
+        &[
+            "render",
+            "-",
+            "--format",
+            "svg",
+            "--json",
+            "--output",
+            &output_path,
+            "--source-map-out",
+            &source_map_path,
+        ],
+        "%%{init: {\"sequence\": {\"mirrorActors\": true}}}%%\nsequenceDiagram\nAlice->>Bob: hi\n",
+    );
+    assert!(
+        output.status.success(),
+        "render sequence diagram with --source-map-out should succeed; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout must be utf-8");
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("render --json must print metadata JSON to stdout");
+    assert_eq!(json["source_map_entry_count"], 5);
+
+    let artifact =
+        std::fs::read_to_string(&source_map_path).expect("failed to read source map artifact");
+    let source_map: serde_json::Value =
+        serde_json::from_str(&artifact).expect("source map artifact must be valid json");
+    assert!(
+        source_map["entries"]
+            .as_array()
+            .expect("entries array")
+            .iter()
+            .any(|entry| entry["element_id"] == "fm-node-alice-0")
+    );
+    assert!(
+        source_map["entries"]
+            .as_array()
+            .expect("entries array")
+            .iter()
+            .any(|entry| entry["element_id"] == "fm-node-alice-0-mirror-header")
+    );
+    assert!(
+        source_map["entries"]
+            .as_array()
+            .expect("entries array")
+            .iter()
+            .any(|entry| entry["element_id"] == "fm-node-bob-1-mirror-header")
+    );
+
+    let svg = std::fs::read_to_string(&output_path).expect("failed to read rendered svg");
+    assert_eq!(svg.matches("id=\"fm-node-alice-0\"").count(), 1);
+    assert_eq!(
+        svg.matches("id=\"fm-node-alice-0-mirror-header\"").count(),
+        1
+    );
+    assert_eq!(svg.matches("id=\"fm-node-bob-1\"").count(), 1);
+    assert_eq!(svg.matches("id=\"fm-node-bob-1-mirror-header\"").count(), 1);
+}
+
+#[test]
 fn validate_json_reports_source_span_counts() {
     let output = run_cli(
         &["validate", "-", "--format", "json"],
