@@ -11184,7 +11184,7 @@ mod tests {
         assert_eq!(step2_incremental.layout, step2_full.layout);
         assert_eq!(
             step2_incremental.trace.incremental.query_type,
-            "layout_full_recompute_with_query_reuse"
+            "layout_full_recompute"
         );
         assert_eq!(
             step2_incremental.trace.incremental.recomputed_nodes,
@@ -11221,7 +11221,7 @@ mod tests {
             vec![
                 "layout_full_recompute",
                 "layout_full_recompute_with_query_reuse",
-                "layout_full_recompute_with_query_reuse",
+                "layout_full_recompute",
                 "layout_full_recompute_with_query_reuse",
             ]
         );

@@ -777,6 +777,9 @@ fn strip_ansi(input: &str) -> String {
 }
 
 fn truncate_display(value: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
     if display_width(value) <= max_width {
         return value.to_string();
     }

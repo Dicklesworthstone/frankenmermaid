@@ -709,23 +709,41 @@ fn expand_edge_groups(input: &str) -> String {
         // Extract source node (everything before the operator).
         let operator_end = before.trim_end().len();
         let op_len = 2; // "--" or "->"
-        let source = before[..operator_end - op_len].trim();
         let operator = &before.trim_end()[operator_end - op_len..operator_end];
+
+        let mut last_idx = 0;
+        let bytes = &before.as_bytes()[..operator_end - op_len];
+        for i in 0..bytes.len() {
+            let is_sep = bytes[i] == b';' || bytes[i] == b'\n' || bytes[i] == b'{' || bytes[i] == b'}';
+            let is_edge_op = i > 0 && bytes[i - 1] == b'-' && (bytes[i] == b'>' || bytes[i] == b'-');
+            if is_sep || is_edge_op {
+                last_idx = i + 1;
+            }
+        }
+        
+        let prefix = &before[..last_idx];
+        let source = before[last_idx..operator_end - op_len].trim();
+
+        output.push_str(prefix);
 
         // Extract group members.
         let inner = rest[brace_start + 1..brace_end].trim();
         let members: Vec<&str> = inner.split_whitespace().filter(|s| !s.is_empty()).collect();
 
         // Expand: emit "source -> member" for each member.
-        for (i, member) in members.iter().enumerate() {
-            if i > 0 {
-                output.push_str("; ");
-            }
+        if members.is_empty() {
             output.push_str(source);
-            output.push(' ');
-            output.push_str(operator);
-            output.push(' ');
-            output.push_str(member);
+        } else {
+            for (i, member) in members.iter().enumerate() {
+                if i > 0 {
+                    output.push_str("; ");
+                }
+                output.push_str(source);
+                output.push(' ');
+                output.push_str(operator);
+                output.push(' ');
+                output.push_str(member);
+            }
         }
 
         rest = &rest[brace_end + 1..];
