@@ -6748,9 +6748,8 @@ fn display_node_label(ir: &MermaidDiagramIr, node: &IrNode) -> String {
         .map(|value| value.text.clone());
 
     match node.shape {
-        fm_core::NodeShape::FilledCircle => String::new(),
+        fm_core::NodeShape::FilledCircle | fm_core::NodeShape::HorizontalBar => String::new(),
         fm_core::NodeShape::DoubleCircle if explicit.is_none() => String::new(),
-        fm_core::NodeShape::HorizontalBar => String::new(),
         _ => explicit.unwrap_or_else(|| node.id.clone()),
     }
 }
@@ -15849,5 +15848,8 @@ mod tests {
                 );
             }
         }
+    }
+}
+
     }
 }

@@ -1,0 +1,60 @@
+schema_version: 1
+benchmarks:
+  sugiyama_small:
+    max_p50_ns: 50000000
+    max_p95_ns: 80000000
+    max_p99_ns: 100000000
+  sugiyama_medium:
+    max_p50_ns: 250000000
+    max_p95_ns: 400000000
+    max_p99_ns: 500000000
+  sugiyama_large:
+    max_p50_ns: 1200000000
+    max_p95_ns: 1800000000
+    max_p99_ns: 2000000000
+  force_small:
+    max_p50_ns: 100000000
+    max_p95_ns: 150000000
+    max_p99_ns: 200000000
+  force_medium:
+    max_p50_ns: 500000000
+    max_p95_ns: 800000000
+    max_p99_ns: 1000000000
+  tree_small:
+    max_p50_ns: 25000000
+    max_p95_ns: 40000000
+    max_p99_ns: 50000000
+  tree_medium:
+    max_p50_ns: 100000000
+    max_p95_ns: 150000000
+    max_p99_ns: 200000000
+  tree_large:
+    max_p50_ns: 250000000
+    max_p95_ns: 400000000
+    max_p99_ns: 500000000
+  radial_50:
+    max_p50_ns: 100000000
+    max_p95_ns: 160000000
+    max_p99_ns: 200000000
+  grid_100:
+    max_p50_ns: 50000000
+    max_p95_ns: 80000000
+    max_p99_ns: 100000000
+  comparison_50.sugiyama:
+    max_p99_ns: 500000000
+  comparison_50.force:
+    max_p99_ns: 500000000
+  comparison_50.tree:
+    max_p99_ns: 500000000
+  parse_flowchart_small:
+    min_median_ops_per_sec: 2000.0
+  parse_flowchart_medium:
+    min_median_ops_per_sec: 200.0
+  parse_flowchart_large:
+    min_median_ops_per_sec: 5.0
+  render_svg_small:
+    min_median_ops_per_sec: 500.0
+  render_svg_medium:
+    min_median_ops_per_sec: 50.0
+  render_svg_large:
+    min_median_ops_per_sec: 5.0

@@ -1,0 +1,293 @@
+{
+  "ok": true,
+  "base_url": "http://127.0.0.1:35389",
+  "route_prefix": "/web_react",
+  "surface": "web_react",
+  "host_kind": "react-web",
+  "repeat": 1,
+  "profiles": [
+    "desktop-default",
+    "desktop-reduced-motion",
+    "mobile-narrow"
+  ],
+  "results": [
+    {
+      "scenario_id": "react-web-compare-export",
+      "profile": "desktop-default",
+      "run_index": 1,
+      "url": "http://127.0.0.1:35389/web_react?sample=flowchart-1-incident-response-escalation&spotlight=flowchart-1-incident-response-escalation&compare=flowchart-3-change-approval-pipeline%2Csequence-1-checkout-risk-review&lab=cycles",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.3.3/react-web-compare-export/desktop-default/2026-04-01T17-16-06Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.3.3/react-web-compare-export/desktop-default/2026-04-01T17-16-06Z__e2e__log.json",
+      "diagnostic_count": 2,
+      "degradation_tier": "fallback",
+      "runtime_mode": "live",
+      "output_artifact_hash": "sha256:fd9eb8af2dc128bb36e0c7fc3a15b6956e647c9c48480aa6a3ab3dafacfd9d70",
+      "determinism_status": "unreported"
+    },
+    {
+      "scenario_id": "react-web-compare-export",
+      "profile": "desktop-reduced-motion",
+      "run_index": 1,
+      "url": "http://127.0.0.1:35389/web_react?sample=flowchart-1-incident-response-escalation&spotlight=flowchart-1-incident-response-escalation&compare=flowchart-3-change-approval-pipeline%2Csequence-1-checkout-risk-review&lab=cycles",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.3.3/react-web-compare-export/desktop-reduced-motion/2026-04-01T17-16-09Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.3.3/react-web-compare-export/desktop-reduced-motion/2026-04-01T17-16-09Z__e2e__log.json",
+      "diagnostic_count": 2,
+      "degradation_tier": "fallback",
+      "runtime_mode": "live",
+      "output_artifact_hash": "sha256:f87b7a8063e22358bac111cc3feee08ef01553065e1a198ee701ef48e20f6670",
+      "determinism_status": "unreported"
+    },
+    {
+      "scenario_id": "react-web-compare-export",
+      "profile": "mobile-narrow",
+      "run_index": 1,
+      "url": "http://127.0.0.1:35389/web_react?sample=flowchart-1-incident-response-escalation&spotlight=flowchart-1-incident-response-escalation&compare=flowchart-3-change-approval-pipeline%2Csequence-1-checkout-risk-review&lab=cycles",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.3.3/react-web-compare-export/mobile-narrow/2026-04-01T17-16-11Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.3.3/react-web-compare-export/mobile-narrow/2026-04-01T17-16-11Z__e2e__log.json",
+      "diagnostic_count": 2,
+      "degradation_tier": "fallback",
+      "runtime_mode": "live",
+      "output_artifact_hash": "sha256:1c7c44ca813eaaf3190aa7b2d61409cafb205dbf69486fcb3ca5dcffed2aafc9",
+      "determinism_status": "unreported"
+    },
+    {
+      "scenario_id": "react-web-diagnostics-recovery",
+      "profile": "desktop-default",
+      "run_index": 1,
+      "url": "http://127.0.0.1:35389/web_react?sample=flowchart-1-incident-response-escalation&source=flowchart+LR%0AA--%3E&lab=overview",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.3.3/react-web-diagnostics-recovery/desktop-default/2026-04-01T17-16-13Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.3.3/react-web-diagnostics-recovery/desktop-default/2026-04-01T17-16-13Z__e2e__log.json",
+      "diagnostic_count": 2,
+      "degradation_tier": "fallback",
+      "runtime_mode": "live",
+      "output_artifact_hash": "sha256:7840da2467ceac075bfd2241ef02514cc7b1d29e588fe2a2ef44093ece60bf47",
+      "determinism_status": "unreported"
+    },
+    {
+      "scenario_id": "react-web-diagnostics-recovery",
+      "profile": "desktop-reduced-motion",
+      "run_index": 1,
+      "url": "http://127.0.0.1:35389/web_react?sample=flowchart-1-incident-response-escalation&source=flowchart+LR%0AA--%3E&lab=overview",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.3.3/react-web-diagnostics-recovery/desktop-reduced-motion/2026-04-01T17-16-15Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.3.3/react-web-diagnostics-recovery/desktop-reduced-motion/2026-04-01T17-16-15Z__e2e__log.json",
+      "diagnostic_count": 2,
+      "degradation_tier": "fallback",
+      "runtime_mode": "live",
+      "output_artifact_hash": "sha256:ef191621b17d89f67ec667986a40be902bfc8acda7f560f83b85b313bf630fa5",
+      "determinism_status": "unreported"
+    },
+    {
+      "scenario_id": "react-web-diagnostics-recovery",
+      "profile": "mobile-narrow",
+      "run_index": 1,
+      "url": "http://127.0.0.1:35389/web_react?sample=flowchart-1-incident-response-escalation&source=flowchart+LR%0AA--%3E&lab=overview",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.3.3/react-web-diagnostics-recovery/mobile-narrow/2026-04-01T17-16-17Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.3.3/react-web-diagnostics-recovery/mobile-narrow/2026-04-01T17-16-17Z__e2e__log.json",
+      "diagnostic_count": 2,
+      "degradation_tier": "fallback",
+      "runtime_mode": "live",
+      "output_artifact_hash": "sha256:c66bfcb1e60b810359b87bd29dbea5dd6baa382035823ce0dd4c765672997789",
+      "determinism_status": "unreported"
+    },
+    {
+      "scenario_id": "react-web-determinism-check",
+      "profile": "desktop-default",
+      "run_index": 1,
+      "url": "http://127.0.0.1:35389/web_react?sample=flowchart-1-incident-response-escalation&det=5",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.3.3/react-web-determinism-check/desktop-default/2026-04-01T17-16-19Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.3.3/react-web-determinism-check/desktop-default/2026-04-01T17-16-19Z__e2e__log.json",
+      "diagnostic_count": 1,
+      "degradation_tier": "healthy",
+      "runtime_mode": "live",
+      "output_artifact_hash": "sha256:db3c964ed90d6368297ca10441e854bb7415fab99c8931f20eae52464ffc6100",
+      "determinism_status": "stable"
+    },
+    {
+      "scenario_id": "react-web-determinism-check",
+      "profile": "desktop-reduced-motion",
+      "run_index": 1,
+      "url": "http://127.0.0.1:35389/web_react?sample=flowchart-1-incident-response-escalation&det=5",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.3.3/react-web-determinism-check/desktop-reduced-motion/2026-04-01T17-16-22Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.3.3/react-web-determinism-check/desktop-reduced-motion/2026-04-01T17-16-22Z__e2e__log.json",
+      "diagnostic_count": 1,
+      "degradation_tier": "healthy",
+      "runtime_mode": "live",
+      "output_artifact_hash": "sha256:db3c964ed90d6368297ca10441e854bb7415fab99c8931f20eae52464ffc6100",
+      "determinism_status": "stable"
+    },
+    {
+      "scenario_id": "react-web-determinism-check",
+      "profile": "mobile-narrow",
+      "run_index": 1,
+      "url": "http://127.0.0.1:35389/web_react?sample=flowchart-1-incident-response-escalation&det=5",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.3.3/react-web-determinism-check/mobile-narrow/2026-04-01T17-16-24Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.3.3/react-web-determinism-check/mobile-narrow/2026-04-01T17-16-24Z__e2e__log.json",
+      "diagnostic_count": 1,
+      "degradation_tier": "healthy",
+      "runtime_mode": "live",
+      "output_artifact_hash": "sha256:db3c964ed90d6368297ca10441e854bb7415fab99c8931f20eae52464ffc6100",
+      "determinism_status": "stable"
+    },
+    {
+      "scenario_id": "react-web-presenter-tour",
+      "profile": "desktop-default",
+      "run_index": 1,
+      "url": "http://127.0.0.1:35389/web_react?tour=main-demo&tour_step=1",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.3.3/react-web-presenter-tour/desktop-default/2026-04-01T17-16-26Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.3.3/react-web-presenter-tour/desktop-default/2026-04-01T17-16-26Z__e2e__log.json",
+      "diagnostic_count": 2,
+      "degradation_tier": "fallback",
+      "runtime_mode": "live",
+      "output_artifact_hash": "sha256:99a83faee1605c437c2b16634680c4806b6847ea38d319bd233eb8f8f488830b",
+      "determinism_status": "unreported"
+    },
+    {
+      "scenario_id": "react-web-presenter-tour",
+      "profile": "desktop-reduced-motion",
+      "run_index": 1,
+      "url": "http://127.0.0.1:35389/web_react?tour=main-demo&tour_step=1",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.3.3/react-web-presenter-tour/desktop-reduced-motion/2026-04-01T17-16-29Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.3.3/react-web-presenter-tour/desktop-reduced-motion/2026-04-01T17-16-29Z__e2e__log.json",
+      "diagnostic_count": 2,
+      "degradation_tier": "fallback",
+      "runtime_mode": "live",
+      "output_artifact_hash": "sha256:5c94a4536e2a90bc94ac65ba69549eb811c53ae9fe7009d4da747279bb12d550",
+      "determinism_status": "unreported"
+    },
+    {
+      "scenario_id": "react-web-presenter-tour",
+      "profile": "mobile-narrow",
+      "run_index": 1,
+      "url": "http://127.0.0.1:35389/web_react?tour=main-demo&tour_step=1",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.3.3/react-web-presenter-tour/mobile-narrow/2026-04-01T17-16-31Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.3.3/react-web-presenter-tour/mobile-narrow/2026-04-01T17-16-31Z__e2e__log.json",
+      "diagnostic_count": 2,
+      "degradation_tier": "fallback",
+      "runtime_mode": "live",
+      "output_artifact_hash": "sha256:8b542c1409af7eca6fee1836a0feee6d1e4fa897771acb901a2efd2c0a17c8c4",
+      "determinism_status": "unreported"
+    }
+  ],
+  "determinism": [
+    {
+      "scenario_id": "react-web-compare-export",
+      "profile": "desktop-default",
+      "runs": 1,
+      "stable_output_hash": true,
+      "stable_normalized_log": true,
+      "output_hashes": [
+        "sha256:fd9eb8af2dc128bb36e0c7fc3a15b6956e647c9c48480aa6a3ab3dafacfd9d70"
+      ]
+    },
+    {
+      "scenario_id": "react-web-compare-export",
+      "profile": "desktop-reduced-motion",
+      "runs": 1,
+      "stable_output_hash": true,
+      "stable_normalized_log": true,
+      "output_hashes": [
+        "sha256:f87b7a8063e22358bac111cc3feee08ef01553065e1a198ee701ef48e20f6670"
+      ]
+    },
+    {
+      "scenario_id": "react-web-compare-export",
+      "profile": "mobile-narrow",
+      "runs": 1,
+      "stable_output_hash": true,
+      "stable_normalized_log": true,
+      "output_hashes": [
+        "sha256:1c7c44ca813eaaf3190aa7b2d61409cafb205dbf69486fcb3ca5dcffed2aafc9"
+      ]
+    },
+    {
+      "scenario_id": "react-web-diagnostics-recovery",
+      "profile": "desktop-default",
+      "runs": 1,
+      "stable_output_hash": true,
+      "stable_normalized_log": true,
+      "output_hashes": [
+        "sha256:7840da2467ceac075bfd2241ef02514cc7b1d29e588fe2a2ef44093ece60bf47"
+      ]
+    },
+    {
+      "scenario_id": "react-web-diagnostics-recovery",
+      "profile": "desktop-reduced-motion",
+      "runs": 1,
+      "stable_output_hash": true,
+      "stable_normalized_log": true,
+      "output_hashes": [
+        "sha256:ef191621b17d89f67ec667986a40be902bfc8acda7f560f83b85b313bf630fa5"
+      ]
+    },
+    {
+      "scenario_id": "react-web-diagnostics-recovery",
+      "profile": "mobile-narrow",
+      "runs": 1,
+      "stable_output_hash": true,
+      "stable_normalized_log": true,
+      "output_hashes": [
+        "sha256:c66bfcb1e60b810359b87bd29dbea5dd6baa382035823ce0dd4c765672997789"
+      ]
+    },
+    {
+      "scenario_id": "react-web-determinism-check",
+      "profile": "desktop-default",
+      "runs": 1,
+      "stable_output_hash": true,
+      "stable_normalized_log": true,
+      "output_hashes": [
+        "sha256:db3c964ed90d6368297ca10441e854bb7415fab99c8931f20eae52464ffc6100"
+      ]
+    },
+    {
+      "scenario_id": "react-web-determinism-check",
+      "profile": "desktop-reduced-motion",
+      "runs": 1,
+      "stable_output_hash": true,
+      "stable_normalized_log": true,
+      "output_hashes": [
+        "sha256:db3c964ed90d6368297ca10441e854bb7415fab99c8931f20eae52464ffc6100"
+      ]
+    },
+    {
+      "scenario_id": "react-web-determinism-check",
+      "profile": "mobile-narrow",
+      "runs": 1,
+      "stable_output_hash": true,
+      "stable_normalized_log": true,
+      "output_hashes": [
+        "sha256:db3c964ed90d6368297ca10441e854bb7415fab99c8931f20eae52464ffc6100"
+      ]
+    },
+    {
+      "scenario_id": "react-web-presenter-tour",
+      "profile": "desktop-default",
+      "runs": 1,
+      "stable_output_hash": true,
+      "stable_normalized_log": true,
+      "output_hashes": [
+        "sha256:99a83faee1605c437c2b16634680c4806b6847ea38d319bd233eb8f8f488830b"
+      ]
+    },
+    {
+      "scenario_id": "react-web-presenter-tour",
+      "profile": "desktop-reduced-motion",
+      "runs": 1,
+      "stable_output_hash": true,
+      "stable_normalized_log": true,
+      "output_hashes": [
+        "sha256:5c94a4536e2a90bc94ac65ba69549eb811c53ae9fe7009d4da747279bb12d550"
+      ]
+    },
+    {
+      "scenario_id": "react-web-presenter-tour",
+      "profile": "mobile-narrow",
+      "runs": 1,
+      "stable_output_hash": true,
+      "stable_normalized_log": true,
+      "output_hashes": [
+        "sha256:8b542c1409af7eca6fee1836a0feee6d1e4fa897771acb901a2efd2c0a17c8c4"
+      ]
+    }
+  ]
+}

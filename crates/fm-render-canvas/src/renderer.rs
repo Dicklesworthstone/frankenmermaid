@@ -5,7 +5,7 @@
 use crate::context::{Canvas2dContext, LineCap, LineJoin, TextAlign, TextBaseline};
 use crate::shapes::{draw_arrowhead, draw_circle_marker, draw_cross_marker, draw_shape};
 use crate::viewport::{Viewport, fit_to_viewport};
-use fm_core::{ArrowType, MermaidDiagramIr, NodeShape};
+use fm_core::{ArrowType, DiagramType, MermaidDiagramIr, NodeShape};
 use fm_layout::{
     DiagramLayout, FillStyle, LineCap as IrLineCap, LineJoin as IrLineJoin, MarkerKind, PathCmd,
     RenderClip, RenderGroup, RenderItem, RenderPath, RenderScene, RenderSource, RenderText,
@@ -191,6 +191,11 @@ impl Canvas2dRenderer {
         // Draw sequence notes and fragments.
         self.draw_sequence_fragments(layout, ctx, offset_x, offset_y);
         self.draw_sequence_notes(layout, ctx, offset_x, offset_y, &mut labels_drawn);
+
+        // Draw pie chart wedges if this is a pie diagram.
+        if ir.diagram_type == DiagramType::Pie {
+            self.draw_pie_wedges(layout, ir, ctx, offset_x, offset_y, &mut labels_drawn);
+        }
 
         // Draw edges
         let edges_drawn = self.draw_edges(layout, ir, ctx, offset_x, offset_y, &mut labels_drawn);
@@ -1235,6 +1240,83 @@ impl Canvas2dRenderer {
 
         count
     }
+
+    /// Draw pie chart wedges using canvas arc API.
+    fn draw_pie_wedges<C: Canvas2dContext>(
+        &mut self,
+        layout: &DiagramLayout,
+        ir: &MermaidDiagramIr,
+        ctx: &mut C,
+        offset_x: f64,
+        offset_y: f64,
+        labels_drawn: &mut usize,
+    ) {
+        let Some(pie_meta) = &ir.pie_meta else {
+            return;
+        };
+        if pie_meta.slices.is_empty() {
+            return;
+        }
+
+        let total: f64 = pie_meta
+            .slices
+            .iter()
+            .map(|s| f64::from(s.value.max(0.0)))
+            .sum::<f64>()
+            .max(f64::EPSILON);
+
+        let bounds = &layout.bounds;
+        let chart_size = f64::from(bounds.width.min(bounds.height));
+        let cx = f64::from(bounds.x) + f64::from(bounds.width) / 2.0 + offset_x;
+        let cy = f64::from(bounds.y) + f64::from(bounds.height) / 2.0 + offset_y;
+        let radius = (chart_size / 2.0 - 36.0).max(30.0);
+
+        let accent_colors = [
+            "#4c78a8", "#f58518", "#e45756", "#72b7b2", "#54a24b", "#eeca3b", "#b279a2", "#ff9da6",
+            "#9d755d", "#bab0ac",
+        ];
+
+        let mut angle = -std::f64::consts::FRAC_PI_2;
+
+        for (i, slice) in pie_meta.slices.iter().enumerate() {
+            let value = f64::from(slice.value.max(0.0));
+            let sweep = (value / total) * 2.0 * std::f64::consts::PI;
+            let color = accent_colors[i % accent_colors.len()];
+
+            ctx.begin_path();
+            ctx.move_to(cx, cy);
+            ctx.arc(cx, cy, radius, angle, angle + sweep);
+            ctx.close_path();
+            ctx.set_fill_style(color);
+            ctx.fill();
+            ctx.set_stroke_style(&self.config.node_stroke);
+            ctx.set_line_width(1.5);
+            ctx.stroke();
+            self.draw_calls += 1;
+
+            // Draw percentage label.
+            let mid_angle = angle + sweep / 2.0;
+            let label_r = radius + 20.0;
+            let lx = cx + label_r * mid_angle.cos();
+            let ly = cy + label_r * mid_angle.sin();
+            let pct = (value / total) * 100.0;
+            let label = format!("{}: {pct:.1}%", slice.label);
+
+            ctx.set_fill_style(&self.config.label_color);
+            ctx.set_font(&format!(
+                "{}px {}",
+                self.config.font_size * 0.8,
+                self.config.font_family
+            ));
+            ctx.set_text_align(TextAlign::Center);
+            ctx.set_text_baseline(TextBaseline::Middle);
+            ctx.fill_text(&label, lx, ly);
+            self.draw_calls += 1;
+            *labels_drawn += 1;
+
+            angle += sweep;
+        }
+    }
 }
 
 fn path_marker_start_geometry(commands: &[PathCmd]) -> Option<(f64, f64, f64)> {
@@ -1386,8 +1468,8 @@ fn class_vis_char(vis: fm_core::ClassVisibility) -> char {
 }
 
 fn generic_canvas_diagram_title(ir: &MermaidDiagramIr) -> Option<&str> {
-    // Unlike SVG/terminal, the canvas backend does not yet have dedicated chart renderers
-    // for pie/gantt/xy/quadrant titles, so the generic title path must remain enabled.
+    // The canvas backend has dedicated pie chart rendering. Gantt/xy/quadrant still use
+    // the generic node/edge path, so the generic title fallback remains enabled.
     ir.meta.title.as_deref()
 }
 

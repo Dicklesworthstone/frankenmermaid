@@ -22,6 +22,16 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
+use crossterm::cursor::{Hide, MoveTo, Show};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::style::{
+    Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
+};
+use crossterm::terminal::{
+    self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
+    enable_raw_mode,
+};
+use crossterm::{execute, queue};
 use fm_core::{
     DiagramType, MermaidBudgetLedger, MermaidDiagramIr, MermaidLayoutDecisionLedger,
     MermaidNativePressureSignals, MermaidParseMode, StructuredDiagnostic, capability_matrix,
@@ -257,6 +267,21 @@ enum Command {
     /// Emit a canonical layout determinism manifest for the embedded golden corpus.
     #[command(hide = true)]
     DeterminismManifest,
+
+    /// Launch an interactive split-pane terminal editor with live diagram preview.
+    Interactive {
+        /// Input file path or "-" for stdin.
+        #[arg(default_value = "-")]
+        input: String,
+
+        /// Parser support contract mode.
+        #[arg(long, value_enum, default_value = "compat")]
+        parse_mode: ParseModeArg,
+
+        /// Initial UI theme.
+        #[arg(short, long, default_value = "default")]
+        theme: String,
+    },
 
     /// Watch a file and re-render on changes (requires `watch` feature).
     #[cfg(feature = "watch")]
@@ -720,6 +745,12 @@ fn main() -> Result<()> {
         Command::Capabilities { pretty, output } => cmd_capabilities(pretty, output.as_deref()),
 
         Command::DeterminismManifest => cmd_determinism_manifest(),
+
+        Command::Interactive {
+            input,
+            parse_mode,
+            theme,
+        } => cmd_interactive(&input, parse_mode.to_core(), &theme),
 
         #[cfg(feature = "watch")]
         Command::Watch {
@@ -2289,6 +2320,799 @@ mod render_tests {
         assert!(diff_use_colors(ColorChoice::Always, false));
         assert!(!diff_use_colors(ColorChoice::Never, true));
     }
+}
+
+#[cfg(test)]
+mod interactive_tests {
+    use super::{
+        InteractiveBuffer, InteractiveSnapshot, cycle_interactive_theme, diagnostic_summary_line,
+        interactive_help_line, interactive_layout, interactive_status_line,
+        resolve_interactive_theme_index,
+    };
+    use crate::ValidationDiagnostic;
+    use fm_core::StructuredDiagnostic;
+
+    fn diagnostic(
+        message: &str,
+        line: Option<usize>,
+        column: Option<usize>,
+    ) -> ValidationDiagnostic {
+        ValidationDiagnostic {
+            stage: "parse".to_string(),
+            payload: StructuredDiagnostic {
+                error_code: "mermaid/error/test".to_string(),
+                severity: "error".to_string(),
+                message: message.to_string(),
+                span: None,
+                source_line: line,
+                source_column: column,
+                rule_id: None,
+                confidence: None,
+                remediation_hint: None,
+            },
+        }
+    }
+
+    #[test]
+    fn theme_cycle_wraps_and_resolves_case_insensitively() {
+        let dark = resolve_interactive_theme_index("DARK");
+        assert_ne!(dark, 0);
+        assert_eq!(cycle_interactive_theme(3), 0);
+    }
+
+    #[test]
+    fn interactive_buffer_backspace_merges_lines() {
+        let mut buffer = InteractiveBuffer::from_source("flowchart LR\nA-->B");
+        buffer.cursor_row = 1;
+        buffer.cursor_col = 0;
+        buffer.backspace();
+
+        assert_eq!(buffer.lines, vec!["flowchart LRA-->B".to_string()]);
+        assert_eq!(buffer.cursor_row, 0);
+    }
+
+    #[test]
+    fn interactive_buffer_insert_newline_splits_current_line() {
+        let mut buffer = InteractiveBuffer::from_source("ABC");
+        buffer.cursor_col = 1;
+        buffer.insert_newline();
+
+        assert_eq!(buffer.lines, vec!["A".to_string(), "BC".to_string()]);
+        assert_eq!(buffer.cursor_row, 1);
+        assert_eq!(buffer.cursor_col, 0);
+    }
+
+    #[test]
+    fn interactive_layout_reserves_split_and_footer_rows() {
+        let layout = interactive_layout(120, 30);
+        assert_eq!(layout.editor_width + layout.preview_width + 1, 120);
+        assert_eq!(layout.content_height, 26);
+    }
+
+    #[test]
+    fn status_and_diagnostic_lines_include_core_session_context() {
+        let snapshot = InteractiveSnapshot {
+            diagram_type: "flowchart".to_string(),
+            node_count: 2,
+            edge_count: 1,
+            render_time_ms: 3.5,
+            preview_lines: vec![],
+            diagnostics: vec![diagnostic("Broken edge", Some(2), Some(7))],
+        };
+        let buffer = InteractiveBuffer::from_source("flowchart LR\nA-->B");
+
+        let status = interactive_status_line(&snapshot, &buffer, "dark");
+        let diagnostics = diagnostic_summary_line(&snapshot.diagnostics);
+        let help = interactive_help_line(&super::InteractiveKeyHints {
+            save_supported: true,
+        });
+
+        assert!(status.contains("flowchart"));
+        assert!(status.contains("nodes=2"));
+        assert!(status.contains("theme=dark"));
+        assert!(diagnostics.contains("Broken edge"));
+        assert!(diagnostics.contains("@ 2:7"));
+        assert!(help.contains("Ctrl-S"));
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InteractiveTheme {
+    name: &'static str,
+    editor_fg: Color,
+    accent_fg: Color,
+    comment_fg: Color,
+    preview_fg: Color,
+    status_fg: Color,
+    status_bg: Color,
+    help_fg: Color,
+    help_bg: Color,
+    error_fg: Color,
+    cursor_line_bg: Color,
+}
+
+const INTERACTIVE_THEMES: [InteractiveTheme; 4] = [
+    InteractiveTheme {
+        name: "default",
+        editor_fg: Color::White,
+        accent_fg: Color::Cyan,
+        comment_fg: Color::DarkGrey,
+        preview_fg: Color::White,
+        status_fg: Color::Black,
+        status_bg: Color::Cyan,
+        help_fg: Color::White,
+        help_bg: Color::DarkBlue,
+        error_fg: Color::Red,
+        cursor_line_bg: Color::DarkGrey,
+    },
+    InteractiveTheme {
+        name: "dark",
+        editor_fg: Color::Grey,
+        accent_fg: Color::Magenta,
+        comment_fg: Color::DarkGrey,
+        preview_fg: Color::Grey,
+        status_fg: Color::White,
+        status_bg: Color::DarkMagenta,
+        help_fg: Color::White,
+        help_bg: Color::DarkGrey,
+        error_fg: Color::Red,
+        cursor_line_bg: Color::DarkBlue,
+    },
+    InteractiveTheme {
+        name: "forest",
+        editor_fg: Color::White,
+        accent_fg: Color::Green,
+        comment_fg: Color::DarkGreen,
+        preview_fg: Color::White,
+        status_fg: Color::Black,
+        status_bg: Color::Green,
+        help_fg: Color::Black,
+        help_bg: Color::DarkGreen,
+        error_fg: Color::Yellow,
+        cursor_line_bg: Color::DarkGreen,
+    },
+    InteractiveTheme {
+        name: "neutral",
+        editor_fg: Color::White,
+        accent_fg: Color::Blue,
+        comment_fg: Color::Grey,
+        preview_fg: Color::White,
+        status_fg: Color::Black,
+        status_bg: Color::Grey,
+        help_fg: Color::Black,
+        help_bg: Color::DarkGrey,
+        error_fg: Color::DarkRed,
+        cursor_line_bg: Color::DarkGrey,
+    },
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InteractiveBuffer {
+    lines: Vec<String>,
+    cursor_row: usize,
+    cursor_col: usize,
+    scroll_row: usize,
+    scroll_col: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InteractiveKeyHints {
+    save_supported: bool,
+}
+
+#[derive(Debug, Clone)]
+struct InteractiveSnapshot {
+    diagram_type: String,
+    node_count: usize,
+    edge_count: usize,
+    render_time_ms: f64,
+    preview_lines: Vec<String>,
+    diagnostics: Vec<ValidationDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InteractiveLayout {
+    editor_width: usize,
+    preview_width: usize,
+    content_height: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InteractiveDrawStyle {
+    fg: Color,
+    bg: Option<Color>,
+    bold: bool,
+}
+
+impl InteractiveBuffer {
+    fn from_source(source: &str) -> Self {
+        let normalized = source.replace("\r\n", "\n");
+        let mut lines: Vec<String> = normalized.split('\n').map(str::to_string).collect();
+        if lines.is_empty() {
+            lines.push(String::new());
+        }
+        if normalized.ends_with('\n') {
+            lines.push(String::new());
+        }
+
+        Self {
+            lines,
+            cursor_row: 0,
+            cursor_col: 0,
+            scroll_row: 0,
+            scroll_col: 0,
+        }
+    }
+
+    fn to_source(&self) -> String {
+        self.lines.join("\n")
+    }
+
+    fn insert_char(&mut self, ch: char) {
+        let line = &mut self.lines[self.cursor_row];
+        let insert_at = self.cursor_col.min(line.len());
+        line.insert(insert_at, ch);
+        self.cursor_col = insert_at + ch.len_utf8();
+    }
+
+    fn insert_newline(&mut self) {
+        let tail = self.lines[self.cursor_row].split_off(self.cursor_col);
+        self.cursor_row += 1;
+        self.lines.insert(self.cursor_row, tail);
+        self.cursor_col = 0;
+    }
+
+    fn backspace(&mut self) {
+        if self.cursor_col > 0 {
+            let line = &mut self.lines[self.cursor_row];
+            let previous_boundary = line[..self.cursor_col]
+                .char_indices()
+                .last()
+                .map_or(0, |(idx, _)| idx);
+            line.replace_range(previous_boundary..self.cursor_col, "");
+            self.cursor_col = previous_boundary;
+            return;
+        }
+
+        if self.cursor_row == 0 {
+            return;
+        }
+
+        let current_line = self.lines.remove(self.cursor_row);
+        self.cursor_row -= 1;
+        self.cursor_col = self.lines[self.cursor_row].len();
+        self.lines[self.cursor_row].push_str(&current_line);
+    }
+
+    fn move_left(&mut self) {
+        if self.cursor_col > 0 {
+            self.cursor_col = self.lines[self.cursor_row][..self.cursor_col]
+                .char_indices()
+                .last()
+                .map_or(0, |(idx, _)| idx);
+        } else if self.cursor_row > 0 {
+            self.cursor_row -= 1;
+            self.cursor_col = self.lines[self.cursor_row].len();
+        }
+    }
+
+    fn move_right(&mut self) {
+        let line = &self.lines[self.cursor_row];
+        if self.cursor_col < line.len() {
+            let next = line[self.cursor_col..]
+                .chars()
+                .next()
+                .map_or(self.cursor_col, |ch| self.cursor_col + ch.len_utf8());
+            self.cursor_col = next;
+        } else if self.cursor_row + 1 < self.lines.len() {
+            self.cursor_row += 1;
+            self.cursor_col = 0;
+        }
+    }
+
+    fn move_up(&mut self) {
+        if self.cursor_row > 0 {
+            self.cursor_row -= 1;
+            self.cursor_col = self.cursor_col.min(self.lines[self.cursor_row].len());
+        }
+    }
+
+    fn move_down(&mut self) {
+        if self.cursor_row + 1 < self.lines.len() {
+            self.cursor_row += 1;
+            self.cursor_col = self.cursor_col.min(self.lines[self.cursor_row].len());
+        }
+    }
+
+    fn ensure_cursor_visible(&mut self, layout: InteractiveLayout) {
+        if self.cursor_row < self.scroll_row {
+            self.scroll_row = self.cursor_row;
+        } else if self.cursor_row >= self.scroll_row.saturating_add(layout.content_height) {
+            self.scroll_row = self
+                .cursor_row
+                .saturating_add(1)
+                .saturating_sub(layout.content_height);
+        }
+
+        if self.cursor_col < self.scroll_col {
+            self.scroll_col = self.cursor_col;
+        } else if self.cursor_col >= self.scroll_col.saturating_add(layout.editor_width) {
+            self.scroll_col = self
+                .cursor_col
+                .saturating_add(1)
+                .saturating_sub(layout.editor_width);
+        }
+    }
+}
+
+fn resolve_interactive_theme_index(theme: &str) -> usize {
+    INTERACTIVE_THEMES
+        .iter()
+        .position(|candidate| candidate.name.eq_ignore_ascii_case(theme))
+        .unwrap_or(0)
+}
+
+fn cycle_interactive_theme(index: usize) -> usize {
+    (index + 1) % INTERACTIVE_THEMES.len()
+}
+
+fn interactive_layout(cols: u16, rows: u16) -> InteractiveLayout {
+    let total_width = usize::from(cols.max(40));
+    let total_height = usize::from(rows.max(8));
+    let editor_width = ((total_width.saturating_sub(1)) * 45) / 100;
+    let preview_width = total_width.saturating_sub(editor_width).saturating_sub(1);
+    let content_height = total_height.saturating_sub(4).max(1);
+    InteractiveLayout {
+        editor_width: editor_width.max(16),
+        preview_width: preview_width.max(16),
+        content_height,
+    }
+}
+
+fn known_mermaid_keyword(line: &str) -> Option<&str> {
+    const KEYWORDS: &[&str] = &[
+        "flowchart",
+        "graph",
+        "sequenceDiagram",
+        "classDiagram",
+        "stateDiagram",
+        "stateDiagram-v2",
+        "erDiagram",
+        "journey",
+        "gantt",
+        "pie",
+        "gitGraph",
+        "mindmap",
+        "timeline",
+        "sankey-beta",
+        "xychart-beta",
+        "quadrantChart",
+        "C4Context",
+        "C4Container",
+        "C4Component",
+        "C4Dynamic",
+        "C4Deployment",
+        "subgraph",
+        "end",
+        "title",
+        "accTitle",
+        "accDescr",
+        "classDef",
+        "class",
+        "style",
+        "linkStyle",
+        "click",
+    ];
+
+    let trimmed = line.trim_start();
+    KEYWORDS.iter().copied().find(|keyword| {
+        trimmed
+            .strip_prefix(keyword)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+    })
+}
+
+fn diagnostic_summary_line(diagnostics: &[ValidationDiagnostic]) -> String {
+    if let Some(diagnostic) = diagnostics.first() {
+        let location = match (
+            diagnostic.payload.source_line,
+            diagnostic.payload.source_column,
+        ) {
+            (Some(line), Some(column)) => format!(" @ {line}:{column}"),
+            (Some(line), None) => format!(" @ {line}"),
+            _ => String::new(),
+        };
+        format!(
+            "{} {}{}",
+            diagnostic.payload.severity.to_ascii_uppercase(),
+            diagnostic.payload.message,
+            location
+        )
+    } else {
+        "No diagnostics".to_string()
+    }
+}
+
+fn interactive_status_line(
+    snapshot: &InteractiveSnapshot,
+    buffer: &InteractiveBuffer,
+    theme_name: &str,
+) -> String {
+    format!(
+        " {} | nodes={} edges={} | {:.2}ms | theme={} | Ln {}, Col {} ",
+        snapshot.diagram_type,
+        snapshot.node_count,
+        snapshot.edge_count,
+        snapshot.render_time_ms,
+        theme_name,
+        buffer.cursor_row + 1,
+        buffer.cursor_col + 1,
+    )
+}
+
+fn interactive_help_line(hints: &InteractiveKeyHints) -> String {
+    if hints.save_supported {
+        " Tab cycle theme | Ctrl-S save file | Ctrl-Q quit ".to_string()
+    } else {
+        " Tab cycle theme | Ctrl-Q quit ".to_string()
+    }
+}
+
+fn build_interactive_snapshot(
+    source: &str,
+    parse_mode: MermaidParseMode,
+    preview_width: usize,
+    preview_height: usize,
+) -> InteractiveSnapshot {
+    let start = Instant::now();
+    let parsed = parse_with_mode(source, parse_mode);
+    let traced_layout = layout_diagram_traced_with_config_and_guardrails(
+        &parsed.ir,
+        LayoutAlgorithm::Auto,
+        LayoutConfig::default(),
+        LayoutGuardrails::default(),
+    );
+    let mut diagnostics = collect_parse_diagnostics(&parsed);
+    diagnostics.extend(collect_structural_diagnostics(&parsed));
+    diagnostics.extend(collect_layout_diagnostics(&traced_layout));
+    sort_diagnostics(&mut diagnostics);
+
+    let result = render_term_with_layout_and_config(
+        &parsed.ir,
+        &traced_layout.layout,
+        &TermRenderConfig::rich(),
+        preview_width.max(16),
+        preview_height.max(4),
+    );
+
+    InteractiveSnapshot {
+        diagram_type: parsed.ir.diagram_type.as_str().to_string(),
+        node_count: parsed.ir.nodes.len(),
+        edge_count: parsed.ir.edges.len(),
+        render_time_ms: start.elapsed().as_secs_f64() * 1000.0,
+        preview_lines: result.output.lines().map(str::to_string).collect(),
+        diagnostics,
+    }
+}
+
+fn visible_line_slice(line: &str, scroll_col: usize, width: usize) -> String {
+    line.chars().skip(scroll_col).take(width).collect()
+}
+
+fn draw_padded_text(
+    stdout: &mut io::Stdout,
+    x: u16,
+    y: u16,
+    width: usize,
+    text: &str,
+    style: InteractiveDrawStyle,
+) -> Result<()> {
+    let clipped: String = text.chars().take(width).collect();
+    queue!(stdout, MoveTo(x, y))?;
+    if let Some(background) = style.bg {
+        queue!(stdout, SetBackgroundColor(background))?;
+    }
+    queue!(stdout, SetForegroundColor(style.fg))?;
+    queue!(
+        stdout,
+        SetAttribute(if style.bold {
+            Attribute::Bold
+        } else {
+            Attribute::Reset
+        })
+    )?;
+    queue!(stdout, Print(format!("{clipped:<width$}")))?;
+    queue!(stdout, ResetColor, SetAttribute(Attribute::Reset))?;
+    Ok(())
+}
+
+fn draw_editor_line(
+    stdout: &mut io::Stdout,
+    position: (u16, u16),
+    width: usize,
+    line: &str,
+    scroll_col: usize,
+    theme: InteractiveTheme,
+    highlight_row: bool,
+) -> Result<()> {
+    let (x, y) = position;
+    let visible = visible_line_slice(line, scroll_col, width);
+    let trimmed = line.trim_start();
+    let keyword = known_mermaid_keyword(line);
+    let line_bg = highlight_row.then_some(theme.cursor_line_bg);
+
+    queue!(stdout, MoveTo(x, y))?;
+    if let Some(background) = line_bg {
+        queue!(stdout, SetBackgroundColor(background))?;
+    }
+
+    let chars: Vec<char> = visible.chars().collect();
+    for (index, ch) in chars.iter().enumerate() {
+        let keyword_highlight = keyword.is_some_and(|value| index < value.len());
+        let accent_char = keyword_highlight
+            || matches!(
+                ch,
+                '-' | '>' | '<' | '=' | '.' | '{' | '}' | '[' | ']' | '(' | ')' | '|'
+            );
+        let color = if trimmed.starts_with("%%") {
+            theme.comment_fg
+        } else if accent_char {
+            theme.accent_fg
+        } else {
+            theme.editor_fg
+        };
+        queue!(stdout, SetForegroundColor(color), Print(*ch))?;
+    }
+
+    let visible_len = chars.len();
+    if visible_len < width {
+        queue!(stdout, SetForegroundColor(theme.editor_fg))?;
+        queue!(stdout, Print(" ".repeat(width - visible_len)))?;
+    }
+
+    queue!(stdout, ResetColor, SetAttribute(Attribute::Reset))?;
+    Ok(())
+}
+
+fn draw_interactive_ui(
+    stdout: &mut io::Stdout,
+    buffer: &mut InteractiveBuffer,
+    snapshot: &InteractiveSnapshot,
+    theme_index: usize,
+    save_supported: bool,
+    terminal_cols: u16,
+    terminal_rows: u16,
+) -> Result<()> {
+    let theme = INTERACTIVE_THEMES[theme_index];
+    let layout = interactive_layout(terminal_cols, terminal_rows);
+    buffer.ensure_cursor_visible(layout.clone());
+
+    let separator_x = u16::try_from(layout.editor_width).unwrap_or(u16::MAX);
+    let content_start_y = 2_u16;
+    let help_y = terminal_rows.saturating_sub(2);
+    let diagnostic_y = terminal_rows.saturating_sub(1);
+
+    queue!(stdout, Hide, Clear(ClearType::All))?;
+    draw_padded_text(
+        stdout,
+        0,
+        0,
+        usize::from(terminal_cols),
+        &interactive_status_line(snapshot, buffer, theme.name),
+        InteractiveDrawStyle {
+            fg: theme.status_fg,
+            bg: Some(theme.status_bg),
+            bold: true,
+        },
+    )?;
+    draw_padded_text(
+        stdout,
+        0,
+        1,
+        layout.editor_width,
+        " EDITOR ",
+        InteractiveDrawStyle {
+            fg: theme.accent_fg,
+            bg: None,
+            bold: true,
+        },
+    )?;
+    draw_padded_text(
+        stdout,
+        separator_x.saturating_add(1),
+        1,
+        layout.preview_width,
+        " PREVIEW ",
+        InteractiveDrawStyle {
+            fg: theme.accent_fg,
+            bg: None,
+            bold: true,
+        },
+    )?;
+
+    for row in 0..layout.content_height {
+        let screen_y = content_start_y.saturating_add(u16::try_from(row).unwrap_or(u16::MAX));
+        queue!(
+            stdout,
+            MoveTo(separator_x, screen_y),
+            SetForegroundColor(theme.accent_fg),
+            Print("│"),
+            ResetColor
+        )?;
+
+        let line_index = buffer.scroll_row + row;
+        let line = buffer.lines.get(line_index).map_or("", String::as_str);
+        draw_editor_line(
+            stdout,
+            (0, screen_y),
+            layout.editor_width,
+            line,
+            buffer.scroll_col,
+            theme,
+            line_index == buffer.cursor_row,
+        )?;
+
+        let preview_text = snapshot.preview_lines.get(row).map_or("", String::as_str);
+        draw_padded_text(
+            stdout,
+            separator_x.saturating_add(1),
+            screen_y,
+            layout.preview_width,
+            preview_text,
+            InteractiveDrawStyle {
+                fg: theme.preview_fg,
+                bg: None,
+                bold: false,
+            },
+        )?;
+    }
+
+    draw_padded_text(
+        stdout,
+        0,
+        help_y,
+        usize::from(terminal_cols),
+        &interactive_help_line(&InteractiveKeyHints { save_supported }),
+        InteractiveDrawStyle {
+            fg: theme.help_fg,
+            bg: Some(theme.help_bg),
+            bold: false,
+        },
+    )?;
+    draw_padded_text(
+        stdout,
+        0,
+        diagnostic_y,
+        usize::from(terminal_cols),
+        &diagnostic_summary_line(&snapshot.diagnostics),
+        InteractiveDrawStyle {
+            fg: theme.error_fg,
+            bg: None,
+            bold: false,
+        },
+    )?;
+
+    let cursor_x = u16::try_from(buffer.cursor_col.saturating_sub(buffer.scroll_col)).unwrap_or(0);
+    let cursor_y = u16::try_from(
+        buffer
+            .cursor_row
+            .saturating_sub(buffer.scroll_row)
+            .saturating_add(usize::from(content_start_y)),
+    )
+    .unwrap_or(content_start_y);
+    queue!(stdout, MoveTo(cursor_x, cursor_y), Show)?;
+    stdout.flush()?;
+    Ok(())
+}
+
+struct InteractiveTerminalGuard;
+
+impl InteractiveTerminalGuard {
+    fn enter(stdout: &mut io::Stdout) -> Result<Self> {
+        enable_raw_mode()?;
+        execute!(stdout, EnterAlternateScreen, Hide)?;
+        Ok(Self)
+    }
+}
+
+impl Drop for InteractiveTerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), Show, LeaveAlternateScreen, ResetColor);
+    }
+}
+
+fn cmd_interactive(input: &str, parse_mode: MermaidParseMode, theme: &str) -> Result<()> {
+    if !io::stdout().is_terminal() {
+        anyhow::bail!("interactive mode requires a terminal stdout");
+    }
+
+    let source = load_input(input)?;
+    let mut buffer = InteractiveBuffer::from_source(&source);
+    let save_path = (input != "-" && Path::new(input).exists()).then_some(input.to_string());
+    let mut theme_index = resolve_interactive_theme_index(theme);
+    let mut stdout = io::stdout();
+    let _guard = InteractiveTerminalGuard::enter(&mut stdout)?;
+
+    loop {
+        let (cols, rows) = terminal::size().unwrap_or((120, 32));
+        let layout = interactive_layout(cols, rows);
+        let snapshot = build_interactive_snapshot(
+            &buffer.to_source(),
+            parse_mode,
+            layout.preview_width,
+            layout.content_height,
+        );
+        draw_interactive_ui(
+            &mut stdout,
+            &mut buffer,
+            &snapshot,
+            theme_index,
+            save_path.is_some(),
+            cols,
+            rows,
+        )?;
+
+        if !event::poll(std::time::Duration::from_millis(100))? {
+            continue;
+        }
+
+        match event::read()? {
+            Event::Key(KeyEvent {
+                code: KeyCode::Char('q'),
+                modifiers,
+                ..
+            }) if modifiers.contains(KeyModifiers::CONTROL) => break,
+            Event::Key(KeyEvent {
+                code: KeyCode::Char('s'),
+                modifiers,
+                ..
+            }) if modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(path) = &save_path {
+                    std::fs::write(path, buffer.to_source())
+                        .context(format!("Failed to save interactive buffer to: {path}"))?;
+                }
+            }
+            Event::Key(KeyEvent {
+                code: KeyCode::Tab, ..
+            }) => {
+                theme_index = cycle_interactive_theme(theme_index);
+            }
+            Event::Key(KeyEvent {
+                code: KeyCode::Enter,
+                ..
+            }) => buffer.insert_newline(),
+            Event::Key(KeyEvent {
+                code: KeyCode::Backspace,
+                ..
+            }) => buffer.backspace(),
+            Event::Key(KeyEvent {
+                code: KeyCode::Left,
+                ..
+            }) => buffer.move_left(),
+            Event::Key(KeyEvent {
+                code: KeyCode::Right,
+                ..
+            }) => buffer.move_right(),
+            Event::Key(KeyEvent {
+                code: KeyCode::Up, ..
+            }) => buffer.move_up(),
+            Event::Key(KeyEvent {
+                code: KeyCode::Down,
+                ..
+            }) => buffer.move_down(),
+            Event::Key(KeyEvent {
+                code: KeyCode::Char(ch),
+                modifiers,
+                ..
+            }) if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                buffer.insert_char(ch);
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
 }
 
 // =============================================================================

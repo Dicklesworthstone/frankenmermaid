@@ -26,6 +26,7 @@ fnx-experimental-directed = ["fm-layout/fnx-experimental-directed"]
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+crossterm = "0.28.1"
 fm-core.workspace = true
 fm-layout.workspace = true
 fm-parser.workspace = true
@@ -38,7 +39,7 @@ sha2 = "0.10.9"
 time = { version = "0.3.41", features = ["formatting", "parsing"] }
 toml = "0.8.23"
 tracing.workspace = true
-tracing-subscriber.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json"] }
 
 # Optional dependencies
 notify = { version = "8.2", optional = true }

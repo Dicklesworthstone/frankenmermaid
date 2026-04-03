@@ -1,0 +1,59 @@
+schema_version = 1
+
+[[checklist]]
+id = "blocking-quality-gates"
+title = "Blocking quality gates pass"
+owner = "runtime"
+source = "gate_summary"
+criterion = "No uncovered failing gates remain after valid overrides are applied."
+playbook = "Inspect uncovered_failing_gates, fix the failing guard, or add a valid time-boxed override in .ci/release-gate-overrides.toml."
+
+[[checklist]]
+id = "override-ledger"
+title = "Override ledger remains explicit and valid"
+owner = "release-manager"
+source = "override_summary"
+criterion = "The override summary parses cleanly and all active overrides remain authorized, time-boxed, and scoped."
+playbook = "Run `cargo run -p fm-cli --bin evidence -- --root . verify-overrides`, then expire or repair any bad override entries before release."
+
+[[checklist]]
+id = "demo-evidence"
+title = "Hosted demo evidence remains stable"
+owner = "demo"
+source = "demo_evidence"
+criterion = "Static and React release summaries both validate with replay bundles and full normalized-log stability."
+playbook = "Rerun the release-grade browser suites and inspect the replay bundles plus determinism summaries for the first divergent scenario/profile pair."
+
+[[validation_matrix]]
+id = "static-web"
+title = "Static /web release replay"
+owner = "demo"
+source = "demo_static"
+surface = "web"
+host_kind = "static-web"
+criterion = "Every static-web scenario/profile group keeps stable normalized logs and retains a replay manifest."
+playbook = "Rerun `scripts/run_static_web_e2e.py` for `/web`, then inspect `artifacts/evidence/demo/static` and `artifacts/evidence/demo/static-replay`."
+
+[[validation_matrix]]
+id = "react-web"
+title = "React /web_react release replay"
+owner = "demo"
+source = "demo_react"
+surface = "web_react"
+host_kind = "react-web"
+criterion = "Every react-web scenario/profile group keeps stable normalized logs and retains a replay manifest."
+playbook = "Rerun `scripts/run_static_web_e2e.py` for `/web_react`, then inspect `artifacts/evidence/demo/react` and `artifacts/evidence/demo/react-replay`."
+
+[[risks]]
+id = "override-drift"
+title = "Emergency override drift"
+owner = "release-manager"
+trigger = "Overrides remain active without fix/retro follow-through."
+mitigation_playbook = "Expire the override, prioritize the linked fix bead, and close the retro bead before the next release window."
+
+[[risks]]
+id = "browser-replay-drift"
+title = "Hosted replay drift"
+owner = "demo"
+trigger = "Normalized logs stop matching across repeated static or React runs."
+mitigation_playbook = "Use the replay bundle to isolate the scenario/profile pair, then inspect the captured HTML and structured logs for the first divergent run."

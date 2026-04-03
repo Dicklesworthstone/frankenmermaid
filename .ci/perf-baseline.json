@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "benchmarks": {
+    "comparison_50.force": { "p99_ns": 500000000 },
+    "comparison_50.sugiyama": { "p99_ns": 500000000 },
+    "comparison_50.tree": { "p99_ns": 500000000 },
+    "force_medium": { "p99_ns": 1000000000 },
+    "force_small": { "p99_ns": 200000000 },
+    "grid_100": { "p99_ns": 100000000 },
+    "radial_50": { "p99_ns": 200000000 },
+    "sugiyama_large": { "p99_ns": 2000000000 },
+    "sugiyama_medium": { "p99_ns": 500000000 },
+    "sugiyama_small": { "p99_ns": 100000000 },
+    "tree_large": { "p99_ns": 500000000 },
+    "tree_medium": { "p99_ns": 200000000 },
+    "tree_small": { "p99_ns": 50000000 }
+  }
+}

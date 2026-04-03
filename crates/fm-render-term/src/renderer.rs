@@ -1246,10 +1246,9 @@ impl TermRenderer {
             && let Some(first_line) = lines.first_mut()
         {
             let title = self.truncate_label(title);
-            let title_chars: Vec<char> = title.chars().collect();
-            let title_len = title_chars.len().min(cell_width);
+            let title_len = title.chars().count().min(cell_width);
             let start_x = cell_width.saturating_sub(title_len) / 2;
-            for (index, ch) in title_chars.into_iter().take(title_len).enumerate() {
+            for (index, ch) in title.chars().take(title_len).enumerate() {
                 let col = start_x + index;
                 if col < first_line.len() {
                     first_line[col] = ch;

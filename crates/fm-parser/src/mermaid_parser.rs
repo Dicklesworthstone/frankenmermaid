@@ -175,9 +175,10 @@ enum ClassStatement {
     End,
 }
 
-/// Parse mermaid input (used by tests, delegates to `parse_mermaid_with_detection`).
+/// Parse mermaid input with auto-detection. Convenience entry point for external callers
+/// and reproduction scripts.
 #[must_use]
-#[allow(dead_code)] // Used by tests
+#[allow(dead_code)]
 pub fn parse_mermaid(input: &str) -> ParseResult {
     let detection = crate::detect_type_with_confidence(input);
     parse_mermaid_with_detection(input, detection, MermaidParseMode::Compat)
@@ -400,6 +401,7 @@ enum FlowAst {
         node: String,
         target: String,
         tooltip: Option<String>,
+        is_callback: bool,
     },
     StyleOrLinkStyle,
     ClassDef,
@@ -673,6 +675,7 @@ fn flow_statement_parser<'a>() -> impl Parser<'a, &'a str, FlowAst, extra::Err<R
                     node: node_id.to_string(),
                     target,
                     tooltip,
+                    is_callback: false,
                 }
             },
         );
@@ -754,6 +757,7 @@ fn lower_flow_ast(
             node,
             target,
             tooltip,
+            is_callback,
         } => {
             let cleaned = target
                 .trim()
@@ -765,6 +769,21 @@ fn lower_flow_ast(
                 builder.add_warning(format!(
                     "Line {line_number}: click directive target is empty after normalization"
                 ));
+            } else if *is_callback {
+                // Callback: store function name, add interactive class.
+                builder.add_class_to_node(node, "has-callback", span);
+                builder.set_node_callback(node, cleaned, span);
+                if let Some(tip) = tooltip {
+                    let tip_cleaned = tip
+                        .trim()
+                        .trim_matches('"')
+                        .trim_matches('\'')
+                        .trim_matches('`')
+                        .trim();
+                    if !tip_cleaned.is_empty() {
+                        builder.set_node_tooltip(node, tip_cleaned, span);
+                    }
+                }
             } else if !is_safe_click_target(cleaned) {
                 builder.add_warning(format!(
                     "Line {line_number}: unsafe click link target blocked: {cleaned}"
@@ -3236,10 +3255,25 @@ fn parse_click_directive_ast(
     } else if target_token.eq_ignore_ascii_case("call")
         || target_token.eq_ignore_ascii_case("callback")
     {
-        warnings.push(format!(
-            "Line {line_number}: click callbacks are not supported yet; keeping node without link metadata"
-        ));
-        return Some(FlowAst::StyleOrLinkStyle);
+        // Parse callback function name: `click nodeId call functionName ["tooltip"]`
+        let Some((fn_name, cb_remaining)) = take_token(after_target) else {
+            warnings.push(format!(
+                "Line {line_number}: click callback directive missing function name: {statement}"
+            ));
+            return Some(FlowAst::StyleOrLinkStyle);
+        };
+        let tooltip = take_token(cb_remaining).map(|(tok, _)| {
+            tok.trim_matches('"')
+                .trim_matches('\'')
+                .trim_matches('`')
+                .to_string()
+        });
+        return Some(FlowAst::ClickDirective {
+            node,
+            target: fn_name.to_string(),
+            tooltip,
+            is_callback: true,
+        });
     } else {
         (target_token.to_string(), after_target)
     };
@@ -3256,6 +3290,7 @@ fn parse_click_directive_ast(
         node,
         target,
         tooltip,
+        is_callback: false,
     })
 }
 
@@ -7715,7 +7750,6 @@ fn parse_c4_relationship(
     let (actual_from, actual_to, arrow) = match function_name {
         "BiRel" => (from_node, to_node, ArrowType::Line),
         "Rel_Back" => (to_node, from_node, ArrowType::Arrow),
-        "Rel_L" | "Rel_R" | "Rel_U" | "Rel_D" | "Rel" => (from_node, to_node, ArrowType::Arrow),
         _ => (from_node, to_node, ArrowType::Arrow),
     };
     builder.push_edge(
@@ -12566,5 +12600,10 @@ Rel_Back(db, app, "Responds")"#,
     fn packet_beta_fields_linked_sequentially() {
         let parsed = parse_mermaid("packet-beta\n  0-7: \"A\"\n  8-15: \"B\"\n  16-23: \"C\"");
         assert_eq!(parsed.ir.edges.len(), 2, "3 fields should produce 2 edges");
+    }
+}
+3 fields should produce 2 edges");
+    }
+}
     }
 }

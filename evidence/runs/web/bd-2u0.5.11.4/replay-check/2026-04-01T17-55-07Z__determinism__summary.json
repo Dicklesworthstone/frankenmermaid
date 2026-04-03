@@ -1,0 +1,41 @@
+{
+  "ok": true,
+  "base_url": "http://127.0.0.1:51895",
+  "route_prefix": "/web_react",
+  "surface": "web_react",
+  "host_kind": "react-web",
+  "repeat": 1,
+  "profiles": [
+    "desktop-default"
+  ],
+  "scenarios": [
+    "react-web-determinism-check"
+  ],
+  "results": [
+    {
+      "scenario_id": "react-web-determinism-check",
+      "profile": "desktop-default",
+      "run_index": 1,
+      "url": "http://127.0.0.1:51895/web_react?sample=flowchart-1-incident-response-escalation&det=5",
+      "html_path": "evidence/runs/web/bd-2u0.5.11.4/replay-check/react-web-determinism-check/desktop-default/2026-04-01T17-55-06Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.11.4/replay-check/react-web-determinism-check/desktop-default/2026-04-01T17-55-06Z__e2e__log.json",
+      "diagnostic_count": 1,
+      "degradation_tier": "healthy",
+      "runtime_mode": "live",
+      "output_artifact_hash": "sha256:db3c964ed90d6368297ca10441e854bb7415fab99c8931f20eae52464ffc6100",
+      "determinism_status": "stable"
+    }
+  ],
+  "determinism": [
+    {
+      "scenario_id": "react-web-determinism-check",
+      "profile": "desktop-default",
+      "runs": 1,
+      "stable_output_hash": true,
+      "stable_normalized_log": true,
+      "output_hashes": [
+        "sha256:db3c964ed90d6368297ca10441e854bb7415fab99c8931f20eae52464ffc6100"
+      ]
+    }
+  ]
+}

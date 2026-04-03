@@ -1,0 +1,11 @@
+schema_version = 1
+
+# Emergency release-gate overrides are exceptional and must stay time-boxed.
+# Every entry requires:
+# - an authorized approver
+# - an explicit reason
+# - exact gate scope
+# - expiration
+# - follow-up fix bead
+# - follow-up retro bead
+overrides = []

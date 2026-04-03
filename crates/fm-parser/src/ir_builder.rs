@@ -402,7 +402,6 @@ impl IrBuilder {
             .stereotype = Some(stereotype);
     }
 
-    #[allow(dead_code)]
     pub(crate) fn set_class_generics(&mut self, class_name: &str, generics: Vec<String>) {
         let Some(&node_id) = self.node_index_by_id.get(class_name) else {
             return;
@@ -618,7 +617,6 @@ impl IrBuilder {
     }
 
     /// Add a rich diagnostic to the IR.
-    #[allow(dead_code)] // Will be used by recovery features
     pub(crate) fn add_diagnostic(&mut self, diagnostic: Diagnostic) {
         self.ir.add_diagnostic(diagnostic);
     }
@@ -829,6 +827,7 @@ impl IrBuilder {
             icon: None,
             classes: Vec::new(),
             href: None,
+            callback: None,
             tooltip: None,
             span_primary: span,
             span_all: vec![span],
@@ -1117,6 +1116,21 @@ impl IrBuilder {
 
         if let Some(node) = self.ir.nodes.get_mut(node_id.0) {
             node.href = Some(target.to_string());
+        }
+    }
+
+    pub(crate) fn set_node_callback(&mut self, node_key: &str, callback: &str, span: Span) {
+        let callback = callback.trim();
+        if callback.is_empty() {
+            return;
+        }
+
+        let Some(node_id) = self.intern_node(node_key, None, NodeShape::Rect, span) else {
+            return;
+        };
+
+        if let Some(node) = self.ir.nodes.get_mut(node_id.0) {
+            node.callback = Some(callback.to_string());
         }
     }
 

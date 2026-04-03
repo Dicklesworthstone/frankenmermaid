@@ -1221,6 +1221,9 @@ pub struct IrNode {
     pub icon: Option<String>,
     pub classes: Vec<String>,
     pub href: Option<String>,
+    /// JavaScript callback function name from `click nodeId call functionName`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback: Option<String>,
     /// Tooltip text from `click nodeId "url" "tooltip"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tooltip: Option<String>,

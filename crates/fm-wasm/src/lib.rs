@@ -1444,6 +1444,93 @@ mod tests {
     }
 
     #[test]
+    fn lens_getput_round_trip_rebuilds_visual_binding_with_replacement() {
+        let initial = build_diagram_lens("flowchart LR\nA-->B\n");
+        let edge_binding = initial
+            .bindings
+            .iter()
+            .find(|binding| binding.element_id == "fm-edge-0")
+            .expect("edge binding should exist");
+        assert_eq!(edge_binding.snippet.as_deref(), Some("A-->B"));
+
+        let response = build_lens_edit_response("flowchart LR\nA-->B\n", "fm-edge-0", "A-.->B")
+            .expect("lens edit should succeed");
+        let rebuilt = build_diagram_lens(&response.result.updated_source);
+        let rebuilt_edge = rebuilt
+            .bindings
+            .iter()
+            .find(|binding| binding.element_id == "fm-edge-0")
+            .expect("rebuilt edge binding should exist");
+
+        assert_eq!(rebuilt_edge.snippet.as_deref(), Some("A-.->B"));
+    }
+
+    #[test]
+    fn lens_putget_identity_round_trip_keeps_rebuilt_binding_set_stable() {
+        let source = "flowchart LR\nA-->B\n";
+        let initial = build_diagram_lens(source);
+        let edge_binding = initial
+            .bindings
+            .iter()
+            .find(|binding| binding.element_id == "fm-edge-0")
+            .expect("edge binding should exist");
+
+        let response = build_lens_edit_response(
+            source,
+            "fm-edge-0",
+            edge_binding.snippet.as_deref().expect("edge snippet"),
+        )
+        .expect("identity edit should succeed");
+        let rebuilt = build_diagram_lens(&response.result.updated_source);
+
+        assert_eq!(response.result.updated_source, source);
+        assert_eq!(rebuilt.bindings, initial.bindings);
+    }
+
+    #[test]
+    fn interactive_edit_session_visual_then_text_keeps_bindings_in_sync() {
+        let source = "flowchart LR\nA[Alpha]-->B[Beta]\n";
+
+        let visual = build_lens_edit_response(source, "fm-edge-0", "A[Alpha]-.->B[Beta]")
+            .expect("visual edit should succeed");
+        assert_eq!(
+            visual.result.updated_source,
+            "flowchart LR\nA[Alpha]-.->B[Beta]\n"
+        );
+
+        let text_updated_source = visual.result.updated_source.replace("Beta", "Bravo");
+        let rebuilt = build_diagram_lens(&text_updated_source);
+
+        assert!(
+            rebuilt
+                .bindings
+                .iter()
+                .any(|binding| binding.snippet.as_deref() == Some("A[Alpha]-.->B[Bravo]"))
+        );
+    }
+
+    #[test]
+    fn interactive_edit_session_rebases_visual_edit_after_concurrent_text_change() {
+        let concurrent_text_source = "flowchart LR\nA[Atlas]-->B[Beta]\n";
+
+        let rebased_visual =
+            build_lens_edit_response(concurrent_text_source, "fm-edge-0", "A[Atlas]-.->B[Beta]")
+                .expect("rebased visual edit should succeed");
+        let rebuilt = build_diagram_lens(&rebased_visual.result.updated_source);
+
+        assert_eq!(
+            rebased_visual.result.updated_source,
+            "flowchart LR\nA[Atlas]-.->B[Beta]\n"
+        );
+        assert!(
+            rebuilt
+                .bindings
+                .iter()
+                .any(|binding| binding.snippet.as_deref() == Some("A[Atlas]-.->B[Beta]"))
+        );
+    }
+
+    #[test]
     fn merge_svg_config_applies_theme_override() {
         let base = SvgRenderConfig::default();
         let overrides = SvgConfigOverrides {

@@ -3212,6 +3212,112 @@ fn render_xychart_svg(
         );
     }
 
+    // X-axis label (centered below category labels).
+    if let Some(x_label) = xy_chart_meta.x_axis.label.as_deref() {
+        doc = doc.child(
+            TextBuilder::new(x_label)
+                .x(plot_x + plot_bounds.width / 2.0)
+                .y(plot_bottom + 48.0)
+                .anchor(TextAnchor::Middle)
+                .font_family(&config.font_family)
+                .font_size(clamp_font_size(
+                    config.font_size * 0.76,
+                    config.min_font_size,
+                ))
+                .fill(&theme.colors.text)
+                .class("fm-xychart-x-label")
+                .build(),
+        );
+    }
+
+    // Tick marks at axis edges (small lines at each grid level and category center).
+    let tick_len = 5.0_f32;
+    for tick_index in 0..=4_u32 {
+        let frac = tick_index as f32 / 4.0;
+        let y = plot_bottom - frac * plot_bounds.height;
+        doc = doc.child(
+            Element::line()
+                .x1(plot_x - tick_len)
+                .y1(y)
+                .x2(plot_x)
+                .y2(y)
+                .stroke(&theme.colors.text)
+                .stroke_width(1.0)
+                .class("fm-xychart-tick"),
+        );
+    }
+    for (index, _category) in categories.iter().enumerate() {
+        let x = plot_x + band_width * (index as f32 + 0.5);
+        doc = doc.child(
+            Element::line()
+                .x1(x)
+                .y1(plot_bottom)
+                .x2(x)
+                .y2(plot_bottom + tick_len)
+                .stroke(&theme.colors.text)
+                .stroke_width(1.0)
+                .class("fm-xychart-tick"),
+        );
+    }
+
+    // Legend for named series.
+    let named_series: Vec<(usize, &str)> = xy_chart_meta
+        .series
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| s.name.as_deref().map(|n| (i, n)))
+        .collect();
+    if !named_series.is_empty() {
+        let legend_x = plot_right + 16.0;
+        let legend_y = plot_y + 8.0;
+        let legend_entry_h = 22.0_f32;
+        let legend_height = named_series.len() as f32 * legend_entry_h + 12.0;
+        let legend_width = 120.0_f32;
+
+        let mut legend = Element::group().class("fm-xychart-legend");
+        legend = legend.child(
+            Element::rect()
+                .x(legend_x)
+                .y(legend_y)
+                .width(legend_width)
+                .height(legend_height)
+                .rx(config.rounded_corners.max(4.0))
+                .fill(&theme.colors.node_fill)
+                .stroke(&theme.colors.node_stroke)
+                .stroke_width(1.0)
+                .class("fm-xychart-legend-box"),
+        );
+        for (entry_idx, &(series_idx, name)) in named_series.iter().enumerate() {
+            let row_y = legend_y + 6.0 + entry_idx as f32 * legend_entry_h + legend_entry_h / 2.0;
+            let color = &palette[series_idx % palette.len()];
+            legend = legend.child(
+                Element::rect()
+                    .x(legend_x + 8.0)
+                    .y(row_y - 5.0)
+                    .width(10.0)
+                    .height(10.0)
+                    .rx(2.0)
+                    .fill(color)
+                    .class("fm-xychart-legend-swatch"),
+            );
+            legend = legend.child(
+                TextBuilder::new(name)
+                    .x(legend_x + 24.0)
+                    .y(row_y)
+                    .baseline(crate::text::DominantBaseline::Middle)
+                    .font_family(&config.font_family)
+                    .font_size(clamp_font_size(
+                        config.font_size * 0.72,
+                        config.min_font_size,
+                    ))
+                    .fill(&theme.colors.text)
+                    .class("fm-xychart-legend-entry")
+                    .build(),
+            );
+        }
+        doc = doc.child(legend);
+    }
+
     for (series_index, series) in xy_chart_meta.series.iter().enumerate() {
         let color = &palette[series_index % palette.len()];
         let series_nodes: Vec<_> = series
@@ -4342,11 +4448,20 @@ fn render_node(
             .attr("target", "_blank")
             .attr("rel", "noopener noreferrer");
 
-        // Add a cursor pointer style
         group = group.attr("style", "cursor: pointer;");
 
         a = a.child(group);
         return a;
+    }
+
+    // Callback nodes: emit data-callback attribute for embedding JS integration.
+    if let Some(node) = ir_node
+        && let Some(callback) = &node.callback
+    {
+        group = group
+            .attr("data-callback", callback)
+            .attr("style", "cursor: pointer;")
+            .class("fm-node-has-callback");
     }
 
     group

@@ -1,0 +1,566 @@
+//! Conformal Geometric Algebra (CGA) for 2D layout transforms.
+//!
+//! Implements the conformal model R_{3,1} with multivectors, rotors,
+//! and conversion to/from conventional 2D affine matrices.
+//!
+//! # Why CGA?
+//!
+//! CGA unifies translations, rotations, and scaling into a single algebraic
+//! framework (rotors). This enables:
+//! - Composing arbitrary sequences of transforms via geometric product
+//! - Interpolating between transforms (rotor slerp)
+//! - Representing circles, lines, and point-pairs as algebraic objects
+//!
+//! # Basis
+//!
+//! R_{3,1} has basis vectors {e1, e2, e+, e-} where e+² = +1, e-² = -1.
+//! A general multivector has 2⁴ = 16 components.
+
+use serde::{Deserialize, Serialize};
+
+/// Basis blade indices for R_{3,1}.
+///
+/// The 16 blades are ordered by grade:
+/// Grade 0: scalar (index 0)
+/// Grade 1: e1, e2, e+, e- (indices 1-4)
+/// Grade 2: e12, e1+, e1-, e2+, e2-, e+- (indices 5-10)
+/// Grade 3: e12+, e12-, e1+-, e2+- (indices 11-14)
+/// Grade 4: e12+- (index 15)
+#[allow(dead_code)]
+mod blade {
+    pub const SCALAR: usize = 0;
+    pub const E1: usize = 1;
+    pub const E2: usize = 2;
+    pub const EP: usize = 3; // e+
+    pub const EM: usize = 4; // e-
+    pub const E12: usize = 5;
+    pub const E1P: usize = 6;
+    pub const E1M: usize = 7;
+    pub const E2P: usize = 8;
+    pub const E2M: usize = 9;
+    pub const EPM: usize = 10; // e+-
+    pub const E12P: usize = 11;
+    pub const E12M: usize = 12;
+    pub const E1PM: usize = 13;
+    pub const E2PM: usize = 14;
+    pub const E12PM: usize = 15;
+}
+
+/// A general multivector in R_{3,1} with 16 components.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Multivector {
+    pub components: [f64; 16],
+}
+
+impl Default for Multivector {
+    fn default() -> Self {
+        Self::zero()
+    }
+}
+
+impl Multivector {
+    /// The zero multivector.
+    #[must_use]
+    pub const fn zero() -> Self {
+        Self {
+            components: [0.0; 16],
+        }
+    }
+
+    /// A scalar multivector.
+    #[must_use]
+    pub fn scalar(value: f64) -> Self {
+        let mut m = Self::zero();
+        m.components[blade::SCALAR] = value;
+        m
+    }
+
+    /// Get the scalar (grade-0) part.
+    #[must_use]
+    pub fn scalar_part(self) -> f64 {
+        self.components[blade::SCALAR]
+    }
+
+    /// Reverse: reverses the order of basis vectors in each blade.
+    /// Grade k blade gets sign (-1)^(k*(k-1)/2).
+    #[must_use]
+    pub fn reverse(self) -> Self {
+        let c = &self.components;
+        let mut r = [0.0_f64; 16];
+        // Grade 0: +1
+        r[0] = c[0];
+        // Grade 1: +1
+        r[1] = c[1];
+        r[2] = c[2];
+        r[3] = c[3];
+        r[4] = c[4];
+        // Grade 2: -1
+        r[5] = -c[5];
+        r[6] = -c[6];
+        r[7] = -c[7];
+        r[8] = -c[8];
+        r[9] = -c[9];
+        r[10] = -c[10];
+        // Grade 3: -1
+        r[11] = -c[11];
+        r[12] = -c[12];
+        r[13] = -c[13];
+        r[14] = -c[14];
+        // Grade 4: +1
+        r[15] = c[15];
+        Self { components: r }
+    }
+
+    /// Squared norm: self * reverse(self), taking the scalar part.
+    #[must_use]
+    pub fn norm_squared(self) -> f64 {
+        self.geometric_product(self.reverse()).scalar_part()
+    }
+
+    /// Geometric product of two multivectors.
+    ///
+    /// This is the fundamental operation of geometric algebra.
+    /// For rotors (even-grade), this composes transforms.
+    #[must_use]
+    pub fn geometric_product(self, other: Self) -> Self {
+        // Full 16x16 geometric product via Cayley table for R_{3,1}.
+        // For efficiency, we only compute the terms that contribute.
+        // e+^2 = +1, e-^2 = -1, e1^2 = e2^2 = +1.
+        let a = &self.components;
+        let b = &other.components;
+        let mut r = [0.0_f64; 16];
+
+        // This is a simplified computation focusing on the most commonly
+        // used components. Full Cayley table expansion would be 256 terms.
+        // For rotors (even-grade), only even-grade outputs matter.
+
+        // Scalar output: a0*b0 + a1*b1 + a2*b2 + a3*b3 - a4*b4
+        //                - a5*b5 - a6*b6 + a7*b7 - a8*b8 + a9*b9
+        //                + a10*b10 + ...
+        // (This is the full contraction, complex to enumerate)
+
+        // For practical use, implement the even-subalgebra product
+        // which is sufficient for rotors.
+        r[blade::SCALAR] = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
+            - a[4] * b[4]
+            - a[5] * b[5]
+            - a[6] * b[6]
+            + a[7] * b[7]
+            - a[8] * b[8]
+            + a[9] * b[9]
+            + a[10] * b[10]
+            + a[11] * b[11]
+            - a[12] * b[12]
+            - a[13] * b[13]
+            + a[14] * b[14]
+            - a[15] * b[15];
+
+        // For a full implementation we'd compute all 16 output components.
+        // For now, focus on the scalar and grade-2 components needed for rotors.
+        // Grade 1 output (needed for sandwich product on vectors):
+        r[blade::E1] = a[0] * b[1] + a[1] * b[0] + a[5] * b[2] - a[2] * b[5] + a[6] * b[3]
+            - a[3] * b[6]
+            - a[7] * b[4]
+            + a[4] * b[7];
+        r[blade::E2] = a[0] * b[2] + a[2] * b[0] - a[5] * b[1] + a[1] * b[5] + a[8] * b[3]
+            - a[3] * b[8]
+            - a[9] * b[4]
+            + a[4] * b[9];
+
+        // Grade 2 output (rotor components):
+        r[blade::E12] = a[0] * b[5] + a[5] * b[0] + a[1] * b[2] - a[2] * b[1];
+
+        Self { components: r }
+    }
+}
+
+/// A 2D affine transformation matrix [a, b, tx; c, d, ty].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct AffineMatrix2D {
+    /// Scale/rotation component (row 0, col 0).
+    pub a: f64,
+    /// Shear/rotation component (row 0, col 1).
+    pub b: f64,
+    /// Translation X.
+    pub tx: f64,
+    /// Shear/rotation component (row 1, col 0).
+    pub c: f64,
+    /// Scale/rotation component (row 1, col 1).
+    pub d: f64,
+    /// Translation Y.
+    pub ty: f64,
+}
+
+impl Default for AffineMatrix2D {
+    fn default() -> Self {
+        Self::identity()
+    }
+}
+
+impl AffineMatrix2D {
+    /// The identity transform.
+    #[must_use]
+    pub const fn identity() -> Self {
+        Self {
+            a: 1.0,
+            b: 0.0,
+            tx: 0.0,
+            c: 0.0,
+            d: 1.0,
+            ty: 0.0,
+        }
+    }
+
+    /// Create a translation matrix.
+    #[must_use]
+    pub const fn translation(dx: f64, dy: f64) -> Self {
+        Self {
+            a: 1.0,
+            b: 0.0,
+            tx: dx,
+            c: 0.0,
+            d: 1.0,
+            ty: dy,
+        }
+    }
+
+    /// Create a rotation matrix (angle in radians).
+    #[must_use]
+    pub fn rotation(angle: f64) -> Self {
+        let cos = angle.cos();
+        let sin = angle.sin();
+        Self {
+            a: cos,
+            b: -sin,
+            tx: 0.0,
+            c: sin,
+            d: cos,
+            ty: 0.0,
+        }
+    }
+
+    /// Create a uniform scale matrix.
+    #[must_use]
+    pub const fn scale(factor: f64) -> Self {
+        Self {
+            a: factor,
+            b: 0.0,
+            tx: 0.0,
+            c: 0.0,
+            d: factor,
+            ty: 0.0,
+        }
+    }
+
+    /// Compose two affine transforms: self * other.
+    #[must_use]
+    pub fn compose(self, other: Self) -> Self {
+        Self {
+            a: self.a * other.a + self.b * other.c,
+            b: self.a * other.b + self.b * other.d,
+            tx: self.a * other.tx + self.b * other.ty + self.tx,
+            c: self.c * other.a + self.d * other.c,
+            d: self.c * other.b + self.d * other.d,
+            ty: self.c * other.tx + self.d * other.ty + self.ty,
+        }
+    }
+
+    /// Apply this transform to a 2D point.
+    #[must_use]
+    pub fn apply(self, x: f64, y: f64) -> (f64, f64) {
+        (
+            self.a * x + self.b * y + self.tx,
+            self.c * x + self.d * y + self.ty,
+        )
+    }
+
+    /// Convert to SVG transform attribute string.
+    #[must_use]
+    pub fn to_svg_transform(&self) -> String {
+        format!(
+            "matrix({},{},{},{},{},{})",
+            self.a, self.c, self.b, self.d, self.tx, self.ty
+        )
+    }
+}
+
+/// A CGA rotor representing a rigid transform in 2D.
+///
+/// Rotors compose via geometric product and apply transforms via
+/// the sandwich product: x' = R x R̃.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Rotor {
+    /// Even-grade components: [scalar, e12, e1+, e1-, e2+, e2-, e+-, e12+-].
+    pub components: [f64; 8],
+}
+
+impl Default for Rotor {
+    fn default() -> Self {
+        Self::identity()
+    }
+}
+
+impl Rotor {
+    /// The identity rotor (no transform).
+    #[must_use]
+    pub const fn identity() -> Self {
+        Self {
+            components: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        }
+    }
+
+    /// Create a translation rotor.
+    ///
+    /// T = 1 + (dx·e1 + dy·e2)·e_inf/2
+    /// where e_inf = e+ + e- is the point at infinity.
+    #[must_use]
+    pub fn translation(dx: f64, dy: f64) -> Self {
+        let half_dx = dx / 2.0;
+        let half_dy = dy / 2.0;
+        Self {
+            components: [
+                1.0, 0.0, half_dx, // e1+ component
+                half_dx, // e1- component
+                half_dy, // e2+ component
+                half_dy, // e2- component
+                0.0, 0.0,
+            ],
+        }
+    }
+
+    /// Create a rotation rotor (angle in radians, around origin).
+    ///
+    /// R = cos(θ/2) + sin(θ/2)·e1∧e2
+    #[must_use]
+    pub fn rotation(angle: f64) -> Self {
+        let half = angle / 2.0;
+        Self {
+            components: [half.cos(), half.sin(), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        }
+    }
+
+    /// Create a uniform scale rotor.
+    ///
+    /// S = cosh(ln(s)/2) + sinh(ln(s)/2)·e+∧e-
+    #[must_use]
+    pub fn scale(factor: f64) -> Self {
+        let half_log = factor.ln() / 2.0;
+        Self {
+            components: [
+                half_log.cosh(),
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                half_log.sinh(), // e+- component
+                0.0,
+            ],
+        }
+    }
+
+    /// Compose two rotors: self * other (geometric product of even subalgebra).
+    #[must_use]
+    pub fn compose(self, other: Self) -> Self {
+        let a = &self.components;
+        let b = &other.components;
+        // Even-subalgebra product for R_{3,1}
+        // Simplified: only the most important terms for translation+rotation.
+        Self {
+            components: [
+                a[0] * b[0] - a[1] * b[1] - a[6] * b[6],
+                a[0] * b[1] + a[1] * b[0],
+                a[0] * b[2] + a[2] * b[0] + a[1] * b[4] - a[4] * b[1],
+                a[0] * b[3] + a[3] * b[0] + a[1] * b[5] - a[5] * b[1],
+                a[0] * b[4] + a[4] * b[0] - a[1] * b[2] + a[2] * b[1],
+                a[0] * b[5] + a[5] * b[0] - a[1] * b[3] + a[3] * b[1],
+                a[0] * b[6] + a[6] * b[0],
+                a[0] * b[7] + a[7] * b[0] + a[1] * b[6] - a[6] * b[1],
+            ],
+        }
+    }
+
+    /// Reverse of the rotor: R̃.
+    #[must_use]
+    pub fn reverse(self) -> Self {
+        Self {
+            components: [
+                self.components[0],
+                -self.components[1],
+                -self.components[2],
+                -self.components[3],
+                -self.components[4],
+                -self.components[5],
+                -self.components[6],
+                self.components[7],
+            ],
+        }
+    }
+
+    /// Squared norm: R * R̃ (scalar part).
+    #[must_use]
+    pub fn norm_squared(self) -> f64 {
+        self.compose(self.reverse()).components[0]
+    }
+
+    /// Convert this rotor to a 2D affine matrix.
+    ///
+    /// Applies the rotor to basis points (0,0), (1,0), (0,1) and extracts
+    /// the affine coefficients.
+    #[must_use]
+    pub fn to_affine_matrix(self) -> AffineMatrix2D {
+        let s = self.components[0];
+        let e12 = self.components[1];
+        let e1p = self.components[2];
+        let e1m = self.components[3];
+        let e2p = self.components[4];
+        let e2m = self.components[5];
+        let epm = self.components[6];
+
+        // For a pure rotation by angle θ: s = cos(θ/2), e12 = sin(θ/2)
+        let cos_theta = s * s - e12 * e12;
+        let sin_theta = 2.0 * s * e12;
+
+        // Scale factor from e+- component
+        let scale = (epm * 2.0).exp();
+        let scale_factor = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        };
+
+        // Translation from e1+/e1- and e2+/e2- components
+        let tx = e1p + e1m;
+        let ty = e2p + e2m;
+
+        AffineMatrix2D {
+            a: cos_theta * scale_factor,
+            b: -sin_theta * scale_factor,
+            tx,
+            c: sin_theta * scale_factor,
+            d: cos_theta * scale_factor,
+            ty,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_rotor_produces_identity_matrix() {
+        let r = Rotor::identity();
+        let m = r.to_affine_matrix();
+        assert!((m.a - 1.0).abs() < 1e-10);
+        assert!((m.d - 1.0).abs() < 1e-10);
+        assert!(m.tx.abs() < 1e-10);
+        assert!(m.ty.abs() < 1e-10);
+    }
+
+    #[test]
+    fn translation_rotor_produces_correct_matrix() {
+        let r = Rotor::translation(3.0, 4.0);
+        let m = r.to_affine_matrix();
+        assert!((m.a - 1.0).abs() < 1e-10);
+        assert!((m.d - 1.0).abs() < 1e-10);
+        assert!((m.tx - 3.0).abs() < 1e-10);
+        assert!((m.ty - 4.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn rotation_rotor_90_degrees() {
+        let r = Rotor::rotation(std::f64::consts::FRAC_PI_2);
+        let m = r.to_affine_matrix();
+        assert!(m.a.abs() < 1e-10, "cos(90°) should be ~0");
+        assert!((m.b + 1.0).abs() < 1e-10, "-sin(90°) should be ~-1");
+        assert!((m.c - 1.0).abs() < 1e-10, "sin(90°) should be ~1");
+        assert!(m.d.abs() < 1e-10, "cos(90°) should be ~0");
+    }
+
+    #[test]
+    fn affine_matrix_identity_apply() {
+        let m = AffineMatrix2D::identity();
+        let (x, y) = m.apply(3.0, 4.0);
+        assert!((x - 3.0).abs() < 1e-10);
+        assert!((y - 4.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn affine_matrix_translation_apply() {
+        let m = AffineMatrix2D::translation(10.0, 20.0);
+        let (x, y) = m.apply(3.0, 4.0);
+        assert!((x - 13.0).abs() < 1e-10);
+        assert!((y - 24.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn affine_matrix_compose() {
+        let t1 = AffineMatrix2D::translation(1.0, 0.0);
+        let t2 = AffineMatrix2D::translation(0.0, 2.0);
+        let composed = t1.compose(t2);
+        let (x, y) = composed.apply(0.0, 0.0);
+        assert!((x - 1.0).abs() < 1e-10);
+        assert!((y - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn rotor_reverse_identity() {
+        let r = Rotor::identity();
+        let rev = r.reverse();
+        assert!((rev.components[0] - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn rotor_norm_squared_identity() {
+        let r = Rotor::identity();
+        assert!((r.norm_squared() - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn multivector_scalar_part() {
+        let m = Multivector::scalar(42.0);
+        assert!((m.scalar_part() - 42.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn multivector_reverse_grade0_unchanged() {
+        let m = Multivector::scalar(5.0);
+        let r = m.reverse();
+        assert!((r.scalar_part() - 5.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn affine_svg_transform_format() {
+        let m = AffineMatrix2D::identity();
+        let svg = m.to_svg_transform();
+        assert!(svg.starts_with("matrix("));
+        assert!(svg.ends_with(')'));
+    }
+
+    #[test]
+    fn rotor_compose_identity_is_identity() {
+        let id = Rotor::identity();
+        let composed = id.compose(id);
+        let m = composed.to_affine_matrix();
+        assert!((m.a - 1.0).abs() < 1e-10);
+        assert!((m.d - 1.0).abs() < 1e-10);
+        assert!(m.tx.abs() < 1e-10);
+    }
+
+    #[test]
+    fn serde_roundtrip_rotor() {
+        let r = Rotor::translation(1.0, 2.0);
+        let json = serde_json::to_string(&r).unwrap();
+        let deser: Rotor = serde_json::from_str(&json).unwrap();
+        assert_eq!(r.components, deser.components);
+    }
+
+    #[test]
+    fn serde_roundtrip_affine() {
+        let m = AffineMatrix2D::rotation(0.5);
+        let json = serde_json::to_string(&m).unwrap();
+        let deser: AffineMatrix2D = serde_json::from_str(&json).unwrap();
+        assert!((m.a - deser.a).abs() < 1e-10);
+    }
+}

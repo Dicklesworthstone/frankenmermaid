@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "$0")/../../../../.." && pwd)
+cd "$repo_root"
+
+# Rerun the full React release-grade suite
+python3 scripts/run_static_web_e2e.py --bead-id bd-2u0.5.11.4 --repo-root /data/projects/frankenmermaid --output-root /data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.11.4/react --chromium /snap/bin/chromium --timeout-seconds 8 --repeat 5 --route-prefix /web_react --surface web_react --host-kind react-web --scenario-prefix react-web --revision 36c370514072fd8b90c3645eb86ae3e1ee8f8158
+
+# Replay a single case by uncommenting one command below
+# react-web-compare-export / desktop-default
+# python3 scripts/run_static_web_e2e.py --bead-id bd-2u0.5.11.4 --repo-root /data/projects/frankenmermaid --output-root /data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.11.4/react --chromium /snap/bin/chromium --timeout-seconds 8 --repeat 1 --route-prefix /web_react --surface web_react --host-kind react-web --scenario-prefix react-web --revision 36c370514072fd8b90c3645eb86ae3e1ee8f8158 --scenario-id static-web-compare-export --profile-id desktop-default
+# react-web-compare-export / desktop-reduced-motion
+# python3 scripts/run_static_web_e2e.py --bead-id bd-2u0.5.11.4 --repo-root /data/projects/frankenmermaid --output-root /data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.11.4/react --chromium /snap/bin/chromium --timeout-seconds 8 --repeat 1 --route-prefix /web_react --surface web_react --host-kind react-web --scenario-prefix react-web --revision 36c370514072fd8b90c3645eb86ae3e1ee8f8158 --scenario-id static-web-compare-export --profile-id desktop-reduced-motion
+# react-web-compare-export / mobile-narrow
+# python3 scripts/run_static_web_e2e.py --bead-id bd-2u0.5.11.4 --repo-root /data/projects/frankenmermaid --output-root /data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.11.4/react --chromium /snap/bin/chromium --timeout-seconds 8 --repeat 1 --route-prefix /web_react --surface web_react --host-kind react-web --scenario-prefix react-web --revision 36c370514072fd8b90c3645eb86ae3e1ee8f8158 --scenario-id static-web-compare-export --profile-id mobile-narrow
+# react-web-diagnostics-recovery / desktop-default
+# python3 scripts/run_static_web_e2e.py --bead-id bd-2u0.5.11.4 --repo-root /data/projects/frankenmermaid --output-root /data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.11.4/react --chromium /snap/bin/chromium --timeout-seconds 8 --repeat 1 --route-prefix /web_react --surface web_react --host-kind react-web --scenario-prefix react-web --revision 36c370514072fd8b90c3645eb86ae3e1ee8f8158 --scenario-id static-web-diagnostics-recovery --profile-id desktop-default
+# react-web-diagnostics-recovery / desktop-reduced-motion
+# python3 scripts/run_static_web_e2e.py --bead-id bd-2u0.5.11.4 --repo-root /data/projects/frankenmermaid --output-root /data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.11.4/react --chromium /snap/bin/chromium --timeout-seconds 8 --repeat 1 --route-prefix /web_react --surface web_react --host-kind react-web --scenario-prefix react-web --revision 36c370514072fd8b90c3645eb86ae3e1ee8f8158 --scenario-id static-web-diagnostics-recovery --profile-id desktop-reduced-motion
+# react-web-diagnostics-recovery / mobile-narrow
+# python3 scripts/run_static_web_e2e.py --bead-id bd-2u0.5.11.4 --repo-root /data/projects/frankenmermaid --output-root /data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.11.4/react --chromium /snap/bin/chromium --timeout-seconds 8 --repeat 1 --route-prefix /web_react --surface web_react --host-kind react-web --scenario-prefix react-web --revision 36c370514072fd8b90c3645eb86ae3e1ee8f8158 --scenario-id static-web-diagnostics-recovery --profile-id mobile-narrow
+# react-web-determinism-check / desktop-default
+# python3 scripts/run_static_web_e2e.py --bead-id bd-2u0.5.11.4 --repo-root /data/projects/frankenmermaid --output-root /data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.11.4/react --chromium /snap/bin/chromium --timeout-seconds 8 --repeat 1 --route-prefix /web_react --surface web_react --host-kind react-web --scenario-prefix react-web --revision 36c370514072fd8b90c3645eb86ae3e1ee8f8158 --scenario-id static-web-determinism-check --profile-id desktop-default
+# react-web-determinism-check / desktop-reduced-motion
+# python3 scripts/run_static_web_e2e.py --bead-id bd-2u0.5.11.4 --repo-root /data/projects/frankenmermaid --output-root /data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.11.4/react --chromium /snap/bin/chromium --timeout-seconds 8 --repeat 1 --route-prefix /web_react --surface web_react --host-kind react-web --scenario-prefix react-web --revision 36c370514072fd8b90c3645eb86ae3e1ee8f8158 --scenario-id static-web-determinism-check --profile-id desktop-reduced-motion
+# react-web-determinism-check / mobile-narrow
+# python3 scripts/run_static_web_e2e.py --bead-id bd-2u0.5.11.4 --repo-root /data/projects/frankenmermaid --output-root /data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.11.4/react --chromium /snap/bin/chromium --timeout-seconds 8 --repeat 1 --route-prefix /web_react --surface web_react --host-kind react-web --scenario-prefix react-web --revision 36c370514072fd8b90c3645eb86ae3e1ee8f8158 --scenario-id static-web-determinism-check --profile-id mobile-narrow
+# react-web-presenter-tour / desktop-default
+# python3 scripts/run_static_web_e2e.py --bead-id bd-2u0.5.11.4 --repo-root /data/projects/frankenmermaid --output-root /data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.11.4/react --chromium /snap/bin/chromium --timeout-seconds 8 --repeat 1 --route-prefix /web_react --surface web_react --host-kind react-web --scenario-prefix react-web --revision 36c370514072fd8b90c3645eb86ae3e1ee8f8158 --scenario-id static-web-presenter-tour --profile-id desktop-default
+# react-web-presenter-tour / desktop-reduced-motion
+# python3 scripts/run_static_web_e2e.py --bead-id bd-2u0.5.11.4 --repo-root /data/projects/frankenmermaid --output-root /data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.11.4/react --chromium /snap/bin/chromium --timeout-seconds 8 --repeat 1 --route-prefix /web_react --surface web_react --host-kind react-web --scenario-prefix react-web --revision 36c370514072fd8b90c3645eb86ae3e1ee8f8158 --scenario-id static-web-presenter-tour --profile-id desktop-reduced-motion
+# react-web-presenter-tour / mobile-narrow
+# python3 scripts/run_static_web_e2e.py --bead-id bd-2u0.5.11.4 --repo-root /data/projects/frankenmermaid --output-root /data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.11.4/react --chromium /snap/bin/chromium --timeout-seconds 8 --repeat 1 --route-prefix /web_react --surface web_react --host-kind react-web --scenario-prefix react-web --revision 36c370514072fd8b90c3645eb86ae3e1ee8f8158 --scenario-id static-web-presenter-tour --profile-id mobile-narrow

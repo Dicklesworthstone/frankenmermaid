@@ -1,0 +1,488 @@
+{
+  "ok": true,
+  "static_root": "evidence/runs/web/bd-2u0.5.8.4/static",
+  "react_root": "evidence/runs/web/bd-2u0.5.8.4/react",
+  "allowed_metric_delta_ms": 250,
+  "required_host_kinds": [
+    "static-web",
+    "react-web"
+  ],
+  "strict_fields": [
+    "renderer",
+    "theme",
+    "diagnostic_count",
+    "degradation_tier",
+    "runtime_mode",
+    "fallback_active",
+    "determinism_status"
+  ],
+  "acceptable_delta_fields": [
+    "surface",
+    "host_kind",
+    "output_artifact_hash",
+    "pass_fail_reason",
+    "parse_ms",
+    "layout_ms",
+    "render_ms",
+    "input_hash",
+    "config_hash",
+    "revision",
+    "trace_id"
+  ],
+  "missing_from_react": [],
+  "missing_from_static": [],
+  "pair_count": 12,
+  "failing_pairs": [],
+  "pairs": [
+    {
+      "scenario_id": "compare-export",
+      "profile": "desktop-default",
+      "ok": true,
+      "static_log": "evidence/runs/web/bd-2u0.5.8.4/static/static-web-compare-export/desktop-default/2026-04-01T17-47-04Z__e2e__log.json",
+      "react_log": "evidence/runs/web/bd-2u0.5.8.4/react/react-web-compare-export/desktop-default/2026-04-01T17-48-04Z__e2e__log.json",
+      "strict_mismatches": [],
+      "acceptable_deltas": [
+        {
+          "field": "surface",
+          "static": "web",
+          "react": "web_react"
+        },
+        {
+          "field": "host_kind",
+          "static": "static-web",
+          "react": "react-web"
+        },
+        {
+          "field": "output_artifact_hash",
+          "static": "sha256:7406017ed6aa551a69c75b9ffa958925146b9c2b6750b521d1608c813e803cbe",
+          "react": "sha256:923122ce212c81557cae9a40e373adf72f4b235248e06c212f55baab70819c74"
+        },
+        {
+          "field": "pass_fail_reason",
+          "static": "/web host restored compare state, rendered the artifact lab, and populated the layout lab.",
+          "react": "/web_react host restored compare state, rendered the artifact lab, and populated the layout lab."
+        },
+        {
+          "field": "input_hash",
+          "static": "sha256:4889168be0c861755bbd41a0405cd2a78c2e05e36b9b02adbc9a80c4d264919b",
+          "react": "sha256:8dd319f2d80838cd86219e30a4768bdc69f473a17ea64e5f86d0a0a745aa1374"
+        },
+        {
+          "field": "trace_id",
+          "static": "bd-2u0.5.8.4-static-web-compare-export-desktop-default-run2",
+          "react": "bd-2u0.5.8.4-react-web-compare-export-desktop-default-run2"
+        }
+      ]
+    },
+    {
+      "scenario_id": "compare-export",
+      "profile": "desktop-reduced-motion",
+      "ok": true,
+      "static_log": "evidence/runs/web/bd-2u0.5.8.4/static/static-web-compare-export/desktop-reduced-motion/2026-04-01T17-47-11Z__e2e__log.json",
+      "react_log": "evidence/runs/web/bd-2u0.5.8.4/react/react-web-compare-export/desktop-reduced-motion/2026-04-01T17-48-10Z__e2e__log.json",
+      "strict_mismatches": [],
+      "acceptable_deltas": [
+        {
+          "field": "surface",
+          "static": "web",
+          "react": "web_react"
+        },
+        {
+          "field": "host_kind",
+          "static": "static-web",
+          "react": "react-web"
+        },
+        {
+          "field": "output_artifact_hash",
+          "static": "sha256:c599ecdd957b21af99cb8c1663bd8f088be125c324f731edbdc45a9c4bb29dac",
+          "react": "sha256:f9c152d7f0e06e2c8de950f7e724f5da70b14bb2d335379ba8b2e50c47ea8796"
+        },
+        {
+          "field": "pass_fail_reason",
+          "static": "/web host restored compare state, rendered the artifact lab, and populated the layout lab.",
+          "react": "/web_react host restored compare state, rendered the artifact lab, and populated the layout lab."
+        },
+        {
+          "field": "input_hash",
+          "static": "sha256:4889168be0c861755bbd41a0405cd2a78c2e05e36b9b02adbc9a80c4d264919b",
+          "react": "sha256:8dd319f2d80838cd86219e30a4768bdc69f473a17ea64e5f86d0a0a745aa1374"
+        },
+        {
+          "field": "trace_id",
+          "static": "bd-2u0.5.8.4-static-web-compare-export-desktop-reduced-motion-run2",
+          "react": "bd-2u0.5.8.4-react-web-compare-export-desktop-reduced-motion-run2"
+        }
+      ]
+    },
+    {
+      "scenario_id": "compare-export",
+      "profile": "mobile-narrow",
+      "ok": true,
+      "static_log": "evidence/runs/web/bd-2u0.5.8.4/static/static-web-compare-export/mobile-narrow/2026-04-01T17-47-15Z__e2e__log.json",
+      "react_log": "evidence/runs/web/bd-2u0.5.8.4/react/react-web-compare-export/mobile-narrow/2026-04-01T17-48-15Z__e2e__log.json",
+      "strict_mismatches": [],
+      "acceptable_deltas": [
+        {
+          "field": "surface",
+          "static": "web",
+          "react": "web_react"
+        },
+        {
+          "field": "host_kind",
+          "static": "static-web",
+          "react": "react-web"
+        },
+        {
+          "field": "output_artifact_hash",
+          "static": "sha256:ac1468c5940df55523536159f42f1986de9d0abe58808ac4fa8bdf29699ac775",
+          "react": "sha256:d67783dd3600ba00984acfbf62584d68e48bfad9b26a058604aa5cffdd07f014"
+        },
+        {
+          "field": "pass_fail_reason",
+          "static": "/web host restored compare state, rendered the artifact lab, and populated the layout lab.",
+          "react": "/web_react host restored compare state, rendered the artifact lab, and populated the layout lab."
+        },
+        {
+          "field": "input_hash",
+          "static": "sha256:4889168be0c861755bbd41a0405cd2a78c2e05e36b9b02adbc9a80c4d264919b",
+          "react": "sha256:8dd319f2d80838cd86219e30a4768bdc69f473a17ea64e5f86d0a0a745aa1374"
+        },
+        {
+          "field": "trace_id",
+          "static": "bd-2u0.5.8.4-static-web-compare-export-mobile-narrow-run2",
+          "react": "bd-2u0.5.8.4-react-web-compare-export-mobile-narrow-run2"
+        }
+      ]
+    },
+    {
+      "scenario_id": "determinism-check",
+      "profile": "desktop-default",
+      "ok": true,
+      "static_log": "evidence/runs/web/bd-2u0.5.8.4/static/static-web-determinism-check/desktop-default/2026-04-01T17-47-33Z__e2e__log.json",
+      "react_log": "evidence/runs/web/bd-2u0.5.8.4/react/react-web-determinism-check/desktop-default/2026-04-01T17-48-29Z__e2e__log.json",
+      "strict_mismatches": [],
+      "acceptable_deltas": [
+        {
+          "field": "surface",
+          "static": "web",
+          "react": "web_react"
+        },
+        {
+          "field": "host_kind",
+          "static": "static-web",
+          "react": "react-web"
+        },
+        {
+          "field": "input_hash",
+          "static": "sha256:8c63bc1c7caf7ed5f4f8da338793df0d5706029f6910f5192e4dff41e6380dad",
+          "react": "sha256:c0cd5f238e7cb46dba5a2177454c271f3942b608b33cc492550ff70dc5d9aee8"
+        },
+        {
+          "field": "trace_id",
+          "static": "bd-2u0.5.8.4-static-web-determinism-check-desktop-default-run2",
+          "react": "bd-2u0.5.8.4-react-web-determinism-check-desktop-default-run2"
+        }
+      ]
+    },
+    {
+      "scenario_id": "determinism-check",
+      "profile": "desktop-reduced-motion",
+      "ok": true,
+      "static_log": "evidence/runs/web/bd-2u0.5.8.4/static/static-web-determinism-check/desktop-reduced-motion/2026-04-01T17-47-39Z__e2e__log.json",
+      "react_log": "evidence/runs/web/bd-2u0.5.8.4/react/react-web-determinism-check/desktop-reduced-motion/2026-04-01T17-48-35Z__e2e__log.json",
+      "strict_mismatches": [],
+      "acceptable_deltas": [
+        {
+          "field": "surface",
+          "static": "web",
+          "react": "web_react"
+        },
+        {
+          "field": "host_kind",
+          "static": "static-web",
+          "react": "react-web"
+        },
+        {
+          "field": "input_hash",
+          "static": "sha256:8c63bc1c7caf7ed5f4f8da338793df0d5706029f6910f5192e4dff41e6380dad",
+          "react": "sha256:c0cd5f238e7cb46dba5a2177454c271f3942b608b33cc492550ff70dc5d9aee8"
+        },
+        {
+          "field": "trace_id",
+          "static": "bd-2u0.5.8.4-static-web-determinism-check-desktop-reduced-motion-run2",
+          "react": "bd-2u0.5.8.4-react-web-determinism-check-desktop-reduced-motion-run2"
+        }
+      ]
+    },
+    {
+      "scenario_id": "determinism-check",
+      "profile": "mobile-narrow",
+      "ok": true,
+      "static_log": "evidence/runs/web/bd-2u0.5.8.4/static/static-web-determinism-check/mobile-narrow/2026-04-01T17-47-43Z__e2e__log.json",
+      "react_log": "evidence/runs/web/bd-2u0.5.8.4/react/react-web-determinism-check/mobile-narrow/2026-04-01T17-48-39Z__e2e__log.json",
+      "strict_mismatches": [],
+      "acceptable_deltas": [
+        {
+          "field": "surface",
+          "static": "web",
+          "react": "web_react"
+        },
+        {
+          "field": "host_kind",
+          "static": "static-web",
+          "react": "react-web"
+        },
+        {
+          "field": "input_hash",
+          "static": "sha256:8c63bc1c7caf7ed5f4f8da338793df0d5706029f6910f5192e4dff41e6380dad",
+          "react": "sha256:c0cd5f238e7cb46dba5a2177454c271f3942b608b33cc492550ff70dc5d9aee8"
+        },
+        {
+          "field": "trace_id",
+          "static": "bd-2u0.5.8.4-static-web-determinism-check-mobile-narrow-run2",
+          "react": "bd-2u0.5.8.4-react-web-determinism-check-mobile-narrow-run2"
+        }
+      ]
+    },
+    {
+      "scenario_id": "diagnostics-recovery",
+      "profile": "desktop-default",
+      "ok": true,
+      "static_log": "evidence/runs/web/bd-2u0.5.8.4/static/static-web-diagnostics-recovery/desktop-default/2026-04-01T17-47-20Z__e2e__log.json",
+      "react_log": "evidence/runs/web/bd-2u0.5.8.4/react/react-web-diagnostics-recovery/desktop-default/2026-04-01T17-48-18Z__e2e__log.json",
+      "strict_mismatches": [],
+      "acceptable_deltas": [
+        {
+          "field": "surface",
+          "static": "web",
+          "react": "web_react"
+        },
+        {
+          "field": "host_kind",
+          "static": "static-web",
+          "react": "react-web"
+        },
+        {
+          "field": "output_artifact_hash",
+          "static": "sha256:670e4fa5214ca0bf2ceb7f0166d8ea37e6322c07a60ac1a69b1213eb67c596d3",
+          "react": "sha256:d6b9389e125987872d467e4de7ba4f4f03a8495b824eeb5874a71cee0f13e8a7"
+        },
+        {
+          "field": "pass_fail_reason",
+          "static": "/web host surfaced diagnostics and degraded fallback messaging for a malformed source override.",
+          "react": "/web_react host surfaced diagnostics and degraded fallback messaging for a malformed source override."
+        },
+        {
+          "field": "input_hash",
+          "static": "sha256:acc307aa9abc7fb8f55a38edfb4c628bc1e999543ea4513959e62efbe09a5703",
+          "react": "sha256:17086db42333f47609c344801fc550d7426730b65243b1e3a1dd5fa49d02eada"
+        },
+        {
+          "field": "trace_id",
+          "static": "bd-2u0.5.8.4-static-web-diagnostics-recovery-desktop-default-run2",
+          "react": "bd-2u0.5.8.4-react-web-diagnostics-recovery-desktop-default-run2"
+        }
+      ]
+    },
+    {
+      "scenario_id": "diagnostics-recovery",
+      "profile": "desktop-reduced-motion",
+      "ok": true,
+      "static_log": "evidence/runs/web/bd-2u0.5.8.4/static/static-web-diagnostics-recovery/desktop-reduced-motion/2026-04-01T17-47-25Z__e2e__log.json",
+      "react_log": "evidence/runs/web/bd-2u0.5.8.4/react/react-web-diagnostics-recovery/desktop-reduced-motion/2026-04-01T17-48-22Z__e2e__log.json",
+      "strict_mismatches": [],
+      "acceptable_deltas": [
+        {
+          "field": "surface",
+          "static": "web",
+          "react": "web_react"
+        },
+        {
+          "field": "host_kind",
+          "static": "static-web",
+          "react": "react-web"
+        },
+        {
+          "field": "output_artifact_hash",
+          "static": "sha256:8ff0e86c68db7acf11a39b387312b4b40e2cb8cb8d248ccac4a773984909eae3",
+          "react": "sha256:1967151eaf708cc4696ad9b8fbc3fad5864153b265babb86237cede498b05928"
+        },
+        {
+          "field": "pass_fail_reason",
+          "static": "/web host surfaced diagnostics and degraded fallback messaging for a malformed source override.",
+          "react": "/web_react host surfaced diagnostics and degraded fallback messaging for a malformed source override."
+        },
+        {
+          "field": "input_hash",
+          "static": "sha256:acc307aa9abc7fb8f55a38edfb4c628bc1e999543ea4513959e62efbe09a5703",
+          "react": "sha256:17086db42333f47609c344801fc550d7426730b65243b1e3a1dd5fa49d02eada"
+        },
+        {
+          "field": "trace_id",
+          "static": "bd-2u0.5.8.4-static-web-diagnostics-recovery-desktop-reduced-motion-run2",
+          "react": "bd-2u0.5.8.4-react-web-diagnostics-recovery-desktop-reduced-motion-run2"
+        }
+      ]
+    },
+    {
+      "scenario_id": "diagnostics-recovery",
+      "profile": "mobile-narrow",
+      "ok": true,
+      "static_log": "evidence/runs/web/bd-2u0.5.8.4/static/static-web-diagnostics-recovery/mobile-narrow/2026-04-01T17-47-29Z__e2e__log.json",
+      "react_log": "evidence/runs/web/bd-2u0.5.8.4/react/react-web-diagnostics-recovery/mobile-narrow/2026-04-01T17-48-25Z__e2e__log.json",
+      "strict_mismatches": [],
+      "acceptable_deltas": [
+        {
+          "field": "surface",
+          "static": "web",
+          "react": "web_react"
+        },
+        {
+          "field": "host_kind",
+          "static": "static-web",
+          "react": "react-web"
+        },
+        {
+          "field": "output_artifact_hash",
+          "static": "sha256:52e2fe6f154571dd6589e5b7717ba00d3349c419b3e96e860ca1fb5f86285990",
+          "react": "sha256:d16accb5da2b82ddbbc50c85ea546f408a7098954528c6e6021b402e2c8e638e"
+        },
+        {
+          "field": "pass_fail_reason",
+          "static": "/web host surfaced diagnostics and degraded fallback messaging for a malformed source override.",
+          "react": "/web_react host surfaced diagnostics and degraded fallback messaging for a malformed source override."
+        },
+        {
+          "field": "input_hash",
+          "static": "sha256:acc307aa9abc7fb8f55a38edfb4c628bc1e999543ea4513959e62efbe09a5703",
+          "react": "sha256:17086db42333f47609c344801fc550d7426730b65243b1e3a1dd5fa49d02eada"
+        },
+        {
+          "field": "trace_id",
+          "static": "bd-2u0.5.8.4-static-web-diagnostics-recovery-mobile-narrow-run2",
+          "react": "bd-2u0.5.8.4-react-web-diagnostics-recovery-mobile-narrow-run2"
+        }
+      ]
+    },
+    {
+      "scenario_id": "presenter-tour",
+      "profile": "desktop-default",
+      "ok": true,
+      "static_log": "evidence/runs/web/bd-2u0.5.8.4/static/static-web-presenter-tour/desktop-default/2026-04-01T17-47-48Z__e2e__log.json",
+      "react_log": "evidence/runs/web/bd-2u0.5.8.4/react/react-web-presenter-tour/desktop-default/2026-04-01T17-48-44Z__e2e__log.json",
+      "strict_mismatches": [],
+      "acceptable_deltas": [
+        {
+          "field": "surface",
+          "static": "web",
+          "react": "web_react"
+        },
+        {
+          "field": "host_kind",
+          "static": "static-web",
+          "react": "react-web"
+        },
+        {
+          "field": "output_artifact_hash",
+          "static": "sha256:6930e0aa4429c480590f6a1af42e59d52ff3df104e9271a9a4adf4db658a5a9b",
+          "react": "sha256:7541c79307b6561ca738519e64191a823c3e8788f6582fb5b3f88dc6c397a201"
+        },
+        {
+          "field": "pass_fail_reason",
+          "static": "/web host restored the guided presenter tour at a concrete step without manual UI setup.",
+          "react": "/web_react host restored the guided presenter tour at a concrete step without manual UI setup."
+        },
+        {
+          "field": "input_hash",
+          "static": "sha256:3e77658b6fca19296b1f7a1200233e82c3d7f2fa4072f85683674fa4defca2a6",
+          "react": "sha256:c813aee5ae99ba058390c41e8c7f0e605288111004ac269006877a09f36333b4"
+        },
+        {
+          "field": "trace_id",
+          "static": "bd-2u0.5.8.4-static-web-presenter-tour-desktop-default-run2",
+          "react": "bd-2u0.5.8.4-react-web-presenter-tour-desktop-default-run2"
+        }
+      ]
+    },
+    {
+      "scenario_id": "presenter-tour",
+      "profile": "desktop-reduced-motion",
+      "ok": true,
+      "static_log": "evidence/runs/web/bd-2u0.5.8.4/static/static-web-presenter-tour/desktop-reduced-motion/2026-04-01T17-47-55Z__e2e__log.json",
+      "react_log": "evidence/runs/web/bd-2u0.5.8.4/react/react-web-presenter-tour/desktop-reduced-motion/2026-04-01T17-48-50Z__e2e__log.json",
+      "strict_mismatches": [],
+      "acceptable_deltas": [
+        {
+          "field": "surface",
+          "static": "web",
+          "react": "web_react"
+        },
+        {
+          "field": "host_kind",
+          "static": "static-web",
+          "react": "react-web"
+        },
+        {
+          "field": "output_artifact_hash",
+          "static": "sha256:92f90137b405cbb1f6106808172b59e057c77fc65a6cea82e3889cda68754172",
+          "react": "sha256:0a5a4c82eed89caae28e2cd21c09577f856dc41b9d647908c139e38565321585"
+        },
+        {
+          "field": "pass_fail_reason",
+          "static": "/web host restored the guided presenter tour at a concrete step without manual UI setup.",
+          "react": "/web_react host restored the guided presenter tour at a concrete step without manual UI setup."
+        },
+        {
+          "field": "input_hash",
+          "static": "sha256:3e77658b6fca19296b1f7a1200233e82c3d7f2fa4072f85683674fa4defca2a6",
+          "react": "sha256:c813aee5ae99ba058390c41e8c7f0e605288111004ac269006877a09f36333b4"
+        },
+        {
+          "field": "trace_id",
+          "static": "bd-2u0.5.8.4-static-web-presenter-tour-desktop-reduced-motion-run2",
+          "react": "bd-2u0.5.8.4-react-web-presenter-tour-desktop-reduced-motion-run2"
+        }
+      ]
+    },
+    {
+      "scenario_id": "presenter-tour",
+      "profile": "mobile-narrow",
+      "ok": true,
+      "static_log": "evidence/runs/web/bd-2u0.5.8.4/static/static-web-presenter-tour/mobile-narrow/2026-04-01T17-48-00Z__e2e__log.json",
+      "react_log": "evidence/runs/web/bd-2u0.5.8.4/react/react-web-presenter-tour/mobile-narrow/2026-04-01T17-48-55Z__e2e__log.json",
+      "strict_mismatches": [],
+      "acceptable_deltas": [
+        {
+          "field": "surface",
+          "static": "web",
+          "react": "web_react"
+        },
+        {
+          "field": "host_kind",
+          "static": "static-web",
+          "react": "react-web"
+        },
+        {
+          "field": "output_artifact_hash",
+          "static": "sha256:6d1eff3e422e5211307197ed6dfd495ab293d46e99e5d654841b58ee4634f35c",
+          "react": "sha256:48a04e6c610372445adede034db168b09cc44a5dbc017c86b887987600dcc11e"
+        },
+        {
+          "field": "pass_fail_reason",
+          "static": "/web host restored the guided presenter tour at a concrete step without manual UI setup.",
+          "react": "/web_react host restored the guided presenter tour at a concrete step without manual UI setup."
+        },
+        {
+          "field": "input_hash",
+          "static": "sha256:3e77658b6fca19296b1f7a1200233e82c3d7f2fa4072f85683674fa4defca2a6",
+          "react": "sha256:c813aee5ae99ba058390c41e8c7f0e605288111004ac269006877a09f36333b4"
+        },
+        {
+          "field": "trace_id",
+          "static": "bd-2u0.5.8.4-static-web-presenter-tour-mobile-narrow-run2",
+          "react": "bd-2u0.5.8.4-react-web-presenter-tour-mobile-narrow-run2"
+        }
+      ]
+    }
+  ]
+}

@@ -4,12 +4,13 @@
 
 use fm_core::{
     DiagramType, GanttDate, GanttExclude, GanttTaskType, GanttTickInterval, GraphDirection,
-    MermaidTier,
+    MermaidLensBinding, MermaidLensEdit, MermaidSourceMap, MermaidTier, apply_lens_edit,
+    build_lens_bindings,
 };
 use fm_layout::{
     IncrementalLayoutEngine, IncrementalLayoutSession, LayoutAlgorithm, LayoutConfig,
     LayoutGuardrails, layout_diagram, layout_diagram_incremental_traced_with_config_and_guardrails,
-    layout_diagram_traced, layout_diagram_traced_with_config_and_guardrails,
+    layout_diagram_traced, layout_diagram_traced_with_config_and_guardrails, layout_source_map,
 };
 use fm_parser::parse;
 use fm_render_svg::{
@@ -22,6 +23,16 @@ use std::process::{Command, Stdio};
 use std::rc::Rc;
 use std::time::Instant;
 use tempfile::{NamedTempFile, TempDir};
+
+fn rendered_session_state(source: &str) -> (String, MermaidSourceMap, Vec<MermaidLensBinding>) {
+    let parse_result = parse(source);
+    let ir = parse_result.ir;
+    let layout = layout_diagram(&ir);
+    let source_map = layout_source_map(&ir, &layout);
+    let bindings = build_lens_bindings(source, &source_map);
+    let svg = render_svg_with_layout(&ir, &layout, &SvgRenderConfig::default());
+    (svg, source_map, bindings)
+}
 
 /// Test that a simple flowchart parses and produces non-zero layout positions.
 #[test]
@@ -1354,6 +1365,85 @@ fn render_svg_source_map_tracks_sequence_mirror_headers_as_distinct_elements() {
     );
     assert_eq!(svg.matches("id=\"fm-node-bob-1\"").count(), 1);
     assert_eq!(svg.matches("id=\"fm-node-bob-1-mirror-header\"").count(), 1);
+}
+
+#[test]
+fn interactive_edit_session_keeps_cli_pipeline_in_sync() {
+    let source = "flowchart LR\nA[Alpha]-->B[Beta]\n";
+    let (initial_svg, initial_source_map, initial_bindings) = rendered_session_state(source);
+    assert!(initial_svg.contains("Alpha"));
+    assert!(initial_svg.contains("Beta"));
+    assert!(
+        initial_bindings
+            .iter()
+            .any(|binding| binding.snippet.as_deref() == Some("A[Alpha]-->B[Beta]"))
+    );
+
+    let visual_edit = MermaidLensEdit {
+        element_id: "fm-edge-0".to_string(),
+        replacement: "A[Alpha]-.->B[Beta]".to_string(),
+    };
+    let visual_result = apply_lens_edit(source, &initial_source_map, &visual_edit)
+        .expect("visual edit should succeed");
+    let (visual_svg, _, visual_bindings) = rendered_session_state(&visual_result.updated_source);
+    assert!(visual_svg.contains("Alpha"));
+    assert!(visual_svg.contains("Beta"));
+    assert!(
+        visual_bindings
+            .iter()
+            .any(|binding| binding.snippet.as_deref() == Some("A[Alpha]-.->B[Beta]"))
+    );
+
+    let text_updated_source = visual_result.updated_source.replace("Beta", "Bravo");
+    let (text_svg, _, text_bindings) = rendered_session_state(&text_updated_source);
+    assert!(text_svg.contains("Bravo"));
+    assert!(
+        text_bindings
+            .iter()
+            .any(|binding| binding.snippet.as_deref() == Some("A[Alpha]-.->B[Bravo]"))
+    );
+}
+
+#[test]
+fn interactive_edit_session_rebases_visual_edit_on_latest_text_source() {
+    let latest_text_source = "flowchart LR\nA[Atlas]-->B[Beta]\n";
+    let (_, latest_source_map, latest_bindings) = rendered_session_state(latest_text_source);
+    assert!(
+        latest_bindings
+            .iter()
+            .any(|binding| binding.snippet.as_deref() == Some("A[Atlas]-->B[Beta]"))
+    );
+
+    let visual_edit = MermaidLensEdit {
+        element_id: "fm-edge-0".to_string(),
+        replacement: "A[Atlas]-.->B[Beta]".to_string(),
+    };
+    let visual_result = apply_lens_edit(latest_text_source, &latest_source_map, &visual_edit)
+        .expect("rebased visual edit should succeed");
+    let (final_svg, _, final_bindings) = rendered_session_state(&visual_result.updated_source);
+
+    assert!(final_svg.contains("Atlas"));
+    assert!(final_svg.contains("Beta"));
+    assert!(
+        final_bindings
+            .iter()
+            .any(|binding| binding.snippet.as_deref() == Some("A[Atlas]-.->B[Beta]"))
+    );
+}
+
+#[test]
+fn interactive_command_help_mentions_live_preview_and_keybindings() {
+    let output = run_cli(&["interactive", "--help"], "");
+    assert!(
+        output.status.success(),
+        "interactive --help should succeed; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout must be utf-8");
+    assert!(stdout.contains("interactive split-pane terminal editor"));
+    assert!(stdout.contains("--theme"));
+    assert!(stdout.contains("--parse-mode"));
 }
 
 #[test]

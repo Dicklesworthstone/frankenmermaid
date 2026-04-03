@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "bead_id": "bd-2u0.5.8.3.2",
+  "scenario_id": "react-web-entrypoint",
+  "input_hash": "sha256:fbc35bdc8ec07cc9ec81d48016851f5df0626921cc5be1a6a4db2a0f7c136102",
+  "surface": "web_react",
+  "renderer": "franken-svg",
+  "theme": "corporate",
+  "config_hash": "sha256:fbc35bdc8ec07cc9ec81d48016851f5df0626921cc5be1a6a4db2a0f7c136102",
+  "parse_ms": 0,
+  "layout_ms": 0,
+  "render_ms": 0,
+  "diagnostic_count": 0,
+  "degradation_tier": "healthy",
+  "output_artifact_hash": "sha256:a29be5f04510cfe3cc3ed7d1fba007547c5f2c9fae6c38e78808be1a040022d9",
+  "pass_fail_reason": "React /web_react host adapter validated via HTML parse, extracted-module syntax check, host marker assertions, and route/header/contract checks without forking standalone showcase semantics.",
+  "run_kind": "evidence",
+  "trace_id": "bd-2u0.5.8.3.2-react-web-entrypoint-2026-04-01T03-23-00Z",
+  "revision": "7695316dbb1b182e3fa539155824c85d15ba4c8b",
+  "host_kind": "react-web",
+  "fallback_active": false,
+  "runtime_mode": "mock-forbidden",
+  "artifacts": {
+    "host_html": {
+      "path": "web_react/index.html",
+      "sha256": "a29be5f04510cfe3cc3ed7d1fba007547c5f2c9fae6c38e78808be1a040022d9"
+    },
+    "headers": {
+      "path": "web_react/_headers",
+      "sha256": "03dc68ffc490f7387cfa774d04843da0bf384cfb820428fca1fed55bc9c3b425"
+    },
+    "entry_contract": {
+      "path": "evidence/contracts/showcase_react_embedding_contract.md",
+      "sha256": "fbc35bdc8ec07cc9ec81d48016851f5df0626921cc5be1a6a4db2a0f7c136102"
+    },
+    "strategy": {
+      "path": "evidence/demo_strategy.md",
+      "sha256": "e7b12252440463efc1f0b31a829b740b2824cd20526e30ee60321c9d2ab86e4f"
+    }
+  },
+  "checks": [
+    "python3 HTMLParser accepted web_react/index.html",
+    "Extracted module script from web_react/index.html passed node --check",
+    "Focused Python assertions verified source fetch, react host marker injection, route root marker, cache rules, and checked-in contract alignment for /web_react"
+  ]
+}

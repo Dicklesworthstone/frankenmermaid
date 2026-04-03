@@ -460,7 +460,7 @@ fn parse_dot_shape(attributes: &str) -> Option<NodeShape> {
 /// Map DOT shape names to frankenmermaid `NodeShape`.
 fn dot_shape_to_node_shape(name: &str) -> Option<NodeShape> {
     Some(match name {
-        "box" | "rect" | "rectangle" | "square" => NodeShape::Rect,
+        "box" | "rect" | "rectangle" | "square" | "folder" | "box3d" | "house" | "invhouse" => NodeShape::Rect,
         "roundedbox" | "rounded" => NodeShape::Rounded,
         "diamond" => NodeShape::Diamond,
         "circle" | "point" | "doublecircle" => NodeShape::Circle,
@@ -474,7 +474,6 @@ fn dot_shape_to_node_shape(name: &str) -> Option<NodeShape> {
         "cylinder" => NodeShape::Cylinder,
         "note" | "tab" => NodeShape::Note,
         "cds" | "component" => NodeShape::Subroutine,
-        "folder" | "box3d" | "house" | "invhouse" => NodeShape::Rect,
         _ => return None,
     })
 }
