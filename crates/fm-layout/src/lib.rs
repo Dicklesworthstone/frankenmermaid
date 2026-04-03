@@ -9,6 +9,7 @@ use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::f32::consts::PI;
+use std::mem::size_of;
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -171,6 +172,313 @@ pub trait DependencyGraph {
     fn propagate_dirty(&self, dirty: &DirtySet) -> DirtySet;
 
     fn estimated_overhead_bytes(&self) -> usize;
+}
+
+/// Deterministic dependency graph over layout invalidation regions.
+///
+/// Region construction follows the `bd-20fq.1` / `bd-12e.1` contract:
+/// explicit Mermaid subgraphs are promoted to first-class invalidation regions,
+/// then any uncovered nodes are grouped into connectivity fragments.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LayoutDependencyGraph {
+    regions: BTreeMap<SubgraphRegionId, SubgraphRegion>,
+    index: BTreeMap<RegionInput, BTreeSet<SubgraphRegionId>>,
+    estimated_overhead_bytes: usize,
+}
+
+impl LayoutDependencyGraph {
+    #[must_use]
+    pub fn from_ir(ir: &MermaidDiagramIr) -> Self {
+        let edges = resolved_edges(ir);
+        let mut regions = BTreeMap::new();
+        let mut explicit_region_ids = BTreeMap::new();
+        let mut covered_nodes = BTreeSet::new();
+        let mut next_region_index = 0_usize;
+
+        for subgraph in &ir.graph.subgraphs {
+            let recursive_members: BTreeSet<_> = ir
+                .graph
+                .subgraph_members_recursive(subgraph.id)
+                .into_iter()
+                .map(|node_id| node_id.0)
+                .collect();
+            if recursive_members.is_empty() {
+                continue;
+            }
+
+            covered_nodes.extend(recursive_members.iter().copied());
+
+            let edge_indexes = edges
+                .iter()
+                .filter(|edge| {
+                    recursive_members.contains(&edge.source) && recursive_members.contains(&edge.target)
+                })
+                .map(|edge| edge.edge_index)
+                .collect();
+
+            let inputs = subgraph
+                .members
+                .iter()
+                .map(|member| RegionInput::Node(member.0))
+                .chain(std::iter::once(RegionInput::Subgraph(subgraph.id.0)))
+                .collect();
+
+            let region_id = SubgraphRegionId(next_region_index);
+            next_region_index = next_region_index.saturating_add(1);
+            explicit_region_ids.insert(subgraph.id.0, region_id);
+            regions.insert(
+                region_id,
+                SubgraphRegion {
+                    id: region_id,
+                    kind: SubgraphRegionKind::ExplicitSubgraph,
+                    label: subgraph_region_label(subgraph),
+                    node_indexes: recursive_members,
+                    edge_indexes,
+                    subgraph_indexes: std::iter::once(subgraph.id.0).collect(),
+                    depends_on: subgraph
+                        .parent
+                        .and_then(|parent| explicit_region_ids.get(&parent.0).copied())
+                        .into_iter()
+                        .collect(),
+                    dependents: BTreeSet::new(),
+                    inputs,
+                    estimated_bytes: 0,
+                },
+            );
+        }
+
+        let fragment_components = connectivity_fragments(ir.nodes.len(), &edges, &covered_nodes);
+        let mut node_to_fragment = BTreeMap::new();
+        for component in fragment_components {
+            let region_id = SubgraphRegionId(next_region_index);
+            next_region_index = next_region_index.saturating_add(1);
+
+            let node_indexes: BTreeSet<_> = component.into_iter().collect();
+            for node_index in &node_indexes {
+                node_to_fragment.insert(*node_index, region_id);
+            }
+            let edge_indexes = edges
+                .iter()
+                .filter(|edge| {
+                    node_indexes.contains(&edge.source) && node_indexes.contains(&edge.target)
+                })
+                .map(|edge| edge.edge_index)
+                .collect();
+            let inputs = node_indexes
+                .iter()
+                .copied()
+                .map(RegionInput::Node)
+                .collect::<BTreeSet<_>>();
+            regions.insert(
+                region_id,
+                SubgraphRegion {
+                    id: region_id,
+                    kind: SubgraphRegionKind::ConnectivityFragment,
+                    label: format!("component:{region_id_index}", region_id_index = region_id.0),
+                    node_indexes,
+                    edge_indexes,
+                    subgraph_indexes: BTreeSet::new(),
+                    depends_on: BTreeSet::new(),
+                    dependents: BTreeSet::new(),
+                    inputs,
+                    estimated_bytes: 0,
+                },
+            );
+        }
+
+        let primary_regions = primary_region_owners(ir, &explicit_region_ids, &node_to_fragment);
+        for edge in &edges {
+            let source_region = primary_regions.get(&edge.source).copied();
+            let target_region = primary_regions.get(&edge.target).copied();
+            match (source_region, target_region) {
+                (Some(source_region), Some(target_region)) if source_region != target_region => {
+                    if let Some(region) = regions.get_mut(&source_region) {
+                        region.inputs.insert(RegionInput::Edge(edge.edge_index));
+                        region.dependents.insert(target_region);
+                    }
+                    if let Some(region) = regions.get_mut(&target_region) {
+                        region.inputs.insert(RegionInput::Edge(edge.edge_index));
+                        region.depends_on.insert(source_region);
+                    }
+                }
+                (Some(region_id), _) | (_, Some(region_id)) => {
+                    if let Some(region) = regions.get_mut(&region_id) {
+                        region.inputs.insert(RegionInput::Edge(edge.edge_index));
+                    }
+                }
+                (None, None) => {}
+            }
+        }
+
+        let region_ids: Vec<_> = regions.keys().copied().collect();
+        for region_id in region_ids {
+            let parents: Vec<_> = regions
+                .get(&region_id)
+                .map(|region| region.depends_on.iter().copied().collect())
+                .unwrap_or_default();
+            for parent_id in parents {
+                if let Some(parent) = regions.get_mut(&parent_id) {
+                    parent.dependents.insert(region_id);
+                }
+            }
+        }
+
+        let mut index = BTreeMap::<RegionInput, BTreeSet<SubgraphRegionId>>::new();
+        let mut estimated_overhead_bytes = 0_usize;
+        for region in regions.values_mut() {
+            region.estimated_bytes = estimate_region_bytes(region);
+            estimated_overhead_bytes = estimated_overhead_bytes.saturating_add(region.estimated_bytes);
+            for input in &region.inputs {
+                index.entry(*input).or_default().insert(region.id);
+            }
+        }
+
+        estimated_overhead_bytes = estimated_overhead_bytes
+            .saturating_add(index.len().saturating_mul(size_of::<RegionInput>()))
+            .saturating_add(
+                index.values()
+                    .map(|owners| owners.len().saturating_mul(size_of::<SubgraphRegionId>()))
+                    .sum::<usize>(),
+            );
+
+        Self {
+            regions,
+            index,
+            estimated_overhead_bytes,
+        }
+    }
+
+    #[must_use]
+    pub const fn memory_budget(&self, layout_bytes: usize) -> RegionMemoryBudget {
+        RegionMemoryBudget {
+            layout_bytes,
+            dependency_graph_bytes: self.estimated_overhead_bytes,
+        }
+    }
+}
+
+impl DependencyGraph for LayoutDependencyGraph {
+    fn regions(&self) -> &BTreeMap<SubgraphRegionId, SubgraphRegion> {
+        &self.regions
+    }
+
+    fn locate_dirty_regions(&self, edit: LayoutEdit) -> DirtySet {
+        let mut dirty = DirtySet::default();
+        dirty.extend(
+            self.index
+                .get(&edit.input())
+                .cloned()
+                .unwrap_or_default()
+                .into_iter(),
+        );
+        dirty
+    }
+
+    fn propagate_dirty(&self, dirty: &DirtySet) -> DirtySet {
+        let mut expanded = dirty.clone();
+        let mut stack: Vec<_> = dirty.regions.iter().copied().collect();
+        while let Some(region_id) = stack.pop() {
+            if let Some(region) = self.regions.get(&region_id) {
+                for dependent in &region.dependents {
+                    if expanded.insert(*dependent) {
+                        stack.push(*dependent);
+                    }
+                }
+            }
+        }
+        expanded
+    }
+
+    fn estimated_overhead_bytes(&self) -> usize {
+        self.estimated_overhead_bytes
+    }
+}
+
+fn subgraph_region_label(subgraph: &fm_core::IrSubgraph) -> String {
+    if subgraph.key.is_empty() {
+        return format!("subgraph:{}", subgraph.id.0);
+    }
+    format!("subgraph:{}", subgraph.key)
+}
+
+fn primary_region_owners(
+    ir: &MermaidDiagramIr,
+    explicit_region_ids: &BTreeMap<usize, SubgraphRegionId>,
+    node_to_fragment: &BTreeMap<usize, SubgraphRegionId>,
+) -> BTreeMap<usize, SubgraphRegionId> {
+    let mut owners = BTreeMap::new();
+    for (node_index, graph_node) in ir.graph.nodes.iter().enumerate() {
+        let explicit_owner = graph_node
+            .subgraphs
+            .last()
+            .and_then(|subgraph_id| explicit_region_ids.get(&subgraph_id.0))
+            .copied();
+        if let Some(owner) = explicit_owner.or_else(|| node_to_fragment.get(&node_index).copied()) {
+            owners.insert(node_index, owner);
+        }
+    }
+    owners
+}
+
+fn connectivity_fragments(
+    node_count: usize,
+    edges: &[OrientedEdge],
+    covered_nodes: &BTreeSet<usize>,
+) -> Vec<Vec<usize>> {
+    if node_count == 0 {
+        return Vec::new();
+    }
+
+    let mut adjacency: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); node_count];
+    for edge in edges {
+        if covered_nodes.contains(&edge.source) || covered_nodes.contains(&edge.target) {
+            continue;
+        }
+        if edge.source >= node_count || edge.target >= node_count {
+            continue;
+        }
+        adjacency[edge.source].insert(edge.target);
+        adjacency[edge.target].insert(edge.source);
+    }
+
+    let mut visited = vec![false; node_count];
+    let mut components = Vec::new();
+    for start in 0..node_count {
+        if covered_nodes.contains(&start) || visited[start] {
+            continue;
+        }
+
+        let mut stack = vec![start];
+        visited[start] = true;
+        let mut component = Vec::new();
+
+        while let Some(node_index) = stack.pop() {
+            component.push(node_index);
+            for &neighbor in adjacency[node_index].iter().rev() {
+                if visited[neighbor] {
+                    continue;
+                }
+                visited[neighbor] = true;
+                stack.push(neighbor);
+            }
+        }
+
+        component.sort_unstable();
+        components.push(component);
+    }
+
+    components
+}
+
+fn estimate_region_bytes(region: &SubgraphRegion) -> usize {
+    size_of::<SubgraphRegion>()
+        .saturating_add(region.label.len())
+        .saturating_add(region.node_indexes.len().saturating_mul(size_of::<usize>()))
+        .saturating_add(region.edge_indexes.len().saturating_mul(size_of::<usize>()))
+        .saturating_add(region.subgraph_indexes.len().saturating_mul(size_of::<usize>()))
+        .saturating_add(region.depends_on.len().saturating_mul(size_of::<SubgraphRegionId>()))
+        .saturating_add(region.dependents.len().saturating_mul(size_of::<SubgraphRegionId>()))
+        .saturating_add(region.inputs.len().saturating_mul(size_of::<RegionInput>()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -10236,9 +10544,10 @@ mod tests {
     )]
     use super::{
         CycleStrategy, DependencyGraph, DirtySet, GraphMetrics, IncrementalLayoutEngine,
-        LayoutAlgorithm, LayoutEdit, LayoutGuardrails, LayoutPoint, LayoutRect,
-        LayoutSequenceLifecycleMarkerKind, RegionInput, RegionMemoryBudget, RenderClip, RenderItem,
-        RenderSource, SubgraphRegion, SubgraphRegionId, SubgraphRegionKind,
+        LayoutAlgorithm, LayoutDependencyGraph, LayoutEdit, LayoutGuardrails, LayoutPoint,
+        LayoutRect, LayoutSequenceLifecycleMarkerKind, RegionInput, RegionMemoryBudget,
+        RenderClip, RenderItem, RenderSource, SubgraphRegion, SubgraphRegionId,
+        SubgraphRegionKind,
         build_layout_decision_ledger, build_layout_guard_report, build_render_scene,
         dispatch_layout_algorithm, layout, layout_diagram, layout_diagram_force,
         layout_diagram_force_traced, layout_diagram_gantt, layout_diagram_grid,
@@ -10417,6 +10726,40 @@ mod tests {
         }
     }
 
+    fn sample_layout_dependency_ir() -> MermaidDiagramIr {
+        let mut ir = labeled_graph_ir(5, &[(0, 1), (1, 2), (2, 3), (3, 4)]);
+
+        ir.graph.subgraphs.push(IrSubgraph {
+            id: IrSubgraphId(0),
+            key: "api".to_string(),
+            title: None,
+            parent: None,
+            children: vec![IrSubgraphId(1)],
+            members: vec![IrNodeId(0)],
+            cluster: None,
+            grid_span: 1,
+            span: Span::at_line(1, 1),
+            direction: None,
+        });
+        ir.graph.subgraphs.push(IrSubgraph {
+            id: IrSubgraphId(1),
+            key: "worker".to_string(),
+            title: None,
+            parent: Some(IrSubgraphId(0)),
+            children: Vec::new(),
+            members: vec![IrNodeId(1)],
+            cluster: None,
+            grid_span: 1,
+            span: Span::at_line(2, 1),
+            direction: None,
+        });
+        ir.graph.nodes[0].subgraphs.push(IrSubgraphId(0));
+        ir.graph.nodes[1].subgraphs.push(IrSubgraphId(0));
+        ir.graph.nodes[1].subgraphs.push(IrSubgraphId(1));
+
+        ir
+    }
+
     #[test]
     fn dependency_graph_locates_dirty_regions_via_deterministic_indexes() {
         let graph = sample_dependency_graph();
@@ -10454,6 +10797,79 @@ mod tests {
             }
             .within_target()
         );
+    }
+
+    #[test]
+    fn layout_dependency_graph_prefers_explicit_subgraphs_then_connectivity_fragments() {
+        let ir = sample_layout_dependency_ir();
+        let graph = LayoutDependencyGraph::from_ir(&ir);
+
+        let region_summaries: Vec<_> = graph
+            .regions()
+            .values()
+            .map(|region| {
+                (
+                    region.label.clone(),
+                    region.kind,
+                    region.node_indexes.iter().copied().collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            region_summaries,
+            vec![
+                (
+                    "subgraph:api".to_string(),
+                    SubgraphRegionKind::ExplicitSubgraph,
+                    vec![0, 1]
+                ),
+                (
+                    "subgraph:worker".to_string(),
+                    SubgraphRegionKind::ExplicitSubgraph,
+                    vec![1]
+                ),
+                (
+                    "component:2".to_string(),
+                    SubgraphRegionKind::ConnectivityFragment,
+                    vec![2, 3, 4]
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn layout_dependency_graph_cross_region_edges_seed_and_propagate_dirty_sets() {
+        let ir = sample_layout_dependency_ir();
+        let graph = LayoutDependencyGraph::from_ir(&ir);
+
+        let nested_dirty = graph.locate_dirty_regions(LayoutEdit::NodeMoved { node_index: 1 });
+        assert_eq!(
+            nested_dirty.regions.into_iter().collect::<Vec<_>>(),
+            vec![SubgraphRegionId(1)]
+        );
+
+        let cross_edge_dirty = graph.locate_dirty_regions(LayoutEdit::EdgeAdded { edge_index: 1 });
+        assert_eq!(
+            cross_edge_dirty.regions.into_iter().collect::<Vec<_>>(),
+            vec![SubgraphRegionId(1), SubgraphRegionId(2)]
+        );
+
+        let propagated = graph.propagate_dirty(&DirtySet::from_region(SubgraphRegionId(0)));
+        assert_eq!(
+            propagated.regions.into_iter().collect::<Vec<_>>(),
+            vec![SubgraphRegionId(0), SubgraphRegionId(1), SubgraphRegionId(2)]
+        );
+    }
+
+    #[test]
+    fn layout_dependency_graph_reports_nonzero_overhead_within_reasonable_budget() {
+        let ir = sample_layout_dependency_ir();
+        let graph = LayoutDependencyGraph::from_ir(&ir);
+        let budget = graph.memory_budget(16_384);
+
+        assert!(graph.estimated_overhead_bytes() > 0);
+        assert!(budget.within_target());
     }
 
     #[test]
@@ -15848,8 +16264,5 @@ mod tests {
                 );
             }
         }
-    }
-}
-
     }
 }
