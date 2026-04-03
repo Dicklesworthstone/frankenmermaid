@@ -13,7 +13,7 @@
 //!
 //! # Usage
 //!
-//! ```ignore
+//! ```rust
 //! use fm_layout::spatial::{GridSpatialIndex, SpatialIndex};
 //!
 //! let mut index = GridSpatialIndex::new(50.0); // 50px cell width
@@ -21,7 +21,8 @@
 //! index.insert(1, (105.0, 195.0));
 //!
 //! let nearest = index.nearest((102.0, 198.0), 20.0);
-//! // Returns Some(1) — node 1 is closest within radius 20
+//! assert_eq!(nearest, Some(0));
+//! // Returns Some(0) — node 0 is closest within radius 20
 //! ```
 //!
 //! # References

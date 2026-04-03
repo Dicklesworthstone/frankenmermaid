@@ -3,3 +3,4 @@ tests/**
 benches/**
 **/tests/**
 **/benches/**
+pkg/**

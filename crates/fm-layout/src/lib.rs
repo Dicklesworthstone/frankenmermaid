@@ -95,6 +95,7 @@ pub struct SubgraphRegion {
 pub enum LayoutEdit {
     NodeAdded { node_index: usize },
     NodeRemoved { node_index: usize },
+    NodeChanged { node_index: usize },
     NodeMoved { node_index: usize },
     EdgeAdded { edge_index: usize },
     EdgeRemoved { edge_index: usize },
@@ -108,6 +109,7 @@ impl LayoutEdit {
         match self {
             Self::NodeAdded { node_index }
             | Self::NodeRemoved { node_index }
+            | Self::NodeChanged { node_index }
             | Self::NodeMoved { node_index } => RegionInput::Node(node_index),
             Self::EdgeAdded { edge_index } | Self::EdgeRemoved { edge_index } => {
                 RegionInput::Edge(edge_index)
@@ -530,10 +532,18 @@ struct CachedNodeSize {
     size: (f32, f32),
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct CachedDependencyGraph {
+    key: u64,
+    graph: LayoutDependencyGraph,
+    ir: MermaidDiagramIr,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 struct IncrementalCacheState {
     graph_metrics_cache: Option<(u64, GraphMetrics)>,
     node_size_cache: BTreeMap<String, CachedNodeSize>,
+    dependency_graph_cache: Option<CachedDependencyGraph>,
     current_summary: IncrementalLayoutSummary,
 }
 
@@ -944,6 +954,7 @@ pub struct IncrementalLayoutEngine {
     cached: Option<CachedTracedLayout>,
     graph_metrics_cache: Option<(u64, GraphMetrics)>,
     node_size_cache: BTreeMap<String, CachedNodeSize>,
+    dependency_graph_cache: Option<CachedDependencyGraph>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1208,6 +1219,298 @@ fn graph_metrics_cache_key(ir: &MermaidDiagramIr) -> u64 {
     for edge in edges {
         hash_u64(&mut hash, edge.source as u64);
         hash_u64(&mut hash, edge.target as u64);
+    }
+    hash
+}
+
+const INCREMENTAL_DEPENDENCY_GRAPH_BYPASS_NODE_THRESHOLD: usize = 50;
+
+fn track_dependency_graph_query(ir: &MermaidDiagramIr) {
+    ACTIVE_INCREMENTAL_STATE.with(|slot| {
+        let mut state = slot.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return;
+        };
+
+        let total_nodes = ir.nodes.len();
+        if total_nodes < INCREMENTAL_DEPENDENCY_GRAPH_BYPASS_NODE_THRESHOLD {
+            let summary = IncrementalQuerySummary {
+                query_type: "dependency_graph_bypass",
+                cache_hit: false,
+                recomputed_nodes: 0,
+                total_nodes,
+                recompute_duration_us: 0,
+            };
+            trace!(
+                query_type = summary.query_type,
+                node_threshold = INCREMENTAL_DEPENDENCY_GRAPH_BYPASS_NODE_THRESHOLD,
+                total_nodes = summary.total_nodes,
+                "incremental.dependency_update"
+            );
+            state.record_query(summary);
+            return;
+        }
+
+        let topology_key = dependency_graph_cache_key(ir);
+        if let Some(cached) = state.dependency_graph_cache.as_mut()
+            && cached.key == topology_key
+        {
+            let dirty_nodes = dirty_nodes_for_edits(&cached.graph, &cached.graph, &cached.ir, ir);
+            let summary = IncrementalQuerySummary {
+                query_type: "dependency_graph",
+                cache_hit: true,
+                recomputed_nodes: dirty_nodes,
+                total_nodes,
+                recompute_duration_us: 0,
+            };
+            trace!(
+                query_type = summary.query_type,
+                cache_hit = summary.cache_hit,
+                dirty_nodes = summary.recomputed_nodes,
+                total_nodes = summary.total_nodes,
+                total_regions = cached.graph.regions().len(),
+                "incremental.dependency_update"
+            );
+            cached.ir = ir.clone();
+            state.record_query(summary);
+            return;
+        }
+
+        let start = Instant::now();
+        let graph = LayoutDependencyGraph::from_ir(ir);
+        let recompute_duration_us = saturating_elapsed_micros(start.elapsed());
+        let dirty_nodes = state
+            .dependency_graph_cache
+            .as_ref()
+            .map_or(total_nodes, |cached| {
+                dirty_nodes_for_edits(&cached.graph, &graph, &cached.ir, ir)
+            });
+        let summary = IncrementalQuerySummary {
+            query_type: "dependency_graph",
+            cache_hit: false,
+            recomputed_nodes: dirty_nodes.max(1).min(total_nodes),
+            total_nodes,
+            recompute_duration_us,
+        };
+        trace!(
+            query_type = summary.query_type,
+            cache_hit = summary.cache_hit,
+            dirty_nodes = summary.recomputed_nodes,
+            total_nodes = summary.total_nodes,
+            total_regions = graph.regions().len(),
+            recompute_duration_us = summary.recompute_duration_us,
+            "incremental.dependency_update"
+        );
+        state.dependency_graph_cache = Some(CachedDependencyGraph {
+            key: topology_key,
+            graph,
+            ir: ir.clone(),
+        });
+        state.record_query(summary);
+    });
+}
+
+fn dirty_nodes_for_edits(
+    previous_graph: &LayoutDependencyGraph,
+    current_graph: &LayoutDependencyGraph,
+    previous_ir: &MermaidDiagramIr,
+    current_ir: &MermaidDiagramIr,
+) -> usize {
+    let edits = derive_layout_edits(previous_ir, current_ir);
+    if edits.is_empty() {
+        return 0;
+    }
+
+    let previous_key = dependency_graph_cache_key(previous_ir);
+    let current_key = dependency_graph_cache_key(current_ir);
+    let same_topology = previous_key == current_key;
+    let mut dirty_current = DirtySet::default();
+    let mut dirty_previous = DirtySet::default();
+
+    for edit in edits {
+        match edit {
+            LayoutEdit::NodeRemoved { .. } | LayoutEdit::EdgeRemoved { .. } if !same_topology => {
+                let located = previous_graph.locate_dirty_regions(edit);
+                dirty_previous.extend(previous_graph.propagate_dirty(&located).regions);
+            }
+            _ => {
+                let located = current_graph.locate_dirty_regions(edit);
+                dirty_current.extend(current_graph.propagate_dirty(&located).regions);
+            }
+        }
+    }
+
+    if same_topology {
+        dirty_current.extend(dirty_previous.regions);
+        return count_dirty_nodes(current_graph, &dirty_current).min(current_ir.nodes.len());
+    }
+
+    count_dirty_nodes(current_graph, &dirty_current)
+        .saturating_add(count_dirty_nodes(previous_graph, &dirty_previous))
+        .min(current_ir.nodes.len())
+}
+
+fn incremental_region_members(
+    ir: &MermaidDiagramIr,
+    dirty_members: &BTreeSet<usize>,
+) -> Vec<usize> {
+    let mut members = dirty_members.clone();
+    for edge in &ir.edges {
+        let Some(source) = endpoint_node_index(ir, edge.from) else {
+            continue;
+        };
+        let Some(target) = endpoint_node_index(ir, edge.to) else {
+            continue;
+        };
+        if dirty_members.contains(&source) {
+            members.insert(target);
+        }
+        if dirty_members.contains(&target) {
+            members.insert(source);
+        }
+    }
+    members.into_iter().collect()
+}
+
+fn count_dirty_nodes<G: DependencyGraph>(graph: &G, dirty: &DirtySet) -> usize {
+    dirty
+        .regions
+        .iter()
+        .filter_map(|region_id| graph.regions().get(region_id))
+        .flat_map(|region| region.node_indexes.iter().copied())
+        .collect::<BTreeSet<_>>()
+        .len()
+}
+
+fn derive_layout_edits(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> Vec<LayoutEdit> {
+    let mut edits = Vec::new();
+    let shared_nodes = previous.nodes.len().min(current.nodes.len());
+    for node_index in 0..shared_nodes {
+        let left = &previous.nodes[node_index];
+        let right = &current.nodes[node_index];
+        if left.id != right.id
+            || left.label != right.label
+            || previous
+                .graph
+                .nodes
+                .get(node_index)
+                .map(|node| &node.subgraphs)
+                != current
+                    .graph
+                    .nodes
+                    .get(node_index)
+                    .map(|node| &node.subgraphs)
+            || left.span_primary != right.span_primary
+            || node_label_text(previous, left.label) != node_label_text(current, right.label)
+        {
+            edits.push(LayoutEdit::NodeChanged { node_index });
+        }
+    }
+    for node_index in shared_nodes..previous.nodes.len() {
+        edits.push(LayoutEdit::NodeRemoved { node_index });
+    }
+    for node_index in shared_nodes..current.nodes.len() {
+        edits.push(LayoutEdit::NodeAdded { node_index });
+    }
+
+    let shared_edges = previous.edges.len().min(current.edges.len());
+    for edge_index in 0..shared_edges {
+        let left = &previous.edges[edge_index];
+        let right = &current.edges[edge_index];
+        if left.from != right.from
+            || left.to != right.to
+            || left.arrow != right.arrow
+            || left.label != right.label
+            || left.span != right.span
+        {
+            edits.push(LayoutEdit::EdgeRemoved { edge_index });
+            edits.push(LayoutEdit::EdgeAdded { edge_index });
+        }
+    }
+    for edge_index in shared_edges..previous.edges.len() {
+        edits.push(LayoutEdit::EdgeRemoved { edge_index });
+    }
+    for edge_index in shared_edges..current.edges.len() {
+        edits.push(LayoutEdit::EdgeAdded { edge_index });
+    }
+
+    let shared_subgraphs = previous
+        .graph
+        .subgraphs
+        .len()
+        .min(current.graph.subgraphs.len());
+    for subgraph_index in 0..shared_subgraphs {
+        let left = &previous.graph.subgraphs[subgraph_index];
+        let right = &current.graph.subgraphs[subgraph_index];
+        if left.id != right.id
+            || left.title != right.title
+            || left.parent != right.parent
+            || left.direction != right.direction
+            || left.members != right.members
+            || left.span != right.span
+        {
+            edits.push(LayoutEdit::SubgraphChanged { subgraph_index });
+        }
+    }
+    for subgraph_index in shared_subgraphs..previous.graph.subgraphs.len() {
+        edits.push(LayoutEdit::SubgraphChanged { subgraph_index });
+    }
+    for subgraph_index in shared_subgraphs..current.graph.subgraphs.len() {
+        edits.push(LayoutEdit::SubgraphChanged { subgraph_index });
+    }
+
+    edits
+}
+
+fn node_label_text(ir: &MermaidDiagramIr, label_id: Option<fm_core::IrLabelId>) -> &str {
+    label_id
+        .and_then(|label| ir.labels.get(label.0))
+        .map_or("", |label| label.text.as_str())
+}
+
+fn dependency_graph_cache_key(ir: &MermaidDiagramIr) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    hash_u64(&mut hash, ir.nodes.len() as u64);
+    hash_u64(&mut hash, ir.edges.len() as u64);
+    hash_u64(&mut hash, ir.graph.subgraphs.len() as u64);
+    for (node_index, node) in ir.nodes.iter().enumerate() {
+        hash_str(&mut hash, &node.id);
+        hash_u64(
+            &mut hash,
+            node.label.map_or(u64::MAX, |label| label.0 as u64),
+        );
+        if let Some(graph_node) = ir.graph.nodes.get(node_index) {
+            hash_u64(&mut hash, graph_node.subgraphs.len() as u64);
+            for subgraph in &graph_node.subgraphs {
+                hash_u64(&mut hash, subgraph.0 as u64);
+            }
+        }
+    }
+    for edge in &ir.edges {
+        hash_str(&mut hash, &format!("{:?}", edge.from));
+        hash_str(&mut hash, &format!("{:?}", edge.to));
+        hash_str(&mut hash, &format!("{:?}", edge.arrow));
+    }
+    for subgraph in &ir.graph.subgraphs {
+        hash_u64(&mut hash, subgraph.id.0 as u64);
+        hash_u64(
+            &mut hash,
+            subgraph.parent.map_or(u64::MAX, |parent| parent.0 as u64),
+        );
+        hash_u64(
+            &mut hash,
+            subgraph.title.map_or(u64::MAX, |title| title.0 as u64),
+        );
+        hash_str(
+            &mut hash,
+            subgraph
+                .direction
+                .map_or("none", fm_core::GraphDirection::as_str),
+        );
+        hash_u64(&mut hash, subgraph.members.len() as u64);
+        for node in &subgraph.members {
+            hash_u64(&mut hash, node.0 as u64);
+        }
     }
     hash
 }
@@ -2288,6 +2591,7 @@ fn compute_traced_layout_with_config_and_guardrails(
     config: LayoutConfig,
     guardrails: LayoutGuardrails,
 ) -> TracedLayout {
+    track_dependency_graph_query(ir);
     let dispatch = dispatch_layout_algorithm(ir, algorithm);
     let guard = evaluate_layout_guardrails(ir, dispatch.selected, guardrails);
     let mut guarded_dispatch = dispatch;
@@ -2373,10 +2677,45 @@ impl IncrementalLayoutEngine {
         let mut incremental_state = IncrementalCacheState {
             graph_metrics_cache: self.graph_metrics_cache,
             node_size_cache: self.node_size_cache.clone(),
+            dependency_graph_cache: self.dependency_graph_cache.clone(),
             current_summary: IncrementalLayoutSummary::default(),
         };
         incremental_state.begin_pass();
         let state_guard = ActiveIncrementalStateGuard::install(incremental_state);
+        if let Some(mut traced) =
+            self.try_incremental_subgraph_relayout(ir, algorithm, &config, guardrails)
+        {
+            let incremental_state = state_guard.finish();
+            let recompute_duration_us = saturating_elapsed_micros(start.elapsed());
+
+            self.graph_metrics_cache = incremental_state.graph_metrics_cache;
+            self.node_size_cache = incremental_state.node_size_cache;
+            self.dependency_graph_cache = incremental_state.dependency_graph_cache;
+            traced.trace.incremental = IncrementalRecomputeTrace {
+                query_type: "layout_incremental_subgraph_relayout",
+                cache_hit: false,
+                recomputed_nodes: incremental_state.current_summary.recomputed_nodes.max(1),
+                total_nodes: incremental_state
+                    .current_summary
+                    .total_nodes
+                    .max(ir.nodes.len()),
+                recompute_duration_us,
+            };
+            debug!(
+                query_type = traced.trace.incremental.query_type,
+                cache_hit = traced.trace.incremental.cache_hit,
+                recomputed_nodes = traced.trace.incremental.recomputed_nodes,
+                total_nodes = traced.trace.incremental.total_nodes,
+                recompute_duration_us,
+                "incremental.recompute"
+            );
+            self.cached = Some(CachedTracedLayout {
+                key,
+                traced: traced.clone(),
+            });
+            return traced;
+        }
+
         let mut traced =
             compute_traced_layout_with_config_and_guardrails(ir, algorithm, config, guardrails);
         let incremental_state = state_guard.finish();
@@ -2385,6 +2724,7 @@ impl IncrementalLayoutEngine {
 
         self.graph_metrics_cache = incremental_state.graph_metrics_cache;
         self.node_size_cache = incremental_state.node_size_cache;
+        self.dependency_graph_cache = incremental_state.dependency_graph_cache;
         traced.trace.incremental = IncrementalRecomputeTrace {
             query_type: if incremental_state.current_summary.cache_hits > 0 {
                 "layout_full_recompute_with_query_reuse"
@@ -2422,6 +2762,184 @@ impl IncrementalLayoutEngine {
         self.cached = None;
         self.graph_metrics_cache = None;
         self.node_size_cache.clear();
+        self.dependency_graph_cache = None;
+    }
+
+    fn try_incremental_subgraph_relayout(
+        &self,
+        ir: &MermaidDiagramIr,
+        algorithm: LayoutAlgorithm,
+        config: &LayoutConfig,
+        guardrails: LayoutGuardrails,
+    ) -> Option<TracedLayout> {
+        let cached_layout = self.cached.as_ref()?;
+        let cached_graph = self.dependency_graph_cache.as_ref()?;
+        if ir.nodes.len() < INCREMENTAL_DEPENDENCY_GRAPH_BYPASS_NODE_THRESHOLD {
+            return None;
+        }
+        if ir.diagram_type != DiagramType::Flowchart {
+            return None;
+        }
+
+        let dispatch = dispatch_layout_algorithm(ir, algorithm);
+        let guard = evaluate_layout_guardrails(ir, dispatch.selected, guardrails);
+        if guard.fallback_applied || guard.selected_algorithm != LayoutAlgorithm::Sugiyama {
+            return None;
+        }
+        if dependency_graph_cache_key(&cached_graph.ir) != dependency_graph_cache_key(ir) {
+            return None;
+        }
+
+        let edits = derive_layout_edits(&cached_graph.ir, ir);
+        if edits.is_empty() {
+            return None;
+        }
+        if edits.iter().any(|edit| {
+            matches!(
+                edit,
+                LayoutEdit::NodeAdded { .. }
+                    | LayoutEdit::NodeRemoved { .. }
+                    | LayoutEdit::EdgeAdded { .. }
+                    | LayoutEdit::EdgeRemoved { .. }
+            )
+        }) {
+            return None;
+        }
+
+        track_dependency_graph_query(ir);
+
+        let mut dirty = DirtySet::default();
+        for edit in edits {
+            let located = cached_graph.graph.locate_dirty_regions(edit);
+            dirty.extend(cached_graph.graph.propagate_dirty(&located).regions);
+        }
+        if dirty.is_empty() {
+            return None;
+        }
+
+        let metrics = config
+            .font_metrics
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(fm_core::FontMetrics::default_metrics);
+        let node_sizes = compute_node_sizes(ir, &metrics);
+        let spacing = LayoutSpacing::default();
+        let mut nodes = cached_layout.traced.layout.nodes.clone();
+        let highlighted_edge_indexes: BTreeSet<_> = cached_layout
+            .traced
+            .layout
+            .edges
+            .iter()
+            .filter(|edge| edge.reversed)
+            .map(|edge| edge.edge_index)
+            .collect();
+
+        for region_id in &dirty.regions {
+            let Some(region) = cached_graph.graph.regions().get(region_id) else {
+                continue;
+            };
+            let dirty_members: Vec<_> = region.node_indexes.iter().copied().collect();
+            if dirty_members.is_empty() {
+                continue;
+            }
+            let local_members = incremental_region_members(ir, &region.node_indexes);
+            let Some(previous_bounds) = layout_bounds_for_members(&dirty_members, &nodes) else {
+                continue;
+            };
+            let Some(local_layout) = build_subgraph_local_layout(
+                ir,
+                &local_members,
+                ir.direction,
+                &node_sizes,
+                &nodes,
+                spacing,
+            ) else {
+                continue;
+            };
+            let Some(local_bounds) = layout_bounds_for_entries(&local_layout) else {
+                continue;
+            };
+            let dx = previous_bounds.center().x - local_bounds.center().x;
+            let dy = previous_bounds.center().y - local_bounds.center().y;
+            let local_entries: BTreeMap<_, _> = local_layout
+                .into_iter()
+                .map(|(node_index, bounds, rank, order)| (node_index, (bounds, rank, order)))
+                .collect();
+            for node_index in dirty_members {
+                let Some((bounds, rank, order)) = local_entries.get(&node_index).cloned() else {
+                    continue;
+                };
+                let Some(node_box) = nodes.get_mut(node_index) else {
+                    continue;
+                };
+                node_box.bounds.x = bounds.x + dx;
+                node_box.bounds.y = bounds.y + dy;
+                node_box.bounds.width = bounds.width;
+                node_box.bounds.height = bounds.height;
+                node_box.rank = rank;
+                node_box.order = order;
+                node_box.span = ir
+                    .nodes
+                    .get(node_index)
+                    .map_or(Span::default(), |node| node.span_primary);
+            }
+        }
+
+        let mut edges = build_edge_paths(ir, &nodes, &highlighted_edge_indexes);
+        bundle_parallel_edges(ir, &mut edges);
+        let clusters = build_cluster_boxes(ir, &nodes, spacing);
+        let cluster_dividers = build_state_cluster_dividers(ir, &nodes, &clusters);
+        let cycle_clusters = cached_layout.traced.layout.cycle_clusters.clone();
+        let collapsed_count = cycle_clusters.len();
+        let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
+        let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
+
+        let mut trace = cached_layout.traced.trace.clone();
+        trace.dispatch = dispatch;
+        trace.guard = guard;
+        push_snapshot(
+            &mut trace,
+            "incremental_subgraph_relayout",
+            ir.nodes.len(),
+            ir.edges.len(),
+            cached_layout.traced.layout.stats.reversed_edges,
+            cached_layout.traced.layout.stats.crossing_count,
+        );
+
+        let stats = LayoutStats {
+            node_count: ir.nodes.len(),
+            edge_count: ir.edges.len(),
+            crossing_count: cached_layout.traced.layout.stats.crossing_count,
+            crossing_count_before_refinement: cached_layout
+                .traced
+                .layout
+                .stats
+                .crossing_count_before_refinement,
+            reversed_edges: cached_layout.traced.layout.stats.reversed_edges,
+            cycle_count: cached_layout.traced.layout.stats.cycle_count,
+            cycle_node_count: cached_layout.traced.layout.stats.cycle_node_count,
+            max_cycle_size: cached_layout.traced.layout.stats.max_cycle_size,
+            collapsed_clusters: collapsed_count,
+            reversed_edge_total_length,
+            total_edge_length,
+            phase_iterations: trace.snapshots.len(),
+        };
+
+        Some(TracedLayout {
+            layout: DiagramLayout {
+                nodes,
+                clusters,
+                cycle_clusters,
+                edges,
+                bounds,
+                stats,
+                extensions: LayoutExtensions {
+                    cluster_dividers,
+                    ..LayoutExtensions::default()
+                },
+            },
+            trace,
+        })
     }
 }
 
@@ -7479,7 +7997,7 @@ fn cycle_removal_greedy(
             .filter(|node| out_degree[*node] == 0)
             .collect();
         if !sinks.is_empty() {
-            sinks.sort_by(|left, right| compare_priority(*left, *right, node_priority));
+            sinks.sort_by(|left, right| compare_priority(*right, *left, node_priority));
             for node in sinks {
                 remove_node(
                     node,
@@ -10556,13 +11074,14 @@ mod tests {
         clippy::many_single_char_names
     )]
     use super::{
-        CycleStrategy, DependencyGraph, DirtySet, GraphMetrics, IncrementalLayoutEngine,
-        LayoutAlgorithm, LayoutDependencyGraph, LayoutEdit, LayoutGuardrails, LayoutPoint,
-        LayoutRect, LayoutSequenceLifecycleMarkerKind, RegionInput, RegionMemoryBudget, RenderClip,
-        RenderItem, RenderSource, SubgraphRegion, SubgraphRegionId, SubgraphRegionKind,
-        build_layout_decision_ledger, build_layout_guard_report, build_render_scene,
-        dispatch_layout_algorithm, layout, layout_diagram, layout_diagram_force,
-        layout_diagram_force_traced, layout_diagram_gantt, layout_diagram_grid,
+        CachedNodeSize, CycleStrategy, DependencyGraph, DirtySet, GraphMetrics,
+        IncrementalLayoutEngine, IncrementalLayoutSession, LayoutAlgorithm, LayoutDependencyGraph,
+        LayoutEdit, LayoutGuardrails, LayoutPoint, LayoutRect, LayoutSequenceLifecycleMarkerKind,
+        RegionInput, RegionMemoryBudget, RenderClip, RenderItem, RenderSource, SubgraphRegion,
+        SubgraphRegionId, SubgraphRegionKind, build_layout_decision_ledger,
+        build_layout_guard_report, build_render_scene, dispatch_layout_algorithm, layout,
+        layout_diagram, layout_diagram_force, layout_diagram_force_traced, layout_diagram_gantt,
+        layout_diagram_grid, layout_diagram_incremental_traced_with_config_and_guardrails,
         layout_diagram_radial, layout_diagram_sankey, layout_diagram_sequence,
         layout_diagram_sequence_traced, layout_diagram_timeline, layout_diagram_traced,
         layout_diagram_traced_with_algorithm, layout_diagram_traced_with_algorithm_and_guardrails,
@@ -10579,7 +11098,9 @@ mod tests {
         MermaidSourceMapKind, NodeShape, Span,
     };
     use proptest::prelude::*;
+    use std::cell::RefCell;
     use std::collections::{BTreeMap, BTreeSet};
+    use std::rc::Rc;
     use std::sync::{Arc, Mutex};
 
     #[derive(Debug, Clone, Default)]
@@ -10807,6 +11328,68 @@ mod tests {
         ir
     }
 
+    fn large_subgraph_dependency_ir() -> MermaidDiagramIr {
+        let mut edges = Vec::new();
+        for node_index in 0..31 {
+            edges.push((node_index, node_index + 1));
+        }
+        for node_index in 32..63 {
+            edges.push((node_index, node_index + 1));
+        }
+        let mut ir = labeled_graph_ir(64, &edges);
+        ir.graph.nodes = (0..ir.nodes.len())
+            .map(|node_index| IrGraphNode {
+                node_id: IrNodeId(node_index),
+                clusters: Vec::new(),
+                subgraphs: Vec::new(),
+                ..IrGraphNode::default()
+            })
+            .collect();
+        ir.graph.edges = ir
+            .edges
+            .iter()
+            .enumerate()
+            .map(|(edge_index, edge)| IrGraphEdge {
+                edge_id: edge_index,
+                from: edge.from,
+                to: edge.to,
+                span: edge.span,
+                ..IrGraphEdge::default()
+            })
+            .collect();
+        ir.graph.subgraphs.push(IrSubgraph {
+            id: IrSubgraphId(0),
+            key: "left".to_string(),
+            title: None,
+            parent: None,
+            children: Vec::new(),
+            members: (0..32).map(IrNodeId).collect(),
+            cluster: None,
+            grid_span: 1,
+            span: Span::at_line(1, 1),
+            direction: None,
+        });
+        ir.graph.subgraphs.push(IrSubgraph {
+            id: IrSubgraphId(1),
+            key: "right".to_string(),
+            title: None,
+            parent: None,
+            children: Vec::new(),
+            members: (32..64).map(IrNodeId).collect(),
+            cluster: None,
+            grid_span: 1,
+            span: Span::at_line(2, 1),
+            direction: None,
+        });
+        for node_index in 0..32 {
+            ir.graph.nodes[node_index].subgraphs.push(IrSubgraphId(0));
+        }
+        for node_index in 32..64 {
+            ir.graph.nodes[node_index].subgraphs.push(IrSubgraphId(1));
+        }
+        ir
+    }
+
     #[test]
     fn dependency_graph_locates_dirty_regions_via_deterministic_indexes() {
         let graph = sample_dependency_graph();
@@ -10954,6 +11537,77 @@ mod tests {
     }
 
     #[test]
+    fn incremental_session_dependency_graph_bypasses_small_graphs() {
+        let session = Rc::new(RefCell::new(IncrementalLayoutSession::new()));
+        let ir = labeled_graph_ir(4, &[(0, 1), (1, 2), (2, 3)]);
+        let result = layout_diagram_incremental_traced_with_config_and_guardrails(
+            &session,
+            &ir,
+            LayoutAlgorithm::Auto,
+            super::LayoutConfig::default(),
+            LayoutGuardrails::default(),
+        );
+
+        let dependency_query = result
+            .incremental
+            .queries
+            .iter()
+            .find(|query| query.query_type == "dependency_graph_bypass")
+            .expect("small graphs should emit dependency-graph bypass summary");
+        assert!(!dependency_query.cache_hit);
+        assert_eq!(dependency_query.recomputed_nodes, 0);
+        assert_eq!(dependency_query.total_nodes, ir.nodes.len());
+    }
+
+    #[test]
+    fn incremental_session_reuses_dependency_graph_for_large_topology_stable_edits() {
+        let session = Rc::new(RefCell::new(IncrementalLayoutSession::new()));
+        let baseline = large_subgraph_dependency_ir();
+        let first = layout_diagram_incremental_traced_with_config_and_guardrails(
+            &session,
+            &baseline,
+            LayoutAlgorithm::Auto,
+            super::LayoutConfig::default(),
+            LayoutGuardrails::default(),
+        );
+        let first_dependency_query = first
+            .incremental
+            .queries
+            .iter()
+            .find(|query| query.query_type == "dependency_graph")
+            .expect("large graphs should build dependency graph");
+        assert!(!first_dependency_query.cache_hit);
+        assert_eq!(
+            first_dependency_query.recomputed_nodes,
+            baseline.nodes.len()
+        );
+
+        let mut edited = baseline.clone();
+        let label_index = edited.nodes[5]
+            .label
+            .expect("labeled graph should assign every node a label")
+            .0;
+        edited.labels[label_index].text = "Left region relabel".to_string();
+
+        let second = layout_diagram_incremental_traced_with_config_and_guardrails(
+            &session,
+            &edited,
+            LayoutAlgorithm::Auto,
+            super::LayoutConfig::default(),
+            LayoutGuardrails::default(),
+        );
+        let second_dependency_query = second
+            .incremental
+            .queries
+            .iter()
+            .find(|query| query.query_type == "dependency_graph")
+            .expect("edited large graphs should still report dependency graph query");
+        assert!(second_dependency_query.cache_hit);
+        assert_eq!(second_dependency_query.recomputed_nodes, 32);
+        assert_eq!(second_dependency_query.total_nodes, edited.nodes.len());
+    }
+
+    #[test]
     fn incremental_layout_engine_reuses_graph_metrics_and_node_sizes_for_identical_inputs() {
         let ir = sample_ir();
         let mut engine = IncrementalLayoutEngine::default();
@@ -11044,6 +11698,81 @@ mod tests {
         );
         assert_eq!(rerun.trace.incremental.recomputed_nodes, edited.nodes.len());
         assert_eq!(rerun.trace.incremental.total_nodes, edited.nodes.len());
+    }
+
+    #[test]
+    fn incremental_layout_engine_selectively_relayouts_dirty_region_and_preserves_clean_region() {
+        let mut engine = IncrementalLayoutEngine::default();
+        let baseline = large_subgraph_dependency_ir();
+        let config = super::LayoutConfig::default();
+        let guardrails = LayoutGuardrails::default();
+
+        let baseline_layout = engine.layout_diagram_traced_with_config_and_guardrails(
+            &baseline,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+
+        let mut edited = baseline.clone();
+        let label_index = edited.nodes[5]
+            .label
+            .expect("labeled graph should assign every node a label")
+            .0;
+        edited.labels[label_index].text = "Left region relabel for selective re-layout".to_string();
+
+        let rerun = engine.layout_diagram_traced_with_config_and_guardrails(
+            &edited,
+            LayoutAlgorithm::Auto,
+            config,
+            guardrails,
+        );
+
+        assert_eq!(
+            rerun.trace.incremental.query_type,
+            "layout_incremental_subgraph_relayout"
+        );
+        assert_eq!(rerun.trace.incremental.recomputed_nodes, 32);
+        for node_index in 32..64 {
+            assert_eq!(
+                rerun.layout.nodes[node_index].bounds,
+                baseline_layout.layout.nodes[node_index].bounds,
+                "clean region drifted for node {node_index}"
+            );
+        }
+    }
+
+    #[test]
+    fn incremental_layout_engine_bypasses_selective_path_for_small_graphs() {
+        let mut engine = IncrementalLayoutEngine::default();
+        let mut baseline = labeled_graph_ir(4, &[(0, 1), (1, 2), (2, 3)]);
+        let config = super::LayoutConfig::default();
+        let guardrails = LayoutGuardrails::default();
+
+        let _warm = engine.layout_diagram_traced_with_config_and_guardrails(
+            &baseline,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+
+        let label_index = baseline.nodes[1]
+            .label
+            .expect("labeled graph should assign every node a label")
+            .0;
+        baseline.labels[label_index].text = "Small graph relabel".to_string();
+
+        let rerun = engine.layout_diagram_traced_with_config_and_guardrails(
+            &baseline,
+            LayoutAlgorithm::Auto,
+            config,
+            guardrails,
+        );
+
+        assert_eq!(
+            rerun.trace.incremental.query_type,
+            "layout_full_recompute_with_query_reuse"
+        );
     }
 
     proptest! {
@@ -16157,6 +16886,207 @@ mod tests {
 
         assert_eq!(first.trace.incremental.query_type, "layout_full_recompute");
         assert_eq!(second.trace.incremental.query_type, "layout_memoized_reuse");
+    }
+
+    #[test]
+    fn incremental_layout_engine_changed_request_discards_corrupted_cached_layout() {
+        let mut engine = IncrementalLayoutEngine::default();
+        let baseline = labeled_graph_ir(4, &[(0, 1), (1, 2), (2, 3)]);
+        let config = super::LayoutConfig::default();
+        let guardrails = LayoutGuardrails::default();
+
+        let _warm = engine.layout_diagram_traced_with_config_and_guardrails(
+            &baseline,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+        if let Some(cached) = engine.cached.as_mut() {
+            cached.traced.layout.nodes[0].bounds.x = 9_999.0;
+            cached.traced.layout.nodes[0].bounds.y = -9_999.0;
+        }
+
+        let mut edited = baseline.clone();
+        let label_index = edited.nodes[0]
+            .label
+            .expect("labeled graph should assign every node a label")
+            .0;
+        edited.labels[label_index].text = "Corruption bypass".to_string();
+
+        let incremental = engine.layout_diagram_traced_with_config_and_guardrails(
+            &edited,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+        let full = layout_diagram_traced_with_config_and_guardrails(
+            &edited,
+            LayoutAlgorithm::Auto,
+            config,
+            guardrails,
+        );
+
+        assert_eq!(incremental.layout, full.layout);
+        assert!(!incremental.trace.incremental.cache_hit);
+        assert_eq!(
+            incremental.trace.incremental.query_type,
+            "layout_full_recompute_with_query_reuse"
+        );
+    }
+
+    #[test]
+    fn incremental_layout_engine_clear_resets_corrupted_query_state() {
+        let mut engine = IncrementalLayoutEngine::default();
+        let baseline = labeled_graph_ir(4, &[(0, 1), (1, 2), (2, 3)]);
+        let config = super::LayoutConfig::default();
+        let guardrails = LayoutGuardrails::default();
+
+        let _warm = engine.layout_diagram_traced_with_config_and_guardrails(
+            &baseline,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+
+        engine.graph_metrics_cache = Some((
+            u64::MAX,
+            GraphMetrics {
+                node_count: 999,
+                edge_count: 999,
+                edge_to_node_ratio: 999.0,
+                back_edge_count: 999,
+                scc_count: 999,
+                max_scc_size: 999,
+                root_count: 999,
+                is_tree_like: false,
+                is_sparse: false,
+                is_dense: true,
+            },
+        ));
+        engine.node_size_cache.insert(
+            baseline.nodes[0].id.clone(),
+            CachedNodeSize {
+                key: u64::MAX,
+                size: (42_000.0, 42_000.0),
+            },
+        );
+        if let Some(cached) = engine.cached.as_mut() {
+            cached.traced.layout.nodes[0].bounds.width = 42_000.0;
+        }
+
+        engine.clear();
+        let rerun = engine.layout_diagram_traced_with_config_and_guardrails(
+            &baseline,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+        let full = layout_diagram_traced_with_config_and_guardrails(
+            &baseline,
+            LayoutAlgorithm::Auto,
+            config,
+            guardrails,
+        );
+
+        assert_eq!(rerun.layout, full.layout);
+        assert_eq!(rerun.trace.incremental.query_type, "layout_full_recompute");
+        assert!(!rerun.trace.incremental.cache_hit);
+    }
+
+    #[test]
+    fn dependency_graph_cycle_propagation_terminates_and_covers_cycle() {
+        let region_a = SubgraphRegion {
+            id: SubgraphRegionId(0),
+            kind: SubgraphRegionKind::ExplicitSubgraph,
+            label: "subgraph:a".to_string(),
+            node_indexes: [0].into_iter().collect(),
+            edge_indexes: BTreeSet::new(),
+            subgraph_indexes: [0].into_iter().collect(),
+            depends_on: [SubgraphRegionId(1)].into_iter().collect(),
+            dependents: [SubgraphRegionId(1)].into_iter().collect(),
+            inputs: [RegionInput::Node(0)].into_iter().collect(),
+            estimated_bytes: 64,
+        };
+        let region_b = SubgraphRegion {
+            id: SubgraphRegionId(1),
+            kind: SubgraphRegionKind::ExplicitSubgraph,
+            label: "subgraph:b".to_string(),
+            node_indexes: [1].into_iter().collect(),
+            edge_indexes: BTreeSet::new(),
+            subgraph_indexes: [1].into_iter().collect(),
+            depends_on: [SubgraphRegionId(0)].into_iter().collect(),
+            dependents: [SubgraphRegionId(0)].into_iter().collect(),
+            inputs: [RegionInput::Node(1)].into_iter().collect(),
+            estimated_bytes: 64,
+        };
+
+        let mut regions = BTreeMap::new();
+        regions.insert(region_a.id, region_a.clone());
+        regions.insert(region_b.id, region_b.clone());
+
+        let mut index = BTreeMap::new();
+        index.insert(
+            RegionInput::Node(0),
+            [SubgraphRegionId(0)].into_iter().collect(),
+        );
+        index.insert(
+            RegionInput::Node(1),
+            [SubgraphRegionId(1)].into_iter().collect(),
+        );
+
+        let graph = TestDependencyGraph {
+            regions,
+            index,
+            estimated_overhead_bytes: 128,
+        };
+
+        let dirty = graph.propagate_dirty(&DirtySet::from_region(SubgraphRegionId(0)));
+        assert_eq!(
+            dirty.regions.into_iter().collect::<Vec<_>>(),
+            vec![SubgraphRegionId(0), SubgraphRegionId(1)]
+        );
+    }
+
+    #[test]
+    fn incremental_layout_engine_survives_rapid_sequential_edits_without_divergence() {
+        let mut engine = IncrementalLayoutEngine::default();
+        let mut ir = labeled_graph_ir(5, &[(0, 1), (1, 2), (2, 3), (3, 4)]);
+        let config = super::LayoutConfig::default();
+        let guardrails = LayoutGuardrails::default();
+
+        for step in 0..100 {
+            if step % 2 == 0 {
+                let node_index = step % ir.nodes.len();
+                let label_index = ir.nodes[node_index]
+                    .label
+                    .expect("labeled graph should assign every node a label")
+                    .0;
+                ir.labels[label_index].text = format!("Node {node_index} rapid step {step}");
+            } else {
+                let from = step % ir.nodes.len();
+                let to = (from + 2) % ir.nodes.len();
+                toggle_edge(&mut ir, from, to);
+            }
+
+            let incremental = engine.layout_diagram_traced_with_config_and_guardrails(
+                &ir,
+                LayoutAlgorithm::Auto,
+                config.clone(),
+                guardrails,
+            );
+            let full = layout_diagram_traced_with_config_and_guardrails(
+                &ir,
+                LayoutAlgorithm::Auto,
+                config.clone(),
+                guardrails,
+            );
+
+            assert_eq!(
+                incremental.layout, full.layout,
+                "diverged at rapid edit step {step}"
+            );
+            assert_eq!(incremental.trace.incremental.total_nodes, ir.nodes.len());
+        }
     }
 
     #[test]

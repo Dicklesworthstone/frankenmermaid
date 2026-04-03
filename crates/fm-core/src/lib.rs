@@ -1726,6 +1726,7 @@ pub fn parse_style_string(raw: &str) -> IrInlineStyle {
             let key = s[..colon_pos].trim().to_ascii_lowercase();
             let val = s[colon_pos + 1..].trim();
             if !key.is_empty()
+                && is_allowed_style_property(&key)
                 && let Some(sanitized) = sanitize_style_value(val)
             {
                 props.insert(key, sanitized);

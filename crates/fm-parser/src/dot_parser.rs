@@ -714,13 +714,15 @@ fn expand_edge_groups(input: &str) -> String {
         let mut last_idx = 0;
         let bytes = &before.as_bytes()[..operator_end - op_len];
         for i in 0..bytes.len() {
-            let is_sep = bytes[i] == b';' || bytes[i] == b'\n' || bytes[i] == b'{' || bytes[i] == b'}';
-            let is_edge_op = i > 0 && bytes[i - 1] == b'-' && (bytes[i] == b'>' || bytes[i] == b'-');
+            let is_sep =
+                bytes[i] == b';' || bytes[i] == b'\n' || bytes[i] == b'{' || bytes[i] == b'}';
+            let is_edge_op =
+                i > 0 && bytes[i - 1] == b'-' && (bytes[i] == b'>' || bytes[i] == b'-');
             if is_sep || is_edge_op {
                 last_idx = i + 1;
             }
         }
-        
+
         let prefix = &before[..last_idx];
         let source = before[last_idx..operator_end - op_len].trim();
 
