@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>frankenmermaid /web_react bootstrap</title>
+<style>
+  :root {
+    color-scheme: dark;
+    font-family: "Iosevka Web", "IBM Plex Sans", system-ui, sans-serif;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    background:
+      radial-gradient(circle at 20% 12%, rgba(249, 115, 22, 0.16), transparent 36%),
+      radial-gradient(circle at 80% 18%, rgba(14, 165, 233, 0.18), transparent 38%),
+      linear-gradient(180deg, #020617 0%, #111827 48%, #0f172a 100%);
+    color: #e2e8f0;
+  }
+
+  main {
+    width: min(46rem, calc(100vw - 2rem));
+    padding: 1.5rem;
+    border: 1px solid rgba(148, 163, 184, 0.22);
+    border-radius: 1.5rem;
+    background: rgba(15, 23, 42, 0.84);
+    box-shadow: 0 24px 80px rgba(2, 6, 23, 0.5);
+  }
+
+  h1 {
+    margin: 0;
+    font-size: clamp(1.6rem, 4vw, 2.2rem);
+    letter-spacing: -0.04em;
+  }
+
+  p {
+    margin: 0.9rem 0 0;
+    line-height: 1.65;
+    color: #cbd5e1;
+  }
+
+  code {
+    padding: 0.12rem 0.35rem;
+    border-radius: 0.45rem;
+    background: rgba(30, 41, 59, 0.9);
+    color: #f8fafc;
+  }
+
+  .status {
+    margin-top: 1rem;
+    font-size: 0.92rem;
+    color: #7dd3fc;
+  }
+
+  .error {
+    color: #fecaca;
+  }
+</style>
+</head>
+<body>
+<main id="showcase-react-root" data-showcase-host="react-web">
+  <h1>Loading frankenmermaid React showcase host</h1>
+  <p>
+    The <code>/web_react</code> route is mounting the same portable showcase snapshot used by
+    <code>/web</code>, while preserving a distinct <code>react-web</code> host contract for future componentized
+    embedding work.
+  </p>
+  <p id="status" class="status">
+    Fetching <code>../frankenmermaid_demo_showcase.html</code> and preserving <code>/web_react</code> URL semantics
+    without forking showcase state, diagnostics, or fallback behavior...
+  </p>
+</main>
+<script type="module">
+  const status = document.getElementById("status");
+  const sourceUrl = new URL("../frankenmermaid_demo_showcase.html", window.location.href);
+
+  function injectHostMarker(html) {
+    let next = html;
+    if (next.includes('data-host-kind="static-web"')) {
+      next = next.replace(/data-host-kind="static-web"/g, 'data-host-kind="react-web"');
+    } else if (!next.includes('data-host-kind="react-web"')) {
+      next = next.replace(/<html([^>]*)>/i, '<html$1 data-host-kind="react-web">');
+    }
+    if (!next.includes('data-react-route-root="showcase-react-root"')) {
+      next = next.replace(/<body([^>]*)>/i, '<body$1 data-react-route-root="showcase-react-root">');
+    }
+    return next;
+  }
+
+  async function bootstrapReactHost() {
+    try {
+      const response = await fetch(sourceUrl, { method: "GET", cache: "no-store" });
+      if (!response.ok) {
+        throw new Error(`failed to fetch standalone showcase: HTTP ${response.status}`);
+      }
+
+      const originalHtml = await response.text();
+      const finalHtml = injectHostMarker(originalHtml);
+
+      document.open();
+      document.write(finalHtml);
+      document.close();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      status.classList.add("error");
+      status.textContent = `Unable to bootstrap /web_react showcase host: ${message}`;
+    }
+  }
+
+  bootstrapReactHost();
+</script>
+</body>
+</html>

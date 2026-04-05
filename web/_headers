@@ -1,0 +1,11 @@
+/pkg/*
+  Cache-Control: public, max-age=31536000, immutable
+
+/evidence/*
+  Cache-Control: public, max-age=3600, must-revalidate
+
+/web
+  Cache-Control: public, max-age=0, must-revalidate
+
+/web/*
+  Cache-Control: public, max-age=0, must-revalidate

@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>frankenmermaid /web bootstrap</title>
+<style>
+  :root {
+    color-scheme: dark;
+    font-family: "Iosevka Web", "IBM Plex Sans", system-ui, sans-serif;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    background:
+      radial-gradient(circle at top, rgba(59, 130, 246, 0.18), transparent 38%),
+      linear-gradient(180deg, #020617 0%, #08101d 46%, #0f172a 100%);
+    color: #dbeafe;
+  }
+
+  main {
+    width: min(42rem, calc(100vw - 2rem));
+    padding: 1.5rem;
+    border: 1px solid rgba(148, 163, 184, 0.22);
+    border-radius: 1.5rem;
+    background: rgba(15, 23, 42, 0.84);
+    box-shadow: 0 24px 80px rgba(2, 6, 23, 0.5);
+  }
+
+  h1 {
+    margin: 0;
+    font-size: clamp(1.5rem, 4vw, 2.1rem);
+    letter-spacing: -0.04em;
+  }
+
+  p {
+    margin: 0.9rem 0 0;
+    line-height: 1.65;
+    color: #cbd5e1;
+  }
+
+  code {
+    padding: 0.12rem 0.35rem;
+    border-radius: 0.45rem;
+    background: rgba(30, 41, 59, 0.9);
+    color: #e2e8f0;
+  }
+
+  .status {
+    margin-top: 1rem;
+    font-size: 0.92rem;
+    color: #93c5fd;
+  }
+
+  .error {
+    color: #fecaca;
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Loading frankenmermaid showcase</h1>
+  <p>
+    The static <code>/web</code> host is bootstrapping the standalone showcase contract and preserving the original
+    relative asset behavior for <code>./pkg</code> and <code>./evidence</code>.
+  </p>
+  <p id="status" class="status">Fetching <code>../frankenmermaid_demo_showcase.html</code> and preserving <code>/web</code> URL semantics without forking showcase logic...</p>
+</main>
+<script type="module">
+  const status = document.getElementById("status");
+  const sourceUrl = new URL("../frankenmermaid_demo_showcase.html", window.location.href);
+
+  function injectHostMarker(html) {
+    if (html.includes('data-host-kind="static-web"')) {
+      return html;
+    }
+    return html.replace(/<html([^>]*)>/i, '<html$1 data-host-kind="static-web">');
+  }
+
+  async function bootstrap() {
+    try {
+      const response = await fetch(sourceUrl, { method: "GET", cache: "no-store" });
+      if (!response.ok) {
+        throw new Error(`failed to fetch standalone showcase: HTTP ${response.status}`);
+      }
+
+      const originalHtml = await response.text();
+      const finalHtml = injectHostMarker(originalHtml);
+
+      document.open();
+      document.write(finalHtml);
+      document.close();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      status.classList.add("error");
+      status.textContent = `Unable to bootstrap /web showcase host: ${message}`;
+    }
+  }
+
+  bootstrap();
+</script>
+</body>
+</html>
