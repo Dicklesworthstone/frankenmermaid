@@ -22,6 +22,26 @@ RUNNER_SPEC.loader.exec_module(RUNNER)
 
 
 class ShowcaseHarnessTests(unittest.TestCase):
+    def test_extract_differential_report_detects_dual_render_contract(self):
+        dom = """
+        <div id="fm-svg"><svg id="fm"></svg></div>
+        <div id="mermaid-svg"><svg id="baseline"></svg></div>
+        <pre id="telemetry-json">{
+          &quot;health&quot;: &quot;degraded&quot;,
+          &quot;timings&quot;: {&quot;svg&quot;: 18, &quot;canvas&quot;: 12, &quot;mermaid&quot;: 27},
+          &quot;degradationReasons&quot;: [&quot;mermaid baseline degraded&quot;]
+        }</pre>
+        """
+        report = HARNESS.extract_differential_report(dom)
+        self.assertTrue(report["telemetry_present"])
+        self.assertTrue(report["comparison_ready"])
+        self.assertTrue(report["franken_svg_present"])
+        self.assertTrue(report["mermaid_svg_present"])
+        self.assertEqual(report["health"], "degraded")
+        self.assertEqual(report["mermaid_timing_ms"], 27)
+        self.assertTrue(report["mermaid_baseline_degraded"])
+        self.assertFalse(report["franken_svg_degraded"])
+
     def test_validate_log_payload_accepts_current_static_web_log(self):
         log_path = (
             Path(__file__).resolve().parent.parent
@@ -315,6 +335,123 @@ class ShowcaseHarnessTests(unittest.TestCase):
         self.assertEqual(result["surface"], "web_react")
         self.assertTrue(result["has_replay_bundle"])
 
+    def test_validate_e2e_summary_accepts_differential_compare_entries(self):
+        with TemporaryDirectory() as tempdir:
+            temp = Path(tempdir)
+            html_path = temp / "run.html"
+            log_path = temp / "run.json"
+            html_path.write_text("<html><body><div id='fm-svg'><svg></svg></div><div id='mermaid-svg'><svg></svg></div></body></html>")
+            log_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "bead_id": "bd-x",
+                        "scenario_id": "static-web-compare-export",
+                        "input_hash": "sha256:a",
+                        "surface": "web",
+                        "renderer": "franken-svg",
+                        "theme": "corporate",
+                        "config_hash": "sha256:b",
+                        "parse_ms": 1,
+                        "layout_ms": 1,
+                        "render_ms": 1,
+                        "diagnostic_count": 1,
+                        "degradation_tier": "healthy",
+                        "output_artifact_hash": "sha256:c",
+                        "pass_fail_reason": "ok",
+                        "run_kind": "e2e",
+                        "trace_id": "trace",
+                        "revision": "rev",
+                        "host_kind": "static-web",
+                        "fallback_active": False,
+                        "runtime_mode": "live",
+                    }
+                )
+            )
+            summary_path = temp / "summary.json"
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "route_prefix": "/web",
+                        "surface": "web",
+                        "host_kind": "static-web",
+                        "repeat": 1,
+                        "profiles": ["desktop-default"],
+                        "scenarios": ["static-web-compare-export"],
+                        "results": [
+                            {
+                                "scenario_id": "static-web-compare-export",
+                                "profile": "desktop-default",
+                                "run_index": 1,
+                                "html_path": str(html_path),
+                                "log_path": str(log_path),
+                                "diagnostic_count": 1,
+                                "degradation_tier": "healthy",
+                                "runtime_mode": "live",
+                                "output_artifact_hash": "sha256:c",
+                                "trace_id": "trace-compare",
+                                "differential": {
+                                    "telemetry_present": True,
+                                    "comparison_ready": True,
+                                    "franken_svg_present": True,
+                                    "mermaid_svg_present": True,
+                                    "health": "healthy",
+                                    "mermaid_timing_ms": 7,
+                                    "franken_svg_timing_ms": 5,
+                                    "canvas_timing_ms": 3,
+                                    "degradation_reasons": [],
+                                    "mermaid_baseline_degraded": False,
+                                    "franken_svg_degraded": False,
+                                    "runtime_artifact_missing": False,
+                                },
+                            }
+                        ],
+                        "determinism": [
+                            {
+                                "scenario_id": "static-web-compare-export",
+                                "profile": "desktop-default",
+                                "runs": 1,
+                                "stable_output_hash": True,
+                                "stable_normalized_log": True,
+                                "output_hashes": ["sha256:c"],
+                            }
+                        ],
+                        "differential": [
+                            {
+                                "scenario_id": "static-web-compare-export",
+                                "profile": "desktop-default",
+                                "run_index": 1,
+                                "telemetry_present": True,
+                                "comparison_ready": True,
+                                "franken_svg_present": True,
+                                "mermaid_svg_present": True,
+                                "health": "healthy",
+                                "mermaid_timing_ms": 7,
+                                "franken_svg_timing_ms": 5,
+                                "canvas_timing_ms": 3,
+                                "degradation_reasons": [],
+                                "mermaid_baseline_degraded": False,
+                                "franken_svg_degraded": False,
+                                "runtime_artifact_missing": False,
+                            }
+                        ],
+                        "trace_index": [
+                            {
+                                "scenario_id": "static-web-compare-export",
+                                "profile": "desktop-default",
+                                "run_index": 1,
+                                "trace_id": "trace-compare",
+                                "log_path": str(log_path),
+                            }
+                        ],
+                    }
+                )
+            )
+            result = HARNESS.validate_e2e_summary(summary_path=summary_path, repo_root=temp)
+            self.assertEqual(result["differential_count"], 1)
+            self.assertEqual(result["trace_count"], 1)
+
     def test_validate_e2e_summary_rejects_missing_replay_bundle_when_required(self):
         with TemporaryDirectory() as tempdir:
             temp = Path(tempdir)
@@ -345,6 +482,7 @@ class ShowcaseHarnessTests(unittest.TestCase):
                         "host_kind": "react-web",
                         "fallback_active": False,
                         "runtime_mode": "live",
+                        "trace_id": "trace",
                     }
                 )
             )
@@ -380,6 +518,15 @@ class ShowcaseHarnessTests(unittest.TestCase):
                                 "stable_output_hash": True,
                                 "stable_normalized_log": True,
                                 "output_hashes": ["sha256:c"],
+                            }
+                        ],
+                        "trace_index": [
+                            {
+                                "scenario_id": "react-web-determinism-check",
+                                "profile": "desktop-default",
+                                "run_index": 1,
+                                "trace_id": "trace",
+                                "log_path": str(log_path),
                             }
                         ],
                     }

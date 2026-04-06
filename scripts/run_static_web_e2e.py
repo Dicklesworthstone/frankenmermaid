@@ -357,6 +357,7 @@ def write_replay_bundle(
     scenarios: tuple[Scenario, ...],
     profiles: tuple[RunProfile, ...],
     summary_path: Path,
+    trace_index: list[dict[str, object]] | None = None,
 ) -> dict[str, str]:
     bundle_dir.mkdir(parents=True, exist_ok=True)
     suite_command = build_replay_command(
@@ -375,10 +376,19 @@ def write_replay_bundle(
     scenario_commands = []
     for scenario in scenarios:
         for profile in profiles:
+            matching_traces = []
+            if trace_index:
+                matching_traces = [
+                    item["trace_id"]
+                    for item in trace_index
+                    if item.get("scenario_id") == scenario.scenario_id.replace("static-web", scenario_prefix, 1)
+                    and item.get("profile") == profile.profile_id
+                ]
             scenario_commands.append(
                 {
                     "scenario_id": scenario.scenario_id.replace("static-web", scenario_prefix, 1),
                     "profile": profile.profile_id,
+                    "trace_ids": matching_traces,
                     "command": build_replay_command(
                         bead_id=bead_id,
                         repo_root=str(repo_root),
@@ -406,6 +416,7 @@ def write_replay_bundle(
         "revision": revision,
         "summary_path": str(summary_path),
         "suite_command": suite_command,
+        "trace_index": trace_index or [],
         "scenario_commands": scenario_commands,
     }
     manifest_path = bundle_dir / "replay_manifest.json"
@@ -501,6 +512,8 @@ def main() -> int:
         "scenarios": [scenario.scenario_id.replace("static-web", args.scenario_prefix, 1) for scenario in scenarios],
         "results": [],
         "determinism": [],
+        "differential": [],
+        "trace_index": [],
     }
     determinism_groups: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
 
@@ -559,7 +572,28 @@ def main() -> int:
                         "runtime_mode": log["runtime_mode"],
                         "output_artifact_hash": log["output_artifact_hash"],
                         "determinism_status": log.get("determinism_status"),
+                        "trace_id": log["trace_id"],
                     }
+                    summary["trace_index"].append(
+                        {
+                            "scenario_id": scenario_id,
+                            "profile": profile.profile_id,
+                            "run_index": run_index,
+                            "trace_id": log["trace_id"],
+                            "log_path": result_record["log_path"],
+                        }
+                    )
+                    differential = showcase_harness.extract_differential_report(dom)
+                    if scenario.scenario_id == "static-web-compare-export":
+                        result_record["differential"] = differential
+                        summary["differential"].append(
+                            {
+                                "scenario_id": scenario_id,
+                                "profile": profile.profile_id,
+                                "run_index": run_index,
+                                **differential,
+                            }
+                        )
                     summary["results"].append(result_record)
                     determinism_groups[(scenario_id, profile.profile_id)].append(
                         {
@@ -605,6 +639,7 @@ def main() -> int:
             scenarios=scenarios,
             profiles=profiles,
             summary_path=summary_path,
+            trace_index=summary["trace_index"],
         )
         write_text(summary_path, json.dumps(summary, indent=2) + "\n")
 

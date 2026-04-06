@@ -129,14 +129,26 @@ class StaticWebE2eHelperTests(unittest.TestCase):
                 scenarios=select_scenarios(["static-web-compare-export"]),
                 profiles=select_profiles(["desktop-default"]),
                 summary_path=root / "summary.json",
+                trace_index=[
+                    {
+                        "scenario_id": "react-web-compare-export",
+                        "profile": "desktop-default",
+                        "run_index": 1,
+                        "trace_id": "trace-123",
+                        "log_path": "evidence/run.json",
+                    }
+                ],
             )
             manifest = (root / "bundle" / "replay_manifest.json").read_text()
             script = (root / "bundle" / "replay_suite.sh").read_text()
+            manifest_json = __import__("json").loads(manifest)
             self.assertEqual(bundle["manifest_path"], str(root / "bundle" / "replay_manifest.json"))
             self.assertIn("\"surface\": \"web_react\"", manifest)
             self.assertIn("react-web-compare-export", manifest)
             self.assertIn("python3 scripts/run_static_web_e2e.py", script)
             self.assertIn("--profile-id desktop-default", script)
+            self.assertEqual(manifest_json["trace_index"][0]["trace_id"], "trace-123")
+            self.assertEqual(manifest_json["scenario_commands"][0]["trace_ids"], ["trace-123"])
 
 
 if __name__ == "__main__":

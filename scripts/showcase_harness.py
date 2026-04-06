@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import html
 import hashlib
 import json
 import re
@@ -162,6 +163,8 @@ def validate_e2e_summary(summary_path: Path, repo_root: Path, require_replay_bun
     scenarios = payload.get("scenarios")
     results = payload.get("results")
     determinism = payload.get("determinism")
+    differential = payload.get("differential")
+    trace_index = payload.get("trace_index")
     if not isinstance(profiles, list) or not profiles:
         errors.append("summary profiles must be a non-empty list")
     if not isinstance(scenarios, list) or not scenarios:
@@ -170,6 +173,10 @@ def validate_e2e_summary(summary_path: Path, repo_root: Path, require_replay_bun
         errors.append("summary results must be a non-empty list")
     if not isinstance(determinism, list) or not determinism:
         errors.append("summary determinism must be a non-empty list")
+    if differential is not None and not isinstance(differential, list):
+        errors.append("summary differential must be a list when present")
+    if trace_index is not None and not isinstance(trace_index, list):
+        errors.append("summary trace_index must be a list when present")
 
     validated_results = 0
     if isinstance(results, list):
@@ -187,6 +194,26 @@ def validate_e2e_summary(summary_path: Path, repo_root: Path, require_replay_bun
             ):
                 if field not in result:
                     errors.append(f"result missing field: {field}")
+            if trace_index is not None and "trace_id" not in result:
+                errors.append("result missing field: trace_id")
+            differential_report = result.get("differential")
+            if differential_report is not None:
+                for field in (
+                    "telemetry_present",
+                    "comparison_ready",
+                    "franken_svg_present",
+                    "mermaid_svg_present",
+                    "health",
+                    "mermaid_timing_ms",
+                    "franken_svg_timing_ms",
+                    "canvas_timing_ms",
+                    "degradation_reasons",
+                    "mermaid_baseline_degraded",
+                    "franken_svg_degraded",
+                    "runtime_artifact_missing",
+                ):
+                    if field not in differential_report:
+                        errors.append(f"result differential missing field: {field}")
             html_path = result.get("html_path")
             log_path = result.get("log_path")
             if isinstance(html_path, str) and not _resolve_artifact_path(repo_root, html_path).exists():
@@ -212,6 +239,34 @@ def validate_e2e_summary(summary_path: Path, repo_root: Path, require_replay_bun
                     )
             validated_determinism += 1
 
+    if isinstance(differential, list):
+        for item in differential:
+            for field in (
+                "scenario_id",
+                "profile",
+                "run_index",
+                "telemetry_present",
+                "comparison_ready",
+                "franken_svg_present",
+                "mermaid_svg_present",
+                "health",
+                "mermaid_timing_ms",
+                "franken_svg_timing_ms",
+                "canvas_timing_ms",
+                "degradation_reasons",
+                "mermaid_baseline_degraded",
+                "franken_svg_degraded",
+                "runtime_artifact_missing",
+            ):
+                if field not in item:
+                    errors.append(f"differential entry missing field: {field}")
+
+    if isinstance(trace_index, list):
+        for item in trace_index:
+            for field in ("scenario_id", "profile", "run_index", "trace_id", "log_path"):
+                if field not in item:
+                    errors.append(f"trace_index entry missing field: {field}")
+
     replay_info = payload.get("replay_bundle")
     if require_replay_bundle:
         if not isinstance(replay_info, dict):
@@ -231,6 +286,8 @@ def validate_e2e_summary(summary_path: Path, repo_root: Path, require_replay_bun
                     expected_commands = len(payload.get("profiles", [])) * len(payload.get("scenarios", []))
                     if len(manifest.get("scenario_commands", [])) != expected_commands:
                         errors.append("replay manifest scenario command count does not match scenario/profile matrix")
+                    if trace_index is not None and manifest.get("trace_index") != trace_index:
+                        errors.append("replay manifest trace_index does not match summary trace_index")
             if isinstance(script_path, str) and not _resolve_artifact_path(repo_root, script_path).exists():
                 errors.append(f"missing replay shell helper: {script_path}")
 
@@ -246,6 +303,8 @@ def validate_e2e_summary(summary_path: Path, repo_root: Path, require_replay_bun
         "profiles": payload["profiles"],
         "scenarios": payload["scenarios"],
         "has_replay_bundle": isinstance(replay_info, dict),
+        "differential_count": len(differential) if isinstance(differential, list) else 0,
+        "trace_count": len(trace_index) if isinstance(trace_index, list) else 0,
     }
 
 
@@ -363,6 +422,49 @@ def extract_module_script(html: str) -> str:
     if not match:
         raise ValueError("module script not found in HTML document")
     return match.group(1)
+
+
+def extract_json_pre(dom: str, element_id: str) -> dict[str, object] | None:
+    pattern = rf'<pre[^>]*id="{re.escape(element_id)}"[^>]*>(.*?)</pre>'
+    match = re.search(pattern, dom, re.DOTALL)
+    if not match:
+        return None
+    payload = html.unescape(match.group(1)).strip()
+    if not payload or payload.endswith("will appear after the next committed render.") or payload.endswith(
+        "will appear here after the checker runs."
+    ):
+        return None
+    return json.loads(payload)
+
+
+def extract_element_inner_html(dom: str, element_id: str) -> str | None:
+    pattern = rf'<(?P<tag>[a-zA-Z0-9]+)[^>]*id="{re.escape(element_id)}"[^>]*>(?P<body>.*?)</(?P=tag)>'
+    match = re.search(pattern, dom, re.DOTALL)
+    if not match:
+        return None
+    return match.group("body")
+
+
+def extract_differential_report(dom: str) -> dict[str, object]:
+    telemetry = extract_json_pre(dom, "telemetry-json")
+    franken_stage = extract_element_inner_html(dom, "fm-svg") or ""
+    mermaid_stage = extract_element_inner_html(dom, "mermaid-svg") or ""
+    degradation_reasons = list(telemetry.get("degradationReasons", [])) if isinstance(telemetry, dict) else []
+    timings = dict(telemetry.get("timings", {})) if isinstance(telemetry, dict) else {}
+    return {
+        "telemetry_present": telemetry is not None,
+        "comparison_ready": "<svg" in franken_stage.lower() and "<svg" in mermaid_stage.lower() and telemetry is not None,
+        "franken_svg_present": "<svg" in franken_stage.lower(),
+        "mermaid_svg_present": "<svg" in mermaid_stage.lower(),
+        "health": telemetry.get("health", "unreported") if isinstance(telemetry, dict) else "unreported",
+        "mermaid_timing_ms": int(timings.get("mermaid", 0) or 0) if isinstance(timings, dict) else 0,
+        "franken_svg_timing_ms": int(timings.get("svg", 0) or 0) if isinstance(timings, dict) else 0,
+        "canvas_timing_ms": int(timings.get("canvas", 0) or 0) if isinstance(timings, dict) else 0,
+        "degradation_reasons": degradation_reasons,
+        "mermaid_baseline_degraded": "mermaid baseline degraded" in degradation_reasons,
+        "franken_svg_degraded": "franken svg render failed" in degradation_reasons,
+        "runtime_artifact_missing": "runtime artifact missing" in degradation_reasons,
+    }
 
 
 def run_node_check(script: str) -> None:
