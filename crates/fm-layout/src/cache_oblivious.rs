@@ -202,63 +202,47 @@ pub fn veb_layout_order(n: usize) -> Vec<usize> {
     if n == 0 {
         return Vec::new();
     }
-
     let mut result = Vec::with_capacity(n);
-    veb_recursive(0, n, &mut result);
+    let height = (usize::BITS - n.leading_zeros()) as usize;
+    build_veb(0, height, n, &mut result);
     result
 }
 
-/// Recursively compute vEB layout.
-fn veb_recursive(start: usize, count: usize, result: &mut Vec<usize>) {
-    if count == 0 {
+/// Recursively compute vEB layout from BFS indices.
+fn build_veb(root_bfs: usize, height: usize, n: usize, result: &mut Vec<usize>) {
+    if height == 0 || root_bfs >= n {
         return;
     }
-    if count == 1 {
-        result.push(start);
+    if height == 1 {
+        result.push(root_bfs);
         return;
     }
 
-    // Find the height of the tree.
-    let height = (usize::BITS - count.leading_zeros()) as usize;
     let half_height = height / 2;
+    let bottom_height = height - half_height;
 
-    // Top tree has 2^half_height - 1 nodes.
-    // Guard against shift overflow for very large inputs.
-    let top_size = if half_height >= usize::BITS as usize {
-        count
-    } else {
-        ((1_usize << half_height) - 1).min(count)
-    };
+    // Layout the top tree.
+    build_veb(root_bfs, half_height, n, result);
 
-    // Layout the top tree first.
-    veb_recursive(start, top_size, result);
-
-    // Layout each bottom subtree.
-    let remaining = count - top_size;
-    if remaining == 0 {
+    // Layout the bottom trees.
+    // In a BFS complete binary tree, the nodes at relative depth `d` from `u`
+    // are exactly in the index range `[u * 2^d + 2^d - 1 .. u * 2^d + 2^{d+1} - 1]`.
+    let d = half_height;
+    if d >= usize::BITS as usize {
         return;
     }
 
-    let height_diff = height - half_height;
-    let bottom_tree_size = if height_diff >= usize::BITS as usize {
-        remaining // Single giant subtree as fallback
-    } else {
-        (1_usize << height_diff) - 1
-    };
-    let num_bottom_trees = if bottom_tree_size == 0 {
-        0
-    } else {
-        remaining.div_ceil(bottom_tree_size)
-    };
+    let level_size = 1_usize << d;
+    let first_leaf = root_bfs
+        .saturating_mul(level_size)
+        .saturating_add(level_size - 1);
+    let last_leaf = first_leaf.saturating_add(level_size);
 
-    let mut offset = start + top_size;
-    for _ in 0..num_bottom_trees {
-        let this_size = bottom_tree_size.min(count.saturating_sub(offset - start));
-        if this_size == 0 {
+    for child_root in first_leaf..last_leaf {
+        if child_root >= n {
             break;
         }
-        veb_recursive(offset, this_size, result);
-        offset += this_size;
+        build_veb(child_root, bottom_height, n, result);
     }
 }
 

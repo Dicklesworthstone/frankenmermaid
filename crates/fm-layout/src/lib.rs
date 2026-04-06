@@ -1427,6 +1427,55 @@ fn incremental_overlap_alignment(
     ))
 }
 
+/// Smooth edges that cross a dirty/clean subgraph boundary.
+///
+/// After incremental re-layout, edges with one endpoint in the dirty region and one in
+/// the clean region may have intermediate waypoints that create visual kinks. This pass
+/// applies a gentle Laplacian smoothing to interior waypoints of boundary edges, pulling
+/// each interior point toward the midpoint of its neighbors to reduce angular
+/// discontinuities while preserving the start and end anchors.
+fn smooth_boundary_edges(
+    ir: &MermaidDiagramIr,
+    edges: &mut [LayoutEdgePath],
+    dirty_node_indexes: &BTreeSet<usize>,
+) {
+    const SMOOTHING_FACTOR: f32 = 0.3;
+    const SMOOTHING_PASSES: usize = 2;
+
+    for edge_path in edges.iter_mut() {
+        let Some(edge) = ir.edges.get(edge_path.edge_index) else {
+            continue;
+        };
+        let source = endpoint_node_index(ir, edge.from);
+        let target = endpoint_node_index(ir, edge.to);
+        let (Some(src), Some(tgt)) = (source, target) else {
+            continue;
+        };
+        let src_dirty = dirty_node_indexes.contains(&src);
+        let tgt_dirty = dirty_node_indexes.contains(&tgt);
+        // Only smooth boundary-crossing edges (one dirty, one clean).
+        if src_dirty == tgt_dirty {
+            continue;
+        }
+        if edge_path.points.len() < 3 {
+            continue;
+        }
+        // Laplacian smoothing: pull interior points toward neighbor midpoints.
+        for _ in 0..SMOOTHING_PASSES {
+            let len = edge_path.points.len();
+            for i in 1..len - 1 {
+                let prev = edge_path.points[i - 1];
+                let next = edge_path.points[i + 1];
+                let mid_x = (prev.x + next.x) * 0.5;
+                let mid_y = (prev.y + next.y) * 0.5;
+                let pt = &mut edge_path.points[i];
+                pt.x += (mid_x - pt.x) * SMOOTHING_FACTOR;
+                pt.y += (mid_y - pt.y) * SMOOTHING_FACTOR;
+            }
+        }
+    }
+}
+
 fn derive_layout_edits(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> Vec<LayoutEdit> {
     let mut edits = Vec::new();
     let shared_nodes = previous.nodes.len().min(current.nodes.len());
@@ -2850,6 +2899,7 @@ impl IncrementalLayoutEngine {
         }
 
         track_dependency_graph_query(ir);
+        let incremental_start = std::time::Instant::now();
         let current_graph =
             if dependency_graph_cache_key(&cached_graph.ir) == dependency_graph_cache_key(ir) {
                 cached_graph.graph.clone()
@@ -2944,6 +2994,7 @@ impl IncrementalLayoutEngine {
         }
 
         let mut edges = build_edge_paths(ir, &nodes, &highlighted_edge_indexes);
+        smooth_boundary_edges(ir, &mut edges, &dirty_node_indexes);
         bundle_parallel_edges(ir, &mut edges);
         let clusters = build_cluster_boxes(ir, &nodes, spacing);
         let cluster_dividers = build_state_cluster_dividers(ir, &nodes, &clusters);
@@ -3002,7 +3053,7 @@ impl IncrementalLayoutEngine {
                     cache_hit: false,
                     recomputed_nodes: dirty_node_indexes.len(),
                     total_nodes: ir.nodes.len(),
-                    recompute_duration_us: 0,
+                    recompute_duration_us: saturating_elapsed_micros(incremental_start.elapsed()),
                 },
                 ..trace
             },

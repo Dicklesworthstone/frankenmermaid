@@ -498,34 +498,6 @@ fn flow_statement_parser<'a>() -> impl Parser<'a, &'a str, FlowAst, extra::Err<R
         .at_least(1)
         .to_slice();
 
-    // -- Quoted string -------------------------------------------------------
-    let quoted_string = {
-        let esc = just('\\').ignore_then(any());
-        let double_q = just('"')
-            .ignore_then(
-                choice((esc, any().filter(|c: &char| *c != '"')))
-                    .repeated()
-                    .collect::<String>(),
-            )
-            .then_ignore(just('"'));
-        let single_q = just('\'')
-            .ignore_then(
-                choice((esc, any().filter(|c: &char| *c != '\'')))
-                    .repeated()
-                    .collect::<String>(),
-            )
-            .then_ignore(just('\''));
-        let back_q = just('`')
-            .ignore_then(
-                any()
-                    .filter(|c: &char| *c != '`')
-                    .repeated()
-                    .collect::<String>(),
-            )
-            .then_ignore(just('`'));
-        double_q.or(single_q).or(back_q)
-    };
-
     // -- Node shapes ---------------------------------------------------------
     // Multi-char delimiters must be tried before single-char ones.
     let double_circle_content = just("((")
@@ -655,19 +627,58 @@ fn flow_statement_parser<'a>() -> impl Parser<'a, &'a str, FlowAst, extra::Err<R
             }
         });
 
-    // -- click directive: click nodeId target ["tooltip"] ---------------------
-    let click_directive = just("click")
+    // -- click directive: click nodeId target ["tooltip"] -------------------
+    let bare_token = any()
+        .filter(|c: &char| !c.is_whitespace())
+        .repeated()
+        .at_least(1)
+        .to_slice()
+        .map(|s: &str| s.to_string());
+
+    let quoted_string = just('"')
+        .ignore_then(any().filter(|c: &char| *c != '"').repeated().to_slice())
+        .then_ignore(just('"'))
+        .map(|s: &str| s.to_string());
+
+    let click_callback_directive = just("click")
         .then(required_ws)
         .ignore_then(ident)
         .then_ignore(required_ws)
-        .then(
-            quoted_string.or(any()
-                .repeated()
-                .at_least(1)
-                .to_slice()
-                .map(|s: &str| s.to_string())),
-        )
+        .then(choice((just("call"), just("callback"))))
+        .then_ignore(required_ws)
+        .then(bare_token)
         .then(required_ws.ignore_then(quoted_string).or_not())
+        .then_ignore(end())
+        .map(
+            |(((node_id, _keyword), callback), tooltip): (
+                ((&str, &str), String),
+                Option<String>,
+            )| {
+                FlowAst::ClickDirective {
+                    node: node_id.to_string(),
+                    target: callback,
+                    tooltip,
+                    is_callback: true,
+                }
+            },
+        );
+
+    let quoted_string_link = just('"')
+        .ignore_then(any().filter(|c: &char| *c != '"').repeated().to_slice())
+        .then_ignore(just('"'))
+        .map(|s: &str| s.to_string());
+
+    let quoted_string_tooltip = just('"')
+        .ignore_then(any().filter(|c: &char| *c != '"').repeated().to_slice())
+        .then_ignore(just('"'))
+        .map(|s: &str| s.to_string());
+
+    let click_link_directive = just("click")
+        .then(required_ws)
+        .ignore_then(ident)
+        .then_ignore(required_ws)
+        .then(quoted_string_link.or(bare_token))
+        .then(required_ws.ignore_then(quoted_string_tooltip).or_not())
         .then_ignore(end())
         .map(
             |((node_id, target), tooltip): ((&str, String), Option<String>)| {
@@ -679,6 +690,8 @@ fn flow_statement_parser<'a>() -> impl Parser<'a, &'a str, FlowAst, extra::Err<R
                 }
             },
         );
+
+    let click_directive = choice((click_callback_directive, click_link_directive));
 
     // -- style/linkStyle/classDef (skip) ------------------------------------
     let skip_directive = choice((
@@ -8793,6 +8806,24 @@ mod tests {
                 .iter()
                 .any(|warning| warning.contains("unsafe click link target blocked"))
         );
+    }
+
+    #[test]
+    fn flowchart_click_callback_directive_sets_callback_and_tooltip() {
+        let parsed = parse_mermaid("flowchart LR\nA-->B\nclick B call focusNode \"Focus node\"");
+        let node_b = parsed.ir.nodes.iter().find(|node| node.id == "B");
+
+        assert!(node_b.is_some());
+        let node_b = node_b.expect("node B should exist");
+        assert_eq!(node_b.callback.as_deref(), Some("focusNode"));
+        assert_eq!(node_b.tooltip.as_deref(), Some("Focus node"));
+        assert!(
+            node_b
+                .classes
+                .iter()
+                .any(|class_name| class_name == "has-callback")
+        );
+        assert!(node_b.href.is_none());
     }
 
     #[test]
