@@ -526,6 +526,7 @@ dependencies = [
 name = "fm-layout"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "fm-core",
  "fnx-algorithms",
  "fnx-classes",
