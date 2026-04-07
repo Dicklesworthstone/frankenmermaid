@@ -17,15 +17,15 @@ fnx-experimental-directed = ["fnx-integration"]
 
 [dependencies]
 fm-core.workspace = true
-nalgebra.workspace = true
 tracing.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+nalgebra.workspace = true
+good_lp = { workspace = true, features = ["highs"] }
 fnx-runtime = { workspace = true, optional = true }
 fnx-classes = { workspace = true, optional = true }
 fnx-algorithms = { workspace = true, optional = true }
 fnx-views = { workspace = true, optional = true }
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-good_lp = { workspace = true, features = ["highs"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tracing = { workspace = true, features = ["release_max_level_off"] }

@@ -17,7 +17,7 @@
 //! - `serve`: Start local HTTP server with live-reload playground (requires `serve` feature)
 
 use std::io::{self, IsTerminal, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -33,26 +33,27 @@ use crossterm::terminal::{
 };
 use crossterm::{execute, queue};
 use fm_core::{
-    DiagramType, MermaidBudgetLedger, MermaidDiagramIr, MermaidLayoutDecisionLedger,
-    MermaidNativePressureSignals, MermaidParseMode, StructuredDiagnostic, capability_matrix,
-    capability_matrix_json_pretty, mermaid_layout_guard_observability,
+    DiagramType, MermaidBudgetLedger, MermaidDiagramIr, MermaidGlyphMode,
+    MermaidLayoutDecisionLedger, MermaidNativePressureSignals, MermaidParseMode, MermaidTier,
+    StructuredDiagnostic, capability_matrix, capability_matrix_json_pretty,
+    mermaid_layout_guard_observability,
 };
 use fm_layout::{
-    LayoutAlgorithm, LayoutConfig, LayoutGuardrails, TracedLayout, build_layout_decision_ledger,
-    build_layout_guard_report_with_pressure, layout_diagram_traced_with_config_and_guardrails,
-    layout_source_map,
+    CycleStrategy, EdgeRouting, LayoutAlgorithm, LayoutConfig, LayoutGuardrails, TracedLayout,
+    build_layout_decision_ledger, build_layout_guard_report_with_pressure,
+    layout_diagram_traced_with_config_and_guardrails, layout_source_map,
 };
 use fm_parser::{
     detect_type_with_confidence, first_significant_line, parse_evidence_json, parse_with_mode,
 };
 use fm_render_svg::{
-    SvgRenderConfig, ThemePreset, describe_diagram_with_layout, render_svg_with_layout,
+    A11yConfig, SvgRenderConfig, ThemePreset, describe_diagram_with_layout, render_svg_with_layout,
 };
 use fm_render_term::{
     TermRenderConfig, diff_diagrams, render_diff_plain, render_diff_summary,
     render_diff_terminal_with_config, render_term_with_layout_and_config,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
@@ -96,6 +97,11 @@ struct Cli {
     #[command(subcommand)]
     command: Command,
 
+    /// Config file path. If omitted, auto-discovers `./frankenmermaid.toml`
+    /// and then `~/.config/frankenmermaid/config.toml`.
+    #[arg(long, global = true)]
+    config: Option<String>,
+
     /// Enable verbose logging (can be repeated for more detail: -v, -vv, -vvv)
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     verbose: u8,
@@ -118,16 +124,16 @@ enum Command {
         parse_mode: ParseModeArg,
 
         /// Requested layout algorithm family.
-        #[arg(long, value_enum, default_value = "auto")]
-        layout_algorithm: LayoutAlgorithmArg,
+        #[arg(long, value_enum)]
+        layout_algorithm: Option<LayoutAlgorithmArg>,
 
         /// Output format
-        #[arg(short, long, value_enum, default_value = "svg")]
-        format: OutputFormat,
+        #[arg(short, long, value_enum)]
+        format: Option<OutputFormat>,
 
         /// Theme name (default, dark, forest, neutral)
-        #[arg(short, long, default_value = "default")]
-        theme: String,
+        #[arg(short, long)]
+        theme: Option<String>,
 
         /// Font size in pixels.
         #[arg(long, value_parser = parse_positive_font_size_arg)]
@@ -237,8 +243,8 @@ enum Command {
         parse_mode: ParseModeArg,
 
         /// Requested layout algorithm family for validation/layout evidence.
-        #[arg(long, value_enum, default_value = "auto")]
-        layout_algorithm: LayoutAlgorithmArg,
+        #[arg(long, value_enum)]
+        layout_algorithm: Option<LayoutAlgorithmArg>,
 
         /// Validation output format.
         #[arg(long, value_enum, default_value = "text")]
@@ -279,8 +285,8 @@ enum Command {
         parse_mode: ParseModeArg,
 
         /// Initial UI theme.
-        #[arg(short, long, default_value = "default")]
-        theme: String,
+        #[arg(short, long)]
+        theme: Option<String>,
     },
 
     /// Watch a file and re-render on changes (requires `watch` feature).
@@ -416,6 +422,75 @@ impl LayoutAlgorithmArg {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct FrankenmermaidConfigFile {
+    core: FrankenmermaidCoreConfig,
+    parser: FrankenmermaidParserConfig,
+    layout: FrankenmermaidLayoutConfig,
+    render: FrankenmermaidRenderConfig,
+    svg: FrankenmermaidSvgConfig,
+    term: FrankenmermaidTermConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct FrankenmermaidCoreConfig {
+    deterministic: Option<bool>,
+    max_input_bytes: Option<usize>,
+    fallback_on_error: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct FrankenmermaidParserConfig {
+    intent_inference: Option<bool>,
+    fuzzy_keyword_distance: Option<usize>,
+    auto_close_delimiters: Option<bool>,
+    create_placeholder_nodes: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct FrankenmermaidLayoutConfig {
+    algorithm: Option<String>,
+    cycle_strategy: Option<String>,
+    node_spacing: Option<f32>,
+    rank_spacing: Option<f32>,
+    edge_routing: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct FrankenmermaidRenderConfig {
+    default_format: Option<String>,
+    show_back_edges: Option<bool>,
+    reduced_motion: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct FrankenmermaidSvgConfig {
+    theme: Option<String>,
+    rounded_corners: Option<f32>,
+    shadows: Option<bool>,
+    gradients: Option<bool>,
+    accessibility: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct FrankenmermaidTermConfig {
+    tier: Option<String>,
+    unicode: Option<bool>,
+    minimap: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LoadedCliConfig {
+    file: FrankenmermaidConfigFile,
+}
+
 impl FailOnSeverity {
     const fn rank(self) -> u8 {
         match self {
@@ -490,14 +565,18 @@ struct RenderResult {
     warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct RenderCommandOptions<'a> {
     parse_mode: MermaidParseMode,
     layout_algorithm: LayoutAlgorithm,
+    layout_config: LayoutConfig,
     format: OutputFormat,
     theme: &'a str,
     font_size: Option<f32>,
     output: Option<&'a str>,
+    max_input_bytes: usize,
+    svg_base_config: SvgRenderConfig,
+    term_base_config: TermRenderConfig,
     embed_source_spans: bool,
     source_map_out: Option<&'a str>,
     dimensions: (Option<u32>, Option<u32>),
@@ -509,6 +588,7 @@ struct DiffCommandOptions<'a> {
     parse_mode: MermaidParseMode,
     format: DiffOutputFormat,
     color: ColorChoice,
+    max_input_bytes: usize,
     dimensions: (Option<u32>, Option<u32>),
     output: Option<&'a str>,
 }
@@ -517,9 +597,23 @@ struct DiffCommandOptions<'a> {
 struct RenderSurfaceOptions<'a> {
     theme: &'a str,
     font_size: Option<f32>,
+    svg_base_config: SvgRenderConfig,
+    term_base_config: TermRenderConfig,
     embed_source_spans: bool,
     dimensions: (Option<u32>, Option<u32>),
     degradation: fm_core::MermaidDegradationPlan,
+}
+
+#[derive(Debug, Clone)]
+struct ValidateCommandOptions<'a> {
+    parse_mode: MermaidParseMode,
+    layout_algorithm: LayoutAlgorithm,
+    layout_config: LayoutConfig,
+    format: ValidateOutputFormat,
+    fail_on: FailOnSeverity,
+    diagnostics_out: Option<&'a str>,
+    max_input_bytes: usize,
+    svg_base_config: SvgRenderConfig,
 }
 
 /// Result of detecting diagram type.
@@ -660,6 +754,8 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     init_tracing(cli.verbose, cli.quiet);
+    let loaded_config = load_cli_config(cli.config.as_deref())?;
+    let max_input_bytes = resolve_max_input_bytes(&loaded_config.file)?;
 
     match cli.command {
         Command::Render {
@@ -676,34 +772,46 @@ fn main() -> Result<()> {
             embed_source_spans,
             no_embed_source_spans,
             source_map_out,
-        } => cmd_render(
-            &input,
-            RenderCommandOptions {
-                parse_mode: parse_mode.to_core(),
-                layout_algorithm: layout_algorithm.to_layout(),
-                format,
-                theme: &theme,
-                font_size,
-                output: output.as_deref(),
-                embed_source_spans: if no_embed_source_spans {
-                    false
-                } else {
-                    embed_source_spans || format == OutputFormat::Svg
+        } => {
+            let format = resolve_output_format(format, &loaded_config.file)?;
+            let layout_algorithm = resolve_layout_algorithm(layout_algorithm, &loaded_config.file)?;
+            let theme = resolve_theme_name(theme, &loaded_config.file);
+            let layout_config = build_layout_config(&loaded_config.file, font_size)?;
+            let svg_base_config = build_base_svg_render_config(&loaded_config.file)?;
+            let term_base_config = build_base_term_render_config(&loaded_config.file)?;
+            cmd_render(
+                &input,
+                RenderCommandOptions {
+                    parse_mode: parse_mode.to_core(),
+                    layout_algorithm,
+                    layout_config,
+                    format,
+                    theme: &theme,
+                    font_size,
+                    output: output.as_deref(),
+                    max_input_bytes,
+                    svg_base_config,
+                    term_base_config,
+                    embed_source_spans: if no_embed_source_spans {
+                        false
+                    } else {
+                        embed_source_spans || format == OutputFormat::Svg
+                    },
+                    source_map_out: source_map_out.as_deref(),
+                    dimensions: (width, height),
+                    json_output: json,
                 },
-                source_map_out: source_map_out.as_deref(),
-                dimensions: (width, height),
-                json_output: json,
-            },
-        ),
+            )
+        }
 
         Command::Parse {
             input,
             parse_mode,
             full,
             pretty,
-        } => cmd_parse(&input, parse_mode.to_core(), full, pretty),
+        } => cmd_parse(&input, parse_mode.to_core(), full, pretty, max_input_bytes),
 
-        Command::Detect { input, json } => cmd_detect(&input, json),
+        Command::Detect { input, json } => cmd_detect(&input, json, max_input_bytes),
 
         Command::Diff {
             old_input,
@@ -721,6 +829,7 @@ fn main() -> Result<()> {
                 parse_mode: parse_mode.to_core(),
                 format,
                 color,
+                max_input_bytes,
                 dimensions: (width, height),
                 output: output.as_deref(),
             },
@@ -735,11 +844,16 @@ fn main() -> Result<()> {
             diagnostics_out,
         } => cmd_validate(
             &input,
-            parse_mode.to_core(),
-            layout_algorithm.to_layout(),
-            format,
-            fail_on,
-            diagnostics_out.as_deref(),
+            ValidateCommandOptions {
+                parse_mode: parse_mode.to_core(),
+                layout_algorithm: resolve_layout_algorithm(layout_algorithm, &loaded_config.file)?,
+                layout_config: build_layout_config(&loaded_config.file, None)?,
+                format,
+                fail_on,
+                diagnostics_out: diagnostics_out.as_deref(),
+                max_input_bytes,
+                svg_base_config: build_base_svg_render_config(&loaded_config.file)?,
+            },
         ),
 
         Command::Capabilities { pretty, output } => cmd_capabilities(pretty, output.as_deref()),
@@ -750,7 +864,10 @@ fn main() -> Result<()> {
             input,
             parse_mode,
             theme,
-        } => cmd_interactive(&input, parse_mode.to_core(), &theme),
+        } => {
+            let theme = resolve_theme_name(theme, &loaded_config.file);
+            cmd_interactive(&input, parse_mode.to_core(), &theme, max_input_bytes)
+        }
 
         #[cfg(feature = "watch")]
         Command::Watch {
@@ -784,17 +901,307 @@ fn init_tracing(verbose: u8, quiet: bool) {
         .try_init();
 }
 
-fn load_input(input: &str) -> Result<String> {
+fn discover_config_path() -> Option<PathBuf> {
+    let local = PathBuf::from("frankenmermaid.toml");
+    if local.exists() {
+        return Some(local);
+    }
+
+    let home = std::env::var_os("HOME")?;
+    let user_config = PathBuf::from(home).join(".config/frankenmermaid/config.toml");
+    user_config.exists().then_some(user_config)
+}
+
+fn load_cli_config(explicit_path: Option<&str>) -> Result<LoadedCliConfig> {
+    let Some(path) = explicit_path
+        .map(PathBuf::from)
+        .or_else(discover_config_path)
+    else {
+        return Ok(LoadedCliConfig::default());
+    };
+
+    let contents = std::fs::read_to_string(&path)
+        .with_context(|| format!("Failed to read config file: {}", path.display()))?;
+    let file = toml::from_str::<FrankenmermaidConfigFile>(&contents)
+        .map_err(|err| anyhow::anyhow!("Failed to parse config file {}: {err}", path.display()))?;
+
+    // Force eager validation so invalid enum-like values fail at load time.
+    let _ = resolve_max_input_bytes(&file)?;
+    let _ = resolve_default_output_format(&file)?;
+    let _ = resolve_default_layout_algorithm(&file)?;
+    let _ = build_layout_config(&file, None)?;
+    let _ = build_base_svg_render_config(&file)?;
+    let _ = build_base_term_render_config(&file)?;
+
+    info!("Loaded config file: {}", path.display());
+
+    Ok(LoadedCliConfig { file })
+}
+
+fn parse_output_format_name(value: &str) -> Result<OutputFormat> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "svg" => Ok(OutputFormat::Svg),
+        "png" => Ok(OutputFormat::Png),
+        "term" => Ok(OutputFormat::Term),
+        "ascii" => Ok(OutputFormat::Ascii),
+        other => anyhow::bail!("unknown render.default_format '{other}'"),
+    }
+}
+
+fn parse_layout_algorithm_name(value: &str) -> Result<LayoutAlgorithm> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "auto" => Ok(LayoutAlgorithm::Auto),
+        "sugiyama" => Ok(LayoutAlgorithm::Sugiyama),
+        "force" => Ok(LayoutAlgorithm::Force),
+        "tree" => Ok(LayoutAlgorithm::Tree),
+        "radial" => Ok(LayoutAlgorithm::Radial),
+        "sequence" => Ok(LayoutAlgorithm::Sequence),
+        "timeline" => Ok(LayoutAlgorithm::Timeline),
+        "gantt" => Ok(LayoutAlgorithm::Gantt),
+        "xychart" => Ok(LayoutAlgorithm::XyChart),
+        "sankey" => Ok(LayoutAlgorithm::Sankey),
+        "kanban" => Ok(LayoutAlgorithm::Kanban),
+        "grid" => Ok(LayoutAlgorithm::Grid),
+        "pie" => Ok(LayoutAlgorithm::Pie),
+        "quadrant" => Ok(LayoutAlgorithm::Quadrant),
+        "gitgraph" => Ok(LayoutAlgorithm::GitGraph),
+        "packet" => Ok(LayoutAlgorithm::Packet),
+        other => anyhow::bail!("unknown layout.algorithm '{other}'"),
+    }
+}
+
+fn parse_edge_routing_name(value: &str) -> Result<EdgeRouting> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "orthogonal" => Ok(EdgeRouting::Orthogonal),
+        "spline" => Ok(EdgeRouting::Spline),
+        other => anyhow::bail!("unknown layout.edge_routing '{other}'"),
+    }
+}
+
+fn parse_tier_name(value: &str) -> Result<MermaidTier> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "auto" => Ok(MermaidTier::Auto),
+        "compact" => Ok(MermaidTier::Compact),
+        "normal" => Ok(MermaidTier::Normal),
+        "rich" => Ok(MermaidTier::Rich),
+        other => anyhow::bail!("unknown term.tier '{other}'"),
+    }
+}
+
+fn validate_reduced_motion_name(value: &str) -> Result<()> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "auto" | "always" | "never" => Ok(()),
+        other => anyhow::bail!("unknown render.reduced_motion '{other}'"),
+    }
+}
+
+fn resolve_max_input_bytes(config: &FrankenmermaidConfigFile) -> Result<usize> {
+    let max_input_bytes = config.core.max_input_bytes.unwrap_or(5_000_000);
+    if max_input_bytes == 0 {
+        anyhow::bail!("core.max_input_bytes must be greater than 0");
+    }
+    Ok(max_input_bytes)
+}
+
+fn resolve_default_output_format(config: &FrankenmermaidConfigFile) -> Result<OutputFormat> {
+    config
+        .render
+        .default_format
+        .as_deref()
+        .map(parse_output_format_name)
+        .transpose()
+        .map(|value| value.unwrap_or(OutputFormat::Svg))
+}
+
+fn resolve_output_format(
+    explicit: Option<OutputFormat>,
+    config: &FrankenmermaidConfigFile,
+) -> Result<OutputFormat> {
+    match explicit {
+        Some(format) => Ok(format),
+        None => resolve_default_output_format(config),
+    }
+}
+
+fn resolve_default_layout_algorithm(config: &FrankenmermaidConfigFile) -> Result<LayoutAlgorithm> {
+    config
+        .layout
+        .algorithm
+        .as_deref()
+        .map(parse_layout_algorithm_name)
+        .transpose()
+        .map(|value| value.unwrap_or(LayoutAlgorithm::Auto))
+}
+
+fn resolve_layout_algorithm(
+    explicit: Option<LayoutAlgorithmArg>,
+    config: &FrankenmermaidConfigFile,
+) -> Result<LayoutAlgorithm> {
+    match explicit {
+        Some(algorithm) => Ok(algorithm.to_layout()),
+        None => resolve_default_layout_algorithm(config),
+    }
+}
+
+fn resolve_theme_name(explicit: Option<String>, config: &FrankenmermaidConfigFile) -> String {
+    explicit
+        .or_else(|| config.svg.theme.clone())
+        .unwrap_or_else(|| String::from("default"))
+}
+
+fn validate_non_negative_f32(value: f32, field: &str) -> Result<f32> {
+    if value.is_finite() && value >= 0.0 {
+        Ok(value)
+    } else {
+        anyhow::bail!("{field} must be a finite value greater than or equal to 0");
+    }
+}
+
+fn validate_positive_f32(value: f32, field: &str) -> Result<f32> {
+    if value.is_finite() && value > 0.0 {
+        Ok(value)
+    } else {
+        anyhow::bail!("{field} must be a finite value greater than 0");
+    }
+}
+
+fn build_layout_config(
+    config_file: &FrankenmermaidConfigFile,
+    font_size: Option<f32>,
+) -> Result<LayoutConfig> {
+    let mut config = LayoutConfig::default();
+    config.font_metrics = normalize_positive_font_size(font_size).map(|size| {
+        fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+            font_size: size,
+            ..Default::default()
+        })
+    });
+
+    if let Some(cycle_strategy) = config_file.layout.cycle_strategy.as_deref() {
+        config.cycle_strategy = CycleStrategy::parse(cycle_strategy).ok_or_else(|| {
+            anyhow::anyhow!("unknown layout.cycle_strategy '{}'", cycle_strategy.trim())
+        })?;
+    }
+    if let Some(node_spacing) = config_file.layout.node_spacing {
+        config.spacing.node_spacing = validate_positive_f32(node_spacing, "layout.node_spacing")?;
+    }
+    if let Some(rank_spacing) = config_file.layout.rank_spacing {
+        config.spacing.rank_spacing = validate_positive_f32(rank_spacing, "layout.rank_spacing")?;
+    }
+    if let Some(edge_routing) = config_file.layout.edge_routing.as_deref() {
+        config.edge_routing = parse_edge_routing_name(edge_routing)?;
+    }
+
+    Ok(config)
+}
+
+fn apply_reduced_motion_setting(
+    config: &mut SvgRenderConfig,
+    reduced_motion: Option<&str>,
+) -> Result<()> {
+    let Some(reduced_motion) = reduced_motion else {
+        return Ok(());
+    };
+    validate_reduced_motion_name(reduced_motion)?;
+    match reduced_motion.trim().to_ascii_lowercase().as_str() {
+        "always" => config.animations_enabled = false,
+        "never" => config.animations_enabled = true,
+        "auto" => {}
+        _ => unreachable!("validated above"),
+    }
+    Ok(())
+}
+
+fn build_base_svg_render_config(config_file: &FrankenmermaidConfigFile) -> Result<SvgRenderConfig> {
+    let mut config = SvgRenderConfig::default();
+
+    if let Some(theme) = config_file.svg.theme.as_deref() {
+        config.theme = theme
+            .parse::<ThemePreset>()
+            .map_err(|_| anyhow::anyhow!("unknown svg.theme '{}'", theme.trim()))?;
+    }
+    if let Some(rounded_corners) = config_file.svg.rounded_corners {
+        config.rounded_corners = validate_non_negative_f32(rounded_corners, "svg.rounded_corners")?;
+    }
+    if let Some(shadows) = config_file.svg.shadows {
+        config.shadows = shadows;
+    }
+    if let Some(gradients) = config_file.svg.gradients {
+        config.node_gradients = gradients;
+    }
+    if let Some(accessibility) = config_file.svg.accessibility {
+        config.accessible = accessibility;
+        config.a11y = if accessibility {
+            A11yConfig::full()
+        } else {
+            A11yConfig::none()
+        };
+    }
+    apply_reduced_motion_setting(&mut config, config_file.render.reduced_motion.as_deref())?;
+
+    Ok(config)
+}
+
+fn build_base_term_render_config(
+    config_file: &FrankenmermaidConfigFile,
+) -> Result<TermRenderConfig> {
+    let mut config = TermRenderConfig::rich();
+
+    if let Some(tier) = config_file.term.tier.as_deref() {
+        config.tier = parse_tier_name(tier)?;
+    }
+    if let Some(unicode) = config_file.term.unicode {
+        config.glyph_mode = if unicode {
+            MermaidGlyphMode::Unicode
+        } else {
+            MermaidGlyphMode::Ascii
+        };
+    }
+
+    Ok(config)
+}
+
+fn load_input(input: &str, max_input_bytes: usize) -> Result<String> {
     if input == "-" {
         let mut buffer = String::new();
         io::stdin()
             .read_to_string(&mut buffer)
             .context("Failed to read from stdin")?;
+        if buffer.len() > max_input_bytes {
+            anyhow::bail!(
+                "Input from stdin is {} bytes, which exceeds core.max_input_bytes={max_input_bytes}",
+                buffer.len()
+            );
+        }
         Ok(buffer)
     } else if Path::new(input).exists() {
-        std::fs::read_to_string(input).context(format!("Failed to read file: {input}"))
+        let metadata =
+            std::fs::metadata(input).context(format!("Failed to stat input file: {input}"))?;
+        if metadata.len() > u64::try_from(max_input_bytes).unwrap_or(u64::MAX) {
+            anyhow::bail!(
+                "Input file '{}' is {} bytes, which exceeds core.max_input_bytes={max_input_bytes}",
+                input,
+                metadata.len()
+            );
+        }
+        let content =
+            std::fs::read_to_string(input).context(format!("Failed to read file: {input}"))?;
+        if content.len() > max_input_bytes {
+            anyhow::bail!(
+                "Input file '{}' is {} bytes after UTF-8 decoding, which exceeds core.max_input_bytes={max_input_bytes}",
+                input,
+                content.len()
+            );
+        }
+        Ok(content)
     } else {
         // Treat as inline diagram text
+        if input.len() > max_input_bytes {
+            anyhow::bail!(
+                "Inline input is {} bytes, which exceeds core.max_input_bytes={max_input_bytes}",
+                input.len()
+            );
+        }
         Ok(input.to_string())
     }
 }
@@ -986,10 +1393,14 @@ fn cmd_render(input: &str, options: RenderCommandOptions<'_>) -> Result<()> {
     let RenderCommandOptions {
         parse_mode,
         layout_algorithm,
+        layout_config,
         format,
         theme,
         font_size,
         output,
+        max_input_bytes,
+        svg_base_config,
+        term_base_config,
         embed_source_spans,
         source_map_out,
         dimensions,
@@ -1003,7 +1414,7 @@ fn cmd_render(input: &str, options: RenderCommandOptions<'_>) -> Result<()> {
         anyhow::bail!("--source-map-out is only supported with --format svg");
     }
 
-    let source = load_input(input)?;
+    let source = load_input(input, max_input_bytes)?;
     let total_start = Instant::now();
     let pressure = MermaidNativePressureSignals::sample().into_report();
     let mut budget_broker = MermaidBudgetLedger::new(&pressure);
@@ -1033,18 +1444,6 @@ fn cmd_render(input: &str, options: RenderCommandOptions<'_>) -> Result<()> {
         max_layout_iterations: budget_broker
             .layout_iteration_budget(LayoutGuardrails::default().max_layout_iterations),
         max_route_ops: budget_broker.route_budget(LayoutGuardrails::default().max_route_ops),
-    };
-    let font_size = normalize_positive_font_size(font_size);
-    let font_metrics = font_size.map(|size| {
-        fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
-            font_size: size,
-            ..Default::default()
-        })
-    });
-
-    let layout_config = LayoutConfig {
-        font_metrics,
-        ..Default::default()
     };
     let traced_layout = fm_layout::layout_diagram_traced_with_config_and_guardrails(
         &parsed.ir,
@@ -1096,6 +1495,8 @@ fn cmd_render(input: &str, options: RenderCommandOptions<'_>) -> Result<()> {
         RenderSurfaceOptions {
             theme: effective_theme,
             font_size,
+            svg_base_config,
+            term_base_config,
             embed_source_spans,
             dimensions: (width, height),
             degradation: guard_report.degradation.clone(),
@@ -1221,13 +1622,16 @@ fn render_format(
     let RenderSurfaceOptions {
         theme,
         font_size,
+        svg_base_config,
+        term_base_config,
         embed_source_spans,
         dimensions: (width, height),
         degradation,
     } = options;
     match format {
         OutputFormat::Svg => {
-            let mut svg_config = build_svg_render_config(theme, font_size, embed_source_spans);
+            let mut svg_config =
+                build_svg_render_config(&svg_base_config, theme, font_size, embed_source_spans);
             svg_config.apply_degradation(&degradation);
             let svg = render_svg_with_layout(ir, layout, &svg_config);
             // Extract dimensions from SVG if available
@@ -1238,7 +1642,8 @@ fn render_format(
         OutputFormat::Png => {
             #[cfg(feature = "png")]
             {
-                let mut svg_config = build_svg_render_config(theme, font_size, embed_source_spans);
+                let mut svg_config =
+                    build_svg_render_config(&svg_base_config, theme, font_size, embed_source_spans);
                 svg_config.apply_degradation(&degradation);
                 let svg = render_svg_with_layout(ir, layout, &svg_config);
                 let (png, px_width, px_height) = svg_to_png(&svg, width, height)?;
@@ -1255,9 +1660,9 @@ fn render_format(
         }
 
         OutputFormat::Term => {
-            warn_if_unknown_theme(theme);
+            warn_if_unknown_theme(theme, svg_base_config.theme);
             let (cols, rows) = terminal_size(width, height);
-            let mut config = TermRenderConfig::rich();
+            let mut config = term_base_config;
             config.apply_degradation(&degradation);
             let result = render_term_with_layout_and_config(ir, layout, &config, cols, rows);
             Ok((
@@ -1268,9 +1673,12 @@ fn render_format(
         }
 
         OutputFormat::Ascii => {
-            warn_if_unknown_theme(theme);
+            warn_if_unknown_theme(theme, svg_base_config.theme);
             let (cols, rows) = terminal_size(width, height);
-            let mut config = TermRenderConfig::compact();
+            let mut config = term_base_config;
+            if matches!(config.tier, MermaidTier::Auto) {
+                config.tier = MermaidTier::Compact;
+            }
             config.glyph_mode = fm_core::MermaidGlyphMode::Ascii;
             config.apply_degradation(&degradation);
             let result = render_term_with_layout_and_config(ir, layout, &config, cols, rows);
@@ -1284,16 +1692,14 @@ fn render_format(
 }
 
 fn build_svg_render_config(
+    base: &SvgRenderConfig,
     theme: &str,
     font_size: Option<f32>,
     embed_source_spans: bool,
 ) -> SvgRenderConfig {
-    let base = SvgRenderConfig::default();
-    let mut svg_config = SvgRenderConfig {
-        theme: resolve_theme_preset(theme, base.theme),
-        include_source_spans: embed_source_spans,
-        ..base
-    };
+    let mut svg_config = base.clone();
+    svg_config.theme = resolve_theme_preset(theme, base.theme);
+    svg_config.include_source_spans = embed_source_spans;
     if let Some(size) = normalize_positive_font_size(font_size) {
         svg_config.font_size = size;
     }
@@ -1317,8 +1723,7 @@ fn resolve_theme_preset(theme: &str, fallback: ThemePreset) -> ThemePreset {
     }
 }
 
-fn warn_if_unknown_theme(theme: &str) {
-    let fallback = SvgRenderConfig::default().theme;
+fn warn_if_unknown_theme(theme: &str, fallback: ThemePreset) {
     if theme.parse::<ThemePreset>().is_err() {
         warn!(
             "Unknown theme '{theme}', falling back to '{}'",
@@ -1460,8 +1865,14 @@ mod png_tests {
     }
 }
 
-fn cmd_parse(input: &str, parse_mode: MermaidParseMode, full: bool, pretty: bool) -> Result<()> {
-    let source = load_input(input)?;
+fn cmd_parse(
+    input: &str,
+    parse_mode: MermaidParseMode,
+    full: bool,
+    pretty: bool,
+    max_input_bytes: usize,
+) -> Result<()> {
+    let source = load_input(input, max_input_bytes)?;
     let parsed = parse_with_mode(&source, parse_mode);
 
     let output = if full {
@@ -1494,8 +1905,8 @@ fn cmd_parse(input: &str, parse_mode: MermaidParseMode, full: bool, pretty: bool
 // Command: detect
 // =============================================================================
 
-fn cmd_detect(input: &str, json_output: bool) -> Result<()> {
-    let source = load_input(input)?;
+fn cmd_detect(input: &str, json_output: bool, max_input_bytes: usize) -> Result<()> {
+    let source = load_input(input, max_input_bytes)?;
     let detection = detect_type_with_confidence(&source);
     let diagram_type = detection.diagram_type;
 
@@ -1547,13 +1958,14 @@ fn cmd_diff(old_input: &str, new_input: &str, options: DiffCommandOptions<'_>) -
         parse_mode,
         format,
         color,
+        max_input_bytes,
         dimensions,
         output,
     } = options;
     let (width, height) = dimensions;
 
-    let old_source = load_input(old_input)?;
-    let new_source = load_input(new_input)?;
+    let old_source = load_input(old_input, max_input_bytes)?;
+    let new_source = load_input(new_input, max_input_bytes)?;
 
     let old_parsed = parse_with_mode(&old_source, parse_mode);
     let new_parsed = parse_with_mode(&new_source, parse_mode);
@@ -1600,15 +2012,19 @@ fn diff_use_colors(color: ColorChoice, writing_to_stdout: bool) -> bool {
 // Command: validate
 // =============================================================================
 
-fn cmd_validate(
-    input: &str,
-    parse_mode: MermaidParseMode,
-    layout_algorithm: LayoutAlgorithm,
-    format: ValidateOutputFormat,
-    fail_on: FailOnSeverity,
-    diagnostics_out: Option<&str>,
-) -> Result<()> {
-    let source = load_input(input)?;
+fn cmd_validate(input: &str, options: ValidateCommandOptions<'_>) -> Result<()> {
+    let ValidateCommandOptions {
+        parse_mode,
+        layout_algorithm,
+        layout_config,
+        format,
+        fail_on,
+        diagnostics_out,
+        max_input_bytes,
+        svg_base_config,
+    } = options;
+
+    let source = load_input(input, max_input_bytes)?;
     let total_start = Instant::now();
     let pressure = MermaidNativePressureSignals::sample().into_report();
     let mut budget_broker = MermaidBudgetLedger::new(&pressure);
@@ -1624,10 +2040,6 @@ fn cmd_validate(
         max_layout_iterations: budget_broker
             .layout_iteration_budget(LayoutGuardrails::default().max_layout_iterations),
         max_route_ops: budget_broker.route_budget(LayoutGuardrails::default().max_route_ops),
-    };
-    let layout_config = LayoutConfig {
-        font_metrics: None,
-        ..Default::default()
     };
     let traced_layout = layout_diagram_traced_with_config_and_guardrails(
         &parsed.ir,
@@ -1647,10 +2059,8 @@ fn cmd_validate(
     );
     guard_report.observability = observability;
     let layout = &traced_layout.layout;
-    let mut svg_config = SvgRenderConfig {
-        include_source_spans: true,
-        ..SvgRenderConfig::default()
-    };
+    let mut svg_config = svg_base_config;
+    svg_config.include_source_spans = true;
     svg_config.apply_degradation(&guard_report.degradation);
     let render_start = Instant::now();
     let svg_output = render_svg_with_layout(&parsed.ir, layout, &svg_config);
@@ -2213,9 +2623,10 @@ mod validate_tests {
 #[cfg(test)]
 mod render_tests {
     use super::{
-        ColorChoice, OutputFormat, RenderSurfaceOptions, ThemePreset, build_svg_render_config,
-        diff_use_colors, extract_svg_dimensions, normalize_positive_font_size,
-        parse_positive_dimension_arg, parse_positive_font_size_arg, render_format, terminal_size,
+        ColorChoice, OutputFormat, RenderSurfaceOptions, SvgRenderConfig, TermRenderConfig,
+        ThemePreset, build_svg_render_config, diff_use_colors, extract_svg_dimensions,
+        normalize_positive_font_size, parse_positive_dimension_arg, parse_positive_font_size_arg,
+        render_format, terminal_size,
     };
     use fm_layout::layout_diagram;
     use fm_parser::parse;
@@ -2237,6 +2648,8 @@ mod render_tests {
             RenderSurfaceOptions {
                 theme: "default",
                 font_size: None,
+                svg_base_config: SvgRenderConfig::default(),
+                term_base_config: TermRenderConfig::rich(),
                 embed_source_spans: false,
                 dimensions: (Some(80), Some(24)),
                 degradation: fm_core::MermaidDegradationPlan::default(),
@@ -2251,7 +2664,7 @@ mod render_tests {
 
     #[test]
     fn svg_render_config_applies_font_size_for_all_svg_based_outputs() {
-        let config = build_svg_render_config("dark", Some(22.0), true);
+        let config = build_svg_render_config(&SvgRenderConfig::default(), "dark", Some(22.0), true);
         assert_eq!(config.theme, ThemePreset::Dark);
         assert_eq!(config.font_size, 22.0);
         assert!(config.include_source_spans);
@@ -2259,17 +2672,21 @@ mod render_tests {
 
     #[test]
     fn svg_render_config_ignores_invalid_font_sizes() {
-        let default_font_size = build_svg_render_config("default", None, true).font_size;
+        let default_font_size =
+            build_svg_render_config(&SvgRenderConfig::default(), "default", None, true).font_size;
         assert_eq!(
-            build_svg_render_config("default", Some(0.0), true).font_size,
+            build_svg_render_config(&SvgRenderConfig::default(), "default", Some(0.0), true)
+                .font_size,
             default_font_size
         );
         assert_eq!(
-            build_svg_render_config("default", Some(-5.0), true).font_size,
+            build_svg_render_config(&SvgRenderConfig::default(), "default", Some(-5.0), true)
+                .font_size,
             default_font_size
         );
         assert_eq!(
-            build_svg_render_config("default", Some(f32::NAN), true).font_size,
+            build_svg_render_config(&SvgRenderConfig::default(), "default", Some(f32::NAN), true)
+                .font_size,
             default_font_size
         );
     }
@@ -2319,6 +2736,132 @@ mod render_tests {
         assert!(!diff_use_colors(ColorChoice::Auto, false));
         assert!(diff_use_colors(ColorChoice::Always, false));
         assert!(!diff_use_colors(ColorChoice::Never, true));
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::{
+        FrankenmermaidConfigFile, LayoutAlgorithmArg, OutputFormat, build_base_svg_render_config,
+        build_layout_config, resolve_layout_algorithm, resolve_output_format, resolve_theme_name,
+    };
+    use fm_layout::{CycleStrategy, EdgeRouting};
+    use fm_render_svg::ThemePreset;
+
+    #[test]
+    fn documented_config_sections_parse_successfully() {
+        let config: FrankenmermaidConfigFile = toml::from_str(
+            r#"
+                [core]
+                deterministic = true
+                max_input_bytes = 4096
+                fallback_on_error = true
+
+                [parser]
+                intent_inference = true
+                fuzzy_keyword_distance = 2
+                auto_close_delimiters = true
+                create_placeholder_nodes = true
+
+                [layout]
+                algorithm = "tree"
+                cycle_strategy = "dfs-back"
+                node_spacing = 96.0
+                rank_spacing = 144.0
+                edge_routing = "spline"
+
+                [render]
+                default_format = "term"
+                show_back_edges = true
+                reduced_motion = "never"
+
+                [svg]
+                theme = "forest"
+                rounded_corners = 6.0
+                shadows = false
+                gradients = false
+                accessibility = false
+
+                [term]
+                tier = "compact"
+                unicode = false
+                minimap = true
+            "#,
+        )
+        .expect("parse documented config");
+
+        assert_eq!(config.core.max_input_bytes, Some(4096));
+        assert_eq!(config.layout.algorithm.as_deref(), Some("tree"));
+        assert_eq!(config.render.default_format.as_deref(), Some("term"));
+        assert_eq!(config.svg.theme.as_deref(), Some("forest"));
+        assert_eq!(config.term.tier.as_deref(), Some("compact"));
+    }
+
+    #[test]
+    fn explicit_render_options_override_file_defaults() {
+        let config: FrankenmermaidConfigFile = toml::from_str(
+            r#"
+                [layout]
+                algorithm = "force"
+
+                [render]
+                default_format = "term"
+
+                [svg]
+                theme = "dark"
+            "#,
+        )
+        .expect("parse config");
+
+        assert_eq!(
+            resolve_output_format(Some(OutputFormat::Svg), &config).expect("resolve format"),
+            OutputFormat::Svg
+        );
+        assert_eq!(
+            resolve_layout_algorithm(Some(LayoutAlgorithmArg::Tree), &config)
+                .expect("resolve algorithm"),
+            fm_layout::LayoutAlgorithm::Tree
+        );
+        assert_eq!(
+            resolve_theme_name(Some(String::from("forest")), &config),
+            "forest"
+        );
+    }
+
+    #[test]
+    fn file_defaults_apply_when_explicit_options_are_absent() {
+        let config: FrankenmermaidConfigFile = toml::from_str(
+            r#"
+                [layout]
+                algorithm = "sugiyama"
+                cycle_strategy = "cycle-aware"
+                node_spacing = 90.0
+                rank_spacing = 150.0
+                edge_routing = "spline"
+
+                [render]
+                default_format = "svg"
+                reduced_motion = "never"
+
+                [svg]
+                theme = "dark"
+                shadows = false
+                gradients = false
+            "#,
+        )
+        .expect("parse config");
+
+        let layout = build_layout_config(&config, None).expect("build layout config");
+        assert_eq!(layout.cycle_strategy, CycleStrategy::CycleAware);
+        assert_eq!(layout.edge_routing, EdgeRouting::Spline);
+        assert_eq!(layout.spacing.node_spacing, 90.0);
+        assert_eq!(layout.spacing.rank_spacing, 150.0);
+
+        let svg = build_base_svg_render_config(&config).expect("build svg config");
+        assert_eq!(svg.theme, ThemePreset::Dark);
+        assert!(!svg.shadows);
+        assert!(!svg.node_gradients);
+        assert!(svg.animations_enabled);
     }
 }
 
@@ -3022,12 +3565,17 @@ impl Drop for InteractiveTerminalGuard {
     }
 }
 
-fn cmd_interactive(input: &str, parse_mode: MermaidParseMode, theme: &str) -> Result<()> {
+fn cmd_interactive(
+    input: &str,
+    parse_mode: MermaidParseMode,
+    theme: &str,
+    max_input_bytes: usize,
+) -> Result<()> {
     if !io::stdout().is_terminal() {
         anyhow::bail!("interactive mode requires a terminal stdout");
     }
 
-    let source = load_input(input)?;
+    let source = load_input(input, max_input_bytes)?;
     let mut buffer = InteractiveBuffer::from_source(&source);
     let save_path = (input != "-" && Path::new(input).exists()).then_some(input.to_string());
     let mut theme_index = resolve_interactive_theme_index(theme);
@@ -3179,7 +3727,7 @@ fn render_and_output(
         print!("\x1B[2J\x1B[H"); // Clear screen and move cursor to top-left
     }
 
-    let source = load_input(input)?;
+    let source = load_input(input, fm_core::MermaidConfig::default().max_input_bytes)?;
     let parsed = fm_parser::parse(&source);
     let layout = fm_layout::layout_diagram(&parsed.ir);
     let (rendered, _, _) = render_format(
@@ -3189,6 +3737,8 @@ fn render_and_output(
         RenderSurfaceOptions {
             theme: "default",
             font_size: None,
+            svg_base_config: SvgRenderConfig::default(),
+            term_base_config: TermRenderConfig::rich(),
             embed_source_spans: false,
             dimensions: (None, None),
             degradation: fm_core::MermaidDegradationPlan::default(),

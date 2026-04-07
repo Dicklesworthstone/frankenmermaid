@@ -38,7 +38,8 @@ mkdir -p "$OUT_DIR"
       --release \
       --target web \
       --out-dir "$OUT_DIR" \
-      --out-name "$OUT_NAME"
+      --out-name "$OUT_NAME" \
+      -- --config 'profile.release.package.fm-layout.opt-level="z"'
 )
 
 if [[ ! -f "$WASM_PATH" ]]; then

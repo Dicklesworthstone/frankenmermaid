@@ -756,6 +756,8 @@ impl CycleStrategy {
 pub struct LayoutConfig {
     pub cycle_strategy: CycleStrategy,
     pub collapse_cycle_clusters: bool,
+    pub spacing: LayoutSpacing,
+    pub edge_routing: EdgeRouting,
     pub font_metrics: Option<fm_core::FontMetrics>,
     pub constraint_solver: ConstraintSolverMode,
     pub constraint_solver_time_limit_ms: u64,
@@ -773,6 +775,8 @@ impl Default for LayoutConfig {
         Self {
             cycle_strategy: CycleStrategy::default(),
             collapse_cycle_clusters: false,
+            spacing: LayoutSpacing::default(),
+            edge_routing: EdgeRouting::default(),
             font_metrics: None,
             constraint_solver: ConstraintSolverMode::Optimize,
             constraint_solver_time_limit_ms: 1_000,
@@ -2122,6 +2126,7 @@ pub mod persistence;
 pub mod polyhedral;
 pub mod shapes;
 pub mod spatial;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod spectral;
 
 use shapes::{node_path, rounded_rect_path};
@@ -2935,7 +2940,7 @@ impl IncrementalLayoutEngine {
             .cloned()
             .unwrap_or_else(fm_core::FontMetrics::default_metrics);
         let node_sizes = compute_node_sizes(ir, &metrics);
-        let spacing = LayoutSpacing::default();
+        let spacing = config.spacing;
         let mut nodes = cached_layout.traced.layout.nodes.clone();
         let highlighted_edge_indexes: BTreeSet<_> = cached_layout
             .traced
@@ -3007,7 +3012,8 @@ impl IncrementalLayoutEngine {
                 .map_or(Span::default(), |node| node.span_primary);
         }
 
-        let mut edges = build_edge_paths(ir, &nodes, &highlighted_edge_indexes);
+        let mut edges =
+            build_edge_paths(ir, &nodes, &highlighted_edge_indexes, config.edge_routing);
         smooth_boundary_edges(ir, &mut edges, &dirty_node_indexes);
         bundle_parallel_edges(ir, &mut edges);
         let clusters = build_cluster_boxes(ir, &nodes, spacing);
@@ -3109,16 +3115,25 @@ fn stable_layout_request_hash(
     metrics: &fm_core::FontMetrics,
 ) -> u64 {
     let descriptor = format!(
-        "{ir:?}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
-        algorithm.as_str(),
-        config.cycle_strategy.as_str(),
-        config.collapse_cycle_clusters,
-        metrics.font_size(),
-        metrics.avg_char_width(),
-        metrics.line_height_px(),
-        guardrails.max_layout_time_ms,
-        guardrails.max_layout_iterations,
-        guardrails.max_route_ops,
+        "{ir:?}|{algorithm}|{cycle_strategy}|{collapse_cycle_clusters}|{edge_routing}|\
+         {node_spacing}|{rank_spacing}|{cluster_padding}|{sequence_participant_gap_extra}|\
+         {sequence_min_message_gap}|{font_size}|{avg_char_width}|{line_height_px}|\
+         {max_layout_time_ms}|{max_layout_iterations}|{max_route_ops}",
+        algorithm = algorithm.as_str(),
+        cycle_strategy = config.cycle_strategy.as_str(),
+        collapse_cycle_clusters = config.collapse_cycle_clusters,
+        edge_routing = config.edge_routing as u8,
+        node_spacing = config.spacing.node_spacing,
+        rank_spacing = config.spacing.rank_spacing,
+        cluster_padding = config.spacing.cluster_padding,
+        sequence_participant_gap_extra = config.spacing.sequence_participant_gap_extra,
+        sequence_min_message_gap = config.spacing.sequence_min_message_gap,
+        font_size = metrics.font_size(),
+        avg_char_width = metrics.avg_char_width(),
+        line_height_px = metrics.line_height_px(),
+        max_layout_time_ms = guardrails.max_layout_time_ms,
+        max_layout_iterations = guardrails.max_layout_iterations,
+        max_route_ops = guardrails.max_route_ops,
     );
     stable_u64_hash(descriptor.as_bytes())
 }
@@ -3734,7 +3749,7 @@ fn layout_diagram_sugiyama_traced_with_config(
     config: LayoutConfig,
 ) -> TracedLayout {
     let mut trace = LayoutTrace::default();
-    let spacing = LayoutSpacing::default();
+    let spacing = config.spacing;
     let metrics = config
         .font_metrics
         .clone()
@@ -3792,7 +3807,12 @@ fn layout_diagram_sugiyama_traced_with_config(
     let mut nodes = coordinate_assignment(ir, &node_sizes, &ranks, &ordering_by_rank, spacing);
     apply_subgraph_direction_overrides(ir, &node_sizes, &mut nodes, spacing);
     apply_constraint_solver(ir, &mut nodes, spacing, &config);
-    let mut edges = build_edge_paths(ir, &nodes, &cycle_result.highlighted_edge_indexes);
+    let mut edges = build_edge_paths(
+        ir,
+        &nodes,
+        &cycle_result.highlighted_edge_indexes,
+        config.edge_routing,
+    );
     bundle_parallel_edges(ir, &mut edges);
     let mut clusters = build_cluster_boxes(ir, &nodes, spacing);
     let cluster_dividers = build_state_cluster_dividers(ir, &nodes, &clusters);
@@ -4100,7 +4120,7 @@ pub fn layout_diagram_tree_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 
     let order_by_rank = rank_orders_from_key(ir, &tree.depth, &span_centers);
     let nodes = node_boxes_from_centers(ir, &node_sizes, &tree.depth, &order_by_rank, &centers);
-    let edges = build_edge_paths(ir, &nodes, &BTreeSet::new());
+    let edges = build_edge_paths(ir, &nodes, &BTreeSet::new(), EdgeRouting::default());
     let clusters = build_cluster_boxes(ir, &nodes, spacing);
     let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
     let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
@@ -6326,7 +6346,7 @@ fn layout_diagram_gitgraph_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         });
     }
 
-    let edges = build_edge_paths(ir, &nodes, &BTreeSet::new());
+    let edges = build_edge_paths(ir, &nodes, &BTreeSet::new(), EdgeRouting::default());
     let clusters = build_cluster_boxes(ir, &nodes, spacing);
     let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
 
@@ -6587,7 +6607,13 @@ fn finalize_specialized_layout(
 
     normalize_center_positions(&mut centers, node_sizes);
     let nodes = node_boxes_from_centers(ir, node_sizes, &rank_by_node, &order_by_node, &centers);
-    let edges = build_edge_paths_with_orientation(ir, &nodes, &BTreeSet::new(), horizontal_edges);
+    let edges = build_edge_paths_with_orientation(
+        ir,
+        &nodes,
+        &BTreeSet::new(),
+        horizontal_edges,
+        EdgeRouting::default(),
+    );
     let clusters = build_cluster_boxes(ir, &nodes, spacing);
     let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
     let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
@@ -10482,9 +10508,16 @@ fn build_edge_paths(
     ir: &MermaidDiagramIr,
     nodes: &[LayoutNodeBox],
     highlighted_edge_indexes: &BTreeSet<usize>,
+    edge_routing: EdgeRouting,
 ) -> Vec<LayoutEdgePath> {
     let horizontal_ranks = matches!(ir.direction, GraphDirection::LR | GraphDirection::RL);
-    build_edge_paths_with_orientation(ir, nodes, highlighted_edge_indexes, horizontal_ranks)
+    build_edge_paths_with_orientation(
+        ir,
+        nodes,
+        highlighted_edge_indexes,
+        horizontal_ranks,
+        edge_routing,
+    )
 }
 
 fn build_edge_paths_with_orientation(
@@ -10492,6 +10525,7 @@ fn build_edge_paths_with_orientation(
     nodes: &[LayoutNodeBox],
     highlighted_edge_indexes: &BTreeSet<usize>,
     horizontal_ranks: bool,
+    edge_routing: EdgeRouting,
 ) -> Vec<LayoutEdgePath> {
     // Track parallel edges: count edges between same (source, target) pair.
     let mut edge_pair_count: BTreeMap<(usize, usize), usize> = BTreeMap::new();
@@ -10537,12 +10571,20 @@ fn build_edge_paths_with_orientation(
                     .filter(|(idx, _)| *idx != source && *idx != target)
                     .map(|(_, n)| n.bounds)
                     .collect();
-                let mut pts = route_edge_points_with_obstacles(
-                    source_anchor,
-                    target_anchor,
-                    horizontal_ranks,
-                    &obstacles,
-                );
+                let mut pts = match edge_routing {
+                    EdgeRouting::Orthogonal => route_edge_points_with_obstacles(
+                        source_anchor,
+                        target_anchor,
+                        horizontal_ranks,
+                        &obstacles,
+                    ),
+                    EdgeRouting::Spline => route_edge_points_spline_with_obstacles(
+                        source_anchor,
+                        target_anchor,
+                        horizontal_ranks,
+                        &obstacles,
+                    ),
+                };
                 if parallel_offset.abs() > 0.01 {
                     apply_parallel_offset(&mut pts, parallel_offset, horizontal_ranks);
                 }
@@ -10850,6 +10892,39 @@ fn route_edge_points_with_obstacles(
     };
 
     simplify_polyline(points)
+}
+
+/// Route an edge using spline-friendly control points.
+///
+/// The SVG backend already smooths edge waypoints with Catmull-Rom interpolation,
+/// so this router emits a smaller set of bend and midpoint anchors instead of the
+/// hard orthogonal staircase used by the default path router.
+fn route_edge_points_spline_with_obstacles(
+    source: LayoutPoint,
+    target: LayoutPoint,
+    horizontal_ranks: bool,
+    obstacles: &[LayoutRect],
+) -> Vec<LayoutPoint> {
+    let orthogonal = route_edge_points_with_obstacles(source, target, horizontal_ranks, obstacles);
+    if orthogonal.len() <= 2 {
+        return orthogonal;
+    }
+
+    let mut spline_points = Vec::with_capacity(orthogonal.len() + 1);
+    spline_points.push(source);
+    for window in orthogonal.windows(2) {
+        let start = window[0];
+        let end = window[1];
+        if start != source {
+            spline_points.push(start);
+        }
+        spline_points.push(LayoutPoint {
+            x: f32::midpoint(start.x, end.x),
+            y: f32::midpoint(start.y, end.y),
+        });
+    }
+    spline_points.push(target);
+    simplify_polyline(spline_points)
 }
 
 /// Check if a vertical segment at x-coordinate `mid_x` intersects any obstacle.
