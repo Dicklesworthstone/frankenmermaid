@@ -2291,7 +2291,7 @@ fn summarize_perf_bucket(
         } else {
             (None, None, PerfGateStatus::NoBaseline)
         };
-    let (slo_gate_status, slo) = evaluate_slo(benchmark, slo, median_ns, p95_ns, p99_ns)?;
+    let (slo_gate_status, slo) = evaluate_slo(benchmark, slo, median_ns, p95_ns, p99_ns);
     let gate_status = combine_gate_statuses(baseline_gate_status, slo_gate_status);
 
     Ok(PerfBenchmarkSummary {
@@ -2325,9 +2325,9 @@ fn evaluate_slo(
     median_ns: u64,
     p95_ns: u64,
     p99_ns: u64,
-) -> Result<(PerfGateStatus, Option<PerfSloEvaluation>)> {
+) -> (PerfGateStatus, Option<PerfSloEvaluation>) {
     let Some(slo) = slo else {
-        return Ok((PerfGateStatus::NoBaseline, None));
+        return (PerfGateStatus::NoBaseline, None);
     };
     let mut violations = Vec::new();
     if let Some(max_p50_ns) = slo.max_p50_ns
@@ -2364,7 +2364,7 @@ fn evaluate_slo(
     } else {
         PerfGateStatus::Fail
     };
-    Ok((
+    (
         gate_status,
         Some(PerfSloEvaluation {
             max_p50_ns: slo.max_p50_ns,
@@ -2373,7 +2373,7 @@ fn evaluate_slo(
             min_median_ops_per_sec: slo.min_median_ops_per_sec,
             violations,
         }),
-    ))
+    )
 }
 
 fn combine_gate_statuses(left: PerfGateStatus, right: PerfGateStatus) -> PerfGateStatus {

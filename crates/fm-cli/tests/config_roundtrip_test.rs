@@ -148,6 +148,37 @@ fn explicit_config_controls_svg_effects_and_accessibility() {
 }
 
 #[test]
+fn explicit_config_enables_svg_effects_and_accessibility() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_path = write_config(
+        &temp,
+        "config.toml",
+        r#"
+            [svg]
+            shadows = true
+            gradients = true
+            accessibility = true
+        "#,
+    );
+
+    let output = run_cli_in_dir(
+        temp.path(),
+        &["--config", &config_path, "render", "-", "--format", "svg"],
+        "flowchart LR\nA-->B\n",
+    );
+    assert!(
+        output.status.success(),
+        "render failed: {}",
+        stderr_text(&output)
+    );
+    let svg = stdout_text(&output);
+    assert!(svg.contains("id=\"drop-shadow\""));
+    assert!(svg.contains("<linearGradient") || svg.contains("<radialGradient"));
+    assert!(svg.contains("aria-label="));
+    assert!(svg.contains("role=\"img\""));
+}
+
+#[test]
 fn explicit_config_changes_layout_spacing() {
     let baseline_dir = TempDir::new().expect("baseline tempdir");
     let configured_dir = TempDir::new().expect("configured tempdir");
@@ -296,6 +327,40 @@ fn invalid_config_reports_path_and_parse_context() {
     assert!(
         stderr.contains("line") || stderr.contains("column"),
         "stderr should include parse context: {stderr}"
+    );
+}
+
+#[test]
+fn unknown_config_key_reports_field_name() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_path = write_config(
+        &temp,
+        "bad.toml",
+        r#"
+            [svg]
+            theme = "dark"
+            definitely_not_a_real_key = true
+        "#,
+    );
+
+    let output = run_cli_in_dir(
+        temp.path(),
+        &["--config", &config_path, "render", "-", "--format", "svg"],
+        "flowchart LR\nA-->B\n",
+    );
+    assert!(!output.status.success(), "unknown config key should fail");
+    let stderr = stderr_text(&output);
+    assert!(
+        stderr.contains(&config_path),
+        "stderr should include config path"
+    );
+    assert!(
+        stderr.contains("unknown field"),
+        "stderr should include unknown-field wording: {stderr}"
+    );
+    assert!(
+        stderr.contains("definitely_not_a_real_key"),
+        "stderr should include the unknown field name: {stderr}"
     );
 }
 
