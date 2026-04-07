@@ -228,6 +228,44 @@ fn explicit_config_changes_terminal_tier() {
 }
 
 #[test]
+fn explicit_config_enables_terminal_minimap() {
+    let baseline_dir = TempDir::new().expect("baseline tempdir");
+    let configured_dir = TempDir::new().expect("configured tempdir");
+    let config_path = write_config(
+        &configured_dir,
+        "config.toml",
+        r#"
+            [term]
+            minimap = true
+        "#,
+    );
+    let input = "flowchart LR\nA-->B-->C-->D-->E-->F\n";
+
+    let baseline = run_cli_in_dir(
+        baseline_dir.path(),
+        &["render", "-", "--format", "term"],
+        input,
+    );
+    assert!(
+        baseline.status.success(),
+        "baseline term render failed: {}",
+        stderr_text(&baseline)
+    );
+    let configured = run_cli_in_dir(
+        configured_dir.path(),
+        &["--config", &config_path, "render", "-", "--format", "term"],
+        input,
+    );
+    assert!(
+        configured.status.success(),
+        "configured term render failed: {}",
+        stderr_text(&configured)
+    );
+
+    assert_ne!(stdout_text(&baseline), stdout_text(&configured));
+}
+
+#[test]
 fn invalid_config_reports_path_and_parse_context() {
     let temp = TempDir::new().expect("tempdir");
     let config_path = write_config(
@@ -254,6 +292,32 @@ fn invalid_config_reports_path_and_parse_context() {
         stderr.contains("line") || stderr.contains("column"),
         "stderr should include parse context: {stderr}"
     );
+}
+
+#[test]
+fn unsupported_parser_config_is_rejected() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_path = write_config(
+        &temp,
+        "config.toml",
+        r#"
+            [parser]
+            create_placeholder_nodes = false
+        "#,
+    );
+
+    let output = run_cli_in_dir(
+        temp.path(),
+        &["--config", &config_path, "render", "-", "--format", "svg"],
+        "flowchart LR\nA-->B\n",
+    );
+    assert!(
+        !output.status.success(),
+        "unsupported parser config should fail"
+    );
+    let stderr = stderr_text(&output);
+    assert!(stderr.contains("parser.create_placeholder_nodes=false"));
+    assert!(stderr.contains("not supported yet"));
 }
 
 #[test]

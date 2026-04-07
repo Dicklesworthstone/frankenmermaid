@@ -577,6 +577,8 @@ struct RenderCommandOptions<'a> {
     max_input_bytes: usize,
     svg_base_config: SvgRenderConfig,
     term_base_config: TermRenderConfig,
+    show_back_edges: bool,
+    show_minimap: bool,
     embed_source_spans: bool,
     source_map_out: Option<&'a str>,
     dimensions: (Option<u32>, Option<u32>),
@@ -599,6 +601,8 @@ struct RenderSurfaceOptions<'a> {
     font_size: Option<f32>,
     svg_base_config: SvgRenderConfig,
     term_base_config: TermRenderConfig,
+    show_back_edges: bool,
+    show_minimap: bool,
     embed_source_spans: bool,
     dimensions: (Option<u32>, Option<u32>),
     degradation: fm_core::MermaidDegradationPlan,
@@ -614,6 +618,7 @@ struct ValidateCommandOptions<'a> {
     diagnostics_out: Option<&'a str>,
     max_input_bytes: usize,
     svg_base_config: SvgRenderConfig,
+    show_back_edges: bool,
 }
 
 /// Result of detecting diagram type.
@@ -779,6 +784,8 @@ fn main() -> Result<()> {
             let layout_config = build_layout_config(&loaded_config.file, font_size)?;
             let svg_base_config = build_base_svg_render_config(&loaded_config.file)?;
             let term_base_config = build_base_term_render_config(&loaded_config.file)?;
+            let show_back_edges = resolve_show_back_edges(&loaded_config.file);
+            let show_minimap = term_base_config.show_minimap;
             cmd_render(
                 &input,
                 RenderCommandOptions {
@@ -792,6 +799,8 @@ fn main() -> Result<()> {
                     max_input_bytes,
                     svg_base_config,
                     term_base_config,
+                    show_back_edges,
+                    show_minimap,
                     embed_source_spans: if no_embed_source_spans {
                         false
                     } else {
@@ -853,6 +862,7 @@ fn main() -> Result<()> {
                 diagnostics_out: diagnostics_out.as_deref(),
                 max_input_bytes,
                 svg_base_config: build_base_svg_render_config(&loaded_config.file)?,
+                show_back_edges: resolve_show_back_edges(&loaded_config.file),
             },
         ),
 
@@ -926,6 +936,7 @@ fn load_cli_config(explicit_path: Option<&str>) -> Result<LoadedCliConfig> {
         .map_err(|err| anyhow::anyhow!("Failed to parse config file {}: {err}", path.display()))?;
 
     // Force eager validation so invalid enum-like values fail at load time.
+    validate_runtime_config_support(&file)?;
     let _ = resolve_max_input_bytes(&file)?;
     let _ = resolve_default_output_format(&file)?;
     let _ = resolve_default_layout_algorithm(&file)?;
@@ -936,6 +947,41 @@ fn load_cli_config(explicit_path: Option<&str>) -> Result<LoadedCliConfig> {
     info!("Loaded config file: {}", path.display());
 
     Ok(LoadedCliConfig { file })
+}
+
+fn validate_runtime_config_support(config: &FrankenmermaidConfigFile) -> Result<()> {
+    if matches!(config.core.deterministic, Some(false)) {
+        anyhow::bail!("core.deterministic=false is not supported; output is always deterministic");
+    }
+    if matches!(config.core.fallback_on_error, Some(false)) {
+        anyhow::bail!(
+            "core.fallback_on_error=false is not supported yet; CLI parsing currently uses explicit --parse-mode overrides instead"
+        );
+    }
+    if matches!(config.parser.intent_inference, Some(false)) {
+        anyhow::bail!(
+            "parser.intent_inference=false is not supported yet; fuzzy keyword recovery is always enabled"
+        );
+    }
+    if let Some(distance) = config.parser.fuzzy_keyword_distance
+        && distance != 2
+    {
+        anyhow::bail!(
+            "parser.fuzzy_keyword_distance={distance} is not supported yet; the current detector uses a fixed distance of 2"
+        );
+    }
+    if matches!(config.parser.auto_close_delimiters, Some(false)) {
+        anyhow::bail!(
+            "parser.auto_close_delimiters=false is not supported yet; delimiter recovery is always enabled"
+        );
+    }
+    if matches!(config.parser.create_placeholder_nodes, Some(false)) {
+        anyhow::bail!(
+            "parser.create_placeholder_nodes=false is not supported yet; dangling-edge placeholder recovery is always enabled"
+        );
+    }
+
+    Ok(())
 }
 
 fn parse_output_format_name(value: &str) -> Result<OutputFormat> {
@@ -1049,6 +1095,10 @@ fn resolve_theme_name(explicit: Option<String>, config: &FrankenmermaidConfigFil
         .unwrap_or_else(|| String::from("default"))
 }
 
+fn resolve_show_back_edges(config: &FrankenmermaidConfigFile) -> bool {
+    config.render.show_back_edges.unwrap_or(true)
+}
+
 fn validate_non_negative_f32(value: f32, field: &str) -> Result<f32> {
     if value.is_finite() && value >= 0.0 {
         Ok(value)
@@ -1157,6 +1207,9 @@ fn build_base_term_render_config(
             MermaidGlyphMode::Ascii
         };
     }
+    if let Some(show_minimap) = config_file.term.minimap {
+        config.show_minimap = show_minimap;
+    }
 
     Ok(config)
 }
@@ -1204,6 +1257,12 @@ fn load_input(input: &str, max_input_bytes: usize) -> Result<String> {
         }
         Ok(input.to_string())
     }
+}
+
+fn layout_without_back_edges(layout: &fm_layout::DiagramLayout) -> fm_layout::DiagramLayout {
+    let mut filtered = layout.clone();
+    filtered.edges.retain(|edge| !edge.reversed);
+    filtered
 }
 
 fn write_output(output: Option<&str>, content: &str) -> Result<()> {
@@ -1401,6 +1460,8 @@ fn cmd_render(input: &str, options: RenderCommandOptions<'_>) -> Result<()> {
         max_input_bytes,
         svg_base_config,
         term_base_config,
+        show_back_edges,
+        show_minimap,
         embed_source_spans,
         source_map_out,
         dimensions,
@@ -1497,6 +1558,8 @@ fn cmd_render(input: &str, options: RenderCommandOptions<'_>) -> Result<()> {
             font_size,
             svg_base_config,
             term_base_config,
+            show_back_edges,
+            show_minimap,
             embed_source_spans,
             dimensions: (width, height),
             degradation: guard_report.degradation.clone(),
@@ -1624,16 +1687,20 @@ fn render_format(
         font_size,
         svg_base_config,
         term_base_config,
+        show_back_edges,
+        show_minimap,
         embed_source_spans,
         dimensions: (width, height),
         degradation,
     } = options;
+    let filtered_layout = (!show_back_edges).then(|| layout_without_back_edges(layout));
+    let render_layout = filtered_layout.as_ref().unwrap_or(layout);
     match format {
         OutputFormat::Svg => {
             let mut svg_config =
                 build_svg_render_config(&svg_base_config, theme, font_size, embed_source_spans);
             svg_config.apply_degradation(&degradation);
-            let svg = render_svg_with_layout(ir, layout, &svg_config);
+            let svg = render_svg_with_layout(ir, render_layout, &svg_config);
             // Extract dimensions from SVG if available
             let (w, h) = extract_svg_dimensions(&svg);
             Ok((svg.into_bytes(), w, h))
@@ -1645,7 +1712,7 @@ fn render_format(
                 let mut svg_config =
                     build_svg_render_config(&svg_base_config, theme, font_size, embed_source_spans);
                 svg_config.apply_degradation(&degradation);
-                let svg = render_svg_with_layout(ir, layout, &svg_config);
+                let svg = render_svg_with_layout(ir, render_layout, &svg_config);
                 let (png, px_width, px_height) = svg_to_png(&svg, width, height)?;
                 Ok((png, Some(px_width), Some(px_height)))
             }
@@ -1664,9 +1731,30 @@ fn render_format(
             let (cols, rows) = terminal_size(width, height);
             let mut config = term_base_config;
             config.apply_degradation(&degradation);
-            let result = render_term_with_layout_and_config(ir, layout, &config, cols, rows);
+            let result = render_term_with_layout_and_config(ir, render_layout, &config, cols, rows);
+            let output = if show_minimap {
+                let minimap = fm_render_term::minimap::render_minimap_from_layout(
+                    render_layout,
+                    &fm_render_term::MinimapConfig {
+                        max_width: cols.saturating_div(4).clamp(12, 28),
+                        max_height: rows.saturating_div(4).clamp(6, 14),
+                        glyph_mode: config.glyph_mode,
+                        ..Default::default()
+                    },
+                    None,
+                );
+                fm_render_term::minimap::overlay_minimap(
+                    &result.output,
+                    &minimap,
+                    result.width,
+                    result.height,
+                    fm_render_term::MinimapCorner::TopRight,
+                )
+            } else {
+                result.output
+            };
             Ok((
-                result.output.into_bytes(),
+                output.into_bytes(),
                 Some(u32::try_from(result.width).unwrap_or(u32::MAX)),
                 Some(u32::try_from(result.height).unwrap_or(u32::MAX)),
             ))
@@ -1681,9 +1769,30 @@ fn render_format(
             }
             config.glyph_mode = fm_core::MermaidGlyphMode::Ascii;
             config.apply_degradation(&degradation);
-            let result = render_term_with_layout_and_config(ir, layout, &config, cols, rows);
+            let result = render_term_with_layout_and_config(ir, render_layout, &config, cols, rows);
+            let output = if show_minimap {
+                let minimap = fm_render_term::minimap::render_minimap_from_layout(
+                    render_layout,
+                    &fm_render_term::MinimapConfig {
+                        max_width: cols.saturating_div(4).clamp(12, 28),
+                        max_height: rows.saturating_div(4).clamp(6, 14),
+                        glyph_mode: config.glyph_mode,
+                        ..Default::default()
+                    },
+                    None,
+                );
+                fm_render_term::minimap::overlay_minimap(
+                    &result.output,
+                    &minimap,
+                    result.width,
+                    result.height,
+                    fm_render_term::MinimapCorner::TopRight,
+                )
+            } else {
+                result.output
+            };
             Ok((
-                result.output.into_bytes(),
+                output.into_bytes(),
                 Some(u32::try_from(result.width).unwrap_or(u32::MAX)),
                 Some(u32::try_from(result.height).unwrap_or(u32::MAX)),
             ))
@@ -2022,6 +2131,7 @@ fn cmd_validate(input: &str, options: ValidateCommandOptions<'_>) -> Result<()> 
         diagnostics_out,
         max_input_bytes,
         svg_base_config,
+        show_back_edges,
     } = options;
 
     let source = load_input(input, max_input_bytes)?;
@@ -2058,7 +2168,9 @@ fn cmd_validate(input: &str, options: ValidateCommandOptions<'_>) -> Result<()> 
         traced_layout.trace.guard.estimated_layout_time_ms.max(1) as u64,
     );
     guard_report.observability = observability;
-    let layout = &traced_layout.layout;
+    let filtered_layout =
+        (!show_back_edges).then(|| layout_without_back_edges(&traced_layout.layout));
+    let layout = filtered_layout.as_ref().unwrap_or(&traced_layout.layout);
     let mut svg_config = svg_base_config;
     svg_config.include_source_spans = true;
     svg_config.apply_degradation(&guard_report.degradation);
@@ -2650,6 +2762,8 @@ mod render_tests {
                 font_size: None,
                 svg_base_config: SvgRenderConfig::default(),
                 term_base_config: TermRenderConfig::rich(),
+                show_back_edges: true,
+                show_minimap: false,
                 embed_source_spans: false,
                 dimensions: (Some(80), Some(24)),
                 degradation: fm_core::MermaidDegradationPlan::default(),
@@ -3727,7 +3841,7 @@ fn render_and_output(
         print!("\x1B[2J\x1B[H"); // Clear screen and move cursor to top-left
     }
 
-    let source = load_input(input, fm_core::MermaidConfig::default().max_input_bytes)?;
+    let source = load_input(input, 5_000_000)?;
     let parsed = fm_parser::parse(&source);
     let layout = fm_layout::layout_diagram(&parsed.ir);
     let (rendered, _, _) = render_format(
@@ -3739,6 +3853,8 @@ fn render_and_output(
             font_size: None,
             svg_base_config: SvgRenderConfig::default(),
             term_base_config: TermRenderConfig::rich(),
+            show_back_edges: true,
+            show_minimap: false,
             embed_source_spans: false,
             dimensions: (None, None),
             degradation: fm_core::MermaidDegradationPlan::default(),

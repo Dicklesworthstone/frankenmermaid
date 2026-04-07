@@ -27,8 +27,7 @@ use fm_render_canvas::{
     Canvas2dContext, CanvasRenderResult, LineCap, LineJoin, TextAlign, TextBaseline, TextMetrics,
 };
 use fm_render_svg::{
-    SvgRenderConfig, ThemeColors, ThemePreset, describe_diagram_with_layout,
-    render_svg_with_layout,
+    SvgRenderConfig, ThemeColors, ThemePreset, describe_diagram_with_layout, render_svg_with_layout,
 };
 use serde::{Deserialize, Serialize};
 #[cfg(target_arch = "wasm32")]

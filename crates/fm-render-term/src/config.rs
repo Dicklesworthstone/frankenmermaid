@@ -27,6 +27,8 @@ pub struct TermRenderConfig {
     pub diagonal_edges: bool,
     /// Padding around the diagram (in cells).
     pub padding: usize,
+    /// Overlay a minimap onto the rendered terminal output.
+    pub show_minimap: bool,
 }
 
 impl Default for TermRenderConfig {
@@ -43,6 +45,7 @@ impl Default for TermRenderConfig {
             show_clusters: true,
             diagonal_edges: true,
             padding: 1,
+            show_minimap: false,
         }
     }
 }

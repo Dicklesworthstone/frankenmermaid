@@ -8104,4 +8104,163 @@ mod tests {
             );
         }
     }
+
+    // ─── End-to-end sequence fragment rendering tests ───
+
+    fn render_sequence_e2e(input: &str) -> String {
+        let parsed = fm_parser::parse(input);
+        let traced = fm_layout::layout_diagram_traced(&parsed.ir);
+        render_svg_with_layout(&parsed.ir, &traced.layout, &SvgRenderConfig::default())
+    }
+
+    #[test]
+    fn e2e_loop_fragment_renders_labeled_rect() {
+        let input = "sequenceDiagram\n\
+            participant A\n\
+            participant B\n\
+            loop Every minute\n\
+            A->>B: ping\n\
+            B-->>A: pong\n\
+            end";
+        let svg = render_sequence_e2e(input);
+
+        assert!(
+            svg.contains("fm-sequence-fragment"),
+            "missing fragment class"
+        );
+        assert!(
+            svg.contains("fm-sequence-fragment-label"),
+            "missing fragment label class"
+        );
+        assert!(
+            svg.contains("loop [Every minute]"),
+            "missing loop label text"
+        );
+    }
+
+    #[test]
+    fn e2e_alt_fragment_renders_with_label() {
+        let input = "sequenceDiagram\n\
+            participant A\n\
+            participant B\n\
+            alt success\n\
+            A->>B: ok\n\
+            else failure\n\
+            A->>B: err\n\
+            end";
+        let svg = render_sequence_e2e(input);
+
+        assert!(
+            svg.contains("fm-sequence-fragment"),
+            "missing fragment class"
+        );
+        assert!(svg.contains("alt [success]"), "missing alt label text");
+    }
+
+    #[test]
+    fn e2e_par_fragment_renders() {
+        let input = "sequenceDiagram\n\
+            participant A\n\
+            participant B\n\
+            participant C\n\
+            par\n\
+            A->>B: one\n\
+            and\n\
+            A->>C: two\n\
+            end";
+        let svg = render_sequence_e2e(input);
+        assert!(
+            svg.contains("fm-sequence-fragment"),
+            "missing fragment class"
+        );
+    }
+
+    #[test]
+    fn e2e_nested_fragments_produce_multiple_rects() {
+        let input = "sequenceDiagram\n\
+            participant A\n\
+            participant B\n\
+            loop repeat\n\
+            alt success\n\
+            A->>B: yes\n\
+            else fail\n\
+            A->>B: no\n\
+            end\n\
+            end";
+        let svg = render_sequence_e2e(input);
+
+        // Two separate fragment rectangles (loop + alt).
+        let count = svg.matches("class=\"fm-sequence-fragment\"").count();
+        assert!(
+            count >= 2,
+            "nested fragments should produce at least 2 fragment rects, got {count}"
+        );
+    }
+
+    #[test]
+    fn e2e_fragment_geometry_has_positive_bounds() {
+        let input = "sequenceDiagram\n\
+            participant A\n\
+            participant B\n\
+            loop Retry\n\
+            A->>B: request\n\
+            B-->>A: response\n\
+            end";
+        let parsed = fm_parser::parse(input);
+        let traced = fm_layout::layout_diagram_traced(&parsed.ir);
+        let fragments = &traced.layout.extensions.sequence_fragments;
+
+        assert!(!fragments.is_empty(), "should produce layout fragments");
+        for frag in fragments {
+            assert!(frag.bounds.width > 0.0, "fragment width must be positive");
+            assert!(frag.bounds.height > 0.0, "fragment height must be positive");
+        }
+    }
+
+    #[test]
+    fn renders_loop_fragment_with_dashed_stroke() {
+        let layout = DiagramLayout {
+            nodes: Vec::new(),
+            clusters: Vec::new(),
+            cycle_clusters: Vec::new(),
+            edges: Vec::new(),
+            bounds: LayoutRect {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 150.0,
+            },
+            stats: Default::default(),
+            extensions: fm_layout::LayoutExtensions {
+                sequence_fragments: vec![fm_layout::LayoutSequenceFragment {
+                    kind: fm_core::FragmentKind::Loop,
+                    label: "3 times".to_string(),
+                    color: None,
+                    bounds: LayoutRect {
+                        x: 5.0,
+                        y: 30.0,
+                        width: 190.0,
+                        height: 80.0,
+                    },
+                }],
+                ..Default::default()
+            },
+        };
+
+        let svg = render_svg_with_layout(
+            &MermaidDiagramIr::empty(DiagramType::Sequence),
+            &layout,
+            &SvgRenderConfig::default(),
+        );
+
+        assert!(
+            svg.contains("stroke-dasharray=\"6,4\""),
+            "loop should have dashed border"
+        );
+        assert!(
+            svg.contains("fm-sequence-fragment-label-bg"),
+            "should have label background"
+        );
+        assert!(svg.contains("loop [3 times]"), "should render label text");
+    }
 }

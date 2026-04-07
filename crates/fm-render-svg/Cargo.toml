@@ -10,4 +10,5 @@ fm-core.workspace = true
 fm-layout.workspace = true
 
 [dev-dependencies]
+fm-parser.workspace = true
 proptest = "1.6.0"
