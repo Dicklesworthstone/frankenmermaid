@@ -319,23 +319,22 @@ fn js_error_with_value(prefix: &str, value: JsValue) -> JsValue {
     js_error(format!("{prefix}: {detail}"))
 }
 
-fn parse_js_value_or_default<T>(value: Option<JsValue>) -> Result<T, JsValue>
+fn parse_js_value_or_default<T>(value: Option<JsValue>) -> T
 where
     T: for<'de> Deserialize<'de> + Default,
 {
     match value {
-        None => Ok(T::default()),
-        Some(raw) if raw.is_undefined() || raw.is_null() => Ok(T::default()),
+        None => T::default(),
+        Some(raw) if raw.is_undefined() || raw.is_null() => T::default(),
         Some(raw) => {
             #[cfg(target_arch = "wasm32")]
             {
-                serde_wasm_bindgen::from_value(raw)
-                    .map_err(|err| js_error(format!("invalid config: {err}")))
+                serde_wasm_bindgen::from_value(raw).unwrap_or_else(|_| T::default())
             }
             #[cfg(not(target_arch = "wasm32"))]
             {
                 let _ = raw;
-                Ok(T::default())
+                T::default()
             }
         }
     }
@@ -620,7 +619,7 @@ pub fn render(input: &str) -> WasmRenderOutput {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 pub fn init(config: Option<JsValue>) -> Result<(), JsValue> {
-    let overrides: RuntimeInitConfig = parse_js_value_or_default(config)?;
+    let overrides: RuntimeInitConfig = parse_js_value_or_default(config);
     let current = read_runtime_config();
     let requested_theme = requested_theme_preset(&overrides)?;
     let svg = merge_svg_config(&current.svg, &overrides.svg, overrides.theme.as_deref())?;
@@ -644,7 +643,7 @@ pub fn init(config: Option<JsValue>) -> Result<(), JsValue> {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = renderSvg))]
 pub fn render_svg_js(input: &str, config: Option<JsValue>) -> Result<String, JsValue> {
-    let overrides: RuntimeInitConfig = parse_js_value_or_default(config)?;
+    let overrides: RuntimeInitConfig = parse_js_value_or_default(config);
     let runtime = read_runtime_config();
     let mut svg_config =
         merge_svg_config(&runtime.svg, &overrides.svg, overrides.theme.as_deref())?;
@@ -990,7 +989,7 @@ impl Diagram {
             .dyn_into::<web_sys::CanvasRenderingContext2d>()
             .map_err(|_| js_error("failed to cast context to CanvasRenderingContext2d"))?;
 
-        let overrides: RuntimeInitConfig = parse_js_value_or_default(config)?;
+        let overrides: RuntimeInitConfig = parse_js_value_or_default(config);
         let runtime = read_runtime_config();
         let requested_theme = requested_theme_preset(&overrides)?;
         let svg_config =
@@ -1017,7 +1016,7 @@ impl Diagram {
     pub fn render(&mut self, input: &str, config: Option<JsValue>) -> Result<JsValue, JsValue> {
         self.ensure_alive()?;
 
-        let overrides: RuntimeInitConfig = parse_js_value_or_default(config)?;
+        let overrides: RuntimeInitConfig = parse_js_value_or_default(config);
         let requested_theme = requested_theme_preset(&overrides)?;
         let next_svg =
             merge_svg_config(&self.svg_config, &overrides.svg, overrides.theme.as_deref())?;
@@ -1215,13 +1214,13 @@ mod tests {
     }
 
     #[allow(dead_code)]
-    fn describe_diagram_js(input: &str) -> Result<String, JsValue> {
+    fn describe_diagram_js(input: &str) -> String {
         let parsed = parse(input);
-        let traced = layout_diagram_traced(&parsed.ir);
-        Ok(describe_diagram_with_layout(
+        let traced = layout_diagram_traced(&parsed.ir, LayoutAlgorithm::Auto);
+        describe_diagram_with_layout(
             &parsed.ir,
             Some(&traced.layout),
-        ))
+        )
     }
 
     #[test]

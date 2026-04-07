@@ -511,9 +511,9 @@ struct ReleaseValidationMatrixResult {
     scenario_count: usize,
     profile_count: usize,
     repeat_count: usize,
-    total_groups: usize,
-    stable_output_groups: usize,
-    stable_normalized_groups: usize,
+    total: usize,
+    stable_output: usize,
+    stable_normalized: usize,
     replay_manifest_path: String,
     detail: String,
 }
@@ -540,9 +540,9 @@ struct DemoEvidenceSummary {
 
 #[derive(Debug, Clone, Deserialize)]
 struct DemoEvidenceCounts {
-    total_groups: usize,
-    stable_output_groups: usize,
-    stable_normalized_groups: usize,
+    total: usize,
+    stable_output: usize,
+    stable_normalized: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -989,16 +989,16 @@ fn bundle_command(root: &Path, args: BundleArgs) -> Result<()> {
         sanitize_bundle_component(&bundle_version),
         sanitize_bundle_component(&release_ref)
     );
-    let out_dir = args
-        .out_dir
-        .map(|path| {
+    let out_dir = args.out_dir.map_or_else(
+        || root.join("artifacts/release-evidence"),
+        |path| {
             if path.is_absolute() {
                 path
             } else {
                 root.join(path)
             }
-        })
-        .unwrap_or_else(|| root.join("artifacts/release-evidence"));
+        },
+    );
     let bundle_dir = out_dir.join(&bundle_name);
     if bundle_dir.exists() {
         bail!(
@@ -1520,21 +1520,21 @@ fn evaluate_release_checklist(
                 ),
             ),
             "demo_evidence" => {
-                let pass = demo_summary.r#static.total_groups > 0
-                    && demo_summary.react.total_groups > 0
-                    && demo_summary.r#static.stable_normalized_groups
-                        == demo_summary.r#static.total_groups
-                    && demo_summary.react.stable_normalized_groups
-                        == demo_summary.react.total_groups;
+                let pass = demo_summary.r#static.total > 0
+                    && demo_summary.react.total > 0
+                    && demo_summary.r#static.stable_normalized
+                        == demo_summary.r#static.total
+                    && demo_summary.react.stable_normalized
+                        == demo_summary.react.total;
                 (
                     pass,
                     path_to_unix_string(demo_summary_path),
                     format!(
                         "static normalized stability: {}/{}; react normalized stability: {}/{}",
-                        demo_summary.r#static.stable_normalized_groups,
-                        demo_summary.r#static.total_groups,
-                        demo_summary.react.stable_normalized_groups,
-                        demo_summary.react.total_groups
+                        demo_summary.r#static.stable_normalized,
+                        demo_summary.r#static.total,
+                        demo_summary.react.stable_normalized,
+                        demo_summary.react.total
                     ),
                 )
             }
@@ -1594,8 +1594,8 @@ fn evaluate_release_matrix(
             .as_ref()
             .map(|bundle| resolve_report_path(root, &bundle.manifest_path))
             .unwrap_or_else(|| manifest_path.clone());
-        let pass = counts.total_groups > 0
-            && counts.stable_normalized_groups == counts.total_groups
+        let pass = counts.total > 0
+            && counts.stable_normalized == counts.total
             && replay_manifest.exists();
         rows.push(ReleaseValidationMatrixResult {
             id: item.id.clone(),
@@ -1611,9 +1611,9 @@ fn evaluate_release_matrix(
             scenario_count: artifact.scenarios.len(),
             profile_count: artifact.profiles.len(),
             repeat_count: artifact.repeat,
-            total_groups: counts.total_groups,
-            stable_output_groups: counts.stable_output_groups,
-            stable_normalized_groups: counts.stable_normalized_groups,
+            total: counts.total,
+            stable_output: counts.stable_output,
+            stable_normalized: counts.stable_normalized,
             replay_manifest_path: path_to_unix_string(
                 replay_manifest
                     .strip_prefix(root)
@@ -1623,8 +1623,8 @@ fn evaluate_release_matrix(
                 "{} scenarios x {} profiles; normalized stability {}/{}",
                 artifact.scenarios.len(),
                 artifact.profiles.len(),
-                counts.stable_normalized_groups,
-                counts.total_groups
+                counts.stable_normalized,
+                counts.total
             ),
         });
     }
@@ -1683,8 +1683,8 @@ fn render_release_signoff_readme(report: &ReleaseSignoffReport) -> String {
             row.host_kind,
             row.owner,
             if row.pass { "Pass" } else { "Fail" },
-            row.stable_normalized_groups,
-            row.total_groups,
+            row.stable_normalized,
+            row.total,
             row.replay_manifest_path
         ));
         lines.push(format!("Criterion: {}", row.criterion));

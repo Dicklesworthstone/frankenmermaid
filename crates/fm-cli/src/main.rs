@@ -3476,7 +3476,7 @@ impl InteractiveBuffer {
         }
     }
 
-    fn ensure_cursor_visible(&mut self, layout: InteractiveLayout) {
+    fn ensure_cursor_visible(&mut self, layout: &InteractiveLayout) {
         if self.cursor_row < self.scroll_row {
             self.scroll_row = self.cursor_row;
         } else if self.cursor_row >= self.scroll_row.saturating_add(layout.content_height) {
@@ -3737,8 +3737,7 @@ fn draw_interactive_ui(
 ) -> Result<()> {
     let theme = INTERACTIVE_THEMES[theme_index];
     let layout = interactive_layout(terminal_cols, terminal_rows);
-    buffer.ensure_cursor_visible(layout.clone());
-
+    buffer.ensure_cursor_visible(&layout);
     let separator_x = u16::try_from(layout.editor_width).unwrap_or(u16::MAX);
     let content_start_y = 2_u16;
     let help_y = terminal_rows.saturating_sub(2);

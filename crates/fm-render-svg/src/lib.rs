@@ -8297,7 +8297,7 @@ mod tests {
         assert!(
             svg.starts_with("<svg") || svg.starts_with("<?xml"),
             "{expected_type}: SVG output should start with <svg or <?xml, got: {}",
-            &svg[..svg.len().min(80)],
+            svg.chars().take(80).collect::<String>(),
         );
         assert!(
             svg.contains("</svg>"),
