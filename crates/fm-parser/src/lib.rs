@@ -99,6 +99,25 @@ impl ParseResult {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ParserConfig {
+    pub intent_inference: bool,
+    pub fuzzy_keyword_distance: usize,
+    pub auto_close_delimiters: bool,
+    pub create_placeholder_nodes: bool,
+}
+
+impl Default for ParserConfig {
+    fn default() -> Self {
+        Self {
+            intent_inference: true,
+            fuzzy_keyword_distance: 2,
+            auto_close_delimiters: true,
+            create_placeholder_nodes: true,
+        }
+    }
+}
+
 /// Method used to detect diagram type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum DetectionMethod {
@@ -151,6 +170,12 @@ pub struct DetectedType {
 /// 5. Fallback to flowchart
 #[must_use]
 pub fn detect_type_with_confidence(input: &str) -> DetectedType {
+    detect_type_with_confidence_and_config(input, &ParserConfig::default())
+}
+
+/// Detect diagram type with explicit parser-behavior settings.
+#[must_use]
+pub fn detect_type_with_confidence_and_config(input: &str, config: &ParserConfig) -> DetectedType {
     let trimmed = input.trim();
 
     // Empty input
@@ -182,14 +207,16 @@ pub fn detect_type_with_confidence(input: &str) -> DetectedType {
         return detected;
     }
 
-    // Strategy 3: Fuzzy keyword match
-    if let Some(detected) = fuzzy_keyword_match(&lower) {
-        return detected;
-    }
+    if config.intent_inference {
+        // Strategy 3: Fuzzy keyword match
+        if let Some(detected) = fuzzy_keyword_match(&lower, config.fuzzy_keyword_distance) {
+            return detected;
+        }
 
-    // Strategy 4: Content heuristics
-    if let Some(detected) = content_heuristics(input) {
-        return detected;
+        // Strategy 4: Content heuristics
+        if let Some(detected) = content_heuristics(input) {
+            return detected;
+        }
     }
 
     // Strategy 5: Fallback to flowchart
@@ -313,7 +340,11 @@ pub(crate) fn matches_keyword_header(line: &str, keyword: &str) -> bool {
 }
 
 /// Fuzzy keyword matching using Levenshtein distance.
-fn fuzzy_keyword_match(lower: &str) -> Option<DetectedType> {
+fn fuzzy_keyword_match(lower: &str, max_distance: usize) -> Option<DetectedType> {
+    if max_distance == 0 {
+        return None;
+    }
+
     // Extract the first word
     let first_word = lower.split_whitespace().next()?;
 
@@ -322,8 +353,8 @@ fn fuzzy_keyword_match(lower: &str) -> Option<DetectedType> {
 
     for (keyword, diagram_type) in DIAGRAM_KEYWORDS {
         let distance = levenshtein_distance(first_word, keyword);
-        // Only consider matches with distance 1-2 (non-zero but close)
-        if distance > 0 && distance <= 2 {
+        // Only consider non-exact matches within the configured threshold.
+        if distance > 0 && distance <= max_distance {
             let is_better_match = match best_match {
                 Some((_, best_distance)) => distance < best_distance,
                 None => true,
@@ -336,11 +367,7 @@ fn fuzzy_keyword_match(lower: &str) -> Option<DetectedType> {
 
     best_match.map(|(diagram_type, distance)| {
         // Confidence decreases with distance
-        let confidence = match distance {
-            1 => 0.85,
-            2 => 0.7,
-            _ => 0.5,
-        };
+        let confidence = (0.85 - (distance.saturating_sub(1)) as f32 * 0.15).max(0.4);
 
         DetectedType {
             diagram_type,
@@ -465,16 +492,25 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
 /// Simple diagram type detection (for backwards compatibility).
 #[must_use]
 pub fn detect_type(input: &str) -> DiagramType {
-    detect_type_with_confidence(input).diagram_type
+    detect_type_with_confidence_and_config(input, &ParserConfig::default()).diagram_type
 }
 
 #[must_use]
 pub fn parse(input: &str) -> ParseResult {
-    parse_with_mode(input, MermaidParseMode::Compat)
+    parse_with_mode_and_config(input, MermaidParseMode::Compat, &ParserConfig::default())
 }
 
 #[must_use]
 pub fn parse_with_mode(input: &str, parse_mode: MermaidParseMode) -> ParseResult {
+    parse_with_mode_and_config(input, parse_mode, &ParserConfig::default())
+}
+
+#[must_use]
+pub fn parse_with_mode_and_config(
+    input: &str,
+    parse_mode: MermaidParseMode,
+    config: &ParserConfig,
+) -> ParseResult {
     if input.trim().is_empty() {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Unknown);
         ir.meta.parse_mode = parse_mode;
@@ -487,7 +523,10 @@ pub fn parse_with_mode(input: &str, parse_mode: MermaidParseMode) -> ParseResult
     }
 
     // Detect type with confidence first
-    let detection = detect_type_with_confidence(input);
+    let mut detection = detect_type_with_confidence_and_config(input, config);
+    if parse_mode == MermaidParseMode::Strict && detection.method == DetectionMethod::Fallback {
+        detection.diagram_type = DiagramType::Unknown;
+    }
 
     if detection.method == DetectionMethod::DotFormat {
         // DOT format - parse via dot parser
@@ -498,7 +537,7 @@ pub fn parse_with_mode(input: &str, parse_mode: MermaidParseMode) -> ParseResult
         return result;
     }
 
-    mermaid_parser::parse_mermaid_with_detection(input, detection, parse_mode)
+    mermaid_parser::parse_mermaid_with_detection_and_config(input, detection, parse_mode, config)
 }
 
 #[must_use]

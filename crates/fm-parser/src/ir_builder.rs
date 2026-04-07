@@ -11,8 +11,7 @@ use fm_core::{
     MermaidParseMode, MermaidWarning, MermaidWarningCode, NodeShape, NotePosition, Span,
 };
 
-use crate::ParseResult;
-use crate::normalize_identifier;
+use crate::{ParseResult, ParserConfig, normalize_identifier};
 
 /// Open fragment entry: (kind, label, `start_edge`, alternatives, `child_fragment_indices`).
 type OpenFragment = (
@@ -54,6 +53,7 @@ pub struct IrBuilder {
     current_class: Option<String>,
     /// Stack of open composite states for state diagrams.
     state_stack: Vec<StateCompositeContext>,
+    parser_config: ParserConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,6 +90,7 @@ impl IrBuilder {
             fragment_stack: Vec::new(),
             current_class: None,
             state_stack: Vec::new(),
+            parser_config: ParserConfig::default(),
         }
     }
 
@@ -115,6 +116,7 @@ impl IrBuilder {
             fragment_stack: Vec::new(),
             current_class: None,
             state_stack: Vec::new(),
+            parser_config: ParserConfig::default(),
         }
     }
 
@@ -135,6 +137,14 @@ impl IrBuilder {
 
     pub(crate) const fn set_parse_mode(&mut self, parse_mode: MermaidParseMode) {
         self.ir.meta.parse_mode = parse_mode;
+    }
+
+    pub(crate) const fn set_parser_config(&mut self, parser_config: ParserConfig) {
+        self.parser_config = parser_config;
+    }
+
+    pub(crate) const fn parser_config(&self) -> &ParserConfig {
+        &self.parser_config
     }
 
     pub(crate) fn set_block_beta_columns(&mut self, columns: usize) {

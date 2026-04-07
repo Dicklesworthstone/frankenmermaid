@@ -1307,7 +1307,7 @@ fn perf_report_command(root: &Path, args: PerfReportArgs) -> Result<()> {
     let input_raw = fs::read_to_string(&input_path)
         .with_context(|| format!("failed to read benchmark log {}", input_path.display()))?;
     let input_sha256 = sha256_hex(input_raw.as_bytes());
-    let buckets = parse_perf_log(&input_raw)?;
+    let buckets = parse_perf_log(&input_raw);
     if buckets.is_empty() {
         bail!(
             "no benchmark JSON lines found in input log {}",
@@ -1522,10 +1522,8 @@ fn evaluate_release_checklist(
             "demo_evidence" => {
                 let pass = demo_summary.r#static.total > 0
                     && demo_summary.react.total > 0
-                    && demo_summary.r#static.stable_normalized
-                        == demo_summary.r#static.total
-                    && demo_summary.react.stable_normalized
-                        == demo_summary.react.total;
+                    && demo_summary.r#static.stable_normalized == demo_summary.r#static.total
+                    && demo_summary.react.stable_normalized == demo_summary.react.total;
                 (
                     pass,
                     path_to_unix_string(demo_summary_path),
@@ -2195,7 +2193,7 @@ fn load_perf_slo_policy(path: &Path) -> Result<PerfSloPolicyFile> {
     Ok(policy)
 }
 
-fn parse_perf_log(raw: &str) -> Result<BTreeMap<String, PerfSampleBucket>> {
+fn parse_perf_log(raw: &str) -> BTreeMap<String, PerfSampleBucket> {
     let mut buckets = BTreeMap::<String, PerfSampleBucket>::new();
     for line in raw.lines() {
         let trimmed = line.trim();
@@ -2232,7 +2230,7 @@ fn parse_perf_log(raw: &str) -> Result<BTreeMap<String, PerfSampleBucket>> {
             }
         }
     }
-    Ok(buckets)
+    buckets
 }
 
 fn append_perf_sample(

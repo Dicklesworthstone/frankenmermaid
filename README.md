@@ -397,7 +397,7 @@ Example `frankenmermaid.toml`:
 ```toml
 # Global behavior
 [core]
-deterministic = true          # Enforce deterministic output
+deterministic = true          # Reserved: output remains deterministic regardless
 max_input_bytes = 5_000_000   # Input size limit
 fallback_on_error = true      # Best-effort on parse failure
 

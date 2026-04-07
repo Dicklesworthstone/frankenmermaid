@@ -11,7 +11,7 @@ use fm_core::{
 use serde_json::Value;
 
 use crate::{
-    DetectedType, ParseResult,
+    DetectedType, ParseResult, ParserConfig,
     ir_builder::{IrBuilder, ParsedLabel},
     is_sankey_header, matches_keyword_header, normalize_identifier,
 };
@@ -94,6 +94,8 @@ const ER_OPERATORS: [(&str, ArrowType); 14] = [
     ("--", ArrowType::Line),
     ("..", ArrowType::DottedArrow),
 ];
+
+const DANGLING_PLACEHOLDER_PREFIX: &str = "__fm_dangling_line_";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NodeToken {
@@ -181,21 +183,39 @@ enum ClassStatement {
 #[allow(dead_code)]
 pub fn parse_mermaid(input: &str) -> ParseResult {
     let detection = crate::detect_type_with_confidence(input);
-    parse_mermaid_with_detection(input, detection, MermaidParseMode::Compat)
+    parse_mermaid_with_detection_and_config(
+        input,
+        detection,
+        MermaidParseMode::Compat,
+        &ParserConfig::default(),
+    )
 }
 
 /// Parse mermaid input with pre-computed detection results.
 #[must_use]
+#[allow(dead_code)] // Used by crate-level tests through the private module path.
 pub fn parse_mermaid_with_detection(
     input: &str,
     detection: DetectedType,
     parse_mode: MermaidParseMode,
+) -> ParseResult {
+    parse_mermaid_with_detection_and_config(input, detection, parse_mode, &ParserConfig::default())
+}
+
+/// Parse mermaid input with pre-computed detection results and explicit parser behavior config.
+#[must_use]
+pub fn parse_mermaid_with_detection_and_config(
+    input: &str,
+    detection: DetectedType,
+    parse_mode: MermaidParseMode,
+    config: &ParserConfig,
 ) -> ParseResult {
     let (content, front_matter_payload) = split_front_matter_block(input);
     let diagram_type = detection.diagram_type;
     let input_lines = content.lines().count();
     let mut builder = IrBuilder::with_capacity_hint(diagram_type, input_lines);
     builder.set_parse_mode(parse_mode);
+    builder.set_parser_config(*config);
 
     // Add detection warnings to builder
     for warning in &detection.warnings {
@@ -895,7 +915,7 @@ fn flow_subgraph_lookup_key(id: &str, title: Option<&str>) -> String {
 // ---------------------------------------------------------------------------
 
 fn parse_flowchart(input: &str, builder: &mut IrBuilder) {
-    let document = parse_flowchart_document(input);
+    let document = parse_flowchart_document(input, builder.parser_config());
     if let Some(direction) = document.header_direction {
         builder.set_direction(direction);
     }
@@ -911,7 +931,7 @@ fn parse_flowchart(input: &str, builder: &mut IrBuilder) {
     extract_style_directives(input, builder);
 }
 
-fn parse_flowchart_document(input: &str) -> FlowDocumentParseResult {
+fn parse_flowchart_document(input: &str, config: &ParserConfig) -> FlowDocumentParseResult {
     let lines: Vec<(usize, &str)> = input
         .lines()
         .enumerate()
@@ -926,6 +946,7 @@ fn parse_flowchart_document(input: &str) -> FlowDocumentParseResult {
         true,
         &mut warnings,
         &mut header_direction,
+        config,
     );
     if unclosed_subgraphs > 0 {
         warnings.push(format!(
@@ -945,6 +966,7 @@ fn parse_flowchart_document_items(
     is_root: bool,
     warnings: &mut Vec<String>,
     header_direction: &mut Option<GraphDirection>,
+    config: &ParserConfig,
 ) -> (Vec<FlowDocumentItem>, usize) {
     let mut items = Vec::new();
     let mut unclosed_subgraphs = 0;
@@ -985,7 +1007,7 @@ fn parse_flowchart_document_items(
             }
 
             if let Some((cluster_key, cluster_title)) =
-                parse_subgraph_statement(normalized_statement)
+                parse_subgraph_statement(normalized_statement, config)
             {
                 let (body, child_unclosed) = parse_flowchart_document_items(
                     lines,
@@ -993,6 +1015,7 @@ fn parse_flowchart_document_items(
                     false,
                     warnings,
                     header_direction,
+                    config,
                 );
                 unclosed_subgraphs += child_unclosed;
                 line_items.push(FlowDocumentItem::Subgraph {
@@ -1018,9 +1041,13 @@ fn parse_flowchart_document_items(
                 continue;
             }
 
-            if let Some(asts) =
-                parse_flowchart_statement_asts(normalized_statement, line_number, line, warnings)
-            {
+            if let Some(asts) = parse_flowchart_statement_asts(
+                normalized_statement,
+                line_number,
+                line,
+                warnings,
+                config,
+            ) {
                 line_items.push(FlowDocumentItem::Statements {
                     asts,
                     line_number,
@@ -1051,6 +1078,7 @@ fn parse_flowchart_statement_asts(
     line_number: usize,
     source_line: &str,
     warnings: &mut Vec<String>,
+    config: &ParserConfig,
 ) -> Option<Vec<FlowAst>> {
     let (ast, errors) = flow_statement_parser()
         .parse(statement)
@@ -1073,10 +1101,15 @@ fn parse_flowchart_statement_asts(
         // but the side effect populates ir.style_refs via the builder.
         return Some(vec![FlowAst::StyleOrLinkStyle]);
     }
-    if let Some(asts) = parse_edge_statement_asts(statement, &FLOW_OPERATORS, true) {
+    if let Some(asts) =
+        parse_edge_statement_asts(statement, &FLOW_OPERATORS, true, config, line_number)
+    {
         return Some(asts);
     }
-    if let Some(node) = parse_node_token(statement) {
+    if find_operator(statement, &FLOW_OPERATORS).is_some() {
+        return None;
+    }
+    if let Some(node) = parse_node_token_with_config(statement, config) {
         return Some(vec![FlowAst::Node(FlowAstNode {
             id: node.id,
             label: node.label,
@@ -1124,14 +1157,21 @@ fn intern_flow_ast_node(
     node: &FlowAstNode,
     span: Span,
 ) -> Option<IrNodeId> {
-    let node_id = builder.intern_node_label(&node.id, node.label.as_ref(), node.shape, span)?;
+    let node_id = if is_dangling_placeholder_node_id(&node.id) {
+        builder.intern_placeholder_node(&node.id, span)?
+    } else {
+        builder.intern_node_label(&node.id, node.label.as_ref(), node.shape, span)?
+    };
     if let Some(icon) = node.icon.as_deref() {
         builder.set_node_icon(node_id, icon);
     }
     Some(node_id)
 }
 
-fn parse_subgraph_statement(statement: &str) -> Option<(String, Option<String>)> {
+fn parse_subgraph_statement(
+    statement: &str,
+    config: &ParserConfig,
+) -> Option<(String, Option<String>)> {
     let statement = statement.trim_start();
     let rest = statement.strip_prefix("subgraph")?;
     let first = rest.chars().next()?;
@@ -1149,7 +1189,8 @@ fn parse_subgraph_statement(statement: &str) -> Option<(String, Option<String>)>
     // normalization behavior as normal node parsing.
     let has_explicit_label_delimiters =
         body.contains('[') || body.contains('(') || body.contains('{') || body.contains('>');
-    if has_explicit_label_delimiters && let Some(node) = parse_node_token(body) {
+    if has_explicit_label_delimiters && let Some(node) = parse_node_token_with_config(body, config)
+    {
         let key = normalize_identifier(&node.id);
         if !key.is_empty() {
             return Some((key, node.label.map(|label| label.text)));
@@ -1175,7 +1216,7 @@ fn parse_subgraph_statement(statement: &str) -> Option<(String, Option<String>)>
         }
     }
 
-    if let Some(node) = parse_node_token(body) {
+    if let Some(node) = parse_node_token_with_config(body, config) {
         let key = normalize_identifier(&node.id);
         if !key.is_empty() {
             return Some((key, node.label.map(|label| label.text)));
@@ -1965,7 +2006,7 @@ fn parse_class(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
-        let Some(statements) = parse_class_statements(trimmed) else {
+        let Some(statements) = parse_class_statements(trimmed, builder.parser_config()) else {
             builder.add_warning(format!(
                 "Line {line_number}: unsupported class syntax: {trimmed}"
             ));
@@ -2144,7 +2185,7 @@ fn strip_class_cardinality(statement: &str) -> (String, Option<String>, Option<S
     (result, source_card, target_card)
 }
 
-fn parse_class_statements(line: &str) -> Option<Vec<ClassStatement>> {
+fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<ClassStatement>> {
     if line.starts_with("class ") && line.ends_with('{') {
         let raw_name = line
             .trim_start_matches("class")
@@ -2193,7 +2234,7 @@ fn parse_class_statements(line: &str) -> Option<Vec<ClassStatement>> {
             let rest = statement.strip_prefix("class ").unwrap_or("").trim();
             if !rest.is_empty() && !rest.contains("--") && !rest.contains("..") {
                 let (clean_name, generics) = extract_class_generics(rest);
-                if let Some(node) = parse_node_token(clean_name) {
+                if let Some(node) = parse_node_token_with_config(clean_name, config) {
                     if generics.is_empty() {
                         statements.push(ClassStatement::Node(node));
                     } else {
@@ -2213,7 +2254,9 @@ fn parse_class_statements(line: &str) -> Option<Vec<ClassStatement>> {
         } else {
             statement
         };
-        if let Some(asts) = parse_edge_statement_asts(edge_input, &CLASS_OPERATORS, false) {
+        if let Some(asts) =
+            parse_edge_statement_asts(edge_input, &CLASS_OPERATORS, false, config, 0)
+        {
             for ast in asts {
                 statements.push(ClassStatement::Ast(ast));
                 // Attach cardinality to this edge in lower_class_statement.
@@ -2226,7 +2269,7 @@ fn parse_class_statements(line: &str) -> Option<Vec<ClassStatement>> {
             }
             continue;
         }
-        if let Some(node) = parse_node_token(statement) {
+        if let Some(node) = parse_node_token_with_config(statement, config) {
             statements.push(ClassStatement::Node(node));
         }
     }
@@ -2242,7 +2285,7 @@ fn lower_class_statement(
 ) {
     match statement {
         ClassStatement::BlockStart(class_name, generics) => {
-            if let Some(node) = parse_node_token(&class_name) {
+            if let Some(node) = parse_node_token_with_config(&class_name, builder.parser_config()) {
                 let span = span_for(line_number, source_line);
                 let _ = intern_node_token(builder, &node, span);
                 builder.set_current_class(&node.id);
@@ -2331,7 +2374,7 @@ fn parse_state(input: &str, builder: &mut IrBuilder) {
             }
         }
 
-        let Some(statements) = parse_state_statements(trimmed) else {
+        let Some(statements) = parse_state_statements(trimmed, builder.parser_config()) else {
             builder.add_warning(format!(
                 "Line {line_number}: unsupported state syntax: {trimmed}"
             ));
@@ -2344,7 +2387,7 @@ fn parse_state(input: &str, builder: &mut IrBuilder) {
     }
 }
 
-fn parse_state_statements(line: &str) -> Option<Vec<StateStatement>> {
+fn parse_state_statements(line: &str, config: &ParserConfig) -> Option<Vec<StateStatement>> {
     if line.starts_with("direction ") {
         return parse_graph_direction(line)
             .map(|direction| vec![StateStatement::Direction(direction)]);
@@ -2384,11 +2427,12 @@ fn parse_state_statements(line: &str) -> Option<Vec<StateStatement>> {
     // `[*]` standalone is handled as a node in the edge parsing
     let mut statements = Vec::new();
     for statement in split_statements(line) {
-        if let Some(asts) = parse_edge_statement_asts(statement, &FLOW_OPERATORS, false) {
+        if let Some(asts) = parse_edge_statement_asts(statement, &FLOW_OPERATORS, false, config, 0)
+        {
             statements.push(StateStatement::Edge(asts));
             continue;
         }
-        if let Some(node) = parse_node_token(statement) {
+        if let Some(node) = parse_node_token_with_config(statement, config) {
             statements.push(StateStatement::Node(node));
         }
     }
@@ -2649,7 +2693,9 @@ fn parse_requirement(input: &str, builder: &mut IrBuilder) {
         for keyword in &requirement_keywords {
             if let Some(rest) = trimmed.strip_prefix(keyword) {
                 let requirement_name = rest.trim_end_matches('{').trim();
-                if let Some(node) = parse_node_token(requirement_name) {
+                if let Some(node) =
+                    parse_node_token_with_config(requirement_name, builder.parser_config())
+                {
                     let span = span_for(line_number, line);
                     current_req_node = builder.intern_node_label(
                         &node.id,
@@ -2791,7 +2837,7 @@ fn parse_mindmap(input: &str, builder: &mut IrBuilder) {
         }
 
         let depth = leading_indent_width(line);
-        let Some(node) = parse_mindmap_node_token(trimmed) else {
+        let Some(node) = parse_mindmap_node_token(trimmed, builder.parser_config()) else {
             builder.add_warning(format!(
                 "Line {line_number}: unsupported mindmap syntax: {trimmed}"
             ));
@@ -2839,7 +2885,7 @@ fn parse_mindmap(input: &str, builder: &mut IrBuilder) {
 
 /// Parse a mindmap node token with mindmap-specific shapes.
 /// Mindmap supports: square [], rounded (), circle (()), bang ))((, cloud )(, hexagon {{}}
-fn parse_mindmap_node_token(raw: &str) -> Option<NodeToken> {
+fn parse_mindmap_node_token(raw: &str, config: &ParserConfig) -> Option<NodeToken> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
@@ -2867,7 +2913,7 @@ fn parse_mindmap_node_token(raw: &str) -> Option<NodeToken> {
     }
 
     // Circle shape: id((text)) - reuse existing double-circle parser
-    if let Some(parsed) = parse_double_circle(core) {
+    if let Some(parsed) = parse_double_circle_with_config(core, config) {
         // For mindmap, (( )) is just a circle, not double-circle
         return Some(NodeToken {
             id: parsed.id,
@@ -2878,12 +2924,12 @@ fn parse_mindmap_node_token(raw: &str) -> Option<NodeToken> {
     }
 
     // Rounded shape: id(text)
-    if let Some(parsed) = parse_wrapped(core, '(', ')', NodeShape::Rounded) {
+    if let Some(parsed) = parse_wrapped_with_config(core, '(', ')', NodeShape::Rounded, config) {
         return Some(parsed);
     }
 
     // Square shape: id[text]
-    if let Some(parsed) = parse_wrapped(core, '[', ']', NodeShape::Rect) {
+    if let Some(parsed) = parse_wrapped_with_config(core, '[', ']', NodeShape::Rect, config) {
         return Some(parsed);
     }
 
@@ -3014,7 +3060,7 @@ fn parse_er(input: &str, builder: &mut IrBuilder) {
         // Start of entity block: ENTITY_NAME {
         if trimmed.ends_with('{') {
             let entity_name = trimmed.trim_end_matches('{').trim();
-            if let Some(node) = parse_node_token(entity_name) {
+            if let Some(node) = parse_node_token_with_config(entity_name, builder.parser_config()) {
                 let span = span_for(line_number, line);
                 current_entity = intern_node_token(builder, &node, span);
                 continue;
@@ -3047,7 +3093,7 @@ fn parse_er(input: &str, builder: &mut IrBuilder) {
         }
 
         // Standalone entity declaration
-        if let Some(node) = parse_node_token(trimmed) {
+        if let Some(node) = parse_node_token_with_config(trimmed, builder.parser_config()) {
             let span = span_for(line_number, line);
             let _ = intern_node_token(builder, &node, span);
             continue;
@@ -4021,7 +4067,7 @@ fn parse_packet(input: &str, builder: &mut IrBuilder) {
                 parsed_line = true;
                 continue;
             }
-            if let Some(node) = parse_node_token(statement) {
+            if let Some(node) = parse_node_token_with_config(statement, builder.parser_config()) {
                 let _ = intern_node_token(builder, &node, span);
                 parsed_line = true;
             }
@@ -4057,10 +4103,10 @@ fn parse_er_relationship(
         return false;
     }
 
-    let Some(left_node) = parse_node_token(left_raw) else {
+    let Some(left_node) = parse_node_token_with_config(left_raw, builder.parser_config()) else {
         return false;
     };
-    let Some(right_node) = parse_node_token(right_raw) else {
+    let Some(right_node) = parse_node_token_with_config(right_raw, builder.parser_config()) else {
         return false;
     };
 
@@ -5192,7 +5238,7 @@ const STATE_START_NODE_ID: &str = "__state_start";
 const STATE_END_NODE_ID: &str = "__state_end";
 
 fn parse_block_beta(input: &str, builder: &mut IrBuilder) {
-    let document = parse_block_beta_document(input);
+    let document = parse_block_beta_document(input, builder.parser_config());
     for warning in &document.warnings {
         builder.add_warning(warning.clone());
     }
@@ -5201,7 +5247,7 @@ fn parse_block_beta(input: &str, builder: &mut IrBuilder) {
     }
 }
 
-fn parse_block_beta_document(input: &str) -> BlockBetaDocumentParseResult {
+fn parse_block_beta_document(input: &str, config: &ParserConfig) -> BlockBetaDocumentParseResult {
     let lines: Vec<(usize, &str)> = input
         .lines()
         .enumerate()
@@ -5210,7 +5256,7 @@ fn parse_block_beta_document(input: &str) -> BlockBetaDocumentParseResult {
     let mut next_index = 0;
     let mut warnings = Vec::new();
     let (items, unclosed_groups) =
-        parse_block_beta_document_items(&lines, &mut next_index, false, &mut warnings);
+        parse_block_beta_document_items(&lines, &mut next_index, false, &mut warnings, config);
     if unclosed_groups > 0 {
         warnings.push(format!(
             "Block-beta diagram ended with {unclosed_groups} unclosed block group(s)"
@@ -5224,6 +5270,7 @@ fn parse_block_beta_document_items(
     next_index: &mut usize,
     stop_on_end: bool,
     warnings: &mut Vec<String>,
+    config: &ParserConfig,
 ) -> (Vec<BlockBetaDocumentItem>, usize) {
     let mut items = Vec::new();
     let mut unclosed_groups = 0;
@@ -5253,7 +5300,7 @@ fn parse_block_beta_document_items(
 
         if let Some((group_key, span_cols)) = parse_block_beta_group_start(trimmed) {
             let (body, child_unclosed) =
-                parse_block_beta_document_items(lines, next_index, true, warnings);
+                parse_block_beta_document_items(lines, next_index, true, warnings, config);
             unclosed_groups += child_unclosed;
             items.push(BlockBetaDocumentItem::Group {
                 id: group_key,
@@ -5274,7 +5321,9 @@ fn parse_block_beta_document_items(
             continue;
         }
 
-        if let Some(asts) = parse_edge_statement_asts(trimmed, &FLOW_OPERATORS, false) {
+        if let Some(asts) =
+            parse_edge_statement_asts(trimmed, &FLOW_OPERATORS, false, config, line_number)
+        {
             items.push(BlockBetaDocumentItem::Statement {
                 statement: BlockBetaStatement::Edges(asts),
                 line_number,
@@ -5283,7 +5332,7 @@ fn parse_block_beta_document_items(
             continue;
         }
 
-        let blocks = parse_block_beta_blocks(trimmed, line_number);
+        let blocks = parse_block_beta_blocks(trimmed, line_number, config);
         if !blocks.is_empty() {
             items.push(BlockBetaDocumentItem::Statement {
                 statement: BlockBetaStatement::Blocks(blocks),
@@ -5465,7 +5514,7 @@ fn parse_block_beta_group_start(line: &str) -> Option<(String, Option<usize>)> {
     (!key.is_empty()).then_some((key, span_cols))
 }
 
-fn parse_block_beta_blocks(line: &str, line_number: usize) -> Vec<BlockDef> {
+fn parse_block_beta_blocks(line: &str, line_number: usize, config: &ParserConfig) -> Vec<BlockDef> {
     let lower = line.to_ascii_lowercase();
     if lower == "space" || lower.starts_with("space:") {
         let span_cols = lower
@@ -5483,7 +5532,7 @@ fn parse_block_beta_blocks(line: &str, line_number: usize) -> Vec<BlockDef> {
 
     split_block_beta_defs(line)
         .into_iter()
-        .filter_map(|token| try_parse_block_beta_def(token.trim()))
+        .filter_map(|token| try_parse_block_beta_def(token.trim(), config))
         .collect()
 }
 
@@ -5543,7 +5592,7 @@ fn split_block_beta_defs(line: &str) -> Vec<String> {
     tokens
 }
 
-fn try_parse_block_beta_def(token: &str) -> Option<BlockDef> {
+fn try_parse_block_beta_def(token: &str, config: &ParserConfig) -> Option<BlockDef> {
     let trimmed = token.trim();
     if trimmed.is_empty() {
         return None;
@@ -5565,7 +5614,7 @@ fn try_parse_block_beta_def(token: &str) -> Option<BlockDef> {
         _ => (trimmed, 1),
     };
 
-    let node = parse_node_token(core)?;
+    let node = parse_node_token_with_config(core, config)?;
     Some(BlockDef {
         id: node.id,
         label: node.label.map(|label| label.text),
@@ -6444,6 +6493,8 @@ fn parse_edge_statement_asts(
     statement: &str,
     operators: &[(&str, ArrowType)],
     allow_parallel_node_lists: bool,
+    config: &ParserConfig,
+    line_number: usize,
 ) -> Option<Vec<FlowAst>> {
     let (first_operator_idx, first_operator, first_arrow) = find_operator(statement, operators)?;
     let left_raw = statement[..first_operator_idx].trim();
@@ -6451,11 +6502,12 @@ fn parse_edge_statement_asts(
         return None;
     }
 
-    let mut from_nodes = parse_node_list(left_raw, allow_parallel_node_lists)?;
+    let mut from_nodes = parse_node_list_with_config(left_raw, allow_parallel_node_lists, config)?;
     let mut asts = Vec::new();
     let mut operator_idx = first_operator_idx;
     let mut operator = first_operator;
     let mut arrow = first_arrow;
+    let mut placeholder_index = 0_usize;
 
     loop {
         let rhs_start = operator_idx + operator.len();
@@ -6489,7 +6541,19 @@ fn parse_edge_statement_asts(
             .trim();
 
             if right_segment.is_empty() {
-                return (!asts.is_empty()).then_some(asts);
+                if !config.create_placeholder_nodes {
+                    return (!asts.is_empty()).then_some(asts);
+                }
+                let placeholder = dangling_placeholder_node(line_number, placeholder_index);
+                for from_node in &from_nodes {
+                    asts.push(FlowAst::Edge {
+                        from: from_node.clone().into(),
+                        arrow,
+                        label: None,
+                        to: placeholder.clone().into(),
+                    });
+                }
+                break;
             }
 
             let (label, target) = extract_pipe_label(right_segment);
@@ -6497,8 +6561,18 @@ fn parse_edge_statement_asts(
             right_without_label = target;
         }
 
-        let to_nodes = match parse_node_list(right_without_label, allow_parallel_node_lists) {
+        let to_nodes = match (!right_without_label.is_empty())
+            .then(|| {
+                parse_node_list_with_config(right_without_label, allow_parallel_node_lists, config)
+            })
+            .flatten()
+        {
             Some(nodes) => nodes,
+            None if config.create_placeholder_nodes && right_without_label.is_empty() => {
+                let placeholder = dangling_placeholder_node(line_number, placeholder_index);
+                placeholder_index += 1;
+                vec![placeholder]
+            }
             None => return (!asts.is_empty()).then_some(asts),
         };
 
@@ -6527,7 +6601,11 @@ fn parse_edge_statement_asts(
     (!asts.is_empty()).then_some(asts)
 }
 
-fn parse_node_list(raw: &str, allow_parallel_node_lists: bool) -> Option<Vec<NodeToken>> {
+fn parse_node_list_with_config(
+    raw: &str,
+    allow_parallel_node_lists: bool,
+    config: &ParserConfig,
+) -> Option<Vec<NodeToken>> {
     if !allow_parallel_node_lists && contains_top_level_ampersand(raw) {
         return None;
     }
@@ -6543,7 +6621,7 @@ fn parse_node_list(raw: &str, allow_parallel_node_lists: bool) -> Option<Vec<Nod
         if trimmed.is_empty() {
             return None;
         }
-        nodes.push(parse_node_token(trimmed)?);
+        nodes.push(parse_node_token_with_config(trimmed, config)?);
     }
     Some(nodes)
 }
@@ -6637,7 +6715,7 @@ fn parse_edge_statement_with_nodes(
     }
 
     let span = span_for(line_number, source_line);
-    let left_node = parse_node_token(left_raw)?;
+    let left_node = parse_node_token_with_config(left_raw, builder.parser_config())?;
     let mut from_node = builder.intern_node_label(
         &left_node.id,
         left_node.label.as_ref(),
@@ -6649,6 +6727,7 @@ fn parse_edge_statement_with_nodes(
     let mut operator_idx = first_operator_idx;
     let mut operator = first_operator;
     let mut arrow = first_arrow;
+    let mut placeholder_index = 0_usize;
 
     loop {
         let rhs_start = operator_idx + operator.len();
@@ -6660,14 +6739,41 @@ fn parse_edge_statement_with_nodes(
         .trim();
 
         if right_segment.is_empty() {
-            return (touched_nodes.len() > 1).then_some(touched_nodes);
+            let to_node = if builder.parser_config().create_placeholder_nodes {
+                let placeholder_id = dangling_placeholder_node_id(line_number, placeholder_index);
+                builder.intern_placeholder_node(&placeholder_id, span)?
+            } else {
+                return (touched_nodes.len() > 1).then_some(touched_nodes);
+            };
+            builder.push_edge(from_node, to_node, arrow, None, span);
+            touched_nodes.push(to_node);
+            break;
         }
 
         let (edge_label, right_without_label) = extract_pipe_label(right_segment);
-        let right_node = match parse_node_token(right_without_label) {
-            Some(node) => node,
-            None => return (touched_nodes.len() > 1).then_some(touched_nodes),
-        };
+        let right_node =
+            match parse_node_token_with_config(right_without_label, builder.parser_config()) {
+                Some(node) => node,
+                None if builder.parser_config().create_placeholder_nodes
+                    && right_without_label.is_empty() =>
+                {
+                    let placeholder_id =
+                        dangling_placeholder_node_id(line_number, placeholder_index);
+                    placeholder_index += 1;
+                    let to_node = builder.intern_placeholder_node(&placeholder_id, span)?;
+                    builder.push_edge(from_node, to_node, arrow, edge_label.as_deref(), span);
+                    touched_nodes.push(to_node);
+                    if let Some((next_idx, next_operator_token, next_arrow)) = next_operator {
+                        from_node = to_node;
+                        operator_idx = next_idx;
+                        operator = next_operator_token;
+                        arrow = next_arrow;
+                        continue;
+                    }
+                    break;
+                }
+                None => return (touched_nodes.len() > 1).then_some(touched_nodes),
+            };
         let to_node = match builder.intern_node_label(
             &right_node.id,
             right_node.label.as_ref(),
@@ -6802,7 +6908,7 @@ fn extract_pipe_label(right_hand_side: &str) -> (Option<String>, &str) {
     (label, remainder)
 }
 
-fn parse_node_token(raw: &str) -> Option<NodeToken> {
+fn parse_node_token_with_config(raw: &str, config: &ParserConfig) -> Option<NodeToken> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
@@ -6822,38 +6928,56 @@ fn parse_node_token(raw: &str) -> Option<NodeToken> {
         return None;
     }
 
-    if let Some(parsed) = parse_double_circle(core) {
+    if let Some(parsed) = parse_double_circle_with_config(core, config) {
         return Some(parsed);
     }
-    if let Some(parsed) = parse_wrapped_str(core, "[(", ")]", NodeShape::Cylinder) {
+    if let Some(parsed) =
+        parse_wrapped_str_with_config(core, "[(", ")]", NodeShape::Cylinder, config)
+    {
         return Some(parsed);
     }
-    if let Some(parsed) = parse_wrapped_str(core, "[[", "]]", NodeShape::Subroutine) {
+    if let Some(parsed) =
+        parse_wrapped_str_with_config(core, "[[", "]]", NodeShape::Subroutine, config)
+    {
         return Some(parsed);
     }
-    if let Some(parsed) = parse_wrapped(core, '[', ']', NodeShape::Rect) {
+    if let Some(parsed) = parse_wrapped_with_config(core, '[', ']', NodeShape::Rect, config) {
         return Some(parsed);
     }
-    if let Some(parsed) = parse_wrapped(core, '(', ')', NodeShape::Rounded) {
+    if let Some(parsed) = parse_wrapped_with_config(core, '(', ')', NodeShape::Rounded, config) {
         return Some(parsed);
     }
-    if let Some(parsed) = parse_wrapped(core, '{', '}', NodeShape::Diamond) {
+    if let Some(parsed) = parse_wrapped_with_config(core, '{', '}', NodeShape::Diamond, config) {
         return Some(parsed);
     }
-    if let Some(parsed) = parse_wrapped_str(core, ">", "]", NodeShape::Asymmetric) {
+    if let Some(parsed) =
+        parse_wrapped_str_with_config(core, ">", "]", NodeShape::Asymmetric, config)
+    {
         return Some(parsed);
     }
-    if let Some(parsed) = parse_wrapped_str(core, "[/", "/]", NodeShape::Parallelogram) {
+    if let Some(parsed) =
+        parse_wrapped_str_with_config(core, "[/", "/]", NodeShape::Parallelogram, config)
+    {
         return Some(parsed);
     }
-    if let Some(parsed) = parse_wrapped_str(core, "[\\", "\\]", NodeShape::InvParallelogram) {
+    if let Some(parsed) =
+        parse_wrapped_str_with_config(core, "[\\", "\\]", NodeShape::InvParallelogram, config)
+    {
         return Some(parsed);
     }
-    if let Some(parsed) = parse_wrapped_str(core, "[/", "\\]", NodeShape::Trapezoid) {
+    if let Some(parsed) =
+        parse_wrapped_str_with_config(core, "[/", "\\]", NodeShape::Trapezoid, config)
+    {
         return Some(parsed);
     }
-    if let Some(parsed) = parse_wrapped_str(core, "[\\", "/]", NodeShape::InvTrapezoid) {
+    if let Some(parsed) =
+        parse_wrapped_str_with_config(core, "[\\", "/]", NodeShape::InvTrapezoid, config)
+    {
         return Some(parsed);
+    }
+
+    if !config.auto_close_delimiters && looks_like_unclosed_node_delimiter(core) {
+        return None;
     }
 
     let id = normalize_identifier(core);
@@ -6872,14 +6996,19 @@ fn parse_node_token(raw: &str) -> Option<NodeToken> {
     })
 }
 
-fn parse_double_circle(raw: &str) -> Option<NodeToken> {
+fn parse_double_circle_with_config(raw: &str, config: &ParserConfig) -> Option<NodeToken> {
     let start = raw.find("((")?;
-    if !raw.ends_with("))") {
+    if !raw.ends_with("))") && !config.auto_close_delimiters {
         return None;
     }
 
     let id_raw = raw[..start].trim();
-    let label_raw = raw[start + 2..raw.len().saturating_sub(2)].trim();
+    let label_end = if raw.ends_with("))") {
+        raw.len().saturating_sub(2)
+    } else {
+        raw.len()
+    };
+    let label_raw = raw[start + 2..label_end].trim();
     let mut id = normalize_identifier(id_raw);
     if id.is_empty() {
         id = normalize_identifier(label_raw);
@@ -6899,14 +7028,24 @@ fn parse_double_circle(raw: &str) -> Option<NodeToken> {
     })
 }
 
-fn parse_wrapped(raw: &str, open: char, close: char, shape: NodeShape) -> Option<NodeToken> {
+fn parse_wrapped_with_config(
+    raw: &str,
+    open: char,
+    close: char,
+    shape: NodeShape,
+    config: &ParserConfig,
+) -> Option<NodeToken> {
     let start = raw.find(open)?;
-    if !raw.ends_with(close) {
+    if !raw.ends_with(close) && !config.auto_close_delimiters {
         return None;
     }
 
     let inner_start = start + open.len_utf8();
-    let end = raw.len().saturating_sub(close.len_utf8());
+    let end = if raw.ends_with(close) {
+        raw.len().saturating_sub(close.len_utf8())
+    } else {
+        raw.len()
+    };
     if inner_start > end {
         return None;
     }
@@ -6932,14 +7071,24 @@ fn parse_wrapped(raw: &str, open: char, close: char, shape: NodeShape) -> Option
     })
 }
 
-fn parse_wrapped_str(raw: &str, open: &str, close: &str, shape: NodeShape) -> Option<NodeToken> {
+fn parse_wrapped_str_with_config(
+    raw: &str,
+    open: &str,
+    close: &str,
+    shape: NodeShape,
+    config: &ParserConfig,
+) -> Option<NodeToken> {
     let start = raw.find(open)?;
-    if !raw.ends_with(close) {
+    if !raw.ends_with(close) && !config.auto_close_delimiters {
         return None;
     }
 
     let inner_start = start + open.len();
-    let end = raw.len().saturating_sub(close.len());
+    let end = if raw.ends_with(close) {
+        raw.len().saturating_sub(close.len())
+    } else {
+        raw.len()
+    };
     if inner_start > end {
         return None;
     }
@@ -6963,6 +7112,38 @@ fn parse_wrapped_str(raw: &str, open: &str, close: &str, shape: NodeShape) -> Op
         icon,
         shape,
     })
+}
+
+fn looks_like_unclosed_node_delimiter(raw: &str) -> bool {
+    (raw.contains("((") && !raw.ends_with("))"))
+        || (raw.contains("[(") && !raw.ends_with(")]"))
+        || (raw.contains("[[") && !raw.ends_with("]]"))
+        || (raw.contains("[/") && !raw.ends_with("/]") && !raw.ends_with("\\]"))
+        || (raw.contains("[\\") && !raw.ends_with("\\]") && !raw.ends_with("/]"))
+        || (raw.contains('[') && !raw.ends_with(']'))
+        || (raw.contains('(') && !raw.ends_with(')'))
+        || (raw.contains('{') && !raw.ends_with('}'))
+        || (raw.contains('>') && !raw.ends_with(']'))
+}
+
+fn dangling_placeholder_node(line_number: usize, placeholder_index: usize) -> NodeToken {
+    NodeToken {
+        id: dangling_placeholder_node_id(line_number, placeholder_index),
+        label: None,
+        icon: None,
+        shape: NodeShape::Rect,
+    }
+}
+
+fn dangling_placeholder_node_id(line_number: usize, placeholder_index: usize) -> String {
+    format!(
+        "{DANGLING_PLACEHOLDER_PREFIX}{line_number}_placeholder_{}",
+        placeholder_index + 1
+    )
+}
+
+fn is_dangling_placeholder_node_id(id: &str) -> bool {
+    id.starts_with(DANGLING_PLACEHOLDER_PREFIX)
 }
 
 fn normalize_compound_identifier(raw: &str) -> String {
@@ -8169,7 +8350,10 @@ fn extract_accessibility_directives(input: &str, builder: &mut IrBuilder) {
     }
 
     // Flush unclosed accDescr block — treat end-of-input as implicit close.
-    if in_acc_descr_block && !descr_lines.is_empty() {
+    if in_acc_descr_block
+        && builder.parser_config().auto_close_delimiters
+        && !descr_lines.is_empty()
+    {
         let descr = descr_lines.join("\n");
         if !descr.is_empty() {
             builder.set_acc_descr(descr);
@@ -8185,11 +8369,11 @@ fn is_comment(line: &str) -> bool {
 mod tests {
     use fm_core::{
         ArrowType, DiagramType, GanttDate, GanttExclude, GanttTaskType, GanttTickInterval,
-        GraphDirection, IrEndpoint, IrLabelSegment, IrXySeriesKind, NodeShape,
+        GraphDirection, IrEndpoint, IrLabelSegment, IrXySeriesKind, MermaidParseMode, NodeShape,
     };
 
-    use super::parse_mermaid;
-    use crate::detect_type;
+    use super::{is_dangling_placeholder_node_id, parse_mermaid};
+    use crate::{ParserConfig, detect_type, parse_with_mode_and_config};
 
     #[test]
     fn detects_supported_headers() {
@@ -8444,9 +8628,10 @@ mod tests {
     #[test]
     fn flowchart_malformed_chain_keeps_parsed_prefix_in_cluster() {
         let parsed = parse_mermaid("flowchart TB\nsubgraph g[Group]\nA-->B-->\nend");
-        assert_eq!(parsed.ir.edges.len(), 1);
+        assert_eq!(parsed.ir.edges.len(), 2);
         assert!(parsed.ir.nodes.iter().any(|node| node.id == "A"));
         assert!(parsed.ir.nodes.iter().any(|node| node.id == "B"));
+        assert!(parsed.ir.nodes.iter().any(|node| node.implicit));
 
         assert_eq!(parsed.ir.clusters.len(), 1);
         let cluster = &parsed.ir.clusters[0];
@@ -8457,6 +8642,11 @@ mod tests {
             .collect();
         assert!(member_ids.contains("A"));
         assert!(member_ids.contains("B"));
+        assert!(
+            member_ids
+                .iter()
+                .any(|member_id| is_dangling_placeholder_node_id(member_id))
+        );
     }
 
     #[test]
@@ -11939,6 +12129,59 @@ Rel_Back(db, app, "Responds")"#,
             parsed.ir.meta.acc_descr.is_some(),
             "unclosed accDescr block should still be captured"
         );
+    }
+
+    #[test]
+    fn auto_close_delimiters_toggle_controls_unclosed_shape_recovery() {
+        let baseline = parse_mermaid("flowchart LR\nA[Open");
+        assert_eq!(baseline.ir.nodes.len(), 1);
+
+        let strict_delimiters = parse_with_mode_and_config(
+            "flowchart LR\nA[Open",
+            MermaidParseMode::Compat,
+            &ParserConfig {
+                auto_close_delimiters: false,
+                ..ParserConfig::default()
+            },
+        );
+        assert_eq!(strict_delimiters.ir.nodes.len(), 0);
+    }
+
+    #[test]
+    fn create_placeholder_nodes_toggle_controls_dangling_edge_recovery() {
+        let baseline = parse_mermaid("flowchart LR\nA -->");
+        assert_eq!(baseline.ir.edges.len(), 1);
+        assert!(baseline.ir.nodes.iter().any(|node| node.implicit));
+
+        let no_placeholders = parse_with_mode_and_config(
+            "flowchart LR\nA -->",
+            MermaidParseMode::Compat,
+            &ParserConfig {
+                create_placeholder_nodes: false,
+                ..ParserConfig::default()
+            },
+        );
+        assert_eq!(no_placeholders.ir.edges.len(), 0);
+        assert!(!no_placeholders.ir.nodes.iter().any(|node| node.implicit));
+    }
+
+    #[test]
+    fn auto_close_delimiters_toggle_controls_unclosed_acc_descr_blocks() {
+        let baseline = parse_mermaid("flowchart LR\n  accDescr {\n    Unclosed content");
+        assert_eq!(
+            baseline.ir.meta.acc_descr.as_deref(),
+            Some("Unclosed content")
+        );
+
+        let strict_delimiters = parse_with_mode_and_config(
+            "flowchart LR\n  accDescr {\n    Unclosed content",
+            MermaidParseMode::Compat,
+            &ParserConfig {
+                auto_close_delimiters: false,
+                ..ParserConfig::default()
+            },
+        );
+        assert!(strict_delimiters.ir.meta.acc_descr.is_none());
     }
 
     #[test]

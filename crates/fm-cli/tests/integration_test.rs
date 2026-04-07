@@ -3415,14 +3415,14 @@ fn evidence_release_signoff_writes_summary_and_markdown() {
   "static_summary": "artifacts/evidence/demo/static-summary.json",
   "react_summary": "artifacts/evidence/demo/react-summary.json",
   "static": {
-    "total_groups": 6,
-    "stable_output_groups": 4,
-    "stable_normalized_groups": 6
+    "total": 6,
+    "stable_output": 4,
+    "stable_normalized": 6
   },
   "react": {
-    "total_groups": 6,
-    "stable_output_groups": 4,
-    "stable_normalized_groups": 6
+    "total": 6,
+    "stable_output": 4,
+    "stable_normalized": 6
   },
   "replay_bundles": {
     "static_manifest": "artifacts/evidence/demo/static-replay/replay_manifest.json",
@@ -3572,14 +3572,14 @@ fn evidence_release_signoff_fails_when_gate_is_uncovered() {
   "static_summary": "artifacts/evidence/demo/static-summary.json",
   "react_summary": "artifacts/evidence/demo/react-summary.json",
   "static": {
-    "total_groups": 1,
-    "stable_output_groups": 1,
-    "stable_normalized_groups": 1
+    "total": 1,
+    "stable_output": 1,
+    "stable_normalized": 1
   },
   "react": {
-    "total_groups": 1,
-    "stable_output_groups": 1,
-    "stable_normalized_groups": 1
+    "total": 1,
+    "stable_output": 1,
+    "stable_normalized": 1
   },
   "replay_bundles": {
     "static_manifest": "artifacts/evidence/demo/static-replay/replay_manifest.json",

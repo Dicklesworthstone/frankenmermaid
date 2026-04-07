@@ -1156,7 +1156,7 @@ impl Diagram {
 #[cfg(test)]
 mod tests {
     use super::{
-        CanvasConfigOverrides, JsValue, PressureConfigOverrides, RuntimeConfig, RuntimeInitConfig,
+        CanvasConfigOverrides, PressureConfigOverrides, RuntimeConfig, RuntimeInitConfig,
         SvgConfigOverrides, ThemePreset, align_canvas_typography_with_svg,
         apply_budget_svg_simplifications, apply_canvas_theme_preset, canvas_font_size_px,
         collect_source_spans, merge_canvas_config, merge_pressure_config, merge_svg_config,
@@ -1216,11 +1216,8 @@ mod tests {
     #[allow(dead_code)]
     fn describe_diagram_js(input: &str) -> String {
         let parsed = parse(input);
-        let traced = layout_diagram_traced(&parsed.ir, LayoutAlgorithm::Auto);
-        describe_diagram_with_layout(
-            &parsed.ir,
-            Some(&traced.layout),
-        )
+        let traced = layout_diagram_traced(&parsed.ir);
+        describe_diagram_with_layout(&parsed.ir, Some(&traced.layout))
     }
 
     #[test]

@@ -3,6 +3,7 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
+use serde_json::Value;
 use tempfile::TempDir;
 
 fn run_cli_in_dir(dir: &Path, args: &[&str], stdin: &str) -> Output {
@@ -37,6 +38,10 @@ fn stdout_text(output: &Output) -> String {
 
 fn stderr_text(output: &Output) -> String {
     String::from_utf8(output.stderr.clone()).expect("stderr should be utf-8")
+}
+
+fn stdout_json(output: &Output) -> Value {
+    serde_json::from_slice(&output.stdout).expect("stdout should be valid json")
 }
 
 fn extract_viewbox_dimensions(svg: &str) -> (f32, f32) {
@@ -295,14 +300,14 @@ fn invalid_config_reports_path_and_parse_context() {
 }
 
 #[test]
-fn unsupported_parser_config_is_rejected() {
+fn core_deterministic_false_is_accepted() {
     let temp = TempDir::new().expect("tempdir");
     let config_path = write_config(
         &temp,
         "config.toml",
         r#"
-            [parser]
-            create_placeholder_nodes = false
+            [core]
+            deterministic = false
         "#,
     );
 
@@ -312,12 +317,211 @@ fn unsupported_parser_config_is_rejected() {
         "flowchart LR\nA-->B\n",
     );
     assert!(
-        !output.status.success(),
-        "unsupported parser config should fail"
+        output.status.success(),
+        "core.deterministic=false should be accepted: {}",
+        stderr_text(&output)
     );
-    let stderr = stderr_text(&output);
-    assert!(stderr.contains("parser.create_placeholder_nodes=false"));
-    assert!(stderr.contains("not supported yet"));
+    assert!(stdout_text(&output).contains("<svg"));
+}
+
+#[test]
+fn fallback_on_error_false_changes_default_parse_mode() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_path = write_config(
+        &temp,
+        "config.toml",
+        r#"
+            [core]
+            fallback_on_error = false
+        "#,
+    );
+
+    let output = run_cli_in_dir(
+        temp.path(),
+        &["--config", &config_path, "parse", "-", "--full", "--pretty"],
+        "plain text without a mermaid header\n",
+    );
+    assert!(
+        output.status.success(),
+        "strict-default parse should succeed: {}",
+        stderr_text(&output)
+    );
+    let json = stdout_json(&output);
+    assert_eq!(
+        json["meta"]["parse_mode"],
+        Value::String("strict".to_string())
+    );
+    assert_eq!(json["diagram_type"], Value::String("Unknown".to_string()));
+}
+
+#[test]
+fn intent_inference_false_disables_fuzzy_detection() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_path = write_config(
+        &temp,
+        "config.toml",
+        r#"
+            [parser]
+            intent_inference = false
+        "#,
+    );
+
+    let output = run_cli_in_dir(
+        temp.path(),
+        &["--config", &config_path, "detect", "-", "--json"],
+        "flwchart LR\n",
+    );
+    assert!(
+        output.status.success(),
+        "detect should succeed: {}",
+        stderr_text(&output)
+    );
+    let json = stdout_json(&output);
+    assert_eq!(
+        json["detection_method"],
+        Value::String("fallback to flowchart".to_string())
+    );
+}
+
+#[test]
+fn fuzzy_keyword_distance_changes_detection_threshold() {
+    let temp = TempDir::new().expect("tempdir");
+    let config_path = write_config(
+        &temp,
+        "config.toml",
+        r#"
+            [parser]
+            fuzzy_keyword_distance = 1
+        "#,
+    );
+
+    let output = run_cli_in_dir(
+        temp.path(),
+        &["--config", &config_path, "detect", "-", "--json"],
+        "flwchrt LR\n",
+    );
+    assert!(
+        output.status.success(),
+        "detect should succeed: {}",
+        stderr_text(&output)
+    );
+    let json = stdout_json(&output);
+    assert_eq!(
+        json["detection_method"],
+        Value::String("fallback to flowchart".to_string())
+    );
+}
+
+#[test]
+fn auto_close_delimiters_config_controls_unclosed_shape_recovery() {
+    let baseline_dir = TempDir::new().expect("baseline tempdir");
+    let configured_dir = TempDir::new().expect("configured tempdir");
+    let config_path = write_config(
+        &configured_dir,
+        "config.toml",
+        r#"
+            [parser]
+            auto_close_delimiters = false
+        "#,
+    );
+    let input = "flowchart LR\nA[Open\n";
+
+    let baseline = run_cli_in_dir(
+        baseline_dir.path(),
+        &["parse", "-", "--full", "--pretty"],
+        input,
+    );
+    assert!(
+        baseline.status.success(),
+        "baseline parse should succeed: {}",
+        stderr_text(&baseline)
+    );
+    let configured = run_cli_in_dir(
+        configured_dir.path(),
+        &["--config", &config_path, "parse", "-", "--full", "--pretty"],
+        input,
+    );
+    assert!(
+        configured.status.success(),
+        "configured parse should succeed: {}",
+        stderr_text(&configured)
+    );
+
+    let baseline_json = stdout_json(&baseline);
+    let configured_json = stdout_json(&configured);
+    let baseline_nodes = baseline_json["nodes"]
+        .as_array()
+        .expect("nodes array")
+        .len();
+    let configured_nodes = configured_json["nodes"]
+        .as_array()
+        .expect("nodes array")
+        .len();
+    assert_eq!(baseline_nodes, 1);
+    assert_eq!(configured_nodes, 0);
+}
+
+#[test]
+fn create_placeholder_nodes_config_controls_dangling_edges() {
+    let baseline_dir = TempDir::new().expect("baseline tempdir");
+    let configured_dir = TempDir::new().expect("configured tempdir");
+    let config_path = write_config(
+        &configured_dir,
+        "config.toml",
+        r#"
+            [parser]
+            create_placeholder_nodes = false
+        "#,
+    );
+    let input = "flowchart LR\nA -->\n";
+
+    let baseline = run_cli_in_dir(
+        baseline_dir.path(),
+        &["parse", "-", "--full", "--pretty"],
+        input,
+    );
+    assert!(
+        baseline.status.success(),
+        "baseline parse should succeed: {}",
+        stderr_text(&baseline)
+    );
+    let configured = run_cli_in_dir(
+        configured_dir.path(),
+        &["--config", &config_path, "parse", "-", "--full", "--pretty"],
+        input,
+    );
+    assert!(
+        configured.status.success(),
+        "configured parse should succeed: {}",
+        stderr_text(&configured)
+    );
+
+    let baseline_json = stdout_json(&baseline);
+    let configured_json = stdout_json(&configured);
+    assert_eq!(
+        baseline_json["edges"]
+            .as_array()
+            .expect("edges array")
+            .len(),
+        1
+    );
+    assert_eq!(
+        configured_json["edges"]
+            .as_array()
+            .expect("edges array")
+            .len(),
+        0
+    );
+    let baseline_nodes = baseline_json["nodes"].as_array().expect("nodes array");
+    assert!(
+        baseline_nodes.iter().any(|node| {
+            node["implicit"] == Value::Bool(true)
+                || node["id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("__fm_dangling_line_"))
+        }),
+        "expected an implicit placeholder node in baseline parse"
+    );
 }
 
 #[test]

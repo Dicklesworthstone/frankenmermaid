@@ -46,7 +46,8 @@ use fm_layout::{
     layout_diagram_traced_with_config_and_guardrails, layout_source_map,
 };
 use fm_parser::{
-    detect_type_with_confidence, first_significant_line, parse_evidence_json, parse_with_mode,
+    ParserConfig, detect_type_with_confidence_and_config, first_significant_line,
+    parse_evidence_json, parse_with_mode, parse_with_mode_and_config,
 };
 use fm_render_svg::{
     A11yConfig, SvgRenderConfig, ThemePreset, describe_diagram_with_layout, render_svg_with_layout,
@@ -122,8 +123,8 @@ enum Command {
         input: String,
 
         /// Parser support contract mode.
-        #[arg(long, value_enum, default_value = "compat")]
-        parse_mode: ParseModeArg,
+        #[arg(long, value_enum)]
+        parse_mode: Option<ParseModeArg>,
 
         /// Requested layout algorithm family.
         #[arg(long, value_enum)]
@@ -178,8 +179,8 @@ enum Command {
         input: String,
 
         /// Parser support contract mode.
-        #[arg(long, value_enum, default_value = "compat")]
-        parse_mode: ParseModeArg,
+        #[arg(long, value_enum)]
+        parse_mode: Option<ParseModeArg>,
 
         /// Output full IR (default is summary)
         #[arg(long)]
@@ -210,8 +211,8 @@ enum Command {
         new_input: String,
 
         /// Parser support contract mode.
-        #[arg(long, value_enum, default_value = "compat")]
-        parse_mode: ParseModeArg,
+        #[arg(long, value_enum)]
+        parse_mode: Option<ParseModeArg>,
 
         /// Diff output format.
         #[arg(long, value_enum, default_value = "terminal")]
@@ -241,8 +242,8 @@ enum Command {
         input: String,
 
         /// Parser support contract mode.
-        #[arg(long, value_enum, default_value = "compat")]
-        parse_mode: ParseModeArg,
+        #[arg(long, value_enum)]
+        parse_mode: Option<ParseModeArg>,
 
         /// Requested layout algorithm family for validation/layout evidence.
         #[arg(long, value_enum)]
@@ -283,8 +284,8 @@ enum Command {
         input: String,
 
         /// Parser support contract mode.
-        #[arg(long, value_enum, default_value = "compat")]
-        parse_mode: ParseModeArg,
+        #[arg(long, value_enum)]
+        parse_mode: Option<ParseModeArg>,
 
         /// Initial UI theme.
         #[arg(short, long)]
@@ -570,6 +571,7 @@ struct RenderResult {
 #[derive(Debug, Clone)]
 struct RenderCommandOptions<'a> {
     parse_mode: MermaidParseMode,
+    parser_config: ParserConfig,
     layout_algorithm: LayoutAlgorithm,
     layout_config: LayoutConfig,
     format: OutputFormat,
@@ -590,6 +592,7 @@ struct RenderCommandOptions<'a> {
 #[derive(Debug, Clone, Copy)]
 struct DiffCommandOptions<'a> {
     parse_mode: MermaidParseMode,
+    parser_config: ParserConfig,
     format: DiffOutputFormat,
     color: ColorChoice,
     max_input_bytes: usize,
@@ -613,6 +616,7 @@ struct RenderSurfaceOptions<'a> {
 #[derive(Debug, Clone)]
 struct ValidateCommandOptions<'a> {
     parse_mode: MermaidParseMode,
+    parser_config: ParserConfig,
     layout_algorithm: LayoutAlgorithm,
     layout_config: LayoutConfig,
     format: ValidateOutputFormat,
@@ -763,6 +767,7 @@ fn main() -> Result<()> {
     init_tracing(cli.verbose, cli.quiet);
     let loaded_config = load_cli_config(cli.config.as_deref())?;
     let max_input_bytes = resolve_max_input_bytes(&loaded_config.file)?;
+    let parser_config = build_parser_config(&loaded_config.file);
 
     match cli.command {
         Command::Render {
@@ -791,7 +796,8 @@ fn main() -> Result<()> {
             cmd_render(
                 &input,
                 RenderCommandOptions {
-                    parse_mode: parse_mode.to_core(),
+                    parse_mode: resolve_parse_mode(parse_mode, &loaded_config.file),
+                    parser_config,
                     layout_algorithm,
                     layout_config,
                     format,
@@ -820,9 +826,16 @@ fn main() -> Result<()> {
             parse_mode,
             full,
             pretty,
-        } => cmd_parse(&input, parse_mode.to_core(), full, pretty, max_input_bytes),
+        } => cmd_parse(
+            &input,
+            resolve_parse_mode(parse_mode, &loaded_config.file),
+            parser_config,
+            full,
+            pretty,
+            max_input_bytes,
+        ),
 
-        Command::Detect { input, json } => cmd_detect(&input, json, max_input_bytes),
+        Command::Detect { input, json } => cmd_detect(&input, json, max_input_bytes, parser_config),
 
         Command::Diff {
             old_input,
@@ -837,7 +850,8 @@ fn main() -> Result<()> {
             &old_input,
             &new_input,
             DiffCommandOptions {
-                parse_mode: parse_mode.to_core(),
+                parse_mode: resolve_parse_mode(parse_mode, &loaded_config.file),
+                parser_config,
                 format,
                 color,
                 max_input_bytes,
@@ -856,7 +870,8 @@ fn main() -> Result<()> {
         } => cmd_validate(
             &input,
             ValidateCommandOptions {
-                parse_mode: parse_mode.to_core(),
+                parse_mode: resolve_parse_mode(parse_mode, &loaded_config.file),
+                parser_config,
                 layout_algorithm: resolve_layout_algorithm(layout_algorithm, &loaded_config.file)?,
                 layout_config: build_layout_config(&loaded_config.file, None)?,
                 format,
@@ -878,7 +893,13 @@ fn main() -> Result<()> {
             theme,
         } => {
             let theme = resolve_theme_name(theme, &loaded_config.file);
-            cmd_interactive(&input, parse_mode.to_core(), &theme, max_input_bytes)
+            cmd_interactive(
+                &input,
+                resolve_parse_mode(parse_mode, &loaded_config.file),
+                parser_config,
+                &theme,
+                max_input_bytes,
+            )
         }
 
         #[cfg(feature = "watch")]
@@ -940,6 +961,7 @@ fn load_cli_config(explicit_path: Option<&str>) -> Result<LoadedCliConfig> {
     // Force eager validation so invalid enum-like values fail at load time.
     validate_runtime_config_support(&file)?;
     let _ = resolve_max_input_bytes(&file)?;
+    let _ = build_parser_config(&file);
     let _ = resolve_default_output_format(&file)?;
     let _ = resolve_default_layout_algorithm(&file)?;
     let _ = build_layout_config(&file, None)?;
@@ -952,38 +974,41 @@ fn load_cli_config(explicit_path: Option<&str>) -> Result<LoadedCliConfig> {
 }
 
 fn validate_runtime_config_support(config: &FrankenmermaidConfigFile) -> Result<()> {
-    if matches!(config.core.deterministic, Some(false)) {
-        anyhow::bail!("core.deterministic=false is not supported; output is always deterministic");
-    }
-    if matches!(config.core.fallback_on_error, Some(false)) {
-        anyhow::bail!(
-            "core.fallback_on_error=false is not supported yet; CLI parsing currently uses explicit --parse-mode overrides instead"
-        );
-    }
-    if matches!(config.parser.intent_inference, Some(false)) {
-        anyhow::bail!(
-            "parser.intent_inference=false is not supported yet; fuzzy keyword recovery is always enabled"
-        );
-    }
-    if let Some(distance) = config.parser.fuzzy_keyword_distance
-        && distance != 2
-    {
-        anyhow::bail!(
-            "parser.fuzzy_keyword_distance={distance} is not supported yet; the current detector uses a fixed distance of 2"
-        );
-    }
-    if matches!(config.parser.auto_close_delimiters, Some(false)) {
-        anyhow::bail!(
-            "parser.auto_close_delimiters=false is not supported yet; delimiter recovery is always enabled"
-        );
-    }
-    if matches!(config.parser.create_placeholder_nodes, Some(false)) {
-        anyhow::bail!(
-            "parser.create_placeholder_nodes=false is not supported yet; dangling-edge placeholder recovery is always enabled"
-        );
-    }
-
+    let _ = config;
     Ok(())
+}
+
+fn build_parser_config(config: &FrankenmermaidConfigFile) -> ParserConfig {
+    let mut parser_config = ParserConfig::default();
+    if let Some(intent_inference) = config.parser.intent_inference {
+        parser_config.intent_inference = intent_inference;
+    }
+    if let Some(fuzzy_keyword_distance) = config.parser.fuzzy_keyword_distance {
+        parser_config.fuzzy_keyword_distance = fuzzy_keyword_distance;
+    }
+    if let Some(auto_close_delimiters) = config.parser.auto_close_delimiters {
+        parser_config.auto_close_delimiters = auto_close_delimiters;
+    }
+    if let Some(create_placeholder_nodes) = config.parser.create_placeholder_nodes {
+        parser_config.create_placeholder_nodes = create_placeholder_nodes;
+    }
+    parser_config
+}
+
+fn resolve_parse_mode(
+    explicit: Option<ParseModeArg>,
+    config: &FrankenmermaidConfigFile,
+) -> MermaidParseMode {
+    explicit.map_or_else(
+        || {
+            if matches!(config.core.fallback_on_error, Some(false)) {
+                MermaidParseMode::Strict
+            } else {
+                MermaidParseMode::Compat
+            }
+        },
+        ParseModeArg::to_core,
+    )
 }
 
 fn parse_output_format_name(value: &str) -> Result<OutputFormat> {
@@ -1455,6 +1480,7 @@ fn layout_float_anomalies(layout: &fm_layout::DiagramLayout) -> (usize, usize) {
 fn cmd_render(input: &str, options: RenderCommandOptions<'_>) -> Result<()> {
     let RenderCommandOptions {
         parse_mode,
+        parser_config,
         layout_algorithm,
         layout_config,
         format,
@@ -1486,7 +1512,7 @@ fn cmd_render(input: &str, options: RenderCommandOptions<'_>) -> Result<()> {
 
     // Parse
     let parse_start = Instant::now();
-    let parsed = parse_with_mode(&source, parse_mode);
+    let parsed = parse_with_mode_and_config(&source, parse_mode, &parser_config);
     let parse_time = parse_start.elapsed();
     budget_broker.record_parse(u64::try_from(parse_time.as_millis()).unwrap_or(u64::MAX));
 
@@ -2102,12 +2128,13 @@ mod png_tests {
 fn cmd_parse(
     input: &str,
     parse_mode: MermaidParseMode,
+    parser_config: ParserConfig,
     full: bool,
     pretty: bool,
     max_input_bytes: usize,
 ) -> Result<()> {
     let source = load_input(input, max_input_bytes)?;
-    let parsed = parse_with_mode(&source, parse_mode);
+    let parsed = parse_with_mode_and_config(&source, parse_mode, &parser_config);
 
     let output = if full {
         // Full IR output
@@ -2139,9 +2166,14 @@ fn cmd_parse(
 // Command: detect
 // =============================================================================
 
-fn cmd_detect(input: &str, json_output: bool, max_input_bytes: usize) -> Result<()> {
+fn cmd_detect(
+    input: &str,
+    json_output: bool,
+    max_input_bytes: usize,
+    parser_config: ParserConfig,
+) -> Result<()> {
     let source = load_input(input, max_input_bytes)?;
-    let detection = detect_type_with_confidence(&source);
+    let detection = detect_type_with_confidence_and_config(&source, &parser_config);
     let diagram_type = detection.diagram_type;
 
     let first_line = first_significant_line(&source).unwrap_or("").trim();
@@ -2190,6 +2222,7 @@ fn confidence_label(confidence: f32) -> &'static str {
 fn cmd_diff(old_input: &str, new_input: &str, options: DiffCommandOptions<'_>) -> Result<()> {
     let DiffCommandOptions {
         parse_mode,
+        parser_config,
         format,
         color,
         max_input_bytes,
@@ -2201,8 +2234,8 @@ fn cmd_diff(old_input: &str, new_input: &str, options: DiffCommandOptions<'_>) -
     let old_source = load_input(old_input, max_input_bytes)?;
     let new_source = load_input(new_input, max_input_bytes)?;
 
-    let old_parsed = parse_with_mode(&old_source, parse_mode);
-    let new_parsed = parse_with_mode(&new_source, parse_mode);
+    let old_parsed = parse_with_mode_and_config(&old_source, parse_mode, &parser_config);
+    let new_parsed = parse_with_mode_and_config(&new_source, parse_mode, &parser_config);
 
     for warning in &old_parsed.warnings {
         warn!("Old parse warning: {warning}");
@@ -2249,6 +2282,7 @@ fn diff_use_colors(color: ColorChoice, writing_to_stdout: bool) -> bool {
 fn cmd_validate(input: &str, options: ValidateCommandOptions<'_>) -> Result<()> {
     let ValidateCommandOptions {
         parse_mode,
+        parser_config,
         layout_algorithm,
         layout_config,
         format,
@@ -2265,7 +2299,7 @@ fn cmd_validate(input: &str, options: ValidateCommandOptions<'_>) -> Result<()> 
     let mut budget_broker = MermaidBudgetLedger::new(&pressure);
 
     let parse_start = Instant::now();
-    let parsed = parse_with_mode(&source, parse_mode);
+    let parsed = parse_with_mode_and_config(&source, parse_mode, &parser_config);
     let parse_time = parse_start.elapsed();
     budget_broker.record_parse(u64::try_from(parse_time.as_millis()).unwrap_or(u64::MAX));
 
@@ -3613,11 +3647,12 @@ fn interactive_help_line(hints: &InteractiveKeyHints) -> String {
 fn build_interactive_snapshot(
     source: &str,
     parse_mode: MermaidParseMode,
+    parser_config: ParserConfig,
     preview_width: usize,
     preview_height: usize,
 ) -> InteractiveSnapshot {
     let start = Instant::now();
-    let parsed = parse_with_mode(source, parse_mode);
+    let parsed = parse_with_mode_and_config(source, parse_mode, &parser_config);
     let traced_layout = layout_diagram_traced_with_config_and_guardrails(
         &parsed.ir,
         LayoutAlgorithm::Auto,
@@ -3876,6 +3911,7 @@ impl Drop for InteractiveTerminalGuard {
 fn cmd_interactive(
     input: &str,
     parse_mode: MermaidParseMode,
+    parser_config: ParserConfig,
     theme: &str,
     max_input_bytes: usize,
 ) -> Result<()> {
@@ -3896,6 +3932,7 @@ fn cmd_interactive(
         let snapshot = build_interactive_snapshot(
             &buffer.to_source(),
             parse_mode,
+            parser_config,
             layout.preview_width,
             layout.content_height,
         );

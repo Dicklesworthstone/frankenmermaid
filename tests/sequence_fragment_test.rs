@@ -5,9 +5,9 @@ use fm_render_svg::{SvgRenderConfig, render_svg_with_layout};
 fn render_sequence(input: &str) -> String {
     let parsed = parse(input);
     assert!(
-        parsed.errors.is_empty(),
+        parsed.warnings.is_empty(),
         "Parse errors: {:?}",
-        parsed.errors
+        parsed.warnings
     );
     let traced = layout_diagram_traced(&parsed.ir);
     render_svg_with_layout(&parsed.ir, &traced.layout, &SvgRenderConfig::default())
