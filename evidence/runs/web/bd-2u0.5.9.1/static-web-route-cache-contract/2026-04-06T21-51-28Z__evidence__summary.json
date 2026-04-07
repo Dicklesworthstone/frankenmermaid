@@ -1,0 +1,65 @@
+{
+  "ok": true,
+  "result": {
+    "surface": "web",
+    "entry": "web/index.html",
+    "headers": "web/_headers",
+    "contract": "evidence/contracts/showcase_static_entrypoint_contract.md",
+    "entry_hash": "sha256:b7ee6a7dbe35b34176df60501f9697bf5833e4781b8c42203e75a610a8ae0daa",
+    "headers_hash": "sha256:edf400fa1d0ce07dd97d75de91ccc24364dd3011617215955ddd8b4e213020e6",
+    "contract_hash": "sha256:07924512a075ed2f448aa68820ff0edc00aa38a5990823c112cfa8e2d93266cc",
+    "log_path": null,
+    "checks": [
+      {
+        "name": "source fetch",
+        "ok": true,
+        "detail": "web host bootstraps the standalone showcase artifact"
+      },
+      {
+        "name": "document write bootstrap",
+        "ok": true,
+        "detail": "bootstrap host replaces shell with standalone showcase document"
+      },
+      {
+        "name": "host marker injection",
+        "ok": true,
+        "detail": "static host marks injected HTML for downstream adapter assertions"
+      },
+      {
+        "name": "pkg cache rule",
+        "ok": true,
+        "detail": "static host keeps stable /pkg/* runtime assets on a revalidating cache policy until revisioned asset paths exist"
+      },
+      {
+        "name": "evidence cache rule",
+        "ok": true,
+        "detail": "static host publishes review-friendly cache policy for evidence artifacts"
+      },
+      {
+        "name": "headers root rule",
+        "ok": true,
+        "detail": "static host publishes explicit revalidating cache behavior for the /web entry route"
+      },
+      {
+        "name": "headers subtree rule",
+        "ok": true,
+        "detail": "static host publishes explicit revalidating cache behavior for /web deep links"
+      },
+      {
+        "name": "contract alignment",
+        "ok": true,
+        "detail": "entrypoint contract matches file-style /web asset semantics"
+      },
+      {
+        "name": "contract cache safety",
+        "ok": true,
+        "detail": "entrypoint contract documents the stable-runtime cache safety constraint"
+      },
+      {
+        "name": "contract route strategy",
+        "ok": true,
+        "detail": "entrypoint contract documents the Cloudflare route, cache-key, and Functions-exclusion plan"
+      }
+    ]
+  }
+}

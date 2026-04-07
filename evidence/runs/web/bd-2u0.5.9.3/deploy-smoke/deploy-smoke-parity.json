@@ -1,0 +1,118 @@
+{
+  "ok": true,
+  "static_root": "/data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/static",
+  "react_root": "/data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/react",
+  "allowed_metric_delta_ms": 250,
+  "required_host_kinds": [
+    "static-web",
+    "react-web"
+  ],
+  "strict_fields": [
+    "renderer",
+    "theme",
+    "diagnostic_count",
+    "degradation_tier",
+    "runtime_mode",
+    "fallback_active",
+    "determinism_status"
+  ],
+  "acceptable_delta_fields": [
+    "surface",
+    "host_kind",
+    "output_artifact_hash",
+    "pass_fail_reason",
+    "parse_ms",
+    "layout_ms",
+    "render_ms",
+    "input_hash",
+    "config_hash",
+    "revision",
+    "trace_id"
+  ],
+  "missing_from_react": [],
+  "missing_from_static": [],
+  "pair_count": 2,
+  "failing_pairs": [],
+  "pairs": [
+    {
+      "scenario_id": "compare-export",
+      "profile": "desktop-default",
+      "ok": true,
+      "static_log": "/data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/static/static-web-compare-export/desktop-default/2026-04-06T23-12-43Z__e2e__log.json",
+      "react_log": "/data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/react/react-web-compare-export/desktop-default/2026-04-06T23-12-51Z__e2e__log.json",
+      "strict_mismatches": [],
+      "acceptable_deltas": [
+        {
+          "field": "surface",
+          "static": "web",
+          "react": "web_react"
+        },
+        {
+          "field": "host_kind",
+          "static": "static-web",
+          "react": "react-web"
+        },
+        {
+          "field": "output_artifact_hash",
+          "static": "sha256:38f435402fbb37a25a58545b97911691e9d7724b1f123bf0034b698746a0f4e5",
+          "react": "sha256:9a3c59168e527d2ef6b73373cc8bc090b0028e31fe0b3ca598cfd943bcb0646c"
+        },
+        {
+          "field": "pass_fail_reason",
+          "static": "/web host restored compare state, rendered the artifact lab, and populated the layout lab.",
+          "react": "/web_react host restored compare state, rendered the artifact lab, and populated the layout lab."
+        },
+        {
+          "field": "input_hash",
+          "static": "sha256:03581989213f2398cea6365ec5520d4a96cb5987d160101913bbfb2faf98f4d7",
+          "react": "sha256:847580230df15a0a66ac055184db5f73d3a74d00aaecbbe28b7e1409c6864791"
+        },
+        {
+          "field": "trace_id",
+          "static": "bd-2u0.5.9.3-static-static-web-compare-export-desktop-default-run2",
+          "react": "bd-2u0.5.9.3-react-react-web-compare-export-desktop-default-run2"
+        }
+      ]
+    },
+    {
+      "scenario_id": "diagnostics-recovery",
+      "profile": "desktop-default",
+      "ok": true,
+      "static_log": "/data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/static/static-web-diagnostics-recovery/desktop-default/2026-04-06T23-12-46Z__e2e__log.json",
+      "react_log": "/data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/react/react-web-diagnostics-recovery/desktop-default/2026-04-06T23-12-54Z__e2e__log.json",
+      "strict_mismatches": [],
+      "acceptable_deltas": [
+        {
+          "field": "surface",
+          "static": "web",
+          "react": "web_react"
+        },
+        {
+          "field": "host_kind",
+          "static": "static-web",
+          "react": "react-web"
+        },
+        {
+          "field": "output_artifact_hash",
+          "static": "sha256:21f95d0496b595ac0490beebc23526835ce70e86e0da8db5d447bc6d8d787eaa",
+          "react": "sha256:f7aca23e77fdcae2f881f41485879c39af600cc29b5629e698e4a6ecbf668e32"
+        },
+        {
+          "field": "pass_fail_reason",
+          "static": "/web host surfaced diagnostics and degraded fallback messaging for a malformed source override.",
+          "react": "/web_react host surfaced diagnostics and degraded fallback messaging for a malformed source override."
+        },
+        {
+          "field": "input_hash",
+          "static": "sha256:4df6a5f1b0e5d45b8e454d4d4c987c7f9d24320f2bb7db5fbfff047cafc9fbd8",
+          "react": "sha256:70a8adaedbd1a73a8440f26f337462f32ef1d4342d68c00d1faa2210d7de73b0"
+        },
+        {
+          "field": "trace_id",
+          "static": "bd-2u0.5.9.3-static-static-web-diagnostics-recovery-desktop-default-run2",
+          "react": "bd-2u0.5.9.3-react-react-web-diagnostics-recovery-desktop-default-run2"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,147 @@
+{
+  "action": "preview-deploy",
+  "dry_run": true,
+  "docs_url": "https://developers.cloudflare.com/pages/functions/wrangler-configuration/",
+  "staged_bundle": {
+    "action": "stage-bundle",
+    "bundle_root": "dist/cloudflare-pages/bd-2u0.5.9.2-preview",
+    "canonical_host": "frankenmermaid.com",
+    "hosting_plan_gate": {
+      "surface": "cloudflare-hosting-plan",
+      "static_headers": "web/_headers",
+      "react_headers": "web_react/_headers",
+      "static_contract": "evidence/contracts/showcase_static_entrypoint_contract.md",
+      "react_contract": "evidence/contracts/showcase_react_embedding_contract.md",
+      "strategy_doc": "evidence/demo_strategy.md",
+      "static_headers_hash": "sha256:edf400fa1d0ce07dd97d75de91ccc24364dd3011617215955ddd8b4e213020e6",
+      "react_headers_hash": "sha256:70eb738920c0b1f0c30f39a151f40cc38f112f2a3a7f056c72ab2ec7ce971190",
+      "static_contract_hash": "sha256:654409ceae4251b238bf4df0737b5b9d5938a60964bdb6450ce0ba3f2d4200cc",
+      "react_contract_hash": "sha256:2c64b80062f6001f0ff04c0ee0af25a62eb21433153fd62586b3f1ec6df8130a",
+      "strategy_doc_hash": "sha256:7750c06c513c0009af5205cf143db1732f32b3c572d2e28f35e50b2a4fa28d8e",
+      "checks": [
+        {
+          "name": "shared pkg cache rule",
+          "ok": true,
+          "detail": "both showcase hosts keep stable /pkg/* runtime assets revalidating until versioned paths exist"
+        },
+        {
+          "name": "shared evidence cache rule",
+          "ok": true,
+          "detail": "both showcase hosts publish the same review-friendly cache policy for evidence artifacts"
+        },
+        {
+          "name": "static route rules",
+          "ok": true,
+          "detail": "static host publishes explicit revalidating cache rules for /web and /web/*"
+        },
+        {
+          "name": "react route rules",
+          "ok": true,
+          "detail": "react host publishes explicit revalidating cache rules for /web_react and /web_react/*"
+        },
+        {
+          "name": "static contract route matrix",
+          "ok": true,
+          "detail": "static contract captures the current cache matrix, the future immutable-versioned path plan, and the Functions exclusion plan"
+        },
+        {
+          "name": "react contract alignment",
+          "ok": true,
+          "detail": "react contract acknowledges the shared Pages route/cache matrix and the future versioned-asset handoff"
+        },
+        {
+          "name": "strategy trace",
+          "ok": true,
+          "detail": "demo strategy points deployment work at the checked-in hosting-plan validator"
+        }
+      ]
+    },
+    "copied_files": [
+      {
+        "source": "evidence/capability_scenario_matrix.json",
+        "destination": "evidence/capability_scenario_matrix.json",
+        "sha256": "sha256:bc913238430afff4f71682d656eac8992354428fd8aac96f92c5bf6d2b62f249"
+      },
+      {
+        "source": "frankenmermaid_demo_showcase.html",
+        "destination": "frankenmermaid_demo_showcase.html",
+        "sha256": "sha256:779fd7962c910f597c6fe0786b6bddb0dde514f2e69f6ea052876f9e8350af7a"
+      },
+      {
+        "source": "pkg/frankenmermaid.d.ts",
+        "destination": "pkg/frankenmermaid.d.ts",
+        "sha256": "sha256:60cb1c24f724845b3a63efd7e8cc7e2331d5f3887bd147f7a003f5ce9ffdda13"
+      },
+      {
+        "source": "pkg/frankenmermaid.js",
+        "destination": "pkg/frankenmermaid.js",
+        "sha256": "sha256:1129bb3f85435c714879ed627661f2f47fd6af4aadb2766f3f1e29e4d77a3e2e"
+      },
+      {
+        "source": "pkg/frankenmermaid_bg.wasm",
+        "destination": "pkg/frankenmermaid_bg.wasm",
+        "sha256": "sha256:27472563d400a90f9591270a010ebf6c98492f533228851efebe61e2f2ef9d0a"
+      },
+      {
+        "source": "pkg/frankenmermaid_bg.wasm.d.ts",
+        "destination": "pkg/frankenmermaid_bg.wasm.d.ts",
+        "sha256": "sha256:b22a34e745ddbf69eebce5aaf7d4d7d6b534313dbdc94b5b61d91dd5fc0b6ab3"
+      },
+      {
+        "source": "pkg/package.json",
+        "destination": "pkg/package.json",
+        "sha256": "sha256:8695d50846774b6b5c0355bb82f09be40b291c688195497bdf124e7eb302bcef"
+      },
+      {
+        "source": "web/index.html",
+        "destination": "web/index.html",
+        "sha256": "sha256:b7ee6a7dbe35b34176df60501f9697bf5833e4781b8c42203e75a610a8ae0daa"
+      },
+      {
+        "source": "web_react/index.html",
+        "destination": "web_react/index.html",
+        "sha256": "sha256:a29be5f04510cfe3cc3ed7d1fba007547c5f2c9fae6c38e78808be1a040022d9"
+      }
+    ],
+    "generated_files": [
+      {
+        "path": "_headers",
+        "sha256": "sha256:daef3b8eff92133500ba8d73e9a66986c8c07538d7c621463ab76900f9988125"
+      }
+    ],
+    "redirect_strategy": {
+      "kind": "cloudflare-redirect-rules",
+      "rules": [
+        {
+          "description": "Canonicalize /web/ to /web while preserving the query string.",
+          "source_path": "/web/",
+          "target_url": "https://frankenmermaid.com/web",
+          "status_code": 301,
+          "preserve_query_string": true
+        },
+        {
+          "description": "Canonicalize /web_react/ to /web_react while preserving the query string.",
+          "source_path": "/web_react/",
+          "target_url": "https://frankenmermaid.com/web_react",
+          "status_code": 301,
+          "preserve_query_string": true
+        }
+      ],
+      "reason": "Pages `_redirects` does not expose a preserve-query-string control, so canonical trailing-slash redirects for `/web/` and `/web_react/` are modeled as zone-level Redirect Rules or Bulk Redirects."
+    }
+  },
+  "command": [
+    "wrangler",
+    "pages",
+    "deploy",
+    "dist/cloudflare-pages/bd-2u0.5.9.2-preview",
+    "--project-name",
+    "frankenmermaid",
+    "--branch",
+    "preview-web",
+    "--commit-hash",
+    "b01fe3802567360415340b8d9b0bd870fbf2c9c8",
+    "--commit-message",
+    "bd-2u0.5.9.2 preview drill"
+  ]
+}

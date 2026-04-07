@@ -1,0 +1,68 @@
+{
+  "ok": true,
+  "result": {
+    "surface": "cloudflare-deploy-ops",
+    "wrangler_config": "wrangler.jsonc",
+    "ops_script": "scripts/cloudflare_pages_ops.py",
+    "static_contract": "evidence/contracts/showcase_static_entrypoint_contract.md",
+    "react_contract": "evidence/contracts/showcase_react_embedding_contract.md",
+    "strategy_doc": "evidence/demo_strategy.md",
+    "wrangler_config_hash": "sha256:1279c653a0b1203d8a3f14f6be972b97bffcb2d0432d021e0c7adf1624591278",
+    "ops_script_hash": "sha256:f470b52b91b2eafc6220b2df33f4df6d513325339e96fb5bc28bf918caeddb5a",
+    "static_contract_hash": "sha256:654409ceae4251b238bf4df0737b5b9d5938a60964bdb6450ce0ba3f2d4200cc",
+    "react_contract_hash": "sha256:2c64b80062f6001f0ff04c0ee0af25a62eb21433153fd62586b3f1ec6df8130a",
+    "strategy_doc_hash": "sha256:7750c06c513c0009af5205cf143db1732f32b3c572d2e28f35e50b2a4fa28d8e",
+    "checks": [
+      {
+        "name": "wrangler config name",
+        "ok": true,
+        "detail": "wrangler config defines a Pages project name"
+      },
+      {
+        "name": "wrangler output dir",
+        "ok": true,
+        "detail": "wrangler config points at an isolated dist/cloudflare-pages staging root"
+      },
+      {
+        "name": "wrangler env overrides",
+        "ok": true,
+        "detail": "wrangler config distinguishes preview and production deployment metadata"
+      },
+      {
+        "name": "static redirect strategy",
+        "ok": true,
+        "detail": "static contract documents the Redirect Rules requirement for canonical query-preserving redirects"
+      },
+      {
+        "name": "react redirect strategy",
+        "ok": true,
+        "detail": "react contract documents the Redirect Rules requirement for canonical query-preserving redirects"
+      },
+      {
+        "name": "bundle staging",
+        "ok": true,
+        "detail": "ops script stages the Pages bundle, emits a merged root _headers file, and records Redirect Rules guidance"
+      },
+      {
+        "name": "preview deploy dry run",
+        "ok": true,
+        "detail": "ops script prints a preview deployment command with explicit branch metadata"
+      },
+      {
+        "name": "production deploy dry run",
+        "ok": true,
+        "detail": "ops script prints a production deployment command without preview-branch override"
+      },
+      {
+        "name": "rollback drill",
+        "ok": true,
+        "detail": "ops script keeps rollback honesty by using a deployment-list preflight and dashboard rollback drill payload"
+      },
+      {
+        "name": "strategy trace",
+        "ok": true,
+        "detail": "demo strategy points deployment work at the checked-in runbook and validator"
+      }
+    ]
+  }
+}

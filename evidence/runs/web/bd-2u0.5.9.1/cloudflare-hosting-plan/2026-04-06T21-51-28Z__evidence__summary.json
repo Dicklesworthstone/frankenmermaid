@@ -1,0 +1,53 @@
+{
+  "ok": true,
+  "result": {
+    "surface": "cloudflare-hosting-plan",
+    "static_headers": "web/_headers",
+    "react_headers": "web_react/_headers",
+    "static_contract": "evidence/contracts/showcase_static_entrypoint_contract.md",
+    "react_contract": "evidence/contracts/showcase_react_embedding_contract.md",
+    "strategy_doc": "evidence/demo_strategy.md",
+    "static_headers_hash": "sha256:edf400fa1d0ce07dd97d75de91ccc24364dd3011617215955ddd8b4e213020e6",
+    "react_headers_hash": "sha256:70eb738920c0b1f0c30f39a151f40cc38f112f2a3a7f056c72ab2ec7ce971190",
+    "static_contract_hash": "sha256:07924512a075ed2f448aa68820ff0edc00aa38a5990823c112cfa8e2d93266cc",
+    "react_contract_hash": "sha256:24425057b83d8027d52d39307ca4f14fb1b9cbbbc3163d06857ee9938599d282",
+    "strategy_doc_hash": "sha256:7a6a67f399ee68101ad3265ae45e66d30f9b1f25ffa7deaf9822cdef8bd56798",
+    "checks": [
+      {
+        "name": "shared pkg cache rule",
+        "ok": true,
+        "detail": "both showcase hosts keep stable /pkg/* runtime assets revalidating until versioned paths exist"
+      },
+      {
+        "name": "shared evidence cache rule",
+        "ok": true,
+        "detail": "both showcase hosts publish the same review-friendly cache policy for evidence artifacts"
+      },
+      {
+        "name": "static route rules",
+        "ok": true,
+        "detail": "static host publishes explicit revalidating cache rules for /web and /web/*"
+      },
+      {
+        "name": "react route rules",
+        "ok": true,
+        "detail": "react host publishes explicit revalidating cache rules for /web_react and /web_react/*"
+      },
+      {
+        "name": "static contract route matrix",
+        "ok": true,
+        "detail": "static contract captures the current cache matrix, the future immutable-versioned path plan, and the Functions exclusion plan"
+      },
+      {
+        "name": "react contract alignment",
+        "ok": true,
+        "detail": "react contract acknowledges the shared Pages route/cache matrix and the future versioned-asset handoff"
+      },
+      {
+        "name": "strategy trace",
+        "ok": true,
+        "detail": "demo strategy points deployment work at the checked-in hosting-plan validator"
+      }
+    ]
+  }
+}

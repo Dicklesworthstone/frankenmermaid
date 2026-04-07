@@ -1,0 +1,16 @@
+{
+  "bead_id": "bd-2u0.5.9.2",
+  "scenario_id": "cloudflare-deploy-ops",
+  "surface": "web",
+  "repeat": 2,
+  "stable_output": true,
+  "first_run_summary_path": "evidence/runs/web/bd-2u0.5.9.2/cloudflare-deploy-ops/2026-04-06T22-07-20Z__evidence__validator.json",
+  "first_run_summary_hash": "sha256:2630b627ff5f35b90d370747ecdb88656caf06c39bc02c644034db341fa5296d",
+  "second_run_summary_hash": "sha256:2630b627ff5f35b90d370747ecdb88656caf06c39bc02c644034db341fa5296d",
+  "comparison": "byte-for-byte JSON equality",
+  "pass_fail_reason": "Repeated deploy-ops validation produced identical JSON output.",
+  "checks": [
+    "python3 scripts/showcase_harness.py validate-cloudflare-deploy-ops --wrangler-config wrangler.jsonc --ops-script scripts/cloudflare_pages_ops.py --static-contract evidence/contracts/showcase_static_entrypoint_contract.md --react-contract evidence/contracts/showcase_react_embedding_contract.md --strategy-doc evidence/demo_strategy.md",
+    "string equality comparison between the first stored JSON validator output and the second command output"
+  ]
+}

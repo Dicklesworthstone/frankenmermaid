@@ -1,0 +1,197 @@
+{
+  "ok": true,
+  "base_url": "http://127.0.0.1:51933",
+  "serve_root": "/data/projects/frankenmermaid/dist/cloudflare-pages/bd-2u0.5.9.3-stage",
+  "route_prefix": "/web_react",
+  "surface": "web_react",
+  "host_kind": "react-web",
+  "repeat": 2,
+  "profiles": [
+    "desktop-default"
+  ],
+  "scenarios": [
+    "react-web-compare-export",
+    "react-web-diagnostics-recovery"
+  ],
+  "results": [
+    {
+      "scenario_id": "react-web-compare-export",
+      "profile": "desktop-default",
+      "run_index": 1,
+      "url": "http://127.0.0.1:51933/web_react?sample=flowchart-1-incident-response-escalation&spotlight=flowchart-1-incident-response-escalation&compare=flowchart-3-change-approval-pipeline%2Csequence-1-checkout-risk-review&lab=cycles",
+      "html_path": "evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/react/react-web-compare-export/desktop-default/2026-04-06T23-12-49Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/react/react-web-compare-export/desktop-default/2026-04-06T23-12-49Z__e2e__log.json",
+      "diagnostic_count": 2,
+      "degradation_tier": "fallback",
+      "runtime_mode": "live",
+      "output_artifact_hash": "sha256:d24a0d7f0df0ebbb409c94b6de001d549864173350860a73e94d2db87df60a0d",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.9.3-react-react-web-compare-export-desktop-default-run1",
+      "differential": {
+        "telemetry_present": true,
+        "comparison_ready": true,
+        "franken_svg_present": true,
+        "mermaid_svg_present": true,
+        "health": "healthy",
+        "mermaid_timing_ms": 40,
+        "franken_svg_timing_ms": 0,
+        "canvas_timing_ms": 0,
+        "degradation_reasons": [],
+        "mermaid_baseline_degraded": false,
+        "franken_svg_degraded": false,
+        "runtime_artifact_missing": false
+      }
+    },
+    {
+      "scenario_id": "react-web-compare-export",
+      "profile": "desktop-default",
+      "run_index": 2,
+      "url": "http://127.0.0.1:51933/web_react?sample=flowchart-1-incident-response-escalation&spotlight=flowchart-1-incident-response-escalation&compare=flowchart-3-change-approval-pipeline%2Csequence-1-checkout-risk-review&lab=cycles",
+      "html_path": "evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/react/react-web-compare-export/desktop-default/2026-04-06T23-12-51Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/react/react-web-compare-export/desktop-default/2026-04-06T23-12-51Z__e2e__log.json",
+      "diagnostic_count": 2,
+      "degradation_tier": "fallback",
+      "runtime_mode": "live",
+      "output_artifact_hash": "sha256:9a3c59168e527d2ef6b73373cc8bc090b0028e31fe0b3ca598cfd943bcb0646c",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.9.3-react-react-web-compare-export-desktop-default-run2",
+      "differential": {
+        "telemetry_present": true,
+        "comparison_ready": true,
+        "franken_svg_present": true,
+        "mermaid_svg_present": true,
+        "health": "healthy",
+        "mermaid_timing_ms": 40,
+        "franken_svg_timing_ms": 0,
+        "canvas_timing_ms": 0,
+        "degradation_reasons": [],
+        "mermaid_baseline_degraded": false,
+        "franken_svg_degraded": false,
+        "runtime_artifact_missing": false
+      }
+    },
+    {
+      "scenario_id": "react-web-diagnostics-recovery",
+      "profile": "desktop-default",
+      "run_index": 1,
+      "url": "http://127.0.0.1:51933/web_react?sample=flowchart-1-incident-response-escalation&source=flowchart+LR%0AA--%3E&lab=overview",
+      "html_path": "evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/react/react-web-diagnostics-recovery/desktop-default/2026-04-06T23-12-52Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/react/react-web-diagnostics-recovery/desktop-default/2026-04-06T23-12-52Z__e2e__log.json",
+      "diagnostic_count": 2,
+      "degradation_tier": "fallback",
+      "runtime_mode": "live",
+      "output_artifact_hash": "sha256:294d57acf116e2b42882f6740c14299a4e6857600d95661a0bbadd0091dcc394",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.9.3-react-react-web-diagnostics-recovery-desktop-default-run1"
+    },
+    {
+      "scenario_id": "react-web-diagnostics-recovery",
+      "profile": "desktop-default",
+      "run_index": 2,
+      "url": "http://127.0.0.1:51933/web_react?sample=flowchart-1-incident-response-escalation&source=flowchart+LR%0AA--%3E&lab=overview",
+      "html_path": "evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/react/react-web-diagnostics-recovery/desktop-default/2026-04-06T23-12-54Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/react/react-web-diagnostics-recovery/desktop-default/2026-04-06T23-12-54Z__e2e__log.json",
+      "diagnostic_count": 2,
+      "degradation_tier": "fallback",
+      "runtime_mode": "live",
+      "output_artifact_hash": "sha256:f7aca23e77fdcae2f881f41485879c39af600cc29b5629e698e4a6ecbf668e32",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.9.3-react-react-web-diagnostics-recovery-desktop-default-run2"
+    }
+  ],
+  "determinism": [
+    {
+      "scenario_id": "react-web-compare-export",
+      "profile": "desktop-default",
+      "runs": 2,
+      "stable_output_hash": false,
+      "stable_normalized_log": true,
+      "output_hashes": [
+        "sha256:d24a0d7f0df0ebbb409c94b6de001d549864173350860a73e94d2db87df60a0d",
+        "sha256:9a3c59168e527d2ef6b73373cc8bc090b0028e31fe0b3ca598cfd943bcb0646c"
+      ]
+    },
+    {
+      "scenario_id": "react-web-diagnostics-recovery",
+      "profile": "desktop-default",
+      "runs": 2,
+      "stable_output_hash": false,
+      "stable_normalized_log": true,
+      "output_hashes": [
+        "sha256:294d57acf116e2b42882f6740c14299a4e6857600d95661a0bbadd0091dcc394",
+        "sha256:f7aca23e77fdcae2f881f41485879c39af600cc29b5629e698e4a6ecbf668e32"
+      ]
+    }
+  ],
+  "differential": [
+    {
+      "scenario_id": "react-web-compare-export",
+      "profile": "desktop-default",
+      "run_index": 1,
+      "telemetry_present": true,
+      "comparison_ready": true,
+      "franken_svg_present": true,
+      "mermaid_svg_present": true,
+      "health": "healthy",
+      "mermaid_timing_ms": 40,
+      "franken_svg_timing_ms": 0,
+      "canvas_timing_ms": 0,
+      "degradation_reasons": [],
+      "mermaid_baseline_degraded": false,
+      "franken_svg_degraded": false,
+      "runtime_artifact_missing": false
+    },
+    {
+      "scenario_id": "react-web-compare-export",
+      "profile": "desktop-default",
+      "run_index": 2,
+      "telemetry_present": true,
+      "comparison_ready": true,
+      "franken_svg_present": true,
+      "mermaid_svg_present": true,
+      "health": "healthy",
+      "mermaid_timing_ms": 40,
+      "franken_svg_timing_ms": 0,
+      "canvas_timing_ms": 0,
+      "degradation_reasons": [],
+      "mermaid_baseline_degraded": false,
+      "franken_svg_degraded": false,
+      "runtime_artifact_missing": false
+    }
+  ],
+  "trace_index": [
+    {
+      "scenario_id": "react-web-compare-export",
+      "profile": "desktop-default",
+      "run_index": 1,
+      "trace_id": "bd-2u0.5.9.3-react-react-web-compare-export-desktop-default-run1",
+      "log_path": "evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/react/react-web-compare-export/desktop-default/2026-04-06T23-12-49Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "react-web-compare-export",
+      "profile": "desktop-default",
+      "run_index": 2,
+      "trace_id": "bd-2u0.5.9.3-react-react-web-compare-export-desktop-default-run2",
+      "log_path": "evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/react/react-web-compare-export/desktop-default/2026-04-06T23-12-51Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "react-web-diagnostics-recovery",
+      "profile": "desktop-default",
+      "run_index": 1,
+      "trace_id": "bd-2u0.5.9.3-react-react-web-diagnostics-recovery-desktop-default-run1",
+      "log_path": "evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/react/react-web-diagnostics-recovery/desktop-default/2026-04-06T23-12-52Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "react-web-diagnostics-recovery",
+      "profile": "desktop-default",
+      "run_index": 2,
+      "trace_id": "bd-2u0.5.9.3-react-react-web-diagnostics-recovery-desktop-default-run2",
+      "log_path": "evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/react/react-web-diagnostics-recovery/desktop-default/2026-04-06T23-12-54Z__e2e__log.json"
+    }
+  ],
+  "summary_path": "evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/react/2026-04-06T23-12-54Z__determinism__summary.json",
+  "replay_bundle": {
+    "manifest_path": "/data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/react-replay/replay_manifest.json",
+    "script_path": "/data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/react-replay/replay_suite.sh"
+  }
+}

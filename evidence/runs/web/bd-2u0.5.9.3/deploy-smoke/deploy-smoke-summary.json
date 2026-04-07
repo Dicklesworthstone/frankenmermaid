@@ -1,0 +1,378 @@
+{
+  "schema_version": 1,
+  "bead_id": "bd-2u0.5.9.3",
+  "scenario_id": "cloudflare-deploy-smoke",
+  "ok": true,
+  "stage_dir": "/data/projects/frankenmermaid/dist/cloudflare-pages/bd-2u0.5.9.3-stage",
+  "output_root": "/data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.9.3/deploy-smoke",
+  "chromium": "/snap/bin/chromium",
+  "timeout_seconds": 8,
+  "repeat": 2,
+  "scenario_ids": [
+    "static-web-compare-export",
+    "static-web-diagnostics-recovery"
+  ],
+  "profile_ids": [
+    "desktop-default"
+  ],
+  "route_integrity": {
+    "ok": true,
+    "checks": [
+      {
+        "name": "static entry",
+        "ok": true,
+        "detail": "staged bundle contains the /web entry document"
+      },
+      {
+        "name": "react entry",
+        "ok": true,
+        "detail": "staged bundle contains the /web_react entry document"
+      },
+      {
+        "name": "shared showcase",
+        "ok": true,
+        "detail": "staged bundle contains the shared standalone showcase snapshot"
+      },
+      {
+        "name": "runtime assets",
+        "ok": true,
+        "detail": "staged bundle contains the checked-in JS and WASM runtime artifacts"
+      },
+      {
+        "name": "capability artifact",
+        "ok": true,
+        "detail": "staged bundle contains the capability matrix artifact required by the hosted showcase"
+      },
+      {
+        "name": "merged headers",
+        "ok": true,
+        "detail": "staged bundle emits a root-level _headers manifest for the hosted routes"
+      },
+      {
+        "name": "redirect rules",
+        "ok": true,
+        "detail": "redirect rules preserve the query string for /web/ and /web_react/ canonicalization"
+      },
+      {
+        "name": "hosting plan precondition",
+        "ok": true,
+        "detail": "staging still requires the checked-in hosting-plan validator to pass first"
+      }
+    ]
+  },
+  "static_summary_path": "evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/static/2026-04-06T23-12-47Z__determinism__summary.json",
+  "react_summary_path": "evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/react/2026-04-06T23-12-54Z__determinism__summary.json",
+  "static_validation": {
+    "summary_path": "/data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/static/2026-04-06T23-12-47Z__determinism__summary.json",
+    "surface": "web",
+    "host_kind": "static-web",
+    "result_count": 4,
+    "determinism_count": 2,
+    "profiles": [
+      "desktop-default"
+    ],
+    "scenarios": [
+      "static-web-compare-export",
+      "static-web-diagnostics-recovery"
+    ],
+    "has_replay_bundle": true,
+    "differential_count": 2,
+    "trace_count": 4
+  },
+  "react_validation": {
+    "summary_path": "/data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/react/2026-04-06T23-12-54Z__determinism__summary.json",
+    "surface": "web_react",
+    "host_kind": "react-web",
+    "result_count": 4,
+    "determinism_count": 2,
+    "profiles": [
+      "desktop-default"
+    ],
+    "scenarios": [
+      "react-web-compare-export",
+      "react-web-diagnostics-recovery"
+    ],
+    "has_replay_bundle": true,
+    "differential_count": 2,
+    "trace_count": 4
+  },
+  "parity_report_path": "evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/deploy-smoke-parity.json",
+  "parity": {
+    "ok": true,
+    "static_root": "/data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/static",
+    "react_root": "/data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/react",
+    "allowed_metric_delta_ms": 250,
+    "required_host_kinds": [
+      "static-web",
+      "react-web"
+    ],
+    "strict_fields": [
+      "renderer",
+      "theme",
+      "diagnostic_count",
+      "degradation_tier",
+      "runtime_mode",
+      "fallback_active",
+      "determinism_status"
+    ],
+    "acceptable_delta_fields": [
+      "surface",
+      "host_kind",
+      "output_artifact_hash",
+      "pass_fail_reason",
+      "parse_ms",
+      "layout_ms",
+      "render_ms",
+      "input_hash",
+      "config_hash",
+      "revision",
+      "trace_id"
+    ],
+    "missing_from_react": [],
+    "missing_from_static": [],
+    "pair_count": 2,
+    "failing_pairs": [],
+    "pairs": [
+      {
+        "scenario_id": "compare-export",
+        "profile": "desktop-default",
+        "ok": true,
+        "static_log": "/data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/static/static-web-compare-export/desktop-default/2026-04-06T23-12-43Z__e2e__log.json",
+        "react_log": "/data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/react/react-web-compare-export/desktop-default/2026-04-06T23-12-51Z__e2e__log.json",
+        "strict_mismatches": [],
+        "acceptable_deltas": [
+          {
+            "field": "surface",
+            "static": "web",
+            "react": "web_react"
+          },
+          {
+            "field": "host_kind",
+            "static": "static-web",
+            "react": "react-web"
+          },
+          {
+            "field": "output_artifact_hash",
+            "static": "sha256:38f435402fbb37a25a58545b97911691e9d7724b1f123bf0034b698746a0f4e5",
+            "react": "sha256:9a3c59168e527d2ef6b73373cc8bc090b0028e31fe0b3ca598cfd943bcb0646c"
+          },
+          {
+            "field": "pass_fail_reason",
+            "static": "/web host restored compare state, rendered the artifact lab, and populated the layout lab.",
+            "react": "/web_react host restored compare state, rendered the artifact lab, and populated the layout lab."
+          },
+          {
+            "field": "input_hash",
+            "static": "sha256:03581989213f2398cea6365ec5520d4a96cb5987d160101913bbfb2faf98f4d7",
+            "react": "sha256:847580230df15a0a66ac055184db5f73d3a74d00aaecbbe28b7e1409c6864791"
+          },
+          {
+            "field": "trace_id",
+            "static": "bd-2u0.5.9.3-static-static-web-compare-export-desktop-default-run2",
+            "react": "bd-2u0.5.9.3-react-react-web-compare-export-desktop-default-run2"
+          }
+        ]
+      },
+      {
+        "scenario_id": "diagnostics-recovery",
+        "profile": "desktop-default",
+        "ok": true,
+        "static_log": "/data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/static/static-web-diagnostics-recovery/desktop-default/2026-04-06T23-12-46Z__e2e__log.json",
+        "react_log": "/data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/react/react-web-diagnostics-recovery/desktop-default/2026-04-06T23-12-54Z__e2e__log.json",
+        "strict_mismatches": [],
+        "acceptable_deltas": [
+          {
+            "field": "surface",
+            "static": "web",
+            "react": "web_react"
+          },
+          {
+            "field": "host_kind",
+            "static": "static-web",
+            "react": "react-web"
+          },
+          {
+            "field": "output_artifact_hash",
+            "static": "sha256:21f95d0496b595ac0490beebc23526835ce70e86e0da8db5d447bc6d8d787eaa",
+            "react": "sha256:f7aca23e77fdcae2f881f41485879c39af600cc29b5629e698e4a6ecbf668e32"
+          },
+          {
+            "field": "pass_fail_reason",
+            "static": "/web host surfaced diagnostics and degraded fallback messaging for a malformed source override.",
+            "react": "/web_react host surfaced diagnostics and degraded fallback messaging for a malformed source override."
+          },
+          {
+            "field": "input_hash",
+            "static": "sha256:4df6a5f1b0e5d45b8e454d4d4c987c7f9d24320f2bb7db5fbfff047cafc9fbd8",
+            "react": "sha256:70a8adaedbd1a73a8440f26f337462f32ef1d4342d68c00d1faa2210d7de73b0"
+          },
+          {
+            "field": "trace_id",
+            "static": "bd-2u0.5.9.3-static-static-web-diagnostics-recovery-desktop-default-run2",
+            "react": "bd-2u0.5.9.3-react-react-web-diagnostics-recovery-desktop-default-run2"
+          }
+        ]
+      }
+    ]
+  },
+  "stage_bundle": {
+    "action": "stage-bundle",
+    "bundle_root": "/data/projects/frankenmermaid/dist/cloudflare-pages/bd-2u0.5.9.3-stage",
+    "canonical_host": "frankenmermaid.com",
+    "hosting_plan_gate": {
+      "surface": "cloudflare-hosting-plan",
+      "static_headers": "/data/projects/frankenmermaid/web/_headers",
+      "react_headers": "/data/projects/frankenmermaid/web_react/_headers",
+      "static_contract": "/data/projects/frankenmermaid/evidence/contracts/showcase_static_entrypoint_contract.md",
+      "react_contract": "/data/projects/frankenmermaid/evidence/contracts/showcase_react_embedding_contract.md",
+      "strategy_doc": "/data/projects/frankenmermaid/evidence/demo_strategy.md",
+      "static_headers_hash": "sha256:edf400fa1d0ce07dd97d75de91ccc24364dd3011617215955ddd8b4e213020e6",
+      "react_headers_hash": "sha256:70eb738920c0b1f0c30f39a151f40cc38f112f2a3a7f056c72ab2ec7ce971190",
+      "static_contract_hash": "sha256:654409ceae4251b238bf4df0737b5b9d5938a60964bdb6450ce0ba3f2d4200cc",
+      "react_contract_hash": "sha256:2c64b80062f6001f0ff04c0ee0af25a62eb21433153fd62586b3f1ec6df8130a",
+      "strategy_doc_hash": "sha256:573e86eb692b5b0a2a1d0fd075dae773f3f020b7f44b94b20fdafb19ec9d082d",
+      "checks": [
+        {
+          "name": "shared pkg cache rule",
+          "ok": true,
+          "detail": "both showcase hosts keep stable /pkg/* runtime assets revalidating until versioned paths exist"
+        },
+        {
+          "name": "shared evidence cache rule",
+          "ok": true,
+          "detail": "both showcase hosts publish the same review-friendly cache policy for evidence artifacts"
+        },
+        {
+          "name": "static route rules",
+          "ok": true,
+          "detail": "static host publishes explicit revalidating cache rules for /web and /web/*"
+        },
+        {
+          "name": "react route rules",
+          "ok": true,
+          "detail": "react host publishes explicit revalidating cache rules for /web_react and /web_react/*"
+        },
+        {
+          "name": "static contract route matrix",
+          "ok": true,
+          "detail": "static contract captures the current cache matrix, the future immutable-versioned path plan, and the Functions exclusion plan"
+        },
+        {
+          "name": "react contract alignment",
+          "ok": true,
+          "detail": "react contract acknowledges the shared Pages route/cache matrix and the future versioned-asset handoff"
+        },
+        {
+          "name": "strategy trace",
+          "ok": true,
+          "detail": "demo strategy points deployment work at the checked-in hosting-plan validator"
+        }
+      ]
+    },
+    "copied_files": [
+      {
+        "source": "evidence/capability_scenario_matrix.json",
+        "destination": "evidence/capability_scenario_matrix.json",
+        "sha256": "sha256:bc913238430afff4f71682d656eac8992354428fd8aac96f92c5bf6d2b62f249"
+      },
+      {
+        "source": "frankenmermaid_demo_showcase.html",
+        "destination": "frankenmermaid_demo_showcase.html",
+        "sha256": "sha256:779fd7962c910f597c6fe0786b6bddb0dde514f2e69f6ea052876f9e8350af7a"
+      },
+      {
+        "source": "pkg/frankenmermaid.d.ts",
+        "destination": "pkg/frankenmermaid.d.ts",
+        "sha256": "sha256:60cb1c24f724845b3a63efd7e8cc7e2331d5f3887bd147f7a003f5ce9ffdda13"
+      },
+      {
+        "source": "pkg/frankenmermaid.js",
+        "destination": "pkg/frankenmermaid.js",
+        "sha256": "sha256:1129bb3f85435c714879ed627661f2f47fd6af4aadb2766f3f1e29e4d77a3e2e"
+      },
+      {
+        "source": "pkg/frankenmermaid_bg.wasm",
+        "destination": "pkg/frankenmermaid_bg.wasm",
+        "sha256": "sha256:27472563d400a90f9591270a010ebf6c98492f533228851efebe61e2f2ef9d0a"
+      },
+      {
+        "source": "pkg/frankenmermaid_bg.wasm.d.ts",
+        "destination": "pkg/frankenmermaid_bg.wasm.d.ts",
+        "sha256": "sha256:b22a34e745ddbf69eebce5aaf7d4d7d6b534313dbdc94b5b61d91dd5fc0b6ab3"
+      },
+      {
+        "source": "pkg/package.json",
+        "destination": "pkg/package.json",
+        "sha256": "sha256:8695d50846774b6b5c0355bb82f09be40b291c688195497bdf124e7eb302bcef"
+      },
+      {
+        "source": "web/index.html",
+        "destination": "web/index.html",
+        "sha256": "sha256:b7ee6a7dbe35b34176df60501f9697bf5833e4781b8c42203e75a610a8ae0daa"
+      },
+      {
+        "source": "web_react/index.html",
+        "destination": "web_react/index.html",
+        "sha256": "sha256:a29be5f04510cfe3cc3ed7d1fba007547c5f2c9fae6c38e78808be1a040022d9"
+      }
+    ],
+    "generated_files": [
+      {
+        "path": "_headers",
+        "sha256": "sha256:daef3b8eff92133500ba8d73e9a66986c8c07538d7c621463ab76900f9988125"
+      }
+    ],
+    "redirect_strategy": {
+      "kind": "cloudflare-redirect-rules",
+      "rules": [
+        {
+          "description": "Canonicalize /web/ to /web while preserving the query string.",
+          "source_path": "/web/",
+          "target_url": "https://frankenmermaid.com/web",
+          "status_code": 301,
+          "preserve_query_string": true
+        },
+        {
+          "description": "Canonicalize /web_react/ to /web_react while preserving the query string.",
+          "source_path": "/web_react/",
+          "target_url": "https://frankenmermaid.com/web_react",
+          "status_code": 301,
+          "preserve_query_string": true
+        }
+      ],
+      "reason": "Pages `_redirects` does not expose a preserve-query-string control, so canonical trailing-slash redirects for `/web/` and `/web_react/` are modeled as zone-level Redirect Rules or Bulk Redirects."
+    }
+  },
+  "checks": [
+    {
+      "name": "route integrity",
+      "ok": true,
+      "detail": "staged bundle contains expected routes, assets, headers, and canonical redirect rules"
+    },
+    {
+      "name": "static summary",
+      "ok": true,
+      "detail": "static /web staged-bundle replay summary validated with replay metadata"
+    },
+    {
+      "name": "react summary",
+      "ok": true,
+      "detail": "react /web_react staged-bundle replay summary validated with replay metadata"
+    },
+    {
+      "name": "parity",
+      "ok": true,
+      "detail": "static and React staged-bundle smoke logs remain aligned within the parity tolerance"
+    },
+    {
+      "name": "static normalized determinism",
+      "ok": true,
+      "detail": "static /web staged-bundle replay kept normalized smoke outcomes stable across repeats"
+    },
+    {
+      "name": "react normalized determinism",
+      "ok": true,
+      "detail": "react /web_react staged-bundle replay kept normalized smoke outcomes stable across repeats"
+    }
+  ]
+}

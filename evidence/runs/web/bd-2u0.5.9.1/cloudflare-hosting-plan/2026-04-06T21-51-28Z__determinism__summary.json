@@ -1,0 +1,16 @@
+{
+  "bead_id": "bd-2u0.5.9.1",
+  "scenario_id": "cloudflare-hosting-plan",
+  "surface": "web",
+  "repeat": 2,
+  "stable_output": true,
+  "first_run_summary_path": "evidence/runs/web/bd-2u0.5.9.1/cloudflare-hosting-plan/2026-04-06T21-51-28Z__evidence__summary.json",
+  "first_run_summary_hash": "sha256:e1c8fcd8b8d23ee380a8665782b95145fc260c5a4274374f6f80f6fe0e2113d2",
+  "second_run_summary_hash": "sha256:e1c8fcd8b8d23ee380a8665782b95145fc260c5a4274374f6f80f6fe0e2113d2",
+  "comparison": "byte-for-byte JSON equality",
+  "pass_fail_reason": "Repeated hosting-plan validation produced identical JSON output.",
+  "checks": [
+    "python3 scripts/showcase_harness.py validate-hosting-plan --static-headers web/_headers --react-headers web_react/_headers --static-contract evidence/contracts/showcase_static_entrypoint_contract.md --react-contract evidence/contracts/showcase_react_embedding_contract.md --strategy-doc evidence/demo_strategy.md",
+    "string equality comparison between the first stored JSON summary and the second command output"
+  ]
+}

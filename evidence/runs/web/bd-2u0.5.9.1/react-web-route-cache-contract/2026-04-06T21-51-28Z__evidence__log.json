@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "bead_id": "bd-2u0.5.9.1",
+  "scenario_id": "react-web-route-cache-contract",
+  "input_hash": "sha256:a29be5f04510cfe3cc3ed7d1fba007547c5f2c9fae6c38e78808be1a040022d9",
+  "surface": "web_react",
+  "renderer": "franken-svg",
+  "theme": "corporate",
+  "config_hash": "sha256:24425057b83d8027d52d39307ca4f14fb1b9cbbbc3163d06857ee9938599d282",
+  "parse_ms": 0,
+  "layout_ms": 0,
+  "render_ms": 0,
+  "diagnostic_count": 0,
+  "degradation_tier": "healthy",
+  "output_artifact_hash": "sha256:234a526705725a973c87b0d1b043ad31bb3c84052a55f897f8bcb040beb69f80",
+  "pass_fail_reason": "React /web_react route, cache, and asset contract validated; stable /pkg/* remains must-revalidate until revisioned asset paths exist.",
+  "run_kind": "evidence",
+  "trace_id": "bd-2u0.5.9.1-react-web-route-cache-contract-2026-04-06T21-51-28Z",
+  "revision": "b01fe3802567360415340b8d9b0bd870fbf2c9c8",
+  "host_kind": "react-web",
+  "fallback_active": false,
+  "runtime_mode": "mock-forbidden",
+  "artifacts": {
+    "entry": {
+      "path": "web_react/index.html",
+      "sha256": "sha256:a29be5f04510cfe3cc3ed7d1fba007547c5f2c9fae6c38e78808be1a040022d9"
+    },
+    "headers": {
+      "path": "web_react/_headers",
+      "sha256": "sha256:70eb738920c0b1f0c30f39a151f40cc38f112f2a3a7f056c72ab2ec7ce971190"
+    },
+    "contract": {
+      "path": "evidence/contracts/showcase_react_embedding_contract.md",
+      "sha256": "sha256:24425057b83d8027d52d39307ca4f14fb1b9cbbbc3163d06857ee9938599d282"
+    },
+    "summary": {
+      "path": "evidence/runs/web/bd-2u0.5.9.1/react-web-route-cache-contract/2026-04-06T21-51-28Z__evidence__summary.json",
+      "sha256": "sha256:234a526705725a973c87b0d1b043ad31bb3c84052a55f897f8bcb040beb69f80"
+    },
+    "hosting_plan_summary": {
+      "path": "evidence/runs/web/bd-2u0.5.9.1/cloudflare-hosting-plan/2026-04-06T21-51-28Z__evidence__summary.json",
+      "sha256": "sha256:e1c8fcd8b8d23ee380a8665782b95145fc260c5a4274374f6f80f6fe0e2113d2"
+    },
+    "determinism_summary": {
+      "path": "evidence/runs/web/bd-2u0.5.9.1/cloudflare-hosting-plan/2026-04-06T21-51-28Z__determinism__summary.json",
+      "sha256": "sha256:2bb39f407d9110db316bd2e60dbb9a67b54e20d07a4615e4b3c0146bbf23aada"
+    }
+  },
+  "checks": [
+    "python3 scripts/showcase_harness.py validate-react-web --entry web_react/index.html --headers web_react/_headers --contract evidence/contracts/showcase_react_embedding_contract.md",
+    "python3 scripts/showcase_harness.py validate-hosting-plan --static-headers web/_headers --react-headers web_react/_headers --static-contract evidence/contracts/showcase_static_entrypoint_contract.md --react-contract evidence/contracts/showcase_react_embedding_contract.md --strategy-doc evidence/demo_strategy.md",
+    "python3 -m unittest tests.test_showcase_harness"
+  ]
+}

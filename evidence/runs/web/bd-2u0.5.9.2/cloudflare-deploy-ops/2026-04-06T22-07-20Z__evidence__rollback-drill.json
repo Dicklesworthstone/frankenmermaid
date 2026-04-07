@@ -1,0 +1,26 @@
+{
+  "action": "rollback-drill",
+  "supported_execution": "dashboard",
+  "project_name": "frankenmermaid",
+  "account_id": "demo-account",
+  "target_deployment_id": "production-deployment-id",
+  "reason": "bd-2u0.5.9.2 rollback drill",
+  "eligibility_rules": [
+    "Only production deployments that completed successfully are valid rollback targets.",
+    "Preview deployments are not valid rollback targets.",
+    "Roll-forward is a fresh production deploy using the same staged bundle path and commit metadata flow."
+  ],
+  "preflight_request": {
+    "method": "GET",
+    "url": "https://api.cloudflare.com/client/v4/accounts/demo-account/pages/projects/frankenmermaid/deployments",
+    "required_env": [
+      "CLOUDFLARE_API_TOKEN"
+    ],
+    "docs_url": "https://developers.cloudflare.com/pages/configuration/api/"
+  },
+  "docs": {
+    "rollbacks": "https://developers.cloudflare.com/pages/configuration/rollbacks/",
+    "api": "https://developers.cloudflare.com/pages/configuration/api/"
+  },
+  "dry_run": true
+}

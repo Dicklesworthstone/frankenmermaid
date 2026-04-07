@@ -1,0 +1,70 @@
+{
+  "ok": true,
+  "result": {
+    "surface": "web_react",
+    "entry": "web_react/index.html",
+    "headers": "web_react/_headers",
+    "contract": "evidence/contracts/showcase_react_embedding_contract.md",
+    "entry_hash": "sha256:a29be5f04510cfe3cc3ed7d1fba007547c5f2c9fae6c38e78808be1a040022d9",
+    "headers_hash": "sha256:70eb738920c0b1f0c30f39a151f40cc38f112f2a3a7f056c72ab2ec7ce971190",
+    "contract_hash": "sha256:24425057b83d8027d52d39307ca4f14fb1b9cbbbc3163d06857ee9938599d282",
+    "log_path": null,
+    "checks": [
+      {
+        "name": "source fetch",
+        "ok": true,
+        "detail": "react host bootstraps the standalone showcase artifact"
+      },
+      {
+        "name": "react root shell",
+        "ok": true,
+        "detail": "react route defines a stable host root and host marker"
+      },
+      {
+        "name": "host marker injection",
+        "ok": true,
+        "detail": "react host rewrites injected HTML with the react-web host kind"
+      },
+      {
+        "name": "body marker injection",
+        "ok": true,
+        "detail": "react host stamps the injected body with a route root marker"
+      },
+      {
+        "name": "bootstrap function",
+        "ok": true,
+        "detail": "react route owns a distinct bootstrap entrypoint"
+      },
+      {
+        "name": "headers root rule",
+        "ok": true,
+        "detail": "react route publishes explicit revalidating cache behavior for the root route"
+      },
+      {
+        "name": "headers subtree rule",
+        "ok": true,
+        "detail": "react route publishes explicit revalidating cache behavior for deep links"
+      },
+      {
+        "name": "pkg cache rule",
+        "ok": true,
+        "detail": "react route keeps stable /pkg/* runtime assets on a revalidating cache policy until revisioned asset paths exist"
+      },
+      {
+        "name": "evidence cache rule",
+        "ok": true,
+        "detail": "react route publishes review-friendly cache policy for evidence artifacts"
+      },
+      {
+        "name": "contract alignment",
+        "ok": true,
+        "detail": "react route aligns with the checked-in embedding contract"
+      },
+      {
+        "name": "contract cache matrix",
+        "ok": true,
+        "detail": "react embedding contract aligns with the Cloudflare route/cache strategy"
+      }
+    ]
+  }
+}

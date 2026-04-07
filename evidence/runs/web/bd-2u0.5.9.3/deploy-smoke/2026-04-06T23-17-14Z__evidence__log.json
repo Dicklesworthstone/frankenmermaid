@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "bead_id": "bd-2u0.5.9.3",
+  "scenario_id": "cloudflare-deploy-smoke",
+  "input_hash": "sha256:d54bb82d19b23c85a4ccba934ddbb8089488020a546fefacc16281a155e6fadd",
+  "surface": "web",
+  "renderer": "franken-svg",
+  "theme": "corporate",
+  "config_hash": "sha256:068b5294a2f1ee005200c073bf2e25ee768d32a84a12f10ab1cc7becb55ca53f",
+  "parse_ms": 0,
+  "layout_ms": 0,
+  "render_ms": 0,
+  "diagnostic_count": 0,
+  "degradation_tier": "healthy",
+  "output_artifact_hash": "sha256:3f8397622d56ef77339d126d41c9a36d31b1d62bad75558d7ef40711caea0ca8",
+  "pass_fail_reason": "Staged Cloudflare Pages smoke checks passed for /web and /web_react, with route-integrity, replay-bundle, parity, and normalized determinism gates all succeeding.",
+  "run_kind": "evidence",
+  "trace_id": "bd-2u0.5.9.3-cloudflare-deploy-smoke-2026-04-06T23-17-14Z",
+  "revision": "b01fe3802567360415340b8d9b0bd870fbf2c9c8",
+  "host_kind": "test-harness",
+  "fallback_active": false,
+  "runtime_mode": "mock-forbidden",
+  "artifacts": {
+    "strategy_doc": {
+      "path": "evidence/demo_strategy.md",
+      "sha256": "sha256:573e86eb692b5b0a2a1d0fd075dae773f3f020b7f44b94b20fdafb19ec9d082d"
+    },
+    "ci_workflow": {
+      "path": ".github/workflows/ci.yml",
+      "sha256": "sha256:068b5294a2f1ee005200c073bf2e25ee768d32a84a12f10ab1cc7becb55ca53f"
+    },
+    "ops_script": {
+      "path": "scripts/cloudflare_pages_ops.py",
+      "sha256": "sha256:d54bb82d19b23c85a4ccba934ddbb8089488020a546fefacc16281a155e6fadd"
+    },
+    "smoke_summary": {
+      "path": "evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/deploy-smoke-summary.json",
+      "sha256": "sha256:3f8397622d56ef77339d126d41c9a36d31b1d62bad75558d7ef40711caea0ca8"
+    },
+    "parity_report": {
+      "path": "evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/deploy-smoke-parity.json",
+      "sha256": "sha256:b5f42b3f35825a8514860bbf6ec9ce4279b07224289b13855c9b460f35f55e3e"
+    },
+    "parity_recheck": {
+      "path": "evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/deploy-smoke-parity-recheck.json",
+      "sha256": "sha256:0c2931b7b8b5d4e2176dbbc920c77fa5576d00f34914232764d211a71e1cd9d2"
+    },
+    "static_determinism_summary": {
+      "path": "evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/static/2026-04-06T23-12-47Z__determinism__summary.json",
+      "sha256": "sha256:2602222b5a69c67d8faffa5b29706c9ade823ebaef6811edf050d6d1a59799d2"
+    },
+    "react_determinism_summary": {
+      "path": "evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/react/2026-04-06T23-12-54Z__determinism__summary.json",
+      "sha256": "sha256:dd99f62d12a37b5231edb0ab13f80e8c419c95234c77fc6f94ed18236089d679"
+    }
+  },
+  "checks": [
+    "python3 -m unittest tests.test_static_web_e2e",
+    "python3 -m unittest tests.test_cloudflare_pages_ops",
+    "python3 -m unittest tests.test_showcase_harness",
+    "python3 scripts/cloudflare_pages_ops.py smoke-check --repo-root . --stage-dir dist/cloudflare-pages/bd-2u0.5.9.3-stage --output-root evidence/runs/web/bd-2u0.5.9.3/deploy-smoke --chromium /snap/bin/chromium --scenario-id static-web-compare-export --scenario-id static-web-diagnostics-recovery --profile-id desktop-default --repeat 2 --report-out evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/deploy-smoke-summary.json",
+    "python3 scripts/showcase_harness.py validate-e2e-summary --summary evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/static/2026-04-06T23-12-47Z__determinism__summary.json --repo-root . --require-replay-bundle",
+    "python3 scripts/showcase_harness.py validate-e2e-summary --summary evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/react/2026-04-06T23-12-54Z__determinism__summary.json --repo-root . --require-replay-bundle",
+    "python3 scripts/showcase_harness.py compare-host-parity --static-root evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/static --react-root evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/react --report-out evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/deploy-smoke-parity-recheck.json"
+  ]
+}

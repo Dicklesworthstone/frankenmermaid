@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "bead_id": "bd-2u0.5.9.2",
+  "scenario_id": "cloudflare-deploy-ops",
+  "input_hash": "sha256:f470b52b91b2eafc6220b2df33f4df6d513325339e96fb5bc28bf918caeddb5a",
+  "surface": "web",
+  "renderer": "franken-svg",
+  "theme": "corporate",
+  "config_hash": "sha256:1279c653a0b1203d8a3f14f6be972b97bffcb2d0432d021e0c7adf1624591278",
+  "parse_ms": 0,
+  "layout_ms": 0,
+  "render_ms": 0,
+  "diagnostic_count": 0,
+  "degradation_tier": "healthy",
+  "output_artifact_hash": "sha256:2630b627ff5f35b90d370747ecdb88656caf06c39bc02c644034db341fa5296d",
+  "pass_fail_reason": "Pages bundle staging plus preview/prod deploy dry-runs and rollback drill validated successfully, with deterministic validator output.",
+  "run_kind": "evidence",
+  "trace_id": "bd-2u0.5.9.2-cloudflare-deploy-ops-2026-04-06T22-07-20Z",
+  "revision": "b01fe3802567360415340b8d9b0bd870fbf2c9c8",
+  "host_kind": "test-harness",
+  "fallback_active": false,
+  "runtime_mode": "mock-forbidden",
+  "artifacts": {
+    "wrangler_config": {
+      "path": "wrangler.jsonc",
+      "sha256": "sha256:1279c653a0b1203d8a3f14f6be972b97bffcb2d0432d021e0c7adf1624591278"
+    },
+    "ops_script": {
+      "path": "scripts/cloudflare_pages_ops.py",
+      "sha256": "sha256:f470b52b91b2eafc6220b2df33f4df6d513325339e96fb5bc28bf918caeddb5a"
+    },
+    "stage_bundle": {
+      "path": "evidence/runs/web/bd-2u0.5.9.2/cloudflare-deploy-ops/2026-04-06T22-07-20Z__evidence__stage-bundle.json",
+      "sha256": "sha256:21fb0f2478e28f0d7ceeef52f4343318c566391a102c8663f41517fbef0f761b"
+    },
+    "create_project": {
+      "path": "evidence/runs/web/bd-2u0.5.9.2/cloudflare-deploy-ops/2026-04-06T22-07-20Z__evidence__create-project.json",
+      "sha256": "sha256:3d97b1536affdfe61dd0ae4316dec19bdf104a0c942dd04b58bad2ed66b664cb"
+    },
+    "preview_deploy": {
+      "path": "evidence/runs/web/bd-2u0.5.9.2/cloudflare-deploy-ops/2026-04-06T22-07-20Z__evidence__preview-deploy.json",
+      "sha256": "sha256:2aeef3adad854e2205e45c9bb26a1a590da7908d7beeeb3087e57d9c3a9b3b84"
+    },
+    "production_deploy": {
+      "path": "evidence/runs/web/bd-2u0.5.9.2/cloudflare-deploy-ops/2026-04-06T22-07-20Z__evidence__production-deploy.json",
+      "sha256": "sha256:651880b4bb47d51f3466cd6bdbd4f787b46db6d63d76aa23071b990b7435a0d1"
+    },
+    "rollback_drill": {
+      "path": "evidence/runs/web/bd-2u0.5.9.2/cloudflare-deploy-ops/2026-04-06T22-07-20Z__evidence__rollback-drill.json",
+      "sha256": "sha256:3f7e9fc561d1f05dc243d5781b79d5e41d4fa6f1367e7294dc100a73dc084473"
+    },
+    "validator": {
+      "path": "evidence/runs/web/bd-2u0.5.9.2/cloudflare-deploy-ops/2026-04-06T22-07-20Z__evidence__validator.json",
+      "sha256": "sha256:2630b627ff5f35b90d370747ecdb88656caf06c39bc02c644034db341fa5296d"
+    },
+    "determinism_summary": {
+      "path": "evidence/runs/web/bd-2u0.5.9.2/cloudflare-deploy-ops/2026-04-06T22-07-20Z__determinism__summary.json",
+      "sha256": "sha256:afd705db7e9a14ec194d4e0151e8d6aa066c2dc671a109b4416e83a91bfef176"
+    }
+  },
+  "checks": [
+    "python3 -m unittest tests.test_cloudflare_pages_ops",
+    "python3 -m unittest tests.test_showcase_harness",
+    "python3 scripts/showcase_harness.py validate-cloudflare-deploy-ops --wrangler-config wrangler.jsonc --ops-script scripts/cloudflare_pages_ops.py --static-contract evidence/contracts/showcase_static_entrypoint_contract.md --react-contract evidence/contracts/showcase_react_embedding_contract.md --strategy-doc evidence/demo_strategy.md"
+  ]
+}

@@ -1,0 +1,150 @@
+{
+  "schema_version": 1,
+  "bead_id": "bd-2u0.5.9.3-static",
+  "surface": "web",
+  "host_kind": "static-web",
+  "route_prefix": "/web",
+  "repeat": 2,
+  "revision": "b01fe3802567360415340b8d9b0bd870fbf2c9c8",
+  "summary_path": "/data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/static/2026-04-06T23-12-47Z__determinism__summary.json",
+  "suite_command": [
+    "python3",
+    "scripts/run_static_web_e2e.py",
+    "--bead-id",
+    "bd-2u0.5.9.3-static",
+    "--repo-root",
+    "/data/projects/frankenmermaid",
+    "--chromium",
+    "/snap/bin/chromium",
+    "--timeout-seconds",
+    "8",
+    "--output-root",
+    "/data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/static",
+    "--repeat",
+    "2",
+    "--route-prefix",
+    "/web",
+    "--surface",
+    "web",
+    "--host-kind",
+    "static-web",
+    "--scenario-prefix",
+    "static-web",
+    "--serve-root",
+    "/data/projects/frankenmermaid/dist/cloudflare-pages/bd-2u0.5.9.3-stage",
+    "--revision",
+    "b01fe3802567360415340b8d9b0bd870fbf2c9c8"
+  ],
+  "trace_index": [
+    {
+      "scenario_id": "static-web-compare-export",
+      "profile": "desktop-default",
+      "run_index": 1,
+      "trace_id": "bd-2u0.5.9.3-static-static-web-compare-export-desktop-default-run1",
+      "log_path": "evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/static/static-web-compare-export/desktop-default/2026-04-06T23-12-41Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-compare-export",
+      "profile": "desktop-default",
+      "run_index": 2,
+      "trace_id": "bd-2u0.5.9.3-static-static-web-compare-export-desktop-default-run2",
+      "log_path": "evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/static/static-web-compare-export/desktop-default/2026-04-06T23-12-43Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "desktop-default",
+      "run_index": 1,
+      "trace_id": "bd-2u0.5.9.3-static-static-web-diagnostics-recovery-desktop-default-run1",
+      "log_path": "evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/static/static-web-diagnostics-recovery/desktop-default/2026-04-06T23-12-45Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "desktop-default",
+      "run_index": 2,
+      "trace_id": "bd-2u0.5.9.3-static-static-web-diagnostics-recovery-desktop-default-run2",
+      "log_path": "evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/static/static-web-diagnostics-recovery/desktop-default/2026-04-06T23-12-46Z__e2e__log.json"
+    }
+  ],
+  "scenario_commands": [
+    {
+      "scenario_id": "static-web-compare-export",
+      "profile": "desktop-default",
+      "trace_ids": [
+        "bd-2u0.5.9.3-static-static-web-compare-export-desktop-default-run1",
+        "bd-2u0.5.9.3-static-static-web-compare-export-desktop-default-run2"
+      ],
+      "command": [
+        "python3",
+        "scripts/run_static_web_e2e.py",
+        "--bead-id",
+        "bd-2u0.5.9.3-static",
+        "--repo-root",
+        "/data/projects/frankenmermaid",
+        "--chromium",
+        "/snap/bin/chromium",
+        "--timeout-seconds",
+        "8",
+        "--output-root",
+        "/data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/static",
+        "--repeat",
+        "1",
+        "--route-prefix",
+        "/web",
+        "--surface",
+        "web",
+        "--host-kind",
+        "static-web",
+        "--scenario-prefix",
+        "static-web",
+        "--serve-root",
+        "/data/projects/frankenmermaid/dist/cloudflare-pages/bd-2u0.5.9.3-stage",
+        "--revision",
+        "b01fe3802567360415340b8d9b0bd870fbf2c9c8",
+        "--scenario-id",
+        "static-web-compare-export",
+        "--profile-id",
+        "desktop-default"
+      ]
+    },
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "desktop-default",
+      "trace_ids": [
+        "bd-2u0.5.9.3-static-static-web-diagnostics-recovery-desktop-default-run1",
+        "bd-2u0.5.9.3-static-static-web-diagnostics-recovery-desktop-default-run2"
+      ],
+      "command": [
+        "python3",
+        "scripts/run_static_web_e2e.py",
+        "--bead-id",
+        "bd-2u0.5.9.3-static",
+        "--repo-root",
+        "/data/projects/frankenmermaid",
+        "--chromium",
+        "/snap/bin/chromium",
+        "--timeout-seconds",
+        "8",
+        "--output-root",
+        "/data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/static",
+        "--repeat",
+        "1",
+        "--route-prefix",
+        "/web",
+        "--surface",
+        "web",
+        "--host-kind",
+        "static-web",
+        "--scenario-prefix",
+        "static-web",
+        "--serve-root",
+        "/data/projects/frankenmermaid/dist/cloudflare-pages/bd-2u0.5.9.3-stage",
+        "--revision",
+        "b01fe3802567360415340b8d9b0bd870fbf2c9c8",
+        "--scenario-id",
+        "static-web-diagnostics-recovery",
+        "--profile-id",
+        "desktop-default"
+      ]
+    }
+  ]
+}
