@@ -11,7 +11,13 @@ export class Diagram {
     setTheme(theme: string): void;
 }
 
+export function applyLensEdit(input: string, element_id: string, replacement: string): any;
+
+export function describeDiagram(input: string): string;
+
 export function detectType(input: string): any;
+
+export function diagramLens(input: string): any;
 
 export function init(config?: any | null): void;
 
@@ -24,7 +30,10 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_diagram_free: (a: number, b: number) => void;
+    readonly applyLensEdit: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
+    readonly describeDiagram: (a: number, b: number, c: number) => void;
     readonly detectType: (a: number, b: number, c: number) => void;
+    readonly diagramLens: (a: number, b: number, c: number) => void;
     readonly diagram_destroy: (a: number) => void;
     readonly diagram_new: (a: number, b: number, c: number) => void;
     readonly diagram_on: (a: number, b: number, c: number, d: number, e: number) => void;

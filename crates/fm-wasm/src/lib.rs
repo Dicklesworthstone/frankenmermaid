@@ -15,7 +15,8 @@ use fm_core::{MermaidSourceMap, MermaidSourceMapKind, Span};
 #[cfg(any(not(target_arch = "wasm32"), test))]
 use fm_layout::build_layout_guard_report_with_pressure;
 use fm_layout::{
-    LayoutConfig, LayoutGuardrails, TracedLayout, layout_diagram_traced_with_config_and_guardrails,
+    LayoutConfig, LayoutGuardrails, TracedLayout, layout_diagram_traced,
+    layout_diagram_traced_with_config_and_guardrails,
 };
 use fm_parser::{detect_type_with_confidence, parse};
 use fm_render_canvas::CanvasRenderConfig;
@@ -25,9 +26,10 @@ use fm_render_canvas::render_to_canvas_with_layout;
 use fm_render_canvas::{
     Canvas2dContext, CanvasRenderResult, LineCap, LineJoin, TextAlign, TextBaseline, TextMetrics,
 };
-#[cfg(any(not(target_arch = "wasm32"), test))]
-use fm_render_svg::describe_diagram_with_layout;
-use fm_render_svg::{SvgRenderConfig, ThemeColors, ThemePreset, render_svg_with_layout};
+use fm_render_svg::{
+    SvgRenderConfig, ThemeColors, ThemePreset, describe_diagram_with_layout,
+    render_svg_with_layout,
+};
 use serde::{Deserialize, Serialize};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
@@ -707,6 +709,39 @@ pub fn detect_type_js(input: &str) -> Result<JsValue, JsValue> {
 pub fn parse_js(input: &str) -> Result<JsValue, JsValue> {
     let parsed = parse(input);
     to_js_value(&parsed)
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = diagramLens))]
+pub fn diagram_lens_js(input: &str) -> Result<JsValue, JsValue> {
+    let parsed = parse(input);
+    let bindings = fm_core::build_lens_bindings(input, &parsed.ir.source_map());
+    to_js_value(&bindings)
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = applyLensEdit))]
+pub fn apply_lens_edit_js(
+    input: &str,
+    element_id: &str,
+    replacement: &str,
+) -> Result<JsValue, JsValue> {
+    let parsed = parse(input);
+    let edit = fm_core::MermaidLensEdit {
+        element_id: element_id.to_string(),
+        replacement: replacement.to_string(),
+    };
+    let result = fm_core::apply_lens_edit(input, &parsed.ir.source_map(), &edit)
+        .map_err(|e| js_error(&e.to_string()))?;
+    to_js_value(&result)
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = describeDiagram))]
+pub fn describe_diagram_js(input: &str) -> Result<String, JsValue> {
+    let parsed = parse(input);
+    let traced = layout_diagram_traced(&parsed.ir);
+    Ok(fm_render_svg::describe_diagram_with_layout(
+        &parsed.ir,
+        Some(&traced.layout),
+    ))
 }
 
 #[cfg(any(not(target_arch = "wasm32"), test))]
