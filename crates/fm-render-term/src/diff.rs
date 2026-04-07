@@ -1207,8 +1207,12 @@ mod tests {
         let new = fm_parser::parse("flowchart LR\n  A-->B-->C");
         let rendered = render_diff_terminal(&old.ir, &new.ir, 100, 24, false);
         assert!(
-            rendered.contains("Diagram Diff") || !rendered.is_empty(),
+            !rendered.is_empty(),
             "terminal diff should produce output"
+        );
+        assert!(
+            rendered.contains("Diagram Diff"),
+            "terminal diff should contain header"
         );
     }
 

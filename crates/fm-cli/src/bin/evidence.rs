@@ -1158,10 +1158,10 @@ fn verify_bundle_command(root: &Path, args: VerifyBundleArgs) -> Result<()> {
 }
 
 fn verify_overrides_command(root: &Path, args: VerifyOverridesArgs) -> Result<()> {
-    let policy_path = args
-        .policy_path
-        .map(|path| absolutize_under_root(root, path))
-        .unwrap_or_else(|| root.join(DEFAULT_OVERRIDE_POLICY_PATH));
+    let policy_path = args.policy_path.map_or_else(
+        || root.join(DEFAULT_OVERRIDE_POLICY_PATH),
+        |path| absolutize_under_root(root, path),
+    );
     let policy = load_override_policy(&policy_path)?;
 
     if !policy.enabled {
@@ -1589,11 +1589,10 @@ fn evaluate_release_matrix(
                 artifact.host_kind
             );
         }
-        let replay_manifest = artifact
-            .replay_bundle
-            .as_ref()
-            .map(|bundle| resolve_report_path(root, &bundle.manifest_path))
-            .unwrap_or_else(|| manifest_path.clone());
+        let replay_manifest = artifact.replay_bundle.as_ref().map_or_else(
+            || manifest_path.clone(),
+            |bundle| resolve_report_path(root, &bundle.manifest_path),
+        );
         let pass = counts.total > 0
             && counts.stable_normalized == counts.total
             && replay_manifest.exists();
