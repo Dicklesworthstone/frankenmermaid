@@ -363,8 +363,10 @@ impl DiagramType {
             | Self::C4Component
             | Self::C4Dynamic
             | Self::C4Deployment
+            | Self::Pie
+            | Self::XyChart
             | Self::Kanban => MermaidSupportLevel::Supported,
-            Self::Sequence | Self::Pie | Self::XyChart => MermaidSupportLevel::Partial,
+            Self::Sequence => MermaidSupportLevel::Partial,
             Self::Unknown => MermaidSupportLevel::Unsupported,
         }
     }
@@ -392,9 +394,10 @@ impl DiagramType {
             | Self::C4Component
             | Self::C4Dynamic
             | Self::C4Deployment
+            | Self::Pie
+            | Self::XyChart
             | Self::Kanban => "full",
-            Self::Sequence | Self::Pie => "partial",
-            Self::XyChart => "basic",
+            Self::Sequence => "partial",
             Self::Unknown => "unknown",
         }
     }

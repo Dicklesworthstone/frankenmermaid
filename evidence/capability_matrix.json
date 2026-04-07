@@ -3,8 +3,8 @@
   "project": "frankenmermaid",
   "status_counts": {
     "experimental": 1,
-    "implemented": 31,
-    "partial": 4
+    "implemented": 33,
+    "partial": 2
   },
   "claims": [
     {
@@ -515,7 +515,7 @@
       "id": "diagram-type/pie",
       "category": "diagram_type",
       "title": "Support pie diagrams",
-      "status": "partial",
+      "status": "implemented",
       "advertised_in": [
         "README.md#supported-diagram-types"
       ],
@@ -536,7 +536,7 @@
         }
       ],
       "notes": [
-        "README advertises this family; current code marks it as partial capability"
+        "README advertises this family; current code marks it as full capability"
       ]
     },
     {
@@ -571,7 +571,7 @@
       "id": "diagram-type/xyChart",
       "category": "diagram_type",
       "title": "Support xyChart diagrams",
-      "status": "partial",
+      "status": "implemented",
       "advertised_in": [
         "README.md#supported-diagram-types"
       ],
@@ -592,7 +592,7 @@
         }
       ],
       "notes": [
-        "README advertises this family; current code marks it as basic capability"
+        "README advertises this family; current code marks it as full capability"
       ]
     },
     {

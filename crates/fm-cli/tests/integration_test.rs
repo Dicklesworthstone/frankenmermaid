@@ -2080,7 +2080,7 @@ fn parse_summary_reports_xychart_counts_without_compatibility_fallback() {
         serde_json::from_str(&stdout).expect("parse summary must print valid JSON");
     assert_eq!(json["diagram_type"], "xyChart");
     assert_eq!(json["parse_mode"], "strict");
-    assert_eq!(json["support_level"], "Partial");
+    assert_eq!(json["support_level"], "Supported");
     assert_eq!(json["node_count"], 6);
     assert_eq!(json["edge_count"], 2);
     assert_eq!(json["diagnostic_count"], 0);
