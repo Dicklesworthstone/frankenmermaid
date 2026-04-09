@@ -424,7 +424,7 @@ mod tests {
 
     #[test]
     fn detects_simple_diagram_block() {
-        let text = r#"
+        let text = r"
 Some text before
 
 +--------+
@@ -432,7 +432,7 @@ Some text before
 +--------+
 
 Some text after
-"#;
+";
         let blocks = detect_diagram_blocks(text);
         assert_eq!(blocks.len(), 1);
         assert!(blocks[0].lines.len() >= 3);
