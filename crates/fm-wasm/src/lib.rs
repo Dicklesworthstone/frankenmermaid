@@ -696,7 +696,7 @@ pub fn render(input: &str) -> WasmRenderOutput {
     }
     guard.budget_broker = budget_broker.clone();
     let source_spans = collect_source_spans(&parsed.ir, &traced_layout.layout);
-    let mut svg_config = runtime.svg.clone();
+    let mut svg_config = runtime.svg;
     apply_budget_svg_simplifications(&mut svg_config, &budget_broker);
     apply_degradation_to_svg(&mut svg_config, &guard.degradation);
     let render_start = Instant::now();
@@ -1635,7 +1635,7 @@ mod tests {
 
         let original = read_runtime_config();
         let _guard = RuntimeConfigGuard(original.clone());
-        let mut updated = original.clone();
+        let mut updated = original;
         updated.svg = SvgRenderConfig {
             font_size: 28.0,
             avg_char_width: 18.0,
