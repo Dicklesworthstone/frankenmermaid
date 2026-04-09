@@ -396,7 +396,7 @@ fn extract_dot_attribute_raw(attributes: &str, key: &str) -> Option<String> {
         }
 
         let mut has_eq = false;
-        if let Some(&'=') = chars.peek() {
+        if chars.peek() == Some(&'=') {
             has_eq = true;
             chars.next();
             while let Some(&c) = chars.peek() {
