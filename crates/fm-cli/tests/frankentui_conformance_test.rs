@@ -1,5 +1,6 @@
 //! Fixture-backed FrankenTUI conformance harness for parser/render parity.
 
+use fm_core::MermaidLinkMode;
 use fm_core::{IrNode, IrXySeriesKind};
 use fm_layout::layout_diagram;
 use fm_parser::parse;
@@ -280,11 +281,11 @@ fn franken_tui_fixture_cases_match_parser_and_svg_expectations() {
 
         let parsed = parse(&input);
         let layout = layout_diagram(&parsed.ir);
-        let svg = normalize_svg(&render_svg_with_layout(
-            &parsed.ir,
-            &layout,
-            &SvgRenderConfig::default(),
-        ));
+        let svg_config = SvgRenderConfig {
+            link_mode: MermaidLinkMode::Inline,
+            ..SvgRenderConfig::default()
+        };
+        let svg = normalize_svg(&render_svg_with_layout(&parsed.ir, &layout, &svg_config));
 
         assert_eq!(
             parsed.ir.diagram_type.as_str(),

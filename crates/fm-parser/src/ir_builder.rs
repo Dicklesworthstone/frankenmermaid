@@ -8,7 +8,8 @@ use fm_core::{
     IrLabelSegment, IrLifecycleEvent, IrNode, IrNodeId, IrNodeKind, IrParticipantGroup,
     IrSequenceFragment, IrSequenceMeta, IrSequenceNote, IrStyleRef, IrStyleTarget, IrSubgraph,
     IrSubgraphId, IrXyChartMeta, LifecycleEventKind, MermaidDiagramIr, MermaidError,
-    MermaidParseMode, MermaidWarning, MermaidWarningCode, NodeShape, NotePosition, Span,
+    MermaidParseMode, MermaidSanitizeMode, MermaidWarning, MermaidWarningCode, NodeShape,
+    NotePosition, Span,
 };
 
 use crate::{ParseResult, ParserConfig, normalize_identifier};
@@ -215,6 +216,14 @@ impl IrBuilder {
         if self.ir.diagram_type == DiagramType::Sequence && show_numbers {
             self.enable_autonumber();
         }
+    }
+
+    pub(crate) const fn set_init_sanitize_mode(&mut self, sanitize_mode: MermaidSanitizeMode) {
+        self.ir.meta.init.config.sanitize_mode = sanitize_mode;
+    }
+
+    pub(crate) const fn sanitize_mode(&self) -> MermaidSanitizeMode {
+        self.ir.meta.init.config.sanitize_mode
     }
 
     pub(crate) const fn set_c4_show_legend(&mut self, show_legend: bool) {

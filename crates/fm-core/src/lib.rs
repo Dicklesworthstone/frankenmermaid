@@ -1682,8 +1682,34 @@ pub fn sanitize_style_value(value: &str) -> Option<String> {
     let lower = value.to_ascii_lowercase();
     let trimmed = lower.trim();
 
+    let contains_url_function = |input: &str| -> bool {
+        let bytes = input.as_bytes();
+        let mut index = 0usize;
+        while index + 3 <= bytes.len() {
+            if bytes[index] == b'u' && bytes[index + 1] == b'r' && bytes[index + 2] == b'l' {
+                if index > 0
+                    && (bytes[index - 1].is_ascii_alphanumeric()
+                        || bytes[index - 1] == b'-'
+                        || bytes[index - 1] == b'_')
+                {
+                    index += 1;
+                    continue;
+                }
+                let mut cursor = index + 3;
+                while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                    cursor += 1;
+                }
+                if cursor < bytes.len() && bytes[cursor] == b'(' {
+                    return true;
+                }
+            }
+            index += 1;
+        }
+        false
+    };
+
     // Reject url() values — can load external resources.
-    if trimmed.contains("url(") {
+    if contains_url_function(trimmed) {
         return None;
     }
     // Reject javascript: protocol.
@@ -1989,6 +2015,7 @@ pub struct MermaidInitConfig {
     pub flowchart_curve: Option<String>,
     pub sequence_mirror_actors: Option<bool>,
     pub sequence_show_sequence_numbers: Option<bool>,
+    pub sanitize_mode: MermaidSanitizeMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -2103,6 +2130,7 @@ pub fn to_init_parse(parsed_config: MermaidConfigParse) -> MermaidInitParse {
         flowchart_curve: parsed_config.config.flowchart_curve.clone(),
         sequence_mirror_actors: parsed_config.config.sequence_mirror_actors,
         sequence_show_sequence_numbers: parsed_config.config.sequence_show_sequence_numbers,
+        sanitize_mode: parsed_config.config.sanitize_mode,
     };
 
     let errors = parsed_config
@@ -4902,7 +4930,8 @@ mod tests {
             "theme": "corporate",
             "themeVariables": { "primaryColor": "#0ff" },
             "flowchart": { "rankDir": "LR", "curve": "linear" },
-            "sequence": { "mirrorActors": false, "showSequenceNumbers": true }
+            "sequence": { "mirrorActors": false, "showSequenceNumbers": true },
+            "securityLevel": "loose"
         }));
         let init_parse = to_init_parse(parsed);
 
@@ -4923,6 +4952,10 @@ mod tests {
         assert_eq!(init_parse.config.flowchart_curve.as_deref(), Some("linear"));
         assert_eq!(init_parse.config.sequence_mirror_actors, Some(false));
         assert_eq!(init_parse.config.sequence_show_sequence_numbers, Some(true));
+        assert_eq!(
+            init_parse.config.sanitize_mode,
+            MermaidSanitizeMode::Lenient
+        );
     }
 
     #[test]
@@ -7469,6 +7502,12 @@ mod tests {
     #[test]
     fn sanitize_rejects_url() {
         assert!(sanitize_style_value("url(http://evil.com)").is_none());
+    }
+
+    #[test]
+    fn sanitize_rejects_url_with_whitespace() {
+        assert!(sanitize_style_value("url (http://evil.com)").is_none());
+        assert!(sanitize_style_value("url\t(#id)").is_none());
     }
 
     #[test]

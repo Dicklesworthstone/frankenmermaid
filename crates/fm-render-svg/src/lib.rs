@@ -37,7 +37,7 @@ use std::collections::BTreeMap;
 
 use fm_core::{
     DiagramType, IrLabelId, IrLabelSegment, IrXyChartMeta, IrXySeriesKind, MermaidDiagramIr,
-    MermaidTier, Span, mermaid_cluster_element_id, mermaid_edge_element_id,
+    MermaidLinkMode, MermaidTier, Span, mermaid_cluster_element_id, mermaid_edge_element_id,
     mermaid_node_element_id, mermaid_node_element_id_with_variant,
 };
 use fm_layout::{
@@ -178,6 +178,8 @@ pub struct SvgRenderConfig {
     pub a11y: A11yConfig,
     /// Whether to emit source-span metadata attributes in the SVG output.
     pub include_source_spans: bool,
+    /// How (or if) to emit node links.
+    pub link_mode: MermaidLinkMode,
 }
 
 impl SvgRenderConfig {
@@ -262,6 +264,7 @@ impl Default for SvgRenderConfig {
             print_optimized: true,
             a11y: A11yConfig::full(),
             include_source_spans: false,
+            link_mode: MermaidLinkMode::Off,
         }
     }
 }
@@ -4518,15 +4521,23 @@ fn render_node(
     if let Some(node) = ir_node
         && let Some(href) = &node.href
     {
-        let mut a = Element::new(crate::element::ElementKind::A)
-            .attr("href", href)
-            .attr("target", "_blank")
-            .attr("rel", "noopener noreferrer");
+        match config.link_mode {
+            MermaidLinkMode::Inline => {
+                let mut a = Element::new(crate::element::ElementKind::A)
+                    .attr("href", href)
+                    .attr("target", "_blank")
+                    .attr("rel", "noopener noreferrer");
 
-        group = group.attr("style", "cursor: pointer;");
+                group = group.attr("style", "cursor: pointer;");
 
-        a = a.child(group);
-        return a;
+                a = a.child(group);
+                return a;
+            }
+            MermaidLinkMode::Footnote => {
+                group = group.attr("data-link", href).class("fm-node-has-link");
+            }
+            MermaidLinkMode::Off => {}
+        }
     }
 
     // Callback nodes: emit data-callback attribute for embedding JS integration.
@@ -6127,7 +6138,7 @@ mod tests {
         IrGraphCluster, IrGraphNode, IrLabel, IrLabelId, IrLabelSegment, IrLifecycleEvent, IrNode,
         IrNodeId, IrPieMeta, IrPieSlice, IrSequenceMeta, IrStyleRef, IrStyleTarget, IrSubgraph,
         IrSubgraphId, IrXyAxis, IrXyChartMeta, IrXySeries, IrXySeriesKind, MermaidDiagramIr,
-        NodeShape, Span,
+        MermaidLinkMode, NodeShape, Span,
     };
     use fm_layout::{
         FillStyle, LayoutAxisTick, LayoutBand, LayoutBandKind, LayoutClusterBox, LayoutRect,
@@ -7638,6 +7649,33 @@ mod tests {
         let svg = render_svg(&ir);
         assert!(svg.contains("data-menu-links=\"Docs|https://example.com/docs\""));
         assert!(svg.contains("fm-node-has-menu-links"));
+    }
+
+    #[test]
+    fn svg_link_mode_controls_anchor_emission() {
+        let mut ir = create_ir_with_single_node("A", NodeShape::Rect);
+        if let Some(node) = ir.nodes.first_mut() {
+            node.href = Some("https://example.com".to_string());
+        }
+
+        let default_svg = render_svg(&ir);
+        assert!(!default_svg.contains("href=\"https://example.com\""));
+
+        let inline_config = SvgRenderConfig {
+            link_mode: MermaidLinkMode::Inline,
+            ..SvgRenderConfig::default()
+        };
+        let svg = render_svg_with_config(&ir, &inline_config);
+        assert!(svg.contains("href=\"https://example.com\""));
+        assert!(svg.contains("target=\"_blank\""));
+
+        let footnote_config = SvgRenderConfig {
+            link_mode: MermaidLinkMode::Footnote,
+            ..SvgRenderConfig::default()
+        };
+        let footnote_svg = render_svg_with_config(&ir, &footnote_config);
+        assert!(!footnote_svg.contains("href=\"https://example.com\""));
+        assert!(footnote_svg.contains("data-link=\"https://example.com\""));
     }
 
     #[test]

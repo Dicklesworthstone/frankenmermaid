@@ -36,8 +36,8 @@ use crossterm::terminal::{
 use crossterm::{execute, queue};
 use fm_core::{
     DiagramType, MermaidBudgetLedger, MermaidDiagramIr, MermaidGlyphMode,
-    MermaidLayoutDecisionLedger, MermaidNativePressureSignals, MermaidParseMode, MermaidTier,
-    StructuredDiagnostic, capability_matrix, capability_matrix_json_pretty,
+    MermaidLayoutDecisionLedger, MermaidLinkMode, MermaidNativePressureSignals, MermaidParseMode,
+    MermaidTier, StructuredDiagnostic, capability_matrix, capability_matrix_json_pretty,
     mermaid_layout_guard_observability,
 };
 use fm_layout::{
@@ -481,6 +481,8 @@ struct FrankenmermaidSvgConfig {
     shadows: Option<bool>,
     gradients: Option<bool>,
     accessibility: Option<bool>,
+    enable_links: Option<bool>,
+    link_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -1063,6 +1065,15 @@ fn parse_tier_name(value: &str) -> Result<MermaidTier> {
     }
 }
 
+fn parse_link_mode(value: &str) -> Result<MermaidLinkMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "off" | "disabled" => Ok(MermaidLinkMode::Off),
+        "inline" | "on" | "enabled" => Ok(MermaidLinkMode::Inline),
+        "footnote" | "notes" => Ok(MermaidLinkMode::Footnote),
+        other => anyhow::bail!("unknown svg.link_mode '{other}'"),
+    }
+}
+
 fn validate_reduced_motion_name(value: &str) -> Result<()> {
     match value.trim().to_ascii_lowercase().as_str() {
         "auto" | "always" | "never" => Ok(()),
@@ -1220,6 +1231,16 @@ fn build_base_svg_render_config(config_file: &FrankenmermaidConfigFile) -> Resul
         } else {
             A11yConfig::none()
         };
+    }
+    if let Some(link_mode) = config_file.svg.link_mode.as_deref() {
+        config.link_mode = parse_link_mode(link_mode)?;
+    }
+    if let Some(enable_links) = config_file.svg.enable_links {
+        if !enable_links {
+            config.link_mode = MermaidLinkMode::Off;
+        } else if config_file.svg.link_mode.is_none() {
+            config.link_mode = MermaidLinkMode::Inline;
+        }
     }
     apply_reduced_motion_setting(&mut config, config_file.render.reduced_motion.as_deref())?;
 

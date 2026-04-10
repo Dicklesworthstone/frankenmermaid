@@ -1236,9 +1236,8 @@ The `MermaidLinkMode` further restricts which links are rendered:
 | Mode | Effect |
 |------|--------|
 | `Off` | No links rendered regardless of `enable_links` |
-| `Local` | Only relative URLs and same-origin links |
-| `External` | Only absolute URLs |
-| `All` | Both local and external |
+| `Inline` | Render links directly as clickable SVG anchors |
+| `Footnote` | Emit link metadata (`data-link`) for external tooling instead of anchors |
 
 ### Input Limits
 

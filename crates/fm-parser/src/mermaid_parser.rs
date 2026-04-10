@@ -5,8 +5,8 @@ use fm_core::{
     ArrowType, Diagnostic, DiagnosticCategory, DiagramType, GanttDate, GanttExclude, GanttTaskType,
     GanttTickInterval, GraphDirection, IrAttributeKey, IrC4NodeMeta, IrGanttMeta, IrGanttSection,
     IrGanttTask, IrLabelSegment, IrNodeId, IrXyAxis, IrXyChartMeta, IrXySeries, IrXySeriesKind,
-    MermaidParseMode, MermaidSupportLevel, NodeShape, Span, parse_mermaid_js_config_value,
-    to_init_parse,
+    MermaidParseMode, MermaidSanitizeMode, MermaidSupportLevel, NodeShape, Span,
+    parse_mermaid_js_config_value, to_init_parse,
 };
 use serde_json::Value;
 
@@ -817,7 +817,7 @@ fn lower_flow_ast(
                         builder.set_node_tooltip(node, tip_cleaned, span);
                     }
                 }
-            } else if !is_safe_click_target(cleaned) {
+            } else if !is_safe_click_target(cleaned, builder.sanitize_mode()) {
                 builder.add_warning(format!(
                     "Line {line_number}: unsafe click link target blocked: {cleaned}"
                 ));
@@ -1857,7 +1857,7 @@ fn lower_sequence_statement(
             builder.hide_sequence_footbox();
         }
         SequenceStatement::Link { actor, label, url } => {
-            if is_safe_click_target(&url) {
+            if is_safe_click_target(&url, builder.sanitize_mode()) {
                 builder.add_node_menu_link(
                     &actor,
                     &label,
@@ -1873,7 +1873,7 @@ fn lower_sequence_statement(
         SequenceStatement::Links { actor, entries } => {
             let span = span_for(line_number, source_line);
             for (label, url) in entries {
-                if !is_safe_click_target(&url) {
+                if !is_safe_click_target(&url, builder.sanitize_mode()) {
                     builder.add_warning(format!(
                         "Line {line_number}: unsafe sequence actor menu link blocked: {url}"
                     ));
@@ -3377,10 +3377,16 @@ fn take_token(input: &str) -> Option<(&str, &str)> {
     Some((token, rest))
 }
 
-fn is_safe_click_target(target: &str) -> bool {
+fn is_safe_click_target(target: &str, sanitize_mode: MermaidSanitizeMode) -> bool {
     let decoded = decode_percent_triplets(target);
     // Trim leading/trailing whitespace and control characters that browsers might ignore
     let trimmed = decoded.trim_matches(|c: char| c.is_whitespace() || c.is_control());
+    if trimmed.is_empty() {
+        return false;
+    }
+    if sanitize_mode == MermaidSanitizeMode::Lenient {
+        return true;
+    }
     let lower = trimmed.to_ascii_lowercase();
 
     if let Some(colon_idx) = lower.find(':') {
@@ -7542,6 +7548,7 @@ fn apply_mermaid_config_value(value: Value, context: &str, span: Span, builder: 
     if let Some(show_numbers) = parsed.config.sequence_show_sequence_numbers {
         builder.set_init_sequence_show_sequence_numbers(show_numbers);
     }
+    builder.set_init_sanitize_mode(parsed.config.sanitize_mode);
 
     for warning in parsed.warnings {
         let message = format!("{context}: {}", warning.message);
@@ -9046,6 +9053,24 @@ mod tests {
         let parsed = parse_mermaid("flowchart LR\nA-->B\nclick A \"javascript:alert(1)\"");
         assert!(
             parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("unsafe click link target blocked"))
+        );
+    }
+
+    #[test]
+    fn flowchart_click_directive_allows_unsafe_links_when_security_level_loose() {
+        let parsed = parse_mermaid(
+            "%%{init: {\"securityLevel\":\"loose\"}}%%\nflowchart LR\nA-->B\nclick A \"javascript:alert(1)\"",
+        );
+        let node_a = parsed.ir.nodes.iter().find(|node| node.id == "A");
+
+        assert!(node_a.is_some());
+        let node_a = node_a.expect("node A should exist");
+        assert_eq!(node_a.href.as_deref(), Some("javascript:alert(1)"));
+        assert!(
+            !parsed
                 .warnings
                 .iter()
                 .any(|warning| warning.contains("unsafe click link target blocked"))
@@ -11229,6 +11254,28 @@ Rel_Back(db, app, "Responds")"#,
         assert!(node.menu_links.is_empty());
         assert!(
             parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("unsafe sequence actor menu link blocked"))
+        );
+    }
+
+    #[test]
+    fn sequence_actor_menu_allows_unsafe_links_when_security_level_loose() {
+        let input = "%%{init: {\"securityLevel\":\"loose\"}}%%\nsequenceDiagram\n  participant API\n  link API: Admin @ javascript:alert(1)";
+        let parsed = parse_mermaid(input);
+        let node = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "API")
+            .expect("participant should be present");
+
+        assert_eq!(node.menu_links.len(), 1);
+        assert_eq!(node.menu_links[0].label, "Admin");
+        assert_eq!(node.menu_links[0].url, "javascript:alert(1)");
+        assert!(
+            !parsed
                 .warnings
                 .iter()
                 .any(|warning| warning.contains("unsafe sequence actor menu link blocked"))

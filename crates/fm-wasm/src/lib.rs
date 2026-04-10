@@ -9,7 +9,7 @@ use fm_core::MermaidGuardReport;
 use fm_core::capability_matrix;
 #[cfg(any(not(target_arch = "wasm32"), test))]
 use fm_core::mermaid_layout_guard_observability;
-use fm_core::{MermaidBudgetLedger, MermaidWasmPressureSignals};
+use fm_core::{MermaidBudgetLedger, MermaidLinkMode, MermaidWasmPressureSignals};
 #[cfg(any(not(target_arch = "wasm32"), test))]
 use fm_core::{MermaidSourceMap, MermaidSourceMapKind, Span};
 #[cfg(any(not(target_arch = "wasm32"), test))]
@@ -158,6 +158,8 @@ struct SvgConfigOverrides {
     rounded_corners: Option<f32>,
     embed_theme_css: Option<bool>,
     theme: Option<String>,
+    enable_links: Option<bool>,
+    link_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -435,6 +437,16 @@ fn merge_svg_config(
     theme_override: Option<&str>,
 ) -> Result<SvgRenderConfig, JsValue> {
     let mut merged = base.clone();
+    let parse_link_mode = |value: &str| -> Result<MermaidLinkMode, JsValue> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" | "disabled" => Ok(MermaidLinkMode::Off),
+            "inline" | "on" | "enabled" => Ok(MermaidLinkMode::Inline),
+            "footnote" | "notes" => Ok(MermaidLinkMode::Footnote),
+            other => Err(js_error(format!(
+                "invalid link mode '{other}': expected off, inline, or footnote"
+            ))),
+        }
+    };
 
     if let Some(value) = overrides.responsive {
         merged.responsive = value;
@@ -465,6 +477,16 @@ fn merge_svg_config(
     }
     if let Some(value) = overrides.embed_theme_css {
         merged.embed_theme_css = value;
+    }
+    if let Some(value) = overrides.link_mode.as_deref() {
+        merged.link_mode = parse_link_mode(value)?;
+    }
+    if let Some(value) = overrides.enable_links {
+        if !value {
+            merged.link_mode = MermaidLinkMode::Off;
+        } else if overrides.link_mode.is_none() {
+            merged.link_mode = MermaidLinkMode::Inline;
+        }
     }
 
     let theme_name = overrides.theme.as_deref().or(theme_override);
