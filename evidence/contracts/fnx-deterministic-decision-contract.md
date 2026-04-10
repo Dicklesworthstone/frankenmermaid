@@ -17,6 +17,20 @@ This contract exists to unblock:
 - `bd-ml2r.9.1` `[FNX] UX subtask: config + CLI controls for fnx modes`
 - `bd-ml2r.10.3` `[FNX] Runtime subtask: fallback ladder and strict-mode behavior`
 
+## Dependency Model
+
+- Canonical dependency is a pinned Git checkout of `franken_networkx` with explicit commit hashes in `Cargo.toml` workspace dependencies.
+- FNX crates are optional and only compiled when `fnx-integration` is enabled.
+- When FNX is unavailable (offline or missing git access), keep FNX features disabled; the default build must succeed without FNX.
+- Local co-development uses a developer-only Cargo `[patch]` override (e.g., `.cargo/config.toml`) and must not be committed.
+
+## Feature-Flag Topology
+
+- Source-of-truth feature flags live in `crates/fm-layout/Cargo.toml`.
+- `crates/fm-cli/Cargo.toml` and `crates/fm-wasm/Cargo.toml` re-export those flags for surface-level toggles.
+- `fnx-experimental-directed` depends on `fnx-integration`; both default to off.
+- CI runs FNX on/off paths (`.github/workflows/ci.yml`) to keep the optional dependency honest.
+
 ## Feature-Flag Boundary
 
 ### Default build

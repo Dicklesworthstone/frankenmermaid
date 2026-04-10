@@ -2437,6 +2437,9 @@ fn cmd_validate(input: &str, options: ValidateCommandOptions<'_>) -> Result<()> 
 
 fn collect_parse_diagnostics(parsed: &fm_parser::ParseResult) -> Vec<ValidationDiagnostic> {
     let mut diagnostics = Vec::new();
+    const STYLE_DIRECTIVE_RULE_ID: &str = "classdef-not-applied";
+    const STYLE_DIRECTIVE_MESSAGE: &str = "style directives (classDef/style/linkStyle) are parsed, but only SVG output currently \
+applies them; terminal/canvas renderers use theme defaults";
 
     for warning in &parsed.ir.meta.init.warnings {
         let payload = StructuredDiagnostic::from_warning(warning)
@@ -2459,9 +2462,13 @@ fn collect_parse_diagnostics(parsed: &fm_parser::ParseResult) -> Vec<ValidationD
     }
 
     for diagnostic in &parsed.ir.diagnostics {
-        let payload = StructuredDiagnostic::from_diagnostic(diagnostic)
-            .with_rule_id(format!("parse.{}", diagnostic.category.as_str()))
-            .with_confidence(parsed.confidence);
+        let mut payload = StructuredDiagnostic::from_diagnostic(diagnostic);
+        if diagnostic.message == STYLE_DIRECTIVE_MESSAGE {
+            payload = payload.with_rule_id(STYLE_DIRECTIVE_RULE_ID);
+        } else {
+            payload = payload.with_rule_id(format!("parse.{}", diagnostic.category.as_str()));
+        }
+        let payload = payload.with_confidence(parsed.confidence);
         diagnostics.push(ValidationDiagnostic {
             stage: "parse".to_string(),
             payload,

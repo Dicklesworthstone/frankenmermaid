@@ -1518,10 +1518,14 @@ fn render_layout_to_svg(
     let legend_height = if legend_enabled { 128.0 } else { 0.0 };
     let has_specialized_title_renderer = ir
         .xy_chart_meta
-        .as_ref().as_ref().is_some_and(|meta| !meta.series.is_empty())
+        .as_ref()
+        .as_ref()
+        .is_some_and(|meta| !meta.series.is_empty())
         || ir
             .pie_meta
-            .as_ref().as_ref().is_some_and(|meta| !meta.slices.is_empty())
+            .as_ref()
+            .as_ref()
+            .is_some_and(|meta| !meta.slices.is_empty())
         || ir.quadrant_meta.is_some();
     let generic_title = if has_specialized_title_renderer {
         None

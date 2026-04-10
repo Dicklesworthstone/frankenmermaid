@@ -828,7 +828,11 @@ fn collect_inter_token_whitespace(
     }
 }
 
-fn collect_quoted_literals(source: &str, quoted_literals: &mut Vec<MermaidQuotedSpan>, offsets: &[usize]) {
+fn collect_quoted_literals(
+    source: &str,
+    quoted_literals: &mut Vec<MermaidQuotedSpan>,
+    offsets: &[usize],
+) {
     let mut active: Option<(MermaidQuoteStyle, usize, char)> = None;
     let mut escaped = false;
 

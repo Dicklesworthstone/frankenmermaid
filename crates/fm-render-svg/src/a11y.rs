@@ -238,9 +238,7 @@ pub fn describe_edge(
     };
 
     if let Some(label_text) = label {
-        format!(
-            "{from_label} {arrow_desc} {to_label} with label: {label_text}"
-        )
+        format!("{from_label} {arrow_desc} {to_label} with label: {label_text}")
     } else {
         format!("{from_label} {arrow_desc} {to_label}")
     }

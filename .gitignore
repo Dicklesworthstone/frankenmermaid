@@ -94,3 +94,5 @@ run_test.sh
 
 # JSONL scan pass files
 pass*.jsonl
+.env
+.claude/settings.local.json
