@@ -60,6 +60,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
+const DEFAULT_MAX_INPUT_BYTES: usize = 5_000_000;
+
 fn parse_positive_font_size_arg(value: &str) -> std::result::Result<f32, String> {
     let parsed = value
         .parse::<f32>()
@@ -1069,7 +1071,10 @@ fn validate_reduced_motion_name(value: &str) -> Result<()> {
 }
 
 fn resolve_max_input_bytes(config: &FrankenmermaidConfigFile) -> Result<usize> {
-    let max_input_bytes = config.core.max_input_bytes.unwrap_or(5_000_000);
+    let max_input_bytes = config
+        .core
+        .max_input_bytes
+        .unwrap_or(DEFAULT_MAX_INPUT_BYTES);
     if max_input_bytes == 0 {
         anyhow::bail!("core.max_input_bytes must be greater than 0");
     }
@@ -2465,6 +2470,8 @@ applies them; terminal/canvas renderers use theme defaults";
         let mut payload = StructuredDiagnostic::from_diagnostic(diagnostic);
         if diagnostic.message == STYLE_DIRECTIVE_MESSAGE {
             payload = payload.with_rule_id(STYLE_DIRECTIVE_RULE_ID);
+        } else if let Some(rule_id) = diagnostic.rule_id.as_deref() {
+            payload = payload.with_rule_id(rule_id);
         } else {
             payload = payload.with_rule_id(format!("parse.{}", diagnostic.category.as_str()));
         }
@@ -4090,7 +4097,7 @@ fn render_and_output(
         print!("\x1B[2J\x1B[H"); // Clear screen and move cursor to top-left
     }
 
-    let source = load_input(input, 5_000_000)?;
+    let source = load_input(input, DEFAULT_MAX_INPUT_BYTES)?;
     let parsed = fm_parser::parse(&source);
     let layout = fm_layout::layout_diagram(&parsed.ir);
     let (rendered, _, _) = render_format(
@@ -4249,9 +4256,30 @@ fn handle_render_request(
 ) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
     use tiny_http::{Header, Response};
 
+    let content_length = request
+        .headers()
+        .iter()
+        .find(|header| header.field.equiv("Content-Length"))
+        .and_then(|header| header.value.as_str().parse::<usize>().ok());
+    if content_length.is_some_and(|len| len > DEFAULT_MAX_INPUT_BYTES) {
+        return Response::from_string(format!(
+            "Request body exceeds {DEFAULT_MAX_INPUT_BYTES} bytes"
+        ))
+        .with_status_code(413);
+    }
+
     let mut body = String::new();
-    if let Err(e) = request.as_reader().read_to_string(&mut body) {
+    let mut reader = request
+        .as_reader()
+        .take(u64::try_from(DEFAULT_MAX_INPUT_BYTES).unwrap_or(u64::MAX) + 1);
+    if let Err(e) = reader.read_to_string(&mut body) {
         return Response::from_string(format!("Failed to read body: {e}")).with_status_code(400);
+    }
+    if body.len() > DEFAULT_MAX_INPUT_BYTES {
+        return Response::from_string(format!(
+            "Request body exceeds {DEFAULT_MAX_INPUT_BYTES} bytes"
+        ))
+        .with_status_code(413);
     }
 
     let parsed = fm_parser::parse(&body);

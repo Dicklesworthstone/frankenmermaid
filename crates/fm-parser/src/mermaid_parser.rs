@@ -8253,6 +8253,19 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
                 let name = name.trim();
                 let style = style.trim();
                 if !name.is_empty() && !style.is_empty() {
+                    let (_parsed, rejected) = fm_core::parse_style_string_with_rejections(style);
+                    if !rejected.is_empty() {
+                        let rejected_list = rejected.join(", ");
+                        let message = format!(
+                            "classDef '{name}' includes unsupported or unsafe style properties (ignored): {rejected_list}"
+                        );
+                        builder.add_diagnostic(
+                            Diagnostic::warning(message)
+                                .with_category(DiagnosticCategory::Compatibility)
+                                .with_span(span)
+                                .with_rule_id("classdef-unsupported-style"),
+                        );
+                    }
                     builder.push_style_ref(
                         fm_core::IrStyleTarget::Class(name.to_string()),
                         style.to_string(),
@@ -12466,6 +12479,25 @@ Rel_Back(db, app, "Responds")"#,
                 .iter()
                 .any(|warning| warning == STYLE_DIRECTIVE_DIAGNOSTIC_MESSAGE),
             "expected parse warning to surface in render logs"
+        );
+    }
+
+    #[test]
+    fn classdef_emits_warning_for_unsupported_properties() {
+        let parsed = parse_mermaid(
+            "flowchart LR\n  A[Node]\n  classDef bad fill:#fff,shadow:2px,color:javascript:alert(1)",
+        );
+        let diagnostic = parsed
+            .ir
+            .diagnostics
+            .iter()
+            .find(|diag| diag.rule_id.as_deref() == Some("classdef-unsupported-style"))
+            .expect("expected unsupported classDef diagnostic");
+        assert_eq!(diagnostic.category, DiagnosticCategory::Compatibility);
+        assert_eq!(diagnostic.severity, DiagnosticSeverity::Warning);
+        assert!(
+            diagnostic.message.contains("shadow"),
+            "expected unsupported property name in diagnostic message"
         );
     }
 

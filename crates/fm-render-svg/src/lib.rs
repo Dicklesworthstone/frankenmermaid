@@ -446,40 +446,28 @@ fn render_scene_document_with_ir(
         || clamp_unit_interval(config.cluster_fill_opacity) < 0.999;
 
     let theme = resolve_theme(ir, config);
+    let classdef_css = ir.map_or(String::new(), collect_classdef_css);
 
+    let mut css = String::new();
     if config.embed_theme_css {
-        let mut css = theme.to_svg_style(config.shadows);
-        if effects_enabled {
-            css.push_str(&effects_css(config));
-        }
-        if config.animations_enabled {
-            css.push_str(&animation_css(config));
-        }
-        if config.a11y.accessibility_css {
-            css.push_str(accessibility_css());
-        }
-        if config.print_optimized {
-            css.push_str(&print_css(config.min_font_size));
-        }
-        doc = doc.style(css);
-    } else if config.a11y.accessibility_css
-        || config.print_optimized
-        || effects_enabled
-        || config.animations_enabled
-    {
-        let mut css = String::new();
-        if effects_enabled {
-            css.push_str(&effects_css(config));
-        }
-        if config.animations_enabled {
-            css.push_str(&animation_css(config));
-        }
-        if config.a11y.accessibility_css {
-            css.push_str(accessibility_css());
-        }
-        if config.print_optimized {
-            css.push_str(&print_css(config.min_font_size));
-        }
+        css.push_str(&theme.to_svg_style(config.shadows));
+    }
+    if effects_enabled {
+        css.push_str(&effects_css(config));
+    }
+    if config.animations_enabled {
+        css.push_str(&animation_css(config));
+    }
+    if config.a11y.accessibility_css {
+        css.push_str(accessibility_css());
+    }
+    if config.print_optimized {
+        css.push_str(&print_css(config.min_font_size));
+    }
+    if !classdef_css.is_empty() {
+        css.push_str(&classdef_css);
+    }
+    if !css.is_empty() {
         doc = doc.style(css);
     }
 
@@ -1123,125 +1111,170 @@ fn is_css_named_color(value: &str) -> bool {
     )
 }
 
-fn split_inline_style_declarations(style: &str) -> Vec<&str> {
-    let mut declarations = Vec::new();
-    let mut start = 0_usize;
-    let mut paren_depth = 0_usize;
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
+const TEXT_STYLE_PROPERTIES: &[&str] = &[
+    "color",
+    "font-size",
+    "font-weight",
+    "font-family",
+    "font-style",
+    "text-decoration",
+];
 
-    for (index, ch) in style.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-
-        match ch {
-            '\\' if quote.is_some() => escaped = true,
-            '"' | '\'' => {
-                if quote == Some(ch) {
-                    quote = None;
-                } else if quote.is_none() {
-                    quote = Some(ch);
-                }
-            }
-            '(' if quote.is_none() => paren_depth += 1,
-            ')' if quote.is_none() => paren_depth = paren_depth.saturating_sub(1),
-            ',' | ';' if quote.is_none() && paren_depth == 0 => {
-                let declaration = style[start..index].trim();
-                if !declaration.is_empty() {
-                    declarations.push(declaration);
-                }
-                start = index + ch.len_utf8();
-            }
-            _ => {}
-        }
+fn style_map_to_css(map: &BTreeMap<String, String>) -> Option<String> {
+    if map.is_empty() {
+        return None;
     }
-
-    let tail = style[start..].trim();
-    if !tail.is_empty() {
-        declarations.push(tail);
-    }
-
-    declarations
+    Some(
+        map.iter()
+            .map(|(k, v)| format!("{k}:{v}"))
+            .collect::<Vec<_>>()
+            .join("; "),
+    )
 }
 
-fn normalize_inline_style(parts: &[&str]) -> Option<String> {
-    let inline = parts
-        .iter()
-        .flat_map(|part| split_inline_style_declarations(part))
-        .map(str::trim)
-        .filter(|declaration| !declaration.is_empty())
-        .collect::<Vec<_>>()
-        .join("; ");
+fn split_style_properties(
+    properties: &BTreeMap<String, String>,
+) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
+    let mut shape = BTreeMap::new();
+    let mut text = BTreeMap::new();
 
-    if inline.is_empty() {
-        None
-    } else {
-        Some(inline)
+    for (key, value) in properties {
+        if TEXT_STYLE_PROPERTIES.contains(&key.as_str()) {
+            if key == "color" {
+                text.insert("fill".to_string(), value.clone());
+            } else {
+                text.insert(key.clone(), value.clone());
+            }
+        } else {
+            shape.insert(key.clone(), value.clone());
+        }
     }
+
+    (shape, text)
 }
 
-/// Resolve inline style for a node based on `classDef` and `style` directives.
-///
-/// Cascade: classDef properties (by class name) → style properties (by node ID).
-/// Returns a CSS style string suitable for the `style` attribute, or `None`.
-fn resolve_node_inline_style(ir: &MermaidDiagramIr, node_index: usize) -> Option<String> {
-    use fm_core::IrStyleTarget;
-    let node = ir.nodes.get(node_index)?;
-    let node_id = fm_core::IrNodeId(node_index);
-
-    // Collect class definitions.
-    let mut class_defs: std::collections::BTreeMap<&str, &str> = std::collections::BTreeMap::new();
-    for sr in &ir.style_refs {
-        if let IrStyleTarget::Class(ref name) = sr.target {
-            class_defs.insert(name.as_str(), sr.style.as_str());
-        }
+fn maybe_add_class(mut elem: Element, class_name: &str, enabled: bool) -> Element {
+    if enabled {
+        elem = elem.class(class_name);
     }
+    elem
+}
 
-    let mut parts: Vec<&str> = Vec::new();
+fn collect_node_style_directives(
+    ir: &MermaidDiagramIr,
+    node_index: usize,
+) -> Option<BTreeMap<String, String>> {
+    use fm_core::{IrNodeId, IrStyleTarget, parse_style_string};
+    let node_id = IrNodeId(node_index);
+    let mut merged = BTreeMap::new();
 
-    // Layer 1: classDef properties (applied in class order for stability).
-    for class_name in &node.classes {
-        if let Some(&style) = class_defs.get(class_name.as_str()) {
-            parts.push(style);
-        }
-    }
-
-    // Layer 2: direct `style nodeId` overrides.
     for sr in &ir.style_refs {
         if let IrStyleTarget::Node(target_id) = sr.target
             && target_id == node_id
         {
-            parts.push(sr.style.as_str());
+            merged.extend(parse_style_string(&sr.style).properties);
         }
     }
 
-    if parts.is_empty() {
-        return None;
+    if merged.is_empty() {
+        None
+    } else {
+        Some(merged)
+    }
+}
+
+fn collect_classdef_css(ir: &MermaidDiagramIr) -> String {
+    use fm_core::{IrStyleDef, IrStyleTarget, parse_style_string};
+    let mut css = String::new();
+
+    let mut defs: Vec<IrStyleDef> = if ir.style_defs.is_empty() {
+        let mut defs: BTreeMap<String, IrStyleDef> = BTreeMap::new();
+        for sr in &ir.style_refs {
+            if let IrStyleTarget::Class(ref name) = sr.target {
+                let parsed = parse_style_string(&sr.style);
+                defs.entry(name.clone())
+                    .and_modify(|def| def.properties.extend(parsed.properties.clone()))
+                    .or_insert_with(|| IrStyleDef {
+                        name: name.clone(),
+                        properties: parsed.properties,
+                        span: sr.span,
+                    });
+            }
+        }
+        defs.into_values().collect()
+    } else {
+        ir.style_defs.clone()
+    };
+
+    defs.sort_by(|a, b| a.name.cmp(&b.name));
+    for def in &defs {
+        let token = sanitize_css_token(&def.name);
+        if token.is_empty() || def.properties.is_empty() {
+            continue;
+        }
+        let (shape_props, text_props) = split_style_properties(&def.properties);
+        if let Some(shape_css) = style_map_to_css(&shape_props) {
+            css.push_str(&format!(
+                ".fm-node-user-{token} .fm-node-shape, .fm-node-user-{token} .fm-node-shape * {{ {shape_css}; }}\n"
+            ));
+        }
+        if let Some(text_css) = style_map_to_css(&text_props) {
+            css.push_str(&format!(
+                ".fm-node-user-{token} .fm-node-label, .fm-node-user-{token} .fm-node-label * {{ {text_css}; }}\n"
+            ));
+        }
     }
 
-    normalize_inline_style(&parts)
+    css
+}
+
+/// Resolve inline styles for a node from `style` directives (shape, text).
+fn resolve_node_inline_styles(
+    ir: &MermaidDiagramIr,
+    node_index: usize,
+) -> (Option<String>, Option<String>) {
+    let node = ir.nodes.get(node_index);
+    let properties = if ir.style_refs.is_empty() {
+        node.and_then(|n| n.inline_style.as_ref().map(|s| s.properties.clone()))
+    } else {
+        collect_node_style_directives(ir, node_index)
+    };
+
+    if let Some(props) = properties {
+        let (shape_props, text_props) = split_style_properties(&props);
+        return (
+            style_map_to_css(&shape_props),
+            style_map_to_css(&text_props),
+        );
+    }
+
+    (None, None)
 }
 
 /// Resolve inline style for an edge based on `linkStyle` directives.
 fn resolve_edge_inline_style(ir: &MermaidDiagramIr, edge_index: usize) -> Option<String> {
-    use fm_core::IrStyleTarget;
-    let mut parts: Vec<&str> = Vec::new();
+    use fm_core::{IrStyleTarget, parse_style_string};
+    if let Some(edge) = ir.edges.get(edge_index)
+        && let Some(style) = edge.inline_style.as_ref()
+    {
+        return style_map_to_css(&style.properties);
+    }
 
+    let mut merged = BTreeMap::new();
+    for sr in &ir.style_refs {
+        if sr.target == IrStyleTarget::LinkDefault {
+            merged.extend(parse_style_string(&sr.style).properties);
+        }
+    }
     for sr in &ir.style_refs {
         if let IrStyleTarget::Link(link_idx) = sr.target
             && link_idx == edge_index
         {
-            parts.push(sr.style.as_str());
+            merged.extend(parse_style_string(&sr.style).properties);
         }
     }
 
-    if parts.is_empty() {
-        return None;
-    }
-
-    normalize_inline_style(&parts)
+    style_map_to_css(&merged)
 }
 
 fn truncate_label(label: &str, max_chars: Option<usize>) -> String {
@@ -1572,6 +1605,8 @@ fn render_layout_to_svg(
         .data("detail-tier", detail_tier_name(detail.tier));
 
     let theme = resolve_theme(Some(ir), config);
+    let classdef_css = collect_classdef_css(ir);
+    let emit_classdef_classes = !classdef_css.is_empty();
     let effects_enabled = config.node_gradients
         || config.glow_enabled
         || clamp_unit_interval(config.inactive_opacity) < 0.999
@@ -1675,9 +1710,12 @@ fn render_layout_to_svg(
         if config.print_optimized {
             css.push_str(&print_css(config.min_font_size));
         }
+        if !classdef_css.is_empty() {
+            css.push_str(&classdef_css);
+        }
 
         doc = doc.style(css);
-    } else if config.a11y.accessibility_css || config.print_optimized || config.animations_enabled {
+    } else {
         // Only add supplemental CSS (accessibility and/or print optimization).
         let mut css = String::new();
         if effects_enabled {
@@ -1692,7 +1730,12 @@ fn render_layout_to_svg(
         if config.print_optimized {
             css.push_str(&print_css(config.min_font_size));
         }
-        doc = doc.style(css);
+        if !classdef_css.is_empty() {
+            css.push_str(&classdef_css);
+        }
+        if !css.is_empty() {
+            doc = doc.style(css);
+        }
     }
 
     // Offset for padding
@@ -2251,6 +2294,7 @@ fn render_layout_to_svg(
             config,
             detail,
             &theme.colors,
+            emit_classdef_classes,
         );
         doc = doc.child(node_elem);
     }
@@ -2264,6 +2308,7 @@ fn render_layout_to_svg(
             config,
             detail,
             &theme.colors,
+            emit_classdef_classes,
         )
         .id(&mermaid_node_element_id_with_variant(
             &node_box.node_id,
@@ -3519,6 +3564,7 @@ fn format_xychart_tick_value(value: f32) -> String {
 }
 
 /// Render a single node to an SVG element.
+#[allow(clippy::too_many_arguments)]
 fn render_node(
     node_box: &LayoutNodeBox,
     ir: &MermaidDiagramIr,
@@ -3527,11 +3573,13 @@ fn render_node(
     config: &SvgRenderConfig,
     detail: RenderDetailProfile,
     colors: &ThemeColors,
+    emit_classdef_classes: bool,
 ) -> Element {
     use fm_core::NodeShape;
 
     let ir_node = ir.nodes.get(node_box.node_index);
     let shape = ir_node.map_or(NodeShape::Rect, |n| n.shape);
+    let (shape_style, text_style) = resolve_node_inline_styles(ir, node_box.node_index);
     let node_id = ir_node
         .map(|node| node.id.as_str())
         .unwrap_or_else(|| node_box.node_id.as_str());
@@ -3568,6 +3616,8 @@ fn render_node(
         .map(str::trim)
         .filter(|icon| !icon.is_empty())
         .filter(|_| ir_node.is_none_or(|node| node.class_meta.is_none() && node.c4_meta.is_none()));
+    let apply_label_class =
+        |elem: Element| maybe_add_class(elem, "fm-node-label", emit_classdef_classes);
 
     let accent_class = format!("fm-node-accent-{}", stable_accent_index(node_id));
     let mut is_highlighted = false;
@@ -3890,6 +3940,7 @@ fn render_node(
                     .stroke(&colors.node_stroke)
                     .stroke_width(1.0),
             );
+            g = maybe_add_class(g, "fm-node-shape", emit_classdef_classes);
             if detail.show_node_labels {
                 return group.child(g).child(render_node_label_text(
                     ir,
@@ -3900,6 +3951,8 @@ fn render_node(
                     node_font_size,
                     config,
                     colors,
+                    text_style.as_deref(),
+                    emit_classdef_classes,
                 ));
             }
             return group.child(g);
@@ -4127,6 +4180,7 @@ fn render_node(
                     .stroke(&colors.node_stroke)
                     .stroke_width(1.6),
             );
+            g = maybe_add_class(g, "fm-node-shape", emit_classdef_classes);
             if detail.show_node_labels {
                 return group.child(g).child(render_node_label_text(
                     ir,
@@ -4137,11 +4191,15 @@ fn render_node(
                     node_font_size,
                     config,
                     colors,
+                    text_style.as_deref(),
+                    emit_classdef_classes,
                 ));
             }
             return group.child(g);
         }
     };
+
+    let shape_elem = maybe_add_class(shape_elem, "fm-node-shape", emit_classdef_classes);
 
     let shape_elem = if config.node_gradients
         && !matches!(
@@ -4169,10 +4227,9 @@ fn render_node(
         shape_elem
     };
 
-    // Apply inline style from classDef/style directives if present.
-    let shape_elem = if let Some(inline_style) = resolve_node_inline_style(ir, node_box.node_index)
-    {
-        shape_elem.attr("style", &inline_style)
+    // Apply inline style from style directives if present.
+    let shape_elem = if let Some(inline_style) = shape_style.as_deref() {
+        shape_elem.attr("style", inline_style)
     } else if let Some(risk_fill) = req_risk_fill {
         // Requirement risk-level fill when no explicit style override.
         shape_elem.attr("style", &format!("fill: {risk_fill}"))
@@ -4242,6 +4299,8 @@ fn render_node(
                 node_font_size,
                 config,
                 colors,
+                text_style.as_deref(),
+                emit_classdef_classes,
             );
         } else if let Some(node) = ir_node
             && let Some(ref req_meta) = node.requirement_meta
@@ -4256,19 +4315,22 @@ fn render_node(
             // Requirement type header (e.g., "<<requirement>>")
             if let Some(ref req_type) = req_meta.requirement_type {
                 let type_label = format!("\u{00ab}{req_type}\u{00bb}");
-                group = group.child(
-                    Element::text()
-                        .x(cx)
-                        .y(text_y)
-                        .content(&type_label)
-                        .attr("text-anchor", "middle")
-                        .attr("dominant-baseline", "central")
-                        .attr_num("font-size", subtitle_font_size)
-                        .attr("font-style", "italic")
-                        .attr("font-family", &config.font_family)
-                        .fill(&colors.text)
-                        .class("fm-req-type-label"),
-                );
+                let mut type_elem = Element::text()
+                    .x(cx)
+                    .y(text_y)
+                    .content(&type_label)
+                    .attr("text-anchor", "middle")
+                    .attr("dominant-baseline", "central")
+                    .attr_num("font-size", subtitle_font_size)
+                    .attr("font-style", "italic")
+                    .attr("font-family", &config.font_family)
+                    .fill(&colors.text)
+                    .class("fm-req-type-label");
+                type_elem = apply_label_class(type_elem);
+                if let Some(style) = text_style.as_deref() {
+                    type_elem = type_elem.attr("style", style);
+                }
+                group = group.child(type_elem);
                 text_y += node_font_size * 0.85;
             }
 
@@ -4286,6 +4348,8 @@ fn render_node(
                 node_font_size,
                 config,
                 colors,
+                text_style.as_deref(),
+                emit_classdef_classes,
             );
             group = group.child(text_elem);
             text_y += node_font_size * 0.85;
@@ -4300,19 +4364,22 @@ fn render_node(
             }
             if !info_parts.is_empty() {
                 let info_text = info_parts.join(" | ");
-                group = group.child(
-                    Element::text()
-                        .x(cx)
-                        .y(text_y)
-                        .content(&info_text)
-                        .attr("text-anchor", "middle")
-                        .attr("dominant-baseline", "central")
-                        .attr_num("font-size", subtitle_font_size)
-                        .attr("font-family", &config.font_family)
-                        .fill(&colors.text)
-                        .attr("opacity", "0.7")
-                        .class("fm-req-metadata"),
-                );
+                let mut meta_elem = Element::text()
+                    .x(cx)
+                    .y(text_y)
+                    .content(&info_text)
+                    .attr("text-anchor", "middle")
+                    .attr("dominant-baseline", "central")
+                    .attr_num("font-size", subtitle_font_size)
+                    .attr("font-family", &config.font_family)
+                    .fill(&colors.text)
+                    .attr("opacity", "0.7")
+                    .class("fm-req-metadata");
+                meta_elem = apply_label_class(meta_elem);
+                if let Some(style) = text_style.as_deref() {
+                    meta_elem = meta_elem.attr("style", style);
+                }
+                group = group.child(meta_elem);
             }
         } else if let Some(node) = ir_node
             && !node.members.is_empty()
@@ -4323,19 +4390,22 @@ fn render_node(
             let header_height = node_font_size * 1.5;
 
             // Entity name header
-            group = group.child(
-                Element::text()
-                    .x(cx)
-                    .y(y + header_height * 0.6)
-                    .content(&label_text)
-                    .attr("text-anchor", "middle")
-                    .attr("dominant-baseline", "central")
-                    .attr_num("font-size", node_font_size)
-                    .attr("font-weight", "bold")
-                    .attr("font-family", &config.font_family)
-                    .fill(&colors.text)
-                    .class("fm-er-entity-name"),
-            );
+            let mut name_elem = Element::text()
+                .x(cx)
+                .y(y + header_height * 0.6)
+                .content(&label_text)
+                .attr("text-anchor", "middle")
+                .attr("dominant-baseline", "central")
+                .attr_num("font-size", node_font_size)
+                .attr("font-weight", "bold")
+                .attr("font-family", &config.font_family)
+                .fill(&colors.text)
+                .class("fm-er-entity-name");
+            name_elem = apply_label_class(name_elem);
+            if let Some(style) = text_style.as_deref() {
+                name_elem = name_elem.attr("style", style);
+            }
+            group = group.child(name_elem);
 
             // Divider line
             group = group.child(
@@ -4363,19 +4433,22 @@ fn render_node(
                 } else {
                     "bold"
                 };
-                group = group.child(
-                    Element::text()
-                        .x(x + 8.0)
-                        .y(attr_y)
-                        .content(&attr_text)
-                        .attr("text-anchor", "start")
-                        .attr("dominant-baseline", "central")
-                        .attr_num("font-size", attr_font_size)
-                        .attr("font-weight", font_weight)
-                        .attr("font-family", &config.font_family)
-                        .fill(&colors.text)
-                        .class("fm-er-attribute"),
-                );
+                let mut attr_elem = Element::text()
+                    .x(x + 8.0)
+                    .y(attr_y)
+                    .content(&attr_text)
+                    .attr("text-anchor", "start")
+                    .attr("dominant-baseline", "central")
+                    .attr_num("font-size", attr_font_size)
+                    .attr("font-weight", font_weight)
+                    .attr("font-family", &config.font_family)
+                    .fill(&colors.text)
+                    .class("fm-er-attribute");
+                attr_elem = apply_label_class(attr_elem);
+                if let Some(style) = text_style.as_deref() {
+                    attr_elem = attr_elem.attr("style", style);
+                }
+                group = group.child(attr_elem);
                 attr_y += attr_font_size * 1.3;
             }
         } else if let Some(node) = ir_node
@@ -4393,6 +4466,8 @@ fn render_node(
                 node_font_size,
                 config,
                 colors,
+                text_style.as_deref(),
+                emit_classdef_classes,
             );
         } else {
             let lines_count = label_text.lines().count().max(1) as f32;
@@ -4417,6 +4492,8 @@ fn render_node(
                 node_font_size,
                 config,
                 colors,
+                text_style.as_deref(),
+                emit_classdef_classes,
             );
             group = group.child(text_elem);
         }
@@ -4506,11 +4583,22 @@ fn render_class_compartments(
     font_size: f32,
     config: &SvgRenderConfig,
     colors: &ThemeColors,
+    label_style: Option<&str>,
+    emit_classdef_classes: bool,
 ) -> Element {
     let meta = match &node.class_meta {
         Some(m) => m,
         None => return group,
     };
+
+    let apply_label_style = |mut elem: Element| {
+        if let Some(style) = label_style {
+            elem = elem.attr("style", style);
+        }
+        elem
+    };
+    let apply_label_class =
+        |elem: Element| maybe_add_class(elem, "fm-node-label", emit_classdef_classes);
 
     let line_h = font_size * config.line_height;
     let padding_x = 8.0;
@@ -4542,7 +4630,7 @@ fn render_class_compartments(
             .italic()
             .fill(&colors.text)
             .build();
-        group = group.child(stereo_elem);
+        group = group.child(apply_label_style(apply_label_class(stereo_elem)));
         cursor_y += line_h;
     }
 
@@ -4562,7 +4650,7 @@ fn render_class_compartments(
         .bold()
         .fill(&colors.text)
         .build();
-    group = group.child(name_elem);
+    group = group.child(apply_label_style(apply_label_class(name_elem)));
     cursor_y += line_h * 0.5;
 
     // Separator line after header.
@@ -4597,7 +4685,7 @@ fn render_class_compartments(
             .anchor(TextAnchor::Start)
             .fill(&colors.text)
             .build();
-        group = group.child(elem);
+        group = group.child(apply_label_style(apply_label_class(elem)));
     }
 
     // Separator before methods (only if both sections present).
@@ -4642,7 +4730,7 @@ fn render_class_compartments(
             .anchor(TextAnchor::Start)
             .fill(&colors.text)
             .build();
-        group = group.child(elem);
+        group = group.child(apply_label_style(apply_label_class(elem)));
     }
 
     group
@@ -4661,7 +4749,18 @@ fn render_c4_node_content(
     font_size: f32,
     config: &SvgRenderConfig,
     colors: &ThemeColors,
+    label_style: Option<&str>,
+    emit_classdef_classes: bool,
 ) -> Element {
+    let apply_label_style = |mut elem: Element| {
+        if let Some(style) = label_style {
+            elem = elem.attr("style", style);
+        }
+        elem
+    };
+    let apply_label_class =
+        |elem: Element| maybe_add_class(elem, "fm-node-label", emit_classdef_classes);
+
     let label_text = node
         .label
         .and_then(|lid| ir.labels.get(lid.0))
@@ -4673,7 +4772,7 @@ fn render_c4_node_content(
     let description_font = clamp_font_size(font_size * 0.72, config.min_font_size);
     let mut cursor_y = y + (small_font * 1.25);
 
-    group = group.child(
+    group = group.child(apply_label_style(apply_label_class(
         TextBuilder::new(&format!("<<{}>>", c4_meta.element_type))
             .x(x + w / 2.0)
             .y(cursor_y)
@@ -4684,7 +4783,7 @@ fn render_c4_node_content(
             .fill(&colors.cluster_stroke)
             .class("fm-c4-type-label")
             .build(),
-    );
+    )));
 
     if node
         .classes
@@ -4699,7 +4798,7 @@ fn render_c4_node_content(
     }
 
     cursor_y += line_h * 0.95;
-    group = group.child(
+    group = group.child(apply_label_style(apply_label_class(
         TextBuilder::new(label_text)
             .x(x + w / 2.0)
             .y(cursor_y)
@@ -4710,11 +4809,11 @@ fn render_c4_node_content(
             .fill(&colors.text)
             .class("fm-c4-name")
             .build(),
-    );
+    )));
 
     if let Some(technology) = &c4_meta.technology {
         cursor_y += line_h * 0.9;
-        group = group.child(
+        group = group.child(apply_label_style(apply_label_class(
             TextBuilder::new(&format!("[{technology}]"))
                 .x(x + w / 2.0)
                 .y(cursor_y)
@@ -4724,7 +4823,7 @@ fn render_c4_node_content(
                 .fill(&colors.edge)
                 .class("fm-c4-technology")
                 .build(),
-        );
+        )));
     }
 
     if let Some(description) = &c4_meta.description {
@@ -4739,7 +4838,7 @@ fn render_c4_node_content(
                 * config.line_height;
             let baseline_y =
                 (cursor_y + description_height.min((h * 0.35).max(0.0))).min(y + h - 8.0);
-            group = group.child(
+            group = group.child(apply_label_style(apply_label_class(
                 TextBuilder::new(&description_text)
                     .x(x + w / 2.0)
                     .y(baseline_y)
@@ -4750,7 +4849,7 @@ fn render_c4_node_content(
                     .fill(&colors.text)
                     .class("fm-c4-description")
                     .build(),
-            );
+            )));
         }
     }
 
@@ -5303,6 +5402,8 @@ fn render_node_label_text(
     font_size: f32,
     config: &SvgRenderConfig,
     colors: &ThemeColors,
+    label_style: Option<&str>,
+    emit_classdef_classes: bool,
 ) -> Element {
     if let Some(label_id) = label_id
         && let Some(segments) = ir.label_markup.get(&label_id)
@@ -5315,10 +5416,12 @@ fn render_node_label_text(
             font_size,
             config,
             colors.text.as_str(),
+            label_style,
+            emit_classdef_classes,
         );
     }
 
-    TextBuilder::new(label_text)
+    let mut text = TextBuilder::new(label_text)
         .x(x)
         .y(y)
         .font_family(&config.font_family)
@@ -5326,9 +5429,17 @@ fn render_node_label_text(
         .line_height(config.line_height)
         .anchor(TextAnchor::Middle)
         .fill(&colors.text)
-        .build()
+        .build();
+    text = maybe_add_class(text, "fm-node-label", emit_classdef_classes);
+
+    if let Some(style) = label_style {
+        text = text.attr("style", style);
+    }
+
+    text
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_markdown_text_segments(
     segments: &[IrLabelSegment],
     x: f32,
@@ -5336,6 +5447,8 @@ fn render_markdown_text_segments(
     font_size: f32,
     config: &SvgRenderConfig,
     fill: &str,
+    label_style: Option<&str>,
+    emit_classdef_classes: bool,
 ) -> Element {
     let line_height_px = font_size * config.line_height;
     let monospace_family = "'JetBrains Mono', 'Fira Code', 'SFMono-Regular', Consolas, monospace";
@@ -5347,6 +5460,11 @@ fn render_markdown_text_segments(
         .attr("font-family", &config.font_family)
         .attr_num("font-size", font_size)
         .fill(fill);
+    text = maybe_add_class(text, "fm-node-label", emit_classdef_classes);
+
+    if let Some(style) = label_style {
+        text = text.attr("style", style);
+    }
 
     let mut first_in_line = true;
     let mut line_index = 0usize;
@@ -6949,7 +7067,8 @@ mod tests {
             span: Span::default(),
         });
 
-        let inline = resolve_node_inline_style(&ir, 0).expect("node style should resolve");
+        let (shape_style, _text_style) = resolve_node_inline_styles(&ir, 0);
+        let inline = shape_style.expect("node style should resolve");
 
         assert_eq!(inline, "fill:rgba(226,232,240,0.3); stroke:#334155");
     }
@@ -6965,22 +7084,35 @@ mod tests {
 
         let inline = resolve_edge_inline_style(&ir, 0).expect("edge style should resolve");
 
-        assert_eq!(
-            inline,
-            "stroke:rgba(12,34,56,0.5); filter:drop-shadow(0px,1px,2px,#000)"
-        );
+        assert!(inline.contains("stroke:rgba(12,34,56,0.5)"));
+        assert!(inline.contains("filter:drop-shadow(0px,1px,2px,#000)"));
     }
 
     #[test]
-    fn inline_style_preserves_commas_inside_escaped_quoted_strings() {
-        let declarations = split_inline_style_declarations(
-            r#"label:"value with \"quote, comma\"",stroke:#334155"#,
-        );
+    fn inline_style_preserves_commas_inside_quoted_values() {
+        let style = fm_core::parse_style_string(r#"font-family:"A, B",stroke:#334155"#);
+        assert_eq!(style.properties.get("font-family").unwrap(), r#""A, B""#);
+        assert_eq!(style.properties.get("stroke").unwrap(), "#334155");
+    }
 
-        assert_eq!(
-            declarations,
-            vec![r#"label:"value with \"quote, comma\"""#, "stroke:#334155"]
-        );
+    #[test]
+    fn classdef_emits_css_rules_for_nodes() {
+        let mut ir = create_ir_with_single_node("node-styled", NodeShape::Rect);
+        ir.nodes[0].classes.push("important".to_string());
+        ir.style_refs.push(IrStyleRef {
+            target: IrStyleTarget::Class("important".to_string()),
+            style: "fill:#f9f,stroke:#333,color:#111".to_string(),
+            span: Span::default(),
+        });
+
+        let svg = render_svg(&ir);
+
+        assert!(svg.contains(".fm-node-user-important"));
+        assert!(svg.contains("fill:#f9f"));
+        assert!(svg.contains("stroke:#333"));
+        assert!(svg.contains("fill:#111"));
+        assert!(svg.contains("fm-node-shape"));
+        assert!(svg.contains("fm-node-label"));
     }
 
     #[test]

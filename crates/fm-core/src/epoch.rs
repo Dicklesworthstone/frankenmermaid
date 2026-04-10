@@ -48,7 +48,7 @@
 //! assert_eq!(snapshot.ir().nodes.len(), 0);
 //! ```
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::MermaidDiagramIr;
 
@@ -106,6 +106,20 @@ struct EpochInner {
 }
 
 impl EpochIrHandle {
+    fn read_inner(&self) -> RwLockReadGuard<'_, EpochInner> {
+        match self.inner.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    fn write_inner(&self) -> RwLockWriteGuard<'_, EpochInner> {
+        match self.inner.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
     /// Create a new handle with the given initial IR at epoch 0.
     #[must_use]
     pub fn new(ir: MermaidDiagramIr) -> Self {
@@ -123,7 +137,7 @@ impl EpochIrHandle {
     /// The returned snapshot is valid indefinitely and does not block future updates.
     #[must_use]
     pub fn snapshot(&self) -> IrSnapshot {
-        let inner = self.inner.read().expect("epoch lock poisoned");
+        let inner = self.read_inner();
         IrSnapshot {
             epoch: inner.epoch,
             ir: Arc::clone(&inner.current),
@@ -135,7 +149,7 @@ impl EpochIrHandle {
     /// Previous snapshots remain valid. The old IR data is reclaimed when all
     /// outstanding snapshots from that epoch are dropped.
     pub fn update(&self, ir: MermaidDiagramIr) {
-        let mut inner = self.inner.write().expect("epoch lock poisoned");
+        let mut inner = self.write_inner();
         inner.epoch = inner.epoch.wrapping_add(1);
         inner.current = Arc::new(ir);
     }
@@ -143,7 +157,7 @@ impl EpochIrHandle {
     /// Current epoch number.
     #[must_use]
     pub fn current_epoch(&self) -> u64 {
-        self.inner.read().expect("epoch lock poisoned").epoch
+        self.read_inner().epoch
     }
 
     /// Number of outstanding `Arc` references to the current epoch's IR.
@@ -151,7 +165,7 @@ impl EpochIrHandle {
     /// Returns 1 when only the handle itself holds a reference.
     #[must_use]
     pub fn current_ref_count(&self) -> usize {
-        Arc::strong_count(&self.inner.read().expect("epoch lock poisoned").current)
+        Arc::strong_count(&self.read_inner().current)
     }
 
     /// Try to reclaim old epochs. In this safe implementation, reclamation is
@@ -159,7 +173,7 @@ impl EpochIrHandle {
     /// information about the current state.
     #[must_use]
     pub fn reclamation_status(&self) -> ReclamationStatus {
-        let inner = self.inner.read().expect("epoch lock poisoned");
+        let inner = self.read_inner();
         ReclamationStatus {
             current_epoch: inner.epoch,
             current_ref_count: Arc::strong_count(&inner.current),

@@ -16,7 +16,7 @@ pub use font_metrics::{
     FontPreset, is_east_asian_wide,
 };
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub use franken_kernel::{Budget, Cx, DecisionId, NoCaps, PolicyId, SchemaVersion, TraceId};
 pub use rustc_hash::{FxHashMap, FxHashSet};
@@ -1652,6 +1652,7 @@ const ALLOWED_STYLE_PROPERTIES: &[&str] = &[
     "stroke-opacity",
     "fill-opacity",
     "opacity",
+    "filter",
     "color",
     "font-size",
     "font-weight",
@@ -1710,34 +1711,66 @@ pub fn sanitize_style_value(value: &str) -> Option<String> {
 }
 
 /// Parse a raw CSS-like property string (`"fill:#fff,stroke:#000,stroke-width:2px"`)
-/// into an [`IrInlineStyle`].
+/// into an [`IrInlineStyle`], returning any rejected properties.
 ///
 /// Handles both comma-separated and semicolon-separated declarations, and
-/// respects parenthesised values like `rgb(1,2,3)`.
+/// respects parenthesised values like `rgb(1,2,3)`. Commas are only treated
+/// as declaration delimiters when followed by a `key:` pair.
 #[must_use]
-pub fn parse_style_string(raw: &str) -> IrInlineStyle {
+pub fn parse_style_string_with_rejections(raw: &str) -> (IrInlineStyle, Vec<String>) {
     let mut properties = BTreeMap::new();
+    let mut rejected = BTreeSet::new();
     let mut start = 0_usize;
     let mut paren_depth = 0_usize;
     let mut quote: Option<char> = None;
     let mut escaped = false;
 
-    let push_declaration = |s: &str, props: &mut BTreeMap<String, String>| {
-        let s = s.trim();
-        if s.is_empty() {
-            return;
+    let is_comma_delimiter = |raw: &str, index: usize| -> bool {
+        let bytes = raw.as_bytes();
+        let mut cursor = index.saturating_add(1);
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
         }
-        if let Some(colon_pos) = s.find(':') {
-            let key = s[..colon_pos].trim().to_ascii_lowercase();
-            let val = s[colon_pos + 1..].trim();
-            if !key.is_empty()
-                && is_allowed_style_property(&key)
-                && let Some(sanitized) = sanitize_style_value(val)
-            {
-                props.insert(key, sanitized);
-            }
+        let start = cursor;
+        while cursor < bytes.len()
+            && (bytes[cursor].is_ascii_alphanumeric()
+                || bytes[cursor] == b'-'
+                || bytes[cursor] == b'_')
+        {
+            cursor += 1;
         }
+        if start == cursor {
+            return false;
+        }
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        matches!(bytes.get(cursor), Some(b':'))
     };
+
+    let push_declaration =
+        |s: &str, props: &mut BTreeMap<String, String>, rejected: &mut BTreeSet<String>| {
+            let s = s.trim();
+            if s.is_empty() {
+                return;
+            }
+            if let Some(colon_pos) = s.find(':') {
+                let key = s[..colon_pos].trim().to_ascii_lowercase();
+                let val = s[colon_pos + 1..].trim();
+                if key.is_empty() {
+                    return;
+                }
+                if !is_allowed_style_property(&key) {
+                    rejected.insert(key);
+                    return;
+                }
+                if let Some(sanitized) = sanitize_style_value(val) {
+                    props.insert(key, sanitized);
+                } else {
+                    rejected.insert(key);
+                }
+            }
+        };
 
     for (index, ch) in raw.char_indices() {
         if escaped {
@@ -1755,16 +1788,30 @@ pub fn parse_style_string(raw: &str) -> IrInlineStyle {
             }
             '(' if quote.is_none() => paren_depth += 1,
             ')' if quote.is_none() => paren_depth = paren_depth.saturating_sub(1),
-            ',' | ';' if quote.is_none() && paren_depth == 0 => {
-                push_declaration(&raw[start..index], &mut properties);
+            ';' if quote.is_none() && paren_depth == 0 => {
+                push_declaration(&raw[start..index], &mut properties, &mut rejected);
+                start = index + ch.len_utf8();
+            }
+            ',' if quote.is_none() && paren_depth == 0 && is_comma_delimiter(raw, index) => {
+                push_declaration(&raw[start..index], &mut properties, &mut rejected);
                 start = index + ch.len_utf8();
             }
             _ => {}
         }
     }
-    push_declaration(&raw[start..], &mut properties);
+    push_declaration(&raw[start..], &mut properties, &mut rejected);
 
-    IrInlineStyle { properties }
+    (IrInlineStyle { properties }, rejected.into_iter().collect())
+}
+
+/// Parse a raw CSS-like property string (`"fill:#fff,stroke:#000,stroke-width:2px"`)
+/// into an [`IrInlineStyle`].
+///
+/// Handles both comma-separated and semicolon-separated declarations, and
+/// respects parenthesised values like `rgb(1,2,3)`.
+#[must_use]
+pub fn parse_style_string(raw: &str) -> IrInlineStyle {
+    parse_style_string_with_rejections(raw).0
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -4593,8 +4640,8 @@ mod tests {
         capability_matrix, capability_matrix_json_pretty,
         capability_readme_supported_diagram_types_markdown, capability_readme_surface_markdown,
         documented_diagram_types, is_allowed_style_property, mermaid_layout_guard_observability,
-        parse_mermaid_js_config_value, parse_style_string, resolve_span_text_range,
-        sanitize_style_value, scale_budget, to_init_parse,
+        parse_mermaid_js_config_value, parse_style_string, parse_style_string_with_rejections,
+        resolve_span_text_range, sanitize_style_value, scale_budget, to_init_parse,
     };
 
     fn sample_span(line: usize, start_col: usize, end_col: usize) -> Span {
@@ -7392,6 +7439,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_style_string_preserves_dasharray_commas() {
+        let style = parse_style_string("stroke-dasharray:5,5,10,stroke:#333");
+        assert_eq!(style.properties.get("stroke-dasharray").unwrap(), "5,5,10");
+        assert_eq!(style.properties.get("stroke").unwrap(), "#333");
+    }
+
+    #[test]
+    fn parse_style_string_with_rejections_reports_unknown_and_unsafe() {
+        let (style, rejected) =
+            parse_style_string_with_rejections("fill:#fff,shadow:2px,color:javascript:alert(1)");
+        assert!(style.properties.contains_key("fill"));
+        assert!(rejected.contains(&"shadow".to_string()));
+        assert!(rejected.contains(&"color".to_string()));
+    }
+
+    #[test]
     fn parse_style_string_empty_input() {
         let style = parse_style_string("");
         assert!(style.is_empty());
@@ -7606,6 +7669,7 @@ mod tests {
         assert!(is_allowed_style_property("fill"));
         assert!(is_allowed_style_property("stroke-width"));
         assert!(is_allowed_style_property("font-size"));
+        assert!(is_allowed_style_property("filter"));
         assert!(!is_allowed_style_property("display"));
         assert!(!is_allowed_style_property("position"));
     }
