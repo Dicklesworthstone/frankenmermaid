@@ -2534,9 +2534,7 @@ impl Lcg64 {
 
 fn parse_rfc3339(value: &str, field_name: &str, override_id: &str) -> Result<OffsetDateTime> {
     OffsetDateTime::parse(value, &Rfc3339).with_context(|| {
-        format!(
-            "override {override_id} has invalid {field_name} timestamp {value}"
-        )
+        format!("override {override_id} has invalid {field_name} timestamp {value}")
     })
 }
 
