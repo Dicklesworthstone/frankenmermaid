@@ -29,6 +29,7 @@ reports/
 
 # Parser test output garbage (files created by malformed diagram parsing)
 B*nend*
+B\[*
 
 # Beads recovery artifacts
 .beads/*.orphan_*
@@ -65,3 +66,31 @@ reproduce_*.rs
 
 # Debug rendering output
 debug_output.svg
+
+# Audit/scan scratch files (clippy, UBS, bug scans)
+clippy_*.txt
+ubs_*.txt
+ubs_*.jsonl
+rust-bug-scan.txt
+new_ubs.txt
+
+# Lint output per-crate
+layout_clippy.txt
+parser_clippy.txt
+term_clippy.txt
+cli_clippy.txt
+
+# Python cache dirs
+__pycache__/
+
+# Patch / diff scratch files
+patch.diff
+
+# Beads merge reject artifacts
+.beads/*.rej
+
+# Ad-hoc shell scripts (use scripts/ dir for tracked scripts)
+run_test.sh
+
+# JSONL scan pass files
+pass*.jsonl

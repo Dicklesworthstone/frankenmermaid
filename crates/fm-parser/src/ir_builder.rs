@@ -554,7 +554,7 @@ impl IrBuilder {
             let start_edge = self.ir.edges.len();
             // Close the previous section's end_edge
             if let Some(last_alt) = alternatives.last_mut() {
-                last_alt.end_edge = start_edge;
+                last_alt.end_edge = start_edge.saturating_sub(1);
             }
             // The alternative starts at the current edge index
             alternatives.push(FragmentAlternative {
