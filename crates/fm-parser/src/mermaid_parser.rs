@@ -8212,6 +8212,11 @@ fn is_flowchart_header(line: &str) -> bool {
     matches_keyword_header(&lower, "flowchart") || matches_keyword_header(&lower, "graph")
 }
 
+const STYLE_DIRECTIVE_DIAGNOSTIC_MESSAGE: &str = "style directives (classDef/style/linkStyle) are parsed, but only SVG output currently \
+applies them; terminal/canvas renderers use theme defaults";
+const STYLE_DIRECTIVE_DIAGNOSTIC_SUGGESTION: &str = "Use --format svg for styled output or avoid style directives on terminal/canvas surfaces \
+until full support lands.";
+
 fn is_non_graph_statement(line: &str) -> bool {
     let check = |line: &str, keyword: &str| {
         line.starts_with(keyword)
@@ -8225,12 +8230,23 @@ fn is_non_graph_statement(line: &str) -> bool {
 
 /// Extract `classDef`, `style`, and `linkStyle` directives from raw input
 /// and add them as `IrStyleRef` entries to the IR via the builder.
+///
+/// These directives are parsed and stored in the IR, but not yet wired through
+/// to rendering output. A compatibility warning is emitted for each directive
+/// to inform users that their styles will not be applied.
 fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
+    let mut saw_style_directive = false;
+    let mut first_style_span = None;
+
     for (line_number, raw_line) in input.lines().enumerate() {
         let line = raw_line.trim();
         let span = span_for(line_number + 1, raw_line);
 
         if let Some(rest) = line.strip_prefix("classDef ") {
+            saw_style_directive = true;
+            if first_style_span.is_none() {
+                first_style_span = Some(span);
+            }
             // classDef className fill:#fff,stroke:#000,...
             let rest = rest.trim();
             if let Some((name, style)) = rest.split_once(' ') {
@@ -8245,6 +8261,10 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
                 }
             }
         } else if let Some(rest) = line.strip_prefix("style ") {
+            saw_style_directive = true;
+            if first_style_span.is_none() {
+                first_style_span = Some(span);
+            }
             // style nodeA,nodeB,nodeC fill:#fff,...
             // Supports comma-separated node IDs before the first space-separated
             // property declaration.
@@ -8267,6 +8287,10 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
                 }
             }
         } else if let Some(rest) = line.strip_prefix("linkStyle ") {
+            saw_style_directive = true;
+            if first_style_span.is_none() {
+                first_style_span = Some(span);
+            }
             // linkStyle 0 stroke:#f00,...
             let rest = rest.trim();
             if let Some((index_str, style)) = rest.split_once(' ') {
@@ -8303,6 +8327,18 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
                 }
             }
         }
+    }
+
+    if saw_style_directive {
+        let mut diagnostic = Diagnostic::warning(STYLE_DIRECTIVE_DIAGNOSTIC_MESSAGE)
+            .with_category(DiagnosticCategory::Compatibility)
+            .with_suggestion(STYLE_DIRECTIVE_DIAGNOSTIC_SUGGESTION.to_string())
+            .with_rule_id("style-directive-not-applied");
+        if let Some(span) = first_style_span {
+            diagnostic = diagnostic.with_span(span);
+        }
+        builder.add_diagnostic(diagnostic);
+        builder.add_warning(STYLE_DIRECTIVE_DIAGNOSTIC_MESSAGE.to_string());
     }
 }
 
@@ -8368,11 +8404,14 @@ fn is_comment(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use fm_core::{
-        ArrowType, DiagramType, GanttDate, GanttExclude, GanttTaskType, GanttTickInterval,
-        GraphDirection, IrEndpoint, IrLabelSegment, IrXySeriesKind, MermaidParseMode, NodeShape,
+        ArrowType, DiagnosticCategory, DiagnosticSeverity, DiagramType, GanttDate, GanttExclude,
+        GanttTaskType, GanttTickInterval, GraphDirection, IrEndpoint, IrLabelSegment,
+        IrXySeriesKind, MermaidParseMode, NodeShape,
     };
 
-    use super::{is_dangling_placeholder_node_id, parse_mermaid};
+    use super::{
+        STYLE_DIRECTIVE_DIAGNOSTIC_MESSAGE, is_dangling_placeholder_node_id, parse_mermaid,
+    };
     use crate::{ParserConfig, detect_type, parse_with_mode_and_config};
 
     #[test]
@@ -12402,6 +12441,32 @@ Rel_Back(db, app, "Responds")"#,
         assert_eq!(parsed.ir.style_defs[0].name, "unused");
         // No nodes have this class, so no inline_style applied
         assert!(parsed.ir.nodes[0].inline_style.is_none());
+    }
+
+    #[test]
+    fn classdef_emits_compatibility_warning() {
+        let parsed =
+            parse_mermaid("flowchart LR\n  A[Node]\n  classDef important fill:#f9f,stroke:#333");
+        let diagnostic = parsed
+            .ir
+            .diagnostics
+            .iter()
+            .find(|diag| diag.message == STYLE_DIRECTIVE_DIAGNOSTIC_MESSAGE)
+            .expect("expected classDef/style diagnostic warning");
+        assert_eq!(diagnostic.category, DiagnosticCategory::Compatibility);
+        assert_eq!(diagnostic.severity, DiagnosticSeverity::Warning);
+        assert_eq!(
+            diagnostic.rule_id.as_deref(),
+            Some("style-directive-not-applied"),
+            "expected rule_id for machine-readable diagnostics"
+        );
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning == STYLE_DIRECTIVE_DIAGNOSTIC_MESSAGE),
+            "expected parse warning to surface in render logs"
+        );
     }
 
     // ── Class diagram cardinality and namespace tests ─────────────────

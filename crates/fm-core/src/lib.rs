@@ -3317,6 +3317,8 @@ pub struct Diagnostic {
     pub found: Option<String>,
     /// Related diagnostics (e.g., "also defined here")
     pub related: Vec<RelatedDiagnostic>,
+    /// Machine-readable rule identifier (e.g., "classdef-not-applied")
+    pub rule_id: Option<String>,
 }
 
 /// A related diagnostic location (e.g., "also defined at...")
@@ -3403,6 +3405,13 @@ impl Diagnostic {
             message: message.into(),
             span,
         });
+        self
+    }
+
+    /// Set the machine-readable rule identifier.
+    #[must_use]
+    pub fn with_rule_id(mut self, rule_id: impl Into<String>) -> Self {
+        self.rule_id = Some(rule_id.into());
         self
     }
 
