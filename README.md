@@ -153,9 +153,22 @@ curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/frankenmermaid/m
 
 ### JavaScript / WASM
 
+> **Note:** The `@frankenmermaid/core` package is not yet published to npm. Use one of the methods below:
+
+**Option 1: Build from source (recommended)**
 ```bash
-npm install @frankenmermaid/core
+git clone https://github.com/Dicklesworthstone/frankenmermaid.git
+cd frankenmermaid
+./build-wasm.sh
+# Copy pkg/ to your project
+cp -r pkg/ your-project/frankenmermaid/
 ```
+
+**Option 2: Use the GitHub Pages bundle**
+
+The [live demo](https://dicklesworthstone.github.io/frankenmermaid/) uses a pre-built WASM bundle. You can reference it directly or download from the `gh-pages` branch.
+
+**Coming soon:** npm publishing is planned. Track progress in the [issues](https://github.com/Dicklesworthstone/frankenmermaid/issues).
 
 ### From Source
 
@@ -179,7 +192,8 @@ with the integration disabled by default.
 - `fnx-integration`: enables the Phase 1 undirected/advisory integration surface
 - `fnx-experimental-directed`: extends `fnx-integration` for future directed-only work; keep this off outside explicit experiments
 
-Default builds remain FNX-free:
+Default builds remain FNX-free, which is also the safe path when FNX is
+unavailable (offline or missing git access):
 
 ```bash
 cargo build --workspace
@@ -198,10 +212,22 @@ Why this model:
 - Local path dependencies would tightly couple frankenmermaid releases to one workstation layout.
 - Published crates do not exist yet, so crates.io is not an option.
 - A Git dependency pinned to a specific commit is reproducible in CI and release packaging while keeping the default build independent.
+- When FNX is unavailable, keeping `fnx-integration` disabled guarantees the build stays isolated from the FNX toolchain.
 
 If you are developing `frankenmermaid` and `franken_networkx` together, prefer a
 local developer-only Cargo patch override instead of committing path
 dependencies into this repo.
+
+Example (developer-only, do not commit):
+
+```toml
+# .cargo/config.toml
+[patch."https://github.com/Dicklesworthstone/franken_networkx.git"]
+fnx-runtime = { path = "/abs/path/to/franken_networkx/crates/fnx-runtime" }
+fnx-classes = { path = "/abs/path/to/franken_networkx/crates/fnx-classes" }
+fnx-algorithms = { path = "/abs/path/to/franken_networkx/crates/fnx-algorithms" }
+fnx-views = { path = "/abs/path/to/franken_networkx/crates/fnx-views" }
+```
 
 ## Quick Start
 
@@ -513,6 +539,8 @@ default = []
 watch = ["dep:notify"]        # File watching for live reload
 serve = ["dep:tiny_http"]     # Local preview server
 png = ["dep:resvg", "dep:usvg"] # PNG rasterization from SVG
+fnx-integration = ["fm-layout/fnx-integration"] # Optional FNX advisory path
+fnx-experimental-directed = ["fm-layout/fnx-experimental-directed"] # Experimental directed path
 ```
 
 ## How the Parser Works
