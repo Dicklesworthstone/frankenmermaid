@@ -96,3 +96,13 @@ run_test.sh
 pass*.jsonl
 .env
 .claude/settings.local.json
+
+# NTM session state
+.ntm/
+
+# Per-machine IDE MCP client configs
+cline.mcp.json
+cursor.mcp.json
+gemini.mcp.json
+opencode.json
+windsurf.mcp.json
