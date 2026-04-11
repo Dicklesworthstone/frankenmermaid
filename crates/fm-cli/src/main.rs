@@ -4503,9 +4503,10 @@ fn handle_render_request(
     }
 
     let mut body = String::new();
-    let mut reader = request
-        .as_reader()
-        .take(u64::try_from(options.max_input_bytes).unwrap_or(u64::MAX) + 1);
+    let read_limit = u64::try_from(options.max_input_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut reader = request.as_reader().take(read_limit);
     if let Err(e) = reader.read_to_string(&mut body) {
         return Response::from_string(format!("Failed to read body: {e}")).with_status_code(400);
     }
