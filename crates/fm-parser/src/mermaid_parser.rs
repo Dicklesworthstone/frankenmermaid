@@ -8130,7 +8130,14 @@ fn strip_flowchart_inline_comment(line: &str) -> &str {
 
 fn parse_graph_direction(header: &str) -> Option<GraphDirection> {
     for token in header.split_whitespace() {
-        let normalized = token.to_ascii_uppercase();
+        let prefix: String = token
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphabetic())
+            .collect();
+        if prefix.is_empty() {
+            continue;
+        }
+        let normalized = prefix.to_ascii_uppercase();
         match normalized.as_str() {
             "LR" => return Some(GraphDirection::LR),
             "RL" => return Some(GraphDirection::RL),
@@ -8968,6 +8975,17 @@ mod tests {
         let statement = parse_mermaid("flowchart\n direction tb\n A-->B");
         assert_eq!(statement.ir.direction, GraphDirection::TB);
         assert_eq!(statement.ir.meta.direction, GraphDirection::TB);
+    }
+
+    #[test]
+    fn flowchart_direction_parses_trailing_semicolons() {
+        let header = parse_mermaid("flowchart LR;\nA-->B");
+        assert_eq!(header.ir.direction, GraphDirection::LR);
+        assert_eq!(header.ir.meta.direction, GraphDirection::LR);
+
+        let statement = parse_mermaid("flowchart\n direction RL;\n A-->B");
+        assert_eq!(statement.ir.direction, GraphDirection::RL);
+        assert_eq!(statement.ir.meta.direction, GraphDirection::RL);
     }
 
     #[test]
