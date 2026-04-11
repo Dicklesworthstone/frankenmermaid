@@ -455,8 +455,8 @@ fn extract_dot_attribute_raw(attributes: &str, key: &str) -> Option<String> {
 /// Extract `shape=...` from DOT attribute list and map to `NodeShape`.
 fn parse_dot_shape(attributes: &str) -> Option<NodeShape> {
     let value = extract_dot_attribute_raw(attributes, "shape")?;
-    let token = value.trim().trim_matches('"').to_ascii_lowercase();
-    dot_shape_to_node_shape(&token)
+    let shape_name = value.trim().trim_matches('"').to_ascii_lowercase();
+    dot_shape_to_node_shape(&shape_name)
 }
 
 /// Map DOT shape names to frankenmermaid `NodeShape`.
@@ -515,9 +515,9 @@ fn parse_dot_label(attributes: &str) -> Option<String> {
         return (!text.is_empty()).then_some(text);
     }
 
-    let token = value.trim_matches('"');
-    let token = decode_escapes(token);
-    (!token.is_empty()).then_some(token)
+    let raw_label = value.trim_matches('"');
+    let decoded_label = decode_escapes(raw_label);
+    (!decoded_label.is_empty()).then_some(decoded_label)
 }
 
 fn find_unescaped_quote_end(input: &str) -> Option<usize> {

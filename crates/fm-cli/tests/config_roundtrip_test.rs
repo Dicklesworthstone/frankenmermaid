@@ -19,13 +19,12 @@ fn run_cli_in_dir(dir: &Path, args: &[&str], stdin: &str) -> Output {
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn fm-cli with stdin");
-        let Some(mut child_stdin) = child.stdin.take() else {
-            panic!("failed to open stdin pipe");
-        };
-        if let Err(err) = child_stdin.write_all(stdin.as_bytes())
-            && err.kind() != std::io::ErrorKind::BrokenPipe
-        {
-            panic!("failed writing stdin to fm-cli: {err}");
+        let mut child_stdin = child.stdin.take().expect("failed to open stdin pipe");
+        if let Err(err) = child_stdin.write_all(stdin.as_bytes()) {
+            assert!(
+                err.kind() == std::io::ErrorKind::BrokenPipe,
+                "failed writing stdin to fm-cli: {err}"
+            );
         }
         drop(child_stdin);
         child.wait_with_output().expect("collect fm-cli output")

@@ -14224,11 +14224,16 @@ mod tests {
         ir.direction = GraphDirection::BT;
 
         let layout = layout_diagram(&ir);
-        let a_node = layout.nodes.iter().find(|node| node.node_id == "A");
-        let b_node = layout.nodes.iter().find(|node| node.node_id == "B");
-        let (Some(a_node), Some(b_node)) = (a_node, b_node) else {
-            panic!("expected A and B nodes in layout");
-        };
+        let a_node = layout
+            .nodes
+            .iter()
+            .find(|node| node.node_id == "A")
+            .expect("expected node A in layout");
+        let b_node = layout
+            .nodes
+            .iter()
+            .find(|node| node.node_id == "B")
+            .expect("expected node B in layout");
 
         assert!(b_node.bounds.y < a_node.bounds.y);
     }
@@ -14239,11 +14244,16 @@ mod tests {
         ir.direction = GraphDirection::RL;
 
         let layout = layout_diagram(&ir);
-        let a_node = layout.nodes.iter().find(|node| node.node_id == "A");
-        let b_node = layout.nodes.iter().find(|node| node.node_id == "B");
-        let (Some(a_node), Some(b_node)) = (a_node, b_node) else {
-            panic!("expected A and B nodes in layout");
-        };
+        let a_node = layout
+            .nodes
+            .iter()
+            .find(|node| node.node_id == "A")
+            .expect("expected node A in layout");
+        let b_node = layout
+            .nodes
+            .iter()
+            .find(|node| node.node_id == "B")
+            .expect("expected node B in layout");
 
         assert!(b_node.bounds.x < a_node.bounds.x);
     }
@@ -14807,11 +14817,16 @@ mod tests {
         }
 
         let layout = layout_diagram(&ir);
-        let a_node = layout.nodes.iter().find(|node| node.node_id == "A");
-        let b_node = layout.nodes.iter().find(|node| node.node_id == "B");
-        let (Some(a_node), Some(b_node)) = (a_node, b_node) else {
-            panic!("expected A and B nodes in layout");
-        };
+        let a_node = layout
+            .nodes
+            .iter()
+            .find(|node| node.node_id == "A")
+            .expect("expected node A in layout");
+        let b_node = layout
+            .nodes
+            .iter()
+            .find(|node| node.node_id == "B")
+            .expect("expected node B in layout");
 
         assert!((a_node.bounds.x - b_node.bounds.x).abs() < 0.001);
     }

@@ -158,7 +158,8 @@ fn layout_golden_checksums_are_stable() {
     for case_id in CASE_IDS {
         let input_path = base.join(format!("{case_id}.mmd"));
         let input = fs::read_to_string(&input_path)
-            .unwrap_or_else(|err| panic!("failed reading {}: {err}", input_path.display()));
+            .map_err(|err| format!("failed reading {}: {err}", input_path.display()))
+            .expect("read golden layout input");
 
         let parsed = parse(&input);
         let canonical = canonical_layout(&parsed.ir);
@@ -235,7 +236,8 @@ fn layout_golden_cases_are_deterministic_across_runs() {
     for case_id in CASE_IDS {
         let input_path = base.join(format!("{case_id}.mmd"));
         let input = fs::read_to_string(&input_path)
-            .unwrap_or_else(|err| panic!("failed reading {}: {err}", input_path.display()));
+            .map_err(|err| format!("failed reading {}: {err}", input_path.display()))
+            .expect("read golden layout input");
 
         let parsed = parse(&input);
         let reference = canonical_layout(&parsed.ir);

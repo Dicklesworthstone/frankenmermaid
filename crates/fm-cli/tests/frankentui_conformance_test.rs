@@ -93,9 +93,11 @@ fn manifest_path() -> PathBuf {
 fn load_cases() -> Vec<FixtureCase> {
     let path = manifest_path();
     let raw = fs::read_to_string(&path)
-        .unwrap_or_else(|err| panic!("failed reading {}: {err}", path.display()));
+        .map_err(|err| format!("failed reading {}: {err}", path.display()));
+    let raw = raw.expect("read frankentui conformance manifest");
     serde_json::from_str(&raw)
-        .unwrap_or_else(|err| panic!("failed parsing {}: {err}", path.display()))
+        .map_err(|err| format!("failed parsing {}: {err}", path.display()))
+        .expect("parse frankentui conformance manifest")
 }
 
 fn normalize_svg(svg: &str) -> String {
@@ -107,10 +109,8 @@ fn normalize_svg(svg: &str) -> String {
 }
 
 fn node_by_id<'a>(nodes: &'a [IrNode], id: &str) -> &'a IrNode {
-    nodes
-        .iter()
-        .find(|node| node.id == id)
-        .unwrap_or_else(|| panic!("expected node '{id}' to exist"))
+    let message = format!("expected node '{id}' to exist");
+    nodes.iter().find(|node| node.id == id).expect(&message)
 }
 
 fn edge_label_texts(ir: &fm_core::MermaidDiagramIr) -> Vec<String> {
@@ -201,10 +201,8 @@ fn assert_xychart_expectation(case: &FixtureCase, ir: &fm_core::MermaidDiagramIr
     let Some(expected) = &case.expected.xychart else {
         return;
     };
-    let meta = ir
-        .xy_chart_meta
-        .as_ref()
-        .unwrap_or_else(|| panic!("{}: missing xy_chart_meta", case.id));
+    let message = format!("{}: missing xy_chart_meta", case.id);
+    let meta = ir.xy_chart_meta.as_ref().expect(&message);
 
     assert_eq!(
         meta.title, expected.title,
@@ -240,11 +238,16 @@ fn assert_xychart_expectation(case: &FixtureCase, ir: &fm_core::MermaidDiagramIr
 
     for (actual, expected_series) in meta.series.iter().zip(&expected.series) {
         let expected_kind = match expected_series.kind.as_str() {
-            "bar" => IrXySeriesKind::Bar,
-            "line" => IrXySeriesKind::Line,
-            "area" => IrXySeriesKind::Area,
-            other => panic!("{}: unsupported expected series kind '{other}'", case.id),
+            "bar" => Some(IrXySeriesKind::Bar),
+            "line" => Some(IrXySeriesKind::Line),
+            "area" => Some(IrXySeriesKind::Area),
+            _ => None,
         };
+        let message = format!(
+            "{}: unsupported expected series kind '{}'",
+            case.id, expected_series.kind
+        );
+        let expected_kind = expected_kind.expect(&message);
         assert_eq!(
             actual.kind, expected_kind,
             "{}: xychart series kind mismatch",
@@ -277,7 +280,8 @@ fn franken_tui_fixture_cases_match_parser_and_svg_expectations() {
 
         let input_path = test_root().join(&case.input_path);
         let input = fs::read_to_string(&input_path)
-            .unwrap_or_else(|err| panic!("failed reading {}: {err}", input_path.display()));
+            .map_err(|err| format!("failed reading {}: {err}", input_path.display()))
+            .expect("read frankentui input");
 
         let parsed = parse(&input);
         let layout = layout_diagram(&parsed.ir);

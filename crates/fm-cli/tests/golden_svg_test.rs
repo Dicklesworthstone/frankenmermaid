@@ -72,9 +72,11 @@ struct ResilienceScenario {
 fn load_resilience_suite() -> ResilienceSuite {
     let path = resilience_suite_path();
     let content = fs::read_to_string(&path)
-        .unwrap_or_else(|err| panic!("failed reading {}: {err}", path.display()));
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))
+        .expect("read resilience suite");
     serde_json::from_str(&content)
-        .unwrap_or_else(|err| panic!("failed parsing {}: {err}", path.display()))
+        .map_err(|err| format!("failed parsing {}: {err}", path.display()))
+        .expect("parse resilience suite")
 }
 
 fn resilience_expectation(case_id: &str) -> Option<ResilienceScenario> {
@@ -111,7 +113,8 @@ fn run_case(case_id: &str, bless: bool) {
     let expected_path = base.join(format!("{case_id}.svg"));
 
     let input = fs::read_to_string(&input_path)
-        .unwrap_or_else(|err| panic!("failed reading {}: {err}", input_path.display()));
+        .map_err(|err| format!("failed reading {}: {err}", input_path.display()))
+        .expect("read golden svg input");
 
     let parse_start = Instant::now();
     let parsed = parse(&input);
@@ -154,17 +157,21 @@ fn run_case(case_id: &str, bless: bool) {
 
     if bless {
         fs::create_dir_all(&base)
-            .unwrap_or_else(|err| panic!("failed creating {}: {err}", base.display()));
+            .map_err(|err| format!("failed creating {}: {err}", base.display()))
+            .expect("create golden svg directory");
         fs::write(&expected_path, &rendered)
-            .unwrap_or_else(|err| panic!("failed writing {}: {err}", expected_path.display()));
+            .map_err(|err| format!("failed writing {}: {err}", expected_path.display()))
+            .expect("write golden svg snapshot");
     }
 
-    let expected = fs::read_to_string(&expected_path).unwrap_or_else(|err| {
-        panic!(
-            "missing golden snapshot {} ({err}). run with BLESS=1 to generate",
-            expected_path.display()
-        )
-    });
+    let expected = fs::read_to_string(&expected_path)
+        .map_err(|err| {
+            format!(
+                "missing golden snapshot {} ({err}). run with BLESS=1 to generate",
+                expected_path.display()
+            )
+        })
+        .expect("read golden svg snapshot");
     let expected = normalize_svg(&expected);
     let expected_hash = fnv_hex(&expected);
 
