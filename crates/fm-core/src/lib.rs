@@ -1615,8 +1615,12 @@ impl IrInlineStyle {
             properties: pairs
                 .into_iter()
                 .filter_map(|(k, v)| {
+                    let key = k.trim().to_ascii_lowercase();
+                    if key.is_empty() || !is_allowed_style_property(&key) {
+                        return None;
+                    }
                     let sanitized = sanitize_style_value(&v)?;
-                    Some((k, sanitized))
+                    Some((key, sanitized))
                 })
                 .collect(),
         }
@@ -1640,8 +1644,8 @@ impl IrInlineStyle {
 }
 
 /// The set of CSS-like properties that are safe to pass through to SVG
-/// attributes.  Anything not in this list is silently dropped by
-/// [`sanitize_style_value`].
+/// attributes. Anything not in this list is silently dropped by the
+/// style parsing helpers (e.g. [`parse_style_string_with_rejections`]).
 const ALLOWED_STYLE_PROPERTIES: &[&str] = &[
     "fill",
     "stroke",
@@ -5969,14 +5973,13 @@ mod tests {
         let init_parse = to_init_parse(parsed);
 
         assert_eq!(init_parse.errors.len(), 1);
-        match &init_parse.errors[0] {
-            MermaidError::Parse {
-                message, expected, ..
-            } => {
-                assert!(message.contains("theme"));
-                assert_eq!(expected, &vec!["a valid Mermaid config value".to_string()]);
-            }
-            other => panic!("expected parse error, got {other:?}"),
+        assert!(matches!(init_parse.errors[0], MermaidError::Parse { .. }));
+        if let MermaidError::Parse {
+            message, expected, ..
+        } = &init_parse.errors[0]
+        {
+            assert!(message.contains("theme"));
+            assert_eq!(expected, &vec!["a valid Mermaid config value".to_string()]);
         }
     }
 
@@ -6745,15 +6748,13 @@ mod tests {
         let end_marker = format!("<!-- END GENERATED: {block_name} -->");
         let start = readme
             .find(&start_marker)
-            .unwrap_or_else(|| panic!("missing start marker for {block_name}"));
+            .expect("missing start marker for generated block");
         let body_start = start + start_marker.len();
         let end = readme
             .get(body_start..)
             .and_then(|s| s.find(&end_marker))
-            .map_or_else(
-                || panic!("missing end marker for {block_name}"),
-                |offset| body_start + offset,
-            );
+            .map(|offset| body_start + offset)
+            .expect("missing end marker for generated block");
 
         readme.get(body_start..end).unwrap_or("").trim().to_string()
     }
@@ -7567,6 +7568,23 @@ mod tests {
         ]);
         assert_eq!(style.properties.len(), 1);
         assert!(style.properties.contains_key("fill"));
+    }
+
+    #[test]
+    fn ir_inline_style_from_pairs_filters_disallowed_keys() {
+        let style = IrInlineStyle::from_pairs(vec![
+            (" FiLl ".to_string(), "#fff".to_string()),
+            ("stroke-width".to_string(), "2px".to_string()),
+            ("onclick".to_string(), "alert(1)".to_string()),
+            ("--custom".to_string(), "5".to_string()),
+            ("".to_string(), "ignored".to_string()),
+        ]);
+        assert_eq!(style.properties.len(), 2);
+        assert_eq!(style.properties.get("fill"), Some(&"#fff".to_string()));
+        assert_eq!(
+            style.properties.get("stroke-width"),
+            Some(&"2px".to_string())
+        );
     }
 
     #[test]
