@@ -5689,7 +5689,14 @@ fn strip_git_command<'a>(line: &'a str, command: &str) -> Option<&'a str> {
 fn parse_gitgraph_direction(header: &str) -> Option<GraphDirection> {
     // Parse direction from tokens after "gitGraph"
     for token in header.split_whitespace().skip(1) {
-        let upper = token.to_ascii_uppercase();
+        let prefix: String = token
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphabetic())
+            .collect();
+        if prefix.is_empty() {
+            continue;
+        }
+        let upper = prefix.to_ascii_uppercase();
         match upper.as_str() {
             "LR" => return Some(GraphDirection::LR),
             "RL" => return Some(GraphDirection::RL),
@@ -10361,6 +10368,15 @@ cherry-pick id: feat1",
     fn gitgraph_direction_lr() {
         let parsed = parse_mermaid("gitGraph LR\ncommit");
         assert_eq!(parsed.ir.direction, GraphDirection::LR);
+    }
+
+    #[test]
+    fn gitgraph_direction_parses_trailing_semicolons() {
+        let parsed = parse_mermaid("gitGraph LR;\ncommit");
+        assert_eq!(parsed.ir.direction, GraphDirection::LR);
+
+        let parsed_td = parse_mermaid("gitGraph TD;\ncommit");
+        assert_eq!(parsed_td.ir.direction, GraphDirection::TB);
     }
 
     #[test]
