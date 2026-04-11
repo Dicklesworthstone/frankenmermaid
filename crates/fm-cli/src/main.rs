@@ -1648,6 +1648,9 @@ fn render_source(source: &str, options: &RenderCommandOptions<'_>) -> Result<Ren
     } else {
         options.theme
     };
+    let filtered_layout = (!options.show_back_edges).then(|| layout_without_back_edges(layout));
+    let source_map_layout = filtered_layout.as_ref().unwrap_or(layout);
+
     let (rendered, actual_width, actual_height) = render_format(
         &parsed.ir,
         layout,
@@ -1669,7 +1672,7 @@ fn render_source(source: &str, options: &RenderCommandOptions<'_>) -> Result<Ren
 
     let total_time = total_start.elapsed();
     let source_map = if options.json_output || options.source_map_out.is_some() {
-        Some(layout_source_map(&parsed.ir, layout))
+        Some(layout_source_map(&parsed.ir, source_map_layout))
     } else {
         None
     };
@@ -1726,9 +1729,9 @@ fn render_source(source: &str, options: &RenderCommandOptions<'_>) -> Result<Ren
             layout_guard_estimated_route_ops: traced_layout.trace.guard.estimated_route_ops,
             layout_band_count: traced_layout.layout.extensions.bands.len(),
             layout_tick_count: traced_layout.layout.extensions.axis_ticks.len(),
-            source_span_node_count: count_known_node_spans(layout),
-            source_span_edge_count: count_known_edge_spans(layout),
-            source_span_cluster_count: count_known_cluster_spans(layout),
+            source_span_node_count: count_known_node_spans(source_map_layout),
+            source_span_edge_count: count_known_edge_spans(source_map_layout),
+            source_span_cluster_count: count_known_cluster_spans(source_map_layout),
             source_map_entry_count: source_map.entries.len(),
             source_map_out: options.source_map_out.map(str::to_string),
             diagram_type: parsed.ir.diagram_type.as_str().to_string(),
@@ -3114,16 +3117,19 @@ mod validate_tests {
 #[cfg(test)]
 mod render_tests {
     use super::{
-        ColorChoice, OutputFormat, RenderSurfaceOptions, SvgRenderConfig, TermRenderConfig,
-        ThemePreset, build_svg_render_config, diff_use_colors, extract_svg_dimensions,
-        layout_without_back_edges, normalize_positive_font_size, parse_positive_dimension_arg,
-        parse_positive_font_size_arg, render_format, terminal_size,
+        ColorChoice, OutputFormat, RenderCommandOptions, RenderSurfaceOptions, SvgRenderConfig,
+        TermRenderConfig, ThemePreset, build_svg_render_config, diff_use_colors,
+        extract_svg_dimensions, layout_without_back_edges, normalize_positive_font_size,
+        parse_positive_dimension_arg, parse_positive_font_size_arg, render_format, render_source,
+        terminal_size,
     };
+    use fm_core::{MermaidParseMode, MermaidSourceMap, MermaidSourceMapKind};
     use fm_layout::{
-        DiagramLayout, LayoutEdgePath, LayoutExtensions, LayoutPoint, LayoutRect, LayoutStats,
-        layout_diagram,
+        DiagramLayout, LayoutAlgorithm, LayoutConfig, LayoutEdgePath, LayoutExtensions,
+        LayoutPoint, LayoutRect, LayoutStats, layout_diagram,
     };
-    use fm_parser::parse;
+    use fm_parser::{ParserConfig, parse};
+    use tempfile::NamedTempFile;
 
     #[test]
     fn term_render_uses_precomputed_layout() {
@@ -3236,6 +3242,68 @@ mod render_tests {
         assert_eq!(filtered.edges.len(), 1);
         assert_eq!(filtered.edges[0].edge_index, 0);
         assert_eq!(layout.edges.len(), 2);
+    }
+
+    #[test]
+    fn source_map_omits_hidden_back_edges() {
+        let source = "flowchart LR\nA-->B\nB-->A";
+        let parsed = parse(source);
+        let layout = layout_diagram(&parsed.ir);
+        assert!(
+            layout.edges.iter().any(|edge| edge.reversed),
+            "expected a reversed edge in cycle layout"
+        );
+        let expected_edge_count = layout_without_back_edges(&layout).edges.len();
+
+        let source_map_path = NamedTempFile::new()
+            .expect("source map temp file")
+            .into_temp_path();
+        let source_map_path_str = source_map_path
+            .to_str()
+            .expect("source map path utf-8")
+            .to_string();
+
+        let options = RenderCommandOptions {
+            parse_mode: MermaidParseMode::Compat,
+            parser_config: ParserConfig::default(),
+            layout_algorithm: LayoutAlgorithm::Auto,
+            layout_config: LayoutConfig::default(),
+            format: OutputFormat::Svg,
+            theme: "default",
+            font_size: None,
+            output: None,
+            max_input_bytes: 5_000_000,
+            svg_base_config: SvgRenderConfig::default(),
+            term_base_config: TermRenderConfig::rich(),
+            show_back_edges: false,
+            show_minimap: false,
+            embed_source_spans: true,
+            source_map_out: Some(source_map_path_str.as_str()),
+            dimensions: (None, None),
+            json_output: true,
+        };
+
+        let outcome = render_source(source, &options).expect("render source");
+        let svg = String::from_utf8(outcome.rendered).expect("svg utf-8");
+        let rendered_edge_count = svg.matches("id=\"fm-edge-").count();
+
+        let source_map_raw = std::fs::read_to_string(&source_map_path).expect("read source map");
+        let source_map: MermaidSourceMap =
+            serde_json::from_str(&source_map_raw).expect("parse source map");
+        let mapped_edge_count = source_map
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == MermaidSourceMapKind::Edge)
+            .count();
+
+        assert_eq!(
+            rendered_edge_count, expected_edge_count,
+            "rendered SVG should omit reversed edges"
+        );
+        assert_eq!(
+            mapped_edge_count, rendered_edge_count,
+            "source map edge count should match rendered SVG"
+        );
     }
 
     #[test]
