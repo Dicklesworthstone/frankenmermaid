@@ -1716,6 +1716,10 @@ pub fn sanitize_style_value(value: &str) -> Option<String> {
     if contains_url_function(trimmed) {
         return None;
     }
+    // Reject CSS comment markers to prevent obfuscated url()/javascript: payloads.
+    if value.contains("/*") || value.contains("*/") {
+        return None;
+    }
     // Reject javascript: protocol.
     if trimmed.contains("javascript:") {
         return None;
@@ -7611,6 +7615,12 @@ mod tests {
     #[test]
     fn sanitize_rejects_backslash_escape() {
         assert!(sanitize_style_value("url\\(http://evil.com)").is_none());
+    }
+
+    #[test]
+    fn sanitize_rejects_css_comment_obfuscation() {
+        assert!(sanitize_style_value("u/**/rl(#id)").is_none());
+        assert!(sanitize_style_value("ja/**/vascript:alert(1)").is_none());
     }
 
     #[test]
