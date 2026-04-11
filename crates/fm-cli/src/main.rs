@@ -912,7 +912,34 @@ fn main() -> Result<()> {
             format,
             output,
             clear,
-        } => cmd_watch(&input, format, output.as_deref(), clear),
+        } => {
+            let theme = resolve_theme_name(None, &loaded_config.file);
+            let layout_config = build_layout_config(&loaded_config.file, None)?;
+            let svg_base_config = build_base_svg_render_config(&loaded_config.file)?;
+            let term_base_config = build_base_term_render_config(&loaded_config.file)?;
+            let show_back_edges = resolve_show_back_edges(&loaded_config.file);
+            let show_minimap = term_base_config.show_minimap;
+            let options = RenderCommandOptions {
+                parse_mode: resolve_parse_mode(None, &loaded_config.file),
+                parser_config,
+                layout_algorithm: resolve_layout_algorithm(None, &loaded_config.file)?,
+                layout_config,
+                format,
+                theme: &theme,
+                font_size: None,
+                output: output.as_deref(),
+                max_input_bytes,
+                svg_base_config,
+                term_base_config,
+                show_back_edges,
+                show_minimap,
+                embed_source_spans: format == OutputFormat::Svg,
+                source_map_out: None,
+                dimensions: (None, None),
+                json_output: false,
+            };
+            cmd_watch(&input, options, clear)
+        }
 
         #[cfg(feature = "serve")]
         Command::Serve { port, host, open } => cmd_serve(&host, port, open),
@@ -4051,7 +4078,7 @@ fn cmd_interactive(
 // =============================================================================
 
 #[cfg(feature = "watch")]
-fn cmd_watch(input: &str, format: OutputFormat, output: Option<&str>, clear: bool) -> Result<()> {
+fn cmd_watch(input: &str, options: RenderCommandOptions<'_>, clear: bool) -> Result<()> {
     use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
     use std::sync::mpsc::channel;
     use std::time::Duration;
@@ -4069,7 +4096,7 @@ fn cmd_watch(input: &str, format: OutputFormat, output: Option<&str>, clear: boo
     println!("Watching {input} for changes... (Ctrl+C to stop)");
 
     // Initial render
-    if let Err(e) = render_and_output(input, format, output, clear) {
+    if let Err(e) = render_and_output(input, options.clone(), clear) {
         eprintln!("Initial render failed: {e}");
     }
 
@@ -4080,7 +4107,7 @@ fn cmd_watch(input: &str, format: OutputFormat, output: Option<&str>, clear: boo
                 std::thread::sleep(Duration::from_millis(100));
                 while rx.try_recv().is_ok() {}
 
-                if let Err(e) = render_and_output(input, format, output, clear) {
+                if let Err(e) = render_and_output(input, options.clone(), clear) {
                     eprintln!("Render error: {e}");
                 }
             }
@@ -4100,49 +4127,12 @@ fn cmd_watch(input: &str, format: OutputFormat, output: Option<&str>, clear: boo
 }
 
 #[cfg(feature = "watch")]
-fn render_and_output(
-    input: &str,
-    format: OutputFormat,
-    output: Option<&str>,
-    clear: bool,
-) -> Result<()> {
+fn render_and_output(input: &str, options: RenderCommandOptions<'_>, clear: bool) -> Result<()> {
     if clear {
         print!("\x1B[2J\x1B[H"); // Clear screen and move cursor to top-left
     }
 
-    let source = load_input(input, DEFAULT_MAX_INPUT_BYTES)?;
-    let parsed = fm_parser::parse(&source);
-    let layout = fm_layout::layout_diagram(&parsed.ir);
-    let (rendered, _, _) = render_format(
-        &parsed.ir,
-        &layout,
-        format,
-        RenderSurfaceOptions {
-            theme: "default",
-            font_size: None,
-            svg_base_config: SvgRenderConfig::default(),
-            term_base_config: TermRenderConfig::rich(),
-            show_back_edges: true,
-            show_minimap: false,
-            embed_source_spans: false,
-            dimensions: (None, None),
-            degradation: fm_core::MermaidDegradationPlan::default(),
-        },
-    )?;
-
-    match format {
-        OutputFormat::Png => write_output_bytes(output, &rendered)?,
-        _ => {
-            let text = String::from_utf8_lossy(&rendered);
-            if output.is_some() {
-                write_output(output, &text)?;
-            } else {
-                println!("{text}");
-            }
-        }
-    }
-
-    Ok(())
+    cmd_render(input, options)
 }
 
 // =============================================================================
