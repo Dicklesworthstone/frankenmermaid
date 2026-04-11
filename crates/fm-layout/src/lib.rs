@@ -18047,7 +18047,7 @@ mod tests {
             .json()
             .with_writer(move || {
                 let captured = Arc::clone(&captured_clone);
-                CaptureWriter(captured)
+                CaptureWriter::new(captured)
             })
             .with_target(false)
             .with_level(true);
@@ -18116,7 +18116,7 @@ mod tests {
             .json()
             .with_writer(move || {
                 let captured = Arc::clone(&captured_clone);
-                CaptureWriter(captured)
+                CaptureWriter::new(captured)
             })
             .with_target(false)
             .with_level(true);
@@ -18160,7 +18160,7 @@ mod tests {
             .json()
             .with_writer(move || {
                 let captured = Arc::clone(&captured_clone);
-                CaptureWriter(captured)
+                CaptureWriter::new(captured)
             })
             .with_target(false)
             .with_level(true);
@@ -18197,20 +18197,45 @@ mod tests {
     }
 
     /// Writer that captures output into a shared Vec.
-    struct CaptureWriter(Arc<Mutex<Vec<String>>>);
+    struct CaptureWriter {
+        lines: Arc<Mutex<Vec<String>>>,
+        buffer: String,
+    }
+
+    impl CaptureWriter {
+        fn new(lines: Arc<Mutex<Vec<String>>>) -> Self {
+            Self {
+                lines,
+                buffer: String::new(),
+            }
+        }
+
+        fn push_line(&self, line: &str) {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                self.lines.lock().unwrap().push(trimmed.to_string());
+            }
+        }
+    }
 
     impl std::io::Write for CaptureWriter {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
             if let Ok(s) = std::str::from_utf8(buf) {
-                let trimmed = s.trim();
-                if !trimmed.is_empty() {
-                    self.0.lock().unwrap().push(trimmed.to_string());
+                self.buffer.push_str(s);
+                while let Some(pos) = self.buffer.find('\n') {
+                    let line = self.buffer[..pos].to_string();
+                    self.buffer.drain(..=pos);
+                    self.push_line(&line);
                 }
             }
             Ok(buf.len())
         }
 
         fn flush(&mut self) -> std::io::Result<()> {
+            if !self.buffer.is_empty() {
+                let remainder = std::mem::take(&mut self.buffer);
+                self.push_line(&remainder);
+            }
             Ok(())
         }
     }
@@ -18934,7 +18959,7 @@ mod tests {
 
         let fmt_layer = tracing_subscriber::fmt::layer()
             .json()
-            .with_writer(move || CaptureWriter(Arc::clone(&captured_clone)))
+            .with_writer(move || CaptureWriter::new(Arc::clone(&captured_clone)))
             .with_target(false)
             .with_level(true);
 

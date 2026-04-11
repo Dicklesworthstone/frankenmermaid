@@ -16,9 +16,9 @@ pub fn looks_like_dot(input: &str) -> bool {
 pub fn parse_dot(input: &str) -> ParseResult {
     let mut builder = IrBuilder::new(DiagramType::Flowchart);
     let directed = is_directed_graph(input);
-    let body = extract_body(input);
-    let body_without_comments = strip_all_comments(body);
-    let expanded_groups = expand_edge_groups(&body_without_comments);
+    let cleaned = strip_all_comments(input);
+    let body = extract_body(&cleaned);
+    let expanded_groups = expand_edge_groups(body);
     let normalized_body = normalize_dot_body(&expanded_groups);
     let mut active_clusters: Vec<usize> = Vec::new();
     let mut active_subgraphs: Vec<usize> = Vec::new();
@@ -735,9 +735,8 @@ fn is_directed_graph(input: &str) -> bool {
         return is_directed;
     }
 
-    let body = extract_body(input);
-    let body_without_comments = strip_all_comments(body);
-    contains_directed_edge_operator(&body_without_comments)
+    let body = extract_body(&cleaned);
+    contains_directed_edge_operator(body)
 }
 
 fn contains_directed_edge_operator(input: &str) -> bool {
@@ -1076,6 +1075,22 @@ mod tests {
         assert_eq!(parsed.ir.edges[0].arrow, ArrowType::Arrow);
 
         let parsed = parse_dot("/* comment */ graph{ a -- b; }");
+        assert_eq!(parsed.ir.edges[0].arrow, ArrowType::Line);
+    }
+
+    #[test]
+    fn parses_dot_when_leading_comment_contains_brace() {
+        let parsed = parse_dot("// { comment\n digraph G { a -> b; }");
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 1);
+        assert_eq!(parsed.ir.edges[0].arrow, ArrowType::Arrow);
+    }
+
+    #[test]
+    fn parses_dot_when_block_comment_contains_brace() {
+        let parsed = parse_dot("/* { comment */ graph G { a -- b; }");
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 1);
         assert_eq!(parsed.ir.edges[0].arrow, ArrowType::Line);
     }
 

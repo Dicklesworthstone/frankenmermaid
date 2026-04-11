@@ -1883,19 +1883,3 @@ The DOT bridge parser (`dot_parser.rs`) recognizes Graphviz `digraph` and `graph
 ## License
 
 MIT License (with OpenAI/Anthropic Rider). See [LICENSE](LICENSE).
-
-<!-- BEGIN GENERATED: runtime-capability-metadata -->
-| Surface | Status | Evidence |
-|---------|--------|----------|
-| CLI detect command | Implemented | 2 evidence refs |
-| CLI parse command with IR JSON evidence | Implemented | 1 evidence refs |
-| CLI SVG rendering | Implemented | 1 evidence refs |
-| CLI terminal rendering | Implemented | 1 evidence refs |
-| CLI validate command with structured diagnostics | Implemented | 1 evidence refs |
-| CLI capability matrix command | Implemented | 2 evidence refs |
-| WASM API renders SVG | Implemented | 1 evidence refs |
-| WASM API exposes capability matrix metadata | Implemented | 1 evidence refs |
-| Canvas rendering backend | Implemented | 1 evidence refs |
-<!-- END GENERATED: runtime-capability-metadata -->
-s |
-<!-- END GENERATED: runtime-capability-metadata -->
