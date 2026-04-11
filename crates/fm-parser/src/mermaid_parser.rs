@@ -8130,7 +8130,8 @@ fn strip_flowchart_inline_comment(line: &str) -> &str {
 
 fn parse_graph_direction(header: &str) -> Option<GraphDirection> {
     for token in header.split_whitespace() {
-        match token {
+        let normalized = token.to_ascii_uppercase();
+        match normalized.as_str() {
             "LR" => return Some(GraphDirection::LR),
             "RL" => return Some(GraphDirection::RL),
             "TB" => return Some(GraphDirection::TB),
@@ -8956,6 +8957,17 @@ mod tests {
         assert_eq!(parsed.ir.meta.direction, GraphDirection::LR);
         assert_eq!(parsed.ir.nodes.len(), 2);
         assert_eq!(parsed.ir.edges.len(), 1);
+    }
+
+    #[test]
+    fn flowchart_direction_parses_case_insensitively() {
+        let header = parse_mermaid("flowchart lr\nA-->B");
+        assert_eq!(header.ir.direction, GraphDirection::LR);
+        assert_eq!(header.ir.meta.direction, GraphDirection::LR);
+
+        let statement = parse_mermaid("flowchart\n direction tb\n A-->B");
+        assert_eq!(statement.ir.direction, GraphDirection::TB);
+        assert_eq!(statement.ir.meta.direction, GraphDirection::TB);
     }
 
     #[test]
