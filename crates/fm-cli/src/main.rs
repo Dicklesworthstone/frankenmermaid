@@ -2584,7 +2584,7 @@ fn cmd_validate(input: &str, options: ValidateCommandOptions<'_>) -> Result<()> 
         Some(results)
     };
     #[cfg(not(all(feature = "fnx-integration", not(target_arch = "wasm32"))))]
-    let fnx_results: Option<()> = None;
+    let _fnx_results: Option<()> = None;
 
     sort_diagnostics(&mut diagnostics);
 

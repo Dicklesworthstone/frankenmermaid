@@ -33,6 +33,38 @@
       "layout_width": 271.700012,
       "node_count": 2
     },
+    "cycle_braid": {
+      "edge_count": 20,
+      "layout_algorithm": "auto",
+      "layout_checksum": "9113ec9df4b9cada",
+      "layout_height": 458.45105,
+      "layout_width": 488.648712,
+      "node_count": 9
+    },
+    "cycle_feedback": {
+      "edge_count": 16,
+      "layout_algorithm": "auto",
+      "layout_checksum": "ed00ee42f6c1805e",
+      "layout_height": 1476.0,
+      "layout_width": 759.362549,
+      "node_count": 11
+    },
+    "cycle_ladder": {
+      "edge_count": 22,
+      "layout_algorithm": "auto",
+      "layout_checksum": "53a77cf403465734",
+      "layout_height": 471.911987,
+      "layout_width": 508.130096,
+      "node_count": 10
+    },
+    "cycle_scc_heavy": {
+      "edge_count": 15,
+      "layout_algorithm": "auto",
+      "layout_checksum": "9e874a97be4b9010",
+      "layout_height": 1103.0,
+      "layout_width": 572.0,
+      "node_count": 12
+    },
     "dense_flowchart_stress": {
       "edge_count": 25,
       "layout_algorithm": "auto",

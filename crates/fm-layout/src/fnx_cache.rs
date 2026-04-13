@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use fm_core::{IrEndpoint, MermaidDiagramIr};
 
 use crate::fnx_adapter::ProjectionConfig;
-use crate::fnx_cycle_scorer::CriticalityScoringResults;
+use crate::fnx_cycle_scorer::{CriticalityScoringConfig, CriticalityScoringResults};
 use crate::fnx_diagnostics::FnxAnalysisResults;
 
 // ============================================================================
@@ -73,29 +73,20 @@ impl CacheKey {
     #[must_use]
     pub fn from_ir_and_config(ir: &MermaidDiagramIr, config: &ProjectionConfig) -> Self {
         let mut hasher = FnvHasher::new();
+        hash_ir_and_config(ir, config, &mut hasher);
+        Self(hasher.finish())
+    }
 
-        // Hash diagram type
-        std::mem::discriminant(&ir.diagram_type).hash(&mut hasher);
-
-        // Hash node count and IDs
-        ir.nodes.len().hash(&mut hasher);
-        for node in &ir.nodes {
-            node.id.hash(&mut hasher);
-        }
-
-        // Hash edge topology (source, target pairs)
-        ir.edges.len().hash(&mut hasher);
-        for edge in &ir.edges {
-            hash_endpoint(&edge.from, &mut hasher);
-            hash_endpoint(&edge.to, &mut hasher);
-        }
-
-        // Hash config settings
-        std::mem::discriminant(&config.directed_policy).hash(&mut hasher);
-        config.penalty_factor.to_bits().hash(&mut hasher);
-        config.preserve_self_loops.hash(&mut hasher);
-        config.collapse_parallel_edges.hash(&mut hasher);
-
+    /// Compute cache key from IR, projection config, and scoring config.
+    #[must_use]
+    pub fn from_ir_and_config_with_scoring(
+        ir: &MermaidDiagramIr,
+        config: &ProjectionConfig,
+        scoring: &CriticalityScoringConfig,
+    ) -> Self {
+        let mut hasher = FnvHasher::new();
+        hash_ir_and_config(ir, config, &mut hasher);
+        hash_scoring_config(scoring, &mut hasher);
         Self(hasher.finish())
     }
 
@@ -104,6 +95,47 @@ impl CacheKey {
     pub const fn as_u64(&self) -> u64 {
         self.0
     }
+}
+
+fn hash_ir_and_config<H: Hasher>(
+    ir: &MermaidDiagramIr,
+    config: &ProjectionConfig,
+    hasher: &mut H,
+) {
+    // Hash diagram type
+    std::mem::discriminant(&ir.diagram_type).hash(hasher);
+
+    // Hash node count and IDs
+    ir.nodes.len().hash(hasher);
+    for node in &ir.nodes {
+        node.id.hash(hasher);
+    }
+
+    // Hash port mappings to avoid stale cache hits when ports move between nodes.
+    ir.ports.len().hash(hasher);
+    for port in &ir.ports {
+        port.node.0.hash(hasher);
+    }
+
+    // Hash edge topology (source, target pairs)
+    ir.edges.len().hash(hasher);
+    for edge in &ir.edges {
+        hash_endpoint(&edge.from, hasher);
+        hash_endpoint(&edge.to, hasher);
+    }
+
+    // Hash config settings
+    std::mem::discriminant(&config.directed_policy).hash(hasher);
+    config.penalty_factor.to_bits().hash(hasher);
+    config.preserve_self_loops.hash(hasher);
+    config.collapse_parallel_edges.hash(hasher);
+}
+
+fn hash_scoring_config<H: Hasher>(scoring: &CriticalityScoringConfig, hasher: &mut H) {
+    scoring.bridge_weight.to_bits().hash(hasher);
+    scoring.articulation_weight.to_bits().hash(hasher);
+    scoring.centrality_weight.to_bits().hash(hasher);
+    scoring.base_penalty.to_bits().hash(hasher);
 }
 
 fn hash_endpoint<H: Hasher>(endpoint: &IrEndpoint, hasher: &mut H) {
@@ -245,6 +277,7 @@ impl AnalysisCache {
             self.stats.hits += 1;
             return Some(result);
         }
+        self.stats.misses += 1;
         None
     }
 
@@ -253,18 +286,20 @@ impl AnalysisCache {
         &mut self,
         ir: &MermaidDiagramIr,
         config: &ProjectionConfig,
+        scoring: &CriticalityScoringConfig,
     ) -> Option<CriticalityScoringResults> {
         if !self.config.enabled {
             return None;
         }
 
-        let key = CacheKey::from_ir_and_config(ir, config);
+        let key = CacheKey::from_ir_and_config_with_scoring(ir, config, scoring);
         if let Some(entry) = self.get_and_touch(key)
             && let Some(result) = entry.criticality.clone()
         {
             self.stats.hits += 1;
             return Some(result);
         }
+        self.stats.misses += 1;
         None
     }
 
@@ -280,7 +315,6 @@ impl AnalysisCache {
         }
 
         let key = CacheKey::from_ir_and_config(ir, config);
-        self.stats.misses += 1;
         self.put(key, |entry| {
             entry.diagnostics = Some(diagnostics);
         });
@@ -291,14 +325,14 @@ impl AnalysisCache {
         &mut self,
         ir: &MermaidDiagramIr,
         config: &ProjectionConfig,
+        scoring: &CriticalityScoringConfig,
         criticality: CriticalityScoringResults,
     ) {
         if !self.config.enabled {
             return;
         }
 
-        let key = CacheKey::from_ir_and_config(ir, config);
-        self.stats.misses += 1;
+        let key = CacheKey::from_ir_and_config_with_scoring(ir, config, scoring);
         self.put(key, |entry| {
             entry.criticality = Some(criticality);
         });
@@ -371,7 +405,7 @@ impl AnalysisCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fm_core::{DiagramType, IrEdge, IrNode, IrNodeId, NodeShape};
+    use fm_core::{DiagramType, IrEdge, IrNode, IrNodeId, IrPort, IrPortId, NodeShape};
 
     fn make_test_ir(nodes: usize, edges: usize) -> MermaidDiagramIr {
         let nodes_vec: Vec<IrNode> = (0..nodes)
@@ -394,6 +428,39 @@ mod tests {
             diagram_type: DiagramType::Flowchart,
             nodes: nodes_vec,
             edges: edges_vec,
+            ..Default::default()
+        }
+    }
+
+    fn make_ir_with_port(port_node: usize) -> MermaidDiagramIr {
+        let nodes = vec![
+            IrNode {
+                id: "A".to_string(),
+                shape: NodeShape::Rect,
+                ..Default::default()
+            },
+            IrNode {
+                id: "B".to_string(),
+                shape: NodeShape::Rect,
+                ..Default::default()
+            },
+        ];
+        let ports = vec![IrPort {
+            node: IrNodeId(port_node),
+            name: "p".to_string(),
+            ..Default::default()
+        }];
+        let edges = vec![IrEdge {
+            from: IrEndpoint::Port(IrPortId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            ..Default::default()
+        }];
+
+        MermaidDiagramIr {
+            diagram_type: DiagramType::Flowchart,
+            nodes,
+            ports,
+            edges,
             ..Default::default()
         }
     }
@@ -432,6 +499,32 @@ mod tests {
         let key2 = CacheKey::from_ir_and_config(&ir, &config2);
 
         assert_ne!(key1, key2, "different config should produce different key");
+    }
+
+    #[test]
+    fn cache_key_differs_on_port_mapping_change() {
+        let config = ProjectionConfig::default();
+        let ir1 = make_ir_with_port(0);
+        let ir2 = make_ir_with_port(1);
+
+        let key1 = CacheKey::from_ir_and_config(&ir1, &config);
+        let key2 = CacheKey::from_ir_and_config(&ir2, &config);
+
+        assert_ne!(key1, key2, "port remap should invalidate cache key");
+    }
+
+    #[test]
+    fn cache_key_differs_on_scoring_config_change() {
+        let ir = make_test_ir(5, 4);
+        let proj = ProjectionConfig::default();
+        let scoring1 = CriticalityScoringConfig::default();
+        let mut scoring2 = CriticalityScoringConfig::default();
+        scoring2.bridge_weight = 0.9;
+
+        let key1 = CacheKey::from_ir_and_config_with_scoring(&ir, &proj, &scoring1);
+        let key2 = CacheKey::from_ir_and_config_with_scoring(&ir, &proj, &scoring2);
+
+        assert_ne!(key1, key2, "different scoring config should produce different key");
     }
 
     #[test]
