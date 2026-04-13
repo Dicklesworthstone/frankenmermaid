@@ -557,6 +557,287 @@ pub fn record_budget_work(units: u64) {
 }
 
 // ============================================================================
+// Fallback Ladder
+// ============================================================================
+
+/// Fallback level in the FNX analysis hierarchy.
+///
+/// The ladder progresses from most capable (full FNX) to most basic (no FNX),
+/// with each level providing progressively less intelligent analysis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum FallbackLevel {
+    /// Full FNX analysis with all algorithms.
+    #[default]
+    Full = 0,
+    /// FNX available but some algorithms timed out.
+    Partial = 1,
+    /// FNX integration disabled or unavailable.
+    Disabled = 2,
+    /// FNX failed with error, using baseline heuristics.
+    Failed = 3,
+}
+
+impl FallbackLevel {
+    /// Human-readable description of this fallback level.
+    #[must_use]
+    pub fn description(&self) -> &'static str {
+        match self {
+            Self::Full => "Full FNX analysis",
+            Self::Partial => "Partial FNX analysis (some algorithms timed out)",
+            Self::Disabled => "FNX disabled, using baseline heuristics",
+            Self::Failed => "FNX failed, using fallback heuristics",
+        }
+    }
+
+    /// Short code for structured logging.
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Full => "fnx_full",
+            Self::Partial => "fnx_partial",
+            Self::Disabled => "fnx_disabled",
+            Self::Failed => "fnx_failed",
+        }
+    }
+
+    /// Whether this level represents degraded operation.
+    #[must_use]
+    pub fn is_degraded(&self) -> bool {
+        !matches!(self, Self::Full)
+    }
+}
+
+/// Reason for fallback to a lower analysis level.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FallbackReason {
+    /// No fallback occurred - full analysis completed.
+    None,
+    /// Budget exceeded during analysis.
+    BudgetExceeded(BudgetExceededReason),
+    /// FNX feature is disabled.
+    FeatureDisabled,
+    /// FNX analysis returned an error.
+    AnalysisError(String),
+    /// User requested strict mode and analysis failed.
+    StrictModeViolation(String),
+}
+
+impl FallbackReason {
+    /// Format as a diagnostic message.
+    #[must_use]
+    pub fn as_diagnostic(&self) -> String {
+        match self {
+            Self::None => "No fallback".to_string(),
+            Self::BudgetExceeded(reason) => reason.as_diagnostic(),
+            Self::FeatureDisabled => "FNX integration is disabled".to_string(),
+            Self::AnalysisError(msg) => format!("FNX analysis error: {msg}"),
+            Self::StrictModeViolation(msg) => format!("Strict mode violation: {msg}"),
+        }
+    }
+
+    /// Short code for structured logging.
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::BudgetExceeded(_) => "budget_exceeded",
+            Self::FeatureDisabled => "feature_disabled",
+            Self::AnalysisError(_) => "analysis_error",
+            Self::StrictModeViolation(_) => "strict_mode_violation",
+        }
+    }
+}
+
+/// Fallback behavior mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FallbackMode {
+    /// Gracefully fall back to lower analysis levels.
+    #[default]
+    Graceful,
+    /// Fail with error instead of falling back.
+    Strict,
+    /// Log warnings but continue with fallback.
+    Warn,
+}
+
+impl FallbackMode {
+    /// Parse from string (for config/CLI).
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "graceful" | "default" => Some(Self::Graceful),
+            "strict" | "fail" => Some(Self::Strict),
+            "warn" | "warning" => Some(Self::Warn),
+            _ => None,
+        }
+    }
+
+    /// Whether to emit warnings for fallbacks.
+    #[must_use]
+    pub fn should_warn(&self) -> bool {
+        matches!(self, Self::Warn)
+    }
+
+    /// Whether to fail instead of falling back.
+    #[must_use]
+    pub fn should_fail(&self) -> bool {
+        matches!(self, Self::Strict)
+    }
+}
+
+impl std::str::FromStr for FallbackMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s).ok_or_else(|| format!("invalid fallback mode: {s}"))
+    }
+}
+
+/// Result of a fallback decision.
+#[derive(Debug, Clone)]
+pub struct FallbackDecision {
+    /// The level we fell back to.
+    pub level: FallbackLevel,
+    /// Why we fell back (if any).
+    pub reason: FallbackReason,
+    /// Original level before fallback.
+    pub original_level: FallbackLevel,
+}
+
+impl FallbackDecision {
+    /// Create a decision for successful full analysis.
+    #[must_use]
+    pub fn success() -> Self {
+        Self {
+            level: FallbackLevel::Full,
+            reason: FallbackReason::None,
+            original_level: FallbackLevel::Full,
+        }
+    }
+
+    /// Create a decision for budget-exceeded fallback.
+    #[must_use]
+    pub fn from_budget_exceeded(reason: BudgetExceededReason) -> Self {
+        Self {
+            level: FallbackLevel::Partial,
+            reason: FallbackReason::BudgetExceeded(reason),
+            original_level: FallbackLevel::Full,
+        }
+    }
+
+    /// Create a decision for feature-disabled fallback.
+    #[must_use]
+    pub fn feature_disabled() -> Self {
+        Self {
+            level: FallbackLevel::Disabled,
+            reason: FallbackReason::FeatureDisabled,
+            original_level: FallbackLevel::Full,
+        }
+    }
+
+    /// Create a decision for analysis error.
+    #[must_use]
+    pub fn from_error(error: impl Into<String>) -> Self {
+        Self {
+            level: FallbackLevel::Failed,
+            reason: FallbackReason::AnalysisError(error.into()),
+            original_level: FallbackLevel::Full,
+        }
+    }
+
+    /// Whether analysis was degraded.
+    #[must_use]
+    pub fn is_degraded(&self) -> bool {
+        self.level.is_degraded()
+    }
+
+    /// Format as a structured log entry.
+    #[must_use]
+    pub fn log_entry(&self) -> FallbackLogEntry {
+        FallbackLogEntry {
+            level: self.level.code(),
+            reason: self.reason.code(),
+            diagnostic: self.reason.as_diagnostic(),
+            degraded: self.is_degraded(),
+        }
+    }
+}
+
+/// Structured log entry for fallback events.
+#[derive(Debug, Clone)]
+pub struct FallbackLogEntry {
+    /// Fallback level code.
+    pub level: &'static str,
+    /// Reason code.
+    pub reason: &'static str,
+    /// Human-readable diagnostic.
+    pub diagnostic: String,
+    /// Whether analysis was degraded.
+    pub degraded: bool,
+}
+
+/// Apply fallback policy based on mode and decision.
+///
+/// Returns Ok with the decision if fallback is allowed, or Err with
+/// an error message if strict mode forbids the fallback.
+pub fn apply_fallback_policy(
+    mode: FallbackMode,
+    decision: &FallbackDecision,
+) -> Result<(), FallbackError> {
+    if !decision.is_degraded() {
+        return Ok(());
+    }
+
+    match mode {
+        FallbackMode::Graceful => {
+            tracing::debug!(
+                fallback_level = decision.level.code(),
+                reason = decision.reason.code(),
+                "FNX fallback activated"
+            );
+            Ok(())
+        }
+        FallbackMode::Warn => {
+            tracing::warn!(
+                fallback_level = decision.level.code(),
+                reason = decision.reason.code(),
+                diagnostic = decision.reason.as_diagnostic(),
+                "FNX analysis degraded"
+            );
+            Ok(())
+        }
+        FallbackMode::Strict => Err(FallbackError {
+            level: decision.level,
+            reason: decision.reason.clone(),
+            message: format!(
+                "Strict mode: {} - {}",
+                decision.level.description(),
+                decision.reason.as_diagnostic()
+            ),
+        }),
+    }
+}
+
+/// Error returned when strict mode forbids fallback.
+#[derive(Debug, Clone)]
+pub struct FallbackError {
+    /// The level we would have fallen back to.
+    pub level: FallbackLevel,
+    /// Why the fallback was needed.
+    pub reason: FallbackReason,
+    /// Error message.
+    pub message: String,
+}
+
+impl std::fmt::Display for FallbackError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for FallbackError {}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -725,5 +1006,114 @@ mod tests {
         // Original thread's context should be unchanged
         let executor = exit_budget_scope();
         assert_eq!(executor.unwrap().work_consumed(), 500);
+    }
+
+    // ==================== Fallback Ladder Tests ====================
+
+    #[test]
+    fn fallback_level_ordering() {
+        // Levels should be ordered from best to worst
+        assert!(FallbackLevel::Full < FallbackLevel::Partial);
+        assert!(FallbackLevel::Partial < FallbackLevel::Disabled);
+        assert!(FallbackLevel::Disabled < FallbackLevel::Failed);
+    }
+
+    #[test]
+    fn fallback_level_degradation() {
+        assert!(!FallbackLevel::Full.is_degraded());
+        assert!(FallbackLevel::Partial.is_degraded());
+        assert!(FallbackLevel::Disabled.is_degraded());
+        assert!(FallbackLevel::Failed.is_degraded());
+    }
+
+    #[test]
+    fn fallback_mode_parsing() {
+        assert_eq!(FallbackMode::parse("graceful"), Some(FallbackMode::Graceful));
+        assert_eq!(FallbackMode::parse("strict"), Some(FallbackMode::Strict));
+        assert_eq!(FallbackMode::parse("warn"), Some(FallbackMode::Warn));
+        assert_eq!(FallbackMode::parse("GRACEFUL"), Some(FallbackMode::Graceful));
+        assert_eq!(FallbackMode::parse("unknown"), None);
+
+        // Test FromStr trait
+        assert_eq!("graceful".parse::<FallbackMode>().unwrap(), FallbackMode::Graceful);
+        assert!("invalid".parse::<FallbackMode>().is_err());
+    }
+
+    #[test]
+    fn fallback_decision_success() {
+        let decision = FallbackDecision::success();
+        assert_eq!(decision.level, FallbackLevel::Full);
+        assert!(!decision.is_degraded());
+        assert!(matches!(decision.reason, FallbackReason::None));
+    }
+
+    #[test]
+    fn fallback_decision_from_budget() {
+        let reason = BudgetExceededReason::TimeExceeded {
+            budget_ms: 100,
+            elapsed_ms: 200,
+        };
+        let decision = FallbackDecision::from_budget_exceeded(reason);
+        assert_eq!(decision.level, FallbackLevel::Partial);
+        assert!(decision.is_degraded());
+        assert!(matches!(decision.reason, FallbackReason::BudgetExceeded(_)));
+    }
+
+    #[test]
+    fn fallback_decision_from_error() {
+        let decision = FallbackDecision::from_error("test error");
+        assert_eq!(decision.level, FallbackLevel::Failed);
+        assert!(decision.is_degraded());
+        assert!(matches!(decision.reason, FallbackReason::AnalysisError(_)));
+    }
+
+    #[test]
+    fn fallback_policy_graceful_allows_degradation() {
+        let decision = FallbackDecision::from_error("test");
+        let result = apply_fallback_policy(FallbackMode::Graceful, &decision);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn fallback_policy_strict_rejects_degradation() {
+        let decision = FallbackDecision::from_error("test");
+        let result = apply_fallback_policy(FallbackMode::Strict, &decision);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("Strict mode"));
+    }
+
+    #[test]
+    fn fallback_policy_accepts_success() {
+        let decision = FallbackDecision::success();
+        // All modes should accept success
+        assert!(apply_fallback_policy(FallbackMode::Graceful, &decision).is_ok());
+        assert!(apply_fallback_policy(FallbackMode::Strict, &decision).is_ok());
+        assert!(apply_fallback_policy(FallbackMode::Warn, &decision).is_ok());
+    }
+
+    #[test]
+    fn fallback_log_entry_structure() {
+        let decision = FallbackDecision::from_budget_exceeded(
+            BudgetExceededReason::WorkExceeded {
+                budget: 1000,
+                consumed: 2000,
+            },
+        );
+        let entry = decision.log_entry();
+        assert_eq!(entry.level, "fnx_partial");
+        assert_eq!(entry.reason, "budget_exceeded");
+        assert!(entry.degraded);
+        assert!(entry.diagnostic.contains("2000"));
+    }
+
+    #[test]
+    fn fallback_error_display() {
+        let err = FallbackError {
+            level: FallbackLevel::Failed,
+            reason: FallbackReason::AnalysisError("test".to_string()),
+            message: "Test error message".to_string(),
+        };
+        assert_eq!(format!("{err}"), "Test error message");
     }
 }
