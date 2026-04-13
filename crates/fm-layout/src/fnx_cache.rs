@@ -97,11 +97,7 @@ impl CacheKey {
     }
 }
 
-fn hash_ir_and_config<H: Hasher>(
-    ir: &MermaidDiagramIr,
-    config: &ProjectionConfig,
-    hasher: &mut H,
-) {
+fn hash_ir_and_config<H: Hasher>(ir: &MermaidDiagramIr, config: &ProjectionConfig, hasher: &mut H) {
     // Hash diagram type
     std::mem::discriminant(&ir.diagram_type).hash(hasher);
 
@@ -485,7 +481,10 @@ mod tests {
         let key1 = CacheKey::from_ir_and_config(&ir1, &config);
         let key2 = CacheKey::from_ir_and_config(&ir2, &config);
 
-        assert_ne!(key1, key2, "different topology should produce different key");
+        assert_ne!(
+            key1, key2,
+            "different topology should produce different key"
+        );
     }
 
     #[test]
@@ -524,7 +523,10 @@ mod tests {
         let key1 = CacheKey::from_ir_and_config_with_scoring(&ir, &proj, &scoring1);
         let key2 = CacheKey::from_ir_and_config_with_scoring(&ir, &proj, &scoring2);
 
-        assert_ne!(key1, key2, "different scoring config should produce different key");
+        assert_ne!(
+            key1, key2,
+            "different scoring config should produce different key"
+        );
     }
 
     #[test]
@@ -567,9 +569,18 @@ mod tests {
         // Add ir3 - should evict ir2 (least recently used)
         cache.put_diagnostics(&ir3, &proj_config, FnxAnalysisResults::default());
 
-        assert!(cache.get_diagnostics(&ir1, &proj_config).is_some(), "ir1 should remain");
-        assert!(cache.get_diagnostics(&ir2, &proj_config).is_none(), "ir2 should be evicted");
-        assert!(cache.get_diagnostics(&ir3, &proj_config).is_some(), "ir3 should be present");
+        assert!(
+            cache.get_diagnostics(&ir1, &proj_config).is_some(),
+            "ir1 should remain"
+        );
+        assert!(
+            cache.get_diagnostics(&ir2, &proj_config).is_none(),
+            "ir2 should be evicted"
+        );
+        assert!(
+            cache.get_diagnostics(&ir3, &proj_config).is_some(),
+            "ir3 should be present"
+        );
     }
 
     #[test]

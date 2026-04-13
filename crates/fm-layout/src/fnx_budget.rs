@@ -45,8 +45,8 @@ pub struct AnalysisBudget {
 impl Default for AnalysisBudget {
     fn default() -> Self {
         Self {
-            time_budget_ms: 100,  // 100ms default
-            work_budget: 10000,   // 10k iterations default
+            time_budget_ms: 100, // 100ms default
+            work_budget: 10000,  // 10k iterations default
             trace_enabled: false,
         }
     }
@@ -142,13 +142,21 @@ impl BudgetExceededReason {
     #[must_use]
     pub fn as_diagnostic(&self) -> String {
         match self {
-            Self::TimeExceeded { budget_ms, elapsed_ms } => {
+            Self::TimeExceeded {
+                budget_ms,
+                elapsed_ms,
+            } => {
                 format!("FNX analysis exceeded time budget: {elapsed_ms}ms > {budget_ms}ms limit")
             }
             Self::WorkExceeded { budget, consumed } => {
                 format!("FNX analysis exceeded work budget: {consumed} > {budget} iterations")
             }
-            Self::BothExceeded { budget_ms, elapsed_ms, work_budget, work_consumed } => {
+            Self::BothExceeded {
+                budget_ms,
+                elapsed_ms,
+                work_budget,
+                work_consumed,
+            } => {
                 format!(
                     "FNX analysis exceeded budgets: time {elapsed_ms}ms > {budget_ms}ms, work {work_consumed} > {work_budget}"
                 )
@@ -875,9 +883,7 @@ mod tests {
 
     #[test]
     fn executor_work_tracking() {
-        let mut executor = BudgetExecutor::new(
-            AnalysisBudget::default().with_work_budget(100),
-        );
+        let mut executor = BudgetExecutor::new(AnalysisBudget::default().with_work_budget(100));
         executor.start();
         executor.record_work(50);
         assert_eq!(executor.work_consumed(), 50);
@@ -899,9 +905,7 @@ mod tests {
 
     #[test]
     fn executor_execute_with_time_exceeded() {
-        let mut executor = BudgetExecutor::new(
-            AnalysisBudget::default().with_time_budget_ms(1),
-        );
+        let mut executor = BudgetExecutor::new(AnalysisBudget::default().with_time_budget_ms(1));
         let result = executor.execute(|| {
             std::thread::sleep(Duration::from_millis(10));
             42
@@ -914,9 +918,7 @@ mod tests {
 
     #[test]
     fn executor_execute_with_work_exceeded() {
-        let mut executor = BudgetExecutor::new(
-            AnalysisBudget::default().with_work_budget(50),
-        );
+        let mut executor = BudgetExecutor::new(AnalysisBudget::default().with_work_budget(50));
         let result = executor.execute_with_progress(|exec| {
             exec.record_work(100);
             "done"
@@ -1028,14 +1030,23 @@ mod tests {
 
     #[test]
     fn fallback_mode_parsing() {
-        assert_eq!(FallbackMode::parse("graceful"), Some(FallbackMode::Graceful));
+        assert_eq!(
+            FallbackMode::parse("graceful"),
+            Some(FallbackMode::Graceful)
+        );
         assert_eq!(FallbackMode::parse("strict"), Some(FallbackMode::Strict));
         assert_eq!(FallbackMode::parse("warn"), Some(FallbackMode::Warn));
-        assert_eq!(FallbackMode::parse("GRACEFUL"), Some(FallbackMode::Graceful));
+        assert_eq!(
+            FallbackMode::parse("GRACEFUL"),
+            Some(FallbackMode::Graceful)
+        );
         assert_eq!(FallbackMode::parse("unknown"), None);
 
         // Test FromStr trait
-        assert_eq!("graceful".parse::<FallbackMode>().unwrap(), FallbackMode::Graceful);
+        assert_eq!(
+            "graceful".parse::<FallbackMode>().unwrap(),
+            FallbackMode::Graceful
+        );
         assert!("invalid".parse::<FallbackMode>().is_err());
     }
 
@@ -1094,12 +1105,10 @@ mod tests {
 
     #[test]
     fn fallback_log_entry_structure() {
-        let decision = FallbackDecision::from_budget_exceeded(
-            BudgetExceededReason::WorkExceeded {
-                budget: 1000,
-                consumed: 2000,
-            },
-        );
+        let decision = FallbackDecision::from_budget_exceeded(BudgetExceededReason::WorkExceeded {
+            budget: 1000,
+            consumed: 2000,
+        });
         let entry = decision.log_entry();
         assert_eq!(entry.level, "fnx_partial");
         assert_eq!(entry.reason, "budget_exceeded");

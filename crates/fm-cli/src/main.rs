@@ -709,6 +709,7 @@ struct FnxWitness {
     results_hash: String,
 }
 
+#[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
 fn fnx_results_hash(parts: &[&str]) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for part in parts {
@@ -2038,15 +2039,12 @@ fn render_source(source: &str, options: &RenderCommandOptions<'_>) -> Result<Ren
         let layout_decision_ledger =
             build_layout_decision_ledger(&parsed.ir, &traced_layout, &guard_report);
         let layout_decision_ledger_jsonl = layout_decision_ledger.to_jsonl()?;
-        #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
         let fnx_witness = build_fnx_witness(
             &traced_layout,
             fnx_enabled,
             options.fnx_projection,
             options.fnx_fallback,
         );
-        #[cfg(not(all(feature = "fnx-integration", not(target_arch = "wasm32"))))]
-        let fnx_witness = None;
 
         Some(RenderResult {
             format: format!("{:?}", options.format).to_lowercase(),
@@ -3108,7 +3106,7 @@ fn cmd_validate(input: &str, options: ValidateCommandOptions<'_>) -> Result<()> 
         (None, std::time::Duration::ZERO)
     };
     #[cfg(not(all(feature = "fnx-integration", not(target_arch = "wasm32"))))]
-    let (fnx_results, fnx_analysis_time): (Option<()>, std::time::Duration) =
+    let (_fnx_results, _fnx_analysis_time): (Option<()>, std::time::Duration) =
         (None, std::time::Duration::ZERO);
 
     sort_diagnostics(&mut diagnostics);

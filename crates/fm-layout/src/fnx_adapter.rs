@@ -11,8 +11,8 @@
 use std::collections::BTreeMap;
 
 use fm_core::{IrEndpoint, IrLabelId, MermaidDiagramIr};
-use fnx_classes::digraph::DiGraph;
 use fnx_classes::Graph;
+use fnx_classes::digraph::DiGraph;
 use fnx_runtime::CgseValue;
 
 // ============================================================================
@@ -74,20 +74,15 @@ impl DirectedProjectionPolicy {
                 "degree_centrality",
                 "clustering_coefficient",
             ],
-            Self::BidirectionalHalfWeight => &[
-                "weighted_centrality",
-                "flow_approximation",
-                "betweenness",
-            ],
+            Self::BidirectionalHalfWeight => {
+                &["weighted_centrality", "flow_approximation", "betweenness"]
+            }
             Self::BidirectionalFullWeight => &[
                 "clustering_coefficient",
                 "modularity",
                 "community_detection",
             ],
-            Self::PenaltyWeighted => &[
-                "weighted_centrality",
-                "importance_ranking",
-            ],
+            Self::PenaltyWeighted => &["weighted_centrality", "importance_ranking"],
         }
     }
 
@@ -100,18 +95,9 @@ impl DirectedProjectionPolicy {
                 "dominator_analysis",
                 "directed_cycle_detection",
             ],
-            Self::BidirectionalHalfWeight => &[
-                "exact_reachability",
-                "topological_sort",
-            ],
-            Self::BidirectionalFullWeight => &[
-                "directional_flow",
-                "source_sink_analysis",
-            ],
-            Self::PenaltyWeighted => &[
-                "exact_reachability",
-                "directional_flow",
-            ],
+            Self::BidirectionalHalfWeight => &["exact_reachability", "topological_sort"],
+            Self::BidirectionalFullWeight => &["directional_flow", "source_sink_analysis"],
+            Self::PenaltyWeighted => &["exact_reachability", "directional_flow"],
         }
     }
 }
@@ -255,7 +241,10 @@ pub fn ir_to_graph_with_policy(
         );
         let _ = graph.add_edge_with_attrs(&source_fnx, &target_fnx, attrs);
 
-        let label_text = ir.edges.get(edge_idx).and_then(|e| resolve_label(ir, e.label));
+        let label_text = ir
+            .edges
+            .get(edge_idx)
+            .and_then(|e| resolve_label(ir, e.label));
         let arrow_str = ir
             .edges
             .get(edge_idx)
@@ -552,7 +541,10 @@ pub fn ir_to_digraph(ir: &MermaidDiagramIr) -> (DiGraph, ProjectionTable) {
             attrs.insert("label".to_string(), CgseValue::String(label_text));
         }
         attrs.insert("ir_index".to_string(), CgseValue::Int(idx as i64));
-        attrs.insert("shape".to_string(), CgseValue::String(format!("{:?}", node.shape)));
+        attrs.insert(
+            "shape".to_string(),
+            CgseValue::String(format!("{:?}", node.shape)),
+        );
 
         // Ignore result - node might already exist in hardened mode
         let _ = graph.add_node_with_attrs(&fnx_id, attrs);
@@ -660,10 +652,22 @@ mod tests {
     fn make_test_ir() -> MermaidDiagramIr {
         // Create labels first
         let labels = vec![
-            IrLabel { text: "Node A".to_string(), span: Span::default() },
-            IrLabel { text: "Node B".to_string(), span: Span::default() },
-            IrLabel { text: "Node C".to_string(), span: Span::default() },
-            IrLabel { text: "edge 1".to_string(), span: Span::default() },
+            IrLabel {
+                text: "Node A".to_string(),
+                span: Span::default(),
+            },
+            IrLabel {
+                text: "Node B".to_string(),
+                span: Span::default(),
+            },
+            IrLabel {
+                text: "Node C".to_string(),
+                span: Span::default(),
+            },
+            IrLabel {
+                text: "edge 1".to_string(),
+                span: Span::default(),
+            },
         ];
 
         MermaidDiagramIr {
@@ -739,10 +743,7 @@ mod tests {
         );
 
         // Check reverse lookup
-        assert_eq!(
-            table.get_projected_id("n0"),
-            Some(&ProjectedId::Node(0))
-        );
+        assert_eq!(table.get_projected_id("n0"), Some(&ProjectedId::Node(0)));
         assert_eq!(table.get_ir_node_index("n1"), Some(1));
     }
 
@@ -793,21 +794,15 @@ mod tests {
         });
 
         let (_graph, table) = ir_to_digraph(&ir);
-        let meta_first = table
-            .get_edge_meta_by_index(0)
-            .expect("first edge meta");
-        let meta_second = table
-            .get_edge_meta_by_index(2)
-            .expect("second edge meta");
+        let meta_first = table.get_edge_meta_by_index(0).expect("first edge meta");
+        let meta_second = table.get_edge_meta_by_index(2).expect("second edge meta");
 
         assert_eq!(meta_first.source_index, 0);
         assert_eq!(meta_first.target_index, 1);
         assert_eq!(meta_second.source_index, 0);
         assert_eq!(meta_second.target_index, 1);
 
-        let pair_meta = table
-            .get_edge_meta("n0", "n1")
-            .expect("pair meta");
+        let pair_meta = table.get_edge_meta("n0", "n1").expect("pair meta");
         assert_eq!(pair_meta.ir_edge_index, 0);
 
         let all_meta = table.get_edge_meta_all("n0", "n1");
@@ -824,13 +819,20 @@ mod tests {
         let mut results = Vec::new();
         for _ in 0..5 {
             let table = ProjectionTable::from_ir(&ir);
-            let ids: Vec<_> = table.all_ids_ordered().iter().map(|(k, v)| ((*k).clone(), v.to_string())).collect();
+            let ids: Vec<_> = table
+                .all_ids_ordered()
+                .iter()
+                .map(|(k, v)| ((*k).clone(), v.to_string()))
+                .collect();
             results.push(ids);
         }
 
         // All results should be identical
         for i in 1..results.len() {
-            assert_eq!(results[0], results[i], "non-deterministic ordering at iteration {i}");
+            assert_eq!(
+                results[0], results[i],
+                "non-deterministic ordering at iteration {i}"
+            );
         }
     }
 

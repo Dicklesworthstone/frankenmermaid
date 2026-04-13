@@ -11,8 +11,8 @@
 
 use fm_core::{IrNodeId, MermaidDiagramIr, Span};
 use fnx_algorithms::{
-    articulation_points, bridges, connected_components, cycle_basis, ArticulationPointsResult,
-    BridgesResult, ComponentsResult, CycleBasisResult,
+    ArticulationPointsResult, BridgesResult, ComponentsResult, CycleBasisResult,
+    articulation_points, bridges, connected_components, cycle_basis,
 };
 
 use crate::fnx_adapter::{ProjectionTable, ir_to_graph};
@@ -277,8 +277,7 @@ fn analyze_bridges(
                 let to_idx = e.to.resolved_node_id(&ir.ports).map(|id| id.0);
                 match (from_idx, to_idx) {
                     (Some(f), Some(t)) => {
-                        (f == source_idx && t == target_idx)
-                            || (f == target_idx && t == source_idx)
+                        (f == source_idx && t == target_idx) || (f == target_idx && t == source_idx)
                     }
                     _ => false,
                 }

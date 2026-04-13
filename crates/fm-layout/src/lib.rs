@@ -43,7 +43,9 @@ use good_lp::{Expression, Solution, SolverModel, constraint, default_solver, var
 use tracing::{debug, info, trace, warn};
 
 #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
-use crate::fnx_ordering::{NodeCentralityScores, compare_with_centrality, compute_centrality_scores};
+use crate::fnx_ordering::{
+    NodeCentralityScores, compare_with_centrality, compute_centrality_scores,
+};
 
 /// Design contract for subgraph-level incremental invalidation (`bd-20fq.1`).
 ///
@@ -994,6 +996,7 @@ struct LayoutMemoKey {
     algorithm: LayoutAlgorithm,
     cycle_strategy: CycleStrategy,
     collapse_cycle_clusters: bool,
+    fnx_enabled: bool,
     font_size_bits: u32,
     avg_char_width_bits: u32,
     line_height_bits: u32,
@@ -3217,6 +3220,7 @@ fn layout_memo_key(
         algorithm,
         cycle_strategy: config.cycle_strategy,
         collapse_cycle_clusters: config.collapse_cycle_clusters,
+        fnx_enabled: config.fnx_enabled,
         font_size_bits: metrics.font_size().to_bits(),
         avg_char_width_bits: metrics.avg_char_width().to_bits(),
         line_height_bits: metrics.line_height_px().to_bits(),
@@ -3234,13 +3238,15 @@ fn stable_layout_request_hash(
     metrics: &fm_core::FontMetrics,
 ) -> u64 {
     let descriptor = format!(
-        "{ir:?}|{algorithm}|{cycle_strategy}|{collapse_cycle_clusters}|{edge_routing}|\
-         {node_spacing}|{rank_spacing}|{cluster_padding}|{sequence_participant_gap_extra}|\
+        "{ir:?}|{algorithm}|{cycle_strategy}|{collapse_cycle_clusters}|{fnx_enabled}|\
+         {edge_routing}|{node_spacing}|{rank_spacing}|{cluster_padding}|\
+         {sequence_participant_gap_extra}|\
          {sequence_min_message_gap}|{font_size}|{avg_char_width}|{line_height_px}|\
          {max_layout_time_ms}|{max_layout_iterations}|{max_route_ops}",
         algorithm = algorithm.as_str(),
         cycle_strategy = config.cycle_strategy.as_str(),
         collapse_cycle_clusters = config.collapse_cycle_clusters,
+        fnx_enabled = config.fnx_enabled,
         edge_routing = config.edge_routing as u8,
         node_spacing = config.spacing.node_spacing,
         rank_spacing = config.spacing.rank_spacing,
@@ -10500,7 +10506,10 @@ fn build_centrality_assist(_: &MermaidDiagramIr, _: &LayoutConfig) -> Centrality
 
 /// Compute centrality tier data for layout extensions (FNX-enabled builds only).
 #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
-fn compute_layout_centrality_tiers(ir: &MermaidDiagramIr, config: &LayoutConfig) -> Vec<NodeCentrality> {
+fn compute_layout_centrality_tiers(
+    ir: &MermaidDiagramIr,
+    config: &LayoutConfig,
+) -> Vec<NodeCentrality> {
     if !config.fnx_enabled {
         return Vec::new();
     }
@@ -10592,8 +10601,7 @@ fn reorder_rank_by_barycenter(
     #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
     match centrality {
         CentralityAssist::Enabled(scores) => {
-            scored_nodes
-                .sort_by(|left, right| compare_with_centrality(*left, *right, scores));
+            scored_nodes.sort_by(|left, right| compare_with_centrality(*left, *right, scores));
         }
         CentralityAssist::Disabled => {
             scored_nodes.sort_by(|left, right| match (left.1, right.1) {

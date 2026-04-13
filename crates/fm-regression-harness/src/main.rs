@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use fm_core::{DiagramType, MermaidDiagramIr};
-use fm_layout::{layout_diagram_with_config, DiagramLayout, LayoutConfig};
+use fm_layout::{DiagramLayout, LayoutConfig, layout_diagram_with_config};
 use fm_parser::parse;
 use fm_render_svg::{SvgRenderConfig, render_svg_with_layout};
 use serde::Serialize;
@@ -177,7 +177,9 @@ fn main() -> Result<()> {
         reports.push(CaseReport {
             case_id: case_id.clone(),
             input_path: input_path.display().to_string(),
-            golden_path: golden_path.exists().then(|| golden_path.display().to_string()),
+            golden_path: golden_path
+                .exists()
+                .then(|| golden_path.display().to_string()),
             output_path: output_path.display().to_string(),
             status,
             output_hash,
@@ -206,8 +208,7 @@ fn main() -> Result<()> {
     fs::write(run_dir.join("report.json"), format!("{report_json}\n"))
         .context("write report.json")?;
     let report_html = render_report_html(&report);
-    fs::write(run_dir.join("report.html"), report_html)
-        .context("write report.html")?;
+    fs::write(run_dir.join("report.html"), report_html).context("write report.html")?;
 
     if args.fail_on_mismatch && report.mismatched > 0 {
         anyhow::bail!("{} mismatches detected", report.mismatched);
@@ -249,12 +250,12 @@ fn fnv_hex(value: &str) -> String {
     format!("{:016x}", fnv1a_64(value.as_bytes()))
 }
 
-fn compute_quality_metrics(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> Option<QualityMetrics> {
+fn compute_quality_metrics(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+) -> Option<QualityMetrics> {
     // Only compute for flowcharts and similar directed diagrams
-    if !matches!(
-        ir.diagram_type,
-        DiagramType::Flowchart | DiagramType::State
-    ) {
+    if !matches!(ir.diagram_type, DiagramType::Flowchart | DiagramType::State) {
         return None;
     }
 
@@ -380,12 +381,7 @@ fn points_close(a: &fm_layout::LayoutPoint, b: &fm_layout::LayoutPoint, eps: f32
     (a.x - b.x).abs() < eps && (a.y - b.y).abs() < eps
 }
 
-fn segments_intersect(
-    p1: (f64, f64),
-    p2: (f64, f64),
-    p3: (f64, f64),
-    p4: (f64, f64),
-) -> bool {
+fn segments_intersect(p1: (f64, f64), p2: (f64, f64), p3: (f64, f64), p4: (f64, f64)) -> bool {
     const EPS: f64 = 1e-9;
 
     let d1 = direction(p3, p4, p1);
@@ -422,10 +418,7 @@ fn direction(p1: (f64, f64), p2: (f64, f64), p3: (f64, f64)) -> f64 {
 }
 
 fn on_segment(p1: (f64, f64), p2: (f64, f64), p: (f64, f64)) -> bool {
-    p.0 >= p1.0.min(p2.0)
-        && p.0 <= p1.0.max(p2.0)
-        && p.1 >= p1.1.min(p2.1)
-        && p.1 <= p1.1.max(p2.1)
+    p.0 >= p1.0.min(p2.0) && p.0 <= p1.0.max(p2.0) && p.1 >= p1.1.min(p2.1) && p.1 <= p1.1.max(p2.1)
 }
 
 fn count_back_edges(_ir: &MermaidDiagramIr, layout: &DiagramLayout) -> usize {
@@ -482,12 +475,16 @@ fn render_report_html(report: &RunReport) -> String {
     );
     html.push_str(".summary{display:flex; gap:16px; margin-bottom:20px;}\n");
     html.push_str(".card{background:#121a23; padding:12px 16px; border-radius:10px;}\n");
-    html.push_str(".case{margin-bottom:24px; padding:16px; background:#10161f; border-radius:12px;}\n");
+    html.push_str(
+        ".case{margin-bottom:24px; padding:16px; background:#10161f; border-radius:12px;}\n",
+    );
     html.push_str(".status{font-weight:600;}\n");
     html.push_str(".grid{display:grid; grid-template-columns:1fr 1fr; gap:16px;}\n");
     html.push_str(".panel{background:#0b1119; padding:12px; border-radius:8px;}\n");
     html.push_str(".panel svg{width:100%; height:auto;}\n");
-    html.push_str(".label{font-size:12px; text-transform:uppercase; letter-spacing:.12em; color:#8b949e;}\n");
+    html.push_str(
+        ".label{font-size:12px; text-transform:uppercase; letter-spacing:.12em; color:#8b949e;}\n",
+    );
     html.push_str(".mono{font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;}\n");
     html.push_str("</style></head><body>");
 
@@ -513,10 +510,7 @@ fn render_report_html(report: &RunReport) -> String {
 
     for case in &report.cases {
         html.push_str("<div class=\"case\">");
-        html.push_str(&format!(
-            "<div class=\"label\">{}</div>",
-            case.case_id
-        ));
+        html.push_str(&format!("<div class=\"label\">{}</div>", case.case_id));
         html.push_str(&format!(
             "<div class=\"status\">Status: {}</div>",
             case.status

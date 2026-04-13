@@ -15,8 +15,8 @@ use std::collections::BTreeMap;
 
 use fm_core::{IrEndpoint, IrPort, MermaidDiagramIr};
 use fnx_algorithms::{
-    articulation_points, bridges, degree_centrality, ArticulationPointsResult, BridgesResult,
-    DegreeCentralityResult,
+    ArticulationPointsResult, BridgesResult, DegreeCentralityResult, articulation_points, bridges,
+    degree_centrality,
 };
 
 use crate::fnx_adapter::{ProjectionTable, ir_to_graph};
@@ -93,10 +93,7 @@ impl CriticalityScoringResults {
     /// Get the criticality score for an edge, or a default low score if unavailable.
     #[must_use]
     pub fn get_score(&self, edge_index: usize) -> f64 {
-        self.scores
-            .get(&edge_index)
-            .map(|s| s.score)
-            .unwrap_or(0.0)
+        self.scores.get(&edge_index).map(|s| s.score).unwrap_or(0.0)
     }
 
     /// Sort edges by criticality (ascending = reverse least critical first).
@@ -164,9 +161,7 @@ pub fn compute_criticality_scores(
 
         let pair = (source_idx.min(target_idx), source_idx.max(target_idx));
         let multiplicity = pair_counts.get(&pair).copied().unwrap_or(1);
-        let is_bridge = source_idx != target_idx
-            && multiplicity == 1
-            && bridge_set.contains(&pair);
+        let is_bridge = source_idx != target_idx && multiplicity == 1 && bridge_set.contains(&pair);
         let source_is_articulation = articulation_set.contains(&source_idx);
         let target_is_articulation = articulation_set.contains(&target_idx);
         let source_centrality = centrality_map.get(&source_idx).copied().unwrap_or(0.0);
@@ -484,10 +479,16 @@ mod tests {
         let config = CriticalityScoringConfig::default();
         let results = compute_criticality_scores(&ir, &config);
 
-        assert_eq!(results.bridge_count, 0, "parallel edges should not count as bridges");
+        assert_eq!(
+            results.bridge_count, 0,
+            "parallel edges should not count as bridges"
+        );
         for edge_idx in 0..2 {
             let score = results.scores.get(&edge_idx).expect("edge score");
-            assert!(!score.is_bridge, "parallel edge {edge_idx} should not be a bridge");
+            assert!(
+                !score.is_bridge,
+                "parallel edge {edge_idx} should not be a bridge"
+            );
         }
     }
 
