@@ -103,7 +103,9 @@ pub fn compute_centrality_scores(ir: &MermaidDiagramIr) -> NodeCentralityScores 
 
     for entry in &centrality_result.scores {
         if let Some(ir_idx) = table.get_ir_node_index(&entry.node) {
-            scores.degree.insert(ir_idx, QuantizedScore::from_normalized(entry.score));
+            scores
+                .degree
+                .insert(ir_idx, QuantizedScore::from_normalized(entry.score));
         }
     }
 
@@ -158,19 +160,17 @@ pub fn compare_with_centrality(
         // Only b has barycenter: b comes first
         (None, Some(_)) => Ordering::Greater,
         // Neither has barycenter: use stable index, then centrality, then node index
-        (None, None) => {
-            match a.2.cmp(&b.2) {
-                Ordering::Equal => {
-                    let a_cent = centrality.get_degree(a.0);
-                    let b_cent = centrality.get_degree(b.0);
-                    match b_cent.cmp(&a_cent) {
-                        Ordering::Equal => a.0.cmp(&b.0),
-                        other => other,
-                    }
+        (None, None) => match a.2.cmp(&b.2) {
+            Ordering::Equal => {
+                let a_cent = centrality.get_degree(a.0);
+                let b_cent = centrality.get_degree(b.0);
+                match b_cent.cmp(&a_cent) {
+                    Ordering::Equal => a.0.cmp(&b.0),
+                    other => other,
                 }
-                other => other,
             }
-        }
+            other => other,
+        },
     }
 }
 
@@ -181,8 +181,8 @@ pub fn compare_with_centrality(
 /// Generate a cache key for centrality scores based on IR structure.
 #[must_use]
 pub fn centrality_cache_key(ir: &MermaidDiagramIr) -> u64 {
-    use std::hash::{Hash, Hasher};
     use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
 
     let mut hasher = DefaultHasher::new();
 
@@ -269,20 +269,15 @@ pub fn classify_centrality_tiers(scores: &NodeCentralityScores) -> Vec<NodeCentr
     }
 
     // Calculate threshold indices (using ceiling division for fairer distribution)
-    let high_count = total.div_ceil(5); // Top ~20%, at least 1
-    let low_start = total - total.div_ceil(5); // Bottom ~20%
-
-    // Get score values at threshold boundaries
-    // high_threshold: scores >= this value are High
-    // low_threshold: scores <= this value are Low
-    let high_threshold = all_scores.get(high_count.saturating_sub(1)).map(|x| x.1).unwrap_or(0);
-    let low_threshold = all_scores.get(low_start).map(|x| x.1).unwrap_or(0);
+    // Top ~20% get High tier, bottom ~20% get Low tier, rest get Medium
+    let high_count = total.div_ceil(5); // At least 1 node in High tier
+    let low_start = total - total.div_ceil(5); // Index where Low tier begins
 
     all_scores
         .into_iter()
         .enumerate()
         .map(|(rank, (node_index, score))| {
-            // Use rank position for tier assignment to handle ties correctly
+            // Use rank position for tier assignment to handle ties consistently
             let tier = if rank < high_count {
                 CentralityTier::High
             } else if rank >= low_start {
@@ -290,8 +285,6 @@ pub fn classify_centrality_tiers(scores: &NodeCentralityScores) -> Vec<NodeCentr
             } else {
                 CentralityTier::Medium
             };
-            // Store the score for potential display, but use rank for tier
-            let _ = (high_threshold, low_threshold); // silence unused warnings
             NodeCentrality {
                 node_index,
                 score,
@@ -404,7 +397,10 @@ mod tests {
     #[test]
     fn quantized_score_clamping() {
         assert_eq!(QuantizedScore::from_normalized(-0.5).raw(), 0);
-        assert_eq!(QuantizedScore::from_normalized(1.5).raw(), QUANTIZATION_FACTOR);
+        assert_eq!(
+            QuantizedScore::from_normalized(1.5).raw(),
+            QUANTIZATION_FACTOR
+        );
     }
 
     #[test]
@@ -572,9 +568,18 @@ mod tests {
         assert_eq!(tiers.len(), 10);
 
         // Count tiers
-        let high_count = tiers.iter().filter(|t| t.tier == CentralityTier::High).count();
-        let low_count = tiers.iter().filter(|t| t.tier == CentralityTier::Low).count();
-        let medium_count = tiers.iter().filter(|t| t.tier == CentralityTier::Medium).count();
+        let high_count = tiers
+            .iter()
+            .filter(|t| t.tier == CentralityTier::High)
+            .count();
+        let low_count = tiers
+            .iter()
+            .filter(|t| t.tier == CentralityTier::Low)
+            .count();
+        let medium_count = tiers
+            .iter()
+            .filter(|t| t.tier == CentralityTier::Medium)
+            .count();
 
         // With 10 nodes and div_ceil(10, 5) = 2, expect 2 High, 2 Low, 6 Medium
         assert_eq!(high_count, 2, "expected 2 high tier nodes");
@@ -632,7 +637,9 @@ impl AblationSummary {
 
         // Adoption threshold: centrality is recommended when time < 1ms (1000us)
         const TIME_BUDGET_US: u64 = 1000;
-        let passing: Vec<_> = self.results.iter()
+        let passing: Vec<_> = self
+            .results
+            .iter()
             .filter(|r| r.centrality_time_us < TIME_BUDGET_US)
             .collect();
 
@@ -730,7 +737,11 @@ mod ablation_tests {
         assert_eq!(result.node_count, 10);
         assert_eq!(result.edge_count, 9);
         // Small graphs should be very fast (< 1ms)
-        assert!(result.centrality_time_us < 10000, "small graph took too long: {}us", result.centrality_time_us);
+        assert!(
+            result.centrality_time_us < 10000,
+            "small graph took too long: {}us",
+            result.centrality_time_us
+        );
     }
 
     #[test]
@@ -743,7 +754,11 @@ mod ablation_tests {
         // Dense graph has 3 edges per node (with wraparound)
         assert!(result.edge_count > 100);
         // Medium graphs should complete in reasonable time (< 100ms)
-        assert!(result.centrality_time_us < 100000, "medium graph took too long: {}us", result.centrality_time_us);
+        assert!(
+            result.centrality_time_us < 100000,
+            "medium graph took too long: {}us",
+            result.centrality_time_us
+        );
     }
 
     #[test]
@@ -771,10 +786,12 @@ mod ablation_tests {
         let ir = make_dense_graph(30);
 
         // Run 5 times, verify centrality scores are identical
-        let results: Vec<_> = (0..5).map(|_| {
-            let scores = compute_centrality_scores(&ir);
-            scores.degree.clone()
-        }).collect();
+        let results: Vec<_> = (0..5)
+            .map(|_| {
+                let scores = compute_centrality_scores(&ir);
+                scores.degree.clone()
+            })
+            .collect();
 
         for i in 1..results.len() {
             assert_eq!(results[0], results[i], "results differ at iteration {i}");
@@ -790,17 +807,15 @@ mod ablation_tests {
 
         // For 20 nodes, centrality should definitely be fast enough.
         // Use lenient 5ms threshold to account for CI timing variance.
-        assert!(result.centrality_time_us < 5000,
+        assert!(
+            result.centrality_time_us < 5000,
             "Centrality for 20-node graph should be < 5ms, got {}us",
-            result.centrality_time_us);
+            result.centrality_time_us
+        );
 
         // Verify the comparison function works with computed scores
         let scores = compute_centrality_scores(&small);
-        let cmp = compare_with_centrality(
-            (0, Some(1.5), 0),
-            (1, Some(1.5), 1),
-            &scores,
-        );
+        let cmp = compare_with_centrality((0, Some(1.5), 0), (1, Some(1.5), 1), &scores);
         // Should produce deterministic ordering
         assert!(cmp != std::cmp::Ordering::Equal || scores.is_empty());
     }
