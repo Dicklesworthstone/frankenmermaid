@@ -230,6 +230,78 @@ fn hash_endpoint<H: std::hash::Hasher>(
 }
 
 // ============================================================================
+// Tier Classification
+// ============================================================================
+
+use crate::{CentralityTier, NodeCentrality};
+
+/// Convert centrality scores to tier-classified layout data.
+///
+/// Nodes are classified into High (top 20%), Medium (middle 60%), and Low (bottom 20%)
+/// tiers based on their relative centrality scores. For small graphs (< 5 nodes),
+/// all nodes are classified as Medium since percentile tiers are not meaningful.
+#[must_use]
+pub fn classify_centrality_tiers(scores: &NodeCentralityScores) -> Vec<NodeCentrality> {
+    if scores.degree.is_empty() {
+        return Vec::new();
+    }
+
+    // Collect all scores sorted descending for percentile calculation
+    let mut all_scores: Vec<(usize, u32)> = scores
+        .degree
+        .iter()
+        .map(|(idx, qs)| (*idx, qs.raw()))
+        .collect();
+    all_scores.sort_by_key(|x| std::cmp::Reverse(x.1)); // Descending by score
+
+    let total = all_scores.len();
+
+    // For small graphs, percentile tiers are not meaningful - classify all as Medium
+    if total < 5 {
+        return all_scores
+            .into_iter()
+            .map(|(node_index, score)| NodeCentrality {
+                node_index,
+                score,
+                tier: CentralityTier::Medium,
+            })
+            .collect();
+    }
+
+    // Calculate threshold indices (using ceiling division for fairer distribution)
+    let high_count = total.div_ceil(5); // Top ~20%, at least 1
+    let low_start = total - total.div_ceil(5); // Bottom ~20%
+
+    // Get score values at threshold boundaries
+    // high_threshold: scores >= this value are High
+    // low_threshold: scores <= this value are Low
+    let high_threshold = all_scores.get(high_count.saturating_sub(1)).map(|x| x.1).unwrap_or(0);
+    let low_threshold = all_scores.get(low_start).map(|x| x.1).unwrap_or(0);
+
+    all_scores
+        .into_iter()
+        .enumerate()
+        .map(|(rank, (node_index, score))| {
+            // Use rank position for tier assignment to handle ties correctly
+            let tier = if rank < high_count {
+                CentralityTier::High
+            } else if rank >= low_start {
+                CentralityTier::Low
+            } else {
+                CentralityTier::Medium
+            };
+            // Store the score for potential display, but use rank for tier
+            let _ = (high_threshold, low_threshold); // silence unused warnings
+            NodeCentrality {
+                node_index,
+                score,
+                tier,
+            }
+        })
+        .collect()
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -452,6 +524,66 @@ mod tests {
 
         assert!(!scores.computed);
         assert!(scores.is_empty());
+    }
+
+    #[test]
+    fn classify_tiers_empty_scores() {
+        let scores = NodeCentralityScores::default();
+        let tiers = classify_centrality_tiers(&scores);
+        assert!(tiers.is_empty());
+    }
+
+    #[test]
+    fn classify_tiers_small_graph_all_medium() {
+        // Small graph (< 5 nodes) should all be Medium
+        let ir = make_chain_ir(); // 3 nodes
+        let scores = compute_centrality_scores(&ir);
+        let tiers = classify_centrality_tiers(&scores);
+
+        assert_eq!(tiers.len(), 3);
+        for tier_data in &tiers {
+            assert_eq!(tier_data.tier, CentralityTier::Medium);
+        }
+    }
+
+    #[test]
+    fn classify_tiers_larger_graph() {
+        // Create a 10-node graph to test tier distribution
+        let mut ir = MermaidDiagramIr::default();
+        for i in 0..10 {
+            ir.nodes.push(IrNode {
+                id: format!("N{i}"),
+                shape: NodeShape::Rect,
+                ..Default::default()
+            });
+        }
+        // Create a star topology: N0 connected to all others
+        for i in 1..10 {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(0)),
+                to: IrEndpoint::Node(IrNodeId(i)),
+                ..Default::default()
+            });
+        }
+
+        let scores = compute_centrality_scores(&ir);
+        let tiers = classify_centrality_tiers(&scores);
+
+        assert_eq!(tiers.len(), 10);
+
+        // Count tiers
+        let high_count = tiers.iter().filter(|t| t.tier == CentralityTier::High).count();
+        let low_count = tiers.iter().filter(|t| t.tier == CentralityTier::Low).count();
+        let medium_count = tiers.iter().filter(|t| t.tier == CentralityTier::Medium).count();
+
+        // With 10 nodes and div_ceil(10, 5) = 2, expect 2 High, 2 Low, 6 Medium
+        assert_eq!(high_count, 2, "expected 2 high tier nodes");
+        assert_eq!(low_count, 2, "expected 2 low tier nodes");
+        assert_eq!(medium_count, 6, "expected 6 medium tier nodes");
+
+        // The center node (N0) should be High (highest centrality)
+        let center_tier = tiers.iter().find(|t| t.node_index == 0).unwrap();
+        assert_eq!(center_tier.tier, CentralityTier::High);
     }
 }
 

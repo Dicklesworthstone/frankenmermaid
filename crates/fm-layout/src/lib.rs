@@ -1719,6 +1719,44 @@ pub struct LayoutClusterDivider {
     pub end: LayoutPoint,
 }
 
+/// Centrality tier for semantic styling of nodes.
+///
+/// Nodes are classified into tiers based on their relative centrality scores
+/// for use in visual emphasis and styling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum CentralityTier {
+    /// Node has high centrality (top 20% of scores).
+    High,
+    /// Node has medium centrality (middle 60% of scores).
+    #[default]
+    Medium,
+    /// Node has low centrality (bottom 20% of scores).
+    Low,
+}
+
+impl CentralityTier {
+    /// Get the CSS class suffix for this centrality tier.
+    #[must_use]
+    pub const fn css_class_suffix(&self) -> &'static str {
+        match self {
+            Self::High => "high",
+            Self::Medium => "medium",
+            Self::Low => "low",
+        }
+    }
+}
+
+/// Centrality data for a single node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeCentrality {
+    /// Index of the node in the IR.
+    pub node_index: usize,
+    /// Quantized centrality score (higher = more central).
+    pub score: u32,
+    /// Tier classification based on score distribution.
+    pub tier: CentralityTier,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct LayoutExtensions {
     pub bands: Vec<LayoutBand>,
@@ -1735,6 +1773,8 @@ pub struct LayoutExtensions {
     pub sequence_lifecycle_markers: Vec<LayoutSequenceLifecycleMarker>,
     /// Mirrored participant headers rendered at the bottom of sequence diagrams.
     pub sequence_mirror_headers: Vec<LayoutNodeBox>,
+    /// Node centrality data for semantic styling (populated when FNX is enabled).
+    pub node_centrality: Vec<NodeCentrality>,
 }
 
 /// A sequence diagram note positioned near a participant's lifeline.
@@ -5053,6 +5093,7 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                 ),
                 sequence_lifecycle_markers: lifecycle_markers,
                 sequence_mirror_headers,
+                node_centrality: Vec::new(),
             },
             dirty_regions: Vec::new(),
         },
