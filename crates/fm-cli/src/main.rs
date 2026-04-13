@@ -3108,7 +3108,8 @@ fn cmd_validate(input: &str, options: ValidateCommandOptions<'_>) -> Result<()> 
         (None, std::time::Duration::ZERO)
     };
     #[cfg(not(all(feature = "fnx-integration", not(target_arch = "wasm32"))))]
-    let (fnx_results, fnx_analysis_time) = (None, std::time::Duration::ZERO);
+    let (fnx_results, fnx_analysis_time): (Option<()>, std::time::Duration) =
+        (None, std::time::Duration::ZERO);
 
     sort_diagnostics(&mut diagnostics);
 

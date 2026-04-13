@@ -42,11 +42,11 @@ use fm_core::{
     mermaid_node_element_id_with_variant,
 };
 use fm_layout::{
-    DiagramLayout, FillStyle, LayoutBand, LayoutBandKind, LayoutEdgePath, LayoutNodeBox,
-    LineCap as RenderLineCap, LineJoin as RenderLineJoin, MarkerKind, PathCmd, RenderClip,
-    RenderGroup, RenderItem, RenderPath, RenderScene, RenderSource, RenderText, RenderTransform,
-    StrokeStyle, TextAlign as RenderTextAlign, TextBaseline as RenderTextBaseline,
-    build_render_scene,
+    CentralityTier, DiagramLayout, FillStyle, LayoutBand, LayoutBandKind, LayoutEdgePath,
+    LayoutNodeBox, LineCap as RenderLineCap, LineJoin as RenderLineJoin, MarkerKind,
+    NodeCentrality, PathCmd, RenderClip, RenderGroup, RenderItem, RenderPath, RenderScene,
+    RenderSource, RenderText, RenderTransform, StrokeStyle, TextAlign as RenderTextAlign,
+    TextBaseline as RenderTextBaseline, build_render_scene,
 };
 
 /// Node fill gradient mode.
@@ -2299,6 +2299,7 @@ fn render_layout_to_svg(
             detail,
             &theme.colors,
             emit_classdef_classes,
+            &layout.extensions.node_centrality,
         );
         doc = doc.child(node_elem);
     }
@@ -2313,6 +2314,7 @@ fn render_layout_to_svg(
             detail,
             &theme.colors,
             emit_classdef_classes,
+            &[], // Mirror headers don't have centrality data
         )
         .id(&mermaid_node_element_id_with_variant(
             &node_box.node_id,
@@ -3567,6 +3569,17 @@ fn format_xychart_tick_value(value: f32) -> String {
     }
 }
 
+/// Look up a node's centrality tier by index.
+fn lookup_centrality_tier(
+    node_centrality: &[NodeCentrality],
+    node_index: usize,
+) -> Option<CentralityTier> {
+    node_centrality
+        .iter()
+        .find(|nc| nc.node_index == node_index)
+        .map(|nc| nc.tier)
+}
+
 /// Render a single node to an SVG element.
 #[allow(clippy::too_many_arguments)]
 fn render_node(
@@ -3578,6 +3591,7 @@ fn render_node(
     detail: RenderDetailProfile,
     colors: &ThemeColors,
     emit_classdef_classes: bool,
+    node_centrality: &[NodeCentrality],
 ) -> Element {
     use fm_core::NodeShape;
 
@@ -3639,6 +3653,10 @@ fn render_node(
         .class(node_shape_css_class(shape))
         .data("id", node_id)
         .data("fm-node-id", node_id);
+    // Add centrality tier class if available (FNX semantic styling)
+    if let Some(tier) = lookup_centrality_tier(node_centrality, node_box.node_index) {
+        group = group.class(&format!("fm-node-centrality-{}", tier.css_class_suffix()));
+    }
     if config.animations_enabled {
         group = group.attr(
             "style",
