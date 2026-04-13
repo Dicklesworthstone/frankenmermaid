@@ -776,6 +776,8 @@ pub struct LayoutConfig {
     pub spacing: LayoutSpacing,
     pub edge_routing: EdgeRouting,
     pub font_metrics: Option<fm_core::FontMetrics>,
+    /// Enable FNX-assisted ordering heuristics when available.
+    pub fnx_enabled: bool,
     pub constraint_solver: ConstraintSolverMode,
     pub constraint_solver_time_limit_ms: u64,
 }
@@ -795,6 +797,7 @@ impl Default for LayoutConfig {
             spacing: LayoutSpacing::default(),
             edge_routing: EdgeRouting::default(),
             font_metrics: None,
+            fnx_enabled: true,
             constraint_solver: ConstraintSolverMode::Optimize,
             constraint_solver_time_limit_ms: 1_000,
         }
@@ -3899,7 +3902,7 @@ fn layout_diagram_sugiyama_traced_with_config(
         0,
     );
 
-    let (crossing_count_before, ordering_by_rank) = crossing_minimization(ir, &ranks);
+    let (crossing_count_before, ordering_by_rank) = crossing_minimization(ir, &ranks, &config);
     push_snapshot(
         &mut trace,
         "crossing_minimization",
@@ -3984,6 +3987,9 @@ fn layout_diagram_sugiyama_traced_with_config(
         phase_iterations: trace.snapshots.len(),
     };
 
+    // Compute centrality tiers for semantic styling (FNX-enabled builds).
+    let node_centrality = compute_layout_centrality_tiers(ir, &config);
+
     TracedLayout {
         layout: DiagramLayout {
             nodes,
@@ -3994,6 +4000,7 @@ fn layout_diagram_sugiyama_traced_with_config(
             stats,
             extensions: LayoutExtensions {
                 cluster_dividers,
+                node_centrality,
                 ..LayoutExtensions::default()
             },
             dirty_regions: Vec::new(),
@@ -9009,13 +9016,14 @@ fn remove_node(
 fn crossing_minimization(
     ir: &MermaidDiagramIr,
     ranks: &BTreeMap<usize, usize>,
+    config: &LayoutConfig,
 ) -> (usize, BTreeMap<usize, Vec<usize>>) {
     let mut ordering_by_rank = nodes_by_rank(ir.nodes.len(), ranks);
     if ordering_by_rank.len() <= 1 {
         return (0, ordering_by_rank);
     }
 
-    let centrality = build_centrality_assist(ir);
+    let centrality = build_centrality_assist(ir, config);
 
     // Deterministic barycenter sweeps: top-down then bottom-up.
     let rank_keys: Vec<usize> = ordering_by_rank.keys().copied().collect();
@@ -10473,7 +10481,10 @@ enum CentralityAssist {
 }
 
 #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
-fn build_centrality_assist(ir: &MermaidDiagramIr) -> CentralityAssist {
+fn build_centrality_assist(ir: &MermaidDiagramIr, config: &LayoutConfig) -> CentralityAssist {
+    if !config.fnx_enabled {
+        return CentralityAssist::Disabled;
+    }
     let scores = compute_centrality_scores(ir);
     if scores.computed && !scores.is_empty() {
         CentralityAssist::Enabled(scores)
@@ -10483,8 +10494,28 @@ fn build_centrality_assist(ir: &MermaidDiagramIr) -> CentralityAssist {
 }
 
 #[cfg(not(all(feature = "fnx-integration", not(target_arch = "wasm32"))))]
-fn build_centrality_assist(_: &MermaidDiagramIr) -> CentralityAssist {
+fn build_centrality_assist(_: &MermaidDiagramIr, _: &LayoutConfig) -> CentralityAssist {
     CentralityAssist::Disabled
+}
+
+/// Compute centrality tier data for layout extensions (FNX-enabled builds only).
+#[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+fn compute_layout_centrality_tiers(ir: &MermaidDiagramIr, config: &LayoutConfig) -> Vec<NodeCentrality> {
+    if !config.fnx_enabled {
+        return Vec::new();
+    }
+    let scores = compute_centrality_scores(ir);
+    if scores.computed && !scores.is_empty() {
+        crate::fnx_ordering::classify_centrality_tiers(&scores)
+    } else {
+        Vec::new()
+    }
+}
+
+/// Stub for non-FNX builds.
+#[cfg(not(all(feature = "fnx-integration", not(target_arch = "wasm32"))))]
+fn compute_layout_centrality_tiers(_: &MermaidDiagramIr, _: &LayoutConfig) -> Vec<NodeCentrality> {
+    Vec::new()
 }
 
 #[allow(unused_variables)] // centrality only used with fnx-integration feature
@@ -15766,7 +15797,7 @@ mod tests {
         ordering_by_rank.insert(1, vec![2, 3]);
         ordering_by_rank.insert(2, vec![4]);
 
-        let centrality = super::build_centrality_assist(&ir);
+        let centrality = super::build_centrality_assist(&ir, &LayoutConfig::default());
         super::reorder_rank_by_barycenter(
             &ir,
             &ranks,
