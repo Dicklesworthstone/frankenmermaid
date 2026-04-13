@@ -1944,6 +1944,52 @@ fn validate_json_reports_fnx_witness_when_enabled() {
     assert!(witness["results_hash"].is_string());
 }
 
+#[cfg(feature = "fnx-integration")]
+#[test]
+fn render_svg_includes_centrality_tier_css_classes_when_fnx_enabled() {
+    let output_file = NamedTempFile::new().expect("temp render output file");
+    let output_path = output_file
+        .path()
+        .to_str()
+        .expect("temp path must be valid utf-8")
+        .to_string();
+
+    // Use a diagram with enough nodes to trigger tier distribution
+    let input = "flowchart LR\nA-->B\nB-->C\nC-->D\nD-->E\nE-->F\nB-->D\nC-->E\n";
+    let output = run_cli(
+        &[
+            "render",
+            "-",
+            "--format",
+            "svg",
+            "--output",
+            &output_path,
+            "--fnx-mode",
+            "enabled",
+        ],
+        input,
+    );
+    assert!(
+        output.status.success(),
+        "render should succeed; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let svg = std::fs::read_to_string(&output_path).expect("read rendered SVG");
+    // With 6 nodes and FNX enabled, we expect centrality tiers
+    // High centrality nodes (top 20%) should have fm-node-centrality-high
+    // Medium centrality nodes should have fm-node-centrality-medium
+    // Low centrality nodes (bottom 20%) should have fm-node-centrality-low
+    let has_high = svg.contains("fm-node-centrality-high");
+    let has_medium = svg.contains("fm-node-centrality-medium");
+    let has_low = svg.contains("fm-node-centrality-low");
+
+    assert!(
+        has_high || has_medium || has_low,
+        "SVG should contain at least one centrality tier class when FNX is enabled"
+    );
+}
+
 #[test]
 fn detect_reports_gitgraph_as_basic_support() {
     let output = run_cli(&["detect", "-", "--json"], "gitGraph\ncommit\n");
