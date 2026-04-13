@@ -13,6 +13,8 @@ pub mod fnx_cache;
 pub mod fnx_cycle_scorer;
 #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
 pub mod fnx_diagnostics;
+#[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+pub mod fnx_ordering;
 
 use std::cell::RefCell;
 use std::cmp::Reverse;
