@@ -45,6 +45,8 @@ use fm_layout::{
     build_layout_decision_ledger, build_layout_guard_report_with_pressure,
     layout_diagram_traced_with_config_and_guardrails, layout_source_map,
 };
+#[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+use fm_layout::fnx_diagnostics::{FnxAnalysisResults, FnxDiagnosticSeverity, analyze_structure};
 use fm_parser::{
     ParserConfig, detect_type_with_confidence_and_config, first_significant_line,
     parse_evidence_json, parse_with_mode, parse_with_mode_and_config,
@@ -698,6 +700,19 @@ struct ValidateResult {
     degradation_collapse_clusters: bool,
     degradation_force_glyph_mode: Option<String>,
     diagnostics: Vec<ValidationDiagnostic>,
+    // FNX structural analysis (when fnx-integration feature is enabled)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fnx_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fnx_component_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fnx_is_connected: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fnx_articulation_point_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fnx_bridge_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fnx_cycle_count: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2560,6 +2575,17 @@ fn cmd_validate(input: &str, options: ValidateCommandOptions<'_>) -> Result<()> 
     diagnostics.extend(collect_structural_diagnostics(&parsed));
     diagnostics.extend(collect_layout_diagnostics(&traced_layout));
     diagnostics.extend(collect_render_diagnostics(&svg_output));
+
+    // FNX structural analysis (when feature is enabled)
+    #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+    let fnx_results = {
+        let results = analyze_structure(&parsed.ir);
+        diagnostics.extend(collect_fnx_diagnostics(&results));
+        Some(results)
+    };
+    #[cfg(not(all(feature = "fnx-integration", not(target_arch = "wasm32"))))]
+    let fnx_results: Option<()> = None;
+
     sort_diagnostics(&mut diagnostics);
 
     let valid = !should_fail_validation(&diagnostics, fail_on);
@@ -2615,6 +2641,30 @@ fn cmd_validate(input: &str, options: ValidateCommandOptions<'_>) -> Result<()> 
             .force_glyph_mode
             .map(|m| format!("{m:?}")),
         diagnostics,
+        #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+        fnx_enabled: Some(true),
+        #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+        fnx_component_count: fnx_results.as_ref().map(|r| r.component_count),
+        #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+        fnx_is_connected: fnx_results.as_ref().map(|r| r.is_connected),
+        #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+        fnx_articulation_point_count: fnx_results.as_ref().map(|r| r.articulation_point_count),
+        #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+        fnx_bridge_count: fnx_results.as_ref().map(|r| r.bridge_count),
+        #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+        fnx_cycle_count: fnx_results.as_ref().map(|r| r.cycle_count),
+        #[cfg(not(all(feature = "fnx-integration", not(target_arch = "wasm32"))))]
+        fnx_enabled: None,
+        #[cfg(not(all(feature = "fnx-integration", not(target_arch = "wasm32"))))]
+        fnx_component_count: None,
+        #[cfg(not(all(feature = "fnx-integration", not(target_arch = "wasm32"))))]
+        fnx_is_connected: None,
+        #[cfg(not(all(feature = "fnx-integration", not(target_arch = "wasm32"))))]
+        fnx_articulation_point_count: None,
+        #[cfg(not(all(feature = "fnx-integration", not(target_arch = "wasm32"))))]
+        fnx_bridge_count: None,
+        #[cfg(not(all(feature = "fnx-integration", not(target_arch = "wasm32"))))]
+        fnx_cycle_count: None,
     };
     let _total_time = total_start.elapsed();
 
@@ -2760,6 +2810,41 @@ fn collect_structural_diagnostics(parsed: &fm_parser::ParseResult) -> Vec<Valida
                 rule_id: Some("parse.structure.empty_diagram".to_string()),
                 confidence: Some(parsed.confidence),
                 remediation_hint: Some("Add at least one node and one edge".to_string()),
+            },
+        });
+    }
+
+    diagnostics
+}
+
+#[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+fn collect_fnx_diagnostics(results: &FnxAnalysisResults) -> Vec<ValidationDiagnostic> {
+    let mut diagnostics = Vec::new();
+
+    for diag in &results.diagnostics {
+        let severity = match diag.severity {
+            FnxDiagnosticSeverity::Info => "info",
+            FnxDiagnosticSeverity::Warning => "warning",
+            FnxDiagnosticSeverity::Error => "error",
+        };
+
+        let (source_line, source_column) = diag
+            .span
+            .map(|span| (Some(span.start.line), Some(span.start.col)))
+            .unwrap_or((None, None));
+
+        diagnostics.push(ValidationDiagnostic {
+            stage: "fnx".to_string(),
+            payload: StructuredDiagnostic {
+                error_code: format!("mermaid/{severity}/{}", diag.code.as_str().to_lowercase()),
+                severity: severity.to_string(),
+                message: diag.message.clone(),
+                span: diag.span,
+                source_line,
+                source_column,
+                rule_id: Some(format!("fnx.{}", diag.code.category.to_lowercase())),
+                confidence: None,
+                remediation_hint: diag.suggestion.clone(),
             },
         });
     }
