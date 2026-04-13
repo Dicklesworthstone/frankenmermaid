@@ -273,16 +273,15 @@ fn analyze_bridges(
             .edges
             .iter()
             .find(|e| {
-                let from_idx = match e.from {
-                    fm_core::IrEndpoint::Node(id) => id.0,
-                    _ => return false,
-                };
-                let to_idx = match e.to {
-                    fm_core::IrEndpoint::Node(id) => id.0,
-                    _ => return false,
-                };
-                (from_idx == source_idx && to_idx == target_idx)
-                    || (from_idx == target_idx && to_idx == source_idx)
+                let from_idx = e.from.resolved_node_id(&ir.ports).map(|id| id.0);
+                let to_idx = e.to.resolved_node_id(&ir.ports).map(|id| id.0);
+                match (from_idx, to_idx) {
+                    (Some(f), Some(t)) => {
+                        (f == source_idx && t == target_idx)
+                            || (f == target_idx && t == source_idx)
+                    }
+                    _ => false,
+                }
             })
             .map(|e| e.span);
 

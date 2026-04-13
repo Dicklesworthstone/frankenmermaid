@@ -141,7 +141,7 @@ pub fn compute_criticality_scores(
 
     let mut results = CriticalityScoringResults {
         fnx_available: true,
-        bridge_count: bridges_result.edges.len(),
+        bridge_count: 0,
         articulation_count: articulation_result.nodes.len(),
         ..Default::default()
     };
@@ -185,6 +185,10 @@ pub fn compute_criticality_scores(
             + config.bridge_weight * bridge_penalty
             + config.articulation_weight * articulation_penalty
             + config.centrality_weight * centrality_penalty;
+
+        if is_bridge {
+            results.bridge_count += 1;
+        }
 
         results.scores.insert(
             edge_idx,
@@ -480,6 +484,7 @@ mod tests {
         let config = CriticalityScoringConfig::default();
         let results = compute_criticality_scores(&ir, &config);
 
+        assert_eq!(results.bridge_count, 0, "parallel edges should not count as bridges");
         for edge_idx in 0..2 {
             let score = results.scores.get(&edge_idx).expect("edge score");
             assert!(!score.is_bridge, "parallel edge {edge_idx} should not be a bridge");
