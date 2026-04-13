@@ -8,6 +8,8 @@
 #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
 pub mod fnx_adapter;
 #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+pub mod fnx_cache;
+#[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
 pub mod fnx_cycle_scorer;
 #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
 pub mod fnx_diagnostics;
