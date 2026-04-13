@@ -50,6 +50,32 @@ pub struct WasmRenderOutput {
     pub guard: MermaidGuardReport,
     pub layout: LayoutRuntimeSummary,
     pub source_spans: Vec<SourceSpanRecord>,
+    /// FNX analysis witness metadata for telemetry (optional, additive field).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fnx_witness: Option<WasmFnxWitness>,
+}
+
+/// FNX analysis witness for WASM API consumers.
+#[cfg(any(not(target_arch = "wasm32"), test))]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WasmFnxWitness {
+    /// Whether FNX integration was available.
+    pub enabled: bool,
+    /// Whether FNX analysis was used for this render.
+    pub used: bool,
+    /// Projection mode used for analysis.
+    pub projection_mode: String,
+    /// List of algorithms invoked.
+    pub algorithms_invoked: Vec<String>,
+    /// Analysis time in microseconds.
+    pub analysis_time_us: u64,
+    /// Whether budget was exceeded.
+    pub budget_exceeded: bool,
+    /// Fallback level if degradation occurred.
+    pub fallback_level: String,
+    /// Fallback reason code.
+    pub fallback_reason: String,
 }
 
 #[cfg(any(not(target_arch = "wasm32"), test))]
@@ -747,7 +773,16 @@ pub fn render(input: &str) -> WasmRenderOutput {
         guard,
         layout: LayoutRuntimeSummary::new(&traced_layout, &layout_config),
         source_spans,
+        fnx_witness: build_wasm_fnx_witness(),
     }
+}
+
+/// Build FNX witness for WASM output.
+#[cfg(any(not(target_arch = "wasm32"), test))]
+fn build_wasm_fnx_witness() -> Option<WasmFnxWitness> {
+    // FNX is not available in WASM builds (no fnx-integration feature)
+    // This placeholder returns None; when FNX is available, it will be populated
+    None
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
