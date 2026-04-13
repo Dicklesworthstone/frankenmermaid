@@ -5,6 +5,9 @@
     clippy::cast_precision_loss
 )]
 
+#[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+pub mod fnx_adapter;
+
 use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
