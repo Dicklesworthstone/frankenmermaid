@@ -174,6 +174,18 @@ enum Command {
         /// Optional JSON artifact path mapping rendered SVG element IDs back to input spans.
         #[arg(long)]
         source_map_out: Option<String>,
+
+        /// FNX integration mode (auto=feature-detect, enabled=force on, disabled=force off).
+        #[arg(long, value_enum, default_value = "auto")]
+        fnx_mode: FnxModeArg,
+
+        /// FNX graph projection strategy for analysis algorithms.
+        #[arg(long, value_enum, default_value = "undirected")]
+        fnx_projection: FnxProjectionArg,
+
+        /// FNX fallback behavior when analysis exceeds budget or fails.
+        #[arg(long, value_enum, default_value = "graceful")]
+        fnx_fallback: FnxFallbackArg,
     },
 
     /// Parse a diagram and output its IR as JSON.
@@ -429,6 +441,89 @@ impl LayoutAlgorithmArg {
     }
 }
 
+/// FNX integration mode for graph analysis features.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+enum FnxModeArg {
+    /// Automatically detect and use FNX when the feature is available.
+    #[default]
+    Auto,
+    /// Force FNX integration on (error if unavailable).
+    Enabled,
+    /// Force FNX integration off (skip all FNX analysis).
+    Disabled,
+}
+
+impl FnxModeArg {
+    /// Check if FNX should be used based on mode and feature availability.
+    #[must_use]
+    #[allow(dead_code)] // Will be used when FNX integration is wired through render path
+    fn should_use_fnx(self) -> bool {
+        match self {
+            Self::Auto => cfg!(all(feature = "fnx-integration", not(target_arch = "wasm32"))),
+            Self::Enabled => true,
+            Self::Disabled => false,
+        }
+    }
+
+    /// Get string representation for logging.
+    #[must_use]
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Enabled => "enabled",
+            Self::Disabled => "disabled",
+        }
+    }
+}
+
+/// FNX graph projection strategy for analysis algorithms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+enum FnxProjectionArg {
+    /// Use undirected graph projection (ignore edge direction).
+    #[default]
+    Undirected,
+    /// Use directed graph projection (preserve edge direction).
+    Directed,
+    /// Automatically select projection based on diagram type.
+    Auto,
+}
+
+impl FnxProjectionArg {
+    /// Get string representation for logging.
+    #[must_use]
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Undirected => "undirected",
+            Self::Directed => "directed",
+            Self::Auto => "auto",
+        }
+    }
+}
+
+/// FNX fallback behavior when analysis exceeds budget or fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+enum FnxFallbackArg {
+    /// Gracefully fall back to baseline heuristics without error.
+    #[default]
+    Graceful,
+    /// Fail with error instead of falling back (strict mode).
+    Strict,
+    /// Log warning but continue with fallback.
+    Warn,
+}
+
+impl FnxFallbackArg {
+    /// Get string representation for logging.
+    #[must_use]
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Graceful => "graceful",
+            Self::Strict => "strict",
+            Self::Warn => "warn",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 struct FrankenmermaidConfigFile {
@@ -625,6 +720,10 @@ struct RenderCommandOptions<'a> {
     source_map_out: Option<&'a str>,
     dimensions: (Option<u32>, Option<u32>),
     json_output: bool,
+    // FNX integration controls
+    fnx_mode: FnxModeArg,
+    fnx_projection: FnxProjectionArg,
+    fnx_fallback: FnxFallbackArg,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -835,6 +934,9 @@ fn main() -> Result<()> {
             embed_source_spans,
             no_embed_source_spans,
             source_map_out,
+            fnx_mode,
+            fnx_projection,
+            fnx_fallback,
         } => {
             let format = resolve_output_format(format, &loaded_config.file)?;
             let layout_algorithm = resolve_layout_algorithm(layout_algorithm, &loaded_config.file)?;
@@ -844,6 +946,15 @@ fn main() -> Result<()> {
             let term_base_config = build_base_term_render_config(&loaded_config.file)?;
             let show_back_edges = resolve_show_back_edges(&loaded_config.file);
             let show_minimap = term_base_config.show_minimap;
+            // Log FNX configuration at debug level
+            debug!(
+                fnx_mode = fnx_mode.as_str(),
+                fnx_projection = fnx_projection.as_str(),
+                fnx_fallback = fnx_fallback.as_str(),
+                fnx_available = cfg!(all(feature = "fnx-integration", not(target_arch = "wasm32"))),
+                "FNX configuration"
+            );
+
             cmd_render(
                 &input,
                 RenderCommandOptions {
@@ -868,6 +979,9 @@ fn main() -> Result<()> {
                     source_map_out: source_map_out.as_deref(),
                     dimensions: (width, height),
                     json_output: json,
+                    fnx_mode,
+                    fnx_projection,
+                    fnx_fallback,
                 },
             )
         }
@@ -984,6 +1098,9 @@ fn main() -> Result<()> {
                 source_map_out: None,
                 dimensions: (None, None),
                 json_output: false,
+                fnx_mode: FnxModeArg::Auto,
+                fnx_projection: FnxProjectionArg::Undirected,
+                fnx_fallback: FnxFallbackArg::Graceful,
             };
             cmd_watch(&input, options, clear)
         }
@@ -1014,6 +1131,9 @@ fn main() -> Result<()> {
                 source_map_out: None,
                 dimensions: (None, None),
                 json_output: false,
+                fnx_mode: FnxModeArg::Auto,
+                fnx_projection: FnxProjectionArg::Undirected,
+                fnx_fallback: FnxFallbackArg::Graceful,
             };
             cmd_serve(&host, port, open, options)
         }
@@ -2004,6 +2124,9 @@ fn cmd_render(input: &str, options: RenderCommandOptions<'_>) -> Result<()> {
         source_map_out,
         dimensions,
         json_output,
+        fnx_mode,
+        fnx_projection,
+        fnx_fallback,
     } = options;
     let (width, height) = dimensions;
     if json_output && output.is_none() {
@@ -2034,6 +2157,9 @@ fn cmd_render(input: &str, options: RenderCommandOptions<'_>) -> Result<()> {
             source_map_out,
             dimensions: (width, height),
             json_output,
+            fnx_mode,
+            fnx_projection,
+            fnx_fallback,
         },
     )?;
 
@@ -3388,11 +3514,11 @@ mod validate_tests {
 #[cfg(test)]
 mod render_tests {
     use super::{
-        ColorChoice, OutputFormat, RenderCommandOptions, RenderSurfaceOptions, SvgRenderConfig,
-        TermRenderConfig, ThemePreset, build_svg_render_config, diff_use_colors,
-        extract_svg_dimensions, layout_without_back_edges, normalize_positive_font_size,
-        parse_positive_dimension_arg, parse_positive_font_size_arg, render_format, render_source,
-        terminal_size,
+        ColorChoice, FnxFallbackArg, FnxModeArg, FnxProjectionArg, OutputFormat,
+        RenderCommandOptions, RenderSurfaceOptions, SvgRenderConfig, TermRenderConfig, ThemePreset,
+        build_svg_render_config, diff_use_colors, extract_svg_dimensions, layout_without_back_edges,
+        normalize_positive_font_size, parse_positive_dimension_arg, parse_positive_font_size_arg,
+        render_format, render_source, terminal_size,
     };
     use fm_core::{MermaidParseMode, MermaidSourceMap, MermaidSourceMapKind};
     use fm_layout::{
@@ -3552,6 +3678,9 @@ mod render_tests {
             source_map_out: Some(source_map_path_str.as_str()),
             dimensions: (None, None),
             json_output: true,
+            fnx_mode: FnxModeArg::Auto,
+            fnx_projection: FnxProjectionArg::Undirected,
+            fnx_fallback: FnxFallbackArg::Graceful,
         };
 
         let outcome = render_source(source, &options).expect("render source");
