@@ -42,6 +42,9 @@ use good_lp::solvers::WithTimeLimit;
 use good_lp::{Expression, Solution, SolverModel, constraint, default_solver, variable};
 use tracing::{debug, info, trace, warn};
 
+#[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+use crate::fnx_ordering::{NodeCentralityScores, compare_with_centrality, compute_centrality_scores};
+
 /// Design contract for subgraph-level incremental invalidation (`bd-20fq.1`).
 ///
 /// The current layout engine is a whole-graph pipeline, but the existing IR already exposes
@@ -8971,19 +8974,37 @@ fn crossing_minimization(
         return (0, ordering_by_rank);
     }
 
+    let centrality = build_centrality_assist(ir);
+
     // Deterministic barycenter sweeps: top-down then bottom-up.
     let rank_keys: Vec<usize> = ordering_by_rank.keys().copied().collect();
     for _ in 0..4 {
         for index in 1..rank_keys.len() {
             let rank = rank_keys[index];
             let upper_rank = rank_keys[index - 1];
-            reorder_rank_by_barycenter(ir, ranks, &mut ordering_by_rank, rank, upper_rank, true);
+            reorder_rank_by_barycenter(
+                ir,
+                ranks,
+                &mut ordering_by_rank,
+                rank,
+                upper_rank,
+                true,
+                &centrality,
+            );
         }
 
         for index in (0..rank_keys.len().saturating_sub(1)).rev() {
             let rank = rank_keys[index];
             let lower_rank = rank_keys[index + 1];
-            reorder_rank_by_barycenter(ir, ranks, &mut ordering_by_rank, rank, lower_rank, false);
+            reorder_rank_by_barycenter(
+                ir,
+                ranks,
+                &mut ordering_by_rank,
+                rank,
+                lower_rank,
+                false,
+                &centrality,
+            );
         }
     }
 
@@ -10399,6 +10420,32 @@ fn apply_egraph_ordering_pass(
     best_crossings
 }
 
+#[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+enum CentralityAssist {
+    Enabled(NodeCentralityScores),
+    Disabled,
+}
+
+#[cfg(not(all(feature = "fnx-integration", not(target_arch = "wasm32"))))]
+enum CentralityAssist {
+    Disabled,
+}
+
+#[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+fn build_centrality_assist(ir: &MermaidDiagramIr) -> CentralityAssist {
+    let scores = compute_centrality_scores(ir);
+    if scores.computed && !scores.is_empty() {
+        CentralityAssist::Enabled(scores)
+    } else {
+        CentralityAssist::Disabled
+    }
+}
+
+#[cfg(not(all(feature = "fnx-integration", not(target_arch = "wasm32"))))]
+fn build_centrality_assist(_: &MermaidDiagramIr) -> CentralityAssist {
+    CentralityAssist::Disabled
+}
+
 fn reorder_rank_by_barycenter(
     ir: &MermaidDiagramIr,
     ranks: &BTreeMap<usize, usize>,
@@ -10406,6 +10453,7 @@ fn reorder_rank_by_barycenter(
     rank: usize,
     adjacent_rank: usize,
     use_incoming: bool,
+    centrality: &CentralityAssist,
 ) {
     let Some(current_order) = ordering_by_rank.get(&rank).cloned() else {
         return;
@@ -10468,6 +10516,23 @@ fn reorder_rank_by_barycenter(
         })
         .collect();
 
+    #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+    match centrality {
+        CentralityAssist::Enabled(scores) => {
+            scored_nodes
+                .sort_by(|left, right| compare_with_centrality(*left, *right, scores));
+        }
+        CentralityAssist::Disabled => {
+            scored_nodes.sort_by(|left, right| match (left.1, right.1) {
+                (Some(lhs), Some(rhs)) => lhs.total_cmp(&rhs).then_with(|| left.0.cmp(&right.0)),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => left.2.cmp(&right.2).then_with(|| left.0.cmp(&right.0)),
+            });
+        }
+    }
+
+    #[cfg(not(all(feature = "fnx-integration", not(target_arch = "wasm32"))))]
     scored_nodes.sort_by(|left, right| match (left.1, right.1) {
         (Some(lhs), Some(rhs)) => lhs.total_cmp(&rhs).then_with(|| left.0.cmp(&right.0)),
         (Some(_), None) => std::cmp::Ordering::Less,
@@ -15619,6 +15684,62 @@ mod tests {
         let second = layout_diagram(&ir);
         assert_eq!(first.stats.crossing_count, second.stats.crossing_count);
         assert_eq!(first, second);
+    }
+
+    #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+    #[test]
+    fn barycenter_tie_breaks_with_centrality() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for node_id in ["B", "A", "C", "D", "E"] {
+            ir.nodes.push(IrNode {
+                id: (*node_id).to_string(),
+                ..IrNode::default()
+            });
+        }
+        let edges = [
+            (1, 2), // A -> C
+            (1, 3), // A -> D
+            (0, 2), // B -> C
+            (0, 3), // B -> D
+            (1, 4), // A -> E (extra degree for A)
+        ];
+        for (from, to) in edges {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let mut ranks = BTreeMap::new();
+        ranks.insert(0, 0);
+        ranks.insert(1, 0);
+        ranks.insert(2, 1);
+        ranks.insert(3, 1);
+        ranks.insert(4, 2);
+
+        let mut ordering_by_rank = BTreeMap::new();
+        ordering_by_rank.insert(0, vec![0, 1]); // B before A initially
+        ordering_by_rank.insert(1, vec![2, 3]);
+        ordering_by_rank.insert(2, vec![4]);
+
+        let centrality = super::build_centrality_assist(&ir);
+        super::reorder_rank_by_barycenter(
+            &ir,
+            &ranks,
+            &mut ordering_by_rank,
+            0,
+            1,
+            false,
+            &centrality,
+        );
+
+        assert_eq!(
+            ordering_by_rank.get(&0),
+            Some(&vec![1, 0]),
+            "centrality should promote higher-degree A (index 1) ahead of B (index 0)"
+        );
     }
 
     #[test]
