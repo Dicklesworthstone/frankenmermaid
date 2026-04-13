@@ -1785,8 +1785,8 @@ If fuzzy matching picked the wrong type, add the explicit keyword header (e.g., 
 
 ## Limitations
 
-- **XyChart** is the only diagram type marked unsupported. It parses but lacks dedicated layout and rendering. Tracked for implementation.
-- **Sequence diagram advanced features** (activation boxes, interaction fragments, notes) are not yet implemented. Basic participant/message flow works.
+- **XyChart** has dedicated layout and SVG rendering, but axis scaling and mixed-series polish are still evolving.
+- **Sequence diagram** supports participants, messages, activation boxes, notes, and interaction fragments (alt/opt/loop/par). Some edge cases in complex nested fragments may still be refined.
 - **classDef / style directives** are applied in SVG output; terminal/canvas renderers still use theme defaults.
 - **Very large SVGs** (10k+ nodes) can be heavy for browsers. Use the Canvas2D backend via WASM for interactive exploration of large graphs.
 - **PNG export** rasterizes the SVG output. CSS animations and hover effects are not preserved in static PNGs.
