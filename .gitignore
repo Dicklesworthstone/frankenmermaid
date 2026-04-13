@@ -94,6 +94,9 @@ run_test.sh
 
 # JSONL scan pass files
 pass*.jsonl
+
+# Mojibake/garbage parser artifacts (e.g., B[🚀)
+B[[]*
 .env
 .claude/settings.local.json
 
