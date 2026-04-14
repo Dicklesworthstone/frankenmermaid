@@ -19,6 +19,8 @@ pub mod fnx_diagnostics;
 #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
 pub mod fnx_ordering;
 
+mod cga_routing;
+
 use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
@@ -11166,61 +11168,28 @@ fn route_edge_points_spline_with_obstacles(
 
 /// Check if a vertical segment at x-coordinate `mid_x` intersects any obstacle.
 /// Returns a nudged x-coordinate that avoids the obstacle, or None if clear.
+///
+/// Uses CGA-based intersection queries for precise segment-rectangle detection.
 fn find_obstacle_nudge_x(
     segment: (LayoutPoint, LayoutPoint),
-    mid_x: f32,
+    _mid_x: f32,
     obstacles: &[LayoutRect],
 ) -> Option<f32> {
-    let margin = 8.0_f32;
-    let y_min = segment.0.y.min(segment.1.y);
-    let y_max = segment.0.y.max(segment.1.y);
-    for obs in obstacles {
-        // Check if the vertical line at mid_x passes through this obstacle's x-range
-        // and the y-range overlaps.
-        if mid_x >= obs.x - margin
-            && mid_x <= obs.x + obs.width + margin
-            && y_max >= obs.y
-            && y_min <= obs.y + obs.height
-        {
-            // Nudge to the closer side of the obstacle.
-            let left_dist = (mid_x - (obs.x - margin)).abs();
-            let right_dist = (mid_x - (obs.x + obs.width + margin)).abs();
-            return if left_dist <= right_dist {
-                Some(obs.x - margin)
-            } else {
-                Some(obs.x + obs.width + margin)
-            };
-        }
-    }
-    None
+    const MARGIN: f32 = 8.0;
+    cga_routing::find_vertical_segment_nudge(segment.0, segment.1, obstacles, MARGIN)
 }
 
 /// Check if a horizontal segment at y-coordinate `mid_y` intersects any obstacle.
 /// Returns a nudged y-coordinate that avoids the obstacle, or None if clear.
+///
+/// Uses CGA-based intersection queries for precise segment-rectangle detection.
 fn find_obstacle_nudge_y(
     segment: (LayoutPoint, LayoutPoint),
-    mid_y: f32,
+    _mid_y: f32,
     obstacles: &[LayoutRect],
 ) -> Option<f32> {
-    let margin = 8.0_f32;
-    let x_min = segment.0.x.min(segment.1.x);
-    let x_max = segment.0.x.max(segment.1.x);
-    for obs in obstacles {
-        if mid_y >= obs.y - margin
-            && mid_y <= obs.y + obs.height + margin
-            && x_max >= obs.x
-            && x_min <= obs.x + obs.width
-        {
-            let top_dist = (mid_y - (obs.y - margin)).abs();
-            let bottom_dist = (mid_y - (obs.y + obs.height + margin)).abs();
-            return if top_dist <= bottom_dist {
-                Some(obs.y - margin)
-            } else {
-                Some(obs.y + obs.height + margin)
-            };
-        }
-    }
-    None
+    const MARGIN: f32 = 8.0;
+    cga_routing::find_horizontal_segment_nudge(segment.0, segment.1, obstacles, MARGIN)
 }
 
 fn simplify_polyline(points: Vec<LayoutPoint>) -> Vec<LayoutPoint> {
