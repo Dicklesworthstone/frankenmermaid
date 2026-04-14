@@ -769,6 +769,302 @@ impl AffineMatrix2D {
     }
 }
 
+// ============================================================================
+// CGA Geometric Objects - Points, Lines, Circles
+// ============================================================================
+
+/// A conformal point in R_{3,1}.
+///
+/// Points are null vectors: P·P = 0.
+/// Represented as: P = x*e1 + y*e2 + (x²+y²)/2*e_∞ + e_o
+/// where e_∞ = e+ + e- and e_o = (e- - e+)/2.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CgaPoint {
+    pub x: f64,
+    pub y: f64,
+}
+
+impl CgaPoint {
+    /// Create a new conformal point from 2D coordinates.
+    #[must_use]
+    pub const fn new(x: f64, y: f64) -> Self {
+        Self { x, y }
+    }
+
+    /// The origin point (0, 0).
+    #[must_use]
+    pub const fn origin() -> Self {
+        Self { x: 0.0, y: 0.0 }
+    }
+
+    /// Squared distance to another point.
+    ///
+    /// Uses the conformal inner product: d²(P, Q) = -2 * P·Q
+    #[must_use]
+    pub fn distance_squared(&self, other: &CgaPoint) -> f64 {
+        let dx = self.x - other.x;
+        let dy = self.y - other.y;
+        dx * dx + dy * dy
+    }
+
+    /// Distance to another point.
+    #[must_use]
+    pub fn distance(&self, other: &CgaPoint) -> f64 {
+        self.distance_squared(other).sqrt()
+    }
+}
+
+/// A line segment defined by two endpoints.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CgaLineSegment {
+    pub start: CgaPoint,
+    pub end: CgaPoint,
+}
+
+impl CgaLineSegment {
+    /// Create a new line segment from endpoints.
+    #[must_use]
+    pub const fn new(start: CgaPoint, end: CgaPoint) -> Self {
+        Self { start, end }
+    }
+
+    /// Length of the line segment.
+    #[must_use]
+    pub fn length(&self) -> f64 {
+        self.start.distance(&self.end)
+    }
+
+    /// Direction vector (normalized).
+    #[must_use]
+    pub fn direction(&self) -> (f64, f64) {
+        let dx = self.end.x - self.start.x;
+        let dy = self.end.y - self.start.y;
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < f64::EPSILON {
+            (0.0, 0.0)
+        } else {
+            (dx / len, dy / len)
+        }
+    }
+
+    /// Find intersection with another line segment.
+    ///
+    /// Returns the intersection point if segments cross, None otherwise.
+    /// Uses parametric line-line intersection.
+    #[must_use]
+    pub fn intersect(&self, other: &CgaLineSegment) -> Option<CgaPoint> {
+        // Parametric form: P = start + t*(end - start)
+        // Solve for t1, t2 where the lines cross
+        let d1x = self.end.x - self.start.x;
+        let d1y = self.end.y - self.start.y;
+        let d2x = other.end.x - other.start.x;
+        let d2y = other.end.y - other.start.y;
+
+        let cross = d1x * d2y - d1y * d2x;
+        if cross.abs() < f64::EPSILON {
+            // Lines are parallel
+            return None;
+        }
+
+        let ox = other.start.x - self.start.x;
+        let oy = other.start.y - self.start.y;
+
+        let t1 = (ox * d2y - oy * d2x) / cross;
+        let t2 = (ox * d1y - oy * d1x) / cross;
+
+        // Check if intersection is within both segments [0, 1]
+        if t1 >= 0.0 && t1 <= 1.0 && t2 >= 0.0 && t2 <= 1.0 {
+            Some(CgaPoint::new(
+                self.start.x + t1 * d1x,
+                self.start.y + t1 * d1y,
+            ))
+        } else {
+            None
+        }
+    }
+
+    /// Find closest point on the segment to a given point.
+    #[must_use]
+    pub fn closest_point(&self, point: &CgaPoint) -> CgaPoint {
+        let dx = self.end.x - self.start.x;
+        let dy = self.end.y - self.start.y;
+        let len_sq = dx * dx + dy * dy;
+
+        if len_sq < f64::EPSILON {
+            return self.start;
+        }
+
+        let t = ((point.x - self.start.x) * dx + (point.y - self.start.y) * dy) / len_sq;
+        let t = t.clamp(0.0, 1.0);
+
+        CgaPoint::new(self.start.x + t * dx, self.start.y + t * dy)
+    }
+
+    /// Distance from a point to this line segment.
+    #[must_use]
+    pub fn distance_to_point(&self, point: &CgaPoint) -> f64 {
+        let closest = self.closest_point(point);
+        point.distance(&closest)
+    }
+}
+
+/// A circle defined by center and radius.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CgaCircle {
+    pub center: CgaPoint,
+    pub radius: f64,
+}
+
+impl CgaCircle {
+    /// Create a new circle.
+    #[must_use]
+    pub const fn new(center: CgaPoint, radius: f64) -> Self {
+        Self { center, radius }
+    }
+
+    /// Check if a point is inside the circle.
+    #[must_use]
+    pub fn contains(&self, point: &CgaPoint) -> bool {
+        point.distance_squared(&self.center) <= self.radius * self.radius
+    }
+
+    /// Check if a point is strictly inside the circle (not on boundary).
+    #[must_use]
+    pub fn contains_strict(&self, point: &CgaPoint) -> bool {
+        point.distance_squared(&self.center) < self.radius * self.radius
+    }
+
+    /// Find intersection points with a line segment.
+    ///
+    /// Returns 0, 1, or 2 intersection points.
+    #[must_use]
+    pub fn intersect_segment(&self, segment: &CgaLineSegment) -> Vec<CgaPoint> {
+        // Line parametric: P = start + t * (end - start)
+        // Circle: |P - center|² = r²
+        // Substitute and solve quadratic
+        let dx = segment.end.x - segment.start.x;
+        let dy = segment.end.y - segment.start.y;
+        let fx = segment.start.x - self.center.x;
+        let fy = segment.start.y - self.center.y;
+
+        let a = dx * dx + dy * dy;
+        if a < f64::EPSILON {
+            // Degenerate segment (point)
+            if self.contains(&segment.start) {
+                return vec![segment.start];
+            }
+            return Vec::new();
+        }
+
+        let b = 2.0 * (fx * dx + fy * dy);
+        let c = fx * fx + fy * fy - self.radius * self.radius;
+
+        let discriminant = b * b - 4.0 * a * c;
+        if discriminant < 0.0 {
+            return Vec::new();
+        }
+
+        let mut points = Vec::new();
+        let sqrt_disc = discriminant.sqrt();
+        let t1 = (-b - sqrt_disc) / (2.0 * a);
+        let t2 = (-b + sqrt_disc) / (2.0 * a);
+
+        // For tangent case (discriminant ≈ 0), t1 ≈ t2, only add once
+        if t1 >= 0.0 && t1 <= 1.0 {
+            points.push(CgaPoint::new(
+                segment.start.x + t1 * dx,
+                segment.start.y + t1 * dy,
+            ));
+        }
+
+        // Only add second point if it's distinct from first
+        if (t2 - t1).abs() > 1e-10 && t2 >= 0.0 && t2 <= 1.0 {
+            points.push(CgaPoint::new(
+                segment.start.x + t2 * dx,
+                segment.start.y + t2 * dy,
+            ));
+        }
+
+        points
+    }
+}
+
+/// An axis-aligned rectangle for hit testing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CgaRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl CgaRect {
+    /// Create a new rectangle.
+    #[must_use]
+    pub const fn new(x: f64, y: f64, width: f64, height: f64) -> Self {
+        Self { x, y, width, height }
+    }
+
+    /// Check if a point is inside the rectangle.
+    #[must_use]
+    pub fn contains(&self, point: &CgaPoint) -> bool {
+        point.x >= self.x
+            && point.x <= self.x + self.width
+            && point.y >= self.y
+            && point.y <= self.y + self.height
+    }
+
+    /// Get the four edges as line segments.
+    #[must_use]
+    pub fn edges(&self) -> [CgaLineSegment; 4] {
+        let tl = CgaPoint::new(self.x, self.y);
+        let tr = CgaPoint::new(self.x + self.width, self.y);
+        let br = CgaPoint::new(self.x + self.width, self.y + self.height);
+        let bl = CgaPoint::new(self.x, self.y + self.height);
+        [
+            CgaLineSegment::new(tl, tr), // top
+            CgaLineSegment::new(tr, br), // right
+            CgaLineSegment::new(br, bl), // bottom
+            CgaLineSegment::new(bl, tl), // left
+        ]
+    }
+
+    /// Find intersection points with a line segment.
+    #[must_use]
+    pub fn intersect_segment(&self, segment: &CgaLineSegment) -> Vec<CgaPoint> {
+        let mut points = Vec::new();
+        for edge in self.edges() {
+            if let Some(p) = segment.intersect(&edge) {
+                // Avoid duplicate points at corners
+                if points.iter().all(|existing: &CgaPoint| {
+                    (existing.x - p.x).abs() > f64::EPSILON
+                        || (existing.y - p.y).abs() > f64::EPSILON
+                }) {
+                    points.push(p);
+                }
+            }
+        }
+        points
+    }
+
+    /// Closest point on rectangle boundary to a given point.
+    #[must_use]
+    pub fn closest_boundary_point(&self, point: &CgaPoint) -> CgaPoint {
+        let mut closest = self.edges()[0].closest_point(point);
+        let mut min_dist = point.distance(&closest);
+
+        for edge in self.edges().iter().skip(1) {
+            let p = edge.closest_point(point);
+            let dist = point.distance(&p);
+            if dist < min_dist {
+                min_dist = dist;
+                closest = p;
+            }
+        }
+        closest
+    }
+}
+
 #[cfg(test)]
 mod transform_stack_tests {
     use super::*;
@@ -919,5 +1215,127 @@ mod transform_stack_tests {
             recovered.c,
             original.c
         );
+    }
+}
+
+#[cfg(test)]
+mod geometry_tests {
+    use super::*;
+
+    #[test]
+    fn point_distance() {
+        let p1 = CgaPoint::new(0.0, 0.0);
+        let p2 = CgaPoint::new(3.0, 4.0);
+        assert!((p1.distance(&p2) - 5.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn line_segment_length() {
+        let seg = CgaLineSegment::new(CgaPoint::new(0.0, 0.0), CgaPoint::new(3.0, 4.0));
+        assert!((seg.length() - 5.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn line_segment_intersection() {
+        // Crossing segments
+        let seg1 = CgaLineSegment::new(CgaPoint::new(0.0, 0.0), CgaPoint::new(2.0, 2.0));
+        let seg2 = CgaLineSegment::new(CgaPoint::new(0.0, 2.0), CgaPoint::new(2.0, 0.0));
+        let intersection = seg1.intersect(&seg2).expect("should intersect");
+        assert!((intersection.x - 1.0).abs() < 1e-10);
+        assert!((intersection.y - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn line_segment_no_intersection_parallel() {
+        let seg1 = CgaLineSegment::new(CgaPoint::new(0.0, 0.0), CgaPoint::new(2.0, 0.0));
+        let seg2 = CgaLineSegment::new(CgaPoint::new(0.0, 1.0), CgaPoint::new(2.0, 1.0));
+        assert!(seg1.intersect(&seg2).is_none());
+    }
+
+    #[test]
+    fn line_segment_no_intersection_not_crossing() {
+        // Lines would cross if extended, but segments don't
+        let seg1 = CgaLineSegment::new(CgaPoint::new(0.0, 0.0), CgaPoint::new(1.0, 1.0));
+        let seg2 = CgaLineSegment::new(CgaPoint::new(2.0, 0.0), CgaPoint::new(3.0, 1.0));
+        assert!(seg1.intersect(&seg2).is_none());
+    }
+
+    #[test]
+    fn line_segment_closest_point_on_segment() {
+        let seg = CgaLineSegment::new(CgaPoint::new(0.0, 0.0), CgaPoint::new(4.0, 0.0));
+        let point = CgaPoint::new(2.0, 3.0);
+        let closest = seg.closest_point(&point);
+        assert!((closest.x - 2.0).abs() < 1e-10);
+        assert!((closest.y - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn line_segment_closest_point_at_endpoint() {
+        let seg = CgaLineSegment::new(CgaPoint::new(0.0, 0.0), CgaPoint::new(4.0, 0.0));
+        let point = CgaPoint::new(-1.0, 1.0);
+        let closest = seg.closest_point(&point);
+        assert!((closest.x - 0.0).abs() < 1e-10);
+        assert!((closest.y - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn circle_contains_point() {
+        let circle = CgaCircle::new(CgaPoint::new(5.0, 5.0), 3.0);
+        assert!(circle.contains(&CgaPoint::new(5.0, 5.0))); // center
+        assert!(circle.contains(&CgaPoint::new(6.0, 5.0))); // inside
+        assert!(circle.contains(&CgaPoint::new(8.0, 5.0))); // on boundary
+        assert!(!circle.contains(&CgaPoint::new(9.0, 5.0))); // outside
+    }
+
+    #[test]
+    fn circle_intersect_segment_two_points() {
+        let circle = CgaCircle::new(CgaPoint::origin(), 1.0);
+        let seg = CgaLineSegment::new(CgaPoint::new(-2.0, 0.0), CgaPoint::new(2.0, 0.0));
+        let points = circle.intersect_segment(&seg);
+        assert_eq!(points.len(), 2);
+    }
+
+    #[test]
+    fn circle_intersect_segment_one_point_tangent() {
+        let circle = CgaCircle::new(CgaPoint::origin(), 1.0);
+        let seg = CgaLineSegment::new(CgaPoint::new(-2.0, 1.0), CgaPoint::new(2.0, 1.0));
+        let points = circle.intersect_segment(&seg);
+        assert_eq!(points.len(), 1);
+        assert!((points[0].y - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn circle_intersect_segment_no_intersection() {
+        let circle = CgaCircle::new(CgaPoint::origin(), 1.0);
+        let seg = CgaLineSegment::new(CgaPoint::new(-2.0, 2.0), CgaPoint::new(2.0, 2.0));
+        let points = circle.intersect_segment(&seg);
+        assert!(points.is_empty());
+    }
+
+    #[test]
+    fn rect_contains_point() {
+        let rect = CgaRect::new(0.0, 0.0, 10.0, 10.0);
+        assert!(rect.contains(&CgaPoint::new(5.0, 5.0)));
+        assert!(rect.contains(&CgaPoint::new(0.0, 0.0)));
+        assert!(rect.contains(&CgaPoint::new(10.0, 10.0)));
+        assert!(!rect.contains(&CgaPoint::new(-1.0, 5.0)));
+    }
+
+    #[test]
+    fn rect_intersect_segment_through() {
+        let rect = CgaRect::new(0.0, 0.0, 10.0, 10.0);
+        let seg = CgaLineSegment::new(CgaPoint::new(-5.0, 5.0), CgaPoint::new(15.0, 5.0));
+        let points = rect.intersect_segment(&seg);
+        assert_eq!(points.len(), 2);
+    }
+
+    #[test]
+    fn rect_edges() {
+        let rect = CgaRect::new(0.0, 0.0, 10.0, 5.0);
+        let edges = rect.edges();
+        assert_eq!(edges.len(), 4);
+        // Top edge
+        assert!((edges[0].start.x - 0.0).abs() < 1e-10);
+        assert!((edges[0].end.x - 10.0).abs() < 1e-10);
     }
 }
