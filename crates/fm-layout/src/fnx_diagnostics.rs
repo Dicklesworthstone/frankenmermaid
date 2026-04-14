@@ -8,6 +8,14 @@
 //! - FNX-CHOKE-001: Articulation point (single point of failure)
 //! - FNX-BRIDGE-001: Bridge edge (fragile connection)
 //! - FNX-CYCLE-001: Dense cycle detected
+//!
+//! # Recommendations
+//!
+//! Each diagnostic includes a structured recommendation with:
+//! - Category (Simplify, Connect, Redundancy, Clarify)
+//! - Confidence level (High, Medium, Low)
+//! - Rationale explaining why this is suggested
+//! - Concrete action steps
 
 use fm_core::{IrNodeId, MermaidDiagramIr, Span};
 use fnx_algorithms::{
@@ -80,6 +88,202 @@ impl FnxDiagnosticSeverity {
 }
 
 // ============================================================================
+// Recommendation Types
+// ============================================================================
+
+/// Category of structural recommendation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecommendationCategory {
+    /// Simplify the diagram structure (reduce complexity).
+    Simplify,
+    /// Connect disconnected parts.
+    Connect,
+    /// Add redundancy for resilience.
+    Redundancy,
+    /// Improve layout clarity.
+    Clarify,
+}
+
+impl RecommendationCategory {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Simplify => "simplify",
+            Self::Connect => "connect",
+            Self::Redundancy => "redundancy",
+            Self::Clarify => "clarify",
+        }
+    }
+
+    #[must_use]
+    pub const fn display_name(&self) -> &'static str {
+        match self {
+            Self::Simplify => "Simplify Structure",
+            Self::Connect => "Improve Connectivity",
+            Self::Redundancy => "Add Redundancy",
+            Self::Clarify => "Clarify Layout",
+        }
+    }
+}
+
+/// Confidence level for a recommendation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RecommendationConfidence {
+    /// Low confidence - suggestion may not apply.
+    Low,
+    /// Medium confidence - likely helpful but context-dependent.
+    Medium,
+    /// High confidence - strongly recommended action.
+    High,
+}
+
+impl RecommendationConfidence {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+
+    /// Numeric score for sorting (higher = more confident).
+    #[must_use]
+    pub const fn score(&self) -> u8 {
+        match self {
+            Self::Low => 1,
+            Self::Medium => 2,
+            Self::High => 3,
+        }
+    }
+}
+
+/// A structured recommendation for diagram improvement.
+///
+/// Provides machine-readable metadata for front-end display in CLI and WASM.
+#[derive(Debug, Clone)]
+pub struct StructuredRecommendation {
+    /// Category of this recommendation.
+    pub category: RecommendationCategory,
+    /// Confidence level.
+    pub confidence: RecommendationConfidence,
+    /// Why this recommendation is being made.
+    pub rationale: String,
+    /// Concrete action to take.
+    pub action: String,
+    /// Optional example showing the fix.
+    pub example: Option<String>,
+}
+
+impl StructuredRecommendation {
+    /// Create a new recommendation.
+    #[must_use]
+    pub fn new(
+        category: RecommendationCategory,
+        confidence: RecommendationConfidence,
+        rationale: impl Into<String>,
+        action: impl Into<String>,
+    ) -> Self {
+        Self {
+            category,
+            confidence,
+            rationale: rationale.into(),
+            action: action.into(),
+            example: None,
+        }
+    }
+
+    /// Add an example to the recommendation.
+    #[must_use]
+    pub fn with_example(mut self, example: impl Into<String>) -> Self {
+        self.example = Some(example.into());
+        self
+    }
+
+    /// Create a recommendation for disconnected components.
+    #[must_use]
+    pub fn for_disconnected_component(component_size: usize, node_names: &[&str]) -> Self {
+        let names_preview = if node_names.len() > 3 {
+            format!("{}, {}, {} and {} more", node_names[0], node_names[1], node_names[2], node_names.len() - 3)
+        } else {
+            node_names.join(", ")
+        };
+
+        Self::new(
+            RecommendationCategory::Connect,
+            if component_size == 1 {
+                RecommendationConfidence::High
+            } else {
+                RecommendationConfidence::Medium
+            },
+            format!(
+                "This group of {} node(s) ({}) is not connected to the main diagram, \
+                 which may indicate missing relationships or an incomplete design.",
+                component_size, names_preview
+            ),
+            "Add edges to connect these nodes to the main flow, or remove them if they're not needed.",
+        )
+        .with_example("A --> DisconnectedNode")
+    }
+
+    /// Create a recommendation for articulation points.
+    #[must_use]
+    pub fn for_articulation_point(node_name: &str) -> Self {
+        Self::new(
+            RecommendationCategory::Redundancy,
+            RecommendationConfidence::Medium,
+            format!(
+                "Node '{}' is a single point of failure. Removing it would split the diagram \
+                 into disconnected parts, which may indicate a fragile design.",
+                node_name
+            ),
+            "Consider adding alternative paths that bypass this node.",
+        )
+        .with_example("Add: OtherNode --> AlternativePath --> DownstreamNode")
+    }
+
+    /// Create a recommendation for bridge edges.
+    #[must_use]
+    pub fn for_bridge_edge(source: &str, target: &str) -> Self {
+        Self::new(
+            RecommendationCategory::Redundancy,
+            RecommendationConfidence::Low,
+            format!(
+                "The edge from '{}' to '{}' is the only connection between two parts of the diagram. \
+                 This may be intentional, but could indicate a fragile design.",
+                source, target
+            ),
+            "If redundancy is needed, add parallel paths between these regions.",
+        )
+    }
+
+    /// Create a recommendation for dense cycles.
+    #[must_use]
+    pub fn for_dense_cycle(cycle_size: usize, node_names: &[&str]) -> Self {
+        let names_preview = if node_names.len() > 4 {
+            format!("{} → {} → ... → {}", node_names[0], node_names[1], node_names.last().unwrap_or(&""))
+        } else {
+            node_names.join(" → ")
+        };
+
+        Self::new(
+            RecommendationCategory::Simplify,
+            if cycle_size > 6 {
+                RecommendationConfidence::Medium
+            } else {
+                RecommendationConfidence::Low
+            },
+            format!(
+                "A cycle with {} nodes ({}) may make the diagram harder to read. \
+                 Large cycles often indicate tightly coupled components.",
+                cycle_size, names_preview
+            ),
+            "Consider breaking the cycle by extracting shared functionality into a separate node.",
+        )
+    }
+}
+
+// ============================================================================
 // Diagnostic Record
 // ============================================================================
 
@@ -98,8 +302,10 @@ pub struct FnxDiagnostic {
     pub related_nodes: Vec<IrNodeId>,
     /// Related edge indices (source, target pairs).
     pub related_edges: Vec<(usize, usize)>,
-    /// Remediation suggestion.
+    /// Remediation suggestion (simple text, for backwards compatibility).
     pub suggestion: Option<String>,
+    /// Structured recommendation with category, confidence, and rationale.
+    pub recommendation: Option<StructuredRecommendation>,
 }
 
 // ============================================================================
@@ -192,6 +398,10 @@ fn analyze_components(
                 .filter_map(|id| ir.nodes.get(id.0).map(|n| n.id.as_str()))
                 .collect();
 
+            let recommendation = StructuredRecommendation::for_disconnected_component(
+                component.len(),
+                &node_names,
+            );
             out.diagnostics.push(FnxDiagnostic {
                 code: FnxDiagnosticCode::DISCONNECTED_COMPONENT,
                 severity: FnxDiagnosticSeverity::Warning,
@@ -204,9 +414,8 @@ fn analyze_components(
                 span,
                 related_nodes: node_ids,
                 related_edges: Vec::new(),
-                suggestion: Some(
-                    "Consider adding edges to connect this component to the main graph".to_string(),
-                ),
+                suggestion: Some(recommendation.action.clone()),
+                recommendation: Some(recommendation),
             });
         }
     }
@@ -228,6 +437,7 @@ fn analyze_articulation_points(
             continue;
         };
 
+        let recommendation = StructuredRecommendation::for_articulation_point(&node.id);
         out.diagnostics.push(FnxDiagnostic {
             code: FnxDiagnosticCode::ARTICULATION_POINT,
             severity: FnxDiagnosticSeverity::Info,
@@ -238,9 +448,8 @@ fn analyze_articulation_points(
             span: Some(node.span_primary),
             related_nodes: vec![IrNodeId(ir_idx)],
             related_edges: Vec::new(),
-            suggestion: Some(
-                "Consider adding redundant paths around this node for resilience".to_string(),
-            ),
+            suggestion: Some(recommendation.action.clone()),
+            recommendation: Some(recommendation),
         });
     }
 }
@@ -284,6 +493,7 @@ fn analyze_bridges(
             })
             .map(|e| e.span);
 
+        let recommendation = StructuredRecommendation::for_bridge_edge(source_name, target_name);
         out.diagnostics.push(FnxDiagnostic {
             code: FnxDiagnosticCode::BRIDGE_EDGE,
             severity: FnxDiagnosticSeverity::Info,
@@ -293,9 +503,8 @@ fn analyze_bridges(
             span: edge_span,
             related_nodes: vec![IrNodeId(source_idx), IrNodeId(target_idx)],
             related_edges: vec![(source_idx, target_idx)],
-            suggestion: Some(
-                "Consider adding parallel paths for redundancy".to_string(),
-            ),
+            suggestion: Some(recommendation.action.clone()),
+            recommendation: Some(recommendation),
         });
     }
 }
@@ -331,6 +540,7 @@ fn analyze_cycles(
             .and_then(|id| ir.nodes.get(id.0))
             .map(|n| n.span_primary);
 
+        let recommendation = StructuredRecommendation::for_dense_cycle(cycle.len(), &node_names);
         out.diagnostics.push(FnxDiagnostic {
             code: FnxDiagnosticCode::DENSE_CYCLE,
             severity: FnxDiagnosticSeverity::Info,
@@ -342,9 +552,8 @@ fn analyze_cycles(
             span,
             related_nodes: node_ids,
             related_edges: Vec::new(),
-            suggestion: Some(
-                "Dense cycles may affect layout clarity; consider simplifying".to_string(),
-            ),
+            suggestion: Some(recommendation.action.clone()),
+            recommendation: Some(recommendation),
         });
     }
 }
