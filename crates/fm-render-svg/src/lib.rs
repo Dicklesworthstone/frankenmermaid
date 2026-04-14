@@ -33,7 +33,7 @@ pub use text::{TextAnchor, TextBuilder};
 pub use theme::{FontConfig, Theme, ThemeColors, ThemePreset, generate_palette};
 pub use transform::{Transform, TransformBuilder};
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use fm_core::{
     DiagramType, IrLabelId, IrLabelSegment, IrXyChartMeta, IrXySeriesKind, MermaidDiagramIr,
@@ -43,10 +43,10 @@ use fm_core::{
 };
 use fm_layout::{
     CentralityTier, DiagramLayout, FillStyle, LayoutBand, LayoutBandKind, LayoutEdgePath,
-    LayoutNodeBox, LineCap as RenderLineCap, LineJoin as RenderLineJoin, MarkerKind,
-    NodeCentrality, PathCmd, RenderClip, RenderGroup, RenderItem, RenderPath, RenderScene,
-    RenderSource, RenderText, RenderTransform, StrokeStyle, TextAlign as RenderTextAlign,
-    TextBaseline as RenderTextBaseline, build_render_scene,
+    LayoutNodeBox, LineCap as RenderLineCap, LineJoin as RenderLineJoin, MarkerKind, PathCmd,
+    RenderClip, RenderGroup, RenderItem, RenderPath, RenderScene, RenderSource, RenderText,
+    RenderTransform, StrokeStyle, TextAlign as RenderTextAlign, TextBaseline as RenderTextBaseline,
+    build_render_scene,
 };
 
 /// Node fill gradient mode.
@@ -2288,6 +2288,14 @@ fn render_layout_to_svg(
         }
     }
 
+    // Build centrality tier lookup map for O(1) access during node rendering
+    let centrality_map: HashMap<usize, CentralityTier> = layout
+        .extensions
+        .node_centrality
+        .iter()
+        .map(|nc| (nc.node_index, nc.tier))
+        .collect();
+
     // Render nodes
     for node_box in &layout.nodes {
         let node_elem = render_node(
@@ -2299,7 +2307,7 @@ fn render_layout_to_svg(
             detail,
             &theme.colors,
             emit_classdef_classes,
-            &layout.extensions.node_centrality,
+            &centrality_map,
         );
         doc = doc.child(node_elem);
     }
@@ -2314,7 +2322,7 @@ fn render_layout_to_svg(
             detail,
             &theme.colors,
             emit_classdef_classes,
-            &[], // Mirror headers don't have centrality data
+            &centrality_map, // Use same map (mirror headers will have no entries)
         )
         .id(&mermaid_node_element_id_with_variant(
             &node_box.node_id,
@@ -3487,24 +3495,30 @@ fn xychart_plot_bounds(layout: &DiagramLayout) -> fm_layout::LayoutRect {
 }
 
 fn xychart_categories(xy_chart_meta: &IrXyChartMeta) -> Vec<String> {
-    if !xy_chart_meta.x_axis.categories.is_empty() {
-        return xy_chart_meta.x_axis.categories.clone();
-    }
-
-    let count = xy_chart_meta
+    let series_count = xy_chart_meta
         .series
         .iter()
         .map(|series| series.values.len())
         .max()
         .unwrap_or(0);
-    let (x_min, x_max) = resolve_xychart_x_domain(xy_chart_meta, count);
-    if count <= 1 {
-        return vec![format_xychart_tick_value(x_min)];
+    let count = series_count.max(xy_chart_meta.x_axis.categories.len());
+
+    if xy_chart_meta.x_axis.categories.is_empty() {
+        let (x_min, x_max) = resolve_xychart_x_domain(xy_chart_meta, count);
+        if count <= 1 {
+            return vec![format_xychart_tick_value(x_min)];
+        }
+        let step = (x_max - x_min) / (count.saturating_sub(1) as f32).max(1.0);
+        return (0..count)
+            .map(|index| format_xychart_tick_value(x_min + step * index as f32))
+            .collect();
     }
-    let step = (x_max - x_min) / (count.saturating_sub(1) as f32).max(1.0);
-    (0..count)
-        .map(|index| format_xychart_tick_value(x_min + step * index as f32))
-        .collect()
+
+    let mut categories = xy_chart_meta.x_axis.categories.clone();
+    if categories.len() < count {
+        categories.extend((categories.len()..count).map(|index| (index + 1).to_string()));
+    }
+    categories
 }
 
 fn resolve_xychart_x_domain(xy_chart_meta: &IrXyChartMeta, count: usize) -> (f32, f32) {
@@ -3569,15 +3583,12 @@ fn format_xychart_tick_value(value: f32) -> String {
     }
 }
 
-/// Look up a node's centrality tier by index.
+/// Look up a node's centrality tier by index (O(1) via HashMap).
 fn lookup_centrality_tier(
-    node_centrality: &[NodeCentrality],
+    centrality_map: &HashMap<usize, CentralityTier>,
     node_index: usize,
 ) -> Option<CentralityTier> {
-    node_centrality
-        .iter()
-        .find(|nc| nc.node_index == node_index)
-        .map(|nc| nc.tier)
+    centrality_map.get(&node_index).copied()
 }
 
 /// Render a single node to an SVG element.
@@ -3591,7 +3602,7 @@ fn render_node(
     detail: RenderDetailProfile,
     colors: &ThemeColors,
     emit_classdef_classes: bool,
-    node_centrality: &[NodeCentrality],
+    centrality_map: &HashMap<usize, CentralityTier>,
 ) -> Element {
     use fm_core::NodeShape;
 
@@ -3654,7 +3665,7 @@ fn render_node(
         .data("id", node_id)
         .data("fm-node-id", node_id);
     // Add centrality tier class if available (FNX semantic styling)
-    if let Some(tier) = lookup_centrality_tier(node_centrality, node_box.node_index) {
+    if let Some(tier) = lookup_centrality_tier(centrality_map, node_box.node_index) {
         group = group.class(&format!("fm-node-centrality-{}", tier.css_class_suffix()));
     }
     if config.animations_enabled {
@@ -8856,6 +8867,20 @@ mod tests {
             "xychart bar series should render rects"
         );
         assert!(svg.contains("Revenue"), "xychart should render title");
+    }
+
+    #[test]
+    fn xychart_pad_missing_categories_for_ticks() {
+        let mut ir = create_xychart_ir();
+        if let Some(meta) = ir.xy_chart_meta.as_mut() {
+            meta.x_axis.categories.truncate(1);
+        }
+        let svg = render_svg_with_config(&ir, &SvgRenderConfig::default());
+        let tick_count = svg.matches("fm-xychart-x-tick").count();
+        assert_eq!(
+            tick_count, 3,
+            "xychart should pad missing categories to match series length"
+        );
     }
 
     // ─── Incremental layout engine integration test ───
