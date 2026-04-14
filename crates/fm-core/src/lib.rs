@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod art;
+pub mod canary;
 pub mod cga;
 pub mod constraints;
 pub mod epoch;
