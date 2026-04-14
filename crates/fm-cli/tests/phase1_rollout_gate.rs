@@ -336,25 +336,14 @@ fn phase1_evidence_bundle_aggregation() {
 /// Phase-1 go/no-go decision criteria checklist.
 #[test]
 fn phase1_go_no_go_checklist() {
-    let mut checklist = Phase1Checklist::default();
-
-    // 1. Canary state machine is implemented and tested
-    checklist.canary_state_machine = true;
-
-    // 2. Rollback triggers work correctly
-    checklist.rollback_triggers = true;
-
-    // 3. Traffic sampling is deterministic
-    checklist.traffic_sampling_deterministic = true;
-
-    // 4. Config lint validates Phase-1 settings
-    checklist.config_lint_passes = true;
-
-    // 5. Evidence logging is complete
-    checklist.evidence_logging = true;
-
-    // 6. Fallback behavior is verified
-    checklist.fallback_behavior = true;
+    let checklist = Phase1Checklist {
+        canary_state_machine: true,          // 1. Canary state machine is implemented and tested
+        rollback_triggers: true,              // 2. Rollback triggers work correctly
+        traffic_sampling_deterministic: true, // 3. Traffic sampling is deterministic
+        config_lint_passes: true,             // 4. Config lint validates Phase-1 settings
+        evidence_logging: true,               // 5. Evidence logging is complete
+        fallback_behavior: true,              // 6. Fallback behavior is verified
+    };
 
     // Compute go/no-go
     let decision = checklist.go_decision();

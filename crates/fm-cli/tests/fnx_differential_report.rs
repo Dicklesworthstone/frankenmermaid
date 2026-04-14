@@ -301,13 +301,11 @@ fn generate_differential_report(input: &str, scenario_id: &str) -> DifferentialR
     };
 
     // Classify structure
-    let structure_classification = if thresholds::REQUIRE_IDENTICAL_STRUCTURE
-        && (fnx_off.node_count != fnx_on.node_count || fnx_off.edge_count != fnx_on.edge_count)
-    {
-        DeltaClassification::Regression
-    } else if bounds_width_delta_pct.abs() > thresholds::MAX_BOUNDS_DELTA_PCT
-        || bounds_height_delta_pct.abs() > thresholds::MAX_BOUNDS_DELTA_PCT
-    {
+    let structure_mismatch = thresholds::REQUIRE_IDENTICAL_STRUCTURE
+        && (fnx_off.node_count != fnx_on.node_count || fnx_off.edge_count != fnx_on.edge_count);
+    let bounds_exceeded = bounds_width_delta_pct.abs() > thresholds::MAX_BOUNDS_DELTA_PCT
+        || bounds_height_delta_pct.abs() > thresholds::MAX_BOUNDS_DELTA_PCT;
+    let structure_classification = if structure_mismatch || bounds_exceeded {
         DeltaClassification::Regression
     } else {
         DeltaClassification::Neutral
@@ -413,13 +411,12 @@ fn load_golden_cases() -> Vec<(String, String)> {
 
     if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if name.ends_with(".mmd") {
-                    let case_id = name.trim_end_matches(".mmd").to_string();
-                    if let Ok(content) = fs::read_to_string(entry.path()) {
-                        cases.push((case_id, content));
-                    }
-                }
+            if let Some(name) = entry.file_name().to_str()
+                && name.ends_with(".mmd")
+                && let Ok(content) = fs::read_to_string(entry.path())
+            {
+                let case_id = name.trim_end_matches(".mmd").to_string();
+                cases.push((case_id, content));
             }
         }
     }

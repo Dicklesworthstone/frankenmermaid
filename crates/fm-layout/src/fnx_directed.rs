@@ -93,6 +93,7 @@ pub fn compute_scc(ir: &MermaidDiagramIr) -> SccResult {
     let mut stack: Vec<usize> = Vec::new();
     let mut sccs: Vec<Vec<usize>> = Vec::new();
 
+    #[allow(clippy::too_many_arguments)] // Tarjan's algorithm state is necessarily coupled
     fn strongconnect(
         v: usize,
         adj: &[BTreeSet<usize>],
@@ -375,6 +376,7 @@ pub fn detect_directed_cycles(ir: &MermaidDiagramIr) -> DirectedCycleResult {
     let mut cyclic_nodes = BTreeSet::new();
     let mut cyclic_edges = BTreeSet::new();
 
+    #[allow(clippy::too_many_arguments)] // DFS state is necessarily coupled
     fn dfs_visit(
         v: usize,
         adj: &[Vec<(usize, usize)>],

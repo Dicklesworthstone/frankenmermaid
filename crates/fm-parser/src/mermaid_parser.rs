@@ -12621,7 +12621,7 @@ Rel_Back(db, app, "Responds")"#,
             .expect("node should have inline_style with quoted font-family");
         // Quoted value should be preserved
         assert!(
-            style.properties.get("font-family").is_some(),
+            style.properties.contains_key("font-family"),
             "font-family should be parsed"
         );
     }

@@ -244,7 +244,7 @@ fn recovery_drill_retry_canary_after_fix() {
     );
 
     // After fix, retry canary
-    state.transition_to(RolloutPhase::Canary, timestamp + 3600_000);
+    state.transition_to(RolloutPhase::Canary, timestamp + 3_600_000);
 
     assert_eq!(state.phase, RolloutPhase::Canary);
     assert_eq!(state.previous_phase, Some(RolloutPhase::RolledBack));

@@ -78,13 +78,12 @@ fn load_golden_cases() -> Vec<(String, String)> {
 
     if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if name.ends_with(".mmd") {
-                    let case_id = name.trim_end_matches(".mmd").to_string();
-                    if let Ok(content) = fs::read_to_string(entry.path()) {
-                        cases.push((case_id, content));
-                    }
-                }
+            if let Some(name) = entry.file_name().to_str()
+                && name.ends_with(".mmd")
+                && let Ok(content) = fs::read_to_string(entry.path())
+            {
+                let case_id = name.trim_end_matches(".mmd").to_string();
+                cases.push((case_id, content));
             }
         }
     }

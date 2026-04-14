@@ -155,11 +155,7 @@ impl RolloutState {
     /// Get current average latency in microseconds.
     #[must_use]
     pub fn avg_latency_us(&self) -> u64 {
-        if self.requests_processed == 0 {
-            0
-        } else {
-            self.latency_sum_us / self.requests_processed
-        }
+        self.latency_sum_us.checked_div(self.requests_processed).unwrap_or(0)
     }
 
     /// Get latency increase percentage compared to baseline.
@@ -245,11 +241,11 @@ impl RolloutState {
             RolloutPhase::Full => true,
             RolloutPhase::Canary => {
                 // 1% canary traffic
-                request_id % 100 == 0
+                request_id.is_multiple_of(100)
             }
             RolloutPhase::Partial => {
                 // 10% partial traffic
-                request_id % 10 == 0
+                request_id.is_multiple_of(10)
             }
         }
     }
