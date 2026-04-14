@@ -873,4 +873,252 @@ mod tests {
             }
         }
     }
+
+    // ========================================================================
+    // Edge Case Tests (bd-ml2r.11.1)
+    // ========================================================================
+
+    #[test]
+    fn single_node_graph_no_diagnostics() {
+        let ir = MermaidDiagramIr {
+            nodes: vec![IrNode {
+                id: "Lonely".to_string(),
+                shape: NodeShape::Rect,
+                ..Default::default()
+            }],
+            edges: vec![],
+            ..Default::default()
+        };
+        let results = analyze_structure(&ir);
+
+        assert_eq!(results.component_count, 1);
+        assert!(results.is_connected);
+        // Single node has no articulation points, bridges, or dense cycles
+        assert_eq!(results.articulation_point_count, 0);
+        assert_eq!(results.bridge_count, 0);
+        assert_eq!(results.cycle_count, 0);
+        // No warnings expected
+        assert!(results.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn small_cycle_not_reported_as_dense() {
+        // A -> B -> C -> A (3-node cycle, should NOT produce dense cycle warning)
+        let ir = MermaidDiagramIr {
+            nodes: vec![
+                IrNode {
+                    id: "A".to_string(),
+                    shape: NodeShape::Rect,
+                    ..Default::default()
+                },
+                IrNode {
+                    id: "B".to_string(),
+                    shape: NodeShape::Rect,
+                    ..Default::default()
+                },
+                IrNode {
+                    id: "C".to_string(),
+                    shape: NodeShape::Rect,
+                    ..Default::default()
+                },
+            ],
+            edges: vec![
+                IrEdge {
+                    from: IrEndpoint::Node(IrNodeId(0)),
+                    to: IrEndpoint::Node(IrNodeId(1)),
+                    ..Default::default()
+                },
+                IrEdge {
+                    from: IrEndpoint::Node(IrNodeId(1)),
+                    to: IrEndpoint::Node(IrNodeId(2)),
+                    ..Default::default()
+                },
+                IrEdge {
+                    from: IrEndpoint::Node(IrNodeId(2)),
+                    to: IrEndpoint::Node(IrNodeId(0)),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let results = analyze_structure(&ir);
+
+        assert_eq!(results.cycle_count, 1);
+        // Should NOT have dense cycle diagnostic (only 3 nodes, threshold is >4)
+        let dense_cycle_diags = results
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == FnxDiagnosticCode::DENSE_CYCLE)
+            .count();
+        assert_eq!(dense_cycle_diags, 0);
+    }
+
+    #[test]
+    fn four_node_cycle_not_reported_as_dense() {
+        // A -> B -> C -> D -> A (4-node cycle, exactly at threshold)
+        let ir = MermaidDiagramIr {
+            nodes: vec![
+                IrNode { id: "A".to_string(), shape: NodeShape::Rect, ..Default::default() },
+                IrNode { id: "B".to_string(), shape: NodeShape::Rect, ..Default::default() },
+                IrNode { id: "C".to_string(), shape: NodeShape::Rect, ..Default::default() },
+                IrNode { id: "D".to_string(), shape: NodeShape::Rect, ..Default::default() },
+            ],
+            edges: vec![
+                IrEdge { from: IrEndpoint::Node(IrNodeId(0)), to: IrEndpoint::Node(IrNodeId(1)), ..Default::default() },
+                IrEdge { from: IrEndpoint::Node(IrNodeId(1)), to: IrEndpoint::Node(IrNodeId(2)), ..Default::default() },
+                IrEdge { from: IrEndpoint::Node(IrNodeId(2)), to: IrEndpoint::Node(IrNodeId(3)), ..Default::default() },
+                IrEdge { from: IrEndpoint::Node(IrNodeId(3)), to: IrEndpoint::Node(IrNodeId(0)), ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        let results = analyze_structure(&ir);
+
+        assert_eq!(results.cycle_count, 1);
+        // 4-node cycle should NOT be reported as dense (threshold is >4)
+        let dense_cycle_diags = results
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == FnxDiagnosticCode::DENSE_CYCLE)
+            .count();
+        assert_eq!(dense_cycle_diags, 0);
+    }
+
+    #[test]
+    fn multiple_disconnected_components_all_reported() {
+        // Three isolated nodes: A, B, C (three separate components)
+        let ir = MermaidDiagramIr {
+            nodes: vec![
+                IrNode { id: "A".to_string(), shape: NodeShape::Rect, ..Default::default() },
+                IrNode { id: "B".to_string(), shape: NodeShape::Rect, ..Default::default() },
+                IrNode { id: "C".to_string(), shape: NodeShape::Rect, ..Default::default() },
+            ],
+            edges: vec![],
+            ..Default::default()
+        };
+        let results = analyze_structure(&ir);
+
+        assert_eq!(results.component_count, 3);
+        assert!(!results.is_connected);
+        // Two components should be reported (the largest is skipped)
+        let disconnected_count = results
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == FnxDiagnosticCode::DISCONNECTED_COMPONENT)
+            .count();
+        assert_eq!(disconnected_count, 2);
+    }
+
+    #[test]
+    fn self_loop_handled_gracefully() {
+        // A -> A (self-loop)
+        let ir = MermaidDiagramIr {
+            nodes: vec![IrNode {
+                id: "A".to_string(),
+                shape: NodeShape::Rect,
+                ..Default::default()
+            }],
+            edges: vec![IrEdge {
+                from: IrEndpoint::Node(IrNodeId(0)),
+                to: IrEndpoint::Node(IrNodeId(0)),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let results = analyze_structure(&ir);
+
+        // Should not panic, and should report as connected
+        assert_eq!(results.component_count, 1);
+        assert!(results.is_connected);
+    }
+
+    // ========================================================================
+    // Recommendation Factory Tests
+    // ========================================================================
+
+    #[test]
+    fn recommendation_for_disconnected_component_single_node_high_confidence() {
+        let rec = StructuredRecommendation::for_disconnected_component(1, &["Orphan"]);
+        assert_eq!(rec.category, RecommendationCategory::Connect);
+        assert_eq!(rec.confidence, RecommendationConfidence::High);
+        assert!(rec.rationale.contains("1 node"));
+        assert!(rec.example.is_some());
+    }
+
+    #[test]
+    fn recommendation_for_disconnected_component_multi_node_medium_confidence() {
+        let rec = StructuredRecommendation::for_disconnected_component(3, &["A", "B", "C"]);
+        assert_eq!(rec.category, RecommendationCategory::Connect);
+        assert_eq!(rec.confidence, RecommendationConfidence::Medium);
+        assert!(rec.rationale.contains("3 node"));
+    }
+
+    #[test]
+    fn recommendation_for_disconnected_component_truncates_long_node_list() {
+        let rec = StructuredRecommendation::for_disconnected_component(
+            5,
+            &["N1", "N2", "N3", "N4", "N5"],
+        );
+        // Should truncate to "N1, N2, N3 and 2 more"
+        assert!(rec.rationale.contains("and 2 more"));
+    }
+
+    #[test]
+    fn recommendation_for_articulation_point_has_example() {
+        let rec = StructuredRecommendation::for_articulation_point("Gateway");
+        assert_eq!(rec.category, RecommendationCategory::Redundancy);
+        assert_eq!(rec.confidence, RecommendationConfidence::Medium);
+        assert!(rec.rationale.contains("Gateway"));
+        assert!(rec.example.is_some());
+    }
+
+    #[test]
+    fn recommendation_for_bridge_edge_low_confidence() {
+        let rec = StructuredRecommendation::for_bridge_edge("Src", "Dst");
+        assert_eq!(rec.category, RecommendationCategory::Redundancy);
+        assert_eq!(rec.confidence, RecommendationConfidence::Low);
+        assert!(rec.rationale.contains("Src"));
+        assert!(rec.rationale.contains("Dst"));
+    }
+
+    #[test]
+    fn recommendation_for_dense_cycle_small_low_confidence() {
+        let rec = StructuredRecommendation::for_dense_cycle(5, &["A", "B", "C", "D", "E"]);
+        assert_eq!(rec.category, RecommendationCategory::Simplify);
+        assert_eq!(rec.confidence, RecommendationConfidence::Low);
+        assert!(rec.rationale.contains("5 nodes"));
+    }
+
+    #[test]
+    fn recommendation_for_dense_cycle_large_medium_confidence() {
+        let nodes: Vec<&str> = (0..8).map(|_| "N").collect();
+        let rec = StructuredRecommendation::for_dense_cycle(8, &nodes);
+        assert_eq!(rec.confidence, RecommendationConfidence::Medium);
+    }
+
+    #[test]
+    fn recommendation_category_display_names() {
+        assert_eq!(RecommendationCategory::Simplify.display_name(), "Simplify Structure");
+        assert_eq!(RecommendationCategory::Connect.display_name(), "Improve Connectivity");
+        assert_eq!(RecommendationCategory::Redundancy.display_name(), "Add Redundancy");
+        assert_eq!(RecommendationCategory::Clarify.display_name(), "Clarify Layout");
+    }
+
+    #[test]
+    fn recommendation_confidence_score_ordering() {
+        assert!(RecommendationConfidence::Low.score() < RecommendationConfidence::Medium.score());
+        assert!(RecommendationConfidence::Medium.score() < RecommendationConfidence::High.score());
+    }
+
+    #[test]
+    fn severity_ordering() {
+        assert!(FnxDiagnosticSeverity::Info < FnxDiagnosticSeverity::Warning);
+        assert!(FnxDiagnosticSeverity::Warning < FnxDiagnosticSeverity::Error);
+    }
+
+    #[test]
+    fn severity_as_str() {
+        assert_eq!(FnxDiagnosticSeverity::Info.as_str(), "info");
+        assert_eq!(FnxDiagnosticSeverity::Warning.as_str(), "warning");
+        assert_eq!(FnxDiagnosticSeverity::Error.as_str(), "error");
+    }
 }
