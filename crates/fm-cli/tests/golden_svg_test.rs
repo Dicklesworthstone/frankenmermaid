@@ -30,6 +30,7 @@ const CASE_IDS: &[&str] = &[
     "quadrant_basic",
     "gitgraph_basic",
     "xychart_basic",
+    "xychart_comprehensive",
     "mindmap_basic",
     "timeline_basic",
     "all_node_shapes",
@@ -259,10 +260,29 @@ fn run_case(case_id: &str, bless: bool) {
     println!("{evidence}");
 }
 
+fn selected_case_ids() -> Vec<&'static str> {
+    let filter = std::env::var("FM_GOLDEN_CASE").ok();
+    match filter.as_deref() {
+        Some(case_id) => {
+            let selected: Vec<&'static str> = CASE_IDS
+                .iter()
+                .copied()
+                .filter(|candidate| candidate == &case_id)
+                .collect();
+            assert!(
+                !selected.is_empty(),
+                "FM_GOLDEN_CASE {case_id} is not a known golden case id"
+            );
+            selected
+        }
+        None => CASE_IDS.to_vec(),
+    }
+}
+
 #[test]
 fn svg_golden_snapshots_are_stable() {
     let bless = std::env::var("BLESS").is_ok_and(|v| v == "1");
-    for case_id in CASE_IDS {
+    for case_id in selected_case_ids() {
         run_case(case_id, bless);
     }
 }
