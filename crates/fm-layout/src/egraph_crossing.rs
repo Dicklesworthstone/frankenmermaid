@@ -1081,4 +1081,227 @@ mod tests {
         // Diagnostic strategy should match result strategy
         assert_eq!(result.diagnostic.fallback_strategy, result.strategy);
     }
+
+    // -------------------------------------------------------------------------
+    // Fault injection tests (bd-1s1g.1)
+    // -------------------------------------------------------------------------
+
+    /// Generate a complete bipartite graph K_{n,m} for stress testing.
+    fn generate_bipartite(n: usize, m: usize) -> (LayerOrdering, LayerOrdering, LayerEdges) {
+        let upper = LayerOrdering::new((0..n).collect());
+        let lower = LayerOrdering::new((n..n + m).collect());
+        let mut edges = Vec::with_capacity(n * m);
+        for &src in &upper.order {
+            for &tgt in &lower.order {
+                edges.push((src, tgt));
+            }
+        }
+        (upper, lower, LayerEdges { edges })
+    }
+
+    #[test]
+    fn fault_node_budget_hit_on_dense_graph() {
+        // Fault scenario 1: K_{15,15} with tiny node budget should exhaust budget
+        let (upper, lower, edges) = generate_bipartite(15, 15);
+        let ctx = CrossingContext {
+            upper_ordering: None,
+            upper_edges: None,
+            lower_ordering: Some(lower),
+            lower_edges: Some(edges),
+        };
+        let config = SaturationConfig {
+            node_limit: 20, // Very small - will definitely be hit
+            iter_limit: 1000,
+            time_limit_ms: 10000,
+        };
+
+        let result = saturate_with_fallback(&upper, &ctx, &config);
+
+        // Should not panic
+        assert!(!result.ordering.order.is_empty());
+
+        // Should produce valid layout (result never worse than greedy)
+        assert!(result.crossing_count <= result.greedy_result.crossing_count);
+
+        // If e-graph was attempted, budget should be recorded
+        if let Some(ref egraph) = result.egraph_result {
+            if egraph.hit_limit {
+                assert!(result.diagnostic.budget_type.is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn fault_iteration_limit_hit() {
+        // Fault scenario 4: Force iteration limit
+        let initial = LayerOrdering::new(vec![0, 1, 2, 3, 4, 5]);
+        let lower = LayerOrdering::new(vec![6, 7, 8, 9, 10, 11]);
+        let edges = LayerEdges {
+            edges: vec![
+                (0, 11), (1, 10), (2, 9), (3, 8), (4, 7), (5, 6),
+            ],
+        };
+        let ctx = CrossingContext {
+            upper_ordering: None,
+            upper_edges: None,
+            lower_ordering: Some(lower),
+            lower_edges: Some(edges),
+        };
+        let config = SaturationConfig {
+            node_limit: 100_000,
+            iter_limit: 1, // Very small - will be hit
+            time_limit_ms: 10000,
+        };
+
+        let result = saturate_with_fallback(&initial, &ctx, &config);
+
+        // Should not panic and produce valid result
+        assert!(!result.ordering.order.is_empty());
+        assert!(result.crossing_count <= result.greedy_result.crossing_count);
+    }
+
+    #[test]
+    fn fault_zero_node_layer() {
+        // Fault scenario 5: Empty layer
+        let initial = LayerOrdering::new(vec![]);
+        let ctx = CrossingContext::default();
+        let config = SaturationConfig::default();
+
+        let result = saturate_with_fallback(&initial, &ctx, &config);
+
+        // Should not panic on empty input
+        assert!(result.ordering.order.is_empty());
+        assert_eq!(result.crossing_count, 0);
+    }
+
+    #[test]
+    fn fault_single_node_layer() {
+        // Fault scenario 6: Single node layer
+        let initial = LayerOrdering::new(vec![42]);
+        let lower = LayerOrdering::new(vec![99]);
+        let edges = LayerEdges {
+            edges: vec![(42, 99)],
+        };
+        let ctx = CrossingContext {
+            upper_ordering: None,
+            upper_edges: None,
+            lower_ordering: Some(lower),
+            lower_edges: Some(edges),
+        };
+        let config = SaturationConfig::default();
+
+        let result = saturate_with_fallback(&initial, &ctx, &config);
+
+        // Should not panic and produce trivial result
+        assert_eq!(result.ordering.order, vec![42]);
+        assert_eq!(result.crossing_count, 0);
+    }
+
+    #[test]
+    fn fault_deterministic_output_across_runs() {
+        // Verify determinism: same input should produce identical output
+        let (upper, lower, edges) = generate_bipartite(8, 8);
+        let ctx = CrossingContext {
+            upper_ordering: None,
+            upper_edges: None,
+            lower_ordering: Some(lower),
+            lower_edges: Some(edges),
+        };
+        let config = SaturationConfig::default();
+
+        let results: Vec<_> = (0..10)
+            .map(|_| saturate_with_fallback(&upper, &ctx, &config))
+            .collect();
+
+        // All results should be identical
+        let first = &results[0];
+        for (i, result) in results.iter().enumerate().skip(1) {
+            assert_eq!(
+                first.ordering.order, result.ordering.order,
+                "Run {i} produced different ordering"
+            );
+            assert_eq!(
+                first.crossing_count, result.crossing_count,
+                "Run {i} produced different crossing count"
+            );
+            assert_eq!(
+                first.strategy, result.strategy,
+                "Run {i} produced different strategy"
+            );
+        }
+    }
+
+    #[test]
+    fn fault_structured_diagnostic_complete() {
+        // Verify diagnostic has all required fields when budget exceeded
+        let (upper, lower, edges) = generate_bipartite(10, 10);
+        let ctx = CrossingContext {
+            upper_ordering: None,
+            upper_edges: None,
+            lower_ordering: Some(lower),
+            lower_edges: Some(edges),
+        };
+        let config = SaturationConfig {
+            node_limit: 10, // Force budget hit
+            iter_limit: 1000,
+            time_limit_ms: 10000,
+        };
+
+        let result = saturate_with_fallback(&upper, &ctx, &config);
+
+        // Diagnostic should be populated
+        let diag = &result.diagnostic;
+        assert_eq!(diag.greedy_crossings, result.greedy_result.crossing_count);
+
+        // If e-graph hit budget, diagnostic should record it
+        if let Some(ref egraph) = result.egraph_result {
+            if egraph.hit_limit {
+                assert!(
+                    diag.budget_type.is_some(),
+                    "Budget type should be recorded when limit hit"
+                );
+                assert!(
+                    diag.budget_value.is_some(),
+                    "Budget value should be recorded"
+                );
+                assert!(
+                    diag.budget_limit.is_some(),
+                    "Budget limit should be recorded"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fault_fallback_within_time_budget() {
+        // Verify that even worst-case graphs complete within reasonable time
+        use std::time::Instant;
+
+        let (upper, lower, edges) = generate_bipartite(20, 20);
+        let ctx = CrossingContext {
+            upper_ordering: None,
+            upper_edges: None,
+            lower_ordering: Some(lower),
+            lower_edges: Some(edges),
+        };
+        let config = SaturationConfig {
+            node_limit: 50,
+            iter_limit: 10,
+            time_limit_ms: 100,
+        };
+
+        let start = Instant::now();
+        let result = saturate_with_fallback(&upper, &ctx, &config);
+        let elapsed = start.elapsed();
+
+        // Should complete within 500ms even on slow hardware
+        assert!(
+            elapsed.as_millis() < 500,
+            "Fallback took too long: {:?}",
+            elapsed
+        );
+
+        // Result should still be valid
+        assert!(result.crossing_count <= result.greedy_result.crossing_count);
+    }
 }
