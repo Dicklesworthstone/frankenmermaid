@@ -1,0 +1,207 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frankenmermaid.dev/schemas/evidence-log-entry.json",
+  "title": "FNX Evidence Log Entry",
+  "description": "Canonical structured log schema for FNX-assisted diagram processing. All e2e scripts and regression harnesses should emit logs conforming to this schema.",
+  "type": "object",
+  "required": [
+    "scenario_id",
+    "input_hash",
+    "fnx_mode",
+    "projection_mode",
+    "decision_mode",
+    "parse_ms",
+    "analysis_ms",
+    "layout_ms",
+    "render_ms",
+    "diagnostic_count",
+    "output_hash",
+    "pass_fail_reason"
+  ],
+  "properties": {
+    "scenario_id": {
+      "type": "string",
+      "description": "Unique identifier for this test scenario (e.g., 'flowchart_simple')."
+    },
+    "input_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{16}$",
+      "description": "FNV-1a hash of the raw input text (16 hex digits)."
+    },
+    "fnx_mode": {
+      "type": "string",
+      "enum": ["off", "advisory", "experimental_directed", "strict"],
+      "description": "FNX integration mode used for this run."
+    },
+    "projection_mode": {
+      "type": "string",
+      "enum": ["native_only", "native_plus_fnx_advisory", "fnx_primary"],
+      "description": "Graph projection strategy applied."
+    },
+    "decision_mode": {
+      "type": "string",
+      "enum": ["native_authoritative", "fnx_authoritative_experimental"],
+      "description": "Decision authority mode (who has final say)."
+    },
+    "fnx_algorithm": {
+      "type": ["string", "null"],
+      "description": "FNX algorithm(s) invoked during analysis, if any."
+    },
+    "parse_ms": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Time spent parsing the input (milliseconds)."
+    },
+    "analysis_ms": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Time spent in FNX analysis (milliseconds, 0 if FNX disabled/skipped)."
+    },
+    "layout_ms": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Time spent in layout computation (milliseconds)."
+    },
+    "render_ms": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Time spent rendering output (milliseconds)."
+    },
+    "diagnostic_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of diagnostics emitted (warnings + errors)."
+    },
+    "fallback_reason": {
+      "type": ["string", "null"],
+      "enum": [
+        "feature_disabled",
+        "timeout",
+        "analysis_error",
+        "invalid_projection",
+        "native_precedence",
+        "unsupported_diagram_type",
+        "runtime_unavailable",
+        null
+      ],
+      "description": "Fallback reason code if degradation occurred."
+    },
+    "witness_hash": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{16}$",
+      "description": "Hash of FNX analysis witness data for determinism verification."
+    },
+    "output_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{16}$",
+      "description": "Hash of the final rendered output for regression detection."
+    },
+    "pass_fail_reason": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": ["pass", "pass_matched_golden"]
+        },
+        {
+          "type": "object",
+          "required": ["pass_deterministic"],
+          "properties": {
+            "pass_deterministic": {
+              "type": "object",
+              "required": ["runs"],
+              "properties": {
+                "runs": { "type": "integer", "minimum": 1 }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["fail_hash_mismatch"],
+          "properties": {
+            "fail_hash_mismatch": {
+              "type": "object",
+              "required": ["expected", "actual"],
+              "properties": {
+                "expected": { "type": "string" },
+                "actual": { "type": "string" }
+              }
+            }
+          }
+        },
+        {
+          "type": "string",
+          "const": "fail_missing_golden"
+        },
+        {
+          "type": "object",
+          "required": ["fail_parse_error"],
+          "properties": {
+            "fail_parse_error": {
+              "type": "object",
+              "required": ["message"],
+              "properties": {
+                "message": { "type": "string" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["fail_layout_error"],
+          "properties": {
+            "fail_layout_error": {
+              "type": "object",
+              "required": ["message"],
+              "properties": {
+                "message": { "type": "string" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["fail_render_error"],
+          "properties": {
+            "fail_render_error": {
+              "type": "object",
+              "required": ["message"],
+              "properties": {
+                "message": { "type": "string" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["fail_nondeterministic"],
+          "properties": {
+            "fail_nondeterministic": {
+              "type": "object",
+              "required": ["runs", "unique_hashes"],
+              "properties": {
+                "runs": { "type": "integer", "minimum": 1 },
+                "unique_hashes": { "type": "integer", "minimum": 2 }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["skipped"],
+          "properties": {
+            "skipped": {
+              "type": "object",
+              "required": ["reason"],
+              "properties": {
+                "reason": { "type": "string" }
+              }
+            }
+          }
+        }
+      ],
+      "description": "Pass/fail status with explanation."
+    }
+  },
+  "additionalProperties": false
+}

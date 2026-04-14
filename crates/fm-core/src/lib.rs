@@ -4,6 +4,7 @@ pub mod art;
 pub mod cga;
 pub mod constraints;
 pub mod epoch;
+pub mod evidence;
 mod font_metrics;
 pub mod leapfrog;
 #[cfg(test)]
@@ -11,6 +12,10 @@ mod lens_tests;
 pub mod quotient_filter;
 pub mod succinct;
 
+pub use evidence::{
+    DecisionMode, EvidenceBundle, EvidenceLogEntry, EvidenceSummary, FallbackReason, FnxFeatures,
+    FnxMode, PassFailReason, ProjectionMode, fnv1a_hex,
+};
 pub use font_metrics::{
     CharWidthClass, DiagnosticLevel, FontMetrics, FontMetricsConfig, FontMetricsDiagnostic,
     FontPreset, is_east_asian_wide,
