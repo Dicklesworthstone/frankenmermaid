@@ -117,7 +117,42 @@ impl CgaTransformStack {
     }
 }
 
+/// Convert a RenderTransform to an SVG matrix string.
+///
+/// For bit-identical output with the existing TransformBuilder approach,
+/// this directly formats the matrix without rotor round-trip conversion.
+pub fn render_transform_to_svg_matrix(transform: fm_layout::RenderTransform) -> String {
+    match transform {
+        fm_layout::RenderTransform::Matrix { a, b, c, d, e, f } => {
+            // Format directly matching TransformBuilder output
+            format!(
+                "matrix({},{},{},{},{},{})",
+                fmt_svg_num(a),
+                fmt_svg_num(b),
+                fmt_svg_num(c),
+                fmt_svg_num(d),
+                fmt_svg_num(e),
+                fmt_svg_num(f)
+            )
+        }
+    }
+}
+
+/// Format a number for SVG transform output (matches TransformBuilder).
+fn fmt_svg_num(n: f32) -> String {
+    if !n.is_finite() {
+        return "0".to_string();
+    }
+    if n.fract() == 0.0 && n >= i32::MIN as f32 && n <= i32::MAX as f32 {
+        format!("{}", n as i32)
+    } else {
+        format!("{n:.2}")
+    }
+}
+
 /// Convert a RenderTransform to a CGA transform stack operation.
+///
+/// Use this when you need CGA-specific features (rotation extraction, etc.).
 pub fn render_transform_to_cga(transform: fm_layout::RenderTransform) -> CgaTransformStack {
     let mut stack = CgaTransformStack::new();
     match transform {

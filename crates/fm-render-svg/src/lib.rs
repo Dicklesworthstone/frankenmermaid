@@ -803,11 +803,10 @@ fn register_clip_path(
 }
 
 fn scene_transform_value(transform: RenderTransform) -> String {
-    match transform {
-        RenderTransform::Matrix { a, b, c, d, e, f } => {
-            TransformBuilder::new().matrix(a, b, c, d, e, f).build()
-        }
-    }
+    // Use direct matrix formatting for bit-identical output.
+    // CGA rotor stack available via cga_transform::render_transform_to_cga()
+    // when rotation extraction or other CGA features are needed.
+    cga_transform::render_transform_to_svg_matrix(transform)
 }
 
 fn path_cmds_to_d(commands: &[PathCmd]) -> String {

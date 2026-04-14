@@ -342,8 +342,15 @@ impl Rotor {
     /// Create a uniform scale rotor.
     ///
     /// S = cosh(ln(s)/2) + sinh(ln(s)/2)·e+∧e-
+    ///
+    /// # Panics
+    /// Panics if factor is not positive (ln of non-positive is undefined).
     #[must_use]
     pub fn scale(factor: f64) -> Self {
+        assert!(
+            factor > 0.0,
+            "scale factor must be positive, got {factor}"
+        );
         let half_log = factor.ln() / 2.0;
         Self {
             components: [
@@ -864,6 +871,18 @@ mod transform_stack_tests {
         assert!(svg.starts_with("matrix("));
         assert!(svg.contains("10"));
         assert!(svg.contains("20"));
+    }
+
+    #[test]
+    #[should_panic(expected = "scale factor must be positive")]
+    fn rotor_scale_zero_panics() {
+        Rotor::scale(0.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "scale factor must be positive")]
+    fn rotor_scale_negative_panics() {
+        Rotor::scale(-1.0);
     }
 
     #[test]
