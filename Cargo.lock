@@ -481,10 +481,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "egg"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd40cfd4196d7a8f882ace95d623d4d6734588e502b4e188675a7c2f55eb4fb4"
+dependencies = [
+ "env_logger",
+ "hashbrown 0.15.5",
+ "indexmap",
+ "log",
+ "num-bigint",
+ "num-traits",
+ "quanta",
+ "rustc-hash",
+ "smallvec",
+ "symbol_table",
+ "symbolic_expressions",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
+
+[[package]]
+name = "env_logger"
+version = "0.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a12e6657c4c97ebab115a42dcee77225f7f482cdd841cf7088c657a42e9e00e7"
+dependencies = [
+ "log",
+]
 
 [[package]]
 name = "equivalent"
@@ -584,7 +613,7 @@ dependencies = [
  "rustc-hash",
  "serde",
  "serde_json",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -592,6 +621,7 @@ name = "fm-layout"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "egg",
  "fm-core",
  "fnx-algorithms",
  "fnx-classes",
@@ -1385,6 +1415,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "quanta"
+version = "0.12.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f3ab5a9d756f0d97bdc89019bd2e4ea098cf9cde50ee7564dde6b81ccc8f06c7"
+dependencies = [
+ "crossbeam-utils",
+ "libc",
+ "once_cell",
+ "raw-cpuid",
+ "wasi",
+ "web-sys",
+ "winapi",
+]
+
+[[package]]
 name = "quick-error"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1447,6 +1492,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "513962919efc330f829edb2535844d1b912b0fbe2ca165d613e4e8788bb05a5a"
 dependencies = [
  "rand_core",
+]
+
+[[package]]
+name = "raw-cpuid"
+version = "11.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "498cd0dc59d73224351ee52a95fee0f1a617a2eae0e7d9d720cc622c73a54186"
+dependencies = [
+ "bitflags 2.11.0",
 ]
 
 [[package]]
@@ -1847,6 +1901,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "symbol_table"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f19bffd69fb182e684d14e3c71d04c0ef33d1641ac0b9e81c712c734e83703bc"
+dependencies = [
+ "crossbeam-utils",
+ "foldhash",
+ "hashbrown 0.15.5",
+]
+
+[[package]]
+name = "symbolic_expressions"
+version = "5.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c68d531d83ec6c531150584c42a4290911964d5f0d79132b193b67252a23b71"
+
+[[package]]
 name = "syn"
 version = "2.0.117"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1872,11 +1943,31 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
+dependencies = [
+ "thiserror-impl 1.0.69",
+]
+
+[[package]]
+name = "thiserror"
 version = "2.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4288b5bcbc7920c07a1149a35cf9590a2aa808e0bc1eafaade0b80947865fbc4"
 dependencies = [
- "thiserror-impl",
+ "thiserror-impl 2.0.18",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

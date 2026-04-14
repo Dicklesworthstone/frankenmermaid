@@ -2202,6 +2202,7 @@ pub fn layout_source_map(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> Merma
 
 pub mod cache_oblivious;
 pub mod delta_debug;
+pub mod egraph_crossing;
 pub mod egraph_ordering;
 pub mod persistence;
 pub mod polyhedral;
