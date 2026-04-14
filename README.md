@@ -1798,6 +1798,7 @@ If fuzzy matching picked the wrong type, add the explicit keyword header (e.g., 
 ## Documentation
 
 - **[FNX User Guide](docs/FNX_USER_GUIDE.md)** - When to use graph intelligence features, command-line examples, troubleshooting
+- **[FNX Migration Guide](docs/FNX_MIGRATION.md)** - Risk-tiered adoption guide with validation checklists
 - **[FNX Integration Architecture](docs/FNX_INTEGRATION.md)** - Technical contract, feature flags, CI configuration
 
 ## FAQ

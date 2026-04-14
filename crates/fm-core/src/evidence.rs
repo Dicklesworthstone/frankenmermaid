@@ -421,6 +421,134 @@ fn chrono_now_iso8601() -> String {
     )
 }
 
+// ============================================================================
+// Config Lint for FNX Mode Combinations (bd-ml2r.12.3)
+// ============================================================================
+
+/// Severity level for config lint warnings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LintSeverity {
+    /// Informational note, no action needed.
+    Info,
+    /// Warning about suboptimal configuration.
+    Warning,
+    /// Error indicating unsupported or dangerous configuration.
+    Error,
+}
+
+/// A single config lint warning with remediation guidance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigLintWarning {
+    /// Severity of this warning.
+    pub severity: LintSeverity,
+    /// Short code for programmatic matching (e.g., "fnx-strict-fallback").
+    pub code: String,
+    /// Human-readable warning message.
+    pub message: String,
+    /// Recommended fix or alternative.
+    pub recommendation: String,
+}
+
+/// Result of linting FNX configuration options.
+#[derive(Debug, Clone, Default)]
+pub struct ConfigLintResult {
+    /// List of warnings/errors found.
+    pub warnings: Vec<ConfigLintWarning>,
+}
+
+impl ConfigLintResult {
+    /// Returns true if there are any errors (not just warnings).
+    #[must_use]
+    pub fn has_errors(&self) -> bool {
+        self.warnings
+            .iter()
+            .any(|w| w.severity == LintSeverity::Error)
+    }
+
+    /// Returns true if there are any warnings or errors.
+    #[must_use]
+    pub fn has_warnings(&self) -> bool {
+        !self.warnings.is_empty()
+    }
+}
+
+/// Configuration options for FNX linting.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FnxConfigLintInput {
+    /// FNX mode being used.
+    pub fnx_mode: FnxMode,
+    /// Projection mode (undirected, directed, etc.).
+    pub projection_mode: ProjectionMode,
+    /// Whether FNX feature is available at compile time.
+    pub fnx_available: bool,
+    /// Whether running in WASM environment.
+    pub is_wasm: bool,
+    /// Whether strict fallback is requested.
+    pub strict_fallback: bool,
+    /// Whether directed projection was explicitly requested (future feature).
+    pub directed_projection_requested: bool,
+}
+
+/// Lint FNX configuration and return any warnings.
+#[must_use]
+pub fn lint_fnx_config(input: &FnxConfigLintInput) -> ConfigLintResult {
+    let mut result = ConfigLintResult::default();
+
+    // Check: FNX enabled but not available
+    if input.fnx_mode.is_active() && !input.fnx_available {
+        result.warnings.push(ConfigLintWarning {
+            severity: LintSeverity::Error,
+            code: "fnx-unavailable".to_string(),
+            message: "FNX mode enabled but fnx-integration feature is not available.".to_string(),
+            recommendation: "Rebuild with --features fnx-integration or use --fnx-mode disabled."
+                .to_string(),
+        });
+    }
+
+    // Check: FNX requested in WASM
+    if input.fnx_mode.is_active() && input.is_wasm {
+        result.warnings.push(ConfigLintWarning {
+            severity: LintSeverity::Warning,
+            code: "fnx-wasm-unsupported".to_string(),
+            message: "FNX integration is not supported in WebAssembly builds.".to_string(),
+            recommendation: "FNX will be disabled automatically. Use --fnx-mode disabled to suppress this warning.".to_string(),
+        });
+    }
+
+    // Check: Strict fallback with FNX enabled
+    if input.fnx_mode.is_active() && input.strict_fallback {
+        result.warnings.push(ConfigLintWarning {
+            severity: LintSeverity::Warning,
+            code: "fnx-strict-fallback".to_string(),
+            message: "Strict fallback mode may fail unexpectedly on large graphs or resource constraints.".to_string(),
+            recommendation: "Use --fnx-fallback graceful unless FNX is mandatory for your use case.".to_string(),
+        });
+    }
+
+    // Check: Directed projection requested but not supported
+    if input.directed_projection_requested {
+        result.warnings.push(ConfigLintWarning {
+            severity: LintSeverity::Warning,
+            code: "fnx-directed-unsupported".to_string(),
+            message: "Directed graph projection is not yet supported.".to_string(),
+            recommendation: "Using undirected projection. Direction information is preserved in layout.".to_string(),
+        });
+    }
+
+    // Check: FNX strict mode (future)
+    if matches!(input.fnx_mode, FnxMode::Strict) {
+        result.warnings.push(ConfigLintWarning {
+            severity: LintSeverity::Info,
+            code: "fnx-strict-mode".to_string(),
+            message: "FNX strict mode requires FNX participation for all layout decisions.".to_string(),
+            recommendation: "Consider advisory mode if strict FNX participation is not required.".to_string(),
+        });
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -576,5 +704,131 @@ mod tests {
         assert!((bundle.summary.total_parse_ms - 3.0).abs() < f64::EPSILON);
         assert!((bundle.summary.total_layout_ms - 5.0).abs() < f64::EPSILON);
         assert_eq!(bundle.summary.total_diagnostics, 1);
+    }
+
+    // ========================================================================
+    // Config Lint Tests
+    // ========================================================================
+
+    #[test]
+    fn lint_fnx_config_clean() {
+        let input = FnxConfigLintInput {
+            fnx_mode: FnxMode::Advisory,
+            projection_mode: ProjectionMode::NativePlusFnxAdvisory,
+            fnx_available: true,
+            is_wasm: false,
+            strict_fallback: false,
+            ..Default::default()
+        };
+        let result = lint_fnx_config(&input);
+        assert!(!result.has_errors());
+        assert!(!result.has_warnings());
+    }
+
+    #[test]
+    fn lint_fnx_config_disabled_clean() {
+        let input = FnxConfigLintInput {
+            fnx_mode: FnxMode::Off,
+            projection_mode: ProjectionMode::NativeOnly,
+            fnx_available: false,
+            is_wasm: true,
+            strict_fallback: true,
+            ..Default::default()
+        };
+        let result = lint_fnx_config(&input);
+        // Off mode should not trigger any warnings even with bad combinations
+        assert!(!result.has_errors());
+        assert!(!result.has_warnings());
+    }
+
+    #[test]
+    fn lint_fnx_config_unavailable() {
+        let input = FnxConfigLintInput {
+            fnx_mode: FnxMode::Advisory,
+            projection_mode: ProjectionMode::NativePlusFnxAdvisory,
+            fnx_available: false, // FNX not available
+            is_wasm: false,
+            strict_fallback: false,
+            ..Default::default()
+        };
+        let result = lint_fnx_config(&input);
+        assert!(result.has_errors());
+        assert!(result.warnings.iter().any(|w| w.code == "fnx-unavailable"));
+    }
+
+    #[test]
+    fn lint_fnx_config_wasm() {
+        let input = FnxConfigLintInput {
+            fnx_mode: FnxMode::Advisory,
+            projection_mode: ProjectionMode::NativePlusFnxAdvisory,
+            fnx_available: true,
+            is_wasm: true, // WASM environment
+            strict_fallback: false,
+            ..Default::default()
+        };
+        let result = lint_fnx_config(&input);
+        assert!(!result.has_errors());
+        assert!(result.has_warnings());
+        assert!(result
+            .warnings
+            .iter()
+            .any(|w| w.code == "fnx-wasm-unsupported"));
+    }
+
+    #[test]
+    fn lint_fnx_config_strict_fallback() {
+        let input = FnxConfigLintInput {
+            fnx_mode: FnxMode::Advisory,
+            projection_mode: ProjectionMode::NativePlusFnxAdvisory,
+            fnx_available: true,
+            is_wasm: false,
+            strict_fallback: true, // Strict fallback
+            ..Default::default()
+        };
+        let result = lint_fnx_config(&input);
+        assert!(!result.has_errors());
+        assert!(result.has_warnings());
+        assert!(result
+            .warnings
+            .iter()
+            .any(|w| w.code == "fnx-strict-fallback"));
+    }
+
+    #[test]
+    fn lint_fnx_config_directed_projection() {
+        let input = FnxConfigLintInput {
+            fnx_mode: FnxMode::Advisory,
+            projection_mode: ProjectionMode::NativePlusFnxAdvisory,
+            fnx_available: true,
+            is_wasm: false,
+            strict_fallback: false,
+            directed_projection_requested: true, // Directed projection requested
+        };
+        let result = lint_fnx_config(&input);
+        assert!(!result.has_errors());
+        assert!(result.has_warnings());
+        assert!(result
+            .warnings
+            .iter()
+            .any(|w| w.code == "fnx-directed-unsupported"));
+    }
+
+    #[test]
+    fn lint_fnx_config_strict_mode() {
+        let input = FnxConfigLintInput {
+            fnx_mode: FnxMode::Strict,
+            projection_mode: ProjectionMode::FnxPrimary,
+            fnx_available: true,
+            is_wasm: false,
+            strict_fallback: false,
+            ..Default::default()
+        };
+        let result = lint_fnx_config(&input);
+        assert!(!result.has_errors());
+        assert!(result.has_warnings());
+        assert!(result
+            .warnings
+            .iter()
+            .any(|w| w.code == "fnx-strict-mode"));
     }
 }
