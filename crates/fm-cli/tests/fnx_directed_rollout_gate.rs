@@ -31,7 +31,8 @@ fn create_linear_chain(n: usize) -> MermaidDiagramIr {
             ..Default::default()
         });
     }
-    for i in 0..(n - 1) {
+    // Use saturating_sub to avoid underflow when n == 0
+    for i in 0..n.saturating_sub(1) {
         ir.edges.push(IrEdge {
             from: IrEndpoint::Node(IrNodeId(i)),
             to: IrEndpoint::Node(IrNodeId(i + 1)),
@@ -43,12 +44,14 @@ fn create_linear_chain(n: usize) -> MermaidDiagramIr {
 
 fn create_cycle(n: usize) -> MermaidDiagramIr {
     let mut ir = create_linear_chain(n);
-    // Close the cycle
-    ir.edges.push(IrEdge {
-        from: IrEndpoint::Node(IrNodeId(n - 1)),
-        to: IrEndpoint::Node(IrNodeId(0)),
-        ..Default::default()
-    });
+    // Close the cycle (only if n >= 2 to avoid degenerate cases)
+    if n >= 2 {
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(n - 1)),
+            to: IrEndpoint::Node(IrNodeId(0)),
+            ..Default::default()
+        });
+    }
     ir
 }
 
