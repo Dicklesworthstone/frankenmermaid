@@ -13,20 +13,9 @@ fn to_cga_point(p: LayoutPoint) -> CgaPoint {
     CgaPoint::new(f64::from(p.x), f64::from(p.y))
 }
 
-/// Convert a LayoutRect to a CgaRect.
-#[inline]
-fn to_cga_rect(r: LayoutRect) -> CgaRect {
-    CgaRect::new(
-        f64::from(r.x),
-        f64::from(r.y),
-        f64::from(r.width),
-        f64::from(r.height),
-    )
-}
-
 /// Check if a line segment intersects any obstacle rectangle.
 ///
-/// Returns true if the segment crosses into any obstacle's interior.
+/// Returns true if the segment crosses the obstacle boundary OR is inside it.
 #[must_use]
 pub fn segment_intersects_obstacles(
     start: LayoutPoint,
@@ -35,6 +24,7 @@ pub fn segment_intersects_obstacles(
     margin: f32,
 ) -> bool {
     let seg = CgaLineSegment::new(to_cga_point(start), to_cga_point(end));
+    let start_cga = to_cga_point(start);
     let margin_f64 = f64::from(margin);
 
     for obs in obstacles {
@@ -46,7 +36,8 @@ pub fn segment_intersects_obstacles(
             f64::from(obs.height) + 2.0 * margin_f64,
         );
 
-        if !expanded.intersect_segment(&seg).is_empty() {
+        // Check boundary crossings OR if segment is entirely inside
+        if !expanded.intersect_segment(&seg).is_empty() || expanded.contains(&start_cga) {
             return true;
         }
     }
@@ -101,6 +92,7 @@ pub fn find_vertical_segment_nudge(
     margin: f32,
 ) -> Option<f32> {
     let seg = CgaLineSegment::new(to_cga_point(segment_start), to_cga_point(segment_end));
+    let start_cga = to_cga_point(segment_start);
     let margin_f64 = f64::from(margin);
     let mid_x = f64::from(segment_start.x);
 
@@ -112,7 +104,8 @@ pub fn find_vertical_segment_nudge(
             f64::from(obs.height) + 2.0 * margin_f64,
         );
 
-        if !expanded.intersect_segment(&seg).is_empty() {
+        // Check boundary crossings OR if segment is entirely inside
+        if !expanded.intersect_segment(&seg).is_empty() || expanded.contains(&start_cga) {
             // Nudge to closer side
             let left = f64::from(obs.x) - margin_f64;
             let right = f64::from(obs.x) + f64::from(obs.width) + margin_f64;
@@ -141,6 +134,7 @@ pub fn find_horizontal_segment_nudge(
     margin: f32,
 ) -> Option<f32> {
     let seg = CgaLineSegment::new(to_cga_point(segment_start), to_cga_point(segment_end));
+    let start_cga = to_cga_point(segment_start);
     let margin_f64 = f64::from(margin);
     let mid_y = f64::from(segment_start.y);
 
@@ -152,7 +146,8 @@ pub fn find_horizontal_segment_nudge(
             f64::from(obs.height) + 2.0 * margin_f64,
         );
 
-        if !expanded.intersect_segment(&seg).is_empty() {
+        // Check boundary crossings OR if segment is entirely inside
+        if !expanded.intersect_segment(&seg).is_empty() || expanded.contains(&start_cga) {
             // Nudge to closer side
             let top = f64::from(obs.y) - margin_f64;
             let bottom = f64::from(obs.y) + f64::from(obs.height) + margin_f64;
@@ -306,5 +301,55 @@ mod tests {
         let (idx, points) = result.unwrap();
         assert_eq!(idx, 1); // Second obstacle
         assert_eq!(points.len(), 2); // Entry and exit points
+    }
+
+    #[test]
+    fn segment_entirely_inside_obstacle_detected() {
+        // Segment entirely inside obstacle - no boundary crossing but still intersects
+        let obs = LayoutRect {
+            x: 10.0,
+            y: 10.0,
+            width: 30.0,
+            height: 30.0,
+        };
+        let start = LayoutPoint { x: 20.0, y: 20.0 };
+        let end = LayoutPoint { x: 25.0, y: 25.0 };
+        assert!(segment_intersects_obstacles(start, end, &[obs], 0.0));
+    }
+
+    #[test]
+    fn vertical_segment_inside_obstacle_nudge() {
+        // Vertical segment entirely inside obstacle
+        let obs = LayoutRect {
+            x: 10.0,
+            y: 10.0,
+            width: 30.0,
+            height: 30.0,
+        };
+        let start = LayoutPoint { x: 25.0, y: 20.0 };
+        let end = LayoutPoint { x: 25.0, y: 30.0 };
+        let nudge = find_vertical_segment_nudge(start, end, &[obs], 0.0);
+        assert!(nudge.is_some());
+        // x=25 is 15 from left edge (10) and 15 from right edge (40)
+        // Equal distance, so should nudge to left edge
+        assert!((nudge.unwrap() - 10.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn horizontal_segment_inside_obstacle_nudge() {
+        // Horizontal segment entirely inside obstacle
+        let obs = LayoutRect {
+            x: 10.0,
+            y: 10.0,
+            width: 30.0,
+            height: 30.0,
+        };
+        let start = LayoutPoint { x: 20.0, y: 25.0 };
+        let end = LayoutPoint { x: 30.0, y: 25.0 };
+        let nudge = find_horizontal_segment_nudge(start, end, &[obs], 0.0);
+        assert!(nudge.is_some());
+        // y=25 is 15 from top edge (10) and 15 from bottom edge (40)
+        // Equal distance, so should nudge to top edge
+        assert!((nudge.unwrap() - 10.0).abs() < 0.01);
     }
 }
