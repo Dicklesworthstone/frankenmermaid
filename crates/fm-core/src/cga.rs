@@ -410,6 +410,35 @@ impl Rotor {
         self.compose(self.reverse()).components[0]
     }
 
+    /// Multiplicative inverse: R⁻¹ = R̃ / |R|².
+    ///
+    /// For normalized rotors (|R|² = 1), this equals the reverse.
+    /// For non-normalized rotors (like scale), this properly inverts.
+    #[must_use]
+    pub fn inverse(self) -> Self {
+        let norm_sq = self.norm_squared();
+        if (norm_sq - 1.0).abs() < 1e-12 {
+            // Already normalized, reverse is the inverse
+            self.reverse()
+        } else {
+            // Scale each component of the reverse by 1/norm_squared
+            let rev = self.reverse();
+            let inv_norm = 1.0 / norm_sq;
+            Self {
+                components: [
+                    rev.components[0] * inv_norm,
+                    rev.components[1] * inv_norm,
+                    rev.components[2] * inv_norm,
+                    rev.components[3] * inv_norm,
+                    rev.components[4] * inv_norm,
+                    rev.components[5] * inv_norm,
+                    rev.components[6] * inv_norm,
+                    rev.components[7] * inv_norm,
+                ],
+            }
+        }
+    }
+
     /// Convert this rotor to a 2D affine matrix.
     ///
     /// Applies the rotor to basis points (0,0), (1,0), (0,1) and extracts
@@ -424,17 +453,41 @@ impl Rotor {
         let e2m = self.components[5];
         let epm = self.components[6];
 
-        // For a pure rotation by angle θ: s = cos(θ/2), e12 = sin(θ/2)
-        let cos_theta = s * s - e12 * e12;
-        let sin_theta = 2.0 * s * e12;
-
         // Scale factor from e+- component
-        let scale = (epm * 2.0).exp();
-        let scale_factor = if scale.is_finite() && scale > 0.0 {
-            scale
-        } else {
+        // epm = sinh(ln(scale)/2), so we need to recover scale = exp(2 * arsinh(epm))
+        // arsinh(x) = ln(x + sqrt(x^2 + 1))
+        let scale_factor = if epm.abs() < 1e-12 {
             1.0
+        } else {
+            let arsinh_epm = (epm + (epm * epm + 1.0).sqrt()).ln();
+            let scale = (2.0 * arsinh_epm).exp();
+            if scale.is_finite() && scale > 0.0 {
+                scale
+            } else {
+                1.0
+            }
         };
+
+        // For combined rotation+scale rotor:
+        // s = cos(θ/2) * cosh(ln(scale)/2)
+        // e12 = sin(θ/2) * cosh(ln(scale)/2)
+        //
+        // We need to extract the rotation component. The cosh factor is sqrt(1 + epm^2).
+        let cosh_factor = (1.0 + epm * epm).sqrt();
+        let cos_half = if cosh_factor.abs() > 1e-12 {
+            s / cosh_factor
+        } else {
+            s
+        };
+        let sin_half = if cosh_factor.abs() > 1e-12 {
+            e12 / cosh_factor
+        } else {
+            e12
+        };
+
+        // Recover full rotation angle using double angle formulas
+        let cos_theta = cos_half * cos_half - sin_half * sin_half;
+        let sin_theta = 2.0 * cos_half * sin_half;
 
         // Translation from e1+/e1- and e2+/e2- components
         let tx = e1p + e1m;
@@ -483,6 +536,27 @@ mod tests {
         assert!((m.b + 1.0).abs() < 1e-10, "-sin(90°) should be ~-1");
         assert!((m.c - 1.0).abs() < 1e-10, "sin(90°) should be ~1");
         assert!(m.d.abs() < 1e-10, "cos(90°) should be ~0");
+    }
+
+    #[test]
+    fn scale_rotor_produces_correct_matrix() {
+        let r = Rotor::scale(2.0);
+        let m = r.to_affine_matrix();
+        // Scale matrix should be: [2, 0, 0; 0, 2, 0]
+        assert!(
+            (m.a - 2.0).abs() < 1e-10,
+            "scale a should be 2, got {}",
+            m.a
+        );
+        assert!(m.b.abs() < 1e-10, "scale b should be 0, got {}", m.b);
+        assert!(m.c.abs() < 1e-10, "scale c should be 0, got {}", m.c);
+        assert!(
+            (m.d - 2.0).abs() < 1e-10,
+            "scale d should be 2, got {}",
+            m.d
+        );
+        assert!(m.tx.abs() < 1e-10, "scale tx should be 0, got {}", m.tx);
+        assert!(m.ty.abs() < 1e-10, "scale ty should be 0, got {}", m.ty);
     }
 
     #[test]
@@ -655,8 +729,10 @@ impl TransformStack {
     /// Returns `true` if a transform was popped, `false` if the stack was empty.
     pub fn pop(&mut self) -> bool {
         if let Some(rotor) = self.stack.pop() {
-            // Multiply by the reverse to undo the transform
-            self.composed = self.composed.compose(rotor.reverse());
+            // Multiply by the inverse to undo the transform
+            // For normalized rotors, inverse = reverse
+            // For scale rotors, inverse = reverse / norm_squared
+            self.composed = self.composed.compose(rotor.inverse());
             true
         } else {
             false
@@ -1167,6 +1243,127 @@ mod transform_stack_tests {
         assert!(svg.starts_with("matrix("));
         assert!(svg.contains("10"));
         assert!(svg.contains("20"));
+    }
+
+    #[test]
+    fn transform_stack_pop_restores_previous_state() {
+        // Push translation, then rotation, then pop rotation
+        // Should restore to just translation state
+        let mut stack = TransformStack::new();
+        stack.push_translation(10.0, 20.0);
+
+        // Record state after translation
+        let after_trans = stack.apply(0.0, 0.0);
+
+        // Push rotation
+        stack.push_rotation(std::f64::consts::FRAC_PI_2);
+        let after_rot = stack.apply(0.0, 0.0);
+
+        // Point should have moved due to rotation applied after translation
+        // Origin stays at origin under rotation, but translation moved it to (10, 20)
+        // then rotation around new origin keeps it there
+        // Actually: transform order is translate then rotate around origin
+        // So point (0,0) -> (10,20) -> rotation of (10,20) around origin
+
+        // Pop the rotation
+        stack.pop();
+        let after_pop = stack.apply(0.0, 0.0);
+
+        // Should be back to just translation state
+        assert!(
+            (after_pop.0 - after_trans.0).abs() < 1e-9,
+            "x mismatch: after_pop={}, after_trans={}",
+            after_pop.0,
+            after_trans.0
+        );
+        assert!(
+            (after_pop.1 - after_trans.1).abs() < 1e-9,
+            "y mismatch: after_pop={}, after_trans={}",
+            after_pop.1,
+            after_trans.1
+        );
+    }
+
+    #[test]
+    fn transform_stack_pop_scale_only() {
+        // Verify that pushing and popping scale returns to identity
+        let mut stack = TransformStack::new();
+        stack.push_scale(2.0);
+        let (x, y) = stack.apply(5.0, 7.0);
+        assert!((x - 10.0).abs() < 1e-9, "Scaled x: {x}");
+        assert!((y - 14.0).abs() < 1e-9, "Scaled y: {y}");
+
+        stack.pop();
+        let (x, y) = stack.apply(5.0, 7.0);
+        assert!((x - 5.0).abs() < 1e-9, "After pop x: {x}");
+        assert!((y - 7.0).abs() < 1e-9, "After pop y: {y}");
+    }
+
+    #[test]
+    fn transform_stack_multiple_pops() {
+        // Start simple: only translation transforms (which are normalized)
+        let mut stack = TransformStack::new();
+        let test_point = (5.0, 7.0);
+
+        // Push three translations
+        stack.push_translation(10.0, 0.0);
+        let after_t1 = stack.apply(test_point.0, test_point.1);
+        assert!((after_t1.0 - 15.0).abs() < 1e-9, "after_t1 x: {}", after_t1.0);
+
+        stack.push_translation(0.0, 3.0);
+        let after_t2 = stack.apply(test_point.0, test_point.1);
+        assert!((after_t2.1 - 10.0).abs() < 1e-9, "after_t2 y: {}", after_t2.1);
+
+        stack.push_translation(5.0, 0.0);
+        let _after_t3 = stack.apply(test_point.0, test_point.1);
+
+        // Pop third transform
+        stack.pop();
+        let restored_t2 = stack.apply(test_point.0, test_point.1);
+        assert!(
+            (restored_t2.0 - after_t2.0).abs() < 1e-9,
+            "After first pop, x: {} vs {}",
+            restored_t2.0,
+            after_t2.0
+        );
+        assert!(
+            (restored_t2.1 - after_t2.1).abs() < 1e-9,
+            "After first pop, y: {} vs {}",
+            restored_t2.1,
+            after_t2.1
+        );
+
+        // Pop second transform
+        stack.pop();
+        let restored_t1 = stack.apply(test_point.0, test_point.1);
+        assert!(
+            (restored_t1.0 - after_t1.0).abs() < 1e-9,
+            "After second pop, x: {} vs {}",
+            restored_t1.0,
+            after_t1.0
+        );
+        assert!(
+            (restored_t1.1 - after_t1.1).abs() < 1e-9,
+            "After second pop, y: {} vs {}",
+            restored_t1.1,
+            after_t1.1
+        );
+
+        // Pop first transform - should be identity
+        stack.pop();
+        let restored_id = stack.apply(test_point.0, test_point.1);
+        assert!(
+            (restored_id.0 - test_point.0).abs() < 1e-9,
+            "After third pop, x: {} vs {}",
+            restored_id.0,
+            test_point.0
+        );
+        assert!(
+            (restored_id.1 - test_point.1).abs() < 1e-9,
+            "After third pop, y: {} vs {}",
+            restored_id.1,
+            test_point.1
+        );
     }
 
     #[test]
