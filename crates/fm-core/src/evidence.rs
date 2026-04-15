@@ -193,10 +193,7 @@ pub enum PassFailReason {
     /// Test passed - determinism verified across N runs.
     PassDeterministic { runs: usize },
     /// Test failed - output hash mismatch.
-    FailHashMismatch {
-        expected: String,
-        actual: String,
-    },
+    FailHashMismatch { expected: String, actual: String },
     /// Test failed - golden snapshot missing.
     FailMissingGolden,
     /// Test failed - parse error.
@@ -206,10 +203,7 @@ pub enum PassFailReason {
     /// Test failed - render error.
     FailRenderError { message: String },
     /// Test failed - determinism violation.
-    FailNondeterministic {
-        runs: usize,
-        unique_hashes: usize,
-    },
+    FailNondeterministic { runs: usize, unique_hashes: usize },
     /// Test skipped.
     Skipped { reason: String },
 }
@@ -416,9 +410,7 @@ fn chrono_now_iso8601() -> String {
     }
     let day = days + 1;
 
-    format!(
-        "{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z"
-    )
+    format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z")
 }
 
 // ============================================================================
@@ -532,7 +524,9 @@ pub fn lint_fnx_config(input: &FnxConfigLintInput) -> ConfigLintResult {
             severity: LintSeverity::Warning,
             code: "fnx-directed-unsupported".to_string(),
             message: "Directed graph projection is not yet supported.".to_string(),
-            recommendation: "Using undirected projection. Direction information is preserved in layout.".to_string(),
+            recommendation:
+                "Using undirected projection. Direction information is preserved in layout."
+                    .to_string(),
         });
     }
 
@@ -541,8 +535,10 @@ pub fn lint_fnx_config(input: &FnxConfigLintInput) -> ConfigLintResult {
         result.warnings.push(ConfigLintWarning {
             severity: LintSeverity::Info,
             code: "fnx-strict-mode".to_string(),
-            message: "FNX strict mode requires FNX participation for all layout decisions.".to_string(),
-            recommendation: "Consider advisory mode if strict FNX participation is not required.".to_string(),
+            message: "FNX strict mode requires FNX participation for all layout decisions."
+                .to_string(),
+            recommendation: "Consider advisory mode if strict FNX participation is not required."
+                .to_string(),
         });
     }
 
@@ -584,7 +580,10 @@ mod tests {
 
     #[test]
     fn decision_mode_display() {
-        assert_eq!(DecisionMode::NativeAuthoritative.to_string(), "native_authoritative");
+        assert_eq!(
+            DecisionMode::NativeAuthoritative.to_string(),
+            "native_authoritative"
+        );
         assert_eq!(
             DecisionMode::FnxAuthoritativeExperimental.to_string(),
             "fnx_authoritative_experimental"
@@ -593,7 +592,10 @@ mod tests {
 
     #[test]
     fn fallback_reason_display() {
-        assert_eq!(FallbackReason::FeatureDisabled.to_string(), "feature_disabled");
+        assert_eq!(
+            FallbackReason::FeatureDisabled.to_string(),
+            "feature_disabled"
+        );
         assert_eq!(FallbackReason::Timeout.to_string(), "timeout");
         assert_eq!(FallbackReason::AnalysisError.to_string(), "analysis_error");
     }
@@ -609,16 +611,20 @@ mod tests {
     #[test]
     fn pass_fail_reason_is_fail() {
         assert!(PassFailReason::FailMissingGolden.is_fail());
-        assert!(PassFailReason::FailHashMismatch {
-            expected: "a".to_string(),
-            actual: "b".to_string()
-        }
-        .is_fail());
+        assert!(
+            PassFailReason::FailHashMismatch {
+                expected: "a".to_string(),
+                actual: "b".to_string()
+            }
+            .is_fail()
+        );
         assert!(!PassFailReason::Pass.is_fail());
-        assert!(!PassFailReason::Skipped {
-            reason: "test".to_string()
-        }
-        .is_fail());
+        assert!(
+            !PassFailReason::Skipped {
+                reason: "test".to_string()
+            }
+            .is_fail()
+        );
     }
 
     #[test]
@@ -769,10 +775,12 @@ mod tests {
         let result = lint_fnx_config(&input);
         assert!(!result.has_errors());
         assert!(result.has_warnings());
-        assert!(result
-            .warnings
-            .iter()
-            .any(|w| w.code == "fnx-wasm-unsupported"));
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.code == "fnx-wasm-unsupported")
+        );
     }
 
     #[test]
@@ -788,10 +796,12 @@ mod tests {
         let result = lint_fnx_config(&input);
         assert!(!result.has_errors());
         assert!(result.has_warnings());
-        assert!(result
-            .warnings
-            .iter()
-            .any(|w| w.code == "fnx-strict-fallback"));
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.code == "fnx-strict-fallback")
+        );
     }
 
     #[test]
@@ -807,10 +817,12 @@ mod tests {
         let result = lint_fnx_config(&input);
         assert!(!result.has_errors());
         assert!(result.has_warnings());
-        assert!(result
-            .warnings
-            .iter()
-            .any(|w| w.code == "fnx-directed-unsupported"));
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.code == "fnx-directed-unsupported")
+        );
     }
 
     #[test]
@@ -826,9 +838,6 @@ mod tests {
         let result = lint_fnx_config(&input);
         assert!(!result.has_errors());
         assert!(result.has_warnings());
-        assert!(result
-            .warnings
-            .iter()
-            .any(|w| w.code == "fnx-strict-mode"));
+        assert!(result.warnings.iter().any(|w| w.code == "fnx-strict-mode"));
     }
 }

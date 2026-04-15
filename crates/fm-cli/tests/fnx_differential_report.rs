@@ -161,7 +161,11 @@ fn run_scenario(input: &str, scenario_id: &str, fnx_enabled: bool) -> ScenarioMe
 
     ScenarioMetrics {
         scenario_id: scenario_id.to_string(),
-        fnx_mode: if fnx_enabled { "on".to_string() } else { "off".to_string() },
+        fnx_mode: if fnx_enabled {
+            "on".to_string()
+        } else {
+            "off".to_string()
+        },
         parse_us,
         layout_us,
         render_us,
@@ -202,9 +206,15 @@ fn count_edge_crossings(layout: &fm_layout::DiagramLayout) -> usize {
             for seg1_idx in 1..e1.points.len() {
                 for seg2_idx in 1..e2.points.len() {
                     if segments_intersect(
-                        (e1.points[seg1_idx - 1].x as f64, e1.points[seg1_idx - 1].y as f64),
+                        (
+                            e1.points[seg1_idx - 1].x as f64,
+                            e1.points[seg1_idx - 1].y as f64,
+                        ),
                         (e1.points[seg1_idx].x as f64, e1.points[seg1_idx].y as f64),
-                        (e2.points[seg2_idx - 1].x as f64, e2.points[seg2_idx - 1].y as f64),
+                        (
+                            e2.points[seg2_idx - 1].x as f64,
+                            e2.points[seg2_idx - 1].y as f64,
+                        ),
                         (e2.points[seg2_idx].x as f64, e2.points[seg2_idx].y as f64),
                     ) {
                         crossings += 1;
@@ -274,14 +284,19 @@ fn generate_differential_report(input: &str, scenario_id: &str) -> DifferentialR
     let fnx_off = run_scenario_median(input, scenario_id, false);
     let fnx_on = run_scenario_median(input, scenario_id, true);
 
-    let layout_time_delta_pct = compute_pct_delta(fnx_off.layout_us as f64, fnx_on.layout_us as f64);
-    let render_time_delta_pct = compute_pct_delta(fnx_off.render_us as f64, fnx_on.render_us as f64);
-    let bounds_width_delta_pct = compute_pct_delta(fnx_off.layout_width as f64, fnx_on.layout_width as f64);
-    let bounds_height_delta_pct = compute_pct_delta(fnx_off.layout_height as f64, fnx_on.layout_height as f64);
+    let layout_time_delta_pct =
+        compute_pct_delta(fnx_off.layout_us as f64, fnx_on.layout_us as f64);
+    let render_time_delta_pct =
+        compute_pct_delta(fnx_off.render_us as f64, fnx_on.render_us as f64);
+    let bounds_width_delta_pct =
+        compute_pct_delta(fnx_off.layout_width as f64, fnx_on.layout_width as f64);
+    let bounds_height_delta_pct =
+        compute_pct_delta(fnx_off.layout_height as f64, fnx_on.layout_height as f64);
     let crossing_delta = fnx_on.edge_crossings as i32 - fnx_off.edge_crossings as i32;
 
     // Classify timing
-    let timing_classification = if layout_time_delta_pct > thresholds::MAX_LAYOUT_TIME_REGRESSION_PCT
+    let timing_classification = if layout_time_delta_pct
+        > thresholds::MAX_LAYOUT_TIME_REGRESSION_PCT
         || render_time_delta_pct > thresholds::MAX_RENDER_TIME_REGRESSION_PCT
     {
         DeltaClassification::Regression
@@ -312,19 +327,18 @@ fn generate_differential_report(input: &str, scenario_id: &str) -> DifferentialR
     };
 
     // Overall classification
-    let overall_classification =
-        if timing_classification == DeltaClassification::Regression
-            || quality_classification == DeltaClassification::Regression
-            || structure_classification == DeltaClassification::Regression
-        {
-            DeltaClassification::Regression
-        } else if timing_classification == DeltaClassification::ExpectedImprovement
-            || quality_classification == DeltaClassification::ExpectedImprovement
-        {
-            DeltaClassification::ExpectedImprovement
-        } else {
-            DeltaClassification::Neutral
-        };
+    let overall_classification = if timing_classification == DeltaClassification::Regression
+        || quality_classification == DeltaClassification::Regression
+        || structure_classification == DeltaClassification::Regression
+    {
+        DeltaClassification::Regression
+    } else if timing_classification == DeltaClassification::ExpectedImprovement
+        || quality_classification == DeltaClassification::ExpectedImprovement
+    {
+        DeltaClassification::ExpectedImprovement
+    } else {
+        DeltaClassification::Neutral
+    };
 
     // Collect failure reasons
     let mut failure_reasons = Vec::new();
@@ -332,19 +346,22 @@ fn generate_differential_report(input: &str, scenario_id: &str) -> DifferentialR
     if layout_time_delta_pct > thresholds::MAX_LAYOUT_TIME_REGRESSION_PCT {
         failure_reasons.push(format!(
             "layout_time_regression: {:.1}% > {:.1}% threshold",
-            layout_time_delta_pct, thresholds::MAX_LAYOUT_TIME_REGRESSION_PCT
+            layout_time_delta_pct,
+            thresholds::MAX_LAYOUT_TIME_REGRESSION_PCT
         ));
     }
     if render_time_delta_pct > thresholds::MAX_RENDER_TIME_REGRESSION_PCT {
         failure_reasons.push(format!(
             "render_time_regression: {:.1}% > {:.1}% threshold",
-            render_time_delta_pct, thresholds::MAX_RENDER_TIME_REGRESSION_PCT
+            render_time_delta_pct,
+            thresholds::MAX_RENDER_TIME_REGRESSION_PCT
         ));
     }
     if crossing_delta > thresholds::MAX_CROSSING_REGRESSION {
         failure_reasons.push(format!(
             "crossing_regression: +{} > {} threshold",
-            crossing_delta, thresholds::MAX_CROSSING_REGRESSION
+            crossing_delta,
+            thresholds::MAX_CROSSING_REGRESSION
         ));
     }
     if thresholds::REQUIRE_IDENTICAL_STRUCTURE && fnx_off.node_count != fnx_on.node_count {
@@ -700,7 +717,9 @@ fn differential_baselines_stable_or_bless() {
     let expected = match load_expected_differentials() {
         Some(e) => e,
         None => {
-            eprintln!("No differential baseline file found. Run with BLESS_DIFFERENTIAL=1 to create.");
+            eprintln!(
+                "No differential baseline file found. Run with BLESS_DIFFERENTIAL=1 to create."
+            );
             return; // Don't fail if no baseline file exists yet
         }
     };
@@ -733,9 +752,7 @@ fn differential_baselines_stable_or_bless() {
 
                 if current_class != expected_class {
                     // Allow neutral -> improvement transitions (not regressions)
-                    if !(expected_class == "neutral"
-                        && current_class == "expected_improvement")
-                    {
+                    if !(expected_class == "neutral" && current_class == "expected_improvement") {
                         mismatches.push(format!(
                             "{case_id}: classification changed from {} to {}",
                             expected_class, current_class

@@ -13,9 +13,9 @@ pub mod fnx_budget;
 pub mod fnx_cache;
 #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
 pub mod fnx_cycle_scorer;
-pub mod fnx_directed;
 #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
 pub mod fnx_diagnostics;
+pub mod fnx_directed;
 #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
 pub mod fnx_ordering;
 
@@ -46,9 +46,13 @@ use good_lp::{Expression, Solution, SolverModel, constraint, default_solver, var
 use tracing::{debug, info, trace, warn};
 
 #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+use crate::fnx_adapter::ir_to_graph;
+#[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
 use crate::fnx_ordering::{
     NodeCentralityScores, compare_with_centrality, compute_centrality_scores,
 };
+#[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+use fnx_algorithms::{articulation_points, bridges, connected_components};
 
 /// Design contract for subgraph-level incremental invalidation (`bd-20fq.1`).
 ///
@@ -2780,7 +2784,7 @@ fn compute_traced_layout_with_config_and_guardrails(
     guardrails: LayoutGuardrails,
 ) -> TracedLayout {
     track_dependency_graph_query(ir);
-    let dispatch = dispatch_layout_algorithm(ir, algorithm);
+    let dispatch = dispatch_layout_algorithm_with_config(ir, algorithm, &config);
     let guard = evaluate_layout_guardrails(ir, dispatch.selected, guardrails);
     let mut guarded_dispatch = dispatch;
     guarded_dispatch.selected = guard.selected_algorithm;
@@ -3281,8 +3285,16 @@ fn saturating_elapsed_micros(duration: std::time::Duration) -> u64 {
 }
 
 fn dispatch_layout_algorithm(ir: &MermaidDiagramIr, requested: LayoutAlgorithm) -> LayoutDispatch {
+    dispatch_layout_algorithm_with_config(ir, requested, &LayoutConfig::default())
+}
+
+fn dispatch_layout_algorithm_with_config(
+    ir: &MermaidDiagramIr,
+    requested: LayoutAlgorithm,
+    config: &LayoutConfig,
+) -> LayoutDispatch {
     let dispatch = match requested {
-        LayoutAlgorithm::Auto => preferred_layout_algorithm(ir),
+        LayoutAlgorithm::Auto => preferred_layout_algorithm_with_config(ir, config),
         explicit => {
             if algorithm_available_for_diagram(ir.diagram_type, explicit) {
                 LayoutDispatch {
@@ -3294,7 +3306,7 @@ fn dispatch_layout_algorithm(ir: &MermaidDiagramIr, requested: LayoutAlgorithm) 
                     ..LayoutDispatch::default()
                 }
             } else {
-                let mut selected = preferred_layout_algorithm(ir);
+                let mut selected = preferred_layout_algorithm_with_config(ir, config);
                 selected.requested = requested;
                 selected.capability_unavailable = true;
                 selected.decision_mode = "requested_capability_fallback";
@@ -3350,7 +3362,10 @@ fn auto_selection_reason(ir: &MermaidDiagramIr, selected: LayoutAlgorithm) -> &'
     }
 }
 
-fn preferred_layout_algorithm(ir: &MermaidDiagramIr) -> LayoutDispatch {
+fn preferred_layout_algorithm_with_config(
+    ir: &MermaidDiagramIr,
+    config: &LayoutConfig,
+) -> LayoutDispatch {
     let selected = match ir.diagram_type {
         DiagramType::Mindmap => LayoutAlgorithm::Radial,
         DiagramType::Timeline => LayoutAlgorithm::Timeline,
@@ -3364,7 +3379,7 @@ fn preferred_layout_algorithm(ir: &MermaidDiagramIr) -> LayoutDispatch {
         DiagramType::QuadrantChart => LayoutAlgorithm::Quadrant,
         DiagramType::GitGraph => LayoutAlgorithm::GitGraph,
         DiagramType::PacketBeta => LayoutAlgorithm::Packet,
-        _ => return select_general_graph_algorithm(ir),
+        _ => return select_general_graph_algorithm_with_config(ir, config),
     };
     LayoutDispatch {
         requested: LayoutAlgorithm::Auto,
@@ -3378,7 +3393,10 @@ fn preferred_layout_algorithm(ir: &MermaidDiagramIr) -> LayoutDispatch {
 
 /// For general graph types (Flowchart, Class, State, ER, C4, Requirement, etc.),
 /// analyze graph topology metrics to choose between Sugiyama, Tree, and Force.
-fn select_general_graph_algorithm(ir: &MermaidDiagramIr) -> LayoutDispatch {
+fn select_general_graph_algorithm_with_config(
+    ir: &MermaidDiagramIr,
+    config: &LayoutConfig,
+) -> LayoutDispatch {
     let metrics = GraphMetrics::from_ir(ir);
 
     // Trivial graphs: Sugiyama handles them efficiently.
@@ -3421,36 +3439,144 @@ fn select_general_graph_algorithm(ir: &MermaidDiagramIr) -> LayoutDispatch {
         dense_graph,
         layered_general,
     );
+    let base_selected = select_min_loss_algorithm(sugiyama_loss, tree_loss, force_loss);
 
-    let selected = [
+    let mut decision_mode = "expected_loss_general_graph_v1";
+    let adjusted_sugiyama_loss = sugiyama_loss;
+    let mut adjusted_tree_loss = tree_loss;
+    let mut adjusted_force_loss = force_loss;
+
+    if let Some(signals) = compute_fnx_layout_selection_signals(ir, config) {
+        let tree_bonus = fnx_tree_loss_bonus_permille(metrics, signals);
+        let force_bonus = fnx_force_loss_bonus_permille(metrics, signals);
+        if tree_bonus > 0 || force_bonus > 0 {
+            decision_mode = "expected_loss_general_graph_v2_fnx";
+            adjusted_tree_loss = adjusted_tree_loss.saturating_sub(tree_bonus);
+            adjusted_force_loss = adjusted_force_loss.saturating_sub(force_bonus);
+        }
+    }
+
+    let selected = select_min_loss_algorithm(
+        adjusted_sugiyama_loss,
+        adjusted_tree_loss,
+        adjusted_force_loss,
+    );
+
+    let selected_expected_loss_permille = match selected {
+        LayoutAlgorithm::Tree => adjusted_tree_loss,
+        LayoutAlgorithm::Force => adjusted_force_loss,
+        _ => adjusted_sugiyama_loss,
+    };
+    let reason =
+        if decision_mode == "expected_loss_general_graph_v2_fnx" && selected != base_selected {
+            match selected {
+                LayoutAlgorithm::Tree => "auto_fnx_hub_spoke_tree",
+                LayoutAlgorithm::Force => "auto_fnx_fragmented_force",
+                _ => auto_selection_reason(ir, selected),
+            }
+        } else {
+            auto_selection_reason(ir, selected)
+        };
+
+    LayoutDispatch {
+        requested: LayoutAlgorithm::Auto,
+        selected,
+        capability_unavailable: false,
+        decision_mode,
+        reason,
+        selected_expected_loss_permille,
+        posterior_tree_like_permille: tree_like,
+        posterior_dense_graph_permille: dense_graph,
+        posterior_layered_permille: layered_general,
+        sugiyama_expected_loss_permille: adjusted_sugiyama_loss,
+        tree_expected_loss_permille: adjusted_tree_loss,
+        force_expected_loss_permille: adjusted_force_loss,
+    }
+}
+
+fn select_min_loss_algorithm(
+    sugiyama_loss: u32,
+    tree_loss: u32,
+    force_loss: u32,
+) -> LayoutAlgorithm {
+    [
         (LayoutAlgorithm::Sugiyama, sugiyama_loss),
         (LayoutAlgorithm::Tree, tree_loss),
         (LayoutAlgorithm::Force, force_loss),
     ]
     .into_iter()
     .min_by_key(|(algorithm, loss)| (*loss, algorithm.as_str()))
-    .map_or(LayoutAlgorithm::Sugiyama, |(algorithm, _)| algorithm);
+    .map_or(LayoutAlgorithm::Sugiyama, |(algorithm, _)| algorithm)
+}
 
-    let selected_expected_loss_permille = match selected {
-        LayoutAlgorithm::Tree => tree_loss,
-        LayoutAlgorithm::Force => force_loss,
-        _ => sugiyama_loss,
-    };
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct FnxLayoutSelectionSignals {
+    component_count: usize,
+    articulation_point_count: usize,
+    bridge_count: usize,
+    peak_degree_centrality_permille: u16,
+}
 
-    LayoutDispatch {
-        requested: LayoutAlgorithm::Auto,
-        selected,
-        capability_unavailable: false,
-        decision_mode: "expected_loss_general_graph_v1",
-        reason: auto_selection_reason(ir, selected),
-        selected_expected_loss_permille,
-        posterior_tree_like_permille: tree_like,
-        posterior_dense_graph_permille: dense_graph,
-        posterior_layered_permille: layered_general,
-        sugiyama_expected_loss_permille: sugiyama_loss,
-        tree_expected_loss_permille: tree_loss,
-        force_expected_loss_permille: force_loss,
+#[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+fn compute_fnx_layout_selection_signals(
+    ir: &MermaidDiagramIr,
+    config: &LayoutConfig,
+) -> Option<FnxLayoutSelectionSignals> {
+    if !config.fnx_enabled || ir.nodes.is_empty() {
+        return None;
     }
+
+    let (graph, _) = ir_to_graph(ir);
+    let component_count = connected_components(&graph).components.len();
+    let (articulation_point_count, bridge_count) = if component_count <= 1 {
+        (
+            articulation_points(&graph).nodes.len(),
+            bridges(&graph).edges.len(),
+        )
+    } else {
+        (0, 0)
+    };
+    let peak_degree_centrality_permille = compute_centrality_scores(ir)
+        .degree
+        .values()
+        .map(|score| score.raw() / 10)
+        .max()
+        .unwrap_or(0) as u16;
+
+    Some(FnxLayoutSelectionSignals {
+        component_count,
+        articulation_point_count,
+        bridge_count,
+        peak_degree_centrality_permille,
+    })
+}
+
+#[cfg(not(all(feature = "fnx-integration", not(target_arch = "wasm32"))))]
+fn compute_fnx_layout_selection_signals(
+    _: &MermaidDiagramIr,
+    _: &LayoutConfig,
+) -> Option<FnxLayoutSelectionSignals> {
+    None
+}
+
+fn fnx_tree_loss_bonus_permille(metrics: GraphMetrics, signals: FnxLayoutSelectionSignals) -> u32 {
+    let is_hub_spoke_candidate = metrics.node_count >= 8
+        && metrics.back_edge_count == 0
+        && metrics.root_count == 1
+        && metrics.edge_to_node_ratio <= 1.25
+        && signals.peak_degree_centrality_permille >= 550
+        && signals.bridge_count >= 3;
+    if is_hub_spoke_candidate { 450 } else { 0 }
+}
+
+fn fnx_force_loss_bonus_permille(metrics: GraphMetrics, signals: FnxLayoutSelectionSignals) -> u32 {
+    let is_fragmented_cyclic_mesh = metrics.node_count >= 8
+        && metrics.back_edge_count > 0
+        && signals.component_count >= 3
+        && signals.articulation_point_count == 0
+        && signals.bridge_count == 0
+        && signals.peak_degree_centrality_permille <= 350;
+    if is_fragmented_cyclic_mesh { 220 } else { 0 }
 }
 
 const fn algorithm_available_for_diagram(
@@ -17442,6 +17568,87 @@ mod tests {
         let ir = graph_ir(DiagramType::State, 12, &edges);
         let dispatch = dispatch_layout_algorithm(&ir, LayoutAlgorithm::Auto);
         assert_eq!(dispatch.selected, LayoutAlgorithm::Tree);
+    }
+
+    #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+    #[test]
+    fn fnx_assisted_auto_select_hub_spoke_graph_prefers_tree() {
+        let ir = graph_ir(
+            DiagramType::Flowchart,
+            10,
+            &[
+                (0, 1),
+                (0, 2),
+                (0, 3),
+                (0, 4),
+                (0, 5),
+                (0, 6),
+                (1, 7),
+                (2, 7),
+                (3, 8),
+                (4, 9),
+            ],
+        );
+        let baseline = super::dispatch_layout_algorithm_with_config(
+            &ir,
+            LayoutAlgorithm::Auto,
+            &LayoutConfig {
+                fnx_enabled: false,
+                ..LayoutConfig::default()
+            },
+        );
+        assert_eq!(baseline.selected, LayoutAlgorithm::Sugiyama);
+        assert_eq!(baseline.decision_mode, "expected_loss_general_graph_v1");
+
+        let assisted = super::dispatch_layout_algorithm_with_config(
+            &ir,
+            LayoutAlgorithm::Auto,
+            &LayoutConfig::default(),
+        );
+        assert_eq!(assisted.selected, LayoutAlgorithm::Tree);
+        assert_eq!(assisted.decision_mode, "expected_loss_general_graph_v2_fnx");
+        assert_eq!(assisted.reason, "auto_fnx_hub_spoke_tree");
+        assert!(assisted.tree_expected_loss_permille < baseline.tree_expected_loss_permille);
+    }
+
+    #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+    #[test]
+    fn fnx_assisted_auto_select_fragmented_cyclic_graph_prefers_force() {
+        let ir = graph_ir(
+            DiagramType::Flowchart,
+            9,
+            &[
+                (0, 1),
+                (1, 2),
+                (2, 0),
+                (3, 4),
+                (4, 5),
+                (5, 3),
+                (6, 7),
+                (7, 8),
+                (8, 6),
+            ],
+        );
+        let baseline = super::dispatch_layout_algorithm_with_config(
+            &ir,
+            LayoutAlgorithm::Auto,
+            &LayoutConfig {
+                fnx_enabled: false,
+                ..LayoutConfig::default()
+            },
+        );
+        assert_eq!(baseline.selected, LayoutAlgorithm::Sugiyama);
+        assert_eq!(baseline.decision_mode, "expected_loss_general_graph_v1");
+
+        let assisted = super::dispatch_layout_algorithm_with_config(
+            &ir,
+            LayoutAlgorithm::Auto,
+            &LayoutConfig::default(),
+        );
+        assert_eq!(assisted.selected, LayoutAlgorithm::Force);
+        assert_eq!(assisted.decision_mode, "expected_loss_general_graph_v2_fnx");
+        assert_eq!(assisted.reason, "auto_fnx_fragmented_force");
+        assert!(assisted.force_expected_loss_permille < baseline.force_expected_loss_permille);
     }
 
     // ── Algorithm-family dispatch parity tests (bd-3uz.17) ─────────────

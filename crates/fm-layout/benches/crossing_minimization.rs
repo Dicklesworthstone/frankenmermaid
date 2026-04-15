@@ -10,10 +10,10 @@
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fm_layout::egraph_crossing::{
-    saturate_with_fallback, CrossingContext, FallbackStrategy, SaturationConfig,
+    CrossingContext, FallbackStrategy, SaturationConfig, saturate_with_fallback,
 };
 use fm_layout::egraph_ordering::{
-    optimize_layer_ordering, LayerEdges, LayerOrdering, local_crossing_count,
+    LayerEdges, LayerOrdering, local_crossing_count, optimize_layer_ordering,
 };
 
 // ============================================================================
@@ -196,10 +196,10 @@ fn benchmark_sparse_dag(c: &mut Criterion) {
 
     for nodes_per_layer in [10, 20, 50] {
         let (orderings, edges) = generate_layered_graph(
-            5,                  // 5 layers
+            5, // 5 layers
             nodes_per_layer,
-            0.1,                // 10% edge density
-            12345,              // seed
+            0.1,   // 10% edge density
+            12345, // seed
         );
 
         // Benchmark middle layer optimization
@@ -244,10 +244,10 @@ fn benchmark_dense_dag(c: &mut Criterion) {
 
     for nodes_per_layer in [5, 10, 15, 20] {
         let (orderings, edges) = generate_layered_graph(
-            3,                  // 3 layers
+            3, // 3 layers
             nodes_per_layer,
-            0.4,                // 40% edge density (dense)
-            54321,              // seed
+            0.4,   // 40% edge density (dense)
+            54321, // seed
         );
 
         let layer_idx = 1;
@@ -302,27 +302,19 @@ fn benchmark_bipartite(c: &mut Criterion) {
 
         let label = format!("K{n}_{m}");
 
-        group.bench_with_input(
-            BenchmarkId::new("egraph", &label),
-            &label,
-            |b, _| {
-                b.iter(|| saturate_with_fallback(initial, &ctx, &config));
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("egraph", &label), &label, |b, _| {
+            b.iter(|| saturate_with_fallback(initial, &ctx, &config));
+        });
 
-        group.bench_with_input(
-            BenchmarkId::new("greedy", &label),
-            &label,
-            |b, _| {
-                b.iter(|| {
-                    optimize_layer_ordering(
-                        initial,
-                        ctx.upper_ordering.as_ref().zip(ctx.upper_edges.as_ref()),
-                        ctx.lower_ordering.as_ref().zip(ctx.lower_edges.as_ref()),
-                    )
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("greedy", &label), &label, |b, _| {
+            b.iter(|| {
+                optimize_layer_ordering(
+                    initial,
+                    ctx.upper_ordering.as_ref().zip(ctx.upper_edges.as_ref()),
+                    ctx.lower_ordering.as_ref().zip(ctx.lower_edges.as_ref()),
+                )
+            });
+        });
     }
 
     group.finish();

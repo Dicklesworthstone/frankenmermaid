@@ -13,7 +13,7 @@
 //! - `saturate_layer`: Main entry point for equality saturation
 
 use crate::egraph_ordering::{LayerEdges, LayerOrdering};
-use egg::{define_language, rewrite, EGraph, Id, RecExpr, Runner};
+use egg::{EGraph, Id, RecExpr, Runner, define_language, rewrite};
 
 // ============================================================================
 // Language Definition
@@ -451,8 +451,8 @@ pub fn saturate_layer(
 
     // Extract best ordering
     let root = runner.roots[0];
-    let (ordering, crossing_count) =
-        extract_best_ordering(&runner.egraph, root, ctx).unwrap_or_else(|| {
+    let (ordering, crossing_count) = extract_best_ordering(&runner.egraph, root, ctx)
+        .unwrap_or_else(|| {
             // Fallback to initial ordering if extraction fails
             let crossings = crate::egraph_ordering::local_crossing_count(
                 initial,
@@ -665,8 +665,7 @@ pub fn saturate_with_fallback(
         }
     };
 
-    let crossing_delta =
-        greedy_result.crossing_count as isize - crossing_count as isize;
+    let crossing_delta = greedy_result.crossing_count as isize - crossing_count as isize;
 
     let diagnostic = FallbackDiagnostic {
         budget_type: egraph_result
@@ -852,7 +851,8 @@ mod tests {
 
         // Should find exactly 2 orderings: [0,1] and [1,0]
         assert_eq!(orderings.len(), 2);
-        let orders: std::collections::HashSet<_> = orderings.iter().map(|o| o.order.clone()).collect();
+        let orders: std::collections::HashSet<_> =
+            orderings.iter().map(|o| o.order.clone()).collect();
         assert!(orders.contains(&vec![0, 1]));
         assert!(orders.contains(&vec![1, 0]));
     }
@@ -872,8 +872,13 @@ mod tests {
         let orderings = collect_orderings(&runner.egraph, runner.roots[0], 100);
 
         // Should find all 6 permutations: 3! = 6
-        assert_eq!(orderings.len(), 6, "Expected 6 permutations, got {}: {:?}",
-            orderings.len(), orderings.iter().map(|o| &o.order).collect::<Vec<_>>());
+        assert_eq!(
+            orderings.len(),
+            6,
+            "Expected 6 permutations, got {}: {:?}",
+            orderings.len(),
+            orderings.iter().map(|o| &o.order).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -1043,8 +1048,8 @@ mod tests {
         let result = saturate_with_fallback(&initial, &ctx, &config);
 
         // Delta should be greedy - final (positive means improvement over greedy)
-        let expected_delta = result.greedy_result.crossing_count as isize
-            - result.crossing_count as isize;
+        let expected_delta =
+            result.greedy_result.crossing_count as isize - result.crossing_count as isize;
         assert_eq!(result.diagnostic.crossing_delta, expected_delta);
     }
 
@@ -1137,9 +1142,7 @@ mod tests {
         let initial = LayerOrdering::new(vec![0, 1, 2, 3, 4, 5]);
         let lower = LayerOrdering::new(vec![6, 7, 8, 9, 10, 11]);
         let edges = LayerEdges {
-            edges: vec![
-                (0, 11), (1, 10), (2, 9), (3, 8), (4, 7), (5, 6),
-            ],
+            edges: vec![(0, 11), (1, 10), (2, 9), (3, 8), (4, 7), (5, 6)],
         };
         let ctx = CrossingContext {
             upper_ordering: None,

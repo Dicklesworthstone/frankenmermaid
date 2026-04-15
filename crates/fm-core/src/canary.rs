@@ -53,9 +53,9 @@ pub struct HealthCriteria {
 impl Default for HealthCriteria {
     fn default() -> Self {
         Self {
-            max_error_rate: 0.01,              // 1% max error rate
-            max_latency_increase_pct: 25.0,    // 25% max latency increase
-            min_sample_size: 100,              // 100 samples minimum
+            max_error_rate: 0.01,                         // 1% max error rate
+            max_latency_increase_pct: 25.0,               // 25% max latency increase
+            min_sample_size: 100,                         // 100 samples minimum
             observation_window: Duration::from_secs(300), // 5 minute window
         }
     }
@@ -68,7 +68,10 @@ pub enum RollbackReason {
     /// Error rate exceeded threshold.
     ErrorRateExceeded { observed: f64, threshold: f64 },
     /// Latency regression exceeded threshold.
-    LatencyRegressionExceeded { observed_pct: f64, threshold_pct: f64 },
+    LatencyRegressionExceeded {
+        observed_pct: f64,
+        threshold_pct: f64,
+    },
     /// Manual rollback triggered by operator.
     ManualTrigger { operator: String },
     /// Quality metrics regression detected.
@@ -80,11 +83,20 @@ pub enum RollbackReason {
 impl std::fmt::Display for RollbackReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ErrorRateExceeded { observed, threshold } => {
+            Self::ErrorRateExceeded {
+                observed,
+                threshold,
+            } => {
                 write!(f, "error_rate_exceeded: {observed:.2}% > {threshold:.2}%")
             }
-            Self::LatencyRegressionExceeded { observed_pct, threshold_pct } => {
-                write!(f, "latency_regression: {observed_pct:.1}% > {threshold_pct:.1}%")
+            Self::LatencyRegressionExceeded {
+                observed_pct,
+                threshold_pct,
+            } => {
+                write!(
+                    f,
+                    "latency_regression: {observed_pct:.1}% > {threshold_pct:.1}%"
+                )
             }
             Self::ManualTrigger { operator } => {
                 write!(f, "manual_trigger by {operator}")
@@ -155,7 +167,9 @@ impl RolloutState {
     /// Get current average latency in microseconds.
     #[must_use]
     pub fn avg_latency_us(&self) -> u64 {
-        self.latency_sum_us.checked_div(self.requests_processed).unwrap_or(0)
+        self.latency_sum_us
+            .checked_div(self.requests_processed)
+            .unwrap_or(0)
     }
 
     /// Get latency increase percentage compared to baseline.
@@ -319,7 +333,10 @@ mod tests {
         state.transition_to(RolloutPhase::Full, 1000);
 
         for i in 0..100 {
-            assert!(state.should_enable_fnx(i), "request {i} should be enabled in full phase");
+            assert!(
+                state.should_enable_fnx(i),
+                "request {i} should be enabled in full phase"
+            );
         }
     }
 
@@ -329,7 +346,10 @@ mod tests {
         state.transition_to(RolloutPhase::Canary, 1000);
 
         let enabled_count: usize = (0..1000).filter(|&i| state.should_enable_fnx(i)).count();
-        assert_eq!(enabled_count, 10, "canary should enable 1% of traffic (10/1000)");
+        assert_eq!(
+            enabled_count, 10,
+            "canary should enable 1% of traffic (10/1000)"
+        );
     }
 
     #[test]
@@ -338,7 +358,10 @@ mod tests {
         state.transition_to(RolloutPhase::Partial, 1000);
 
         let enabled_count: usize = (0..100).filter(|&i| state.should_enable_fnx(i)).count();
-        assert_eq!(enabled_count, 10, "partial should enable 10% of traffic (10/100)");
+        assert_eq!(
+            enabled_count, 10,
+            "partial should enable 10% of traffic (10/100)"
+        );
     }
 
     #[test]
@@ -349,7 +372,10 @@ mod tests {
         state.record_request(100, true);
 
         let error_rate = state.error_rate();
-        assert!((error_rate - 0.333).abs() < 0.01, "error rate should be ~33%");
+        assert!(
+            (error_rate - 0.333).abs() < 0.01,
+            "error rate should be ~33%"
+        );
     }
 
     #[test]
@@ -368,7 +394,10 @@ mod tests {
         };
 
         let reason = state.check_health(&criteria);
-        assert!(matches!(reason, Some(RollbackReason::ErrorRateExceeded { .. })));
+        assert!(matches!(
+            reason,
+            Some(RollbackReason::ErrorRateExceeded { .. })
+        ));
     }
 
     #[test]
@@ -388,7 +417,10 @@ mod tests {
         };
 
         let reason = state.check_health(&criteria);
-        assert!(matches!(reason, Some(RollbackReason::LatencyRegressionExceeded { .. })));
+        assert!(matches!(
+            reason,
+            Some(RollbackReason::LatencyRegressionExceeded { .. })
+        ));
     }
 
     #[test]
@@ -413,7 +445,9 @@ mod tests {
         state.transition_to(RolloutPhase::Canary, 1000);
 
         state.rollback(
-            RollbackReason::ManualTrigger { operator: "test".to_string() },
+            RollbackReason::ManualTrigger {
+                operator: "test".to_string(),
+            },
             2000,
         );
 
@@ -447,7 +481,10 @@ mod tests {
 
         let criteria = HealthCriteria::default();
         let reason = state.check_health(&criteria);
-        assert!(reason.is_none(), "should skip check with insufficient samples");
+        assert!(
+            reason.is_none(),
+            "should skip check with insufficient samples"
+        );
     }
 
     #[test]

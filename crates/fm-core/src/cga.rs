@@ -347,10 +347,7 @@ impl Rotor {
     /// Panics if factor is not positive (ln of non-positive is undefined).
     #[must_use]
     pub fn scale(factor: f64) -> Self {
-        assert!(
-            factor > 0.0,
-            "scale factor must be positive, got {factor}"
-        );
+        assert!(factor > 0.0, "scale factor must be positive, got {factor}");
         let half_log = factor.ln() / 2.0;
         Self {
             components: [
@@ -1078,7 +1075,12 @@ impl CgaRect {
     /// Create a new rectangle.
     #[must_use]
     pub const fn new(x: f64, y: f64, width: f64, height: f64) -> Self {
-        Self { x, y, width, height }
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     /// Check if a point is inside the rectangle.
@@ -1308,11 +1310,19 @@ mod transform_stack_tests {
         // Push three translations
         stack.push_translation(10.0, 0.0);
         let after_t1 = stack.apply(test_point.0, test_point.1);
-        assert!((after_t1.0 - 15.0).abs() < 1e-9, "after_t1 x: {}", after_t1.0);
+        assert!(
+            (after_t1.0 - 15.0).abs() < 1e-9,
+            "after_t1 x: {}",
+            after_t1.0
+        );
 
         stack.push_translation(0.0, 3.0);
         let after_t2 = stack.apply(test_point.0, test_point.1);
-        assert!((after_t2.1 - 10.0).abs() < 1e-9, "after_t2 y: {}", after_t2.1);
+        assert!(
+            (after_t2.1 - 10.0).abs() < 1e-9,
+            "after_t2 y: {}",
+            after_t2.1
+        );
 
         stack.push_translation(5.0, 0.0);
         let _after_t3 = stack.apply(test_point.0, test_point.1);
@@ -1383,16 +1393,8 @@ mod transform_stack_tests {
         let original = AffineMatrix2D::translation(5.0, 10.0);
         let rotor = original.to_rotor();
         let recovered = rotor.to_affine_matrix();
-        assert!(
-            (recovered.tx - 5.0).abs() < 1e-10,
-            "tx: {}",
-            recovered.tx
-        );
-        assert!(
-            (recovered.ty - 10.0).abs() < 1e-10,
-            "ty: {}",
-            recovered.ty
-        );
+        assert!((recovered.tx - 5.0).abs() < 1e-10, "tx: {}", recovered.tx);
+        assert!((recovered.ty - 10.0).abs() < 1e-10, "ty: {}", recovered.ty);
     }
 
     #[test]

@@ -12603,7 +12603,10 @@ Rel_Back(db, app, "Responds")"#,
         // Empty classDef (no properties) should still be valid and create a style_def
         let parsed = parse_mermaid("flowchart LR\n  A --> B\n  classDef empty");
         // Parser accepts empty classDef without error
-        assert!(!parsed.ir.has_errors(), "empty classDef should not cause parse errors");
+        assert!(
+            !parsed.ir.has_errors(),
+            "empty classDef should not cause parse errors"
+        );
     }
 
     #[test]
@@ -12654,16 +12657,22 @@ Rel_Back(db, app, "Responds")"#,
     fn classdef_applied_to_nonexistent_node_no_error() {
         // Applying class to node that doesn't exist shouldn't cause a crash
         // The parser may implicitly create the node when class directive references it
-        let parsed = parse_mermaid("flowchart LR\n  A --> B\n  classDef fancy fill:#f00\n  class Z fancy");
+        let parsed =
+            parse_mermaid("flowchart LR\n  A --> B\n  classDef fancy fill:#f00\n  class Z fancy");
         // Parse should succeed without panicking
-        assert!(!parsed.ir.has_errors(), "applying class to nonexistent node should not cause error");
+        assert!(
+            !parsed.ir.has_errors(),
+            "applying class to nonexistent node should not cause error"
+        );
         // Z may be created as an implicit node or just ignored - either is acceptable
     }
 
     #[test]
     fn classdef_via_inline_declaration() {
         // Test applying classDef to node created inline (not via class directive)
-        let parsed = parse_mermaid("flowchart LR\n  A[Node] --> B\n  classDef urgent fill:#f00\n  class A urgent");
+        let parsed = parse_mermaid(
+            "flowchart LR\n  A[Node] --> B\n  classDef urgent fill:#f00\n  class A urgent",
+        );
         let node = parsed.ir.nodes.iter().find(|n| n.id == "A").unwrap();
         assert!(
             node.classes.contains(&"urgent".to_string()),

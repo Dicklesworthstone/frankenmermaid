@@ -101,7 +101,10 @@ fn rollback_drill_error_rate_exceeded() {
     };
 
     let reason = state.check_health(&criteria);
-    assert!(matches!(reason, Some(RollbackReason::ErrorRateExceeded { .. })));
+    assert!(matches!(
+        reason,
+        Some(RollbackReason::ErrorRateExceeded { .. })
+    ));
 
     if let Some(reason) = reason {
         state.rollback(reason.clone(), timestamp + 1000);
@@ -131,7 +134,10 @@ fn rollback_drill_latency_regression() {
     };
 
     let reason = state.check_health(&criteria);
-    assert!(matches!(reason, Some(RollbackReason::LatencyRegressionExceeded { .. })));
+    assert!(matches!(
+        reason,
+        Some(RollbackReason::LatencyRegressionExceeded { .. })
+    ));
 
     if let Some(reason) = reason {
         state.rollback(reason.clone(), timestamp + 1000);
@@ -337,5 +343,8 @@ fn emit_drill_evidence(drill_id: &str, state: &RolloutState, reason: Option<&Rol
     });
 
     // Emit to stdout as structured JSON (CI can capture)
-    println!("{}", serde_json::to_string(&evidence).expect("serialize evidence"));
+    println!(
+        "{}",
+        serde_json::to_string(&evidence).expect("serialize evidence")
+    );
 }

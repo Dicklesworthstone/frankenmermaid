@@ -763,5 +763,85 @@
         "Database"
       ]
     }
+  },
+  {
+    "id": "flowchart_subgraph",
+    "description": "Flowchart with subgraphs for grouping related nodes.",
+    "input_path": "fixtures/frankentui_conformance/flowchart_subgraph.mmd",
+    "source_refs": [
+      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:subgraph_parser"
+    ],
+    "expected": {
+      "diagram_type": "flowchart",
+      "warnings": {
+        "exact_count": 0
+      },
+      "counts": {
+        "nodes": 4,
+        "edges": 3,
+        "clusters": 2,
+        "subgraphs": 2
+      },
+      "svg_contains": [
+        "User",
+        "Browser",
+        "API",
+        "Database",
+        "fm-cluster"
+      ]
+    }
+  },
+  {
+    "id": "sequence_notes",
+    "description": "Sequence diagram with notes attached to participants.",
+    "input_path": "fixtures/frankentui_conformance/sequence_notes.mmd",
+    "source_refs": [
+      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:sequence_notes"
+    ],
+    "expected": {
+      "diagram_type": "sequence",
+      "warnings": {
+        "exact_count": 0
+      },
+      "counts": {
+        "nodes": 2,
+        "edges": 2,
+        "clusters": 0,
+        "subgraphs": 0
+      },
+      "svg_contains": [
+        "Alice",
+        "Bob",
+        "thinks",
+        "greet"
+      ]
+    }
+  },
+  {
+    "id": "sequence_fragments",
+    "description": "Sequence diagram with alt/loop fragments.",
+    "input_path": "fixtures/frankentui_conformance/sequence_fragments.mmd",
+    "source_refs": [
+      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:sequence_fragments"
+    ],
+    "expected": {
+      "diagram_type": "sequence",
+      "warnings": {
+        "exact_count": 0
+      },
+      "counts": {
+        "nodes": 2,
+        "edges": 4,
+        "clusters": 0,
+        "subgraphs": 0
+      },
+      "svg_contains": [
+        "User",
+        "Server",
+        "Request",
+        "OK",
+        "Error"
+      ]
+    }
   }
 ]

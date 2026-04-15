@@ -48,7 +48,11 @@ fn phase1_default_mode_is_advisory() {
         "Phase-1 projection string representation"
     );
 
-    emit_phase1_evidence("default_mode_is_advisory", true, "Phase-1 defaults verified");
+    emit_phase1_evidence(
+        "default_mode_is_advisory",
+        true,
+        "Phase-1 defaults verified",
+    );
 }
 
 /// Phase-1 config lint passes for valid configuration.
@@ -98,10 +102,7 @@ fn phase1_fallback_when_fnx_unavailable() {
         "Should error when FNX requested but unavailable"
     );
 
-    let has_unavailable_error = result
-        .warnings
-        .iter()
-        .any(|w| w.code == "fnx-unavailable");
+    let has_unavailable_error = result.warnings.iter().any(|w| w.code == "fnx-unavailable");
 
     assert!(
         has_unavailable_error,
@@ -337,12 +338,12 @@ fn phase1_evidence_bundle_aggregation() {
 #[test]
 fn phase1_go_no_go_checklist() {
     let checklist = Phase1Checklist {
-        canary_state_machine: true,          // 1. Canary state machine is implemented and tested
-        rollback_triggers: true,              // 2. Rollback triggers work correctly
+        canary_state_machine: true, // 1. Canary state machine is implemented and tested
+        rollback_triggers: true,    // 2. Rollback triggers work correctly
         traffic_sampling_deterministic: true, // 3. Traffic sampling is deterministic
-        config_lint_passes: true,             // 4. Config lint validates Phase-1 settings
-        evidence_logging: true,               // 5. Evidence logging is complete
-        fallback_behavior: true,              // 6. Fallback behavior is verified
+        config_lint_passes: true,   // 4. Config lint validates Phase-1 settings
+        evidence_logging: true,     // 5. Evidence logging is complete
+        fallback_behavior: true,    // 6. Fallback behavior is verified
     };
 
     // Compute go/no-go

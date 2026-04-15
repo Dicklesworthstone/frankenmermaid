@@ -6,9 +6,11 @@
 //! - Performance: within acceptable time budgets
 //! - Parity: consistent with baseline behavior
 
-use fm_core::{DiagramType, IrEdge, IrEndpoint, IrNode, IrNodeId, MermaidDiagramIr};
 use fm_core::evidence;
-use fm_layout::fnx_directed::{compute_reachability, compute_scc, compute_wcc, detect_directed_cycles};
+use fm_core::{DiagramType, IrEdge, IrEndpoint, IrNode, IrNodeId, MermaidDiagramIr};
+use fm_layout::fnx_directed::{
+    compute_reachability, compute_scc, compute_wcc, detect_directed_cycles,
+};
 use fm_layout::{LayoutConfig, layout_diagram_with_config};
 use fm_parser::parse;
 use fm_render_svg::{SvgRenderConfig, render_svg_with_layout};
@@ -212,7 +214,10 @@ fn directed_scc_determinism_nested() {
         for (i, comp) in result.components.iter().enumerate() {
             let ref_comp: HashSet<_> = reference.components[i].nodes.iter().collect();
             let cur_comp: HashSet<_> = comp.nodes.iter().collect();
-            assert_eq!(ref_comp, cur_comp, "SCC {i} membership should be deterministic");
+            assert_eq!(
+                ref_comp, cur_comp,
+                "SCC {i} membership should be deterministic"
+            );
         }
     }
 }
@@ -539,7 +544,10 @@ fn parity_fnx_enabled_vs_disabled_consistency() {
     // Both should have same node count
     let nodes_off = svg_off.matches("fm-node").count();
     let nodes_on = svg_on.matches("fm-node").count();
-    assert_eq!(nodes_off, nodes_on, "Node count should match between fnx modes");
+    assert_eq!(
+        nodes_off, nodes_on,
+        "Node count should match between fnx modes"
+    );
 }
 
 // ============================================================================

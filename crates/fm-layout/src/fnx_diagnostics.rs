@@ -204,7 +204,13 @@ impl StructuredRecommendation {
     #[must_use]
     pub fn for_disconnected_component(component_size: usize, node_names: &[&str]) -> Self {
         let names_preview = if node_names.len() > 3 {
-            format!("{}, {}, {} and {} more", node_names[0], node_names[1], node_names[2], node_names.len() - 3)
+            format!(
+                "{}, {}, {} and {} more",
+                node_names[0],
+                node_names[1],
+                node_names[2],
+                node_names.len() - 3
+            )
         } else {
             node_names.join(", ")
         };
@@ -261,7 +267,12 @@ impl StructuredRecommendation {
     #[must_use]
     pub fn for_dense_cycle(cycle_size: usize, node_names: &[&str]) -> Self {
         let names_preview = if node_names.len() > 4 {
-            format!("{} → {} → ... → {}", node_names[0], node_names[1], node_names.last().unwrap_or(&""))
+            format!(
+                "{} → {} → ... → {}",
+                node_names[0],
+                node_names[1],
+                node_names.last().unwrap_or(&"")
+            )
         } else {
             node_names.join(" → ")
         };
@@ -398,10 +409,8 @@ fn analyze_components(
                 .filter_map(|id| ir.nodes.get(id.0).map(|n| n.id.as_str()))
                 .collect();
 
-            let recommendation = StructuredRecommendation::for_disconnected_component(
-                component.len(),
-                &node_names,
-            );
+            let recommendation =
+                StructuredRecommendation::for_disconnected_component(component.len(), &node_names);
             out.diagnostics.push(FnxDiagnostic {
                 code: FnxDiagnosticCode::DISCONNECTED_COMPONENT,
                 severity: FnxDiagnosticSeverity::Warning,
@@ -958,16 +967,48 @@ mod tests {
         // A -> B -> C -> D -> A (4-node cycle, exactly at threshold)
         let ir = MermaidDiagramIr {
             nodes: vec![
-                IrNode { id: "A".to_string(), shape: NodeShape::Rect, ..Default::default() },
-                IrNode { id: "B".to_string(), shape: NodeShape::Rect, ..Default::default() },
-                IrNode { id: "C".to_string(), shape: NodeShape::Rect, ..Default::default() },
-                IrNode { id: "D".to_string(), shape: NodeShape::Rect, ..Default::default() },
+                IrNode {
+                    id: "A".to_string(),
+                    shape: NodeShape::Rect,
+                    ..Default::default()
+                },
+                IrNode {
+                    id: "B".to_string(),
+                    shape: NodeShape::Rect,
+                    ..Default::default()
+                },
+                IrNode {
+                    id: "C".to_string(),
+                    shape: NodeShape::Rect,
+                    ..Default::default()
+                },
+                IrNode {
+                    id: "D".to_string(),
+                    shape: NodeShape::Rect,
+                    ..Default::default()
+                },
             ],
             edges: vec![
-                IrEdge { from: IrEndpoint::Node(IrNodeId(0)), to: IrEndpoint::Node(IrNodeId(1)), ..Default::default() },
-                IrEdge { from: IrEndpoint::Node(IrNodeId(1)), to: IrEndpoint::Node(IrNodeId(2)), ..Default::default() },
-                IrEdge { from: IrEndpoint::Node(IrNodeId(2)), to: IrEndpoint::Node(IrNodeId(3)), ..Default::default() },
-                IrEdge { from: IrEndpoint::Node(IrNodeId(3)), to: IrEndpoint::Node(IrNodeId(0)), ..Default::default() },
+                IrEdge {
+                    from: IrEndpoint::Node(IrNodeId(0)),
+                    to: IrEndpoint::Node(IrNodeId(1)),
+                    ..Default::default()
+                },
+                IrEdge {
+                    from: IrEndpoint::Node(IrNodeId(1)),
+                    to: IrEndpoint::Node(IrNodeId(2)),
+                    ..Default::default()
+                },
+                IrEdge {
+                    from: IrEndpoint::Node(IrNodeId(2)),
+                    to: IrEndpoint::Node(IrNodeId(3)),
+                    ..Default::default()
+                },
+                IrEdge {
+                    from: IrEndpoint::Node(IrNodeId(3)),
+                    to: IrEndpoint::Node(IrNodeId(0)),
+                    ..Default::default()
+                },
             ],
             ..Default::default()
         };
@@ -988,9 +1029,21 @@ mod tests {
         // Three isolated nodes: A, B, C (three separate components)
         let ir = MermaidDiagramIr {
             nodes: vec![
-                IrNode { id: "A".to_string(), shape: NodeShape::Rect, ..Default::default() },
-                IrNode { id: "B".to_string(), shape: NodeShape::Rect, ..Default::default() },
-                IrNode { id: "C".to_string(), shape: NodeShape::Rect, ..Default::default() },
+                IrNode {
+                    id: "A".to_string(),
+                    shape: NodeShape::Rect,
+                    ..Default::default()
+                },
+                IrNode {
+                    id: "B".to_string(),
+                    shape: NodeShape::Rect,
+                    ..Default::default()
+                },
+                IrNode {
+                    id: "C".to_string(),
+                    shape: NodeShape::Rect,
+                    ..Default::default()
+                },
             ],
             edges: vec![],
             ..Default::default()
@@ -1097,10 +1150,22 @@ mod tests {
 
     #[test]
     fn recommendation_category_display_names() {
-        assert_eq!(RecommendationCategory::Simplify.display_name(), "Simplify Structure");
-        assert_eq!(RecommendationCategory::Connect.display_name(), "Improve Connectivity");
-        assert_eq!(RecommendationCategory::Redundancy.display_name(), "Add Redundancy");
-        assert_eq!(RecommendationCategory::Clarify.display_name(), "Clarify Layout");
+        assert_eq!(
+            RecommendationCategory::Simplify.display_name(),
+            "Simplify Structure"
+        );
+        assert_eq!(
+            RecommendationCategory::Connect.display_name(),
+            "Improve Connectivity"
+        );
+        assert_eq!(
+            RecommendationCategory::Redundancy.display_name(),
+            "Add Redundancy"
+        );
+        assert_eq!(
+            RecommendationCategory::Clarify.display_name(),
+            "Clarify Layout"
+        );
     }
 
     #[test]

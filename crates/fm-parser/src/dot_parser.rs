@@ -1363,11 +1363,29 @@ fn dot_edge_group_with_quoted_nodes() {
     let input = r#"digraph G { A -> {"node 1" "node 2"}; }"#;
     let result = parse_dot(input);
     let node_ids: Vec<&str> = result.ir.nodes.iter().map(|n| n.id.as_str()).collect();
-    assert_eq!(result.ir.edges.len(), 2, "Expected 2 edges, got {} with nodes {:?}", result.ir.edges.len(), node_ids);
-    assert!(node_ids.contains(&"A"), "Missing source node A, got: {:?}", node_ids);
+    assert_eq!(
+        result.ir.edges.len(),
+        2,
+        "Expected 2 edges, got {} with nodes {:?}",
+        result.ir.edges.len(),
+        node_ids
+    );
+    assert!(
+        node_ids.contains(&"A"),
+        "Missing source node A, got: {:?}",
+        node_ids
+    );
     // Spaces in quoted IDs are normalized to underscores
-    assert!(node_ids.contains(&"node_1"), "Missing 'node_1', got: {:?}", node_ids);
-    assert!(node_ids.contains(&"node_2"), "Missing 'node_2', got: {:?}", node_ids);
+    assert!(
+        node_ids.contains(&"node_1"),
+        "Missing 'node_1', got: {:?}",
+        node_ids
+    );
+    assert!(
+        node_ids.contains(&"node_2"),
+        "Missing 'node_2', got: {:?}",
+        node_ids
+    );
 }
 
 #[test]
@@ -1376,9 +1394,23 @@ fn dot_edge_group_with_single_quoted_nodes() {
     let input = "digraph G { A -> {'node 1' 'node 2'}; }";
     let result = parse_dot(input);
     let node_ids: Vec<&str> = result.ir.nodes.iter().map(|n| n.id.as_str()).collect();
-    assert_eq!(result.ir.edges.len(), 2, "Expected 2 edges, got {} with nodes {:?}", result.ir.edges.len(), node_ids);
-    assert!(node_ids.contains(&"node_1"), "Missing 'node_1', got: {:?}", node_ids);
-    assert!(node_ids.contains(&"node_2"), "Missing 'node_2', got: {:?}", node_ids);
+    assert_eq!(
+        result.ir.edges.len(),
+        2,
+        "Expected 2 edges, got {} with nodes {:?}",
+        result.ir.edges.len(),
+        node_ids
+    );
+    assert!(
+        node_ids.contains(&"node_1"),
+        "Missing 'node_1', got: {:?}",
+        node_ids
+    );
+    assert!(
+        node_ids.contains(&"node_2"),
+        "Missing 'node_2', got: {:?}",
+        node_ids
+    );
 }
 
 #[test]

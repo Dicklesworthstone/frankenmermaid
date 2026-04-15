@@ -52,7 +52,8 @@ impl Complexity {
             + input.matches("---").count()
             + input.matches("->>").count();
         let has_subgraph = input.contains("subgraph");
-        let has_fragments = input.contains("alt ") || input.contains("loop ") || input.contains("opt ");
+        let has_fragments =
+            input.contains("alt ") || input.contains("loop ") || input.contains("opt ");
 
         if has_subgraph || has_fragments || node_estimate > 20 {
             Complexity::Complex
@@ -176,10 +177,17 @@ fn synthetic_corpus() -> Vec<CorpusEntry> {
     let inputs = vec![
         // Simple flowcharts
         ("flowchart LR\n    A --> B --> C", "synthetic/simple/flow1"),
-        ("flowchart TD\n    Start --> Process --> End", "synthetic/simple/flow2"),
-        ("graph LR\n    A[Input] --> B{Decision}\n    B -->|Yes| C[Output]", "synthetic/simple/flow3"),
+        (
+            "flowchart TD\n    Start --> Process --> End",
+            "synthetic/simple/flow2",
+        ),
+        (
+            "graph LR\n    A[Input] --> B{Decision}\n    B -->|Yes| C[Output]",
+            "synthetic/simple/flow3",
+        ),
         // Complex flowcharts
-        (r#"flowchart TB
+        (
+            r#"flowchart TB
     subgraph Production
         A[Load Balancer] --> B[Web Server 1]
         A --> C[Web Server 2]
@@ -190,10 +198,16 @@ fn synthetic_corpus() -> Vec<CorpusEntry> {
         E[Prometheus] --> A
         E --> B
         E --> C
-    end"#, "synthetic/complex/infra"),
+    end"#,
+            "synthetic/complex/infra",
+        ),
         // Sequence diagrams
-        ("sequenceDiagram\n    Alice->>Bob: Hello\n    Bob-->>Alice: Hi", "synthetic/simple/seq1"),
-        (r#"sequenceDiagram
+        (
+            "sequenceDiagram\n    Alice->>Bob: Hello\n    Bob-->>Alice: Hi",
+            "synthetic/simple/seq1",
+        ),
+        (
+            r#"sequenceDiagram
     participant C as Client
     participant S as Server
     participant DB as Database
@@ -204,19 +218,39 @@ fn synthetic_corpus() -> Vec<CorpusEntry> {
     DB-->>S: Results
     deactivate DB
     S-->>C: Response
-    deactivate S"#, "synthetic/moderate/seq2"),
+    deactivate S"#,
+            "synthetic/moderate/seq2",
+        ),
         // Class diagrams
-        ("classDiagram\n    Animal <|-- Dog\n    Animal <|-- Cat", "synthetic/simple/class1"),
+        (
+            "classDiagram\n    Animal <|-- Dog\n    Animal <|-- Cat",
+            "synthetic/simple/class1",
+        ),
         // State diagrams
-        ("stateDiagram-v2\n    [*] --> Active\n    Active --> [*]", "synthetic/simple/state1"),
+        (
+            "stateDiagram-v2\n    [*] --> Active\n    Active --> [*]",
+            "synthetic/simple/state1",
+        ),
         // ER diagrams
-        ("erDiagram\n    CUSTOMER ||--o{ ORDER : places\n    ORDER ||--|{ LINE-ITEM : contains", "synthetic/simple/er1"),
+        (
+            "erDiagram\n    CUSTOMER ||--o{ ORDER : places\n    ORDER ||--|{ LINE-ITEM : contains",
+            "synthetic/simple/er1",
+        ),
         // Mind maps
-        ("mindmap\n    root((Central))\n        Topic 1\n            Subtopic A\n        Topic 2", "synthetic/simple/mindmap1"),
+        (
+            "mindmap\n    root((Central))\n        Topic 1\n            Subtopic A\n        Topic 2",
+            "synthetic/simple/mindmap1",
+        ),
         // Gantt charts
-        ("gantt\n    title Project Plan\n    section Phase 1\n    Task 1 :a1, 2024-01-01, 30d", "synthetic/simple/gantt1"),
+        (
+            "gantt\n    title Project Plan\n    section Phase 1\n    Task 1 :a1, 2024-01-01, 30d",
+            "synthetic/simple/gantt1",
+        ),
         // Pie charts
-        ("pie\n    title Market Share\n    \"A\" : 40\n    \"B\" : 30\n    \"C\" : 30", "synthetic/simple/pie1"),
+        (
+            "pie\n    title Market Share\n    \"A\" : 40\n    \"B\" : 30\n    \"C\" : 30",
+            "synthetic/simple/pie1",
+        ),
     ];
 
     inputs
@@ -532,7 +566,10 @@ fn synthetic_corpus_has_coverage() {
 
     // Should have multiple diagram types
     let types: BTreeSet<_> = corpus.iter().map(|e| &e.diagram_type).collect();
-    assert!(types.len() >= 5, "Synthetic corpus should cover multiple diagram types");
+    assert!(
+        types.len() >= 5,
+        "Synthetic corpus should cover multiple diagram types"
+    );
 
     // Should have multiple complexity levels
     let complexities: BTreeSet<_> = corpus.iter().map(|e| e.complexity).collect();

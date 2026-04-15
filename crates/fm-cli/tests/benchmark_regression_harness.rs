@@ -356,9 +356,15 @@ fn count_edge_crossings(layout: &fm_layout::DiagramLayout) -> usize {
             for seg1_idx in 1..e1.points.len() {
                 for seg2_idx in 1..e2.points.len() {
                     if segments_intersect(
-                        (e1.points[seg1_idx - 1].x as f64, e1.points[seg1_idx - 1].y as f64),
+                        (
+                            e1.points[seg1_idx - 1].x as f64,
+                            e1.points[seg1_idx - 1].y as f64,
+                        ),
                         (e1.points[seg1_idx].x as f64, e1.points[seg1_idx].y as f64),
-                        (e2.points[seg2_idx - 1].x as f64, e2.points[seg2_idx - 1].y as f64),
+                        (
+                            e2.points[seg2_idx - 1].x as f64,
+                            e2.points[seg2_idx - 1].y as f64,
+                        ),
                         (e2.points[seg2_idx].x as f64, e2.points[seg2_idx].y as f64),
                     ) {
                         crossings += 1;

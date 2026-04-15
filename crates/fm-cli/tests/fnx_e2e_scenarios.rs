@@ -71,7 +71,10 @@ flowchart LR
     A[Start] --> B[Process]
     B --> C[End]
 "#;
-    let output = run_cli(&["render", "-", "--format", "svg", "--fnx-mode", "disabled"], input);
+    let output = run_cli(
+        &["render", "-", "--format", "svg", "--fnx-mode", "disabled"],
+        input,
+    );
     assert_success(&output, "baseline render");
 
     let svg = String::from_utf8_lossy(&output.stdout);
@@ -88,7 +91,14 @@ flowchart LR
 fn baseline_validate_without_fnx_reports_no_witness() {
     let input = "flowchart LR\nA-->B\n";
     let output = run_cli(
-        &["validate", "-", "--format", "json", "--fnx-mode", "disabled"],
+        &[
+            "validate",
+            "-",
+            "--format",
+            "json",
+            "--fnx-mode",
+            "disabled",
+        ],
         input,
     );
     assert_success(&output, "baseline validate");
@@ -119,8 +129,14 @@ flowchart TD
     G --> H
 "#;
     // Run twice and verify determinism
-    let output1 = run_cli(&["render", "-", "--format", "svg", "--fnx-mode", "disabled"], input);
-    let output2 = run_cli(&["render", "-", "--format", "svg", "--fnx-mode", "disabled"], input);
+    let output1 = run_cli(
+        &["render", "-", "--format", "svg", "--fnx-mode", "disabled"],
+        input,
+    );
+    let output2 = run_cli(
+        &["render", "-", "--format", "svg", "--fnx-mode", "disabled"],
+        input,
+    );
 
     assert_success(&output1, "first render");
     assert_success(&output2, "second render");
@@ -148,7 +164,10 @@ flowchart TD
     Hub --> E
     Hub --> F
 "#;
-    let output = run_cli(&["render", "-", "--format", "svg", "--fnx-mode", "enabled"], input);
+    let output = run_cli(
+        &["render", "-", "--format", "svg", "--fnx-mode", "enabled"],
+        input,
+    );
     assert_success(&output, "fnx advisory render");
 
     let svg = String::from_utf8_lossy(&output.stdout);
@@ -171,14 +190,28 @@ fn fnx_advisory_witness_has_required_fields() {
 
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("should output JSON");
 
-    let witness = json.get("fnx_witness").expect("fnx_witness should be present");
+    let witness = json
+        .get("fnx_witness")
+        .expect("fnx_witness should be present");
 
     // Verify required witness fields
-    assert!(witness.get("enabled").is_some(), "witness should have enabled");
+    assert!(
+        witness.get("enabled").is_some(),
+        "witness should have enabled"
+    );
     assert!(witness.get("used").is_some(), "witness should have used");
-    assert!(witness.get("projection_mode").is_some(), "witness should have projection_mode");
-    assert!(witness.get("algorithms_invoked").is_some(), "witness should have algorithms_invoked");
-    assert!(witness.get("results_hash").is_some(), "witness should have results_hash");
+    assert!(
+        witness.get("projection_mode").is_some(),
+        "witness should have projection_mode"
+    );
+    assert!(
+        witness.get("algorithms_invoked").is_some(),
+        "witness should have algorithms_invoked"
+    );
+    assert!(
+        witness.get("results_hash").is_some(),
+        "witness should have results_hash"
+    );
 }
 
 #[cfg(feature = "fnx-integration")]
@@ -230,7 +263,8 @@ flowchart TD
 
     for (i, out) in outputs.iter().enumerate().skip(1) {
         assert_eq!(
-            &outputs[0], out,
+            &outputs[0],
+            out,
             "run {} should match run 1 for determinism",
             i + 1
         );
@@ -263,7 +297,16 @@ fn fnx_fallback_reports_reason_in_witness() {
     // Test that fallback reason is captured
     let input = "flowchart LR\nA-->B\n";
     let (output, stdout) = run_cli_json(
-        &["render", "-", "--format", "svg", "--fnx-mode", "enabled", "--fnx-fallback", "graceful"],
+        &[
+            "render",
+            "-",
+            "--format",
+            "svg",
+            "--fnx-mode",
+            "enabled",
+            "--fnx-fallback",
+            "graceful",
+        ],
         input,
     );
     assert_success(&output, "fnx fallback with reason");
@@ -271,7 +314,10 @@ fn fnx_fallback_reports_reason_in_witness() {
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("should output JSON");
 
     let witness = json.get("fnx_witness");
-    assert!(witness.is_some(), "should have fnx_witness even with fallback");
+    assert!(
+        witness.is_some(),
+        "should have fnx_witness even with fallback"
+    );
 }
 
 // ============================================================================
@@ -288,7 +334,10 @@ fn pathological_deep_chain() {
         }
     }
 
-    let output = run_cli(&["render", "-", "--format", "svg", "--fnx-mode", "disabled"], &input);
+    let output = run_cli(
+        &["render", "-", "--format", "svg", "--fnx-mode", "disabled"],
+        &input,
+    );
     assert_success(&output, "deep chain render");
 
     let svg = String::from_utf8_lossy(&output.stdout);
@@ -303,7 +352,10 @@ fn pathological_wide_graph() {
         input.push_str(&format!("    Spoke{} --> Hub\n", i));
     }
 
-    let output = run_cli(&["render", "-", "--format", "svg", "--fnx-mode", "disabled"], &input);
+    let output = run_cli(
+        &["render", "-", "--format", "svg", "--fnx-mode", "disabled"],
+        &input,
+    );
     assert_success(&output, "wide graph render");
 
     let svg = String::from_utf8_lossy(&output.stdout);
@@ -323,7 +375,10 @@ fn pathological_dense_cycle() {
         }
     }
 
-    let output = run_cli(&["render", "-", "--format", "svg", "--fnx-mode", "enabled"], &input);
+    let output = run_cli(
+        &["render", "-", "--format", "svg", "--fnx-mode", "enabled"],
+        &input,
+    );
     assert_success(&output, "dense cycle render");
 
     let svg = String::from_utf8_lossy(&output.stdout);
@@ -343,9 +398,18 @@ fn render_json_includes_timing_metrics() {
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("should output JSON");
 
     // Verify timing fields are present
-    assert!(json.get("parse_time_ms").is_some(), "should have parse_time_ms");
-    assert!(json.get("layout_time_ms").is_some(), "should have layout_time_ms");
-    assert!(json.get("render_time_ms").is_some(), "should have render_time_ms");
+    assert!(
+        json.get("parse_time_ms").is_some(),
+        "should have parse_time_ms"
+    );
+    assert!(
+        json.get("layout_time_ms").is_some(),
+        "should have layout_time_ms"
+    );
+    assert!(
+        json.get("render_time_ms").is_some(),
+        "should have render_time_ms"
+    );
 }
 
 #[test]
@@ -356,8 +420,16 @@ fn render_json_includes_node_edge_counts() {
 
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("should output JSON");
 
-    assert_eq!(json.get("node_count"), Some(&serde_json::json!(4)), "should have 4 nodes");
-    assert_eq!(json.get("edge_count"), Some(&serde_json::json!(3)), "should have 3 edges");
+    assert_eq!(
+        json.get("node_count"),
+        Some(&serde_json::json!(4)),
+        "should have 4 nodes"
+    );
+    assert_eq!(
+        json.get("edge_count"),
+        Some(&serde_json::json!(3)),
+        "should have 3 edges"
+    );
 }
 
 // ============================================================================
@@ -387,15 +459,19 @@ fn mode_switch_produces_consistent_layout() {
     let svg_disabled = String::from_utf8_lossy(&output_disabled.stdout);
     let svg_enabled = String::from_utf8_lossy(&output_enabled.stdout);
 
-    assert!(svg_disabled.contains("<svg"), "disabled mode should produce SVG");
-    assert!(svg_enabled.contains("<svg"), "enabled mode should produce SVG");
+    assert!(
+        svg_disabled.contains("<svg"),
+        "disabled mode should produce SVG"
+    );
+    assert!(
+        svg_enabled.contains("<svg"),
+        "enabled mode should produce SVG"
+    );
 
     // Both should have the same number of node group elements (class="fm-node")
     // Note: FNX mode may add additional classes like fm-node-centrality-high,
     // so we count the primary node class declaration specifically
-    let count_node_groups = |svg: &str| -> usize {
-        svg.matches(r#"class="fm-node"#).count()
-    };
+    let count_node_groups = |svg: &str| -> usize { svg.matches(r#"class="fm-node"#).count() };
     assert_eq!(
         count_node_groups(&svg_disabled),
         count_node_groups(&svg_enabled),
@@ -415,6 +491,9 @@ fn auto_mode_selects_appropriate_algorithm() {
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("should output JSON");
 
     // Auto mode should successfully render with timing metrics
-    assert!(json.get("layout_time_ms").is_some(), "should report layout timing");
+    assert!(
+        json.get("layout_time_ms").is_some(),
+        "should report layout timing"
+    );
     assert!(json.get("node_count").is_some(), "should report node count");
 }

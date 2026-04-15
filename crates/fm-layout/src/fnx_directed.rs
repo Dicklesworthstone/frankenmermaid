@@ -73,7 +73,10 @@ pub fn compute_scc(ir: &MermaidDiagramIr) -> SccResult {
     let mut has_self_loop: Vec<bool> = vec![false; n];
 
     for edge in &ir.edges {
-        let (Some(from_idx), Some(to_idx)) = (endpoint_node_index(&edge.from), endpoint_node_index(&edge.to)) else {
+        let (Some(from_idx), Some(to_idx)) = (
+            endpoint_node_index(&edge.from),
+            endpoint_node_index(&edge.to),
+        ) else {
             continue;
         };
         if from_idx < n && to_idx < n {
@@ -113,7 +116,16 @@ pub fn compute_scc(ir: &MermaidDiagramIr) -> SccResult {
         // Visit successors in sorted order (BTreeSet guarantees this)
         for &w in &adj[v] {
             if indices[w].is_none() {
-                strongconnect(w, adj, index_counter, indices, lowlinks, on_stack, stack, sccs);
+                strongconnect(
+                    w,
+                    adj,
+                    index_counter,
+                    indices,
+                    lowlinks,
+                    on_stack,
+                    stack,
+                    sccs,
+                );
                 lowlinks[v] = lowlinks[v].min(lowlinks[w]);
             } else if on_stack[w] {
                 lowlinks[v] = lowlinks[v].min(indices[w].unwrap());
@@ -234,7 +246,10 @@ pub fn compute_wcc(ir: &MermaidDiagramIr) -> WccResult {
     let mut adj: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
 
     for edge in &ir.edges {
-        let (Some(from_idx), Some(to_idx)) = (endpoint_node_index(&edge.from), endpoint_node_index(&edge.to)) else {
+        let (Some(from_idx), Some(to_idx)) = (
+            endpoint_node_index(&edge.from),
+            endpoint_node_index(&edge.to),
+        ) else {
             continue;
         };
         if from_idx < n && to_idx < n && from_idx != to_idx {
@@ -348,7 +363,10 @@ pub fn detect_directed_cycles(ir: &MermaidDiagramIr) -> DirectedCycleResult {
     let mut adj: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n]; // (target, edge_idx)
 
     for (edge_idx, edge) in ir.edges.iter().enumerate() {
-        let (Some(from_idx), Some(to_idx)) = (endpoint_node_index(&edge.from), endpoint_node_index(&edge.to)) else {
+        let (Some(from_idx), Some(to_idx)) = (
+            endpoint_node_index(&edge.from),
+            endpoint_node_index(&edge.to),
+        ) else {
             continue;
         };
         if from_idx < n && to_idx < n {
@@ -502,7 +520,10 @@ pub fn compute_reachability(ir: &MermaidDiagramIr) -> ReachabilityResult {
     let mut in_adj: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
 
     for edge in &ir.edges {
-        let (Some(from_idx), Some(to_idx)) = (endpoint_node_index(&edge.from), endpoint_node_index(&edge.to)) else {
+        let (Some(from_idx), Some(to_idx)) = (
+            endpoint_node_index(&edge.from),
+            endpoint_node_index(&edge.to),
+        ) else {
             continue;
         };
         if from_idx < n && to_idx < n && from_idx != to_idx {
@@ -531,7 +552,10 @@ pub fn compute_reachability(ir: &MermaidDiagramIr) -> ReachabilityResult {
 
         // Build reverse mapping
         for &target in &reachable {
-            reaches_to.entry(target).or_insert_with(BTreeSet::new).insert(start);
+            reaches_to
+                .entry(target)
+                .or_insert_with(BTreeSet::new)
+                .insert(start);
         }
 
         reachable_from.insert(start, reachable);

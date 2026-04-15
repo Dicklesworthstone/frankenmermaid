@@ -122,8 +122,10 @@ fn fnx_off_baseline_is_deterministic() {
             {
                 failures.push(format!(
                     "{case_id}: run {run} layout bounds differ: {:.1}x{:.1} vs {:.1}x{:.1}",
-                    current.layout_width, current.layout_height,
-                    reference.layout_width, reference.layout_height
+                    current.layout_width,
+                    current.layout_height,
+                    reference.layout_width,
+                    reference.layout_height
                 ));
             }
         }
@@ -261,13 +263,16 @@ fn save_baselines(baselines: &BTreeMap<String, BaselineInvariant>) {
     let entries: BTreeMap<String, serde_json::Value> = baselines
         .iter()
         .map(|(k, v)| {
-            (k.clone(), serde_json::json!({
-                "output_hash": v.output_hash,
-                "node_count": v.node_count,
-                "edge_count": v.edge_count,
-                "layout_width": v.layout_width,
-                "layout_height": v.layout_height,
-            }))
+            (
+                k.clone(),
+                serde_json::json!({
+                    "output_hash": v.output_hash,
+                    "node_count": v.node_count,
+                    "edge_count": v.edge_count,
+                    "layout_width": v.layout_width,
+                    "layout_height": v.layout_height,
+                }),
+            )
         })
         .collect();
 
@@ -390,12 +395,16 @@ fn fnx_off_baseline_positions_within_bounds() {
             assert!(
                 node.bounds.x >= layout.bounds.x - 50.0,
                 "{case_id}: node {} x position {} out of bounds (min {})",
-                node.node_id, node.bounds.x, layout.bounds.x
+                node.node_id,
+                node.bounds.x,
+                layout.bounds.x
             );
             assert!(
                 node.bounds.y >= layout.bounds.y - 50.0,
                 "{case_id}: node {} y position {} out of bounds (min {})",
-                node.node_id, node.bounds.y, layout.bounds.y
+                node.node_id,
+                node.bounds.y,
+                layout.bounds.y
             );
         }
     }
