@@ -25,6 +25,7 @@ a.out
 screenshots_for_diagnostics/
 rustc-ice-*.txt
 reports/
+artifacts/
 .agent-mail.yaml
 
 # Parser test output garbage (files created by malformed diagram parsing)

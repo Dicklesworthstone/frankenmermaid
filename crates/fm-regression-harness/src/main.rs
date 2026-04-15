@@ -466,75 +466,463 @@ fn case_sort_key(path: &Path) -> (String, String) {
 }
 
 fn render_report_html(report: &RunReport) -> String {
+    // Compute aggregate statistics
+    let total_parse_ms: u128 = report.cases.iter().map(|c| c.parse_ms).sum();
+    let total_layout_ms: u128 = report.cases.iter().map(|c| c.layout_ms).sum();
+    let total_render_ms: u128 = report.cases.iter().map(|c| c.render_ms).sum();
+    let total_nodes: usize = report.cases.iter().map(|c| c.node_count).sum();
+    let total_edges: usize = report.cases.iter().map(|c| c.edge_count).sum();
+
+    // Group cases by category (prefix before underscore)
+    let mut categories: std::collections::BTreeMap<String, Vec<&CaseReport>> =
+        std::collections::BTreeMap::new();
+    for case in &report.cases {
+        let category = case
+            .case_id
+            .split('_')
+            .next()
+            .unwrap_or("other")
+            .to_string();
+        categories.entry(category).or_default().push(case);
+    }
+
     let mut html = String::new();
-    html.push_str("<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"/>");
+    html.push_str("<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"/>");
+    html.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/>");
     html.push_str("<title>FrankenMermaid Regression Harness</title>");
     html.push_str("<style>");
-    html.push_str(
-        "body{font-family:system-ui, sans-serif; background:#0b0f14; color:#e6edf3; margin:0; padding:24px;}\n",
-    );
-    html.push_str(".summary{display:flex; gap:16px; margin-bottom:20px;}\n");
-    html.push_str(".card{background:#121a23; padding:12px 16px; border-radius:10px;}\n");
-    html.push_str(
-        ".case{margin-bottom:24px; padding:16px; background:#10161f; border-radius:12px;}\n",
-    );
-    html.push_str(".status{font-weight:600;}\n");
-    html.push_str(".grid{display:grid; grid-template-columns:1fr 1fr; gap:16px;}\n");
-    html.push_str(".panel{background:#0b1119; padding:12px; border-radius:8px;}\n");
-    html.push_str(".panel svg{width:100%; height:auto;}\n");
-    html.push_str(
-        ".label{font-size:12px; text-transform:uppercase; letter-spacing:.12em; color:#8b949e;}\n",
-    );
-    html.push_str(".mono{font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;}\n");
+    html.push_str(r#"
+:root {
+  --bg-primary: #0b0f14;
+  --bg-secondary: #121a23;
+  --bg-tertiary: #10161f;
+  --bg-panel: #0b1119;
+  --text-primary: #e6edf3;
+  --text-secondary: #8b949e;
+  --accent-green: #3fb950;
+  --accent-red: #f85149;
+  --accent-yellow: #d29922;
+  --accent-blue: #58a6ff;
+  --border-radius: 12px;
+}
+* { box-sizing: border-box; }
+body {
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  margin: 0;
+  padding: 24px;
+  line-height: 1.5;
+}
+h1 {
+  font-size: 2rem;
+  margin: 0 0 8px;
+  background: linear-gradient(90deg, #58a6ff, #a371f7);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+.subtitle { color: var(--text-secondary); margin-bottom: 24px; }
+.summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 12px;
+  margin-bottom: 24px;
+}
+.card {
+  background: var(--bg-secondary);
+  padding: 16px;
+  border-radius: var(--border-radius);
+  text-align: center;
+}
+.card-value {
+  font-size: 1.75rem;
+  font-weight: 700;
+  font-family: ui-monospace, monospace;
+}
+.card-label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-secondary);
+  margin-top: 4px;
+}
+.card.matched .card-value { color: var(--accent-green); }
+.card.mismatched .card-value { color: var(--accent-red); }
+.card.missing .card-value { color: var(--accent-yellow); }
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  margin-bottom: 32px;
+  padding: 16px;
+  background: var(--bg-secondary);
+  border-radius: var(--border-radius);
+}
+.stat { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+.stat:last-child { border-bottom: none; }
+.stat-label { color: var(--text-secondary); }
+.stat-value { font-family: ui-monospace, monospace; color: var(--accent-blue); }
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 24px;
+}
+.filter-btn {
+  background: var(--bg-secondary);
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+  padding: 8px 16px;
+  border-radius: 20px;
+  cursor: pointer;
+  font-size: 0.875rem;
+  transition: all 0.2s;
+}
+.filter-btn:hover { border-color: var(--accent-blue); color: var(--text-primary); }
+.filter-btn.active { background: var(--accent-blue); color: #000; }
+.category {
+  margin-bottom: 32px;
+}
+.category-header {
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin-bottom: 16px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.1);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.category-count {
+  font-size: 0.75rem;
+  background: var(--bg-secondary);
+  padding: 4px 10px;
+  border-radius: 12px;
+  color: var(--text-secondary);
+}
+.thumbnail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+}
+.case {
+  background: var(--bg-tertiary);
+  border-radius: var(--border-radius);
+  overflow: hidden;
+  cursor: pointer;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+.case:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(0,0,0,0.3); }
+.case.expanded { grid-column: 1 / -1; }
+.case-preview {
+  background: var(--bg-panel);
+  padding: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 160px;
+  position: relative;
+}
+.case-preview object, .case-preview img {
+  max-width: 100%;
+  max-height: 200px;
+  width: auto;
+  height: auto;
+}
+.case.expanded .case-preview { min-height: 300px; }
+.case.expanded .case-preview object, .case.expanded .case-preview img { max-height: 400px; }
+.status-badge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.status-badge.matched { background: rgba(63, 185, 80, 0.2); color: var(--accent-green); }
+.status-badge.mismatch { background: rgba(248, 81, 73, 0.2); color: var(--accent-red); }
+.status-badge.missing-golden { background: rgba(210, 153, 34, 0.2); color: var(--accent-yellow); }
+.case-info { padding: 12px 16px; }
+.case-title {
+  font-weight: 600;
+  font-size: 0.9rem;
+  margin-bottom: 8px;
+  word-break: break-word;
+}
+.case-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+.case-meta span { display: flex; align-items: center; gap: 4px; }
+.expanded-content { display: none; padding: 0 16px 16px; }
+.case.expanded .expanded-content { display: block; }
+.comparison-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 16px;
+}
+.comparison-panel {
+  background: var(--bg-panel);
+  padding: 12px;
+  border-radius: 8px;
+}
+.comparison-panel .panel-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+.comparison-panel object, .comparison-panel img { width: 100%; height: auto; }
+.quality-metrics {
+  margin-top: 16px;
+  padding: 12px;
+  background: var(--bg-panel);
+  border-radius: 8px;
+}
+.quality-metrics h4 {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-secondary);
+  margin: 0 0 12px;
+}
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+}
+.metric {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.8rem;
+}
+.metric-label { color: var(--text-secondary); }
+.metric-value { font-family: ui-monospace, monospace; }
+@media (max-width: 640px) {
+  .comparison-grid { grid-template-columns: 1fr; }
+  .thumbnail-grid { grid-template-columns: 1fr; }
+}
+"#);
     html.push_str("</style></head><body>");
 
+    // Header
     html.push_str("<h1>FrankenMermaid Regression Harness</h1>");
+    html.push_str("<p class=\"subtitle\">Visual regression testing and demo showcase</p>");
+
+    // Summary cards
     html.push_str("<div class=\"summary\">");
     html.push_str(&format!(
-        "<div class=\"card\">Total<br><span class=\"mono\">{}</span></div>",
+        "<div class=\"card\"><div class=\"card-value\">{}</div><div class=\"card-label\">Total Cases</div></div>",
         report.total
     ));
     html.push_str(&format!(
-        "<div class=\"card\">Matched<br><span class=\"mono\">{}</span></div>",
+        "<div class=\"card matched\"><div class=\"card-value\">{}</div><div class=\"card-label\">Matched</div></div>",
         report.matched
     ));
     html.push_str(&format!(
-        "<div class=\"card\">Mismatched<br><span class=\"mono\">{}</span></div>",
+        "<div class=\"card mismatched\"><div class=\"card-value\">{}</div><div class=\"card-label\">Mismatched</div></div>",
         report.mismatched
     ));
     html.push_str(&format!(
-        "<div class=\"card\">Missing<br><span class=\"mono\">{}</span></div>",
+        "<div class=\"card missing\"><div class=\"card-value\">{}</div><div class=\"card-label\">Missing Golden</div></div>",
         report.missing
     ));
     html.push_str("</div>");
 
-    for case in &report.cases {
-        html.push_str("<div class=\"case\">");
-        html.push_str(&format!("<div class=\"label\">{}</div>", case.case_id));
+    // Aggregate statistics
+    html.push_str("<div class=\"stats-grid\">");
+    html.push_str(&format!(
+        "<div class=\"stat\"><span class=\"stat-label\">Total Nodes</span><span class=\"stat-value\">{}</span></div>",
+        total_nodes
+    ));
+    html.push_str(&format!(
+        "<div class=\"stat\"><span class=\"stat-label\">Total Edges</span><span class=\"stat-value\">{}</span></div>",
+        total_edges
+    ));
+    html.push_str(&format!(
+        "<div class=\"stat\"><span class=\"stat-label\">Parse Time</span><span class=\"stat-value\">{}ms</span></div>",
+        total_parse_ms
+    ));
+    html.push_str(&format!(
+        "<div class=\"stat\"><span class=\"stat-label\">Layout Time</span><span class=\"stat-value\">{}ms</span></div>",
+        total_layout_ms
+    ));
+    html.push_str(&format!(
+        "<div class=\"stat\"><span class=\"stat-label\">Render Time</span><span class=\"stat-value\">{}ms</span></div>",
+        total_render_ms
+    ));
+    html.push_str(&format!(
+        "<div class=\"stat\"><span class=\"stat-label\">Total Pipeline</span><span class=\"stat-value\">{}ms</span></div>",
+        total_parse_ms + total_layout_ms + total_render_ms
+    ));
+    html.push_str("</div>");
+
+    // Filter bar
+    html.push_str("<div class=\"filter-bar\">");
+    html.push_str("<button class=\"filter-btn active\" data-filter=\"all\">All</button>");
+    for category in categories.keys() {
         html.push_str(&format!(
-            "<div class=\"status\">Status: {}</div>",
-            case.status
+            "<button class=\"filter-btn\" data-filter=\"{}\">{}</button>",
+            category, category
         ));
-        html.push_str("<div class=\"grid\">");
-        html.push_str("<div class=\"panel\"><div class=\"label\">Golden</div>");
-        if case.golden_path.is_some() {
+    }
+    html.push_str("</div>");
+
+    // Cases grouped by category
+    for (category, cases) in &categories {
+        html.push_str(&format!(
+            "<div class=\"category\" data-category=\"{}\">",
+            category
+        ));
+        html.push_str(&format!(
+            "<div class=\"category-header\">{}<span class=\"category-count\">{} diagrams</span></div>",
+            category, cases.len()
+        ));
+        html.push_str("<div class=\"thumbnail-grid\">");
+
+        for case in cases {
+            let status_class = case.status.replace('-', "-");
             html.push_str(&format!(
-                "<object type=\"image/svg+xml\" data=\"golden/{}.svg\"></object>",
+                "<div class=\"case\" data-case=\"{}\" onclick=\"toggleExpand(this)\">",
                 case.case_id
             ));
-        } else {
-            html.push_str("<div>Missing golden</div>");
+            html.push_str("<div class=\"case-preview\">");
+            html.push_str(&format!(
+                "<span class=\"status-badge {}\">{}</span>",
+                status_class, case.status
+            ));
+            html.push_str(&format!(
+                "<object type=\"image/svg+xml\" data=\"current/{}.svg\"></object>",
+                case.case_id
+            ));
+            html.push_str("</div>");
+            html.push_str("<div class=\"case-info\">");
+            html.push_str(&format!("<div class=\"case-title\">{}</div>", case.case_id));
+            html.push_str("<div class=\"case-meta\">");
+            html.push_str(&format!("<span>{} nodes</span>", case.node_count));
+            html.push_str(&format!("<span>{} edges</span>", case.edge_count));
+            let total_time = case.parse_ms + case.layout_ms + case.render_ms;
+            html.push_str(&format!("<span>{}ms</span>", total_time));
+            html.push_str("</div>");
+            html.push_str("</div>");
+
+            // Expanded content
+            html.push_str("<div class=\"expanded-content\">");
+            html.push_str("<div class=\"comparison-grid\">");
+            html.push_str("<div class=\"comparison-panel\">");
+            html.push_str("<div class=\"panel-label\">Golden</div>");
+            if case.golden_path.is_some() {
+                html.push_str(&format!(
+                    "<object type=\"image/svg+xml\" data=\"golden/{}.svg\"></object>",
+                    case.case_id
+                ));
+            } else {
+                html.push_str(
+                    "<div style=\"color: var(--accent-yellow);\">No golden reference</div>",
+                );
+            }
+            html.push_str("</div>");
+            html.push_str("<div class=\"comparison-panel\">");
+            html.push_str("<div class=\"panel-label\">Current</div>");
+            html.push_str(&format!(
+                "<object type=\"image/svg+xml\" data=\"current/{}.svg\"></object>",
+                case.case_id
+            ));
+            html.push_str("</div>");
+            html.push_str("</div>");
+
+            // Quality metrics if available
+            if let Some(ref q) = case.quality {
+                html.push_str("<div class=\"quality-metrics\">");
+                html.push_str("<h4>Quality Metrics</h4>");
+                html.push_str("<div class=\"metrics-grid\">");
+                html.push_str(&format!(
+                    "<div class=\"metric\"><span class=\"metric-label\">Crossings</span><span class=\"metric-value\">{}</span></div>",
+                    q.edge_crossings
+                ));
+                html.push_str(&format!(
+                    "<div class=\"metric\"><span class=\"metric-label\">Back Edges</span><span class=\"metric-value\">{}</span></div>",
+                    q.back_edge_count
+                ));
+                html.push_str(&format!(
+                    "<div class=\"metric\"><span class=\"metric-label\">Cycles</span><span class=\"metric-value\">{}</span></div>",
+                    q.cycle_count
+                ));
+                html.push_str(&format!(
+                    "<div class=\"metric\"><span class=\"metric-label\">Mean Edge Length</span><span class=\"metric-value\">{:.1}</span></div>",
+                    q.mean_edge_length
+                ));
+                html.push_str(&format!(
+                    "<div class=\"metric\"><span class=\"metric-label\">Edge Length StdDev</span><span class=\"metric-value\">{:.1}</span></div>",
+                    q.edge_length_stddev
+                ));
+                html.push_str("</div>");
+                html.push_str("</div>");
+            }
+
+            // Timing breakdown
+            html.push_str("<div class=\"quality-metrics\">");
+            html.push_str("<h4>Timing Breakdown</h4>");
+            html.push_str("<div class=\"metrics-grid\">");
+            html.push_str(&format!(
+                "<div class=\"metric\"><span class=\"metric-label\">Parse</span><span class=\"metric-value\">{}ms</span></div>",
+                case.parse_ms
+            ));
+            html.push_str(&format!(
+                "<div class=\"metric\"><span class=\"metric-label\">Layout</span><span class=\"metric-value\">{}ms</span></div>",
+                case.layout_ms
+            ));
+            html.push_str(&format!(
+                "<div class=\"metric\"><span class=\"metric-label\">Render</span><span class=\"metric-value\">{}ms</span></div>",
+                case.render_ms
+            ));
+            html.push_str(&format!(
+                "<div class=\"metric\"><span class=\"metric-label\">Hash</span><span class=\"metric-value\" style=\"font-size:0.7rem;\">{}</span></div>",
+                case.output_hash
+            ));
+            html.push_str("</div>");
+            html.push_str("</div>");
+
+            html.push_str("</div>"); // expanded-content
+            html.push_str("</div>"); // case
         }
-        html.push_str("</div>");
-        html.push_str("<div class=\"panel\"><div class=\"label\">Current</div>");
-        html.push_str(&format!(
-            "<object type=\"image/svg+xml\" data=\"current/{}.svg\"></object>",
-            case.case_id
-        ));
-        html.push_str("</div>");
-        html.push_str("</div>");
-        html.push_str("</div>");
+
+        html.push_str("</div>"); // thumbnail-grid
+        html.push_str("</div>"); // category
     }
+
+    // JavaScript for interactivity
+    html.push_str("<script>");
+    html.push_str(
+        r#"
+function toggleExpand(el) {
+  el.classList.toggle('expanded');
+}
+document.querySelectorAll('.filter-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    const filter = btn.dataset.filter;
+    document.querySelectorAll('.category').forEach(cat => {
+      if (filter === 'all' || cat.dataset.category === filter) {
+        cat.style.display = 'block';
+      } else {
+        cat.style.display = 'none';
+      }
+    });
+  });
+});
+"#,
+    );
+    html.push_str("</script>");
 
     html.push_str("</body></html>");
     html
