@@ -19,6 +19,7 @@ pub mod fnx_directed;
 #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
 pub mod fnx_ordering;
 
+pub mod adapton;
 mod cga_routing;
 
 use std::cell::RefCell;
