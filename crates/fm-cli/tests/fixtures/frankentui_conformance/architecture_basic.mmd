@@ -1,0 +1,5 @@
+architecture-beta
+    group api(cloud)[API Layer]
+    service gateway(server)[Gateway] in api
+    service auth(lock)[Auth] in api
+    gateway:R --> L:auth

@@ -480,5 +480,183 @@
         "merge develop"
       ]
     }
+  },
+  {
+    "id": "flowchart_basic",
+    "description": "Basic flowchart with decision node and multiple paths.",
+    "input_path": "fixtures/frankentui_conformance/flowchart_basic.mmd",
+    "source_refs": [
+      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:flowchart_parser"
+    ],
+    "expected": {
+      "diagram_type": "flowchart",
+      "warnings": {
+        "exact_count": 0
+      },
+      "counts": {
+        "nodes": 5,
+        "edges": 5,
+        "clusters": 0,
+        "subgraphs": 0
+      },
+      "svg_contains": [
+        "Start",
+        "Decision",
+        "Action",
+        "End"
+      ]
+    }
+  },
+  {
+    "id": "c4context_basic",
+    "description": "C4 Context diagram with persons, systems and relationships.",
+    "input_path": "fixtures/frankentui_conformance/c4context_basic.mmd",
+    "source_refs": [
+      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:c4_parser"
+    ],
+    "expected": {
+      "diagram_type": "C4Context",
+      "warnings": {
+        "exact_count": 0
+      },
+      "counts": {
+        "nodes": 3,
+        "edges": 2,
+        "clusters": 0,
+        "subgraphs": 0
+      },
+      "svg_contains": [
+        "User",
+        "System",
+        "Email",
+        "Uses",
+        "Sends"
+      ]
+    }
+  },
+  {
+    "id": "requirement_basic",
+    "description": "Requirements diagram with requirements and elements.",
+    "input_path": "fixtures/frankentui_conformance/requirement_basic.mmd",
+    "source_refs": [
+      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:requirement_parser"
+    ],
+    "expected": {
+      "diagram_type": "requirementDiagram",
+      "warnings": {
+        "max_count": 3
+      },
+      "counts": {
+        "nodes": 2,
+        "edges": 1,
+        "clusters": 0,
+        "subgraphs": 0
+      },
+      "svg_contains": [
+        "req1",
+        "elem1"
+      ]
+    }
+  },
+  {
+    "id": "quadrant_basic",
+    "description": "Quadrant chart with labeled axes and data points.",
+    "input_path": "fixtures/frankentui_conformance/quadrant_basic.mmd",
+    "source_refs": [
+      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:quadrant_parser"
+    ],
+    "expected": {
+      "diagram_type": "quadrantChart",
+      "warnings": {
+        "exact_count": 0
+      },
+      "counts": {
+        "nodes": 3,
+        "edges": 0,
+        "clusters": 0,
+        "subgraphs": 0
+      },
+      "svg_contains": [
+        "Priority",
+        "Effort",
+        "Impact",
+        "Item"
+      ]
+    }
+  },
+  {
+    "id": "packet_basic",
+    "description": "Packet diagram with header fields.",
+    "input_path": "fixtures/frankentui_conformance/packet_basic.mmd",
+    "source_refs": [
+      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:packet_parser"
+    ],
+    "expected": {
+      "diagram_type": "packet-beta",
+      "warnings": {
+        "exact_count": 0
+      },
+      "counts": {
+        "nodes": 3,
+        "edges": 2,
+        "clusters": 0,
+        "subgraphs": 0
+      },
+      "svg_contains": [
+        "Header",
+        "Payload",
+        "Checksum"
+      ]
+    }
+  },
+  {
+    "id": "architecture_basic",
+    "description": "Architecture diagram with groups and services.",
+    "input_path": "fixtures/frankentui_conformance/architecture_basic.mmd",
+    "source_refs": [
+      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:architecture_parser"
+    ],
+    "expected": {
+      "diagram_type": "architecture-beta",
+      "warnings": {
+        "exact_count": 0
+      },
+      "counts": {
+        "nodes": 2,
+        "edges": 1,
+        "clusters": 1,
+        "subgraphs": 1
+      },
+      "svg_contains": [
+        "Gateway",
+        "Auth",
+        "API"
+      ]
+    }
+  },
+  {
+    "id": "kanban_basic",
+    "description": "Kanban board with columns and tasks.",
+    "input_path": "fixtures/frankentui_conformance/kanban_basic.mmd",
+    "source_refs": [
+      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:kanban_parser"
+    ],
+    "expected": {
+      "diagram_type": "kanban",
+      "warnings": {
+        "max_count": 2
+      },
+      "counts": {
+        "nodes": 0,
+        "edges": 0,
+        "clusters": 6,
+        "subgraphs": 6
+      },
+      "svg_contains": [
+        "data-type=\"kanban\"",
+        "kanban diagram",
+        "organized in 6 groups"
+      ]
+    }
   }
 ]
