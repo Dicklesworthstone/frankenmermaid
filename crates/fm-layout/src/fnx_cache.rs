@@ -491,8 +491,10 @@ mod tests {
     fn cache_key_differs_on_config_change() {
         let ir = make_test_ir(5, 4);
         let config1 = ProjectionConfig::default();
-        let mut config2 = ProjectionConfig::default();
-        config2.penalty_factor = 0.75; // Different from default 0.5
+        let config2 = ProjectionConfig {
+            penalty_factor: 0.75, // Different from default 0.5
+            ..ProjectionConfig::default()
+        };
 
         let key1 = CacheKey::from_ir_and_config(&ir, &config1);
         let key2 = CacheKey::from_ir_and_config(&ir, &config2);
@@ -517,8 +519,10 @@ mod tests {
         let ir = make_test_ir(5, 4);
         let proj = ProjectionConfig::default();
         let scoring1 = CriticalityScoringConfig::default();
-        let mut scoring2 = CriticalityScoringConfig::default();
-        scoring2.bridge_weight = 0.9;
+        let scoring2 = CriticalityScoringConfig {
+            bridge_weight: 0.9,
+            ..CriticalityScoringConfig::default()
+        };
 
         let key1 = CacheKey::from_ir_and_config_with_scoring(&ir, &proj, &scoring1);
         let key2 = CacheKey::from_ir_and_config_with_scoring(&ir, &proj, &scoring2);

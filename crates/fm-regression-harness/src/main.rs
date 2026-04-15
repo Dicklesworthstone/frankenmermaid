@@ -847,7 +847,7 @@ h1 {
         html.push_str("<div class=\"thumbnail-grid\">");
 
         for case in cases {
-            let status_class = case.status.replace('-', "-");
+            let status_class = case.status.as_str();
             html.push_str(&format!(
                 "<div class=\"case\" data-case=\"{}\" onclick=\"toggleExpand(this)\">",
                 case.case_id

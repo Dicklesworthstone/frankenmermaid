@@ -132,38 +132,38 @@ pub fn load_corpus() -> Vec<CorpusEntry> {
 
     for entry in files.flatten() {
         let path = entry.path();
-        if path.extension().is_some_and(|e| e == "jsonl") {
-            if let Ok(content) = fs::read_to_string(&path) {
-                for line in content.lines() {
-                    if line.trim().is_empty() {
+        if path.extension().is_some_and(|e| e == "jsonl")
+            && let Ok(content) = fs::read_to_string(&path)
+        {
+            for line in content.lines() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
+                    let input = json["input"].as_str().unwrap_or("").to_string();
+                    let source = json["source"].as_str().unwrap_or("unknown").to_string();
+                    let license = json["license"].as_str().unwrap_or("unknown").to_string();
+
+                    // Deduplicate by content hash
+                    let hash = evidence::fnv1a_hex(input.as_bytes());
+                    if seen_hashes.contains(&hash) {
                         continue;
                     }
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
-                        let input = json["input"].as_str().unwrap_or("").to_string();
-                        let source = json["source"].as_str().unwrap_or("unknown").to_string();
-                        let license = json["license"].as_str().unwrap_or("unknown").to_string();
+                    seen_hashes.insert(hash.clone());
 
-                        // Deduplicate by content hash
-                        let hash = evidence::fnv1a_hex(input.as_bytes());
-                        if seen_hashes.contains(&hash) {
-                            continue;
-                        }
-                        seen_hashes.insert(hash.clone());
+                    // Detect diagram type
+                    let parsed = parse(&input);
+                    let diagram_type = format!("{:?}", parsed.ir.diagram_type).to_lowercase();
+                    let complexity = Complexity::from_input(&input);
 
-                        // Detect diagram type
-                        let parsed = parse(&input);
-                        let diagram_type = format!("{:?}", parsed.ir.diagram_type).to_lowercase();
-                        let complexity = Complexity::from_input(&input);
-
-                        entries.push(CorpusEntry {
-                            id: hash,
-                            source,
-                            license,
-                            input,
-                            diagram_type,
-                            complexity,
-                        });
-                    }
+                    entries.push(CorpusEntry {
+                        id: hash,
+                        source,
+                        license,
+                        input,
+                        diagram_type,
+                        complexity,
+                    });
                 }
             }
         }
@@ -483,7 +483,7 @@ pub fn analyze_trends(results: &[CompatResult], corpus: &[CorpusEntry]) -> Trend
 
     // Top failure signatures
     let mut sigs: Vec<_> = failure_counts.into_iter().collect();
-    sigs.sort_by(|a, b| b.1.cmp(&a.1));
+    sigs.sort_by_key(|entry| std::cmp::Reverse(entry.1));
     report.top_failure_signatures = sigs.into_iter().take(10).collect();
 
     // Limit high-value failures to most impactful

@@ -12,9 +12,7 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fm_layout::egraph_crossing::{
     CrossingContext, FallbackStrategy, SaturationConfig, saturate_with_fallback,
 };
-use fm_layout::egraph_ordering::{
-    LayerEdges, LayerOrdering, local_crossing_count, optimize_layer_ordering,
-};
+use fm_layout::egraph_ordering::{LayerEdges, LayerOrdering, optimize_layer_ordering};
 
 // ============================================================================
 // Test Graph Generation
@@ -106,6 +104,7 @@ fn generate_bipartite(n: usize, m: usize) -> (Vec<LayerOrdering>, Vec<LayerEdges
 
 /// Metrics from a crossing minimization run.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct CrossingMetrics {
     /// Final crossing count.
     crossing_count: usize,
@@ -117,6 +116,7 @@ struct CrossingMetrics {
 
 /// Comparison between E-graph and greedy.
 #[derive(Debug)]
+#[allow(dead_code)]
 struct Comparison {
     egraph: CrossingMetrics,
     greedy: CrossingMetrics,
@@ -373,6 +373,7 @@ criterion_main!(benches);
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
 
     #[test]

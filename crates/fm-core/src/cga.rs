@@ -946,7 +946,7 @@ impl CgaLineSegment {
         let t2 = (ox * d1y - oy * d1x) / cross;
 
         // Check if intersection is within both segments [0, 1]
-        if t1 >= 0.0 && t1 <= 1.0 && t2 >= 0.0 && t2 <= 1.0 {
+        if (0.0..=1.0).contains(&t1) && (0.0..=1.0).contains(&t2) {
             Some(CgaPoint::new(
                 self.start.x + t1 * d1x,
                 self.start.y + t1 * d1y,
@@ -1043,7 +1043,7 @@ impl CgaCircle {
         let t2 = (-b + sqrt_disc) / (2.0 * a);
 
         // For tangent case (discriminant ≈ 0), t1 ≈ t2, only add once
-        if t1 >= 0.0 && t1 <= 1.0 {
+        if (0.0..=1.0).contains(&t1) {
             points.push(CgaPoint::new(
                 segment.start.x + t1 * dx,
                 segment.start.y + t1 * dy,
@@ -1051,7 +1051,7 @@ impl CgaCircle {
         }
 
         // Only add second point if it's distinct from first
-        if (t2 - t1).abs() > 1e-10 && t2 >= 0.0 && t2 <= 1.0 {
+        if (t2 - t1).abs() > 1e-10 && (0.0..=1.0).contains(&t2) {
             points.push(CgaPoint::new(
                 segment.start.x + t2 * dx,
                 segment.start.y + t2 * dy,
@@ -1259,7 +1259,7 @@ mod transform_stack_tests {
 
         // Push rotation
         stack.push_rotation(std::f64::consts::FRAC_PI_2);
-        let after_rot = stack.apply(0.0, 0.0);
+        let _after_rot = stack.apply(0.0, 0.0);
 
         // Point should have moved due to rotation applied after translation
         // Origin stays at origin under rotation, but translation moved it to (10, 20)
@@ -1379,13 +1379,13 @@ mod transform_stack_tests {
     #[test]
     #[should_panic(expected = "scale factor must be positive")]
     fn rotor_scale_zero_panics() {
-        Rotor::scale(0.0);
+        let _ = Rotor::scale(0.0);
     }
 
     #[test]
     #[should_panic(expected = "scale factor must be positive")]
     fn rotor_scale_negative_panics() {
-        Rotor::scale(-1.0);
+        let _ = Rotor::scale(-1.0);
     }
 
     #[test]

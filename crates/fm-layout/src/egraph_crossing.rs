@@ -106,7 +106,7 @@ pub fn adjacent_swap_rules() -> Vec<egg::Rewrite<OrderingLang, ()>> {
 // ============================================================================
 
 /// Context for crossing count computation during extraction.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct CrossingContext {
     /// Fixed upper layer ordering (if any).
     pub upper_ordering: Option<LayerOrdering>,
@@ -116,17 +116,6 @@ pub struct CrossingContext {
     pub lower_ordering: Option<LayerOrdering>,
     /// Edges from current layer to lower layer.
     pub lower_edges: Option<LayerEdges>,
-}
-
-impl Default for CrossingContext {
-    fn default() -> Self {
-        Self {
-            upper_ordering: None,
-            upper_edges: None,
-            lower_ordering: None,
-            lower_edges: None,
-        }
-    }
 }
 
 /// Extract the best ordering from a saturated e-graph.
@@ -203,12 +192,12 @@ fn collect_orderings(
                     // Get node symbols and recurse
                     let node_canonical = egraph.find(*node_id);
                     for node_node in &egraph[node_canonical].nodes {
-                        if let OrderingLang::Symbol(sym) = node_node {
-                            if let Some(node_idx) = parse_node_symbol(sym) {
-                                let mut new_partial = partial.clone();
-                                new_partial.push(node_idx);
-                                stack.push((*rest_id, new_partial));
-                            }
+                        if let OrderingLang::Symbol(sym) = node_node
+                            && let Some(node_idx) = parse_node_symbol(sym)
+                        {
+                            let mut new_partial = partial.clone();
+                            new_partial.push(node_idx);
+                            stack.push((*rest_id, new_partial));
                         }
                     }
                 }
@@ -1129,10 +1118,10 @@ mod tests {
         assert!(result.crossing_count <= result.greedy_result.crossing_count);
 
         // If e-graph was attempted, budget should be recorded
-        if let Some(ref egraph) = result.egraph_result {
-            if egraph.hit_limit {
-                assert!(result.diagnostic.budget_type.is_some());
-            }
+        if let Some(ref egraph) = result.egraph_result
+            && egraph.hit_limit
+        {
+            assert!(result.diagnostic.budget_type.is_some());
         }
     }
 
@@ -1257,21 +1246,21 @@ mod tests {
         assert_eq!(diag.greedy_crossings, result.greedy_result.crossing_count);
 
         // If e-graph hit budget, diagnostic should record it
-        if let Some(ref egraph) = result.egraph_result {
-            if egraph.hit_limit {
-                assert!(
-                    diag.budget_type.is_some(),
-                    "Budget type should be recorded when limit hit"
-                );
-                assert!(
-                    diag.budget_value.is_some(),
-                    "Budget value should be recorded"
-                );
-                assert!(
-                    diag.budget_limit.is_some(),
-                    "Budget limit should be recorded"
-                );
-            }
+        if let Some(ref egraph) = result.egraph_result
+            && egraph.hit_limit
+        {
+            assert!(
+                diag.budget_type.is_some(),
+                "Budget type should be recorded when limit hit"
+            );
+            assert!(
+                diag.budget_value.is_some(),
+                "Budget value should be recorded"
+            );
+            assert!(
+                diag.budget_limit.is_some(),
+                "Budget limit should be recorded"
+            );
         }
     }
 
