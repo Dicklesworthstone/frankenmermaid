@@ -29,7 +29,7 @@ fm-render-svg = { path = "crates/fm-render-svg" }
 fm-render-canvas = { path = "crates/fm-render-canvas" }
 fm-render-term = { path = "crates/fm-render-term" }
 fm-wasm = { path = "crates/fm-wasm" }
-franken-kernel = "0.3.0"
+franken-kernel = "0.3.1"
 fnx-runtime = { git = "https://github.com/Dicklesworthstone/franken_networkx.git", rev = "cb8bdb590573b9de5ddbc26b948279057ac4049e", default-features = false }
 fnx-classes = { git = "https://github.com/Dicklesworthstone/franken_networkx.git", rev = "cb8bdb590573b9de5ddbc26b948279057ac4049e", default-features = false }
 fnx-algorithms = { git = "https://github.com/Dicklesworthstone/franken_networkx.git", rev = "cb8bdb590573b9de5ddbc26b948279057ac4049e", default-features = false }

@@ -733,9 +733,9 @@ checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
 name = "franken-kernel"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6aff78b47d49216308598be2eb0a37694b10d81e9b9cea2263986dea61d4a7fc"
+checksum = "415a201052a6d072a869af5b39f59256cf3324669191035daf77a50cc08fa109"
 dependencies = [
  "serde",
 ]
