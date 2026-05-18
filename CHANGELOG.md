@@ -3,15 +3,665 @@
 All notable changes to **frankenmermaid** are documented here.
 
 > frankenmermaid is a Rust-first, Mermaid-compatible diagram engine with
-> intent-aware parsing, 10+ layout algorithms, and SVG / terminal / WASM
-> rendering from a single intermediate representation.
+> intent-aware parsing, 15 layout algorithms, and SVG / terminal / Canvas2D /
+> WASM rendering from a single intermediate representation.
 >
 > Repository: <https://github.com/Dicklesworthstone/frankenmermaid>
 > Live demo: <https://dicklesworthstone.github.io/frankenmermaid/>
 
-There are no tagged releases yet. The sections below are organized
-chronologically and grouped by capability area. Every commit link points to
-the canonical GitHub history.
+There are no tagged releases yet — the workspace is at version `0.1.0` across
+all crates and crates.io publishing is being prepared (see
+[`CRATES_IO_PUBLISHING.md`](https://github.com/Dicklesworthstone/frankenmermaid/blob/main/CRATES_IO_PUBLISHING.md)).
+The sections below are organized chronologically and grouped by capability
+area. Every commit link points to the canonical GitHub history. Beads issue
+identifiers (`bd-XXXX`) reference the dependency-aware task tracker in
+[`.beads/`](https://github.com/Dicklesworthstone/frankenmermaid/tree/main/.beads).
+
+---
+
+## 2026-05-16 — Test fixture cleanup
+
+- Removed the obsolete `frankentui_conformance` fixture directory; the
+  conformance harness now lives in
+  `crates/fm-cli/tests/frankentui_conformance_test.rs` with
+  `frankentui_conformance_cases.json`
+  ([a70587f](https://github.com/Dicklesworthstone/frankenmermaid/commit/a70587f))
+
+---
+
+## 2026-04-21 — Crates.io migration of `franken-kernel` and `asupersync`
+
+The two upstream dependencies that historically blocked workspace publication
+to crates.io are now consumed from crates.io rather than pinned to git.
+
+- Replace git-pinned `franken-kernel` with crates.io `v0.3.0`
+  ([41e7efa](https://github.com/Dicklesworthstone/frankenmermaid/commit/41e7efa)).
+  `franken-kernel` provides `Budget`, `Cx`, `DecisionId`, `NoCaps`, `PolicyId`,
+  `SchemaVersion`, and `TraceId` to `fm-core`; moving it off git removes the
+  primary blocker called out in
+  [`CRATES_IO_PUBLISHING.md`](https://github.com/Dicklesworthstone/frankenmermaid/blob/main/CRATES_IO_PUBLISHING.md).
+- Bump `asupersync` from `0.3.0` to `0.3.1`
+  ([fe575e2](https://github.com/Dicklesworthstone/frankenmermaid/commit/fe575e2))
+- Drop the broken `legacy_mermaid_code/mermaid` gitlink and ignore the path
+  ([8cf8d81](https://github.com/Dicklesworthstone/frankenmermaid/commit/8cf8d81))
+
+The fnx-* crates remain git-pinned because they back an optional
+(`fnx-integration`) feature; default builds remain crates.io-clean.
+
+---
+
+## 2026-04-15 — Adapton self-adjusting computation, layout-decision surface, conformance fixtures, crates.io strategy
+
+### Incremental computation: Adapton framework
+
+- **Adapton-style self-adjusting computation framework** in `fm-layout/src/adapton.rs`
+  (epic `bd-12e`), giving the layout engine first-class memoization with
+  dirty-tracking so partial graph edits avoid recomputing untouched subgraphs
+  ([3e10c54](https://github.com/Dicklesworthstone/frankenmermaid/commit/3e10c54))
+
+### Layout decision explainability
+
+- **Layout decision explanation surface** (`bd-gy4.11`): the CLI can now emit
+  a human-readable rationale describing why a particular algorithm, cycle
+  strategy, and refinement plan were chosen for a given diagram
+  ([65616ac](https://github.com/Dicklesworthstone/frankenmermaid/commit/65616ac))
+- Config-aware layout algorithm dispatch with graph analysis: the dispatcher
+  consults density, branching factor, and graph topology before picking
+  Sugiyama vs. Force vs. Tree vs. specialized layouts
+  ([7e73b20](https://github.com/Dicklesworthstone/frankenmermaid/commit/7e73b20))
+
+### Conformance test harness
+
+- **Fixture-backed FrankenTUI conformance suite** with coverage tracking,
+  driven by `crates/fm-cli/tests/frankentui_conformance_cases.json` and
+  documented in
+  [`FEATURE_PARITY.md`](https://github.com/Dicklesworthstone/frankenmermaid/blob/main/FEATURE_PARITY.md)
+  ([3921135](https://github.com/Dicklesworthstone/frankenmermaid/commit/3921135),
+  [d639df0](https://github.com/Dicklesworthstone/frankenmermaid/commit/d639df0),
+  [1ce6609](https://github.com/Dicklesworthstone/frankenmermaid/commit/1ce6609),
+  [2319654](https://github.com/Dicklesworthstone/frankenmermaid/commit/2319654),
+  [fea0360](https://github.com/Dicklesworthstone/frankenmermaid/commit/fea0360))
+- Coverage matrix update for `sequence_notes`, `sequence_fragments`, and
+  `flowchart_subgraph`
+  ([26f3c42](https://github.com/Dicklesworthstone/frankenmermaid/commit/26f3c42))
+
+### Publishing strategy
+
+- **Crates.io publishing strategy** (`bd-b3h0`) with name availability check,
+  workspace dependency unblock plan, and publish-order definition
+  ([bf54d5c](https://github.com/Dicklesworthstone/frankenmermaid/commit/bf54d5c))
+
+### Refactoring
+
+- Simplify E-graph crossing minimization and improve CGA routing internals
+  ([ed8d1a7](https://github.com/Dicklesworthstone/frankenmermaid/commit/ed8d1a7),
+  [f4f3f7c](https://github.com/Dicklesworthstone/frankenmermaid/commit/f4f3f7c))
+- Clone the pressure record to avoid a move in
+  `build_layout_decision_ledger`
+  ([7c906fa](https://github.com/Dicklesworthstone/frankenmermaid/commit/7c906fa))
+
+---
+
+## 2026-04-14 — Regression harness, E-graph crossing minimization, FxHash DoS hardening
+
+### Regression harness with HTML report
+
+- **Thumbnail-grid HTML report** for the regression harness with CI-friendly
+  summary output and configurable performance thresholds (`bd-u785`)
+  ([ec1e3ca](https://github.com/Dicklesworthstone/frankenmermaid/commit/ec1e3ca),
+  [f4cd792](https://github.com/Dicklesworthstone/frankenmermaid/commit/f4cd792))
+
+### E-graph equality-saturation crossing minimization
+
+- **Egg-based equality saturation** for crossing minimization in
+  `fm-layout/src/egraph_crossing.rs` and `egraph_ordering.rs` (`bd-1xma.2`).
+  When a graph's rank ordering can be improved by rewriting node positions,
+  the e-graph explores rewrites in parallel and extracts the lowest-crossing
+  ordering
+  ([da298ac](https://github.com/Dicklesworthstone/frankenmermaid/commit/da298ac))
+- **Node-budget and timeout guards** for E-graph saturation (`bd-1xma.3`)
+  ([e2143fb](https://github.com/Dicklesworthstone/frankenmermaid/commit/e2143fb))
+- **Sugiyama fallback** when the E-graph exceeds its budget (`bd-1xma.4`)
+  ([2e67a07](https://github.com/Dicklesworthstone/frankenmermaid/commit/2e67a07))
+- **Criterion benchmarks** comparing E-graph vs greedy crossing minimization
+  (`bd-1xma.5`)
+  ([f2073c6](https://github.com/Dicklesworthstone/frankenmermaid/commit/f2073c6))
+- E-graph budget overflow protection
+  ([e70a3a0](https://github.com/Dicklesworthstone/frankenmermaid/commit/e70a3a0))
+- E-graph memory explosion and budget exhaustion fault tests (`bd-1s1g.1`)
+  ([3fe4956](https://github.com/Dicklesworthstone/frankenmermaid/commit/3fe4956))
+
+### Adversarial-input hardening
+
+- **FxHash collision and DoS resistance tests** (`bd-1s1g.7`) verifying that
+  pathological IDs do not push hash-keyed structures into quadratic behavior
+  ([c324df2](https://github.com/Dicklesworthstone/frankenmermaid/commit/c324df2))
+
+### DOT parser fixes
+
+- Handle quoted nodes in DOT edge groups
+  ([f039c7a](https://github.com/Dicklesworthstone/frankenmermaid/commit/f039c7a))
+- Handle single-quoted strings in `split_dot_by`
+  ([4c0c824](https://github.com/Dicklesworthstone/frankenmermaid/commit/4c0c824))
+
+---
+
+## 2026-04-13 — Conformal Geometric Algebra (CGA) edge routing and SVG transforms
+
+The geometric algebra epic (`bd-3cd8` family) replaces the ad-hoc matrix
+pipeline with rotor composition and intersection queries.
+
+### CGA edge routing
+
+- **CGA geometric object types** (`bd-2q3f.3`) — points, lines, circles, and
+  bivectors used for intersection queries
+  ([f0d7414](https://github.com/Dicklesworthstone/frankenmermaid/commit/f0d7414))
+- **CGA intersection queries wired into edge routing**, so segments are
+  tested against node obstacles using the same algebra used for transforms
+  ([16d33ac](https://github.com/Dicklesworthstone/frankenmermaid/commit/16d33ac))
+- CGA routing now detects segments that pass through obstacles
+  ([3503469](https://github.com/Dicklesworthstone/frankenmermaid/commit/3503469))
+
+### CGA SVG transforms
+
+- **TransformStack and CGA transform module** for SVG rendering (`bd-2q3f.2`)
+  ([7645c80](https://github.com/Dicklesworthstone/frankenmermaid/commit/7645c80))
+- Reject non-positive scale factors and improve SVG transform parity
+  ([bb453eb](https://github.com/Dicklesworthstone/frankenmermaid/commit/bb453eb))
+- Fix CGA rotor inverse and scale extraction bugs
+  ([95fc5dd](https://github.com/Dicklesworthstone/frankenmermaid/commit/95fc5dd))
+
+### Real-world corpus ingestion
+
+- **Real-world Mermaid corpus ingestion pipeline** (`bd-2xl.15`) used to drive
+  the regression harness against representative third-party diagrams
+  ([62a02ca](https://github.com/Dicklesworthstone/frankenmermaid/commit/62a02ca))
+
+---
+
+## 2026-04-12 — FNX Phase-2 directed graph rollout (gates, drills, compatibility matrix)
+
+The FNX integration moved from Phase 1 (undirected advisory) to Phase 2
+(directed: SCC, WCC, directed cycles, reachability) under the
+`bd-ml2r.7`/`bd-ml2r.8` epics. Directed algorithms are implemented natively in
+`fm-layout/src/fnx_directed.rs` rather than waiting on upstream fnx.
+
+### Phase-2 directed algorithm surface
+
+- **Directed algorithm surface for FNX Phase 2** (`bd-ml2r.7.1`) wrapping
+  Tarjan's SCC, WCC via BFS, directed cycle detection, and reachability
+  analysis with deterministic output ordering
+  ([a30b794](https://github.com/Dicklesworthstone/frankenmermaid/commit/a30b794))
+- **FNX compatibility matrix** (`bd-ml2r.7.2`) tracking available vs
+  pending fnx capabilities per phase; documented in
+  [`docs/FNX_COMPATIBILITY_MATRIX.md`](https://github.com/Dicklesworthstone/frankenmermaid/blob/main/docs/FNX_COMPATIBILITY_MATRIX.md)
+  ([662b86e](https://github.com/Dicklesworthstone/frankenmermaid/commit/662b86e))
+
+### Rollout gates and canary drills
+
+- **Phase-1 rollout gate tests** with go/no-go decision evidence (`bd-ml2r.8.1`)
+  ([40ab2d3](https://github.com/Dicklesworthstone/frankenmermaid/commit/40ab2d3))
+- **Phase-2 directed rollout gate tests and policy** (`bd-ml2r.8.2`),
+  documented in
+  [`docs/FNX_PHASE2_ROLLOUT.md`](https://github.com/Dicklesworthstone/frankenmermaid/blob/main/docs/FNX_PHASE2_ROLLOUT.md)
+  ([997a526](https://github.com/Dicklesworthstone/frankenmermaid/commit/997a526))
+- **Canary rollout state machine and drill tests** (`bd-ml2r.12.4`) in
+  `fm-core/src/canary.rs`
+  ([8fd602d](https://github.com/Dicklesworthstone/frankenmermaid/commit/8fd602d))
+
+### Documentation and migration
+
+- **FNX migration guide** (`bd-ml2r.12.3`) with risk-tiered adoption checklists
+  ([6000a26](https://github.com/Dicklesworthstone/frankenmermaid/commit/6000a26))
+- **FNX user guide and examples** (`bd-ml2r.9.4`)
+  ([36e0be5](https://github.com/Dicklesworthstone/frankenmermaid/commit/36e0be5))
+- **FNX differential quality/performance reporting** (`bd-ml2r.12.2`)
+  ([bb0ec6b](https://github.com/Dicklesworthstone/frankenmermaid/commit/bb0ec6b))
+- **FNX-off baseline snapshot and invariant tests** (`bd-ml2r.12.1`)
+  ([45b3f15](https://github.com/Dicklesworthstone/frankenmermaid/commit/45b3f15))
+
+### golden test infrastructure
+
+- New `xychart_comprehensive` golden case + `FM_GOLDEN_CASE` filter
+  ([5f770b6](https://github.com/Dicklesworthstone/frankenmermaid/commit/5f770b6))
+- ClassDef/style golden test (`bd-65l0`) and edge-case coverage (`bd-b65r`)
+  ([6d6f980](https://github.com/Dicklesworthstone/frankenmermaid/commit/6d6f980),
+  [54b1858](https://github.com/Dicklesworthstone/frankenmermaid/commit/54b1858))
+- Detect new golden cases not in blessed baselines
+  ([8a2325d](https://github.com/Dicklesworthstone/frankenmermaid/commit/8a2325d))
+
+---
+
+## 2026-04-10 — FNX Phase 1: centrality tiers, witness metadata, CLI modes, cycle scoring
+
+### Centrality-aware semantic styling (`bd-ml2r.9`)
+
+- **Centrality cache and stable normalization** (`bd-ml2r.5.1`)
+  ([b64db94](https://github.com/Dicklesworthstone/frankenmermaid/commit/b64db94))
+- **Centrality tie-breaks in barycenter ordering** (`br-ml2r.5`) so hub
+  nodes settle into stable rank positions
+  ([b98deab](https://github.com/Dicklesworthstone/frankenmermaid/commit/b98deab))
+- **Populate centrality tiers in Sugiyama layout** (`bd-ml2r.9.2`)
+  ([c73324b](https://github.com/Dicklesworthstone/frankenmermaid/commit/c73324b))
+- **Centrality tier CSS classes in SVG node output** so hub nodes can be
+  styled semantically (`fm-node-centrality-high`, etc.)
+  ([dd13980](https://github.com/Dicklesworthstone/frankenmermaid/commit/dd13980))
+- O(n²) → O(n) centrality lookup optimization, plus xychart category padding
+  ([3895c50](https://github.com/Dicklesworthstone/frankenmermaid/commit/3895c50))
+
+### FNX witness metadata
+
+- **FNX witness metadata in CLI JSON output** (`bd-ml2r.6.1`) — every render
+  surface that records FNX analysis emits a `witness` block with the metrics
+  used and the bookkeeping needed for differential reporting
+  ([774a493](https://github.com/Dicklesworthstone/frankenmermaid/commit/774a493))
+- **FNX witness in WASM API** (`bd-ml2r.6.2`)
+  ([443b47b](https://github.com/Dicklesworthstone/frankenmermaid/commit/443b47b))
+- Wire `fnx_witness` into render/validate paths
+  ([ab87911](https://github.com/Dicklesworthstone/frankenmermaid/commit/ab87911))
+- Include `fnx_enabled` in the layout cache key so cached layouts cannot leak
+  across modes
+  ([4504698](https://github.com/Dicklesworthstone/frankenmermaid/commit/4504698))
+
+### CLI controls
+
+- **CLI flags for FNX integration modes** (`bd-ml2r.9.1`): `--fnx-mode`,
+  `--fnx-projection`, `--fnx-fallback` across `render` and `validate`
+  ([341f281](https://github.com/Dicklesworthstone/frankenmermaid/commit/341f281))
+
+### FNX diagnostics, cycle scoring, fallback ladder
+
+- **FNX parser-side structural diagnostics** (`bd-ml2r.3.1`) and integration
+  into `fm-cli validate` (`bd-ml2r.3.2`)
+  ([3e8c948](https://github.com/Dicklesworthstone/frankenmermaid/commit/3e8c948),
+  [c0a50ef](https://github.com/Dicklesworthstone/frankenmermaid/commit/c0a50ef))
+- **FNX edge criticality scoring for cycle removal** (`bd-ml2r.4.1`)
+  ([4c35b17](https://github.com/Dicklesworthstone/frankenmermaid/commit/4c35b17))
+- **Deterministic FNX analysis cache** (`bd-ml2r.10.2`) and **analysis budget
+  enforcement** (`bd-ml2r.10.1`)
+  ([d838bb6](https://github.com/Dicklesworthstone/frankenmermaid/commit/d838bb6),
+  [a4fe1de](https://github.com/Dicklesworthstone/frankenmermaid/commit/a4fe1de))
+- **Fallback ladder and strict-mode behavior** when FNX analysis exhausts its
+  budget (`bd-ml2r.10.3`)
+  ([1e2c2e4](https://github.com/Dicklesworthstone/frankenmermaid/commit/1e2c2e4))
+- **Bridge detection** in FNX diagnostics and cycle scorer
+  ([5b7686b](https://github.com/Dicklesworthstone/frankenmermaid/commit/5b7686b))
+- **FNX adapter stable ID projection** (`bd-ml2r.2.1`) and directed/undirected
+  projection policy (`bd-ml2r.2.2`)
+  ([bb34c64](https://github.com/Dicklesworthstone/frankenmermaid/commit/bb34c64),
+  [464884a](https://github.com/Dicklesworthstone/frankenmermaid/commit/464884a))
+
+### Quality and benchmarking
+
+- **Ablation benchmark and adoption threshold** for FNX (`bd-ml2r.5.2`)
+  ([d18525e](https://github.com/Dicklesworthstone/frankenmermaid/commit/d18525e))
+- **Benchmark regression harness with determinism replay** (`bd-ml2r.11.3`)
+  ([9071a8a](https://github.com/Dicklesworthstone/frankenmermaid/commit/9071a8a))
+- **FNX E2E scenario tests** (`bd-ml2r.11.2`) and diagnostics edge cases
+  (`bd-ml2r.11.1`)
+  ([ec6283b](https://github.com/Dicklesworthstone/frankenmermaid/commit/ec6283b),
+  [2ab2873](https://github.com/Dicklesworthstone/frankenmermaid/commit/2ab2873))
+- **Structured recommendations with category/confidence** (`bd-ml2r.9.3`)
+  ([2365426](https://github.com/Dicklesworthstone/frankenmermaid/commit/2365426))
+- **Structured evidence log schema** for FNX QA (`bd-ml2r.11.4`)
+  ([71b88b7](https://github.com/Dicklesworthstone/frankenmermaid/commit/71b88b7))
+
+### npm publishing prep
+
+- **npm-publish CI job** for the `@frankenmermaid/core` WASM bundle
+  (`bd-hye0`)
+  ([7853562](https://github.com/Dicklesworthstone/frankenmermaid/commit/7853562))
+
+### README accuracy fixes
+
+- Document the demo features actually shipped (`bd-3y9i`,
+  [587233a](https://github.com/Dicklesworthstone/frankenmermaid/commit/587233a),
+  [6fb868e](https://github.com/Dicklesworthstone/frankenmermaid/commit/6fb868e))
+
+---
+
+## 2026-04-07 — DOT parser hardening, style sanitization, classDef edge cases
+
+### Security / sanitization hardening
+
+- Harden CSS style sanitization (`bd-swtz`) against comment obfuscation
+  ([49e29d0](https://github.com/Dicklesworthstone/frankenmermaid/commit/49e29d0))
+- Harden style sanitizer casing (`bd-72ij`) against case-insensitive
+  `javascript:` schemes
+  ([ffe82e4](https://github.com/Dicklesworthstone/frankenmermaid/commit/ffe82e4))
+- Enforce allowed inline style properties in `from_pairs` (`bd-20ot`)
+- Harden SVG link emission against unsafe hrefs (`bd-b2l4`)
+- Resolve SVG `var()` fallbacks during PNG rasterization (`bd-rk5u`); handle
+  nested parentheses in fallback resolution (`bd-a240`)
+- Harden DOT comment handling (`bd-udou`)
+  ([7212217](https://github.com/Dicklesworthstone/frankenmermaid/commit/7212217))
+- Fix DOT header detection with comments/brace adjacency (`bd-a80w`)
+  ([72ea106](https://github.com/Dicklesworthstone/frankenmermaid/commit/72ea106))
+- Fix DOT operator detection (`bd-3kxn`)
+  ([3338aff](https://github.com/Dicklesworthstone/frankenmermaid/commit/3338aff))
+- Hash DOT symbol-only identifiers (`bd-d4at`)
+  ([a8055ee](https://github.com/Dicklesworthstone/frankenmermaid/commit/a8055ee))
+- Fix DOT body extraction for braces in quoted graph IDs (`bd-kpkv`) and
+  dispatch logging (`bd-7sb6`)
+  ([abb7a03](https://github.com/Dicklesworthstone/frankenmermaid/commit/abb7a03))
+- Fix `serve` request limit overflow (`bd-xzr3`)
+  ([f267e65](https://github.com/Dicklesworthstone/frankenmermaid/commit/f267e65))
+
+### Parser polish
+
+- Tolerate trailing semicolons in flowchart direction headers
+  ([fd6b8b1](https://github.com/Dicklesworthstone/frankenmermaid/commit/fd6b8b1))
+- Handle `gitGraph` direction tokens with trailing punctuation (`bd-wvqt`)
+  ([5d766da](https://github.com/Dicklesworthstone/frankenmermaid/commit/5d766da))
+- Add golden tests for long-tail diagram types (`bd-k3bv`)
+  ([346b6d9](https://github.com/Dicklesworthstone/frankenmermaid/commit/346b6d9))
+
+### CLI input limits
+
+- Enforce `core.max_input_bytes` via bounded reads on stdin and files
+  ([894fdc1](https://github.com/Dicklesworthstone/frankenmermaid/commit/894fdc1))
+
+---
+
+## 2026-04-06 — Incremental layout engine, epoch-based concurrent IR, vEB rewrite, TOML config
+
+### Incremental layout (`bd-12e` epic)
+
+- **Massive incremental layout engine expansion** with dependency-graph
+  caching, so subsequent renders of a near-identical diagram skip stages whose
+  inputs have not changed
+  ([80d3744](https://github.com/Dicklesworthstone/frankenmermaid/commit/80d3744))
+- Incremental layout engine + benchmarks + proptest regressions
+  ([da3f3e0](https://github.com/Dicklesworthstone/frankenmermaid/commit/da3f3e0))
+- Incremental overlap alignment, east-asian width support
+  ([18cc855](https://github.com/Dicklesworthstone/frankenmermaid/commit/18cc855))
+- Memoized reuse marked as incremental in the trace (`bd-n3wn`)
+  ([018d028](https://github.com/Dicklesworthstone/frankenmermaid/commit/018d028))
+- Record layout recompute duration in trace (`bd-5pdg`)
+  ([0c45bd4](https://github.com/Dicklesworthstone/frankenmermaid/commit/0c45bd4))
+
+### Epoch-based concurrent IR
+
+- **Epoch-based concurrent IR handle** in `fm-core/src/epoch.rs`, letting
+  multiple readers observe a consistent IR snapshot while another agent
+  prepares the next epoch
+  ([c9cd75b](https://github.com/Dicklesworthstone/frankenmermaid/commit/c9cd75b))
+
+### vEB layout rewrite + boundary smoothing
+
+- **van Emde Boas (vEB) layout rewrite**, boundary edge smoothing, and a fix
+  for the `click` callback wiring
+  ([7c37e2f](https://github.com/Dicklesworthstone/frankenmermaid/commit/7c37e2f))
+
+### TOML config + Cloudflare Pages ops
+
+- **TOML config file support** with auto-discovery
+  (`./frankenmermaid.toml` → `~/.config/frankenmermaid/config.toml`) and
+  per-subcommand overrides
+  ([4b238c6](https://github.com/Dicklesworthstone/frankenmermaid/commit/4b238c6))
+- **E-graph crossing minimization** + wasm32 conditional compilation + Cloudflare
+  Pages ops integration via `scripts/cloudflare_pages_ops.py`
+  ([58b7721](https://github.com/Dicklesworthstone/frankenmermaid/commit/58b7721))
+
+### WASM bindings expansion
+
+- Extend wasm bindings with additional exported functions (`diagramLens`,
+  `applyLensEdit`, `parseLens`, `applyParseLensEdit`, `describeDiagram`,
+  `source_spans_js`, `capability_matrix_js`); refresh type declarations
+  ([d0f00e4](https://github.com/Dicklesworthstone/frankenmermaid/commit/d0f00e4),
+  [b4fc12f](https://github.com/Dicklesworthstone/frankenmermaid/commit/b4fc12f))
+- Integrate the IncrementalLayoutEngine into the `Diagram` wasm struct
+  ([96e9aca](https://github.com/Dicklesworthstone/frankenmermaid/commit/96e9aca))
+- WebRenderer selection with canvas2d/WebGPU fallback and lens edit bindings
+  ([c474f21](https://github.com/Dicklesworthstone/frankenmermaid/commit/c474f21))
+- Slim wasm bindings with `cfg`-gated native-only features and JS source-spans
+  helper
+  ([e266bac](https://github.com/Dicklesworthstone/frankenmermaid/commit/e266bac))
+
+### Conformance harness scaffolding
+
+- **Fixture-backed FrankenTUI conformance harness** scaffolding
+  ([34c2395](https://github.com/Dicklesworthstone/frankenmermaid/commit/34c2395))
+- Showcase / e2e harness scripts and static web bootstrap pages
+  ([531b2b1](https://github.com/Dicklesworthstone/frankenmermaid/commit/531b2b1))
+- `fm-core` CGA tests, integration test updates
+  ([eeb14db](https://github.com/Dicklesworthstone/frankenmermaid/commit/eeb14db))
+
+---
+
+## 2026-04-05 — Stress testing, criterion benchmarks, demo expansion, intent-reality closure
+
+### Performance baselines
+
+- **1K-node and dense-graph stress tests**, pipeline benchmark stub, and
+  showcase expansion
+  ([6f45f5d](https://github.com/Dicklesworthstone/frankenmermaid/commit/6f45f5d))
+- **Criterion benchmark harness scaffold** for pipeline benchmarks
+  ([121e38e](https://github.com/Dicklesworthstone/frankenmermaid/commit/121e38e))
+- **Layout quality benchmarks** + CJK/emoji full-width support + cross-target
+  E2E tests
+  ([c2163d6](https://github.com/Dicklesworthstone/frankenmermaid/commit/c2163d6))
+- Layout-aware source maps + expanded DOT parser coverage + SVG attribute
+  fixes
+  ([277f390](https://github.com/Dicklesworthstone/frankenmermaid/commit/277f390))
+
+### Pressure-adaptive runtime (`bd-3uz` epic)
+
+- **Deterministic degradation engine with operator algebra** in
+  `fm-core` and `fm-layout` (`bd-3uz.7`/`bd-3uz.8`), giving layout/render a
+  composable language for cost-vs-quality tradeoffs under pressure
+  ([e5a9dff](https://github.com/Dicklesworthstone/frankenmermaid/commit/e5a9dff))
+- Diagnostics panel, fallback preview, diff metadata tracking, and shared-core
+  contracts for the showcase
+  ([d26cab2](https://github.com/Dicklesworthstone/frankenmermaid/commit/d26cab2))
+- DOT edge groups + port stripping + latest-edit-wins render pipeline
+  ([aeba5c0](https://github.com/Dicklesworthstone/frankenmermaid/commit/aeba5c0))
+
+### Showcase / editor
+
+- Adversarial test corpus, split-shell editor layout
+  ([679d4fe](https://github.com/Dicklesworthstone/frankenmermaid/commit/679d4fe))
+- URL state sync, adoption-decision documentation
+  ([688f27a](https://github.com/Dicklesworthstone/frankenmermaid/commit/688f27a))
+- Narrative metadata on featured spotlight samples
+  ([072f923](https://github.com/Dicklesworthstone/frankenmermaid/commit/072f923))
+- Rich editor surface with syntax lens and structural hints
+  ([f471772](https://github.com/Dicklesworthstone/frankenmermaid/commit/f471772))
+
+---
+
+## 2026-04-02 — Evidence ledger CLI, source maps, accessibility, dimension hardening
+
+### Evidence ledger surface
+
+- **Evidence ledger CLI** with structured pass/fail evidence persistence
+  ([5bbb2dc](https://github.com/Dicklesworthstone/frankenmermaid/commit/5bbb2dc))
+- Seeded alien-CS evidence ledger and demo strategy documentation
+  ([345bf14](https://github.com/Dicklesworthstone/frankenmermaid/commit/345bf14))
+
+### Source maps + accessibility
+
+- **Source map artifact generation**, accessibility descriptions, and CLI
+  flags `--embed-source-spans` / `--source-map-out`
+  ([525d1e7](https://github.com/Dicklesworthstone/frankenmermaid/commit/525d1e7))
+
+### Golden / dimension hardening
+
+- **SVG viewBox dimension fallback**, 3 new golden tests, extracted dimension
+  helpers
+  ([7921e81](https://github.com/Dicklesworthstone/frankenmermaid/commit/7921e81))
+- Width/height dimension validation, 4 new golden test diagrams, xychart bar
+  width formatting fix
+  ([bc5afbd](https://github.com/Dicklesworthstone/frankenmermaid/commit/bc5afbd))
+- 6 new golden test diagrams + font-aware mock text metrics + edge-label font
+  sizing + canvas theme presets
+  ([29edc39](https://github.com/Dicklesworthstone/frankenmermaid/commit/29edc39))
+
+### Render-stack fixes
+
+- Validate font-size and numeric SVG config overrides — reject NaN/Inf/zero/
+  negative values
+  ([8c2955d](https://github.com/Dicklesworthstone/frankenmermaid/commit/8c2955d))
+- Resolve bounds-checking panics and coordinate scaling bugs in layout +
+  render-term
+  ([1345858](https://github.com/Dicklesworthstone/frankenmermaid/commit/1345858))
+- Prevent legend clamp panic; make quadrant chart adaptive
+  ([6cdb2d1](https://github.com/Dicklesworthstone/frankenmermaid/commit/6cdb2d1))
+- Count title labels in canvas render result; align quadrant SVG with layout
+  engine dimensions
+  ([433195e](https://github.com/Dicklesworthstone/frankenmermaid/commit/433195e))
+- Guard force layout against NaN positions; align canvas typography with SVG
+  ([64a9d46](https://github.com/Dicklesworthstone/frankenmermaid/commit/64a9d46))
+
+### Canvas rendering
+
+- Implement path marker drawing for the canvas backend
+  ([02f6762](https://github.com/Dicklesworthstone/frankenmermaid/commit/02f6762))
+- Diagram title rendering test; fix font format string layout
+  ([6490bda](https://github.com/Dicklesworthstone/frankenmermaid/commit/6490bda))
+
+### Constraint solver + SVG visual effects
+
+- **Constraint-based layout solver**, SVG gradient/filter support, terminal
+  Unicode box drawing
+  ([13ab3cf](https://github.com/Dicklesworthstone/frankenmermaid/commit/13ab3cf))
+- Curved cylinder caps, deterministic ordering, layout-aware gantt rendering
+  ([2615c8f](https://github.com/Dicklesworthstone/frankenmermaid/commit/2615c8f))
+- Harden numeric inputs, fix calendar validation, ensure deterministic ordering
+  ([736037b](https://github.com/Dicklesworthstone/frankenmermaid/commit/736037b))
+
+---
+
+## 2026-03-28 — Recursive→iterative traversal, presenter mode, comprehensive showcase
+
+### Stack-safety: recursive → iterative rewrites
+
+- Replace recursive `cycle_removal_dfs_back` with iterative stack-based
+  traversal so deep cyclic graphs never blow the stack
+  ([18546de](https://github.com/Dicklesworthstone/frankenmermaid/commit/18546de))
+- Replace recursive subgraph/tree traversal with iterative variants and
+  expand the showcase
+  ([921d885](https://github.com/Dicklesworthstone/frankenmermaid/commit/921d885))
+
+### Demo showcase: presenter mode
+
+- **Presenter mode with step-sequenced guided tour** in the showcase HTML;
+  expands demo strategy
+  ([2e02e91](https://github.com/Dicklesworthstone/frankenmermaid/commit/2e02e91))
+
+---
+
+## 2026-03-27 — Diagram coverage push: icons, animations, namespaces, evidence bundles, auto-layout, kanban metadata, Gantt SVG, Sankey weighting
+
+This was the largest single-day capability wave since the initial Mermaid
+parser. The shared theme is closing the gap between syntax coverage and
+visually polished render output for every diagram family.
+
+### CSS animations
+
+- **CSS-only diagram animations** with entrance, flow, pulse, and hover
+  effects, no JavaScript required
+  ([2f6a5bd](https://github.com/Dicklesworthstone/frankenmermaid/commit/2f6a5bd))
+
+### Node icons + custom SVG icons
+
+- **Node icon extraction**, custom SVG icons, and left-position layout
+  ([f2f692e](https://github.com/Dicklesworthstone/frankenmermaid/commit/f2f692e))
+- Wasm bindings + bead for icon/emoji + `SvgCustomIconOverride: Default`
+  derive
+  ([a64e8de](https://github.com/Dicklesworthstone/frankenmermaid/commit/a64e8de))
+
+### Class / state / namespace extensions
+
+- **Class cardinality**, **namespace blocks**, state notes/guards, and node
+  icons
+  ([3b5d4c3](https://github.com/Dicklesworthstone/frankenmermaid/commit/3b5d4c3))
+
+### CSS style system
+
+- **Structured CSS style system** with sanitization (parser + core), the
+  foundation for safely consuming `classDef`/`style`/`linkStyle` directives
+  from untrusted input
+  ([7e5d316](https://github.com/Dicklesworthstone/frankenmermaid/commit/7e5d316))
+
+### Auto-layout engine + evidence bundles
+
+- **Auto-layout engine**, evidence timestamps, and parser refactoring
+  ([a8004f7](https://github.com/Dicklesworthstone/frankenmermaid/commit/a8004f7))
+- **Release evidence bundles**, requirement styling, mindmap branch colors,
+  and expanded CI quality gates
+  ([1872305](https://github.com/Dicklesworthstone/frankenmermaid/commit/1872305))
+- **Incremental layout engine**, release-signoff command, and CI gate
+  aggregation
+  ([791b2aa](https://github.com/Dicklesworthstone/frankenmermaid/commit/791b2aa))
+
+### Diagram family coverage
+
+- **Kanban metadata** (`@{wip, priority, assigned}`), priority colors
+  ([7695316](https://github.com/Dicklesworthstone/frankenmermaid/commit/7695316))
+- **FxHash collections**, **packet-beta field parsing**, **Sankey
+  flow-weighted node sizing**
+  ([36c3705](https://github.com/Dicklesworthstone/frankenmermaid/commit/36c3705))
+- **Dedicated Gantt chart SVG renderer** with type-based task coloring
+  ([11aa063](https://github.com/Dicklesworthstone/frankenmermaid/commit/11aa063))
+- Promote diagram support levels, IR capacity hints, fix tree traversal
+  ([d1de1c6](https://github.com/Dicklesworthstone/frankenmermaid/commit/d1de1c6))
+- **Promote C4 diagrams** (Context/Container/Component/Dynamic/Deployment) to
+  full support + demo evidence guard
+  ([0d24c9a](https://github.com/Dicklesworthstone/frankenmermaid/commit/0d24c9a))
+
+---
+
+## 2026-03-23 — Sequence diagram comprehensive expansion
+
+Sequence diagrams went from "participants and messages" to full mermaid-js
+parity for fragments, notes, lifecycles, and styled arrows in one push.
+
+### Sequence rendering
+
+- **Major sequence diagram rendering expansion** — fragments, lifelines,
+  activations, notes
+  ([f6520ab](https://github.com/Dicklesworthstone/frankenmermaid/commit/f6520ab))
+- Extended sequence rendering with notes, fragments, and lifecycle refinements
+  ([0fa688d](https://github.com/Dicklesworthstone/frankenmermaid/commit/0fa688d))
+- Sequence notes + fragments + theme config + dot parser improvements
+  ([4117f68](https://github.com/Dicklesworthstone/frankenmermaid/commit/4117f68))
+- Sequence lifecycle markers + DottedCross arrow + notes + fragments
+  ([e4b2a64](https://github.com/Dicklesworthstone/frankenmermaid/commit/e4b2a64))
+- Enhance sequence lifecycle and plan Sankey rendering
+  ([66d55ad](https://github.com/Dicklesworthstone/frankenmermaid/commit/66d55ad))
+- Sequence arrow parity (open/half/stick arrows) + ER cardinality labels +
+  edge bundling
+  ([cea92a9](https://github.com/Dicklesworthstone/frankenmermaid/commit/cea92a9))
+- Coalesce multiple destroy lifecycle markers per participant
+  ([ec00577](https://github.com/Dicklesworthstone/frankenmermaid/commit/ec00577))
+- Refine sequence note geometry and enhance SVG/terminal rendering
+  ([4ecc382](https://github.com/Dicklesworthstone/frankenmermaid/commit/4ecc382))
+
+### New diagram coverage
+
+- **Quadrant chart support**, accessibility directives, gitgraph layout
+  ([ccff015](https://github.com/Dicklesworthstone/frankenmermaid/commit/ccff015))
+- Half/stick arrows, central connection, regenerated golden SVGs
+  ([804e58d](https://github.com/Dicklesworthstone/frankenmermaid/commit/804e58d))
+- Register Pie in concrete layout algorithm list
+  ([1d3783d](https://github.com/Dicklesworthstone/frankenmermaid/commit/1d3783d))
+
+### Title extraction
+
+- **Comprehensive diagram title extraction and rendering** across parser
+  and SVG renderer
+  ([23ab91d](https://github.com/Dicklesworthstone/frankenmermaid/commit/23ab91d))
+
+### Parser fixes
+
+- Fix HTML entity decoding for numeric entities
+  ([eece7f2](https://github.com/Dicklesworthstone/frankenmermaid/commit/eece7f2))
+
+### Gantt expansion
+
+- Add gantt chart metadata and expand sequence rendering
+  ([827ea95](https://github.com/Dicklesworthstone/frankenmermaid/commit/827ea95))
 
 ---
 
