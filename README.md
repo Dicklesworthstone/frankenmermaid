@@ -782,7 +782,7 @@ Input text
 
 ### Fuzzy matching
 
-A two-row dynamic-programming Levenshtein computation (O(mn) time, O(n) space) against the 14 base keywords. Only distances 1–2 are accepted:
+A two-row dynamic-programming Levenshtein computation (O(mn) time, O(n) space) against the 17 base keywords in `DIAGRAM_KEYWORDS` (one per diagram family, with `graph` aliased to `flowchart`). Only distances 1–2 are accepted:
 
 | Distance | Confidence | Example |
 |---|---|---|
@@ -1043,7 +1043,7 @@ Phase 2 extends FNX to directed graph semantics. The algorithms are implemented 
 - **Directed cycle detection** via DFS with back-edge tracking.
 - **Reachability analysis** with source/sink identification.
 
-A canary rollout state machine (`fm-core/src/canary.rs`) drives Phase-2 enablement through Shadow → Advisory → Authoritative tiers, with go/no-go gates for determinism, correctness, performance budget (≤100 ms for 100-node graphs), and pipeline parity. See [`docs/FNX_PHASE2_ROLLOUT.md`](docs/FNX_PHASE2_ROLLOUT.md).
+A canary rollout state machine (`fm-core/src/canary.rs`) drives Phase-2 enablement through a `RolloutPhase` enum: `Disabled` → `Canary` (≈1% traffic) → `Partial` (10–50%) → `Full`, with a `RolledBack` sink state. The conceptual progression documented in [`docs/FNX_PHASE2_ROLLOUT.md`](docs/FNX_PHASE2_ROLLOUT.md) maps these traffic phases onto three policy modes — Shadow (results logged, not used), Advisory (used as hints), Full Integration — with go/no-go gates for determinism, correctness, performance budget (≤100 ms for 100-node graphs), and pipeline parity.
 
 ### CLI controls
 
@@ -1122,7 +1122,7 @@ The renderer ships with a full library of SVG `<marker>` definitions matching th
 | Monochrome | Pure black and white |
 | Blueprint | Technical drawing style on blue background |
 
-Themes define 13 CSS custom properties (`--fm-bg`, `--fm-text-color`, `--fm-node-fill`, `--fm-node-stroke`, `--fm-edge-color`, `--fm-cluster-fill`, `--fm-cluster-stroke`, plus 8 accent colors). Mermaid-style `%%{init}%%` `themeVariables` (`primaryColor`, `lineColor`, `clusterBkg`, etc.) are mapped to these properties automatically.
+Each theme exposes 15 base CSS custom properties (7 named — `--fm-bg`, `--fm-text-color`, `--fm-node-fill`, `--fm-node-stroke`, `--fm-edge-color`, `--fm-cluster-fill`, `--fm-cluster-stroke` — plus `--fm-accent-1` through `--fm-accent-8`). The renderer then derives ~half a dozen more (`--fm-edge-muted`, `--fm-cluster-label-color`, `--fm-edge-label-bg`, `--fm-node-accent`, `--fm-node-hover-accent`, animation knobs) via `var()` references, giving ~21 custom properties in the final `<style>` block. Mermaid-style `%%{init}%%` `themeVariables` (`primaryColor`, `lineColor`, `clusterBkg`, etc.) are mapped onto the base properties automatically.
 
 ### Accessibility
 
@@ -1191,7 +1191,7 @@ The Canvas2D renderer is an alternative to SVG for browser-based rendering, part
 
 ### Trait-based abstraction
 
-`Canvas2dContext` is a trait with 35 methods covering path operations (`begin_path`, `move_to`, `line_to`, `bezier_curve_to`, `arc`, …), drawing (`fill`, `stroke`, `fill_rect`, `stroke_rect`, …), text (`fill_text`, `stroke_text`, `measure_text`), style, transform, and shadows.
+`Canvas2dContext` is a trait with 40 methods covering path operations (`begin_path`, `move_to`, `line_to`, `quadratic_curve_to`, `bezier_curve_to`, `arc`, `arc_to`, `rect`, …), drawing (`fill`, `stroke`, `fill_rect`, `stroke_rect`, `clear_rect`), text (`fill_text`, `stroke_text`, `measure_text`, plus alignment / baseline setters), style (fill / stroke / line-width / line-cap / line-join / line-dash / global-alpha / font), transform (`save`, `restore`, `translate`, `scale`, `rotate`, `set_transform`, `reset_transform`, `clip`), and shadows.
 
 In WASM builds, the trait is implemented against `web_sys::CanvasRenderingContext2d` with font-size-aware text metrics. For testing, a `MockCanvas2dContext` records all draw operations into a `Vec<DrawOperation>` so the full render pipeline can be tested in CI without a browser.
 
@@ -1949,7 +1949,7 @@ A --> B
 - **Very large SVGs** (10k+ nodes) can be heavy for browsers. Use the Canvas2D backend via WASM for interactive exploration.
 - **PNG export** rasterizes the SVG output. CSS animations and hover effects are not preserved in static PNGs.
 - **WebGPU backend** is plumbed in the WebRenderer selection logic but the implementation is a fallback to Canvas2D; full WebGPU rendering is a planned epic.
-- **FNX directed analysis** (Phase 2) is in canary rollout with a Shadow → Advisory → Authoritative state machine. Enable explicitly with `--features fnx-experimental-directed` if you want to drive it.
+- **FNX directed analysis** (Phase 2) is in canary rollout via the `RolloutPhase` state machine in `fm-core/src/canary.rs` (`Disabled → Canary → Partial → Full`, with `RolledBack` for health-criteria violations). Enable explicitly with `--features fnx-experimental-directed` if you want to drive it.
 - **`@frankenmermaid/core` npm package** is not on npm yet. The publish CI job exists and is gated to `refs/tags/v*` pushes; the project hasn't cut a tagged release. Until then, use the WASM bundle from the live demo or build locally with `./build-wasm.sh`.
 - Some niche Mermaid syntax may parse with warnings and produce different visual output from mermaid-js; the `Compatibility` diagnostic category surfaces these explicitly.
 
@@ -2188,7 +2188,7 @@ Project-specific vocabulary that shows up in the trace output, the decision ledg
 | **Trace ID** | Stable observability ID (from `franken-kernel`) shared across the decision ledger, witness records, and evidence artifacts for a single render |
 | **Conformance fixture** | A `(input, expected-output)` pair in `crates/fm-cli/tests/frankentui_conformance_cases.json` that pins behavior against the FrankenTUI reference |
 | **Bead** | A task tracker entry (`bd-XXXX`) in `.beads/` — used for dependency-aware work planning. Bead IDs appear in commit messages |
-| **Canary tier** | One of the FNX Phase-2 directed rollout states: `shadow` (results logged, not used), `advisory` (used as hints), `authoritative` (binding) |
+| **Rollout phase** | One of `RolloutPhase::{Disabled, Canary, Partial, Full, RolledBack}` from `fm-core/src/canary.rs`, gating what fraction of requests use Phase-2 FNX. Maps to the conceptual Shadow / Advisory / Full Integration modes documented in [`docs/FNX_PHASE2_ROLLOUT.md`](docs/FNX_PHASE2_ROLLOUT.md) |
 
 ---
 
@@ -2296,7 +2296,7 @@ Layout stats: `crossing_count = 0`, `total_edge_length = …`, `reversed_edge_to
 
 ### 6. Render scene
 
-The scene IR receives a `RenderGroup` with five layers: clusters (empty), edges (5 orthogonal paths with arrowheads + 2 midpoint labels), nodes (6 shapes — 2 stadiums, 1 diamond, 3 rects), labels (positioned text).
+The scene IR receives a `RenderGroup` with four layers: clusters (empty), edges (5 orthogonal paths with arrowheads + 2 midpoint labels), nodes (6 shapes — 2 stadiums, 1 diamond, 3 rects), labels (positioned text).
 
 ### 7. SVG output
 
@@ -2304,7 +2304,7 @@ The SVG renderer emits:
 
 - A root `<svg>` with `viewBox`, `<title>`, `<desc>`, and accessibility attributes.
 - A `<defs>` block with the gradient, drop-shadow, and arrowhead marker definitions for the active theme.
-- A `<style>` block with the 13 CSS variables for the active theme.
+- A `<style>` block with the active theme's CSS custom properties (15 base + derived; see "Theme system" above for the breakdown).
 - One `<g class="fm-cluster-layer">` (empty), one `<g class="fm-edge-layer">` containing 5 `<path>` elements, one `<g class="fm-node-layer">` containing 6 shape elements, one `<g class="fm-label-layer">` with positioned text.
 
 If `--embed-source-spans` was passed, every node and edge group carries `data-fm-source-span="LINE:COL"` linking back to the input.
@@ -2826,7 +2826,7 @@ A few things this lets a host do without re-rendering:
 
 ## Browser compatibility and WASM bundle
 
-The WASM build targets browsers with **`WebAssembly` v1** + **`SharedArrayBuffer`** support. As of this commit:
+The WASM build targets browsers with baseline **`WebAssembly` v1** support. It uses no shared memory and no atomics, so `SharedArrayBuffer` is not required and no cross-origin-isolation headers are needed to load the bundle. Other Web APIs are optional and only matter for specific render paths:
 
 | Surface | Required |
 |---|---|
@@ -2836,7 +2836,7 @@ The WASM build targets browsers with **`WebAssembly` v1** + **`SharedArrayBuffer
 | Web Workers (for off-main-thread parse/layout) | All modern browsers |
 | WebGPU (when the WebGPU renderer is wired) | Chrome 113+, Firefox 121+, Safari Tech Preview |
 
-The default bundle uses no shared memory and no atomics, so any browser with basic WebAssembly support can load it. The pre-built bundle from the live demo loads cleanly under file-served-over-HTTP and via standard CDNs.
+The pre-built bundle from the live demo loads cleanly under file-served-over-HTTP and via standard CDNs; no special headers required.
 
 Bundle composition is documented in detail under "Building the WASM bundle" above. Quick reference for the default (no-FNX) build:
 
