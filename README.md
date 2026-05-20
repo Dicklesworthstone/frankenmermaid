@@ -697,7 +697,7 @@ frankenmermaid/
                     ▼
       ┌──────────────────────────────┐
       │ fm-core                      │
-      │  • IR types + 25 shapes      │
+      │  • IR types + 23 shapes      │
       │  • CGA primitives            │
       │  • diagnostic categories     │
       │  • epoch-based IR handle     │
@@ -886,7 +886,7 @@ Hardening includes:
 
 `fm-layout` and `fm-render-svg` share a CGA primitive layer (`fm-core/src/cga.rs`, `fm-layout/src/cga_routing.rs`, `fm-render-svg/src/cga_transform.rs`) used for two distinct purposes:
 
-1. **Edge routing.** Geometric objects (point, line, circle, bivector) and intersection queries let the orthogonal router detect when a candidate segment would pass through an obstacle and reroute around it.
+1. **Edge routing.** Geometric primitives (`CgaPoint`, `CgaLineSegment`, `CgaCircle`, `CgaRect`) and intersection queries let the orthogonal router detect when a candidate segment would pass through an obstacle and reroute around it.
 2. **SVG transform composition.** A `TransformStack` composes rotors (rotation), translations, and scales through geometric-algebra products instead of stacking matrices. This keeps determinism intact and gives correct scale-extraction even after composed transforms.
 
 ### Incremental layout
@@ -1730,16 +1730,16 @@ The aggregator surfaces a single pass/fail signal to the CI workflow per push, w
 
 ## Validate pipeline
 
-`fm-cli validate` runs four diagnostic collection stages and produces a sorted, deduplicated report.
+`fm-cli validate` runs four diagnostic collection stages — `parse`, `fnx`, `layout`, `render` — and produces a sorted, deduplicated report.
 
 | Stage | What it checks |
 |---|---|
-| **Parse** | Parser warnings, init directive errors, structured IR diagnostics, unstructured recovery warnings |
-| **Structural** | Unknown diagram type, empty diagram (no nodes and no edges), disconnected components |
-| **Layout** | Algorithm capability unavailable for the diagram type, guardrail fallback applied, cycles detected and edges reversed, FNX advisory (hub detection, bridges, cycle scoring, structural recommendations) |
-| **Render** | SVG envelope validation (output starts with `<svg` and ends with `</svg>`) |
+| `parse` | Parser warnings, init directive errors, structured IR diagnostics, unstructured recovery warnings, unknown diagram type, empty diagram (no nodes and no edges) |
+| `fnx` | Optional FNX structural diagnostics (hub detection, bridges, disconnected components, cycle scoring, structured recommendations) — only present when FNX is enabled |
+| `layout` | Algorithm capability unavailable for the diagram type, guardrail fallback applied, cycles detected and edges reversed |
+| `render` | SVG envelope validation (output starts with `<svg` and ends with `</svg>`) |
 
-Diagnostics are sorted by six keys for consistent output (severity, source line, source column, validation stage, error code, message text). The `--fail-on` flag controls which severity level causes a non-zero exit code.
+Diagnostics are sorted by six keys for consistent output (severity, source line, source column, stage, error code, message text). The `--fail-on` flag controls which severity level causes a non-zero exit code.
 
 ## Deployment and rollback
 
