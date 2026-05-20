@@ -146,7 +146,7 @@ The fnx-* crates remain git-pinned because they back an optional
 
 ---
 
-## 2026-04-13 — Conformal Geometric Algebra (CGA) edge routing and SVG transforms
+## 2026-04-14 — Conformal Geometric Algebra (CGA) edge routing and SVG transforms
 
 The geometric algebra epic (`bd-3cd8` family) replaces the ad-hoc matrix
 pipeline with rotor composition and intersection queries.
@@ -179,7 +179,7 @@ pipeline with rotor composition and intersection queries.
 
 ---
 
-## 2026-04-12 — FNX Phase-2 directed graph rollout (gates, drills, compatibility matrix)
+## 2026-04-14 — FNX Phase-2 directed graph rollout (gates, drills, compatibility matrix)
 
 The FNX integration moved from Phase 1 (undirected advisory) to Phase 2
 (directed: SCC, WCC, directed cycles, reachability) under the
@@ -232,7 +232,7 @@ The FNX integration moved from Phase 1 (undirected advisory) to Phase 2
 
 ---
 
-## 2026-04-10 — FNX Phase 1: centrality tiers, witness metadata, CLI modes, cycle scoring
+## 2026-04-13 — FNX Phase 1: centrality tiers, witness metadata, CLI modes, cycle scoring
 
 ### Centrality-aware semantic styling (`bd-ml2r.9`)
 
@@ -320,7 +320,7 @@ The FNX integration moved from Phase 1 (undirected advisory) to Phase 2
 
 ---
 
-## 2026-04-07 — DOT parser hardening, style sanitization, classDef edge cases
+## 2026-04-11 — DOT parser hardening, style sanitization, classDef edge cases
 
 ### Security / sanitization hardening
 
@@ -429,7 +429,26 @@ The FNX integration moved from Phase 1 (undirected advisory) to Phase 2
 
 ---
 
-## 2026-04-05 — Stress testing, criterion benchmarks, demo expansion, intent-reality closure
+## 2026-03-28 — Recursive→iterative traversal, presenter mode, comprehensive showcase
+
+### Stack-safety: recursive → iterative rewrites
+
+- Replace recursive `cycle_removal_dfs_back` with iterative stack-based
+  traversal so deep cyclic graphs never blow the stack
+  ([18546de](https://github.com/Dicklesworthstone/frankenmermaid/commit/18546de))
+- Replace recursive subgraph/tree traversal with iterative variants and
+  expand the showcase
+  ([921d885](https://github.com/Dicklesworthstone/frankenmermaid/commit/921d885))
+
+### Demo showcase: presenter mode
+
+- **Presenter mode with step-sequenced guided tour** in the showcase HTML;
+  expands demo strategy
+  ([2e02e91](https://github.com/Dicklesworthstone/frankenmermaid/commit/2e02e91))
+
+---
+
+## 2026-03-27 to 2026-03-28 — Stress testing, criterion benchmarks, demo expansion, intent-reality closure
 
 ### Performance baselines
 
@@ -467,87 +486,6 @@ The FNX integration moved from Phase 1 (undirected advisory) to Phase 2
   ([072f923](https://github.com/Dicklesworthstone/frankenmermaid/commit/072f923))
 - Rich editor surface with syntax lens and structural hints
   ([f471772](https://github.com/Dicklesworthstone/frankenmermaid/commit/f471772))
-
----
-
-## 2026-04-02 — Evidence ledger CLI, source maps, accessibility, dimension hardening
-
-### Evidence ledger surface
-
-- **Evidence ledger CLI** with structured pass/fail evidence persistence
-  ([5bbb2dc](https://github.com/Dicklesworthstone/frankenmermaid/commit/5bbb2dc))
-- Seeded alien-CS evidence ledger and demo strategy documentation
-  ([345bf14](https://github.com/Dicklesworthstone/frankenmermaid/commit/345bf14))
-
-### Source maps + accessibility
-
-- **Source map artifact generation**, accessibility descriptions, and CLI
-  flags `--embed-source-spans` / `--source-map-out`
-  ([525d1e7](https://github.com/Dicklesworthstone/frankenmermaid/commit/525d1e7))
-
-### Golden / dimension hardening
-
-- **SVG viewBox dimension fallback**, 3 new golden tests, extracted dimension
-  helpers
-  ([7921e81](https://github.com/Dicklesworthstone/frankenmermaid/commit/7921e81))
-- Width/height dimension validation, 4 new golden test diagrams, xychart bar
-  width formatting fix
-  ([bc5afbd](https://github.com/Dicklesworthstone/frankenmermaid/commit/bc5afbd))
-- 6 new golden test diagrams + font-aware mock text metrics + edge-label font
-  sizing + canvas theme presets
-  ([29edc39](https://github.com/Dicklesworthstone/frankenmermaid/commit/29edc39))
-
-### Render-stack fixes
-
-- Validate font-size and numeric SVG config overrides — reject NaN/Inf/zero/
-  negative values
-  ([8c2955d](https://github.com/Dicklesworthstone/frankenmermaid/commit/8c2955d))
-- Resolve bounds-checking panics and coordinate scaling bugs in layout +
-  render-term
-  ([1345858](https://github.com/Dicklesworthstone/frankenmermaid/commit/1345858))
-- Prevent legend clamp panic; make quadrant chart adaptive
-  ([6cdb2d1](https://github.com/Dicklesworthstone/frankenmermaid/commit/6cdb2d1))
-- Count title labels in canvas render result; align quadrant SVG with layout
-  engine dimensions
-  ([433195e](https://github.com/Dicklesworthstone/frankenmermaid/commit/433195e))
-- Guard force layout against NaN positions; align canvas typography with SVG
-  ([64a9d46](https://github.com/Dicklesworthstone/frankenmermaid/commit/64a9d46))
-
-### Canvas rendering
-
-- Implement path marker drawing for the canvas backend
-  ([02f6762](https://github.com/Dicklesworthstone/frankenmermaid/commit/02f6762))
-- Diagram title rendering test; fix font format string layout
-  ([6490bda](https://github.com/Dicklesworthstone/frankenmermaid/commit/6490bda))
-
-### Constraint solver + SVG visual effects
-
-- **Constraint-based layout solver**, SVG gradient/filter support, terminal
-  Unicode box drawing
-  ([13ab3cf](https://github.com/Dicklesworthstone/frankenmermaid/commit/13ab3cf))
-- Curved cylinder caps, deterministic ordering, layout-aware gantt rendering
-  ([2615c8f](https://github.com/Dicklesworthstone/frankenmermaid/commit/2615c8f))
-- Harden numeric inputs, fix calendar validation, ensure deterministic ordering
-  ([736037b](https://github.com/Dicklesworthstone/frankenmermaid/commit/736037b))
-
----
-
-## 2026-03-28 — Recursive→iterative traversal, presenter mode, comprehensive showcase
-
-### Stack-safety: recursive → iterative rewrites
-
-- Replace recursive `cycle_removal_dfs_back` with iterative stack-based
-  traversal so deep cyclic graphs never blow the stack
-  ([18546de](https://github.com/Dicklesworthstone/frankenmermaid/commit/18546de))
-- Replace recursive subgraph/tree traversal with iterative variants and
-  expand the showcase
-  ([921d885](https://github.com/Dicklesworthstone/frankenmermaid/commit/921d885))
-
-### Demo showcase: presenter mode
-
-- **Presenter mode with step-sequenced guided tour** in the showcase HTML;
-  expands demo strategy
-  ([2e02e91](https://github.com/Dicklesworthstone/frankenmermaid/commit/2e02e91))
 
 ---
 
@@ -609,6 +547,68 @@ visually polished render output for every diagram family.
 - **Promote C4 diagrams** (Context/Container/Component/Dynamic/Deployment) to
   full support + demo evidence guard
   ([0d24c9a](https://github.com/Dicklesworthstone/frankenmermaid/commit/0d24c9a))
+
+---
+
+## 2026-03-24 to 2026-03-26 — Constraint solver, evidence ledger CLI, source maps, accessibility, dimension hardening
+
+### Evidence ledger surface
+
+- **Evidence ledger CLI** with structured pass/fail evidence persistence
+  ([5bbb2dc](https://github.com/Dicklesworthstone/frankenmermaid/commit/5bbb2dc))
+- Seeded alien-CS evidence ledger and demo strategy documentation
+  ([345bf14](https://github.com/Dicklesworthstone/frankenmermaid/commit/345bf14))
+
+### Source maps + accessibility
+
+- **Source map artifact generation**, accessibility descriptions, and CLI
+  flags `--embed-source-spans` / `--source-map-out`
+  ([525d1e7](https://github.com/Dicklesworthstone/frankenmermaid/commit/525d1e7))
+
+### Golden / dimension hardening
+
+- **SVG viewBox dimension fallback**, 3 new golden tests, extracted dimension
+  helpers
+  ([7921e81](https://github.com/Dicklesworthstone/frankenmermaid/commit/7921e81))
+- Width/height dimension validation, 4 new golden test diagrams, xychart bar
+  width formatting fix
+  ([bc5afbd](https://github.com/Dicklesworthstone/frankenmermaid/commit/bc5afbd))
+- 6 new golden test diagrams + font-aware mock text metrics + edge-label font
+  sizing + canvas theme presets
+  ([29edc39](https://github.com/Dicklesworthstone/frankenmermaid/commit/29edc39))
+
+### Render-stack fixes
+
+- Validate font-size and numeric SVG config overrides — reject NaN/Inf/zero/
+  negative values
+  ([8c2955d](https://github.com/Dicklesworthstone/frankenmermaid/commit/8c2955d))
+- Resolve bounds-checking panics and coordinate scaling bugs in layout +
+  render-term
+  ([1345858](https://github.com/Dicklesworthstone/frankenmermaid/commit/1345858))
+- Prevent legend clamp panic; make quadrant chart adaptive
+  ([6cdb2d1](https://github.com/Dicklesworthstone/frankenmermaid/commit/6cdb2d1))
+- Count title labels in canvas render result; align quadrant SVG with layout
+  engine dimensions
+  ([433195e](https://github.com/Dicklesworthstone/frankenmermaid/commit/433195e))
+- Guard force layout against NaN positions; align canvas typography with SVG
+  ([64a9d46](https://github.com/Dicklesworthstone/frankenmermaid/commit/64a9d46))
+
+### Canvas rendering
+
+- Implement path marker drawing for the canvas backend
+  ([02f6762](https://github.com/Dicklesworthstone/frankenmermaid/commit/02f6762))
+- Diagram title rendering test; fix font format string layout
+  ([6490bda](https://github.com/Dicklesworthstone/frankenmermaid/commit/6490bda))
+
+### Constraint solver + SVG visual effects
+
+- **Constraint-based layout solver**, SVG gradient/filter support, terminal
+  Unicode box drawing
+  ([13ab3cf](https://github.com/Dicklesworthstone/frankenmermaid/commit/13ab3cf))
+- Curved cylinder caps, deterministic ordering, layout-aware gantt rendering
+  ([2615c8f](https://github.com/Dicklesworthstone/frankenmermaid/commit/2615c8f))
+- Harden numeric inputs, fix calendar validation, ensure deterministic ordering
+  ([736037b](https://github.com/Dicklesworthstone/frankenmermaid/commit/736037b))
 
 ---
 
