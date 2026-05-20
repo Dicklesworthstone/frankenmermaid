@@ -1,0 +1,11 @@
+classDiagram
+    Animal <|-- Duck
+    Animal <|-- Fish
+    Animal : +int age
+    Animal : +String gender
+    Animal : +isMammal() bool
+    Duck : +String beakColor
+    Duck : +swim()
+    Duck : +quack()
+    Fish : +int sizeInFeet
+    Fish : +canEat()

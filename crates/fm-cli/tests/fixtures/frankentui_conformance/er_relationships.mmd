@@ -1,0 +1,12 @@
+erDiagram
+    CUSTOMER ||--o{ ORDER : places
+    ORDER ||--|{ LINE-ITEM : contains
+    PRODUCT ||--o{ LINE-ITEM : references
+    CUSTOMER {
+        string name
+        string id PK
+    }
+    ORDER {
+        int orderNumber PK
+        date created
+    }

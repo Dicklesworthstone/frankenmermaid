@@ -1,0 +1,11 @@
+C4Deployment
+    title Deployment diagram
+    Deployment_Node(aws, "AWS Cloud", "Cloud Provider") {
+        Deployment_Node(ec2, "EC2 Instance", "t3.medium") {
+            Container(api, "API Server", "Rust", "Backend service")
+        }
+        Deployment_Node(rds, "RDS", "db.t3.micro") {
+            ContainerDb(db, "Database", "PostgreSQL", "Data store")
+        }
+    }
+    Rel(api, db, "Connects to")

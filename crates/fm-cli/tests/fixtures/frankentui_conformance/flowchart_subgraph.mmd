@@ -1,0 +1,8 @@
+flowchart TB
+    subgraph Frontend
+        A[User] --> B[Browser]
+    end
+    subgraph Backend
+        C[API] --> D[Database]
+    end
+    B --> C

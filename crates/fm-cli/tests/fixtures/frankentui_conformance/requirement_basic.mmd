@@ -1,0 +1,12 @@
+requirementDiagram
+    requirement req1 {
+        id: 1
+        text: System shall process requests
+        risk: high
+        verifymethod: test
+    }
+    element elem1 {
+        type: module
+        docref: doc1
+    }
+    elem1 - satisfies -> req1

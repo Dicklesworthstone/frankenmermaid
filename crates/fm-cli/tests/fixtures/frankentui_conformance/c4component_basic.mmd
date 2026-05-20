@@ -1,0 +1,9 @@
+C4Component
+    title Component diagram
+    Container_Boundary(api, "API") {
+        Component(ctrl, "Controller", "Rust", "Handles requests")
+        Component(svc, "Service", "Rust", "Business logic")
+        Component(repo, "Repository", "Rust", "Data access")
+    }
+    Rel(ctrl, svc, "Calls")
+    Rel(svc, repo, "Uses")

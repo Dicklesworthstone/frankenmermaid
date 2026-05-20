@@ -1,0 +1,8 @@
+C4Dynamic
+    title Dynamic diagram
+    Person(user, "User", "A person")
+    Container(web, "Web App", "React", "Frontend")
+    Container(api, "API", "Rust", "Backend")
+    Rel(user, web, "1. Opens app")
+    Rel(web, api, "2. Fetches data")
+    Rel(api, web, "3. Returns data")

@@ -1,0 +1,12 @@
+sequenceDiagram
+    participant User
+    participant Server
+    User->>Server: Request
+    alt success
+        Server-->>User: 200 OK
+    else error
+        Server-->>User: 500 Error
+    end
+    loop retry
+        User->>Server: Retry
+    end

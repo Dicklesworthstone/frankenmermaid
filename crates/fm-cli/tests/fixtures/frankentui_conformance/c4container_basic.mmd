@@ -1,0 +1,11 @@
+C4Container
+    title Container diagram
+    Person(user, "User", "A person using the system")
+    Container_Boundary(c1, "Main System") {
+        Container(web, "Web App", "React", "The frontend")
+        Container(api, "API", "Rust", "The backend")
+        ContainerDb(db, "Database", "PostgreSQL", "Stores data")
+    }
+    Rel(user, web, "Uses")
+    Rel(web, api, "Makes API calls")
+    Rel(api, db, "Reads/writes")
