@@ -52,6 +52,31 @@
 
 _(none yet — first measured experiments in progress)_
 
+## Kept Wins Also Recorded Here By Request
+
+### Thresholded single-pass barycenter accumulation — KEPT (2026-06-24)
+- **Lever:** `fm-layout::reorder_rank_by_barycenter` keeps the original per-node
+  edge scan for narrow ranks and switches ranks with at least 8 nodes to a single
+  edge pass that accumulates adjacent-rank position sums into per-slot bins.
+- **Hypothesis:** wide layered diagrams spend avoidable time rescanning every edge
+  once per rank node during crossing-minimization barycenter sweeps.
+- **Baseline -> After:** `layout_wide/layered/8x16` forced-rebuild baseline mean
+  `942.66 us` -> candidate mean `877.99 us` (`-6.8602%`, p < 0.05). Larger wide
+  cases were statistical no-change, not regressions: `12x24` `4.0067 ms` ->
+  `4.0635 ms` (p = 0.31), `16x32` `12.084 ms` -> `12.285 ms` (p = 0.27).
+- **Original comparator:** Mermaid `11.12.0` browser bundle from
+  `https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.min.js`, Chromium
+  headless, `maxEdges=2000`, 3 warmups, 20 timed render-to-SVG iterations.
+- **frankenmermaid/Mermaid ratio:** full-pipeline wide SVG mean ratios were
+  `0.011986x` (`8x16`: `5.9845 ms` vs `499.28 ms`), `0.015694x`
+  (`12x24`: `16.913 ms` vs `1077.69 ms`), and `0.008061x`
+  (`16x32`: `31.832 ms` vs `3948.7 ms`).
+- **Verdict:** kept; this is a narrow measured win with a large original-comparator
+  margin. It is also recorded in `evidence/ledger/mermaid-js-head-to-head.toml`.
+- **Do-not-retry note:** do not replace the threshold with unconditional
+  single-pass accumulation unless a fresh same-target-dir run proves no small-rank
+  setup overhead or mid-size regression.
+
 ## Blocked/Invalid Evidence Attempts
 
 ### Agent Mail registration/reservation — BLOCKED (2026-06-24)

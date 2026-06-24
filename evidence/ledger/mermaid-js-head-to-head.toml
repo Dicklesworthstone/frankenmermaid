@@ -48,24 +48,62 @@ target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-a"
 "full_pipeline/parse_layout_svg/typical_7_nodes_mean_us" = 370.36
 
 [original_comparator]
-status = "blocked"
+status = "measured"
 name = "mermaid-js"
-version = "not_pinned_yet"
-blocking_reason = "No committed local legacy_mermaid_code/ corpus or pinned mermaid-js harness exists in this checkout."
-required_bead = "bd-1buv.1"
+version = "11.12.0"
+source = "https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.min.js"
+runtime = "Chromium headless via /snap/bin/chromium, data URL harness"
+warmups = 3
+iterations = 20
+max_edges = 2000
+notes = "No npm/npx package install was used; the pinned browser bundle was loaded directly by Chromium."
 
 [ratios]
-status = "pending"
-frankenmermaid_over_mermaid_js = "not_measured"
-reason = "Original comparator harness must be built before dominance ratios are valid."
+status = "measured"
+metric = "mean wall time, render-to-SVG full pipeline"
+"wide_8x16_frankenmermaid_over_mermaid_js" = 0.011986
+"wide_12x24_frankenmermaid_over_mermaid_js" = 0.015694
+"wide_16x32_frankenmermaid_over_mermaid_js" = 0.008061
+"wide_8x16_mermaid_js_over_frankenmermaid" = 83.43
+"wide_12x24_mermaid_js_over_frankenmermaid" = 63.72
+"wide_16x32_mermaid_js_over_frankenmermaid" = 124.05
 
 [implementation]
 beads = ["bd-1buv", "bd-1buv.1", "bd-1buv.2", "bd-1buv.3", "bd-1buv.4"]
 
 [post_measurement]
+date = "2026-06-24"
+agent = "frankenmermaid-cod-b"
+agent_mail_identity = "TanSparrow"
+lever_bead = "bd-qsm0"
+worker = "vmi1152480"
+rust_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b RUSTFLAGS='-C metadata=codbcandidate' rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+baseline_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b RUSTFLAGS='-C metadata=codbbaseline' rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- layout_wide --warm-up-time 1 --measurement-time 2"
+mermaid_js_command = "chromium --headless --no-sandbox --disable-gpu --virtual-time-budget=180000 --dump-dom <data-url-harness>"
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-b"
+rust_build_profile = "release profile [optimized]"
+candidate_summary = "Thresholded single-pass barycenter accumulation for ranks with at least 8 nodes; original per-node scan retained for narrow ranks."
+behavior_proof = "Barycenter value remains the same integer sum of adjacent positions divided once by the neighbor count; sort key and stable tie-break are unchanged."
 
 [post_measurement.metrics]
+"layout_wide_8x16_baseline_mean_us" = 942.66
+"layout_wide_8x16_candidate_mean_us" = 877.99
+"layout_wide_8x16_candidate_delta_pct" = -6.8602
+"layout_wide_12x24_baseline_mean_ms" = 4.0067
+"layout_wide_12x24_candidate_mean_ms" = 4.0635
+"layout_wide_12x24_candidate_delta_pct" = 1.4184
+"layout_wide_12x24_verdict" = "no statistically significant change, p=0.31"
+"layout_wide_16x32_baseline_mean_ms" = 12.084
+"layout_wide_16x32_candidate_mean_ms" = 12.285
+"layout_wide_16x32_candidate_delta_pct" = 1.6614
+"layout_wide_16x32_verdict" = "no statistically significant change, p=0.27"
+"full_pipeline_wide_8x16_frankenmermaid_mean_ms" = 5.9845
+"full_pipeline_wide_12x24_frankenmermaid_mean_ms" = 16.913
+"full_pipeline_wide_16x32_frankenmermaid_mean_ms" = 31.832
+"full_pipeline_wide_8x16_mermaid_js_mean_ms" = 499.28
+"full_pipeline_wide_12x24_mermaid_js_mean_ms" = 1077.69
+"full_pipeline_wide_16x32_mermaid_js_mean_ms" = 3948.7
 
 [decision]
-status = "pending"
-rationale = "Rust-side baseline captured; no mermaid-js head-to-head ratio is valid until bd-1buv.1 lands."
+status = "keep"
+rationale = "The layout lever produced a statistically significant 6.86% mean win on the 8x16 wide-rank workload, no statistically significant regression on 12x24 or 16x32, and frankenmermaid full-pipeline SVG render is 63.72x-124.05x faster than Mermaid 11.12.0 on the same wide workloads."

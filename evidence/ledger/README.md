@@ -10,7 +10,7 @@ Tracked concepts: 8
 | E-Graphs for Crossing Minimization | §6.6 | B | Pending | none | `evidence/contracts/e-graphs-crossing-minimization.md` |
 | FNX Deterministic Decision Contract | FNX Phase 1 | A | Pending | bd-ml2r.1.2 | `evidence/contracts/fnx-deterministic-decision-contract.md` |
 | Incremental Subgraph Re-Layout | §6.1 | A | Pending | none | `evidence/contracts/incremental-subgraph-relayout.md` |
-| Mermaid-JS Head-to-Head Performance Dominance | Profiling + Extreme Optimization + FrankenMermaid opportunity matrix | S | Pending | bd-1buv, bd-1buv.1, bd-1buv.2, bd-1buv.3, bd-1buv.4 | `docs/NEGATIVE_EVIDENCE.md` |
+| Mermaid-JS Head-to-Head Performance Dominance | Profiling + Extreme Optimization + FrankenMermaid opportunity matrix | S | Keep | bd-1buv, bd-1buv.1, bd-1buv.2, bd-1buv.3, bd-1buv.4 | `docs/NEGATIVE_EVIDENCE.md` |
 | Swiss Tables for Node/Edge Maps | §7.7 | B | Pending | none | `evidence/contracts/swiss-tables-node-edge-maps.md` |
 
 ## Notes
