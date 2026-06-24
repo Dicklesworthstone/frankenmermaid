@@ -107,3 +107,44 @@ behavior_proof = "Barycenter value remains the same integer sum of adjacent posi
 [decision]
 status = "keep"
 rationale = "The layout lever produced a statistically significant 6.86% mean win on the 8x16 wide-rank workload, no statistically significant regression on 12x24 or 16x32, and frankenmermaid full-pipeline SVG render is 63.72x-124.05x faster than Mermaid 11.12.0 on the same wide workloads."
+
+[post_measurement_svg_capacity]
+date = "2026-06-24"
+agent = "frankenmermaid-cod-a"
+worker_delta = "hz2"
+worker_ratio = "ovh-a"
+rust_delta_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench -p frankenmermaid-cli --bench pipeline_bench -- render_svg --warm-up-time 1 --measurement-time 2"
+rust_ratio_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+baseline_worktree = "/data/projects/.worktrees/frankenmermaid-cod-a-render-baseline"
+baseline_commit = "391cddf"
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-a"
+rust_build_profile = "bench profile [optimized]"
+candidate_summary = "Borrow static SVG attribute names with Cow<'static, str> and pre-size the final SVG output string for regular layout renders from node/edge/cluster counts via SvgDocument::to_string_with_capacity."
+behavior_proof = "Attribute names and values render through the same Attributes::render and write_to_string paths; capacity changes only allocation. A unit test asserts default to_string equals to_string_with_capacity for the same document."
+
+[post_measurement_svg_capacity.metrics]
+"render_svg_small_10_baseline_mean_us" = 303.19
+"render_svg_small_10_candidate_mean_us" = 286.28
+"render_svg_small_10_candidate_delta_pct" = -5.5774
+"render_svg_medium_100_baseline_mean_ms" = 1.5254
+"render_svg_medium_100_candidate_mean_ms" = 1.4854
+"render_svg_medium_100_candidate_delta_pct" = -2.6223
+"render_svg_large_500_baseline_mean_ms" = 7.1556
+"render_svg_large_500_candidate_mean_ms" = 6.7241
+"render_svg_large_500_candidate_delta_pct" = -6.0302
+"full_pipeline_wide_8x16_frankenmermaid_mean_ms" = 4.2079
+"full_pipeline_wide_12x24_frankenmermaid_mean_ms" = 11.083
+"full_pipeline_wide_16x32_frankenmermaid_mean_ms" = 23.504
+"full_pipeline_wide_8x16_mermaid_js_mean_ms" = 499.28
+"full_pipeline_wide_12x24_mermaid_js_mean_ms" = 1077.69
+"full_pipeline_wide_16x32_mermaid_js_mean_ms" = 3948.7
+"full_pipeline_wide_8x16_frankenmermaid_over_mermaid_js" = 0.008428
+"full_pipeline_wide_12x24_frankenmermaid_over_mermaid_js" = 0.010284
+"full_pipeline_wide_16x32_frankenmermaid_over_mermaid_js" = 0.005952
+"full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 118.65
+"full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 97.24
+"full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 168.00
+
+[post_measurement_svg_capacity.decision]
+status = "keep"
+rationale = "Same-worker render_svg proof shows a 6.03% win on large_500 and 5.58% on small_10 with no measured regressions; fresh full_pipeline_wide candidate ratios remain 97.24x-168.00x faster than Mermaid 11.12.0."

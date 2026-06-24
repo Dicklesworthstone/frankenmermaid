@@ -448,14 +448,14 @@ impl Element {
     /// Set a custom attribute.
     #[must_use]
     pub fn attr(mut self, name: &str, value: &str) -> Self {
-        self.attrs = self.attrs.str(name, value);
+        self.attrs = self.attrs.str(name.to_string(), value);
         self
     }
 
     /// Set a custom numeric attribute.
     #[must_use]
     pub fn attr_num(mut self, name: &str, value: f32) -> Self {
-        self.attrs = self.attrs.num(name, value);
+        self.attrs = self.attrs.num(name.to_string(), value);
         self
     }
 

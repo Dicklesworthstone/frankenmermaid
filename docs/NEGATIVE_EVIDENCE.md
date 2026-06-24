@@ -77,6 +77,39 @@ _(none yet — first measured experiments in progress)_
   single-pass accumulation unless a fresh same-target-dir run proves no small-rank
   setup overhead or mid-size regression.
 
+### SVG renderer allocation trim — KEPT (2026-06-24)
+- **Lever:** `fm-render-svg::Attributes` stores static attribute names as
+  borrowed `Cow<'static, str>` values instead of heap-allocating every literal
+  name, `SvgDocument` exposes `to_string_with_capacity`, and regular layout SVG
+  rendering sizes the final contiguous output buffer from node/edge/cluster
+  counts before serializing. Dynamic wrapper calls still pass owned names where
+  required, so the renderer crate compiles cleanly on local and remote toolchains.
+- **Hypothesis:** large realistic SVG outputs waste time copying the final
+  `String` through repeated growth from the previous fixed 4 KiB starting
+  capacity and spend avoidable allocation traffic on static attribute names. A
+  cheap layout-size hint plus borrowed literal attribute names is an arena-style
+  allocation win that does not alter the SVG serializer or emitted attributes.
+- **Baseline -> After:** same-worker `hz2`, clean baseline worktree at
+  `391cddf` vs candidate main checkout, command
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench -p frankenmermaid-cli --bench pipeline_bench -- render_svg --warm-up-time 1 --measurement-time 2`.
+  `render_svg/flowchart/small_10` mean `303.19 us` -> `286.28 us`
+  (`-5.5774%`); `medium_100` `1.5254 ms` -> `1.4854 ms` (`-2.6223%`);
+  `large_500` `7.1556 ms` -> `6.7241 ms` (`-6.0302%`).
+- **Original comparator:** Mermaid `11.12.0` browser bundle from
+  `https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.min.js`, Chromium
+  headless, `maxEdges=2000`, 3 warmups, 20 timed render-to-SVG iterations.
+- **frankenmermaid/Mermaid ratio:** fresh candidate full-pipeline wide SVG means
+  on `ovh-a` were `0.008428x` (`8x16`: `4.2079 ms` vs `499.28 ms`),
+  `0.010284x` (`12x24`: `11.083 ms` vs `1077.69 ms`), and `0.005952x`
+  (`16x32`: `23.504 ms` vs `3948.7 ms`), i.e. Mermaid.js was `118.65x`,
+  `97.24x`, and `168.00x` slower on those inputs.
+- **Verdict:** kept; the realistic large SVG render case improved by >3%, small
+  also improved, medium was a smaller win, and no regression was measured.
+- **Do-not-retry note:** keep this as literal-name borrowing plus a final-buffer
+  hint. Do not add a recursive pre-sizing pass over every element unless it beats
+  this cheaper hint on a same-worker medium/large run without small-diagram
+  overhead.
+
 ## Blocked/Invalid Evidence Attempts
 
 ### Agent Mail registration/reservation — BLOCKED (2026-06-24)

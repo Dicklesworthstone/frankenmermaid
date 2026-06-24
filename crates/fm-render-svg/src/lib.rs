@@ -2344,7 +2344,38 @@ fn render_layout_to_svg(
         ));
     }
 
-    doc.to_string()
+    finish_layout_svg_document(doc, ir, layout)
+}
+
+fn finish_layout_svg_document(
+    doc: SvgDocument,
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+) -> String {
+    doc.to_string_with_capacity(layout_svg_capacity_hint(ir, layout))
+}
+
+fn layout_svg_capacity_hint(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> usize {
+    const BASE_DOCUMENT_BYTES: usize = 16 * 1024;
+    const NODE_BYTES: usize = 768;
+    const EDGE_BYTES: usize = 384;
+    const CLUSTER_BYTES: usize = 512;
+    const AUXILIARY_ITEM_BYTES: usize = 192;
+
+    let auxiliary_items = layout.extensions.bands.len()
+        + layout.extensions.axis_ticks.len()
+        + layout.extensions.activation_bars.len()
+        + layout.extensions.sequence_lifecycle_markers.len()
+        + layout.extensions.sequence_notes.len()
+        + layout.extensions.sequence_fragments.len()
+        + layout.extensions.cluster_dividers.len()
+        + layout.extensions.sequence_mirror_headers.len();
+
+    BASE_DOCUMENT_BYTES
+        + ir.nodes.len().saturating_mul(NODE_BYTES)
+        + layout.edges.len().saturating_mul(EDGE_BYTES)
+        + layout.clusters.len().saturating_mul(CLUSTER_BYTES)
+        + auxiliary_items.saturating_mul(AUXILIARY_ITEM_BYTES)
 }
 
 fn render_layout_band(

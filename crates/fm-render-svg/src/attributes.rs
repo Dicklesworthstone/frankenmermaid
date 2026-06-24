@@ -2,12 +2,16 @@
 //!
 //! Provides a flexible way to manage SVG attributes with proper escaping.
 
+use std::borrow::Cow;
 use std::fmt::{self, Write};
 
 /// A single SVG attribute.
 #[derive(Debug, Clone)]
 pub struct Attribute {
-    pub name: String,
+    /// Attribute name. Borrowed for the overwhelmingly common static-literal case
+    /// (`"x"`, `"width"`, `"stroke-width"`, …) so building an element does not heap
+    /// allocate per attribute; owned only for dynamic names (e.g. `data-*`).
+    pub name: Cow<'static, str>,
     pub value: AttributeValue,
 }
 
@@ -81,7 +85,11 @@ impl Attributes {
 
     /// Add an attribute.
     #[must_use]
-    pub fn set<K: Into<String>, V: Into<AttributeValue>>(mut self, name: K, value: V) -> Self {
+    pub fn set<K: Into<Cow<'static, str>>, V: Into<AttributeValue>>(
+        mut self,
+        name: K,
+        value: V,
+    ) -> Self {
         let name = name.into();
         self.attrs.retain(|attr| attr.name != name);
         self.attrs.push(Attribute {
@@ -93,19 +101,19 @@ impl Attributes {
 
     /// Add a string attribute.
     #[must_use]
-    pub fn str<K: Into<String>>(self, name: K, value: &str) -> Self {
+    pub fn str<K: Into<Cow<'static, str>>>(self, name: K, value: &str) -> Self {
         self.set(name, value)
     }
 
     /// Add a numeric attribute.
     #[must_use]
-    pub fn num<K: Into<String>>(self, name: K, value: f32) -> Self {
+    pub fn num<K: Into<Cow<'static, str>>>(self, name: K, value: f32) -> Self {
         self.set(name, value)
     }
 
     /// Add an integer attribute.
     #[must_use]
-    pub fn int<K: Into<String>>(self, name: K, value: i32) -> Self {
+    pub fn int<K: Into<Cow<'static, str>>>(self, name: K, value: i32) -> Self {
         self.set(name, value)
     }
 
@@ -120,7 +128,7 @@ impl Attributes {
     pub fn class(mut self, class: &str) -> Self {
         // Look for existing class attribute and append
         for attr in &mut self.attrs {
-            if attr.name == "class"
+            if attr.name.as_ref() == "class"
                 && let AttributeValue::String(ref mut s) = attr.value
             {
                 s.push(' ');
@@ -140,13 +148,16 @@ impl Attributes {
     /// Check if a specific attribute is set.
     #[must_use]
     pub fn has(&self, name: &str) -> bool {
-        self.attrs.iter().any(|a| a.name == name)
+        self.attrs.iter().any(|a| a.name.as_ref() == name)
     }
 
     /// Get the value of an attribute.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&AttributeValue> {
-        self.attrs.iter().find(|a| a.name == name).map(|a| &a.value)
+        self.attrs
+            .iter()
+            .find(|a| a.name.as_ref() == name)
+            .map(|a| &a.value)
     }
 
     /// Render attributes to a string.
@@ -175,7 +186,7 @@ impl Attributes {
     #[must_use]
     pub fn merge(mut self, other: Self) -> Self {
         for attr in other.attrs {
-            if attr.name == "class" {
+            if attr.name.as_ref() == "class" {
                 // Merge classes
                 if let AttributeValue::String(class) = &attr.value {
                     self = self.class(class);

@@ -110,7 +110,7 @@ impl SvgDocument {
     /// Set a custom attribute.
     #[must_use]
     pub fn attr<V: Into<String>>(mut self, name: &str, value: V) -> Self {
-        self.attrs = self.attrs.set(name, value.into());
+        self.attrs = self.attrs.set(name.to_string(), value.into());
         self
     }
 
@@ -197,6 +197,18 @@ impl SvgDocument {
         output.push_str("</svg>");
     }
 
+    /// Render the SVG document into a string with caller-provided capacity.
+    ///
+    /// Large diagrams are dominated by the final contiguous SVG buffer. Letting
+    /// layout/render callers provide a size hint avoids repeated growth copies
+    /// while preserving the exact same serialization path.
+    #[must_use]
+    pub fn to_string_with_capacity(&self, capacity: usize) -> String {
+        let mut output = String::with_capacity(capacity.max(4096));
+        self.write_to_string(&mut output);
+        output
+    }
+
     /// Write the SVG document to an io::Write implementor.
     pub fn write_to<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
         let svg = self.to_string();
@@ -212,9 +224,7 @@ impl Default for SvgDocument {
 
 impl fmt::Display for SvgDocument {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut output = String::with_capacity(4096);
-        self.write_to_string(&mut output);
-        f.write_str(&output)
+        f.write_str(&self.to_string_with_capacity(4096))
     }
 }
 
@@ -245,6 +255,17 @@ mod tests {
         assert!(svg.ends_with("</svg>"));
         assert!(svg.contains("xmlns=\"http://www.w3.org/2000/svg\""));
         assert!(svg.contains("viewBox=\"0 0 100 100\""));
+    }
+
+    #[test]
+    fn capacity_hint_preserves_serialization() {
+        let doc = SvgDocument::new()
+            .viewbox(0.0, 0.0, 100.0, 100.0)
+            .responsive()
+            .accessible("Title", "Description")
+            .child(Element::rect().x(1.0).y(2.0).width(3.0).height(4.0));
+
+        assert_eq!(doc.to_string(), doc.to_string_with_capacity(64 * 1024));
     }
 
     #[test]
