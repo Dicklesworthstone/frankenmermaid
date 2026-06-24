@@ -49,6 +49,31 @@ fn gen_cyclic(node_count: usize) -> String {
     lines.join("\n")
 }
 
+/// Generate a *wide* layered DAG: `layers` ranks of `width` nodes each, with each
+/// node fanning out to two nodes in the next layer. This produces ranks with many
+/// nodes — the realistic shape for fan-out pipelines, ER/state diagrams, and org
+/// charts — which exercises the crossing-minimization barycenter sweep far more than
+/// a linear chain (where every rank holds a single node).
+fn gen_wide(layers: usize, width: usize) -> String {
+    let mut lines = vec![String::from("flowchart TD")];
+    for layer in 0..layers {
+        for w in 0..width {
+            lines.push(format!("  N{layer}_{w}[L{layer} W{w}]"));
+        }
+    }
+    for layer in 0..layers.saturating_sub(1) {
+        for w in 0..width {
+            lines.push(format!("  N{layer}_{w}-->N{}_{w}", layer + 1));
+            lines.push(format!(
+                "  N{layer}_{w}-->N{}_{}",
+                layer + 1,
+                (w + 1) % width
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
 // ─── Parse benchmarks ───────────────────────────────────────────────────────
 
 fn bench_parse(c: &mut Criterion) {
@@ -106,6 +131,54 @@ fn bench_layout(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("cyclic", label), &parsed.ir, |b, ir| {
             b.iter(|| fm_layout::layout_diagram(ir));
         });
+    }
+
+    group.finish();
+}
+
+// ─── Wide layered layout benchmarks ─────────────────────────────────────────
+// These isolate the crossing-minimization barycenter sweep on graphs whose ranks
+// contain many nodes (the cost driver that linear-chain benches never trigger).
+
+fn bench_layout_wide(c: &mut Criterion) {
+    let mut group = c.benchmark_group("layout_wide");
+
+    for (label, layers, width) in [
+        ("8x16", 8_usize, 16_usize),
+        ("12x24", 12, 24),
+        ("16x32", 16, 32),
+    ] {
+        let input = gen_wide(layers, width);
+        let parsed = fm_parser::parse(&input);
+        group.bench_with_input(BenchmarkId::new("layered", label), &parsed.ir, |b, ir| {
+            b.iter(|| fm_layout::layout_diagram(ir));
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_full_pipeline_wide(c: &mut Criterion) {
+    let mut group = c.benchmark_group("full_pipeline_wide");
+    let config = fm_render_svg::SvgRenderConfig::default();
+
+    for (label, layers, width) in [
+        ("8x16", 8_usize, 16_usize),
+        ("12x24", 12, 24),
+        ("16x32", 16, 32),
+    ] {
+        let input = gen_wide(layers, width);
+        group.bench_with_input(
+            BenchmarkId::new("parse_layout_svg", label),
+            &input,
+            |b, input| {
+                b.iter(|| {
+                    let parsed = fm_parser::parse(input);
+                    let layout = fm_layout::layout_diagram(&parsed.ir);
+                    fm_render_svg::render_svg_with_layout(&parsed.ir, &layout, &config)
+                });
+            },
+        );
     }
 
     group.finish();
@@ -193,6 +266,8 @@ criterion_group!(
     benches,
     bench_parse,
     bench_layout,
+    bench_layout_wide,
+    bench_full_pipeline_wide,
     bench_render_svg,
     bench_full_pipeline
 );

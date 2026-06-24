@@ -10681,13 +10681,74 @@ fn reorder_rank_by_barycenter(
         .map(|(position, node)| (*node, position))
         .collect();
 
-    let mut scored_nodes: Vec<(usize, Option<f32>, usize)> = current_order
-        .iter()
-        .enumerate()
-        .map(|(stable_idx, node_index)| {
-            let mut total_position = 0_usize;
-            let mut neighbor_count = 0_usize;
+    // The barycenter of each node is the mean position of its neighbors in the
+    // adjacent rank. Two implementations compute the *identical* result (integer
+    // position sum divided once by the neighbor count); we pick by rank width:
+    //
+    // - Narrow ranks: the original per-node scan. Cheap, and avoids the single-pass
+    //   setup allocations that would dominate when there are only a handful of nodes.
+    // - Wide ranks: a single pass over the edge list that accumulates contributions
+    //   into per-slot bins, turning the O(rank_size * edge_count) per-node rescan
+    //   into O(edge_count + rank_size) — the cost driver of crossing minimization on
+    //   fan-out graphs (parallel pipelines, ER/state diagrams, org charts).
+    const SINGLE_PASS_RANK_THRESHOLD: usize = 8;
 
+    let mut scored_nodes: Vec<(usize, Option<f32>, usize)> =
+        if current_order.len() < SINGLE_PASS_RANK_THRESHOLD {
+            current_order
+                .iter()
+                .enumerate()
+                .map(|(stable_idx, node_index)| {
+                    let mut total_position = 0_usize;
+                    let mut neighbor_count = 0_usize;
+
+                    for edge in &ir.edges {
+                        let Some(source) = endpoint_node_index(ir, edge.from) else {
+                            continue;
+                        };
+                        let Some(target) = endpoint_node_index(ir, edge.to) else {
+                            continue;
+                        };
+
+                        let neighbor = if use_incoming {
+                            if target == *node_index
+                                && ranks.get(&source).copied().unwrap_or(0) == adjacent_rank
+                            {
+                                Some(source)
+                            } else {
+                                None
+                            }
+                        } else if source == *node_index
+                            && ranks.get(&target).copied().unwrap_or(0) == adjacent_rank
+                        {
+                            Some(target)
+                        } else {
+                            None
+                        };
+
+                        if let Some(adjacent_node) = neighbor
+                            && let Some(position) = adjacent_position.get(&adjacent_node)
+                        {
+                            total_position = total_position.saturating_add(*position);
+                            neighbor_count = neighbor_count.saturating_add(1);
+                        }
+                    }
+
+                    let barycenter = if neighbor_count == 0 {
+                        None
+                    } else {
+                        Some(total_position as f32 / neighbor_count as f32)
+                    };
+                    (*node_index, barycenter, stable_idx)
+                })
+                .collect()
+        } else {
+            let local_slot: BTreeMap<usize, usize> = current_order
+                .iter()
+                .enumerate()
+                .map(|(slot, node)| (*node, slot))
+                .collect();
+            let mut accumulators: Vec<(usize, usize)> = vec![(0, 0); current_order.len()];
             for edge in &ir.edges {
                 let Some(source) = endpoint_node_index(ir, edge.from) else {
                     continue;
@@ -10695,39 +10756,40 @@ fn reorder_rank_by_barycenter(
                 let Some(target) = endpoint_node_index(ir, edge.to) else {
                     continue;
                 };
-
-                let neighbor = if use_incoming {
-                    if target == *node_index
-                        && ranks.get(&source).copied().unwrap_or(0) == adjacent_rank
-                    {
-                        Some(source)
-                    } else {
-                        None
-                    }
-                } else if source == *node_index
-                    && ranks.get(&target).copied().unwrap_or(0) == adjacent_rank
-                {
-                    Some(target)
+                let (node, adjacent_node) = if use_incoming {
+                    (target, source)
                 } else {
-                    None
+                    (source, target)
                 };
-
-                if let Some(adjacent_node) = neighbor
-                    && let Some(position) = adjacent_position.get(&adjacent_node)
+                let Some(&slot) = local_slot.get(&node) else {
+                    continue;
+                };
+                if ranks.get(&adjacent_node).copied().unwrap_or(0) != adjacent_rank {
+                    continue;
+                }
+                if let Some(position) = adjacent_position.get(&adjacent_node)
+                    && let Some(accumulator) = accumulators.get_mut(slot)
                 {
-                    total_position = total_position.saturating_add(*position);
-                    neighbor_count = neighbor_count.saturating_add(1);
+                    accumulator.0 = accumulator.0.saturating_add(*position);
+                    accumulator.1 = accumulator.1.saturating_add(1);
                 }
             }
 
-            let barycenter = if neighbor_count == 0 {
-                None
-            } else {
-                Some(total_position as f32 / neighbor_count as f32)
-            };
-            (*node_index, barycenter, stable_idx)
-        })
-        .collect();
+            current_order
+                .iter()
+                .enumerate()
+                .map(|(stable_idx, node_index)| {
+                    let (total_position, neighbor_count) =
+                        accumulators.get(stable_idx).copied().unwrap_or((0, 0));
+                    let barycenter = if neighbor_count == 0 {
+                        None
+                    } else {
+                        Some(total_position as f32 / neighbor_count as f32)
+                    };
+                    (*node_index, barycenter, stable_idx)
+                })
+                .collect()
+        };
 
     #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
     match centrality {
