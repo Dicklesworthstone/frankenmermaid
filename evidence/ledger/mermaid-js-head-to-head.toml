@@ -1,0 +1,71 @@
+concept_id = "mermaid-js-head-to-head"
+concept_name = "Mermaid-JS Head-to-Head Performance Dominance"
+graveyard_section = "Profiling + Extreme Optimization + FrankenMermaid opportunity matrix"
+graveyard_score = 5.0
+tier = "s"
+contract_path = "docs/NEGATIVE_EVIDENCE.md"
+hypothesis = "Frankenmermaid can dominate the original mermaid-js JavaScript renderer on realistic parse/layout/render workloads when every lever is measured head-to-head and zero-gain work is reverted."
+predicted_improvement = "At least 3% kept per-lever frankenmermaid improvement and materially faster frankenmermaid/mermaid-js ratios on medium and large real-world workloads."
+predicted_risk = "Comparator unfairness, missing original corpus provenance, browser-vs-native mismatch, and cargo-bench command drift can invalidate ratios."
+notes = [
+  "Seeded by frankenmermaid-cod-a on 2026-06-24.",
+  "The local legacy_mermaid_code/ corpus is absent; the first harness bead must pin mermaid-js source/package provenance.",
+  "Literal cargo bench --release is rejected by this Cargo toolchain; cargo bench uses the optimized bench profile.",
+]
+
+[baseline]
+status = "rust_baseline_only"
+date = "2026-06-24"
+agent = "frankenmermaid-cod-a"
+worker = "vmi1152480"
+command_requested = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench -p frankenmermaid-cli --bench pipeline_bench --release"
+command_actual = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench -p frankenmermaid-cli --bench pipeline_bench -- --warm-up-time 1 --measurement-time 2"
+command_actual_exit = 0
+invalid_command_exit = 1
+invalid_command_reason = "Cargo rejected --release for cargo bench before benchmark execution."
+build_profile = "bench profile [optimized]"
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-a"
+
+[baseline.metrics]
+"parse/flowchart/small_10_mean_us" = 78.964
+"parse/flowchart/medium_100_mean_us" = 791.36
+"parse/flowchart/large_1000_mean_ms" = 10.294
+"parse/sequence/20_participants_mean_us" = 147.20
+"parse/pie/3_slices_mean_us" = 8.7900
+"layout/flowchart/small_10_mean_us" = 24.260
+"layout/flowchart/medium_100_mean_us" = 762.55
+"layout/flowchart/large_500_mean_ms" = 4.9565
+"layout/cyclic/cyclic_10_mean_us" = 30.048
+"layout/cyclic/cyclic_50_mean_us" = 274.98
+"layout/cyclic/cyclic_200_mean_ms" = 1.1378
+"render_svg/flowchart/small_10_mean_us" = 325.02
+"render_svg/flowchart/medium_100_mean_ms" = 1.6304
+"render_svg/flowchart/large_500_mean_ms" = 7.5713
+"full_pipeline/parse_layout_svg/small_10_mean_us" = 499.45
+"full_pipeline/parse_layout_svg/medium_100_mean_ms" = 3.5765
+"full_pipeline/parse_layout_svg/large_500_mean_ms" = 19.193
+"full_pipeline/parse_layout_svg/cyclic_50_mean_ms" = 1.7158
+"full_pipeline/parse_layout_svg/typical_7_nodes_mean_us" = 370.36
+
+[original_comparator]
+status = "blocked"
+name = "mermaid-js"
+version = "not_pinned_yet"
+blocking_reason = "No committed local legacy_mermaid_code/ corpus or pinned mermaid-js harness exists in this checkout."
+required_bead = "bd-1buv.1"
+
+[ratios]
+status = "pending"
+frankenmermaid_over_mermaid_js = "not_measured"
+reason = "Original comparator harness must be built before dominance ratios are valid."
+
+[implementation]
+beads = ["bd-1buv", "bd-1buv.1", "bd-1buv.2", "bd-1buv.3", "bd-1buv.4"]
+
+[post_measurement]
+
+[post_measurement.metrics]
+
+[decision]
+status = "pending"
+rationale = "Rust-side baseline captured; no mermaid-js head-to-head ratio is valid until bd-1buv.1 lands."
