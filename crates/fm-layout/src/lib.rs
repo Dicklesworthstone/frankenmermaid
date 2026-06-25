@@ -8097,8 +8097,18 @@ fn cycle_removal(ir: &MermaidDiagramIr, cycle_strategy: CycleStrategy) -> CycleR
     }
 
     let node_priority = stable_node_priorities(ir);
-    let cycle_detection = detect_cycle_components(node_count, &edges, &node_priority);
     let dfs_back_edges = cycle_removal_dfs_back(node_count, &edges, &node_priority);
+    // A directed graph is acyclic iff a DFS finds no back edge. When the graph is
+    // acyclic there are no cyclic components and the cycle summary is empty, so the
+    // (otherwise unconditional) strongly-connected-components pass is pure waste — the
+    // common case for flowcharts. The only fields a full run would additionally populate
+    // (per-node singleton components) feed MFAS-approx, which reverses nothing when there
+    // are no cyclic components, so skipping the pass is output-identical.
+    let cycle_detection = if dfs_back_edges.is_empty() {
+        CycleDetection::default()
+    } else {
+        detect_cycle_components(node_count, &edges, &node_priority)
+    };
 
     let reversed_edge_indexes = match cycle_strategy {
         CycleStrategy::Greedy => cycle_removal_greedy(node_count, &edges, &node_priority),
