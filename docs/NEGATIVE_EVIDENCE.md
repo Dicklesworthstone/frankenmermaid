@@ -304,6 +304,35 @@
   without fresh same-machine A/B; earlier Cow/static-name capacity work was
   measured as ~0 and logged separately.
 
+### Edge path offset Vec elision — REJECTED (2026-06-25)
+- **Lever tested:** `fm-render-svg::render_edge` was changed locally to skip the
+  temporary `Vec<(f32, f32)>` used to add `offset_x`/`offset_y` before calling
+  `smooth_edge_path`, and instead serialize directly from `LayoutEdgePath.points`.
+- **Mapped primitive:** buffer-reuse/allocation-elision from the render hot path;
+  this was the fresh one-lever follow-up after the earlier SVG allocation wins.
+- **Hypothesis:** wide and large flowcharts have many edges, so one fewer edge-path
+  vector allocation should reduce SVG render time while preserving byte output.
+- **Outcome:** rejected and reverted. Same-machine A/B against baseline worktree
+  `/data/projects/.worktrees/frankenmermaid-cod-a-edge-offset-baseline-d568ce6`
+  using `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a cargo bench
+  -p frankenmermaid-cli --bench pipeline_bench -- render_svg/flowchart --warm-up-time 1
+  --measurement-time 3` measured `small_10` `145.98 us` -> `151.50 us`
+  (`3.78%` slower), `medium_100` `883.46 us` -> `1.1335 ms` (`28.30%`
+  slower), and `large_500` `4.4858 ms` -> `4.5743 ms` (`1.97%` slower,
+  Criterion no-change).
+- **Original comparator:** fresh Mermaid `11.12.0` ESM browser bundle from
+  `https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.esm.min.mjs`,
+  Node `v24.14.0` driving `/snap/bin/chromium` through Chrome DevTools
+  Protocol, `maxEdges=2000`, 3 warmups, 20 timed render-to-SVG iterations.
+- **frankenmermaid/Mermaid ratio after revert:** current-main wide SVG means were
+  `0.007076x` (`8x16`: `2.4348 ms` vs `344.0700 ms`), `0.006078x`
+  (`12x24`: `6.2641 ms` vs `1030.5500 ms`), and `0.004201x`
+  (`16x32`: `11.394 ms` vs `2711.9150 ms`), i.e. Mermaid.js was `141.31x`,
+  `164.52x`, and `238.01x` slower.
+- **Do-not-retry note:** do not retry this direct-offset serializer unless a fresh
+  CPU/allocation profile shows the per-edge point vector allocation has returned
+  to the top renderer costs; the simpler tuple-slice path currently wins.
+
 ## Blocked/Invalid Evidence Attempts
 
 ### Agent Mail registration/reservation — BLOCKED (2026-06-24)

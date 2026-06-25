@@ -422,3 +422,47 @@ notes = [
 [negative_measurement_edge_path_streaming_2026_06_25.decision]
 status = "reject"
 rationale = "Direct edge-path string emission was byte-equivalent but measured as a slight render-only regression/noise on current main."
+
+[post_measurement_render_edge_offset_vec_elision]
+date = "2026-06-25"
+agent = "TanSparrow"
+lever_bead = "bd-1buv.1"
+worker_delta = "local"
+worker_ratio = "local"
+baseline_worktree = "/data/projects/.worktrees/frankenmermaid-cod-a-edge-offset-baseline-d568ce6"
+baseline_commit = "d568ce6"
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-a"
+render_baseline_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a cargo bench -p frankenmermaid-cli --bench pipeline_bench -- render_svg/flowchart --warm-up-time 1 --measurement-time 3"
+render_candidate_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a cargo bench -p frankenmermaid-cli --bench pipeline_bench -- render_svg/flowchart --warm-up-time 1 --measurement-time 3"
+wide_current_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a cargo bench -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+mermaid_js_command = "Node v24.14.0 Chrome DevTools Protocol harness launching /snap/bin/chromium --headless=new and dynamically importing https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.esm.min.mjs"
+rust_build_profile = "bench profile [optimized]"
+candidate_summary = "Rejected attempt to remove render_edge's temporary Vec of offset-adjusted edge points by serializing directly from LayoutEdgePath.points."
+behavior_proof = "The tested helper computed the same offset-adjusted coordinates before Catmull-Rom math, but the code was reverted after regression; current main behavior is unchanged."
+
+[post_measurement_render_edge_offset_vec_elision.metrics]
+"render_svg_small_10_baseline_mean_us" = 145.98
+"render_svg_small_10_candidate_mean_us" = 151.50
+"render_svg_small_10_candidate_delta_pct" = 3.7813
+"render_svg_medium_100_baseline_mean_us" = 883.46
+"render_svg_medium_100_candidate_mean_us" = 1133.50
+"render_svg_medium_100_candidate_delta_pct" = 28.3024
+"render_svg_large_500_baseline_mean_ms" = 4.4858
+"render_svg_large_500_candidate_mean_ms" = 4.5743
+"render_svg_large_500_candidate_delta_pct" = 1.9729
+"full_pipeline_wide_8x16_current_mean_ms" = 2.4348
+"full_pipeline_wide_12x24_current_mean_ms" = 6.2641
+"full_pipeline_wide_16x32_current_mean_ms" = 11.394
+"full_pipeline_wide_8x16_mermaid_js_mean_ms" = 344.07000000476836
+"full_pipeline_wide_12x24_mermaid_js_mean_ms" = 1030.549999988079
+"full_pipeline_wide_16x32_mermaid_js_mean_ms" = 2711.915000009537
+"full_pipeline_wide_8x16_frankenmermaid_over_mermaid_js" = 0.007076
+"full_pipeline_wide_12x24_frankenmermaid_over_mermaid_js" = 0.006078
+"full_pipeline_wide_16x32_frankenmermaid_over_mermaid_js" = 0.004201
+"full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 141.31
+"full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 164.52
+"full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 238.01
+
+[post_measurement_render_edge_offset_vec_elision.decision]
+status = "reject"
+rationale = "Directly serializing edge paths from LayoutEdgePath.points regressed render_svg small_10 by 3.78% and medium_100 by 28.30%, with large_500 statistically unchanged; code was reverted. Current main still beats Mermaid 11.12.0 by 141.31x-238.01x on fresh live-CDP wide workloads."
