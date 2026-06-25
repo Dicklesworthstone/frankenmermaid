@@ -287,3 +287,54 @@ behavior_proof = "The fast path runs only after checking an edge's own inline_st
 [post_measurement_edge_style_short_circuit.decision]
 status = "keep"
 rationale = "Same-window render_svg proof shows 1.08x-1.10x renderer speedups; full_pipeline_wide is statistically unchanged and still 190.9x-349.6x faster than Mermaid 11.12.0 on the same inputs."
+
+[post_measurement_svg_attribute_vec_capacity]
+date = "2026-06-25"
+agent = "TanSparrow"
+lever_bead = "bd-1buv.1"
+worker_delta = "local"
+worker_ratio = "local"
+baseline_worktree = "/data/projects/.worktrees/frankenmermaid-cod-a-attrs-baseline-9a61d4c"
+baseline_commit = "9a61d4c"
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-a"
+render_baseline_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a cargo bench -p frankenmermaid-cli --bench pipeline_bench -- render_svg/flowchart --warm-up-time 1 --measurement-time 2"
+render_candidate_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a cargo bench -p frankenmermaid-cli --bench pipeline_bench -- render_svg/flowchart --warm-up-time 1 --measurement-time 2"
+wide_baseline_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a cargo bench -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 4"
+wide_candidate_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a cargo bench -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 4"
+mermaid_js_command = "Node v24.14.0 Chrome DevTools Protocol harness launching /snap/bin/chromium --headless=new and dynamically importing https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.esm.min.mjs"
+rust_build_profile = "bench profile [optimized]"
+candidate_summary = "Pre-size fm-render-svg Attributes internal Vec to 12 entries for common SVG element attribute counts."
+behavior_proof = "Only private Vec allocation capacity changes before attributes are pushed; attribute order, deduplication, escaping, formatting, and serialization are unchanged."
+
+[post_measurement_svg_attribute_vec_capacity.metrics]
+"render_svg_small_10_baseline_mean_us" = 152.43
+"render_svg_small_10_candidate_mean_us" = 151.71
+"render_svg_small_10_candidate_delta_pct" = -0.4723
+"render_svg_medium_100_baseline_mean_us" = 900.91
+"render_svg_medium_100_candidate_mean_us" = 914.00
+"render_svg_medium_100_candidate_delta_pct" = 1.4530
+"render_svg_large_500_baseline_mean_ms" = 4.6577
+"render_svg_large_500_candidate_mean_ms" = 4.2747
+"render_svg_large_500_candidate_delta_pct" = -8.2229
+"full_pipeline_wide_8x16_baseline_mean_ms" = 2.3034
+"full_pipeline_wide_8x16_candidate_mean_ms" = 2.2771
+"full_pipeline_wide_8x16_candidate_delta_pct" = -1.1418
+"full_pipeline_wide_12x24_baseline_mean_ms" = 5.5680
+"full_pipeline_wide_12x24_candidate_mean_ms" = 5.3180
+"full_pipeline_wide_12x24_candidate_delta_pct" = -4.4899
+"full_pipeline_wide_16x32_baseline_mean_ms" = 10.497
+"full_pipeline_wide_16x32_candidate_mean_ms" = 10.553
+"full_pipeline_wide_16x32_candidate_delta_pct" = 0.5335
+"full_pipeline_wide_8x16_mermaid_js_mean_ms" = 370.75500000715255
+"full_pipeline_wide_12x24_mermaid_js_mean_ms" = 1122.6200000047684
+"full_pipeline_wide_16x32_mermaid_js_mean_ms" = 2917.189999997616
+"full_pipeline_wide_8x16_frankenmermaid_over_mermaid_js" = 0.006142
+"full_pipeline_wide_12x24_frankenmermaid_over_mermaid_js" = 0.004737
+"full_pipeline_wide_16x32_frankenmermaid_over_mermaid_js" = 0.003618
+"full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 162.82
+"full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 211.10
+"full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 276.43
+
+[post_measurement_svg_attribute_vec_capacity.decision]
+status = "keep"
+rationale = "Same-machine A/B shows an 8.22% win on render_svg large_500 and a 4.49% win on full_pipeline_wide 12x24; other wide cases were no-change/noise, and fresh live-CDP Mermaid 11.12.0 ratios remain 162.82x-276.43x faster."

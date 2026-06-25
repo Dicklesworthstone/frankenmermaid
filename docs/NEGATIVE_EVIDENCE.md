@@ -206,6 +206,42 @@ _(none yet — first measured experiments in progress)_
   fast path is only for diagrams with no style refs after checking an edge's own
   inline style.
 
+### SVG attribute Vec pre-size — KEPT (2026-06-25)
+- **Lever:** `fm-render-svg::Attributes::new()` pre-sizes its private attribute
+  vector to 12 entries, matching the common attribute count for SVG elements.
+  This only changes allocation behavior while preserving the existing setter,
+  deduplication, escaping, and serialization paths.
+- **Hypothesis:** after the direct-write and bulk-escape renderer wins, repeated
+  small `Vec` growth while constructing SVG element attributes is still a real
+  large-render cost.
+- **Baseline -> After:** clean detached baseline worktree
+  `/data/projects/.worktrees/frankenmermaid-cod-a-attrs-baseline-9a61d4c` at
+  `9a61d4c` vs candidate commit `8ba0aba`, same machine, target dir
+  `/data/projects/.rch-targets/frankenmermaid-cod-a`, package
+  `frankenmermaid-cli`. `render_svg/flowchart` means: `small_10`
+  `152.43 us` -> `151.71 us` (`0.47%` faster); `medium_100` `900.91 us`
+  -> `914.00 us` (`1.45%` slower/noise); `large_500` `4.6577 ms` ->
+  `4.2747 ms` (`8.22%` faster). Longer `full_pipeline_wide` means:
+  `8x16` `2.3034 ms` -> `2.2771 ms` (`1.14%` faster); `12x24`
+  `5.5680 ms` -> `5.3180 ms` (`4.49%` faster); `16x32` `10.497 ms`
+  -> `10.553 ms` (`0.53%` slower, Criterion no-change with overlapping
+  interval).
+- **Original comparator:** Mermaid `11.12.0` ESM browser bundle from
+  `https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.esm.min.mjs`,
+  Node `v24.14.0` driving `/snap/bin/chromium` through Chrome DevTools
+  Protocol, `maxEdges=2000`, 3 warmups, 20 timed render-to-SVG iterations.
+- **frankenmermaid/Mermaid ratio:** fresh live-CDP mean ratios were
+  `0.006142x` (`8x16`: `2.2771 ms` vs `370.755 ms`), `0.004737x`
+  (`12x24`: `5.3180 ms` vs `1122.62 ms`), and `0.003618x`
+  (`16x32`: `10.553 ms` vs `2917.19 ms`), i.e. Mermaid.js was `162.82x`,
+  `211.10x`, and `276.43x` slower on those inputs.
+- **Verdict:** kept; the isolated large render stage and the wide `12x24`
+  full-pipeline case clear the 3% threshold, and no significant wide regression
+  reproduced on the longer run.
+- **Do-not-retry note:** do not generalize this into broader allocation work
+  without fresh same-machine A/B; earlier Cow/static-name capacity work was
+  measured as ~0 and logged separately.
+
 ## Blocked/Invalid Evidence Attempts
 
 ### Agent Mail registration/reservation — BLOCKED (2026-06-24)

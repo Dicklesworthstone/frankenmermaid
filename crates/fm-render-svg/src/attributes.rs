@@ -78,9 +78,15 @@ pub struct Attributes {
 
 impl Attributes {
     /// Create a new empty attribute collection.
+    ///
+    /// Pre-sized to a typical element's attribute count (rect/text/path carry ~8–12
+    /// attributes), so building an element's attribute list does not repeatedly realloc
+    /// and copy as setters push — element construction dominates SVG render time.
     #[must_use]
     pub fn new() -> Self {
-        Self { attrs: Vec::new() }
+        Self {
+            attrs: Vec::with_capacity(12),
+        }
     }
 
     /// Add an attribute.
