@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use rustc_hash::FxHashMap;
+
 use fm_core::{
     ArrowType, ClassMemberKind, ClassStereotype, Diagnostic, DiagnosticCategory, DiagramType,
     FragmentAlternative, FragmentKind, GraphDirection, IrActivation, IrAttributeKey, IrC4NodeMeta,
@@ -35,11 +37,13 @@ struct StateCompositeContext {
 
 pub struct IrBuilder {
     ir: MermaidDiagramIr,
-    // Lookups for uniqueness
-    node_index_by_id: BTreeMap<String, IrNodeId>,
-    cluster_index_by_key: BTreeMap<String, usize>,
-    subgraph_index_by_key: BTreeMap<String, usize>,
-    label_index_by_text: BTreeMap<(String, Vec<IrLabelSegment>), IrLabelId>,
+    // Lookups for uniqueness. These are read by key only (never iterated), so a hash
+    // map is both faster and determinism-safe — IR output order comes from the `ir`
+    // vectors, not from map iteration.
+    node_index_by_id: FxHashMap<String, IrNodeId>,
+    cluster_index_by_key: FxHashMap<String, usize>,
+    subgraph_index_by_key: FxHashMap<String, usize>,
+    label_index_by_text: FxHashMap<(String, Vec<IrLabelSegment>), IrLabelId>,
 
     warnings: Vec<String>,
     /// Track nodes that were auto-created (for dangling edge recovery)
@@ -80,10 +84,10 @@ impl IrBuilder {
     pub(crate) fn new(diagram_type: DiagramType) -> Self {
         Self {
             ir: MermaidDiagramIr::empty(diagram_type),
-            node_index_by_id: BTreeMap::new(),
-            cluster_index_by_key: BTreeMap::new(),
-            subgraph_index_by_key: BTreeMap::new(),
-            label_index_by_text: BTreeMap::new(),
+            node_index_by_id: FxHashMap::default(),
+            cluster_index_by_key: FxHashMap::default(),
+            subgraph_index_by_key: FxHashMap::default(),
+            label_index_by_text: FxHashMap::default(),
             warnings: Vec::new(),
             auto_created_nodes: Vec::new(),
             activation_stacks: BTreeMap::new(),
@@ -106,10 +110,10 @@ impl IrBuilder {
         ir.reserve_capacity(estimated_nodes, estimated_edges, estimated_labels);
         Self {
             ir,
-            node_index_by_id: BTreeMap::new(),
-            cluster_index_by_key: BTreeMap::new(),
-            subgraph_index_by_key: BTreeMap::new(),
-            label_index_by_text: BTreeMap::new(),
+            node_index_by_id: FxHashMap::default(),
+            cluster_index_by_key: FxHashMap::default(),
+            subgraph_index_by_key: FxHashMap::default(),
+            label_index_by_text: FxHashMap::default(),
             warnings: Vec::new(),
             auto_created_nodes: Vec::new(),
             activation_stacks: BTreeMap::new(),
