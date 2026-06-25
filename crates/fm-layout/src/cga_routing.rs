@@ -98,7 +98,30 @@ pub fn find_vertical_segment_nudge(
     let margin_f64 = f64::from(margin);
     let mid_x = f64::from(segment_start.x);
 
+    // Segment axis-aligned bounding box (in f64, matching the CGA math). Used as a
+    // cheap conservative reject below.
+    let seg_min_x = f64::from(segment_start.x.min(segment_end.x));
+    let seg_max_x = f64::from(segment_start.x.max(segment_end.x));
+    let seg_min_y = f64::from(segment_start.y.min(segment_end.y));
+    let seg_max_y = f64::from(segment_start.y.max(segment_end.y));
+
     for obs in obstacles {
+        // Cheap AABB rejection before the (expensive) CGA test. The segment lies
+        // within its bounding box and `start` within that box, so if the box does
+        // not overlap the margin-expanded obstacle the CGA test is guaranteed to
+        // report no intersection/containment — skipping it cannot change the result.
+        let exp_min_x = f64::from(obs.x) - margin_f64;
+        let exp_max_x = f64::from(obs.x) + f64::from(obs.width) + margin_f64;
+        let exp_min_y = f64::from(obs.y) - margin_f64;
+        let exp_max_y = f64::from(obs.y) + f64::from(obs.height) + margin_f64;
+        if seg_max_x < exp_min_x
+            || seg_min_x > exp_max_x
+            || seg_max_y < exp_min_y
+            || seg_min_y > exp_max_y
+        {
+            continue;
+        }
+
         let expanded = CgaRect::new(
             f64::from(obs.x) - margin_f64,
             f64::from(obs.y) - margin_f64,
@@ -140,7 +163,30 @@ pub fn find_horizontal_segment_nudge(
     let margin_f64 = f64::from(margin);
     let mid_y = f64::from(segment_start.y);
 
+    // Segment axis-aligned bounding box (in f64, matching the CGA math). Used as a
+    // cheap conservative reject below.
+    let seg_min_x = f64::from(segment_start.x.min(segment_end.x));
+    let seg_max_x = f64::from(segment_start.x.max(segment_end.x));
+    let seg_min_y = f64::from(segment_start.y.min(segment_end.y));
+    let seg_max_y = f64::from(segment_start.y.max(segment_end.y));
+
     for obs in obstacles {
+        // Cheap AABB rejection before the (expensive) CGA test. The segment lies
+        // within its bounding box and `start` within that box, so if the box does
+        // not overlap the margin-expanded obstacle the CGA test is guaranteed to
+        // report no intersection/containment — skipping it cannot change the result.
+        let exp_min_x = f64::from(obs.x) - margin_f64;
+        let exp_max_x = f64::from(obs.x) + f64::from(obs.width) + margin_f64;
+        let exp_min_y = f64::from(obs.y) - margin_f64;
+        let exp_max_y = f64::from(obs.y) + f64::from(obs.height) + margin_f64;
+        if seg_max_x < exp_min_x
+            || seg_min_x > exp_max_x
+            || seg_max_y < exp_min_y
+            || seg_min_y > exp_max_y
+        {
+            continue;
+        }
+
         let expanded = CgaRect::new(
             f64::from(obs.x) - margin_f64,
             f64::from(obs.y) - margin_f64,
