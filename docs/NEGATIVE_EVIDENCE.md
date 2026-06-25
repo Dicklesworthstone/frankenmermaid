@@ -116,6 +116,45 @@
 
 ## Kept Wins Also Recorded Here By Request
 
+### Sparse edge-routing obstacle spatial index — KEPT (2026-06-25)
+- **Lever:** `fm-layout` builds a grid index for node obstacle bounds once in
+  `build_edge_paths_with_orientation`, then routes sparse/tree-like flowcharts
+  through sorted candidate obstacle indices instead of scanning every node for
+  each nudge segment. Dense wide graphs stay on the old scan path via an
+  edge-count gate.
+- **Hypothesis:** after the AABB and build-once obstacle wins, sparse large
+  flowcharts still pay O(edges * nodes) cheap obstacle visits. A conservative
+  grid query should reduce that to O(edges * nearby candidates) while preserving
+  the existing CGA intersection authority.
+- **Baseline -> After:** clean baseline worktree
+  `/data/projects/.worktrees/frankenmermaid-cod-b-next-main-28b271d` at
+  `28b271d` vs candidate checkout, package `frankenmermaid-cli`, bench
+  `pipeline_bench`, target dir
+  `/data/projects/.rch-targets/frankenmermaid-cod-a`. `layout/flowchart`
+  means: `medium_100` `247.84 us` -> `234.58 us` (`5.35%` faster);
+  `large_500` `736.49 us` -> `558.35 us` (`24.19%` faster). Full-pipeline
+  `large_500` was directionally faster, `6.9929 ms` -> `6.6015 ms`, with
+  Criterion reporting no significant change on the candidate rerun. Wide
+  full-pipeline means stayed neutral or better against the same baseline:
+  `8x16` `2.4635 ms` -> `2.3002 ms`, `12x24` `5.6366 ms` -> `5.5850 ms`,
+  `16x32` `11.011 ms` -> `10.023 ms`.
+- **Original comparator:** Mermaid `11.12.0` ESM browser bundle from
+  `https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.esm.min.mjs`,
+  Node `v24.14.0` driving `/snap/bin/chromium` through Chrome DevTools
+  Protocol, `maxEdges=2000`, 3 warmups, 20 timed render-to-SVG iterations.
+- **frankenmermaid/Mermaid ratio:** candidate full-pipeline wide SVG mean ratios
+  were `0.007299x` (`8x16`: `2.3002 ms` vs `315.14 ms`), `0.005689x`
+  (`12x24`: `5.5850 ms` vs `981.73 ms`), and `0.003481x` (`16x32`:
+  `10.023 ms` vs `2879.185 ms`), i.e. Mermaid.js was `137.01x`, `175.78x`,
+  and `287.26x` slower.
+- **Verdict:** kept; the profiled sparse large-flowchart layout stage improved
+  by 24.19%, medium improved by 5.35%, wide full-pipeline did not regress, and
+  all `fm-layout` tests plus clippy are green.
+- **Do-not-retry note:** do not remove the sparse edge-count gate without a
+  fresh same-metadata A/B on the wide layered cases; dense ranks can make grid
+  candidate gathering and sorting more expensive than the already-cheap AABB
+  scan.
+
 ### Thresholded single-pass barycenter accumulation — KEPT (2026-06-24)
 - **Lever:** `fm-layout::reorder_rank_by_barycenter` keeps the original per-node
   edge scan for narrow ranks and switches ranks with at least 8 nodes to a single

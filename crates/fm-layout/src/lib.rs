@@ -32,9 +32,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use fm_core::{
-    DiagramType, GanttDate, GanttExclude, GanttTaskType, GraphDirection, IrEndpoint, IrGanttMeta,
-    IrNode, IrXyChartMeta, IrXySeriesKind, MermaidComplexity, MermaidConfig, MermaidDecisionWeight,
-    MermaidDiagramIr, MermaidGuardReport, MermaidLayoutDecisionAlternative,
+    DiagramType, FxHashMap, GanttDate, GanttExclude, GanttTaskType, GraphDirection, IrEndpoint,
+    IrGanttMeta, IrNode, IrXyChartMeta, IrXySeriesKind, MermaidComplexity, MermaidConfig,
+    MermaidDecisionWeight, MermaidDiagramIr, MermaidGuardReport, MermaidLayoutDecisionAlternative,
     MermaidLayoutDecisionExplanation, MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord,
     MermaidObservabilityIds, MermaidPressureReport, MermaidPressureTier, MermaidSourceMap,
     MermaidSourceMapEntry, MermaidSourceMapKind, Span, mermaid_cluster_element_id,
@@ -10992,6 +10992,10 @@ fn build_edge_paths_with_orientation(
     // Each edge's own two endpoints are temporarily parked far away below so the
     // router's AABB check rejects them — equivalent to excluding them, O(1) per edge.
     let mut obstacle_bounds: Vec<LayoutRect> = nodes.iter().map(|n| n.bounds).collect();
+    let sparse_routing = ir.edges.len() <= nodes.len().saturating_mul(3) / 2;
+    let mut obstacle_index = (sparse_routing
+        && obstacle_bounds.len() >= ObstacleSpatialIndex::MIN_INDEXED_OBSTACLES)
+        .then(|| ObstacleSpatialIndex::new(&obstacle_bounds));
 
     ir.edges
         .iter()
@@ -11036,17 +11040,19 @@ fn build_edge_paths_with_orientation(
                     *slot = FAR_AWAY;
                 }
                 let mut pts = match edge_routing {
-                    EdgeRouting::Orthogonal => route_edge_points_with_obstacles(
+                    EdgeRouting::Orthogonal => route_edge_points_with_obstacle_index(
                         source_anchor,
                         target_anchor,
                         horizontal_ranks,
                         &obstacle_bounds,
+                        obstacle_index.as_mut(),
                     ),
-                    EdgeRouting::Spline => route_edge_points_spline_with_obstacles(
+                    EdgeRouting::Spline => route_edge_points_spline_with_obstacle_index(
                         source_anchor,
                         target_anchor,
                         horizontal_ranks,
                         &obstacle_bounds,
+                        obstacle_index.as_mut(),
                     ),
                 };
                 if let (Some(slot), Some(saved)) = (obstacle_bounds.get_mut(source), saved_source) {
@@ -11147,6 +11153,93 @@ fn apply_parallel_offset(points: &mut [LayoutPoint], offset: f32, horizontal_ran
     }
 }
 
+struct ObstacleSpatialIndex {
+    inv_cell_size: f32,
+    cells: FxHashMap<(i32, i32), Vec<usize>>,
+    seen: Vec<u32>,
+    generation: u32,
+    candidates: Vec<usize>,
+}
+
+impl ObstacleSpatialIndex {
+    const CELL_SIZE: f32 = 128.0;
+    const MIN_INDEXED_OBSTACLES: usize = 64;
+
+    fn new(obstacles: &[LayoutRect]) -> Self {
+        let mut cells = FxHashMap::default();
+        cells.reserve(obstacles.len().saturating_mul(2));
+        let mut index = Self {
+            inv_cell_size: 1.0 / Self::CELL_SIZE,
+            cells,
+            seen: vec![0; obstacles.len()],
+            generation: 0,
+            candidates: Vec::new(),
+        };
+
+        for (idx, rect) in obstacles.iter().enumerate() {
+            index.insert_rect(idx, *rect);
+        }
+
+        index
+    }
+
+    fn cell_coord(&self, value: f32) -> i32 {
+        (value * self.inv_cell_size).floor() as i32
+    }
+
+    fn insert_rect(&mut self, idx: usize, rect: LayoutRect) {
+        let min_x = rect.x.min(rect.x + rect.width);
+        let max_x = rect.x.max(rect.x + rect.width);
+        let min_y = rect.y.min(rect.y + rect.height);
+        let max_y = rect.y.max(rect.y + rect.height);
+        if !(min_x.is_finite() && max_x.is_finite() && min_y.is_finite() && max_y.is_finite()) {
+            return;
+        }
+
+        for cell_x in self.cell_coord(min_x)..=self.cell_coord(max_x) {
+            for cell_y in self.cell_coord(min_y)..=self.cell_coord(max_y) {
+                self.cells.entry((cell_x, cell_y)).or_default().push(idx);
+            }
+        }
+    }
+
+    fn query_segment(&mut self, segment: (LayoutPoint, LayoutPoint), margin: f32) -> &[usize] {
+        self.candidates.clear();
+        self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 {
+            self.seen.fill(0);
+            self.generation = 1;
+        }
+
+        let min_x = segment.0.x.min(segment.1.x) - margin;
+        let max_x = segment.0.x.max(segment.1.x) + margin;
+        let min_y = segment.0.y.min(segment.1.y) - margin;
+        let max_y = segment.0.y.max(segment.1.y) + margin;
+        if !(min_x.is_finite() && max_x.is_finite() && min_y.is_finite() && max_y.is_finite()) {
+            return &self.candidates;
+        }
+
+        for cell_x in self.cell_coord(min_x)..=self.cell_coord(max_x) {
+            for cell_y in self.cell_coord(min_y)..=self.cell_coord(max_y) {
+                if let Some(indices) = self.cells.get(&(cell_x, cell_y)) {
+                    for &idx in indices {
+                        if self.seen.get(idx).copied() == Some(self.generation) {
+                            continue;
+                        }
+                        if let Some(seen) = self.seen.get_mut(idx) {
+                            *seen = self.generation;
+                            self.candidates.push(idx);
+                        }
+                    }
+                }
+            }
+        }
+
+        self.candidates.sort_unstable();
+        &self.candidates
+    }
+}
+
 fn edge_anchors(
     source_box: &LayoutNodeBox,
     target_box: &LayoutNodeBox,
@@ -11215,11 +11308,22 @@ fn route_edge_points(
 ///
 /// When `obstacles` is non-empty, the router checks if the midpoint segment
 /// intersects any obstacle and reroutes around it if needed.
+#[cfg(test)]
 fn route_edge_points_with_obstacles(
     source: LayoutPoint,
     target: LayoutPoint,
     horizontal_ranks: bool,
     obstacles: &[LayoutRect],
+) -> Vec<LayoutPoint> {
+    route_edge_points_with_obstacle_index(source, target, horizontal_ranks, obstacles, None)
+}
+
+fn route_edge_points_with_obstacle_index(
+    source: LayoutPoint,
+    target: LayoutPoint,
+    horizontal_ranks: bool,
+    obstacles: &[LayoutRect],
+    mut obstacle_index: Option<&mut ObstacleSpatialIndex>,
 ) -> Vec<LayoutPoint> {
     let epsilon = 0.001_f32;
 
@@ -11235,7 +11339,9 @@ fn route_edge_points_with_obstacles(
                     y: target.y,
                 },
             );
-            if let Some(nudge) = find_obstacle_nudge_y(segment, source.y, obstacles) {
+            if let Some(nudge) =
+                find_obstacle_nudge_y(segment, source.y, obstacles, obstacle_index.as_deref_mut())
+            {
                 vec![
                     source,
                     LayoutPoint {
@@ -11264,7 +11370,9 @@ fn route_edge_points_with_obstacles(
                 },
             );
             // Check if the vertical mid-segment clips through any obstacle.
-            if let Some(nudge) = find_obstacle_nudge_x(mid_segment, mid_x, obstacles) {
+            if let Some(nudge) =
+                find_obstacle_nudge_x(mid_segment, mid_x, obstacles, obstacle_index.as_deref_mut())
+            {
                 // Route around: two vertical segments flanking the obstacle.
                 vec![
                     source,
@@ -11304,7 +11412,9 @@ fn route_edge_points_with_obstacles(
                 y: source.y.max(target.y),
             },
         );
-        if let Some(nudge) = find_obstacle_nudge_x(segment, source.x, obstacles) {
+        if let Some(nudge) =
+            find_obstacle_nudge_x(segment, source.x, obstacles, obstacle_index.as_deref_mut())
+        {
             vec![
                 source,
                 LayoutPoint {
@@ -11332,7 +11442,7 @@ fn route_edge_points_with_obstacles(
                 y: mid_y,
             },
         );
-        if let Some(nudge) = find_obstacle_nudge_y(mid_segment, mid_y, obstacles) {
+        if let Some(nudge) = find_obstacle_nudge_y(mid_segment, mid_y, obstacles, obstacle_index) {
             vec![
                 source,
                 LayoutPoint {
@@ -11369,13 +11479,30 @@ fn route_edge_points_with_obstacles(
 /// The SVG backend already smooths edge waypoints with Catmull-Rom interpolation,
 /// so this router emits a smaller set of bend and midpoint anchors instead of the
 /// hard orthogonal staircase used by the default path router.
+#[allow(dead_code)]
 fn route_edge_points_spline_with_obstacles(
     source: LayoutPoint,
     target: LayoutPoint,
     horizontal_ranks: bool,
     obstacles: &[LayoutRect],
 ) -> Vec<LayoutPoint> {
-    let orthogonal = route_edge_points_with_obstacles(source, target, horizontal_ranks, obstacles);
+    route_edge_points_spline_with_obstacle_index(source, target, horizontal_ranks, obstacles, None)
+}
+
+fn route_edge_points_spline_with_obstacle_index(
+    source: LayoutPoint,
+    target: LayoutPoint,
+    horizontal_ranks: bool,
+    obstacles: &[LayoutRect],
+    obstacle_index: Option<&mut ObstacleSpatialIndex>,
+) -> Vec<LayoutPoint> {
+    let orthogonal = route_edge_points_with_obstacle_index(
+        source,
+        target,
+        horizontal_ranks,
+        obstacles,
+        obstacle_index,
+    );
     if orthogonal.len() <= 2 {
         return orthogonal;
     }
@@ -11405,9 +11532,17 @@ fn find_obstacle_nudge_x(
     segment: (LayoutPoint, LayoutPoint),
     _mid_x: f32,
     obstacles: &[LayoutRect],
+    obstacle_index: Option<&mut ObstacleSpatialIndex>,
 ) -> Option<f32> {
     const MARGIN: f32 = 8.0;
-    cga_routing::find_vertical_segment_nudge(segment.0, segment.1, obstacles, MARGIN)
+    if let Some(index) = obstacle_index {
+        let candidates = index.query_segment(segment, MARGIN);
+        cga_routing::find_vertical_segment_nudge_by_indices(
+            segment.0, segment.1, obstacles, candidates, MARGIN,
+        )
+    } else {
+        cga_routing::find_vertical_segment_nudge(segment.0, segment.1, obstacles, MARGIN)
+    }
 }
 
 /// Check if a horizontal segment at y-coordinate `mid_y` intersects any obstacle.
@@ -11418,9 +11553,17 @@ fn find_obstacle_nudge_y(
     segment: (LayoutPoint, LayoutPoint),
     _mid_y: f32,
     obstacles: &[LayoutRect],
+    obstacle_index: Option<&mut ObstacleSpatialIndex>,
 ) -> Option<f32> {
     const MARGIN: f32 = 8.0;
-    cga_routing::find_horizontal_segment_nudge(segment.0, segment.1, obstacles, MARGIN)
+    if let Some(index) = obstacle_index {
+        let candidates = index.query_segment(segment, MARGIN);
+        cga_routing::find_horizontal_segment_nudge_by_indices(
+            segment.0, segment.1, obstacles, candidates, MARGIN,
+        )
+    } else {
+        cga_routing::find_horizontal_segment_nudge(segment.0, segment.1, obstacles, MARGIN)
+    }
 }
 
 fn simplify_polyline(points: Vec<LayoutPoint>) -> Vec<LayoutPoint> {
@@ -12198,10 +12341,11 @@ mod tests {
         CachedNodeSize, ConstraintSolverMode, CycleStrategy, DependencyGraph, DiagramLayout,
         DirtySet, GraphMetrics, IncrementalLayoutEngine, IncrementalLayoutSession, LayoutAlgorithm,
         LayoutConfig, LayoutDependencyGraph, LayoutEdit, LayoutGuardrails, LayoutNodeBox,
-        LayoutPoint, LayoutRect, LayoutSequenceLifecycleMarkerKind, RegionInput,
-        RegionMemoryBudget, RenderClip, RenderItem, RenderSource, SubgraphRegion, SubgraphRegionId,
-        SubgraphRegionKind, build_layout_decision_ledger, build_layout_guard_report,
-        build_render_scene, dispatch_layout_algorithm, incremental_overlap_alignment, layout,
+        LayoutPoint, LayoutRect, LayoutSequenceLifecycleMarkerKind, ObstacleSpatialIndex,
+        RegionInput, RegionMemoryBudget, RenderClip, RenderItem, RenderSource, SubgraphRegion,
+        SubgraphRegionId, SubgraphRegionKind, build_layout_decision_ledger,
+        build_layout_guard_report, build_render_scene, dispatch_layout_algorithm,
+        find_obstacle_nudge_x, find_obstacle_nudge_y, incremental_overlap_alignment, layout,
         layout_diagram, layout_diagram_force, layout_diagram_force_traced, layout_diagram_gantt,
         layout_diagram_grid, layout_diagram_incremental_traced_with_config_and_guardrails,
         layout_diagram_radial, layout_diagram_sankey, layout_diagram_sequence,
@@ -14794,6 +14938,64 @@ mod tests {
         let basic = route_edge_points(source, target, false);
         let obstacle_aware = route_edge_points_with_obstacles(source, target, false, &[]);
         assert_eq!(basic, obstacle_aware);
+    }
+
+    #[test]
+    fn obstacle_index_preserves_first_intersecting_obstacle_order() {
+        let obstacles = vec![
+            LayoutRect {
+                x: 70.0,
+                y: 10.0,
+                width: 10.0,
+                height: 20.0,
+            },
+            LayoutRect {
+                x: 20.0,
+                y: 0.0,
+                width: 10.0,
+                height: 20.0,
+            },
+        ];
+        let segment = (
+            LayoutPoint { x: 0.0, y: 15.0 },
+            LayoutPoint { x: 100.0, y: 15.0 },
+        );
+        let full_scan = find_obstacle_nudge_y(segment, 15.0, &obstacles, None);
+        let mut index = ObstacleSpatialIndex::new(&obstacles);
+        let indexed = find_obstacle_nudge_y(segment, 15.0, &obstacles, Some(&mut index));
+        assert_eq!(indexed, full_scan);
+    }
+
+    #[test]
+    fn obstacle_index_reads_current_parked_endpoint_bounds() {
+        let mut obstacles = vec![
+            LayoutRect {
+                x: 40.0,
+                y: 20.0,
+                width: 20.0,
+                height: 20.0,
+            },
+            LayoutRect {
+                x: 45.0,
+                y: 70.0,
+                width: 10.0,
+                height: 10.0,
+            },
+        ];
+        let mut index = ObstacleSpatialIndex::new(&obstacles);
+        obstacles[0] = LayoutRect {
+            x: 1.0e30,
+            y: 1.0e30,
+            width: 0.0,
+            height: 0.0,
+        };
+        let segment = (
+            LayoutPoint { x: 50.0, y: 0.0 },
+            LayoutPoint { x: 50.0, y: 100.0 },
+        );
+        let full_scan = find_obstacle_nudge_x(segment, 50.0, &obstacles, None);
+        let indexed = find_obstacle_nudge_x(segment, 50.0, &obstacles, Some(&mut index));
+        assert_eq!(indexed, full_scan);
     }
 
     #[test]

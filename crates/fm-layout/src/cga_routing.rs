@@ -93,6 +93,34 @@ pub fn find_vertical_segment_nudge(
     obstacles: &[LayoutRect],
     margin: f32,
 ) -> Option<f32> {
+    find_vertical_segment_nudge_iter(segment_start, segment_end, obstacles.iter(), margin)
+}
+
+/// Check candidate obstacle indices, preserving the provided order.
+#[must_use]
+pub fn find_vertical_segment_nudge_by_indices(
+    segment_start: LayoutPoint,
+    segment_end: LayoutPoint,
+    obstacles: &[LayoutRect],
+    candidate_indices: &[usize],
+    margin: f32,
+) -> Option<f32> {
+    find_vertical_segment_nudge_iter(
+        segment_start,
+        segment_end,
+        candidate_indices
+            .iter()
+            .filter_map(|&idx| obstacles.get(idx)),
+        margin,
+    )
+}
+
+fn find_vertical_segment_nudge_iter<'a>(
+    segment_start: LayoutPoint,
+    segment_end: LayoutPoint,
+    obstacles: impl IntoIterator<Item = &'a LayoutRect>,
+    margin: f32,
+) -> Option<f32> {
     let seg = CgaLineSegment::new(to_cga_point(segment_start), to_cga_point(segment_end));
     let start_cga = to_cga_point(segment_start);
     let margin_f64 = f64::from(margin);
@@ -156,6 +184,34 @@ pub fn find_horizontal_segment_nudge(
     segment_start: LayoutPoint,
     segment_end: LayoutPoint,
     obstacles: &[LayoutRect],
+    margin: f32,
+) -> Option<f32> {
+    find_horizontal_segment_nudge_iter(segment_start, segment_end, obstacles.iter(), margin)
+}
+
+/// Check candidate obstacle indices, preserving the provided order.
+#[must_use]
+pub fn find_horizontal_segment_nudge_by_indices(
+    segment_start: LayoutPoint,
+    segment_end: LayoutPoint,
+    obstacles: &[LayoutRect],
+    candidate_indices: &[usize],
+    margin: f32,
+) -> Option<f32> {
+    find_horizontal_segment_nudge_iter(
+        segment_start,
+        segment_end,
+        candidate_indices
+            .iter()
+            .filter_map(|&idx| obstacles.get(idx)),
+        margin,
+    )
+}
+
+fn find_horizontal_segment_nudge_iter<'a>(
+    segment_start: LayoutPoint,
+    segment_end: LayoutPoint,
+    obstacles: impl IntoIterator<Item = &'a LayoutRect>,
     margin: f32,
 ) -> Option<f32> {
     let seg = CgaLineSegment::new(to_cga_point(segment_start), to_cga_point(segment_end));
