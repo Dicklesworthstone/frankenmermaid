@@ -10968,6 +10968,12 @@ fn build_edge_paths_with_orientation(
         *count += 1;
     }
 
+    // Build the obstacle set (all node bounds) **once** and reuse it for every edge,
+    // instead of rebuilding an all-nodes-except-endpoints `Vec` per edge (O(edges*nodes)).
+    // Each edge's own two endpoints are temporarily parked far away below so the
+    // router's AABB check rejects them — equivalent to excluding them, O(1) per edge.
+    let mut obstacle_bounds: Vec<LayoutRect> = nodes.iter().map(|n| n.bounds).collect();
+
     ir.edges
         .iter()
         .enumerate()
@@ -10993,27 +10999,47 @@ fn build_edge_paths_with_orientation(
             } else {
                 let (source_anchor, target_anchor) =
                     edge_anchors(source_box, target_box, horizontal_ranks);
-                // Collect obstacles: all node boxes except source and target.
-                let obstacles: Vec<LayoutRect> = nodes
-                    .iter()
-                    .enumerate()
-                    .filter(|(idx, _)| *idx != source && *idx != target)
-                    .map(|(_, n)| n.bounds)
-                    .collect();
+                // Exclude this edge's own endpoints from the shared obstacle set by
+                // parking them far away (the router's AABB reject drops them), then
+                // restore. Far enough that no realistic segment bbox can overlap.
+                const FAR_AWAY: LayoutRect = LayoutRect {
+                    x: 1.0e30,
+                    y: 1.0e30,
+                    width: 0.0,
+                    height: 0.0,
+                };
+                let saved_source = obstacle_bounds.get(source).copied();
+                let saved_target = obstacle_bounds.get(target).copied();
+                if let Some(slot) = obstacle_bounds.get_mut(source) {
+                    *slot = FAR_AWAY;
+                }
+                if let Some(slot) = obstacle_bounds.get_mut(target) {
+                    *slot = FAR_AWAY;
+                }
                 let mut pts = match edge_routing {
                     EdgeRouting::Orthogonal => route_edge_points_with_obstacles(
                         source_anchor,
                         target_anchor,
                         horizontal_ranks,
-                        &obstacles,
+                        &obstacle_bounds,
                     ),
                     EdgeRouting::Spline => route_edge_points_spline_with_obstacles(
                         source_anchor,
                         target_anchor,
                         horizontal_ranks,
-                        &obstacles,
+                        &obstacle_bounds,
                     ),
                 };
+                if let (Some(slot), Some(saved)) =
+                    (obstacle_bounds.get_mut(source), saved_source)
+                {
+                    *slot = saved;
+                }
+                if let (Some(slot), Some(saved)) =
+                    (obstacle_bounds.get_mut(target), saved_target)
+                {
+                    *slot = saved;
+                }
                 if parallel_offset.abs() > 0.01 {
                     apply_parallel_offset(&mut pts, parallel_offset, horizontal_ranks);
                 }
