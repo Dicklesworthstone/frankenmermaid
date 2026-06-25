@@ -7702,6 +7702,13 @@ fn leading_indent_width(line: &str) -> usize {
 
 fn split_statements(line: &str) -> impl Iterator<Item = &str> {
     let mut statements = Vec::new();
+    // Statements are separated by `;` (outside quotes/brackets). When the line contains
+    // no `;` at all it is a single statement, so skip the quote/bracket-aware scan.
+    // Output-identical: the full scan yields exactly `[line]` in that case.
+    if !line.as_bytes().contains(&b';') {
+        statements.push(line);
+        return statements.into_iter();
+    }
     let mut current_start = 0;
     let mut in_quote: Option<char> = None;
     let mut escaped = false;
@@ -8213,6 +8220,13 @@ fn is_architecture_side_token(token: &str) -> bool {
 }
 
 fn strip_flowchart_inline_comment(line: &str) -> &str {
+    // Inline comments begin with `%%`; if there is no `%` at all there is nothing to
+    // strip, so skip the quote/bracket-aware scan entirely. Output-identical: the full
+    // scan returns `line` unchanged when it finds no `%%`.
+    if !line.as_bytes().contains(&b'%') {
+        return line;
+    }
+
     let mut in_quote: Option<char> = None;
     let mut escaped = false;
     let mut square_depth = 0_usize;
