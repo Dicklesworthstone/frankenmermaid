@@ -233,3 +233,57 @@ notes = [
 [post_measurement_bold_verify_2026_06_25.decision]
 status = "verified"
 rationale = "Current main full-pipeline-wide Rust means are 174.67x-310.54x faster than Mermaid 11.12.0 on the same generated wide flowchart workloads, using the requested per-crate cargo bench lane and a live browser comparator."
+
+[post_measurement_edge_style_short_circuit]
+date = "2026-06-25"
+agent = "TanSparrow"
+lever_bead = "bd-1buv.2"
+worker_delta = "local"
+worker_ratio = "local"
+baseline_worktree = "/data/projects/.worktrees/frankenmermaid-cod-b-next-baseline-b8a4743"
+baseline_commit = "b8a4743"
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-b"
+render_baseline_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b RUSTFLAGS='-C metadata=codbstylebaseline' cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- render_svg --warm-up-time 1 --measurement-time 2"
+render_candidate_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b RUSTFLAGS='-C metadata=codbstylecandidate' cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- render_svg --warm-up-time 1 --measurement-time 2"
+wide_baseline_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b RUSTFLAGS='-C metadata=codbstylebaseline' cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+wide_candidate_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b RUSTFLAGS='-C metadata=codbstylecandidate' cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+mermaid_js_command = "Pinned Chromium headless data-URL harness recorded in [original_comparator]; denominator reused unchanged for the same generated wide inputs."
+rust_build_profile = "release profile [optimized]"
+candidate_summary = "Short-circuit edge inline style resolution for unstyled diagrams with no style refs, avoiding one empty BTreeMap allocation/setup per unstyled edge."
+behavior_proof = "The fast path runs only after checking an edge's own inline_style and only when ir.style_refs is empty; diagrams with linkStyle or style refs continue through the existing resolver."
+
+[post_measurement_edge_style_short_circuit.metrics]
+"render_svg_small_10_baseline_mean_us" = 155.38
+"render_svg_small_10_candidate_mean_us" = 142.98
+"render_svg_small_10_speedup" = 1.087
+"render_svg_medium_100_baseline_mean_us" = 936.46
+"render_svg_medium_100_candidate_mean_us" = 852.30
+"render_svg_medium_100_speedup" = 1.099
+"render_svg_large_500_baseline_mean_ms" = 4.6292
+"render_svg_large_500_candidate_mean_ms" = 4.2710
+"render_svg_large_500_speedup" = 1.084
+"full_pipeline_wide_8x16_baseline_mean_ms" = 2.4651
+"full_pipeline_wide_8x16_candidate_mean_ms" = 2.4938
+"full_pipeline_wide_8x16_candidate_delta_pct" = 1.164
+"full_pipeline_wide_8x16_verdict" = "no statistically significant change, p=0.68"
+"full_pipeline_wide_12x24_baseline_mean_ms" = 5.5677
+"full_pipeline_wide_12x24_candidate_mean_ms" = 5.6444
+"full_pipeline_wide_12x24_candidate_delta_pct" = 1.378
+"full_pipeline_wide_12x24_verdict" = "no statistically significant change, p=0.47"
+"full_pipeline_wide_16x32_baseline_mean_ms" = 11.537
+"full_pipeline_wide_16x32_candidate_mean_ms" = 11.295
+"full_pipeline_wide_16x32_candidate_delta_pct" = -2.098
+"full_pipeline_wide_16x32_verdict" = "no statistically significant change, p=0.43"
+"full_pipeline_wide_8x16_mermaid_js_mean_ms" = 499.28
+"full_pipeline_wide_12x24_mermaid_js_mean_ms" = 1077.69
+"full_pipeline_wide_16x32_mermaid_js_mean_ms" = 3948.7
+"full_pipeline_wide_8x16_frankenmermaid_over_mermaid_js" = 0.004995
+"full_pipeline_wide_12x24_frankenmermaid_over_mermaid_js" = 0.005237
+"full_pipeline_wide_16x32_frankenmermaid_over_mermaid_js" = 0.002860
+"full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 200.2
+"full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 190.9
+"full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 349.6
+
+[post_measurement_edge_style_short_circuit.decision]
+status = "keep"
+rationale = "Same-window render_svg proof shows 1.08x-1.10x renderer speedups; full_pipeline_wide is statistically unchanged and still 190.9x-349.6x faster than Mermaid 11.12.0 on the same inputs."

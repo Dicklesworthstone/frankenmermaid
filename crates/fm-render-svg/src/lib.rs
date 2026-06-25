@@ -1263,6 +1263,9 @@ fn resolve_edge_inline_style(ir: &MermaidDiagramIr, edge_index: usize) -> Option
     {
         return style_map_to_css(&style.properties);
     }
+    if ir.style_refs.is_empty() {
+        return None;
+    }
 
     let mut merged = BTreeMap::new();
     for sr in &ir.style_refs {
@@ -7171,6 +7174,27 @@ mod tests {
 
         assert!(inline.contains("stroke:rgba(12,34,56,0.5)"));
         assert!(inline.contains("filter:drop-shadow(0px,1px,2px,#000)"));
+    }
+
+    #[test]
+    fn unstyled_edge_has_no_inline_style() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.nodes.push(IrNode {
+            id: "A".to_string(),
+            ..IrNode::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "B".to_string(),
+            ..IrNode::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            arrow: ArrowType::Arrow,
+            ..IrEdge::default()
+        });
+
+        assert_eq!(resolve_edge_inline_style(&ir, 0), None);
     }
 
     #[test]

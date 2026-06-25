@@ -173,6 +173,39 @@ _(none yet — first measured experiments in progress)_
   as a timing source for this comparator; it rendered valid SVG but collapsed
   `performance.now()` samples to zero in this session.
 
+### Edge style empty-case short-circuit — KEPT (2026-06-25)
+- **Lever:** `fm-render-svg::resolve_edge_inline_style` returns immediately for
+  unstyled edges when the diagram has no style refs instead of constructing an
+  empty `BTreeMap` per edge.
+- **Hypothesis:** ordinary generated flowcharts have many unstyled edges and no
+  `linkStyle` directives, so the old resolver paid a data-structure setup cost
+  on the dominant render path even when the correct result was statically `None`.
+- **Baseline -> After:** detached baseline worktree
+  `/data/projects/.worktrees/frankenmermaid-cod-b-next-baseline-b8a4743` at
+  `b8a4743` vs candidate checkout, local same-machine, per-crate package
+  `frankenmermaid-cli`, target dir
+  `/data/projects/.rch-targets/frankenmermaid-cod-b`. Render-only means:
+  `render_svg/flowchart/small_10` `155.38 us` -> `142.98 us` (`1.087x`);
+  `medium_100` `936.46 us` -> `852.30 us` (`1.099x`); `large_500`
+  `4.6292 ms` -> `4.2710 ms` (`1.084x`). Wide full-pipeline means were
+  statistically unchanged: `8x16` `2.4651 ms` -> `2.4938 ms` (`+1.16%`,
+  no change), `12x24` `5.5677 ms` -> `5.6444 ms` (`+1.38%`, no change),
+  and `16x32` `11.537 ms` -> `11.295 ms` (`-2.10%`, no change).
+- **Original comparator:** Mermaid `11.12.0` browser bundle from
+  `https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.min.js`, Chromium
+  headless, `maxEdges=2000`, 3 warmups, 20 timed render-to-SVG iterations.
+- **frankenmermaid/Mermaid ratio:** candidate full-pipeline wide SVG mean ratios
+  were `0.004995x` (`8x16`: `2.4938 ms` vs `499.28 ms`), `0.005237x`
+  (`12x24`: `5.6444 ms` vs `1077.69 ms`), and `0.002860x` (`16x32`:
+  `11.295 ms` vs `3948.7 ms`), i.e. Mermaid.js was `200.2x`, `190.9x`,
+  and `349.6x` slower on those inputs.
+- **Verdict:** kept; the render-only crate proof is a repeatable 7.7%-9.0%
+  speedup, while the wider comparator workload remains statistically unchanged
+  and still strongly dominated versus Mermaid.js.
+- **Do-not-retry note:** do not remove styled-edge resolution wholesale. This
+  fast path is only for diagrams with no style refs after checking an edge's own
+  inline style.
+
 ## Blocked/Invalid Evidence Attempts
 
 ### Agent Mail registration/reservation — BLOCKED (2026-06-24)
