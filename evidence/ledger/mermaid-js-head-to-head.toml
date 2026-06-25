@@ -466,3 +466,108 @@ behavior_proof = "The tested helper computed the same offset-adjusted coordinate
 [post_measurement_render_edge_offset_vec_elision.decision]
 status = "reject"
 rationale = "Directly serializing edge paths from LayoutEdgePath.points regressed render_svg small_10 by 3.78% and medium_100 by 28.30%, with large_500 statistically unchanged; code was reverted. Current main still beats Mermaid 11.12.0 by 141.31x-238.01x on fresh live-CDP wide workloads."
+
+[negative_measurement_crossing_count_dense_positions_2026_06_25]
+date = "2026-06-25"
+agent = "TanSparrow"
+lever_bead = "bd-1buv.2"
+worker_delta = "local"
+baseline_commit = "28b271d"
+candidate_summary = "Replace crossing_count BTreeMap position maps and merge-sort inversion counting with dense position vectors plus a Fenwick tree."
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-b"
+layout_baseline_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b cargo bench -p frankenmermaid-cli --bench pipeline_bench -- layout_wide --warm-up-time 1 --measurement-time 2"
+layout_candidate_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b cargo bench -p frankenmermaid-cli --bench pipeline_bench -- layout_wide --warm-up-time 1 --measurement-time 2"
+wide_current_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b cargo bench -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+mermaid_js_command = "Pinned live-CDP Mermaid 11.12.0 denominator from current-main BOLD-VERIFY entry reused for identical generated wide inputs."
+rust_build_profile = "bench profile [optimized]"
+behavior_proof = "Focused crossing-count tests passed while candidate existed, but the implementation was reverted after layout-wide regressions; current main behavior is unchanged."
+
+[negative_measurement_crossing_count_dense_positions_2026_06_25.metrics]
+"layout_wide_8x16_baseline_mean_us" = 132.67
+"layout_wide_8x16_candidate_mean_us" = 153.33
+"layout_wide_8x16_candidate_delta_pct" = 15.5725
+"layout_wide_12x24_baseline_mean_us" = 470.95
+"layout_wide_12x24_candidate_mean_us" = 583.05
+"layout_wide_12x24_candidate_delta_pct" = 23.8030
+"layout_wide_16x32_baseline_mean_ms" = 1.0877
+"layout_wide_16x32_candidate_mean_ms" = 1.2930
+"layout_wide_16x32_candidate_delta_pct" = 18.8747
+"retained_main_full_pipeline_wide_8x16_mean_ms" = 2.2269
+"retained_main_full_pipeline_wide_12x24_mean_ms" = 5.3551
+"retained_main_full_pipeline_wide_16x32_mean_ms" = 10.986
+"full_pipeline_wide_8x16_mermaid_js_mean_ms" = 373.2200000047684
+"full_pipeline_wide_12x24_mermaid_js_mean_ms" = 1238.1649999976157
+"full_pipeline_wide_16x32_mermaid_js_mean_ms" = 2830.4949999928476
+"retained_main_full_pipeline_wide_8x16_frankenmermaid_over_mermaid_js" = 0.005967
+"retained_main_full_pipeline_wide_12x24_frankenmermaid_over_mermaid_js" = 0.004325
+"retained_main_full_pipeline_wide_16x32_frankenmermaid_over_mermaid_js" = 0.003881
+"retained_main_full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 167.60
+"retained_main_full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 231.21
+"retained_main_full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 257.65
+
+[negative_measurement_crossing_count_dense_positions_2026_06_25.decision]
+status = "reject"
+rationale = "Dense position maps plus Fenwick inversion counting regressed every measured layout_wide case by 15.57%-23.80%; code was reverted."
+
+[negative_measurement_svg_attr_borrowed_names_2026_06_25]
+date = "2026-06-25"
+agent = "TanSparrow"
+lever_bead = "bd-1buv.2"
+worker_delta = "local"
+baseline_commit = "28b271d"
+candidate_summary = "Change Element::attr and attr_num to accept Cow<'static, str> so literal SVG attribute names can be borrowed instead of allocating name.to_string()."
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-b"
+render_baseline_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b cargo bench -p frankenmermaid-cli --bench pipeline_bench -- render_svg --warm-up-time 1 --measurement-time 2"
+render_candidate_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b cargo bench -p frankenmermaid-cli --bench pipeline_bench -- render_svg --warm-up-time 1 --measurement-time 2"
+mermaid_js_command = "Pinned live-CDP Mermaid 11.12.0 denominator from current-main BOLD-VERIFY entry reused for identical generated wide inputs."
+rust_build_profile = "bench profile [optimized]"
+behavior_proof = "Element builder output path was API-equivalent and focused renderer tests passed while candidate existed, but the implementation was reverted after measured render regressions; current main behavior is unchanged."
+
+[negative_measurement_svg_attr_borrowed_names_2026_06_25.metrics]
+"render_svg_small_10_baseline_mean_us" = 147.98
+"render_svg_small_10_candidate_mean_us" = 190.09
+"render_svg_small_10_candidate_delta_pct" = 28.4565
+"render_svg_medium_100_baseline_mean_us" = 959.06
+"render_svg_medium_100_candidate_mean_us" = 953.67
+"render_svg_medium_100_candidate_delta_pct" = -0.5620
+"render_svg_large_500_baseline_mean_ms" = 4.6302
+"render_svg_large_500_candidate_mean_ms" = 4.8435
+"render_svg_large_500_candidate_delta_pct" = 4.6067
+"retained_main_full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 167.60
+"retained_main_full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 231.21
+"retained_main_full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 257.65
+
+[negative_measurement_svg_attr_borrowed_names_2026_06_25.decision]
+status = "reject"
+rationale = "Borrowed SVG attribute names regressed render_svg small_10 by 28.46% and large_500 by 4.61%, with medium_100 effectively noise; code was reverted."
+
+[negative_measurement_flowchart_common_arrow_shortcut_2026_06_25]
+date = "2026-06-25"
+agent = "TanSparrow"
+lever_bead = "bd-1buv.2"
+worker_delta = "local"
+baseline_commit = "28b271d"
+candidate_summary = "Try a guarded exact '-->' shortcut in parse_fast_simple_flowchart_edge_ast before scanning the full fast-operator table."
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-b"
+parse_candidate_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b cargo bench -p frankenmermaid-cli --bench pipeline_bench -- parse/flowchart --warm-up-time 1 --measurement-time 2"
+mermaid_js_command = "Pinned live-CDP Mermaid 11.12.0 denominator from current-main BOLD-VERIFY entry reused for identical generated wide inputs."
+rust_build_profile = "bench profile [optimized]"
+behavior_proof = "Fast-path edge tests passed while candidate existed, including fallback equivalence for simple edges and rejection of complex statements; implementation was reverted after measured parser regression."
+
+[negative_measurement_flowchart_common_arrow_shortcut_2026_06_25.metrics]
+"parse_flowchart_small_10_baseline_mean_us" = 31.455
+"parse_flowchart_small_10_candidate_mean_us" = 31.280
+"parse_flowchart_small_10_candidate_delta_pct" = -0.5564
+"parse_flowchart_medium_100_baseline_mean_us" = 270.26
+"parse_flowchart_medium_100_candidate_mean_us" = 550.33
+"parse_flowchart_medium_100_candidate_delta_pct" = 103.6298
+"parse_flowchart_large_1000_baseline_mean_ms" = 3.6663
+"parse_flowchart_large_1000_candidate_mean_ms" = 3.7202
+"parse_flowchart_large_1000_candidate_delta_pct" = 1.4701
+"retained_main_full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 167.60
+"retained_main_full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 231.21
+"retained_main_full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 257.65
+
+[negative_measurement_flowchart_common_arrow_shortcut_2026_06_25.decision]
+status = "reject"
+rationale = "The common-arrow shortcut failed to produce a stable parse win and Criterion reported a clear medium_100 regression; code was reverted."

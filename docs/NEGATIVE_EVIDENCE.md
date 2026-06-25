@@ -333,6 +333,66 @@
   CPU/allocation profile shows the per-edge point vector allocation has returned
   to the top renderer costs; the simpler tuple-slice path currently wins.
 
+### Dense crossing-count position maps — REJECTED (2026-06-25)
+- **Lever tested:** `fm-layout::egraph_ordering::crossing_count` was changed
+  locally to build dense node-position vectors where node IDs were compact and to
+  count lower-position inversions with a Fenwick tree instead of the existing
+  `BTreeMap` position maps plus merge-sort inversion counter.
+- **Mapped primitive:** dense-index lookup and alternate inversion-count data
+  structure for the e-graph/crossing-refinement hot path.
+- **Outcome:** rejected and reverted. Same-worktree candidate run using
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b cargo bench
+  -p frankenmermaid-cli --bench pipeline_bench -- layout_wide --warm-up-time 1
+  --measurement-time 2` regressed every wide layout case: `8x16` `132.67 us`
+  -> `153.33 us` (`15.57%` slower), `12x24` `470.95 us` -> `583.05 us`
+  (`23.80%` slower), and `16x32` `1.0877 ms` -> `1.2930 ms` (`18.87%`
+  slower).
+- **frankenmermaid/Mermaid ratio after revert:** retained current-main
+  `full_pipeline_wide` medians were `2.2269 ms`, `5.3551 ms`, and `10.986 ms`.
+  Reusing the pinned live-CDP Mermaid `11.12.0` denominator from the current-main
+  BOLD-VERIFY entry for identical generated wide inputs, frankenmermaid/Mermaid
+  ratios are `0.005967x`, `0.004325x`, and `0.003881x`; Mermaid.js is `167.60x`,
+  `231.21x`, and `257.65x` slower.
+- **Do-not-retry note:** the existing `BTreeMap` plus merge-sort path wins on the
+  current crossing-refinement workload; do not replace it with dense/Fenwick
+  bookkeeping unless a profile shows different crossing-count shape.
+
+### Borrowed SVG attribute names — REJECTED (2026-06-25)
+- **Lever tested:** `fm-render-svg::Element::attr` and `attr_num` were changed
+  locally to accept `Cow<'static, str>` names so literal attribute names could be
+  borrowed instead of converted through `name.to_string()`.
+- **Mapped primitive:** allocation elision on SVG element construction.
+- **Outcome:** rejected and reverted. Fresh current-main render baseline from
+  `/data/projects/frankenmermaid` measured `render_svg/flowchart` at `147.98 us`,
+  `959.06 us`, and `4.6302 ms`. The candidate measured `190.09 us`,
+  `953.67 us`, and `4.8435 ms`: `small_10` regressed `28.46%`, `medium_100`
+  was effectively noise (`0.56%` faster), and `large_500` regressed `4.61%`.
+- **frankenmermaid/Mermaid ratio after revert:** same retained current-main wide
+  ratios as above: Mermaid.js remains `167.60x`, `231.21x`, and `257.65x`
+  slower on 8x16, 12x24, and 16x32 generated wide flowcharts.
+- **Do-not-retry note:** the generic `Cow` setter shape does not pay for itself
+  on this renderer; literal-name allocation is not the next keepable lever.
+
+### Common `-->` flowchart parser shortcut — REJECTED (2026-06-25)
+- **Lever tested:** `parse_fast_simple_flowchart_edge_ast` was changed locally to
+  try a guarded exact `-->` shortcut before scanning the full fast-operator table.
+- **Mapped primitive:** branch-specialized parser shortcut for the benchmark's
+  most common plain flowchart edge operator.
+- **Outcome:** rejected and reverted. Candidate run
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b cargo bench
+  -p frankenmermaid-cli --bench pipeline_bench -- parse/flowchart --warm-up-time 1
+  --measurement-time 2` measured `small_10` `31.280 us`, `medium_100`
+  `550.33 us`, and `large_1000` `3.7202 ms`; Criterion reported no change for
+  `small_10`/`large_1000` and a clear `medium_100` regression. Compared with the
+  current-head routing baseline (`31.455 us`, `270.26 us`, `3.6663 ms`), the
+  candidate moved `-0.56%`, `+103.63%`, and `+1.47%`.
+- **frankenmermaid/Mermaid ratio after revert:** same retained current-main wide
+  ratios as above: Mermaid.js remains `167.60x`, `231.21x`, and `257.65x`
+  slower on the generated wide flowchart pipeline.
+- **Do-not-retry note:** the extra guarded shortcut adds branch/overlap cost
+  without a stable parse win; keep using the existing fast-operator table until a
+  profile isolates a different parser primitive.
+
 ## Blocked/Invalid Evidence Attempts
 
 ### Agent Mail registration/reservation — BLOCKED (2026-06-24)
