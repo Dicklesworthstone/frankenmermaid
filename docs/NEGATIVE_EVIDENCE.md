@@ -451,6 +451,43 @@
 - **Do-not-retry note:** the generic `Cow` setter shape does not pay for itself
   on this renderer; literal-name allocation is not the next keepable lever.
 
+### Guarded SVG attribute retain skip — REJECTED (2026-06-25)
+- **Lever tested:** `fm-render-svg::Attributes::set` was changed locally to scan
+  for an existing attribute name before calling `Vec::retain`, so the common
+  unique-name path could skip the full retain pass while duplicate names still
+  fell back to the old remove-then-push semantics.
+- **Mapped primitive:** guarded shape specialization / expected-loss guard from
+  the alien-artifact pass: make the rare duplicate-attribute case pay the
+  removal cost, and keep the common append-only case linear in one scan.
+- **Outcome:** rejected and reverted. Same-worktree A/B used target dir
+  `/data/projects/.rch-targets/frankenmermaid-cod-b`, package
+  `frankenmermaid-cli`, bench `pipeline_bench`, and `rch exec -- cargo bench
+  --profile release -p frankenmermaid-cli --bench pipeline_bench`. The isolated
+  `render_svg/flowchart` filter looked strong: `small_10` `167.30 us` ->
+  `148.48 us` (`11.25%` faster), `medium_100` `1.0674 ms` -> `904.51 us`
+  (`15.26%` faster), and `large_500` `6.2082 ms` -> `4.5859 ms` (`26.13%`
+  faster). The actual gate, `full_pipeline_wide`, failed on rerun:
+  retained current-main `2.2419 ms`, `5.1960 ms`, and `9.9276 ms` vs candidate
+  `2.6149 ms`, `6.4114 ms`, and `12.629 ms`, which is `16.64%`, `23.39%`,
+  and `27.21%` slower.
+- **Original comparator:** latest live-CDP Mermaid `11.12.0` denominator from the
+  current-main BOLD-VERIFY entry, using Node `v24.14.0`, `/snap/bin/chromium`,
+  dynamic import of
+  `https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.esm.min.mjs`,
+  3 warmups, and 20 timed render-to-SVG iterations.
+- **frankenmermaid/Mermaid ratio after revert:** retained current-main
+  `full_pipeline_wide` means were `2.2419 ms`, `5.1960 ms`, and `9.9276 ms`.
+  Reusing the same generated-input Mermaid.js means from the latest main entry,
+  frankenmermaid/Mermaid ratios are `0.007114x`, `0.005293x`, and `0.003448x`;
+  Mermaid.js is `140.57x`, `188.94x`, and `290.02x` slower. The rejected
+  candidate would have worsened those to `0.008298x`, `0.006531x`, and
+  `0.004386x`, i.e. Mermaid.js only `120.52x`, `153.12x`, and `227.98x`
+  slower.
+- **Do-not-retry note:** do not land `Attributes::set` scan-before-retain on
+  render-only evidence. Any future attribute dedup work must clear
+  `full_pipeline_wide` because the renderer microbench result did not predict
+  the end-to-end gap.
+
 ### Common `-->` flowchart parser shortcut — REJECTED (2026-06-25)
 - **Lever tested:** `parse_fast_simple_flowchart_edge_ast` was changed locally to
   try a guarded exact `-->` shortcut before scanning the full fast-operator table.

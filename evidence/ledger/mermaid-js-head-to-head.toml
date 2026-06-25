@@ -727,3 +727,64 @@ tooling_notes = [
 [negative_measurement_svg_document_child_capacity_2026_06_25.decision]
 status = "reject"
 rationale = "Document child Vec pre-sizing produced no realistic-size render win and regressed full_pipeline_wide by 20.93%-28.22%; code was reverted."
+
+[negative_measurement_svg_attrs_set_retain_guard_2026_06_25]
+date = "2026-06-25"
+agent = "TanSparrow"
+lever_bead = "bd-1buv.1"
+worker_delta = "local (rch fallback)"
+baseline_commit = "4b29360"
+candidate_summary = "Guard Attributes::set retain with an existence scan so unique attribute names skip retain while duplicate names keep remove-then-push semantics."
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-b"
+render_baseline_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- render_svg/flowchart --warm-up-time 1 --measurement-time 2"
+render_candidate_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- render_svg/flowchart --warm-up-time 1 --measurement-time 2"
+wide_candidate_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 3"
+mermaid_js_command = "Latest live-CDP Mermaid 11.12.0 denominator from current-main BOLD-VERIFY entry reused for identical generated wide inputs."
+rust_build_profile = "bench profile [optimized]"
+behavior_proof = "Candidate code was reverted before commit; duplicate-removal semantics were intended to be preserved by falling back to retain when a same-name attribute exists, but the full_pipeline_wide gate regressed."
+tooling_notes = [
+  "RCH invocations fell back locally because no worker was admissible during these measured runs.",
+  "The render_svg/flowchart microbench improved, but it was rejected because the requested biggest measured gap is full_pipeline_wide.",
+]
+
+[negative_measurement_svg_attrs_set_retain_guard_2026_06_25.metrics]
+"render_svg_flowchart_small_10_baseline_mean_us" = 167.30
+"render_svg_flowchart_small_10_candidate_mean_us" = 148.48
+"render_svg_flowchart_small_10_candidate_delta_pct" = -11.2493
+"render_svg_flowchart_small_10_baseline_over_candidate" = 1.1268
+"render_svg_flowchart_medium_100_baseline_mean_ms" = 1.0674
+"render_svg_flowchart_medium_100_candidate_mean_ms" = 0.90451
+"render_svg_flowchart_medium_100_candidate_delta_pct" = -15.2604
+"render_svg_flowchart_medium_100_baseline_over_candidate" = 1.1801
+"render_svg_flowchart_large_500_baseline_mean_ms" = 6.2082
+"render_svg_flowchart_large_500_candidate_mean_ms" = 4.5859
+"render_svg_flowchart_large_500_candidate_delta_pct" = -26.1316
+"render_svg_flowchart_large_500_baseline_over_candidate" = 1.3538
+"retained_main_full_pipeline_wide_8x16_mean_ms" = 2.2419
+"retained_main_full_pipeline_wide_12x24_mean_ms" = 5.1960
+"retained_main_full_pipeline_wide_16x32_mean_ms" = 9.9276
+"candidate_full_pipeline_wide_8x16_mean_ms" = 2.6149
+"candidate_full_pipeline_wide_12x24_mean_ms" = 6.4114
+"candidate_full_pipeline_wide_16x32_mean_ms" = 12.629
+"candidate_full_pipeline_wide_8x16_delta_pct" = 16.6377
+"candidate_full_pipeline_wide_12x24_delta_pct" = 23.3911
+"candidate_full_pipeline_wide_16x32_delta_pct" = 27.2110
+"full_pipeline_wide_8x16_mermaid_js_mean_ms" = 315.1399999976158
+"full_pipeline_wide_12x24_mermaid_js_mean_ms" = 981.7300000190735
+"full_pipeline_wide_16x32_mermaid_js_mean_ms" = 2879.185000014305
+"retained_main_full_pipeline_wide_8x16_frankenmermaid_over_mermaid_js" = 0.007114
+"retained_main_full_pipeline_wide_12x24_frankenmermaid_over_mermaid_js" = 0.005293
+"retained_main_full_pipeline_wide_16x32_frankenmermaid_over_mermaid_js" = 0.003448
+"retained_main_full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 140.57
+"retained_main_full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 188.94
+"retained_main_full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 290.02
+"candidate_full_pipeline_wide_8x16_frankenmermaid_over_mermaid_js" = 0.008298
+"candidate_full_pipeline_wide_12x24_frankenmermaid_over_mermaid_js" = 0.006531
+"candidate_full_pipeline_wide_16x32_frankenmermaid_over_mermaid_js" = 0.004386
+"candidate_full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 120.52
+"candidate_full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 153.12
+"candidate_full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 227.98
+
+[negative_measurement_svg_attrs_set_retain_guard_2026_06_25.decision]
+status = "reject"
+rationale = "Attributes::set scan-before-retain improved isolated render_svg/flowchart by 11.25%-26.13%, but full_pipeline_wide regressed by 16.64%-27.21%; code was reverted."
