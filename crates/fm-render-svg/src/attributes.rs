@@ -23,10 +23,12 @@ pub enum AttributeValue {
     Integer(i32),
 }
 
-impl fmt::Display for AttributeValue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl AttributeValue {
+    /// Write the value directly into `out`, bypassing the `fmt::Formatter` indirection on
+    /// the hot per-attribute serialization path. [`Display`](fmt::Display) delegates here.
+    pub(crate) fn write_value<W: fmt::Write>(&self, out: &mut W) -> fmt::Result {
         match self {
-            Self::String(s) => write_escaped_attr(f, s),
+            Self::String(s) => write_escaped_attr(out, s),
             Self::Number(n) => {
                 // Format with reasonable precision, trim trailing zeros.
                 // Use integer formatting only for values that fit in i32 range
@@ -36,13 +38,19 @@ impl fmt::Display for AttributeValue {
                     && *n >= i32::MIN as f32
                     && *n <= i32::MAX as f32
                 {
-                    write!(f, "{}", *n as i32)
+                    write!(out, "{}", *n as i32)
                 } else {
-                    write_fixed2(f, *n)
+                    write_fixed2(out, *n)
                 }
             }
-            Self::Integer(i) => write!(f, "{i}"),
+            Self::Integer(i) => write!(out, "{i}"),
         }
+    }
+}
+
+impl fmt::Display for AttributeValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.write_value(f)
     }
 }
 
@@ -169,8 +177,16 @@ impl Attributes {
     /// Write the attributes directly into `out`, avoiding the intermediate `String`
     /// that [`render`](Self::render) allocates per element on the hot serialization path.
     pub fn write_into<W: fmt::Write>(&self, out: &mut W) {
+        // Write the constant pieces and the attribute name directly instead of through
+        // `write!`/`format_args!`, which routes every piece and both `Display` args through
+        // the `fmt::Formatter` machinery. Byte-identical to ` {name}="{value}"`; this is
+        // the per-attribute hot path (~thousands of attributes per diagram).
         for attr in &self.attrs {
-            let _ = write!(out, " {}=\"{}\"", attr.name, attr.value);
+            let _ = out.write_char(' ');
+            let _ = out.write_str(&attr.name);
+            let _ = out.write_str("=\"");
+            let _ = attr.value.write_value(out);
+            let _ = out.write_char('"');
         }
     }
 
