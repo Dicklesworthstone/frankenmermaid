@@ -9160,6 +9160,15 @@ fn crossing_minimization(
         return (0, ordering_by_rank);
     }
 
+    // Fast path: if no rank holds two or more nodes, no crossings are possible and the
+    // barycenter sweeps cannot reorder anything within a rank — the ordering is already
+    // final. Skips centrality construction, the four sweep rounds, and the crossing count
+    // for the common linear-flowchart case (every rank one node). Output-identical: the
+    // full path returns this same ordering with zero crossings.
+    if ordering_by_rank.values().all(|nodes| nodes.len() <= 1) {
+        return (0, ordering_by_rank);
+    }
+
     let centrality = build_centrality_assist(ir, config);
 
     // Deterministic barycenter sweeps: top-down then bottom-up.
