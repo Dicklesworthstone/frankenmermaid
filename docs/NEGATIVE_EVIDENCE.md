@@ -432,6 +432,44 @@
   without a stable parse win; keep using the existing fast-operator table until a
   profile isolates a different parser primitive.
 
+### Plain flowchart label shortcut — REJECTED (2026-06-25)
+- **Lever tested:** `parse_fast_simple_flowchart_node_ast` was changed locally to
+  bypass `parse_label`, icon-prefix extraction, and empty-label cleanup for ASCII
+  bracket labels with no entity, quote, markdown marker, icon delimiter, or
+  non-ASCII leading emoji.
+- **Mapped primitive:** guarded shape specialization / partial-evaluation fast
+  path from the alien-artifact pass: use a static plain-label variant only when
+  the value-shape guard is exact, and keep the generic parser as deopt fallback.
+- **Outcome:** rejected and reverted. Same-machine A/B used target dir
+  `/data/projects/.rch-targets/frankenmermaid-cod-b`, package
+  `frankenmermaid-cli`, bench `pipeline_bench`, filter `parse/flowchart`.
+  Baseline command was attempted through `rch exec` and fell back locally because
+  no worker was admissible:
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec
+  -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench
+  -- parse/flowchart --warm-up-time 1 --measurement-time 2`. A candidate rerun
+  through `rch exec` selected worker `vmi1264463` but failed before benchmarks
+  because `cmake` was missing while building `highs-sys`; that run is a toolchain
+  blocker, not benchmark evidence. The valid candidate proof was local with the
+  same target dir and filter.
+- **Baseline -> After:** `parse/flowchart/small_10` `29.895 us` -> `30.151 us`
+  (`0.86%` slower/noise), `medium_100` `240.60 us` -> `281.80 us` (`17.12%`
+  slower), and `large_1000` `3.0699 ms` -> `4.0402 ms` (`31.61%` slower).
+- **Original comparator:** latest live-CDP Mermaid `11.12.0` denominator from the
+  current-main BOLD-VERIFY entry, using Node `v24.14.0`, `/snap/bin/chromium`,
+  dynamic import of
+  `https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.esm.min.mjs`,
+  3 warmups, and 20 timed render-to-SVG iterations.
+- **frankenmermaid/Mermaid ratio after revert:** fresh current-main
+  `full_pipeline_wide` means were `2.2419 ms`, `5.1960 ms`, and `9.9276 ms`.
+  Reusing the same generated-input Mermaid.js means from the latest main entry,
+  frankenmermaid/Mermaid ratios are `0.007114x`, `0.005293x`, and `0.003448x`;
+  Mermaid.js is `140.57x`, `188.94x`, and `290.02x` slower.
+- **Do-not-retry note:** even the narrow plain-label guard added enough extra
+  branch/scanning cost to regress medium and large flowchart parsing; do not
+  retry label-shape specialization unless a new parser profile shows `parse_label`
+  itself, not line/edge dispatch, back at the top.
+
 ## Blocked/Invalid Evidence Attempts
 
 ### Agent Mail registration/reservation — BLOCKED (2026-06-24)

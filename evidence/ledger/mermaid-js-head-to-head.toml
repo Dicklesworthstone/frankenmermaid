@@ -625,3 +625,50 @@ behavior_proof = "The grid query is a conservative superset of the old AABB over
 [post_measurement_sparse_obstacle_spatial_index_2026_06_25.decision]
 status = "keep"
 rationale = "Sparse large-flowchart layout improved 24.19%, medium improved 5.35%, wide full-pipeline stayed neutral or better under the sparse edge-count gate, and live-CDP Mermaid 11.12.0 ratios remain 137.01x-287.26x faster."
+
+[negative_measurement_flowchart_plain_label_shortcut_2026_06_25]
+date = "2026-06-25"
+agent = "TanSparrow"
+lever_bead = "bd-1buv.1"
+worker_delta = "local"
+baseline_commit = "82c491a"
+candidate_summary = "Bypass parse_label, icon-prefix extraction, and empty-label cleanup for guarded ASCII bracket labels in parse_fast_simple_flowchart_node_ast."
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-b"
+parse_baseline_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- parse/flowchart --warm-up-time 1 --measurement-time 2"
+parse_candidate_rch_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- parse/flowchart --warm-up-time 1 --measurement-time 2"
+parse_candidate_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- parse/flowchart --warm-up-time 1 --measurement-time 2"
+wide_current_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+mermaid_js_command = "Latest live-CDP Mermaid 11.12.0 denominator from current-main BOLD-VERIFY entry reused for identical generated wide inputs."
+rust_build_profile = "bench profile [optimized]"
+behavior_proof = "Candidate code was reverted before commit; no production code is retained. Existing fast-path parser equivalence tests still cover the restored path."
+tooling_notes = [
+  "RCH baseline invocation fell back locally because no worker was admissible.",
+  "RCH candidate invocation selected vmi1264463 but failed before benchmarks because cmake was missing while building highs-sys; that run is not benchmark evidence.",
+]
+
+[negative_measurement_flowchart_plain_label_shortcut_2026_06_25.metrics]
+"parse_flowchart_small_10_baseline_mean_us" = 29.895
+"parse_flowchart_small_10_candidate_mean_us" = 30.151
+"parse_flowchart_small_10_candidate_delta_pct" = 0.8563
+"parse_flowchart_medium_100_baseline_mean_us" = 240.60
+"parse_flowchart_medium_100_candidate_mean_us" = 281.80
+"parse_flowchart_medium_100_candidate_delta_pct" = 17.1239
+"parse_flowchart_large_1000_baseline_mean_ms" = 3.0699
+"parse_flowchart_large_1000_candidate_mean_ms" = 4.0402
+"parse_flowchart_large_1000_candidate_delta_pct" = 31.6070
+"retained_main_full_pipeline_wide_8x16_mean_ms" = 2.2419
+"retained_main_full_pipeline_wide_12x24_mean_ms" = 5.1960
+"retained_main_full_pipeline_wide_16x32_mean_ms" = 9.9276
+"full_pipeline_wide_8x16_mermaid_js_mean_ms" = 315.1399999976158
+"full_pipeline_wide_12x24_mermaid_js_mean_ms" = 981.7300000190735
+"full_pipeline_wide_16x32_mermaid_js_mean_ms" = 2879.185000014305
+"retained_main_full_pipeline_wide_8x16_frankenmermaid_over_mermaid_js" = 0.007114
+"retained_main_full_pipeline_wide_12x24_frankenmermaid_over_mermaid_js" = 0.005293
+"retained_main_full_pipeline_wide_16x32_frankenmermaid_over_mermaid_js" = 0.003448
+"retained_main_full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 140.57
+"retained_main_full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 188.94
+"retained_main_full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 290.02
+
+[negative_measurement_flowchart_plain_label_shortcut_2026_06_25.decision]
+status = "reject"
+rationale = "Plain-label specialization regressed parse/flowchart medium_100 by 17.12% and large_1000 by 31.61%; code was reverted."
