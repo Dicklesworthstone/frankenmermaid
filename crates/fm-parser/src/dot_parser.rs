@@ -5,6 +5,14 @@ use crate::{DetectionMethod, ParseResult, ir_builder::IrBuilder};
 
 #[must_use]
 pub fn looks_like_dot(input: &str) -> bool {
+    // DOT graphs are brace-delimited, so an input with no braces cannot be DOT. Bail
+    // before `strip_all_comments`, which collects the whole input into a `Vec<char>` and
+    // rescans it — wasteful on every parse of the common Mermaid flowchart (no braces).
+    // Output-identical: comment stripping only removes characters, so a brace in the
+    // cleaned text implies a brace in the raw input.
+    if !input.as_bytes().contains(&b'{') || !input.as_bytes().contains(&b'}') {
+        return false;
+    }
     let cleaned = strip_all_comments(input);
     if dot_header_kind(&cleaned).is_none() {
         return false;

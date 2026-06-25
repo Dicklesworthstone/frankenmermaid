@@ -8315,6 +8315,13 @@ pub fn first_significant_line(input: &str) -> Option<&str> {
 }
 
 fn is_flowchart_header(line: &str) -> bool {
+    // A flowchart header is `flowchart`/`graph` (case-insensitive) at the start of the
+    // already-trimmed statement, so its first byte must be one of those keywords'
+    // initials. Bail before allocating a lowercased copy — this runs for every statement,
+    // and node/edge statements (the overwhelming majority) never start with f/g.
+    if !matches!(line.as_bytes().first(), Some(b'f' | b'F' | b'g' | b'G')) {
+        return false;
+    }
     let lower = line.to_ascii_lowercase();
     matches_keyword_header(&lower, "flowchart") || matches_keyword_header(&lower, "graph")
 }
