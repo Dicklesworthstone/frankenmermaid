@@ -93,16 +93,28 @@ impl PathCommand {
     fn render(&self, output: &mut String) {
         match self {
             Self::MoveTo { x, y } => {
-                let _ = write!(output, "M{} {}", FmtNum(*x), FmtNum(*y));
+                output.push('M');
+                let _ = FmtNum(*x).write_into(output);
+                output.push(' ');
+                let _ = FmtNum(*y).write_into(output);
             }
             Self::MoveToRel { dx, dy } => {
-                let _ = write!(output, "m{} {}", FmtNum(*dx), FmtNum(*dy));
+                output.push('m');
+                let _ = FmtNum(*dx).write_into(output);
+                output.push(' ');
+                let _ = FmtNum(*dy).write_into(output);
             }
             Self::LineTo { x, y } => {
-                let _ = write!(output, "L{} {}", FmtNum(*x), FmtNum(*y));
+                output.push('L');
+                let _ = FmtNum(*x).write_into(output);
+                output.push(' ');
+                let _ = FmtNum(*y).write_into(output);
             }
             Self::LineToRel { dx, dy } => {
-                let _ = write!(output, "l{} {}", FmtNum(*dx), FmtNum(*dy));
+                output.push('l');
+                let _ = FmtNum(*dx).write_into(output);
+                output.push(' ');
+                let _ = FmtNum(*dy).write_into(output);
             }
             Self::HorizontalTo { x } => {
                 let _ = write!(output, "H{}", FmtNum(*x));
@@ -250,17 +262,25 @@ impl PathCommand {
 /// Helper for efficient, zero-allocation number formatting in SVG.
 struct FmtNum(f32);
 
-impl std::fmt::Display for FmtNum {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl FmtNum {
+    /// Write the number directly into `out`, bypassing the `fmt::Formatter` indirection on
+    /// the hot per-path-command serialization path. [`Display`](std::fmt::Display) delegates here.
+    fn write_into<W: std::fmt::Write>(&self, out: &mut W) -> std::fmt::Result {
         let n = self.0;
         if !n.is_finite() {
-            return f.write_str("0");
+            return out.write_str("0");
         }
         if n.fract() == 0.0 && n >= i32::MIN as f32 && n <= i32::MAX as f32 {
-            write!(f, "{}", n as i32)
+            write!(out, "{}", n as i32)
         } else {
-            crate::attributes::write_fixed2(f, n)
+            crate::attributes::write_fixed2(out, n)
         }
+    }
+}
+
+impl std::fmt::Display for FmtNum {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.write_into(f)
     }
 }
 

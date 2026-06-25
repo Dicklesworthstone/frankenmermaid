@@ -3,8 +3,6 @@
 //! Provides structs for creating SVG elements like rect, circle, path, etc.
 //! with a fluent builder API.
 
-use std::fmt::Write;
-
 use crate::attributes::Attributes;
 
 /// Types of SVG elements.
@@ -497,7 +495,10 @@ impl Element {
     /// Write the element to a string.
     pub fn write_to_string(&self, output: &mut String) {
         let tag = self.kind.tag_name();
-        let _ = write!(output, "<{tag}");
+        // Direct pushes instead of write!/format_args (which routes `tag` through
+        // fmt::Formatter) on this per-element hot path. Byte-identical to `<{tag}`.
+        output.push('<');
+        output.push_str(tag);
         self.attrs.write_into(output);
 
         if self.kind.is_self_closing() && self.children.is_empty() && self.text_content.is_none() {
@@ -513,7 +514,9 @@ impl Element {
                 child.write_to_string(output);
             }
 
-            let _ = write!(output, "</{tag}>");
+            output.push_str("</");
+            output.push_str(tag);
+            output.push('>');
         }
     }
 }
