@@ -402,7 +402,7 @@ fn apply_support_contract(
 
 /// Intermediate AST node produced by the chumsky flowchart parser.
 /// Lowered to IR via [`lower_flowchart`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)] // Subgraph variant used in future expansion
 enum FlowAst {
     Direction(GraphDirection),
@@ -427,7 +427,7 @@ enum FlowAst {
     ClassDef,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct FlowAstNode {
     id: String,
     label: Option<ParsedLabel>,
@@ -1080,6 +1080,10 @@ fn parse_flowchart_statement_asts(
     warnings: &mut Vec<String>,
     config: &ParserConfig,
 ) -> Option<Vec<FlowAst>> {
+    if let Some(ast) = parse_fast_simple_flowchart_statement_ast(statement) {
+        return Some(vec![ast]);
+    }
+
     let (ast, errors) = flow_statement_parser()
         .parse(statement)
         .into_output_errors();
@@ -1120,6 +1124,137 @@ fn parse_flowchart_statement_asts(
 
     let _ = source_line;
     None
+}
+
+fn parse_fast_simple_flowchart_statement_ast(statement: &str) -> Option<FlowAst> {
+    parse_fast_simple_flowchart_edge_ast(statement)
+        .or_else(|| parse_fast_simple_flowchart_node_ast(statement).map(FlowAst::Node))
+}
+
+fn parse_fast_simple_flowchart_edge_ast(statement: &str) -> Option<FlowAst> {
+    let trimmed = statement.trim();
+    if trimmed.is_empty()
+        || trimmed.bytes().any(|byte| {
+            matches!(
+                byte,
+                b'[' | b']'
+                    | b'('
+                    | b')'
+                    | b'{'
+                    | b'}'
+                    | b'"'
+                    | b'\''
+                    | b'`'
+                    | b'|'
+                    | b'&'
+                    | b':'
+                    | b','
+            )
+        })
+    {
+        return None;
+    }
+
+    const FAST_OPERATORS: [(&str, ArrowType); 6] = [
+        ("-.->", ArrowType::DottedArrow),
+        ("==>", ArrowType::ThickArrow),
+        ("-->", ArrowType::Arrow),
+        ("---", ArrowType::Line),
+        ("--o", ArrowType::Circle),
+        ("--x", ArrowType::Cross),
+    ];
+
+    let mut matched: Option<(usize, &str, ArrowType)> = None;
+    for (operator, arrow) in FAST_OPERATORS {
+        let Some(index) = trimmed.find(operator) else {
+            continue;
+        };
+        match matched {
+            Some((best_index, best_operator, _))
+                if index > best_index
+                    || (index == best_index && operator.len() <= best_operator.len()) => {}
+            _ => matched = Some((index, operator, arrow)),
+        }
+    }
+
+    let (operator_index, operator, arrow) = matched?;
+    let left = trimmed.get(..operator_index)?.trim();
+    let right = trimmed.get(operator_index + operator.len()..)?.trim();
+    if !is_fast_flow_identifier(left) || !is_fast_flow_identifier(right) {
+        return None;
+    }
+    if FAST_OPERATORS
+        .iter()
+        .any(|(next_operator, _)| right.contains(next_operator))
+    {
+        return None;
+    }
+
+    Some(FlowAst::Edge {
+        from: FlowAstNode {
+            id: left.to_string(),
+            label: None,
+            icon: None,
+            shape: NodeShape::Rect,
+        },
+        arrow,
+        label: None,
+        to: FlowAstNode {
+            id: right.to_string(),
+            label: None,
+            icon: None,
+            shape: NodeShape::Rect,
+        },
+    })
+}
+
+fn parse_fast_simple_flowchart_node_ast(statement: &str) -> Option<FlowAstNode> {
+    let trimmed = statement.trim();
+    if trimmed.is_empty()
+        || trimmed.bytes().any(|byte| {
+            matches!(
+                byte,
+                b'(' | b')' | b'{' | b'}' | b'"' | b'\'' | b'`' | b'|' | b'&' | b','
+            )
+        })
+    {
+        return None;
+    }
+
+    if trimmed.contains('[') {
+        if !trimmed.ends_with(']') {
+            return None;
+        }
+        let (id, label_tail) = trimmed.split_once('[')?;
+        let id = id.trim();
+        let label_raw = label_tail.strip_suffix(']')?.trim();
+        if !is_fast_flow_identifier(id) || label_raw.contains(['[', ']']) {
+            return None;
+        }
+        let mut label = parse_label((!label_raw.is_empty()).then_some(label_raw));
+        let icon = extract_icon_prefix(label.as_mut());
+        clear_empty_label(&mut label);
+        return Some(FlowAstNode {
+            id: id.to_string(),
+            label,
+            icon,
+            shape: NodeShape::Rect,
+        });
+    }
+
+    is_fast_flow_identifier(trimmed).then(|| FlowAstNode {
+        id: trimmed.to_string(),
+        label: None,
+        icon: None,
+        shape: NodeShape::Rect,
+    })
+}
+
+fn is_fast_flow_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/'))
 }
 
 fn add_node_to_active_clusters(
@@ -8374,6 +8509,7 @@ fn is_comment(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use chumsky::Parser;
     use fm_core::{
         ArrowType, DiagnosticCategory, DiagnosticSeverity, DiagramType, GanttDate, GanttExclude,
         GanttTaskType, GanttTickInterval, GraphDirection, IrEndpoint, IrLabelSegment,
@@ -8381,7 +8517,9 @@ mod tests {
     };
 
     use super::{
-        STYLE_DIRECTIVE_DIAGNOSTIC_MESSAGE, is_dangling_placeholder_node_id, parse_mermaid,
+        FLOW_OPERATORS, STYLE_DIRECTIVE_DIAGNOSTIC_MESSAGE, flow_statement_parser,
+        is_dangling_placeholder_node_id, parse_edge_statement_asts,
+        parse_fast_simple_flowchart_statement_ast, parse_mermaid,
     };
     use crate::{ParserConfig, detect_type, parse_with_mode_and_config};
 
@@ -8430,6 +8568,80 @@ mod tests {
         assert!(parsed.ir.nodes.iter().any(|node| node.id == "A"));
         assert!(parsed.ir.nodes.iter().any(|node| node.id == "B"));
         assert!(parsed.ir.nodes.iter().any(|node| node.id == "C"));
+    }
+
+    #[test]
+    fn flowchart_fast_path_matches_fallback_for_simple_edges() {
+        for statement in [
+            "A-->B",
+            "A --> B",
+            "left_1 -.-> right.2",
+            "svc/api ==> db-node",
+            "A---B",
+            "A--oB",
+            "A--xB",
+        ] {
+            let fast = parse_fast_simple_flowchart_statement_ast(statement);
+            assert!(fast.is_some(), "fast path rejected {statement:?}");
+            let Some(fast) = fast else {
+                return;
+            };
+            let fallback = parse_edge_statement_asts(
+                statement,
+                &FLOW_OPERATORS,
+                true,
+                &ParserConfig::default(),
+                0,
+            );
+            assert_eq!(
+                Some(vec![fast]),
+                fallback,
+                "fast path diverged from fallback edge parser for {statement:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn flowchart_fast_path_matches_chumsky_for_simple_nodes() {
+        for statement in [
+            "A",
+            "node_1[Node 1]",
+            "svc/api[Service API]",
+            "db-node[fa:database Storage]",
+            "stage.one[Stage One]",
+        ] {
+            let fast = parse_fast_simple_flowchart_statement_ast(statement);
+            assert!(fast.is_some(), "fast path rejected {statement:?}");
+            let Some(fast) = fast else {
+                return;
+            };
+            let (chumsky, errors) = flow_statement_parser()
+                .parse(statement)
+                .into_output_errors();
+            assert!(
+                errors.is_empty(),
+                "chumsky rejected {statement:?}: {errors:?}"
+            );
+            assert_eq!(Some(fast), chumsky, "fast path diverged for {statement:?}");
+        }
+    }
+
+    #[test]
+    fn flowchart_fast_path_rejects_complex_statements() {
+        for statement in [
+            "A-->B-->C",
+            "A & B --> C",
+            "A[Start] -->|go| B(End)",
+            "class A hot",
+            "click A callback \"tip\"",
+            "A:::hot",
+            "A[[Subroutine]]",
+        ] {
+            assert!(
+                parse_fast_simple_flowchart_statement_ast(statement).is_none(),
+                "fast path should reject complex statement {statement:?}"
+            );
+        }
     }
 
     #[test]

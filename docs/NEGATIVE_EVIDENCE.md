@@ -110,6 +110,41 @@ _(none yet — first measured experiments in progress)_
   this cheaper hint on a same-worker medium/large run without small-diagram
   overhead.
 
+### Simple flowchart parser fast path — KEPT (2026-06-25)
+- **Lever:** `fm-parser::parse_flowchart_statement_asts` first recognizes simple
+  bare-node and bare-edge flowchart statements directly, then falls through to
+  the existing chumsky/fallback parser stack for complex syntax. Accepted fast
+  cases are bare ids, `id[label]`, and bare-id edges using `-.->`, `==>`, `-->`,
+  `---`, `--o`, or `--x`.
+- **Hypothesis:** generated and real-world flowcharts are dominated by simple
+  node/edge statements, while the generic statement parser and recovery cascade
+  pay avoidable parser-construction and parser-combinator overhead on every line.
+- **Baseline -> After:** detached baseline worktree
+  `/data/projects/.worktrees/frankenmermaid-cod-b-parser-baseline-48bb15c` at
+  `48bb15c` vs candidate checkout, local same-machine, per-crate package
+  `frankenmermaid-cli`, target dir
+  `/data/projects/.rch-targets/frankenmermaid-cod-b`. Parse-only means:
+  `parse/flowchart/small_10` `71.856 us` -> `32.963 us` (`2.180x`);
+  `medium_100` `662.18 us` -> `271.47 us` (`2.439x`);
+  `large_1000` `7.3442 ms` -> `3.9525 ms` (`1.858x`). Wide full-pipeline
+  means: `8x16` `3.0428 ms` -> `2.1856 ms` (`1.392x`); `12x24`
+  `7.8318 ms` -> `5.2484 ms` (`1.492x`); `16x32` `13.182 ms` ->
+  `9.7081 ms` (`1.358x`).
+- **Original comparator:** Mermaid `11.12.0` browser bundle from
+  `https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.min.js`, Chromium
+  headless, `maxEdges=2000`, 3 warmups, 20 timed render-to-SVG iterations.
+- **frankenmermaid/Mermaid ratio:** full-pipeline wide SVG mean ratios were
+  `0.004378x` (`8x16`: `2.1856 ms` vs `499.28 ms`), `0.004870x`
+  (`12x24`: `5.2484 ms` vs `1077.69 ms`), and `0.002459x`
+  (`16x32`: `9.7081 ms` vs `3948.7 ms`), i.e. Mermaid.js was `228.4x`,
+  `205.3x`, and `406.7x` slower on those inputs.
+- **Verdict:** kept; parse-only improves by roughly 1.86x-2.44x and the wide
+  full-pipeline comparator improves by roughly 1.36x-1.49x on final-code
+  same-machine absolute means.
+- **Do-not-retry note:** do not broaden the fast path to labels, chained edges,
+  grouped sources/targets, class shorthand, quoted labels, or shape-rich nodes
+  without differential tests against the fallback parser and conformance proof.
+
 ## Blocked/Invalid Evidence Attempts
 
 ### Agent Mail registration/reservation — BLOCKED (2026-06-24)

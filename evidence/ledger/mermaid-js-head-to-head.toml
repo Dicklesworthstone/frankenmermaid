@@ -148,3 +148,54 @@ behavior_proof = "Attribute names and values render through the same Attributes:
 [post_measurement_svg_capacity.decision]
 status = "keep"
 rationale = "Same-worker render_svg proof shows a 6.03% win on large_500 and 5.58% on small_10 with no measured regressions; fresh full_pipeline_wide candidate ratios remain 97.24x-168.00x faster than Mermaid 11.12.0."
+
+[post_measurement_parser_fast_path]
+date = "2026-06-25"
+agent = "TanSparrow"
+lever_bead = "bd-1buv.1"
+worker_delta = "local"
+worker_ratio = "local"
+baseline_worktree = "/data/projects/.worktrees/frankenmermaid-cod-b-parser-baseline-48bb15c"
+baseline_commit = "48bb15c"
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-b"
+parse_baseline_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b RUSTFLAGS='-C metadata=codbbaselinefastpath' rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- parse/flowchart --warm-up-time 1 --measurement-time 2"
+parse_candidate_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b RUSTFLAGS='-C metadata=codbcandidatefastpathlocal' cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- parse/flowchart --warm-up-time 1 --measurement-time 2"
+wide_baseline_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b RUSTFLAGS='-C metadata=codbbaselinefastpathwide' cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+wide_candidate_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b RUSTFLAGS='-C metadata=codbcandidatefastpathwide' cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+mermaid_js_command = "Pinned Chromium headless data-URL harness recorded in [original_comparator]; denominator reused unchanged for the same generated wide inputs."
+rust_build_profile = "release profile [optimized]"
+candidate_summary = "Fast-path simple flowchart statements before constructing the generic chumsky statement parser: bare ids, id[label], and simple bare-id edges."
+behavior_proof = "Focused tests compare simple fast-path edge ASTs with the existing fallback edge parser and simple fast-path node ASTs with the chumsky parser; complex syntax is rejected and falls through."
+
+[post_measurement_parser_fast_path.metrics]
+"parse_flowchart_small_10_baseline_mean_us" = 71.856
+"parse_flowchart_small_10_candidate_mean_us" = 32.963
+"parse_flowchart_small_10_speedup" = 2.180
+"parse_flowchart_medium_100_baseline_mean_us" = 662.18
+"parse_flowchart_medium_100_candidate_mean_us" = 271.47
+"parse_flowchart_medium_100_speedup" = 2.439
+"parse_flowchart_large_1000_baseline_mean_ms" = 7.3442
+"parse_flowchart_large_1000_candidate_mean_ms" = 3.9525
+"parse_flowchart_large_1000_speedup" = 1.858
+"full_pipeline_wide_8x16_baseline_mean_ms" = 3.0428
+"full_pipeline_wide_8x16_candidate_mean_ms" = 2.1856
+"full_pipeline_wide_8x16_speedup" = 1.392
+"full_pipeline_wide_12x24_baseline_mean_ms" = 7.8318
+"full_pipeline_wide_12x24_candidate_mean_ms" = 5.2484
+"full_pipeline_wide_12x24_speedup" = 1.492
+"full_pipeline_wide_16x32_baseline_mean_ms" = 13.182
+"full_pipeline_wide_16x32_candidate_mean_ms" = 9.7081
+"full_pipeline_wide_16x32_speedup" = 1.358
+"full_pipeline_wide_8x16_mermaid_js_mean_ms" = 499.28
+"full_pipeline_wide_12x24_mermaid_js_mean_ms" = 1077.69
+"full_pipeline_wide_16x32_mermaid_js_mean_ms" = 3948.7
+"full_pipeline_wide_8x16_frankenmermaid_over_mermaid_js" = 0.004378
+"full_pipeline_wide_12x24_frankenmermaid_over_mermaid_js" = 0.004870
+"full_pipeline_wide_16x32_frankenmermaid_over_mermaid_js" = 0.002459
+"full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 228.4
+"full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 205.3
+"full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 406.7
+
+[post_measurement_parser_fast_path.decision]
+status = "keep"
+rationale = "Same-machine parser proof shows 1.86x-2.44x parse speedups, and same-machine full_pipeline_wide proof shows 1.36x-1.49x speedups with ratios now 205.3x-406.7x faster than Mermaid 11.12.0."
