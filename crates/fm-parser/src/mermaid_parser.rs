@@ -7544,6 +7544,12 @@ fn parse_xychart_series(line: &str) -> Option<(&str, Option<String>, &str)> {
 }
 
 fn parse_init_directives(input: &str, builder: &mut IrBuilder) {
+    // Init directives are `%%{ ... }%%` blocks; if that marker never appears there is
+    // nothing to parse, so skip the per-line scan (run on every parse). Output-identical:
+    // `extract_init_payload` only matches lines containing `%%{`.
+    if !input.contains("%%{") {
+        return;
+    }
     for (index, line) in input.lines().enumerate() {
         let line_number = index + 1;
         let trimmed = line.trim();
@@ -8485,6 +8491,14 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
 /// - `accDescr: Single-line description`
 /// - `accDescr { multi-line description }`
 fn extract_accessibility_directives(input: &str, builder: &mut IrBuilder) {
+    // The only accessibility directives are `accTitle`/`accDescr`; if neither keyword
+    // appears, bail before the per-line scan (run on every parse of every diagram type).
+    // Output-identical: with neither substring no directive line matches and no accDescr
+    // block is ever opened, so there is nothing to flush at end of input.
+    if !input.contains("accTitle") && !input.contains("accDescr") {
+        return;
+    }
+
     let mut in_acc_descr_block = false;
     let mut descr_lines: Vec<&str> = Vec::new();
 
