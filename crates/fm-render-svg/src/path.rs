@@ -259,7 +259,7 @@ impl std::fmt::Display for FmtNum {
         if n.fract() == 0.0 && n >= i32::MIN as f32 && n <= i32::MAX as f32 {
             write!(f, "{}", n as i32)
         } else {
-            write!(f, "{n:.2}")
+            crate::attributes::write_fixed2(f, n)
         }
     }
 }

@@ -38,7 +38,7 @@ impl fmt::Display for AttributeValue {
                 {
                     write!(f, "{}", *n as i32)
                 } else {
-                    write!(f, "{n:.2}")
+                    write_fixed2(f, *n)
                 }
             }
             Self::Integer(i) => write!(f, "{i}"),
@@ -199,6 +199,30 @@ impl Attributes {
     }
 }
 
+/// Write `value` to exactly two decimal places, byte-for-byte identical to
+/// `write!(f, "{value:.2}")`, but without the general float-to-decimal formatting
+/// machinery — which dominates SVG serialization on coordinate-heavy diagrams.
+///
+/// Promoting to `f64` is lossless for an `f32`, so scaling by 100 and rounding
+/// (ties to even, matching `{:.2}`) reproduces the exact decimal rounding of the
+/// underlying `f32`. Values too large to scale into `i64`, and any non-finite input,
+/// fall back to the standard formatter so output stays identical in every case.
+/// Verified byte-identical against `{:.2}` over a dense value sweep in the tests.
+pub(crate) fn write_fixed2<W: fmt::Write>(f: &mut W, value: f32) -> fmt::Result {
+    if !value.is_finite() || value.abs() >= 9.0e15 {
+        // Non-finite, or large enough that `* 100` could overflow `i64`.
+        return write!(f, "{value:.2}");
+    }
+    let scaled = (f64::from(value) * 100.0).round_ties_even();
+    let magnitude = (scaled as i64).unsigned_abs();
+    let int_part = magnitude / 100;
+    let frac_part = magnitude % 100;
+    if value.is_sign_negative() {
+        f.write_char('-')?;
+    }
+    write!(f, "{int_part}.{frac_part:02}")
+}
+
 /// Escape special characters in XML attribute values.
 fn escape_xml_attr(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
@@ -239,6 +263,28 @@ pub fn escape_xml_text(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn write_fixed2_byte_identical_to_std_format() {
+        let check = |v: f32| {
+            let mut got = String::new();
+            write_fixed2(&mut got, v).unwrap();
+            assert_eq!(got, format!("{v:.2}"), "mismatch for {v} (bits {:#010x})", v.to_bits());
+        };
+        // Dense sweep across the realistic coordinate range (fine step, both signs).
+        let mut i: i32 = -3_000_000;
+        while i <= 3_000_000 {
+            check(i as f32 / 1000.0);
+            i += 1;
+        }
+        // Half-way / rounding-tie cases and larger magnitudes.
+        for &v in &[
+            0.005f32, -0.005, 0.015, 0.025, 0.045, 0.125, 0.135, 1.005, 2.675, 2.685, -2.675,
+            -0.001, 0.001, 12345.67, -88888.88, 99999.99, 131071.99, 262143.5, 1.0e7 + 0.5,
+        ] {
+            check(v);
+        }
+    }
 
     #[test]
     fn renders_attributes() {
