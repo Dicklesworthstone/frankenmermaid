@@ -338,3 +338,87 @@ behavior_proof = "Only private Vec allocation capacity changes before attributes
 [post_measurement_svg_attribute_vec_capacity.decision]
 status = "keep"
 rationale = "Same-machine A/B shows an 8.22% win on render_svg large_500 and a 4.49% win on full_pipeline_wide 12x24; other wide cases were no-change/noise, and fresh live-CDP Mermaid 11.12.0 ratios remain 162.82x-276.43x faster."
+
+[negative_measurement_attrs_presize_reverify_2026_06_25]
+date = "2026-06-25"
+agent = "TanSparrow"
+lever_bead = "bd-1buv.2"
+worker_delta = "ovh-a"
+baseline_commit = "b52b71c"
+candidate_commit = "5b81012 cherry-picked for verification only"
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-b"
+render_baseline_command = "RCH_WORKER=hz2 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b RUSTFLAGS='-C metadata=codbattrsbaseline' rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- render_svg --warm-up-time 1 --measurement-time 2"
+render_candidate_command = "RCH_WORKER=ovh-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b RUSTFLAGS='-C metadata=codbattrscandidate' rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- render_svg --warm-up-time 1 --measurement-time 2"
+mermaid_js_command = "Pinned Chromium headless data-URL harness recorded in [original_comparator]; denominator reused unchanged for the same generated wide inputs."
+rust_build_profile = "release profile [optimized]"
+candidate_summary = "Pre-size Attributes::new with Vec::with_capacity(12), re-verifying an unpushed worktree win against the b52b71c current-main baseline."
+behavior_proof = "Pure capacity-only candidate. This recheck did not independently clear the keep threshold; upstream d568ce6 landed the lever during rebase using its own same-machine evidence."
+notes = [
+  "Initial rch attempt selected vmi1264463 and failed before benchmark execution because cmake was unavailable for highs-sys; reran on ovh-a.",
+  "The candidate previously measured as a win against older main, but the current b52b71c renderer baseline already includes the edge-style short-circuit.",
+]
+
+[negative_measurement_attrs_presize_reverify_2026_06_25.metrics]
+"render_svg_small_10_baseline_mean_us" = 117.66
+"render_svg_small_10_candidate_mean_us" = 115.06
+"render_svg_small_10_speedup" = 1.023
+"render_svg_medium_100_baseline_mean_us" = 689.56
+"render_svg_medium_100_candidate_mean_us" = 685.37
+"render_svg_medium_100_speedup" = 1.006
+"render_svg_large_500_baseline_mean_ms" = 3.2504
+"render_svg_large_500_candidate_mean_ms" = 3.2109
+"render_svg_large_500_speedup" = 1.012
+"full_pipeline_wide_8x16_mermaid_js_mean_ms" = 499.28
+"full_pipeline_wide_12x24_mermaid_js_mean_ms" = 1077.69
+"full_pipeline_wide_16x32_mermaid_js_mean_ms" = 3948.7
+"retained_main_full_pipeline_wide_8x16_frankenmermaid_over_mermaid_js" = 0.004995
+"retained_main_full_pipeline_wide_12x24_frankenmermaid_over_mermaid_js" = 0.005237
+"retained_main_full_pipeline_wide_16x32_frankenmermaid_over_mermaid_js" = 0.002860
+"retained_main_full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 200.2
+"retained_main_full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 190.9
+"retained_main_full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 349.6
+
+[negative_measurement_attrs_presize_reverify_2026_06_25.decision]
+status = "caution"
+rationale = "Current-main recheck shows only 0.6%-2.3% render-only improvement, below the >=3% keep threshold for this lane, while upstream d568ce6 remains the landed Attributes Vec capacity commit."
+
+[negative_measurement_edge_path_streaming_2026_06_25]
+date = "2026-06-25"
+agent = "TanSparrow"
+lever_bead = "bd-1buv.2"
+worker_delta = "ovh-a"
+baseline_commit = "b52b71c"
+candidate_summary = "Stream edge path d strings directly from LayoutEdgePath points, bypassing the temporary offset-point Vec and PathBuilder command Vec."
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-b"
+render_baseline_command = "RCH_WORKER=hz2 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b RUSTFLAGS='-C metadata=codbattrsbaseline' rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- render_svg --warm-up-time 1 --measurement-time 2"
+render_candidate_command = "RCH_WORKER=ovh-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b RUSTFLAGS='-C metadata=codbedgestreamcandidate' rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- render_svg --warm-up-time 1 --measurement-time 2"
+mermaid_js_command = "Pinned Chromium headless data-URL harness recorded in [original_comparator]; denominator reused unchanged for the same generated wide inputs."
+rust_build_profile = "release profile [optimized]"
+behavior_proof = "Focused unit test compared streamed output byte-for-byte with the existing PathBuilder helper before the candidate was reverted."
+notes = [
+  "Candidate was reverted before commit because every render_svg case moved slightly slower and Criterion reported change within noise threshold.",
+]
+
+[negative_measurement_edge_path_streaming_2026_06_25.metrics]
+"render_svg_small_10_baseline_mean_us" = 117.66
+"render_svg_small_10_candidate_mean_us" = 118.12
+"render_svg_small_10_speedup" = 0.996
+"render_svg_medium_100_baseline_mean_us" = 689.56
+"render_svg_medium_100_candidate_mean_us" = 697.50
+"render_svg_medium_100_speedup" = 0.989
+"render_svg_large_500_baseline_mean_ms" = 3.2504
+"render_svg_large_500_candidate_mean_ms" = 3.2647
+"render_svg_large_500_speedup" = 0.996
+"full_pipeline_wide_8x16_mermaid_js_mean_ms" = 499.28
+"full_pipeline_wide_12x24_mermaid_js_mean_ms" = 1077.69
+"full_pipeline_wide_16x32_mermaid_js_mean_ms" = 3948.7
+"retained_main_full_pipeline_wide_8x16_frankenmermaid_over_mermaid_js" = 0.004995
+"retained_main_full_pipeline_wide_12x24_frankenmermaid_over_mermaid_js" = 0.005237
+"retained_main_full_pipeline_wide_16x32_frankenmermaid_over_mermaid_js" = 0.002860
+"retained_main_full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 200.2
+"retained_main_full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 190.9
+"retained_main_full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 349.6
+
+[negative_measurement_edge_path_streaming_2026_06_25.decision]
+status = "reject"
+rationale = "Direct edge-path string emission was byte-equivalent but measured as a slight render-only regression/noise on current main."

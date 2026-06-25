@@ -50,7 +50,69 @@
 
 ## Entries
 
-_(none yet — first measured experiments in progress)_
+### Attributes Vec pre-size after edge-style fast path — CAUTION (2026-06-25)
+- **Lever:** `fm-render-svg::Attributes::new` changed from `Vec::new()` to
+  `Vec::with_capacity(12)`, based on an unpushed worktree commit
+  `5b81012` that had measured as a renderer win before the current
+  edge-style short-circuit landed.
+- **Hypothesis:** most SVG elements carry several attributes, so pre-sizing the
+  attribute vector should avoid repeated small Vec growth on node/edge element
+  construction.
+- **Baseline -> After:** re-verified against current `main` baseline
+  `b52b71c` on `ovh-a`, package `frankenmermaid-cli`, bench
+  `pipeline_bench`, filter `render_svg`, target dir
+  `/data/projects/.rch-targets/frankenmermaid-cod-b`. Means were
+  `small_10` `117.66 us` -> `115.06 us` (`1.023x`), `medium_100`
+  `689.56 us` -> `685.37 us` (`1.006x`), and `large_500` `3.2504 ms`
+  -> `3.2109 ms` (`1.012x`).
+- **Original comparator:** Mermaid `11.12.0` browser bundle from
+  `https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.min.js`,
+  Chromium headless, `maxEdges=2000`, 3 warmups, 20 timed render-to-SVG
+  iterations.
+- **frankenmermaid/Mermaid ratio:** retained current-main ratios remain
+  `0.004995x` (`8x16`), `0.005237x` (`12x24`), and `0.002860x`
+  (`16x32`), i.e. Mermaid.js is still `200.2x`, `190.9x`, and `349.6x`
+  slower on the pinned wide inputs.
+- **Verdict:** not an independent keep by this recheck; every re-verified
+  render-only gain is below the >=3% keep bar after the already-landed
+  edge-style fast path changed the baseline. Upstream `d568ce6` landed this
+  lever during rebase using its own same-machine evidence and is also recorded
+  in `evidence/ledger/mermaid-js-head-to-head.toml`.
+- **Revert:** none in this commit; no additional production code was landed by
+  this recheck.
+- **Do-not-retry note:** do not resurrect the broad default capacity of 12
+  unless a fresh profile shows `Attributes` Vec growth back in the top renderer
+  costs on current `main`.
+
+### Direct edge-path string emission — REJECTED (2026-06-25)
+- **Lever:** `fm-render-svg` streamed Catmull-Rom edge path text directly from
+  `LayoutEdgePath` points with offsets, bypassing the temporary offset-point
+  `Vec` and the intermediate `PathBuilder` command vector.
+- **Hypothesis:** generated flowcharts have many edges, so eliminating two
+  short-lived allocations per edge should improve render-only large-flowchart
+  throughput.
+- **Baseline -> After:** same `ovh-a` baseline at `b52b71c`, package
+  `frankenmermaid-cli`, bench `pipeline_bench`, filter `render_svg`, target
+  dir `/data/projects/.rch-targets/frankenmermaid-cod-b`. Means were
+  `small_10` `117.66 us` -> `118.12 us` (`0.996x`), `medium_100`
+  `689.56 us` -> `697.50 us` (`0.989x`), and `large_500` `3.2504 ms`
+  -> `3.2647 ms` (`0.996x`). Criterion marked the changes within its noise
+  threshold, with a slight slower direction in all three cases.
+- **Original comparator:** Mermaid `11.12.0` browser bundle from
+  `https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.min.js`,
+  Chromium headless, `maxEdges=2000`, 3 warmups, 20 timed render-to-SVG
+  iterations.
+- **frankenmermaid/Mermaid ratio:** retained current-main ratios remain
+  `0.004995x` (`8x16`), `0.005237x` (`12x24`), and `0.002860x`
+  (`16x32`), i.e. Mermaid.js is still `200.2x`, `190.9x`, and `349.6x`
+  slower on the pinned wide inputs.
+- **Verdict:** reverted before commit; the direct writer was byte-equivalent in
+  a focused unit test but did not improve the measured renderer path.
+- **Revert:** manual `apply_patch` removal in this session; no production code
+  diff remains.
+- **Do-not-retry note:** the per-edge path allocation is not the active
+  bottleneck at current graph sizes. Route future renderer work toward measured
+  element construction or text/style costs instead.
 
 ## Kept Wins Also Recorded Here By Request
 
