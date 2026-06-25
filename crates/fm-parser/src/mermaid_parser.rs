@@ -8349,6 +8349,15 @@ fn is_non_graph_statement(line: &str) -> bool {
 /// to rendering output. A compatibility warning is emitted for each directive
 /// to inform users that their styles will not be applied.
 fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
+    // Every style-directive line starts with `classDef`/`style`/`linkStyle`/`class`; if
+    // none of those substrings occur anywhere, there is nothing to extract and the whole
+    // per-line scan (which computes a span_for/char-count for every line) is pure waste —
+    // the common flowchart has no style directives. Output-identical: with no directive
+    // the loop leaves `saw_style_directive` false and the trailing block is skipped.
+    if !input.contains("class") && !input.contains("style") && !input.contains("linkStyle") {
+        return;
+    }
+
     let mut saw_style_directive = false;
     let mut first_style_span = None;
 
