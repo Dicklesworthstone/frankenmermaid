@@ -3,7 +3,7 @@
 //! Provides a flexible way to manage SVG attributes with proper escaping.
 
 use std::borrow::Cow;
-use std::fmt::{self, Write};
+use std::fmt;
 
 /// A single SVG attribute.
 #[derive(Debug, Clone)]
@@ -160,13 +160,19 @@ impl Attributes {
             .map(|a| &a.value)
     }
 
+    /// Write the attributes directly into `out`, avoiding the intermediate `String`
+    /// that [`render`](Self::render) allocates per element on the hot serialization path.
+    pub fn write_into<W: fmt::Write>(&self, out: &mut W) {
+        for attr in &self.attrs {
+            let _ = write!(out, " {}=\"{}\"", attr.name, attr.value);
+        }
+    }
+
     /// Render attributes to a string.
     #[must_use]
     pub fn render(&self) -> String {
         let mut result = String::new();
-        for attr in &self.attrs {
-            let _ = write!(result, " {}=\"{}\"", attr.name, attr.value);
-        }
+        self.write_into(&mut result);
         result
     }
 

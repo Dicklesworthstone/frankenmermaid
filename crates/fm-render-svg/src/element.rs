@@ -498,7 +498,7 @@ impl Element {
     pub fn write_to_string(&self, output: &mut String) {
         let tag = self.kind.tag_name();
         let _ = write!(output, "<{tag}");
-        output.push_str(&self.attrs.render());
+        self.attrs.write_into(output);
 
         if self.kind.is_self_closing() && self.children.is_empty() && self.text_content.is_none() {
             output.push_str("/>");
