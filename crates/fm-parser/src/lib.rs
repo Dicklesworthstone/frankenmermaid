@@ -606,7 +606,10 @@ pub fn detect_type(input: &str) -> DiagramType {
 
 #[must_use]
 pub fn build_parse_lens(input: &str) -> ParseLensSnapshot {
-    let parsed = parse(input);
+    let mut parsed = parse(input);
+    // The lens needs the format complement for round-trip editing; `parse` no longer
+    // captures it on the hot path, so capture it explicitly here.
+    parsed.format_complement = capture_format_complement(input);
     let source_map = parsed.ir.source_map();
     let bindings = build_lens_bindings(input, &source_map);
     ParseLensSnapshot {
@@ -739,7 +742,7 @@ pub fn parse_with_mode_and_config(
             warnings: vec!["Input was empty; returning empty IR".to_string()],
             confidence: 0.0,
             detection_method: DetectionMethod::Fallback,
-            format_complement: capture_format_complement(input),
+            format_complement: MermaidFormatComplement::default(),
         };
     }
 
@@ -755,14 +758,19 @@ pub fn parse_with_mode_and_config(
         result.confidence = detection.confidence;
         result.detection_method = detection.method;
         result.ir.meta.parse_mode = parse_mode;
-        result.format_complement = capture_format_complement(input);
+        result.format_complement = MermaidFormatComplement::default();
         return result;
     }
 
     let mut result = mermaid_parser::parse_mermaid_with_detection_and_config(
         input, detection, parse_mode, config,
     );
-    result.format_complement = capture_format_complement(input);
+    // The format complement (whitespace/comment/directive/quoted-literal spans) is
+    // only needed for round-trip editing (`build_parse_lens`) and evidence output —
+    // never by the parse → layout → render hot path. Capturing it costs ~10-22% of
+    // parse time, so it is left empty here and captured explicitly by the consumers
+    // that need it (see `capture_format_complement`).
+    result.format_complement = MermaidFormatComplement::default();
     result
 }
 
@@ -1128,7 +1136,10 @@ mod tests {
     fn parse_result_exposes_format_complement() {
         let input =
             "%%{init: {\"theme\":\"dark\"}}%%\n%% comment\nflowchart LR\nA[Alpha] --> B[Beta]\n";
-        let result = parse(input);
+        // `parse` no longer captures the format complement on the hot path; consumers
+        // (here and `build_parse_lens`) capture it explicitly when needed.
+        let mut result = parse(input);
+        result.format_complement = capture_format_complement(input);
 
         assert_eq!(result.format_complement.directives.len(), 1);
         assert_eq!(result.format_complement.comments.len(), 1);

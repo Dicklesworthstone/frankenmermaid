@@ -48,8 +48,8 @@ use fm_layout::{
     layout_diagram_traced_with_config_and_guardrails, layout_source_map,
 };
 use fm_parser::{
-    ParserConfig, detect_type_with_confidence_and_config, first_significant_line,
-    parse_evidence_json, parse_with_mode, parse_with_mode_and_config,
+    ParserConfig, capture_format_complement, detect_type_with_confidence_and_config,
+    first_significant_line, parse_evidence_json, parse_with_mode, parse_with_mode_and_config,
 };
 use fm_render_svg::{
     A11yConfig, SvgRenderConfig, ThemePreset, describe_diagram_with_layout, render_svg_with_layout,
@@ -2856,7 +2856,10 @@ fn cmd_parse(
     max_input_bytes: usize,
 ) -> Result<()> {
     let source = load_input(input, max_input_bytes)?;
-    let parsed = parse_with_mode_and_config(&source, parse_mode, &parser_config);
+    let mut parsed = parse_with_mode_and_config(&source, parse_mode, &parser_config);
+    // The `parse` command surfaces format-complement counts in its evidence summary,
+    // so capture it explicitly here (the parse hot path no longer does).
+    parsed.format_complement = capture_format_complement(&source);
 
     let output = if full {
         // Full IR output
