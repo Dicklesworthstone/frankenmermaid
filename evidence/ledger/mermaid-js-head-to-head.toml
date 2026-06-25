@@ -199,3 +199,37 @@ behavior_proof = "Focused tests compare simple fast-path edge ASTs with the exis
 [post_measurement_parser_fast_path.decision]
 status = "keep"
 rationale = "Same-machine parser proof shows 1.86x-2.44x parse speedups, and same-machine full_pipeline_wide proof shows 1.36x-1.49x speedups with ratios now 205.3x-406.7x faster than Mermaid 11.12.0."
+
+[post_measurement_bold_verify_2026_06_25]
+date = "2026-06-25"
+agent = "TanSparrow"
+worker = "hz2"
+rust_command = "RCH_WORKER=hz2 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+mermaid_js_command = "Node v24.14.0 Chrome DevTools Protocol harness launching /snap/bin/chromium --headless=new and dynamically importing https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.esm.min.mjs"
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-a"
+rust_build_profile = "bench profile [optimized]"
+comparator_runtime = "/snap/bin/chromium headless via CDP"
+candidate_summary = "Fresh BOLD verification of current main after parser, edge-routing, and SVG renderer wins already landed."
+behavior_proof = "No production code changed in this verification entry; the measured Rust path is the existing parse -> layout -> render_svg pipeline benchmark."
+notes = [
+  "Initial rch attempt selected vmi1227854 and failed before benchmark execution because cmake was unavailable for highs-sys; reran on hz2.",
+  "chromium --dump-dom with virtual time produced valid SVG but zero timing, so the recorded comparator uses a live CDP page and performance.now wall-clock samples.",
+]
+
+[post_measurement_bold_verify_2026_06_25.metrics]
+"full_pipeline_wide_8x16_frankenmermaid_mean_ms" = 2.1367
+"full_pipeline_wide_12x24_frankenmermaid_mean_ms" = 4.9451
+"full_pipeline_wide_16x32_frankenmermaid_mean_ms" = 9.1147
+"full_pipeline_wide_8x16_mermaid_js_mean_ms" = 373.2200000047684
+"full_pipeline_wide_12x24_mermaid_js_mean_ms" = 1238.1649999976157
+"full_pipeline_wide_16x32_mermaid_js_mean_ms" = 2830.4949999928476
+"full_pipeline_wide_8x16_frankenmermaid_over_mermaid_js" = 0.005725
+"full_pipeline_wide_12x24_frankenmermaid_over_mermaid_js" = 0.003994
+"full_pipeline_wide_16x32_frankenmermaid_over_mermaid_js" = 0.003220
+"full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 174.67
+"full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 250.38
+"full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 310.54
+
+[post_measurement_bold_verify_2026_06_25.decision]
+status = "verified"
+rationale = "Current main full-pipeline-wide Rust means are 174.67x-310.54x faster than Mermaid 11.12.0 on the same generated wide flowchart workloads, using the requested per-crate cargo bench lane and a live browser comparator."

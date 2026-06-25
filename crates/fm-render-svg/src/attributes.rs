@@ -319,9 +319,30 @@ mod tests {
             r
         }
         let cases = [
-            "", "abc", "a&b", "<x>", "\"q\"", "'s'", "]]>", "a]]>b", "]>", "]]", "café ☕",
-            "<&>\"'", "node A & B", "x]]>y]]>z", "<<<", "&amp;already", "a > b", "div > p",
-            "]] >", "] ] >", "résumé < β & δ > \"τ\"", "🚀]]>🚀", "tail]]", "lead]]>",
+            "",
+            "abc",
+            "a&b",
+            "<x>",
+            "\"q\"",
+            "'s'",
+            "]]>",
+            "a]]>b",
+            "]>",
+            "]]",
+            "café ☕",
+            "<&>\"'",
+            "node A & B",
+            "x]]>y]]>z",
+            "<<<",
+            "&amp;already",
+            "a > b",
+            "div > p",
+            "]] >",
+            "] ] >",
+            "résumé < β & δ > \"τ\"",
+            "🚀]]>🚀",
+            "tail]]",
+            "lead]]>",
         ];
         for s in cases {
             let mut got_attr = String::new();
@@ -331,7 +352,11 @@ mod tests {
             let mut got_text = String::new();
             write_escaped_text(&mut got_text, s).unwrap();
             assert_eq!(got_text, ref_text(s), "text mismatch for {s:?}");
-            assert_eq!(escape_xml_text(s), ref_text(s), "escape_xml_text mismatch for {s:?}");
+            assert_eq!(
+                escape_xml_text(s),
+                ref_text(s),
+                "escape_xml_text mismatch for {s:?}"
+            );
         }
     }
 
@@ -340,7 +365,12 @@ mod tests {
         let check = |v: f32| {
             let mut got = String::new();
             write_fixed2(&mut got, v).unwrap();
-            assert_eq!(got, format!("{v:.2}"), "mismatch for {v} (bits {:#010x})", v.to_bits());
+            assert_eq!(
+                got,
+                format!("{v:.2}"),
+                "mismatch for {v} (bits {:#010x})",
+                v.to_bits()
+            );
         };
         // Dense sweep across the realistic coordinate range (fine step, both signs).
         let mut i: i32 = -3_000_000;
@@ -350,8 +380,25 @@ mod tests {
         }
         // Half-way / rounding-tie cases and larger magnitudes.
         for &v in &[
-            0.005f32, -0.005, 0.015, 0.025, 0.045, 0.125, 0.135, 1.005, 2.675, 2.685, -2.675,
-            -0.001, 0.001, 12345.67, -88888.88, 99999.99, 131071.99, 262143.5, 1.0e7 + 0.5,
+            0.005f32,
+            -0.005,
+            0.015,
+            0.025,
+            0.045,
+            0.125,
+            0.135,
+            1.005,
+            2.675,
+            2.685,
+            -2.675,
+            -0.001,
+            0.001,
+            12345.67,
+            -88888.88,
+            99999.99,
+            131071.99,
+            262143.5,
+            1.0e7 + 0.5,
         ] {
             check(v);
         }

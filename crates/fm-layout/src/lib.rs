@@ -11030,14 +11030,10 @@ fn build_edge_paths_with_orientation(
                         &obstacle_bounds,
                     ),
                 };
-                if let (Some(slot), Some(saved)) =
-                    (obstacle_bounds.get_mut(source), saved_source)
-                {
+                if let (Some(slot), Some(saved)) = (obstacle_bounds.get_mut(source), saved_source) {
                     *slot = saved;
                 }
-                if let (Some(slot), Some(saved)) =
-                    (obstacle_bounds.get_mut(target), saved_target)
-                {
+                if let (Some(slot), Some(saved)) = (obstacle_bounds.get_mut(target), saved_target) {
                     *slot = saved;
                 }
                 if parallel_offset.abs() > 0.01 {

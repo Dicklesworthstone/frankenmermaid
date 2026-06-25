@@ -145,6 +145,34 @@ _(none yet — first measured experiments in progress)_
   grouped sources/targets, class shorthand, quoted labels, or shape-rich nodes
   without differential tests against the fallback parser and conformance proof.
 
+### Current main live-CDP BOLD-VERIFY — KEPT (2026-06-25)
+- **Lever:** no new code lever in this entry; this is a fresh live-browser
+  verification of current `main` after the parser fast path and stacked
+  parser/layout/render wins.
+- **Hypothesis:** current `main` should still dominate Mermaid.js when the
+  original comparator is timed through a live Chrome DevTools Protocol page
+  rather than `--dump-dom` virtual-time output.
+- **Baseline -> After:** current Rust full-pipeline-wide means on worker `hz2`,
+  command `RCH_WORKER=hz2 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a
+  rch exec -- cargo bench -p frankenmermaid-cli --bench pipeline_bench --
+  full_pipeline_wide --warm-up-time 1 --measurement-time 2`: `8x16`
+  `2.1367 ms`, `12x24` `4.9451 ms`, `16x32` `9.1147 ms`.
+- **Original comparator:** Mermaid `11.12.0` ESM browser bundle from
+  `https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.esm.min.mjs`,
+  Node `v24.14.0` driving `/snap/bin/chromium` through Chrome DevTools
+  Protocol, `maxEdges=2000`, 3 warmups, 20 timed render-to-SVG iterations.
+- **frankenmermaid/Mermaid ratio:** fresh live-CDP mean ratios were
+  `0.005725x` (`8x16`: `2.1367 ms` vs `373.22 ms`), `0.003994x`
+  (`12x24`: `4.9451 ms` vs `1238.165 ms`), and `0.003220x`
+  (`16x32`: `9.1147 ms` vs `2830.495 ms`), i.e. Mermaid.js was `174.67x`,
+  `250.38x`, and `310.54x` slower on those inputs.
+- **Verdict:** kept/verified; the detached measured worktrees were already
+  ancestors of `main`, so the fresh contribution is the current-ratio ledger
+  proof rather than another code change.
+- **Do-not-retry note:** do not use `chromium --dump-dom --virtual-time-budget`
+  as a timing source for this comparator; it rendered valid SVG but collapsed
+  `performance.now()` samples to zero in this session.
+
 ## Blocked/Invalid Evidence Attempts
 
 ### Agent Mail registration/reservation — BLOCKED (2026-06-24)
