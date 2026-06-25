@@ -26,7 +26,7 @@ pub enum AttributeValue {
 impl fmt::Display for AttributeValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::String(s) => write!(f, "{}", escape_xml_attr(s)),
+            Self::String(s) => write_escaped_attr(f, s),
             Self::Number(n) => {
                 // Format with reasonable precision, trim trailing zeros.
                 // Use integer formatting only for values that fit in i32 range
@@ -223,46 +223,111 @@ pub(crate) fn write_fixed2<W: fmt::Write>(f: &mut W, value: f32) -> fmt::Result 
     write!(f, "{int_part}.{frac_part:02}")
 }
 
-/// Escape special characters in XML attribute values.
-fn escape_xml_attr(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => result.push_str("&amp;"),
-            '<' => result.push_str("&lt;"),
-            '>' => result.push_str("&gt;"),
-            '"' => result.push_str("&quot;"),
-            '\'' => result.push_str("&#39;"),
-            _ => result.push(c),
-        }
+/// Write `s` into `f` with XML attribute-value escaping (`& < > " '`), copying
+/// unescaped runs in bulk instead of character-by-character. Every escaped
+/// character is ASCII, so scanning bytes never splits a multi-byte UTF-8 sequence
+/// — the output is byte-for-byte identical to escaping each `char` individually,
+/// with no intermediate allocation. This is the hot SVG-serialization path.
+pub(crate) fn write_escaped_attr<W: fmt::Write>(f: &mut W, s: &str) -> fmt::Result {
+    let bytes = s.as_bytes();
+    let mut start = 0;
+    for (i, &b) in bytes.iter().enumerate() {
+        let replacement = match b {
+            b'&' => "&amp;",
+            b'<' => "&lt;",
+            b'>' => "&gt;",
+            b'"' => "&quot;",
+            b'\'' => "&#39;",
+            _ => continue,
+        };
+        f.write_str(&s[start..i])?;
+        f.write_str(replacement)?;
+        start = i + 1;
     }
-    result
+    f.write_str(&s[start..])
+}
+
+/// Write `s` into `f` with XML text-content escaping. Like [`write_escaped_attr`]
+/// but only escapes `>` when it closes a `]]>` sequence (so CSS child combinators
+/// such as `div > p` survive inline `<style>`), matching the prior behaviour
+/// exactly. `]` is ASCII, so the byte look-back matches a `char` look-back.
+pub(crate) fn write_escaped_text<W: fmt::Write>(f: &mut W, s: &str) -> fmt::Result {
+    let bytes = s.as_bytes();
+    let mut start = 0;
+    for (i, &b) in bytes.iter().enumerate() {
+        let replacement = match b {
+            b'&' => "&amp;",
+            b'<' => "&lt;",
+            b'>' if i >= 2 && bytes[i - 1] == b']' && bytes[i - 2] == b']' => "&gt;",
+            _ => continue,
+        };
+        f.write_str(&s[start..i])?;
+        f.write_str(replacement)?;
+        start = i + 1;
+    }
+    f.write_str(&s[start..])
 }
 
 /// Escape special characters in XML text content.
+#[must_use]
 pub fn escape_xml_text(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
-    let mut prev1 = '\0';
-    let mut prev2 = '\0';
-    for c in s.chars() {
-        match c {
-            '&' => result.push_str("&amp;"),
-            '<' => result.push_str("&lt;"),
-            // We intentionally do not escape '>' to '&gt;' here because it breaks
-            // CSS child combinators (e.g. `div > p`) when the SVG is embedded inline in HTML5.
-            // In standard XML, '>' only needs to be escaped if it is part of `]]>`.
-            '>' if prev1 == ']' && prev2 == ']' => result.push_str("&gt;"),
-            _ => result.push(c),
-        }
-        prev2 = prev1;
-        prev1 = c;
-    }
+    let _ = write_escaped_text(&mut result, s);
     result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bulk_escape_byte_identical_to_charwise() {
+        // Reference: the original character-by-character implementations.
+        fn ref_attr(s: &str) -> String {
+            let mut r = String::new();
+            for c in s.chars() {
+                match c {
+                    '&' => r.push_str("&amp;"),
+                    '<' => r.push_str("&lt;"),
+                    '>' => r.push_str("&gt;"),
+                    '"' => r.push_str("&quot;"),
+                    '\'' => r.push_str("&#39;"),
+                    _ => r.push(c),
+                }
+            }
+            r
+        }
+        fn ref_text(s: &str) -> String {
+            let mut r = String::new();
+            let (mut p1, mut p2) = ('\0', '\0');
+            for c in s.chars() {
+                match c {
+                    '&' => r.push_str("&amp;"),
+                    '<' => r.push_str("&lt;"),
+                    '>' if p1 == ']' && p2 == ']' => r.push_str("&gt;"),
+                    _ => r.push(c),
+                }
+                p2 = p1;
+                p1 = c;
+            }
+            r
+        }
+        let cases = [
+            "", "abc", "a&b", "<x>", "\"q\"", "'s'", "]]>", "a]]>b", "]>", "]]", "café ☕",
+            "<&>\"'", "node A & B", "x]]>y]]>z", "<<<", "&amp;already", "a > b", "div > p",
+            "]] >", "] ] >", "résumé < β & δ > \"τ\"", "🚀]]>🚀", "tail]]", "lead]]>",
+        ];
+        for s in cases {
+            let mut got_attr = String::new();
+            write_escaped_attr(&mut got_attr, s).unwrap();
+            assert_eq!(got_attr, ref_attr(s), "attr mismatch for {s:?}");
+
+            let mut got_text = String::new();
+            write_escaped_text(&mut got_text, s).unwrap();
+            assert_eq!(got_text, ref_text(s), "text mismatch for {s:?}");
+            assert_eq!(escape_xml_text(s), ref_text(s), "escape_xml_text mismatch for {s:?}");
+        }
+    }
 
     #[test]
     fn write_fixed2_byte_identical_to_std_format() {

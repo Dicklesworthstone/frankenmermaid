@@ -506,7 +506,7 @@ impl Element {
             output.push('>');
 
             if let Some(ref text) = self.text_content {
-                output.push_str(&crate::attributes::escape_xml_text(text));
+                let _ = crate::attributes::write_escaped_text(output, text);
             }
 
             for child in &self.children {
