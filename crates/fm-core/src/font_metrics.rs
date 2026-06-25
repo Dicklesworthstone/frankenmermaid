@@ -12,6 +12,14 @@ use serde::{Deserialize, Serialize};
 #[must_use]
 pub const fn is_east_asian_wide(c: char) -> bool {
     let cp = c as u32;
+    // Fast path: every East-Asian-wide range below begins at U+3000 or above, so any code
+    // point under it (all ASCII / Latin / Cyrillic / … — the overwhelming majority of
+    // label text) is not wide. This returns in a single comparison instead of walking the
+    // ~14 range checks, which run for every non-special character during per-character
+    // text-width measurement. Output-identical: the `matches!` is also false below U+3000.
+    if cp < 0x3000 {
+        return false;
+    }
     matches!(cp,
         // CJK Unified Ideographs
         0x4E00..=0x9FFF
