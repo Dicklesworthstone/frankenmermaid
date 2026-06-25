@@ -672,3 +672,58 @@ tooling_notes = [
 [negative_measurement_flowchart_plain_label_shortcut_2026_06_25.decision]
 status = "reject"
 rationale = "Plain-label specialization regressed parse/flowchart medium_100 by 17.12% and large_1000 by 31.61%; code was reverted."
+
+[negative_measurement_svg_document_child_capacity_2026_06_25]
+date = "2026-06-25"
+agent = "TanSparrow"
+lever_bead = "bd-1buv.1"
+baseline_commit = "82c491a"
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-a"
+candidate_summary = "Pre-size the root SvgDocument children Vec from layout node/edge/extension counts before pushing rendered SVG elements."
+render_baseline_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench -p frankenmermaid-cli --bench pipeline_bench -- render_svg/flowchart --warm-up-time 1 --measurement-time 2"
+render_candidate_command = "RCH_WORKER=ovh-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench -p frankenmermaid-cli --bench pipeline_bench -- render_svg/flowchart --warm-up-time 1 --measurement-time 2"
+wide_candidate_command = "RCH_WORKER=hz2 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+mermaid_js_command = "Latest live-CDP Mermaid 11.12.0 denominator from current-main ledger reused for identical generated wide inputs."
+rust_build_profile = "bench profile [optimized]"
+behavior_proof = "Candidate capacity-only code was reverted before commit; retained source returns to SvgDocument::new with Vec::new children. fm-layout check passed on ovh-a after a transient split remote bench failure."
+tooling_notes = [
+  "The literal requested cargo bench --release form was attempted earlier in this BOLD-VERIFY loop and Cargo rejected --release for cargo bench before running benchmarks.",
+  "The full_pipeline_wide candidate command used rch but failed open locally because no worker was admissible; the local result is treated as rejection evidence, not as keep proof.",
+  "Agent Mail file reservation failed because the mail database was malformed; edits were constrained manually to renderer/evidence files.",
+]
+
+[negative_measurement_svg_document_child_capacity_2026_06_25.metrics]
+"render_svg_flowchart_small_10_baseline_mean_us" = 117.96
+"render_svg_flowchart_small_10_candidate_mean_us" = 116.72
+"render_svg_flowchart_small_10_candidate_delta_pct" = -1.7780
+"render_svg_flowchart_small_10_verdict" = "improved but below keep bar"
+"render_svg_flowchart_medium_100_baseline_mean_us" = 690.67
+"render_svg_flowchart_medium_100_candidate_mean_us" = 688.94
+"render_svg_flowchart_medium_100_candidate_delta_pct" = -0.1614
+"render_svg_flowchart_medium_100_verdict" = "Criterion no-change"
+"render_svg_flowchart_large_500_baseline_mean_ms" = 3.1937
+"render_svg_flowchart_large_500_candidate_mean_ms" = 3.1875
+"render_svg_flowchart_large_500_candidate_delta_pct" = -0.1932
+"render_svg_flowchart_large_500_verdict" = "Criterion no-change"
+"full_pipeline_wide_8x16_baseline_mean_ms" = 2.0793
+"full_pipeline_wide_8x16_candidate_mean_ms" = 2.6031
+"full_pipeline_wide_8x16_candidate_delta_pct" = 25.190
+"full_pipeline_wide_12x24_baseline_mean_ms" = 4.9551
+"full_pipeline_wide_12x24_candidate_mean_ms" = 5.9923
+"full_pipeline_wide_12x24_candidate_delta_pct" = 20.933
+"full_pipeline_wide_16x32_baseline_mean_ms" = 8.7779
+"full_pipeline_wide_16x32_candidate_mean_ms" = 11.255
+"full_pipeline_wide_16x32_candidate_delta_pct" = 28.223
+"full_pipeline_wide_8x16_mermaid_js_mean_ms" = 315.1399999976158
+"full_pipeline_wide_12x24_mermaid_js_mean_ms" = 981.7300000190735
+"full_pipeline_wide_16x32_mermaid_js_mean_ms" = 2879.185000014305
+"retained_main_full_pipeline_wide_8x16_frankenmermaid_over_mermaid_js" = 0.006598
+"retained_main_full_pipeline_wide_12x24_frankenmermaid_over_mermaid_js" = 0.005047
+"retained_main_full_pipeline_wide_16x32_frankenmermaid_over_mermaid_js" = 0.003049
+"retained_main_full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 151.56
+"retained_main_full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 198.13
+"retained_main_full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 328.00
+
+[negative_measurement_svg_document_child_capacity_2026_06_25.decision]
+status = "reject"
+rationale = "Document child Vec pre-sizing produced no realistic-size render win and regressed full_pipeline_wide by 20.93%-28.22%; code was reverted."

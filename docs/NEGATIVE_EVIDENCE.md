@@ -50,6 +50,45 @@
 
 ## Entries
 
+### SVG document child Vec capacity hint — REVERTED (2026-06-25)
+- **Lever:** `fm-render-svg::SvgDocument` grew a `with_child_capacity`
+  constructor, and the legacy layout renderer pre-sized the root document
+  `children` vector from layout node/edge/extension counts before pushing SVG
+  elements.
+- **Hypothesis:** wide diagrams push hundreds to thousands of root SVG children;
+  pre-sizing that vector should avoid repeated growth copies and improve the
+  render-heavy `full_pipeline_wide` gap versus Mermaid.js.
+- **Baseline -> After:** same-worker `ovh-a`, package `frankenmermaid-cli`,
+  bench `pipeline_bench`, filter `render_svg/flowchart`, target dir
+  `/data/projects/.rch-targets/frankenmermaid-cod-a`: `small_10`
+  `117.96 us` -> `116.72 us` (`-1.78%`, significant but below keep bar),
+  `medium_100` `690.67 us` -> `688.94 us` (`-0.16%`, no change), and
+  `large_500` `3.1937 ms` -> `3.1875 ms` (`-0.19%`, no change).
+- **Wide gate:** `rch` could not reserve a remote worker and failed open locally
+  for `full_pipeline_wide`; the candidate regressed the retained Criterion
+  baseline by `+25.19%`, `+20.93%`, and `+28.22%` on `8x16`, `12x24`, and
+  `16x32` (`2.0793 ms` -> `2.6031 ms`, `4.9551 ms` -> `5.9923 ms`,
+  `8.7779 ms` -> `11.255 ms`). This local fallback is rejection evidence, not
+  a keep proof.
+- **Original comparator:** latest pinned live-CDP Mermaid `11.12.0` denominator
+  from the current main ledger, Node `v24.14.0`, `/snap/bin/chromium`,
+  dynamic import of
+  `https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.esm.min.mjs`,
+  3 warmups, 20 timed render-to-SVG iterations, identical generated wide inputs.
+- **frankenmermaid/Mermaid ratio after revert:** retained main
+  `full_pipeline_wide` means `2.0793 ms`, `4.9551 ms`, and `8.7779 ms`
+  against Mermaid.js means `315.14 ms`, `981.73 ms`, and `2879.185 ms` give
+  frankenmermaid/Mermaid ratios `0.006598x`, `0.005047x`, and `0.003049x`;
+  Mermaid.js is `151.56x`, `198.13x`, and `328.00x` slower.
+- **Verdict:** ~0 gain on realistic render-only sizes plus a decisive wide
+  regression. The code was reverted before commit.
+- **Revert:** candidate reverted before commit; this ledger commit records the
+  rejection.
+- **Do-not-retry note:** root document child-vector allocation is not a measured
+  hotspot after the existing output-buffer and attribute-vector work; future SVG
+  work should profile element construction, text escaping, and path/label
+  serialization instead of pre-sizing the document child Vec again.
+
 ### Attributes Vec pre-size after edge-style fast path — CAUTION (2026-06-25)
 - **Lever:** `fm-render-svg::Attributes::new` changed from `Vec::new()` to
   `Vec::with_capacity(12)`, based on an unpushed worktree commit
