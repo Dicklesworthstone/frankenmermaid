@@ -1168,6 +1168,42 @@
 
 ## Blocked/Invalid Evidence Attempts
 
+### `layout_wide/16x32` runs the TREE algorithm, not Sugiyama — OPTIMIZATION-TARGETING FINDING (2026-06-26)
+- **What was measured:** the layout guardrail forces a fallback from Sugiyama to the **tree**
+  algorithm for the largest wide bench case. Built `fm-cli`, rendered the generated wide
+  inputs, read the layout WARN on stderr:
+  - `8x16` → Sugiyama (no fallback)
+  - `12x24` → Sugiyama (no fallback)
+  - `16x32` → **`selected_algorithm="tree"`**, `estimated_time_ms=10481`,
+    `reason="guardrail_forced_multi_budget"`
+  Temporary `LAYOUT_PROFILE` instrumentation in `layout_diagram_sugiyama_traced_with_config`
+  emitted **zero** `LAYOUT_SPLIT` lines for `16x32`, confirming the Sugiyama pipeline
+  (`crossing_minimization` / `crossing_refinement` / `coordinate_assignment`) never executes
+  for that input — it dispatches to `layout_diagram_tree_traced`.
+- **Why this matters (redirects effort):** every crossing-minimization lever the swarm has
+  tried — [[barycenter-sweep-precomputed-edge-adjacency]],
+  [[flat-array-total-crossings-position-edge-tables]],
+  [[dense-crossing-count-position-maps]], and the stashed local-delta refinement — lives on
+  the **Sugiyama** path. That path runs for `8x16`/`12x24` but **not** for `16x32`, the
+  largest and most prominent `layout_wide` case. So those four attempts could never have
+  moved the heaviest wide layout number; their neutral/negative results are partly explained
+  by this. The benched `layout_wide/16x32` (≈`1.13 ms`) is the **tree** algorithm:
+  `build_tree_layout_structure` + subtree-span/center passes + the **shared
+  `build_edge_paths`** (1024-edge obstacle-routed). Edge routing (already AABB/obstacle-index
+  optimized — see [[sparse-edge-routing-obstacle-spatial-index]]) is the likely hot share.
+- **frankenmermaid/Mermaid ratio:** unchanged — measurement only, no source change landed.
+  Retained current-main `full_pipeline_wide` standing `1.5908 ms` / `3.7339 ms` / `6.7530 ms`
+  vs live-CDP Mermaid `11.12.0` `315.14 ms` / `981.73 ms` / `2879.185 ms` = `198.10x` /
+  `262.92x` / `426.35x`.
+- **Do-next (not do-not-retry):** to move `layout_wide/16x32`, profile and optimize the
+  **tree** path (`layout_diagram_tree_traced`) and the shared `build_edge_paths`, NOT the
+  Sugiyama crossing-min code. To move `8x16`/`12x24`, Sugiyama is in play but its
+  crossing-min is already heavily mined (4 rejects). Separately worth checking whether the
+  `estimated_time_ms=10481` guardrail estimate is realistic (the whole `16x32` layout is
+  ~`1.13 ms` via tree) — if Sugiyama would actually be fast, the fallback may be degrading
+  layout *quality* (tree vs crossing-minimized) unnecessarily, a correctness/quality angle
+  distinct from speed.
+
 ### Post-process `<style>` CSS minification — REJECTED (render +19%) (2026-06-26)
 - **Byte-composition finding (kept for targeting):** for a small flowchart (3 nodes, 2
   edges) the rendered SVG is `13489` bytes, of which the embedded `<style>` CSS is **`9734`
