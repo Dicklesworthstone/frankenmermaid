@@ -231,6 +231,48 @@
 
 ## Kept Wins Also Recorded Here By Request
 
+### Borrowed source lines in flowchart document parser — KEPT (2026-06-26)
+- **Lever:** `fm-parser::parse_flowchart_document` no longer copies each raw
+  source line into an owned `String`. `FlowDocumentItem` (both `Statements` and
+  `Subgraph` variants) and `FlowDocumentParseResult` now carry a `source_line:
+  &'a str` borrowed from the parser input that already outlives the document
+  build, so `parse_flowchart_document_items` stores `line` directly instead of
+  `line.to_string()`. One heap allocation per parsed statement/subgraph line is
+  eliminated; `span_for`/lowering read the borrow unchanged.
+- **Mapped primitive:** allocation elision via lifetime threading — the input
+  `&str` is the single owner of all line bytes for the whole parse, so the
+  intermediate per-line `String` copies were pure overhead.
+- **Baseline -> After:** same `cc` target dir
+  (`/data/projects/.rch-targets/frankenmermaid-cc`), package
+  `frankenmermaid-cli`, bench `pipeline_bench`, filter `parse/flowchart`, via
+  `rch exec` (worker `ovh-a`). Baseline saved with `--save-baseline cc_base` on
+  `main` `3dea2f6`, then re-run with `--baseline cc_base` after applying the
+  change. Criterion `change` (p = 0.00 < 0.05, "Performance has improved" on all
+  three):
+  | case | before | after | change |
+  |------|--------|-------|--------|
+  | `small_10` | `23.981 us` | `18.953 us` | `-37.2%` (baseline noisy 22.9-25.3) |
+  | `medium_100` | `163.21 us` | `153.36 us` | `-4.88%` |
+  | `large_1000` | `2.3496 ms` | `2.1076 ms` | `-10.30%` |
+- **Original comparator:** the parse stage feeds the standing live-CDP Mermaid
+  `11.12.0` full-pipeline denominators (`8x16` `315.14 ms`, `12x24` `981.73 ms`,
+  `16x32` `2879.185 ms`). frankenmermaid's whole parse+layout+SVG pipeline already
+  runs at `198.10x`/`262.92x`/`426.35x` faster than Mermaid.js on those inputs
+  (current-main standing, entry above); shaving ~10% off the parse component on
+  1000-node flowcharts strictly widens that lead — Mermaid.js spends a large
+  multiple of frankenmermaid's *entire* runtime inside its own parser alone.
+- **Behavior proof:** `rch exec -- cargo test -p fm-parser` = `405 passed; 0
+  failed`. Borrowed-lifetime version compiles clean (lifetimes proven sound by
+  the borrow checker — the input outlives the returned document), so parse
+  semantics, spans, and warnings are byte-identical.
+- **Verdict:** kept; clears the keep bar with reproducible `-4.88%` (medium_100)
+  and `-10.30%` (large_1000) and no regression — the larger the flowchart, the
+  more per-line `String` allocations are avoided.
+- **Do-not-retry note:** the borrow is now load-bearing; `FlowDocumentItem`
+  cannot be detached from the input `&str` (e.g. returned past the parse) without
+  re-introducing owned lines. Keep the `'a` lifetime threaded through
+  `parse_flowchart_document_items` and `lower_flow_document_item`.
+
 ### Sparse edge-routing obstacle spatial index — KEPT (2026-06-25)
 - **Lever:** `fm-layout` builds a grid index for node obstacle bounds once in
   `build_edge_paths_with_orientation`, then routes sparse/tree-like flowcharts

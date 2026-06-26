@@ -447,24 +447,24 @@ impl From<NodeToken> for FlowAstNode {
 }
 
 #[derive(Debug, Clone)]
-enum FlowDocumentItem {
+enum FlowDocumentItem<'a> {
     Statements {
         asts: Vec<FlowAst>,
         line_number: usize,
-        source_line: String,
+        source_line: &'a str,
     },
     Subgraph {
         id: String,
         title: Option<String>,
         line_number: usize,
-        source_line: String,
+        source_line: &'a str,
         body: Vec<Self>,
     },
 }
 
 #[derive(Debug, Default)]
-struct FlowDocumentParseResult {
-    items: Vec<FlowDocumentItem>,
+struct FlowDocumentParseResult<'a> {
+    items: Vec<FlowDocumentItem<'a>>,
     warnings: Vec<String>,
     header_direction: Option<GraphDirection>,
 }
@@ -844,7 +844,7 @@ fn lower_flow_ast(
 }
 
 fn lower_flow_document_item(
-    item: &FlowDocumentItem,
+    item: &FlowDocumentItem<'_>,
     builder: &mut IrBuilder,
     active_clusters: &[usize],
     active_subgraphs: &[usize],
@@ -855,6 +855,7 @@ fn lower_flow_document_item(
             line_number,
             source_line,
         } => {
+            let source_line: &str = source_line;
             for ast in asts {
                 lower_flow_ast(
                     ast,
@@ -873,6 +874,7 @@ fn lower_flow_document_item(
             source_line,
             body,
         } => {
+            let source_line: &str = source_line;
             let span = span_for(*line_number, source_line);
             let lookup_key = flow_subgraph_lookup_key(id, title.as_deref());
             let Some(cluster_index) = builder.ensure_cluster(&lookup_key, title.as_deref(), span)
@@ -931,7 +933,10 @@ fn parse_flowchart(input: &str, builder: &mut IrBuilder) {
     extract_style_directives(input, builder);
 }
 
-fn parse_flowchart_document(input: &str, config: &ParserConfig) -> FlowDocumentParseResult {
+fn parse_flowchart_document<'a>(
+    input: &'a str,
+    config: &ParserConfig,
+) -> FlowDocumentParseResult<'a> {
     let lines: Vec<(usize, &str)> = input
         .lines()
         .enumerate()
@@ -960,14 +965,14 @@ fn parse_flowchart_document(input: &str, config: &ParserConfig) -> FlowDocumentP
     }
 }
 
-fn parse_flowchart_document_items(
-    lines: &[(usize, &str)],
+fn parse_flowchart_document_items<'a>(
+    lines: &[(usize, &'a str)],
     next_index: &mut usize,
     is_root: bool,
     warnings: &mut Vec<String>,
     header_direction: &mut Option<GraphDirection>,
     config: &ParserConfig,
-) -> (Vec<FlowDocumentItem>, usize) {
+) -> (Vec<FlowDocumentItem<'a>>, usize) {
     let mut items = Vec::new();
     let mut unclosed_subgraphs = 0;
 
@@ -1022,7 +1027,7 @@ fn parse_flowchart_document_items(
                     id: cluster_key,
                     title: cluster_title,
                     line_number,
-                    source_line: line.to_string(),
+                    source_line: line,
                     body,
                 });
                 parsed_line = true;
@@ -1051,7 +1056,7 @@ fn parse_flowchart_document_items(
                 line_items.push(FlowDocumentItem::Statements {
                     asts,
                     line_number,
-                    source_line: line.to_string(),
+                    source_line: line,
                 });
                 parsed_line = true;
             }
