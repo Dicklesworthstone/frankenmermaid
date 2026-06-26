@@ -136,16 +136,7 @@ impl PathCommand {
                 x,
                 y,
             } => {
-                let _ = write!(
-                    output,
-                    "C{} {},{} {},{} {}",
-                    FmtNum(*x1),
-                    FmtNum(*y1),
-                    FmtNum(*x2),
-                    FmtNum(*y2),
-                    FmtNum(*x),
-                    FmtNum(*y)
-                );
+                write_cubic(output, 'C', (*x1, *y1), (*x2, *y2), (*x, *y));
             }
             Self::CurveToRel {
                 dx1,
@@ -155,16 +146,7 @@ impl PathCommand {
                 dx,
                 dy,
             } => {
-                let _ = write!(
-                    output,
-                    "c{} {},{} {},{} {}",
-                    FmtNum(*dx1),
-                    FmtNum(*dy1),
-                    FmtNum(*dx2),
-                    FmtNum(*dy2),
-                    FmtNum(*dx),
-                    FmtNum(*dy)
-                );
+                write_cubic(output, 'c', (*dx1, *dy1), (*dx2, *dy2), (*dx, *dy));
             }
             Self::SmoothCurveTo { x2, y2, x, y } => {
                 let _ = write!(
@@ -282,6 +264,24 @@ impl std::fmt::Display for FmtNum {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.write_into(f)
     }
+}
+
+/// Write a cubic-Bézier path segment (`C`/`c`) directly, bypassing the `write!`/
+/// `fmt::Formatter` machinery on this per-edge-segment hot path. Byte-identical to
+/// `{prefix}{x1} {y1},{x2} {y2},{x} {y}`.
+fn write_cubic(output: &mut String, prefix: char, c1: (f32, f32), c2: (f32, f32), end: (f32, f32)) {
+    output.push(prefix);
+    let _ = FmtNum(c1.0).write_into(output);
+    output.push(' ');
+    let _ = FmtNum(c1.1).write_into(output);
+    output.push(',');
+    let _ = FmtNum(c2.0).write_into(output);
+    output.push(' ');
+    let _ = FmtNum(c2.1).write_into(output);
+    output.push(',');
+    let _ = FmtNum(end.0).write_into(output);
+    output.push(' ');
+    let _ = FmtNum(end.1).write_into(output);
 }
 
 /// Fluent builder for SVG path `d` attribute strings.
