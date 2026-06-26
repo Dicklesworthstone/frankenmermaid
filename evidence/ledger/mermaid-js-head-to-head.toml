@@ -899,3 +899,69 @@ tooling_notes = [
 [post_measurement_svg_dynamic_class_append_2026_06_25.decision]
 status = "keep"
 rationale = "Dynamic class append removes per-node format/copy work, improves render_svg medium_100 by 22.25%, improves raw same-local full_pipeline_wide 12x24 by 25.33%, keeps large render statistically unchanged, and retains 151x-283x Mermaid 11.12.0 dominance ratios."
+
+[post_measurement_svg_static_hot_data_attrs_2026_06_26]
+date = "2026-06-26"
+agent = "TanSparrow"
+lever_bead = "bd-1buv.1"
+worker_delta = "local (rch fallback)"
+baseline_commit = "45015be"
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-b"
+render_baseline_command = "RCH_WORKER=hz2 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- render_svg/flowchart --warm-up-time 1 --measurement-time 2"
+render_candidate_command = "RCH_WORKER=hz2 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- render_svg/flowchart --warm-up-time 1 --measurement-time 2"
+wide_baseline_command = "RCH_WORKER=ovh-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+wide_candidate_command = "RCH_WORKER=hz2 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+mermaid_js_command = "Latest live-CDP Mermaid 11.12.0 denominator reused from the current-main BOLD-VERIFY entry for identical generated wide inputs."
+rust_build_profile = "release profile [optimized]"
+candidate_summary = "Map the hot SVG data attribute names id, fm-node-id, and fm-edge-id to static data-* names inside Attributes::data, avoiding per-node/per-edge format! allocation while preserving the generic fallback."
+behavior_proof = "Attributes unit test coverage now exercises static and fallback data-name paths; cargo fmt -p fm-render-svg --check passed; rch exec -- cargo test --profile release -p fm-render-svg attributes passed; rch exec -- cargo clippy --profile release -p fm-render-svg --all-targets -- -D warnings passed before rebase; after rebasing on upstream renderer work, direct CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b cargo clippy --profile release -p fm-render-svg --all-targets -- -D warnings and direct CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b cargo test --profile release -p frankenmermaid-cli --test frankentui_conformance_test passed. Remote conformance/clippy attempts on vmi1227854/vmi1264463 failed before validation because cmake was missing for highs-sys, and one RCH_ENABLED=0 wrapper invocation stalled before spawning Cargo."
+tooling_notes = [
+  "A remote vmi1264463 benchmark attempt failed before bench because cmake was missing while building highs-sys; that run is not benchmark evidence.",
+  "An exploratory broad static data-name table was rejected during exploration because it regressed render_svg/flowchart despite improving wide timing.",
+  "Accepted A/B evidence used rch exec local fallback for both restored baseline and candidate in the same clean worktree and warm cod-b target dir.",
+]
+
+[post_measurement_svg_static_hot_data_attrs_2026_06_26.metrics]
+"render_svg_flowchart_small_10_baseline_mean_us" = 132.76
+"render_svg_flowchart_small_10_candidate_mean_us" = 128.96
+"render_svg_flowchart_small_10_candidate_delta_pct" = -2.8623
+"render_svg_flowchart_small_10_baseline_over_candidate" = 1.0295
+"render_svg_flowchart_medium_100_baseline_mean_us" = 777.37
+"render_svg_flowchart_medium_100_candidate_mean_us" = 734.64
+"render_svg_flowchart_medium_100_candidate_delta_pct" = -5.4967
+"render_svg_flowchart_medium_100_baseline_over_candidate" = 1.0582
+"render_svg_flowchart_large_500_baseline_mean_ms" = 3.9018
+"render_svg_flowchart_large_500_candidate_mean_ms" = 3.6295
+"render_svg_flowchart_large_500_candidate_delta_pct" = -6.9788
+"render_svg_flowchart_large_500_baseline_over_candidate" = 1.0750
+"full_pipeline_wide_8x16_baseline_mean_ms" = 2.1444
+"full_pipeline_wide_8x16_candidate_mean_ms" = 1.8260
+"full_pipeline_wide_8x16_candidate_delta_pct" = -14.8480
+"full_pipeline_wide_8x16_baseline_over_candidate" = 1.1744
+"full_pipeline_wide_12x24_baseline_mean_ms" = 5.3861
+"full_pipeline_wide_12x24_candidate_mean_ms" = 4.2053
+"full_pipeline_wide_12x24_candidate_delta_pct" = -21.9231
+"full_pipeline_wide_12x24_baseline_over_candidate" = 1.2808
+"full_pipeline_wide_16x32_baseline_mean_ms" = 10.763
+"full_pipeline_wide_16x32_candidate_mean_ms" = 8.2537
+"full_pipeline_wide_16x32_candidate_delta_pct" = -23.3141
+"full_pipeline_wide_16x32_baseline_over_candidate" = 1.3040
+"full_pipeline_wide_8x16_mermaid_js_mean_ms" = 315.1399999976158
+"full_pipeline_wide_12x24_mermaid_js_mean_ms" = 981.7300000190735
+"full_pipeline_wide_16x32_mermaid_js_mean_ms" = 2879.185000014305
+"baseline_full_pipeline_wide_8x16_frankenmermaid_over_mermaid_js" = 0.006805
+"baseline_full_pipeline_wide_12x24_frankenmermaid_over_mermaid_js" = 0.005486
+"baseline_full_pipeline_wide_16x32_frankenmermaid_over_mermaid_js" = 0.003738
+"baseline_full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 146.96
+"baseline_full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 182.27
+"baseline_full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 267.51
+"candidate_full_pipeline_wide_8x16_frankenmermaid_over_mermaid_js" = 0.005794
+"candidate_full_pipeline_wide_12x24_frankenmermaid_over_mermaid_js" = 0.004284
+"candidate_full_pipeline_wide_16x32_frankenmermaid_over_mermaid_js" = 0.002867
+"candidate_full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 172.58
+"candidate_full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 233.45
+"candidate_full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 348.84
+
+[post_measurement_svg_static_hot_data_attrs_2026_06_26.decision]
+status = "keep"
+rationale = "The narrowed static hot data-name map improves render_svg medium_100 by 5.50%, render_svg large_500 by 6.98%, and full_pipeline_wide by 14.85%-23.31%, while retaining generic data-name fallback semantics and improving Mermaid.js dominance ratios to 172x-349x."

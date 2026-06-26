@@ -463,6 +463,54 @@
   scan-before-retain; that broader allocation lever already regressed
   `full_pipeline_wide` and remains rejected below.
 
+### Static hot data-attribute names — KEPT (2026-06-26)
+- **Lever:** `fm-render-svg::Attributes::data` now maps only the repeated hot
+  renderer names `id`, `fm-node-id`, and `fm-edge-id` to static
+  `data-*` attribute names, avoiding a per-node/per-edge
+  `format!("data-{name}")` allocation while preserving the old fallback for all
+  other data attributes.
+- **Mapped primitive:** value-shape specialization from the alien-artifact pass:
+  compile the observed hot names into static borrowed names and leave uncommon
+  names on the generic allocation path.
+- **Baseline -> After:** same clean worktree, same cod-b target dir, package
+  `frankenmermaid-cli`, bench `pipeline_bench`, via `rch exec` local fallback.
+  `render_svg/flowchart` means improved from `132.76 us` to `128.96 us`
+  (`2.86%`) on `small_10`, `777.37 us` to `734.64 us` (`5.50%`) on
+  `medium_100`, and `3.9018 ms` to `3.6295 ms` (`6.98%`) on `large_500`.
+  `full_pipeline_wide` means improved from `2.1444 ms` to `1.8260 ms`
+  (`14.85%`) on `8x16`, `5.3861 ms` to `4.2053 ms` (`21.92%`) on `12x24`,
+  and `10.763 ms` to `8.2537 ms` (`23.31%`) on `16x32`.
+- **Original comparator:** latest live-CDP Mermaid `11.12.0` denominator reused
+  for identical generated wide inputs: Node `v24.14.0`, `/snap/bin/chromium`,
+  dynamic import of
+  `https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.esm.min.mjs`,
+  3 warmups, and 20 timed render-to-SVG iterations.
+- **frankenmermaid/Mermaid ratio:** candidate local full-pipeline wide ratios
+  were `0.005794x` (`8x16`: `1.8260 ms` vs `315.14 ms`), `0.004284x`
+  (`12x24`: `4.2053 ms` vs `981.73 ms`), and `0.002867x` (`16x32`:
+  `8.2537 ms` vs `2879.185 ms`), i.e. Mermaid.js was `172.58x`, `233.45x`,
+  and `348.84x` slower.
+- **Behavior proof:** the new `Attributes` unit coverage exercises static and
+  fallback data-name paths; `cargo fmt -p fm-render-svg --check`,
+  `rch exec -- cargo test --profile release -p fm-render-svg attributes`,
+  and `rch exec -- cargo clippy --profile release -p fm-render-svg --all-targets
+  -- -D warnings` passed before rebase. After rebasing on the upstream
+  renderer win, the remote clippy/conformance workers failed before validation
+  because `cmake` was missing for `highs-sys`, and one `RCH_ENABLED=0 rch exec`
+  wrapper spawned no Cargo child and was interrupted. Direct scoped Cargo gates
+  with the same warm cod-b target dir passed:
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b cargo
+  clippy --profile release -p fm-render-svg --all-targets -- -D warnings` and
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b cargo test
+  --profile release -p frankenmermaid-cli --test frankentui_conformance_test`.
+- **Verdict:** kept; the narrowed static-name table clears the keep bar on
+  render-only medium/large and all wide full-pipeline cases, while the generic
+  data attribute semantics remain unchanged for names outside the hot set.
+- **Do-not-retry note:** do not widen this into a broad static table without a
+  fresh render-only gate; an exploratory broader table improved wide timing but
+  regressed `render_svg/flowchart`, so only the repeated node/edge names were
+  retained.
+
 ### Edge path offset Vec elision — REJECTED (2026-06-25)
 - **Lever tested:** `fm-render-svg::render_edge` was changed locally to skip the
   temporary `Vec<(f32, f32)>` used to add `offset_x`/`offset_y` before calling

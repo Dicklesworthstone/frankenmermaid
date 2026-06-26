@@ -134,7 +134,11 @@ impl Attributes {
     /// Add a data-* attribute.
     #[must_use]
     pub fn data(self, name: &str, value: &str) -> Self {
-        self.set(format!("data-{name}"), value)
+        if let Some(static_name) = static_data_attr_name(name) {
+            self.set(static_name, value)
+        } else {
+            self.set(format!("data-{name}"), value)
+        }
     }
 
     /// Add a class attribute (will be merged if multiple).
@@ -275,6 +279,15 @@ impl Attributes {
         }
         self
     }
+}
+
+fn static_data_attr_name(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "fm-edge-id" => "data-fm-edge-id",
+        "fm-node-id" => "data-fm-node-id",
+        "id" => "data-id",
+        _ => return None,
+    })
 }
 
 fn push_usize(out: &mut String, value: usize) {
@@ -566,8 +579,14 @@ mod tests {
 
     #[test]
     fn adds_data_attributes() {
-        let attrs = Attributes::new().data("test", "value").data("count", "5");
+        let attrs = Attributes::new()
+            .data("id", "node-a")
+            .data("fm-node-id", "node-a")
+            .data("test", "value")
+            .data("count", "5");
         let rendered = attrs.render();
+        assert!(rendered.contains("data-id=\"node-a\""));
+        assert!(rendered.contains("data-fm-node-id=\"node-a\""));
         assert!(rendered.contains("data-test=\"value\""));
         assert!(rendered.contains("data-count=\"5\""));
     }
