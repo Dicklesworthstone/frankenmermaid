@@ -50,6 +50,55 @@
 
 ## Entries
 
+### SVG integer number manual writer - REJECTED (2026-06-26)
+- **Lever:** `fm-render-svg` added a shared `write_i32` helper for integer-valued
+  SVG numbers and routed the integer branches of `AttributeValue::Number`,
+  `AttributeValue::Integer`, and path `FmtNum` serialization through it.
+- **Hypothesis:** wide flowcharts emit many integer-valued SVG coordinates and
+  numeric attributes, so avoiding the generic `write!` / `fmt::Formatter`
+  integer path should reduce render serialization overhead.
+- **Baseline -> After:** clean worktree
+  `/data/projects/.worktrees/frankenmermaid-tansparrow-path-bbox-20260626`,
+  baseline commit `93f7ac0`, warm target dir
+  `/data/projects/.rch-targets/frankenmermaid-cod-b`, package
+  `frankenmermaid-cli`, bench `pipeline_bench`, filter `wide_stages/render`.
+  Same-local baseline means were `1.2226 ms`, `3.5489 ms`, and `5.6627 ms`
+  for `8x16`, `12x24`, and `16x32`; candidate means were `1.3227 ms`,
+  `2.8211 ms`, and `6.2051 ms`. That is `8.19%` slower, `20.51%` faster, and
+  `9.58%` slower.
+- **Full-pipeline gate:** retained current-main `full_pipeline_wide` means were
+  `1.8394 ms`, `4.1821 ms`, and `8.7503 ms`; candidate means were
+  `1.7957 ms`, `4.8479 ms`, and `9.2844 ms`. The candidate was `2.38%`
+  faster on `8x16`, but `15.92%` slower on `12x24` and `6.10%` slower on
+  `16x32`.
+- **Original comparator:** latest pinned live-CDP Mermaid `11.12.0` denominator
+  reused from the current main ledger, Node `v24.14.0`, `/snap/bin/chromium`,
+  dynamic import of
+  `https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.esm.min.mjs`,
+  3 warmups, 20 timed render-to-SVG iterations, identical generated wide inputs.
+- **frankenmermaid/Mermaid ratio:** retained full-pipeline baseline means
+  versus Mermaid.js means `315.14 ms`, `981.73 ms`, and `2879.185 ms` give
+  frankenmermaid/Mermaid ratios `0.005837x`, `0.004260x`, and `0.003039x`;
+  Mermaid.js is `171.33x`, `234.75x`, and `329.04x` slower. The rejected
+  candidate ratios were `0.005698x`, `0.004938x`, and `0.003225x`, leaving
+  Mermaid.js `175.50x`, `202.51x`, and `310.11x` slower; the candidate worsened
+  the `12x24` and `16x32` dominance ratios.
+- **Verdict:** regression; code was reverted before commit and only this ledger
+  evidence remains.
+- **Revert:** manual `apply_patch` restored the standard integer formatting
+  branches in `attributes.rs` and `path.rs`; `git diff` showed no production
+  code diff afterward.
+- **Do-not-retry note:** do not pursue a shared manual decimal writer for SVG
+  integer-valued numeric serialization in isolation. It can help one render case,
+  but the full-pipeline gate regressed on the larger wide cases.
+- **Tooling note:** a requested `rch exec` focused unit-test run selected
+  `vmi1227854` and failed before tests because `cmake` was missing while
+  building `highs-sys`. `RCH_WORKER=hz2` produced candidate-only routing
+  context, but the keep/reject decision uses the same-local baseline/candidate
+  render and full-pipeline pairs. The literal `cargo bench --release` form is
+  invalid on this Cargo toolchain; per-crate bench commands used
+  `--profile release`.
+
 ### SVG static custom-attribute names — REJECTED (2026-06-26)
 - **Lever:** `fm-render-svg::Element::attr` and `Element::attr_num` were changed
   to take `&'static str` names and pass those names directly into

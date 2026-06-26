@@ -1218,3 +1218,69 @@ tooling_notes = [
 [negative_measurement_svg_static_attr_names_2026_06_26.decision]
 status = "reject"
 rationale = "The static Element::attr/attr_num name signature improved same-local render 8x16 by 13.28% but regressed 12x24 by 126.78% and 16x32 by 12.07%; code was reverted before commit."
+
+[negative_measurement_svg_integer_number_writer_2026_06_26]
+date = "2026-06-26"
+agent = "TanSparrow"
+lever_bead = "bd-1buv.1"
+worker_delta = "same-local render and full-pipeline pair; hz2 candidate runs recorded as routing context only"
+baseline_commit = "93f7ac0"
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-b"
+candidate_summary = "Add shared write_i32 and route integer-valued SVG AttributeValue/FmtNum serialization through it instead of write!/fmt::Formatter."
+render_baseline_command = "RCH_WORKER=hz2 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
+render_candidate_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
+full_pipeline_baseline_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+full_pipeline_candidate_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+mermaid_js_command = "Latest live-CDP Mermaid 11.12.0 denominator reused from the current-main BOLD-VERIFY entry for identical generated wide inputs."
+rust_build_profile = "release profile [optimized]"
+behavior_proof = "Candidate code was reverted before commit; no production code diff remains. rustfmt --edition 2024 --check crates/fm-render-svg/src/attributes.rs passed; direct CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b cargo check --profile release -p fm-render-svg passed; direct CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b cargo test --profile release -p fm-render-svg write_i32_byte_identical_to_std_format passed."
+tooling_notes = [
+  "The requested rch exec focused unit-test run selected vmi1227854 and failed before tests because cmake was missing while building highs-sys.",
+  "RCH_WORKER=hz2 produced candidate-only routing context; the matching baseline attempts fell back local, so hz2 timings are not keep/reject proof.",
+  "The literal cargo bench --release form remains invalid on this Cargo toolchain; --profile release was used for per-crate bench commands.",
+]
+
+[negative_measurement_svg_integer_number_writer_2026_06_26.metrics]
+"wide_stages_render_8x16_baseline_mean_ms" = 1.2226
+"wide_stages_render_8x16_candidate_mean_ms" = 1.3227
+"wide_stages_render_8x16_candidate_delta_pct" = 8.1875
+"wide_stages_render_8x16_baseline_over_candidate" = 0.9243
+"wide_stages_render_12x24_baseline_mean_ms" = 3.5489
+"wide_stages_render_12x24_candidate_mean_ms" = 2.8211
+"wide_stages_render_12x24_candidate_delta_pct" = -20.5078
+"wide_stages_render_12x24_baseline_over_candidate" = 1.2580
+"wide_stages_render_16x32_baseline_mean_ms" = 5.6627
+"wide_stages_render_16x32_candidate_mean_ms" = 6.2051
+"wide_stages_render_16x32_candidate_delta_pct" = 9.5785
+"wide_stages_render_16x32_baseline_over_candidate" = 0.9126
+"full_pipeline_wide_8x16_baseline_mean_ms" = 1.8394
+"full_pipeline_wide_8x16_candidate_mean_ms" = 1.7957
+"full_pipeline_wide_8x16_candidate_delta_pct" = -2.3758
+"full_pipeline_wide_8x16_baseline_over_candidate" = 1.0243
+"full_pipeline_wide_12x24_baseline_mean_ms" = 4.1821
+"full_pipeline_wide_12x24_candidate_mean_ms" = 4.8479
+"full_pipeline_wide_12x24_candidate_delta_pct" = 15.9202
+"full_pipeline_wide_12x24_baseline_over_candidate" = 0.8627
+"full_pipeline_wide_16x32_baseline_mean_ms" = 8.7503
+"full_pipeline_wide_16x32_candidate_mean_ms" = 9.2844
+"full_pipeline_wide_16x32_candidate_delta_pct" = 6.1038
+"full_pipeline_wide_16x32_baseline_over_candidate" = 0.9425
+"full_pipeline_wide_8x16_mermaid_js_mean_ms" = 315.1399999976158
+"full_pipeline_wide_12x24_mermaid_js_mean_ms" = 981.7300000190735
+"full_pipeline_wide_16x32_mermaid_js_mean_ms" = 2879.185000014305
+"baseline_full_pipeline_wide_8x16_frankenmermaid_over_mermaid_js" = 0.005837
+"baseline_full_pipeline_wide_12x24_frankenmermaid_over_mermaid_js" = 0.004260
+"baseline_full_pipeline_wide_16x32_frankenmermaid_over_mermaid_js" = 0.003039
+"baseline_full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 171.33
+"baseline_full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 234.75
+"baseline_full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 329.04
+"candidate_full_pipeline_wide_8x16_frankenmermaid_over_mermaid_js" = 0.005698
+"candidate_full_pipeline_wide_12x24_frankenmermaid_over_mermaid_js" = 0.004938
+"candidate_full_pipeline_wide_16x32_frankenmermaid_over_mermaid_js" = 0.003225
+"candidate_full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 175.50
+"candidate_full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 202.51
+"candidate_full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 310.11
+
+[negative_measurement_svg_integer_number_writer_2026_06_26.decision]
+status = "reject"
+rationale = "Manual integer SVG number formatting improved same-local render 12x24 by 20.51% but regressed render 8x16 by 8.19%, render 16x32 by 9.58%, full_pipeline_wide 12x24 by 15.92%, and full_pipeline_wide 16x32 by 6.10%; code was reverted before commit."
