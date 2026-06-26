@@ -829,7 +829,8 @@ impl IrBuilder {
                     existing_node.shape = shape;
                 }
 
-                existing_node.span_all.push(span);
+                // `span_all` is write-only dead data (no workspace reader); do not accumulate
+                // a `Span` per node reference. See the node-construction site.
 
                 // If this call is NOT auto-created but the existing node IS,
                 // "upgrade" it to an explicit node and remove from tracking.
@@ -854,7 +855,10 @@ impl IrBuilder {
             callback: None,
             tooltip: None,
             span_primary: span,
-            span_all: vec![span],
+            // `span_all` has no reader anywhere in the workspace (the defining span lives in
+            // `span_primary`), so leave it empty instead of allocating a one-element `Vec` per
+            // node and re-pushing on every node reference — pure dead-data construction cost.
+            span_all: Vec::new(),
             implicit: is_auto_created,
             members: Vec::new(),
             menu_links: Vec::new(),
