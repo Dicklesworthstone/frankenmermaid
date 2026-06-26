@@ -855,6 +855,38 @@
   `TextBuilder` owned-String fields, the Element tree build itself); target those with a
   `wide_stages render` gate, not the attribute dedup.
 
+### Owned accessibility title element path — REJECTED (2026-06-26)
+- **Lever tested:** `describe_node` / `describe_edge` already return owned
+  accessibility title strings, but `Element::title(&desc)` cloned them again into
+  `text_content`. A new `Element::title_owned(String)` path moved those generated
+  strings directly into the title element, then the node and edge text-alternative
+  call sites used it.
+- **Mapped primitive:** value-shape specialization / finite-state template emission from
+  the alien-artifact pass: avoid a generic borrowed-to-owned conversion when the hot
+  producer already owns the value.
+- **Baseline -> After:** per-crate `frankenmermaid-cli`, `pipeline_bench`, warm target
+  dir `/data/projects/.rch-targets/frankenmermaid-cod-a`. Fresh local-fallback
+  `wide_stages/render/16x32` baseline from current main was `5.2354 ms`; candidate
+  focused rerun was `6.1373 ms` (`+17.23%`). Candidate `full_pipeline_wide` means
+  were `1.7957 ms`, `4.3769 ms`, and `8.7596 ms`; Criterion reported no change on
+  `8x16`/`12x24` and a `+8.20%` regression on `16x32`.
+- **Original comparator:** latest live-CDP Mermaid `11.12.0` denominator reused from
+  the current-main BOLD-VERIFY entry for identical generated wide inputs: Node
+  `v24.14.0`, `/snap/bin/chromium`, dynamic import of
+  `https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.esm.min.mjs`, 3 warmups,
+  20 timed render-to-SVG iterations.
+- **frankenmermaid/Mermaid ratio:** candidate full-pipeline wide means versus Mermaid.js
+  means `315.14 ms`, `981.73 ms`, and `2879.185 ms` give ratios `0.005698x`,
+  `0.004458x`, and `0.003042x`; Mermaid.js is `175.50x`, `224.30x`, and `328.69x`
+  slower. The retained current-main standing remains `198.10x`, `262.92x`, and
+  `426.35x` slower.
+- **Verdict:** rejected; the clone removal is too small to help the common cases and
+  regressed the large wide render/full-pipeline gate. Code was manually reverted before
+  commit; no production source diff remains.
+- **Do-not-retry note:** accessibility title clone elision is not the wide-render
+  lever. The remaining per-element cost is dominated by larger Element/tree/attribute
+  construction, not this final owned-string handoff.
+
 ### Common `-->` flowchart parser shortcut — REJECTED (2026-06-25)
 - **Lever tested:** `parse_fast_simple_flowchart_edge_ast` was changed locally to
   try a guarded exact `-->` shortcut before scanning the full fast-operator table.

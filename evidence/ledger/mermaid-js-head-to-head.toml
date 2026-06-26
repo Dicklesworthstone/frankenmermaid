@@ -1112,3 +1112,49 @@ tooling_notes = [
 [negative_measurement_svg_edge_data_usize_2026_06_26.decision]
 status = "reject"
 rationale = "The data-fm-edge-id numeric AttributeValue path failed the render-stage keep bar and regressed full_pipeline_wide by 44.38% on 12x24 and 28.10% on 16x32; code was reverted before commit."
+
+[negative_measurement_svg_title_owned_2026_06_26]
+date = "2026-06-26"
+agent = "TanSparrow"
+lever_bead = "bd-1buv.1"
+worker_delta = "baseline local fallback; candidate mixed ovh-a/local with decisive local render regression"
+baseline_commit = "297461a"
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-a"
+candidate_summary = "Move already-owned accessibility title descriptions into Element text_content via Element::title_owned instead of cloning through Element::title(&str)."
+render_baseline_command = "RCH_WORKER=ovh-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench -p frankenmermaid-cli --bench pipeline_bench -- wide_stages --warm-up-time 1 --measurement-time 2"
+render_candidate_command = "RCH_WORKER=ovh-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render/16x32 --warm-up-time 1 --measurement-time 2"
+wide_candidate_command = "RCH_WORKER=ovh-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+mermaid_js_command = "Latest live-CDP Mermaid 11.12.0 denominator reused from the current-main BOLD-VERIFY entry for identical generated wide inputs."
+rust_build_profile = "bench profile [optimized]"
+behavior_proof = "Candidate code was reverted before commit; Element::title_owned was byte-equivalent to Element::title for escaped title text and the focused equivalence unit test passed before revert."
+tooling_notes = [
+  "Agent Mail file reservation failed because the SQLite mail database reported malformed index page/root 41 and recovery mode was read-only.",
+  "cargo fmt -p fm-render-svg --check is currently blocked by pre-existing rustfmt drift in crates/fm-render-svg/src/path.rs, unrelated to this reverted candidate.",
+  "The literal requested cargo bench --release form remains invalid for cargo bench on this toolchain; per-crate cargo bench uses the optimized bench profile.",
+]
+
+[negative_measurement_svg_title_owned_2026_06_26.metrics]
+"wide_stages_render_16x32_baseline_mean_ms" = 5.2354
+"wide_stages_render_16x32_candidate_mean_ms" = 6.1373
+"wide_stages_render_16x32_candidate_delta_pct" = 17.2273
+"wide_stages_render_16x32_baseline_over_candidate" = 0.8530
+"full_pipeline_wide_8x16_candidate_mean_ms" = 1.7957
+"full_pipeline_wide_12x24_candidate_mean_ms" = 4.3769
+"full_pipeline_wide_16x32_candidate_mean_ms" = 8.7596
+"full_pipeline_wide_16x32_candidate_delta_pct" = 8.1987
+"full_pipeline_wide_8x16_mermaid_js_mean_ms" = 315.1399999976158
+"full_pipeline_wide_12x24_mermaid_js_mean_ms" = 981.7300000190735
+"full_pipeline_wide_16x32_mermaid_js_mean_ms" = 2879.185000014305
+"candidate_full_pipeline_wide_8x16_frankenmermaid_over_mermaid_js" = 0.005698
+"candidate_full_pipeline_wide_12x24_frankenmermaid_over_mermaid_js" = 0.004458
+"candidate_full_pipeline_wide_16x32_frankenmermaid_over_mermaid_js" = 0.003042
+"candidate_full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 175.50
+"candidate_full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 224.30
+"candidate_full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 328.69
+"retained_main_full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 198.10
+"retained_main_full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 262.92
+"retained_main_full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 426.35
+
+[negative_measurement_svg_title_owned_2026_06_26.decision]
+status = "reject"
+rationale = "Moving already-owned accessibility title descriptions into Element text_content did not improve the common wide cases and regressed the decisive wide_stages render 16x32 gate by 17.23% plus full_pipeline_wide 16x32 by 8.20%; code was reverted before commit."
