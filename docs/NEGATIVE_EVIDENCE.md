@@ -50,6 +50,55 @@
 
 ## Entries
 
+### SVG static custom-attribute names — REJECTED (2026-06-26)
+- **Lever:** `fm-render-svg::Element::attr` and `Element::attr_num` were changed
+  to take `&'static str` names and pass those names directly into
+  `Attributes::str` / `Attributes::num`, removing the per-call
+  `name.to_string()` allocation for literal SVG custom-attribute names such as
+  `style`, `role`, `font-size`, and `text-anchor`.
+- **Hypothesis:** all observed `attr` / `attr_num` first arguments in
+  `fm-render-svg` are literals, and wide diagrams emit enough SVG elements that
+  avoiding attribute-name allocation should improve `wide_stages/render`.
+- **Baseline -> After:** clean worktree
+  `/data/projects/.worktrees/frankenmermaid-tansparrow-attr-literal-20260626`,
+  baseline commit `4f1a98e`, same warm target dir
+  `/data/projects/.rch-targets/frankenmermaid-cod-b`, package
+  `frankenmermaid-cli`, bench `pipeline_bench`, filter `wide_stages/render`.
+  Same-local `rch exec` fallback baseline means were `1.3065 ms`, `2.9507 ms`,
+  and `5.5851 ms` for `8x16`, `12x24`, and `16x32`; candidate means were
+  `1.1330 ms`, `6.6917 ms`, and `6.2591 ms`. That is `13.28%` faster on
+  `8x16`, but `126.78%` slower on `12x24` and `12.07%` slower on `16x32`.
+- **Full-pipeline context:** local retained-baseline `full_pipeline_wide` means
+  after the revert were `1.9222 ms`, `4.3413 ms`, and `8.2540 ms`. An unpaired
+  candidate `full_pipeline_wide` run on `hz2` measured `1.4886 ms`,
+  `3.5287 ms`, and `6.6858 ms`, but that is routing context only because the
+  scheduler did not provide a matching `hz2` baseline in this turn.
+- **Original comparator:** latest pinned live-CDP Mermaid `11.12.0` denominator
+  reused from the current main ledger, Node `v24.14.0`, `/snap/bin/chromium`,
+  dynamic import of
+  `https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.esm.min.mjs`,
+  3 warmups, 20 timed render-to-SVG iterations, identical generated wide inputs.
+- **frankenmermaid/Mermaid ratio:** retained local full-pipeline baseline means
+  versus Mermaid.js means `315.14 ms`, `981.73 ms`, and `2879.185 ms` give
+  frankenmermaid/Mermaid ratios `0.006100x`, `0.004422x`, and `0.002867x`;
+  Mermaid.js is `163.95x`, `226.14x`, and `348.82x` slower. The rejected
+  render-stage candidate means against the same denominators were `0.003595x`,
+  `0.006816x`, and `0.002174x`; the `12x24` stage ratio worsened because the
+  candidate more than doubled same-local render time.
+- **Verdict:** regression; the candidate failed the same-local render-stage
+  gate at `12x24` and `16x32`.
+- **Revert:** manual `apply_patch` restored `name: &str` plus
+  `name.to_string()` in both builder methods; no production code diff remains.
+- **Do-not-retry note:** do not pursue a blanket static-name signature for
+  `Element::attr` / `attr_num`. The literal-name allocation is not a stable
+  wide-render bottleneck in isolation, and tightening the public builder
+  signature risks churn for little or negative measured gain.
+- **Tooling note:** a requested pinned-worker remote candidate run first spilled
+  to `vmi1227854` and failed before benchmarking because `cmake` was missing for
+  `highs-sys`. Later, `RCH_ENABLED=false` still allowed one candidate
+  full-pipeline run to execute on `hz2`; because the paired baseline fell back
+  locally, the `hz2` number is recorded only as unpaired context.
+
 ### Edge `data-fm-edge-id` numeric value path — REJECTED (2026-06-26)
 - **Lever:** `fm-render-svg` added a numeric `usize` `AttributeValue` path plus
   `Attributes::data_usize` / `Element::data_usize`, then used it for the three
