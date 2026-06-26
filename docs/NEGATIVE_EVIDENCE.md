@@ -1123,6 +1123,39 @@
 
 ## Blocked/Invalid Evidence Attempts
 
+### `fm-source-span` static-name + `data_owned` allocation trim — ZERO-GAIN (2026-06-26)
+- **Lever tested:** in the spans-on render path, `apply_span_metadata` does
+  `.data("fm-source-span", &span.compact_display())`, which cost three allocations per
+  span-bearing element: the formatted span value, the `format!("data-fm-source-span")`
+  name (the attr was not in the static-name table), and the value copy inside
+  `data`/`From<&str>`. Added `"fm-source-span"` to `static_data_attr_name` and a
+  `data_owned`/`Attributes::data_owned` path that moves the formatted string in — reducing
+  it to one allocation per element. Output-identical (`cargo test -p fm-render-svg` = `219
+  passed; 0 failed`).
+- **Outcome:** reverted as zero-gain. Same-machine local A/B (rch timing was unusable this
+  cycle — the assigned worker `vmi1227854` lacks `cmake` for `highs-sys`, and cross-worker
+  baselines are noisy), `render_spans_on/render/8x16`, criterion `--save-baseline` then
+  `--baseline`: `1.3688 ms → 1.3634 ms`, change `−2.44%` (p = 0.11 > 0.05, **No change**).
+  Two saved allocations across ~576 elements are too small a share of total render to clear
+  the ≥3% bar.
+- **Scope note (dead-end recorded):** this only ever touched the *spans-on* path. The
+  flowchart fair-fight render (`SvgRenderConfig::default()`, spans **off**, the config the
+  Mermaid head-to-head benches use) emits **no** `data-fm-source-*` attributes at all —
+  flowchart nodes/edges render via the legacy `render_node`/`render_edge` path
+  (`apply_span_metadata`, span only, gated off by default), not the scene path's
+  `apply_source_metadata` (which emits the unconsumed `fm-source-kind`/`fm-source-index`
+  only for non-flowchart scene items). So source-metadata trimming cannot move the
+  fair-fight ratio; do not chase it there.
+- **frankenmermaid/Mermaid ratio:** unchanged — retained current-main `full_pipeline_wide`
+  standing `1.5908 ms` / `3.7339 ms` / `6.7530 ms` vs live-CDP Mermaid `11.12.0` `315.14 ms`
+  / `981.73 ms` / `2879.185 ms` = `198.10x` / `262.92x` / `426.35x` slower.
+- **Do-not-retry note:** the spans-on per-element allocation count is no longer the
+  bottleneck worth chasing; and source-metadata is absent from the spans-off fair-fight
+  render entirely. Recurring infra blocker: rch keeps routing to `cmake`-less workers
+  (`vmi1227854`) that fail `highs-sys`, forcing local builds for any deterministic check —
+  this is documented repeatedly above and needs a pool fix (install `cmake` or pin a
+  cmake-equipped worker) to unblock reliable per-crate timing across the swarm.
+
 ### Agent Mail registration/reservation — BLOCKED (2026-06-24)
 - **Attempt:** Register `frankenmermaid-cod-a` and reserve `docs/NEGATIVE_EVIDENCE.md`,
   `evidence/ledger/**`, `.beads/**`, and bench files through MCP Agent Mail before edits.
