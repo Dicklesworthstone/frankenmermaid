@@ -5510,15 +5510,26 @@ fn render_node_label_text(
         );
     }
 
-    let mut text = TextBuilder::new(label_text)
-        .x(x)
-        .y(y)
-        .font_family(&config.font_family)
-        .font_size(font_size)
-        .line_height(config.line_height)
-        .anchor(TextAnchor::Middle)
-        .fill(&colors.text)
-        .build();
+    let mut text = if label_text.contains('\n') || label_text.contains('\r') {
+        TextBuilder::new(label_text)
+            .x(x)
+            .y(y)
+            .font_family(&config.font_family)
+            .font_size(font_size)
+            .line_height(config.line_height)
+            .anchor(TextAnchor::Middle)
+            .fill(&colors.text)
+            .build()
+    } else {
+        Element::text()
+            .x(x)
+            .y(y)
+            .attr("text-anchor", TextAnchor::Middle.as_str())
+            .attr("font-family", &config.font_family)
+            .attr_num("font-size", font_size)
+            .fill(&colors.text)
+            .content(label_text)
+    };
     text = maybe_add_class(text, "fm-node-label", emit_classdef_classes);
 
     if let Some(style) = label_style {
@@ -6226,6 +6237,40 @@ mod tests {
         layout_diagram,
     };
     use proptest::prelude::*;
+
+    #[test]
+    fn plain_node_label_fast_path_matches_text_builder_output() {
+        let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        let config = SvgRenderConfig::default();
+        let colors = ThemeColors::default();
+
+        let mut expected = TextBuilder::new("Node 42")
+            .x(11.0)
+            .y(22.0)
+            .font_family(&config.font_family)
+            .font_size(13.0)
+            .line_height(config.line_height)
+            .anchor(TextAnchor::Middle)
+            .fill(&colors.text)
+            .build();
+        expected = maybe_add_class(expected, "fm-node-label", true);
+        expected = expected.attr("style", "font-weight:700");
+
+        let actual = render_node_label_text(
+            &ir,
+            None,
+            "Node 42",
+            11.0,
+            22.0,
+            13.0,
+            &config,
+            &colors,
+            Some("font-weight:700"),
+            true,
+        );
+
+        assert_eq!(actual.render(), expected.render());
+    }
 
     fn create_ir_with_cluster(title: &str) -> MermaidDiagramIr {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);

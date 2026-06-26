@@ -965,3 +965,52 @@ tooling_notes = [
 [post_measurement_svg_static_hot_data_attrs_2026_06_26.decision]
 status = "keep"
 rationale = "The narrowed static hot data-name map improves render_svg medium_100 by 5.50%, render_svg large_500 by 6.98%, and full_pipeline_wide by 14.85%-23.31%, while retaining generic data-name fallback semantics and improving Mermaid.js dominance ratios to 172x-349x."
+
+[post_measurement_svg_plain_node_label_fast_path_2026_06_26]
+date = "2026-06-26"
+agent = "TanSparrow"
+lever_bead = "bd-1buv.1"
+worker_delta = "same local fallback through rch exec"
+worker_ratio = "local"
+baseline_commit = "e7ad162"
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-a"
+baseline_worktree = "/data/projects/.worktrees/frankenmermaid-cod-a-baseline-e7ad162-20260626"
+candidate_worktree = "/data/projects/frankenmermaid"
+candidate_summary = "Render plain single-line node labels directly as SVG text elements while keeping markdown and multiline labels on the TextBuilder fallback."
+baseline_command = "RCH_ENABLED=0 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+candidate_command = "RCH_ENABLED=0 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+mermaid_js_command = "Latest live-CDP Mermaid 11.12.0 denominator reused from the current-main BOLD-VERIFY entry for identical generated wide inputs."
+rust_build_profile = "bench profile [optimized]"
+behavior_proof = "Plain-label equivalence test passed; cargo fmt -p fm-render-svg --check passed; rch exec -- cargo check -p fm-render-svg --all-targets passed on ovh-a; rch exec -- cargo clippy -p fm-render-svg --all-targets -- -D warnings passed on ovh-a; cargo test -p frankenmermaid-cli --test frankentui_conformance_test passed locally after remote worker vmi1227854 failed before tests because cmake was missing for highs-sys."
+tooling_notes = [
+  "Agent Mail file reservation failed because the SQLite mail database reported malformed index page/root 41; edits were constrained manually to renderer/evidence files.",
+  "A remote render_svg baseline on hz2 produced raw current-main means but the candidate rerun fell back locally, so the keep decision uses same-local full_pipeline_wide raw means.",
+  "The literal requested cargo bench --release form is still invalid for cargo bench on this toolchain; per-crate cargo bench uses the optimized bench profile.",
+]
+
+[post_measurement_svg_plain_node_label_fast_path_2026_06_26.metrics]
+"full_pipeline_wide_8x16_baseline_mean_ms" = 2.1114
+"full_pipeline_wide_8x16_candidate_mean_ms" = 1.8459
+"full_pipeline_wide_8x16_candidate_delta_pct" = -12.5746
+"full_pipeline_wide_8x16_baseline_over_candidate" = 1.1438
+"full_pipeline_wide_12x24_baseline_mean_ms" = 4.9828
+"full_pipeline_wide_12x24_candidate_mean_ms" = 4.5859
+"full_pipeline_wide_12x24_candidate_delta_pct" = -7.9654
+"full_pipeline_wide_12x24_baseline_over_candidate" = 1.0865
+"full_pipeline_wide_16x32_baseline_mean_ms" = 10.617
+"full_pipeline_wide_16x32_candidate_mean_ms" = 8.0958
+"full_pipeline_wide_16x32_candidate_delta_pct" = -23.7468
+"full_pipeline_wide_16x32_baseline_over_candidate" = 1.3114
+"full_pipeline_wide_8x16_mermaid_js_mean_ms" = 315.1399999976158
+"full_pipeline_wide_12x24_mermaid_js_mean_ms" = 981.7300000190735
+"full_pipeline_wide_16x32_mermaid_js_mean_ms" = 2879.185000014305
+"full_pipeline_wide_8x16_frankenmermaid_over_mermaid_js" = 0.005857
+"full_pipeline_wide_12x24_frankenmermaid_over_mermaid_js" = 0.004671
+"full_pipeline_wide_16x32_frankenmermaid_over_mermaid_js" = 0.002812
+"full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 170.72
+"full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 214.08
+"full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 355.64
+
+[post_measurement_svg_plain_node_label_fast_path_2026_06_26.decision]
+status = "keep"
+rationale = "Guarded direct SVG text construction for plain single-line node labels improves same-local full_pipeline_wide by 7.97%-23.75%, keeps markup and multiline labels on the existing fallback, and retains 171x-356x Mermaid 11.12.0 dominance ratios."

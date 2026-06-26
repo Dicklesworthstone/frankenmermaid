@@ -50,6 +50,42 @@
 
 ## Entries
 
+### SVG plain node label direct element path — KEPT (2026-06-26)
+- **Lever:** `fm-render-svg::render_node_label_text` now keeps markdown and
+  multiline labels on the existing `TextBuilder` path, but renders single-line
+  plain labels directly as an SVG `text` element. This avoids the extra builder
+  string clones for the common flowchart node-label shape.
+- **Hypothesis:** generated wide flowcharts spend enough time constructing plain
+  node label text elements that a guarded direct path should improve the
+  full-pipeline SVG gate while preserving markup and multiline behavior.
+- **Baseline -> After:** clean detached current-main baseline worktree
+  `/data/projects/.worktrees/frankenmermaid-cod-a-baseline-e7ad162-20260626`
+  at `e7ad162`, then candidate in `/data/projects/frankenmermaid`, same
+  `RCH_ENABLED=0 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a
+  rch exec -- cargo bench -p frankenmermaid-cli --bench pipeline_bench --
+  full_pipeline_wide --warm-up-time 1 --measurement-time 2`. Current-main
+  means were `2.1114 ms`, `4.9828 ms`, and `10.617 ms` for `8x16`, `12x24`,
+  and `16x32`; candidate means were `1.8459 ms`, `4.5859 ms`, and `8.0958 ms`.
+  The candidate was `12.57%`, `7.97%`, and `23.75%` faster.
+- **Original comparator:** latest pinned live-CDP Mermaid `11.12.0` denominator
+  reused from the current main ledger, Node `v24.14.0`, `/snap/bin/chromium`,
+  dynamic import of
+  `https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.esm.min.mjs`,
+  3 warmups, 20 timed render-to-SVG iterations, identical generated wide inputs.
+- **frankenmermaid/Mermaid ratio:** candidate wide means versus Mermaid.js means
+  `315.14 ms`, `981.73 ms`, and `2879.185 ms` give frankenmermaid/Mermaid
+  ratios `0.005857x`, `0.004671x`, and `0.002812x`; Mermaid.js is `170.72x`,
+  `214.08x`, and `355.64x` slower.
+- **Verdict:** kept. Behavior proof: `cargo fmt -p fm-render-svg --check`,
+  `rch exec -- cargo check -p fm-render-svg --all-targets`,
+  `rch exec -- cargo clippy -p fm-render-svg --all-targets -- -D warnings`,
+  focused `cargo test -p fm-render-svg
+  plain_node_label_fast_path_matches_text_builder_output -- --nocapture`, and
+  local conformance `cargo test -p frankenmermaid-cli --test
+  frankentui_conformance_test` all passed. The remote conformance attempt on
+  `vmi1227854` failed before tests because that worker lacks `cmake` for
+  `highs-sys`.
+
 ### SVG root attribute direct streaming — REVERTED (2026-06-26)
 - **Lever:** `fm-render-svg::SvgDocument::write_to_string` changed root SVG
   attribute emission from `output.push_str(&self.attrs.render())` to
