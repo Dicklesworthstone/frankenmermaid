@@ -1014,3 +1014,35 @@ tooling_notes = [
 [post_measurement_svg_plain_node_label_fast_path_2026_06_26.decision]
 status = "keep"
 rationale = "Guarded direct SVG text construction for plain single-line node labels improves same-local full_pipeline_wide by 7.97%-23.75%, keeps markup and multiline labels on the existing fallback, and retains 171x-356x Mermaid 11.12.0 dominance ratios."
+
+[verify_main_full_pipeline_wide_standing_2026_06_26]
+date = "2026-06-26"
+agent = "TanSparrow"
+lever_bead = "bd-1buv.1"
+kind = "BOLD-VERIFY standing (no code change this turn)"
+main_commit = "52109a1"
+worker = "hz2 (rch exec; toolchain matches the .rch-targets pool)"
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cc"
+candidate_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cc rch exec -- cargo bench -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+mermaid_js_command = "Latest live-CDP Mermaid 11.12.0 denominator reused from prior BOLD-VERIFY entries for identical generated wide inputs (Node v24.14.0, chromium, mermaid@11.12.0 esm, 3 warmups, 20 timed render-to-SVG iterations)."
+rust_build_profile = "bench profile [optimized]"
+summary = "Fresh hz2 full_pipeline_wide means on current main (after the last 5 fm-render-svg perf commits) confirm widened Mermaid 11.12.0 dominance. No source changed this turn; the worktree win 290adec was already landed as main commit 45015be."
+criterion_change_note = "Criterion reported -24.6% (12x24) and -23.1% (16x32) versus the prior stored hz2 baseline, attributable to the cumulative recent renderer commits."
+
+[verify_main_full_pipeline_wide_standing_2026_06_26.metrics]
+"full_pipeline_wide_8x16_frankenmermaid_mean_ms" = 1.5908
+"full_pipeline_wide_12x24_frankenmermaid_mean_ms" = 3.7339
+"full_pipeline_wide_16x32_frankenmermaid_mean_ms" = 6.7530
+"full_pipeline_wide_8x16_mermaid_js_mean_ms" = 315.1399999976158
+"full_pipeline_wide_12x24_mermaid_js_mean_ms" = 981.7300000190735
+"full_pipeline_wide_16x32_mermaid_js_mean_ms" = 2879.185000014305
+"full_pipeline_wide_8x16_frankenmermaid_over_mermaid_js" = 0.005048
+"full_pipeline_wide_12x24_frankenmermaid_over_mermaid_js" = 0.003803
+"full_pipeline_wide_16x32_frankenmermaid_over_mermaid_js" = 0.002345
+"full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 198.10
+"full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 262.92
+"full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 426.35
+
+[verify_main_full_pipeline_wide_standing_2026_06_26.decision]
+status = "verified"
+rationale = "Current main (52109a1) renders parse+layout+SVG for wide flowcharts in 1.59-6.75 ms versus Mermaid 11.12.0's 315-2879 ms, i.e. 198x-426x faster, exceeding the previously recorded 170x-356x standing after the cumulative recent renderer optimizations."

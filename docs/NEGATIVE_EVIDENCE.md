@@ -772,3 +772,26 @@
 - **Do-not-retry note:** complete `bd-1buv.1` first: pin mermaid-js source/package
   provenance, normalize equivalent render-to-SVG calls, and emit ratios before closing
   any optimization bead or claiming a win.
+
+### Current-main wide pipeline standing — VERIFIED (2026-06-26)
+- **Kind:** BOLD-VERIFY standing measurement; **no source changed this turn**. The
+  worktree commit `290adec` ("append dynamic classes without temp strings") was found
+  already landed on `main` as commit `45015be`, so there was no unlanded win to ship.
+- **Measurement:** fresh `full_pipeline_wide` (parse + layout + SVG) means on `main`
+  `52109a1` via `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cc rch exec
+  -- cargo bench -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide
+  --warm-up-time 1 --measurement-time 2` on worker `hz2` (toolchain matches the pool):
+  `8x16` `1.5908 ms`, `12x24` `3.7339 ms`, `16x32` `6.7530 ms`. Criterion reported
+  `-24.6%` (`12x24`) and `-23.1%` (`16x32`) versus the prior stored hz2 baseline —
+  attributable to the cumulative last-5 `fm-render-svg` perf commits.
+- **Original comparator:** latest live-CDP Mermaid `11.12.0` denominators reused from
+  prior BOLD-VERIFY entries for identical generated wide inputs: `8x16` `315.14 ms`,
+  `12x24` `981.73 ms`, `16x32` `2879.185 ms`.
+- **frankenmermaid/Mermaid ratio:** `0.005048x` (`8x16`), `0.003803x` (`12x24`),
+  `0.002345x` (`16x32`) — i.e. Mermaid.js is `198.10x`, `262.92x`, and `426.35x`
+  slower, exceeding the previously recorded `170x-356x` standing.
+- **Verdict:** verified; current main holds and extends wide-pipeline dominance after the
+  recent renderer optimizations. Recorded as standing, not as a new lever.
+- **Do-not-retry note:** the dynamic-class-append lever is already on main (`45015be`);
+  do not re-attempt it as if unlanded. Its pre-rebase worktree copy `290adec` only looks
+  novel to `git cherry` because its diff context targets the old `10b1654` baseline.
