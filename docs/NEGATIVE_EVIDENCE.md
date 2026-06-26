@@ -1168,6 +1168,36 @@
 
 ## Blocked/Invalid Evidence Attempts
 
+### Edge routing is 85% of tree-path layout; `intersect_segment` bool variant — ~0-GAIN (2026-06-26)
+- **Finding (follow-up to the tree-fallback entry below):** instrumenting
+  `layout_diagram_tree_traced` on `16x32` (512 nodes, 960 edges, the tree-path case) split
+  the ~1 ms layout into **tree-build+placement ≈ `140 µs` (15%)** and **`build_edge_paths`
+  (obstacle-routed edges) ≈ `785–862 µs` (85%)**. Edge routing — *shared with Sugiyama* — is
+  the layout bottleneck for wide graphs. So the next layout lever is edge routing, not the
+  tree builder.
+- **Lever tested:** the obstacle check in `cga_routing::find_{vertical,horizontal}_segment_nudge`
+  did `!expanded.intersect_segment(&seg).is_empty()` — `CgaRect::intersect_segment` allocates a
+  `Vec<CgaPoint>` and dedups corner points just to test emptiness. Added a non-allocating
+  `CgaRect::intersects_segment(&self,&seg)->bool` (early-exit `any`) and routed the call-sites
+  through it. Output-identical (`cargo test -p fm-core -p fm-layout` = `349`+`428` passed).
+- **Outcome:** reverted as ~0-gain. Same-machine local A/B (rch timing still `cmake`-blocked),
+  `layout_wide` `--save-baseline`/`--baseline`: `8x16` `-4.2%`, `12x24` `+4.1%`, `16x32`
+  `+11.0%` — **incoherent** (a strictly-less-work change cannot regress +11%; the moves are not
+  even same-direction, ruling out a uniform load shift). The local box is too contended to
+  resolve a sub-noise effect. Root cause of the ~0: `intersect_segment` only runs on
+  AABB-overlapping candidates (rare on cleanly-routed edges), so the removed alloc is **not**
+  on the hot path. The `~850 µs` edge-routing cost lives in the per-edge index `query_segment`
+  traversal, the per-edge output `Vec<LayoutPoint>`, and the per-candidate f64 AABB rejects —
+  not the rare `intersect_segment` allocation.
+- **frankenmermaid/Mermaid ratio:** unchanged — reverted, main untouched. Retained
+  `full_pipeline_wide` standing `198.10x` / `262.92x` / `426.35x` vs live-CDP Mermaid `11.12.0`.
+- **Do-next:** to move edge routing, target the per-edge cost that actually dominates — the
+  obstacle-index `query_segment` traversal and the output point-vector — not the
+  obstacle-intersection allocation. And it needs a low-noise bench: the recurring `cmake`-less
+  rch worker blocks clean rch timing, and the local box is too contended for sub-5% layout
+  effects, so any edge-routing micro-opt is currently **unmeasurable** here — a real
+  infra blocker for further layout/edge-routing perf work.
+
 ### `layout_wide/16x32` runs the TREE algorithm, not Sugiyama — OPTIMIZATION-TARGETING FINDING (2026-06-26)
 - **What was measured:** the layout guardrail forces a fallback from Sugiyama to the **tree**
   algorithm for the largest wide bench case. Built `fm-cli`, rendered the generated wide
