@@ -335,10 +335,33 @@ pub(crate) fn write_fixed2<W: fmt::Write>(f: &mut W, value: f32) -> fmt::Result 
     let magnitude = (scaled as i64).unsigned_abs();
     let int_part = magnitude / 100;
     let frac_part = magnitude % 100;
-    if value.is_sign_negative() {
-        f.write_char('-')?;
+
+    // Format `[-]int_part.frac_part` (frac always 2 digits) right-to-left into a stack
+    // buffer, then write once — avoiding the fmt::Formatter dispatch of write! on this
+    // per-coordinate hot path. The early-return guard bounds int_part below 9e15 (16
+    // digits), so sign + 16 digits + '.' + 2 frac fit comfortably in 24 bytes.
+    let mut buf = [0u8; 24];
+    let mut idx = buf.len();
+    idx -= 1;
+    buf[idx] = b'0' + (frac_part % 10) as u8;
+    idx -= 1;
+    buf[idx] = b'0' + (frac_part / 10) as u8;
+    idx -= 1;
+    buf[idx] = b'.';
+    let mut n = int_part;
+    loop {
+        idx -= 1;
+        buf[idx] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
     }
-    write!(f, "{int_part}.{frac_part:02}")
+    if value.is_sign_negative() {
+        idx -= 1;
+        buf[idx] = b'-';
+    }
+    f.write_str(core::str::from_utf8(&buf[idx..]).unwrap_or(""))
 }
 
 /// Write `s` into `f` with XML attribute-value escaping (`& < > " '`), copying
