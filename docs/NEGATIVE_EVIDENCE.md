@@ -50,6 +50,46 @@
 
 ## Entries
 
+### SVG root attribute direct streaming — REVERTED (2026-06-26)
+- **Lever:** `fm-render-svg::SvgDocument::write_to_string` changed root SVG
+  attribute emission from `output.push_str(&self.attrs.render())` to
+  `self.attrs.write_into(output)`, avoiding the temporary root attribute string.
+- **Hypothesis:** the root SVG element is emitted on every render, and direct
+  streaming should remove one allocation/copy from the full-pipeline SVG hot
+  path without changing escaping semantics because `Attributes::render` delegates
+  to `Attributes::write_into`.
+- **Baseline -> After:** same worktree
+  `/data/projects/.worktrees/frankenmermaid-tansparrow-svg-root-attrs-direct-20260626`,
+  same `rch exec` local fallback, package `frankenmermaid-cli`, bench
+  `pipeline_bench`, filter `full_pipeline_wide`, target dir
+  `/data/projects/.rch-targets/frankenmermaid-cod-b`. Restored-current baseline
+  means were `2.2743 ms`, `5.3945 ms`, and `10.707 ms` for `8x16`, `12x24`,
+  and `16x32`; candidate means were `2.1638 ms`, `6.6546 ms`, and `9.5462 ms`.
+  The candidate was `4.86%` faster on `8x16`, `23.36%` slower on `12x24`, and
+  `10.84%` faster on `16x32`.
+- **Original comparator:** latest pinned live-CDP Mermaid `11.12.0` denominator
+  from the current main ledger, Node `v24.14.0`, `/snap/bin/chromium`,
+  dynamic import of
+  `https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.esm.min.mjs`,
+  3 warmups, 20 timed render-to-SVG iterations, identical generated wide inputs.
+- **frankenmermaid/Mermaid ratio:** candidate wide means versus Mermaid.js means
+  `315.14 ms`, `981.73 ms`, and `2879.185 ms` give frankenmermaid/Mermaid
+  ratios `0.006866x`, `0.006778x`, and `0.003316x`; Mermaid.js is `145.64x`,
+  `147.53x`, and `301.61x` slower. The retained baseline ratios after revert
+  are `0.007217x`, `0.005495x`, and `0.003719x`.
+- **Verdict:** mixed loss; the important `12x24` wide case regressed by
+  `23.36%`, so the code was reverted before commit.
+- **Revert:** manual `apply_patch` restored `output.push_str(&self.attrs.render())`;
+  no production code diff remains.
+- **Do-not-retry note:** the one-off root attribute temporary is not a stable
+  full-pipeline bottleneck at current sizes. Future SVG serialization work should
+  target repeated element/path/text emission costs rather than the root
+  `SvgDocument` attribute render.
+- **Tooling note:** an earlier candidate-only run on `ovh-a` had no same-worker
+  baseline and is not keep evidence. A follow-up baseline attempt on
+  `vmi1227854` failed before benchmarking because `cmake` was missing while
+  building `highs-sys`; that run is also not benchmark evidence.
+
 ### SVG document child Vec capacity hint — REVERTED (2026-06-25)
 - **Lever:** `fm-render-svg::SvgDocument` grew a `with_child_capacity`
   constructor, and the legacy layout renderer pre-sized the root document

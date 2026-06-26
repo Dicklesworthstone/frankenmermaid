@@ -788,3 +788,56 @@ tooling_notes = [
 [negative_measurement_svg_attrs_set_retain_guard_2026_06_25.decision]
 status = "reject"
 rationale = "Attributes::set scan-before-retain improved isolated render_svg/flowchart by 11.25%-26.13%, but full_pipeline_wide regressed by 16.64%-27.21%; code was reverted."
+
+[negative_measurement_svg_root_attrs_direct_stream_2026_06_26]
+date = "2026-06-26"
+agent = "TanSparrow"
+lever_bead = "bd-1buv.1"
+worker_delta = "local (rch fallback)"
+baseline_commit = "10b1654"
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-b"
+candidate_summary = "Stream root SvgDocument attributes directly into the final SVG output buffer instead of allocating a temporary Attributes::render string."
+baseline_command = "RCH_ENABLED=0 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+candidate_command = "RCH_ENABLED=0 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+mermaid_js_command = "Latest live-CDP Mermaid 11.12.0 denominator from current-main BOLD-VERIFY entry reused for identical generated wide inputs."
+rust_build_profile = "release profile [optimized]"
+behavior_proof = "Candidate code was reverted before commit; Attributes::render already delegates to Attributes::write_into, so the attempted direct stream had equivalent intended escaping semantics but failed the full_pipeline_wide gate."
+tooling_notes = [
+  "Initial candidate-only remote run on ovh-a produced 1.5526 ms, 3.6484 ms, and 6.7263 ms, but lacked a same-worker restored baseline and is not keep evidence.",
+  "A same-worker remote baseline attempt selected vmi1227854 and failed before benchmarking because cmake was missing while building highs-sys; that run is not benchmark evidence.",
+  "Accepted A/B evidence used rch exec local fallback for both restored baseline and candidate in the same clean worktree because remote worker selection was degraded.",
+  "Fresh clean worktree was used because an older worktree had concurrent unstaged renderer class-prefix edits.",
+]
+
+[negative_measurement_svg_root_attrs_direct_stream_2026_06_26.metrics]
+"full_pipeline_wide_8x16_baseline_mean_ms" = 2.2743
+"full_pipeline_wide_8x16_candidate_mean_ms" = 2.1638
+"full_pipeline_wide_8x16_candidate_delta_pct" = -4.8586
+"full_pipeline_wide_8x16_baseline_over_candidate" = 1.0511
+"full_pipeline_wide_12x24_baseline_mean_ms" = 5.3945
+"full_pipeline_wide_12x24_candidate_mean_ms" = 6.6546
+"full_pipeline_wide_12x24_candidate_delta_pct" = 23.3590
+"full_pipeline_wide_12x24_baseline_over_candidate" = 0.8106
+"full_pipeline_wide_16x32_baseline_mean_ms" = 10.707
+"full_pipeline_wide_16x32_candidate_mean_ms" = 9.5462
+"full_pipeline_wide_16x32_candidate_delta_pct" = -10.8415
+"full_pipeline_wide_16x32_baseline_over_candidate" = 1.1216
+"full_pipeline_wide_8x16_mermaid_js_mean_ms" = 315.1399999976158
+"full_pipeline_wide_12x24_mermaid_js_mean_ms" = 981.7300000190735
+"full_pipeline_wide_16x32_mermaid_js_mean_ms" = 2879.185000014305
+"candidate_full_pipeline_wide_8x16_frankenmermaid_over_mermaid_js" = 0.006866
+"candidate_full_pipeline_wide_12x24_frankenmermaid_over_mermaid_js" = 0.006778
+"candidate_full_pipeline_wide_16x32_frankenmermaid_over_mermaid_js" = 0.003316
+"candidate_full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 145.64
+"candidate_full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 147.53
+"candidate_full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 301.61
+"retained_main_full_pipeline_wide_8x16_frankenmermaid_over_mermaid_js" = 0.007217
+"retained_main_full_pipeline_wide_12x24_frankenmermaid_over_mermaid_js" = 0.005495
+"retained_main_full_pipeline_wide_16x32_frankenmermaid_over_mermaid_js" = 0.003719
+"retained_main_full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 138.57
+"retained_main_full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 181.99
+"retained_main_full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 268.91
+
+[negative_measurement_svg_root_attrs_direct_stream_2026_06_26.decision]
+status = "reject"
+rationale = "Root attribute direct streaming was mixed: 8x16 and 16x32 improved, but 12x24 regressed by 23.36%; code was reverted and only this evidence record was retained."
