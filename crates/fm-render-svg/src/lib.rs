@@ -5785,49 +5785,9 @@ const fn node_shape_css_class(shape: fm_core::NodeShape) -> &'static str {
 /// A `tension` factor of 0.25 (1/4) is used so curves stay close to the
 /// original waypoints while still looking smooth.
 fn smooth_edge_path(points: &[(f32, f32)], _is_self_loop: bool) -> String {
-    let n = points.len();
-    if n == 0 {
-        return String::new();
-    }
-
-    let mut pb = PathBuilder::new();
-    pb = pb.move_to(points[0].0, points[0].1);
-
-    if n == 1 {
-        return pb.build();
-    }
-
-    if n == 2 {
-        pb = pb.line_to(points[1].0, points[1].1);
-        return pb.build();
-    }
-
-    // Catmull-Rom to cubic bezier conversion with tension = 1/4.
-    // For segment from p[i] to p[i+1]:
-    //   cp1 = p[i]   + (p[i+1] - p[i-1]) * tension
-    //   cp2 = p[i+1] - (p[i+2] - p[i])   * tension
-    // At boundaries we clamp the virtual neighbor to the endpoint itself.
-    let t: f32 = 0.25;
-
-    for i in 0..(n - 1) {
-        let p_prev = if i == 0 { points[0] } else { points[i - 1] };
-        let p_cur = points[i];
-        let p_next = points[i + 1];
-        let p_next2 = if i + 2 < n {
-            points[i + 2]
-        } else {
-            points[n - 1]
-        };
-
-        let cp1x = p_cur.0 + (p_next.0 - p_prev.0) * t;
-        let cp1y = p_cur.1 + (p_next.1 - p_prev.1) * t;
-        let cp2x = p_next.0 - (p_next2.0 - p_cur.0) * t;
-        let cp2y = p_next.1 - (p_next2.1 - p_cur.1) * t;
-
-        pb = pb.curve_to(cp1x, cp1y, cp2x, cp2y, p_next.0, p_next.1);
-    }
-
-    pb.build()
+    // Catmull-Rom→cubic conversion written straight into the `d` string, with no
+    // intermediate `Vec<PathCommand>`. Byte-identical to the prior PathBuilder version.
+    crate::path::build_smooth_path(points)
 }
 
 /// Render a single edge to an SVG element.

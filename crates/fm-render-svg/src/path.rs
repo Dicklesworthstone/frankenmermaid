@@ -284,6 +284,53 @@ fn write_cubic(output: &mut String, prefix: char, c1: (f32, f32), c2: (f32, f32)
     let _ = FmtNum(end.1).write_into(output);
 }
 
+fn write_point(output: &mut String, prefix: char, x: f32, y: f32) {
+    output.push(prefix);
+    let _ = FmtNum(x).write_into(output);
+    output.push(' ');
+    let _ = FmtNum(y).write_into(output);
+}
+
+/// Build a smooth cubic-Bézier path `d` string directly, with no intermediate
+/// `Vec<PathCommand>` — Catmull-Rom→cubic conversion (tension 1/4), the same shape a
+/// `PathBuilder` of `move_to`/`line_to`/`curve_to` would produce. Byte-identical to the
+/// builder output (commands joined by single spaces). This is the per-edge hot path on
+/// curve-heavy graphs, where the builder's per-segment enum push + dispatch is pure
+/// overhead on top of the byte writing.
+pub(crate) fn build_smooth_path(points: &[(f32, f32)]) -> String {
+    let n = points.len();
+    if n == 0 {
+        return String::new();
+    }
+    let mut d = String::with_capacity(n * 24);
+    write_point(&mut d, 'M', points[0].0, points[0].1);
+    if n == 1 {
+        return d;
+    }
+    if n == 2 {
+        d.push(' ');
+        write_point(&mut d, 'L', points[1].0, points[1].1);
+        return d;
+    }
+
+    let t: f32 = 0.25;
+    for i in 0..(n - 1) {
+        let p_prev = if i == 0 { points[0] } else { points[i - 1] };
+        let p_cur = points[i];
+        let p_next = points[i + 1];
+        let p_next2 = if i + 2 < n { points[i + 2] } else { points[n - 1] };
+
+        let cp1x = p_cur.0 + (p_next.0 - p_prev.0) * t;
+        let cp1y = p_cur.1 + (p_next.1 - p_prev.1) * t;
+        let cp2x = p_next.0 - (p_next2.0 - p_cur.0) * t;
+        let cp2y = p_next.1 - (p_next2.1 - p_cur.1) * t;
+
+        d.push(' ');
+        write_cubic(&mut d, 'C', (cp1x, cp1y), (cp2x, cp2y), (p_next.0, p_next.1));
+    }
+    d
+}
+
 /// Fluent builder for SVG path `d` attribute strings.
 #[derive(Debug, Clone, Default)]
 pub struct PathBuilder {
