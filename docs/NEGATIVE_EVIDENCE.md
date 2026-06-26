@@ -375,6 +375,51 @@
 
 ## Kept Wins Also Recorded Here By Request
 
+### Emit only used `<defs>` arrowhead markers for flowcharts — KEPT (2026-06-26)
+- **Lever:** both SVG render backends (`render_layout_to_svg` legacy/default and
+  `render_scene_document_with_ir` scene) unconditionally wrote all **12** arrowhead markers
+  into `<defs>` regardless of which the diagram uses. Mermaid.js emits only used markers.
+  Now, for **flowcharts**, a one-pass `ir.edges` check decides: if every edge arrow uses
+  only the basic markers (`arrow-end`/`arrow-open`/none — see `arrow_uses_only_basic_markers`;
+  back-edges always use `arrow-open`), emit just those two; a single "fancy" arrow
+  (half/stick/thick/circle/cross/diamond/double) falls back to the full set so a referenced
+  marker is never missing. Emission order preserved.
+- **Mapped primitive:** dead-output elimination / work-proportional-to-use, scoped by a
+  provably-safe predicate (subset of `render_edge`'s marker match), with a conservative
+  fallback (any non-listed arrow → full set; **non-flowchart diagrams → full set**, since
+  e.g. sequence diagrams reference markers outside `ir.edges`).
+- **Deterministic measurement (machine-independent):** built `fm-cli`, rendered flowcharts
+  to SVG (`--no-embed-source-spans`). The marker reduction removes a **constant 1969 bytes**
+  (the 10 omitted `<marker>` defs) per basic-arrow flowchart render: 2-edge flowchart
+  `16006 → 14037` bytes (**−12.3%**), wide `8x16` `166290 → 164321` (**−1.18%**); marker
+  count `12 → 2`, `marker-end="url(#arrow-end)"` still present (arrowheads intact); a circle
+  arrow (`A --o B`) still emits all 12.
+- **Render-time:** same-machine local A/B (rch timing blocked this turn — assigned worker
+  `vmi1227854` lacks `cmake` for `highs-sys`), `render_svg/flowchart/small_10`, criterion
+  `--save-baseline` then `--baseline`: `121.29 µs → 98.07 µs`, change **−15.89%** (p = 0.00
+  < 0.05, "improved") — 10 fewer per-render `Element` builds + ~2 KB less to serialize, the
+  largest fraction on small diagrams.
+- **Behavior proof:** `cargo test -p fm-render-svg` = `219 passed; 0 failed` (the
+  `includes_half_arrow_marker_defs` empty-**sequence** test still passes because non-flowchart
+  diagrams keep the full set); `cargo test -p frankenmermaid-cli --test
+  frankentui_conformance_test` passed. Regression-harness goldens are not git-tracked
+  (regenerated locally), so no golden churn lands.
+- **Original comparator:** Mermaid.js emits no unused markers, so for a basic flowchart it
+  ships ~1–2 markers where we shipped 12; this removes that fixed ~2 KB / 10-element gap,
+  matching Mermaid's marker behavior — largest win on the small/medium `render_svg/flowchart`
+  sizes (the closest-fought vs Mermaid). The default-config `full_pipeline_wide` standing is
+  effectively unchanged (markers are a ~1.2% slice there): `1.5908 ms` / `3.7339 ms` /
+  `6.7530 ms` vs live-CDP Mermaid `11.12.0` `315.14 ms` / `981.73 ms` / `2879.185 ms` =
+  `198.10x` / `262.92x` / `426.35x`.
+- **Verdict:** kept; deterministic byte cut + significant small-flowchart render-time win,
+  output-identical for any diagram that uses a given marker, safe fallback for fancy arrows
+  and all non-flowchart diagram types. Implements the `bd-rcu5`-adjacent marker lever scoped
+  in the prior "Emit only used `<defs>` arrowhead markers" blocker entry, via its safe
+  plain/fancy route.
+- **Do-not-retry note:** do not extend the basic-marker list without re-checking
+  `render_edge`'s match (a wrong entry drops a referenced marker); do not gate non-flowchart
+  diagrams this way (their markers are not all discoverable from `ir.edges`).
+
 ### Drop 6 redundant `data-fm-source-*` attributes (SVG −35% spans-on) — KEPT (2026-06-26)
 - **Lever:** `fm-render-svg::apply_span_metadata` emitted seven source attributes per
   element: the compact `data-fm-source-span`

@@ -478,46 +478,42 @@ fn render_scene_document_with_ir(
 
     let mut defs = DefsBuilder::new();
 
-    // Add standard arrowhead markers
-    defs = defs.marker(ArrowheadMarker::standard("arrow-end", &theme.colors.edge));
-    defs = defs.marker(ArrowheadMarker::filled("arrow-filled", &theme.colors.edge));
-    defs = defs.marker(ArrowheadMarker::open("arrow-open", &theme.colors.edge));
-    defs = defs.marker(ArrowheadMarker::half_top(
-        "arrow-half-top",
-        &theme.colors.edge,
-    ));
-    defs = defs.marker(ArrowheadMarker::half_bottom(
-        "arrow-half-bottom",
-        &theme.colors.edge,
-    ));
-    defs = defs.marker(ArrowheadMarker::stick_top(
-        "arrow-stick-top",
-        &theme.colors.edge,
-    ));
-    defs = defs.marker(ArrowheadMarker::stick_bottom(
-        "arrow-stick-bottom",
-        &theme.colors.edge,
-    ));
-    defs = defs.marker(
-        ArrowheadMarker::standard("arrow-start", &theme.colors.edge)
-            .with_orient(crate::defs::MarkerOrient::AutoStartReverse),
-    );
-    defs = defs.marker(
-        ArrowheadMarker::filled("arrow-start-filled", &theme.colors.edge)
-            .with_orient(crate::defs::MarkerOrient::AutoStartReverse),
-    );
-    defs = defs.marker(ArrowheadMarker::circle_marker(
-        "arrow-circle",
-        &theme.colors.edge,
-    ));
-    defs = defs.marker(ArrowheadMarker::cross_marker(
-        "arrow-cross",
-        &theme.colors.edge,
-    ));
-    defs = defs.marker(ArrowheadMarker::diamond_marker(
-        "arrow-diamond",
-        &theme.colors.edge,
-    ));
+    // Arrowhead markers: emit only what the diagram can reference (see
+    // `arrow_uses_only_basic_markers`). Kept identical to the legacy backend's gating so the
+    // two backends produce the same marker set for the same diagram. Without an IR
+    // (`render_scene_to_svg`) we cannot inspect arrow types, so conservatively emit the full
+    // set. Emission order is preserved, so output is byte-identical whenever a fancy arrow is
+    // present.
+    let emit_fancy_markers = ir.is_none_or(|diagram_ir| {
+        diagram_ir.diagram_type != fm_core::DiagramType::Flowchart
+            || diagram_ir
+                .edges
+                .iter()
+                .any(|edge| !arrow_uses_only_basic_markers(edge.arrow))
+    });
+    let edge_color = &theme.colors.edge;
+    defs = defs.marker(ArrowheadMarker::standard("arrow-end", edge_color));
+    if emit_fancy_markers {
+        defs = defs.marker(ArrowheadMarker::filled("arrow-filled", edge_color));
+    }
+    defs = defs.marker(ArrowheadMarker::open("arrow-open", edge_color));
+    if emit_fancy_markers {
+        defs = defs.marker(ArrowheadMarker::half_top("arrow-half-top", edge_color));
+        defs = defs.marker(ArrowheadMarker::half_bottom("arrow-half-bottom", edge_color));
+        defs = defs.marker(ArrowheadMarker::stick_top("arrow-stick-top", edge_color));
+        defs = defs.marker(ArrowheadMarker::stick_bottom("arrow-stick-bottom", edge_color));
+        defs = defs.marker(
+            ArrowheadMarker::standard("arrow-start", edge_color)
+                .with_orient(crate::defs::MarkerOrient::AutoStartReverse),
+        );
+        defs = defs.marker(
+            ArrowheadMarker::filled("arrow-start-filled", edge_color)
+                .with_orient(crate::defs::MarkerOrient::AutoStartReverse),
+        );
+        defs = defs.marker(ArrowheadMarker::circle_marker("arrow-circle", edge_color));
+        defs = defs.marker(ArrowheadMarker::cross_marker("arrow-cross", edge_color));
+        defs = defs.marker(ArrowheadMarker::diamond_marker("arrow-diamond", edge_color));
+    }
 
     let mut clip_defs = Vec::new();
     let mut clip_id_counter = 0usize;
@@ -1548,6 +1544,26 @@ fn edge_animation_order(edge_path: &LayoutEdgePath, ir: &MermaidDiagramIr) -> us
 }
 
 /// Render a computed layout to SVG.
+/// Whether an edge arrow type renders using only the basic arrowhead markers
+/// (`arrow-end` / `arrow-open`) or no marker at all. When every edge in a diagram is basic,
+/// `<defs>` can omit the ten "fancy" markers (half/stick/thick/circle/cross/diamond/double).
+/// This list must stay a subset of the arrow types in `render_edge`'s marker match that map
+/// only to `arrow-end`, `arrow-open`, or no marker — any arrow type not listed here is
+/// treated as fancy (the safe default, never dropping a referenced marker).
+fn arrow_uses_only_basic_markers(arrow: fm_core::ArrowType) -> bool {
+    use fm_core::ArrowType;
+    matches!(
+        arrow,
+        ArrowType::Line
+            | ArrowType::ThickLine
+            | ArrowType::Arrow
+            | ArrowType::OpenArrow
+            | ArrowType::DottedArrow
+            | ArrowType::DottedOpenArrow
+            | ArrowType::DottedLine
+    )
+}
+
 fn render_layout_to_svg(
     layout: &DiagramLayout,
     ir: &MermaidDiagramIr,
@@ -1623,46 +1639,44 @@ fn render_layout_to_svg(
     // Build defs section
     let mut defs = DefsBuilder::new();
 
-    // Add standard arrowhead markers
-    defs = defs.marker(ArrowheadMarker::standard("arrow-end", &theme.colors.edge));
-    defs = defs.marker(ArrowheadMarker::filled("arrow-filled", &theme.colors.edge));
-    defs = defs.marker(ArrowheadMarker::open("arrow-open", &theme.colors.edge));
-    defs = defs.marker(ArrowheadMarker::half_top(
-        "arrow-half-top",
-        &theme.colors.edge,
-    ));
-    defs = defs.marker(ArrowheadMarker::half_bottom(
-        "arrow-half-bottom",
-        &theme.colors.edge,
-    ));
-    defs = defs.marker(ArrowheadMarker::stick_top(
-        "arrow-stick-top",
-        &theme.colors.edge,
-    ));
-    defs = defs.marker(ArrowheadMarker::stick_bottom(
-        "arrow-stick-bottom",
-        &theme.colors.edge,
-    ));
-    defs = defs.marker(
-        ArrowheadMarker::standard("arrow-start", &theme.colors.edge)
-            .with_orient(crate::defs::MarkerOrient::AutoStartReverse),
-    );
-    defs = defs.marker(
-        ArrowheadMarker::filled("arrow-start-filled", &theme.colors.edge)
-            .with_orient(crate::defs::MarkerOrient::AutoStartReverse),
-    );
-    defs = defs.marker(ArrowheadMarker::circle_marker(
-        "arrow-circle",
-        &theme.colors.edge,
-    ));
-    defs = defs.marker(ArrowheadMarker::cross_marker(
-        "arrow-cross",
-        &theme.colors.edge,
-    ));
-    defs = defs.marker(ArrowheadMarker::diamond_marker(
-        "arrow-diamond",
-        &theme.colors.edge,
-    ));
+    // Arrowhead markers: emit only what the diagram can reference, like Mermaid.js (which
+    // never emits unused markers). Every edge whose arrow uses one of the basic markers
+    // (`arrow-end` / `arrow-open` / none) — and back-edges always use `arrow-open` — needs
+    // only those two; a single "fancy" arrow (half/stick/thick/circle/cross/diamond/double)
+    // falls back to the complete set so a referenced marker can never be missing. Emission
+    // order is preserved, so output is byte-identical for any diagram that uses a fancy
+    // arrow, and typical flowcharts shed the ~10 unused marker definitions.
+    // Restricted to flowcharts: there, edges (`ir.edges`) are the only marker source, so the
+    // basic-arrow check is complete. Other diagram types (sequence, etc.) may reference
+    // markers outside `ir.edges`, so they keep the full set.
+    let emit_fancy_markers = ir.diagram_type != fm_core::DiagramType::Flowchart
+        || ir
+            .edges
+            .iter()
+            .any(|edge| !arrow_uses_only_basic_markers(edge.arrow));
+    let edge_color = &theme.colors.edge;
+    defs = defs.marker(ArrowheadMarker::standard("arrow-end", edge_color));
+    if emit_fancy_markers {
+        defs = defs.marker(ArrowheadMarker::filled("arrow-filled", edge_color));
+    }
+    defs = defs.marker(ArrowheadMarker::open("arrow-open", edge_color));
+    if emit_fancy_markers {
+        defs = defs.marker(ArrowheadMarker::half_top("arrow-half-top", edge_color));
+        defs = defs.marker(ArrowheadMarker::half_bottom("arrow-half-bottom", edge_color));
+        defs = defs.marker(ArrowheadMarker::stick_top("arrow-stick-top", edge_color));
+        defs = defs.marker(ArrowheadMarker::stick_bottom("arrow-stick-bottom", edge_color));
+        defs = defs.marker(
+            ArrowheadMarker::standard("arrow-start", edge_color)
+                .with_orient(crate::defs::MarkerOrient::AutoStartReverse),
+        );
+        defs = defs.marker(
+            ArrowheadMarker::filled("arrow-start-filled", edge_color)
+                .with_orient(crate::defs::MarkerOrient::AutoStartReverse),
+        );
+        defs = defs.marker(ArrowheadMarker::circle_marker("arrow-circle", edge_color));
+        defs = defs.marker(ArrowheadMarker::cross_marker("arrow-cross", edge_color));
+        defs = defs.marker(ArrowheadMarker::diamond_marker("arrow-diamond", edge_color));
+    }
 
     // Add drop shadow filter if enabled
     if detail.enable_shadows {
