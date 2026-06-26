@@ -589,6 +589,47 @@
   regressed `render_svg/flowchart`, so only the repeated node/edge names were
   retained.
 
+### Barycenter sweep precomputed edge adjacency — REJECTED (2026-06-26)
+- **Lever tested:** `fm-layout`'s barycenter crossing-minimization sweep
+  (`reorder_rank_by_barycenter`) rescans the *entire* `ir.edges` list on every call
+  (~`4 rounds * 2 * ranks` calls per layout). It was changed to build edge adjacency
+  **once** per `crossing_minimization` (a `BarycenterAdjacency` of dense `node_rank`
+  plus per-node `out_neighbors`/`in_neighbors` lists) and have each reordering walk
+  only the neighbors of its rank's nodes — turning the sweep from
+  O(rounds * ranks * edges) into O(rounds * edges). A thin wrapper kept the old
+  signature for the unit test; the hot loop called a new `_with_adjacency` variant.
+- **Mapped primitive:** build-once adjacency / work-proportional-to-incidence on the
+  ordering hot path (same family as the KEPT [[sparse-edge-routing-obstacle-spatial-index]]
+  obstacle index, applied to crossing minimization instead of edge routing).
+- **Correctness:** output-identical — neighbor lists preserve parallel-edge
+  multiplicity and `node_rank[n] == ranks.get(&n).unwrap_or(0)`, so each node's
+  barycenter (integer position sum / neighbor count) and the downstream stable sort
+  are unchanged. `rch exec -- cargo test -p fm-layout` = `428 passed; 0 failed`.
+- **Outcome:** rejected and reverted. Per-crate `cc` target dir, `frankenmermaid-cli`/
+  `pipeline_bench`, filter `layout_wide`, criterion `--baseline cc_xc_base` (baseline
+  captured on identical-layout `main`). `8x16` `129.51 us` -> `125.55 us` change
+  `+1.40%` **No change** (p=0.29), `12x24` `466.66 us` -> `471.00 us` change `+1.70%`
+  **No change** (p=0.32), `16x32` `1.1338 ms` -> `1.1859 ms` change `+5.84%`
+  **regressed** (p=0.00). Net zero-gain with a regression on the largest case.
+- **Root cause:** the full-edge rescan is *not* the `layout_wide` bottleneck. The
+  `Vec<Vec<usize>>` adjacency costs ~`2 * node_count` outer + ~`node_count` inner Vec
+  allocations per layout, and that fixed build cost cancels (8x16/12x24) or exceeds
+  (16x32) whatever scanning it saves — so the asymptotic win never shows at these
+  sizes because the constant it replaced was already cheap.
+- **frankenmermaid/Mermaid ratio after revert:** main unchanged — retained current-main
+  `full_pipeline_wide` standing `1.5908 ms` / `3.7339 ms` / `6.7530 ms` vs pinned
+  live-CDP Mermaid `11.12.0` `315.14 ms` / `981.73 ms` / `2879.185 ms` = Mermaid.js
+  `198.10x` / `262.92x` / `426.35x` slower (`8x16` / `12x24` / `16x32`).
+- **Do-not-retry note:** this is the **4th** data-structure rewrite of the
+  crossing-minimization / ordering area to fail — see
+  [[flat-array-total-crossings-position-edge-tables]],
+  [[dense-crossing-count-position-maps]], and the stashed "local-delta
+  crossing_refinement ~0 gain". Stop guessing at this stage: do **not** attempt
+  further container/adjacency rewrites of barycenter or crossing counting without a
+  CPU profile (e.g. `perf`/`samply` on `layout_wide/16x32`) that names the actual
+  dominant function — the live candidates are Brandes-Köpf coordinate assignment and
+  edge routing, not the ordering scans.
+
 ### Edge path offset Vec elision — REJECTED (2026-06-25)
 - **Lever tested:** `fm-render-svg::render_edge` was changed locally to skip the
   temporary `Vec<(f32, f32)>` used to add `offset_x`/`offset_y` before calling
