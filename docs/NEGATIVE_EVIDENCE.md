@@ -825,6 +825,36 @@
   `full_pipeline_wide` because the renderer microbench result did not predict
   the end-to-end gap.
 
+### Removing `Attributes::set` dedup entirely — REJECTED (correctness) (2026-06-26)
+- **Lever tested:** following the [[wide-pipeline-stage-split-svg-render-dominates-not-layout]]
+  finding (render is 63–70% of the wide pipeline; per-element cost ~`2.34 us`), the
+  per-insert `self.attrs.retain(|a| a.name != name)` in `fm-render-svg::Attributes::set`
+  was removed outright (push directly, O(attrs²)→O(attrs) element construction), guarded
+  by a `debug_assert` that no name is set twice. The hypothesis was that `class`/`style`
+  have their own merge paths so plain setters never overwrite, making the dedup pure
+  overhead.
+- **Outcome:** rejected — **not output-preserving**, so never benched. With the
+  `debug_assert` active, `rch exec -- cargo test -p fm-render-svg` failed ~all render
+  tests: many render paths *do* call `set` twice for the same attribute and rely on
+  last-wins (e.g. a default `fill`/`stroke`/`style` later overridden). The `retain` is
+  **load-bearing**, not overhead.
+- **Why no output-identical speedup exists:** `retain`+push gives last-wins *and* moves
+  the overwritten attribute to the end of the list; any cheaper scheme that skips the scan
+  (push-only) emits duplicate attributes, and any in-place replace changes attribute order
+  — both alter the serialized tag. So the O(n) scan per `set` cannot be removed without
+  changing bytes. This complements [[guarded-svg-attribute-retain-skip]] (which kept dedup
+  but regressed `full_pipeline_wide`): the dedup can be neither removed (breaks output) nor
+  skipped (regresses end-to-end).
+- **frankenmermaid/Mermaid ratio:** unchanged — main untouched; retained current-main
+  `full_pipeline_wide` standing `1.5908 ms` / `3.7339 ms` / `6.7530 ms` vs pinned live-CDP
+  Mermaid `11.12.0` `315.14 ms` / `981.73 ms` / `2879.185 ms` = Mermaid.js `198.10x` /
+  `262.92x` / `426.35x` slower.
+- **Do-not-retry note:** stop probing `Attributes::set` dedup — both removal (this entry)
+  and guarded-skip ([[guarded-svg-attribute-retain-skip]]) are closed. The wide-render
+  per-element cost lives elsewhere (per-attribute value allocation in `AttributeValue`,
+  `TextBuilder` owned-String fields, the Element tree build itself); target those with a
+  `wide_stages render` gate, not the attribute dedup.
+
 ### Common `-->` flowchart parser shortcut — REJECTED (2026-06-25)
 - **Lever tested:** `parse_fast_simple_flowchart_edge_ast` was changed locally to
   try a guarded exact `-->` shortcut before scanning the full fast-operator table.
