@@ -642,6 +642,49 @@
   current crossing-refinement workload; do not replace it with dense/Fenwick
   bookkeeping unless a profile shows different crossing-count shape.
 
+### Flat-array `total_crossings` position/edge tables — REJECTED (2026-06-26)
+- **Lever tested:** `fm-layout::lib::total_crossings` (the crossing counter driving
+  the transpose + sifting `crossing_refinement` and the e-graph ordering pass) was
+  changed locally to drop its per-call nested
+  `BTreeMap<rank, BTreeMap<node, position>>` and `BTreeMap<(usize, usize), Vec<_>>`
+  rebuilds in favour of flat node-indexed tables: `position: Vec<usize>` +
+  `appears_rank: Vec<Option<usize>>` sized `ir.nodes.len()`, and a per-source-rank
+  `Vec<Vec<(usize, usize)>>` edge bucket. Merge-sort inversion counter kept; a single
+  reused `target_positions` buffer fed it.
+- **Mapped primitive:** dense O(1) node-id lookup replacing tree lookups on the
+  crossing-count hot path — the same family as the prior
+  [[dense-crossing-count-position-maps]] reject, applied to the *sibling* counter in
+  `lib.rs` rather than `egraph_ordering::crossing_count`.
+- **Correctness:** output-identical — `appears_rank[n] == Some(r)` + `position[n]`
+  reproduces the old `positions_by_rank[r].get(n)` lookup exactly; grouping by source
+  rank is a bijection with the old `(r, r+1)` layer pairs and inversion sums are
+  order-independent. `rch exec -- cargo test -p fm-layout` = `428 passed; 0 failed`,
+  so the delta is pure overhead, not a behavior change.
+- **Outcome:** rejected and reverted. Per-crate `cc` target dir
+  (`/data/projects/.rch-targets/frankenmermaid-cc`), `frankenmermaid-cli`/
+  `pipeline_bench`, filter `layout_wide`, criterion `--save-baseline cc_xc_base` on
+  `main` `7b6b80c` then `--baseline cc_xc_base` after the change. Every wide case
+  regressed (p < 0.05, "Performance has regressed"): `8x16` `129.51 us` ->
+  `128.91 us` change `+14.53%`, `12x24` `466.66 us` -> `486.95 us` change
+  `+5.59%`, `16x32` `1.1338 ms` -> `1.1688 ms` change `+4.24%`.
+- **Root cause:** `total_crossings` is invoked thousands of times across the
+  transpose/sifting/egraph inner loops; the fixed per-call cost of zeroing two
+  `node_count`-sized flat arrays (`Option<usize>` is 16 bytes — ~12 KB zeroed per
+  call at 512 nodes) plus the `Vec<Vec<_>>` outer allocation exceeds the small,
+  cache-resident `BTreeMap` rebuild it replaced. Swapping the data structure does not
+  help because allocation, not lookup, dominates.
+- **frankenmermaid/Mermaid ratio after revert:** main is unchanged, so the retained
+  current-main `full_pipeline_wide` standing holds — `1.5908 ms` / `3.7339 ms` /
+  `6.7530 ms` vs pinned live-CDP Mermaid `11.12.0` `315.14 ms` / `981.73 ms` /
+  `2879.185 ms` = Mermaid.js `198.10x` / `262.92x` / `426.35x` slower (`8x16` /
+  `12x24` / `16x32`).
+- **Do-not-retry note:** do not re-attempt a flat/dense rewrite of either crossing
+  counter that allocates fresh per call — both `total_crossings` (this entry) and
+  `egraph_ordering::crossing_count` ([[dense-crossing-count-position-maps]]) regress.
+  A real win here must eliminate the per-call allocation entirely (scratch buffers
+  reused across the refinement loop, cleared+refilled rather than re-`vec!`'d), not
+  just change the container; revisit only with a CPU/alloc profile in hand.
+
 ### Borrowed SVG attribute names — REJECTED (2026-06-25)
 - **Lever tested:** `fm-render-svg::Element::attr` and `attr_num` were changed
   locally to accept `Cow<'static, str>` names so literal attribute names could be
