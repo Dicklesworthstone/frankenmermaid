@@ -921,3 +921,39 @@
 - **Do-not-retry note:** the dynamic-class-append lever is already on main (`45015be`);
   do not re-attempt it as if unlanded. Its pre-rebase worktree copy `290adec` only looks
   novel to `git cherry` because its diff context targets the old `10b1654` baseline.
+
+### Wide-pipeline stage split — SVG render dominates, not layout — VERIFIED (2026-06-26)
+- **Kind:** measurement/finding that redirects optimization targeting; ships a new
+  permanent bench group `wide_stages` (`crates/fm-cli/benches/pipeline_bench.rs`) and no
+  source perf change.
+- **Why this was hidden:** the existing benches measure layout in isolation
+  (`layout_wide`), the whole pipeline fused (`full_pipeline_wide`), or render of *linear*
+  flowcharts only (`render_svg`/`gen_flowchart`). None isolate render on the *wide*
+  (edge-heavy) corpus, so per-stage cost on realistic fan-out graphs was never visible —
+  and prior perf effort went heavily into layout and linear-render micro-ops.
+- **Measurement:** per-crate `cc` target dir
+  (`/data/projects/.rch-targets/frankenmermaid-cc`), `frankenmermaid-cli`/`pipeline_bench`,
+  filter `wide_stages`, via `rch exec` (worker `ovh-a`), criterion means:
+  | size | parse | layout | render | render share |
+  |------|-------|--------|--------|--------------|
+  | `8x16`  | `271.6 us` | `117.7 us` | `922.6 us` | `70%` |
+  | `12x24` | `627.7 us` | `408.4 us` | `2.1264 ms` | `67%` |
+  | `16x32` | `1.1854 ms` | `959.5 us` | `3.6208 ms` | `63%` |
+- **Implication:** for wide graphs SVG render is the dominant stage (≈63–70%), layout is
+  only ≈12–17%. Render cost is essentially per-element: a fit over the three sizes gives
+  ≈`23 us` fixed + ≈`2.34 us` per emitted element (`d`/attribute construction +
+  serialization), so the lever is the per-node/per-edge `Element` build, not `defs` or
+  layout. This is the single most reliable place to find the next real win against
+  Mermaid.js on fan-out diagrams.
+- **frankenmermaid/Mermaid ratio:** unchanged — retained current-main `full_pipeline_wide`
+  standing `1.5908 ms` / `3.7339 ms` / `6.7530 ms` vs pinned live-CDP Mermaid `11.12.0`
+  `315.14 ms` / `981.73 ms` / `2879.185 ms` = Mermaid.js `198.10x` / `262.92x` / `426.35x`
+  slower (`8x16` / `12x24` / `16x32`).
+- **Do-not-retry note:** stop targeting `layout_wide` for headline wide-pipeline wins — at
+  ≈12–17% of the budget its ceiling is small and four data-structure rewrites of the
+  crossing-min/ordering path have already failed (see
+  [[barycenter-sweep-precomputed-edge-adjacency]],
+  [[flat-array-total-crossings-position-edge-tables]],
+  [[dense-crossing-count-position-maps]]). Target `render` on `wide_stages` instead, and
+  measure render levers against this group (not the linear-only `render_svg` group, which
+  hides edge-heavy cost).

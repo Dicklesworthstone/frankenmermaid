@@ -262,6 +262,41 @@ fn bench_full_pipeline(c: &mut Criterion) {
     group.finish();
 }
 
+/// Per-stage split (parse vs layout vs render) on the *wide* (edge-heavy) corpus.
+///
+/// The other groups bench layout in isolation (`layout_wide`) or the whole pipeline
+/// fused (`full_pipeline_wide`), and the `render_svg` group only renders *linear*
+/// flowcharts. None of them reveal where wide-pipeline time actually goes — which
+/// turns out to be SVG render of the many-edge graph, not layout. This group isolates
+/// each stage on the same wide inputs so render work can be targeted directly.
+fn bench_wide_stages(c: &mut Criterion) {
+    let mut group = c.benchmark_group("wide_stages");
+    let config = fm_render_svg::SvgRenderConfig::default();
+
+    for (label, layers, width) in [("8x16", 8_usize, 16_usize), ("12x24", 12, 24), ("16x32", 16, 32)]
+    {
+        let input = gen_wide(layers, width);
+        let parsed = fm_parser::parse(&input);
+        let layout = fm_layout::layout_diagram(&parsed.ir);
+
+        group.bench_with_input(BenchmarkId::new("parse", label), &input, |b, input| {
+            b.iter(|| fm_parser::parse(input));
+        });
+        group.bench_with_input(BenchmarkId::new("layout", label), &parsed.ir, |b, ir| {
+            b.iter(|| fm_layout::layout_diagram(ir));
+        });
+        group.bench_with_input(
+            BenchmarkId::new("render", label),
+            &(&parsed.ir, &layout),
+            |b, (ir, layout)| {
+                b.iter(|| fm_render_svg::render_svg_with_layout(ir, layout, &config));
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_parse,
@@ -269,6 +304,7 @@ criterion_group!(
     bench_layout_wide,
     bench_full_pipeline_wide,
     bench_render_svg,
-    bench_full_pipeline
+    bench_full_pipeline,
+    bench_wide_stages
 );
 criterion_main!(benches);
