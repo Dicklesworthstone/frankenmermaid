@@ -1123,6 +1123,55 @@
 
 ## Blocked/Invalid Evidence Attempts
 
+### Emit only used `<defs>` arrowhead markers — HIGH-VALUE LEVER, IMPLEMENTATION-BLOCKED (2026-06-26)
+- **The gap (measured):** every SVG render emits the full fixed set of **12** arrowhead
+  markers (`arrow-end`, `-filled`, `-open`, `-half-{top,bottom}`, `-stick-{top,bottom}`,
+  `-start`, `-start-filled`, `-circle`, `-cross`, `-diamond`) regardless of which the
+  diagram uses. Verified: a trivial `flowchart TD; A-->B` (uses only `arrow-end`) emits all
+  12. Mermaid.js emits **only used** markers. The 11 dead markers are fixed per-render
+  output bytes + build cost — a *large* share of a small/medium diagram's render (where defs
+  is a big fraction of total), and where our render-vs-Mermaid multiple is smallest. This is
+  a real fair-fight (spans-off) win, unlike source-metadata (absent on that path).
+- **Why blocked this turn (not a perf result — an architecture blocker):** the default
+  `SvgBackend::LegacyLayout` renderer `render_layout_to_svg` builds `<defs>` (all 12 markers
+  at once) and assigns it into the document **before** it builds the node/edge body, and it
+  has several early `return doc.to_string()` paths in between. So the clean "build body →
+  collect referenced markers → emit only those" reorder is unsafe (early returns would ship
+  no defs), and the markers cannot be discovered up-front without the body.
+- **Scoped fix for a fresh session (do this next):**
+  1. Extract `render_edge`'s arrow→style match into a shared
+     `fn edge_style(arrow: ArrowType, is_back_edge: bool, colors: &ThemeColors) ->
+     (dasharray, marker_start, marker_end, color)` — single source of truth. `render_edge`
+     calls it; correctness of marker selection stays in one place.
+  2. In `render_layout_to_svg`, **before** the marker block, pre-scan `layout.edges`:
+     `arrow = ir.edges[edge_path.edge_index].arrow`, `is_back = edge_path.reversed`, call
+     `edge_style`, collect the referenced marker ids (`marker_id_from_url`) into a set.
+  3. Gate each `defs.marker(...)` on `used.contains(id)`, preserving the existing emission
+     order so output is byte-identical for any marker a diagram actually uses.
+  4. The Scene backend (`render_scene_document_with_ir`) can gate the same way but more
+     simply — it builds `scene_root` first, so walk it with an `Element::for_each_marker_ref`
+     helper (drafted this turn) and gate. Do both backends together or the
+     `explicit_legacy_backend_matches_default_output` / scene-vs-legacy parity expectations
+     diverge.
+  5. Regenerate the regression-harness goldens (`artifacts/regression-harness/latest`),
+     which currently embed the full 12-marker set, and re-run `cargo test -p fm-render-svg`.
+- **frankenmermaid/Mermaid ratio:** unchanged — main untouched (the half-done Scene-only
+  gating was reverted to avoid backend divergence). Retained current-main
+  `full_pipeline_wide` standing `1.5908 ms` / `3.7339 ms` / `6.7530 ms` vs live-CDP Mermaid
+  `11.12.0` `315.14 ms` / `981.73 ms` / `2879.185 ms` = `198.10x` / `262.92x` / `426.35x`.
+- **Simpler safe fallback (if the per-marker pre-scan is too much):** classify edges as
+  "plain" iff their arrow uses only `arrow-end`/`arrow-open`/no-marker (`Arrow`, `Line`,
+  `ThickLine`, `OpenArrow`, `DottedArrow`, `DottedLine`, `DottedOpenArrow`; back-edges always
+  use `arrow-open`). If **all** `ir.edges` are plain → emit just `{arrow-end, arrow-open}`;
+  otherwise emit all 12 (unchanged). This needs only an `ir.edges` scan before the marker
+  block (no reorder, no `edge_style` extraction), is correctness-safe (any fancy arrow falls
+  back to the full set), and already captures the common flowchart case (the wide bench is
+  all `Arrow` → 2 markers instead of 12). Still requires golden regen.
+- **Do-not-retry note:** do not gate only the Scene backend (diverges from the default
+  Legacy backend that the benches/CLI actually use); do not reorder `render_layout_to_svg`'s
+  defs past its early returns. The shared-`edge_style` pre-scan (or the plain/fancy fallback)
+  is the safe route.
+
 ### `fm-source-span` static-name + `data_owned` allocation trim — ZERO-GAIN (2026-06-26)
 - **Lever tested:** in the spans-on render path, `apply_span_metadata` does
   `.data("fm-source-span", &span.compact_display())`, which cost three allocations per
