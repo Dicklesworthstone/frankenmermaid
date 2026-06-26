@@ -772,13 +772,14 @@ fn apply_span_metadata(mut elem: Element, span: Span) -> Element {
         return elem;
     }
 
-    elem = elem.data("fm-source-span", &span.compact_display());
-    elem = elem.data("fm-source-start-line", &span.start.line.to_string());
-    elem = elem.data("fm-source-start-col", &span.start.col.to_string());
-    elem = elem.data("fm-source-start-byte", &span.start.byte.to_string());
-    elem = elem.data("fm-source-end-line", &span.end.line.to_string());
-    elem = elem.data("fm-source-end-col", &span.end.col.to_string());
-    elem.data("fm-source-end-byte", &span.end.byte.to_string())
+    // Emit only the compact `data-fm-source-span` attribute, which already encodes all six
+    // values (`{start.line}:{start.col}-{end.line}:{end.col}@{start.byte}-{end.byte}`, see
+    // `Span::compact_display`). The six former `data-fm-source-{start,end}-{line,col,byte}`
+    // attributes duplicated those exact values, had zero consumers anywhere in the tree, and
+    // — being long repeated names across every element — dominated source-span output bytes.
+    // Source spans are off by default, so this is byte-identical for the default config and
+    // roughly halves render output (and time) when `include_source_spans` is enabled.
+    elem.data("fm-source-span", &span.compact_display())
 }
 
 fn register_clip_path(

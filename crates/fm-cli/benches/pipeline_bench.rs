@@ -297,6 +297,33 @@ fn bench_wide_stages(c: &mut Criterion) {
     group.finish();
 }
 
+/// Render the wide corpus with `include_source_spans = true`. Source-span metadata is
+/// off by default (matching Mermaid.js, which emits no source maps), so the default-config
+/// groups never exercise the span-emission path. This group isolates the spans-on render
+/// cost — where redundant per-element source attributes dominate output bytes — so that
+/// emit-side reductions there can be measured.
+fn bench_render_spans_on(c: &mut Criterion) {
+    let mut group = c.benchmark_group("render_spans_on");
+    let mut config = fm_render_svg::SvgRenderConfig::default();
+    config.include_source_spans = true;
+
+    for (label, layers, width) in [("8x16", 8_usize, 16_usize), ("12x24", 12, 24), ("16x32", 16, 32)]
+    {
+        let input = gen_wide(layers, width);
+        let parsed = fm_parser::parse(&input);
+        let layout = fm_layout::layout_diagram(&parsed.ir);
+        group.bench_with_input(
+            BenchmarkId::new("render", label),
+            &(&parsed.ir, &layout),
+            |b, (ir, layout)| {
+                b.iter(|| fm_render_svg::render_svg_with_layout(ir, layout, &config));
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_parse,
@@ -305,6 +332,7 @@ criterion_group!(
     bench_full_pipeline_wide,
     bench_render_svg,
     bench_full_pipeline,
-    bench_wide_stages
+    bench_wide_stages,
+    bench_render_spans_on
 );
 criterion_main!(benches);

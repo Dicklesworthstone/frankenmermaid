@@ -326,6 +326,51 @@
 
 ## Kept Wins Also Recorded Here By Request
 
+### Drop 6 redundant `data-fm-source-*` attributes (SVG −35% spans-on) — KEPT (2026-06-26)
+- **Lever:** `fm-render-svg::apply_span_metadata` emitted seven source attributes per
+  element: the compact `data-fm-source-span`
+  (`{start.line}:{start.col}-{end.line}:{end.col}@{start.byte}-{end.byte}`) **plus** six
+  individual `data-fm-source-{start,end}-{line,col,byte}` attributes that re-encode the
+  exact same six values. Repo-wide grep confirmed each individual attr has exactly one
+  reference — its own emit line — i.e. **zero consumers, zero test assertions, zero golden
+  references**, while `data-fm-source-span` is consumed. The six were emit-only dead output.
+  Now only the compact attribute is emitted (implements bead `bd-rcu5`, option a).
+- **Scope / safety:** source spans are off in `SvgRenderConfig::default()`, so this is
+  **byte-identical for the library default config** and for every default-config bench
+  (`wide_stages`, `full_pipeline_wide`) and golden artifact (the regression-harness `.svg`
+  files render spans-off, so none contained the six attrs). The CLI, however, embeds spans
+  by default for SVG output (`main.rs`: `embed_source_spans || format == Svg`), so the
+  real user-facing SVG is the spans-on path this shrinks.
+- **Deterministic measurement (machine-independent, the headline):** wide `8x16` diagram
+  (`flowchart TD`, 128 nodes, 256 edges) rendered to SVG via the built `fm-cli` binary,
+  spans-on (CLI default). Output bytes: **`290282` → `188542`**, i.e. **−101740 bytes
+  (−35.0%)**; the 576 span-bearing elements each shed six attributes. `fm-source-start-line`
+  occurrences `576 → 0`; `fm-source-span` retained at `576`.
+- **Render-time corroboration:** new permanent bench group `render_spans_on`
+  (`crates/fm-cli/benches/pipeline_bench.rs`, `include_source_spans = true`), per-crate
+  `cc` target dir, criterion `--save-baseline cc_spans_base` then `--baseline`. `8x16`
+  `1.8021 ms → 1.5516 ms`, change `−12.47%` (p = 0.00 < 0.05, "improved"); `12x24` and
+  `16x32` were inconclusive (p = 0.43 / 0.56) due to rch cross-worker variance (the saved
+  baseline and candidate landed on different workers), but the deterministic byte cut is
+  worker-independent.
+- **Behavior proof:** `rch exec -- cargo test -p fm-render-svg` = `219 passed; 0 failed`
+  (no test referenced the dropped attrs) and `cargo test -p frankenmermaid-cli --test
+  frankentui_conformance_test` passed. Default-config output unchanged.
+- **Original comparator:** Mermaid.js emits no source-map attributes at all, so the
+  spans-on path was where our SVG was heaviest *relative to* Mermaid; removing this dead
+  duplication cuts 35% of those excess bytes while keeping the one consumed span attr. The
+  default-config `full_pipeline_wide` standing vs live-CDP Mermaid `11.12.0` is unchanged
+  (spans off there): `1.5908 ms` / `3.7339 ms` / `6.7530 ms` vs `315.14 ms` / `981.73 ms`
+  / `2879.185 ms` = `198.10x` / `262.92x` / `426.35x` slower.
+- **Verdict:** kept; removes verified-dead output, shrinks real CLI SVG by 35% (spans-on),
+  zero risk to the default config, resolves the priority-0 `bd-rcu5` big-lever bead via its
+  conservative option (keep the consumed compact span, drop the redundant six).
+- **Do-not-retry note:** the bead estimated ~55% byte reduction / render halving; the
+  measured reduction is 35% bytes and ~12% render (8x16) — the redundant attrs were a large
+  but not majority share, and render is not as purely byte-bound as the earlier profile
+  suggested. Do not chase the remaining span bytes by also dropping `data-fm-source-span`;
+  it is consumed.
+
 ### Borrowed source lines in flowchart document parser — KEPT (2026-06-26)
 - **Lever:** `fm-parser::parse_flowchart_document` no longer copies each raw
   source line into an owned `String`. `FlowDocumentItem` (both `Statements` and
