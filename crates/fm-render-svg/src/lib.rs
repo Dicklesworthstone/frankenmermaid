@@ -3682,7 +3682,6 @@ fn render_node(
     let apply_label_class =
         |elem: Element| maybe_add_class(elem, "fm-node-label", emit_classdef_classes);
 
-    let accent_class = format!("fm-node-accent-{}", stable_accent_index(node_id));
     let mut is_highlighted = false;
     let mut is_inactive = false;
     let mut dashed_border = false;
@@ -3694,13 +3693,13 @@ fn render_node(
     let mut group = Element::group()
         .id(&mermaid_node_element_id(node_id, node_box.node_index))
         .class("fm-node")
-        .class(&accent_class)
+        .class_prefixed_usize("fm-node-accent-", stable_accent_index(node_id))
         .class(node_shape_css_class(shape))
         .data("id", node_id)
         .data("fm-node-id", node_id);
     // Add centrality tier class if available (FNX semantic styling)
     if let Some(tier) = lookup_centrality_tier(centrality_map, node_box.node_index) {
-        group = group.class(&format!("fm-node-centrality-{}", tier.css_class_suffix()));
+        group = group.class_prefixed("fm-node-centrality-", tier.css_class_suffix());
     }
     if config.animations_enabled {
         group = group.attr(
@@ -3712,7 +3711,7 @@ fn render_node(
         group = group.class("fm-node-has-icon");
         let icon_class = sanitize_css_token(&normalize_icon_token(icon));
         if !icon_class.is_empty() {
-            group = group.class(&format!("fm-node-icon-{icon_class}"));
+            group = group.class_prefixed("fm-node-icon-", &icon_class);
         }
         group = group.class(match config.node_icon_position {
             NodeIconPosition::Above => "fm-node-icon-pos-above",
@@ -3728,7 +3727,7 @@ fn render_node(
             let normalized = class.to_ascii_lowercase();
             let sanitized = sanitize_css_token(class);
             if !sanitized.is_empty() {
-                group = group.class(&format!("fm-node-user-{sanitized}"));
+                group = group.class_prefixed("fm-node-user-", &sanitized);
             }
             if normalized.contains("highlight")
                 || normalized.contains("selected")
@@ -3815,13 +3814,14 @@ fn render_node(
     });
     if let Some(meta) = ir_node.and_then(|n| n.requirement_meta.as_ref()) {
         if let Some(ref risk) = meta.risk {
-            group = group.class(&format!("fm-req-risk-{}", risk.to_ascii_lowercase()));
+            let risk_class = risk.to_ascii_lowercase();
+            group = group.class_prefixed("fm-req-risk-", &risk_class);
         }
         if let Some(ref req_type) = meta.requirement_type {
             let type_class = req_type
                 .replace(|c: char| !c.is_ascii_alphanumeric(), "-")
                 .to_ascii_lowercase();
-            group = group.class(&format!("fm-req-type-{type_class}"));
+            group = group.class_prefixed("fm-req-type-", &type_class);
         }
         if meta.verify_method.is_some() {
             group = group.class("fm-req-has-verify");
@@ -5063,9 +5063,10 @@ fn render_node_icon(
     let y = cy - half;
     let stroke = colors.node_stroke.as_str();
     let fill = colors.node_fill.as_str();
+    let icon_class = sanitize_css_token(&normalized);
     let mut icon = Element::group()
         .class("fm-node-icon")
-        .class(&format!("fm-node-icon-{}", sanitize_css_token(&normalized)));
+        .class_prefixed("fm-node-icon-", &icon_class);
 
     if let Some(custom_icon) = config.custom_icons.get(&normalized) {
         return Some(icon.child(render_custom_svg_icon(custom_icon, cx, cy, size, stroke)));

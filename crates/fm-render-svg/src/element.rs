@@ -436,6 +436,20 @@ impl Element {
         self
     }
 
+    /// Add a CSS class made from a prefix and string suffix.
+    #[must_use]
+    pub fn class_prefixed(mut self, prefix: &str, suffix: &str) -> Self {
+        self.attrs = self.attrs.class_prefixed(prefix, suffix);
+        self
+    }
+
+    /// Add a CSS class made from a prefix and integer suffix.
+    #[must_use]
+    pub fn class_prefixed_usize(mut self, prefix: &str, value: usize) -> Self {
+        self.attrs = self.attrs.class_prefixed_usize(prefix, value);
+        self
+    }
+
     /// Set a data-* attribute.
     #[must_use]
     pub fn data(mut self, name: &str, value: &str) -> Self {

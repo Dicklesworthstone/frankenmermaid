@@ -841,3 +841,61 @@ tooling_notes = [
 [negative_measurement_svg_root_attrs_direct_stream_2026_06_26.decision]
 status = "reject"
 rationale = "Root attribute direct streaming was mixed: 8x16 and 16x32 improved, but 12x24 regressed by 23.36%; code was reverted and only this evidence record was retained."
+
+[post_measurement_svg_dynamic_class_append_2026_06_25]
+date = "2026-06-25"
+agent = "TanSparrow"
+lever_bead = "bd-1buv.1"
+worker_delta = "local raw means; Criterion labels invalid after remote artifact retrieval"
+worker_ratio = "local"
+baseline_commit = "10b1654"
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-a"
+render_baseline_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench -p frankenmermaid-cli --bench pipeline_bench -- render_svg/flowchart --warm-up-time 1 --measurement-time 2"
+render_candidate_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench -p frankenmermaid-cli --bench pipeline_bench -- render_svg/flowchart --warm-up-time 1 --measurement-time 2"
+wide_rch_candidate_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+wide_candidate_local_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a cargo bench -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+mermaid_js_command = "Latest live-CDP Mermaid 11.12.0 denominator reused from the current-main BOLD-VERIFY entry for identical generated wide inputs."
+rust_build_profile = "bench profile [optimized]"
+candidate_summary = "Append dynamic SVG node/icon class suffixes directly into the existing class attribute string, avoiding per-node format! temporaries and the class(&str) copy."
+behavior_proof = "New prefixed-class serialization tests passed; cargo fmt -p fm-render-svg --check passed; rch exec -- cargo check -p fm-render-svg --all-targets passed on hz2; rch exec -- cargo clippy -p fm-render-svg --all-targets -- -D warnings passed on hz2; cargo test -p frankenmermaid-cli --test frankentui_conformance_test passed locally after remote worker vmi1227854 failed before tests because cmake was missing for highs-sys."
+tooling_notes = [
+  "Agent Mail file reservation failed because the SQLite mail database corruption circuit breaker was open.",
+  "The first full_pipeline_wide candidate run used rch on ovh-a and produced ratio means, but no valid old/new Criterion comparison existed on that worker.",
+  "The supplemental local full_pipeline_wide run printed regression percentages against remote-retrieved Criterion artifacts; those labels are cross-worker invalid, so the retained decision uses raw local before/after means from this BOLD-VERIFY turn.",
+]
+
+[post_measurement_svg_dynamic_class_append_2026_06_25.metrics]
+"render_svg_flowchart_small_10_baseline_mean_us" = 125.53
+"render_svg_flowchart_small_10_candidate_mean_us" = 129.74
+"render_svg_flowchart_small_10_candidate_delta_pct" = 3.3538
+"render_svg_flowchart_small_10_verdict" = "Criterion within-noise"
+"render_svg_flowchart_medium_100_baseline_mean_ms" = 1.0405
+"render_svg_flowchart_medium_100_candidate_mean_us" = 809.00
+"render_svg_flowchart_medium_100_candidate_delta_pct" = -22.2489
+"render_svg_flowchart_medium_100_verdict" = "Criterion improved"
+"render_svg_flowchart_large_500_baseline_mean_ms" = 4.0836
+"render_svg_flowchart_large_500_candidate_mean_ms" = 4.1034
+"render_svg_flowchart_large_500_candidate_delta_pct" = 0.4849
+"render_svg_flowchart_large_500_verdict" = "Criterion no-change"
+"full_pipeline_wide_8x16_baseline_mean_ms" = 2.0991
+"full_pipeline_wide_8x16_candidate_mean_ms" = 2.0840
+"full_pipeline_wide_8x16_candidate_delta_pct" = -0.7194
+"full_pipeline_wide_12x24_baseline_mean_ms" = 6.8145
+"full_pipeline_wide_12x24_candidate_mean_ms" = 5.0882
+"full_pipeline_wide_12x24_candidate_delta_pct" = -25.3327
+"full_pipeline_wide_16x32_baseline_mean_ms" = 10.428
+"full_pipeline_wide_16x32_candidate_mean_ms" = 10.176
+"full_pipeline_wide_16x32_candidate_delta_pct" = -2.4166
+"full_pipeline_wide_8x16_mermaid_js_mean_ms" = 315.1399999976158
+"full_pipeline_wide_12x24_mermaid_js_mean_ms" = 981.7300000190735
+"full_pipeline_wide_16x32_mermaid_js_mean_ms" = 2879.185000014305
+"full_pipeline_wide_8x16_frankenmermaid_over_mermaid_js" = 0.006613
+"full_pipeline_wide_12x24_frankenmermaid_over_mermaid_js" = 0.005183
+"full_pipeline_wide_16x32_frankenmermaid_over_mermaid_js" = 0.003534
+"full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 151.22
+"full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 192.94
+"full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 282.94
+
+[post_measurement_svg_dynamic_class_append_2026_06_25.decision]
+status = "keep"
+rationale = "Dynamic class append removes per-node format/copy work, improves render_svg medium_100 by 22.25%, improves raw same-local full_pipeline_wide 12x24 by 25.33%, keeps large render statistically unchanged, and retains 151x-283x Mermaid 11.12.0 dominance ratios."

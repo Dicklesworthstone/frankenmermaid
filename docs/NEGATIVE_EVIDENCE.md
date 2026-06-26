@@ -422,6 +422,47 @@
   without fresh same-machine A/B; earlier Cow/static-name capacity work was
   measured as ~0 and logged separately.
 
+### SVG dynamic class append — KEPT (2026-06-25)
+- **Lever:** dynamic SVG node/icon classes now append prefix and suffix directly
+  into the existing `class` attribute string via `class_prefixed*`, avoiding
+  per-node `format!` temporaries and the second copy through `class(&str)`.
+- **Mapped primitive:** allocation-fusion / partial evaluation from the
+  alien-artifact pass: keep class serialization byte-identical, but compile the
+  common `prefix + small suffix` shape into direct buffer appends.
+- **Baseline -> After:** same checkout/target local means with
+  `/data/projects/.rch-targets/frankenmermaid-cod-a`, package
+  `frankenmermaid-cli`, bench `pipeline_bench`. `render_svg/flowchart`:
+  `small_10` `125.53 us` -> `129.74 us` (`+3.35%`, Criterion within-noise),
+  `medium_100` `1.0405 ms` -> `809.00 us` (`-22.25%`, Criterion improved),
+  and `large_500` `4.0836 ms` -> `4.1034 ms` (`+0.48%`, no change).
+  Raw same-local `full_pipeline_wide` means: `8x16` `2.0991 ms` ->
+  `2.0840 ms` (`-0.72%`), `12x24` `6.8145 ms` -> `5.0882 ms`
+  (`-25.33%`), and `16x32` `10.428 ms` -> `10.176 ms` (`-2.42%`).
+- **Original comparator:** latest live-CDP Mermaid `11.12.0` denominator reused
+  for identical generated wide inputs: Node `v24.14.0`, `/snap/bin/chromium`,
+  dynamic import of
+  `https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.esm.min.mjs`,
+  3 warmups, and 20 timed render-to-SVG iterations.
+- **frankenmermaid/Mermaid ratio:** candidate local full-pipeline wide ratios
+  were `0.006613x` (`8x16`: `2.0840 ms` vs `315.14 ms`), `0.005183x`
+  (`12x24`: `5.0882 ms` vs `981.73 ms`), and `0.003534x` (`16x32`:
+  `10.176 ms` vs `2879.185 ms`), i.e. Mermaid.js was `151.22x`, `192.94x`,
+  and `282.94x` slower.
+- **Behavior proof:** new `Attributes` tests cover prefixed class
+  serialization; `cargo fmt -p fm-render-svg --check`,
+  `rch exec -- cargo check -p fm-render-svg --all-targets`,
+  `rch exec -- cargo clippy -p fm-render-svg --all-targets -- -D warnings`,
+  and local `cargo test -p frankenmermaid-cli --test
+  frankentui_conformance_test` passed. The remote conformance attempt failed
+  before tests on worker `vmi1227854` because `cmake` was missing for
+  `highs-sys`; this is worker toolchain failure, not conformance evidence.
+- **Verdict:** kept; the focused renderer win is clear on `medium_100`, the
+  wide `12x24` pipeline improves materially by raw same-local means, and no
+  large-case regression reproduced in the retained means.
+- **Do-not-retry note:** do not generalize this into `Attributes::set`
+  scan-before-retain; that broader allocation lever already regressed
+  `full_pipeline_wide` and remains rejected below.
+
 ### Edge path offset Vec elision — REJECTED (2026-06-25)
 - **Lever tested:** `fm-render-svg::render_edge` was changed locally to skip the
   temporary `Vec<(f32, f32)>` used to add `offset_x`/`offset_y` before calling

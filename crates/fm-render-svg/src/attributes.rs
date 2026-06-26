@@ -153,6 +153,56 @@ impl Attributes {
         self.set("class", class)
     }
 
+    /// Add a CSS class made from two string pieces without allocating a temporary
+    /// formatted class name when a class attribute already exists.
+    #[must_use]
+    pub fn class_prefixed(mut self, prefix: &str, suffix: &str) -> Self {
+        for attr in &mut self.attrs {
+            if attr.name.as_ref() == "class"
+                && let AttributeValue::String(ref mut s) = attr.value
+            {
+                s.push(' ');
+                s.push_str(prefix);
+                s.push_str(suffix);
+                return self;
+            }
+        }
+
+        let mut class = String::with_capacity(prefix.len() + suffix.len());
+        class.push_str(prefix);
+        class.push_str(suffix);
+        self.attrs.push(Attribute {
+            name: Cow::Borrowed("class"),
+            value: AttributeValue::String(class),
+        });
+        self
+    }
+
+    /// Add a CSS class made from a string prefix and integer suffix without a
+    /// temporary `format!` allocation on the hot node-rendering path.
+    #[must_use]
+    pub fn class_prefixed_usize(mut self, prefix: &str, value: usize) -> Self {
+        for attr in &mut self.attrs {
+            if attr.name.as_ref() == "class"
+                && let AttributeValue::String(ref mut s) = attr.value
+            {
+                s.push(' ');
+                s.push_str(prefix);
+                push_usize(s, value);
+                return self;
+            }
+        }
+
+        let mut class = String::with_capacity(prefix.len() + decimal_digits(value));
+        class.push_str(prefix);
+        push_usize(&mut class, value);
+        self.attrs.push(Attribute {
+            name: Cow::Borrowed("class"),
+            value: AttributeValue::String(class),
+        });
+        self
+    }
+
     /// Add an id attribute.
     #[must_use]
     pub fn id(self, id: &str) -> Self {
@@ -225,6 +275,33 @@ impl Attributes {
         }
         self
     }
+}
+
+fn push_usize(out: &mut String, value: usize) {
+    if value >= 10 {
+        push_usize(out, value / 10);
+    }
+    out.push(match value % 10 {
+        0 => '0',
+        1 => '1',
+        2 => '2',
+        3 => '3',
+        4 => '4',
+        5 => '5',
+        6 => '6',
+        7 => '7',
+        8 => '8',
+        _ => '9',
+    });
+}
+
+const fn decimal_digits(mut value: usize) -> usize {
+    let mut digits = 1;
+    while value >= 10 {
+        value /= 10;
+        digits += 1;
+    }
+    digits
 }
 
 /// Write `value` to exactly two decimal places, byte-for-byte identical to
@@ -461,6 +538,30 @@ mod tests {
         let attrs = Attributes::new().class("foo").class("bar").class("baz");
         let rendered = attrs.render();
         assert!(rendered.contains("class=\"foo bar baz\""));
+    }
+
+    #[test]
+    fn appends_prefixed_classes_without_changing_serialization() {
+        let attrs = Attributes::new()
+            .class("fm-node")
+            .class_prefixed_usize("fm-node-accent-", 7)
+            .class("fm-node-shape-rect")
+            .class_prefixed("fm-node-user-", "selected");
+        assert_eq!(
+            attrs.render(),
+            " class=\"fm-node fm-node-accent-7 fm-node-shape-rect fm-node-user-selected\""
+        );
+    }
+
+    #[test]
+    fn starts_class_attribute_from_prefixed_class() {
+        let attrs = Attributes::new()
+            .class_prefixed("fm-node-icon-", "server")
+            .class_prefixed_usize("fm-node-accent-", 12);
+        assert_eq!(
+            attrs.render(),
+            " class=\"fm-node-icon-server fm-node-accent-12\""
+        );
     }
 
     #[test]
