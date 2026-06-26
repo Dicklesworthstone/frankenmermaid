@@ -1168,6 +1168,38 @@
 
 ## Blocked/Invalid Evidence Attempts
 
+### Post-process `<style>` CSS minification — REJECTED (render +19%) (2026-06-26)
+- **Byte-composition finding (kept for targeting):** for a small flowchart (3 nodes, 2
+  edges) the rendered SVG is `13489` bytes, of which the embedded `<style>` CSS is **`9734`
+  bytes (72%)** — by far the largest chunk now that markers are gated. The CSS is
+  pretty-printed (352 non-empty lines, ~195 indented). The gradient and drop-shadow filter
+  in `<defs>` are *used* (`fill="url(#fm-node-gradient)"`, `filter="url(#drop-shadow)"` on
+  nodes), so not dead. The CSS rule bodies are theme-independent (they use `var(--fm-*)`);
+  only `:root{…}` carries actual colors.
+- **Lever tested:** a `minify_css` post-process (trim each line, join, inserting a space only
+  where it would merge two word bytes — byte-safe for any CSS) applied at the three
+  `doc.style(css)` sites. Deterministically shrank output: small flowchart `13489 → 12706`
+  (**−783 bytes, −5.8%**), wide `8x16` `164321 → 163538` (−0.48%); CSS stays valid
+  (`:root`, `.fm-node` rules, gradient ref all present; well-formed SVG). `cargo test -p
+  fm-render-svg` = `219 passed; 0 failed`.
+- **Outcome:** rejected — **render-time regression**. Same-machine local A/B (rch timing
+  blocked by `cmake`-less worker), `render_svg/flowchart/small_10`: `100.83 µs → 123.09 µs`,
+  change **+19.39%** (p = 0.00 < 0.05, "regressed"). Reprocessing the 9.7 KB CSS string
+  (allocate + per-line scan) costs far more (~+22 µs) than the 783 fewer output bytes save.
+  A byte win but a clear time loss on the very bench that fronts the Mermaid comparison.
+- **frankenmermaid/Mermaid ratio:** unchanged — reverted, main untouched. Retained
+  current-main `full_pipeline_wide` standing `1.5908 ms` / `3.7339 ms` / `6.7530 ms` vs
+  live-CDP Mermaid `11.12.0` `315.14 ms` / `981.73 ms` / `2879.185 ms` = `198.10x` /
+  `262.92x` / `426.35x`.
+- **Do-not-retry note:** do **not** minify CSS as a post-process — the reprocessing pass
+  dominates. The 783-byte (and potentially more, via used-only rule pruning) reduction is
+  only worth taking if emitted **at generation time**: change `Theme::to_svg_style` (and the
+  `effects/animation/accessibility` CSS builders) to push compact CSS directly (no
+  indentation/newlines in the `format!`/`push_str` templates), so no second pass is needed.
+  That is a larger, template-by-template edit with golden churn (harness goldens are not
+  git-tracked) — a focused follow-up, not a quick win. CSS is the 72%-of-small-SVG frontier
+  vs Mermaid (which ships minified CSS); generation-time compaction is the route.
+
 ### Emit only used `<defs>` arrowhead markers — HIGH-VALUE LEVER, IMPLEMENTATION-BLOCKED (2026-06-26)
 - **The gap (measured):** every SVG render emits the full fixed set of **12** arrowhead
   markers (`arrow-end`, `-filled`, `-open`, `-half-{top,bottom}`, `-stick-{top,bottom}`,
