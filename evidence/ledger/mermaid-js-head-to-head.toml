@@ -1046,3 +1046,69 @@ criterion_change_note = "Criterion reported -24.6% (12x24) and -23.1% (16x32) ve
 [verify_main_full_pipeline_wide_standing_2026_06_26.decision]
 status = "verified"
 rationale = "Current main (52109a1) renders parse+layout+SVG for wide flowcharts in 1.59-6.75 ms versus Mermaid 11.12.0's 315-2879 ms, i.e. 198x-426x faster, exceeding the previously recorded 170x-356x standing after the cumulative recent renderer optimizations."
+
+[negative_measurement_svg_edge_data_usize_2026_06_26]
+date = "2026-06-26"
+agent = "TanSparrow"
+lever_bead = "bd-1buv.1"
+worker_delta = "baseline rch local fallback; candidate direct local after remote worker failure"
+baseline_commit = "0f8c2f6"
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-b"
+candidate_summary = "Add a numeric usize AttributeValue plus data_usize helpers and use it for render_edge data-fm-edge-id values to avoid edge_index.to_string() allocations."
+render_baseline_command = "RCH_WORKER=hz2 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
+render_candidate_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
+wide_baseline_command = "RCH_WORKER=hz2 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+wide_candidate_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+mermaid_js_command = "Latest live-CDP Mermaid 11.12.0 denominator reused from the current-main BOLD-VERIFY entry for identical generated wide inputs."
+rust_build_profile = "release profile [optimized]"
+behavior_proof = "Candidate code was reverted before commit; no production code diff remains. The intended byte shape was unchanged because numeric AttributeValue would still serialize quoted decimal digits in the same data-fm-edge-id attribute."
+tooling_notes = [
+  "The requested rch exec candidate run selected vmi1227854 and failed before benchmarking because cmake was missing while building highs-sys.",
+  "An RCH_ENABLED=0 rch exec retry still selected vmi1227854 and was interrupted before repeating the known worker failure.",
+  "The literal cargo bench --release form remains invalid on this Cargo toolchain; --profile release was used for per-crate bench commands.",
+]
+
+[negative_measurement_svg_edge_data_usize_2026_06_26.metrics]
+"wide_stages_render_8x16_baseline_mean_ms" = 1.2735
+"wide_stages_render_8x16_candidate_mean_ms" = 1.2162
+"wide_stages_render_8x16_candidate_delta_pct" = -4.4994
+"wide_stages_render_8x16_baseline_over_candidate" = 1.0471
+"wide_stages_render_12x24_baseline_mean_ms" = 3.0705
+"wide_stages_render_12x24_candidate_mean_ms" = 3.0792
+"wide_stages_render_12x24_candidate_delta_pct" = 0.2833
+"wide_stages_render_12x24_baseline_over_candidate" = 0.9972
+"wide_stages_render_16x32_baseline_mean_ms" = 6.1986
+"wide_stages_render_16x32_candidate_mean_ms" = 6.5593
+"wide_stages_render_16x32_candidate_delta_pct" = 5.8191
+"wide_stages_render_16x32_baseline_over_candidate" = 0.9450
+"full_pipeline_wide_8x16_baseline_mean_ms" = 1.7174
+"full_pipeline_wide_8x16_candidate_mean_ms" = 1.7523
+"full_pipeline_wide_8x16_candidate_delta_pct" = 2.0321
+"full_pipeline_wide_8x16_baseline_over_candidate" = 0.9801
+"full_pipeline_wide_12x24_baseline_mean_ms" = 4.3000
+"full_pipeline_wide_12x24_candidate_mean_ms" = 6.2083
+"full_pipeline_wide_12x24_candidate_delta_pct" = 44.3791
+"full_pipeline_wide_12x24_baseline_over_candidate" = 0.6926
+"full_pipeline_wide_16x32_baseline_mean_ms" = 8.5379
+"full_pipeline_wide_16x32_candidate_mean_ms" = 10.937
+"full_pipeline_wide_16x32_candidate_delta_pct" = 28.0994
+"full_pipeline_wide_16x32_baseline_over_candidate" = 0.7806
+"full_pipeline_wide_8x16_mermaid_js_mean_ms" = 315.1399999976158
+"full_pipeline_wide_12x24_mermaid_js_mean_ms" = 981.7300000190735
+"full_pipeline_wide_16x32_mermaid_js_mean_ms" = 2879.185000014305
+"baseline_full_pipeline_wide_8x16_frankenmermaid_over_mermaid_js" = 0.005450
+"baseline_full_pipeline_wide_12x24_frankenmermaid_over_mermaid_js" = 0.004380
+"baseline_full_pipeline_wide_16x32_frankenmermaid_over_mermaid_js" = 0.002965
+"baseline_full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 183.50
+"baseline_full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 228.31
+"baseline_full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 337.22
+"candidate_full_pipeline_wide_8x16_frankenmermaid_over_mermaid_js" = 0.005560
+"candidate_full_pipeline_wide_12x24_frankenmermaid_over_mermaid_js" = 0.006324
+"candidate_full_pipeline_wide_16x32_frankenmermaid_over_mermaid_js" = 0.003799
+"candidate_full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 179.84
+"candidate_full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 158.13
+"candidate_full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 263.25
+
+[negative_measurement_svg_edge_data_usize_2026_06_26.decision]
+status = "reject"
+rationale = "The data-fm-edge-id numeric AttributeValue path failed the render-stage keep bar and regressed full_pipeline_wide by 44.38% on 12x24 and 28.10% on 16x32; code was reverted before commit."

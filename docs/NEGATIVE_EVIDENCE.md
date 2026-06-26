@@ -50,6 +50,52 @@
 
 ## Entries
 
+### Edge `data-fm-edge-id` numeric value path — REJECTED (2026-06-26)
+- **Lever:** `fm-render-svg` added a numeric `usize` `AttributeValue` path plus
+  `Attributes::data_usize` / `Element::data_usize`, then used it for the three
+  `data-fm-edge-id` edge-index call sites in `render_edge`.
+- **Hypothesis:** wide layered diagrams render hundreds of edges; avoiding
+  `edge_index.to_string()` for each edge metadata attribute should reduce SVG
+  render allocation pressure while preserving byte-identical quoted decimal
+  output such as `data-fm-edge-id="42"`.
+- **Baseline -> After:** same clean worktree, same warm cod-b target dir
+  `/data/projects/.rch-targets/frankenmermaid-cod-b`, package
+  `frankenmermaid-cli`, bench `pipeline_bench`. Baseline `wide_stages/render`
+  through `rch exec` local fallback measured `1.2735 ms`, `3.0705 ms`, and
+  `6.1986 ms` for `8x16`, `12x24`, and `16x32`; candidate direct-local means
+  after the remote worker failed before bench were `1.2162 ms`, `3.0792 ms`,
+  and `6.5593 ms`. That is `4.50%` faster but not significant on `8x16`,
+  `0.28%` slower/noise on `12x24`, and `5.82%` slower on `16x32`.
+- **Full-pipeline gate:** retained current-main `full_pipeline_wide` means were
+  `1.7174 ms`, `4.3000 ms`, and `8.5379 ms`; candidate means were
+  `1.7523 ms`, `6.2083 ms`, and `10.937 ms`, which is `2.03%`, `44.38%`,
+  and `28.10%` slower. Criterion reported significant regressions for `12x24`
+  and `16x32`.
+- **Original comparator:** latest pinned live-CDP Mermaid `11.12.0` denominator
+  reused from the current main ledger, Node `v24.14.0`, `/snap/bin/chromium`,
+  dynamic import of
+  `https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.esm.min.mjs`,
+  3 warmups, 20 timed render-to-SVG iterations, identical generated wide inputs.
+- **frankenmermaid/Mermaid ratio:** retained current-main full-pipeline ratios
+  are `0.005450x`, `0.004380x`, and `0.002965x`, meaning Mermaid.js is
+  `183.50x`, `228.31x`, and `337.22x` slower. The rejected candidate would
+  worsen the `12x24` and `16x32` ratios to `0.006324x` and `0.003799x`, leaving
+  Mermaid.js only `158.13x` and `263.25x` slower on those cases.
+- **Verdict:** regression; code was reverted before commit and only this ledger
+  evidence remains.
+- **Revert:** manual `apply_patch` removed `AttributeValue::Usize`,
+  `data_usize`, and the `render_edge` call-site changes; `git diff` showed no
+  production code diff afterward.
+- **Do-not-retry note:** do not pursue edge-id numeric metadata allocation in
+  isolation. The extra enum variant and serialization branch did not predict the
+  full-pipeline behavior; future SVG render work should target the larger
+  repeated element/tree construction costs surfaced by `wide_stages/render`.
+- **Tooling note:** the requested `rch exec` candidate run selected worker
+  `vmi1227854` and failed before benchmarking because `cmake` was missing while
+  building `highs-sys`; an `RCH_ENABLED=0 rch exec` retry still selected the
+  same worker and was interrupted. The accepted candidate timing used direct
+  local Cargo with the same target dir as the `rch exec` local-fallback baseline.
+
 ### SVG plain node label direct element path — KEPT (2026-06-26)
 - **Lever:** `fm-render-svg::render_node_label_text` now keeps markdown and
   multiline labels on the existing `TextBuilder` path, but renders single-line
