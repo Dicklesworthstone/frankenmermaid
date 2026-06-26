@@ -1284,3 +1284,68 @@ tooling_notes = [
 [negative_measurement_svg_integer_number_writer_2026_06_26.decision]
 status = "reject"
 rationale = "Manual integer SVG number formatting improved same-local render 12x24 by 20.51% but regressed render 8x16 by 8.19%, render 16x32 by 9.58%, full_pipeline_wide 12x24 by 15.92%, and full_pipeline_wide 16x32 by 6.10%; code was reverted before commit."
+
+[negative_measurement_svg_textbuilder_line_iter_2026_06_26]
+date = "2026-06-26"
+agent = "TanSparrow"
+lever_bead = "bd-1buv.1"
+worker_delta = "unpaired RCH routing context on hz2/ovh-a; keep/reject decision from same-machine local toggle"
+baseline_commit = "850791e"
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-a"
+candidate_summary = "Avoid TextBuilder::build collecting self.text.lines() into Vec<&str> for the common single-line label path by peeking the line iterator and only creating tspans for true multiline text."
+remote_render_baseline_command = "RCH_WORKER=ovh-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
+remote_render_candidate_command = "RCH_WORKER=hz2 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
+local_render_candidate_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a cargo bench -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
+local_render_baseline_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a cargo bench -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
+mermaid_js_command = "Latest live-CDP Mermaid 11.12.0 denominator reused from the current-main BOLD-VERIFY entry for identical generated wide inputs."
+rust_build_profile = "bench profile [optimized]"
+behavior_proof = "Candidate code was reverted before commit; no production code diff remains. The intended byte shape preserved single-line TextBuilder content, including trailing newline, and used the existing tspan construction for multiline text."
+tooling_notes = [
+  "Agent Mail macro_start_session failed because the mail SQLite database reported a malformed index page/root 41.",
+  "RCH ignored the requested worker hints: baseline selected hz2 while candidate selected ovh-a, so remote numbers are routing context rather than decisive proof.",
+  "RCH cargo test -p fm-render-svg selected vmi1227854 and failed before testing because cmake was missing while building highs-sys; local CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a cargo test -p fm-render-svg passed 219 unit tests and doctests.",
+  "The literal cargo bench --release form remains invalid on this Cargo toolchain; per-crate cargo bench uses the optimized bench profile.",
+  "Current main emits an unrelated unused_mut warning in crates/fm-render-svg/src/lib.rs:770.",
+]
+
+[negative_measurement_svg_textbuilder_line_iter_2026_06_26.metrics]
+"remote_hz2_wide_stages_render_8x16_baseline_mean_ms" = 1.0273
+"remote_hz2_wide_stages_render_12x24_baseline_mean_ms" = 2.3335
+"remote_hz2_wide_stages_render_16x32_baseline_mean_ms" = 4.3177
+"remote_ovh_a_wide_stages_render_8x16_candidate_mean_ms" = 0.96134
+"remote_ovh_a_wide_stages_render_12x24_candidate_mean_ms" = 2.1719
+"remote_ovh_a_wide_stages_render_16x32_candidate_mean_ms" = 3.9782
+"local_wide_stages_render_8x16_baseline_mean_ms" = 1.1304
+"local_wide_stages_render_8x16_candidate_mean_ms" = 1.1551
+"local_wide_stages_render_8x16_candidate_delta_pct" = 2.1849
+"local_wide_stages_render_8x16_baseline_over_candidate" = 0.9786
+"local_wide_stages_render_12x24_baseline_mean_ms" = 2.9145
+"local_wide_stages_render_12x24_candidate_mean_ms" = 3.1485
+"local_wide_stages_render_12x24_candidate_delta_pct" = 8.0288
+"local_wide_stages_render_12x24_baseline_over_candidate" = 0.9257
+"local_wide_stages_render_16x32_baseline_mean_ms" = 5.8246
+"local_wide_stages_render_16x32_candidate_mean_ms" = 5.4789
+"local_wide_stages_render_16x32_candidate_delta_pct" = -5.9352
+"local_wide_stages_render_16x32_baseline_over_candidate" = 1.0631
+"retained_main_full_pipeline_wide_8x16_mean_ms" = 1.5908
+"retained_main_full_pipeline_wide_12x24_mean_ms" = 3.7339
+"retained_main_full_pipeline_wide_16x32_mean_ms" = 6.7530
+"full_pipeline_wide_8x16_mermaid_js_mean_ms" = 315.1399999976158
+"full_pipeline_wide_12x24_mermaid_js_mean_ms" = 981.7300000190735
+"full_pipeline_wide_16x32_mermaid_js_mean_ms" = 2879.185000014305
+"retained_main_full_pipeline_wide_8x16_frankenmermaid_over_mermaid_js" = 0.005048
+"retained_main_full_pipeline_wide_12x24_frankenmermaid_over_mermaid_js" = 0.003803
+"retained_main_full_pipeline_wide_16x32_frankenmermaid_over_mermaid_js" = 0.002345
+"retained_main_full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 198.10
+"retained_main_full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 262.92
+"retained_main_full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 426.35
+"render_stage_candidate_8x16_frankenmermaid_over_mermaid_js_denominator" = 0.003665
+"render_stage_candidate_12x24_frankenmermaid_over_mermaid_js_denominator" = 0.003207
+"render_stage_candidate_16x32_frankenmermaid_over_mermaid_js_denominator" = 0.001903
+"render_stage_candidate_8x16_mermaid_js_over_frankenmermaid" = 272.82
+"render_stage_candidate_12x24_mermaid_js_over_frankenmermaid" = 311.82
+"render_stage_candidate_16x32_mermaid_js_over_frankenmermaid" = 525.51
+
+[negative_measurement_svg_textbuilder_line_iter_2026_06_26.decision]
+status = "reject"
+rationale = "The TextBuilder line-iterator specialization avoided a Vec allocation but regressed same-machine wide_stages/render 8x16 by 2.18% and 12x24 by 8.03%, with only a 5.94% 16x32 improvement; code was reverted before commit."

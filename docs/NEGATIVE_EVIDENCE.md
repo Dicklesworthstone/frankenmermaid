@@ -1030,6 +1030,39 @@
   lever. The remaining per-element cost is dominated by larger Element/tree/attribute
   construction, not this final owned-string handoff.
 
+### TextBuilder multiline Vec removal — REJECTED (2026-06-26)
+- **Lever tested:** `TextBuilder::build` eagerly collected `self.text.lines()` into a
+  `Vec<&str>` even for the common single-line label path. The candidate consumed the
+  first two lines directly from the iterator, preserving the old single-line content
+  behavior and only building `tspan` children for real multiline labels.
+- **Mapped primitive:** allocation removal / hot-path specialization from the
+  wide-render pass: remove one per-text temporary collection while keeping the
+  serialized SVG byte shape for one-line labels.
+- **Baseline -> After:** per-crate `frankenmermaid-cli`, `pipeline_bench`, warm target
+  dir `/data/projects/.rch-targets/frankenmermaid-cod-a`. The RCH run selected different
+  workers for current-main baseline (`hz2`: `1.0273 ms`, `2.3335 ms`, `4.3177 ms`) and
+  candidate (`ovh-a`: `0.96134 ms`, `2.1719 ms`, `3.9782 ms`), so it was routing
+  context only. A same-machine toggle rejected the candidate: candidate render means
+  `1.1551 ms`, `3.1485 ms`, `5.4789 ms` versus reverted current-main baseline
+  `1.1304 ms`, `2.9145 ms`, `5.8246 ms`, i.e. `+2.18%`, `+8.03%`, and `-5.94%`.
+- **Original comparator:** latest live-CDP Mermaid `11.12.0` denominator reused from
+  the current-main BOLD-VERIFY entry for identical generated wide inputs: Node
+  `v24.14.0`, `/snap/bin/chromium`, dynamic import of
+  `https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.esm.min.mjs`, 3 warmups,
+  20 timed render-to-SVG iterations.
+- **frankenmermaid/Mermaid ratio:** retained current-main `full_pipeline_wide` standing
+  remains `1.5908 ms`, `3.7339 ms`, and `6.7530 ms` vs Mermaid.js `315.14 ms`,
+  `981.73 ms`, and `2879.185 ms`, so Mermaid.js is `198.10x`, `262.92x`, and
+  `426.35x` slower. The rejected render-stage candidate alone was `272.82x`,
+  `311.82x`, and `525.51x` faster than those full Mermaid denominators, but it was not a
+  same-machine win over current main.
+- **Verdict:** rejected; the small allocation removal did not beat current main on the
+  common `8x16` and `12x24` wide-render gates. Code was manually reverted before commit;
+  no production source diff remains.
+- **Do-not-retry note:** do not revisit `TextBuilder::build` line-collection elision as a
+  standalone wide-render lever. The next candidate needs to remove larger Element/tree
+  construction work or change the generated element count.
+
 ### Common `-->` flowchart parser shortcut — REJECTED (2026-06-25)
 - **Lever tested:** `parse_fast_simple_flowchart_edge_ast` was changed locally to
   try a guarded exact `-->` shortcut before scanning the full fast-operator table.
