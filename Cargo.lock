@@ -612,6 +612,7 @@ name = "fm-parser"
 version = "0.1.0"
 dependencies = [
  "chumsky",
+ "criterion",
  "fm-core",
  "json5",
  "proptest",

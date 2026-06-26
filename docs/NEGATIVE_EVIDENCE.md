@@ -1168,6 +1168,41 @@
 
 ## Blocked/Invalid Evidence Attempts
 
+### cmake-free `fm-parser` parse bench + the per-worker-target-dir A/B blocker — INFRA (2026-06-26)
+- **Shipped (infra):** `crates/fm-parser/benches/parse_bench.rs` (+ criterion dev-dep). The
+  full-pipeline `pipeline_bench` lives in `fm-cli`, which pulls in `fm-layout → highs-sys →
+  cmake`; the recurring `cmake`-less worker `vmi1227854` fails that build (`exit 101`). But
+  `fm-parser` has **no** `highs-sys`/`fm-layout` dependency, so this bench builds and runs on
+  **every** worker — verified: `rch exec -- cargo bench -p fm-parser` completed with **zero**
+  `cmake`/`highs-sys` references, parse times on `ovh-a` `flowchart/small_10` `18.54 µs`
+  (±0.15%, very stable), `flowchart/large_1000` `2.109 ms`. Parse (≈21% of the wide pipeline)
+  is now independently, reliably benchable.
+- **Deeper blocker now diagnosed (the real reason A/B has been unreliable all along):** rch
+  gives each worker its **own** `CARGO_TARGET_DIR` suffix (`.rch-target-<worker>-pool-…`), and
+  `rch exec` has **no worker-pin flag** (confirmed: `exec` exposes only `-v`; a top-level
+  `--worker` is rejected by `exec`). So a criterion baseline saved on one worker is invisible
+  to another: a `--baseline` run that lands on a different worker panics
+  `Baseline '…' must exist`. Reliable A/B therefore requires *both* runs to land on the same
+  worker — an uncontrollable lottery. This cycle, the baseline saved on `ovh-a` but both
+  `--baseline` retries routed to `vmi1227854` → comparison impossible. **This — not just the
+  missing cmake — is why cross-cycle layout/render A/Bs have been noisy/uncomparable.**
+- **`span_all` is write-only dead data (noted, unverified-this-cycle):** `IrNode.span_all:
+  Vec<Span>` (fm-core, serialized) is **never read** anywhere in the workspace (1 push site +
+  init; 0 readers), yet `IrBuilder::intern_node_auto` pushes one `Span` per node *reference*
+  (~2/edge). Removing the per-reference push was attempted but could not be A/B'd (the
+  blocker above) and changes a serialized field's content, so it was reverted. A future cycle
+  with same-worker benching should re-measure removing `span_all` entirely (field + init +
+  push) on `parse_bench` — the bigger cost is the per-node `vec![span]` init alloc, not the
+  pushes.
+- **frankenmermaid/Mermaid ratio:** unchanged — no source perf change landed (bench infra +
+  docs only). Retained `full_pipeline_wide` standing `198.10x` / `262.92x` / `426.35x` vs
+  live-CDP Mermaid `11.12.0`.
+- **Do-next / fix:** the highest-leverage infra fix for the whole swarm is **same-worker
+  benching** — either an `rch exec --worker <id>` pin (feature request) or, per cycle,
+  save-baseline and compare in immediate succession and *discard runs that report a different
+  `remote <worker>`*. Until then, prefer `fm-parser`'s cmake-free bench for parse work
+  (builds never fail) and accept that sub-5% layout/render effects remain unverifiable.
+
 ### Edge routing is 85% of tree-path layout; `intersect_segment` bool variant — ~0-GAIN (2026-06-26)
 - **Finding (follow-up to the tree-fallback entry below):** instrumenting
   `layout_diagram_tree_traced` on `16x32` (512 nodes, 960 edges, the tree-path case) split
