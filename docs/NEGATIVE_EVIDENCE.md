@@ -3091,6 +3091,46 @@
 
   Agent: TanSparrow
 
+### Parse: borrowed fast-node document item — REJECTED, regression vs current ORIG (2026-06-27)
+- **Lever tried:** extend the borrowed-id idea from the kept `FastEdge` path to
+  simple node declarations (`N0_0[L0 W0]` and bare `N0_0`) by adding a
+  `FlowDocumentItem::FastNode` that stores the node id as an input-borrowed
+  `&str` and lowers directly through `IrBuilder`, while keeping labels/icons
+  owned as today.
+- **Mapped primitive:** alien-graveyard region/lifetime split plus data-plane
+  allocation hygiene. The input line is the region; in principle the node id
+  only needs to live until IR interning. This was also the next documented slice
+  after the edge-endpoint win.
+- **Baseline -> After:** clean current-main worktree
+  `/data/projects/.worktrees/frankenmermaid-tansparrow-node-id-20260627` at
+  `c47f53d`, package `frankenmermaid-cli`, bench `pipeline_bench`, filter
+  `wide_stages/parse`, target dir
+  `/data/projects/.rch-targets/frankenmermaid-cod-a`. Commands used
+  `AGENT_NAME=TanSparrow RCH_WORKER=ovh-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/parse --warm-up-time 1 --measurement-time 2`.
+  `rch` accepted both runs through the same local fallback route because no
+  remote worker was admissible.
+- **Measured result (median, candidate/ORIG):** `8x16` `287.52 us -> 448.57 us`
+  (`1.560x`, 56.0% slower), `12x24` `649.72 us -> 845.21 us` (`1.301x`,
+  30.1% slower), `16x32` `1.2171 ms -> 1.3812 ms` (`1.135x`, 13.5% slower).
+  Criterion marked all three as regressions (`p = 0.00`).
+- **Original comparator:** pinned live-CDP Mermaid `11.12.0` denominators reused
+  for identical generated wide inputs: `8x16` `315.14 ms`, `12x24`
+  `981.73 ms`, `16x32` `2879.185 ms`.
+- **frankenmermaid/Mermaid ratio:** the rejected candidate parse-stage medians
+  were still `0.001423x`, `0.000861x`, and `0.000480x` Mermaid.js time
+  (`703x`, `1161x`, and `2084x` faster), but all are worse than current ORIG.
+- **Verdict:** rejected and reverted before commit. Do not retry the node-id
+  borrowing as a separate `FlowDocumentItem::FastNode` path. The failed shape
+  adds another top-level document item/lowering branch but does not remove the
+  label parsing/allocation cost on the wide corpus; the edge slice won because
+  it removed many more temporary endpoint id strings on the denser edge half of
+  the input.
+- **Next direction:** if node-id borrowing is revisited, it needs to be part of
+  a broader borrowed `FlowAst<'a>`/`FlowAstNode<'a>` representation or another
+  profile-backed parser restructuring, not this isolated document-item splice.
+
+  Agent: TanSparrow
+
 ### Streamed edge fragments (a4f6cff) — INDEPENDENT CONFIRMATION + ceiling + next lever (2026-06-27)
 - **Context:** TanSparrow landed `a4f6cff` "stream rendered edge fragments" while I (GreyShrike)
   independently built the same lever; this records my independent rigorous measurement of the
