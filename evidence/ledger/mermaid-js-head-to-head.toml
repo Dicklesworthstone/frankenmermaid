@@ -1992,3 +1992,75 @@ tooling_notes = [
 [negative_measurement_textbuilder_single_line_no_vec_2026_06_27.decision]
 status = "reject"
 rationale = "TextBuilder single-line line-vector skipping improved 8x16 render by 4.89% but regressed 12x24 by 28.15% and 16x32 by 423.13%; production source was manually reverted and only evidence remains."
+
+[positive_measurement_accessible_edge_label_cache_2026_06_27]
+date = "2026-06-27"
+agent = "TanSparrow"
+lever_bead = "bd-1buv.1"
+graveyard_route = "Alien Graveyard memoization and object-layout specialization plus Alien Artifact allocation and lookup fusion: build accessible node labels once per SVG render and reuse borrowed endpoint labels while emitting edge text alternatives."
+worker_delta = "wide_stages/render baseline and candidate used the same rch local fallback after no admissible ovh-a workers; same-worker keep gate used hz2 for full_pipeline_wide baseline and candidate"
+baseline_commit = "e1de983"
+candidate_summary = "Cache accessible node labels once when text alternatives are enabled and pass the borrowed cache into edge title generation; output strings remain byte-equivalent to the old per-edge node lookup description."
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-a"
+render_baseline_command = "AGENT_NAME=TanSparrow RCH_WORKER=ovh-a RUSTFLAGS='-C metadata=tansparrowa11ycachebase' CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
+render_candidate_command = "AGENT_NAME=TanSparrow RCH_WORKER=ovh-a RUSTFLAGS='-C metadata=tansparrowa11ycachecand' CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
+full_pipeline_baseline_command = "AGENT_NAME=TanSparrow RCH_WORKER=ovh-a RUSTFLAGS='-C metadata=tansparrowa11yfullbase' CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+full_pipeline_candidate_command = "AGENT_NAME=TanSparrow RCH_WORKER=hz2 RUSTFLAGS='-C metadata=tansparrowa11yfullcandhz2' CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+mermaid_js_command = "Pinned live-CDP Mermaid 11.12.0 denominator reused from current-main ledger for identical generated wide inputs."
+rust_build_profile = "release profile [optimized]"
+behavior_proof = "A focused test proves cached edge endpoint labels match the previous node lookup description path; full fm-render-svg tests and frankenmermaid-cli conformance passed after the candidate."
+tooling_notes = [
+  "The literal cargo bench --release form remains invalid on this Cargo toolchain; --profile release was used for the requested release-profile per-crate bench.",
+  "Agent Mail file reservations failed because the mail SQLite database corruption circuit breaker is open.",
+  "RCH fell open locally for the render-stage routing bench and conformance test, but the full_pipeline_wide keep gate was measured baseline-vs-candidate on hz2.",
+]
+
+[positive_measurement_accessible_edge_label_cache_2026_06_27.metrics]
+"wide_stages_render_8x16_baseline_mean_ms" = 1.0726
+"wide_stages_render_8x16_candidate_mean_ms" = 1.0262
+"wide_stages_render_8x16_raw_delta_pct" = -4.3259
+"wide_stages_render_8x16_criterion_p_value" = 0.05
+"wide_stages_render_12x24_baseline_mean_ms" = 3.0072
+"wide_stages_render_12x24_candidate_mean_ms" = 2.5380
+"wide_stages_render_12x24_raw_delta_pct" = -15.6026
+"wide_stages_render_12x24_criterion_p_value" = 0.00
+"wide_stages_render_16x32_baseline_mean_ms" = 5.3540
+"wide_stages_render_16x32_candidate_mean_ms" = 5.2526
+"wide_stages_render_16x32_raw_delta_pct" = -1.8939
+"wide_stages_render_16x32_criterion_p_value" = 0.59
+"full_pipeline_wide_8x16_baseline_hz2_mean_ms" = 1.3710
+"full_pipeline_wide_8x16_candidate_hz2_mean_ms" = 1.3489
+"full_pipeline_wide_8x16_raw_delta_pct" = -1.6120
+"full_pipeline_wide_12x24_baseline_hz2_mean_ms" = 3.2061
+"full_pipeline_wide_12x24_candidate_hz2_mean_ms" = 3.1883
+"full_pipeline_wide_12x24_raw_delta_pct" = -0.5552
+"full_pipeline_wide_16x32_baseline_hz2_mean_ms" = 6.3799
+"full_pipeline_wide_16x32_candidate_hz2_mean_ms" = 6.1492
+"full_pipeline_wide_16x32_raw_delta_pct" = -3.6160
+"wide_8x16_mermaid_js_mean_ms" = 315.1399999976158
+"wide_12x24_mermaid_js_mean_ms" = 981.7300000190735
+"wide_16x32_mermaid_js_mean_ms" = 2879.185000014305
+"full_pipeline_candidate_8x16_frankenmermaid_over_mermaid_js" = 0.004280
+"full_pipeline_candidate_12x24_frankenmermaid_over_mermaid_js" = 0.003248
+"full_pipeline_candidate_16x32_frankenmermaid_over_mermaid_js" = 0.002136
+"full_pipeline_candidate_8x16_mermaid_js_over_frankenmermaid" = 233.63
+"full_pipeline_candidate_12x24_mermaid_js_over_frankenmermaid" = 307.92
+"full_pipeline_candidate_16x32_mermaid_js_over_frankenmermaid" = 468.22
+"render_stage_candidate_8x16_frankenmermaid_over_mermaid_js" = 0.003256
+"render_stage_candidate_12x24_frankenmermaid_over_mermaid_js" = 0.002585
+"render_stage_candidate_16x32_frankenmermaid_over_mermaid_js" = 0.001824
+"render_stage_candidate_8x16_mermaid_js_over_frankenmermaid" = 307.09
+"render_stage_candidate_12x24_mermaid_js_over_frankenmermaid" = 386.81
+"render_stage_candidate_16x32_mermaid_js_over_frankenmermaid" = 548.14
+
+[positive_measurement_accessible_edge_label_cache_2026_06_27.validation]
+"cargo_fmt_fm_render_svg_check" = "passed"
+"cargo_check_fm_render_svg_all_targets" = "passed via rch exec on ovh-a"
+"cargo_clippy_fm_render_svg_all_targets" = "passed via rch exec on hz2 with -D warnings"
+"cargo_test_fm_render_svg_focused_cached_edge_labels" = "passed via rch exec local fallback: 1 test"
+"cargo_test_fm_render_svg" = "passed via rch exec local fallback: 223 tests"
+"cargo_test_frankenmermaid_cli_frankentui_conformance" = "passed via rch exec local fallback after queue_timeout: 1 test"
+
+[positive_measurement_accessible_edge_label_cache_2026_06_27.decision]
+status = "keep"
+rationale = "Same-worker hz2 full_pipeline_wide improved across all three generated wide sizes, and the render-stage routing bench showed a significant 12x24 improvement with no measured regression. Behavior is byte-equivalent for edge descriptions and conformance stayed green."

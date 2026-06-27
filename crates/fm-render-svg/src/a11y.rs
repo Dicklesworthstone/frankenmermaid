@@ -2,7 +2,7 @@
 //!
 //! Provides ARIA attributes, text alternatives, and accessibility CSS utilities.
 
-use fm_core::{IrNode, MermaidDiagramIr};
+use fm_core::{ArrowType, IrNode, MermaidDiagramIr};
 use fm_layout::DiagramLayout;
 
 /// Generate an accessible description for a diagram.
@@ -221,19 +221,37 @@ pub fn describe_edge(
         .or_else(|| to_node.map(|n| n.id.as_str()))
         .unwrap_or("unknown");
 
+    describe_edge_labels(Some(from_label), Some(to_label), arrow_type, label)
+}
+
+pub(crate) fn accessible_node_label<'a>(node: &'a IrNode, ir: &'a MermaidDiagramIr) -> &'a str {
+    node.label
+        .and_then(|lid| ir.labels.get(lid.0))
+        .map(|label| label.text.as_str())
+        .unwrap_or(&node.id)
+}
+
+pub(crate) fn describe_edge_labels(
+    from_label: Option<&str>,
+    to_label: Option<&str>,
+    arrow_type: ArrowType,
+    label: Option<&str>,
+) -> String {
+    let from_label = from_label.unwrap_or("unknown");
+    let to_label = to_label.unwrap_or("unknown");
     let arrow_desc = match arrow_type {
-        fm_core::ArrowType::Arrow => "points to",
-        fm_core::ArrowType::ThickArrow => "strongly points to",
-        fm_core::ArrowType::DottedArrow => "optionally points to",
-        fm_core::ArrowType::Circle => "relates to",
-        fm_core::ArrowType::Cross => "blocks",
-        fm_core::ArrowType::ThickLine => "strongly connects to",
-        fm_core::ArrowType::DottedLine => "optionally connects to",
-        fm_core::ArrowType::DoubleArrow => "points both ways to",
-        fm_core::ArrowType::DoubleThickArrow => "strongly points both ways to",
-        fm_core::ArrowType::DoubleDottedArrow => "optionally points both ways to",
-        fm_core::ArrowType::OpenArrow => "sends to",
-        fm_core::ArrowType::DottedOpenArrow => "optionally sends to",
+        ArrowType::Arrow => "points to",
+        ArrowType::ThickArrow => "strongly points to",
+        ArrowType::DottedArrow => "optionally points to",
+        ArrowType::Circle => "relates to",
+        ArrowType::Cross => "blocks",
+        ArrowType::ThickLine => "strongly connects to",
+        ArrowType::DottedLine => "optionally connects to",
+        ArrowType::DoubleArrow => "points both ways to",
+        ArrowType::DoubleThickArrow => "strongly points both ways to",
+        ArrowType::DoubleDottedArrow => "optionally points both ways to",
+        ArrowType::OpenArrow => "sends to",
+        ArrowType::DottedOpenArrow => "optionally sends to",
         _ => "connects to",
     };
 
@@ -444,6 +462,29 @@ mod tests {
         );
         assert!(desc.contains("connects to"));
         assert!(!desc.contains("with label"));
+    }
+
+    #[test]
+    fn cached_edge_labels_match_node_lookup_description() -> Result<(), &'static str> {
+        let ir = create_test_ir();
+        let from_node = ir.nodes.first().ok_or("missing from node")?;
+        let to_node = ir.nodes.get(1).ok_or("missing to node")?;
+        let direct = describe_edge(
+            Some(from_node),
+            Some(to_node),
+            fm_core::ArrowType::Arrow,
+            Some("Submit"),
+            &ir,
+        );
+        let cached = describe_edge_labels(
+            Some(accessible_node_label(from_node, &ir)),
+            Some(accessible_node_label(to_node, &ir)),
+            fm_core::ArrowType::Arrow,
+            Some("Submit"),
+        );
+
+        assert_eq!(direct, cached);
+        Ok(())
     }
 
     #[test]

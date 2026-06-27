@@ -1655,6 +1655,10 @@ fn render_layout_to_svg(
     let theme = resolve_theme(Some(ir), config);
     let classdef_css = collect_classdef_css(ir);
     let emit_classdef_classes = !classdef_css.is_empty();
+    let accessible_node_labels = config
+        .a11y
+        .text_alternatives
+        .then(|| build_accessible_node_label_cache(ir));
     let effects_enabled = config.node_gradients
         || config.glow_enabled
         || clamp_unit_interval(config.inactive_opacity) < 0.999
@@ -2214,20 +2218,22 @@ fn render_layout_to_svg(
         doc = doc.child(line);
     }
 
+    let edge_context = EdgeRenderContext {
+        ir,
+        offset_x,
+        offset_y,
+        config,
+        detail,
+        colors: &theme.colors,
+        accessible_node_labels: accessible_node_labels.as_deref(),
+    };
+
     // Render edges (skip edges absorbed into bundles).
     for edge_path in &layout.edges {
         if edge_path.bundled {
             continue;
         }
-        let edge_elem = render_edge(
-            edge_path,
-            ir,
-            offset_x,
-            offset_y,
-            config,
-            detail,
-            &theme.colors,
-        );
+        let edge_elem = render_edge(edge_path, &edge_context);
         doc = doc.child(edge_elem);
     }
 
@@ -2419,6 +2425,13 @@ fn finish_layout_svg_document(
     layout: &DiagramLayout,
 ) -> String {
     doc.to_string_with_capacity(layout_svg_capacity_hint(ir, layout))
+}
+
+fn build_accessible_node_label_cache(ir: &MermaidDiagramIr) -> Vec<&str> {
+    ir.nodes
+        .iter()
+        .map(|node| crate::a11y::accessible_node_label(node, ir))
+        .collect()
 }
 
 fn layout_svg_capacity_hint(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> usize {
@@ -5858,16 +5871,28 @@ fn smooth_edge_path(points: &[(f32, f32)], _is_self_loop: bool) -> String {
 }
 
 /// Render a single edge to an SVG element.
-fn render_edge(
-    edge_path: &LayoutEdgePath,
-    ir: &MermaidDiagramIr,
+struct EdgeRenderContext<'a> {
+    ir: &'a MermaidDiagramIr,
     offset_x: f32,
     offset_y: f32,
-    config: &SvgRenderConfig,
+    config: &'a SvgRenderConfig,
     detail: RenderDetailProfile,
-    colors: &ThemeColors,
-) -> Element {
+    colors: &'a ThemeColors,
+    accessible_node_labels: Option<&'a [&'a str]>,
+}
+
+fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> Element {
     use fm_core::ArrowType;
+
+    let EdgeRenderContext {
+        ir,
+        offset_x,
+        offset_y,
+        config,
+        detail,
+        colors,
+        accessible_node_labels,
+    } = *context;
 
     let edge_index = edge_path.edge_index;
     let ir_edge = ir.edges.get(edge_index);
@@ -6193,15 +6218,10 @@ fn render_edge(
         if config.a11y.text_alternatives
             && let Some(edge) = ir_edge
         {
-            let from_node = match &edge.from {
-                fm_core::IrEndpoint::Node(nid) => ir.nodes.get(nid.0),
-                _ => None,
-            };
-            let to_node = match &edge.to {
-                fm_core::IrEndpoint::Node(nid) => ir.nodes.get(nid.0),
-                _ => None,
-            };
-            let edge_desc = describe_edge(from_node, to_node, arrow, Some(label_text), ir);
+            let (from_label, to_label) =
+                edge_endpoint_accessible_labels(edge, ir, accessible_node_labels);
+            let edge_desc =
+                crate::a11y::describe_edge_labels(from_label, to_label, arrow, Some(label_text));
             group = group.child(Element::title(&edge_desc));
         }
 
@@ -6212,15 +6232,9 @@ fn render_edge(
     if config.a11y.text_alternatives
         && let Some(edge) = ir_edge
     {
-        let from_node = match &edge.from {
-            fm_core::IrEndpoint::Node(nid) => ir.nodes.get(nid.0),
-            _ => None,
-        };
-        let to_node = match &edge.to {
-            fm_core::IrEndpoint::Node(nid) => ir.nodes.get(nid.0),
-            _ => None,
-        };
-        let edge_desc = describe_edge(from_node, to_node, arrow, None, ir);
+        let (from_label, to_label) =
+            edge_endpoint_accessible_labels(edge, ir, accessible_node_labels);
+        let edge_desc = crate::a11y::describe_edge_labels(from_label, to_label, arrow, None);
         // Wrap in group to add title
         let mut group = Element::group()
             .id(&mermaid_edge_element_id(edge_index))
@@ -6254,6 +6268,34 @@ fn render_edge(
     elem = elem.id(&mermaid_edge_element_id(edge_index));
 
     elem
+}
+
+fn edge_endpoint_accessible_labels<'a>(
+    edge: &fm_core::IrEdge,
+    ir: &'a MermaidDiagramIr,
+    accessible_node_labels: Option<&'a [&'a str]>,
+) -> (Option<&'a str>, Option<&'a str>) {
+    (
+        endpoint_accessible_label(edge.from, ir, accessible_node_labels),
+        endpoint_accessible_label(edge.to, ir, accessible_node_labels),
+    )
+}
+
+fn endpoint_accessible_label<'a>(
+    endpoint: fm_core::IrEndpoint,
+    ir: &'a MermaidDiagramIr,
+    accessible_node_labels: Option<&'a [&'a str]>,
+) -> Option<&'a str> {
+    let fm_core::IrEndpoint::Node(node_id) = endpoint else {
+        return None;
+    };
+    accessible_node_labels
+        .and_then(|labels| labels.get(node_id.0).copied())
+        .or_else(|| {
+            ir.nodes
+                .get(node_id.0)
+                .map(|node| crate::a11y::accessible_node_label(node, ir))
+        })
 }
 
 #[cfg(test)]

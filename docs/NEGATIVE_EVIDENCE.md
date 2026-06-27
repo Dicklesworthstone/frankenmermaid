@@ -2741,3 +2741,61 @@
   removal without an allocation profile proving the temporary `Vec<&str>` is a
   top renderer cost and a same-route bench showing the branch/iterator shape is
   stable on large wide diagrams.
+
+### Accessible edge-label cache — KEPT (2026-06-27)
+- **Lever tested:** `fm-render-svg` now builds a per-render cache of accessible
+  node labels when text alternatives are enabled, then reuses those labels while
+  generating edge `<title>` text. The rendered strings remain byte-equivalent to
+  the prior per-edge node lookup path; the change removes repeated endpoint
+  lookups and label fallback resolution from the wide SVG render hot path.
+- **Mapped primitive:** alien-graveyard memoization / object-layout
+  specialization plus alien-artifact allocation and lookup fusion: compute a
+  stable derived view once at render scope, then pass borrowed labels through the
+  edge renderer instead of reconstructing the same endpoint descriptions for
+  every edge.
+- **Baseline -> After:** current-main baseline at `e1de983`, per-crate package
+  `frankenmermaid-cli`, bench `pipeline_bench`, filter `wide_stages/render`,
+  target dir `/data/projects/.rch-targets/frankenmermaid-cod-a`, via
+  `AGENT_NAME=TanSparrow RCH_WORKER=ovh-a rch exec -- cargo bench --profile
+  release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render
+  --warm-up-time 1 --measurement-time 2`. `rch` fell open locally for the
+  render-stage pair, so this is routing evidence rather than the keep gate.
+  Baseline measured `8x16` `1.0726 ms`, `12x24` `3.0072 ms`, and `16x32`
+  `5.3540 ms`; candidate measured `1.0262 ms`, `2.5380 ms`, and `5.2526 ms`.
+  Raw deltas were `-4.33%`, `-15.60%`, and `-1.89%`; Criterion reported the
+  `12x24` case as an improvement (`p = 0.00`) and the other two as no reliable
+  change.
+- **Same-worker keep gate:** full-pipeline wide was rerun baseline-vs-candidate
+  on the same `hz2` worker through `rch exec` with package
+  `frankenmermaid-cli`, bench `pipeline_bench`, filter `full_pipeline_wide`,
+  target dir `/data/projects/.rch-targets/frankenmermaid-cod-a`. Baseline at
+  `e1de983` measured `8x16` `1.3710 ms`, `12x24` `3.2061 ms`, and `16x32`
+  `6.3799 ms`; candidate measured `1.3489 ms`, `3.1883 ms`, and `6.1492 ms`.
+  Raw full-pipeline deltas were `-1.61%`, `-0.56%`, and `-3.62%`. This is a
+  small but consistent same-worker win over the standing biggest measured gap,
+  with a stronger render-stage signal on the middle wide case.
+- **Original comparator:** pinned live-CDP Mermaid `11.12.0` denominators reused
+  for identical generated wide inputs: `8x16` `315.14 ms`, `12x24`
+  `981.73 ms`, `16x32` `2879.185 ms`.
+- **frankenmermaid/Mermaid ratio:** same-worker full-pipeline candidate is
+  `0.004280x`, `0.003248x`, and `0.002136x` Mermaid.js time (`233.63x`,
+  `307.92x`, and `468.22x` faster than Mermaid.js). Render-stage candidate
+  context is `0.003256x`, `0.002585x`, and `0.001824x` Mermaid.js time
+  (`307.09x`, `386.81x`, and `548.14x` faster).
+- **Behavior proof:** `cargo fmt -p fm-render-svg --check` passed;
+  `AGENT_NAME=TanSparrow CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a
+  rch exec -- cargo check -p fm-render-svg --all-targets` passed on `ovh-a`;
+  `rch exec -- cargo clippy -p fm-render-svg --all-targets -- -D warnings`
+  passed on `hz2`; `rch exec -- cargo test --profile release -p fm-render-svg`
+  passed (`223` tests); and `rch exec -- cargo test --profile release -p
+  frankenmermaid-cli --test frankentui_conformance_test` passed (`1` test).
+  A focused release test also proves the cached-label helper matches the old
+  node-lookup edge description path.
+- **Tooling notes:** the literal `cargo bench --release` form is invalid on this
+  Cargo toolchain, so the release-profile per-crate bench used
+  `cargo bench --profile release`. Agent Mail registration and file reservation
+  failed because the mail SQLite database corruption circuit breaker is open.
+- **Verdict:** kept. Do not retry edge-title endpoint-label lookup reductions
+  unless a new profile shows another distinct edge-title subpath; the next SVG
+  render lever should move toward direct serialization or another measured
+  allocation source.
