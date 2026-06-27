@@ -2239,3 +2239,58 @@ tooling_notes = [
 [negative_measurement_attributes_smallvec_inline_storage_cod_a_confirmation_2026_06_27.decision]
 status = "confirm_reject"
 rationale = "The independent cod-a A/B reproduced the two-slot SmallVec inline storage regression across all three wide render sizes: +14.09% at 8x16, +12.43% at 12x24, and +6.65% at 16x32."
+
+[negative_measurement_generated_path_d_raw_serialization_2026_06_27]
+date = "2026-06-27"
+agent = "TanSparrow"
+lever_bead = "bd-1buv.1"
+graveyard_route = "Alien Graveyard hot-path allocation/serialization budget plus Alien Artifact generated-data specialization: bypass SVG attribute escaping for generated path d data only if same-route render and conformance prove it."
+worker_delta = "baseline and candidate used the same rch local fallback after RCH_WORKER=ovh-a reported no admissible workers; conformance queued in rch, then fell open locally on queue_timeout"
+baseline_commit = "5922ab7"
+candidate_summary = "Temporarily added AttributeValue::Raw and used it from Element::d to write generated SVG path data without an XML escape scan in the cod-b local-fallback A/B. The measured candidate regressed on that route; origin/main later advanced with independent keep commit d932529 for the same source lever."
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-b"
+render_baseline_command = "AGENT_NAME=TanSparrow RCH_WORKER=ovh-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
+render_candidate_command = "AGENT_NAME=TanSparrow RCH_WORKER=ovh-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
+mermaid_js_command = "Pinned live-CDP Mermaid 11.12.0 denominator reused from current-main ledger for identical generated wide inputs."
+rust_build_profile = "release profile [optimized]"
+behavior_proof = "The cod-b A/B source was manually restored before the final conformance attempt; while validation was queued, origin/main advanced to d932529, which independently kept the same source lever. frankenmermaid-cli frankentui_conformance_test then passed through rch exec on current main."
+tooling_notes = [
+  "The literal cargo bench --release form remains invalid on this Cargo toolchain; --profile release was used for the requested release-profile per-crate bench.",
+  "Conformance initially queued in rch JSON mode; after queue_timeout, rch fell open locally and the conformance test passed.",
+]
+
+[negative_measurement_generated_path_d_raw_serialization_2026_06_27.metrics]
+"wide_stages_render_8x16_baseline_mean_ms" = 1.2113
+"wide_stages_render_8x16_candidate_mean_ms" = 1.3033
+"wide_stages_render_8x16_candidate_delta_pct" = 7.5951
+"wide_stages_render_8x16_criterion_p_value" = 0.01
+"wide_stages_render_12x24_baseline_mean_ms" = 3.0919
+"wide_stages_render_12x24_candidate_mean_ms" = 3.4376
+"wide_stages_render_12x24_candidate_delta_pct" = 11.1808
+"wide_stages_render_12x24_criterion_p_value" = 0.07
+"wide_stages_render_16x32_baseline_mean_ms" = 5.0470
+"wide_stages_render_16x32_candidate_mean_ms" = 6.3362
+"wide_stages_render_16x32_candidate_delta_pct" = 25.5439
+"wide_stages_render_16x32_criterion_p_value" = 0.00
+"wide_stages_render_8x16_mermaid_js_mean_ms" = 315.1399999976158
+"wide_stages_render_12x24_mermaid_js_mean_ms" = 981.7300000190735
+"wide_stages_render_16x32_mermaid_js_mean_ms" = 2879.185000014305
+"baseline_render_stage_8x16_frankenmermaid_over_mermaid_js" = 0.003844
+"baseline_render_stage_12x24_frankenmermaid_over_mermaid_js" = 0.003149
+"baseline_render_stage_16x32_frankenmermaid_over_mermaid_js" = 0.001753
+"baseline_render_stage_8x16_mermaid_js_over_frankenmermaid" = 260.17
+"baseline_render_stage_12x24_mermaid_js_over_frankenmermaid" = 317.52
+"baseline_render_stage_16x32_mermaid_js_over_frankenmermaid" = 570.47
+"candidate_render_stage_8x16_frankenmermaid_over_mermaid_js" = 0.004136
+"candidate_render_stage_12x24_frankenmermaid_over_mermaid_js" = 0.003502
+"candidate_render_stage_16x32_frankenmermaid_over_mermaid_js" = 0.002201
+"candidate_render_stage_8x16_mermaid_js_over_frankenmermaid" = 241.80
+"candidate_render_stage_12x24_mermaid_js_over_frankenmermaid" = 285.59
+"candidate_render_stage_16x32_mermaid_js_over_frankenmermaid" = 454.40
+
+[negative_measurement_generated_path_d_raw_serialization_2026_06_27.validation]
+"cargo_test_frankenmermaid_cli_frankentui_conformance" = "passed on current main d932529 via RCH_OUTPUT_FORMAT=json rch exec --json queue_timeout local fallback: 1 test"
+
+[negative_measurement_generated_path_d_raw_serialization_2026_06_27.decision]
+status = "reject_on_cod_b_local_fallback"
+rationale = "Generated path d raw attribute serialization regressed the cod-b local-fallback same-route wide_stages/render A/B by 7.60%, 11.18%, and 25.54%. This is negative routing evidence against treating local fallback as decisive; it does not revert the independent d932529 keep on main."
