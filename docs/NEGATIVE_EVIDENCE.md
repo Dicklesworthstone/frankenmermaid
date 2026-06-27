@@ -484,6 +484,30 @@
 
 ## Kept Wins Also Recorded Here By Request
 
+### Gate redundant inline node-shape base `stroke` on `embed_theme_css` (−0.80% SVG bytes + alloc) — KEPT (2026-06-26)
+- **Change:** the node analog of the edge stroke gate, after last cycle scoped the safe path. Every
+  node shape emitted `stroke=<theme node stroke>` (`#e2e8f0` = `--fm-node-stroke`), but the
+  unconditional CSS `.fm-node rect, path, circle, ellipse, polygon { stroke: var(--fm-node-accent) }`
+  (and `.fm-node line`) covers **every** node element type and overrides the presentation attribute,
+  so the inline copy is redundant. Added `Element::stroke_unless_embedded_css(color, embed_css)` and
+  routed all **28** `.stroke(&colors.node_stroke)` sites (in `render_node` + `render_class_compartments`,
+  both with `config`) through it.
+- **Safety (the deferred-refactor concern from last cycle, resolved):** verified every node-stroke
+  element is a CSS-covered type — `all_node_shapes` strokes `<rect>`/`<path>`/`<circle>`/`<line>`, all
+  inside `.fm-node` and covered (line by its own `.fm-node line` rule). Custom `classDef`/`style`
+  colors ride a separate `style="fill:…; stroke:…"` that wins (verified: `style A` → base stroke gone,
+  `style=` carries `#00ff00`). `stroke-width` is **kept** (per-shape values — rect 1.6 vs line 1.5 —
+  would need per-shape matching). Confirmed the default render now carries **zero** inline node strokes
+  while the attribute-driven (`embed_theme_css = false`, PNG raster) export keeps them.
+- **Measured (deterministic byte win + alloc):** node-heavy 40-node flowchart `46,611 → 45,931 B`
+  (`−680`, ~1.4%); aggregate over the 31 regenerated `golden_svg_test` snapshots `656,874 → 651,638
+  = −0.80%`. Also eliminates one `node_stroke` `String` clone per node element in the default path.
+- **Conformance:** `cargo test -p fm-render-svg` = **220 pass** (the gate test now covers edge + node
+  strokes). `golden_svg_test` regenerated via `BLESS=1` = **2 pass**; verified the 31 diffs are **only**
+  `stroke="#…"` removal (stripping ` stroke="#hex"` from old and new yields identical text).
+- **frankenmermaid/Mermaid ratio:** Mermaid is CSS-driven (no inline node stroke); this matches it.
+  Standing `240.5x`/`319.1x`/`505.7x` (latest) over Mermaid `11.12.0`.
+
 ### Gate redundant inline edge base `stroke` on `embed_theme_css` (−0.92% SVG bytes + alloc) — KEPT (2026-06-26)
 - **Change:** extends the `fill="none"` gate below to the edge's base `stroke=<theme edge color>`.
   `.fm-edge { stroke: var(--fm-edge-color) }` is unconditional CSS and overrides the presentation

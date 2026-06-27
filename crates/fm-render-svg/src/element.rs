@@ -480,6 +480,17 @@ impl Element {
         self
     }
 
+    /// Add a `stroke` attribute only when the theme CSS is **not** embedded. With CSS embedded
+    /// (the default), `.fm-node <shape> { stroke: var(--fm-node-accent) }` (and `.fm-node line`)
+    /// already styles every node element and overrides this presentation attribute, so the inline
+    /// copy is redundant. Attribute-driven exports (`embed_theme_css = false`, e.g. the PNG raster
+    /// path) keep it. Per-node `classDef`/`style` colors ride a separate `style="…"` that wins
+    /// regardless, so dropping the base stroke never affects custom colors.
+    #[must_use]
+    pub fn stroke_unless_embedded_css(self, color: &str, embed_css: bool) -> Self {
+        if embed_css { self } else { self.stroke(color) }
+    }
+
     /// Set text content for text elements.
     #[must_use]
     pub fn content(mut self, text: impl Into<String>) -> Self {

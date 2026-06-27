@@ -3861,7 +3861,7 @@ fn render_node(
             .width(w)
             .height(h)
             .fill(&colors.node_fill)
-            .stroke(&colors.node_stroke)
+            .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
             .stroke_width(1.6)
             .rx(config.rounded_corners * 0.55),
 
@@ -3871,7 +3871,7 @@ fn render_node(
             .width(w)
             .height(h)
             .fill(&colors.node_fill)
-            .stroke(&colors.node_stroke)
+            .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
             .stroke_width(1.6)
             .rx(config.rounded_corners),
 
@@ -3881,7 +3881,7 @@ fn render_node(
             .width(w)
             .height(h)
             .fill(&colors.node_fill)
-            .stroke(&colors.node_stroke)
+            .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
             .stroke_width(1.6)
             .rx(w.min(h) / 2.0),
 
@@ -3896,7 +3896,7 @@ fn render_node(
             Element::path()
                 .d(&path)
                 .fill(&colors.node_fill)
-                .stroke(&colors.node_stroke)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width(1.6)
         }
 
@@ -3914,7 +3914,7 @@ fn render_node(
             Element::path()
                 .d(&path)
                 .fill(&colors.node_fill)
-                .stroke(&colors.node_stroke)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width(1.6)
         }
 
@@ -3929,7 +3929,7 @@ fn render_node(
                 } else {
                     colors.node_fill.as_str()
                 })
-                .stroke(&colors.node_stroke)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width(1.6);
 
             if shape == NodeShape::DoubleCircle {
@@ -3945,7 +3945,7 @@ fn render_node(
             .width(w)
             .height((h * 0.5).max(8.0))
             .fill(&colors.node_stroke)
-            .stroke(&colors.node_stroke)
+            .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
             .stroke_width(1.0)
             .rx((h * 0.25).max(3.0)),
 
@@ -3963,7 +3963,7 @@ fn render_node(
             Element::path()
                 .d(&path)
                 .fill(&colors.node_fill)
-                .stroke(&colors.node_stroke)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width(1.6)
         }
 
@@ -3979,7 +3979,7 @@ fn render_node(
             Element::path()
                 .d(&path)
                 .fill(&colors.node_fill)
-                .stroke(&colors.node_stroke)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width(1.6)
         }
 
@@ -3997,7 +3997,7 @@ fn render_node(
                     } else {
                         colors.node_fill.as_str()
                     })
-                    .stroke(&colors.node_stroke)
+                    .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                     .stroke_width(1.6)
                     .rx(config.rounded_corners * 0.45),
             );
@@ -4008,7 +4008,7 @@ fn render_node(
                     .y1(y)
                     .x2(x + inset)
                     .y2(y + h)
-                    .stroke(&colors.node_stroke)
+                    .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                     .stroke_width(1.0),
             );
             // Right vertical line
@@ -4018,7 +4018,7 @@ fn render_node(
                     .y1(y)
                     .x2(x + w - inset)
                     .y2(y + h)
-                    .stroke(&colors.node_stroke)
+                    .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                     .stroke_width(1.0),
             );
             g = maybe_add_class(g, "fm-node-shape", emit_classdef_classes);
@@ -4052,7 +4052,7 @@ fn render_node(
             Element::path()
                 .d(&path)
                 .fill(&colors.node_fill)
-                .stroke(&colors.node_stroke)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width(1.6)
         }
 
@@ -4072,7 +4072,7 @@ fn render_node(
             Element::path()
                 .d(&path)
                 .fill(&colors.node_fill)
-                .stroke(&colors.node_stroke)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width(1.0)
         }
 
@@ -4089,7 +4089,7 @@ fn render_node(
             Element::path()
                 .d(&path)
                 .fill(&colors.node_fill)
-                .stroke(&colors.node_stroke)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width(1.6)
         }
 
@@ -4105,7 +4105,7 @@ fn render_node(
             Element::path()
                 .d(&path)
                 .fill(&colors.node_fill)
-                .stroke(&colors.node_stroke)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width(1.6)
         }
 
@@ -4121,7 +4121,7 @@ fn render_node(
             Element::path()
                 .d(&path)
                 .fill(&colors.node_fill)
-                .stroke(&colors.node_stroke)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width(1.6)
         }
 
@@ -4135,7 +4135,7 @@ fn render_node(
             Element::path()
                 .d(&path)
                 .fill(&colors.node_fill)
-                .stroke(&colors.node_stroke)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width(1.6)
         }
 
@@ -4157,7 +4157,7 @@ fn render_node(
             Element::path()
                 .d(&path.close().build())
                 .fill(&colors.node_fill)
-                .stroke(&colors.node_stroke)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width(1.6)
         }
 
@@ -4181,7 +4181,7 @@ fn render_node(
             Element::path()
                 .d(&path.close().build())
                 .fill(&colors.node_fill)
-                .stroke(&colors.node_stroke)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width(1.6)
         }
 
@@ -4202,7 +4202,7 @@ fn render_node(
             Element::path()
                 .d(&path)
                 .fill(&colors.node_fill)
-                .stroke(&colors.node_stroke)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width(1.6)
         }
 
@@ -4220,7 +4220,7 @@ fn render_node(
             Element::path()
                 .d(&path)
                 .fill(&colors.node_fill)
-                .stroke(&colors.node_stroke)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width(1.6)
         }
 
@@ -4238,7 +4238,7 @@ fn render_node(
                     } else {
                         colors.node_fill.as_str()
                     })
-                    .stroke(&colors.node_stroke)
+                    .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                     .stroke_width(1.6),
             );
             // Diagonal lines
@@ -4249,7 +4249,7 @@ fn render_node(
                     .y1(cy - offset)
                     .x2(cx + offset)
                     .y2(cy + offset)
-                    .stroke(&colors.node_stroke)
+                    .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                     .stroke_width(1.6),
             );
             g = g.child(
@@ -4258,7 +4258,7 @@ fn render_node(
                     .y1(cy - offset)
                     .x2(cx - offset)
                     .y2(cy + offset)
-                    .stroke(&colors.node_stroke)
+                    .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                     .stroke_width(1.6),
             );
             g = maybe_add_class(g, "fm-node-shape", emit_classdef_classes);
@@ -4495,7 +4495,7 @@ fn render_node(
                     .y1(y + header_height)
                     .x2(x + w - 2.0)
                     .y2(y + header_height)
-                    .stroke(&colors.node_stroke)
+                    .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                     .stroke_width(0.8),
             );
 
@@ -4761,7 +4761,7 @@ fn render_class_compartments(
         .attr_num("y1", cursor_y)
         .attr_num("x2", x + w)
         .attr_num("y2", cursor_y)
-        .stroke(&colors.node_stroke)
+        .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
         .stroke_width(1.0);
     group = group.child(sep1);
     cursor_y += line_h * 0.3;
@@ -4798,7 +4798,7 @@ fn render_class_compartments(
             .attr_num("y1", cursor_y)
             .attr_num("x2", x + w)
             .attr_num("y2", cursor_y)
-            .stroke(&colors.node_stroke)
+            .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
             .stroke_width(1.0);
         group = group.child(sep2);
         cursor_y += line_h * 0.3;
@@ -6718,20 +6718,23 @@ mod tests {
                 ..Default::default()
             },
         );
-        // The edge contributes one inline `fill="none"` and one inline `stroke="..."`; both vanish
-        // from the default (CSS-embedded) render and remain in the attribute-driven export. Node
-        // and marker strokes are unaffected, so the per-edge difference must be strictly positive.
+        // The edge contributes one inline `fill="none"`; it vanishes from the default
+        // (CSS-embedded) render and remains in the attribute-driven export.
         let fill_with = with_css.matches("fill=\"none\"").count();
         let fill_without = without_css.matches("fill=\"none\"").count();
         assert!(
             fill_without > fill_with,
             "attribute-driven export must keep inline edge fill (with={fill_with}, without={fill_without})"
         );
+        // Both the edge base stroke AND every node-shape base stroke (`.fm-node <shape> { stroke:
+        // var(--fm-node-accent) }` covers them) are gated, so the attribute-driven export carries
+        // strictly more inline `stroke=` attributes than the CSS-embedded render. Marker strokes in
+        // the `<defs>` are unaffected and cancel out.
         let stroke_with = with_css.matches(" stroke=\"").count();
         let stroke_without = without_css.matches(" stroke=\"").count();
         assert!(
             stroke_without > stroke_with,
-            "attribute-driven export must keep inline edge stroke (with={stroke_with}, without={stroke_without})"
+            "attribute-driven export must keep inline edge + node strokes (with={stroke_with}, without={stroke_without})"
         );
     }
 
