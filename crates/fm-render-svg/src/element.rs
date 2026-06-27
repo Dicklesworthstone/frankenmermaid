@@ -475,7 +475,11 @@ impl Element {
     /// value as an `Integer` (no per-call `String` allocation) and, with a `&'static` name,
     /// allocates nothing — while serializing byte-identically to the decimal string.
     #[must_use]
-    pub fn attr_int<K: Into<std::borrow::Cow<'static, str>>>(mut self, name: K, value: i32) -> Self {
+    pub fn attr_int<K: Into<std::borrow::Cow<'static, str>>>(
+        mut self,
+        name: K,
+        value: i32,
+    ) -> Self {
         self.attrs = self.attrs.int(name, value);
         self
     }
@@ -497,7 +501,11 @@ impl Element {
     /// Attribute-driven exports (`embed_theme_css = false`, PNG raster) keep it.
     #[must_use]
     pub fn stroke_width_unless_embedded_css(self, width: f32, embed_css: bool) -> Self {
-        if embed_css { self } else { self.stroke_width(width) }
+        if embed_css {
+            self
+        } else {
+            self.stroke_width(width)
+        }
     }
 
     /// Add an inline `font-family` only when the theme CSS is **not** embedded. With CSS embedded
@@ -505,7 +513,11 @@ impl Element {
     /// copy is redundant; attribute-driven exports keep it.
     #[must_use]
     pub fn font_family_unless_embedded_css(self, family: &str, embed_css: bool) -> Self {
-        if embed_css { self } else { self.attr("font-family", family) }
+        if embed_css {
+            self
+        } else {
+            self.attr("font-family", family)
+        }
     }
 
     /// Set text content for text elements.

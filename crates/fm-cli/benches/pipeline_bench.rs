@@ -273,8 +273,11 @@ fn bench_wide_stages(c: &mut Criterion) {
     let mut group = c.benchmark_group("wide_stages");
     let config = fm_render_svg::SvgRenderConfig::default();
 
-    for (label, layers, width) in [("8x16", 8_usize, 16_usize), ("12x24", 12, 24), ("16x32", 16, 32)]
-    {
+    for (label, layers, width) in [
+        ("8x16", 8_usize, 16_usize),
+        ("12x24", 12, 24),
+        ("16x32", 16, 32),
+    ] {
         let input = gen_wide(layers, width);
         let parsed = fm_parser::parse(&input);
         let layout = fm_layout::layout_diagram(&parsed.ir);
@@ -307,8 +310,11 @@ fn bench_render_spans_on(c: &mut Criterion) {
     let mut config = fm_render_svg::SvgRenderConfig::default();
     config.include_source_spans = true;
 
-    for (label, layers, width) in [("8x16", 8_usize, 16_usize), ("12x24", 12, 24), ("16x32", 16, 32)]
-    {
+    for (label, layers, width) in [
+        ("8x16", 8_usize, 16_usize),
+        ("12x24", 12, 24),
+        ("16x32", 16, 32),
+    ] {
         let input = gen_wide(layers, width);
         let parsed = fm_parser::parse(&input);
         let layout = fm_layout::layout_diagram(&parsed.ir);

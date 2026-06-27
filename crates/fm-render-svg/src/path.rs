@@ -318,7 +318,11 @@ pub(crate) fn build_smooth_path(points: &[(f32, f32)]) -> String {
         let p_prev = if i == 0 { points[0] } else { points[i - 1] };
         let p_cur = points[i];
         let p_next = points[i + 1];
-        let p_next2 = if i + 2 < n { points[i + 2] } else { points[n - 1] };
+        let p_next2 = if i + 2 < n {
+            points[i + 2]
+        } else {
+            points[n - 1]
+        };
 
         let cp1x = p_cur.0 + (p_next.0 - p_prev.0) * t;
         let cp1y = p_cur.1 + (p_next.1 - p_prev.1) * t;
@@ -326,7 +330,13 @@ pub(crate) fn build_smooth_path(points: &[(f32, f32)]) -> String {
         let cp2y = p_next.1 - (p_next2.1 - p_cur.1) * t;
 
         d.push(' ');
-        write_cubic(&mut d, 'C', (cp1x, cp1y), (cp2x, cp2y), (p_next.0, p_next.1));
+        write_cubic(
+            &mut d,
+            'C',
+            (cp1x, cp1y),
+            (cp2x, cp2y),
+            (p_next.0, p_next.1),
+        );
     }
     d
 }

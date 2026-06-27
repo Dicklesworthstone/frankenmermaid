@@ -125,7 +125,11 @@ impl TextBuilder {
     /// since they have no inherited source.
     #[must_use]
     pub fn font_family_unless_embedded_css(self, family: &str, embed_css: bool) -> Self {
-        if embed_css { self } else { self.font_family(family) }
+        if embed_css {
+            self
+        } else {
+            self.font_family(family)
+        }
     }
 
     /// Set the font size.

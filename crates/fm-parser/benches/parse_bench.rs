@@ -37,7 +37,11 @@ fn gen_wide(layers: usize, width: usize) -> String {
     for layer in 0..layers.saturating_sub(1) {
         for w in 0..width {
             lines.push(format!("  N{layer}_{w}-->N{}_{w}", layer + 1));
-            lines.push(format!("  N{layer}_{w}-->N{}_{}", layer + 1, (w + 1) % width));
+            lines.push(format!(
+                "  N{layer}_{w}-->N{}_{}",
+                layer + 1,
+                (w + 1) % width
+            ));
         }
     }
     lines.join("\n")
@@ -56,8 +60,11 @@ fn bench_parse(c: &mut Criterion) {
         });
     }
 
-    for (label, layers, width) in [("8x16", 8_usize, 16_usize), ("12x24", 12, 24), ("16x32", 16, 32)]
-    {
+    for (label, layers, width) in [
+        ("8x16", 8_usize, 16_usize),
+        ("12x24", 12, 24),
+        ("16x32", 16, 32),
+    ] {
         let input = gen_wide(layers, width);
         group.bench_with_input(BenchmarkId::new("wide", label), &input, |b, input| {
             b.iter(|| fm_parser::parse(input));

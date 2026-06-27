@@ -465,7 +465,7 @@ impl Theme {
 
     /// Generate the complete CSS style block for embedding in SVG.
     #[must_use]
-    pub fn to_svg_style(&self, shadows: bool, has_edge_labels: bool) -> String {
+    pub fn to_svg_style(&self, shadows: bool) -> String {
         let mut css = String::with_capacity(4096);
         css.push_str(&self.colors.to_css_vars());
         css.push_str(&self.font.to_css());
@@ -634,6 +634,27 @@ svg {{
   opacity: 0.8;
   stroke-dasharray: 4 4;
 }}
+.fm-edge-labeled > rect {{
+  fill: var(--fm-edge-label-bg);
+  stroke: var(--fm-edge-label-border);
+  stroke-width: 0.75;
+  rx: 6px;
+  ry: 6px;
+}}
+/* Add a backdrop filter for modern glassmorphism effect on the rect */
+@supports (backdrop-filter: blur(4px)) {{
+  .fm-edge-labeled > rect {{
+    fill: color-mix(in srgb, var(--fm-edge-label-bg) 85%, transparent);
+    backdrop-filter: blur(8px);
+  }}
+}}
+.edge-label {{
+  fill: var(--fm-edge-label-text);
+  font-weight: 600;
+  font-size: 0.88em;
+  letter-spacing: -0.01em;
+  text-rendering: optimizeLegibility;
+}}
 marker#arrow-end path,
 marker#arrow-filled path,
 marker#arrow-circle path,
@@ -704,37 +725,6 @@ marker#arrow-cross path {{
 }}
 "#
         );
-
-        // Edge-label rules apply only to `.fm-edge-labeled`/`.edge-label` elements, emitted only
-        // when an edge actually carries a label. Appending them conditionally keeps ~0.4 KB of
-        // otherwise-dead CSS out of the (common) unlabeled-edge SVG. Order is irrelevant (distinct
-        // selectors). Detector verified: `.edge-label` appears iff an edge has a label.
-        if has_edge_labels {
-            css.push_str(
-                r"
-.fm-edge-labeled > rect {
-  fill: var(--fm-edge-label-bg);
-  stroke: var(--fm-edge-label-border);
-  stroke-width: 0.75;
-  rx: 6px;
-  ry: 6px;
-}
-@supports (backdrop-filter: blur(4px)) {
-  .fm-edge-labeled > rect {
-    fill: color-mix(in srgb, var(--fm-edge-label-bg) 85%, transparent);
-    backdrop-filter: blur(8px);
-  }
-}
-.edge-label {
-  fill: var(--fm-edge-label-text);
-  font-weight: 600;
-  font-size: 0.88em;
-  letter-spacing: -0.01em;
-  text-rendering: optimizeLegibility;
-}
-",
-            );
-        }
 
         css
     }
@@ -922,7 +912,7 @@ mod tests {
     #[test]
     fn theme_generates_complete_style() {
         let theme = Theme::from_preset(ThemePreset::Default);
-        let style = theme.to_svg_style(true, true);
+        let style = theme.to_svg_style(true);
         assert!(style.contains(":root {"));
         assert!(style.contains(".fm-node"));
         assert!(style.contains(".fm-edge"));

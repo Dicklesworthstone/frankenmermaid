@@ -50,6 +50,96 @@
 
 ## Entries
 
+### Document XML streaming + conditional edge-label CSS - KEPT after same-worker remote proof (2026-06-27)
+- **Lever:** `fm-render-svg::SvgDocument::write_to_string` streams XML attribute/text
+  escaping into the output writer, `Theme::to_svg_style` emits edge-label CSS only when
+  the diagram has labeled edges, `truncate_label` returns borrowed labels when no
+  truncation is needed, and the measured bench worktree lands the small follow-up cleanup
+  (`escape_xml_text` test-only, no redundant `mut`, and the `Cow<str>` text call site).
+- **Hypothesis:** the wide-stage split shows SVG render dominates the Mermaid-facing gap.
+  Removing per-attribute escape `String` temporaries, unused edge-label CSS bytes, and
+  unchanged-label clones should reduce the per-element render cost without changing layout
+  or SVG semantics.
+- **Baseline -> After:** same-worker `ovh-a`, target dir
+  `/data/projects/.rch-targets/frankenmermaid-cod-a`, package `frankenmermaid-cli`,
+  bench `pipeline_bench`, filter `wide_stages/render`. Parent baseline worktree
+  `/data/projects/.worktrees/frankenmermaid-tansparrow-701b-baseline-0cd` at `0cd6248`
+  measured `1.1764 ms`, `3.0633 ms`, and `6.9645 ms` for `8x16`, `12x24`, and
+  `16x32`. Candidate measured `760.81 us`, `1.7421 ms`, and `3.1475 ms`. That is
+  `35.33%`, `43.13%`, and `54.81%` faster.
+- **Original comparator:** latest pinned live-CDP Mermaid `11.12.0` denominator reused from
+  the current ledger for identical generated wide inputs: `315.14 ms`, `981.73 ms`, and
+  `2879.185 ms`.
+- **frankenmermaid/Mermaid ratio:** candidate render-stage means versus Mermaid.js
+  denominators give ratios `0.002414x`, `0.001775x`, and `0.001093x`; Mermaid.js is
+  `414.22x`, `563.53x`, and `914.75x` slower on the same wide input sizes. These are
+  render-stage ratios against full-pipeline Mermaid denominators, so they are conservative
+  dominance context rather than a replacement for the standing full-pipeline ratio.
+- **Verdict:** kept. This supersedes the adjacent local-fallback rejection below, which used
+  a different execution mode and lost its stop-rule argument once the same-worker remote
+  parent/candidate pair was measured.
+- **Validation:** focused `fm-render-svg` truncate-label tests passed; `cargo test --profile
+  release -p frankenmermaid-cli --test frankentui_conformance_test` passed on `ovh-a`;
+  `cargo check --profile release -p fm-render-svg --all-targets` and
+  `cargo clippy --profile release -p fm-render-svg --all-targets -- -D warnings` passed on
+  `hz2`.
+- **Tooling note:** `cargo fmt --check` remains blocked by already-committed rustfmt drift in
+  bench files and unrelated renderer helper files; this commit does not broaden into a
+  repo-wide format sweep. Agent Mail file reservations failed because the mail SQLite
+  database reported corruption.
+
+### Document XML streaming + conditional edge-label CSS - REJECTED (2026-06-27)
+- **Lever:** `fm-render-svg::SvgDocument::write_to_string` was changed to stream
+  root width/height, title, description, and style escaping directly into the
+  output buffer; `Theme::to_svg_style` also accepted a `has_edge_labels` flag so
+  unlabeled wide graphs could skip the `.fm-edge-labeled` / `.edge-label` CSS.
+  The same candidate also made label truncation return `Cow<'_, str>`.
+- **Hypothesis:** the widest Mermaid-facing gap is still SVG render output.
+  Removing document-level escaping temporaries, dead edge-label CSS, and a few
+  unchanged-label allocations should reduce the dominant wide render stage
+  without changing layout or SVG semantics.
+- **Render-stage baseline -> after:** clean baseline worktree
+  `/data/projects/.worktrees/frankenmermaid-cod-b-doc-escape-baseline-0cd6248`
+  at `0cd6248`, warm target dir
+  `/data/projects/.rch-targets/frankenmermaid-cod-b`, package
+  `frankenmermaid-cli`, bench `pipeline_bench`, filter `wide_stages/render`.
+  Same-local `rch exec` fallback baseline means were `1.1142 ms`, `2.8794 ms`,
+  and `7.5438 ms` for `8x16`, `12x24`, and `16x32`; candidate means were
+  `1.1570 ms`, `2.9054 ms`, and `4.8644 ms`. The largest render stage improved
+  `35.51%`, but the smaller cases were `3.84%` and `0.90%` slower/no-change.
+- **Full-pipeline gate:** the Mermaid-facing `full_pipeline_wide` same-local
+  fallback gate measured baseline `1.6898 ms`, `4.1700 ms`, and `7.6135 ms`
+  versus candidate `1.6772 ms`, `4.3165 ms`, and `8.0876 ms`. That is `0.75%`
+  faster, `3.51%` slower, and `6.23%` slower. The largest end-to-end case is the
+  stop rule, so the lever was reverted even though isolated `16x32` rendering
+  looked better.
+- **Post-revert bench:** after the forward revert, `rch exec` had no admissible
+  workers and fell back local with the requested target dir. The same
+  `full_pipeline_wide` filter measured `1.2980 ms`, `3.8305 ms`, and `7.0666 ms`;
+  versus Mermaid.js those are `0.004119x`, `0.003902x`, and `0.002454x`
+  (Mermaid.js `242.79x`, `256.29x`, and `407.44x` slower). This is confirmation
+  that the final committed code is back on the retained path, not evidence for
+  keeping the rejected candidate.
+- **Original comparator:** latest pinned live-CDP Mermaid `11.12.0` denominator
+  reused from the current main ledger for identical generated wide inputs:
+  `315.14 ms`, `981.73 ms`, and `2879.185 ms`.
+- **frankenmermaid/Mermaid ratio:** retained full-pipeline baseline ratios were
+  `0.005362x`, `0.004247x`, and `0.002644x` (Mermaid.js `186.49x`, `235.43x`,
+  and `378.17x` slower). The rejected candidate ratios were `0.005322x`,
+  `0.004397x`, and `0.002809x` (Mermaid.js only `187.89x`, `227.44x`, and
+  `356.00x` slower), worsening the two larger dominance ratios.
+- **Verdict:** regression on the end-to-end gate; production code was restored in
+  a forward revert commit and only this negative evidence remains.
+- **Revert:** manual `apply_patch` restored document escaping allocation,
+  unconditional edge-label CSS, and `String` label truncation on top of main.
+- **Do-not-retry note:** document-level streaming escape can win a substage while
+  still losing the full Mermaid-facing pipeline. Do not retry this micro-family
+  without an adjacent full-pipeline win on the same worker/fallback mode.
+- **Tooling note:** Agent Mail registration and file reservations were unavailable
+  because the project mail SQLite corruption circuit breaker is open. Literal
+  `cargo bench --release` is invalid on this Cargo toolchain, so per-crate bench
+  commands used `--profile release`.
+
 ### Theme CSS sub-writer append path - REJECTED (2026-06-27)
 - **Lever:** `fm-render-svg::Theme::to_svg_style` was changed to call private
   `ThemeColors::write_css_vars` and `FontConfig::write_css` helpers that wrote
