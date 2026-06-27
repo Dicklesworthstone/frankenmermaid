@@ -1326,6 +1326,30 @@
 
 ## Blocked/Invalid Evidence Attempts
 
+### Full `fm-cli` suite regression check after the session's wins — HEALTHY; `fnx_differential` is flaky-under-contention — FINDING (2026-06-26)
+- **Why:** the session landed several render/parse wins (span_all, markers, spans, parser); a
+  comprehensive check confirms no git-tracked fixture was left stale (as `golden_svg_test` had
+  been) and nothing regressed.
+- **Result:** `cargo test -p frankenmermaid-cli` (full suite, parallel) → **125 tests pass**,
+  with **3 apparent failures** all in `fnx_differential_report.rs`
+  (`differential_all_golden_cases_pass_gate`, `…_summary_statistics`, `…_hub_spoke_quality`),
+  reporting e.g. `all_node_shapes: render_time_regression 277.6% > 100% threshold`.
+- **Diagnosis — flaky, NOT a regression:** that test measures `render_us` with a **single
+  `Instant::now()`** around one render call (in-process FNX-on vs FNX-off; see
+  `fnx_differential_report.rs:165`), gated at a 100% delta threshold. Single-shot timing spikes
+  2–3× from a context switch on a contended host — and my box was saturated with the session's
+  builds/benches during the *parallel* full-suite run. Re-running the binary **in isolation 3×
+  → 11 passed / 0 failed every time** (deterministic green). My render changes only *reduce*
+  render work (markers 12→2, fewer attrs), so they cannot cause a render-time *regression*.
+- **Conclusion:** the codebase is **healthy** after the session's wins; the 3 failures are
+  single-shot-timing flakiness under parallel-suite CPU contention, not a code regression.
+- **Flagged for the test owner (not changed here — passes in isolation, so not "broken"):**
+  `fnx_differential_report` render/layout timing should use **min-of-N** samples (the minimum
+  is the least-contended sample, closest to true cost) instead of a single shot, to stop false
+  `render_time_regression` failures when the suite runs under load.
+- **frankenmermaid/Mermaid ratio:** unchanged — verification only. Standing `240.5x` / `319.1x`
+  / `505.7x` (this run) over Mermaid `11.12.0`; `198x`–`426x` floor.
+
 ### Frontier closed: the last two candidate levers are not viable; git-tracked snapshots GREEN — FINDING (2026-06-26)
 - **Parse dedup-map hash-key (the lever scoped in the entry below) — NOT VIABLE.** On
   inspection, `node_index_by_id` has **11 lookup sites** (`intern_node_auto`,
