@@ -484,6 +484,31 @@
 
 ## Kept Wins Also Recorded Here By Request
 
+### Gate redundant inline edge base `stroke` on `embed_theme_css` (−0.92% SVG bytes + alloc) — KEPT (2026-06-26)
+- **Change:** extends the `fill="none"` gate below to the edge's base `stroke=<theme edge color>`.
+  `.fm-edge { stroke: var(--fm-edge-color) }` is unconditional CSS and overrides the presentation
+  attribute, and `base_color` in `render_edge` is **always** the theme edge color (verified: the
+  arrow-type match binds it to `&colors.edge` for every variant). Per-edge `linkStyle` colors are
+  emitted as a **separate `style="stroke:#…"`** that wins over both the presentation attribute and
+  the CSS — confirmed by rendering `linkStyle 0 stroke:#ff0000` (output keeps `style="stroke:#ff0000"`,
+  drops the base `stroke`). So gating the base stroke on `!embed_theme_css` is safe in all four
+  default/custom × CSS-on/off cases.
+- **Why the gate (not deletion):** identical reasoning to the fill gate — `embed_theme_css = false`
+  is the PNG raster path (resvg can't fully apply CSS), which keeps the inline fallback.
+- **Measured (deterministic byte win + alloc):** default 40-edge flowchart `47,274 → 46,611 B`
+  (`−663`, ~1.4% of that render); aggregate over the 28 regenerated `golden_svg_test` snapshots
+  `618,938 → 613,226 = −0.92%`. Also eliminates one `String` clone of the edge color per edge in
+  the default path (`.stroke` no longer runs). `stroke-width` is **kept** (the `2px !important`
+  rule that would cover it is inside `@media (prefers-contrast: more)`, conditional — the
+  unconditional CSS sets no width, so the inline value is the real one).
+- **Conformance:** `cargo test -p fm-render-svg` = **220 pass** (the gate test now asserts both the
+  inline edge fill *and* stroke vanish with CSS and remain without it). `golden_svg_test`
+  regenerated via `BLESS=1` = **2 pass**; verified the 28 diffs are **only** edge `stroke="#…"`
+  removal (stripping ` stroke="#hex"` from old and new yields identical text). `linkStyle` custom
+  colors confirmed intact.
+- **frankenmermaid/Mermaid ratio:** Mermaid is CSS-driven (no inline edge stroke); this matches it.
+  Standing `240.5x`/`319.1x`/`505.7x` (latest) over Mermaid `11.12.0`.
+
 ### Gate redundant inline edge `fill="none"` on `embed_theme_css` (−0.65% to −2% SVG bytes) — KEPT (2026-06-26)
 - **Change:** `render_edge` always emitted `fill="none"` on every edge path. The embedded theme
   CSS already sets `.fm-edge { fill: none }`, and an SVG **presentation attribute loses to the

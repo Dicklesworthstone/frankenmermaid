@@ -5976,16 +5976,19 @@ fn render_edge(
         }
     };
 
-    // `fill="none"` is redundant when the theme CSS is embedded — `.fm-edge { fill: none }`
-    // already applies (a presentation attribute loses to the stylesheet). Emit the inline
-    // fallback only when CSS is *not* embedded, so the default/benched output sheds it while
-    // `embed_theme_css = false` exports stay self-contained.
+    // `fill="none"` and the base `stroke=<theme edge color>` are redundant when the theme CSS is
+    // embedded: `.fm-edge { fill: none; stroke: var(--fm-edge-color) }` applies (a presentation
+    // attribute loses to the stylesheet), and `base_color` is *always* the theme edge color —
+    // per-edge `linkStyle` colors are emitted as a separate `style="..."` that wins over both the
+    // presentation attribute and the CSS. So emit these inline fallbacks only when CSS is absent
+    // (e.g. the PNG raster path, which resvg cannot fully style via CSS) so those exports stay
+    // self-contained. `stroke-width` is NOT gated — the unconditional CSS sets none, so the inline
+    // is the actual width.
     let mut elem = Element::path().d(&path_str);
     if !config.embed_theme_css {
-        elem = elem.fill("none");
+        elem = elem.fill("none").stroke(base_color);
     }
     let mut elem = elem
-        .stroke(base_color)
         .stroke_width(stroke_width)
         .class("fm-edge")
         .class(style_class)
@@ -6700,11 +6703,12 @@ mod tests {
     }
 
     #[test]
-    fn edge_fill_none_is_gated_on_embedded_css() {
-        // `.fm-edge { fill: none }` makes the inline `fill="none"` on edge paths redundant when
-        // the theme CSS is embedded (a presentation attribute loses to the stylesheet), so it is
-        // dropped there. Attribute-driven exports (`embed_theme_css = false`, e.g. the PNG raster
-        // path which resvg cannot fully style via CSS) MUST keep the inline fallback.
+    fn edge_inline_fill_and_stroke_gated_on_embedded_css() {
+        // `.fm-edge { fill: none; stroke: var(--fm-edge-color) }` makes the inline `fill="none"`
+        // and base `stroke=<theme color>` on edge paths redundant when the theme CSS is embedded
+        // (a presentation attribute loses to the stylesheet), so they are dropped there.
+        // Attribute-driven exports (`embed_theme_css = false`, e.g. the PNG raster path which
+        // resvg cannot fully style via CSS) MUST keep both inline fallbacks.
         let ir = create_ir_with_labeled_edge();
         let with_css = render_svg_with_config(&ir, &SvgRenderConfig::default());
         let without_css = render_svg_with_config(
@@ -6714,11 +6718,20 @@ mod tests {
                 ..Default::default()
             },
         );
-        let with = with_css.matches("fill=\"none\"").count();
-        let without = without_css.matches("fill=\"none\"").count();
+        // The edge contributes one inline `fill="none"` and one inline `stroke="..."`; both vanish
+        // from the default (CSS-embedded) render and remain in the attribute-driven export. Node
+        // and marker strokes are unaffected, so the per-edge difference must be strictly positive.
+        let fill_with = with_css.matches("fill=\"none\"").count();
+        let fill_without = without_css.matches("fill=\"none\"").count();
         assert!(
-            without > with,
-            "attribute-driven export must keep inline edge fill (with_css={with}, without_css={without})"
+            fill_without > fill_with,
+            "attribute-driven export must keep inline edge fill (with={fill_with}, without={fill_without})"
+        );
+        let stroke_with = with_css.matches(" stroke=\"").count();
+        let stroke_without = without_css.matches(" stroke=\"").count();
+        assert!(
+            stroke_without > stroke_with,
+            "attribute-driven export must keep inline edge stroke (with={stroke_with}, without={stroke_without})"
         );
     }
 
