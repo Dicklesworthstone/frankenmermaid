@@ -2910,3 +2910,59 @@
   storage trade-off before shipping it.
 
   Agent: GreyShrike
+
+### Attributes SmallVec inline storage — REVERTED (2026-06-27)
+- **Lever tested:** `fm-render-svg::Attributes` briefly replaced
+  `Vec<Attribute>`/`Vec::with_capacity(12)` with `smallvec::SmallVec`, first with
+  four inline attributes and then with two inline attributes. This directly tested
+  the prior allocation-bound render hypothesis: remove per-element heap Vec
+  allocation without changing serialized attribute order or escaping.
+- **Mapped primitive:** alien-graveyard allocation-budget / small-buffer
+  specialization plus alien-artifact reverse-order evidence: shrink allocator
+  pressure while proving byte-equivalent rendering, then reject if the larger
+  `Element` payload loses to move/copy costs.
+- **Baseline -> After:** current-main baseline at `bbd0271`, package
+  `frankenmermaid-cli`, bench `pipeline_bench`, filter `wide_stages/render`,
+  target dir `/data/projects/.rch-targets/frankenmermaid-cod-b`, via
+  `AGENT_NAME=TanSparrow RCH_WORKER=ovh-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b
+  rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench
+  pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2`.
+  `rch` fell open locally for the render benches after reporting no admissible
+  worker slots.
+- **Four-slot variant:** initial same-route baseline measured `8x16`
+  `2.0016 ms`, `12x24` `2.9593 ms`, `16x32` `6.5207 ms`; `SmallVec<[Attribute; 4]>`
+  measured `1.3617 ms`, `4.2724 ms`, and `6.7416 ms`. That improved the smallest
+  case but regressed `12x24` by `44.37%` and left `16x32` slightly slower, so the
+  four-slot shape is rejected.
+- **Two-slot reverse-order check:** `SmallVec<[Attribute; 2]>` measured
+  `1.2847 ms`, `2.8425 ms`, `5.6433 ms`; restoring the production Vec storage
+  immediately after measured `1.0270 ms`, `2.3872 ms`, `4.6098 ms`. Against that
+  reverse baseline, the two-slot variant was slower by `25.09%`, `19.07%`, and
+  `22.42%`.
+- **Original comparator:** pinned live-CDP Mermaid `11.12.0` denominators reused
+  for identical generated wide inputs: `8x16` `315.14 ms`, `12x24`
+  `981.73 ms`, `16x32` `2879.185 ms`.
+- **frankenmermaid/Mermaid ratio:** reverse production Vec baseline render stage
+  was `0.003259x`, `0.002432x`, and `0.001601x` Mermaid.js time (`306.85x`,
+  `411.25x`, and `624.58x` faster than Mermaid.js). The two-slot candidate was
+  `0.004077x`, `0.002895x`, and `0.001960x` Mermaid.js time (`245.30x`,
+  `345.38x`, and `510.20x` faster). These are render-stage ratios against
+  full-pipeline Mermaid denominators for context only.
+- **Behavior proof:** while measured, the candidate passed
+  `AGENT_NAME=TanSparrow CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b
+  rch exec -- cargo test --profile release -p fm-render-svg attributes` (`12`
+  tests), and `cargo fmt --check` passed. Production source was manually restored.
+  Final conformance on the restored tree passed via
+  `RCH_OUTPUT_FORMAT=json AGENT_NAME=TanSparrow RCH_WORKER=ovh-a
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec
+  --json -- cargo test --profile release -p frankenmermaid-cli --test
+  frankentui_conformance_test` on `ovh-a` (`1` test).
+- **Tooling notes:** the literal `cargo bench --release` form remains invalid on
+  this Cargo toolchain; `--profile release` was used for the requested
+  release-profile per-crate bench. Plain conformance `rch exec` produced no
+  progress output and was interrupted; the JSON retry ran remotely on `ovh-a` and
+  passed.
+- **Verdict:** reverted. The allocator profile was real, but inlining attribute
+  storage makes each `Element` larger and loses on the reverse-order gate. Do not
+  retry `Attributes` SmallVec inline storage without an Element arena or other
+  plan that also removes/masks the larger by-value child-vector move cost.
