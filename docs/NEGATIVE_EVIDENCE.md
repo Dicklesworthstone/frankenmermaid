@@ -1661,6 +1661,27 @@
 
 ## Blocked/Invalid Evidence Attempts
 
+### REJECTED: cycle_removal acyclic strategy short-circuit (~0-gain) + re-profiled hotspots (2026-06-27)
+- **Re-profiled the layout after the SCC fast-path win (`ba9a45d`)** (FM_PROFILE, 16x32):
+  **`cycle_removal` 173µs (~37%)** and **`coordinate_assignment` 147µs (~31%)** are now the two
+  hotspots; then `build_edge_paths` 55µs, `rank_assignment` 47µs, `node_sizes` 17µs, `crossing` 13µs.
+- **Tried + REJECTED:** short-circuit `cycle_removal`'s `cycle_strategy` match to `BTreeSet::new()`
+  when `dfs_back_edges.is_empty()` (acyclic ⇒ every strategy reverses nothing, output-identical, 428
+  tests pass). Same-session ovh-a A/B (layout_wide, tight): HEAD `87.18 / 314.34 / 740.50 µs` →
+  candidate `86.83 / 314.08 / 745.70 µs` = **−0.4% / −0.1% / +0.7%, within noise → ~0-gain.** Reason:
+  the default `CycleStrategy` is **not Greedy**, so the match already just clones the (empty) back-edge
+  set — the costly greedy FAS pass never ran. The 173µs is the **detection** (`resolved_edges` +
+  `stable_node_priorities` + `cycle_removal_dfs_back`), which determines acyclicity and can't be
+  skipped. Reverted.
+- **Candidate lever for next cycle (redundancy):** `resolved_edges(ir)` and the back-edge DFS are
+  computed in **both** `GraphMetrics::from_ir` (Auto selection: `resolved_edges` + `count_back_edges`)
+  **and** `cycle_removal` (`resolved_edges` + `cycle_removal_dfs_back`). Threading the resolved edges
+  (and back-edge set) from the dispatch into the sugiyama run would eliminate the duplicate O(V+E)
+  traversal — but forced-sugiyama skips the selection, so the share is Auto-path-only and needs care.
+  Sub-profile cycle_removal's three parts first to size the win. (Separately, `coordinate_assignment`'s
+  147µs is node-box building; its per-node `node.id.clone()` is contract-bound — render+CLI read it.)
+- **Standing:** unchanged — reverted. `226x`–`506x` over Mermaid `11.12.0`.
+
 ### Layout post-crossing_refinement: distributed cost, and a measured but unexplained Auto-path overhead (2026-06-27)
 - **Sub-phase profile (16x32, FM_PROFILE):** `bk_vertical_alignment` dominates the BK (~66-80%), but
   the **whole BK (`brandes_kopf_secondary_coords`) is only ~7.5µs warm** — confirming last cycle's
