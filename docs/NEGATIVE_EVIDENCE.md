@@ -484,6 +484,30 @@
 
 ## Kept Wins Also Recorded Here By Request
 
+### Gate redundant inline edge `fill="none"` on `embed_theme_css` (−0.65% to −2% SVG bytes) — KEPT (2026-06-26)
+- **Change:** `render_edge` always emitted `fill="none"` on every edge path. The embedded theme
+  CSS already sets `.fm-edge { fill: none }`, and an SVG **presentation attribute loses to the
+  stylesheet**, so the inline copy is redundant whenever CSS is embedded (the default). Gated it
+  on `!config.embed_theme_css` (`crates/fm-render-svg/src/lib.rs`, render_edge): the default /
+  benched interactive SVG sheds it; `embed_theme_css = false` exports keep it.
+- **Why the gate (not deletion):** `embed_theme_css = false` is the **PNG raster path**
+  (`make_svg_render_config_raster_safe`) — usvg/resvg can't fully apply the CSS, so it relies on
+  attribute-driven styling; dropping the inline fill there would render edges black-filled. The
+  gate emits the inline fallback exactly there, so PNG output is unchanged.
+- **Measured (deterministic byte win):** default render of a 40-edge flowchart drops edge
+  `fill="none"` from 40 → 1 (the 1 is a non-edge open-arrow marker), **−468 B ≈ −0.96%**;
+  aggregate over the 28 regenerated `golden_svg_test` snapshots **622,970 → 618,938 B = −0.65%**
+  (mixed sizes; edge-heavy/wide diagrams trend toward ~2%). Plus one fewer `String` alloc
+  (`"none"`) per edge in the default path.
+- **Conformance:** `cargo test -p fm-render-svg` = **219 pass** + a new test
+  `edge_fill_none_is_gated_on_embedded_css` (asserts the no-CSS export keeps more `fill="none"`
+  than the CSS export). `golden_svg_test` regenerated via `BLESS=1` = **2 pass**; verified the 28
+  golden diffs are **only** edge `fill="none"` removal (stripping ` fill="none"` from old and new
+  yields identical text for every file).
+- **frankenmermaid/Mermaid ratio:** Mermaid is CSS-driven and emits no inline edge fill, so this
+  matches its approach and narrows the per-edge byte gap. Standing `240.5x`/`319.1x`/`505.7x`
+  (latest) over Mermaid `11.12.0`.
+
 ### Drop dead `data-fm-node-id` node attribute (−1 to −2% SVG bytes, zero consumers) — KEPT (2026-06-26)
 - **Change:** `render_node` emitted **both** `.data("id", node_id)` and
   `.data("fm-node-id", node_id)` — two attributes carrying the *same* `node_id`. Removed the

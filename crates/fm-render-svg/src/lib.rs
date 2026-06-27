@@ -5976,9 +5976,15 @@ fn render_edge(
         }
     };
 
-    let mut elem = Element::path()
-        .d(&path_str)
-        .fill("none")
+    // `fill="none"` is redundant when the theme CSS is embedded — `.fm-edge { fill: none }`
+    // already applies (a presentation attribute loses to the stylesheet). Emit the inline
+    // fallback only when CSS is *not* embedded, so the default/benched output sheds it while
+    // `embed_theme_css = false` exports stay self-contained.
+    let mut elem = Element::path().d(&path_str);
+    if !config.embed_theme_css {
+        elem = elem.fill("none");
+    }
+    let mut elem = elem
         .stroke(base_color)
         .stroke_width(stroke_width)
         .class("fm-edge")
@@ -6691,6 +6697,29 @@ mod tests {
             },
         );
         assert_eq!(default_svg, explicit_legacy);
+    }
+
+    #[test]
+    fn edge_fill_none_is_gated_on_embedded_css() {
+        // `.fm-edge { fill: none }` makes the inline `fill="none"` on edge paths redundant when
+        // the theme CSS is embedded (a presentation attribute loses to the stylesheet), so it is
+        // dropped there. Attribute-driven exports (`embed_theme_css = false`, e.g. the PNG raster
+        // path which resvg cannot fully style via CSS) MUST keep the inline fallback.
+        let ir = create_ir_with_labeled_edge();
+        let with_css = render_svg_with_config(&ir, &SvgRenderConfig::default());
+        let without_css = render_svg_with_config(
+            &ir,
+            &SvgRenderConfig {
+                embed_theme_css: false,
+                ..Default::default()
+            },
+        );
+        let with = with_css.matches("fill=\"none\"").count();
+        let without = without_css.matches("fill=\"none\"").count();
+        assert!(
+            without > with,
+            "attribute-driven export must keep inline edge fill (with_css={with}, without_css={without})"
+        );
     }
 
     #[test]
