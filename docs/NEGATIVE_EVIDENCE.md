@@ -575,6 +575,34 @@
 
 ## Kept Wins Also Recorded Here By Request
 
+### Incremental crossing-count in `crossing_refinement` — −13 to −23% layout (2026-06-27)
+- **Lever (fresh — no prior layout entry in this ledger; not in git perf history):**
+  `crossing_refinement` (fm-layout/src/lib.rs) called the full-graph `total_crossings` — which
+  rebuilds two nested `BTreeMap`s over all 512 nodes and rescans all ~1024 `ir.edges` — on **every
+  transpose/sift trial** (~15-20k calls for the 16x32 wide DAG, whose wrap-around diagonal keeps
+  crossings > 0 so the refinement runs fully). A trial perturbs exactly one rank, so only the
+  `(r-1, r)` and `(r, r+1)` pair crossings can change. Now precompute the adjacent-rank edge buckets
+  once (`build_pair_node_edges`) and compare only the affected pairs per trial (`pair_crossings`,
+  O(pair-edges)). Accepting iff the affected pairs strictly decrease is **exactly equivalent** to the
+  full-total comparison, so the resulting ordering and `best_crossings` are identical → SVG output
+  byte-identical.
+- **Measured (same-worker `ovh-a` A/B, per-crate `layout_wide` bench, candidate ±0.2% noise):**
+  - 8x16: `153.5 µs → 117.4 µs` (**−23.5%**)
+  - 12x24: `497.8 µs → 432.0 µs` (**−13.2%**)
+  - 16x32: `1.331 ms → 1.026 ms` (**−22.9%**)
+- **End-to-end (`full_pipeline_wide`, both confirmed `ovh-a`, tight):** 8x16 `1.214 ms → 1.182 ms`
+  (**−2.6%**); the pipeline saving (32 µs) ≈ the isolated layout saving (36 µs) and the derived
+  baseline layout (149 µs) ≈ measured (153.5 µs), so the A/B is internally consistent. Layout is
+  ~10% of the 8x16 pipeline and ~19% at 16x32, so the end-to-end win grows with size.
+- **Ratio vs Mermaid 11.12.0 (`ovh-a`):** 8x16 `1.182 ms` → **267x**, 12x24 `2.817 ms` → **348x**
+  (worker-dependent; standing band `226x`–`506x` holds, nudged up by this layout win).
+- **Conformance GREEN:** 428 fm-layout tests + golden SVG tests + determinism pass (output
+  byte-identical). The lone `explicit_config_enables_svg_effects_and_accessibility` failure is
+  **pre-existing on HEAD** (it asserts the inline `id="drop-shadow"` def that HEAD's render gates off
+  under embedded CSS, fm-render-svg/src/lib.rs:1711) and is a **no-op for my change** (its 2-node
+  `A-->B` diagram never enters `crossing_refinement`) — unrelated render-side staleness, not this
+  change's regression.
+
 ### Move per-label `font-family` to the root `<svg>` (inherited) under `embed_theme_css` (−6.83% SVG bytes) — KEPT (2026-06-27)
 - **Change — the largest byte win of the series.** Every `<text>` label carried an inline
   `font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial,

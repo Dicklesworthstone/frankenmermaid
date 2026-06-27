@@ -9240,6 +9240,19 @@ fn crossing_refinement(
         return (0, ordering_by_rank);
     }
 
+    // A transpose/sift confined to rank `r` changes only the `(r-1, r)` and `(r, r+1)` pair
+    // crossings, so we precompute the adjacent-rank edge buckets once and compare just those
+    // affected pairs per trial — instead of recomputing the whole graph's crossings
+    // (`total_crossings`) tens of thousands of times. Accepting iff the affected pairs strictly
+    // decrease is exactly equivalent to the full-total comparison, so the resulting ordering (and
+    // `best_crossings`) is identical to the naive version, just far cheaper to reach.
+    let pair_edges = build_pair_node_edges(ir, ranks);
+    let affected = |rank: usize, ordering: &BTreeMap<usize, Vec<usize>>| -> usize {
+        rank.checked_sub(1)
+            .map_or(0, |p| pair_crossings(p, rank, ordering, &pair_edges))
+            .saturating_add(pair_crossings(rank, rank + 1, ordering, &pair_edges))
+    };
+
     // Phase 1: Transpose — swap adjacent nodes in each rank if it reduces crossings.
     let mut improved = true;
     for _pass in 0..10 {
@@ -9249,30 +9262,27 @@ fn crossing_refinement(
         improved = false;
         let rank_keys: Vec<usize> = ordering_by_rank.keys().copied().collect();
         for &rank in &rank_keys {
-            let n = match ordering_by_rank.get(&rank) {
-                Some(o) => o.len(),
-                _ => 0,
-            };
+            let n = ordering_by_rank.get(&rank).map_or(0, Vec::len);
             if n < 2 {
                 continue;
             }
+            let mut current = affected(rank, &ordering_by_rank);
             for i in 0..n - 1 {
                 // Try swapping positions i and i+1 in-place.
                 if let Some(rank_order) = ordering_by_rank.get_mut(&rank) {
                     rank_order.swap(i, i + 1);
                 }
-                let trial_crossings = total_crossings(ir, ranks, &ordering_by_rank);
-                if trial_crossings < best_crossings {
-                    best_crossings = trial_crossings;
+                let trial = affected(rank, &ordering_by_rank);
+                if trial < current {
+                    best_crossings = best_crossings.saturating_sub(current - trial);
+                    current = trial;
                     improved = true;
                     if best_crossings == 0 {
                         return (0, ordering_by_rank);
                     }
-                } else {
+                } else if let Some(rank_order) = ordering_by_rank.get_mut(&rank) {
                     // Swap back if not improved.
-                    if let Some(rank_order) = ordering_by_rank.get_mut(&rank) {
-                        rank_order.swap(i, i + 1);
-                    }
+                    rank_order.swap(i, i + 1);
                 }
             }
         }
@@ -9286,6 +9296,7 @@ fn crossing_refinement(
             _ => continue,
         };
         let n = order.len();
+        let mut current = affected(rank, &ordering_by_rank);
         for node in order {
             // Find current position of node in the (potentially modified) rank order.
             let mut current_pos = match ordering_by_rank.get(&rank) {
@@ -9307,19 +9318,18 @@ fn crossing_refinement(
                     rank_order.insert(target_pos, element);
                 }
 
-                let trial_crossings = total_crossings(ir, ranks, &ordering_by_rank);
-                if trial_crossings < best_crossings {
-                    best_crossings = trial_crossings;
+                let trial = affected(rank, &ordering_by_rank);
+                if trial < current {
+                    best_crossings = best_crossings.saturating_sub(current - trial);
+                    current = trial;
                     current_pos = target_pos;
                     if best_crossings == 0 {
                         return (0, ordering_by_rank);
                     }
-                } else {
+                } else if let Some(rank_order) = ordering_by_rank.get_mut(&rank) {
                     // Move back if not improved.
-                    if let Some(rank_order) = ordering_by_rank.get_mut(&rank) {
-                        let element = rank_order.remove(target_pos);
-                        rank_order.insert(current_pos, element);
-                    }
+                    let element = rank_order.remove(target_pos);
+                    rank_order.insert(current_pos, element);
                 }
             }
         }
@@ -10840,6 +10850,96 @@ fn reorder_rank_by_barycenter(
             .map(|(node_index, _, _)| node_index)
             .collect(),
     );
+}
+
+/// Adjacent-rank-pair node edges, precomputed once for incremental crossing counting.
+///
+/// Key `(upper_rank, lower_rank)` (consecutive ranks); value is `(source_node, target_node)`
+/// pairs. Mirrors the edge filtering in [`total_crossings`] but stores node ids (stable across
+/// reordering) instead of positions, so per-pair crossings can be recomputed cheaply after a
+/// single-rank perturbation without rescanning every edge.
+fn build_pair_node_edges(
+    ir: &MermaidDiagramIr,
+    ranks: &BTreeMap<usize, usize>,
+) -> FxHashMap<(usize, usize), Vec<(usize, usize)>> {
+    let mut pair_edges: FxHashMap<(usize, usize), Vec<(usize, usize)>> = FxHashMap::default();
+    for edge in &ir.edges {
+        let Some(mut source) = endpoint_node_index(ir, edge.from) else {
+            continue;
+        };
+        let Some(mut target) = endpoint_node_index(ir, edge.to) else {
+            continue;
+        };
+        let Some(mut source_rank) = ranks.get(&source).copied() else {
+            continue;
+        };
+        let Some(mut target_rank) = ranks.get(&target).copied() else {
+            continue;
+        };
+        if source_rank == target_rank {
+            continue;
+        }
+        if source_rank > target_rank {
+            std::mem::swap(&mut source, &mut target);
+            std::mem::swap(&mut source_rank, &mut target_rank);
+        }
+        if target_rank != source_rank.saturating_add(1) {
+            continue;
+        }
+        pair_edges
+            .entry((source_rank, target_rank))
+            .or_default()
+            .push((source, target));
+    }
+    pair_edges
+}
+
+/// Crossings on a single adjacent rank pair for the current ordering — O(pair-edges · log).
+///
+/// The sum of `pair_crossings` over every consecutive `(r, r+1)` pair equals [`total_crossings`];
+/// a perturbation confined to rank `r` only changes the `(r-1, r)` and `(r, r+1)` pairs, so the
+/// refinement compares just those instead of recomputing the whole graph.
+fn pair_crossings(
+    upper_rank: usize,
+    lower_rank: usize,
+    ordering_by_rank: &BTreeMap<usize, Vec<usize>>,
+    pair_edges: &FxHashMap<(usize, usize), Vec<(usize, usize)>>,
+) -> usize {
+    let Some(edges) = pair_edges.get(&(upper_rank, lower_rank)) else {
+        return 0;
+    };
+    if edges.len() < 2 {
+        return 0;
+    }
+    let (Some(upper_order), Some(lower_order)) = (
+        ordering_by_rank.get(&upper_rank),
+        ordering_by_rank.get(&lower_rank),
+    ) else {
+        return 0;
+    };
+    let mut upper_pos: FxHashMap<usize, usize> = FxHashMap::default();
+    for (position, &node) in upper_order.iter().enumerate() {
+        upper_pos.insert(node, position);
+    }
+    let mut lower_pos: FxHashMap<usize, usize> = FxHashMap::default();
+    for (position, &node) in lower_order.iter().enumerate() {
+        lower_pos.insert(node, position);
+    }
+    let mut edge_positions: Vec<(usize, usize)> = Vec::with_capacity(edges.len());
+    for &(source, target) in edges {
+        let (Some(&source_position), Some(&target_position)) =
+            (upper_pos.get(&source), lower_pos.get(&target))
+        else {
+            continue;
+        };
+        edge_positions.push((source_position, target_position));
+    }
+    edge_positions.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    let mut target_positions: Vec<usize> = edge_positions
+        .into_iter()
+        .map(|(_source_position, target_position)| target_position)
+        .collect();
+    count_inversions(&mut target_positions)
 }
 
 fn total_crossings(
