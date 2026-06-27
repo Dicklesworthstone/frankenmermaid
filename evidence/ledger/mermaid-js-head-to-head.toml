@@ -1429,3 +1429,73 @@ tooling_notes = [
 [negative_measurement_svg_edge_point_offset_stream_2026_06_26.decision]
 status = "reject"
 rationale = "The per-edge offset-point streaming path removed a real allocation and first looked positive, but the final same-machine rerun after the baseline regressed wide_stages/render 8x16 by 6.39% and showed no significant 12x24 or 16x32 improvement; code was reverted before commit."
+
+[post_measurement_theme_css_direct_write_2026_06_26]
+date = "2026-06-26"
+agent = "TanSparrow"
+lever_bead = "bd-1buv.1"
+graveyard_route = "Alien Graveyard buffer-management / region-style reuse; FrankenSuite format! hot-loop rule -> write! into reused buffer."
+artifact_contract = "Same CSS template, same captured shadow_filter and hover_shadow_filter values, direct write into the existing String; no SVG semantic change intended."
+worker_delta = "same-machine local; rch exec render pair fell back local; remote full-pipeline attempt failed before benchmarking on vmi1264463 due missing cmake for highs-sys"
+baseline_commit = "35569a3"
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-b"
+candidate_summary = "Theme::to_svg_style writes the large utility CSS template directly into the existing css String with write! instead of allocating format!(...) and copying it with push_str."
+render_baseline_command = "RUSTFLAGS='-C metadata=tansparrowcssbase' CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
+render_candidate_command = "RUSTFLAGS='-C metadata=tansparrowcsscand' CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
+full_pipeline_baseline_command = "RUSTFLAGS='-C metadata=tansparrowcssbase' CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+full_pipeline_candidate_command = "RUSTFLAGS='-C metadata=tansparrowcsscand' CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+mermaid_js_command = "Latest live-CDP Mermaid 11.12.0 denominator reused from the current-main BOLD-VERIFY entry for identical generated wide inputs."
+rust_build_profile = "release profile [optimized]"
+behavior_proof = "rustfmt --edition 2024 --check crates/fm-render-svg/src/theme.rs passed; CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b cargo check --profile release -p fm-render-svg passed; CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b cargo test --profile release -p fm-render-svg theme_generates_complete_style passed; CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b cargo test --profile release -p frankenmermaid-cli --test frankentui_conformance_test passed."
+tooling_notes = [
+  "Agent Mail macro_start_session failed because the mail SQLite database corruption circuit breaker is open.",
+  "The requested rch exec render baseline/candidate fell back local because no admissible workers were available.",
+  "A remote rch exec full-pipeline baseline selected vmi1264463 and failed before benchmarking because cmake was missing while building highs-sys.",
+  "The literal cargo bench --release form remains invalid on this Cargo toolchain; --profile release was used for per-crate bench commands.",
+  "Current main emits an unrelated unused_mut warning in crates/fm-render-svg/src/lib.rs:766.",
+]
+
+[post_measurement_theme_css_direct_write_2026_06_26.metrics]
+"wide_stages_render_8x16_baseline_mean_ms" = 2.1748
+"wide_stages_render_8x16_candidate_mean_ms" = 1.3995
+"wide_stages_render_8x16_candidate_delta_pct" = -35.6493
+"wide_stages_render_8x16_baseline_over_candidate" = 1.5540
+"wide_stages_render_12x24_baseline_mean_ms" = 4.9721
+"wide_stages_render_12x24_candidate_mean_ms" = 3.4677
+"wide_stages_render_12x24_candidate_delta_pct" = -30.2568
+"wide_stages_render_12x24_baseline_over_candidate" = 1.4338
+"wide_stages_render_16x32_baseline_mean_ms" = 10.296
+"wide_stages_render_16x32_candidate_mean_ms" = 11.075
+"wide_stages_render_16x32_candidate_delta_pct" = 7.5660
+"wide_stages_render_16x32_baseline_over_candidate" = 0.9297
+"full_pipeline_wide_8x16_baseline_mean_ms" = 3.0598
+"full_pipeline_wide_8x16_candidate_mean_ms" = 2.3892
+"full_pipeline_wide_8x16_candidate_delta_pct" = -21.9165
+"full_pipeline_wide_8x16_baseline_over_candidate" = 1.2807
+"full_pipeline_wide_12x24_baseline_mean_ms" = 7.7382
+"full_pipeline_wide_12x24_candidate_mean_ms" = 7.8448
+"full_pipeline_wide_12x24_candidate_delta_pct" = 1.3776
+"full_pipeline_wide_12x24_baseline_over_candidate" = 0.9864
+"full_pipeline_wide_16x32_baseline_mean_ms" = 9.1638
+"full_pipeline_wide_16x32_candidate_mean_ms" = 7.8508
+"full_pipeline_wide_16x32_candidate_delta_pct" = -14.3281
+"full_pipeline_wide_16x32_baseline_over_candidate" = 1.1672
+"full_pipeline_wide_8x16_mermaid_js_mean_ms" = 315.1399999976158
+"full_pipeline_wide_12x24_mermaid_js_mean_ms" = 981.7300000190735
+"full_pipeline_wide_16x32_mermaid_js_mean_ms" = 2879.185000014305
+"baseline_full_pipeline_wide_8x16_frankenmermaid_over_mermaid_js" = 0.009709
+"baseline_full_pipeline_wide_12x24_frankenmermaid_over_mermaid_js" = 0.007882
+"baseline_full_pipeline_wide_16x32_frankenmermaid_over_mermaid_js" = 0.003183
+"baseline_full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 102.99
+"baseline_full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 126.87
+"baseline_full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 314.19
+"candidate_full_pipeline_wide_8x16_frankenmermaid_over_mermaid_js" = 0.007581
+"candidate_full_pipeline_wide_12x24_frankenmermaid_over_mermaid_js" = 0.007991
+"candidate_full_pipeline_wide_16x32_frankenmermaid_over_mermaid_js" = 0.002727
+"candidate_full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 131.90
+"candidate_full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 125.14
+"candidate_full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 366.74
+
+[post_measurement_theme_css_direct_write_2026_06_26.decision]
+status = "keep"
+rationale = "Direct CSS template writing improves adjacent full_pipeline_wide 8x16 by 21.92% and 16x32 by 14.33%, with 12x24 within the no-change band; conformance is green and CSS generation uses the same template without a temporary format! String."

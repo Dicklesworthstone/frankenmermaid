@@ -50,6 +50,55 @@
 
 ## Entries
 
+### Theme CSS direct buffer write - KEPT (2026-06-26)
+- **Lever:** `fm-render-svg::Theme::to_svg_style` now writes the large utility
+  CSS template directly into the existing `String` with `write!` instead of
+  allocating a second `format!` string and then copying it with `push_str`.
+- **Hypothesis:** after the marker and source-span wins, embedded CSS remains a
+  large fixed chunk of SVG output. The alien-graveyard buffer-management route
+  and the FrankenSuite `format!` -> `write!` hot-loop rule suggested removing
+  the temporary CSS buffer while preserving the exact same template.
+- **Baseline -> After:** clean baseline worktree
+  `/data/projects/.worktrees/frankenmermaid-tansparrow-css-direct-write-baseline-20260626`
+  at `35569a3` vs candidate worktree
+  `/data/projects/.worktrees/frankenmermaid-tansparrow-css-direct-write-20260626`,
+  package `frankenmermaid-cli`, bench `pipeline_bench`, warm target dir
+  `/data/projects/.rch-targets/frankenmermaid-cod-b`. The decisive adjacent
+  full-pipeline gate used distinct metadata artifacts:
+  `RUSTFLAGS='-C metadata=tansparrowcssbase'` and
+  `RUSTFLAGS='-C metadata=tansparrowcsscand'`. Baseline
+  `full_pipeline_wide` means were `3.0598 ms`, `7.7382 ms`, and `9.1638 ms`
+  for `8x16`, `12x24`, and `16x32`; candidate means were `2.3892 ms`,
+  `7.8448 ms`, and `7.8508 ms`. That is `21.92%` faster, `1.38%`
+  slower/no-change, and `14.33%` faster.
+- **Render-stage context:** an adjacent forced-artifact `wide_stages/render`
+  pair measured baseline `2.1748 ms`, `4.9721 ms`, and `10.296 ms` versus
+  candidate `1.3995 ms`, `3.4677 ms`, and `11.075 ms`; the first two cases
+  improved, while `16x32` was noisy/no-change. The full-pipeline gate is the
+  keep decision because it is the Mermaid.js-facing workload.
+- **Original comparator:** latest pinned live-CDP Mermaid `11.12.0` denominator
+  reused from the current main ledger, Node `v24.14.0`, `/snap/bin/chromium`,
+  dynamic import of
+  `https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.esm.min.mjs`,
+  3 warmups, 20 timed render-to-SVG iterations, identical generated wide inputs.
+- **frankenmermaid/Mermaid ratio:** candidate full-pipeline means versus
+  Mermaid.js means `315.14 ms`, `981.73 ms`, and `2879.185 ms` give
+  frankenmermaid/Mermaid ratios `0.007581x`, `0.007991x`, and `0.002727x`;
+  Mermaid.js is `131.90x`, `125.14x`, and `366.74x` slower on the same inputs.
+- **Verdict:** kept. Behavior proof: `rustfmt --edition 2024 --check
+  crates/fm-render-svg/src/theme.rs`, `cargo check --profile release -p
+  fm-render-svg`, focused `cargo test --profile release -p fm-render-svg
+  theme_generates_complete_style`, and local conformance `cargo test --profile
+  release -p frankenmermaid-cli --test frankentui_conformance_test` all passed.
+  The code uses the same format template and captured `shadow_filter` /
+  `hover_shadow_filter` values, so SVG CSS bytes are intended to remain
+  identical.
+- **Tooling note:** `rch exec` first fell back local for the render pair, then a
+  remote full-pipeline attempt selected `vmi1264463` and failed before
+  benchmarking because that worker lacks `cmake` for `highs-sys`. The literal
+  `cargo bench --release` form is invalid on this Cargo toolchain; per-crate
+  bench commands used `--profile release`.
+
 ### SVG integer number manual writer - REJECTED (2026-06-26)
 - **Lever:** `fm-render-svg` added a shared `write_i32` helper for integer-valued
   SVG numbers and routed the integer branches of `AttributeValue::Number`,

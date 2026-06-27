@@ -2,7 +2,7 @@
 //!
 //! Provides preset themes, CSS custom property generation, and color palette utilities.
 
-use std::str::FromStr;
+use std::{fmt::Write as _, str::FromStr};
 
 /// Theme preset identifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -483,8 +483,9 @@ impl Theme {
         };
 
         // Add utility classes
-        css.push_str(
-            &format!(r#"
+        let _ = write!(
+            css,
+            r#"
 :root {{
   --fm-edge-muted: var(--fm-cluster-stroke);
   --fm-edge-label-bg: var(--fm-bg);
@@ -722,7 +723,7 @@ marker#arrow-cross path {{
   outline: 2px solid var(--fm-accent-1);
   outline-offset: 3px;
 }}
-"#)
+"#
         );
 
         css
