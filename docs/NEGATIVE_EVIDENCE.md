@@ -2458,3 +2458,47 @@
   but regressed the 12x24 gate and did not produce a reliable 16x32 win. Do not
   retry cluster-CSS pruning unless paired with a profile showing CSS string
   construction or SVG style serialization as a top cost on the target size.
+
+### Element child Vec pre-sizing — REVERTED (2026-06-27)
+- **Lever tested:** `fm-render-svg::Element` briefly grew group constructors with
+  explicit child `Vec` capacity and routed the hot node group, labeled-edge
+  group, and unlabeled-edge wrapper group through them. The intent was to reduce
+  reallocations while building the object tree for `wide_stages/render`.
+- **Mapped primitive:** alien-graveyard object-layout specialization plus
+  alien-artifact allocation fusion: specialize known fan-out in the common SVG
+  group builders before considering a larger direct-serialization rewrite.
+- **Baseline -> After:** current-main baseline at `b866a4a`, per-crate package
+  `frankenmermaid-cli`, bench `pipeline_bench`, filter `wide_stages/render`,
+  target dir `/data/projects/.rch-targets/frankenmermaid-cod-a`, via
+  `AGENT_NAME=TanSparrow RCH_WORKER=ovh-a rch exec -- cargo bench --profile
+  release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render
+  --warm-up-time 1 --measurement-time 2`. `rch` fell open locally for both
+  baseline and candidate (`no admissible workers: insufficient_slots=3,
+  hard_preflight=1`), so this is local-fallback evidence only. Baseline measured
+  `8x16` `1.1229 ms`, `12x24` `2.8389 ms`, and `16x32` `5.5447 ms`. Candidate
+  measured `1.0945 ms`, `2.7545 ms`, and `5.2495 ms`: `-2.53%`, `-2.97%`, and
+  `-5.32%` by raw mean, but Criterion reported no reliable change (`p = 0.32`,
+  `0.32`, and `0.13` respectively), with the middle case below the keep bar.
+- **Original comparator:** pinned live-CDP Mermaid `11.12.0` denominators reused
+  for identical generated wide inputs: `8x16` `315.14 ms`, `12x24`
+  `981.73 ms`, `16x32` `2879.185 ms`.
+- **frankenmermaid/Mermaid ratio:** baseline render stage was `0.003563x`,
+  `0.002892x`, and `0.001926x` Mermaid.js time (`280.65x`, `345.81x`, and
+  `519.27x` faster than Mermaid.js). Candidate render stage was `0.003473x`,
+  `0.002806x`, and `0.001823x` Mermaid.js time (`287.93x`, `356.41x`, and
+  `548.47x` faster). These render-stage ratios are conservative context against
+  full-pipeline Mermaid denominators, not a replacement for the standing
+  full-pipeline ratio.
+- **Behavior proof:** while measured, the candidate passed the focused release
+  test `cargo test --profile release -p fm-render-svg
+  child_capacity_does_not_change_rendered_bytes` (`1` test). Production source
+  was then manually restored. Final conformance on the reverted tree passed via
+  `AGENT_NAME=TanSparrow
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec --
+  cargo test --profile release -p frankenmermaid-cli --test
+  frankentui_conformance_test` (`1` test).
+- **Verdict:** reverted; child-capacity reservation is at most noise without a
+  statistically reliable win, and it does not justify widening the Element API.
+  Do not retry small `Element` child `Vec` pre-sizing in isolation; the next
+  render lever should attack direct serialization or a measured top allocation
+  source in the wide SVG render path.

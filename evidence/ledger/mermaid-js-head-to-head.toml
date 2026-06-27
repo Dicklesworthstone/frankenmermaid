@@ -1876,3 +1876,61 @@ tooling_notes = [
 [negative_measurement_cluster_css_feature_gate_2026_06_27.decision]
 status = "reject"
 rationale = "Cluster CSS feature gating improved 8x16 render by 10.88% but regressed 12x24 by 12.35% and left 16x32 statistically no-change with a slower median; production source was manually reverted and only evidence remains."
+
+[negative_measurement_element_child_capacity_2026_06_27]
+date = "2026-06-27"
+agent = "TanSparrow"
+lever_bead = "bd-1buv.1"
+graveyard_route = "Alien Graveyard object-layout specialization plus Alien Artifact allocation fusion: reserve known child Vec capacities in hot SVG Element group builders before attempting a larger direct-serialization rewrite."
+worker_delta = "same checkout and same rch local fallback for baseline and candidate; RCH_WORKER=ovh-a was requested but rch reported no admissible workers for both runs"
+baseline_commit = "b866a4a"
+integration_commit_base = "d5b837e"
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-a"
+candidate_summary = "Temporarily added Element constructors with explicit child Vec capacity and used them for hot node and edge groups in fm-render-svg; manually reverted after no statistically reliable wide_stages/render win."
+render_baseline_command = "AGENT_NAME=TanSparrow RCH_WORKER=ovh-a RUSTFLAGS='-C metadata=tansparrowelemcapbase' CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
+render_candidate_command = "AGENT_NAME=TanSparrow RCH_WORKER=ovh-a RUSTFLAGS='-C metadata=tansparrowelemcapcand' CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
+mermaid_js_command = "Pinned live-CDP Mermaid 11.12.0 denominator reused from current-main ledger for identical generated wide inputs."
+rust_build_profile = "release profile [optimized]"
+behavior_proof = "Candidate added and passed a focused child_capacity_does_not_change_rendered_bytes serialization test while measured. Candidate production source was manually reverted; final reverted tree passed frankenmermaid-cli frankentui_conformance_test."
+tooling_notes = [
+  "The literal cargo bench --release form remains invalid on this Cargo toolchain; --profile release was used for the requested release-profile per-crate bench.",
+  "Agent Mail file reservations failed because the mail SQLite database corruption circuit breaker is open.",
+  "The shared /data/projects/frankenmermaid checkout was behind origin/main and had peer parser edits, so the final evidence-only commit was prepared in a clean integration clone from origin/main.",
+]
+
+[negative_measurement_element_child_capacity_2026_06_27.metrics]
+"wide_stages_render_8x16_baseline_mean_ms" = 1.1229
+"wide_stages_render_8x16_candidate_mean_ms" = 1.0945
+"wide_stages_render_8x16_raw_delta_pct" = -2.5292
+"wide_stages_render_8x16_criterion_p_value" = 0.32
+"wide_stages_render_12x24_baseline_mean_ms" = 2.8389
+"wide_stages_render_12x24_candidate_mean_ms" = 2.7545
+"wide_stages_render_12x24_raw_delta_pct" = -2.9730
+"wide_stages_render_12x24_criterion_p_value" = 0.32
+"wide_stages_render_16x32_baseline_mean_ms" = 5.5447
+"wide_stages_render_16x32_candidate_mean_ms" = 5.2495
+"wide_stages_render_16x32_raw_delta_pct" = -5.3240
+"wide_stages_render_16x32_criterion_p_value" = 0.13
+"wide_stages_render_8x16_mermaid_js_mean_ms" = 315.1399999976158
+"wide_stages_render_12x24_mermaid_js_mean_ms" = 981.7300000190735
+"wide_stages_render_16x32_mermaid_js_mean_ms" = 2879.185000014305
+"baseline_render_stage_8x16_frankenmermaid_over_mermaid_js" = 0.003563
+"baseline_render_stage_12x24_frankenmermaid_over_mermaid_js" = 0.002892
+"baseline_render_stage_16x32_frankenmermaid_over_mermaid_js" = 0.001926
+"baseline_render_stage_8x16_mermaid_js_over_frankenmermaid" = 280.65
+"baseline_render_stage_12x24_mermaid_js_over_frankenmermaid" = 345.81
+"baseline_render_stage_16x32_mermaid_js_over_frankenmermaid" = 519.27
+"candidate_render_stage_8x16_frankenmermaid_over_mermaid_js" = 0.003473
+"candidate_render_stage_12x24_frankenmermaid_over_mermaid_js" = 0.002806
+"candidate_render_stage_16x32_frankenmermaid_over_mermaid_js" = 0.001823
+"candidate_render_stage_8x16_mermaid_js_over_frankenmermaid" = 287.93
+"candidate_render_stage_12x24_mermaid_js_over_frankenmermaid" = 356.41
+"candidate_render_stage_16x32_mermaid_js_over_frankenmermaid" = 548.47
+
+[negative_measurement_element_child_capacity_2026_06_27.validation]
+"cargo_test_fm_render_svg_child_capacity" = "passed via rch exec local fallback: 1 test"
+"cargo_test_frankenmermaid_cli_frankentui_conformance" = "passed via rch exec local fallback after queue_timeout: 1 test"
+
+[negative_measurement_element_child_capacity_2026_06_27.decision]
+status = "reject"
+rationale = "Element child Vec pre-sizing produced only noisy local-fallback improvements, with no statistically reliable Criterion win and the 12x24 case below the keep threshold. Production source was manually reverted and only evidence remains."
