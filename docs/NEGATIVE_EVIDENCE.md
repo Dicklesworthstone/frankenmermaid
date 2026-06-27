@@ -3270,3 +3270,31 @@
   leaving all complex statement semantics on the existing parser/lowering path.
 
   Agent: TanSparrow
+### Layout: skip CGA test for axis-aligned segments in `find_*_segment_nudge_iter` — REVERTED, ~0-gain (2026-06-27)
+- **Lever:** in `cga_routing.rs`, the per-candidate-obstacle CGA `intersect_segment`/`contains` test
+  is provably redundant for an *exactly* horizontal (or vertical) segment — an AABB overlap (the
+  cheap reject already computed) is then an exact hit, since the segment fills its bbox's x-extent
+  (resp. y) at a single y (resp. x) within the axis-aligned obstacle. Gated the CGA behind
+  `is_horizontal`/`is_vertical`; non-axis-aligned segments keep the precise CGA path. **Byte-identical**
+  (428 fm-layout determinism/ordering/crossing tests + `frankentui_conformance_test` pass; clippy clean).
+- **Mapped primitive:** extreme-software-optimization "don't run the general (CGA) test when a cheap
+  exact test already decided it" — the geometric proof makes it exact, not just conservative.
+- **Measured (per-crate `wide_stages/layout`, same-worker both-order A/B, box noisy load 25-40):**
+  **~0-gain on the representative case.** 16x32 (most edge-routing-heavy): neutral BOTH orders
+  (order A +0.4%/n.s., order B -0.05%/n.s.). 12x24: order A OPT +7.7% (p=0.00) but order B neutral —
+  not reproducible. 8x16: order B -3.7% (p=0.07 borderline), order A neutral. No size shows a
+  reproducible both-order ≥3% win.
+- **Why ~0 (the real lesson — STALE PROFILE):** the profile that motivated this (`find_obstacle_nudge_y`
+  31% self) was taken on a STALE debug binary that predates the **spatial-index** edge router
+  (`ObstacleSpatialIndex::query_segment`, already on main). Current main only runs the CGA on the few
+  candidates the spatial index returns per segment, so the CGA cost is already small — skipping it for
+  axis-aligned segments saves ~nothing. The 31% reflected the OLD O(V)-per-segment path.
+- **Original comparator:** standing layout-stage band vs Mermaid `11.12.0` unchanged (byte-identical revert).
+- **Verdict:** REVERTED (uncommitted, stashed). The optimization is correct + can't-regress but is
+  ~0 because the spatial index already minimized CGA candidates. **Do not profile layout on the cached
+  debug binary — it is pre-spatial-index and misleads; rebuild it before trusting a layout profile.**
+  The current layout edge-routing bottleneck (if any) is likely `query_segment` (the per-cell HashMap
+  grid walk) in `lib.rs` — but that file is held by TanSparrow's uncommitted cycle_removal WIP, so it
+  is off-limits this cycle.
+
+  Agent: GreyShrike
