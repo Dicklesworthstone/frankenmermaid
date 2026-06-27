@@ -1519,6 +1519,33 @@
 
 ## Blocked/Invalid Evidence Attempts
 
+### Dead-CSS prune (~27% of the `<style>` is unused per diagram) — HIGH VALUE, blocked on reliable feature detection (2026-06-27)
+- **The lever (biggest remaining byte gap):** the embedded `<style>` is **universal** — it carries
+  rules for features/diagram-types not present in the current render. Measured on a flowchart (`w40`):
+  **~2,571 B (~27%) of the ~9.5 KB CSS is dead** — `.fm-cluster*`, `.edge-label`/`.fm-edge-labeled`,
+  `.fm-edge-dashed`/`.fm-edge-thick`/`.fm-edge-back`, `.fm-node-block-beta`, `.fm-cluster-c4`/
+  `-swimlane`, `.fm-node-inactive`, `.fm-label`. For a CSS-dominated small SVG (CSS is 79%) that's
+  **~20% of the whole file**; ~1.5% of wide. Pruning is also a small *time* win (less CSS to build).
+- **Implementation that works structurally:** the feature groups are **contiguous blocks** in the
+  single 330-line format-arg `write!`. They can be pruned without splitting that `write!` — *remove*
+  the block from the template and conditionally **`push_str` it back after the core** (order is
+  irrelevant; distinct selectors). Verified this compiles + 220 tests pass + clustered diagrams keep
+  the rules.
+- **Blocked on feature detection (found by attempting the cluster group):** the obvious detector
+  `!layout.clusters.is_empty()` is **over-inclusive** — it is *true* for `w40` (the layered wide
+  layout populates `layout.clusters` with groupings that are **not** rendered as `.fm-cluster`
+  elements), so the prune never fires for the benched flowchart. The render is still correct
+  (conservative = keep), but there's no win. A reliable detector must reflect what is *actually
+  emitted* (e.g. the IR's real subgraph presence, or edge-label/edge-style scans), and a wrong
+  detector in the *other* direction (under-inclusive) would silently drop a needed rule — which the
+  golden snapshot would absorb. Reverted pending an accurate per-feature detector.
+- **Next step:** build a `CssFeatures { has_clusters, has_labeled_edges, has_styled_edges, … }` from
+  the **IR** (not the layout), verified against `class="fm-…"` presence in the rendered body for each
+  feature, then prune each contiguous block via the append-after-core pattern above. Estimated
+  ~2.5 KB (~20% small / ~1.5% wide) + small time. This is the single biggest remaining byte lever.
+- **frankenmermaid/Mermaid ratio:** unchanged — reverted. Standing `226x`–`506x` (worker-dependent)
+  over Mermaid `11.12.0`.
+
 ### Byte-reduction frontier: CSS minify blocked; attr levers exhausted; post-gates standing holds — FINDING (2026-06-27)
 - **CSS minify (the remaining byte lever) is blocked.** After the inline-vs-CSS gates the embedded
   `<style>` is the largest single chunk (~9.7 KB, **79% of a small SVG**), and it's pretty-printed
