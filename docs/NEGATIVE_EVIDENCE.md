@@ -1519,6 +1519,29 @@
 
 ## Blocked/Invalid Evidence Attempts
 
+### Label-text `fill` is NOT cleanly gateable like font-family — per-class CSS coverage is mostly absent (2026-06-27)
+- **Why investigated:** after the `font-family` root-move (−6.83%), the label `<text>` still carries
+  `fill="#1a1a2e"` (= `--fm-text-color`); the obvious next step was to gate it like the node stroke.
+- **Blocked — coverage is per-label-class and mostly missing.** Unlike `font-family` (uniform across
+  every label, so movable to the root via inheritance), `fill` is gated only if the label class has a
+  CSS `fill` rule that overrides the inline for CSS-on. Verified coverage: `.fm-node text`,
+  `.edge-label`, `.fm-cluster-label` = **covered**; `.fm-sequence-fragment-label`, `.fm-er-cardinality`,
+  `.fm-sequence-mirror-header`, `.fm-er-attr`, `.fm-state-label` (and the gantt/pie/quadrant/xychart
+  label classes) = **NOT covered**. Gating an uncovered class's inline fill would drop its color (it
+  has no CSS/inherited source) — a silent visual regression the golden snapshot would absorb.
+- **Also sprawling:** label fill is emitted at **~42 sites** across *two* variables
+  (`.fill(&colors.text)` ×16 in node/compartment contexts, `.fill(&theme.colors.text)` ×26 in
+  diagram-specific contexts) **plus** the plain-label fast path — and the per-element root-fill trick
+  used for font-family is unsafe here because `fill` (unlike `font-family`) is also used by *shapes*,
+  so a root `fill` would be wrongly inherited by any shape lacking its own fill.
+- **What it would take:** add CSS `fill` rules for *all* ~15 label classes in `to_svg_style`, then gate
+  all 42 sites + the fast path with per-site coverage verification — a large, error-prone change for an
+  estimated ~1–2% (vs the font-family's −6.83%). Deferred. The clean, uniform inline-vs-CSS/root win was
+  `font-family`; the remaining label attrs (`fill` per-class, `text-anchor`/`font-size` per-label varying)
+  do not transfer cleanly.
+- **frankenmermaid/Mermaid ratio:** unchanged — investigation only. Standing `240.5x`/`319.1x`/`505.7x`
+  (latest) over Mermaid `11.12.0`.
+
 ### Node inline-style gating (the node analog of the landed edge fill/stroke gates) — BLOCKED, deferred refactor (2026-06-26)
 - **Why investigated:** the edge `fill`/`stroke` gates (Kept Wins) landed cleanly because each is a
   single site under one CSS rule. Nodes carry far more inline presentation bytes
