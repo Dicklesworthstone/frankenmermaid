@@ -21,6 +21,10 @@ pub enum AttributeValue {
     String(String),
     Number(f32),
     Integer(i32),
+    /// A string value that is known to contain no XML-special bytes and is written
+    /// verbatim, skipping the per-byte escape scan. Use only for generated content
+    /// that provably cannot contain `& < > " '` or `]` (e.g. path `d` geometry).
+    Raw(String),
 }
 
 impl AttributeValue {
@@ -44,6 +48,7 @@ impl AttributeValue {
                 }
             }
             Self::Integer(i) => write!(out, "{i}"),
+            Self::Raw(s) => out.write_str(s),
         }
     }
 }

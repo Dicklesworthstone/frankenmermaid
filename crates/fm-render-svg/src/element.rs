@@ -3,7 +3,7 @@
 //! Provides structs for creating SVG elements like rect, circle, path, etc.
 //! with a fluent builder API.
 
-use crate::attributes::Attributes;
+use crate::attributes::{AttributeValue, Attributes};
 
 /// Types of SVG elements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,7 +306,12 @@ impl Element {
     /// Set the d (path data) attribute.
     #[must_use]
     pub fn d(mut self, path: &str) -> Self {
-        self.attrs = self.attrs.str("d", path);
+        // Path `d` data is always generated geometry (command letters `M`/`L`/`C`/`Z`,
+        // digits, `.`, `-`, `,`, space) and never contains an XML-special byte, so it is
+        // stored as a `Raw` value that serializes via a direct `write_str` and skips the
+        // per-byte escape scan. On wide curve-heavy graphs the `d` strings are long and
+        // numerous, so that scan is a measurable share of render (output byte-identical).
+        self.attrs = self.attrs.set("d", AttributeValue::Raw(path.to_string()));
         self
     }
 

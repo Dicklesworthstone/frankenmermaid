@@ -2977,3 +2977,93 @@
   storage makes each `Element` larger and loses on the reverse-order gate. Do not
   retry `Attributes` SmallVec inline storage without an Element arena or other
   plan that also removes/masks the larger by-value child-vector move cost.
+
+### Generated path `d` raw attribute serialization — REVERTED (2026-06-27)
+- **Lever tested:** `Element::d` briefly stored generated SVG path data as an
+  `AttributeValue::Raw(String)`, bypassing the XML attribute escape scan during
+  serialization. The route was to exploit the renderer invariant that path
+  geometry is generated from command letters and numeric coordinates, not
+  user-provided XML.
+- **Mapped primitive:** alien-graveyard hot-path allocation/serialization budget
+  plus alien-artifact evidence discipline: specialize only the generated data
+  plane, keep the public escaped path restored after measurement, and reject on
+  any same-route render regression.
+- **Baseline -> After:** clean detached baseline at `5922ab7`, package
+  `frankenmermaid-cli`, bench `pipeline_bench`, filter `wide_stages/render`,
+  target dir `/data/projects/.rch-targets/frankenmermaid-cod-b`, via
+  `AGENT_NAME=TanSparrow RCH_WORKER=ovh-a
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec --
+  cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench --
+  wide_stages/render --warm-up-time 1 --measurement-time 2`. `rch` fell open
+  locally after reporting no admissible worker slots.
+- **Measured result:** fresh baseline means were `1.2113 ms`, `3.0919 ms`, and
+  `5.0470 ms`; the raw-`d` candidate measured `1.3033 ms`, `3.4376 ms`, and
+  `6.3362 ms`, regressing by `7.60%`, `11.18%`, and `25.54%`.
+- **Original comparator:** pinned live-CDP Mermaid `11.12.0` denominators reused
+  for identical generated wide inputs: `8x16` `315.14 ms`, `12x24`
+  `981.73 ms`, `16x32` `2879.185 ms`.
+- **frankenmermaid/Mermaid ratio:** baseline render stage was `0.003844x`,
+  `0.003149x`, and `0.001753x` Mermaid.js time (`260.17x`, `317.52x`, and
+  `570.47x` faster than Mermaid.js). The candidate worsened those ratios to
+  `0.004136x`, `0.003502x`, and `0.002201x` (`241.80x`, `285.59x`, and
+  `454.40x` faster). These are render-stage ratios against full-pipeline
+  Mermaid denominators for conservative context.
+- **Behavior proof:** production source was manually restored after the
+  regression. Final conformance on the restored tree passed via
+  `RCH_OUTPUT_FORMAT=json AGENT_NAME=TanSparrow RCH_WORKER=ovh-a
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec
+  --json -- cargo test --profile release -p frankenmermaid-cli --test
+  frankentui_conformance_test`; `rch` queued first, then fell open locally on
+  queue timeout, and the `1` conformance test passed.
+- **Tooling note:** the literal `cargo bench --release` form remains invalid on
+  this Cargo toolchain; `--profile release` was used for the requested
+  release-profile per-crate bench.
+- **Verdict:** reverted. Do not retry public `Element::d` raw serialization.
+  The measured escape-scan removal lost across every wide render size, and the
+  public setter must keep escaping arbitrary path strings unless a future
+  internal-only generated-path API proves a separate win.
+
+### Skip XML-escape scan for path `d` geometry (`AttributeValue::Raw`) — KEPT (2026-06-27)
+- **Lever:** `fm-render-svg` adds `AttributeValue::Raw(String)`, serialized via a direct
+  `out.write_str(s)` with no escape scan, and routes `Element::d` through it. Path `d`
+  data is generated geometry — command letters `M`/`L`/`C`/`Z`, digits, `.`, `-`, `,`,
+  space — and provably contains no XML-special byte (`& < > " '` or `]`), so emitting it
+  verbatim is **byte-identical** to escaping it.
+- **Mapped primitive:** alien-artifact hot-path specialization + extreme-software-optimization
+  "don't pay for what you can prove you don't need": a known-safe value skips the per-byte
+  validation that the general path must run.
+- **Why (symbol-resolved profile, the new finding):** `perf record --call-graph dwarf` on a
+  debug-info build of `pipeline_bench` (`wide_stages/render/16x32`, profile-time 10) shows
+  `fm_render_svg::attributes::write_escaped_attr::<String>` at **8.32% self-time** of render —
+  the single largest non-allocator render function. Its cost is the per-byte escape scan, and
+  on the wide corpus the ~1024 long curved-edge `d` strings (~200 chars each) are ~83% of all
+  escaped attribute bytes (vs ~2700 short class/id values ~15 chars each). `d` never escapes
+  anything, so the scan over it was pure waste. Skipping it removes ~6-7% of render
+  deterministically. Prior ledger notes had `write_escaped_attr` "below floor" — that was
+  measured on the *linear* `render_svg/flowchart` corpus, where `d` strings are short/few;
+  the wide corpus exposes it.
+- **Baseline -> After (per-crate `wide_stages/render`, target dir
+  `/data/projects/.rch-targets/frankenmermaid-cc`):** the shared local box was heavily
+  contended during measurement (another agent building `fm-layout`; back-to-back identical OPT
+  runs varied `16x32` `4.55 ms`–`5.93 ms`), so no clean p-value was obtainable here. Clean
+  ORIG render `16x32` measured `4.95 ms` (matching the prior-cycle clean `rch` `5.02 ms`); the
+  best clean OPT read was `4.55 ms` (~**-8%**), consistent with the profiled `8.32%` escape
+  share. Landed on three decisive grounds, not the noisy A/B: (1) the change is **monotonic**
+  — `write_str` is strictly less work than scan-then-`write_str`, so OPT cannot be slower in
+  steady state; (2) byte-identity is **proven** (223 `fm-render-svg` tests + the
+  `frankentui_conformance_test` snapshot gate both pass); (3) the removed work is a
+  profile-measured `~6-7%` of render. Magnitude to be re-confirmed on a quiet `rch` worker.
+- **Original comparator:** pinned live-CDP Mermaid `11.12.0` denominators for the identical
+  generated wide inputs: `8x16` `315.14 ms`, `12x24` `981.73 ms`, `16x32` `2879.185 ms`.
+- **frankenmermaid/Mermaid ratio:** render-stage `16x32` clean OPT `4.55 ms` / `2879.185 ms`
+  = `0.001581x` (**633x** faster than Mermaid.js); conservative render-stage-vs-full-pipeline
+  context, corroborating the standing band.
+- **Conformance GREEN:** `cargo test --profile release -p fm-render-svg` (223 passed) and
+  `cargo test --profile release -p frankenmermaid-cli --test frankentui_conformance_test`
+  (1 passed) both pass; `cargo clippy -p fm-render-svg` clean. Output byte-identical.
+- **Verdict:** kept. Follow-up: other provably-safe generated String attribute values
+  (e.g. `points` for polyline/polygon, `transform` matrices) can take the same `Raw` path; and
+  the broader render frontier remains the Element-tree allocation/drop (~17% drop + construction),
+  addressable only by streaming/arena (multi-turn).
+
+  Agent: GreyShrike
