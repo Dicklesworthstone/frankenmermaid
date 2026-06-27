@@ -50,6 +50,66 @@
 
 ## Entries
 
+### Theme CSS sub-writer append path - REJECTED (2026-06-27)
+- **Lever:** `fm-render-svg::Theme::to_svg_style` was changed to call private
+  `ThemeColors::write_css_vars` and `FontConfig::write_css` helpers that wrote
+  directly into the final style `String`. The existing `to_css_vars()` and
+  `to_css()` public helpers were kept behavior-compatible by delegating to the
+  same writers.
+- **Hypothesis:** after the kept direct-write of the large utility CSS template,
+  the remaining CSS hot path still allocated two intermediate strings and several
+  `format!` temporaries for theme variables and font CSS. Alien Graveyard /
+  FrankenSuite guidance explicitly calls out `format!` on hot paths and simple
+  concat as candidates for `write!` into a reused buffer.
+- **Render-stage baseline -> after:** clean baseline worktree
+  `/data/projects/.worktrees/frankenmermaid-tansparrow-theme-subwriters-baseline-20260627`
+  at `02cad1d`, candidate worktree
+  `/data/projects/.worktrees/frankenmermaid-tansparrow-theme-subwriters-20260627`,
+  warm target dir `/data/projects/.rch-targets/frankenmermaid-cod-b`, package
+  `frankenmermaid-cli`, bench `pipeline_bench`, filter `wide_stages/render`.
+  Same-local `rch exec` fallback baseline means were `1.0935 ms`, `2.6047 ms`,
+  and `4.9912 ms` for `8x16`, `12x24`, and `16x32`; candidate means were
+  `1.2194 ms`, `2.9315 ms`, and `5.2374 ms`. That is `11.51%`, `12.55%`, and
+  `4.93%` slower, with Criterion reporting significant regressions on `8x16`
+  and `12x24` and no significant change on `16x32`.
+- **Fresh full-pipeline follow-up:** this run repeated the Mermaid-facing
+  `full_pipeline_wide` gate with the requested warm target dir
+  `/data/projects/.rch-targets/frankenmermaid-cod-a`. The same-local baseline
+  through `rch exec` fallback measured `1.8083 ms`, `4.7523 ms`, and `8.3740 ms`;
+  same-local candidate measured `1.6505 ms`, `4.2361 ms`, and `8.7357 ms`.
+  That is `8.73%` faster, `10.86%` faster, and `4.32%` slower. A remote
+  candidate-only `hz2` run measured `1.5106 ms`, `3.6487 ms`, and `6.6555 ms`,
+  but it had no matching remote baseline and is routing context only.
+- **Original comparator:** latest pinned live-CDP Mermaid `11.12.0` denominator
+  reused from the current main ledger for identical generated wide inputs:
+  `315.14 ms`, `981.73 ms`, and `2879.185 ms`.
+- **frankenmermaid/Mermaid ratio:** the retained render-stage baseline means
+  versus Mermaid.js denominators give ratios `0.003470x`, `0.002653x`, and
+  `0.001734x` (Mermaid.js `288.19x`, `376.91x`, and `576.85x` slower). The
+  rejected candidate worsened those render-stage ratios to `0.003869x`,
+  `0.002986x`, and `0.001819x` (Mermaid.js only `258.44x`, `334.89x`, and
+  `549.74x` slower). The fresh full-pipeline candidate still beats Mermaid.js
+  by `190.94x`, `231.75x`, and `329.59x`, but the retained full-pipeline baseline
+  was better on the largest gate (`343.82x` vs `329.59x`).
+- **Verdict:** regression; code was reverted before commit and only this ledger
+  evidence remains.
+- **Revert:** manual `apply_patch` restored the original `to_css_vars()`,
+  `to_css()`, and `to_svg_style()` structure; `git diff` showed no production
+  code diff afterward.
+- **Do-not-retry note:** do not split the remaining small theme/font CSS writers
+  into private append helpers in isolation. The extra call structure and
+  `fmt::Write` path lose against the current `format!` temporaries for this
+  workload; the large-template direct-write keep is the useful member of this
+  family.
+- **Tooling note:** `rch exec` first selected `vmi1227854` and failed before
+  benchmarking because `cmake` is missing for `highs-sys`; a pinned `hz2` retry
+  fell back local with no admissible workers, so the keep/reject decision uses
+  the adjacent same-local `rch exec` fallback pair. On this Cargo toolchain,
+  per-crate benches use `--profile release`; literal `cargo bench --release`
+  remains invalid. A follow-up `full_pipeline_wide` gate used
+  `/data/projects/.rch-targets/frankenmermaid-cod-a` and confirmed the reject
+  because `16x32` regressed.
+
 ### Theme CSS direct buffer write - KEPT (2026-06-26)
 - **Lever:** `fm-render-svg::Theme::to_svg_style` now writes the large utility
   CSS template directly into the existing `String` with `write!` instead of

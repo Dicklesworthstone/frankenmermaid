@@ -1499,3 +1499,82 @@ tooling_notes = [
 [post_measurement_theme_css_direct_write_2026_06_26.decision]
 status = "keep"
 rationale = "Direct CSS template writing improves adjacent full_pipeline_wide 8x16 by 21.92% and 16x32 by 14.33%, with 12x24 within the no-change band; conformance is green and CSS generation uses the same template without a temporary format! String."
+
+[negative_measurement_theme_css_subwriters_2026_06_27]
+date = "2026-06-27"
+agent = "TanSparrow"
+graveyard_route = "Alien Graveyard / FrankenSuite format-hot-path rule: replace simple concat and format! temporaries with write! into a reused buffer."
+artifact_contract = "The candidate preserved public to_css_vars() and to_css() output while making Theme::to_svg_style append theme/font CSS directly into the final style buffer."
+worker_delta = "same-machine local fallback through rch exec; initial remote selected vmi1227854 and failed before benchmark because cmake is missing for highs-sys"
+baseline_commit = "02cad1d"
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-b"
+fresh_full_pipeline_target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-a"
+candidate_summary = "ThemeColors::write_css_vars and FontConfig::write_css private helpers removed two intermediate String appends and per-line format! temporaries from the to_svg_style hot path."
+render_baseline_command = "RCH_WORKER=hz2 RUSTFLAGS='-C metadata=themesubbasehz2' CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
+render_candidate_command = "RCH_WORKER=hz2 RUSTFLAGS='-C metadata=themesubcandhz2' CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
+full_pipeline_baseline_command = "RUSTFLAGS='-C metadata=tansparrowthemesubbase' CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+full_pipeline_remote_candidate_command = "RUSTFLAGS='-C metadata=tansparrowthemesubcand' CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+full_pipeline_local_candidate_command = "RUSTFLAGS='-C metadata=tansparrowthemesubcandlocal' CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+mermaid_js_command = "Latest live-CDP Mermaid 11.12.0 denominator reused from the current-main BOLD-VERIFY entry for identical generated wide inputs."
+rust_build_profile = "release profile [optimized]"
+behavior_proof = "While candidate was applied: rustfmt --edition 2024 --check crates/fm-render-svg/src/theme.rs passed; CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec -- cargo check --profile release -p fm-render-svg passed; CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec -- cargo test --profile release -p fm-render-svg theme -- --nocapture passed. Code was reverted before commit; CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec -- cargo test --profile release -p frankenmermaid-cli --test frankentui_conformance_test passed on ovh-a after the revert."
+tooling_notes = [
+  "Agent Mail macro_start_session failed because the mail SQLite database corruption circuit breaker is open.",
+  "cargo fmt --check --manifest-path crates/fm-render-svg/Cargo.toml fails on pre-existing formatting drift in crates/fm-render-svg/src/lib.rs and crates/fm-render-svg/src/path.rs; rustfmt --check passed for the touched theme.rs file.",
+  "Current main emits an unrelated unused_mut warning in crates/fm-render-svg/src/lib.rs:766.",
+  "The literal cargo bench --release form remains invalid on this Cargo toolchain; --profile release was used for per-crate bench commands.",
+]
+
+[negative_measurement_theme_css_subwriters_2026_06_27.metrics]
+"wide_stages_render_8x16_baseline_mean_ms" = 1.0935
+"wide_stages_render_8x16_candidate_mean_ms" = 1.2194
+"wide_stages_render_8x16_candidate_delta_pct" = 11.5135
+"wide_stages_render_12x24_baseline_mean_ms" = 2.6047
+"wide_stages_render_12x24_candidate_mean_ms" = 2.9315
+"wide_stages_render_12x24_candidate_delta_pct" = 12.5466
+"wide_stages_render_16x32_baseline_mean_ms" = 4.9912
+"wide_stages_render_16x32_candidate_mean_ms" = 5.2374
+"wide_stages_render_16x32_candidate_delta_pct" = 4.9327
+"full_pipeline_wide_8x16_baseline_mean_ms" = 1.8083
+"full_pipeline_wide_8x16_candidate_mean_ms" = 1.6505
+"full_pipeline_wide_8x16_candidate_delta_pct" = -8.7264
+"full_pipeline_wide_12x24_baseline_mean_ms" = 4.7523
+"full_pipeline_wide_12x24_candidate_mean_ms" = 4.2361
+"full_pipeline_wide_12x24_candidate_delta_pct" = -10.8621
+"full_pipeline_wide_16x32_baseline_mean_ms" = 8.3740
+"full_pipeline_wide_16x32_candidate_mean_ms" = 8.7357
+"full_pipeline_wide_16x32_candidate_delta_pct" = 4.3193
+"remote_hz2_full_pipeline_wide_8x16_candidate_mean_ms" = 1.5106
+"remote_hz2_full_pipeline_wide_12x24_candidate_mean_ms" = 3.6487
+"remote_hz2_full_pipeline_wide_16x32_candidate_mean_ms" = 6.6555
+"full_pipeline_wide_8x16_mermaid_js_mean_ms" = 315.1399999976158
+"full_pipeline_wide_12x24_mermaid_js_mean_ms" = 981.7300000190735
+"full_pipeline_wide_16x32_mermaid_js_mean_ms" = 2879.185000014305
+"baseline_render_stage_8x16_frankenmermaid_over_mermaid_js" = 0.003470
+"baseline_render_stage_12x24_frankenmermaid_over_mermaid_js" = 0.002653
+"baseline_render_stage_16x32_frankenmermaid_over_mermaid_js" = 0.001734
+"baseline_render_stage_8x16_mermaid_js_over_frankenmermaid" = 288.19
+"baseline_render_stage_12x24_mermaid_js_over_frankenmermaid" = 376.91
+"baseline_render_stage_16x32_mermaid_js_over_frankenmermaid" = 576.85
+"candidate_render_stage_8x16_frankenmermaid_over_mermaid_js" = 0.003869
+"candidate_render_stage_12x24_frankenmermaid_over_mermaid_js" = 0.002986
+"candidate_render_stage_16x32_frankenmermaid_over_mermaid_js" = 0.001819
+"candidate_render_stage_8x16_mermaid_js_over_frankenmermaid" = 258.44
+"candidate_render_stage_12x24_mermaid_js_over_frankenmermaid" = 334.89
+"candidate_render_stage_16x32_mermaid_js_over_frankenmermaid" = 549.74
+"baseline_full_pipeline_wide_8x16_frankenmermaid_over_mermaid_js" = 0.005738
+"baseline_full_pipeline_wide_12x24_frankenmermaid_over_mermaid_js" = 0.004841
+"baseline_full_pipeline_wide_16x32_frankenmermaid_over_mermaid_js" = 0.002908
+"baseline_full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 174.27
+"baseline_full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 206.58
+"baseline_full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 343.82
+"candidate_full_pipeline_wide_8x16_frankenmermaid_over_mermaid_js" = 0.005237
+"candidate_full_pipeline_wide_12x24_frankenmermaid_over_mermaid_js" = 0.004315
+"candidate_full_pipeline_wide_16x32_frankenmermaid_over_mermaid_js" = 0.003034
+"candidate_full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 190.94
+"candidate_full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 231.75
+"candidate_full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 329.59
+
+[negative_measurement_theme_css_subwriters_2026_06_27.decision]
+status = "reject"
+rationale = "The dominant wide SVG render stage regressed by 11.51% on 8x16 and 12.55% on 12x24, and a fresh full_pipeline_wide follow-up on the requested cod-a target dir still regressed the largest 16x32 gate by 4.32%; production code was reverted and only the negative evidence remains."
