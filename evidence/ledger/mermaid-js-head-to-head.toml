@@ -2064,3 +2064,60 @@ tooling_notes = [
 [positive_measurement_accessible_edge_label_cache_2026_06_27.decision]
 status = "keep"
 rationale = "Same-worker hz2 full_pipeline_wide improved across all three generated wide sizes, and the render-stage routing bench showed a significant 12x24 improvement with no measured regression. Behavior is byte-equivalent for edge descriptions and conformance stayed green."
+
+[negative_measurement_truncate_label_byte_len_guard_2026_06_27]
+date = "2026-06-27"
+agent = "TanSparrow"
+lever_bead = "bd-1buv.1"
+graveyard_route = "Alien Graveyard allocation/hot-path budget plus Alien Artifact evidence-preserving fast-path specialization: add a byte-length short-label guard before Unicode char counting in truncate_label."
+worker_delta = "baseline and candidate used the same rch local fallback after RCH_WORKER=ovh-a reported no admissible workers; conformance retry ran remotely on ovh-a"
+baseline_commit = "294d0e0"
+candidate_summary = "Temporarily returned Cow::Borrowed from truncate_label when label.len() <= limit; manually reverted after wide_stages/render regression."
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-b"
+render_baseline_command = "AGENT_NAME=TanSparrow RCH_WORKER=ovh-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
+render_candidate_command = "AGENT_NAME=TanSparrow RCH_WORKER=ovh-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
+mermaid_js_command = "Pinned live-CDP Mermaid 11.12.0 denominator reused from current-main ledger for identical generated wide inputs."
+rust_build_profile = "release profile [optimized]"
+behavior_proof = "Candidate passed fm-render-svg truncate_label focused tests while measured. Production source was manually restored; frankenmermaid-cli frankentui_conformance_test passed on ovh-a through rch exec after the revert."
+tooling_notes = [
+  "The literal cargo bench --release form remains invalid on this Cargo toolchain; --profile release was used for the requested release-profile per-crate bench.",
+  "An initial conformance rch exec wrapper produced no progress output and was interrupted; RCH_OUTPUT_FORMAT=json rch exec --json reran the same conformance test remotely on ovh-a and passed.",
+]
+
+[negative_measurement_truncate_label_byte_len_guard_2026_06_27.metrics]
+"wide_stages_render_8x16_baseline_mean_ms" = 1.1381
+"wide_stages_render_8x16_candidate_mean_ms" = 1.2909
+"wide_stages_render_8x16_candidate_delta_pct" = 13.4259
+"wide_stages_render_8x16_criterion_p_value" = 0.00
+"wide_stages_render_12x24_baseline_mean_ms" = 2.5213
+"wide_stages_render_12x24_candidate_mean_ms" = 3.2360
+"wide_stages_render_12x24_candidate_delta_pct" = 28.3465
+"wide_stages_render_12x24_criterion_p_value" = 0.00
+"wide_stages_render_16x32_baseline_mean_ms" = 6.6031
+"wide_stages_render_16x32_candidate_mean_ms" = 6.2516
+"wide_stages_render_16x32_candidate_delta_pct" = -5.3233
+"wide_stages_render_16x32_criterion_p_value" = 0.12
+"wide_stages_render_8x16_mermaid_js_mean_ms" = 315.1399999976158
+"wide_stages_render_12x24_mermaid_js_mean_ms" = 981.7300000190735
+"wide_stages_render_16x32_mermaid_js_mean_ms" = 2879.185000014305
+"baseline_render_stage_8x16_frankenmermaid_over_mermaid_js" = 0.003611
+"baseline_render_stage_12x24_frankenmermaid_over_mermaid_js" = 0.002568
+"baseline_render_stage_16x32_frankenmermaid_over_mermaid_js" = 0.002293
+"baseline_render_stage_8x16_mermaid_js_over_frankenmermaid" = 276.90
+"baseline_render_stage_12x24_mermaid_js_over_frankenmermaid" = 389.37
+"baseline_render_stage_16x32_mermaid_js_over_frankenmermaid" = 436.04
+"candidate_render_stage_8x16_frankenmermaid_over_mermaid_js" = 0.004096
+"candidate_render_stage_12x24_frankenmermaid_over_mermaid_js" = 0.003296
+"candidate_render_stage_16x32_frankenmermaid_over_mermaid_js" = 0.002171
+"candidate_render_stage_8x16_mermaid_js_over_frankenmermaid" = 244.12
+"candidate_render_stage_12x24_mermaid_js_over_frankenmermaid" = 303.38
+"candidate_render_stage_16x32_mermaid_js_over_frankenmermaid" = 460.55
+
+[negative_measurement_truncate_label_byte_len_guard_2026_06_27.validation]
+"cargo_test_fm_render_svg_truncate_label" = "passed via rch exec local fallback: 2 tests"
+"cargo_fmt_check" = "passed"
+"cargo_test_frankenmermaid_cli_frankentui_conformance" = "passed via RCH_OUTPUT_FORMAT=json rch exec --json on ovh-a: 1 test"
+
+[negative_measurement_truncate_label_byte_len_guard_2026_06_27.decision]
+status = "reject"
+rationale = "truncate_label byte-length short-label guard regressed 8x16 render by 13.43% and 12x24 render by 28.35%; the 16x32 improvement was noisy and not sufficient to keep the lever. Production source was manually reverted and only evidence remains."

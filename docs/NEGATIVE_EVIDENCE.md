@@ -2842,6 +2842,9 @@
   release-profile per-crate bench. An initial conformance wrapper produced no
   progress output and was interrupted; the JSON retry ran remotely on `ovh-a`
   and passed.
+- **Structured ledger:** see
+  `negative_measurement_truncate_label_byte_len_guard_2026_06_27` in
+  `evidence/ledger/mermaid-js-head-to-head.toml`.
 - **Verdict:** reverted. The byte-length guard worsened the two smaller wide
   render cases and produced only a noisy `16x32` improvement; do not retry
   `truncate_label` short-label guards without a profile proving char counting is
