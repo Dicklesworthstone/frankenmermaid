@@ -1610,6 +1610,31 @@
 
 ## Blocked/Invalid Evidence Attempts
 
+### Dead-CSS prune VALIDATED — landed concurrently; standing down from fm-render-svg to avoid collision (2026-06-27)
+- **The lever works and is partly landed.** Last cycle's dead-CSS-prune finding (~27% of the
+  `<style>` is unused per diagram; emit feature rule groups only when the feature is present) was
+  **landed concurrently by another agent** as `701b265` *"fm-render-svg: stream XML escaping and
+  emit edge-label CSS only when edges are labeled"* — the exact edge-label group I implemented this
+  cycle (gated on `ir.edges` having labels). My parallel implementation is **byte-identical to HEAD**
+  (`git diff theme.rs` empty), i.e. fully redundant. The same agent also landed an **SVG streaming
+  render** win (`c605ab5`) — the big lever I had deferred for many cycles. Both confirm the
+  directions in this ledger were correct.
+- **Why I produced no source change this turn:** HEAD advanced `b9a9819 → c605ab5` mid-cycle (same
+  `main`, same working dir — a concurrent agent is actively committing here). The working tree also
+  holds that agent's **in-flight, uncommitted** refactor (`attributes.rs` privatised
+  `escape_xml_text`; `lib.rs:4500` `.content(&label_text)` currently fails `String: From<&Cow>`),
+  which **breaks the fm-cli build** and therefore blocks `golden_svg_test` regeneration. That break
+  is **not on HEAD** (`HEAD:lib.rs:4500` is unrelated) — transient working-tree state that resolves
+  when they commit. I did not touch their files (`git add` doc only).
+- **Continuation for whoever owns fm-render-svg byte work:** the remaining dead-CSS groups beyond
+  edge-label are the next wins — **cluster** rules (needs a *render-matched* detector, NOT
+  `!layout.clusters.is_empty()` which is over-inclusive for the layered wide layout; use the IR's
+  real subgraph presence, verified against `class="fm-cluster"` in the body), **dashed/thick edge**
+  rules (`ir.edges` arrow types), and diagram-type-specific groups (block-beta/c4/swimlane via
+  `ir.diagram_type`). Same append-after-core pattern as `701b265`.
+- **frankenmermaid/Mermaid ratio:** unchanged — no source change. Standing `226x`–`506x`
+  (worker-dependent) over Mermaid `11.12.0`.
+
 ### Dead-CSS prune (~27% of the `<style>` is unused per diagram) — HIGH VALUE, blocked on reliable feature detection (2026-06-27)
 - **The lever (biggest remaining byte gap):** the embedded `<style>` is **universal** — it carries
   rules for features/diagram-types not present in the current render. Measured on a flowchart (`w40`):
