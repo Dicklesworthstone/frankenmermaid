@@ -1419,6 +1419,33 @@
 
 ## Blocked/Invalid Evidence Attempts
 
+### Node inline-style gating (the node analog of the landed edge fill/stroke gates) — BLOCKED, deferred refactor (2026-06-26)
+- **Why investigated:** the edge `fill`/`stroke` gates (Kept Wins) landed cleanly because each is a
+  single site under one CSS rule. Nodes carry far more inline presentation bytes
+  (`fill="url(#fm-node-gradient)"` ~30 B, `stroke` ~17 B, `stroke-width`), so the same lever would
+  be a bigger win — *if* it transfers.
+- **Node `fill` — NOT redundant.** The inline is the **gradient** `url(#fm-node-gradient)`, but the
+  unconditional CSS `.fm-node rect, path, circle, ellipse, polygon { fill: var(--fm-node-fill) }`
+  is a **solid** color (`--fm-node-fill: #ffffff`). They differ, so gating the inline fill would
+  change the look (gradient → solid), not a no-op. Cannot gate.
+- **Node `stroke` / `stroke-width` — redundant but not 1-site.** They *are* CSS-redundant: the
+  unified rule sets `stroke: var(--fm-node-accent); stroke-width: 1.6`, the inline `stroke="#e2e8f0"`
+  equals `--fm-node-stroke` (already overridden by the accent for CSS-on), and custom `classDef`/
+  `style` colors are emitted as a **separate `style="fill:…; stroke:…"`** that wins (verified:
+  `style A fill:#ff0000,stroke:#00ff00` → base stroke stays `#e2e8f0`, separate `style=` carries the
+  custom). **But** `.stroke(&colors.node_stroke)` appears at **~28 shape-builder sites** in
+  `render_node`'s `match shape`, spanning multiple element types — `all_node_shapes` emits node
+  strokes on `<rect>`, `<path>`, `<circle>` **and `<line>`**, and `<line>` is covered by a *separate*
+  `.fm-node line` rule (different stroke-width), so coverage is non-uniform. Safe gating needs a
+  shared `apply_node_base_styling(elem, colors, config)` helper that every branch routes through,
+  plus exhaustive per-element-type CSS-coverage verification (a non-covered element would silently
+  lose its stroke under CSS — the golden snapshot would absorb the regression without flagging it).
+- **Conclusion:** node gating is a **deferred refactor**, not the quick win the edge gates were. The
+  edge inline-vs-CSS lever is complete (fill + stroke landed); the node extension is parked behind
+  the shape-builder-helper refactor.
+- **frankenmermaid/Mermaid ratio:** unchanged — investigation only. Standing `240.5x`/`319.1x`/
+  `505.7x` (latest) over Mermaid `11.12.0`.
+
 ### Dead-output sweep of the benched render is exhausted after the `data-fm-node-id` drop — FINDING (2026-06-26)
 - **Why:** last cycle's `data-fm-node-id` removal (a pure dead duplicate) worked via a repo-wide
   consumer search; this cycle applies the same technique to *every* remaining node/edge attribute
