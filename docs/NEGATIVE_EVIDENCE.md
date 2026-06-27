@@ -1326,6 +1326,37 @@
 
 ## Blocked/Invalid Evidence Attempts
 
+### Frontier closed: the last two candidate levers are not viable; git-tracked snapshots GREEN — FINDING (2026-06-26)
+- **Parse dedup-map hash-key (the lever scoped in the entry below) — NOT VIABLE.** On
+  inspection, `node_index_by_id` has **11 lookup sites** (`intern_node_auto`,
+  class/style/click/link handlers, etc.), all of which already use *borrow-based* `get(&str)`
+  (no clone) — only the single `insert` clones the id. Converting that map to a hash-keyed
+  `FxHashMap<u64, SmallVec<IrNodeId>>` with verify-on-hit would touch all 11 sites and add a
+  per-lookup id comparison, for a ~1.2% saving (insert clones only). The `label_index_by_text`
+  map is contained (one function) but is only ~1.5–2%. Neither alone clears the 3% bar, and
+  the node half is far too invasive/correctness-critical (a wrong-dedup bug merges nodes) for
+  its size. **Do not pursue.** (`SmallVec` would also be a new direct dep; `IrLabelSegment`
+  does derive `Hash`/`Eq`, so that part is feasible — but moot.)
+- **`data-id` / `data-fm-node-id` duplicate node-id attrs — NOT REMOVABLE (intentional
+  dual-naming).** Both carry `node_id`. `data-id` is **documented** in `README.md` (the
+  example SVG, line ~2801); `data-fm-node-id` is the fm-namespaced form that parallels the
+  emitted `data-fm-edge-id` selection scheme. So they target different consumer classes
+  (mermaid-style generic vs frankenmermaid-native tooling), not accidental redundancy — an
+  output-contract item, not a free dead-output removal like the `data-fm-source-*` set was.
+- **Git-tracked snapshot integrity — GREEN.** After fixing `golden_svg_test` last cycle, ran
+  the other git-tracked snapshot/checksum tests: `golden_layout_test` (2), `mermaid_compat_test`
+  (2), `fnx_baseline_invariants` (7) all pass — no other fixture was left stale by the landed
+  render/parse wins.
+- **Net frontier status:** the codebase is optimized to the point where remaining levers are
+  (a) **sub-5% and noise-bound** on the shared bench hosts (layout edge-routing — see
+  `intersects_segment` ~0-gain), (b) **byte-only / time-neutral** so reverted on a time bench
+  (CSS minification), (c) **contract-bound** (`data-id`), or (d) a **large streaming-render
+  refactor** (eliminate the Element tree) — the only remaining >5%-ceiling lever, deferred as
+  high-effort/high-risk. The gating constraint is no longer the codebase; it is a
+  **dedicated low-contention bench host** to verify sub-5% effects.
+- **frankenmermaid/Mermaid ratio:** unchanged — no source change. Retained `full_pipeline_wide`
+  standing `198.10x` / `262.92x` / `426.35x` vs live-CDP Mermaid `11.12.0`.
+
 ### Parse profile post-`span_all`: detection ~0%, IR-build 99%; next lever is dedup-map key double-alloc — FINDING (2026-06-26)
 - **Profiled (via `PARSE_PROFILE` env split in `parse_with_mode_and_config`, run on the
   cmake-free `parse_bench`):** for `flowchart/large_1000` (≈30.6 KB input) the stages split
