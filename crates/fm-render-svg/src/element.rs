@@ -8,6 +8,7 @@ use crate::attributes::Attributes;
 /// Types of SVG elements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElementKind {
+    Raw,
     Rect,
     Circle,
     Ellipse,
@@ -43,6 +44,7 @@ impl ElementKind {
     #[must_use]
     pub const fn tag_name(self) -> &'static str {
         match self {
+            Self::Raw => "",
             Self::Rect => "rect",
             Self::Circle => "circle",
             Self::Ellipse => "ellipse",
@@ -107,6 +109,17 @@ pub struct Element {
 }
 
 impl Element {
+    /// Create a raw SVG fragment element from markup emitted by this crate's own serializer.
+    #[must_use]
+    pub(crate) fn raw_svg(svg: String) -> Self {
+        Self {
+            kind: ElementKind::Raw,
+            attrs: Attributes::new(),
+            children: Vec::new(),
+            text_content: Some(svg),
+        }
+    }
+
     /// Create a new element of the given kind.
     #[must_use]
     pub fn new(kind: ElementKind) -> Self {
@@ -557,6 +570,13 @@ impl Element {
 
     /// Write the element to a string.
     pub fn write_to_string(&self, output: &mut String) {
+        if self.kind == ElementKind::Raw {
+            if let Some(ref raw_svg) = self.text_content {
+                output.push_str(raw_svg);
+            }
+            return;
+        }
+
         let tag = self.kind.tag_name();
         // Direct pushes instead of write!/format_args (which routes `tag` through
         // fmt::Formatter) on this per-element hot path. Byte-identical to `<{tag}`.

@@ -3041,3 +3041,52 @@
   micro-lever frontier is otherwise exhausted.
 
   Agent: GreyShrike
+
+### Edge subtree raw-fragment streaming — KEPT (2026-06-27)
+- **Lever:** `fm-render-svg` now serializes already-rendered edge subtrees into
+  one crate-internal raw SVG fragment and inserts that fragment at the same
+  document position where per-edge children were previously retained. Each edge
+  still goes through `render_edge` and `Element::write_to_string`; the change
+  removes the root document's retained edge `Element` tree and final recursive
+  traversal for that region.
+- **Mapped primitive:** alien-graveyard region/lifetime split plus streaming:
+  shorten the lifetime of high-cardinality intermediate structure instead of
+  reworking path geometry or XML escaping.
+- **Baseline -> After:** clean ORIG worktree
+  `/data/projects/.worktrees/frankenmermaid-tansparrow-render-orig-6179` at
+  `6179d27` versus candidate worktree
+  `/data/projects/.worktrees/frankenmermaid-tansparrow-render-frontier-20260627`
+  at pre-ledger code commit `db414a3` (same code amended with this ledger entry
+  before landing), package `frankenmermaid-cli`, bench `pipeline_bench`, filter
+  `wide_stages/render`. Command:
+  `AGENT_NAME=TanSparrow RCH_WORKER=ovh-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2`.
+  `rch` rewrote the requested target dir to worker-scoped pooled target dirs on
+  `ovh-a`; both ORIG and candidate ran on `ovh-a` with the same request.
+- **Measured result (median, candidate/ORIG):** `8x16` `760.22 us -> 675.77 us`
+  (`0.889x`, `1.125x` faster), `12x24` `1.7160 ms -> 1.5603 ms` (`0.909x`,
+  `1.100x` faster), `16x32` `3.0997 ms -> 2.7559 ms` (`0.889x`, `1.125x`
+  faster).
+- **Original comparator:** pinned live-CDP Mermaid `11.12.0` denominators reused
+  for identical generated wide inputs: `8x16` `315.14 ms`, `12x24`
+  `981.73 ms`, `16x32` `2879.185 ms`.
+- **frankenmermaid/Mermaid ratio:** candidate render-stage medians are
+  `0.002145x`, `0.001589x`, and `0.000957x` Mermaid.js time (`466x`, `629x`,
+  and `1045x` faster). These are render-stage ratios against full-pipeline
+  Mermaid denominators for context.
+- **Behavior proof:** `cargo fmt --check` passed. Remote per-crate gates passed:
+  `AGENT_NAME=TanSparrow RCH_WORKER=ovh-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo check -p fm-render-svg --all-targets`
+  (`hz2`), `AGENT_NAME=TanSparrow RCH_WORKER=ovh-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo clippy -p fm-render-svg --all-targets -- -D warnings`
+  (`ovh-a`), and
+  `AGENT_NAME=TanSparrow RCH_WORKER=ovh-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo test -p frankenmermaid-cli --test frankentui_conformance_test`
+  (`ovh-a`, `1` test).
+- **Tooling notes:** the literal `cargo bench --release` form is invalid on this
+  Cargo toolchain, so `--profile release` was used for the requested
+  release-profile per-crate bench. An initial ORIG attempt on `vmi1264463`
+  failed because that worker lacks `cmake` for `highs-sys`; accepted A/B uses
+  `ovh-a` for both sides. Agent Mail reservation failed because the local Agent
+  Mail database is malformed; no settings or hooks were modified.
+- **Verdict:** kept. This is the first measured piece of the deeper streaming
+  renderer refactor after the raw-`d` revert, with a stable `10-13%`
+  render-stage win.
+
+  Agent: TanSparrow

@@ -2228,13 +2228,19 @@ fn render_layout_to_svg(
         accessible_node_labels: accessible_node_labels.as_deref(),
     };
 
-    // Render edges (skip edges absorbed into bundles).
+    // Render edges (skip edges absorbed into bundles). Edge subtrees are serialized immediately
+    // and inserted as one internal raw fragment so the root document does not retain thousands of
+    // short-lived edge element trees until final serialization.
+    let mut edge_svg = String::with_capacity(layout.edges.len().saturating_mul(384));
     for edge_path in &layout.edges {
         if edge_path.bundled {
             continue;
         }
         let edge_elem = render_edge(edge_path, &edge_context);
-        doc = doc.child(edge_elem);
+        edge_elem.write_to_string(&mut edge_svg);
+    }
+    if !edge_svg.is_empty() {
+        doc = doc.child(Element::raw_svg(edge_svg));
     }
 
     // Render bundle count labels for bundled edges (e.g., "×3").
