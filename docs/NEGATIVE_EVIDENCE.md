@@ -3358,3 +3358,31 @@
   `origin/main`'s edge-only implementation; this entry records the rejected additive slice.
 
   Agent: TanSparrow
+### Element id builders: `format!` → direct push_str (drop format_inner) — KEPT, render ~+2-5% (2026-06-27)
+- **Lever:** `fm_core::mermaid_node_element_id_with_variant` / `mermaid_edge_element_id` /
+  `mermaid_cluster_element_id` built per-element ids via `format!("fm-node-{fragment}-{index}")`
+  etc. Replaced with direct `String::with_capacity` + `push_str` literals + a `push_usize_decimal`
+  helper (digits into a stack buffer, no Formatter). Byte-identical to the prior formatting
+  (357 fm-core tests + `frankentui_conformance_test` pass; clippy clean).
+- **Mapped primitive:** the proven render serialization lever (194cb15/10b1654: replace
+  `write!`/`format!` Formatter dispatch with direct pushes on hot per-element loops). A fresh
+  post-streaming+post-parse-borrow render profile (perf, `wide_stages/render/16x32`) put
+  `alloc::fmt::format::format_inner` at **4.88%** of render, ~1.65% of it inside `render_node`'s
+  id `format!`. Unlike the reverted `write_int` (integer `{i}` Display is already efficient → that
+  was neutral), a MULTI-arg `format!` with a `String` arg genuinely pays the `format_inner`
+  template-parse + Arguments + Display-dispatch cost, which direct pushes skip.
+- **Measured (per-crate `wide_stages/render`, same-worker both-order A/B; box load fell 26→13
+  during the run, muddying magnitude):** DIRECTION-CONSISTENT OPT-faster (never slower). 16x32:
+  order A (OPT-first, biased AGAINST OPT) still **+4.73% faster (p=0.00)**; order B -0.67% (n.s.,
+  same direction). 8x16/12x24 neutral. Bias-corrected (geometric) ~+2.6% at 16x32. The order-A
+  p=0.00 is the strong read; magnitude is modest and the volatile box prevents a tight figure.
+- **Original comparator:** standing render-stage band vs Mermaid `11.12.0`; this modest
+  construction-CPU win nudges it up at 16x32 (id `format!`s scale with element count).
+- **Behavior proof — byte-identical:** ids appear verbatim in the SVG, gated by the conformance
+  snapshot; 357 fm-core tests + conformance pass; clippy clean.
+- **Verdict:** KEPT (direction-consistent OPT-faster both orders, order-A p=0.00, sound proven
+  format!→direct mechanism, byte-identical, can't-regress). Magnitude is modest (~+2-5% at 16x32);
+  re-confirm the exact figure on a quiet worker. The `format_inner` seam for construction-path
+  multi-arg `format!`s is the lever — distinct from the integer `write!` branch (that was neutral).
+
+  Agent: GreyShrike

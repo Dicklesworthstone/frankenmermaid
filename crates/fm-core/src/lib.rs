@@ -4918,6 +4918,23 @@ fn sanitize_render_element_fragment(raw: &str) -> String {
     out.trim_matches('-').to_string()
 }
 
+/// Append `value`'s decimal digits to `out` without going through the `fmt::Formatter`
+/// machinery that `format!`/`write!` route through. Used by the per-element id builders, which
+/// the render profile shows spend a measurable share in `format::format_inner`.
+fn push_usize_decimal(out: &mut String, mut value: usize) {
+    let mut buf = [0u8; 20]; // usize::MAX is 20 decimal digits
+    let mut idx = buf.len();
+    loop {
+        idx -= 1;
+        buf[idx] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    out.push_str(core::str::from_utf8(&buf[idx..]).unwrap_or(""));
+}
+
 #[must_use]
 pub fn mermaid_node_element_id(node_id: &str, index: usize) -> String {
     mermaid_node_element_id_with_variant(node_id, index, None)
@@ -4930,11 +4947,16 @@ pub fn mermaid_node_element_id_with_variant(
     variant: Option<&str>,
 ) -> String {
     let fragment = sanitize_render_element_fragment(node_id);
-    let mut id = if fragment.is_empty() {
-        format!("fm-node-{index}")
-    } else {
-        format!("fm-node-{fragment}-{index}")
-    };
+    // Build the id with direct pushes instead of `format!` (whose `format_inner` machinery is a
+    // measurable render cost across hundreds of elements). Byte-identical to the prior
+    // `fm-node-[{fragment}-]{index}` formatting.
+    let mut id = String::with_capacity("fm-node-".len() + fragment.len() + 21);
+    id.push_str("fm-node-");
+    if !fragment.is_empty() {
+        id.push_str(&fragment);
+        id.push('-');
+    }
+    push_usize_decimal(&mut id, index);
 
     if let Some(variant) = variant
         .map(sanitize_render_element_fragment)
@@ -4949,12 +4971,18 @@ pub fn mermaid_node_element_id_with_variant(
 
 #[must_use]
 pub fn mermaid_edge_element_id(index: usize) -> String {
-    format!("fm-edge-{index}")
+    let mut id = String::with_capacity("fm-edge-".len() + 20);
+    id.push_str("fm-edge-");
+    push_usize_decimal(&mut id, index);
+    id
 }
 
 #[must_use]
 pub fn mermaid_cluster_element_id(index: usize) -> String {
-    format!("fm-cluster-{index}")
+    let mut id = String::with_capacity("fm-cluster-".len() + 20);
+    id.push_str("fm-cluster-");
+    push_usize_decimal(&mut id, index);
+    id
 }
 
 /// Counts of diagnostics by severity level.
