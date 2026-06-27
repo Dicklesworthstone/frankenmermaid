@@ -1661,6 +1661,27 @@
 
 ## Blocked/Invalid Evidence Attempts
 
+### REJECTED: share `stable_node_priorities` across cycle_removal + rank_assignment (~0-gain) (2026-06-27)
+- `stable_node_priorities` (O(V·log V) node-id string sort) is called ~4×/layout (cycle_removal,
+  rank_assignment, GraphMetrics [skipped for DAGs by the SCC fast-path], build_cycle_cluster_map). It's
+  pure in `ir`, so I threaded a once-computed array through `cycle_removal_with_priorities` +
+  `rank_assignment_with_priorities` (wrapper+core split, no test churn). Correct: 428 fm-layout tests
+  pass, output-identical.
+- **~0-gain.** Same-session ovh-a A/B (layout_wide): HEAD `87.26 / 316.33 / 748.41 µs` → candidate
+  `~91.9 / 327.8 / 752.9 µs`, but the candidate ran on a **contended** worker (8x16 ±8%, a clean
+  16x32 re-run gave 838–965µs ±14%) — the apparent slowdown is contention, not a regression (the
+  refactor does strictly less work). The true gain is just **one eliminated sort**, and that sort is
+  **cheap** (the cycle_removal `173µs` hotspot is the back-edge DFS `cycle_removal_dfs_back`, not the
+  priorities). Below the noise floor + unconfirmable → reverted rather than land an unmeasured change.
+- **Remaining cycle_removal lever (hard):** `cycle_removal_dfs_back` overlaps `GraphMetrics::from_ir`'s
+  `count_back_edges` (both back-edge DFS) — but they use **different DFS orderings** (not
+  interchangeable), and the only safe share is the acyclic *flag* (`count_back_edges == 0`) threaded
+  from the Auto dispatch into the sugiyama run (Auto-path-only; forced-sugiyama has no selection). The
+  layout is at diminishing returns after the two landed wins (crossing_refinement −13–23%, SCC
+  fast-path −27–29%); the remaining hotspots are `cycle_removal_dfs_back` (threading-bound) and
+  `coordinate_assignment` node-box building (the per-node `node.id.clone` is contract-bound).
+- **Standing:** unchanged — reverted. `226x`–`506x` over Mermaid `11.12.0`.
+
 ### REJECTED: cycle_removal acyclic strategy short-circuit (~0-gain) + re-profiled hotspots (2026-06-27)
 - **Re-profiled the layout after the SCC fast-path win (`ba9a45d`)** (FM_PROFILE, 16x32):
   **`cycle_removal` 173µs (~37%)** and **`coordinate_assignment` 147µs (~31%)** are now the two
