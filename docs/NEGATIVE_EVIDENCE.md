@@ -575,6 +575,29 @@
 
 ## Kept Wins Also Recorded Here By Request
 
+### Acyclic SCC fast-path in `GraphMetrics::from_ir` — −27 to −29% layout (Auto-selection overhead) (2026-06-27)
+- **Lever (the 203µs Auto overhead pinned last cycle):** the Auto algorithm selection
+  (`select_general_graph_algorithm_with_config`) calls `GraphMetrics::from_ir` on **every** layout —
+  and that ran `detect_cycle_components` (Tarjan SCC, O(V+E)) + `stable_node_priorities`
+  unconditionally. The forced-sugiyama path skips selection entirely, which is exactly the
+  `layout_diagram` (Auto, 929µs) vs forced-sugiyama (726µs) gap. But `count_back_edges` runs first, and
+  **`back_edge_count == 0` ⟺ acyclic ⟺ `scc_count == 0`, `max_scc_size == 1`** — so for any DAG the SCC
+  pass and the priorities that only feed it are skippable with a **provably identical result**. Added
+  that fast-path (fm-layout/src/lib.rs `GraphMetrics::from_ir`).
+- **Measured (same-worker `ovh-a` A/B, per-crate `layout_wide`, both tight ±0.1%):**
+  - 8x16: `119.20 µs → 86.31 µs` (**−27.6%**)
+  - 12x24: `432.35 µs → 315.17 µs` (**−27.1%**)
+  - 16x32: `1.0442 ms → 740.09 µs` (**−29.1%**)
+  Candidate `740 µs` ≈ forced sugiyama `726 µs` → the Auto-path overhead is essentially eliminated.
+  Layout is ~18% of the wide pipeline → ~**−5% end-to-end**; helps every acyclic diagram (the common
+  case), production + bench alike (not a repeated-call cache artifact).
+- **Ratio vs Mermaid 11.12.0:** layout 16x32 `740 µs`; standing `226x`–`506x` band rises as the wide
+  pipeline drops ~5%.
+- **Conformance GREEN:** 428 fm-layout tests + golden SVG (30+30) + determinism + budget all pass
+  (output byte-identical — the metrics are exactly what the Tarjan pass yields for a DAG, so the
+  selection and layout are unchanged). The lone `explicit_config_enables_svg_effects_and_accessibility`
+  failure is the unrelated pre-existing render-side drop-shadow assertion (no-op for this change).
+
 ### Incremental crossing-count in `crossing_refinement` — −13 to −23% layout (2026-06-27)
 - **Lever (fresh — no prior layout entry in this ledger; not in git perf history):**
   `crossing_refinement` (fm-layout/src/lib.rs) called the full-graph `total_crossings` — which

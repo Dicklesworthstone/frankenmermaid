@@ -1172,16 +1172,26 @@ impl GraphMetrics {
 
         let back_edge_count = count_back_edges(node_count, &edges);
 
-        let node_priority = stable_node_priorities(ir);
-        let cycle_detection = detect_cycle_components(node_count, &edges, &node_priority);
-        let scc_count = cycle_detection.cyclic_component_indexes.len();
-        let max_scc_size = cycle_detection
-            .components
-            .iter()
-            .filter(|c| c.len() > 1)
-            .map(Vec::len)
-            .max()
-            .unwrap_or(1);
+        // No back edges ⇒ the graph is acyclic ⇒ every strongly-connected component is a singleton,
+        // so `scc_count == 0` and `max_scc_size == 1`. Skip the O(V+E) Tarjan SCC pass and the node
+        // priority computation that only feeds it — a no-op result for the common DAG case. This
+        // metrics struct is rebuilt for the Auto algorithm-selection posteriors on every layout, so
+        // the saved traversals shave the selection overhead on the (cache-cold) hot path.
+        let (scc_count, max_scc_size) = if back_edge_count == 0 {
+            (0, 1)
+        } else {
+            let node_priority = stable_node_priorities(ir);
+            let cycle_detection = detect_cycle_components(node_count, &edges, &node_priority);
+            let scc_count = cycle_detection.cyclic_component_indexes.len();
+            let max_scc_size = cycle_detection
+                .components
+                .iter()
+                .filter(|c| c.len() > 1)
+                .map(Vec::len)
+                .max()
+                .unwrap_or(1);
+            (scc_count, max_scc_size)
+        };
 
         let is_tree_like = node_count > 0
             && back_edge_count == 0
