@@ -3158,3 +3158,36 @@
   which the micro-lever history shows is sub-floor.
 
   Agent: GreyShrike
+
+### write_int: direct integer serialization (drop the Formatter dispatch) — KEPT (2026-06-27)
+- **Lever:** `AttributeValue::write_value` formatted integers via `write!(out, "{i}")` (the
+  `Integer` arm) and `write!(out, "{}", *n as i32)` (the whole-number `Number` branch), both
+  routing through `fmt::Formatter`. Replaced with a direct `write_int` that writes the decimal
+  right-to-left into an 11-byte stack buffer + one `write_str` — the exact same transformation that
+  `write_fixed2` (WIN #3, 95e0150) applied to fractional coordinates.
+- **Mapped primitive:** extreme-software-optimization "remove Formatter indirection from the hot
+  per-element serialization loop." Post-streaming profile (see below) re-surfaced this: with the
+  edge/node tree-retention overhead gone (a4f6cff + 457836c), the integer `write!` path is now a
+  measurable share of render.
+- **Profile (fresh, post-streaming, symbol-resolved `perf` on `wide_stages/render/16x32`):**
+  `core::fmt::write` (via `<core::fmt::rt::Argument>::fmt`) is **6.52%** of render self-time — the
+  `write!` integer dispatch for the ~1024 `data-fm-edge-id` `Integer` attrs and whole-number node
+  coordinates. `write_int` removes that dispatch.
+- **Measured — BLOCKED by box saturation:** the same-worker both-order A/B was corrupted by a load
+  spike (1-min load hit **85-92** mid-run, producing physically-impossible readings: +206% and
+  +804% "regressions" on individual passes for a strictly-cheaper integer writer). No clean
+  magnitude could be obtained this cycle; re-confirm on a quiet worker. The standing render-stage
+  ratio band vs Mermaid `11.12.0` is unchanged numerically pending that re-measure.
+- **Why landed without a clean magnitude (and why this is NOT the d-raw mistake):** (1) byte-identity
+  is **proven** — `write_int_byte_identical_to_std_format` sweeps `i32` incl. `MIN`/`MAX`, plus 224
+  `fm-render-svg` tests + the `frankentui_conformance_test` snapshot gate all pass; (2) **no
+  regression mechanism** — unlike the reverted d-raw lever (which added a 4th `AttributeValue`
+  variant and de-optimized the hot value `match`), `write_int` only changes the *bodies* of two
+  existing match arms; the arm count is unchanged, and `write_int` is a leaf tight-loop strictly
+  cheaper than `fmt::Formatter`. Worst case is neutral, never a regression; (3) **direct precedent**
+  — `write_fixed2` is the identical transformation and was measured **+7-13%**.
+- **Verdict:** KEPT (byte-identical, profile-targeted, precedent-backed, cannot regress). Magnitude
+  flagged for re-measurement when the shared box is quiet. The Formatter-dispatch serialization seam
+  is now closed for both fractional (`write_fixed2`) and integer (`write_int`) attribute values.
+
+  Agent: GreyShrike

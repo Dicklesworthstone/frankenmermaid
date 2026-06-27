@@ -38,12 +38,12 @@ impl AttributeValue {
                     && *n >= i32::MIN as f32
                     && *n <= i32::MAX as f32
                 {
-                    write!(out, "{}", *n as i32)
+                    write_int(out, *n as i32)
                 } else {
                     write_fixed2(out, *n)
                 }
             }
-            Self::Integer(i) => write!(out, "{i}"),
+            Self::Integer(i) => write_int(out, *i),
         }
     }
 }
@@ -364,6 +364,31 @@ pub(crate) fn write_fixed2<W: fmt::Write>(f: &mut W, value: f32) -> fmt::Result 
     f.write_str(core::str::from_utf8(&buf[idx..]).unwrap_or(""))
 }
 
+/// Write a signed integer's decimal representation directly into `out`, bypassing the
+/// `fmt::Formatter` dispatch that `write!(out, "{value}")` routes through. Byte-identical to
+/// default `i32` formatting. On the hot per-attribute path (the `data-*` integer ids and
+/// whole-number coordinates) the Formatter dispatch is a measurable share of render.
+pub(crate) fn write_int<W: fmt::Write>(f: &mut W, value: i32) -> fmt::Result {
+    // `i32::MIN` = -2147483648 → 11 bytes (sign + 10 digits). `i64::from(..).unsigned_abs()`
+    // avoids the `abs()` overflow at `i32::MIN`.
+    let mut buf = [0u8; 11];
+    let mut idx = buf.len();
+    let mut magnitude = i64::from(value).unsigned_abs();
+    loop {
+        idx -= 1;
+        buf[idx] = b'0' + (magnitude % 10) as u8;
+        magnitude /= 10;
+        if magnitude == 0 {
+            break;
+        }
+    }
+    if value < 0 {
+        idx -= 1;
+        buf[idx] = b'-';
+    }
+    f.write_str(core::str::from_utf8(&buf[idx..]).unwrap_or(""))
+}
+
 /// Write `s` into `f` with XML attribute-value escaping (`& < > " '`), copying
 /// unescaped runs in bulk instead of character-by-character. Every escaped
 /// character is ASCII, so scanning bytes never splits a multi-byte UTF-8 sequence
@@ -493,6 +518,35 @@ mod tests {
                 ref_text(s),
                 "escape_xml_text mismatch for {s:?}"
             );
+        }
+    }
+
+    #[test]
+    fn write_int_byte_identical_to_std_format() {
+        let cases = [
+            0i32,
+            1,
+            -1,
+            9,
+            10,
+            -10,
+            42,
+            -42,
+            100,
+            999,
+            1000,
+            -1000,
+            123_456,
+            -123_456,
+            2_147_483_647,
+            -2_147_483_647,
+            i32::MAX,
+            i32::MIN,
+        ];
+        for v in cases {
+            let mut got = String::new();
+            write_int(&mut got, v).unwrap();
+            assert_eq!(got, format!("{v}"), "write_int mismatch for {v}");
         }
     }
 
