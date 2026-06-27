@@ -2357,3 +2357,38 @@
   so the generated-id copy is not the active bottleneck. Do not retry this as
   `id_owned`, `attr_owned`, or a cross-crate generated-id helper without a fresh
   allocation profile showing generated id copies in the top renderer costs.
+
+### Parser hash-key dedup maps — REVERTED (2026-06-27)
+- **Lever tested:** `IrBuilder` briefly replaced `node_index_by_id:
+  FxHashMap<String, IrNodeId>` and `label_index_by_text:
+  FxHashMap<(String, Vec<IrLabelSegment>), IrLabelId>` with `u64` hash buckets
+  that collision-check against the already-owned `IrNode.id`, `IrLabel.text`,
+  and `label_markup` payloads. This removed the transient owned map keys at the
+  cost of hashing into buckets and scanning/comparing on every lookup. The
+  candidate needed a direct `smallvec` dependency while measured.
+- **Mapped primitive:** alien-graveyard hash-table specialization / alien-artifact
+  allocation fusion: store compact fingerprints for ephemeral dedup state and
+  validate collisions against canonical owned values.
+- **Baseline -> After:** current-main baseline on `ovh-a` via `rch exec`,
+  package `fm-parser`, bench `parse_bench`, filter `flowchart`, target dir
+  `/data/projects/.rch-targets/frankenmermaid-cod-a`, measured `small_10`
+  `18.389 us`, `medium_100` `152.25 us`, and `large_1000` `2.0857 ms`.
+  The candidate command requested the same worker but `rch` fell back local
+  (`no admissible workers: insufficient_slots=3,hard_preflight=1`) and measured
+  `23.628 us`, `189.37 us`, and `3.2483 ms`. Raw candidate-vs-baseline deltas
+  were `+28.5%`, `+24.4%`, and `+55.7%`; Criterion also reported significant
+  regressions (`+41.0%`, `+21.6%`, `+55.7%`). A restored-source rerun also fell
+  back local under heavier contention and is **not** used as proof either way.
+- **Why reverted:** this produced no valid same-worker win and the available
+  candidate evidence was strongly negative. The extra per-lookup hashing,
+  bucket load, and string/segment comparisons outweighed the saved transient
+  key allocations. Production source and `Cargo.lock` were restored; no
+  `smallvec` direct dependency remains.
+- **frankenmermaid/Mermaid ratio:** unchanged — reverted. Latest retained
+  `full_pipeline_wide` ratio stays `1.2980 ms` / `3.8305 ms` / `7.0666 ms`
+  over pinned live-CDP Mermaid `11.12.0` `315.14 ms` / `981.73 ms` /
+  `2879.185 ms` = frankenmermaid `0.004119x` / `0.003902x` / `0.002454x`
+  Mermaid.js time (`242.79x` / `256.29x` / `407.44x` faster).
+- **Verdict:** reverted; do not retry node/label dedup-map fingerprint buckets
+  without a fresh allocation profile proving the owned-key allocations dominate
+  the parser after the existing `span_all` and borrowed-line wins.

@@ -1768,3 +1768,56 @@ tooling_notes = [
 [negative_measurement_svg_generated_id_owned_2026_06_27.decision]
 status = "reject"
 rationale = "Generated SVG id ownership removed one allocation/copy in source but the same-worker ovh-a wide_stages/render pair was mixed: 8x16 regressed 1.65%, 12x24 improved only 0.76%, and 16x32 regressed 0.30%. Production code was manually reverted and only evidence remains."
+
+[negative_measurement_parser_hash_dedup_2026_06_27]
+date = "2026-06-27"
+agent = "TanSparrow"
+lever_bead = "bd-1buv.1"
+graveyard_route = "Alien Graveyard hash-table specialization plus Alien Artifact allocation fusion: replace transient owned parser dedup keys with compact hash buckets and collision checks against canonical IR storage."
+worker_baseline = "ovh-a via rch exec"
+worker_candidate = "local fallback after rch reported no admissible workers for requested ovh-a"
+baseline_commit = "3d6f8bc"
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-a"
+candidate_summary = "IrBuilder used u64 hash buckets for node and label dedup maps, collision-checking against IrNode.id, IrLabel.text, and label_markup; reverted after measurement."
+baseline_command = "AGENT_NAME=TanSparrow RCH_WORKER=ovh-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench --profile release -p fm-parser --bench parse_bench -- flowchart --warm-up-time 1 --measurement-time 2"
+candidate_command = "AGENT_NAME=TanSparrow RCH_WORKER=ovh-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench --profile release -p fm-parser --bench parse_bench -- flowchart --warm-up-time 1 --measurement-time 2"
+rust_build_profile = "release profile [optimized]"
+behavior_proof = "Candidate used verify-on-hit bucket scans, so hash collisions could not merge nodes or labels incorrectly. Production source and Cargo.lock were restored after the negative measurement."
+tooling_notes = [
+  "The literal cargo bench --release form remains invalid on this Cargo toolchain; --profile release was used for the requested release-profile per-crate bench.",
+  "Candidate and restored-source reruns both fell back local because rch had no admissible ovh-a slot; no local fallback result was accepted as keep evidence.",
+]
+
+[negative_measurement_parser_hash_dedup_2026_06_27.metrics]
+"parse_flowchart_small_10_baseline_mean_us" = 18.389
+"parse_flowchart_small_10_candidate_mean_us" = 23.628
+"parse_flowchart_small_10_raw_delta_pct" = 28.49
+"parse_flowchart_small_10_criterion_change_pct" = 41.042
+"parse_flowchart_medium_100_baseline_mean_us" = 152.25
+"parse_flowchart_medium_100_candidate_mean_us" = 189.37
+"parse_flowchart_medium_100_raw_delta_pct" = 24.38
+"parse_flowchart_medium_100_criterion_change_pct" = 21.582
+"parse_flowchart_large_1000_baseline_mean_ms" = 2.0857
+"parse_flowchart_large_1000_candidate_mean_ms" = 3.2483
+"parse_flowchart_large_1000_raw_delta_pct" = 55.74
+"parse_flowchart_large_1000_criterion_change_pct" = 55.745
+"retained_full_pipeline_wide_8x16_frankenmermaid_mean_ms" = 1.2980
+"retained_full_pipeline_wide_12x24_frankenmermaid_mean_ms" = 3.8305
+"retained_full_pipeline_wide_16x32_frankenmermaid_mean_ms" = 7.0666
+"full_pipeline_wide_8x16_mermaid_js_mean_ms" = 315.1399999976158
+"full_pipeline_wide_12x24_mermaid_js_mean_ms" = 981.7300000190735
+"full_pipeline_wide_16x32_mermaid_js_mean_ms" = 2879.185000014305
+"retained_full_pipeline_wide_8x16_frankenmermaid_over_mermaid_js" = 0.004119
+"retained_full_pipeline_wide_12x24_frankenmermaid_over_mermaid_js" = 0.003902
+"retained_full_pipeline_wide_16x32_frankenmermaid_over_mermaid_js" = 0.002454
+"retained_full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 242.79
+"retained_full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 256.29
+"retained_full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 407.44
+
+[negative_measurement_parser_hash_dedup_2026_06_27.validation]
+"cargo_test_fm_parser" = "passed locally after candidate compile: 405 tests"
+"cargo_test_frankenmermaid_cli_frankentui_conformance" = "passed via rch exec local fallback: 1 test"
+
+[negative_measurement_parser_hash_dedup_2026_06_27.decision]
+status = "reject"
+rationale = "No same-worker keep proof was available and the candidate raw/criterion evidence was strongly negative; extra hash-bucket lookup work outweighed saved transient String/Vec key allocations. Production code and dependency changes were manually reverted; only evidence remains."
