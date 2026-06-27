@@ -3187,3 +3187,34 @@
   wrong.** Conformance/tests unaffected (revert restores the prior, already-validated serializer).
 
   Agent: GreyShrike
+
+### Parse: eliminate per-line `line_items` Vec in `parse_flowchart_document_items` — REVERTED, ~0-gain (2026-06-27)
+- **Lever:** the flowchart line loop buffered each line's parsed items in a throwaway
+  `line_items: Vec` before `items.extend(line_items)` at line-end. Since every line's items are
+  always flushed into `items` in order (line-end or non-root `end`), never discarded, the per-line
+  Vec is redundant — pushed items straight into `items` (5 sites). Byte-identical (405 fm-parser
+  tests + `frankentui_conformance_test` pass; clippy clean).
+- **Mapped primitive:** extreme-software-optimization "remove a redundant per-iteration heap
+  temporary from the hot loop." Fresh wide-parse profile (perf, `wide_stages/parse/16x32`)
+  motivated it: `parse_flowchart_statement_asts` 7.95% self (the `vec![ast]` + `line_items`
+  per-statement Vecs), ~17% in malloc/free/grow.
+- **Measured (per-crate `wide_stages/parse`, same-worker both-order A/B, box volatile load 7-?):**
+  **~0-gain on realistic sizes.** 12x24: order A n.s. (-0.6%), order B +4.5% (OPT slower) → neutral.
+  16x32: order A n.s. (-0.55%), order B n.s. (-1.85%) → neutral. 8x16: order B -8.2% (p=0.00) — but
+  MECHANISM-INCONSISTENT (the win should grow with line count, so 16x32 should beat 8x16; it's the
+  reverse), so the 8x16 figure is order-bias/noise, not the lever.
+- **Why ~0 (the lesson):** the per-line `line_items` Vec is allocated and freed every iteration in a
+  tight loop, so the allocator recycles the same small chunk hot from the free list — alloc+free in a
+  tight loop is nearly free (the same insight behind the streaming wins: locality + reuse, not
+  alloc-count, is what matters). Removing it changes nothing measurable.
+- **Original comparator:** standing parse-stage band vs Mermaid `11.12.0` unchanged (byte-identical
+  revert).
+- **Verdict:** REVERTED (uncommitted, stashed). Do not retry per-line/per-statement small-Vec
+  removal in the parse loop — the allocator already makes them free.
+- **Next parse direction (bigger, not this cycle):** the real parse alloc cost is the fast-path
+  building `FlowAst`/`FlowAstNode` with OWNED `String` ids (~1920 edge-endpoint + 512 node id
+  allocs) which the interner then looks up by key and drops. Making `FlowAst` borrow `&'a str` ids
+  from the input (lifetimes through the parser) would eliminate those allocs — a real but
+  multi-function refactor; the interner already keys by `&str`, so only inserts need to own.
+
+  Agent: GreyShrike
