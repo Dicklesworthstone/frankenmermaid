@@ -1661,6 +1661,26 @@
 
 ## Blocked/Invalid Evidence Attempts
 
+### CORRECTION: cycle_removal is ~13µs, NOT 173µs — the "hotspot" was FM_PROFILE noise (2026-06-27)
+- Before building the cycle_removal→GraphMetrics acyclic-flag threading lever (flagged last cycle off
+  a `173µs` reading), I **sub-profiled cycle_removal**: `resolved_edges` 0.4–1.7µs, `priorities`
+  0.7–5.7µs, **`cycle_removal_dfs_back` 6.7–11.8µs** ⇒ **cycle_removal ≈ 13µs total**, not 173µs. The
+  173µs was a **single noisy/contended FM_PROFILE iteration** (eprintln overhead + per-iteration cache
+  variance + worker load — the same artifact that made coordinate_assignment read 108→673µs across
+  iterations). **So the back-edge DFS is only ~7–12µs and threading the acyclic flag from the Auto
+  dispatch into cycle_removal would be ~0-gain.** Did NOT build the multi-layer refactor — the
+  sub-profile saved it. Reverted instrumentation.
+- **Methodology:** FM_PROFILE single-iteration phase numbers are unreliable (huge variance); sub-profile
+  the suspect function and take the warm/consistent value, or cross-check against the criterion
+  same-worker A/B delta, before committing to a refactor.
+- **The layout is at genuine diminishing returns** after the two landed wins (crossing_refinement
+  −13–23%, SCC fast-path −27–29%): every phase is cheap and distributed (~10–55µs locally), no single
+  ≥20% hotspot. The largest *real* phases are `build_edge_paths` (~55µs, already obstacle-index
+  optimized) and `rank_assignment` (~47µs) — both modest (~7% of layout each → ~1% pipeline). Next
+  layout work should target one of those with a same-worker A/B, not the cycle_removal/priorities path
+  (now triple-confirmed ~0-gain).
+- **Standing:** unchanged — no source change. `226x`–`506x` over Mermaid `11.12.0`.
+
 ### REJECTED: share `stable_node_priorities` across cycle_removal + rank_assignment (~0-gain) (2026-06-27)
 - `stable_node_priorities` (O(V·log V) node-id string sort) is called ~4×/layout (cycle_removal,
   rank_assignment, GraphMetrics [skipped for DAGs by the SCC fast-path], build_cycle_cluster_map). It's
