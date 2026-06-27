@@ -3159,35 +3159,31 @@
 
   Agent: GreyShrike
 
-### write_int: direct integer serialization (drop the Formatter dispatch) — KEPT (2026-06-27)
-- **Lever:** `AttributeValue::write_value` formatted integers via `write!(out, "{i}")` (the
-  `Integer` arm) and `write!(out, "{}", *n as i32)` (the whole-number `Number` branch), both
-  routing through `fmt::Formatter`. Replaced with a direct `write_int` that writes the decimal
-  right-to-left into an 11-byte stack buffer + one `write_str` — the exact same transformation that
-  `write_fixed2` (WIN #3, 95e0150) applied to fractional coordinates.
-- **Mapped primitive:** extreme-software-optimization "remove Formatter indirection from the hot
-  per-element serialization loop." Post-streaming profile (see below) re-surfaced this: with the
-  edge/node tree-retention overhead gone (a4f6cff + 457836c), the integer `write!` path is now a
-  measurable share of render.
-- **Profile (fresh, post-streaming, symbol-resolved `perf` on `wide_stages/render/16x32`):**
-  `core::fmt::write` (via `<core::fmt::rt::Argument>::fmt`) is **6.52%** of render self-time — the
-  `write!` integer dispatch for the ~1024 `data-fm-edge-id` `Integer` attrs and whole-number node
-  coordinates. `write_int` removes that dispatch.
-- **Measured — BLOCKED by box saturation:** the same-worker both-order A/B was corrupted by a load
-  spike (1-min load hit **85-92** mid-run, producing physically-impossible readings: +206% and
-  +804% "regressions" on individual passes for a strictly-cheaper integer writer). No clean
-  magnitude could be obtained this cycle; re-confirm on a quiet worker. The standing render-stage
-  ratio band vs Mermaid `11.12.0` is unchanged numerically pending that re-measure.
-- **Why landed without a clean magnitude (and why this is NOT the d-raw mistake):** (1) byte-identity
-  is **proven** — `write_int_byte_identical_to_std_format` sweeps `i32` incl. `MIN`/`MAX`, plus 224
-  `fm-render-svg` tests + the `frankentui_conformance_test` snapshot gate all pass; (2) **no
-  regression mechanism** — unlike the reverted d-raw lever (which added a 4th `AttributeValue`
-  variant and de-optimized the hot value `match`), `write_int` only changes the *bodies* of two
-  existing match arms; the arm count is unchanged, and `write_int` is a leaf tight-loop strictly
-  cheaper than `fmt::Formatter`. Worst case is neutral, never a regression; (3) **direct precedent**
-  — `write_fixed2` is the identical transformation and was measured **+7-13%**.
-- **Verdict:** KEPT (byte-identical, profile-targeted, precedent-backed, cannot regress). Magnitude
-  flagged for re-measurement when the shared box is quiet. The Formatter-dispatch serialization seam
-  is now closed for both fractional (`write_fixed2`) and integer (`write_int`) attribute values.
+### write_int (direct integer serialization) — REVERTED, ~0-gain on re-confirm (2026-06-27)
+- **Lever (was landed a0d0d3f, now reverted):** replaced `AttributeValue::write_value`'s integer
+  `write!(out, "{i}")` / `write!(out, "{}", n as i32)` with a direct stack-buffer digit writer
+  `write_int` (the `write_fixed2` transformation applied to integers). Landed last cycle WITHOUT a
+  clean magnitude (box was saturated, the A/B was corrupted by a load spike) on the strength of
+  byte-identity + profile (core::fmt::write 6.52%) + the write_fixed2 precedent.
+- **Re-confirm (this cycle, same-worker local A/B, BOTH orders, box volatile load 14-58):** the
+  effect is **neutral**. 12x24 n.s. in both orders (p=0.81). 16x32 showed the textbook symmetric
+  order-bias — forward (OPT-first) ORIG -13.2% / reverse (ORIG-first) OPT -10.0%, i.e. whichever
+  ran second measured ~11.6% faster. Bias-corrected (geometric: `r² = (b·r)/(b/r)`), the true effect
+  is **~-1.8% at 16x32** (within noise) and ~0 at 12x24 — not a measurable win.
+- **Mechanism — why this differs from write_fixed2 (the lesson):** `write_fixed2` replaced the
+  fractional `{:.2}` path, whose precision formatting is genuinely heavy → +7-13% real win.
+  `write_int` replaces the plain integer `{i}` Display path, which **LLVM already lowers
+  efficiently** for a single `i32` arg into a String — so removing the Formatter wrapper buys almost
+  nothing. The `core::fmt::write` 6.52% profile line is the Formatter *setup*, most of which the
+  compiler had already optimized away in the integer case; it was NOT a 6.52% recoverable cost.
+  **Do not assume the integer `write!` branch mirrors the fractional one — the fractional path is
+  heavy, the integer path is already cheap.**
+- **Original comparator:** standing render-stage band vs Mermaid `11.12.0` is unchanged (revert is
+  byte-identical to pre-a0d0d3f main).
+- **Verdict:** REVERTED. Byte-identical and cannot regress, but ~0-gain on rigorous re-confirm, so
+  per the keep bar it should not carry the extra `write_int` helper + test. This corrects last
+  cycle's premature unmeasured landing. **Process lesson reinforced: do not land a perf lever on
+  precedent + profile alone without a clean A/B; the integer-branch analogy to write_fixed2 was
+  wrong.** Conformance/tests unaffected (revert restores the prior, already-validated serializer).
 
   Agent: GreyShrike
