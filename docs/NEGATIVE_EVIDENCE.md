@@ -1383,6 +1383,47 @@
   this is documented repeatedly above and needs a pool fix (install `cmake` or pin a
   cmake-equipped worker) to unblock reliable per-crate timing across the swarm.
 
+### Offset edge-point streaming path builder — REJECTED (2026-06-26)
+- **Lever tested:** `render_edge` and the Gantt dependency renderer still allocated a
+  fresh `Vec<(f32, f32)>` per edge solely to add `offset_x`/`offset_y` before calling the
+  smooth path serializer. A candidate `build_smooth_path_with_offset(&[LayoutPoint], dx,
+  dy)` streamed offset points directly into the Catmull-Rom path writer, matching the
+  collected-vector arithmetic and adding a byte-equivalence unit test.
+- **Mapped primitive:** region/arena allocation removal from §5.10: eliminate a
+  request-scoped temporary region in the hot SVG-render edge loop without changing
+  rendered bytes.
+- **Outcome:** rejected and reverted. The first candidate render run looked promising:
+  `wide_stages/render` means `1.0853 ms`, `2.6163 ms`, `5.0474 ms`, with Criterion
+  reporting significant wins for `12x24` and `16x32`. A same-machine baseline toggle then
+  measured current-main render at `1.1173 ms`, `2.7479 ms`, `5.1672 ms`; but the final
+  re-applied candidate rerun regressed `8x16` to `1.1887 ms` (`+6.39%`, p=0.00) and showed
+  no significant change on `12x24` (`2.7125 ms`) or `16x32` (`5.2766 ms`). Full-pipeline
+  candidate context was similarly small/noisy: candidate `1.8362 ms`, `4.6470 ms`,
+  `8.4002 ms` vs toggled baseline `1.8932 ms`, `4.7857 ms`, `8.4282 ms`.
+- **Original comparator:** latest live-CDP Mermaid `11.12.0` denominator reused from
+  the current-main BOLD-VERIFY entry for identical generated wide inputs: `315.14 ms`,
+  `981.73 ms`, and `2879.185 ms`.
+- **frankenmermaid/Mermaid ratio:** toggled current-main baseline full-pipeline means give
+  Mermaid.js `166.45x`, `205.14x`, and `341.62x` slower. The rejected candidate
+  full-pipeline context was `171.63x`, `211.26x`, and `342.75x` slower, too small/noisy to
+  keep and contradicted by the final render-stage regression.
+- **Validation:** while candidate code was applied, `cargo test -p fm-render-svg`
+  passed `220` unit tests plus doctests, `cargo check -p fm-render-svg --all-targets`
+  passed, `cargo clippy -p fm-render-svg --all-targets -- -D warnings` passed, and
+  `rustfmt --edition 2024 --check crates/fm-render-svg/src/lib.rs
+  crates/fm-render-svg/src/path.rs` passed. Code was manually reverted before commit; no
+  production source diff remains.
+- **Tooling:** the literal requested `rch exec -- cargo bench --release ...` still fails
+  before benchmarking because this Cargo rejects `--release` for `cargo bench`. Valid
+  per-crate `rch exec -- cargo bench -p frankenmermaid-cli --bench pipeline_bench ...`
+  also fell back local because RCH reported `no admissible workers:
+  insufficient_slots=4,hard_preflight=1`.
+- **Do-not-retry note:** do not retry the per-edge offset-Vec elision as a standalone
+  lever. The allocation is real, but its measured runtime signal is below the noise floor
+  after recent renderer wins. Target larger output-generation work instead, especially
+  generation-time CSS compaction or direct element serialization that removes whole
+  Element/Attributes objects.
+
 ### Agent Mail registration/reservation — BLOCKED (2026-06-24)
 - **Attempt:** Register `frankenmermaid-cod-a` and reserve `docs/NEGATIVE_EVIDENCE.md`,
   `evidence/ledger/**`, `.beads/**`, and bench files through MCP Agent Mail before edits.

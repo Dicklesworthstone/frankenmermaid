@@ -1349,3 +1349,83 @@ tooling_notes = [
 [negative_measurement_svg_textbuilder_line_iter_2026_06_26.decision]
 status = "reject"
 rationale = "The TextBuilder line-iterator specialization avoided a Vec allocation but regressed same-machine wide_stages/render 8x16 by 2.18% and 12x24 by 8.03%, with only a 5.94% 16x32 improvement; code was reverted before commit."
+
+[negative_measurement_svg_edge_point_offset_stream_2026_06_26]
+date = "2026-06-26"
+agent = "TanSparrow"
+lever_bead = "bd-1buv.1"
+worker_delta = "RCH wrapper local fallback; same-machine manual toggle and final candidate rerun"
+baseline_commit = "35569a3"
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-a"
+candidate_summary = "Stream LayoutPoint plus render offset directly into the smooth SVG path serializer instead of allocating a per-edge Vec<(f32, f32)> for offset points."
+literal_requested_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench --release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
+render_candidate_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
+render_baseline_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
+render_candidate_final_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
+full_pipeline_candidate_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+full_pipeline_baseline_command = "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+mermaid_js_command = "Latest live-CDP Mermaid 11.12.0 denominator reused from the current-main BOLD-VERIFY entry for identical generated wide inputs."
+rust_build_profile = "bench profile [optimized]"
+behavior_proof = "Candidate code was reverted before commit; no production code diff remains. While applied, a focused unit test proved build_smooth_path_with_offset byte-identical to collecting offset points then calling build_smooth_path across empty, one-point, two-point, and four-point cases."
+tooling_notes = [
+  "Agent Mail macro_start_session failed because the mail SQLite corruption circuit breaker is open.",
+  "The literal cargo bench --release form remains invalid on this Cargo toolchain; it failed before benchmarking.",
+  "All valid rch exec cargo bench attempts fell back local with no admissible workers: insufficient_slots=4,hard_preflight=1.",
+]
+
+[negative_measurement_svg_edge_point_offset_stream_2026_06_26.metrics]
+"candidate_first_wide_stages_render_8x16_mean_ms" = 1.0853
+"candidate_first_wide_stages_render_12x24_mean_ms" = 2.6163
+"candidate_first_wide_stages_render_16x32_mean_ms" = 5.0474
+"candidate_first_wide_stages_render_8x16_criterion_delta_pct" = -3.9850
+"candidate_first_wide_stages_render_12x24_criterion_delta_pct" = -10.233
+"candidate_first_wide_stages_render_16x32_criterion_delta_pct" = -13.342
+"wide_stages_render_8x16_baseline_mean_ms" = 1.1173
+"wide_stages_render_12x24_baseline_mean_ms" = 2.7479
+"wide_stages_render_16x32_baseline_mean_ms" = 5.1672
+"candidate_final_wide_stages_render_8x16_mean_ms" = 1.1887
+"candidate_final_wide_stages_render_12x24_mean_ms" = 2.7125
+"candidate_final_wide_stages_render_16x32_mean_ms" = 5.2766
+"candidate_final_wide_stages_render_8x16_criterion_delta_pct" = 6.3924
+"candidate_final_wide_stages_render_12x24_criterion_delta_pct" = -1.2889
+"candidate_final_wide_stages_render_16x32_criterion_delta_pct" = 2.1165
+"candidate_final_wide_stages_render_8x16_baseline_over_candidate" = 0.9399
+"candidate_final_wide_stages_render_12x24_baseline_over_candidate" = 1.0131
+"candidate_final_wide_stages_render_16x32_baseline_over_candidate" = 0.9793
+"full_pipeline_wide_8x16_baseline_mean_ms" = 1.8932
+"full_pipeline_wide_12x24_baseline_mean_ms" = 4.7857
+"full_pipeline_wide_16x32_baseline_mean_ms" = 8.4282
+"full_pipeline_wide_8x16_candidate_context_mean_ms" = 1.8362
+"full_pipeline_wide_12x24_candidate_context_mean_ms" = 4.6470
+"full_pipeline_wide_16x32_candidate_context_mean_ms" = 8.4002
+"full_pipeline_wide_8x16_context_delta_pct" = -3.0118
+"full_pipeline_wide_12x24_context_delta_pct" = -2.8982
+"full_pipeline_wide_16x32_context_delta_pct" = -0.3322
+"full_pipeline_wide_8x16_mermaid_js_mean_ms" = 315.1399999976158
+"full_pipeline_wide_12x24_mermaid_js_mean_ms" = 981.7300000190735
+"full_pipeline_wide_16x32_mermaid_js_mean_ms" = 2879.185000014305
+"baseline_full_pipeline_wide_8x16_frankenmermaid_over_mermaid_js" = 0.006007
+"baseline_full_pipeline_wide_12x24_frankenmermaid_over_mermaid_js" = 0.004874
+"baseline_full_pipeline_wide_16x32_frankenmermaid_over_mermaid_js" = 0.002927
+"baseline_full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 166.45
+"baseline_full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 205.14
+"baseline_full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 341.62
+"candidate_context_full_pipeline_wide_8x16_frankenmermaid_over_mermaid_js" = 0.005827
+"candidate_context_full_pipeline_wide_12x24_frankenmermaid_over_mermaid_js" = 0.004733
+"candidate_context_full_pipeline_wide_16x32_frankenmermaid_over_mermaid_js" = 0.002917
+"candidate_context_full_pipeline_wide_8x16_mermaid_js_over_frankenmermaid" = 171.63
+"candidate_context_full_pipeline_wide_12x24_mermaid_js_over_frankenmermaid" = 211.26
+"candidate_context_full_pipeline_wide_16x32_mermaid_js_over_frankenmermaid" = 342.75
+"candidate_final_render_8x16_mermaid_js_over_frankenmermaid" = 265.11
+"candidate_final_render_12x24_mermaid_js_over_frankenmermaid" = 361.93
+"candidate_final_render_16x32_mermaid_js_over_frankenmermaid" = 545.66
+
+[negative_measurement_svg_edge_point_offset_stream_2026_06_26.validation]
+"cargo_test_fm_render_svg" = "passed: 220 unit tests plus doctests while candidate was applied"
+"cargo_check_fm_render_svg_all_targets" = "passed while candidate was applied"
+"cargo_clippy_fm_render_svg_all_targets_d_warnings" = "passed while candidate was applied"
+"rustfmt_check_touched_files" = "passed while candidate was applied"
+
+[negative_measurement_svg_edge_point_offset_stream_2026_06_26.decision]
+status = "reject"
+rationale = "The per-edge offset-point streaming path removed a real allocation and first looked positive, but the final same-machine rerun after the baseline regressed wide_stages/render 8x16 by 6.39% and showed no significant 12x24 or 16x32 improvement; code was reverted before commit."
