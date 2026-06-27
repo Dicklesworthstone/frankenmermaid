@@ -554,8 +554,14 @@
 - **Behavior proof:** `cargo test -p fm-render-svg` = `219 passed; 0 failed` (the
   `includes_half_arrow_marker_defs` empty-**sequence** test still passes because non-flowchart
   diagrams keep the full set); `cargo test -p frankenmermaid-cli --test
-  frankentui_conformance_test` passed. Regression-harness goldens are not git-tracked
-  (regenerated locally), so no golden churn lands.
+  frankentui_conformance_test` passed. The `artifacts/regression-harness` goldens are not
+  git-tracked, **but** `crates/fm-cli/tests/golden/*.svg` (the `golden_svg_test` FNV
+  snapshots) **are** git-tracked and were *not* regenerated when this landed — so
+  `golden_svg_test` was left failing on the 14 basic-arrow flowchart cases (12→2 markers).
+  **Fixed 2026-06-26** by `BLESS=1 cargo test -p frankenmermaid-cli --test golden_svg_test`:
+  the regenerated goldens differ from the old ones *only* by the 10 removed marker `<path>`
+  defs (node/edge elements byte-identical; `flowchart_simple` `16337 → 14368` = −1969 bytes,
+  matching the marker measurement), and `golden_svg_test` is GREEN again.
 - **Original comparator:** Mermaid.js emits no unused markers, so for a basic flowchart it
   ships ~1–2 markers where we shipped 12; this removes that fixed ~2 KB / 10-element gap,
   matching Mermaid's marker behavior — largest win on the small/medium `render_svg/flowchart`
