@@ -2392,3 +2392,45 @@
 - **Verdict:** reverted; do not retry node/label dedup-map fingerprint buckets
   without a fresh allocation profile proving the owned-key allocations dominate
   the parser after the existing `span_all` and borrowed-line wins.
+
+### Cluster CSS feature gate — REVERTED (2026-06-27)
+- **Lever tested:** `fm-render-svg` briefly split cluster-only CSS selectors
+  (`.fm-cluster`, `.fm-cluster-label`, C4/swimlane variants, cluster opacity, and
+  print cluster rules) behind a render-time cluster-presence bit. The intent was to
+  keep plain wide flowcharts from serializing dead cluster CSS while preserving CSS
+  for real IR clusters and non-flowchart layout cluster boxes.
+- **Mapped primitive:** dead-code elimination / predicate hoisting from the
+  alien-graveyard + alien-artifact pass: specialize the common no-cluster SVG
+  render path instead of emitting universal style blocks.
+- **Baseline -> After:** clean worktree
+  `/data/projects/.worktrees/frankenmermaid-cod-b-cluster-css-20260627` at
+  `3d6f8bc`, per-crate package `frankenmermaid-cli`, bench `pipeline_bench`,
+  filter `wide_stages/render`, target dir
+  `/data/projects/.rch-targets/frankenmermaid-cod-b`, via
+  `AGENT_NAME=TanSparrow RCH_WORKER=ovh-a rch exec -- cargo bench --profile release
+  -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time
+  1 --measurement-time 2`. `rch` fell open locally for both baseline and
+  candidate, so the pair is comparable. Baseline measured `8x16` `1.1697 ms`,
+  `12x24` `2.4328 ms`, and `16x32` `6.4536 ms`. Candidate measured `1.0424 ms`,
+  `2.7332 ms`, and `7.0638 ms`: `-10.88%`, `+12.35%`, and `+9.45%` by median
+  (criterion reported the largest case as statistically no-change, `p = 0.11`).
+- **Original comparator:** pinned live-CDP Mermaid `11.12.0` denominators reused
+  for identical generated wide inputs: `8x16` `315.14 ms`, `12x24` `981.73 ms`,
+  `16x32` `2879.185 ms`.
+- **frankenmermaid/Mermaid ratio:** baseline render stage was `0.003712x`,
+  `0.002478x`, and `0.002241x` Mermaid.js time (`269.42x`, `403.54x`, and
+  `446.14x` faster than Mermaid.js). Candidate render stage was `0.003308x`,
+  `0.002784x`, and `0.002453x` Mermaid.js time (`302.32x`, `359.19x`, and
+  `407.60x` faster). These are render-stage ratios against full-pipeline
+  Mermaid denominators for context only.
+- **Behavior proof:** while measured, the candidate passed the focused release
+  test filter `cargo test --profile release -p fm-render-svg cluster` (`7`
+  tests). The production source was then manually restored. Final conformance on
+  the reverted tree passed via `AGENT_NAME=TanSparrow
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec --
+  cargo test --profile release -p frankenmermaid-cli --test
+  frankentui_conformance_test` (`1` test).
+- **Verdict:** reverted; the no-cluster CSS gate helped the smallest render case
+  but regressed the 12x24 gate and did not produce a reliable 16x32 win. Do not
+  retry cluster-CSS pruning unless paired with a profile showing CSS string
+  construction or SVG style serialization as a top cost on the target size.

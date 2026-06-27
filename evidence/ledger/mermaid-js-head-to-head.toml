@@ -1821,3 +1821,58 @@ tooling_notes = [
 [negative_measurement_parser_hash_dedup_2026_06_27.decision]
 status = "reject"
 rationale = "No same-worker keep proof was available and the candidate raw/criterion evidence was strongly negative; extra hash-bucket lookup work outweighed saved transient String/Vec key allocations. Production code and dependency changes were manually reverted; only evidence remains."
+
+[negative_measurement_cluster_css_feature_gate_2026_06_27]
+date = "2026-06-27"
+agent = "TanSparrow"
+lever_bead = "bd-1buv.1"
+graveyard_route = "Alien Graveyard / Alien Artifact dead-code elimination and predicate-hoisting route: specialize the common no-cluster SVG style path instead of serializing universal cluster selectors."
+worker_delta = "same clean worktree and same rch local fallback for baseline and candidate; RCH_WORKER=ovh-a was requested but rch reported local fallback for both runs"
+baseline_commit = "3d6f8bc"
+worktree = "/data/projects/.worktrees/frankenmermaid-cod-b-cluster-css-20260627"
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-b"
+candidate_summary = "Temporarily gated fm-render-svg cluster theme/effects/print CSS behind real cluster presence; manually reverted after mixed wide_stages/render result."
+render_baseline_command = "AGENT_NAME=TanSparrow RCH_WORKER=ovh-a RUSTFLAGS='-C metadata=tansparrowclustercsscleanbase' CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
+render_candidate_command = "AGENT_NAME=TanSparrow RCH_WORKER=ovh-a RUSTFLAGS='-C metadata=tansparrowclustercsscandidate' CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
+mermaid_js_command = "Pinned live-CDP Mermaid 11.12.0 denominator reused from current-main ledger for identical generated wide inputs."
+rust_build_profile = "release profile [optimized]"
+behavior_proof = "Candidate passed cargo test --profile release -p fm-render-svg cluster while measured. Candidate source was manually reverted; final reverted tree passed frankenmermaid-cli frankentui_conformance_test."
+tooling_notes = [
+  "The literal cargo bench --release form remains invalid on this Cargo toolchain; --profile release was used for the requested release-profile per-crate bench.",
+  "The shared /data/projects/frankenmermaid worktree picked up peer edits during the run, so clean evidence was collected in a linked worktree from origin/main.",
+  "RCH queued conformance, then fell open locally with selection error queue_timeout; this still exercised the requested rch exec path.",
+]
+
+[negative_measurement_cluster_css_feature_gate_2026_06_27.metrics]
+"wide_stages_render_8x16_baseline_mean_ms" = 1.1697
+"wide_stages_render_8x16_candidate_mean_ms" = 1.0424
+"wide_stages_render_8x16_candidate_delta_pct" = -10.8831
+"wide_stages_render_12x24_baseline_mean_ms" = 2.4328
+"wide_stages_render_12x24_candidate_mean_ms" = 2.7332
+"wide_stages_render_12x24_candidate_delta_pct" = 12.3479
+"wide_stages_render_16x32_baseline_mean_ms" = 6.4536
+"wide_stages_render_16x32_candidate_mean_ms" = 7.0638
+"wide_stages_render_16x32_candidate_delta_pct" = 9.4552
+"wide_stages_render_8x16_mermaid_js_mean_ms" = 315.1399999976158
+"wide_stages_render_12x24_mermaid_js_mean_ms" = 981.7300000190735
+"wide_stages_render_16x32_mermaid_js_mean_ms" = 2879.185000014305
+"baseline_render_stage_8x16_frankenmermaid_over_mermaid_js" = 0.003712
+"baseline_render_stage_12x24_frankenmermaid_over_mermaid_js" = 0.002478
+"baseline_render_stage_16x32_frankenmermaid_over_mermaid_js" = 0.002241
+"baseline_render_stage_8x16_mermaid_js_over_frankenmermaid" = 269.42
+"baseline_render_stage_12x24_mermaid_js_over_frankenmermaid" = 403.54
+"baseline_render_stage_16x32_mermaid_js_over_frankenmermaid" = 446.14
+"candidate_render_stage_8x16_frankenmermaid_over_mermaid_js" = 0.003308
+"candidate_render_stage_12x24_frankenmermaid_over_mermaid_js" = 0.002784
+"candidate_render_stage_16x32_frankenmermaid_over_mermaid_js" = 0.002453
+"candidate_render_stage_8x16_mermaid_js_over_frankenmermaid" = 302.32
+"candidate_render_stage_12x24_mermaid_js_over_frankenmermaid" = 359.19
+"candidate_render_stage_16x32_mermaid_js_over_frankenmermaid" = 407.60
+
+[negative_measurement_cluster_css_feature_gate_2026_06_27.validation]
+"cargo_test_fm_render_svg_cluster" = "passed via rch exec local fallback: 7 tests"
+"cargo_test_frankenmermaid_cli_frankentui_conformance" = "passed via rch exec local fallback after queue_timeout: 1 test"
+
+[negative_measurement_cluster_css_feature_gate_2026_06_27.decision]
+status = "reject"
+rationale = "Cluster CSS feature gating improved 8x16 render by 10.88% but regressed 12x24 by 12.35% and left 16x32 statistically no-change with a slower median; production source was manually reverted and only evidence remains."
