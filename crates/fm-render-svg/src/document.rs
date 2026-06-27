@@ -6,7 +6,7 @@
 use std::fmt::{self, Write};
 use std::io;
 
-use crate::attributes::{Attributes, escape_xml_text};
+use crate::attributes::{Attributes, write_escaped_attr, write_escaped_text};
 use crate::defs::DefsBuilder;
 use crate::element::Element;
 
@@ -167,10 +167,14 @@ impl SvgDocument {
 
         // Add width/height
         if let Some(ref w) = self.width {
-            let _ = write!(output, " width=\"{}\"", escape_xml_attr_value(w));
+            output.push_str(" width=\"");
+            let _ = write_escaped_attr(output, w);
+            output.push('"');
         }
         if let Some(ref h) = self.height {
-            let _ = write!(output, " height=\"{}\"", escape_xml_attr_value(h));
+            output.push_str(" height=\"");
+            let _ = write_escaped_attr(output, h);
+            output.push('"');
         }
 
         // Add other attributes
@@ -180,17 +184,23 @@ impl SvgDocument {
 
         // Add title for accessibility
         if let Some(ref title) = self.title {
-            let _ = write!(output, "<title>{}</title>", escape_xml_text(title));
+            output.push_str("<title>");
+            let _ = write_escaped_text(output, title);
+            output.push_str("</title>");
         }
 
         // Add description for accessibility
         if let Some(ref desc) = self.desc {
-            let _ = write!(output, "<desc>{}</desc>", escape_xml_text(desc));
+            output.push_str("<desc>");
+            let _ = write_escaped_text(output, desc);
+            output.push_str("</desc>");
         }
 
         // Add inline style
         if let Some(ref css) = self.style {
-            let _ = write!(output, "<style>{}</style>", escape_xml_text(css));
+            output.push_str("<style>");
+            let _ = write_escaped_text(output, css);
+            output.push_str("</style>");
         }
 
         // Add defs section
@@ -235,21 +245,6 @@ impl fmt::Display for SvgDocument {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.to_string_with_capacity(4096))
     }
-}
-
-fn escape_xml_attr_value(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for ch in value.chars() {
-        match ch {
-            '&' => escaped.push_str("&amp;"),
-            '<' => escaped.push_str("&lt;"),
-            '>' => escaped.push_str("&gt;"),
-            '"' => escaped.push_str("&quot;"),
-            '\'' => escaped.push_str("&#39;"),
-            _ => escaped.push(ch),
-        }
-    }
-    escaped
 }
 
 #[cfg(test)]

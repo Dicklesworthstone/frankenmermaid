@@ -1589,6 +1589,7 @@ worker_delta = "ovh-a"
 baseline_worktree = "/data/projects/.worktrees/frankenmermaid-tansparrow-701b-baseline-0cd"
 baseline_commit = "0cd6248"
 candidate_commit_base = "5026751"
+reapplied_after_commit = "9aaaa6f"
 target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-a"
 render_baseline_command = "RCH_WORKER=ovh-a RUSTFLAGS='-C metadata=tansparrow701bbaseovh' CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a AGENT_NAME=TanSparrow rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
 render_candidate_command = "RUSTFLAGS='-C metadata=tansparrow701bcand' CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a AGENT_NAME=TanSparrow rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
@@ -1601,6 +1602,7 @@ tooling_notes = [
   "Build slot reservations are disabled on this Agent Mail deployment.",
   "cargo fmt --check remains blocked by already-committed rustfmt drift in bench files and unrelated renderer helper files; the commit intentionally avoids a repo-wide format sweep.",
   "The literal cargo bench --release form remains invalid on this Cargo toolchain; --profile release was used for per-crate bench commands.",
+  "Two rch focused-test attempts selected vmi1264463 and failed before tests because that worker lacks cmake for highs-sys; final tests ran locally with the same CARGO_TARGET_DIR.",
 ]
 
 [post_measurement_svg_stream_escape_edge_css_cow_2026_06_27.metrics]
@@ -1627,10 +1629,10 @@ tooling_notes = [
 "candidate_render_stage_16x32_mermaid_js_over_frankenmermaid" = 914.75
 
 [post_measurement_svg_stream_escape_edge_css_cow_2026_06_27.validation]
-"cargo_test_fm_render_svg_truncate_label" = "passed locally through rch exec fallback: 2 tests"
-"cargo_test_frankenmermaid_cli_frankentui_conformance" = "passed on ovh-a: 1 test"
-"cargo_check_fm_render_svg_all_targets" = "passed on hz2"
-"cargo_clippy_fm_render_svg_all_targets_d_warnings" = "passed on hz2"
+"cargo_test_fm_render_svg_truncate_label" = "passed locally: 2 tests"
+"cargo_test_frankenmermaid_cli_frankentui_conformance" = "passed locally: 1 test"
+"cargo_check_fm_render_svg_all_targets" = "passed locally after reapplying on top of 9aaaa6f"
+"cargo_clippy_fm_render_svg_all_targets_d_warnings" = "passed locally after reapplying on top of 9aaaa6f"
 "cargo_fmt_check" = "blocked by already-committed rustfmt drift outside this measured lever"
 
 [post_measurement_svg_stream_escape_edge_css_cow_2026_06_27.decision]

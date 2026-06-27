@@ -75,18 +75,19 @@
   `414.22x`, `563.53x`, and `914.75x` slower on the same wide input sizes. These are
   render-stage ratios against full-pipeline Mermaid denominators, so they are conservative
   dominance context rather than a replacement for the standing full-pipeline ratio.
-- **Verdict:** kept. This supersedes the adjacent local-fallback rejection below, which used
-  a different execution mode and lost its stop-rule argument once the same-worker remote
-  parent/candidate pair was measured.
-- **Validation:** focused `fm-render-svg` truncate-label tests passed; `cargo test --profile
-  release -p frankenmermaid-cli --test frankentui_conformance_test` passed on `ovh-a`;
+- **Verdict:** kept. This supersedes earlier local-fallback routing evidence for this
+  micro-family because the same-worker remote parent/candidate pair is the decision-grade
+  measurement.
+- **Validation:** focused `fm-render-svg` truncate-label tests passed locally; `cargo test
+  --profile release -p frankenmermaid-cli --test frankentui_conformance_test` passed locally;
   `cargo check --profile release -p fm-render-svg --all-targets` and
-  `cargo clippy --profile release -p fm-render-svg --all-targets -- -D warnings` passed on
-  `hz2`.
+  `cargo clippy --profile release -p fm-render-svg --all-targets -- -D warnings` passed
+  locally after reapplying the lever on top of `9aaaa6f`.
 - **Tooling note:** `cargo fmt --check` remains blocked by already-committed rustfmt drift in
   bench files and unrelated renderer helper files; this commit does not broaden into a
   repo-wide format sweep. Agent Mail file reservations failed because the mail SQLite
-  database reported corruption.
+  database reported corruption. Two `rch` focused-test attempts selected `vmi1264463` and
+  failed before tests because that worker lacks `cmake`, so the final tests ran locally.
 
 ### Document XML streaming + conditional edge-label CSS - REJECTED (2026-06-27)
 - **Lever:** `fm-render-svg::SvgDocument::write_to_string` was changed to stream

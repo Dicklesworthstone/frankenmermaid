@@ -34,7 +34,10 @@ pub use text::{TextAnchor, TextBuilder};
 pub use theme::{FontConfig, Theme, ThemeColors, ThemePreset, generate_palette};
 pub use transform::{Transform, TransformBuilder};
 
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, HashMap},
+};
 
 use fm_core::{
     DiagramType, IrLabelId, IrLabelSegment, IrXyChartMeta, IrXySeriesKind, MermaidDiagramIr,
@@ -461,7 +464,10 @@ fn render_scene_document_with_ir(
 
     let mut css = String::new();
     if config.embed_theme_css {
-        css.push_str(&theme.to_svg_style(config.shadows));
+        css.push_str(&theme.to_svg_style(
+            config.shadows,
+            ir.is_some_and(|ir| ir.edges.iter().any(|edge| edge.label.is_some())),
+        ));
     }
     if effects_enabled {
         css.push_str(&effects_css(config));
@@ -1293,14 +1299,14 @@ fn resolve_edge_inline_style(ir: &MermaidDiagramIr, edge_index: usize) -> Option
     style_map_to_css(&merged)
 }
 
-fn truncate_label(label: &str, max_chars: Option<usize>) -> String {
+fn truncate_label(label: &str, max_chars: Option<usize>) -> Cow<'_, str> {
     let Some(limit) = max_chars else {
-        return label.to_string();
+        return Cow::Borrowed(label);
     };
     let mut chars = label.chars();
     let needs_truncation = chars.clone().count() > limit;
     if !needs_truncation {
-        return label.to_string();
+        return Cow::Borrowed(label);
     }
     let mut text = String::new();
     for _ in 0..limit.saturating_sub(1) {
@@ -1310,7 +1316,7 @@ fn truncate_label(label: &str, max_chars: Option<usize>) -> String {
         text.push(ch);
     }
     text.push('…');
-    text
+    Cow::Owned(text)
 }
 
 fn detail_tier_name(tier: RenderDetailTier) -> &'static str {
@@ -1744,7 +1750,10 @@ fn render_layout_to_svg(
 
     // Embed theme CSS if enabled
     if config.embed_theme_css {
-        let mut css = theme.to_svg_style(detail.enable_shadows);
+        let mut css = theme.to_svg_style(
+            detail.enable_shadows,
+            ir.edges.iter().any(|edge| edge.label.is_some()),
+        );
         if effects_enabled {
             css.push_str(&effects_css(config));
         }
@@ -4518,7 +4527,7 @@ fn render_node(
             let mut name_elem = Element::text()
                 .x(cx)
                 .y(y + header_height * 0.6)
-                .content(&label_text)
+                .content(label_text.as_ref())
                 .attr("text-anchor", "middle")
                 .attr("dominant-baseline", "central")
                 .attr_num("font-size", node_font_size)
@@ -6079,12 +6088,12 @@ fn render_edge(
         let base_label = truncate_label(&label.text, detail.edge_label_max_chars);
 
         // Prepend autonumber when enabled for sequence diagrams
-        let label_text = if let Some(number) = ir
+        let label_text: Cow<'_, str> = if let Some(number) = ir
             .sequence_meta
             .as_ref()
             .and_then(|meta| meta.autonumber_value(edge_index))
         {
-            format!("{number} {base_label}")
+            Cow::Owned(format!("{number} {}", base_label.as_ref()))
         } else {
             base_label
         };
@@ -6136,6 +6145,7 @@ fn render_edge(
         group = group.child(elem);
 
         // Add background rect for label
+        let label_text = label_text.as_ref();
         let lines_count = label_text.lines().count().max(1) as f32;
         let max_line_len = label_text
             .lines()
@@ -6167,7 +6177,7 @@ fn render_edge(
 
         // Add label text
         group = group.child(
-            TextBuilder::new(&label_text)
+            TextBuilder::new(label_text)
                 .x(lx)
                 .y(start_y)
                 .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
@@ -6191,7 +6201,7 @@ fn render_edge(
                 fm_core::IrEndpoint::Node(nid) => ir.nodes.get(nid.0),
                 _ => None,
             };
-            let edge_desc = describe_edge(from_node, to_node, arrow, Some(&label_text), ir);
+            let edge_desc = describe_edge(from_node, to_node, arrow, Some(label_text), ir);
             group = group.child(Element::title(&edge_desc));
         }
 
@@ -6264,6 +6274,25 @@ mod tests {
         layout_diagram,
     };
     use proptest::prelude::*;
+
+    #[test]
+    fn truncate_label_borrows_when_no_truncation_needed() {
+        let label = "short label";
+        let unchanged = truncate_label(label, Some(32));
+        assert!(matches!(unchanged, Cow::Borrowed(_)));
+        assert_eq!(unchanged.as_ref(), label);
+
+        let unlimited = truncate_label(label, None);
+        assert!(matches!(unlimited, Cow::Borrowed(_)));
+        assert_eq!(unlimited.as_ref(), label);
+    }
+
+    #[test]
+    fn truncate_label_owns_only_truncated_output() {
+        let truncated = truncate_label("abcdef", Some(4));
+        assert!(matches!(truncated, Cow::Owned(_)));
+        assert_eq!(truncated.as_ref(), "abc…");
+    }
 
     #[test]
     fn plain_node_label_fast_path_matches_text_builder_output() {

@@ -410,8 +410,9 @@ pub(crate) fn write_escaped_text<W: fmt::Write>(f: &mut W, s: &str) -> fmt::Resu
 }
 
 /// Escape special characters in XML text content.
+#[cfg(test)]
 #[must_use]
-pub fn escape_xml_text(s: &str) -> String {
+fn escape_xml_text(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let _ = write_escaped_text(&mut result, s);
     result
