@@ -1638,6 +1638,25 @@
 
 ## Blocked/Invalid Evidence Attempts
 
+### REJECTED: Brandes-Köpf neighbour precompute regresses +2-4% (neighbour recompute is not the BK bottleneck) (2026-06-27)
+- Implemented the lever flagged last cycle: `bk_upper_neighbours` re-walks adjacency + re-sorts a
+  `Vec` per node per pass (×4); the ordering is fixed during BK, so I precomputed the upper (rank-1)
+  and lower (rank+1) neighbour lists **once** (`bk_precompute_neighbours`) and reused them across all
+  four passes, halving the neighbour work (2048 → 1024 calls). Output byte-identical (428 fm-layout
+  tests + golden SVG + determinism all pass).
+- **But it REGRESSED.** Same-session `ovh-a` A/B (`layout_wide`, both tight): HEAD `118.04 µs` /
+  `1.0305 ms` (8x16/16x32) → candidate `122.39 µs` / `1.0518 ms` = **+3.7% / +2.1% slower**. The
+  precompute trades 2048 *transient* `Vec`s for **1024 persistent nested `Vec`s** (`upper`+`lower`,
+  held for the whole BK) — and since the neighbour computation is **not** the BK bottleneck, halving
+  it doesn't pay for the `Vec<Vec>` allocation/retention. Reverted.
+- **Redirect:** the BK (`coordinate_assignment`, ~47-56% of layout) bottleneck is **elsewhere** —
+  `bk_horizontal_compaction` (lib.rs:9490, runs ×4) or the alignment median/threshold logic, not the
+  neighbour lists. A flat CSR neighbour layout would avoid the `Vec<Vec>` overhead but won't help
+  (the recompute isn't the cost). Next cycle: profile `bk_vertical_alignment` vs
+  `bk_horizontal_compaction` (accumulated over the 4 passes) to locate the real BK cost before
+  optimizing. Do NOT re-attempt the neighbour precompute.
+- **Standing:** unchanged — reverted. `226x`–`506x` over Mermaid `11.12.0`.
+
 ### PROFILED: Brandes-Köpf `coordinate_assignment` is now the dominant layout phase (next lever) (2026-06-27)
 - After the crossing_refinement win (`5688f41`), env-gated phase timers (`FM_PROFILE`) on the 16x32
   wide layout give this per-iteration breakdown (warm, local): `compute_node_sizes 10µs`,
