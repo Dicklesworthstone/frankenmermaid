@@ -2799,3 +2799,111 @@
   unless a new profile shows another distinct edge-title subpath; the next SVG
   render lever should move toward direct serialization or another measured
   allocation source.
+
+### Truncate-label byte-length guard - REVERTED (2026-06-27)
+- **Lever tested:** `truncate_label` briefly returned early when
+  `label.len() <= limit`, avoiding the Unicode `chars().count()` walk for
+  already-short labels. This targeted the wide SVG render path after the
+  accessible edge-label cache had already landed on current main.
+- **Mapped primitive:** alien-graveyard allocation/hot-path budget plus
+  alien-artifact evidence-preserving fast-path specialization: prove the common
+  ASCII-short-label case before changing deeper text rendering.
+- **Baseline -> After:** current-main baseline at `294d0e0`, package
+  `frankenmermaid-cli`, bench `pipeline_bench`, filter `wide_stages/render`,
+  target dir `/data/projects/.rch-targets/frankenmermaid-cod-b`, via
+  `AGENT_NAME=TanSparrow RCH_WORKER=ovh-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b
+  rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench
+  pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2`.
+  `rch` fell open locally for both baseline and candidate after reporting no
+  admissible worker slots, so the pair is same-route local-fallback evidence.
+  Baseline measured `8x16` `1.1381 ms`, `12x24` `2.5213 ms`, and `16x32`
+  `6.6031 ms`; candidate measured `1.2909 ms`, `3.2360 ms`, and `6.2516 ms`.
+  Raw deltas were `+13.43%`, `+28.35%`, and `-5.32%`; Criterion reported
+  significant regressions for `8x16` and `12x24` (`p = 0.00`) and no reliable
+  change for `16x32` (`p = 0.12`).
+- **Original comparator:** pinned live-CDP Mermaid `11.12.0` denominators reused
+  for identical generated wide inputs: `8x16` `315.14 ms`, `12x24`
+  `981.73 ms`, `16x32` `2879.185 ms`.
+- **frankenmermaid/Mermaid ratio:** baseline render stage was `0.003611x`,
+  `0.002568x`, and `0.002293x` Mermaid.js time (`276.90x`, `389.37x`, and
+  `436.04x` faster than Mermaid.js). Candidate render stage was `0.004096x`,
+  `0.003296x`, and `0.002171x` Mermaid.js time (`244.12x`, `303.38x`, and
+  `460.55x` faster). These are render-stage ratios against full-pipeline
+  Mermaid denominators for context only.
+- **Behavior proof:** while measured, the candidate passed
+  `AGENT_NAME=TanSparrow CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b
+  rch exec -- cargo test --profile release -p fm-render-svg truncate_label`
+  (`2` tests), and `cargo fmt --check` passed. Production source was manually
+  restored. Final conformance on the restored tree passed via
+  `RCH_OUTPUT_FORMAT=json rch exec --json -- cargo test --profile release -p
+  frankenmermaid-cli --test frankentui_conformance_test` on `ovh-a` (`1` test).
+- **Tooling notes:** the literal `cargo bench --release` form remains invalid on
+  this Cargo toolchain; `--profile release` was used for the requested
+  release-profile per-crate bench. An initial conformance wrapper produced no
+  progress output and was interrupted; the JSON retry ran remotely on `ovh-a`
+  and passed.
+- **Verdict:** reverted. The byte-length guard worsened the two smaller wide
+  render cases and produced only a noisy `16x32` improvement; do not retry
+  `truncate_label` short-label guards without a profile proving char counting is
+  a top renderer cost.
+
+### PROFILED: spans-off wide render is ALLOCATION-bound (model correction); next lever = `Attributes` inline storage (2026-06-27)
+- **Dig (no shippable lever this cycle):** with no measured win sitting off `main`
+  (TanSparrow's `Accessible edge-label cache` source landed as `294d0e0` during
+  this cycle, so the working tree is clean and that win is on `main`), this is the
+  dig branch on the biggest measured gap vs Mermaid: the **render** stage.
+- **Biggest measured gap (`wide_stages`, current `main` `294d0e0`):** render dominates
+  the wide pipeline at every size — `8x16` parse `329 µs` / layout `206 µs` / render
+  `1.29 ms` (render ~71%); `12x24` `727 µs` / `382 µs` / `2.18 ms` (~66%); `16x32`
+  parse `1.36 ms` / layout `1.01 ms` / render `5.02 ms` (~68%, render measured on a
+  clean `rch` route; the `12.2 ms` local-fallback render read for `16x32` is a
+  contention artifact and is discarded). Per-crate bench: `CARGO_TARGET_DIR=
+  /data/projects/.rch-targets/frankenmermaid-cc rch exec -- cargo bench --profile
+  release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages --warm-up-time 1
+  --measurement-time 2`.
+- **Profile (the new finding):** `perf record -g` on the cached `pipeline_bench`
+  binary, `--profile-time 8 wide_stages/render/16x32`, shows render self-time is
+  dominated by libc allocation, **not** serialization: `_int_malloc 13.4%`,
+  `_int_free_chunk 12.6%`, `__memmove_avx_unaligned_erms 8.6%` (Vec/String regrowth
+  copies), `__libc_malloc2 8.4%`, `_int_free_maybe_consolidate 7.1%`,
+  `malloc_consolidate 6.2%`, `cfree 5.9%`, `realloc 3.7%`, `_int_realloc 2.8%`,
+  `malloc 2.6%` — **>50% of render self-time is malloc/free/realloc/memmove churn**.
+  Rust frames are unresolved (the release bench binary is stripped: `nm` = 0
+  symbols), so this is category-level, not function-level.
+- **Model correction:** the standing ledger model (`render is serialization /
+  byte-writing bound`, after the 22+ serialization-writer wins) was measured when
+  `include_source_spans` defaulted **true** — the repeated `data-fm-source-*` attr
+  NAMES then dominated output bytes. Spans are now **off by default** (matches
+  Mermaid.js; `bench_render_spans_on` isolates the spans-on path), which roughly
+  halves serialized output and flips the default render path to **allocation-bound**.
+  The serialization writers are still optimal; the next render lever is allocation
+  reduction, not more `write!`→direct conversions.
+- **Next lever (identified, NOT shipped — needs a careful A/B, not a blind ship):**
+  the dominant allocation is structural — every SVG element heap-allocates an
+  `Attributes` `Vec` (already `Vec::with_capacity(12)`, landed `d568ce6`) and is
+  itself stored by value in the document's `children: Vec<Element>`. For a `16x32`
+  graph that is ~1536 element `Attributes` Vecs. Eliminating the per-element heap
+  Vec needs inline small-vector storage in `Attributes` (`smallvec`/`arrayvec` are
+  already in the lock file transitively). **Why it was not shipped blind:** inline
+  storage inflates `sizeof(Element)`, and `Element` is moved by value as the root
+  `children: Vec<Element>` grows (doubling) — trading fewer mallocs for larger
+  `memmove` copies, a net-uncertain, byte-identity-critical change (snapshot +
+  `frankentui_conformance_test` gated). It must be measured with the reverse-order
+  same-worker A/B and an inline-size sweep, which did not fit this cycle's window.
+  Bounding prior rejections on this seam: document child-`Vec` capacity hint
+  (REVERTED, ~0 / wide regression), `TextBuilder` single-line line-vector skip
+  (REVERTED, catastrophic `16x32` regression), direct edge-path string emission
+  (REJECTED, ~0). A SmallVec on `Attributes` is distinct from all three and is the
+  recommended next attempt.
+- **Ratio vs Mermaid 11.12.0:** render-stage `16x32` clean `rch` `5.0159 ms` /
+  pinned full-pipeline Mermaid `2879.185 ms` = `0.001742x` (`574x` faster) — a
+  conservative render-stage-vs-full-pipeline datapoint corroborating the standing
+  same-worker render-stage band from `294d0e0` (`307x`/`387x`/`548x`) and the
+  full-pipeline band (`234x`/`308x`/`468x`).
+- **Verdict:** no source change this cycle (docs-only; conformance unaffected). The
+  contribution is the corrected render cost model + the pinned next lever. Do not
+  resume serialization-writer micro-levers for spans-off flowcharts; profile-confirm
+  any future render lever attacks allocation, and measure the `Attributes` inline
+  storage trade-off before shipping it.
+
+  Agent: GreyShrike
