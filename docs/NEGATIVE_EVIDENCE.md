@@ -1260,6 +1260,38 @@
 
 ## Blocked/Invalid Evidence Attempts
 
+### Parse profile post-`span_all`: detection ~0%, IR-build 99%; next lever is dedup-map key double-alloc — FINDING (2026-06-26)
+- **Profiled (via `PARSE_PROFILE` env split in `parse_with_mode_and_config`, run on the
+  cmake-free `parse_bench`):** for `flowchart/large_1000` (≈30.6 KB input) the stages split
+  `detect ≈ 6 µs` vs `parse_build ≈ 2.5 ms` — **detection is ~0.3%; the IR build is 99%+** of
+  parse. So further parse wins must come from the IR build (`parse_flowchart` →
+  `IrBuilder`), not detection (already guarded).
+- **What's left in the IR build (inspected, all sub-3% or contract-bound):**
+  - **node-id double-alloc:** `intern_node_auto` allocates the id once for `IrNode.id`
+    (`String`, public field) and again as the `node_index_by_id: FxHashMap<String, …>` key —
+    two `String`s per unique node (~1000 for `large_1000`). The map key is transient (freed
+    after parse) but still allocates.
+  - **label text double-clone:** `intern_label` builds `key = (text.clone(), segments.clone())`
+    *before* the lookup, then clones `text` again into `IrLabel.text` — two text clones per
+    unique label.
+  - `ir.graph` (the FNX-adapter `IrGraphNode/IrGraphEdge` built in `push_edge`/node intern) is
+    **not** dead — it is read by the default layout (`primary_region_owners`,
+    `node_label_text`, block-beta grid), so it cannot be dropped like `span_all` was.
+- **Next lever (specific, estimated ~3–4% combined, moderate refactor):** replace the two
+  owned-`String`/tuple dedup-map keys (`node_index_by_id`, `label_index_by_text`) with
+  **hash-keyed** maps (`FxHashMap<u64, SmallVec<IrLabelId|IrNodeId>>`, hash of the
+  id/label-text), resolving collisions by comparing against the already-owned `ir.nodes[i].id`
+  / `ir.labels[i].text`. This eliminates the per-unique-node/label **key** `String` allocation
+  (the `IrNode.id` / `IrLabel.text` allocation stays). Correctness-critical (a wrong-dedup bug
+  merges nodes/labels), so it needs the full `fm-parser` test suite + a clean same-worker
+  `parse_bench` A/B — both now available. Deferred rather than rushed.
+- **frankenmermaid/Mermaid ratio:** unchanged — measurement/finding only, no source change.
+  Retained `full_pipeline_wide` standing `198.10x` / `262.92x` / `426.35x` vs live-CDP Mermaid
+  `11.12.0`.
+- **Do-not-retry note:** detection is not worth touching (~0.3%); `ir.graph` is not dead; the
+  hash-keyed dedup is the one remaining ≥3%-candidate parse lever and must be measured, not
+  assumed.
+
 ### cmake-free `fm-parser` parse bench + the per-worker-target-dir A/B blocker — INFRA (2026-06-26)
 - **Shipped (infra):** `crates/fm-parser/benches/parse_bench.rs` (+ criterion dev-dep). The
   full-pipeline `pipeline_bench` lives in `fm-cli`, which pulls in `fm-layout → highs-sys →
