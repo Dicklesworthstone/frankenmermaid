@@ -2939,6 +2939,12 @@
   immediately after measured `1.0270 ms`, `2.3872 ms`, `4.6098 ms`. Against that
   reverse baseline, the two-slot variant was slower by `25.09%`, `19.07%`, and
   `22.42%`.
+- **Independent cod-a confirmation:** a separate `CARGO_TARGET_DIR=
+  /data/projects/.rch-targets/frankenmermaid-cod-a` same-machine `rch` fallback
+  A/B reproduced the two-slot loss after an initial remote baseline was discarded
+  as cross-route. Production Vec baseline measured `1.1391 ms`, `2.7529 ms`,
+  `5.7031 ms`; `SmallVec<[Attribute; 2]>` measured `1.2996 ms`, `3.0951 ms`,
+  `6.0824 ms`, slower by `14.09%`, `12.43%`, and `6.65%`.
 - **Original comparator:** pinned live-CDP Mermaid `11.12.0` denominators reused
   for identical generated wide inputs: `8x16` `315.14 ms`, `12x24`
   `981.73 ms`, `16x32` `2879.185 ms`.
@@ -2948,6 +2954,9 @@
   `0.004077x`, `0.002895x`, and `0.001960x` Mermaid.js time (`245.30x`,
   `345.38x`, and `510.20x` faster). These are render-stage ratios against
   full-pipeline Mermaid denominators for context only.
+  The independent `cod-a` confirmation's production Vec ratios were `276.66x`,
+  `356.62x`, and `504.85x` faster than Mermaid.js; its two-slot candidate ratios
+  fell to `242.49x`, `317.19x`, and `473.36x`.
 - **Behavior proof:** while measured, the candidate passed
   `AGENT_NAME=TanSparrow CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b
   rch exec -- cargo test --profile release -p fm-render-svg attributes` (`12`
@@ -2961,7 +2970,9 @@
   this Cargo toolchain; `--profile release` was used for the requested
   release-profile per-crate bench. Plain conformance `rch exec` produced no
   progress output and was interrupted; the JSON retry ran remotely on `ovh-a` and
-  passed.
+  passed. The independent `cod-a` confirmation hit the same quiet wrapper issue;
+  `RCH_OUTPUT_FORMAT=json rch exec --json` passed conformance remotely on `ovh-a`
+  after production source was restored.
 - **Verdict:** reverted. The allocator profile was real, but inlining attribute
   storage makes each `Element` larger and loses on the reverse-order gate. Do not
   retry `Attributes` SmallVec inline storage without an Element arena or other

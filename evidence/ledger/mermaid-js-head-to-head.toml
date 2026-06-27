@@ -2184,3 +2184,58 @@ tooling_notes = [
 [negative_measurement_attributes_smallvec_inline_storage_2026_06_27.decision]
 status = "reject"
 rationale = "SmallVec inline attribute storage improved the smallest noisy case in the four-slot shape but regressed 12x24; the two-slot shape lost the reverse-order gate by 19-25% across all wide render sizes. Production source was manually restored and only evidence remains."
+
+[negative_measurement_attributes_smallvec_inline_storage_cod_a_confirmation_2026_06_27]
+date = "2026-06-27"
+agent = "TanSparrow"
+lever_bead = "bd-1buv.1"
+graveyard_route = "Independent confirmation of the rejected Alien Graveyard allocator-pressure SmallVec storage lever on the cod-a target directory."
+worker_delta = "decisive baseline and candidate both used rch local fallback after worker pin attempts reported no admissible slots; an initial ovh-a remote baseline was discarded as cross-route"
+baseline_commit = "bbd0271"
+candidate_summary = "Repeated the two-slot SmallVec<[Attribute; 2]> Attributes storage check in /data/projects/.rch-targets/frankenmermaid-cod-a, then restored production Vec storage."
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-a"
+render_baseline_command = "AGENT_NAME=TanSparrow RCH_WORKER=hz1 RUSTFLAGS='-C metadata=tansparrowsmallvechz1base' CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
+render_candidate_command = "AGENT_NAME=TanSparrow RCH_WORKER=ovh-a RUSTFLAGS='-C metadata=tansparrowsmallveccand' CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
+mermaid_js_command = "Pinned live-CDP Mermaid 11.12.0 denominator reused from current-main ledger for identical generated wide inputs."
+rust_build_profile = "release profile [optimized]"
+behavior_proof = "Candidate passed a focused fm-render-svg inline-storage serialization test while measured. Production source and lockfile were manually restored; frankenmermaid-cli frankentui_conformance_test passed on ovh-a through rch exec after the revert."
+tooling_notes = [
+  "The literal cargo bench --release form remains invalid on this Cargo toolchain; --profile release was used for the requested release-profile per-crate bench.",
+  "Plain conformance rch exec produced no progress output and was interrupted; RCH_OUTPUT_FORMAT=json rch exec --json reran the same conformance test remotely on ovh-a and passed.",
+  "Agent Mail file reservation failed because the mail SQLite database corruption circuit breaker is open.",
+]
+
+[negative_measurement_attributes_smallvec_inline_storage_cod_a_confirmation_2026_06_27.metrics]
+"wide_stages_render_8x16_baseline_mean_ms" = 1.1391
+"wide_stages_render_8x16_candidate_mean_ms" = 1.2996
+"wide_stages_render_8x16_candidate_delta_pct" = 14.0901
+"wide_stages_render_12x24_baseline_mean_ms" = 2.7529
+"wide_stages_render_12x24_candidate_mean_ms" = 3.0951
+"wide_stages_render_12x24_candidate_delta_pct" = 12.4305
+"wide_stages_render_16x32_baseline_mean_ms" = 5.7031
+"wide_stages_render_16x32_candidate_mean_ms" = 6.0824
+"wide_stages_render_16x32_candidate_delta_pct" = 6.6508
+"wide_stages_render_8x16_mermaid_js_mean_ms" = 315.1399999976158
+"wide_stages_render_12x24_mermaid_js_mean_ms" = 981.7300000190735
+"wide_stages_render_16x32_mermaid_js_mean_ms" = 2879.185000014305
+"baseline_render_stage_8x16_frankenmermaid_over_mermaid_js" = 0.003615
+"baseline_render_stage_12x24_frankenmermaid_over_mermaid_js" = 0.002804
+"baseline_render_stage_16x32_frankenmermaid_over_mermaid_js" = 0.001981
+"baseline_render_stage_8x16_mermaid_js_over_frankenmermaid" = 276.66
+"baseline_render_stage_12x24_mermaid_js_over_frankenmermaid" = 356.62
+"baseline_render_stage_16x32_mermaid_js_over_frankenmermaid" = 504.85
+"candidate_render_stage_8x16_frankenmermaid_over_mermaid_js" = 0.004124
+"candidate_render_stage_12x24_frankenmermaid_over_mermaid_js" = 0.003153
+"candidate_render_stage_16x32_frankenmermaid_over_mermaid_js" = 0.002113
+"candidate_render_stage_8x16_mermaid_js_over_frankenmermaid" = 242.49
+"candidate_render_stage_12x24_mermaid_js_over_frankenmermaid" = 317.19
+"candidate_render_stage_16x32_mermaid_js_over_frankenmermaid" = 473.36
+
+[negative_measurement_attributes_smallvec_inline_storage_cod_a_confirmation_2026_06_27.validation]
+"cargo_test_fm_render_svg_attributes_inline_storage" = "passed via rch exec local fallback: 1 focused test"
+"candidate_source_restored" = "Cargo.lock, crates/fm-render-svg/Cargo.toml, and crates/fm-render-svg/src/attributes.rs manually restored to current-main content before docs-only confirmation commit"
+"cargo_test_frankenmermaid_cli_frankentui_conformance" = "passed via RCH_OUTPUT_FORMAT=json rch exec --json on ovh-a: 1 test"
+
+[negative_measurement_attributes_smallvec_inline_storage_cod_a_confirmation_2026_06_27.decision]
+status = "confirm_reject"
+rationale = "The independent cod-a A/B reproduced the two-slot SmallVec inline storage regression across all three wide render sizes: +14.09% at 8x16, +12.43% at 12x24, and +6.65% at 16x32."
