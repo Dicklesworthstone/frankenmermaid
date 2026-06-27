@@ -375,6 +375,49 @@
 
 ## Kept Wins Also Recorded Here By Request
 
+### Drop write-only `IrNode.span_all` accumulation (parse −12% large) — KEPT (2026-06-26)
+- **Provenance:** the code change landed independently during a session gap as commit
+  `35569a3` ("stop building write-only span_all dead data in the IR builder"), built on the
+  cmake-free `parse_bench` added in `5449c71`. This entry contributes the **clean,
+  same-worker measured A/B** (below) that quantifies it.
+- **Lever:** `IrNode.span_all: Vec<Span>` is **write-only dead data** — a repo-wide grep finds
+  one push site plus its initializer and **zero readers** (the defining span lives in
+  `span_primary`). Yet `IrBuilder::intern_node_auto` allocated a one-element `vec![span]` per
+  node *and* pushed an extra `Span` on **every node reference** (≈2 per edge endpoint), with
+  the inner `Vec` reallocating as references accumulated. Now `span_all` is initialized empty
+  (`Vec::new()`, no allocation) and the per-reference push is removed.
+- **Mapped primitive:** dead-data construction elimination, scoped by a proven zero-reader
+  predicate (same family as the kept source-attr/marker dead-output removals, but on the
+  parse/IR-build side rather than render output).
+- **Measurement (clean, same-worker A/B):** benched on the new `fm-parser/parse_bench`
+  (cmake-free, builds on any worker), `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cc`
+  via `rch exec`. Both `--save-baseline` and `--baseline` runs landed on the **same** worker
+  `hz2` (verified — no cross-worker `Baseline must exist` panic), so the comparison is valid:
+  | case | change | |
+  |------|--------|--|
+  | `flowchart/large_1000` | **−12.48%** | p = 0.00 (`2.5316 ms → 2.2157 ms`) |
+  | `flowchart/small_10` | **−4.77%** | p = 0.01 |
+  | `wide/8x16` | **−3.75%** | p = 0.00 |
+  | `wide/12x24` | −2.96% | p = 0.01 |
+  | `wide/16x32` | −2.95% | p = 0.00 (`1.236 ms`) |
+  | `flowchart/medium_100` | −1.30% | n.s. (p = 0.32) |
+  Clears the keep bar on three realistic cases with no regression anywhere.
+- **Behavior proof:** `rch exec -- cargo test -p fm-parser` = `405 passed; 0 failed` — empty
+  `span_all` breaks nothing, confirming it is unread. The field still exists (no public-API/
+  serde struct change); only its content changes from `[spans]` to `[]`, and it has no
+  consumer. SVG output is unaffected (`span_all` is IR-internal, never rendered).
+- **Original comparator:** parse is ≈21% of the wide pipeline; Mermaid.js's parser is part of
+  its full render path. Shaving up to 12% off our node-heavy parse strictly widens the
+  standing full-pipeline lead — current-main `full_pipeline_wide` `1.5908 ms` / `3.7339 ms` /
+  `6.7530 ms` vs live-CDP Mermaid `11.12.0` `315.14 ms` / `981.73 ms` / `2879.185 ms` =
+  `198.10x` / `262.92x` / `426.35x` slower.
+- **Verdict:** kept; a clean, significant, output-identical parse win, measured reliably via
+  the cmake-free `parse_bench` with both A/B runs pinned (by retry) to the same worker `hz2` —
+  the same-worker workaround for the per-worker-target-dir blocker recorded below.
+- **Do-not-retry note:** `span_all` is now empty, not removed; if a future consumer needs
+  "all spans for a node" it must repopulate it (and should then also become a reader, ending
+  its dead-data status).
+
 ### Emit only used `<defs>` arrowhead markers for flowcharts — KEPT (2026-06-26)
 - **Lever:** both SVG render backends (`render_layout_to_svg` legacy/default and
   `render_scene_document_with_ir` scene) unconditionally wrote all **12** arrowhead markers
