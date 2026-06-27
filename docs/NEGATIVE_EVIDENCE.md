@@ -484,6 +484,33 @@
 
 ## Kept Wins Also Recorded Here By Request
 
+### Move per-label `font-family` to the root `<svg>` (inherited) under `embed_theme_css` (−6.83% SVG bytes) — KEPT (2026-06-27)
+- **Change — the largest byte win of the series.** Every `<text>` label carried an inline
+  `font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial,
+  sans-serif"` (~123 B with escaping) — repeated once per node/edge/cluster label. `font-family`
+  is an **inherited** SVG property, so with the theme CSS embedded it's now set **once** on the
+  root `<svg>` (`SvgDocument::font_family`, gated on `embed_theme_css`) and every `<text>` inherits
+  it; the per-label inline copies are gated off via `font_family_unless_embedded_css` on both
+  `TextElement` and `Element` (the two emission mechanisms — **54** call sites + the plain-label
+  fast path, all routed through the helpers so the fast path still matches the TextBuilder path).
+- **Why the gate (not unconditional move):** `embed_theme_css = false` (PNG raster) has no
+  inherited source resvg can rely on cheaply, so it keeps the per-label inline (root font-family is
+  *not* added there). Browsers handle root→text `font-family` inheritance natively for the CSS-on
+  path. The monospace tspan font (code labels) is **not** gated — it intentionally overrides the
+  inherited root.
+- **Measured (deterministic byte win):** aggregate over the **37** regenerated `golden_svg_test`
+  snapshots `724,053 → 674,607 = −6.83%`; a 2-node diagram is `12,573 → 12,282` (−291), and
+  label-heavy/wide diagrams trend far higher (≈123 B × every label minus the one root attr — e.g.
+  ~63 KB on a 512-node graph). This is the single biggest output-size gap vs Mermaid (which is
+  CSS-driven and never repeats the font per label) and this change matches that approach.
+- **Conformance:** `cargo test -p fm-render-svg` = **220 pass** (the plain-label-fast-path
+  equivalence test passes once the fast path is gated identically). `golden_svg_test` regenerated
+  via `BLESS=1` = **2 pass**; verified the 37 diffs are **only** `font-family` relocation (stripping
+  every ` font-family="…"` from old and new yields identical text). Verified the root `<svg>`
+  carries `font-family` and labels carry none for CSS-on; the raster path keeps the per-label copy.
+- **frankenmermaid/Mermaid ratio:** matches Mermaid's CSS-driven font handling. Standing `240.5x`/
+  `319.1x`/`505.7x` (latest) over Mermaid `11.12.0`.
+
 ### Gate redundant node drop-shadow inline `filter` + its `<defs>` def on `embed_theme_css` (−1.83% SVG bytes) — KEPT (2026-06-26)
 - **Change:** node shapes emitted `filter="url(#drop-shadow)"` and a `<filter id="drop-shadow">`
   def, but `to_svg_style` puts `filter: drop-shadow(…)` directly on the **base** `.fm-node rect,

@@ -48,6 +48,15 @@ impl SvgDocument {
         self
     }
 
+    /// Set `font-family` on the root `<svg>`. `font-family` is inherited, so every descendant
+    /// `<text>` picks it up — letting the per-label inline `font-family` (a long ~90-byte string)
+    /// be dropped when the theme CSS is embedded.
+    #[must_use]
+    pub fn font_family(mut self, family: &str) -> Self {
+        self.attrs = self.attrs.set("font-family", family);
+        self
+    }
+
     /// Set explicit width.
     #[must_use]
     pub fn width(mut self, w: &str) -> Self {

@@ -500,6 +500,14 @@ impl Element {
         if embed_css { self } else { self.stroke_width(width) }
     }
 
+    /// Add an inline `font-family` only when the theme CSS is **not** embedded. With CSS embedded
+    /// the root `<svg>` carries `font-family` (inherited by every `<text>`), so this per-element
+    /// copy is redundant; attribute-driven exports keep it.
+    #[must_use]
+    pub fn font_family_unless_embedded_css(self, family: &str, embed_css: bool) -> Self {
+        if embed_css { self } else { self.attr("font-family", family) }
+    }
+
     /// Set text content for text elements.
     #[must_use]
     pub fn content(mut self, text: impl Into<String>) -> Self {

@@ -403,6 +403,12 @@ fn render_scene_document_with_ir(
         )
         .preserve_aspect_ratio("xMidYMid meet");
 
+    // Root `font-family` (inherited by every `<text>`) when the theme CSS is embedded; the
+    // per-label inline copies are gated off.
+    if config.embed_theme_css {
+        doc = doc.font_family(&config.font_family);
+    }
+
     if config.responsive {
         doc = doc.responsive();
     }
@@ -424,7 +430,7 @@ fn render_scene_document_with_ir(
                 .x(scene.bounds.x + scene.bounds.width / 2.0)
                 .y(scene.bounds.y - 8.0)
                 .anchor(TextAnchor::Middle)
-                .font_family(&config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(config.font_size + 4.0)
                 .font_weight("600")
                 .fill("var(--fm-text-color, #1f2937)")
@@ -671,7 +677,7 @@ fn render_scene_text(
     let mut elem = TextBuilder::new(&text.text)
         .x(text.x)
         .y(text.y)
-        .font_family(&config.font_family)
+        .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
         .font_size(text.font_size)
         .line_height(config.line_height)
         .anchor(map_text_align(text.align))
@@ -1602,6 +1608,12 @@ fn render_layout_to_svg(
         .viewbox(0.0, 0.0, width, height)
         .preserve_aspect_ratio("xMidYMid meet");
 
+    // With the theme CSS embedded, set `font-family` once on the root so every `<text>` inherits
+    // it — the per-label inline copies are gated off (see `font_family_unless_embedded_css`).
+    if config.embed_theme_css {
+        doc = doc.font_family(&config.font_family);
+    }
+
     if config.responsive {
         doc = doc.responsive();
     }
@@ -1813,7 +1825,7 @@ fn render_layout_to_svg(
                 .x(width / 2.0)
                 .y(padding + config.font_size + 2.0)
                 .anchor(TextAnchor::Middle)
-                .font_family(&config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(config.font_size + 4.0)
                 .font_weight("600")
                 .fill(&theme.colors.text)
@@ -1912,7 +1924,7 @@ fn render_layout_to_svg(
                 TextBuilder::new(&note.text)
                     .x(nx + 8.0)
                     .y(ny + 8.0)
-                    .font_family(&config.font_family)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                     .font_size(note_font_size)
                     .line_height(config.line_height)
                     .baseline(text::DominantBaseline::Hanging)
@@ -2002,7 +2014,7 @@ fn render_layout_to_svg(
                 .attr("dominant-baseline", "middle")
                 .attr_num("font-size", config.font_size * 0.75)
                 .attr("font-weight", "bold")
-                .attr("font-family", &config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .fill(&theme.colors.text)
                 .class("fm-sequence-fragment-label"),
         );
@@ -2144,7 +2156,7 @@ fn render_layout_to_svg(
                 let text = TextBuilder::new(&display_title)
                     .x(cluster.bounds.x + offset_x + 8.0)
                     .y(cluster.bounds.y + offset_y + 16.0)
-                    .font_family(&config.font_family)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                     .font_size(detail.cluster_font_size)
                     .fill(&label_color)
                     .class("fm-cluster-label")
@@ -2212,7 +2224,7 @@ fn render_layout_to_svg(
                     .attr("text-anchor", "start")
                     .attr("dominant-baseline", "auto")
                     .attr_num("font-size", config.font_size * 0.65)
-                    .attr("font-family", &config.font_family)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                     .fill(&theme.colors.edge)
                     .attr("fill-opacity", "0.7")
                     .class("fm-bundle-count"),
@@ -2241,7 +2253,7 @@ fn render_layout_to_svg(
                             .attr("text-anchor", "start")
                             .attr("dominant-baseline", "auto")
                             .attr_num("font-size", font_size)
-                            .attr("font-family", &config.font_family)
+                            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                             .fill(&theme.colors.text)
                             .class("fm-er-cardinality"),
                     );
@@ -2258,7 +2270,7 @@ fn render_layout_to_svg(
                             .attr("text-anchor", "start")
                             .attr("dominant-baseline", "auto")
                             .attr_num("font-size", font_size)
-                            .attr("font-family", &config.font_family)
+                            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                             .fill(&theme.colors.text)
                             .class("fm-er-cardinality"),
                     );
@@ -2285,7 +2297,7 @@ fn render_layout_to_svg(
                         .attr("text-anchor", "start")
                         .attr("dominant-baseline", "auto")
                         .attr_num("font-size", font_size)
-                        .attr("font-family", &config.font_family)
+                        .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                         .fill(&theme.colors.text)
                         .class("fm-class-cardinality"),
                 );
@@ -2301,7 +2313,7 @@ fn render_layout_to_svg(
                         .attr("text-anchor", "start")
                         .attr("dominant-baseline", "auto")
                         .attr_num("font-size", font_size)
-                        .attr("font-family", &config.font_family)
+                        .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                         .fill(&theme.colors.text)
                         .class("fm-class-cardinality"),
                 );
@@ -2439,7 +2451,7 @@ fn render_layout_band(
             TextBuilder::new(&band.label)
                 .x(band.bounds.x + offset_x + 8.0)
                 .y(band.bounds.y + offset_y + 16.0)
-                .font_family(&config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(clamp_font_size(
                     config.font_size * 0.82,
                     config.min_font_size,
@@ -2468,7 +2480,7 @@ fn render_layout_axis_tick(label: &str, x: f32, y: f32, config: &SvgRenderConfig
         TextBuilder::new(label)
             .x(x + 3.0)
             .y(y)
-            .font_family(&config.font_family)
+            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
             .font_size(clamp_font_size(
                 config.font_size * 0.72,
                 config.min_font_size,
@@ -2593,7 +2605,7 @@ fn render_quadrant_svg(
                     .attr("text-anchor", "middle")
                     .attr("dominant-baseline", "middle")
                     .attr_num("font-size", config.font_size * 0.9)
-                    .attr("font-family", &config.font_family)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                     .attr("fill-opacity", "0.5")
                     .fill(&theme.colors.text)
                     .class("fm-quadrant-label"),
@@ -2665,7 +2677,7 @@ fn render_quadrant_svg(
                 .content(left)
                 .attr("text-anchor", "start")
                 .attr_num("font-size", config.font_size * 0.8)
-                .attr("font-family", &config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .fill(&theme.colors.text)
                 .class("fm-quadrant-axis-label"),
         );
@@ -2678,7 +2690,7 @@ fn render_quadrant_svg(
                 .content(right)
                 .attr("text-anchor", "end")
                 .attr_num("font-size", config.font_size * 0.8)
-                .attr("font-family", &config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .fill(&theme.colors.text)
                 .class("fm-quadrant-axis-label"),
         );
@@ -2693,7 +2705,7 @@ fn render_quadrant_svg(
                 .content(bottom)
                 .attr("text-anchor", "end")
                 .attr_num("font-size", config.font_size * 0.8)
-                .attr("font-family", &config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .fill(&theme.colors.text)
                 .class("fm-quadrant-axis-label"),
         );
@@ -2706,7 +2718,7 @@ fn render_quadrant_svg(
                 .content(top)
                 .attr("text-anchor", "end")
                 .attr_num("font-size", config.font_size * 0.8)
-                .attr("font-family", &config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .fill(&theme.colors.text)
                 .class("fm-quadrant-axis-label"),
         );
@@ -2721,7 +2733,7 @@ fn render_quadrant_svg(
                 .content(title)
                 .attr("text-anchor", "middle")
                 .attr_num("font-size", config.font_size + 4.0)
-                .attr("font-family", &config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .fill(&theme.colors.text)
                 .class("fm-quadrant-title"),
         );
@@ -2756,7 +2768,7 @@ fn render_quadrant_svg(
                 .content(label)
                 .attr("text-anchor", "start")
                 .attr_num("font-size", config.font_size * 0.75)
-                .attr("font-family", &config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .fill(&theme.colors.text)
                 .class("fm-quadrant-point-label"),
         );
@@ -2789,7 +2801,7 @@ fn render_gantt_svg(
                 .x(layout.bounds.width / 2.0 + offset_x)
                 .y(offset_y + config.font_size + 4.0)
                 .anchor(TextAnchor::Middle)
-                .font_family(&config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(config.font_size + 4.0)
                 .font_weight("600")
                 .fill(&theme.colors.text)
@@ -2822,7 +2834,7 @@ fn render_gantt_svg(
                     .attr("text-anchor", "start")
                     .attr("font-weight", "600")
                     .attr_num("font-size", config.font_size * 0.85)
-                    .attr("font-family", &config.font_family)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                     .fill(&theme.colors.text)
                     .class("fm-gantt-section-label"),
             );
@@ -2937,7 +2949,7 @@ fn render_gantt_svg(
                     .attr("text-anchor", "middle")
                     .attr("dominant-baseline", "central")
                     .attr_num("font-size", config.font_size * 0.8)
-                    .attr("font-family", &config.font_family)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                     .fill(&theme.colors.text)
                     .class("fm-gantt-task-label"),
             );
@@ -3020,7 +3032,7 @@ fn render_pie_svg(
                 .x(cx)
                 .y(bounds.y + offset_y + config.font_size + 2.0)
                 .anchor(TextAnchor::Middle)
-                .font_family(&config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(config.font_size + 4.0)
                 .font_weight("600")
                 .fill(&theme.colors.text)
@@ -3095,7 +3107,7 @@ fn render_pie_svg(
                 .y(ly)
                 .anchor(anchor)
                 .baseline(crate::text::DominantBaseline::Middle)
-                .font_family(&config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(clamp_font_size(
                     config.font_size * 0.85,
                     config.min_font_size,
@@ -3129,7 +3141,7 @@ fn render_pie_svg(
         TextBuilder::new("Legend")
             .x(legend_x + 14.0)
             .y(legend_y + 18.0)
-            .font_family(&config.font_family)
+            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
             .font_size(clamp_font_size(
                 config.font_size * 0.82,
                 config.min_font_size,
@@ -3166,7 +3178,7 @@ fn render_pie_svg(
                 .x(legend_x + 34.0)
                 .y(row_y)
                 .baseline(crate::text::DominantBaseline::Middle)
-                .font_family(&config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(clamp_font_size(
                     config.font_size * 0.8,
                     config.min_font_size,
@@ -3237,7 +3249,7 @@ fn render_xychart_svg(
                 .x(plot_x - 10.0)
                 .y(tick_y + 4.0)
                 .anchor(TextAnchor::End)
-                .font_family(&config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(clamp_font_size(
                     config.font_size * 0.72,
                     config.min_font_size,
@@ -3277,7 +3289,7 @@ fn render_xychart_svg(
                 .x(x)
                 .y(plot_bottom + 24.0)
                 .anchor(TextAnchor::Middle)
-                .font_family(&config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(clamp_font_size(
                     config.font_size * 0.74,
                     config.min_font_size,
@@ -3294,7 +3306,7 @@ fn render_xychart_svg(
                 .x((layout.bounds.width / 2.0) + offset_x)
                 .y(plot_y - 34.0)
                 .anchor(TextAnchor::Middle)
-                .font_family(&config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(clamp_font_size(
                     config.font_size * 1.18,
                     config.min_font_size,
@@ -3311,7 +3323,7 @@ fn render_xychart_svg(
             TextBuilder::new(y_label)
                 .x(plot_x - 52.0)
                 .y(plot_y - 12.0)
-                .font_family(&config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(clamp_font_size(
                     config.font_size * 0.76,
                     config.min_font_size,
@@ -3329,7 +3341,7 @@ fn render_xychart_svg(
                 .x(plot_x + plot_bounds.width / 2.0)
                 .y(plot_bottom + 48.0)
                 .anchor(TextAnchor::Middle)
-                .font_family(&config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(clamp_font_size(
                     config.font_size * 0.76,
                     config.min_font_size,
@@ -3415,7 +3427,7 @@ fn render_xychart_svg(
                     .x(legend_x + 24.0)
                     .y(row_y)
                     .baseline(crate::text::DominantBaseline::Middle)
-                    .font_family(&config.font_family)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                     .font_size(clamp_font_size(
                         config.font_size * 0.72,
                         config.min_font_size,
@@ -4412,7 +4424,7 @@ fn render_node(
                     .attr("dominant-baseline", "central")
                     .attr_num("font-size", subtitle_font_size)
                     .attr("font-style", "italic")
-                    .attr("font-family", &config.font_family)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                     .fill(&colors.text)
                     .class("fm-req-type-label");
                 type_elem = apply_label_class(type_elem);
@@ -4460,7 +4472,7 @@ fn render_node(
                     .attr("text-anchor", "middle")
                     .attr("dominant-baseline", "central")
                     .attr_num("font-size", subtitle_font_size)
-                    .attr("font-family", &config.font_family)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                     .fill(&colors.text)
                     .attr("opacity", "0.7")
                     .class("fm-req-metadata");
@@ -4487,7 +4499,7 @@ fn render_node(
                 .attr("dominant-baseline", "central")
                 .attr_num("font-size", node_font_size)
                 .attr("font-weight", "bold")
-                .attr("font-family", &config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .fill(&colors.text)
                 .class("fm-er-entity-name");
             name_elem = apply_label_class(name_elem);
@@ -4530,7 +4542,7 @@ fn render_node(
                     .attr("dominant-baseline", "central")
                     .attr_num("font-size", attr_font_size)
                     .attr("font-weight", font_weight)
-                    .attr("font-family", &config.font_family)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                     .fill(&colors.text)
                     .class("fm-er-attribute");
                 attr_elem = apply_label_class(attr_elem);
@@ -4734,7 +4746,7 @@ fn render_class_compartments(
         let stereo_elem = TextBuilder::new(stereo_text)
             .x(x + w / 2.0)
             .y(cursor_y)
-            .font_family(&config.font_family)
+            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
             .font_size(font_size * 0.85)
             .anchor(TextAnchor::Middle)
             .italic()
@@ -4754,7 +4766,7 @@ fn render_class_compartments(
     let name_elem = TextBuilder::new(&display_name)
         .x(x + w / 2.0)
         .y(cursor_y)
-        .font_family(&config.font_family)
+        .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
         .font_size(font_size)
         .anchor(TextAnchor::Middle)
         .bold()
@@ -4790,7 +4802,7 @@ fn render_class_compartments(
         let elem = TextBuilder::new(&text)
             .x(text_x)
             .y(cursor_y)
-            .font_family(&config.font_family)
+            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
             .font_size(member_font_size)
             .anchor(TextAnchor::Start)
             .fill(&colors.text)
@@ -4835,7 +4847,7 @@ fn render_class_compartments(
         let elem = TextBuilder::new(&text)
             .x(text_x)
             .y(cursor_y)
-            .font_family(&config.font_family)
+            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
             .font_size(member_font_size)
             .anchor(TextAnchor::Start)
             .fill(&colors.text)
@@ -4886,7 +4898,7 @@ fn render_c4_node_content(
         TextBuilder::new(&format!("<<{}>>", c4_meta.element_type))
             .x(x + w / 2.0)
             .y(cursor_y)
-            .font_family(&config.font_family)
+            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
             .font_size(small_font)
             .font_weight("600")
             .anchor(TextAnchor::Middle)
@@ -4912,7 +4924,7 @@ fn render_c4_node_content(
         TextBuilder::new(label_text)
             .x(x + w / 2.0)
             .y(cursor_y)
-            .font_family(&config.font_family)
+            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
             .font_size(font_size)
             .font_weight("600")
             .anchor(TextAnchor::Middle)
@@ -4927,7 +4939,7 @@ fn render_c4_node_content(
             TextBuilder::new(&format!("[{technology}]"))
                 .x(x + w / 2.0)
                 .y(cursor_y)
-                .font_family(&config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(small_font)
                 .anchor(TextAnchor::Middle)
                 .fill(&colors.edge)
@@ -4952,7 +4964,7 @@ fn render_c4_node_content(
                 TextBuilder::new(&description_text)
                     .x(x + w / 2.0)
                     .y(baseline_y)
-                    .font_family(&config.font_family)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                     .font_size(description_font)
                     .line_height(config.line_height)
                     .anchor(TextAnchor::Middle)
@@ -5066,7 +5078,7 @@ fn render_node_icon(
             TextBuilder::new(trimmed)
                 .x(cx)
                 .y(cy + size * 0.18)
-                .font_family(&config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(size)
                 .anchor(TextAnchor::Middle)
                 .class("fm-node-icon")
@@ -5417,7 +5429,7 @@ fn render_node_icon(
                 TextBuilder::new(if fallback.is_empty() { "?" } else { &fallback })
                     .x(cx)
                     .y(cy + size * 0.16)
-                    .font_family(&config.font_family)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                     .font_size(size * 0.62)
                     .anchor(TextAnchor::Middle)
                     .fill(stroke)
@@ -5536,7 +5548,7 @@ fn render_node_label_text(
         TextBuilder::new(label_text)
             .x(x)
             .y(y)
-            .font_family(&config.font_family)
+            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
             .font_size(font_size)
             .line_height(config.line_height)
             .anchor(TextAnchor::Middle)
@@ -5547,7 +5559,7 @@ fn render_node_label_text(
             .x(x)
             .y(y)
             .attr("text-anchor", TextAnchor::Middle.as_str())
-            .attr("font-family", &config.font_family)
+            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
             .attr_num("font-size", font_size)
             .fill(&colors.text)
             .content(label_text)
@@ -5579,7 +5591,7 @@ fn render_markdown_text_segments(
         .x(x)
         .y(y)
         .attr("text-anchor", TextAnchor::Middle.as_str())
-        .attr("font-family", &config.font_family)
+        .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
         .attr_num("font-size", font_size)
         .fill(fill);
     text = maybe_add_class(text, "fm-node-label", emit_classdef_classes);
@@ -5672,7 +5684,7 @@ fn render_c4_legend(
         TextBuilder::new("C4 Legend")
             .x(x + 14.0)
             .y(y + 18.0)
-            .font_family(&config.font_family)
+            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
             .font_size(clamp_font_size(
                 config.font_size * 0.82,
                 config.min_font_size,
@@ -5703,7 +5715,7 @@ fn render_c4_legend(
             TextBuilder::new(&format!("{sample} {label}"))
                 .x(entry_x)
                 .y(entry_y)
-                .font_family(&config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(clamp_font_size(
                     config.font_size * 0.72,
                     config.min_font_size,
@@ -6134,7 +6146,7 @@ fn render_edge(
             TextBuilder::new(&label_text)
                 .x(lx)
                 .y(start_y)
-                .font_family(&config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(label_font_size)
                 .line_height(config.line_height)
                 .anchor(TextAnchor::Middle)
@@ -6238,7 +6250,7 @@ mod tests {
         let mut expected = TextBuilder::new("Node 42")
             .x(11.0)
             .y(22.0)
-            .font_family(&config.font_family)
+            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
             .font_size(13.0)
             .line_height(config.line_height)
             .anchor(TextAnchor::Middle)

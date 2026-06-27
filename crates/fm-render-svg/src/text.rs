@@ -119,6 +119,15 @@ impl TextBuilder {
         self
     }
 
+    /// Set the font family only when the theme CSS is **not** embedded. With CSS embedded the
+    /// root `<svg>` carries `font-family` (which every `<text>` inherits), so the per-label inline
+    /// copy is redundant; attribute-driven exports (`embed_theme_css = false`, PNG raster) keep it
+    /// since they have no inherited source.
+    #[must_use]
+    pub fn font_family_unless_embedded_css(self, family: &str, embed_css: bool) -> Self {
+        if embed_css { self } else { self.font_family(family) }
+    }
+
     /// Set the font size.
     #[must_use]
     pub fn font_size(mut self, size: f32) -> Self {
