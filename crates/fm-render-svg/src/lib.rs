@@ -1678,8 +1678,11 @@ fn render_layout_to_svg(
         defs = defs.marker(ArrowheadMarker::diamond_marker("arrow-diamond", edge_color));
     }
 
-    // Add drop shadow filter if enabled
-    if detail.enable_shadows {
+    // Add drop shadow filter if enabled. Skip the `<filter id="drop-shadow">` def when the theme
+    // CSS is embedded: its only referrer is the inline `filter="url(#drop-shadow)"` on node shapes,
+    // which is gated off in that case (the CSS `filter: drop-shadow(…)` renders the shadow), so the
+    // def would be dead output. Attribute-driven exports (`embed_theme_css = false`) keep both.
+    if detail.enable_shadows && !config.embed_theme_css {
         if config.shadow_color.trim().is_empty() {
             defs = defs.filter(Filter::drop_shadow(
                 "drop-shadow",
@@ -4294,7 +4297,12 @@ fn render_node(
 
     // Apply shadow filter if enabled and this isn't a special composite shape.
     // Highlighted nodes prefer glow so the effects don't visually muddy each other.
+    // The inline `filter="url(#drop-shadow)"` is redundant when the theme CSS is embedded: the
+    // unconditional `.fm-node <shape> { filter: drop-shadow(…) }` rule (emitted by `to_svg_style`
+    // under the *same* `detail.enable_shadows` gate) overrides this presentation attribute. Emit
+    // the inline copy only for attribute-driven exports (`embed_theme_css = false`, PNG raster).
     let shape_elem = if detail.enable_shadows
+        && !config.embed_theme_css
         && !(is_highlighted && config.glow_enabled)
         && !matches!(
             shape,
@@ -6744,6 +6752,19 @@ mod tests {
             sw_without > sw_with,
             "attribute-driven export must keep inline node stroke-width (with={sw_with}, without={sw_without})"
         );
+        // Node drop-shadow: the inline `filter="url(#drop-shadow)"` (and its now-unreferenced
+        // `<defs>` filter) are gated off with CSS embedded (the CSS `filter: drop-shadow(…)` renders
+        // the shadow); the attribute-driven export keeps them. So `url(#drop-shadow)` references
+        // appear only without CSS.
+        assert_eq!(
+            with_css.matches("url(#drop-shadow)").count(),
+            0,
+            "embedded-CSS render must not reference #drop-shadow (CSS provides the shadow)"
+        );
+        assert!(
+            without_css.contains("url(#drop-shadow)"),
+            "attribute-driven export must keep the inline drop-shadow filter"
+        );
     }
 
     #[test]
@@ -7449,6 +7470,10 @@ mod tests {
             shadow_blur: 5.0,
             shadow_opacity: 0.45,
             shadow_color: "#ff3366".to_string(),
+            // The configurable `<filter id="drop-shadow">` (which honours `shadow_color`) is the
+            // shadow source for attribute-driven output; with embedded CSS the shadow comes from
+            // the `.fm-node { filter: drop-shadow(…) }` rule instead, so the def is gated off there.
+            embed_theme_css: false,
             ..Default::default()
         };
         let svg = render_svg_with_config(&ir, &config);

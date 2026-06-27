@@ -484,6 +484,35 @@
 
 ## Kept Wins Also Recorded Here By Request
 
+### Gate redundant node drop-shadow inline `filter` + its `<defs>` def on `embed_theme_css` (−1.83% SVG bytes) — KEPT (2026-06-26)
+- **Change:** node shapes emitted `filter="url(#drop-shadow)"` and a `<filter id="drop-shadow">`
+  def, but `to_svg_style` puts `filter: drop-shadow(…)` directly on the **base** `.fm-node rect,
+  path, circle, ellipse, polygon { … }` rule (verified in `theme.rs` — the `{shadow_filter}` is in
+  that selector, not just `:hover`). A presentation attribute loses to the stylesheet, so for
+  embedded CSS the inline filter is redundant *and* the def is then **dead** (its only referrer is
+  that inline filter — `url(#drop-shadow)` reference count drops to 0). Gated both on
+  `!config.embed_theme_css` (the inline filter at the shape site, the def block in
+  `render_layout_to_svg`). The CSS shadow and the inline filter/def are gated on the *same*
+  `detail.enable_shadows`, so they're always correlated — when the inline would emit, the CSS
+  shadow is present.
+- **Why the gate (not deletion):** `embed_theme_css = false` (PNG raster) is the path where the
+  inline filter + def are the actual shadow source (resvg can't apply the CSS), and it's also where
+  the configurable `shadow_color` is honoured. Verified the shadow still renders for CSS-on (the
+  regenerated goldens retain the `filter: drop-shadow(…)` CSS rule) and updated
+  `configurable_shadow_filter_is_emitted` to assert the configurable def via the
+  `embed_theme_css = false` path (where it's live).
+- **Measured (deterministic byte win):** the def (~180 B) is per-SVG so this is the largest of the
+  inline-vs-CSS gates on shadow-bearing diagrams — `flowchart_simple` (3 nodes) `14,053 → 13,799 B`
+  (`−254`, ~1.8%); aggregate over the **36** regenerated `golden_svg_test` snapshots `727,955 →
+  714,599 = −1.83%`. Only affects diagrams where `detail.enable_shadows` is on (smaller diagrams;
+  large graphs already drop shadows).
+- **Conformance:** `cargo test -p fm-render-svg` = **220 pass** (the gate test now also asserts the
+  embedded-CSS render holds **0** `url(#drop-shadow)` references while the attribute-driven export
+  keeps them). `golden_svg_test` regenerated via `BLESS=1` = **2 pass**; verified the 36 diffs are
+  **only** the drop-shadow inline filter + def removal.
+- **frankenmermaid/Mermaid ratio:** Mermaid is CSS-driven; this matches it. Standing `240.5x`/
+  `319.1x`/`505.7x` (latest) over Mermaid `11.12.0`.
+
 ### Gate redundant inline node-shape `stroke-width="1.60"` on `embed_theme_css` (−0.92% SVG bytes) — KEPT (2026-06-26)
 - **Change:** companion to the node-stroke gate. The standard node shapes emitted
   `stroke-width="1.60"`, but the unconditional CSS `.fm-node rect, path, circle, ellipse, polygon {
