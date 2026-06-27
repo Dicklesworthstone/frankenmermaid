@@ -1610,6 +1610,30 @@
 
 ## Blocked/Invalid Evidence Attempts
 
+### IrGraph build MEASURED ~0-gain (data closes the parked lever) (2026-06-27)
+- **Result:** the eager `ir.graph` FNX-adapter build (`ir_builder.rs` 872/1265) — flagged as "dead
+  in the render pipeline, modest ~2-5%" in `1dbd7cd` — is now **measured ~0-gain**, upgrading the
+  estimate to data. Clean **single-process A/B** (`parse_bench`, `wide`, same worker, same process:
+  a `ParserConfig.emit_graph_adapter` flag + a `wide_nograph` variant via a new `parse_with_config`):
+  skipping the build is **not faster — within noise, slightly slower** (the per-iteration gate branch
+  offsets the saved push):
+  - `8x16` graph `354.35 µs` vs nograph `362.39 µs`
+  - `12x24` graph `823.93 µs` vs nograph `863.92 µs`
+  - `16x32` graph `2.124 ms` vs nograph `2.330 ms`
+  The build is **below the parse noise floor** (cheap Copy-ish structs into two pre-reserved Vecs).
+  Scaffolding reverted per "REVERT ~0-gain". The IrGraph lever is now **definitively closed** — do
+  not re-investigate.
+- **Methodology trap recorded:** the first candidate gated the pushes with `if std::hint::black_box(false)`
+  to defeat dead-code elim — but `black_box` is an **optimizer fence**, and one per node/edge in the
+  hot parse loop poisoned surrounding optimization, producing a **false +14-91% "regression"** that
+  had nothing to do with the gated code. Use plain `if false` (clean DCE) or a real runtime flag for
+  per-iteration gating in micro-benchmarks; never `black_box(const)` inside the measured loop.
+  (Also: criterion `--save-baseline`/`--baseline` does **not** transfer across rch workers — the
+  worker lottery put candidate on a different host than baseline → "Baseline must exist" panic. Do
+  A/B variants **in one bench run** instead.)
+- **frankenmermaid/Mermaid ratio:** unchanged — reverted. Standing `226x`–`506x` (worker-dependent)
+  over Mermaid `11.12.0`.
+
 ### Parse area contended — hash-key/smallvec dedup in flight; IrGraph measurement deferred (2026-06-27)
 - Attempted to measure the parked IrGraph-build cost (parse_bench A/B, gating `ir_builder.rs`
   872/1265). The baseline bench **failed to compile**: `unresolved import smallvec`, `no field
