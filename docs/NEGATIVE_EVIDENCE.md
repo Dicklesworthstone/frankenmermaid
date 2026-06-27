@@ -484,6 +484,28 @@
 
 ## Kept Wins Also Recorded Here By Request
 
+### Store integer `data-fm-edge-id` without allocating (byte-identical alloc reduction) — KEPT (2026-06-26)
+- **Change:** the three edge-render sites built the edge-id attribute as
+  `.data("fm-edge-id", &edge_index.to_string())`, which **double-allocates** — `to_string()`
+  builds a `String`, then `.data`'s `set` does `value.to_owned()` into `AttributeValue::String`.
+  Replaced with a new `Element::attr_int` (forwards to the existing `Attributes::int` →
+  `AttributeValue::Integer`); called as `.attr_int("data-fm-edge-id", edge_index as i32)` with a
+  `&'static` name (`Cow::Borrowed`). Net: **2 `String` allocations eliminated per edge, zero
+  added** (name static, value integer).
+- **Byte-identical:** `Integer(n)` serializes to the same decimal text as the string, under the
+  same attribute name. Verified: `cargo test -p fm-render-svg` = **219 pass**, and the
+  git-tracked `golden_svg_test` = **2 pass** (the `data-fm-edge-id="N"` snapshots are unchanged).
+- **Why KEPT despite no clean timing number:** the effect is ~1.2% of `render_svg/large_500`
+  (500 edges × 2 allocs ≈ 30 µs of 2.4 ms) — **below the shared-worker noise floor**; the A/B
+  attempt landed on a contended `ovh-a` (`5.7 ms ±2.8%`, vs an earlier quiet `2.40 ms ±0.05%` —
+  a 2.4×→5.7 ms cross-run drift that swamps ~1.2%). Unlike the reverted *sign-unknown* micro-opts
+  (`intersects_segment`) or the magic-number `to_svg_style` capacity, this is **sign-known ≥0**
+  (strictly removes allocations, can never regress) and a genuine type-correctness fix using the
+  right `AttributeValue` variant, plus a reusable `attr_int` that prevents the same
+  integer-as-`String` anti-pattern elsewhere. Landed on byte-identity + sign, not a timing claim.
+- **frankenmermaid/Mermaid ratio:** unchanged-to-slightly-improved; standing `240.5x`/`319.1x`/
+  `505.7x` (latest) over Mermaid `11.12.0`, `198x`–`426x` floor.
+
 ### Drop write-only `IrNode.span_all` accumulation (parse −12% large) — KEPT (2026-06-26)
 - **Provenance:** the code change landed independently during a session gap as commit
   `35569a3` ("stop building write-only span_all dead data in the IR builder"), built on the

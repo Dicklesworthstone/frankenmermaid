@@ -471,6 +471,15 @@ impl Element {
         self
     }
 
+    /// Set a custom integer attribute. Unlike `data(name, &n.to_string())`, this stores the
+    /// value as an `Integer` (no per-call `String` allocation) and, with a `&'static` name,
+    /// allocates nothing — while serializing byte-identically to the decimal string.
+    #[must_use]
+    pub fn attr_int<K: Into<std::borrow::Cow<'static, str>>>(mut self, name: K, value: i32) -> Self {
+        self.attrs = self.attrs.int(name, value);
+        self
+    }
+
     /// Set text content for text elements.
     #[must_use]
     pub fn content(mut self, text: impl Into<String>) -> Self {

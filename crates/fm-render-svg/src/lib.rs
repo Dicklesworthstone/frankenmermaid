@@ -5984,7 +5984,7 @@ fn render_edge(
         .stroke_width(stroke_width)
         .class("fm-edge")
         .class(style_class)
-        .data("fm-edge-id", &edge_index.to_string());
+        .attr_int("data-fm-edge-id", edge_index as i32);
     let animation_style = config
         .animations_enabled
         .then(|| animation_style_attr(edge_animation_order(edge_path, ir)));
@@ -6064,7 +6064,7 @@ fn render_edge(
         let mut group = Element::group()
             .id(&mermaid_edge_element_id(edge_index))
             .class("fm-edge-labeled")
-            .data("fm-edge-id", &edge_index.to_string());
+            .attr_int("data-fm-edge-id", edge_index as i32);
         if let Some(extra) = animation_style.as_deref() {
             group = group.attr("style", extra);
         }
@@ -6163,7 +6163,7 @@ fn render_edge(
         let mut group = Element::group()
             .id(&mermaid_edge_element_id(edge_index))
             .class("fm-edge")
-            .data("fm-edge-id", &edge_index.to_string());
+            .attr_int("data-fm-edge-id", edge_index as i32);
         if let Some(extra) = animation_style.as_deref() {
             group = group.attr("style", extra);
         }
