@@ -1610,6 +1610,27 @@
 
 ## Blocked/Invalid Evidence Attempts
 
+### IrGraph adapter build is dead in the render pipeline — but cheap, so a low-priority parse lever (2026-06-27)
+- **Rigorously traced:** the production IR builder eagerly populates `ir.graph` (the FNX adapter) —
+  `ir.graph.nodes` per node (`fm-parser/src/ir_builder.rs:872`) and `ir.graph.edges` per edge
+  (`:1265`), ~1,536 structs for a 16x32 wide diagram. But **every production read path rebuilds from
+  `ir.edges` instead**: `fnx_adapter::ir_to_graph` iterates `ir.edges` (`fnx_adapter.rs:181/554/614`),
+  `fnx-integration` is a **non-default** feature (`fm-layout/Cargo.toml: default = []`), and the only
+  `ir.graph.{nodes,edges}` *reads* anywhere are in **test modules** (fm-core `mod tests` @5008+;
+  mermaid_parser.rs:9135/9877 asserts) — never the default parse→layout→render pipeline, never the
+  SVG renderer (its `ir.graph.*` lines are test-fixture `push`es). The 3 `ir.graph.edges =` rewrites
+  in fm-layout are all test fixtures (`sample_layout_dependency_ir`, etc.).
+- **Why it's parked, not landed:** the structs are **cheap** — `IrGraphNode` = {node_id, kind, two
+  `Vec`s that stay empty for non-subgraph nodes}; `IrGraphEdge` = all `Copy` fields. So the dead work
+  is ~1,536 struct moves + two `Vec` growths, **no per-struct heap allocs** for a plain flowchart →
+  an estimated ~2-5% of parse (sub-1% of pipeline). Eliminating it needs a `ParserConfig`
+  `build_graph_adapter` flag (default true to preserve the tested `ir.graph` output contract) wired
+  through to the fm-cli render path (set false) — a cross-crate change whose full-pipeline validation
+  is **blocked by the concurrent broken fm-render-svg working tree** (fm-cli won't build). Modest win
+  vs real landing cost → parked. Recorded so it isn't re-investigated.
+- **frankenmermaid/Mermaid ratio:** unchanged — no source change. Standing `226x`–`506x`
+  (worker-dependent) over Mermaid `11.12.0`.
+
 ### Dead-CSS prune VALIDATED — landed concurrently; standing down from fm-render-svg to avoid collision (2026-06-27)
 - **The lever works and is partly landed.** Last cycle's dead-CSS-prune finding (~27% of the
   `<style>` is unused per diagram; emit feature rule groups only when the feature is present) was
