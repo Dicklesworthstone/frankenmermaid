@@ -1610,6 +1610,23 @@
 
 ## Blocked/Invalid Evidence Attempts
 
+### Parse area contended — hash-key/smallvec dedup in flight; IrGraph measurement deferred (2026-06-27)
+- Attempted to measure the parked IrGraph-build cost (parse_bench A/B, gating `ir_builder.rs`
+  872/1265). The baseline bench **failed to compile**: `unresolved import smallvec`, `no field
+  node_index_by_id`/`label_index_by_text on IrBuilder` — a **concurrent agent is implementing the
+  hash-key/smallvec dedup** of the node/label dedup maps (the bigger parse lever flagged
+  "too-invasive" in earlier cycles) directly in `ir_builder.rs` + `mermaid_parser.rs` + `Cargo.toml`,
+  uncommitted and mid-flight broken. That break makes fm-parser (a dependency of everything) fail to
+  build → **no crate in the workspace benches right now**.
+- My IrGraph lever edits the **same file** (`ir_builder.rs`), so landing it now would merge-conflict
+  with the in-flight dedup; and the dedup is a strictly bigger parse win. **Standing down from parse**
+  (as from render). I made **zero source edits** this cycle (interrupted before gating); my footprint
+  is doc-only. The environment is saturated with concurrent agents on the measurable levers (render
+  streaming/edge-label, parse dedup, generated-id ownership). Re-measure IrGraph once the dedup lands
+  and fm-parser builds again.
+- **frankenmermaid/Mermaid ratio:** unchanged — no source change. Standing `226x`–`506x`
+  (worker-dependent) over Mermaid `11.12.0`.
+
 ### IrGraph adapter build is dead in the render pipeline — but cheap, so a low-priority parse lever (2026-06-27)
 - **Rigorously traced:** the production IR builder eagerly populates `ir.graph` (the FNX adapter) —
   `ir.graph.nodes` per node (`fm-parser/src/ir_builder.rs:872`) and `ir.graph.edges` per edge
