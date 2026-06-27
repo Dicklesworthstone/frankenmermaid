@@ -3218,3 +3218,55 @@
   multi-function refactor; the interner already keys by `&str`, so only inserts need to own.
 
   Agent: GreyShrike
+
+### Parse: borrowed simple-edge endpoint ids — KEPT, parse -10.6% to -13.4% (2026-06-27)
+- **Lever:** add a `FlowDocumentItem::FastEdge` path for simple flowchart edge
+  statements (`A-->B`, `A---B`, `A==>B`, etc.) that stores endpoint ids as
+  borrowed `&str` slices from the input line and lowers directly through the
+  existing `IrBuilder`. General/labeled/chained/class/click/subgraph statements
+  still use the existing `FlowAst` path. This removes the fast path's temporary
+  owned `String` ids for edge endpoints before immediate interning.
+- **Mapped primitive:** alien-graveyard region/lifetime split plus data-plane
+  allocation hygiene. The input buffer is the region; simple endpoint ids are
+  consumed before the parse document escapes, so borrowing them until lowering
+  removes churn without changing IR ownership.
+- **Baseline -> After:** clean ORIG worktree at `5d1ccbc` versus candidate
+  worktree `/data/projects/.worktrees/frankenmermaid-tansparrow-boldverify-20260627`,
+  package `frankenmermaid-cli`, bench `pipeline_bench`, filter
+  `wide_stages/parse`. Commands used
+  `AGENT_NAME=TanSparrow CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages[/parse] --warm-up-time 1 --measurement-time 2`.
+  Both accepted ORIG and candidate measurements used the same `rch` local
+  fallback route because no remote worker was admissible.
+- **Measured result (median, candidate/ORIG, conservative first-order A/B):**
+  `8x16` `315.11 us -> 281.70 us` (`0.894x`, `1.119x` faster), `12x24`
+  `714.01 us -> 639.11 us` (`0.895x`, `1.117x` faster), `16x32`
+  `1.3977 ms -> 1.2097 ms` (`0.866x`, `1.155x` faster).
+- **Reverse-order check:** clean ORIG rerun after the candidate measured
+  `332.72 us`, `815.88 us`, and `1.4431 ms`; ORIG remained slower in all
+  three sizes, ruling out a simple "second run wins" explanation.
+- **Original comparator:** pinned live-CDP Mermaid `11.12.0` denominators reused
+  for identical generated wide inputs: `8x16` `315.14 ms`, `12x24`
+  `981.73 ms`, `16x32` `2879.185 ms`.
+- **frankenmermaid/Mermaid ratio:** candidate parse-stage medians are
+  `0.000894x`, `0.000651x`, and `0.000420x` Mermaid.js time (`1119x`,
+  `1536x`, and `2380x` faster). These are parse-stage ratios against
+  full-pipeline Mermaid denominators for context.
+- **Behavior proof:** `cargo fmt --check` and `git diff --check` passed.
+  `AGENT_NAME=TanSparrow CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo check -p fm-parser --all-targets`
+  passed on `hz2`; `... rch exec -- cargo clippy -p fm-parser --all-targets -- -D warnings`
+  passed via local fallback. `cargo test -p fm-parser` passed locally with the
+  same target dir (`405` tests), and
+  `cargo test -p frankenmermaid-cli --test frankentui_conformance_test` passed
+  locally (`1` test). The full parser and conformance `rch exec` test wrappers
+  stalled with no child cargo process and were interrupted before these local
+  retries; build/bench proof still used `rch exec`.
+- **Tooling notes:** the literal `cargo bench --release` form is invalid on this
+  Cargo toolchain, so `--profile release` was used for the requested
+  release-profile per-crate bench. Agent Mail file reservation failed because
+  the local Agent Mail database is malformed; no settings or hooks were
+  modified.
+- **Verdict:** kept. This is the first safe slice of the larger borrowed-`FlowAst`
+  direction: it removes owned endpoint ids on the hot simple-edge path while
+  leaving all complex statement semantics on the existing parser/lowering path.
+
+  Agent: TanSparrow

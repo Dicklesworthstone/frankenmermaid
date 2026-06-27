@@ -448,6 +448,13 @@ impl From<NodeToken> for FlowAstNode {
 
 #[derive(Debug, Clone)]
 enum FlowDocumentItem<'a> {
+    FastEdge {
+        from: &'a str,
+        arrow: ArrowType,
+        to: &'a str,
+        line_number: usize,
+        source_line: &'a str,
+    },
     Statements {
         asts: Vec<FlowAst>,
         line_number: usize,
@@ -850,6 +857,30 @@ fn lower_flow_document_item(
     active_subgraphs: &[usize],
 ) {
     match item {
+        FlowDocumentItem::FastEdge {
+            from,
+            arrow,
+            to,
+            line_number,
+            source_line,
+        } => {
+            let span = span_for(*line_number, source_line);
+            let from_id = if is_dangling_placeholder_node_id(from) {
+                builder.intern_placeholder_node(from, span)
+            } else {
+                builder.intern_node_label(from, None, NodeShape::Rect, span)
+            };
+            let to_id = if is_dangling_placeholder_node_id(to) {
+                builder.intern_placeholder_node(to, span)
+            } else {
+                builder.intern_node_label(to, None, NodeShape::Rect, span)
+            };
+            if let (Some(f), Some(t)) = (from_id, to_id) {
+                add_node_to_active_groups(builder, active_clusters, active_subgraphs, f);
+                add_node_to_active_groups(builder, active_clusters, active_subgraphs, t);
+                builder.push_edge(f, t, *arrow, None, span);
+            }
+        }
         FlowDocumentItem::Statements {
             asts,
             line_number,
@@ -1046,6 +1077,20 @@ fn parse_flowchart_document_items<'a>(
                 continue;
             }
 
+            if let Some((from, arrow, to)) =
+                parse_fast_simple_flowchart_edge_parts(normalized_statement)
+            {
+                line_items.push(FlowDocumentItem::FastEdge {
+                    from,
+                    arrow,
+                    to,
+                    line_number,
+                    source_line: line,
+                });
+                parsed_line = true;
+                continue;
+            }
+
             if let Some(asts) = parse_flowchart_statement_asts(
                 normalized_statement,
                 line_number,
@@ -1137,6 +1182,26 @@ fn parse_fast_simple_flowchart_statement_ast(statement: &str) -> Option<FlowAst>
 }
 
 fn parse_fast_simple_flowchart_edge_ast(statement: &str) -> Option<FlowAst> {
+    let (left, arrow, right) = parse_fast_simple_flowchart_edge_parts(statement)?;
+    Some(FlowAst::Edge {
+        from: FlowAstNode {
+            id: left.to_string(),
+            label: None,
+            icon: None,
+            shape: NodeShape::Rect,
+        },
+        arrow,
+        label: None,
+        to: FlowAstNode {
+            id: right.to_string(),
+            label: None,
+            icon: None,
+            shape: NodeShape::Rect,
+        },
+    })
+}
+
+fn parse_fast_simple_flowchart_edge_parts(statement: &str) -> Option<(&str, ArrowType, &str)> {
     let trimmed = statement.trim();
     if trimmed.is_empty()
         || trimmed.bytes().any(|byte| {
@@ -1195,22 +1260,7 @@ fn parse_fast_simple_flowchart_edge_ast(statement: &str) -> Option<FlowAst> {
         return None;
     }
 
-    Some(FlowAst::Edge {
-        from: FlowAstNode {
-            id: left.to_string(),
-            label: None,
-            icon: None,
-            shape: NodeShape::Rect,
-        },
-        arrow,
-        label: None,
-        to: FlowAstNode {
-            id: right.to_string(),
-            label: None,
-            icon: None,
-            shape: NodeShape::Rect,
-        },
-    })
+    Some((left, arrow, right))
 }
 
 fn parse_fast_simple_flowchart_node_ast(statement: &str) -> Option<FlowAstNode> {
