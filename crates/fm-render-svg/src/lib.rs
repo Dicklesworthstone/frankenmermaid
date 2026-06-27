@@ -3862,7 +3862,7 @@ fn render_node(
             .height(h)
             .fill(&colors.node_fill)
             .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
-            .stroke_width(1.6)
+            .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
             .rx(config.rounded_corners * 0.55),
 
         NodeShape::Rounded => Element::rect()
@@ -3872,7 +3872,7 @@ fn render_node(
             .height(h)
             .fill(&colors.node_fill)
             .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
-            .stroke_width(1.6)
+            .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
             .rx(config.rounded_corners),
 
         NodeShape::Stadium => Element::rect()
@@ -3882,7 +3882,7 @@ fn render_node(
             .height(h)
             .fill(&colors.node_fill)
             .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
-            .stroke_width(1.6)
+            .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
             .rx(w.min(h) / 2.0),
 
         NodeShape::Diamond => {
@@ -3897,7 +3897,7 @@ fn render_node(
                 .d(&path)
                 .fill(&colors.node_fill)
                 .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
-                .stroke_width(1.6)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
 
         NodeShape::Hexagon => {
@@ -3915,7 +3915,7 @@ fn render_node(
                 .d(&path)
                 .fill(&colors.node_fill)
                 .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
-                .stroke_width(1.6)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
 
         NodeShape::Circle | NodeShape::FilledCircle | NodeShape::DoubleCircle => {
@@ -3930,7 +3930,7 @@ fn render_node(
                     colors.node_fill.as_str()
                 })
                 .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
-                .stroke_width(1.6);
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css);
 
             if shape == NodeShape::DoubleCircle {
                 // For double circle, we'll use a slightly smaller stroke
@@ -3964,7 +3964,7 @@ fn render_node(
                 .d(&path)
                 .fill(&colors.node_fill)
                 .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
-                .stroke_width(1.6)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
 
         NodeShape::Trapezoid => {
@@ -3980,7 +3980,7 @@ fn render_node(
                 .d(&path)
                 .fill(&colors.node_fill)
                 .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
-                .stroke_width(1.6)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
 
         NodeShape::Subroutine => {
@@ -3998,7 +3998,7 @@ fn render_node(
                         colors.node_fill.as_str()
                     })
                     .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
-                    .stroke_width(1.6)
+                    .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
                     .rx(config.rounded_corners * 0.45),
             );
             // Left vertical line
@@ -4053,7 +4053,7 @@ fn render_node(
                 .d(&path)
                 .fill(&colors.node_fill)
                 .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
-                .stroke_width(1.6)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
 
         NodeShape::Note => {
@@ -4090,7 +4090,7 @@ fn render_node(
                 .d(&path)
                 .fill(&colors.node_fill)
                 .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
-                .stroke_width(1.6)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
 
         NodeShape::Parallelogram => {
@@ -4106,7 +4106,7 @@ fn render_node(
                 .d(&path)
                 .fill(&colors.node_fill)
                 .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
-                .stroke_width(1.6)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
 
         NodeShape::InvParallelogram => {
@@ -4122,7 +4122,7 @@ fn render_node(
                 .d(&path)
                 .fill(&colors.node_fill)
                 .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
-                .stroke_width(1.6)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
 
         NodeShape::Triangle => {
@@ -4136,7 +4136,7 @@ fn render_node(
                 .d(&path)
                 .fill(&colors.node_fill)
                 .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
-                .stroke_width(1.6)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
 
         NodeShape::Pentagon => {
@@ -4158,7 +4158,7 @@ fn render_node(
                 .d(&path.close().build())
                 .fill(&colors.node_fill)
                 .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
-                .stroke_width(1.6)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
 
         NodeShape::Star => {
@@ -4182,7 +4182,7 @@ fn render_node(
                 .d(&path.close().build())
                 .fill(&colors.node_fill)
                 .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
-                .stroke_width(1.6)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
 
         NodeShape::Cloud => {
@@ -4203,7 +4203,7 @@ fn render_node(
                 .d(&path)
                 .fill(&colors.node_fill)
                 .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
-                .stroke_width(1.6)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
 
         NodeShape::Tag => {
@@ -4221,7 +4221,7 @@ fn render_node(
                 .d(&path)
                 .fill(&colors.node_fill)
                 .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
-                .stroke_width(1.6)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
 
         NodeShape::CrossedCircle => {
@@ -4239,7 +4239,7 @@ fn render_node(
                         colors.node_fill.as_str()
                     })
                     .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
-                    .stroke_width(1.6),
+                    .stroke_width_unless_embedded_css(1.6, config.embed_theme_css),
             );
             // Diagonal lines
             let offset = r * 0.707; // r * cos(45°)
@@ -4250,7 +4250,7 @@ fn render_node(
                     .x2(cx + offset)
                     .y2(cy + offset)
                     .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
-                    .stroke_width(1.6),
+                    .stroke_width_unless_embedded_css(1.6, config.embed_theme_css),
             );
             g = g.child(
                 Element::line()
@@ -4259,7 +4259,7 @@ fn render_node(
                     .x2(cx - offset)
                     .y2(cy + offset)
                     .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
-                    .stroke_width(1.6),
+                    .stroke_width_unless_embedded_css(1.6, config.embed_theme_css),
             );
             g = maybe_add_class(g, "fm-node-shape", emit_classdef_classes);
             if detail.show_node_labels {
@@ -6735,6 +6735,14 @@ mod tests {
         assert!(
             stroke_without > stroke_with,
             "attribute-driven export must keep inline edge + node strokes (with={stroke_with}, without={stroke_without})"
+        );
+        // The node-shape base `stroke-width="1.60"` is likewise gated (the unconditional
+        // `.fm-node <shape> { stroke-width: 1.6 }` rule overrides it); edges keep theirs.
+        let sw_with = with_css.matches(" stroke-width=\"").count();
+        let sw_without = without_css.matches(" stroke-width=\"").count();
+        assert!(
+            sw_without > sw_with,
+            "attribute-driven export must keep inline node stroke-width (with={sw_with}, without={sw_without})"
         );
     }
 

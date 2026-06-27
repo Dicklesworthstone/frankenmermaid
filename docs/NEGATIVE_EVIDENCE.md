@@ -484,6 +484,26 @@
 
 ## Kept Wins Also Recorded Here By Request
 
+### Gate redundant inline node-shape `stroke-width="1.60"` on `embed_theme_css` (−0.92% SVG bytes) — KEPT (2026-06-26)
+- **Change:** companion to the node-stroke gate. The standard node shapes emitted
+  `stroke-width="1.60"`, but the unconditional CSS `.fm-node rect, path, circle, ellipse, polygon {
+  stroke-width: 1.6 }` already sets it and overrides the presentation attribute, so the inline copy
+  is redundant for CSS-on. Added `Element::stroke_width_unless_embedded_css(width, embed_css)` and
+  routed the **21** `.stroke_width(1.6)` sites through it — all verified to be in `render_node`
+  (none outside; edges use a `.stroke_width(<var>)` variable, not the `1.6` literal, so they are
+  untouched).
+- **Safety:** byte-identical-rendering — CSS-on already renders the CSS `1.6` (it overrides the
+  inline), CSS-off keeps the inline (PNG raster). The **special-width** node sites (`.stroke_width(1.0/0.8/2.0)`
+  for variant shapes) are **left untouched** — their CSS-variant coverage isn't the uniform `1.6`
+  rule, so they're out of scope. Verified the regenerated goldens drop **only** `stroke-width="1.60"`.
+- **Measured (deterministic byte win):** node-heavy 40-node flowchart `45,931 → 45,131 B` (`−800`,
+  ~1.6%); aggregate over the 31 regenerated `golden_svg_test` snapshots `651,638 → 645,618 = −0.92%`.
+- **Conformance:** `cargo test -p fm-render-svg` = **220 pass** (the gate test now also asserts the
+  inline node `stroke-width` vanishes with CSS and remains without it). `golden_svg_test` regenerated
+  via `BLESS=1` = **2 pass**; verified the 31 diffs are **only** ` stroke-width="1.60"` removal.
+- **frankenmermaid/Mermaid ratio:** Mermaid is CSS-driven; this matches it. Standing `240.5x`/
+  `319.1x`/`505.7x` (latest) over Mermaid `11.12.0`.
+
 ### Gate redundant inline node-shape base `stroke` on `embed_theme_css` (−0.80% SVG bytes + alloc) — KEPT (2026-06-26)
 - **Change:** the node analog of the edge stroke gate, after last cycle scoped the safe path. Every
   node shape emitted `stroke=<theme node stroke>` (`#e2e8f0` = `--fm-node-stroke`), but the

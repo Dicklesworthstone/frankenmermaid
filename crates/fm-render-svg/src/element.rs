@@ -491,6 +491,15 @@ impl Element {
         if embed_css { self } else { self.stroke(color) }
     }
 
+    /// Add a `stroke-width` attribute only when the theme CSS is **not** embedded. With CSS
+    /// embedded, `.fm-node <shape> { stroke-width: 1.6 }` (and the shape-variant rules) already
+    /// sets it and overrides this presentation attribute, so the inline copy is redundant.
+    /// Attribute-driven exports (`embed_theme_css = false`, PNG raster) keep it.
+    #[must_use]
+    pub fn stroke_width_unless_embedded_css(self, width: f32, embed_css: bool) -> Self {
+        if embed_css { self } else { self.stroke_width(width) }
+    }
+
     /// Set text content for text elements.
     #[must_use]
     pub fn content(mut self, text: impl Into<String>) -> Self {
