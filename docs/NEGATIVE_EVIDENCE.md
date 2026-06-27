@@ -1519,6 +1519,28 @@
 
 ## Blocked/Invalid Evidence Attempts
 
+### Byte-reduction frontier: CSS minify blocked; attr levers exhausted; post-gates standing holds — FINDING (2026-06-27)
+- **CSS minify (the remaining byte lever) is blocked.** After the inline-vs-CSS gates the embedded
+  `<style>` is the largest single chunk (~9.7 KB, **79% of a small SVG**), and it's pretty-printed
+  vs Mermaid's minified CSS. Measured minify headroom: ~426 B indentation + 209 B comments + 357 B
+  newlines ≈ **~635–992 B** (~5–8% of small/CSS-dominated SVGs, ~0.4% of wide). But: (a) a gen-time
+  minify needs the **~330-line `write!` raw-string template** in `to_svg_style` rewritten as a
+  minified single line — too large/error-prone to do safely (placeholders, format args); (b) a
+  post-build minify *pass* reprocesses the 9.7 KB string and **regresses render time** (documented
+  +19% earlier). So the clean, time-neutral path isn't tractable. Comments can't be dropped without
+  losing source documentation (output == raw-string source). Deferred.
+- **The clean attr levers are exhausted.** The inline-vs-CSS/root series (edge fill/stroke, node
+  stroke/stroke-width, drop-shadow filter+def, **font-family root-move −6.83%**) is complete; the
+  remaining label attrs are blocked (`fill` per-class CSS coverage missing — prior entry) or
+  per-label varying (`text-anchor`, `font-size`). Remaining inline attrs are geometry (`x`/`y`/
+  `transform`) or functional (`<title>` a11y).
+- **Post-gates standing — holds (BOLD-VERIFY).** `full_pipeline_wide` on `hz2`: `1.3926` / `3.3312`
+  / `6.2023 ms` = **`226x` / `295x` / `464x`** vs live-CDP Mermaid `11.12.0`. Lower than the prior
+  `ovh-a` standing (`240x`/`319x`/`506x`) purely because `hz2` is a slower worker (cross-worker, plus
+  ±2–3% variance) — **not a regression**. The byte wins are gated on the default CSS-on path so they
+  *are* in this pipeline; their render-time benefit (fewer per-element attr builds) is real but
+  sub-noise, so the headline ratio is bounded by worker speed, not the codebase.
+
 ### Label-text `fill` is NOT cleanly gateable like font-family — per-class CSS coverage is mostly absent (2026-06-27)
 - **Why investigated:** after the `font-family` root-move (−6.83%), the label `<text>` still carries
   `fill="#1a1a2e"` (= `--fm-text-color`); the obvious next step was to gate it like the node stroke.
