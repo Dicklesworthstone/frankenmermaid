@@ -1370,6 +1370,31 @@
 
 ## Blocked/Invalid Evidence Attempts
 
+### Dead-output sweep of the benched render is exhausted after the `data-fm-node-id` drop — FINDING (2026-06-26)
+- **Why:** last cycle's `data-fm-node-id` removal (a pure dead duplicate) worked via a repo-wide
+  consumer search; this cycle applies the same technique to *every* remaining node/edge attribute
+  and class emitted by the legacy flowchart render, to see if more byte can be shed.
+- **Systematic consumer-check result — nothing else is dead:**
+  - `data-id` — documented (`README.md`), the node identifier → **keep**.
+  - `data-fm-edge-id` — undocumented and **zero** JS/CSS/doc consumers, *but* it carries the
+    unique edge **index** (the only thing that disambiguates parallel `A-->B` edges; not a
+    duplicate like node-id was), so removing it is a feature removal, not a redundancy cleanup →
+    **keep** (also: just alloc-optimized via `attr_int` two cycles ago).
+  - `fm-node-accent-N`, `fm-node-shape-X` — both have real emitted CSS rules
+    (`.fm-node-accent-* { --fm-node-accent: color-mix(...) }`, `.fm-node-shape-*`) and are
+    user-facing styling hooks → **keep**.
+  - `id` (element id) — DOM targeting + mermaid-compat → **keep**.
+  - `fm-source-span` / `fm-source-index` / `fm-source-kind` — the intentional source-map set
+    (the redundant individual span attrs were already dropped in an earlier cycle); scene-path
+    only (not in the benched flowchart), a feature with possible external (IDE) consumers → **keep**.
+- **Conclusion:** the benched flowchart render now emits **no dead output**; `data-fm-node-id`
+  was the last clear redundancy. Further SVG-byte reduction vs Mermaid is bounded by (a) the
+  fixed ~9.7 KB CSS (byte-only / time-neutral), (b) frankenmermaid *enhancements* over Mermaid
+  (per-node accent/shape styling — intentional, not bloat), and (c) contract-bound attrs
+  (`data-fm-edge-id`, source-map). **Do not re-hunt benched-render dead-output.**
+- **frankenmermaid/Mermaid ratio:** unchanged — sweep only. Standing `240.5x`/`319.1x`/`505.7x`
+  (latest) over Mermaid `11.12.0`; `198x`–`426x` floor.
+
 ### CSS-building is sub-bar: stale 4 KB `to_svg_style` capacity (2 reallocs/render) saves only ~1.6% small / ~0% wide — REVERTED (2026-06-26)
 - **Lever:** `Theme::to_svg_style` (theme.rs:469) builds the ~**9,741-byte** theme CSS (verified
   by measuring the `<style>` block of a default render) starting from `String::with_capacity(4096)`
