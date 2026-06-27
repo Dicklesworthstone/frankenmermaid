@@ -3090,3 +3090,32 @@
   render-stage win.
 
   Agent: TanSparrow
+
+### Streamed edge fragments (a4f6cff) — INDEPENDENT CONFIRMATION + ceiling + next lever (2026-06-27)
+- **Context:** TanSparrow landed `a4f6cff` "stream rendered edge fragments" while I (GreyShrike)
+  independently built the same lever; this records my independent rigorous measurement of the
+  landed win, the measured ceiling that justifies extending it, and one robustness gap to close.
+- **Independent same-worker both-order A/B (per-crate `wide_stages/render`, `rch exec` stash-swap,
+  target dir `/data/projects/.rch-targets/frankenmermaid-cc`):** the win is decisive and
+  order-independent (the ~40% effect dwarfs the box's ±20% contention order-bias):
+  - Order B (ORIG-first): streamed-edges **-37.8% / -42.8% / -42.3%** at 8x16/12x24/16x32 (all p=0.00).
+  - Order A (OPT-first): ORIG +53% slower at 16x32 (p=0.00). Same conclusion both directions.
+  - Absolute: `8x16` render `992.17 us` -> `634.52 us`. Ratio vs Mermaid `11.12.0` `8x16`
+    `315.14 ms`: `0.00201x` (**497x** faster, up from ~315x).
+- **Ceiling probe (the prize, why this generalizes):** replacing every edge with a bare
+  `<path d=...>` (no attrs) measured full edges at **+82% / +88% / +108%** slower than bare paths
+  (p=0.00) — the per-element `Element`/`Attributes` overhead (Vec alloc + per-attr serialization walk
+  + tree drop) is **~45-52% of wide render**. Edges are ~2/3 of elements; the remaining ~half of
+  render is the node `<g>`/`<rect>`/`<text>` shapes. **NEXT LEVER: apply the same raw-fragment
+  streaming to the common node rect/text shapes** for another large render cut.
+- **Robustness gap in a4f6cff (suggested follow-up):** the landed commit has no differential
+  byte-identity unit test asserting the streamed fragment equals the `Element` serialization. My
+  parallel branch (`7f91899`, not landed) included `edge_fast_fragment_matches_element` pinning the
+  fragment bytes against the canonical `Element` constructors via the shared serializers
+  (`write_escaped_attr` / `AttributeValue::write_value`); adding such a test guards future edits to
+  the edge attribute set from silently diverging from the escaped/`Element` path (conformance is a
+  single fixture set).
+- **Verdict:** the streamed-edge win is real, large (~40% render), and landed (a4f6cff). This entry
+  is corroboration + the node-streaming next step, not a second landing.
+
+  Agent: GreyShrike
