@@ -1326,6 +1326,26 @@
 
 ## Blocked/Invalid Evidence Attempts
 
+### CSS-building is sub-bar: stale 4 KB `to_svg_style` capacity (2 reallocs/render) saves only ~1.6% small / ~0% wide — REVERTED (2026-06-26)
+- **Lever:** `Theme::to_svg_style` (theme.rs:469) builds the ~**9,741-byte** theme CSS (verified
+  by measuring the `<style>` block of a default render) starting from `String::with_capacity(4096)`
+  — a value from Feb (`4f08f5f1`), stale since the utility-class block grew. Building 9.7 KB from
+  4 KB forces **2 reallocs/render** (4 K→8 K→16 K). Bumped it to `12 * 1024`. Byte-identical
+  (`cargo test -p fm-render-svg` = **219 pass**), sign-known ≥0 (a capacity increase can't regress).
+- **Why reverted (measured + derived):** the `render_svg/flowchart/small_10` baseline is
+  **76.557 µs** (rch/ovh-a, cmake OK, ±0.05%). The 2 avoided reallocs are ≈1.2 µs of memcpy →
+  **~1.6% of small_10**, and `large_500` is `2.399 ms` so the same ~1.2 µs is **~0.05%**. The CSS
+  block is a *fixed* ~9.7 KB, so its build cost is a vanishing fraction of any non-trivial render,
+  and even `small_10` is dominated by node/edge/defs building, not the CSS. **Below the 3% keep
+  bar and the ~5–15% shared-worker noise floor** → ~0-gain on the headline; reverted per policy.
+- **Closes the CSS-building lever:** all `to_svg_style`-side micro-opts (capacity, write-direct to
+  avoid the intermediate-String copy, default-theme caching) are bounded by the same few-µs CSS
+  cost — **sub-bar on small, negligible on wide.** Do not pursue. (The CSS *byte* size is a real
+  gap vs Mermaid's minified CSS, but byte-only/time-neutral → ~0-gain on a time bench; see prior
+  CSS-minify entries.)
+- **frankenmermaid/Mermaid ratio:** unchanged — reverted. Standing `240.5x`/`319.1x`/`505.7x`
+  (latest run) over Mermaid `11.12.0`; `198x`–`426x` floor.
+
 ### Full `fm-cli` suite regression check after the session's wins — HEALTHY; `fnx_differential` is flaky-under-contention — FINDING (2026-06-26)
 - **Why:** the session landed several render/parse wins (span_all, markers, spans, parser); a
   comprehensive check confirms no git-tracked fixture was left stale (as `golden_svg_test` had
