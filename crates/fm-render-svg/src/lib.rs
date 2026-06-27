@@ -3710,8 +3710,7 @@ fn render_node(
         .class("fm-node")
         .class_prefixed_usize("fm-node-accent-", stable_accent_index(node_id))
         .class(node_shape_css_class(shape))
-        .data("id", node_id)
-        .data("fm-node-id", node_id);
+        .data("id", node_id);
     // Add centrality tier class if available (FNX semantic styling)
     if let Some(tier) = lookup_centrality_tier(centrality_map, node_box.node_index) {
         group = group.class_prefixed("fm-node-centrality-", tier.css_class_suffix());

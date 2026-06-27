@@ -484,6 +484,28 @@
 
 ## Kept Wins Also Recorded Here By Request
 
+### Drop dead `data-fm-node-id` node attribute (−1 to −2% SVG bytes, zero consumers) — KEPT (2026-06-26)
+- **Change:** `render_node` emitted **both** `.data("id", node_id)` and
+  `.data("fm-node-id", node_id)` — two attributes carrying the *same* `node_id`. Removed the
+  second (`crates/fm-render-svg/src/lib.rs:3714`), keeping the **documented** `data-id`.
+- **Why safe (dead output):** a repo-wide search found **zero** consumers of `data-fm-node-id`
+  — no CSS selector, no JS `querySelector`/`getAttribute`/`dataset`, no README/docs guidance
+  (the README documents `data-id`, not `data-fm-node-id`). It only duplicated `data-id`. This
+  *corrects* a prior cycle's incorrect "intentional dual-naming, not removable" note (the
+  claimed parallel to `data-fm-edge-id` was wrong — edge-id is the unique index, node-id a pure
+  duplicate). Same class of dead-output removal as the earlier `data-fm-source-*` drop.
+- **Measured (deterministic byte win):** aggregate over the 31 git-tracked `golden_svg_test`
+  snapshots **673,729 → 666,618 bytes = −1.06%** (machine-independent); a node-heavy 40-node
+  flowchart is **−1.8%**, scaling with node density vs the fixed ~9.7 KB CSS. Plus a small
+  alloc/time reduction — one fewer `node_id` `String` copy and one fewer attribute (Vec slot +
+  retain scan + serialization) **per node** (~0.5–1%, below the noise floor).
+- **Conformance:** `cargo test -p fm-render-svg` = **219 pass**; `golden_svg_test` regenerated
+  via `BLESS=1` and **GREEN** (2 pass). Verified the 31 golden diffs are **only**
+  `data-fm-node-id` removal — stripping ` data-fm-node-id="…"` from each old snapshot exactly
+  reproduces the new one (no coordinate/other drift).
+- **frankenmermaid/Mermaid ratio:** Mermaid emits no such attribute, so this strictly narrows
+  the per-node byte gap. Standing `240.5x`/`319.1x`/`505.7x` (latest) over Mermaid `11.12.0`.
+
 ### Store integer `data-fm-edge-id` without allocating (byte-identical alloc reduction) — KEPT (2026-06-26)
 - **Change:** the three edge-render sites built the edge-id attribute as
   `.data("fm-edge-id", &edge_index.to_string())`, which **double-allocates** — `to_string()`
@@ -1403,12 +1425,14 @@
   the node half is far too invasive/correctness-critical (a wrong-dedup bug merges nodes) for
   its size. **Do not pursue.** (`SmallVec` would also be a new direct dep; `IrLabelSegment`
   does derive `Hash`/`Eq`, so that part is feasible — but moot.)
-- **`data-id` / `data-fm-node-id` duplicate node-id attrs — NOT REMOVABLE (intentional
-  dual-naming).** Both carry `node_id`. `data-id` is **documented** in `README.md` (the
-  example SVG, line ~2801); `data-fm-node-id` is the fm-namespaced form that parallels the
-  emitted `data-fm-edge-id` selection scheme. So they target different consumer classes
-  (mermaid-style generic vs frankenmermaid-native tooling), not accidental redundancy — an
-  output-contract item, not a free dead-output removal like the `data-fm-source-*` set was.
+- **`data-id` / `data-fm-node-id` duplicate node-id attrs — ~~NOT REMOVABLE~~ → SUPERSEDED,
+  `data-fm-node-id` DROPPED (see Kept Wins, 2026-06-26).** This bullet's "keep" reasoning was
+  **wrong**: `data-fm-edge-id` carries the *unique edge index*, whereas `data-fm-node-id` is a
+  *pure duplicate* of `node_id` (= the documented `data-id`), so the "parallel selection scheme"
+  argument does not hold. A repo-wide consumer search (`*.js/ts/tsx/css`, `querySelector`/
+  `getAttribute`/`dataset`, README/docs) found **zero** consumers of `data-fm-node-id` — it is
+  dead output, exactly like the `data-fm-source-*` set. Dropped it (kept the documented
+  `data-id`).
 - **Git-tracked snapshot integrity — GREEN.** After fixing `golden_svg_test` last cycle, ran
   the other git-tracked snapshot/checksum tests: `golden_layout_test` (2), `mermaid_compat_test`
   (2), `fnx_baseline_invariants` (7) all pass — no other fixture was left stale by the landed
