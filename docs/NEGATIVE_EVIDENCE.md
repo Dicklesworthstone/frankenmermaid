@@ -1416,6 +1416,21 @@
   rch worker blocks clean rch timing, and the local box is too contended for sub-5% layout
   effects, so any edge-routing micro-opt is currently **unmeasurable** here — a real
   infra blocker for further layout/edge-routing perf work.
+- **UPDATE (2026-06-26, definitive ~0-gain via same-worker A/B):** re-ran the
+  `intersects_segment` change with the same-worker workaround — both `--save-baseline` and
+  `--baseline` runs verified on worker `hz2` (`layout_wide`, criterion). Result was
+  **incoherent**: `8x16 −2.3%` (n.s., p=0.58), `12x24 +15.4%`, `16x32 +12.3%` (p=0.00). A
+  change that does *strictly less work* (`edges().any(intersect.is_some())` early-exit vs the
+  full `intersect_segment` `Vec`-build + corner-dedup) **cannot** regress +15%, and the moves
+  are not same-direction → this is **shared-worker contention drift** between the sequential
+  baseline and candidate runs (hz2 is shared by the swarm). `cargo test -p fm-core -p
+  fm-layout` = `349`+`428` passed (output-identical), so the delta is pure noise around zero.
+  Reverted again. **Measurement-floor finding:** the same-worker workaround that cleanly
+  resolved the `span_all` `−12%` parse win has a **noise floor of ≈5–15%** on shared workers
+  (`hz2`/`ovh-a` serve the whole swarm), so it resolves *large* effects but **cannot verify
+  sub-5% layout/render levers**. `span_all` was measurable only because it was big. **Do not
+  re-attempt `intersects_segment` or any sub-5% layout/edge-routing micro-opt** until a
+  dedicated low-contention bench host exists — its sign cannot be established here.
 
 ### `layout_wide/16x32` runs the TREE algorithm, not Sugiyama — OPTIMIZATION-TARGETING FINDING (2026-06-26)
 - **What was measured:** the layout guardrail forces a fallback from Sugiyama to the **tree**
