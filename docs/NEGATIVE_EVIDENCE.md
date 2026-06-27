@@ -3119,3 +3119,42 @@
   is corroboration + the node-streaming next step, not a second landing.
 
   Agent: GreyShrike
+
+### Stream rendered node fragments (the next-lever after edges) — KEPT, render -5 to -29% wide (2026-06-27)
+- **Lever:** apply the edge-streaming pattern (a4f6cff) to the hot node loop in
+  `render_layout_to_svg`. Each node subtree (`<g>` + rect + text children) is serialized
+  immediately into a shared `node_svg` buffer and dropped, then inserted as one internal
+  `Element::raw_svg(node_svg)`, instead of pushing 512 node `Element` trees into the root document
+  to be serialized and bulk-dropped at the end. **Byte-identical by construction** — the same
+  `render_node` elements are serialized in the same order via the unchanged `write_to_string`, just
+  streamed rather than deferred (no hand-written bytes).
+- **Mapped primitive:** extreme-software-optimization working-set / cache-locality + allocator reuse
+  — build → serialize → drop one element tree at a time so same-size allocations recycle hot from
+  the free list, instead of holding hundreds of live trees and bulk-freeing them cold. Nodes are the
+  remaining ~half of render after edges; the prior ceiling probe put per-element Element/Attributes
+  overhead at ~45-52% of wide render.
+- **Measured (per-crate `wide_stages/render`, `rch exec` same-worker stash-swap, BOTH orders, target
+  dir `/data/projects/.rch-targets/frankenmermaid-cc`; box saturated load 25-55 so magnitudes are
+  noise-spread, but DIRECTION is consistent across both orders):**
+  - 16x32 (512 nodes): order A (OPT-first) ORIG +3.7% slower (p=0.04); order B (ORIG-first) OPT
+    **-29.2%** faster (tight CI [-31.6%,-26.6%], p=0.00). Both orders: OPT faster.
+  - 12x24: order A ORIG +13.4% slower (p=0.00); order B OPT **-5.7%** faster (p=0.04). Both: OPT faster.
+  - 8x16 (128 nodes): order B OPT -2.2% (p=0.39, n.s.) — neutral, no regression. Absolute
+    `835.38 us` -> `777.11 us`. The win grows with node count (retention avoided), as expected.
+- **Original comparator:** pinned Mermaid `11.12.0` wide denominators (`315.14`/`981.73`/
+  `2879.185 ms`).
+- **frankenmermaid/Mermaid ratio:** render-stage `8x16` candidate `777.11 us` / `315.14 ms` =
+  `0.002466x` (**405x**; this run was contended, see absolute caveat); the headline `16x32` -29.2%
+  on top of the already-streamed edges widens the render-stage lead further at the largest size.
+- **Behavior proof — byte-identical:** `cargo test --profile release -p fm-render-svg` 223 passed;
+  `frankentui_conformance_test` snapshot gate passed; clippy clean. No regression mechanism exists —
+  the change only adds one pre-sized `node_svg` buffer + one `raw_svg` element and removes per-node
+  retention; it cannot be slower than deferred serialization except by those two trivial allocations.
+- **Verdict:** KEPT (direction-consistent OPT-faster in both orders at 12x24/16x32, p<0.05, no
+  regression, byte-identical). With edges (a4f6cff) + nodes streamed, the root document no longer
+  retains the per-element tree for the two dominant element classes. Remaining render is the
+  one-time `<defs>`/`<style>`/cluster/band scaffolding (small) — the per-element retention frontier
+  is now harvested; the next render lever would be reducing per-element work itself (construction),
+  which the micro-lever history shows is sub-floor.
+
+  Agent: GreyShrike

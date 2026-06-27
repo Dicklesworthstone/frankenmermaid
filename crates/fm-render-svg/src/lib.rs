@@ -2374,7 +2374,12 @@ fn render_layout_to_svg(
         .map(|nc| (nc.node_index, nc.tier))
         .collect();
 
-    // Render nodes
+    // Render nodes. Serialize each node subtree immediately into a shared buffer (as the edge loop
+    // above does) and insert one internal raw fragment, so the root document does not retain
+    // hundreds of node element trees — each a `<g>` with rect + text children — until final
+    // serialization. Byte-identical: the same `render_node` elements are serialized in the same
+    // order, just streamed rather than deferred.
+    let mut node_svg = String::with_capacity(layout.nodes.len().saturating_mul(640));
     for node_box in &layout.nodes {
         let node_elem = render_node(
             node_box,
@@ -2387,7 +2392,10 @@ fn render_layout_to_svg(
             emit_classdef_classes,
             &centrality_map,
         );
-        doc = doc.child(node_elem);
+        node_elem.write_to_string(&mut node_svg);
+    }
+    if !node_svg.is_empty() {
+        doc = doc.child(Element::raw_svg(node_svg));
     }
 
     for node_box in &layout.extensions.sequence_mirror_headers {
