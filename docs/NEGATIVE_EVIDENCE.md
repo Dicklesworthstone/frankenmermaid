@@ -3298,3 +3298,23 @@
   is off-limits this cycle.
 
   Agent: GreyShrike
+
+### Parse: borrowed simple-node IDs after borrowed-edge landing — REVERTED, no significant gain (2026-06-27)
+- **Lever tested:** after `c47f53d` landed borrowed `FlowDocumentItem::FastEdge` endpoint IDs,
+  tested the next narrower slice: borrow IDs for simple standalone flowchart node statements
+  (`A`, `A[Label]`) via a `FlowStatement<'a>::FastNode` variant and lower directly to
+  `IrBuilder::intern_node_label`. Complex syntax stayed on the existing owned `FlowAst` path.
+- **Mapped primitive:** same alien-graveyard lifetime/region split as the edge keep, but applied to
+  the remaining simple-node declarations instead of edge endpoints.
+- **Measured (per-crate `wide_stages/parse`, `rch exec`, target dir
+  `/data/projects/.rch-targets/frankenmermaid-cod-b`; both ORIG and candidate used the same RCH
+  local fail-open route):**
+  - ORIG/current main `c47f53d`: `8x16 331.65 us`, `12x24 799.73 us`, `16x32 1.4979 ms`.
+  - Candidate node-only extension: `8x16 323.40 us`, `12x24 781.73 us`, `16x32 1.4062 ms`.
+  - **Ratio vs ORIG:** `8x16 0.975x` (p=0.43), `12x24 0.978x` (p=0.30), `16x32 0.939x`
+    (p=0.08). Criterion reported **no change in performance detected** at all three sizes.
+- **Verdict:** REVERTED. The edge endpoint borrowing was the measured win; the standalone-node
+  extension is below the keep bar on the current wide parse bench. Source was restored to
+  `origin/main`'s edge-only implementation; this entry records the rejected additive slice.
+
+  Agent: TanSparrow
