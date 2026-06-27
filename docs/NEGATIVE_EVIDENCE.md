@@ -2502,3 +2502,50 @@
   Do not retry small `Element` child `Vec` pre-sizing in isolation; the next
   render lever should attack direct serialization or a measured top allocation
   source in the wide SVG render path.
+
+### TextBuilder single-line line-vector skip - REVERTED (2026-06-27)
+- **Lever tested:** `fm-render-svg::TextBuilder::build` briefly avoided the
+  eager `self.text.lines().collect::<Vec<_>>()` allocation on the common
+  single-line label path, only building multi-line `tspan` output after seeing a
+  second line. This targeted the wide render stage, where text nodes are emitted
+  for every synthetic node label.
+- **Mapped primitive:** alien-graveyard allocation-budget hygiene plus
+  alien-artifact hot-path specialization: remove dead temporary collections from
+  renderer inner loops before pursuing larger renderer architecture changes.
+- **Baseline -> After:** clean current-main detached baseline at `d5b837e`,
+  package `frankenmermaid-cli`, bench `pipeline_bench`, filter
+  `wide_stages/render`, target dir
+  `/data/projects/.rch-targets/frankenmermaid-cod-b`, via
+  `AGENT_NAME=TanSparrow RCH_WORKER=ovh-a rch exec -- cargo bench --profile release
+  -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time
+  1 --measurement-time 2`. `rch` fell open locally for both accepted baseline
+  and candidate runs, so the pair is comparable. Baseline measured `8x16`
+  `1.1342 ms`, `12x24` `2.6393 ms`, and `16x32` `5.0188 ms`. Candidate measured
+  `1.0787 ms`, `3.3821 ms`, and `26.255 ms`: `-4.89%`, `+28.15%`, and
+  `+423.13%` by median. An earlier candidate-only `ovh-a` remote run measured
+  faster absolute numbers but was not accepted because the matching baseline had
+  fallen open locally.
+- **Original comparator:** pinned live-CDP Mermaid `11.12.0` denominators reused
+  for identical generated wide inputs: `8x16` `315.14 ms`, `12x24` `981.73 ms`,
+  `16x32` `2879.185 ms`.
+- **frankenmermaid/Mermaid ratio:** baseline render stage was `0.003599x`,
+  `0.002688x`, and `0.001743x` Mermaid.js time (`277.85x`, `371.97x`, and
+  `573.68x` faster than Mermaid.js). Candidate render stage was `0.003423x`,
+  `0.003445x`, and `0.009119x` Mermaid.js time (`292.15x`, `290.27x`, and
+  `109.66x` faster). These are render-stage ratios against full-pipeline
+  Mermaid denominators for context only.
+- **Behavior proof:** while measured, the candidate passed the focused release
+  test filter `cargo test --profile release -p fm-render-svg text` (`12` tests).
+  A separate remote attempt on `vmi1264463` failed before testing because that
+  worker lacked `cmake` for `highs-sys`; it is environment evidence only. The
+  production source was then manually restored. Final conformance on the
+  reverted tree passed via `AGENT_NAME=TanSparrow
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec --
+  cargo test --profile release -p frankenmermaid-cli --test
+  frankentui_conformance_test` (`1` test).
+- **Verdict:** reverted; the single-line allocation skip was slightly faster on
+  the smallest render case but regressed the larger wide cases, catastrophically
+  on the 16x32 sample. Do not retry this `TextBuilder::build` line-collection
+  removal without an allocation profile proving the temporary `Vec<&str>` is a
+  top renderer cost and a same-route bench showing the branch/iterator shape is
+  stable on large wide diagrams.
