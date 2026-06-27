@@ -2277,3 +2277,38 @@
   [[dense-crossing-count-position-maps]]). Target `render` on `wide_stages` instead, and
   measure render levers against this group (not the linear-only `render_svg` group, which
   hides edge-heavy cost).
+
+### Generated SVG id ownership — REVERTED (2026-06-27)
+- **Lever tested:** `fm-render-svg::Attributes` and `Element` briefly grew
+  `id_owned(String)` so generated Mermaid element ids (`fm-node-*`,
+  `fm-edge-*`, `fm-cluster-*`) could move the already-built `String` into the
+  `id` attribute instead of allocating once in the helper and copying again
+  through `id(&str)`.
+- **Mapped primitive:** allocation-fusion / partial evaluation from the
+  alien-artifact pass: specialize the generated-id path while leaving borrowed
+  literal ids on the existing API.
+- **Baseline -> After:** per-crate package `frankenmermaid-cli`, bench
+  `pipeline_bench`, filter `wide_stages/render`, target dir
+  `/data/projects/.rch-targets/frankenmermaid-cod-a`, via
+  `rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench
+  pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2`.
+  RCH had no admissible worker for both runs, so both fell back local. Raw means:
+  `8x16` `1.3141 ms` -> `1.3679 ms` (`+4.09%`), `12x24` `2.5020 ms`
+  -> `5.8822 ms` (`+135.10%`), and `16x32` `4.6356 ms` -> `20.031 ms`
+  (`+332.11%`).
+- **Original comparator:** pinned live-CDP Mermaid `11.12.0` denominators reused
+  for identical generated wide inputs: `8x16` `315.14 ms`, `12x24`
+  `981.73 ms`, `16x32` `2879.185 ms`.
+- **frankenmermaid/Mermaid ratio:** baseline render stage was `0.004170x`,
+  `0.002549x`, and `0.001610x` Mermaid.js time (`239.81x`, `392.38x`,
+  `621.10x` faster than Mermaid.js). Candidate render stage worsened to
+  `0.004341x`, `0.005992x`, and `0.006957x` Mermaid.js time (`230.38x`,
+  `166.90x`, `143.74x` faster).
+- **Behavior proof:** the candidate source added a focused serialization test
+  for `id_owned`, and `cargo fmt -p fm-render-svg --check` passed while the
+  candidate was applied. The source code was manually restored after the failed
+  measurement; no production code from this lever remains.
+- **Verdict:** reverted; the measured wide render gate showed a large regression,
+  so the generated-id copy is not the active bottleneck. Do not retry this as
+  `id_owned`, `attr_owned`, or a cross-crate generated-id helper without a fresh
+  allocation profile showing generated id copies in the top renderer costs.
