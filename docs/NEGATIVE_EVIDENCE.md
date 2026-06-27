@@ -1638,6 +1638,38 @@
 
 ## Blocked/Invalid Evidence Attempts
 
+### PROFILED: Brandes-Köpf `coordinate_assignment` is now the dominant layout phase (next lever) (2026-06-27)
+- After the crossing_refinement win (`5688f41`), env-gated phase timers (`FM_PROFILE`) on the 16x32
+  wide layout give this per-iteration breakdown (warm, local): `compute_node_sizes 10µs`,
+  `cycle_removal 34µs`, `rank_assignment 31µs`, `crossing_minimization 8µs`,
+  **`crossing_refinement 60ns`** (was the ~305µs dominant phase — my opt crushed it),
+  **`coordinate_assignment(BK) ~108µs warm / up to 673µs cold`**, `subgraph+constraint_solver 60ns`,
+  `build_edge_paths 29µs`, `post_edge_path 10µs`. So **Brandes-Köpf coordinate assignment is now the
+  biggest phase (~47-56%)** — the hotspot moved there once crossing_refinement was fixed.
+- **Next lever (fresh, Explore-flagged, not yet attempted):** `bk_upper_neighbours`
+  (fm-layout/src/lib.rs:9352) allocates + sorts a `Vec` per node per direction — called ×4 alignment
+  passes (~2048×). The ordering is **fixed during BK**, so the upper/lower neighbour lists (sorted by
+  position) can be precomputed **once** and reused across all 4 passes (currently recomputed ~2×
+  redundantly per direction). Also pervasive `BTreeMap<usize, _>` (`ranks`, `pos_map`,
+  `rank_pos_maps`) over dense node/rank indices → `Vec`/`FxHashMap` for O(1) lookup. Estimated the
+  single biggest remaining layout lever; same output-preserving discipline as crossing_refinement.
+- **Standing:** unchanged this entry. `226x`–`506x` over Mermaid `11.12.0`.
+
+### FINDING: layout guardrail forces "tree" for large wide diagrams — production ≠ bench (2026-06-27)
+- Rendering the 16x32 wide diagram through the **CLI** logs
+  `layout.guardrail.fallback initial_algorithm="sugiyama" selected_algorithm="tree"
+  estimated_time_ms=10481 reason="guardrail_forced_multi_budget"` — the guardrail **estimates
+  sugiyama at 10.5 s and falls back to the tree algorithm**. But the actual sugiyama layout (the path
+  the `layout_wide`/`full_pipeline_wide` benches exercise via `layout_diagram`) is **~1 ms** — the
+  estimate is ~10000x pessimistic.
+- **Implication:** the benches measure **sugiyama**, but the CLI/production falls back to **tree** for
+  large wide diagrams, so sugiyama bench wins (crossing_refinement, and a future BK opt) may not reach
+  production at that size. **Potential lever:** correct the guardrail's time estimate (it appears to
+  model worst-case / un-optimized sugiyama) so production uses the now-fast sugiyama — *if* sugiyama is
+  actually ≤ tree time and the layout quality is acceptable (both need verification before changing a
+  safety guardrail). Parked pending that verification.
+- **Standing:** unchanged. `226x`–`506x` over Mermaid `11.12.0`.
+
 ### IrGraph build MEASURED ~0-gain (data closes the parked lever) (2026-06-27)
 - **Result:** the eager `ir.graph` FNX-adapter build (`ir_builder.rs` 872/1265) — flagged as "dead
   in the render pipeline, modest ~2-5%" in `1dbd7cd` — is now **measured ~0-gain**, upgrading the
