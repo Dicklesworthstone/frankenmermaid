@@ -3005,3 +3005,39 @@
   clean worker BEFORE landing; never read a contended local A/B as a win.
 
   Agent: GreyShrike
+
+### Per-edge `pts` stack buffer (eliminate 1024 heap Vecs) — REVERTED, sub-bar/unmeasurable under contention (2026-06-27)
+- **Lever:** `render_edge` collected the offset edge points into a per-edge heap
+  `Vec<(f32,f32)>` before `smooth_edge_path`. Replaced with a fixed `[(f32,f32); 24]`
+  stack buffer (heap fallback only for the rare >24-point path), removing ~1024 per-edge
+  heap allocations per `16x32` render. Offset arithmetic unchanged → **byte-identical**
+  (223 `fm-render-svg` tests + `frankentui_conformance_test` pass; clippy clean).
+- **Mapped primitive:** extreme-software-optimization allocation-hygiene — move a small,
+  bounded, hot-loop temporary off the heap onto the stack. Edges are ~2/3 of wide-render
+  elements, and last cycle's symbol-resolved profile showed render is allocation-bound.
+- **Measured (per-crate `wide_stages/render`, `rch exec` same-worker stash-swap A/B, target
+  dir `/data/projects/.rch-targets/frankenmermaid-cc`):** BOTH orders run because the box was
+  saturated (load average **38-43**, **41 concurrent cargo/rustc** processes; `rch` fell open
+  local). Forward (OPT first): OPT measured **+7.7% / n.s. / +7.9% SLOWER** at 8x16/12x24/16x32.
+  Reverse (ORIG first): OPT measured **-5.5% / -8.9% / -23.5% FASTER**. The sign flips with run
+  order and the magnitude (±7-23%) swamps any real signal — this is pure order-bias
+  ("second run is faster" under contention), not an effect of the change. The mechanism is a
+  guaranteed *small* win (~1-2%, removing 1024 allocs; cannot regress — no codegen change to
+  any hot path, unlike the d-raw enum-variant match de-opt), but it is **below the measurement
+  floor** and unprovable as a reproducible ≥3% keep under current conditions.
+- **Original comparator:** pinned Mermaid `11.12.0` wide denominators (`315.14`/`981.73`/
+  `2879.185 ms`); the render-stage band is unchanged this cycle (~200-570x faster than ORIG;
+  no source landed).
+- **Verdict:** REVERTED. Byte-identical and mechanically sound but cannot clear the ≥3%
+  reproducible keep bar; per protocol, not landed. Do not re-attempt sub-5% byte-identical
+  render micro-levers until a clean worker is available.
+- **BLOCKER surfaced (swarm-wide):** the shared build/bench box is saturated (load 38-43, ~41
+  concurrent cargo/rustc) and `rch` is falling open to it, so the same-worker A/B order-bias is
+  ±7-23% — **every remaining incremental render/parse/layout lever (all <10%) is currently
+  unmeasurable.** Validation requires either a dedicated/quiet `rch` worker, or pivoting to the
+  one lever large enough to measure through the noise: the multi-turn **streaming/arena render
+  refactor** that eliminates the per-element `Element`/`Attributes` allocation + the ~17%
+  Element-tree drop (the only ≥3% render lever left; see prior-cycle profile entries). The
+  micro-lever frontier is otherwise exhausted.
+
+  Agent: GreyShrike
