@@ -1720,6 +1720,26 @@
   provenance, normalize equivalent render-to-SVG calls, and emit ratios before closing
   any optimization bead or claiming a win.
 
+### Current-main wide pipeline standing after the session's wins — VERIFIED (2026-06-26)
+- **Kind:** BOLD-VERIFY standing measurement; **no source changed this turn**. Re-measures
+  the headline `full_pipeline_wide` (parse + layout + SVG, `SvgRenderConfig::default()` =
+  spans-off, the fair fight vs Mermaid) after this session landed `span_all` (parse −12%),
+  the flowchart marker gating, the spans-on attr trim, and the parser borrowed-lines win.
+- **Measurement:** `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cc rch exec
+  -- cargo bench -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide` on worker
+  `ovh-a` (cmake OK, criterion variance ±0.1%): `8x16` **`1.3105 ms`**, `12x24` **`3.0769
+  ms`**, `16x32` **`5.6932 ms`**. That is **−17.6% / −17.6% / −15.7%** vs the prior recorded
+  standing (`1.5908` / `3.7339` / `6.7530 ms`), consistent with the landed parse+render wins.
+- **frankenmermaid/Mermaid ratio:** vs the pinned live-CDP Mermaid `11.12.0` denominators
+  (`315.14` / `981.73` / `2879.185 ms`): **`240.5x` / `319.1x` / `505.7x`** faster — up from
+  the prior `198.10x` / `262.92x` / `426.35x`.
+- **Caveat (honest):** the prior standing was measured on worker `hz2`; this run is on `ovh-a`,
+  so part of the absolute delta may be worker-speed, not solely the landed wins (cross-worker
+  confound — the same ≈5–15% noise floor recorded elsewhere). The *direction* (faster) and the
+  span_all parse win (−12%, measured clean same-worker) are real and are in this pipeline; treat
+  the headline ratios as a conservatively-bounded improvement, with `198x`–`426x` as the
+  floor and `240x`–`506x` as this run's reading.
+
 ### Current-main wide pipeline standing — VERIFIED (2026-06-26)
 - **Kind:** BOLD-VERIFY standing measurement; **no source changed this turn**. The
   worktree commit `290adec` ("append dynamic classes without temp strings") was found
