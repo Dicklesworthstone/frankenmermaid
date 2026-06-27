@@ -1638,6 +1638,34 @@
 
 ## Blocked/Invalid Evidence Attempts
 
+### Layout post-crossing_refinement: distributed cost, and a measured but unexplained Auto-path overhead (2026-06-27)
+- **Sub-phase profile (16x32, FM_PROFILE):** `bk_vertical_alignment` dominates the BK (~66-80%), but
+  the **whole BK (`brandes_kopf_secondary_coords`) is only ~7.5µs warm** — confirming last cycle's
+  neighbour-precompute regression: the BK is *not* a bottleneck. The layout cost is now **distributed**
+  (cycle_removal, rank_assignment, coordinate_assignment node-box building, build_edge_paths — each
+  ~30-60µs, no single ≥50% hotspot). The big lever (crossing_refinement) is already landed; the layout
+  is at diminishing returns for single-phase wins.
+- **Algorithm comparison (16x32, ovh-a, one run, tight):** forced `sugiyama` **726µs** ≈ forced `tree`
+  **716µs** — the guardrail's tree fallback is **not faster** (sugiyama is equal speed + better quality,
+  fewer crossings). But `layout_diagram` (Auto — the production/pipeline path) = **929µs = +28% / ~203µs
+  over forced sugiyama.**
+- **The 203µs Auto overhead is the next lever — but its source resisted code inspection.** The Auto
+  dispatch is cheap by code: `track_dependency_graph_query` early-returns (no incremental state),
+  `dispatch`/`preferred`/`select_general_graph`/`expected_loss_permille`/`evaluate_layout_guardrails`
+  are all just `estimate_layout_cost` arithmetic, and `compute_fnx_layout_selection_signals` (the only
+  O(V·E) candidate — builds the fnx graph + articulation/bridges) is **stubbed to `None`** in the default
+  build (`fnx-integration` is non-default). Both entry points use the same config/cycle-strategy; only
+  the `LayoutAlgorithm` param differs (Auto vs Sugiyama). So the 203µs is real but unexplained by static
+  reading — **next: flamegraph `layout_diagram` vs `layout_diagram_traced_with_algorithm(_, Sugiyama)`**
+  on 16x32. If real + eliminable, it's a ~22% win on the **production path** (the biggest remaining
+  layout lever). Did not ship a guess.
+- **Side note (stale guardrail estimate):** `estimate_layout_cost` Sugiyama = `nodes×edges/50` =
+  **10485ms for 16x32** (actual 726µs, ~14000x off) — models the old O(V·E²) crossing logic that
+  crossing_refinement replaced. It drives the CLI's `sugiyama→tree` fallback for large diagrams.
+  Recalibrating is a **quality** change (tree≈sugiyama speed, sugiyama better) to a safety mechanism +
+  changes untested large-diagram output — parked, not a speed win.
+- **Standing:** unchanged — no source change (scaffolding reverted). `226x`–`506x` over Mermaid `11.12.0`.
+
 ### REJECTED: Brandes-Köpf neighbour precompute regresses +2-4% (neighbour recompute is not the BK bottleneck) (2026-06-27)
 - Implemented the lever flagged last cycle: `bk_upper_neighbours` re-walks adjacency + re-sorts a
   `Vec` per node per pass (×4); the ordering is fixed during BK, so I precomputed the upper (rank-1)
