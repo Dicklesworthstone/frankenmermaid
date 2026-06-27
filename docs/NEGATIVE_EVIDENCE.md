@@ -2310,26 +2310,33 @@
   literal ids on the existing API.
 - **Baseline -> After:** per-crate package `frankenmermaid-cli`, bench
   `pipeline_bench`, filter `wide_stages/render`, target dir
-  `/data/projects/.rch-targets/frankenmermaid-cod-a`, via
-  `rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench
-  pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2`.
-  RCH had no admissible worker for both runs, so both fell back local. Raw means:
-  `8x16` `1.3141 ms` -> `1.3679 ms` (`+4.09%`), `12x24` `2.5020 ms`
-  -> `5.8822 ms` (`+135.10%`), and `16x32` `4.6356 ms` -> `20.031 ms`
-  (`+332.11%`).
+  `/data/projects/.rch-targets/frankenmermaid-cod-b`, via
+  `RCH_WORKER=ovh-a rch exec -- cargo bench --profile release -p
+  frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time
+  1 --measurement-time 2`. Clean `HEAD` baseline worktree
+  `/data/projects/.worktrees/frankenmermaid-tansparrow-id-owned-baseline-20260627`
+  at `af4e091` measured `8x16` `0.77240 ms`, `12x24` `1.7722 ms`, and
+  `16x32` `3.1487 ms`. The candidate measured `0.78512 ms`, `1.7588 ms`,
+  and `3.1582 ms`. That is `+1.65%`, `-0.76%`, and `+0.30%`: mixed and below
+  the keep bar. Earlier local-fallback evidence for the same lever is superseded
+  by this same-worker `ovh-a` pair.
 - **Original comparator:** pinned live-CDP Mermaid `11.12.0` denominators reused
   for identical generated wide inputs: `8x16` `315.14 ms`, `12x24`
   `981.73 ms`, `16x32` `2879.185 ms`.
-- **frankenmermaid/Mermaid ratio:** baseline render stage was `0.004170x`,
-  `0.002549x`, and `0.001610x` Mermaid.js time (`239.81x`, `392.38x`,
-  `621.10x` faster than Mermaid.js). Candidate render stage worsened to
-  `0.004341x`, `0.005992x`, and `0.006957x` Mermaid.js time (`230.38x`,
-  `166.90x`, `143.74x` faster).
+- **frankenmermaid/Mermaid ratio:** baseline render stage was `0.002451x`,
+  `0.001805x`, and `0.001094x` Mermaid.js time (`408.00x`, `553.96x`,
+  `914.40x` faster than Mermaid.js). Candidate render stage was `0.002491x`,
+  `0.001792x`, and `0.001097x` Mermaid.js time (`401.39x`, `558.18x`,
+  `911.65x` faster). These render-stage ratios are conservative context against
+  full-pipeline Mermaid denominators, not a replacement for the standing
+  full-pipeline ratio.
 - **Behavior proof:** the candidate source added a focused serialization test
-  for `id_owned`, and `cargo fmt -p fm-render-svg --check` passed while the
-  candidate was applied. The source code was manually restored after the failed
-  measurement; no production code from this lever remains.
-- **Verdict:** reverted; the measured wide render gate showed a large regression,
+  for `id_owned` while measured. The source code is restored in the final tree;
+  no production code from this lever remains. Final conformance rerun:
+  `AGENT_NAME=TanSparrow CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b
+  rch exec -- cargo test --profile release -p frankenmermaid-cli --test
+  frankentui_conformance_test` passed (`1` test).
+- **Verdict:** reverted; the same-worker wide render gate showed no reliable win,
   so the generated-id copy is not the active bottleneck. Do not retry this as
   `id_owned`, `attr_owned`, or a cross-crate generated-id helper without a fresh
   allocation profile showing generated id copies in the top renderer costs.

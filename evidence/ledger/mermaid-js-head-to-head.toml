@@ -1720,46 +1720,51 @@ date = "2026-06-27"
 agent = "TanSparrow"
 lever_bead = "bd-1buv.1"
 graveyard_route = "Alien Artifact allocation-fusion / partial-evaluation route: specialize already-generated SVG id strings so they move into attributes instead of allocating and copying a second time."
-worker_delta = "local fallback through rch exec; no admissible workers for baseline or candidate"
-baseline_commit = "c605ab5"
-target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-a"
+worker_delta = "same-worker ovh-a remote through rch exec; supersedes earlier local-fallback evidence for this lever"
+baseline_commit = "af4e091"
+baseline_worktree = "/data/projects/.worktrees/frankenmermaid-tansparrow-id-owned-baseline-20260627"
+target_dir = "/data/projects/.rch-targets/frankenmermaid-cod-b"
 candidate_summary = "Added fm-render-svg Attributes::id_owned(String) and Element::id_owned(String), then routed generated Mermaid node/edge/cluster ids through it. Reverted after measurement."
-render_baseline_command = "AGENT_NAME=TanSparrow CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
-render_candidate_command = "AGENT_NAME=TanSparrow CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
+render_baseline_command = "AGENT_NAME=TanSparrow RCH_WORKER=ovh-a RUSTFLAGS='-C metadata=tansparrowidownedbaseovh2' CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
+render_candidate_command = "AGENT_NAME=TanSparrow RCH_WORKER=ovh-a RUSTFLAGS='-C metadata=tansparrowidownedcandovh' CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 2"
 mermaid_js_command = "Pinned live-CDP Mermaid 11.12.0 denominator reused from current-main ledger for identical generated wide inputs."
 rust_build_profile = "release profile [optimized]"
-behavior_proof = "Candidate added an id_owned serialization test and cargo fmt -p fm-render-svg --check passed. Candidate production source was manually reverted after regression; evidence-only docs remain."
+behavior_proof = "Candidate added an id_owned serialization test while measured. Candidate production source was manually reverted after the mixed same-worker result; evidence-only docs remain."
 tooling_notes = [
   "The literal cargo bench --release form remains invalid on this Cargo toolchain; --profile release was used for the requested release-profile per-crate bench.",
-  "RCH selected local fallback for both runs because no admissible worker was available.",
+  "An initial clean-baseline run fell back local and was treated as non-comparable after the candidate acquired ovh-a.",
+  "Agent Mail file reservations failed because the mail SQLite database corruption circuit breaker is open.",
 ]
 
 [negative_measurement_svg_generated_id_owned_2026_06_27.metrics]
-"wide_stages_render_8x16_baseline_mean_ms" = 1.3141
-"wide_stages_render_8x16_candidate_mean_ms" = 1.3679
-"wide_stages_render_8x16_candidate_delta_pct" = 4.0941
-"wide_stages_render_12x24_baseline_mean_ms" = 2.5020
-"wide_stages_render_12x24_candidate_mean_ms" = 5.8822
-"wide_stages_render_12x24_candidate_delta_pct" = 135.0999
-"wide_stages_render_16x32_baseline_mean_ms" = 4.6356
-"wide_stages_render_16x32_candidate_mean_ms" = 20.031
-"wide_stages_render_16x32_candidate_delta_pct" = 332.1123
+"wide_stages_render_8x16_baseline_mean_ms" = 0.77240
+"wide_stages_render_8x16_candidate_mean_ms" = 0.78512
+"wide_stages_render_8x16_candidate_delta_pct" = 1.6468
+"wide_stages_render_12x24_baseline_mean_ms" = 1.7722
+"wide_stages_render_12x24_candidate_mean_ms" = 1.7588
+"wide_stages_render_12x24_candidate_delta_pct" = -0.7561
+"wide_stages_render_16x32_baseline_mean_ms" = 3.1487
+"wide_stages_render_16x32_candidate_mean_ms" = 3.1582
+"wide_stages_render_16x32_candidate_delta_pct" = 0.3017
 "wide_stages_render_8x16_mermaid_js_mean_ms" = 315.1399999976158
 "wide_stages_render_12x24_mermaid_js_mean_ms" = 981.7300000190735
 "wide_stages_render_16x32_mermaid_js_mean_ms" = 2879.185000014305
-"baseline_render_stage_8x16_frankenmermaid_over_mermaid_js" = 0.004170
-"baseline_render_stage_12x24_frankenmermaid_over_mermaid_js" = 0.002549
-"baseline_render_stage_16x32_frankenmermaid_over_mermaid_js" = 0.001610
-"baseline_render_stage_8x16_mermaid_js_over_frankenmermaid" = 239.81
-"baseline_render_stage_12x24_mermaid_js_over_frankenmermaid" = 392.38
-"baseline_render_stage_16x32_mermaid_js_over_frankenmermaid" = 621.10
-"candidate_render_stage_8x16_frankenmermaid_over_mermaid_js" = 0.004341
-"candidate_render_stage_12x24_frankenmermaid_over_mermaid_js" = 0.005992
-"candidate_render_stage_16x32_frankenmermaid_over_mermaid_js" = 0.006957
-"candidate_render_stage_8x16_mermaid_js_over_frankenmermaid" = 230.38
-"candidate_render_stage_12x24_mermaid_js_over_frankenmermaid" = 166.90
-"candidate_render_stage_16x32_mermaid_js_over_frankenmermaid" = 143.74
+"baseline_render_stage_8x16_frankenmermaid_over_mermaid_js" = 0.002451
+"baseline_render_stage_12x24_frankenmermaid_over_mermaid_js" = 0.001805
+"baseline_render_stage_16x32_frankenmermaid_over_mermaid_js" = 0.001094
+"baseline_render_stage_8x16_mermaid_js_over_frankenmermaid" = 408.00
+"baseline_render_stage_12x24_mermaid_js_over_frankenmermaid" = 553.96
+"baseline_render_stage_16x32_mermaid_js_over_frankenmermaid" = 914.40
+"candidate_render_stage_8x16_frankenmermaid_over_mermaid_js" = 0.002491
+"candidate_render_stage_12x24_frankenmermaid_over_mermaid_js" = 0.001792
+"candidate_render_stage_16x32_frankenmermaid_over_mermaid_js" = 0.001097
+"candidate_render_stage_8x16_mermaid_js_over_frankenmermaid" = 401.39
+"candidate_render_stage_12x24_mermaid_js_over_frankenmermaid" = 558.18
+"candidate_render_stage_16x32_mermaid_js_over_frankenmermaid" = 911.65
+
+[negative_measurement_svg_generated_id_owned_2026_06_27.validation]
+"cargo_test_frankenmermaid_cli_frankentui_conformance" = "passed via rch exec local fallback: 1 test"
 
 [negative_measurement_svg_generated_id_owned_2026_06_27.decision]
 status = "reject"
-rationale = "Generated SVG id ownership removed one allocation/copy in source but regressed wide_stages/render by 4.09%, 135.10%, and 332.11% on the same target dir; production code was manually reverted and only evidence remains."
+rationale = "Generated SVG id ownership removed one allocation/copy in source but the same-worker ovh-a wide_stages/render pair was mixed: 8x16 regressed 1.65%, 12x24 improved only 0.76%, and 16x32 regressed 0.30%. Production code was manually reverted and only evidence remains."
