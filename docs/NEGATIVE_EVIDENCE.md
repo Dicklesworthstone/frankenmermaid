@@ -3835,3 +3835,33 @@
   the win is real and ~2x the trim_ascii lever. Second parse win after the render frontier floored.
 
   Agent: GreyShrike
+
+### Flowchart edge-count capacity pre-scan — REJECTED, 1.58x-1.81x slower than ORIG parse/wide (2026-06-28)
+- **Lever tested:** replace `IrBuilder::with_capacity_hint`'s `input_lines / 3` edge reserve
+  heuristic with an input-derived flowchart edge hint. The attempted implementation counted likely
+  edge statements during the existing line-count pass using the existing comment stripper, statement
+  splitter, and quote/bracket-aware `find_operator` over `FLOW_OPERATORS`, then passed that count as
+  an optional edge reserve hint. Production code was restored after measurement; no source change
+  remains.
+- **Mapped primitive:** Alien Graveyard / Extreme Optimization hot-path allocation control:
+  avoid amortized `Vec` growth on an edge-heavy parser workload by preallocating from input shape.
+- **Why it failed:** the capacity saving is real in principle, but the quote/bracket-aware operator
+  scan is paid for every flowchart line before parsing. That duplicate scan dominates the avoided
+  edge-vector regrowth.
+- **Measured (per-crate `fm-parser`, `parse_bench`, filter `parse/wide`, same target dir,
+  `rch exec` local fallback because no worker was admissible):** ORIG current `main` (`b627b82`)
+  means were `284.22 us` / `627.96 us` / `1.2203 ms` for `8x16` / `12x24` / `16x32`. Candidate
+  means were `448.81 us` / `1.1334 ms` / `1.9636 ms`. Candidate/ORIG ratios:
+  **`1.58x` / `1.81x` / `1.61x` slower**; Criterion reported regressions of `+55.5%` /
+  `+77.8%` / `+60.9%` (all p=0.00).
+- **Original comparator:** current-main ORIG `b627b82` after the kept `trim_ascii` parser win.
+- **Conformance after revert:** `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b
+  cargo test --profile release -p frankenmermaid-cli --test frankentui_conformance_test` passed
+  (`1` test). Two `rch exec` conformance attempts produced no output and were interrupted; the
+  benchmark itself did run through `rch exec` and fell open locally.
+- **Verdict:** REJECTED and reverted. Do not retry a duplicate syntax-aware edge-count pre-scan on
+  the parse hot path. If this family is revisited, the count must be nearly free (for example,
+  maintained while the real parser is already splitting/lowering statements) and must prove it beats
+  the current line-count reserve before changing capacity.
+
+  Agent: BlackThrush
