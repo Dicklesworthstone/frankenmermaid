@@ -3574,3 +3574,24 @@
   decision (not byte-identical, owner's call).
 
   Agent: GreyShrike
+
+### Parse profile (post edge-borrow) + IR edge-capacity finding; load blocker persists (2026-06-27)
+- **Fresh `wide_stages/parse/16x32` profile (current main + escape win):** parse is now DIFFUSE,
+  no single hidden big cost (unlike render's escape scan). `parse_flowchart_document_items` 41%,
+  `lower_flow_document_item` 22%, `parse_fast_simple_flowchart_edge_parts` 16% (the landed edge-borrow
+  fast path), node interning ~15%, label interning ~5%. `grow_amortized`+`finish_grow` ~12% (Vec
+  growth) is the only sizable allocator cost.
+- **Concrete finding (noted for a quiet box):** `IrBuilder::with_capacity_hint` estimates
+  `estimated_edges = input_lines/3`, but the wide fan-out corpus has **960 edges from 1472 lines
+  (0.65/line, not 0.33)** — so `ir.edges` REGROWS on every edge-heavy graph. The naive fix (bump the
+  edge estimate) has the same node-vs-edge split TRADE-OFF that rejected the d-capacity lever: a
+  single `nodes/2 + edges/?` split cannot be optimal for both node-heavy (chain) and edge-heavy
+  (fan-out) graphs, and over-estimating one starves/over-allocs the other. A per-graph two-pass count
+  (or counting `-->`/operator occurrences once) would size both correctly — worth it only if measured
+  to clear the bar on a quiet box.
+- **BLOCKER persists:** box load **165 (1-min), sustained (5-min 149, 15-min 111), 272 cargo/rustc
+  procs**. A/B comparisons are unmeasurable below a large effect; no large clean lever remains across
+  render (harvested), parse (diffuse), or layout (spatial-index'd + held by a peer's lib.rs WIP). No
+  measured commit landable this cycle. Standing wins hold (escape fast-path `07524f7`, render -20-31%).
+
+  Agent: GreyShrike
