@@ -11085,8 +11085,13 @@ fn build_edge_paths_with_orientation(
     horizontal_ranks: bool,
     edge_routing: EdgeRouting,
 ) -> Vec<LayoutEdgePath> {
-    // Track parallel edges: count edges between same (source, target) pair.
-    let mut edge_pair_count: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+    // Track parallel edges: count edges between same (source, target) pair. The map is
+    // read by key only (never iterated for output order), so an `FxHashMap` is
+    // determinism-safe and turns the O(log n) keyed inserts/lookups — 2 per edge — into
+    // O(1); the common flowchart has no parallel edges, so `any_parallel` lets the hot
+    // per-edge path skip the lookup entirely.
+    let mut edge_pair_count: FxHashMap<(usize, usize), usize> = FxHashMap::default();
+    edge_pair_count.reserve(ir.edges.len());
     let mut edge_pair_index: Vec<usize> = Vec::with_capacity(ir.edges.len());
     for edge in &ir.edges {
         let source = endpoint_node_index(ir, edge.from).unwrap_or(usize::MAX);
@@ -11096,6 +11101,7 @@ fn build_edge_paths_with_orientation(
         edge_pair_index.push(*count);
         *count += 1;
     }
+    let any_parallel = edge_pair_count.values().any(|&count| count > 1);
 
     // Build the obstacle set (all node bounds) **once** and reuse it for every edge,
     // instead of rebuilding an all-nodes-except-endpoints `Vec` per edge (O(edges*nodes)).
@@ -11129,9 +11135,15 @@ fn build_edge_paths_with_orientation(
             let target_box = nodes.get(target)?;
 
             let is_self_loop = source == target;
-            let key = (source.min(target), source.max(target));
-            let pair_total = edge_pair_count.get(&key).copied().unwrap_or(1);
-            let pair_idx = edge_pair_index.get(edge_index).copied().unwrap_or(0);
+            let (pair_total, pair_idx) = if any_parallel {
+                let key = (source.min(target), source.max(target));
+                (
+                    edge_pair_count.get(&key).copied().unwrap_or(1),
+                    edge_pair_index.get(edge_index).copied().unwrap_or(0),
+                )
+            } else {
+                (1, 0)
+            };
             let parallel_offset = if pair_total > 1 {
                 let offset_step = 12.0_f32;
                 (pair_idx as f32 - (pair_total - 1) as f32 / 2.0) * offset_step
