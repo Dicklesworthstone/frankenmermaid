@@ -3751,3 +3751,35 @@
   escape (07524f7) wins stand.
 
   Agent: GreyShrike
+
+### Render frontier exhausted: fresh profile + pipeline standing (post session wins) (2026-06-28)
+- **Fresh symbol-resolved render profile (16x32, current main `21203f3`, rebuilt debug binary):** the
+  render frontier is at its FLOOR after this session's wins (streaming + escape `07524f7` + cubic
+  d-capacity `4cfe7ed` + edge direct-byte `41d3a1b`). Remaining cost is INHERENT, not structural:
+  - Edge `d`-string building ~20%: `smooth_edge_path` 9.7% + `build_smooth_path` 9.6% + `write_cubic`
+    6% — Catmull-Rom control points + formatting 6 coords/segment via the already-optimized
+    `write_fixed2`. Necessary work (must compute + format the path geometry).
+  - Output byte-writing ~30%: `append_elements` 15% + `memcpy` 13% + `String::push` 12% +
+    `write_escaped_attr` 5% (escape fast-path already collapses the no-special case). Inherent (the
+    SVG bytes must be written).
+  - Node serialization `write_into` 22%: this is mostly the BYTE-WRITING of the node attrs, which a
+    direct-byte fragment ALSO does — so only the small Element-structure overhead is skippable, which
+    is why the full-node direct-byte measured ~0 (21203f3). `memmove` 7% is diffuse small regrowths
+    (per-node class strings / describe_node), each sub-floor to fix individually.
+  - The accumulators (`edge_svg` edges*384, `node_svg` nodes*640) are already pre-sized (no regrowth);
+    the one residual inefficiency, the ~431KB accumulator->final-output copy, is ~1.8% behind a risky
+    incremental-serialization refactor — not worth it.
+- **No hidden hotspot remains** (the escape scan was the last one). Per-element direct-byte is the
+  exhausted technique: edges DONE, nodes do-not-pay (structure overhead is small post-streaming).
+- **Pipeline standing (16x32, current main, per-stage isolation):** parse `1.208 ms`, layout
+  `0.914 ms`, render `2.021 ms` (sum ~`4.14 ms`). vs Mermaid `11.12.0` full `2879.185 ms`: render
+  stage `1425x`, whole pipeline ~`695x`. NOTE the shift — this session's render wins dropped render
+  from ~57% to ~49% of the pipeline, so render (`2.02 ms`) now ~= parse+layout (`2.12 ms`); render is
+  still the biggest single stage but no longer dominant.
+- **Verdict (surface):** the wide-flowchart render path is optimized to its inherent floor. Next
+  highest-value work is OUTSIDE render: parse (`1.37 ms`, diffuse — interning/lowering, the IR
+  edge-capacity was sub-floor) or layout (`0.98 ms`, held by a peer's `fm-layout` WIP). A render
+  algorithm/output change (e.g. emitting only USED arrow markers, or caching the static CSS across
+  renders) would be a design decision, not a byte-identical lever.
+
+  Agent: GreyShrike
