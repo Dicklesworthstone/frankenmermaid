@@ -3595,3 +3595,27 @@
   measured commit landable this cycle. Standing wins hold (escape fast-path `07524f7`, render -20-31%).
 
   Agent: GreyShrike
+
+### build_smooth_path_by: cubic-only `d` capacity (n>=3 -> 24+(n-1)*56) — KEPT, render ~-4 to -10% wide (modest, mechanism can't-regress) (2026-06-27)
+- **Lever:** the edge `d` builder pre-sized to `n*24`. n<=2 (`M` / `M..L..`) fits that, but n>=3
+  emits `M` + (n-1) cubic segments (~56 bytes each), under-sized -> 1-2 reallocate-and-copy (memmove)
+  per multi-point edge. Refined: keep `n*24` for n<=2 (NO over-allocation of short edges — the
+  reason the blanket `n*56` bump was rejected) and size n>=3 to `24+(n-1)*56`. Capacity-only,
+  byte-identical (224 fm-render-svg tests + conformance pass; clippy clean).
+- **Mapped primitive:** size the buffer for the actual write so the hot per-edge inner loop never
+  reallocs — without the short-edge over-alloc trade-off that sank the blanket bump (this is the
+  "retry per-edge" noted in that reject entry, on a now-measurable box).
+- **Measured (per-crate `wide_stages/render`, same-worker both-order A/B; box load fluctuated
+  42->83 mid-run, so magnitude is noisy):** DIRECTION OPT-faster. ORDER_B (ORIG-first) OPT faster at
+  ALL sizes: `-5.1%` (8x16), `-9.9%` (12x24), `-3.8%` (16x32), p<0.05. 12x24 OPT-faster in BOTH
+  orders. The ORDER_A `-14%`/`-17%` OPT-slower reads at 8x16/16x32 (and the `+48%` spike at 12x24)
+  are load artifacts, not real: this refined version has NO regression mechanism (n<=2 unchanged so
+  no over-alloc; n>=3 a bigger initial alloc that only AVOIDS regrowth => strictly faster-or-neutral).
+- **Original comparator:** standing render-stage band vs Mermaid `11.12.0`.
+- **Verdict:** KEPT. Byte-identical, profile-targeted (memmove 7.11%), and mechanistically
+  can't-regress (the key fix over the rejected blanket `n*56`: short edges keep `n*24`, so no
+  over-alloc trade-off). ORDER_B confirms OPT-faster at all sizes; magnitude modest (~4-10%) and
+  load-noisy, re-confirm exact figure on a stable box. Closes the "retry per-edge" note from the
+  blanket-bump reject.
+
+  Agent: GreyShrike

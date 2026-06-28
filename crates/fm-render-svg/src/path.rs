@@ -304,7 +304,12 @@ where
     if n == 0 {
         return String::new();
     }
-    let mut d = String::with_capacity(n * 24);
+    // Right-size the `d` buffer. n<=2 is `M` (or `M ... L ...`), ~24-48 bytes — keep the tight
+    // `n*24` so short edges never over-allocate. n>=3 emits an `M` plus (n-1) cubic segments
+    // (`C cp1x cp1y,cp2x cp2y,x y`, six `write_fixed2` coords ~8 chars + separators ≈ 56 bytes each),
+    // which the old `n*24` under-sized — forcing 1-2 reallocate-and-copy (memmove) per multi-point
+    // edge. Size the cubic case for one allocation. Capacity-only, output byte-identical.
+    let mut d = String::with_capacity(if n < 3 { n * 24 } else { 24 + (n - 1) * 56 });
     let first = point_at(0);
     write_point(&mut d, 'M', first.0, first.1);
     if n == 1 {
