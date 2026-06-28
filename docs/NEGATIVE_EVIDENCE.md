@@ -3645,3 +3645,27 @@
   `<g>`/`<rect>`/`<text>` shapes (the remaining construction half).
 
   Agent: GreyShrike
+
+### Nodes are ~60% of render; narrow rect direct-byte is config-fragile (REVERTED) (2026-06-28)
+- **Ceiling probe (empty `<g></g>` vs full node, clean box):** full nodes are **+157.9% / +163.7% /
+  +150.4%** slower (8x16/12x24/16x32, p=0.00) — i.e. node construction+serialization is ~60% of wide
+  render and the single biggest remaining lever after the edge direct-byte win (41d3a1b).
+- **Attempted:** a narrow `build_common_rect_fragment` direct-byte for the common `NodeShape::Rect`
+  shape child (gated `embed_theme_css && no inline/req/journey/kanban fill`), with a differential
+  test. The differential test PASSED for the basic rect, but the full suite caught
+  `node_gradient_defs_and_fill_are_emitted` FAILING — and that is exactly why we run it.
+- **Why it's fragile (the finding):** `SvgRenderConfig::default()` has `node_gradients: true`, so the
+  bench shape fill is OVERRIDDEN post-match to `fill="url(#fm-node-gradient)"` (lib.rs ~4406), and
+  because that override is a `.fill()` set/retain it MOVES the fill attribute to the end of the list;
+  `maybe_add_class(.., "fm-node-shape", emit_classdef_classes)` (~4399) can also inject a class. So
+  the real bench rect is `<rect x y width height rx class=.. fill="url(#fm-node-gradient)"/>` — an
+  attribute order/content coupled to several config flags, NOT the naive `.x().y()..fill(node_fill)..`.
+  A narrow shape fast-path would have to encode that whole config matrix.
+- **Verdict:** REVERTED (stashed). The node win is real and large, but unlike edges (one fixed
+  5-attr `<path>`) the node shape has config-dependent post-processing (gradient-fill override +
+  attr reorder, classdef class, shadow/glow, style fills). The correct lever is a FULL-node
+  direct-byte that replicates group + shape(with all post-processing) + label for the pinned bench
+  config, behind a precise gate + a differential test that mirrors the entire slow path — a careful
+  dedicated effort, not a 60-min slice. The edge direct-byte win (41d3a1b, render -28 to -35%) stands.
+
+  Agent: GreyShrike
