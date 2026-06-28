@@ -2911,6 +2911,38 @@
 
   Agent: GreyShrike
 
+### Render: gated raw rect-node writer — REVERTED, mixed/noisy and small-size slower (2026-06-27)
+- **Lever tested:** replace the generic `SvgElement` construction for the conservative hot case
+  (plain `NodeShape::Rect`, no classes, no icons, no source spans, no inline styles, no markdown
+  labels, default theme embedding) with a hand-written raw SVG serializer. After the first run
+  regressed smaller diagrams, the fast path was gated to `layout.nodes.len() >= 512` so only the
+  16x32 wide case took it.
+- **Mapped primitive:** alien-graveyard region/allocation split plus extreme-software-optimization
+  fixed-shape serialization: avoid building short-lived element trees on the render hot path when
+  the SVG shape is known. A focused byte-identity unit test passed before the lever was reverted.
+- **Measured ORIG/current main:** `93152f1` on `wide_stages/render` via per-crate
+  `frankenmermaid-cli` bench. Remote `hz2` ORIG medians were `8x16 717.32 us`, `12x24 1.6095 ms`,
+  `16x32 3.5206 ms`; the later candidate route fell back locally, so these were routing evidence
+  only, not keep/reject proof.
+- **Measured same-route local fail-open A/B (`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a`,
+  per-crate `cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render`):**
+  ORIG/current main `8x16 922.79 us`, `12x24 1.9729 ms`, `16x32 5.7765 ms`; gated candidate
+  `8x16 1.0237 ms`, `12x24 1.8613 ms`, `16x32 3.0707 ms`.
+  **Ratio vs ORIG:** `8x16 1.109x` (10.9% slower), `12x24 0.943x`, `16x32 0.532x`.
+- **Mermaid comparator:** standing Mermaid `11.12.0` wide render denominators
+  `315.14 ms`, `981.73 ms`, `2879.185 ms`; the rejected candidate would still be
+  `0.003248x`, `0.001896x`, `0.001067x` of Mermaid.js respectively, but relative-to-ORIG
+  robustness is the keep bar.
+- **Why rejected:** the smaller 8x16 case slowed down even with the fast path disabled by the
+  512-node gate, and the local fail-open route showed order/noise instability large enough that the
+  dramatic 16x32 number is not credible as a standalone keep. The ungated first attempt also
+  regressed `8x16`/`12x24` (`1.1367 ms`, `2.0615 ms`, `3.1436 ms` medians). The handwritten
+  serializer is a broad maintenance surface, so it needs quieter both-order proof before landing.
+- **Verdict:** REVERTED before commit; docs-only evidence kept. Do not retry this raw rect-node
+  splice without same-worker both-order proof that keeps small diagrams neutral.
+
+  Agent: TanSparrow
+
 ### Attributes SmallVec inline storage — REVERTED (2026-06-27)
 - **Lever tested:** `fm-render-svg::Attributes` briefly replaced
   `Vec<Attribute>`/`Vec::with_capacity(12)` with `smallvec::SmallVec`, first with
