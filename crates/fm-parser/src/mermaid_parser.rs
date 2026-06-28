@@ -1264,9 +1264,14 @@ fn parse_fast_simple_flowchart_edge_parts(statement: &str) -> Option<(&str, Arro
     if !is_fast_flow_identifier(left) || !is_fast_flow_identifier(right) {
         return None;
     }
-    if FAST_OPERATORS
-        .iter()
-        .any(|(next_operator, _)| right.contains(next_operator))
+    // Reject a chained right side (e.g. `a-->b-->c`, where `right` holds a second operator).
+    // Guard the six `contains` substring searches behind a single byte scan: every fast operator
+    // starts with `-` or `=`, so if `right` has neither byte none can match. Byte-identical; saves
+    // 6 substring-search calls per edge for the common single-operator edge.
+    if right.bytes().any(|byte| matches!(byte, b'-' | b'='))
+        && FAST_OPERATORS
+            .iter()
+            .any(|(next_operator, _)| right.contains(next_operator))
     {
         return None;
     }
