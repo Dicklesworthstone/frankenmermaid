@@ -1202,7 +1202,10 @@ fn parse_fast_simple_flowchart_edge_ast(statement: &str) -> Option<FlowAst> {
 }
 
 fn parse_fast_simple_flowchart_edge_parts(statement: &str) -> Option<(&str, ArrowType, &str)> {
-    let trimmed = statement.trim();
+    // ASCII byte-level trim (auto-vectorizable) instead of the Unicode `char::is_whitespace` scan.
+    // Byte-identical here: any non-ASCII left after the trim is rejected by `is_fast_flow_identifier`
+    // below, falling back to the slow path which uses the Unicode `.trim()`.
+    let trimmed = statement.trim_ascii();
     if trimmed.is_empty()
         || trimmed.bytes().any(|byte| {
             matches!(
@@ -1248,8 +1251,8 @@ fn parse_fast_simple_flowchart_edge_parts(statement: &str) -> Option<(&str, Arro
     }
 
     let (operator_index, operator, arrow) = matched?;
-    let left = trimmed.get(..operator_index)?.trim();
-    let right = trimmed.get(operator_index + operator.len()..)?.trim();
+    let left = trimmed.get(..operator_index)?.trim_ascii();
+    let right = trimmed.get(operator_index + operator.len()..)?.trim_ascii();
     if !is_fast_flow_identifier(left) || !is_fast_flow_identifier(right) {
         return None;
     }
@@ -1264,7 +1267,9 @@ fn parse_fast_simple_flowchart_edge_parts(statement: &str) -> Option<(&str, Arro
 }
 
 fn parse_fast_simple_flowchart_node_ast(statement: &str) -> Option<FlowAstNode> {
-    let trimmed = statement.trim();
+    // ASCII byte-level trim; any non-ASCII survivor is rejected by `is_fast_flow_identifier` /
+    // the byte checks below, so this stays byte-identical to the Unicode `.trim()` slow path.
+    let trimmed = statement.trim_ascii();
     if trimmed.is_empty()
         || trimmed.bytes().any(|byte| {
             matches!(
@@ -1281,7 +1286,7 @@ fn parse_fast_simple_flowchart_node_ast(statement: &str) -> Option<FlowAstNode> 
             return None;
         }
         let (id, label_tail) = trimmed.split_once('[')?;
-        let id = id.trim();
+        let id = id.trim_ascii();
         let label_raw = label_tail.strip_suffix(']')?.trim();
         if !is_fast_flow_identifier(id) || label_raw.contains(['[', ']']) {
             return None;

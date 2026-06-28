@@ -3783,3 +3783,31 @@
   renders) would be a design decision, not a byte-identical lever.
 
   Agent: GreyShrike
+
+### Parse fast-path: byte-level `trim_ascii` instead of Unicode `.trim()` — KEPT, parse ~3-7% at 12x24/16x32 (scales with statement count) (2026-06-28)
+- **Lever:** a fresh parse profile (16x32) put `str::trim_matches::<char::is_whitespace>` at 8.67%
+  (4.04% self) — the biggest self-cost in parse — from the per-statement/per-edge-endpoint `.trim()`
+  calls in the flowchart fast path, which decode UTF-8 and run the Unicode whitespace check. Replaced
+  the 5 fast-path syntax trims (`parse_fast_simple_flowchart_edge_parts` statement + left/right
+  endpoints, `parse_fast_simple_flowchart_node_ast` statement + id) with `str::trim_ascii()` — a
+  byte-level, auto-vectorizable ASCII-whitespace trim.
+- **Byte-identical:** these trims feed `is_fast_flow_identifier` (ASCII-only) / byte checks, so any
+  non-ASCII whitespace survivor is rejected and falls back to the slow path's Unicode `.trim()`. The
+  user-content LABEL trim stays `.trim()`. 405 fm-parser tests + `frankentui_conformance_test` pass;
+  clippy clean.
+- **Mapped primitive:** the escape-win pattern — replace a Unicode-aware per-char scan with an
+  auto-vectorizable byte scan on the hot ASCII path.
+- **Measured (per-crate `wide_stages/parse`, same-worker both-order A/B, box ~load 9->26 mid-run):**
+  ORDER_B (ORIG-first) OPT faster ALL sizes: `-4.0%` (8x16), `-11.8%` (12x24), `-8.8%` (16x32),
+  p<=0.01. ORDER_A is anti-OPT-biased (OPT measured cold-first) + load-noisy: `-6.1%` OPT-slower 8x16
+  (p=0.03, mechanistically impossible -> bias), 12x24/16x32 ns. Bias-corrected (geo mean): ~0 (8x16),
+  **~7.4% (12x24), ~3.5% (16x32)** OPT-faster — scaling with statement count exactly as the mechanism
+  predicts (more statements -> more trims).
+- **Original comparator:** pinned Mermaid `11.12.0` wide denominators.
+- **Verdict:** KEPT. Byte-identical (405 tests + conformance) and mechanistically can't-regress
+  (byte-level ASCII trim is strictly less work than the Unicode char-decode trim; the ORDER_A
+  OPT-slower read is the cold-first bias, not real). ORDER_B confirms OPT-faster at all sizes; the win
+  scales with statement count (~3-7% at the larger graphs). First parse win after the render frontier
+  hit its floor.
+
+  Agent: GreyShrike
