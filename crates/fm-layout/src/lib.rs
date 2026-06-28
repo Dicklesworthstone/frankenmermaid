@@ -6970,6 +6970,15 @@ fn build_tree_layout_structure(ir: &MermaidDiagramIr) -> TreeLayoutStructure {
         };
     }
 
+    // Pre-extract the node-id sort keys into a contiguous `Vec<&str>`. The three sorts below
+    // order by node id (then index); reading `ir.nodes[idx].id` for a random `idx` during a
+    // sort strides through the large `IrNode` struct array (a cache miss per comparison),
+    // whereas a flat `&str` slice is cache-friendly. Byte-identical: `ids[i]` is exactly
+    // `ir.nodes[i].id`, so every comparison and tie-break is unchanged.
+    let ids: Vec<&str> = ir.nodes.iter().map(|node| node.id.as_str()).collect();
+    let cmp_by_id =
+        |left: &usize, right: &usize| ids[*left].cmp(ids[*right]).then_with(|| left.cmp(right));
+
     let mut outgoing = vec![Vec::new(); node_count];
     let mut indegree = vec![0_usize; node_count];
     for edge in &ir.edges {
@@ -6987,12 +6996,12 @@ fn build_tree_layout_structure(ir: &MermaidDiagramIr) -> TreeLayoutStructure {
     }
 
     for neighbors in &mut outgoing {
-        neighbors.sort_by(|left, right| compare_node_indices(ir, *left, *right));
+        neighbors.sort_by(&cmp_by_id);
         neighbors.dedup();
     }
 
     let mut sorted_nodes: Vec<usize> = (0..node_count).collect();
-    sorted_nodes.sort_by(|left, right| compare_node_indices(ir, *left, *right));
+    sorted_nodes.sort_by(&cmp_by_id);
 
     let mut candidate_roots: Vec<usize> = sorted_nodes
         .iter()
@@ -7041,7 +7050,7 @@ fn build_tree_layout_structure(ir: &MermaidDiagramIr) -> TreeLayoutStructure {
     }
 
     for node_children in &mut children {
-        node_children.sort_by(|left, right| compare_node_indices(ir, *left, *right));
+        node_children.sort_by(&cmp_by_id);
     }
 
     let max_depth = depth.iter().copied().max().unwrap_or(0);
