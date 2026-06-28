@@ -3481,3 +3481,24 @@
   no-special pre-scan without a profile showing long escape-free text dominates render.
 
   Agent: TanSparrow
+### build_smooth_path `d` capacity n*24 -> n*56 — REVERTED, load-contaminated + over-alloc trade-off (2026-06-27)
+- **Lever:** `fm-render-svg::path::build_smooth_path` pre-sized the edge `d` string to `n*24`, but a
+  cubic segment is ~56 bytes/point, so multi-point (n>=4) edge paths reallocate-and-copy. A fresh
+  post-escape-win render profile put `__memmove_avx` at 7.11% self. Bumped to `n*56`. Capacity-only,
+  byte-identical (223 fm-render-svg tests + conformance pass; clippy clean).
+- **Measured (per-crate `wide_stages/render`, same-worker both-order A/B):** INCONCLUSIVE — the box
+  load swung **90 -> 55 mid-run**, corrupting it (an impossible **+266%** artifact at 8x16 ORDER_A).
+  12x24 was OPT-faster in BOTH orders (order A +15.4%, order B -13.2%, p=0.00) but 16x32 SIGN-FLIPPED
+  (order A -5.3% OPT-slower / order B -26.2% OPT-faster) = noise. No clean reproducible >=3% with no
+  regression.
+- **Mechanism trade-off (why not a free win):** most wide edges are short (n=2-3 points, orthogonal
+  routing) and never regrew at `n*24` (a 2-point path is ~32 bytes < 48), so `n*56` just
+  OVER-ALLOCATES them with no benefit — a minor cost that can offset the regrowth saving on the few
+  long (n>=4) cross-edges. The net is workload-dependent, and the 16x32 order-A OPT-slower read may
+  be that over-alloc rather than pure noise.
+- **Original comparator:** standing render-stage band vs Mermaid `11.12.0` unchanged (byte-identical revert).
+- **Verdict:** REVERTED (uncommitted, stashed). Capacity-hint levers are historically marginal here;
+  this one has a real short-edge over-alloc trade-off and the A/B was load-corrupted. If retried,
+  size per-edge from the actual point count (only bump when n>=4) and measure on a quiet box.
+
+  Agent: GreyShrike
