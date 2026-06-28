@@ -3723,3 +3723,31 @@
   per-element frontier: edges DONE (41d3a1b, -28 to -35%); nodes = refactor. Edge + escape wins stand.
 
   Agent: GreyShrike
+
+### Full-node direct-byte: byte-identical but ~0 (sub-noise) — REVERTED; corrects the edge-win model (2026-06-28)
+- **Built the complete lever** the prior 3 cycles pointed to: an early-return in `render_node` that
+  assembles the entire common rect node (`<g>`+gradient `<rect>`+centered `<text>`+`<title>`) into
+  one raw fragment via `build_common_node_fragment` + `Element::raw_svg`, behind an ~18-clause gate
+  mapping 1:1 to every conditional class/child/post-processing branch. **Byte-identical and correct:**
+  new `node_fast_fragment_matches_render` pins the exact bytes; full 226-test suite +
+  `frankentui_conformance_test` (covering the gated-out node variants) pass; clippy clean. Skips FOUR
+  `Element` builds + their Attributes Vecs + write_into walks per node, with no label measurement
+  (text-anchor=middle => text_x=cx, text_y=cy+font/3).
+- **Measured (two full both-order A/Bs, clean box ~load 12-14):** ~0, sub-noise, sign-flipping.
+  Run-1 ORDER_A +6-10% OPT-faster but ORDER_B +15-25% OPT-slower; Run-2 ORDER_A -3 to -5% OPT-slower,
+  ORDER_B mixed. OPT 16x32 absolute swung 2.106-2.373 ms across runs; ORIG 1.68-2.39 ms — fully
+  overlapping. No consistent direction at any size => effect is below the box's ~±10% noise floor.
+- **Why ~0 (the model correction):** the node win was expected to mirror the edge direct-byte win
+  (41d3a1b, -28 to -35%). It does NOT, because **the edge win's real source was skipping the long
+  `d`-string COPY** — `.d(&path_str)` copies ~150 bytes/edge into the Element across 960 edges; the
+  direct-byte writes `path_str` straight through. Nodes have only SHORT attrs (id/accent/label ~10-20
+  chars), so there is no large copy to avoid, and the streaming build->serialize->drop loop already
+  recycles the per-node Element allocations. What remains — Attributes Vec management + per-attr
+  write_into dispatch — is real but tiny per node, well under the noise floor. The earlier rect-slice
+  ~0 (5d45c69) was the same signal; this confirms it for the whole node.
+- **Verdict:** REVERTED (stashed). Correct + byte-identical but not a measurable win. **Node
+  direct-byte is CLOSED — it does not pay off; the per-element render win was edge-specific (the long
+  `d` string).** Render per-element frontier exhausted: edges DONE, nodes do-not-pay. Edge (41d3a1b) +
+  escape (07524f7) wins stand.
+
+  Agent: GreyShrike
