@@ -3546,3 +3546,31 @@
   `SvgDocument`/CSS do-not-retry seams.
 
   Agent: TanSparrow
+### Render frontier status + measurement blocker (post escape-win) (2026-06-27)
+- **Fresh wide_stages/16x32 breakdown (current main `adf47e1`+escape win `07524f7`):** render
+  `3.23 ms` (57%), parse `1.37 ms` (24%), layout `0.98 ms` (17%). Render is still the biggest gap
+  vs ORIG; absolutes are sane even under load (criterion's per-iteration wall-clock holds), but A/B
+  *comparisons* are not (see blocker).
+- **Render incremental frontier is HARVESTED for big byte-identical levers.** Symbol-resolved
+  profile (rebuilt debug binary) after the escape win: the 17% Element-tree drop is gone (streaming),
+  `write_escaped_attr` is no longer hot (the -20-31% auto-vectorized fast-path). What remains is
+  diffuse: per-element construction whose allocs are allocator-RECYCLED by the streaming
+  build→serialize→drop loop (so eliminating them is ~0, cf. the line_items/pts-Vec rejects) +
+  inherent output byte-writing (`append_elements`/`memcpy`/`push_str`, ~30%) + coordinate formatting
+  (`write_fixed2`, inherent). The `d`-capacity tweak was rejected (over-alloc trade-off); the
+  `write_escaped_text` variant was rejected by a peer (sub-floor).
+- **The one remaining >=3% render lever is multi-turn + contended:** a direct-byte construction
+  refactor that skips the `Element`/`Attributes` build entirely and writes node/edge SVG bytes
+  inline (the ceiling probe put per-element Element/Attributes overhead at ~45-52% of render;
+  streaming captured the retention half, this would capture the construction half). It is
+  byte-identity-critical (needs a differential test + conformance) and overlaps the peer
+  edge-streaming work (a4f6cff) — a dedicated multi-cycle effort, not a 60-min lever, and it needs a
+  quiet box to measure.
+- **MEASUREMENT BLOCKER:** box load is **169 (1-min), rising (85→121→169 over 15 min)** — the whole
+  swarm plus extra load. At this load an A/B's two runs see different CPU slices, so any sub-~15%
+  lever is unmeasurable; only a large effect survives. No clean/safe large lever remains, so no
+  measured commit is landable this cycle. Recommended: pursue the direct-byte construction refactor
+  on a quiet/dedicated worker, or reduce output bytes (the `data-fm-*` emit-only attrs) as a design
+  decision (not byte-identical, owner's call).
+
+  Agent: GreyShrike
