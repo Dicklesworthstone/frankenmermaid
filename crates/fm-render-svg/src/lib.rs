@@ -5884,6 +5884,35 @@ struct EdgeRenderContext<'a> {
     accessible_node_labels: Option<&'a [&'a str]>,
 }
 
+/// Serialize a common solid-arrow edge `<path>` directly into raw SVG bytes, **byte-identical** to
+/// the `Element` the slow path builds — every attribute value goes through the same serializers
+/// (`write_escaped_attr` / `AttributeValue::write_value`), so only the attribute names, order, and
+/// `<path .../>` structure are replicated here (asserted by `edge_fast_fragment_matches_element`).
+/// This skips the per-edge `Attributes` Vec build and the per-attribute `write_into` dispatch, which
+/// a ceiling probe shows is ~40% of wide render even after the keep-Element streaming.
+fn build_common_edge_fragment(
+    path_str: &str,
+    stroke_width: f32,
+    style_class: &str,
+    edge_index: i32,
+    marker_end: &str,
+) -> String {
+    use crate::attributes::{AttributeValue, write_escaped_attr};
+    let mut f = String::with_capacity(path_str.len() + 96);
+    f.push_str("<path d=\"");
+    let _ = write_escaped_attr(&mut f, path_str);
+    f.push_str("\" stroke-width=\"");
+    let _ = AttributeValue::Number(stroke_width).write_value(&mut f);
+    f.push_str("\" class=\"fm-edge ");
+    f.push_str(style_class);
+    f.push_str("\" data-fm-edge-id=\"");
+    let _ = AttributeValue::Integer(edge_index).write_value(&mut f);
+    f.push_str("\" marker-end=\"");
+    let _ = write_escaped_attr(&mut f, marker_end);
+    f.push_str("\"/>");
+    f
+}
+
 fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> Element {
     use fm_core::ArrowType;
 
@@ -6058,6 +6087,33 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
     // (e.g. the PNG raster path, which resvg cannot fully style via CSS) so those exports stay
     // self-contained. `stroke-width` is NOT gated — the unconditional CSS sets none, so the inline
     // is the actual width.
+    //
+    // Fast path: the overwhelmingly common edge (solid `Arrow`, themed CSS, no back-edge, no
+    // animation, no source spans, no inline `linkStyle`, no rendered label) serializes to a fixed
+    // five-attribute `<path>`. Stream those bytes directly via `Element::raw_svg`, skipping the
+    // per-edge `Attributes` Vec build + per-attribute `write_into` dispatch (a ceiling probe shows
+    // that overhead is ~40% of wide render). For `ArrowType::Arrow` (not a back-edge) the marker/
+    // dasharray/colour/class/width above are all fixed. Output is byte-identical (see the helper).
+    if arrow == ArrowType::Arrow
+        && !is_back_edge
+        && config.embed_theme_css
+        && !config.animations_enabled
+        && !config.include_source_spans
+        && marker_start.is_none()
+        && base_dasharray.is_none()
+        && resolve_edge_inline_style(ir, edge_index).is_none()
+        && !(detail.show_edge_labels && ir_edge.and_then(|e| e.label).is_some())
+        && let Some(marker_end_val) = marker_end
+    {
+        return Element::raw_svg(build_common_edge_fragment(
+            &path_str,
+            stroke_width,
+            style_class,
+            edge_index as i32,
+            marker_end_val,
+        ));
+    }
+
     let mut elem = Element::path().d(&path_str);
     if !config.embed_theme_css {
         elem = elem.fill("none").stroke(base_color);
@@ -6297,6 +6353,35 @@ fn endpoint_accessible_label<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The streamed common-edge fragment must be byte-identical to the `Element` the slow path
+    /// builds. Pins `build_common_edge_fragment` against the canonical `Element` constructors.
+    #[test]
+    fn edge_fast_fragment_matches_element() {
+        let cases: &[(&str, i32)] = &[
+            ("M0 0 L10 10", 0),
+            ("M1.50 2.25 C3.00 4.00 5.00 6.00 7.00 8.00", 42),
+            ("M-5.25 0 L0 -3.50", 1000),
+            ("", 7),
+        ];
+        for &(d, idx) in cases {
+            let elem = Element::path()
+                .d(d)
+                .stroke_width(1.8)
+                .class("fm-edge")
+                .class("fm-edge-solid")
+                .attr_int("data-fm-edge-id", idx)
+                .marker_end("url(#arrow-end)");
+            let mut expected = String::new();
+            elem.write_to_string(&mut expected);
+            let frag = build_common_edge_fragment(d, 1.8, "fm-edge-solid", idx, "url(#arrow-end)");
+            assert_eq!(
+                frag, expected,
+                "streamed edge fragment must equal the Element serialization (d={d:?})"
+            );
+        }
+    }
+
     use fm_core::{
         ArrowType, DiagramType, IrC4NodeMeta, IrCluster, IrClusterId, IrEdge, IrEndpoint,
         IrGraphCluster, IrGraphNode, IrLabel, IrLabelId, IrLabelSegment, IrLifecycleEvent, IrNode,

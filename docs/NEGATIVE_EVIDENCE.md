@@ -3612,3 +3612,36 @@
   blanket-bump reject.
 
   Agent: GreyShrike
+
+### Stream common edges as direct-byte fragments (skip Element/Attributes) — KEPT, render -28 to -35% wide (huge) (2026-06-28)
+- **Lever:** a4f6cff's edge streaming builds each edge `Element` (Attributes Vec + per-attribute
+  `write_into` dispatch), serializes it, and drops it — capturing the RETENTION cost but not the
+  construction cost. A ceiling probe (bare `<path d=...>` vs full) measured the per-edge attribute
+  overhead at **+55.7% / +57.8% / +67.9%** (8x16/12x24/16x32, p=0.00, clean box) = ~40% of render.
+  This lever serializes the common edge (solid `Arrow`, themed CSS, no back-edge/animation/spans/
+  inline-style/label) directly into raw `<path>` bytes via `build_common_edge_fragment` +
+  `Element::raw_svg`, skipping the Attributes Vec build and the `write_into` dispatch. Non-common
+  edges fall through to the unchanged `Element` path.
+- **Byte-identical:** every attribute VALUE goes through the same serializers the slow path uses
+  (`write_escaped_attr` / `AttributeValue::write_value`); only attribute names/order/`<path .../>`
+  structure are replicated. New differential test `edge_fast_fragment_matches_element` pins the
+  fragment bytes against the canonical `Element` serialization; 225 fm-render-svg tests +
+  `frankentui_conformance_test` pass; clippy clean.
+- **Mapped primitive:** extreme-software-optimization "stream the hot fixed-shape object as bytes
+  instead of building+walking an Element tree per element." Edges are ~2/3 of wide-render elements.
+- **Measured (per-crate `wide_stages/render`, same-worker both-order A/B, clean box ~load 14-36):**
+  DECISIVE, both orders agree, all p=0.00. ORDER_A (OPT-first) OPT faster +43.0% / +45.3% / +39.9%;
+  ORDER_B (ORIG-first) OPT faster -28.0% / -30.5% / -34.6% (8x16/12x24/16x32). Bias-corrected ~30-40%
+  faster. Absolute OPT render: `8x16` `516 us`, `12x24` `1.110 ms`, `16x32` `2.425 ms`
+  (ORIG ~`740 us` / `1.61 ms` / `3.40 ms`).
+- **Original comparator:** pinned Mermaid `11.12.0` wide denominators `315.14`/`981.73`/`2879.185 ms`.
+- **frankenmermaid/Mermaid ratio:** render-stage candidate `516 us` / `1.110 ms` / `2.425 ms` give
+  `0.001637x` / `0.001131x` / `0.000842x` — Mermaid.js is **611x / 885x / 1187x** slower (16x32 over
+  1000x on the render stage for the first time).
+- **Verdict:** KEPT — the biggest render lever this session alongside the escape fast-path,
+  byte-identical (differential test + conformance), both A/B orders p=0.00. The keep-Element
+  streaming (a4f6cff) captured edge RETENTION; this captures edge CONSTRUCTION (the Attributes Vec
+  build + per-attribute `write_into` dispatch). Next: the same direct-byte fragment for common node
+  `<g>`/`<rect>`/`<text>` shapes (the remaining construction half).
+
+  Agent: GreyShrike
