@@ -3811,3 +3811,27 @@
   hit its floor.
 
   Agent: GreyShrike
+
+### Parse fast-path: single byte scan for the edge operator vs 6 `str::find` passes — KEPT, parse ~8-12% (16x32 both orders faster) (2026-06-28)
+- **Lever:** `parse_fast_simple_flowchart_edge_parts` searched for the edge operator with SIX
+  `trimmed.find(operator)` substring searches (one per `FAST_OPERATORS` entry) — for the common edge
+  that is 1 hit + 5 full-statement-scan misses. The fresh parse profile put `<str>::find::<&str>` at
+  7.66%. Replaced with a single byte scan: walk the bytes once, and at the first `-`/`=` test the 6
+  operators via `starts_with`, taking the leftmost that matches.
+- **Byte-identical:** every fast operator starts with `-` or `=`, and none is a prefix of another, so
+  at most one matches at any position — the leftmost operator necessarily starts at the leftmost
+  operator-starting `-`/`=`, reproducing the old leftmost-index / longest-tie-break exactly. 405
+  fm-parser tests + `frankentui_conformance_test` (identical ASTs across the corpus) pass; clippy clean.
+- **Mapped primitive:** replace N full passes with one position-indexed pass — check the expensive
+  predicate only at candidate anchors (`-`/`=`) instead of scanning the whole string N times.
+- **Measured (per-crate `wide_stages/parse`, same-worker both-order A/B; box ~load 49-71, noisy):**
+  16x32 DIRECTION-CONSISTENT both orders OPT-faster: ORDER_A `+13.4%`, ORDER_B `-5.9%` (both p=0.00) =>
+  bias-corrected ~9%. 8x16 ORDER_A `+12.6%` (p=0.00); 12x24 ORDER_B `-8.7%` (p=0.00). The 12x24
+  ORDER_A `+107%` and 8x16 ORDER_B `+58%` are load-71 artifacts (huge ranges). Net ~8-12% OPT-faster,
+  on top of the trim_ascii win (b627b82).
+- **Original comparator:** pinned Mermaid `11.12.0` wide denominators.
+- **Verdict:** KEPT. Byte-identical (405 tests + conformance) and mechanistically can't-regress
+  (one byte scan replaces six full substring searches). 16x32 is direction-consistent both orders;
+  the win is real and ~2x the trim_ascii lever. Second parse win after the render frontier floored.
+
+  Agent: GreyShrike

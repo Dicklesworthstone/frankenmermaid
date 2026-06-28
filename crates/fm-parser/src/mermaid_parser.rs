@@ -1237,16 +1237,24 @@ fn parse_fast_simple_flowchart_edge_parts(statement: &str) -> Option<(&str, Arro
         ("--x", ArrowType::Cross),
     ];
 
+    // Single byte scan for the leftmost `-`/`=` that starts a fast operator, instead of six full
+    // `str::find` substring searches (1 hit + 5 full-scan misses per edge). Byte-identical: every
+    // fast operator starts with `-` or `=`, and no two are prefixes of one another, so at most one
+    // matches at any position — the leftmost operator necessarily starts at the leftmost
+    // operator-starting `-`/`=` (same result as the old leftmost-index / longest tie-break).
+    let bytes = trimmed.as_bytes();
     let mut matched: Option<(usize, &str, ArrowType)> = None;
-    for (operator, arrow) in FAST_OPERATORS {
-        let Some(index) = trimmed.find(operator) else {
-            continue;
-        };
-        match matched {
-            Some((best_index, best_operator, _))
-                if index > best_index
-                    || (index == best_index && operator.len() <= best_operator.len()) => {}
-            _ => matched = Some((index, operator, arrow)),
+    for i in 0..bytes.len() {
+        if matches!(bytes[i], b'-' | b'=') {
+            for (operator, arrow) in FAST_OPERATORS {
+                if bytes[i..].starts_with(operator.as_bytes()) {
+                    matched = Some((i, operator, arrow));
+                    break;
+                }
+            }
+            if matched.is_some() {
+                break;
+            }
         }
     }
 
