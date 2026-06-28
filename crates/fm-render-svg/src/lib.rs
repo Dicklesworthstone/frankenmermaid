@@ -3019,12 +3019,7 @@ fn render_gantt_svg(
     // Dependency arrows.
     for edge_path in &layout.edges {
         if edge_path.points.len() >= 2 {
-            let pts: Vec<(f32, f32)> = edge_path
-                .points
-                .iter()
-                .map(|p| (p.x + offset_x, p.y + offset_y))
-                .collect();
-            let path_d = smooth_edge_path(&pts, edge_path.is_self_loop);
+            let path_d = smooth_layout_edge_path(edge_path, offset_x, offset_y);
             doc = doc.child(
                 Element::path()
                     .d(&path_d)
@@ -5871,17 +5866,11 @@ const fn node_shape_css_class(shape: fm_core::NodeShape) -> &'static str {
     }
 }
 
-/// Build a smooth SVG path `d` attribute from a series of points using
-/// Catmull-Rom to cubic bezier conversion.  For 2 or fewer points a simple
-/// polyline is produced; for 3+ points each interior segment is drawn as a
-/// cubic bezier curve giving a natural, rounded appearance.
-///
-/// A `tension` factor of 0.25 (1/4) is used so curves stay close to the
-/// original waypoints while still looking smooth.
-fn smooth_edge_path(points: &[(f32, f32)], _is_self_loop: bool) -> String {
-    // Catmull-Rom→cubic conversion written straight into the `d` string, with no
-    // intermediate `Vec<PathCommand>`. Byte-identical to the prior PathBuilder version.
-    crate::path::build_smooth_path(points)
+fn smooth_layout_edge_path(edge_path: &LayoutEdgePath, offset_x: f32, offset_y: f32) -> String {
+    crate::path::build_smooth_path_by(edge_path.points.len(), |index| {
+        let point = &edge_path.points[index];
+        (point.x + offset_x, point.y + offset_y)
+    })
 }
 
 /// Render a single edge to an SVG element.
@@ -5913,14 +5902,7 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
     let arrow = ir_edge.map_or(ArrowType::Arrow, |e| e.arrow);
     let is_back_edge = edge_path.reversed;
 
-    // Build path from points using smooth curves
-    let pts: Vec<(f32, f32)> = edge_path
-        .points
-        .iter()
-        .map(|p| (p.x + offset_x, p.y + offset_y))
-        .collect();
-
-    let path_str = smooth_edge_path(&pts, edge_path.is_self_loop);
+    let path_str = smooth_layout_edge_path(edge_path, offset_x, offset_y);
 
     // Back-edges get special treatment: dashed + muted color
     let (base_dasharray, marker_start, marker_end, base_color): (

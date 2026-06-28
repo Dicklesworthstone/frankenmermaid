@@ -297,31 +297,35 @@ fn write_point(output: &mut String, prefix: char, x: f32, y: f32) {
 /// builder output (commands joined by single spaces). This is the per-edge hot path on
 /// curve-heavy graphs, where the builder's per-segment enum push + dispatch is pure
 /// overhead on top of the byte writing.
-pub(crate) fn build_smooth_path(points: &[(f32, f32)]) -> String {
-    let n = points.len();
+pub(crate) fn build_smooth_path_by<F>(n: usize, mut point_at: F) -> String
+where
+    F: FnMut(usize) -> (f32, f32),
+{
     if n == 0 {
         return String::new();
     }
     let mut d = String::with_capacity(n * 24);
-    write_point(&mut d, 'M', points[0].0, points[0].1);
+    let first = point_at(0);
+    write_point(&mut d, 'M', first.0, first.1);
     if n == 1 {
         return d;
     }
     if n == 2 {
+        let second = point_at(1);
         d.push(' ');
-        write_point(&mut d, 'L', points[1].0, points[1].1);
+        write_point(&mut d, 'L', second.0, second.1);
         return d;
     }
 
     let t: f32 = 0.25;
     for i in 0..(n - 1) {
-        let p_prev = if i == 0 { points[0] } else { points[i - 1] };
-        let p_cur = points[i];
-        let p_next = points[i + 1];
+        let p_prev = if i == 0 { point_at(0) } else { point_at(i - 1) };
+        let p_cur = point_at(i);
+        let p_next = point_at(i + 1);
         let p_next2 = if i + 2 < n {
-            points[i + 2]
+            point_at(i + 2)
         } else {
-            points[n - 1]
+            point_at(n - 1)
         };
 
         let cp1x = p_cur.0 + (p_next.0 - p_prev.0) * t;
@@ -611,6 +615,17 @@ mod tests {
             .curve_to(25.0, 50.0, 75.0, 50.0, 100.0, 0.0)
             .build();
         assert!(path.contains("C25 50,75 50,100 0"));
+    }
+
+    #[test]
+    fn smooth_path_by_index_matches_expected_bytes() {
+        let points = [(10.0, 20.0), (30.0, 60.0), (70.0, 60.0), (90.0, 20.0)];
+        let path = build_smooth_path_by(points.len(), |index| points[index]);
+
+        assert_eq!(
+            path,
+            "M10 20 C15 30,15 50,30 60 C45 70,55 70,70 60 C85 50,85 30,90 20"
+        );
     }
 
     #[test]
