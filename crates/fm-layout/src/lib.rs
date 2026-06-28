@@ -6808,6 +6808,14 @@ fn layered_ranks(ir: &MermaidDiagramIr) -> Vec<usize> {
         return Vec::new();
     }
 
+    // Pre-extract node-id sort keys into a contiguous `Vec<&str>` so the two id-ordered sorts
+    // below compare packed `&str` slices instead of striding through the large `IrNode` struct
+    // array (a cache miss per `ir.nodes[idx].id` deref). Byte-identical (`ids[i]` is exactly
+    // `ir.nodes[i].id`). Same lever as `build_tree_layout_structure`.
+    let ids: Vec<&str> = ir.nodes.iter().map(|node| node.id.as_str()).collect();
+    let cmp_by_id =
+        |left: &usize, right: &usize| ids[*left].cmp(ids[*right]).then_with(|| left.cmp(right));
+
     let mut outgoing = vec![Vec::<usize>::new(); node_count];
     let mut indegree = vec![0_usize; node_count];
     for edge in &ir.edges {
@@ -6825,12 +6833,12 @@ fn layered_ranks(ir: &MermaidDiagramIr) -> Vec<usize> {
     }
 
     for neighbors in &mut outgoing {
-        neighbors.sort_by(|left, right| compare_node_indices(ir, *left, *right));
+        neighbors.sort_by(&cmp_by_id);
         neighbors.dedup();
     }
 
     let mut sorted_nodes: Vec<usize> = (0..node_count).collect();
-    sorted_nodes.sort_by(|left, right| compare_node_indices(ir, *left, *right));
+    sorted_nodes.sort_by(&cmp_by_id);
 
     let mut ranks = vec![0_usize; node_count];
     let mut processed = vec![false; node_count];
