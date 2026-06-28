@@ -189,6 +189,23 @@ impl CharWidthClass {
     }
 }
 
+/// Precomputed width multiplier per ASCII byte = `classify(byte).multiplier()`. A direct
+/// `f32` table (no intermediate `CharWidthClass` enum) so per-char measurement on ASCII
+/// text — the overwhelmingly common label case — is one array load + multiply instead of
+/// the `classify`→`multiplier` match chain. Bit-identical to that chain: each entry is
+/// exactly `classify(b as char).multiplier()`, computed at compile time from the same const
+/// fns. (Unlike the rejected `CharWidthClass` lookup table, this stores the final multiplier,
+/// so there is no intermediate enum load to break the compiler's match fusion.)
+const ASCII_WIDTH_MULT: [f32; 128] = {
+    let mut table = [0.0_f32; 128];
+    let mut i = 0usize;
+    while i < 128 {
+        table[i] = CharWidthClass::classify(i as u8 as char).multiplier();
+        i += 1;
+    }
+    table
+};
+
 /// Font metrics calculator for deterministic text measurement.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FontMetrics {
@@ -275,6 +292,17 @@ impl FontMetrics {
     /// Estimate the width of a single line of text.
     #[must_use]
     pub fn estimate_width(&self, text: &str) -> f32 {
+        // ASCII fast path (common labels, non-monospace): a direct multiplier-table load per
+        // byte replaces the per-char `classify().multiplier()` match chain. Bit-identical —
+        // `ASCII_WIDTH_MULT[b]` IS `classify(b as char).multiplier()`, and the `avg * mult`
+        // op + left-to-right f32 sum are unchanged. Monospace / non-ASCII keep the char path.
+        if self.config.preset != FontPreset::Monospace && text.is_ascii() {
+            let avg = self.avg_char_width;
+            return text
+                .bytes()
+                .map(|b| avg * ASCII_WIDTH_MULT[b as usize])
+                .sum();
+        }
         text.chars().map(|c| self.char_width(c)).sum()
     }
 
