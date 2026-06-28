@@ -371,6 +371,17 @@ pub(crate) fn write_fixed2<W: fmt::Write>(f: &mut W, value: f32) -> fmt::Result 
 /// with no intermediate allocation. This is the hot SVG-serialization path.
 pub(crate) fn write_escaped_attr<W: fmt::Write>(f: &mut W, s: &str) -> fmt::Result {
     let bytes = s.as_bytes();
+    // Fast path: a single scan checking whether ANY byte needs escaping. This is a simple
+    // "byte ∈ small set" reduction the auto-vectorizer can lower to SIMD, and the common
+    // attribute values on the hot render path — path `d` geometry, numeric coords, class/id
+    // tokens — contain no special byte, so we bulk-copy the whole string with one `write_str`.
+    // Byte-identical: when no byte is special the slow loop below would also emit `s` verbatim.
+    if !bytes
+        .iter()
+        .any(|&b| matches!(b, b'&' | b'<' | b'>' | b'"' | b'\''))
+    {
+        return f.write_str(s);
+    }
     let mut start = 0;
     for (i, &b) in bytes.iter().enumerate() {
         let replacement = match b {

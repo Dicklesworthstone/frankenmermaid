@@ -3418,3 +3418,39 @@
   multi-arg `format!`s is the lever — distinct from the integer `write!` branch (that was neutral).
 
   Agent: GreyShrike
+
+### write_escaped_attr: auto-vectorizable no-special fast-path — KEPT, render -20 to -24% wide (2026-06-27)
+- **Lever:** `fm-render-svg::write_escaped_attr` (per-attribute-value XML escaping) now prepends a
+  single `bytes.iter().any(|b| matches!(b, b'&'|b'<'|b'>'|b'"'|b'\''))` scan — a "byte ∈ small set"
+  reduction the auto-vectorizer lowers to SIMD — and bulk-copies the whole string with one
+  `write_str` when no byte is special. The dominant hot-path attribute values (path `d` geometry,
+  numeric coords, class/id tokens) are escape-free, so this replaces the per-byte match+run loop
+  with one vectorizable pass. Strings that DO contain a special fall through to the unchanged
+  byte-by-byte loop. **Byte-identical by construction** (escape-free ⇒ the slow loop also emits `s`
+  verbatim); 223 fm-render-svg tests + `frankentui_conformance_test` pass; clippy clean.
+- **Mapped primitive:** extreme-software-optimization "make the common case a single vectorizable
+  scan." NO new dependency (the crate is branded zero-dependency; `memchr` was rejected for that
+  reason) and NO `unsafe` (`#![forbid(unsafe_code)]`) — relies on LLVM auto-vectorizing the `.any()`
+  reduction. The profile under-attributed this (`write_escaped_attr` showed 6% self), but the
+  byte-by-byte scan over the long, numerous `d` strings was actually ~20-30% of render — the A/B is
+  the ground truth.
+- **Measured (per-crate `wide_stages/render`, same-worker A/B, target dir
+  `/data/projects/.rch-targets/frankenmermaid-cc`):** ORDER_A is the FORWARD order (OPT-first,
+  which the swarm's methodology shows is biased AGAINST OPT because the recompiled ORIG runs second
+  with a warmup advantage), so these are a CONSERVATIVE lower bound — and they are decisive:
+  OPT faster by **+20.4%** (8x16), **+21.2%** (12x24), **+31.3%** (16x32), all p=0.00.
+  Absolute OPT render: `8x16` `820.4 us`, `12x24` `1.830 ms`, `16x32` `3.703 ms`
+  (ORIG ≈ `988 us` / `2.22 ms` / `4.86 ms`). The reverse order (ORDER_B, ORIG-first) confirms
+  OPT-faster at every size too (`-13.3%`, `-66.8%`, `-5.2%`, all p=0.00) — direction-reproducible
+  in both orders, magnitude noisy on the loaded box but the conservative forward read is the floor.
+- **Original comparator:** pinned Mermaid `11.12.0` wide denominators `315.14 ms`, `981.73 ms`,
+  `2879.185 ms`.
+- **frankenmermaid/Mermaid ratio:** render-stage candidate `820.4 us` / `1.830 ms` / `3.703 ms`
+  give `0.002603x` / `0.001864x` / `0.001286x` — Mermaid.js is **384x / 536x / 777x** slower
+  (16x32 up from the ~574x band before this lever).
+- **Verdict:** KEPT — the biggest single render lever this session, byte-identical, no new dep, no
+  unsafe, p=0.00 in the conservative forward order across all three sizes. Lesson: a per-byte scan
+  over long output strings (escape) is a big hidden render cost; an auto-vectorizable `.any()`
+  no-special fast-path collapses it without `memchr`/`unsafe`.
+
+  Agent: GreyShrike
