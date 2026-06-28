@@ -3454,3 +3454,30 @@
   no-special fast-path collapses it without `memchr`/`unsafe`.
 
   Agent: GreyShrike
+
+### write_escaped_text: auto-vectorizable no-special fast-path — REVERTED, render regression (2026-06-28)
+- **Lever tested:** mirror the kept `write_escaped_attr` no-special pre-scan in
+  `fm-render-svg::write_escaped_text`, returning a single `write_str` when a text/title string
+  contains no `&`, `<`, or closing-CDATA `]]>` sequence. This targeted the remaining default
+  render text/title escaping path after the attribute escaper win.
+- **Mapped primitive:** same graveyard hot-path specialization and alien-artifact proof shape as
+  the attribute fast path: prove the escape-free case is byte-identical, then bulk-copy. The
+  focused `bulk_escape_byte_identical_to_charwise` test passed before the candidate was reverted.
+- **Measured ORIG/current main:** `07524f7`, per-crate `wide_stages/render`, via
+  `AGENT_NAME=TanSparrow CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-a rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages --warm-up-time 1 --measurement-time 2`
+  (`rch` local fail-open: no admissible workers). Current-main render medians:
+  `8x16 793.35 us`, `12x24 1.8470 ms`, `16x32 3.7359 ms`.
+- **Measured candidate:** same target dir and route, filter `wide_stages/render`. Candidate medians:
+  `8x16 1.1042 ms`, `12x24 2.7177 ms`, `16x32 9.6334 ms`.
+  **Ratio vs ORIG:** `8x16 1.392x`, `12x24 1.471x`, `16x32 2.579x` (all p=0.00 regression).
+- **Mermaid comparator:** pinned Mermaid `11.12.0` wide denominators `315.14 ms`, `981.73 ms`,
+  `2879.185 ms`. Current main render ratios are `0.002517x`, `0.001881x`, `0.001298x`;
+  rejected candidate ratios were worse at `0.003504x`, `0.002768x`, `0.003346x`.
+- **Why rejected:** unlike attribute values, the text path strings are short enough that the extra
+  enumerated pre-scan is pure overhead, and the `]]>` look-back predicate blocks the clean small-set
+  reduction shape that made the attribute path profitable. The one-pass text escaper is already the
+  better implementation for this corpus.
+- **Verdict:** REVERTED before commit; docs-only evidence kept. Do not retry the text-content
+  no-special pre-scan without a profile showing long escape-free text dominates render.
+
+  Agent: TanSparrow
