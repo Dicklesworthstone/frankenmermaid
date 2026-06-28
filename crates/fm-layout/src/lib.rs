@@ -11102,8 +11102,20 @@ fn build_edge_paths_with_orientation(
     // Each edge's own two endpoints are temporarily parked far away below so the
     // router's AABB check rejects them — equivalent to excluding them, O(1) per edge.
     let mut obstacle_bounds: Vec<LayoutRect> = nodes.iter().map(|n| n.bounds).collect();
+    // Index the obstacle set for either a sparse/tree-like flowchart (the original
+    // `edges <= 1.5*nodes` case) **or** a *large* dense graph. The density gate alone
+    // kept wide layered graphs on the per-edge linear scan, but a fresh profile shows
+    // `build_edge_paths` dominating layout there (≈1 ms / 960 edges at 16x32): the
+    // mid-segment nudge scans every node obstacle even though each axis-aligned segment
+    // spans only a couple of grid cells, so the index's localized candidate query is a
+    // large win (16x32 −42%, 12x24 −25%). For *small* dense graphs the index's build +
+    // candidate-sort overhead loses to the already-cheap scan (8x16 +5%), so dense
+    // indexing is floored at `DENSE_INDEX_OBSTACLES`. The index query is a conservative
+    // superset of the AABB scan, so routing stays byte-identical either way.
     let sparse_routing = ir.edges.len() <= nodes.len().saturating_mul(3) / 2;
-    let mut obstacle_index = (sparse_routing
+    let index_eligible = sparse_routing
+        || obstacle_bounds.len() >= ObstacleSpatialIndex::DENSE_INDEX_OBSTACLES;
+    let mut obstacle_index = (index_eligible
         && obstacle_bounds.len() >= ObstacleSpatialIndex::MIN_INDEXED_OBSTACLES)
         .then(|| ObstacleSpatialIndex::new(&obstacle_bounds));
 
@@ -11274,6 +11286,12 @@ struct ObstacleSpatialIndex {
 impl ObstacleSpatialIndex {
     const CELL_SIZE: f32 = 128.0;
     const MIN_INDEXED_OBSTACLES: usize = 64;
+    /// Obstacle-count floor above which a *dense* graph (edges > 1.5×nodes) is still
+    /// indexed. Below it the per-edge linear AABB scan beats the index's build +
+    /// candidate-sort overhead; above it the localized query wins decisively. The
+    /// crossover sits between the 8x16 wide graph (128 obstacles, scan faster) and the
+    /// 12x24 wide graph (288 obstacles, index ~25% faster).
+    const DENSE_INDEX_OBSTACLES: usize = 256;
 
     fn new(obstacles: &[LayoutRect]) -> Self {
         let mut cells = FxHashMap::default();
