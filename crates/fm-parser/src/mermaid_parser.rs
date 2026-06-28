@@ -7387,6 +7387,20 @@ fn split_emoji_icon_prefix(text: &str) -> Option<(&str, Option<&str>)> {
 
 fn parse_label(raw: Option<&str>) -> Option<ParsedLabel> {
     let raw = raw?;
+    // Fast path: a label with no surrounding quotes (`"` `'`), markdown backtick, or HTML entity
+    // (`&` `#`) reduces to a plain trimmed copy -- the quote-stripping, markdown, and entity-decode
+    // passes below all leave it unchanged. Byte-identical: for such a label the full path also ends
+    // at `Some(ParsedLabel::plain(raw.trim()))` (or `None` when empty). Skips ~3 redundant
+    // `trim`/`trim_matches` scans + the two-`find` entity decode per label (parse_label runs once
+    // per node label; doc-parse is ~49% of flowchart parse).
+    if !raw
+        .bytes()
+        .any(|byte| matches!(byte, b'"' | b'\'' | b'`' | b'&' | b'#'))
+    {
+        let trimmed = raw.trim();
+        return (!trimmed.is_empty()).then(|| ParsedLabel::plain(trimmed));
+    }
+
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
