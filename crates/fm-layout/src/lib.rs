@@ -11121,9 +11121,13 @@ fn build_edge_paths_with_orientation(
     let sparse_routing = ir.edges.len() <= nodes.len().saturating_mul(3) / 2;
     let index_eligible = sparse_routing
         || obstacle_bounds.len() >= ObstacleSpatialIndex::DENSE_INDEX_OBSTACLES;
-    let mut obstacle_index = (index_eligible
-        && obstacle_bounds.len() >= ObstacleSpatialIndex::MIN_INDEXED_OBSTACLES)
-        .then(|| ObstacleSpatialIndex::new(&obstacle_bounds));
+    let mut obstacle_index = if index_eligible
+        && obstacle_bounds.len() >= ObstacleSpatialIndex::MIN_INDEXED_OBSTACLES
+    {
+        ObstacleSpatialIndex::new(&obstacle_bounds)
+    } else {
+        None
+    };
 
     ir.edges
         .iter()
@@ -11287,9 +11291,23 @@ fn apply_parallel_offset(points: &mut [LayoutPoint], offset: f32, horizontal_ran
     }
 }
 
+/// A flat CSR (compressed-sparse-row) bucket grid over node-obstacle rects. Replaces the
+/// earlier `FxHashMap<(i32,i32), Vec<usize>>` grid: the build avoids one heap `Vec`
+/// allocation per occupied cell plus per-insert hashing (it counts then scatters into two
+/// flat `Vec`s), and the query indexes the bucket directly instead of hashing each cell.
+/// Byte-identical to the hash grid: the same `cell_of` mapping fills the same cells with the
+/// same obstacle indices, and `query_segment` still returns the deduped candidate set
+/// `sort_unstable`-ordered (within-cell order never escapes the final sort).
 struct ObstacleSpatialIndex {
     inv_cell_size: f32,
-    cells: FxHashMap<(i32, i32), Vec<usize>>,
+    min_cx: i32,
+    min_cy: i32,
+    ncols: usize,
+    nrows: usize,
+    /// `offsets[i]..offsets[i+1]` is cell `i`'s slice of `flat` (CSR row pointers).
+    offsets: Vec<u32>,
+    /// Obstacle indices bucketed by cell.
+    flat: Vec<u32>,
     seen: Vec<u32>,
     generation: u32,
     candidates: Vec<usize>,
@@ -11304,43 +11322,110 @@ impl ObstacleSpatialIndex {
     /// crossover sits between the 8x16 wide graph (128 obstacles, scan faster) and the
     /// 12x24 wide graph (288 obstacles, index ~25% faster).
     const DENSE_INDEX_OBSTACLES: usize = 256;
+    /// Cap on grid cells per obstacle. A layout so spread out that its cell bbox exceeds
+    /// this is not worth a dense grid — `new` returns `None` and the caller falls back to
+    /// the per-edge linear AABB scan, which is byte-identical (just slower for that rare
+    /// case). Real diagrams pack obstacles tightly, so this never trips for them.
+    const MAX_CELLS_PER_OBSTACLE: usize = 64;
 
-    fn new(obstacles: &[LayoutRect]) -> Self {
-        let mut cells = FxHashMap::default();
-        cells.reserve(obstacles.len().saturating_mul(2));
-        let mut index = Self {
-            inv_cell_size: 1.0 / Self::CELL_SIZE,
-            cells,
-            seen: vec![0; obstacles.len()],
-            generation: 0,
-            candidates: Vec::new(),
-        };
-
-        for (idx, rect) in obstacles.iter().enumerate() {
-            index.insert_rect(idx, *rect);
-        }
-
-        index
+    #[inline]
+    fn cell_of(value: f32, inv: f32) -> i32 {
+        (value * inv).floor() as i32
     }
 
-    fn cell_coord(&self, value: f32) -> i32 {
-        (value * self.inv_cell_size).floor() as i32
-    }
-
-    fn insert_rect(&mut self, idx: usize, rect: LayoutRect) {
+    /// Inclusive `(cx0, cx1, cy0, cy1)` cell range a rect spans, or `None` if non-finite.
+    #[inline]
+    fn rect_cells(rect: LayoutRect, inv: f32) -> Option<(i32, i32, i32, i32)> {
         let min_x = rect.x.min(rect.x + rect.width);
         let max_x = rect.x.max(rect.x + rect.width);
         let min_y = rect.y.min(rect.y + rect.height);
         let max_y = rect.y.max(rect.y + rect.height);
         if !(min_x.is_finite() && max_x.is_finite() && min_y.is_finite() && max_y.is_finite()) {
-            return;
+            return None;
         }
+        Some((
+            Self::cell_of(min_x, inv),
+            Self::cell_of(max_x, inv),
+            Self::cell_of(min_y, inv),
+            Self::cell_of(max_y, inv),
+        ))
+    }
 
-        for cell_x in self.cell_coord(min_x)..=self.cell_coord(max_x) {
-            for cell_y in self.cell_coord(min_y)..=self.cell_coord(max_y) {
-                self.cells.entry((cell_x, cell_y)).or_default().push(idx);
+    fn new(obstacles: &[LayoutRect]) -> Option<Self> {
+        let inv = 1.0 / Self::CELL_SIZE;
+        let mut min_cx = i32::MAX;
+        let mut min_cy = i32::MAX;
+        let mut max_cx = i32::MIN;
+        let mut max_cy = i32::MIN;
+        for rect in obstacles {
+            if let Some((cx0, cx1, cy0, cy1)) = Self::rect_cells(*rect, inv) {
+                min_cx = min_cx.min(cx0);
+                max_cx = max_cx.max(cx1);
+                min_cy = min_cy.min(cy0);
+                max_cy = max_cy.max(cy1);
             }
         }
+        if min_cx > max_cx || min_cy > max_cy {
+            return None; // no finite obstacles -> nothing to index
+        }
+        let ncols = (i64::from(max_cx) - i64::from(min_cx) + 1) as usize;
+        let nrows = (i64::from(max_cy) - i64::from(min_cy) + 1) as usize;
+        let cell_count = ncols.checked_mul(nrows)?;
+        if cell_count
+            > obstacles
+                .len()
+                .saturating_mul(Self::MAX_CELLS_PER_OBSTACLE)
+                .max(4096)
+        {
+            return None; // too spread out; the caller uses the linear scan instead
+        }
+
+        let lin = |cx: i32, cy: i32| -> usize {
+            (cy - min_cy) as usize * ncols + (cx - min_cx) as usize
+        };
+
+        // Pass 1: count obstacles per cell into offsets[i+1].
+        let mut offsets = vec![0u32; cell_count + 1];
+        for rect in obstacles {
+            if let Some((cx0, cx1, cy0, cy1)) = Self::rect_cells(*rect, inv) {
+                for cx in cx0..=cx1 {
+                    for cy in cy0..=cy1 {
+                        offsets[lin(cx, cy) + 1] += 1;
+                    }
+                }
+            }
+        }
+        // Prefix sum: offsets[i] becomes the start of cell i's bucket.
+        for i in 1..offsets.len() {
+            offsets[i] += offsets[i - 1];
+        }
+        let mut flat = vec![0u32; offsets[cell_count] as usize];
+        let mut cursor = offsets.clone();
+        // Pass 2: scatter each obstacle index into its cells.
+        for (idx, rect) in obstacles.iter().enumerate() {
+            if let Some((cx0, cx1, cy0, cy1)) = Self::rect_cells(*rect, inv) {
+                for cx in cx0..=cx1 {
+                    for cy in cy0..=cy1 {
+                        let ci = lin(cx, cy);
+                        flat[cursor[ci] as usize] = idx as u32;
+                        cursor[ci] += 1;
+                    }
+                }
+            }
+        }
+
+        Some(Self {
+            inv_cell_size: inv,
+            min_cx,
+            min_cy,
+            ncols,
+            nrows,
+            offsets,
+            flat,
+            seen: vec![0; obstacles.len()],
+            generation: 0,
+            candidates: Vec::new(),
+        })
     }
 
     fn query_segment(&mut self, segment: (LayoutPoint, LayoutPoint), margin: f32) -> &[usize] {
@@ -11359,18 +11444,27 @@ impl ObstacleSpatialIndex {
             return &self.candidates;
         }
 
-        for cell_x in self.cell_coord(min_x)..=self.cell_coord(max_x) {
-            for cell_y in self.cell_coord(min_y)..=self.cell_coord(max_y) {
-                if let Some(indices) = self.cells.get(&(cell_x, cell_y)) {
-                    for &idx in indices {
-                        if self.seen.get(idx).copied() == Some(self.generation) {
-                            continue;
-                        }
-                        if let Some(seen) = self.seen.get_mut(idx) {
-                            *seen = self.generation;
-                            self.candidates.push(idx);
-                        }
+        // Clamp the query cell range to the grid; cells outside it hold no obstacles, exactly
+        // as the hash grid's missing entries did.
+        let grid_max_cx = self.min_cx + self.ncols as i32 - 1;
+        let grid_max_cy = self.min_cy + self.nrows as i32 - 1;
+        let qx0 = Self::cell_of(min_x, self.inv_cell_size).max(self.min_cx);
+        let qx1 = Self::cell_of(max_x, self.inv_cell_size).min(grid_max_cx);
+        let qy0 = Self::cell_of(min_y, self.inv_cell_size).max(self.min_cy);
+        let qy1 = Self::cell_of(max_y, self.inv_cell_size).min(grid_max_cy);
+
+        for cx in qx0..=qx1 {
+            for cy in qy0..=qy1 {
+                let ci = (cy - self.min_cy) as usize * self.ncols + (cx - self.min_cx) as usize;
+                let start = self.offsets[ci] as usize;
+                let end = self.offsets[ci + 1] as usize;
+                for k in start..end {
+                    let idx = self.flat[k] as usize;
+                    if self.seen[idx] == self.generation {
+                        continue;
                     }
+                    self.seen[idx] = self.generation;
+                    self.candidates.push(idx);
                 }
             }
         }
@@ -15101,7 +15195,7 @@ mod tests {
             LayoutPoint { x: 100.0, y: 15.0 },
         );
         let full_scan = find_obstacle_nudge_y(segment, 15.0, &obstacles, None);
-        let mut index = ObstacleSpatialIndex::new(&obstacles);
+        let mut index = ObstacleSpatialIndex::new(&obstacles).expect("compact obstacles index");
         let indexed = find_obstacle_nudge_y(segment, 15.0, &obstacles, Some(&mut index));
         assert_eq!(indexed, full_scan);
     }
@@ -15122,7 +15216,7 @@ mod tests {
                 height: 10.0,
             },
         ];
-        let mut index = ObstacleSpatialIndex::new(&obstacles);
+        let mut index = ObstacleSpatialIndex::new(&obstacles).expect("compact obstacles index");
         obstacles[0] = LayoutRect {
             x: 1.0e30,
             y: 1.0e30,
