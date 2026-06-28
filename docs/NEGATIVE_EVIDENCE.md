@@ -3669,3 +3669,29 @@
   dedicated effort, not a 60-min slice. The edge direct-byte win (41d3a1b, render -28 to -35%) stands.
 
   Agent: GreyShrike
+
+### Common gradient rect node shape direct-byte — byte-identical but ~0 at headline (REVERTED) (2026-06-28)
+- **Lever:** the corrected follow-up to the config-fragile rect attempt. Captured the EXACT default
+  node bytes (`<rect x y width height rx fill="url(#fm-node-gradient)"/>` — the gradient `.fill()`
+  override moves fill to the end) and built `common_rect_fast` + `build_common_rect_fragment` gated
+  on the full post-processing matrix (`embed_theme_css && node_gradients && !emit_classdef_classes &&
+  !enable_shadows && no inline/req/journey/kanban fill`), with the gradient override gated off.
+- **Byte-identical THIS time:** `rect_fast_fragment_matches_element` mirrors the exact slow path; the
+  full 226-test suite — including `node_gradient_defs_and_fill_are_emitted` that caught the earlier
+  naive attempt — plus conformance pass; clippy clean. The gradient gap is solved.
+- **Measured (per-crate `wide_stages/render`, same-worker both-order A/B, clean box ~load 10):**
+  INCONSISTENT and ~0 at the headline. ORDER_B 8x16 `-4.6%` / 12x24 `-5.5%` (p=0.00) but ORDER_A
+  8x16 `+4.3% OPT-slower` (p=0.00, forward-order bias) / 12x24 `+0.9%` (p=0.59) / 16x32 `-1.2%`
+  (p=0.49); 16x32 ORDER_B `-38%` is a noise spike (range -56..-18). **OPT 16x32 = 2.43 ms = current
+  main** — the rect slice is ~0 at the headline size.
+- **Why ~0:** the rect is only ~1/4 of the per-node construction (group + rect + text + title), and
+  16x32 is edge-heavy (960 edges vs 512 nodes) so the per-node saving is diluted. The win shows
+  only on smaller, node-denser graphs and is swamped by noise there.
+- **Verdict:** REVERTED (stashed). Byte-identical + can't-regress, but ~0 at the headline and it adds
+  a config-coupled gate (couples to gradient/classdef/shadow/fill flags) + latent fragility not
+  justified by a marginal slice. **The node win is real (~60% of render) but requires a FULL-node
+  direct-byte — group `<g>` (id/class/data-id/role/aria-label/tabindex) + rect + label `<text>` +
+  `<title>` as ONE fragment — to capture the whole ~30%, not the rect child alone.** The gradient/
+  post-processing handling proven here is reusable for that. Edge direct-byte (41d3a1b) stands.
+
+  Agent: GreyShrike
