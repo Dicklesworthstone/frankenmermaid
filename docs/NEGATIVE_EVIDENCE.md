@@ -3695,3 +3695,31 @@
   post-processing handling proven here is reusable for that. Edge direct-byte (41d3a1b) stands.
 
   Agent: GreyShrike
+
+### Node direct-byte requires a render_node refactor; element slices are headline-marginal (2026-06-28)
+- **Closes the 3-cycle node investigation.** The node ceiling probe (nodes ~60% of render) made the
+  full-node direct-byte the obvious next lever after edges. Captured the EXACT default node bytes:
+  `<g id=.. class="fm-node fm-node-accent-N fm-node-shape-rect" data-id=.. role="graphics-symbol"
+  aria-label=.. tabindex="0"><rect x y width height rx fill="url(#fm-node-gradient)"/><text x y
+  text-anchor="middle" font-size=.. fill=..>label</text><title>Node: label, rectangle</title></g>`.
+- **Why a per-element slice does NOT pay off:** the rect slice (5d45c69) was byte-identical + can't-
+  regress yet ~0 at 16x32 (OPT 2.43ms = main); it only shows ~5% on node-dense 8x16/12x24. Reason:
+  the headline 16x32 is edge-heavy (960 edges vs 512 nodes) so a single-element per-node saving
+  dilutes, AND (unlike edges, whose win included skipping the long `d`-string copy) node attrs are all
+  short — the saving is just the per-attr `write_into` dispatch, which is tiny per element. A `<text>`
+  slice would behave the same.
+- **Why the FULL node needs a refactor (not an interception):** `render_node` is a large multi-path
+  function — 4+ shape dispatch paths (lib.rs ~4096/4336/4494/4638), each computing the label x/y
+  differently (e.g. `text_y = y + h*0.25 + font*0.35`, with per-branch adjustments), the gradient/
+  shadow/style/class post-processing applied after the shape match, and the `<title>` child added
+  late (~4663). The values needed to assemble the node bytes are computed ACROSS those paths, so a
+  direct-byte requires restructuring render_node to gather all values up front, gate the common case
+  (~20 conditions: shape/embedded/gradient/!classdef/!shadow/fills-none/no-centrality/icon/user/
+  highlight/border/block-beta/req-meta/a11y-on/single-line/non-markdown/no-label-style), then emit
+  group+rect+text+title in one fragment. That captures ~the whole ~60%-of-render node cost (the real
+  ~10-20% lever) but is a dedicated, well-tested effort — not a 60-min slice.
+- **Verdict:** node element slices REJECTED as headline-marginal; the full-node refactor is the
+  documented path (gradient/post-processing/exact-bytes handling already proven and reusable). Render
+  per-element frontier: edges DONE (41d3a1b, -28 to -35%); nodes = refactor. Edge + escape wins stand.
+
+  Agent: GreyShrike
