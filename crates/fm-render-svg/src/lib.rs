@@ -3710,6 +3710,76 @@ fn lookup_centrality_tier(
     centrality_map.get(&node_index).copied()
 }
 
+/// Serialize a complete common rectangle node (`<g>` + gradient `<rect>` + centered `<text>` +
+/// `<title>`) directly into raw SVG bytes, **byte-identical** to what `render_node` builds via
+/// `Element`s for the default themed config. Every value goes through the same serializers
+/// (`AttributeValue::write_value` / `write_escaped_attr` / `write_escaped_text`); only attribute
+/// names/order and tag structure are replicated here (pinned by `node_fast_fragment_matches_render`).
+/// Used only via the `common_node_fast` gate, which guarantees none of `render_node`'s conditional
+/// classes/children/post-processing apply, so this is the entire node. Skips four `Element` builds +
+/// their `Attributes` Vecs + `write_into` walks — the per-node construction is ~60% of wide render.
+#[allow(clippy::too_many_arguments)]
+fn build_common_node_fragment(
+    node_id: &str,
+    node_index: usize,
+    accent: usize,
+    raw_label: &str,
+    label: &str,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    rx: f32,
+    text_x: f32,
+    text_y: f32,
+    font_size: f32,
+    text_fill: &str,
+    node_desc: &str,
+) -> String {
+    use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
+    use std::fmt::Write as _;
+    let mut f = String::with_capacity(label.len() + node_desc.len() + raw_label.len() + 320);
+    // <g id=".." class="fm-node fm-node-accent-N fm-node-shape-rect" data-id=".." role=".." aria-label=".." tabindex="0">
+    f.push_str("<g id=\"");
+    let _ = write_escaped_attr(&mut f, &fm_core::mermaid_node_element_id(node_id, node_index));
+    f.push_str("\" class=\"fm-node fm-node-accent-");
+    let _ = write!(f, "{accent}");
+    f.push_str(" fm-node-shape-rect\" data-id=\"");
+    let _ = write_escaped_attr(&mut f, node_id);
+    f.push_str("\" role=\"graphics-symbol\" aria-label=\"");
+    let _ = write_escaped_attr(&mut f, raw_label);
+    f.push_str("\" tabindex=\"0\">");
+    // <rect x y width height rx fill="url(#fm-node-gradient)"/>
+    f.push_str("<rect x=\"");
+    let _ = AttributeValue::Number(x).write_value(&mut f);
+    f.push_str("\" y=\"");
+    let _ = AttributeValue::Number(y).write_value(&mut f);
+    f.push_str("\" width=\"");
+    let _ = AttributeValue::Number(w).write_value(&mut f);
+    f.push_str("\" height=\"");
+    let _ = AttributeValue::Number(h).write_value(&mut f);
+    f.push_str("\" rx=\"");
+    let _ = AttributeValue::Number(rx).write_value(&mut f);
+    f.push_str("\" fill=\"url(#fm-node-gradient)\"/>");
+    // <text x y text-anchor="middle" font-size=".." fill="..">label</text>
+    f.push_str("<text x=\"");
+    let _ = AttributeValue::Number(text_x).write_value(&mut f);
+    f.push_str("\" y=\"");
+    let _ = AttributeValue::Number(text_y).write_value(&mut f);
+    f.push_str("\" text-anchor=\"middle\" font-size=\"");
+    let _ = AttributeValue::Number(font_size).write_value(&mut f);
+    f.push_str("\" fill=\"");
+    let _ = write_escaped_attr(&mut f, text_fill);
+    f.push_str("\">");
+    let _ = write_escaped_text(&mut f, label);
+    f.push_str("</text>");
+    // <title>..</title>
+    f.push_str("<title>");
+    let _ = write_escaped_text(&mut f, node_desc);
+    f.push_str("</title></g>");
+    f
+}
+
 /// Render a single node to an SVG element.
 #[allow(clippy::too_many_arguments)]
 fn render_node(
@@ -3773,6 +3843,54 @@ fn render_node(
     let mut double_border = false;
     let mut is_block_beta = false;
     let mut is_block_beta_space = false;
+
+    // Fast path: the overwhelmingly common themed rectangle node — plain single-line label, no
+    // conditional class/child/post-processing — serializes to a fixed
+    // `<g><rect/><text/><title/></g>`. Emit it directly, skipping four `Element` builds + their
+    // `Attributes` Vecs + `write_into` walks (per-node construction is ~60% of wide render). Each
+    // gate clause corresponds to a branch below that would add/alter a class, child, attribute, or
+    // post-processing step; when all are absent the node bytes are fully determined.
+    if matches!(shape, NodeShape::Rect)
+        && config.embed_theme_css
+        && config.node_gradients
+        && !emit_classdef_classes
+        && !detail.enable_shadows
+        && !config.animations_enabled
+        && !config.include_source_spans
+        && config.a11y.aria_labels
+        && config.a11y.keyboard_nav
+        && config.a11y.text_alternatives
+        && shape_style.is_none()
+        && text_style.is_none()
+        && node_icon.is_none()
+        && !placeholder_space_node
+        && !label_text.contains('\n')
+        && !label_text.contains('\r')
+        && lookup_centrality_tier(centrality_map, node_box.node_index).is_none()
+        && label_id.is_none_or(|id| ir.label_markup.get(&id).is_none_or(|s| s.is_empty()))
+        && let Some(node) = ir_node
+        && node.classes.is_empty()
+        && node.requirement_meta.is_none()
+    {
+        let node_desc = describe_node(node, ir);
+        return Element::raw_svg(build_common_node_fragment(
+            node_id,
+            node_box.node_index,
+            stable_accent_index(node_id),
+            raw_label_text,
+            &label_text,
+            x,
+            y,
+            w,
+            h,
+            config.rounded_corners * 0.55,
+            cx,
+            cy + node_font_size / 3.0,
+            node_font_size,
+            colors.text.as_str(),
+            &node_desc,
+        ));
+    }
 
     // Create group for node shape + label
     let mut group = Element::group()
@@ -6353,6 +6471,32 @@ fn endpoint_accessible_label<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The full-node fast path must render byte-identical to the `Element` slow path it replaces.
+    /// Pins the assembled `<g><rect/><text/><title/></g>` against the known-correct default-config
+    /// output (captured from the slow path); conformance covers the gated-out node variants.
+    #[test]
+    fn node_fast_fragment_matches_render() {
+        let ir = create_ir_with_single_node("N0", NodeShape::Rect);
+        let config = SvgRenderConfig::default();
+        let svg = render_svg_with_config(&ir, &config);
+        let expected = concat!(
+            "<g id=\"fm-node-n0-0\" class=\"fm-node fm-node-accent-4 fm-node-shape-rect\" ",
+            "data-id=\"N0\" role=\"graphics-symbol\" aria-label=\"Single Node\" tabindex=\"0\">",
+            "<rect x=\"92\" y=\"92\" width=\"148.73\" height=\"66.50\" rx=\"5.50\" ",
+            "fill=\"url(#fm-node-gradient)\"/>",
+            "<text x=\"166.36\" y=\"129.85\" text-anchor=\"middle\" font-size=\"13.80\" ",
+            "fill=\"#1a1a2e\">Single Node</text>",
+            "<title>Node: Single Node, rectangle</title></g>",
+        );
+        let region = svg
+            .find("<g id=\"fm-node")
+            .map_or("", |s| &svg[s..]);
+        assert!(
+            svg.contains(expected),
+            "full-node fast-path bytes must match the slow path.\nGOT node region:\n{region}\nEXPECTED:\n{expected}"
+        );
+    }
 
     /// The streamed common-edge fragment must be byte-identical to the `Element` the slow path
     /// builds. Pins `build_common_edge_fragment` against the canonical `Element` constructors.
