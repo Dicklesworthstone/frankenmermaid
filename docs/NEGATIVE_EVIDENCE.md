@@ -5344,3 +5344,37 @@
   wide workload the mermaid-js ratios use is now ~1/4 of the original.
 
   Agent: cc
+
+### LANDED: edge path geometry streamed inline -- wide render allocs -37% more (2026-06-29)
+- Fourth stacking render-alloc win this session (after f3e248f edge wrapper, 42547c4 node id, fa0f7be edge
+  title). The whole-edge fast path still materialized the per-edge `d` String via
+  `smooth_layout_edge_path` -> `build_smooth_path_by` (one pre-sized String + occasional growth realloc),
+  only to escape-copy it into the fragment. Path `d` data is `[MLC0-9 .,-]` -- NO escapable byte -- so the
+  escape pass is a no-op.
+- **Fix (LANDED):** added `crate::path::build_smooth_path_by_into(out, n, point_at)` that appends the
+  Catmull-Rom->cubic `d` data straight into a caller buffer; `build_smooth_path_by` now delegates to it
+  (pre-sizes + appends). `build_common_edge_full_fragment` takes `(point_count, point_at)` instead of a
+  pre-built `path_str` and streams the geometry directly into its fragment buffer; `path_str` in
+  `render_edge` is now computed LAZILY (only the slower inner-fast / slow paths, which still need the
+  materialized `d`, build it). Writing the path unescaped is byte-identical to the slow path's
+  `write_escaped_attr(d)` because path data carries no escapable byte.
+- **MEASURED (deterministic counting-allocator A/B, load-immune):** FULL wide render allocs
+  wide_8x16 **1389 -> 941 (-32.3%)**, wide_12x24 ~2960 -> 1961, wide_16x32 **5209 -> 3289 (-36.9%)**
+  (~2 alloc events/edge removed -- the `d` String plus a growth realloc). **SESSION CUMULATIVE: wide_16x32
+  render allocs 19225 (ORIG) -> 3289 = -82.9%** across the four wins (edge wrapper, node id, edge title,
+  edge path).
+- **Byte-identical & safe:** new path test `build_smooth_path_into_matches_build_smooth_path` proves the
+  append-variant == the String builder for 0/1/2/cubic point counts incl. negative/fractional coords; the
+  `edge_fast_full_fragment_matches_render` pin test now feeds POINT SETS and builds the expected `d` via
+  `build_smooth_path_by`, so it pins "streamed-inline path == escaped `d` String" + the whole structure;
+  `svg_golden_snapshots_are_stable` + conformance GREEN with NO re-bless; 234 fm-render-svg lib tests pass;
+  clippy `-D warnings` clean (`#[allow(too_many_arguments)]`, matching the sibling node fast path). Shared
+  WASM render path; only `String`/`write_*` primitives.
+- **Verdict: LANDED.** The "build String -> escape-write -> drop" pattern struck a fourth time, here for the
+  geometry path. Render heap traffic on the exact wide workload the mermaid-js ratios use is now ~1/6 of the
+  original. Remaining wide-render allocs (~3289 for wide_16x32) are now the genuinely-needed buffers (the
+  node + edge fragment Strings, node accessible-label Strings, the parallel-chunk Strings, document/CSS) --
+  the pure-waste "intermediate String for a never-escapable value" allocs in the common edge/node fast
+  paths are now exhausted.
+
+  Agent: cc

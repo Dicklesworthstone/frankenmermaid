@@ -6594,9 +6594,23 @@ fn write_common_edge_path_into(
     edge_index: i32,
     marker_end: &str,
 ) {
-    use crate::attributes::{AttributeValue, write_escaped_attr};
+    use crate::attributes::write_escaped_attr;
     f.push_str("<path d=\"");
     let _ = write_escaped_attr(f, path_str);
+    write_common_edge_path_tail_into(f, stroke_width, style_class, edge_index, marker_end);
+}
+
+/// Write the `<path>` attributes that follow the `d` value — `" stroke-width="…" class="fm-edge {style}"
+/// data-fm-edge-id="…" marker-end="…"/>`. Shared by the pre-built-`d` writer above and the geometry-
+/// streaming whole-edge builder so the after-`d` structure stays single-sourced.
+fn write_common_edge_path_tail_into(
+    f: &mut String,
+    stroke_width: f32,
+    style_class: &str,
+    edge_index: i32,
+    marker_end: &str,
+) {
+    use crate::attributes::{AttributeValue, write_escaped_attr};
     f.push_str("\" stroke-width=\"");
     let _ = AttributeValue::Number(stroke_width).write_value(f);
     f.push_str("\" class=\"fm-edge ");
@@ -6624,18 +6638,29 @@ fn write_common_edge_path_into(
 /// piecewise so the per-edge description String never has to be allocated. Escaping the assembled
 /// string and escaping the two labels separately are byte-identical because the connective phrase
 /// (`" points to "`) and the `"unknown"` fallback contain no escapable bytes, so `write_escaped_text`
-/// is the identity on them. Pinned (incl. labels with `& < >`) by `edge_fast_full_fragment_matches_render`.
-fn build_common_edge_full_fragment(
-    path_str: &str,
+/// is the identity on them.
+///
+/// The path `d` data is streamed in via `build_smooth_path_by_into(n, point_at)` rather than passing a
+/// pre-built `path_str` String — the geometry is written straight into the fragment buffer (no per-edge
+/// `d` allocation). Writing it unescaped is byte-identical to the slow path's `write_escaped_attr(d)`
+/// because path data is only `[MLC0-9 .,-]`, which contains no escapable byte. Pinned (incl. the path
+/// geometry, and labels with `& < >`) by `edge_fast_full_fragment_matches_render`.
+#[allow(clippy::too_many_arguments)]
+fn build_common_edge_full_fragment<F>(
+    point_count: usize,
+    point_at: F,
     stroke_width: f32,
     style_class: &str,
     edge_index: i32,
     marker_end: &str,
     from_label: Option<&str>,
     to_label: Option<&str>,
-) -> String {
+) -> String
+where
+    F: FnMut(usize) -> (f32, f32),
+{
     use crate::attributes::{AttributeValue, write_escaped_text};
-    let mut f = String::with_capacity(path_str.len() + 192);
+    let mut f = String::with_capacity(24 + point_count * 56 + 192);
     // <g id="fm-edge-N" class="fm-edge" data-fm-edge-id="N" role="graphics-symbol" tabindex="0">
     // The id is `mermaid_edge_element_id(edge_index)` = "fm-edge-" + decimal(index); it never contains
     // an escapable byte, so it goes through the same `Integer` serializer as `data-fm-edge-id`.
@@ -6644,7 +6669,9 @@ fn build_common_edge_full_fragment(
     f.push_str("\" class=\"fm-edge\" data-fm-edge-id=\"");
     let _ = AttributeValue::Integer(edge_index).write_value(&mut f);
     f.push_str("\" role=\"graphics-symbol\" tabindex=\"0\">");
-    write_common_edge_path_into(&mut f, path_str, stroke_width, style_class, edge_index, marker_end);
+    f.push_str("<path d=\"");
+    crate::path::build_smooth_path_by_into(&mut f, point_count, point_at);
+    write_common_edge_path_tail_into(&mut f, stroke_width, style_class, edge_index, marker_end);
     f.push_str("<title>");
     let _ = write_escaped_text(&mut f, from_label.unwrap_or("unknown"));
     f.push_str(" points to ");
@@ -6670,8 +6697,6 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
     let ir_edge = ir.edges.get(edge_index);
     let arrow = ir_edge.map_or(ArrowType::Arrow, |e| e.arrow);
     let is_back_edge = edge_path.reversed;
-
-    let path_str = smooth_layout_edge_path(edge_path, offset_x, offset_y);
 
     // Back-edges get special treatment: dashed + muted color
     let (base_dasharray, marker_start, marker_end, base_color): (
@@ -6860,10 +6885,16 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
     {
         let (from_label, to_label) =
             edge_endpoint_accessible_labels(edge, ir, accessible_node_labels);
-        // `build_common_edge_full_fragment` writes the title (`"{from} points to {to}"`) piecewise, so
-        // the per-edge `describe_edge_labels` String is never allocated.
+        // `build_common_edge_full_fragment` streams the path geometry and writes the title
+        // (`"{from} points to {to}"`) piecewise, so NEITHER the per-edge `d` String (`path_str`, which is
+        // computed lazily below only for the slower paths) NOR the `describe_edge_labels` String is ever
+        // allocated.
         return Element::raw_svg(build_common_edge_full_fragment(
-            &path_str,
+            edge_path.points.len(),
+            |i| {
+                let p = &edge_path.points[i];
+                (p.x + offset_x, p.y + offset_y)
+            },
             stroke_width,
             style_class,
             edge_index as i32,
@@ -6872,6 +6903,10 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
             to_label,
         ));
     }
+
+    // Only the slower paths below need the materialized `d` String (the whole-edge fast path streamed it
+    // straight into its fragment above and returned).
+    let path_str = smooth_layout_edge_path(edge_path, offset_x, offset_y);
 
     // Fast path: the overwhelmingly common edge (solid `Arrow`, themed CSS, no back-edge, no
     // animation, no source spans, no inline `linkStyle`, no rendered label) serializes its `<path>`
@@ -7204,17 +7239,20 @@ mod tests {
         // `<path>` fast fragment in `Element::group().id().class("fm-edge").attr_int("data-fm-edge-id")
         // .attr("role").attr("tabindex").child(path).child(title)`, with the title text from
         // `describe_edge_labels(from, to, Arrow, None)`. The fragment must serialize byte-identically —
-        // including piecewise `<title>` escaping of labels with `& < > "` and the `"unknown"` fallback.
-        let check = |d: &str,
+        // including the streamed path geometry and piecewise `<title>` escaping of labels with
+        // `& < > "` and the `"unknown"` fallback. The expected `d` String is the one the slow path would
+        // build (`build_smooth_path_by`), so this also pins "streamed-inline path == escaped `d` String".
+        let check = |points: &[(f32, f32)],
                      idx: i32,
                      style: &str,
                      sw: f32,
                      from_label: Option<&str>,
                      to_label: Option<&str>| {
+            let d = crate::path::build_smooth_path_by(points.len(), |i| points[i]);
             let desc =
                 crate::a11y::describe_edge_labels(from_label, to_label, ArrowType::Arrow, None);
             let path_child =
-                Element::raw_svg(build_common_edge_fragment(d, sw, style, idx, "url(#arrow-end)"));
+                Element::raw_svg(build_common_edge_fragment(&d, sw, style, idx, "url(#arrow-end)"));
             let group = Element::group()
                 .id(&fm_core::mermaid_edge_element_id(idx as usize))
                 .class("fm-edge")
@@ -7226,24 +7264,31 @@ mod tests {
             let mut expected = String::new();
             group.write_to_string(&mut expected);
             let frag = build_common_edge_full_fragment(
-                d, sw, style, idx, "url(#arrow-end)", from_label, to_label,
+                points.len(),
+                |i| points[i],
+                sw,
+                style,
+                idx,
+                "url(#arrow-end)",
+                from_label,
+                to_label,
             );
             assert_eq!(
                 frag, expected,
                 "whole-edge fast fragment must equal the slow Element group (idx={idx})"
             );
         };
-        check("M0 0 L10 10", 0, "fm-edge-solid", 1.8, Some("A"), Some("B"));
+        check(&[(0.0, 0.0), (10.0, 10.0)], 0, "fm-edge-solid", 1.8, Some("A"), Some("B"));
         check(
-            "M1.50 2.25 C3.00 4.00 5.00 6.00 7.00 8.00",
+            &[(1.5, 2.25), (3.0, 4.0), (5.0, 6.0), (7.0, 8.0)],
             42,
             "fm-edge-solid",
             1.8,
             Some("Node <1> & \"x\""),
             Some("Node 2"),
         );
-        check("M-5.25 0 L0 -3.50", 1000, "fm-edge-solid", 2.5, None, None);
-        check("", 7, "fm-edge-solid", 1.8, Some("start"), None);
+        check(&[(-5.25, 0.0), (0.0, -3.5)], 1000, "fm-edge-solid", 2.5, None, None);
+        check(&[(0.0, 0.0)], 7, "fm-edge-solid", 1.8, Some("start"), None);
     }
 
     use fm_core::{

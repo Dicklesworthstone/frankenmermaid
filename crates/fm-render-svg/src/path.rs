@@ -297,29 +297,41 @@ fn write_point(output: &mut String, prefix: char, x: f32, y: f32) {
 /// builder output (commands joined by single spaces). This is the per-edge hot path on
 /// curve-heavy graphs, where the builder's per-segment enum push + dispatch is pure
 /// overhead on top of the byte writing.
-pub(crate) fn build_smooth_path_by<F>(n: usize, mut point_at: F) -> String
+pub(crate) fn build_smooth_path_by<F>(n: usize, point_at: F) -> String
 where
     F: FnMut(usize) -> (f32, f32),
 {
-    if n == 0 {
-        return String::new();
-    }
     // Right-size the `d` buffer. n<=2 is `M` (or `M ... L ...`), ~24-48 bytes — keep the tight
     // `n*24` so short edges never over-allocate. n>=3 emits an `M` plus (n-1) cubic segments
     // (`C cp1x cp1y,cp2x cp2y,x y`, six `write_fixed2` coords ~8 chars + separators ≈ 56 bytes each),
     // which the old `n*24` under-sized — forcing 1-2 reallocate-and-copy (memmove) per multi-point
     // edge. Size the cubic case for one allocation. Capacity-only, output byte-identical.
     let mut d = String::with_capacity(if n < 3 { n * 24 } else { 24 + (n - 1) * 56 });
+    build_smooth_path_by_into(&mut d, n, point_at);
+    d
+}
+
+/// Append the smooth cubic-Bézier path `d` data directly into `out` — byte-identical to
+/// [`build_smooth_path_by`] but writing into a caller-provided buffer so a whole edge fragment can be
+/// assembled without allocating the per-edge `d` String first. Pinned by
+/// `build_smooth_path_into_matches_build_smooth_path`.
+pub(crate) fn build_smooth_path_by_into<F>(out: &mut String, n: usize, mut point_at: F)
+where
+    F: FnMut(usize) -> (f32, f32),
+{
+    if n == 0 {
+        return;
+    }
     let first = point_at(0);
-    write_point(&mut d, 'M', first.0, first.1);
+    write_point(out, 'M', first.0, first.1);
     if n == 1 {
-        return d;
+        return;
     }
     if n == 2 {
         let second = point_at(1);
-        d.push(' ');
-        write_point(&mut d, 'L', second.0, second.1);
-        return d;
+        out.push(' ');
+        write_point(out, 'L', second.0, second.1);
+        return;
     }
 
     let t: f32 = 0.25;
@@ -338,16 +350,9 @@ where
         let cp2x = p_next.0 - (p_next2.0 - p_cur.0) * t;
         let cp2y = p_next.1 - (p_next2.1 - p_cur.1) * t;
 
-        d.push(' ');
-        write_cubic(
-            &mut d,
-            'C',
-            (cp1x, cp1y),
-            (cp2x, cp2y),
-            (p_next.0, p_next.1),
-        );
+        out.push(' ');
+        write_cubic(out, 'C', (cp1x, cp1y), (cp2x, cp2y), (p_next.0, p_next.1));
     }
-    d
 }
 
 /// Fluent builder for SVG path `d` attribute strings.
@@ -590,6 +595,30 @@ impl PathBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_smooth_path_into_matches_build_smooth_path() {
+        // The append-into variant must be byte-identical to the String-returning builder for every
+        // point count (M-only, M+L, and the cubic-Bézier path), incl. negative/fractional coords.
+        let point_sets: &[&[(f32, f32)]] = &[
+            &[],
+            &[(0.0, 0.0)],
+            &[(0.0, 0.0), (10.0, 10.0)],
+            &[(0.0, 0.0), (10.0, 10.0), (20.0, 5.0), (30.0, 30.0)],
+            &[(-5.25, 0.0), (0.0, -3.5), (12.75, 8.0), (40.0, -1.0), (50.0, 50.0)],
+        ];
+        for pts in point_sets {
+            let returned = build_smooth_path_by(pts.len(), |i| pts[i]);
+            let mut appended = String::from("PREFIX:");
+            build_smooth_path_by_into(&mut appended, pts.len(), |i| pts[i]);
+            assert_eq!(
+                appended,
+                format!("PREFIX:{returned}"),
+                "into-variant diverged for {} points",
+                pts.len()
+            );
+        }
+    }
 
     #[test]
     fn builds_simple_path() {
