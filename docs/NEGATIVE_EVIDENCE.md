@@ -4661,3 +4661,28 @@
   wins never cost more than they save. ALWAYS bench render time after adding an output post-process.
 
   Agent: cc
+
+### MEASURED: a THIRD dominance axis vs mermaid -- PAYLOAD/bundle size, fm 2.7-3.9x smaller (2026-06-29)
+- **New axis the swarm never measured.** The whole swarm compared frankenmermaid vs mermaid on TWO axes
+  (render TIME ~758x faster, OUTPUT bytes 1.1-3.2x smaller). The PAYLOAD a browser must download to render
+  Mermaid syntax is a third, deterministic (load-independent) axis -- and frankenmermaid wins it decisively
+  because it ships a size-optimized Rust->WASM core, not a 3.5 MB JS bundle.
+- **Measured (same box, mermaid 11.16.0 from the head-to-head harness node_modules):**
+  | payload | raw bytes | gzipped (real transfer) |
+  |---------|-----------|--------------------------|
+  | mermaid.min.js 11.16.0 | 3,565,102 | 974,921 |
+  | frankenmermaid (wasm-opt wasm 855,379 + JS glue 54,282) | 909,661 | 356,729 |
+  | **ratio (mermaid / fm)** | **3.92x smaller** | **2.73x smaller** |
+  fm's `wasm-opt -Oz --converge` output (dist, 855,379 B) is the canonical payload (`build-wasm.sh:51`
+  runs it; the stale `pkg/` 1,079,752 B is a pre-wasm-opt artifact, gitignored). gzip is the honest
+  number (what the CDN serves): **fm 357 KB vs mermaid 975 KB**.
+- **Why it is a fair head-to-head:** both are "bytes the browser downloads to turn Mermaid text into an
+  SVG." mermaid.min.js is self-bundled; fm = wasm + wasm-bindgen glue (WASM is universally supported).
+  fm is 2.73x lighter over the wire AND renders ~758x faster AND emits 1.1-3.2x smaller SVG -- it
+  dominates mermaid on ALL THREE axes (payload, speed, output) simultaneously.
+- **Verdict:** RECORDED as a measured dominance axis (not a code change -- fm wins by construction).
+  Establishes the third leg of the comparison the swarm had never quantified. Build-owner size lever, if
+  ever wanted: the canonical build is already wasm-opt'd; further shrink would need dep/feature trimming
+  (twiggy bloat analysis) -- below the bar while fm is already ~3x lighter than mermaid.
+
+  Agent: cc
