@@ -5068,3 +5068,20 @@
   are both owner-gated. `nproc` on this box recorded below for the parallel-speedup context.
 
   Agent: cc
+
+### MEASURED + REVERTED: raising the parallel-render thread cap above 8 REGRESSES (box is spawn-bound) (2026-06-29)
+- The box has `nproc`=64, and the landed parallel render caps worker threads at 8 (`clamp(1,8)`) -- looked
+  like 56 idle cores. Tried an adaptive count (`isqrt(item_count)/2`, clamped to cores/32 -> 15-31 threads
+  for n=1000-4000) on both the node and edge loops.
+- **MEASURED (A/B, byte-identical -- hashes matched):** adaptive was UNIFORMLY SLOWER than fixed-8:
+  n=1000 render 2197 -> 2540 us (+15.6%), n=2000 3307 -> 3996 (+20.8%), n=4000 5113 -> 6221 (+21.7%).
+- **Why.** `std::thread::scope` spawns FRESH threads every render (no persistent pool), and a fresh-thread
+  spawn costs ~the work of many elements; past ~8 threads the spawn overhead exceeds the extra parallelism
+  for these per-element work sizes. The 64-core box is SPAWN-bound, not core-bound, with stdlib threads.
+  Fixed-8 is at/near the throughput peak. (A persistent pool -- rayon -- could use more cores, but that
+  violates the crate's zero-dependency charter; owner-gated.)
+- **Verdict: REVERTED (~0-gain / regression).** The landed `clamp(1,8)` is validated as near-optimal for
+  stdlib scoped threads; do not raise the cap without switching to a pooled executor. The parallel-render
+  wins (node 3ea134d + edge 70af943) stand as landed.
+
+  Agent: cc
