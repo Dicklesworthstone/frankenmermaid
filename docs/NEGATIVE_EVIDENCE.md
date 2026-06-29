@@ -5442,3 +5442,30 @@
   ("IR ownership") rather than assume -- the assumption hid a clean 26% win.
 
   Agent: cc
+
+### LANDED: split_statements yields the no-`;` line via Once, no Vec -- parse allocs -36% more (2026-06-29)
+- Continuing the parse-alloc profile (after dropping the per-line staging Vec, 0798451), the remaining
+  wide_16x32 parse 64-127 bucket was 1479 ≈ statement count -- another ~1 alloc/statement. Root cause:
+  `split_statements` builds a `Vec<&str>` and returns `Vec::into_iter()`; even for the overwhelmingly common
+  no-`;` line it did `statements.push(line); return statements.into_iter()` -- a one-element `Vec<&str>`
+  (cap-4 x 16 B fat ptr = 64 B = the 64-127 bucket).
+- **Fix (LANDED):** return an enum iterator `SplitStatements::{Single(Once), Multiple(vec::IntoIter)}`.
+  The no-`;` line yields the whole line via `std::iter::once(line)` with ZERO allocation; only a genuinely
+  multi-statement (`;`-bearing) line builds the Vec. Output-identical (the full scan already yields exactly
+  `[line]` for a no-`;` line). Benefits all four `split_statements` callers, no new dependency.
+- **MEASURED (deterministic counting-allocator A/B, load-immune):** parse allocs
+  wide_16x32 **4105 -> 2632 (-35.9%)** (64-127 bucket 1479 -> 6, i.e. 1473 per-line Vecs removed),
+  wide_8x16 1057 -> 704 (-33.4%). **COMBINED with the same-cycle staging-Vec win: wide_16x32 parse
+  5577 (ORIG) -> 2632 = -52.8%.**
+- **Byte-identical & safe:** `franken_tui_fixture_cases` (parse corpus) + `layout_golden_checksums_are_stable`
+  (IR->layout byte-identity, IR unchanged) + `svg_golden_snapshots_are_stable` GREEN with NO re-bless; 405
+  fm-parser lib tests pass; clippy `-D warnings` clean.
+- **Verdict: LANDED.** Second parse-alloc lever this cycle, same family as the staging Vec: a per-line
+  helper allocating a tiny Vec for the single-element common case. After both, wide_16x32 parse allocs are
+  2632, now dominated by the 0-15 bucket (2577) = the genuinely-needed IR-owned node-id/label Strings -- so
+  parse is now AT its IR-ownership floor (the cheap transient-alloc levers there ARE exhausted, this time
+  verified by bucketing not assumed). Pattern: `fn f(..) -> impl Iterator` that internally `Vec::into_iter()`
+  hides a per-call allocation; an enum-of-iterators (`Once` | `IntoIter`) removes it for the common
+  single-element case with no dep.
+
+  Agent: cc

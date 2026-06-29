@@ -7848,15 +7848,34 @@ fn leading_indent_width(line: &str) -> usize {
     width
 }
 
-fn split_statements(line: &str) -> impl Iterator<Item = &str> {
-    let mut statements = Vec::new();
-    // Statements are separated by `;` (outside quotes/brackets). When the line contains
-    // no `;` at all it is a single statement, so skip the quote/bracket-aware scan.
-    // Output-identical: the full scan yields exactly `[line]` in that case.
-    if !line.as_bytes().contains(&b';') {
-        statements.push(line);
-        return statements.into_iter();
+/// Iterator over the `;`-separated statements of a line. The overwhelmingly common no-`;` line yields
+/// the whole line via [`std::iter::Once`] with NO allocation; only a genuinely multi-statement line
+/// builds the `Vec`. (Previously this always returned `Vec::into_iter()`, so every single-statement line
+/// paid a one-element `Vec<&str>` allocation — ~1 alloc/line on wide flowcharts.)
+enum SplitStatements<'a> {
+    Single(std::iter::Once<&'a str>),
+    Multiple(std::vec::IntoIter<&'a str>),
+}
+
+impl<'a> Iterator for SplitStatements<'a> {
+    type Item = &'a str;
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Single(it) => it.next(),
+            Self::Multiple(it) => it.next(),
+        }
     }
+}
+
+fn split_statements(line: &str) -> SplitStatements<'_> {
+    // Statements are separated by `;` (outside quotes/brackets). When the line contains no `;` at all it
+    // is a single statement, so skip the quote/bracket-aware scan AND the `Vec` allocation — yield the
+    // whole line via `Once`. Output-identical: the full scan yields exactly `[line]` in that case.
+    if !line.as_bytes().contains(&b';') {
+        return SplitStatements::Single(std::iter::once(line));
+    }
+    let mut statements = Vec::new();
     let mut current_start = 0;
     let mut in_quote: Option<char> = None;
     let mut escaped = false;
@@ -7905,7 +7924,7 @@ fn split_statements(line: &str) -> impl Iterator<Item = &str> {
         statements.push(remainder);
     }
 
-    statements.into_iter()
+    SplitStatements::Multiple(statements.into_iter())
 }
 
 fn parse_sankey_record(line: &str) -> Option<(String, String, String)> {
