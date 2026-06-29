@@ -5085,3 +5085,31 @@
   wins (node 3ea134d + edge 70af943) stand as landed.
 
   Agent: cc
+
+### FOUND (near-latent perf bug, NOT yet fixable safely): the node fast-path is DEAD for the default config (2026-06-29)
+- `build_common_node_fragment` direct-serializes a common rectangle node (skipping 4 `Element` builds +
+  their `Attributes` Vecs -- "~60% of wide render" per its own comment). But its gate clause
+  `!detail.enable_shadows` is never satisfied by the DEFAULT config: `config.shadows` defaults to `true`,
+  so the fast path takes **0 hits** on a default render (verified with a counter) -- every common node
+  falls to the slow 4-`Element` path.
+- **The shadow gate is REDUNDANT.** The per-node shadow is the inline `filter="url(#drop-shadow)"`, emitted
+  ONLY when `!config.embed_theme_css`; the gate already REQUIRES `embed_theme_css=true`, under which the
+  shadow comes from the `.fm-node <shape>` CSS rule and `enable_shadows` changes NO node byte. Relaxing the
+  clause made all 37 goldens byte-identical (no re-bless) and measured render **n=100 688->493 us
+  (-28.3%)** (small/serial diagrams -- the COMMON case; modest on large because parallelism already hides
+  per-node work).
+- **Why it can't ship as a one-clause change:** the fast-path GATE HAS ROTTED. Features added AFTER it --
+  click callbacks (`data-callback`), node menu links, link/anchor (`href`), sequence mirror-header class --
+  are applied by CALLERS that POST-PROCESS the returned `Element` (e.g. the mirror loop does
+  `render_node(..).class("fm-sequence-mirror-header")`). The fast path returns opaque `raw_svg`, so all
+  such post-processing is silently DROPPED -- 4 lib tests broke. The `!enable_shadows` clause had been
+  masking this by disqualifying every default node. Safely enabling the fast path needs the gate COMPLETED:
+  exclude callback/menu/link nodes (node-field clauses) AND give post-processing callers (mirror loop) a
+  `permit_fast=false` path -- a careful audit of every `render_node` caller (risk: an UNTESTED
+  post-processed feature dropping silently), beyond a safe one-shot.
+- **Verdict: REVERTED, SURFACED as high-value.** This is the single biggest remaining render win for the
+  COMMON case (~28% on small/medium default renders) and it's a ROOT-CAUSED, near-latent perf bug, not a
+  vague "architectural" lever. Recommended owner follow-up: complete the fast-path gate (node-field
+  exclusions + caller `permit_fast` flag) and re-enable it for the default config.
+
+  Agent: cc
