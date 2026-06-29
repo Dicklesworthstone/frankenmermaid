@@ -179,27 +179,6 @@ svg {
   opacity: 0.8;
   stroke-dasharray: 4 4;
 }
-.fm-edge-labeled > rect {
-  fill: var(--fm-edge-label-bg);
-  stroke: var(--fm-edge-label-border);
-  stroke-width: 0.75;
-  rx: 6px;
-  ry: 6px;
-}
-/* Add a backdrop filter for modern glassmorphism effect on the rect */
-@supports (backdrop-filter: blur(4px)) {
-  .fm-edge-labeled > rect {
-    fill: color-mix(in srgb, var(--fm-edge-label-bg) 85%, transparent);
-    backdrop-filter: blur(8px);
-  }
-}
-.edge-label {
-  fill: var(--fm-edge-label-text);
-  font-weight: 600;
-  font-size: 0.88em;
-  letter-spacing: -0.01em;
-  text-rendering: optimizeLegibility;
-}
 marker#arrow-end path,
 marker#arrow-filled path,
 marker#arrow-circle path,

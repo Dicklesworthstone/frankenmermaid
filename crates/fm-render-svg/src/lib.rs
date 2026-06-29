@@ -6206,73 +6206,81 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
     // self-contained. `stroke-width` is NOT gated — the unconditional CSS sets none, so the inline
     // is the actual width.
     //
+    let animation_style = config
+        .animations_enabled
+        .then(|| animation_style_attr(edge_animation_order(edge_path, ir)));
+
     // Fast path: the overwhelmingly common edge (solid `Arrow`, themed CSS, no back-edge, no
-    // animation, no source spans, no inline `linkStyle`, no rendered label) serializes to a fixed
-    // five-attribute `<path>`. Stream those bytes directly via `Element::raw_svg`, skipping the
-    // per-edge `Attributes` Vec build + per-attribute `write_into` dispatch (a ceiling probe shows
-    // that overhead is ~40% of wide render). For `ArrowType::Arrow` (not a back-edge) the marker/
-    // dasharray/colour/class/width above are all fixed. Output is byte-identical (see the helper).
-    if arrow == ArrowType::Arrow
+    // animation, no source spans, no inline `linkStyle`, no rendered label) serializes its `<path>`
+    // child to a fixed five-attribute fragment via `Element::raw_svg`, skipping the per-edge
+    // `Attributes` Vec build + per-attribute `write_into` dispatch (a ceiling probe shows that
+    // overhead is ~40% of wide render). The fragment is ONLY the `<path>`; it then falls through to
+    // the SAME a11y wrapping tail (group / `role` / `tabindex` / `<title>`) the slow path runs, so
+    // the full output stays byte-identical to the slow Element path (proven by `golden_svg_test`).
+    // Gated on `a11y.text_alternatives && ir_edge.is_some()` so the raw fragment only ever flows
+    // into the group-child branch below, never the attribute-mutating unwrapped fallthrough (a
+    // `raw_svg` element cannot take `.attr()`/`.id()`).
+    let mut elem = if arrow == ArrowType::Arrow
         && !is_back_edge
         && config.embed_theme_css
         && !config.animations_enabled
         && !config.include_source_spans
+        && config.a11y.text_alternatives
+        && ir_edge.is_some()
         && marker_start.is_none()
         && base_dasharray.is_none()
         && resolve_edge_inline_style(ir, edge_index).is_none()
         && !(detail.show_edge_labels && ir_edge.and_then(|e| e.label).is_some())
         && let Some(marker_end_val) = marker_end
     {
-        return Element::raw_svg(build_common_edge_fragment(
+        Element::raw_svg(build_common_edge_fragment(
             &path_str,
             stroke_width,
             style_class,
             edge_index as i32,
             marker_end_val,
-        ));
-    }
+        ))
+    } else {
+        let mut elem = Element::path().d(&path_str);
+        if !config.embed_theme_css {
+            elem = elem.fill("none").stroke(base_color);
+        }
+        let mut elem = elem
+            .stroke_width(stroke_width)
+            .class("fm-edge")
+            .class(style_class)
+            .attr_int("data-fm-edge-id", edge_index as i32);
+        if config.animations_enabled && base_dasharray.is_some() {
+            elem = elem.class("fm-edge-flow-animated");
+        }
 
-    let mut elem = Element::path().d(&path_str);
-    if !config.embed_theme_css {
-        elem = elem.fill("none").stroke(base_color);
-    }
-    let mut elem = elem
-        .stroke_width(stroke_width)
-        .class("fm-edge")
-        .class(style_class)
-        .attr_int("data-fm-edge-id", edge_index as i32);
-    let animation_style = config
-        .animations_enabled
-        .then(|| animation_style_attr(edge_animation_order(edge_path, ir)));
-    if config.animations_enabled && base_dasharray.is_some() {
-        elem = elem.class("fm-edge-flow-animated");
-    }
+        // Apply inline style from linkStyle directives if present.
+        if let Some(inline_style) = resolve_edge_inline_style(ir, edge_index) {
+            let merged_style = animation_style.as_ref().map_or_else(
+                || inline_style.clone(),
+                |extra| format!("{inline_style};{extra}"),
+            );
+            elem = elem.attr("style", &merged_style);
+        } else if let Some(extra) = animation_style.as_deref() {
+            elem = elem.attr("style", extra);
+        }
 
-    // Apply inline style from linkStyle directives if present.
-    if let Some(inline_style) = resolve_edge_inline_style(ir, edge_index) {
-        let merged_style = animation_style.as_ref().map_or_else(
-            || inline_style.clone(),
-            |extra| format!("{inline_style};{extra}"),
-        );
-        elem = elem.attr("style", &merged_style);
-    } else if let Some(extra) = animation_style.as_deref() {
-        elem = elem.attr("style", extra);
-    }
+        if let Some(marker) = marker_start {
+            elem = elem.marker_start(marker);
+        }
+        if let Some(marker) = marker_end {
+            elem = elem.marker_end(marker);
+        }
 
-    if let Some(marker) = marker_start {
-        elem = elem.marker_start(marker);
-    }
-    if let Some(marker) = marker_end {
-        elem = elem.marker_end(marker);
-    }
+        if config.include_source_spans {
+            elem = apply_span_metadata(elem, edge_path.span);
+        }
 
-    if config.include_source_spans {
-        elem = apply_span_metadata(elem, edge_path.span);
-    }
-
-    if let Some(dasharray) = base_dasharray {
-        elem = elem.stroke_dasharray(dasharray);
-    }
+        if let Some(dasharray) = base_dasharray {
+            elem = elem.stroke_dasharray(dasharray);
+        }
+        elem
+    };
 
     // If edge has a label, wrap in group with text
     if detail.show_edge_labels

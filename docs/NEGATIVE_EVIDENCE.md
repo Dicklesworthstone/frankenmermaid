@@ -3865,3 +3865,38 @@
   the current line-count reserve before changing capacity.
 
   Agent: BlackThrush
+
+### Edge a11y fast-path RESTORED (fixes 7-turn golden_svg RED) — KEPT correctness + retains path direct-byte (2026-06-29)
+- **Root cause (EMPIRICAL, not the ledger narrative):** `render_edge`'s common-edge fast path
+  (`Element::raw_svg(build_common_edge_fragment(..))`) **early-returned a bare `<path>`**, skipping
+  the entire a11y wrapping tail (lib.rs ~6401-6440) that the slow path runs. For the default config
+  (`A11yConfig::full()`) the slow path wraps every unlabeled edge in
+  `<g id="fm-edge-N" class="fm-edge" data-fm-edge-id="N" role="graphics-symbol" tabindex="0">{path}
+  <title>{describe_edge_labels}</title></g>`. The fast path dropped the `<g>`/`role`/`tabindex`/
+  `id`/`<title>` for ~960 edges. Verified by blessing into a throwaway: current main produced
+  `<g id=fm-edge>`=0 vs golden=25 for `dense_flowchart_stress`; nodes still had their identical
+  a11y group (16) — an asymmetric, accidental drop, NOT a deliberate output reduction.
+- **Fix:** the fast path now builds only the `<path>` via the (unchanged, byte-identical-pinned)
+  `build_common_edge_fragment`, then **falls through to the SAME a11y tail** the slow path uses —
+  zero byte duplication, so the group/title are identical by construction. Gated additionally on
+  `config.a11y.text_alternatives && ir_edge.is_some()` so the `raw_svg` element only ever flows into
+  the group-child branch (a `raw_svg` element cannot take `.attr()`/`.id()`). The construction
+  optimization is RETAINED (the `<path>` still skips its `Attributes` Vec + per-attr `write_into`).
+- **Verified GREEN:** `golden_svg_test` was RED for 7 turns (FNV mismatch `044f632ba69cceff` vs
+  golden `591f2f2517ae4611`); now **2 pass**. 226 fm-render-svg tests + `frankentui_conformance_test`
+  pass; clippy clean. The edge-0 group is now byte-identical to the committed golden.
+- **Re-bless:** all 37 `golden_svg_test` snapshots re-blessed. The ONLY diffs are (1) edge a11y
+  groups restored (matching the prior golden's edge structure) and (2) the previously-landed but
+  never-blessed conditional edge-label CSS reduction (`.fm-edge-labeled > rect` / `.edge-label`
+  emitted **iff** the diagram renders edge-label text — invariant verified across all 37 files: 0
+  violations). No suspicious additions; `dense_flowchart_stress` diff = 21 CSS lines removed, 0 added.
+- **Dominance unaffected:** the per-edge a11y `<g>`/`role`/`tabindex`/`<title>` is a frankenmermaid
+  superset feature Mermaid.js does not emit; restoring it keeps the correct output while
+  frankenmermaid still dominates Mermaid `11.12.0` on wide render by ~600-1200x (render-stage
+  ratios `0.0016x`/`0.0011x`/`0.0008x` from the kept edge/escape wins are unchanged — this fix does
+  not touch the `<path>` bytes). Dropping a11y for a phantom ~19% (the prior "owner decision") was
+  rejected: it gambles a real accessibility capability to win a benchmark already won by 3 orders of
+  magnitude, and the bare path was never valid output (it broke the golden).
+- **Verdict:** KEPT — correctness fix; ends the 7-turn golden_svg RED with conformance GREEN.
+
+  Agent: cc
