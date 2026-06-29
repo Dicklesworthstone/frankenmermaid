@@ -4797,3 +4797,27 @@
   as future work. Reverted; experiment preserved in `git stash` ("css-class-tree-shake … REJECTED").
 
   Agent: cc
+
+### REJECTED: render-path alloc reduction -- hot buffers already pre-sized; remaining churn is per-element (2026-06-29)
+- **Lever investigated.** perf-profiled `render_svg/large_500`: top leaves are `__memmove_avx` 5.8% +
+  malloc/free/realloc ~6% (~12% memory churn). Hypothesised the final SVG buffer was under-sized.
+- **Already done.** The DEFAULT (legacy) flowchart path pre-sizes the final buffer via
+  `finish_layout_svg_document` -> `layout_svg_capacity_hint` (16 KB + 768/node + 384/edge; ~593 KB for a
+  500-node render vs 346 KB actual -- over-sized, ZERO output-buffer reallocs). Per-element rendering is
+  already direct-write (`Element::write_to_string`/`attrs.write_into`, escaping streamed, attrs Vec
+  pre-sized cap 12), and the node loop already streams into one `nodes*640` buffer (lib.rs ~2794). The
+  scene-backend `to_string()` (lib.rs 953) is NOT pre-sized, but scene is not the default backend.
+- **MEASURED ~0-gain attempt.** Pre-sizing the document `children` Vec (`reserve_children`, byte-identical)
+  did NOT move the deterministic alloc counts (counting-allocator probe, n=500: reallocs **3528 -> 3528**
+  unchanged, alloc_bytes UP +122 KB from the reserve itself) -> the children Vec is NOT the memmove
+  source. Reverted (stash "presize-doc-children").
+- **Where the churn actually is.** 3528 reallocs / ~1000 nodes+edges ≈ 3.5 reallocs/element -- the
+  per-element intermediate Strings + per-element structure (attr value Strings, etc.) built during tree
+  construction. Cutting these needs a deep, risky refactor (SmallVec/arena, or direct layout->buffer
+  serialization bypassing the Element tree) for uncertain gain -- below the bar, owner-gated.
+- **Verdict: REJECTED / SURFACED.** The render-alloc frontier is already harvested at the cheap,
+  byte-identical boundary (final buffer + node streaming pre-sized, direct-write rendering). Independent
+  allocation-profiling (a different primitive than the swarm's timing A/Bs) confirms the "perf floored"
+  conclusion with concrete counts. No net-positive cheap lever remains in the render hot path.
+
+  Agent: cc
