@@ -4167,3 +4167,34 @@
   layout all floored or owner-routed).
 
   Agent: cc
+
+### FRESH layout-stage profile (first personal profile) — edge routing dominates (peer-owned); 17% malloc-bound; + a symbol-resolution method for the swarm (2026-06-29)
+- **Symbol-resolution unblock (useful for ALL agents):** the workspace `[profile.release]` sets
+  `strip = true` + `lto = true` + `opt-level = "z"`, so bench binaries are stripped and `perf`/`nm`/
+  `addr2line` resolve NOTHING (the whole swarm's profiles show bare `0x...`). Rebuild the bench with
+  `CARGO_PROFILE_RELEASE_STRIP=false CARGO_PROFILE_RELEASE_DEBUG=2 cargo build -p <pkg> --bench <b>`
+  (env override, no Cargo.toml edit) → 58 MB unstripped binary, and `addr2line -e <bin> 0x...` + `perf
+  report` resolve fm_layout/fm_core symbols by name. This is how the profile below was obtained.
+- **Profile (`pipeline_bench wide_stages/layout/16x32`, fp call-graph, resolved self-cost):**
+  | % self | symbol | owner |
+  |--------|--------|-------|
+  | 10.0% | `ObstacleSpatialIndex::query_segment` | edge routing (peer, just optimized: CSR bucket grid) |
+  | 10.0% | `_int_malloc` (incl. `RawVec<…regex Cache>::grow_one`, RawVec grows) | allocation churn |
+  | 8.6% | `build_edge_paths_with_orientation` | edge routing (peer) |
+  | 5.0% | its `FilterMap<Enumerate<Iter<IrEdge>>>` closure | edge routing (peer) |
+  | — | `fm_core::parse_style_string_with_rejections` + `<char as Pattern>::into_searcher` | per-node style re-parse during layout |
+  Layout is **~17% malloc/free-bound** (`_int_malloc` 10% + `malloc_consolidate` 3.4% + `_int_free_chunk`
+  2.3% + `cfree` 2.2%) — more than parse. The dominant ~24% is EDGE ROUTING (`query_segment` +
+  `build_edge_paths` + closure), which is the active peer's domain and the subject of their last 6
+  commits (obstacle CSR grid, edge-routing pair tracker, etc.) — high conflict/redundancy risk to touch.
+- **The one arguably-mine lever, also multi-crate:** `parse_style_string_with_rejections` is re-parsed
+  during layout (node sizing) per styled node via `str::find`/char search — the parsed style should be
+  computed once at parse and carried on the IR node (fm-core field + fm-parser populate + fm-layout
+  read), the same 3-crate shape as the layout fingerprint. The regex `Cache` churn is transitive (no
+  direct regex in fm-core/fm-layout — via `egg` or another dep), not a clean single-crate lever.
+- **Verdict:** layout frontier now PERSONALLY profiled (was assumed). Biggest lever = edge routing
+  (peer-owned, recently optimized) → routed to the peer; secondary = style re-parse caching (3-crate).
+  No clean single-crate in-scope layout lever for this agent. Frontier map complete: parse/render/layout
+  all profiled + floored-or-owner-routed.
+
+  Agent: cc
