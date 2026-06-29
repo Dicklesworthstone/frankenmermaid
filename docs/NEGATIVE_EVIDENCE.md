@@ -4126,3 +4126,25 @@
   owner. No further single-crate in-scope lever remains on this path.
 
   Agent: cc
+
+### MEASURED: incremental cache-hit is hash-bound (605us), NOT clone-bound (23us) — O(1) follow-up = fingerprint ONLY, drop the Arc (2026-06-29)
+- **Measurement (instrumented `IncrementalLayoutEngine` cache-hit, `integration_test:771` @400 nodes,
+  reverted after):** split the post-serde_json cache-hit into its two parts, 6 stable samples:
+  `key_us` (the `layout_memo_key` serde hash) = **601-642 us (~605 us)**; `clone_us`
+  (`cached.traced.clone()`) = **23-24 us**. The hit is **96% hash, 4% clone**.
+- **Corrects the prior follow-up scope (4debd83):** that entry listed BOTH an O(1) IR fingerprint AND
+  an `Arc<TracedLayout>` zero-copy return as needed. The clone is only ~23 us — negligible and NOT
+  worth an API-breaking `Arc` change. **The complete O(1) fix is the IR-carried fingerprint ALONE:**
+  make `layout_memo_key`'s IR hash O(1) (a fingerprint computed once at parse in `fm-parser`, stored on
+  `MermaidDiagramIr` in `fm-core`, invalidated on mutation) and the cache-hit drops to ~O(1)+23us clone
+  = clear win at every size (vs 512 us full recompute @400). No engine return-type change required.
+- **Also bounds the intermediate options:** the 605 us is serde_json serialization + scalar FNV over
+  the JSON; swapping FNV->FxHasher saves only the FNV slice (~tens of us, the serialization dominates),
+  landing ~535 us — still ~break-even vs 512 us @400, i.e. a sub-noise `REVERT ~0-gain`. Only a compact
+  binary serializer (new dep) or the fingerprint moves @400 to a clear win.
+- **Verdict:** the remaining incremental lever is precisely scoped to ONE change — the IR fingerprint
+  (3-crate, mutation-invalidation correctness-sensitive, owner-routed). The landed serde_json fix
+  (cab553e) already resolves the regression for the test + typical interactive sizes; this measurement
+  removes the Arc from the follow-up and rules out the sub-noise hasher swap.
+
+  Agent: cc
