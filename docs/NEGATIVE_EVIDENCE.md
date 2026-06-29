@@ -5159,3 +5159,26 @@
   fast-path + parallel wins this session already cut the PER-ELEMENT cost; the fixed cost is the residual.
 
   Agent: cc
+
+### MEASURED: layout is ~50% ALLOCATION-bound (~3500 small allocs); reducing it is owner-gated (2026-06-29)
+- Profiled the least-explored phase (layout, 9-25% of pipeline). Counting-allocator: `layout_diagram` does
+  **~3500 allocations** (n=100: 3481, n=500: 3618, n=1000: 7204; only ~40 reallocs) -- ~17 distinct small
+  allocs PER node+edge for a chain. layout time ≈ allocs x ~89 ns ≈ alloc-bound.
+- **perf confirms it (frame-pointer profile of a layout loop):** `_int_malloc` 21.4% + `malloc` 9% +
+  `malloc_consolidate` 5.6% + `realloc` 4.6% = **>50% of layout time in the allocator** (the malloc_consolidate
+  share is the small-alloc churn signature). Cutting the ~3500 allocs would roughly HALVE layout (~5-12%
+  pipeline for the common small-diagram case).
+- **Why it's not a clean autonomous win:** (1) the source is spread across the 693 KB `fm-layout` crate
+  (BK coordinate assignment / edge routing / spectral -- the egg e-graph crossing-min is GATED OFF for
+  chains: `current_order.len() < 2` and ">100 nodes -> greedy", so it isn't the source here) and the Rust
+  frames don't symbolicate, so pinpointing needs a backtrace-capturing allocator pass; (2) layout is
+  POSITION-critical -- any algorithm change alters node coordinates and breaks the layout golden checksums
+  (`golden_layout_test`), so the only safe win is pure alloc-reduction (arena/buffer reuse / pooling the
+  ~17 per-element temp Vecs) WITHOUT changing positions. That is a deep, careful refactor of a
+  correctness-critical crate -> owner-gated, not a one-shot.
+- **Verdict.** Layout is the next real perf frontier (alloc-bound, ~50% allocator), now QUANTIFIED. The
+  clean lever (arena-allocate the per-element layout temporaries) is high-EV (~halve layout) but needs
+  careful position-preserving work + a backtrace pass to locate the hottest sites. Render (this session's
+  5 wins) and parse (FastNode) are harvested; layout-allocator-pressure is the open frontier.
+
+  Agent: cc
