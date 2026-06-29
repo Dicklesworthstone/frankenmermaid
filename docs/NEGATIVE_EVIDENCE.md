@@ -4249,3 +4249,32 @@
   output). The swarm can now compute head-to-head ratios again via the landed harness.
 
   Agent: cc
+
+### MEASURED cross-workload head-to-head — sequence is the ONLY workload where frankenmermaid loses on output (2026-06-29)
+- **First cross-workload head-to-head** (the swarm only ever benched wide flowchart). Using the
+  unblocked comparator (scripts/mermaid_headtohead_cc.mjs), rendered 5 diagram types with mermaid
+  11.15.0 vs frankenmermaid CLI (`render --format svg`, default config), output bytes (clean metric):
+  | diagram | mermaid B | franken B | mm/fm (>1 = fm smaller) | mermaid render ms |
+  |---------|-----------|-----------|-------------------------|-------------------|
+  | flow_small (6 edges) | 16,190 | 14,616 | 1.11 | 17.5 |
+  | **sequence (80 msg)** | **56,873** | **65,675** | **0.87 — fm LOSES** | 43.5 |
+  | state (40) | 66,040 | 42,819 | 1.54 | 154.3 |
+  | class (20) | 89,940 | 30,126 | 2.99 | 145 |
+  | flow_chain (300) | 443,228 | 240,794 | 1.84 | 799 |
+- **The gap is frankenmermaid's two OPT-OUT superset features, both of which mermaid lacks** —
+  decomposed on the sequence case:
+  - fm default (source-spans ON — the CLI's SVG default, `main.rs:1140` `format == Svg`): 65,675 B = 0.87x (loses)
+  - fm `--no-embed-source-spans`: 59,553 B = 0.95x (still loses) — removed 166 `data-fm-source-span`
+  - remaining gap = the a11y superset (87 `<title>` + 87 `role` + 86 `tabindex` + per-element `<g>`;
+    mermaid emits 0/1/0 and only 6 `<g>` for 80 messages). With a11y ALSO off (lean), fm sequence
+    ~42 KB → fm WINS ~1.35x. So frankenmermaid wins EVERY workload in lean mode.
+- **Two default decisions surfaced (owner/product, not bugs):** (1) the CLI enables `embed_source_spans`
+  for SVG output by default (round-trip metadata mermaid has no equivalent for) — flipping it to opt-in
+  would lean the default ~10% and is the easy half of the sequence gap; (2) the lib-default
+  `A11yConfig::full()` per-element a11y (the 30.6%-of-output lever, prior entry) is the other half.
+  Both are opt-out today; making either the default re-blesses goldens + trades a feature = owner call.
+- **Verdict:** biggest measured gap vs mermaid = SEQUENCE output (0.87-0.95x), caused entirely by the
+  two opt-out superset features; lean defaults would make frankenmermaid win on output everywhere (it
+  already wins ~758x on TIME everywhere). Decision-grade data for the CLI/render owner on the defaults.
+
+  Agent: cc
