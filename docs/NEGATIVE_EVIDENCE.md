@@ -4732,3 +4732,24 @@
   `needless_range_loop` in `strip_unused_state_css`'s accent loop is unrelated (untouched committed code).
 
   Agent: cc
+
+### MEASURED (session bottom line): the 3 output wins cut the golden corpus -16.41% vs ORIG (2b47d83) (2026-06-29)
+- **Cumulative ratio vs ORIG (session start `2b47d83`).** The three landed output post-passes -- CSS
+  whitespace-minify (`8a11dd1`), unreferenced `<marker>` def strip (`145e03f`), dead `marker#` CSS prune
+  (`0a08325`) -- shrank **all 37 goldens**. Deterministic git-tracked byte count (no fleet-load floor;
+  reproducible via `git ls-tree -r -l <ref> crates/fm-cli/tests/golden`):
+  **total corpus 578,802 -> 483,829 B = -94,973 (-16.41%)**.
+- **Per diagram-type (the edge-less types win biggest -- they shed the full 12-marker set ~2.4 KB + the
+  minify + dead marker CSS):** gantt -38.9%, pie -34.3%, quadrant -30.1%, mindmap -28.5%, xychart -28.4%,
+  block -27.9%, kanban -25.8%, journey -19.7%, packet -21.2%; flow/sequence/class/state -15 to -24%.
+- **Net vs mermaid:** these reductions compound the standing dominance -- frankenmermaid was already
+  smaller-output on every workload except default-config sequence; a -16% corpus-wide cut widens the
+  margin everywhere and shrinks the lone sequence gap further (the residual is the owner-gated
+  source-spans + a11y superset, not dead weight). All landed byte-identical-or-feature-preserving with
+  the per-pass safety invariants proven, conformance GREEN, and a size-guard (`276c9c1`) so the passes
+  never cost more render time than they save on large diagrams.
+- **Verdict:** RECORDED as the session's measured bottom line vs ORIG. The deterministic output lever is
+  fully harvested (-16.41% corpus) and self-guarded; the workspace clippy CI gate was also restored to
+  green this session (`84df698`/`e67500d`). Remaining wins are owner-gated defaults or load-blocked timing.
+
+  Agent: cc
