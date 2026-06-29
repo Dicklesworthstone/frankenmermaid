@@ -5202,3 +5202,27 @@
   scoped (CSR/arena for the per-node adjacency containers), and the tempting cheap version is proven futile.
 
   Agent: cc
+
+### TESTED + REVERTED: CSR on the component-detection adjacency builders is byte-identical but ~0-gain (2026-06-29)
+- Acting on the prior "layout = per-node adjacency allocs; fix is CSR" finding, ATTEMPTED the first CSR
+  conversion: replaced the `Vec<BTreeSet<usize>>` in `weakly_connected_components` (lib.rs:8783) and
+  `connectivity_fragments` (462) with flat CSR (offsets+targets). These are SAFE to convert because each
+  sorts its component before output and the DFS only needs reachability (`visited` dedups), so iteration
+  order/dedup don't affect the result.
+- **PROVEN byte-identical:** `golden_layout_test` (position checksums) + `golden_svg_test` both pass, NO
+  re-bless -- confirming CSR conversion of these builders preserves layout exactly. This validates the CSR
+  approach is golden-safe.
+- **But ~0-gain for the benchmarked workload (REVERTED):** counting-allocator A/B on the chain bench showed
+  NO net change (n=100/500 stayed 3481/3618). These component-detection builders run on a CONNECTED chain
+  but find ONE component with few active edges, so the BTreeSet barely allocated (few inserts) and the CSR's
+  fixed offsets/cursor/targets Vecs offset it. They are NOT the hot source of the ~3500 layout allocs.
+- **Refined target.** The hot per-node-container allocs are in the DIRECTED-adjacency / BK coordinate-assign
+  / edge-routing path (e.g. `force_build_adjacency`@7476 `Vec<Vec<usize>>`, the 9719 BTreeSet whose consumer
+  is order-DEPENDENT, BK's per-pass structures) -- NOT component detection. Locating exactly which needs a
+  per-builder alloc-attribution pass (a counter around each builder). The order-dependent consumers (9719)
+  make CSR there riskier (must preserve sorted iteration). Experiment preserved in `git stash`.
+- **Verdict.** CSR is confirmed byte-identical-safe (goldens) and IS the right primitive, but must target the
+  HOT builder (directed adjacency / BK), not the component-detection ones that aren't exercised by connected
+  graphs. The hot-builder CSR + the order-preservation it needs is the remaining owner-gated deep work.
+
+  Agent: cc
