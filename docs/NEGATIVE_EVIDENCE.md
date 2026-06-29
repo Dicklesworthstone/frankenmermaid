@@ -4821,3 +4821,23 @@
   conclusion with concrete counts. No net-positive cheap lever remains in the render hot path.
 
   Agent: cc
+
+### SURFACED: pipeline phase split -- render is 70%, no single render hotspot (2026-06-29)
+- **Where pipeline time goes (median, deterministic phase timing, default-config flowchart):**
+  n=100 -> parse 12% / layout 21% / **render 68%**; n=500 -> parse 21% / layout **8%** / **render 71%**.
+  Layout (BK + crossing-min) is cheap and well-optimized; render dominates and is the only worthwhile
+  perf seam.
+- **Inside render there is NO dominant hotspot.** Symbolicated CPU profile (perf, frame pointers) of
+  `render_svg/large_500`: the only resolved leaves are `__memmove_avx` 6.6% + malloc/realloc/free ~8%
+  (~14% allocation -- the frontier already harvested per the entry above: final buffer, node+edge stream
+  loops, and path `d`-strings are ALL pre-sized). The remaining ~55% is distributed across many tiny
+  inlined render sites (each 0.02-0.07% self-cost, clustered in the per-element serialize/format region)
+  -- i.e. float formatting + attribute/string writing + per-element geometry, none individually large.
+- **Verdict.** No cheap single-lever render win remains: allocation is harvested, compute has no hotspot
+  to attack. A material render-time gain would require an architectural change (e.g. skipping the
+  intermediate `Element` tree and serializing layout->buffer directly, or arena/`SmallVec` for per-element
+  structures) -- a large, correctness-risky refactor, owner-gated. Layout/parse are not the gap. This
+  directs future perf work: only an architectural render rewrite moves the needle, and it is below the
+  risk/reward bar for an autonomous pass.
+
+  Agent: cc
