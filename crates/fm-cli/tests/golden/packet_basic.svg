@@ -205,30 +205,6 @@ marker#arrow-cross path {
   stroke-width: 1.8;
   transition: stroke 200ms ease;
 }
-.fm-cluster {
-  fill: var(--fm-cluster-fill);
-  stroke: var(--fm-cluster-stroke);
-  stroke-width: 1;
-  stroke-dasharray: 5 3;
-  rx: 12;
-  ry: 12;
-}
-.fm-cluster-label {
-  fill: var(--fm-cluster-label-color);
-  font-weight: 700;
-  font-size: 0.85em;
-  letter-spacing: 0.01em;
-}
-.fm-cluster-c4 {
-  fill: var(--fm-cluster-c4-fill);
-  stroke: var(--fm-cluster-c4-stroke);
-  stroke-dasharray: none;
-}
-.fm-cluster-swimlane {
-  fill: var(--fm-cluster-swimlane-fill);
-  stroke: var(--fm-cluster-swimlane-stroke);
-  stroke-dasharray: none;
-}
 .fm-label {
   fill: var(--fm-text-color);
 }

@@ -4328,3 +4328,31 @@
   DEAD CSS, no feature trade-off). Ready for the render owner / a dedicated slice.
 
   Agent: cc
+
+### KEPT & LANDED: gate the cluster theme-CSS block when a diagram has no clusters — byte-identical, -532 B/diagram (2026-06-29)
+- **Lever:** the fixed ~9.2 KB embedded `<style>` ships cluster rules (`.fm-cluster` / `-label` / `-c4`
+  / `-swimlane`, 532 B) for EVERY diagram, but they match no element when there are no clusters (most
+  diagrams). `strip_unused_theme_css` (fm-render-svg/src/lib.rs) removes the exact captured block from
+  the `to_svg_style` output when `ir.clusters.is_empty()`, at both render entry points. The first of
+  the conditional-CSS dead-weight levers (NEGATIVE_EVIDENCE prior entry); the same proven pattern as
+  the landed `has_edge_labels` gate.
+- **Byte-IDENTICAL rendering + safe by construction:** the removed selectors style nothing, so visuals
+  are unchanged. The block is an exact constant, so a future CSS drift makes the strip a NO-OP (matches
+  nothing → no removal), never a corruption. **Invariant verified across all 37 goldens:** theme cluster
+  CSS present IFF cluster elements (`class="fm-cluster"`) present — 0 violations, so NO diagram is left
+  with unstyled clusters. The 4 cluster goldens (architecture/block/c4/state_composite) are byte-
+  identical; 33 non-cluster goldens drop the dead block (792 deletions, 0 insertions).
+- **Measured (output bytes, deterministic — no fleet noise floor):** non-cluster diagrams shrink 532 B.
+  `flow_small` (a 6-edge flowchart) 14,616 → 14,084 B (-3.6%). vs mermaid 11.15.0 (16,190 B) the ratio
+  improves from 1.11x to **1.15x smaller**. ~0.7% of a medium_100 (~80 KB) and sub-noise on the
+  artificial wide bench, but a real, deterministic win on the MOST realistic workload (small diagrams,
+  where the fixed CSS is up to 63% of output). 226 fm-render-svg tests + conformance pass; clippy clean.
+- **Original comparator:** frankenmermaid (cluster-CSS-on) → (gated). vs mermaid: flow_small 1.11x →
+  1.15x smaller; cluster diagrams unaffected (still emit the block). Time unchanged (CSS gen is not the
+  hot path; one `String::replace` per render when clusters absent).
+- **Verdict:** KEPT — byte-identical, invariant-verified, safe-by-construction conditional-CSS win.
+  Extendable to the other dead blocks (node-shapes ~537 B, edge-styles ~218 B, state CSS ~877 B) via
+  the same `strip_unused_theme_css` helper + per-feature flags, each clearing ~3% on a realistic
+  small/medium diagram.
+
+  Agent: cc

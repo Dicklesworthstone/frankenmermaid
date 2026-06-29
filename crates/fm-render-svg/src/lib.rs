@@ -382,6 +382,23 @@ fn resolve_theme(ir: Option<&MermaidDiagramIr>, config: &SvgRenderConfig) -> The
     theme
 }
 
+/// The `.fm-cluster*` theme CSS block, captured EXACTLY as `Theme::to_svg_style` emits it. When a
+/// diagram has no clusters these selectors match no element, so stripping the block is byte-identical
+/// rendering while shrinking the fixed ~9 KB `<style>` (clusters ≈ 532 B). Kept as an exact constant
+/// so a drift (CSS edit) makes `strip_unused_theme_css` a safe NO-OP (it matches nothing → no strip),
+/// never a corruption. See docs/NEGATIVE_EVIDENCE.md (CSS dead-weight lever).
+const CLUSTER_THEME_CSS: &str = ".fm-cluster {\n  fill: var(--fm-cluster-fill);\n  stroke: var(--fm-cluster-stroke);\n  stroke-width: 1;\n  stroke-dasharray: 5 3;\n  rx: 12;\n  ry: 12;\n}\n.fm-cluster-label {\n  fill: var(--fm-cluster-label-color);\n  font-weight: 700;\n  font-size: 0.85em;\n  letter-spacing: 0.01em;\n}\n.fm-cluster-c4 {\n  fill: var(--fm-cluster-c4-fill);\n  stroke: var(--fm-cluster-c4-stroke);\n  stroke-dasharray: none;\n}\n.fm-cluster-swimlane {\n  fill: var(--fm-cluster-swimlane-fill);\n  stroke: var(--fm-cluster-swimlane-stroke);\n  stroke-dasharray: none;\n}\n";
+
+/// Drop theme CSS rule blocks the diagram cannot use (currently the cluster block when there are no
+/// clusters). Byte-identical rendering — the removed selectors match nothing; safe by construction
+/// (a non-matching constant is a no-op).
+fn strip_unused_theme_css(css: &mut String, ir: Option<&MermaidDiagramIr>) {
+    let has_clusters = ir.is_some_and(|ir| !ir.clusters.is_empty());
+    if !has_clusters {
+        *css = css.replace(CLUSTER_THEME_CSS, "");
+    }
+}
+
 fn render_scene_document_with_ir(
     scene: &RenderScene,
     config: &SvgRenderConfig,
@@ -464,10 +481,12 @@ fn render_scene_document_with_ir(
 
     let mut css = String::new();
     if config.embed_theme_css {
-        css.push_str(&theme.to_svg_style(
+        let mut theme_css = theme.to_svg_style(
             config.shadows,
             ir.is_some_and(|ir| ir.edges.iter().any(|edge| edge.label.is_some())),
-        ));
+        );
+        strip_unused_theme_css(&mut theme_css, ir);
+        css.push_str(&theme_css);
     }
     if effects_enabled {
         css.push_str(&effects_css(config));
@@ -1758,6 +1777,7 @@ fn render_layout_to_svg(
             detail.enable_shadows,
             ir.edges.iter().any(|edge| edge.label.is_some()),
         );
+        strip_unused_theme_css(&mut css, Some(ir));
         if effects_enabled {
             css.push_str(&effects_css(config));
         }
