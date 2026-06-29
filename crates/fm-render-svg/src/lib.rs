@@ -357,6 +357,23 @@ fn strip_unused_state_css(svg: &mut String) {
     {
         svg.replace_range(start..after, "");
     }
+
+    // The 8 accent palettes (`.fm-node-accent-1..8`) are assigned per node, so a diagram with few
+    // nodes uses only some. Drop each `.fm-node-accent-N` rule whose class is absent from the body.
+    // Body-based + exact-selector; no-op if the class is used or the rule is missing.
+    let body_at = svg.find("</style>").map_or(0, |i| i + "</style>".len());
+    let used: [bool; 9] =
+        std::array::from_fn(|n| n == 0 || svg[body_at..].contains(&format!("fm-node-accent-{n}")));
+    for n in 1..=8usize {
+        if !used[n] {
+            let selector = format!(".fm-node-accent-{n} {{");
+            if let Some(start) = svg.find(&selector)
+                && let Some(rel_end) = svg[start..].find("}\n")
+            {
+                svg.replace_range(start..start + rel_end + 2, "");
+            }
+        }
+    }
 }
 
 /// Render a target-agnostic scene to SVG string with custom configuration.

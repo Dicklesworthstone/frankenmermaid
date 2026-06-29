@@ -4444,3 +4444,17 @@
   weakness vs mermaid, is now substantially closed.
 
   Agent: cc
+
+### KEPT: body-based strip of unused accent-palette CSS -- -~400 B/small diagram (2026-06-29)
+- 6th conditional-CSS strip via the body-based post-process: the 8 `.fm-node-accent-1..8` palettes are
+  per-node hash-assigned, so a small diagram uses only some. Each `.fm-node-accent-N` rule whose class
+  is absent from the rendered body is dropped (exact-selector boundary strip; no-op if used/missing).
+- SAFE verified across all 37 goldens: 0 UNSTYLED cases (used accent with CSS removed). 14 kept-dead
+  cases on the 3 scene-path goldens (selector-format differs -> no-op, suboptimal but safe). stress_120
+  (all 8 accents) keeps all 8. 226 render tests + conformance + clippy pass; 30 goldens re-blessed.
+- CUMULATIVE conditional-CSS dead-weight (cluster 532 + shapes 541 + cluster-vars 262 + edge-style 131
+  + state 885 + accents ~400 B): flow_small 14,616 (orig) -> 11,869 = **-2,747 B / -18.8%**. vs mermaid
+  11.15.0 (16,190 B): output ratio **1.11x -> 1.36x SMALLER**. frankenmermaid's only small-diagram
+  weakness (fixed CSS overhead) is now decisively flipped to a clear win on realistic small diagrams.
+
+  Agent: cc

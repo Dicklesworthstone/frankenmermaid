@@ -76,26 +76,6 @@ svg {
   transform: translateY(-2px) scale(1.01);
   transform-origin: center;
 }
-.fm-node-accent-1 {
-  --fm-node-accent: var(--fm-node-stroke);
-  --fm-node-accent: color-mix(in srgb, var(--fm-accent-1) 50%, var(--fm-node-stroke));
-  --fm-node-hover-accent: var(--fm-accent-1);
-}
-.fm-node-accent-2 {
-  --fm-node-accent: var(--fm-node-stroke);
-  --fm-node-accent: color-mix(in srgb, var(--fm-accent-2) 50%, var(--fm-node-stroke));
-  --fm-node-hover-accent: var(--fm-accent-2);
-}
-.fm-node-accent-3 {
-  --fm-node-accent: var(--fm-node-stroke);
-  --fm-node-accent: color-mix(in srgb, var(--fm-accent-3) 50%, var(--fm-node-stroke));
-  --fm-node-hover-accent: var(--fm-accent-3);
-}
-.fm-node-accent-4 {
-  --fm-node-accent: var(--fm-node-stroke);
-  --fm-node-accent: color-mix(in srgb, var(--fm-accent-4) 50%, var(--fm-node-stroke));
-  --fm-node-hover-accent: var(--fm-accent-4);
-}
 .fm-node-accent-5 {
   --fm-node-accent: var(--fm-node-stroke);
   --fm-node-accent: color-mix(in srgb, var(--fm-accent-5) 50%, var(--fm-node-stroke));
@@ -105,11 +85,6 @@ svg {
   --fm-node-accent: var(--fm-node-stroke);
   --fm-node-accent: color-mix(in srgb, var(--fm-accent-6) 50%, var(--fm-node-stroke));
   --fm-node-hover-accent: var(--fm-accent-6);
-}
-.fm-node-accent-7 {
-  --fm-node-accent: var(--fm-node-stroke);
-  --fm-node-accent: color-mix(in srgb, var(--fm-accent-7) 50%, var(--fm-node-stroke));
-  --fm-node-hover-accent: var(--fm-accent-7);
 }
 .fm-node-accent-8 {
   --fm-node-accent: var(--fm-node-stroke);

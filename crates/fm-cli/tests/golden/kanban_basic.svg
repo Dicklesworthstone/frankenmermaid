@@ -96,11 +96,6 @@ svg {
   --fm-node-accent: color-mix(in srgb, var(--fm-accent-3) 50%, var(--fm-node-stroke));
   --fm-node-hover-accent: var(--fm-accent-3);
 }
-.fm-node-accent-4 {
-  --fm-node-accent: var(--fm-node-stroke);
-  --fm-node-accent: color-mix(in srgb, var(--fm-accent-4) 50%, var(--fm-node-stroke));
-  --fm-node-hover-accent: var(--fm-accent-4);
-}
 .fm-node-accent-5 {
   --fm-node-accent: var(--fm-node-stroke);
   --fm-node-accent: color-mix(in srgb, var(--fm-accent-5) 50%, var(--fm-node-stroke));
