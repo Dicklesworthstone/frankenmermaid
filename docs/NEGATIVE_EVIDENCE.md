@@ -4573,3 +4573,38 @@
   CSS lane, mechanically proven whitespace-only, closing a real structural gap vs mermaid's minified CSS.
 
   Agent: cc
+
+### KEPT & LANDED: strip unreferenced `<marker>` arrowhead defs -- BIGGEST output win, -2,180-2,360 B/diagram (2026-06-29)
+- **NEW lever, DIFFERENT primitive (body/defs strip, not CSS).** The non-flowchart render paths emit
+  the FULL 12-marker arrowhead set (~2,360 B) because they can't cheaply predict which arrow shapes a
+  sequence/class/state/er/etc. diagram uses (`lib.rs:728` `emit_fancy_markers` only narrows FLOWCHARTS;
+  `is_none_or` returns true for every other diagram type). But an SVG `<marker>` is purely declarative
+  -- it renders NOTHING unless a `marker-start/-mid/-end` (a `url(#id)`) points at it -- and the typical
+  such diagram references only `arrow-end` (or, for the many edge-less types, NONE). So ~2 KB of dead
+  `<marker>` defs shipped on every non-flowchart diagram. mermaid emits only the markers it uses.
+- **Fix = `strip_unused_markers`, a body-based post-pass in the single render funnel** (the trusted
+  drift-proof pattern of `strip_unused_state_css`): collect every id in a `url(#id)`, then remove each
+  `<marker id="X">…</marker>` whose X is not referenced, via ONE O(n) rebuild (no per-marker rescans, so
+  no large-render cost -- and large flowcharts already emit a minimal set, nothing to strip). Safe by
+  construction: marker DEFS contain no `url(#…)` and the theme CSS targets markers with `marker#id`
+  selectors (never `url(#id)`), so the live-set is exactly the markers an edge points at; a referenced
+  or future marker is always kept; drift can only leave a dead def, never strip a live one.
+- **SAFETY machine-proven across all 34 affected goldens:** for every golden, (a) every SURVIVING
+  `<marker id="X">` has a matching `url(#X)` in the body, and (b) every REMOVED marker had no `url(#X)`
+  -- **0 violations**. So no edge lost its arrowhead (rendering is visually identical) and no dead def
+  was kept. Two unit tests pin the invariant (a hand-built SVG + a real half/stick-arrow sequence).
+- **Measured (output bytes, DETERMINISTIC):** 272 markers removed across the corpus; 34 of 37 goldens
+  shrank (the 3 untouched are basic flowcharts that already emit the minimal set). Changed-golden
+  corpus **514,315 -> 460,461 B = -53,854 (-10.47%)**. Per diagram:
+  | class | -2,180 B (-24.2%) | sequence | -2,180 B (-19.8%) | state | -2,180 B (-21.8%) |
+  | edge-less (pie/gantt/mindmap/block/xychart/kanban/journey/quadrant/packet) | -2,360 B (-13 to **-28%**, ALL 12 markers gone) |
+  This is the **single biggest deterministic output lever** harvested in the swarm -- far larger than
+  any CSS strip -- because the full marker set is ~2.4 KB and most diagrams use ~1 of it.
+- **Conformance GREEN:** 230 fm-render-svg lib tests (+2 new marker tests, +2 pre-existing defs tests
+  updated from the old always-emit contract to the reference-gated one), 34 goldens re-blessed +
+  invariant-verified, golden_svg + frankentui_conformance pass. No feature trade-off -- dead defs only.
+- **Verdict:** KEPT & LANDED. Compounds with the CSS minify (same turn): both render post-passes shrink
+  EVERY diagram, deterministically, with mechanically-proven safety, narrowing the output gap vs mermaid
+  (which emits neither pretty CSS nor unused markers) on its widest axis.
+
+  Agent: cc

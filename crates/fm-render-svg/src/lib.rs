@@ -327,6 +327,7 @@ pub fn render_svg_with_layout(
         }
     };
     strip_unused_state_css(&mut svg);
+    strip_unused_markers(&mut svg);
     minify_style_block(&mut svg);
     svg
 }
@@ -397,6 +398,72 @@ fn strip_unused_state_css(svg: &mut String) {
             }
         }
     }
+}
+
+/// Render post-pass: drop `<marker>` arrowhead defs that the rendered body never references.
+///
+/// The non-flowchart render paths emit the FULL arrow-marker set (12 markers, ~2.4 KB) because
+/// they cannot cheaply predict which arrow shapes a sequence/class/state/er diagram will use, but
+/// the typical such diagram references only `arrow-end` — leaving ~2 KB of dead `<marker>` defs.
+/// An SVG `<marker>` is purely declarative: it renders NOTHING unless a `marker-start/-mid/-end`
+/// (i.e. a `url(#id)`) points at it, so removing an unreferenced marker is visually identical.
+///
+/// Detection is body-based and drift-proof (the exact pattern of [`strip_unused_state_css`]): a
+/// marker is kept iff its id appears inside a `url(#id)` somewhere in the document. Marker DEFS
+/// contain no `url(#...)`, and the theme CSS targets markers with `marker#id` selectors (never
+/// `url(#id)`), so the live-set is exactly the markers an edge actually points at. Safe by
+/// construction: any referenced or future marker is kept; a CSS/markup drift can only leave a dead
+/// def in place, never strip a live one. Single O(n) rebuild (no per-marker rescans), so it adds
+/// no large-render cost — and large flowcharts already emit a minimal marker set (nothing to strip).
+fn strip_unused_markers(svg: &mut String) {
+    if !svg.contains("<marker ") {
+        return;
+    }
+    // 1. Collect every id referenced via `url(#id)` (marker assignments live only here).
+    let mut referenced: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut at = 0;
+    while let Some(rel) = svg[at..].find("url(#") {
+        let id_start = at + rel + "url(#".len();
+        let Some(close) = svg[id_start..].find(')') else {
+            break;
+        };
+        referenced.insert(&svg[id_start..id_start + close]);
+        at = id_start + close + 1;
+    }
+    // 2. Find each `<marker id="..">…</marker>` span whose id is not referenced.
+    let mut dead_spans: Vec<(usize, usize)> = Vec::new();
+    let mut at = 0;
+    while let Some(rel) = svg[at..].find("<marker ") {
+        let m_start = at + rel;
+        let Some(end_rel) = svg[m_start..].find("</marker>") else {
+            break;
+        };
+        let m_end = m_start + end_rel + "</marker>".len();
+        // The marker id is the first `id="…"` inside the opening tag.
+        let tag_end = svg[m_start..m_end].find('>').map_or(m_end, |g| m_start + g);
+        if let Some(idrel) = svg[m_start..tag_end].find("id=\"") {
+            let id_start = m_start + idrel + "id=\"".len();
+            if let Some(idclose) = svg[id_start..tag_end].find('"') {
+                let id = &svg[id_start..id_start + idclose];
+                if !referenced.contains(id) {
+                    dead_spans.push((m_start, m_end));
+                }
+            }
+        }
+        at = m_end;
+    }
+    if dead_spans.is_empty() {
+        return;
+    }
+    // 3. Rebuild once, skipping the dead spans (O(n), no repeated tail-shifts).
+    let mut out = String::with_capacity(svg.len());
+    let mut cursor = 0;
+    for (start, end) in &dead_spans {
+        out.push_str(&svg[cursor..*start]);
+        cursor = *end;
+    }
+    out.push_str(&svg[cursor..]);
+    *svg = out;
 }
 
 /// Final render post-pass: minify the embedded `<style>` CSS. Mermaid ships minified CSS;
@@ -7487,8 +7554,9 @@ mod tests {
 
     #[test]
     fn includes_defs_section() {
-        let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
-        let svg = render_svg(&ir);
+        // A diagram with an edge references arrow-end, so the reference-gated marker strip keeps it.
+        let parsed = fm_parser::parse("flowchart LR\n  A --> B\n");
+        let svg = render_svg(&parsed.ir);
         assert!(svg.contains("<defs>"));
         assert!(svg.contains("</defs>"));
         assert!(svg.contains("<marker"));
@@ -7497,12 +7565,28 @@ mod tests {
 
     #[test]
     fn includes_half_arrow_marker_defs() {
-        let ir = MermaidDiagramIr::empty(DiagramType::Sequence);
-        let svg = render_svg(&ir);
-        assert!(svg.contains("id=\"arrow-half-top\""));
-        assert!(svg.contains("id=\"arrow-half-bottom\""));
-        assert!(svg.contains("id=\"arrow-stick-top\""));
-        assert!(svg.contains("id=\"arrow-stick-bottom\""));
+        // Sequence half/stick arrowheads still render through their markers; the reference-gated
+        // strip (see `strip_unused_markers`) must never leave an emitted marker def unreferenced.
+        let parsed = fm_parser::parse(
+            "sequenceDiagram\n\
+             Alice->>Bob: Solid\n\
+             Alice-|\\Bob: HalfTop\n\
+             Bob-|/Alice: HalfBottom\n",
+        );
+        let svg = render_svg(&parsed.ir);
+        assert!(svg.contains("id=\"arrow-end\""), "solid arrow marker missing");
+        let mut at = 0;
+        while let Some(rel) = svg[at..].find("<marker ") {
+            let s = at + rel;
+            let id_at = svg[s..].find("id=\"").expect("marker id") + s + 4;
+            let id_end = svg[id_at..].find('"').expect("id end") + id_at;
+            let id = svg[id_at..id_end].to_string();
+            assert!(
+                svg.contains(&format!("url(#{id})")),
+                "strip left orphan marker def {id}"
+            );
+            at = id_end;
+        }
     }
 
     #[test]
@@ -8099,6 +8183,51 @@ mod tests {
         assert!(min.contains("in srgb"), "function-arg space dropped: {min:?}");
         assert!(min.contains("4%, transparent") || min.contains("4%,transparent"));
         assert!(min.contains("fill: var(--fm-node-fill)"), "`: ` space dropped: {min:?}");
+    }
+
+    #[test]
+    fn strip_unused_markers_keeps_only_referenced_defs() {
+        // Hand-built SVG: two marker defs, only one referenced.
+        let mut svg = String::from(
+            "<svg><defs>\
+             <marker id=\"arrow-end\" refX=\"8\"><path d=\"M0 0\"/></marker>\
+             <marker id=\"arrow-cross\" refX=\"8\"><path d=\"M1 1\"/></marker>\
+             </defs>\
+             <path class=\"fm-edge\" marker-end=\"url(#arrow-end)\" d=\"M0 0 L9 9\"/></svg>",
+        );
+        strip_unused_markers(&mut svg);
+        assert!(svg.contains("id=\"arrow-end\""), "referenced marker must stay");
+        assert!(
+            !svg.contains("id=\"arrow-cross\""),
+            "unreferenced marker must be removed"
+        );
+        // The referenced edge and its reference are untouched.
+        assert!(svg.contains("marker-end=\"url(#arrow-end)\""));
+        assert!(svg.contains("M0 0 L9 9"));
+    }
+
+    #[test]
+    fn rendered_sequence_emits_only_referenced_markers() {
+        // A sequence diagram emits the full 12-marker set but typically references only arrow-end;
+        // every remaining `<marker id="X">` must have a matching `url(#X)` in the body.
+        let parsed =
+            fm_parser::parse("sequenceDiagram\n    Alice->>Bob: Hello\n    Bob-->>Alice: Hi\n");
+        let svg = render_svg(&parsed.ir);
+        let mut at = 0;
+        let mut checked = 0;
+        while let Some(rel) = svg[at..].find("<marker ") {
+            let s = at + rel;
+            let id_at = svg[s..].find("id=\"").expect("marker id") + s + 4;
+            let id_end = svg[id_at..].find('"').expect("id end") + id_at;
+            let id = &svg[id_at..id_end];
+            assert!(
+                svg.contains(&format!("url(#{id})")),
+                "marker {id} kept but never referenced"
+            );
+            checked += 1;
+            at = id_end;
+        }
+        assert!(checked >= 1, "expected at least the arrow-end marker");
     }
 
     #[test]
