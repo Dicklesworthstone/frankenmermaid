@@ -5410,3 +5410,35 @@
   CLOSED.
 
   Agent: cc
+
+### LANDED: drop per-line staging Vec in flowchart document parser -- parse allocs -26% (2026-06-29)
+- After five render-alloc wins flipped the wide alloc balance (render now below parse), profiled the new
+  alloc-dominant wide phase -- PARSE (counting-allocator, load-immune). wide_16x32 parse = 5577 allocs,
+  bucketed: 0-15:2577, 64-127:1479, **256+:1514**. The 256+ bucket ≈ the statement count (1472) -- ~1 big
+  alloc PER STATEMENT, NOT IR ownership (which would be the short 0-15 id/label Strings). Verifying beat the
+  prior "parse allocs are mostly IR ownership" assumption.
+- **Root cause:** `parse_flowchart_document_items` allocated `let mut line_items = Vec::new()` PER content
+  line, pushed the line's statement item(s) into it, then `items.extend(line_items)` at the end of the line.
+  For a ~72-byte `FlowDocumentItem` enum the first push reserves capacity 4 (~288 B -> 256+ bucket), so every
+  content line paid one staging-Vec allocation for nothing: every branch flushes it unconditionally (the
+  bottom `extend` on normal completion, or the `end` early-return), and `items` keeps insertion order either
+  way.
+- **Fix (LANDED):** push document items straight into `items`; remove the `line_items` Vec and both
+  `extend`s (the `end` path just `return`s `items`, normal completion needs no flush). Behavior-identical
+  (same items, same order, same warnings).
+- **MEASURED (deterministic counting-allocator A/B, load-immune):** parse allocs
+  wide_16x32 **5577 -> 4105 (-26.4%)** (256+ bucket 1514 -> 42, i.e. 1472 per-line Vecs removed),
+  wide_8x16 **1409 -> 1057 (-25.0%)**.
+- **Byte-identical & safe:** `franken_tui_fixture_cases_match_parser_and_svg_expectations` (parse corpus
+  guard) + `layout_golden_checksums_are_stable` (IR->layout byte-identity, proves the IR is unchanged) +
+  `svg_golden_snapshots_are_stable` GREEN with NO re-bless; 405 fm-parser lib tests pass; clippy
+  `-D warnings` clean.
+- **Verdict: LANDED.** First non-render alloc win of the run -- a NEW phase + NEW lever (transient staging
+  Vec, not the render-fast-path intermediate-String family). Correction to the prior surface: NOT all parse
+  allocs are IR ownership -- ~26% were a per-line staging Vec. The remaining wide_16x32 parse 64-127 bucket
+  (1479 ≈ statement count, ~1 alloc/statement) is the next parse candidate to investigate (likely the IR
+  lowering or a per-statement temp); the 0-15 bucket (2577) is the genuinely-needed IR-owned id/label
+  Strings. LESSON: re-profile the NEW dominant phase after a big win shifts the balance, and VERIFY
+  ("IR ownership") rather than assume -- the assumption hid a clean 26% win.
+
+  Agent: cc

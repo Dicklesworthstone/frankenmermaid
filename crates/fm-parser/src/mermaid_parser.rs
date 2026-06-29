@@ -1049,7 +1049,11 @@ fn parse_flowchart_document_items<'a>(
             continue;
         }
 
-        let mut line_items = Vec::new();
+        // Push document items straight into `items` rather than staging them in a per-line `Vec` that is
+        // immediately `extend`ed in — that staging Vec allocated once per content line (~1 alloc/statement
+        // on wide flowcharts) for no benefit: every branch below flushes it unconditionally (the bottom
+        // `extend` on normal completion, or the `end` early-return), and items keep insertion order either
+        // way. Removing it is behavior-identical.
         let mut parsed_line = false;
 
         for statement in split_statements(uncommented_line) {
@@ -1083,7 +1087,7 @@ fn parse_flowchart_document_items<'a>(
                     config,
                 );
                 unclosed_subgraphs += child_unclosed;
-                line_items.push(FlowDocumentItem::Subgraph {
+                items.push(FlowDocumentItem::Subgraph {
                     id: cluster_key,
                     title: cluster_title,
                     line_number,
@@ -1096,7 +1100,6 @@ fn parse_flowchart_document_items<'a>(
 
             if normalized_statement == "end" {
                 if !is_root {
-                    items.extend(line_items);
                     return (items, unclosed_subgraphs);
                 }
                 warnings.push(format!(
@@ -1109,7 +1112,7 @@ fn parse_flowchart_document_items<'a>(
             if let Some((from, arrow, to)) =
                 parse_fast_simple_flowchart_edge_parts(normalized_statement)
             {
-                line_items.push(FlowDocumentItem::FastEdge {
+                items.push(FlowDocumentItem::FastEdge {
                     from,
                     arrow,
                     to,
@@ -1127,7 +1130,7 @@ fn parse_flowchart_document_items<'a>(
             if let Some((id, label, icon)) =
                 parse_fast_simple_flowchart_node_borrowed(normalized_statement)
             {
-                line_items.push(FlowDocumentItem::FastNode {
+                items.push(FlowDocumentItem::FastNode {
                     id,
                     label,
                     icon,
@@ -1145,7 +1148,7 @@ fn parse_flowchart_document_items<'a>(
                 warnings,
                 config,
             ) {
-                line_items.push(FlowDocumentItem::Statements {
+                items.push(FlowDocumentItem::Statements {
                     asts,
                     line_number,
                     source_line: line,
@@ -1159,8 +1162,6 @@ fn parse_flowchart_document_items<'a>(
                 "Line {line_number}: unsupported flowchart syntax: {trimmed}"
             ));
         }
-
-        items.extend(line_items);
     }
 
     if !is_root {
