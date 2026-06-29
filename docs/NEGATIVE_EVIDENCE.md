@@ -5226,3 +5226,23 @@
   graphs. The hot-builder CSR + the order-preservation it needs is the remaining owner-gated deep work.
 
   Agent: cc
+
+### ECONOMICS CORRECTION: layout CSR alone is ~25% of allocs (~1.5% pipeline), not "~halve" (2026-06-29)
+- Pinpointing attempt: backtrace-capturing allocator on the 8-15 B allocs -- but RELEASE inlining collapses
+  the `fm_layout` frames (no usable symbols); a debug rebuild changes the alloc pattern. So located the hot
+  per-node `Vec<Vec<usize>>` builders by inspection instead: the RANKING `outgoing` (lib.rs:8642, on every
+  flowchart's hot path) + the 6850/7021/8460/8486 outgoing-edge structures.
+- **CSR there is order-RISKIER than component-detection:** `outgoing` is SORTED by priority (8653) and
+  iterated in that order, so a CSR conversion must preserve the per-node sort (not the free
+  reachability-only case). And it saves only ~node_count allocs (~0.3% pipeline per conversion).
+- **The "~halve layout" headline was optimistic.** Size-bucketing: the 8-15 B per-node-Vec bucket is only
+  ~1195 of ~3500 allocs = **~25%**. Converting ALL ~5 per-node `Vec<Vec>` builders to CSR (5 order-risky
+  conversions, 5 slow fm-layout builds) totals ~1.5% pipeline. The OTHER ~50% (the 32-39 B + 64 B struct
+  buckets) are NOT containers -- they need a layout-scoped ARENA (bump allocator threaded through the
+  phases), a far deeper change. So "halve layout" = CSR (~25%) + arena (~25%+), both deep.
+- **Verdict.** The layout lever is now economically scoped: ~1.5% pipeline from 5 marginal/order-risky CSR
+  conversions, plus a deep arena for the rest -- a dedicated low-priority refactor, not autonomous one-shot
+  wins. CSR is golden-safe (proven 2949b7f) but each step is ~0.3% and order-risky. Render (5 wins) +
+  parse (FastNode) remain the harvested high-value work; layout is a long-tail arena/CSR project.
+
+  Agent: cc
