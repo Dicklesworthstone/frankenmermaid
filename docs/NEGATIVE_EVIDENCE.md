@@ -3964,3 +3964,40 @@
   document-model refactor, not a 60-min slice — surfaced as the standing render blocker.
 
   Agent: cc
+
+### BLOCKER (peer-owned): incremental layout memo cache-hit is 2-4x SLOWER than full recompute — net-negative since the layout perf wins (2026-06-29)
+- **Measured (root-cause of the standing `integration_test:771` RED — consistent 5/5, NOT flaky):**
+  `incremental_layout_rerender_after_small_change_is_faster_than_full_recompute` asserts the memoized
+  incremental rerender beats a full recompute. It does the OPPOSITE, and the gap WIDENS with size:
+  - 72 nodes (the checked-in test size): incremental cache-hit **425.6 us** vs full recompute **203.5 us** (2.1x slower)
+  - 400 nodes (diagnostic bump, reverted): incremental **2018 us** vs full **503.8 us** (4.0x slower)
+- **Root cause (code-confirmed, `fm-layout/src/lib.rs:2852-2873`):** the memoized cache-hit's only
+  substantial work is `let mut traced = cached.traced.clone();` — a DEEP CLONE of the whole
+  `TracedLayout { layout: DiagramLayout, trace: LayoutTrace }`. `LayoutTrace.snapshots:
+  Vec<LayoutStageSnapshot>` holds a per-stage copy of the layout geometry, so the clone copies the
+  layout data SEVERAL times — heavier than running the (heavily optimized) layout once. The 6 recent
+  `fm-layout` perf wins (obstacle CSR grid, sort-key cache, acyclic SCC fast-path, etc. — recompute
+  for 400 nodes is now only ~503 us) INVERTED the memo's value: recompute is now cheaper than cloning
+  the cached result. The cache-hit overwrites `trace.incremental` anyway (line 2857), so the cloned
+  snapshots are largely dead weight on the hit path.
+- **Production impact (NOT test-only):** `fm-wasm/src/lib.rs:1175` holds an `IncrementalLayoutEngine`
+  as a struct field and re-renders through it (`:1273`); `fm-render-svg/src/lib.rs:9387` also drives
+  it. So interactive browser re-renders — the PRIMARY realistic Mermaid-replacement workload — are
+  SLOWER with the memo than without it on any graph >= ~72 nodes.
+- **Why I did not "fix" it here:** (1) the failing test is CORRECT — it catches a real regression;
+  hardening/relaxing the timing assertion would MASK a net-negative production feature, so the test
+  must stay as-is. (2) The fix lives in `fm-layout` (an ACTIVE peer's crate — 6 recent commits) and is
+  an architectural trace-semantics decision, not a byte-identical micro-lever; editing it risks
+  conflict and the agent-mail reservation DB is corrupt.
+- **Fix directions (owner's call), in increasing scope:** (a) on cache-hit, clone only `layout` and
+  rebuild a slim `trace` (drop `snapshots`) instead of deep-cloning the whole `TracedLayout` — the
+  hit path already discards the cloned `incremental` field; (b) store the cache in `Arc<TracedLayout>`
+  and return `Arc` (zero-copy) where callers allow; (c) gate the full-clone memo on
+  `cached.recompute_duration_us` exceeding a measured clone-cost floor, falling back to recompute when
+  the layout is cheap (it now usually is) — keep only the selective-subgraph relayout path
+  (`try_incremental_subgraph_relayout`) for the genuine large-edit win.
+- **Verdict:** SURFACED as a peer-owned blocker with root cause + measurements + production impact +
+  fix menu. Not masked, not unilaterally edited across crate ownership. This is the biggest measured
+  internal regression on the board (a landed feature that is net-negative in production).
+
+  Agent: cc
