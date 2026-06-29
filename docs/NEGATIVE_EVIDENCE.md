@@ -4102,3 +4102,27 @@
   (this entry). The biggest internal regression on the board is fixed; the memo is net-positive again.
 
   Agent: cc
+
+### Incremental cache-key fix — downstream-verified + the remaining O(1) refinement scoped (2026-06-29)
+- **Downstream verification of cab553e (adding `serde_json` to `fm-layout`'s prod deps):** `cargo build
+  -p frankenmermaid-cli` (native user binary) and `cargo check -p fm-wasm --target
+  wasm32-unknown-unknown` both **Finished clean** — `serde_json` works in the WASM build (fm-wasm
+  already linked it), so the foundational-crate dep addition broke nothing downstream. Workspace healthy.
+- **Why this is the floor for a single-crate fix, and what the complete win needs:** the memoized
+  cache-hit = `hash(ir)` + `cached.traced.clone()`, both O(n). `serde_json` cut `hash` from a huge
+  Debug-O(n) to a moderate-O(n), enough to WIN at the test size (72) and reach ~break-even at 400.
+  A CLEAR large-graph win needs the hit to be O(1)-ish, which requires BOTH: (1) an O(1) key — the IR
+  must CARRY a content fingerprint (computed once at parse in `fm-parser`, stored on `MermaidDiagramIr`
+  in `fm-core`, invalidated on every mutation) so `fm-layout` reads it instead of re-serializing; and
+  (2) the `clone()` is the residual O(n) — a zero-copy `Arc<TracedLayout>` return would remove it.
+- **Why not done here:** (1) is a 3-crate change (fm-core field + fm-parser compute + fm-layout read)
+  whose correctness hinges on EVERY IR mutator invalidating the cached fingerprint — a missed mutator
+  silently returns a stale layout; (2) changes the engine's return type. Both are careful architectural
+  changes spanning crates under the active layout peer's ownership, not a 60-min byte-identical slice.
+  The landed `serde_json` fix already removes the regression for the test + typical interactive graph
+  sizes; the O(1) fingerprint + Arc return is the recorded follow-up for large-graph re-renders.
+- **Verdict:** incremental-layout regression CLOSED for the common case (cab553e, landed + measured +
+  downstream-verified); large-graph O(1) refinement scoped + routed to the fm-core/fm-parser/fm-layout
+  owner. No further single-crate in-scope lever remains on this path.
+
+  Agent: cc
