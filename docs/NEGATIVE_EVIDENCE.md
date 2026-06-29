@@ -5138,3 +5138,24 @@
   by repairing its rotted gate. Render work is now ~halved on every default small/medium diagram.
 
   Agent: cc
+
+### MEASURED: small-render fixed cost is ~130 us, 58% of it the output post-passes; clean opts ~0-gain (2026-06-29)
+- After the 5 landed render wins, re-profiled WHERE small-diagram render time goes (the common case). Render
+  time = **~130 us fixed + ~1.4 us/element** (n=3 and n=10 both ~132 us median; slope from n=10->n=60).
+- **Fixed-cost split (n=10, deterministic instrumentation):** backend render ~55 us, **output post-passes
+  ~75 us (~58% of small render)**. The post-passes are `strip_unused_state_css` + `strip_unused_markers` +
+  `strip_dead_marker_css` + `minify_style_block` -- the landed OUTPUT-SIZE strips (each walks the SVG).
+- **Tested two clean opts, both ~0-gain (REVERTED):**
+  - `format!("fm-node-accent-{n}")`/`format!("var(--fm-accent-{n})")` x16/render in `strip_unused_state_css`
+    -> const `&str` arrays: ~1 us, marginal.
+  - `minify_style_block` `replace_range` -> manual head+min+tail rebuild: MIXED (n=10 +18% -- the full-buffer
+    alloc beats the in-place tail-shift only for larger SVGs; n=30/60 -7/-10%). Net wash. Byte-identical.
+  These re-confirm the prior "bulk-copy minify sub-noise; post-pass cost is the marker O(n) scans" finding --
+  the post-pass cost is the inherent multi-pass marker/CSS processing, not removable overhead.
+- **Verdict.** Small render is FIXED-COST-bound by the output post-passes, which are a DELIBERATE
+  output-size-vs-render-time tradeoff (they shrink the corpus ~16%) already at their optimization floor.
+  The only further lever is combining the 4 passes into fewer scans/rebuilds OR skipping them for tiny
+  diagrams (forfeiting the output win) -- both trade against landed wins and are owner-gated. The render
+  fast-path + parallel wins this session already cut the PER-ELEMENT cost; the fixed cost is the residual.
+
+  Agent: cc
