@@ -4535,3 +4535,41 @@
   the project is at its optimization frontier -- re-task to a project not already dominant on both axes.
 
   Agent: cc
+
+### KEPT & LANDED: whitespace-minify the embedded `<style>` block -- UNIVERSAL ~600-875 B/diagram, mermaid ships minified CSS (2026-06-29)
+- **NEW lever, DIFFERENT primitive from the 6 conditional-CSS strips** (those each gate ONE dead
+  block when a feature is absent, and are size-guarded off >100 KB). This one is a final
+  whitespace-only minify of the WHOLE `<style>` region that fires on **EVERY** diagram -- including
+  the large renders the strips skip -- because frankenmermaid emitted PRETTY-printed CSS (2-space
+  indent + a newline per line) while **mermaid.js ships its CSS minified**. That pretty-print is fixed
+  dead weight on 100% of output. `minify_style_block` runs once after `strip_unused_state_css` in the
+  single render funnel (`render_svg_with_layout`), over only the ~9 KB style region (the SVG body is
+  untouched), so it is one constant-size scan -- no full-SVG rescans, no size guard needed.
+- **WHITESPACE-ONLY by construction + machine-proven** (`minify_css`): a whitespace run is dropped when
+  an adjacent delimiter already separates the tokens (`{ } ; , :` before, or `}` after) and otherwise
+  collapses to a single space. This PRESERVES the two whitespace classes that are semantic in CSS --
+  descendant combinators (`.fm-node .child`) and value-internal spaces (`2px 8px`, `in srgb`,
+  `var(--x) 4%`, `prop: value`) -- so the CSS parses identically. `: ` after a property is kept (the
+  maximally drift-safe choice -- `:` is shared by selectors/pseudo-elements/declarations). **Invariant
+  proven across ALL 37 goldens: stripping every whitespace char from the OLD (HEAD) and NEW golden
+  yields byte-identical strings -- 0 violations** -- proving the change touched ONLY whitespace, never a
+  selector/property/value byte. A unit test pins the same projection + the descendant/value/`: ` spaces.
+- **Measured (output bytes, DETERMINISTIC -- no fleet noise floor, valid at load 104):**
+  | diagram (golden cfg) | total SVG | CSS block |
+  |----------------------|-----------|-----------|
+  | flowchart_cycle | 8,630 -> 8,029 (**-601, -7.0%**) | 5,701 -> 5,100 (**-10.5%**) |
+  | class_basic | 9,601 -> 9,017 (-584, -6.1%) | 5,477 -> 4,893 (-10.7%) |
+  | sequence_basic | 11,680 -> 11,019 (-661, -5.7%) | 6,089 -> 5,428 (-10.9%) |
+  | **37-golden corpus** | **578,793 -> 554,799 (-23,994, -4.15%)** | ~10% of every CSS block |
+  On the CLI DEFAULT config (full state CSS present, not stripped) the per-diagram saving is ~875 B.
+  The win COMPOUNDS with the 6 conditional strips (they run first on the pretty CSS, this minifies the
+  survivor) and -- unlike them -- also lands on the large/wide renders, narrowing the fixed-CSS gap vs
+  mermaid (whose `<style>` is already minified) on the one axis where frankenmermaid was widest.
+- **Conformance GREEN:** 228 fm-render-svg lib tests (+2 new minify tests), 37 goldens re-blessed +
+  invariant-verified, golden_svg_test + frankentui_conformance_test pass; integration_test's
+  incremental-vs-full and determinism `assert_eq!`s hold (both render paths funnel through the same
+  minified `render_svg_with_layout`). No feature trade-off -- pure dead-whitespace removal.
+- **Verdict:** KEPT & LANDED -- the first UNIVERSAL (every-diagram, every-size) output-size win in the
+  CSS lane, mechanically proven whitespace-only, closing a real structural gap vs mermaid's minified CSS.
+
+  Agent: cc

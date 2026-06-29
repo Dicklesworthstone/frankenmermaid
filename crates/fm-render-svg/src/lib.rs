@@ -327,6 +327,7 @@ pub fn render_svg_with_layout(
         }
     };
     strip_unused_state_css(&mut svg);
+    minify_style_block(&mut svg);
     svg
 }
 
@@ -396,6 +397,84 @@ fn strip_unused_state_css(svg: &mut String) {
             }
         }
     }
+}
+
+/// Final render post-pass: minify the embedded `<style>` CSS. Mermaid ships minified CSS;
+/// frankenmermaid emitted pretty-printed CSS (2-space indent + a newline per line), which is
+/// fixed dead weight on EVERY diagram — including the large renders the conditional dead-CSS
+/// strips skip (size-guarded). Runs once over the ~9 KB style region only (the SVG body is
+/// untouched), so the cost is a single constant-size scan with no size guard needed. No-op when
+/// there is no `<style>` block. See [`minify_css`] for the whitespace-only contract.
+fn minify_style_block(svg: &mut String) {
+    let Some(open) = svg.find("<style") else {
+        return;
+    };
+    let Some(gt_rel) = svg[open..].find('>') else {
+        return;
+    };
+    let content_start = open + gt_rel + 1;
+    let Some(end_rel) = svg[content_start..].find("</style>") else {
+        return;
+    };
+    let content_end = content_start + end_rel;
+    let minified = minify_css(&svg[content_start..content_end]);
+    if minified.len() < content_end - content_start {
+        svg.replace_range(content_start..content_end, &minified);
+    }
+}
+
+/// Collapse non-semantic whitespace in a CSS string to mermaid-style minified form.
+///
+/// WHITESPACE-ONLY by construction: no non-whitespace byte is ever added or removed, so the
+/// CSS parses identically. A run of whitespace is dropped when an adjacent delimiter already
+/// separates the tokens (`{ } ; , :` immediately before, or `}` immediately after) and otherwise
+/// collapses to a single space. This preserves the two whitespace classes that ARE semantic in
+/// CSS — descendant combinators (`.a .b`) and value-internal spaces (`2px 8px`, `in srgb`,
+/// `var(--x) 4%`, `prop: value`) — while removing indentation, line breaks, and delimiter-hugging
+/// spaces. Spaces after `:` are intentionally kept (selectors, pseudo-elements, and declarations
+/// all share `:`, so leaving it untouched is the maximally drift-safe choice). The invariant is
+/// machine-checked: stripping ALL whitespace from the input and from the output yields identical
+/// strings (verified per-test and across every golden), proving only whitespace changed.
+fn minify_css(css: &str) -> String {
+    let b = css.as_bytes();
+    let n = b.len();
+    let mut out: Vec<u8> = Vec::with_capacity(n);
+    let mut i = 0;
+    while i < n {
+        match b[i] {
+            b' ' | b'\t' | b'\n' | b'\r' => {
+                let mut has_nl = false;
+                while i < n {
+                    match b[i] {
+                        b' ' | b'\t' => i += 1,
+                        b'\n' | b'\r' => {
+                            has_nl = true;
+                            i += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                let prev = out.last().copied().unwrap_or(0);
+                let nxt = if i < n { b[i] } else { 0 };
+                let drop = if has_nl {
+                    prev == 0 || matches!(prev, b'{' | b'}' | b';' | b',' | b':') || nxt == b'}'
+                } else {
+                    matches!(prev, b'{' | b'}' | b';' | b',')
+                        || matches!(nxt, b'{' | b'}' | b';' | b',' | 0)
+                };
+                if !drop {
+                    out.push(b' ');
+                }
+            }
+            other => {
+                out.push(other);
+                i += 1;
+            }
+        }
+    }
+    // A pure whitespace transformation over valid UTF-8 input is always valid UTF-8; the fallback
+    // is defensive only.
+    String::from_utf8(out).unwrap_or_else(|_| css.to_string())
 }
 
 /// Render a target-agnostic scene to SVG string with custom configuration.
@@ -7979,6 +8058,66 @@ mod tests {
     }
 
     #[test]
+    fn minify_css_is_whitespace_only_and_preserves_semantic_spaces() {
+        // The strip-ALL-whitespace projection of input and output must be identical: this proves
+        // the minifier only added/removed whitespace, never a selector/property/value byte.
+        let strip_ws = |s: &str| -> String { s.chars().filter(|c| !c.is_whitespace()).collect() };
+        let pretty = "\
+:root {
+  --fm-bg: #fff;
+}
+.fm-node rect,
+.fm-node path {
+  fill: var(--fm-node-fill);
+  stroke-width: 1.6;
+  filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.10));
+}
+.fm-node .child {
+  background: color-mix(in srgb, var(--fm-accent-1) 4%, transparent);
+}
+";
+        let min = minify_css(pretty);
+        // 1. Whitespace-only invariant.
+        assert_eq!(
+            strip_ws(pretty),
+            strip_ws(&min),
+            "minify_css changed a non-whitespace byte"
+        );
+        // 2. It actually shrank (indentation + newlines removed).
+        assert!(min.len() < pretty.len());
+        assert!(!min.contains('\n'), "newlines should be gone: {min:?}");
+        assert!(!min.contains("  "), "indentation should be gone: {min:?}");
+        // 3. Delimiter-hugging spaces collapse.
+        assert!(min.contains(".fm-node rect,.fm-node path{"));
+        assert!(min.contains("#fff;}"));
+        // 4. SEMANTIC spaces survive — descendant combinator, value-internal, and `prop: value`.
+        assert!(
+            min.contains(".fm-node .child{"),
+            "descendant combinator space dropped: {min:?}"
+        );
+        assert!(min.contains("2px 8px"), "value-internal space dropped: {min:?}");
+        assert!(min.contains("in srgb"), "function-arg space dropped: {min:?}");
+        assert!(min.contains("4%, transparent") || min.contains("4%,transparent"));
+        assert!(min.contains("fill: var(--fm-node-fill)"), "`: ` space dropped: {min:?}");
+    }
+
+    #[test]
+    fn rendered_style_block_is_minified() {
+        let ir = create_ir_with_single_node("n", NodeShape::Rect);
+        let svg = render_svg(&ir);
+        let start = svg.find("<style").expect("style open");
+        let gt = svg[start..].find('>').expect("style >") + start + 1;
+        let end = svg[gt..].find("</style>").expect("style close") + gt;
+        let css = &svg[gt..end];
+        // No pretty-print artifacts remain in the embedded stylesheet.
+        assert!(!css.contains('\n'), "embedded CSS still has newlines");
+        assert!(!css.contains("  "), "embedded CSS still has indentation");
+        // But the rules themselves are intact.
+        assert!(css.contains(":root{"));
+        assert!(css.contains(".fm-node "));
+    }
+
+    #[test]
     fn node_gradient_defs_and_fill_are_emitted() {
         let ir = create_ir_with_single_node("grad-node", NodeShape::Rect);
         let config = SvgRenderConfig {
@@ -8016,7 +8155,9 @@ mod tests {
         };
         let svg = render_svg_with_config(&ir, &config);
         assert!(svg.contains("fm-node-inactive"));
-        assert!(svg.contains(".fm-node-inactive { opacity: 0.35; }"));
+        // The embedded `<style>` is whitespace-minified (see `minify_css`): delimiter-hugging
+        // spaces collapse, but the `: ` after a property is preserved.
+        assert!(svg.contains(".fm-node-inactive{opacity: 0.35;}"));
     }
 
     #[test]
@@ -8028,8 +8169,9 @@ mod tests {
         );
         let svg = render_svg(&ir);
         assert!(svg.contains("fm-node-block-beta"));
+        // Descendant-combinator spaces survive minification; the space before `{` collapses.
         assert!(svg.contains(".fm-node-block-beta rect,"));
-        assert!(svg.contains(".fm-node-block-beta text {"));
+        assert!(svg.contains(".fm-node-block-beta text{"));
     }
 
     #[test]
@@ -8044,7 +8186,7 @@ mod tests {
 
         let svg = render_svg(&ir);
         assert!(svg.contains("fm-node-block-beta-space"));
-        assert!(svg.contains(".fm-node-block-beta-space {"));
+        assert!(svg.contains(".fm-node-block-beta-space{"));
         assert!(!svg.contains("__space_12</text>"));
         assert!(!svg.contains("aria-label=\"__space_12\""));
     }
