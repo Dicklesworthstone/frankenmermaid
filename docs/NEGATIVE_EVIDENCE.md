@@ -4686,3 +4686,27 @@
   (twiggy bloat analysis) -- below the bar while fm is already ~3x lighter than mermaid.
 
   Agent: cc
+
+### REVERTED: bulk-copy minify hot loop -- sub-noise; the post-pass cost is the marker O(n) scans, not minify (2026-06-29)
+- **Dig (different primitive -- recover render time, not shrink output):** the size-guarded output
+  post-passes still cost +13-24% on small/medium (under the 100 KB cap). Tried the cleanest byte-identical
+  speedup: `minify_css` copied non-whitespace ONE BYTE AT A TIME (`out.push(other)`); replaced with a
+  bulk `extend_from_slice` of each non-whitespace run (memcpy). Mechanically can-not-regress, output
+  byte-identical (whitespace-only invariant test passes), simpler code.
+- **Measured (render_svg/flowchart vs head_after baseline):** small_10 -4.2% (p=0.01, CI [-7.0%,-1.1%]),
+  **medium_100 +3.3%**, large_500 -8.4% (the latter is the size GUARD, not minify -- head_after ran the
+  passes on the >100 KB large render). The medium +3.3% is impossible from a can-not-regress change ->
+  the A/B is cross-run LOAD-CONTAMINATED (head_after was sampled at a different box load). So the minify
+  speedup is **unmeasurable / sub-noise** -- the same call as the reverted manual `compact_display`
+  (4e408c6): byte-identical but not cleanly measurable -> not worth landing.
+- **Useful negative finding (frontier map):** the minify hot loop is NOT the post-pass bottleneck. The
+  per-render cost of the 3 passes is dominated by `strip_unused_markers`' whole-SVG `url(#` scan +
+  HashSet + O(n) rebuild (and the marker-CSS prune's rule scan) -- inherent O(SVG) work that can only be
+  cut by CHANGING output (re-bless / trade output back for time) or a full single-pass rewrite, neither a
+  clean byte-identical slice. On FLOWCHARTS (the render_svg bench) the passes are worst-case: max O(n)
+  cost, min byte win (only arrow-open ~190 B stripped); their real payoff is on small NON-flowcharts
+  (sequence/class: the full 12-marker set ~2.4 KB), where the bench does not look.
+- **Verdict:** REVERTED (~0-gain, can't-measure). Records that the remaining post-pass render cost is
+  irreducible without an output change or a major rewrite -- do-not-retry the minify micro-opt.
+
+  Agent: cc
