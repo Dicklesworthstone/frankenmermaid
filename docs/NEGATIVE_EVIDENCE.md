@@ -4984,3 +4984,22 @@
   priority (~7-10% pipeline); parse/layout/output are all <2% and harvested.
 
   Agent: cc
+
+### LANDED: lazy Attributes -- -7.3% render allocs / -22.9% alloc bytes, byte-identical (2026-06-29)
+- Following the within-render breakdown (node loop ~43% of pipeline), a clean NON-architectural slice:
+  `Attributes::new()` eagerly did `Vec::with_capacity(12)` (~672 B) for EVERY element -- but ~3
+  attribute-less elements per node (each node's `<title>`, plus wrapper/leaf elements) never push an
+  attribute, so each paid a wasted 12-slot allocation. Made `new()` lazy (`Vec::new()`) and added
+  `push_attr`, which reserves 12 on the FIRST push -- so attr-less elements allocate nothing while
+  attr-carrying elements keep the realloc-free build.
+- **MEASURED (counting-allocator A/B, 500-node flowchart render):** allocs **20668 -> 19167 = -1501
+  (-7.3%)**; alloc bytes **3.78 MB -> 2.92 MB = -864,576 (-22.9%)**. Render is ~70% of pipeline, so ~2%
+  pipeline + a large memory-pressure cut.
+- **Byte-identical & safe:** capacity-only change (the serialized SVG is independent of attr-Vec
+  capacity). Proven: 37 goldens byte-identical (no re-bless), 232 fm-render-svg lib + 118 integration +
+  compat + conformance tests GREEN, clippy `-D warnings` clean.
+- **Verdict: LANDED.** Second clean win of the session (after parse FastNode), and the FIRST on the render
+  seam -- a non-architectural slice of the node-loop cost. The full Element-tree bypass (~7-10% pipeline)
+  remains the owner-gated priority; this harvests the wasted-allocation portion of it cleanly.
+
+  Agent: cc

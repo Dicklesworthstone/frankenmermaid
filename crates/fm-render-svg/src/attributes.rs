@@ -87,14 +87,24 @@ pub struct Attributes {
 impl Attributes {
     /// Create a new empty attribute collection.
     ///
-    /// Pre-sized to a typical element's attribute count (rect/text/path carry ~8–12
-    /// attributes), so building an element's attribute list does not repeatedly realloc
-    /// and copy as setters push — element construction dominates SVG render time.
+    /// Lazily allocated (empty `Vec`): attribute-LESS elements — notably every node's `<title>`, plus
+    /// other wrapper/leaf elements — never push, so they must not pay for a heap `Vec` at all. The first
+    /// push reserves the typical 8–12 slots ([`push_attr`]), so attribute-carrying elements keep the
+    /// realloc-free build the old eager `with_capacity(12)` gave. Element construction dominates SVG
+    /// render time, and ~3 attribute-less elements per node were each paying a wasted 12-slot allocation.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            attrs: Vec::with_capacity(12),
+        Self { attrs: Vec::new() }
+    }
+
+    /// Push an attribute, reserving the typical element capacity on the first push. Centralises the
+    /// lazy-allocation policy so an empty element never allocates while a populated one never reallocs.
+    #[inline]
+    fn push_attr(&mut self, attr: Attribute) {
+        if self.attrs.capacity() == 0 {
+            self.attrs.reserve(12);
         }
+        self.attrs.push(attr);
     }
 
     /// Add an attribute.
@@ -106,7 +116,7 @@ impl Attributes {
     ) -> Self {
         let name = name.into();
         self.attrs.retain(|attr| attr.name != name);
-        self.attrs.push(Attribute {
+        self.push_attr(Attribute {
             name,
             value: value.into(),
         });
@@ -175,7 +185,7 @@ impl Attributes {
         let mut class = String::with_capacity(prefix.len() + suffix.len());
         class.push_str(prefix);
         class.push_str(suffix);
-        self.attrs.push(Attribute {
+        self.push_attr(Attribute {
             name: Cow::Borrowed("class"),
             value: AttributeValue::String(class),
         });
@@ -200,7 +210,7 @@ impl Attributes {
         let mut class = String::with_capacity(prefix.len() + decimal_digits(value));
         class.push_str(prefix);
         push_usize(&mut class, value);
-        self.attrs.push(Attribute {
+        self.push_attr(Attribute {
             name: Cow::Borrowed("class"),
             value: AttributeValue::String(class),
         });
@@ -274,7 +284,7 @@ impl Attributes {
                     self = self.class(class);
                 }
             } else {
-                self.attrs.push(attr);
+                self.push_attr(attr);
             }
         }
         self
