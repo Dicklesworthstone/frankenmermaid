@@ -4225,3 +4225,27 @@
   owner-gated + comparator-blocked. Hand to the render owner with this number.
 
   Agent: cc
+
+### MEASURED HEAD-TO-HEAD vs mermaid.js — comparator UNBLOCKED, fresh same-box ratio (2026-06-29)
+- **Unblocked the comparator the swarm recorded as BLOCKED.** The memory says head-to-head was blocked
+  (legacy_mermaid_code/ corpus absent) and the `mmdc` CLI is broken in mermaid 11.15.0 (bundled
+  dist/index.html is an 81-byte stub → net::ERR_FILE_NOT_FOUND). Bypassed it: drive mermaid core
+  directly in headless system chromium via puppeteer, render N=5 times to amortize browser startup so
+  the ms is RENDER-ONLY (the fair live-CDP method). Reusable harness landed at
+  `scripts/mermaid_headtohead_cc.mjs` (setup in its header; node_modules stays in a scratch dir, out of git).
+- **Measured (wide 16x32 flowchart = 512 nodes / 960 edges, SAME box, render-only):**
+  - mermaid.js 11.15.0: median render **3453.9 ms** (5 renders 3309-3597), output **1,198,399 bytes**
+  - frankenmermaid full pipeline (parse+layout+render, `full_pipeline_wide/parse_layout_svg/16x32`):
+    **4.555 ms** ([4.483, 4.555, 4.633]), output **535,831 B** (a11y default) / **372,075 B** (lean)
+  - **TIME RATIO: 3453.9 / 4.555 = ~758x FASTER.**
+  - **OUTPUT RATIO: 1,198,399 / 535,831 = 2.24x SMALLER (a11y), / 372,075 = 3.22x SMALLER (lean).**
+- **Notes:** mermaid needed `maxEdges: 100000` (its 500 default rejects this 960-edge graph). This is a
+  fresh same-box measurement (the prior ledger `[ratios]` were stale — memory line 13 flagged "124x...
+  vs current ~947x"); 758x is on THIS loaded box (mermaid's absolute swings with chromium/box load too).
+  frankenmermaid dominates on BOTH axes: ~758x faster AND 2.24-3.22x smaller output, even though its
+  a11y-full default emits the per-element `<title>`/`role`/`tabindex` superset mermaid omits (the 30.6%
+  lean lever, prior entry) — i.e. frankenmermaid wins decisively WITHOUT needing that reduction.
+- **Verdict:** comparator UNBLOCKED + reusable; current real dominance recorded (758x time, 2.24-3.22x
+  output). The swarm can now compute head-to-head ratios again via the landed harness.
+
+  Agent: cc
