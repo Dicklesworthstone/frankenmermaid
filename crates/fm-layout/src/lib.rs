@@ -3256,8 +3256,36 @@ fn stable_layout_request_hash(
     guardrails: LayoutGuardrails,
     metrics: &fm_core::FontMetrics,
 ) -> u64 {
-    let descriptor = format!(
-        "{ir:?}|{algorithm}|{cycle_strategy}|{collapse_cycle_clusters}|{fnx_enabled}|\
+    // Hash the FULL IR by streaming its serde serialization straight into the FNV state, then fold
+    // in the scalar config/guardrails tail. `serde_json` has the SAME complete, maintenance-safe
+    // field coverage as the old `format!("{ir:?}")` (both walk every field via a derive) — a new IR
+    // field is captured automatically — but the JSON serializer is ~10-50x cheaper than `Debug`
+    // formatting and writes no giant intermediate `String`. The old `{ir:?}` render was an O(n)
+    // Debug-stringify run on EVERY engine call (including memoized cache hits), which made the
+    // incremental cache-hit slower than a full recompute (see docs/NEGATIVE_EVIDENCE.md 2026-06-29).
+    // The resulting `u64` differs from the old scheme, but the cache only needs internal consistency
+    // (same input -> same key, different input -> different key), which this preserves.
+    struct FnvWriter(u64);
+    impl std::io::Write for FnvWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let mut hash = self.0;
+            for &byte in buf {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(0x0100_0000_01b3);
+            }
+            self.0 = hash;
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = FnvWriter(0xcbf2_9ce4_8422_2325);
+    // In-memory `Serialize` cannot fail; ignore defensively. IR maps are `BTreeMap`/`Vec` (ordered),
+    // so the serialization — and thus the key — is deterministic for a given IR.
+    let _ = serde_json::to_writer(&mut writer, ir);
+    let tail = format!(
+        "|{algorithm}|{cycle_strategy}|{collapse_cycle_clusters}|{fnx_enabled}|\
          {edge_routing}|{node_spacing}|{rank_spacing}|{cluster_padding}|\
          {sequence_participant_gap_extra}|\
          {sequence_min_message_gap}|{font_size}|{avg_char_width}|{line_height_px}|\
@@ -3279,16 +3307,9 @@ fn stable_layout_request_hash(
         max_layout_iterations = guardrails.max_layout_iterations,
         max_route_ops = guardrails.max_route_ops,
     );
-    stable_u64_hash(descriptor.as_bytes())
-}
-
-fn stable_u64_hash(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0100_0000_01b3);
-    }
-    hash
+    use std::io::Write;
+    let _ = writer.write(tail.as_bytes());
+    writer.0
 }
 
 fn saturating_elapsed_micros(duration: std::time::Duration) -> u64 {

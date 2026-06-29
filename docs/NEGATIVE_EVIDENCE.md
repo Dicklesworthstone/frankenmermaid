@@ -4069,3 +4069,36 @@
   fix (this entry).
 
   Agent: cc
+
+### FIXED & LANDED: incremental layout cache key — serde-serialize hash replaces Debug-string (the memo is net-positive again) (2026-06-29)
+- **Lever (the fix the prior 3 entries specified — now implemented):** replaced
+  `stable_layout_request_hash`'s `format!("{ir:?}")` + scalar byte-FNV (an O(n) Debug-stringify of the
+  WHOLE IR run on every engine call, including memoized cache hits) with `serde_json::to_writer(ir)`
+  streamed straight into the FNV state, then the same scalar config/guardrails tail. `serde::Serialize`
+  gives the IDENTICAL complete + maintenance-safe field coverage as `{:?}` (a new IR field is captured
+  automatically) but the JSON serializer is far cheaper than `Debug` formatting and allocates no giant
+  intermediate `String`. DIFFERENT primitive: structured serialize-into-hasher, not Debug-render-then-hash.
+- **Zero binary weight:** `serde_json` is already a production dep of `fm-wasm`/`fm-cli`/`fm-render-svg`,
+  so it is already in every binary that links `fm-layout`; adding `serde_json.workspace = true` to
+  `fm-layout` adds nothing to the WASM closure (Cargo.lock unchanged).
+- **Measured (`integration_test:771`, the perf oracle; loaded box, paired incr-vs-full medians):**
+  | size | BEFORE incr / full (ratio) | AFTER incr / full (ratio) | cache-hit speedup |
+  |------|----------------------------|---------------------------|-------------------|
+  | 72 nodes (test size) | 425.6 / 203.5 us = **2.09x SLOWER** | 98.2 / 137.7 us = **0.71x (29% FASTER)** | **4.3x** |
+  | 400 nodes | 2018 / 503.8 us = **4.01x SLOWER** | 554.7 / 512.6 us = **1.08x (~break-even)** | **3.6x** |
+  The memoized cache-hit is now 3.6-4.3x faster and BEATS full recompute at the test size; the consistent
+  `:771` RED (5/5) is GREEN. Honest note: `serde_json` is still O(n), so at very large graphs (>=~400
+  nodes) the hit is ~break-even — a fully O(1) win needs an engine-maintained IR fingerprint (hash kept
+  incrementally instead of re-serialized per call); recorded as the remaining refinement.
+- **Production impact:** `fm-wasm` re-renders through `IncrementalLayoutEngine`, so interactive browser
+  re-renders (the primary realistic Mermaid-replacement workload) are now 3.6-4.3x faster on the
+  cache-hit path instead of slower-than-recompute.
+- **Conformance:** cache-KEY-only change — the cached/computed layout is byte-identical, so SVG output
+  is unchanged. 428 `fm-layout` tests + 18 incremental-engine invalidation/reuse tests + `:771` +
+  `frankentui_conformance_test` all pass; clippy clean. Cache correctness (invalidate on change, hit on
+  identical input) is preserved by the invalidation test suite.
+- **Verdict:** KEPT & LANDED. Closes the incremental-layout regression chain: measured (f75ce3d) ->
+  Debug-key root cause (c654c2f) -> design reason + fix spec (633f945) -> implemented + measured + landed
+  (this entry). The biggest internal regression on the board is fixed; the memo is net-positive again.
+
+  Agent: cc
