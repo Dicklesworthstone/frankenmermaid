@@ -45,3 +45,27 @@ node fast path (66ff940 / `build_common_node_fragment`), which *does* emit `<tit
 This corrects my earlier 90446ae hedge ("re-bless or fix"): it is a **fast-path-vs-slow-path
 divergence**, not a stale golden — the fast path and slow path disagree, so re-blessing alone would
 bake in inconsistent output (fast-path edges bare, slow-path edges titled).
+
+## Update (71c1d76 follow-up): the divergence is BIGGER than just `<title>` — complete fix spec
+
+Reading the full slow path (render_edge:6401-6440) this turn, the bare fast-path `<path>` is missing
+MORE than the a11y title:
+- **`id="fm-edge-N"` is missing for EVERY config** — the slow path always appends
+  `elem = elem.id(&mermaid_edge_element_id(edge_index))` (line 6438), even for non-a11y edges. The
+  fast-path `build_common_edge_fragment` never emits an `id`.
+- **When `a11y.text_alternatives`** (default on): slow path wraps in
+  `<g id="fm-edge-N" class="fm-edge" data-fm-edge-id="N" [role="graphics-symbol"] [tabindex="0"]>{path}<title>{describe_edge_labels(...)}</title></g>`
+  (role gated on `a11y.aria_labels`, tabindex on `a11y.keyboard_nav`). Fast path emits none of it.
+
+So the complete fix (preferred — keeps the direct-byte speed, the peer's node-fragment pattern
+66ff940): `build_common_edge_fragment` must take the a11y flags + the `describe_edge` text and emit:
+- a11y-off, no aria/kbd → `<path d=… stroke-width=… class="fm-edge {cls}" data-fm-edge-id="N" marker-end=… id="fm-edge-N"/>`
+- a11y-on → the full `<g …>{path}<title>…</title></g>` above.
+And **fix the tautological pin test** `edge_fast_fragment_matches_element` to assert
+`build_common_edge_fragment(...) == ` the **real** `render_edge(...)` serialization for an unlabeled
+edge across the a11y-flag matrix (not a hand-built bare `Element::path()`).
+
+Alternatively gate the fast path on the a11y/id conditions — but that disables it for the default
+(a11y-on) config, regressing the ~40%-of-render direct-byte path. This is render-owner work (their
+fast path + their node-fragment expertise); it is the conformance half of the prerequisite to the
+measurable ~12% render output-reduction win.
