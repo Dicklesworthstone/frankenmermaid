@@ -401,6 +401,12 @@ const NODE_SHAPE_THEME_CSS: &str = ".fm-node.fm-node-shape-note path,\n.fm-node.
 fn strip_unused_theme_css(css: &mut String, ir: Option<&MermaidDiagramIr>) {
     if !ir.is_some_and(|ir| !ir.clusters.is_empty()) {
         *css = css.replace(CLUSTER_THEME_CSS, "");
+        // The `:root` cluster-only custom properties feed ONLY the stripped cluster rules, so they
+        // are dead too when there are no clusters. Same exact-substring / safe-no-op contract.
+        *css = css.replace(
+            "  --fm-cluster-label-color: var(--fm-text-color);\n  --fm-cluster-c4-fill: var(--fm-cluster-fill);\n  --fm-cluster-c4-stroke: var(--fm-cluster-stroke);\n  --fm-cluster-swimlane-fill: var(--fm-cluster-fill);\n  --fm-cluster-swimlane-stroke: var(--fm-cluster-stroke);\n",
+            "",
+        );
     }
     let has_special_shapes = ir.is_some_and(|ir| {
         ir.nodes.iter().any(|node| {

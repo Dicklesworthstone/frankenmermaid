@@ -4379,3 +4379,16 @@
   block is shrinking toward mermaid-parity on the realistic small-diagram workload.
 
   Agent: cc
+
+### KEPT: also strip dead :root cluster vars when no clusters -- byte-identical, -262 B/diagram (2026-06-29)
+- Extends the cluster gate ([[cluster theme-CSS gate]]): the 5 :root cluster-only custom properties
+  feed ONLY the already-stripped cluster rules, so they are dead too when no clusters. Same exact-
+  substring / safe-no-op contract. Invariant verified across all 37 goldens (cluster vars present IFF
+  cluster elements present, 0 violations); 226 render tests + conformance pass; clippy clean.
+- CUMULATIVE conditional-CSS dead-weight landed this session (cluster rules 532 B + node-shapes 541 B
+  + cluster vars 262 B): flow_small 14,616 (orig) -> 13,281 = -1,335 B / -9.1%. vs mermaid 11.15.0
+  (16,190 B): output ratio 1.11x -> 1.22x SMALLER. Real on small/realistic diagrams; cluster/shape
+  diagrams unaffected. Remaining gateable: edge-styles ~218 B (IR-detectable) and the state/highlight
+  block ~877 B (needs the riskier post-process-final-SVG approach, not a clean IR flag).
+
+  Agent: cc

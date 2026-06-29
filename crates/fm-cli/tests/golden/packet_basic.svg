@@ -36,11 +36,6 @@
   --fm-edge-label-bg: var(--fm-bg);
   --fm-edge-label-border: var(--fm-cluster-stroke);
   --fm-edge-label-text: var(--fm-text-color);
-  --fm-cluster-label-color: var(--fm-text-color);
-  --fm-cluster-c4-fill: var(--fm-cluster-fill);
-  --fm-cluster-c4-stroke: var(--fm-cluster-stroke);
-  --fm-cluster-swimlane-fill: var(--fm-cluster-fill);
-  --fm-cluster-swimlane-stroke: var(--fm-cluster-stroke);
   --fm-surface-shadow: rgba(15, 23, 42, 0.1);
 }
 svg {
