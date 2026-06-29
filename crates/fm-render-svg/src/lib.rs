@@ -6618,16 +6618,24 @@ fn write_common_edge_path_into(
 /// wide-render alloc lever. The group's attribute names/order (`id`, `class`, `data-fm-edge-id`,
 /// `role`, `tabindex`) and the `role="graphics-symbol"`/`tabindex="0"` literals are replicated here;
 /// asserted by `edge_fast_full_fragment_matches_render` and the corpus `golden_svg_test`.
+///
+/// The `<title>` text is the unlabeled solid-arrow description -- `describe_edge_labels(from, to,
+/// ArrowType::Arrow, None)` = `"{from} points to {to}"` (with `"unknown"` fallbacks) -- written
+/// piecewise so the per-edge description String never has to be allocated. Escaping the assembled
+/// string and escaping the two labels separately are byte-identical because the connective phrase
+/// (`" points to "`) and the `"unknown"` fallback contain no escapable bytes, so `write_escaped_text`
+/// is the identity on them. Pinned (incl. labels with `& < >`) by `edge_fast_full_fragment_matches_render`.
 fn build_common_edge_full_fragment(
     path_str: &str,
     stroke_width: f32,
     style_class: &str,
     edge_index: i32,
     marker_end: &str,
-    edge_desc: &str,
+    from_label: Option<&str>,
+    to_label: Option<&str>,
 ) -> String {
     use crate::attributes::{AttributeValue, write_escaped_text};
-    let mut f = String::with_capacity(path_str.len() + edge_desc.len() + 160);
+    let mut f = String::with_capacity(path_str.len() + 192);
     // <g id="fm-edge-N" class="fm-edge" data-fm-edge-id="N" role="graphics-symbol" tabindex="0">
     // The id is `mermaid_edge_element_id(edge_index)` = "fm-edge-" + decimal(index); it never contains
     // an escapable byte, so it goes through the same `Integer` serializer as `data-fm-edge-id`.
@@ -6638,7 +6646,9 @@ fn build_common_edge_full_fragment(
     f.push_str("\" role=\"graphics-symbol\" tabindex=\"0\">");
     write_common_edge_path_into(&mut f, path_str, stroke_width, style_class, edge_index, marker_end);
     f.push_str("<title>");
-    let _ = write_escaped_text(&mut f, edge_desc);
+    let _ = write_escaped_text(&mut f, from_label.unwrap_or("unknown"));
+    f.push_str(" points to ");
+    let _ = write_escaped_text(&mut f, to_label.unwrap_or("unknown"));
     f.push_str("</title></g>");
     f
 }
@@ -6850,14 +6860,16 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
     {
         let (from_label, to_label) =
             edge_endpoint_accessible_labels(edge, ir, accessible_node_labels);
-        let edge_desc = crate::a11y::describe_edge_labels(from_label, to_label, arrow, None);
+        // `build_common_edge_full_fragment` writes the title (`"{from} points to {to}"`) piecewise, so
+        // the per-edge `describe_edge_labels` String is never allocated.
         return Element::raw_svg(build_common_edge_full_fragment(
             &path_str,
             stroke_width,
             style_class,
             edge_index as i32,
             marker_end_val,
-            &edge_desc,
+            from_label,
+            to_label,
         ));
     }
 
@@ -7190,21 +7202,17 @@ mod tests {
         // Pin the WHOLE-edge fast fragment against the `Element` group the slow path actually builds
         // for an unlabeled solid-arrow edge under default a11y: the unlabeled-edge tail wraps the
         // `<path>` fast fragment in `Element::group().id().class("fm-edge").attr_int("data-fm-edge-id")
-        // .attr("role").attr("tabindex").child(path).child(title)`. The fragment must serialize
-        // byte-identically — including `<title>` escaping of special characters.
-        let cases: &[(&str, i32, &str, f32, &str)] = &[
-            ("M0 0 L10 10", 0, "fm-edge-solid", 1.8, "A points to B"),
-            (
-                "M1.50 2.25 C3.00 4.00 5.00 6.00 7.00 8.00",
-                42,
-                "fm-edge-solid",
-                1.8,
-                "Node <1> & \"x\" points to Node 2",
-            ),
-            ("M-5.25 0 L0 -3.50", 1000, "fm-edge-solid", 2.5, "unknown points to unknown"),
-            ("", 7, "fm-edge-solid", 1.8, "start points to end"),
-        ];
-        for &(d, idx, style, sw, desc) in cases {
+        // .attr("role").attr("tabindex").child(path).child(title)`, with the title text from
+        // `describe_edge_labels(from, to, Arrow, None)`. The fragment must serialize byte-identically —
+        // including piecewise `<title>` escaping of labels with `& < > "` and the `"unknown"` fallback.
+        let check = |d: &str,
+                     idx: i32,
+                     style: &str,
+                     sw: f32,
+                     from_label: Option<&str>,
+                     to_label: Option<&str>| {
+            let desc =
+                crate::a11y::describe_edge_labels(from_label, to_label, ArrowType::Arrow, None);
             let path_child =
                 Element::raw_svg(build_common_edge_fragment(d, sw, style, idx, "url(#arrow-end)"));
             let group = Element::group()
@@ -7214,16 +7222,28 @@ mod tests {
                 .attr("role", "graphics-symbol")
                 .attr("tabindex", "0")
                 .child(path_child)
-                .child(Element::title(desc));
+                .child(Element::title(&desc));
             let mut expected = String::new();
             group.write_to_string(&mut expected);
-            let frag =
-                build_common_edge_full_fragment(d, sw, style, idx, "url(#arrow-end)", desc);
+            let frag = build_common_edge_full_fragment(
+                d, sw, style, idx, "url(#arrow-end)", from_label, to_label,
+            );
             assert_eq!(
                 frag, expected,
                 "whole-edge fast fragment must equal the slow Element group (idx={idx})"
             );
-        }
+        };
+        check("M0 0 L10 10", 0, "fm-edge-solid", 1.8, Some("A"), Some("B"));
+        check(
+            "M1.50 2.25 C3.00 4.00 5.00 6.00 7.00 8.00",
+            42,
+            "fm-edge-solid",
+            1.8,
+            Some("Node <1> & \"x\""),
+            Some("Node 2"),
+        );
+        check("M-5.25 0 L0 -3.50", 1000, "fm-edge-solid", 2.5, None, None);
+        check("", 7, "fm-edge-solid", 1.8, Some("start"), None);
     }
 
     use fm_core::{

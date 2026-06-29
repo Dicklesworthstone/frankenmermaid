@@ -5315,3 +5315,32 @@
   is a pure-waste alloc; stream it into the destination buffer instead.
 
   Agent: cc
+
+### LANDED: edge <title> description written piecewise -- wide render allocs -36% more (2026-06-29)
+- Third stacking render-alloc win this session (after the whole-edge fast path f3e248f and the node-id
+  writer 42547c4). The whole-edge fast path still called `describe_edge_labels(from, to, Arrow, None)` per
+  edge, which `format!`s `"{from} points to {to}"` into a FRESH String -- counting-allocator shows that is
+  **~3 allocation events/edge** (the initial String + its growth reallocs), all dropped after the title is
+  escape-copied into the fragment.
+- **Fix (LANDED):** `build_common_edge_full_fragment` now takes the `from`/`to` accessible labels and
+  writes the `<title>` piecewise straight into the (pre-sized) fragment buffer:
+  `write_escaped_text(from) + " points to " + write_escaped_text(to)`. Byte-identical to escaping the whole
+  assembled string because the connective phrase `" points to "` and the `"unknown"` fallback contain no
+  escapable bytes, so `write_escaped_text` is the identity on them (the labels are still escaped). The
+  per-edge description String is never allocated.
+- **MEASURED (deterministic counting-allocator A/B, load-immune):** FULL wide render allocs
+  wide_16x32 **8089 -> 5209 (-35.6%)**, wide_8x16 2061 -> 1389 (-32.6%); node-only render unchanged (edge-
+  only change). **Session cumulative: wide_16x32 render allocs 19225 (ORIG) -> 5209 = -72.9%** across the
+  three wins (edge wrapper, node id, edge title).
+- **Byte-identical & safe:** `edge_fast_full_fragment_matches_render` pin test rewritten to build the
+  expected group via the REAL `describe_edge_labels` + `Element::title` and compare (cases incl. labels with
+  `& < > "` and `None`/`unknown` fallbacks); `svg_golden_snapshots_are_stable` + conformance GREEN with NO
+  re-bless; 233 fm-render-svg lib tests pass; clippy `-D warnings` clean (closure-per-case in the test to
+  stay under `type_complexity`). Shared WASM render path; only `String`/`write_escaped_text` primitives.
+- **Verdict: LANDED.** The "intermediate String -> escape-write -> drop" pattern struck a third time, and
+  `format!` of a fresh String is worse than a single alloc (initial + growth reallocs all count). Writing
+  variable content piecewise into a pre-sized destination buffer -- escaping only the parts that can carry
+  escapable bytes -- removes the whole per-edge description allocation. Render heap traffic on the exact
+  wide workload the mermaid-js ratios use is now ~1/4 of the original.
+
+  Agent: cc
