@@ -4148,3 +4148,22 @@
   removes the Arc from the follow-up and rules out the sub-noise hasher swap.
 
   Agent: cc
+
+### Land branch empty + incremental hash large-graph extension fully bounded (2026-06-29)
+- **Land:** fresh scan of all `.worktrees` — `cod-b-land-20260625`'s `fe62f85` ("pre-size Attributes Vec
+  render +6-14%") is ALREADY on main (`attributes.rs:96` `Vec::with_capacity(12)`); `cod-a` worktrees
+  are stale (peers inactive 4 days, last 6h of commits are all this lane's). No unlanded measured win.
+- **Dig — the large-graph (>=400 node) incremental hash extension is bounded to three options, none a
+  safe zero-weight 60-min slice:** (a) FxHasher swap = sub-noise (the 605 us hit is serde-serialization-
+  dominated, ~500 us; FxHasher only touches the ~105 us FNV -> ~535 us, still break-even @400);
+  (b) compact binary serializer (postcard/ciborium) WOULD help (smaller+faster encode) but `ciborium`
+  is not in the prod closure and `postcard` is a new external crate — adds WASM weight, an owner dep
+  decision; (c) a zero-weight ~150-line custom `serde::Serializer` that hashes values directly (no JSON
+  text, complete maintenance-safe coverage) — the cleanest, but a dedicated, correctness-surfaced effort,
+  not a quick slice; or (d) the IR fingerprint (the true O(1), unsafe to rush — mutation invalidation).
+- **Standing:** the landed serde_json fix (cab553e) already makes the memo net-positive for the test +
+  typical interactive sizes; the large-graph clear-win is an owner/dedicated-effort item, fully scoped.
+  No safe, single-crate, zero-weight, >noise lever remains anywhere in the wide pipeline (parse/render/
+  layout all floored or owner-routed).
+
+  Agent: cc
