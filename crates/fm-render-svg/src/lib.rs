@@ -338,6 +338,14 @@ pub fn render_svg_with_layout(
 /// is implausibly large (mis-grab guard). Byte-identical rendering — the dropped selectors match
 /// nothing in the body.
 fn strip_unused_state_css(svg: &mut String) {
+    // This post-pass full-scans the SVG ~20 times (state-class + accent presence checks). The fixed
+    // theme CSS it trims (~1.3 KB of states/accents) is a meaningful fraction only for small/medium
+    // diagrams; on a large SVG it is <1% of output while the repeated scans add measurable render
+    // time. Cap the work to outputs where the win clearly beats the scan cost (covers small flowcharts
+    // through the sequence diagram ~62 KB; skips the 200 KB+ chain / wide renders).
+    if svg.len() > 100_000 {
+        return;
+    }
     const STATE_CLASSES: [&str; 5] = [
         "fm-node-inactive",
         "fm-node-block-beta",

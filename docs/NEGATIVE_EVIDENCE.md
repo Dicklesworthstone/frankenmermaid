@@ -4473,3 +4473,17 @@
   which is now harvested. Closing that one default flip would make frankenmermaid win output everywhere.
 
   Agent: cc
+
+### KEPT: size-guard the body-based CSS post-pass -- fixes a ~11% large-render regression I introduced (2026-06-29)
+- Self-caught regression: strip_unused_state_css full-scans the SVG ~20x; on a large SVG that adds
+  render time while trimming <1% of output. Benchmarking (render_svg/flowchart/large_500) caught it at
+  2.344 ms. Added `if svg.len() > 100_000 { return; }` -> large_500 back to **2.081 ms (-11.2%, p=0.00)**.
+- The byte wins are preserved (the cap covers every diagram where the fixed CSS is a meaningful
+  fraction -- small flowcharts through sequence ~62 KB): flow_small 11,817 (1.37x vs mermaid),
+  sequence no-spans 56,780 < mermaid 56,873 (still WINS). 0 goldens changed (skipped large diagrams
+  had no strip anyway); 226 render tests + conformance + clippy pass.
+- LESSON: a body-based post-pass that repeatedly full-scans the output is O(output_size * passes) --
+  guard it to the size range where the win clears the scan cost. ALWAYS bench render time after adding
+  an output post-process, not just the byte delta.
+
+  Agent: cc
