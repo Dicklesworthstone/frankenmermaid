@@ -307,8 +307,10 @@ fn bench_wide_stages(c: &mut Criterion) {
 /// emit-side reductions there can be measured.
 fn bench_render_spans_on(c: &mut Criterion) {
     let mut group = c.benchmark_group("render_spans_on");
-    let mut config = fm_render_svg::SvgRenderConfig::default();
-    config.include_source_spans = true;
+    let config = fm_render_svg::SvgRenderConfig {
+        include_source_spans: true,
+        ..Default::default()
+    };
 
     for (label, layers, width) in [
         ("8x16", 8_usize, 16_usize),
