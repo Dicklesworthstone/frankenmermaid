@@ -4356,3 +4356,26 @@
   small/medium diagram.
 
   Agent: cc
+
+### KEPT & LANDED: gate the special-node-shape theme-CSS block — byte-identical, -541 B/diagram (extends the cluster gate) (2026-06-29)
+- **Lever:** extends `strip_unused_theme_css` (the conditional-CSS dead-weight helper) to also drop the
+  `.fm-node-shape-{note,cloud,cylinder,star,pentagon}` block (541 B) when the diagram uses NONE of those
+  shapes — the common rect/diamond/round/stadium/circle case. Gated on
+  `ir.nodes.iter().any(|n| matches!(n.shape, Note|Cloud|Cylinder|Star|Pentagon))`.
+- **Byte-IDENTICAL + safe + invariant-verified:** the removed selectors match no element; exact-constant
+  strip is a no-op if it ever drifts. **Invariant re-verified across all 37 goldens** (BOTH cluster and
+  shape): block present IFF a matching element present — 0 violations (no unstyled shapes/clusters).
+  `all_node_shapes.svg` (uses the special shapes) keeps the block byte-identically; 36 goldens drop it.
+  226 fm-render-svg tests + conformance pass; clippy clean.
+- **Measured (deterministic bytes), CUMULATIVE with the cluster gate (1db1f0f):**
+  `flow_small` 14,616 (original) → 14,084 (cluster gate) → **13,543** (this) = **-1,073 B / -7.3%**.
+  vs mermaid 11.15.0 (16,190 B): output ratio **1.11x → 1.20x SMALLER**. Real on small/realistic diagrams
+  (fixed CSS up to 63% of output); ~0.7-1.3% on medium; sub-noise on the artificial wide bench.
+- **Original comparator:** frankenmermaid (full CSS) → (cluster+shape gated). vs mermaid flow_small
+  1.11x → 1.20x smaller; shape/cluster diagrams unaffected. Time unchanged (one extra `String::replace`
+  per render only when the shapes are absent; CSS gen is not the hot path).
+- **Verdict:** KEPT — second conditional-CSS dead-weight block landed via the same safe helper. Still
+  extendable to edge-styles (~218 B) and the state/highlight blocks (~877 B) per-feature. The fixed CSS
+  block is shrinking toward mermaid-parity on the realistic small-diagram workload.
+
+  Agent: cc

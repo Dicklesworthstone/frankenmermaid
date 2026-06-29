@@ -130,23 +130,6 @@ svg {
   --fm-node-accent: color-mix(in srgb, var(--fm-accent-8) 50%, var(--fm-node-stroke));
   --fm-node-hover-accent: var(--fm-accent-8);
 }
-.fm-node.fm-node-shape-note path,
-.fm-node.fm-node-shape-note rect {
-  fill: var(--fm-node-fill);
-  fill: color-mix(in srgb, #fef3c7 40%, var(--fm-node-fill));
-}
-.fm-node.fm-node-shape-cloud path {
-  fill: var(--fm-node-fill);
-  fill: color-mix(in srgb, var(--fm-accent-2) 15%, var(--fm-node-fill));
-}
-.fm-node.fm-node-shape-cylinder path {
-  fill: var(--fm-node-fill);
-  fill: color-mix(in srgb, var(--fm-accent-1) 12%, var(--fm-node-fill));
-}
-.fm-node.fm-node-shape-star path,
-.fm-node.fm-node-shape-pentagon path {
-  stroke-width: 1.8;
-}
 .fm-edge {
   fill: none;
   stroke: var(--fm-edge-color);

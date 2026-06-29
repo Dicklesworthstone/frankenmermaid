@@ -389,13 +389,33 @@ fn resolve_theme(ir: Option<&MermaidDiagramIr>, config: &SvgRenderConfig) -> The
 /// never a corruption. See docs/NEGATIVE_EVIDENCE.md (CSS dead-weight lever).
 const CLUSTER_THEME_CSS: &str = ".fm-cluster {\n  fill: var(--fm-cluster-fill);\n  stroke: var(--fm-cluster-stroke);\n  stroke-width: 1;\n  stroke-dasharray: 5 3;\n  rx: 12;\n  ry: 12;\n}\n.fm-cluster-label {\n  fill: var(--fm-cluster-label-color);\n  font-weight: 700;\n  font-size: 0.85em;\n  letter-spacing: 0.01em;\n}\n.fm-cluster-c4 {\n  fill: var(--fm-cluster-c4-fill);\n  stroke: var(--fm-cluster-c4-stroke);\n  stroke-dasharray: none;\n}\n.fm-cluster-swimlane {\n  fill: var(--fm-cluster-swimlane-fill);\n  stroke: var(--fm-cluster-swimlane-stroke);\n  stroke-dasharray: none;\n}\n";
 
-/// Drop theme CSS rule blocks the diagram cannot use (currently the cluster block when there are no
-/// clusters). Byte-identical rendering — the removed selectors match nothing; safe by construction
-/// (a non-matching constant is a no-op).
+/// The special-node-shape theme CSS block (`note`/`cloud`/`cylinder`/`star`/`pentagon`), captured
+/// EXACTLY as `Theme::to_svg_style` emits it. Stripped when the diagram uses none of those shapes
+/// (the common rect/diamond/round/stadium case). Same byte-identical, safe-no-op-if-drifts contract
+/// as `CLUSTER_THEME_CSS`.
+const NODE_SHAPE_THEME_CSS: &str = ".fm-node.fm-node-shape-note path,\n.fm-node.fm-node-shape-note rect {\n  fill: var(--fm-node-fill);\n  fill: color-mix(in srgb, #fef3c7 40%, var(--fm-node-fill));\n}\n.fm-node.fm-node-shape-cloud path {\n  fill: var(--fm-node-fill);\n  fill: color-mix(in srgb, var(--fm-accent-2) 15%, var(--fm-node-fill));\n}\n.fm-node.fm-node-shape-cylinder path {\n  fill: var(--fm-node-fill);\n  fill: color-mix(in srgb, var(--fm-accent-1) 12%, var(--fm-node-fill));\n}\n.fm-node.fm-node-shape-star path,\n.fm-node.fm-node-shape-pentagon path {\n  stroke-width: 1.8;\n}\n";
+
+/// Drop theme CSS rule blocks the diagram cannot use — the cluster block when there are no clusters,
+/// and the special-node-shape block when none of those shapes are present. Byte-identical rendering
+/// (the removed selectors match nothing); safe by construction (a non-matching constant is a no-op).
 fn strip_unused_theme_css(css: &mut String, ir: Option<&MermaidDiagramIr>) {
-    let has_clusters = ir.is_some_and(|ir| !ir.clusters.is_empty());
-    if !has_clusters {
+    if !ir.is_some_and(|ir| !ir.clusters.is_empty()) {
         *css = css.replace(CLUSTER_THEME_CSS, "");
+    }
+    let has_special_shapes = ir.is_some_and(|ir| {
+        ir.nodes.iter().any(|node| {
+            matches!(
+                node.shape,
+                fm_core::NodeShape::Note
+                    | fm_core::NodeShape::Cloud
+                    | fm_core::NodeShape::Cylinder
+                    | fm_core::NodeShape::Star
+                    | fm_core::NodeShape::Pentagon
+            )
+        })
+    });
+    if !has_special_shapes {
+        *css = css.replace(NODE_SHAPE_THEME_CSS, "");
     }
 }
 
