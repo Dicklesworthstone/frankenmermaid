@@ -4010,3 +4010,36 @@
   internal regression on the board (a landed feature that is net-negative in production).
 
   Agent: cc
+
+### Render streaming-serialization refactor QUANTIFIED as sub-noise — render frontier CLOSED at floor (2026-06-29)
+- **Corrects my own earlier framing.** Prior entries (and the edge_svg right-size note) called the
+  "accumulator -> final-buffer copy" the real remaining render lever and implied a ~5% streaming
+  refactor. Quantifying it shows it is **sub-noise**, so the render frontier is genuinely at floor.
+- **Mechanism (code-confirmed, `fm-render-svg/src/document.rs:155-217`):** `SvgDocument::write_to_string`
+  writes each child DIRECTLY into the single pre-sized `output` buffer in order (`child.write_to_string
+  (output)`). The two big children are `raw_svg(edge_svg)` and `raw_svg(node_svg)` — built as separate
+  accumulators (to avoid retaining ~1500 element trees) and then `push_str`-copied into `output`. That
+  copy is the ONLY avoidable memcpy; everything else (each element's bytes written into the
+  accumulators, then into `output`) is INHERENT — the SVG bytes must be produced once.
+- **Arithmetic (16x32 wide):** measured section sizes are edge_svg ~405 KB + node_svg ~210 KB =
+  **~615 KB of avoidable accumulator->final copy**. At ~10 GB/s memcpy that is **~60 us**. Render is
+  ~2.0 ms (unloaded ledger) / ~3.0 ms (loaded box), so the avoidable copy is **~2-3% of render** and
+  shrinks further once the box is loaded. The fresh render profile's `__memmove/__memcpy` **7.0%** is
+  therefore dominated by the INHERENT per-element writes + buffer growth, NOT the two accumulator
+  copies; only ~2-3pp of that 7% is recoverable.
+- **Why it is not worth it:** recovering ~2-3% needs a document-model change — a deferred/streaming
+  child variant (`Fn(&mut String)`) so the node/edge loops render straight into the final buffer
+  instead of into accumulators — with the render closures capturing `&layout`/`&ir`/`&theme`/`&config`
+  /offsets, plus byte-identity verification across all 37 goldens. A ~2-3% (sub-±3-10%-noise) win for a
+  core-serialization refactor + lifetime plumbing is below the keep bar and a `REVERT ~0-gain`
+  candidate. The accumulators are also a deliberate memory optimization (avoid retaining ~1500 element
+  trees), so removing them trades a guaranteed memory win for a sub-noise time delta.
+- **Original comparator:** unaffected (no code change). Render-stage dominance vs Mermaid `11.12.0`
+  remains ~600-1200x (`0.0016x`/`0.0011x`/`0.0008x`).
+- **Verdict:** render frontier CLOSED at floor. Per-element direct-byte = sub-noise (prior node
+  finding); streaming-serialization = ~2-3% sub-noise (this entry); the inherent cost is producing +
+  writing the SVG bytes once. Frontier map for the wide pipeline: **parse = allocation floor
+  (aa56205), render = inherent-write floor (this entry), layout = owner-owned Debug-string cache-key
+  regression (c654c2f)** — no >3% byte-identical in-scope lever remains.
+
+  Agent: cc
