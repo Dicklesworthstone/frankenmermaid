@@ -4392,3 +4392,24 @@
   block ~877 B (needs the riskier post-process-final-SVG approach, not a clean IR flag).
 
   Agent: cc
+
+### REJECTED: block-beta CSS gate — const mismatch + a pre-existing block-diagram render quirk (2026-06-29)
+- **Attempted** the 4th conditional-CSS strip (`.fm-node-block-beta*` ~281 B, gated on
+  `diagram_type == BlockBeta`) via `strip_unused_theme_css`. REVERTED.
+- **Why rejected:** (1) the captured constant did not match the generated CSS (flow_small was
+  unchanged 13,281 B → the `str::replace` was a no-op), AND (2) the cross-golden invariant check
+  FLAGGED `block_basic`: it has `fm-node-block-beta` ELEMENTS but its embedded `<style>` has NO
+  block-beta CSS — and this is TRUE on committed main, before any change. The invariant safety net
+  worked exactly as intended (caught it pre-bless; goldens + lib.rs reverted, 0 net change).
+- **Tangential finding for the render owner (pre-existing, not mine):** `block_basic`'s block-beta
+  nodes carry no inline fill (`0` occurrences of `#546e7a`/`#455a64`) AND no `.fm-node-block-beta`
+  theme CSS, so they render with the DEFAULT node fill instead of the intended dark block-beta fill.
+  Block diagrams appear to take a render path (the scene path, lib.rs site 1) whose embedded CSS omits
+  the block-beta rules — the block-beta theme styling never reaches block-diagram output. A real
+  rendering inconsistency to investigate, separate from the CSS dead-weight lever.
+- **Standing:** the 3 LANDED conditional-CSS wins (cluster rules 532 B / node-shapes 541 B / cluster
+  vars 262 B = -1,335 B, flow_small 1.11x→1.22x vs mermaid) are unaffected and verified. Remaining
+  clean gateable block: edge-styles (~150 B dashed+thick, IR-detectable). The state/highlight/border
+  block needs the post-process-final-SVG approach (per-element class presence), not an IR flag.
+
+  Agent: cc
