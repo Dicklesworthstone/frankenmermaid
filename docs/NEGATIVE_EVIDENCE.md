@@ -4906,3 +4906,23 @@
   cheap-lever frontier is exhausted.
 
   Agent: cc
+
+### CLOSED (by experiment): the two render element-construction alloc/compute levers (2026-06-29)
+- **attrs `SmallVec` (alloc lever) -- TRADEOFF, not a clean win.** Each render `Element` heap-allocates its
+  `attrs: Vec` (cap-12) -- ~2000 transient allocs/render at n=500. Inlining wins on the DEFAULT/legacy path
+  (it streams transient Elements). BUT the `Attributes` doc confirms elements carry **8-12 attrs**, so an
+  inline `SmallVec<[Attribute; ~12]>` is ~672 B/Element, and the SCENE backend RETAINS the full 1000+-Element
+  tree (`render_scene_document` builds `scene_root` then `doc.child(scene_root).to_string()`) -> ~672 KB of
+  inline bloat = a memmove regression there. No N is clean on both backends. Default-only payoff ~1.2%
+  pipeline behind a scene regression -> owner-gated.
+- **`Attributes::set()` O(n^2) `retain` (compute lever) -- LOAD-BEARING, cannot remove.** Every setter
+  (`.class`/`.id`/`.fill`/…) routes through `set()`, which `retain`-scans all existing attrs to dedup before
+  push (O(n^2) per element). Tested removal with a `debug_assert` no-dup guard: it **fires immediately** --
+  e.g. `fill` is set as a theme default then overridden, across many diagrams. So the dedup is REQUIRED for
+  overwrite semantics; removing it emits duplicate attributes (broken SVG). Ordered overwrite-by-name can't
+  use an O(1) HashMap without breaking attribute order (byte-identity). Reverted; lever closed.
+- **Verdict.** Both render element-construction levers are now closed by direct experiment. Combined with the
+  prior maps, the cross-subsystem cheap-lever frontier is confirmed exhausted; render gains need the
+  architectural Element-tree-bypass rewrite (owner-gated). The session's clean win remains FastNode (e52848e).
+
+  Agent: cc
