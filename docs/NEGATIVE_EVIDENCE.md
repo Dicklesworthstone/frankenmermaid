@@ -4888,3 +4888,21 @@
   seam, at zero output/behavior change. The render seam (70%) remains architectural/owner-gated per above.
 
   Agent: cc
+
+### MAPPED: remaining parse alloc levers need central intern refactor (owner-gated) (2026-06-29)
+- After the FastNode land (-18%), n=500 parse is 4554 allocs (~9/node). The remaining redundant ones are
+  NOT clean narrow mirrors like FastNode -- they all sit in the central 55-line `intern_node_auto` /
+  `intern_label` and need a typed refactor:
+  - **id String allocated twice per new node** (the `IrNode.id` field AND the `node_index_by_id`
+    `FxHashMap<String,_>` key). Dedup needs `Rc<str>` shared across the IR -> wide blast radius (every
+    `node.id` reader), correctness-critical.
+  - **label text cloned twice per new label** (the `label_index_by_text` key tuple `(String, Vec<seg>)`
+    AND the `IrLabel.text`), plus a clone-BEFORE-lookup (Rust can't `Borrow`-lookup a `(String,Vec)` key
+    by `(&str,&[seg])`). Removing needs an owned-label intern path (duplicates `intern_node_auto`'s
+    existing-node merge logic -> sync risk) or a hash-keyed dedup map with collision handling.
+- **Verdict.** Each is ~1 alloc/node ≈ ~1-2% pipeline, behind a moderate-risk central-path refactor --
+  below the autonomous-pass bar; owner-gated. The cheap, byte-identical parse frontier is now harvested
+  (FastEdge + FastNode). Combined with render (architectural) and output (closed), the cross-subsystem
+  cheap-lever frontier is exhausted.
+
+  Agent: cc
