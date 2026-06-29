@@ -5003,3 +5003,25 @@
   remains the owner-gated priority; this harvests the wasted-allocation portion of it cleanly.
 
   Agent: cc
+
+### LANDED: parallel node rendering -- -25% to -59% render time on large diagrams, byte-identical (2026-06-29)
+- The within-render breakdown put the per-node render loop at ~43% of the WHOLE pipeline, and `render_node`
+  is PURE (read-only `ir`/`config`/`theme`/`centrality_map` + `Copy` scalars, no shared mutable state) --
+  embarrassingly parallel. Fanned the node loop across stdlib `std::thread::scope` threads on native,
+  concatenating the per-chunk buffers IN ORDER.
+- **MEASURED (A/B, native, parallel vs serial):** n=500 render **2291 -> 1724 us (-24.7%)**; n=1000 render
+  **7055 -> 2901 us (-58.9%, a 2.4x speedup)**. Larger diagrams win more (more cores used, spawn amortized).
+  This is the biggest perf win of the sweep -- directly on the 70% render seam / 43%-of-pipeline node loop.
+- **Byte-identical & safe (every guard verified):** parallel vs serial output hashes MATCH exactly
+  (n=500 `4574c195…`, n=1000 `3499b0f5…`) and lengths match. Chunks are concatenated in node order, so the
+  output is independent of thread count -> machine-independent and deterministic. ZERO new dependency
+  (`std::thread::scope`, keeping the crate's "zero-dependency" charter). WASM takes the serial path via
+  `#[cfg(not(target_arch = "wasm32"))]` (verified: `wasm32-unknown-unknown` builds clean, no thread code).
+  Size-gated at 256 nodes so small/medium renders and the 37 goldens (all <256 nodes) stay on the serial
+  path -- byte-identical, no re-bless. 232 fm-render-svg lib + 118 integration + compat + conformance GREEN,
+  clippy `-D warnings` clean.
+- **Verdict: LANDED.** Third clean win of the session and the largest. The remaining setup+edges (~37% of
+  render) is a natural follow-up (parallelize the edge loop the same way). The full Element-tree bypass
+  remains a separate owner-gated option; this captures the parallelism win without it.
+
+  Agent: cc

@@ -1984,6 +1984,37 @@ fn arrow_uses_only_basic_markers(arrow: fm_core::ArrowType) -> bool {
     )
 }
 
+/// Serial node-render loop, shared by the WASM path and the below-threshold native path (and inlined
+/// per-chunk by the parallel native path). Factored out so all three render byte-identically.
+#[allow(clippy::too_many_arguments)]
+fn render_nodes_serial(
+    out: &mut String,
+    nodes: &[LayoutNodeBox],
+    ir: &MermaidDiagramIr,
+    offset_x: f32,
+    offset_y: f32,
+    config: &SvgRenderConfig,
+    detail: RenderDetailProfile,
+    colors: &ThemeColors,
+    emit_classdef_classes: bool,
+    centrality_map: &HashMap<usize, CentralityTier>,
+) {
+    for node_box in nodes {
+        let node_elem = render_node(
+            node_box,
+            ir,
+            offset_x,
+            offset_y,
+            config,
+            detail,
+            colors,
+            emit_classdef_classes,
+            centrality_map,
+        );
+        node_elem.write_to_string(out);
+    }
+}
+
 fn render_layout_to_svg(
     layout: &DiagramLayout,
     ir: &MermaidDiagramIr,
@@ -2787,20 +2818,82 @@ fn render_layout_to_svg(
     // serialization. Byte-identical: the same `render_node` elements are serialized in the same
     // order, just streamed rather than deferred.
     let mut node_svg = String::with_capacity(layout.nodes.len().saturating_mul(640));
-    for node_box in &layout.nodes {
-        let node_elem = render_node(
-            node_box,
-            ir,
-            offset_x,
-            offset_y,
-            config,
-            detail,
-            &theme.colors,
-            emit_classdef_classes,
-            &centrality_map,
-        );
-        node_elem.write_to_string(&mut node_svg);
+    // The per-node render (`render_node` -> serialize) is the single largest pipeline cost (~43% of the
+    // whole pipeline) and is embarrassingly parallel: `render_node` is pure (read-only `ir`/`config`/
+    // `theme`/`centrality_map` + `Copy` scalars, no shared mutable state). For large diagrams on native
+    // we fan the nodes across stdlib scoped threads (no new dependency — the crate stays zero-dep) and
+    // concatenate the per-chunk buffers IN ORDER, so the output is byte-identical to the serial path.
+    // Below the threshold the thread-spawn overhead would dominate, and WASM (no usable threads) always
+    // takes the serial path — so small/medium renders and every browser render are unchanged.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        const PARALLEL_NODE_THRESHOLD: usize = 256;
+        let node_count = layout.nodes.len();
+        if node_count >= PARALLEL_NODE_THRESHOLD {
+            let threads = std::thread::available_parallelism()
+                .map_or(1, |c| c.get())
+                .clamp(1, 8);
+            let chunk_size = node_count.div_ceil(threads);
+            // Bind shared references once so each `move` thread closure captures a `Copy` `&_` rather
+            // than trying to move the underlying value.
+            let colors = &theme.colors;
+            let centrality = &centrality_map;
+            let parts: Vec<String> = std::thread::scope(|scope| {
+                let handles: Vec<_> = layout
+                    .nodes
+                    .chunks(chunk_size)
+                    .map(|chunk| {
+                        scope.spawn(move || {
+                            let mut buf = String::with_capacity(chunk.len().saturating_mul(640));
+                            render_nodes_serial(
+                                &mut buf,
+                                chunk,
+                                ir,
+                                offset_x,
+                                offset_y,
+                                config,
+                                detail,
+                                colors,
+                                emit_classdef_classes,
+                                centrality,
+                            );
+                            buf
+                        })
+                    })
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            for part in &parts {
+                node_svg.push_str(part);
+            }
+        } else {
+            render_nodes_serial(
+                &mut node_svg,
+                &layout.nodes,
+                ir,
+                offset_x,
+                offset_y,
+                config,
+                detail,
+                &theme.colors,
+                emit_classdef_classes,
+                &centrality_map,
+            );
+        }
     }
+    #[cfg(target_arch = "wasm32")]
+    render_nodes_serial(
+        &mut node_svg,
+        &layout.nodes,
+        ir,
+        offset_x,
+        offset_y,
+        config,
+        detail,
+        &theme.colors,
+        emit_classdef_classes,
+        &centrality_map,
+    );
     if !node_svg.is_empty() {
         doc = doc.child(Element::raw_svg(node_svg));
     }
