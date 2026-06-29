@@ -2015,6 +2015,19 @@ fn render_nodes_serial(
     }
 }
 
+/// Serial edge-render loop (skips bundled edges, which are rendered by the later bundle passes),
+/// shared by the WASM path, the below-threshold native path, and the per-chunk parallel native path so
+/// all render byte-identically.
+fn render_edges_serial(out: &mut String, edges: &[LayoutEdgePath], context: &EdgeRenderContext<'_>) {
+    for edge_path in edges {
+        if edge_path.bundled {
+            continue;
+        }
+        let edge_elem = render_edge(edge_path, context);
+        edge_elem.write_to_string(out);
+    }
+}
+
 fn render_layout_to_svg(
     layout: &DiagramLayout,
     ir: &MermaidDiagramIr,
@@ -2669,14 +2682,43 @@ fn render_layout_to_svg(
     // cubic `d` string average ~422 B/edge on wide flowcharts (measured), so 384 overflowed the
     // accumulator and forced a ~370 KB realloc+copy every render. 480 keeps the common wide edge
     // within one allocation. Capacity-only: byte-identical output.
+    // Parallel fan-out mirrors the node loop: `render_edge` is pure (reads `edge_path` + the Sync
+    // `EdgeRenderContext`, no shared mutable state), chunks are concatenated in edge order so output is
+    // byte-identical and thread-count-independent, native-only (WASM serial), size-gated.
     let mut edge_svg = String::with_capacity(layout.edges.len().saturating_mul(480));
-    for edge_path in &layout.edges {
-        if edge_path.bundled {
-            continue;
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        const PARALLEL_EDGE_THRESHOLD: usize = 256;
+        let edge_count = layout.edges.len();
+        if edge_count >= PARALLEL_EDGE_THRESHOLD {
+            let threads = std::thread::available_parallelism()
+                .map_or(1, |c| c.get())
+                .clamp(1, 8);
+            let chunk_size = edge_count.div_ceil(threads);
+            let ctx = &edge_context;
+            let parts: Vec<String> = std::thread::scope(|scope| {
+                let handles: Vec<_> = layout
+                    .edges
+                    .chunks(chunk_size)
+                    .map(|chunk| {
+                        scope.spawn(move || {
+                            let mut buf = String::with_capacity(chunk.len().saturating_mul(480));
+                            render_edges_serial(&mut buf, chunk, ctx);
+                            buf
+                        })
+                    })
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            for part in &parts {
+                edge_svg.push_str(part);
+            }
+        } else {
+            render_edges_serial(&mut edge_svg, &layout.edges, &edge_context);
         }
-        let edge_elem = render_edge(edge_path, &edge_context);
-        edge_elem.write_to_string(&mut edge_svg);
     }
+    #[cfg(target_arch = "wasm32")]
+    render_edges_serial(&mut edge_svg, &layout.edges, &edge_context);
     if !edge_svg.is_empty() {
         doc = doc.child(Element::raw_svg(edge_svg));
     }

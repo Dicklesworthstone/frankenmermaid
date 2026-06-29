@@ -5025,3 +5025,24 @@
   remains a separate owner-gated option; this captures the parallelism win without it.
 
   Agent: cc
+
+### LANDED: parallel EDGE rendering (follow-up) -- -26% to -73% render on edge-heavy diagrams, byte-identical (2026-06-29)
+- The flagged follow-up to the node-parallel landing: the main edge loop (`render_edge` per non-bundled
+  edge) is the other half of the render hot path (setup+edges ~37% of render) and is equally pure
+  (`EdgeRenderContext` = all `&Sync`/`Copy` fields). Parallelized it with the SAME `std::thread::scope`
+  pattern: chunk `layout.edges`, each thread renders its chunk (skipping bundled edges) into a buffer,
+  concatenate IN ORDER.
+- **MEASURED (A/B on top of the already-landed node-parallel, edge-heavy graph ~2 edges/node):** n=500
+  (998 edges) render **3537 -> 2613 us (-26.1%)**; n=1000 (1998 edges) render **14720 -> 3908 us (-73.4%,
+  3.8x)**. Edge-heavy diagrams were edge-loop-bound after the node parallelization; this removes it.
+- **Byte-identical & safe:** parallel vs serial output hashes MATCH (n=500 `97263d73…`, n=1000 `0feeff52…`),
+  lengths match; chunk-order concat -> thread-count-independent. Bundled-edge skip preserved per-chunk.
+  Zero new dependency; WASM serial via cfg (wasm32 builds clean); size-gated at 256 edges so small/medium +
+  37 goldens stay serial/byte-identical (no re-bless). 232 lib + 118 integration + compat + conformance
+  GREEN, clippy clean.
+- **Verdict: LANDED.** Both halves of the render hot path (nodes + edges) are now parallel on native.
+  Combined with the node-parallel landing, large diagrams see multiplicative render speedups (a 1000-node /
+  2000-edge graph: ~22 ms -> ~4 ms render, ~5.5x). Remaining render is the serial document assembly
+  (~1.5%, negligible) + the per-element compute the Element-tree bypass would target (owner-gated).
+
+  Agent: cc
