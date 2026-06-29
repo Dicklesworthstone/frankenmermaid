@@ -455,6 +455,13 @@ enum FlowDocumentItem<'a> {
         line_number: usize,
         source_line: &'a str,
     },
+    FastNode {
+        id: &'a str,
+        label: Option<ParsedLabel>,
+        icon: Option<String>,
+        line_number: usize,
+        source_line: &'a str,
+    },
     Statements {
         asts: Vec<FlowAst>,
         line_number: usize,
@@ -881,6 +888,28 @@ fn lower_flow_document_item(
                 builder.push_edge(f, t, *arrow, None, span);
             }
         }
+        FlowDocumentItem::FastNode {
+            id,
+            label,
+            icon,
+            line_number,
+            source_line,
+        } => {
+            // Exact mirror of the `FlowAst::Node` arm of `lower_flow_ast` / `intern_flow_ast_node`
+            // for a Rect node — interns straight from the borrowed id slice.
+            let span = span_for(*line_number, source_line);
+            let node_id = if is_dangling_placeholder_node_id(id) {
+                builder.intern_placeholder_node(id, span)
+            } else {
+                builder.intern_node_label(id, label.as_ref(), NodeShape::Rect, span)
+            };
+            if let Some(node_id) = node_id {
+                if let Some(icon) = icon.as_deref() {
+                    builder.set_node_icon(node_id, icon);
+                }
+                add_node_to_active_groups(builder, active_clusters, active_subgraphs, node_id);
+            }
+        }
         FlowDocumentItem::Statements {
             asts,
             line_number,
@@ -1091,6 +1120,24 @@ fn parse_flowchart_document_items<'a>(
                 continue;
             }
 
+            // Simple `id` / `id[label]` node statement: intern straight from the borrowed slice,
+            // skipping the `FlowAst::Node` String + single-element `vec![ast]` the general path makes.
+            // Same matcher (and the same edge-before-node priority) as the fast path inside
+            // `parse_flowchart_statement_asts`, so this is behavior-identical — only allocation-cheaper.
+            if let Some((id, label, icon)) =
+                parse_fast_simple_flowchart_node_borrowed(normalized_statement)
+            {
+                line_items.push(FlowDocumentItem::FastNode {
+                    id,
+                    label,
+                    icon,
+                    line_number,
+                    source_line: line,
+                });
+                parsed_line = true;
+                continue;
+            }
+
             if let Some(asts) = parse_flowchart_statement_asts(
                 normalized_statement,
                 line_number,
@@ -1280,6 +1327,23 @@ fn parse_fast_simple_flowchart_edge_parts(statement: &str) -> Option<(&str, Arro
 }
 
 fn parse_fast_simple_flowchart_node_ast(statement: &str) -> Option<FlowAstNode> {
+    let (id, label, icon) = parse_fast_simple_flowchart_node_borrowed(statement)?;
+    Some(FlowAstNode {
+        id: id.to_string(),
+        label,
+        icon,
+        shape: NodeShape::Rect,
+    })
+}
+
+/// Borrowed core of [`parse_fast_simple_flowchart_node_ast`]: returns the node id as a `&str` slice
+/// into `statement` (instead of an owned `String`) plus the owned label/icon. Lets the document parser
+/// stash a simple node as `FlowDocumentItem::FastNode` and intern it straight from the slice — skipping
+/// both the `id.to_string()` and the single-element `vec![FlowAst::Node(..)]` the general path allocates.
+/// Shape is always `Rect` on this fast path. Byte-identical matching to the original (same trims/guards).
+fn parse_fast_simple_flowchart_node_borrowed(
+    statement: &str,
+) -> Option<(&str, Option<ParsedLabel>, Option<String>)> {
     // ASCII byte-level trim; any non-ASCII survivor is rejected by `is_fast_flow_identifier` /
     // the byte checks below, so this stays byte-identical to the Unicode `.trim()` slow path.
     let trimmed = statement.trim_ascii();
@@ -1307,20 +1371,10 @@ fn parse_fast_simple_flowchart_node_ast(statement: &str) -> Option<FlowAstNode> 
         let mut label = parse_label((!label_raw.is_empty()).then_some(label_raw));
         let icon = extract_icon_prefix(label.as_mut());
         clear_empty_label(&mut label);
-        return Some(FlowAstNode {
-            id: id.to_string(),
-            label,
-            icon,
-            shape: NodeShape::Rect,
-        });
+        return Some((id, label, icon));
     }
 
-    is_fast_flow_identifier(trimmed).then(|| FlowAstNode {
-        id: trimmed.to_string(),
-        label: None,
-        icon: None,
-        shape: NodeShape::Rect,
-    })
+    is_fast_flow_identifier(trimmed).then_some((trimmed, None, None))
 }
 
 fn is_fast_flow_identifier(value: &str) -> bool {

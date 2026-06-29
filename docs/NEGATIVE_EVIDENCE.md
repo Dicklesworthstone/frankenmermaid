@@ -4865,3 +4865,26 @@
   (render Element-tree rewrite) or an invasive AST refactor (parse) -- both marginal and owner-gated.
 
   Agent: cc
+
+### LANDED: parse FastNode fast-path -- -18% parse allocations, byte-identical (2026-06-29)
+- **Correction to the prior "owner-gated" entry.** The residual parse allocation IS removable cleanly --
+  by mirroring the EXISTING `FlowDocumentItem::FastEdge` borrowed fast-path (which already interns edge
+  endpoints from `&str`, no FlowAst). Added a sibling `FlowDocumentItem::FastNode { id: &str, label, icon }`:
+  the document loop now interns a simple `id` / `id[label]` node straight from the borrowed slice, skipping
+  both the `FlowAst::Node` `id.to_string()` AND the single-element `vec![ast]` the general path allocated.
+- **MEASURED (counting-allocator, deterministic, default flowchart):** n=500 parse allocs **5554 -> 4554
+  = -1000 (-18.0%)** (exactly 2/node: the id String + the one-element Vec); n=100 **1148 -> 948 (-17.4%)**.
+  alloc_bytes also down. Wall time dropped in the same probe (1.01ms -> 0.71ms at n=500; timing noisy, the
+  alloc delta is the proof).
+- **Safety: byte-identical.** The FastNode consumer is an exact mirror of the `FlowAst::Node` /
+  `intern_flow_ast_node` arm (placeholder check, `intern_node_label(id, label, Rect, span)`, icon,
+  `add_node_to_active_groups`), and the matcher (`parse_fast_simple_flowchart_node_borrowed`, the shared
+  core of `parse_fast_simple_flowchart_node_ast`) is the same one the general path tried first -- with the
+  same edge-before-node priority. So it routes the identical statements through a cheaper path, producing
+  identical IR. Proven: all 37 goldens byte-identical (no re-bless), 118 integration + compat + conformance
+  tests GREEN, fm-parser clippy `-D warnings` clean.
+- **Verdict: LANDED.** First net-positive perf win of the cross-subsystem sweep -- parse is 21% of pipeline,
+  so -18% of its allocations is a real (if modest ~few-% pipeline) deterministic gain on the 2nd-largest
+  seam, at zero output/behavior change. The render seam (70%) remains architectural/owner-gated per above.
+
+  Agent: cc
