@@ -374,6 +374,20 @@ fn strip_unused_state_css(svg: &mut String) {
             }
         }
     }
+
+    // Drop each `:root` accent custom property `--fm-accent-N` that is no longer referenced anywhere
+    // (its accent rule was stripped above and no node-shape/gradient uses it). Reference-counted, so
+    // it is a no-op while ANY `var(--fm-accent-N)` remains — safe.
+    for n in 1..=8usize {
+        if !svg.contains(&format!("var(--fm-accent-{n})")) {
+            let decl = format!("  --fm-accent-{n}:");
+            if let Some(start) = svg.find(&decl)
+                && let Some(rel_end) = svg[start..].find(";\n")
+            {
+                svg.replace_range(start..start + rel_end + 2, "");
+            }
+        }
+    }
 }
 
 /// Render a target-agnostic scene to SVG string with custom configuration.

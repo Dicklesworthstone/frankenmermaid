@@ -7,13 +7,10 @@
   --fm-cluster-fill: rgba(241,245,249,0.6);
   --fm-cluster-stroke: #cbd5e1;
   --fm-accent-1: #6366f1;
-  --fm-accent-2: #3b82f6;
   --fm-accent-3: #06b6d4;
   --fm-accent-4: #8b5cf6;
   --fm-accent-5: #f59e0b;
   --fm-accent-6: #ec4899;
-  --fm-accent-7: #10b981;
-  --fm-accent-8: #f43f5e;
 }
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap');
 .fm-text {

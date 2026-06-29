@@ -12,7 +12,6 @@
   --fm-accent-4: #8b5cf6;
   --fm-accent-5: #f59e0b;
   --fm-accent-6: #ec4899;
-  --fm-accent-7: #10b981;
   --fm-accent-8: #f43f5e;
 }
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap');
