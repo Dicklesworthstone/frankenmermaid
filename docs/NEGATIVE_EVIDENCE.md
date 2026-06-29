@@ -4413,3 +4413,17 @@
   block needs the post-process-final-SVG approach (per-element class presence), not an IR flag.
 
   Agent: cc
+
+### KEPT: gate dashed/thick edge-style theme-CSS when no such arrows -- byte-identical, -131 B/diagram (2026-06-29)
+- 4th conditional-CSS strip via strip_unused_theme_css: `.fm-edge-dashed` + `.fm-edge-thick`(+`:hover`)
+  style only dotted/thick arrows. Gated on a dashed/thick arrow present; the 16-variant arrow lists are
+  copied VERBATIM from render_edge style_class so detection cannot drift from the emitted class.
+  `.fm-edge-back` (layout-determined reversed edges) is kept. Verified the const FIRES before blessing
+  (flow_small 13281->13150) -- the lesson from the reverted block-beta gate (const mismatch). Invariant
+  verified across all 37 goldens (0 violations); 226 render tests + conformance pass; clippy clean.
+- CUMULATIVE conditional-CSS dead-weight landed (cluster rules 532 + node-shapes 541 + cluster vars 262
+  + edge-style 131 B): flow_small 14,616 (orig) -> 13,150 = **-1,466 B / -10.0%**. vs mermaid 11.15.0
+  (16,190 B): output ratio **1.11x -> 1.23x SMALLER**. Remaining gateable needs the post-process-final-SVG
+  approach (accents/states by per-element class presence), not an IR flag.
+
+  Agent: cc

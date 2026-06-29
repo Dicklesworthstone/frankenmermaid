@@ -143,15 +143,6 @@ svg {
 .fm-edge-solid {
   stroke-dasharray: none;
 }
-.fm-edge-dashed {
-  stroke-dasharray: 6 6;
-}
-.fm-edge-thick {
-  stroke-width: 2.5;
-}
-.fm-edge-thick:hover {
-  stroke-width: 3.5;
-}
 .fm-edge-back {
   stroke: var(--fm-edge-muted);
   opacity: 0.8;

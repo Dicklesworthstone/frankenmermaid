@@ -423,7 +423,42 @@ fn strip_unused_theme_css(css: &mut String, ir: Option<&MermaidDiagramIr>) {
     if !has_special_shapes {
         *css = css.replace(NODE_SHAPE_THEME_CSS, "");
     }
+    // `.fm-edge-dashed`/`.fm-edge-thick` style only dotted/thick arrows. The arrow lists below are
+    // copied VERBATIM from `render_edge`'s `style_class` match so detection cannot drift from the
+    // class actually emitted. `.fm-edge-back` is layout-determined (reversed edges) so it is NOT
+    // gated here — it stays in the kept tail of the block.
+    let has_dashed_or_thick = ir.is_some_and(|ir| {
+        ir.edges.iter().any(|e| {
+            matches!(
+                e.arrow,
+                fm_core::ArrowType::DottedArrow
+                    | fm_core::ArrowType::DottedOpenArrow
+                    | fm_core::ArrowType::DottedCross
+                    | fm_core::ArrowType::HalfArrowTopDotted
+                    | fm_core::ArrowType::HalfArrowBottomDotted
+                    | fm_core::ArrowType::HalfArrowTopReverseDotted
+                    | fm_core::ArrowType::HalfArrowBottomReverseDotted
+                    | fm_core::ArrowType::StickArrowTopDotted
+                    | fm_core::ArrowType::StickArrowBottomDotted
+                    | fm_core::ArrowType::StickArrowTopReverseDotted
+                    | fm_core::ArrowType::StickArrowBottomReverseDotted
+                    | fm_core::ArrowType::DottedLine
+                    | fm_core::ArrowType::DoubleDottedArrow
+                    | fm_core::ArrowType::ThickArrow
+                    | fm_core::ArrowType::DoubleThickArrow
+                    | fm_core::ArrowType::ThickLine
+            )
+        })
+    });
+    if !has_dashed_or_thick {
+        *css = css.replace(EDGE_STYLE_THEME_CSS, "");
+    }
 }
+
+/// The `.fm-edge-dashed` + `.fm-edge-thick`(+`:hover`) theme rules — captured EXACTLY as
+/// `Theme::to_svg_style` emits them — stripped when no edge uses a dotted/thick arrow. Same
+/// byte-identical, safe-no-op-if-drifts contract as the other blocks.
+const EDGE_STYLE_THEME_CSS: &str = ".fm-edge-dashed {\n  stroke-dasharray: 6 6;\n}\n.fm-edge-thick {\n  stroke-width: 2.5;\n}\n.fm-edge-thick:hover {\n  stroke-width: 3.5;\n}\n";
 
 fn render_scene_document_with_ir(
     scene: &RenderScene,
