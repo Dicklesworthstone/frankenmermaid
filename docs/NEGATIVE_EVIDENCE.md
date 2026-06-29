@@ -4278,3 +4278,22 @@
   already wins ~758x on TIME everywhere). Decision-grade data for the CLI/render owner on the defaults.
 
   Agent: cc
+
+### Sequence-gap fix is tested-INTENTIONAL (not a bug) — both halves owner-gated, confirmed (2026-06-29)
+- Follow-up to the cross-workload finding (sequence is the only output loss vs mermaid). Confirmed both
+  halves of the gap are DELIBERATE, tested product defaults — neither a unilateral clean win:
+  - **CLI source-spans default** (`main.rs:1014/1140`: SVG ⇒ `embed_source_spans=true`) is pinned by
+    `crates/fm-cli/tests/integration_test.rs:1192` (`assert!(artifact.contains("data-fm-source-span="))`)
+    and `:1415` (`assert_eq!(json["embedded_source_spans"], true)`). Note the CLI default DIVERGES from
+    the LIBRARY default (`SvgRenderConfig::include_source_spans = false`) — aligning them (lean-by-default,
+    spans auto-on under `--span-artifact`/`--embed-source-spans`) is the easy ~10% half, but it reverses
+    tested intent ⇒ render/CLI owner's call (requires updating those two asserts).
+  - **a11y superset default** (`A11yConfig::full()`) is the other half (the 30.6%-of-output lever),
+    pinned by the 37 golden_svg snapshots ⇒ also owner-gated.
+- **Net:** frankenmermaid loses to mermaid on exactly ONE axis of ONE workload (sequence OUTPUT bytes),
+  caused 100% by two intentional opt-out features; it WINS on time (~758x) everywhere and on output
+  everywhere else (1.1-3.0x) and on sequence too in lean mode (~1.35x). No unilateral lever remains —
+  the two default flips are the render/CLI owner's product calls, now fully specified with the exact
+  tests/goldens that gate them.
+
+  Agent: cc
