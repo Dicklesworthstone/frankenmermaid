@@ -4198,3 +4198,30 @@
   all profiled + floored-or-owner-routed.
 
   Agent: cc
+
+### MEASURED (decision-grade): per-element a11y is 30.6% of wide SVG output — the biggest remaining render lever, already available as an opt-out (2026-06-29)
+- **The one large render lever left** (the swarm memory repeatedly names it: "next real gains need a
+  DESIGN/OUTPUT change — render data-* / title opt-in to match mermaid — not a byte-identical
+  micro-lever"). Mermaid.js does NOT emit per-element title/role/tabindex; frankenmermaid's
+  `A11yConfig::full()` default does. Quantified the total cost as a single config flip (noise-free byte
+  count, no fleet-load floor concern — unlike sub-10% timing levers), wide 16x32:
+  - `A11yConfig::full()` (DEFAULT): 535,831 bytes — 1473 title, 1473 role=, 1472 tabindex=
+  - a11y all-off (aria_labels/text_alternatives/keyboard_nav = false, accessible=false): 372,075 bytes — 0 / 0 / 0
+  - **Reduction = 30.6%** of output (ratio lean/full = **0.6944**). Render TIME reduction is
+    ~proportional (the edge-a11y slice alone was the measured ~19% of render, b573a47/f90963e; nodes add the rest).
+- **Already available — the capability exists, only the DEFAULT is the question:** the all-off
+  `A11yConfig` produces VALID lean SVG (0 a11y markers, measured here), so users can already opt into
+  mermaid-lean output via `SvgRenderConfig { accessible: false, a11y: A11yConfig { ..all false } }`.
+  No code change needed for the capability; making it the default re-blesses the 37 goldens and is a
+  product/accessibility positioning decision — the render owner's call, not a unilateral one.
+- **Why I cannot land it as the directive's "ratio vs mermaid.js":** (1) it is owner-gated (default
+  change + a11y feature trade-off); (2) the mermaid-js head-to-head comparator is BLOCKED — the
+  `legacy_mermaid_code/` corpus is absent from the checkout (per the methodology memory), so the
+  literal frankenmermaid-over-mermaid output-size ratio cannot be computed here. What IS computable and
+  decision-grade is the above: dropping the non-mermaid a11y superset closes 30.6% of the output-size
+  gap and ~19-30% of render time, on demand, today.
+- **Verdict:** SURFACED with decision-grade data. This is the largest remaining render lever, it is
+  above the noise floor (30.6%, deterministic), the opt-out already exists, and the default flip is
+  owner-gated + comparator-blocked. Hand to the render owner with this number.
+
+  Agent: cc
