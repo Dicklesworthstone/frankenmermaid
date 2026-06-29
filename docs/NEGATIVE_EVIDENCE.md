@@ -5182,3 +5182,23 @@
   5 wins) and parse (FastNode) are harvested; layout-allocator-pressure is the open frontier.
 
   Agent: cc
+
+### REFINED: layout alloc churn = per-node adjacency Vecs across many structures; fix is CSR/arena (2026-06-29)
+- Size-bucketed the layout allocs (n=100): dominated by TINY allocations -- **1195x 8-15 B + 900x 32-39 B +
+  398x 64 B** (~12 small allocs/node+edge). Classic "many small per-element containers" pattern.
+- **Source = per-node adjacency containers.** `fm-layout` builds graph adjacency as `Vec<BTreeSet<usize>>`
+  (lib.rs:462, 8783) and `Vec<Vec<usize>>` (457, 7476, 8642, ...) -- one container PER node, built then
+  iterated. For a chain each holds 1-2 neighbors.
+- **CORRECTION to the obvious intuition: `BTreeSet -> Vec` is ~0-gain.** A `BTreeSet` of 1-2 elements
+  allocates ONE B-tree node (nodes hold ~11 elements), exactly like a `Vec`'s one buffer -- so swapping the
+  container type doesn't cut the alloc COUNT (~1/node either way). The waste is having N separate per-node
+  allocations at all, repeated across several adjacency-like structures (~5 -> ~5N tiny allocs).
+- **The real lever = CSR adjacency (2 flat arrays: offsets + targets) or a layout-scoped arena**, which
+  replaces the ~5N per-node allocations with O(1) flat allocations -> the ~halve-layout win. That is a
+  deep, multi-site refactor of the 693 KB position-critical `fm-layout` crate (every adjacency builder +
+  consumer), validated by `golden_layout_test` checksums (byte-identical positions) -- owner-gated, not an
+  autonomous one-shot. The surgical container swaps that LOOK like wins are ~0-gain (measured/reasoned).
+- **Verdict.** Layout-allocator-pressure remains the quantified open frontier; the fix is now PRECISELY
+  scoped (CSR/arena for the per-node adjacency containers), and the tempting cheap version is proven futile.
+
+  Agent: cc
