@@ -5378,3 +5378,35 @@
   paths are now exhausted.
 
   Agent: cc
+
+### LANDED: node <title> written piecewise -- node render allocs -45% (2026-06-29)
+- Fifth stacking render-alloc win this session (after f3e248f edge wrapper, 42547c4 node id, fa0f7be edge
+  title, eb8bde0 edge path). The node fast path still called `describe_node(node, ir)` per node =
+  `format!("Node: {label}, {shape_desc}")` into a fresh String (~2 alloc events/node incl. a growth
+  realloc), escape-copied into the `<title>` and dropped.
+- **Key observation:** in the node fast path the shape is GATED to `NodeShape::Rect`, so `describe_node`'s
+  `shape_desc` is ALWAYS `"rectangle"`, and (verified across all label/no-label/dangling-id cases) its
+  `label` is EXACTLY the `raw_label` already passed to `build_common_node_fragment`. So the title is always
+  `"Node: {raw_label}, rectangle"`.
+- **Fix (LANDED):** write the title piecewise into the fragment buffer -- `"<title>Node: "` +
+  `write_escaped_text(raw_label)` + `", rectangle</title>"` -- dropping the `node_desc` parameter and the
+  `describe_node` call. Byte-identical to `write_escaped_text(describe_node(..))` because the `"Node: "` /
+  `", rectangle"` literals carry no escapable byte (escape is the identity on them) and the label is
+  escaped the same either way.
+- **MEASURED (deterministic counting-allocator A/B, load-immune):** node-only render allocs
+  wide_16x32 **2274 -> 1250 (-45.0%)** (~2 alloc events/node removed); FULL wide render allocs
+  wide_16x32 **3289 -> 2265 (-31.1%)**, wide_8x16 941 -> 685 (-27.2%). **SESSION CUMULATIVE: wide_16x32
+  render allocs 19225 (ORIG) -> 2265 = -88.2%** across the five wins.
+- **Byte-identical & safe:** `node_fast_fragment_matches_render` pin test (renders a full SVG and asserts
+  the exact `<g…><rect/><text/><title>Node: Single Node, rectangle</title></g>` bytes) GREEN;
+  `svg_golden_snapshots_are_stable` + conformance GREEN with NO re-bless; 234 fm-render-svg lib tests pass;
+  clippy `-D warnings` clean. Shared WASM render path; only `String`/`write_escaped_text` primitives.
+- **Verdict: LANDED.** The node title was the last per-element `format!`-into-fresh-String in the common
+  node/edge fast paths. Render heap traffic on the exact wide workload the mermaid-js ratios use is now
+  ~1/8.5 of the original. The wide alloc balance has now flipped: render (2265) is below parse (5577) and
+  layout (4279) for wide_16x32 -- parse is now the alloc-dominant phase, but its allocs are mostly IR
+  ownership (owned node-id/label Strings the IR outlives parse with), not transient intermediates, so the
+  cheap render-style lever does not transfer there. The common-fast-path intermediate-String frontier is
+  CLOSED.
+
+  Agent: cc

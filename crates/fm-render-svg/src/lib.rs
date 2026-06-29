@@ -4280,11 +4280,12 @@ fn build_common_node_fragment(
     text_y: f32,
     font_size: f32,
     text_fill: &str,
-    node_desc: &str,
 ) -> String {
     use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
     use std::fmt::Write as _;
-    let mut f = String::with_capacity(label.len() + node_desc.len() + raw_label.len() + 320);
+    // `raw_label` is written twice (the `aria-label` and the `<title>` text), so size for both copies
+    // plus the fixed tag/literal bytes.
+    let mut f = String::with_capacity(label.len() + raw_label.len() * 2 + 340);
     // <g id=".." class="fm-node fm-node-accent-N fm-node-shape-rect" data-id=".." role=".." aria-label=".." tabindex="0">
     f.push_str("<g id=\"");
     // The node id is `fm-node-[{sanitized}-]{index}` — only `[a-z0-9-]`, never an escapable byte — so
@@ -4323,10 +4324,15 @@ fn build_common_node_fragment(
     f.push_str("\">");
     let _ = write_escaped_text(&mut f, label);
     f.push_str("</text>");
-    // <title>..</title>
-    f.push_str("<title>");
-    let _ = write_escaped_text(&mut f, node_desc);
-    f.push_str("</title></g>");
+    // <title>Node: {raw_label}, rectangle</title> -- this is `describe_node(node, ir)` for the gated
+    // Rect shape (its `shape_desc` is always "rectangle" here, and its label is exactly `raw_label`),
+    // written piecewise so the per-node description String is never allocated. Byte-identical to
+    // `write_escaped_text(describe_node(..))` because the `"Node: "` / `", rectangle"` literals carry no
+    // escapable byte (escape is the identity on them) and the label is escaped the same either way.
+    // Pinned by `node_fast_fragment_matches_render`.
+    f.push_str("<title>Node: ");
+    let _ = write_escaped_text(&mut f, raw_label);
+    f.push_str(", rectangle</title></g>");
     f
 }
 
@@ -4434,7 +4440,6 @@ fn render_node(
         && node.href.is_none()
         && node.callback.is_none()
     {
-        let node_desc = describe_node(node, ir);
         return Element::raw_svg(build_common_node_fragment(
             node_id,
             node_box.node_index,
@@ -4450,7 +4455,6 @@ fn render_node(
             cy + node_font_size / 3.0,
             node_font_size,
             colors.text.as_str(),
-            &node_desc,
         ));
     }
 
