@@ -5282,3 +5282,36 @@
   surfaced a clean ~50% alloc win the chain profile hid.
 
   Agent: cc
+
+### LANDED: node element-id written directly into the fast-path buffer -- node render allocs -40% (2026-06-29)
+- Follow-up to the whole-edge fast path (f3e248f). Re-profiled render allocs node-vs-edge on the wide
+  head-to-head shape (counting-allocator, load-immune; node-only graph = no edges vs full graph): node
+  render was ~7.4 allocs/node (wide_16x32 NODESONLY=3810 allocs / 512 nodes).
+- **Root cause:** the node fast path (`build_common_node_fragment`) built the id via
+  `write_escaped_attr(&f, &mermaid_node_element_id(node_id, idx))` -- but `mermaid_node_element_id`
+  allocates **3 throwaway Strings per node**: `sanitize_render_element_fragment` does `with_capacity`
+  THEN `trim_matches('-').to_string()` (two allocs), plus the id String itself -- all built only to be
+  escape-copied into `f` and dropped. The id is always `fm-node-[{a-z0-9-}-]{index}` (only `[a-z0-9-]`),
+  so the escape pass is a no-op.
+- **Fix (LANDED):** added `fm_core::write_mermaid_node_element_id_into(out, node_id, idx)` that streams
+  the id straight into the caller's buffer -- zero allocations. Sanitization is single-sourced via a new
+  streaming `write_sanitized_render_element_fragment_into` (deferred-dash technique: a leading dash is
+  never emitted and a trailing pending dash is dropped, exactly the collect-then-`trim_matches('-')` the
+  old version did); `sanitize_render_element_fragment` now delegates to it. The node fast path writes the
+  id directly (no escape, since the id can never hold `& < > " '`).
+- **MEASURED (deterministic counting-allocator A/B, load-immune):** node-only render allocs
+  wide_16x32 **3810 -> 2274 (-40.3%)**, wide_8x16 1105 -> 721 (-34.8%) -- exactly 3 allocs/node removed.
+  FULL wide render allocs wide_16x32 **9625 -> 8089 (-16.0%)**, wide_8x16 2445 -> 2061 (-15.7%). Combined
+  with the same-session edge fast path, wide_16x32 render allocs are now **19225 (ORIG) -> 8089 (-57.9%)**.
+- **Byte-identical & safe:** new fm-core test `streaming_sanitize_and_node_id_writer_are_byte_identical`
+  proves the streaming sanitizer == the original collect-then-trim algorithm AND the direct writer ==
+  `mermaid_node_element_id`/`..._with_variant(None)` across 15 inputs (leading/trailing/internal/emoji/
+  empty/all-symbol) x 5 indices. `node_fast_fragment_matches_render` pin test GREEN;
+  `svg_golden_snapshots_are_stable` + conformance GREEN with NO re-bless; 350 fm-core + 233 fm-render-svg
+  lib tests pass; clippy `-D warnings` clean. Uses only `String` ops on the shared WASM render path.
+- **Verdict: LANDED.** Stacks on the edge win: render heap traffic on the exact wide workload the
+  mermaid-js ratios are computed on is now well under half the original. Pattern (same as the edge id):
+  an "intermediate String -> escape-write -> drop" for a value that can never contain an escapable byte
+  is a pure-waste alloc; stream it into the destination buffer instead.
+
+  Agent: cc

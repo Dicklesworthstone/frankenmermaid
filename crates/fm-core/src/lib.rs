@@ -4903,19 +4903,31 @@ fn byte_index_for_line_col(
 
 fn sanitize_render_element_fragment(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
-    let mut last_was_dash = false;
+    write_sanitized_render_element_fragment_into(&mut out, raw);
+    out
+}
 
+/// Stream the sanitized fragment of `raw` directly into `out` — **byte-identical** to
+/// [`sanitize_render_element_fragment`] but without the intermediate `String` + its trailing
+/// `trim_matches('-').to_string()` (a second allocation). Used by the id-writer hot path. A leading
+/// dash is never produced (the deferred dash only flushes once an alphanumeric has been written) and
+/// a trailing dash is never produced (a pending dash is dropped if no alphanumeric follows) — exactly
+/// the leading/trailing trim the collect-then-trim version performs.
+fn write_sanitized_render_element_fragment_into(out: &mut String, raw: &str) {
+    let mut wrote_alnum = false;
+    let mut pending_dash = false;
     for ch in raw.chars() {
         if ch.is_ascii_alphanumeric() {
+            if pending_dash {
+                out.push('-');
+                pending_dash = false;
+            }
             out.push(ch.to_ascii_lowercase());
-            last_was_dash = false;
-        } else if !last_was_dash && !out.is_empty() {
-            out.push('-');
-            last_was_dash = true;
+            wrote_alnum = true;
+        } else if wrote_alnum {
+            pending_dash = true;
         }
     }
-
-    out.trim_matches('-').to_string()
 }
 
 /// Append `value`'s decimal digits to `out` without going through the `fmt::Formatter`
@@ -4937,7 +4949,25 @@ fn push_usize_decimal(out: &mut String, mut value: usize) {
 
 #[must_use]
 pub fn mermaid_node_element_id(node_id: &str, index: usize) -> String {
-    mermaid_node_element_id_with_variant(node_id, index, None)
+    let mut id = String::with_capacity("fm-node-".len() + node_id.len() + 21);
+    write_mermaid_node_element_id_into(&mut id, node_id, index);
+    id
+}
+
+/// Write the (no-variant) node element id directly into `out` — **byte-identical** to
+/// [`mermaid_node_element_id`] but allocating nothing: it streams the sanitized `node_id` fragment in
+/// place (no intermediate `sanitize_render_element_fragment` String, which itself allocates twice) and
+/// writes the index decimal directly. The result is `fm-node-[{fragment}-]{index}` where `{fragment}`
+/// contains only `[a-z0-9-]`, so a caller may write it without XML-escaping (the id can never contain
+/// an escapable byte). Used on the per-node render fast path.
+pub fn write_mermaid_node_element_id_into(out: &mut String, node_id: &str, index: usize) {
+    out.push_str("fm-node-");
+    let before = out.len();
+    write_sanitized_render_element_fragment_into(out, node_id);
+    if out.len() > before {
+        out.push('-');
+    }
+    push_usize_decimal(out, index);
 }
 
 #[must_use]
@@ -5035,6 +5065,58 @@ mod schema_version_semver {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+
+    /// Reference implementation: the original collect-then-trim sanitizer, kept here so the streaming
+    /// writer can be proven byte-identical to it.
+    fn sanitize_reference(raw: &str) -> String {
+        let mut out = String::new();
+        let mut last_was_dash = false;
+        for ch in raw.chars() {
+            if ch.is_ascii_alphanumeric() {
+                out.push(ch.to_ascii_lowercase());
+                last_was_dash = false;
+            } else if !last_was_dash && !out.is_empty() {
+                out.push('-');
+                last_was_dash = true;
+            }
+        }
+        out.trim_matches('-').to_string()
+    }
+
+    #[test]
+    fn streaming_sanitize_and_node_id_writer_are_byte_identical() {
+        let cases = [
+            "",
+            "N5_3",
+            "Node 12",
+            "  leading",
+            "trailing  ",
+            "--dashes--",
+            "a__b..c--d",
+            "ALLCAPS",
+            "mixedCASE_99",
+            "!!!",
+            "💡emoji_x",
+            "a",
+            "1",
+            "_only_underscores_",
+            "x-y-z",
+        ];
+        for raw in cases {
+            // streaming fragment sanitizer == reference
+            let streamed = super::sanitize_render_element_fragment(raw);
+            assert_eq!(streamed, sanitize_reference(raw), "fragment sanitize diverged for {raw:?}");
+            // direct node-id writer == the String-building (no-variant) builder, for several indices
+            for index in [0usize, 7, 42, 1000, 999_999] {
+                let mut written = String::new();
+                super::write_mermaid_node_element_id_into(&mut written, raw, index);
+                let built = super::mermaid_node_element_id(raw, index);
+                let with_variant_none = super::mermaid_node_element_id_with_variant(raw, index, None);
+                assert_eq!(written, built, "id writer != builder for ({raw:?}, {index})");
+                assert_eq!(written, with_variant_none, "id writer != variant(None) for ({raw:?}, {index})");
+            }
+        }
+    }
 
     use std::collections::BTreeMap;
 

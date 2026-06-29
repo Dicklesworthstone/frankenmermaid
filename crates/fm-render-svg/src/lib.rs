@@ -4287,7 +4287,11 @@ fn build_common_node_fragment(
     let mut f = String::with_capacity(label.len() + node_desc.len() + raw_label.len() + 320);
     // <g id=".." class="fm-node fm-node-accent-N fm-node-shape-rect" data-id=".." role=".." aria-label=".." tabindex="0">
     f.push_str("<g id=\"");
-    let _ = write_escaped_attr(&mut f, &fm_core::mermaid_node_element_id(node_id, node_index));
+    // The node id is `fm-node-[{sanitized}-]{index}` — only `[a-z0-9-]`, never an escapable byte — so
+    // write it straight into `f` (skipping `mermaid_node_element_id`'s 3 throwaway allocations: the
+    // sanitizer's two Strings + the id String). Byte-identical to `write_escaped_attr(id)` because the
+    // id can never contain `& < > " '`; pinned by `node_fast_fragment_matches_render`.
+    fm_core::write_mermaid_node_element_id_into(&mut f, node_id, node_index);
     f.push_str("\" class=\"fm-node fm-node-accent-");
     let _ = write!(f, "{accent}");
     f.push_str(" fm-node-shape-rect\" data-id=\"");
