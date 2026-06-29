@@ -4043,3 +4043,29 @@
   regression (c654c2f)** — no >3% byte-identical in-scope lever remains.
 
   Agent: cc
+
+### Layout cache-key fix — WHY it's Debug-string + the exact safe path (closes the root-cause chain) (2026-06-29)
+- **The design reason (confirmed in fm-core):** `MermaidDiagramIr` derives `PartialEq` but NOT
+  `Eq`/`Hash` (`fm-core/src/lib.rs:4353`) — the classic float signature. Its flowchart-relevant
+  element types `IrNode`/`IrEdge`/`IrLabel`/`IrCluster` DO derive `Eq` (no floats), but the whole-IR
+  derive is blocked by `f32` fields in `constraints` (`IrConstraint`, from `constraints.rs`) and the
+  chart metas (`gantt_meta`/`xy_chart_meta`/`pie_meta`/`quadrant_meta`). So the IR cannot
+  `#[derive(Hash)]`, which is exactly WHY `stable_layout_request_hash` resorts to `format!("{ir:?}")`
+  + byte-FNV — a float-tolerant but O(n)-Debug-stringify-on-every-call workaround.
+- **Exact safe fix (for the fm-layout/fm-core owner, ~verifiable):** add `Hash` to the four already-`Eq`
+  flowchart IR element types (mechanical, they're float-free) and hash those fields structurally via
+  `FxHasher`; for the float-carrying fields (`constraints`, chart metas — empty/None on the flowchart
+  hot path) hash via `f32::to_bits()` in a small manual `Hash`-equivalent helper, or keep the existing
+  Debug-string for ONLY those small fields. Coverage is provable: the existing incremental-engine
+  invalidation tests (`fm-layout/src/lib.rs:13128+`: topology-change invalidation, node-size change,
+  selective relayout) confirm a changed field changes the key; `integration_test:771` is the perf
+  oracle. This drops the cache HIT from O(n)-Debug to O(n)-tight-hash (or O(1) with an engine-cached
+  fingerprint), restoring the memo to net-positive and fixing the WASM re-render regression.
+- **Why still not done here:** spans fm-core (add derives) + fm-layout (replace the hash) under active
+  peer ownership of fm-layout, and is cache-correctness-sensitive (a missed float field → silent stale
+  layout). Recorded as a fully-specified, owner-routable fix — not a `safe-Rust ceiling`, a coordination
+  + correctness-ownership boundary. This closes the incremental-layout root-cause chain (b573a47-style
+  precision): regression measured (f75ce3d) -> Debug-key root cause (c654c2f) -> design reason + exact
+  fix (this entry).
+
+  Agent: cc
