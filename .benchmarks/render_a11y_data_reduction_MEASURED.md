@@ -32,10 +32,17 @@ emit `<title>`/`role` — a labelled-edge corpus would have an even larger a11y 
    `<title>Node: X, rectangle</title>` is non-Mermaid (Mermaid renders the label as text). If Mermaid
    omits these, gate them off in render_node/render_edge (fidelity fix + perf) + regen golden_svg
    (also clears the RED first-edge-title-drop 90446ae).
-2. **`data-*` (~7%, `data-id` + `data-fm-edge-id`)** — provably redundant with `id`, BUT
-   `frankentui_conformance_cases.json` asserts on `data-*` (e.g. `svg_not_contains: ["data-callback="]`),
-   so FrankenTUI likely consumes `data-*` as interactivity hooks → a downstream-contract decision, not
-   pure dead weight. Confirm with the FrankenTUI consumer before dropping.
+2. **`data-*` (~7%, `data-id` + `data-fm-edge-id`)** — redundant with `id`, and **functionally
+   unconsumed** (checked the consumers, correcting an earlier guess): FrankenTUI `/dp/frankentui` has
+   **zero** references to `data-fm-edge-id`/`data-id`/`data-fm-node-id`; the browser demo showcase HTML
+   only *embeds* rendered SVG (no `querySelector`/`getAttribute`/`dataset` read of them); in-repo they
+   appear only at emit-sites + a couple of presence-assert unit tests. The conformance's
+   `svg_not_contains:["data-callback="]` is a *security* assert (no callback injection), not a
+   data-* requirement. So `data-*` is **not consumed anywhere I can check** → its ~7% drop is gated
+   only on an **owner API decision** (is `data-*` a committed public SVG attribute?), needing **no
+   Mermaid comparator** — making it the *simpler* of the two render wins. Dropping it = remove the
+   `attr_int("data-fm-edge-id", …)` / `data-id` emit sites in `render_node`/`render_edge`, update the
+   ~2 presence tests, regen golden_svg.
 
 ## Net
 
