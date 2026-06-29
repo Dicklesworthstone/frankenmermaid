@@ -385,8 +385,8 @@ fn strip_unused_state_css(svg: &mut String) {
     let body_at = svg.find("</style>").map_or(0, |i| i + "</style>".len());
     let used: [bool; 9] =
         std::array::from_fn(|n| n == 0 || svg[body_at..].contains(&format!("fm-node-accent-{n}")));
-    for n in 1..=8usize {
-        if !used[n] {
+    for (n, &is_used) in used.iter().enumerate().skip(1) {
+        if !is_used {
             let selector = format!(".fm-node-accent-{n} {{");
             if let Some(start) = svg.find(&selector)
                 && let Some(rel_end) = svg[start..].find("}\n")
