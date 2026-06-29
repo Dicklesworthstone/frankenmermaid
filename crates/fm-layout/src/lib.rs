@@ -3283,6 +3283,16 @@ fn stable_layout_request_hash(
     let mut writer = FnvWriter(0xcbf2_9ce4_8422_2325);
     // In-memory `Serialize` cannot fail; ignore defensively. IR maps are `BTreeMap`/`Vec` (ordered),
     // so the serialization — and thus the key — is deterministic for a given IR.
+    //
+    // This `serde_json` walk is O(nodes+edges) and dominates the memoized cache-hit (~605 us @400
+    // nodes, vs ~23 us for the clone — measured). It is the safe ZERO-WEIGHT fix that wins for the
+    // test + typical interactive sizes and is ~break-even at >=400 nodes. To make a cache HIT a CLEAR
+    // win at large graphs, make THIS line cheaper — bounded options in docs/NEGATIVE_EVIDENCE.md
+    // (2026-06-29): (1) an IR-carried fingerprint (true O(1), needs fm-core/fm-parser + mutation
+    // invalidation), or (2) a zero-weight custom `serde::Serializer` that folds values straight into
+    // the hasher (no JSON text) — correctness-critical (a collision => silent stale layout), so it
+    // warrants review, not a quick slice. `FxHasher` here is sub-noise (serialization, not the FNV,
+    // dominates). Do NOT regress this back to `format!("{ir:?}")`.
     let _ = serde_json::to_writer(&mut writer, ir);
     let tail = format!(
         "|{algorithm}|{cycle_strategy}|{collapse_cycle_clusters}|{fnx_enabled}|\
