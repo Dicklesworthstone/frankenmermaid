@@ -3900,3 +3900,40 @@
 - **Verdict:** KEPT — correctness fix; ends the 7-turn golden_svg RED with conformance GREEN.
 
   Agent: cc
+
+### Parse frontier confirmed at allocation-diffuse floor — fresh post-parse-wins profile (no >3% byte-identical lever) (2026-06-29)
+- **Context:** after the two landed parse wins (trim_ascii `b627b82`, single-byte operator scan
+  `12431a6`), re-profiled `fm-parser` `parse_bench` `wide/16x32` (perf, `--call-graph dwarf`,
+  `--profile-time 6`, clean box) to find the next lever. Baseline `parse/wide/16x32` = **817 µs**
+  (median, `[796.45, 817.09, 839.89] µs`). vs Mermaid `11.12.0` wide full-pipeline denominator
+  `2879.185 ms` the parse stage alone is ~**3523x** faster (`0.000284x`) — conservative parse-vs-full
+  dominance context (Mermaid does not expose an isolated parse stage).
+- **Profile (self-cost):** the hot frontier is the ALLOCATOR + key compares, NOT a Rust hotspot:
+  `_int_malloc` 3.9%, `__memcmp_avx2_movbe` 2.9% (FxHashMap node-key equality on intern lookups),
+  `malloc_consolidate` 1.4%, `__memmove/__memcpy_avx_unaligned` 1.4%, `cfree` 1.3%, `_int_free_chunk`
+  ~1% — i.e. ~8-10% of parse is malloc/free churn + ~3% is key memcmp, spread across many small
+  allocations. No single Rust function clears the render/parse noise floor (±3-10%); the cost is
+  diffuse exactly as the prior frontier note said.
+- **Levers identified and why each is sub-floor / not a byte-identical micro-lever:**
+  - **Redundant AST node-id alloc** (the one untried structural lever): `parse_fast_simple_flowchart_node_ast`
+    does `id.to_string()` (lib `mermaid_parser.rs:1311/1319`) into a `FlowAstNode`, then `intern_node`
+    copies the id AGAIN into the FxHashMap key — the id is allocated twice. Edges already avoid this
+    via the borrowed `FlowDocumentItem::FastEdge` (`&str`, zero-copy). A symmetric borrowed `FastNode`
+    would drop ~512 AST-id allocations on `wide/16x32`. But 512 of ~2000 parse allocations is bounded
+    ~1-2.5% of parse (well under the ±3-10% floor) and needs a new `FlowDocumentItem` variant +
+    lowering + byte-identical AST proof — a structural refactor for a predicted sub-noise result, so
+    it would land in `REVERT ~0-gain`. Not attempted; recorded so the next agent does not re-derive it.
+  - **`line_items` per-line Vec elimination:** already tried and rejected ~0-gain (stash@{4}
+    "line_items-elim ~0-gain reject").
+  - **`memcmp` (2.9%) on intern lookups:** reducing it requires changing the intern data structure
+    (e.g. pre-hashed/interned key ids), not a byte-identical micro-lever.
+- **Verdict:** parse is at its inherent allocation-diffuse floor; render is documented exhausted
+  (edges DONE `41d3a1b`, nodes do-not-pay). No >3% byte-identical perf lever remains on the wide
+  pipeline without a structural arena/borrow refactor (high risk, multi-hour, not a 60-min slice).
+- **Blocker surfaced:** the highest-value REMAINING work on `main` is the two PRE-EXISTING conformance
+  REDs (confirmed independent of recent perf work on clean HEAD): `config_roundtrip_test:174`
+  (`shadows=true` does not emit `id="drop-shadow"` — config-plumbing bug) and `integration_test:771`
+  (`incremental..._is_faster_than_full_recompute` — flaky layout timing under swarm load). These are
+  correctness, not perf — the perf dominance vs Mermaid (~600-3500x across stages) is already decisive.
+
+  Agent: cc
