@@ -5246,3 +5246,39 @@
   parse (FastNode) remain the harvested high-value work; layout is a long-tail arena/CSR project.
 
   Agent: cc
+
+### LANDED: whole-edge SVG fast path -- render allocations ~HALVED on the wide head-to-head (2026-06-29)
+- **Re-profiled WHERE render allocates on the ACTUAL mermaid-js head-to-head workload (`gen_wide`, the
+  8x16/12x24/16x32 layered DAGs the ledger ratios use) -- NOT chains.** Deterministic counting-allocator
+  (load-immune): on wide, render is the alloc-dominant phase by far -- wide_16x32 render=19225 allocs vs
+  parse=5577, layout=4279 (render ~64% of all allocs). The prior layout-alloc frontier work measured CHAINS;
+  on wide flowcharts EDGES dominate and they live in render.
+- **Root cause:** the node fast path (`build_common_node_fragment`) already streams an ENTIRE node to one
+  String, but the EDGE fast path only streamed the `<path>` child -- every edge then still built a full
+  `Element::group` (Attributes Vec + 2-slot children Vec), an `id`/`role`/`tabindex` triple (two heap value
+  Strings + the `mermaid_edge_element_id` String), and a `<title>` Element whose `content` clones the
+  description: ~10 allocs/edge of pure wrapper overhead.
+- **Fix (LANDED):** `build_common_edge_full_fragment` streams the WHOLE common edge --
+  `<g id=.. class="fm-edge" data-fm-edge-id=.. role="graphics-symbol" tabindex="0"><path .../><title>..</title></g>`
+  -- directly to one String, gated on the inner `<path>` fast path's conditions PLUS
+  `a11y.aria_labels && a11y.keyboard_nav` (so the hardcoded role/tabindex always match the group the slow
+  path would build) and an explicit unlabeled check. Shares `write_common_edge_path_into` with the `<path>`
+  fast path so the path serialization stays single-sourced.
+- **MEASURED (deterministic counting-allocator A/B, load-immune):** render allocations
+  wide_8x16 **4685 -> 2445 (-47.8%)**, wide_12x24 **10745 -> 5465 (-49.1%)**, wide_16x32
+  **19225 -> 9625 (-49.9%)**; chain_500 11797 -> 6787 (-42.5%). Render alloc BYTES wide_16x32 -14.9%.
+  Render TIME is below this fleet's render noise floor (only >=10% render deltas resolve here, per the
+  methodology) so the alloc count is the load-immune proof, exactly as for the node fast path (174b534).
+- **Byte-identical & safe:** `svg_golden_snapshots_are_stable` + `franken_tui_fixture_cases_match_parser_and_svg_expectations`
+  GREEN with NO re-bless; 233 fm-render-svg lib tests (incl. a new pin test `edge_fast_full_fragment_matches_render`
+  that asserts the fragment == the real slow-path `Element` group serialization, special-char title escaping
+  included); clippy `-D warnings` clean. The change uses only `String`/`fmt::Write` primitives already on the
+  shared WASM render path. `differential_summary_statistics` is a pre-existing TIMING flake (passed on re-run;
+  a pure alloc cut can only help timing).
+- **Verdict: LANDED.** The biggest remaining WIDE-render alloc lever -- render allocations halved on the
+  exact workload the mermaid-js ratios are computed on (frankenmermaid render stage is already ~240-570x
+  faster than Mermaid 11.12.0; this removes ~half the render heap traffic underneath that). Lesson: the
+  "render is harvested" conclusion was chain-shaped; profiling the HEAD-TO-HEAD shape (wide, edge-dominated)
+  surfaced a clean ~50% alloc win the chain profile hid.
+
+  Agent: cc

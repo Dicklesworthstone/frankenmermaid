@@ -6573,19 +6573,69 @@ fn build_common_edge_fragment(
     edge_index: i32,
     marker_end: &str,
 ) -> String {
-    use crate::attributes::{AttributeValue, write_escaped_attr};
     let mut f = String::with_capacity(path_str.len() + 96);
+    write_common_edge_path_into(&mut f, path_str, stroke_width, style_class, edge_index, marker_end);
+    f
+}
+
+/// Write the common solid-arrow `<path .../>` element directly into `f`. Shared by the `<path>`-only
+/// fast path ([`build_common_edge_fragment`]) and the whole-edge fast path
+/// ([`build_common_edge_full_fragment`]) so the path serialization stays in one place and stays
+/// byte-identical to the slow `Element` build.
+fn write_common_edge_path_into(
+    f: &mut String,
+    path_str: &str,
+    stroke_width: f32,
+    style_class: &str,
+    edge_index: i32,
+    marker_end: &str,
+) {
+    use crate::attributes::{AttributeValue, write_escaped_attr};
     f.push_str("<path d=\"");
-    let _ = write_escaped_attr(&mut f, path_str);
+    let _ = write_escaped_attr(f, path_str);
     f.push_str("\" stroke-width=\"");
-    let _ = AttributeValue::Number(stroke_width).write_value(&mut f);
+    let _ = AttributeValue::Number(stroke_width).write_value(f);
     f.push_str("\" class=\"fm-edge ");
     f.push_str(style_class);
     f.push_str("\" data-fm-edge-id=\"");
-    let _ = AttributeValue::Integer(edge_index).write_value(&mut f);
+    let _ = AttributeValue::Integer(edge_index).write_value(f);
     f.push_str("\" marker-end=\"");
-    let _ = write_escaped_attr(&mut f, marker_end);
+    let _ = write_escaped_attr(f, marker_end);
     f.push_str("\"/>");
+}
+
+/// Serialize an ENTIRE common edge — `<g …><path …/><title>…</title></g>` — directly into raw SVG
+/// bytes, **byte-identical** to the `Element` group the slow path builds for an unlabeled solid-arrow
+/// edge under default (`A11yConfig::full()`) a11y. The slow path builds an `Element::group` (its
+/// `Attributes` Vec + a 2-slot children Vec), an `id`/`role`/`tabindex` triple (two heap value
+/// Strings), the `<path>` child element, and a `<title>` element (whose `content` clones the
+/// description) — ~6 allocations per edge. This collapses all of it into the single fragment String,
+/// which on wide layered flowcharts (edges dominate render allocations) is the largest remaining
+/// wide-render alloc lever. The group's attribute names/order (`id`, `class`, `data-fm-edge-id`,
+/// `role`, `tabindex`) and the `role="graphics-symbol"`/`tabindex="0"` literals are replicated here;
+/// asserted by `edge_fast_full_fragment_matches_render` and the corpus `golden_svg_test`.
+fn build_common_edge_full_fragment(
+    path_str: &str,
+    stroke_width: f32,
+    style_class: &str,
+    edge_index: i32,
+    marker_end: &str,
+    edge_desc: &str,
+) -> String {
+    use crate::attributes::{AttributeValue, write_escaped_text};
+    let mut f = String::with_capacity(path_str.len() + edge_desc.len() + 160);
+    // <g id="fm-edge-N" class="fm-edge" data-fm-edge-id="N" role="graphics-symbol" tabindex="0">
+    // The id is `mermaid_edge_element_id(edge_index)` = "fm-edge-" + decimal(index); it never contains
+    // an escapable byte, so it goes through the same `Integer` serializer as `data-fm-edge-id`.
+    f.push_str("<g id=\"fm-edge-");
+    let _ = AttributeValue::Integer(edge_index).write_value(&mut f);
+    f.push_str("\" class=\"fm-edge\" data-fm-edge-id=\"");
+    let _ = AttributeValue::Integer(edge_index).write_value(&mut f);
+    f.push_str("\" role=\"graphics-symbol\" tabindex=\"0\">");
+    write_common_edge_path_into(&mut f, path_str, stroke_width, style_class, edge_index, marker_end);
+    f.push_str("<title>");
+    let _ = write_escaped_text(&mut f, edge_desc);
+    f.push_str("</title></g>");
     f
 }
 
@@ -6767,6 +6817,45 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
     let animation_style = config
         .animations_enabled
         .then(|| animation_style_attr(edge_animation_order(edge_path, ir)));
+
+    // Whole-edge fast path: when the common edge ALSO carries the default a11y wrapping
+    // (`text_alternatives` + `aria_labels` + `keyboard_nav`, all true under `A11yConfig::full()`), the
+    // entire `<g …><path …/><title>…</title></g>` serializes directly to one String — skipping the
+    // `Element::group` Attributes Vec + children Vec, the `id`/`role`/`tabindex` value Strings, and the
+    // `<title>` Element + its content clone (~6 allocs/edge). Edges dominate render allocations on wide
+    // layered flowcharts, so this is the largest remaining wide-render alloc lever. The conditions are
+    // exactly the inner `<path>` fast path's plus `aria_labels && keyboard_nav` (so the hardcoded
+    // `role`/`tabindex` always match the group the slow path would build) and an explicit unlabeled
+    // check (so the title is the unlabeled-edge description). Byte-identical: see
+    // `edge_fast_full_fragment_matches_render` + `golden_svg_test`. `resolve_edge_inline_style` is last
+    // so the (potentially allocating) lookup only runs once everything cheaper has already passed.
+    if arrow == ArrowType::Arrow
+        && !is_back_edge
+        && config.embed_theme_css
+        && !config.animations_enabled
+        && !config.include_source_spans
+        && config.a11y.text_alternatives
+        && config.a11y.aria_labels
+        && config.a11y.keyboard_nav
+        && marker_start.is_none()
+        && base_dasharray.is_none()
+        && !(detail.show_edge_labels && ir_edge.and_then(|e| e.label).is_some())
+        && let Some(edge) = ir_edge
+        && let Some(marker_end_val) = marker_end
+        && resolve_edge_inline_style(ir, edge_index).is_none()
+    {
+        let (from_label, to_label) =
+            edge_endpoint_accessible_labels(edge, ir, accessible_node_labels);
+        let edge_desc = crate::a11y::describe_edge_labels(from_label, to_label, arrow, None);
+        return Element::raw_svg(build_common_edge_full_fragment(
+            &path_str,
+            stroke_width,
+            style_class,
+            edge_index as i32,
+            marker_end_val,
+            &edge_desc,
+        ));
+    }
 
     // Fast path: the overwhelmingly common edge (solid `Arrow`, themed CSS, no back-edge, no
     // animation, no source spans, no inline `linkStyle`, no rendered label) serializes its `<path>`
@@ -7088,6 +7177,47 @@ mod tests {
             assert_eq!(
                 frag, expected,
                 "streamed edge fragment must equal the Element serialization (d={d:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn edge_fast_full_fragment_matches_render() {
+        // Pin the WHOLE-edge fast fragment against the `Element` group the slow path actually builds
+        // for an unlabeled solid-arrow edge under default a11y: the unlabeled-edge tail wraps the
+        // `<path>` fast fragment in `Element::group().id().class("fm-edge").attr_int("data-fm-edge-id")
+        // .attr("role").attr("tabindex").child(path).child(title)`. The fragment must serialize
+        // byte-identically — including `<title>` escaping of special characters.
+        let cases: &[(&str, i32, &str, f32, &str)] = &[
+            ("M0 0 L10 10", 0, "fm-edge-solid", 1.8, "A points to B"),
+            (
+                "M1.50 2.25 C3.00 4.00 5.00 6.00 7.00 8.00",
+                42,
+                "fm-edge-solid",
+                1.8,
+                "Node <1> & \"x\" points to Node 2",
+            ),
+            ("M-5.25 0 L0 -3.50", 1000, "fm-edge-solid", 2.5, "unknown points to unknown"),
+            ("", 7, "fm-edge-solid", 1.8, "start points to end"),
+        ];
+        for &(d, idx, style, sw, desc) in cases {
+            let path_child =
+                Element::raw_svg(build_common_edge_fragment(d, sw, style, idx, "url(#arrow-end)"));
+            let group = Element::group()
+                .id(&fm_core::mermaid_edge_element_id(idx as usize))
+                .class("fm-edge")
+                .attr_int("data-fm-edge-id", idx)
+                .attr("role", "graphics-symbol")
+                .attr("tabindex", "0")
+                .child(path_child)
+                .child(Element::title(desc));
+            let mut expected = String::new();
+            group.write_to_string(&mut expected);
+            let frag =
+                build_common_edge_full_fragment(d, sw, style, idx, "url(#arrow-end)", desc);
+            assert_eq!(
+                frag, expected,
+                "whole-edge fast fragment must equal the slow Element group (idx={idx})"
             );
         }
     }
