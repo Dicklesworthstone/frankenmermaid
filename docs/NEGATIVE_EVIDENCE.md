@@ -4500,3 +4500,14 @@
   (strictly fewer allocs). Follow-up: compact_display still `format!`s 6 ints (1 alloc + Formatter).
 
   Agent: cc
+
+### REVERTED: manual compact_display (byte-identical but unmeasurable + expected sub-noise) (2026-06-29)
+- Follow-up to the span attr_owned win (37744b0): replaced compact_displays `format!(\"{}:{}-...\", 6 ints)`
+  with a manual decimal builder (byte-identical -- 349 fm-core tests pass). Mechanistically can-not-regress
+  (avoids the Formatter machinery) but the A/B was load-contaminated (criterion change +72%, p=0.00, vs a
+  low-load 3.94 ms baseline -- pure noise: the box load spiked, per the noise-floor rule). Expected gain is
+  ~1-2% (the 6 ints still alloc one String; the integer formatting itself is what the rejected write_int
+  itoa already found sub-noise). REVERTED -- not worth fm-core code for an unmeasurable/sub-noise micro-opt.
+  The attr_owned alloc win (-5.3%, the name format! + value clone) was the real, measurable span-path lever.
+
+  Agent: cc
