@@ -4458,3 +4458,18 @@
   weakness (fixed CSS overhead) is now decisively flipped to a clear win on realistic small diagrams.
 
   Agent: cc
+
+### MEASURED: the CSS dead-weight wins CLOSED the sequence output gap (the last workload loss) (2026-06-29)
+- The 6 conditional-CSS strips apply to EVERY diagram, not just small flowcharts. Re-measured the
+  sequence diagram (the one workload where frankenmermaid lost on output, prior cross-workload entry):
+  - fm sequence DEFAULT (source-spans on): 65,675 -> **62,928 B**, ratio mm/fm 0.87 -> **0.904**
+  - fm sequence --no-embed-source-spans: 59,553 -> **56,806 B**, ratio mm/fm 0.95 -> **1.001 = fm WINS**
+  vs mermaid 11.15.0 sequence 56,873 B. The strips that fired on sequence: node-shapes + state region +
+  2 unused accents (-2,747 B), flipping the no-spans ratio past 1.0.
+- **frankenmermaid now wins OUTPUT on every measured workload in lean/no-spans mode** (small 1.36x,
+  state 1.5x+, class 3x, flow_chain 1.8x, sequence 1.001x) AND wins TIME ~758x everywhere. The only
+  residual output loss is sequence in the DEFAULT config (0.904x), caused solely by the CLI
+  source-spans-on-for-SVG default (owner-gated, tested at integration_test.rs:1192/1415) -- not the CSS,
+  which is now harvested. Closing that one default flip would make frankenmermaid win output everywhere.
+
+  Agent: cc
