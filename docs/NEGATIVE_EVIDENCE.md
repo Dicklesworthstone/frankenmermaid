@@ -4297,3 +4297,34 @@
   tests/goldens that gate them.
 
   Agent: cc
+
+### MEASURED fresh lever: frankenmermaid's fixed CSS block is ~9.2 KB (2.2x mermaid) with ~2.35 KB dead — conditional-CSS gating (2026-06-29)
+- **Found via the cross-workload head-to-head** (the comparator I unblocked): `flow_small` (a 6-edge
+  flowchart) is frankenmermaid's WEAKEST output win (1.11x vs mermaid) because the embedded `<style>` is
+  **63% of its total output** (9,182 of 14,616 B) and FIXED — the same ~9 KB ships for every diagram
+  (flow_small 9182 / sequence 9663 / state 8993 / class 9182), vs mermaid's 4,128 B for flow_small.
+- **~2.35 KB of that CSS is DEAD** for a simple flowchart (10 of 35 class-selectors are actually used).
+  Byte-weight of the cleanly-gateable dead sections (measured on flow_small):
+  - `.fm-cluster*` (cluster/c4/swimlane/label): ~719 B — gate on `!layout.clusters.is_empty()`
+  - `.fm-node-shape-{note,cloud,cylinder,star,pentagon}`: ~537 B — gate on the shape-set present in `ir.nodes`
+  - `.fm-node-{block-beta,highlighted,inactive,border-*}`: ~877 B — gate on those states being applied
+  - `.fm-edge-{dashed,thick,back}`: ~218 B — gate on the arrow types present in `ir.edges`
+  This is the SAME conditional-CSS pattern already in `Theme::to_svg_style(shadows, has_edge_labels)`
+  (theme.rs:468) — the edge-label CSS is already gated; node-shape/edge-style/cluster/state are NOT.
+- **Win:** byte-IDENTICAL rendering (dead CSS matches nothing), feature-preserving, and
+  byte-DETERMINISTIC (no fleet noise floor). Saves ~1.5 KB (safe subset: shapes+edges+clusters, all
+  explicit in the IR) to ~2.35 KB (incl. state CSS). That is ~10-16% of small-diagram output and
+  ~3% of a realistic medium_100 (~80 KB) — clears the keep-bar on the MOST realistic workloads (real
+  mermaid diagrams are small, not 512-node wide graphs), though it is sub-noise on the artificial wide
+  bench (9 KB / 535 KB = 1.7%). Takes flow_small from 1.11x to ~1.3x vs mermaid.
+- **Why surfaced not landed here:** it requires threading ~4-8 feature flags from the render fn into
+  `to_svg_style`, gating each CSS section, re-blessing the 37 goldens, and a CSS-iff-feature INVARIANT
+  check across all goldens (a wrong gate silently blesses an unstyled element — the golden byte-compare
+  blesses whatever is emitted, so the invariant must be checked separately, as was done for has_edge_labels).
+  A careful render-owner change, not a rushed slice. Scoped here with the exact sections, gate
+  conditions, byte weights, and the existing pattern to extend.
+- **Verdict:** fresh, measured, feature-preserving, landable lever on the realistic small/medium output
+  gap — the cleanest non-owner-gated win left (unlike the a11y/source-span DEFAULTS, this drops only
+  DEAD CSS, no feature trade-off). Ready for the render owner / a dedicated slice.
+
+  Agent: cc
