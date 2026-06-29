@@ -4753,3 +4753,47 @@
   green this session (`84df698`/`e67500d`). Remaining wins are owner-gated defaults or load-blocked timing.
 
   Agent: cc
+
+### REJECTED: general CSS class tree-shake -- real -6.5% corpus output, but +12-23 us/render net-negative (2026-06-29)
+- **The lever (a NEW primitive, not the special-case strips).** The landed strips prune only specific
+  families: `strip_unused_state_css` (accents/states), `strip_dead_marker_css` (`marker#`). The
+  remaining `<style>` is still **56.9%** of a typical small SVG (5.3 KB), and most of it is a fixed
+  theme superset: a pie/gantt/quadrant/xychart embeds the full `.fm-node`/`.fm-edge`/cluster/shape rule
+  set it never uses, and EVERY golden ships `.fm-label` + `.fm-sr-only` that no element references. A
+  static SVG has a CLOSED class set, so a rule whose every comma-member needs an absent class can match
+  nothing -- prunable, byte-identical. Built `strip_unused_class_css`: scan body `class="…"` -> sorted
+  used-set; rebuild the stylesheet keeping a comma-member iff all its `.class` tokens are present
+  (compound/descendant => AND), dropping fully-dead rules; at-rules (`@media`/`@supports`/`@import`)
+  passed through verbatim; comments skipped during token scan.
+- **MEASURED output win (real + safe).** Blessing all 37 goldens: **483,829 -> 452,363 B = -31,466
+  (-6.50%)** -- LARGER than any single landed pass (it also drops dead *members* from partial rules).
+  Safety machine-verified: every golden BODY byte-identical (pass touches only `<style>`), and every
+  removed selector provably dead (its classes absent from the body) -- 0 live members removed across
+  all 37. Conformance GREEN when blessed; 2 focused unit tests added.
+- **One subtle correctness trap found + fixed.** `.fm-animations-enabled` is a view-time MODE toggle
+  applied at DOCUMENT scope under a config flag (`doc.class(...)`), NOT a per-element content class, and
+  in the scene path it is not even serialised onto the root -- so the naive shake pruned the live
+  `stroke-dasharray` animation rule (unit test `animations_emit_…`). Fix: a `VIEW_TIME_MODE_CLASSES`
+  denylist treated as always-present, while the CONTENT class in the same selector is still required
+  (rule kept iff a dashed edge exists). Correct -- but a sign the lever's safety surface is wider than
+  the static-class model first suggests.
+- **MEASURED render COST (the disqualifier).** Isolated single-process timing (load-immune; criterion
+  cross-runs were load-contaminated, the methodology trap): pass cost **11.7 us on a 9.3 KB flowchart,
+  22.7 us on a 21.8 KB one** -- and it SCALES with body size (per-render `used`-set body scan).
+  Phase-resolved: used_build 3->13 us (grows with #class attrs), rule_loop ~6.5 us (≈CSS size),
+  reassembly ~2 us. That is **+7.3% on the `render_svg/small_10` flowchart (≈161 us)**, ~+4% medium.
+  Optimisation attempts: alloc-free member emit (no change -> allocs weren't it), sorted-Vec+binary
+  search membership (no change -> SipHash wasn't it), and `replace_range` -> manual 3-`push_str`
+  rebuild (20 -> 11.7 us; `replace_range`'s splice path was ~8 us of pure waste). Floor is still
+  ~6-12 us, dominated by the per-render body scan.
+- **Verdict: REJECTED.** A new lever, different primitive, no ceiling framing -- and the measurement is
+  decisive against landing. Render time is this project's prized, tightly-contested axis; output size is
+  already WON vs mermaid (today's -16.41% widened an existing lead on nearly every workload). Spending
+  4-7% render time to shrink already-winning output -- most of it on the *common* graph types where the
+  per-diagram saving is only ~438 B -- is misaligned. Unlike the landed strips (cheap single-scan
+  rewrites), this pass pays a body-scaling scan on every render. The ONLY net-positive path is
+  renderer-side class accumulation (record emitted classes during body construction -> no per-render
+  body scan, cost collapses to the ~6 us rule_loop), which is an invasive, owner-gated refactor -- left
+  as future work. Reverted; experiment preserved in `git stash` ("css-class-tree-shake … REJECTED").
+
+  Agent: cc
