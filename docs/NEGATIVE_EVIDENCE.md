@@ -4943,3 +4943,21 @@
   that FastNode cleared (a drop-in mirror of an existing pattern); this is not. Owner-gated.
 
   Agent: cc
+
+### TESTED (no-ceiling): wide/high-crossing graphs DON'T shift the bottleneck -- render still ~70% (2026-06-29)
+- Prior phase splits used LINEAR-chain flowcharts (layout 8%). Hypothesis worth testing: a WIDE DAG
+  (`gen_wide`, the bench shape that "exercises crossing-minimization far more") might make layout/crossing-min
+  -- the NP-hard core where an /alien-graveyard algorithm swap could apply -- the dominant cost.
+- **MEASURED (deterministic phase timing, wide DAGs):** 10x20 (200n/360e) parse 20% / layout 12% / render 68%;
+  20x25 (500n/**950e**, dense crossings) parse 17% / **layout 8%** / **render 74%**; 10x50 (500n/900e)
+  parse 20% / layout 8% / render 71%. Layout STAYS 8-12% even at 2x edge density and 50-wide ranks.
+- **Verdict.** Crossing-minimization / layout is genuinely cheap and well-optimized at scale -- a better
+  crossing-min heuristic would move <12% of one phase = sub-1% pipeline. Render dominance (~70%) is UNIVERSAL
+  across graph shape, confirming the single remaining lever is the architectural Element-tree-bypass render
+  rewrite (build per-element `<g>/<rect>/<text>` straight into the output buffer instead of materializing
+  transient `Element` trees -- saves ~5 allocs/node + the serialize indirection). That is byte-identity-fiddly
+  (must replicate every attribute's exact order/format across 4 element kinds) and carries a dual-path
+  maintenance cost -- a multi-step, owner-gated refactor, not an autonomous land. Layout is now ruled out as
+  a perf seam for every benchmarked shape.
+
+  Agent: cc
