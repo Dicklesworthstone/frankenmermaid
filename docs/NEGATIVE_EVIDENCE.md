@@ -5113,3 +5113,28 @@
   exclusions + caller `permit_fast` flag) and re-enable it for the default config.
 
   Agent: cc
+
+### LANDED: re-enabled the dead node fast-path for the default config -- render allocs HALVED, byte-identical (2026-06-29)
+- Follow-up that SHIPS the near-latent bug found above. `build_common_node_fragment` direct-serializes a
+  common rect node (skipping 4 `Element` builds + their `Attributes` Vecs) but was DEAD for the default
+  config (gated on `!detail.enable_shadows`, redundant since the gate requires `embed_theme_css` under which
+  the shadow is CSS, not a node byte). Re-enabled it by COMPLETING the rotted gate after a full audit of
+  every conditional emission in `render_node`:
+  - removed the redundant `!detail.enable_shadows` clause;
+  - added `node.menu_links.is_empty() && node.href.is_none() && node.callback.is_none()` -- the only
+    node-field features the fragment omits (states/accents/journey/kanban/req fills all derive from
+    `node.classes`/`requirement_meta`, already gated);
+  - added a `permit_fast` param so the ONE post-processing caller (the sequence mirror-header loop, which
+    adds `.id`+`.class`) forces the slow path; the main/parallel loop passes `true`.
+- **MEASURED (deterministic counting-allocator A/B, load-immune):** render allocations n=100 **3993 -> 1993
+  (-50.1%)**, n=500 **19243 -> 9243 (-52.0%)**; alloc bytes -26%. Render TIME (load-variable but consistent):
+  ~-50% to -60% on small/medium default renders -- the COMMON case (most diagrams are small, below the
+  parallel threshold, so the per-node-work halving shows directly).
+- **Byte-identical & safe:** all 37 goldens unchanged (no re-bless), 232 fm-render-svg lib + 118 integration
+  + compat + conformance GREEN, clippy `-D warnings` clean, `wasm32-unknown-unknown` builds. The 4 lib tests
+  that the naive one-clause relaxation broke (callback/menu/link/mirror) now pass -- the completed gate
+  excludes exactly those.
+- **Verdict: LANDED.** The biggest COMMON-case render win of the sweep -- a dead optimization re-activated
+  by repairing its rotted gate. Render work is now ~halved on every default small/medium diagram.
+
+  Agent: cc

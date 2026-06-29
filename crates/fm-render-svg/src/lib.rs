@@ -2010,6 +2010,8 @@ fn render_nodes_serial(
             colors,
             emit_classdef_classes,
             centrality_map,
+            // No post-processing here (serialized straight out) — the fast direct-serialize path is safe.
+            true,
         );
         node_elem.write_to_string(out);
     }
@@ -2951,6 +2953,8 @@ fn render_layout_to_svg(
             &theme.colors,
             emit_classdef_classes,
             &centrality_map, // Use same map (mirror headers will have no entries)
+            // Post-processed below (.id + .class) — must NOT take the opaque fast path.
+            false,
         )
         .id(&mermaid_node_element_id_with_variant(
             &node_box.node_id,
@@ -4334,6 +4338,8 @@ fn render_node(
     colors: &ThemeColors,
     emit_classdef_classes: bool,
     centrality_map: &HashMap<usize, CentralityTier>,
+    // False forces the slow `Element` path for callers that post-process the result (e.g. add a class).
+    permit_fast: bool,
 ) -> Element {
     use fm_core::NodeShape;
 
@@ -4392,11 +4398,18 @@ fn render_node(
     // `Attributes` Vecs + `write_into` walks (per-node construction is ~60% of wide render). Each
     // gate clause corresponds to a branch below that would add/alter a class, child, attribute, or
     // post-processing step; when all are absent the node bytes are fully determined.
-    if matches!(shape, NodeShape::Rect)
+    // `detail.enable_shadows` is NOT gated: the per-node shadow is the inline `filter="url(#drop-shadow)"`,
+    // emitted only when `!config.embed_theme_css` (required true here), so with the theme CSS embedded the
+    // shadow is a CSS rule and changes no node byte. `permit_fast` lets a caller that POST-PROCESSES the
+    // returned `Element` (the sequence mirror-header loop adds a class) force the slow path. The
+    // `menu_links`/`href`/`callback` clauses exclude the only node-field features the fragment omits (all
+    // other conditionals — states, accents, journey/kanban/req fills, icons — derive from `node.classes`/
+    // `requirement_meta`/icon/centrality already gated below).
+    if permit_fast
+        && matches!(shape, NodeShape::Rect)
         && config.embed_theme_css
         && config.node_gradients
         && !emit_classdef_classes
-        && !detail.enable_shadows
         && !config.animations_enabled
         && !config.include_source_spans
         && config.a11y.aria_labels
@@ -4413,6 +4426,9 @@ fn render_node(
         && let Some(node) = ir_node
         && node.classes.is_empty()
         && node.requirement_meta.is_none()
+        && node.menu_links.is_empty()
+        && node.href.is_none()
+        && node.callback.is_none()
     {
         let node_desc = describe_node(node, ir);
         return Element::raw_svg(build_common_node_fragment(
