@@ -5469,3 +5469,34 @@
   single-element case with no dep.
 
   Agent: cc
+
+### LANDED: borrow node label for size measurement instead of cloning -- layout allocs -12% (2026-06-29)
+- After render + parse alloc frontiers were exhausted, profiled the remaining LARGEST wide alloc phase --
+  LAYOUT (wide_16x32 4279 allocs). Phase-bisect (env-gated probes, load-immune): the Sugiyama
+  crossing-minimization barycenter path contributes ZERO (wide flowcharts route to the Tree/fallback path,
+  NOT Sugiyama -- confirmed the routing fact). Edge routing ~1506 allocs (of which ~1053 are the
+  `LayoutEdgePath.points` Vecs = render OUTPUT, not removable). Non-edge ~2773 (node sizing / tree).
+- **Root cause (clean transient found):** `compute_node_size` -> `display_node_label(ir, node)` returned a
+  freshly CLONED `String` (`value.text.clone()` / `node.id.clone()`) just to pass `&text` to
+  `metrics.estimate_dimensions(&str)` -- a read-only measurement. The displayed label is ALWAYS borrowable
+  from the IR (the label text, the node id, or empty), so the clone is pure waste. Four callers used it
+  transiently (3x `estimate_dimensions`, 1x `hash_str`); two store it (kept owned).
+- **Fix (LANDED):** added `display_node_label_ref(ir, node) -> &str` (zero-alloc, borrows from ir/node);
+  `display_node_label` delegates via `.to_string()` for the two storing callers. Routed the four transient
+  callers through the ref variant.
+- **MEASURED (deterministic counting-allocator A/B, load-immune):** layout allocs
+  wide_16x32 **4279 -> 3767 (-12.0%)** (0-15 bucket 1059 -> 547, i.e. 512 per-node label clones removed),
+  wide_8x16 1105 -> 977 (-11.6%).
+- **Byte-identical & position-preserving:** `layout_golden_checksums_are_stable` +
+  `layout_golden_cases_are_deterministic_across_runs` (LAYOUT POSITION checksums -- the critical guard for
+  a layout change) + `franken_tui_fixture_cases` + `svg_golden_snapshots_are_stable` GREEN with NO re-bless;
+  428 fm-layout lib tests pass; clippy `-D warnings` clean. Sizes computed from borrowed vs cloned text are
+  identical, so positions are unchanged.
+- **Verdict: LANDED.** First CLEAN layout-alloc win -- the prior "layout is fully owner-gated CSR/arena"
+  surface was too pessimistic: the per-node label-clone-for-measurement was a clean transient (the
+  render/parse "clone/intermediate for a read-only use" pattern, now found in layout too). The dominant
+  layout allocs that REMAIN are genuinely hard: the edge `points` Vecs (render output) and the per-node
+  adjacency / tree-structure Vecs (position-critical, order-dependent = the owner-gated CSR/arena project).
+  So layout's CLEAN transient frontier is the label clone (now harvested); the rest is architectural.
+
+  Agent: cc

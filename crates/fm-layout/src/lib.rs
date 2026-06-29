@@ -6434,7 +6434,7 @@ fn layout_diagram_pie_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         let sweep = (value / total) * 2.0 * PI;
         let mid_angle = angle_cursor + sweep / 2.0;
 
-        let (label_w, label_h) = metrics.estimate_dimensions(&display_node_label(ir, node));
+        let (label_w, label_h) = metrics.estimate_dimensions(display_node_label_ref(ir, node));
         let node_w = label_w + 24.0;
         let node_h = label_h + 16.0;
 
@@ -6540,7 +6540,7 @@ fn layout_diagram_quadrant_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             .unwrap_or(0.5)
             .clamp(0.0, 1.0);
 
-        let (label_w, label_h) = metrics.estimate_dimensions(&display_node_label(ir, node));
+        let (label_w, label_h) = metrics.estimate_dimensions(display_node_label_ref(ir, node));
         let node_w = (label_w + 20.0).max(12.0);
         let node_h = (label_h + 12.0).max(12.0);
 
@@ -8005,7 +8005,7 @@ fn compute_node_size(
     node: &IrNode,
     metrics: &fm_core::FontMetrics,
 ) -> (f32, f32) {
-    let text = display_node_label(ir, node);
+    let text = display_node_label_ref(ir, node);
 
     match node.shape {
         fm_core::NodeShape::FilledCircle => (20.0, 20.0),
@@ -8013,7 +8013,7 @@ fn compute_node_size(
             if text.is_empty() {
                 (24.0, 24.0)
             } else {
-                let (label_width, label_height) = metrics.estimate_dimensions(&text);
+                let (label_width, label_height) = metrics.estimate_dimensions(text);
                 (
                     (label_width + 52.0).max(42.0),
                     (label_height + 30.0).max(42.0),
@@ -8025,7 +8025,7 @@ fn compute_node_size(
             let text = if text.is_empty() {
                 node.id.as_str()
             } else {
-                &text
+                text
             };
             let (label_width, label_height) = metrics.estimate_dimensions(text);
             let (icon_width, icon_height) = icon_dimensions(node, metrics);
@@ -8047,7 +8047,7 @@ fn node_size_cache_key(
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     hash_str(&mut hash, &node.id);
     hash_u64(&mut hash, node.shape as u64);
-    hash_str(&mut hash, &display_node_label(ir, node));
+    hash_str(&mut hash, display_node_label_ref(ir, node));
     hash_str(&mut hash, node.icon.as_deref().unwrap_or_default());
     hash_u64(&mut hash, u64::from(metrics.font_size().to_bits()));
     hash_u64(&mut hash, u64::from(metrics.avg_char_width().to_bits()));
@@ -8076,15 +8076,23 @@ fn icon_dimensions(node: &IrNode, metrics: &fm_core::FontMetrics) -> (f32, f32) 
 }
 
 fn display_node_label(ir: &MermaidDiagramIr, node: &IrNode) -> String {
+    display_node_label_ref(ir, node).to_string()
+}
+
+/// Borrowing core of [`display_node_label`]: the displayed label text is always either the IR label
+/// text, the node id, or empty — all borrowable from `ir`/`node` — so callers that only READ it (text
+/// measurement, hashing) need not clone. Byte-identical content to `display_node_label`; the owning
+/// version just `.to_string()`s this for callers that store the result.
+fn display_node_label_ref<'a>(ir: &'a MermaidDiagramIr, node: &'a IrNode) -> &'a str {
     let explicit = node
         .label
         .and_then(|label_id| ir.labels.get(label_id.0))
-        .map(|value| value.text.clone());
+        .map(|value| value.text.as_str());
 
     match node.shape {
-        fm_core::NodeShape::FilledCircle | fm_core::NodeShape::HorizontalBar => String::new(),
-        fm_core::NodeShape::DoubleCircle if explicit.is_none() => String::new(),
-        _ => explicit.unwrap_or_else(|| node.id.clone()),
+        fm_core::NodeShape::FilledCircle | fm_core::NodeShape::HorizontalBar => "",
+        fm_core::NodeShape::DoubleCircle if explicit.is_none() => "",
+        _ => explicit.unwrap_or(node.id.as_str()),
     }
 }
 
