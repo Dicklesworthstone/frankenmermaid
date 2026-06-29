@@ -943,7 +943,8 @@ fn apply_span_metadata(elem: Element, span: Span) -> Element {
     // — being long repeated names across every element — dominated source-span output bytes.
     // Source spans are off by default, so this is byte-identical for the default config and
     // roughly halves render output (and time) when `include_source_spans` is enabled.
-    elem.data("fm-source-span", &span.compact_display())
+    // Static name + owned value: no `format!("data-…")` name alloc and no value clone (vs `data`).
+    elem.attr_owned("data-fm-source-span", span.compact_display())
 }
 
 fn register_clip_path(

@@ -497,6 +497,20 @@ impl Element {
         self
     }
 
+    /// Set a custom attribute from an OWNED `String` value. Unlike `data`/`attr` (which take `&str`
+    /// and clone the value, and may `format!` the name), this MOVES the `String` in and — with a
+    /// `&'static` name — allocates nothing extra. Serializes byte-identically. Used on the per-element
+    /// source-span hot path (`include_source_spans`).
+    #[must_use]
+    pub fn attr_owned<K: Into<std::borrow::Cow<'static, str>>>(
+        mut self,
+        name: K,
+        value: String,
+    ) -> Self {
+        self.attrs = self.attrs.set(name, value);
+        self
+    }
+
     /// Add a `stroke` attribute only when the theme CSS is **not** embedded. With CSS embedded
     /// (the default), `.fm-node <shape> { stroke: var(--fm-node-accent) }` (and `.fm-node line`)
     /// already styles every node element and overrides this presentation attribute, so the inline

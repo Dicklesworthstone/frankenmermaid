@@ -4487,3 +4487,16 @@
   an output post-process, not just the byte delta.
 
   Agent: cc
+
+### KEPT: owned-value attr for source spans -- render_spans_on -5.3% byte-identical (2026-06-29)
+- NEW lever (the source-span emission path, the CLI SVG default, never optimized): spans-on render is
+  ~40% of render (16x32: 4.162 ms vs 2.959 ms spans-off). apply_span_metadata called
+  `elem.data(\"fm-source-span\", &span.compact_display())` -> `format!(\"data-{name}\")` per element (fm-source-span
+  absent from static_data_attr_name) + a value clone = 2 extra allocs/element x ~1500. Added
+  `Element::attr_owned(K: Into<Cow>, String)` that MOVES an owned value with a &static name; apply_span_metadata
+  now passes `\"data-fm-source-span\"` + the owned `compact_display()`.
+- Byte-identical (same name/value; 226 render + golden + conformance pass; clippy clean). Measured:
+  render_spans_on/render/16x32 4.162 -> 3.940 ms = **-5.3% (p=0.00)**. Mechanistically can-not-regress
+  (strictly fewer allocs). Follow-up: compact_display still `format!`s 6 ints (1 alloc + Formatter).
+
+  Agent: cc
