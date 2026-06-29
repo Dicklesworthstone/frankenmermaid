@@ -4608,3 +4608,28 @@
   (which emits neither pretty CSS nor unused markers) on its widest axis.
 
   Agent: cc
+
+### KEPT & LANDED: prune dead `marker#arrow-*` CSS selectors -- completes the marker lever, -17,125 B/corpus (2026-06-29)
+- **Completes the prior marker-def strip (145e03f).** Removing the unused `<marker>` DEFS left their
+  theme-CSS rules (`marker#arrow-end/filled/circle/diamond path`, `marker#arrow-open path`,
+  `marker#arrow-cross path` + `:hover` variants) referencing markers that no longer exist -- pure dead
+  CSS: 225 B on a typical arrow-end-only diagram, 584 B on an edge-less one where EVERY marker rule dies.
+- **`strip_dead_marker_css`** runs in the funnel right after `strip_unused_markers` (pre-minify, pretty
+  CSS). It is a general selector-list pruner, not exact-constant: brace-depth-tracked rule scan; for any
+  rule whose selector list contains `marker#`, drop each comma-selector that references a DEAD marker
+  (one with no surviving `<marker id="X">` def), keep the rest, and drop the rule entirely if every
+  selector goes. Nested at-rules (`@media`) are emitted verbatim. So it harvests BOTH the whole-dead
+  rules (open/cross, and every marker rule on edge-less diagrams) AND the partial combined rule
+  (`marker#arrow-end path, marker#arrow-filled path, …` -> keeps only `marker#arrow-end path`).
+- **SAFETY machine-proven across all 37 goldens:** every `marker#X` selector remaining in the CSS
+  references a LIVE `<marker id="X">` def -- **0 violations** -- so no live marker lost its styling
+  (the pruner keeps live selectors by construction) and no dead selector survived. Two unit tests pin
+  it (a hand-built partial-prune + whole-rule-drop case, and an edge-less pie that drops ALL marker CSS).
+- **Measured (deterministic bytes):** all 37 goldens pruned; **corpus 500,945 -> 483,820 B = -17,125
+  (-3.42%)**, on TOP of the def strip. Pie/gantt/etc. (edge-less) shed their entire marker CSS block.
+- **Conformance GREEN:** 232 fm-render-svg lib tests (+2 new), 37 goldens re-blessed + invariant-verified,
+  golden_svg + frankentui_conformance pass. Dead CSS only -- no feature change.
+- **Verdict:** KEPT & LANDED. Third deterministic output win of the turn; the marker lever (defs + CSS)
+  is now fully harvested. CSS-strip residual on the marker axis is zero (invariant-proven).
+
+  Agent: cc

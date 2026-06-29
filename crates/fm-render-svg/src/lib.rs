@@ -328,6 +328,7 @@ pub fn render_svg_with_layout(
     };
     strip_unused_state_css(&mut svg);
     strip_unused_markers(&mut svg);
+    strip_dead_marker_css(&mut svg);
     minify_style_block(&mut svg);
     svg
 }
@@ -464,6 +465,100 @@ fn strip_unused_markers(svg: &mut String) {
     }
     out.push_str(&svg[cursor..]);
     *svg = out;
+}
+
+/// Companion to [`strip_unused_markers`]: prune `marker#arrow-*` selectors from the theme CSS once
+/// their `<marker>` defs have been stripped. The theme stylesheet ships fixed rules that style the
+/// arrowhead markers (`marker#arrow-end/filled/circle/diamond path`, `marker#arrow-open path`,
+/// `marker#arrow-cross path`, and the `:hover` variants). After the marker-def strip, any such
+/// selector whose marker is gone matches nothing — pure dead CSS (225 B on a typical arrow-end-only
+/// diagram, 584 B on an edge-less one where every marker rule dies).
+///
+/// A selector is kept iff it references no DEAD marker (a live marker, or no `marker#` at all);
+/// a rule with every selector pruned is dropped whole. Runs on the pre-minify (pretty) stylesheet
+/// in the render funnel, after `strip_unused_markers`. Safe by construction: a live marker keeps its
+/// styling (its selector references a present def), and CSS drift can only leave a dead selector in
+/// place, never drop a live one. Brace-depth tracking emits nested at-rules (`@media`) verbatim.
+fn strip_dead_marker_css(svg: &mut String) {
+    if !svg.contains("marker#arrow-") {
+        return;
+    }
+    // Live marker ids = those still present as `<marker id="…">` defs.
+    let mut live: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut at = 0;
+    while let Some(rel) = svg[at..].find("<marker ") {
+        let m = at + rel;
+        if let Some(i) = svg[m..].find("id=\"") {
+            let s = m + i + "id=\"".len();
+            if let Some(e) = svg[s..].find('"') {
+                live.insert(&svg[s..s + e]);
+            }
+        }
+        at = m + "<marker ".len();
+    }
+    let Some(open) = svg.find("<style") else {
+        return;
+    };
+    let Some(gt) = svg[open..].find('>') else {
+        return;
+    };
+    let cs = open + gt + 1;
+    let Some(er) = svg[cs..].find("</style>") else {
+        return;
+    };
+    let ce = cs + er;
+    let css = &svg[cs..ce];
+    let bytes = css.as_bytes();
+    let mut out = String::with_capacity(css.len());
+    let mut i = 0;
+    let mut seg_start = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'{' {
+            let selectors = &css[seg_start..i];
+            // Body = the balanced `{ … }` (track depth so a nested at-rule body is one unit).
+            let mut depth = 1;
+            let mut j = i + 1;
+            while j < bytes.len() && depth > 0 {
+                match bytes[j] {
+                    b'{' => depth += 1,
+                    b'}' => depth -= 1,
+                    _ => {}
+                }
+                j += 1;
+            }
+            let body = &css[i..j];
+            if selectors.contains("marker#") {
+                let kept: Vec<&str> = selectors
+                    .split(',')
+                    .filter(|sel| match sel.find("marker#") {
+                        Some(p) => {
+                            let rest = &sel[p + "marker#".len()..];
+                            let end = rest
+                                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+                                .unwrap_or(rest.len());
+                            live.contains(&rest[..end])
+                        }
+                        None => true,
+                    })
+                    .collect();
+                if !kept.is_empty() {
+                    out.push_str(&kept.join(","));
+                    out.push_str(body);
+                }
+            } else {
+                out.push_str(selectors);
+                out.push_str(body);
+            }
+            i = j;
+            seg_start = j;
+        } else {
+            i += 1;
+        }
+    }
+    out.push_str(&css[seg_start..]);
+    if out.len() < css.len() {
+        svg.replace_range(cs..ce, &out);
+    }
 }
 
 /// Final render post-pass: minify the embedded `<style>` CSS. Mermaid ships minified CSS;
@@ -8228,6 +8323,46 @@ mod tests {
             at = id_end;
         }
         assert!(checked >= 1, "expected at least the arrow-end marker");
+    }
+
+    #[test]
+    fn strip_dead_marker_css_prunes_dead_selectors() {
+        // Only arrow-end is defined; the CSS references end/filled/cross/open.
+        let mut svg = String::from(
+            "<svg><defs><marker id=\"arrow-end\"><path/></marker></defs>\
+             <style>\
+marker#arrow-end path,
+marker#arrow-filled path {
+  fill: red;
+}
+marker#arrow-open path {
+  stroke: blue;
+}
+.fm-edge {
+  stroke: black;
+}
+</style>\
+             <path marker-end=\"url(#arrow-end)\"/></svg>",
+        );
+        strip_dead_marker_css(&mut svg);
+        // Live selector kept, dead sibling pruned from the list.
+        assert!(svg.contains("marker#arrow-end path"), "live marker selector dropped");
+        assert!(!svg.contains("marker#arrow-filled"), "dead sibling not pruned");
+        // Whole rule with only a dead marker is removed.
+        assert!(!svg.contains("marker#arrow-open"), "fully-dead rule not removed");
+        // Non-marker rule untouched.
+        assert!(svg.contains(".fm-edge {"), "non-marker rule corrupted");
+        // The live rule still has its body.
+        assert!(svg.contains("fill: red"));
+    }
+
+    #[test]
+    fn edgeless_diagram_drops_all_marker_css() {
+        // A pie chart has no edges -> no markers -> every marker#… rule is dead.
+        let parsed = fm_parser::parse("pie title Pets\n  \"Dogs\": 3\n  \"Cats\": 2\n");
+        let svg = render_svg(&parsed.ir);
+        assert!(!svg.contains("marker#arrow"), "edge-less diagram kept dead marker CSS");
+        assert!(!svg.contains("<marker "), "edge-less diagram kept marker defs");
     }
 
     #[test]
