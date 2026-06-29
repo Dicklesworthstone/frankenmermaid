@@ -3971,31 +3971,40 @@
   incremental rerender beats a full recompute. It does the OPPOSITE, and the gap WIDENS with size:
   - 72 nodes (the checked-in test size): incremental cache-hit **425.6 us** vs full recompute **203.5 us** (2.1x slower)
   - 400 nodes (diagnostic bump, reverted): incremental **2018 us** vs full **503.8 us** (4.0x slower)
-- **Root cause (code-confirmed, `fm-layout/src/lib.rs:2852-2873`):** the memoized cache-hit's only
-  substantial work is `let mut traced = cached.traced.clone();` — a DEEP CLONE of the whole
-  `TracedLayout { layout: DiagramLayout, trace: LayoutTrace }`. `LayoutTrace.snapshots:
-  Vec<LayoutStageSnapshot>` holds a per-stage copy of the layout geometry, so the clone copies the
-  layout data SEVERAL times — heavier than running the (heavily optimized) layout once. The 6 recent
-  `fm-layout` perf wins (obstacle CSR grid, sort-key cache, acyclic SCC fast-path, etc. — recompute
-  for 400 nodes is now only ~503 us) INVERTED the memo's value: recompute is now cheaper than cloning
-  the cached result. The cache-hit overwrites `trace.incremental` anyway (line 2857), so the cloned
-  snapshots are largely dead weight on the hit path.
+- **Root cause (code-confirmed — CORRECTED from an earlier draft of this entry that wrongly blamed
+  the clone/snapshots; `LayoutStageSnapshot` is just 5 `usize` counts, trivially cheap to clone):**
+  the dominant cost is the CACHE-KEY HASH, computed on EVERY engine call *before* the cache check
+  (`fm-layout/src/lib.rs:2850` -> `layout_memo_key` -> `stable_layout_request_hash`, line 3259):
+  ```
+  let descriptor = format!("{ir:?}|{algorithm}|...", ...);   // Debug-format the ENTIRE IR
+  stable_u64_hash(descriptor.as_bytes())                      // scalar byte FNV over all of it
+  ```
+  `format!("{ir:?}")` Debug-renders the whole `MermaidDiagramIr` (all 400 nodes + 800 edges + labels
+  + spans) into one giant heap String, then a scalar FNV loop walks every byte. That is **O(nodes+
+  edges) with a huge constant, run on every cache HIT** — so the "memoized reuse" pays a full
+  IR-Debug-stringify + hash before it can return the cached layout, which is why the hit (425 us @ 72,
+  2018 us @ 400) costs MORE than the now-heavily-optimized full layout (203 us / 503 us). The 6 recent
+  `fm-layout` perf wins made recompute cheap; the Debug-string cache key did not get the same
+  treatment, so the memo inverted to net-negative. (`{:?}` for hashing is a textbook anti-pattern.)
 - **Production impact (NOT test-only):** `fm-wasm/src/lib.rs:1175` holds an `IncrementalLayoutEngine`
   as a struct field and re-renders through it (`:1273`); `fm-render-svg/src/lib.rs:9387` also drives
   it. So interactive browser re-renders — the PRIMARY realistic Mermaid-replacement workload — are
   SLOWER with the memo than without it on any graph >= ~72 nodes.
 - **Why I did not "fix" it here:** (1) the failing test is CORRECT — it catches a real regression;
   hardening/relaxing the timing assertion would MASK a net-negative production feature, so the test
-  must stay as-is. (2) The fix lives in `fm-layout` (an ACTIVE peer's crate — 6 recent commits) and is
-  an architectural trace-semantics decision, not a byte-identical micro-lever; editing it risks
-  conflict and the agent-mail reservation DB is corrupt.
-- **Fix directions (owner's call), in increasing scope:** (a) on cache-hit, clone only `layout` and
-  rebuild a slim `trace` (drop `snapshots`) instead of deep-cloning the whole `TracedLayout` — the
-  hit path already discards the cloned `incremental` field; (b) store the cache in `Arc<TracedLayout>`
-  and return `Arc` (zero-copy) where callers allow; (c) gate the full-clone memo on
-  `cached.recompute_duration_us` exceeding a measured clone-cost floor, falling back to recompute when
-  the layout is cheap (it now usually is) — keep only the selective-subgraph relayout path
-  (`try_incremental_subgraph_relayout`) for the genuine large-edit win.
+  must stay as-is. (2) The fix lives in `fm-layout` (an ACTIVE peer's crate — 6 recent commits, though
+  none touch `stable_layout_request_hash`) and the cache KEY is correctness-sensitive — a hash that
+  drops a layout-relevant field silently returns a STALE layout; editing it warrants the owner's care,
+  and the agent-mail reservation DB is corrupt so I cannot reserve it.
+- **Fix directions (owner's call), in increasing scope/risk — all target the Debug-string cache key:**
+  (a) SAFE & byte-identical: stream the same Debug bytes straight into the FNV hasher via a
+  `fmt::Write` adapter (`write!(hasher, "{ir:?}|…")`) instead of `format!` -> `String` -> byte loop —
+  kills the giant intermediate allocation + second pass with provably identical key values (verify
+  vs the existing incremental cache tests + `:771`); (b) FULL fix: derive/implement `Hash` on the
+  layout-relevant IR fields and feed an `FxHasher` directly (no Debug traversal at all) — fastest, but
+  must capture every field the layout depends on or risk a stale-cache correctness bug; (c) only run
+  the key hash on a cache MISS — keep a cheap incrementally-maintained IR fingerprint on the engine so
+  a hit is O(1). Whichever path, the goal is a cache HIT that is O(1)-ish, not O(nodes+edges)-Debug.
 - **Verdict:** SURFACED as a peer-owned blocker with root cause + measurements + production impact +
   fix menu. Not masked, not unilaterally edited across crate ownership. This is the biggest measured
   internal regression on the board (a landed feature that is net-negative in production).
