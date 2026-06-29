@@ -3937,3 +3937,30 @@
   correctness, not perf — the perf dominance vs Mermaid (~600-3500x across stages) is already decisive.
 
   Agent: cc
+
+### edge_svg accumulator right-sized 384->480 B/edge (pairs with the a11y fix) — sub-noise, KEPT as byte-identical hygiene (2026-06-29)
+- **Lever:** `render_svg_with_config`'s edge accumulator was pre-sized `layout.edges.len() * 384`
+  (lib.rs:2234). The edge a11y restore (`48d1d84`) re-added the `<g id role tabindex>…<title/></g>`
+  group (~130 B/edge), pushing the measured wide-flowchart edge to **~422 B/edge avg** (16x32:
+  405,082 B actual vs 368,640 B capacity) — so the accumulator overflowed and `String` reallocated
+  (one ~370 KB grow+copy) every wide render. Bumped to 480 B/edge so the common wide edge fits in one
+  allocation. **Capacity-only: byte-identical output** (no golden re-bless; `String` capacity ≠ content).
+- **Fresh render profile (16x32, `pipeline_bench wide_stages/render`, dwarf, loaded box):** render is
+  memcpy/alloc-bound — `__memmove/__memcpy_avx_unaligned` **7.0%** (the single biggest self-cost),
+  `cfree`/`_int_malloc`/`malloc`/`realloc`/`_int_free` ~**6.7%** combined. The 7% memcpy is dominated
+  by the INHERENT edge_svg+node_svg accumulator -> final-buffer copy, not by growth reallocs (the
+  final buffer is pre-sized via `layout_svg_capacity_hint`, which over-estimates 777 KB vs 625 KB
+  actual). The one growth realloc that WAS avoidable is this under-sized edge_svg.
+- **Measured (per-crate `frankenmermaid-cli` `pipeline_bench`, `wide_stages/render/16x32`, criterion
+  A/B, same loaded box):** baseline (384) `2.9827 ms`; candidate (480) `2.9835 ms`; change
+  **`[-1.98%, +0.03%, +2.18%]`, p=0.97 — "No change in performance detected."** The eliminated realloc
+  is one ~370 KB memcpy (~37 us) — real but **sub-noise** in a ~3 ms render on this ±2% box.
+- **Original comparator:** unchanged — this is a capacity-only byte-identical change; the render-stage
+  dominance vs Mermaid `11.12.0` (`0.0016x`/`0.0011x`/`0.0008x`, ~600-1200x) is not affected.
+- **Verdict:** KEPT as byte-identical, can't-regress hygiene that right-sizes the accumulator to the
+  post-a11y edge size (reverting would re-introduce a guaranteed realloc/render). NOT claimed as a
+  perf win — the wall-clock effect is sub-noise. The real render memcpy lever (eliminating the
+  accumulator->final copy via streaming serialization) remains a multi-hour, byte-identity-risky
+  document-model refactor, not a 60-min slice — surfaced as the standing render blocker.
+
+  Agent: cc

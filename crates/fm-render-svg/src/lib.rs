@@ -2231,7 +2231,11 @@ fn render_layout_to_svg(
     // Render edges (skip edges absorbed into bundles). Edge subtrees are serialized immediately
     // and inserted as one internal raw fragment so the root document does not retain thousands of
     // short-lived edge element trees until final serialization.
-    let mut edge_svg = String::with_capacity(layout.edges.len().saturating_mul(384));
+    // 480 B/edge, not 384: the per-edge a11y group (`<g id role tabindex>…<title/></g>`) plus the
+    // cubic `d` string average ~422 B/edge on wide flowcharts (measured), so 384 overflowed the
+    // accumulator and forced a ~370 KB realloc+copy every render. 480 keeps the common wide edge
+    // within one allocation. Capacity-only: byte-identical output.
+    let mut edge_svg = String::with_capacity(layout.edges.len().saturating_mul(480));
     for edge_path in &layout.edges {
         if edge_path.bundled {
             continue;
