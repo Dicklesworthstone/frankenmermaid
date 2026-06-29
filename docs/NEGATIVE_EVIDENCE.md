@@ -4926,3 +4926,20 @@
   architectural Element-tree-bypass rewrite (owner-gated). The session's clean win remains FastNode (e52848e).
 
   Agent: cc
+
+### CLOSED: label-intern key-clone lever -- dedup is observable, only hash-dedup preserves it (2026-06-29)
+- The residual parse alloc after FastNode includes `intern_label` cloning the label text for the
+  `label_index_by_text` map key on EVERY label (`key = (text.clone(), segments.clone())`) AND again for
+  `IrLabel.text` -- 2 text allocs/label, both stored (map needs an owned tuple key; tuples can't
+  `Borrow`-lookup by `(&str,&[seg])`, so no borrowed lookup).
+- **"Just skip the dedup" is UNSAFE.** Label dedup is OUTPUT-neutral (two nodes with the same text render
+  identically whether or not they share an `IrLabelId`), BUT it is OBSERVABLE via `ir.labels.len()`:
+  `dot_parser.rs` has multiple `assert_eq!(parsed.ir.labels.len(), 1)` tests, and `fm-layout` sizes
+  capacity hints off `ir.labels.len()`. Removing dedup changes those counts -> breaks tests.
+- **Only viable form = hash-keyed dedup** (`FxHashMap<u64, SmallVec<IrLabelId>>` + compare candidates'
+  `ir.labels[id].text`/`label_markup` against the probe) -- preserves `labels.len()` exactly while dropping
+  the map's text clone (~500 allocs / -11% parse at n=500). But it rewrites core label interning (used by
+  ALL parsers) with collision-comparison logic -> moderate risk for ~2% pipeline. Fails the low-risk bar
+  that FastNode cleared (a drop-in mirror of an existing pattern); this is not. Owner-gated.
+
+  Agent: cc
