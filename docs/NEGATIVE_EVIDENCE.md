@@ -4841,3 +4841,27 @@
   risk/reward bar for an autonomous pass.
 
   Agent: cc
+
+### SURFACED: parse is alloc-count-bound (~11 alloc/node); residual is AST-owned edge endpoints (2026-06-29)
+- **Why look here.** Phase split put parse at 21% of pipeline at n=500 (the 2nd seam after render's
+  exhausted 70%). Counting-allocator probe (default flowchart): n=500 parse = **5554 allocs, 19 reallocs,
+  1.74 MB** (~11 allocs/node; 115x the 15 KB source). Parse is allocation-COUNT bound, not realloc-bound.
+- **Fast paths are already optimized.** `parse_fast_simple_flowchart_node_ast`/`_edge_parts` use byte-level
+  `trim_ascii`, single-scan operator matching (not 6 substring searches), and byte-identical-proof guards
+  -- a prior perf pass already worked this. `intern_node_label` keys an `FxHashMap<String,IrNodeId>` by
+  `&str` and allocates the owned key only on INSERT (new node), so edge-endpoint LOOKUPS don't allocate.
+- **The residual redundant alloc.** The edge fast path (`parse_fast_simple_flowchart_edge_ast`, lines
+  ~1188/1196) builds `FlowAst::Edge` with `from.id = left.to_string()` / `to.id = right.to_string()` --
+  but edge endpoints reference EXISTING nodes, so those owned Strings exist only to be borrowed for an
+  intern lookup, then dropped. ~2 throwaway allocs/edge = ~1000 of the 5554 (~18%) for n=500.
+- **Why not landed.** The parser is two-phase (materialize `Vec<FlowAst>` that OWNS its Strings, then
+  consume), so removing the throwaway endpoint Strings needs a borrowed-lifetime `FlowAst` or a
+  bypass path that interns simple edges straight from the `&str` slices `parse_fast_simple_flowchart_edge_parts`
+  already returns -- an invasive, correctness-risky refactor across the AST. Payoff is bounded: ~18% of
+  parse allocs ≈ ~10% of parse time ≈ ~2% of pipeline (render is 70% and exhausted). Below the
+  risk/reward bar for an autonomous pass; owner-gated.
+- **Verdict.** Cross-subsystem perf frontier now mapped (output / render / layout / parse all assessed):
+  every cheap, byte-identical lever is harvested; every remaining lever is either architectural
+  (render Element-tree rewrite) or an invasive AST refactor (parse) -- both marginal and owner-gated.
+
+  Agent: cc
