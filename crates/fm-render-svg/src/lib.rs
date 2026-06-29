@@ -319,12 +319,43 @@ pub fn render_svg_with_layout(
     layout: &DiagramLayout,
     config: &SvgRenderConfig,
 ) -> String {
-    match config.backend {
+    let mut svg = match config.backend {
         SvgBackend::LegacyLayout => render_layout_to_svg(layout, ir, config),
         SvgBackend::Scene => {
             let scene = build_render_scene(ir, layout);
             render_scene_document_with_ir(&scene, config, Some(ir))
         }
+    };
+    strip_unused_state_css(&mut svg);
+    svg
+}
+
+/// Post-pass: drop the contiguous node-STATE rule region (inactive / block-beta / highlighted /
+/// border-dashed / border-double) from the embedded `<style>` when the rendered BODY uses none of
+/// those state classes. These classes come from classDef / diagram features (not one IR field), so
+/// detection is done on the final SVG body — exact and drift-proof. Safe by construction: no-op if
+/// any state class is used, if the boundary markers are absent (CSS drift), or if the bounded region
+/// is implausibly large (mis-grab guard). Byte-identical rendering — the dropped selectors match
+/// nothing in the body.
+fn strip_unused_state_css(svg: &mut String) {
+    const STATE_CLASSES: [&str; 5] = [
+        "fm-node-inactive",
+        "fm-node-block-beta",
+        "fm-node-highlighted",
+        "fm-node-border-dashed",
+        "fm-node-border-double",
+    ];
+    let body_start = svg.find("</style>").map_or(0, |i| i + "</style>".len());
+    if STATE_CLASSES.iter().any(|c| svg[body_start..].contains(c)) {
+        return;
+    }
+    if let (Some(start), Some(after)) = (
+        svg.find(".fm-node-inactive { opacity:"),
+        svg.find(".fm-cluster { fill-opacity:"),
+    ) && after > start
+        && after - start < 1500
+    {
+        svg.replace_range(start..after, "");
     }
 }
 

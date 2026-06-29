@@ -4427,3 +4427,20 @@
   approach (accents/states by per-element class presence), not an IR flag.
 
   Agent: cc
+
+### KEPT: body-based strip of dead node-state CSS region -- -885 B/diagram, CLI default config (2026-06-29)
+- 5th conditional-CSS strip, a DIFFERENT primitive (body-based post-process, not an IR flag):
+  strip_unused_state_css drops the contiguous node-state rule region (inactive/block-beta/highlighted/
+  border-dashed/border-double ~885 B) from the embedded <style> when the FINAL SVG body uses none of
+  those state classes (they come from classDef/diagram features, not one IR field -- body detection is
+  exact + drift-proof). Safe: no-op if any state class is in the body, markers absent (CSS drift), or
+  the region is >1500 B (mis-grab guard). VERIFIED flowchart_classdef/block_basic KEEP the region.
+- Tangential: the golden test config (inactive_opacity=1.0) does NOT emit the state region, so 0 goldens
+  change (no regression) -- the win is on the CLI DEFAULT config that real renders use; manually verified
+  via CLI. 226 render tests + conformance + clippy pass.
+- CUMULATIVE conditional-CSS dead-weight (cluster 532 + shapes 541 + cluster-vars 262 + edge-style 131
+  + state 885 B): flow_small 14,616 (orig) -> 12,265 = **-2,351 B / -16.1%**. vs mermaid 11.15.0 (16,190 B):
+  output ratio **1.11x -> 1.32x SMALLER**. The fixed CSS overhead, frankenmermaid's only small-diagram
+  weakness vs mermaid, is now substantially closed.
+
+  Agent: cc
