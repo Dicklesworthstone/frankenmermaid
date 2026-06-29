@@ -4961,3 +4961,26 @@
   a perf seam for every benchmarked shape.
 
   Agent: cc
+
+### MEASURED (within-render breakdown): the NODE LOOP is ~43% of the WHOLE pipeline (2026-06-29)
+- Never measured before: instrumented `render_layout_to_svg` sub-phases (warm, 500-node flowchart, perf
+  symbolication was env-blocked so this used direct `Instant` timing instead). Stable warm run:
+  **setup+edges 726 us (~37% of render) / node_loop 1221 us (~62% of render) / finish_serialize 30 us (~1.5%)
+  / total 1977 us.**
+- **The single per-node render loop (`render_node` -> build `<g>/<rect>/<text>/<title>` Element tree ->
+  `write_to_string`) is ~62% of render = ~43% of the ENTIRE pipeline** (render is ~70%). `finish_serialize`
+  (document concatenation of the already-streamed node/edge blobs + CSS) is negligible (~1.5%) -- the
+  pre-sized final buffer + streaming already made document assembly free.
+- **This QUANTIFIES the one remaining lever.** The Element-tree-bypass (have `render_node` write its
+  `<g>…</g>` straight into the buffer using the existing `write_escaped_attr`/`write_fixed2` helpers, instead
+  of materializing 4 transient `Element`s with their attr/children Vecs per node) targets exactly this
+  node_loop. perf put allocation at ~14% of render, so eliminating the per-node Element overhead is
+  plausibly ~10-14% of render = ~7-10% of pipeline -- by far the highest-EV lever in the codebase, an order
+  of magnitude above the parse micro-opts.
+- **Still owner-gated, but now precisely scoped + prioritized.** It is byte-identity-fiddly (must replicate
+  every attribute's exact order/format/conditionals across `g/rect/text/title` -- provable via the 37
+  goldens) and adds a dual-path maintenance cost, so it is a multi-step deliberate refactor, not an
+  autonomous one-shot. RECOMMENDATION for the owner: this node-render direct-serialize bypass is THE perf
+  priority (~7-10% pipeline); parse/layout/output are all <2% and harvested.
+
+  Agent: cc
