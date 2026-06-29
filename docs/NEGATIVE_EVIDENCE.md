@@ -5046,3 +5046,25 @@
   (~1.5%, negligible) + the per-element compute the Element-tree bypass would target (owner-gated).
 
   Agent: cc
+
+### MEASURED: the render-parallel landings SHIFTED the bottleneck -- parse is now the biggest serial gap (2026-06-29)
+- Re-measured the pipeline phase split after the node+edge parallel landings (large flowchart, deterministic
+  timing): n=500 **parse 33% / layout 9% / render 58%**; n=1000 **parse 39% / layout 10% / render 51%**.
+  Render (now parallel) shrank from ~70% to ~55%; **parse grew 21% -> 33-39%** -- the biggest SERIAL gap.
+- **Why parse is NOT the next clean autonomous lever (unlike nodes/edges):** the render loops were
+  embarrassingly parallel -- `render_node`/`render_edge` are PURE, simple loops. The document parser is
+  STATEFUL: it tracks subgraph nesting via recursion, accumulates warnings + line numbers, and the
+  line->`FlowDocumentItem`->intern pipeline mutates shared IR-builder state (intern maps, `ir.nodes`).
+  Parallel line-parse is only sound for FLAT (subgraph-free) flowcharts and needs a flat-detect special
+  case + ordered borrowed-item merge + warning coordination -- a correctness-critical, intricate change to
+  the parser, not a clean drop-in. Owner-gated.
+- **Remaining render (~55%, parallel):** thread count already = available cores (capped 8, no
+  oversubscription); the serial remainder is theme/setup + doc assembly (~few %) + the per-element COMPUTE
+  inside the parallel chunks, which only the Element-tree-bypass would cut (owner-gated). Layout (9%) is
+  cheap. More cores would help large diagrams further (the speedup already scales: -25% at n=500 -> -59%+
+  at n=1000).
+- **Verdict.** The four landed wins (FastNode, lazy Attributes, parallel node + edge rendering) harvested
+  every clean autonomous lever; the post-shift gaps (parse stateful-parallelization, render Element-bypass)
+  are both owner-gated. `nproc` on this box recorded below for the parallel-speedup context.
+
+  Agent: cc
