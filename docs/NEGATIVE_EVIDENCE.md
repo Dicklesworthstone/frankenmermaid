@@ -4511,3 +4511,27 @@
   The attr_owned alloc win (-5.3%, the name format! + value clone) was the real, measurable span-path lever.
 
   Agent: cc
+
+### FRONTIER + BLOCKER: measurable render-perf levers exhausted; box-load blocks the remaining sub-noise micros (2026-06-29)
+- **Measurable, non-owner-gated render levers are harvested.** The span `attr_owned` win (37744b0,
+  render_spans_on -5.3%) was the last lever that cleared the noise floor -- it removed 2 allocs/element
+  x ~1500 (the `format!("data-{name}")` name + the value clone), a large enough aggregate to measure.
+- **The remaining default-render targets are all SUB-NOISE per-element `format!` micros, do-not-retry:**
+  `Span::compact_display` (6 ints, reverted 4e408c6 -- byte-identical but unmeasurable + sub-noise),
+  `a11y::describe_node` (`format!("Node: {label}, {shape}")`, 1 alloc) and `describe_edge` (same class).
+  These are the exact pattern the earlier `write_int`/itoa rejection found sub-noise: one small String +
+  the Formatter machinery per call. Not worth landing unmeasured. `apply_source_metadata`'s
+  `data("fm-source-{kind,index}")` `format!`-name is SCENE-path only (default backend is LegacyLayout,
+  lib.rs:231) -- not in the benched/default render, so adding them to `static_data_attr_name` is moot here.
+- **BLOCKER (infra): the box is too loaded to A/B sub-10% levers.** Load 1-min 61 / 5-min 66 this turn
+  (it spiked 23->70->61). Per the noise-floor methodology a sub-7% lever needs near-idle (load <~3); at
+  load 60+ the render bench reads +-50-72% off identical code (observed: the compact_display A/B read
+  +72% from a low-load baseline). So even the sub-noise micros cannot be cleanly measured now.
+- **Standing (closed):** frankenmermaid dominates mermaid.js 11.15.0 on BOTH axes across every measured
+  workload -- ~758x faster (time) everywhere; output smaller everywhere incl. sequence in lean mode
+  (1.001x, closed by the CSS dead-weight wins). Remaining gaps are owner product defaults (CLI
+  source-spans-on-for-SVG; A11yConfig::full; font @import) -- not byte-identical levers.
+- **Next perf work needs a QUIET box** (re-measure the sub-noise micros only if load <3, expect ~0), or
+  the project is at its optimization frontier -- re-task to a project not already dominant on both axes.
+
+  Agent: cc
