@@ -4633,3 +4633,31 @@
   is now fully harvested. CSS-strip residual on the marker axis is zero (invariant-proven).
 
   Agent: cc
+
+### SELF-CAUGHT + FIXED: size-guard the 3 output post-passes -- they regressed render +24-55% (2026-06-29)
+- **Self-caught regression (the state-css lesson again, applied to my own turn).** After landing the
+  three output post-passes (CSS minify 8a11dd1, marker-def strip 145e03f, marker-CSS prune 0a08325) I
+  A/B-benched `render_svg/flowchart` (same build, env-gated passes ON vs OFF, criterion, p=0.00):
+  | size | OFF (no passes) | ON (3 passes) | regression |
+  |------|-----------------|---------------|------------|
+  | small_10 | 105.8 us | 164.5 us | **+54.7%** |
+  | medium_100 | 527 us | 657 us | **+23.7%** |
+  | large_500 | 1.98 ms | 2.72 ms | **+37.5%** |
+  The passes each walk the SVG and rebuild a buffer; on a LARGE render the byte win is <0.5% (geometry
+  dominates) while the rebuilds cost +37% -- a clear net-negative, exactly the `strip_unused_state_css`
+  size-guard lesson (70eafde). On SMALL the win is a meaningful 4-10% (fixed CSS + the 12-marker set
+  dominate small output) for a small ABSOLUTE cost (+58 us; render stays ~107x faster than mermaid's ~17 ms).
+- **Fix:** gate all three post-passes behind `if svg.len() <= 100_000` in the render funnel (the same
+  threshold `strip_unused_state_css` self-guards at), so large renders take the fast path. **0 of the 37
+  goldens exceed 100 KB** (largest = stress_120 at 87,854 B), so the guard changes NO checked-in output
+  -- every golden keeps its minified + marker-stripped form; conformance + 232 lib tests stay GREEN with
+  no re-bless. large_500 returns to the no-pass baseline (the residual A/B delta is run noise, wide CI).
+- **Honest accounting of the kept tradeoff:** on small/medium (the realistic diagram sizes, all the
+  goldens) the post-passes still cost render time (+13-55%) to buy the 4-10% output reduction. This is a
+  deliberate trade on the axis where frankenmermaid was WEAKEST vs mermaid (output bytes -- it actually
+  LOST sequence) spent from its ~100-750x TIME cushion; fm still dominates BOTH axes after it. The guard
+  removes the one regime (large) where the trade went net-negative. Not a free win -- a measured, bounded one.
+- **Verdict:** KEPT & LANDED. Closes the turn's output-lever arc: 3 wins + a measured self-guard so the
+  wins never cost more than they save. ALWAYS bench render time after adding an output post-process.
+
+  Agent: cc

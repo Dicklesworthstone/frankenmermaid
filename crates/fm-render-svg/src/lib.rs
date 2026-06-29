@@ -327,9 +327,19 @@ pub fn render_svg_with_layout(
         }
     };
     strip_unused_state_css(&mut svg);
-    strip_unused_markers(&mut svg);
-    strip_dead_marker_css(&mut svg);
-    minify_style_block(&mut svg);
+    // The output post-passes below (marker-def strip, dead-marker-CSS prune, CSS minify) each walk
+    // the SVG and rebuild a buffer. On a SMALL/MEDIUM diagram that is cheap and the byte win is a
+    // meaningful fraction (the fixed CSS + the 12-marker set dominate small output). On a LARGE
+    // render the output saving is <0.5% (the geometry dominates) while the rebuilds add measurable
+    // render time — a measured net-negative (render_svg/large_500 regressed ~+37% with them on). Cap
+    // the work to the size range where the win clears the cost, exactly like `strip_unused_state_css`
+    // (which self-guards at the same threshold). No golden exceeds this cap, so output is unchanged
+    // for every checked-in case.
+    if svg.len() <= 100_000 {
+        strip_unused_markers(&mut svg);
+        strip_dead_marker_css(&mut svg);
+        minify_style_block(&mut svg);
+    }
     svg
 }
 
