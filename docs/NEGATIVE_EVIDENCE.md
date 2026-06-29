@@ -4710,3 +4710,25 @@
   irreducible without an output change or a major rewrite -- do-not-retry the minify micro-opt.
 
   Agent: cc
+
+### KEPT (hygiene, NOT a perf claim): theme CSS written into the buffer -- removes per-render temp allocs (2026-06-29)
+- **Different primitive (allocation hygiene, render path).** `ThemeColors::to_css_vars` and
+  `FontConfig::to_css` built their CSS with `css.push_str(&format!("...", x))` per declaration -- the
+  `clippy::format_push_string` anti-pattern: each line allocates a throwaway `String`, and the whole
+  block is then returned as an intermediate `String` and `push_str`-copied into the stylesheet by
+  `to_svg_style`. Replaced with `write_css_vars(&mut String)` / `write_css(&mut String)` that
+  `writeln!` straight into the caller's buffer (the public `to_css_vars`/`to_css` stay as thin
+  wrappers for their tests). Removes ~11 temp `String`s + 2 intermediate `String`s + 2 copies per render.
+- **Byte-IDENTICAL (proven):** 232 fm-render-svg lib tests (incl. the theme tests that assert
+  `to_css_vars`/`to_css` output) and golden_svg pass with **no re-bless** -- zero output bytes changed.
+  clippy-clean (`writeln!` not `write!`+`\n`); strictly fewer allocations so it can-not-regress.
+- **Honest measurement note:** the render_svg A/B was LOAD-CONTAMINATED and discarded -- "with" sampled
+  small_10 at 260 us during a box-load spike vs ~105-169 us in every other run, so criterion read a
+  nonsensical -36% on can-not-regress code. NOT claimed as a timing win; the box (load 15-100, swinging)
+  cannot A/B a once-per-render alloc delta. KEPT purely as byte-identical, can-not-regress allocation
+  hygiene that also clears the `format_push_string` anti-pattern -- same disposition as the edge_svg
+  right-size KEEP (byte-identical hygiene, sub-noise wall-clock, not a claimed win).
+- **Verdict:** KEPT as hygiene (conformance GREEN, no re-bless, can-not-regress). Pre-existing
+  `needless_range_loop` in `strip_unused_state_css`'s accent loop is unrelated (untouched committed code).
+
+  Agent: cc

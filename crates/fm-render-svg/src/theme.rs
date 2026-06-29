@@ -375,22 +375,27 @@ impl ThemeColors {
     #[must_use]
     pub fn to_css_vars(&self) -> String {
         let mut css = String::with_capacity(512);
+        self.write_css_vars(&mut css);
+        css
+    }
+
+    /// Write the `:root` custom-property block directly into `css`. Byte-identical to
+    /// [`Self::to_css_vars`] but writes straight into the caller's buffer, avoiding a temp `String`
+    /// per declaration (the `push_str(&format!(..))` anti-pattern) plus the intermediate `String`
+    /// and its copy when the render funnel composes the full stylesheet.
+    pub(crate) fn write_css_vars(&self, css: &mut String) {
         css.push_str(":root {\n");
-        css.push_str(&format!("  --fm-bg: {};\n", self.background));
-        css.push_str(&format!("  --fm-text-color: {};\n", self.text));
-        css.push_str(&format!("  --fm-node-fill: {};\n", self.node_fill));
-        css.push_str(&format!("  --fm-node-stroke: {};\n", self.node_stroke));
-        css.push_str(&format!("  --fm-edge-color: {};\n", self.edge));
-        css.push_str(&format!("  --fm-cluster-fill: {};\n", self.cluster_fill));
-        css.push_str(&format!(
-            "  --fm-cluster-stroke: {};\n",
-            self.cluster_stroke
-        ));
+        let _ = writeln!(css, "  --fm-bg: {};", self.background);
+        let _ = writeln!(css, "  --fm-text-color: {};", self.text);
+        let _ = writeln!(css, "  --fm-node-fill: {};", self.node_fill);
+        let _ = writeln!(css, "  --fm-node-stroke: {};", self.node_stroke);
+        let _ = writeln!(css, "  --fm-edge-color: {};", self.edge);
+        let _ = writeln!(css, "  --fm-cluster-fill: {};", self.cluster_fill);
+        let _ = writeln!(css, "  --fm-cluster-stroke: {};", self.cluster_stroke);
         for (i, accent) in self.accents.iter().enumerate() {
-            css.push_str(&format!("  --fm-accent-{}: {};\n", i + 1, accent));
+            let _ = writeln!(css, "  --fm-accent-{}: {};", i + 1, accent);
         }
         css.push_str("}\n");
-        css
     }
 }
 
@@ -424,23 +429,29 @@ impl FontConfig {
     #[must_use]
     pub fn to_css(&self) -> String {
         let mut css = String::with_capacity(256);
+        self.write_css(&mut css);
+        css
+    }
 
+    /// Write the `.fm-text` font block (and optional `@import`) directly into `css`. Byte-identical
+    /// to [`Self::to_css`]; writes straight into the caller's buffer to avoid the temp `String` per
+    /// declaration and the intermediate `String` + copy on the render path.
+    pub(crate) fn write_css(&self, css: &mut String) {
         // Embed web font if provided
         if let Some(url) = &self.web_font_url {
-            let sanitized: String = url
-                .chars()
-                .filter(|&c| c != '\'' && c != ')' && c != '\\' && c != '"')
-                .collect();
-            css.push_str(&format!("@import url('{sanitized}');\n"));
+            css.push_str("@import url('");
+            css.extend(
+                url.chars()
+                    .filter(|&c| c != '\'' && c != ')' && c != '\\' && c != '"'),
+            );
+            css.push_str("');\n");
         }
 
         css.push_str(".fm-text {\n");
-        css.push_str(&format!("  font-family: {};\n", self.family));
-        css.push_str(&format!("  font-size: {}px;\n", self.size));
-        css.push_str(&format!("  font-weight: {};\n", self.weight));
+        let _ = writeln!(css, "  font-family: {};", self.family);
+        let _ = writeln!(css, "  font-size: {}px;", self.size);
+        let _ = writeln!(css, "  font-weight: {};", self.weight);
         css.push_str("}\n");
-
-        css
     }
 }
 
@@ -467,8 +478,8 @@ impl Theme {
     #[must_use]
     pub fn to_svg_style(&self, shadows: bool, has_edge_labels: bool) -> String {
         let mut css = String::with_capacity(4096);
-        css.push_str(&self.colors.to_css_vars());
-        css.push_str(&self.font.to_css());
+        self.colors.write_css_vars(&mut css);
+        self.font.write_css(&mut css);
 
         let shadow_filter = if shadows {
             "filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.10)) drop-shadow(0 1px 3px rgba(0, 0, 0, 0.06));"
