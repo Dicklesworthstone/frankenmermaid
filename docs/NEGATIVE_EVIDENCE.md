@@ -5651,3 +5651,31 @@
   `outgoing` (~512, prior-dropped ~0-gain) + node-sizing/flat Vecs -- output or genuinely marginal.
 
   Agent: cc
+
+### LANDED: simplify_polyline compacts in place -- layout allocs -16% (2026-06-30)
+- With render down to per-diagram overhead (281) and parse at the IR floor (1608), LAYOUT (3319) is the
+  dominant wide alloc phase. Bucketed: 32-47 bucket = 2062, more than edge points (~960) + recycled
+  `outgoing` (~512) explain. Root: `simplify_polyline(points: Vec) -> Vec` allocated a SECOND `Vec`
+  (`simplified`) per multi-point edge and dropped the routed input -- ~1 extra heap alloc per >2-point edge.
+- **Fix (LANDED):** compact IN PLACE with a write cursor `w` (the routed `Vec` is reused + truncated),
+  no second allocation. `LayoutPoint` is `Copy` and `w <= r` always, so reading `points[r]` after writing
+  the compacted prefix `points[..w]` never aliases. Byte-identical: same consecutive-duplicate skip + same
+  axis-aligned-collinear middle removal (overwrite `points[w-2]=c; w-=1` == `simplified.remove(len-2)`), same
+  order. NO public-API change, NO new dependency, single function.
+- **MEASURED (deterministic counting-allocator A/B, load-immune):** layout allocs
+  wide_16x32 **3319 -> 2793 (-15.8%)** (~526 per-edge intermediate Vecs removed), wide_8x16 886 -> 746
+  (-15.8%). **SESSION layout total: 4279 (ORIG) -> 2793 = -34.7%.**
+- **Byte-identical & POSITION-PRESERVING:** `layout_golden_checksums_are_stable` +
+  `layout_golden_cases_are_deterministic_across_runs` (the layout POSITION checksums) +
+  `franken_tui_fixture_cases` + `svg_golden_snapshots_are_stable` GREEN with NO re-bless; 428 fm-layout lib
+  tests pass; clippy `-D warnings` clean.
+- **Verdict: LANDED.** A genuinely CONTAINED layout lever (the `build_..._fragment -> String` and
+  `Vec<Vec>` patterns were exhausted; this is the "transform `Vec -> Vec` that builds a new collection ->
+  do it in place with a write cursor" pattern). Distinct from the BLOCKED levers: the remaining big layout
+  chunks -- edge `points` Vecs (output; SmallVec/CSR would be a BREAKING public-API change + new dep =
+  owner decision) and `node_id` (golden-serialized; needs DiagramLayout-borrows-IR or interning) and
+  `outgoing` (freed-early/recycled = prior-dropped ~0-gain) -- are all owner-level/architectural, NOT
+  contained autonomous levers. SESSION TOTAL 14 wins: wide_16x32 pipeline allocs render 19225->281 + parse
+  5577->1608 + layout 4279->2793 = ~29081->4682 (-84%).
+
+  Agent: cc

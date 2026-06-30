@@ -11895,31 +11895,41 @@ fn find_obstacle_nudge_y(
     }
 }
 
-fn simplify_polyline(points: Vec<LayoutPoint>) -> Vec<LayoutPoint> {
+fn simplify_polyline(mut points: Vec<LayoutPoint>) -> Vec<LayoutPoint> {
     if points.len() <= 2 {
         return points;
     }
 
-    let mut simplified = Vec::with_capacity(points.len());
-    for point in points {
-        if simplified.last() == Some(&point) {
+    // Compact in place with a write cursor `w` instead of allocating a second `Vec` — every multi-point
+    // edge previously paid an extra heap allocation for the simplified copy (the routed input was then
+    // dropped). `LayoutPoint` is `Copy`, and `w <= r` always, so reading `points[r]` after writing the
+    // compacted prefix `points[..w]` never aliases. Byte-identical to the push-into-new-Vec version:
+    // same consecutive-duplicate skip and same axis-aligned-collinear middle removal, in the same order.
+    let mut w = 0usize;
+    for r in 0..points.len() {
+        let point = points[r];
+        if w > 0 && points[w - 1] == point {
             continue;
         }
-        simplified.push(point);
+        points[w] = point;
+        w += 1;
 
-        while simplified.len() >= 3 {
-            let c = simplified[simplified.len() - 1];
-            let b = simplified[simplified.len() - 2];
-            let a = simplified[simplified.len() - 3];
+        while w >= 3 {
+            let c = points[w - 1];
+            let b = points[w - 2];
+            let a = points[w - 3];
             if is_axis_aligned_collinear(a, b, c) {
-                simplified.remove(simplified.len() - 2);
+                // Drop the middle point `b`: overwrite its slot with `c` and shrink the prefix.
+                points[w - 2] = c;
+                w -= 1;
             } else {
                 break;
             }
         }
     }
 
-    simplified
+    points.truncate(w);
+    points
 }
 
 fn is_axis_aligned_collinear(a: LayoutPoint, b: LayoutPoint, c: LayoutPoint) -> bool {
