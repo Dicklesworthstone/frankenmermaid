@@ -86,6 +86,66 @@ impl NodeIdIndex {
     }
 }
 
+/// Label-dedup index that keys by the FxHash of `(text, segments)` instead of storing an owned
+/// `(String, Vec<IrLabelSegment>)` key. The label text is already owned in `ir.labels[id].text` and the
+/// segments in `ir.label_markup[id]`; the previous `FxHashMap<(String, Vec<_>), _>` cloned BOTH a second
+/// time per distinct label purely for the dedup key. Keying by hash removes those clones; lookups verify
+/// the candidate against `ir.labels`/`ir.label_markup` so a hash collision can never dedup two distinct
+/// labels together (collisions land in `Many`). Never iterated, so hash-keying is determinism-safe.
+#[derive(Default)]
+struct LabelIndex {
+    buckets: FxHashMap<u64, LabelBucket>,
+}
+
+enum LabelBucket {
+    One(IrLabelId),
+    Many(Vec<IrLabelId>),
+}
+
+impl LabelIndex {
+    fn hash_key(text: &str, segments: &[IrLabelSegment]) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = rustc_hash::FxHasher::default();
+        text.hash(&mut hasher);
+        segments.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn get(
+        &self,
+        text: &str,
+        segments: &[IrLabelSegment],
+        labels: &[IrLabel],
+        markup: &BTreeMap<IrLabelId, Vec<IrLabelSegment>>,
+    ) -> Option<IrLabelId> {
+        let matches = |lid: &IrLabelId| {
+            labels.get(lid.0).is_some_and(|label| label.text == text)
+                && markup.get(lid).map_or(&[][..], Vec::as_slice) == segments
+        };
+        match self.buckets.get(&Self::hash_key(text, segments))? {
+            LabelBucket::One(lid) => matches(lid).then_some(*lid),
+            LabelBucket::Many(candidates) => candidates.iter().copied().find(|lid| matches(lid)),
+        }
+    }
+
+    /// Record `label_id` for `(text, segments)`. Callers guarantee the pair is not already present
+    /// (`intern_label` checks `get` first), so an occupied slot is always a hash COLLISION.
+    fn insert(&mut self, text: &str, segments: &[IrLabelSegment], label_id: IrLabelId) {
+        let hash = Self::hash_key(text, segments);
+        match self.buckets.get_mut(&hash) {
+            None => {
+                self.buckets.insert(hash, LabelBucket::One(label_id));
+            }
+            Some(LabelBucket::One(existing)) => {
+                let existing = *existing;
+                self.buckets
+                    .insert(hash, LabelBucket::Many(vec![existing, label_id]));
+            }
+            Some(LabelBucket::Many(candidates)) => candidates.push(label_id),
+        }
+    }
+}
+
 pub struct IrBuilder {
     ir: MermaidDiagramIr,
     // Lookups for uniqueness. These are read by key only (never iterated), so a hash
@@ -94,7 +154,7 @@ pub struct IrBuilder {
     node_id_index: NodeIdIndex,
     cluster_index_by_key: FxHashMap<String, usize>,
     subgraph_index_by_key: FxHashMap<String, usize>,
-    label_index_by_text: FxHashMap<(String, Vec<IrLabelSegment>), IrLabelId>,
+    label_index: LabelIndex,
 
     warnings: Vec<String>,
     /// Track nodes that were auto-created (for dangling edge recovery)
@@ -138,7 +198,7 @@ impl IrBuilder {
             node_id_index: NodeIdIndex::default(),
             cluster_index_by_key: FxHashMap::default(),
             subgraph_index_by_key: FxHashMap::default(),
-            label_index_by_text: FxHashMap::default(),
+            label_index: LabelIndex::default(),
             warnings: Vec::new(),
             auto_created_nodes: Vec::new(),
             activation_stacks: BTreeMap::new(),
@@ -164,7 +224,7 @@ impl IrBuilder {
             node_id_index: NodeIdIndex::default(),
             cluster_index_by_key: FxHashMap::default(),
             subgraph_index_by_key: FxHashMap::default(),
-            label_index_by_text: FxHashMap::default(),
+            label_index: LabelIndex::default(),
             warnings: Vec::new(),
             auto_created_nodes: Vec::new(),
             activation_stacks: BTreeMap::new(),
@@ -1341,8 +1401,12 @@ impl IrBuilder {
     }
 
     fn intern_label(&mut self, label: &ParsedLabel, span: Span) -> IrLabelId {
-        let key = (label.text.clone(), label.segments.clone());
-        if let Some(&existing_id) = self.label_index_by_text.get(&key) {
+        if let Some(existing_id) = self.label_index.get(
+            &label.text,
+            &label.segments,
+            &self.ir.labels,
+            &self.ir.label_markup,
+        ) {
             return existing_id;
         }
 
@@ -1356,7 +1420,8 @@ impl IrBuilder {
                 .label_markup
                 .insert(label_id, label.segments.clone());
         }
-        self.label_index_by_text.insert(key, label_id);
+        self.label_index
+            .insert(&label.text, &label.segments, label_id);
         label_id
     }
 }

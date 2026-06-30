@@ -5529,3 +5529,31 @@
   the duplicate clone with no contract change, when the map is never iterated.
 
   Agent: cc
+
+### LANDED: label-dedup index keyed by hash, not a cloned (String, Vec) -- parse allocs -24% more (2026-06-29)
+- Applies the same contained hash-index pattern proven on node ids (7ccbc49) to the label dedup map.
+  `intern_label` built `key = (label.text.clone(), label.segments.clone())` per distinct label and stored it
+  as the `label_index_by_text: FxHashMap<(String, Vec<IrLabelSegment>), IrLabelId>` key -- DUPLICATING the
+  label text already owned in `ir.labels[id].text` (and segments in `ir.label_markup[id]`). The dedup-map
+  keys accumulate through lowering, so it was a real per-label allocation.
+- **Fix (LANDED):** replace with a `LabelIndex` keyed by the `u64` FxHash of `(text, segments)`
+  (`enum LabelBucket { One | Many }`). No owned key stored. Lookups VERIFY the candidate against
+  `ir.labels[..].text` AND `ir.label_markup` so a hash collision can never dedup two distinct labels
+  together (collisions -> `Many`); inserts are dedup-guarded by `intern_label`'s own `get` check (occupied =
+  collision). Never iterated -> determinism-safe.
+- **MEASURED (deterministic counting-allocator A/B, load-immune):** parse allocs
+  wide_16x32 **2120 -> 1608 (-24.2%)** (the 512 label-text map-key clones removed), wide_8x16 576 -> 448
+  (-22.2%). **SESSION parse total: 5577 (ORIG) -> 1608 = -71%** across the 4 parse wins (staging Vec,
+  split_statements, node-id index, label index).
+- **Byte-identical & safe:** `franken_tui_fixture_cases` (parse corpus) + `layout_golden_checksums_are_stable`
+  (IR->layout byte-identity, IR/label-dedup unchanged) + `svg_golden_snapshots_are_stable` GREEN with NO
+  re-bless; 405 fm-parser lib tests pass; clippy `-D warnings` clean. Single-site change (intern_label) plus
+  the field/init; no external callers (label_index_by_text was private to intern_label).
+- **Verdict: LANDED.** Second application of the hash-index pattern. The remaining wide_16x32 parse allocs
+  (~1608) are now the genuinely-needed IR-owned id/label Strings (~512 node.id + ~512 label.text) + segment
+  markup + misc -- the IR-OWNERSHIP floor, this time truly (the two duplicate lookup-map keys are both gone).
+  cluster_index_by_key / subgraph_index_by_key still clone keys but are tiny (few clusters/subgraphs, not
+  per-node) -- below the bar. PATTERN CONFIRMED twice: a never-iterated `HashMap<OwnedKey,_>` lookup index
+  whose key duplicates an already-owned value -> u64-hash-keyed index with verify-on-lookup, no contract change.
+
+  Agent: cc
