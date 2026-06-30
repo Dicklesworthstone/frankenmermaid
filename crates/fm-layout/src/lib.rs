@@ -6986,11 +6986,36 @@ fn finalize_specialized_layout(
 #[derive(Debug, Clone)]
 struct TreeLayoutStructure {
     roots: Vec<usize>,
-    children: Vec<Vec<usize>>,
+    children: TreeChildren,
     depth: Vec<usize>,
     max_depth: usize,
     horizontal_depth_axis: bool,
     reverse_depth_axis: bool,
+}
+
+/// CSR (compressed-sparse-row) adjacency for the layout tree's children: one flat `Vec<usize>` holding
+/// every node's children contiguously, plus per-node `start`/`len`, instead of a `Vec<Vec<usize>>` that
+/// heap-allocated a separate inner `Vec` per node (one live allocation per node through the whole
+/// tree-positioning phase). `of(node)` returns the child slice; all consumers only read it as a slice
+/// (`.iter()`/`.len()`/`.is_empty()`/index), so the swap is purely an allocation change. The BFS builds it
+/// in the same order the per-node `Vec`s were filled (children pushed contiguously when a node is
+/// dequeued, then each segment sorted in place by id), so layout output is byte-identical (golden-pinned).
+#[derive(Default, Debug, Clone)]
+struct TreeChildren {
+    flat: Vec<usize>,
+    start: Vec<usize>,
+    len: Vec<usize>,
+}
+
+impl TreeChildren {
+    fn of(&self, node: usize) -> &[usize] {
+        let start = self.start[node];
+        &self.flat[start..start + self.len[node]]
+    }
+
+    fn node_count(&self) -> usize {
+        self.start.len()
+    }
 }
 
 fn build_tree_layout_structure(ir: &MermaidDiagramIr) -> TreeLayoutStructure {
@@ -7001,7 +7026,7 @@ fn build_tree_layout_structure(ir: &MermaidDiagramIr) -> TreeLayoutStructure {
     if node_count == 0 {
         return TreeLayoutStructure {
             roots: Vec::new(),
-            children: Vec::new(),
+            children: TreeChildren::default(),
             depth: Vec::new(),
             max_depth: 0,
             horizontal_depth_axis,
@@ -7055,7 +7080,11 @@ fn build_tree_layout_structure(ir: &MermaidDiagramIr) -> TreeLayoutStructure {
 
     let mut visited = vec![false; node_count];
     let mut depth = vec![0_usize; node_count];
-    let mut children = vec![Vec::new(); node_count];
+    let mut children = TreeChildren {
+        flat: Vec::new(),
+        start: vec![0_usize; node_count],
+        len: vec![0_usize; node_count],
+    };
     let mut roots = Vec::new();
 
     for candidate in candidate_roots
@@ -7076,20 +7105,27 @@ fn build_tree_layout_structure(ir: &MermaidDiagramIr) -> TreeLayoutStructure {
             queue_index = queue_index.saturating_add(1);
             let child_depth = depth[node].saturating_add(1);
 
+            // Children are appended contiguously while `node` is being processed, so a single flat `Vec`
+            // + per-node start/len reproduces the old per-node `Vec` exactly (CSR).
+            children.start[node] = children.flat.len();
             for &child in &outgoing[node] {
                 if visited[child] {
                     continue;
                 }
                 visited[child] = true;
                 depth[child] = child_depth;
-                children[node].push(child);
+                children.flat.push(child);
                 queue.push(child);
             }
+            children.len[node] = children.flat.len() - children.start[node];
         }
     }
 
-    for node_children in &mut children {
-        node_children.sort_by(&cmp_by_id);
+    // Sort each node's child segment in place — byte-identical to sorting the old per-node `Vec`s.
+    for node in 0..node_count {
+        let start = children.start[node];
+        let end = start + children.len[node];
+        children.flat[start..end].sort_by(&cmp_by_id);
     }
 
     let max_depth = depth.iter().copied().max().unwrap_or(0);
@@ -7105,12 +7141,12 @@ fn build_tree_layout_structure(ir: &MermaidDiagramIr) -> TreeLayoutStructure {
 
 fn compute_tree_subtree_spans(
     roots: &[usize],
-    children: &[Vec<usize>],
+    children: &TreeChildren,
     node_span_sizes: &[f32],
     spacing: LayoutSpacing,
     memo: &mut [Option<f32>],
 ) {
-    let node_count = children.len();
+    let node_count = children.node_count();
     let mut post_order = Vec::with_capacity(node_count);
 
     let mut state = vec![0_u8; node_count];
@@ -7123,7 +7159,7 @@ fn compute_tree_subtree_spans(
         state[start_node] = 1;
 
         while let Some((node, child_idx)) = stack.pop() {
-            let node_children = &children[node];
+            let node_children = children.of(node);
             if child_idx < node_children.len() {
                 stack.push((node, child_idx + 1));
                 let child = node_children[child_idx];
@@ -7144,14 +7180,15 @@ fn compute_tree_subtree_spans(
         }
 
         let own_span = node_span_sizes[node].max(1.0);
-        let child_span_total = if children[node].is_empty() {
+        let node_children = children.of(node);
+        let child_span_total = if node_children.is_empty() {
             0.0
         } else {
-            let subtree_span_sum: f32 = children[node]
+            let subtree_span_sum: f32 = node_children
                 .iter()
                 .map(|child| memo[*child].unwrap_or(0.0))
                 .sum();
-            let gaps = spacing.node_spacing * (children[node].len().saturating_sub(1) as f32);
+            let gaps = spacing.node_spacing * (node_children.len().saturating_sub(1) as f32);
             subtree_span_sum + gaps
         };
 
@@ -7162,7 +7199,7 @@ fn compute_tree_subtree_spans(
 
 fn compute_all_tree_span_centers(
     roots: &[usize],
-    children: &[Vec<usize>],
+    children: &TreeChildren,
     subtree_spans: &[f32],
     spacing: LayoutSpacing,
     out_centers: &mut [f32],
@@ -7180,20 +7217,21 @@ fn compute_all_tree_span_centers(
         let subtree_span = subtree_spans[node];
         out_centers[node] = span_start + (subtree_span / 2.0);
 
-        if children[node].is_empty() {
+        let node_children = children.of(node);
+        if node_children.is_empty() {
             continue;
         }
 
         let child_total: f32 = spacing.node_spacing.mul_add(
-            children[node].len().saturating_sub(1) as f32,
-            children[node]
+            node_children.len().saturating_sub(1) as f32,
+            node_children
                 .iter()
                 .map(|child| subtree_spans[*child])
                 .sum::<f32>(),
         );
         let mut child_cursor = span_start + ((subtree_span - child_total) / 2.0);
 
-        for &child in &children[node] {
+        for &child in node_children {
             queue.push((child, child_cursor));
             child_cursor += subtree_spans[child] + spacing.node_spacing;
         }
@@ -7304,17 +7342,18 @@ fn node_boxes_from_centers(
 
 fn radial_leaf_count(
     node_index: usize,
-    children: &[Vec<usize>],
+    children: &TreeChildren,
     memo: &mut [Option<usize>],
 ) -> usize {
     if let Some(cached) = memo[node_index] {
         return cached;
     }
 
-    let count = if children[node_index].is_empty() {
+    let node_children = children.of(node_index);
+    let count = if node_children.is_empty() {
         1
     } else {
-        children[node_index]
+        node_children
             .iter()
             .map(|child| radial_leaf_count(*child, children, memo))
             .sum::<usize>()
@@ -7337,7 +7376,7 @@ fn assign_radial_angles(
     spacing: LayoutSpacing,
     angles: &mut [f32],
 ) {
-    let children = &tree.children[node_index];
+    let children = tree.children.of(node_index);
     if children.is_empty() {
         angles[node_index] = f32::midpoint(start_angle, end_angle);
         return;

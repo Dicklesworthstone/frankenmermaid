@@ -5557,3 +5557,35 @@
   whose key duplicates an already-owned value -> u64-hash-keyed index with verify-on-lookup, no contract change.
 
   Agent: cc
+
+### LANDED: tree children adjacency as CSR (one flat Vec, not per-node Vec) -- layout allocs -12% (2026-06-29)
+- After the parse hash-index wins flipped layout to the largest wide alloc phase (3767), re-attacked it.
+  Phase-bisect confirmed: edge routing is clean (obstacle set/index built ONCE, per-edge alloc is just the
+  OUTPUT `points` vec!). The dominant non-output, non-recycled layout alloc is `build_tree_layout_structure`'s
+  `children: Vec<Vec<usize>>` -- one heap `Vec` per node, LIVE through the whole tree-positioning phase
+  (unlike the sibling `outgoing`, which a prior agent CSR'd but dropped because it frees early/recycles).
+- **Fix (LANDED):** `TreeChildren` CSR -- one flat `Vec<usize>` of all children grouped by parent + per-node
+  `start`/`len`; `of(node) -> &[usize]`. The BFS already pushes a node's children CONTIGUOUSLY when it is
+  dequeued, so the CSR is built in place (record start, append, set len) and each segment sorted in place by
+  id -- byte-identical order to the old per-node `Vec` + per-node sort. All 4 consumers
+  (`compute_tree_subtree_spans`, `compute_all_tree_span_centers`, `radial_leaf_count`, `assign_radial_angles`)
+  only READ children as a slice, so they switch to `children.of(node)` with no logic change.
+- **MEASURED (deterministic counting-allocator A/B, load-immune):** layout allocs
+  wide_16x32 **3767 -> 3319 (-11.9%)** (~448 per-node children Vecs removed -- fewer than node_count because
+  leaves have none), wide_8x16 977 -> 886 (-9.3%). **SESSION layout total: 4279 (ORIG) -> 3319 = -22.4%**
+  (label-clone borrow a544290 + this).
+- **Byte-identical & POSITION-PRESERVING:** `layout_golden_checksums_are_stable` +
+  `layout_golden_cases_are_deterministic_across_runs` (layout POSITION checksums -- the critical guard) +
+  `franken_tui_fixture_cases` + `svg_golden_snapshots_are_stable` GREEN with NO re-bless; 428 fm-layout lib
+  tests pass; clippy `-D warnings` clean. The CSR build preserves the exact child order (contiguous append +
+  per-segment sort), so node positions are unchanged.
+- **Verdict: LANDED.** A genuinely-NEW lever distinct from the prior-dropped `outgoing` CSR: `children` LIVES
+  through tree-positioning (not freed-early/recycled), so cutting its per-node Vecs is a real reduction, and
+  building CSR DURING the BFS (vs the prior agent's post-hoc convert of `outgoing`) keeps order trivially.
+  PATTERN: a `Vec<Vec<T>>` per-element adjacency that is (1) built contiguously-per-parent and (2) only read
+  as slices downstream can be made CSR in place during construction -- removing N per-element allocations,
+  golden-verifiable for position-critical layout. The remaining layout allocs (~3319) are the OUTPUT edge
+  `points` Vecs (vec!-exact) + node_id (golden-serialized) + the freed-early/recycled `outgoing` (prior-
+  dropped ~0-gain) -- output or genuinely-marginal.
+
+  Agent: cc
