@@ -5621,3 +5621,33 @@
   is a transient String per element -- give the renderer the output buffer and write the fragment in place.
 
   Agent: cc
+
+### LANDED: render common nodes straight into the output buffer -- render allocs -78% more (2026-06-29)
+- Companion to render_edge_into (c282ff1): the per-node fast path returned `Element::raw_svg(
+  build_common_node_fragment() -> String)` purely to fit `render_node`'s `-> Element` return;
+  `render_nodes_serial` then `write_to_string`d it (push_str COPY into the chunk buffer) and dropped it --
+  transient allocations PER NODE.
+- **Fix (LANDED):** added `render_node_into(out, node_box, ir, ...)` that, for the common themed rect node
+  (the same prelude + gate as `render_node`'s fast path), streams `<g><rect/><text/><title/></g>` STRAIGHT
+  into `out` via `write_common_node_fragment_into` -- no fragment `String`, no `Element`. Non-fast nodes
+  (non-Rect, inline styles, icons, classes, menu/href/callback, multiline, reduced a11y) delegate to the
+  UNTOUCHED `render_node`. `render_nodes_serial` (serial AND parallel chunks) now calls it. `render_node`
+  is left intact (its other caller -- the sequence mirror-header loop -- needs the post-processable
+  `Element`); render_node_into duplicates only the ~60-line prelude+gate, with byte-identity enforced by
+  golden + the node pin test (any divergence fails CI loudly).
+- **MEASURED (deterministic counting-allocator A/B, load-immune):** render allocs
+  wide_16x32 **1305 -> 281 (-78.5%)**, wide_8x16 461 -> 205 (-55.5%). **SESSION render total: 19225 (ORIG)
+  -> 281 = -98.5%** -- render is now essentially per-DIAGRAM overhead only (theme CSS, defs/markers, document
+  assembly, parallel-chunk buffers); the per-ELEMENT allocation is gone for both nodes and edges.
+- **Byte-identical & safe:** `svg_golden_snapshots_are_stable` + `franken_tui_fixture_cases` GREEN with NO
+  re-bless; 234 fm-render-svg lib tests pass (incl. `node_fast_fragment_matches_render`); clippy
+  `-D warnings` clean. Shared WASM path; only `String`/`write_*` primitives.
+- **Verdict: LANDED.** Completes the "render directly into the output buffer" pattern (4th family) for BOTH
+  element types: a fast path returning `Element::raw_svg(build_fragment_String())` only to be
+  `write_to_string`'d is a transient String per element -- give the renderer the buffer (`_into(out, ...)`)
+  and write in place. wide_16x32 pipeline allocs are now render 281 + parse 1608 + layout 3319 = ~5208 (from
+  ORIG ~29081 = -82%). LAYOUT (3319) is now overwhelmingly the dominant phase; its remaining allocs are
+  OUTPUT (edge `points` vec!-exact ~1053, `node_id` golden-serialized ~512) + freed-early/recycled
+  `outgoing` (~512, prior-dropped ~0-gain) + node-sizing/flat Vecs -- output or genuinely marginal.
+
+  Agent: cc

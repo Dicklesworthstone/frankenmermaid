@@ -2000,7 +2000,10 @@ fn render_nodes_serial(
     centrality_map: &HashMap<usize, CentralityTier>,
 ) {
     for node_box in nodes {
-        let node_elem = render_node(
+        // Render straight into `out` — the fast path streams the node fragment in place (no per-node
+        // fragment `String`); non-fast nodes delegate to `render_node`.
+        render_node_into(
+            out,
             node_box,
             ir,
             offset_x,
@@ -2010,10 +2013,7 @@ fn render_nodes_serial(
             colors,
             emit_classdef_classes,
             centrality_map,
-            // No post-processing here (serialized straight out) — the fast direct-serialize path is safe.
-            true,
         );
-        node_elem.write_to_string(out);
     }
 }
 
@@ -4280,48 +4280,75 @@ fn build_common_node_fragment(
     font_size: f32,
     text_fill: &str,
 ) -> String {
-    use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
-    use std::fmt::Write as _;
     // `raw_label` is written twice (the `aria-label` and the `<title>` text), so size for both copies
     // plus the fixed tag/literal bytes.
     let mut f = String::with_capacity(label.len() + raw_label.len() * 2 + 340);
+    write_common_node_fragment_into(
+        &mut f, node_id, node_index, accent, raw_label, label, x, y, w, h, rx, text_x, text_y,
+        font_size, text_fill,
+    );
+    f
+}
+
+/// Write-into core of [`build_common_node_fragment`]: streams the common rect node straight into `f` with
+/// no intermediate `String`, so `render_node_into` can render it directly into the chunk output buffer.
+#[allow(clippy::too_many_arguments)]
+fn write_common_node_fragment_into(
+    f: &mut String,
+    node_id: &str,
+    node_index: usize,
+    accent: usize,
+    raw_label: &str,
+    label: &str,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    rx: f32,
+    text_x: f32,
+    text_y: f32,
+    font_size: f32,
+    text_fill: &str,
+) {
+    use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
+    use std::fmt::Write as _;
     // <g id=".." class="fm-node fm-node-accent-N fm-node-shape-rect" data-id=".." role=".." aria-label=".." tabindex="0">
     f.push_str("<g id=\"");
     // The node id is `fm-node-[{sanitized}-]{index}` — only `[a-z0-9-]`, never an escapable byte — so
     // write it straight into `f` (skipping `mermaid_node_element_id`'s 3 throwaway allocations: the
     // sanitizer's two Strings + the id String). Byte-identical to `write_escaped_attr(id)` because the
     // id can never contain `& < > " '`; pinned by `node_fast_fragment_matches_render`.
-    fm_core::write_mermaid_node_element_id_into(&mut f, node_id, node_index);
+    fm_core::write_mermaid_node_element_id_into(f, node_id, node_index);
     f.push_str("\" class=\"fm-node fm-node-accent-");
     let _ = write!(f, "{accent}");
     f.push_str(" fm-node-shape-rect\" data-id=\"");
-    let _ = write_escaped_attr(&mut f, node_id);
+    let _ = write_escaped_attr(f, node_id);
     f.push_str("\" role=\"graphics-symbol\" aria-label=\"");
-    let _ = write_escaped_attr(&mut f, raw_label);
+    let _ = write_escaped_attr(f, raw_label);
     f.push_str("\" tabindex=\"0\">");
     // <rect x y width height rx fill="url(#fm-node-gradient)"/>
     f.push_str("<rect x=\"");
-    let _ = AttributeValue::Number(x).write_value(&mut f);
+    let _ = AttributeValue::Number(x).write_value(f);
     f.push_str("\" y=\"");
-    let _ = AttributeValue::Number(y).write_value(&mut f);
+    let _ = AttributeValue::Number(y).write_value(f);
     f.push_str("\" width=\"");
-    let _ = AttributeValue::Number(w).write_value(&mut f);
+    let _ = AttributeValue::Number(w).write_value(f);
     f.push_str("\" height=\"");
-    let _ = AttributeValue::Number(h).write_value(&mut f);
+    let _ = AttributeValue::Number(h).write_value(f);
     f.push_str("\" rx=\"");
-    let _ = AttributeValue::Number(rx).write_value(&mut f);
+    let _ = AttributeValue::Number(rx).write_value(f);
     f.push_str("\" fill=\"url(#fm-node-gradient)\"/>");
     // <text x y text-anchor="middle" font-size=".." fill="..">label</text>
     f.push_str("<text x=\"");
-    let _ = AttributeValue::Number(text_x).write_value(&mut f);
+    let _ = AttributeValue::Number(text_x).write_value(f);
     f.push_str("\" y=\"");
-    let _ = AttributeValue::Number(text_y).write_value(&mut f);
+    let _ = AttributeValue::Number(text_y).write_value(f);
     f.push_str("\" text-anchor=\"middle\" font-size=\"");
-    let _ = AttributeValue::Number(font_size).write_value(&mut f);
+    let _ = AttributeValue::Number(font_size).write_value(f);
     f.push_str("\" fill=\"");
-    let _ = write_escaped_attr(&mut f, text_fill);
+    let _ = write_escaped_attr(f, text_fill);
     f.push_str("\">");
-    let _ = write_escaped_text(&mut f, label);
+    let _ = write_escaped_text(f, label);
     f.push_str("</text>");
     // <title>Node: {raw_label}, rectangle</title> -- this is `describe_node(node, ir)` for the gated
     // Rect shape (its `shape_desc` is always "rectangle" here, and its label is exactly `raw_label`),
@@ -4330,9 +4357,129 @@ fn build_common_node_fragment(
     // escapable byte (escape is the identity on them) and the label is escaped the same either way.
     // Pinned by `node_fast_fragment_matches_render`.
     f.push_str("<title>Node: ");
-    let _ = write_escaped_text(&mut f, raw_label);
+    let _ = write_escaped_text(f, raw_label);
     f.push_str(", rectangle</title></g>");
-    f
+}
+
+/// Render a single node straight into the output buffer. For the overwhelmingly common themed rectangle
+/// node (the same gate as `render_node`'s fast path) the `<g><rect/><text/><title/></g>` is streamed
+/// directly into `out` via `write_common_node_fragment_into` — eliminating the per-node fragment `String`
+/// that `render_node` would build, wrap in `Element::raw_svg`, and immediately copy out then drop. Every
+/// other node delegates to the `render_node` Element path. The prelude/gate here mirror `render_node`'s
+/// (any divergence is caught byte-for-byte by `svg_golden_snapshots_are_stable` +
+/// `node_fast_fragment_matches_render`).
+#[allow(clippy::too_many_arguments)]
+fn render_node_into(
+    out: &mut String,
+    node_box: &LayoutNodeBox,
+    ir: &MermaidDiagramIr,
+    offset_x: f32,
+    offset_y: f32,
+    config: &SvgRenderConfig,
+    detail: RenderDetailProfile,
+    colors: &ThemeColors,
+    emit_classdef_classes: bool,
+    centrality_map: &HashMap<usize, CentralityTier>,
+) {
+    use fm_core::NodeShape;
+
+    let ir_node = ir.nodes.get(node_box.node_index);
+    let shape = ir_node.map_or(NodeShape::Rect, |n| n.shape);
+    let (shape_style, text_style) = resolve_node_inline_styles(ir, node_box.node_index);
+    let node_id = ir_node
+        .map(|node| node.id.as_str())
+        .unwrap_or_else(|| node_box.node_id.as_str());
+
+    let x = node_box.bounds.x + offset_x;
+    let y = node_box.bounds.y + offset_y;
+    let w = node_box.bounds.width;
+    let h = node_box.bounds.height;
+    let cx = x + w / 2.0;
+    let cy = y + h / 2.0;
+
+    let placeholder_space_node = ir_node.is_some_and(is_block_beta_space_node);
+    let label_id = ir_node.and_then(|node| node.label);
+    let raw_label_text = if placeholder_space_node {
+        ""
+    } else {
+        label_id
+            .and_then(|lid| ir.labels.get(lid.0))
+            .map(|l| l.text.as_str())
+            .or_else(|| {
+                ir_node.and_then(|node| match node.shape {
+                    NodeShape::DoubleCircle if node.label.is_none() => None,
+                    NodeShape::FilledCircle | NodeShape::HorizontalBar => None,
+                    _ => Some(node.id.as_str()),
+                })
+            })
+            .unwrap_or("")
+    };
+    let label_text = truncate_label(raw_label_text, detail.node_label_max_chars);
+    let node_font_size = detail.node_font_size;
+    let node_icon = ir_node
+        .and_then(|node| node.icon.as_deref())
+        .map(str::trim)
+        .filter(|icon| !icon.is_empty())
+        .filter(|_| ir_node.is_none_or(|node| node.class_meta.is_none() && node.c4_meta.is_none()));
+
+    // Same gate as `render_node`'s fast path (permit_fast is always true on this serialize-only path).
+    if matches!(shape, NodeShape::Rect)
+        && config.embed_theme_css
+        && config.node_gradients
+        && !emit_classdef_classes
+        && !config.animations_enabled
+        && !config.include_source_spans
+        && config.a11y.aria_labels
+        && config.a11y.keyboard_nav
+        && config.a11y.text_alternatives
+        && shape_style.is_none()
+        && text_style.is_none()
+        && node_icon.is_none()
+        && !placeholder_space_node
+        && !label_text.contains('\n')
+        && !label_text.contains('\r')
+        && lookup_centrality_tier(centrality_map, node_box.node_index).is_none()
+        && label_id.is_none_or(|id| ir.label_markup.get(&id).is_none_or(|s| s.is_empty()))
+        && let Some(node) = ir_node
+        && node.classes.is_empty()
+        && node.requirement_meta.is_none()
+        && node.menu_links.is_empty()
+        && node.href.is_none()
+        && node.callback.is_none()
+    {
+        write_common_node_fragment_into(
+            out,
+            node_id,
+            node_box.node_index,
+            stable_accent_index(node_id),
+            raw_label_text,
+            &label_text,
+            x,
+            y,
+            w,
+            h,
+            config.rounded_corners * 0.55,
+            cx,
+            cy + node_font_size / 3.0,
+            node_font_size,
+            colors.text.as_str(),
+        );
+        return;
+    }
+
+    render_node(
+        node_box,
+        ir,
+        offset_x,
+        offset_y,
+        config,
+        detail,
+        colors,
+        emit_classdef_classes,
+        centrality_map,
+        true,
+    )
+    .write_to_string(out);
 }
 
 /// Render a single node to an SVG element.
