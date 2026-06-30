@@ -5500,3 +5500,32 @@
   So layout's CLEAN transient frontier is the label clone (now harvested); the rest is architectural.
 
   Agent: cc
+
+### LANDED: node-id lookup map keyed by hash, not a cloned String -- parse allocs -20% more (2026-06-29)
+- The prior cycle MAPPED (but dismissed as "architectural") the ~512 duplicate node-id String clones in
+  `intern_node_auto`: the id is owned once in `ir.nodes[id].id` (necessary) and cloned a SECOND time as the
+  `node_index_by_id: FxHashMap<String, IrNodeId>` key (ir_builder.rs:929). The map keys ACCUMULATE through
+  lowering (not allocator-recycled) -- a real per-node allocation on every diagram. "no ceiling framing"
+  prompted re-attacking it: the full Rc<str>/interning contract change is broad, but a CONTAINED fix exists.
+- **Fix (LANDED):** replace `FxHashMap<String, IrNodeId>` with a `NodeIdIndex` keyed by the `u64` FxHash of
+  the id (`enum NodeIdBucket { One(IrNodeId), Many(Vec<IrNodeId>) }`). No owned String key is stored. Lookups
+  VERIFY the candidate against `ir.nodes[..].id` so a hash collision can never resolve to the wrong node
+  (collisions land in `Many`); inserts are dedup-guarded by `intern_node_auto`'s existing existence-check, so
+  an occupied slot is always a distinct-id collision. The map is never iterated (IR order comes from
+  `ir.nodes`), so hash-keying is determinism-safe.
+- **MEASURED (deterministic counting-allocator A/B, load-immune):** parse allocs
+  wide_16x32 **2632 -> 2120 (-19.5%)** (the 512 node map-key String clones removed), wide_8x16 704 -> 576
+  (-18.2%). **SESSION parse total: 5577 (ORIG) -> 2120 = -62%.**
+- **Byte-identical & safe:** `franken_tui_fixture_cases` (parse corpus) + `layout_golden_checksums_are_stable`
+  (IR->layout byte-identity, proves edge resolution is unchanged) + `svg_golden_snapshots_are_stable` GREEN
+  with NO re-bless; 405 fm-parser lib tests pass; clippy `-D warnings` clean. node_id_by_key's 2 external
+  callers updated for the `Option<&IrNodeId>`->`Option<IrNodeId>` return change.
+- **Verdict: LANDED.** The "architectural / owner-gated" surface was too pessimistic AGAIN -- the node-id
+  lookup-map key clone was removable with a CONTAINED u64-keyed index (verify-on-lookup for collision
+  safety), no Rc<str>/lifetime/contract change. The same treatment applies to `label_index_by_text` (the
+  remaining ~512 label-text map-key clones; its key is a `(String, Vec<segment>)` tuple, slightly more
+  involved) -- the next parse-alloc lever. Pattern: a `HashMap<String,_>` lookup index whose String key
+  DUPLICATES an already-owned value can be replaced by a hash-keyed index with verify-on-lookup, removing
+  the duplicate clone with no contract change, when the map is never iterated.
+
+  Agent: cc

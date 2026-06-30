@@ -35,12 +35,63 @@ struct StateCompositeContext {
     pending_region_members: Vec<IrNodeId>,
 }
 
+/// Node-id → `IrNodeId` lookup that keys by the FxHash of the id rather than storing an owned `String`
+/// key. The id is already owned once in `ir.nodes[id].id`; the previous `FxHashMap<String, _>` cloned it
+/// a SECOND time per node purely for the map key (the keys accumulate through lowering, so they are not
+/// allocator-recycled — a real per-node allocation on every diagram). Keying by `u64` removes that clone;
+/// lookups verify the candidate against `ir.nodes[..].id` so a hash collision can never resolve to the
+/// wrong node (collisions land in `Many`). The map is never iterated (IR order comes from `ir.nodes`), so
+/// keying by hash is determinism-safe.
+#[derive(Default)]
+struct NodeIdIndex {
+    buckets: FxHashMap<u64, NodeIdBucket>,
+}
+
+enum NodeIdBucket {
+    One(IrNodeId),
+    Many(Vec<IrNodeId>),
+}
+
+impl NodeIdIndex {
+    fn hash_key(id: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = rustc_hash::FxHasher::default();
+        id.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn get(&self, id: &str, nodes: &[IrNode]) -> Option<IrNodeId> {
+        let matches = |nid: &IrNodeId| nodes.get(nid.0).is_some_and(|node| node.id == id);
+        match self.buckets.get(&Self::hash_key(id))? {
+            NodeIdBucket::One(nid) => matches(nid).then_some(*nid),
+            NodeIdBucket::Many(candidates) => candidates.iter().copied().find(|nid| matches(nid)),
+        }
+    }
+
+    /// Record `node_id` for `id`. Callers guarantee `id` is not already present (`intern_node_auto`
+    /// checks `get` first), so an occupied slot here is always a hash COLLISION between distinct ids.
+    fn insert(&mut self, id: &str, node_id: IrNodeId) {
+        let hash = Self::hash_key(id);
+        match self.buckets.get_mut(&hash) {
+            None => {
+                self.buckets.insert(hash, NodeIdBucket::One(node_id));
+            }
+            Some(NodeIdBucket::One(existing)) => {
+                let existing = *existing;
+                self.buckets
+                    .insert(hash, NodeIdBucket::Many(vec![existing, node_id]));
+            }
+            Some(NodeIdBucket::Many(candidates)) => candidates.push(node_id),
+        }
+    }
+}
+
 pub struct IrBuilder {
     ir: MermaidDiagramIr,
     // Lookups for uniqueness. These are read by key only (never iterated), so a hash
     // map is both faster and determinism-safe — IR output order comes from the `ir`
     // vectors, not from map iteration.
-    node_index_by_id: FxHashMap<String, IrNodeId>,
+    node_id_index: NodeIdIndex,
     cluster_index_by_key: FxHashMap<String, usize>,
     subgraph_index_by_key: FxHashMap<String, usize>,
     label_index_by_text: FxHashMap<(String, Vec<IrLabelSegment>), IrLabelId>,
@@ -84,7 +135,7 @@ impl IrBuilder {
     pub(crate) fn new(diagram_type: DiagramType) -> Self {
         Self {
             ir: MermaidDiagramIr::empty(diagram_type),
-            node_index_by_id: FxHashMap::default(),
+            node_id_index: NodeIdIndex::default(),
             cluster_index_by_key: FxHashMap::default(),
             subgraph_index_by_key: FxHashMap::default(),
             label_index_by_text: FxHashMap::default(),
@@ -110,7 +161,7 @@ impl IrBuilder {
         ir.reserve_capacity(estimated_nodes, estimated_edges, estimated_labels);
         Self {
             ir,
-            node_index_by_id: FxHashMap::default(),
+            node_id_index: NodeIdIndex::default(),
             cluster_index_by_key: FxHashMap::default(),
             subgraph_index_by_key: FxHashMap::default(),
             label_index_by_text: FxHashMap::default(),
@@ -266,7 +317,7 @@ impl IrBuilder {
             .iter()
             .filter_map(|name| {
                 let normalized = normalize_identifier(name);
-                self.node_index_by_id.get(&normalized).copied()
+                self.node_id_index.get(&normalized, &self.ir.nodes)
             })
             .collect();
 
@@ -284,7 +335,7 @@ impl IrBuilder {
 
     pub(crate) fn activate_participant(&mut self, name: &str) {
         let normalized = normalize_identifier(name);
-        let Some(&node_id) = self.node_index_by_id.get(&normalized) else {
+        let Some(node_id) = self.node_id_index.get(&normalized, &self.ir.nodes) else {
             return;
         };
         let edge_index = self.ir.edges.len().saturating_sub(1);
@@ -327,7 +378,7 @@ impl IrBuilder {
         if let Some((label, color, names)) = self.current_participant_group.take() {
             let participants: Vec<IrNodeId> = names
                 .iter()
-                .filter_map(|name| self.node_index_by_id.get(name).copied())
+                .filter_map(|name| self.node_id_index.get(name, &self.ir.nodes))
                 .collect();
 
             if !participants.is_empty() {
@@ -356,7 +407,7 @@ impl IrBuilder {
 
     pub(crate) fn add_lifecycle_create(&mut self, name: &str) {
         let normalized = normalize_identifier(name);
-        let Some(&node_id) = self.node_index_by_id.get(&normalized) else {
+        let Some(node_id) = self.node_id_index.get(&normalized, &self.ir.nodes) else {
             return;
         };
         let at_edge = self.ir.edges.len();
@@ -373,7 +424,7 @@ impl IrBuilder {
 
     pub(crate) fn add_lifecycle_destroy(&mut self, name: &str) {
         let normalized = normalize_identifier(name);
-        let Some(&node_id) = self.node_index_by_id.get(&normalized) else {
+        let Some(node_id) = self.node_id_index.get(&normalized, &self.ir.nodes) else {
             return;
         };
         let at_edge = self.ir.edges.len().saturating_sub(1);
@@ -400,7 +451,7 @@ impl IrBuilder {
         let Some(class_name) = self.current_class.as_ref() else {
             return;
         };
-        let Some(&node_id) = self.node_index_by_id.get(class_name) else {
+        let Some(node_id) = self.node_id_index.get(class_name, &self.ir.nodes) else {
             return;
         };
         let Some(node) = self.ir.nodes.get_mut(node_id.0) else {
@@ -414,7 +465,7 @@ impl IrBuilder {
     }
 
     pub(crate) fn set_class_stereotype(&mut self, class_name: &str, stereotype: ClassStereotype) {
-        let Some(&node_id) = self.node_index_by_id.get(class_name) else {
+        let Some(node_id) = self.node_id_index.get(class_name, &self.ir.nodes) else {
             return;
         };
         let Some(node) = self.ir.nodes.get_mut(node_id.0) else {
@@ -426,7 +477,7 @@ impl IrBuilder {
     }
 
     pub(crate) fn set_class_generics(&mut self, class_name: &str, generics: Vec<String>) {
-        let Some(&node_id) = self.node_index_by_id.get(class_name) else {
+        let Some(node_id) = self.node_id_index.get(class_name, &self.ir.nodes) else {
             return;
         };
         let Some(node) = self.ir.nodes.get_mut(node_id.0) else {
@@ -686,8 +737,8 @@ impl IrBuilder {
     }
 
     /// Look up a node ID by its string key (as used in the diagram source).
-    pub(crate) fn node_id_by_key(&self, key: &str) -> Option<&IrNodeId> {
-        self.node_index_by_id.get(key)
+    pub(crate) fn node_id_by_key(&self, key: &str) -> Option<IrNodeId> {
+        self.node_id_index.get(key, &self.ir.nodes)
     }
 
     /// Get a node by its `IrNodeId`.
@@ -808,7 +859,7 @@ impl IrBuilder {
         }
 
         // Check if already exists
-        if let Some(existing_id) = self.node_index_by_id.get(normalized_id).copied() {
+        if let Some(existing_id) = self.node_id_index.get(normalized_id, &self.ir.nodes) {
             let resolved_label = if self
                 .ir
                 .nodes
@@ -875,8 +926,7 @@ impl IrBuilder {
             clusters: Vec::new(),
             subgraphs: Vec::new(),
         });
-        self.node_index_by_id
-            .insert(normalized_id.to_string(), node_id);
+        self.node_id_index.insert(normalized_id, node_id);
 
         if is_auto_created {
             self.auto_created_nodes.push(node_id);

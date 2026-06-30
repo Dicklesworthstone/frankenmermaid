@@ -2290,7 +2290,7 @@ fn parse_class(input: &str, builder: &mut IrBuilder) {
             lower_class_statement(statement, line_number, line, builder);
 
             if let (Some(key), Some(sg_idx)) = (ns_node_key, ns_sg_idx)
-                && let Some(node_id) = builder.node_id_by_key(&key).copied()
+                && let Some(node_id) = builder.node_id_by_key(&key)
             {
                 builder.add_node_to_subgraph(sg_idx, node_id);
             }
@@ -8578,7 +8578,7 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
                     for target in targets.split(',') {
                         let target = target.trim();
                         if !target.is_empty()
-                            && let Some(&node_id) = builder.node_id_by_key(target)
+                            && let Some(node_id) = builder.node_id_by_key(target)
                         {
                             builder.push_style_ref(
                                 fm_core::IrStyleTarget::Node(node_id),
