@@ -2025,8 +2025,7 @@ fn render_edges_serial(out: &mut String, edges: &[LayoutEdgePath], context: &Edg
         if edge_path.bundled {
             continue;
         }
-        let edge_elem = render_edge(edge_path, context);
-        edge_elem.write_to_string(out);
+        render_edge_into(out, edge_path, context);
     }
 }
 
@@ -6663,25 +6662,55 @@ fn build_common_edge_full_fragment<F>(
 where
     F: FnMut(usize) -> (f32, f32),
 {
-    use crate::attributes::{AttributeValue, write_escaped_text};
     let mut f = String::with_capacity(24 + point_count * 56 + 192);
+    write_common_edge_full_fragment_into(
+        &mut f,
+        point_count,
+        point_at,
+        stroke_width,
+        style_class,
+        edge_index,
+        marker_end,
+        from_label,
+        to_label,
+    );
+    f
+}
+
+/// Write-into core of [`build_common_edge_full_fragment`]. Used by `render_edge_into` to stream the whole
+/// common edge straight into the chunk output buffer, with NO per-edge fragment `String` (the fragment
+/// `String` is the single largest remaining per-element render allocation on wide flowcharts).
+#[allow(clippy::too_many_arguments)]
+fn write_common_edge_full_fragment_into<F>(
+    f: &mut String,
+    point_count: usize,
+    point_at: F,
+    stroke_width: f32,
+    style_class: &str,
+    edge_index: i32,
+    marker_end: &str,
+    from_label: Option<&str>,
+    to_label: Option<&str>,
+) where
+    F: FnMut(usize) -> (f32, f32),
+{
+    use crate::attributes::{AttributeValue, write_escaped_text};
     // <g id="fm-edge-N" class="fm-edge" data-fm-edge-id="N" role="graphics-symbol" tabindex="0">
     // The id is `mermaid_edge_element_id(edge_index)` = "fm-edge-" + decimal(index); it never contains
     // an escapable byte, so it goes through the same `Integer` serializer as `data-fm-edge-id`.
     f.push_str("<g id=\"fm-edge-");
-    let _ = AttributeValue::Integer(edge_index).write_value(&mut f);
+    let _ = AttributeValue::Integer(edge_index).write_value(f);
     f.push_str("\" class=\"fm-edge\" data-fm-edge-id=\"");
-    let _ = AttributeValue::Integer(edge_index).write_value(&mut f);
+    let _ = AttributeValue::Integer(edge_index).write_value(f);
     f.push_str("\" role=\"graphics-symbol\" tabindex=\"0\">");
     f.push_str("<path d=\"");
-    crate::path::build_smooth_path_by_into(&mut f, point_count, point_at);
-    write_common_edge_path_tail_into(&mut f, stroke_width, style_class, edge_index, marker_end);
+    crate::path::build_smooth_path_by_into(f, point_count, point_at);
+    write_common_edge_path_tail_into(f, stroke_width, style_class, edge_index, marker_end);
     f.push_str("<title>");
-    let _ = write_escaped_text(&mut f, from_label.unwrap_or("unknown"));
+    let _ = write_escaped_text(f, from_label.unwrap_or("unknown"));
     f.push_str(" points to ");
-    let _ = write_escaped_text(&mut f, to_label.unwrap_or("unknown"));
+    let _ = write_escaped_text(f, to_label.unwrap_or("unknown"));
     f.push_str("</title></g>");
-    f
 }
 
 fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> Element {
@@ -7148,6 +7177,66 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
     elem = elem.id(&mermaid_edge_element_id(edge_index));
 
     elem
+}
+
+/// Serialize an edge straight into the output buffer. For the overwhelmingly common solid-arrow edge under
+/// default a11y (the same conditions as `render_edge`'s whole-edge fast path) the `<g…><path/><title/></g>`
+/// is streamed directly into `out` — eliminating the per-edge fragment `String` that `render_edge` would
+/// build, wrap in `Element::raw_svg`, and immediately copy out then drop (the single largest remaining
+/// per-element render allocation on wide flowcharts). For `arrow == Arrow` the stroke-width / class /
+/// marker-end are the known solid-arrow constants, so the full arrow match is skipped too. Every other
+/// edge (back-edges, non-Arrow markers, dashed, animated, source spans, inline `linkStyle`, labeled, or
+/// reduced a11y) falls back to the existing `render_edge` Element path, so output stays byte-identical
+/// (corpus-pinned by `golden_svg_test`).
+fn render_edge_into(out: &mut String, edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) {
+    use fm_core::ArrowType;
+    let EdgeRenderContext {
+        ir,
+        offset_x,
+        offset_y,
+        config,
+        detail,
+        accessible_node_labels,
+        ..
+    } = *context;
+    let edge_index = edge_path.edge_index;
+    let ir_edge = ir.edges.get(edge_index);
+    let arrow = ir_edge.map_or(ArrowType::Arrow, |edge| edge.arrow);
+
+    if arrow == ArrowType::Arrow
+        && !edge_path.reversed
+        && config.embed_theme_css
+        && !config.animations_enabled
+        && !config.include_source_spans
+        && config.a11y.text_alternatives
+        && config.a11y.aria_labels
+        && config.a11y.keyboard_nav
+        && !(detail.show_edge_labels && ir_edge.and_then(|edge| edge.label).is_some())
+        && let Some(edge) = ir_edge
+        && resolve_edge_inline_style(ir, edge_index).is_none()
+    {
+        let (from_label, to_label) =
+            edge_endpoint_accessible_labels(edge, ir, accessible_node_labels);
+        // Solid-arrow constants: stroke-width 1.8, class "fm-edge-solid", marker-end "url(#arrow-end)"
+        // — exactly what `render_edge`'s arrow match yields for `ArrowType::Arrow`.
+        write_common_edge_full_fragment_into(
+            out,
+            edge_path.points.len(),
+            |index| {
+                let point = &edge_path.points[index];
+                (point.x + offset_x, point.y + offset_y)
+            },
+            1.8,
+            "fm-edge-solid",
+            edge_index as i32,
+            "url(#arrow-end)",
+            from_label,
+            to_label,
+        );
+        return;
+    }
+
+    render_edge(edge_path, context).write_to_string(out);
 }
 
 fn edge_endpoint_accessible_labels<'a>(

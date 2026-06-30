@@ -5589,3 +5589,35 @@
   dropped ~0-gain) -- output or genuinely-marginal.
 
   Agent: cc
+
+### LANDED: render edges straight into the output buffer -- render allocs -42% more (2026-06-29)
+- Re-examined the render flow with fresh eyes: the per-element FAST PATHS build a fragment `String`
+  (`build_common_edge_full_fragment`), wrap it in `Element::raw_svg`, and `render_edges_serial` then
+  `write_to_string`s it (a `push_str` COPY into the chunk buffer) and drops it -- a transient `String`
+  PER EDGE (~960 on wide_16x32), the single largest remaining per-element render allocation. I'd optimized
+  the fragment's CONTENTS (id/title/path sub-allocs) but never the fragment String ITSELF.
+- **Fix (LANDED):** added `render_edge_into(out, edge_path, context)` that, for the common solid-arrow edge
+  under default a11y (same gate as `render_edge`'s whole-edge fast path), streams the
+  `<g…><path/><title/></g>` STRAIGHT into `out` via `write_common_edge_full_fragment_into` -- no fragment
+  `String`, no `Element`. For `arrow == Arrow` the stroke-width/class/marker-end are the known solid-arrow
+  constants (1.8 / "fm-edge-solid" / "url(#arrow-end)"), so the full 130-line arrow match is skipped too.
+  Every other edge (back/non-Arrow/dashed/animated/labeled/spans/inline-style/reduced-a11y) falls back to
+  the existing `render_edge` Element path. `render_edges_serial` (the ONLY edge caller, serial AND parallel
+  chunks) now calls it.
+- **MEASURED (deterministic counting-allocator A/B, load-immune):** render allocs
+  wide_16x32 **2265 -> 1305 (-42.4%)** (~960 per-edge fragment Strings removed), wide_8x16 685 -> 461
+  (-32.7%). **SESSION render total: 19225 (ORIG) -> 1305 = -93.2%.**
+- **Byte-identical & safe:** `svg_golden_snapshots_are_stable` + `franken_tui_fixture_cases` GREEN with NO
+  re-bless; 234 fm-render-svg lib tests pass (incl. `edge_fast_full_fragment_matches_render`); clippy
+  `-D warnings` clean. The fast gate mirrors `render_edge`'s exactly and the Arrow constants match its
+  arrow-match output, so the same edges take the path with identical bytes; non-fast edges delegate
+  unchanged. Shared WASM path; only `String`/`write_*` primitives.
+- **Verdict: LANDED.** A NEW class of lever above the prior fragment-content work: eliminate the per-element
+  fragment STRING entirely by rendering directly into the destination buffer (the fast path was already
+  pre-serialized bytes wrapped in `raw_svg` purely to fit `render_edge`'s `-> Element` return; bypassing the
+  return removes the alloc + the copy). The analogous NODE lever (`render_node_into`, ~512 node fragment
+  Strings) is next, but needs the per-node setup refactored (node params aren't constant like Arrow's).
+  PATTERN: a fast path that returns `Element::raw_svg(build_fragment_String)` only to be `write_to_string`'d
+  is a transient String per element -- give the renderer the output buffer and write the fragment in place.
+
+  Agent: cc
