@@ -153,6 +153,16 @@ impl SvgDocument {
 
     /// Write the SVG document to a string.
     pub fn write_to_string(&self, output: &mut String) {
+        self.write_prelude(output);
+        output.push_str("</svg>");
+    }
+
+    /// Serialize everything up to (but not including) the closing `</svg>`: the open tag with all
+    /// root attributes, `<title>`/`<desc>`/`<style>`/`<defs>`, and every child in order. Split out
+    /// of [`write_to_string`] so a caller can stream extra body content (the node/edge fragments)
+    /// straight into the final buffer at the child position instead of materializing them as
+    /// intermediate `String`s and copying them a second time. See [`to_string_with_body`].
+    fn write_prelude(&self, output: &mut String) {
         output.push_str("<svg xmlns=\"http://www.w3.org/2000/svg\"");
 
         // Add viewBox (guard against NaN/Infinity producing invalid SVG)
@@ -212,8 +222,6 @@ impl SvgDocument {
         for child in &self.children {
             child.write_to_string(output);
         }
-
-        output.push_str("</svg>");
     }
 
     /// Render the SVG document into a string with caller-provided capacity.
@@ -225,6 +233,21 @@ impl SvgDocument {
     pub fn to_string_with_capacity(&self, capacity: usize) -> String {
         let mut output = String::with_capacity(capacity.max(4096));
         self.write_to_string(&mut output);
+        output
+    }
+
+    /// Serialize the prelude (open tag + meta + defs + this document's children), then invoke
+    /// `body` to stream additional content directly into the final buffer at the child position,
+    /// then close with `</svg>`. Byte-identical to appending `body`'s content as the trailing
+    /// children — but without materializing that content as an intermediate `String` and copying
+    /// it in a second time. The render fast path uses this to write the node/edge fragments
+    /// straight into the output.
+    #[must_use]
+    pub fn to_string_with_body(&self, capacity: usize, body: impl FnOnce(&mut String)) -> String {
+        let mut output = String::with_capacity(capacity.max(4096));
+        self.write_prelude(&mut output);
+        body(&mut output);
+        output.push_str("</svg>");
         output
     }
 

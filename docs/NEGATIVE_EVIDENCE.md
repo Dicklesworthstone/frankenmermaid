@@ -5822,10 +5822,21 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
 
   Agent: cc
 
-### MEASURED OPPORTUNITY (not reverted — scoped for a land): render node/edge double-copy = ~9% pipeline (2026-07-01)
+### LANDED: stream flowchart edges/nodes straight into the output buffer — render −43%, pipeline −11% (2026-07-01)
+- **LANDED same cycle it was surfaced.** The plan below was implemented immediately after the ceiling
+  measurement and shipped byte-identical. **Measured result exceeded the ceiling:** interleaved A/B (private
+  binaries) render wide_16x32 **~960 → ~550 µs (−43%)**, full pipeline **~2020 → ~1795 µs (−11%)** — larger
+  than the −18/20% skip-copy ceiling because the fast path ALSO eliminates the two large intermediate buffer
+  allocations (`edge_svg` ~460 KB cap + `node_svg` ~327 KB cap, both mmap-threshold → per-render mmap/munmap +
+  page faults), not just the second copy. Byte-identical: `golden_svg_test` + `golden_layout_test` +
+  `frankentui_conformance` GREEN with NO re-bless; 234 fm-render-svg lib tests pass; clippy `-D warnings` clean.
+  Implementation: `SvgDocument::to_string_with_body` + a fast path in `render_layout_to_svg` gated on
+  `diagram_type == Flowchart && edges < 4096 && nodes < 2048 && all bundle_count <= 1`, with the prior path kept
+  verbatim as the fallback. Details below (as-planned).
+
 - **This upgrades the "architectural, unquantified" render double-copy above to a MEASURED ceiling with a
   concrete, low-risk land plan.** Worth a dedicated cycle; too large to complete + verify byte-identical inside
-  a 60-min budget, so surfaced rather than half-landed.
+  a 60-min budget, so surfaced rather than half-landed. **[SUPERSEDED — landed above.]**
 - **Measured ceiling (interleaved render A/B, private binaries):** a throwaway build that skips *only* the two
   `doc.child(Element::raw_svg(edge_svg|node_svg))` pushes (nodes/edges still fully render into their buffers —
   only the final serialization `push_str` copy is removed) runs render wide_16x32 **966.6 → 769.3 µs min

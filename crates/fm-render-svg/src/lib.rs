@@ -2666,6 +2666,15 @@ fn render_layout_to_svg(
         doc = doc.child(line);
     }
 
+    // Build centrality tier lookup map for O(1) access during node rendering. Hoisted above the
+    // edge/node emission so the flowchart fast path below can reference it.
+    let centrality_map: HashMap<usize, CentralityTier> = layout
+        .extensions
+        .node_centrality
+        .iter()
+        .map(|nc| (nc.node_index, nc.tier))
+        .collect();
+
     let edge_context = EdgeRenderContext {
         ir,
         offset_x,
@@ -2675,6 +2684,42 @@ fn render_layout_to_svg(
         colors: &theme.colors,
         accessible_node_labels: accessible_node_labels.as_deref(),
     };
+
+    // Fast path for the common case (the head-to-head corpus): a plain flowchart small enough that
+    // both loops render serially. Every child that the slow path inserts BETWEEN the edge and node
+    // fragments (bundle-count labels, ER cardinality, class cardinality) or AFTER them (sequence
+    // mirror headers, C4 legend) is diagram-type- or bundle-gated and therefore empty here, so the
+    // document is exactly `[prefix children] + edges + nodes`. Stream the edges and nodes STRAIGHT
+    // into the final output buffer via `to_string_with_body` instead of rendering them into
+    // intermediate `edge_svg`/`node_svg` Strings that `write_to_string` then copies a SECOND time
+    // (~18% of render / ~9% of the wide pipeline, measured). Byte-identical: the same
+    // `render_edges_serial`/`render_nodes_serial` bytes in the same position. The slow path below is
+    // the verbatim fallback for every non-flowchart / bundled / very-large case.
+    #[cfg(not(target_arch = "wasm32"))]
+    let flowchart_stream_fast_path = ir.diagram_type == fm_core::DiagramType::Flowchart
+        && layout.edges.len() < 4096
+        && layout.nodes.len() < 2048
+        && layout.edges.iter().all(|edge| edge.bundle_count <= 1);
+    #[cfg(target_arch = "wasm32")]
+    let flowchart_stream_fast_path = ir.diagram_type == fm_core::DiagramType::Flowchart
+        && layout.edges.iter().all(|edge| edge.bundle_count <= 1);
+    if flowchart_stream_fast_path {
+        return doc.to_string_with_body(layout_svg_capacity_hint(ir, layout), |out| {
+            render_edges_serial(out, &layout.edges, &edge_context);
+            render_nodes_serial(
+                out,
+                &layout.nodes,
+                ir,
+                offset_x,
+                offset_y,
+                config,
+                detail,
+                &theme.colors,
+                emit_classdef_classes,
+                &centrality_map,
+            );
+        });
+    }
 
     // Render edges (skip edges absorbed into bundles). Edge subtrees are serialized immediately
     // and inserted as one internal raw fragment so the root document does not retain thousands of
@@ -2855,14 +2900,6 @@ fn render_layout_to_svg(
             }
         }
     }
-
-    // Build centrality tier lookup map for O(1) access during node rendering
-    let centrality_map: HashMap<usize, CentralityTier> = layout
-        .extensions
-        .node_centrality
-        .iter()
-        .map(|nc| (nc.node_index, nc.tier))
-        .collect();
 
     // Render nodes. Serialize each node subtree immediately into a shared buffer (as the edge loop
     // above does) and insert one internal raw fragment, so the root document does not retain
