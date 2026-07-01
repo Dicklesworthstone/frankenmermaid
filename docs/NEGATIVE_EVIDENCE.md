@@ -5886,3 +5886,24 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   "dead" ceilings after each adjacent landing.
 
   Agent: cc
+
+### LANDED: fast integer writer for whole-pixel coordinates (write_int_into) — render −18% (2026-07-01)
+- **The `write_int` lever that was REVERTED as ~0-gain in an early cycle (integer `{}` "already lowered well
+  by LLVM") is now a real win** — re-measured after the double-copy + write_fixed2 landings stopped masking it,
+  exactly the [[project_render_writefixed2_digitpairs]] lesson. Fresh perf on the lean render shows
+  `<i32 as Display>::fmt` 4.66% + `pad_integral` 3.85% = **~8.5% of render**: most SVG coordinates land on whole
+  pixels and take the integer branch of `AttributeValue::write_value` / `FmtNum::write_into`, which formatted via
+  `write!(out, "{}", n as i32)` — the full `fmt::Formatter` + `pad_integral` machinery.
+- **Fix:** add `attributes::write_int_into(f, i: i32)` = optional `-` then `write_uint_into` (the DIGIT_PAIRS
+  two-digits-at-a-time writer added for write_fixed2), and route all three whole-number sites through it:
+  `AttributeValue::write_value` (Number-whole + Integer variants) and `path::FmtNum::write_into` (cubic-Bézier
+  path coordinates). `i64::from(i).unsigned_abs()` handles `i32::MIN`. Byte-identical to `{i}`.
+- **MEASURED (interleaved A/B, private binaries):** render wide_16x32 **~436 → ~356 µs (−18%, 9/10 rounds)**;
+  full pipeline **1627 → 1534 µs (−6%, 7/8)**. Benefits every diagram type (whole-pixel coordinates are
+  everywhere). Stacks on top of write_fixed2 (16ed6d3) and the stream fast path (9bc7a29).
+- **Byte-identical:** 234 fm-render-svg lib tests + `golden_svg_test` + `golden_layout_test` +
+  `frankentui_conformance` GREEN, NO re-bless; clippy `-D warnings` clean.
+- **Verdict: LANDED.** Second confirmation that "LLVM lowers X well / ~0-gain" verdicts are only valid at the
+  profile balance they were measured on — re-run them after every adjacent render landing.
+
+  Agent: cc

@@ -38,12 +38,12 @@ impl AttributeValue {
                     && *n >= i32::MIN as f32
                     && *n <= i32::MAX as f32
                 {
-                    write!(out, "{}", *n as i32)
+                    write_int_into(out, *n as i32)
                 } else {
                     write_fixed2(out, *n)
                 }
             }
-            Self::Integer(i) => write!(out, "{i}"),
+            Self::Integer(i) => write_int_into(out, *i),
         }
     }
 }
@@ -349,6 +349,17 @@ fn write_uint_into<W: fmt::Write>(f: &mut W, n: u64) -> fmt::Result {
         let d = n as usize * 2 + 1;
         f.write_str(&DIGIT_PAIRS[d..d + 1])
     }
+}
+
+/// Append signed integer `i` in decimal to `f` via the fast [`DIGIT_PAIRS`] path — byte-identical
+/// to `write!(f, "{i}")` but without the `fmt::Formatter`/`pad_integral` machinery, which shows up
+/// as ~8% of coordinate-heavy render (most SVG coordinates land on whole pixels and take the integer
+/// branch of [`AttributeValue::write_value`]). `i64::from(i).unsigned_abs()` handles `i32::MIN`.
+pub(crate) fn write_int_into<W: fmt::Write>(f: &mut W, i: i32) -> fmt::Result {
+    if i < 0 {
+        f.write_str("-")?;
+    }
+    write_uint_into(f, i64::from(i).unsigned_abs())
 }
 
 /// Write `value` to exactly two decimal places, byte-for-byte identical to

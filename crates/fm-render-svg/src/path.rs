@@ -253,7 +253,7 @@ impl FmtNum {
             return out.write_str("0");
         }
         if n.fract() == 0.0 && n >= i32::MIN as f32 && n <= i32::MAX as f32 {
-            write!(out, "{}", n as i32)
+            crate::attributes::write_int_into(out, n as i32)
         } else {
             crate::attributes::write_fixed2(out, n)
         }
