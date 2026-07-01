@@ -1033,7 +1033,13 @@ fn parse_flowchart_document_items<'a>(
     header_direction: &mut Option<GraphDirection>,
     config: &ParserConfig,
 ) -> (Vec<FlowDocumentItem<'a>>, usize) {
-    let mut items = Vec::new();
+    // Pre-size to the number of remaining lines: each source line yields at most a small
+    // constant number of document items (usually exactly one node/edge), so this is a tight
+    // upper bound that removes the ~log2(N) reallocs the empty `Vec::new()` incurred while
+    // growing to hundreds/thousands of items on wide flowcharts. Recursive subgraph-body
+    // calls over-estimate (the body ends before end-of-input), but the unused tail capacity
+    // is never written, so its pages never fault — it costs address space, not RSS or time.
+    let mut items = Vec::with_capacity(lines.len().saturating_sub(*next_index));
     let mut unclosed_subgraphs = 0;
 
     while let Some((line_number, line)) = lines.get(*next_index).copied() {

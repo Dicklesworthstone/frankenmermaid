@@ -5755,3 +5755,30 @@
   must run local or pinned to one worker.
 
   Agent: cc
+
+### LANDED: pre-size the internal FlowDocumentItem Vec — parse reallocs -43%, parse bytes -4.9% (2026-07-01)
+- **Distinct from the edge-presize REVERT above.** That reverted lever grew an already-presized PUBLIC IR Vec
+  and *increased* bytes (over-reserve). This one presizes an un-presized CRATE-PRIVATE transient Vec and
+  *decreases* both reallocs and bytes — a strict Pareto improvement with zero downside.
+- **Lever:** `mermaid_parser::parse_flowchart_document_items` built its `Vec<FlowDocumentItem>` with
+  `Vec::new()` (capacity 0) and pushed one item per node/edge statement, so the wide corpus grew it to
+  hundreds/thousands of items through ~log2(N) doubling reallocs. Pre-size with
+  `Vec::with_capacity(lines.len().saturating_sub(*next_index))` — remaining input lines, a tight upper bound
+  (each line yields ~1 item). Recursive subgraph-body calls over-estimate, but the unused tail is never written
+  (pages never fault; costs address space, not RSS/time). Capacity-only → byte-identical output.
+- **MEASURED (deterministic counting-allocator A/B, load-immune — allocprobe, single parse):**
+  parse reallocs wide_16x32 **21 -> 12 (-43%)**, wide_12x24 19 -> 11, wide_8x16 17 -> 10; parse allocated
+  BYTES wide_16x32 **1,316,992 -> 1,252,592 (-4.9%)**, wide_12x24 707,784 -> 684,600, wide_8x16 319,856 ->
+  302,048 — BYTES drop because presize-to-exact beats the empty-Vec doubling overshoot (2048-cap for ~1472
+  items). Total parse alloc EVENTS 1608 -> 1599 (the reallocs are a subset).
+- **Time:** within tight-loop noise (free-list-confounded, as established above — interleaved 16x32 was 5/5,
+  ~1%); the single-parse real-world benefit (9 malloc/free + ~245 KB of doubling memcpy removed) is larger than
+  the loop shows but is not cleanly measurable here. Claimed on the DETERMINISTIC axis (reallocs/bytes), not a
+  time %.
+- **Byte-identical & GREEN:** 405 fm-parser lib tests pass; `svg_golden_snapshots_are_stable`,
+  `layout_golden_checksums_are_stable`, `frankentui_conformance` GREEN with NO re-bless; clippy `-D warnings`
+  clean.
+- **Verdict: LANDED.** A safe, contained (crate-private), zero-downside memory-traffic reduction on the
+  alloc-dominant parse phase — the load-immune currency the campaign uses when time is free-list-confounded.
+
+  Agent: cc
