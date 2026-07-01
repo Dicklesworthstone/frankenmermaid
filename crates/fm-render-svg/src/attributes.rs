@@ -327,6 +327,30 @@ const fn decimal_digits(mut value: usize) -> usize {
     digits
 }
 
+/// Two-digit ASCII pairs `"00".."99"` concatenated (200 bytes). The 2-digit group for a value
+/// `d` in `0..100` is `&DIGIT_PAIRS[d * 2 .. d * 2 + 2]`, and its low digit alone (for `d < 10`,
+/// no leading zero) is `&DIGIT_PAIRS[d * 2 + 1 .. d * 2 + 2]`. Emitting each group as a borrowed
+/// `&str` slice of this static lets `write_fixed2` avoid both the per-call stack byte buffer AND
+/// the `str::from_utf8` revalidation of digits it just produced — the latter measured at ~12% of
+/// coordinate-heavy render once the node/edge double-copy was removed. `#![forbid(unsafe_code)]`
+/// rules out `from_utf8_unchecked`, so slicing a known-ASCII static is the safe equivalent.
+const DIGIT_PAIRS: &str = "00010203040506070809101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899";
+
+/// Append `n` in decimal (no leading zeros) to `f`, two digits at a time via [`DIGIT_PAIRS`].
+fn write_uint_into<W: fmt::Write>(f: &mut W, n: u64) -> fmt::Result {
+    if n >= 100 {
+        write_uint_into(f, n / 100)?;
+        let d = (n % 100) as usize * 2;
+        f.write_str(&DIGIT_PAIRS[d..d + 2])
+    } else if n >= 10 {
+        let d = n as usize * 2;
+        f.write_str(&DIGIT_PAIRS[d..d + 2])
+    } else {
+        let d = n as usize * 2 + 1;
+        f.write_str(&DIGIT_PAIRS[d..d + 1])
+    }
+}
+
 /// Write `value` to exactly two decimal places, byte-for-byte identical to
 /// `write!(f, "{value:.2}")`, but without the general float-to-decimal formatting
 /// machinery — which dominates SVG serialization on coordinate-heavy diagrams.
@@ -335,6 +359,8 @@ const fn decimal_digits(mut value: usize) -> usize {
 /// (ties to even, matching `{:.2}`) reproduces the exact decimal rounding of the
 /// underlying `f32`. Values too large to scale into `i64`, and any non-finite input,
 /// fall back to the standard formatter so output stays identical in every case.
+/// The integer part and the always-2-digit fraction are streamed straight into `f` as
+/// borrowed `DIGIT_PAIRS` slices (no stack buffer, no `from_utf8`).
 /// Verified byte-identical against `{:.2}` over a dense value sweep in the tests.
 pub(crate) fn write_fixed2<W: fmt::Write>(f: &mut W, value: f32) -> fmt::Result {
     if !value.is_finite() || value.abs() >= 9.0e15 {
@@ -344,34 +370,16 @@ pub(crate) fn write_fixed2<W: fmt::Write>(f: &mut W, value: f32) -> fmt::Result 
     let scaled = (f64::from(value) * 100.0).round_ties_even();
     let magnitude = (scaled as i64).unsigned_abs();
     let int_part = magnitude / 100;
-    let frac_part = magnitude % 100;
+    let frac_part = (magnitude % 100) as usize;
 
-    // Format `[-]int_part.frac_part` (frac always 2 digits) right-to-left into a stack
-    // buffer, then write once — avoiding the fmt::Formatter dispatch of write! on this
-    // per-coordinate hot path. The early-return guard bounds int_part below 9e15 (16
-    // digits), so sign + 16 digits + '.' + 2 frac fit comfortably in 24 bytes.
-    let mut buf = [0u8; 24];
-    let mut idx = buf.len();
-    idx -= 1;
-    buf[idx] = b'0' + (frac_part % 10) as u8;
-    idx -= 1;
-    buf[idx] = b'0' + (frac_part / 10) as u8;
-    idx -= 1;
-    buf[idx] = b'.';
-    let mut n = int_part;
-    loop {
-        idx -= 1;
-        buf[idx] = b'0' + (n % 10) as u8;
-        n /= 10;
-        if n == 0 {
-            break;
-        }
-    }
+    // `[-]int_part.frac_part`, frac always 2 digits, in the same order the old right-to-left
+    // stack-buffer build produced — byte-identical, just streamed instead of buffered+revalidated.
     if value.is_sign_negative() {
-        idx -= 1;
-        buf[idx] = b'-';
+        f.write_str("-")?;
     }
-    f.write_str(core::str::from_utf8(&buf[idx..]).unwrap_or(""))
+    write_uint_into(f, int_part)?;
+    f.write_str(".")?;
+    f.write_str(&DIGIT_PAIRS[frac_part * 2..frac_part * 2 + 2])
 }
 
 /// Write `s` into `f` with XML attribute-value escaping (`& < > " '`), copying

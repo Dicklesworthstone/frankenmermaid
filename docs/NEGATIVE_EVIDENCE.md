@@ -5862,3 +5862,27 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
      fails goldens and is reverted.
 
   Agent: cc
+
+### LANDED: write_fixed2 streams DIGIT_PAIRS &str slices, no byte buffer / no from_utf8 — render −20% (2026-07-01)
+- **The from_utf8 ceiling that was ~0 last cycle is now real.** After the render double-copy was removed
+  (9bc7a29, render 960→522 µs), a fresh perf shows number formatting is the new #1 render cost:
+  `write_fixed2` 22% self + its internal `str::from_utf8` 15% self = ~37% of render. Re-running the
+  `from_utf8_unchecked` ceiling on the *fast-path* render (not the old double-copy path that masked it):
+  527 → 462 µs = **−12.5%** clean — so the validation IS a real cost now.
+- **Safe fix (crate is `#![forbid(unsafe_code)]`, so `from_utf8_unchecked` is out):** add a 200-byte
+  `const DIGIT_PAIRS: &str = "0001…9899"` and emit the integer part (recursive, two digits at a time) and the
+  always-2-digit fraction as borrowed `&DIGIT_PAIRS[d*2..d*2+2]` slices straight into `f`. This drops BOTH the
+  per-call `[u8; 24]` stack buffer AND the `from_utf8` revalidation. Arithmetic (`round_ties_even`, magnitude,
+  int/frac split, sign) is UNCHANGED, so output is byte-identical to `{:.2}`.
+- **MEASURED (interleaved A/B, private binaries):** render wide_16x32 **~527 → ~422 µs (−20%, 10/10 rounds)** —
+  beats the −12.5% from_utf8-only ceiling because the byte-buffer fill is also gone. Full pipeline wide_16x32
+  **1736 → 1631 µs (−6%, 8/8)**. Smaller 100-node flowchart render **~146 → ~122 µs (−16%)**. Benefits EVERY
+  diagram type (write_fixed2 is the per-coordinate formatter everywhere), not just flowcharts.
+- **Byte-identical:** `attributes::tests::write_fixed2_byte_identical_to_std_format` (exhaustive vs `{:.2}`) +
+  `golden_svg_test` + `golden_layout_test` + `frankentui_conformance` GREEN, NO re-bless; 234 fm-render-svg lib
+  tests pass; clippy `-D warnings` clean.
+- **Verdict: LANDED.** A prior ~0-gain lever ([[project_parse_render_dig_negatives]], the from_utf8 ceiling)
+  became a real win once a bigger cost (the double-copy) was removed and stopped masking it — re-measure
+  "dead" ceilings after each adjacent landing.
+
+  Agent: cc
