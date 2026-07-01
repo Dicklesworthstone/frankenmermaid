@@ -5821,3 +5821,33 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   inherent) + `::new` rebuild (6%, inherent per layout) + the first string sort above. All inherent.
 
   Agent: cc
+
+### MEASURED OPPORTUNITY (not reverted — scoped for a land): render node/edge double-copy = ~9% pipeline (2026-07-01)
+- **This upgrades the "architectural, unquantified" render double-copy above to a MEASURED ceiling with a
+  concrete, low-risk land plan.** Worth a dedicated cycle; too large to complete + verify byte-identical inside
+  a 60-min budget, so surfaced rather than half-landed.
+- **Measured ceiling (interleaved render A/B, private binaries):** a throwaway build that skips *only* the two
+  `doc.child(Element::raw_svg(edge_svg|node_svg))` pushes (nodes/edges still fully render into their buffers —
+  only the final serialization `push_str` copy is removed) runs render wide_16x32 **966.6 → 769.3 µs min
+  (−20%), median ~980 → ~800 (−18%).** Render is 48% of the wide pipeline → **~9% full-pipeline**. Output is
+  invalid in the hack (no nodes/edges), but the delta isolates the copy cost exactly.
+- **Root:** `SvgDocument::write_to_string` (document.rs) serializes children via `child.write_to_string(out)`;
+  for `ElementKind::Raw` that is `output.push_str(raw_svg)` (element.rs:589) — copying the pre-rendered
+  `edge_svg` (~328 KB) + `node_svg` (~197 KB) a SECOND time (they were already written once by
+  `render_edges_serial`/`render_nodes_serial`). `__memcpy` in `write_to_string` = 15-20% of render.
+- **Land plan (byte-identical, goldens gate it):**
+  1. Add `SvgDocument::to_string_with_body(capacity, body: impl FnOnce(&mut String)) -> String` that emits
+     open-tag + title/desc/style/defs + `self.children` exactly as `write_to_string`, then calls `body(&mut out)`
+     at the child position, then `</svg>`.
+  2. In `render_layout_to_svg`, gate a FAST PATH on "no children fall between edge_svg and node_svg or after
+     node_svg": for a flowchart that means no bundle labels (`layout.edges.iter().all(|e| e.bundle_count <= 1)`),
+     not ER (`ir.diagram_type != Er`), no sequence mirror headers / C4 legend (both diagram-type gated). On the
+     fast path, do NOT `.child(raw_svg(edge_svg))`/`.child(raw_svg(node_svg))`; instead build `doc` with only the
+     prefix children and call `doc.to_string_with_body(hint, |out| { render_edges_serial(out, …); render_nodes_serial(out, …); })`
+     — edges/nodes stream straight into the final buffer, no intermediate `edge_svg`/`node_svg` String, no second
+     copy. Keep the current path verbatim as the fallback for every non-flowchart / bundled case.
+  3. Byte-identical because `edge_svg == render_edges_serial(out)` emitted at the same position; verify with
+     `golden_svg_test` + `frankentui_conformance` (flowchart cases) GREEN, NO re-bless. Risk is bounded — a break
+     fails goldens and is reverted.
+
+  Agent: cc
