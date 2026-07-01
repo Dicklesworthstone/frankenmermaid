@@ -5713,3 +5713,45 @@
   serial-win zone without re-measuring the crossover on the target hardware.
 
   Agent: cc
+
+### write_fixed2 from_utf8 revalidation — CEILING ~0-gain, NOT PURSUED (2026-07-01)
+- **Lever considered:** `attributes::write_fixed2` builds the fixed-2-decimal digits into a `[u8; 24]` stack
+  buffer (all ASCII) then does `f.write_str(core::str::from_utf8(&buf[idx..]).unwrap_or(""))`. A fresh `perf`
+  of the now-serial render (post-4cc0bb1) attributed **7.4% self** to `core::str::converts::from_utf8` inside
+  this hot per-coordinate function — an apparent revalidation of bytes we just wrote as ASCII.
+- **Why it looked promising:** replacing with `from_utf8_unchecked` would skip validation entirely.
+- **CEILING measured (temporary `#![allow(unsafe_code)]` + `from_utf8_unchecked`, profharness render 16x32):**
+  938.9 -> 901-939 µs = **~0% within noise.** The perf "7.4% self" was mis-attribution (from_utf8's ASCII
+  fast-path on ~7-byte slices is cheap; the sampler parked cycles on the leaf symbol on the hot path). Removing
+  it does not move render time.
+- **Blocker anyway:** `fm-render-svg` is `#![forbid(unsafe_code)]`; `from_utf8_unchecked` is off the table, and
+  the only safe rewrites (write_char-per-digit, static digit-pair `&str` slicing) add per-call dispatch with no
+  ceiling headroom to pay for it.
+- **Verdict:** ~0-gain (measured at the theoretical ceiling before any real work). **Do-not-retry:** the
+  `write_fixed2` residual self-time is the float arithmetic (`round_ties_even`, div/mod), not the from_utf8.
+  Reverted the temporary allow-unsafe; tree restored byte-for-byte.
+
+  Agent: cc
+
+### with_capacity_hint edges = input_lines (vs input_lines/3) — REVERTED, sub-bar + free-list-confounded (2026-07-01)
+- **Lever:** `IrBuilder::with_capacity_hint` presizes `ir.edges`/`ir.graph.edges` to `input_lines / 3`. Edge-heavy
+  graphs have edges ≈ 0.65·lines (a wide fan-out = ~2 edges/node), so this under-shoots and forces one mid-parse
+  `Vec<IrEdge>` realloc. `perf` of parse flagged the `push_edge -> grow_one -> realloc` path at ~8%. Fix: reserve
+  `input_lines` (tight upper bound; unused tail never written so its pages never fault).
+- **Deterministic counting-allocator A/B (single parse, load-immune — the campaign's real currency):** removes
+  exactly **2 realloc events** (`self.edges` + `self.graph.edges`): wide_16x32 reallocs 21 -> 19, wide_12x24
+  19 -> 17, wide_8x16 17 -> 15; total alloc EVENTS 1608 -> 1606 = **-0.12%** (allocs unchanged, +13-17% reserved
+  BYTES from the over-alloc). That is far below the campaign's event-reduction bar (prior wins were -16%..-78%).
+- **Time A/B is UNTRUSTWORTHY here:** the tight-loop bench parses the same input and frees between iters, so
+  glibc free-list state — not the realloc — dominates. Interleaved profharness showed physically-impossible,
+  self-contradictory swings: wide_12x24 "52% faster", wide_8x16 "72% SLOWER", wide_16x32 "~5% faster" — all
+  reproducible, all artifacts (allocprobe proves fix has FEWER reallocs on 8x16 too, so the 8x16 "regression" is
+  pure free-list noise). A one-realloc avoidance cannot move parse ±50%.
+- **Verdict: REVERTED (~0-gain by events, unmeasurable-clean by time).** Same class as the reverted `write_int`:
+  a profile-flagged change with no clean A/B. The realloc mechanism is real but tiny (2 memcpys of the edge
+  array ≈ ~1% of a single real parse) and the campaign counts EVENTS, where it is -0.12%. **Do-not-retry** unless
+  a future change makes parse edge-realloc a measurable EVENT or clean-TIME fraction. rch caveat noted: criterion
+  `--save-baseline`/`--baseline` do NOT survive across rch workers (per-worker target dirs) — baseline compare
+  must run local or pinned to one worker.
+
+  Agent: cc
