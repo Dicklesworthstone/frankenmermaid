@@ -5782,3 +5782,42 @@
   alloc-dominant parse phase — the load-immune currency the campaign uses when time is free-list-confounded.
 
   Agent: cc
+
+### build_tree_layout_structure integer-rank sort keys — REVERTED, ~0-gain (2026-07-01)
+- **Lever:** `build_tree_layout_structure` runs three `sort_by(&cmp_by_id)` sorts (the all-nodes sort, the
+  per-node outgoing-neighbor sorts, and the per-node children-segment sorts), all ordering by
+  `ids[l].cmp(ids[r]).then(l.cmp(r))` — a per-comparison `&str::cmp`. perf showed the `sort_by::<closure#1>`
+  quicksort/smallsort symbols summing to ~5% of layout. Hypothesis: compute a dense `u32 rank` once from a
+  single string sort, then drive the many small per-node sorts by integer `rank` (a bijection of the (id,index)
+  order → byte-identical) to turn thousands of string compares into `u32` compares.
+- **MEASURED (interleaved layout time A/B, private binaries to dodge shared-target-dir contention):** 16x32
+  layout base_min 268.5 → fix_min 265.6 µs = **~1%, fix faster 7/12 rounds — within noise.** Byte-identical
+  confirmed authoritatively: `golden_layout_test` (position checksums) + `golden_svg_test` +
+  `frankentui_conformance` all GREEN.
+- **Why ~0:** the dominant sort is the single 512-element `sorted_nodes` string sort (~4600 compares), which
+  MUST stay string-based (rank is derived FROM it — circular). The per-node sorts converted to integer are only
+  ~2000 compares of 2-3-element slices whose cost is call/setup overhead, not comparison. Converting ~30% of the
+  compares moved ~1%.
+- **Verdict: REVERTED (~0-gain).** Do-not-retry: the layout sort cost is the irreducible first string sort.
+
+### FRONTIER MAP — the contained-lever frontier is closed; remaining wins are architectural/owner-gated (2026-07-01)
+Fresh `perf` of all three phases at HEAD 152d936 (render 48% of wide_16x32 pipeline TIME, parse 38%, layout 14%)
+confirms every top lever is now either a public-API refactor or genuinely inherent — no clean autonomous
+≥3% lever remains. Recorded so cycles stop re-scanning the same leaves:
+- **RENDER (biggest, 48%): the node/edge output double-copy = 15% of render.** `render_node`/`render_edge`
+  stream into intermediate `node_svg`(~197 KB)/`edge_svg`(~328 KB) buffers (already presized, no realloc — the
+  6% memmove is NOT these), which `Element::write_to_string` then `push_str`s a SECOND time into the final doc
+  String (`__memcpy` 15.27%). Killing it needs rendering directly into the final buffer at serialization time —
+  an `Element` deferred-closure variant (needs an `Element` lifetime + drops the `#[derive(Clone)]` + changes
+  `write_to_string` to by-value) or an incremental streamed serializer. Both are architectural rewrites of the
+  SvgDocument/Element model, high byte-identity risk. `write_fixed2` self-time (13%) is the float arithmetic
+  (`round_ties_even`, div/mod) — inherent; its `from_utf8` was already proven ~0 (see [[project_parse_render_dig_negatives]]).
+- **PARSE (38%): large-struct moves/drops.** `IrEdge` = 256 B (120 B is five `Option<String>` unused by
+  flowcharts) drives `ptr::write::<IrEdge>` (5%) + realloc copies; `IrNode` = 608 B (inlined `Option<...Meta>`)
+  drives `drop_glue` (7.8%). Boxing the rare fields → `Option<Box<…>>` shrinks both ~2× but touches many public
+  `pub` fields (`guard` 60 refs; class/req/c4_meta 38) = breaking-API refactor, owner sign-off (serde is safe:
+  `Box<T>` serializes as `T`). See [[project_parse_presize_and_struct_blocker]].
+- **LAYOUT (14%): edge-routing spatial index.** `ObstacleSpatialIndex::query_segment` cell-scan (13% self,
+  inherent) + `::new` rebuild (6%, inherent per layout) + the first string sort above. All inherent.
+
+  Agent: cc
