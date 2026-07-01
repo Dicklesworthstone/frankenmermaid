@@ -5907,3 +5907,22 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   profile balance they were measured on — re-run them after every adjacent render landing.
 
   Agent: cc
+
+### LANDED: byte-classification LUT for the fast-edge-parts forbidden-char scan — parse −2-3% (2026-07-01)
+- With render heavily harvested (960→~340 µs over 9bc7a29/16ed6d3/2e9d626), parse is now ~50% of the wide
+  pipeline. Its biggest CONTAINED compute leaf is `parse_fast_simple_flowchart_edge_parts` (4.85% self); the
+  hottest part is the per-statement "reject if it contains a shape/quote/label byte" scan, previously a 12-way
+  `matches!(byte, b'[' | b']' | … | b',')` compare chain per byte.
+- **Fix:** a `static FAST_EDGE_REJECT: [bool; 256]` (const-built) — one indexed load per byte instead of the
+  compare chain. Byte-identical classification (same 13 bytes map to reject).
+- **MEASURED (interleaved A/B, private binaries; load-fluctuating box):** parse wide_16x32 min 742→718 µs at
+  low load (−3.2%), 731→720 at higher load (−1.6%); **fix faster in ~21/26 rounds across runs** (direction
+  robust; magnitude compresses under CPU contention). A Pareto-safe change — a table lookup with no downside.
+- **Byte-identical:** 405 fm-parser lib tests + `golden_svg_test` + `golden_layout_test` +
+  `frankentui_conformance` GREEN, NO re-bless.
+- **Verdict: LANDED.** Also negative evidence recorded alongside: an iterative **byte-buffer + `from_utf8`**
+  rewrite of `write_uint_into` (to drop the `&DIGIT_PAIRS[d..d+2]` char-boundary checks) measured **~30% SLOWER**
+  (render 342→446 µs, 0/12) — `from_utf8` is expensive even on ≤20-byte buffers, so the borrowed-`&str`-slice
+  DIGIT_PAIRS writer (16ed6d3) is already optimal. Do-not-retry the buffer form.
+
+  Agent: cc

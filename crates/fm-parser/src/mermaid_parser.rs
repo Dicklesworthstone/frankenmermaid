@@ -1255,30 +1255,28 @@ fn parse_fast_simple_flowchart_edge_ast(statement: &str) -> Option<FlowAst> {
     })
 }
 
+/// Byte-classification table: `true` for the bytes whose presence forces a flowchart statement off
+/// the fast edge path (bracket/paren/brace shapes, quotes, `|` edge labels, `&` node lists, `:`/`,`).
+/// A single indexed load per byte replaces the 12-way `matches!` compare chain on this hot scan.
+static FAST_EDGE_REJECT: [bool; 256] = {
+    let mut t = [false; 256];
+    let rejects = [
+        b'[', b']', b'(', b')', b'{', b'}', b'"', b'\'', b'`', b'|', b'&', b':', b',',
+    ];
+    let mut i = 0;
+    while i < rejects.len() {
+        t[rejects[i] as usize] = true;
+        i += 1;
+    }
+    t
+};
+
 fn parse_fast_simple_flowchart_edge_parts(statement: &str) -> Option<(&str, ArrowType, &str)> {
     // ASCII byte-level trim (auto-vectorizable) instead of the Unicode `char::is_whitespace` scan.
     // Byte-identical here: any non-ASCII left after the trim is rejected by `is_fast_flow_identifier`
     // below, falling back to the slow path which uses the Unicode `.trim()`.
     let trimmed = statement.trim_ascii();
-    if trimmed.is_empty()
-        || trimmed.bytes().any(|byte| {
-            matches!(
-                byte,
-                b'[' | b']'
-                    | b'('
-                    | b')'
-                    | b'{'
-                    | b'}'
-                    | b'"'
-                    | b'\''
-                    | b'`'
-                    | b'|'
-                    | b'&'
-                    | b':'
-                    | b','
-            )
-        })
-    {
+    if trimmed.is_empty() || trimmed.bytes().any(|byte| FAST_EDGE_REJECT[byte as usize]) {
         return None;
     }
 
