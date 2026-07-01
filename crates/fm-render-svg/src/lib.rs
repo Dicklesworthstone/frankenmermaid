@@ -2689,7 +2689,16 @@ fn render_layout_to_svg(
     let mut edge_svg = String::with_capacity(layout.edges.len().saturating_mul(480));
     #[cfg(not(target_arch = "wasm32"))]
     {
-        const PARALLEL_EDGE_THRESHOLD: usize = 256;
+        // Threshold 4096, not 256: after the direct-into-buffer serial edge writer (c282ff1) the
+        // serial path is so cheap that std::thread spawn + join (~15-30 µs/thread on native, paid
+        // twice/render since nodes fan out too) DOMINATES the parallel win below the crossover.
+        // Deterministic time A/B on the wide head-to-head shapes (64-core box, this bench machine):
+        // serial BEATS 8-thread render by ~37% at 16x32 (992 edges), ~19% at 24x48 (2256 edges);
+        // parallel only pulls ahead past ~4032 edges (32x64, +4.5%) and is a genuine ~12-13% win
+        // only on huge graphs (40x80 = 6320 edges, 48x96 = 9120 edges). Gating at 4096 keeps the
+        // entire realistic corpus — every 8x16/12x24/16x32/24x48 diagram — on the fast serial path
+        // while preserving the parallel win for the rare 3000+-node diagram. Byte-identical output.
+        const PARALLEL_EDGE_THRESHOLD: usize = 4096;
         let edge_count = layout.edges.len();
         if edge_count >= PARALLEL_EDGE_THRESHOLD {
             let threads = std::thread::available_parallelism()
@@ -2870,7 +2879,14 @@ fn render_layout_to_svg(
     // takes the serial path — so small/medium renders and every browser render are unchanged.
     #[cfg(not(target_arch = "wasm32"))]
     {
-        const PARALLEL_NODE_THRESHOLD: usize = 256;
+        // Threshold 2048, not 256: since the direct-into-buffer serial node writer (5e42d39) the
+        // serial path out-runs the parallel one until the node count is large enough to amortize the
+        // std::thread spawn + join cost. Deterministic time A/B on the wide head-to-head shapes
+        // (64-core box): serial BEATS 8-thread render by ~37% at 16x32 (512 nodes), ~19% at 24x48
+        // (1152 nodes); the crossover sits at ~2048 nodes and parallel is a real ~12-13% win only on
+        // huge graphs (40x80 = 3200 nodes). Gating at 2048 keeps the whole realistic corpus on the
+        // fast serial path while retaining parallelism for the rare very large diagram. Byte-identical.
+        const PARALLEL_NODE_THRESHOLD: usize = 2048;
         let node_count = layout.nodes.len();
         if node_count >= PARALLEL_NODE_THRESHOLD {
             let threads = std::thread::available_parallelism()

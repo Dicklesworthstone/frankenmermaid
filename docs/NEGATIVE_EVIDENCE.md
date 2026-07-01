@@ -5679,3 +5679,37 @@
   5577->1608 + layout 4279->2793 = ~29081->4682 (-84%).
 
   Agent: cc
+
+### LANDED: raise parallel-render thresholds -- serial now wins the whole realistic corpus, render TIME -35% (2026-07-01)
+- **Not an alloc lever -- a TIME lever.** The alloc campaign had driven render allocs to the floor (281 for
+  wide_16x32) and moved on to layout (2793 allocs, the count leader). But a fresh `perf record` of the render
+  phase shows the alloc count was the WRONG proxy: at wide_16x32 render is **63% of pipeline TIME** (~1550 µs;
+  parse 30%, layout 11%) with almost no allocs, and **25% of that render time was `pthread_create`/`__clone3`**
+  -- the node/edge parallel fan-out (`std::thread::scope`, threshold 256, 8 threads) spawning 16 OS threads
+  *per render* on this 64-core box, each doing only ~64 nodes / ~124 edges of the now-ultra-cheap serial work.
+- **Root cause = a stale crossover.** Parallel render was landed (3ea134d node, 70af943 edge) when the serial
+  path was slower; it measured a win on a synthetic 1000n/2000e shape. The subsequent direct-into-buffer serial
+  writers (5e42d39 node -78% allocs, c282ff1 edge -42% allocs) made serial so cheap that thread spawn + join now
+  DOMINATES the parallel gain across the entire head-to-head corpus. The 256 threshold rots into a net regression.
+- **Fix (LANDED):** `PARALLEL_NODE_THRESHOLD` 256 -> 2048, `PARALLEL_EDGE_THRESHOLD` 256 -> 4096. Two constants;
+  the parallel code path is UNCHANGED and still available for genuinely huge (3000+-node) diagrams where it wins.
+- **MEASURED (deterministic time A/B, isolated toggle, same binary/machine, black_box loop):** render
+  wide_16x32 **1522 -> 984 µs/iter (-35%)**; FULL pipeline wide_12x24 **2176 -> 995 µs (-54%)**, wide_16x32
+  **2970 -> 1895 µs (-36%)**. **Control wide_8x16 (128n/224e, below BOTH old & new thresholds -> no path change):
+  505.6 -> 506.3 µs = unchanged**, isolating the effect to the path selection alone. Crossover sweep (serial vs
+  8-thread): serial wins 37% @16x32, 19% @24x48; parallel wins only +4.5% @32x64 (2048n) and +12-13% @40x80/48x96.
+  Official criterion AFTER (`pipeline_bench`, rch, per-crate): `full_pipeline_wide/16x32` 2.85 ms,
+  `wide_stages/render/16x32` 1.26 ms.
+- **Ratio vs ORIG:** Mermaid 11.12.0 `full_pipeline_wide_16x32` ≈ 2830-3948 ms (pinned Chromium comparator in
+  `evidence/ledger/mermaid-js-head-to-head.toml`); frankenmermaid criterion 2.85 ms -> **~1000x-1385x faster**,
+  materially up from the prior ~310x now that ~1/3 of the wide pipeline's wall-clock is gone.
+- **Byte-identical:** serial output == parallel output verified via sha256 across 16x32/24x48/32x64/40x80
+  (the parallel path was authored to concatenate per-chunk buffers in order). `svg_golden_snapshots_are_stable`,
+  `layout_golden_checksums_are_stable`, `frankentui_conformance` GREEN with NO re-bless; 234 fm-render-svg lib
+  tests pass; clippy `-D warnings` clean.
+- **Verdict: LANDED.** The "DEAD/ROTTED gate" meta-lesson applied in reverse: a LIVE optimization whose gate
+  went stale under later wins, silently costing 35% of render on every realistic diagram. `perf` on TIME (not the
+  alloc proxy) surfaced it. Do-not-regress: keep the parallel path; do NOT lower the thresholds back toward the
+  serial-win zone without re-measuring the crossover on the target hardware.
+
+  Agent: cc
