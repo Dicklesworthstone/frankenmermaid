@@ -6142,3 +6142,40 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   named it and a table lookup kills it. Profile the phase, don't assume the last commit closed it.
 
   Agent: BlackThrush
+
+### REVERTED: path-writer `push(char)` → `push_str(1-byte literal)` — render regressed (2026-07-02)
+- **Lever:** in `path.rs` `write_point`/`write_cubic`/`build_smooth_path_by_into`, convert the SVG
+  path-data separators from `output.push(' '/','/'C'/…)` to `push_str(" "/","/…)` and change the command
+  `prefix` param from `char` to `&str`. Hypothesis: at the crate's `opt-level = "z"`, `String::push`
+  (`char::encode_utf8` + `push_str`) showed as ~10% of render self-time (two `String::push` symbols in a
+  symbolized `perf`), so a direct `extend_from_slice` should be cheaper.
+- **Baseline → After (criterion, same machine/target, `wide_stages/render`, vs committed e79a7bd):** 12x24
+  **595.90 µs → 568.23 µs +4.27% REGRESSED (p=0.00)**; 16x32 +0.90% (p=0.49, no change); 8x16 −3.16%
+  (p=0.08, not significant). Net regression/wash.
+- **Verdict:** regression. `push(const char)` is apparently already lowered to a 1-byte write here; adding a
+  `&str` prefix param introduces a length-carrying slice + `push_str` bounds path that costs more than it
+  saves on the common short 2-point edge. Reverted (`git checkout path.rs`), byte-identical either way.
+- **Do-not-retry:** the `String::push`/`Vec::reserve`/`append_elements` render self-time is the *inherent*
+  cost of producing the ~534 KB SVG one small write at a time (render allocs are CONSTANT ~202, buffer is
+  over-hinted so it never reallocs — the memmove is byte-writing, not growth). Swapping `push`↔`push_str` does
+  not move it.
+
+### FRONTIER NOTE: three-phase symbolized profile — remaining render/layout levers are inherent (2026-07-02)
+- Same-machine `wide_stages/16x32` split: **render 52% / parse 32% / layout 16%.** Symbolized `perf`
+  (`CARGO_PROFILE_BENCH_DEBUG=2` + `--profile-time` + `perf … --call-graph dwarf`) of each phase:
+  - **render:** after the `check_range` win (e79a7bd, −7.5%), self-time is `Vec::append_elements`/memmove
+    (~30% + ~20%, the inherent 534 KB byte production), `write_fixed2`+`write_uint_into` (~13%, number
+    formatting), `Vec::reserve` (~6%), `String::push` (~10%). No non-inherent lever found; the `push_str`
+    swap above regressed.
+  - **layout:** `build_edge_paths_with_orientation` routing (the `find_map` seen in perf is just
+    `filter_map::collect`, not an O(E²) bug — `endpoint_node_index` is O(1)), `ObstacleSpatialIndex::query_segment`
+    (~10%, already buffer-reusing + generation-counter `seen`, no per-call alloc), `_int_malloc`/`_int_free`
+    (~12%, the inherent per-edge route-output `Vec<Point>`), `ObstacleSpatialIndex::new` (~6%, once/layout).
+    Routing was already `−42%/−25%`-optimized via the obstacle index; nothing clean left.
+  - **parse:** struct-shrink harvested (IrNode 608→184 B, IrEdge 256→96 B), fast-pathed (FastNode/FastEdge,
+    LUT byte-classification, presize, hash-keyed dedup), and only ~10% of full-pipeline wall time anyway.
+- **NOT retried:** batched stack-buffer + `str::from_utf8` number writing — already reverted twice (see the
+  `write_fixed2 from_utf8 CEILING` entries), and the `check_range` landing made the streaming path *faster*,
+  raising the bar batching would have to clear. Re-treading it is what this ledger exists to prevent.
+
+  Agent: BlackThrush
