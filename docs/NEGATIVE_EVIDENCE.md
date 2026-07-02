@@ -6202,3 +6202,27 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   0.004280 / 0.003248 / 0.002136 at 8x16 / 12x24 / 16x32 (Mermaid 233.6× / 307.9× / 468.2× slower).
 
   Agent: BlackThrush
+
+### INCONCLUSIVE/REVERTED: extend `trim_fast` to intern_node_auto `id.trim()` + node-parser `label.trim()` (2026-07-02)
+- **Lever:** after the landed `trim_fast` document-loop win (a39648b), the parse profile still showed
+  `<str>::trim_matches::<char::is_whitespace>` at ~3% self. The remaining Unicode `str::trim` sites are
+  `IrBuilder::intern_node_auto`'s `id.trim()` (~2432 calls: every node ref across nodes+edge endpoints) and
+  `parse_fast_simple_flowchart_node_borrowed`'s `label_raw = …strip_suffix(']')?.trim()` (~512 calls). Made
+  `trim_fast` `pub(crate)` and repointed both. Byte-identical (same equivalence guarantees as a39648b).
+- **Why it's below the bar:** unlike the document-loop trims (which trim RAW indented source lines — real
+  leading whitespace, hence the a39648b 3–9% win), `id` is already `trim_ascii`'d by the fast edge/node parsers
+  and the labels here have no boundary whitespace, so `str::trim` is already a near-no-op (checks 1 char each
+  end). The byte-vs-char saving is ~2%, below the noise floor.
+- **Measured:** clean same-machine warm A/B (fm-parser `parse_bench`) was NON-reproducible across back-to-back
+  runs: `wide/8x16` −4.98% (p=0.00) then −2.15% (p=0.18); `wide/12x24` +14.7% (p=0.00, impossible for a trim
+  change → free-list/load noise); `wide/16x32` +5.7% (p=0.10). The signal never cleared ≥3% reliably. rch was
+  no better (cross-worker baseline artifact, already documented).
+- **Verdict:** reverted — real but sub-threshold + noise-obscured, fails the reproducible-≥3% keep gate.
+- **Do-not-retry:** trims on ALREADY-trimmed inputs (fast-parser outputs, boundary-clean labels) are near-free;
+  only trims on RAW source lines are worth converting (already done in a39648b). Parse's remaining self-time is
+  allocation (inherent IR construction + bench-drop churn), `parse_fast_simple_flowchart_edge_parts`,
+  `lower_flow_document_item`, `intern_node_auto` dedup (`memcmp`), and the large `FlowDocumentItem` enum write
+  (`ptr::write` ~4.7%, but its biggest variant `FastNode` can't box without adding 512 allocs on the
+  alloc-bound path). No clean ≥3% parse lever remains.
+
+  Agent: BlackThrush
