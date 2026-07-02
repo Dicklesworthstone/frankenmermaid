@@ -2645,7 +2645,21 @@ behavior_proof = "Full-SVG dump across 9 diagram types byte-identical (hardware 
 "full_pipeline_profharness_baseline_instructions" = 93387538443
 "full_pipeline_profharness_v2_instructions" = 88399345300
 "full_pipeline_instructions_delta_pct" = -5.3
+# CANONICAL rch confirmation (release opt=3+mimalloc+fat-LTO, same worker hz2 sequential,
+# baseline x86-64 vs -C target-cpu=x86-64-v2). WEAKER/NOISIER than the profharness task-clock:
+"rch_full_pipeline_wide_8x16_baseline_us" = 224.73
+"rch_full_pipeline_wide_8x16_v2_us" = 221.58
+"rch_full_pipeline_wide_8x16_delta_pct" = -1.4
+"rch_full_pipeline_wide_8x16_verdict" = "within noise (overlapping CIs)"
+"rch_full_pipeline_wide_12x24_baseline_us" = 484.59
+"rch_full_pipeline_wide_12x24_v2_us" = 458.34
+"rch_full_pipeline_wide_12x24_delta_pct" = -5.4
+"rch_full_pipeline_wide_12x24_verdict" = "real, non-overlapping CIs"
+"rch_full_pipeline_wide_16x32_baseline_us" = 851.34
+"rch_full_pipeline_wide_16x32_v2_us" = 827.64
+"rch_full_pipeline_wide_16x32_delta_pct" = -2.8
+"rch_full_pipeline_wide_16x32_verdict" = "within noise (overlapping CIs)"
 
 [positive_measurement_target_cpu_x86_64_v2_2026_07_02.decision]
-status = "keep_pending_rch_confirmation"
-rationale = "Deterministic profharness A/B: -5.3% instructions (zero variance = real work removed: software rint/floorf -> hardware roundsd/floorss) and -4.7% task-clock, byte-identical. x86-64-v2 (SSE4.1, ~2009+) is a near-universal safe baseline required by modern distros. PORTABILITY: raises min runtime CPU to SSE4.1 (surfaced in .cargo/config.toml; trivially revertible by deleting the file). NOTE: canonical rch full_pipeline_wide opt=z/opt=3 A/B was NOT captured this turn (HEAD-freeze interrupted the BEFORE run); follow-up: rch bench before/after same-worker-sequential with RUSTFLAGS='-C target-cpu=x86-64-v2'."
+status = "keep"
+rationale = "CORRECTION to f49bf26's '-5%' headline: the deterministic profharness A/B is solid (-5.3% instructions zero-variance = real work removed, software rint/floorf -> hardware roundsd/floorss; -4.7% task-clock), and BYTE-IDENTICAL. But the CANONICAL rch time delta (release fat-LTO) is smaller/noisier: -5.4% at 12x24 (non-overlapping CIs) but only -1.4%/-2.8% at 8x16/16x32 (within noise). So the real time win is ~-3% avg (fat-LTO + OoO execution absorb much of the -5.3% instruction reduction). Kept: byte-identical, no regression, clears >=3% on 12x24 with a machine-independent -5.3% instruction floor, and x86-64-v2 is a safe near-universal baseline. Honest magnitude: ~-3% time / -5.3% instrs, NOT the -5% the commit implied. PORTABILITY: raises min runtime CPU to SSE4.1 (~2009+), revertible by deleting .cargo/config.toml."
