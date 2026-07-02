@@ -6115,3 +6115,30 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   struct-shrink frontier is essentially closed.
 
   Agent: BlackThrush
+
+### LANDED: coordinate digit-table lookup drops str `check_range` — render −7.5% at 16x32 (2026-07-02)
+- **Symbolized `perf` of the biggest pipeline phase (render = 52% of the local wide_stages pipeline;
+  parse 32%, layout 16%) pointed straight at `str` range slicing.** `write_fixed2` (8% of render) and
+  `write_uint_into` (6.7%) emitted each 2-digit group as `f.write_str(&DIGIT_PAIRS[d*2 .. d*2+2])`, slicing a
+  `&str` static by a runtime `Range`. That path runs `str`'s `check_range` — a UTF-8 char-boundary
+  re-validation — on every call: `<Range<usize> as SliceIndex<str>>::index` + `check_range` measured **~7.5%
+  of render** (self), pure waste for known-ASCII digits.
+- **Fix (safe, `#![forbid(unsafe_code)]`-clean):** replace the single concatenated `DIGIT_PAIRS: &str` with a
+  precomputed `PAIRS2: [&str; 100]` (and `DIGITS1: [&str; 10]`) indexed by value. Array indexing of
+  already-built `&'static str` does only a bounds check (elided where the index is provably `< 100`/`< 10`) and
+  NO UTF-8 boundary re-validation — `from_utf8_unchecked` stays off the table. 4 call sites repointed.
+- **MEASURED (criterion, same machine/target, `wide_stages/render`, warm-up 1s / measure 4s):** 16x32
+  **1.0762 ms → 960.55 µs (−7.50%, p=0.00)**; 12x24 **595.90 µs → 542.86 µs (−6.99%, p=0.00)**; 8x16 −2.6%
+  (p=0.13, small-case noise). The win magnitude matches the profiled `check_range` share exactly. Baseline and
+  candidate differ only in this change (the debuginfo flag used for profiling is codegen-neutral — separate
+  DWARF sections, same opt-level `z`, same machine code).
+- **Byte-identical & GREEN:** `write_fixed2` unit test (byte-for-byte vs `{:.2}` over a dense sweep) + 234
+  fm-render-svg lib tests + golden_svg (1) + golden_layout (2) + frankentui_conformance (2), NO re-bless.
+- **Standing dominance context (not a new claim):** full_pipeline_wide vs pinned live-CDP Mermaid 11.12.0 =
+  0.004280 / 0.003248 / 0.002136 at 8x16 / 12x24 / 16x32 (Mermaid 233.6× / 307.9× / 468.2× slower); this
+  shaves ~7.5% off the dominant render stage on top of that.
+- **META:** re-measuring after a "closed" frontier found a real lever — the DIGIT_PAIRS `&str`-slice approach
+  (16ed6d3) removed the `from_utf8` copy but left the per-slice `check_range` in place; a symbolized profile
+  named it and a table lookup kills it. Profile the phase, don't assume the last commit closed it.
+
+  Agent: BlackThrush

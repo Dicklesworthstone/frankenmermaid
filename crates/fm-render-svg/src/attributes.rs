@@ -327,31 +327,45 @@ const fn decimal_digits(mut value: usize) -> usize {
     digits
 }
 
-/// Two-digit ASCII pairs `"00".."99"` concatenated (200 bytes). The 2-digit group for a value
-/// `d` in `0..100` is `&DIGIT_PAIRS[d * 2 .. d * 2 + 2]`, and its low digit alone (for `d < 10`,
-/// no leading zero) is `&DIGIT_PAIRS[d * 2 + 1 .. d * 2 + 2]`. Emitting each group as a borrowed
-/// `&str` slice of this static lets `write_fixed2` avoid both the per-call stack byte buffer AND
-/// the `str::from_utf8` revalidation of digits it just produced — the latter measured at ~12% of
-/// coordinate-heavy render once the node/edge double-copy was removed. `#![forbid(unsafe_code)]`
-/// rules out `from_utf8_unchecked`, so slicing a known-ASCII static is the safe equivalent.
-const DIGIT_PAIRS: &str = "00010203040506070809101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899";
+/// Two-digit decimal strings `"00".."99"`, indexed by value: [`PAIRS2`]`[d]` is the 2-digit group
+/// for `d` in `0..100`, and [`DIGITS1`]`[d]` is the single low digit for `d` in `0..10`.
+///
+/// This replaces the earlier single concatenated `&str` sliced at runtime as `&DIGIT_PAIRS[d*2..d*2+2]`.
+/// Slicing a `&str` by a runtime `Range` goes through `str`'s `check_range`, which re-validates UTF-8
+/// char boundaries on every call — pure waste for known-ASCII digits, and measured at ~7% of
+/// coordinate-heavy render (`write_fixed2`/`write_uint_into` dominate). Indexing an array of
+/// already-built `&'static str` does only a bounds check (which the compiler elides where the index is
+/// provably `< 100`/`< 10`), no boundary re-validation — byte-identical output, still no `unsafe`
+/// (`#![forbid(unsafe_code)]`).
+const PAIRS2: [&str; 100] = [
+    "00", "01", "02", "03", "04", "05", "06", "07", "08", "09",
+    "10", "11", "12", "13", "14", "15", "16", "17", "18", "19",
+    "20", "21", "22", "23", "24", "25", "26", "27", "28", "29",
+    "30", "31", "32", "33", "34", "35", "36", "37", "38", "39",
+    "40", "41", "42", "43", "44", "45", "46", "47", "48", "49",
+    "50", "51", "52", "53", "54", "55", "56", "57", "58", "59",
+    "60", "61", "62", "63", "64", "65", "66", "67", "68", "69",
+    "70", "71", "72", "73", "74", "75", "76", "77", "78", "79",
+    "80", "81", "82", "83", "84", "85", "86", "87", "88", "89",
+    "90", "91", "92", "93", "94", "95", "96", "97", "98", "99",
+];
 
-/// Append `n` in decimal (no leading zeros) to `f`, two digits at a time via [`DIGIT_PAIRS`].
+/// Single decimal digit strings `"0".."9"` — see [`PAIRS2`].
+const DIGITS1: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
+
+/// Append `n` in decimal (no leading zeros) to `f`, two digits at a time via [`PAIRS2`]/[`DIGITS1`].
 fn write_uint_into<W: fmt::Write>(f: &mut W, n: u64) -> fmt::Result {
     if n >= 100 {
         write_uint_into(f, n / 100)?;
-        let d = (n % 100) as usize * 2;
-        f.write_str(&DIGIT_PAIRS[d..d + 2])
+        f.write_str(PAIRS2[(n % 100) as usize])
     } else if n >= 10 {
-        let d = n as usize * 2;
-        f.write_str(&DIGIT_PAIRS[d..d + 2])
+        f.write_str(PAIRS2[n as usize])
     } else {
-        let d = n as usize * 2 + 1;
-        f.write_str(&DIGIT_PAIRS[d..d + 1])
+        f.write_str(DIGITS1[n as usize])
     }
 }
 
-/// Append signed integer `i` in decimal to `f` via the fast [`DIGIT_PAIRS`] path — byte-identical
+/// Append signed integer `i` in decimal to `f` via the fast [`PAIRS2`] path — byte-identical
 /// to `write!(f, "{i}")` but without the `fmt::Formatter`/`pad_integral` machinery, which shows up
 /// as ~8% of coordinate-heavy render (most SVG coordinates land on whole pixels and take the integer
 /// branch of [`AttributeValue::write_value`]). `i64::from(i).unsigned_abs()` handles `i32::MIN`.
@@ -371,7 +385,7 @@ pub(crate) fn write_int_into<W: fmt::Write>(f: &mut W, i: i32) -> fmt::Result {
 /// underlying `f32`. Values too large to scale into `i64`, and any non-finite input,
 /// fall back to the standard formatter so output stays identical in every case.
 /// The integer part and the always-2-digit fraction are streamed straight into `f` as
-/// borrowed `DIGIT_PAIRS` slices (no stack buffer, no `from_utf8`).
+/// borrowed [`PAIRS2`] entries (no stack buffer, no `from_utf8`, no `str` range revalidation).
 /// Verified byte-identical against `{:.2}` over a dense value sweep in the tests.
 pub(crate) fn write_fixed2<W: fmt::Write>(f: &mut W, value: f32) -> fmt::Result {
     if !value.is_finite() || value.abs() >= 9.0e15 {
@@ -390,7 +404,7 @@ pub(crate) fn write_fixed2<W: fmt::Write>(f: &mut W, value: f32) -> fmt::Result 
     }
     write_uint_into(f, int_part)?;
     f.write_str(".")?;
-    f.write_str(&DIGIT_PAIRS[frac_part * 2..frac_part * 2 + 2])
+    f.write_str(PAIRS2[frac_part])
 }
 
 /// Write `s` into `f` with XML attribute-value escaping (`& < > " '`), copying
