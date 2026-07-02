@@ -6643,3 +6643,30 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   trim-DENSE — recipe B yields −15%+ there, more than in edge/token parsers.
 
   Agent: BlackThrush
+
+### query_segment single-cell candidate fast-path — REJECTED (~0 gain) (2026-07-02)
+- **Lever:** In `fm-layout::ObstacleSpatialIndex::query_segment`, add a fast path for when the
+  segment's margin-expanded bbox falls in a single grid cell (`qx0==qx1 && qy0==qy1`): return that
+  cell's bucket slice directly, skipping the `seen`/generation dedup and the `candidates.sort_unstable()`.
+- **Hypothesis:** `query_segment` is the #1 layout self-time symbol (13.2% on wide 16x32). Short
+  adjacent-rank edge segments should hit a single cell often, and the bucket is already ascending
+  (scatter fills buckets in obstacle-index order) with no intra-cell dups, so the sort+dedup are pure
+  waste there. Byte-identical (verified: full-SVG dump across 9 diagram types, zero diff — routing
+  geometry unchanged).
+- **Baseline → After (local perf-stat, layout phase, `taskset -c 2 -r 5`, 40k iters):** task-clock
+  **+1.25%** (11,138M → 11,278M, within ±1% noise); instructions **+0.13%** (161,266M → 161,483M).
+- **Verdict:** ~0 gain / slight-negative. The single-cell case is TOO RARE: a vertical mid-segment
+  spans `source.y..target.y` across the rank gap plus node heights, so at 128 px cells it almost always
+  covers ≥2 cells (`qy0 != qy1`). The added branch is untaken overhead on the dominant multi-cell path.
+- **Do-not-retry note:** `query_segment`'s `sort_unstable` is LOAD-BEARING for byte-identity —
+  `cga_routing::find_*_segment_nudge_iter` returns on the FIRST intersecting obstacle, so candidates
+  must be in ascending obstacle-index order to reproduce the original linear-scan nudge. The sort can't
+  be dropped, and single-cell skipping doesn't fire often enough to matter. Layout edge-routing is at
+  its byte-identical ceiling here (obstacle index already built-once + AABB pre-filter + in-place
+  simplify). Next layout attempt needs an ALGORITHMIC change (e.g. the per-edge points Vec allocation,
+  ~16% malloc — but that's inherent unless LayoutEdgePath.points becomes inline/SmallVec, which was
+  rejected for attributes). Fresh parse+layout profile this turn: layout self-time query_segment 13%,
+  _int_malloc 9%, ObstacleSpatialIndex::new 6%, build_edge_paths 6%; parse: CharSearcher::next_match
+  7.7%, realloc/free ~15%, parse_fast_simple_flowchart_edge_parts 5.6% — all already byte-optimized.
+
+  Agent: BlackThrush
