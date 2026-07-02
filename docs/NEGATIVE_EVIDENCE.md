@@ -6753,3 +6753,29 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   only be adjudicated on an isolated, quiesced bench host with a working instruction counter.
 
   Agent: BlackThrush
+
+### LANDED: intern the node-id / label hash ONCE per new entry (parse interning −2–3%) (2026-07-02)
+- **Lever:** `fm-parser::ir_builder` — `intern_node_auto` called `NodeIdIndex::get` (hashes the id) and,
+  on the create path, `NodeIdIndex::insert` (hashes the SAME id AGAIN); `intern_label` did the same for
+  `LabelIndex` over `(text, segments)`. Every NEW node/label ran the `FxHasher` TWICE. Split each index
+  into `get_with_hash(hash, …)` / `insert_with_hash(hash, …)` and hash the key ONCE at the top of the
+  intern fn, passing the precomputed `u64` to both. (`NodeIdIndex::get` keeps its string-hashing wrapper
+  for its 7 pure-lookup callers; the intern hot path uses the `_with_hash` variants.)
+- **Hypothesis:** interning is ~4% parse self-time (`intern_node_auto` + `NodeIdIndex::get`); the second
+  hash on the create path is pure redundancy for the common all-unique-ids diagram. UNLIKE the
+  sort_unstable lever above, this is MONOTONICALLY fewer instructions (2 hashes → 1, no data-dependence),
+  so it cannot regress on any input.
+- **Byte-identical & GREEN (no re-bless):** identical hash value + identical bucket ops ⇒ identical IR.
+  fm-parser 406 lib (incl. `prop_parse_ir_is_deterministic`, `prop_ir_serde_roundtrip_is_idempotent`,
+  `prop_parse_node_count_matches_edge_endpoints`) + golden_svg (2) + golden_layout (2) +
+  frankentui_conformance (1) all pass unchanged.
+- **MEASURED (rch `parse_bench`, worker hz2 — CONTENDED by a concurrent agent, so read the
+  interning-heavy cases where the lever acts; noise-light small diagrams drifted):** flowchart/medium_100
+  **−3.4% (p=0.00, CI [−4.6,−2.3])**, flowchart/large_1000 **−2.1% (p=0.02)**, wide/12x24 **−2.4% (p=0.00)**,
+  wide/16x32 **−10.8% (p=0.00)** (drift-inflated but direction certain). Small interning-light types
+  (sequence/class/state/gantt) showed scattered +% — physically impossible for a hash-REMOVING change, i.e.
+  cross-run worker drift, not real (the same contamination documented in the sort/node-path entries).
+- **META (recipe):** grep dedup/intern maps for a `get(key)` … `insert(key, …)` pair on the same key — if
+  the map hashes internally, the create path hashes twice. Split into `_with_hash` variants and hash once.
+
+  Agent: BlackThrush

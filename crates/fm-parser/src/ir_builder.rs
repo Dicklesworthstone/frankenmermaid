@@ -69,17 +69,24 @@ impl NodeIdIndex {
     }
 
     fn get(&self, id: &str, nodes: &[IrNode]) -> Option<IrNodeId> {
+        self.get_with_hash(Self::hash_key(id), id, nodes)
+    }
+
+    /// Like [`Self::get`] but with a caller-precomputed `hash` (from [`Self::hash_key`]). Lets the
+    /// intern hot path (`intern_node_auto`) hash the id ONCE for its get+insert pair instead of
+    /// twice (a full `FxHasher` run per new node was redundant). Behaviour-identical to `get`.
+    fn get_with_hash(&self, hash: u64, id: &str, nodes: &[IrNode]) -> Option<IrNodeId> {
         let matches = |nid: &IrNodeId| nodes.get(nid.0).is_some_and(|node| node.id == id);
-        match self.buckets.get(&Self::hash_key(id))? {
+        match self.buckets.get(&hash)? {
             NodeIdBucket::One(nid) => matches(nid).then_some(*nid),
             NodeIdBucket::Many(candidates) => candidates.iter().copied().find(|nid| matches(nid)),
         }
     }
 
-    /// Record `node_id` for `id`. Callers guarantee `id` is not already present (`intern_node_auto`
-    /// checks `get` first), so an occupied slot here is always a hash COLLISION between distinct ids.
-    fn insert(&mut self, id: &str, node_id: IrNodeId) {
-        let hash = Self::hash_key(id);
+    /// Record `node_id` under a caller-precomputed `hash` (from [`Self::hash_key`]). Callers
+    /// guarantee the id is not already present (`intern_node_auto` checks `get_with_hash` first),
+    /// so an occupied slot here is always a hash COLLISION between distinct ids.
+    fn insert_with_hash(&mut self, hash: u64, node_id: IrNodeId) {
         match self.buckets.get_mut(&hash) {
             None => {
                 self.buckets.insert(hash, NodeIdBucket::One(node_id));
@@ -126,8 +133,11 @@ impl LabelIndex {
         hasher.finish()
     }
 
-    fn get(
+    /// Look up `(text, segments)` under a caller-precomputed `hash` (from [`Self::hash_key`]). Lets
+    /// `intern_label` hash the pair ONCE for its get+insert pair instead of twice per new label.
+    fn get_with_hash(
         &self,
+        hash: u64,
         text: &str,
         segments: &[IrLabelSegment],
         labels: &[IrLabel],
@@ -137,16 +147,16 @@ impl LabelIndex {
             labels.get(lid.0).is_some_and(|label| label.text == text)
                 && markup.get(lid).map_or(&[][..], Vec::as_slice) == segments
         };
-        match self.buckets.get(&Self::hash_key(text, segments))? {
+        match self.buckets.get(&hash)? {
             LabelBucket::One(lid) => matches(lid).then_some(*lid),
             LabelBucket::Many(candidates) => candidates.iter().copied().find(|lid| matches(lid)),
         }
     }
 
-    /// Record `label_id` for `(text, segments)`. Callers guarantee the pair is not already present
-    /// (`intern_label` checks `get` first), so an occupied slot is always a hash COLLISION.
-    fn insert(&mut self, text: &str, segments: &[IrLabelSegment], label_id: IrLabelId) {
-        let hash = Self::hash_key(text, segments);
+    /// Record `label_id` under a caller-precomputed `hash` (from [`Self::hash_key`]). Callers
+    /// guarantee the pair is not already present (`intern_label` checks `get_with_hash` first),
+    /// so an occupied slot is always a hash COLLISION.
+    fn insert_with_hash(&mut self, hash: u64, label_id: IrLabelId) {
         match self.buckets.get_mut(&hash) {
             None => {
                 self.buckets.insert(hash, LabelBucket::One(label_id));
@@ -933,8 +943,15 @@ impl IrBuilder {
             return None;
         }
 
+        // Hash the id ONCE for the get+insert pair below (a new node was hashed twice: once here
+        // and again in the insert on the create path). Byte-identical; monotonically fewer hashes.
+        let id_hash = NodeIdIndex::hash_key(normalized_id);
+
         // Check if already exists
-        if let Some(existing_id) = self.node_id_index.get(normalized_id, &self.ir.nodes) {
+        if let Some(existing_id) =
+            self.node_id_index
+                .get_with_hash(id_hash, normalized_id, &self.ir.nodes)
+        {
             let resolved_label = if self
                 .ir
                 .nodes
@@ -994,7 +1011,7 @@ impl IrBuilder {
             clusters: Vec::new(),
             subgraphs: Vec::new(),
         });
-        self.node_id_index.insert(normalized_id, node_id);
+        self.node_id_index.insert_with_hash(id_hash, node_id);
 
         if is_auto_created {
             self.auto_created_nodes.push(node_id);
@@ -1405,7 +1422,11 @@ impl IrBuilder {
     }
 
     fn intern_label(&mut self, label: &ParsedLabel, span: Span) -> IrLabelId {
-        if let Some(existing_id) = self.label_index.get(
+        // Hash the (text, segments) pair ONCE for the get+insert pair below (a new label was
+        // hashed twice). Byte-identical; monotonically fewer hashes.
+        let label_hash = LabelIndex::hash_key(&label.text, &label.segments);
+        if let Some(existing_id) = self.label_index.get_with_hash(
+            label_hash,
             &label.text,
             &label.segments,
             &self.ir.labels,
@@ -1424,8 +1445,7 @@ impl IrBuilder {
                 .label_markup
                 .insert(label_id, label.segments.clone());
         }
-        self.label_index
-            .insert(&label.text, &label.segments, label_id);
+        self.label_index.insert_with_hash(label_hash, label_id);
         label_id
     }
 }
