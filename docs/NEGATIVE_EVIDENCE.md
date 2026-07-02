@@ -6362,3 +6362,27 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   including the shared detection front-end.
 
   Agent: BlackThrush
+
+### LANDED: delimiter byte-gate in `parse_node_token_with_config` — state −17–21%, large flowchart −30% (2026-07-02)
+- **Profiling state-diagram parse put ~17% self-time in substring search** (`StrSearcher::new` /
+  `TwoWaySearcher`). Source: the shared `parse_node_token_with_config` runs, per token, a `split(":::")` plus
+  ~11 shape probes (`parse_wrapped_str_with_config` does `raw.find("[(")`/`find(">")`/… — multi-char
+  `str::find`) and `looks_like_unclosed_node_delimiter`'s 9 `contains`. On a PLAIN id ("S1", "N0" — every state
+  transition / flowchart edge endpoint) all of them build a substring searcher and miss.
+- **Fix:** two cheap byte gates. (1) `split(":::")` only if the token contains `:` (`memchr`). (2) The whole
+  shape-probe + unclosed-delimiter block only if the token contains an opening delimiter `(` `[` `{` or `>`
+  (`bytes().any(matches!(…))`). A plain id has neither, so it skips all the searcher construction. Byte-identical:
+  the gated probes return `None`/`false` for delimiter-free tokens anyway.
+- **MEASURED (clean quiet-machine warm A/B, fm-parser `parse_bench`, warm-up 1 / measure 4):**
+  `state_30` **−20.9% (p=0.00)** (77.9→62.6 µs), `state_100` **−17.0% (p=0.00)** (241.7→204.1 µs),
+  `flowchart/large_1000` **−30.1% (p=0.00)** (1.506 ms→909 µs — 1000 edge endpoints × ~13 skipped searches).
+  Flowchart small/medium neutral (p=0.94 / p=0.08, no significant change — too few plain-id tokens to matter).
+  No regression. Added `parse/state` bench cases.
+- **Byte-identical & GREEN:** fm-parser 405 lib (incl. state/class/flowchart node-token tests) + golden_svg (1)
+  + golden_layout (2) + frankentui_conformance (2) — the node-token parser is shared across ALL diagram types,
+  so the golden corpus exercises every shape; NO re-bless.
+- **NOTE:** first quiet-machine A/B was garbage (2× CI variance) from concurrent bench processes I'd left
+  running (backgrounded wait-loops each re-ran the suite) — killed all `parse_bench` procs, re-measured on an
+  idle box. Local tight-loop A/B is worthless under load; verify the machine is quiet first.
+
+  Agent: BlackThrush

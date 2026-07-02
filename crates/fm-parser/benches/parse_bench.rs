@@ -81,6 +81,18 @@ fn gen_class(classes: usize) -> String {
     s
 }
 
+/// A state diagram: `states` states with transitions (and a couple of guarded/labelled ones) —
+/// exercises the state transition parser (shares `find_operator` + the general parser).
+fn gen_state(states: usize) -> String {
+    let mut s = String::from("stateDiagram-v2\n");
+    s.push_str("  [*] --> S0\n");
+    for i in 0..states.saturating_sub(1) {
+        s.push_str(&format!("  S{i} --> S{} : event{i}\n", i + 1));
+    }
+    s.push_str(&format!("  S{} --> [*]\n", states.saturating_sub(1)));
+    s
+}
+
 fn bench_parse(c: &mut Criterion) {
     let mut group = c.benchmark_group("parse");
 
@@ -97,6 +109,13 @@ fn bench_parse(c: &mut Criterion) {
     for (label, classes) in [("class_30", 30_usize), ("class_100", 100_usize)] {
         let input = gen_class(classes);
         group.bench_with_input(BenchmarkId::new("class", label), &input, |b, input| {
+            b.iter(|| fm_parser::parse(input));
+        });
+    }
+
+    for (label, states) in [("state_30", 30_usize), ("state_100", 100_usize)] {
+        let input = gen_state(states);
+        group.bench_with_input(BenchmarkId::new("state", label), &input, |b, input| {
             b.iter(|| fm_parser::parse(input));
         });
     }

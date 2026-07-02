@@ -7195,61 +7195,78 @@ fn parse_node_token_with_config(raw: &str, config: &ParserConfig) -> Option<Node
         });
     }
 
-    let core = trimmed.split(":::").next().unwrap_or(trimmed).trim();
+    // The `:::className` CSS-class shorthand needs a `:`; guard the multi-char `split(":::")` (which
+    // builds a substring searcher) behind a cheap `memchr(':')` — the common node token has no colon.
+    let core = if trimmed.as_bytes().contains(&b':') {
+        trimmed.split(":::").next().unwrap_or(trimmed).trim()
+    } else {
+        trimmed
+    };
     if core.is_empty() {
         return None;
     }
 
-    if let Some(parsed) = parse_double_circle_with_config(core, config) {
-        return Some(parsed);
-    }
-    if let Some(parsed) =
-        parse_wrapped_str_with_config(core, "[(", ")]", NodeShape::Cylinder, config)
+    // Fast path: every shaped token — `((…))`, `[(…)]`, `[[…]]`, `[…]`, `(…)`, `{…}`, `>…]`,
+    // `[/…\]`, … — contains an opening delimiter `(` `[` `{` or `>`. A plain identifier (the common
+    // node id) has none, so skip the ~11 `str::find`/`ends_with` shape probes AND
+    // `looks_like_unclosed_node_delimiter`'s `contains` sweep below — each builds a substring searcher
+    // and all of them would miss. Byte-identical: the gate only skips work that returns None here.
+    if core
+        .as_bytes()
+        .iter()
+        .any(|&b| matches!(b, b'(' | b'[' | b'{' | b'>'))
     {
-        return Some(parsed);
-    }
-    if let Some(parsed) =
-        parse_wrapped_str_with_config(core, "[[", "]]", NodeShape::Subroutine, config)
-    {
-        return Some(parsed);
-    }
-    if let Some(parsed) = parse_wrapped_with_config(core, '[', ']', NodeShape::Rect, config) {
-        return Some(parsed);
-    }
-    if let Some(parsed) = parse_wrapped_with_config(core, '(', ')', NodeShape::Rounded, config) {
-        return Some(parsed);
-    }
-    if let Some(parsed) = parse_wrapped_with_config(core, '{', '}', NodeShape::Diamond, config) {
-        return Some(parsed);
-    }
-    if let Some(parsed) =
-        parse_wrapped_str_with_config(core, ">", "]", NodeShape::Asymmetric, config)
-    {
-        return Some(parsed);
-    }
-    if let Some(parsed) =
-        parse_wrapped_str_with_config(core, "[/", "/]", NodeShape::Parallelogram, config)
-    {
-        return Some(parsed);
-    }
-    if let Some(parsed) =
-        parse_wrapped_str_with_config(core, "[\\", "\\]", NodeShape::InvParallelogram, config)
-    {
-        return Some(parsed);
-    }
-    if let Some(parsed) =
-        parse_wrapped_str_with_config(core, "[/", "\\]", NodeShape::Trapezoid, config)
-    {
-        return Some(parsed);
-    }
-    if let Some(parsed) =
-        parse_wrapped_str_with_config(core, "[\\", "/]", NodeShape::InvTrapezoid, config)
-    {
-        return Some(parsed);
-    }
+        if let Some(parsed) = parse_double_circle_with_config(core, config) {
+            return Some(parsed);
+        }
+        if let Some(parsed) =
+            parse_wrapped_str_with_config(core, "[(", ")]", NodeShape::Cylinder, config)
+        {
+            return Some(parsed);
+        }
+        if let Some(parsed) =
+            parse_wrapped_str_with_config(core, "[[", "]]", NodeShape::Subroutine, config)
+        {
+            return Some(parsed);
+        }
+        if let Some(parsed) = parse_wrapped_with_config(core, '[', ']', NodeShape::Rect, config) {
+            return Some(parsed);
+        }
+        if let Some(parsed) = parse_wrapped_with_config(core, '(', ')', NodeShape::Rounded, config) {
+            return Some(parsed);
+        }
+        if let Some(parsed) = parse_wrapped_with_config(core, '{', '}', NodeShape::Diamond, config) {
+            return Some(parsed);
+        }
+        if let Some(parsed) =
+            parse_wrapped_str_with_config(core, ">", "]", NodeShape::Asymmetric, config)
+        {
+            return Some(parsed);
+        }
+        if let Some(parsed) =
+            parse_wrapped_str_with_config(core, "[/", "/]", NodeShape::Parallelogram, config)
+        {
+            return Some(parsed);
+        }
+        if let Some(parsed) =
+            parse_wrapped_str_with_config(core, "[\\", "\\]", NodeShape::InvParallelogram, config)
+        {
+            return Some(parsed);
+        }
+        if let Some(parsed) =
+            parse_wrapped_str_with_config(core, "[/", "\\]", NodeShape::Trapezoid, config)
+        {
+            return Some(parsed);
+        }
+        if let Some(parsed) =
+            parse_wrapped_str_with_config(core, "[\\", "/]", NodeShape::InvTrapezoid, config)
+        {
+            return Some(parsed);
+        }
 
-    if !config.auto_close_delimiters && looks_like_unclosed_node_delimiter(core) {
-        return None;
+        if !config.auto_close_delimiters && looks_like_unclosed_node_delimiter(core) {
+            return None;
+        }
     }
 
     let id = normalize_identifier(core);
