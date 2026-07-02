@@ -6696,3 +6696,24 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   must first PIN the caller (perf could not attribute it; try a targeted micro-bench or valgrind/callgrind).
 
   Agent: BlackThrush
+
+### itoa crate for write_uint_into — REJECTED (regression) (2026-07-02)
+- **Lever:** Replace the 3+ digit branch of `fm-render-svg::attributes::write_uint_into` (the #1
+  render self-time function, ~7%) with `itoa::Buffer::new().format(n)` + a single `write_str`,
+  instead of the hand-tuned de-recursed `PAIRS2`/`DIGITS1` two-digit-table appends. Kept the 1-2
+  digit table fast path. Added `itoa = "1.0"` to fm-render-svg (already transitively in the lock).
+- **Hypothesis:** itoa batches all digits into one `write_str` (via internal `from_utf8_unchecked`),
+  sidestepping the "from_utf8 ceiling" and cutting the 3-4 digit case from two `write_str`s to one —
+  the same call-count-reduction shape that DOTPAIRS3 landed.
+- **Baseline → After (deterministic same-machine `taskset -c 2` perf-stat, render phase, opt=3+
+  mimalloc profharness, 20k iters):** instructions **+11.1%** (97,865M → 108,741M), task-clock
+  **+12.2%** (6,244M → 7,007M). Byte-identical (9-diagram SVG dump zero diff), but a clear REGRESSION.
+- **Verdict:** regression. The general-purpose `itoa::Buffer` setup + its all-u64 digit path cost
+  MORE than the two 2-byte `PAIRS2` `write_str`s it removes. The hand-tuned, coord-range-specialized
+  (`n < 10_000` de-recursed) table formatter is already faster than the standard crate here.
+- **Do-not-retry note:** don't swap the bespoke `write_uint_into`/`write_fixed2` table formatters for
+  a general integer crate (itoa/ryu) — they're specialized for the SVG coordinate range (mostly 3-4
+  digits) and beat the general path. The number-format leaf is at its ceiling: from_utf8 buffer
+  approaches are ~0 (documented), and the itoa/unsafe-batched approach REGRESSES. Reverted (dep + code).
+
+  Agent: BlackThrush
