@@ -6670,3 +6670,29 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   7.7%, realloc/free ~15%, parse_fast_simple_flowchart_edge_parts 5.6% — all already byte-optimized.
 
   Agent: BlackThrush
+
+### node-path ends_with/strip_suffix ']' → byte ops — REJECTED (~0, rch false-positive) (2026-07-02)
+- **Lever:** In `parse_fast_simple_flowchart_node_borrowed`, replace `!trimmed.ends_with(']')` +
+  `trimmed[bracket+1..].strip_suffix(']')` (single-`char` Pattern ops) with a byte `last()` check +
+  a byte-index slice `trimmed[bracket+1..len-1]`. Byte-identical (verified: 9-diagram SVG dump zero diff).
+- **Hypothesis:** these were the residual `CharSearcher`-family calls on the node path (CharSearcher::
+  next_match is still ~6.6% parse self-time after the landed `[` byte-scan win, commit 547adca).
+- **rch parse_bench A/B (LOOKED like a win, but is NOISE):** flowchart small/med/large −6.4/−7.4/−8.6%,
+  wide 8x16/12x24/16x32 −4.5/−8.2/−16.0%, all non-overlapping CIs. **BUT** the BEFORE (96a967e) run
+  measured wide/16x32 = 607 µs vs the SAME commit's 527 µs the prior turn — a ~15% baseline drift: the
+  two parallel rch benches landed on different-capability workers, and BEFORE drew a slow one.
+- **Deterministic arbiter (same-machine `taskset -c 2` perf-stat):** instructions **−0.16%** (95,829M →
+  95,672M per fixed iters) — i.e. **essentially zero**. `ends_with(']')`/`strip_suffix(']')` for a single
+  ASCII char already compile to a cheap byte compare; they were NOT the CharSearcher hotspot.
+- **Verdict:** ~0 gain. Reverted (not landed).
+- **Do-not-retry / METHODOLOGY note:** the rch criterion baseline does NOT cross workers — two parallel
+  `rch exec` benches can land on different-speed workers and manufacture a consistent, non-overlapping-CI
+  "delta" that is pure worker variance. ALWAYS confirm a parse/format micro-win with a deterministic
+  same-machine instruction count (perf-stat `instructions`, zero run-to-run variance) before trusting the
+  rch µs deltas. Here the instruction count (−0.16%) debunked an apparent −8/−16% rch "win". The real
+  forward `CharSearcher::next_match` (~6.6%) is still unlocated — it is NOT the node `[`/`]` ops (all now
+  byte-based or already-cheap), NOT the byte-guarded per-line helpers (split_statements, is_comment,
+  strip_flowchart_inline_comment, is_flowchart_header), NOT parse_label's plain fast path. Next parse dig
+  must first PIN the caller (perf could not attribute it; try a targeted micro-bench or valgrind/callgrind).
+
+  Agent: BlackThrush
