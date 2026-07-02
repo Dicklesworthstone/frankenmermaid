@@ -63,6 +63,24 @@ fn gen_sequence(participants: usize, messages: usize) -> String {
     s
 }
 
+/// A class diagram: `classes` classes each with a few members, plus inheritance/association
+/// relationships between them — exercises the class member/relationship parser.
+fn gen_class(classes: usize) -> String {
+    let mut s = String::from("classDiagram\n");
+    for i in 0..classes {
+        s.push_str(&format!("  class Class{i} {{\n"));
+        s.push_str(&format!("    +String field{i}\n"));
+        s.push_str(&format!("    +int count{i}\n"));
+        s.push_str(&format!("    +compute{i}() int\n"));
+        s.push_str("  }\n");
+    }
+    for i in 0..classes.saturating_sub(1) {
+        s.push_str(&format!("  Class{i} <|-- Class{}\n", i + 1));
+        s.push_str(&format!("  Class{i} --> Class{} : uses\n", (i + 2) % classes));
+    }
+    s
+}
+
 fn bench_parse(c: &mut Criterion) {
     let mut group = c.benchmark_group("parse");
 
@@ -72,6 +90,13 @@ fn bench_parse(c: &mut Criterion) {
     ] {
         let input = gen_sequence(participants, messages);
         group.bench_with_input(BenchmarkId::new("sequence", label), &input, |b, input| {
+            b.iter(|| fm_parser::parse(input));
+        });
+    }
+
+    for (label, classes) in [("class_30", 30_usize), ("class_100", 100_usize)] {
+        let input = gen_class(classes);
+        group.bench_with_input(BenchmarkId::new("class", label), &input, |b, input| {
             b.iter(|| fm_parser::parse(input));
         });
     }

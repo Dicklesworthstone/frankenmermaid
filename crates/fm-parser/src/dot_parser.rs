@@ -10,7 +10,17 @@ pub fn looks_like_dot(input: &str) -> bool {
     // rescans it — wasteful on every parse of the common Mermaid flowchart (no braces).
     // Output-identical: comment stripping only removes characters, so a brace in the
     // cleaned text implies a brace in the raw input.
-    if !input.as_bytes().contains(&b'{') || !input.as_bytes().contains(&b'}') {
+    let bytes = input.as_bytes();
+    if !bytes.contains(&b'{') || !bytes.contains(&b'}') {
+        return false;
+    }
+    // Every DOT header is `graph` / `digraph` / `strict [di]graph` — all contain "graph", and DOT
+    // keywords are case-insensitive (`dot_header_kind` lowercases the first line). So a real DOT file
+    // ALWAYS contains "graph" somewhere in its raw text. Class/state diagrams have `{ }` braces but no
+    // `graph` keyword, so this cheap substring pre-guard short-circuits the expensive
+    // `strip_all_comments` (whole-input `Vec<char>` collect + rescan) that dominated their detection.
+    // Output-identical: comment stripping never introduces a `graph` substring that wasn't there.
+    if !contains_ignore_ascii_case(bytes, b"graph") {
         return false;
     }
     let cleaned = strip_all_comments(input);
@@ -18,6 +28,14 @@ pub fn looks_like_dot(input: &str) -> bool {
         return false;
     }
     cleaned.contains('{') && cleaned.contains('}')
+}
+
+/// Case-insensitive ASCII substring test (`needle` is a short ASCII literal). Scans byte windows,
+/// short-circuiting on the first match; each window compare rejects on the first differing byte.
+fn contains_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
 #[must_use]

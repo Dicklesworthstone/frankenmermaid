@@ -6338,3 +6338,27 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   and allocation.
 
   Agent: BlackThrush
+
+### LANDED: cheap "graph" pre-guard in `looks_like_dot` — class/state (brace) diagram parse −9–10% (2026-07-02)
+- **Profiling a fresh diagram type (class) put the #1 hotspot in DETECTION, not parsing:**
+  `dot_parser::strip_all_comments` (~6% self) + its `CharIndices`/`String::push` (~9% more). `detect_type` runs
+  `looks_like_dot` FIRST, whose only cheap guard was "has `{` and `}`". Class/state diagrams HAVE braces (class
+  bodies / composite states), so every parse fell through to `strip_all_comments` — which collects the whole
+  input into a `Vec<char>` and rescans it — before `dot_header_kind` failed. ~15% of class parse wasted on DOT
+  detection.
+- **Fix:** every DOT header is `graph`/`digraph`/`strict [di]graph` (keywords case-insensitive), so a real DOT
+  file always contains "graph" in its raw text. Added a case-insensitive "graph" substring pre-guard (a
+  short-circuiting `windows(5).any(eq_ignore_ascii_case)`) before `strip_all_comments`. Class/state have braces
+  but no `graph` keyword → they now skip the expensive strip entirely. Detection is output-identical (comment
+  stripping never introduces a `graph` substring).
+- **MEASURED (clean warm same-machine A/B, fm-parser `parse_bench parse/class`, warm-up 2 / measure 5):**
+  `class_30` **−10.10% (p=0.00)** (281.3→262.7 µs), `class_100` **−9.26% (p=0.00)** (918.9→828.2 µs). Also
+  speeds STATE diagrams and any brace-containing diagram. Added `parse/class` bench cases (was flowchart+seq).
+- **Byte-identical & GREEN:** fm-parser 405 lib (incl. 39 DOT detection/routing tests) + golden_svg (1) +
+  golden_layout (2) + frankentui_conformance (2) + dot_bug_test (2) — DOT still detected + routed correctly,
+  NO re-bless.
+- **META:** the biggest class-parse cost wasn't in the class parser at all — it was the DOT-detection probe
+  paying full price on every brace-containing non-DOT diagram. Profile the WHOLE pipeline for a diagram type,
+  including the shared detection front-end.
+
+  Agent: BlackThrush
