@@ -56,6 +56,14 @@ tiny_http = { version = "0.12", optional = true }
 resvg = { version = "0.47", optional = true, default-features = false }
 usvg = { version = "0.47", optional = true, default-features = false }
 
+# Native global allocator. The whole pipeline (parse interning, layout point/index vecs,
+# render output buffer) is allocation-heavy; a measured full-pipeline profile put glibc
+# malloc/free/consolidate at ~9% of the wide render. mimalloc's segregated free lists
+# (no consolidation pass) cut a deterministic ~9-10% of pipeline instructions/time. Native
+# only — the wasm build (fm-wasm, a separate crate) keeps its own allocator.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+mimalloc = { version = "0.1", default-features = false }
+
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3.25"

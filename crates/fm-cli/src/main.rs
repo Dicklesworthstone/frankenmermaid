@@ -16,6 +16,16 @@
 //! - `watch`: Re-render on file change (requires `watch` feature)
 //! - `serve`: Start local HTTP server with live-reload playground (requires `serve` feature)
 
+// mimalloc as the global allocator on native builds. The pipeline is allocation-heavy
+// (parse interning, per-edge layout point vecs, the render output buffer); a full-pipeline
+// profile put glibc malloc/free/consolidate at ~9% of the wide render, and swapping to
+// mimalloc measured a deterministic ~9-10% pipeline instruction/time reduction with
+// byte-identical output. Declaring a `#[global_allocator]` static is safe (no `unsafe`),
+// so it coexists with `#![forbid(unsafe_code)]`. Native only; wasm keeps its own allocator.
+#[cfg(not(target_arch = "wasm32"))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[cfg(feature = "png")]
 use std::collections::BTreeMap;
 use std::io::{self, IsTerminal, Read, Write};

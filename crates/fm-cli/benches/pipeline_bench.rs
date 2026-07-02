@@ -10,6 +10,12 @@
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
+// Match the shipped CLI (fm-cli/src/main.rs): benchmark the pipeline under the same
+// native global allocator the `frankenmermaid` binary uses, so the numbers reflect reality.
+#[cfg(not(target_arch = "wasm32"))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn gen_flowchart(node_count: usize) -> String {
     let mut lines = vec![String::from("flowchart LR")];
     for i in 0..node_count {

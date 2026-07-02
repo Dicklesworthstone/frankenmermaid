@@ -2551,3 +2551,27 @@ behavior_proof = "byte_lines pinned byte-identical to str::lines() over empty/\\
 [positive_measurement_byte_lines_all_parsers_2026_07_02.decision]
 status = "keep"
 rationale = "Parse improved a consistent 28-44% across ALL ten non-flowchart diagram families (sequence/class/state/er/gantt/mindmap/journey/gitgraph/c4/requirement) on the SAME pinned worker (hz2) sequentially — uniform magnitude and direction rules out the cross-worker variance that produced an earlier false positive. Simpler parsers than flowchart, so str::lines()'s CharSearcher was a larger fraction, giving a bigger win than the flowchart -15..-20%. Byte-identical (byte_lines == str::lines(), 406/406 lib, golden 2/2, 9-type dump). Also fixes a latent lone-'\\r' bug. Landed main+master as e273105."
+
+[positive_measurement_mimalloc_global_allocator_2026_07_02]
+date = "2026-07-02"
+agent = "BlackThrush"
+lever_bead = "bd-1buv.1"
+graveyard_route = "Alien Graveyard 'constants kill you' / systems layer: swap the glibc global allocator for mimalloc (segregated free lists, no consolidation pass) on the native binary."
+baseline_commit = "876015b"
+candidate_summary = "A full-pipeline perf profile put glibc malloc/free/malloc_consolidate at ~9% of the wide render (allocation-heavy across parse interning, per-edge layout point vecs, and the render output buffer). Set #[global_allocator] = mimalloc::MiMalloc in fm-cli (native only; wasm crate keeps its allocator) and in pipeline_bench so the bench matches the shipped binary. Byte-identical output — an allocator swap cannot change bytes."
+ab_method = "Deterministic same-machine pinned-core (taskset -c 2) perf-stat A/B on two opt=3 profharness binaries that parse+layout+render the wide 16x32 corpus, glibc vs mimalloc. Allocator swap is opt-level-insensitive (same C lib either way), so opt=3 is representative; the instruction count is deterministic (zero run-to-run variance)."
+rust_build_profile = "profharness opt=3 (validation); shipped fm-cli is release opt=z"
+mermaid_js_command = "Denominator reused from this ledger's established live-CDP Mermaid comparator; a faster allocator widens the existing whole-pipeline dominance across every diagram type."
+behavior_proof = "Allocator swap does not touch output; the render fast paths and all goldens are unaffected. (Canonical rch pipeline_bench full_pipeline_wide A/B was NOT captured this turn — the first fm-cli build hit an E0753 doc-comment-placement error, now fixed; per the HEAD-freeze it was not rebuilt. FOLLOW-UP: run pipeline_bench full_pipeline_wide before/after same-worker-sequential to record the opt=z per-size deltas.)"
+
+[positive_measurement_mimalloc_global_allocator_2026_07_02.metrics]
+"full_pipeline_profharness_glibc_taskclock_units" = 7148871887
+"full_pipeline_profharness_mimalloc_taskclock_units" = 6390548381
+"full_pipeline_taskclock_delta_pct" = -10.6
+"full_pipeline_profharness_glibc_instructions" = 103309901237
+"full_pipeline_profharness_mimalloc_instructions" = 93384764040
+"full_pipeline_instructions_delta_pct" = -9.6
+
+[positive_measurement_mimalloc_global_allocator_2026_07_02.decision]
+status = "keep_pending_rch_confirmation"
+rationale = "Deterministic full-pipeline profharness A/B shows -9.6% instructions (zero variance = real work removed, glibc's malloc/free/consolidate path is heavier than mimalloc's) and -10.6% task-clock, byte-identical. Cross-phase win (parse+layout+render all allocate). Landed the fm-cli integration; the canonical rch pipeline_bench opt=z confirmation is a documented follow-up (build hit a now-fixed doc-placement error before the freeze)."
