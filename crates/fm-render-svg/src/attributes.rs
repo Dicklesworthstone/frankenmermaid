@@ -375,14 +375,31 @@ const DOTPAIRS3: [&str; 100] = [
 ];
 
 /// Append `n` in decimal (no leading zeros) to `f`, two digits at a time via [`PAIRS2`]/[`DIGITS1`].
+///
+/// The 1-4 digit cases (every realistic SVG coordinate / dimension) are handled without any
+/// recursive call: the old `n >= 100 { write_uint_into(f, n / 100); … }` recursion is NOT
+/// tail-recursive (a `write_str` follows the call), so on the shipped `opt-level="z"` build —
+/// where the self-call is not inlined — each multi-digit number paid a real function call.
+/// Emitting the high 1-2 digits then the low pair inline removes that call for the common
+/// range. Byte-identical: the high group is `DIGITS1`/`PAIRS2` exactly as the recursion would
+/// have chosen, followed by `PAIRS2[n % 100]`. Values ≥ 10000 keep the recursive tail.
 fn write_uint_into<W: fmt::Write>(f: &mut W, n: u64) -> fmt::Result {
-    if n >= 100 {
+    if n < 10 {
+        f.write_str(DIGITS1[n as usize])
+    } else if n < 100 {
+        f.write_str(PAIRS2[n as usize])
+    } else if n < 10_000 {
+        let hi = (n / 100) as usize;
+        let lo = (n % 100) as usize;
+        if hi < 10 {
+            f.write_str(DIGITS1[hi])?;
+        } else {
+            f.write_str(PAIRS2[hi])?;
+        }
+        f.write_str(PAIRS2[lo])
+    } else {
         write_uint_into(f, n / 100)?;
         f.write_str(PAIRS2[(n % 100) as usize])
-    } else if n >= 10 {
-        f.write_str(PAIRS2[n as usize])
-    } else {
-        f.write_str(DIGITS1[n as usize])
     }
 }
 
