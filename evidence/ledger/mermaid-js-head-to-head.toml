@@ -2381,3 +2381,41 @@ behavior_proof = "Both byte-identical (9-diagram-type SVG dump, zero diff)."
 [negative_measurement_render_number_scan_and_callcount_microopts_2026_07_02.decision]
 status = "reject_escape_text_fastpath"
 rationale = "The write_escaped_text bulk fast-path cut instructions 2.4% but task-clock was flat (+0.6%, within noise): the 7.84% self-time in write_escaped_text is the unavoidable output byte copy (write_str), not the scan, so vectorizing the scan does not reduce time. Reverted (not landed). LESSON: on this render leaf, scan/branch instruction cuts do not translate to time unless they remove a whole fmt::Write CALL on the opt=z build (which DOTPAIRS3 does, and is kept)."
+
+[positive_measurement_write_uint_into_derecurse_2026_07_02]
+date = "2026-07-02"
+agent = "BlackThrush"
+lever_bead = "bd-1buv.1"
+graveyard_route = "Alien Graveyard: remove a non-tail recursive call on the dominant SVG integer-format leaf (opt=z does not inline it), following the same opt=z call-removal insight that landed DOTPAIRS3."
+baseline_commit = "0095b56"
+candidate_commit = "652d6c1"
+candidate_summary = "write_uint_into recursed for n>=100 (not tail-recursive), paying a real self-call per multi-digit number on the opt=z build. Emit the high 1-2 digits then the low pair inline for n<10000, recursive tail kept for n>=10000. Byte-identical."
+render_baseline_command = "AGENT_NAME=BlackThrush RUSTFLAGS='-C metadata=bt0095b56base' CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-blackthrush-before rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 5"
+render_candidate_command = "AGENT_NAME=BlackThrush RUSTFLAGS='-C metadata=btderecursecand' CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-blackthrush rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 5"
+rust_build_profile = "release profile [optimized], opt-level=z (shipped)"
+behavior_proof = "Full-SVG byte-identity dump across 9 diagram types: zero diff. fm-render-svg lib 234/234; clippy -p fm-render-svg --lib -- -D warnings clean. Deterministic instruction count -4.9% (opt=3 local perf-stat)."
+
+[positive_measurement_write_uint_into_derecurse_2026_07_02.metrics]
+# two independent rch runs per side (run1 mt=3, run2 mt=5); medians in us
+"wide_stages_render_8x16_baseline_run1_us" = 227.04
+"wide_stages_render_8x16_candidate_run1_us" = 221.83
+"wide_stages_render_8x16_baseline_run2_us" = 213.94
+"wide_stages_render_8x16_candidate_run2_us" = 216.28
+"wide_stages_render_8x16_verdict" = "within noise (sign flips across runs, overlapping CIs)"
+"wide_stages_render_12x24_baseline_run1_us" = 473.53
+"wide_stages_render_12x24_candidate_run1_us" = 453.45
+"wide_stages_render_12x24_baseline_run2_us" = 479.79
+"wide_stages_render_12x24_candidate_run2_us" = 451.51
+"wide_stages_render_12x24_delta_run1_pct" = -4.24
+"wide_stages_render_12x24_delta_run2_pct" = -5.90
+"wide_stages_render_12x24_verdict" = "consistent >=3%, non-overlapping CIs both runs"
+"wide_stages_render_16x32_baseline_run1_us" = 764.64
+"wide_stages_render_16x32_candidate_run1_us" = 763.10
+"wide_stages_render_16x32_baseline_run2_us" = 799.04
+"wide_stages_render_16x32_candidate_run2_us" = 787.12
+"wide_stages_render_16x32_verdict" = "within noise (overlapping CIs)"
+"local_perfstat_instructions_delta_pct" = -4.89
+
+[positive_measurement_write_uint_into_derecurse_2026_07_02.decision]
+status = "keep"
+rationale = "Modest but real: deterministic -4.9% instructions for byte-identical output (cannot regress), consistent ~-5% render at 12x24 across two independent runs with non-overlapping CIs, and no size regressing beyond noise. Weaker/size-dependent vs DOTPAIRS3 (the removed recursive call is well-predicted / off the critical path at 8x16 and 16x32). Kept because the code is strictly better and clears the >=3% bar on a realistic size. Landed main+master as 652d6c1."
