@@ -2571,7 +2571,19 @@ behavior_proof = "Allocator swap does not touch output; the render fast paths an
 "full_pipeline_profharness_glibc_instructions" = 103309901237
 "full_pipeline_profharness_mimalloc_instructions" = 93384764040
 "full_pipeline_instructions_delta_pct" = -9.6
+# CANONICAL rch confirmation (next turn f0aa425): pipeline_bench full_pipeline_wide, opt=z
+# release, SAME worker (hz2) SEQUENTIAL, before=876015b (glibc) vs after=f0aa425 (mimalloc):
+"rch_full_pipeline_wide_8x16_glibc_us" = 466.90
+"rch_full_pipeline_wide_8x16_mimalloc_us" = 414.83
+"rch_full_pipeline_wide_8x16_delta_pct" = -11.2
+"rch_full_pipeline_wide_12x24_glibc_us" = 999.56
+"rch_full_pipeline_wide_12x24_mimalloc_us" = 884.42
+"rch_full_pipeline_wide_12x24_delta_pct" = -11.5
+"rch_full_pipeline_wide_16x32_glibc_ms" = 1.7650
+"rch_full_pipeline_wide_16x32_mimalloc_ms" = 1.5355
+"rch_full_pipeline_wide_16x32_delta_pct" = -13.0
+"build_confirmed" = "fm-cli release build exits 0 on rch (E0753 doc-placement fix verified); main is not broken."
 
 [positive_measurement_mimalloc_global_allocator_2026_07_02.decision]
-status = "keep_pending_rch_confirmation"
-rationale = "Deterministic full-pipeline profharness A/B shows -9.6% instructions (zero variance = real work removed, glibc's malloc/free/consolidate path is heavier than mimalloc's) and -10.6% task-clock, byte-identical. Cross-phase win (parse+layout+render all allocate). Landed the fm-cli integration; the canonical rch pipeline_bench opt=z confirmation is a documented follow-up (build hit a now-fixed doc-placement error before the freeze)."
+status = "keep"
+rationale = "CONFIRMED. Canonical rch pipeline_bench full_pipeline_wide (opt=z, same worker hz2 sequential) shows -11.2/-11.5/-13.0% across 8x16/12x24/16x32 with non-overlapping criterion CIs, matching/exceeding the deterministic profharness A/B (-9.6% instructions / -10.6% task-clock). Byte-identical (allocator swap cannot change output). Cross-phase win (parse+layout+render all allocate). fm-cli release build confirmed compiling. Landed main+master as f0aa425."
