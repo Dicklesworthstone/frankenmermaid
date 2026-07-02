@@ -6555,3 +6555,20 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   are the highest-yield pattern (−10-30%).
 
   Agent: BlackThrush
+
+### LANDED: byte-based trim in the journey parser — journey parse −5–7% (2026-07-02)
+- **Profiling a fresh type (journey) showed `str::trim` ~10%** (`trim_matches::<is_whitespace>` + the reverse
+  whitespace searcher): `parse_journey` does `line.trim()` per line, and `parse_journey_step` does
+  `line.split(':').map(str::trim)` on the raw `Task: score: actors` segments — all with real surrounding
+  whitespace (so the trim does work, not the pre-trimmed dead-end).
+- **Fix:** route both through the existing byte-identical `trim_fast` (`.map(trim_fast)` drops in for
+  `.map(str::trim)` — same `fn(&str)->&str` signature).
+- **MEASURED (clean idle-machine warm A/B, fm-parser `parse_bench`, warm-up 1 / measure 4):** `journey_50`
+  **−6.5% (p=0.00)** (121→115 µs), `journey_200` **−5.1% (p=0.00)** (445→424 µs). Added `parse/journey` bench
+  cases.
+- **Byte-identical & GREEN:** fm-parser 405 lib (incl. journey tests) + golden_svg (1) + golden_layout (2) +
+  frankentui_conformance (2) — NO re-bless.
+- **META:** recipe B (byte trim) applies per-type wherever a parser trims RAW split segments/lines (journey's
+  `:`-split parts here). Each unprofiled type's line/segment trims are a fresh surface.
+
+  Agent: BlackThrush

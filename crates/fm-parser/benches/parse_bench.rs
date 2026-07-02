@@ -136,6 +136,18 @@ fn gen_mindmap(nodes: usize) -> String {
     s
 }
 
+/// A user-journey diagram: `steps` task lines (`Task: score: actors`) across sections.
+fn gen_journey(steps: usize) -> String {
+    let mut s = String::from("journey\n  title My Working Day\n");
+    for i in 0..steps {
+        if i % 8 == 0 {
+            s.push_str(&format!("  section Section {}\n", i / 8));
+        }
+        s.push_str(&format!("    Task {i}: {}: Actor{}, Actor{}\n", 1 + i % 5, i % 3, (i + 1) % 3));
+    }
+    s
+}
+
 fn bench_parse(c: &mut Criterion) {
     let mut group = c.benchmark_group("parse");
 
@@ -180,6 +192,13 @@ fn bench_parse(c: &mut Criterion) {
     for (label, nodes) in [("mindmap_50", 50_usize), ("mindmap_200", 200_usize)] {
         let input = gen_mindmap(nodes);
         group.bench_with_input(BenchmarkId::new("mindmap", label), &input, |b, input| {
+            b.iter(|| fm_parser::parse(input));
+        });
+    }
+
+    for (label, steps) in [("journey_50", 50_usize), ("journey_200", 200_usize)] {
+        let input = gen_journey(steps);
+        group.bench_with_input(BenchmarkId::new("journey", label), &input, |b, input| {
             b.iter(|| fm_parser::parse(input));
         });
     }

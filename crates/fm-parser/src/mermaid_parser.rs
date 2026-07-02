@@ -3698,7 +3698,7 @@ fn parse_journey(input: &str, builder: &mut IrBuilder) {
 
     for (index, line) in input.lines().enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
@@ -3811,7 +3811,10 @@ struct JourneyStep {
 }
 
 fn parse_journey_step(line: &str) -> Option<JourneyStep> {
-    let mut segments = line.split(':').map(str::trim);
+    // `trim_fast` (byte ASCII trim) instead of the Unicode `str::trim` on each `:`-split segment —
+    // these are raw `Task: score: actors` parts with real surrounding whitespace, so the trim does
+    // work (unlike pre-trimmed inputs); it was ~10% of journey parse. Byte-identical.
+    let mut segments = line.split(':').map(trim_fast);
     let name = clean_label(segments.next())?;
 
     let score = segments.next().and_then(|raw| raw.parse::<u8>().ok());
