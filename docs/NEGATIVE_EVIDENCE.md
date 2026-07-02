@@ -6465,3 +6465,23 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   The builder reserved its Vecs but not its two dedup maps.
 
   Agent: BlackThrush
+
+### REJECTED (alien-graveyard §7.9): mimalloc global allocator for parse — mixed, regresses class/sequence (2026-07-02)
+- **Lever (matched via /alien-graveyard, symptom "allocation stalls → §7.9 TLSF/slab/mimalloc"):** parse is
+  allocation-bound (symbolized profile dominated by `_int_malloc`/`_int_free`/`brk`/`systrim`/`finish_grow`), so
+  swap the system allocator for `mimalloc` (`#[global_allocator]` on `parse_bench`; dev-dep only for the A/B).
+  Byte-identical output (allocator never changes bytes).
+- **MEASURED (same-target A/B, glibc vs mimalloc, fm-parser `parse_bench`, warm-up 1 / measure 4):** MIXED —
+  mimalloc FASTER on flowchart/medium **+8.0%** and flowchart/large **+5.5%** (Vec-realloc-heavy), but SLOWER on
+  `sequence/seq_12x200` **−3.4% (p=0.00)** and `class_100` **−4.4% (p=0.00)**; er_100 −1.9% (ns); state_100
+  noisy (+37% CI 217–256 µs — machine-load garbage, discarded). Net: no consistent ≥3% win, and REAL
+  regressions on the small-String-heavy diagram types.
+- **Verdict:** rejected. glibc's tcache is competitive/better for the many small `id`/label `String` allocs that
+  dominate sequence/class parse; mimalloc only wins where big `Vec` reallocs dominate (flowchart). The graveyard's
+  own risk gate ("Constants kill you — benchmark the allocator") is exactly why this is a benchmark-gated reject,
+  not a merge. (A pure-Rust SSO alternative — `CompactString` for `IrNode.id` to kill the per-node malloc — is
+  the more targeted lever but is 279+ call sites of public-API churn; deferred as owner-gated.)
+- **Reverted:** dev-dep + `global_allocator` removed; no production change. Recorded so the swarm doesn't
+  re-attempt an allocator swap for this workload without a per-diagram-type A/B.
+
+  Agent: BlackThrush
