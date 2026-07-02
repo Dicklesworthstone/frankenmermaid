@@ -6485,3 +6485,34 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   re-attempt an allocator swap for this workload without a per-diagram-type A/B.
 
   Agent: BlackThrush
+
+### FRONTIER (alien-graveyard pass): clean per-crate frontier closing after 9 parse wins; remaining levers are structural/gated (2026-07-02)
+- **Fresh symbolized profiles (this session's 9 landed parse wins are in):**
+  - **parse/flowchart/large** (post all wins): now flat — fast edge/node parsers ~5%/3.5%, `str::trim` 3.9%
+    (intern `id.trim()` on already-`trim_ascii`'d input = the dbea790 dead-end), memchr ~10% (single-char
+    `split_once`/`contains` — already optimal), `intern_node_auto` 3.4% (hash+memcmp dedup, inherent), and the
+    `Vec<FlowDocumentItem>` push+`ptr::write` ~10% (the large intermediate enum, materialized then consumed).
+    The byte-gate recipe is already applied to every hot loop fn (`strip_flowchart_inline_comment`,
+    `parse_fast_*`, `parse_node_token`, `split_top_level_ampersands`, `looks_like_dot`).
+  - **wide_stages/render/16x32:** inherent — `Vec::append_elements`/`memmove` ~50% (byte production of the
+    534 KB SVG), `write_fixed2`+`write_uint_into`+`FmtNum` ~16% (already digit-table-optimized, e79a7bd),
+    `Vec::reserve`+`String::push` ~16% (inherent to safe `push_str`; the `push→push_str` swap was REJECTED in
+    d7627fd). No clean lever.
+- **Remaining levers, mapped to /alien-graveyard, all structural/gated:**
+  1. **`FlowDocumentItem` single-pass streaming** (thread `builder`+cluster/subgraph context through the
+     recursive flowchart document parser, lower inline instead of materializing the items Vec). Same
+     "eliminate materialize-then-consume" pattern that gave sequence parse −16% (0580ce4). EV ~7% flowchart
+     parse (the dominant type). INTERNAL (private enum) but HIGH BLAST RADIUS (the core flowchart path);
+     needs the full golden+proptest+conformance gate to prove byte-identity across subgraph nesting /
+     placeholder / warning edge cases. **Recommended highest-EV next step for a focused session.**
+  2. **SSO — `CompactString` for `IrNode.id`** (graveyard §7.9 inline storage): kills the per-node `id` malloc
+     (the dominant parse alloc-COUNT). Byte-identical. OWNER-GATED: 279+ call sites on public `fm-core` API.
+  3. **Arena/region alloc** (graveyard §5.10) for transient parse structures: same lifetime-churn as SSO.
+  4. **mimalloc** (graveyard §7.9): REJECTED this session (mixed; regresses class/sequence — see entry above).
+  5. **Non-flowchart render slow-path streaming** (~18% render on sequence/class/state/er): OWNER-GATED
+     (interleaved children between/after edges+nodes block `to_string_with_body`).
+- **Verdict:** the low-risk byte-scan/presize recipe frontier is essentially harvested. Further gains need a
+  scoped, well-tested structural refactor (lever 1) or an owner decision on public-API/allocator changes
+  (levers 2-3). No clean drop-in ≥3% win remains.
+
+  Agent: BlackThrush
