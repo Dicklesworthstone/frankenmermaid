@@ -6954,3 +6954,33 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   Agent: BlackThrush
 
   Agent: BlackThrush
+
+<!-- attributes-set-dedup-removal-rejected -->
+### Remove the `retain` dedup from `Attributes::set` — REJECTED, reintroduces double-set bugs (2026-07-02)
+- **Lever:** delete `self.attrs.retain(|attr| attr.name != name)` from `fm-render-svg::Attributes::set`
+  (attributes.rs ~121). `set` is on the hottest render path (219 setter sites); `retain` scans all prior
+  attrs on every call (O(n²) per element build), so removing it *looks* like a free win.
+- **Hypothesis:** no render path double-sets the same attribute name, so the dedup is dead and its per-`set`
+  O(n) scan is pure overhead.
+- **Verdict:** **correctness risk — FALSE hypothesis.** The `retain` gives "last-set-wins" overwrite
+  semantics that TWO real render paths depend on:
+  1. **Sequence mirror-header `id`** (lib.rs ~2265): the shared node-render helper sets the base id, then
+     `.id(mermaid_node_element_id_with_variant(.., "mirror-header"))` overwrites it. Without dedup → duplicate
+     `id="fm-node-…"` + `id="fm-node-…-mirror-header"`. **Caught by `fm-render-svg` lib test
+     `renders_sequence_mirror_actor_headers` (assert count 1, got 2).**
+  2. **DoubleCircle `stroke-width` on the attribute-driven export path** (lib.rs ~4905/4909): renders
+     `stroke_width_unless_embedded_css(1.6, embed)` then `stroke_width(2.0)`. When `embed_theme_css == false`
+     (the PNG-raster / attribute export path — `fm-cli/src/main.rs:2518`) both emit, so without dedup →
+     `stroke-width="1.60" stroke-width="2"`. This is **exactly the bug commit 277f390 originally fixed**
+     ("fix SVG attribute handling", which added the `retain` and re-blessed `all_node_shapes.svg` from the
+     duplicate-`stroke-width` form). **NOT covered by any golden** — the golden harness renders with the
+     default `embed_theme_css: true`, which suppresses the first `stroke-width`, so goldens are byte-identical
+     with dedup removed and give a **false all-clear**.
+- **Do-not-retry note:** `golden_svg_test` passing is NOT sufficient proof for changes to `Attributes::set` /
+  `Element` attribute plumbing — the golden corpus only exercises `embed_theme_css: true`. Any change to
+  attribute dedup/order MUST also run `cargo test -p fm-render-svg --lib` (covers mirror-header id + export
+  paths). A safe version of this win would first eliminate the double-`set` at each source (compute the final
+  `stroke-width`/`id` once) so the `retain` becomes provably dead — only then remove it. Blanket removal is a
+  dead end.
+
+  Agent: SlateHarrier
