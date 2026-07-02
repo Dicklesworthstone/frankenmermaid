@@ -2294,3 +2294,46 @@ tooling_notes = [
 [negative_measurement_generated_path_d_raw_serialization_2026_06_27.decision]
 status = "reject_on_cod_b_local_fallback"
 rationale = "Generated path d raw attribute serialization regressed the cod-b local-fallback same-route wide_stages/render A/B by 7.60%, 11.18%, and 25.54%. This is negative routing evidence against treating local fallback as decisive; it does not revert the independent d932529 keep on main."
+
+[positive_measurement_truncf_removal_hot_number_formatters_2026_07_02]
+date = "2026-07-02"
+agent = "BlackThrush"
+lever_bead = "bd-1buv.1"
+graveyard_route = "Alien Graveyard 'constants kill you' / hardware-lowering: replace a hidden software libm call on the dominant render hot path with inline SSE conversions, matched to a measured perf profile."
+worker_delta = "wide_stages/render baseline (before-wt HEAD~1, RUSTFLAGS metadata=btfractbase) and candidate (main HEAD, metadata=btcastcand) each built+benched via rch exec on remote workers with separate target dirs; corroborated by a same-machine pinned-core perf-stat A/B on two independently rebuilt binaries."
+baseline_commit = "303b93c"
+candidate_commit = "bbfa640"
+candidate_summary = "AttributeValue::Number (every numeric SVG attribute) and path::FmtNum (every path coordinate) detected whole numbers with `n.fract() == 0.0 && n in i32 range`. f32::fract() lowers to a software `truncf` call (crate also targets wasm / opt-level=z). A perf profile of the wide-16x32 render put truncf at ~9% self-time. Replaced the test with a saturating round-trip cast `let i = n as i32; i as f32 == n`, provably the same branch across the full range incl. the +-2^31 boundary (out-of-range wholes saturate and fail the compare; NaN/inf fall to write_fixed2 which routes non-finite to the std formatter). FmtNum keeps its non-finite -> \"0\" guard."
+target_dir = "/data/projects/.rch-targets/frankenmermaid-blackthrush (candidate), /data/projects/.rch-targets/frankenmermaid-blackthrush-before (baseline)"
+render_baseline_command = "AGENT_NAME=BlackThrush RUSTFLAGS='-C metadata=btfractbase' CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-blackthrush-before rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 3"
+render_candidate_command = "AGENT_NAME=BlackThrush RUSTFLAGS='-C metadata=btcastcand' CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-blackthrush rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 3"
+local_ab_method = "taskset -c 2 perf stat -r 6 -- <binary> render 15000, two independently rebuilt opt=3 profharness binaries (before-wt vs main)."
+mermaid_js_command = "Denominator reused from this ledger's established live-CDP Mermaid comparator; this lever only widens the existing render-stage dominance and does not change the comparator."
+rust_build_profile = "release profile [optimized] (rch); opt-level=3 thin-lto (local perf-stat corroboration)"
+behavior_proof = "Full-SVG byte-identity dump before/after across 9 diagram types (wide 16x32/8x16, flowchart 100/500, cyclic 50/200, typical, sequence, pie): zero diff, identical len + rolling hash. Deterministic instruction count dropped 5.1% (82,906M -> 78,646M) with zero run-to-run variance, machine-independent proof that the truncf calls were removed."
+
+[positive_measurement_truncf_removal_hot_number_formatters_2026_07_02.metrics]
+"wide_stages_render_8x16_baseline_mean_us" = 265.78
+"wide_stages_render_8x16_candidate_mean_us" = 237.61
+"wide_stages_render_8x16_raw_delta_pct" = -10.60
+"wide_stages_render_12x24_baseline_mean_us" = 567.66
+"wide_stages_render_12x24_candidate_mean_us" = 497.59
+"wide_stages_render_12x24_raw_delta_pct" = -12.34
+"wide_stages_render_16x32_baseline_mean_us" = 957.20
+"wide_stages_render_16x32_candidate_mean_us" = 882.17
+"wide_stages_render_16x32_raw_delta_pct" = -7.84
+"local_perfstat_16x32_render_baseline_taskclock_ms" = 5806.42
+"local_perfstat_16x32_render_candidate_taskclock_ms" = 5211.71
+"local_perfstat_16x32_render_taskclock_delta_pct" = -10.24
+"local_perfstat_16x32_render_baseline_instructions_millions" = 82906.24
+"local_perfstat_16x32_render_candidate_instructions_millions" = 78646.30
+"local_perfstat_16x32_render_instructions_delta_pct" = -5.14
+
+[positive_measurement_truncf_removal_hot_number_formatters_2026_07_02.validation]
+"byte_identity_svg_dump_9_diagram_types" = "identical (zero diff)"
+"cargo_test_fm_render_svg_lib" = "passed via rch exec: 234 tests, 0 failed (incl. write_fixed2_byte_identical_to_std_format, prop_svg_output_is_deterministic)"
+"cargo_clippy_workspace_note" = "fm-render-svg change itself is clippy-clean. SURFACED (not caused by this lever): workspace clippy --all-targets -D warnings is PRE-EXISTING RED on fm-parser (~16 errors incl. byte_char_slices at mermaid_parser.rs:1294 and needless_option_as_deref in test code at :13250), accumulated via direct pushes; broad test-code cleanup left as a separate follow-up so this perf-evidence push stays surgical."
+
+[positive_measurement_truncf_removal_hot_number_formatters_2026_07_02.decision]
+status = "keep"
+rationale = "Render improved 7.8%-12.3% across all three generated wide sizes in the canonical rch release-profile per-crate bench with non-overlapping criterion CIs, corroborated by a same-core perf-stat A/B (-10.2% CPU) and a machine-independent -5.1% instruction-count drop. Output is byte-identical across 9 diagram types. Already landed on main+master as bbfa640."
