@@ -6908,4 +6908,26 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   layout you'd need to shorten the probed mid-segment or cut candidates without changing routed geometry
   (byte-identity-hard), or an algorithmic index change — not a leaf micro-opt.
 
+<!-- gantt-fastpath-landed -->
+### LANDED: skip the constant date-format re-split on the gantt fast path — gantt parse −8% (2026-07-02)
+- **Profiling gantt parse showed `normalize_gantt_date_with_format` at 15% self-time** (called once per
+  task date). It ran `split_gantt_date_parts(date_format, is_ascii_alphabetic)` on EVERY date — but
+  `date_format` is CONSTANT for the whole diagram (defaults to `"YYYY-MM-DD"`, which always splits to
+  `["YYYY","MM","DD"]`), so re-splitting it per task was pure redundancy.
+- **Fix:** a fast path — when `date_format == "YYYY-MM-DD"` (the default/most common), take `year/month/day`
+  directly from `token_parts[0/1/2]` and skip the format split; other formats keep the general zip+match.
+  Local to the fn (no threading). Byte-identical: for `"YYYY-MM-DD"` the general path maps part 0→year,
+  1→month, 2→day — exactly the fast path; `?`/None short-circuits unchanged (both return `None` on any
+  invalid token/format).
+- **MEASURED (clean same-machine A/B, profharness `gantt 300 parse`, user-time over 20k iters, alternated
+  7×):** OLD 5.29–5.61s → NEW 4.86–5.08 = **−8%, non-overlapping every round** (the char-predicate
+  `split(closure)` on the format string was pricier than expected).
+- **Byte-identical & GREEN (no re-bless):** fm-parser 406 lib (incl. gantt date-format tests) + golden_svg
+  (2) + golden_layout (2) + conformance (1); clippy clean.
+- **META:** a per-item parse/format helper that re-parses a CONSTANT config string (format spec, delimiter
+  set, option map) on every item — add a fast path for the dominant default value (cheaper than threading
+  the parsed form through the call chain).
+
+  Agent: BlackThrush
+
   Agent: BlackThrush

@@ -4759,22 +4759,34 @@ fn parse_gantt_absolute_date(token: &str, date_format: Option<&str>) -> Option<S
 }
 
 fn normalize_gantt_date_with_format(token: &str, date_format: &str) -> Option<String> {
-    let format_parts = split_gantt_date_parts(date_format, |ch| ch.is_ascii_alphabetic())?;
     let token_parts = split_gantt_date_parts(token, |ch| ch.is_ascii_digit())?;
 
-    let mut year = None;
-    let mut month = None;
-    let mut day = None;
-    for (format_part, token_part) in format_parts.iter().zip(token_parts.iter()) {
-        match *format_part {
-            "YYYY" => year = token_part.parse::<u32>().ok(),
-            "MM" => month = token_part.parse::<u32>().ok(),
-            "DD" => day = token_part.parse::<u32>().ok(),
-            _ => return None,
+    // Fast path for the default/most-common format: `"YYYY-MM-DD"` always splits to
+    // `["YYYY","MM","DD"]`, so skip re-splitting the (constant) format string on EVERY date —
+    // `split_gantt_date_parts(date_format, …)` ran once per task otherwise. Byte-identical to the
+    // general zip+match below for this format (year = part 0, month = part 1, day = part 2).
+    let (year, month, day) = if date_format == "YYYY-MM-DD" {
+        (
+            token_parts[0].parse::<u32>().ok()?,
+            token_parts[1].parse::<u32>().ok()?,
+            token_parts[2].parse::<u32>().ok()?,
+        )
+    } else {
+        let format_parts = split_gantt_date_parts(date_format, |ch| ch.is_ascii_alphabetic())?;
+        let mut year = None;
+        let mut month = None;
+        let mut day = None;
+        for (format_part, token_part) in format_parts.iter().zip(token_parts.iter()) {
+            match *format_part {
+                "YYYY" => year = token_part.parse::<u32>().ok(),
+                "MM" => month = token_part.parse::<u32>().ok(),
+                "DD" => day = token_part.parse::<u32>().ok(),
+                _ => return None,
+            }
         }
-    }
+        (year?, month?, day?)
+    };
 
-    let (year, month, day) = (year?, month?, day?);
     if !is_valid_gantt_calendar_date(year, month, day) {
         return None;
     }
