@@ -6591,3 +6591,21 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   `to_ascii_lowercase()` used only for comparison (many types lowercase keywords this way).
 
   Agent: BlackThrush
+
+### LANDED: slice C4 function-call arguments instead of char-by-char build — C4 parse −7–12% (2026-07-02)
+- **Profiling a fresh type (C4) showed `String::push` + `char::encode_utf8` ~6% + `str::trim` ~6%:**
+  `split_top_level_arguments` built each argument by pushing EVERY char into a per-arg `String` — but it does
+  no unescaping (backslashes/quotes pushed verbatim), so each argument is just a substring of the input between
+  top-level commas.
+- **Fix (NEW recipe E):** track the byte index of each argument boundary and SLICE `raw[start..comma]` instead
+  of char-by-char building (the state machine for quote/paren/escape still runs, but no `push`). Plus recipe B
+  (`trim_fast`) on the C4 line trim + `parse_function_call`'s name/remainder trims. Byte-identical:
+  `raw[start..comma]` is exactly what the accumulator held.
+- **MEASURED (clean idle-machine warm A/B, fm-parser `parse_bench`, warm-up 1 / measure 4):** `c4_50`
+  **−7.3% (p=0.00)** (175→162 µs), `c4_100` **−11.6% (p=0.00)** (340→300 µs). Added `parse/c4` bench cases.
+- **Byte-identical & GREEN:** fm-parser 405 lib (incl. 9 C4 tests) + golden_svg (1) + golden_layout (2) +
+  frankentui_conformance (2) — NO re-bless.
+- **META (recipe E):** a char-by-char `String` builder that copies input VERBATIM (no transform) → track byte
+  indices and slice. Grep parsers for `current.push(ch)` / `.chars()` loops that only accumulate.
+
+  Agent: BlackThrush

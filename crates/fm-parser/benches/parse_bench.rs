@@ -164,6 +164,22 @@ fn gen_gitgraph(commands: usize) -> String {
     s
 }
 
+/// A C4 context diagram: `elements` Person/System elements + Rel relationships (function-call syntax).
+fn gen_c4(elements: usize) -> String {
+    let mut s = String::from("C4Context\n  title System Context\n");
+    for i in 0..elements {
+        if i % 2 == 0 {
+            s.push_str(&format!("  Person(user{i}, \"User {i}\", \"A user number {i}\")\n"));
+        } else {
+            s.push_str(&format!("  System(sys{i}, \"System {i}\", \"The system {i}\")\n"));
+        }
+    }
+    for i in 0..elements.saturating_sub(1) {
+        s.push_str(&format!("  Rel(user{}, sys{}, \"Uses\", \"HTTPS\")\n", i & !1, (i + 1) | 1));
+    }
+    s
+}
+
 fn bench_parse(c: &mut Criterion) {
     let mut group = c.benchmark_group("parse");
 
@@ -222,6 +238,13 @@ fn bench_parse(c: &mut Criterion) {
     for (label, cmds) in [("gitgraph_50", 50_usize), ("gitgraph_200", 200_usize)] {
         let input = gen_gitgraph(cmds);
         group.bench_with_input(BenchmarkId::new("gitgraph", label), &input, |b, input| {
+            b.iter(|| fm_parser::parse(input));
+        });
+    }
+
+    for (label, elements) in [("c4_50", 50_usize), ("c4_100", 100_usize)] {
+        let input = gen_c4(elements);
+        group.bench_with_input(BenchmarkId::new("c4", label), &input, |b, input| {
             b.iter(|| fm_parser::parse(input));
         });
     }

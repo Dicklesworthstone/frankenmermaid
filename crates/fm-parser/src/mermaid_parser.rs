@@ -5181,7 +5181,7 @@ fn parse_c4(input: &str, builder: &mut IrBuilder) {
 
     for (index, raw_line) in input.lines().enumerate() {
         let line_number = index + 1;
-        let trimmed = strip_flowchart_inline_comment(raw_line).trim();
+        let trimmed = trim_fast(strip_flowchart_inline_comment(raw_line));
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
@@ -8098,14 +8098,14 @@ fn split_csv_fields(line: &str) -> Option<Vec<String>> {
 
 fn parse_function_call(line: &str) -> Option<(String, Vec<String>, bool)> {
     let open_paren = line.find('(')?;
-    let function_name = line[..open_paren].trim();
+    let function_name = trim_fast(&line[..open_paren]);
     if function_name.is_empty() {
         return None;
     }
 
     let close_paren = find_matching_paren(line, open_paren)?;
     let arguments = split_top_level_arguments(&line[open_paren + 1..close_paren]);
-    let remainder = line[close_paren + 1..].trim();
+    let remainder = trim_fast(&line[close_paren + 1..]);
     let opens_block = remainder == "{";
 
     Some((function_name.to_string(), arguments, opens_block))
@@ -8149,54 +8149,48 @@ fn find_matching_paren(line: &str, open_paren: usize) -> Option<usize> {
 }
 
 fn split_top_level_arguments(raw: &str) -> Vec<String> {
+    // Each argument is a VERBATIM substring of `raw` between top-level commas (the old version pushed
+    // every char — including backslashes and quotes — into a per-arg `String`, doing no unescaping).
+    // So track the byte index of each argument boundary and SLICE instead of building char-by-char
+    // (`String::push` + `encode_utf8` were ~6% of C4 parse). Byte-identical: `raw[start..comma]` is
+    // exactly what the accumulator held; `trim_fast` equals `str::trim`.
     let mut arguments = Vec::new();
-    let mut current = String::new();
     let mut in_quote: Option<char> = None;
     let mut escaped = false;
     let mut nested_parens = 0_usize;
+    let mut start = 0_usize;
 
-    for ch in raw.chars() {
+    for (idx, ch) in raw.char_indices() {
         if let Some(quote) = in_quote {
             if escaped {
-                current.push(ch);
                 escaped = false;
                 continue;
             }
             if ch == '\\' && quote != '`' {
-                current.push(ch);
                 escaped = true;
                 continue;
             }
             if ch == quote {
                 in_quote = None;
             }
-            current.push(ch);
             continue;
         }
 
         match ch {
-            '"' | '\'' | '`' => {
-                in_quote = Some(ch);
-                current.push(ch);
-            }
-            '(' => {
-                nested_parens = nested_parens.saturating_add(1);
-                current.push(ch);
-            }
-            ')' => {
-                nested_parens = nested_parens.saturating_sub(1);
-                current.push(ch);
-            }
+            '"' | '\'' | '`' => in_quote = Some(ch),
+            '(' => nested_parens = nested_parens.saturating_add(1),
+            ')' => nested_parens = nested_parens.saturating_sub(1),
             ',' if nested_parens == 0 => {
-                arguments.push(current.trim().to_string());
-                current.clear();
+                arguments.push(trim_fast(&raw[start..idx]).to_string());
+                start = idx + ch.len_utf8();
             }
-            _ => current.push(ch),
+            _ => {}
         }
     }
 
-    if !current.trim().is_empty() {
-        arguments.push(current.trim().to_string());
+    let last = trim_fast(&raw[start..]);
+    if !last.is_empty() {
+        arguments.push(last.to_string());
     }
 
     arguments
