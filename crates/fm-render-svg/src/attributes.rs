@@ -30,15 +30,18 @@ impl AttributeValue {
         match self {
             Self::String(s) => write_escaped_attr(out, s),
             Self::Number(n) => {
-                // Format with reasonable precision, trim trailing zeros.
-                // Use integer formatting only for values that fit in i32 range
-                // to avoid truncation overflow on extreme coordinates.
-                if n.fract() == 0.0
-                    && n.is_finite()
-                    && *n >= i32::MIN as f32
-                    && *n <= i32::MAX as f32
-                {
-                    write_int_into(out, *n as i32)
+                // Whole numbers in i32 range serialize as integers; everything else to 2
+                // decimals. `*n as i32` is a saturating cast, so the round-trip compare
+                // `i as f32 == *n` is *exactly* the old `n.fract() == 0.0 && n.is_finite()
+                // && n in i32 range` test: a fractional value truncates and fails the
+                // compare; a whole in-range value round-trips; NaN/±inf and out-of-range
+                // wholes fail the compare and fall to `write_fixed2` (which itself routes
+                // non-finite to the std formatter) — identical bytes in every case. This
+                // avoids the `f32::fract` → `truncf` libm call, which measured ~9% of
+                // coordinate-heavy SVG render (per-attribute number formatting hot path).
+                let i = *n as i32;
+                if i as f32 == *n {
+                    write_int_into(out, i)
                 } else {
                     write_fixed2(out, *n)
                 }

@@ -252,8 +252,15 @@ impl FmtNum {
         if !n.is_finite() {
             return out.write_str("0");
         }
-        if n.fract() == 0.0 && n >= i32::MIN as f32 && n <= i32::MAX as f32 {
-            crate::attributes::write_int_into(out, n as i32)
+        // For finite `n`, `n as i32` is a saturating cast, so the round-trip compare
+        // `i as f32 == n` reproduces the old `n.fract() == 0.0 && n in i32 range` branch
+        // byte-for-byte (a fractional value truncates and fails the compare; a whole
+        // in-range value round-trips; an out-of-range whole saturates and fails). This
+        // drops the `f32::fract` → `truncf` libm call — ~9% of coordinate-heavy render
+        // on the per-path-coordinate serialization hot loop.
+        let i = n as i32;
+        if i as f32 == n {
+            crate::attributes::write_int_into(out, i)
         } else {
             crate::attributes::write_fixed2(out, n)
         }
