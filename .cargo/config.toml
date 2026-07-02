@@ -1,0 +1,18 @@
+# Native x86-64 builds target the x86-64-v2 microarchitecture level (SSE4.1/SSSE3/POPCNT/
+# CMPXCHG16B — Intel Nehalem / AMD Bulldozer, ~2009, and the baseline required by modern
+# distros such as RHEL 9). This lets the number-formatting hot path lower round_ties_even()
+# and floor() to hardware `roundsd`/`floorss` instead of the compiler-builtins software
+# `rint`/`floorf` (measured ~2% of the pipeline), and widens the auto-vectorized byte scans.
+#
+# Measured (deterministic same-machine pinned-core perf-stat, full pipeline, byte-identical):
+#   instructions -5.3%, task-clock -4.7%.
+#
+# Gated to x86_64 so wasm32/aarch64 are unaffected. build-wasm.sh sets its own RUSTFLAGS
+# (env RUSTFLAGS takes precedence over config), so the wasm bundle is untouched.
+#
+# PORTABILITY: this raises the minimum runtime CPU for distributed native binaries to
+# x86-64-v2 (SSE4.1, ~2009+). To support older CPUs, delete this file (reverts to the
+# generic x86-64 / SSE2 baseline); to go further on known-modern hardware, use
+# "x86-64-v3" (AVX2, Haswell 2013+) or "native".
+[target.'cfg(target_arch = "x86_64")']
+rustflags = ["-C", "target-cpu=x86-64-v2"]

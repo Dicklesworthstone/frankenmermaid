@@ -2625,3 +2625,27 @@ behavior_proof = "opt-level does not change output bytes (same source, different
 [positive_measurement_native_opt3_hot_crates_2026_07_02.decision]
 status = "keep"
 rationale = "Native full pipeline roughly HALVED (-48..-50% across 8x16/12x24/16x32; render -59..-61%, parse -45..-50%, layout -15..-26% via opt=3 fm-core) on the same pinned worker sequentially, non-overlapping criterion CIs. Biggest single win of the campaign. Byte-identical (opt-level is codegen-only). wasm bundle size preserved via build-wasm.sh --config overrides. Extends the pre-existing fm-layout native-opt3 split. Landed main+master."
+
+[positive_measurement_target_cpu_x86_64_v2_2026_07_02]
+date = "2026-07-02"
+agent = "BlackThrush"
+lever_bead = "bd-1buv.1"
+graveyard_route = "Alien Graveyard 'constants kill you': the generic x86-64 target (SSE2) lowers round_ties_even()/floor() to software compiler-builtins rint/floorf; target-cpu=x86-64-v2 (SSE4.1) gives them hardware roundsd/floorss and wider byte scans."
+baseline_commit = "85440e2"
+candidate_summary = ".cargo/config.toml sets [target.'cfg(target_arch=\"x86_64\")'] rustflags=[\"-C\",\"target-cpu=x86-64-v2\"]. Native x86_64 only (wasm32/aarch64 unaffected; build-wasm.sh env RUSTFLAGS takes precedence for wasm). Byte-identical: hardware round-to-even == software rint, hardware floor == floorf (IEEE)."
+ab_method = "Deterministic same-machine pinned-core (taskset -c 2) perf-stat A/B on two opt=3+mimalloc profharness binaries (parse+layout+render wide 16x32), baseline x86-64 (SSE2) vs -C target-cpu=x86-64-v2 (SSE4.1). Byte-identity verified via full-SVG 9-diagram dump (zero diff)."
+rust_build_profile = "opt=3 profharness (validation). Baseline profile showed compiler-builtins rint ~0.98% + floorf ~1.13% (software float rounding on SSE2)."
+mermaid_js_command = "Denominator reused from this ledger's established live-CDP Mermaid comparator; widens native whole-pipeline dominance."
+behavior_proof = "Full-SVG dump across 9 diagram types byte-identical (hardware roundsd/floorss are IEEE, identical to software rint/floorf). Bench pipeline valid at v2."
+
+[positive_measurement_target_cpu_x86_64_v2_2026_07_02.metrics]
+"full_pipeline_profharness_baseline_taskclock_units" = 6256023524
+"full_pipeline_profharness_v2_taskclock_units" = 5960958202
+"full_pipeline_taskclock_delta_pct" = -4.7
+"full_pipeline_profharness_baseline_instructions" = 93387538443
+"full_pipeline_profharness_v2_instructions" = 88399345300
+"full_pipeline_instructions_delta_pct" = -5.3
+
+[positive_measurement_target_cpu_x86_64_v2_2026_07_02.decision]
+status = "keep_pending_rch_confirmation"
+rationale = "Deterministic profharness A/B: -5.3% instructions (zero variance = real work removed: software rint/floorf -> hardware roundsd/floorss) and -4.7% task-clock, byte-identical. x86-64-v2 (SSE4.1, ~2009+) is a near-universal safe baseline required by modern distros. PORTABILITY: raises min runtime CPU to SSE4.1 (surfaced in .cargo/config.toml; trivially revertible by deleting the file). NOTE: canonical rch full_pipeline_wide opt=z/opt=3 A/B was NOT captured this turn (HEAD-freeze interrupted the BEFORE run); follow-up: rch bench before/after same-worker-sequential with RUSTFLAGS='-C target-cpu=x86-64-v2'."
