@@ -517,7 +517,7 @@ impl IrBuilder {
         let Some(node) = self.ir.nodes.get_mut(node_id.0) else {
             return;
         };
-        let meta = node.class_meta.get_or_insert_with(IrClassNodeMeta::default);
+        let meta = node.class_meta.get_or_insert_with(|| Box::new(IrClassNodeMeta::default()));
         match member.kind {
             ClassMemberKind::Attribute => meta.attributes.push(member),
             ClassMemberKind::Method => meta.methods.push(member),
@@ -532,7 +532,7 @@ impl IrBuilder {
             return;
         };
         node.class_meta
-            .get_or_insert_with(IrClassNodeMeta::default)
+            .get_or_insert_with(|| Box::new(IrClassNodeMeta::default()))
             .stereotype = Some(stereotype);
     }
 
@@ -544,7 +544,7 @@ impl IrBuilder {
             return;
         };
         node.class_meta
-            .get_or_insert_with(IrClassNodeMeta::default)
+            .get_or_insert_with(|| Box::new(IrClassNodeMeta::default()))
             .generics = generics;
     }
 
@@ -1311,7 +1311,7 @@ impl IrBuilder {
         let Some(node) = self.ir.nodes.get_mut(node_id.0) else {
             return;
         };
-        node.c4_meta = Some(meta);
+        node.c4_meta = Some(Box::new(meta));
     }
 
     /// Add an entity attribute to a node (for ER diagrams).

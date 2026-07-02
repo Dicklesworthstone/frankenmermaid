@@ -1245,15 +1245,20 @@ pub struct IrNode {
     /// Entity attributes/members (for ER diagrams)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub members: Vec<IrEntityAttribute>,
-    /// Class-diagram-specific metadata (attributes, methods, stereotypes)
+    /// Class-diagram-specific metadata (attributes, methods, stereotypes). Boxed: this and the
+    /// other two diagram-specific metas below are `None` for the overwhelmingly common
+    /// flowchart/sequence node, so boxing keeps their ~90/70/100-byte payloads off every `IrNode`
+    /// (heap only when actually present) — `IrNode` shrinks from 584 to ~360 bytes, cutting the
+    /// per-node move/copy/drop and cache traffic on the hot parse→layout→render path. `Box<T>`
+    /// serializes transparently as `T`, so the JSON form is unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub class_meta: Option<IrClassNodeMeta>,
-    /// Requirement-diagram metadata (type, id, text, risk, verifymethod)
+    pub class_meta: Option<Box<IrClassNodeMeta>>,
+    /// Requirement-diagram metadata (type, id, text, risk, verifymethod). Boxed — see `class_meta`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requirement_meta: Option<IrRequirementNodeMeta>,
-    /// C4-diagram-specific metadata (element type, technology, description)
+    pub requirement_meta: Option<Box<IrRequirementNodeMeta>>,
+    /// C4-diagram-specific metadata (element type, technology, description). Boxed — see `class_meta`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub c4_meta: Option<IrC4NodeMeta>,
+    pub c4_meta: Option<Box<IrC4NodeMeta>>,
     /// Parsed inline style from `style nodeId ...` directives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline_style: Option<IrInlineStyle>,

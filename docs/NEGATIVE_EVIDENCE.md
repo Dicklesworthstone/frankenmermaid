@@ -5978,3 +5978,28 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   parse gain depends on.
 
   Agent: cc
+
+### LANDED: box IrNode's diagram-specific metas — IrNode 584 → 320 B, parse bytes −15.7% (2026-07-01)
+- **The "owner-gated struct-shrink" surfaced for many cycles — executed once re-scoped as a workspace-internal,
+  goldens-verified refactor** (fm-core has no external crates.io consumers, and every diagram type has a golden
+  SVG, so byte-identity is fully verifiable). Boxed the three inlined diagram-specific metas on `IrNode`:
+  `class_meta` (96 B), `requirement_meta`, `c4_meta` (72 B) → `Option<Box<…>>`. They are `None` for the
+  overwhelmingly common flowchart/sequence node, so the ~260 B of inline payload leaves every `IrNode` (heap
+  only when the field is actually present, i.e. class/requirement/C4 diagrams).
+- **MEASURED (deterministic counting-allocator + `size_of`, load-immune):** `size_of::<IrNode>()`
+  **584 → 320 B (−45%)**; parse allocated BYTES wide_16x32 **1,234,928 → 1,040,624 (−15.7%)** (the `ir.nodes`
+  Vec — initial + doubling reallocs — is the dominant parse allocation, so a 45 %-smaller element shrinks it
+  hard). Parse alloc COUNT is unchanged (pure memory-traffic reduction; no new Box alloc for flowcharts since
+  the fields are `None`). Also shrinks the per-node move memcpy and improves `ir.nodes` cache density through
+  layout+render.
+- **Byte-identical & serde-safe:** `Box<T>` serializes transparently as `T`. `svg_golden_snapshots_are_stable`
+  (all diagram types incl. c4/class/requirement/er/state), `layout_golden_checksums_are_stable`,
+  `frankentui_conformance`, `config_roundtrip_test` (15 serde cases), 234 fm-render-svg + fm-parser lib tests
+  GREEN with NO re-bless. Compiler-guided (each construction site: `get_or_insert_with(|| Box::new(..))`,
+  `Some(Box::new(..))`); reads auto-deref through `Box`.
+- **Verdict: LANDED.** The meta-lesson delivered: an "architectural / owner-gated" lever became a clean landable
+  win once scoped (box only the 3 metas = ~13 construction sites, reads unchanged) and verified against the
+  comprehensive golden corpus. Remaining struct-shrink: `IrEdge`'s 5 `Option<String>` (`guard` 60 refs) — the
+  reads there are not all `Option`-method calls, so it needs more care; deferred as the next step.
+
+  Agent: cc

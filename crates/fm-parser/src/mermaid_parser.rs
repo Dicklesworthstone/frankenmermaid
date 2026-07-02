@@ -2989,7 +2989,7 @@ fn parse_requirement(input: &str, builder: &mut IrBuilder) {
             {
                 let meta = node
                     .requirement_meta
-                    .get_or_insert_with(fm_core::IrRequirementNodeMeta::default);
+                    .get_or_insert_with(|| Box::new(fm_core::IrRequirementNodeMeta::default()));
                 if meta.requirement_type.is_none() {
                     meta.requirement_type = current_req_type.take();
                 }
@@ -3008,7 +3008,7 @@ fn parse_requirement(input: &str, builder: &mut IrBuilder) {
             {
                 let meta = node
                     .requirement_meta
-                    .get_or_insert_with(fm_core::IrRequirementNodeMeta::default);
+                    .get_or_insert_with(|| Box::new(fm_core::IrRequirementNodeMeta::default()));
                 meta.req_id = Some(rest.trim().to_string());
                 continue;
             }
@@ -3018,7 +3018,7 @@ fn parse_requirement(input: &str, builder: &mut IrBuilder) {
             {
                 let meta = node
                     .requirement_meta
-                    .get_or_insert_with(fm_core::IrRequirementNodeMeta::default);
+                    .get_or_insert_with(|| Box::new(fm_core::IrRequirementNodeMeta::default()));
                 meta.text = Some(rest.trim().to_string());
                 continue;
             }
@@ -3028,7 +3028,7 @@ fn parse_requirement(input: &str, builder: &mut IrBuilder) {
             {
                 let meta = node
                     .requirement_meta
-                    .get_or_insert_with(fm_core::IrRequirementNodeMeta::default);
+                    .get_or_insert_with(|| Box::new(fm_core::IrRequirementNodeMeta::default()));
                 meta.risk = Some(rest.trim().to_string());
                 continue;
             }
@@ -3038,7 +3038,7 @@ fn parse_requirement(input: &str, builder: &mut IrBuilder) {
             {
                 let meta = node
                     .requirement_meta
-                    .get_or_insert_with(fm_core::IrRequirementNodeMeta::default);
+                    .get_or_insert_with(|| Box::new(fm_core::IrRequirementNodeMeta::default()));
                 meta.verify_method = Some(rest.trim().to_string());
                 continue;
             }

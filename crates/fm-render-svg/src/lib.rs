@@ -7729,11 +7729,11 @@ mod tests {
             label: Some(IrLabelId(0)),
             shape: NodeShape::Rect,
             classes: vec!["c4".to_string(), "c4-container".to_string()],
-            c4_meta: Some(IrC4NodeMeta {
+            c4_meta: Some(Box::new(IrC4NodeMeta {
                 element_type: "Container".to_string(),
                 technology: Some("Rust".to_string()),
                 description: Some("Handles payment requests".to_string()),
-            }),
+            })),
             ..IrNode::default()
         });
         ir.nodes.push(IrNode {
@@ -7745,11 +7745,11 @@ mod tests {
                 "c4-person".to_string(),
                 "c4-external".to_string(),
             ],
-            c4_meta: Some(IrC4NodeMeta {
+            c4_meta: Some(Box::new(IrC4NodeMeta {
                 element_type: "Person".to_string(),
                 technology: None,
                 description: Some("External user".to_string()),
-            }),
+            })),
             ..IrNode::default()
         });
         ir
