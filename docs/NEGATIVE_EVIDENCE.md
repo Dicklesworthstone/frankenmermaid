@@ -6319,3 +6319,22 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   removes the redundancy with zero behavior change.
 
   Agent: BlackThrush
+
+### REVERTED: no-quote/bracket fast path for `find_operator_from_index` — ~0 gain (2026-07-02)
+- **Lever:** `find_operator_from_index` walks `char_indices` with a quote/bracket depth state machine (to avoid
+  matching an operator inside a quoted/bracketed region). For a line with NO `"'`[](){}` byte anywhere, that
+  tracking is dead weight, so: pre-scan bytes for any special char; if none, run a plain byte loop
+  (`op_first_byte` gate + longest-`starts_with`) with no state machine. Byte-identical (the state machine treats
+  every position as unquoted+unbracketed on such lines). Shared the operator-match logic via a `match_op` closure.
+- **Measured (clean warm same-machine A/B, fm-parser `parse_bench parse/sequence`, warm-up 2 / measure 5):**
+  `seq_12x50` +1.9% (p=0.16), `seq_12x200` −0.7% (p=0.56) — NOT significant, absolutes unchanged
+  (~100/~314 µs both arms). Fails the ≥3% gate.
+- **Verdict:** ~0 gain, reverted. **Why:** after the first-byte gate (3df0205) the state machine's per-char cost
+  is already tiny (a `match` that misses + three `== 0` depth checks + the byte gate); the ~8% `find_operator`
+  self-time is the `char_indices` iteration + the `starts_with` calls, which the fast path ALSO does. And the
+  fast path adds a full `has_special` byte pass, so it trades one char-scan for two byte-scans — a wash.
+- **Do-not-retry:** the operator scan is inherent (must look at each position once); the state machine is not the
+  cost. Remaining sequence-parse levers are `str::replace` in `normalize_sequence_display_text` (~2.5%, label-only)
+  and allocation.
+
+  Agent: BlackThrush
