@@ -9477,7 +9477,7 @@ mod tests {
         );
         let node_a = parsed.ir.nodes.iter().find(|node| node.id == "A");
         if let Some(node_a) = node_a {
-            assert!(node_a.href.is_none());
+            assert!(node_a.href().is_none());
         }
     }
 
@@ -9490,7 +9490,7 @@ mod tests {
 
         assert!(node_a.is_some());
         let node_a = node_a.expect("node A should exist");
-        assert_eq!(node_a.href.as_deref(), Some("//example.com"));
+        assert_eq!(node_a.href().as_deref(), Some("//example.com"));
         assert!(
             !parsed
                 .warnings
@@ -9508,7 +9508,7 @@ mod tests {
 
         assert!(node_a.is_some());
         let node_a = node_a.expect("node A should exist");
-        assert_eq!(node_a.href.as_deref(), Some("javascript:alert(1)"));
+        assert_eq!(node_a.href().as_deref(), Some("javascript:alert(1)"));
         assert!(
             !parsed
                 .warnings
@@ -9535,15 +9535,15 @@ mod tests {
 
         assert!(node_b.is_some());
         let node_b = node_b.expect("node B should exist");
-        assert_eq!(node_b.callback.as_deref(), Some("focusNode"));
-        assert_eq!(node_b.tooltip.as_deref(), Some("Focus node"));
+        assert_eq!(node_b.callback().as_deref(), Some("focusNode"));
+        assert_eq!(node_b.tooltip().as_deref(), Some("Focus node"));
         assert!(
             node_b
                 .classes
                 .iter()
                 .any(|class_name| class_name == "has-callback")
         );
-        assert!(node_b.href.is_none());
+        assert!(node_b.href().is_none());
     }
 
     #[test]
@@ -10266,7 +10266,7 @@ mod tests {
             .iter()
             .find(|node| node.id == "Child")
             .unwrap();
-        assert_eq!(child.icon.as_deref(), Some("fa fa-book"));
+        assert_eq!(child.icon().as_deref(), Some("fa fa-book"));
     }
 
     #[test]
@@ -10277,7 +10277,7 @@ mod tests {
             .label
             .and_then(|label_id| parsed.ir.labels.get(label_id.0))
             .map(|label| label.text.as_str());
-        assert_eq!(node.icon.as_deref(), Some("fa:server"));
+        assert_eq!(node.icon().as_deref(), Some("fa:server"));
         assert_eq!(label, Some("API"));
     }
 
@@ -10289,7 +10289,7 @@ mod tests {
             .label
             .and_then(|label_id| parsed.ir.labels.get(label_id.0))
             .map(|label| label.text.as_str());
-        assert_eq!(node.icon.as_deref(), Some("🚀"));
+        assert_eq!(node.icon().as_deref(), Some("🚀"));
         assert_eq!(label, Some("Deploy"));
     }
 
@@ -10938,7 +10938,7 @@ fan_in:B --> T:db",
                 .iter()
                 .any(|class_name| class_name == "architecture-icon-server")
         );
-        assert_eq!(api.icon.as_deref(), Some("server"));
+        assert_eq!(api.icon().as_deref(), Some("server"));
 
         let junction = parsed
             .ir
@@ -12785,8 +12785,8 @@ Rel_Back(db, app, "Responds")"#,
             "flowchart LR\n  A[Node]\n  click A \"https://example.com\" \"My Tooltip\"",
         );
         let node = parsed.ir.nodes.iter().find(|n| n.id == "A").unwrap();
-        assert_eq!(node.href.as_deref(), Some("https://example.com"));
-        assert_eq!(node.tooltip.as_deref(), Some("My Tooltip"));
+        assert_eq!(node.href().as_deref(), Some("https://example.com"));
+        assert_eq!(node.tooltip().as_deref(), Some("My Tooltip"));
     }
 
     // ── linkStyle default tests ────────────────────────────────────────

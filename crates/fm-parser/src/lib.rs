@@ -1023,9 +1023,9 @@ fn position_for_byte(source: &str, byte_index: usize, offsets: &[usize]) -> Posi
     let line_start = offsets[line.saturating_sub(1)];
     let col = source[line_start..clamped].chars().count() + 1;
     Position {
-        line,
-        col,
-        byte: clamped,
+        line: u32::try_from(line).unwrap_or(u32::MAX),
+        col: u32::try_from(col).unwrap_or(u32::MAX),
+        byte: u32::try_from(clamped).unwrap_or(u32::MAX),
     }
 }
 
@@ -1922,7 +1922,7 @@ mod tests {
         let node = result.ir.nodes.iter().find(|n| n.id == "A");
         if let Some(node) = node {
             assert!(
-                node.href.is_none() || !node.href.as_ref().unwrap().contains("javascript:"),
+                node.href().is_none() || !node.href().unwrap().contains("javascript:"),
                 "javascript: URLs must be blocked"
             );
         }

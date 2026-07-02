@@ -6083,3 +6083,35 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   1,234,928 → 824,640 = **−33.2%**, all byte-identical.
 
   Agent: cc
+
+### LANDED: shrink Position line/col/byte usize → u32 — Span 48 → 24 B, IrNode 208 → 184 B, IrEdge 120 → 96 B, parse bytes −10.8% (2026-07-02)
+- **The last large IR field, harvested.** After the meta/interaction/extras/inline_style boxing, the single
+  biggest remaining field on both hot-path structs was `IrNode.span_primary` / `IrEdge.span`: a `Span`
+  = 2×`Position`, each `Position` = 3×`usize` = 48 B, present on EVERY node and edge (23% of a 208-B `IrNode`,
+  40% of a 120-B `IrEdge`). Spans are source locations for diagnostics/source-mapping, never geometry — no
+  realistic Mermaid source approaches 4 GiB — so `Position`'s three fields drop `usize → u32`, halving
+  `Position` (24 → 12 B) and every `Span` (48 → 24 B).
+- **MEASURED (deterministic counting-allocator + `size_of`, load-immune):** `size_of::<Position>()` 24 → 12 B,
+  `size_of::<Span>()` 48 → 24 B, `size_of::<IrNode>()` **208 → 184 B (−11.5%)**, `size_of::<IrEdge>()`
+  **120 → 96 B (−20%)**; parse allocated BYTES wide_16x32 **979,760 → 873,728 (−10.8%)**. Alloc COUNT unchanged
+  (1599 — pure memory-traffic reduction, no new box; the `ir.nodes`/`ir.edges` Vecs + doubling reallocs shrink).
+- **Compiler-guided, ~10 cast sites:** construction (`position_for_byte`, `Span::at_line` cast internally via
+  `u32::try_from(..).unwrap_or(u32::MAX)`) plus the handful of diagnostic read sites (`span.start.line as usize`
+  widening, `MermaidTextRange` byte offsets). `Position`/`Span` are workspace-internal (fm-core has no crates.io
+  consumers), so the pub-field change is fully within-tree.
+- **Byte-identical & serde-safe:** `u32` and `usize` serialize identically as JSON numbers (same values), and
+  spans never affect layout geometry or rendered SVG. `golden_svg_test` (1), `golden_layout_test` (2),
+  `frankentui_conformance` (2) GREEN with NO re-bless; fm-core 350 + fm-parser 405 + fm-render-svg 234 +
+  fm-render-term 78 lib tests GREEN.
+- **Also fixed pre-existing test-only breakage from 7b01bbe (interaction-boxing) + bef271d that had never been
+  recompiled:** `frankentui_conformance_test`, fm-render-svg + fm-parser test modules still read the moved
+  `icon`/`href`/`callback`/`tooltip` fields as fields — converted to the `()` accessors / `interaction_mut()`.
+  Those crates' lib tests + the conformance gate now compile and pass again.
+- **Standing dominance context (not a new claim):** latest same-worker full_pipeline_wide vs pinned live-CDP
+  Mermaid 11.12.0 has frankenmermaid/Mermaid = 0.004280 / 0.003248 / 0.002136 at 8x16 / 12x24 / 16x32
+  (Mermaid **233.6× / 307.9× / 468.2× slower**). This is a deterministic parse-bytes/cache win on top of that.
+- **SESSION+PRIOR STRUCT-SHRINK TOTAL:** `IrNode` 608 → 184 B (−70%), `IrEdge` 256 → 96 B (−62.5%). With
+  `Span` now 24 B, both structs are dominated by their genuinely-used `String`/`Vec`/enum payloads — the cheap
+  struct-shrink frontier is essentially closed.
+
+  Agent: BlackThrush

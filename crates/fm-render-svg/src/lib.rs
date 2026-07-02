@@ -9113,9 +9113,9 @@ marker#arrow-open path {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         ir.nodes.push(IrNode {
             id: "A".to_string(),
-            callback: Some("handleNodeClick".to_string()),
             ..IrNode::default()
         });
+        ir.nodes[0].interaction_mut().callback = Some("handleNodeClick".to_string());
 
         let svg = render_svg(&ir);
         assert!(svg.contains("data-callback=\"handleNodeClick\""));
@@ -9426,7 +9426,7 @@ marker#arrow-open path {
     fn svg_link_mode_controls_anchor_emission() {
         let mut ir = create_ir_with_single_node("A", NodeShape::Rect);
         if let Some(node) = ir.nodes.first_mut() {
-            node.href = Some("https://example.com".to_string());
+            node.interaction_mut().href = Some("https://example.com".to_string());
         }
 
         let default_svg = render_svg(&ir);
@@ -9453,7 +9453,7 @@ marker#arrow-open path {
     fn svg_link_mode_skips_unsafe_href_under_strict() {
         let mut ir = create_ir_with_single_node("A", NodeShape::Rect);
         if let Some(node) = ir.nodes.first_mut() {
-            node.href = Some("javascript:alert(1)".to_string());
+            node.interaction_mut().href = Some("javascript:alert(1)".to_string());
         }
         ir.meta.init.config.sanitize_mode = MermaidSanitizeMode::Strict;
 
@@ -9869,7 +9869,7 @@ marker#arrow-open path {
     #[test]
     fn renders_named_node_icon_with_icon_classes() {
         let mut ir = create_ir_with_single_node("api", NodeShape::Rect);
-        ir.nodes[0].icon = Some("server".to_string());
+        ir.nodes[0].interaction_mut().icon = Some("server".to_string());
 
         let svg = render_svg(&ir);
 
@@ -9880,7 +9880,7 @@ marker#arrow-open path {
     #[test]
     fn renders_emoji_node_icon_as_text() {
         let mut ir = create_ir_with_single_node("spark", NodeShape::Rounded);
-        ir.nodes[0].icon = Some("🚀".to_string());
+        ir.nodes[0].interaction_mut().icon = Some("🚀".to_string());
 
         let svg = render_svg(&ir);
 
@@ -9891,7 +9891,7 @@ marker#arrow-open path {
     #[test]
     fn renders_custom_node_icon_from_config() {
         let mut ir = create_ir_with_single_node("chip", NodeShape::Rect);
-        ir.nodes[0].icon = Some("chip-core".to_string());
+        ir.nodes[0].interaction_mut().icon = Some("chip-core".to_string());
         let mut config = SvgRenderConfig::default();
         config.custom_icons.insert(
             "chip-core".to_string(),
@@ -9915,7 +9915,7 @@ marker#arrow-open path {
     #[test]
     fn renders_left_positioned_node_icons() {
         let mut ir = create_ir_with_single_node("queue", NodeShape::Rect);
-        ir.nodes[0].icon = Some("queue".to_string());
+        ir.nodes[0].interaction_mut().icon = Some("queue".to_string());
         let config = SvgRenderConfig {
             node_icon_position: NodeIconPosition::Left,
             ..SvgRenderConfig::default()

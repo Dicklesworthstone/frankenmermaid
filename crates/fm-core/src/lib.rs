@@ -145,11 +145,15 @@ pub fn mermaid_layout_guard_observability(
     )
 }
 
+/// A source position. Line/column/byte are stored as `u32` (max ~4.3 B) rather than
+/// `usize`: no realistic Mermaid source approaches 4 GiB, and halving this struct
+/// (24 → 12 B) halves every [`Span`] (48 → 24 B) — the single largest field on both
+/// `IrNode` and `IrEdge`, present on every node/edge on the hot parse path.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct Position {
-    pub line: usize,
-    pub col: usize,
-    pub byte: usize,
+    pub line: u32,
+    pub col: u32,
+    pub byte: u32,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -166,6 +170,7 @@ impl Span {
 
     #[must_use]
     pub fn at_line(line: usize, line_len: usize) -> Self {
+        let line = u32::try_from(line).unwrap_or(u32::MAX);
         let start = Position {
             line,
             col: 1,
@@ -173,7 +178,7 @@ impl Span {
         };
         let end = Position {
             line,
-            col: line_len.max(1),
+            col: u32::try_from(line_len).unwrap_or(u32::MAX).max(1),
             byte: 0,
         };
         Self::new(start, end)
@@ -3978,7 +3983,7 @@ impl StructuredDiagnostic {
     #[must_use]
     pub fn from_diagnostic(diagnostic: &Diagnostic) -> Self {
         let (source_line, source_column) = diagnostic.span.map_or((None, None), |span| {
-            (Some(span.start.line), Some(span.start.col))
+            (Some(span.start.line as usize), Some(span.start.col as usize))
         });
 
         Self {
@@ -4001,8 +4006,8 @@ impl StructuredDiagnostic {
             severity: DiagnosticSeverity::Warning.as_str().to_string(),
             message: warning.message.clone(),
             span: Some(warning.span),
-            source_line: Some(warning.span.start.line),
-            source_column: Some(warning.span.start.col),
+            source_line: Some(warning.span.start.line as usize),
+            source_column: Some(warning.span.start.col as usize),
             rule_id: None,
             confidence: None,
             remediation_hint: None,
@@ -4024,8 +4029,8 @@ impl StructuredDiagnostic {
             severity: DiagnosticSeverity::Error.as_str().to_string(),
             message: error.to_string(),
             span: Some(span),
-            source_line: Some(span.start.line),
-            source_column: Some(span.start.col),
+            source_line: Some(span.start.line as usize),
+            source_column: Some(span.start.col as usize),
             rule_id: None,
             confidence: None,
             remediation_hint,
@@ -4937,16 +4942,21 @@ pub fn resolve_span_text_range(source: &str, span: Span) -> Option<MermaidTextRa
 
     if span.end.byte > span.start.byte {
         return Some(MermaidTextRange {
-            start_byte: span.start.byte,
-            end_byte: span.end.byte,
+            start_byte: span.start.byte as usize,
+            end_byte: span.end.byte as usize,
         });
     }
 
     let line_starts = source_line_starts(source);
-    let start_byte =
-        byte_index_for_line_col(source, &line_starts, span.start.line, span.start.col)?;
-    let end_col_exclusive = span.end.col.saturating_add(1);
-    let end_byte = byte_index_for_line_col(source, &line_starts, span.end.line, end_col_exclusive)?;
+    let start_byte = byte_index_for_line_col(
+        source,
+        &line_starts,
+        span.start.line as usize,
+        span.start.col as usize,
+    )?;
+    let end_col_exclusive = span.end.col as usize + 1;
+    let end_byte =
+        byte_index_for_line_col(source, &line_starts, span.end.line as usize, end_col_exclusive)?;
     (end_byte >= start_byte).then_some(MermaidTextRange {
         start_byte,
         end_byte,
@@ -5240,7 +5250,7 @@ mod tests {
         scale_budget, to_init_parse,
     };
 
-    fn sample_span(line: usize, start_col: usize, end_col: usize) -> Span {
+    fn sample_span(line: u32, start_col: u32, end_col: u32) -> Span {
         Span::new(
             Position {
                 line,
