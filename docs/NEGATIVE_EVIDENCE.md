@@ -6516,3 +6516,22 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   (levers 2-3). No clean drop-in ≥3% win remains.
 
   Agent: BlackThrush
+
+### LANDED: gantt date split into a fixed [&str; 3] (no Vec) — gantt parse −5% (2026-07-02)
+- **Profiling a fresh type (gantt) showed date parsing ~10%:** `split_gantt_date_parts` split the format and
+  the token into `Vec<&str>` via `collect::<Vec<_>>()` — 2 heap allocs per parsed date (400 for gantt_200) —
+  even though its sole caller (`normalize_gantt_date_with_format`) requires EXACTLY 3 parts.
+- **Fix:** return `Option<[&str; 3]>` — pull the first three non-empty runs from the split iterator, `None` if
+  fewer (`next()?`) or more (trailing check). No `Vec`. Dropped the now-redundant `len() != 3` guards in the
+  caller. Byte-identical: <3/>3 both map to the previous `len != 3 -> None`.
+- **MEASURED (clean idle-machine warm A/B, fm-parser `parse_bench`, warm-up 1 / measure 4):** `gantt_200`
+  **−5.1% (p=0.00)** (502→492 µs); `gantt_50` −1.6% (p=0.16, ns — fewer dates, so fewer allocs to save). Added
+  `parse/gantt` bench cases. Win scales with task count (each date drops 2 `Vec` allocs).
+- **Byte-identical & GREEN:** fm-parser 405 lib (incl. 9 gantt tests: date-format normalization,
+  impossible-calendar-date rejection, non-ISO formats) + golden_svg (1) + golden_layout (2) +
+  frankentui_conformance (2) — NO re-bless.
+- **META:** `collect::<Vec>()` on a hot path where the count is known/bounded → fixed-size array or direct
+  iteration. Follow-up available: the `date_format` is constant across a gantt chart but re-split per task —
+  hoisting that parse would remove the other half of the date-parse cost.
+
+  Agent: BlackThrush

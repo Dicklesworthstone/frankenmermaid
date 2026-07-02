@@ -4645,10 +4645,6 @@ fn parse_gantt_absolute_date(token: &str, date_format: Option<&str>) -> Option<S
 fn normalize_gantt_date_with_format(token: &str, date_format: &str) -> Option<String> {
     let format_parts = split_gantt_date_parts(date_format, |ch| ch.is_ascii_alphabetic())?;
     let token_parts = split_gantt_date_parts(token, |ch| ch.is_ascii_digit())?;
-    if format_parts.len() != 3 || token_parts.len() != 3 || format_parts.len() != token_parts.len()
-    {
-        return None;
-    }
 
     let mut year = None;
     let mut month = None;
@@ -4697,16 +4693,27 @@ const fn is_gantt_leap_year(year: u32) -> bool {
     (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
-fn split_gantt_date_parts<F>(value: &str, predicate: F) -> Option<Vec<&str>>
+/// Split a date/format string into its three non-empty component runs (e.g. `YYYY`/`MM`/`DD` or
+/// `2024`/`01`/`01`). Returns `Some([a, b, c])` only for EXACTLY three parts — the sole caller
+/// (`normalize_gantt_date_with_format`) required `len() == 3` — so this avoids the per-date `Vec`
+/// allocation the old `collect::<Vec<_>>()` incurred (2 allocs per parsed date). Byte-identical:
+/// fewer than three parts fails the `next()?`, more than three fails the trailing check — both map
+/// to the previous `len() != 3 -> None`.
+fn split_gantt_date_parts<F>(value: &str, predicate: F) -> Option<[&str; 3]>
 where
     F: Fn(char) -> bool,
 {
-    let parts = value
+    let mut parts = value
         .trim()
-        .split(|ch: char| !predicate(ch))
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-    if parts.is_empty() { None } else { Some(parts) }
+        .split(move |ch: char| !predicate(ch))
+        .filter(|part| !part.is_empty());
+    let a = parts.next()?;
+    let b = parts.next()?;
+    let c = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some([a, b, c])
 }
 
 fn parse_gantt_duration_days(raw: &str) -> Option<u32> {

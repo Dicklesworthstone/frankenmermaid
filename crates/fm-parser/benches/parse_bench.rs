@@ -109,6 +109,22 @@ fn gen_er(entities: usize) -> String {
     s
 }
 
+/// A gantt chart: `tasks` tasks across a few sections — exercises the gantt task/section/date parser.
+fn gen_gantt(tasks: usize) -> String {
+    let mut s = String::from("gantt\n  title Project Plan\n  dateFormat YYYY-MM-DD\n");
+    for i in 0..tasks {
+        if i % 10 == 0 {
+            s.push_str(&format!("  section Section {}\n", i / 10));
+        }
+        if i == 0 {
+            s.push_str(&format!("  Task {i} :a{i}, 2024-01-01, 5d\n"));
+        } else {
+            s.push_str(&format!("  Task {i} :a{i}, after a{}, {}d\n", i - 1, 3 + i % 7));
+        }
+    }
+    s
+}
+
 fn bench_parse(c: &mut Criterion) {
     let mut group = c.benchmark_group("parse");
 
@@ -139,6 +155,13 @@ fn bench_parse(c: &mut Criterion) {
     for (label, entities) in [("er_30", 30_usize), ("er_100", 100_usize)] {
         let input = gen_er(entities);
         group.bench_with_input(BenchmarkId::new("er", label), &input, |b, input| {
+            b.iter(|| fm_parser::parse(input));
+        });
+    }
+
+    for (label, tasks) in [("gantt_50", 50_usize), ("gantt_200", 200_usize)] {
+        let input = gen_gantt(tasks);
+        group.bench_with_input(BenchmarkId::new("gantt", label), &input, |b, input| {
             b.iter(|| fm_parser::parse(input));
         });
     }
