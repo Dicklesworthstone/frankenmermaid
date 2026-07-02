@@ -215,7 +215,12 @@ pub fn parse_mermaid_with_detection_and_config(
 ) -> ParseResult {
     let (content, front_matter_payload) = split_front_matter_block(input);
     let diagram_type = detection.diagram_type;
-    let input_lines = content.lines().count();
+    // Capacity hint only (feeds `with_capacity_hint`'s node/edge estimates — no semantic
+    // effect), so an approximate line count is fine. A byte `\n` filter (auto-vectorizable)
+    // replaces `content.lines().count()`, whose `str::lines()` splits on the `char` `'\n'`
+    // via `CharSearcher` — a full-input single-`char` scan measured as a top parse self-time
+    // symbol. `+ 1` matches `lines()` for input without a trailing newline.
+    let input_lines = content.bytes().filter(|&b| b == b'\n').count() + 1;
     let mut builder = IrBuilder::with_capacity_hint(diagram_type, input_lines);
     builder.set_parse_mode(parse_mode);
     builder.set_parser_config(*config);
@@ -1000,11 +1005,41 @@ fn parse_flowchart_document<'a>(
     input: &'a str,
     config: &ParserConfig,
 ) -> FlowDocumentParseResult<'a> {
-    let lines: Vec<(usize, &str)> = input
-        .lines()
-        .enumerate()
-        .map(|(i, line)| (i + 1, line))
-        .collect();
+    // Byte-based line split, byte-identical to `input.lines().enumerate().map(|(i, l)| (i + 1, l))`:
+    // split on `\n`, strip a trailing `\r` per line, and (like `lines()`) do not yield a trailing
+    // empty line after a final `\n`. `str::lines()` splits on the `char` `'\n'` through
+    // `CharSearcher` (a single-`char` full-input scan that is a top parse self-time symbol); the
+    // `[u8]::position(== b'\n')` scan below auto-vectorizes and avoids that char machinery.
+    let bytes = input.as_bytes();
+    let mut lines: Vec<(usize, &str)> = Vec::new();
+    let mut start = 0usize;
+    let mut line_no = 1usize;
+    loop {
+        match bytes[start..].iter().position(|&b| b == b'\n') {
+            Some(rel) => {
+                let nl = start + rel;
+                let end = if nl > start && bytes[nl - 1] == b'\r' {
+                    nl - 1
+                } else {
+                    nl
+                };
+                lines.push((line_no, &input[start..end]));
+                line_no += 1;
+                start = nl + 1;
+            }
+            None => {
+                if start < bytes.len() {
+                    let end = if bytes.len() > start && bytes[bytes.len() - 1] == b'\r' {
+                        bytes.len() - 1
+                    } else {
+                        bytes.len()
+                    };
+                    lines.push((line_no, &input[start..end]));
+                }
+                break;
+            }
+        }
+    }
     let mut next_index = 0;
     let mut warnings = Vec::new();
     let mut header_direction = None;
