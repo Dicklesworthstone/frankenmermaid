@@ -6807,3 +6807,32 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   NON-flowchart diagram types — they have dedicated parse/layout/render code the mature flowchart path lacks.
 
   Agent: BlackThrush
+
+### LANDED: precompute the operator first-byte gate as a const — SEQUENCE parse −8.6% (2026-07-02)
+- **Profiling sequence parse (post-`<br>`-fix) showed `find_operator_from_index` as the #1 hotspot at
+  13.7% self-time.** It runs once per message line and returns early at the operator (scanning only a few
+  chars), so the cost was NOT the scan — it was the `op_first_byte` GATE REBUILD: a `[bool; 128]` array
+  rebuilt by iterating all **26** `SEQUENCE_OPERATORS` on EVERY message line (`for op in operators { … }`).
+- **Two REJECTED sub-attempts first (both measured ~0, reverted — recorded so they aren't re-tried):**
+  (1) packing the gate `[bool;128]` → `u128` register bitmask: WASH (OLD 6.30s / NEW 6.34s user-time, seq
+  8×400 parse 30k iters) — it changed the gate STORAGE but kept the O(26) build loop, which is the actual
+  cost. (2) converting the per-line `line.trim()` (13 parser loops) → `trim_fast`: WASH (~0.85% of self-time
+  by profile, below the A/B floor — sequence lines have little whitespace; `trim_matches::<is_whitespace>`'s
+  remaining 5.5% is in normalize_identifier/parse_label/clean_label, each <1%, not worth chasing).
+- **Fix (what worked):** split the scan into `find_operator_core(…, op_first_byte: u128)` taking a
+  caller-supplied gate; `find_operator_from_index` builds the gate (as a u128) and delegates (all existing
+  flowchart/class/ER callers unchanged); a `const fn op_first_byte_gate()` computes the gate at COMPILE TIME,
+  and the hot `parse_sequence_message_ast` passes `const SEQUENCE_OP_GATE` to `find_operator_core` directly —
+  eliminating the per-message rebuild. No edge-parser ripple. Byte-identical: the const gate equals the
+  runtime-built gate bit-for-bit; the scan logic is unchanged (`op_first_byte[cp]` → `(gate>>cp)&1`).
+- **Profile PROOF:** `find_operator` self-time 13.7% → **8.4%** (the build loop is gone; only the scan remains).
+- **MEASURED (clean same-machine A/B, profharness `seq 8×400 parse`, user-time over 30k iters, OLD/NEW
+  alternated 5×):** OLD ~6.31s → NEW ~5.77s = **−8.6%, non-overlapping every round.**
+- **Byte-identical & GREEN (no re-bless):** fm-parser 406 lib + golden_svg (2) + golden_layout (2) +
+  frankentui_conformance (1); clippy clean.
+- **META:** when a per-item hot function iterates a `'static` config list to build a lookup on EVERY call,
+  precompute it as a `const` (via `const fn`) and thread it to a `_core` split — don't just change the
+  lookup's storage type (that keeps the build loop = the real cost). Confirm which part is hot by isolating
+  the build from the scan, not by profile self-time alone.
+
+  Agent: BlackThrush

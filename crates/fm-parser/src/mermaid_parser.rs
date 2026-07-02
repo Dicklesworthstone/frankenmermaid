@@ -96,6 +96,26 @@ const ER_OPERATORS: [(&str, ArrowType); 14] = [
     ("..", ArrowType::DottedArrow),
 ];
 
+/// Compile-time first-byte gate for an operator list: bit `b` set ⇔ some operator starts with ASCII
+/// byte `b`. Lets `'static` operator lists precompute the gate as a `const` and pass it to
+/// [`find_operator_core`], skipping the per-call rebuild (`find_operator`'s hot cost on sequences).
+const fn op_first_byte_gate(operators: &[(&str, ArrowType)]) -> u128 {
+    let mut gate: u128 = 0;
+    let mut i = 0;
+    while i < operators.len() {
+        let bytes = operators[i].0.as_bytes();
+        if !bytes.is_empty() && bytes[0] < 128 {
+            gate |= 1u128 << bytes[0];
+        }
+        i += 1;
+    }
+    gate
+}
+
+/// Precomputed first-byte gate for [`SEQUENCE_OPERATORS`] (26 entries) — used on the hot per-message
+/// sequence path so `find_operator` doesn't rebuild the gate for every message line.
+const SEQUENCE_OP_GATE: u128 = op_first_byte_gate(&SEQUENCE_OPERATORS);
+
 const DANGLING_PLACEHOLDER_PREFIX: &str = "__fm_dangling_line_";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6746,7 +6766,9 @@ struct SequenceMessageData {
 }
 
 fn parse_sequence_message_ast(statement: &str) -> Option<SequenceMessageData> {
-    let (operator_idx, operator, arrow) = find_operator(statement, &SEQUENCE_OPERATORS)?;
+    // Pass the precomputed const gate (skip the per-call gate rebuild — the hot cost here).
+    let (operator_idx, operator, arrow) =
+        find_operator_core(statement, 0, &SEQUENCE_OPERATORS, SEQUENCE_OP_GATE)?;
     let left = trim_fast(&statement[..operator_idx]);
     let right = trim_fast(&statement[operator_idx + operator.len()..]);
     if left.is_empty() || right.is_empty() {
@@ -7184,25 +7206,29 @@ fn find_operator_from_index<'a>(
     start_index: usize,
     operators: &'a [(&'a str, ArrowType)],
 ) -> Option<(usize, &'a str, ArrowType)> {
+    // Build this list's first-byte gate, then scan. Callers with a `'static` operator list should
+    // call `find_operator_core` directly with its precomputed `const` gate (see `SEQUENCE_OP_GATE`)
+    // to skip this per-call rebuild — it was the dominant cost of `find_operator` on the hot
+    // sequence-message path (26 operators rebuilt into the gate on EVERY message line).
+    find_operator_core(statement, start_index, operators, op_first_byte_gate(operators))
+}
+
+/// Core operator scan with a caller-supplied first-byte gate: bit `b` is set iff some operator in
+/// `operators` starts with ASCII byte `b`. Every operator starts with one specific ASCII byte (`-`,
+/// `<`, etc.), so at a position whose byte can't start ANY operator the `starts_with` loop is
+/// guaranteed to miss — skipping it turns the O(chars × operators) sweep into O(operator-start
+/// positions × operators). Byte-identical: the gate only skips positions the loop would reject.
+fn find_operator_core<'a>(
+    statement: &str,
+    start_index: usize,
+    operators: &'a [(&'a str, ArrowType)],
+    op_first_byte: u128,
+) -> Option<(usize, &'a str, ArrowType)> {
     let mut in_quote: Option<char> = None;
     let mut escaped = false;
     let mut square_depth = 0_usize;
     let mut paren_depth = 0_usize;
     let mut brace_depth = 0_usize;
-
-    // First-byte gate for the per-position operator scan below. Every operator starts with one
-    // specific ASCII byte (`-`, `<`, etc.), so at a position whose byte can't start ANY operator the
-    // `starts_with` loop is guaranteed to miss — skipping it turns the O(chars × operators)
-    // `starts_with` sweep (the dominant cost of sequence-message parsing) into O(operator-start
-    // positions × operators). Byte-identical: the gate only skips positions the loop would reject.
-    let mut op_first_byte = [false; 128];
-    for (operator, _) in operators {
-        if let Some(&b) = operator.as_bytes().first()
-            && b < 128
-        {
-            op_first_byte[b as usize] = true;
-        }
-    }
 
     for (idx, ch) in statement.char_indices() {
         if idx < start_index {
@@ -7263,7 +7289,7 @@ fn find_operator_from_index<'a>(
         // Skip positions whose byte can't begin any operator (see `op_first_byte`). Non-ASCII
         // chars (code point ≥ 128) can never match an ASCII-prefixed operator either.
         let cp = ch as u32;
-        if cp >= 128 || !op_first_byte[cp as usize] {
+        if cp >= 128 || (op_first_byte >> cp) & 1 == 0 {
             continue;
         }
 
