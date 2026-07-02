@@ -291,17 +291,17 @@ fn compare_nodes(
         });
     }
 
-    if old_node.href != new_node.href {
+    if old_node.href() != new_node.href() {
         changes.push(NodeChange::HrefChanged {
-            old: old_node.href.clone(),
-            new: new_node.href.clone(),
+            old: old_node.href().map(String::from),
+            new: new_node.href().map(String::from),
         });
     }
 
-    if old_node.tooltip != new_node.tooltip {
+    if old_node.tooltip() != new_node.tooltip() {
         changes.push(NodeChange::TooltipChanged {
-            old: old_node.tooltip.clone(),
-            new: new_node.tooltip.clone(),
+            old: old_node.tooltip().map(String::from),
+            new: new_node.tooltip().map(String::from),
         });
     }
 

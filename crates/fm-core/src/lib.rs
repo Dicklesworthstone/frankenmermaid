@@ -1227,17 +1227,14 @@ pub struct IrNode {
     pub id: String,
     pub label: Option<IrLabelId>,
     pub shape: NodeShape,
-    /// Optional icon metadata attached to the node (`::icon(...)`, architecture icons, etc.).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub icon: Option<String>,
     pub classes: Vec<String>,
-    pub href: Option<String>,
-    /// JavaScript callback function name from `click nodeId call functionName`.
+    /// Icon/link/interaction metadata (`::icon(...)`, `click` href/callback/tooltip), grouped and
+    /// boxed because ALL of it is `None` on the overwhelmingly common flowchart/sequence node —
+    /// one `Option<Box<IrNodeInteraction>>` (8 B, heap only when set) replaces four inline
+    /// `Option<String>` (96 B), shrinking `IrNode` on the hot parse path. Read via the
+    /// `icon()`/`href()`/`callback()`/`tooltip()` accessors; write via `interaction_mut()`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub callback: Option<String>,
-    /// Tooltip text from `click nodeId "url" "tooltip"`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tooltip: Option<String>,
+    pub interaction: Option<Box<IrNodeInteraction>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub menu_links: Vec<IrMenuLink>,
     pub span_primary: Span,
@@ -1262,6 +1259,51 @@ pub struct IrNode {
     /// Parsed inline style from `style nodeId ...` directives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline_style: Option<Box<IrInlineStyle>>,
+}
+
+/// Rarely-populated icon/link/interaction fields split off `IrNode` (see [`IrNode::interaction`])
+/// so the common flowchart/sequence node pays only a null pointer for all of them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct IrNodeInteraction {
+    /// Icon metadata (`::icon(...)`, architecture icons, etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    /// `click nodeId href "url"` target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub href: Option<String>,
+    /// JavaScript callback function name from `click nodeId call functionName`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback: Option<String>,
+    /// Tooltip text from `click nodeId "url" "tooltip"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tooltip: Option<String>,
+}
+
+impl IrNode {
+    /// Icon metadata, if any.
+    #[must_use]
+    pub fn icon(&self) -> Option<&str> {
+        self.interaction.as_ref().and_then(|i| i.icon.as_deref())
+    }
+    /// `click` href target, if any.
+    #[must_use]
+    pub fn href(&self) -> Option<&str> {
+        self.interaction.as_ref().and_then(|i| i.href.as_deref())
+    }
+    /// `click` callback function name, if any.
+    #[must_use]
+    pub fn callback(&self) -> Option<&str> {
+        self.interaction.as_ref().and_then(|i| i.callback.as_deref())
+    }
+    /// `click` tooltip text, if any.
+    #[must_use]
+    pub fn tooltip(&self) -> Option<&str> {
+        self.interaction.as_ref().and_then(|i| i.tooltip.as_deref())
+    }
+    /// Mutable access to the icon/link/interaction fields, allocating the box on first use.
+    pub fn interaction_mut(&mut self) -> &mut IrNodeInteraction {
+        self.interaction.get_or_insert_with(|| Box::new(IrNodeInteraction::default()))
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]

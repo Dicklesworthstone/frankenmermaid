@@ -6065,3 +6065,21 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   the last large field but is `usize`-read pervasively (cast-heavy) — higher-churn, deferred.
 
   Agent: cc
+
+### LANDED: group IrNode icon/href/callback/tooltip behind Option<Box<IrNodeInteraction>> — IrNode 296 → 208 B, parse bytes −7.3% (2026-07-01)
+- Four `click`/icon interaction fields (icon, href, callback, tooltip) — ALL `None` on the common
+  flowchart/sequence node — moved from inline `Option<String>` (96 B) into one
+  `Option<Box<IrNodeInteraction>>` (8 B, heap only when set). Read via `node.icon()`/`href()`/`callback()`/
+  `tooltip()` accessors (→ `Option<&str>`); write via `node.interaction_mut()`.
+- **MEASURED (deterministic, load-immune):** `size_of::<IrNode>()` **296 → 208 B (−30%)**; parse allocated
+  BYTES wide_16x32 **889,408 → 824,640 (−7.3%)**. Compiler-guided ~30 call sites (fm-parser construction →
+  `interaction_mut()`; fm-layout/fm-render-svg/fm-render-term reads → accessors). `FlowAstNode.icon` (a
+  separate parser struct) is unaffected — only `IrNode` sites errored.
+- **Byte-identical:** `golden_svg_test` + `golden_layout_test` GREEN, NO re-bless (covers icon/click/c4
+  rendering that uses these fields). Serde: fields nest under `"interaction"` in the debug `--json` IR only
+  (no golden checks IR JSON). Golden verification was tooling-flaky this cycle (stale `rustix`/`highs-sys` dep
+  artifacts on some rch workers + the local target dir) — confirmed GREEN on a clean worker.
+- **SESSION STRUCT-SHRINK TOTAL:** `IrNode` 608 → 208 B (−66%), `IrEdge` 256 → 120 B (−53%); parse bytes
+  1,234,928 → 824,640 = **−33.2%**, all byte-identical.
+
+  Agent: cc

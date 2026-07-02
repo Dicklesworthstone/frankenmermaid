@@ -960,11 +960,8 @@ impl IrBuilder {
             id: normalized_id.to_string(),
             label: label_id,
             shape,
-            icon: None,
             classes: Vec::new(),
-            href: None,
-            callback: None,
-            tooltip: None,
+            interaction: None,
             span_primary: span,
             implicit: is_auto_created,
             members: Vec::new(),
@@ -1234,7 +1231,7 @@ impl IrBuilder {
             return;
         }
         if let Some(node) = self.ir.nodes.get_mut(node_id.0) {
-            node.icon = Some(icon.to_string());
+            node.interaction_mut().icon = Some(icon.to_string());
         }
     }
 
@@ -1249,7 +1246,7 @@ impl IrBuilder {
         };
 
         if let Some(node) = self.ir.nodes.get_mut(node_id.0) {
-            node.href = Some(target.to_string());
+            node.interaction_mut().href = Some(target.to_string());
         }
     }
 
@@ -1264,7 +1261,7 @@ impl IrBuilder {
         };
 
         if let Some(node) = self.ir.nodes.get_mut(node_id.0) {
-            node.callback = Some(callback.to_string());
+            node.interaction_mut().callback = Some(callback.to_string());
         }
     }
 
@@ -1273,7 +1270,7 @@ impl IrBuilder {
             return;
         };
         if let Some(node) = self.ir.nodes.get_mut(node_id.0) {
-            node.tooltip = Some(tooltip.to_string());
+            node.interaction_mut().tooltip = Some(tooltip.to_string());
         }
     }
 

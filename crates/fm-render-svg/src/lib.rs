@@ -4470,7 +4470,7 @@ fn render_node_into(
     let label_text = truncate_label(raw_label_text, detail.node_label_max_chars);
     let node_font_size = detail.node_font_size;
     let node_icon = ir_node
-        .and_then(|node| node.icon.as_deref())
+        .and_then(|node| node.icon())
         .map(str::trim)
         .filter(|icon| !icon.is_empty())
         .filter(|_| ir_node.is_none_or(|node| node.class_meta.is_none() && node.c4_meta.is_none()));
@@ -4497,8 +4497,8 @@ fn render_node_into(
         && node.classes.is_empty()
         && node.requirement_meta.is_none()
         && node.menu_links.is_empty()
-        && node.href.is_none()
-        && node.callback.is_none()
+        && node.href().is_none()
+        && node.callback().is_none()
     {
         write_common_node_fragment_into(
             out,
@@ -4587,7 +4587,7 @@ fn render_node(
     let label_text = truncate_label(raw_label_text, detail.node_label_max_chars);
     let node_font_size = detail.node_font_size;
     let node_icon = ir_node
-        .and_then(|node| node.icon.as_deref())
+        .and_then(|node| node.icon())
         .map(str::trim)
         .filter(|icon| !icon.is_empty())
         .filter(|_| ir_node.is_none_or(|node| node.class_meta.is_none() && node.c4_meta.is_none()));
@@ -4636,8 +4636,8 @@ fn render_node(
         && node.classes.is_empty()
         && node.requirement_meta.is_none()
         && node.menu_links.is_empty()
-        && node.href.is_none()
-        && node.callback.is_none()
+        && node.href().is_none()
+        && node.callback().is_none()
     {
         return Element::raw_svg(build_common_node_fragment(
             node_id,
@@ -5568,7 +5568,7 @@ fn render_node(
     }
 
     if let Some(node) = ir_node
-        && let Some(href) = &node.href
+        && let Some(href) = node.href()
         && is_safe_link_target(href, ir.meta.init.config.sanitize_mode)
     {
         match config.link_mode {
@@ -5592,7 +5592,7 @@ fn render_node(
 
     // Callback nodes: emit data-callback attribute for embedding JS integration.
     if let Some(node) = ir_node
-        && let Some(callback) = &node.callback
+        && let Some(callback) = node.callback()
     {
         group = group
             .attr("data-callback", callback)

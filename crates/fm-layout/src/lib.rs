@@ -8087,7 +8087,7 @@ fn node_size_cache_key(
     hash_str(&mut hash, &node.id);
     hash_u64(&mut hash, node.shape as u64);
     hash_str(&mut hash, display_node_label_ref(ir, node));
-    hash_str(&mut hash, node.icon.as_deref().unwrap_or_default());
+    hash_str(&mut hash, node.icon().unwrap_or_default());
     hash_u64(&mut hash, u64::from(metrics.font_size().to_bits()));
     hash_u64(&mut hash, u64::from(metrics.avg_char_width().to_bits()));
     hash_u64(&mut hash, u64::from(metrics.line_height_px().to_bits()));
@@ -8096,8 +8096,7 @@ fn node_size_cache_key(
 
 fn icon_dimensions(node: &IrNode, metrics: &fm_core::FontMetrics) -> (f32, f32) {
     let Some(icon) = node
-        .icon
-        .as_deref()
+        .icon()
         .map(str::trim)
         .filter(|icon| !icon.is_empty())
     else {
