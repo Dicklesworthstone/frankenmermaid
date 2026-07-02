@@ -356,6 +356,24 @@ const PAIRS2: [&str; 100] = [
 /// Single decimal digit strings `"0".."9"` — see [`PAIRS2`].
 const DIGITS1: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
 
+/// Dot-prefixed two-digit fractions `".00"..".99"`, indexed by the fractional value. Lets
+/// [`write_fixed2`] emit the decimal point and both fraction digits in a *single* `write_str`
+/// instead of `write_str(".")` + `write_str(PAIRS2[frac])` — halving the tiny append calls (each
+/// a `fmt::Write` dispatch + capacity check + memcpy) on the hot 2-decimal coordinate path.
+/// `DOTPAIRS3[f]` is byte-identical to `"." + PAIRS2[f]`.
+const DOTPAIRS3: [&str; 100] = [
+    ".00", ".01", ".02", ".03", ".04", ".05", ".06", ".07", ".08", ".09",
+    ".10", ".11", ".12", ".13", ".14", ".15", ".16", ".17", ".18", ".19",
+    ".20", ".21", ".22", ".23", ".24", ".25", ".26", ".27", ".28", ".29",
+    ".30", ".31", ".32", ".33", ".34", ".35", ".36", ".37", ".38", ".39",
+    ".40", ".41", ".42", ".43", ".44", ".45", ".46", ".47", ".48", ".49",
+    ".50", ".51", ".52", ".53", ".54", ".55", ".56", ".57", ".58", ".59",
+    ".60", ".61", ".62", ".63", ".64", ".65", ".66", ".67", ".68", ".69",
+    ".70", ".71", ".72", ".73", ".74", ".75", ".76", ".77", ".78", ".79",
+    ".80", ".81", ".82", ".83", ".84", ".85", ".86", ".87", ".88", ".89",
+    ".90", ".91", ".92", ".93", ".94", ".95", ".96", ".97", ".98", ".99",
+];
+
 /// Append `n` in decimal (no leading zeros) to `f`, two digits at a time via [`PAIRS2`]/[`DIGITS1`].
 fn write_uint_into<W: fmt::Write>(f: &mut W, n: u64) -> fmt::Result {
     if n >= 100 {
@@ -406,8 +424,8 @@ pub(crate) fn write_fixed2<W: fmt::Write>(f: &mut W, value: f32) -> fmt::Result 
         f.write_str("-")?;
     }
     write_uint_into(f, int_part)?;
-    f.write_str(".")?;
-    f.write_str(PAIRS2[frac_part])
+    // `".00".."99"` in one append instead of `write_str(".")` + `write_str(PAIRS2[frac])`.
+    f.write_str(DOTPAIRS3[frac_part])
 }
 
 /// Write `s` into `f` with XML attribute-value escaping (`& < > " '`), copying
