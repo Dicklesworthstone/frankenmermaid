@@ -6836,3 +6836,27 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   the build from the scan, not by profile self-time alone.
 
   Agent: BlackThrush
+
+### find_operator_core: `char_indices` → byte loop — REJECTED (regression) (2026-07-02)
+- **Lever:** After the gate precompute above, `find_operator_core`'s remaining self-time (8.4%) is the
+  per-char scan `for (idx, ch) in statement.char_indices()` (quote/bracket depth state machine + first-byte
+  gate). Every delimiter (`" ' \` [ ] ( ) { } \\`) and operator-start byte is ASCII, and non-ASCII bytes
+  (incl. UTF-8 continuation bytes) are never delimiters/escapes/op-starts, so a raw byte scan
+  (`statement.as_bytes()`) is byte-identical to the char loop while skipping the per-char UTF-8 decode.
+- **Hypothesis:** dropping the UTF-8 decode from `char_indices` speeds the scan.
+- **Byte-identity:** CONFIRMED both ways — fm-parser 406 lib pass with the byte loop (reasoned through the
+  non-ASCII / escaped-state / start_index-boundary cases; the returned operator byte offset is unchanged).
+- **MEASURED (clean same-machine A/B, profharness `seq 8×400 parse`, user-time over 30k iters, alternated):**
+  BOTH byte-loop forms are a **REGRESSION**: `while idx < len { … idx += 1 }` ≈ **+3–5%** (OLD char 5.63–6.14s
+  vs 5.83–6.10s), and the idiomatic `for idx in start..bytes.len()` ≈ **+3–5%** too (OLD 5.70–6.30 vs
+  5.98–6.44) — OLD (char_indices) faster in EVERY round.
+- **Verdict:** regression. Reverted (kept `char_indices`).
+- **Do-not-retry note:** `str::char_indices()` is NOT a UTF-8-decode tax here — for the all-ASCII common case
+  the compiler lowers it to essentially a byte read and codegen's the delimiter scan better than a hand-rolled
+  byte loop with a branchy per-byte `match` + `continue` (both the manual-increment and range-iterator forms
+  lost). Don't "byte-loop" a `char_indices` scan whose per-iteration body is already a cheap ASCII match —
+  measure first; the decode is free and the manual loop defeats the optimizer. `find_operator_core`'s scan is
+  at its practical ceiling; the residual cost is the 26-operator `starts_with` sweep at the single operator
+  position (is_prefix_of ~7%), which would need a first-2-byte dispatch/trie (byte-identity-risky) to cut.
+
+  Agent: BlackThrush
