@@ -6405,3 +6405,26 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   (2) — NO re-bless.
 
   Agent: BlackThrush
+
+### LANDED: detect_type matches mermaid keyword before the DOT probe — class/er parse −9–12% (2026-07-02)
+- **Profiling ER parse showed `eq_ignore_ascii_case` (my dda8374 "graph" pre-guard) at ~3.8% — but the deeper
+  issue is that `detect_type` runs `looks_like_dot` FIRST on every parse.** For a brace-containing diagram
+  (class/er, and state/sequence with braces) that whole-input scan (`{`/`}` check + the "graph" windows scan) is
+  pure overhead before the keyword match inevitably wins.
+- **Fix:** compute the first-significant-line keyword up front; if it matches an UNAMBIGUOUS mermaid keyword —
+  anything but a bare `graph`/`digraph`/`strict` DOT header — return WITHOUT `looks_like_dot`. Only
+  `graph`/`digraph`/`strict`/comment/unknown first lines can actually be DOT, so those still run the probe.
+  Byte-identical: a real DOT header always starts with one of those prefixes, so no DOT input is ever
+  short-circuited (verified: 39 DOT detection/routing tests + `prop_detect_type_*` + goldens still pass).
+- **MEASURED (clean idle-machine warm A/B, fm-parser `parse_bench`, warm-up 1 / measure 4):**
+  `class_100` **−12.0% (p=0.00)** (655→605 µs), `er_30` **−11.2% (p=0.00)** (102.7→90.8 µs), `er_100`
+  **−9.3% (p=0.00)** (324.6→294.5 µs). `class_30` neutral (p=0.69 — the skipped scan is O(input size), so the
+  saving is small on tiny inputs); sequence/state NEUTRAL (brace-free, so `looks_like_dot`'s brace-guard already
+  rejected them cheaply). No regression. Added `parse/er` bench cases.
+- **Byte-identical & GREEN:** fm-parser 405 lib (incl. detection + DOT routing + prop-determinism) + golden_svg
+  (1) + golden_layout (2) + frankentui_conformance (2) — NO re-bless.
+- **META:** dda8374 made the DOT probe cheaper for brace diagrams; this removes it for them entirely. The
+  detection front-end is a per-parse FIXED cost every diagram type pays — reorder so the cheap unambiguous
+  keyword match wins before the expensive interop probe.
+
+  Agent: BlackThrush

@@ -93,6 +93,22 @@ fn gen_state(states: usize) -> String {
     s
 }
 
+/// An ER diagram: `entities` entities each with an attribute block, plus cardinality relationships
+/// between them — exercises the ER relationship (`||--o{`) + attribute-block parser.
+fn gen_er(entities: usize) -> String {
+    let mut s = String::from("erDiagram\n");
+    for i in 0..entities.saturating_sub(1) {
+        s.push_str(&format!("  ENTITY{i} ||--o{{ ENTITY{} : rel{i}\n", i + 1));
+    }
+    for i in 0..entities {
+        s.push_str(&format!("  ENTITY{i} {{\n"));
+        s.push_str(&format!("    string name{i}\n"));
+        s.push_str(&format!("    int value{i}\n"));
+        s.push_str("  }\n");
+    }
+    s
+}
+
 fn bench_parse(c: &mut Criterion) {
     let mut group = c.benchmark_group("parse");
 
@@ -116,6 +132,13 @@ fn bench_parse(c: &mut Criterion) {
     for (label, states) in [("state_30", 30_usize), ("state_100", 100_usize)] {
         let input = gen_state(states);
         group.bench_with_input(BenchmarkId::new("state", label), &input, |b, input| {
+            b.iter(|| fm_parser::parse(input));
+        });
+    }
+
+    for (label, entities) in [("er_30", 30_usize), ("er_100", 100_usize)] {
+        let input = gen_er(entities);
+        group.bench_with_input(BenchmarkId::new("er", label), &input, |b, input| {
             b.iter(|| fm_parser::parse(input));
         });
     }

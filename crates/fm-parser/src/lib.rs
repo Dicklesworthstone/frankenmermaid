@@ -297,8 +297,21 @@ pub fn detect_type_with_confidence_and_config(input: &str, config: &ParserConfig
         };
     }
 
-    // Strategy 1: DOT format detection (high priority for interop)
-    if looks_like_dot(input) {
+    // Get the first significant line up front. An UNAMBIGUOUS mermaid keyword — anything but a bare
+    // `graph` / `digraph` / `strict` DOT header — lets us return WITHOUT running the DOT probe
+    // (Strategy 1), whose comment-strip + whole-input "graph" scan is pure overhead for
+    // class/er/state/sequence/… (and even the brace scan for a plain flowchart). Only
+    // `graph`/`digraph`/`strict`/comment/unknown first lines can actually be DOT, so those still run
+    // `looks_like_dot`. Byte-identical: a real DOT header always starts with one of those prefixes.
+    let first_line = mermaid_parser::first_significant_line(input).unwrap_or("");
+    let lower = first_line.to_ascii_lowercase();
+    let keyword = exact_keyword_match(&lower, first_line);
+    let could_be_dot = lower.starts_with("graph")
+        || lower.starts_with("digraph")
+        || lower.starts_with("strict");
+
+    // Strategy 1: DOT format detection (high priority for interop).
+    if (keyword.is_none() || could_be_dot) && looks_like_dot(input) {
         return DetectedType {
             diagram_type: DiagramType::Flowchart,
             confidence: 0.95,
@@ -307,12 +320,8 @@ pub fn detect_type_with_confidence_and_config(input: &str, config: &ParserConfig
         };
     }
 
-    // Get first significant line
-    let first_line = mermaid_parser::first_significant_line(input).unwrap_or("");
-    let lower = first_line.to_ascii_lowercase();
-
     // Strategy 2: Exact keyword match
-    if let Some(detected) = exact_keyword_match(&lower, first_line) {
+    if let Some(detected) = keyword {
         return detected;
     }
 
