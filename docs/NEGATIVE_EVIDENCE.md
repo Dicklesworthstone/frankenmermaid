@@ -6609,3 +6609,21 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   indices and slice. Grep parsers for `current.push(ch)` / `.chars()` loops that only accumulate.
 
   Agent: BlackThrush
+
+### LANDED: allocation-free gantt task-metadata keyword/duration matching — gantt parse −7.5% more (2026-07-02)
+- **Follow-up to the gantt date-split win (ac883ae): `parse_gantt_task_metadata` lowercased EVERY meta token
+  (`token.to_ascii_lowercase()` → `match as_str()`) — 3 allocs/task — and `parse_gantt_duration_days` lowercased
+  each `Nd`/`Nw` token to strip the unit.** Recipes B+D.
+- **Fix:** (D) match `milestone`/`active`/`done`/`crit`/`critical` via `eq_ignore_ascii_case` (no alloc); match
+  the `after ` prefix case-insensitively and lowercase ONLY the reference (as before) — so the common id/date/
+  duration tokens allocate nothing. Strip the duration unit from the original via `strip_suffix(['d','D'])` (the
+  leading digits are ASCII, parse identically). (B) `split(',').map(str::trim)` → `map(trim_fast)`. Byte-identical.
+- **MEASURED (clean idle-machine warm A/B, fm-parser `parse_bench`, warm-up 1 / measure 4):** `gantt_50`
+  **−7.7% (p=0.00)** (117→106 µs), `gantt_200` **−7.5% (p=0.00)** (483→449 µs). Combined with ac883ae, gantt
+  parse is ~−12% this session.
+- **Byte-identical & GREEN:** fm-parser 405 lib (incl. 9 gantt tests) + golden_svg (1) + golden_layout (2) +
+  frankentui_conformance (2) — NO re-bless.
+- **META:** recipe D applies even when the lowercased value is PARTLY used — lowercase only the sub-part that
+  needs it (the `after` reference), and use `eq_ignore_ascii_case` / case-invariant slicing for the rest.
+
+  Agent: BlackThrush

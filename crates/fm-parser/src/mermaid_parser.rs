@@ -4580,32 +4580,34 @@ fn parse_gantt_task_metadata(raw_meta: &str, date_format: Option<&str>) -> Parse
 
     for token in raw_meta
         .split(',')
-        .map(str::trim)
+        .map(trim_fast)
         .filter(|token| !token.is_empty())
     {
-        let lower = token.to_ascii_lowercase();
-        match lower.as_str() {
-            "milestone" => {
-                parsed.task_type = GanttTaskType::Milestone;
-                continue;
-            }
-            "active" => {
-                parsed.task_type = GanttTaskType::Active;
-                continue;
-            }
-            "done" => {
-                parsed.task_type = GanttTaskType::Done;
-                continue;
-            }
-            "crit" | "critical" => {
-                parsed.task_type = GanttTaskType::Critical;
-                continue;
-            }
-            _ => {}
+        // Case-insensitive keyword match without allocating a lowercased copy of every token — the
+        // vast majority (ids, dates, `Nd` durations) match nothing. `eq_ignore_ascii_case` is identical
+        // to the old `token.to_ascii_lowercase()` then `match as_str()` (both exact case-insensitive).
+        if token.eq_ignore_ascii_case("milestone") {
+            parsed.task_type = GanttTaskType::Milestone;
+            continue;
+        }
+        if token.eq_ignore_ascii_case("active") {
+            parsed.task_type = GanttTaskType::Active;
+            continue;
+        }
+        if token.eq_ignore_ascii_case("done") {
+            parsed.task_type = GanttTaskType::Done;
+            continue;
+        }
+        if token.eq_ignore_ascii_case("crit") || token.eq_ignore_ascii_case("critical") {
+            parsed.task_type = GanttTaskType::Critical;
+            continue;
         }
 
-        if let Some(after) = lower.strip_prefix("after ") {
-            let dependency = normalize_compound_identifier(after);
+        // `after <task>` dependency: match the prefix case-insensitively, then lowercase ONLY the
+        // reference (as the old whole-token `to_ascii_lowercase` did before `strip_prefix("after ")`).
+        if token.len() >= 6 && token.as_bytes()[..6].eq_ignore_ascii_case(b"after ") {
+            let after = token[6..].to_ascii_lowercase();
+            let dependency = normalize_compound_identifier(&after);
             if !dependency.is_empty() {
                 if parsed.start.is_none() {
                     parsed.start = Some(GanttDate::AfterTask(dependency.clone()));
@@ -4739,11 +4741,12 @@ fn parse_gantt_duration_days(raw: &str) -> Option<u32> {
         return None;
     }
 
-    let lower = trimmed.to_ascii_lowercase();
-    if let Some(days) = lower.strip_suffix('d') {
+    // Strip the unit suffix from the ORIGINAL (case-insensitively) rather than allocating a lowercased
+    // copy — the leading digits are ASCII and parse identically regardless of the suffix's case.
+    if let Some(days) = trimmed.strip_suffix(['d', 'D']) {
         return days.trim().parse::<u32>().ok();
     }
-    if let Some(weeks) = lower.strip_suffix('w') {
+    if let Some(weeks) = trimmed.strip_suffix(['w', 'W']) {
         return weeks.trim().parse::<u32>().ok().map(|weeks| weeks * 7);
     }
     None
