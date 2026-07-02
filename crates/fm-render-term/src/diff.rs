@@ -460,10 +460,10 @@ fn compare_edges(
         });
     }
 
-    if old_edge.er_notation != new_edge.er_notation {
+    if old_edge.er_notation() != new_edge.er_notation() {
         changes.push(EdgeChange::ErNotationChanged {
-            old: old_edge.er_notation.as_deref().map(String::from),
-            new: new_edge.er_notation.as_deref().map(String::from),
+            old: old_edge.er_notation().map(String::from),
+            new: new_edge.er_notation().map(String::from),
         });
     }
 

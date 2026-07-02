@@ -1313,12 +1313,24 @@ pub struct IrEdge {
     pub arrow: ArrowType,
     pub label: Option<IrLabelId>,
     pub span: Span,
-    // The five fields below are all diagram-specific (ER / class / state) and `None` on every
-    // flowchart/sequence edge, which is the overwhelmingly common case. Stored as `Option<Box<str>>`
-    // (16 B) rather than `Option<String>` (24 B) so each shaves 8 B off *every* `IrEdge` — the
-    // `IrEdge` shrinks 256 → 216 B, cutting the `ir.edges` Vec allocation + per-edge move/copy on the
-    // hot parse path. `Box<str>` derefs to `str`, so `.as_deref()`/`.is_some()` read sites are
-    // unchanged and it serializes identically to a string.
+    /// Diagram-specific edge metadata (ER cardinality, class cardinality, state guard/action),
+    /// boxed together because ALL of it is `None` on every flowchart/sequence edge — the
+    /// overwhelmingly common case. Grouping the five rarely-set fields behind one
+    /// `Option<Box<IrEdgeExtras>>` (8 B, heap only when present) instead of five inline
+    /// `Option<Box<str>>` (80 B) shrinks `IrEdge` 192 → 120 B, cutting the `ir.edges` Vec
+    /// allocation + per-edge move/copy on the hot parse path. Access the fields via the
+    /// `er_notation()` / `guard()` / … accessors (read) and `extras_mut()` (write).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extras: Option<Box<IrEdgeExtras>>,
+    /// Parsed inline style from `linkStyle N ...` directives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline_style: Option<Box<IrInlineStyle>>,
+}
+
+/// Rarely-populated, diagram-specific fields split off `IrEdge` (see [`IrEdge::extras`]) so the
+/// common flowchart/sequence edge pays only a null pointer for all of them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct IrEdgeExtras {
     /// Raw ER cardinality operator (e.g., `"||--o{"`), stored only for ER diagrams.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub er_notation: Option<Box<str>>,
@@ -1334,9 +1346,38 @@ pub struct IrEdge {
     /// Action on a state transition (e.g., `cleanup()`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<Box<str>>,
-    /// Parsed inline style from `linkStyle N ...` directives.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inline_style: Option<Box<IrInlineStyle>>,
+}
+
+impl IrEdge {
+    /// Raw ER cardinality operator, if any.
+    #[must_use]
+    pub fn er_notation(&self) -> Option<&str> {
+        self.extras.as_ref().and_then(|e| e.er_notation.as_deref())
+    }
+    /// Source-side cardinality label, if any.
+    #[must_use]
+    pub fn source_cardinality(&self) -> Option<&str> {
+        self.extras.as_ref().and_then(|e| e.source_cardinality.as_deref())
+    }
+    /// Target-side cardinality label, if any.
+    #[must_use]
+    pub fn target_cardinality(&self) -> Option<&str> {
+        self.extras.as_ref().and_then(|e| e.target_cardinality.as_deref())
+    }
+    /// State-transition guard, if any.
+    #[must_use]
+    pub fn guard(&self) -> Option<&str> {
+        self.extras.as_ref().and_then(|e| e.guard.as_deref())
+    }
+    /// State-transition action, if any.
+    #[must_use]
+    pub fn action(&self) -> Option<&str> {
+        self.extras.as_ref().and_then(|e| e.action.as_deref())
+    }
+    /// Mutable access to the diagram-specific extras, allocating the box on first use.
+    pub fn extras_mut(&mut self) -> &mut IrEdgeExtras {
+        self.extras.get_or_insert_with(|| Box::new(IrEdgeExtras::default()))
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
@@ -6600,11 +6641,7 @@ mod tests {
             arrow: ArrowType::Arrow,
             label: Some(IrLabelId(0)),
             span: sample_span(2, 1, 6),
-            er_notation: None,
-            source_cardinality: None,
-            target_cardinality: None,
-            guard: None,
-            action: None,
+            extras: None,
             inline_style: None,
         });
 
@@ -6664,11 +6701,7 @@ mod tests {
             arrow: ArrowType::Circle,
             label: Some(IrLabelId(3)),
             span: sample_span(6, 1, 9),
-            er_notation: None,
-            source_cardinality: None,
-            target_cardinality: None,
-            guard: None,
-            action: None,
+            extras: None,
             inline_style: None,
         };
 
@@ -8287,9 +8320,9 @@ mod tests {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         ir.nodes.push(IrNode {
             id: "A".to_string(),
-            inline_style: Some(IrInlineStyle {
+            inline_style: Some(Box::new(IrInlineStyle {
                 properties: BTreeMap::from([("fill".to_string(), "#abc".to_string())]),
-            }),
+            })),
             ..Default::default()
         });
 

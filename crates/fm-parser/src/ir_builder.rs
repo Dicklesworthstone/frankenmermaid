@@ -1361,11 +1361,7 @@ impl IrBuilder {
             arrow,
             label: label_id,
             span,
-            er_notation: None,
-            source_cardinality: None,
-            target_cardinality: None,
-            guard: None,
-            action: None,
+            extras: None,
             inline_style: None,
         });
         self.ir.graph.edges.push(IrGraphEdge {
@@ -1380,7 +1376,7 @@ impl IrBuilder {
     /// Set the ER cardinality notation on the last-pushed edge.
     pub(crate) fn set_last_edge_er_notation(&mut self, notation: &str) {
         if let Some(edge) = self.ir.edges.last_mut() {
-            edge.er_notation = Some(Box::from(notation));
+            edge.extras_mut().er_notation = Some(Box::from(notation));
         }
     }
 
@@ -1388,10 +1384,10 @@ impl IrBuilder {
     pub(crate) fn set_last_edge_cardinality(&mut self, source: Option<&str>, target: Option<&str>) {
         if let Some(edge) = self.ir.edges.last_mut() {
             if let Some(s) = source {
-                edge.source_cardinality = Some(Box::from(s));
+                edge.extras_mut().source_cardinality = Some(Box::from(s));
             }
             if let Some(t) = target {
-                edge.target_cardinality = Some(Box::from(t));
+                edge.extras_mut().target_cardinality = Some(Box::from(t));
             }
         }
     }

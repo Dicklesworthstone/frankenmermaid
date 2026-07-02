@@ -2829,8 +2829,9 @@ fn lower_state_flow_ast(
                 if (guard.is_some() || action.is_some())
                     && let Some(edge) = builder.ir_mut().edges.last_mut()
                 {
-                    edge.guard = guard.map(String::into_boxed_str);
-                    edge.action = action.map(String::into_boxed_str);
+                    let ex = edge.extras_mut();
+                    ex.guard = guard.map(String::into_boxed_str);
+                    ex.action = action.map(String::into_boxed_str);
                 }
             }
         }
@@ -5112,10 +5113,7 @@ fn parse_sankey(input: &str, builder: &mut IrBuilder) {
         );
 
         // Add flow data attribute for gradient rendering.
-        if let Some(edge) = builder.ir_mut().edges.last_mut() {
-            edge.source_cardinality = None; // Not used for sankey
-            edge.target_cardinality = None;
-        }
+        // (sankey edges carry no cardinality; `extras` defaults to `None`)
     }
 }
 
@@ -12833,7 +12831,7 @@ Rel_Back(db, app, "Responds")"#,
         assert!(!parsed.ir.edges.is_empty(), "should have edges");
         let edge = &parsed.ir.edges[0];
         assert!(
-            edge.er_notation.is_some(),
+            edge.er_notation().is_some(),
             "er_notation should be set on ER edges"
         );
     }
@@ -13111,8 +13109,8 @@ Rel_Back(db, app, "Responds")"#,
         let parsed = parse_mermaid("classDiagram\n  Dog \"1\" --> \"*\" Cat : chases");
         assert!(!parsed.ir.edges.is_empty(), "should have edges");
         let edge = &parsed.ir.edges[0];
-        assert_eq!(edge.source_cardinality.as_deref(), Some("1"));
-        assert_eq!(edge.target_cardinality.as_deref(), Some("*"));
+        assert_eq!(edge.source_cardinality().as_deref(), Some("1"));
+        assert_eq!(edge.target_cardinality().as_deref(), Some("*"));
     }
 
     #[test]
@@ -13120,8 +13118,8 @@ Rel_Back(db, app, "Responds")"#,
         let parsed = parse_mermaid("classDiagram\n  Vehicle \"1\" *-- \"0..*\" Wheel");
         assert!(!parsed.ir.edges.is_empty(), "should have edges");
         let edge = &parsed.ir.edges[0];
-        assert_eq!(edge.source_cardinality.as_deref(), Some("1"));
-        assert_eq!(edge.target_cardinality.as_deref(), Some("0..*"));
+        assert_eq!(edge.source_cardinality().as_deref(), Some("1"));
+        assert_eq!(edge.target_cardinality().as_deref(), Some("0..*"));
     }
 
     #[test]
@@ -13129,8 +13127,8 @@ Rel_Back(db, app, "Responds")"#,
         let parsed = parse_mermaid("classDiagram\n  Dog --> Cat");
         assert!(!parsed.ir.edges.is_empty());
         let edge = &parsed.ir.edges[0];
-        assert!(edge.source_cardinality.is_none());
-        assert!(edge.target_cardinality.is_none());
+        assert!(edge.source_cardinality().is_none());
+        assert!(edge.target_cardinality().is_none());
     }
 
     #[test]
@@ -13138,8 +13136,8 @@ Rel_Back(db, app, "Responds")"#,
         let parsed = parse_mermaid("classDiagram\n  Student \"1\" --> \"*\" Course : enrolls");
         assert!(!parsed.ir.edges.is_empty(), "should have an edge");
         let edge = &parsed.ir.edges[0];
-        assert_eq!(edge.source_cardinality.as_deref(), Some("1"));
-        assert_eq!(edge.target_cardinality.as_deref(), Some("*"));
+        assert_eq!(edge.source_cardinality().as_deref(), Some("1"));
+        assert_eq!(edge.target_cardinality().as_deref(), Some("*"));
     }
 
     #[test]
@@ -13197,8 +13195,8 @@ Rel_Back(db, app, "Responds")"#,
         let parsed = parse_mermaid("stateDiagram-v2\n  Active --> Done : complete");
         assert!(!parsed.ir.edges.is_empty());
         let edge = &parsed.ir.edges[0];
-        assert!(edge.guard.is_none());
-        assert!(edge.action.is_none());
+        assert!(edge.guard().is_none());
+        assert!(edge.action().is_none());
     }
 
     #[test]

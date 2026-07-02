@@ -2804,7 +2804,7 @@ fn render_layout_to_svg(
     if ir.diagram_type == fm_core::DiagramType::Er {
         for edge_path in &layout.edges {
             if let Some(ir_edge) = ir.edges.get(edge_path.edge_index)
-                && let Some(notation) = &ir_edge.er_notation
+                && let Some(notation) = ir_edge.er_notation()
                 && edge_path.points.len() >= 2
             {
                 let (left_label, right_label) = parse_er_cardinality(notation);
@@ -2856,12 +2856,12 @@ fn render_layout_to_svg(
     // Render class diagram cardinality labels near edge endpoints.
     for edge_path in &layout.edges {
         if let Some(ir_edge) = ir.edges.get(edge_path.edge_index)
-            && (ir_edge.source_cardinality.is_some() || ir_edge.target_cardinality.is_some())
+            && (ir_edge.source_cardinality().is_some() || ir_edge.target_cardinality().is_some())
             && edge_path.points.len() >= 2
         {
             let font_size = config.font_size * 0.7;
 
-            if let Some(card) = ir_edge.source_cardinality.as_deref() {
+            if let Some(card) = ir_edge.source_cardinality() {
                 let p = &edge_path.points[0];
                 doc = doc.child(
                     Element::text()
@@ -2880,7 +2880,7 @@ fn render_layout_to_svg(
                 );
             }
 
-            if let Some(card) = ir_edge.target_cardinality.as_deref() {
+            if let Some(card) = ir_edge.target_cardinality() {
                 let p = &edge_path.points[edge_path.points.len() - 1];
                 doc = doc.child(
                     Element::text()

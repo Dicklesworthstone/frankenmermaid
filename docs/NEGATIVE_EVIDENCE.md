@@ -6045,3 +6045,23 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   read as `usize`, so higher-churn.
 
   Agent: cc
+
+### LANDED: group IrEdge's 5 diagram-specific fields behind Option<Box<IrEdgeExtras>> — IrEdge 192 → 120 B, parse bytes −7.4% (2026-07-01)
+- **Executed the previously-surfaced grouped-extras lever.** The five ER/class/state fields (er_notation,
+  source/target_cardinality, guard, action) — ALL `None` on every flowchart/sequence edge — moved from five
+  inline `Option<Box<str>>` (80 B) into one `Option<Box<IrEdgeExtras>>` (8 B, heap only when present). Access via
+  `edge.er_notation()`/`guard()`/… read accessors (→ `Option<&str>`) and `edge.extras_mut()` (write).
+- **MEASURED (deterministic, load-immune):** `size_of::<IrEdge>()` **192 → 120 B (−37.5%)**; parse allocated
+  BYTES wide_16x32 **960,112 → 889,408 (−7.4%)**. Alloc COUNT unchanged (flowchart edges never allocate the box).
+- **Compiler-guided, ~26 call sites** (fm-parser construction → `extras_mut()`; fm-render-svg/term reads →
+  accessors; fm-core tests). The `--json` IR debug output now nests these under `"extras"` (no golden checks IR
+  JSON; `invariant_proof_harness` serialize→deserialize round-trip passes — same structure both ways).
+- **Byte-identical & GREEN:** golden_svg + golden_layout + frankentui_conformance + config_roundtrip +
+  invariant_proof_harness (12 round-trip cases) + fm-core 350 + fm-parser 405 + fm-render-svg 234 +
+  fm-render-term 78 lib tests, NO re-bless. (Also fixed a latent fm-core `inline_style` test-construction gap
+  from 067086e — fm-core `--lib` is now green.)
+- **SESSION STRUCT-SHRINK TOTAL:** `IrNode` 608 → 296 B (−51%), `IrEdge` 256 → 120 B (−53%); parse bytes
+  **1,234,928 → 889,408 = −28.0%**, parse time −19%+, all byte-identical. `Span` (48 B, `Position` = 3×usize) is
+  the last large field but is `usize`-read pervasively (cast-heavy) — higher-churn, deferred.
+
+  Agent: cc
