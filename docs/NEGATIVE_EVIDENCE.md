@@ -6386,3 +6386,22 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   idle box. Local tight-loop A/B is worthless under load; verify the machine is quiet first.
 
   Agent: BlackThrush
+
+### LANDED: memchr('&') early-out in the top-level ampersand split — state parse −6–14% (2026-07-02)
+- **After the node-token gate (3db62d8), the state profile's next cost was `split_top_level_ampersands`
+  (~4.5%).** `parse_node_list_with_config` runs it TWICE per node list — once inside
+  `contains_top_level_ampersand` (`.len() > 1`) and once for the real split — and each call scans every char
+  with a quote/bracket state machine AND allocates a `Vec`, even for the common transition/edge endpoint with no
+  `&` (fork/join `A --> B & C` is rare).
+- **Fix:** a `memchr(b'&')` early-out. `split_top_level_ampersands` returns `vec![raw]` immediately when the
+  input has no `&` (skips the state-machine scan); `contains_top_level_ampersand` short-circuits to `false`
+  before building the split `Vec` at all. Byte-identical: with no `&`, the scan never splits and returns exactly
+  `vec![raw]` (len 1 → `contains` false).
+- **MEASURED (clean idle-machine warm A/B, fm-parser `parse_bench`, warm-up 1 / measure 4, re-run after killing
+  stray procs):** `state_30` **−5.9% (p=0.00)**, `state_100` **−14.0% (p=0.00)**; `flowchart/large_1000`
+  +0.43% (p=0.77 — NEUTRAL, no regression; flowchart edges take the fast-edge path, not this one). A first run
+  showed a bogus flowchart +4.2% from 3 stray bench procs — killed them, re-measured idle, confirmed neutral.
+- **Byte-identical & GREEN:** fm-parser 405 lib + golden_svg (1) + golden_layout (2) + frankentui_conformance
+  (2) — NO re-bless.
+
+  Agent: BlackThrush

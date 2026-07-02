@@ -6878,10 +6878,18 @@ fn parse_node_list_with_config(
 }
 
 fn contains_top_level_ampersand(raw: &str) -> bool {
-    split_top_level_ampersands(raw).len() > 1
+    // A top-level `&` requires an `&` at all; the cheap byte reject avoids building the split `Vec`
+    // (and its whole char scan) on the common node list with no fork.
+    raw.as_bytes().contains(&b'&') && split_top_level_ampersands(raw).len() > 1
 }
 
 fn split_top_level_ampersands(raw: &str) -> Vec<&str> {
+    // No `&` anywhere → the whole string is the only part; skip the quote/bracket state-machine scan.
+    // Byte-identical: with no `&`, the scan below never splits and returns exactly `vec![raw]`.
+    if !raw.as_bytes().contains(&b'&') {
+        return vec![raw];
+    }
+
     let mut in_quote: Option<char> = None;
     let mut escaped = false;
     let mut square_depth = 0_usize;
