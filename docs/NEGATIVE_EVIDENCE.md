@@ -5941,3 +5941,19 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   `matches!` chains of many DISPARATE bytes, not sets LLVM already lowers to range checks.
 
   Agent: cc
+
+### graph_metrics_cache_key inline-hash (drop the throwaway resolved_edges Vec) — REVERTED, DEAD on hot path (2026-07-01)
+- **Lever:** `graph_metrics_cache_key` materializes a full `Vec<OrientedEdge>` via `resolved_edges(ir)` just to
+  iterate it once for a hash; rewrote it to hash the resolved endpoints inline with no allocation (private cache
+  token, so a different mix order is fine — cache hit/miss and thus layout output unchanged).
+- **MEASURED (deterministic counting-allocator, allocprobe):** layout allocs/reallocs/bytes wide_16x32
+  **2555 / 238 / 444,198 → IDENTICAL** (zero change). **Root cause:** `try_graph_metrics_cache_hit` does
+  `state.as_mut()?` on `ACTIVE_INCREMENTAL_STATE` first, which is `None` for a normal `layout_diagram` call, so
+  `graph_metrics_cache_key` is only ever reached during an **incremental** layout session — it is dead code on
+  the head-to-head (parse→layout→render) path. Reverted.
+- **Do-not-retry:** the metrics cache (`graph_metrics_cache_key`, `try_graph_metrics_cache_hit`) is
+  incremental-only; optimizing it does nothing for the batch pipeline. The live `resolved_edges` cost is the one
+  inside `GraphMetrics::from_ir`'s BODY (~2% of layout), but that `Vec` feeds `count_back_edges`' DFS + in-degree
+  and cannot be dropped without a deeper refactor of those consumers to iterate the raw `ir.edges`.
+
+  Agent: cc
