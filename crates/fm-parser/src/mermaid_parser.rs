@@ -1393,13 +1393,17 @@ fn parse_fast_simple_flowchart_node_borrowed(
         return None;
     }
 
-    if trimmed.contains('[') {
+    // One byte scan for the first `[` replaces `contains('[')` + `split_once('[')` — each a
+    // separate `CharSearcher` char-by-char decode (measured as CharSearcher::next_match on the
+    // node parse path). `[` is ASCII, so its byte index is a char boundary and
+    // `trimmed[..bracket]` / `trimmed[bracket + 1..]` reproduce `split_once('[')` exactly. This
+    // also folds the old double scan (contains, then split_once) into a single pass.
+    if let Some(bracket) = trimmed.as_bytes().iter().position(|&b| b == b'[') {
         if !trimmed.ends_with(']') {
             return None;
         }
-        let (id, label_tail) = trimmed.split_once('[')?;
-        let id = id.trim_ascii();
-        let label_raw = label_tail.strip_suffix(']')?.trim();
+        let id = trimmed[..bracket].trim_ascii();
+        let label_raw = trimmed[bracket + 1..].strip_suffix(']')?.trim();
         // Byte scan for a nested `[`/`]` rather than `contains(['[', ']'])`, whose `MultiCharEqSearcher`
         // decodes every char of the label (~4% of flowchart parse). Both brackets are ASCII, so the
         // byte scan is identical.
