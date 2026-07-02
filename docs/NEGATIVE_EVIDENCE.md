@@ -6275,3 +6275,25 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   classification) — a candidate for the next dig.
 
   Agent: BlackThrush
+
+### LANDED: byte-based trim in the sequence message path — sequence parse −6–9% (2026-07-02)
+- **Follow-up to the arrow-scanner gate (3df0205): re-profiling sequence parse showed `str::trim`
+  (`trim_matches::<char::is_whitespace>` + the reverse `char::is_whitespace` searcher) back at ~7–9% self.**
+  The message path trims left/right/target per message (×N), and `strip_sequence_central_prefix`/`suffix` trimmed
+  `raw` TWICE each (called ~4×/message), all via Unicode `str::trim`.
+- **Fix:** route those sites through the existing byte-identical `trim_fast` (a39648b; a private fn in the same
+  module) and collapse the double `raw.trim()` in the two `strip_sequence_central_*` helpers to a single
+  `trim_fast` reused for the strip + fallback. Unlike the earlier sub-threshold extended-trim (dbea790, which hit
+  ALREADY-trimmed inputs), these trim RAW split fragments with real surrounding whitespace (around the arrow),
+  so the win is real.
+- **MEASURED (clean warm same-machine A/B, fm-parser `parse_bench parse/sequence`, longer measure to beat
+  free-list noise):** `seq_12x50` **−9.27% (p=0.00)** (130.4→118.7 µs), `seq_12x200` **−5.73% (p=0.00)**
+  (429.2→391.0 µs) — on top of the 3df0205 gate. (A first noisy run showed a bogus +58%: contaminated baseline,
+  the recurring cross-run machine-noise artifact — a char→byte trim that also removes a double-trim cannot
+  regress; the quiet re-measure confirmed the real win.)
+- **Byte-identical & GREEN:** fm-parser 405 lib (incl. sequence) + golden_svg (1) + golden_layout (2) +
+  frankentui_conformance (2) — NO re-bless.
+- **Standing dominance context:** flowchart-wide head-to-head vs Mermaid 11.12.0 = 233.6–468.2× slower; this
+  further speeds sequence parse (combined with 3df0205, sequence parse is now ~−15–22% vs two commits ago).
+
+  Agent: BlackThrush

@@ -6618,16 +6618,13 @@ fn sequence_participant_visuals(
 
 fn parse_sequence_message_ast(statement: &str) -> Option<String> {
     let (operator_idx, operator, _) = find_operator(statement, &SEQUENCE_OPERATORS)?;
-    let left = statement[..operator_idx].trim();
-    let right = statement[operator_idx + operator.len()..].trim();
+    let left = trim_fast(&statement[..operator_idx]);
+    let right = trim_fast(&statement[operator_idx + operator.len()..]);
     if left.is_empty() || right.is_empty() {
         return None;
     }
 
-    let target_raw = right
-        .split_once(':')
-        .map_or(right, |(target, _)| target)
-        .trim();
+    let target_raw = trim_fast(right.split_once(':').map_or(right, |(target, _)| target));
     let left = strip_sequence_central_suffix(left);
     let target_raw = strip_sequence_central_prefix(target_raw);
     let from_id = normalize_identifier(left);
@@ -6650,15 +6647,15 @@ fn lower_sequence_message(
         return false;
     };
 
-    let left = statement[..operator_idx].trim();
-    let right = statement[operator_idx + operator.len()..].trim();
+    let left = trim_fast(&statement[..operator_idx]);
+    let right = trim_fast(&statement[operator_idx + operator.len()..]);
     if left.is_empty() || right.is_empty() {
         return false;
     }
 
     let (target_raw, message_label) = if let Some((target, label)) = right.split_once(':') {
         (
-            target.trim(),
+            trim_fast(target),
             clean_label(Some(label)).map(|label| normalize_sequence_display_text(&label)),
         )
     } else {
@@ -6708,15 +6705,15 @@ fn lower_sequence_message(
 }
 
 fn strip_sequence_central_prefix(raw: &str) -> &str {
-    raw.trim()
-        .strip_prefix("()")
-        .map_or(raw.trim(), str::trim_start)
+    // `trim_fast` once (byte ASCII trim, was `str::trim` twice — the Unicode char scan showed up in
+    // the sequence-parse profile) and reuse it for both the strip and the no-`()` fallback.
+    let trimmed = trim_fast(raw);
+    trimmed.strip_prefix("()").map_or(trimmed, str::trim_start)
 }
 
 fn strip_sequence_central_suffix(raw: &str) -> &str {
-    raw.trim()
-        .strip_suffix("()")
-        .map_or(raw.trim(), str::trim_end)
+    let trimmed = trim_fast(raw);
+    trimmed.strip_suffix("()").map_or(trimmed, str::trim_end)
 }
 
 fn parse_edge_statement(
