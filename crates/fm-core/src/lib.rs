@@ -1261,7 +1261,7 @@ pub struct IrNode {
     pub c4_meta: Option<Box<IrC4NodeMeta>>,
     /// Parsed inline style from `style nodeId ...` directives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inline_style: Option<IrInlineStyle>,
+    pub inline_style: Option<Box<IrInlineStyle>>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
@@ -1336,7 +1336,7 @@ pub struct IrEdge {
     pub action: Option<Box<str>>,
     /// Parsed inline style from `linkStyle N ...` directives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inline_style: Option<IrInlineStyle>,
+    pub inline_style: Option<Box<IrInlineStyle>>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
@@ -4635,7 +4635,7 @@ impl MermaidDiagramIr {
             }
 
             if !merged.is_empty() {
-                node.inline_style = Some(IrInlineStyle { properties: merged });
+                node.inline_style = Some(Box::new(IrInlineStyle { properties: merged }));
             }
         }
 
@@ -4661,7 +4661,7 @@ impl MermaidDiagramIr {
             }
 
             if !merged.is_empty() {
-                edge.inline_style = Some(IrInlineStyle { properties: merged });
+                edge.inline_style = Some(Box::new(IrInlineStyle { properties: merged }));
             }
         }
     }

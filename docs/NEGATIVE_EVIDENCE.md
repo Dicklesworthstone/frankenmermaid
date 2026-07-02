@@ -6026,3 +6026,22 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   rewriting for another ~4% parse bytes.
 
   Agent: cc
+
+### LANDED: box inline_style on both IrNode and IrEdge — both −24 B, parse bytes −4.1% (2026-07-01)
+- `inline_style: Option<IrInlineStyle>` (32 B inline) → `Option<Box<IrInlineStyle>>` (8 B) on BOTH `IrNode`
+  and `IrEdge`. It is `None` on every node/edge that has no `style`/`linkStyle` directive (the common case), so
+  the 24-byte payload leaves both structs (heap only when a style is actually present).
+- **Two-line field change, 2 construction sites fixed** (`Some(IrInlineStyle{..})` → `Some(Box::new(..))` in
+  `fm-core`'s style-cascade); all read sites (`.as_ref()`/`.is_some()` + the parser's write paths) compiled
+  unchanged via `Box` deref-coercion — the cleanest boxing yet.
+- **MEASURED (deterministic, load-immune):** `size_of::<IrNode>()` **320 → 296 B**, `size_of::<IrEdge>()`
+  **216 → 192 B**; parse allocated BYTES wide_16x32 **1,001,344 → 960,112 (−4.1%)**. Alloc COUNT unchanged.
+- **Byte-identical & serde-safe:** `svg_golden_snapshots_are_stable`, `layout_golden_checksums_are_stable`,
+  `config_roundtrip_test`, `frankentui_conformance`, 234 fm-render-svg lib tests GREEN, NO re-bless.
+- **SESSION STRUCT-SHRINK TOTAL:** `IrNode` 608 → 296 B (−51%), `IrEdge` 256 → 192 B (−25%); parse bytes
+  **1,234,928 → 960,112 = −22.3%** across span_all-removal + IrNode-meta-box + IrEdge-string-box +
+  inline_style-box, all byte-identical. The "owner-gated struct-shrink" is now largely harvested; the biggest
+  remaining field is `Span` (48 B in every node+edge, `Position` = 3×usize) — shrinkable to u32 but pervasively
+  read as `usize`, so higher-churn.
+
+  Agent: cc
