@@ -1001,45 +1001,67 @@ fn parse_flowchart(input: &str, builder: &mut IrBuilder) {
     extract_style_directives(input, builder);
 }
 
-fn parse_flowchart_document<'a>(
+/// Iterator over `input`'s lines, byte-identical to [`str::lines`] but implemented with a
+/// `[u8]::position(== b'\n')` byte scan instead of `lines()`'s single-`char` `'\n'` `CharSearcher`.
+/// `str::lines()`'s CharSearcher `next_match` measured as a top parse self-time symbol (~6% of
+/// flowchart parse), and every diagram parser scans the input line-by-line. Semantics match
+/// `lines()` exactly: split on `\n`, strip one trailing `\r` per line, and do not yield a trailing
+/// empty line after a final `\n`. Pinned against `str::lines()` by `byte_lines_matches_std_lines`.
+struct ByteLines<'a> {
     input: &'a str,
-    config: &ParserConfig,
-) -> FlowDocumentParseResult<'a> {
-    // Byte-based line split, byte-identical to `input.lines().enumerate().map(|(i, l)| (i + 1, l))`:
-    // split on `\n`, strip a trailing `\r` per line, and (like `lines()`) do not yield a trailing
-    // empty line after a final `\n`. `str::lines()` splits on the `char` `'\n'` through
-    // `CharSearcher` (a single-`char` full-input scan that is a top parse self-time symbol); the
-    // `[u8]::position(== b'\n')` scan below auto-vectorizes and avoids that char machinery.
-    let bytes = input.as_bytes();
-    let mut lines: Vec<(usize, &str)> = Vec::new();
-    let mut start = 0usize;
-    let mut line_no = 1usize;
-    loop {
-        match bytes[start..].iter().position(|&b| b == b'\n') {
+    start: usize,
+}
+
+impl<'a> Iterator for ByteLines<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<&'a str> {
+        let bytes = self.input.as_bytes();
+        if self.start > bytes.len() {
+            return None;
+        }
+        match bytes[self.start..].iter().position(|&b| b == b'\n') {
             Some(rel) => {
-                let nl = start + rel;
-                let end = if nl > start && bytes[nl - 1] == b'\r' {
+                let nl = self.start + rel;
+                let end = if nl > self.start && bytes[nl - 1] == b'\r' {
                     nl - 1
                 } else {
                     nl
                 };
-                lines.push((line_no, &input[start..end]));
-                line_no += 1;
-                start = nl + 1;
+                let line = &self.input[self.start..end];
+                self.start = nl + 1;
+                Some(line)
             }
             None => {
-                if start < bytes.len() {
-                    let end = if bytes.len() > start && bytes[bytes.len() - 1] == b'\r' {
-                        bytes.len() - 1
-                    } else {
-                        bytes.len()
-                    };
-                    lines.push((line_no, &input[start..end]));
-                }
-                break;
+                // Final segment (no more `\n`). `lines()` yields it only when non-empty and never
+                // yields a trailing empty line after a final `\n`; mark exhausted either way. A
+                // trailing `\r` here is a LONE carriage return (not a `\r\n` terminator), which
+                // `str::lines()` does NOT strip — so the final segment is emitted verbatim.
+                let out = if self.start < bytes.len() {
+                    Some(&self.input[self.start..])
+                } else {
+                    None
+                };
+                self.start = bytes.len() + 1;
+                out
             }
         }
     }
+}
+
+/// Byte-based [`str::lines`] replacement — see [`ByteLines`].
+fn byte_lines(input: &str) -> ByteLines<'_> {
+    ByteLines { input, start: 0 }
+}
+
+fn parse_flowchart_document<'a>(
+    input: &'a str,
+    config: &ParserConfig,
+) -> FlowDocumentParseResult<'a> {
+    let lines: Vec<(usize, &str)> = byte_lines(input)
+        .enumerate()
+        .map(|(i, line)| (i + 1, line))
+        .collect();
     let mut next_index = 0;
     let mut warnings = Vec::new();
     let mut header_direction = None;
@@ -1585,7 +1607,7 @@ fn looks_like_explicit_subgraph_id(raw: &str) -> bool {
 }
 
 fn parse_sequence(input: &str, builder: &mut IrBuilder) {
-    for (index, line) in input.lines().enumerate() {
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
         let trimmed = line.trim();
         if trimmed.is_empty() || is_comment(trimmed) {
@@ -2288,7 +2310,7 @@ fn parse_class(input: &str, builder: &mut IrBuilder) {
     // Stack of (namespace_name, subgraph_index) for nested namespace blocks.
     let mut namespace_stack: Vec<(String, usize)> = Vec::new();
 
-    for (index, line) in input.lines().enumerate() {
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
         let trimmed = line.trim();
         if trimmed.is_empty() || is_comment(trimmed) {
@@ -2659,7 +2681,7 @@ fn parse_state(input: &str, builder: &mut IrBuilder) {
     // Multi-line note accumulator: (target, position, lines, start_line_number)
     let mut note_block: Option<(String, String, Vec<String>, usize)> = None;
 
-    for (index, line) in input.lines().enumerate() {
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
         let trimmed = line.trim();
 
@@ -3016,7 +3038,7 @@ fn parse_requirement(input: &str, builder: &mut IrBuilder) {
         "element ",
     ];
 
-    for (index, line) in input.lines().enumerate() {
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
         let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
@@ -3138,7 +3160,7 @@ fn parse_mindmap(input: &str, builder: &mut IrBuilder) {
     // Map from first-level children: depth of root, branch counter.
     let mut root_depth: Option<usize> = None;
 
-    for (index, line) in input.lines().enumerate() {
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
         let trimmed = line.trim();
         if trimmed.is_empty() || is_comment(trimmed) {
@@ -3399,7 +3421,7 @@ fn parse_mindmap_hexagon(raw: &str) -> Option<NodeToken> {
 fn parse_er(input: &str, builder: &mut IrBuilder) {
     let mut current_entity: Option<IrNodeId> = None;
 
-    for (index, line) in input.lines().enumerate() {
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
         let trimmed = line.trim();
         if trimmed.is_empty() || is_comment(trimmed) {
@@ -3735,7 +3757,7 @@ fn parse_journey(input: &str, builder: &mut IrBuilder) {
     let mut current_section: Option<usize> = None;
     let mut current_section_subgraph: Option<usize> = None;
 
-    for (index, line) in input.lines().enumerate() {
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
         let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
@@ -3883,7 +3905,7 @@ fn parse_kanban(input: &str, builder: &mut IrBuilder) {
     let mut current_column_indent: Option<usize> = None;
     let mut card_count = 0_usize;
 
-    for (index, line) in input.lines().enumerate() {
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
         let trimmed = line.trim();
         if trimmed.is_empty() || is_comment(trimmed) {
@@ -4092,7 +4114,7 @@ fn parse_timeline(input: &str, builder: &mut IrBuilder) {
     let mut current_section: Option<usize> = None;
     let mut current_section_subgraph: Option<usize> = None;
 
-    for (index, line) in input.lines().enumerate() {
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
         let trimmed = line.trim();
         if trimmed.is_empty() || is_comment(trimmed) {
@@ -4298,7 +4320,7 @@ fn parse_packet(input: &str, builder: &mut IrBuilder) {
     let mut field_index = 0_usize;
     let mut previous_field: Option<IrNodeId> = None;
 
-    for (index, line) in input.lines().enumerate() {
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
         let trimmed = line.trim();
         if trimmed.is_empty() || is_comment(trimmed) {
@@ -4441,7 +4463,7 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
     let mut task_ids_to_nodes: BTreeMap<String, IrNodeId> = BTreeMap::new();
     let mut pending_dependencies: Vec<(IrNodeId, String, Span)> = Vec::new();
 
-    for (index, line) in input.lines().enumerate() {
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
         let trimmed = line.trim();
         if trimmed.is_empty() || is_comment(trimmed) {
@@ -4849,7 +4871,7 @@ fn parse_gantt_weekday(token: &str) -> Option<u8> {
 fn parse_pie(input: &str, builder: &mut IrBuilder) {
     let mut pie_meta = fm_core::IrPieMeta::default();
 
-    for (index, line) in input.lines().enumerate() {
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
         let trimmed = line.trim();
         if trimmed.is_empty() || is_comment(trimmed) {
@@ -4934,7 +4956,7 @@ fn parse_pie(input: &str, builder: &mut IrBuilder) {
 fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
     let mut meta = fm_core::IrQuadrantMeta::default();
 
-    for (index, line) in input.lines().enumerate() {
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
         let trimmed = line.trim();
         if trimmed.is_empty() || is_comment(trimmed) {
@@ -5039,7 +5061,7 @@ fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
 fn parse_xychart(input: &str, builder: &mut IrBuilder) {
     let mut xy_chart_meta = IrXyChartMeta::default();
 
-    for (index, line) in input.lines().enumerate() {
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
         let trimmed = line.trim();
         if trimmed.is_empty() || is_comment(trimmed) {
@@ -5146,7 +5168,7 @@ fn parse_xychart(input: &str, builder: &mut IrBuilder) {
 }
 
 fn parse_sankey(input: &str, builder: &mut IrBuilder) {
-    for (index, line) in input.lines().enumerate() {
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
         let trimmed = line.trim();
         if trimmed.is_empty() || is_comment(trimmed) {
@@ -5221,7 +5243,7 @@ fn parse_sankey(input: &str, builder: &mut IrBuilder) {
 fn parse_c4(input: &str, builder: &mut IrBuilder) {
     let mut boundary_stack: Vec<(usize, usize)> = Vec::new();
 
-    for (index, raw_line) in input.lines().enumerate() {
+    for (index, raw_line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
         let trimmed = trim_fast(strip_flowchart_inline_comment(raw_line));
         if trimmed.is_empty() || is_comment(trimmed) {
@@ -5330,7 +5352,7 @@ fn parse_c4(input: &str, builder: &mut IrBuilder) {
 fn parse_architecture(input: &str, builder: &mut IrBuilder) {
     let mut groups: BTreeMap<String, (usize, usize)> = BTreeMap::new();
 
-    for (index, raw_line) in input.lines().enumerate() {
+    for (index, raw_line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
         let trimmed = strip_flowchart_inline_comment(raw_line).trim();
         if trimmed.is_empty() || is_comment(trimmed) {
@@ -5935,7 +5957,7 @@ fn try_parse_block_beta_def(token: &str, config: &ParserConfig) -> Option<BlockD
 fn parse_gitgraph(input: &str, builder: &mut IrBuilder) {
     let mut state = GitGraphState::new();
 
-    for (index, line) in input.lines().enumerate() {
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
         let trimmed = line.trim();
         if trimmed.is_empty() || is_comment(trimmed) {
@@ -7851,7 +7873,7 @@ fn parse_init_directives(input: &str, builder: &mut IrBuilder) {
     if !input.contains("%%{") {
         return;
     }
-    for (index, line) in input.lines().enumerate() {
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
         let trimmed = line.trim();
         let Some(payload) = extract_init_payload(trimmed) else {
@@ -8681,7 +8703,7 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
     let mut saw_style_directive = false;
     let mut first_style_span = None;
 
-    for (line_number, raw_line) in input.lines().enumerate() {
+    for (line_number, raw_line) in byte_lines(input).enumerate() {
         let line = raw_line.trim();
         let span = span_for(line_number + 1, raw_line);
 
@@ -8875,11 +8897,41 @@ mod tests {
     };
 
     use super::{
-        FLOW_OPERATORS, STYLE_DIRECTIVE_DIAGNOSTIC_MESSAGE, flow_statement_parser,
+        FLOW_OPERATORS, STYLE_DIRECTIVE_DIAGNOSTIC_MESSAGE, byte_lines, flow_statement_parser,
         is_dangling_placeholder_node_id, parse_edge_statement_asts,
         parse_fast_simple_flowchart_statement_ast, parse_mermaid,
     };
     use crate::{ParserConfig, detect_type, parse_with_mode_and_config};
+
+    #[test]
+    fn byte_lines_matches_std_lines() {
+        // `byte_lines` must be byte-identical to `str::lines()` across every edge case: empty
+        // input, `\n`/`\r\n`/lone-`\r` terminators, blank lines, and presence/absence of a final
+        // newline. Any divergence would corrupt line numbers or content in every diagram parser.
+        let cases = [
+            "",
+            "\n",
+            "\r\n",
+            "\n\n",
+            "a",
+            "a\n",
+            "a\nb",
+            "a\nb\n",
+            "a\r\nb\r\n",
+            "a\r\nb",
+            "  x  \n\ty\t\n",
+            "flowchart TD\n  A-->B\n\n  B-->C",
+            "a\n\n\nb\n",
+            "unicode: café\nnext líne\n",
+            "trailing carriage\r",
+            "mixed\r\nunix\nend",
+        ];
+        for case in cases {
+            let expected: Vec<&str> = case.lines().collect();
+            let got: Vec<&str> = byte_lines(case).collect();
+            assert_eq!(got, expected, "byte_lines mismatch for {case:?}");
+        }
+    }
 
     #[test]
     fn detects_supported_headers() {
