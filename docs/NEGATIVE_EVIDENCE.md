@@ -6860,3 +6860,25 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   position (is_prefix_of ~7%), which would need a first-2-byte dispatch/trie (byte-identity-risky) to cut.
 
   Agent: BlackThrush
+
+### LANDED: normalize_identifier already-clean fast path — non-flowchart parse −4–5% (2026-07-02)
+- **Profiled the OTHER non-flowchart types (class/state/er/gantt) — `fm_parser::normalize_identifier` is
+  4–6% self-time in EACH (called per node/entity reference in every diagram family).** For an id already
+  made of the chars the normalizer keeps verbatim (ASCII alphanumerics + `_ - . /`, no trailing `_`) — the
+  overwhelmingly common case — it still ran the char-by-char `out.push(ch)` rebuild AND then reallocated for
+  `out.trim_end_matches('_').to_string()`: TWO allocations + a scalar push loop to reproduce the input.
+- **Fix:** a byte pre-check (`cleaned` all-allowed + last byte != `_`) that returns `cleaned.to_owned()`
+  (one memcpy) and skips the loop + throwaway `out`. Byte-identical: the loop pushes each such char unchanged
+  and the trim/fallback leave it as-is; a non-ASCII byte fails `is_ascii_alphanumeric`, deferring to the slow
+  path. GREEN no re-bless: fm-parser 406 lib + golden_svg (2) + golden_layout (2) + conformance (1); clippy clean.
+- **MEASURED (clean same-machine A/B, profharness `<type> 300 parse`, user-time over 15–20k iters, alternated
+  5–6×):** er **−5.3%** (2.85→2.70s, non-overlapping every round), state **−4.1%** (4.90→4.70), class **−4–5%**
+  (6.00→5.70). Flowchart is a WASH (it interns via `parse_fast_simple_flowchart_node_borrowed`, not
+  `normalize_identifier`) — the win is exactly on the non-flowchart families where the fn is hot.
+- **META:** a `normalize`/`clean` fn that RETURNS String and rebuilds via a per-char `push` loop almost always
+  has an identity-transform common case — add a byte all-allowed pre-check that returns one owned copy. Also:
+  watch for `out.push`-loop → `out.trim().to_string()` = a double allocation (the `out` is thrown away).
+  META²: this was found by PROFILING class/state/er/gantt (not just sequence) — the per-type parsers each
+  carry cross-cutting helpers (normalize_identifier, trim, find_operator) worth optimizing once.
+
+  Agent: BlackThrush
