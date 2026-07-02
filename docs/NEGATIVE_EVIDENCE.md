@@ -6535,3 +6535,23 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   hoisting that parse would remove the other half of the date-parse cost.
 
   Agent: BlackThrush
+
+### LANDED: delimiter/colon byte-gates in the mindmap node parser — mindmap parse −11–27% (2026-07-02)
+- **Profiling a fresh type (mindmap) showed ~11% in substring search** (`StrSearcher`/`TwoWaySearcher`):
+  `parse_mindmap_node_token` has its OWN copy of the `split(":::")` (a 3-char `TwoWaySearcher`, ungated) plus
+  6 shape probes (`parse_mindmap_bang`/`cloud`/`hexagon`/`double_circle`/wrapped `()`/`[]`, each `find`/`contains`
+  substring searchers) — all run per node, all miss on a plain node.
+- **Fix (recipes A + the 3db62d8 delimiter gate, applied to this separate parser copy):** `memchr(':')` guard
+  on the `:::` split; and gate the whole shape-probe block behind `bytes().any(matches!(b, '('|')'|'['|']'|'{'|'}'))`
+  — every mindmap shape has a bracket/paren/brace delimiter, so a plain node skips all of it. Byte-identical.
+- **MEASURED (clean idle-machine warm A/B, fm-parser `parse_bench`, warm-up 1 / measure 4):** `mindmap_200`
+  **−26.8% (p=0.00)** (273→189 µs), `mindmap_50` **−11.5% (p=0.00)** (58→53 µs). Added `parse/mindmap` bench
+  cases.
+- **Byte-identical & GREEN:** fm-parser 405 lib (incl. 12 mindmap tests: bang/cloud/hexagon/circle shapes,
+  icons, class suffixes) + golden_svg (1) + golden_layout (2) + frankentui_conformance (2) — NO re-bless.
+- **META:** the same substring-search-on-plain-input hotspot recurs in EACH diagram type's node parser (they're
+  independent copies — flowchart `parse_node_token_with_config` 3db62d8, now mindmap). The recipe frontier is
+  NOT closed; every unprofiled type's parser is a fresh surface. Node parsers with a `:::` split + shape probes
+  are the highest-yield pattern (−10-30%).
+
+  Agent: BlackThrush

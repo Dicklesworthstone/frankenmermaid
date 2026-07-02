@@ -125,6 +125,17 @@ fn gen_gantt(tasks: usize) -> String {
     s
 }
 
+/// A mindmap: `nodes` nodes across an indentation hierarchy — exercises the mindmap indentation/shape parser.
+fn gen_mindmap(nodes: usize) -> String {
+    let mut s = String::from("mindmap\n  root((Root))\n");
+    for i in 0..nodes {
+        let depth = 2 + (i % 3);
+        let indent = "  ".repeat(depth);
+        s.push_str(&format!("{indent}Node {i} idea\n"));
+    }
+    s
+}
+
 fn bench_parse(c: &mut Criterion) {
     let mut group = c.benchmark_group("parse");
 
@@ -162,6 +173,13 @@ fn bench_parse(c: &mut Criterion) {
     for (label, tasks) in [("gantt_50", 50_usize), ("gantt_200", 200_usize)] {
         let input = gen_gantt(tasks);
         group.bench_with_input(BenchmarkId::new("gantt", label), &input, |b, input| {
+            b.iter(|| fm_parser::parse(input));
+        });
+    }
+
+    for (label, nodes) in [("mindmap_50", 50_usize), ("mindmap_200", 200_usize)] {
+        let input = gen_mindmap(nodes);
+        group.bench_with_input(BenchmarkId::new("mindmap", label), &input, |b, input| {
             b.iter(|| fm_parser::parse(input));
         });
     }

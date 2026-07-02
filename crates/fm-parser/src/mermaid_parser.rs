@@ -3191,46 +3191,60 @@ fn parse_mindmap_node_token(raw: &str, config: &ParserConfig) -> Option<NodeToke
         return None;
     }
 
-    // Strip class suffix (:::class1 class2) from the node definition
-    let core = trimmed.split(":::").next().unwrap_or(trimmed).trim();
+    // Strip class suffix (:::class1 class2) from the node definition. The `:::` split builds a
+    // substring searcher; guard it behind a cheap `memchr(':')` — the common mindmap node has no colon.
+    let core = if trimmed.as_bytes().contains(&b':') {
+        trimmed.split(":::").next().unwrap_or(trimmed).trim()
+    } else {
+        trimmed
+    };
     if core.is_empty() {
         return None;
     }
 
-    // Bang shape: id))text((
-    if let Some(parsed) = parse_mindmap_bang(core) {
-        return Some(parsed);
-    }
+    // Every mindmap shape — `))…((`, `)…(`, `{{…}}`, `((…))`, `(…)`, `[…]` — contains a bracket/paren/
+    // brace delimiter. A plain node (the common case) has none, so skip the shape probes (each a
+    // `find`/`contains` substring searcher) below. Byte-identical: the probes all miss without a delimiter.
+    if core
+        .as_bytes()
+        .iter()
+        .any(|&b| matches!(b, b'(' | b')' | b'[' | b']' | b'{' | b'}'))
+    {
+        // Bang shape: id))text((
+        if let Some(parsed) = parse_mindmap_bang(core) {
+            return Some(parsed);
+        }
 
-    // Cloud shape: id)text(
-    if let Some(parsed) = parse_mindmap_cloud(core) {
-        return Some(parsed);
-    }
+        // Cloud shape: id)text(
+        if let Some(parsed) = parse_mindmap_cloud(core) {
+            return Some(parsed);
+        }
 
-    // Hexagon shape: id{{text}}
-    if let Some(parsed) = parse_mindmap_hexagon(core) {
-        return Some(parsed);
-    }
+        // Hexagon shape: id{{text}}
+        if let Some(parsed) = parse_mindmap_hexagon(core) {
+            return Some(parsed);
+        }
 
-    // Circle shape: id((text)) - reuse existing double-circle parser
-    if let Some(parsed) = parse_double_circle_with_config(core, config) {
-        // For mindmap, (( )) is just a circle, not double-circle
-        return Some(NodeToken {
-            id: parsed.id,
-            label: parsed.label,
-            icon: parsed.icon,
-            shape: NodeShape::Circle,
-        });
-    }
+        // Circle shape: id((text)) - reuse existing double-circle parser
+        if let Some(parsed) = parse_double_circle_with_config(core, config) {
+            // For mindmap, (( )) is just a circle, not double-circle
+            return Some(NodeToken {
+                id: parsed.id,
+                label: parsed.label,
+                icon: parsed.icon,
+                shape: NodeShape::Circle,
+            });
+        }
 
-    // Rounded shape: id(text)
-    if let Some(parsed) = parse_wrapped_with_config(core, '(', ')', NodeShape::Rounded, config) {
-        return Some(parsed);
-    }
+        // Rounded shape: id(text)
+        if let Some(parsed) = parse_wrapped_with_config(core, '(', ')', NodeShape::Rounded, config) {
+            return Some(parsed);
+        }
 
-    // Square shape: id[text]
-    if let Some(parsed) = parse_wrapped_with_config(core, '[', ']', NodeShape::Rect, config) {
-        return Some(parsed);
+        // Square shape: id[text]
+        if let Some(parsed) = parse_wrapped_with_config(core, '[', ']', NodeShape::Rect, config) {
+            return Some(parsed);
+        }
     }
 
     // Default shape: plain text (no delimiters)
