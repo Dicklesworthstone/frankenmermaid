@@ -5926,3 +5926,18 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   DIGIT_PAIRS writer (16ed6d3) is already optimal. Do-not-retry the buffer form.
 
   Agent: cc
+
+### LUT for is_fast_flow_identifier + fast-node forbidden scan — REVERTED, ~0-gain (2026-07-01)
+- **Follow-up to the landed edge-parts LUT (9a2fb91) that did NOT generalize.** Applied the same
+  `[bool; 256]` byte-classification table to `is_fast_flow_identifier` (the per-endpoint id validator,
+  `is_ascii_alphanumeric() || matches!(b, b'_'|b'-'|b'.'|b'/')`, ~2432 calls/parse) and to the fast-NODE
+  forbidden scan (10-way `matches!`).
+- **MEASURED (interleaved A/B, private binaries):** parse wide_16x32 base_min 722.9 → fix_min 722.5 µs
+  (**flat, fix faster 5/9 rounds = coin-flip**). REVERTED.
+- **Why it differed from the edge LUT:** `is_ascii_alphanumeric()` already lowers to two tight ASCII range
+  compares — a table LOAD does not beat it (and adds a cache line). The edge-parts win came specifically from
+  collapsing a **12-way disparate-value `matches!`** (which LLVM could not fold into a range) into one load;
+  that condition does not hold for the alphanumeric-dominated id check. **Do-not-retry:** only LUT-ify
+  `matches!` chains of many DISPARATE bytes, not sets LLVM already lowers to range checks.
+
+  Agent: cc
