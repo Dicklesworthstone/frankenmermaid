@@ -6003,3 +6003,26 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   reads there are not all `Option`-method calls, so it needs more care; deferred as the next step.
 
   Agent: cc
+
+### LANDED: box IrEdge's 5 diagram-specific string fields — IrEdge 256 → 216 B, parse bytes −3.8% (2026-07-01)
+- **The next struct-shrink step, and the "guard = 60 refs" blocker turned out to be a phantom:** 42 of those 60
+  were `traced_layout.trace.guard` (the layout-guardrail trace, an unrelated field). Actual `IrEdge` refs:
+  er_notation 8, source/target_cardinality 9+9, guard 16, action 18. Changed the five `Option<String>`
+  (er_notation, source/target_cardinality, guard, action — all ER/class/state-only, `None` on every
+  flowchart/sequence edge) to **`Option<Box<str>>`** (16 B vs 24 B each).
+- **Why `Box<str>` not a grouped `Option<Box<Extras>>`:** `Option<Box<str>>::as_deref()` returns `Option<&str>` —
+  IDENTICAL to `Option<String>::as_deref()` — and `Box<str>` derefs to `str`, so every `.as_deref()`/`.is_some()`
+  read site compiles unchanged. Only the ~9 construction/clone sites needed edits (`Box::from(&str)`,
+  `.map(String::into_boxed_str)`, `.as_deref().map(String::from)`), all compiler-guided. Grouping into one Box
+  would shrink more (→144 B) but rewrites all ~60 read sites — deferred.
+- **MEASURED (deterministic, load-immune):** `size_of::<IrEdge>()` **256 → 216 B (−16%)**; parse allocated BYTES
+  wide_16x32 **1,040,624 → 1,001,344 (−3.8%)** (the `ir.edges` Vec is the dominant edge allocation). Alloc COUNT
+  unchanged. **Combined with the IrNode meta-boxing this session, parse bytes 1,234,928 → 1,001,344 = −18.9%.**
+- **Byte-identical & serde-safe:** `Box<str>` serializes as a string. `svg_golden_snapshots_are_stable` (incl.
+  ER/class/state edges that USE these fields), `layout_golden_checksums_are_stable`, `frankentui_conformance`,
+  `config_roundtrip_test`, `mermaid_compat_test`, 234 fm-render-svg + 405 fm-parser lib tests GREEN, NO re-bless.
+- **Verdict: LANDED.** `Box<str>` is the low-churn way to shrink `Option<String>` fields whose reads are
+  deref-based. Remaining: the grouped `Option<Box<IrEdgeExtras>>` (→144 B) if the ~60 read sites are worth
+  rewriting for another ~4% parse bytes.
+
+  Agent: cc

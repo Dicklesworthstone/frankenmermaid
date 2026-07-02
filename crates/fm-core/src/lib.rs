@@ -1313,21 +1313,27 @@ pub struct IrEdge {
     pub arrow: ArrowType,
     pub label: Option<IrLabelId>,
     pub span: Span,
+    // The five fields below are all diagram-specific (ER / class / state) and `None` on every
+    // flowchart/sequence edge, which is the overwhelmingly common case. Stored as `Option<Box<str>>`
+    // (16 B) rather than `Option<String>` (24 B) so each shaves 8 B off *every* `IrEdge` — the
+    // `IrEdge` shrinks 256 → 216 B, cutting the `ir.edges` Vec allocation + per-edge move/copy on the
+    // hot parse path. `Box<str>` derefs to `str`, so `.as_deref()`/`.is_some()` read sites are
+    // unchanged and it serializes identically to a string.
     /// Raw ER cardinality operator (e.g., `"||--o{"`), stored only for ER diagrams.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub er_notation: Option<String>,
+    pub er_notation: Option<Box<str>>,
     /// Source-side cardinality label (e.g., `"1"`, `"0..*"`) for class diagrams.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_cardinality: Option<String>,
+    pub source_cardinality: Option<Box<str>>,
     /// Target-side cardinality label (e.g., `"*"`, `"1..*"`) for class diagrams.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_cardinality: Option<String>,
+    pub target_cardinality: Option<Box<str>>,
     /// Guard condition on a state transition (e.g., `[isValid]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub guard: Option<String>,
+    pub guard: Option<Box<str>>,
     /// Action on a state transition (e.g., `cleanup()`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub action: Option<String>,
+    pub action: Option<Box<str>>,
     /// Parsed inline style from `linkStyle N ...` directives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline_style: Option<IrInlineStyle>,

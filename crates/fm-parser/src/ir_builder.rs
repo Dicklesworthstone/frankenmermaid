@@ -1380,7 +1380,7 @@ impl IrBuilder {
     /// Set the ER cardinality notation on the last-pushed edge.
     pub(crate) fn set_last_edge_er_notation(&mut self, notation: &str) {
         if let Some(edge) = self.ir.edges.last_mut() {
-            edge.er_notation = Some(notation.to_string());
+            edge.er_notation = Some(Box::from(notation));
         }
     }
 
@@ -1388,10 +1388,10 @@ impl IrBuilder {
     pub(crate) fn set_last_edge_cardinality(&mut self, source: Option<&str>, target: Option<&str>) {
         if let Some(edge) = self.ir.edges.last_mut() {
             if let Some(s) = source {
-                edge.source_cardinality = Some(s.to_string());
+                edge.source_cardinality = Some(Box::from(s));
             }
             if let Some(t) = target {
-                edge.target_cardinality = Some(t.to_string());
+                edge.target_cardinality = Some(Box::from(t));
             }
         }
     }

@@ -2829,8 +2829,8 @@ fn lower_state_flow_ast(
                 if (guard.is_some() || action.is_some())
                     && let Some(edge) = builder.ir_mut().edges.last_mut()
                 {
-                    edge.guard = guard;
-                    edge.action = action;
+                    edge.guard = guard.map(String::into_boxed_str);
+                    edge.action = action.map(String::into_boxed_str);
                 }
             }
         }

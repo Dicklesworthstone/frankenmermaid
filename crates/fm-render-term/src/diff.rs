@@ -462,8 +462,8 @@ fn compare_edges(
 
     if old_edge.er_notation != new_edge.er_notation {
         changes.push(EdgeChange::ErNotationChanged {
-            old: old_edge.er_notation.clone(),
-            new: new_edge.er_notation.clone(),
+            old: old_edge.er_notation.as_deref().map(String::from),
+            new: new_edge.er_notation.as_deref().map(String::from),
         });
     }
 

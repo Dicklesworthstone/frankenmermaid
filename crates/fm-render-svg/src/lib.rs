@@ -2861,7 +2861,7 @@ fn render_layout_to_svg(
         {
             let font_size = config.font_size * 0.7;
 
-            if let Some(card) = &ir_edge.source_cardinality {
+            if let Some(card) = ir_edge.source_cardinality.as_deref() {
                 let p = &edge_path.points[0];
                 doc = doc.child(
                     Element::text()
@@ -2880,7 +2880,7 @@ fn render_layout_to_svg(
                 );
             }
 
-            if let Some(card) = &ir_edge.target_cardinality {
+            if let Some(card) = ir_edge.target_cardinality.as_deref() {
                 let p = &edge_path.points[edge_path.points.len() - 1];
                 doc = doc.child(
                     Element::text()
