@@ -1400,7 +1400,12 @@ fn parse_fast_simple_flowchart_node_borrowed(
         let (id, label_tail) = trimmed.split_once('[')?;
         let id = id.trim_ascii();
         let label_raw = label_tail.strip_suffix(']')?.trim();
-        if !is_fast_flow_identifier(id) || label_raw.contains(['[', ']']) {
+        // Byte scan for a nested `[`/`]` rather than `contains(['[', ']'])`, whose `MultiCharEqSearcher`
+        // decodes every char of the label (~4% of flowchart parse). Both brackets are ASCII, so the
+        // byte scan is identical.
+        if !is_fast_flow_identifier(id)
+            || label_raw.as_bytes().iter().any(|&b| b == b'[' || b == b']')
+        {
             return None;
         }
         let mut label = parse_label((!label_raw.is_empty()).then_some(label_raw));

@@ -6428,3 +6428,20 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   keyword match wins before the expensive interop probe.
 
   Agent: BlackThrush
+
+### LANDED: byte-scan for nested-bracket check in the fast-node parser — flowchart parse −6–9% (2026-07-02)
+- **Profiling flowchart parse (the dominant type) showed `MultiCharEqSearcher<[char; 2]>` + `is_contained_in`
+  at ~4–9%.** Source: `parse_fast_simple_flowchart_node_borrowed` rejects a nested-bracket label via
+  `label_raw.contains(['[', ']'])` — a 2-char SET search that decodes every char of the label, once per node.
+- **Fix:** `label_raw.as_bytes().iter().any(|&b| b == b'[' || b == b']')`. Both brackets are ASCII, so the byte
+  scan is identical to the char-set `contains`, but skips UTF-8 decoding + the `MultiCharEqSearcher`.
+- **MEASURED (clean idle-machine warm A/B, fm-parser `parse_bench`, warm-up 1 / measure 4):**
+  `flowchart/medium_100` **−6.5% (p=0.00)** (91.5→85.5 µs), `flowchart/large_1000` **−9.0% (p=0.00)**
+  (930→846 µs). The searcher was pricier than expected. No regression.
+- **Byte-identical & GREEN:** fm-parser 405 lib + golden_svg (1) + golden_layout (2) + frankentui_conformance
+  (2) — NO re-bless.
+- **META:** `str::contains([c1, c2])` / `.contains("multichar")` on a hot per-element path builds a searcher +
+  decodes chars; when the needles are ASCII, a `bytes().any(matches!(…))` is byte-identical and much cheaper.
+  Same family as the node-token delimiter gate (3db62d8).
+
+  Agent: BlackThrush
