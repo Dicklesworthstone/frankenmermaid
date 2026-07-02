@@ -2337,3 +2337,47 @@ behavior_proof = "Full-SVG byte-identity dump before/after across 9 diagram type
 [positive_measurement_truncf_removal_hot_number_formatters_2026_07_02.decision]
 status = "keep"
 rationale = "Render improved 7.8%-12.3% across all three generated wide sizes in the canonical rch release-profile per-crate bench with non-overlapping criterion CIs, corroborated by a same-core perf-stat A/B (-10.2% CPU) and a machine-independent -5.1% instruction-count drop. Output is byte-identical across 9 diagram types. Already landed on main+master as bbfa640."
+
+[positive_measurement_write_fixed2_dotpairs_single_append_2026_07_02]
+date = "2026-07-02"
+agent = "BlackThrush"
+lever_bead = "bd-1buv.1"
+graveyard_route = "Alien Graveyard object-layout/table specialization: fold two hot fmt::Write appends into one static-table lookup on the dominant SVG number-formatting leaf."
+worker_delta = "wide_stages/render before (head-wt at HEAD=bbfa640, metadata=btbbfa640base, target frankenmermaid-blackthrush-before) and after (main+dddc2ea, metadata=btdotpairscand, target frankenmermaid-blackthrush) built+benched via rch exec on remote workers; before 16x32 mean (883.33us) reproduces last turn's bbfa640 (882.17us), confirming a stable baseline across workers."
+baseline_commit = "64f8ee3"
+candidate_commit = "dddc2ea"
+candidate_summary = "write_fixed2 emitted the fraction as write_str(\".\") + write_str(PAIRS2[frac]); added a DOTPAIRS3 table (\".00\"..\".99\") to emit both in one write_str, byte-identical to \".\" + PAIRS2[frac]. Removes one tiny fmt::Write append (dispatch + capacity check + memcpy) per non-integer coordinate."
+render_baseline_command = "AGENT_NAME=BlackThrush RUSTFLAGS='-C metadata=btbbfa640base' CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-blackthrush-before rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 3"
+render_candidate_command = "AGENT_NAME=BlackThrush RUSTFLAGS='-C metadata=btdotpairscand' CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-blackthrush rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- wide_stages/render --warm-up-time 1 --measurement-time 3"
+rust_build_profile = "release profile [optimized], opt-level=z (shipped). NOTE: an opt=3 local perf-stat showed only ~1% because write_str inlines there; the real opt=z release win is ~10x larger because the call is NOT inlined. Measure levers on the shipped profile."
+behavior_proof = "Full-SVG byte-identity dump before/after across 9 diagram types: zero diff. fm-render-svg lib 234/234 tests pass; clippy -p fm-render-svg --lib -- -D warnings clean."
+
+[positive_measurement_write_fixed2_dotpairs_single_append_2026_07_02.metrics]
+"wide_stages_render_8x16_baseline_mean_us" = 242.59
+"wide_stages_render_8x16_candidate_mean_us" = 222.77
+"wide_stages_render_8x16_raw_delta_pct" = -8.17
+"wide_stages_render_12x24_baseline_mean_us" = 517.25
+"wide_stages_render_12x24_candidate_mean_us" = 456.36
+"wide_stages_render_12x24_raw_delta_pct" = -11.77
+"wide_stages_render_16x32_baseline_mean_us" = 883.33
+"wide_stages_render_16x32_candidate_mean_us" = 791.50
+"wide_stages_render_16x32_raw_delta_pct" = -10.40
+
+[positive_measurement_write_fixed2_dotpairs_single_append_2026_07_02.decision]
+status = "keep"
+rationale = "Render improved 8.2%-11.8% across all three generated wide sizes in the canonical rch release-profile per-crate bench with non-overlapping criterion CIs against a baseline that reproduces the prior turn's number. Byte-identical across 9 diagram types. Landed on main+master as dddc2ea."
+
+[negative_measurement_render_number_scan_and_callcount_microopts_2026_07_02]
+date = "2026-07-02"
+agent = "BlackThrush"
+lever_bead = "bd-1buv.1"
+candidate_summary = "Two byte-identical render-leaf micro-opts tried the same turn as the DOTPAIRS3 keep: (1) a vectorizable bulk fast-path in write_escaped_text (skip the per-byte match loop when no & < > present, matching write_escaped_attr); (2) [superseded-note] the call-merge that BECAME the DOTPAIRS3 keep once measured on opt=z."
+behavior_proof = "Both byte-identical (9-diagram-type SVG dump, zero diff)."
+
+[negative_measurement_render_number_scan_and_callcount_microopts_2026_07_02.metrics]
+"escape_text_fastpath_opt3_local_taskclock_delta_pct" = 0.6
+"escape_text_fastpath_opt3_local_instructions_delta_pct" = -2.4
+
+[negative_measurement_render_number_scan_and_callcount_microopts_2026_07_02.decision]
+status = "reject_escape_text_fastpath"
+rationale = "The write_escaped_text bulk fast-path cut instructions 2.4% but task-clock was flat (+0.6%, within noise): the 7.84% self-time in write_escaped_text is the unavoidable output byte copy (write_str), not the scan, so vectorizing the scan does not reduce time. Reverted (not landed). LESSON: on this render leaf, scan/branch instruction cuts do not translate to time unless they remove a whole fmt::Write CALL on the opt=z build (which DOTPAIRS3 does, and is kept)."
