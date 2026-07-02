@@ -1331,6 +1331,23 @@ fn clamp_unit_interval(value: f32) -> f32 {
     value.clamp(0.0, 1.0)
 }
 
+/// Whether `haystack` contains `needle` as an ASCII-case-insensitive substring, without allocating a
+/// lowercased copy. `needle` must be lowercase ASCII. Byte-identical to
+/// `haystack.to_ascii_lowercase().contains(needle)` for ASCII keywords, but skips the per-class
+/// `to_ascii_lowercase` allocation and the `str::contains` `TwoWaySearcher` construction — the
+/// per-node-class keyword scan (highlight/selected/… ~15 needles) ran both on EVERY styled node.
+fn contains_ascii_ci(haystack: &str, needle: &str) -> bool {
+    let (h, n) = (haystack.as_bytes(), needle.as_bytes());
+    if n.is_empty() {
+        return true;
+    }
+    if n.len() > h.len() {
+        return false;
+    }
+    h.windows(n.len())
+        .any(|w| w.iter().zip(n).all(|(a, b)| a.eq_ignore_ascii_case(b)))
+}
+
 fn sanitize_css_token(value: &str) -> String {
     value
         .chars()
@@ -4691,39 +4708,41 @@ fn render_node(
 
     if let Some(node) = ir_node {
         for class in &node.classes {
-            let normalized = class.to_ascii_lowercase();
+            // ASCII-case-insensitive keyword checks run directly on `class` via `contains_ascii_ci` /
+            // `eq_ignore_ascii_case` — no per-class `to_ascii_lowercase` allocation and no
+            // `str::contains` `TwoWaySearcher` setup (byte-identical to the old lowercase-then-contains).
             let sanitized = sanitize_css_token(class);
             if !sanitized.is_empty() {
                 group = group.class_prefixed("fm-node-user-", &sanitized);
             }
-            if normalized.contains("highlight")
-                || normalized.contains("selected")
-                || normalized.contains("active")
-                || normalized.contains("focus")
-                || normalized.contains("important")
+            if contains_ascii_ci(class, "highlight")
+                || contains_ascii_ci(class, "selected")
+                || contains_ascii_ci(class, "active")
+                || contains_ascii_ci(class, "focus")
+                || contains_ascii_ci(class, "important")
             {
                 is_highlighted = true;
             }
-            if normalized.contains("inactive")
-                || normalized.contains("dim")
-                || normalized.contains("muted")
-                || normalized.contains("disabled")
+            if contains_ascii_ci(class, "inactive")
+                || contains_ascii_ci(class, "dim")
+                || contains_ascii_ci(class, "muted")
+                || contains_ascii_ci(class, "disabled")
             {
                 is_inactive = true;
             }
-            if normalized.contains("dashed-border") || normalized.contains("border-dashed") {
+            if contains_ascii_ci(class, "dashed-border") || contains_ascii_ci(class, "border-dashed") {
                 dashed_border = true;
             }
-            if normalized == "c4-external" {
+            if class.eq_ignore_ascii_case("c4-external") {
                 dashed_border = true;
             }
-            if normalized.contains("double-border") || normalized.contains("border-double") {
+            if contains_ascii_ci(class, "double-border") || contains_ascii_ci(class, "border-double") {
                 double_border = true;
             }
-            if normalized == "block-beta" {
+            if class.eq_ignore_ascii_case("block-beta") {
                 is_block_beta = true;
             }
-            if normalized == "block-beta-space" {
+            if class.eq_ignore_ascii_case("block-beta-space") {
                 is_block_beta_space = true;
             }
         }

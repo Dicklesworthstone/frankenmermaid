@@ -6908,6 +6908,29 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   layout you'd need to shorten the probed mid-segment or cut candidates without changing routed geometry
   (byte-identity-hard), or an algorithmic index change — not a leaf micro-opt.
 
+<!-- styled-render-ci-landed -->
+### LANDED: case-insensitive byte keyword scan for node classes — styled render −10% (2026-07-02)
+- **Profiling class RENDER surfaced `sanitize_css_token` + a `str::contains` (`is_contained_in`) as ~5.5%;
+  tracing it found the per-node-class keyword loop (render_node, lib.rs ~4692):** for EVERY user class on
+  EVERY node it did `class.to_ascii_lowercase()` (an alloc) then **~15 `normalized.contains("highlight" |
+  "selected" | "active" | … | "double-border")`** (each a `TwoWaySearcher`) + 3 `normalized == "…"`, to set
+  is_highlighted/is_inactive/dashed/double/block-beta flags.
+- **Fix:** a `contains_ascii_ci(class, needle)` helper (case-insensitive BYTE substring, no alloc, no
+  `TwoWaySearcher`) replacing `normalized.contains(..)`, and `class.eq_ignore_ascii_case("…")` for the exact
+  matches. Drops the per-class `to_ascii_lowercase` allocation AND all ~15 searcher constructions. Byte-
+  identical: for ASCII keywords, `class.to_ascii_lowercase().contains(needle)` == case-insensitive substring
+  of `class`; `to_ascii_lowercase()==x` == `eq_ignore_ascii_case(x)` for lowercase `x`.
+- **MEASURED (clean same-machine A/B, profharness `styled 300 render` — flowchart w/ `class N0,… mynodeclass`
+  so every node carries a class, user-time over 8k iters, alternated 7×):** OLD 3.79–4.62s → NEW 3.42–3.72
+  = **−10%, non-overlapping every round.**
+- **Byte-identical & GREEN (no re-bless):** fm-render-svg 234 lib + golden_svg (2, incl. flowchart_classdef)
+  + golden_layout (2) + conformance (1); clippy clean. Applies to any styled diagram (`class`/`:::className`/
+  classDef) — very common in real flowcharts.
+- **META:** the `<br>`/detection TwoWaySearcher-storm pattern strikes in RENDER too — a per-item loop doing N
+  `to_ascii_lowercase().contains(keyword)` checks → one case-insensitive byte scan, no lowercase alloc.
+
+  Agent: BlackThrush
+
 <!-- gantt-fastpath-landed -->
 ### LANDED: skip the constant date-format re-split on the gantt fast path — gantt parse −8% (2026-07-02)
 - **Profiling gantt parse showed `normalize_gantt_date_with_format` at 15% self-time** (called once per
