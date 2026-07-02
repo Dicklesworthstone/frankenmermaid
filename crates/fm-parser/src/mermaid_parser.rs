@@ -2979,7 +2979,7 @@ fn parse_requirement(input: &str, builder: &mut IrBuilder) {
 
     for (index, line) in input.lines().enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
@@ -3045,7 +3045,7 @@ fn parse_requirement(input: &str, builder: &mut IrBuilder) {
                 let meta = node
                     .requirement_meta
                     .get_or_insert_with(|| Box::new(fm_core::IrRequirementNodeMeta::default()));
-                meta.req_id = Some(rest.trim().to_string());
+                meta.req_id = Some(trim_fast(rest).to_string());
                 continue;
             }
             if let Some(rest) = trimmed.strip_prefix("text:")
@@ -3055,7 +3055,7 @@ fn parse_requirement(input: &str, builder: &mut IrBuilder) {
                 let meta = node
                     .requirement_meta
                     .get_or_insert_with(|| Box::new(fm_core::IrRequirementNodeMeta::default()));
-                meta.text = Some(rest.trim().to_string());
+                meta.text = Some(trim_fast(rest).to_string());
                 continue;
             }
             if let Some(rest) = trimmed.strip_prefix("risk:")
@@ -3065,7 +3065,7 @@ fn parse_requirement(input: &str, builder: &mut IrBuilder) {
                 let meta = node
                     .requirement_meta
                     .get_or_insert_with(|| Box::new(fm_core::IrRequirementNodeMeta::default()));
-                meta.risk = Some(rest.trim().to_string());
+                meta.risk = Some(trim_fast(rest).to_string());
                 continue;
             }
             if let Some(rest) = trimmed.strip_prefix("verifymethod:")
@@ -3075,7 +3075,7 @@ fn parse_requirement(input: &str, builder: &mut IrBuilder) {
                 let meta = node
                     .requirement_meta
                     .get_or_insert_with(|| Box::new(fm_core::IrRequirementNodeMeta::default()));
-                meta.verify_method = Some(rest.trim().to_string());
+                meta.verify_method = Some(trim_fast(rest).to_string());
                 continue;
             }
         }

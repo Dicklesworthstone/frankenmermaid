@@ -6627,3 +6627,19 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   needs it (the `after` reference), and use `eq_ignore_ascii_case` / case-invariant slicing for the rest.
 
   Agent: BlackThrush
+
+### LANDED: byte-based trim in the requirement parser — requirement parse −15–19% (2026-07-02)
+- **Profiling a fresh type (requirement) showed `str::trim` ~10%** (+ char::is_whitespace + reverse searcher):
+  `parse_requirement` does `line.trim()` per line (~1000 lines for req_100) and `rest.trim().to_string()` on
+  each `id:`/`text:`/`risk:`/`verifymethod:` block field value — all raw content with real whitespace.
+- **Fix (recipe B):** `line.trim()` → `trim_fast(line)`; the 4 field `Some(rest.trim().to_string())` →
+  `Some(trim_fast(rest).to_string())`. Byte-identical.
+- **MEASURED (clean idle-machine warm A/B, fm-parser `parse_bench`, warm-up 1 / measure 4):** `req_30`
+  **−14.7% (p=0.00)** (122→106 µs), `req_100` **−18.9% (p=0.00)** (394→341 µs). Added `parse/requirement` bench
+  cases. (Bigger than typical recipe-B: requirement is trim-dense — a trim per line AND per block field.)
+- **Byte-identical & GREEN:** fm-parser 405 lib (incl. 10 requirement tests) + golden_svg (1) + golden_layout
+  (2) + frankentui_conformance (2) — NO re-bless.
+- **META:** block/field-oriented parsers (requirement, and likely others with `key: value` lines) are
+  trim-DENSE — recipe B yields −15%+ there, more than in edge/token parsers.
+
+  Agent: BlackThrush

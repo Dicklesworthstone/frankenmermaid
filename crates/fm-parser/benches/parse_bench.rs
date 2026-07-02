@@ -180,6 +180,19 @@ fn gen_c4(elements: usize) -> String {
     s
 }
 
+/// A requirement diagram: `n` requirement/element blocks + relationships.
+fn gen_requirement(n: usize) -> String {
+    let mut s = String::from("requirementDiagram\n");
+    for i in 0..n {
+        s.push_str(&format!("  requirement req_{i} {{\n    id: {i}\n    text: requirement text number {i}\n    risk: high\n    verifymethod: test\n  }}\n"));
+        s.push_str(&format!("  element elem_{i} {{\n    type: simulation\n    docref: doc{i}\n  }}\n"));
+    }
+    for i in 0..n.saturating_sub(1) {
+        s.push_str(&format!("  elem_{i} - satisfies -> req_{}\n", i + 1));
+    }
+    s
+}
+
 fn bench_parse(c: &mut Criterion) {
     let mut group = c.benchmark_group("parse");
 
@@ -245,6 +258,13 @@ fn bench_parse(c: &mut Criterion) {
     for (label, elements) in [("c4_50", 50_usize), ("c4_100", 100_usize)] {
         let input = gen_c4(elements);
         group.bench_with_input(BenchmarkId::new("c4", label), &input, |b, input| {
+            b.iter(|| fm_parser::parse(input));
+        });
+    }
+
+    for (label, n) in [("req_30", 30_usize), ("req_100", 100_usize)] {
+        let input = gen_requirement(n);
+        group.bench_with_input(BenchmarkId::new("requirement", label), &input, |b, input| {
             b.iter(|| fm_parser::parse(input));
         });
     }
