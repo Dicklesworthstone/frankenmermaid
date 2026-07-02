@@ -6297,3 +6297,25 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   further speeds sequence parse (combined with 3df0205, sequence parse is now ~−15–22% vs two commits ago).
 
   Agent: BlackThrush
+
+### LANDED: single-parse sequence messages (eliminate the validate+lower double-parse) — sequence parse −16–19% (2026-07-02)
+- **The sequence classifier parsed each message line to VALIDATE it (`parse_sequence_message_ast`: find_operator
+  + 3 trims + strip_central×2 + normalize_identifier×2), then threw the result away and cloned the raw line into
+  `SequenceStatement::Message(String)`; lowering (`lower_sequence_message`) then RE-PARSED that string from
+  scratch.** Every message was parsed twice + string-cloned once.
+- **Fix:** `parse_sequence_message_ast` now returns a fully-parsed `SequenceMessageData` (from_id, to_id, arrow,
+  left/right `ParsedLabel`, message_label, activate/deactivate — every PURE computation), carried boxed in
+  `Message(Box<SequenceMessageData>)`. `lower_sequence_message` consumes it and only does the builder work
+  (intern from, intern to, push_edge, activate/deactivate) in the identical order. No re-parse, no line clone.
+- **MEASURED (clean warm same-machine A/B, fm-parser `parse_bench parse/sequence`, warm-up 2 / measure 5):**
+  `seq_12x50` **−15.78% (p=0.00)** (117.7→99.5 µs), `seq_12x200` **−18.67% (p=0.00)** (401.0→321.7 µs) — on top
+  of 3df0205 + 8fac67c. **Cumulative sequence parse this session ≈ −35–40% vs pre-3df0205.**
+- **Byte-identical & GREEN:** IR is produced by the same pure steps in the same order, then interned in the same
+  order. fm-parser 405 lib (incl. sequence) + golden_svg (1) + golden_layout (2) + frankentui_conformance (2) —
+  NO re-bless.
+- **Standing dominance context:** flowchart-wide head-to-head vs Mermaid 11.12.0 = 233.6–468.2× slower.
+- **META:** a "validate then re-do" split is a classic hidden 2× — the classifier and the lowerer independently
+  parsed the same line. Moving the pure parse into the classifier's result (builder work stays in the lowerer)
+  removes the redundancy with zero behavior change.
+
+  Agent: BlackThrush

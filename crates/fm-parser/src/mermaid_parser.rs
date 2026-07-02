@@ -126,7 +126,10 @@ struct SequenceParticipantDeclaration {
 enum SequenceStatement {
     Participant(String),
     Actor(String),
-    Message(String),
+    /// A fully-parsed message. The classifier parses the message ONCE (arrow, endpoints, labels,
+    /// activation) into [`SequenceMessageData`]; lowering then only interns + pushes the edge, instead
+    /// of re-parsing the raw line a second time (and cloning it). Boxed to keep the enum small.
+    Message(Box<SequenceMessageData>),
     Autonumber {
         start: Option<u32>,
         increment: Option<u32>,
@@ -1676,7 +1679,7 @@ fn parse_sequence_statement(line: &str) -> Option<SequenceStatement> {
         }
     }
 
-    parse_sequence_message_ast(line).map(SequenceStatement::Message)
+    parse_sequence_message_ast(line).map(|data| SequenceStatement::Message(Box::new(data)))
 }
 
 fn parse_sequence_autonumber(line: &str) -> Option<SequenceStatement> {
@@ -2139,8 +2142,8 @@ fn lower_sequence_statement(
                 ));
             }
         }
-        SequenceStatement::Message(statement) => {
-            let _ = lower_sequence_message(&statement, line_number, source_line, builder);
+        SequenceStatement::Message(data) => {
+            let _ = lower_sequence_message(&data, line_number, source_line, builder);
         }
         SequenceStatement::Autonumber { start, increment } => {
             builder.enable_autonumber_with(start.unwrap_or(1), increment.unwrap_or(1));
@@ -6616,41 +6619,26 @@ fn sequence_participant_visuals(
     }
 }
 
-fn parse_sequence_message_ast(statement: &str) -> Option<String> {
-    let (operator_idx, operator, _) = find_operator(statement, &SEQUENCE_OPERATORS)?;
-    let left = trim_fast(&statement[..operator_idx]);
-    let right = trim_fast(&statement[operator_idx + operator.len()..]);
-    if left.is_empty() || right.is_empty() {
-        return None;
-    }
-
-    let target_raw = trim_fast(right.split_once(':').map_or(right, |(target, _)| target));
-    let left = strip_sequence_central_suffix(left);
-    let target_raw = strip_sequence_central_prefix(target_raw);
-    let from_id = normalize_identifier(left);
-    let to_id = normalize_identifier(target_raw);
-    if from_id.is_empty() || to_id.is_empty() {
-        return None;
-    }
-
-    Some(statement.to_string())
+/// Fully-parsed sequence message — every pure computation the old two-pass path did TWICE (once to
+/// validate in the classifier, once to lower). Lowering consumes this and only touches the builder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SequenceMessageData {
+    from_id: String,
+    to_id: String,
+    arrow: ArrowType,
+    left_label: Option<ParsedLabel>,
+    right_label: Option<ParsedLabel>,
+    message_label: Option<String>,
+    activate: bool,
+    deactivate: bool,
 }
 
-fn lower_sequence_message(
-    statement: &str,
-    line_number: usize,
-    source_line: &str,
-    builder: &mut IrBuilder,
-) -> bool {
-    let Some((operator_idx, operator, arrow)) = find_operator(statement, &SEQUENCE_OPERATORS)
-    else {
-        return false;
-    };
-
+fn parse_sequence_message_ast(statement: &str) -> Option<SequenceMessageData> {
+    let (operator_idx, operator, arrow) = find_operator(statement, &SEQUENCE_OPERATORS)?;
     let left = trim_fast(&statement[..operator_idx]);
     let right = trim_fast(&statement[operator_idx + operator.len()..]);
     if left.is_empty() || right.is_empty() {
-        return false;
+        return None;
     }
 
     let (target_raw, message_label) = if let Some((target, label)) = right.split_once(':') {
@@ -6665,38 +6653,63 @@ fn lower_sequence_message(
     let left = strip_sequence_central_suffix(left);
     let target_raw = strip_sequence_central_prefix(target_raw);
 
-    // Check for +/- activation modifiers on target
-    let (target_clean, activate_target, deactivate_target) =
-        if let Some(stripped) = target_raw.strip_prefix('+') {
-            (stripped, true, false)
-        } else if let Some(stripped) = target_raw.strip_prefix('-') {
-            (stripped, false, true)
-        } else {
-            (target_raw, false, false)
-        };
+    // +/- activation modifiers on the target.
+    let (target_clean, activate, deactivate) = if let Some(stripped) = target_raw.strip_prefix('+') {
+        (stripped, true, false)
+    } else if let Some(stripped) = target_raw.strip_prefix('-') {
+        (stripped, false, true)
+    } else {
+        (target_raw, false, false)
+    };
 
     let from_id = normalize_identifier(left);
     let to_id = normalize_identifier(target_clean);
     if from_id.is_empty() || to_id.is_empty() {
-        return false;
+        return None;
     }
 
+    let left_label = parse_label(Some(left)).filter(|label| label.text != from_id);
+    let right_label = parse_label(Some(target_clean)).filter(|label| label.text != to_id);
+
+    Some(SequenceMessageData {
+        from_id,
+        to_id,
+        arrow,
+        left_label,
+        right_label,
+        message_label,
+        activate,
+        deactivate,
+    })
+}
+
+fn lower_sequence_message(
+    data: &SequenceMessageData,
+    line_number: usize,
+    source_line: &str,
+    builder: &mut IrBuilder,
+) -> bool {
+    // All parsing already happened in `parse_sequence_message_ast`; only the builder-touching steps
+    // (interning + edge push, in the SAME order as before) run here — no re-parse, no re-normalize.
     let span = span_for(line_number, source_line);
 
-    let left_label = parse_label(Some(left)).filter(|label| label.text != from_id);
-    let from = builder.intern_node_label(&from_id, left_label.as_ref(), NodeShape::Rect, span);
-
-    let right_label = parse_label(Some(target_clean)).filter(|label| label.text != to_id);
-    let to = builder.intern_node_label(&to_id, right_label.as_ref(), NodeShape::Rect, span);
+    let from = builder.intern_node_label(&data.from_id, data.left_label.as_ref(), NodeShape::Rect, span);
+    let to = builder.intern_node_label(&data.to_id, data.right_label.as_ref(), NodeShape::Rect, span);
 
     match (from, to) {
         (Some(from_node), Some(to_node)) => {
-            builder.push_edge(from_node, to_node, arrow, message_label.as_deref(), span);
-            if activate_target {
-                builder.activate_participant(&to_id);
+            builder.push_edge(
+                from_node,
+                to_node,
+                data.arrow,
+                data.message_label.as_deref(),
+                span,
+            );
+            if data.activate {
+                builder.activate_participant(&data.to_id);
             }
-            if deactivate_target {
-                builder.deactivate_participant(&to_id);
+            if data.deactivate {
+                builder.deactivate_participant(&data.to_id);
             }
             true
         }
