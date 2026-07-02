@@ -53,6 +53,14 @@ enum NodeIdBucket {
 }
 
 impl NodeIdIndex {
+    /// Pre-size the bucket map so a large diagram's node interning doesn't rehash ~log2(N) times
+    /// (measured as `RawTable::reserve_rehash` on the hot parse path). Capacity-only, behavior-identical.
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            buckets: FxHashMap::with_capacity_and_hasher(capacity, rustc_hash::FxBuildHasher),
+        }
+    }
+
     fn hash_key(id: &str) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = rustc_hash::FxHasher::default();
@@ -103,6 +111,13 @@ enum LabelBucket {
 }
 
 impl LabelIndex {
+    /// Pre-size the bucket map — see [`NodeIdIndex::with_capacity`]. Capacity-only, behavior-identical.
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            buckets: FxHashMap::with_capacity_and_hasher(capacity, rustc_hash::FxBuildHasher),
+        }
+    }
+
     fn hash_key(text: &str, segments: &[IrLabelSegment]) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = rustc_hash::FxHasher::default();
@@ -221,10 +236,10 @@ impl IrBuilder {
         ir.reserve_capacity(estimated_nodes, estimated_edges, estimated_labels);
         Self {
             ir,
-            node_id_index: NodeIdIndex::default(),
+            node_id_index: NodeIdIndex::with_capacity(estimated_nodes),
             cluster_index_by_key: FxHashMap::default(),
             subgraph_index_by_key: FxHashMap::default(),
-            label_index: LabelIndex::default(),
+            label_index: LabelIndex::with_capacity(estimated_labels),
             warnings: Vec::new(),
             auto_created_nodes: Vec::new(),
             activation_stacks: BTreeMap::new(),

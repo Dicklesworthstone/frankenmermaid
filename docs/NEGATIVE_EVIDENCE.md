@@ -6445,3 +6445,23 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   Same family as the node-token delimiter gate (3db62d8).
 
   Agent: BlackThrush
+
+### LANDED: pre-size the node-id + label dedup HashMaps — parse −4–8% (larger diagrams) (2026-07-02)
+- **Post the flowchart fast-node fix, the flowchart/large profile showed `RawTable::reserve_rehash` at ~3.4%:**
+  `IrBuilder::with_capacity_hint` reserved the IR `Vec`s but left `node_id_index` and `label_index`
+  (`FxHashMap<u64, …>` dedup indexes) at `::default()` (empty) — so interning ~N nodes/labels rehashed the
+  bucket table ~log2(N) times on every parse.
+- **Fix:** `NodeIdIndex::with_capacity` / `LabelIndex::with_capacity` (`FxHashMap::with_capacity_and_hasher`),
+  called from `with_capacity_hint` with the existing `estimated_nodes`/`estimated_labels`. Capacity-only,
+  behavior-identical (distinct from the reverted public *edge-Vec* presize — this is the dedup HASHMAPs, whose
+  rehash cost was directly profiled).
+- **MEASURED (clean idle-machine warm A/B, fm-parser `parse_bench`, warm-up 1 / measure 4):** `er_100`
+  **−7.9% (p=0.00)** (313→290 µs), `flowchart/large_1000` **−6.1% (p=0.00)** (849→825 µs), `state_100`
+  **−4.4% (p=0.00)** (178→167 µs), `class_100` **−3.8% (p=0.00)** (583→574 µs). `flowchart/medium_100` neutral
+  (p=0.24 — only ~100 entries, few rehashes). No regression. Helps ALL diagram types on larger inputs.
+- **Byte-identical & GREEN:** fm-parser 405 lib + golden_svg (1) + golden_layout (2) + frankentui_conformance
+  (2) — NO re-bless.
+- **META:** a HASHMAP presize is a different lever from a Vec presize — profile `reserve_rehash` specifically.
+  The builder reserved its Vecs but not its two dedup maps.
+
+  Agent: BlackThrush
