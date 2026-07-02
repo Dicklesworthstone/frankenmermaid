@@ -6882,3 +6882,30 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   carry cross-cutting helpers (normalize_identifier, trim, find_operator) worth optimizing once.
 
   Agent: BlackThrush
+
+### CgaRect::segment_crosses (boolean early-return) for obstacle nudge — REJECTED (~0) (2026-07-02)
+- **Phase-split profiling of the OTHER types found class/er are RENDER+LAYOUT heavy (class: parse 361µs /
+  layout 279µs / render 856µs; er: parse 130 / layout 75 / render 664µs), and `fm_layout::find_obstacle_nudge_x`
+  is 56.7% of CLASS LAYOUT self-time** — the single biggest hotspot found all campaign. It routes an edge's
+  vertical mid-segment around obstacles: `query_segment` (spatial index) → per-candidate AABB reject → CGA
+  `CgaRect::intersect_segment(&seg)` (builds 4 edges, 4 CGA line-meets, dedups into a `Vec`) just to test
+  `.is_empty()`.
+- **Lever:** add `CgaRect::segment_crosses(&seg) -> bool` that short-circuits on the first crossing edge (no
+  `Vec`, no dedup, lazy edges), replacing `!intersect_segment(&seg).is_empty()` at the 3 boolean call sites
+  (kept `intersect_segment` at the one site that consumes the points). Byte-identical (same "any edge crosses").
+- **Byte-identity:** CONFIRMED — fm-layout 428 lib (incl. vertical/horizontal nudge tests) pass.
+- **MEASURED (clean same-machine A/B, profharness `<type> 300 layout`, user-time over 8k iters, alternated 6×):**
+  class **WASH** (OLD 2.33–2.47s / NEW 2.37–2.44, overlapping, NEW min slightly higher), er **WASH** (both 0.63s).
+- **Verdict:** ~0. Reverted.
+- **Do-not-retry / finding:** the CGA `intersect_segment` (meets/Vec/dedup) is NOT the bottleneck inside
+  `find_obstacle_nudge_x` — so NO CGA-level change helps, including the tempting (and byte-identity-RISKY at
+  grazing corners) "vertical segment ⇒ AABB-pass == intersect, skip the CGA" fast path (it would wash too).
+  The 56.7% is the **candidate/AABB loop**: the mid-segment spans the FULL vertical extent
+  `min(src.y,tgt.y)..max(..)`, so for far-apart boxes `query_segment` returns many candidates and each is
+  AABB-checked. That is the `ObstacleSpatialIndex` query cost (already at its byte-identical ceiling — see the
+  query_segment single-cell entry). Class/er RENDER (the other big phase) is the generic mature path
+  (write_escaped_attr/text, write_uint/fixed = the format-leaf loop) — at ceiling/forbidden. To move class
+  layout you'd need to shorten the probed mid-segment or cut candidates without changing routed geometry
+  (byte-identity-hard), or an algorithmic index change — not a leaf micro-opt.
+
+  Agent: BlackThrush
