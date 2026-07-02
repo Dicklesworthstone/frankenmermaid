@@ -47,8 +47,34 @@ fn gen_wide(layers: usize, width: usize) -> String {
     lines.join("\n")
 }
 
+/// A sequence diagram: `participants` actors and `messages` arrow lines — the message lines
+/// exercise the general arrow-operator scanner (`find_operator_from_index`), unlike the flowchart
+/// fast-edge byte path.
+fn gen_sequence(participants: usize, messages: usize) -> String {
+    let mut s = String::from("sequenceDiagram\n");
+    for i in 0..participants {
+        s.push_str(&format!("  participant P{i} as Participant {i}\n"));
+    }
+    for m in 0..messages {
+        let a = m % participants;
+        let b = (m + 1) % participants;
+        s.push_str(&format!("  P{a}->>P{b}: Message number {m}\n"));
+    }
+    s
+}
+
 fn bench_parse(c: &mut Criterion) {
     let mut group = c.benchmark_group("parse");
+
+    for (label, participants, messages) in [
+        ("seq_12x50", 12_usize, 50_usize),
+        ("seq_12x200", 12, 200),
+    ] {
+        let input = gen_sequence(participants, messages);
+        group.bench_with_input(BenchmarkId::new("sequence", label), &input, |b, input| {
+            b.iter(|| fm_parser::parse(input));
+        });
+    }
 
     for (label, input) in [
         ("small_10", gen_flowchart(10)),

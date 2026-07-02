@@ -6248,3 +6248,30 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   `query_segment`/routing cost is effectively inherent for this corpus.
 
   Agent: BlackThrush
+
+### LANDED: first-byte gate for the general arrow-operator scanner — sequence parse −10–13% (2026-07-02)
+- **First symbolized profile of a NON-flowchart pipeline (sequence, 12 participants × 200 messages) — parsing
+  dominates it, and ~17%+ of that is substring matching in the arrow-operator scan.** `find_operator_from_index`
+  walks every char position of a message line and, at each unquoted/unbracketed position, tries
+  `tail.starts_with(op)` for EVERY operator in the arrow table — O(chars × operators). The flowchart fast-edge
+  path was byte-scanned long ago (9a2fb91); the general scanner (used by sequence messages, and slow-path
+  flowchart/class/state/er) was not.
+- **Fix:** build a `[bool; 128]` first-byte table from the operator list once, then skip any position whose byte
+  can't begin ANY operator (arrows all start with `-`/`<`/etc.; non-ASCII chars can't match an ASCII-prefixed
+  operator). The `starts_with` sweep now runs only at genuine operator-start positions. Byte-identical — the
+  gate only skips positions the loop would have rejected.
+- **MEASURED (warm same-machine A/B, fm-parser `parse_bench`, new `parse/sequence` cases):** `seq_12x50`
+  **−10.70% (p=0.00)**, `seq_12x200` **−12.64% (p=0.00)**. Confirmed building+running on the rch
+  `frankenmermaid-cc` target (candidate `seq_12x50` ≈ 112 µs). Also added the two sequence bench cases so this
+  path is measurable going forward (parse_bench previously had flowchart-only coverage).
+- **Byte-identical & GREEN:** fm-parser 405 lib tests (incl. sequence), golden_svg (1), golden_layout (2),
+  frankentui_conformance (2) — NO re-bless.
+- **Standing dominance context:** the ledger's head-to-head baselines are flowchart-wide (Mermaid 11.12.0,
+  233.6–468.2× slower); this is a frankenmermaid-side sequence-parse speedup on top of that. Also helps
+  slow-path flowchart / class / state / ER, which share `find_operator_from_index`.
+- **META:** the wide-flowchart pipeline was closed across all 3 phases, but a NON-flowchart diagram type had an
+  un-harvested hotspot — profiling outside the benchmarked hot path found a clean double-digit win. Sequence
+  parse still shows heavy `str::contains`/`TwoWaySearcher` in `parse_sequence_statement` (statement-type
+  classification) — a candidate for the next dig.
+
+  Agent: BlackThrush

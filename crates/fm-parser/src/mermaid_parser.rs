@@ -7060,6 +7060,20 @@ fn find_operator_from_index<'a>(
     let mut paren_depth = 0_usize;
     let mut brace_depth = 0_usize;
 
+    // First-byte gate for the per-position operator scan below. Every operator starts with one
+    // specific ASCII byte (`-`, `<`, etc.), so at a position whose byte can't start ANY operator the
+    // `starts_with` loop is guaranteed to miss — skipping it turns the O(chars × operators)
+    // `starts_with` sweep (the dominant cost of sequence-message parsing) into O(operator-start
+    // positions × operators). Byte-identical: the gate only skips positions the loop would reject.
+    let mut op_first_byte = [false; 128];
+    for (operator, _) in operators {
+        if let Some(&b) = operator.as_bytes().first()
+            && b < 128
+        {
+            op_first_byte[b as usize] = true;
+        }
+    }
+
     for (idx, ch) in statement.char_indices() {
         if idx < start_index {
             continue;
@@ -7113,6 +7127,13 @@ fn find_operator_from_index<'a>(
         }
 
         if square_depth != 0 || paren_depth != 0 || brace_depth != 0 {
+            continue;
+        }
+
+        // Skip positions whose byte can't begin any operator (see `op_first_byte`). Non-ASCII
+        // chars (code point ≥ 128) can never match an ASCII-prefixed operator either.
+        let cp = ch as u32;
+        if cp >= 128 || !op_first_byte[cp as usize] {
             continue;
         }
 
