@@ -2457,3 +2457,43 @@ behavior_proof = "Full-SVG byte-identity dump across 9 diagram types: zero diff.
 [positive_measurement_node_label_bracket_byte_scan_2026_07_02.decision]
 status = "keep"
 rationale = "Parse improved 4.8%-8.0% across all six flowchart/wide sizes in the canonical rch release parse_bench with non-overlapping criterion CIs. Byte-identical (9-diagram SVG dump zero diff; 405/405 lib; golden_svg 2/2). Landed main+master as 547adca."
+
+[positive_measurement_byte_line_split_flowchart_2026_07_02]
+date = "2026-07-02"
+agent = "BlackThrush"
+lever_bead = "bd-1buv.1"
+graveyard_route = "Alien Graveyard: replace str::lines()'s single-char CharSearcher '\\n' scan (top parse self-time symbol, scanned twice/parse over the full input) with an auto-vectorizable byte scan."
+baseline_commit = "ae426af"
+candidate_commit = "4957e16"
+candidate_summary = "str::lines() splits on char '\\n' via CharSearcher. Replaced the capacity-hint content.lines().count() with a byte '\\n' filter (capacity-only, no semantic effect) and the parse_flowchart_document line split with a [u8]::position(==b'\\n') scan reproducing lines() exactly (split on '\\n', strip trailing '\\r', no trailing empty line). Byte-identical."
+render_baseline_command = "AGENT_NAME=BlackThrush RCH_WORKER=hz2 RUSTFLAGS='-C metadata=btlinesbase' CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-blackthrush-before rch exec -- cargo bench --profile release -p fm-parser --bench parse_bench -- 'parse/flowchart|parse/wide' --warm-up-time 1 --measurement-time 4"
+render_candidate_command = "AGENT_NAME=BlackThrush RCH_WORKER=hz2 RUSTFLAGS='-C metadata=btlinescand' CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-blackthrush rch exec -- cargo bench --profile release -p fm-parser --bench parse_bench -- 'parse/flowchart|parse/wide' --warm-up-time 1 --measurement-time 4"
+ab_method = "SAME worker (hz2) SEQUENTIAL — pinned RCH_WORKER to avoid the cross-worker parallel false-positive documented in NEGATIVE_EVIDENCE (2026-07-02). Corroborated by a deterministic same-machine perf-stat instruction count (-6.82%)."
+rust_build_profile = "release profile [optimized], opt-level=z (shipped)"
+mermaid_js_command = "Denominator reused from this ledger's established live-CDP Mermaid comparator; this parse-side lever only widens the existing pipeline dominance."
+behavior_proof = "Full-SVG byte-identity dump across 9 diagram types: zero diff. fm-parser 405/405 lib; golden_svg 2/2. Deterministic instructions -6.82% (opt=3)."
+
+[positive_measurement_byte_line_split_flowchart_2026_07_02.metrics]
+"parse_flowchart_small_10_baseline_us" = 10.970
+"parse_flowchart_small_10_candidate_us" = 9.1658
+"parse_flowchart_small_10_delta_pct" = -16.45
+"parse_flowchart_medium_100_baseline_us" = 83.761
+"parse_flowchart_medium_100_candidate_us" = 70.700
+"parse_flowchart_medium_100_delta_pct" = -15.59
+"parse_flowchart_large_1000_baseline_us" = 808.82
+"parse_flowchart_large_1000_candidate_us" = 661.98
+"parse_flowchart_large_1000_delta_pct" = -18.16
+"parse_wide_8x16_baseline_us" = 135.74
+"parse_wide_8x16_candidate_us" = 109.09
+"parse_wide_8x16_delta_pct" = -19.63
+"parse_wide_12x24_baseline_us" = 313.90
+"parse_wide_12x24_candidate_us" = 249.41
+"parse_wide_12x24_delta_pct" = -20.54
+"parse_wide_16x32_baseline_us" = 553.78
+"parse_wide_16x32_candidate_us" = 450.31
+"parse_wide_16x32_delta_pct" = -18.68
+"local_perfstat_instructions_delta_pct" = -6.82
+
+[positive_measurement_byte_line_split_flowchart_2026_07_02.decision]
+status = "keep"
+rationale = "Parse improved 15.6%-20.5% across all six flowchart/wide sizes on the SAME pinned worker (hz2) sequentially, non-overlapping CIs, corroborated by a deterministic -6.82% instruction count (real work removed, not worker variance). Byte-identical (corpus dump + 405/405 lib + golden 2/2). Largest single parse win of the campaign. Landed main+master as 4957e16."
