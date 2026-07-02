@@ -20085,12 +20085,13 @@ mod tests {
             label: Some(IrLabelId(0)),
             ..IrNode::default()
         });
-        ir.nodes.push(IrNode {
+        let icon_node = IrNode {
             id: "icon".to_string(),
             label: Some(IrLabelId(1)),
-            icon: Some("server".to_string()),
             ..IrNode::default()
-        });
+        };
+        ir.nodes.push(icon_node);
+        ir.nodes.last_mut().unwrap().interaction_mut().icon = Some("server".to_string());
         ir.labels.push(IrLabel {
             text: "Service".to_string(),
             span: Span::default(),

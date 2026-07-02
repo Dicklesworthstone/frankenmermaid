@@ -6226,3 +6226,25 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   alloc-bound path). No clean ≥3% parse lever remains.
 
   Agent: BlackThrush
+
+### REVERTED: drop `ObstacleSpatialIndex::query_segment` per-query sort (min-index in consumer) (2026-07-02)
+- **Lever:** `query_segment` sorts its candidate list (`sort_unstable`) every call so the router consumer's
+  "first intersecting obstacle" == smallest-index obstacle. Dropped the sort and moved smallest-index selection
+  into `cga_routing::find_{vertical,horizontal}_segment_nudge_by_indices` (scan candidates, keep the min-index
+  hit, with an `idx >= best_idx` skip that also elides the CGA test for candidates that can't lower the min).
+  Hypothesis: most routed segments clear ALL obstacles (query returns no hit), so the sort is pure waste there;
+  layout profile showed `query_segment` self ~9.6%.
+- **Byte-identical:** min-index selection reproduces sorted-first-hit exactly; goldens + layout goldens +
+  frankentui_conformance GREEN, 428 fm-layout lib tests (incl. cga_routing) pass — verified before revert.
+- **Measured (verify-target, warm same-machine A/B, `wide_stages/layout`):** MIXED/regressed — 8x16 +1.1%
+  (p=0.51), **12x24 +6.6% REGRESSED (p=0.00)**, 16x32 −3.6% (p=0.01). Fails the "≥3%, no regression elsewhere"
+  gate.
+- **Verdict:** reverted. The wide LAYERED corpus is intersection-HEAVY (edges route around packed ranks), so
+  the common case is NOT "no hit" — it's "some hit," where the sorted path early-outs at the first (lowest-index)
+  hit while the min-index scan must test candidates until the true minimum is found (candidate order is spatial,
+  not index order, so a low-index obstacle can be tested late). That extra CGA work outweighs the saved sort.
+- **Do-not-retry:** the sort is load-bearing precisely because it lets the consumer early-out at the first hit;
+  removing it only pays off on hit-sparse graphs, and regresses the dense layered head-to-head shapes. Layout's
+  `query_segment`/routing cost is effectively inherent for this corpus.
+
+  Agent: BlackThrush
