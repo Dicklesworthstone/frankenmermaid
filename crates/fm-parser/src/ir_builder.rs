@@ -966,10 +966,6 @@ impl IrBuilder {
             callback: None,
             tooltip: None,
             span_primary: span,
-            // `span_all` has no reader anywhere in the workspace (the defining span lives in
-            // `span_primary`), so leave it empty instead of allocating a one-element `Vec` per
-            // node and re-pushing on every node reference — pure dead-data construction cost.
-            span_all: Vec::new(),
             implicit: is_auto_created,
             members: Vec::new(),
             menu_links: Vec::new(),

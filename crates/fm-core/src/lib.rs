@@ -1241,7 +1241,6 @@ pub struct IrNode {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub menu_links: Vec<IrMenuLink>,
     pub span_primary: Span,
-    pub span_all: Vec<Span>,
     pub implicit: bool,
     /// Entity attributes/members (for ER diagrams)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

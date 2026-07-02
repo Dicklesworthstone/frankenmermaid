@@ -5957,3 +5957,24 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   and cannot be dropped without a deeper refactor of those consumers to iterate the raw `ir.edges`.
 
   Agent: cc
+
+### LANDED: remove the dead write-only `IrNode.span_all` field — IrNode 608 → 584 B (2026-07-01)
+- **The safe, contained first step of the IrNode struct-shrink** (the parse frontier). `span_all: Vec<Span>`
+  had ZERO readers anywhere in the workspace (verified: the only non-fm-core ref was its `Vec::new()`
+  construction; the defining span lives in `span_primary`) — a prior cycle had already stopped *allocating* it
+  but left the 24-byte `Vec` header inline in every `IrNode`. Removed the field + its lone construction site.
+- **Deterministic:** `size_of::<IrNode>()` **608 → 584 B** (−24 B/node = −12 KB of `ir.nodes` moved/dropped per
+  wide_16x32 parse; alloc COUNT unchanged since the field was already empty). Perf effect is marginal (smaller
+  `ptr::write::<IrNode>` memcpy + better cache), NOT a headline win — but it is a strictly-correct dead-code
+  removal, so it is landed rather than reverted (unlike a ~0 *optimization*).
+- **Byte-identical & serde-safe:** `golden_svg_test` + `golden_layout_test` + `frankentui_conformance` +
+  `config_roundtrip_test` (15 serde-roundtrip cases) + 405 fm-parser lib tests GREEN, NO re-bless; clean
+  workspace build (compiler confirmed no other construction site).
+- **Remaining struct-shrink is owner-gated:** the still-inline USED diagram-specific fields — `IrNode`'s
+  `class_meta`(96 B)/`c4_meta`(72 B)/`requirement_meta` and `IrEdge`'s 5 `Option<String>` (`guard` 60 refs,
+  `action` 18, cardinalities 26, `er_notation` 8) — would need `Option<Box<…>>` boxing across ~104 workspace
+  call sites (ER/state goldens exist, so it IS byte-identity-verifiable), plus a quiet-machine full-pipeline
+  criterion A/B (the tight-loop parse time is free-list-confounded). That's the owner decision the next real
+  parse gain depends on.
+
+  Agent: cc
