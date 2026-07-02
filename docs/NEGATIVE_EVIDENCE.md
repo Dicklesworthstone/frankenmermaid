@@ -6179,3 +6179,26 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   raising the bar batching would have to clear. Re-treading it is what this ledger exists to prevent.
 
   Agent: BlackThrush
+
+### LANDED: byte-based `trim_fast` for the flowchart document loop — parse wide −3–9% (2026-07-02)
+- **Symbolized `perf` of the parse phase (the unprofiled 2nd-biggest stage, 32% of wide_stages) named
+  `<str>::trim_matches::<char::is_whitespace>` at ~4.5% self.** The flowchart document loop trims every source
+  line (`line.trim()`) and every `;`-split statement (`statement.trim()`) with Unicode `str::trim`; the fast
+  edge/node parsers already use `trim_ascii`, so this was the last Unicode-trim hotspot.
+- **Fix:** `trim_fast(&str) -> &str` — scans ASCII whitespace by byte from both ends, and falls back to
+  `str::trim` only when a non-ASCII byte sits at a trimmed boundary (where a multi-byte Unicode-whitespace char
+  could remain). Byte-identical to `str::trim` in every case. Applied to the two document-loop trim sites.
+- **MEASURED (rch `frankenmermaid-cc`, per-crate `fm-parser` `parse_bench`, byte-identical A/B vs same-run
+  HEAD baseline):** parse `wide/8x16` **−9.46% (p=0.00)**, `wide/12x24` **−3.35% (p=0.00)**,
+  `flowchart/small_10` **−4.15% (p=0.00)**; medium/large −1.8–2.2% (p>0.05, smaller trim share). The
+  edge-heavy wide corpus (the head-to-head shapes) clears the ≥3% bar. NOTE: a `wide/16x32` reading of +46%
+  from a *separate* rch invocation is the documented cross-worker criterion-baseline artifact (contradicts the
+  same-change −3–9% on 8x16/12x24 — one change cannot slow one size while speeding the others), not a
+  regression.
+- **Byte-identical & GREEN:** standalone equivalence check of `trim_fast` vs `str::trim` over ASCII + Unicode-
+  whitespace edge cases (11 cases, 0 mismatches); fm-parser 405 lib tests (incl. proptests), golden_svg (1),
+  golden_layout (2), frankentui_conformance (2) — NO re-bless.
+- **Standing dominance context (not a new claim):** full_pipeline_wide vs pinned live-CDP Mermaid 11.12.0 =
+  0.004280 / 0.003248 / 0.002136 at 8x16 / 12x24 / 16x32 (Mermaid 233.6× / 307.9× / 468.2× slower).
+
+  Agent: BlackThrush
