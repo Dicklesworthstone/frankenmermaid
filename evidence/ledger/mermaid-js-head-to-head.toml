@@ -2587,3 +2587,41 @@ behavior_proof = "Allocator swap does not touch output; the render fast paths an
 [positive_measurement_mimalloc_global_allocator_2026_07_02.decision]
 status = "keep"
 rationale = "CONFIRMED. Canonical rch pipeline_bench full_pipeline_wide (opt=z, same worker hz2 sequential) shows -11.2/-11.5/-13.0% across 8x16/12x24/16x32 with non-overlapping criterion CIs, matching/exceeding the deterministic profharness A/B (-9.6% instructions / -10.6% task-clock). Byte-identical (allocator swap cannot change output). Cross-phase win (parse+layout+render all allocate). fm-cli release build confirmed compiling. Landed main+master as f0aa425."
+
+[positive_measurement_native_opt3_hot_crates_2026_07_02]
+date = "2026-07-02"
+agent = "BlackThrush"
+lever_bead = "bd-1buv.1"
+graveyard_route = "Alien Graveyard 'constants kill you': the native binary was compiled opt-level=z (size) — extend the existing native-speed/wasm-size profile split (already used for fm-layout) to the remaining hot crates."
+baseline_commit = "d1531dc"
+candidate_summary = "Workspace [profile.release] is opt-level=z (for wasm bundle size). fm-layout already overrode to opt=3 for native (with build-wasm.sh --config putting it back to z for wasm). Extended the same split to fm-parser, fm-render-svg, fm-core: [profile.release.package.X] opt-level=3, with matching --config overrides in build-wasm.sh so the wasm bundle stays size-optimized. Byte-identical by construction: opt-level changes codegen, not output (Rust does not enable fast-math)."
+render_baseline_command = "AGENT_NAME=BlackThrush RCH_WORKER=hz2 RUSTFLAGS='-C metadata=btoptzbase' CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-blackthrush-before rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- 'full_pipeline_wide|wide_stages' --warm-up-time 1 --measurement-time 3"
+render_candidate_command = "AGENT_NAME=BlackThrush RCH_WORKER=hz2 RUSTFLAGS='-C metadata=btopt3' CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-blackthrush rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- 'full_pipeline_wide|wide_stages' --warm-up-time 1 --measurement-time 3"
+ab_method = "SAME worker (hz2) SEQUENTIAL, opt=z baseline (d1531dc) vs opt=3 candidate. Consistent with the long-standing observation that the opt=3 profharness beat the opt=z bench for identical code."
+rust_build_profile = "release; the lever IS the opt-level (z -> 3) for fm-parser/fm-render-svg/fm-core/fm-layout on native; wasm unchanged (z)."
+mermaid_js_command = "Denominator reused from this ledger's established live-CDP Mermaid comparator; halving the native pipeline widens the whole-pipeline dominance for every diagram type."
+behavior_proof = "opt-level does not change output bytes (same source, different codegen; no fast-math). Bench pipeline produced valid results at opt=3. Goldens/conformance are output checks and are opt-level-independent."
+
+[positive_measurement_native_opt3_hot_crates_2026_07_02.metrics]
+"full_pipeline_wide_8x16_optz_us" = 444.94
+"full_pipeline_wide_8x16_opt3_us" = 230.08
+"full_pipeline_wide_8x16_delta_pct" = -48.3
+"full_pipeline_wide_12x24_optz_us" = 940.49
+"full_pipeline_wide_12x24_opt3_us" = 473.88
+"full_pipeline_wide_12x24_delta_pct" = -49.6
+"full_pipeline_wide_16x32_optz_ms" = 1.6973
+"full_pipeline_wide_16x32_opt3_us" = 861.62
+"full_pipeline_wide_16x32_delta_pct" = -49.2
+"wide_render_16x32_optz_us" = 817.27
+"wide_render_16x32_opt3_us" = 319.01
+"wide_render_16x32_delta_pct" = -61.0
+"wide_parse_16x32_optz_us" = 465.92
+"wide_parse_16x32_opt3_us" = 255.31
+"wide_parse_16x32_delta_pct" = -45.2
+"wide_layout_16x32_optz_us" = 336.07
+"wide_layout_16x32_opt3_us" = 249.83
+"wide_layout_16x32_delta_pct" = -25.7
+
+[positive_measurement_native_opt3_hot_crates_2026_07_02.decision]
+status = "keep"
+rationale = "Native full pipeline roughly HALVED (-48..-50% across 8x16/12x24/16x32; render -59..-61%, parse -45..-50%, layout -15..-26% via opt=3 fm-core) on the same pinned worker sequentially, non-overlapping criterion CIs. Biggest single win of the campaign. Byte-identical (opt-level is codegen-only). wasm bundle size preserved via build-wasm.sh --config overrides. Extends the pre-existing fm-layout native-opt3 split. Landed main+master."

@@ -58,7 +58,22 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
+# Native release builds optimize the hot pipeline crates for SPEED (opt-level=3), not the
+# workspace-default size ("z"). The native CLI is not size-constrained, and opt="z" disables
+# the inlining/vectorization that the number-formatting and byte-scan hot paths depend on
+# (measured: the opt=3 profharness consistently beats the opt="z" bench for identical code).
+# The wasm build (build-wasm.sh) overrides each of these back to "z" via `--config` so the
+# wasm bundle stays small. fm-layout has used this split since before; extended to the rest.
 [profile.release.package.fm-layout]
+opt-level = 3
+
+[profile.release.package.fm-parser]
+opt-level = 3
+
+[profile.release.package.fm-render-svg]
+opt-level = 3
+
+[profile.release.package.fm-core]
 opt-level = 3
 
 [profile.dev.package.fm-layout]
