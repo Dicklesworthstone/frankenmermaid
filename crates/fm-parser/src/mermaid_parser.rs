@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use chumsky::prelude::*;
@@ -1848,12 +1849,27 @@ fn decode_mermaid_entities(text: &str) -> String {
     decoded
 }
 
+/// Replace the three `<br>` spellings with `\n`, gated on a cheap `'<'` byte scan.
+///
+/// Each `str::replace(&str, _)` builds a `TwoWaySearcher` and allocates a fresh `String` even when
+/// the needle is absent — measured as ~17% of sequence-message parsing (searcher construction +
+/// `str::replace` + malloc), because a message label almost never contains `'<'`. `str::contains('<')`
+/// is a char pattern (memchr), not a `TwoWaySearcher`. With no `'<'` present, none of the `"<br...>"`
+/// needles can match, so returning the input borrowed is byte-identical to running the replace chain.
+fn replace_br_with_newlines(text: &str) -> Cow<'_, str> {
+    if text.contains('<') {
+        Cow::Owned(
+            text.replace("<br/>", "\n")
+                .replace("<br>", "\n")
+                .replace("<br />", "\n"),
+        )
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
 fn normalize_sequence_display_text(text: &str) -> String {
-    let with_line_breaks = text
-        .trim()
-        .replace("<br/>", "\n")
-        .replace("<br>", "\n")
-        .replace("<br />", "\n");
+    let with_line_breaks = replace_br_with_newlines(text.trim());
     decode_mermaid_entities(&with_line_breaks)
 }
 
@@ -7656,11 +7672,7 @@ fn parse_label(raw: Option<&str>) -> Option<ParsedLabel> {
         .strip_prefix('`')
         .and_then(|value| value.strip_suffix('`'))
     {
-        let normalized = markdown_body
-            .trim()
-            .replace("<br/>", "\n")
-            .replace("<br>", "\n")
-            .replace("<br />", "\n");
+        let normalized = replace_br_with_newlines(markdown_body.trim());
         let decoded = decode_mermaid_entities(&normalized);
         let segments = parse_markdown_label_segments(&decoded);
         let text = flatten_label_segments(&segments);

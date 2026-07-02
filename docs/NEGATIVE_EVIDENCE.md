@@ -6779,3 +6779,31 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   the map hashes internally, the create path hashes twice. Split into `_with_hash` variants and hash once.
 
   Agent: BlackThrush
+
+### LANDED: gate the `<br>`→newline replace chain on a `'<'` byte scan — SEQUENCE parse −14% (2026-07-02)
+- **Profiling a fresh diagram type (SEQUENCE, never profiled — parse is 54% of the sequence pipeline vs
+  ~29% for flowcharts) showed a searcher storm:** `TwoWaySearcher::new` 5.6% + `StrSearcher::new` 7.2% +
+  `str::replace::<&str>` 4.2% (+ the malloc/memmove they drive) ≈ 17% of sequence-message parse self-time.
+  Source: `normalize_sequence_display_text` (runs on EVERY message label) did
+  `.replace("<br/>","\n").replace("<br>","\n").replace("<br />","\n")` — each `str::replace` builds a
+  `TwoWaySearcher`, scans the whole label, and ALLOCATES a fresh `String` even when the needle is absent.
+  A message label almost never contains `'<'`, so this was ~1200 wasted searcher-setups + allocs per parse.
+- **Fix:** extract `replace_br_with_newlines(&str) -> Cow<str>` gated on `text.contains('<')` (a CHAR
+  pattern = memchr, NOT a `TwoWaySearcher`); with no `'<'` present, none of the `"<br…>"` needles can match,
+  so return the input borrowed. Applied at both `<br>`-replace sites (the hot sequence one + the markdown-
+  label one). Byte-identical: `'<'` absent ⇒ replaces are no-ops; `'<'` present ⇒ identical replace chain.
+- **Profile PROOF the hotspot is gone:** re-profiled the fixed binary — `TwoWaySearcher::new` 5.6% → **0.09%**,
+  `StrSearcher::new`/`str::replace` gone, replaced by a 0.71% `contains::<char>` memchr.
+- **MEASURED (clean same-machine A/B, profharness `seq 8×400 parse`, total user-time over 30k iters,
+  OLD/NEW alternated 4×):** OLD ~7.39s → NEW ~6.32s = **−14.5%, non-overlapping every round** (the
+  frequency-floored min-of-N couldn't resolve it; total user-time averages the per-iter freq noise out).
+  Sequence parse is ~54% of the sequence pipeline ⇒ ~−7% full-pipeline for sequence diagrams.
+- **Byte-identical & GREEN (no re-bless):** fm-parser 406 lib (incl. determinism/roundtrip props) +
+  golden_svg (2) + golden_layout (2) + frankentui_conformance (1).
+- **META (recipe):** `str::replace(&str, …)` / `.find(&str)` / `.contains(&str)` / `.split(&str)` with a
+  MULTI-CHAR string needle builds a `TwoWaySearcher` (maximal_suffix precompute) AND `replace` always
+  allocates — gate the whole chain on a cheap single-BYTE/char pre-scan (`contains('<')` = memchr) when the
+  needle is rare. Profile shows it as `TwoWaySearcher::new`/`StrSearcher::new` self-time. Also: profile the
+  NON-flowchart diagram types — they have dedicated parse/layout/render code the mature flowchart path lacks.
+
+  Agent: BlackThrush
