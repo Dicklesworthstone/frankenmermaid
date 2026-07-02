@@ -6717,3 +6717,39 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   approaches are ~0 (documented), and the itoa/unsafe-batched approach REGRESSES. Reverted (dep + code).
 
   Agent: BlackThrush
+
+### layout sort_by → sort_unstable_by (19 usize index-tiebreak sorts) — REJECTED (wash + regressions, noise-limited) (2026-07-02)
+- **Lever:** In `fm-layout::lib`, convert the 19 `sort_by` calls that sort a `usize` slice with an
+  index-tie-breaking comparator (`cmp_by_id`, `compare_node_indices`, `compare_priority`,
+  `compare_block_beta_grid_node_indices` — each ends in `.then_with(|| left.cmp(&right))`) to
+  `sort_unstable_by`. Left all tuple/f32/enum sorts untouched.
+- **Hypothesis:** each such comparator is a STRICT TOTAL ORDER over the slice (distinct positions
+  never compare Equal; duplicate usizes are identical), so stable and unstable yield the identical
+  unique permutation ⇒ byte-identical, while `sort_unstable_by` (pdqsort) drops the stable sort's
+  O(n) scratch-buffer allocation + merge memmoves (visible in the profile as `build_tree_layout_structure`
+  sorts at 2–4.5% of layout self-time). Fresh profile this turn: render 40% / layout 30% / parse 29%
+  (layout has grown as render micro-opts landed).
+- **Byte-identity:** CONFIRMED — all 428 `fm-layout --lib` tests pass unchanged (incl. tree-layout,
+  crossing-min, constraint-solver, incremental-equivalence, and deterministic-output tests).
+- **Baseline → After (rch per-crate, pinned worker hz2, `pipeline_bench` layout groups,
+  --measurement-time 4 --sample-size 120, criterion --save-baseline/--baseline):** MIXED, medians:
+  small_10 −2%, medium_100 −1.4%, large_500 **+4.5%** (p=0.00, REGRESSION), cyclic_10 −7.6%,
+  cyclic_50 −1.3%, cyclic_200 **+2.1%** (p=0.01), 8x16 **+3.5%**, 12x24 −0.4%, 16x32 −5.6%. Change-CIs
+  up to ±9% wide; per-run baseline drift across shapes was ±40% (16x32 baseline read 347/263/236 µs on
+  three separate runs), so the individual verdicts are not reliable.
+- **Verdict:** wash with real-looking regressions on realistic sizes (large_500 +4.5%, 8x16 +3.5%) —
+  fails the "≥3% improvement, NO regression elsewhere" gate. Reverted.
+- **Do-not-retry note:** the "unstable = strictly less work" premise is FALSE here. Rust's stable
+  `slice::sort_by` (driftsort) is ADAPTIVE — it detects pre-existing sorted runs and merges them in
+  ~O(n), so on the near-sorted node/rank orderings that layout produces it is competitive with, and on
+  large slices sometimes beats, pdqsort's non-adaptive path; the scratch alloc it "wastes" is cheaper
+  than pdqsort's extra comparisons on that data. So this is byte-identical but NOT a perf win, and the
+  direction is data-dependent per shape. METHODOLOGY BLOCKER (this session): a ~2% layout micro-lever is
+  BELOW the reliable measurement floor of the current fleet — the local `perf stat` PMU is non-functional
+  in this VM (`instructions:u`/`cycles:u` return pinned constants regardless of workload; only `perf
+  record` sampling works), local wall-time is frequency-scaling-corrupted under swarm load, and the shared
+  rch workers/target dir drift between the baseline and compare runs (temporal cross-run contamination,
+  the same class of false-positive as the node-path entry above). A layout micro-lever this small can
+  only be adjudicated on an isolated, quiesced bench host with a working instruction counter.
+
+  Agent: BlackThrush
