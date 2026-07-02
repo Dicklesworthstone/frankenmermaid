@@ -148,6 +148,22 @@ fn gen_journey(steps: usize) -> String {
     s
 }
 
+/// A gitgraph: `commands` commit/branch/checkout/merge commands — exercises the gitgraph command parser.
+fn gen_gitgraph(commands: usize) -> String {
+    let mut s = String::from("gitGraph\n");
+    for i in 0..commands {
+        match i % 6 {
+            0 => s.push_str(&format!("  commit id: \"c{i}\"\n")),
+            1 => s.push_str(&format!("  branch feature{i}\n")),
+            2 => s.push_str(&format!("  checkout feature{i}\n")),
+            3 => s.push_str(&format!("  commit id: \"c{i}\" tag: \"v{i}\"\n")),
+            4 => s.push_str("  checkout main\n"),
+            _ => s.push_str(&format!("  merge feature{}\n", i - 4)),
+        }
+    }
+    s
+}
+
 fn bench_parse(c: &mut Criterion) {
     let mut group = c.benchmark_group("parse");
 
@@ -199,6 +215,13 @@ fn bench_parse(c: &mut Criterion) {
     for (label, steps) in [("journey_50", 50_usize), ("journey_200", 200_usize)] {
         let input = gen_journey(steps);
         group.bench_with_input(BenchmarkId::new("journey", label), &input, |b, input| {
+            b.iter(|| fm_parser::parse(input));
+        });
+    }
+
+    for (label, cmds) in [("gitgraph_50", 50_usize), ("gitgraph_200", 200_usize)] {
+        let input = gen_gitgraph(cmds);
+        group.bench_with_input(BenchmarkId::new("gitgraph", label), &input, |b, input| {
             b.iter(|| fm_parser::parse(input));
         });
     }

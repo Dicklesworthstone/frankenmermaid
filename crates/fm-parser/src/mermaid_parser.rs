@@ -5900,9 +5900,8 @@ fn parse_gitgraph(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
-        // Skip header line (case-insensitive)
-        let lower = trimmed.to_ascii_lowercase();
-        if lower.starts_with("gitgraph") {
+        // Skip header line (case-insensitive) — byte prefix check, no per-line lowercased alloc.
+        if trimmed.len() >= 8 && trimmed.as_bytes()[..8].eq_ignore_ascii_case(b"gitgraph") {
             // Check for options like LR, TB after gitGraph
             if let Some(direction) = parse_gitgraph_direction(trimmed) {
                 builder.set_direction(direction);
@@ -5990,8 +5989,12 @@ fn lower_gitgraph_command(
 
 /// Strip a git command prefix, requiring a word boundary (space or end of string).
 fn strip_git_command<'a>(line: &'a str, command: &str) -> Option<&'a str> {
-    let lower = line.to_ascii_lowercase();
-    if !lower.starts_with(command) {
+    // Case-insensitive prefix match WITHOUT allocating a lowercased copy of `line`. This ran up to 6x
+    // per gitgraph command line (once per command keyword), dominating gitgraph parse at ~15% in
+    // `to_ascii_lowercase`. `command` is a lowercase ASCII literal, so a byte-wise
+    // `eq_ignore_ascii_case` on the prefix is identical to `line.to_ascii_lowercase().starts_with(command)`.
+    let cmd = command.as_bytes();
+    if line.len() < cmd.len() || !line.as_bytes()[..cmd.len()].eq_ignore_ascii_case(cmd) {
         return None;
     }
     let rest = &line[command.len()..];

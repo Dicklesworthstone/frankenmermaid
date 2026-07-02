@@ -6572,3 +6572,22 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   `:`-split parts here). Each unprofiled type's line/segment trims are a fresh surface.
 
   Agent: BlackThrush
+
+### LANDED: allocation-free case-insensitive command match in the gitgraph parser — gitgraph parse −11–15% (2026-07-02)
+- **Profiling a fresh type (gitgraph) showed ~15% in `to_ascii_lowercase`** (+ its `make_ascii_lowercase` +
+  `memcmp`): `strip_git_command` did `line.to_ascii_lowercase().starts_with(command)` — ALLOCATING a lowercased
+  `String` per call, called once per command keyword (up to 6×/line: commit/branch/checkout/switch/merge/
+  cherry-pick). Plus `parse_gitgraph` lowercased every line just to check the `gitGraph` header.
+- **Fix (NEW recipe D):** case-insensitive prefix match WITHOUT allocation. `command` is a lowercase ASCII
+  literal, so `line.as_bytes()[..cmd.len()].eq_ignore_ascii_case(cmd)` is identical to
+  `line.to_ascii_lowercase().starts_with(command)`. Header check likewise via `eq_ignore_ascii_case(b"gitgraph")`.
+- **MEASURED (clean idle-machine warm A/B, fm-parser `parse_bench`, warm-up 1 / measure 4):** `gitgraph_50`
+  **−14.9% (p=0.00)** (46→40 µs), `gitgraph_200` **−11.5% (p=0.00)** (185→167 µs). Added `parse/gitgraph` bench
+  cases.
+- **Byte-identical & GREEN:** fm-parser 405 lib (incl. 18 gitgraph tests) + golden_svg (1) + golden_layout (2) +
+  frankentui_conformance (2) — NO re-bless.
+- **META (recipe D):** `x.to_ascii_lowercase().starts_with/==/contains(lit)` for case-insensitive matching
+  ALLOCATES — replace with `eq_ignore_ascii_case` (prefix/whole) or a byte compare. Grep every parser for
+  `to_ascii_lowercase()` used only for comparison (many types lowercase keywords this way).
+
+  Agent: BlackThrush
