@@ -2497,3 +2497,57 @@ behavior_proof = "Full-SVG byte-identity dump across 9 diagram types: zero diff.
 [positive_measurement_byte_line_split_flowchart_2026_07_02.decision]
 status = "keep"
 rationale = "Parse improved 15.6%-20.5% across all six flowchart/wide sizes on the SAME pinned worker (hz2) sequentially, non-overlapping CIs, corroborated by a deterministic -6.82% instruction count (real work removed, not worker variance). Byte-identical (corpus dump + 405/405 lib + golden 2/2). Largest single parse win of the campaign. Landed main+master as 4957e16."
+
+[positive_measurement_byte_lines_all_parsers_2026_07_02]
+date = "2026-07-02"
+agent = "BlackThrush"
+lever_bead = "bd-1buv.1"
+graveyard_route = "Alien Graveyard: extend the flowchart CharSearcher-'\\n' removal (byte line scan) to EVERY diagram parser via a shared byte_lines() iterator."
+baseline_commit = "0e0a2e1"
+candidate_commit = "e273105"
+candidate_summary = "Added a reusable byte_lines() iterator (byte-identical to str::lines(), a [u8]::position(==b'\\n') scan) and converted all 21 input.lines().enumerate() sites across every non-flowchart parser; refactored the flowchart inline split to use it. Also fixed a latent lone-trailing-'\\r' bug (str::lines() does not strip a '\\r' not followed by '\\n') that the new byte_lines_matches_std_lines unit test caught."
+ab_method = "SAME worker (hz2) SEQUENTIAL (RCH_WORKER=hz2, before then after) — the reliable method per the cross-worker-parallel false-positive documented earlier this day. Cross-check: AFTER flowchart medians (8.93/67.4/664 us) reproduce a fully independent prior-turn measurement of the same flowchart code (9.17/70.7/662 us), confirming baseline stability. Mechanism's deterministic instruction count was established for flowchart in the byte-line-split entry (-6.82%); per-non-flowchart-type instruction counts were not separately captured."
+rust_build_profile = "release profile [optimized], opt-level=z (shipped)"
+mermaid_js_command = "Denominator reused from this ledger's established live-CDP Mermaid comparator; this parse-side lever widens the existing pipeline dominance across all diagram families."
+behavior_proof = "byte_lines pinned byte-identical to str::lines() over empty/\\n/\\r\\n/lone-\\r/blank/no-final-newline/unicode cases; full-SVG dump across 9 diagram types byte-identical; fm-parser 406/406 lib (incl. byte_lines test); golden_svg 2/2."
+
+[positive_measurement_byte_lines_all_parsers_2026_07_02.metrics]
+"parse_sequence_12x50_baseline_us" = 118.69
+"parse_sequence_12x50_candidate_us" = 83.515
+"parse_sequence_12x50_delta_pct" = -29.6
+"parse_sequence_12x200_baseline_us" = 428.15
+"parse_sequence_12x200_candidate_us" = 267.88
+"parse_sequence_12x200_delta_pct" = -37.4
+"parse_class_100_baseline_us" = 785.26
+"parse_class_100_candidate_us" = 499.11
+"parse_class_100_delta_pct" = -36.4
+"parse_state_100_baseline_us" = 223.60
+"parse_state_100_candidate_us" = 148.15
+"parse_state_100_delta_pct" = -33.7
+"parse_er_30_baseline_us" = 108.01
+"parse_er_30_candidate_us" = 75.786
+"parse_er_30_delta_pct" = -29.8
+"parse_gantt_200_baseline_us" = 584.54
+"parse_gantt_200_candidate_us" = 416.25
+"parse_gantt_200_delta_pct" = -28.8
+"parse_mindmap_200_baseline_us" = 244.17
+"parse_mindmap_200_candidate_us" = 158.84
+"parse_mindmap_200_delta_pct" = -34.9
+"parse_journey_200_baseline_us" = 569.21
+"parse_journey_200_candidate_us" = 393.29
+"parse_journey_200_delta_pct" = -30.9
+"parse_gitgraph_200_baseline_us" = 228.30
+"parse_gitgraph_200_candidate_us" = 128.25
+"parse_gitgraph_200_delta_pct" = -43.8
+"parse_c4_100_baseline_us" = 388.10
+"parse_c4_100_candidate_us" = 261.39
+"parse_c4_100_delta_pct" = -32.6
+"parse_requirement_100_baseline_us" = 465.08
+"parse_requirement_100_candidate_us" = 283.98
+"parse_requirement_100_delta_pct" = -38.9
+"noisy_baseline_note" = "er_100 and gantt_50 had wide BEFORE criterion CIs and showed even larger (-60%/-49%) deltas; excluded from the headline range as unreliable."
+"flowchart_unchanged_sanity" = "flowchart/wide medians stable vs prior turn (byte-identical refactor), confirming the measurement."
+
+[positive_measurement_byte_lines_all_parsers_2026_07_02.decision]
+status = "keep"
+rationale = "Parse improved a consistent 28-44% across ALL ten non-flowchart diagram families (sequence/class/state/er/gantt/mindmap/journey/gitgraph/c4/requirement) on the SAME pinned worker (hz2) sequentially — uniform magnitude and direction rules out the cross-worker variance that produced an earlier false positive. Simpler parsers than flowchart, so str::lines()'s CharSearcher was a larger fraction, giving a bigger win than the flowchart -15..-20%. Byte-identical (byte_lines == str::lines(), 406/406 lib, golden 2/2, 9-type dump). Also fixes a latent lone-'\\r' bug. Landed main+master as e273105."
