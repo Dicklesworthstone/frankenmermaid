@@ -7616,3 +7616,34 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   code. (fm_core already re-exports Fx* and uses them for NodeSet.)
 
   Agent: SlateHarrier
+
+<!-- surface-render-strmatch-frontier-diminishing -->
+### SURFACE: render string-matching frontier mined for clean unilateral wins — remaining is owner-gated (2026-07-03)
+- Fresh symbolized profile (flowchart-60 render) AFTER this segment's 3 wins (9bc7a29/044f531 streaming+memmem,
+  6498d4c FxHashSet): string-matching fell from ~47% to ~36% of render. Current top: `render_svg_with_layout`
+  self 15.3%, `next_match` 14%, `is_contained_in` (str::contains) 12.3%, `write_escaped_text` 6.3%,
+  `memmove`+`replace_range` ~9%. All the remaining str-matching lives in ONE function: `strip_unused_state_css`
+  (every marker pass is already memmem). For a plain flowchart it SCANS heavily but STRIPS NOTHING (no state
+  classes, all 8 accents used, all vars referenced in the theme CSS) — pure overhead.
+- **Why the remaining strip_unused_state_css levers are blocked (all measured/analyzed, not guessed):**
+  1. **STATE_CLASSES 5-scan `.any()` gate** (the hot ~4% for flowchart, 5 full-miss body scans): a single
+     multi-pattern scan needs Aho-Corasick. It IS in the lock (1.1.4) but NOT in fm-render-svg's tree, so
+     adding it ships a MEDIUM dep in the bundle for ~3-4% — poor ROI, and the crate is branded "zero-dependency".
+  2. **accent `used` (8 contains) / var (8 contains) → single `find_iter`:** diagram-dependent. When accents
+     are USED (common: flowchart-60 uses all 8), the 8 `contains` EARLY-EXIT (cheap) and would LOSE to one full
+     `find_iter` body scan. Only helps few-accent diagrams. Net regression risk on the common case.
+  3. **var-decl reduction:** CASCADE-unsafe — `--fm-accent-N` decl values reference other accents' `var()`
+     (theme.rs:561 `--fm-node-accent: color-mix(... var(--fm-accent-1) ...)`), so pre-collecting differs from
+     the interleaved strip.
+  4. Converting its remaining `str::find` (`</style>` etc.) to memmem: a PRIOR loop's full state_css memmem
+     conversion REGRESSED (b8357fc — `str::contains` is already `simd_contains`); the medium-needle finds are
+     borderline (5b5e709 — memmem loses to Two-Way on longer needles).
+- **The real remaining render lever is OWNER-GATED: generate-only-needed CSS** (don't emit the state/accent/
+  cluster/marker CSS then strip it — emit only what's used). That removes the entire strip-pass + `is_contained_in`
+  + `memmove` cost (~35%+ of small render), but it couples CSS emission to the renderer's feature use (a
+  robustness tradeoff — the strip passes are post-hoc drift-proof). Same class as the marker-gen owner-gated
+  note. Recommend the owner weigh this; it's the largest render lever left by far.
+- Dominance context unchanged: full-pipeline mermaid_js/frankenmermaid 63-124x (Chromium); this segment's 3
+  wins widened the small-diagram render lead ~25-30%.
+
+  Agent: SlateHarrier
