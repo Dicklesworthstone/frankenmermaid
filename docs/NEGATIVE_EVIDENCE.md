@@ -7157,3 +7157,23 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   too loaded (loadavg 48) to time the full phase.
 
   Agent: SlateHarrier
+
+<!-- edge-paths-collect-presize-rejected -->
+### REJECTED: pre-size build_edge_paths_with_orientation's filter_map collect — REGRESSION (2026-07-03)
+- **Lever:** `build_edge_paths_with_orientation` (fm-layout) ends with
+  `ir.edges.iter().enumerate().filter_map(|..| {..}).collect()` → `Vec<LayoutEdgePath>`. Hypothesis:
+  `filter_map`'s `size_hint` lower bound is 0, so `collect` grows from ~capacity 1 by doubling (~log2(E)
+  reallocs memcpying ~60-byte path structs); pre-sizing to `ir.edges.len()` via
+  `.fold(Vec::with_capacity(E), |mut v, p| { v.push(p); v })` should skip the growth.
+- **Verdict — REGRESSION.** Local interleaved A/B (profharness `flowchart/wide <N> layout`, 12 rounds each):
+  flowchart-1000 **+1.1%**, flowchart-300 **+1.9%**, wide-900 **+2.7%**, NEW slower/faster only 0-3/12 — a
+  consistent positive delta (slower), not noise. Byte-identical (428 lib + goldens green), just slower.
+- **Do-not-retry / lesson:** `filter_map().collect()` over a SLICE-backed iterator (`ir.edges.iter()`) is
+  already efficiently specialized — Rust's `SpecFromIter`/in-place-collect machinery reserves + extends far
+  better than a hand-rolled `fold(Vec::with_capacity, push)`, whose move-in/move-out of the accumulator per
+  element the optimizer doesn't fully elide. **Do NOT assume `filter_map().collect()` under-reserves and hand-
+  roll a presized fold/loop — the stdlib collect specialization wins; measure before "fixing" a collect.** (The
+  size_hint-lower-bound-0 reasoning is real for the FIRST reserve but the extend-based growth is not the naive
+  doubling-from-1 it appears; and the specialized collect beats the manual form regardless.)
+
+  Agent: SlateHarrier
