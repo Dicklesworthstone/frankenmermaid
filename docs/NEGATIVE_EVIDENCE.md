@@ -7223,3 +7223,29 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   does not apply). Don't assume from_utf8/from_utf8_unchecked is a hot validation — measure; std validates fast.
 
   Agent: SlateHarrier
+
+<!-- gantt-layout-bounds-on2-set-landed -->
+### LANDED: layout_bounds_for_nodes O(nodes×section) linear membership → hash set — gantt layout O(N²) fix, byte-identical (2026-07-03)
+- **First deep profile of a gantt diagram (400 tasks / 20 sections) flagged `<[usize]>::contains` at 2.73% of
+  the pipeline**, inside `layout_bounds_for_nodes` — called once PER SECTION from the gantt band builder
+  (`section_to_nodes.iter().filter_map(|(sec, idxs)| layout_bounds_for_nodes(&layout, idxs, 24.0))`). The
+  function iterated ALL `layout.nodes` (O(nodes)) and did a LINEAR `node_indexes.contains(&idx)` (O(section))
+  for each → O(nodes × section) per call × sections = **O(N²)** for the gantt fallback.
+- **Fix (fm-layout):** build an `FxHashSet<usize>` from `node_indexes` once per call for O(1) membership.
+  Byte-identical: min/max over the same node set is order- AND duplicate-independent (the set only changes how
+  membership is tested, not which nodes are included) — unlike a node_index→box map (Option B), which would
+  drop duplicate-index nodes the linear scan keeps, so the set is the safe choice. GREEN: 428 fm-layout lib +
+  golden_layout (2) + golden_svg (2, incl. gantt), clippy clean.
+- **MEASURED — isolated micro-bench (load-independent, models the full per-section band computation, output
+  asserted identical):** the linear scan → hash set is **1.8× faster at N=400/S=20 (ratio 0.56), 2.8× at
+  N=800/S=28 (0.36), 5.5× at N=2000/S=40 (0.18)** — the win GROWS with size (it removes the section-size
+  factor). Full-pipeline layout A/B couldn't resolve it (band build is ~2.7% of pipeline / ~10% of gantt
+  layout, below the ±5-8% throttling noise), so the isolated component bench is the correct arbiter (the
+  earlier gantt-400 "+8.6%" pipeline reading was pure noise). Matters MORE for large real gantt charts than
+  this moderate benchmark (quadratic).
+- **META:** a `slice.contains(&x)` (LINEAR) inside a per-item loop over a large collection is an O(N²) trap —
+  grep hot layout/parse code for `.contains(&` on a `&[T]`/`Vec<T>` inside a loop; a `FxHashSet` (byte-identical
+  for membership) or a hoisted map fixes it. Isolated component micro-bench resolves component-level wins that
+  the full-pipeline A/B buries under noise.
+
+  Agent: SlateHarrier

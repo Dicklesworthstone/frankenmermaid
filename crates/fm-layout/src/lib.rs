@@ -32,7 +32,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use fm_core::{
-    DiagramType, FxHashMap, GanttDate, GanttExclude, GanttTaskType, GraphDirection, IrEndpoint,
+    DiagramType, FxHashMap, FxHashSet, GanttDate, GanttExclude, GanttTaskType, GraphDirection,
+    IrEndpoint,
     IrGanttMeta, IrNode, IrXyChartMeta, IrXySeriesKind, MermaidComplexity, MermaidConfig,
     MermaidDecisionWeight, MermaidDiagramIr, MermaidGuardReport, MermaidLayoutDecisionAlternative,
     MermaidLayoutDecisionExplanation, MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord,
@@ -6777,13 +6778,19 @@ fn layout_bounds_for_nodes(
     node_indexes: &[usize],
     padding: f32,
 ) -> Option<LayoutRect> {
+    // Membership via a hash set: the old `node_indexes.contains(&idx)` was a LINEAR scan inside the
+    // per-node loop, making this O(nodes × node_indexes) — and it's called once PER SECTION for gantt
+    // bands (`section_to_nodes.iter().filter_map(..)`), so the fallback was O(N²). Byte-identical:
+    // min/max over the same node set is order- and duplicate-independent, so set membership changes
+    // nothing about the result.
+    let wanted: FxHashSet<usize> = node_indexes.iter().copied().collect();
     let mut min_x = f32::INFINITY;
     let mut min_y = f32::INFINITY;
     let mut max_x = f32::NEG_INFINITY;
     let mut max_y = f32::NEG_INFINITY;
 
     for node_box in &layout.nodes {
-        if !node_indexes.contains(&node_box.node_index) {
+        if !wanted.contains(&node_box.node_index) {
             continue;
         }
         min_x = min_x.min(node_box.bounds.x);
