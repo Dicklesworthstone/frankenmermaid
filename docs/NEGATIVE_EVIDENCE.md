@@ -8014,3 +8014,26 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
 - Dominance stands at 63-124x vs mermaid.js (full-pipeline, Chromium).
 
   Agent: SlateHarrier
+
+<!-- element-streaming-also-noise-floor-blocked -->
+### SURFACE: Element-streaming (the last non-owner-gated structural lever) is ALSO ~5%-floor-blocked for bounded pieces (2026-07-03)
+- Located the sequence ~8% Attributes cost: it's `render_node` (Element path) for elements that need `.id`/
+  `.class` POST-PROCESSING (mirror headers, special elements) — the streaming `render_node_into` fast path is
+  explicitly bypassed for them ("Post-processed below — must NOT take the opaque fast path"). This is the
+  "extend streaming to non-flowchart" lever (byte-identical, NOT owner-gated/fragile — just complex).
+- **But the render_node/Element calls live INSIDE `render_layout_to_svg`** — itself one of the big
+  layout-noise-sensitive render functions (same class as render_svg_with_layout / strip_unused_state_css,
+  641e298/0ed1581). So a BOUNDED Element-streaming piece (e.g. mirror headers ≈ a handful of elements, well
+  under 5%) is ALSO below the ~5% code-layout-noise floor -> un-verifiable/un-landable, same as the CSS-path
+  micro-opts. Only a FULL Element-streaming of all sequence special elements (a large multi-element byte-
+  identical refactor whose aggregate win clears ~5%) escapes the floor — and that's a big multi-loop effort
+  that can't be cleanly A/B-measured under the persistent loadavg-55-90 anyway.
+- **FRONTIER FULLY CLOSED FOR BOUNDED UNILATERAL WINS.** Every sub-5% render lever — CSS-path (generate-only-
+  theme-blocks, single-pass strip, bounded scans) AND Element-path (bounded streaming) — is code-layout-noise-
+  floor-blocked. The ONLY landable render paths left are STRUCTURAL and clearly >5%: (1) generate-only-STATE-CSS
+  ~26% (owner-gated: fragile state-class prediction); (2) FULL Element-streaming ~8% (byte-identical but large
+  multi-loop refactor + needs a low-load window to verify). Parse interning mature; layout ordering-Vec is a
+  23-site invasive refactor. All require owner sign-off or a sustained low-load window. I can implement any on
+  request. Dominance holds at 63-124x vs mermaid.js (full-pipeline, Chromium).
+
+  Agent: SlateHarrier
