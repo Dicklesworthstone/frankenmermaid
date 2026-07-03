@@ -2663,3 +2663,32 @@ behavior_proof = "Full-SVG dump across 9 diagram types byte-identical (hardware 
 [positive_measurement_target_cpu_x86_64_v2_2026_07_02.decision]
 status = "keep"
 rationale = "CORRECTION to f49bf26's '-5%' headline: the deterministic profharness A/B is solid (-5.3% instructions zero-variance = real work removed, software rint/floorf -> hardware roundsd/floorss; -4.7% task-clock), and BYTE-IDENTICAL. But the CANONICAL rch time delta (release fat-LTO) is smaller/noisier: -5.4% at 12x24 (non-overlapping CIs) but only -1.4%/-2.8% at 8x16/16x32 (within noise). So the real time win is ~-3% avg (fat-LTO + OoO execution absorb much of the -5.3% instruction reduction). Kept: byte-identical, no regression, clears >=3% on 12x24 with a machine-independent -5.3% instruction floor, and x86-64-v2 is a safe near-universal baseline. Honest magnitude: ~-3% time / -5.3% instrs, NOT the -5% the commit implied. PORTABILITY: raises min runtime CPU to SSE4.1 (~2009+), revertible by deleting .cargo/config.toml."
+
+[post_measurement_parse_phase_npm_2026_07_03]
+agent = "SlateHarrier"
+date = "2026-07-03"
+status = "measured"
+modality = "PARSE-PHASE head-to-head via the mermaid npm package run HEADLESS (mermaid@11 `mermaid.parse`), complementing the existing full-pipeline browser measurement (which explicitly used no npm install). Isolates the parser: mermaid.parse runs the real jison grammar and populates the diagram db (addVertex/addLink), comparable to frankenmermaid's full IR build."
+harness = "node v24.14.0, process.hrtime.bigint, min of 5 rounds x 100-2000 iters, warmed; identical label-less `flowchart LR` edge-chain input on the same machine for both."
+mermaid_js_version = "11 (npm)"
+notes = [
+  "mermaid.parse throws `DOMPurify.addHook is not a function` on LABELED nodes (headless sanitization needs a DOM), so the comparison used label-less edge chains `N{i}-->N{i+1}` which parse cleanly in both.",
+  "mermaid.js enforces a DEFAULT 500-edge limit (throws `Edge limit exceeded`); frankenmermaid parses 799 edges with no limit — a scalability dominance beyond the ratio.",
+  "frankenmermaid parse builds the full IR (arguably MORE work than mermaid.parse), so the parse dominance is conservative.",
+]
+
+[post_measurement_parse_phase_npm_2026_07_03.metrics]
+"parse/flowchart/199_edges_2580B_mermaid_js_us" = 5934.8
+"parse/flowchart/199_edges_2580B_frankenmermaid_us" = 58.6
+"parse/flowchart/399_edges_5380B_mermaid_js_us" = 11657.1
+"parse/flowchart/399_edges_5380B_frankenmermaid_us" = 168.3
+"parse/flowchart/799_edges_10980B_frankenmermaid_us" = 352.1
+"parse/flowchart/799_edges_mermaid_js" = "N/A — mermaid 500-edge limit exceeded"
+
+[post_measurement_parse_phase_npm_2026_07_03.ratios]
+"parse_flowchart_199e_mermaid_js_over_frankenmermaid" = 101.3
+"parse_flowchart_399e_mermaid_js_over_frankenmermaid" = 69.3
+
+[post_measurement_parse_phase_npm_2026_07_03.decision]
+kept = true
+reason = "Corroborates the recorded full-pipeline 63-124x dominance with an independent parse-phase, npm-package, headless measurement: frankenmermaid parse is ~70-100x faster than mermaid.js on identical inputs AND scales past mermaid's 500-edge limit. No frankenmermaid code change — a measurement/provenance record only."
