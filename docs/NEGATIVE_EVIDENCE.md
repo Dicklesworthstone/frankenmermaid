@@ -7439,6 +7439,35 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
 
   Agent: cc (Opus 4.8 1M)
 
+<!-- parser-fast-ascii-trim-ws-WASH -->
+### REJECTED: parser byte-fast `trim_ws` (ASCII fast-path for `str::trim`) — WASH at parse phase despite 9.46% profile self-time (2026-07-03)
+- **The lure.** A clean symbolized class-parse profile (flowchart-style profharness, unstripped)
+  showed `<str>::trim_matches::<char::is_whitespace>` (i.e. `str::trim()`) as the **#1 self-time
+  at 9.46%** — the parser trims essentially every line and token, and `char::is_whitespace` runs a
+  UTF-8 decode + Unicode `White_Space` table lookup per boundary char. Built a byte-identical
+  `trim_ws` (strip ASCII ws `{0x09..=0x0d, b' '}` — note it INCLUDES `0x0b`/`0x0c`, so NOT a
+  `trim_ascii` swap — then defer to `str::trim` only at a non-ASCII boundary), applied via an
+  extension trait + a mechanical `.trim()`→`.trim_ws()` rename across all 243 production sites in
+  mermaid_parser.rs.
+- **Byte-identical: PROVEN.** Standalone A/B: `trim_ws == str::trim` over 34 adversarial cases
+  (VT/FF/NEL/NBSP/em-space/U+2028/`café`/`héllo`) + all 16384 ASCII byte-pairs; fm-parser --lib 406
+  + golden_svg + golden_layout all green.
+- **Verdict — WASH (reverted, not landed).** Isolated primitive A/B on a whitespace-heavy corpus
+  was **−32%**, BUT the whole-parse-phase A/B (14-round global-min, loadavg ~18) was a flat WASH:
+  class −0.2% / state −0.6% / flowchart +0.5%. Confirmed the class input parses correctly (200
+  nodes, not a misparse), so the 9.46% self-time is real. **Root cause: the primitive win only
+  materializes when there is actual leading/trailing whitespace to STRIP (the byte loops iterate);
+  most real parser trims are on already-clean short substrings (e.g. after `split(':')`/`split(',')`),
+  where `trim_ws` ≈ `str::trim` (both just test 1-2 boundary chars) and the per-call saving is ~0.**
+- **Do-not-retry / durable lesson:** a high SELF-TIME % on a frequently-called-but-individually-CHEAP
+  op is NOT a landable signal — the primitive speedup must be measured on the ACTUAL input
+  distribution (already-trimmed short substrings), not a whitespace-heavy synthetic corpus, or the
+  phase win evaporates. Also `trim_ws` is NOT strictly-less-work (non-ASCII boundaries do the byte
+  loops THEN `str::trim`), so it can't be justified as a monotonic win either. `str::trim` in the
+  parser is at its effective floor.
+
+  Agent: cc (Opus 4.8 1M)
+
 <!-- small-diagram-frontier-fully-mapped-surfaced -->
 ### SURFACED: common-case (small-diagram) frontier fully mapped — accessible wins done, remainder inherent/owner-gated (2026-07-03)
 - **Completed the small-diagram (8-node, the realistic common case) characterization** after landing the
