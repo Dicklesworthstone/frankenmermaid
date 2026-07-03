@@ -7770,3 +7770,31 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   needle.
 
   Agent: SlateHarrier
+
+<!-- surface-layout-ordering-btreemap-frontier -->
+### SURFACE: layout is ~24% allocation, dominated by the BTreeMap<rank,Vec> ordering — conversion is a 23-site invasive refactor (2026-07-03)
+- Fresh layout-phase profiles (flowchart/state/er, 60 nodes) — all consistent: `layout_diagram_sugiyama_
+  traced_with_config` ~30-33% self, **allocation ~15-24%** (`_mi_page_malloc_zero` 4-9% + `mi_theap_malloc_
+  zero_aligned` + `mi_free`/`finish_grow`/`mi_malloc_aligned`), `nodes_by_rank` 1.5-2.2%, obstacle nudge ~6%.
+- **The allocation is dominated by `BTreeMap<usize, Vec<usize>>` keyed by dense rank ints** (the node ORDERING
+  passed through Sugiyama). `adb5300` already proved the fix for one such map (BTreeMap-by-dense-int -> flat
+  `Vec<Vec>` bucket = −8-12%: kills the per-entry BTree-node allocs + O(log n) inserts + ordered-iteration tax),
+  and the memory flagged "~10 more by_rank sites."
+- **Why the HOT sites are NOT a bounded win (measured scope):** the ordering type `BTreeMap<usize, Vec<usize>>`
+  appears **23x** across **7+ functions** — `crossing_minimization` returns it and it threads through the
+  Brandes-Köpf / secondary-coordinate assignment (fns at 9514/9611/9767/9868/10652/11023/11066), consumed via
+  `.get(&rank)` / `.keys()` / `.len()` / `.values()`. A `Vec<Vec>` differs on those exactly where it matters:
+  BTreeMap SKIPS empty ranks (`.keys()`/`.iter()` yield only non-empty; `.get(absent)`=None) while a rank-indexed
+  Vec includes empty buckets (`.get(rank)`=Some(empty)). In BK coordinate assignment "sort is load-bearing for
+  byte-identity" (see layout memory), so any drift in ordering/iteration risks a different last-bit coordinate.
+  Converting all 23 sites correctly (filter empties on iterate, None-map empties on get) is a moderate-large
+  careful refactor — OWNER-GATED-scale (pervasive internal-representation change), not a clean one-loop lever.
+  The ONE clean grouping-only site (10158, LP constraint build) is on the highs LP-compaction path which is
+  only ~0.35% even for state — not worth converting alone.
+- **Ranked owner-gated levers now (all measured/scoped, none unilateral-clean):** (1) generate-only-needed CSS
+  (render, biggest, robustness tradeoff); (2) ordering BTreeMap->Vec (layout, ~24% alloc, 23-site refactor);
+  (3) x86-64-v3 AVX2 (portability); (4) SmallVec on public LayoutEdgePath.points. The accessible byte-identical
+  UNILATERAL frontier is comprehensively mined at 63-124x mermaid.js dominance.
+- Dominance unaffected (full-pipeline 63-124x vs mermaid.js, Chromium).
+
+  Agent: SlateHarrier
