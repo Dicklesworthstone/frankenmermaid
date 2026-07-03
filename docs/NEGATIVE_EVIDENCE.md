@@ -7468,6 +7468,34 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
 
   Agent: cc (Opus 4.8 1M)
 
+<!-- er-parse-profile-common-type-frontier-mined -->
+### SURFACED: ER/class parse profiled — common-type parse frontier mined; the alloc-lowercase lever is exhausted for hot sites (2026-07-03)
+- **After landing the per-line `to_ascii_lowercase()`→`eq_ignore_ascii_case` alloc-elimination on sankey
+  (89c19da, -10%) and block-beta (17b64e0, -9%), profiled ER parse (300 entities, unstripped) to find the
+  next lever.** Top self-time: `str::trim` 9.8% (REJECTED wash, see trim_ws entry above), `find_operator_core`
+  8.0%, `__memcmp_avx2_movbe` 7.0% (from `find_operator`'s `starts_with(operator)` + intern key-eq),
+  `parse_node_token_with_config` 6.5%, driver 5.6%, `intern_node_auto` 4.4%, `parse_label` 4.3%, mimalloc
+  ~9%, `char_count` 2.9%, `normalize_identifier` 2.6%.
+- **Every hot site is already optimized or inherent — checked exhaustively:** `find_operator_core` already
+  has the `op_first_byte: u128` gate (ec0394c) + `starts_with` first-byte early-exit; `parse_node_token_with_config`
+  gates the `:::` split behind `memchr(':')` and the ~11 shape-probes behind a delimiter byte-scan;
+  `parse_label` has the no-quote/entity fast-path; interning is FxHash + hash-once; `char_count`
+  (`line.chars().count()` in `span_for`) can't beat a byte-scan (both `is_ascii`+`len` and `count_chars` are
+  one O(n) SWAR pass); `parse_er_relationship` just orchestrates these shared functions (no ER-specific waste).
+- **Remaining `to_ascii_lowercase`/`to_lowercase` sites are all cold or store-necessary (not levers):** gantt
+  keyword-match already uses `eq_ignore_ascii_case` (dep-ref lowercase at 4707 is a stored normalization);
+  class-stereotype `<<...>>` `to_lowercase` (2611) is a rare-line cold path; `is_css_named_color` (2034) is
+  bounded by style-directive count; kanban lowercases (4041/4048/4059) build STORED CSS class names; xychart
+  (5138) has too few lines to matter (like the rejected gantt-axis-tick). `find_operator` sort-longest-first +
+  break is a modest, byte-identity-risky (const-table reorder) micro-opt, not pursued.
+- **Do-not-retry / status:** the alloc-lowercase lever is mined for hot sites (sankey/block-beta landed; the
+  rest are cold/necessary). The common-type (flowchart/class/er/state) parse core is mature — remaining gains
+  are structural/owner-gated (arena allocation to kill `drop_glue::<ParseResult>` + per-item IR String allocs;
+  first-byte-indexed operator table). Next digs should target a DIFFERENT phase or a structural change, not
+  more parse leaf micro-opts.
+
+  Agent: cc (Opus 4.8 1M)
+
 <!-- small-diagram-frontier-fully-mapped-surfaced -->
 ### SURFACED: common-case (small-diagram) frontier fully mapped — accessible wins done, remainder inherent/owner-gated (2026-07-03)
 - **Completed the small-diagram (8-node, the realistic common case) characterization** after landing the
