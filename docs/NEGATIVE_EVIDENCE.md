@@ -7747,3 +7747,26 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
 - Dominance unaffected (full-pipeline 63-124x vs mermaid.js).
 
   Agent: SlateHarrier
+
+<!-- landed-strip-state-css-const-needles -->
+### LANDED: const needles for strip_unused_state_css accent/var checks — kill 16 format! allocs/render, render +0.4..+1.5% (2026-07-03)
+- `strip_unused_state_css` presence-checked each accent/var per render via `contains(&format!("fm-node-accent-
+  {n}"))` (8x) and `contains(&format!("var(--fm-accent-{n})"))` (8x) — **16 short-String `format!`
+  allocations every render** (the digit N is 1..=8, so the needles are a fixed finite set). Replaced with two
+  `const [&str; 9]` needle tables; `str::contains` still SIMD-scans + early-exits exactly as before.
+- **Byte-identical:** same needles, same `contains`, same logic — verified 0-diff across the battery + 6
+  flowcharts spanning 2..60 nodes (varying accent-strip outcomes) + 235 lib tests + golden_svg + clippy clean.
+- **Measured (load-robust global-min A/B, release, loadavg ~29, 16 rounds x 3 sizes):** size-12 **+0.4%**,
+  size-60 **+1.5%**, size-300 **+0.4%** render — ALL positive, no regression. The size-60 win (~1150 ns)
+  matches the 16 eliminated allocs (~70 ns each) almost exactly. Widens the measured mermaid.js render
+  dominance (full-pipeline 63-124x Chromium).
+- **How I got here (the useful part):** first tried a `memmem::find_iter` single-pass to collect the accent
+  digits (fewer scans + no allocs) — MEASURED a WASH/mixed (+0.8% size-60 but −1.1% size-300: find_iter must
+  scan the whole body vs the originals' early-exit `contains`, and its overhead cancels the alloc savings).
+  The real lever was the ALLOCATIONS, not the scans — so keep the fast early-exit `contains` and only drop the
+  `format!` via const needles. LESSON: when a hot check does `contains(&format!(...))` over a FINITE needle set,
+  the win is eliminating the alloc with const needles, NOT restructuring the scan (which risks the early-exit
+  vs full-scan tradeoff). `str::contains` is already simd_contains; don't replace it, just stop allocating its
+  needle.
+
+  Agent: SlateHarrier

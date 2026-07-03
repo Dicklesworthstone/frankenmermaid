@@ -383,8 +383,26 @@ fn strip_unused_state_css(svg: &mut String) {
     // nodes uses only some. Drop each `.fm-node-accent-N` rule whose class is absent from the body.
     // Body-based + exact-selector; no-op if the class is used or the rule is missing.
     let body_at = svg.find("</style>").map_or(0, |i| i + "</style>".len());
+    // Which `.fm-node-accent-N` classes (N=1..=8) appear in the body — collected in ONE scan by
+    // reading the digit after each "fm-node-accent-" match, instead of 8 `contains(&format!(...))`
+    // that each allocate a needle String and re-scan the body. Byte-identical: used[n] is true iff
+    // "fm-node-accent-{n}" occurs (single-digit N), exactly the substring the per-n `contains` tested.
+    // Const needles (not `format!("fm-node-accent-{n}")`) so the presence check allocates nothing —
+    // `str::contains` still SIMD-scans + early-exits exactly as before. Byte-identical, strictly fewer
+    // allocations (8 short Strings/render eliminated).
+    const ACCENT_NEEDLES: [&str; 9] = [
+        "",
+        "fm-node-accent-1",
+        "fm-node-accent-2",
+        "fm-node-accent-3",
+        "fm-node-accent-4",
+        "fm-node-accent-5",
+        "fm-node-accent-6",
+        "fm-node-accent-7",
+        "fm-node-accent-8",
+    ];
     let used: [bool; 9] =
-        std::array::from_fn(|n| n == 0 || svg[body_at..].contains(&format!("fm-node-accent-{n}")));
+        std::array::from_fn(|n| n == 0 || svg[body_at..].contains(ACCENT_NEEDLES[n]));
     for (n, &is_used) in used.iter().enumerate().skip(1) {
         if !is_used {
             let selector = format!(".fm-node-accent-{n} {{");
@@ -398,9 +416,21 @@ fn strip_unused_state_css(svg: &mut String) {
 
     // Drop each `:root` accent custom property `--fm-accent-N` that is no longer referenced anywhere
     // (its accent rule was stripped above and no node-shape/gradient uses it). Reference-counted, so
-    // it is a no-op while ANY `var(--fm-accent-N)` remains — safe.
+    // it is a no-op while ANY `var(--fm-accent-N)` remains — safe. Const needles avoid a per-n
+    // `format!` alloc for the (always-run) reference check; the strip logic is otherwise unchanged.
+    const VAR_NEEDLES: [&str; 9] = [
+        "",
+        "var(--fm-accent-1)",
+        "var(--fm-accent-2)",
+        "var(--fm-accent-3)",
+        "var(--fm-accent-4)",
+        "var(--fm-accent-5)",
+        "var(--fm-accent-6)",
+        "var(--fm-accent-7)",
+        "var(--fm-accent-8)",
+    ];
     for n in 1..=8usize {
-        if !svg.contains(&format!("var(--fm-accent-{n})")) {
+        if !svg.contains(VAR_NEEDLES[n]) {
             let decl = format!("  --fm-accent-{n}:");
             if let Some(start) = svg.find(&decl)
                 && let Some(rel_end) = svg[start..].find(";\n")
