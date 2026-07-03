@@ -7647,3 +7647,27 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   wins widened the small-diagram render lead ~25-30%.
 
   Agent: SlateHarrier
+
+<!-- rejected-parse-memchr-shortline-gates -->
+### REJECTED: memchr for single-byte per-line gates in the parser — 7.4% parse REGRESSION (2026-07-03)
+- Fresh parse profile (flowchart-60 parse phase) flagged `strip_flowchart_inline_comment` 2.1% + sibling gates
+  using `<[u8]>::contains(&b'X')` (scalar `iter().any`, not SIMD) — `%` / `;` / `&` / `:` presence checks run
+  per line/token. Converted all 6 to `memchr::memchr(b'X', s.as_bytes()).is_some()/none()` (SIMD, byte-identical
+  — verified 0-diff render battery + 406 parser lib tests). But same-machine alternated A/B (parse phase) =
+  a CONSISTENT **−6.5 to −8.4% REGRESSION** (min-of-7 −7.4%). Reverted.
+- **Why (refines the memchr/memmem rule — the FINAL boundary):** the parser gates run on SHORT haystacks
+  (flowchart lines ~11 chars). `memchr`'s SIMD path has real per-call setup (dispatch, alignment prologue,
+  SIMD register setup) that only amortizes over LONG haystacks; on ~11 bytes a tight scalar `<[u8]>::contains`
+  loop (which LLVM inlines/optimizes at the call site) wins. This is exactly why memchr WON in the two places
+  it landed — the render CSS passes scan the whole ~11 KB SVG (044f531), and the newline count scans the whole
+  file (ca95fe4) — and LOSES here.
+- **DURABLE RULE (single-byte search): `memchr::memchr` needs a LONG haystack (whole-file / whole-document) to
+  beat scalar `<[u8]>::contains`; for per-line / per-token gates (short slices) leave the scalar `.contains()`.**
+  Combined with the memmem boundary (short find needles WIN, contains/large-needle/replace LOSE): SIMD
+  substring/byte search pays off only when (needle short) AND (haystack long). The parser's per-line gates
+  violate the haystack-long condition.
+- Dominance unaffected (full-pipeline 63-124x). Parse is ~10% of the small-diagram pipeline; its hot cost is
+  interning/hashing (get_with_hash 6.2%, HashMap insert 6% — already FxHash) + allocation (~11.6%), not the
+  scalar gates. Those are the mature/structural frontier.
+
+  Agent: SlateHarrier
