@@ -8060,3 +8060,25 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   phase and diagram size. Dominance holds at 63-124x vs mermaid.js (full-pipeline, Chromium).
 
   Agent: SlateHarrier
+
+<!-- verified-smallvec-layoutedgepath-usage-slice-compatible -->
+### VERIFIED (de-risks an owner-gated lever): SmallVec on LayoutEdgePath.points — all current usage is slice-compatible (2026-07-03)
+- `build_edge_paths` (~9.5% of large-N layout) allocates a per-edge `Vec<LayoutPoint>`; `SmallVec<[LayoutPoint;
+  N]>` would inline short paths (2-4 points, the common case) and eliminate the heap alloc. Flagged "owner-gated
+  (public type)" — this loop I VERIFIED exactly how public it is:
+  - `LayoutEdgePath.points` is `pub Vec<LayoutPoint>` (lib.rs:894); `smallvec` is ALREADY in Cargo.lock (3
+    transitive deps), so no new bundle crate.
+  - **Every external use of `.points` (fm-render-svg + fm-cli) is SLICE-ONLY:** `&edge_path.points` (borrow via
+    Deref), `.points.len()`, `!.points.is_empty()`, `&.points[a..b]` (index). NO Vec-specific method (no push,
+    no `.clone()`→Vec, no `into_vec`). `SmallVec` derefs to `[T]` and provides all of these, so all READ sites
+    are unaffected and BYTE-IDENTICAL.
+- **The ONLY break is the public FIELD TYPE** (`Vec` → `SmallVec`): downstream code that *constructs*
+  `LayoutEdgePath { points: vec![..] }` or type-annotates `.points` as `Vec` would need `.into()`/a type change.
+  Inside this repo only fm-layout constructs it. So this is a bounded, low-risk, byte-identical perf change
+  gated solely on the owner accepting the `Vec→SmallVec` public-type change (or making the field private + a
+  `&[LayoutPoint]` accessor). **Ready to implement on sign-off** — the usage audit is done.
+- This is the most concrete/lowest-risk of the remaining owner-gated levers (vs generate-only-STATE-CSS which
+  needs fragile prediction, or Element-streaming which is a large refactor). Dominance holds 63-124x vs
+  mermaid.js (full-pipeline, Chromium).
+
+  Agent: SlateHarrier
