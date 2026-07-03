@@ -7326,3 +7326,20 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   index-eligibility tweak.
 
   Agent: SlateHarrier
+
+<!-- attributes-set-retain-definitively-load-bearing -->
+### REJECTED (definitively): optimizing/removing the Attributes::set retain — pervasive `fill` double-set + order-load-bearing (2026-07-03)
+- **Follow-up to the 15ac933 dedup-removal rejection.** Instrumented `Attributes::set` to log every double-set
+  (name already present) across the full fm-render-svg lib suite + goldens. Result: the double-set is DOMINATED
+  by **`fill` (100+ elements)** — many render paths set a default fill then override it — plus `id` (2, the
+  sequence mirror-header). Not the "2 edge cases" earlier assumed: the retain does REAL dedup work on ~every
+  styled element. So the "fix the double-set sources then delete the retain" plan is infeasible (100+ sites).
+- **Also, the retain can't be cheapened to a find+replace-in-place:** `retain(|a| a.name != name)` then push
+  gives "last-set-wins AND moved to the END of the attr list"; an in-place `position()`+overwrite keeps the
+  attr at its ORIGINAL position → different attribute order → different SVG bytes. The move-to-end ordering is
+  load-bearing for byte-identity, so the O(n)-scan-per-set can't be replaced with an O(n)-scan-no-shift either.
+- **Do-not-retry:** the `retain` (~1.5-2% of render, but only on the non-fast-path elements — the common
+  node/edge fast-paths stream directly and never touch `Attributes`) is at its ceiling. Both removal (pervasive
+  fill) and in-place-replace (order) are blocked. Leave it.
+
+  Agent: SlateHarrier
