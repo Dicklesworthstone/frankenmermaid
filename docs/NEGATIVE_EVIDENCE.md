@@ -8037,3 +8037,26 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   request. Dominance holds at 63-124x vs mermaid.js (full-pipeline, Chromium).
 
   Agent: SlateHarrier
+
+<!-- surface-large-n-layout-profile-characterized -->
+### SURFACE: large-N layout profile characterized (fresh) — all hotspots owner-gated / byte-identity-hard / inherent / mature (2026-07-03)
+- Profiled LARGE-diagram layout (default 400 nodes) — a fresh angle; I'd only profiled small-diagram layout
+  (Brandes-Köpf) before. Top self-time: `build_edge_paths_with_orientation` 9.5%, `query_segment` (obstacle
+  spatial index) 9.3%, `compute_traced_layout` 8.2%, `estimate_dimensions` (FontMetrics text sizing) 5.7%,
+  `build_tree_layout_structure` 4.6%, `CharSearcher::next_match` 3.8%, `GraphMetrics::from_ir` 3.8%, `memcmp`
+  3.6%, `finish_grow` 3.4%.
+- **All blocked, verified:** (1) `build_edge_paths` = per-edge `Vec<LayoutPoint>` alloc — SmallVec would fix it
+  but `LayoutEdgePath.points` is a PUBLIC type (owner-gated API change). (2) `query_segment` = obstacle
+  spatial-index CSR walk — byte-identity-hard (CGA), a known dead-end. (3) `estimate_dimensions` = per-char
+  text width sum — inherent (memoizing by label helps only repeated labels, adds a lookup that washes on the
+  unique-label common case). (4) `build_tree_layout_structure` sort — ALREADY optimized (ids pre-extracted to a
+  flat `Vec<&str>` for cache locality, cmp is `str::cmp`=memcmp); the `CharSearcher::next_match` 3.8% is
+  INLINING-MISATTRIBUTED to the sort comparator (there is NO char op there — the comparator is `str::cmp` +
+  usize tiebreak). (5) `GraphMetrics::from_ir` = `Vec::contains(&node_id)` (not a str char op).
+- **Layout frontier now FULLY characterized (small + large):** small = inherent Brandes-Köpf + BTreeMap
+  ordering (23-site invasive); large = owner-gated SmallVec + byte-identity-hard obstacle + inherent text sizing
+  + already-mature sort. No bounded clean landable lever in layout. Combined with render (~5% noise floor +
+  owner-gated) and parse (mature interning), the ENTIRE bounded unilateral frontier is exhausted across every
+  phase and diagram size. Dominance holds at 63-124x vs mermaid.js (full-pipeline, Chromium).
+
+  Agent: SlateHarrier
