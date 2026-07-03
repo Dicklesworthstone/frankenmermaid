@@ -5242,8 +5242,14 @@ fn parse_sankey(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
-        let lower = trimmed.to_ascii_lowercase();
-        if is_sankey_header(&lower) || lower.starts_with("title ") {
+        // Header/title skip without the per-line `to_ascii_lowercase()` heap alloc (most lines are
+        // data records). `is_sankey_header` now lowercases-compare in place; the title check folds
+        // ASCII case over the first 6 bytes — byte-identical to the old `lower.starts_with`.
+        if is_sankey_header(trimmed)
+            || trimmed
+                .get(..6)
+                .is_some_and(|p| p.eq_ignore_ascii_case("title "))
+        {
             continue;
         }
 

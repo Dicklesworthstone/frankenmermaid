@@ -457,8 +457,7 @@ const DIAGRAM_KEYWORDS: &[(&str, DiagramType)] = &[
 ];
 
 pub(crate) fn is_sankey_header(line: &str) -> bool {
-    let lower = line.to_ascii_lowercase();
-    matches_keyword_header(&lower, "sankey") || matches_keyword_header(&lower, "sankey-beta")
+    matches_keyword_header_ci(line, "sankey") || matches_keyword_header_ci(line, "sankey-beta")
 }
 
 pub(crate) fn is_block_beta_header(line: &str) -> bool {
@@ -471,6 +470,23 @@ pub(crate) fn matches_keyword_header(line: &str, keyword: &str) -> bool {
             .strip_prefix(keyword)
             .and_then(|rest| rest.chars().next())
             .is_some_and(|c| c.is_whitespace() || c == '-')
+}
+
+/// ASCII-case-insensitive [`matches_keyword_header`] that avoids the caller's per-line
+/// `to_ascii_lowercase()` heap allocation. Byte-identical to
+/// `matches_keyword_header(&line.to_ascii_lowercase(), keyword)` for a lowercase-ASCII `keyword`:
+/// the prefix compare folds ASCII case (matching the lowercasing), and `to_ascii_lowercase` never
+/// changes a char's whitespace-ness or the `'-'` byte, so the post-keyword char test is unaffected.
+/// `keyword` is ASCII, so `keyword.len()` is a char boundary once the prefix matches.
+pub(crate) fn matches_keyword_header_ci(line: &str, keyword: &str) -> bool {
+    let kb = keyword.as_bytes();
+    if line.len() < kb.len() || !line.as_bytes()[..kb.len()].eq_ignore_ascii_case(kb) {
+        return false;
+    }
+    match line[kb.len()..].chars().next() {
+        None => true,
+        Some(c) => c.is_whitespace() || c == '-',
+    }
 }
 
 /// Fuzzy keyword matching using Levenshtein distance.
@@ -1062,6 +1078,22 @@ mod tests {
         MermaidLineEndingStyle, MermaidWhitespaceKind, apply_parse_lens_edit, build_parse_lens,
         capture_format_complement, detect_type, normalize_identifier, parse, parse_with_mode,
     };
+
+    #[test]
+    fn matches_keyword_header_ci_is_byte_identical() {
+        // Pin the alloc-free CI matcher to `matches_keyword_header(&line.to_ascii_lowercase(), kw)`.
+        let lines = [
+            "sankey", "Sankey", "SANKEY-BETA", "sankey-beta", "sankey ", "Sankey-Beta title",
+            "sankeyx", "sankey_beta", "san", "", "sankey\t", "sankey-", "title x", "TITLE",
+            "sÄnkey", "sankeyÄ", "  sankey", "block-beta", "sankey beta extra",
+        ];
+        for kw in ["sankey", "sankey-beta", "title", "block-beta"] {
+            for l in lines {
+                let want = super::matches_keyword_header(&l.to_ascii_lowercase(), kw);
+                assert_eq!(super::matches_keyword_header_ci(l, kw), want, "line={l:?} kw={kw:?}");
+            }
+        }
+    }
     use fm_core::{
         ArrowType, DiagnosticCategory, DiagramType, GraphDirection, IrEndpoint, MermaidDiagramIr,
         MermaidLensEdit, MermaidParseMode,
