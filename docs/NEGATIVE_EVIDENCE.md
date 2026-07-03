@@ -7990,3 +7990,27 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   landed wins.
 
   Agent: SlateHarrier
+
+<!-- code-layout-noise-sets-5pct-floor-on-render-css-wins -->
+### KEY REFINEMENT: code-layout noise sets a ~5% FLOOR on landable render-CSS-path wins (2026-07-03)
+- Evaluated `generate-only-needed` for the THEME BLOCKS (cluster/node-shape/edge-style). CORRECTION to prior
+  "owner-gated" labeling: these 3 blocks are gated on SIMPLE IR facts (`has_clusters`/`has_special_shapes`/
+  `has_dashed_thick`, already computed in strip_unused_theme_css), NOT fragile emission-prediction (unlike the
+  marker-gen / state-class cases). Emitting them conditionally in `to_svg_style` (the blocks are pure literal
+  CSS = the existing `CLUSTER_THEME_CSS`/etc. consts) is BYTE-IDENTICAL, NOT-FRAGILE, and MONOTONIC-LESS-WORK
+  (eliminates strip_unused_theme_css's 4 `str::replace` + ~3 redundant whole-CSS allocs/copies, ~2-4% render).
+- **But it is UN-LANDABLE, and here is the durable reason:** it edits the render CSS path, and 641e298 proved
+  that path carries **±5% code-layout noise** (icache/alignment) that can flip even a *strictly-less-work* edit
+  net-NEGATIVE — the bounded-search was strictly-less-work yet netted −5.7%. A ~2-4% monotonic win is BELOW that
+  ~5% noise floor, so it can't be verified as net-positive and could ship a regression. **Monotonic-less-work is
+  NOT sufficient to land on a code-layout-noisy hot path — the noise can dominate.**
+- **CONSEQUENCE (sharpens the whole render conclusion): the render CSS-path frontier has a ~5% LANDABILITY
+  FLOOR.** Sub-5% CSS-path wins (generate-only-theme-blocks ~2-4%, single-pass strip rewrite ~2%, bounded
+  scans) are ALL un-landable (noise can flip them). Only wins whose magnitude clearly EXCEEDS ~5% survive the
+  noise — and those are the owner-gated/large ones: generate-only-STATE-CSS (~26%, needs the fragile state-
+  class prediction → owner sign-off), or Element-streaming for non-flowchart (~8%, big byte-identical refactor).
+  This is why the small render levers keep measuring as regressions/washes: not that they lack a real win, but
+  that the win < the layout noise. Escaping requires a STRUCTURAL change big enough to clear the floor.
+- Dominance stands at 63-124x vs mermaid.js (full-pipeline, Chromium).
+
+  Agent: SlateHarrier
