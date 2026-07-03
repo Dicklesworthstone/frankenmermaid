@@ -7593,3 +7593,26 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   post-pass memmem frontier is CLOSED at 044f531 (the short-needle loop passes).
 
   Agent: SlateHarrier
+
+<!-- landed-strip-fxhashset -->
+### LANDED: FxHashSet (not SipHash std HashSet) for marker-id sets in strip passes — render -4.4% (2026-07-03)
+- Fresh symbolized perf AFTER the 044f531 memmem win (which cut str-search from ~47% to ~36% of small render)
+  surfaced the new lever: **SipHash cost ~3.5%** (`hash_one` 1.55% + `Hasher::write` 1.07% + `HashMap::insert`
+  0.92%). Source: `strip_unused_markers` (`referenced`) and `strip_dead_marker_css` (`live`) collect marker ids
+  into `std::collections::HashSet<&str>` — SipHash, with a per-set random seed. `referenced` takes one insert
+  per `url(#…)` edge ref (~E inserts), all short marker-id strings.
+- **Fix:** `fm_core::FxHashSet` (rustc_hash, already a workspace dep). Both sets are membership-only (insert +
+  contains, NO iteration), so FxHash's different bucket order is invisible → byte-identical. FxHash is a couple
+  multiply-xor ops vs SipHash's full round function — ~3-4x faster on short keys, and skips SipHash's random
+  seed init per set.
+- **Byte-identical (verified):** 11-type battery + cluster/dashed/shape no-op paths + 235 lib + golden_svg +
+  clippy `-D warnings` clean.
+- **Measured (same-machine alternated A/B, release, min-of-N, NEW < OLD every round, non-overlapping):**
+  flowchart-60 render 80633->77116 ns (**-4.4%**, min-of-7), state-60 **-3.7..-4.6%**, class-40 **-1.5..-3.3%**
+  (smaller where render is heavier). Widens the measured mermaid.js dominance (full-pipeline 63-124x Chromium).
+- **Lesson:** `std::collections::HashSet`/`HashMap` in a hot path = SipHash (DoS-resistant, slow) + per-instance
+  random seed; when the set is internal + membership-only (no iteration-order contract, no untrusted-key DoS
+  surface), `FxHashSet`/`FxHashMap` is a byte-identical drop-in. grep `std::collections::HashSet::new()` in hot
+  code. (fm_core already re-exports Fx* and uses them for NodeSet.)
+
+  Agent: SlateHarrier

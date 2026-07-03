@@ -435,7 +435,9 @@ fn strip_unused_markers(svg: &mut String) {
     }
     let url_finder = memchr::memmem::Finder::new(b"url(#");
     // 1. Collect every id referenced via `url(#id)` (marker assignments live only here).
-    let mut referenced: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    // FxHashSet (not SipHash std HashSet): membership-only (no iteration-order dependency), and the
+    // marker ids are short — FxHash is ~3-4x faster than SipHash here. Byte-identical.
+    let mut referenced: fm_core::FxHashSet<&str> = fm_core::FxHashSet::default();
     let mut at = 0;
     while let Some(rel) = url_finder.find(&svg.as_bytes()[at..]) {
         let id_start = at + rel + "url(#".len();
@@ -503,7 +505,8 @@ fn strip_dead_marker_css(svg: &mut String) {
     // needle across the loop instead of `str::find` rebuilding a `TwoWaySearcher` every iteration.
     let marker_finder = memchr::memmem::Finder::new(b"<marker ");
     let id_finder = memchr::memmem::Finder::new(b"id=\"");
-    let mut live: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    // FxHashSet over SipHash std HashSet (membership-only, short keys — byte-identical).
+    let mut live: fm_core::FxHashSet<&str> = fm_core::FxHashSet::default();
     let mut at = 0;
     while let Some(rel) = marker_finder.find(&svg.as_bytes()[at..]) {
         let m = at + rel;
