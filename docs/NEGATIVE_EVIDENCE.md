@@ -7046,3 +7046,32 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   signal clears the noise floor (this one did).
 
   Agent: SlateHarrier
+
+<!-- rank-orders-btreemap-to-bucket-vec-landed -->
+### LANDED: rank_orders_from_key BTreeMap → flat bucket-Vec — layout −8-12%, byte-identical (2026-07-03)
+- **The clean flowchart-1000 profile flagged `rank_orders_from_key` at 2.55%.** It grouped node indices by
+  rank into a `BTreeMap<usize, Vec<usize>>` (O(log R) node-based-tree insert per node + cache-unfriendly
+  pointer-chasing on iteration), then sorted each rank's nodes by key and numbered them 0..k.
+- **Insight:** the per-rank `order` assignment is INDEPENDENT of rank iteration order (each rank numbers its
+  own nodes from 0), so the BTreeMap's sorted-key iteration was never needed. Ranks here are tree DEPTHS —
+  dense small integers `0..height` (both callers pass `tree.depth`) — so a flat `Vec<Vec<usize>>` bucketed by
+  rank (`vec![Vec::new(); max_rank+1]`, O(1) index push) replaces the tree entirely.
+- **Byte-identical:** same buckets, each sorted by the same `key.total_cmp().then(compare_node_indices)`
+  comparator (a strict total order), same 0..k numbering; rank iteration order doesn't affect output. GREEN:
+  428 fm-layout lib tests + golden_layout (2) + golden_svg (2); clippy clean.
+- **MEASURED — local interleaved A/B (profharness `flowchart <N> layout`, min-ns/4k iters, 6 rounds,
+  drift-immune):** N=1000 **−11.1..−11.9%** (all 6), N=300 **−8.3..−9.0%** (all 6). Baseline already includes
+  the obstacle-index win (fcd51f2), so this stacks on top. The chain shape has ~1000 ranks (1 node each), the
+  worst case for the BTreeMap (1000 O(log n) inserts + tree walk). **rch per-crate confirm** (`fm-layout`
+  `incremental_layout` `full_recompute/1000`, raw NEW vs raw OLD on the warm hz1 pool): single/1000
+  312.9→294.4µs **−5.9%**, five/1000 324.1→304.6µs **−6.0%** — dampened vs local because the bench runs FULL
+  layout (rank_orders is a fraction), same direction, uniform across both groups.
+- **rch NOTE / partial blocker:** `fm-layout`'s `incremental_layout` bench transitively builds `highs-sys`
+  (C/cmake via bindgen, needs libclang); rch worker routing is non-deterministic and cold workers without
+  libclang / under heavy cross-agent contention fail the highs-sys cmake build (exit 101). Got clean runs only
+  after landing on a warm worker; `--save-baseline` A/B was flaky, so used raw NEW-vs-OLD times. The
+  drift-immune local interleaved A/B remains the primary arbiter for this ≥5% signal.
+- **FOLLOW-UP:** the file has ~10 `by_rank: BTreeMap`/similar rank-grouping sites — several other layout
+  functions may share this BTreeMap-where-a-dense-Vec-suffices pattern. Worth a sweep.
+
+  Agent: SlateHarrier

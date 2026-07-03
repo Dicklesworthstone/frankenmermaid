@@ -7290,20 +7290,27 @@ fn rank_orders_from_key(
     rank_by_node: &[usize],
     key_by_node: &[f32],
 ) -> Vec<usize> {
-    let mut by_rank: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for (node_index, rank) in rank_by_node.iter().copied().enumerate() {
-        by_rank.entry(rank).or_default().push(node_index);
+    // Bucket node indices by rank. Ranks here are tree depths — dense small integers (0..height) —
+    // so a flat `Vec`-of-buckets indexed by rank replaces the `BTreeMap`'s O(log R) node-based-tree
+    // inserts and cache-unfriendly traversal with O(1) index pushes. The per-rank `order` assignment
+    // is independent of rank iteration order (each rank numbers its own nodes 0..k), so bucketing by
+    // ascending rank and sorting each bucket by the same key is byte-identical to the BTreeMap form.
+    let Some(&max_rank) = rank_by_node.iter().max() else {
+        return Vec::new(); // no nodes
+    };
+    let mut by_rank: Vec<Vec<usize>> = vec![Vec::new(); max_rank + 1];
+    for (node_index, &rank) in rank_by_node.iter().enumerate() {
+        by_rank[rank].push(node_index);
     }
 
     let mut order_by_node = vec![0_usize; rank_by_node.len()];
-    for (_rank, node_indexes) in by_rank {
-        let mut sorted = node_indexes;
-        sorted.sort_by(|left, right| {
+    for node_indexes in &mut by_rank {
+        node_indexes.sort_by(|left, right| {
             key_by_node[*left]
                 .total_cmp(&key_by_node[*right])
                 .then_with(|| compare_node_indices(ir, *left, *right))
         });
-        for (order, node_index) in sorted.into_iter().enumerate() {
+        for (order, &node_index) in node_indexes.iter().enumerate() {
             order_by_node[node_index] = order;
         }
     }
