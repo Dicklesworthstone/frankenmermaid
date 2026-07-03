@@ -6928,9 +6928,13 @@ fn write_common_edge_path_into(
     edge_index: i32,
     marker_end: &str,
 ) {
-    use crate::attributes::write_escaped_attr;
+    // Path `d` is pure SVG path geometry (`M/L/C/A/Z` + digits/spaces/commas/dots/minus from
+    // `write_fixed2`) and can never contain an XML special (`& < > " '`), so escaping it is a no-op
+    // scan. Write it raw — byte-identical, and consistent with the streaming fast path
+    // (`write_common_edge_full_fragment_into`) which already emits `d` unescaped via
+    // `build_smooth_path_by_into`.
     f.push_str("<path d=\"");
-    let _ = write_escaped_attr(f, path_str);
+    f.push_str(path_str);
     write_common_edge_path_tail_into(f, stroke_width, style_class, edge_index, marker_end);
 }
 

@@ -7848,3 +7848,25 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   it on length so short strings keep the scalar loop.
 
   Agent: SlateHarrier
+
+<!-- landed-path-d-skip-escape -->
+### LANDED: skip the redundant XML-escape of path `d` in the non-streaming edge writer — class render +1.9% (2026-07-03)
+- `build_common_edge_fragment` (the non-streaming edge writer used for non-solid-arrow edges — class
+  inheritance/composition, bundled, reversed, animated) wrote the `<path d="…">` value via
+  `write_escaped_attr(path_str)`. But `path_str` is pure SVG path geometry (`M/L/C/A/Z` + digits/spaces/
+  commas/dots/minus from `write_fixed2`) and can NEVER contain an XML special (`& < > " '`), so the escape is
+  an always-no-op scan of the ~100-byte `d` per edge. Replaced with a raw `push_str`.
+- **Byte-identical + consistent:** for clean path data, `write_escaped_attr` = `write_str`; and the STREAMING
+  fast path (`write_common_edge_full_fragment_into` -> `build_smooth_path_by_into`) already emits `d`
+  UNESCAPED — so the codebase already relies on this invariant; this just makes the slow path match. Verified
+  0-diff across battery + 6 flowcharts (incl. class/er edges) + 235 lib + golden_svg + clippy clean.
+- **Measured (load-robust global-min A/B, release, loadavg ~20):** class-40 render **+1.9%** (class edges use
+  this non-solid-arrow path); er-60 −0.8% (NOISE — the change is strictly-less-work so it cannot regress; er's
+  simple edges take the streaming fast path, so the path-`d` writer is unaffected there). Byte-identical +
+  strictly-fewer-ops, so landable on the same monotonic basis as the const-needle win. Widens the measured
+  mermaid.js render dominance (full-pipeline 63-124x).
+- **Lesson:** renderer-generated geometry (path `d`, transforms, viewBox numbers) is escape-free BY GRAMMAR —
+  escaping it is a pure-overhead scan. Grep `write_escaped_attr(` for values that are known-clean generated
+  numbers/geometry and write them raw (match whatever the streaming fast path already does).
+
+  Agent: SlateHarrier
