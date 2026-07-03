@@ -7798,3 +7798,25 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
 - Dominance unaffected (full-pipeline 63-124x vs mermaid.js, Chromium).
 
   Agent: SlateHarrier
+
+<!-- measured-x86-64-v3-mixed -->
+### MEASURED (owner-gated lever closed): x86-64-v3 (AVX2) is a MIXED bag — net full-pipeline only +1.6%, parse/layout REGRESS (2026-07-03)
+- Built the whole pipeline with `RUSTFLAGS="-C target-cpu=x86-64-v3"` (vs the shipped x86-64-v2) and ran a
+  load-robust global-min A/B (loadavg ~18, 20 rounds/phase, HEAD code identical, only target-cpu differs).
+- **Result (v2 -> v3, flowchart-60):** full pipeline 174140->171335 ns **+1.6%**; render 76536->73950 **+3.4%**;
+  parse 16832->17313 **−2.9%**; layout 63500->64913 **−2.2%**.
+- **Why (refutes "v3/AVX2 = faster"):** v3 helps the VECTOR-heavy render (number formatting `roundsd`/wider
+  auto-vectorized byte scans) but HURTS the branchy parse/layout — AVX2 codegen there brings no vectorization
+  win while adding code size (icache) and AVX frequency-throttle/transition risk. Net is a small +1.6% that is
+  NOT clean (two of three phases regress).
+- **Verdict: global x86-64-v3 is NOT worth it** — a marginal net win, per-phase regressions, AND it raises the
+  distributed-binary min CPU to Haswell (2013+) per the .cargo/config.toml portability note. The render +3.4%
+  is real but not cleanly extractable: target-cpu is a global rustflag (no per-package setting), and isolating
+  AVX2 to the render number-formatters needs `#[target_feature(enable="avx2")]` + runtime dispatch = unsafe +
+  complex (and the crate is `#![forbid(unsafe_code)]`). So this owner-gated lever is CLOSED as not-worth-it.
+- **Method note:** load-robust global-min cleanly separated the per-phase signs (render + / parse,layout −)
+  at loadavg 18 — a clean per-phase verdict a mean/median A/B could not give. Removes v3 from the
+  "worth-doing" owner-gated list (leaves generate-only-needed CSS + the layout ordering Vec refactor).
+- Dominance unaffected (full-pipeline 63-124x vs mermaid.js, Chromium).
+
+  Agent: SlateHarrier
