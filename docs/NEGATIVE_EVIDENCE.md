@@ -7301,3 +7301,28 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   from 6a2972e) or absent. The byte-identical perf frontier is genuinely near-closed across micro AND algorithmic.
 
   Agent: SlateHarrier
+
+<!-- mindmap-obstacle-index-eligibility-rejected -->
+### REJECTED: skip obstacle index for global-edge (mindmap) layouts — WASH; the O(N²) is the AABB checks, not the index (2026-07-03)
+- **Hypothesis:** mindmap layout is O(N²) with `ObstacleSpatialIndex::query_segment` at 23% (per perf record);
+  the index's per-query candidate GATHER+SORT is wasted for long global edges (radial spokes span the layout →
+  each query bbox covers ~O(N) obstacles). Since the index and linear-scan routing paths are byte-identical (a
+  conservative superset — CONFIRMED here: mm_star/flow/wide SVG hashes match exactly with the index forced off),
+  a majority-long-edges eligibility gate would pick the faster path with ZERO byte-identity risk.
+- **Verdict — WASH (reverted).** Interleaved A/B (ph_old index vs ph_new heuristic, back-to-back, 8-10 rounds):
+  mindmap-800 layout OLD=453k NEW=459k (+1.2%), full OLD=454k NEW=459k (+1.0%); raw single runs BOTH ~2057µs
+  identical. flowchart/wide unchanged. The index isn't the bottleneck — the mindmap O(N²) is the per-edge AABB
+  obstacle checks (`find_*_segment_nudge` over O(N) candidates), which BOTH paths do equally for global edges;
+  the index only removes the sort/build, which is negligible. The heuristic's O(edges) pre-pass adds ~1%.
+- **CRITICAL MEASUREMENT LESSON (I violated my own rule):** the "4.5× faster" that motivated this came from
+  comparing a FORCED-NONE run measured at turbo (454µs) against an index run measured earlier under heavy load
+  (2066µs) — a CROSS-LOAD comparison. The truthful interleaved (back-to-back) A/B showed no difference; raw
+  runs put BOTH at ~2057µs. NEVER compare two numbers taken at different times/loads — only interleaved OLD/NEW
+  back-to-back is valid (see [[project_rch_cross_worker_false_positive]]). A `perf record` %-hotspot
+  (load-independent) tells you WHERE time goes but NOT that removing it is a net win — the removed work may just
+  move to an equivalent path (here: index query → linear AABB scan, same O(N²)).
+- **Do-not-retry:** the mindmap O(N²) is inherent to obstacle-avoidance routing of global edges; fixing it
+  needs a radial-specific router that doesn't obstacle-route spokes (changes geometry, owner-gated), not an
+  index-eligibility tweak.
+
+  Agent: SlateHarrier
