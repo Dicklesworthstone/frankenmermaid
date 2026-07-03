@@ -7891,3 +7891,28 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
 - Dominance unaffected (full-pipeline 63-124x vs mermaid.js).
 
   Agent: SlateHarrier
+
+<!-- fresh-profile-and-state-css-style-memmem-rejected -->
+### FRESH PROFILE (this segment's wins confirmed) + REJECTED state_css </style> memmem (2026-07-03)
+- **Fresh symbolized render profile at HEAD (b550141), flowchart-60, confirming the recent wins landed:**
+  `write_escaped_text` fell **6.3% -> 1.66%** (a89766f memchr2 run-based worked); allocation down (const-needles
+  a3c4117 + FxHashSet 6498d4c). New top: `render_svg_with_layout` self 16.0%, **`is_contained_in` (str::contains)
+  14.9%**, **`next_match` (TwoWaySearcher str::find) 13.9%**, memchr `Finder::find` 5.6% (my memmem),
+  `memmove`+`replace_range` ~9.4% (CSS strip rewrites), number formatting ~8% (write_uint/fixed2, at ceiling).
+- **The top two str ops (~29%) are BOTH in `strip_unused_state_css` and BOTH blocked:** (1) `is_contained_in`
+  = the STATE_CLASSES (x5) + accent/var `contains` — simd_contains, reducible only via Aho-Corasick multi-pattern
+  (dep, poor ROI); (2) `next_match` = its `str::find`s (`.fm-cluster { fill-opacity:` etc.) — MEDIUM needles
+  starting with a COMMON byte (`.`), where TwoWaySearcher's rare-byte skip BEATS memmem's packed-pair prefilter
+  (memmem loses on common-first-byte needles). So neither is a clean memmem/SIMD target.
+- **REJECTED: state_css `find("</style>")` (x2) -> memmem.** Its sibling passes (strip_dead_marker/minify) use
+  memmem for the same 8-byte needle (044f531), so this looked like a consistency win. Byte-identical (0-diff +
+  235 lib). But the A/B showed a consistent −5.6% and could NOT be verified — loadavg spiked to 58-76 mid-run
+  (rch worker returned), where even load-robust global-min can't reach the contention-free time. Reverted per
+  the measure-before-landing discipline. Likely reason it isn't a win anyway: these are ONE-TIME finds, and
+  `memmem::find` constructs a packed-pair Finder PER CALL — the construction overhead only amortizes when the
+  Finder is HOISTED across a loop (as in the 044f531 marker loops), not for a single scan.
+- **Render frontier state:** the byte-scan/escape/alloc bounded wins are captured; the remaining top is the
+  blocked `strip_unused_state_css` str ops. The only path to it is OWNER-GATED generate-only-needed CSS (don't
+  emit the state/accent CSS then strip it). Dominance unaffected (full-pipeline 63-124x vs mermaid.js).
+
+  Agent: SlateHarrier
