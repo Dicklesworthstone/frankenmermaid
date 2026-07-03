@@ -2402,10 +2402,12 @@ mod tests {
                 LayoutEdgePath {
                     edge_index: 0,
                     span: Default::default(),
-                    points: vec![
+                    points: [
                         fm_layout::LayoutPoint { x: 5.0, y: 6.0 },
                         fm_layout::LayoutPoint { x: 30.0, y: 6.0 },
-                    ],
+                    ]
+                    .into_iter()
+                    .collect(),
                     reversed: false,
                     is_self_loop: false,
                     parallel_offset: 0.0,
@@ -2415,10 +2417,12 @@ mod tests {
                 LayoutEdgePath {
                     edge_index: 1,
                     span: Default::default(),
-                    points: vec![
+                    points: [
                         fm_layout::LayoutPoint { x: 30.0, y: 12.0 },
                         fm_layout::LayoutPoint { x: 5.0, y: 12.0 },
-                    ],
+                    ]
+                    .into_iter()
+                    .collect(),
                     reversed: false,
                     is_self_loop: false,
                     parallel_offset: 0.0,

@@ -3844,10 +3844,12 @@ mod render_tests {
                 LayoutEdgePath {
                     edge_index: 0,
                     span: Default::default(),
-                    points: vec![
+                    points: [
                         LayoutPoint { x: 0.0, y: 0.0 },
                         LayoutPoint { x: 1.0, y: 0.0 },
-                    ],
+                    ]
+                    .into_iter()
+                    .collect(),
                     reversed: false,
                     is_self_loop: false,
                     parallel_offset: 0.0,
@@ -3857,10 +3859,12 @@ mod render_tests {
                 LayoutEdgePath {
                     edge_index: 1,
                     span: Default::default(),
-                    points: vec![
+                    points: [
                         LayoutPoint { x: 1.0, y: 0.0 },
                         LayoutPoint { x: 0.0, y: 0.0 },
-                    ],
+                    ]
+                    .into_iter()
+                    .collect(),
                     reversed: true,
                     is_self_loop: false,
                     parallel_offset: 0.0,

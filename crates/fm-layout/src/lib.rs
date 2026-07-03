@@ -43,6 +43,7 @@ use fm_core::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 use good_lp::solvers::WithTimeLimit;
+use smallvec::{SmallVec, smallvec};
 #[cfg(not(target_arch = "wasm32"))]
 use good_lp::{Expression, Solution, SolverModel, constraint, default_solver, variable};
 use tracing::{debug, info, trace, warn};
@@ -840,6 +841,14 @@ pub struct LayoutPoint {
     pub y: f32,
 }
 
+/// Inline storage for a routed edge path. Orthogonal edges — the overwhelming majority —
+/// are 2-4 points, so 4 inline slots keep them heap-free; the rarer 5-point self-loops and
+/// splines spill to the heap transparently. `N=4` is deliberately tight: a larger buffer
+/// bloats every `LayoutEdgePath` and the by-value routing returns with memcpy that outweighs
+/// the single malloc it saves (measured: `N=8` regressed layout +2-4%). Derefs to
+/// `[LayoutPoint]`, so all read sites are unchanged.
+pub type EdgePoints = SmallVec<[LayoutPoint; 4]>;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LayoutRect {
     pub x: f32,
@@ -891,7 +900,7 @@ pub enum EdgeRouting {
 pub struct LayoutEdgePath {
     pub edge_index: usize,
     pub span: Span,
-    pub points: Vec<LayoutPoint>,
+    pub points: EdgePoints,
     pub reversed: bool,
     /// True if this is a self-loop edge (source == target).
     pub is_self_loop: bool,
@@ -4932,7 +4941,7 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                 // Self-message: draw a loop to the right and back.
                 let loop_width = spacing.sequence_self_loop_width;
                 let loop_height = message_gap * 0.6;
-                vec![
+                smallvec![
                     LayoutPoint { x: source_x, y },
                     LayoutPoint {
                         x: source_x + loop_width,
@@ -4948,7 +4957,7 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                     },
                 ]
             } else {
-                vec![
+                smallvec![
                     LayoutPoint { x: source_x, y },
                     LayoutPoint { x: target_x, y },
                 ]
@@ -5923,7 +5932,7 @@ fn layout_diagram_xychart_from_meta(
                 edges.push(LayoutEdgePath {
                     edge_index,
                     span,
-                    points: vec![source_bounds.bounds.center(), target_bounds.bounds.center()],
+                    points: smallvec![source_bounds.bounds.center(), target_bounds.bounds.center()],
                     reversed: false,
                     is_self_loop: false,
                     parallel_offset: 0.0,
@@ -7936,7 +7945,7 @@ fn force_build_edge_paths(ir: &MermaidDiagramIr, nodes: &[LayoutNodeBox]) -> Vec
             Some(LayoutEdgePath {
                 edge_index: ei,
                 span: edge.span,
-                points: vec![from_pt, to_pt],
+                points: smallvec![from_pt, to_pt],
                 reversed: false,
                 is_self_loop: from_idx == to_idx,
                 parallel_offset: 0.0,
@@ -11331,7 +11340,7 @@ fn build_edge_paths_with_orientation(
 }
 
 /// Route a self-loop edge: goes out one side and returns on another.
-fn route_self_loop(node_box: &LayoutNodeBox, horizontal_ranks: bool) -> Vec<LayoutPoint> {
+fn route_self_loop(node_box: &LayoutNodeBox, horizontal_ranks: bool) -> EdgePoints {
     let b = &node_box.bounds;
     let loop_size = 24.0_f32;
 
@@ -11357,7 +11366,7 @@ fn route_self_loop(node_box: &LayoutNodeBox, horizontal_ranks: bool) -> Vec<Layo
             x: b.width.mul_add(0.6, b.x),
             y: b.y,
         };
-        vec![start, corner1, corner2, corner3, end]
+        smallvec![start, corner1, corner2, corner3, end]
     } else {
         // Loop goes out the bottom and returns from the right.
         let start = LayoutPoint {
@@ -11380,7 +11389,7 @@ fn route_self_loop(node_box: &LayoutNodeBox, horizontal_ranks: bool) -> Vec<Layo
             x: b.x + b.width,
             y: b.height.mul_add(0.4, b.y),
         };
-        vec![start, corner1, corner2, corner3, end]
+        smallvec![start, corner1, corner2, corner3, end]
     }
 }
 
@@ -11689,7 +11698,7 @@ fn route_edge_points(
     source: LayoutPoint,
     target: LayoutPoint,
     horizontal_ranks: bool,
-) -> Vec<LayoutPoint> {
+) -> EdgePoints {
     route_edge_points_with_obstacles(source, target, horizontal_ranks, &[])
 }
 
@@ -11703,7 +11712,7 @@ fn route_edge_points_with_obstacles(
     target: LayoutPoint,
     horizontal_ranks: bool,
     obstacles: &[LayoutRect],
-) -> Vec<LayoutPoint> {
+) -> EdgePoints {
     route_edge_points_with_obstacle_index(source, target, horizontal_ranks, obstacles, None)
 }
 
@@ -11713,7 +11722,7 @@ fn route_edge_points_with_obstacle_index(
     horizontal_ranks: bool,
     obstacles: &[LayoutRect],
     mut obstacle_index: Option<&mut ObstacleSpatialIndex>,
-) -> Vec<LayoutPoint> {
+) -> EdgePoints {
     let epsilon = 0.001_f32;
 
     let points = if horizontal_ranks {
@@ -11731,7 +11740,7 @@ fn route_edge_points_with_obstacle_index(
             if let Some(nudge) =
                 find_obstacle_nudge_y(segment, source.y, obstacles, obstacle_index.as_deref_mut())
             {
-                vec![
+                smallvec![
                     source,
                     LayoutPoint {
                         x: source.x,
@@ -11744,7 +11753,7 @@ fn route_edge_points_with_obstacle_index(
                     target,
                 ]
             } else {
-                vec![source, target]
+                smallvec![source, target]
             }
         } else {
             let mid_x = f32::midpoint(source.x, target.x);
@@ -11763,7 +11772,7 @@ fn route_edge_points_with_obstacle_index(
                 find_obstacle_nudge_x(mid_segment, mid_x, obstacles, obstacle_index.as_deref_mut())
             {
                 // Route around: two vertical segments flanking the obstacle.
-                vec![
+                smallvec![
                     source,
                     LayoutPoint {
                         x: nudge,
@@ -11776,7 +11785,7 @@ fn route_edge_points_with_obstacle_index(
                     target,
                 ]
             } else {
-                vec![
+                smallvec![
                     source,
                     LayoutPoint {
                         x: mid_x,
@@ -11804,7 +11813,7 @@ fn route_edge_points_with_obstacle_index(
         if let Some(nudge) =
             find_obstacle_nudge_x(segment, source.x, obstacles, obstacle_index.as_deref_mut())
         {
-            vec![
+            smallvec![
                 source,
                 LayoutPoint {
                     x: nudge,
@@ -11817,7 +11826,7 @@ fn route_edge_points_with_obstacle_index(
                 target,
             ]
         } else {
-            vec![source, target]
+            smallvec![source, target]
         }
     } else {
         let mid_y = f32::midpoint(source.y, target.y);
@@ -11832,7 +11841,7 @@ fn route_edge_points_with_obstacle_index(
             },
         );
         if let Some(nudge) = find_obstacle_nudge_y(mid_segment, mid_y, obstacles, obstacle_index) {
-            vec![
+            smallvec![
                 source,
                 LayoutPoint {
                     x: source.x,
@@ -11845,7 +11854,7 @@ fn route_edge_points_with_obstacle_index(
                 target,
             ]
         } else {
-            vec![
+            smallvec![
                 source,
                 LayoutPoint {
                     x: source.x,
@@ -11874,7 +11883,7 @@ fn route_edge_points_spline_with_obstacles(
     target: LayoutPoint,
     horizontal_ranks: bool,
     obstacles: &[LayoutRect],
-) -> Vec<LayoutPoint> {
+) -> EdgePoints {
     route_edge_points_spline_with_obstacle_index(source, target, horizontal_ranks, obstacles, None)
 }
 
@@ -11884,7 +11893,7 @@ fn route_edge_points_spline_with_obstacle_index(
     horizontal_ranks: bool,
     obstacles: &[LayoutRect],
     obstacle_index: Option<&mut ObstacleSpatialIndex>,
-) -> Vec<LayoutPoint> {
+) -> EdgePoints {
     let orthogonal = route_edge_points_with_obstacle_index(
         source,
         target,
@@ -11896,7 +11905,7 @@ fn route_edge_points_spline_with_obstacle_index(
         return orthogonal;
     }
 
-    let mut spline_points = Vec::with_capacity(orthogonal.len() + 1);
+    let mut spline_points: EdgePoints = SmallVec::with_capacity(orthogonal.len() + 1);
     spline_points.push(source);
     for window in orthogonal.windows(2) {
         let start = window[0];
@@ -11955,7 +11964,7 @@ fn find_obstacle_nudge_y(
     }
 }
 
-fn simplify_polyline(mut points: Vec<LayoutPoint>) -> Vec<LayoutPoint> {
+fn simplify_polyline(mut points: EdgePoints) -> EdgePoints {
     if points.len() <= 2 {
         return points;
     }

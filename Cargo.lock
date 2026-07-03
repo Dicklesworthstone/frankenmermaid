@@ -603,6 +603,7 @@ dependencies = [
  "nalgebra",
  "proptest",
  "serde_json",
+ "smallvec",
  "tracing",
  "tracing-subscriber",
 ]
