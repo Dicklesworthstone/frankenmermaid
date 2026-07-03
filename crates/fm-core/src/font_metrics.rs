@@ -340,10 +340,20 @@ impl FontMetrics {
     /// Estimate both width and height.
     #[must_use]
     pub fn estimate_dimensions(&self, text: &str) -> (f32, f32) {
-        (
-            self.estimate_multiline_width(text),
-            self.estimate_height(text),
-        )
+        // Single `lines()` traversal for both axes: the split-out `estimate_multiline_width`
+        // + `estimate_height` each scanned the whole string for '\n' independently, so every
+        // node label was walked twice. Fusing folds max-width and line-count in one pass.
+        // Byte-identical: same left-to-right `f32::max` over `estimate_width(line)` and the
+        // same `lines().count().max(1)` height (an empty string still yields 1 line).
+        let mut max_width = 0.0_f32;
+        let mut line_count: u32 = 0;
+        for line in text.lines() {
+            max_width = max_width.max(self.estimate_width(line));
+            line_count = line_count.saturating_add(1);
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let line_count_f32 = line_count.max(1) as f32;
+        (max_width, line_count_f32 * self.line_height_px())
     }
 
     /// Get the font size.
