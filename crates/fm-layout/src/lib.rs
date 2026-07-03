@@ -6860,8 +6860,19 @@ fn layered_ranks(ir: &MermaidDiagramIr) -> Vec<usize> {
     // array (a cache miss per `ir.nodes[idx].id` deref). Byte-identical (`ids[i]` is exactly
     // `ir.nodes[i].id`). Same lever as `build_tree_layout_structure`.
     let ids: Vec<&str> = ir.nodes.iter().map(|node| node.id.as_str()).collect();
-    let cmp_by_id =
-        |left: &usize, right: &usize| ids[*left].cmp(ids[*right]).then_with(|| left.cmp(right));
+    // Precompute a u64 sort key (first 8 id bytes, big-endian, zero-padded) so each comparison
+    // is an inline integer compare instead of a memcmp that chases the `&str` to the string
+    // bytes. Provably byte-identical: for text ids (no interior NUL) the packed-key order equals
+    // the first-8-byte lexicographic order, and the full `ids` compare stays as a lazy tie-break
+    // (runs only on key ties), so `key.cmp().then(ids.cmp()).then(index)` == the original
+    // `ids.cmp().then(index)`.
+    let id_keys: Vec<u64> = ids.iter().map(|s| pack_id_key(s)).collect();
+    let cmp_by_id = |left: &usize, right: &usize| {
+        id_keys[*left]
+            .cmp(&id_keys[*right])
+            .then_with(|| ids[*left].cmp(ids[*right]))
+            .then_with(|| left.cmp(right))
+    };
 
     let mut outgoing = vec![Vec::<usize>::new(); node_count];
     let mut indegree = vec![0_usize; node_count];
@@ -7034,6 +7045,24 @@ impl TreeChildren {
     }
 }
 
+/// Pack the first 8 bytes of an id into a big-endian, zero-padded `u64` so that `u64`
+/// comparison reproduces the byte-lexicographic order of those bytes. Zero-padding is
+/// order-preserving for text ids (which never contain an interior NUL): a shorter string's
+/// implicit trailing zeros sort before any real byte, exactly as a prefix sorts before its
+/// extensions. Used as the fast path for id-ordered node sorts; ties fall back to the full
+/// `&str` compare, so the overall ordering is unchanged.
+#[inline]
+fn pack_id_key(s: &str) -> u64 {
+    let b = s.as_bytes();
+    let mut k = 0u64;
+    let mut i = 0;
+    while i < 8 {
+        k = (k << 8) | u64::from(*b.get(i).unwrap_or(&0));
+        i += 1;
+    }
+    k
+}
+
 fn build_tree_layout_structure(ir: &MermaidDiagramIr) -> TreeLayoutStructure {
     let node_count = ir.nodes.len();
     let horizontal_depth_axis = matches!(ir.direction, GraphDirection::LR | GraphDirection::RL);
@@ -7056,8 +7085,19 @@ fn build_tree_layout_structure(ir: &MermaidDiagramIr) -> TreeLayoutStructure {
     // whereas a flat `&str` slice is cache-friendly. Byte-identical: `ids[i]` is exactly
     // `ir.nodes[i].id`, so every comparison and tie-break is unchanged.
     let ids: Vec<&str> = ir.nodes.iter().map(|node| node.id.as_str()).collect();
-    let cmp_by_id =
-        |left: &usize, right: &usize| ids[*left].cmp(ids[*right]).then_with(|| left.cmp(right));
+    // Precompute a u64 sort key (first 8 id bytes, big-endian, zero-padded) so each comparison
+    // is an inline integer compare instead of a memcmp that chases the `&str` to the string
+    // bytes. Provably byte-identical: for text ids (no interior NUL) the packed-key order equals
+    // the first-8-byte lexicographic order, and the full `ids` compare stays as a lazy tie-break
+    // (runs only on key ties), so `key.cmp().then(ids.cmp()).then(index)` == the original
+    // `ids.cmp().then(index)`.
+    let id_keys: Vec<u64> = ids.iter().map(|s| pack_id_key(s)).collect();
+    let cmp_by_id = |left: &usize, right: &usize| {
+        id_keys[*left]
+            .cmp(&id_keys[*right])
+            .then_with(|| ids[*left].cmp(ids[*right]))
+            .then_with(|| left.cmp(right))
+    };
 
     let mut outgoing = vec![Vec::new(); node_count];
     let mut indegree = vec![0_usize; node_count];
