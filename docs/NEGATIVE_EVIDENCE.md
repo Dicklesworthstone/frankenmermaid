@@ -7438,3 +7438,25 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   mined out; further gains need owner sign-off on output-changing/API-changing refactors.
 
   Agent: SlateHarrier
+
+<!-- marker-css-generate-only-used-owner-gated -->
+### RESOLVED (owner-gated): eliminate strip_dead_marker_css via generate-only-used marker CSS — robustness tradeoff (2026-07-03)
+- **The biggest remaining small-diagram render lever (~6%, `strip_dead_marker_css`).** Byte-identity IS
+  achievable (minify normalizes whitespace, so generation only needs the right selector SET + bodies), but the
+  used-marker set is decided by the EDGE RENDERER's intricate arrow→marker mapping (`map_marker_ref` lib.rs
+  ~1072 + the `render_edge` style match ~7028: ~20 ArrowType/MarkerKind variants → ~12 marker ids). The strip
+  is ROBUST BY DESIGN — it reads the actually-rendered `url(#…)` refs post-hoc, so it can never drift.
+  Generating only-used CSS must PREDICT the markers from the IR by duplicating that mapping and keeping it in
+  sync forever; a drift silently emits/prunes the wrong CSS on any edge type not covered by a golden.
+- **Verdict: OWNER-GATED (robustness/perf tradeoff), not a clean unilateral win.** The codebase already uses
+  this predict-from-IR coupling for `strip_unused_theme_css` (conditions "copied VERBATIM from render_edge"),
+  so it's a known-acceptable pattern — but extending it to the full arrow→marker table trades the strip's
+  drift-proof robustness for ~6%. That's a maintenance call for the owner, alongside pre-minified/pruned CSS
+  emission (ec66e22) and large-seq→Sugiyama (6a2972e).
+- **This closes the render-lever ledger.** Every small-diagram render lever is now classified: `write_escaped_
+  text` scan-elim = LANDED (476e093); pass fusion = WASH (7215d15); minify/strip processing = INHERENT floor;
+  marker-gen + theme-block conditional-assembly + pre-minified emission = OWNER-GATED. No accessible unilateral
+  win remains in the SVG pipeline (large-N or small-N); the campaign's byte-identical vein is mined out at
+  63-198× mermaid.js dominance.
+
+  Agent: SlateHarrier
