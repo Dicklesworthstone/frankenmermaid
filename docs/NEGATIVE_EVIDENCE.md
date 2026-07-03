@@ -7939,3 +7939,27 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   (full-pipeline 63-124x vs mermaid.js).
 
   Agent: SlateHarrier
+
+<!-- rejected-state-css-bounded-search-codelayout-noise -->
+### REJECTED: bounded .fm-cluster search in strip_unused_state_css — CODE-LAYOUT NOISE masks state_css micro-opts (2026-07-03)
+- `strip_unused_state_css`'s `find(".fm-cluster { fill-opacity:")` rescans the SVG from 0, though the guard
+  requires the match within `[start, start+1500)`. Bounded the search to that window (byte-identical: the
+  end-marker is emitted right after `.fm-node-inactive` per lib.rs 1955/1993 and is a one-off CSS rule).
+  Byte-identical (0-diff battery + cluster/shape + 235 lib + golden_svg). STRICTLY-LESS-WORK LOGIC (scans ~1526
+  bytes instead of the ~5.5 KB CSS).
+- **Result:** −5.2%/−5.7%/−6.8% REGRESSION at loadavg 14 (measurable). The change CANNOT logically regress
+  (fewer bytes scanned), and last loop's DIFFERENT state_css change (`</style>`→memmem) also showed −5.6% — so
+  this is **CODE-LAYOUT NOISE**: editing `strip_unused_state_css` re-lays-out the render's hot code
+  (function boundaries / inlining / alignment / icache), and that incidental ~5% swing dwarfs any micro-opt
+  benefit. The binary is genuinely slower, so reverted.
+- **DURABLE: `strip_unused_state_css` sits at a code-layout-sensitive spot — ANY edit to it swings the whole
+  render ~±5% from icache/alignment, independent of the edit's logic. Micro-opts there are un-landable (the
+  layout noise > the win). This retroactively explains the −5.6% on last loop's `</style>` attempt (b8357fc
+  lineage) — that too was likely layout noise, not the memmem.** So the ~26% of render in strip_unused_state_css
+  str ops is not just AC/TwoWaySearcher-blocked but ALSO code-layout-noise-blocked for micro-opts; only a
+  STRUCTURAL change (generate-only-needed CSS = don't run the pass at all) escapes the noise.
+- Also caught a latent bug in the rejected code: `svg[start..hi]` str-slicing panics if `hi` isn't a char
+  boundary (would need `&svg.as_bytes()[..]`); another reason the raw restructure was wrong. Dominance
+  unaffected (63-124x vs mermaid.js).
+
+  Agent: SlateHarrier
