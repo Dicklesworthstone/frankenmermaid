@@ -7698,3 +7698,27 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   hashing already FxHash+hash-once; allocation dominated by String interning, not this line Vec).
 
   Agent: SlateHarrier
+
+<!-- surface-memchr-opt3-candidate-load-blocked -->
+### SURFACE (unmeasurable under load): memchr opt=3 candidate + persistent measurement blocker (2026-07-03)
+- **Candidate (byte-identical, plausible, NOT verified):** `[profile.release]` opt-levels are fully tuned —
+  workspace default opt="z", opt=3 for the 4 hot crates (fm-layout/parser/render-svg/core), lto=fat,
+  codegen-units=1, panic=abort, target-cpu=x86-64-v2. But `memchr` — now a byte-scan HOT PATH (fm-render-svg's
+  CSS-post-pass memmem `Finder::find` ~5% of small render; fm-parser newline count) — is a dependency, so it
+  inherits opt="z". The Cargo.toml comment's OWN rationale ("opt='z' disables the inlining/vectorization the
+  byte-scan hot paths depend on") argues for bumping it to opt=3 (with a matching wasm-side "z" override to
+  keep the bundle small). opt=3 >= opt=z for runtime speed by construction, so worst case is a wash.
+- **Why REVERTED unmeasured:** the machine was at **loadavg 55-98 for this entire session** (a shared rch
+  worker saturating cores). Render A/B is bimodally frequency-scaled — flowchart-60 render alternated between
+  ~80k ns (full freq) and ~135k ns (throttled) round-to-round, giving deltas from −57% to +36%. The min-of-10
+  hint (−9%) is untrustworthy (old vs new caught different freq states). Unlike a leaf primitive, an
+  opt-level effect on the full render pipeline can't be isolated into a load-robust rustc -O micro-bench.
+  Per the session discipline (never land an unmeasured perf change — it caught 4 regressions: state_css memmem,
+  theme_css replace_range, parse per-line memchr, line-Vec presize), I did not ship it on faith.
+- **ACTION FOR OWNER / next low-load loop:** re-measure `[profile.release.package.memchr] opt-level=3`
+  (+ wasm "z" override) with a clean release A/B when loadavg < ~10; it's a one-line byte-identical config
+  change that likely helps the memmem-heavy render passes. Also un-blocked then: the x86-64-v3 (AVX2) target-cpu
+  bump (owner portability call — raises min CPU to Haswell 2013+, comment already documents it).
+- Dominance unaffected (full-pipeline 63-124x vs mermaid.js, Chromium).
+
+  Agent: SlateHarrier
