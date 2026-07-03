@@ -7413,3 +7413,28 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   eliminated a per-byte SCAN entirely (bulk copy); fusing passes doesn't eliminate any processing.
 
   Agent: SlateHarrier
+
+<!-- small-diagram-frontier-fully-mapped-surfaced -->
+### SURFACED: common-case (small-diagram) frontier fully mapped — accessible wins done, remainder inherent/owner-gated (2026-07-03)
+- **Completed the small-diagram (8-node, the realistic common case) characterization** after landing the
+  `write_escaped_text` fast-path (476e093) and rejecting the CSS post-pass fusion (7215d15). Full pipeline
+  ~78µs = parse 3µs / layout 8µs / render 64µs (render 82%).
+- **RENDER (64µs, ~46% fixed CSS post-processing):** `minify_css` whitespace-collapse ~12% and
+  `strip_dead_marker_css` rule-parse ~6% are at their PROCESSING floor (fusing passes = wash, 7215d15;
+  `write_escaped_text` scan-elimination WAS landable, 476e093). Remaining: `strip_unused_theme_css` ~2% (4×
+  `css.replace` rebuilds — batchable to 1, but ~1% & likely a wash like the fusion); marker-CSS "generate only
+  used" ~6% (byte-identical since strip removes dead rules anyway, BUT the rules are GROUPED selectors in a
+  `theme.rs` constant + interact with minify's whitespace-collapse — a delicate moderate refactor);
+  theme-block conditional-assembly ~2% (blocks emitted INLINE in `to_svg_style`, coupled to matching consts —
+  moderate refactor). None clean/accessible.
+- **LAYOUT (8µs) — NEW profile, was only ever done at large-N:** dominated by the INHERENT Brandes-Köpf
+  coordinate assignment (`bk_vertical_alignment` 13%, `brandes_kopf_secondary_coords` 20%, `bk_horizontal_
+  compaction` 4%, `cycle_removal` 3%) — the actual O(V+E) algorithm, NOT fixed overhead (no GraphMetrics/
+  dispatch/selection in the hot set). No fixed-overhead lever; the absolute is tiny (8µs).
+- **Conclusion:** the common-case frontier is now mapped end-to-end. The unilateral byte-identical accessible
+  wins are captured; the remainder is INHERENT (BK, minify/strip processing) or OWNER-GATED / delicate-moderate-
+  refactor (generate-only-used CSS, pre-minified emission). Combined with the large-N frontier (all types
+  linear, O(N²) fixed) and the measured 63-198× mermaid.js dominance, the perf campaign's unilateral vein is
+  mined out; further gains need owner sign-off on output-changing/API-changing refactors.
+
+  Agent: SlateHarrier
