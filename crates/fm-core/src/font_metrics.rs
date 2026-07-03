@@ -6,6 +6,29 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Invoke `f` on each line of `text`, byte-identically to [`str::lines`], but locate the `'\n'`
+/// separators with a SIMD `memchr` scan instead of std's UTF-8-decoding `CharSearcher` (which
+/// showed as ~2.5% of layout self-time on node-label sizing). Semantics match `str::lines`
+/// exactly: split on `'\n'`; strip a single trailing `'\r'` only when it immediately precedes a
+/// `'\n'` (a lone `'\r'` is kept); and emit no trailing empty segment when `text` ends in `'\n'`.
+#[inline]
+fn for_each_line(text: &str, mut f: impl FnMut(&str)) {
+    let bytes = text.as_bytes();
+    let mut start = 0usize;
+    for nl in memchr::memchr_iter(b'\n', bytes) {
+        let mut end = nl;
+        if end > start && bytes[end - 1] == b'\r' {
+            end -= 1;
+        }
+        // `'\n'`/`'\r'` are ASCII, so `start`/`end` land on char boundaries.
+        f(&text[start..end]);
+        start = nl + 1;
+    }
+    if start < bytes.len() {
+        f(&text[start..]);
+    }
+}
+
 /// Returns true for characters that occupy approximately 2 columns in
 /// monospace/proportional fonts — CJK ideographs, fullwidth forms, and
 /// common emoji. Based on UAX #11 East Asian Width property (W/F categories).
@@ -317,9 +340,11 @@ impl FontMetrics {
     /// Estimate the width of multi-line text (returns max line width).
     #[must_use]
     pub fn estimate_multiline_width(&self, text: &str) -> f32 {
-        text.lines()
-            .map(|line| self.estimate_width(line))
-            .fold(0.0_f32, f32::max)
+        // `memchr`-split lines fed through the same left-to-right `f32::max` from a 0.0 seed
+        // (empty text yields 0.0, matching `fold(0.0, f32::max)` on an empty `lines()`).
+        let mut max_width = 0.0_f32;
+        for_each_line(text, |line| max_width = max_width.max(self.estimate_width(line)));
+        max_width
     }
 
     /// Get the height of a single line.
@@ -331,7 +356,13 @@ impl FontMetrics {
     /// Estimate the height of text (multi-line aware).
     #[must_use]
     pub fn estimate_height(&self, text: &str) -> f32 {
-        let line_count = text.lines().count().max(1);
+        // `str::lines().count()` == number of `'\n'` plus one when the text is non-empty and
+        // does not end in `'\n'` (no trailing empty line). Counting `'\n'` with `memchr` avoids
+        // materializing/scanning line slices for the height-only path.
+        let bytes = text.as_bytes();
+        let newline_count = memchr::memchr_iter(b'\n', bytes).count();
+        let trailing = usize::from(!bytes.is_empty() && bytes[bytes.len() - 1] != b'\n');
+        let line_count = (newline_count + trailing).max(1);
         #[allow(clippy::cast_precision_loss)]
         let line_count_f32 = u32::try_from(line_count).unwrap_or(u32::MAX) as f32;
         line_count_f32 * self.line_height_px()
@@ -347,10 +378,10 @@ impl FontMetrics {
         // same `lines().count().max(1)` height (an empty string still yields 1 line).
         let mut max_width = 0.0_f32;
         let mut line_count: u32 = 0;
-        for line in text.lines() {
+        for_each_line(text, |line| {
             max_width = max_width.max(self.estimate_width(line));
             line_count = line_count.saturating_add(1);
-        }
+        });
         #[allow(clippy::cast_precision_loss)]
         let line_count_f32 = line_count.max(1) as f32;
         (max_width, line_count_f32 * self.line_height_px())

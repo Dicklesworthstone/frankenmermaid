@@ -582,6 +582,7 @@ name = "fm-core"
 version = "0.1.0"
 dependencies = [
  "franken-kernel",
+ "memchr",
  "rustc-hash",
  "serde",
  "serde_json",

@@ -12,6 +12,9 @@ homepage.workspace = true
 
 [dependencies]
 franken-kernel.workspace = true
+# Already in the workspace lock (transitively via fm-parser); promoting to a direct dep is
+# zero bundle cost and exposes memchr's SIMD `\n` scan for the font-metrics line splitters.
+memchr = "2"
 rustc-hash.workspace = true
 serde.workspace = true
 serde_json.workspace = true
