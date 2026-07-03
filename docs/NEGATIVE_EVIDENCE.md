@@ -6984,3 +6984,33 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   dead end.
 
   Agent: SlateHarrier
+
+<!-- node-class-keyword-single-pass-landed -->
+### LANDED: single-pass node-class keyword scan (11 substring sweeps → 1) — styled render ~1%, byte-identical (2026-07-02)
+- **Profiling the class pipeline showed `contains_ascii_ci` + inlined children (`eq_ignore_ascii_case`,
+  the `windows`/`zip` closures) at ~10% self-time.** The per-node loop (render_node, lib.rs ~4718) ran up to
+  **11 separate `contains_ascii_ci` substring sweeps per class per node** (highlight/selected/active/focus/
+  important/inactive/dim/muted/disabled/dashed-border/border-dashed/double-border/border-double), each a full
+  window scan of the class string.
+- **Fix:** `scan_node_class_keywords(class)` does **one** case-insensitive pass over the class bytes,
+  dispatching on the lowercased first byte (`b | 0x20` — a 1-level trie / hand-rolled Aho-Corasick root) so a
+  keyword's full compare (`matches_ci_at`) only runs at a candidate start byte. Replaces the 11 OR-chained
+  `contains_ascii_ci` calls; exact-match keywords (`c4-external`/`block-beta`/`block-beta-space`) stay as
+  `eq_ignore_ascii_case`. `contains_ascii_ci` deleted (sole caller). Strictly monotonic less work.
+- **Byte-identical:** `b | 0x20` maps both ASCII cases of any letter to its lowercase, so every position the
+  old per-needle scan matched is routed to that needle's `matches_ci_at`, which re-verifies the full substring
+  (no false positives from the loose dispatch). Locked by a new differential unit test
+  (`scan_node_class_keywords_matches_contains_reference`, 34 cases incl. uppercase / embedded / boundary /
+  near-miss) + golden `flowchart_classdef` + 235 fm-render-svg lib tests, all GREEN; clippy clean.
+- **MEASURED (clean same-machine A/B, profharness `styled 300 render` — flowchart, every node `:::class`,
+  min-ns over 8k iters, alternated 8×):** OLD ~106.5k → NEW ~105.4k = **~1%, NEW faster in 14/16 rounds**
+  (across `styled` + `styled3`). **Below the ≥3% keeper bar** on realistic inputs — landed only because it is
+  byte-identical + strictly-less-work (same basis as intern-hash-once 4c0cd5e), not on the timing alone.
+- **CALIBRATION FINDING (the real value):** the profile's ~10% was a **malformed synthetic-input artifact** —
+  profharness's single-line class bodies (`class C0 { +int f0 +m0() }`) misparse into ~4 garbage multi-token
+  classes per node (`"{ +int f0 +m0() }"`, `"}"`, …), so the keyword loop scanned long dirty strings. On
+  well-formed styled diagrams (one short class token per node) the loop is only ~1-2% of render. LESSON:
+  verify a synthetic profiling input actually parses to the intended IR before trusting a hotspot % from it —
+  a misparse can inflate a leaf 5-10× and manufacture a false frontier.
+
+  Agent: SlateHarrier

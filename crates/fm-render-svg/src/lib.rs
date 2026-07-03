@@ -1331,21 +1331,95 @@ fn clamp_unit_interval(value: f32) -> f32 {
     value.clamp(0.0, 1.0)
 }
 
-/// Whether `haystack` contains `needle` as an ASCII-case-insensitive substring, without allocating a
-/// lowercased copy. `needle` must be lowercase ASCII. Byte-identical to
-/// `haystack.to_ascii_lowercase().contains(needle)` for ASCII keywords, but skips the per-class
-/// `to_ascii_lowercase` allocation and the `str::contains` `TwoWaySearcher` construction — the
-/// per-node-class keyword scan (highlight/selected/… ~15 needles) ran both on EVERY styled node.
-fn contains_ascii_ci(haystack: &str, needle: &str) -> bool {
-    let (h, n) = (haystack.as_bytes(), needle.as_bytes());
-    if n.is_empty() {
-        return true;
+/// The substring-keyword flags a single node class can raise (highlight/inactive/dashed/double
+/// border). Exact-match keywords (`c4-external`, `block-beta`, …) are handled by the caller.
+#[derive(Default)]
+struct NodeClassKeywords {
+    highlighted: bool,
+    inactive: bool,
+    dashed_border: bool,
+    double_border: bool,
+}
+
+/// Whether `needle` (lowercase ASCII) equals `haystack[at..]`'s prefix, case-insensitively.
+#[inline]
+fn matches_ci_at(haystack: &[u8], at: usize, needle: &[u8]) -> bool {
+    haystack.len() - at >= needle.len()
+        && haystack[at..at + needle.len()]
+            .iter()
+            .zip(needle)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+}
+
+/// Single-pass ASCII-case-insensitive keyword scan for one node class. Replaces the ~11 separate
+/// `contains_ascii_ci` substring scans that ran on EVERY styled node (each a full window sweep) with
+/// one pass over the class bytes, dispatching on the lowercased first byte (`b | 0x20`) — a 1-level
+/// trie / hand-rolled Aho-Corasick root — so a keyword's full compare only runs at a candidate start
+/// byte. Byte-identical to OR-ing the individual `to_ascii_lowercase().contains(needle)` checks it
+/// replaces: `b | 0x20` maps both cases of any ASCII letter to its lowercase, so every position that
+/// the old per-needle scan would match is routed to that needle's `matches_ci_at`, which re-verifies
+/// the full substring (no false positives from the loose first-byte dispatch).
+fn scan_node_class_keywords(class: &str) -> NodeClassKeywords {
+    let b = class.as_bytes();
+    let mut f = NodeClassKeywords::default();
+    for i in 0..b.len() {
+        match b[i] | 0x20 {
+            b'h' => {
+                if matches_ci_at(b, i, b"highlight") {
+                    f.highlighted = true;
+                }
+            }
+            b's' => {
+                if matches_ci_at(b, i, b"selected") {
+                    f.highlighted = true;
+                }
+            }
+            b'a' => {
+                if matches_ci_at(b, i, b"active") {
+                    f.highlighted = true;
+                }
+            }
+            b'f' => {
+                if matches_ci_at(b, i, b"focus") {
+                    f.highlighted = true;
+                }
+            }
+            b'i' => {
+                if matches_ci_at(b, i, b"important") {
+                    f.highlighted = true;
+                }
+                if matches_ci_at(b, i, b"inactive") {
+                    f.inactive = true;
+                }
+            }
+            b'm' => {
+                if matches_ci_at(b, i, b"muted") {
+                    f.inactive = true;
+                }
+            }
+            b'd' => {
+                if matches_ci_at(b, i, b"dim") || matches_ci_at(b, i, b"disabled") {
+                    f.inactive = true;
+                }
+                if matches_ci_at(b, i, b"dashed-border") {
+                    f.dashed_border = true;
+                }
+                if matches_ci_at(b, i, b"double-border") {
+                    f.double_border = true;
+                }
+            }
+            b'b' => {
+                if matches_ci_at(b, i, b"border-dashed") {
+                    f.dashed_border = true;
+                }
+                if matches_ci_at(b, i, b"border-double") {
+                    f.double_border = true;
+                }
+            }
+            _ => {}
+        }
     }
-    if n.len() > h.len() {
-        return false;
-    }
-    h.windows(n.len())
-        .any(|w| w.iter().zip(n).all(|(a, b)| a.eq_ignore_ascii_case(b)))
+    f
 }
 
 fn sanitize_css_token(value: &str) -> String {
@@ -4708,36 +4782,21 @@ fn render_node(
 
     if let Some(node) = ir_node {
         for class in &node.classes {
-            // ASCII-case-insensitive keyword checks run directly on `class` via `contains_ascii_ci` /
-            // `eq_ignore_ascii_case` — no per-class `to_ascii_lowercase` allocation and no
-            // `str::contains` `TwoWaySearcher` setup (byte-identical to the old lowercase-then-contains).
+            // One case-insensitive pass over `class` raises all substring keyword flags at once
+            // (highlight/inactive/dashed/double border) — byte-identical to the old per-needle
+            // `contains_ascii_ci` OR-chains, without allocating a lowercased copy or sweeping the
+            // class string ~11 times. Exact-match keywords stay as `eq_ignore_ascii_case`.
             let sanitized = sanitize_css_token(class);
             if !sanitized.is_empty() {
                 group = group.class_prefixed("fm-node-user-", &sanitized);
             }
-            if contains_ascii_ci(class, "highlight")
-                || contains_ascii_ci(class, "selected")
-                || contains_ascii_ci(class, "active")
-                || contains_ascii_ci(class, "focus")
-                || contains_ascii_ci(class, "important")
-            {
-                is_highlighted = true;
-            }
-            if contains_ascii_ci(class, "inactive")
-                || contains_ascii_ci(class, "dim")
-                || contains_ascii_ci(class, "muted")
-                || contains_ascii_ci(class, "disabled")
-            {
-                is_inactive = true;
-            }
-            if contains_ascii_ci(class, "dashed-border") || contains_ascii_ci(class, "border-dashed") {
-                dashed_border = true;
-            }
+            let kw = scan_node_class_keywords(class);
+            is_highlighted |= kw.highlighted;
+            is_inactive |= kw.inactive;
+            dashed_border |= kw.dashed_border;
+            double_border |= kw.double_border;
             if class.eq_ignore_ascii_case("c4-external") {
                 dashed_border = true;
-            }
-            if contains_ascii_ci(class, "double-border") || contains_ascii_ci(class, "border-double") {
-                double_border = true;
             }
             if class.eq_ignore_ascii_case("block-beta") {
                 is_block_beta = true;
@@ -10611,6 +10670,74 @@ marker#arrow-open path {
     }
 
     // ─── Incremental layout engine integration test ───
+
+    #[test]
+    fn scan_node_class_keywords_matches_contains_reference() {
+        // Reference: the pre-single-pass logic — OR of case-insensitive substring checks.
+        fn ci_contains(h: &str, n: &str) -> bool {
+            let (hb, nb) = (h.as_bytes(), n.as_bytes());
+            !nb.is_empty()
+                && nb.len() <= hb.len()
+                && hb
+                    .windows(nb.len())
+                    .any(|w| w.iter().zip(nb).all(|(a, b)| a.eq_ignore_ascii_case(b)))
+        }
+        fn reference(class: &str) -> (bool, bool, bool, bool) {
+            let highlighted = ["highlight", "selected", "active", "focus", "important"]
+                .iter()
+                .any(|k| ci_contains(class, k));
+            let inactive = ["inactive", "dim", "muted", "disabled"]
+                .iter()
+                .any(|k| ci_contains(class, k));
+            let dashed = ci_contains(class, "dashed-border") || ci_contains(class, "border-dashed");
+            let double = ci_contains(class, "double-border") || ci_contains(class, "border-double");
+            (highlighted, inactive, dashed, double)
+        }
+        let cases = [
+            "",
+            "a",
+            "highlight",
+            "HIGHLIGHT",
+            "HighLight",
+            "my-highlight-node",
+            "prefixSelectedSuffix",
+            "ACTIVE",
+            "focus",
+            "important",
+            "inactive",
+            "dim",
+            "muted",
+            "disabled",
+            "dashed-border",
+            "border-dashed",
+            "double-border",
+            "BORDER-DOUBLE",
+            "fm-node",
+            "fm-node-accent-8",
+            "fm-node-shape-rect",
+            "serviceNodeStyle",
+            "regionUsEastPrimary",
+            "observabilityDashboard",
+            "c4-external",
+            "block-beta",
+            "block-beta-space",
+            "dimmed-but-active-highlight",
+            "borderish",
+            "highligh",       // one char short of a match
+            "doubleborder",   // no hyphen — must NOT match
+            "high-light",     // hyphen splits keyword — must NOT match
+            "muTeDim",        // overlapping starts
+            "DisabledInactiveDim",
+        ];
+        for c in cases {
+            let got = scan_node_class_keywords(c);
+            assert_eq!(
+                (got.highlighted, got.inactive, got.dashed_border, got.double_border),
+                reference(c),
+                "single-pass keyword scan diverged from contains-reference for {c:?}"
+            );
+        }
+    }
 
     #[test]
     fn incremental_engine_reuses_layout_on_label_edit() {
