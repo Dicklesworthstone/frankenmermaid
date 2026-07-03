@@ -2692,3 +2692,31 @@ notes = [
 [post_measurement_parse_phase_npm_2026_07_03.decision]
 kept = true
 reason = "Corroborates the recorded full-pipeline 63-124x dominance with an independent parse-phase, npm-package, headless measurement: frankenmermaid parse is ~70-100x faster than mermaid.js on identical inputs AND scales past mermaid's 500-edge limit. No frankenmermaid code change — a measurement/provenance record only."
+
+[post_measurement_parse_phase_per_type_2026_07_03]
+agent = "SlateHarrier"
+date = "2026-07-03"
+status = "measured"
+modality = "PARSE-PHASE per-diagram-type head-to-head via mermaid npm headless (mermaid@11 mermaid.parse), broadening the prior flowchart-only parse record to ER and SEQUENCE. Identical inputs, same machine; frankenmermaid = fm_parser::parse min-of-5x2000, mermaid = min-of-5x100, both warmed."
+notes = [
+  "Headless mermaid.parse works for flowchart / er / sequence; STATE and CLASS throw `DOMPurify.sanitize is not a function` (need a DOM) so are not headless-comparable via npm.",
+  "Dominance is HIGHER for er (165x) and sequence (198x) than flowchart (110x): mermaid's jison grammars for relationship-cardinality (`||--o{`) and message operators (`->>`) are relatively slow, while frankenmermaid uses dedicated byte fast-paths.",
+  "200-node inputs. frankenmermaid parse builds the full IR (>= mermaid.parse work), so ratios are conservative.",
+]
+
+[post_measurement_parse_phase_per_type_2026_07_03.metrics]
+"parse/flowchart/200_2580B_mermaid_js_us" = 6620.1
+"parse/flowchart/200_2580B_frankenmermaid_us" = 60.4
+"parse/er/200_4766B_mermaid_js_us" = 19739.8
+"parse/er/200_4766B_frankenmermaid_us" = 119.8
+"parse/sequence/200_3105B_mermaid_js_us" = 17308.3
+"parse/sequence/200_3105B_frankenmermaid_us" = 87.3
+
+[post_measurement_parse_phase_per_type_2026_07_03.ratios]
+"parse_flowchart_200_mermaid_js_over_frankenmermaid" = 109.6
+"parse_er_200_mermaid_js_over_frankenmermaid" = 164.8
+"parse_sequence_200_mermaid_js_over_frankenmermaid" = 198.3
+
+[post_measurement_parse_phase_per_type_2026_07_03.decision]
+kept = true
+reason = "Broadens the measured parse dominance beyond flowchart to er (165x) and sequence (198x) — dominance holds and strengthens across diagram types. Measurement/provenance record only; no frankenmermaid code change."
