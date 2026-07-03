@@ -7671,3 +7671,30 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   scalar gates. Those are the mature/structural frontier.
 
   Agent: SlateHarrier
+
+<!-- rejected-parse-lines-presize -->
+### REJECTED: presize the flowchart line Vec<(usize,&str)> — count scan costs more than the reallocs it saves (2026-07-03)
+- `parse_flowchart_document` collects lines into `Vec<(usize,&str)>` via `byte_lines(input).collect()`;
+  `ByteLines` has no `size_hint`, so the Vec grows 0->4->8->16->... Presized it with a memchr newline count +
+  `Vec::with_capacity` (byte-identical, 0-diff render battery + 406 parser tests). Measured via an ISOLATED
+  interleaved micro-bench (rustc -O standalone, load-robust — the machine was at loadavg 80-98 from a shared
+  rch worker, so a release A/B would be pure noise).
+- **Isolated result (3 runs, min-ns):** realloc_savings (unpresized collect − const-presized collect) = only
+  **20-40 ns**; the newline count alone costs ~470 ns scalar / ~70-100 ns even as memchr. So presize = spend
+  70-100 ns to save 20-40 ns → **net regression** (~−28% on the isolated collect with scalar count; still a
+  loss with memchr).
+- **Why (durable, refutes "presize is always good"):** with a good allocator (mimalloc, this crate's global),
+  growing a SMALL Vec reallocs mostly IN-PLACE (extend the block) — the reallocs are nearly free (~30 ns
+  total for 60 elements). Adding ANY whole-input count scan to enable presizing costs MORE than the near-free
+  reallocs it removes. Presize wins only when (a) the element count is ALREADY known (no extra scan — e.g.
+  IrBuilder::with_capacity_hint uses the newline count computed ONCE at the top level, 152d936), or (b) the
+  Vec is large enough that out-of-place reallocs + big copies dominate. A per-parse Vec of ~60 small tuples is
+  neither.
+- **METHOD VALUE:** the isolated interleaved micro-bench (rustc -O, ratio in one process) gave a clean verdict
+  under loadavg 80-98 where the release A/B was unrunnable — and CAUGHT a regression that byte-identity +
+  "presize theory" would have shipped. Always isolate the exact tradeoff (realloc savings vs count cost) rather
+  than trust "presize = free".
+- Dominance unaffected (full-pipeline 63-124x vs mermaid.js). Parse frontier remains structural (interning/
+  hashing already FxHash+hash-once; allocation dominated by String interning, not this line Vec).
+
+  Agent: SlateHarrier
