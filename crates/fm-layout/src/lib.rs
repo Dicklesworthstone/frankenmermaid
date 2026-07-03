@@ -11286,7 +11286,14 @@ fn build_edge_paths_with_orientation(
         None
     };
 
-    ir.edges
+    // Presize to `ir.edges.len()` (the max; `filter_map` only drops unresolved-endpoint edges) so
+    // the `Vec<LayoutEdgePath>` fills without the log(N) growth reallocs a `filter_map().collect()`
+    // pays — `filter_map`'s 0 lower size-hint gives `collect` no starting capacity, so it doubles and
+    // memcpys the fat `LayoutEdgePath` structs repeatedly. `edges.len()` is O(1) (no scan), so this
+    // is a strict win; byte-identical (same elements, same order).
+    let mut edge_paths = Vec::with_capacity(ir.edges.len());
+    let routed = ir
+        .edges
         .iter()
         .enumerate()
         .filter_map(|(edge_index, edge)| {
@@ -11375,8 +11382,9 @@ fn build_edge_paths_with_orientation(
                 bundle_count: 1,
                 bundled: false,
             })
-        })
-        .collect()
+        });
+    edge_paths.extend(routed);
+    edge_paths
 }
 
 /// Route a self-loop edge: goes out one side and returns on another.
