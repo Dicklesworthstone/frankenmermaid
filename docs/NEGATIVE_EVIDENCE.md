@@ -7550,3 +7550,22 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   Remaining: `strip_unused_state_css` (~20 self-scans) + `strip_unused_theme_css` (`replace(LARGE_CONST)`).
 
   Agent: SlateHarrier
+
+<!-- rejected-state-css-memmem -->
+### REJECTED: memchr::memmem in strip_unused_state_css — WASH/tiny regression (str::contains is ALREADY simd_contains) (2026-07-03)
+- Follow-up to 044f531 (which flagged `strip_unused_state_css` ~20 self-scans as a remaining memmem target).
+  Converted all its `find`/`contains` to memmem, byte-identical (0-diff 11-type battery). But same-machine
+  alternated A/B (release, flowchart-60 render, the common case) showed a CONSISTENT **−0.2 to −0.6% (slower)**
+  across all 6 rounds — a real tiny regression, not noise. Reverted.
+- **Why (refines the 044f531 lesson):** `strip_unused_state_css` uses mostly `str::contains` (STATE_CLASSES,
+  `fm-node-accent-N`, `var(--fm-accent-N)`), and **`str::contains` is ALREADY SIMD** — std dispatches short
+  needles to `core::str::pattern::simd_contains` (visible in the 044f531 profile at 1.24% self-time). So
+  `contains → memmem` swaps one SIMD scan for another and ADDS `memmem::Finder` construction per call → net
+  slower. The 044f531 win came specifically from `str::find` (which uses the NON-SIMD `TwoWaySearcher`) in
+  LOOPS where a hoisted `Finder` also removed per-iteration construction.
+- **DURABLE RULE:** memmem beats `str::find` (TwoWaySearcher, scalar) — especially hoisted out of a loop — but
+  does NOT beat `str::contains` (already `simd_contains`). Convert `.find(<multi-byte &str>)`; LEAVE
+  `.contains(...)`. The remaining `strip_unused_theme_css` `replace(LARGE_CONST)` is a `str::replace` (find +
+  rebuild) whose needle is huge; it MAY still win but was not measured this loop.
+
+  Agent: SlateHarrier
