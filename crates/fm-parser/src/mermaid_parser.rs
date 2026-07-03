@@ -237,11 +237,12 @@ pub fn parse_mermaid_with_detection_and_config(
     let (content, front_matter_payload) = split_front_matter_block(input);
     let diagram_type = detection.diagram_type;
     // Capacity hint only (feeds `with_capacity_hint`'s node/edge estimates — no semantic
-    // effect), so an approximate line count is fine. A byte `\n` filter (auto-vectorizable)
-    // replaces `content.lines().count()`, whose `str::lines()` splits on the `char` `'\n'`
-    // via `CharSearcher` — a full-input single-`char` scan measured as a top parse self-time
-    // symbol. `+ 1` matches `lines()` for input without a trailing newline.
-    let input_lines = content.bytes().filter(|&b| b == b'\n').count() + 1;
+    // effect), so an approximate line count is fine. Count `\n` with memchr's SIMD scan: the
+    // scalar `filter(..).count()` (and the equivalent `map(bool).sum()`) does NOT auto-vectorize
+    // at opt=3/x86-64-v2 and profiled ~4.8% self; memchr's `\n` count measured ~14× faster on
+    // realistic input, byte-identical (exact `\n` count). memchr is already in the build graph via
+    // chumsky, so no bundle cost. `+ 1` matches `str::lines()` for input without a trailing newline.
+    let input_lines = memchr::memchr_iter(b'\n', content.as_bytes()).count() + 1;
     let mut builder = IrBuilder::with_capacity_hint(diagram_type, input_lines);
     builder.set_parse_mode(parse_mode);
     builder.set_parser_config(*config);

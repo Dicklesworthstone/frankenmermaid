@@ -615,6 +615,7 @@ dependencies = [
  "criterion",
  "fm-core",
  "json5",
+ "memchr",
  "proptest",
  "rustc-hash",
  "serde",

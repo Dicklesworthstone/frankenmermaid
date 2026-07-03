@@ -7128,3 +7128,32 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   here (2.7% self in `RangeInclusive::next`), unlike a comparator swap on a movement-bound sort (rejected 1845f3a).
 
   Agent: SlateHarrier
+
+<!-- parse-newline-count-memchr-landed -->
+### LANDED: capacity-hint newline count via memchr SIMD (was scalar filter/count) — parse ~1.5-1.8%, byte-identical (2026-07-03)
+- **Clean parse-only profile (flowchart 1000) flagged the capacity-hint line count at ~4.8% self:**
+  `content.bytes().filter(|&b| b == b'\n').count()` in `parse_mermaid_with_detection_and_config`
+  (feeds `with_capacity_hint`; no semantic effect, so an exact-but-cheaper count is free to swap).
+- **REJECTED intermediate (kept as a lesson):** reformulating to a branchless `map(|&b| (b==b'\n') as
+  usize).sum()` — hoping for auto-vectorization — is a **WASH**. Isolated interleaved micro-bench + isolated
+  disassembly: NEITHER `filter().count()` NOR `map().sum()` auto-vectorizes at `opt=3` / `target-cpu=x86-64-v2`
+  (SIMD byte-count-to-`usize` needs the `psadbw` trick LLVM won't emit here); both compile to the same scalar
+  loop (~1.90e6 µs for 200k×2000-line counts, identical).
+- **Fix:** `memchr::memchr_iter(b'\n', content.as_bytes()).count()` — memchr's hand-tuned SIMD. **memchr is
+  already in the build graph via `chumsky` (a direct fm-parser dep) and `serde_json`, so the direct dep adds
+  ZERO code to the native binary or wasm bundle.** Byte-identical (exact `\n` count; 406 fm-parser lib +
+  golden_svg + golden_layout green; clippy clean).
+- **MEASURED:** isolated interleaved micro-bench (load-independent — a ratio inside one process, immune to the
+  loadavg-48 throttling that corrupted full-pipeline timing) = memchr **14× faster** than the scalar count
+  (ratio 0.07, 6/6 rounds, equal counts). Full parse A/B (profharness `flowchart <N> parse`, turbo-catching
+  250-iter interleaved ×14): **−1.5% (1000) / −1.8% (300), NEW faster 13/14 both** (smaller than 14× because
+  the count is partly memory-bound in-pipeline, and it's ~4.8% of parse). Broad — the line count runs for
+  EVERY diagram parse. rch skipped: −1.5% is below its ~3% cross-run drift floor; the isolated ratio is the
+  stronger, load-independent evidence.
+- **META:** (1) auto-vectorization of a byte count is UNRELIABLE — verify with isolated asm/micro-bench before
+  assuming a reformulation vectorizes (the map→sum "win" was a wash). (2) When a needed SIMD primitive already
+  rides in via a transitive dep (`cargo tree -i memchr`), promoting it to a direct dep is free. (3) An isolated
+  interleaved micro-bench of the hot PRIMITIVE gives a clean win/no-win verdict even when the machine is far
+  too loaded (loadavg 48) to time the full phase.
+
+  Agent: SlateHarrier
