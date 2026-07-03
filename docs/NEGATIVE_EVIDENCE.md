@@ -7075,3 +7075,28 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   functions may share this BTreeMap-where-a-dense-Vec-suffices pattern. Worth a sweep.
 
   Agent: SlateHarrier
+
+<!-- tree-layout-id-rank-sort-key-rejected -->
+### REJECTED: precompute u32 id-rank to replace cmp_by_id string comparison in build_tree_layout_structure — sort is MERGE-bound (2026-07-03)
+- **Lever:** `build_tree_layout_structure` (fm-layout) sorts three things by `cmp_by_id` =
+  `ids[l].cmp(ids[r]).then(l.cmp(r))` (a `&str` comparator): per-node `neighbors` (run N times), all
+  `sorted_nodes`, and each `children` slice. Idea: sort node indices by id ONCE into a `u32` `id_rank[node]`,
+  then have `cmp_by_id` compare `id_rank[l].cmp(&id_rank[r])` (cheap int) instead of `&str`. Byte-identical
+  (id_rank encodes the same strict total order — 428 lib + golden_layout + golden_svg green, clippy clean).
+- **Profile that motivated it:** wide-grid (900n) layout, `build_tree_layout_structure` 6.2% self +
+  `drift::sort::<usize, …closure#1>` (cmp_by_id) 4.3% self.
+- **Verdict — ~0 / likely slight regression on realistic inputs.** The 4.3% "sort" self-time is dominated by
+  `logical_merge` + `merge_up` (3.48% + 3.41%) — i.e. the drift sort's **element memmove**, NOT the
+  comparator. For typical SHORT node ids ("N0".."N899", "A", …) a `&str` compare is 1-3 bytes ≈ a `u32`
+  compare, so swapping the comparator doesn't touch the dominant (merge/movement) cost. Worse, the id_rank
+  build ADDS a full `&str` sort of N (`sorted_nodes` sorted by id *is* that same order — sorted twice unless
+  further restructured). Local A/B was inconclusive (machine under heavy multi-agent load → freq-corrupted
+  wall time, mins 5× inflated vs an unloaded parity run; deltas scattered −4.7%..+12.3%, centered ~0).
+- **Do-not-retry / lesson:** a sort flagged hot in a profile is NOT automatically comparator-bound — check
+  whether the self-time is in the COMPARATOR or in `logical_merge`/`merge_up`/memmove (element movement). For
+  small keys (short strings, ints) the sort is movement-bound, and cheaper-comparator tricks (int rank keys,
+  radix-ish) are ~0. `cmp_by_id` string→u32 only pays off with LONG ids AND a comparison-bound sort; neither
+  holds for typical flowcharts. (Distinct from the LANDED rank_orders_from_key BTreeMap→Vec win, which removed
+  ordered-container OVERHEAD, not comparator cost.)
+
+  Agent: SlateHarrier
