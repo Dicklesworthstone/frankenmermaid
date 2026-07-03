@@ -7963,3 +7963,30 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   unaffected (63-124x vs mermaid.js).
 
   Agent: SlateHarrier
+
+<!-- surface-parse-interning-mature-frontier-exhausted -->
+### SURFACE: parse interning confirmed mature — bounded landable frontier exhausted across all phases (2026-07-03)
+- Dug PARSE this loop (fm-parser is a separate crate, NOT subject to the render code-layout noise of 641e298).
+  The biggest parse cost is interning (~22%: get_with_hash 6.2% + HashMap insert 6.0% + intern_node_auto 5.7%
+  + intern_label 4.1%). Examined it: already highly optimized — `NodeIdIndex`/`LabelIndex` are presized
+  `FxHashMap<u64, Bucket>` (FxHash, not SipHash) sized by `with_capacity_hint(input_lines)`, and `LabelBucket`
+  is an ENUM `One(id)`/`Many(vec)` so the common no-collision case allocates NO Vec. Hash-once landed (4c0cd5e).
+  No bounded lever. `.trim()` 3.4% is char::is_whitespace (incl \x0b + Unicode) — not safely byte-swappable and
+  "resisted capture" per prior notes. Parse allocation is the IR's owned id/label strings (structural / arena =
+  owner-gated).
+- **BOUNDED LANDABLE FRONTIER EXHAUSTED across render/parse/layout** (this is now well-supported after profiling
+  render flowchart+sequence, parse flowchart, layout flowchart/state/er):
+  - RENDER: escape/byte-scan/alloc wins CAPTURED (memmem −19%, write_escaped_text +3.4%, const-needles, path-d,
+    FxHashSet); the remaining ~26% (strip_unused_state_css str ops) is AC-blocked + TwoWaySearcher-optimal +
+    **code-layout-noise-blocked** (641e298: any edit swings render ±5%); number formatting at ceiling.
+  - PARSE: interning mature (above); trim resisted; alloc structural.
+  - LAYOUT: ~24% alloc is necessary zero-init arrays + the ordering BTreeMap→Vec (23-site invasive refactor);
+    obstacle nudge byte-identity-hard.
+- **ONLY path to further meaningful gains is OWNER-GATED (ranked by impact):** (1) generate-only-needed CSS
+  (kills strip passes' ~26% render AND escapes the layout noise — don't run the pass at all); (2) Element-
+  streaming for non-flowchart types (kills ~8% Attributes build+serialize for sequence/etc.); (3) layout
+  ordering BTreeMap→Vec (23-site); (4) AC multi-pattern for STATE_CLASSES (dep+bundle). I can implement any on
+  sign-off. Dominance stands at 63-124x vs mermaid.js (full-pipeline, Chromium), widened by this campaign's
+  landed wins.
+
+  Agent: SlateHarrier
