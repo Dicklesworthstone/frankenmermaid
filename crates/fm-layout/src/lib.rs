@@ -11493,14 +11493,28 @@ impl ObstacleSpatialIndex {
             (cy - min_cy) as usize * ncols + (cx - min_cx) as usize
         };
 
-        // Pass 1: count obstacles per cell into offsets[i+1].
+        // Pass 1: count obstacles per cell into offsets[i+1]. The `cx0..=cx1`/`cy0..=cy1` cell walk
+        // uses plain loops instead of `RangeInclusive` iterators — the latter's per-step
+        // exhaustion tracking showed as ~2.7% self here (profiled). `rect_cells` guarantees
+        // `cx0 <= cx1` & `cy0 <= cy1`, and break-before-increment avoids the `hi + 1` overflow when
+        // `hi == i32::MAX` (a finite-but-huge coordinate). Byte-identical to the inclusive ranges.
         let mut offsets = vec![0u32; cell_count + 1];
         for &rc in &cells {
             if let Some((cx0, cx1, cy0, cy1)) = rc {
-                for cx in cx0..=cx1 {
-                    for cy in cy0..=cy1 {
+                let mut cx = cx0;
+                loop {
+                    let mut cy = cy0;
+                    loop {
                         offsets[lin(cx, cy) + 1] += 1;
+                        if cy == cy1 {
+                            break;
+                        }
+                        cy += 1;
                     }
+                    if cx == cx1 {
+                        break;
+                    }
+                    cx += 1;
                 }
             }
         }
@@ -11510,15 +11524,25 @@ impl ObstacleSpatialIndex {
         }
         let mut flat = vec![0u32; offsets[cell_count] as usize];
         let mut cursor = offsets.clone();
-        // Pass 2: scatter each obstacle index into its cells.
+        // Pass 2: scatter each obstacle index into its cells (same plain-loop cell walk as pass 1).
         for (idx, &rc) in cells.iter().enumerate() {
             if let Some((cx0, cx1, cy0, cy1)) = rc {
-                for cx in cx0..=cx1 {
-                    for cy in cy0..=cy1 {
+                let mut cx = cx0;
+                loop {
+                    let mut cy = cy0;
+                    loop {
                         let ci = lin(cx, cy);
                         flat[cursor[ci] as usize] = idx as u32;
                         cursor[ci] += 1;
+                        if cy == cy1 {
+                            break;
+                        }
+                        cy += 1;
                     }
+                    if cx == cx1 {
+                        break;
+                    }
+                    cx += 1;
                 }
             }
         }
@@ -11562,19 +11586,34 @@ impl ObstacleSpatialIndex {
         let qy0 = Self::cell_of(min_y, self.inv_cell_size).max(self.min_cy);
         let qy1 = Self::cell_of(max_y, self.inv_cell_size).min(grid_max_cy);
 
-        for cx in qx0..=qx1 {
-            for cy in qy0..=qy1 {
-                let ci = (cy - self.min_cy) as usize * self.ncols + (cx - self.min_cx) as usize;
-                let start = self.offsets[ci] as usize;
-                let end = self.offsets[ci + 1] as usize;
-                for k in start..end {
-                    let idx = self.flat[k] as usize;
-                    if self.seen[idx] == self.generation {
-                        continue;
+        // Plain-loop cell walk over `qx0..=qx1` × `qy0..=qy1` (see `new`): avoids `RangeInclusive`'s
+        // per-step overhead on this per-edge-segment query. The query range CAN be empty (a segment
+        // outside the grid clamps to qx0 > qx1), so guard it; break-before-increment is overflow-safe
+        // when a clamped `qx1`/`qy1` reaches `i32::MAX`. Byte-identical to the inclusive ranges.
+        if qx0 <= qx1 && qy0 <= qy1 {
+            let mut cx = qx0;
+            loop {
+                let mut cy = qy0;
+                loop {
+                    let ci = (cy - self.min_cy) as usize * self.ncols + (cx - self.min_cx) as usize;
+                    let start = self.offsets[ci] as usize;
+                    let end = self.offsets[ci + 1] as usize;
+                    for k in start..end {
+                        let idx = self.flat[k] as usize;
+                        if self.seen[idx] != self.generation {
+                            self.seen[idx] = self.generation;
+                            self.candidates.push(idx);
+                        }
                     }
-                    self.seen[idx] = self.generation;
-                    self.candidates.push(idx);
+                    if cy == qy1 {
+                        break;
+                    }
+                    cy += 1;
                 }
+                if cx == qx1 {
+                    break;
+                }
+                cx += 1;
             }
         }
 

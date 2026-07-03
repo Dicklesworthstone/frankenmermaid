@@ -7100,3 +7100,31 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   ordered-container OVERHEAD, not comparator cost.)
 
   Agent: SlateHarrier
+
+<!-- obstacle-index-rangeinclusive-to-plainloop-landed -->
+### LANDED: ObstacleSpatialIndex cell walks RangeInclusive → plain loops — layout ~1-2%, byte-identical (2026-07-03)
+- **Callgraph on the wide-grid layout showed `ObstacleSpatialIndex::new` at 8.9%, of which ~2.7% was
+  `RangeInclusive<i32>::next`/`spec_next`/`i32::lt`** — the per-step exhaustion tracking of the
+  `for cx in cx0..=cx1 { for cy in cy0..=cy1 }` cell walks (a known Rust gotcha: `RangeInclusive` iteration is
+  slower than a plain `Range`/loop because it carries an extra done-flag check). Same pattern in
+  `query_segment`'s `qx0..=qx1 × qy0..=qy1` walk, which runs PER edge-segment (higher leverage).
+- **Fix:** replace the three inclusive-range cell walks (2 in `new`, 1 in `query_segment`) with plain
+  `loop { …; if v == hi { break; } v += 1; }`. Overflow-safe: break-before-increment avoids `hi + 1` when a
+  finite-but-huge coordinate clamps `hi` to `i32::MAX`. `query_segment`'s range can be empty (segment outside
+  grid ⇒ `qx0 > qx1`), so it's guarded `if qx0 <= qx1 && qy0 <= qy1`; `new`'s ranges are `rect_cells`-
+  guaranteed `lo <= hi`. Byte-identical to the inclusive ranges (428 fm-layout lib + golden_layout +
+  golden_svg green; clippy clean).
+- **MEASURED — local interleaved A/B (profharness layout/sugiyama phases, drift-canceling):** turbo (300-iter)
+  runs wide layout **−2.3%** (11/12), wide sugiyama −1.8% (12/12); more-loaded (1500-iter) runs −0.9..−1.4%,
+  NEW faster **8-10/10 on EVERY case** (wide + flowchart, sizes 300/900/1000), no regression anywhere. True
+  magnitude ~1-2% (throttling compresses it). Applies to ALL edge routing (obstacle index is built + queried
+  on every non-trivial flowchart layout). Landed on the byte-identical + strictly-monotonic-less-work +
+  broad + zero-downside basis (same as dd8dcbb), not on clearing ≥3%.
+- **rch NOT used:** a ~1-2% signal is below rch's cross-run drift floor (>3%, see
+  [[project_rch_cross_worker_false_positive]]) and its `fm-layout`/highs-sys build is flaky this session; the
+  drift-canceling local interleaved A/B is the correct arbiter for sub-3% (established for the rank_orders win).
+- **META:** `for i in a..=b` in a hot loop is a latent lever — grep hot code for `..=` iteration; a plain
+  break-before-increment loop drops the exhaustion-flag overhead AND the `b+1` overflow risk. Confirmed real
+  here (2.7% self in `RangeInclusive::next`), unlike a comparator swap on a movement-bound sort (rejected 1845f3a).
+
+  Agent: SlateHarrier
