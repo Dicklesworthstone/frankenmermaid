@@ -7468,6 +7468,31 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
 
   Agent: cc (Opus 4.8 1M)
 
+<!-- flowchart-render-freshly-profiled-mature -->
+### SURFACED: flowchart render freshly profiled at HEAD — mature; all three phases now confirmed mined this campaign (2026-07-03)
+- **After landing the layout edge-Vec presizes (5342232 -3.5%, e33c8f0 -1.5%), profiled flowchart render
+  (200 nodes, unstripped, current HEAD e33c8f0) — render had only been characterized from memory this
+  campaign, not re-profiled.** Top self-time: `write_uint_into` 11.4% + `write_fixed2` 10.4% (= ~22%
+  number formatting), `StrSearcher::next_match` 8.1% + `::new` 4.5% (= ~12.6% CSS strip), `write_escaped_text`
+  7.3% + `write_escaped_attr` 7.3% (= ~14.6% escaping), `write_value` 5.9%, node/edge fragment writers ~12%.
+- **Every hot site is at ceiling, owner-gated, or inherent — verified in source:** `write_uint_into`/`write_fixed2`
+  use the DIGITS1/PAIRS2/DOTPAIRS `&str`-slice digit tables (e79a7bd/dddc2ea) streamed with no from_utf8
+  buffer — at ceiling; `write_value` uses the saturating-cast whole-number test that already elides
+  `f32::fract`/`truncf` (bbfa640); the ~12.6% `StrSearcher` is `strip_unused_state_css`'s `str::find`, which
+  is CODE-LAYOUT-NOISE-FLOORED + AC/TwoWaySearcher-blocked + owner-gated generate-only-CSS (see the
+  strip_unused_theme_css re-rejection above — do NOT retry memmem here); `write_escaped_text`/`_attr` are
+  memchr2-optimized (a89766f) and escape genuinely-user text (labels) or SHORT ids (skip-escape washes on
+  short values per b550141, and numbers/geometry already bypass escaping per e405f54).
+- **Status: the accessible unilateral perf frontier is comprehensively mined across ALL THREE phases** (parse
+  444123b, layout edge-Vecs + query_segment buffer-reuse + tree-traversal presize, render this entry). The
+  63-124x mermaid.js dominance (evidence/ledger/mermaid-js-head-to-head.toml) stands. Remaining gains are all
+  OWNER-GATED / STRUCTURAL: generate-only-needed CSS (kills the ~26% strip passes, fragile state-class
+  prediction), Element-streaming for non-flowchart render (~8% Attributes build+serialize), arena allocation
+  (per-item IR String allocs + `drop_glue`), cross-phase node-size reuse (estimate_dimensions runs in BOTH
+  layout and render). Next agent: pick one of those structural items with an owner, not another leaf micro-opt.
+
+  Agent: cc (Opus 4.8 1M)
+
 <!-- er-parse-profile-common-type-frontier-mined -->
 ### SURFACED: ER/class parse profiled — common-type parse frontier mined; the alloc-lowercase lever is exhausted for hot sites (2026-07-03)
 - **After landing the per-line `to_ascii_lowercase()`→`eq_ignore_ascii_case` alloc-elimination on sankey
