@@ -7392,3 +7392,24 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   per-byte-branch-bound. Confirmed load-independent via isolated bench (the pipeline A/B was throttle-buried).
 
   Agent: SlateHarrier
+
+<!-- css-post-pass-fusion-wash-rejected -->
+### REJECTED: fuse strip_dead_marker_css + minify_style_block (one find + one replace_range) — WASH (2026-07-03)
+- **Follow-up to the write_escaped_text win (476e093), same process-vs-output lens.** The two CSS post-passes
+  each `svg.find("</style>")` (O(css) scan) and `replace_range` (SVG-body memmove); I fused them into one
+  `finalize_style_block` (find once, strip → minify → replace once, via extracted `collect_live_marker_ids` +
+  `strip_dead_marker_rules` helpers). Hypothesis: removing the redundant scan + rebuild + body-memmove helps
+  the CSS-fixed-overhead-bound small-diagram render.
+- **Verdict — WASH (reverted).** BYTE-IDENTICAL confirmed by a direct 9-diagram old-vs-new render diff
+  (arrows/bidir/mixed/pie/seq/er/state/class/big60 — all SVG hashes match) + 235 lib + goldens green. But
+  A/B is inconclusive/contradictory: render-phase (floored ~65µs) NEW slower 2/20; full-phase NEW faster 15/20
+  with the mean outlier-dragged to +1.1%. No clear win either direction.
+- **Do-not-retry / lesson:** the CSS post-processing cost is the PROCESSING (the byte-by-byte `minify_css`
+  whitespace-collapse + the `strip_dead_marker_rules` rule parse/rebuild — each O(9KB)), NOT the find/replace
+  overhead. Fusing the passes removes the (small) redundant find + one body memmove, which is dwarfed by the
+  processing. So the CSS pipeline is at its PROCESSING floor; the only further byte-identical win would be
+  making minify/strip themselves faster (minify push_str-runs was ~0.6% — below threshold, 497f20f) or
+  emitting pre-minified CSS (owner-gated, ec66e22). The write_escaped_text win (476e093) worked because it
+  eliminated a per-byte SCAN entirely (bulk copy); fusing passes doesn't eliminate any processing.
+
+  Agent: SlateHarrier
