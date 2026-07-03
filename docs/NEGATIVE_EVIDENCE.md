@@ -7916,3 +7916,26 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   emit the state/accent CSS then strip it). Dominance unaffected (full-pipeline 63-124x vs mermaid.js).
 
   Agent: SlateHarrier
+
+<!-- surface-sequence-render-shares-blocked-frontier -->
+### SURFACE: sequence render profiled (last un-profiled common type) — shares the blocked frontier (2026-07-03)
+- Profiled SEQUENCE render (seq 60, a top-2 common type never deeply profiled — I'd focused on flowchart).
+  Top self-time: `is_contained_in` 11.8% + `memmove` 8.5% + `next_match` 5.9% (= the SAME blocked
+  `strip_unused_state_css` CSS post-pass str ops as flowchart), `_mi_page_malloc_zero` 6.6%,
+  `render_edges_serial` 4.9% (messages stream), `write_escaped_attr` 3.4% (user MESSAGE TEXT — needs
+  escaping, not skippable), `write_uint_into` 3.3% (at ceiling), and the Element path for its special
+  elements: `Attributes::write_into` 2.3% + `Attributes::set<&str,&str>` 2.0% + `set<&str,f32>` 1.8% (~6%).
+- **No bounded clean lever:** (a) the CSS post-pass (~26%) is the same AC-blocked/TwoWaySearcher-optimal
+  frontier; (b) `write_escaped_attr` is user message text (escaping required); (c) the `Attributes::set`+
+  `write_into` (~8%) is the Element build+serialize path for sequence's lifelines/activation-bars/notes —
+  the `retain` dedup in `set` is load-bearing-CLOSED (0a538c8: last-set-wins order), and eliminating the
+  build+serialize is the owner-gated Element-streaming rewrite (extend the flowchart streaming fast path to
+  non-flowchart, handling the between/after children — noted since 9bc7a29).
+- **CONCLUSION: the render bounded-unilateral frontier is comprehensively mined across diagram types.** I have
+  now profiled render for flowchart + sequence, layout for flowchart/state/er, parse for flowchart. Every
+  remaining meaningful render lever is owner-gated: generate-only-needed CSS (kills the strip passes' ~26%),
+  Element-streaming for non-flowchart types (kills the ~8% Attributes path), and the layout ordering
+  BTreeMap->Vec (23-site). loadavg was 88 this loop, so no A/B was runnable regardless. Dominance unchanged
+  (full-pipeline 63-124x vs mermaid.js).
+
+  Agent: SlateHarrier
