@@ -2776,25 +2776,35 @@ fn render_layout_to_svg(
         accessible_node_labels: accessible_node_labels.as_deref(),
     };
 
-    // Fast path for the common case (the head-to-head corpus): a plain flowchart small enough that
-    // both loops render serially. Every child that the slow path inserts BETWEEN the edge and node
-    // fragments (bundle-count labels, ER cardinality, class cardinality) or AFTER them (sequence
-    // mirror headers, C4 legend) is diagram-type- or bundle-gated and therefore empty here, so the
-    // document is exactly `[prefix children] + edges + nodes`. Stream the edges and nodes STRAIGHT
-    // into the final output buffer via `to_string_with_body` instead of rendering them into
-    // intermediate `edge_svg`/`node_svg` Strings that `write_to_string` then copies a SECOND time
-    // (~18% of render / ~9% of the wide pipeline, measured). Byte-identical: the same
-    // `render_edges_serial`/`render_nodes_serial` bytes in the same position. The slow path below is
-    // the verbatim fallback for every non-flowchart / bundled / very-large case.
+    // Fast path for the common case: a diagram small enough that both loops render serially AND for
+    // which the slow path inserts NO child BETWEEN the edge and node fragments (bundle-count labels,
+    // ER cardinality, class cardinality) or AFTER them (sequence mirror headers, C4 legend). When none
+    // of those fire the document is exactly `[prefix children] + edges + nodes`, so we stream the edges
+    // and nodes STRAIGHT into the final output buffer via `to_string_with_body` instead of rendering
+    // them into intermediate `edge_svg`/`node_svg` Strings that `write_to_string` then copies a SECOND
+    // time (~18% of render / ~9% of the wide pipeline, measured). Byte-identical: the same
+    // `render_edges_serial`/`render_nodes_serial` bytes in the same position.
+    //
+    // The gate tests the ACTUAL insertion conditions (see the 9 `doc.child` sites below), not just
+    // `== Flowchart`, so it's a strict superset of the old flowchart-only gate: every simple type —
+    // state, sankey, journey, gitgraph, requirement, mindmap, plain flowchart — now streams, while ER /
+    // class-cardinality / sequence-mirror / C4-legend / bundled / very-large renders take the verbatim
+    // slow-path fallback below. Keep this in sync with those insertion guards.
+    let no_between_or_after_children = ir.diagram_type != fm_core::DiagramType::Er
+        && layout.extensions.sequence_mirror_headers.is_empty()
+        && !legend_enabled
+        && layout.edges.iter().all(|edge| {
+            edge.bundle_count <= 1
+                && ir.edges.get(edge.edge_index).is_none_or(|ir_edge| {
+                    ir_edge.source_cardinality().is_none() && ir_edge.target_cardinality().is_none()
+                })
+        });
     #[cfg(not(target_arch = "wasm32"))]
-    let flowchart_stream_fast_path = ir.diagram_type == fm_core::DiagramType::Flowchart
-        && layout.edges.len() < 4096
-        && layout.nodes.len() < 2048
-        && layout.edges.iter().all(|edge| edge.bundle_count <= 1);
+    let stream_fast_path =
+        no_between_or_after_children && layout.edges.len() < 4096 && layout.nodes.len() < 2048;
     #[cfg(target_arch = "wasm32")]
-    let flowchart_stream_fast_path = ir.diagram_type == fm_core::DiagramType::Flowchart
-        && layout.edges.iter().all(|edge| edge.bundle_count <= 1);
-    if flowchart_stream_fast_path {
+    let stream_fast_path = no_between_or_after_children;
+    if stream_fast_path {
         return doc.to_string_with_body(layout_svg_capacity_hint(ir, layout), |out| {
             render_edges_serial(out, &layout.edges, &edge_context);
             render_nodes_serial(

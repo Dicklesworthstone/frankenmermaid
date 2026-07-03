@@ -7488,3 +7488,39 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   double-copy at every such call site.
 
   Agent: SlateHarrier
+
+<!-- landed-stream-fastpath-generalized -->
+### LANDED: generalize render streaming fast-path from flowchart-only to ALL simple types — state render -3.3 to -5.3% (2026-07-03)
+- Follow-on to 9bc7a29 (streaming fast-path) + 5a5b971 (early-return presize). `render_layout_to_svg`'s
+  `to_string_with_body` streaming fast-path — which skips the intermediate `edge_svg`/`node_svg` Strings that
+  `write_to_string` then copies a SECOND time (the copy is ~18% of render / ~9% of the wide pipeline, measured
+  on flowcharts) — was gated `diagram_type == Flowchart`. But that gate was a PROXY for the real requirement:
+  "the slow path inserts no child BETWEEN the edge/node fragments or AFTER them." The 9 `doc.child` sites in
+  the fallback insert between/after children ONLY for: bundled edges (`bundle_count > 1`), ER cardinality
+  (`== Er`), class cardinality (`edge.source/target_cardinality().is_some()`), sequence mirror headers
+  (`extensions.sequence_mirror_headers`), C4 legend (`legend_enabled`). Every OTHER type — state, sankey,
+  journey, gitgraph, requirement, mindmap — produces exactly `[prefix children] + edges + nodes`, identical to
+  a plain flowchart, yet was needlessly taking the double-copy slow path.
+- **Fix:** replace the `== Flowchart` proxy with a gate on the ACTUAL insertion conditions (`!= Er` &&
+  `sequence_mirror_headers.is_empty()` && `!legend_enabled` && every edge has `bundle_count <= 1` and no
+  source/target cardinality). Strict SUPERSET of the old gate (all flowcharts still stream) plus every simple
+  type. Fused the bundle + cardinality checks into the one existing edge scan.
+- **Byte-identical — PROVEN, not just asserted.** Built two binaries (old = `== Flowchart` gate, new =
+  condition gate; confirmed non-identical via `cmp`) and diffed rendered SVG for 11 diagram types: state,
+  sankey, journey, gitgraph, requirement, mindmap, flowchart (newly-streaming + control) AND er, class,
+  sequence, gantt (must still fall back) → **ALL 11 byte-identical**. Plus golden_svg + golden_layout +
+  frankentui_conformance + mermaid_compat + 235 lib tests + clippy, all green.
+- **Measured (same-machine alternated A/B, release, min-of-N; NEW < OLD every round):** state size-800
+  250485→237169 ns (**-5.3%**, min-of-8, all 8 rounds faster), state size-200 (**-3.3%**, all 4 faster).
+  Magnitude scales with output size (it IS the eliminated final memcpy). sankey size-500 = WASH (heavy
+  wedge/gradient geometry dominates, so the copy is a tiny fraction) — but the streaming path is STRICTLY less
+  work (no intermediate alloc, no second copy), so there is no regression, only a gain that shrinks to noise on
+  render-heavy types. Widens the measured mermaid.js dominance (full-pipeline 63-124x Chromium): state/sankey/
+  gitgraph/journey/mindmap renders now all drop the double-copy.
+- **Lesson:** a fast-path gated on a TYPE (`== Flowchart`) is often a proxy for a structural PROPERTY ("no
+  interspersed children"). Gating on the property directly — derived by enumerating the exact guards of every
+  conditional insertion — safely generalizes the optimization to every type that satisfies it, and is more
+  robust than a type allowlist (a new simple type gets the fast path for free; a new insertion condition is a
+  documented one-line gate update). Same "audit siblings when an optimization lands" thread as 5a5b971.
+
+  Agent: SlateHarrier
