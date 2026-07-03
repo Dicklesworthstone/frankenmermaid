@@ -11451,13 +11451,21 @@ impl ObstacleSpatialIndex {
         let mut min_cy = i32::MAX;
         let mut max_cx = i32::MIN;
         let mut max_cy = i32::MIN;
+        // Compute each obstacle's cell range ONCE and cache it — the bbox, count, and scatter
+        // passes below all need the identical `(cx0, cx1, cy0, cy1)`, so recomputing `rect_cells`
+        // (4 min/max + 4 finite checks + 4 float floor-casts) per pass was 3× the work. Byte-
+        // identical: the cached tuples equal what each pass would recompute, iterated in the same
+        // obstacle order.
+        let mut cells: Vec<Option<(i32, i32, i32, i32)>> = Vec::with_capacity(obstacles.len());
         for rect in obstacles {
-            if let Some((cx0, cx1, cy0, cy1)) = Self::rect_cells(*rect, inv) {
+            let rc = Self::rect_cells(*rect, inv);
+            if let Some((cx0, cx1, cy0, cy1)) = rc {
                 min_cx = min_cx.min(cx0);
                 max_cx = max_cx.max(cx1);
                 min_cy = min_cy.min(cy0);
                 max_cy = max_cy.max(cy1);
             }
+            cells.push(rc);
         }
         if min_cx > max_cx || min_cy > max_cy {
             return None; // no finite obstacles -> nothing to index
@@ -11480,8 +11488,8 @@ impl ObstacleSpatialIndex {
 
         // Pass 1: count obstacles per cell into offsets[i+1].
         let mut offsets = vec![0u32; cell_count + 1];
-        for rect in obstacles {
-            if let Some((cx0, cx1, cy0, cy1)) = Self::rect_cells(*rect, inv) {
+        for &rc in &cells {
+            if let Some((cx0, cx1, cy0, cy1)) = rc {
                 for cx in cx0..=cx1 {
                     for cy in cy0..=cy1 {
                         offsets[lin(cx, cy) + 1] += 1;
@@ -11496,8 +11504,8 @@ impl ObstacleSpatialIndex {
         let mut flat = vec![0u32; offsets[cell_count] as usize];
         let mut cursor = offsets.clone();
         // Pass 2: scatter each obstacle index into its cells.
-        for (idx, rect) in obstacles.iter().enumerate() {
-            if let Some((cx0, cx1, cy0, cy1)) = Self::rect_cells(*rect, inv) {
+        for (idx, &rc) in cells.iter().enumerate() {
+            if let Some((cx0, cx1, cy0, cy1)) = rc {
                 for cx in cx0..=cx1 {
                     for cy in cy0..=cy1 {
                         let ci = lin(cx, cy);

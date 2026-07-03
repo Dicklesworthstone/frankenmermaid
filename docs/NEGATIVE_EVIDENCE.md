@@ -7014,3 +7014,35 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   a misparse can inflate a leaf 5-10× and manufacture a false frontier.
 
   Agent: SlateHarrier
+
+<!-- obstacle-index-rect-cells-cache-landed -->
+### LANDED: cache rect_cells across the 3 ObstacleSpatialIndex::new passes — layout −4-6% at realistic sizes, byte-identical (2026-07-03)
+- **Fresh CLEAN flowchart-1000 profile (symbolized) surfaced the `ObstacleSpatialIndex` cluster at ~6.5% of
+  the full pipeline:** `::new` 2.58% + `::query_segment` 2.01% + `::rect_cells` 1.88%. Query is at its
+  byte-identical ceiling (prior rejections), but CONSTRUCTION was unexamined: `new()` called `rect_cells`
+  (4 min/max + 4 `is_finite` + 4 float floor-casts) **3× per obstacle** — once for the cell-bbox pass, once
+  for the CSR count pass, once for the scatter pass — recomputing the identical `(cx0,cx1,cy0,cy1)` each time.
+- **Fix (fm-layout `ObstacleSpatialIndex::new`):** compute each obstacle's cell range ONCE in the bbox pass
+  into a cached `Vec<Option<(i32,i32,i32,i32)>>`; the count and scatter passes iterate the cache instead of
+  recomputing. Eliminates 2/3 of `rect_cells` AND makes the count/scatter passes iterate a compact 20-byte
+  tuple Vec instead of re-reading `LayoutRect` + redoing float floor-casts (much better cache behavior — the
+  measured win is larger than the raw call-count saving). One added allocation (obstacles.len() tuples).
+- **Byte-identical:** the cached tuples equal what each pass recomputed, iterated in the same obstacle order,
+  so offsets/flat/candidates and all routed geometry are unchanged. GREEN: 428 fm-layout lib tests +
+  golden_layout (2) + golden_svg (2), clippy clean.
+- **MEASURED — local interleaved A/B (profharness `flowchart <N> layout`, min-ns over 4k iters, 6 rounds each;
+  interleaving OLD/NEW cancels the worker's temporal drift):** N=1000 **−3.9..−5.0%** (all 6), N=300
+  **−4.4..−6.2%** (all 6), N=100 **neutral** (±1-2%, break-even — the cache alloc offsets the saving when the
+  index is tiny; NOT a regression). **rch per-crate confirm** (`fm-layout` `incremental_layout`
+  `full_recompute`, `--baseline`): single/500 −7.1%, five/1000 −3.0% (p=0.01), five/500 −2.6% (p<0.05),
+  five/200 −3.9% (p=0.11); the lone +6.4% at five/100 is cross-run temporal drift (memory
+  [[project_rch_cross_worker_false_positive]] / [[project_layout_sort_unstable_lever_and_pmu_blocker]]) —
+  REFUTED by the drift-canceling local interleaved read which shows N=100 neutral.
+- **META:** when a subsystem shows up as 2-3 sibling functions in a profile (here `::new`/`::query`/
+  `::rect_cells`), the leaf that's "at its query ceiling" can still have an untouched CONSTRUCTION cost — a
+  helper recomputed once per build-pass. Cache-once across passes beats re-deriving, and the cache-locality
+  gain (compact tuple Vec vs re-reading the source struct + float ops) can exceed the raw call-count saving.
+  rch A/B remains drift-noisy below ~5%; the local interleaved min-ns A/B is the better arbiter when the
+  signal clears the noise floor (this one did).
+
+  Agent: SlateHarrier
