@@ -7820,3 +7820,31 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
 - Dominance unaffected (full-pipeline 63-124x vs mermaid.js, Chromium).
 
   Agent: SlateHarrier
+
+<!-- landed-write-escaped-text-memchr2-runbased -->
+### LANDED: memchr2 run-based write_escaped_text — render +3.3..3.9% (captures the v3 AVX2 scan win at v2) (2026-07-03)
+- `write_escaped_text` (~6% of small-diagram render) writes the embedded ~5.5 KB `<style>` CSS every render.
+  Its old fast path (`len>=256 && !bytes.iter().any(&/<) && !contains("]]>") -> write_str`) NEVER fired for the
+  CSS because the theme CSS contains ONE `&` (a `color-mix`), so it fell through to a per-byte match loop over
+  all ~5.5 KB — AND the `.iter().any(&/<)` gate scan itself ran SCALAR to that `&` near the end (~5.5 KB scalar
+  scan/render). That scalar scan was the bulk of the 6%.
+- **Fix:** for long text with no `]]>` (only `&`/`<` can escape — `>` escapes only inside `]]>`), find the
+  specials with `memchr::memchr2(&, <)` (runtime-AVX2-dispatched, so fast at the shipped x86-64-v2) and
+  bulk-copy the runs between; short text / `]]>` text keeps the per-byte loop (memchr's setup loses on short
+  labels — cf. the parser per-line memchr regression). The CSS (1 `&`, no `<`, no `]]>`) now takes 2-3
+  `write_str`s instead of a 5.5 KB per-byte loop + a scalar gate scan.
+- **Byte-identical:** for a string with no `]]>`, the per-byte loop escapes exactly `&`/`<` — same as the
+  memchr2 path. Verified 0-diff across the battery + 6 flowcharts + a >256-char label containing `&`, `<`, AND
+  `]]>` (exercises the memchr2 path and the `]]>` per-byte fallback) + 235 lib + golden_svg/conformance/
+  mermaid_compat + clippy clean.
+- **Measured (load-robust global-min A/B, release, loadavg 14, 24 rounds x 3 sizes):** size-30 **+3.9%**,
+  size-60 **+3.4%**, size-120 **+3.3%** render — consistent across sizes. This is essentially the SAME render
+  gain global x86-64-v3 gave (+3.4%, see 48ddce5) but WITHOUT v3's parse −2.9%/layout −2.2% regressions or the
+  Haswell portability cost — because memchr does runtime AVX2 dispatch, so the wide scan is available at v2.
+  Widens the measured mermaid.js render dominance (full-pipeline 63-124x Chromium).
+- **Lesson:** a `str::find`-free per-byte escape/scan loop over a LONG buffer (here the always-present CSS) is a
+  memchr2/memchr3 target (SIMD, byte-identical) — and memchr's runtime AVX2 dispatch captures the AVX2 win that
+  a global target-cpu=v3 bump would give, on the vector-heavy paths only, without regressing branchy code. Gate
+  it on length so short strings keep the scalar loop.
+
+  Agent: SlateHarrier

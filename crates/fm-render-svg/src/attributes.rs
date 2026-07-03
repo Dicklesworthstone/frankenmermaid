@@ -486,17 +486,26 @@ pub(crate) fn write_escaped_attr<W: fmt::Write>(f: &mut W, s: &str) -> fmt::Resu
 /// exactly. `]` is ASCII, so the byte look-back matches a `char` look-back.
 pub(crate) fn write_escaped_text<W: fmt::Write>(f: &mut W, s: &str) -> fmt::Result {
     let bytes = s.as_bytes();
-    // Fast path for LONG text (the ~9 KB embedded `<style>` CSS is written through here on every
-    // diagram — ~10% of small-diagram render): when nothing needs escaping, bulk-copy in one
-    // `write_str` instead of the per-byte match loop (which pays a `]]>` look-back on every `>`, and
-    // CSS is full of `>` child combinators). Gated on length so short labels — which are numerous and
-    // for which the extra `any`+`contains` scans lose — keep the loop. Byte-identical: the loop also
-    // emits `s` verbatim when no byte escapes, so the gate only picks the faster equivalent path.
-    if bytes.len() >= 256
-        && !bytes.iter().any(|&b| b == b'&' || b == b'<')
-        && !s.contains("]]>")
-    {
-        return f.write_str(s);
+    // Fast path for LONG text (the ~5 KB embedded `<style>` CSS is written through here on every
+    // diagram — ~6% of small-diagram render). Without a `]]>` CDATA-end, ONLY `&`/`<` need escaping
+    // (a `>` escapes only inside `]]>`), so locate them with memchr2 (SIMD) and bulk-copy the runs
+    // between — no per-byte loop and no `]]>` look-back on every `>` (CSS is full of `>` combinators).
+    // The CSS contains an `&` (color-mix), so the previous whole-copy fast path fell through to the
+    // per-byte loop over all ~5 KB; this handles it in a couple of `write_str`s. Length-gated so the
+    // numerous SHORT labels — where memchr's setup loses — keep the loop below. Byte-identical: for a
+    // string with no `]]>`, the loop escapes exactly `&`/`<`, same as here.
+    if bytes.len() >= 256 && !s.contains("]]>") {
+        let mut start = 0;
+        let mut from = 0;
+        while let Some(rel) = memchr::memchr2(b'&', b'<', &bytes[from..]) {
+            let i = from + rel;
+            let replacement = if bytes[i] == b'&' { "&amp;" } else { "&lt;" };
+            f.write_str(&s[start..i])?;
+            f.write_str(replacement)?;
+            start = i + 1;
+            from = i + 1;
+        }
+        return f.write_str(&s[start..]);
     }
     let mut start = 0;
     for (i, &b) in bytes.iter().enumerate() {
