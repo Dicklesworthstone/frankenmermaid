@@ -429,8 +429,8 @@ fn strip_unused_state_css(svg: &mut String) {
         "var(--fm-accent-7)",
         "var(--fm-accent-8)",
     ];
-    for n in 1..=8usize {
-        if !svg.contains(VAR_NEEDLES[n]) {
+    for (n, &needle) in VAR_NEEDLES.iter().enumerate().skip(1) {
+        if !svg.contains(needle) {
             let decl = format!("  --fm-accent-{n}:");
             if let Some(start) = svg.find(&decl)
                 && let Some(rel_end) = svg[start..].find(";\n")
