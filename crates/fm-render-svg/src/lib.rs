@@ -764,12 +764,12 @@ const NODE_SHAPE_THEME_CSS: &str = ".fm-node.fm-node-shape-note path,\n.fm-node.
 /// (the removed selectors match nothing); safe by construction (a non-matching constant is a no-op).
 fn strip_unused_theme_css(css: &mut String, ir: Option<&MermaidDiagramIr>) {
     if !ir.is_some_and(|ir| !ir.clusters.is_empty()) {
-        *css = css.replace(CLUSTER_THEME_CSS, "");
+        strip_css_block(css, CLUSTER_THEME_CSS);
         // The `:root` cluster-only custom properties feed ONLY the stripped cluster rules, so they
         // are dead too when there are no clusters. Same exact-substring / safe-no-op contract.
-        *css = css.replace(
+        strip_css_block(
+            css,
             "  --fm-cluster-label-color: var(--fm-text-color);\n  --fm-cluster-c4-fill: var(--fm-cluster-fill);\n  --fm-cluster-c4-stroke: var(--fm-cluster-stroke);\n  --fm-cluster-swimlane-fill: var(--fm-cluster-fill);\n  --fm-cluster-swimlane-stroke: var(--fm-cluster-stroke);\n",
-            "",
         );
     }
     let has_special_shapes = ir.is_some_and(|ir| {
@@ -785,7 +785,7 @@ fn strip_unused_theme_css(css: &mut String, ir: Option<&MermaidDiagramIr>) {
         })
     });
     if !has_special_shapes {
-        *css = css.replace(NODE_SHAPE_THEME_CSS, "");
+        strip_css_block(css, NODE_SHAPE_THEME_CSS);
     }
     // `.fm-edge-dashed`/`.fm-edge-thick` style only dotted/thick arrows. The arrow lists below are
     // copied VERBATIM from `render_edge`'s `style_class` match so detection cannot drift from the
@@ -815,7 +815,23 @@ fn strip_unused_theme_css(css: &mut String, ir: Option<&MermaidDiagramIr>) {
         })
     });
     if !has_dashed_or_thick {
-        *css = css.replace(EDGE_STYLE_THEME_CSS, "");
+        strip_css_block(css, EDGE_STYLE_THEME_CSS);
+    }
+}
+
+/// Remove a fixed theme-CSS `block` from `css` in place. `str::replace(block, "")` always
+/// allocates a fresh `String` and copies the *entire* CSS (even when the block is absent) and
+/// builds a per-call `TwoWaySearcher`; this SIMD-locates the block with `memchr::memmem` and, on
+/// a hit, shifts the tail down with `replace_range` — no new allocation, no searcher construction.
+///
+/// Byte-identical to `css.replace(block, "")`: each of these blocks is a unique CSS rule set that
+/// occurs at most once in the generated theme CSS, so removing the single hit reproduces
+/// "replace all occurrences" exactly. The embedded-theme path is covered by golden_svg (bytes),
+/// which would catch any divergence. Absent block ⇒ no-op (matches `replace`, minus the copy).
+#[inline]
+fn strip_css_block(css: &mut String, block: &str) {
+    if let Some(pos) = memchr::memmem::find(css.as_bytes(), block.as_bytes()) {
+        css.replace_range(pos..pos + block.len(), "");
     }
 }
 
