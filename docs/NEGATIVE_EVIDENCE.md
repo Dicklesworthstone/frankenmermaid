@@ -7249,3 +7249,29 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   the full-pipeline A/B buries under noise.
 
   Agent: SlateHarrier
+
+<!-- ir-builder-subgraph-membership-on2-landed -->
+### LANDED: add_node_to_cluster/subgraph O(members) linear dedup → O(1) hash set — subgraph parse O(N²) fix, up to −53% (2026-07-03)
+- **First profile of a subgraph-heavy flowchart (one big subgraph of N nodes) showed ~58% of parse in linear
+  membership scans:** `IrBuilder::add_node_to_cluster` 39% + `add_node_to_subgraph` 18%. Both did
+  `if !members.contains(&node_id) { members.push(node_id) }` — a LINEAR dedup-on-insert over an append-only Vec
+  that grows to the subgraph size, so adding M nodes was O(M²). Cross-cutting: subgraphs/clusters are a core,
+  common mermaid feature, and NO golden covers them (the 406 lib tests + goldens did NOT exercise this path).
+- **Fix (fm-parser ir_builder):** two builder-side `FxHashSet<(index, IrNodeId)>` dedup sets
+  (`cluster_member_set`, `subgraph_member_set`) for O(1) membership. Byte-identical: `ir.clusters[i].members`,
+  `ir.graph.clusters[i].members`, `ir.graph.subgraphs[i].members` are created empty and appended ONLY here in
+  lockstep (clusters/graph.clusters are parallel Vecs, so `graph_cluster.get_mut` always succeeds when the
+  outer one did), so one set key gates both cluster member Vecs and the sets mirror the Vecs exactly. The small
+  per-node `graph_node.clusters/subgraphs` lists keep their cheap linear check.
+- **BYTE-IDENTITY PROVEN directly (goldens don't cover subgraphs):** a 5-case render+IR diff (one-big / multi /
+  nested / duplicate-node / edges-in-subgraph), OLD vs NEW binary, is byte-for-byte IDENTICAL (SVG FNV + len +
+  cluster/subgraph member Vecs). Plus 406 fm-parser lib + golden_svg + golden_layout green; clippy clean.
+- **MEASURED (profharness `subg <N> parse`, one big subgraph):** OLD→NEW **N=200 −20.4%, N=400 −36.6%,
+  N=800 −53.4%** — the win GROWS with subgraph size (O(N²)→O(N)); parse is HALVED at 800 and approaches full
+  elimination of the 58% linear-scan cost for larger subgraphs.
+- **META:** the "linear `.contains(&)` dedup-on-insert into an append-only Vec" is the SAME O(N²) family as the
+  gantt band fix (8f65354) — a builder/collector that grows a Vec and linear-checks for dups on each push. Grep
+  for `if !xs.contains(&y) { xs.push(y) }`. Also: a NON-flowchart/subgraph feature with NO golden coverage
+  needs a DIRECT old-vs-new output diff to prove byte-identity (tests passing ≠ path covered).
+
+  Agent: SlateHarrier

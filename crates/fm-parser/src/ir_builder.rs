@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use fm_core::{
     ArrowType, ClassMemberKind, ClassStereotype, Diagnostic, DiagnosticCategory, DiagramType,
@@ -179,6 +179,13 @@ pub struct IrBuilder {
     node_id_index: NodeIdIndex,
     cluster_index_by_key: FxHashMap<String, usize>,
     subgraph_index_by_key: FxHashMap<String, usize>,
+    /// O(1) membership dedup for `(cluster_index, node_id)` / `(subgraph_index, node_id)` — the
+    /// `cluster.members`/`subgraph.members` Vecs are append-only and grow to the subgraph size, so
+    /// the old `members.contains(&id)` linear dedup-on-insert was O(subgraph²) (measured ~58% of a
+    /// big-subgraph parse). These sets mirror those Vecs exactly (both start empty, both are only
+    /// appended here), so gating the push on the set is byte-identical.
+    cluster_member_set: FxHashSet<(usize, IrNodeId)>,
+    subgraph_member_set: FxHashSet<(usize, IrNodeId)>,
     label_index: LabelIndex,
 
     warnings: Vec<String>,
@@ -223,6 +230,8 @@ impl IrBuilder {
             node_id_index: NodeIdIndex::default(),
             cluster_index_by_key: FxHashMap::default(),
             subgraph_index_by_key: FxHashMap::default(),
+            cluster_member_set: FxHashSet::default(),
+            subgraph_member_set: FxHashSet::default(),
             label_index: LabelIndex::default(),
             warnings: Vec::new(),
             auto_created_nodes: Vec::new(),
@@ -249,6 +258,8 @@ impl IrBuilder {
             node_id_index: NodeIdIndex::with_capacity(estimated_nodes),
             cluster_index_by_key: FxHashMap::default(),
             subgraph_index_by_key: FxHashMap::default(),
+            cluster_member_set: FxHashSet::default(),
+            subgraph_member_set: FxHashSet::default(),
             label_index: LabelIndex::with_capacity(estimated_labels),
             warnings: Vec::new(),
             auto_created_nodes: Vec::new(),
@@ -1090,13 +1101,15 @@ impl IrBuilder {
         let Some(cluster) = self.ir.clusters.get_mut(cluster_index) else {
             return;
         };
-        if !cluster.members.contains(&node_id) {
+        // O(1) dedup via `cluster_member_set` instead of the O(members) `contains` scans (this was
+        // O(subgraph²) on big clusters). `ir.clusters[i].members` and `ir.graph.clusters[i].members`
+        // are created together and only appended here in lockstep, so one set key gates both — the
+        // set is empty exactly when both Vecs lack `node_id`. Byte-identical.
+        if self.cluster_member_set.insert((cluster_index, node_id)) {
             cluster.members.push(node_id);
-        }
-        if let Some(graph_cluster) = self.ir.graph.clusters.get_mut(cluster_index)
-            && !graph_cluster.members.contains(&node_id)
-        {
-            graph_cluster.members.push(node_id);
+            if let Some(graph_cluster) = self.ir.graph.clusters.get_mut(cluster_index) {
+                graph_cluster.members.push(node_id);
+            }
         }
         if let Some(graph_node) = self.ir.graph.nodes.get_mut(node_id.0) {
             let cluster_id = IrClusterId(cluster_index);
@@ -1179,7 +1192,9 @@ impl IrBuilder {
         let Some(subgraph) = self.ir.graph.subgraphs.get_mut(subgraph_index) else {
             return;
         };
-        if !subgraph.members.contains(&node_id) {
+        // O(1) dedup (was O(subgraph²) — see `add_node_to_cluster`). `subgraph_member_set` mirrors
+        // `subgraph.members` exactly (empty start, appended only here). Byte-identical.
+        if self.subgraph_member_set.insert((subgraph_index, node_id)) {
             subgraph.members.push(node_id);
         }
         if let Some(graph_node) = self.ir.graph.nodes.get_mut(node_id.0) {
