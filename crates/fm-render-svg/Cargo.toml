@@ -14,6 +14,10 @@ homepage.workspace = true
 fm-core.workspace = true
 fm-layout.workspace = true
 serde_json.workspace = true
+# SIMD substring/byte search for the CSS post-passes (strip/minify), whose str::find/contains built
+# a TwoWaySearcher per call — ~47% of small-diagram render self-time. Already in the workspace lock
+# (fm-parser depends on it for SIMD newline counting), so promoting it here is zero bundle cost.
+memchr = "2"
 
 [dev-dependencies]
 fm-parser.workspace = true

@@ -7524,3 +7524,29 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   documented one-line gate update). Same "audit siblings when an optimization lands" thread as 5a5b971.
 
   Agent: SlateHarrier
+
+<!-- landed-css-postpass-memmem -->
+### LANDED: memchr::memmem in CSS post-passes (kill per-call TwoWaySearcher) — small render -19% (2026-07-03)
+- Symbolized perf (task-clock, dwarf) of a small flowchart RENDER showed **~47% of self-time in str
+  pattern-matching**: `TwoWaySearcher::next_match` 32.6% + `is_contained_in` 9.8% + `StrSearcher::new` 4.2%.
+  Source: the CSS post-passes (`strip_unused_markers`, `strip_dead_marker_css`, `minify_style_block`) used
+  `str::find`/`contains` on multi-byte needles (`"url(#"`, `"<marker "`, `"</marker>"`, `"</style>"`,
+  `"marker#"`, …), several INSIDE tight loops (once per `url(#…)` ref / `<marker>` def), so `str::find`
+  rebuilt a `TwoWaySearcher` every call.
+- **Fix:** `memchr::memmem` (SIMD). For loop needles, build a `memmem::Finder` ONCE and reuse it; single-byte
+  finds → `memchr::memchr`. Added `memchr = "2"` to fm-render-svg (already in the workspace lock via fm-parser
+  → zero bundle cost; same SIMD-scan justification the parser already uses).
+- **Byte-identical — proven:** `memmem`/`memchr` return the same byte offsets as `str::find`. Verified by
+  rendering 11 diagram types with a memmem binary vs the HEAD binary → ALL identical; + strip-specific lib
+  tests + 235 lib + golden_svg/golden_layout/conformance/mermaid_compat + clippy `-D warnings` clean.
+- **Measured (same-machine alternated A/B, release, min-of-N, NEW < OLD every round, non-overlapping):**
+  flowchart-60 render 99899→80693 ns (**-19%**), state-60 (**-17 to -22%**), class-40 (**-9 to -11%**).
+  Largest on small diagrams (the common case) where the ~fixed-size CSS block is a big fraction of render;
+  shrinks on large diagrams (geometry dominates). Biggest render win of the campaign. Widens the measured
+  mermaid.js dominance (full-pipeline 63-124x Chromium): the common small-diagram render just dropped ~1/5.
+- **Lesson:** `grep -nE '\.find\(|\.contains\(' ` for MULTI-BYTE &str needles = hidden `TwoWaySearcher`
+  construction+scan; in loops it's rebuilt per iteration. `memchr::memmem::Finder` (hoisted) is SIMD and
+  byte-identical. Same stdlib-searcher trap as the parser's CharSearcher (memchr) findings, now in the renderer.
+  Remaining: `strip_unused_state_css` (~20 self-scans) + `strip_unused_theme_css` (`replace(LARGE_CONST)`).
+
+  Agent: SlateHarrier

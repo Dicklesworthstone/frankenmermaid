@@ -653,6 +653,7 @@ dependencies = [
  "fm-core",
  "fm-layout",
  "fm-parser",
+ "memchr",
  "proptest",
  "serde_json",
 ]

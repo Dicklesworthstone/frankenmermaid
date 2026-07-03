@@ -427,34 +427,40 @@ fn strip_unused_state_css(svg: &mut String) {
 /// def in place, never strip a live one. Single O(n) rebuild (no per-marker rescans), so it adds
 /// no large-render cost — and large flowcharts already emit a minimal marker set (nothing to strip).
 fn strip_unused_markers(svg: &mut String) {
-    if !svg.contains("<marker ") {
+    // Multi-byte needles searched in tight loops (once per `url(#…)` ref / `<marker>` def): build each
+    // SIMD `Finder` ONCE and reuse it, instead of `str::find` rebuilding a `TwoWaySearcher` per call.
+    let marker_finder = memchr::memmem::Finder::new(b"<marker ");
+    if marker_finder.find(svg.as_bytes()).is_none() {
         return;
     }
+    let url_finder = memchr::memmem::Finder::new(b"url(#");
     // 1. Collect every id referenced via `url(#id)` (marker assignments live only here).
     let mut referenced: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut at = 0;
-    while let Some(rel) = svg[at..].find("url(#") {
+    while let Some(rel) = url_finder.find(&svg.as_bytes()[at..]) {
         let id_start = at + rel + "url(#".len();
-        let Some(close) = svg[id_start..].find(')') else {
+        let Some(close) = memchr::memchr(b')', &svg.as_bytes()[id_start..]) else {
             break;
         };
         referenced.insert(&svg[id_start..id_start + close]);
         at = id_start + close + 1;
     }
     // 2. Find each `<marker id="..">…</marker>` span whose id is not referenced.
+    let endmarker_finder = memchr::memmem::Finder::new(b"</marker>");
+    let id_finder = memchr::memmem::Finder::new(b"id=\"");
     let mut dead_spans: Vec<(usize, usize)> = Vec::new();
     let mut at = 0;
-    while let Some(rel) = svg[at..].find("<marker ") {
+    while let Some(rel) = marker_finder.find(&svg.as_bytes()[at..]) {
         let m_start = at + rel;
-        let Some(end_rel) = svg[m_start..].find("</marker>") else {
+        let Some(end_rel) = endmarker_finder.find(&svg.as_bytes()[m_start..]) else {
             break;
         };
         let m_end = m_start + end_rel + "</marker>".len();
         // The marker id is the first `id="…"` inside the opening tag.
-        let tag_end = svg[m_start..m_end].find('>').map_or(m_end, |g| m_start + g);
-        if let Some(idrel) = svg[m_start..tag_end].find("id=\"") {
+        let tag_end = memchr::memchr(b'>', &svg.as_bytes()[m_start..m_end]).map_or(m_end, |g| m_start + g);
+        if let Some(idrel) = id_finder.find(&svg.as_bytes()[m_start..tag_end]) {
             let id_start = m_start + idrel + "id=\"".len();
-            if let Some(idclose) = svg[id_start..tag_end].find('"') {
+            if let Some(idclose) = memchr::memchr(b'"', &svg.as_bytes()[id_start..tag_end]) {
                 let id = &svg[id_start..id_start + idclose];
                 if !referenced.contains(id) {
                     dead_spans.push((m_start, m_end));
@@ -490,35 +496,39 @@ fn strip_unused_markers(svg: &mut String) {
 /// styling (its selector references a present def), and CSS drift can only leave a dead selector in
 /// place, never drop a live one. Brace-depth tracking emits nested at-rules (`@media`) verbatim.
 fn strip_dead_marker_css(svg: &mut String) {
-    if !svg.contains("marker#arrow-") {
+    if memchr::memmem::find(svg.as_bytes(), b"marker#arrow-").is_none() {
         return;
     }
-    // Live marker ids = those still present as `<marker id="…">` defs.
+    // Live marker ids = those still present as `<marker id="…">` defs. Reuse one SIMD `Finder` per
+    // needle across the loop instead of `str::find` rebuilding a `TwoWaySearcher` every iteration.
+    let marker_finder = memchr::memmem::Finder::new(b"<marker ");
+    let id_finder = memchr::memmem::Finder::new(b"id=\"");
     let mut live: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut at = 0;
-    while let Some(rel) = svg[at..].find("<marker ") {
+    while let Some(rel) = marker_finder.find(&svg.as_bytes()[at..]) {
         let m = at + rel;
-        if let Some(i) = svg[m..].find("id=\"") {
+        if let Some(i) = id_finder.find(&svg.as_bytes()[m..]) {
             let s = m + i + "id=\"".len();
-            if let Some(e) = svg[s..].find('"') {
+            if let Some(e) = memchr::memchr(b'"', &svg.as_bytes()[s..]) {
                 live.insert(&svg[s..s + e]);
             }
         }
         at = m + "<marker ".len();
     }
-    let Some(open) = svg.find("<style") else {
+    let Some(open) = memchr::memmem::find(svg.as_bytes(), b"<style") else {
         return;
     };
-    let Some(gt) = svg[open..].find('>') else {
+    let Some(gt) = memchr::memchr(b'>', &svg.as_bytes()[open..]) else {
         return;
     };
     let cs = open + gt + 1;
-    let Some(er) = svg[cs..].find("</style>") else {
+    let Some(er) = memchr::memmem::find(&svg.as_bytes()[cs..], b"</style>") else {
         return;
     };
     let ce = cs + er;
     let css = &svg[cs..ce];
     let bytes = css.as_bytes();
+    let marker_hash_finder = memchr::memmem::Finder::new(b"marker#");
     let mut out = String::with_capacity(css.len());
     let mut i = 0;
     let mut seg_start = 0;
@@ -537,10 +547,10 @@ fn strip_dead_marker_css(svg: &mut String) {
                 j += 1;
             }
             let body = &css[i..j];
-            if selectors.contains("marker#") {
+            if marker_hash_finder.find(selectors.as_bytes()).is_some() {
                 let kept: Vec<&str> = selectors
                     .split(',')
-                    .filter(|sel| match sel.find("marker#") {
+                    .filter(|sel| match marker_hash_finder.find(sel.as_bytes()) {
                         Some(p) => {
                             let rest = &sel[p + "marker#".len()..];
                             let end = rest
@@ -578,14 +588,14 @@ fn strip_dead_marker_css(svg: &mut String) {
 /// untouched), so the cost is a single constant-size scan with no size guard needed. No-op when
 /// there is no `<style>` block. See [`minify_css`] for the whitespace-only contract.
 fn minify_style_block(svg: &mut String) {
-    let Some(open) = svg.find("<style") else {
+    let Some(open) = memchr::memmem::find(svg.as_bytes(), b"<style") else {
         return;
     };
-    let Some(gt_rel) = svg[open..].find('>') else {
+    let Some(gt_rel) = memchr::memchr(b'>', &svg.as_bytes()[open..]) else {
         return;
     };
     let content_start = open + gt_rel + 1;
-    let Some(end_rel) = svg[content_start..].find("</style>") else {
+    let Some(end_rel) = memchr::memmem::find(&svg.as_bytes()[content_start..], b"</style>") else {
         return;
     };
     let content_end = content_start + end_rel;
