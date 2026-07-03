@@ -4792,6 +4792,24 @@ fn normalize_gantt_date_with_format(token: &str, date_format: &str) -> Option<St
         return None;
     }
 
+    // Fast path: write the fixed 10-byte `YYYY-MM-DD` directly instead of going through
+    // `format!`'s `Formatter`/zero-pad machinery, which ran once per parsed gantt date. Gated on
+    // `year < 10000` so the four year digits are exactly `{year:04}`; `month`/`day` are already
+    // validated to 1..=12 / 1..=31 (two digits). Byte-identical to the `format!` below for this
+    // range; wider years (rare) keep `format!`, which allows a >4-digit year.
+    if year < 10000 {
+        let mut b = [b'-'; 10];
+        b[0] = b'0' + (year / 1000) as u8;
+        b[1] = b'0' + (year / 100 % 10) as u8;
+        b[2] = b'0' + (year / 10 % 10) as u8;
+        b[3] = b'0' + (year % 10) as u8;
+        b[5] = b'0' + (month / 10) as u8;
+        b[6] = b'0' + (month % 10) as u8;
+        b[8] = b'0' + (day / 10) as u8;
+        b[9] = b'0' + (day % 10) as u8;
+        return Some(String::from_utf8(b.to_vec()).expect("ascii date digits"));
+    }
+
     Some(format!("{year:04}-{month:02}-{day:02}"))
 }
 
