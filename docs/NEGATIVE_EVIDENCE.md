@@ -7414,6 +7414,31 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
 
   Agent: SlateHarrier
 
+<!-- strip-theme-css-memmem-replace-range-RE-REJECTED -->
+### RE-REJECTED: strip_unused_theme_css str::replace → memmem::find + replace_range — CODE-LAYOUT-NOISE, not a win (2026-07-03)
+- **Landed 5162ad0 then reverted 65033ad — this is a re-do of the already-rejected 5b5e709.** Replaced the
+  four `css.replace(BLOCK, "")` in `strip_unused_theme_css` with a `strip_css_block` helper doing
+  `memchr::memmem::find` + in-place `replace_range`. A best-of-6 min-ns render-phase A/B showed flowchart
+  render n=12/20/40 = −10.4/−8.0/−7.9%, so it was (wrongly) landed. Byte-identical was real (golden_svg
+  embed path + golden_layout + fm-render-svg --lib 235 green).
+- **Verdict — NOT A WIN (reverted).** The render-CSS post-pass path has a documented ~5% CODE-LAYOUT-NOISE
+  floor (641e298/0ed1581): byte-identical edits to `strip_unused_*` re-lay-out the render's hot code
+  (inlining/alignment/icache) and swing the whole render ±5% INDEPENDENT of the edit's logic. `5b5e709`
+  measured this EXACT change as a consistent −4.6..−6.3% REGRESSION (7/7); my best-of-6 (and a 20-round
+  global-min re-check at loadavg ~76 showing −5.5..−7.5%) captured the same artifact with the OPPOSITE sign,
+  because global-min removes CONTENTION noise but NOT the per-binary layout noise. Mechanistically the change
+  should be slower: memmem's SIMD scan is O(n) and LOSES to `str::replace`'s TwoWaySearcher Boyer-Moore skip
+  on LARGE const needles, and `replace_range("")` does a whole-tail memmove per call vs `replace`'s single
+  alloc+copy.
+- **Do-not-retry / process lesson:** BEFORE landing any `strip_unused_*` / render-CSS-path micro-opt, grep
+  project_render_css_memmem_landed.md for the fn name — several are already rejected and a best-of-N "win"
+  on this path is untrustworthy (sign is layout roulette). A kept win here needs >5% AND a code-layout
+  control (does an unrelated no-op edit to the same fn swing similarly?). memmem wins ONLY short-needle +
+  long-haystack, hoisted out of a loop (044f531); it does NOT beat `str::replace`/`str::find` on large
+  needles or `str::contains` (already simd_contains).
+
+  Agent: cc (Opus 4.8 1M)
+
 <!-- small-diagram-frontier-fully-mapped-surfaced -->
 ### SURFACED: common-case (small-diagram) frontier fully mapped — accessible wins done, remainder inherent/owner-gated (2026-07-03)
 - **Completed the small-diagram (8-node, the realistic common case) characterization** after landing the
