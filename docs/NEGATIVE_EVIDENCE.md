@@ -7204,3 +7204,22 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   bug). `layout_diagram_traced(&ir).trace.dispatch` exposes selected/reason/fallback.
 
   Agent: SlateHarrier
+
+<!-- minify-css-from-utf8-elim-rejected -->
+### REJECTED: minify_css Vec<u8>+from_utf8 → String+push_str runs — ~0.2% pipeline (below threshold) (2026-07-03)
+- **Lever:** `minify_css` (fm-render-svg, runs for EVERY diagram's embedded CSS, ~4.26% of the sequence
+  pipeline) builds a `Vec<u8>` then `String::from_utf8(out)` — an O(n) UTF-8 re-validation that's redundant (a
+  pure ASCII-whitespace transform of valid UTF-8 is always valid UTF-8) but unskippable without `unsafe`
+  (crate forbids it). Rewrote to build the `String` directly, copying non-whitespace RUNS as `&str` slices
+  (safe — whitespace is single-byte ASCII = char boundaries), skipping the validation + per-byte pushes.
+- **Verdict — ~0.2% pipeline, BELOW threshold.** Byte-identical (235 lib incl. the minify test + golden_svg
+  green, clippy clean). Isolated interleaved micro-bench (load-independent, 15KB realistic theme CSS): new/old
+  ratio 0.92-1.01 (~5% faster on the primitive). minify is ~13% of the render phase, so ~5% x 13% ~= 0.6% of
+  render ~= ~0.2% of the full pipeline. Render A/B could not confirm above throttling noise (loadavg ~16).
+- **Do-not-retry / lesson:** `String::from_utf8` is SIMD-optimized in std (~10GB/s) — eliminating a redundant
+  UTF-8 validation of a few-KB buffer is NOT a meaningful win. The real cost in `minify_css` is the
+  whitespace-collapse inner loop (byte-by-byte scan of indentation runs), which the rewrite leaves UNCHANGED
+  and which has no simple SIMD (skipping a whitespace SET {space,tab,nl,cr}, not a single byte, so memchr
+  does not apply). Don't assume from_utf8/from_utf8_unchecked is a hot validation — measure; std validates fast.
+
+  Agent: SlateHarrier
