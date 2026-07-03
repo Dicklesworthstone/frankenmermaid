@@ -7177,3 +7177,30 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   doubling-from-1 it appears; and the specialized collect beats the manual form regardless.)
 
   Agent: SlateHarrier
+
+<!-- sequence-frontier-explored-surfaced -->
+### SURFACED: sequence-diagram frontier explored — no byte-identical perf lever + a correctness finding (2026-07-03)
+- **Profiled a sequence diagram (20 participants, 400 messages) for the first time deeply.** Phase split
+  parse ~41% / render ~32% / layout ~19% (parse-dominant, unlike flowchart). Top self-times: `parse_sequence`
+  5.98%, `find_operator_core` 5.75%, `layout_diagram_sugiyama` 4.80%, `parse_sequence_statement` 4.00%,
+  `render_svg_with_layout` 3.98%, `parse_sequence_message_ast` 2.90%, `minify_css`+`minify_style_block` 4.26%.
+- **No clean byte-identical perf lever found:** `find_operator_core` is at ceiling (memory: char_indices→byte
+  rejected); `parse_label` for message endpoints is NECESSARY (captures display-vs-id case, e.g. "Alice" label
+  vs "alice" id — not wasted); `parse_sequence_statement`'s check order (autonumber/note/activate/…/message)
+  is LOAD-BEARING — a note's text can contain `->>` (`note over A: uses ->> arrow`), so the message check
+  cannot be reordered earlier without misclassifying notes → NOT byte-identical; `minify_css` is already a
+  tight byte-scan.
+- **CORRECTNESS FINDING (owner-gated, surfaced not fixed):** large sequences (≥~200 messages) hit a guardrail
+  `reason="guardrail_forced_time_budget"`, `fallback=true` that FORCES `Sequence`→`Sugiyama` layout — so a
+  sequence diagram is laid out as a GENERAL GRAPH (no lifelines/timeline = visually wrong). Small sequences
+  (≤50 msgs) correctly use `Sequence`. Measured: for 400 msgs, `Sequence` layout (~390µs) and the `Sugiyama`
+  fallback (~390µs) are the SAME speed (ratio 1.01-1.05), so the fallback is **perf-neutral** — it's not a
+  perf lever, but it produces incorrect visuals. Fixing (raise/remove the sequence time-budget guardrail, or
+  speed up the ~390µs/400msg sequence layout so it stays under budget) CHANGES large-sequence output → needs
+  golden re-bless + owner sign-off. Flagged for the owner; not landed.
+- **META:** when a diagram type's profile shows a *general-graph* layout (`sugiyama`/`build_edge_paths`/
+  obstacle routing) hot for a NON-graph type (sequence/gantt/pie), check `traced.trace.dispatch.selected` /
+  `.reason` — a guardrail may be silently falling back to the wrong algorithm (perf-neutral here, but a visual
+  bug). `layout_diagram_traced(&ir).trace.dispatch` exposes selected/reason/fallback.
+
+  Agent: SlateHarrier
