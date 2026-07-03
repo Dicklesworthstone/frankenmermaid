@@ -7343,3 +7343,28 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   fill) and in-place-replace (order) are blocked. Leave it.
 
   Agent: SlateHarrier
+
+<!-- small-diagram-css-fixed-overhead-surfaced -->
+### SURFACED: small-diagram render is dominated by fixed ~9KB theme-CSS post-processing (owner-gated) (2026-07-03)
+- **Profiled a SMALL flowchart (8 nodes) — the realistic common case (real diagrams are ~7-30 nodes; the
+  ledger's 7-node full pipeline is ~370µs).** Render is 82% of the pipeline (64µs of 78µs), and **~46% of
+  render is fixed CSS post-processing** that does NOT scale down with node count: `minify_css` 27% +
+  `strip_dead_marker_css` 7.2% + `strip_unused_theme_css` 2.1% + `write_escaped_text` (mostly the CSS) 10%.
+  Three separate full scans of the ~9KB theme `<style>` block (`strip_unused` during assembly → `strip_dead_
+  marker` post → `minify` post), two of which rebuild the CSS String.
+- **Why it's not a clean unilateral win:** the output CSS is byte-identity-LOCKED by the current strip/minify
+  logic (every golden pins it). Stripping more unused rules, or pruning the theme CSS for the actual diagram,
+  SHRINKS the `<style>` block → changes the SVG bytes → needs golden re-bless (owner-gated). The only
+  byte-identical route is to emit the theme CSS ALREADY-minified (so `minify_style_block` can be removed) —
+  but that requires re-authoring every theme-CSS constant + the color-injection + assembly in minified form
+  and proving the assembled bytes equal `minify_css(current pretty CSS)`: a large, delicate refactor across
+  `theme.rs`/`defs.rs`/the CSS assembly, not a contained edge.
+- **Rejected the contained sub-lever:** the `minify_css` `Vec<u8>`→`String`+push_str-runs change (already
+  rejected 497f20f as ~0.2% of the LARGE pipeline) is ~5% of minify = ~1.4% of SMALL render = ~1% of the small
+  full pipeline — still below threshold even weighting the common case, and `from_utf8` is SIMD-fast.
+- **Actionable for the owner:** emitting pre-minified + diagram-pruned theme CSS would roughly HALVE
+  small-diagram render (the common case), widening the already-100×+ parse / 63-124× full-pipeline mermaid.js
+  lead further. It's the highest-value remaining render lever, but it changes output/needs a re-bless + a
+  cross-file CSS-emission refactor — owner-gated, like the mindmap radial router and large-seq→sugiyama.
+
+  Agent: SlateHarrier
