@@ -8930,22 +8930,24 @@ fn weakly_connected_components(node_count: usize, edges: &[OrientedEdge]) -> Vec
 
 fn resolved_edges(ir: &MermaidDiagramIr) -> Vec<OrientedEdge> {
     let node_count = ir.nodes.len();
-    ir.edges
-        .iter()
-        .enumerate()
-        .filter_map(|(edge_index, edge)| {
-            let source = endpoint_node_index(ir, edge.from)?;
-            let target = endpoint_node_index(ir, edge.to)?;
-            if source >= node_count || target >= node_count {
-                return None;
-            }
-            Some(OrientedEdge {
-                source,
-                target,
-                edge_index,
-            })
+    // Presize to `ir.edges.len()` (the max; `filter_map` only drops unresolved/out-of-range edges)
+    // so the `Vec` fills without `filter_map().collect()`'s growth reallocs — `filter_map`'s 0 lower
+    // size-hint gives `collect` no capacity. `edges.len()` is O(1); byte-identical (same order).
+    // `resolved_edges` runs per layout (GraphMetrics::from_ir algorithm selection + cycle removal).
+    let mut edges = Vec::with_capacity(ir.edges.len());
+    edges.extend(ir.edges.iter().enumerate().filter_map(|(edge_index, edge)| {
+        let source = endpoint_node_index(ir, edge.from)?;
+        let target = endpoint_node_index(ir, edge.to)?;
+        if source >= node_count || target >= node_count {
+            return None;
+        }
+        Some(OrientedEdge {
+            source,
+            target,
+            edge_index,
         })
-        .collect()
+    }));
+    edges
 }
 
 fn oriented_edges(
