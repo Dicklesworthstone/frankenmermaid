@@ -2358,7 +2358,7 @@ fn render_layout_to_svg(
             config,
             &theme,
         );
-        return doc.to_string();
+        return doc.to_string_with_capacity(layout_svg_capacity_hint(ir, layout));
     }
 
     // Pie chart rendering: draw wedges from pie metadata.
@@ -2366,7 +2366,7 @@ fn render_layout_to_svg(
         doc = render_pie_svg(
             doc, ir, layout, pie_meta, offset_x, offset_y, config, &theme,
         );
-        return doc.to_string();
+        return doc.to_string_with_capacity(layout_svg_capacity_hint(ir, layout));
     }
 
     // Quadrant chart rendering.
@@ -2374,13 +2374,13 @@ fn render_layout_to_svg(
         doc = render_quadrant_svg(
             doc, ir, layout, quad_meta, offset_x, offset_y, config, &theme,
         );
-        return doc.to_string();
+        return doc.to_string_with_capacity(layout_svg_capacity_hint(ir, layout));
     }
 
     // Gantt chart: type-based task bar colors and section headers.
     if ir.diagram_type == fm_core::DiagramType::Gantt && ir.gantt_meta.is_some() {
         doc = render_gantt_svg(doc, ir, layout, offset_x, offset_y, config, &theme);
-        return doc.to_string();
+        return doc.to_string_with_capacity(layout_svg_capacity_hint(ir, layout));
     }
 
     if let Some(title) = generic_title {

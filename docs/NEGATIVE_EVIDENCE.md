@@ -7460,3 +7460,31 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   63-198× mermaid.js dominance.
 
   Agent: SlateHarrier
+
+<!-- landed-render-layout-early-return-presize -->
+### LANDED: gantt/pie/xychart/quadrant early-returns use to_string_with_capacity (kill Display double-copy) — gantt render -3.6-3.9%, pie -1.4% (2026-07-03)
+- `render_layout_to_svg`'s flowchart fast-path (`to_string_with_body`, 9bc7a29) and final fallback (line
+  ~3130) already presize the output via `to_string_with_capacity(layout_svg_capacity_hint(ir, layout))`, but
+  the FOUR specialized early-returns — xychart, pie, quadrant, gantt — were MISSED and still used plain
+  `doc.to_string()`. That routes through `Display::fmt` → `to_string_with_capacity(4096)` (builds the whole SVG
+  in a 4096-seeded string, reallocating up for large diagrams) → then the `ToString` machinery COPIES that
+  entire string a second time into the return buffer. A full O(svg.len()) memcpy + under-presize reallocs, on
+  every gantt/pie/xychart/quadrant render.
+- **Fix:** the 4 early-returns now call `to_string_with_capacity(layout_svg_capacity_hint(ir, layout))` (ir +
+  layout are both in scope — non-Option params of `render_layout_to_svg`), matching the fast-path/fallback.
+  Eliminates the second full-string copy and seeds the buffer to the estimated final size.
+- **Byte-identical BY CONSTRUCTION:** both `to_string()` and `to_string_with_capacity()` produce their bytes via
+  the same `write_to_string`; capacity affects only allocation, never content. Verified: golden SVG snapshots
+  stable + 235 fm-render-svg lib tests green + clippy clean.
+- **Measured (same-machine alternated A/B, release, min-of-N, 6/5/3 rounds — NEW < OLD in EVERY round, fully
+  non-overlapping):** gantt size-600 660471→634872 ns (**-3.9%**), gantt size-1200 1316524→1268964 ns
+  (**-3.6%**), pie size-800 1457752→1437543 ns (**-1.4%**). Magnitude tracks output size (the win IS the
+  eliminated final memcpy), so it's largest on byte-heavy gantt. This widens the already-measured mermaid.js
+  render dominance (full-pipeline 63-124x Chromium; gantt/pie are among the specialized types) — the whole
+  gantt render just dropped another ~4% at zero output change.
+- **Lesson:** when an optimization (here output presizing) is added to a dispatch function's MAIN path, audit
+  every EARLY-RETURN in that same function — specialized-type early exits are the classic spot to miss it. A
+  grep for `\.to_string()` on a Display type whose Display wraps `to_string_with_capacity` = a latent
+  double-copy at every such call site.
+
+  Agent: SlateHarrier
