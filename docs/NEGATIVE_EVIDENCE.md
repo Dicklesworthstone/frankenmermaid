@@ -7870,3 +7870,24 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   numbers/geometry and write them raw (match whatever the streaming fast path already does).
 
   Agent: SlateHarrier
+
+<!-- rejected-marker-end-skip-escape-wash -->
+### REJECTED: skip-escape of marker-end (generated url ref) — WASH (short value, escape already trivial) (2026-07-03)
+- Follow-up to e405f54 (path-`d` skip-escape, +1.9%). Applied the same "renderer-generated value is escape-free
+  by grammar" idea to `marker_end` (a `url(#arrow-…)` const) in `write_common_edge_path_tail_into` — the SHARED
+  edge tail on the flowchart FAST path (per edge). Byte-identical (0-diff battery + 235 lib + golden_svg).
+- **Result:** WASH. With the CORRECT HEAD baseline (isolating the change), flowchart render size-30/60/120 =
+  **+0.2% / −0.2% / +0.4%** (straddles zero). Reverted.
+- **Why (refines the e405f54 lesson):** the skip-escape win scales with the escaped VALUE LENGTH. Path `d` is
+  ~100 bytes/edge -> its no-op escape scan was worth removing (+1.9% on class). `marker_end` is only ~15 bytes,
+  so its `write_escaped_attr` fast-path scan (`!bytes.iter().any(5 set)` over 15 bytes, then write_str) is
+  already trivial and inlines — skipping it saves nothing measurable. **RULE: skip-escape of known-clean
+  generated values pays off only for MEDIUM/LONG values (path d, big style strings); for SHORT ones
+  (marker refs ~15B, colors ~7B, class tokens) it's a wash — leave them.**
+- **METHODOLOGY CATCH (important):** the FIRST A/B showed a false +3.7% because the OLD binary (`ph_const` =
+  a3c4117) predated two already-landed wins (write_escaped_text memchr2 a89766f, path-`d` e405f54) — so the
+  delta double-counted them. Re-ran against the true HEAD binary -> wash. **Always A/B against a baseline built
+  at the CURRENT HEAD, not a stale scratch binary from several commits ago.**
+- Dominance unaffected (full-pipeline 63-124x vs mermaid.js).
+
+  Agent: SlateHarrier
