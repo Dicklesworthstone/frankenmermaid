@@ -486,6 +486,18 @@ pub(crate) fn write_escaped_attr<W: fmt::Write>(f: &mut W, s: &str) -> fmt::Resu
 /// exactly. `]` is ASCII, so the byte look-back matches a `char` look-back.
 pub(crate) fn write_escaped_text<W: fmt::Write>(f: &mut W, s: &str) -> fmt::Result {
     let bytes = s.as_bytes();
+    // Fast path for LONG text (the ~9 KB embedded `<style>` CSS is written through here on every
+    // diagram — ~10% of small-diagram render): when nothing needs escaping, bulk-copy in one
+    // `write_str` instead of the per-byte match loop (which pays a `]]>` look-back on every `>`, and
+    // CSS is full of `>` child combinators). Gated on length so short labels — which are numerous and
+    // for which the extra `any`+`contains` scans lose — keep the loop. Byte-identical: the loop also
+    // emits `s` verbatim when no byte escapes, so the gate only picks the faster equivalent path.
+    if bytes.len() >= 256
+        && !bytes.iter().any(|&b| b == b'&' || b == b'<')
+        && !s.contains("]]>")
+    {
+        return f.write_str(s);
+    }
     let mut start = 0;
     for (i, &b) in bytes.iter().enumerate() {
         let replacement = match b {

@@ -7368,3 +7368,27 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   cross-file CSS-emission refactor — owner-gated, like the mindmap radial router and large-seq→sugiyama.
 
   Agent: SlateHarrier
+
+<!-- write-escaped-text-long-fastpath-landed -->
+### LANDED: write_escaped_text length-gated bulk-copy fast-path — small-diagram render ~3-7%, byte-identical (2026-07-03)
+- **Follow-up to the small-diagram CSS-overhead surface (ec66e22).** The ~9 KB embedded `<style>` CSS is
+  written through `write_escaped_text` on EVERY diagram (~10% of small-diagram render self-time). Unlike
+  `write_escaped_attr`, it had NO fast path — a per-byte match loop that pays a `]]>` look-back on every `>`,
+  and CSS is full of `>` child combinators. CSS never contains `&`/`<`/`]]>`, so the whole 9 KB is a straight
+  copy done the slow way.
+- **Fix (fm-render-svg attributes):** a fast path — when `len >= 256` AND no `&`/`<` AND no `]]>`, bulk-copy
+  with one `write_str` instead of the loop. Length-gated so SHORT labels (numerous, and for which the extra
+  `any`+`contains` scans lose ~25%) keep the loop. Byte-identical: the loop also emits `s` verbatim when no
+  byte escapes, so the gate only picks the faster equivalent path (235 fm-render-svg lib + golden_svg +
+  golden_layout green; clippy clean).
+- **MEASURED — isolated micro-bench (load-independent, outputs asserted identical):** on realistic ~18 KB CSS
+  (child combinators, no escapes) the fast path is **30-40% faster** (new/old 0.59-0.74); on a 13-byte label
+  it's ~25% SLOWER (hence the length gate). Pipeline A/B (profharness `flowchart 8 render`, throttle-noisy):
+  **mean -2.8% / best-of-20 (least-throttled) -7.2%**, NEW faster 15/20; large sizes unaffected (labels gated,
+  the single CSS write is just faster). Broad — every diagram writes the theme CSS through this path; biggest
+  for the common small-diagram case.
+- **META:** the escape-check fast path that LOSES for short attr values (memchr rejection) WINS for long text
+  (KB-scale CSS) — gate escape/scan fast-paths on length; short strings are scan-floor-bound, long strings are
+  per-byte-branch-bound. Confirmed load-independent via isolated bench (the pipeline A/B was throttle-buried).
+
+  Agent: SlateHarrier
