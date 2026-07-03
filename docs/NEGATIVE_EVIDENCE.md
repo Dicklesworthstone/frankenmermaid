@@ -7275,3 +7275,29 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   needs a DIRECT old-vs-new output diff to prove byte-identity (tests passing ≠ path covered).
 
   Agent: SlateHarrier
+
+<!-- on2-hunt-frontier-characterized-surfaced -->
+### SURFACED: systematic O(N²) hunt across all diagram types — frontier characterized (2026-07-03)
+- **After landing two O(N²) fixes (gantt band 8f65354, subgraph membership c8764c8), swept the whole codebase
+  for more.** Two O(N²) families: (a) dedup-on-insert `if !xs.contains(&y) { xs.push(y) }` — grep found all
+  remaining sites are SMALL/fixed lists (per-node `graph_node.clusters/subgraphs`, gitgraph `branch_order`,
+  the ~5-elem layout-algorithm `candidates` list) or `graph_neighbors` O(degree²) (degree tiny); (b) linear
+  `.iter().find()/.position()` in loops — all real hits are tests or O(line) byte scans, except the niche
+  gitgraph `layout_diagram_gitgraph_traced` per-node `clusters.iter().find(|c| c.members.contains(..))` (6637).
+- **Scaling-checked (profharness, 200→400→800, super-linear ⇒ O(N²)):** flowchart, sequence, gantt, subgraph,
+  state, er, class (fixed the malformed profharness shape), gitgraph, sankey, pie — **all LINEAR** (gitgraph
+  6637 is NOT hot: clusters are empty for gitgraph, general edge routing dominates and is linear). So the
+  common-type O(N²) frontier is EXHAUSTED.
+- **ONE exception — mindmap layout is O(N²)** (156µs→2066µs for 200→800 nodes = 13× / 4× size), dominated by
+  `ObstacleSpatialIndex::query_segment` (23%). NOT a clean lever: it's the GENERAL obstacle-routing, and for a
+  flat-star mindmap (root + N children) each root→child spoke is long and passes through the dense radial
+  packing, so each of N edge queries gathers O(N) candidates → O(N²). The gather+sort is inherent (sort is
+  load-bearing for byte-identity); skipping obstacle routing for radial/mindmap layouts would fix it but
+  CHANGES routed geometry (owner-gated, not byte-identical). Realistic hierarchical mindmaps (shorter edges)
+  are far less affected — this is largely a degenerate-flat-star artifact. **Flagged for the owner** (a
+  radial-specific direct-spoke router would make mindmap O(N)).
+- **META:** the "profile a NEW diagram type for O(N²)" vein (which found gantt + subgraph) is now MINED for the
+  common types — they're linear. Remaining algorithmic wins are owner-gated (mindmap routing, large-seq→sugiyama
+  from 6a2972e) or absent. The byte-identical perf frontier is genuinely near-closed across micro AND algorithmic.
+
+  Agent: SlateHarrier
