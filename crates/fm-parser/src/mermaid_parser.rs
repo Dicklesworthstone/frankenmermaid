@@ -5686,12 +5686,13 @@ fn parse_block_beta_document_items(
             continue;
         }
 
-        let lower = trimmed.to_ascii_lowercase();
-        if lower.starts_with("block-beta") {
+        // Header/`end` skip without the per-line `to_ascii_lowercase()` heap alloc (fires on every
+        // block line, then `parse_block_beta_columns`/`_blocks` below each lowercased again).
+        if starts_with_ci(trimmed, "block-beta") {
             continue;
         }
 
-        if lower == "end" {
+        if trimmed.eq_ignore_ascii_case("end") {
             if stop_on_end {
                 return (items, unclosed_groups);
             }
@@ -5889,9 +5890,21 @@ fn lower_block_beta_document_item(
     }
 }
 
+/// ASCII-case-insensitive `str::starts_with` without allocating a lowercased copy.
+fn starts_with_ci(s: &str, prefix: &str) -> bool {
+    s.len() >= prefix.len() && s.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+}
+
+/// ASCII-case-insensitive `str::strip_prefix` returning the RAW (not lowercased) remainder.
+/// `prefix.len()` is a char boundary once `starts_with_ci` holds (the matched bytes are ASCII).
+fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    starts_with_ci(s, prefix).then(|| &s[prefix.len()..])
+}
+
 fn parse_block_beta_columns(line: &str) -> Option<usize> {
-    let lower = line.to_ascii_lowercase();
-    let rest = lower.strip_prefix("columns")?.trim();
+    // The remainder after `columns` is trimmed then parsed as a `usize` (digits/whitespace are
+    // case-invariant), so match the prefix case-insensitively without the per-line lowercase alloc.
+    let rest = strip_prefix_ci(line, "columns")?.trim();
     rest.parse::<usize>().ok()
 }
 
@@ -5918,10 +5931,10 @@ fn parse_block_beta_group_start(line: &str) -> Option<(String, Option<usize>)> {
 }
 
 fn parse_block_beta_blocks(line: &str, line_number: usize, config: &ParserConfig) -> Vec<BlockDef> {
-    let lower = line.to_ascii_lowercase();
-    if lower == "space" || lower.starts_with("space:") {
-        let span_cols = lower
-            .strip_prefix("space:")
+    // Case-insensitive `space`/`space:N` check without the per-line lowercase alloc; the `N` after
+    // `space:` is numeric (case-invariant). Byte-identical to the old lowercased-copy comparisons.
+    if line.eq_ignore_ascii_case("space") || starts_with_ci(line, "space:") {
+        let span_cols = strip_prefix_ci(line, "space:")
             .and_then(|value| value.trim().parse::<usize>().ok())
             .unwrap_or(1);
         return vec![BlockDef {
@@ -8964,6 +8977,28 @@ fn is_comment(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ci_prefix_helpers_are_byte_identical() {
+        // Pin the alloc-free helpers to the old `to_ascii_lowercase()` forms they replaced.
+        let cases = ["space", "Space", "SPACE:3", "space: 2", "spacex", "space", "block-beta",
+            "Block-Beta x", "columns 4", "COLUMNS 5", "col", "", "spÄce", "space:", " space"];
+        for prefix in ["space", "space:", "block-beta", "columns"] {
+            for s in cases {
+                let lower = s.to_ascii_lowercase();
+                assert_eq!(super::starts_with_ci(s, prefix), lower.starts_with(prefix), "{s:?} {prefix:?}");
+                // strip_prefix_ci returns the RAW remainder; membership matches lowercase strip.
+                assert_eq!(
+                    super::strip_prefix_ci(s, prefix).is_some(),
+                    lower.strip_prefix(prefix).is_some(),
+                    "{s:?} {prefix:?}"
+                );
+                if let Some(raw_rest) = super::strip_prefix_ci(s, prefix) {
+                    assert_eq!(raw_rest, &s[prefix.len()..]);
+                }
+            }
+        }
+    }
+
     use chumsky::Parser;
     use fm_core::{
         ArrowType, DiagnosticCategory, DiagnosticSeverity, DiagramType, GanttDate, GanttExclude,
