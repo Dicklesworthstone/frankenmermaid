@@ -7722,3 +7722,28 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
 - Dominance unaffected (full-pipeline 63-124x vs mermaid.js, Chromium).
 
   Agent: SlateHarrier
+
+<!-- rejected-memchr-opt3-measured -->
+### REJECTED (now MEASURED): memchr opt=3 — ~1.8% render REGRESSION, not a win (2026-07-03)
+- Follow-up to 5ab6a81 (surfaced as unmeasurable under load). Resolved it with a LOAD-ROBUST global-min A/B:
+  load only ADDS time (contention + freq throttling), never subtracts, so the MINIMUM render time across many
+  rounds converges to the true contention-free time regardless of loadavg. Ran the two prebuilt binaries
+  (ph_fx_rel = memchr opt="z" = HEAD; ph_mc3 = memchr opt=3) 90 interleaved rounds at loadavg ~72-76.
+- **Result:** old(z) global-min **77857 ns** (plateaued by round 40, flat over the next 50), new(opt=3)
+  global-min **79290 ns** (converged down from 85161@10r -> 79510@40r -> 79290@90r, plateauing ~1.8% ABOVE old).
+  Stable **−1.8% render REGRESSION**. Byte-identical (build config only), so this is a pure codegen effect.
+- **Why (refutes "byte-scan hot path => opt=3"):** memchr's vector search is INTRINSIC-based (explicit SIMD),
+  so the actual hot instructions are the SAME at opt="z" and opt=3 — opt=3 buys nothing on the vector ops.
+  What it DOES change is surrounding codegen: opt=3 inlines/unrolls `Finder::find` more, bloating it, which
+  adds ICACHE pressure inside the render's large hot loop (which also runs write_escaped_text, node/edge
+  emission, the other CSS passes). The smaller opt="z" memchr fits the icache better here. So the workspace
+  default opt="z" for the memchr DEP is already optimal; the opt=3 bumps help the WORKSPACE crates (lots of
+  non-intrinsic code that vectorizes/inlines) but NOT an intrinsic-SIMD dependency.
+- **METHOD (durable):** global-min over many interleaved rounds IS a valid load-robust A/B for a
+  deterministic workload even at loadavg 70+ — it needs no low-load window, unlike per-round mean/median which
+  the bimodal freq-scaling corrupts. This retroactively CONFIRMS 5ab6a81's discipline-driven revert was
+  correct (the candidate was a real regression, not a win). Lesson: do NOT bump intrinsic-SIMD deps
+  (memchr/etc.) to opt=3 on the assumption "hot byte-scan => opt=3"; measure — icache can make opt="z" win.
+- Dominance unaffected (full-pipeline 63-124x vs mermaid.js).
+
+  Agent: SlateHarrier
