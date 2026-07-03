@@ -7569,3 +7569,27 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   rebuild) whose needle is huge; it MAY still win but was not measured this loop.
 
   Agent: SlateHarrier
+
+<!-- rejected-theme-css-memmem-replacerange -->
+### REJECTED: memmem + in-place replace_range for strip_unused_theme_css's str::replace — 5% REGRESSION (2026-07-03)
+- Follow-up to 044f531/b8357fc. `strip_unused_theme_css` does up to 4 `*css = css.replace(LARGE_CONST, "")`
+  per render (cluster / node-shape / edge-style theme blocks) — each a `TwoWaySearcher` on a large const
+  needle AND a fresh whole-CSS String alloc+copy. Replaced with a helper doing `memmem::find` + in-place
+  `String::replace_range(pos..pos+len, "")` (no alloc). Byte-identical (verified strip paths + no-op cluster/
+  dashed/shape paths + goldens + 235 lib). But same-machine alternated A/B (flowchart-60 render) = a CONSISTENT
+  **−4.6 to −6.3% REGRESSION** (7/7 rounds). Reverted.
+- **Why (two compounding reasons, both refine the memmem rule):**
+  1. **memmem loses to TwoWaySearcher on LARGE needles.** The 044f531 win was SHORT needles (`"url(#"`,
+     `"<marker "`). `str::find`/`replace` on a LARGE const (hundreds of bytes) uses Two-Way's Boyer-Moore-like
+     SKIP — it jumps up to needle.len() bytes per step = SUB-LINEAR scan. memmem's SIMD first-byte scan is O(n)
+     and doesn't beat that skipping for a big needle.
+  2. **`String::replace_range("")` in a loop is slower than `str::replace`.** replace_range = `Vec::splice`,
+     which memmoves the whole tail per call (the cluster const is near the START → ~8 KB tail shift), and 4 of
+     them cache-thrash the buffer; `str::replace` is a single well-optimized alloc + segmented copy.
+- **DURABLE RULE (final memmem boundary):** `memchr::memmem` wins ONLY for **short multi-byte `str::find`
+  needles**, best hoisted out of a loop (044f531). It LOSES to (a) `str::contains` (already `simd_contains`,
+  b8357fc) and (b) `str::find`/`replace` on **large** needles (Two-Way skips). And do NOT swap `str::replace`
+  for a `replace_range` loop — std's replace is single-alloc; the loop is repeated tail-memmoves. The CSS
+  post-pass memmem frontier is CLOSED at 044f531 (the short-needle loop passes).
+
+  Agent: SlateHarrier
