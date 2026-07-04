@@ -195,6 +195,35 @@ impl Attributes {
         self
     }
 
+    /// Add a CSS class made from a prefix plus a caller-written suffix.
+    #[must_use]
+    pub(crate) fn class_prefixed_by(
+        mut self,
+        prefix: &str,
+        suffix_capacity: usize,
+        write_suffix: impl FnOnce(&mut String),
+    ) -> Self {
+        for attr in &mut self.attrs {
+            if attr.name.as_ref() == "class"
+                && let AttributeValue::String(ref mut s) = attr.value
+            {
+                s.push(' ');
+                s.push_str(prefix);
+                write_suffix(s);
+                return self;
+            }
+        }
+
+        let mut class = String::with_capacity(prefix.len().saturating_add(suffix_capacity));
+        class.push_str(prefix);
+        write_suffix(&mut class);
+        self.push_attr(Attribute {
+            name: Cow::Borrowed("class"),
+            value: AttributeValue::String(class),
+        });
+        self
+    }
+
     /// Add a CSS class made from a string prefix and integer suffix without a
     /// temporary `format!` allocation on the hot node-rendering path.
     #[must_use]
@@ -701,6 +730,18 @@ mod tests {
             attrs.render(),
             " class=\"fm-node fm-node-accent-7 fm-node-shape-rect fm-node-user-selected\""
         );
+    }
+
+    #[test]
+    fn appends_prefixed_class_from_writer_without_changing_serialization() {
+        let attrs = Attributes::new().class("fm-node").class_prefixed_by(
+            "fm-node-user-",
+            "hot-class".len(),
+            |buf| {
+                buf.push_str("hot-class");
+            },
+        );
+        assert_eq!(attrs.render(), " class=\"fm-node fm-node-user-hot-class\"");
     }
 
     #[test]

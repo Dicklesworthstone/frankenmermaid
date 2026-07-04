@@ -4045,6 +4045,51 @@
   the current line-count reserve before changing capacity.
 
   Agent: BlackThrush
+<!-- tansparrow-block-beta-anchor-borrow-reject -->
+### NO-SHIP: borrowed block-beta sort anchors regressed same-worker layout (2026-07-04)
+- **Lever:** replaced `block_beta_direct_items` sort anchors from cloned `(String, usize)` tuples to borrowed
+  node-index anchors, preserving the old `~group-{id}` fallback for empty groups.
+- **Measurement:** per-crate release Criterion on `frankenmermaid-cli`, bench
+  `pipeline_bench`, filter `block_beta_stages/layout/24x32`, with
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod`. Same-worker `vmi1264463`
+  baseline `683.27 us`; candidate `943.04 us`; candidate/baseline `1.380x` slower.
+- **Ratio vs the original (mermaid.js):** candidate `943.04 us` versus the standing
+  Mermaid.js `11.15.0` Chromium wide `16x32` denominator `3453.9 ms` is
+  `0.000273x` frankenmermaid/Mermaid (`3662x` faster), but this is rejected because
+  it regressed current Rust.
+- **Verdict:** reverted before commit. The comparator clone was not the real block-beta bottleneck.
+
+  Agent: TanSparrow
+<!-- tansparrow-highlighted-node-class-writer-landed -->
+### LANDED: append sanitized slow-path node classes without a temporary String (highlighted-wide render 1.17x) (2026-07-04)
+- **Lever:** the remaining `render_node` slow path still did
+  `let sanitized = sanitize_css_token(class); group.class_prefixed("fm-node-user-", &sanitized)`,
+  allocating a temporary class suffix for every highlighted/inactive/dashed/double-border node. Added a
+  crate-local `class_prefixed_by` writer on `Attributes`/`Element` and wrote the sanitized suffix directly
+  into the existing class attribute. The already-landed simple-class streaming fast paths are unchanged.
+- **Byte-identity:** same `write_sanitized_css_token_into` mapping, same prefix, same class insertion order.
+  New `attributes::tests::appends_prefixed_class_from_writer_without_changing_serialization` pins the helper;
+  `fm-render-svg` full crate tests passed (238 tests + doctests).
+- **Measurement:** per-crate release Criterion on `frankenmermaid-cli`, bench
+  `pipeline_bench`, filter `highlighted_wide_stages/render/16x32`, with
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod`. The benchmark forces every wide node through
+  the highlighted/dashed slow path, avoiding already-covered simple-class fast paths. Final same-worker
+  `vmi1152480` pair after clippy fixes: baseline `1.9428 ms`; candidate `1.6606 ms`;
+  speedup `1.1699x`, delta `-14.53%`.
+- **Ratio vs the original (mermaid.js):** candidate `1.6606 ms` versus the standing Mermaid.js `11.15.0`
+  Chromium wide `16x32` denominator `3453.9 ms` gives frankenmermaid/Mermaid `0.0004808x`;
+  Mermaid.js is `2079.91x` slower on that standing denominator.
+- **Validation:** `cargo test -p fm-render-svg` passed via RCH on `ovh-a`; `cargo check -p frankenmermaid-cli
+  --benches` passed via RCH on `hz2`; `cargo clippy -p fm-render-svg --lib -- -D warnings` passed via RCH on
+  `ovh-a`. Full `cargo clippy -p fm-render-svg --all-targets -- -D warnings` is blocked by existing
+  `fm-parser` test-target lint `clippy::byte_char_slices` at `crates/fm-parser/src/mermaid_parser.rs:1388`.
+  `cargo fmt --check -p fm-render-svg -p frankenmermaid-cli` is blocked by pre-existing formatting drift in
+  renderer/CLI files, so no broad formatting sweep was included in this perf commit.
+- **Tooling note:** Agent Mail registration/reservation remained blocked by the SQLite corruption circuit
+  breaker; release-profile benches used `cargo bench --profile release` because this toolchain rejects
+  literal `cargo bench --release`.
+
+  Agent: TanSparrow
 
 <!-- tansparrow-marker-start-edge-streaming-landed -->
 ### LANDED: stream marker-start edge fragments (marker-start render 3.31x) (2026-07-04)

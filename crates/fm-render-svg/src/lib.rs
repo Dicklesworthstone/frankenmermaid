@@ -1407,25 +1407,17 @@ fn scan_node_class_keywords(class: &str) -> NodeClassKeywords {
     let mut f = NodeClassKeywords::default();
     for i in 0..b.len() {
         match b[i] | 0x20 {
-            b'h' => {
-                if matches_ci_at(b, i, b"highlight") {
-                    f.highlighted = true;
-                }
+            b'h' if matches_ci_at(b, i, b"highlight") => {
+                f.highlighted = true;
             }
-            b's' => {
-                if matches_ci_at(b, i, b"selected") {
-                    f.highlighted = true;
-                }
+            b's' if matches_ci_at(b, i, b"selected") => {
+                f.highlighted = true;
             }
-            b'a' => {
-                if matches_ci_at(b, i, b"active") {
-                    f.highlighted = true;
-                }
+            b'a' if matches_ci_at(b, i, b"active") => {
+                f.highlighted = true;
             }
-            b'f' => {
-                if matches_ci_at(b, i, b"focus") {
-                    f.highlighted = true;
-                }
+            b'f' if matches_ci_at(b, i, b"focus") => {
+                f.highlighted = true;
             }
             b'i' => {
                 if matches_ci_at(b, i, b"important") {
@@ -1435,10 +1427,8 @@ fn scan_node_class_keywords(class: &str) -> NodeClassKeywords {
                     f.inactive = true;
                 }
             }
-            b'm' => {
-                if matches_ci_at(b, i, b"muted") {
-                    f.inactive = true;
-                }
+            b'm' if matches_ci_at(b, i, b"muted") => {
+                f.inactive = true;
             }
             b'd' => {
                 if matches_ci_at(b, i, b"dim") || matches_ci_at(b, i, b"disabled") {
@@ -3623,6 +3613,7 @@ fn render_quadrant_svg(
 
 /// Stream a gantt task bar `<rect>` byte-identical to the slow path's `Element::rect()`:
 /// `x y width height fill stroke stroke-width="1" rx="3" class="fm-gantt-task {type_class}"`.
+#[allow(clippy::too_many_arguments)]
 fn write_gantt_bar_into(f: &mut String, x: f32, y: f32, w: f32, h: f32, fill: &str, stroke: &str, type_class: &str) {
     use crate::attributes::{AttributeValue, write_escaped_attr};
     f.push_str("<rect x=\"");
@@ -5359,9 +5350,10 @@ fn render_node(
             // (highlight/inactive/dashed/double border) — byte-identical to the old per-needle
             // `contains_ascii_ci` OR-chains, without allocating a lowercased copy or sweeping the
             // class string ~11 times. Exact-match keywords stay as `eq_ignore_ascii_case`.
-            let sanitized = sanitize_css_token(class);
-            if !sanitized.is_empty() {
-                group = group.class_prefixed("fm-node-user-", &sanitized);
+            if !class.is_empty() {
+                group = group.class_prefixed_by("fm-node-user-", class.len(), |buf| {
+                    write_sanitized_css_token_into(buf, class);
+                });
             }
             let kw = scan_node_class_keywords(class);
             is_highlighted |= kw.highlighted;
@@ -6330,6 +6322,7 @@ fn write_class_separator_into(f: &mut String, x1: f32, y: f32, x2: f32) {
     f.push_str("\" stroke-width=\"1\"/>");
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_class_compartments(
     mut group: Element,
     node: &fm_core::IrNode,

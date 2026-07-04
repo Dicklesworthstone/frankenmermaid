@@ -456,6 +456,20 @@ impl Element {
         self
     }
 
+    /// Add a CSS class made from a prefix plus a caller-written suffix.
+    #[must_use]
+    pub(crate) fn class_prefixed_by(
+        mut self,
+        prefix: &str,
+        suffix_capacity: usize,
+        write_suffix: impl FnOnce(&mut String),
+    ) -> Self {
+        self.attrs = self
+            .attrs
+            .class_prefixed_by(prefix, suffix_capacity, write_suffix);
+        self
+    }
+
     /// Add a CSS class made from a prefix and integer suffix.
     #[must_use]
     pub fn class_prefixed_usize(mut self, prefix: &str, value: usize) -> Self {
