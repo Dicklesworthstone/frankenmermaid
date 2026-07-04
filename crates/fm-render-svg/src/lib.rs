@@ -2841,15 +2841,15 @@ fn render_layout_to_svg(
     // state, sankey, journey, gitgraph, requirement, mindmap, plain flowchart — now streams, while ER /
     // class-cardinality / sequence-mirror / C4-legend / bundled / very-large renders take the verbatim
     // slow-path fallback below. Keep this in sync with those insertion guards.
-    let no_between_or_after_children = ir.diagram_type != fm_core::DiagramType::Er
-        && layout.extensions.sequence_mirror_headers.is_empty()
+    // The only children the slow path inserts BETWEEN the edge and node fragments are the ER / class
+    // cardinality labels and bundle-count labels; the only ones AFTER are sequence mirror headers and the
+    // C4 legend. Bundle labels / mirror / legend still force the slow path, but ER and class cardinality
+    // are now emitted INSIDE the streaming body (between edges and nodes, byte-identical order), so they no
+    // longer disqualify a diagram. This pulls ER and class-relation diagrams (previously always slow-path)
+    // onto the streaming path — killing the second copy of `edge_svg`+`cardinality_svg`+`node_svg`.
+    let no_between_or_after_children = layout.extensions.sequence_mirror_headers.is_empty()
         && !legend_enabled
-        && layout.edges.iter().all(|edge| {
-            edge.bundle_count <= 1
-                && ir.edges.get(edge.edge_index).is_none_or(|ir_edge| {
-                    ir_edge.source_cardinality().is_none() && ir_edge.target_cardinality().is_none()
-                })
-        });
+        && layout.edges.iter().all(|edge| edge.bundle_count <= 1);
     #[cfg(not(target_arch = "wasm32"))]
     let stream_fast_path =
         no_between_or_after_children && layout.edges.len() < 4096 && layout.nodes.len() < 2048;
@@ -2858,6 +2858,29 @@ fn render_layout_to_svg(
     if stream_fast_path {
         return doc.to_string_with_body(layout_svg_capacity_hint(ir, layout), |out| {
             render_edges_serial(out, &layout.edges, &edge_context);
+            // Cardinality labels sit between edges and nodes in the slow path's child order; stream them in
+            // the same position. Each writer self-guards (ER emits only for ER edges, class only for edges
+            // with source/target cardinality), so both are no-ops for a plain flowchart.
+            if ir.diagram_type == fm_core::DiagramType::Er {
+                write_er_cardinality_labels_into(
+                    out,
+                    ir,
+                    layout,
+                    offset_x,
+                    offset_y,
+                    config,
+                    &theme.colors,
+                );
+            }
+            write_class_cardinality_labels_into(
+                out,
+                ir,
+                layout,
+                offset_x,
+                offset_y,
+                config,
+                &theme.colors,
+            );
             render_nodes_serial(
                 out,
                 &layout.nodes,
@@ -2952,95 +2975,36 @@ fn render_layout_to_svg(
         }
     }
 
-    // Render ER cardinality labels near edge endpoints.
+    // Render ER cardinality labels near edge endpoints — one raw fragment, byte-identical to the
+    // per-label `Element::text()` (shared with the streaming fast path via `write_er_cardinality_labels_into`).
     if ir.diagram_type == fm_core::DiagramType::Er {
-        // Stream every ER cardinality label into ONE raw fragment instead of building an `Element::text`
-        // per label (2 per edge — the bulk of ER render's child allocations, and ER can't take the
-        // whole-document streaming fast path). Byte-identical: `write_er_cardinality_text_into` emits the
-        // same `<text …>label</text>` bytes in the same left-then-right, edge-order sequence the
-        // `Element` children serialized to.
         let mut cardinality_svg = String::new();
-        for edge_path in &layout.edges {
-            if let Some(ir_edge) = ir.edges.get(edge_path.edge_index)
-                && let Some(notation) = ir_edge.er_notation()
-                && edge_path.points.len() >= 2
-            {
-                let (left_label, right_label) = parse_er_cardinality(notation);
-                let font_size = config.font_size * 0.7;
-                if !left_label.is_empty() {
-                    let p = &edge_path.points[0];
-                    write_cardinality_text_into(
-                        &mut cardinality_svg,
-                        p.x + offset_x + 8.0,
-                        p.y + offset_y - 8.0,
-                        font_size,
-                        &theme.colors.text,
-                        &config.font_family,
-                        config.embed_theme_css,
-                        "fm-er-cardinality",
-                        left_label,
-                    );
-                }
-                if !right_label.is_empty() {
-                    let p = &edge_path.points[edge_path.points.len() - 1];
-                    write_cardinality_text_into(
-                        &mut cardinality_svg,
-                        p.x + offset_x + 8.0,
-                        p.y + offset_y - 8.0,
-                        font_size,
-                        &theme.colors.text,
-                        &config.font_family,
-                        config.embed_theme_css,
-                        "fm-er-cardinality",
-                        right_label,
-                    );
-                }
-            }
-        }
+        write_er_cardinality_labels_into(
+            &mut cardinality_svg,
+            ir,
+            layout,
+            offset_x,
+            offset_y,
+            config,
+            &theme.colors,
+        );
         if !cardinality_svg.is_empty() {
             doc = doc.child(Element::raw_svg(cardinality_svg));
         }
     }
 
-    // Render class diagram cardinality labels near edge endpoints — streamed into ONE raw fragment (same
-    // pattern as the ER cardinality above), byte-identical to the per-label `Element::text()`.
+    // Render class diagram cardinality labels near edge endpoints — one raw fragment, byte-identical to the
+    // per-label `Element::text()` (shared with the streaming fast path via `write_class_cardinality_labels_into`).
     let mut class_cardinality_svg = String::new();
-    for edge_path in &layout.edges {
-        if let Some(ir_edge) = ir.edges.get(edge_path.edge_index)
-            && (ir_edge.source_cardinality().is_some() || ir_edge.target_cardinality().is_some())
-            && edge_path.points.len() >= 2
-        {
-            let font_size = config.font_size * 0.7;
-            if let Some(card) = ir_edge.source_cardinality() {
-                let p = &edge_path.points[0];
-                write_cardinality_text_into(
-                    &mut class_cardinality_svg,
-                    p.x + offset_x + 8.0,
-                    p.y + offset_y - 8.0,
-                    font_size,
-                    &theme.colors.text,
-                    &config.font_family,
-                    config.embed_theme_css,
-                    "fm-class-cardinality",
-                    card,
-                );
-            }
-            if let Some(card) = ir_edge.target_cardinality() {
-                let p = &edge_path.points[edge_path.points.len() - 1];
-                write_cardinality_text_into(
-                    &mut class_cardinality_svg,
-                    p.x + offset_x + 8.0,
-                    p.y + offset_y - 8.0,
-                    font_size,
-                    &theme.colors.text,
-                    &config.font_family,
-                    config.embed_theme_css,
-                    "fm-class-cardinality",
-                    card,
-                );
-            }
-        }
-    }
+    write_class_cardinality_labels_into(
+        &mut class_cardinality_svg,
+        ir,
+        layout,
+        offset_x,
+        offset_y,
+        config,
+        &theme.colors,
+    );
     if !class_cardinality_svg.is_empty() {
         doc = doc.child(Element::raw_svg(class_cardinality_svg));
     }
@@ -3295,6 +3259,107 @@ fn render_layout_axis_tick(label: &str, x: f32, y: f32, config: &SvgRenderConfig
 
 /// Parse an ER cardinality notation string (e.g., `"||--o{"`) into display labels
 /// for the left and right endpoints.
+/// Stream every ER cardinality `<text>` (left-then-right per edge, edge order) into `out`. Extracted from
+/// the slow-path loop so both the slow path and the whole-document streaming fast path share ONE
+/// implementation; emits nothing for non-ER edges. Byte-identical to the slow path's `cardinality_svg`.
+fn write_er_cardinality_labels_into(
+    out: &mut String,
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    offset_x: f32,
+    offset_y: f32,
+    config: &SvgRenderConfig,
+    colors: &ThemeColors,
+) {
+    for edge_path in &layout.edges {
+        if let Some(ir_edge) = ir.edges.get(edge_path.edge_index)
+            && let Some(notation) = ir_edge.er_notation()
+            && edge_path.points.len() >= 2
+        {
+            let (left_label, right_label) = parse_er_cardinality(notation);
+            let font_size = config.font_size * 0.7;
+            if !left_label.is_empty() {
+                let p = &edge_path.points[0];
+                write_cardinality_text_into(
+                    out,
+                    p.x + offset_x + 8.0,
+                    p.y + offset_y - 8.0,
+                    font_size,
+                    &colors.text,
+                    &config.font_family,
+                    config.embed_theme_css,
+                    "fm-er-cardinality",
+                    left_label,
+                );
+            }
+            if !right_label.is_empty() {
+                let p = &edge_path.points[edge_path.points.len() - 1];
+                write_cardinality_text_into(
+                    out,
+                    p.x + offset_x + 8.0,
+                    p.y + offset_y - 8.0,
+                    font_size,
+                    &colors.text,
+                    &config.font_family,
+                    config.embed_theme_css,
+                    "fm-er-cardinality",
+                    right_label,
+                );
+            }
+        }
+    }
+}
+
+/// Stream every class-relation cardinality `<text>` (source-then-target per edge, edge order) into `out`.
+/// Extracted twin of [`write_er_cardinality_labels_into`]; emits nothing for edges without source/target
+/// cardinality. Byte-identical to the slow path's `class_cardinality_svg`.
+fn write_class_cardinality_labels_into(
+    out: &mut String,
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    offset_x: f32,
+    offset_y: f32,
+    config: &SvgRenderConfig,
+    colors: &ThemeColors,
+) {
+    for edge_path in &layout.edges {
+        if let Some(ir_edge) = ir.edges.get(edge_path.edge_index)
+            && (ir_edge.source_cardinality().is_some() || ir_edge.target_cardinality().is_some())
+            && edge_path.points.len() >= 2
+        {
+            let font_size = config.font_size * 0.7;
+            if let Some(card) = ir_edge.source_cardinality() {
+                let p = &edge_path.points[0];
+                write_cardinality_text_into(
+                    out,
+                    p.x + offset_x + 8.0,
+                    p.y + offset_y - 8.0,
+                    font_size,
+                    &colors.text,
+                    &config.font_family,
+                    config.embed_theme_css,
+                    "fm-class-cardinality",
+                    card,
+                );
+            }
+            if let Some(card) = ir_edge.target_cardinality() {
+                let p = &edge_path.points[edge_path.points.len() - 1];
+                write_cardinality_text_into(
+                    out,
+                    p.x + offset_x + 8.0,
+                    p.y + offset_y - 8.0,
+                    font_size,
+                    &colors.text,
+                    &config.font_family,
+                    config.embed_theme_css,
+                    "fm-class-cardinality",
+                    card,
+                );
+            }
+        }
+    }
+}
+
 /// Stream one cardinality `<text>` directly into `out`, byte-identical to the `Element::text()` the slow
 /// path built: attrs in insertion order `x, y, text-anchor, dominant-baseline, font-size,
 /// [font-family when NOT embedded], fill, class`, with the label as escaped text content. Numbers use the
@@ -3656,6 +3721,7 @@ fn render_quadrant_svg(
 /// `Element`s under embedded CSS (the label's `font-family` is CSS-driven, so absent inline). `r="6"` /
 /// `stroke-width="1.50"` are the fixed `r(6.0)`/`stroke_width(1.5)` serializations. Skips the two per-point
 /// `Element` builds + their `Attributes` Vecs (`Attributes::set` was ~8% of quadrant render).
+#[allow(clippy::too_many_arguments)]
 fn write_quadrant_point_into(
     f: &mut String,
     cx: f32,
@@ -4261,6 +4327,22 @@ fn render_xychart_svg(
     let baseline_y = xychart_value_to_y(baseline_value, y_min, y_max, plot_bounds) + offset_y;
     let categories = xychart_categories(xy_chart_meta);
     let palette = theme.colors.accents.clone();
+    let lookup_len = layout
+        .nodes
+        .iter()
+        .map(|node| node.node_index)
+        .max()
+        .map_or(ir.nodes.len(), |max_index| {
+            ir.nodes.len().max(max_index.saturating_add(1))
+        });
+    let mut layout_nodes_by_index = vec![None; lookup_len];
+    for node in &layout.nodes {
+        if let Some(slot) = layout_nodes_by_index.get_mut(node.node_index)
+            && slot.is_none()
+        {
+            *slot = Some(node);
+        }
+    }
 
     doc = doc.child(
         Element::rect()
@@ -4491,12 +4573,7 @@ fn render_xychart_svg(
         let series_nodes: Vec<_> = series
             .nodes
             .iter()
-            .filter_map(|node_id| {
-                layout
-                    .nodes
-                    .iter()
-                    .find(|node| node.node_index == node_id.0)
-            })
+            .filter_map(|node_id| layout_nodes_by_index.get(node_id.0).and_then(|node| *node))
             .collect();
 
         match series.kind {
@@ -5214,7 +5291,11 @@ fn write_common_node_fragment_into(
         fm_core::NodeShape::Diamond => {
             let cx = x + w / 2.0;
             let cy = y + h / 2.0;
-            write_polygon_shape_into(f, &[(cx, y), (x + w, cy), (cx, y + h), (x, cy)], special_fill);
+            write_polygon_shape_into(
+                f,
+                &[(cx, y), (x + w, cy), (cx, y + h), (x, cy)],
+                special_fill,
+            );
         }
         fm_core::NodeShape::Hexagon => {
             let cy = y + h / 2.0;
@@ -5239,7 +5320,12 @@ fn write_common_node_fragment_into(
             let inset = w * 0.15;
             write_polygon_shape_into(
                 f,
-                &[(x + inset, y), (x + w - inset, y), (x + w, y + h), (x, y + h)],
+                &[
+                    (x + inset, y),
+                    (x + w - inset, y),
+                    (x + w, y + h),
+                    (x, y + h),
+                ],
                 special_fill,
             );
         }
@@ -5247,7 +5333,12 @@ fn write_common_node_fragment_into(
             let inset = w * 0.15;
             write_polygon_shape_into(
                 f,
-                &[(x, y), (x + w, y), (x + w - inset, y + h), (x + inset, y + h)],
+                &[
+                    (x, y),
+                    (x + w, y),
+                    (x + w - inset, y + h),
+                    (x + inset, y + h),
+                ],
                 special_fill,
             );
         }
@@ -5255,7 +5346,12 @@ fn write_common_node_fragment_into(
             let inset = w * 0.15;
             write_polygon_shape_into(
                 f,
-                &[(x + inset, y), (x + w, y), (x + w - inset, y + h), (x, y + h)],
+                &[
+                    (x + inset, y),
+                    (x + w, y),
+                    (x + w - inset, y + h),
+                    (x, y + h),
+                ],
                 special_fill,
             );
         }
@@ -5647,16 +5743,16 @@ fn render_node_into(
     if matches!(
         shape,
         NodeShape::Rect
-                | NodeShape::Circle
-                | NodeShape::Rounded
-                | NodeShape::Stadium
-                | NodeShape::Diamond
-                | NodeShape::Hexagon
-                | NodeShape::Cylinder
-                | NodeShape::Trapezoid
-                | NodeShape::InvTrapezoid
-                | NodeShape::Parallelogram
-                | NodeShape::Asymmetric
+            | NodeShape::Circle
+            | NodeShape::Rounded
+            | NodeShape::Stadium
+            | NodeShape::Diamond
+            | NodeShape::Hexagon
+            | NodeShape::Cylinder
+            | NodeShape::Trapezoid
+            | NodeShape::InvTrapezoid
+            | NodeShape::Parallelogram
+            | NodeShape::Asymmetric
     ) && config.embed_theme_css
         && config.node_gradients
         && !emit_classdef_classes

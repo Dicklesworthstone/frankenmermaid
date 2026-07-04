@@ -10124,3 +10124,29 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   after the peer closed the shape-streaming frontier).
 
   Agent: BlackThrush
+
+  Agent: TanSparrow
+<!-- tansparrow-xychart-series-node-index-table -->
+### LANDED: xychart series render uses an O(1) node-index table (xychart render 1.81x) (2026-07-04)
+- **Lever:** `render_xychart_svg` still did `layout.nodes.iter().find(|node| node.node_index == id)` for every
+  node in every bar/line/area series. On a 512-point chart with 3 series, that is a hidden O(series-points *
+  layout-nodes) scan in the render phase after the layout-side xychart O(N^2) work had already been fixed.
+  Build a first-match `node_index -> &LayoutNodeBox` table once, then keep the existing per-series node-id
+  order. The table only fills an empty slot, so duplicate `node_index` behavior matches the old `iter().find`
+  first-match semantics.
+- **Measurement:** same-worker `vmi1227854`, per-crate Criterion via `rch exec -- cargo bench --profile release
+  -p frankenmermaid-cli --bench pipeline_bench -- xychart_stages/render/512 --warm-up-time 1 --measurement-time
+  2 --sample-size 10 --noplot`, `CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod`. Baseline worktree
+  at `e8f5635` (bench fixture, old renderer): **1.5939 ms** mean [1.5178, 1.7654]. Candidate: **879.47 us**
+  mean [831.58, 920.85]. Ratio: **1.8123x faster**, **-44.82%** render time.
+- **Ratio vs ORIG:** standing Mermaid.js original comparator remains wide 16x32 render **3453.9 ms**; candidate
+  xychart render/512 is **0.0002546x** of that denominator, or **3927.25x faster**. No fresh same-input
+  browser xychart rerun was captured.
+- **Validation:** `cargo check -p frankenmermaid-cli --benches` passed via RCH `ovh-b`; `cargo test -p
+  fm-render-svg xychart` passed via RCH `vmi1149989` (6 tests); `cargo clippy -p fm-render-svg --lib -- -D
+  warnings` passed via RCH `hz2` after adding a narrow lint allow for the pre-existing quadrant point writer
+  arity lint in the same crate; full `cargo test -p fm-render-svg --lib` passed locally via `rch exec` after
+  RCH reported no admissible worker slots (241 tests); `rustfmt --edition 2024 --check` on touched files and
+  `git diff --check` passed.
+- **Bench syntax note:** literal `cargo bench --release` is rejected by this Cargo; the release-profile bench
+  command uses `--profile release`.

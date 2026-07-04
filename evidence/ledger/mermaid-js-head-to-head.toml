@@ -2988,3 +2988,39 @@ bench_syntax_note = "Literal cargo bench --release is rejected by this Cargo; re
 [post_measurement_requirement_subtitle_streaming_2026_07_04.decision]
 kept = true
 reason = "Same-machine local fail-open release Criterion A/B cuts requirement render/512 from 1.8386 ms to 1.7035 ms (1.08x). The lever removes Element/Attributes construction from two fixed subtitle text fragments per requirement node and preserves serialization byte order."
+
+[post_measurement_xychart_series_node_lookup_2026_07_04]
+date = "2026-07-04"
+agent = "TanSparrow"
+status = "keep"
+baseline_commit = "e8f5635"
+candidate_summary = "In render_xychart_svg, build a first-match node_index -> LayoutNodeBox table once and use it for every bar/line/area series node instead of scanning layout.nodes with iter().find per point."
+graveyard_route = "Alien Graveyard + Alien Artifact Coding + Extreme Optimization: remove an O(series-points * layout-nodes) lookup hidden in xychart render after the layout-side xychart scaling lever had already landed."
+rust_baseline_command = "AGENT_NAME=TanSparrow CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod RCH_WORKER=vmi1227854 RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 RUSTFLAGS='-C metadata=tansparrow_xychart_base_vmi1227854' rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- xychart_stages/render/512 --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot"
+rust_candidate_command = "AGENT_NAME=TanSparrow CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod RCH_WORKER=ovh-a RCH_QUEUE_WHEN_BUSY=1 RUSTFLAGS='-C metadata=tansparrow_xychart_cand' rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- xychart_stages/render/512 --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot"
+rust_worker = "Accepted comparison uses actual worker vmi1227854 for both runs. RCH selected vmi1227854 for candidate despite stale RCH_WORKER=ovh-a in the environment; the baseline rerun was strict-pinned to vmi1227854 from a detached e8f5635 worktree."
+mermaid_js_command = "Standing comparator from scripts/mermaid_headtohead_cc.mjs: Mermaid.js 11.15.0 via Puppeteer/system Chromium, wide 16x32 median render 3453.9 ms. No fresh same-input browser xychart rerun captured."
+behavior_proof = "The lookup table writes only the first LayoutNodeBox for each node_index, preserving iter().find first-match semantics; series node-id order and downstream render branches are unchanged. Existing xychart render tests passed."
+agent_mail = "Agent Mail registration/reservation as TanSparrow was blocked by the SQLite corruption circuit breaker; no reservation was available."
+bench_syntax_note = "Literal cargo bench --release is rejected by this Cargo; release-profile bench used --profile release."
+
+[post_measurement_xychart_series_node_lookup_2026_07_04.metrics]
+"xychart_render_512_baseline_ms" = 1.5939
+"xychart_render_512_candidate_ms" = 0.87947
+"xychart_render_512_speedup_x" = 1.8123
+"xychart_render_512_delta_pct" = -44.82
+"standing_wide_16x32_mermaid_js_ms" = 3453.9
+"xychart_candidate_over_standing_mermaid_js" = 0.0002546
+"standing_mermaid_js_over_xychart_candidate" = 3927.25
+
+[post_measurement_xychart_series_node_lookup_2026_07_04.validation]
+"cargo_check_cli_benches" = "passed via RCH ovh-b: cargo check -p frankenmermaid-cli --benches"
+"cargo_test_fm_render_svg_xychart" = "passed via RCH vmi1149989: 6 xychart tests"
+"cargo_test_fm_render_svg_lib" = "passed locally via rch exec after no admissible worker slots: 241 tests"
+"cargo_clippy_fm_render_svg_lib" = "passed via RCH hz2: cargo clippy -p fm-render-svg --lib -- -D warnings; first run exposed an existing quadrant writer arity lint, fixed with a narrow allow"
+"rustfmt_touched_files" = "passed locally: rustfmt --edition 2024 --check crates/fm-render-svg/src/lib.rs crates/fm-cli/benches/pipeline_bench.rs"
+"git_diff_check" = "passed locally"
+
+[post_measurement_xychart_series_node_lookup_2026_07_04.decision]
+kept = true
+reason = "Same-worker vmi1227854 release Criterion A/B cuts xychart render/512 from 1.5939 ms to 0.87947 ms (1.81x) by replacing per-series linear node lookups with a first-match node-index table."
