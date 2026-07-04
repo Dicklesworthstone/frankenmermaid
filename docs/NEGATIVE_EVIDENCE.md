@@ -9126,3 +9126,25 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   filtered patch kept the peer WIP intact.
 
   Agent: BlackThrush
+
+<!-- blackthrush-gantt-task-streaming-landed -->
+### LANDED: stream gantt task bars/labels + dependency arrows (gantt render 3.13x) (2026-07-04)
+- **Lever:** gantt render built ~2-3 `Element`s per task (bar `<rect>` or milestone `<path>`, optional
+  progress `<rect>`, label `<text>`) plus a `<path>` per dependency edge — all `doc.child`ed. Added helpers
+  `write_gantt_bar_into` / `write_gantt_label_into` and rewrote both loops to stream each task's + each
+  dependency's bytes into ONE `Element::raw_svg` child per loop. Byte-identical: same element bytes/attr
+  order/per-task sequence; the label's `font-family` is gated on `!embed_theme_css` exactly as the element;
+  the milestone `<path d>` keeps the same full-precision `format!`.
+- **Measurement:** clean 2-build same-machine A/B (OLD = committed HEAD code `be0b7b6e`; NEW = `65e42d63`,
+  differing only by this change). Interleaved `profharness gantt <n> render`, best-of-8 min-ns.
+  - `gantt render n=400`: `488917 ns` -> `156056 ns` = **3.133x**
+  - `gantt render n=800`: `937817 ns` -> `298726 ns` = **3.139x** (consistent)
+  - controls: `flow` 1.042x, `class` 0.956x — ~4% layout noise, ≪ the 3.13x target.
+- **Byte-identity:** all **235 fm-render-svg lib tests pass** incl. `golden_svg_test` (gantt charts —
+  sections, task types, dependency arrows — in corpus).
+- **Ratio vs the original (mermaid.js):** dominance context; gantt charts (a common heavy type) now render
+  ~3.1x faster.
+- **Staging:** helpers + streamed loops in the clean lib.rs sub-region (3610-3870); `git apply --cached`
+  filtered patch kept the peer WIP intact.
+
+  Agent: BlackThrush

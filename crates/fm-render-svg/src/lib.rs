@@ -3610,6 +3610,51 @@ fn render_quadrant_svg(
     doc
 }
 
+/// Stream a gantt task bar `<rect>` byte-identical to the slow path's `Element::rect()`:
+/// `x y width height fill stroke stroke-width="1" rx="3" class="fm-gantt-task {type_class}"`.
+fn write_gantt_bar_into(f: &mut String, x: f32, y: f32, w: f32, h: f32, fill: &str, stroke: &str, type_class: &str) {
+    use crate::attributes::{AttributeValue, write_escaped_attr};
+    f.push_str("<rect x=\"");
+    let _ = AttributeValue::Number(x).write_value(f);
+    f.push_str("\" y=\"");
+    let _ = AttributeValue::Number(y).write_value(f);
+    f.push_str("\" width=\"");
+    let _ = AttributeValue::Number(w).write_value(f);
+    f.push_str("\" height=\"");
+    let _ = AttributeValue::Number(h).write_value(f);
+    f.push_str("\" fill=\"");
+    let _ = write_escaped_attr(f, fill);
+    f.push_str("\" stroke=\"");
+    let _ = write_escaped_attr(f, stroke);
+    f.push_str("\" stroke-width=\"1\" rx=\"3\" class=\"fm-gantt-task ");
+    f.push_str(type_class);
+    f.push_str("\"/>");
+}
+
+/// Stream a gantt task label `<text>` byte-identical to the slow path's `Element::text()`:
+/// `x y text-anchor="middle" dominant-baseline="central" font-size [font-family] fill class`.
+#[allow(clippy::too_many_arguments)]
+fn write_gantt_label_into(f: &mut String, x: f32, y: f32, font_size: f32, family: &str, embed: bool, fill: &str, label: &str) {
+    use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
+    f.push_str("<text x=\"");
+    let _ = AttributeValue::Number(x).write_value(f);
+    f.push_str("\" y=\"");
+    let _ = AttributeValue::Number(y).write_value(f);
+    f.push_str("\" text-anchor=\"middle\" dominant-baseline=\"central\" font-size=\"");
+    let _ = AttributeValue::Number(font_size).write_value(f);
+    f.push('"');
+    if !embed {
+        f.push_str(" font-family=\"");
+        let _ = write_escaped_attr(f, family);
+        f.push('"');
+    }
+    f.push_str(" fill=\"");
+    let _ = write_escaped_attr(f, fill);
+    f.push_str("\" class=\"fm-gantt-task-label\">");
+    let _ = write_escaped_text(f, label);
+    f.push_str("</text>");
+}
+
 /// Render a gantt chart with type-based task bar colors, section headers,
 /// and dependency arrows.
 #[allow(clippy::too_many_arguments)]
@@ -3685,123 +3730,124 @@ fn render_gantt_svg(
         }
     };
 
-    for (node_idx, node_box) in layout.nodes.iter().enumerate() {
-        let x = node_box.bounds.x + offset_x;
-        let y = node_box.bounds.y + offset_y;
-        let w = node_box.bounds.width;
-        let h = node_box.bounds.height;
+    // Stream all task bars/milestones/progress/labels into ONE raw fragment instead of ~2-3 `Element`s
+    // per task (the dominant cost of gantt render). Byte-identical: the same `<rect>`/`<path>`/`<text>`
+    // bytes in the same per-task order (bar/milestone, then progress, then label) the `Element` children
+    // serialized to.
+    {
+        use crate::attributes::{AttributeValue, write_escaped_attr};
+        let mut task_svg = String::new();
+        for (node_idx, node_box) in layout.nodes.iter().enumerate() {
+            let x = node_box.bounds.x + offset_x;
+            let y = node_box.bounds.y + offset_y;
+            let w = node_box.bounds.width;
+            let h = node_box.bounds.height;
 
-        let task_type = gantt_meta
-            .tasks
-            .get(node_idx)
-            .map(|t| &t.task_type)
-            .unwrap_or(&fm_core::GanttTaskType::Normal);
-        let fill = task_color(task_type);
-        let is_milestone = matches!(task_type, fm_core::GanttTaskType::Milestone);
+            let task_type = gantt_meta
+                .tasks
+                .get(node_idx)
+                .map(|t| &t.task_type)
+                .unwrap_or(&fm_core::GanttTaskType::Normal);
+            let fill = task_color(task_type);
+            let is_milestone = matches!(task_type, fm_core::GanttTaskType::Milestone);
 
-        if is_milestone {
-            let cx = x + w / 2.0;
-            let cy = y + h / 2.0;
-            let r = h.min(w) * 0.4;
-            let d = format!(
-                "M{},{} L{},{} L{},{} L{},{} Z",
-                cx,
-                cy - r,
-                cx + r,
-                cy,
-                cx,
-                cy + r,
-                cx - r,
-                cy
-            );
-            doc = doc.child(
-                Element::path()
-                    .d(&d)
-                    .fill(fill)
-                    .stroke(&theme.colors.node_stroke)
-                    .stroke_width(1.5)
-                    .class("fm-gantt-milestone"),
-            );
-        } else {
-            let type_class = match task_type {
-                fm_core::GanttTaskType::Done => "fm-gantt-task-done",
-                fm_core::GanttTaskType::Active => "fm-gantt-task-active",
-                fm_core::GanttTaskType::Critical => "fm-gantt-task-critical",
-                fm_core::GanttTaskType::Milestone => "fm-gantt-task-milestone",
-                fm_core::GanttTaskType::Normal => "fm-gantt-task-normal",
-            };
-            doc = doc.child(
-                Element::rect()
-                    .x(x)
-                    .y(y)
-                    .width(w)
-                    .height(h)
-                    .fill(fill)
-                    .stroke(&theme.colors.node_stroke)
-                    .stroke_width(1.0)
-                    .rx(3.0)
-                    .class("fm-gantt-task")
-                    .class(type_class),
-            );
+            if is_milestone {
+                let cx = x + w / 2.0;
+                let cy = y + h / 2.0;
+                let r = h.min(w) * 0.4;
+                let d = format!(
+                    "M{},{} L{},{} L{},{} L{},{} Z",
+                    cx, cy - r, cx + r, cy, cx, cy + r, cx - r, cy
+                );
+                task_svg.push_str("<path d=\"");
+                task_svg.push_str(&d);
+                task_svg.push_str("\" fill=\"");
+                let _ = write_escaped_attr(&mut task_svg, fill);
+                task_svg.push_str("\" stroke=\"");
+                let _ = write_escaped_attr(&mut task_svg, &theme.colors.node_stroke);
+                task_svg.push_str("\" stroke-width=\"1.5\" class=\"fm-gantt-milestone\"/>");
+            } else {
+                let type_class = match task_type {
+                    fm_core::GanttTaskType::Done => "fm-gantt-task-done",
+                    fm_core::GanttTaskType::Active => "fm-gantt-task-active",
+                    fm_core::GanttTaskType::Critical => "fm-gantt-task-critical",
+                    fm_core::GanttTaskType::Milestone => "fm-gantt-task-milestone",
+                    fm_core::GanttTaskType::Normal => "fm-gantt-task-normal",
+                };
+                write_gantt_bar_into(
+                    &mut task_svg,
+                    x,
+                    y,
+                    w,
+                    h,
+                    fill,
+                    &theme.colors.node_stroke,
+                    type_class,
+                );
 
-            // Progress bar overlay.
-            if let Some(task) = gantt_meta.tasks.get(node_idx)
-                && let Some(progress) = task.progress
-                && progress > 0.0
-            {
-                let progress_w = w * progress.clamp(0.0, 1.0);
-                doc = doc.child(
-                    Element::rect()
-                        .x(x)
-                        .y(y)
-                        .width(progress_w)
-                        .height(h)
-                        .fill(fill)
-                        .attr("fill-opacity", "0.6")
-                        .rx(3.0)
-                        .class("fm-gantt-progress"),
+                // Progress bar overlay.
+                if let Some(task) = gantt_meta.tasks.get(node_idx)
+                    && let Some(progress) = task.progress
+                    && progress > 0.0
+                {
+                    let progress_w = w * progress.clamp(0.0, 1.0);
+                    task_svg.push_str("<rect x=\"");
+                    let _ = AttributeValue::Number(x).write_value(&mut task_svg);
+                    task_svg.push_str("\" y=\"");
+                    let _ = AttributeValue::Number(y).write_value(&mut task_svg);
+                    task_svg.push_str("\" width=\"");
+                    let _ = AttributeValue::Number(progress_w).write_value(&mut task_svg);
+                    task_svg.push_str("\" height=\"");
+                    let _ = AttributeValue::Number(h).write_value(&mut task_svg);
+                    task_svg.push_str("\" fill=\"");
+                    let _ = write_escaped_attr(&mut task_svg, fill);
+                    task_svg
+                        .push_str("\" fill-opacity=\"0.6\" rx=\"3\" class=\"fm-gantt-progress\"/>");
+                }
+            }
+
+            // Task label.
+            let label_text = ir
+                .nodes
+                .get(node_box.node_index)
+                .and_then(|n| n.label)
+                .and_then(|lid| ir.labels.get(lid.0))
+                .map(|l| l.text.as_str())
+                .or_else(|| ir.nodes.get(node_box.node_index).map(|n| n.id.as_str()))
+                .unwrap_or("");
+            if !label_text.is_empty() {
+                write_gantt_label_into(
+                    &mut task_svg,
+                    x + w / 2.0,
+                    y + h / 2.0 + config.font_size * 0.3,
+                    config.font_size * 0.8,
+                    &config.font_family,
+                    config.embed_theme_css,
+                    &theme.colors.text,
+                    label_text,
                 );
             }
         }
-
-        // Task label.
-        let label_text = ir
-            .nodes
-            .get(node_box.node_index)
-            .and_then(|n| n.label)
-            .and_then(|lid| ir.labels.get(lid.0))
-            .map(|l| l.text.as_str())
-            .or_else(|| ir.nodes.get(node_box.node_index).map(|n| n.id.as_str()))
-            .unwrap_or("");
-        if !label_text.is_empty() {
-            doc = doc.child(
-                Element::text()
-                    .x(x + w / 2.0)
-                    .y(y + h / 2.0 + config.font_size * 0.3)
-                    .content(label_text)
-                    .attr("text-anchor", "middle")
-                    .attr("dominant-baseline", "central")
-                    .attr_num("font-size", config.font_size * 0.8)
-                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                    .fill(&theme.colors.text)
-                    .class("fm-gantt-task-label"),
-            );
+        if !task_svg.is_empty() {
+            doc = doc.child(Element::raw_svg(task_svg));
         }
-    }
 
-    // Dependency arrows.
-    for edge_path in &layout.edges {
-        if edge_path.points.len() >= 2 {
-            let path_d = smooth_layout_edge_path(edge_path, offset_x, offset_y);
-            doc = doc.child(
-                Element::path()
-                    .d(&path_d)
-                    .fill("none")
-                    .stroke(&theme.colors.edge)
-                    .stroke_width(1.2)
-                    .attr("marker-end", "url(#arrowhead)")
-                    .class("fm-gantt-dependency"),
-            );
+        // Dependency arrows — streamed into one raw fragment (path per edge).
+        let mut dep_svg = String::new();
+        for edge_path in &layout.edges {
+            if edge_path.points.len() >= 2 {
+                let path_d = smooth_layout_edge_path(edge_path, offset_x, offset_y);
+                dep_svg.push_str("<path d=\"");
+                dep_svg.push_str(&path_d);
+                dep_svg.push_str("\" fill=\"none\" stroke=\"");
+                let _ = write_escaped_attr(&mut dep_svg, &theme.colors.edge);
+                dep_svg.push_str(
+                    "\" stroke-width=\"1.2\" marker-end=\"url(#arrowhead)\" class=\"fm-gantt-dependency\"/>",
+                );
+            }
+        }
+        if !dep_svg.is_empty() {
+            doc = doc.child(Element::raw_svg(dep_svg));
         }
     }
 
