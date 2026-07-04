@@ -4514,7 +4514,11 @@ fn parse_er_relationship(
 fn parse_gantt(input: &str, builder: &mut IrBuilder) {
     let mut gantt_meta = IrGanttMeta::default();
     let mut current_section_idx = 0_usize;
-    let mut task_ids_to_nodes: BTreeMap<String, IrNodeId> = BTreeMap::new();
+    // Lookup-only (dependency resolution `get`s below); iteration order is never used — the resolved
+    // edges come from `pending_dependencies` in insertion order — so an FxHashMap replaces the BTreeMap's
+    // O(log N) String-comparison inserts/lookups with O(1) hashing. Byte-identical output.
+    let mut task_ids_to_nodes: rustc_hash::FxHashMap<String, IrNodeId> =
+        rustc_hash::FxHashMap::default();
     let mut pending_dependencies: Vec<(IrNodeId, String, Span)> = Vec::new();
 
     for (index, line) in byte_lines(input).enumerate() {

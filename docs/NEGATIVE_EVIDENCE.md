@@ -8536,3 +8536,38 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   and currently blocked by concurrent uncommitted peer WIP across `fm-render-svg/src/{lib,attributes,path}.rs`.
 
   Agent: BlackThrush
+
+<!-- blackthrush-gantt-taskmap-btreemap-to-fxhashmap-landed -->
+### LANDED: gantt task-id map BTreeMap→FxHashMap (gantt parse 1.17-1.23x, scales with N) (2026-07-04)
+- **Lever:** `fm-parser::mermaid_parser::parse_gantt` kept `task_ids_to_nodes: BTreeMap<String, IrNodeId>`
+  purely to resolve `after <task>` dependencies. Its only operations are `entry().or_insert()` (per task)
+  and `get()` (per dependency); the map is **never iterated** — the resolved edges are pushed from the
+  `pending_dependencies` Vec in insertion order — so the BTreeMap's O(log N) String-comparison inserts and
+  lookups were replaced with an `rustc_hash::FxHashMap` (O(1) hashing, already a workspace dep). Ordering
+  is irrelevant to output.
+- **Why gantt:** fresh HEAD parse profile (profharness, local min-ns) ranks `gantt` the **heaviest parse**
+  of the remaining un-mined diagram types (~820 ns/node at n=400) after the class/styled family was
+  optimized this campaign. gantt is a common real diagram type; the per-task id/dependency map is on its
+  hot path (populated + looked up once per task).
+- **Measurement:** clean **2-build** same-machine A/B — OLD and NEW differ ONLY by the map type (both built
+  from identical surrounding source), so control shapes execute byte-identical code. Interleaved
+  `profharness gantt <n> parse`, best-of-7 min-ns. OLD md5 `22039a1f…` (BTreeMap), NEW md5 `38ca3738…`
+  (FxHashMap). Build via rch offload, `CARGO_TARGET_DIR=…/frankenmermaid-blackthrush`, release opt=3 fat-LTO.
+  - `gantt n=200`: `156737 ns` -> `133914 ns` = **1.170x**
+  - `gantt n=400`: `331529 ns` -> `274401 ns` = **1.208x**
+  - `gantt n=800`: `675221 ns` -> `550644 ns` = **1.226x** (win GROWS with N — the O(log N)→O(1) signature)
+  - controls (identical code path): `flow` 1.014x, `class` 1.023x — ~1.0x residual noise, both slightly
+    favoring NEW, so the gantt win is if anything marginally understated.
+- **Byte-identity:** guaranteed by construction (map used only for keyed lookup; iteration order never
+  observed; edges come from the insertion-ordered `pending_dependencies` Vec). All **408 fm-parser lib
+  tests pass** (incl. gantt task/section/dependency tests).
+- **Ratio vs the original (mermaid.js):** dominance context, not a fresh browser rerun (standing comparator
+  `scripts/mermaid_headtohead_cc.mjs` / `evidence/ledger/mermaid-js-head-to-head.toml`, Mermaid.js via
+  Chromium; parse dominates ~70-100x). gantt was the least-dominant remaining parse type; this widens its
+  margin ~1.2x and more as task count grows.
+- **Landable rule:** byte-identical + strictly-less-work (O(1) vs O(log N) per task op), same rule as the
+  class-clone (`bc58db6`) and styled-chumsky-skip (`0e05f39`) wins this campaign. LEVER (reusable): a
+  `BTreeMap` whose iteration order is never used and whose values feed keyed lookups is a free FxHashMap
+  swap — grep other parsers for the same shape (e.g. gitgraph `branches: BTreeMap<String, IrNodeId>`).
+
+  Agent: BlackThrush
