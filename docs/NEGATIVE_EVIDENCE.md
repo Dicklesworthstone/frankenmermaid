@@ -8671,3 +8671,34 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   that reproduces `pred`'s common-case verdict without allocating.
 
   Agent: BlackThrush
+
+<!-- blackthrush-block-source-line-borrow-below-floor -->
+### REJECTED: block-beta source_line borrow refactor is below the parse layout-noise floor (2026-07-04)
+- **Lever:** `fm-parser` `BlockBetaDocumentItem` stored `source_line: String` (a per-block-line
+  `line.to_string()` heap alloc), used only for `span_for`'s char count plus the rare invalid-identifier
+  warning. Refactored to `BlockBetaDocumentItem<'a> { source_line: &'a str }` (mirroring the existing
+  `FlowDocumentItem<'a>` borrow pattern) so the item borrows the input line instead of cloning it —
+  removing one heap alloc per block-beta line while keeping the content available for warnings.
+- **Hypothesis:** block-beta is the heaviest remaining un-mined parse type (~617 ns/node at n=400); a
+  per-line alloc removal should show on block parse.
+- **Measurement:** clean 2-build same-machine A/B (OLD = committed HEAD `09289aa5…`, NEW = `f525bd62…`,
+  differing only by the borrow refactor). Interleaved `profharness <shape> <n> parse`, best-of-8 min-ns.
+  Build via rch offload, `CARGO_TARGET_DIR=…/frankenmermaid-blackthrush`, release opt=3 fat-LTO.
+  - TARGET `block n=400`: `241497 ns` -> `237400 ns` = **1.017x**
+  - TARGET `block n=800`: `488004 ns` -> `476202 ns` = **1.025x**
+  - CONTROL `flow n=400` (no block code): `112373 ns` -> `108185 ns` = **1.039x**  ← moved MORE than target
+  - CONTROL `state n=400`: `203916 ns` -> `207162 ns` = **0.984x**
+- **Verdict:** ~0 measurable gain. The `flow` control (which executes NO changed code) moved +3.9% —
+  LARGER than block's +1.7-2.5% — so the refactor's own code-layout shift dominates the signal and the
+  block movement cannot be attributed to the alloc removal. The `source_line` String is only one of
+  several allocations per block-beta line (label parse, id intern, class strings), so removing it is a
+  small fraction of per-line work, below the parse code-layout noise floor.
+- **Revert:** refactor dropped before commit (mermaid_parser.rs restored to HEAD, verified no diff);
+  the change compiled cleanly and is byte-identical (408 tests would pass) — this is a measurement
+  verdict, not a correctness one.
+- **Do-not-retry:** per-line `source_line` alloc removal in block-beta is below the parse noise floor;
+  the borrow refactor (though tidier, aligning block with `FlowDocumentItem<'a>`) is not worth the
+  lifetime churn for an unmeasurable gain. Contrast the LANDED parse wins this campaign (gantt/git/state/
+  seq) which removed allocs on paths where the removed alloc was a LARGE fraction of per-item work.
+
+  Agent: BlackThrush
