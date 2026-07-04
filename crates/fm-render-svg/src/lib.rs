@@ -3977,6 +3977,15 @@ fn render_pie_svg(
         );
     }
 
+    // The wedge `<path d>` framing is loop-invariant: `cx`/`cy` (center) and `radius` never change
+    // across slices, so the `format!("M {cx} {cy} L …")`'s four Grisu float formats for them were
+    // re-run once per wedge (float formatting was ~36% of pie render). Format the invariant head
+    // (`M cx cy L `) and arc (` A radius radius 0 `) fragments once; per wedge only the four variable
+    // arc endpoints go through Grisu, written straight into `pie_svg` (no per-wedge `d` String).
+    // Byte-identical: the pieces concatenate to exactly the old format string.
+    use std::fmt::Write as _;
+    let pie_head = format!("M {cx} {cy} L ");
+    let pie_arc = format!(" A {radius} {radius} 0 ");
     let mut angle = -PI / 2.0;
     for (i, slice) in pie_meta.slices.iter().enumerate() {
         let value = slice.value.max(0.0);
@@ -4005,10 +4014,11 @@ fn render_pie_svg(
             let x2 = cx + radius * (angle + sweep).cos();
             let y2 = cy + radius * (angle + sweep).sin();
             let large_arc = i32::from(sweep > PI);
-            let d =
-                format!("M {cx} {cy} L {x1} {y1} A {radius} {radius} 0 {large_arc} 1 {x2} {y2} Z");
             pie_svg.push_str("<path d=\"");
-            pie_svg.push_str(&d);
+            pie_svg.push_str(&pie_head);
+            let _ = write!(pie_svg, "{x1} {y1}");
+            pie_svg.push_str(&pie_arc);
+            let _ = write!(pie_svg, "{large_arc} 1 {x2} {y2} Z");
             pie_svg.push_str("\" fill=\"");
             let _ = write_escaped_attr(&mut pie_svg, color);
             pie_svg.push_str("\" stroke=\"");

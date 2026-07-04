@@ -9260,3 +9260,32 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   intact.
 
   Agent: BlackThrush
+<!-- blackthrush-pie-wedge-grisu-hoist-landed -->
+### LANDED: hoist loop-invariant Grisu floats out of the pie wedge path (pie render 1.5x) (2026-07-04)
+- **Lever:** profiled pie render (still 301us/n=300 after the streaming win) — **36.5% was Grisu float
+  formatting** (`grisu::format_shortest_opt` 26% + `float_to_decimal_common_shortest::<f32>` 10%), all from
+  the per-wedge `format!("M {cx} {cy} L {x1} {y1} A {radius} {radius} 0 {large_arc} 1 {x2} {y2} Z")`. Of the
+  8 float formats per wedge, **4 are loop-invariant** — `cx`/`cy` (center) and `radius` (twice) never change
+  across slices, yet were re-Grisu'd every wedge. Hoisted the invariant framing into two once-computed
+  strings (`pie_head = "M {cx} {cy} L "`, `pie_arc = " A {radius} {radius} 0 "`) and write the four variable
+  arc endpoints straight into `pie_svg` via `write!` — dropping 4 Grisu calls/wedge **and** the per-wedge
+  intermediate `d` String allocation (`String::write_str` 6% + `format_inner` 3.5%).
+- **Byte-identity:** the pieces concatenate to exactly the old format string (`pie_head` + `x1 y1` + `pie_arc`
+  + `large_arc 1 x2 y2 Z`); `write!(f, "{x1}")` is the same `Display`/Grisu as `format!`. **All 237
+  fm-render-svg lib tests pass** incl. `svg_golden_snapshots_are_stable` (pie in corpus); output length
+  exact-matches OLD across pie n=7..500.
+- **Measurement:** 2-build same-machine A/B (OLD = committed HEAD `7c713d2`; NEW differs only by this change).
+  - Instructions (`perf stat -e instructions:u`, load-independent): `pie render n=300` **1.504x** fewer
+    (11.16B->7.42B); `n=500` **1.492x** (17.56B->11.76B).
+  - Wall-clock best-of-12 (load 10): `pie render n=300` **1.545x** (295991->191603 ns); `n=500` **1.474x**
+    (459030->311490 ns). `pie full pipeline n=300` **1.292x** (486462->376403 ns).
+  - Control: `flowchart render` **1.0000** instr (untouched).
+- **Ratio vs the original (mermaid.js):** dominance context (full-pipeline 63-124x); pie charts now render
+  ~1.5x faster still, on top of the earlier streaming win.
+- **LEVER (reusable):** grep per-item `format!`/`write!` with MIXED loop-invariant + loop-variant float args
+  — hoist the invariant floats' formatted text out of the loop (Grisu/`{}` float formatting is ~10x a byte
+  copy). The pie center/radius were the textbook case.
+- **Staging:** 2 hunks in `render_pie_svg`; `git apply --cached` filtered patch kept the 18 peer WIP hunks
+  intact.
+
+  Agent: BlackThrush
