@@ -5931,35 +5931,38 @@ fn layout_diagram_xychart_from_meta(
         }
 
         if matches!(series.kind, IrXySeriesKind::Line | IrXySeriesKind::Area) {
-            for edge_index in ir
-                .edges
+            // Was O(series × edges × nodes): the `series.nodes.iter().any` membership filter AND the two
+            // `nodes.iter().find` endpoint lookups were LINEAR scans PER edge, and a line series has one
+            // edge per point (edges ≈ nodes) ⇒ O(N²). Build a series-membership `FxHashSet` and a
+            // node_index -> center `FxHashMap` once, then O(1) per edge. Byte-identical: `contains` matches
+            // `any`, and the map's center for `node_index` equals the (unique) node the `find` returned;
+            // edges are `sort_by_key`ed by `edge_index` below, so push order is irrelevant anyway.
+            let series_members: FxHashSet<usize> =
+                series.nodes.iter().map(|node| node.0).collect();
+            let center_by_index: FxHashMap<usize, _> = nodes
                 .iter()
-                .enumerate()
-                .filter_map(|(edge_index, edge)| {
-                    let source = endpoint_node_index(ir, edge.from)?;
-                    let target = endpoint_node_index(ir, edge.to)?;
-                    if series.nodes.iter().any(|node| node.0 == source)
-                        && series.nodes.iter().any(|node| node.0 == target)
-                    {
-                        Some((edge_index, source, target, edge.span))
-                    } else {
-                        None
-                    }
-                })
-            {
-                let (edge_index, source, target, span) = edge_index;
-                let Some(source_bounds) = nodes.iter().find(|node| node.node_index == source)
-                else {
+                .map(|node| (node.node_index, node.bounds.center()))
+                .collect();
+            for (edge_index, edge) in ir.edges.iter().enumerate() {
+                let Some(source) = endpoint_node_index(ir, edge.from) else {
                     continue;
                 };
-                let Some(target_bounds) = nodes.iter().find(|node| node.node_index == target)
-                else {
+                let Some(target) = endpoint_node_index(ir, edge.to) else {
+                    continue;
+                };
+                if !series_members.contains(&source) || !series_members.contains(&target) {
+                    continue;
+                }
+                let Some(&source_center) = center_by_index.get(&source) else {
+                    continue;
+                };
+                let Some(&target_center) = center_by_index.get(&target) else {
                     continue;
                 };
                 edges.push(LayoutEdgePath {
                     edge_index,
-                    span,
-                    points: smallvec![source_bounds.bounds.center(), target_bounds.bounds.center()],
+                    span: edge.span,
+                    points: smallvec![source_center, target_center],
                     reversed: false,
                     is_self_loop: false,
                     parallel_offset: 0.0,

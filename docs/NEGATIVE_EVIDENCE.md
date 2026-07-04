@@ -9860,3 +9860,34 @@ OLD = committed HEAD `bcc41d5`).
   peer WIP there — direct `git add`).
 
   Agent: BlackThrush
+<!-- blackthrush-xychart-line-edges-map-landed -->
+### LANDED: O(1) maps for xychart line/area edge geometry, was O(series×edges×nodes) (xychart layout up to 11.3x) (2026-07-04)
+- **Lever:** profiled the never-benched `xychart` LAYOUT (added a profharness `xychart` generator: one line +
+  one bar series over N points). `layout_diagram_xychart_from_meta`'s Line/Area edge builder, PER series, ran
+  a per-edge loop where **each edge** did (a) two `series.nodes.iter().any(|n| n.0 == source|target)`
+  membership scans AND (b) two `nodes.iter().find(|n| n.node_index == source|target)` endpoint scans — all
+  LINEAR. A line series has one edge per point (edges ≈ nodes) ⇒ **O(N²)** (formally O(series × edges ×
+  nodes)). Replaced with, once per series: a `FxHashSet<usize>` of the series' member node indices and a
+  `FxHashMap<usize, center>` from `nodes` (all pushed so far), then O(1) `contains`/`get` per edge.
+- **Byte-identity:** `contains` ≡ `any` (same element set); the map's center for a `node_index` equals the
+  node the `find` returned because `node_index = node_id.0` is GLOBALLY UNIQUE across series (each xychart
+  point is a distinct IR node), so find-first == the map's only entry; `edge_index`/`span` unchanged, and the
+  `ir.edges.iter().enumerate()` iteration order is preserved (and `edges` are `sort_by_key`ed by `edge_index`
+  below regardless). **fm-layout lib tests pass** (exit 0); xychart full-pipeline output length **exact and
+  IDENTICAL across n=20/50/100/300/500** (52821/102666/173097/496203/801183 bytes, OLD==NEW).
+- **Measurement:** 2-build same-machine A/B (OLD = HEAD f852a86→9ea1e72; NEW = +this change), unstripped
+  debug=1 sym binaries, `perf stat -e instructions:u` (load-independent, re-run stable to the instruction):
+  `xychart layout` **n=100 1.943x** (83.0M→42.7M), **n=300 4.590x** (524.8M→114.3M), **n=500 7.282x**
+  (1351.0M→185.5M), **n=800 11.324x** (3312.4M→292.5M) — ratio GROWS with N ⇒ O(N²)→O(N). (n=50 both ≈902M,
+  ratio 1.008 — a heavier OLD-code path unrelated to this loop dominates there; NEW never slower at any size.)
+- **Ratio vs the original (mermaid.js):** dominance context; xychart line/area edge geometry is now O(N).
+- **Golden:** `svg_golden_snapshots_are_stable` is RED at HEAD on case **`gantt_basic`** (pre-existing,
+  verified failing identically on the reverted OLD tree) — NOT xychart, NOT caused by this change.
+- **LEVER (3rd in this family):** `.iter().find`/`.iter().any`/`.contains` INSIDE a per-item loop = O(items²);
+  build a set/map once. Same as journey lane bands (`f852a86`) and timeline axis ticks (`9ea1e72`) — "profile
+  the never-benched niche layout phases; a linear scan inside a per-group loop is the tell." xychart had TWO
+  such scans per edge (membership + endpoint), hence O(series×edges×nodes).
+- **Staging:** single self-contained change in `crates/fm-layout/src/lib.rs` (xychart line/area edge builder;
+  no peer WIP there — direct `git add`).
+
+  Agent: BlackThrush
