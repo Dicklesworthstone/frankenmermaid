@@ -4046,6 +4046,35 @@
 
   Agent: BlackThrush
 
+<!-- tansparrow-dotted-edge-streaming-landed -->
+### LANDED: stream dotted no-marker-start edges (dotted-wide render 2.08x) (2026-07-04)
+- **Lever:** extends the existing whole-edge streaming fragment from solid no-marker-start arrows to dotted
+  no-marker-start arrows. The old fast path deliberately excluded any `stroke-dasharray`, so `-.->`, `-.-`,
+  dotted open/cross, and non-reverse dotted half/stick arrows still built the `<path>`/group/title through
+  `Element`. Added a dasharray-aware edge-tail writer and wired the dotted variants into `render_edge_into`
+  with the same marker-end, class, dasharray, and a11y phrase bytes as `render_edge`. Reverse/double arrows
+  still fall through because they need `marker-start`.
+- **Measurement:** clean two-worktree same-worker RCH A/B on `ovh-a`, release profile, per-crate
+  `frankenmermaid-cli` Criterion bench. The bench harness adds `dotted_wide_stages/render/16x32`, a 16x32
+  layered flowchart alternating `-.->` and `-.-` edges.
+  - Baseline (`f9f8058` + bench harness): `538.62 µs` median
+  - Candidate (`f9f8058` + dotted streaming): `259.27 µs` median = **2.08x faster** / **51.86% less time**
+  - Rebased current-head sanity (`9a893b5` + dotted streaming) on `hz2`: `281.53 µs` median. A refreshed
+    current-head baseline attempt was refused by RCH capacity (`remote required; refusing local fallback`), so
+    the accepted ratio remains the same-worker `ovh-a` pair above.
+- **Behavior proof:** focused `fm-render-svg` unit test `dotted_edge_streaming_matches_element_render` passes
+  on RCH `ovh-a`; it compares `render_edge_into` byte-for-byte against the slow `render_edge` Element path
+  for dotted arrow/open/cross/line and non-reverse dotted half/stick arrows, including escaped endpoint labels.
+- **Ratio vs the original (mermaid.js):** standing comparator context from `scripts/mermaid_headtohead_cc.mjs`
+  is Mermaid.js 11.15.0 wide 16x32 render median `3453.9 ms`; the rebased dotted render median `0.28153 ms`
+  is **~12,269x below that standing ORIG denominator**. This is not a fresh same-input browser rerun; it is
+  the project-standard standing ORIG context for render-frontier Rust wins.
+- **Operational notes:** Agent Mail registration/reservation remained blocked by the SQLite corruption circuit
+  breaker, so no reservation artifact was available. Literal `cargo bench --release` is rejected by this
+  Cargo/toolchain; all release-profile RCH benches used `cargo bench --profile release`.
+
+  Agent: TanSparrow
+
 ### Edge a11y fast-path RESTORED (fixes 7-turn golden_svg RED) — KEPT correctness + retains path direct-byte (2026-06-29)
 - **Root cause (EMPIRICAL, not the ledger narrative):** `render_edge`'s common-edge fast path
   (`Element::raw_svg(build_common_edge_fragment(..))`) **early-returned a bare `<path>`**, skipping

@@ -80,6 +80,26 @@ fn gen_wide(layers: usize, width: usize) -> String {
     lines.join("\n")
 }
 
+fn gen_dotted_wide(layers: usize, width: usize) -> String {
+    let mut lines = vec![String::from("flowchart TD")];
+    for layer in 0..layers {
+        for w in 0..width {
+            lines.push(format!("  N{layer}_{w}[L{layer} W{w}]"));
+        }
+    }
+    for layer in 0..layers.saturating_sub(1) {
+        for w in 0..width {
+            lines.push(format!("  N{layer}_{w}-.->N{}_{w}", layer + 1));
+            lines.push(format!(
+                "  N{layer}_{w}-.-N{}_{}",
+                layer + 1,
+                (w + 1) % width
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
 fn gen_mindmap(node_count: usize) -> String {
     let mut lines = Vec::with_capacity(node_count.saturating_add(1));
     lines.push(String::from("mindmap"));
@@ -338,6 +358,37 @@ fn bench_wide_stages(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_dotted_wide_stages(c: &mut Criterion) {
+    let mut group = c.benchmark_group("dotted_wide_stages");
+    let config = fm_render_svg::SvgRenderConfig::default();
+
+    for (label, layers, width) in [
+        ("8x16", 8_usize, 16_usize),
+        ("12x24", 12, 24),
+        ("16x32", 16, 32),
+    ] {
+        let input = gen_dotted_wide(layers, width);
+        let parsed = fm_parser::parse(&input);
+        let layout = fm_layout::layout_diagram(&parsed.ir);
+
+        group.bench_with_input(BenchmarkId::new("parse", label), &input, |b, input| {
+            b.iter(|| fm_parser::parse(input));
+        });
+        group.bench_with_input(BenchmarkId::new("layout", label), &parsed.ir, |b, ir| {
+            b.iter(|| fm_layout::layout_diagram(ir));
+        });
+        group.bench_with_input(
+            BenchmarkId::new("render", label),
+            &(&parsed.ir, &layout),
+            |b, (ir, layout)| {
+                b.iter(|| fm_render_svg::render_svg_with_layout(ir, layout, &config));
+            },
+        );
+    }
+
+    group.finish();
+}
+
 /// Render the wide corpus with `include_source_spans = true`. Source-span metadata is
 /// off by default (matching Mermaid.js, which emits no source maps), so the default-config
 /// groups never exercise the span-emission path. This group isolates the spans-on render
@@ -380,6 +431,7 @@ criterion_group!(
     bench_render_svg,
     bench_full_pipeline,
     bench_wide_stages,
+    bench_dotted_wide_stages,
     bench_render_spans_on
 );
 criterion_main!(benches);

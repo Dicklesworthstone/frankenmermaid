@@ -7230,6 +7230,24 @@ fn write_common_edge_path_tail_into(
     edge_index: i32,
     marker_end: &str,
 ) {
+    write_common_edge_path_tail_with_dasharray_into(
+        f,
+        stroke_width,
+        style_class,
+        edge_index,
+        marker_end,
+        "",
+    );
+}
+
+fn write_common_edge_path_tail_with_dasharray_into(
+    f: &mut String,
+    stroke_width: f32,
+    style_class: &str,
+    edge_index: i32,
+    marker_end: &str,
+    dasharray: &str,
+) {
     use crate::attributes::{AttributeValue, write_escaped_attr};
     f.push_str("\" stroke-width=\"");
     let _ = AttributeValue::Number(stroke_width).write_value(f);
@@ -7243,6 +7261,10 @@ fn write_common_edge_path_tail_into(
     if !marker_end.is_empty() {
         f.push_str("\" marker-end=\"");
         let _ = write_escaped_attr(f, marker_end);
+    }
+    if !dasharray.is_empty() {
+        f.push_str("\" stroke-dasharray=\"");
+        let _ = write_escaped_attr(f, dasharray);
     }
     f.push_str("\"/>");
 }
@@ -7295,6 +7317,7 @@ where
         style_class,
         edge_index,
         marker_end,
+        "",
         " points to ",
         from_label,
         to_label,
@@ -7314,6 +7337,7 @@ fn write_common_edge_full_fragment_into<F>(
     style_class: &str,
     edge_index: i32,
     marker_end: &str,
+    dasharray: &str,
     arrow_phrase: &str,
     from_label: Option<&str>,
     to_label: Option<&str>,
@@ -7331,7 +7355,14 @@ fn write_common_edge_full_fragment_into<F>(
     f.push_str("\" role=\"graphics-symbol\" tabindex=\"0\">");
     f.push_str("<path d=\"");
     crate::path::build_smooth_path_by_into(f, point_count, point_at);
-    write_common_edge_path_tail_into(f, stroke_width, style_class, edge_index, marker_end);
+    write_common_edge_path_tail_with_dasharray_into(
+        f,
+        stroke_width,
+        style_class,
+        edge_index,
+        marker_end,
+        dasharray,
+    );
     f.push_str("<title>");
     let _ = write_escaped_text(f, from_label.unwrap_or("unknown"));
     // The a11y connective phrase is `describe_edge_labels`'s per-arrow word surrounded by spaces
@@ -7908,38 +7939,99 @@ fn render_edge_into(out: &mut String, edge_path: &LayoutEdgePath, context: &Edge
     let arrow = ir_edge.map_or(ArrowType::Arrow, |edge| edge.arrow);
 
     // The whole-edge streaming fragment handles every non-reversed arrow whose slow-path `render_edge`
-    // shape is a single `<path>` with NO dasharray and NO marker-start — i.e. `(stroke_width, class,
-    // marker_end)` fully determines the bytes. Each tuple below is `(stroke_width, style_class,
-    // marker_end, a11y_phrase)` read straight off `render_edge`'s `stroke_width`/`style_class`/`marker_end`
-    // matches and `describe_edge_labels`'s per-arrow word (surrounded by spaces; `_ => "connects to"`).
-    // Dashed/reverse/double arrows (dasharray or marker-start), back-edges, labels, inline styles,
-    // animations, source spans, and non-full a11y all still fall to the `Element` slow path below.
+    // shape is a single `<path>` with no marker-start. Each tuple below is `(stroke_width, style_class,
+    // marker_end, dasharray, a11y_phrase)` read straight off `render_edge`'s matches and
+    // `describe_edge_labels`'s per-arrow word (surrounded by spaces; `_ => "connects to"`).
+    // Reverse/double arrows (marker-start), back-edges, labels, inline styles, animations, source spans,
+    // and non-full a11y all still fall to the `Element` slow path below.
     // Byte-identity is pinned by `golden_svg_test` + `edge_fast_full_fragment_matches_render`.
-    let stream_arrow: Option<(f32, &str, &str, &str)> = match arrow {
-        ArrowType::Arrow => Some((1.8, "fm-edge-solid", "url(#arrow-end)", " points to ")),
-        ArrowType::Line => Some((1.8, "fm-edge-solid", "", " connects to ")),
-        ArrowType::OpenArrow => Some((1.8, "fm-edge-solid", "url(#arrow-open)", " sends to ")),
-        ArrowType::Circle => Some((1.8, "fm-edge-solid", "url(#arrow-circle)", " relates to ")),
-        ArrowType::Cross => Some((1.8, "fm-edge-solid", "url(#arrow-cross)", " blocks ")),
+    let stream_arrow: Option<(f32, &str, &str, &str, &str)> = match arrow {
+        ArrowType::Arrow => Some((1.8, "fm-edge-solid", "url(#arrow-end)", "", " points to ")),
+        ArrowType::Line => Some((1.8, "fm-edge-solid", "", "", " connects to ")),
+        ArrowType::OpenArrow => Some((1.8, "fm-edge-solid", "url(#arrow-open)", "", " sends to ")),
+        ArrowType::Circle => Some((1.8, "fm-edge-solid", "url(#arrow-circle)", "", " relates to ")),
+        ArrowType::Cross => Some((1.8, "fm-edge-solid", "url(#arrow-cross)", "", " blocks ")),
         ArrowType::HalfArrowTop => {
-            Some((1.8, "fm-edge-solid", "url(#arrow-half-top)", " connects to "))
+            Some((1.8, "fm-edge-solid", "url(#arrow-half-top)", "", " connects to "))
         }
         ArrowType::HalfArrowBottom => {
-            Some((1.8, "fm-edge-solid", "url(#arrow-half-bottom)", " connects to "))
+            Some((1.8, "fm-edge-solid", "url(#arrow-half-bottom)", "", " connects to "))
         }
         ArrowType::StickArrowTop => {
-            Some((1.8, "fm-edge-solid", "url(#arrow-stick-top)", " connects to "))
+            Some((1.8, "fm-edge-solid", "url(#arrow-stick-top)", "", " connects to "))
         }
         ArrowType::StickArrowBottom => {
-            Some((1.8, "fm-edge-solid", "url(#arrow-stick-bottom)", " connects to "))
+            Some((1.8, "fm-edge-solid", "url(#arrow-stick-bottom)", "", " connects to "))
         }
         ArrowType::ThickArrow => {
-            Some((2.5, "fm-edge-thick", "url(#arrow-filled)", " strongly points to "))
+            Some((
+                2.5,
+                "fm-edge-thick",
+                "url(#arrow-filled)",
+                "",
+                " strongly points to ",
+            ))
         }
-        ArrowType::ThickLine => Some((2.5, "fm-edge-thick", "", " strongly connects to ")),
+        ArrowType::ThickLine => Some((2.5, "fm-edge-thick", "", "", " strongly connects to ")),
+        ArrowType::DottedArrow => Some((
+            1.8,
+            "fm-edge-dashed",
+            "url(#arrow-end)",
+            "5,5",
+            " optionally points to ",
+        )),
+        ArrowType::DottedOpenArrow => Some((
+            1.8,
+            "fm-edge-dashed",
+            "url(#arrow-open)",
+            "5,5",
+            " optionally sends to ",
+        )),
+        ArrowType::DottedCross => Some((
+            1.8,
+            "fm-edge-dashed",
+            "url(#arrow-cross)",
+            "5,5",
+            " connects to ",
+        )),
+        ArrowType::HalfArrowTopDotted => Some((
+            1.8,
+            "fm-edge-dashed",
+            "url(#arrow-half-top)",
+            "5,5",
+            " connects to ",
+        )),
+        ArrowType::HalfArrowBottomDotted => Some((
+            1.8,
+            "fm-edge-dashed",
+            "url(#arrow-half-bottom)",
+            "5,5",
+            " connects to ",
+        )),
+        ArrowType::StickArrowTopDotted => Some((
+            1.8,
+            "fm-edge-dashed",
+            "url(#arrow-stick-top)",
+            "5,5",
+            " connects to ",
+        )),
+        ArrowType::StickArrowBottomDotted => Some((
+            1.8,
+            "fm-edge-dashed",
+            "url(#arrow-stick-bottom)",
+            "5,5",
+            " connects to ",
+        )),
+        ArrowType::DottedLine => Some((
+            1.8,
+            "fm-edge-dashed",
+            "",
+            "5,5",
+            " optionally connects to ",
+        )),
         _ => None,
     };
-    if let Some((stroke_width, style_class, marker_end, arrow_phrase)) = stream_arrow
+    if let Some((stroke_width, style_class, marker_end, dasharray, arrow_phrase)) = stream_arrow
         && !edge_path.reversed
         && config.embed_theme_css
         && !config.animations_enabled
@@ -7964,6 +8056,7 @@ fn render_edge_into(out: &mut String, edge_path: &LayoutEdgePath, context: &Edge
             style_class,
             edge_index as i32,
             marker_end,
+            dasharray,
             arrow_phrase,
             from_label,
             to_label,
@@ -8117,6 +8210,78 @@ mod tests {
         );
         check(&[(-5.25, 0.0), (0.0, -3.5)], 1000, "fm-edge-solid", 2.5, None, None);
         check(&[(0.0, 0.0)], 7, "fm-edge-solid", 1.8, Some("start"), None);
+    }
+
+    #[test]
+    fn dotted_edge_streaming_matches_element_render() {
+        let config = SvgRenderConfig::default();
+        let colors = ThemeColors::default();
+        let detail = resolve_detail_profile(800.0, 600.0, &config);
+
+        for arrow in [
+            ArrowType::DottedArrow,
+            ArrowType::DottedOpenArrow,
+            ArrowType::DottedCross,
+            ArrowType::DottedLine,
+            ArrowType::HalfArrowTopDotted,
+            ArrowType::HalfArrowBottomDotted,
+            ArrowType::StickArrowTopDotted,
+            ArrowType::StickArrowBottomDotted,
+        ] {
+            let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+            ir.nodes.push(IrNode {
+                id: "A <&>".to_string(),
+                ..IrNode::default()
+            });
+            ir.nodes.push(IrNode {
+                id: "B \"q\"".to_string(),
+                ..IrNode::default()
+            });
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(0)),
+                to: IrEndpoint::Node(IrNodeId(1)),
+                arrow,
+                ..IrEdge::default()
+            });
+            let edge_path = LayoutEdgePath {
+                edge_index: 0,
+                span: Span::default(),
+                points: [
+                    fm_layout::LayoutPoint { x: 0.0, y: 0.0 },
+                    fm_layout::LayoutPoint { x: 32.0, y: 48.0 },
+                    fm_layout::LayoutPoint { x: 72.0, y: 48.0 },
+                    fm_layout::LayoutPoint { x: 96.0, y: 80.0 },
+                ]
+                .into_iter()
+                .collect(),
+                reversed: false,
+                is_self_loop: false,
+                parallel_offset: 0.0,
+                bundle_count: 1,
+                bundled: false,
+            };
+            let context = EdgeRenderContext {
+                ir: &ir,
+                offset_x: 1.5,
+                offset_y: -2.0,
+                config: &config,
+                detail,
+                colors: &colors,
+                accessible_node_labels: None,
+            };
+
+            let mut streamed = String::new();
+            render_edge_into(&mut streamed, &edge_path, &context);
+
+            let mut element_rendered = String::new();
+            render_edge(&edge_path, &context).write_to_string(&mut element_rendered);
+
+            assert_eq!(
+                streamed, element_rendered,
+                "streamed dotted edge must match Element render for {arrow:?}"
+            );
+            assert!(streamed.contains("stroke-dasharray=\"5,5\""));
+        }
     }
 
     use fm_core::{
