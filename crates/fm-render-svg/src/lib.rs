@@ -5042,6 +5042,66 @@ fn write_polygon_shape_into(f: &mut String, points: &[(f32, f32)], special_fill:
     f.push_str("/>");
 }
 
+/// Stream the cylinder/database node path. This reproduces the slow `PathBuilder` bytes exactly:
+/// `M x y+ry A w/2 ry 0 0 1 x+w y+ry L x+w y+h-ry A w/2 ry 0 0 0 x y+h-ry Z M x y+ry
+/// A w/2 ry 0 0 0 x+w y+ry`.
+fn write_cylinder_shape_into(
+    f: &mut String,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    special_fill: Option<&str>,
+) {
+    use crate::attributes::AttributeValue;
+
+    let ry = h * 0.1;
+    let rx = w / 2.0;
+    let top_y = y + ry;
+    let bottom_y = y + h - ry;
+    let right_x = x + w;
+
+    f.push_str("<path d=\"M");
+    let _ = AttributeValue::Number(x).write_value(f);
+    f.push(' ');
+    let _ = AttributeValue::Number(top_y).write_value(f);
+    f.push_str(" A");
+    let _ = AttributeValue::Number(rx).write_value(f);
+    f.push(' ');
+    let _ = AttributeValue::Number(ry).write_value(f);
+    f.push_str(" 0 0 1 ");
+    let _ = AttributeValue::Number(right_x).write_value(f);
+    f.push(' ');
+    let _ = AttributeValue::Number(top_y).write_value(f);
+    f.push_str(" L");
+    let _ = AttributeValue::Number(right_x).write_value(f);
+    f.push(' ');
+    let _ = AttributeValue::Number(bottom_y).write_value(f);
+    f.push_str(" A");
+    let _ = AttributeValue::Number(rx).write_value(f);
+    f.push(' ');
+    let _ = AttributeValue::Number(ry).write_value(f);
+    f.push_str(" 0 0 0 ");
+    let _ = AttributeValue::Number(x).write_value(f);
+    f.push(' ');
+    let _ = AttributeValue::Number(bottom_y).write_value(f);
+    f.push_str(" Z M");
+    let _ = AttributeValue::Number(x).write_value(f);
+    f.push(' ');
+    let _ = AttributeValue::Number(top_y).write_value(f);
+    f.push_str(" A");
+    let _ = AttributeValue::Number(rx).write_value(f);
+    f.push(' ');
+    let _ = AttributeValue::Number(ry).write_value(f);
+    f.push_str(" 0 0 0 ");
+    let _ = AttributeValue::Number(right_x).write_value(f);
+    f.push(' ');
+    let _ = AttributeValue::Number(top_y).write_value(f);
+    f.push_str("\" fill=\"url(#fm-node-gradient)\"");
+    write_special_fill_style_into(f, special_fill);
+    f.push_str("/>");
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_common_node_fragment(
     node_id: &str,
@@ -5172,6 +5232,9 @@ fn write_common_node_fragment_into(
                 special_fill,
             );
         }
+        fm_core::NodeShape::Cylinder => {
+            write_cylinder_shape_into(f, x, y, w, h, special_fill);
+        }
         fm_core::NodeShape::Trapezoid => {
             let inset = w * 0.15;
             write_polygon_shape_into(
@@ -5255,6 +5318,7 @@ fn write_common_node_fragment_into(
         fm_core::NodeShape::Stadium => ", stadium shape</title></g>",
         fm_core::NodeShape::Diamond => ", diamond</title></g>",
         fm_core::NodeShape::Hexagon => ", hexagon</title></g>",
+        fm_core::NodeShape::Cylinder => ", cylinder</title></g>",
         fm_core::NodeShape::Trapezoid => ", trapezoid</title></g>",
         fm_core::NodeShape::InvTrapezoid => ", inverted trapezoid</title></g>",
         fm_core::NodeShape::Parallelogram => ", parallelogram</title></g>",
@@ -5587,6 +5651,12 @@ fn render_node_into(
                 | NodeShape::Rounded
                 | NodeShape::Stadium
                 | NodeShape::Diamond
+                | NodeShape::Hexagon
+                | NodeShape::Cylinder
+                | NodeShape::Trapezoid
+                | NodeShape::InvTrapezoid
+                | NodeShape::Parallelogram
+                | NodeShape::Asymmetric
     ) && config.embed_theme_css
         && config.node_gradients
         && !emit_classdef_classes
@@ -5741,6 +5811,7 @@ fn render_node(
                 | NodeShape::Stadium
                 | NodeShape::Diamond
                 | NodeShape::Hexagon
+                | NodeShape::Cylinder
                 | NodeShape::Trapezoid
                 | NodeShape::InvTrapezoid
                 | NodeShape::Parallelogram
@@ -9158,6 +9229,70 @@ mod tests {
             svg.contains(expected),
             "full-node fast-path bytes must match the slow path.\nGOT node region:\n{region}\nEXPECTED:\n{expected}"
         );
+    }
+
+    #[test]
+    fn node_shape_fast_fragments_match_slow_render() {
+        let config = SvgRenderConfig::default();
+        let colors = ThemeColors::default();
+        let detail = resolve_detail_profile(800.0, 600.0, &config);
+        let centrality = HashMap::new();
+
+        for shape in [
+            NodeShape::Diamond,
+            NodeShape::Hexagon,
+            NodeShape::Cylinder,
+            NodeShape::Trapezoid,
+            NodeShape::InvTrapezoid,
+            NodeShape::Parallelogram,
+            NodeShape::Asymmetric,
+        ] {
+            let ir = create_ir_with_single_node("N0", shape);
+            let node_box = LayoutNodeBox {
+                node_index: 0,
+                node_id: "N0".to_string(),
+                rank: 0,
+                order: 0,
+                span: Span::default(),
+                bounds: fm_layout::LayoutRect {
+                    x: 10.0,
+                    y: 20.0,
+                    width: 140.0,
+                    height: 90.0,
+                },
+            };
+
+            let mut streamed = String::new();
+            render_node_into(
+                &mut streamed,
+                &node_box,
+                &ir,
+                0.0,
+                0.0,
+                &config,
+                detail,
+                &colors,
+                false,
+                &centrality,
+            );
+
+            let mut slow = String::new();
+            render_node(
+                &node_box,
+                &ir,
+                0.0,
+                0.0,
+                &config,
+                detail,
+                &colors,
+                false,
+                &centrality,
+                false,
+            )
+            .write_to_string(&mut slow);
+
+            assert_eq!(streamed, slow, "shape {shape:?}");
+        }
     }
 
     #[test]

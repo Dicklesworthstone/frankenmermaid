@@ -169,6 +169,26 @@ fn gen_requirement_chain(node_count: usize) -> String {
     lines.join("\n")
 }
 
+fn gen_polygon_shape_chain(shape: &str, node_count: usize) -> String {
+    let mut lines = vec![String::from("flowchart TB")];
+    for i in 0..node_count {
+        let node = match shape {
+            "hexagon" => format!("  N{i}{{{{Hex {i}}}}}"),
+            "cylinder" => format!("  N{i}[(DB {i})]"),
+            "parallel" => format!("  N{i}[/Para {i}/]"),
+            "trapez" => format!("  N{i}[/Trap {i}\\]"),
+            "invtrap" => format!("  N{i}[\\Inv {i}/]"),
+            "asym" => format!("  N{i}>Flag {i}]"),
+            _ => format!("  N{i}[Node {i}]"),
+        };
+        lines.push(node);
+    }
+    for i in 0..node_count.saturating_sub(1) {
+        lines.push(format!("  N{i}-->N{}", i + 1));
+    }
+    lines.join("\n")
+}
+
 fn gen_mindmap(node_count: usize) -> String {
     let mut lines = Vec::with_capacity(node_count.saturating_add(1));
     lines.push(String::from("mindmap"));
@@ -547,6 +567,46 @@ fn bench_requirement_stages(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_polygon_shape_render(c: &mut Criterion) {
+    let mut group = c.benchmark_group("polygon_shape_render");
+    let config = fm_render_svg::SvgRenderConfig::default();
+
+    for shape in ["hexagon", "parallel", "trapez", "invtrap", "asym"] {
+        let input = gen_polygon_shape_chain(shape, 256);
+        let parsed = fm_parser::parse(&input);
+        let layout = fm_layout::layout_diagram(&parsed.ir);
+
+        group.bench_with_input(
+            BenchmarkId::new("render", shape),
+            &(&parsed.ir, &layout),
+            |b, (ir, layout)| {
+                b.iter(|| fm_render_svg::render_svg_with_layout(ir, layout, &config));
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_cylinder_shape_render(c: &mut Criterion) {
+    let mut group = c.benchmark_group("cylinder_shape_render");
+    let config = fm_render_svg::SvgRenderConfig::default();
+
+    let input = gen_polygon_shape_chain("cylinder", 256);
+    let parsed = fm_parser::parse(&input);
+    let layout = fm_layout::layout_diagram(&parsed.ir);
+
+    group.bench_with_input(
+        BenchmarkId::new("render", "cylinder"),
+        &(&parsed.ir, &layout),
+        |b, (ir, layout)| {
+            b.iter(|| fm_render_svg::render_svg_with_layout(ir, layout, &config));
+        },
+    );
+
+    group.finish();
+}
+
 /// Render the wide corpus with `include_source_spans = true`. Source-span metadata is
 /// off by default (matching Mermaid.js, which emits no source maps), so the default-config
 /// groups never exercise the span-emission path. This group isolates the spans-on render
@@ -593,6 +653,8 @@ criterion_group!(
     bench_marker_start_wide_stages,
     bench_highlighted_wide_stages,
     bench_requirement_stages,
+    bench_polygon_shape_render,
+    bench_cylinder_shape_render,
     bench_render_spans_on
 );
 criterion_main!(benches);
