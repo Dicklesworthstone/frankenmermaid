@@ -6882,8 +6882,19 @@ fn parse_sequence_message_ast(statement: &str) -> Option<SequenceMessageData> {
         return None;
     }
 
-    let left_label = parse_label(Some(left)).filter(|label| label.text != from_id);
-    let right_label = parse_label(Some(target_clean)).filter(|label| label.text != to_id);
+    // For a plain participant token (`P0->>P1`), `parse_label` returns `plain(token.trim())` whose text
+    // equals the normalized id, so the `.filter(text != id)` drops it — but the `ParsedLabel` heap alloc
+    // was already paid, twice per message. Skip `parse_label` when the trimmed token already equals the
+    // id (the only case that yields `None`): a token needing quote/entity/`_`-trim normalization has
+    // `id != token.trim()` and still takes the full path. Byte-identical.
+    let left_label = (from_id.as_str() != left.trim())
+        .then(|| parse_label(Some(left)))
+        .flatten()
+        .filter(|label| label.text != from_id);
+    let right_label = (to_id.as_str() != target_clean.trim())
+        .then(|| parse_label(Some(target_clean)))
+        .flatten()
+        .filter(|label| label.text != to_id);
 
     Some(SequenceMessageData {
         from_id,

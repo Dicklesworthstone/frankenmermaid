@@ -8642,3 +8642,32 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   `evidence/ledger/mermaid-js-head-to-head.toml`); widens the state/er/class-edge parse margin.
 
   Agent: BlackThrush
+
+<!-- blackthrush-sequence-message-parselabel-gate-landed -->
+### LANDED: skip wasted per-message ParsedLabel allocs in sequence parser (seq parse ~1.06-1.07x) (2026-07-04)
+- **Lever:** `fm-parser::parse_sequence_message_ast` computed `left_label`/`right_label` per message via
+  `parse_label(Some(token)).filter(|l| l.text != id)`. For a plain participant token (`P0->>P1`),
+  `parse_label` returns `plain(token.trim())` whose text equals the (case-preserving) normalized id, so the
+  filter drops it — but the `ParsedLabel` heap allocation was already paid, TWICE per message. Gated the
+  call on `id != token.trim()`: the only case that yields `None` is a plain token already equal to its id,
+  and any token needing quote/entity/`_`-trim normalization has `id != token.trim()` and still takes the
+  full `parse_label` path.
+- **Why sequence:** the profharness `seq` shape (and real sequence diagrams) are message-dominated
+  (participants are √N, messages are N); every message paid two throwaway `ParsedLabel` allocations.
+- **Measurement:** clean 2-build same-machine A/B (OLD = committed HEAD `385e18c6…`, NEW = `09289aa5…`,
+  differing only by the gate). Interleaved `profharness seq <n> parse`, best-of-8 min-ns. Build via rch
+  offload, `CARGO_TARGET_DIR=…/frankenmermaid-blackthrush`, release opt=3 fat-LTO.
+  - `seq n=400`: `183598 ns` -> `171204 ns` = **1.072x**
+  - `seq n=800`: `363118 ns` -> `341257 ns` = **1.064x**
+  - controls: `flow` 0.998x (flat), `state` 0.985x (~1.5% layout noise) — seq win clears the band.
+- **Byte-identity:** verified against `normalize_identifier` (case-preserving fast path, so `plain("P0")`
+  filters out) and the quote/entity/trailing-`_` cases (all have `id != token.trim()`, so they still call
+  `parse_label`). All **408 fm-parser lib tests pass**, incl. `sequence_parses_messages`,
+  `sequence_message_label_decodes_mermaid_entities`, `sequence_message_label_normalizes_line_break_markup`.
+- **Ratio vs the original (mermaid.js):** dominance context (parse ~70-100x per
+  `evidence/ledger/mermaid-js-head-to-head.toml`); widens the sequence parse margin ~1.06-1.07x.
+- **Landable rule:** byte-identical + strictly-less-work (2 fewer heap allocs/message). LEVER (reused):
+  `alloc(...).filter(pred)` where `pred` discards the alloc in the common case → hoist a cheap pre-check
+  that reproduces `pred`'s common-case verdict without allocating.
+
+  Agent: BlackThrush
