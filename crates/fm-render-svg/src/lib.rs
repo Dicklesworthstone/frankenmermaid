@@ -295,6 +295,8 @@ struct RenderDetailProfile {
     enable_shadows: bool,
 }
 
+const POST_PASS_MAX_SVG_BYTES: usize = 100_000;
+
 /// Render an IR diagram to SVG string.
 #[must_use]
 pub fn render_svg(ir: &MermaidDiagramIr) -> String {
@@ -335,7 +337,7 @@ pub fn render_svg_with_layout(
     // the work to the size range where the win clears the cost, exactly like `strip_unused_state_css`
     // (which self-guards at the same threshold). No golden exceeds this cap, so output is unchanged
     // for every checked-in case.
-    if svg.len() <= 100_000 {
+    if svg.len() <= POST_PASS_MAX_SVG_BYTES {
         strip_unused_markers(&mut svg);
         strip_dead_marker_css(&mut svg);
         minify_style_block(&mut svg);
@@ -356,7 +358,7 @@ fn strip_unused_state_css(svg: &mut String) {
     // diagrams; on a large SVG it is <1% of output while the repeated scans add measurable render
     // time. Cap the work to outputs where the win clearly beats the scan cost (covers small flowcharts
     // through the sequence diagram ~62 KB; skips the 200 KB+ chain / wide renders).
-    if svg.len() > 100_000 {
+    if svg.len() > POST_PASS_MAX_SVG_BYTES {
         return;
     }
     const STATE_CLASSES: [&str; 5] = [
@@ -382,7 +384,6 @@ fn strip_unused_state_css(svg: &mut String) {
     // The 8 accent palettes (`.fm-node-accent-1..8`) are assigned per node, so a diagram with few
     // nodes uses only some. Drop each `.fm-node-accent-N` rule whose class is absent from the body.
     // Body-based + exact-selector; no-op if the class is used or the rule is missing.
-    let body_at = svg.find("</style>").map_or(0, |i| i + "</style>".len());
     // Which `.fm-node-accent-N` classes (N=1..=8) appear in the body — collected in ONE scan by
     // reading the digit after each "fm-node-accent-" match, instead of 8 `contains(&format!(...))`
     // that each allocate a needle String and re-scan the body. Byte-identical: used[n] is true iff
@@ -401,6 +402,7 @@ fn strip_unused_state_css(svg: &mut String) {
         "fm-node-accent-7",
         "fm-node-accent-8",
     ];
+    let body_at = svg.find("</style>").map_or(0, |i| i + "</style>".len());
     let used: [bool; 9] =
         std::array::from_fn(|n| n == 0 || svg[body_at..].contains(ACCENT_NEEDLES[n]));
     for (n, &is_used) in used.iter().enumerate().skip(1) {
@@ -489,7 +491,8 @@ fn strip_unused_markers(svg: &mut String) {
         };
         let m_end = m_start + end_rel + "</marker>".len();
         // The marker id is the first `id="…"` inside the opening tag.
-        let tag_end = memchr::memchr(b'>', &svg.as_bytes()[m_start..m_end]).map_or(m_end, |g| m_start + g);
+        let tag_end =
+            memchr::memchr(b'>', &svg.as_bytes()[m_start..m_end]).map_or(m_end, |g| m_start + g);
         if let Some(idrel) = id_finder.find(&svg.as_bytes()[m_start..tag_end]) {
             let id_start = m_start + idrel + "id=\"".len();
             if let Some(idclose) = memchr::memchr(b'"', &svg.as_bytes()[id_start..tag_end]) {
@@ -2155,7 +2158,11 @@ fn render_nodes_serial(
 /// Serial edge-render loop (skips bundled edges, which are rendered by the later bundle passes),
 /// shared by the WASM path, the below-threshold native path, and the per-chunk parallel native path so
 /// all render byte-identically.
-fn render_edges_serial(out: &mut String, edges: &[LayoutEdgePath], context: &EdgeRenderContext<'_>) {
+fn render_edges_serial(
+    out: &mut String,
+    edges: &[LayoutEdgePath],
+    context: &EdgeRenderContext<'_>,
+) {
     for edge_path in edges {
         if edge_path.bundled {
             continue;
@@ -5994,25 +6001,46 @@ fn render_node(
             let subtitle_font_size = clamp_font_size(node_font_size * 0.75, config.min_font_size);
             let mut text_y = y + h * 0.25 + node_font_size * 0.35;
 
-            // Requirement type header (e.g., "<<requirement>>")
+            // Requirement type header (e.g., "<<requirement>>"). Stream the `<text>` bytes directly under
+            // the common themed config (embedded CSS, no per-label style/classdef) instead of building an
+            // `Element` + its `Attributes` Vec — requirement nodes always take this slow path, and the
+            // Element machinery was the top of requirement render.
+            let stream_req_subtitles =
+                config.embed_theme_css && !emit_classdef_classes && text_style.is_none();
             if let Some(ref req_type) = req_meta.requirement_type {
                 let type_label = format!("\u{00ab}{req_type}\u{00bb}");
-                let mut type_elem = Element::text()
-                    .x(cx)
-                    .y(text_y)
-                    .content(&type_label)
-                    .attr("text-anchor", "middle")
-                    .attr("dominant-baseline", "central")
-                    .attr_num("font-size", subtitle_font_size)
-                    .attr("font-style", "italic")
-                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                    .fill(&colors.text)
-                    .class("fm-req-type-label");
-                type_elem = apply_label_class(type_elem);
-                if let Some(style) = text_style.as_deref() {
-                    type_elem = type_elem.attr("style", style);
+                if stream_req_subtitles {
+                    let mut f = String::new();
+                    write_req_subtitle_into(
+                        &mut f,
+                        cx,
+                        text_y,
+                        subtitle_font_size,
+                        " font-style=\"italic\"",
+                        "",
+                        &colors.text,
+                        "fm-req-type-label",
+                        &type_label,
+                    );
+                    group = group.child(Element::raw_svg(f));
+                } else {
+                    let mut type_elem = Element::text()
+                        .x(cx)
+                        .y(text_y)
+                        .content(&type_label)
+                        .attr("text-anchor", "middle")
+                        .attr("dominant-baseline", "central")
+                        .attr_num("font-size", subtitle_font_size)
+                        .attr("font-style", "italic")
+                        .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                        .fill(&colors.text)
+                        .class("fm-req-type-label");
+                    type_elem = apply_label_class(type_elem);
+                    if let Some(style) = text_style.as_deref() {
+                        type_elem = type_elem.attr("style", style);
+                    }
+                    group = group.child(type_elem);
                 }
-                group = group.child(type_elem);
                 text_y += node_font_size * 0.85;
             }
 
@@ -6046,22 +6074,38 @@ fn render_node(
             }
             if !info_parts.is_empty() {
                 let info_text = info_parts.join(" | ");
-                let mut meta_elem = Element::text()
-                    .x(cx)
-                    .y(text_y)
-                    .content(&info_text)
-                    .attr("text-anchor", "middle")
-                    .attr("dominant-baseline", "central")
-                    .attr_num("font-size", subtitle_font_size)
-                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                    .fill(&colors.text)
-                    .attr("opacity", "0.7")
-                    .class("fm-req-metadata");
-                meta_elem = apply_label_class(meta_elem);
-                if let Some(style) = text_style.as_deref() {
-                    meta_elem = meta_elem.attr("style", style);
+                if stream_req_subtitles {
+                    let mut f = String::new();
+                    write_req_subtitle_into(
+                        &mut f,
+                        cx,
+                        text_y,
+                        subtitle_font_size,
+                        "",
+                        " opacity=\"0.7\"",
+                        &colors.text,
+                        "fm-req-metadata",
+                        &info_text,
+                    );
+                    group = group.child(Element::raw_svg(f));
+                } else {
+                    let mut meta_elem = Element::text()
+                        .x(cx)
+                        .y(text_y)
+                        .content(&info_text)
+                        .attr("text-anchor", "middle")
+                        .attr("dominant-baseline", "central")
+                        .attr_num("font-size", subtitle_font_size)
+                        .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                        .fill(&colors.text)
+                        .attr("opacity", "0.7")
+                        .class("fm-req-metadata");
+                    meta_elem = apply_label_class(meta_elem);
+                    if let Some(style) = text_style.as_deref() {
+                        meta_elem = meta_elem.attr("style", style);
+                    }
+                    group = group.child(meta_elem);
                 }
-                group = group.child(meta_elem);
             }
         } else if let Some(node) = ir_node
             && !node.members.is_empty()
@@ -6302,6 +6346,43 @@ fn write_class_text_into(
     f.push_str(extra);
     f.push_str(" fill=\"");
     let _ = write_escaped_attr(f, fill);
+    f.push_str("\">");
+    let _ = write_escaped_text(f, text);
+    f.push_str("</text>");
+}
+
+/// Stream a requirement-node subtitle `<text>` (the `«type»` header / `Risk … | Verify …` metadata line)
+/// byte-identical to the `Element` the slow path builds under the common themed config (embedded CSS,
+/// no per-label style/classdef → `font-family` and `fm-node-label` absent). `before_fill`/`after_fill`
+/// carry the config-specific attribute in the slow path's exact position: the type header's
+/// `font-style="italic"` sits BEFORE `fill`, the metadata's `opacity="0.7"` AFTER it.
+#[allow(clippy::too_many_arguments)]
+fn write_req_subtitle_into(
+    f: &mut String,
+    x: f32,
+    y: f32,
+    font_size: f32,
+    before_fill: &str,
+    after_fill: &str,
+    fill: &str,
+    class: &str,
+    text: &str,
+) {
+    use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
+    f.push_str("<text x=\"");
+    let _ = AttributeValue::Number(x).write_value(f);
+    f.push_str("\" y=\"");
+    let _ = AttributeValue::Number(y).write_value(f);
+    f.push_str("\" text-anchor=\"middle\" dominant-baseline=\"central\" font-size=\"");
+    let _ = AttributeValue::Number(font_size).write_value(f);
+    f.push('"');
+    f.push_str(before_fill);
+    f.push_str(" fill=\"");
+    let _ = write_escaped_attr(f, fill);
+    f.push('"');
+    f.push_str(after_fill);
+    f.push_str(" class=\"");
+    f.push_str(class);
     f.push_str("\">");
     let _ = write_escaped_text(f, text);
     f.push_str("</text>");
@@ -7484,7 +7565,14 @@ fn build_common_edge_fragment(
     marker_end: &str,
 ) -> String {
     let mut f = String::with_capacity(path_str.len() + 96);
-    write_common_edge_path_into(&mut f, path_str, stroke_width, style_class, edge_index, marker_end);
+    write_common_edge_path_into(
+        &mut f,
+        path_str,
+        stroke_width,
+        style_class,
+        edge_index,
+        marker_end,
+    );
     f
 }
 
@@ -8582,9 +8670,7 @@ mod tests {
             "fill=\"#1a1a2e\">Single Node</text>",
             "<title>Node: Single Node, rectangle</title></g>",
         );
-        let region = svg
-            .find("<g id=\"fm-node")
-            .map_or("", |s| &svg[s..]);
+        let region = svg.find("<g id=\"fm-node").map_or("", |s| &svg[s..]);
         assert!(
             svg.contains(expected),
             "full-node fast-path bytes must match the slow path.\nGOT node region:\n{region}\nEXPECTED:\n{expected}"
@@ -8638,8 +8724,13 @@ mod tests {
             let d = crate::path::build_smooth_path_by(points.len(), |i| points[i]);
             let desc =
                 crate::a11y::describe_edge_labels(from_label, to_label, ArrowType::Arrow, None);
-            let path_child =
-                Element::raw_svg(build_common_edge_fragment(&d, sw, style, idx, "url(#arrow-end)"));
+            let path_child = Element::raw_svg(build_common_edge_fragment(
+                &d,
+                sw,
+                style,
+                idx,
+                "url(#arrow-end)",
+            ));
             let group = Element::group()
                 .id(&fm_core::mermaid_edge_element_id(idx as usize))
                 .class("fm-edge")
@@ -8665,7 +8756,14 @@ mod tests {
                 "whole-edge fast fragment must equal the slow Element group (idx={idx})"
             );
         };
-        check(&[(0.0, 0.0), (10.0, 10.0)], 0, "fm-edge-solid", 1.8, Some("A"), Some("B"));
+        check(
+            &[(0.0, 0.0), (10.0, 10.0)],
+            0,
+            "fm-edge-solid",
+            1.8,
+            Some("A"),
+            Some("B"),
+        );
         check(
             &[(1.5, 2.25), (3.0, 4.0), (5.0, 6.0), (7.0, 8.0)],
             42,
@@ -8674,7 +8772,14 @@ mod tests {
             Some("Node <1> & \"x\""),
             Some("Node 2"),
         );
-        check(&[(-5.25, 0.0), (0.0, -3.5)], 1000, "fm-edge-solid", 2.5, None, None);
+        check(
+            &[(-5.25, 0.0), (0.0, -3.5)],
+            1000,
+            "fm-edge-solid",
+            2.5,
+            None,
+            None,
+        );
         check(&[(0.0, 0.0)], 7, "fm-edge-solid", 1.8, Some("start"), None);
     }
 
@@ -9573,7 +9678,10 @@ mod tests {
              Bob-|/Alice: HalfBottom\n",
         );
         let svg = render_svg(&parsed.ir);
-        assert!(svg.contains("id=\"arrow-end\""), "solid arrow marker missing");
+        assert!(
+            svg.contains("id=\"arrow-end\""),
+            "solid arrow marker missing"
+        );
         let mut at = 0;
         while let Some(rel) = svg[at..].find("<marker ") {
             let s = at + rel;
@@ -10178,10 +10286,19 @@ mod tests {
             min.contains(".fm-node .child{"),
             "descendant combinator space dropped: {min:?}"
         );
-        assert!(min.contains("2px 8px"), "value-internal space dropped: {min:?}");
-        assert!(min.contains("in srgb"), "function-arg space dropped: {min:?}");
+        assert!(
+            min.contains("2px 8px"),
+            "value-internal space dropped: {min:?}"
+        );
+        assert!(
+            min.contains("in srgb"),
+            "function-arg space dropped: {min:?}"
+        );
         assert!(min.contains("4%, transparent") || min.contains("4%,transparent"));
-        assert!(min.contains("fill: var(--fm-node-fill)"), "`: ` space dropped: {min:?}");
+        assert!(
+            min.contains("fill: var(--fm-node-fill)"),
+            "`: ` space dropped: {min:?}"
+        );
     }
 
     #[test]
@@ -10195,7 +10312,10 @@ mod tests {
              <path class=\"fm-edge\" marker-end=\"url(#arrow-end)\" d=\"M0 0 L9 9\"/></svg>",
         );
         strip_unused_markers(&mut svg);
-        assert!(svg.contains("id=\"arrow-end\""), "referenced marker must stay");
+        assert!(
+            svg.contains("id=\"arrow-end\""),
+            "referenced marker must stay"
+        );
         assert!(
             !svg.contains("id=\"arrow-cross\""),
             "unreferenced marker must be removed"
@@ -10250,10 +10370,19 @@ marker#arrow-open path {
         );
         strip_dead_marker_css(&mut svg);
         // Live selector kept, dead sibling pruned from the list.
-        assert!(svg.contains("marker#arrow-end path"), "live marker selector dropped");
-        assert!(!svg.contains("marker#arrow-filled"), "dead sibling not pruned");
+        assert!(
+            svg.contains("marker#arrow-end path"),
+            "live marker selector dropped"
+        );
+        assert!(
+            !svg.contains("marker#arrow-filled"),
+            "dead sibling not pruned"
+        );
         // Whole rule with only a dead marker is removed.
-        assert!(!svg.contains("marker#arrow-open"), "fully-dead rule not removed");
+        assert!(
+            !svg.contains("marker#arrow-open"),
+            "fully-dead rule not removed"
+        );
         // Non-marker rule untouched.
         assert!(svg.contains(".fm-edge {"), "non-marker rule corrupted");
         // The live rule still has its body.
@@ -10265,8 +10394,14 @@ marker#arrow-open path {
         // A pie chart has no edges -> no markers -> every marker#… rule is dead.
         let parsed = fm_parser::parse("pie title Pets\n  \"Dogs\": 3\n  \"Cats\": 2\n");
         let svg = render_svg(&parsed.ir);
-        assert!(!svg.contains("marker#arrow"), "edge-less diagram kept dead marker CSS");
-        assert!(!svg.contains("<marker "), "edge-less diagram kept marker defs");
+        assert!(
+            !svg.contains("marker#arrow"),
+            "edge-less diagram kept dead marker CSS"
+        );
+        assert!(
+            !svg.contains("<marker "),
+            "edge-less diagram kept marker defs"
+        );
     }
 
     #[test]
@@ -11896,16 +12031,21 @@ marker#arrow-open path {
             "block-beta-space",
             "dimmed-but-active-highlight",
             "borderish",
-            "highligh",       // one char short of a match
-            "doubleborder",   // no hyphen — must NOT match
-            "high-light",     // hyphen splits keyword — must NOT match
-            "muTeDim",        // overlapping starts
+            "highligh",     // one char short of a match
+            "doubleborder", // no hyphen — must NOT match
+            "high-light",   // hyphen splits keyword — must NOT match
+            "muTeDim",      // overlapping starts
             "DisabledInactiveDim",
         ];
         for c in cases {
             let got = scan_node_class_keywords(c);
             assert_eq!(
-                (got.highlighted, got.inactive, got.dashed_border, got.double_border),
+                (
+                    got.highlighted,
+                    got.inactive,
+                    got.dashed_border,
+                    got.double_border
+                ),
                 reference(c),
                 "single-pass keyword scan diverged from contains-reference for {c:?}"
             );
