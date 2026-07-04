@@ -5608,6 +5608,21 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
     let mut start_days = vec![base_start_day; task_count];
     let mut end_exclusive_days = vec![base_start_day; task_count];
 
+    // Resolve each task's primary-dependency task index ONCE. The fixpoint below is O(task_count)
+    // iterations, and its inner loop previously did a `task_id_to_idx` (BTreeMap<String, _>) lookup per
+    // task per iteration — O(task_count^2 log) string comparisons (memcmp was ~22% of gantt layout on a
+    // dependency chain). `task_id_to_idx` is fully built above and never mutated, so the resolved index
+    // is loop-invariant; hoist it. Byte-identical: `dep_idx_by_task[i]` is `Some` exactly when the old
+    // `.get(after_id)` succeeded, and both the "no dependency" and "unresolved dependency" cases fell
+    // through to `section_end` before.
+    let dep_idx_by_task: Vec<Option<usize>> = gantt_meta
+        .tasks
+        .iter()
+        .map(|task| {
+            gantt_task_primary_dependency(task).and_then(|id| task_id_to_idx.get(id).copied())
+        })
+        .collect();
+
     for _ in 0..=task_count {
         let mut changed = false;
         let mut section_end = vec![base_start_day; section_count];
@@ -5616,10 +5631,10 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
             let section_idx = task.section_idx.min(section_count.saturating_sub(1));
             let start = if let Some(explicit) = explicit_starts[task_idx] {
                 explicit
-            } else if let Some(after_task_id) = gantt_task_primary_dependency(task) {
-                task_id_to_idx
-                    .get(after_task_id)
-                    .and_then(|dep_idx| end_exclusive_days.get(*dep_idx).copied())
+            } else if let Some(dep_idx) = dep_idx_by_task[task_idx] {
+                end_exclusive_days
+                    .get(dep_idx)
+                    .copied()
                     .unwrap_or(section_end[section_idx])
             } else {
                 section_end[section_idx]

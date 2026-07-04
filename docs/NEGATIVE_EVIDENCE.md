@@ -9289,3 +9289,34 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   intact.
 
   Agent: BlackThrush
+<!-- blackthrush-gantt-layout-dep-hoist-landed -->
+### LANDED: hoist gantt task-dependency lookup out of the O(N^2) fixpoint (gantt layout ~1.08-1.09x) (2026-07-04)
+- **Lever:** profiled gantt layout (150us/n=300, 31% of gantt full) — **21.8% was `memcmp`**. Source:
+  `layout_diagram_gantt_from_meta`'s start-day fixpoint `for _ in 0..=task_count { for task in tasks { … } }`
+  did a `task_id_to_idx.get(after_task_id)` (**`BTreeMap<String,_>` string lookup**) per task per iteration —
+  O(task_count^2 * log) string comparisons on a dependency chain. `task_id_to_idx` is fully built before the
+  fixpoint and never mutated, so the resolved dep index is loop-invariant. Precompute
+  `dep_idx_by_task: Vec<Option<usize>>` once (O(task_count) lookups) and index it inside the fixpoint.
+- **Byte-identity:** `dep_idx_by_task[i]` is `Some` exactly when the old `.get(after_id)` succeeded; the old
+  "no dependency" and "unresolved dependency" branches both fell through to `section_end`, so the collapsed
+  `else` is equivalent. **fm-layout + fm-render-svg lib tests pass** (exit 0); gantt full-pipeline output
+  length exact-matches OLD across n=10..500 (render positions derive from layout → identical layout).
+- **Measurement:** 2-build same-machine A/B (OLD = committed HEAD `5926cd4`; NEW differs only by this change).
+  Instructions (`perf stat -e instructions:u`, load-independent — the VM was at load 65+ so wall-clock was
+  unreliable):
+  - `gantt layout n=300` **1.076x** fewer instr (4.683B->4.353B); `n=500` **1.091x** (8.175B->7.496B); scales
+    with dependency-chain depth (n=100 flat 1.000 — chains there are too shallow to matter).
+  - `gantt full pipeline n=300` **1.022x**; `n=500` **1.027x**.
+  - Control: `flowchart layout` **1.0000** instr (untouched).
+  - `memcmp` in gantt layout dropped 21.8% -> 11.9% self-time (re-profiled). The residual 11.9% is the
+    `section_to_nodes` `BTreeMap<String,Vec<usize>>` keyed by section label — **load-bearing** (bands iterate
+    in the map's lexicographic label order, e.g. "Section 10" < "Section 2"; a Vec-by-section_idx would
+    reorder bands and change output). Left as-is.
+- **Ratio vs the original (mermaid.js):** dominance context (full-pipeline 63-124x); gantt layout's
+  dependency resolution is now O(N) instead of O(N^2 log N).
+- **LEVER (reusable):** grep for a `BTreeMap<String,_>`/`HashMap<String,_>` `.get(key_str)` INSIDE a fixpoint
+  or nested loop where the map is built-once/never-mutated → precompute the resolved value/index into a
+  `Vec` once before the loop. memcmp% in a *layout* profile is the tell.
+- **Staging:** single-file change in `crates/fm-layout/src/lib.rs` (no peer WIP there — direct `git add`).
+
+  Agent: BlackThrush
