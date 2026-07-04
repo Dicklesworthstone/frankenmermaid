@@ -9831,3 +9831,32 @@ OLD = committed HEAD `bcc41d5`).
   there — direct `git add`).
 
   Agent: BlackThrush
+<!-- blackthrush-timeline-axis-ticks-map-landed -->
+### LANDED: O(1) node lookup for timeline axis ticks, was O(N²) linear find (timeline layout 1.27-1.46x) (2026-07-04)
+- **Lever:** profiled the never-benched `timeline` layout (49.67% in the inlined
+  `compute_traced_layout`/`layout_diagram_timeline_traced`). Its axis-tick builder did
+  `traced.layout.nodes.iter().find(|n| n.node_index == node_index)` — a LINEAR SCAN — once PER
+  `period_index`; the timeline gives most events a distinct period, so `period_indexes ≈ nodes` ⇒ O(N²).
+  Replaced with a single O(N) pass building a `FxHashMap<node_index, center_x>` (owned `f32` so the
+  `traced.layout.extensions` write doesn't conflict with a borrow of `traced.layout.nodes`), then O(1)
+  lookups.
+- **Byte-identity:** same center_x per node_index, same label, same `period_indexes` order; a node_index
+  absent from the map (not in `layout.nodes`) is dropped exactly like the old `find`'s `None`. **fm-layout +
+  fm-render-svg lib tests pass** (exit 0); timeline full-pipeline output length exact across n=20..500.
+- **Measurement:** 2-build same-machine A/B (OLD = HEAD; NEW = +this change). Instructions
+  (`perf stat -e instructions:u`, load-independent): `timeline layout n=300` **1.266x** (3.81B->3.01B);
+  `n=500` **1.455x** (7.46B->5.13B — grows with N ⇒ O(N²)->O(N)). `timeline full pipeline` **1.043x@300 /
+  1.072x@500**. Controls `flowchart`/`gantt layout` **1.0000**.
+- **Ratio vs the original (mermaid.js):** dominance context; timeline axis-tick placement is now O(N).
+- **LEVER (reusable):** `x.iter().find(|e| e.key == k)` INSIDE a loop over keys = O(keys × items); build a
+  key→value map once. Same family as the journey lane-band O(N²) (`f852a86`) — "profile the never-benched
+  niche layout phases; a `.iter().find`/`.contains`/rescan inside a per-group loop is the tell."
+- **Also this turn (NO-SHIP, reverted, ~0-gain):** swapped `connectivity_fragments`' adjacency
+  `Vec<BTreeSet<usize>>` → `Vec<FxHashSet<usize>>` (byte-identical: the DFS component set is order-independent
+  + `sort_unstable`d). Measured **exactly 1.0000** on timeline/subg/flowchart layout — the `BTreeSet` I
+  changed isn't the timeline hotspot (that BTreeMap-insert % is elsewhere) and FxHashSet ≈ BTreeSet for the
+  tiny sparse adjacency. Reverted.
+- **Staging:** single self-contained change in `crates/fm-layout/src/lib.rs` (timeline axis-tick builder; no
+  peer WIP there — direct `git add`).
+
+  Agent: BlackThrush

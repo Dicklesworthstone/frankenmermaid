@@ -4750,17 +4750,25 @@ pub fn layout_diagram_timeline_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         trace,
         true,
     );
+    // Axis tick x-positions via a node_index -> center_x map (was a linear `layout.nodes.iter().find`
+    // PER period_index — and the timeline gives most events a distinct period, so `period_indexes ≈ nodes`,
+    // making this O(N²), ~half of timeline layout). One O(N) pass builds the map; owned `f32` values so the
+    // subsequent `traced.layout.extensions` write doesn't conflict with a borrow of `traced.layout.nodes`.
+    // Byte-identical: same center_x per node_index, same label, same `period_indexes` order (a node_index
+    // absent from the map — i.e. not in `layout.nodes` — is dropped, exactly like the old `find`'s `None`).
+    let center_x_by_index: FxHashMap<usize, f32> = traced
+        .layout
+        .nodes
+        .iter()
+        .map(|node| (node.node_index, node.bounds.center().x))
+        .collect();
     traced.layout.extensions.axis_ticks = period_indexes
         .into_iter()
         .filter_map(|node_index| {
-            let node = traced
-                .layout
-                .nodes
-                .iter()
-                .find(|node| node.node_index == node_index)?;
+            let position = *center_x_by_index.get(&node_index)?;
             Some(LayoutAxisTick {
                 label: layout_label_text(ir, node_index).to_string(),
-                position: node.bounds.center().x,
+                position,
             })
         })
         .collect();
