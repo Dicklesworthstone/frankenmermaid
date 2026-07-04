@@ -9497,3 +9497,32 @@ OLD = committed HEAD `bcc41d5`).
 - **Ratio vs the original (mermaid.js):** n/a (both reverted; no code kept).
 
   Agent: BlackThrush
+<!-- blackthrush-sanitize-render-fragment-bytescan-landed -->
+### LANDED: byte-scan write_sanitized_render_element_fragment_into (render -0.25..0.81% all shapes, cross-cutting) (2026-07-04)
+- **Lever:** `fm_core::write_sanitized_render_element_fragment_into` (2.2-3.4% self-time across flowchart/
+  mindmap/git render — it runs per element id via `write_mermaid_node_element_id_into` on the node-id fast
+  path) iterated `raw.chars()` (per-char UTF-8 decode) but does only ASCII work (`is_ascii_alphanumeric` +
+  `to_ascii_lowercase`, else a separator). Crucially it collapses separator runs to a single `-` via a
+  **bool** `pending_dash` (not a per-char push, unlike `sanitize_css_token`), so a multi-byte char's bytes
+  (all non-alphanumeric) still yield exactly one `-`. Rewrote the loop over `raw.as_bytes()` with byte
+  literals — dropping the decode.
+- **Byte-identity:** byte iteration keeps only ASCII alnum (lowercased) and collapses every separator run
+  (incl. non-ASCII multi-byte chars, whose bytes are all >= 128 = non-alnum) to one `-` — identical output.
+  **fm-core + fm-render-svg lib tests pass** (exit 0); render output length exact-matches OLD across
+  flowchart/mindmap/git/class/er/state/styled (n=300).
+- **Measurement:** 2-build same-machine A/B (OLD = committed HEAD `4ae5441`; NEW differs only by this
+  rewrite). Instructions (`perf stat -e instructions:u`, load-independent) — **fewer on every shape, none
+  regressed** (monotonic-less-work: byte iteration is strictly cheaper than the char decode, so it cannot
+  regress): `git` **1.0081x**, `mindmap` **1.0063x**, `state` **1.0059x**, `flowchart` **1.0057x**, `class`
+  **1.0044x**, `er` **1.0025x**.
+- **Ratio vs the original (mermaid.js):** dominance context (full-pipeline 63-124x); every element-id
+  sanitization on the render hot path is now decode-free.
+- **LEVER (reusable):** grep `for ch in x.chars()` loops that only do ASCII classification/`to_ascii_*` and
+  push ASCII → byte-iterate (`for &b in x.as_bytes()`). SAFE here (unlike `sanitize_css_token`, which pushes
+  a `-` PER non-alnum char so multi-byte → multiple dashes) because the separator collapses to a bool. Same
+  decode-removal family as [[project_find_operator_byte_scan]] / [[project_parse_lines_charsearcher_landed]].
+  Landable at <1% because it's monotonic-less-work + uniformly positive (contrast the reverted find_operator
+  operator-gate which ADDED a check and regressed styled).
+- **Staging:** single-file change in `crates/fm-core/src/lib.rs` (no peer WIP there — direct `git add`).
+
+  Agent: BlackThrush

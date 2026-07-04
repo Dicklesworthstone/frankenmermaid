@@ -5017,15 +5017,21 @@ fn sanitize_render_element_fragment(raw: &str) -> String {
 /// a trailing dash is never produced (a pending dash is dropped if no alphanumeric follows) — exactly
 /// the leading/trailing trim the collect-then-trim version performs.
 fn write_sanitized_render_element_fragment_into(out: &mut String, raw: &str) {
+    // Byte scan (was `chars()`): only ASCII alphanumerics are kept (lowercased); every other byte is a
+    // separator. A non-ASCII byte (>= 128, a UTF-8 lead/continuation) is non-alphanumeric exactly as its
+    // char is, and because `pending_dash` is a *bool* (not a count) a run of separator bytes still
+    // collapses to a single `-` — so byte iteration is byte-identical to the char scan while skipping the
+    // per-char UTF-8 decode (this runs per element id on the render hot path). Pushing an ASCII byte as a
+    // `char` appends exactly one byte and keeps `out` valid UTF-8.
     let mut wrote_alnum = false;
     let mut pending_dash = false;
-    for ch in raw.chars() {
-        if ch.is_ascii_alphanumeric() {
+    for &b in raw.as_bytes() {
+        if b.is_ascii_alphanumeric() {
             if pending_dash {
                 out.push('-');
                 pending_dash = false;
             }
-            out.push(ch.to_ascii_lowercase());
+            out.push(b.to_ascii_lowercase() as char);
             wrote_alnum = true;
         } else if wrote_alnum {
             pending_dash = true;
