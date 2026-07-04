@@ -80,6 +80,16 @@ fn gen_wide(layers: usize, width: usize) -> String {
     lines.join("\n")
 }
 
+fn gen_mindmap(node_count: usize) -> String {
+    let mut lines = Vec::with_capacity(node_count.saturating_add(1));
+    lines.push(String::from("mindmap"));
+    lines.push(String::from("  root((Root))"));
+    for i in 1..node_count {
+        lines.push(format!("    N{i}[Node {i}]"));
+    }
+    lines.join("\n")
+}
+
 // ─── Parse benchmarks ───────────────────────────────────────────────────────
 
 fn bench_parse(c: &mut Criterion) {
@@ -174,6 +184,28 @@ fn bench_full_pipeline_wide(c: &mut Criterion) {
         ("16x32", 16, 32),
     ] {
         let input = gen_wide(layers, width);
+        group.bench_with_input(
+            BenchmarkId::new("parse_layout_svg", label),
+            &input,
+            |b, input| {
+                b.iter(|| {
+                    let parsed = fm_parser::parse(input);
+                    let layout = fm_layout::layout_diagram(&parsed.ir);
+                    fm_render_svg::render_svg_with_layout(&parsed.ir, &layout, &config)
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_full_pipeline_mindmap(c: &mut Criterion) {
+    let mut group = c.benchmark_group("full_pipeline_mindmap");
+    let config = fm_render_svg::SvgRenderConfig::default();
+
+    for (label, node_count) in [("200", 200_usize), ("800", 800), ("1600", 1600)] {
+        let input = gen_mindmap(node_count);
         group.bench_with_input(
             BenchmarkId::new("parse_layout_svg", label),
             &input,
@@ -344,6 +376,7 @@ criterion_group!(
     bench_layout,
     bench_layout_wide,
     bench_full_pipeline_wide,
+    bench_full_pipeline_mindmap,
     bench_render_svg,
     bench_full_pipeline,
     bench_wide_stages,

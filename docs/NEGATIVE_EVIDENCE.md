@@ -50,6 +50,45 @@
 
 ## Entries
 
+### Radial mindmap guardrail cost estimate - KEPT (2026-07-04)
+- **Lever:** `fm-layout::estimate_layout_cost` now prices `LayoutAlgorithm::Radial`
+  as cheaper than `Tree` for mindmap guardrail fallback scoring. Radial mindmaps use
+  single-pass angle assignment plus straight-line edges; `Tree` can pay dense
+  obstacle-routing costs, so the old estimate could incorrectly force large mindmaps
+  from their specialized radial layout onto a slower fallback.
+- **Hypothesis:** the FrankenMermaid graveyard profile calls out layout scalability
+  and algorithm choice as the remaining high-EV gap. For large mindmaps, correcting
+  the guardrail cost model should preserve the intended radial layout and avoid the
+  tree fallback without changing small or non-mindmap dispatch.
+- **Baseline -> After:** same-worker RCH `hz2`, per-crate
+  `frankenmermaid-cli` `pipeline_bench`, new `full_pipeline_mindmap` group
+  (`parse + layout + SVG`), release profile via Cargo's supported
+  `--profile release` flag. Baseline worktree was `0e0e09e` with only the new
+  bench harness added; candidate worktree added the radial cost change and guardrail
+  test. Means:
+  - `200`: `745.75 us` -> `575.59 us` (`-22.82%`, `1.296x` faster)
+  - `800`: `3.6369 ms` -> `2.2998 ms` (`-36.76%`, `1.581x` faster)
+  - `1600`: `9.5216 ms` -> `4.3571 ms` (`-54.24%`, `2.185x` faster)
+- **Original comparator:** the standing pinned comparator is
+  `scripts/mermaid_headtohead_cc.mjs`, Mermaid.js `11.15.0` through Puppeteer/system
+  Chromium. Its recorded wide `16x32` median render denominator is `3453.9 ms`.
+  No fresh same-input Mermaid.js mindmap rerun was captured; scratch dependency search
+  was too slow and no package-manager install was performed inside the Cargo repo.
+- **frankenmermaid/Mermaid ratio:** candidate `1600` mindmap full-pipeline mean
+  versus the standing Mermaid.js denominator is `0.001262x`; Mermaid.js is `792.71x`
+  slower. This is dominance context, not a same-input browser rerun.
+- **Verdict:** kept. The largest mindmap full pipeline is cut by `54.24%`, and all
+  measured sizes improve on the same worker.
+- **Validation:** added
+  `large_mindmap_guardrail_keeps_radial_as_lowest_cost_fallback`, which proves a
+  large default-guardrail mindmap stays on `Radial` instead of falling back to
+  `Tree`. The change is dispatch-cost metadata only; radial geometry and parser/render
+  semantics are unchanged.
+- **Tooling note:** Agent Mail identity remained `TanSparrow`, but file reservations
+  were blocked by the Agent Mail SQLite corruption circuit breaker. Literal
+  `cargo bench --release` is not supported by this Cargo; `cargo bench --profile release`
+  was used for the requested release-profile per-crate bench.
+
 ### Obstacle candidate no-sort min-index routing - KEPT + proof hardened (2026-07-04)
 - **Lever:** `fm-layout::cga_routing` now lets `ObstacleSpatialIndex::query_segment`
   return candidate obstacle indices without sorting. The indexed CGA nudge helpers scan
@@ -8222,3 +8261,36 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   mermaid.js (full-pipeline, Chromium).
 
   Agent: SlateHarrier
+
+<!-- tansparrow-svg-css-usage-mask-no-ship -->
+### REVERTED: precomputed SVG state/accent CSS usage mask is below landability floor (2026-07-04)
+- **Lever:** `fm-render-svg::render_svg_with_layout` precomputed a `StateCssUsage`
+  mask from `DiagramLayout.nodes` and `MermaidDiagramIr.nodes`, then passed it into
+  `strip_unused_state_css` to avoid scanning the completed SVG body for state classes
+  and `.fm-node-accent-N` classes.
+- **Hypothesis:** the render frontier still pays repeated post-render string scans in
+  the CSS cleanup path. A proof-carrying usage mask should replace those scans with
+  layout/IR metadata and win on small/medium SVG renders while preserving output.
+- **Baseline -> After:** same-worker RCH `hz2`, per-crate
+  `frankenmermaid-cli` `pipeline_bench`, `render_svg/flowchart` filter,
+  release profile via `cargo bench --profile release -p frankenmermaid-cli --bench
+  pipeline_bench -- render_svg/flowchart --warm-up-time 1 --measurement-time 2`,
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-tansparrow-css-usage`.
+  Final scoped candidate used the mask only below 64 KiB and left larger SVGs on the
+  old scan path. Means:
+  - `small_10`: `54.069 us` -> `53.807 us` (`0.995x`, `0.48%` faster; noise)
+  - `medium_100`: `112.20 us` -> `112.22 us` (`1.0002x`, flat/slightly slower)
+  - `large_500`: `169.52 us` -> `175.09 us` (`1.033x`, `3.29%` slower)
+- **Original comparator:** the standing pinned comparator is
+  `scripts/mermaid_headtohead_cc.mjs`, Mermaid.js `11.15.0` through Puppeteer/system
+  Chromium. Its recorded wide `16x32` median render denominator is `3453.9 ms`.
+  Candidate `large_500` render-only mean versus that denominator is `0.0000507x`;
+  this is dominance context, not a same-input browser rerun.
+- **Verdict:** ~0 gain/regression. Small does not clear the 3% keep floor, medium is
+  flat, and large regresses even after the 64 KiB guard.
+- **Revert:** source lever dropped before commit; this entry is evidence-only.
+- **Do-not-retry note:** replacing the body scans with a precomputed usage mask is
+  below the render CSS-path noise floor for flowchart SVGs. The viable render frontier
+  remains larger structural work, not another bounded state/accent CSS scan variant.
+
+  Agent: TanSparrow

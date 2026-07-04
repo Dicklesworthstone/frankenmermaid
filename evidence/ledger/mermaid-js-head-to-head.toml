@@ -2750,3 +2750,40 @@ agent_mail = "Registered as TanSparrow; file reservations blocked by Agent Mail 
 [post_measurement_obstacle_sort_min_index_2026_07_04.decision]
 kept = true
 reason = "Mindmap obstacle-dense layout gets a measured -30..-40% same-commit win by removing per-query candidate sorting while preserving lowest-index semantics. Fresh per-crate RCH full_pipeline_wide confirms the current post-win build remains 1275x faster than the standing Mermaid.js 11.15.0 wide 16x32 denominator."
+
+[post_measurement_radial_mindmap_guardrail_2026_07_04]
+date = "2026-07-04"
+agent = "TanSparrow"
+lever_bead = "bd-1buv.1"
+status = "keep"
+baseline_commit = "0e0e09e"
+candidate_summary = "Correct LayoutAlgorithm::Radial guardrail cost estimates so large mindmaps stay on their specialized radial layout instead of falling back to Tree due stale estimated time/route costs."
+graveyard_route = "Alien Graveyard FrankenMermaid profile: layout scalability and algorithm-choice guardrails; high-EV data-structure/dispatch-cost lever rather than a speculative new layout algorithm."
+rust_baseline_command = "AGENT_NAME=TanSparrow RCH_WORKER=hz2 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-tansparrow-radial-baseline rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_mindmap --warm-up-time 1 --measurement-time 3"
+rust_candidate_command = "AGENT_NAME=TanSparrow RCH_WORKER=hz2 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-tansparrow-radial-candidate rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_mindmap --warm-up-time 1 --measurement-time 3"
+rust_worker = "hz2 for both baseline and candidate"
+mermaid_js_command = "Standing comparator from scripts/mermaid_headtohead_cc.mjs: Mermaid.js 11.15.0 via Puppeteer/system Chromium, wide 16x32 median render 3453.9 ms. No fresh same-input mindmap browser rerun captured."
+behavior_proof = "New unit test large_mindmap_guardrail_keeps_radial_as_lowest_cost_fallback asserts a large default-guardrail mindmap remains on Radial; geometry/parser/render code paths are unchanged."
+agent_mail = "Registered as TanSparrow; file reservations blocked by Agent Mail SQLite corruption circuit breaker."
+bench_syntax_note = "Cargo bench in this toolchain exposes --profile <PROFILE-NAME>, not --release; release-profile benches used --profile release."
+
+[post_measurement_radial_mindmap_guardrail_2026_07_04.metrics]
+"full_pipeline_mindmap_200_baseline_us" = 745.75
+"full_pipeline_mindmap_200_candidate_us" = 575.59
+"full_pipeline_mindmap_200_delta_pct" = -22.82
+"full_pipeline_mindmap_200_speedup_x" = 1.296
+"full_pipeline_mindmap_800_baseline_ms" = 3.6369
+"full_pipeline_mindmap_800_candidate_ms" = 2.2998
+"full_pipeline_mindmap_800_delta_pct" = -36.76
+"full_pipeline_mindmap_800_speedup_x" = 1.581
+"full_pipeline_mindmap_1600_baseline_ms" = 9.5216
+"full_pipeline_mindmap_1600_candidate_ms" = 4.3571
+"full_pipeline_mindmap_1600_delta_pct" = -54.24
+"full_pipeline_mindmap_1600_speedup_x" = 2.185
+"standing_wide_16x32_mermaid_js_ms" = 3453.9
+"mindmap_1600_frankenmermaid_over_standing_mermaid_js" = 0.001262
+"standing_mermaid_js_over_mindmap_1600_frankenmermaid" = 792.71
+
+[post_measurement_radial_mindmap_guardrail_2026_07_04.decision]
+kept = true
+reason = "Same-worker hz2 full_pipeline_mindmap improves every size and cuts the 1600-node mindmap full pipeline by 54.24% by keeping guardrail fallback on Radial. The lever is isolated to cost metadata plus a regression test."
