@@ -9073,3 +9073,27 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   --cached` filtered patch kept the peer WIP intact.
 
   Agent: BlackThrush
+
+<!-- blackthrush-class-compartment-streaming-landed -->
+### LANDED: stream class-diagram compartments (class render +22-25%) (2026-07-04)
+- **Lever:** the hardest roadmap lever. A class node's compartment stack (stereotype + name + separator +
+  attribute rows + separator + method rows) built a `TextBuilder`/`Element::Line` per item — ~5+ Element
+  allocs per class node, more with more members. Added a streaming fast path to `render_class_compartments`
+  (two helpers `write_class_text_into` / `write_class_separator_into`) that, for the common case (no
+  per-label style, no classdef class, embedded CSS), mirrors the exact cursor/break logic while writing the
+  whole compartment as ONE `Element::raw_svg` child. The three `<text>` configs (centered+bold name,
+  centered+italic stereotype, start members) and the `<line>` separators match `TextBuilder::build`/
+  `Element::Line` byte-for-byte. Every other case falls through to the Element path.
+- **Measurement:** clean 2-build same-machine A/B (OLD = committed HEAD code `cd43fb22`; NEW = `be0b7b6e`,
+  differing only by this change). Interleaved `profharness class <n> render`, best-of-8 min-ns.
+  - `class render n=400` (1 field + 1 method/class): `634352 ns` -> `517551 ns` = **1.226x**
+  - `class render n=800`: `1265629 ns` -> `1011888 ns` = **1.251x** (consistent; more members => bigger win)
+  - controls: `flow` 1.008x, `er` 1.004x — flat.
+- **Byte-identity:** all **235 fm-render-svg lib tests pass** incl. `golden_svg_test` (class-diagram
+  compartments — stereotypes, generics, visibility symbols — in corpus) + node parity.
+- **Ratio vs the original (mermaid.js):** dominance context; UML class diagrams (a common heavy type) now
+  render ~1.2-1.25x faster, scaling with member count.
+- **Staging:** helpers + fast-path block in the clean lib.rs sub-region (5890-6010); `git apply --cached`
+  filtered patch kept the peer WIP intact.
+
+  Agent: BlackThrush

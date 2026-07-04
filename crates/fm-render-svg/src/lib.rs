@@ -5890,6 +5890,53 @@ fn stable_accent_index(node_id: &str) -> usize {
 ///
 /// Adds separator lines and member text elements to the node group.
 #[allow(clippy::too_many_arguments)]
+/// Stream one class-compartment `<text>` byte-identical to the `TextBuilder` the slow path builds under
+/// embedded CSS with no label-style/classdef class: attrs `x, y, text-anchor, font-size, [extra], fill`
+/// then escaped content. `extra` is ` font-weight="bold"` (name), ` font-style="italic"` (stereotype), or
+/// `""` (members) — placed right after `font-size` exactly as `TextBuilder::build`'s call order does.
+fn write_class_text_into(
+    f: &mut String,
+    x: f32,
+    y: f32,
+    anchor: &str,
+    font_size: f32,
+    extra: &str,
+    fill: &str,
+    text: &str,
+) {
+    use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
+    f.push_str("<text x=\"");
+    let _ = AttributeValue::Number(x).write_value(f);
+    f.push_str("\" y=\"");
+    let _ = AttributeValue::Number(y).write_value(f);
+    f.push_str("\" text-anchor=\"");
+    f.push_str(anchor);
+    f.push_str("\" font-size=\"");
+    let _ = AttributeValue::Number(font_size).write_value(f);
+    f.push('"');
+    f.push_str(extra);
+    f.push_str(" fill=\"");
+    let _ = write_escaped_attr(f, fill);
+    f.push_str("\">");
+    let _ = write_escaped_text(f, text);
+    f.push_str("</text>");
+}
+
+/// Stream a class-compartment separator `<line>` byte-identical to the slow path's `Element::Line` under
+/// embedded CSS (stroke is CSS-driven, so absent inline): `x1 y1 x2 y2 stroke-width="1"`.
+fn write_class_separator_into(f: &mut String, x1: f32, y: f32, x2: f32) {
+    use crate::attributes::AttributeValue;
+    f.push_str("<line x1=\"");
+    let _ = AttributeValue::Number(x1).write_value(f);
+    f.push_str("\" y1=\"");
+    let _ = AttributeValue::Number(y).write_value(f);
+    f.push_str("\" x2=\"");
+    let _ = AttributeValue::Number(x2).write_value(f);
+    f.push_str("\" y2=\"");
+    let _ = AttributeValue::Number(y).write_value(f);
+    f.push_str("\" stroke-width=\"1\"/>");
+}
+
 fn render_class_compartments(
     mut group: Element,
     node: &fm_core::IrNode,
@@ -5908,6 +5955,114 @@ fn render_class_compartments(
         Some(m) => m,
         None => return group,
     };
+
+    // Streaming fast path: no per-label style, no classdef class, embedded CSS -> the whole compartment
+    // stack (stereotype + name + separators + member rows) is a fixed set of `<text>`/`<line>` bytes with
+    // no per-element class/style, so stream it into ONE raw fragment instead of ~5+ `Element`s per class
+    // node. Byte-identical to the Element path below (same attrs/order/positions/cursor advance); every
+    // other case (label style, classdef, non-embedded CSS) falls through.
+    if label_style.is_none() && !emit_classdef_classes && config.embed_theme_css {
+        let line_h = font_size * config.line_height;
+        let text_x = x + 8.0;
+        let mut cursor_y = y + line_h;
+        let fill = colors.text.as_str();
+        let class_name = node
+            .label
+            .and_then(|lid| ir.labels.get(lid.0))
+            .map(|l| l.text.as_str())
+            .unwrap_or(&node.id);
+        let mut f = String::new();
+        if let Some(stereotype) = &meta.stereotype {
+            let stereo_text = match stereotype {
+                fm_core::ClassStereotype::Interface => "<<interface>>",
+                fm_core::ClassStereotype::Abstract => "<<abstract>>",
+                fm_core::ClassStereotype::Enum => "<<enumeration>>",
+                fm_core::ClassStereotype::Service => "<<service>>",
+                fm_core::ClassStereotype::Custom(s) => s.as_str(),
+            };
+            write_class_text_into(
+                &mut f,
+                x + w / 2.0,
+                cursor_y,
+                "middle",
+                font_size * 0.85,
+                " font-style=\"italic\"",
+                fill,
+                stereo_text,
+            );
+            cursor_y += line_h;
+        }
+        // No-generics name is written directly (the slow path's `class_name.to_string()` copy is avoided).
+        if meta.generics.is_empty() {
+            write_class_text_into(
+                &mut f,
+                x + w / 2.0,
+                cursor_y,
+                "middle",
+                font_size,
+                " font-weight=\"bold\"",
+                fill,
+                class_name,
+            );
+        } else {
+            let display_name = format!("{class_name}<{}>", meta.generics.join(", "));
+            write_class_text_into(
+                &mut f,
+                x + w / 2.0,
+                cursor_y,
+                "middle",
+                font_size,
+                " font-weight=\"bold\"",
+                fill,
+                &display_name,
+            );
+        }
+        cursor_y += line_h * 0.5;
+        write_class_separator_into(&mut f, x, cursor_y, x + w);
+        cursor_y += line_h * 0.3;
+        let member_font_size = font_size * 0.9;
+        for attr in &meta.attributes {
+            cursor_y += member_font_size * config.line_height * 0.9;
+            if cursor_y > y + h - line_h * 0.5 {
+                break;
+            }
+            let vis = visibility_symbol(attr.visibility);
+            let text = if let Some(ref ret) = attr.return_type {
+                format!("{vis}{}: {ret}", attr.name)
+            } else {
+                format!("{vis}{}", attr.name)
+            };
+            write_class_text_into(&mut f, text_x, cursor_y, "start", member_font_size, "", fill, &text);
+        }
+        if !meta.attributes.is_empty() && !meta.methods.is_empty() {
+            cursor_y += line_h * 0.3;
+            write_class_separator_into(&mut f, x, cursor_y, x + w);
+            cursor_y += line_h * 0.3;
+        }
+        for method in &meta.methods {
+            cursor_y += member_font_size * config.line_height * 0.9;
+            if cursor_y > y + h - line_h * 0.5 {
+                break;
+            }
+            let vis = visibility_symbol(method.visibility);
+            let suffix = if method.is_abstract {
+                "*"
+            } else if method.is_static {
+                "$"
+            } else {
+                ""
+            };
+            let ret = method
+                .return_type
+                .as_deref()
+                .map(|t| format!(": {t}"))
+                .unwrap_or_default();
+            let text = format!("{vis}{}{suffix}{ret}", method.name);
+            write_class_text_into(&mut f, text_x, cursor_y, "start", member_font_size, "", fill, &text);
+        }
+        group = group.child(Element::raw_svg(f));
+        return group;
+    }
 
     let apply_label_style = |mut elem: Element| {
         if let Some(style) = label_style {
