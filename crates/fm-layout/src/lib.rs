@@ -11524,7 +11524,42 @@ impl ObstacleSpatialIndex {
     }
 
     fn new(obstacles: &[LayoutRect]) -> Option<Self> {
-        let inv = 1.0 / Self::CELL_SIZE;
+        // Adaptive cell size. A fixed 128px cell makes the grid's cell count scale with the
+        // layout's WORLD area, so a tall+wide spread-out layout (e.g. a large gantt: ~26k×100k px)
+        // blows past `MAX_CELLS_PER_OBSTACLE` and returns `None` — disabling the index and forcing
+        // the O(N) per-edge linear obstacle scan → O(N²) routing (measured: `find_obstacle_nudge_x`
+        // 72% of a 2000-task gantt layout, ~O(N²) scaling). Instead, size cells so the grid holds
+        // ~one obstacle per cell regardless of aspect ratio: `cell = max(128, sqrt(area / count))`.
+        // DENSE layouts keep exactly 128px (the `max` floor → bit-identical to before); only
+        // spread-out layouts coarsen. Coarser cells return a SUPERSET of candidates that the exact
+        // CGA test filters, so the routing result is byte-identical (same property that makes the
+        // linear-scan fallback byte-identical) — only far faster (index instead of full scan).
+        let mut wmin_x = f32::INFINITY;
+        let mut wmax_x = f32::NEG_INFINITY;
+        let mut wmin_y = f32::INFINITY;
+        let mut wmax_y = f32::NEG_INFINITY;
+        let mut finite = 0usize;
+        for rect in obstacles {
+            let lo_x = rect.x.min(rect.x + rect.width);
+            let hi_x = rect.x.max(rect.x + rect.width);
+            let lo_y = rect.y.min(rect.y + rect.height);
+            let hi_y = rect.y.max(rect.y + rect.height);
+            if lo_x.is_finite() && hi_x.is_finite() && lo_y.is_finite() && hi_y.is_finite() {
+                wmin_x = wmin_x.min(lo_x);
+                wmax_x = wmax_x.max(hi_x);
+                wmin_y = wmin_y.min(lo_y);
+                wmax_y = wmax_y.max(hi_y);
+                finite += 1;
+            }
+        }
+        if finite == 0 {
+            return None; // no finite obstacles -> nothing to index
+        }
+        let span_x = (wmax_x - wmin_x).max(1.0);
+        let span_y = (wmax_y - wmin_y).max(1.0);
+        let target_cells = obstacles.len().max(1) as f32;
+        let cell_size = (span_x * span_y / target_cells).sqrt().max(Self::CELL_SIZE);
+        let inv = 1.0 / cell_size;
         let mut min_cx = i32::MAX;
         let mut min_cy = i32::MAX;
         let mut max_cx = i32::MIN;
