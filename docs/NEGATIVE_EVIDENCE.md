@@ -8416,3 +8416,43 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   landed.
 
   Agent: BlackThrush
+
+<!-- blackthrush-styled-flowchart-skip-doomed-chumsky-landed -->
+### LANDED: skip the always-failing chumsky parse for `:::`-suffixed flowchart nodes (styled parse 1.43-1.77x) (2026-07-04)
+- **Lever:** `fm-parser::mermaid_parser::parse_flowchart_statement_asts`. A flowchart node carrying an
+  inline `:::className` class suffix (`N0[Node 0]:::foo:::bar`) has **no rule** in the chumsky
+  `flow_statement_parser` grammar — the `node` alternative requires `end()` immediately after the shape,
+  so the trailing `:::` makes the entire combinator parse fail. The failed parse (~1.1 µs/node) was pure
+  waste: the statement then fell through to the manual `parse_node_token_with_config`, which strips the
+  `:::` suffix. Added a guard that skips the doomed chumsky attempt for exactly the statements where it
+  provably fails: `statement.contains(":::")` AND not a `style `/`linkStyle `/`classDef ` directive (those
+  still parse via `skip_directive`) AND `find_operator(..).is_none()` (edges like `A -->|x:::y| B` or
+  `A:::x --> B` keep normal edge handling).
+- **Why styled flowcharts:** fresh HEAD parse profile (profharness, local timing, min-ns) ranks the
+  triple-class `styled3` shape the **heaviest parse of all diagram types** (~1700 ns/node), ahead of even
+  `class` (~1300 ns/node). The 0→1 inline class jump is +1137 ns/node (entering the doomed chumsky path);
+  each further class is only +145 ns — i.e. the cost is entering chumsky, not per-class work. `:::className`
+  node styling is a common, real mermaid feature, so this is a realistic hot path, not just a synthetic.
+- **Measurement:** same-machine (local), interleaved OLD-vs-NEW `profharness <shape> 400 1000 parse`,
+  best-of-5 min-ns. OLD = HEAD after the class-clone fix (`profharness_HEAD`, md5 `9711d5a7…`),
+  NEW md5 `86460848…`. Build via rch offload, `CARGO_TARGET_DIR=…/frankenmermaid-blackthrush`, release
+  (opt=3 fm-parser, fat-LTO).
+  - `styled  n=400` (1 class/node): `559781 ns` -> `316420 ns` = **1.769x** (43% faster)
+  - `styled3 n=400` (3 classes/node): `682103 ns` -> `475672 ns` = **1.434x** (30% faster)
+  - controls (unchanged code paths): `flow` 1.02x, `wide` 1.015x, `class` 0.993x — all within run-to-run
+    noise, no regression (the added `:::` scan is one cheap SIMD `contains` on the non-styled hot path).
+- **Byte-identity:** verified by direct probe (`probe_styled`) before/after — inline `:::` classes were
+  and remain **silently dropped** on flowchart nodes (`node.classes==[]`, no warnings; only the `class X y`
+  directive attaches classes), and directive/edge-then-class cases still attach `foo` identically. The
+  guard removes only a computation whose result (a chumsky parse error) was already discarded, so IR
+  output is unchanged. All **408 `fm-parser` lib tests pass** (incl. the chumsky-vs-fast-path parity test).
+- **Ratio vs the original (mermaid.js):** dominance context, not a fresh browser rerun (standing
+  comparator `scripts/mermaid_headtohead_cc.mjs`, Mermaid.js 11.15.0 via Chromium; parse already dominates
+  ~70-100x per `project_mermaidjs_headless_benchmark`). Styled flowcharts were the least-dominant parse
+  frontier; this widens their margin ~1.4-1.8x. NOTE (separate, out of scope here): frankenmermaid
+  *silently drops* inline `:::` node classes vs mermaid.js, which applies them — a latent conformance gap,
+  not touched by this byte-identical perf change; flagged for a future behavior fix.
+- **Landable rule:** byte-identical + strictly-less-work (skips a provably-failing parse), same rule as
+  the class-clone removal (`bc58db6`) landed under.
+
+  Agent: BlackThrush
