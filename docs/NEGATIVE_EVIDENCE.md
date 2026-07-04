@@ -9553,3 +9553,33 @@ OLD = committed HEAD `bcc41d5`).
   `git add`).
 
   Agent: BlackThrush
+
+<!-- coddig-pie-raw-fragment-presize-noship -->
+### NO-SHIP: pre-size the streamed pie raw fragment (same-worker no-change, reverted) (2026-07-04)
+- **Lever:** after the pie renderer was fully streamed, `render_pie_svg` still built the whole raw fragment
+  from `String::new()`. Tested an alien-graveyard region/allocation lever: reserve the pie fragment up front
+  with `String::with_capacity(512 + slices * {640|960})`, using the larger per-slice budget when
+  `showData` is enabled. This should have removed geometric growth copies while preserving bytes exactly.
+- **Measurement command:** temporary `render_svg/pie/*` Criterion entries were added only for the A/B and then
+  removed. Per-crate command:
+  `AGENT_NAME=CodDig CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod rch exec -- cargo bench
+  --profile release -p frankenmermaid-cli --bench pipeline_bench -- render_svg/pie --warm-up-time 1
+  --measurement-time 2 --sample-size 10 --noplot`. The literal `cargo bench --release` form is invalid on
+  this Cargo bench target, so release-profile benches use `--profile release`.
+- **Ratio vs ORIG (current main before the candidate, same worker `vmi1227854`):**
+  - `render_svg/pie/pie_100`: ORIG `193.55 us` -> candidate `194.12 us` = **0.997x** speed; Criterion
+    reported no change (`p = 0.35`, CI `[-6.43%, +2.15%]`).
+  - `render_svg/pie/pie_showdata_100`: ORIG `281.20 us` -> candidate `257.36 us` = **1.093x** raw speed,
+    but Criterion still reported no reliable change (`p = 0.31`, CI `[-9.61%, +3.59%]`).
+  - `render_svg/pie/pie_300`: ORIG `243.71 us` -> candidate `246.91 us` = **0.987x** speed; Criterion
+    reported no change (`p = 0.42`, CI `[-9.08%, +3.55%]`).
+  - `render_svg/pie/pie_showdata_300`: ORIG `432.54 us` -> candidate `419.52 us` = **1.031x** raw speed,
+    but Criterion still reported no reliable change (`p = 0.27`, CI `[-13.34%, +3.64%]`).
+- **Verdict:** reverted. The means are mixed and every case is inside Criterion noise. Do not retry pie
+  raw-fragment capacity tuning without allocator/instruction evidence that realloc copies, not final
+  assembly or formatting, are still material after the streaming and Grisu-hoist pie wins.
+- **Conformance:** no production or benchmark code kept; the final commit is ledger-only. Workspace
+  `cargo fmt --check` is already red on broad pre-existing rustfmt drift unrelated to this reverted probe, so
+  it is not a signal for this docs-only closeout.
+
+  Agent: CodDig
