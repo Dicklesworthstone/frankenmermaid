@@ -5023,6 +5023,25 @@ fn write_special_fill_style_into(f: &mut String, special_fill: Option<&str>) {
     }
 }
 
+/// Stream a closed polygon `<path>` — the common streaming fast path's shape element for the single-path
+/// polygon shapes (Diamond/Hexagon/Trapezoid/InvTrapezoid/Parallelogram/Asymmetric). Byte-identical to
+/// `render_node`'s `PathBuilder::move_to(p0).line_to(p1)…close().build()`: commands join with single spaces
+/// (`M{x0} {y0} L{x1} {y1} … Z`), and coords use `AttributeValue::Number::write_value`, which is bit-for-bit
+/// identical to `PathBuilder`'s `FmtNum` (both: `n as i32` round-trip → `write_int_into` else `write_fixed2`).
+fn write_polygon_shape_into(f: &mut String, points: &[(f32, f32)], special_fill: Option<&str>) {
+    use crate::attributes::AttributeValue;
+    f.push_str("<path d=\"");
+    for (i, &(px, py)) in points.iter().enumerate() {
+        f.push_str(if i == 0 { "M" } else { " L" });
+        let _ = AttributeValue::Number(px).write_value(f);
+        f.push(' ');
+        let _ = AttributeValue::Number(py).write_value(f);
+    }
+    f.push_str(" Z\" fill=\"url(#fm-node-gradient)\"");
+    write_special_fill_style_into(f, special_fill);
+    f.push_str("/>");
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_common_node_fragment(
     node_id: &str,
@@ -5130,32 +5149,67 @@ fn write_common_node_fragment_into(
             write_special_fill_style_into(f, special_fill);
             f.push_str("/>");
         }
+        // Single-`<path>` polygon shapes: each reproduces `render_node`'s slow-path `PathBuilder` point
+        // sequence exactly (see `write_polygon_shape_into`). `inset`/`flag` = `w * 0.15` as in the slow path.
         fm_core::NodeShape::Diamond => {
-            // `render_node`'s slow path builds this via `PathBuilder::move_to(cx, y).line_to(x+w, cy)
-            // .line_to(cx, y+h).line_to(x, cy).close()`, whose commands join with single spaces →
-            // `M{cx} {y} L{x+w} {cy} L{cx} {y+h} L{x} {cy} Z`. Coords via `AttributeValue::Number`, which
-            // is byte-identical to `PathBuilder`'s `FmtNum` (same whole→int / else→fixed2 branch).
             let cx = x + w / 2.0;
             let cy = y + h / 2.0;
-            f.push_str("<path d=\"M");
-            let _ = AttributeValue::Number(cx).write_value(f);
-            f.push(' ');
-            let _ = AttributeValue::Number(y).write_value(f);
-            f.push_str(" L");
-            let _ = AttributeValue::Number(x + w).write_value(f);
-            f.push(' ');
-            let _ = AttributeValue::Number(cy).write_value(f);
-            f.push_str(" L");
-            let _ = AttributeValue::Number(cx).write_value(f);
-            f.push(' ');
-            let _ = AttributeValue::Number(y + h).write_value(f);
-            f.push_str(" L");
-            let _ = AttributeValue::Number(x).write_value(f);
-            f.push(' ');
-            let _ = AttributeValue::Number(cy).write_value(f);
-            f.push_str(" Z\" fill=\"url(#fm-node-gradient)\"");
-            write_special_fill_style_into(f, special_fill);
-            f.push_str("/>");
+            write_polygon_shape_into(f, &[(cx, y), (x + w, cy), (cx, y + h), (x, cy)], special_fill);
+        }
+        fm_core::NodeShape::Hexagon => {
+            let cy = y + h / 2.0;
+            let inset = w * 0.15;
+            write_polygon_shape_into(
+                f,
+                &[
+                    (x + inset, y),
+                    (x + w - inset, y),
+                    (x + w, cy),
+                    (x + w - inset, y + h),
+                    (x + inset, y + h),
+                    (x, cy),
+                ],
+                special_fill,
+            );
+        }
+        fm_core::NodeShape::Trapezoid => {
+            let inset = w * 0.15;
+            write_polygon_shape_into(
+                f,
+                &[(x + inset, y), (x + w - inset, y), (x + w, y + h), (x, y + h)],
+                special_fill,
+            );
+        }
+        fm_core::NodeShape::InvTrapezoid => {
+            let inset = w * 0.15;
+            write_polygon_shape_into(
+                f,
+                &[(x, y), (x + w, y), (x + w - inset, y + h), (x + inset, y + h)],
+                special_fill,
+            );
+        }
+        fm_core::NodeShape::Parallelogram => {
+            let inset = w * 0.15;
+            write_polygon_shape_into(
+                f,
+                &[(x + inset, y), (x + w, y), (x + w - inset, y + h), (x, y + h)],
+                special_fill,
+            );
+        }
+        fm_core::NodeShape::Asymmetric => {
+            let cy = y + h / 2.0;
+            let flag = w * 0.15;
+            write_polygon_shape_into(
+                f,
+                &[
+                    (x, y),
+                    (x + w - flag, y),
+                    (x + w, cy),
+                    (x + w - flag, y + h),
+                    (x, y + h),
+                ],
+                special_fill,
+            );
         }
         _ => {
             // Rect / Rounded / Stadium — all rect elements, differing only in `rx` (set by the caller).
@@ -5200,6 +5254,11 @@ fn write_common_node_fragment_into(
         fm_core::NodeShape::Rounded => ", rounded rectangle</title></g>",
         fm_core::NodeShape::Stadium => ", stadium shape</title></g>",
         fm_core::NodeShape::Diamond => ", diamond</title></g>",
+        fm_core::NodeShape::Hexagon => ", hexagon</title></g>",
+        fm_core::NodeShape::Trapezoid => ", trapezoid</title></g>",
+        fm_core::NodeShape::InvTrapezoid => ", inverted trapezoid</title></g>",
+        fm_core::NodeShape::Parallelogram => ", parallelogram</title></g>",
+        fm_core::NodeShape::Asymmetric => ", flag shape</title></g>",
         _ => ", circle</title></g>",
     });
 }
@@ -5681,6 +5740,11 @@ fn render_node(
                 | NodeShape::Rounded
                 | NodeShape::Stadium
                 | NodeShape::Diamond
+                | NodeShape::Hexagon
+                | NodeShape::Trapezoid
+                | NodeShape::InvTrapezoid
+                | NodeShape::Parallelogram
+                | NodeShape::Asymmetric
         )
         && config.embed_theme_css
         && config.node_gradients

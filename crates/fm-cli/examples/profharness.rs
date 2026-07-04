@@ -271,6 +271,51 @@ fn gen_input(shape: &str, n: usize) -> String {
                 l.push(format!("  N{i}-->N{}", i + 1));
             }
         }
+        "hexagon" => {
+            l.push("flowchart TB".into());
+            for i in 0..n {
+                l.push(format!("  N{i}{{{{Hex {i}}}}}"));
+            }
+            for i in 0..n.saturating_sub(1) {
+                l.push(format!("  N{i}-->N{}", i + 1));
+            }
+        }
+        "parallel" => {
+            l.push("flowchart TB".into());
+            for i in 0..n {
+                l.push(format!("  N{i}[/Para {i}/]"));
+            }
+            for i in 0..n.saturating_sub(1) {
+                l.push(format!("  N{i}-->N{}", i + 1));
+            }
+        }
+        "trapez" => {
+            l.push("flowchart TB".into());
+            for i in 0..n {
+                l.push(format!("  N{i}[/Trap {i}\\]"));
+            }
+            for i in 0..n.saturating_sub(1) {
+                l.push(format!("  N{i}-->N{}", i + 1));
+            }
+        }
+        "invtrap" => {
+            l.push("flowchart TB".into());
+            for i in 0..n {
+                l.push(format!("  N{i}[\\Inv {i}/]"));
+            }
+            for i in 0..n.saturating_sub(1) {
+                l.push(format!("  N{i}-->N{}", i + 1));
+            }
+        }
+        "asym" => {
+            l.push("flowchart TB".into());
+            for i in 0..n {
+                l.push(format!("  N{i}>Flag {i}]"));
+            }
+            for i in 0..n.saturating_sub(1) {
+                l.push(format!("  N{i}-->N{}", i + 1));
+            }
+        }
         "flowstad" => {
             l.push("flowchart LR".into());
             for i in 0..n {
