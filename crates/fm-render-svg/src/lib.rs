@@ -1465,17 +1465,28 @@ fn scan_node_class_keywords(class: &str) -> NodeClassKeywords {
     f
 }
 
+/// Write the CSS-sanitized form of `value` straight into `buf` — the alloc-free core of
+/// [`sanitize_css_token`]. Used by the node-class fast paths (`simple_node_user_class_suffix` etc.) which
+/// only need to append the token to a suffix buffer, so they skip the throwaway per-class `String`
+/// (`sanitize_css_token` was ~4.5-4.9% of classed-node render — mindmap/git/styled — almost entirely the
+/// `collect()` allocation). Byte-identical: same per-char mapping in the same order.
+fn write_sanitized_css_token_into(buf: &mut String, value: &str) {
+    for ch in value.chars() {
+        let mapped = if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            ch.to_ascii_lowercase()
+        } else {
+            '-'
+        };
+        buf.push(mapped);
+    }
+}
+
 fn sanitize_css_token(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect()
+    // Each source char maps to exactly one output char whose byte length never exceeds the source's
+    // (ASCII lowercase / a 1-byte `-`), so `value.len()` is a safe no-realloc capacity.
+    let mut token = String::with_capacity(value.len());
+    write_sanitized_css_token_into(&mut token, value);
+    token
 }
 
 pub(crate) fn sanitize_svg_paint(value: &str) -> Option<String> {
@@ -4634,10 +4645,11 @@ fn simple_node_user_class_suffix(node: &fm_core::IrNode) -> Option<String> {
         if class.eq_ignore_ascii_case("block-beta") {
             block_beta = true;
         }
-        let sanitized = sanitize_css_token(class);
-        if !sanitized.is_empty() {
+        // A non-empty class always sanitizes to a non-empty token (every char maps to one char), so gate
+        // on the raw class and write the token straight into `suffix` — no throwaway per-class `String`.
+        if !class.is_empty() {
             suffix.push_str(" fm-node-user-");
-            suffix.push_str(&sanitized);
+            write_sanitized_css_token_into(&mut suffix, class);
         }
     }
     // The slow path appends `fm-node-block-beta` AFTER the per-class `fm-node-user-…` loop (see the
@@ -4683,10 +4695,9 @@ fn simple_class_node_user_suffix(node: &fm_core::IrNode) -> Option<String> {
             | "journey-score-5" => return None,
             _ => {}
         }
-        let sanitized = sanitize_css_token(class);
-        if !sanitized.is_empty() {
+        if !class.is_empty() {
             suffix.push_str(" fm-node-user-");
-            suffix.push_str(&sanitized);
+            write_sanitized_css_token_into(&mut suffix, class);
         }
     }
     Some(suffix)

@@ -9407,3 +9407,34 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   unchanged); rebuilt clean after removing the artifact — sym build + test compiled the change correctly.
 
   Agent: BlackThrush
+<!-- blackthrush-sanitize-css-token-write-into-landed -->
+### LANDED: write sanitized CSS tokens straight into the suffix buffer (git render 1.06x, mindmap 1.03x) (2026-07-04)
+- **Lever:** profiled the niche `mindmap`/`git` render (unprofiled outliers). Both showed **`sanitize_css_token`
+  ~4.5-4.9% self-time** — the node-class fast paths (`simple_node_user_class_suffix` /
+  `simple_class_node_user_suffix`) called it per class and immediately `push_str`'d the result into a suffix
+  `String`, so each classed node paid a throwaway `.chars().map().collect()` allocation. Added
+  `write_sanitized_css_token_into(buf, class)` (the alloc-free core) and had the two fast paths write the
+  token straight into `suffix` (gating on `!class.is_empty()` — a non-empty class always sanitizes non-empty).
+  `sanitize_css_token` now calls the core with a `value.len()` presize.
+- **Byte-identity:** same per-char mapping (`ascii_alphanumeric`/`-`/`_` → `to_ascii_lowercase`, else `-`) in
+  the same order, appended to the same buffer. **fm-render-svg lib tests pass** (exit 0, incl.
+  `svg_golden_snapshots_are_stable`); render output length exact-matches OLD across mindmap/git/styled/class/
+  block (n=300).
+- **Measurement:** 2-build same-machine A/B (OLD = committed HEAD `6a088b4`; NEW differs only by this change).
+  Instructions (`perf stat -e instructions:u`, load-independent):
+  - `git render n=400` **1.064x** fewer (8.969B->8.433B); wall-clock best-of-12 **1.044x** (181504->173890 ns).
+  - `mindmap render n=400` **1.029x** fewer (9.574B->9.309B). (Its wall-clock read 0.988 at load 25 — noise on
+    a ~190us render; the deterministic instruction count is the truth, and this is monotonic-less-work so it
+    cannot regress.)
+  - Controls **~1.0005**: `flowchart` (classless → no sanitize) and `styled` (its `:::class` nodes take
+    `render_node`'s *slow* path at ~5358, which this change doesn't touch) — flat.
+- **Ratio vs the original (mermaid.js):** dominance context (full-pipeline 63-124x); classed-node rendering
+  (git branch classes, mindmap depth classes) drops a per-node heap allocation.
+- **LEVER (reusable):** grep `let x = sanitize_something(..); buf.push_str(&x)` (or any
+  `f(..) -> String` immediately consumed by a buffer append) → add a `write_..._into(buf, ..)` core and skip
+  the throwaway `String`. `sanitize_css_token`'s slow-path caller (`render_node` class loop ~5358, via
+  `class_prefixed`) is the remaining site — Element-API-gated, left for a structural pass.
+- **Staging:** 3 hunks (the `sanitize_css_token` refactor + the two fast-path callers); `git apply --cached`
+  filtered patch kept the 18 peer WIP hunks intact.
+
+  Agent: BlackThrush
