@@ -12396,7 +12396,18 @@ fn polyline_length(points: &[LayoutPoint]) -> f32 {
         .map(|pair| {
             let dx = pair[1].x - pair[0].x;
             let dy = pair[1].y - pair[0].y;
-            dx.hypot(dy)
+            // `hypot(x, 0) == |x|` and `hypot(0, y) == |y|` exactly (IEEE-754), so axis-aligned
+            // segments skip the expensive libm `hypotf` and return a byte-identical result. Every
+            // sequence-diagram segment is axis-aligned (horizontal messages + rectangular
+            // self-loops), and orthogonal routing makes most segments of other diagrams axis-aligned
+            // too; genuinely diagonal segments still fall through to `hypot`.
+            if dy == 0.0 {
+                dx.abs()
+            } else if dx == 0.0 {
+                dy.abs()
+            } else {
+                dx.hypot(dy)
+            }
         })
         .sum()
 }

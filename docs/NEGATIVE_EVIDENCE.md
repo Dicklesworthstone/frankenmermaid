@@ -9891,3 +9891,39 @@ OLD = committed HEAD `bcc41d5`).
   no peer WIP there — direct `git add`).
 
   Agent: BlackThrush
+<!-- blackthrush-polyline-length-axis-aligned-hypot-fastpath -->
+### LANDED: axis-aligned fast-path in polyline_length skips libm hypotf (layout 1.005-1.009x, cross-cutting) (2026-07-04)
+- **Lever:** profiling `seq` layout (stripped sym binary — only libm symbols resolve; rch strips despite
+  `CARGO_PROFILE_RELEASE_STRIP=false`, so profiling is symbol-blind but `perf stat -e instructions:u` A/B is
+  unaffected) showed **`hypotf@@GLIBC` at 3.15% self-time** — the single largest resolved symbol.
+  `polyline_length` (the only caller of `compute_edge_length_metrics`, run once per layout to compute the
+  `total_edge_length`/`reversed_edge_total_length` stats) did `dx.hypot(dy)` for **every** edge segment.
+  `hypot(x, 0) == |x|` and `hypot(0, y) == |y|` EXACTLY per IEEE-754, so axis-aligned segments can skip the
+  libm call: `if dy==0.0 {dx.abs()} else if dx==0.0 {dy.abs()} else {dx.hypot(dy)}`.
+- **Byte-identity:** IEEE-guaranteed — for finite coords `dx.abs()` equals `dx.hypot(0.0)` to the bit (incl.
+  ±0.0 → +0.0), so the per-segment length and the summed total are unchanged; it only affects a STAT anyway.
+  **fm-layout lib tests 430/430 pass**; full-pipeline output length identical (seq/flowchart/er/state n=300).
+- **Measurement:** 2-build same-machine A/B (OLD = HEAD 621721b; NEW = +this change), `perf stat -e
+  instructions:u` (load-independent, reproduced to 4 decimals across two runs). Layout instructions:
+  **gantt 1.0089** (356.7M→353.5M), **seq 1.0063** (380.0M→377.7M), **flowchart 1.0059**, **er/state/subg
+  1.0054**, **wide 1.0051-1.0052**. Uniform win across 7 diverse shapes, **no shape regresses** — even
+  flowchart/wide (most bend potential) win, confirming orthogonal routing makes most segments axis-aligned in
+  every diagram type. A genuinely diagonal segment costs 2 extra comparisons then the same `hypot`; the
+  empirical uniform gain proves axis-aligned dominates.
+- **Ratio vs the original (mermaid.js):** dominance context; the edge-length stat now avoids libm on
+  axis-aligned segments across all layouts.
+- **LEVER (proven again, cf. `bbfa640` truncf/fract removal, pie Grisu hoist):** an expensive libm call
+  (`hypot`/`hypotf`) applied uniformly where inputs are frequently axis-aligned (one delta == 0) → branch to
+  `abs()`; IEEE spec makes it byte-identical. Small (~0.6%) but cross-cutting, byte-identical, and removes a
+  real libm call — lands under the same monotonic-less-work bar as the sanitize byte-scan (0.25-0.81%) and
+  resolved_edges presize (sub-3%).
+- **Note:** the niche-type SCALING frontier is closed — a parse+layout scaling sweep (instr n=400/n=100) over
+  all 12 niche types (git/block/sankey/mindmap/timeline/kanban/journey/xychart/quadrant/requirement/seq/gantt)
+  shows every parse **linear** (ratio 3.5-3.9) and every layout linear/no-O(N²); render is flat (top real fn
+  ~1.5%, memmove structural double-copy). Remaining layout wins are constant-factor, not algorithmic. The
+  earlier apparent seq "O(N²)" (ratio 13x n100→n400) was an artifact of an anomalously-low n=100 point
+  (size-dependent guardrail algorithm switch), not real super-linear growth.
+- **Staging:** single self-contained change in `crates/fm-layout/src/lib.rs` (`polyline_length`; no peer WIP
+  there — direct `git add`).
+
+  Agent: BlackThrush
