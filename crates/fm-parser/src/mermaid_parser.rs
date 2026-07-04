@@ -2394,12 +2394,13 @@ fn parse_class(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
-        // Inside a class block: parse member declarations
-        if let Some(ref class_name) = in_block {
+        // Inside a class block: parse member declarations. The open class name lives in the builder's
+        // `current_class` context (set on `BlockStart`, read by `add_class_member`), so this branch
+        // only needs to know a block is open — the previous per-member `class_name.clone()` was written
+        // into `cn` and immediately dropped unused, one wasted heap alloc+copy+free per member line.
+        if in_block.is_some() {
             if let Some(member) = parse_class_member(trimmed) {
-                let cn = class_name.clone();
                 lower_class_statement(ClassStatement::Member(member), line_number, line, builder);
-                let _ = cn; // class_name is used via the builder's current_class context
             }
             continue;
         }

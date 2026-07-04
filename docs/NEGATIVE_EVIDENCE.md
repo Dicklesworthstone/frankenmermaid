@@ -8355,3 +8355,38 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   remains larger structural work, not another bounded state/accent CSS scan variant.
 
   Agent: TanSparrow
+
+<!-- blackthrush-class-parse-dead-member-clone-landed -->
+### LANDED: removed dead per-member `class_name.clone()` in the class parser (class parse -3.7..4.5%) (2026-07-04)
+- **Lever:** `fm-parser::mermaid_parser::parse_class`, inside the open-class-block branch, executed
+  `let cn = class_name.clone(); lower_class_statement(Member(..), ..); let _ = cn;` on **every member
+  line** — one heap alloc + memcpy + free per attribute/method, with the clone written into `cn` and
+  immediately dropped unused. `add_class_member` reads the open class from the builder's
+  `current_class` context (set on `BlockStart`, cleared on `End`), never from a passed-in name, so the
+  clone was provably dead. Replaced `if let Some(ref class_name) = in_block` with `if in_block.is_some()`
+  and deleted the `cn` clone + its `let _ =` sink.
+- **Why class:** fresh HEAD profile (profharness, local timing) ranks `class` the single **heaviest**
+  diagram type — full-pipeline median at n=300 ≈ 3.30 ms vs the next shape (er/mindmap/block) ≈ 1.9 ms.
+  Class parse ≈ 0.93 ms is its 2nd-biggest phase after render. Both class parse and render are cleanly
+  **linear** (~1300 ns/node parse, ~1750 ns/node render; the earlier "3× render jump" at n=400→800 was
+  median jitter — min-ns is flat), so this is a per-node constant-factor removal, not an algorithmic fix.
+- **Measurement:** same-machine (local), interleaved OLD-vs-NEW `profharness class <n> 1500 parse`,
+  best-of-5 min-ns (min is noise-robust). Binaries differ by md5 (OLD `ff5fd84a…`, NEW `9711d5a7…`).
+  Build via rch offload, `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-blackthrush`,
+  release (opt=3 for fm-parser, fat-LTO).
+  - `class n=300`: `389437 ns` -> `375511 ns` = **1.037x** (3.7% faster)
+  - `class n=500`: `658628 ns` -> `630254 ns` = **1.045x** (4.5% faster)
+- **Byte-identity:** guaranteed by construction — the removed binding was never read (verified
+  `add_class_member` uses `self.current_class`); parse output is unchanged. Rebuilt binary parses and
+  renders normally.
+- **Ratio vs the original (mermaid.js):** dominance context, not a fresh browser rerun (standing
+  comparator `scripts/mermaid_headtohead_cc.mjs`, Mermaid.js 11.15.0 via Chromium). Parse already
+  dominates mermaid.js ~70-100x (see `project_mermaidjs_headless_benchmark`); this widens the class-parse
+  margin by the ~3.7-4.5% above. Class remains the least-dominant / heaviest frontier type; the render
+  half (compartment Element-tree, ~1750 ns/node) is the larger remaining structural lever but sits in
+  `fm-render-svg/src/lib.rs`, which has concurrent uncommitted peer WIP — left untouched.
+- **Landable rule:** byte-identical + strictly-monotonic-less-work (one fewer heap alloc per member
+  line), the same rule under which `intern` hash-once (4c0cd5e) and `resolved_edges` presize (e33c8f0)
+  landed.
+
+  Agent: BlackThrush
