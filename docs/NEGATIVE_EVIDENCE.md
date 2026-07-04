@@ -9438,3 +9438,34 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   filtered patch kept the 18 peer WIP hunks intact.
 
   Agent: BlackThrush
+<!-- blackthrush-seq-keyword-firstbyte-gate-landed -->
+### LANDED: first-byte gate to skip the sequence keyword chain for messages (seq parse 5.1% wall / 2.4% instr) (2026-07-04)
+- **Lever:** profiled the niche `seq` shape (unprofiled outlier). Parse was **18.5% `memcmp`**, of which
+  `parse_sequence` contributed **8.9%** — every message line (`P{a}->>P{b}: msg`, the dominant statement:
+  n messages vs sqrt(n) participants) ran the full ~18-check keyword chain in `parse_sequence_statement`
+  (`strip_prefix`/`==` for autonumber/note/activate/deactivate/end/loop/alt/opt/par/box/create/participant/
+  actor/…), and each `strip_prefix` invokes `memcmp` even on a first-byte mismatch. Every keyword is a
+  prefix match beginning with a lowercase letter, `Note` (`N`), or the case-insensitive `hide footbox`
+  (`h`/`H`), so added a guard: if the line's first byte is none of those (an uppercase participant name like
+  `P0`/`Alice`, a digit, `[`, `"`, …) it cannot match any keyword → go straight to the message parse.
+- **Byte-identity:** each skipped check compares from byte 0 and would return `None` on such a first byte;
+  the message parse is the existing fall-through; a lowercase/`N`/`H` first byte still runs the full chain
+  (conservative). **fm-parser + fm-render-svg lib tests pass** (exit 0); seq full-pipeline output length
+  exact-matches OLD (n=20..500).
+- **Measurement:** 2-build same-machine A/B (OLD = committed HEAD `e91eb82`; NEW differs only by this guard).
+  - `seq parse n=300` **1.024x** fewer instr (5.411B->5.283B), **1.051x wall-clock** best-of-12 (137220->130558 ns);
+    `n=500` **1.0245x** instr. The wall-clock beats the instruction ratio because the removed `memcmp` calls
+    carry call/cache time overhead beyond their instruction count.
+  - Control: `flowchart parse` **exactly 1.0000** instr (change is sequence-only) — confirms the seq win is
+    real signal and isolated.
+- **Ratio vs the original (mermaid.js):** dominance context (parse 70-100x); sequence message parsing skips
+  the keyword-dispatch chain.
+- **LEVER (reusable):** a long prefix-keyword dispatch chain where the COMMON statement isn't a keyword →
+  gate the whole chain behind a first-byte set (safe when every keyword's first byte is known and the
+  common case's first byte is outside it). `memcmp%` in a *parser* profile = strip_prefix/starts_with call
+  overhead. Same niche-shape lesson as [[project_find_operator_byte_scan]] /
+  [[project_sanitize_css_token_write_into]].
+- **Staging:** single-file change in `crates/fm-parser/src/mermaid_parser.rs` (no peer WIP there — direct
+  `git add`).
+
+  Agent: BlackThrush

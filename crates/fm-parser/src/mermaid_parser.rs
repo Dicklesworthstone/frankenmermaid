@@ -1668,6 +1668,20 @@ fn parse_sequence(input: &str, builder: &mut IrBuilder) {
 }
 
 fn parse_sequence_statement(line: &str) -> Option<SequenceStatement> {
+    // Fast reject: every keyword statement below begins with a lowercase ASCII letter, `Note` (`N`), or
+    // the case-insensitive `hide footbox` (`h`/`H`) — all its checks are prefix (`strip_prefix`/`==`)
+    // matches. A line whose first byte is anything else (an uppercase participant name like `Alice`/`P0`,
+    // a digit, `[`, `"`, …) cannot match any keyword, so skip the whole ~18-check keyword chain straight
+    // to the message parse (those keyword `strip_prefix`/`==` calls each invoke `memcmp` even on a
+    // first-byte mismatch — ~8.9% of sequence parse). Byte-identical: each skipped check compares from
+    // byte 0 and would return `None` on such a first byte, and the message parse is the existing
+    // fall-through. Conservative — a lowercase/`N`/`H` first byte still runs the full chain.
+    if let Some(&first) = line.as_bytes().first()
+        && !(first.is_ascii_lowercase() || first == b'N' || first == b'H')
+    {
+        return parse_sequence_message_ast(line).map(|data| SequenceStatement::Message(Box::new(data)));
+    }
+
     if let Some(autonumber) = parse_sequence_autonumber(line) {
         return Some(autonumber);
     }
