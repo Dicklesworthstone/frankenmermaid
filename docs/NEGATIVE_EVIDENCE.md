@@ -50,6 +50,31 @@
 
 ## Entries
 
+### Presize class/ER compartment children Vec - REVERTED (2026-07-04)
+- **Lever:** added `Element::reserve_children(n)` (fm-render-svg `element.rs`) and called it in
+  `render_class_compartments` with `meta.attributes.len() + meta.methods.len() + 4`, to avoid the
+  doubling reallocs from pushing one compartment row (a fat ~80-byte `Element`) at a time via
+  `group.child(...)` in the attribute/method loops.
+- **Hypothesis:** rich class/ER boxes push many children one-by-one, so presizing by the known
+  member count (same pattern as the KEPT layout edge-Vec presizes) should be strictly-less-work and
+  byte-identical.
+- **Baseline → After:** release, cpu-pinned min, synthetic rich classes (`classDiagram`, N classes ×
+  M members), full render. Byte-identical (rendered-SVG hashes match HEAD exactly). BUT:
+  - `N=40 M=20`: `136,228 ns` → `150,756 ns` (**+10.7%, 0.90×**)
+  - `N=80 M=20`: `215,198 ns` → `238,542 ns` (**+10.8%**)
+- **Original comparator:** not run vs Mermaid.js (a byte-identical *regression* disqualifies it
+  before any ratio matters).
+- **Verdict:** **regression.** Compartment rows are CLIPPED to the box height
+  (`if cursor_y > y + h - line_h*0.5 { break }`) — only ~15 rows render regardless of member count
+  (verified: `M=20` and `M=40` produce the identical SVG). So reserving by member count
+  OVER-allocates the children `Vec` (44–84 slots for ~15–17 actual pushes), and the larger up-front
+  allocation costs MORE than natural doubling growth to ~32. The push count on this path is small and
+  clip-bounded, so no member-count presize can help.
+- **Revert:** dropped from the working tree before commit (never landed); HEAD unchanged.
+- **Do-not-retry note:** do NOT presize class/ER compartment children by member count — height
+  clipping caps the real child count, so it only over-reserves. The presize lever needs a KNOWN,
+  UN-clipped count (as in the layout edge-Vec case); a clip-bounded loop is not a candidate.
+
 ### Sequence guardrail cost estimate (force Sequence layout, not Sugiyama) - REVERTED (2026-07-04)
 - **Lever:** split `LayoutAlgorithm::Sequence` out of the shared dedicated-cost arm in
   `fm-layout::estimate_layout_cost` and weight messages lightly (`time_ms = nodes*2 +
