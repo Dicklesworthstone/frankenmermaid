@@ -4045,6 +4045,39 @@
   the current line-count reserve before changing capacity.
 
   Agent: BlackThrush
+
+<!-- goldenmaple-polygon-shape-streaming-mixed-audit -->
+### MIXED EVIDENCE: polygon node streaming landed concurrently, but local A/B did not confirm the cross-worker RCH win (2026-07-04)
+- **Context:** while digging the diamond follow-up, `19585b2` landed the polygon-node streaming extension on
+  `main`/`master` (`Hexagon`, `Trapezoid`, `InvTrapezoid`, `Parallelogram`, `Asymmetric`) before this audit
+  could commit a ledger entry. I added the same temporary `polygon_shape_render/render/*` Criterion bench to
+  ORIG and candidate worktrees for measurement, then dropped that temporary bench harness from the tree.
+- **Mapped primitive:** alien-graveyard partial evaluation / multi-version specialization: specialize a
+  generic `Element` renderer into direct SVG fragment writes for known node-shape states, with slow `Element`
+  rendering as the baseline comparator and byte-identity as the proof obligation.
+- **Per-crate RCH command:** `AGENT_NAME=GoldenMaple CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod
+  rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench --
+  polygon_shape_render/render --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot`. The literal
+  `cargo bench --release` form is invalid for this Cargo bench target, so release-profile benches use
+  `--profile release`.
+- **RCH ratio vs ORIG (supporting only; different workers):** ORIG ran on `vmi1264463`, candidate on
+  `vmi1227854`, so these are directional rather than keep proof: `hexagon` `1.3301 ms -> 145.56 us`
+  (**9.14x**), `parallel` `308.43 us -> 123.95 us` (**2.49x**), `trapez` `408.54 us -> 115.41 us`
+  (**3.54x**), `invtrap` `532.20 us -> 123.31 us` (**4.32x**), `asym` `1.1266 ms -> 146.73 us`
+  (**7.68x**).
+- **Local same-machine ratio vs ORIG (stronger proof signal):** ORIG `55f4ff3` + temporary bench harness vs
+  candidate `19585b2` + same temporary bench harness, same `CARGO_TARGET_DIR`. Criterion reported no reliable
+  improvement for every candidate case: `hexagon` `472.46 us -> 458.35 us` (**1.031x**, no change),
+  `parallel` `126.69 us -> 122.38 us` (**1.035x**, no change), `trapez` `135.26 us -> 130.12 us`
+  (**1.040x**, no change), `invtrap` `120.44 us -> 141.31 us` (**0.852x**, no change / slower raw mean),
+  `asym` `463.33 us -> 545.67 us` (**0.849x**, no change / slower raw mean).
+- **Verdict:** do not use the cross-worker RCH deltas alone as proof for this broad shape extension. The code
+  was already on `main` by the time this audit finished, and its byte-identity test is valuable, but the local
+  timing evidence says this shape-family benchmark is at or below the short-run noise floor after the diamond
+  win. Future work should profile a real corpus where these non-diamond shapes dominate before extending the
+  streaming playbook further.
+
+  Agent: GoldenMaple
 <!-- tansparrow-block-beta-anchor-borrow-reject -->
 ### NO-SHIP: borrowed block-beta sort anchors regressed same-worker layout (2026-07-04)
 - **Lever:** replaced `block_beta_direct_items` sort anchors from cloned `(String, usize)` tuples to borrowed
