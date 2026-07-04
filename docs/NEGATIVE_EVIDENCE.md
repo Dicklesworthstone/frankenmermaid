@@ -8841,3 +8841,31 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   needed no edit.
 
   Agent: BlackThrush
+
+<!-- blackthrush-edge-streaming-all-simple-arrows-landed -->
+### LANDED: generalize whole-edge streaming to all no-dasharray/no-marker-start arrows (Circle/Cross render 2.65-2.72x) (2026-07-04)
+- **Lever:** extends `260bae9` (Arrow+Line streaming). `render_edge_into`'s fast path now streams EVERY
+  non-reversed arrow whose slow-path `<path>` shape is fully determined by `(stroke_width, style_class,
+  marker_end)` with NO dasharray and NO marker-start: Arrow, Line, OpenArrow, Circle, Cross,
+  HalfArrowTop/Bottom, StickArrowTop/Bottom, ThickArrow, ThickLine (11 types). Each tuple is read straight
+  off `render_edge`'s own `stroke_width`/`style_class`/`marker_end` matches + `describe_edge_labels`'s
+  per-arrow phrase. Dashed/reverse/double arrows (dasharray or marker-start), back-edges, labels, inline
+  styles, animations still take the `Element` slow path.
+- **Why it matters:** these arrows are real flowchart/relationship edges — `--o` (Circle), `--x` (Cross),
+  `==>` (ThickArrow), etc. — that each built a ~6-alloc Element tree per edge. Now they stream.
+- **Measurement:** clean 2-build same-machine A/B (OLD = committed HEAD `260bae9` lib = Arrow+Line only
+  `a4f148e9…`; NEW = 11-arrow `26fee39b…`; both profharness binaries carry added `flowo`/`flowx` shapes so
+  the input is identical). Interleaved `profharness <shape> <n> render`, best-of-8 min-ns.
+  - `flowo` (400 `--o` Circle edges) render n=400: `349834 ns` -> `131790 ns` = **2.654x**
+  - `flowx` (400 `--x` Cross edges) render n=400: `352929 ns` -> `129876 ns` = **2.717x**
+  - controls (Arrow/Line, already streamed in both): `flow` 1.035x, `mindmap` 1.016x — small layout noise
+    (OLD lacks the cosmetic uncommitted peer WIP), ≪ the 2.65x target.
+- **Byte-identity:** all **235 fm-render-svg lib tests pass**, incl. `golden_svg_test` + the edge parity
+  test. The 11 tuples are derived directly from `render_edge`'s tables, and the `<g><path/><title/></g>`
+  structure is arrow-independent for the no-marker-start set, so each streams byte-identically.
+- **Ratio vs the original (mermaid.js):** dominance context (render dominates ~60-120x); Circle/Cross/thick
+  edge diagrams now render 2.6-2.7x faster than before, deepening dominance further.
+- **Staging:** the change is one match in `render_edge_into` (clean sub-region 7550-7620, no peer hunks);
+  staged via `git apply --cached` of the filtered patch so the abandoned peer WIP stayed unstaged/intact.
+
+  Agent: BlackThrush

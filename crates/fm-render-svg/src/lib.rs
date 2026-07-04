@@ -7550,18 +7550,39 @@ fn render_edge_into(out: &mut String, edge_path: &LayoutEdgePath, context: &Edge
     let ir_edge = ir.edges.get(edge_index);
     let arrow = ir_edge.map_or(ArrowType::Arrow, |edge| edge.arrow);
 
-    // The whole-edge streaming fragment handles the two simplest non-reversed arrow types — solid
-    // `Arrow` and plain `Line` — which `render_edge`'s match resolves to the identical stroke-width (1.8)
-    // and class ("fm-edge-solid"), differing only in marker-end and the a11y phrase. Everything more
-    // exotic (dashed/thick/half/stick/double/reverse, back-edges, labels, inline styles, animations,
-    // source spans, non-full a11y) still falls to the `Element` slow path below. Byte-identity of the
-    // Line arm is covered by `golden_svg_test` (the corpus includes mindmap/line-edge diagrams).
-    let stream_arrow = match arrow {
-        ArrowType::Arrow => Some(("url(#arrow-end)", " points to ")),
-        ArrowType::Line => Some(("", " connects to ")),
+    // The whole-edge streaming fragment handles every non-reversed arrow whose slow-path `render_edge`
+    // shape is a single `<path>` with NO dasharray and NO marker-start — i.e. `(stroke_width, class,
+    // marker_end)` fully determines the bytes. Each tuple below is `(stroke_width, style_class,
+    // marker_end, a11y_phrase)` read straight off `render_edge`'s `stroke_width`/`style_class`/`marker_end`
+    // matches and `describe_edge_labels`'s per-arrow word (surrounded by spaces; `_ => "connects to"`).
+    // Dashed/reverse/double arrows (dasharray or marker-start), back-edges, labels, inline styles,
+    // animations, source spans, and non-full a11y all still fall to the `Element` slow path below.
+    // Byte-identity is pinned by `golden_svg_test` + `edge_fast_full_fragment_matches_render`.
+    let stream_arrow: Option<(f32, &str, &str, &str)> = match arrow {
+        ArrowType::Arrow => Some((1.8, "fm-edge-solid", "url(#arrow-end)", " points to ")),
+        ArrowType::Line => Some((1.8, "fm-edge-solid", "", " connects to ")),
+        ArrowType::OpenArrow => Some((1.8, "fm-edge-solid", "url(#arrow-open)", " sends to ")),
+        ArrowType::Circle => Some((1.8, "fm-edge-solid", "url(#arrow-circle)", " relates to ")),
+        ArrowType::Cross => Some((1.8, "fm-edge-solid", "url(#arrow-cross)", " blocks ")),
+        ArrowType::HalfArrowTop => {
+            Some((1.8, "fm-edge-solid", "url(#arrow-half-top)", " connects to "))
+        }
+        ArrowType::HalfArrowBottom => {
+            Some((1.8, "fm-edge-solid", "url(#arrow-half-bottom)", " connects to "))
+        }
+        ArrowType::StickArrowTop => {
+            Some((1.8, "fm-edge-solid", "url(#arrow-stick-top)", " connects to "))
+        }
+        ArrowType::StickArrowBottom => {
+            Some((1.8, "fm-edge-solid", "url(#arrow-stick-bottom)", " connects to "))
+        }
+        ArrowType::ThickArrow => {
+            Some((2.5, "fm-edge-thick", "url(#arrow-filled)", " strongly points to "))
+        }
+        ArrowType::ThickLine => Some((2.5, "fm-edge-thick", "", " strongly connects to ")),
         _ => None,
     };
-    if let Some((marker_end, arrow_phrase)) = stream_arrow
+    if let Some((stroke_width, style_class, marker_end, arrow_phrase)) = stream_arrow
         && !edge_path.reversed
         && config.embed_theme_css
         && !config.animations_enabled
@@ -7582,8 +7603,8 @@ fn render_edge_into(out: &mut String, edge_path: &LayoutEdgePath, context: &Edge
                 let point = &edge_path.points[index];
                 (point.x + offset_x, point.y + offset_y)
             },
-            1.8,
-            "fm-edge-solid",
+            stroke_width,
+            style_class,
             edge_index as i32,
             marker_end,
             arrow_phrase,
