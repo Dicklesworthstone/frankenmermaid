@@ -169,6 +169,28 @@ fn gen_requirement_chain(node_count: usize) -> String {
     lines.join("\n")
 }
 
+fn gen_xychart(point_count: usize) -> String {
+    let mut lines = vec![String::from("xychart-beta")];
+    lines.push("  title Throughput".to_string());
+    let categories: Vec<String> = (0..point_count).map(|i| format!("c{i}")).collect();
+    lines.push(format!("  x-axis [{}]", categories.join(", ")));
+    lines.push("  y-axis \"Value\" 0 --> 1000".to_string());
+
+    let bars: Vec<String> = (0..point_count)
+        .map(|i| (100 + (i * 13) % 700).to_string())
+        .collect();
+    let line: Vec<String> = (0..point_count)
+        .map(|i| (50 + (i * 17) % 850).to_string())
+        .collect();
+    let area: Vec<String> = (0..point_count)
+        .map(|i| (75 + (i * 19) % 750).to_string())
+        .collect();
+    lines.push(format!("  bar Bars [{}]", bars.join(", ")));
+    lines.push(format!("  line Line [{}]", line.join(", ")));
+    lines.push(format!("  area Area [{}]", area.join(", ")));
+    lines.join("\n")
+}
+
 fn gen_polygon_shape_chain(shape: &str, node_count: usize) -> String {
     let mut lines = vec![String::from("flowchart TB")];
     for i in 0..node_count {
@@ -567,6 +589,33 @@ fn bench_requirement_stages(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_xychart_stages(c: &mut Criterion) {
+    let mut group = c.benchmark_group("xychart_stages");
+    let config = fm_render_svg::SvgRenderConfig::default();
+
+    for (label, point_count) in [("128", 128_usize), ("512", 512)] {
+        let input = gen_xychart(point_count);
+        let parsed = fm_parser::parse(&input);
+        let layout = fm_layout::layout_diagram(&parsed.ir);
+
+        group.bench_with_input(BenchmarkId::new("parse", label), &input, |b, input| {
+            b.iter(|| fm_parser::parse(input));
+        });
+        group.bench_with_input(BenchmarkId::new("layout", label), &parsed.ir, |b, ir| {
+            b.iter(|| fm_layout::layout_diagram(ir));
+        });
+        group.bench_with_input(
+            BenchmarkId::new("render", label),
+            &(&parsed.ir, &layout),
+            |b, (ir, layout)| {
+                b.iter(|| fm_render_svg::render_svg_with_layout(ir, layout, &config));
+            },
+        );
+    }
+
+    group.finish();
+}
+
 fn bench_polygon_shape_render(c: &mut Criterion) {
     let mut group = c.benchmark_group("polygon_shape_render");
     let config = fm_render_svg::SvgRenderConfig::default();
@@ -653,6 +702,7 @@ criterion_group!(
     bench_marker_start_wide_stages,
     bench_highlighted_wide_stages,
     bench_requirement_stages,
+    bench_xychart_stages,
     bench_polygon_shape_render,
     bench_cylinder_shape_render,
     bench_render_spans_on
