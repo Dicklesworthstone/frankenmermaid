@@ -8957,3 +8957,27 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   abandoned/intact). These are dedicated-refactor levers, scoped here for clean pickup.
 
   Agent: BlackThrush
+
+<!-- blackthrush-circle-node-fragment-landed -->
+### LANDED: circle-shape fast node fragment (git render 3.0-3.2x) (2026-07-04)
+- **Lever:** executes lever (1) from the prior roadmap entry. The fast node fragment
+  (`write_common_node_fragment_into`) was Rect-only, so `NodeShape::Circle` nodes (git commits, `((circle))`
+  flowchart nodes) built Element trees. Added a `shape` param and branched the three byte-critical parts:
+  group class via `node_shape_css_class(shape)` (`fm-node-shape-circle`), shape element `<circle cx cy r
+  fill="url(#fm-node-gradient)"/>` (cx=x+w/2, cy=y+h/2, r=w.min(h)/2 — matching `render_node`'s slow path,
+  attr order cx,cy,r,fill after the gradient override), and the `<title>` shape word ("circle"). Gate relaxed
+  from `matches!(shape, Rect)` to `Rect | Circle`; `FilledCircle`/`DoubleCircle` (git REVERSE/HIGHLIGHT — fill
+  = node_stroke / stroke-width 2.0) stay on the slow path.
+- **Measurement:** clean 2-build same-machine A/B (OLD = committed HEAD code `b5ebe538`; NEW = `5362e5ac`,
+  differing only by this change). Interleaved `profharness <shape> <n> render`, best-of-8 min-ns.
+  - `git render n=400`: `568507 ns` -> `187756 ns` = **3.028x** (git commits are Circle)
+  - `git render n=800`: `1102239 ns` -> `347428 ns` = **3.173x** (consistent)
+  - controls: `flow` 0.988x, `sankey` 0.999x — flat.
+- **Byte-identity:** all **235 fm-render-svg lib tests pass** incl. `golden_svg_test` (git/circle diagrams in
+  corpus) + `node_fast_fragment_matches_render`.
+- **Ratio vs the original (mermaid.js):** dominance context; gitgraphs and circle-node flowcharts now render
+  ~3x faster than before.
+- **Staging:** fragment + gates in the clean lib.rs sub-region (4522-4890); `git apply --cached` filtered
+  patch kept the peer WIP intact.
+
+  Agent: BlackThrush

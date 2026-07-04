@@ -4522,13 +4522,14 @@ fn build_common_node_fragment(
     font_size: f32,
     text_fill: &str,
     user_classes: &str,
+    shape: fm_core::NodeShape,
 ) -> String {
     // `raw_label` is written twice (the `aria-label` and the `<title>` text), so size for both copies
     // plus the fixed tag/literal bytes.
     let mut f = String::with_capacity(label.len() + raw_label.len() * 2 + user_classes.len() + 340);
     write_common_node_fragment_into(
         &mut f, node_id, node_index, accent, raw_label, label, x, y, w, h, rx, text_x, text_y,
-        font_size, text_fill, user_classes,
+        font_size, text_fill, user_classes, shape,
     );
     f
 }
@@ -4553,6 +4554,7 @@ fn write_common_node_fragment_into(
     font_size: f32,
     text_fill: &str,
     user_classes: &str,
+    shape: fm_core::NodeShape,
 ) {
     use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
     use std::fmt::Write as _;
@@ -4565,7 +4567,8 @@ fn write_common_node_fragment_into(
     fm_core::write_mermaid_node_element_id_into(f, node_id, node_index);
     f.push_str("\" class=\"fm-node fm-node-accent-");
     let _ = write!(f, "{accent}");
-    f.push_str(" fm-node-shape-rect");
+    f.push(' ');
+    f.push_str(node_shape_css_class(shape));
     // Simple custom classes (`class X foo` / `:::foo` on nodes with no state-keyword or special class);
     // empty for the overwhelmingly common no-class node. Matches the slow path's ` fm-node-user-…` tail.
     f.push_str(user_classes);
@@ -4574,18 +4577,31 @@ fn write_common_node_fragment_into(
     f.push_str("\" role=\"graphics-symbol\" aria-label=\"");
     let _ = write_escaped_attr(f, raw_label);
     f.push_str("\" tabindex=\"0\">");
-    // <rect x y width height rx fill="url(#fm-node-gradient)"/>
-    f.push_str("<rect x=\"");
-    let _ = AttributeValue::Number(x).write_value(f);
-    f.push_str("\" y=\"");
-    let _ = AttributeValue::Number(y).write_value(f);
-    f.push_str("\" width=\"");
-    let _ = AttributeValue::Number(w).write_value(f);
-    f.push_str("\" height=\"");
-    let _ = AttributeValue::Number(h).write_value(f);
-    f.push_str("\" rx=\"");
-    let _ = AttributeValue::Number(rx).write_value(f);
-    f.push_str("\" fill=\"url(#fm-node-gradient)\"/>");
+    // Shape element with the gradient fill (stroke/stroke-width are CSS-driven under embedded theme, so
+    // absent inline). `<rect x y width height rx …/>` for Rect; `<circle cx cy r …/>` for Circle, whose
+    // cx/cy/r match render_node's slow path (cx=x+w/2, cy=y+h/2, r=w.min(h)/2) and whose serialized attr
+    // order (cx,cy,r,fill) matches the slow `Element::circle()` after the gradient-fill override.
+    if matches!(shape, fm_core::NodeShape::Rect) {
+        f.push_str("<rect x=\"");
+        let _ = AttributeValue::Number(x).write_value(f);
+        f.push_str("\" y=\"");
+        let _ = AttributeValue::Number(y).write_value(f);
+        f.push_str("\" width=\"");
+        let _ = AttributeValue::Number(w).write_value(f);
+        f.push_str("\" height=\"");
+        let _ = AttributeValue::Number(h).write_value(f);
+        f.push_str("\" rx=\"");
+        let _ = AttributeValue::Number(rx).write_value(f);
+        f.push_str("\" fill=\"url(#fm-node-gradient)\"/>");
+    } else {
+        f.push_str("<circle cx=\"");
+        let _ = AttributeValue::Number(x + w / 2.0).write_value(f);
+        f.push_str("\" cy=\"");
+        let _ = AttributeValue::Number(y + h / 2.0).write_value(f);
+        f.push_str("\" r=\"");
+        let _ = AttributeValue::Number(w.min(h) / 2.0).write_value(f);
+        f.push_str("\" fill=\"url(#fm-node-gradient)\"/>");
+    }
     // <text x y text-anchor="middle" font-size=".." fill="..">label</text>
     f.push_str("<text x=\"");
     let _ = AttributeValue::Number(text_x).write_value(f);
@@ -4606,7 +4622,12 @@ fn write_common_node_fragment_into(
     // Pinned by `node_fast_fragment_matches_render`.
     f.push_str("<title>Node: ");
     let _ = write_escaped_text(f, raw_label);
-    f.push_str(", rectangle</title></g>");
+    // `describe_node`'s shape word: "rectangle" for Rect, "circle" for Circle (the only shapes gated here).
+    f.push_str(if matches!(shape, fm_core::NodeShape::Rect) {
+        ", rectangle</title></g>"
+    } else {
+        ", circle</title></g>"
+    });
 }
 
 /// Render a single node straight into the output buffer. For the overwhelmingly common themed rectangle
@@ -4674,7 +4695,7 @@ fn render_node_into(
     // `user_class_suffix` is `Some("")` for the common no-class node and `Some(" fm-node-user-…")` for a
     // node whose custom classes are all simple; `None` (slow path) when a class needs conditional render.
     let user_class_suffix = ir_node.and_then(simple_node_user_class_suffix);
-    if matches!(shape, NodeShape::Rect)
+    if matches!(shape, NodeShape::Rect | NodeShape::Circle)
         && config.embed_theme_css
         && config.node_gradients
         && !emit_classdef_classes
@@ -4715,6 +4736,7 @@ fn render_node_into(
             node_font_size,
             colors.text.as_str(),
             user_classes,
+            shape,
         );
         return;
     }
@@ -4815,7 +4837,7 @@ fn render_node(
     // `requirement_meta`/icon/centrality already gated below).
     let user_class_suffix = ir_node.and_then(simple_node_user_class_suffix);
     if permit_fast
-        && matches!(shape, NodeShape::Rect)
+        && matches!(shape, NodeShape::Rect | NodeShape::Circle)
         && config.embed_theme_css
         && config.node_gradients
         && !emit_classdef_classes
@@ -4855,6 +4877,7 @@ fn render_node(
             node_font_size,
             colors.text.as_str(),
             user_classes,
+            shape,
         ));
     }
 
