@@ -8806,3 +8806,38 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   which is the large change gated on the `lib.rs` peer WIP.
 
   Agent: BlackThrush
+
+<!-- blackthrush-edge-streaming-line-arrow-landed -->
+### LANDED: extend the whole-edge streaming fast path to ArrowType::Line (mindmap render +40%) (2026-07-04)
+- **Lever:** `fm-render-svg`'s whole-edge streaming fast path (`render_edge_into` -> `write_common_edge_full_fragment_into`)
+  collapses an edge's `<g><path/><title/></g>` into direct bytes, skipping the ~6 heap allocs/edge the
+  `Element` slow path pays (group Attributes Vec + children Vec, id/role/tabindex value Strings, `<path>`
+  Element, `<title>` Element + content clone). It only fired for `ArrowType::Arrow`. But `render_edge`'s
+  arrow match resolves BOTH `Arrow` and plain `Line` to the identical stroke-width (1.8) and class
+  ("fm-edge-solid") — they differ ONLY in marker-end (`url(#arrow-end)` vs none) and the a11y phrase
+  (`" points to "` vs `" connects to "`). Parameterized those two, made `write_common_edge_path_tail_into`
+  omit `marker-end` when empty, and relaxed the gate to `Arrow | Line`. Everything exotic
+  (dashed/thick/half/stick/double/reverse, back-edges, labels, inline styles, animations) still takes the
+  slow path.
+- **Why it clears the render floor:** node/edge-COUNT multiplier — `Line`-edge diagrams (mindmap, and any
+  `---` connections) had EVERY edge on the slow Element path; now they stream. This is the same lever the
+  code comment calls "the largest remaining wide-render alloc lever," extended from Arrow to Line.
+- **Measurement:** clean 2-build same-machine A/B (OLD = committed HEAD `c76a0b6f…` = the attr-name win,
+  NEW = `6f23e80a…`, differing only by this change). Interleaved `profharness <shape> <n> render`,
+  best-of-8 min-ns. Build via rch offload, `CARGO_TARGET_DIR=…/frankenmermaid-blackthrush`, release opt=3.
+  - `mindmap render n=400` (400 Line edges): `735794 ns` -> `524895 ns` = **1.402x** (40% faster)
+  - `mindmap render n=800`: `1462181 ns` -> `1033037 ns` = **1.415x** (consistent)
+  - controls: `flow` (already on the Arrow fast path) 0.976x = layout noise; `class` 1.005x = flat.
+- **Byte-identity:** all **235 fm-render-svg lib tests pass**, incl. `golden_svg_test` (the full corpus,
+  which contains mindmap/Line-edge diagrams — so the streamed Line bytes are pinned identical to the
+  `Element` slow path) and `edge_fast_full_fragment_matches_render`.
+- **Ratio vs the original (mermaid.js):** dominance context (render dominates ~60-120x per
+  `evidence/ledger/mermaid-js-head-to-head.toml`); this is the largest single render win of the campaign
+  and applies to every Line-edge diagram type (mindmap most of all).
+- **Staging note:** the four touched functions all sit in a CLEAN sub-region of `lib.rs` (6958-7600, no
+  peer-WIP hunks); staged via `git apply --cached` of the line-range-filtered patch so the abandoned peer
+  WIP (≤6912, ≥7623) stayed unstaged and byte-intact. Kept `build_common_edge_full_fragment`'s signature
+  unchanged (its `" points to "` is now internal) specifically so its parity test near the peer test hunks
+  needed no edit.
+
+  Agent: BlackThrush

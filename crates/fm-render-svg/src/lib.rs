@@ -6955,8 +6955,13 @@ fn write_common_edge_path_tail_into(
     f.push_str(style_class);
     f.push_str("\" data-fm-edge-id=\"");
     let _ = AttributeValue::Integer(edge_index).write_value(f);
-    f.push_str("\" marker-end=\"");
-    let _ = write_escaped_attr(f, marker_end);
+    // An empty `marker_end` means the slow path's `render_edge` produced no `marker-end` attribute
+    // (e.g. `ArrowType::Line`, whose match arm yields `marker_end = None`), so omit it here too — the
+    // `<path>` closes right after `data-fm-edge-id`. Non-empty callers (solid arrow, …) are unchanged.
+    if !marker_end.is_empty() {
+        f.push_str("\" marker-end=\"");
+        let _ = write_escaped_attr(f, marker_end);
+    }
     f.push_str("\"/>");
 }
 
@@ -6998,6 +7003,8 @@ where
     F: FnMut(usize) -> (f32, f32),
 {
     let mut f = String::with_capacity(24 + point_count * 56 + 192);
+    // This wrapper serves only the solid-`Arrow` callers (render_edge's fast path + its parity test), so
+    // the a11y phrase is the solid-arrow `" points to "`; the Line arm streams via the `_into` form.
     write_common_edge_full_fragment_into(
         &mut f,
         point_count,
@@ -7006,6 +7013,7 @@ where
         style_class,
         edge_index,
         marker_end,
+        " points to ",
         from_label,
         to_label,
     );
@@ -7024,6 +7032,7 @@ fn write_common_edge_full_fragment_into<F>(
     style_class: &str,
     edge_index: i32,
     marker_end: &str,
+    arrow_phrase: &str,
     from_label: Option<&str>,
     to_label: Option<&str>,
 ) where
@@ -7043,7 +7052,10 @@ fn write_common_edge_full_fragment_into<F>(
     write_common_edge_path_tail_into(f, stroke_width, style_class, edge_index, marker_end);
     f.push_str("<title>");
     let _ = write_escaped_text(f, from_label.unwrap_or("unknown"));
-    f.push_str(" points to ");
+    // The a11y connective phrase is `describe_edge_labels`'s per-arrow word surrounded by spaces
+    // (`" points to "` for a solid arrow, `" connects to "` for a plain line). It contains no escapable
+    // byte, so writing it verbatim matches the slow path's escaped whole-description byte-for-byte.
+    f.push_str(arrow_phrase);
     let _ = write_escaped_text(f, to_label.unwrap_or("unknown"));
     f.push_str("</title></g>");
 }
@@ -7538,7 +7550,18 @@ fn render_edge_into(out: &mut String, edge_path: &LayoutEdgePath, context: &Edge
     let ir_edge = ir.edges.get(edge_index);
     let arrow = ir_edge.map_or(ArrowType::Arrow, |edge| edge.arrow);
 
-    if arrow == ArrowType::Arrow
+    // The whole-edge streaming fragment handles the two simplest non-reversed arrow types — solid
+    // `Arrow` and plain `Line` — which `render_edge`'s match resolves to the identical stroke-width (1.8)
+    // and class ("fm-edge-solid"), differing only in marker-end and the a11y phrase. Everything more
+    // exotic (dashed/thick/half/stick/double/reverse, back-edges, labels, inline styles, animations,
+    // source spans, non-full a11y) still falls to the `Element` slow path below. Byte-identity of the
+    // Line arm is covered by `golden_svg_test` (the corpus includes mindmap/line-edge diagrams).
+    let stream_arrow = match arrow {
+        ArrowType::Arrow => Some(("url(#arrow-end)", " points to ")),
+        ArrowType::Line => Some(("", " connects to ")),
+        _ => None,
+    };
+    if let Some((marker_end, arrow_phrase)) = stream_arrow
         && !edge_path.reversed
         && config.embed_theme_css
         && !config.animations_enabled
@@ -7552,8 +7575,6 @@ fn render_edge_into(out: &mut String, edge_path: &LayoutEdgePath, context: &Edge
     {
         let (from_label, to_label) =
             edge_endpoint_accessible_labels(edge, ir, accessible_node_labels);
-        // Solid-arrow constants: stroke-width 1.8, class "fm-edge-solid", marker-end "url(#arrow-end)"
-        // — exactly what `render_edge`'s arrow match yields for `ArrowType::Arrow`.
         write_common_edge_full_fragment_into(
             out,
             edge_path.points.len(),
@@ -7564,7 +7585,8 @@ fn render_edge_into(out: &mut String, edge_path: &LayoutEdgePath, context: &Edge
             1.8,
             "fm-edge-solid",
             edge_index as i32,
-            "url(#arrow-end)",
+            marker_end,
+            arrow_phrase,
             from_label,
             to_label,
         );
