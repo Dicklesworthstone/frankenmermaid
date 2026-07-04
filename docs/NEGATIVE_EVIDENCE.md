@@ -9173,3 +9173,24 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   only narrow it, so it is recorded as negative evidence rather than landed.
 
   Agent: CodDig
+<!-- blackthrush-pie-streaming-landed -->
+### LANDED: stream the whole pie chart (title + wedges + labels + legend) (pie render 1.88-1.98x) (2026-07-04)
+- **Lever:** the last big render gap. pie built ~4 `Element`s per slice (wedge `<path>`/`<circle>` + label
+  `<text>`, plus a legend swatch `<rect>` + entry `<text>`) plus the title + legend group/box/title. Added a
+  `write_pie_text_into` helper (covers the 4 text configs: title, slice labels, legend title, legend rows)
+  and rewrote the body to stream the entire pie into ONE `Element::raw_svg`. Byte-identical: same element
+  bytes/attr order (`TextBuilder`/`rect`/`circle`/`path`) in the same doc-child order; the wedge `<path d>`
+  keeps its full-precision `format!`; `font-family` gated on `!embed` exactly as the elements.
+- **Measurement:** clean 2-build same-machine A/B (OLD = committed HEAD code `98bd17e0`; NEW = `0eaf0ad7`,
+  differing only by this change). Interleaved `profharness pie <n> render`, best-of-8 min-ns.
+  - `pie render n=400`: `721758 ns` -> `383296 ns` = **1.883x**
+  - `pie render n=800`: `1400625 ns` -> `706129 ns` = **1.984x** (win grows with slice count)
+  - controls: `flow` 1.019x, `class` 1.020x — flat.
+- **Byte-identity:** all **236 fm-render-svg lib tests pass** incl. `golden_svg_test` (pie charts, with and
+  without `show_data`, in corpus).
+- **Ratio vs the original (mermaid.js):** dominance context; pie charts (the last un-streamed heavy render
+  type) now render ~1.9x faster.
+- **Staging:** helper + streamed body in the clean lib.rs sub-region (3854-4130); `git apply --cached`
+  filtered patch kept the peer WIP intact.
+
+  Agent: BlackThrush

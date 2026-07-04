@@ -3854,6 +3854,55 @@ fn render_gantt_svg(
     doc
 }
 
+/// Stream one pie `<text>` byte-identical to the slow path's `TextBuilder`: attrs in `TextBuilder::build`
+/// order `x, y, text-anchor, [dominant-baseline="middle"], [font-family], font-size, [font-weight="600"],
+/// fill, class`, then escaped content. Covers the pie title, slice labels, legend title, and legend rows.
+#[allow(clippy::too_many_arguments)]
+fn write_pie_text_into(
+    f: &mut String,
+    x: f32,
+    y: f32,
+    anchor: &str,
+    baseline_middle: bool,
+    family: &str,
+    embed: bool,
+    font_size: f32,
+    weight_600: bool,
+    fill: &str,
+    class: &str,
+    text: &str,
+) {
+    use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
+    f.push_str("<text x=\"");
+    let _ = AttributeValue::Number(x).write_value(f);
+    f.push_str("\" y=\"");
+    let _ = AttributeValue::Number(y).write_value(f);
+    f.push_str("\" text-anchor=\"");
+    f.push_str(anchor);
+    f.push('"');
+    if baseline_middle {
+        f.push_str(" dominant-baseline=\"middle\"");
+    }
+    if !embed {
+        f.push_str(" font-family=\"");
+        let _ = write_escaped_attr(f, family);
+        f.push('"');
+    }
+    f.push_str(" font-size=\"");
+    let _ = AttributeValue::Number(font_size).write_value(f);
+    f.push('"');
+    if weight_600 {
+        f.push_str(" font-weight=\"600\"");
+    }
+    f.push_str(" fill=\"");
+    let _ = write_escaped_attr(f, fill);
+    f.push_str("\" class=\"");
+    f.push_str(class);
+    f.push_str("\">");
+    let _ = write_escaped_text(f, text);
+    f.push_str("</text>");
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_pie_svg(
     mut doc: SvgDocument,
@@ -3900,43 +3949,56 @@ fn render_pie_svg(
         .sum::<f32>()
         .max(f32::EPSILON);
 
+    // Stream the whole pie (title + per-slice wedge+label + legend group) into ONE raw fragment instead
+    // of ~4 `Element`s per slice + the legend group/box/title. Byte-identical: same element bytes/attr
+    // order (`TextBuilder`/`Element::rect`/`circle`/`path`) in the same doc-child order; the wedge `<path
+    // d>` keeps the same full-precision `format!`; label/legend `font-family` gated on `!embed`.
+    use crate::attributes::{AttributeValue, write_escaped_attr};
+    let text_fill = theme.colors.text.as_str();
+    let family = config.font_family.as_str();
+    let embed = config.embed_theme_css;
+    let bg = theme.colors.background.as_str();
+    let mut pie_svg = String::new();
+
     if let Some(title) = title {
-        doc = doc.child(
-            TextBuilder::new(title)
-                .x(cx)
-                .y(bounds.y + offset_y + config.font_size + 2.0)
-                .anchor(TextAnchor::Middle)
-                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                .font_size(config.font_size + 4.0)
-                .font_weight("600")
-                .fill(&theme.colors.text)
-                .class("fm-pie-title")
-                .build(),
+        write_pie_text_into(
+            &mut pie_svg,
+            cx,
+            bounds.y + offset_y + config.font_size + 2.0,
+            "middle",
+            false,
+            family,
+            embed,
+            config.font_size + 4.0,
+            true,
+            text_fill,
+            "fm-pie-title",
+            title,
         );
     }
 
     let mut angle = -PI / 2.0;
-
     for (i, slice) in pie_meta.slices.iter().enumerate() {
         let value = slice.value.max(0.0);
         let sweep = (value / total) * 2.0 * PI;
         let color = accent_colors[i % accent_colors.len()];
 
-        let wedge = if value <= f32::EPSILON {
-            Element::path()
-                .d("")
-                .fill("none")
-                .stroke("none")
-                .class("fm-pie-slice fm-pie-slice-zero")
+        if value <= f32::EPSILON {
+            pie_svg.push_str(
+                "<path d=\"\" fill=\"none\" stroke=\"none\" class=\"fm-pie-slice fm-pie-slice-zero\"/>",
+            );
         } else if (sweep - 2.0 * PI).abs() <= 0.0001 {
-            Element::circle()
-                .cx(cx)
-                .cy(cy)
-                .r(radius)
-                .fill(color)
-                .stroke(&theme.colors.background)
-                .stroke_width(2.0)
-                .class("fm-pie-slice fm-pie-slice-full")
+            pie_svg.push_str("<circle cx=\"");
+            let _ = AttributeValue::Number(cx).write_value(&mut pie_svg);
+            pie_svg.push_str("\" cy=\"");
+            let _ = AttributeValue::Number(cy).write_value(&mut pie_svg);
+            pie_svg.push_str("\" r=\"");
+            let _ = AttributeValue::Number(radius).write_value(&mut pie_svg);
+            pie_svg.push_str("\" fill=\"");
+            let _ = write_escaped_attr(&mut pie_svg, color);
+            pie_svg.push_str("\" stroke=\"");
+            let _ = write_escaped_attr(&mut pie_svg, bg);
+            pie_svg.push_str("\" stroke-width=\"2\" class=\"fm-pie-slice fm-pie-slice-full\"/>");
         } else {
             let x1 = cx + radius * angle.cos();
             let y1 = cy + radius * angle.sin();
@@ -3945,52 +4007,46 @@ fn render_pie_svg(
             let large_arc = i32::from(sweep > PI);
             let d =
                 format!("M {cx} {cy} L {x1} {y1} A {radius} {radius} 0 {large_arc} 1 {x2} {y2} Z");
-            Element::path()
-                .d(&d)
-                .fill(color)
-                .stroke(&theme.colors.background)
-                .stroke_width(2.0)
-                .class("fm-pie-slice")
-        };
-
-        doc = doc.child(wedge);
+            pie_svg.push_str("<path d=\"");
+            pie_svg.push_str(&d);
+            pie_svg.push_str("\" fill=\"");
+            let _ = write_escaped_attr(&mut pie_svg, color);
+            pie_svg.push_str("\" stroke=\"");
+            let _ = write_escaped_attr(&mut pie_svg, bg);
+            pie_svg.push_str("\" stroke-width=\"2\" class=\"fm-pie-slice\"/>");
+        }
 
         let mid_angle = angle + sweep / 2.0;
         let label_radius = radius + 24.0;
         let lx = cx + label_radius * mid_angle.cos();
         let ly = cy + label_radius * mid_angle.sin();
         let pct = (value / total) * 100.0;
-
         let label_text = if pie_meta.show_data {
             format!("{}: {:.0} ({:.1}%)", slice.label, value, pct)
         } else {
             slice.label.clone()
         };
-
         let anchor = if mid_angle.cos() < -0.1 {
-            TextAnchor::End
+            "end"
         } else if mid_angle.cos() > 0.1 {
-            TextAnchor::Start
+            "start"
         } else {
-            TextAnchor::Middle
+            "middle"
         };
-
-        doc = doc.child(
-            TextBuilder::new(&label_text)
-                .x(lx)
-                .y(ly)
-                .anchor(anchor)
-                .baseline(crate::text::DominantBaseline::Middle)
-                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                .font_size(clamp_font_size(
-                    config.font_size * 0.85,
-                    config.min_font_size,
-                ))
-                .fill(&theme.colors.text)
-                .class("fm-pie-label")
-                .build(),
+        write_pie_text_into(
+            &mut pie_svg,
+            lx,
+            ly,
+            anchor,
+            true,
+            family,
+            embed,
+            clamp_font_size(config.font_size * 0.85, config.min_font_size),
+            false,
+            text_fill,
+            "fm-pie-label",
+            &label_text,
         );
-
         angle += sweep;
     }
 
@@ -3998,32 +4054,34 @@ fn render_pie_svg(
     let legend_y = chart_top + 12.0;
     let legend_height = (pie_meta.slices.len() as f32 * 24.0 + 44.0).max(64.0);
 
-    let mut legend = Element::group().class("fm-pie-legend");
-    legend = legend.child(
-        Element::rect()
-            .x(legend_x)
-            .y(legend_y)
-            .width(legend_width)
-            .height(legend_height)
-            .rx(config.rounded_corners.max(6.0))
-            .fill(&theme.colors.node_fill)
-            .stroke(&theme.colors.node_stroke)
-            .stroke_width(1.2)
-            .class("fm-pie-legend-box"),
-    );
-    legend = legend.child(
-        TextBuilder::new("Legend")
-            .x(legend_x + 14.0)
-            .y(legend_y + 18.0)
-            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-            .font_size(clamp_font_size(
-                config.font_size * 0.82,
-                config.min_font_size,
-            ))
-            .font_weight("600")
-            .fill(&theme.colors.text)
-            .class("fm-pie-legend-title")
-            .build(),
+    pie_svg.push_str("<g class=\"fm-pie-legend\"><rect x=\"");
+    let _ = AttributeValue::Number(legend_x).write_value(&mut pie_svg);
+    pie_svg.push_str("\" y=\"");
+    let _ = AttributeValue::Number(legend_y).write_value(&mut pie_svg);
+    pie_svg.push_str("\" width=\"");
+    let _ = AttributeValue::Number(legend_width).write_value(&mut pie_svg);
+    pie_svg.push_str("\" height=\"");
+    let _ = AttributeValue::Number(legend_height).write_value(&mut pie_svg);
+    pie_svg.push_str("\" rx=\"");
+    let _ = AttributeValue::Number(config.rounded_corners.max(6.0)).write_value(&mut pie_svg);
+    pie_svg.push_str("\" fill=\"");
+    let _ = write_escaped_attr(&mut pie_svg, &theme.colors.node_fill);
+    pie_svg.push_str("\" stroke=\"");
+    let _ = write_escaped_attr(&mut pie_svg, &theme.colors.node_stroke);
+    pie_svg.push_str("\" stroke-width=\"1.2\" class=\"fm-pie-legend-box\"/>");
+    write_pie_text_into(
+        &mut pie_svg,
+        legend_x + 14.0,
+        legend_y + 18.0,
+        "start",
+        false,
+        family,
+        embed,
+        clamp_font_size(config.font_size * 0.82, config.min_font_size),
+        true,
+        text_fill,
+        "fm-pie-legend-title",
+        "Legend",
     );
 
     for (index, slice) in pie_meta.slices.iter().enumerate() {
@@ -4035,35 +4093,33 @@ fn render_pie_svg(
         } else {
             slice.label.clone()
         };
-        legend = legend.child(
-            Element::rect()
-                .x(legend_x + 14.0)
-                .y(row_y - 9.0)
-                .width(12.0)
-                .height(12.0)
-                .rx(2.0)
-                .fill(color)
-                .stroke(&theme.colors.background)
-                .stroke_width(1.0)
-                .class("fm-pie-legend-swatch"),
-        );
-        legend = legend.child(
-            TextBuilder::new(&entry_label)
-                .x(legend_x + 34.0)
-                .y(row_y)
-                .baseline(crate::text::DominantBaseline::Middle)
-                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                .font_size(clamp_font_size(
-                    config.font_size * 0.8,
-                    config.min_font_size,
-                ))
-                .fill(&theme.colors.text)
-                .class("fm-pie-legend-entry")
-                .build(),
+        pie_svg.push_str("<rect x=\"");
+        let _ = AttributeValue::Number(legend_x + 14.0).write_value(&mut pie_svg);
+        pie_svg.push_str("\" y=\"");
+        let _ = AttributeValue::Number(row_y - 9.0).write_value(&mut pie_svg);
+        pie_svg.push_str("\" width=\"12\" height=\"12\" rx=\"2\" fill=\"");
+        let _ = write_escaped_attr(&mut pie_svg, color);
+        pie_svg.push_str("\" stroke=\"");
+        let _ = write_escaped_attr(&mut pie_svg, bg);
+        pie_svg.push_str("\" stroke-width=\"1\" class=\"fm-pie-legend-swatch\"/>");
+        write_pie_text_into(
+            &mut pie_svg,
+            legend_x + 34.0,
+            row_y,
+            "start",
+            true,
+            family,
+            embed,
+            clamp_font_size(config.font_size * 0.8, config.min_font_size),
+            false,
+            text_fill,
+            "fm-pie-legend-entry",
+            &entry_label,
         );
     }
+    pie_svg.push_str("</g>");
 
-    doc = doc.child(legend);
+    doc = doc.child(Element::raw_svg(pie_svg));
 
     doc
 }
