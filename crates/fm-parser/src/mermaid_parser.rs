@@ -5591,8 +5591,9 @@ fn parse_architecture(input: &str, builder: &mut IrBuilder) {
 
 /// Git graph state tracker for parsing.
 struct GitGraphState {
-    /// Map of branch names to their current head commit node ID
-    branches: BTreeMap<String, IrNodeId>,
+    /// Map of branch names to their current head commit node ID. Lookup-only (`get`/`insert`, never
+    /// iterated), so FxHashMap's O(1) hashing replaces the BTreeMap's O(log N) String comparisons.
+    branches: rustc_hash::FxHashMap<String, IrNodeId>,
     /// Current branch name
     current_branch: String,
     /// Auto-generated commit counter for unnamed commits
@@ -5604,7 +5605,7 @@ struct GitGraphState {
 impl GitGraphState {
     fn new() -> Self {
         Self {
-            branches: BTreeMap::new(),
+            branches: rustc_hash::FxHashMap::default(),
             current_branch: "main".to_string(),
             commit_counter: 0,
             branch_order: vec!["main".to_string()],
@@ -6247,13 +6248,21 @@ fn parse_git_commit(
         );
     }
 
-    // Apply branch color class.
-    let branch_index = state.branch_index(&state.current_branch.clone());
-    builder.add_class_to_node(
-        &commit_id,
-        &format!("git-branch-{}", branch_index % 8),
-        span,
-    );
+    // Apply branch color class. `branch_index` borrows `&self`, so no per-commit clone of the branch
+    // name is needed; and the class is one of 8 fixed strings, so index a static table instead of a
+    // per-commit `format!` heap allocation. Byte-identical.
+    const GIT_BRANCH_CLASSES: [&str; 8] = [
+        "git-branch-0",
+        "git-branch-1",
+        "git-branch-2",
+        "git-branch-3",
+        "git-branch-4",
+        "git-branch-5",
+        "git-branch-6",
+        "git-branch-7",
+    ];
+    let branch_index = state.branch_index(&state.current_branch);
+    builder.add_class_to_node(&commit_id, GIT_BRANCH_CLASSES[branch_index % 8], span);
 
     // Link from current branch head if it exists
     if let Some(parent_id) = state.current_head() {

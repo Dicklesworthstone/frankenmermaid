@@ -8571,3 +8571,40 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   swap — grep other parsers for the same shape (e.g. gitgraph `branches: BTreeMap<String, IrNodeId>`).
 
   Agent: BlackThrush
+
+<!-- blackthrush-gitgraph-percommit-alloc-and-branchmap-landed -->
+### LANDED: gitgraph per-commit alloc removal + branches FxHashMap (git parse ~1.35x) (2026-07-04)
+- **Lever:** three byte-identical changes on the per-commit hot path of `fm-parser`'s `parse_git_commit`
+  / `GitGraphState`:
+  1. `state.branch_index(&state.current_branch.clone())` -> `state.branch_index(&state.current_branch)`
+     — `branch_index` takes `&self`, so the per-commit `String` clone of the branch name was needless
+     (two shared borrows of `state` are fine).
+  2. `format!("git-branch-{}", branch_index % 8)` -> index a `const GIT_BRANCH_CLASSES: [&str; 8]` table
+     — the class is one of 8 fixed strings, so a static `&'static str` replaces a per-commit heap `format!`
+     allocation (the proven `format!`-of-a-bounded-pattern -> table lever).
+  3. `branches: BTreeMap<String, IrNodeId>` -> `rustc_hash::FxHashMap` — lookup-only (`get`/`insert`,
+     never iterated), so O(1) hashing replaces O(log N) String comparisons (same lever as gantt `f429a67`).
+- **Why gitgraph:** it is a common diagram type and its render is the 2nd-heaviest measured (~728 µs at
+  n=400); the parse path allocated twice per commit (branch-name clone + branch-class `format!`) plus a
+  BTreeMap op — all per-commit, so the win scales with commit count independent of branch count.
+- **Measurement:** clean 2-build same-machine A/B (OLD = committed HEAD `38ca3738…`, NEW = `2aad6113…`,
+  differing only by the three git-path changes). Interleaved `profharness git <n> parse`, best-of-7 min-ns.
+  Build via rch offload, `CARGO_TARGET_DIR=…/frankenmermaid-blackthrush`, release opt=3 fat-LTO.
+  - `git n=200`: `73429 ns` -> `54042 ns` = **1.359x**
+  - `git n=400`: `145195 ns` -> `106862 ns` = **1.359x**
+  - `git n=800`: `289479 ns` -> `214387 ns` = **1.350x** (flat ~35% — per-commit alloc removal signature)
+  - controls (no git code): `gantt` 0.984x, `flow` 1.006x — ~1% residual layout noise, ≪ the 35% win.
+- **Byte-identity:** clone removal reads the identical value; the 8 table strings equal the old `format!`
+  output; the map is keyed-lookup-only. All **408 fm-parser lib tests pass** (incl.
+  `gitgraph_branch_color_classes_assigned`, `gitgraph_commit_type_maps_to_shape_and_class`).
+- **Ratio vs the original (mermaid.js):** dominance context, not a fresh browser rerun (standing comparator
+  `evidence/ledger/mermaid-js-head-to-head.toml`; parse dominates ~70-100x). Widens the gitgraph parse
+  margin ~1.35x.
+- **Not taken (synthetic-only):** `branch_index` is an O(branches) linear scan of `branch_order` per
+  commit; it dominates only when branch count is large (the profharness shape uses sqrt(N) branches).
+  Real gitgraphs have few branches, so a name->index map was NOT added (would optimize a stress-only case).
+- **Landable rule:** byte-identical + strictly-less-work (2 fewer heap allocs/commit + O(1) map). LEVER
+  (reused): grep per-item parse/render paths for (a) `x.clone()` passed to a `&self`/`&str` API, and
+  (b) `format!` of a bounded small-cardinality pattern -> static `&str` table.
+
+  Agent: BlackThrush
