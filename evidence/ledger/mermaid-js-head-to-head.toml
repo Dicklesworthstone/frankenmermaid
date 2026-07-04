@@ -2866,3 +2866,31 @@ bench_syntax_note = "Literal cargo bench --release is rejected by this Cargo; re
 [post_measurement_dotted_edge_streaming_2026_07_04.decision]
 kept = true
 reason = "Same-worker ovh-a release Criterion A/B cuts dotted-wide render from 538.62 us to 259.27 us (2.08x). The rebased current-head code passes a byte-identity unit test and measures 281.53 us on hz2; the intervening labeled-edge commit is orthogonal to unlabeled dotted edges."
+
+[post_measurement_marker_start_edge_streaming_2026_07_04]
+date = "2026-07-04"
+agent = "TanSparrow"
+status = "keep"
+baseline_commit = "a720e03"
+candidate_summary = "Extend the whole-edge streaming fast path to marker-start edge families: reverse half/stick arrows, reverse dotted half/stick arrows, and double arrows. The writer emits marker-start before marker-end to preserve Element builder byte order."
+graveyard_route = "Alien Graveyard + Alien Artifact Coding + Extreme Optimization render-frontier lever: remove Element allocation/attribute dispatch from a still-unstreamed edge family instead of retuning already-covered solid, dotted, label, node, class, or gantt paths."
+rust_baseline_command = "AGENT_NAME=TanSparrow RCH_WORKER=ovh-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod RCH_REQUIRE_REMOTE=1 RCH_FORCE_REMOTE=1 RUSTFLAGS='-C metadata=tansparrow_markerstart_base_bench' rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- marker_start_wide_stages/render/16x32 --measurement-time 8 --warm-up-time 2 --sample-size 30 --noplot"
+rust_candidate_command = "AGENT_NAME=TanSparrow RCH_WORKER=ovh-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod RCH_REQUIRE_REMOTE=1 RCH_FORCE_REMOTE=1 RUSTFLAGS='-C metadata=tansparrow_markerstart_cand_bench' rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- marker_start_wide_stages/render/16x32 --measurement-time 8 --warm-up-time 2 --sample-size 30 --noplot"
+rust_worker = "ovh-a for both accepted baseline and candidate"
+mermaid_js_command = "Standing comparator from scripts/mermaid_headtohead_cc.mjs: Mermaid.js 11.15.0 via Puppeteer/system Chromium, wide 16x32 median render 3453.9 ms. No fresh same-input marker-start browser rerun captured."
+behavior_proof = "New fm-render-svg unit test marker_start_edge_streaming_matches_element_render compares render_edge_into byte-for-byte against render_edge for reverse half/stick, reverse dotted half/stick, and double arrows."
+agent_mail = "Agent Mail registration/reservation as TanSparrow was blocked by the SQLite corruption circuit breaker; no reservation was available."
+bench_syntax_note = "Literal cargo bench --release is rejected by this Cargo; release-profile bench used --profile release."
+
+[post_measurement_marker_start_edge_streaming_2026_07_04.metrics]
+"marker_start_wide_render_16x32_baseline_us" = 943.83
+"marker_start_wide_render_16x32_candidate_us" = 285.12
+"marker_start_wide_render_16x32_speedup_x" = 3.310
+"marker_start_wide_render_16x32_delta_pct" = -69.79
+"standing_wide_16x32_mermaid_js_ms" = 3453.9
+"current_head_marker_start_render_over_standing_mermaid_js" = 0.00008255
+"standing_mermaid_js_over_current_head_marker_start_render" = 12113.85
+
+[post_measurement_marker_start_edge_streaming_2026_07_04.decision]
+kept = true
+reason = "Same-worker ovh-a release Criterion A/B cuts marker-start-wide render from 943.83 us to 285.12 us (3.31x). The new byte-identity unit test covers reverse marker-start and double-marker arrows; other edge cases remain on the Element fallback."

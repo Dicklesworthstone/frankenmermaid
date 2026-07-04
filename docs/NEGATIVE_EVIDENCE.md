@@ -4046,6 +4046,36 @@
 
   Agent: BlackThrush
 
+<!-- tansparrow-marker-start-edge-streaming-landed -->
+### LANDED: stream marker-start edge fragments (marker-start render 3.31x) (2026-07-04)
+- **Lever:** extends the whole-edge streaming fast path to the remaining marker-start edge families
+  whose slow path is still a single `<path>`: reverse half/stick arrows, reverse dotted half/stick arrows,
+  and double arrows. The streamed fragment now writes `marker-start` in the same attribute order as the
+  `Element` builder, then `marker-end`, then optional `stroke-dasharray`. Back-edges, labels, inline styles,
+  animations, source spans, and reduced a11y still fall through to the `Element` path.
+- **Measurement:** same-worker release Criterion A/B on `ovh-a`, per-crate only via `frankenmermaid-cli`
+  bench harness and isolated target dir `/data/projects/.rch-targets/frankenmermaid-cod`.
+  - Baseline on current `origin/main` (`a720e03` plus the marker-start bench harness only):
+    `marker_start_wide_stages/render/16x32` median `943.83 us`.
+  - Candidate with marker-start streaming: median `285.12 us`.
+  - Ratio: `943.83 / 285.12 = 3.310x` faster, `69.79%` lower render time.
+- **Ratio vs ORIG:** standing browser comparator in this repo (`scripts/mermaid_headtohead_cc.mjs`,
+  Mermaid.js 11.15.0 via Puppeteer/system Chromium) records wide 16x32 render median `3453.9 ms`.
+  Candidate marker-start render median is `0.00008255x` of ORIG time, i.e. ORIG is `12113.85x` slower
+  for this render-stage comparison.
+- **Commands:** baseline:
+  `AGENT_NAME=TanSparrow RCH_WORKER=ovh-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod RCH_REQUIRE_REMOTE=1 RCH_FORCE_REMOTE=1 RUSTFLAGS='-C metadata=tansparrow_markerstart_base_bench' rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- marker_start_wide_stages/render/16x32 --measurement-time 8 --warm-up-time 2 --sample-size 30 --noplot`.
+  Candidate:
+  `AGENT_NAME=TanSparrow RCH_WORKER=ovh-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod RCH_REQUIRE_REMOTE=1 RCH_FORCE_REMOTE=1 RUSTFLAGS='-C metadata=tansparrow_markerstart_cand_bench' rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- marker_start_wide_stages/render/16x32 --measurement-time 8 --warm-up-time 2 --sample-size 30 --noplot`.
+- **Behavior proof:** new focused `fm-render-svg` unit test
+  `marker_start_edge_streaming_matches_element_render` compares `render_edge_into` byte-for-byte against
+  `render_edge(...).write_to_string` for reverse half/stick, reverse dotted half/stick, and double arrows.
+- **Tooling note:** literal `cargo bench --release` is rejected by this Cargo; the release-profile bench
+  used `cargo bench --profile release`. Agent Mail registration/reservation as `TanSparrow` remained blocked
+  by the SQLite corruption circuit breaker, so no reservation was available.
+
+  Agent: TanSparrow
+
 <!-- tansparrow-dotted-edge-streaming-landed -->
 ### LANDED: stream dotted no-marker-start edges (dotted-wide render 2.08x) (2026-07-04)
 - **Lever:** extends the existing whole-edge streaming fragment from solid no-marker-start arrows to dotted

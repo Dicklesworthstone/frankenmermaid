@@ -7350,6 +7350,26 @@ fn write_common_edge_path_tail_with_dasharray_into(
     marker_end: &str,
     dasharray: &str,
 ) {
+    write_common_edge_path_tail_with_markers_into(
+        f,
+        stroke_width,
+        style_class,
+        edge_index,
+        "",
+        marker_end,
+        dasharray,
+    );
+}
+
+fn write_common_edge_path_tail_with_markers_into(
+    f: &mut String,
+    stroke_width: f32,
+    style_class: &str,
+    edge_index: i32,
+    marker_start: &str,
+    marker_end: &str,
+    dasharray: &str,
+) {
     use crate::attributes::{AttributeValue, write_escaped_attr};
     f.push_str("\" stroke-width=\"");
     let _ = AttributeValue::Number(stroke_width).write_value(f);
@@ -7357,9 +7377,13 @@ fn write_common_edge_path_tail_with_dasharray_into(
     f.push_str(style_class);
     f.push_str("\" data-fm-edge-id=\"");
     let _ = AttributeValue::Integer(edge_index).write_value(f);
-    // An empty `marker_end` means the slow path's `render_edge` produced no `marker-end` attribute
-    // (e.g. `ArrowType::Line`, whose match arm yields `marker_end = None`), so omit it here too — the
-    // `<path>` closes right after `data-fm-edge-id`. Non-empty callers (solid arrow, …) are unchanged.
+    // Empty marker strings mean the slow path's `render_edge` produced no marker attribute, so omit
+    // them here too. When both are present, `marker-start` must precede `marker-end`, matching the
+    // `Element` builder's insertion order.
+    if !marker_start.is_empty() {
+        f.push_str("\" marker-start=\"");
+        let _ = write_escaped_attr(f, marker_start);
+    }
     if !marker_end.is_empty() {
         f.push_str("\" marker-end=\"");
         let _ = write_escaped_attr(f, marker_end);
@@ -7418,6 +7442,7 @@ where
         stroke_width,
         style_class,
         edge_index,
+        "",
         marker_end,
         "",
         " points to ",
@@ -7438,6 +7463,7 @@ fn write_common_edge_full_fragment_into<F>(
     stroke_width: f32,
     style_class: &str,
     edge_index: i32,
+    marker_start: &str,
     marker_end: &str,
     dasharray: &str,
     arrow_phrase: &str,
@@ -7457,11 +7483,12 @@ fn write_common_edge_full_fragment_into<F>(
     f.push_str("\" role=\"graphics-symbol\" tabindex=\"0\">");
     f.push_str("<path d=\"");
     crate::path::build_smooth_path_by_into(f, point_count, point_at);
-    write_common_edge_path_tail_with_dasharray_into(
+    write_common_edge_path_tail_with_markers_into(
         f,
         stroke_width,
         style_class,
         edge_index,
+        marker_start,
         marker_end,
         dasharray,
     );
@@ -8041,100 +8068,248 @@ fn render_edge_into(out: &mut String, edge_path: &LayoutEdgePath, context: &Edge
     let arrow = ir_edge.map_or(ArrowType::Arrow, |edge| edge.arrow);
 
     // The whole-edge streaming fragment handles every non-reversed arrow whose slow-path `render_edge`
-    // shape is a single `<path>` with no marker-start. Each tuple below is `(stroke_width, style_class,
+    // shape is a single `<path>`. Each tuple below is `(stroke_width, style_class, marker_start,
     // marker_end, dasharray, a11y_phrase)` read straight off `render_edge`'s matches and
     // `describe_edge_labels`'s per-arrow word (surrounded by spaces; `_ => "connects to"`).
-    // Reverse/double arrows (marker-start), back-edges, labels, inline styles, animations, source spans,
-    // and non-full a11y all still fall to the `Element` slow path below.
+    // Back-edges, labels, inline styles, animations, source spans, and non-full a11y all still fall to
+    // the `Element` slow path below.
     // Byte-identity is pinned by `golden_svg_test` + `edge_fast_full_fragment_matches_render`.
-    let stream_arrow: Option<(f32, &str, &str, &str, &str)> = match arrow {
-        ArrowType::Arrow => Some((1.8, "fm-edge-solid", "url(#arrow-end)", "", " points to ")),
-        ArrowType::Line => Some((1.8, "fm-edge-solid", "", "", " connects to ")),
-        ArrowType::OpenArrow => Some((1.8, "fm-edge-solid", "url(#arrow-open)", "", " sends to ")),
-        ArrowType::Circle => Some((1.8, "fm-edge-solid", "url(#arrow-circle)", "", " relates to ")),
-        ArrowType::Cross => Some((1.8, "fm-edge-solid", "url(#arrow-cross)", "", " blocks ")),
-        ArrowType::HalfArrowTop => {
-            Some((1.8, "fm-edge-solid", "url(#arrow-half-top)", "", " connects to "))
-        }
-        ArrowType::HalfArrowBottom => {
-            Some((1.8, "fm-edge-solid", "url(#arrow-half-bottom)", "", " connects to "))
-        }
-        ArrowType::StickArrowTop => {
-            Some((1.8, "fm-edge-solid", "url(#arrow-stick-top)", "", " connects to "))
-        }
-        ArrowType::StickArrowBottom => {
-            Some((1.8, "fm-edge-solid", "url(#arrow-stick-bottom)", "", " connects to "))
-        }
-        ArrowType::ThickArrow => {
-            Some((
-                2.5,
-                "fm-edge-thick",
-                "url(#arrow-filled)",
-                "",
-                " strongly points to ",
-            ))
-        }
-        ArrowType::ThickLine => Some((2.5, "fm-edge-thick", "", "", " strongly connects to ")),
-        ArrowType::DottedArrow => Some((
+    let (stroke_width, style_class, marker_start, marker_end, dasharray, arrow_phrase): (
+        f32,
+        &str,
+        &str,
+        &str,
+        &str,
+        &str,
+    ) = match arrow {
+        ArrowType::Arrow => (
             1.8,
-            "fm-edge-dashed",
+            "fm-edge-solid",
+            "",
             "url(#arrow-end)",
-            "5,5",
-            " optionally points to ",
-        )),
-        ArrowType::DottedOpenArrow => Some((
+            "",
+            " points to ",
+        ),
+        ArrowType::Line => (1.8, "fm-edge-solid", "", "", "", " connects to "),
+        ArrowType::OpenArrow => (
             1.8,
-            "fm-edge-dashed",
+            "fm-edge-solid",
+            "",
             "url(#arrow-open)",
-            "5,5",
-            " optionally sends to ",
-        )),
-        ArrowType::DottedCross => Some((
+            "",
+            " sends to ",
+        ),
+        ArrowType::Circle => (
             1.8,
-            "fm-edge-dashed",
+            "fm-edge-solid",
+            "",
+            "url(#arrow-circle)",
+            "",
+            " relates to ",
+        ),
+        ArrowType::Cross => (
+            1.8,
+            "fm-edge-solid",
+            "",
             "url(#arrow-cross)",
-            "5,5",
-            " connects to ",
-        )),
-        ArrowType::HalfArrowTopDotted => Some((
+            "",
+            " blocks ",
+        ),
+        ArrowType::HalfArrowTop => (
             1.8,
-            "fm-edge-dashed",
+            "fm-edge-solid",
+            "",
             "url(#arrow-half-top)",
-            "5,5",
+            "",
             " connects to ",
-        )),
-        ArrowType::HalfArrowBottomDotted => Some((
+        ),
+        ArrowType::HalfArrowBottom => (
             1.8,
-            "fm-edge-dashed",
+            "fm-edge-solid",
+            "",
             "url(#arrow-half-bottom)",
-            "5,5",
+            "",
             " connects to ",
-        )),
-        ArrowType::StickArrowTopDotted => Some((
+        ),
+        ArrowType::HalfArrowTopReverse => (
             1.8,
-            "fm-edge-dashed",
+            "fm-edge-solid",
+            "url(#arrow-half-bottom)",
+            "",
+            "",
+            " connects to ",
+        ),
+        ArrowType::HalfArrowBottomReverse => (
+            1.8,
+            "fm-edge-solid",
+            "url(#arrow-half-top)",
+            "",
+            "",
+            " connects to ",
+        ),
+        ArrowType::StickArrowTop => (
+            1.8,
+            "fm-edge-solid",
+            "",
             "url(#arrow-stick-top)",
-            "5,5",
+            "",
             " connects to ",
-        )),
-        ArrowType::StickArrowBottomDotted => Some((
+        ),
+        ArrowType::StickArrowBottom => (
             1.8,
-            "fm-edge-dashed",
+            "fm-edge-solid",
+            "",
             "url(#arrow-stick-bottom)",
-            "5,5",
+            "",
             " connects to ",
-        )),
-        ArrowType::DottedLine => Some((
+        ),
+        ArrowType::StickArrowTopReverse => (
+            1.8,
+            "fm-edge-solid",
+            "url(#arrow-stick-bottom)",
+            "",
+            "",
+            " connects to ",
+        ),
+        ArrowType::StickArrowBottomReverse => (
+            1.8,
+            "fm-edge-solid",
+            "url(#arrow-stick-top)",
+            "",
+            "",
+            " connects to ",
+        ),
+        ArrowType::ThickArrow => (
+            2.5,
+            "fm-edge-thick",
+            "",
+            "url(#arrow-filled)",
+            "",
+            " strongly points to ",
+        ),
+        ArrowType::ThickLine => (2.5, "fm-edge-thick", "", "", "", " strongly connects to "),
+        ArrowType::DottedArrow => (
             1.8,
             "fm-edge-dashed",
             "",
+            "url(#arrow-end)",
+            "5,5",
+            " optionally points to ",
+        ),
+        ArrowType::DottedOpenArrow => (
+            1.8,
+            "fm-edge-dashed",
+            "",
+            "url(#arrow-open)",
+            "5,5",
+            " optionally sends to ",
+        ),
+        ArrowType::DottedCross => (
+            1.8,
+            "fm-edge-dashed",
+            "",
+            "url(#arrow-cross)",
+            "5,5",
+            " connects to ",
+        ),
+        ArrowType::HalfArrowTopDotted => (
+            1.8,
+            "fm-edge-dashed",
+            "",
+            "url(#arrow-half-top)",
+            "5,5",
+            " connects to ",
+        ),
+        ArrowType::HalfArrowBottomDotted => (
+            1.8,
+            "fm-edge-dashed",
+            "",
+            "url(#arrow-half-bottom)",
+            "5,5",
+            " connects to ",
+        ),
+        ArrowType::HalfArrowTopReverseDotted => (
+            1.8,
+            "fm-edge-dashed",
+            "url(#arrow-half-bottom)",
+            "",
+            "5,5",
+            " connects to ",
+        ),
+        ArrowType::HalfArrowBottomReverseDotted => (
+            1.8,
+            "fm-edge-dashed",
+            "url(#arrow-half-top)",
+            "",
+            "5,5",
+            " connects to ",
+        ),
+        ArrowType::StickArrowTopDotted => (
+            1.8,
+            "fm-edge-dashed",
+            "",
+            "url(#arrow-stick-top)",
+            "5,5",
+            " connects to ",
+        ),
+        ArrowType::StickArrowBottomDotted => (
+            1.8,
+            "fm-edge-dashed",
+            "",
+            "url(#arrow-stick-bottom)",
+            "5,5",
+            " connects to ",
+        ),
+        ArrowType::StickArrowTopReverseDotted => (
+            1.8,
+            "fm-edge-dashed",
+            "url(#arrow-stick-bottom)",
+            "",
+            "5,5",
+            " connects to ",
+        ),
+        ArrowType::StickArrowBottomReverseDotted => (
+            1.8,
+            "fm-edge-dashed",
+            "url(#arrow-stick-top)",
+            "",
+            "5,5",
+            " connects to ",
+        ),
+        ArrowType::DottedLine => (
+            1.8,
+            "fm-edge-dashed",
+            "",
+            "",
             "5,5",
             " optionally connects to ",
-        )),
-        _ => None,
+        ),
+        ArrowType::DoubleArrow => (
+            1.8,
+            "fm-edge-solid",
+            "url(#arrow-start)",
+            "url(#arrow-end)",
+            "",
+            " points both ways to ",
+        ),
+        ArrowType::DoubleThickArrow => (
+            2.5,
+            "fm-edge-thick",
+            "url(#arrow-start-filled)",
+            "url(#arrow-filled)",
+            "",
+            " strongly points both ways to ",
+        ),
+        ArrowType::DoubleDottedArrow => (
+            1.8,
+            "fm-edge-dashed",
+            "url(#arrow-start)",
+            "url(#arrow-end)",
+            "5,5",
+            " optionally points both ways to ",
+        ),
     };
-    if let Some((stroke_width, style_class, marker_end, dasharray, arrow_phrase)) = stream_arrow
-        && !edge_path.reversed
+    if !edge_path.reversed
         && config.embed_theme_css
         && !config.animations_enabled
         && !config.include_source_spans
@@ -8157,6 +8332,7 @@ fn render_edge_into(out: &mut String, edge_path: &LayoutEdgePath, context: &Edge
             stroke_width,
             style_class,
             edge_index as i32,
+            marker_start,
             marker_end,
             dasharray,
             arrow_phrase,
@@ -8383,6 +8559,91 @@ mod tests {
                 "streamed dotted edge must match Element render for {arrow:?}"
             );
             assert!(streamed.contains("stroke-dasharray=\"5,5\""));
+        }
+    }
+
+    #[test]
+    fn marker_start_edge_streaming_matches_element_render() {
+        let config = SvgRenderConfig::default();
+        let colors = ThemeColors::default();
+        let detail = resolve_detail_profile(800.0, 600.0, &config);
+
+        for arrow in [
+            ArrowType::HalfArrowTopReverse,
+            ArrowType::HalfArrowBottomReverse,
+            ArrowType::StickArrowTopReverse,
+            ArrowType::StickArrowBottomReverse,
+            ArrowType::HalfArrowTopReverseDotted,
+            ArrowType::HalfArrowBottomReverseDotted,
+            ArrowType::StickArrowTopReverseDotted,
+            ArrowType::StickArrowBottomReverseDotted,
+            ArrowType::DoubleArrow,
+            ArrowType::DoubleThickArrow,
+            ArrowType::DoubleDottedArrow,
+        ] {
+            let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+            ir.nodes.push(IrNode {
+                id: "A <&>".to_string(),
+                ..IrNode::default()
+            });
+            ir.nodes.push(IrNode {
+                id: "B \"q\"".to_string(),
+                ..IrNode::default()
+            });
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(0)),
+                to: IrEndpoint::Node(IrNodeId(1)),
+                arrow,
+                ..IrEdge::default()
+            });
+            let edge_path = LayoutEdgePath {
+                edge_index: 0,
+                span: Span::default(),
+                points: [
+                    fm_layout::LayoutPoint { x: 0.0, y: 0.0 },
+                    fm_layout::LayoutPoint { x: 32.0, y: 48.0 },
+                    fm_layout::LayoutPoint { x: 72.0, y: 48.0 },
+                    fm_layout::LayoutPoint { x: 96.0, y: 80.0 },
+                ]
+                .into_iter()
+                .collect(),
+                reversed: false,
+                is_self_loop: false,
+                parallel_offset: 0.0,
+                bundle_count: 1,
+                bundled: false,
+            };
+            let context = EdgeRenderContext {
+                ir: &ir,
+                offset_x: 1.5,
+                offset_y: -2.0,
+                config: &config,
+                detail,
+                colors: &colors,
+                accessible_node_labels: None,
+            };
+
+            let mut streamed = String::new();
+            render_edge_into(&mut streamed, &edge_path, &context);
+
+            let mut element_rendered = String::new();
+            render_edge(&edge_path, &context).write_to_string(&mut element_rendered);
+
+            assert_eq!(
+                streamed, element_rendered,
+                "streamed marker-start edge must match Element render for {arrow:?}"
+            );
+            assert!(streamed.contains("marker-start=\"url(#arrow-"));
+            if matches!(
+                arrow,
+                ArrowType::HalfArrowTopReverseDotted
+                    | ArrowType::HalfArrowBottomReverseDotted
+                    | ArrowType::StickArrowTopReverseDotted
+                    | ArrowType::StickArrowBottomReverseDotted
+                    | ArrowType::DoubleDottedArrow
+            ) {
+                assert!(streamed.contains("stroke-dasharray=\"5,5\""));
+            }
         }
     }
 
