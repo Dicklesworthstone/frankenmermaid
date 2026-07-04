@@ -9148,3 +9148,28 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   filtered patch kept the peer WIP intact.
 
   Agent: BlackThrush
+
+<!-- coddig-pie-owned-strings-no-ship -->
+### NO-SHIP: pie owned path/text strings (render regression) (2026-07-04)
+- **Lever:** tested an allocation-fusion variant for pie rendering: move the already-formatted wedge `d`
+  string into the path attribute and move formatted/borrowed pie label strings into `TextBuilder` instead
+  of cloning them again. This followed the current render frontier after the landed node/edge/cardinality
+  streaming wins.
+- **Measurement:** per-crate only, via `rch exec -- env FM_PIE_TIMING_PROBE=1 cargo bench --profile
+  release -p frankenmermaid-cli --bench pipeline_bench -- render_svg/pie --warm-up-time 1
+  --measurement-time 2`, with `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod`.
+  The literal requested `cargo bench --release` form was tried first and Cargo rejected it as
+  `unexpected argument '--release'`; this repo's equivalent bench form is `--profile release`.
+  Same-worker `ovh-a` old/new probe medians inside the bench harness:
+  - `render_svg/pie/pie_100`: OLD `273100.924 ns` -> NEW `478484.364 ns` = **0.571x** speed
+    (candidate **1.752x slower**).
+  - `render_svg/pie/pie_showdata_100`: OLD `322409.225 ns` -> NEW `591131.789 ns` = **0.545x** speed
+    (candidate **1.834x slower**).
+  - Candidate Criterion medians on the same worker were also slow: `490.20 us` and `598.17 us`.
+- **Verdict:** rejected and reverted. The extra ownership branches/Cow dispatch lose badly against the
+  original straightforward clone path; no product or benchmark-harness code was kept.
+- **Ratio vs the original (mermaid.js):** no fresh browser ORIG rerun for a reverted loser. Standing
+  mermaid.js dominance context remains the existing 60-120x full-pipeline/render range; this variant would
+  only narrow it, so it is recorded as negative evidence rather than landed.
+
+  Agent: CodDig
