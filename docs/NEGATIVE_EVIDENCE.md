@@ -9320,3 +9320,30 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
 - **Staging:** single-file change in `crates/fm-layout/src/lib.rs` (no peer WIP there — direct `git add`).
 
   Agent: BlackThrush
+<!-- blackthrush-edge-svg-content-aware-presize-noship -->
+### NO-SHIP (reverted ~0-gain): content-aware edge-buffer presize for cardinality/labeled edges (2026-07-04)
+- **Hypothesis:** ER render is ~24% memmove+memcpy (memmove 13.5% + `_mi_memcpy` 11.2%). ER relationship
+  edges measured ~985 B/edge (crow's-foot cardinality markers + labels) vs the flowchart-tuned presize bases
+  (`edge_svg` 480 B/edge at lib.rs:2885, document `EDGE_BYTES` 384 at `layout_svg_capacity_hint`), so the
+  buffers looked under-sized → 1-2 full-buffer realloc+copies/render. Added `edge_extra_capacity_bytes(ir)`
+  (per-edge: `label.len()*4` + `560` when `edge.extras.is_some()`, i.e. ER/class cardinality) to both
+  presizes so labeled/cardinality edges get their own budget.
+- **Result: WASH, reverted.** Instruction A/B (`perf stat -e instructions:u`, load-independent; OLD =
+  committed HEAD `59635bf`, NEW +presize):
+  - `er render n=300` **1.020x**, but `er render n=500` **0.997x** (inconsistent — doesn't scale, so noise
+    not signal); `class` 0.999, `sankey` 0.998, `flowchart` 0.999 — all flat.
+- **Why it failed:** the 24% memory movement is the **inherent `raw_svg`→doc→final-String assembly copy**
+  (each `node_svg`/`edge_svg` fragment is written once, then copied a second time into the document buffer),
+  NOT buffer reallocs. My estimate DID cover ER's ~985 B/edge (so reallocs were prevented) yet instructions
+  didn't drop — proving reallocs weren't the cost. Worse, the added per-render O(edges) scan (iterating
+  `ir.edges` twice, label lookup + `extras` check) roughly offset any saving (ER n=500 went slightly
+  negative). Byte-identical (golden `svg_golden_snapshots_are_stable` + 237 lib tests pass; output length
+  exact n=all shapes) — but a byte-identical wash is not landable.
+- **DURABLE LESSON:** memmove/memcpy% in a *fully-streamed* render is the **intermediate-fragment →
+  document double-copy**, which is STRUCTURAL (would need writing fragments directly into the final buffer,
+  restructuring the doc-child assembly), not a presize-tunable realloc. Do NOT re-attempt presize tuning on
+  `edge_svg`/`node_svg`/`layout_svg_capacity_hint` for the labeled shapes — the reallocs it targets aren't
+  the cost. Confirm a presize hypothesis by checking it SCALES with N before landing (this one didn't).
+- **Ratio vs the original (mermaid.js):** n/a (reverted wash; no code kept).
+
+  Agent: BlackThrush
