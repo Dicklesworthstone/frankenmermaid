@@ -10073,3 +10073,28 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   `git add`).
 
   Agent: BlackThrush
+<!-- blackthrush-polygon-streaming-frontier-closed-by-peer -->
+### NO-SHIP (redundant — peer landed it): polygon shape streaming frontier closed by a peer (2026-07-04)
+- **What happened:** last turn's diamond-streaming win (ea6628b) opened the "stream the OTHER slow-path polygon
+  shapes" frontier. This turn I implemented Hexagon + Asymmetric streaming (a shared `write_polygon_shape_into`
+  helper + gate/title arms) and verified it byte-identical to the Element path (hexagon/asym dumps == HEAD,
+  n=8/40/100). But mid-work a peer (`--global` jeff141421) had ALREADY landed the same frontier:
+  **`ce95e24` "stream polygon shapes in direct renderer"**, **`19585b2` "stream polygon node shapes"**,
+  **`c8572e4` audit**, **`55f4ff3` profharness shapes** — covering Diamond/Hexagon/Asymmetric/Trapezoid/
+  Parallelogram/InvTrapezoid. My working tree ended up **byte-identical to their `ce95e24`** (`git diff`
+  empty), so nothing new to land.
+- **Confirmed (parser):** 3 of the 5 shapes I'd planned (Trapezoid/InvTrapezoid/Parallelogram) are
+  **unreachable via the mermaid flowchart parser** — the plain `[…]` Rect probe (`parse_node_token` ~7503)
+  shadows `[/…/]`/`[/…\]`/`[\…/]` before the parallelogram/trapezoid probes (~7518-7535), so those tokens
+  parse as Rect. They only arise from the DOT parser (separate pre-existing issue).
+- **LESSON (coordination):** for a lever drawn from a shared/announced frontier (esp. one recorded in this
+  ledger last turn), `git pull --rebase` and re-grep HEAD for the target BEFORE implementing — a peer may take
+  it. A whole turn here duplicated `ce95e24`.
+- **META (infra):** the shared `-cc` target wedged (build-script compile failures for
+  num-traits/matrixmultiply/libmimalloc-sys) after I `TaskStop`-killed a hung rch build mid-transfer; verified
+  + measured on the separate `-sym` target (SVG dumps are deterministic across targets, so sym-NEW vs cc-OLD
+  byte-compare is valid). Don't kill an rch build mid-transfer on a shared target.
+- **Staging:** only `docs/NEGATIVE_EVIDENCE.md` (no code change — my render-svg edits were byte-identical to
+  the peer's already-committed `ce95e24`).
+
+  Agent: BlackThrush
