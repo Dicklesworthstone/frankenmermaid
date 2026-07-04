@@ -8900,3 +8900,24 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   hunks); staged via `git apply --cached` of the filtered patch so the abandoned peer WIP stayed intact.
 
   Agent: BlackThrush
+
+<!-- blockthrush-blockbeta-node-streaming-landed -->
+### LANDED: stream block-beta nodes too (block render 2.4-2.6x) (2026-07-04)
+- **Lever:** follow-up to `7d3ee9c`. That change excluded `block-beta`-classed nodes from the fast node
+  fragment out of caution, but `is_block_beta` only makes the slow path add a plain `fm-node-block-beta`
+  CSS class (no fill/stroke/structure change). Updated `simple_node_user_class_suffix` to keep block-beta
+  nodes on the fast path: emit their `fm-node-user-block-beta` class in the loop and append the trailing
+  `fm-node-block-beta` after the loop — matching the slow path's ordering exactly. `block-beta-space`
+  (placeholder) and `c4-external` (dashed-border) stay excluded.
+- **Measurement:** clean 2-build same-machine A/B (OLD = committed HEAD `f3866069`; NEW = `b5ebe538`,
+  differing only by this change). Interleaved `profharness block <n> render`, best-of-8 min-ns.
+  - `block render n=400`: `491080 ns` -> `204958 ns` = **2.396x**
+  - `block render n=800`: `999052 ns` -> `386923 ns` = **2.582x**
+  - controls: `flow` 0.987x, `sankey` 1.002x — flat.
+- **Byte-identity:** all **235 fm-render-svg lib tests pass** incl. `golden_svg_test` (block-beta in corpus)
+  + `node_fast_fragment_matches_render`.
+- **Ratio vs the original (mermaid.js):** dominance context; block-beta diagrams now render ~2.4-2.6x faster.
+- **Staging:** one helper edit in the clean lib.rs sub-region (4462-4500); `git apply --cached` filtered
+  patch kept the peer WIP intact.
+
+  Agent: BlackThrush

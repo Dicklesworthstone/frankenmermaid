@@ -4462,9 +4462,9 @@ fn lookup_centrality_tier(
 /// their `Attributes` Vecs + `write_into` walks — the per-node construction is ~60% of wide render.
 /// The ` fm-node-user-{sanitized}` class suffix the slow path appends for a node's custom classes, but
 /// ONLY when every class is "simple" — none triggers a state/border keyword (highlight/inactive/dashed/
-/// double) or a special layout class (`c4-external`/`block-beta`/`block-beta-space`) that would change the
-/// node's rendered fill/stroke/structure. Returns `None` when any class needs the `Element` slow path, so
-/// the fast node fragment stays byte-identical. Empty/no classes yield `Some("")` (no allocation).
+/// double) or a special class that changes the node's rendered fill/stroke/structure. Returns `None` when
+/// any class needs the `Element` slow path, so the fast node fragment stays byte-identical. Empty/no
+/// classes yield `Some("")` (no allocation).
 fn simple_node_user_class_suffix(node: &fm_core::IrNode) -> Option<String> {
     // Nodes with compartments (class diagrams) or C4 metadata render extra content the plain-rect fast
     // fragment does not produce; they were implicitly excluded by the old `classes.is_empty()` gate, so
@@ -4473,6 +4473,7 @@ fn simple_node_user_class_suffix(node: &fm_core::IrNode) -> Option<String> {
         return None;
     }
     let mut suffix = String::new();
+    let mut block_beta = false;
     for class in &node.classes {
         let kw = scan_node_class_keywords(class);
         if kw.highlighted
@@ -4480,16 +4481,26 @@ fn simple_node_user_class_suffix(node: &fm_core::IrNode) -> Option<String> {
             || kw.dashed_border
             || kw.double_border
             || class.eq_ignore_ascii_case("c4-external")
-            || class.eq_ignore_ascii_case("block-beta")
             || class.eq_ignore_ascii_case("block-beta-space")
         {
             return None;
+        }
+        // `block-beta` only makes the slow path add a plain `fm-node-block-beta` class (no fill/structure
+        // change), so keep it on the fast path and replicate that class below. `block-beta-space` is a
+        // placeholder node (already excluded by the fast gate's `!placeholder_space_node`) — reject it.
+        if class.eq_ignore_ascii_case("block-beta") {
+            block_beta = true;
         }
         let sanitized = sanitize_css_token(class);
         if !sanitized.is_empty() {
             suffix.push_str(" fm-node-user-");
             suffix.push_str(&sanitized);
         }
+    }
+    // The slow path appends `fm-node-block-beta` AFTER the per-class `fm-node-user-…` loop (see the
+    // `is_block_beta` block in `render_node`), so it goes last here too. Byte-identical.
+    if block_beta {
+        suffix.push_str(" fm-node-block-beta");
     }
     Some(suffix)
 }
