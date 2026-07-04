@@ -4638,6 +4638,227 @@ fn simple_node_user_class_suffix(node: &fm_core::IrNode) -> Option<String> {
     Some(suffix)
 }
 
+/// The ` fm-node-user-{sanitized}` class suffix for a **class-diagram node's** custom classes — the
+/// class-node twin of [`simple_node_user_class_suffix`] (which excludes `class_meta` nodes outright).
+/// Returns `None` (forcing the `Element` slow path) whenever any class would make `render_node` add a
+/// state/border keyword class, a special fill/structure, or a block-beta marker — none of which the
+/// class-node streaming fragment reproduces. Empty/no classes yield `Some("")`. Class nodes are never
+/// block-beta/kanban/journey in practice, but every such case is rejected so the fragment stays
+/// byte-identical to the slow path (pinned by `svg_golden_snapshots_are_stable`).
+fn simple_class_node_user_suffix(node: &fm_core::IrNode) -> Option<String> {
+    let mut suffix = String::new();
+    for class in &node.classes {
+        let kw = scan_node_class_keywords(class);
+        if kw.highlighted
+            || kw.inactive
+            || kw.dashed_border
+            || kw.double_border
+            || class.eq_ignore_ascii_case("c4-external")
+            || class.eq_ignore_ascii_case("block-beta")
+            || class.eq_ignore_ascii_case("block-beta-space")
+        {
+            return None;
+        }
+        // kanban-priority / journey-score classes drive an inline `style="fill: …"` on the shape in the
+        // slow path (the streaming rect always uses the gradient fill), so reject them.
+        match class.as_str() {
+            "kanban-priority-high"
+            | "kanban-priority-critical"
+            | "kanban-priority-medium"
+            | "kanban-priority-low"
+            | "journey-score-1"
+            | "journey-score-2"
+            | "journey-score-3"
+            | "journey-score-4"
+            | "journey-score-5" => return None,
+            _ => {}
+        }
+        let sanitized = sanitize_css_token(class);
+        if !sanitized.is_empty() {
+            suffix.push_str(" fm-node-user-");
+            suffix.push_str(&sanitized);
+        }
+    }
+    Some(suffix)
+}
+
+/// Stream a class node's compartment stack (stereotype + name + separators + attribute/method rows) into
+/// `f`. Extracted from [`render_class_compartments`]' streaming fast path so the whole-class-node fast
+/// path ([`write_class_node_fragment_into`]) can reuse the exact same body — same `<text>`/`<line>`
+/// attrs, order, positions, and cursor advance. Byte-identical to the `Element` slow path.
+#[allow(clippy::too_many_arguments)]
+fn write_class_compartments_into(
+    f: &mut String,
+    node: &fm_core::IrNode,
+    meta: &fm_core::IrClassNodeMeta,
+    ir: &MermaidDiagramIr,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    font_size: f32,
+    config: &SvgRenderConfig,
+    colors: &ThemeColors,
+) {
+    let line_h = font_size * config.line_height;
+    let text_x = x + 8.0;
+    let mut cursor_y = y + line_h;
+    let fill = colors.text.as_str();
+    let class_name = node
+        .label
+        .and_then(|lid| ir.labels.get(lid.0))
+        .map(|l| l.text.as_str())
+        .unwrap_or(&node.id);
+    if let Some(stereotype) = &meta.stereotype {
+        let stereo_text = match stereotype {
+            fm_core::ClassStereotype::Interface => "<<interface>>",
+            fm_core::ClassStereotype::Abstract => "<<abstract>>",
+            fm_core::ClassStereotype::Enum => "<<enumeration>>",
+            fm_core::ClassStereotype::Service => "<<service>>",
+            fm_core::ClassStereotype::Custom(s) => s.as_str(),
+        };
+        write_class_text_into(
+            f,
+            x + w / 2.0,
+            cursor_y,
+            "middle",
+            font_size * 0.85,
+            " font-style=\"italic\"",
+            fill,
+            stereo_text,
+        );
+        cursor_y += line_h;
+    }
+    // No-generics name is written directly (the slow path's `class_name.to_string()` copy is avoided).
+    if meta.generics.is_empty() {
+        write_class_text_into(
+            f,
+            x + w / 2.0,
+            cursor_y,
+            "middle",
+            font_size,
+            " font-weight=\"bold\"",
+            fill,
+            class_name,
+        );
+    } else {
+        let display_name = format!("{class_name}<{}>", meta.generics.join(", "));
+        write_class_text_into(
+            f,
+            x + w / 2.0,
+            cursor_y,
+            "middle",
+            font_size,
+            " font-weight=\"bold\"",
+            fill,
+            &display_name,
+        );
+    }
+    cursor_y += line_h * 0.5;
+    write_class_separator_into(f, x, cursor_y, x + w);
+    cursor_y += line_h * 0.3;
+    let member_font_size = font_size * 0.9;
+    for attr in &meta.attributes {
+        cursor_y += member_font_size * config.line_height * 0.9;
+        if cursor_y > y + h - line_h * 0.5 {
+            break;
+        }
+        let vis = visibility_symbol(attr.visibility);
+        let text = if let Some(ref ret) = attr.return_type {
+            format!("{vis}{}: {ret}", attr.name)
+        } else {
+            format!("{vis}{}", attr.name)
+        };
+        write_class_text_into(f, text_x, cursor_y, "start", member_font_size, "", fill, &text);
+    }
+    if !meta.attributes.is_empty() && !meta.methods.is_empty() {
+        cursor_y += line_h * 0.3;
+        write_class_separator_into(f, x, cursor_y, x + w);
+        cursor_y += line_h * 0.3;
+    }
+    for method in &meta.methods {
+        cursor_y += member_font_size * config.line_height * 0.9;
+        if cursor_y > y + h - line_h * 0.5 {
+            break;
+        }
+        let vis = visibility_symbol(method.visibility);
+        let suffix = if method.is_abstract {
+            "*"
+        } else if method.is_static {
+            "$"
+        } else {
+            ""
+        };
+        let ret = method
+            .return_type
+            .as_deref()
+            .map(|t| format!(": {t}"))
+            .unwrap_or_default();
+        let text = format!("{vis}{}{suffix}{ret}", method.name);
+        write_class_text_into(f, text_x, cursor_y, "start", member_font_size, "", fill, &text);
+    }
+}
+
+/// Stream a complete class-diagram node (`<g>` + gradient `<rect>` + compartment stack + `<title>`)
+/// directly into `out`, **byte-identical** to what `render_node` builds via `Element`s — the class-node
+/// analogue of [`write_common_node_fragment_into`]. The `<g>`/rect/title bytes replicate that helper's
+/// (proven) sequence for a `Rect` shape; the body is [`write_class_compartments_into`] (the same code
+/// `render_class_compartments`' fast path runs). Used only via `render_node_into`'s class gate, which
+/// guarantees none of `render_node`'s conditional classes/children/post-processing apply. Skips the
+/// group + rect `Element` builds, their `Attributes` Vecs, and the compartment fragment's second copy.
+#[allow(clippy::too_many_arguments)]
+fn write_class_node_fragment_into(
+    out: &mut String,
+    node: &fm_core::IrNode,
+    meta: &fm_core::IrClassNodeMeta,
+    node_id: &str,
+    node_index: usize,
+    raw_label: &str,
+    ir: &MermaidDiagramIr,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    rx: f32,
+    font_size: f32,
+    config: &SvgRenderConfig,
+    colors: &ThemeColors,
+    user_classes: &str,
+) {
+    use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
+    use std::fmt::Write as _;
+    // <g id=".." class="fm-node fm-node-accent-N fm-node-shape-rect[ fm-node-user-…]" data-id=".." …>
+    out.push_str("<g id=\"");
+    fm_core::write_mermaid_node_element_id_into(out, node_id, node_index);
+    out.push_str("\" class=\"fm-node fm-node-accent-");
+    let _ = write!(out, "{}", stable_accent_index(node_id));
+    out.push(' ');
+    out.push_str(node_shape_css_class(fm_core::NodeShape::Rect));
+    out.push_str(user_classes);
+    out.push_str("\" data-id=\"");
+    let _ = write_escaped_attr(out, node_id);
+    out.push_str("\" role=\"graphics-symbol\" aria-label=\"");
+    let _ = write_escaped_attr(out, raw_label);
+    out.push_str("\" tabindex=\"0\">");
+    // <rect x y width height rx fill="url(#fm-node-gradient)"/> — same attr order as the common fragment.
+    out.push_str("<rect x=\"");
+    let _ = AttributeValue::Number(x).write_value(out);
+    out.push_str("\" y=\"");
+    let _ = AttributeValue::Number(y).write_value(out);
+    out.push_str("\" width=\"");
+    let _ = AttributeValue::Number(w).write_value(out);
+    out.push_str("\" height=\"");
+    let _ = AttributeValue::Number(h).write_value(out);
+    out.push_str("\" rx=\"");
+    let _ = AttributeValue::Number(rx).write_value(out);
+    out.push_str("\" fill=\"url(#fm-node-gradient)\"/>");
+    write_class_compartments_into(out, node, meta, ir, x, y, w, h, font_size, config, colors);
+    // <title>Node: {raw_label}, rectangle</title></g> — describe_node's Rect form, written piecewise.
+    out.push_str("<title>Node: ");
+    let _ = write_escaped_text(out, raw_label);
+    out.push_str(", rectangle</title></g>");
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_common_node_fragment(
     node_id: &str,
@@ -4825,6 +5046,55 @@ fn render_node_into(
         .map(str::trim)
         .filter(|icon| !icon.is_empty())
         .filter(|_| ir_node.is_none_or(|node| node.class_meta.is_none() && node.c4_meta.is_none()));
+
+    // Whole-class-node streaming fast path: a themed class-diagram node with compartments (name +
+    // attribute/method rows) whose config carries no conditional render (same gate class as the common
+    // node fast path, plus the class-node specifics). `render_node`'s slow path would build a group
+    // `Element` + rect `Element` + a *separate* compartment fragment `String` wrapped in a child; stream
+    // the whole `<g>…</g>` in place instead. Byte-identical (pinned by `svg_golden_snapshots_are_stable`).
+    if let Some(node) = ir_node
+        && matches!(shape, NodeShape::Rect)
+        && let Some(meta) = node.class_meta.as_deref()
+        && (!meta.attributes.is_empty() || !meta.methods.is_empty())
+        && config.embed_theme_css
+        && config.node_gradients
+        && !emit_classdef_classes
+        && !config.animations_enabled
+        && !config.include_source_spans
+        && config.a11y.aria_labels
+        && config.a11y.keyboard_nav
+        && config.a11y.text_alternatives
+        && shape_style.is_none()
+        && text_style.is_none()
+        && node_icon.is_none()
+        && !placeholder_space_node
+        && lookup_centrality_tier(centrality_map, node_box.node_index).is_none()
+        && node.requirement_meta.is_none()
+        && node.menu_links.is_empty()
+        && node.href().is_none()
+        && node.callback().is_none()
+        && let Some(user_classes) = simple_class_node_user_suffix(node)
+    {
+        write_class_node_fragment_into(
+            out,
+            node,
+            meta,
+            node_id,
+            node_box.node_index,
+            raw_label_text,
+            ir,
+            x,
+            y,
+            w,
+            h,
+            config.rounded_corners * 0.55,
+            node_font_size,
+            config,
+            colors,
+            &user_classes,
+        );
+        return;
+    }
 
     // Same gate as `render_node`'s fast path (permit_fast is always true on this serialize-only path).
     // `user_class_suffix` is `Some("")` for the common no-class node and `Some(" fm-node-user-…")` for a
@@ -6064,104 +6334,8 @@ fn render_class_compartments(
     // node. Byte-identical to the Element path below (same attrs/order/positions/cursor advance); every
     // other case (label style, classdef, non-embedded CSS) falls through.
     if label_style.is_none() && !emit_classdef_classes && config.embed_theme_css {
-        let line_h = font_size * config.line_height;
-        let text_x = x + 8.0;
-        let mut cursor_y = y + line_h;
-        let fill = colors.text.as_str();
-        let class_name = node
-            .label
-            .and_then(|lid| ir.labels.get(lid.0))
-            .map(|l| l.text.as_str())
-            .unwrap_or(&node.id);
         let mut f = String::new();
-        if let Some(stereotype) = &meta.stereotype {
-            let stereo_text = match stereotype {
-                fm_core::ClassStereotype::Interface => "<<interface>>",
-                fm_core::ClassStereotype::Abstract => "<<abstract>>",
-                fm_core::ClassStereotype::Enum => "<<enumeration>>",
-                fm_core::ClassStereotype::Service => "<<service>>",
-                fm_core::ClassStereotype::Custom(s) => s.as_str(),
-            };
-            write_class_text_into(
-                &mut f,
-                x + w / 2.0,
-                cursor_y,
-                "middle",
-                font_size * 0.85,
-                " font-style=\"italic\"",
-                fill,
-                stereo_text,
-            );
-            cursor_y += line_h;
-        }
-        // No-generics name is written directly (the slow path's `class_name.to_string()` copy is avoided).
-        if meta.generics.is_empty() {
-            write_class_text_into(
-                &mut f,
-                x + w / 2.0,
-                cursor_y,
-                "middle",
-                font_size,
-                " font-weight=\"bold\"",
-                fill,
-                class_name,
-            );
-        } else {
-            let display_name = format!("{class_name}<{}>", meta.generics.join(", "));
-            write_class_text_into(
-                &mut f,
-                x + w / 2.0,
-                cursor_y,
-                "middle",
-                font_size,
-                " font-weight=\"bold\"",
-                fill,
-                &display_name,
-            );
-        }
-        cursor_y += line_h * 0.5;
-        write_class_separator_into(&mut f, x, cursor_y, x + w);
-        cursor_y += line_h * 0.3;
-        let member_font_size = font_size * 0.9;
-        for attr in &meta.attributes {
-            cursor_y += member_font_size * config.line_height * 0.9;
-            if cursor_y > y + h - line_h * 0.5 {
-                break;
-            }
-            let vis = visibility_symbol(attr.visibility);
-            let text = if let Some(ref ret) = attr.return_type {
-                format!("{vis}{}: {ret}", attr.name)
-            } else {
-                format!("{vis}{}", attr.name)
-            };
-            write_class_text_into(&mut f, text_x, cursor_y, "start", member_font_size, "", fill, &text);
-        }
-        if !meta.attributes.is_empty() && !meta.methods.is_empty() {
-            cursor_y += line_h * 0.3;
-            write_class_separator_into(&mut f, x, cursor_y, x + w);
-            cursor_y += line_h * 0.3;
-        }
-        for method in &meta.methods {
-            cursor_y += member_font_size * config.line_height * 0.9;
-            if cursor_y > y + h - line_h * 0.5 {
-                break;
-            }
-            let vis = visibility_symbol(method.visibility);
-            let suffix = if method.is_abstract {
-                "*"
-            } else if method.is_static {
-                "$"
-            } else {
-                ""
-            };
-            let ret = method
-                .return_type
-                .as_deref()
-                .map(|t| format!(": {t}"))
-                .unwrap_or_default();
-            let text = format!("{vis}{}{suffix}{ret}", method.name);
-            write_class_text_into(&mut f, text_x, cursor_y, "start", member_font_size, "", fill, &text);
-        }
+        write_class_compartments_into(&mut f, node, meta, ir, x, y, w, h, font_size, config, colors);
         group = group.child(Element::raw_svg(f));
         return group;
     }

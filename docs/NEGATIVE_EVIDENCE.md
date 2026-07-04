@@ -9224,3 +9224,39 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   filtered patch kept the peer WIP intact.
 
   Agent: BlackThrush
+<!-- blackthrush-class-node-streaming-landed -->
+### LANDED: stream the whole class-diagram node (`<g>`+rect+compartments+title) (class render 2.6-2.7x) (2026-07-04)
+- **Lever:** profiled the biggest full-pipeline shape (`class` 831us/n=300, 2.7x flowchart). Full-pipeline
+  self-time was ~28% allocation/memmove (mimalloc funcs ~22% + memmove 6%), and the #1 render self-time
+  function was `render_node` (10.5% class-render / 6.6% full). Class nodes with member compartments took
+  `render_node`'s Element slow path: a `group` Element (Attributes Vec) + a `rect` Element + a **separate**
+  compartment fragment `String` wrapped in an `Element::raw_svg` child, then a `write_to_string` tree walk —
+  ~16.6K instr/node. Extracted the compartment body into `write_class_compartments_into` and added a
+  `write_class_node_fragment_into` streaming fast path in `render_node_into` (gated exactly like the common
+  node fast path + class specifics: Rect shape, `class_meta` with members, embed CSS, gradients, a11y on, no
+  style/icon/centrality/requirement/href/menu, and `simple_class_node_user_suffix` rejecting any
+  keyword/kanban/journey class). Streams `<g id class data-id role aria-label tabindex><rect/>{compartments}
+  <title>…</title></g>` in place. Drops to ~7.8K instr/node.
+- **Byte-identity:** reuses the proven `write_common_node_fragment_into` group/rect/title byte sequence
+  (rect attr order `x y width height rx fill` is already pinned) + the *verbatim* compartment code the old
+  fast path ran. **All 237 fm-render-svg lib tests pass** incl. `svg_golden_snapshots_are_stable`; output
+  length exact-matches OLD across `class`/`classcard` n=20..500.
+- **Measurement:** 2-build same-machine A/B (OLD = committed HEAD `2df97c8`; NEW differs only by this change).
+  Instruction count via `perf stat -e instructions:u` (load-independent — the VM was at load 86 mid-run, so
+  wall-clock was corroborated only once load fell to 11):
+  - `class render n=300`: **2.12x** fewer instr (19.87B->9.38B); wall-clock **2.61x** (392956->150766 ns).
+  - `class render n=500`: **2.19x** fewer instr (32.18B->14.70B); wall-clock **2.71x** (643071->237160 ns).
+  - `class full pipeline n=300`: wall-clock **1.42x** (823292->579429 ns).
+  - Win scales with node count (1.43x instr @100 -> 2.19x @500).
+  - Controls flat (untouched paths): `classcard` 0.996 (no compartments), `flowchart` 0.995, `er` 0.998,
+    `state` 0.994, `pie` 1.000 (instr). The small -0.5% is byte-identical recompile code-layout noise.
+- **Ratio vs the original (mermaid.js):** dominance context (standing full-pipeline 63-124x); class diagrams
+  with member compartments — the last un-streamed heavy node type — now render ~2.6x faster, ~1.4x full.
+- **Method note:** the zsh no-word-split trap (`set -- $spec` doesn't split) initially made the A/B measure
+  the *default flowchart* (flat ~256ns wash) — caught it because OLD render didn't scale with size. Redone
+  with explicit args. Recorded per memory's standing warning.
+- **Staging:** 3 hunks (new fns after `simple_node_user_class_suffix`, gate in `render_node_into`, body
+  extraction in `render_class_compartments`); `git apply --cached` filtered patch kept the 18 peer WIP hunks
+  intact.
+
+  Agent: BlackThrush
