@@ -9526,3 +9526,30 @@ OLD = committed HEAD `bcc41d5`).
 - **Staging:** single-file change in `crates/fm-core/src/lib.rs` (no peer WIP there — direct `git add`).
 
   Agent: BlackThrush
+<!-- blackthrush-span-for-ascii-len-landed -->
+### LANDED: span_for uses line.len() for ASCII lines instead of chars().count() (parse 0.7-3.4x all shapes) (2026-07-04)
+- **Lever:** `span_for` (fm-parser, called per statement in EVERY parser — 45 sites) built the span length via
+  `line.chars().count()`, which the profile showed hitting `core::str::count::char_count_general_case` (~3%
+  of class parse). For an all-ASCII line — the overwhelming majority of Mermaid source (identifiers,
+  keywords, operators, numeric coords) — the char count equals `line.len()`, an O(1) field read. Gate on
+  `line.is_ascii()` (a fast SIMD byte reduction) and use `len()` on the ASCII path; keep `chars().count()`
+  for the rare non-ASCII line.
+- **Byte-identity:** `is_ascii()` gates so the span length is the exact same value either way (`len() ==
+  char count` for ASCII; the non-ASCII path is unchanged). **All fm-parser lib tests pass** (exit 0, incl.
+  the span-position tests); full-pipeline output length exact-matches OLD across class/flowchart/state/er/
+  seq/gantt/block/pie (n=300).
+- **Measurement:** 2-build same-machine A/B (OLD = committed HEAD `28859ad`; NEW differs only by this change).
+  Instructions (`perf stat -e instructions:u`, load-independent — load was 87, so wall-clock was skipped):
+  fewer on every shape — `class parse` **1.034x** (biggest parse phase; 21.13B->20.43B), `flowchart` **1.028x**,
+  `seq` **1.025x**, `er` **1.022x**, `gantt` **1.017x**, `state` **1.007x**.
+- **Ratio vs the original (mermaid.js):** dominance context (parse 70-100x); per-statement span construction
+  across all parsers is now O(1) on the common ASCII line.
+- **LEVER (reusable):** grep `.chars().count()` on a hot path where the value is a length/column — for ASCII
+  input it equals `.len()`; gate on `is_ascii()` (cheaper than the general char-count byte scan). Bigger than
+  the usual decode-removal because it replaces an O(n) scan with an O(1) read (not just a faster O(n) scan).
+  Distinct from [[project_sanitize_render_fragment_bytescan]] (decode→byte-scan). Also check `.chars().count()`
+  in front-matter/label span sites.
+- **Staging:** single-file change in `crates/fm-parser/src/mermaid_parser.rs` (no peer WIP there — direct
+  `git add`).
+
+  Agent: BlackThrush

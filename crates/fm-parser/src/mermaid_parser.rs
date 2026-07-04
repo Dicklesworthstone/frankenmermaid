@@ -8809,7 +8809,17 @@ fn parse_graph_direction(header: &str) -> Option<GraphDirection> {
 }
 
 fn span_for(line_number: usize, line: &str) -> Span {
-    Span::at_line(line_number, line.chars().count())
+    // The span length is the line's char count. For an all-ASCII line (the overwhelming majority of
+    // Mermaid source — identifiers, keywords, operators) that equals `line.len()`, an O(1) field read,
+    // so skip `chars().count()`'s `char_count_general_case` byte scan (~3% of class parse; `span_for`
+    // runs per statement in every parser). Byte-identical: `is_ascii()` gates so the non-ASCII path still
+    // counts chars exactly.
+    let cols = if line.is_ascii() {
+        line.len()
+    } else {
+        line.chars().count()
+    };
+    Span::at_line(line_number, cols)
 }
 
 pub fn first_significant_line(input: &str) -> Option<&str> {
