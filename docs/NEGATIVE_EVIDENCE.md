@@ -8780,3 +8780,29 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   `Into<Cow<'static, str>>` — the `&str` ones are laggards allocating literal names.
 
   Agent: BlackThrush
+
+<!-- blackthrush-textbuilder-doubleclone-below-floor -->
+### REJECTED: TextBuilder move-owned-fields (avoid double-clone) is below the render floor (2026-07-04)
+- **Lever:** `fm-render-svg::text::TextBuilder::build(self)` owns its `font_family`/`font_weight`/
+  `font_style`/`fill` `Option<String>` fields but did `if let Some(ref x) = self.field { elem.attr(name, x) }`
+  — borrowing the owned String and letting `.attr`/`.fill` CLONE it again before `self` drops. Changed to
+  MOVE each field in via `attr_owned` (no second clone). Compiles, byte-identical.
+- **Measurement:** clean 2-build A/B (OLD = HEAD `c76a0b6f…` = the attr-name-borrow win, NEW = `c962af0e…`,
+  differing only by the moves). Interleaved `profharness <shape> <n> render`, best-of-8 min-ns.
+  - `class render n=400`: `630084 ns` -> `634362 ns` = **0.993x** (flat/noise)
+  - `er render n=400`: `813181 ns` -> `813371 ns` = **1.000x**
+  - `gantt render n=400`: **0.987x**; control `flow`: **0.994x** — all ~0/slightly negative = layout noise.
+- **Verdict + sharp lesson:** ~0 gain. Two reasons: (1) `font_family` is `None` in the common embedded-CSS
+  path (`font_family_unless_embedded_css` skips it when the theme CSS is embedded — the default), so only
+  `fill` is moved — ~1 clone/text-element saved; (2) **per-text-element micro-opts are below the render
+  code-layout noise floor.** This CALIBRATES why the attr-name-borrow win (`92813cd`) landed at +10% while
+  this is ~0: that win removed ~8 name allocs PER ELEMENT (one per `.attr` call) × ~10 elements/node — a
+  large multiplier; a 1-2 clone/element saving is not. **Rule for the render frontier: only levers that
+  scale with attr-COUNT-per-element (or node-count) clear the ~5% floor; single-op-per-element removals
+  (double-clone, retain-skip ≈21 cheap compares/element) are below it and should be skipped.**
+- **Revert:** dropped before commit (text.rs restored to HEAD, verified no diff); compiled clean +
+  byte-identical — a measurement verdict. **Do-not-retry** per-element micro-opts here; the remaining
+  render win is the STRUCTURAL byte-streaming refactor for fat nodes (bypass Element/Attributes entirely),
+  which is the large change gated on the `lib.rs` peer WIP.
+
+  Agent: BlackThrush
