@@ -2720,3 +2720,33 @@ notes = [
 [post_measurement_parse_phase_per_type_2026_07_03.decision]
 kept = true
 reason = "Broadens the measured parse dominance beyond flowchart to er (165x) and sequence (198x) — dominance holds and strengthens across diagram types. Measurement/provenance record only; no frankenmermaid code change."
+
+[post_measurement_obstacle_sort_min_index_2026_07_04]
+date = "2026-07-04"
+agent = "TanSparrow"
+lever_bead = "bd-1buv.1"
+status = "keep"
+commit = "e66b43917304571ff7d703acaec4613e674fc00a"
+baseline_commit = "4274c5c"
+candidate_summary = "ObstacleSpatialIndex query_segment no longer sorts candidate obstacle indices; indexed CGA nudge scans unsorted candidates and keeps the lowest intersecting index, preserving the old sorted-first-hit result without O(K log K)."
+rust_delta_evidence = "Commit e66b439 release CPU-pinned min-of-6 layout phase: mindmap n=400 -30.7%, n=800 -36.5%, n=1600 -39.5%; flow/wide/subgraph/state within noise."
+rust_command = "AGENT_NAME=TanSparrow RCH_WORKER=hz2 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-tansparrow-proof rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- full_pipeline_wide --warm-up-time 1 --measurement-time 2"
+rust_worker = "vmi1264463 (RCH selected this worker despite the RCH_WORKER=hz2 hint)"
+mermaid_js_command = "Standing comparator from scripts/mermaid_headtohead_cc.mjs: Mermaid.js 11.15.0 via Puppeteer/system Chromium, wide 16x32 median render 3453.9 ms."
+behavior_proof = "New unit test asserts unsorted [1,0] indexed candidates match full-scan lowest-index semantics for horizontal and vertical nudges; existing obstacle-index tests still pass."
+agent_mail = "Registered as TanSparrow; file reservations blocked by Agent Mail SQLite corruption circuit breaker."
+
+[post_measurement_obstacle_sort_min_index_2026_07_04.metrics]
+"mindmap_layout_400_delta_pct" = -30.7
+"mindmap_layout_800_delta_pct" = -36.5
+"mindmap_layout_1600_delta_pct" = -39.5
+"full_pipeline_wide_8x16_frankenmermaid_us" = 887.54
+"full_pipeline_wide_12x24_frankenmermaid_ms" = 1.2468
+"full_pipeline_wide_16x32_frankenmermaid_ms" = 2.7086
+"wide_16x32_mermaid_js_ms" = 3453.9
+"wide_16x32_frankenmermaid_over_mermaid_js" = 0.000784
+"wide_16x32_mermaid_js_over_frankenmermaid" = 1275.16
+
+[post_measurement_obstacle_sort_min_index_2026_07_04.decision]
+kept = true
+reason = "Mindmap obstacle-dense layout gets a measured -30..-40% same-commit win by removing per-query candidate sorting while preserving lowest-index semantics. Fresh per-crate RCH full_pipeline_wide confirms the current post-win build remains 1275x faster than the standing Mermaid.js 11.15.0 wide 16x32 denominator."

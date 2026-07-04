@@ -50,6 +50,39 @@
 
 ## Entries
 
+### Obstacle candidate no-sort min-index routing - KEPT + proof hardened (2026-07-04)
+- **Lever:** `fm-layout::cga_routing` now lets `ObstacleSpatialIndex::query_segment`
+  return candidate obstacle indices without sorting. The indexed CGA nudge helpers scan
+  those unsorted candidates once and keep the lowest intersecting obstacle index, preserving
+  the old ascending-sort/first-hit result without the per-query `O(K log K)` sort.
+- **Hypothesis:** obstacle-dense mindmap/tree routing was spending measurable time sorting
+  spatial-index candidates on each segment query. A min-index scan should remove that cost
+  while keeping byte-identical routing semantics.
+- **Baseline -> After:** kept in commit `e66b43917304571ff7d703acaec4613e674fc00a`
+  against parent `4274c5c`. Its release, CPU-pinned min-of-6 layout-phase evidence showed
+  `mindmap n=400` `-30.7%`, `mindmap n=800` `-36.5%`, and `mindmap n=1600` `-39.5%`;
+  flow/wide/subgraph/state cases stayed within noise. Fresh per-crate RCH confirmation on
+  the canonical `frankenmermaid-cli` `pipeline_bench` `full_pipeline_wide` filter selected
+  worker `vmi1264463` and measured current post-win means of `887.54 us` (`8x16`),
+  `1.2468 ms` (`12x24`), and `2.7086 ms` (`16x32`).
+- **Original comparator:** the standing pinned comparator is
+  `scripts/mermaid_headtohead_cc.mjs`, Mermaid.js `11.15.0` through Puppeteer/system
+  Chromium. Its recorded wide `16x32` median render denominator is `3453.9 ms`.
+- **frankenmermaid/Mermaid ratio:** fresh RCH `16x32` post-win full-pipeline mean versus
+  the standing Mermaid.js denominator is `0.000784x`; Mermaid.js is `1275.16x` slower.
+  This ratio is dominance context for the current post-win build, not a same-worker JS
+  rerun.
+- **Verdict:** kept. The measured win is the mindmap layout delta above; the fresh RCH
+  wide run confirms the current crate still dominates the original comparator.
+- **Validation:** added
+  `indexed_nudge_ignores_candidate_order_and_uses_lowest_hit_index`, which feeds unsorted
+  `[1, 0]` candidate indices to both horizontal and vertical indexed nudges and asserts they
+  match the full ordered scan. Focused tests passed for that new test plus the existing
+  obstacle-index order and parked-endpoint bounds tests.
+- **Tooling note:** Agent Mail registration succeeded as `TanSparrow`, but file
+  reservations were blocked by the Agent Mail SQLite corruption circuit breaker. The RCH
+  command used `AGENT_NAME=TanSparrow` and an isolated target directory.
+
 ### Document XML streaming + conditional edge-label CSS - KEPT after same-worker remote proof (2026-06-27)
 - **Lever:** `fm-render-svg::SvgDocument::write_to_string` streams XML attribute/text
   escaping into the output writer, `Theme::to_svg_style` emits edge-label CSS only when
