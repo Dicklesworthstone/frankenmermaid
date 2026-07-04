@@ -7328,13 +7328,20 @@ fn find_operator_core<'a>(
     operators: &'a [(&'a str, ArrowType)],
     op_first_byte: u128,
 ) -> Option<(usize, &'a str, ArrowType)> {
-    let mut in_quote: Option<char> = None;
+    // Byte-level scan (was `char_indices`): every structural byte tracked here — the quotes `"` `'` `` ` ``,
+    // the brackets `[] () {}`, the escape `\` — and every operator first byte is ASCII (< 128). A UTF-8
+    // lead or continuation byte (>= 128) can never equal an ASCII structural/operator byte, so the depth
+    // and in-quote state transitions are identical to the char scan while a multi-byte char stays inert;
+    // `starts_with` only runs at an ASCII position (a char boundary). Iterating bytes drops the per-char
+    // UTF-8 decode (find_operator was ~14% of `:::`-class flowchart parse). Byte-identical: pinned by the
+    // parser corpus + golden snapshots.
+    let mut in_quote: Option<u8> = None;
     let mut escaped = false;
     let mut square_depth = 0_usize;
     let mut paren_depth = 0_usize;
     let mut brace_depth = 0_usize;
 
-    for (idx, ch) in statement.char_indices() {
+    for (idx, &byte) in statement.as_bytes().iter().enumerate() {
         if idx < start_index {
             continue;
         }
@@ -7344,42 +7351,42 @@ fn find_operator_core<'a>(
                 escaped = false;
                 continue;
             }
-            if ch == '\\' && quote != '`' {
+            if byte == b'\\' && quote != b'`' {
                 escaped = true;
                 continue;
             }
-            if ch == quote {
+            if byte == quote {
                 in_quote = None;
             }
             continue;
         }
 
-        match ch {
-            '"' | '\'' | '`' => {
-                in_quote = Some(ch);
+        match byte {
+            b'"' | b'\'' | b'`' => {
+                in_quote = Some(byte);
                 continue;
             }
-            '[' => {
+            b'[' => {
                 square_depth = square_depth.saturating_add(1);
                 continue;
             }
-            ']' => {
+            b']' => {
                 square_depth = square_depth.saturating_sub(1);
                 continue;
             }
-            '(' => {
+            b'(' => {
                 paren_depth = paren_depth.saturating_add(1);
                 continue;
             }
-            ')' => {
+            b')' => {
                 paren_depth = paren_depth.saturating_sub(1);
                 continue;
             }
-            '{' => {
+            b'{' => {
                 brace_depth = brace_depth.saturating_add(1);
                 continue;
             }
-            '}' => {
+            b'}' => {
                 brace_depth = brace_depth.saturating_sub(1);
                 continue;
             }
@@ -7390,9 +7397,9 @@ fn find_operator_core<'a>(
             continue;
         }
 
-        // Skip positions whose byte can't begin any operator (see `op_first_byte`). Non-ASCII
-        // chars (code point ≥ 128) can never match an ASCII-prefixed operator either.
-        let cp = ch as u32;
+        // Skip positions whose byte can't begin any operator (see `op_first_byte`). Bytes >= 128
+        // (UTF-8 lead/continuation) can never match an ASCII-prefixed operator either.
+        let cp = u32::from(byte);
         if cp >= 128 || (op_first_byte >> cp) & 1 == 0 {
             continue;
         }

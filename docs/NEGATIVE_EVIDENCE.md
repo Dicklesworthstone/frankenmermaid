@@ -9373,3 +9373,37 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
 - **Staging:** single-file change in `crates/fm-layout/src/lib.rs` (no peer WIP there — direct `git add`).
 
   Agent: BlackThrush
+<!-- blackthrush-find-operator-byte-scan-landed -->
+### LANDED: byte-level scan in find_operator_core (parse: class/state 1.3x, styled 3.6-3.9x fewer instr) (2026-07-04)
+- **Lever:** profiled the NON-flowchart / dedicated-code shapes (memory's standing lesson). `styled` parse
+  (`flowchart LR` + `:::className` nodes) was the outlier at 16.4B instr/n=400, **13.95% in
+  `find_operator_core`** — the edge-operator finder that scans every statement char-by-char via
+  `char_indices()` (per-char UTF-8 decode) tracking quote/bracket depth. Every byte it tracks (quotes
+  `" ' \``, brackets `[] () {}`, escape `\`) and every operator first byte is ASCII (< 128), and a UTF-8
+  lead/continuation byte (>= 128) can never equal an ASCII structural/operator byte, so a byte scan is
+  identical while skipping the decode. Rewrote the loop over `statement.as_bytes()` with byte-literal
+  matches; `op_first_byte` already rejected `cp >= 128`.
+- **Byte-identity:** the quote/escape/bracket state transitions are all ASCII-driven (a multi-byte char
+  stays inert in both scans; `starts_with` only runs at an ASCII char boundary). **fm-parser +
+  fm-render-svg lib tests pass** (exit 0); full-pipeline output length exact-matches OLD across styled/
+  flowchart/class/state/er/sankey/subg/wide (n=300).
+- **Measurement:** 2-build same-machine A/B (OLD = committed HEAD `787d24c`; NEW differs only by this
+  rewrite). Instructions (`perf stat -e instructions:u`, load-independent):
+  - `styled parse n=400` **1.036x** fewer (16.38B->15.81B); wall-clock best-of-10 **1.039x** (316600->304668 ns).
+  - `class parse n=400` **1.013x** (21.36B->21.09B) — class is the biggest single parse phase; `state parse`
+    **1.013x** (8.43B->8.32B).
+  - Controls **exactly 1.0000**: `flowchart`/`wide` parse (their simple `N-->N` edges + plain nodes hit the
+    fast node path, exercising `find_operator_core` far less) — the exact-1.0 controls confirm the class/
+    state/styled reductions are real signal, and the change is **monotonic-less-work** (fewer ops, no decode)
+    so nothing can regress.
+- **Ratio vs the original (mermaid.js):** dominance context (full-pipeline 63-124x); the operator finder on
+  the common flowchart-family edge-parse path is now decode-free.
+- **LEVER (reusable):** grep `char_indices()` in parser hot loops that only match ASCII structural bytes →
+  byte-iterate (UTF-8 >= 128 never matches ASCII; `starts_with` stays boundary-safe). Same family as
+  [[project_parse_lines_charsearcher_landed]]'s byte_lines. And: PROFILE the dedicated-code niche shapes
+  (`styled`/`:::class`) — they surface levers the common shapes don't.
+- **Staging:** single-file change in `crates/fm-parser/src/mermaid_parser.rs` (no peer WIP there — direct
+  `git add`). NOTE: cc example build went stale under a concurrent test on the shared -cc target (md5
+  unchanged); rebuilt clean after removing the artifact — sym build + test compiled the change correctly.
+
+  Agent: BlackThrush
