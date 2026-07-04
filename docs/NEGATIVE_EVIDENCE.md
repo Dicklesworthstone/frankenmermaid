@@ -50,6 +50,42 @@
 
 ## Entries
 
+### Sequence guardrail cost estimate (force Sequence layout, not Sugiyama) - REVERTED (2026-07-04)
+- **Lever:** split `LayoutAlgorithm::Sequence` out of the shared dedicated-cost arm in
+  `fm-layout::estimate_layout_cost` and weight messages lightly (`time_ms = nodes*2 +
+  edges/2 + 6`), so a detailed sequence (many messages, few participants) stays on the
+  Sequence layout instead of exceeding the 250 time budget and being forced onto Sugiyama.
+  Same pattern as the KEPT radial-mindmap fix below.
+- **Hypothesis:** the dispatch survey found `seq n=200` (14 participants / 200 messages)
+  forced onto Sugiyama (`guardrail_forced_time_budget`); the shared estimate's `edges*2`
+  over-prices messages, which are cheap horizontal arrows, not routed graph edges. Direct
+  measurement showed Sequence layout is **8.61× faster** than the forced Sugiyama
+  (`8,436 ns` vs `72,638 ns` at n=200, both finite/valid) — looked like a mindmap-style win.
+- **Baseline → After:** release, cpu-pinned min, **full pipeline** (parse+layout+render),
+  HEAD (Sugiyama-forced) vs candidate (Sequence):
+  - `seq n=100`: `258,329 ns` → `280,932 ns` (**0.91×**, slower)
+  - `seq n=200`: `245,425 ns` → `410,067 ns` (**0.59×**, slower)
+  - `seq n=400`: `404,546 ns` → `777,343 ns` (**0.52×**, slower)
+- **Original comparator:** not run vs Mermaid.js (dropped before that stage — a full-pipeline
+  regression disqualifies it as a perf lever regardless of the Mermaid ratio).
+- **Verdict:** **regression** on the metric that matters. The 8.61× layout speedup is real,
+  but the *correct* Sequence render emits ~5.7× more SVG than the degenerate Sugiyama output
+  (`22,944` → `130,614` bytes at n=200), and the larger render outweighs the layout win →
+  full pipeline 0.52–0.91×. This is a **correctness fix disguised as a perf lever**: Sugiyama
+  produces degenerate/wrong sequence geometry (a sequence is not a DAG), so the old "fast"
+  path was fast *wrong* output. Byte-identity confirmed the only outputs that change are
+  sequences >~120 messages (Sugiyama→Sequence); small-sequence goldens and all other types
+  are unchanged.
+- **Revert:** dropped from the working tree before commit (never landed); HEAD stays at the
+  Sugiyama-forced behavior.
+- **Do-not-retry note:** do NOT re-attempt this as a *perf* lever — forcing the dedicated
+  Sequence (or Pie: 4.67× layout but same render-size offset) algorithm regresses the full
+  pipeline because the correct render is larger. If pursued, it must be scoped and reviewed
+  as a **correctness** change (wrong layout algorithm for large sequence diagrams), with the
+  accepted ~2× sequence-pipeline cost, and needs owner sign-off — it is not a silent perf win.
+  Contrast with the mindmap radial fix (KEPT), which is a genuine full-pipeline win because
+  radial emits *smaller* output than the tree fallback.
+
 ### Radial mindmap guardrail cost estimate - KEPT (2026-07-04)
 - **Lever:** `fm-layout::estimate_layout_cost` now prices `LayoutAlgorithm::Radial`
   as cheaper than `Tree` for mindmap guardrail fallback scoring. Radial mindmaps use
