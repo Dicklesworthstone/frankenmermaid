@@ -7530,6 +7530,81 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
             (mid_point.x + offset_x, mid_point.y + offset_y - 8.0)
         };
 
+        // Whole labeled-edge fast fragment: for the common single-line solid-`Arrow` label under embedded
+        // CSS + default a11y (no animation/span/inline-style/back-edge), stream
+        // `<g><path/><rect/><text/><title/></g>` directly instead of building the group + path + rect +
+        // text + title Elements (~5 allocs/edge — the dominant cost of label-heavy diagrams like sankey).
+        // Byte-identical: the same attrs/order the Element path serializes; every other case falls through.
+        let label_str = label_text.as_ref();
+        if config.embed_theme_css
+            && config.a11y.aria_labels
+            && config.a11y.keyboard_nav
+            && config.a11y.text_alternatives
+            && !config.animations_enabled
+            && !config.include_source_spans
+            && !is_back_edge
+            && arrow == ArrowType::Arrow
+            && marker_start.is_none()
+            && base_dasharray.is_none()
+            && !label_str.contains('\n')
+            && resolve_edge_inline_style(ir, edge_index).is_none()
+            && let Some(marker_end_val) = marker_end
+            && let Some(edge) = ir_edge
+        {
+            use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
+            let label_font_size = detail.edge_font_size;
+            let label_width =
+                (label_str.chars().count() as f32 * config.avg_char_width) + 8.0 + 20.0;
+            let label_height = label_font_size + 14.0;
+            let start_y = ly + (label_font_size / 4.0);
+            let (from_label, to_label) =
+                edge_endpoint_accessible_labels(edge, ir, accessible_node_labels);
+            let mut f = String::with_capacity(path_str.len() + label_str.len() * 3 + 360);
+            f.push_str("<g id=\"fm-edge-");
+            let _ = AttributeValue::Integer(edge_index as i32).write_value(&mut f);
+            f.push_str("\" class=\"fm-edge-labeled\" data-fm-edge-id=\"");
+            let _ = AttributeValue::Integer(edge_index as i32).write_value(&mut f);
+            f.push_str("\" role=\"graphics-symbol\" tabindex=\"0\">");
+            write_common_edge_path_into(
+                &mut f,
+                &path_str,
+                stroke_width,
+                style_class,
+                edge_index as i32,
+                marker_end_val,
+            );
+            f.push_str("<rect x=\"");
+            let _ = AttributeValue::Number(lx - label_width / 2.0).write_value(&mut f);
+            f.push_str("\" y=\"");
+            let _ = AttributeValue::Number(ly - label_height / 2.0 - 1.0).write_value(&mut f);
+            f.push_str("\" width=\"");
+            let _ = AttributeValue::Number(label_width).write_value(&mut f);
+            f.push_str("\" height=\"");
+            let _ = AttributeValue::Number(label_height).write_value(&mut f);
+            f.push_str("\" fill=\"");
+            let _ = write_escaped_attr(&mut f, &colors.background);
+            f.push_str("\" stroke=\"");
+            let _ = write_escaped_attr(&mut f, &colors.cluster_stroke);
+            f.push_str("\" stroke-width=\"0.75\" rx=\"6\" ry=\"6\"/><text x=\"");
+            let _ = AttributeValue::Number(lx).write_value(&mut f);
+            f.push_str("\" y=\"");
+            let _ = AttributeValue::Number(start_y).write_value(&mut f);
+            f.push_str("\" text-anchor=\"middle\" font-size=\"");
+            let _ = AttributeValue::Number(label_font_size).write_value(&mut f);
+            f.push_str("\" fill=\"");
+            let _ = write_escaped_attr(&mut f, &colors.text);
+            f.push_str("\" class=\"edge-label\">");
+            let _ = write_escaped_text(&mut f, label_str);
+            f.push_str("</text><title>");
+            let _ = write_escaped_text(&mut f, from_label.unwrap_or("unknown"));
+            f.push_str(" points to ");
+            let _ = write_escaped_text(&mut f, to_label.unwrap_or("unknown"));
+            f.push_str(" with label: ");
+            let _ = write_escaped_text(&mut f, label_str);
+            f.push_str("</title></g>");
+            return Element::raw_svg(f);
+        }
+
         let mut group = Element::group()
             .id(&mermaid_edge_element_id(edge_index))
             .class("fm-edge-labeled")

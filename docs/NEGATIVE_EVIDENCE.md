@@ -9048,3 +9048,28 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   filtered patch kept the peer WIP intact.
 
   Agent: BlackThrush
+
+<!-- blackthrush-labeled-edge-streaming-landed -->
+### LANDED: stream the common labeled edge (sankey render +86%; all labeled-edge diagrams) (2026-07-04)
+- **Lever:** executes the highest-value roadmap lever. A labeled edge (`-->|x|`, sankey flow value, state
+  transition, sequence message) built a `<g class="fm-edge-labeled">` + path + background `<rect>` +
+  `<text>` label + `<title>` — ~5 Element allocs per edge — and could not take the whole-edge streaming
+  fast path (the label excludes it). Added an inline whole-labeled-edge fragment in `render_edge`: for the
+  common single-line solid-`Arrow` label under embedded CSS + default a11y (no animation/span/inline-style/
+  back-edge), stream `<g><path/><rect/><text/><title/></g>` directly (path via `write_common_edge_path_into`)
+  and return `Element::raw_svg`. Every other labeled edge falls through to the Element path.
+- **Measurement:** clean 2-build same-machine A/B (OLD = committed HEAD code `61edba9b`; NEW = `cd43fb22`,
+  differing only by this change). Interleaved `profharness sankey <n> render`, best-of-8 min-ns. (sankey
+  edges carry the flow value as a label, so they exercise this path.)
+  - `sankey render n=400`: `617681 ns` -> `332771 ns` = **1.856x** (86% faster)
+  - `sankey render n=800`: `1220444 ns` -> `648429 ns` = **1.882x** (consistent)
+  - controls: `flow` 0.979x, `mindmap` 1.003x — flat.
+- **Byte-identity:** all **235 fm-render-svg lib tests pass** incl. `golden_svg_test` (sankey + labeled
+  flowchart/edge diagrams in corpus). The `<rect>`/`<text>`/`<title>` bytes + attr order match the slow
+  `Element` path exactly (title = `describe_edge_labels(from,to,Arrow,Some(label))` written piecewise).
+- **Ratio vs the original (mermaid.js):** dominance context; sankey and every single-line-labeled-edge
+  diagram (flowchart `-->|x|`, state, sequence) now render up to ~1.9x faster.
+- **Staging:** one block in `render_edge`'s labeled branch, clean lib.rs sub-region (7544-7620); `git apply
+  --cached` filtered patch kept the peer WIP intact.
+
+  Agent: BlackThrush
