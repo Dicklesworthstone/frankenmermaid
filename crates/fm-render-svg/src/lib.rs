@@ -3582,6 +3582,40 @@ fn render_quadrant_svg(
 
     // Data points.
     let accent_colors: Vec<&str> = theme.colors.accents.iter().map(String::as_str).collect();
+    // Stream all data points (circle + label) into one raw fragment under embedded CSS — the label's only
+    // config-dependent attribute (`font-family`) is then CSS-driven/absent, so the whole point stack is a
+    // fixed set of bytes. Skips two `Element` builds + `Attributes` Vecs per point. Byte-identical; the
+    // non-embedded (attribute-driven) export keeps the Element path so `font-family` is emitted inline.
+    if config.embed_theme_css {
+        let mut points_svg = String::with_capacity(layout.nodes.len().saturating_mul(160));
+        for (i, node_box) in layout.nodes.iter().enumerate() {
+            let cx = node_box.bounds.x + node_box.bounds.width / 2.0 + offset_x;
+            let cy = node_box.bounds.y + node_box.bounds.height / 2.0 + offset_y;
+            let color = accent_colors[i % accent_colors.len()];
+            let label = quad_meta
+                .points
+                .get(i)
+                .map(|p| p.label.as_str())
+                .unwrap_or(&node_box.node_id);
+            write_quadrant_point_into(
+                &mut points_svg,
+                cx,
+                cy,
+                color,
+                &theme.colors.background,
+                cx + 10.0,
+                cy + 4.0,
+                config.font_size * 0.75,
+                &theme.colors.text,
+                label,
+            );
+        }
+        if !points_svg.is_empty() {
+            doc = doc.child(Element::raw_svg(points_svg));
+        }
+        return doc;
+    }
+
     for (i, node_box) in layout.nodes.iter().enumerate() {
         let cx = node_box.bounds.x + node_box.bounds.width / 2.0 + offset_x;
         let cy = node_box.bounds.y + node_box.bounds.height / 2.0 + offset_y;
@@ -3616,6 +3650,44 @@ fn render_quadrant_svg(
     }
 
     doc
+}
+
+/// Stream a quadrant data point (`<circle>` + `<text>` label) byte-identical to the slow path's
+/// `Element`s under embedded CSS (the label's `font-family` is CSS-driven, so absent inline). `r="6"` /
+/// `stroke-width="1.50"` are the fixed `r(6.0)`/`stroke_width(1.5)` serializations. Skips the two per-point
+/// `Element` builds + their `Attributes` Vecs (`Attributes::set` was ~8% of quadrant render).
+fn write_quadrant_point_into(
+    f: &mut String,
+    cx: f32,
+    cy: f32,
+    color: &str,
+    bg: &str,
+    label_x: f32,
+    label_y: f32,
+    label_font_size: f32,
+    text_fill: &str,
+    label: &str,
+) {
+    use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
+    f.push_str("<circle cx=\"");
+    let _ = AttributeValue::Number(cx).write_value(f);
+    f.push_str("\" cy=\"");
+    let _ = AttributeValue::Number(cy).write_value(f);
+    f.push_str("\" r=\"6\" fill=\"");
+    let _ = write_escaped_attr(f, color);
+    f.push_str("\" stroke=\"");
+    let _ = write_escaped_attr(f, bg);
+    f.push_str("\" stroke-width=\"1.50\" class=\"fm-quadrant-point\"/><text x=\"");
+    let _ = AttributeValue::Number(label_x).write_value(f);
+    f.push_str("\" y=\"");
+    let _ = AttributeValue::Number(label_y).write_value(f);
+    f.push_str("\" text-anchor=\"start\" font-size=\"");
+    let _ = AttributeValue::Number(label_font_size).write_value(f);
+    f.push_str("\" fill=\"");
+    let _ = write_escaped_attr(f, text_fill);
+    f.push_str("\" class=\"fm-quadrant-point-label\">");
+    let _ = write_escaped_text(f, label);
+    f.push_str("</text>");
 }
 
 /// Stream a gantt task bar `<rect>` byte-identical to the slow path's `Element::rect()`:

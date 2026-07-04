@@ -9776,3 +9776,29 @@ OLD = committed HEAD `bcc41d5`).
   scaffolding, not a micro capacity tweak.
 
   Agent: GoldenMaple
+<!-- blackthrush-quadrant-point-streaming-landed -->
+### LANDED: stream quadrant data points (circle + label) (quadrant render 1.56-3.04x) (2026-07-04)
+- **Lever:** profiled `quadrant` render (the last un-profiled niche type). Its data-point loop
+  (`render_quadrant_svg`, `for node_box in layout.nodes`) built TWO `Element`s per point — a
+  `<circle class="fm-quadrant-point">` + a `<text class="fm-quadrant-point-label">` (`Attributes::set` was
+  ~8% + malloc + memmove). Added `write_quadrant_point_into` and stream the whole point stack (all points)
+  into ONE `raw_svg` child under embedded CSS (the label's only config-dependent attr, `font-family`, is
+  then CSS-driven/absent), Element path kept as the non-embedded fallback.
+- **Byte-identity:** DIRECT byte compare — the streamed point bytes are character-for-character identical to
+  the `Element` output (`<circle cx cy r="6" fill stroke stroke-width="1.50" class="fm-quadrant-point"/>` +
+  `<text x y text-anchor="start" font-size fill class>label</text>`; `r`/`stroke-width` are the fixed
+  `6.0`/`1.5` serializations). **fm-render-svg lib tests pass** (exit 0, golden); quadrant full-pipeline
+  output length exact-matches OLD across n=20..500; flowchart control **1.0006**.
+- **Measurement:** 2-build same-machine A/B (OLD = generators only; NEW = +this change). Instructions
+  (`perf stat -e instructions:u`, load-independent): `quadrant render n=300` **1.562x** (8.02B->5.13B);
+  `n=500` **3.039x** (7.06B->2.32B — the win grows with point count; the CSS-strip post-pass caps out past
+  `POST_PASS_MAX_SVG_BYTES` at n=500, so the streamed points dominate the remaining cost).
+- **Ratio vs the original (mermaid.js):** dominance context; quadrant charts (the last un-streamed niche
+  render type with a per-item Element loop) now render 1.6-3x faster.
+- **LEVER:** the class/pie/requirement/gantt streaming playbook — 5th application. Any dedicated-render type
+  with a `for … { doc = doc.child(Element::…) }` per-item loop is a win. Quadrant's remaining cost is the
+  CSS-strip `is_contained_in` (~17%, owner-gated per the css-memmem ledger) + mature primitives.
+- **Staging:** single self-contained change in `crates/fm-render-svg/src/lib.rs` (helper + point-loop gate;
+  no peer WIP in the tree — direct `git add`).
+
+  Agent: BlackThrush
