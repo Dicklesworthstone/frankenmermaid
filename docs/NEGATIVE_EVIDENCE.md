@@ -50,6 +50,53 @@
 
 ## Entries
 
+### Class member label allocation rewrite - REVERTED (2026-07-04)
+- **Lever:** `fm-render-svg::render_class_compartments` was changed in a scratch
+  candidate to avoid a throwaway `String` for plain class titles and to build
+  attribute/method labels with one pre-sized `String` via a `class_member_label`
+  helper instead of layered `format!` calls. The temporary `class_stages`
+  `frankenmermaid-cli` bench generated 30/100/300-class `classDiagram` inputs and
+  isolated render-only plus parse+layout+SVG full-pipeline cases.
+- **Hypothesis:** class rendering still sits on the remaining structural render
+  frontier. Member labels are produced for every visible class row, so avoiding
+  intermediate `format!` strings looked like a small but byte-identical allocation
+  win after the previous member-count children presize was rejected.
+- **Baseline -> After:** per-crate `frankenmermaid-cli` `pipeline_bench`,
+  release profile through Cargo's supported `--profile release` bench flag,
+  `AGENT_NAME=TanSparrow`, isolated target dirs under
+  `/data/projects/.rch-targets/frankenmermaid/`. Baseline worktree was based on
+  `bc58db6` with only the temporary bench harness; candidate added the label
+  allocation rewrite. The first baseline remote attempt was terminated before
+  Criterion output; the measured baseline was remote `vmi1293453`, while the
+  strict candidate run was remote `vmi1149989` after an attempted local fallback
+  was aborted and discarded. Medians:
+  - `render/30`: `186.44 us` -> `153.60 us` (`-17.61%`, cross-worker only)
+  - `full_pipeline/30`: `334.13 us` -> `321.23 us` (`-3.86%`, cross-worker only)
+  - `render/100`: `293.98 us` -> `296.70 us` (`+0.93%`, `0.991x`)
+  - `full_pipeline/100`: `872.81 us` -> `881.30 us` (`+0.97%`, `0.990x`)
+  - `render/300`: `795.20 us` -> `841.70 us` (`+5.85%`, `0.945x`)
+  - `full_pipeline/300`: `1.5487 ms` -> `1.8757 ms` (`+21.11%`, `0.826x`)
+- **Original comparator:** no fresh same-input Mermaid.js class browser rerun was
+  captured for this rejected variant. Standing dominance context is the pinned
+  `scripts/mermaid_headtohead_cc.mjs` Mermaid.js `11.15.0` Chromium wide `16x32`
+  median denominator, `3453.9 ms`: the rejected candidate's `class/300`
+  full-pipeline median is `0.000543x` of that standing original denominator
+  (Mermaid.js `1841.39x` slower). This is **not** a same-input comparator and is
+  not used to justify keeping the lever.
+- **Verdict:** **regression / no decision-grade win.** The realistic 100-class
+  cases are noise-to-slightly-slower and the 300-class cases are slower, with the
+  largest full-pipeline case regressing by `21.11%`. The only apparent wins were
+  small 30-class cross-worker measurements, below the bar for landing a renderer
+  change.
+- **Revert:** dropped from the scratch worktree before commit; no production code
+  or bench harness landed. Evidence-only ledger entry landed from clean worktree
+  `frankenmermaid-tansparrow-class-label-evidence-030346`.
+- **Do-not-retry note:** do not repackage the same class-title/member-label
+  `format!` rewrite as a perf lever. The allocation cleanup is too small and
+  instruction/layout-sensitive compared with `TextBuilder`/Element construction;
+  route deeper to class render batching or a same-input Mermaid class comparator
+  instead of another per-label string micro-lever.
+
 ### Presize class/ER compartment children Vec - REVERTED (2026-07-04)
 - **Lever:** added `Element::reserve_children(n)` (fm-render-svg `element.rs`) and called it in
   `render_class_compartments` with `meta.attributes.len() + meta.methods.len() + 4`, to avoid the

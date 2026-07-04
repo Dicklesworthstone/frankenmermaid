@@ -2787,3 +2787,49 @@ bench_syntax_note = "Cargo bench in this toolchain exposes --profile <PROFILE-NA
 [post_measurement_radial_mindmap_guardrail_2026_07_04.decision]
 kept = true
 reason = "Same-worker hz2 full_pipeline_mindmap improves every size and cuts the 1600-node mindmap full pipeline by 54.24% by keeping guardrail fallback on Radial. The lever is isolated to cost metadata plus a regression test."
+
+[post_measurement_class_member_label_alloc_reject_2026_07_04]
+date = "2026-07-04"
+agent = "TanSparrow"
+lever_bead = "bd-1buv.1"
+status = "reject"
+baseline_commit = "bc58db6"
+logged_on_base = "648af30"
+candidate_summary = "Scratch fm-render-svg render_class_compartments rewrite: borrow plain class titles and build class attribute/method labels with one pre-sized String helper instead of layered format! temporaries."
+graveyard_route = "Alien Graveyard + Extreme Optimization renderer allocation cleanup; tested after class/ER compartment children presize was rejected."
+rust_baseline_command = "AGENT_NAME=TanSparrow RCH_FORCE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid/tansparrow-class-label-base-024636 rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- class_stages --warm-up-time 1 --measurement-time 2 --sample-size 10"
+rust_candidate_command = "AGENT_NAME=TanSparrow RCH_REQUIRE_REMOTE=1 RCH_FORCE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid/tansparrow-class-label-cand-024636 rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- class_stages --warm-up-time 1 --measurement-time 2 --sample-size 10"
+rust_baseline_worker = "vmi1293453"
+rust_candidate_worker = "vmi1149989"
+bench_syntax_note = "Literal cargo bench --release is rejected by this Cargo; release-profile bench used --profile release."
+candidate_local_fallback = "Discarded: one RCH attempt fell open to local due no admissible workers and was aborted before benchmark output."
+mermaid_js_command = "Standing comparator only: scripts/mermaid_headtohead_cc.mjs, Mermaid.js 11.15.0 via Puppeteer/system Chromium, wide 16x32 median render 3453.9 ms. No same-input class browser rerun captured for this rejected variant."
+agent_mail = "Agent Mail registration as TanSparrow was blocked by the SQLite corruption circuit breaker; no file reservation was available."
+behavior_proof = "Candidate intended byte-identical string construction only, but no production code landed because realistic class cases regressed."
+
+[post_measurement_class_member_label_alloc_reject_2026_07_04.metrics]
+"class_render_30_baseline_us" = 186.44
+"class_render_30_candidate_us" = 153.60
+"class_render_30_candidate_delta_pct" = -17.6142
+"class_full_pipeline_30_baseline_us" = 334.13
+"class_full_pipeline_30_candidate_us" = 321.23
+"class_full_pipeline_30_candidate_delta_pct" = -3.8608
+"class_render_100_baseline_us" = 293.98
+"class_render_100_candidate_us" = 296.70
+"class_render_100_candidate_delta_pct" = 0.9252
+"class_full_pipeline_100_baseline_us" = 872.81
+"class_full_pipeline_100_candidate_us" = 881.30
+"class_full_pipeline_100_candidate_delta_pct" = 0.9727
+"class_render_300_baseline_us" = 795.20
+"class_render_300_candidate_us" = 841.70
+"class_render_300_candidate_delta_pct" = 5.8476
+"class_full_pipeline_300_baseline_ms" = 1.5487
+"class_full_pipeline_300_candidate_ms" = 1.8757
+"class_full_pipeline_300_candidate_delta_pct" = 21.1145
+"standing_wide_16x32_mermaid_js_ms" = 3453.9
+"class_300_candidate_over_standing_mermaid_js" = 0.000543
+"standing_mermaid_js_over_class_300_candidate" = 1841.39
+
+[post_measurement_class_member_label_alloc_reject_2026_07_04.decision]
+kept = false
+reason = "Dropped before commit: realistic 100-class cases were noise/slightly slower and 300-class render/full-pipeline regressed by 5.85%/21.11%. The only apparent 30-class win was cross-worker and not enough to justify a renderer micro-lever."
