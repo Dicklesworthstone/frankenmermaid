@@ -6775,17 +6775,41 @@ fn layout_diagram_kanban_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         trace,
         true,
     );
+    // Lane bands: the per-rank `layout_band_for_rank` re-scanned ALL nodes twice per rank (build the
+    // rank's index list + `layout_bounds_for_nodes`' all-nodes membership loop), i.e. O(ranks × nodes) —
+    // the kanban/journey layout assigns a distinct rank per row, so ranks ≈ nodes and this was O(N²)
+    // (60% of journey layout). Accumulate every rank's min/max in ONE pass over the nodes instead.
+    // Byte-identical: same per-rank min/max (over the same nodes, in the same `layout.nodes` order) and
+    // the same `min-padding` / `padding.mul_add(2.0, span)` rect as `layout_bounds_for_nodes(.., 20.0)`;
+    // ranks with no node produce no bounds entry, exactly like that fn's `None`.
+    let mut rank_bounds: FxHashMap<usize, (f32, f32, f32, f32)> = FxHashMap::default();
+    for node_box in &traced.layout.nodes {
+        let entry = rank_bounds.entry(node_box.rank).or_insert((
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        ));
+        entry.0 = entry.0.min(node_box.bounds.x);
+        entry.1 = entry.1.min(node_box.bounds.y);
+        entry.2 = entry.2.max(node_box.bounds.x + node_box.bounds.width);
+        entry.3 = entry.3.max(node_box.bounds.y + node_box.bounds.height);
+    }
     traced.layout.extensions.bands = nodes_by_rank
         .keys()
         .copied()
         .filter_map(|rank| {
-            layout_band_for_rank(
-                &traced.layout,
-                rank,
-                LayoutBandKind::Lane,
-                format!("lane {}", rank + 1),
-                20.0,
-            )
+            let (min_x, min_y, max_x, max_y) = *rank_bounds.get(&rank)?;
+            Some(LayoutBand {
+                kind: LayoutBandKind::Lane,
+                label: format!("lane {}", rank + 1),
+                bounds: LayoutRect {
+                    x: min_x - 20.0,
+                    y: min_y - 20.0,
+                    width: 20.0_f32.mul_add(2.0, max_x - min_x),
+                    height: 20.0_f32.mul_add(2.0, max_y - min_y),
+                },
+            })
         })
         .collect();
     traced

@@ -9802,3 +9802,32 @@ OLD = committed HEAD `bcc41d5`).
   no peer WIP in the tree — direct `git add`).
 
   Agent: BlackThrush
+<!-- blackthrush-kanban-lane-bands-onepass-landed -->
+### LANDED: compute kanban/journey lane bands in one O(N) pass, not O(ranks×N) (journey layout 3.3-4.9x) (2026-07-04)
+- **Lever:** profiled the never-benched niche LAYOUT phases. `journey` layout was **60.31% in
+  `layout_bounds_for_nodes`** — an O(N²): `layout_diagram_kanban_traced` builds a lane band PER RANK
+  (`nodes_by_rank.keys().filter_map(|rank| layout_band_for_rank(...))`), and each `layout_band_for_rank`
+  scans ALL `layout.nodes` TWICE (once to collect the rank's `node_indexes`, once inside
+  `layout_bounds_for_nodes`' all-nodes membership loop). journey assigns a distinct rank per task row, so
+  ranks ≈ nodes ⇒ O(N²). Replaced the per-rank calls with ONE pass over the nodes accumulating each rank's
+  min/max into an `FxHashMap<rank, (min_x,min_y,max_x,max_y)>`, then build the bands from it.
+- **Byte-identity:** same per-rank min/max (over the same nodes in the same `layout.nodes` order) and the
+  same `min - 20.0` / `20.0.mul_add(2.0, span)` rect as `layout_bounds_for_nodes(.., 20.0)`; ranks with no
+  node yield no entry, exactly like that fn's `None`. **fm-layout + fm-render-svg lib tests pass** (exit 0);
+  journey/kanban full-pipeline output length exact-matches OLD across n=20..500.
+- **Measurement:** 2-build same-machine A/B (OLD = generators only; NEW = +this change). Instructions
+  (`perf stat -e instructions:u`, load-independent): `journey layout n=300` **3.337x** (5.63B->1.69B);
+  `n=500` **4.909x** (13.75B->2.80B — the win GROWS with N, confirming O(N²)->O(N)). `journey full pipeline`
+  **1.276x@300 / 1.464x@500**. Controls: `kanban layout` **1.0000** (kanban has one rank per column ≈ √N
+  ranks, so its band cost was already small — the win is specific to journey's rank-per-row structure);
+  `flowchart layout` **1.0003**.
+- **Ratio vs the original (mermaid.js):** dominance context; journey (user-journey) layout's lane-band
+  construction is now O(N) instead of O(N²).
+- **LEVER (reusable):** `layout_bounds_for_nodes` / any "bounds/aggregate over a subset" called ONCE PER
+  GROUP where each call rescans ALL items = O(groups × items); fold all groups in ONE item-pass into a
+  per-group accumulator map. `layout_bounds_for_nodes` at high % in a profile = this pattern (also feeds
+  the gantt `section_to_nodes` bands — those are √N sections so lower priority, but same shape).
+- **Staging:** single self-contained change in `crates/fm-layout/src/lib.rs` (kanban band loop; no peer WIP
+  there — direct `git add`).
+
+  Agent: BlackThrush
