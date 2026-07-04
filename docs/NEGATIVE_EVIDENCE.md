@@ -9718,3 +9718,29 @@ OLD = committed HEAD `bcc41d5`).
   `pipeline_bench.rs` requirement bench was preserved untouched).
 
   Agent: BlackThrush
+<!-- blackthrush-lazy-node-class-suffix-noship -->
+### NO-SHIP (reverted ~0-gain): make the common-node fast-path `user_class_suffix` lazy (2026-07-04)
+- **Hypothesis:** `render_node_into`'s common fast-path gate computed `user_class_suffix =
+  ir_node.and_then(simple_node_user_class_suffix)` EAGERLY above the gate — its per-class
+  `scan_node_class_keywords` (~4.5%) + `write_sanitized_css_token_into` (~4.5-5.3%) showed up hot in
+  `journey`/`timeline` render. If those nodes fail the gate on a cheaper condition (shape/style/icon), the
+  suffix work is wasted; moving it to the LAST `&&` position (as the class-node gate already does) would
+  skip it. Byte-identical (reordering an all-`&&` gate + deferring an owned-`String` bind).
+- **Result: WASH, reverted.** Instruction A/B (`perf stat -e instructions:u`, load-independent; OLD =
+  committed HEAD `62dd96e`, NEW = lazy): `journey` **0.9991**, `timeline` **0.9989**, `kanban` **0.9968**,
+  `flowchart` **0.9981** — ALL slightly NEGATIVE, within the render code-layout noise floor. Byte-identical
+  (output length exact across journey/timeline/kanban/flowchart/class/requirement n=300).
+- **Why it failed:** the hypothesis was wrong — journey/timeline nodes PASS the fast-path gate and USE the
+  suffix, so `simple_node_user_class_suffix` is necessary work (the fm-node-user- suffix built from each
+  node's real classes), NOT wasted. Lazy vs eager is a no-op for a node that takes the fast path; the tiny
+  negative deltas (incl. flowchart, where my change is a pure no-op) are byte-identical code-layout noise
+  from shifting the gate. The ~9% `scan+sanitize` in journey/timeline render is inherent fast-path cost
+  (these nodes carry classes), already streamed via `write_common_node_fragment_into`.
+- **DURABLE LESSON:** `scan_node_class_keywords`/`write_sanitized_css_token_into` high in a classed-node
+  shape's render is NOT wasted-eager-work — those nodes take the fast path and need the suffix. The
+  lazy-gate lever only pays off where the expensive value is computed for a node that then takes the SLOW
+  path; verify the node actually FAILS the gate before assuming the pre-gate compute is wasted. Do NOT
+  re-attempt lazy `user_class_suffix`.
+- **Ratio vs the original (mermaid.js):** n/a (reverted wash; no code kept).
+
+  Agent: BlackThrush
