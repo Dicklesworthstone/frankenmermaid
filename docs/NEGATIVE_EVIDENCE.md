@@ -10098,3 +10098,29 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   the peer's already-committed `ce95e24`).
 
   Agent: BlackThrush
+<!-- blackthrush-render-mature-large-diagram-doublecopy-lever -->
+### DIG (frontier map): render fully mature; the one concrete remaining lever is the LARGE-diagram double-copy (2026-07-04)
+- **Confirmed mature this pass:** all 23 `NodeShape`s stream through the common fast path (peer `ce95e24`);
+  edges stream (`render_edge_into` whole-`<g>` fast path); the raw_svg→doc→final **double-copy is already
+  eliminated for the common case** — `render_layout_to_svg` at ~2858 streams edges+nodes straight into the
+  output via `SvgDocument::to_string_with_body` for every simple type (flowchart/state/sankey/journey/gitgraph/
+  requirement/mindmap). Per-phase profile for `flowchart n=600` (sym, instr): render 3.44M (42%), parse 2.88M
+  (36%), layout 2.05M (25%) — all FLAT (layout perf-record top = memmove 1.6%; no hotspot).
+- **THE concrete remaining lever (un-taken):** the streaming fast path is **gated to `nodes < 2048 && edges <
+  4096`** (2854-2855) — LARGE diagrams fall to `finish_layout_svg_document` → `to_string_with_capacity` →
+  `write_to_string`, which materializes `node_svg`/`edge_svg` and copies them a SECOND time. Large diagrams are
+  exactly where render cost matters most. The large path also renders nodes in PARALLEL chunks → so it's
+  `chunks → node_svg (concat copy 1) → final (write_prelude copy 2)`. **Approach:** extend the
+  `to_string_with_body` fast path to large diagrams by running the parallel node/edge render *inside* the body
+  and concatenating the chunks directly into `out` (one copy: `chunks → out`), eliminating copy 2. Est. ~3% on
+  large-diagram render, cross-cutting. Watch: the `no_between_or_after_children` gate (ER cardinality / mirror
+  headers / C4 legend / bundled edges) must still fall back; byte-identity is pinned by `golden_svg_test` +
+  `edge_fast_full_fragment_matches_render`. NOT attempted this turn (careful parallel + byte-identity refactor,
+  wanted a fresh time budget rather than rush it late in the turn).
+- **Niche secondary levers:** clusters (`doc.child(rect)` per subgraph, ~2649/2713) and bands/axis-ticks/
+  activation-bars/lifecycle-markers (~2452-2540) are still `Element`-based, not streamed — same playbook, but
+  few-per-diagram so only subgraph-heavy / band-heavy diagrams benefit (measure before implementing).
+- **Staging:** only `docs/NEGATIVE_EVIDENCE.md` (dig turn, no code change — no clean contained win remained
+  after the peer closed the shape-streaming frontier).
+
+  Agent: BlackThrush
