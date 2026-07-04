@@ -4460,6 +4460,40 @@ fn lookup_centrality_tier(
 /// Used only via the `common_node_fast` gate, which guarantees none of `render_node`'s conditional
 /// classes/children/post-processing apply, so this is the entire node. Skips four `Element` builds +
 /// their `Attributes` Vecs + `write_into` walks — the per-node construction is ~60% of wide render.
+/// The ` fm-node-user-{sanitized}` class suffix the slow path appends for a node's custom classes, but
+/// ONLY when every class is "simple" — none triggers a state/border keyword (highlight/inactive/dashed/
+/// double) or a special layout class (`c4-external`/`block-beta`/`block-beta-space`) that would change the
+/// node's rendered fill/stroke/structure. Returns `None` when any class needs the `Element` slow path, so
+/// the fast node fragment stays byte-identical. Empty/no classes yield `Some("")` (no allocation).
+fn simple_node_user_class_suffix(node: &fm_core::IrNode) -> Option<String> {
+    // Nodes with compartments (class diagrams) or C4 metadata render extra content the plain-rect fast
+    // fragment does not produce; they were implicitly excluded by the old `classes.is_empty()` gate, so
+    // keep excluding them now that arbitrary simple classes are allowed.
+    if node.class_meta.is_some() || node.c4_meta.is_some() {
+        return None;
+    }
+    let mut suffix = String::new();
+    for class in &node.classes {
+        let kw = scan_node_class_keywords(class);
+        if kw.highlighted
+            || kw.inactive
+            || kw.dashed_border
+            || kw.double_border
+            || class.eq_ignore_ascii_case("c4-external")
+            || class.eq_ignore_ascii_case("block-beta")
+            || class.eq_ignore_ascii_case("block-beta-space")
+        {
+            return None;
+        }
+        let sanitized = sanitize_css_token(class);
+        if !sanitized.is_empty() {
+            suffix.push_str(" fm-node-user-");
+            suffix.push_str(&sanitized);
+        }
+    }
+    Some(suffix)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_common_node_fragment(
     node_id: &str,
@@ -4476,13 +4510,14 @@ fn build_common_node_fragment(
     text_y: f32,
     font_size: f32,
     text_fill: &str,
+    user_classes: &str,
 ) -> String {
     // `raw_label` is written twice (the `aria-label` and the `<title>` text), so size for both copies
     // plus the fixed tag/literal bytes.
-    let mut f = String::with_capacity(label.len() + raw_label.len() * 2 + 340);
+    let mut f = String::with_capacity(label.len() + raw_label.len() * 2 + user_classes.len() + 340);
     write_common_node_fragment_into(
         &mut f, node_id, node_index, accent, raw_label, label, x, y, w, h, rx, text_x, text_y,
-        font_size, text_fill,
+        font_size, text_fill, user_classes,
     );
     f
 }
@@ -4506,10 +4541,11 @@ fn write_common_node_fragment_into(
     text_y: f32,
     font_size: f32,
     text_fill: &str,
+    user_classes: &str,
 ) {
     use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
     use std::fmt::Write as _;
-    // <g id=".." class="fm-node fm-node-accent-N fm-node-shape-rect" data-id=".." role=".." aria-label=".." tabindex="0">
+    // <g id=".." class="fm-node fm-node-accent-N fm-node-shape-rect[ fm-node-user-…]" data-id=".." …>
     f.push_str("<g id=\"");
     // The node id is `fm-node-[{sanitized}-]{index}` — only `[a-z0-9-]`, never an escapable byte — so
     // write it straight into `f` (skipping `mermaid_node_element_id`'s 3 throwaway allocations: the
@@ -4518,7 +4554,11 @@ fn write_common_node_fragment_into(
     fm_core::write_mermaid_node_element_id_into(f, node_id, node_index);
     f.push_str("\" class=\"fm-node fm-node-accent-");
     let _ = write!(f, "{accent}");
-    f.push_str(" fm-node-shape-rect\" data-id=\"");
+    f.push_str(" fm-node-shape-rect");
+    // Simple custom classes (`class X foo` / `:::foo` on nodes with no state-keyword or special class);
+    // empty for the overwhelmingly common no-class node. Matches the slow path's ` fm-node-user-…` tail.
+    f.push_str(user_classes);
+    f.push_str("\" data-id=\"");
     let _ = write_escaped_attr(f, node_id);
     f.push_str("\" role=\"graphics-symbol\" aria-label=\"");
     let _ = write_escaped_attr(f, raw_label);
@@ -4620,6 +4660,9 @@ fn render_node_into(
         .filter(|_| ir_node.is_none_or(|node| node.class_meta.is_none() && node.c4_meta.is_none()));
 
     // Same gate as `render_node`'s fast path (permit_fast is always true on this serialize-only path).
+    // `user_class_suffix` is `Some("")` for the common no-class node and `Some(" fm-node-user-…")` for a
+    // node whose custom classes are all simple; `None` (slow path) when a class needs conditional render.
+    let user_class_suffix = ir_node.and_then(simple_node_user_class_suffix);
     if matches!(shape, NodeShape::Rect)
         && config.embed_theme_css
         && config.node_gradients
@@ -4638,7 +4681,7 @@ fn render_node_into(
         && lookup_centrality_tier(centrality_map, node_box.node_index).is_none()
         && label_id.is_none_or(|id| ir.label_markup.get(&id).is_none_or(|s| s.is_empty()))
         && let Some(node) = ir_node
-        && node.classes.is_empty()
+        && let Some(user_classes) = user_class_suffix.as_deref()
         && node.requirement_meta.is_none()
         && node.menu_links.is_empty()
         && node.href().is_none()
@@ -4660,6 +4703,7 @@ fn render_node_into(
             cy + node_font_size / 3.0,
             node_font_size,
             colors.text.as_str(),
+            user_classes,
         );
         return;
     }
@@ -4758,6 +4802,7 @@ fn render_node(
     // `menu_links`/`href`/`callback` clauses exclude the only node-field features the fragment omits (all
     // other conditionals — states, accents, journey/kanban/req fills, icons — derive from `node.classes`/
     // `requirement_meta`/icon/centrality already gated below).
+    let user_class_suffix = ir_node.and_then(simple_node_user_class_suffix);
     if permit_fast
         && matches!(shape, NodeShape::Rect)
         && config.embed_theme_css
@@ -4777,7 +4822,7 @@ fn render_node(
         && lookup_centrality_tier(centrality_map, node_box.node_index).is_none()
         && label_id.is_none_or(|id| ir.label_markup.get(&id).is_none_or(|s| s.is_empty()))
         && let Some(node) = ir_node
-        && node.classes.is_empty()
+        && let Some(user_classes) = user_class_suffix.as_deref()
         && node.requirement_meta.is_none()
         && node.menu_links.is_empty()
         && node.href().is_none()
@@ -4798,6 +4843,7 @@ fn render_node(
             cy + node_font_size / 3.0,
             node_font_size,
             colors.text.as_str(),
+            user_classes,
         ));
     }
 

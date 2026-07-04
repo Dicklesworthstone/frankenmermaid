@@ -8869,3 +8869,34 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   staged via `git apply --cached` of the filtered patch so the abandoned peer WIP stayed unstaged/intact.
 
   Agent: BlackThrush
+
+<!-- blackthrush-classed-node-streaming-landed -->
+### LANDED: stream simple classed nodes via the fast node fragment (sankey render +52%) (2026-07-04)
+- **Lever:** the whole-node streaming fast path (`build_common_node_fragment` / `write_common_node_fragment_into`,
+  skips ~4 Element builds + Attributes Vecs per node) fired only for nodes with NO custom classes
+  (`node.classes.is_empty()`), so any node carrying a class — `sankey-node`, gantt task-types, kanban tags,
+  journey/timeline classes, `class X foo` styled flowcharts — built an Element tree. Added a
+  `simple_node_user_class_suffix(node)` helper that returns the ` fm-node-user-{sanitize(class)}` class tail
+  the slow path appends, but ONLY when every class is simple (no state/border keyword, no
+  c4-external/block-beta) AND the node has no `class_meta`/`c4_meta` (compartment/C4 content the fragment
+  can't produce). The fragment takes a `user_classes: &str` param emitted right after `fm-node-shape-rect`.
+  Both fast-path gates (`render_node`, `render_node_into`) relax `classes.is_empty()` to
+  `let Some(user_classes) = simple_node_user_class_suffix(node)`.
+- **Why sankey:** after the edge-streaming wins, sankey was the #1 render at n=400 (~937 us) because its
+  nodes carry the `sankey-node` class and thus all built Element trees; now they stream.
+- **Measurement:** clean 2-build same-machine A/B (OLD = committed HEAD `26fee39b` = all edge wins; NEW =
+  `f3866069`, differing only by this change). Interleaved `profharness <shape> <n> render`, best-of-8 min-ns.
+  - `sankey render n=400`: `937287 ns` -> `614624 ns` = **1.525x** (52% faster)
+  - controls: `styled` 0.963x / `gantt` 0.996x / `flow` 0.967x / `class` 0.991x — all ~0/layout-noise
+    (styled's inline `:::` classes are dropped and gantt Normal tasks have none, so those nodes were already
+    classless/streaming; sankey is the only profharness shape whose nodes actually carry a class).
+- **Byte-identity:** all **235 fm-render-svg lib tests pass**, incl. `golden_svg_test` (corpus contains
+  sankey) + `node_fast_fragment_matches_render`. A first attempt regressed the C4 stereotype test — fixed by
+  excluding `c4_meta`/`class_meta` nodes in the helper (they were only implicitly excluded by the old
+  classes gate).
+- **Ratio vs the original (mermaid.js):** dominance context (render dominates ~60-120x); sankey (and every
+  classed simple-node diagram: gantt/kanban/journey/timeline/`class X` flowcharts) now renders ~1.5x faster.
+- **Staging:** helper + fragment param + both gates all sit in a clean lib.rs sub-region (4460-4800, no peer
+  hunks); staged via `git apply --cached` of the filtered patch so the abandoned peer WIP stayed intact.
+
+  Agent: BlackThrush
