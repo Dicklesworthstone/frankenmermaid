@@ -4609,10 +4609,11 @@ fn write_common_node_fragment_into(
     let _ = write_escaped_attr(f, raw_label);
     f.push_str("\" tabindex=\"0\">");
     // Shape element with the gradient fill (stroke/stroke-width are CSS-driven under embedded theme, so
-    // absent inline). `<rect x y width height rx …/>` for Rect; `<circle cx cy r …/>` for Circle, whose
-    // cx/cy/r match render_node's slow path (cx=x+w/2, cy=y+h/2, r=w.min(h)/2) and whose serialized attr
-    // order (cx,cy,r,fill) matches the slow `Element::circle()` after the gradient-fill override.
-    if matches!(shape, fm_core::NodeShape::Rect) {
+    // absent inline). `<rect x y width height rx …/>` for the rect family (Rect/Rounded/Stadium — the
+    // caller passes each shape's `rx`); `<circle cx cy r …/>` for Circle, whose cx/cy/r match render_node's
+    // slow path (cx=x+w/2, cy=y+h/2, r=w.min(h)/2) and whose serialized attr order (cx,cy,r,fill) matches
+    // the slow `Element::circle()` after the gradient-fill override.
+    if !matches!(shape, fm_core::NodeShape::Circle) {
         f.push_str("<rect x=\"");
         let _ = AttributeValue::Number(x).write_value(f);
         f.push_str("\" y=\"");
@@ -4653,11 +4654,12 @@ fn write_common_node_fragment_into(
     // Pinned by `node_fast_fragment_matches_render`.
     f.push_str("<title>Node: ");
     let _ = write_escaped_text(f, raw_label);
-    // `describe_node`'s shape word: "rectangle" for Rect, "circle" for Circle (the only shapes gated here).
-    f.push_str(if matches!(shape, fm_core::NodeShape::Rect) {
-        ", rectangle</title></g>"
-    } else {
-        ", circle</title></g>"
+    // `describe_node`'s shape word for the gated shapes.
+    f.push_str(match shape {
+        fm_core::NodeShape::Rect => ", rectangle</title></g>",
+        fm_core::NodeShape::Rounded => ", rounded rectangle</title></g>",
+        fm_core::NodeShape::Stadium => ", stadium shape</title></g>",
+        _ => ", circle</title></g>",
     });
 }
 
@@ -4726,7 +4728,10 @@ fn render_node_into(
     // `user_class_suffix` is `Some("")` for the common no-class node and `Some(" fm-node-user-…")` for a
     // node whose custom classes are all simple; `None` (slow path) when a class needs conditional render.
     let user_class_suffix = ir_node.and_then(simple_node_user_class_suffix);
-    if matches!(shape, NodeShape::Rect | NodeShape::Circle)
+    if matches!(
+            shape,
+            NodeShape::Rect | NodeShape::Circle | NodeShape::Rounded | NodeShape::Stadium
+        )
         && config.embed_theme_css
         && config.node_gradients
         && !emit_classdef_classes
@@ -4761,7 +4766,11 @@ fn render_node_into(
             y,
             w,
             h,
-            config.rounded_corners * 0.55,
+            match shape {
+                NodeShape::Rounded => config.rounded_corners,
+                NodeShape::Stadium => w.min(h) / 2.0,
+                _ => config.rounded_corners * 0.55,
+            },
             cx,
             cy + node_font_size / 3.0,
             node_font_size,
@@ -4868,7 +4877,10 @@ fn render_node(
     // `requirement_meta`/icon/centrality already gated below).
     let user_class_suffix = ir_node.and_then(simple_node_user_class_suffix);
     if permit_fast
-        && matches!(shape, NodeShape::Rect | NodeShape::Circle)
+        && matches!(
+            shape,
+            NodeShape::Rect | NodeShape::Circle | NodeShape::Rounded | NodeShape::Stadium
+        )
         && config.embed_theme_css
         && config.node_gradients
         && !emit_classdef_classes
@@ -4902,7 +4914,11 @@ fn render_node(
             y,
             w,
             h,
-            config.rounded_corners * 0.55,
+            match shape {
+                NodeShape::Rounded => config.rounded_corners,
+                NodeShape::Stadium => w.min(h) / 2.0,
+                _ => config.rounded_corners * 0.55,
+            },
             cx,
             cy + node_font_size / 3.0,
             node_font_size,

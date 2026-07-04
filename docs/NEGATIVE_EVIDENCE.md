@@ -9025,3 +9025,26 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   --cached` filtered patch kept the peer WIP intact.
 
   Agent: BlackThrush
+
+<!-- blackthrush-rounded-stadium-node-fragment-landed -->
+### LANDED: extend fast node fragment to Rounded + Stadium shapes (flowround/flowstad render 3.3x) (2026-07-04)
+- **Lever:** the shape-aware fast node fragment (added for Circle in `e9d2a65`) already emits the group class
+  via `node_shape_css_class(shape)`, so extending to the rect-family shapes Rounded (`(text)`) and Stadium
+  (`([text])`) needed only: the shape-element branch to emit `<rect>` for anything that isn't Circle, the
+  caller to pass each shape's `rx` (Rect `rounded_corners*0.55`, Rounded `rounded_corners`, Stadium
+  `w.min(h)/2` — matching render_node's slow path), the `<title>` word ("rounded rectangle"/"stadium
+  shape"), and the gate relaxed to `Rect|Circle|Rounded|Stadium`.
+- **Measurement:** clean 2-build same-machine A/B (OLD = HEAD code Rect|Circle only; NEW, both profharness
+  binaries with added `flowround` = `N(text)` / `flowstad` = `N([text])` shapes). Interleaved
+  `profharness <shape> 400 400 render`, best-of-8 min-ns. (First NEW build hit a transient RCH-E309 and
+  measured a stale binary lacking the new shapes — rebuilt and re-measured.)
+  - `flowround render n=400`: `416178 ns` -> `125669 ns` = **3.312x**
+  - `flowstad render n=400`: `429013 ns` -> `127712 ns` = **3.359x**
+  - control `flow`: 1.001x — flat.
+- **Byte-identity:** all **235 fm-render-svg lib tests pass** incl. `golden_svg_test` + node parity.
+- **Ratio vs the original (mermaid.js):** dominance context; flowcharts using rounded/stadium nodes (common)
+  now render up to ~3.3x faster (proportional to the fraction of such nodes).
+- **Staging:** fragment + gates + caller rx in the clean lib.rs sub-region (4609-4921); `git apply --cached`
+  filtered patch kept the peer WIP intact.
+
+  Agent: BlackThrush
