@@ -8921,3 +8921,39 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   patch kept the peer WIP intact.
 
   Agent: BlackThrush
+
+<!-- blackthrush-render-frontier-remaining-levers-scoped -->
+### SURFACE: render frontier after 5 streaming wins — remaining levers scoped (2026-07-04)
+- **Context:** after landing 5 render wins (attr-name-borrow `92813cd`, Line-edge streaming `260bae9`,
+  all-simple-arrow streaming `408bbb3`, classed-node streaming `7d3ee9c`, block-beta-node streaming
+  `07e9c29`), the simple-node / simple-edge render frontier is streamed. Fresh render profile (n=400):
+  er 793 us, pie 712, class 637, sankey 618, git 583, block 487→~205 (this campaign), gantt 413.
+- **Remaining measurable levers (each a scoped MODERATE refactor, all guarded by `golden_svg_test`):**
+  1. **Circle-shape fast node fragment (git ~583 us; circle-node flowcharts).** git commits are
+     `NodeShape::Circle`, excluded from the Rect-only `write_common_node_fragment_into`. A circle variant
+     differs in exactly three byte-critical places vs the rect fragment: group class via
+     `node_shape_css_class(shape)` (`fm-node-shape-circle`), shape element `<circle cx cy r
+     fill="url(#fm-node-gradient)"/>` with `r = w.min(h)/2` (stroke/stroke-width gated off under embedded
+     CSS, gradient overrides fill — same as rect), and the `<title>` shape-desc word ("circle" vs
+     "rectangle"). `FilledCircle`/`DoubleCircle` (git REVERSE/HIGHLIGHT commits) additionally change
+     fill (`node_stroke`) / stroke-width (2.0) — handle or exclude. Cleanest impl: add a `shape` param to
+     the fragment and branch the three parts.
+  2. **Compartment/entity streaming for er (793) + class (637).** These build member-row `Element` trees
+     (er `node.members`, class `class_meta` — both currently excluded from the fast fragment). Streaming
+     needs a per-member `<text>` writer replicating `TextBuilder::build()` bytes (font-family conditional,
+     class, escaping) — harder byte-identity than the class-tail append; er also renders cardinality
+     labels that exclude it from whole-document streaming.
+  3. **pie slices (712)** — per-slice wedge `<path>` + label + a per-slice legend row; largely a synthetic
+     hot path (real pies have few slices), lower real-world value.
+  4. **dashed/reverse edges** — need a dasharray param (constant "5,5", emitted after marker-end) and
+     marker-start; the tail change propagates to a peer-WIP-adjacent caller (`build_common_edge_fragment`
+     @6912), so stage carefully.
+- **Also identified (byte-identical but UNMEASURABLE via profharness):** `is_inactive`/`dashed_border`/
+  `double_border` state classes ALSO only add a CSS class (like block-beta `07e9c29`), so those nodes could
+  stream via `simple_node_user_class_suffix` — but no profharness shape carries them, and `is_highlighted`
+  additionally interacts with `config.glow_enabled`. Landable under the monotonic-less-work rule if a
+  styled-node shape is added to measure.
+- **Not a blocker** — all clean-sub-region + per-hunk-`git apply --cached` stageable (peer WIP remains
+  abandoned/intact). These are dedicated-refactor levers, scoped here for clean pickup.
+
+  Agent: BlackThrush
