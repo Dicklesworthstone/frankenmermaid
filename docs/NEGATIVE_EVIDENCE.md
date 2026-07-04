@@ -9469,3 +9469,31 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   `git add`).
 
   Agent: BlackThrush
+<!-- blackthrush-firstbyte-gate-does-not-generalize-noship -->
+### NO-SHIP (both reverted): first-byte gate does NOT generalize to find_operator or state parse (2026-07-04)
+Two attempts to extend the winning seq keyword first-byte gate ([[bcc41d5]]) to sibling parse paths. Both
+measured ~0-gain-or-worse and were reverted. Instruction A/B (`perf stat -e instructions:u`, load-independent;
+OLD = committed HEAD `bcc41d5`).
+- **(a) find_operator_core operator-loop first-byte gate — MIXED, regressed styled.** Gated each
+  `tail.starts_with(operator)` on a cheap inline `operator.as_bytes().first() == Some(&byte)` (the operator
+  list mixes first bytes, so most entries can't match a given position). Cross-cutting result: `er` **1.029x**,
+  `seq` **1.025x**, `class` **1.016x**, `state` **1.013x** fewer instr — BUT `flowchart` **1.0000** (flat) and
+  `styled` **0.9944** (a 0.56% REGRESSION). Root cause: `starts_with` on the SHORT FLOW_OPERATORS (`-->`, 3
+  bytes) is already inlined to a fast byte-0 compare, so the added gate check is pure overhead there — and
+  styled's long `:::class` node lines are scanned position-by-position, amplifying it. NOT monotonic-less-work
+  (adds a check), and regresses a common shape. Reverted.
+- **(b) parse_state_statements keyword first-byte gate — WASH/slightly negative.** Guarded the 5 keyword
+  checks (`direction`/`note`/`state`/`}`/`--`, first bytes `d`/`n`/`s`/`}`/`-`) behind a single first-byte
+  reject so `S0 --> S1` edges skip them. `state parse n=400/500` **0.9993x / 0.9992x** (NEW does slightly MORE
+  instr); controls `flowchart`/`styled` **1.0000**. Root cause: only 5 checks (vs seq's 18) and they fail
+  cheaply at byte 0 (inlined), so the gate's `first()`+`matches!` overhead exceeds the savings. Byte-identical
+  (output length exact n=20..500) but ~0-gain. Reverted.
+- **DURABLE LESSON:** the first-byte keyword gate wins ONLY when (i) the chain is LONG (seq's ~18 checks) AND
+  (ii) the skipped `starts_with`/`==` are real `memcmp` CALLS (not compiler-inlined). Short operator lists /
+  few checks are already inlined to a byte-0 compare, so the gate is redundant overhead (can even regress via
+  the extra check on long non-matching lines). Confirm `memcmp%` is HIGH and the chain is LONG before
+  gating. seq (8.9% memcmp, 18 checks) qualified; find_operator's short-operator loop and state's 5-check
+  dispatch did not. Do NOT re-attempt either.
+- **Ratio vs the original (mermaid.js):** n/a (both reverted; no code kept).
+
+  Agent: BlackThrush
