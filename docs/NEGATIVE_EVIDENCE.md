@@ -9656,3 +9656,33 @@ OLD = committed HEAD `bcc41d5`).
   materially; the larger DOT case is not a measured regression, just noisy/no-change in this short gate.
 
   Agent: CodDig
+<!-- blackthrush-requirement-subtitle-streaming-landed -->
+### LANDED: stream requirement-node type/metadata subtitles (requirement render 1.09x) (2026-07-04)
+- **Lever:** profiled the never-benched niche diagram types (added profharness generators for journey/
+  quadrant/requirement/timeline/kanban — memory's "PROFILE NON-FLOWCHART TYPES" lesson). `requirement`
+  render was the outlier (3.9B instr/n=300, render-dominated); its top self-time was `render_node` (7.6%) +
+  `Attributes::set`/`write_into` (~12%) + malloc (~11%) — requirement nodes (with `requirement_meta`) always
+  take `render_node`'s un-streamed Element path, building a `«type»` header `<text>` + a `Risk … | Verify …`
+  metadata `<text>` as `Element`s (Attributes Vec + malloc each). Added `write_req_subtitle_into` and stream
+  both `<text>` fragments straight into a `raw_svg` child under the common themed config (embedded CSS, no
+  per-label style/classdef), keeping the Element path as fallback.
+- **Byte-identity:** streamed bytes replicate the Element attr order exactly (`x y text-anchor="middle"
+  dominant-baseline="central" font-size`, then `font-style="italic"` BEFORE `fill` for the type header /
+  `opacity="0.7"` AFTER `fill` for the metadata, then `class`). **fm-render-svg lib tests pass** (exit 0,
+  golden snapshots); requirement full-pipeline output length exact-matches OLD across n=20..500; flowchart/
+  class unaffected.
+- **Measurement:** 2-build same-machine A/B (OLD = generators only; NEW = +this change). Instructions
+  (`perf stat -e instructions:u`, load-independent): `requirement render n=300` **1.088x** fewer
+  (19.52B->17.94B); `n=500` **1.090x** (32.10B->29.45B). Control `flowchart render` **exactly 1.0000** —
+  confirms the win is requirement-path-only and the A/B is clean (no peer-WIP contamination).
+- **Ratio vs the original (mermaid.js):** dominance context; requirement diagrams (a previously un-streamed
+  dedicated-code render type) now render ~1.09x faster.
+- **LEVER (reusable):** the class/pie streaming playbook applies to EVERY dedicated-code node type that goes
+  through `render_node`'s Element path — journey/kanban/timeline nodes likely have the same gap. Add
+  generators for the un-benched types and profile; `render_node` + `Attributes::set` high = un-streamed nodes.
+- **Landing note:** the code was swept into origin by a shared `--global` checkpoint (`18dea05`, "checkpoint
+  svg renderer probes") mid-build alongside other agents' probe files, then a peer landed `3636b78` on top —
+  this entry documents the already-on-origin measured win (concurrent-agent working-tree merge; a peer's
+  `pipeline_bench.rs` requirement bench was preserved untouched).
+
+  Agent: BlackThrush
