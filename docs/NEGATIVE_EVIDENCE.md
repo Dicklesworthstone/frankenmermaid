@@ -8745,3 +8745,38 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   move and cannot be safely done unilaterally without destroying a peer's uncommitted work.
 
   Agent: BlackThrush
+
+<!-- blackthrush-element-attr-cow-name-landed -->
+### LANDED: Element::attr/attr_num borrow the name instead of to_string() (class render +10%, er +4%) (2026-07-04)
+- **Lever:** `fm-render-svg::element::Element::attr(name: &str, ..)` / `attr_num(name: &str, ..)` did
+  `self.attrs.str(name.to_string(), ..)` — a heap allocation for the attribute NAME on every call. But
+  every call site passes a string literal (`"text-anchor"`, `"font-size"`, `"dominant-baseline"`, `"x1"`,
+  …; verified: the only non-literal match in the crate is a doc comment). Changed both to
+  `K: Into<Cow<'static, str>>` (exactly what the sibling `attr_int`/`attr_owned` already do), so a
+  `&'static str` name is stored borrowed (`Cow::Borrowed`) with zero allocation. Byte-identical: the name
+  serializes to the same bytes; `Attributes::str`/`num` already take `Into<Cow<'static, str>>`.
+- **Why it clears the render floor (where bounded alloc removals failed, `a4eac9c`):** this is not one
+  alloc per node — it is one alloc per `.attr`/`.attr_num` CALL, and the fat-node Element-tree path makes
+  MANY per node: every text element sets `text-anchor` + `dominant-baseline` + `font-size` (+ `style`,
+  `font-weight`, …), every class separator line sets `x1`/`y1`/`x2`/`y2`. Removing all of them compounds
+  well past the ~5% code-layout noise floor.
+- **Measurement:** clean 2-build same-machine A/B (OLD `2d973ebd…`, NEW `c76a0b6f…`, differing only by the
+  two signatures). Interleaved `profharness <shape> <n> render`, best-of-8 min-ns. Build via rch offload,
+  `CARGO_TARGET_DIR=…/frankenmermaid-blackthrush`, release opt=3 fat-LTO.
+  - `class render n=400`: `693413 ns` -> `629252 ns` = **1.102x** (10.2% faster)
+  - `er render n=400`: `851243 ns` -> `817048 ns` = **1.042x**
+  - `er render n=800`: `1671907 ns` -> `1605121 ns` = **1.042x** (consistent)
+  - control `flow render n=400` (node fast-path, few `.attr` calls): `0.985x` (~1.6% layout noise, ≪ win)
+- **Byte-identity:** all **235 fm-render-svg lib tests pass** (incl. golden SVG). No other crate calls
+  `Element::attr`/`attr_num` (Element is fm-render-svg-internal), and all names are literals, so the
+  signature change compiles workspace-wide and changes no output byte.
+- **Ratio vs the original (mermaid.js):** dominance context (render dominates ~60-120x per
+  `evidence/ledger/mermaid-js-head-to-head.toml`); this is the first RENDER win of the campaign and widens
+  the class/er (fat-compartment) render margin ~1.04-1.10x.
+- **Landable rule:** byte-identical + strictly-less-work (one fewer heap alloc per attribute-set call).
+  KEY: this contained render lever lives in the CLEAN `element.rs`, NOT the peer-WIP-contested
+  `lib.rs`/`attributes.rs`, so it lands without touching the abandoned WIP. LEVER (reused): grep for
+  builder setters taking `name: &str` that `to_string()` it while the value-typed siblings already take
+  `Into<Cow<'static, str>>` — the `&str` ones are laggards allocating literal names.
+
+  Agent: BlackThrush

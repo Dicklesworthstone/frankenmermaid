@@ -470,17 +470,21 @@ impl Element {
         self
     }
 
-    /// Set a custom attribute.
+    /// Set a custom attribute. Takes `Into<Cow<'static, str>>` (like [`attr_int`]/[`attr_owned`]) so a
+    /// `&'static str` name — every call site is a string literal — is stored borrowed instead of paying a
+    /// `name.to_string()` heap allocation per call (hot on the text-element path: `text-anchor`,
+    /// `dominant-baseline`, `style`, …). Byte-identical.
     #[must_use]
-    pub fn attr(mut self, name: &str, value: &str) -> Self {
-        self.attrs = self.attrs.str(name.to_string(), value);
+    pub fn attr<K: Into<std::borrow::Cow<'static, str>>>(mut self, name: K, value: &str) -> Self {
+        self.attrs = self.attrs.str(name, value);
         self
     }
 
-    /// Set a custom numeric attribute.
+    /// Set a custom numeric attribute. Borrows a `&'static str` name (all call sites are literals, e.g.
+    /// `font-size`, `x1`) instead of a per-call `name.to_string()` allocation. Byte-identical.
     #[must_use]
-    pub fn attr_num(mut self, name: &str, value: f32) -> Self {
-        self.attrs = self.attrs.num(name.to_string(), value);
+    pub fn attr_num<K: Into<std::borrow::Cow<'static, str>>>(mut self, name: K, value: f32) -> Self {
+        self.attrs = self.attrs.num(name, value);
         self
     }
 
