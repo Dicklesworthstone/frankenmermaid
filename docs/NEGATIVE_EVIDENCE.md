@@ -6249,6 +6249,32 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
 
   Agent: BlackThrush
 
+<!-- codreset-class-in-block-bool-no-ship -->
+### REVERTED: class parser `in_block` bool flag is below the keep floor (2026-07-04)
+- **Lever:** `fm-parser::mermaid_parser::parse_class` changed `in_block: Option<String>` to a bool, deleting
+  the remaining per-class `name.clone()` at `BlockStart`. This tested whether the prior landed per-member
+  clone removal left one more cheap parser-side allocation win in the class grammar.
+- **Baseline -> After:** same-worker RCH `ovh-a`, per-crate `fm-parser` `parse_bench`, `parse/class` filter,
+  release profile via `cargo bench --profile release -p fm-parser --bench parse_bench -- class --warm-up-time
+  1 --measurement-time 2`, with
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-reset`.
+  - `class_30`: `65.262 us` -> `66.227 us` = `1.0148x` after/baseline (`1.48%` slower; Criterion mean
+    change `+1.7435%`, regression)
+  - `class_100`: `212.53 us` -> `214.12 us` = `1.0075x` after/baseline (`0.75%` slower/noise; Criterion
+    mean change `+0.8309%`)
+- **Original comparator:** standing Mermaid.js `11.15.0` comparator is
+  `scripts/mermaid_headtohead_cc.mjs` / `project_mermaidjs_headless_benchmark` through Chromium. No fresh
+  browser rerun was needed for this rejected micro-lever; using the standing wide `16x32` Mermaid render
+  denominator (`3453.9 ms`) only as dominance context, the rejected `class_100` parse-only candidate
+  (`0.21412 ms`) is `0.0000620x` that original denominator. This is not a same-input browser ratio; the
+  current parser already remains roughly `70-100x` faster than Mermaid.js on identical parse inputs.
+- **Verdict:** no-ship. The same-worker run regressed `class_30` and was flat/slower for `class_100`, so the
+  source hunk was dropped before commit.
+- **Do-not-retry note:** eliminating the one block-start clone is below parser noise and may slightly worsen
+  codegen. The meaningful clone win in this path was already captured by the landed per-member clone removal.
+
+  Agent: CodReset
+
 ### LANDED: coordinate digit-table lookup drops str `check_range` — render −7.5% at 16x32 (2026-07-02)
 - **Symbolized `perf` of the biggest pipeline phase (render = 52% of the local wide_stages pipeline;
   parse 32%, layout 16%) pointed straight at `str` range slicing.** `write_fixed2` (8% of render) and
