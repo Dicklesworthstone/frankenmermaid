@@ -9967,3 +9967,43 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
 - **Staging:** only `docs/NEGATIVE_EVIDENCE.md` (all code changes reverted; tree clean at HEAD).
 
   Agent: BlackThrush
+<!-- blackthrush-journey-kanban-fill-streaming-correctness-fix -->
+### LANDED (CORRECTNESS, perf-neutral): journey-score / kanban-priority fill dropped by the streaming fast path — restored (2026-07-04)
+- **Bug found while digging the journey/timeline streaming lever:** under the DEFAULT config
+  (`embed_theme_css` + `node_gradients`, i.e. production), journey task nodes rendered
+  `fill="url(#fm-node-gradient)"` with **NO score color** — 0 inline `style="fill:"`, and the embedded
+  `<style>` has no `.fm-node-user-journey-score-N` fill rule. Journey's whole point (color tasks by
+  satisfaction 1=red…5=green) was silently lost; same latent bug for kanban-priority. The golden
+  (`journey_basic.svg`) is rendered with gradients OFF → slow path → correct, so `svg_golden_snapshots_are_stable`
+  never caught it. Verified via a profharness `dump` mode: default journey = 0 `style="fill:"`, golden = 7.
+- **Root cause:** the common streaming fast path (`write_common_node_fragment_into`, via
+  `simple_node_user_class_suffix`) accepts `journey-score-*`/`kanban-priority-*` classes but always emits the
+  gradient fill, dropping the inline `style="fill:{color}"` that `render_node`'s slow path applies
+  (`journey_score_fill`/`kanban_priority_fill`). Its class-node twin `simple_class_node_user_suffix` correctly
+  rejects these; `simple_node_user_class_suffix` was never updated when the fast path was generalized to
+  "arbitrary simple classes." Both fast-fragment sites (`render_node_into` 5481 AND `render_node`'s own
+  early-return fragment 5630) had it.
+- **Fix (perf-neutral, chosen over the naive one):** made `write_common_node_fragment_into` /
+  `build_common_node_fragment` take a `special_fill: Option<&str>` and emit ` style="fill: {color}"` after the
+  rect/circle fill; a `common_fragment_special_fill(node)` helper maps the 9 journey-score/kanban-priority
+  classes to the exact slow-path colors. Both fast-fragment call sites pass it.
+- **Byte-identity (to the CORRECT slow path, not to buggy HEAD):** dumped journey & kanban from this fix vs a
+  forced-slow-path build (`simple_node_user_class_suffix` rejecting these classes) — **byte-identical** (49730
+  / 24308 bytes). All 16 diagram types identical between the two correct builds; non-special node types
+  (flowchart/class/state/er/…) unchanged from HEAD. **fm-render-svg lib tests 240/240 pass**; golden RED only
+  on pre-existing `gantt_basic`.
+- **Perf (`perf stat -e instructions:u`, render n=300):** vs the naive slow-path fix (reject → Element path)
+  this streaming fix is **1.675× faster on journey** (1918M→1145M) — it keeps journey/kanban on the fast path
+  instead of regressing them. Cost vs the *buggy* HEAD fast path is **~0.99×** (journey 0.991, kanban 0.983) —
+  the ~1% is the correct color bytes + the per-node class scan that HEAD wrongly skipped; classless controls
+  (flowchart/class) 0.991/0.998 within the render code-layout-noise floor (output byte-identical to HEAD).
+- **Ratio vs the original (mermaid.js):** restores journey/kanban score-color parity that the default config
+  had silently lost.
+- **LESSON:** the "dig a perf lever" path can surface a CORRECTNESS bug — a fast path that accepts an input
+  class but doesn't reproduce that class's special rendering. When generalizing a fast-path gate to "arbitrary
+  simple classes," audit EVERY class the slow path treats specially (fills/borders/structure), and keep the
+  two sibling gates (`simple_node_user_class_suffix` / `simple_class_node_user_suffix`) in lockstep.
+- **Staging:** single self-contained change in `crates/fm-render-svg/src/lib.rs` (no peer WIP there — direct
+  `git add`).
+
+  Agent: BlackThrush

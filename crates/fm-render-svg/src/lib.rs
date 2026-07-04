@@ -4993,6 +4993,36 @@ fn write_class_node_fragment_into(
     out.push_str(", rectangle</title></g>");
 }
 
+/// The inline `style="fill: …"` color the slow path (`render_node`) applies to a node's shape rect for
+/// journey-score / kanban-priority classes (`journey_score_fill`/`kanban_priority_fill`). The common
+/// streaming fragment must emit the identical `style` or it silently drops the score/priority color under
+/// the default embedded-CSS + gradient config. Requirement-risk fills never reach the common fragment (its
+/// gate excludes `requirement_meta`), so they're intentionally not handled here.
+fn common_fragment_special_fill(node: &fm_core::IrNode) -> Option<&'static str> {
+    node.classes.iter().find_map(|class| match class.as_str() {
+        "journey-score-1" => Some("#fca5a5"),
+        "journey-score-2" => Some("#fdba74"),
+        "journey-score-3" => Some("#fde68a"),
+        "journey-score-4" => Some("#bef264"),
+        "journey-score-5" => Some("#86efac"),
+        "kanban-priority-high" | "kanban-priority-critical" => Some("#fca5a5"),
+        "kanban-priority-medium" => Some("#fde68a"),
+        "kanban-priority-low" => Some("#bbf7d0"),
+        _ => None,
+    })
+}
+
+/// Emit ` style="fill: {color}"` for a node whose journey-score/kanban-priority class overrides the shape
+/// fill. Byte-identical to `render_node`'s slow path, which builds the same attr via
+/// `Element::attr("style", &format!("fill: {fill}"))` (the color is a fixed `#rrggbb`, never escapable).
+fn write_special_fill_style_into(f: &mut String, special_fill: Option<&str>) {
+    if let Some(fill) = special_fill {
+        f.push_str(" style=\"fill: ");
+        f.push_str(fill);
+        f.push('"');
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_common_node_fragment(
     node_id: &str,
@@ -5011,6 +5041,7 @@ fn build_common_node_fragment(
     text_fill: &str,
     user_classes: &str,
     shape: fm_core::NodeShape,
+    special_fill: Option<&str>,
 ) -> String {
     // `raw_label` is written twice (the `aria-label` and the `<title>` text), so size for both copies
     // plus the fixed tag/literal bytes.
@@ -5033,6 +5064,7 @@ fn build_common_node_fragment(
         text_fill,
         user_classes,
         shape,
+        special_fill,
     );
     f
 }
@@ -5058,6 +5090,7 @@ fn write_common_node_fragment_into(
     text_fill: &str,
     user_classes: &str,
     shape: fm_core::NodeShape,
+    special_fill: Option<&str>,
 ) {
     use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
     use std::fmt::Write as _;
@@ -5096,7 +5129,9 @@ fn write_common_node_fragment_into(
         let _ = AttributeValue::Number(h).write_value(f);
         f.push_str("\" rx=\"");
         let _ = AttributeValue::Number(rx).write_value(f);
-        f.push_str("\" fill=\"url(#fm-node-gradient)\"/>");
+        f.push_str("\" fill=\"url(#fm-node-gradient)\"");
+        write_special_fill_style_into(f, special_fill);
+        f.push_str("/>");
     } else {
         f.push_str("<circle cx=\"");
         let _ = AttributeValue::Number(x + w / 2.0).write_value(f);
@@ -5104,7 +5139,9 @@ fn write_common_node_fragment_into(
         let _ = AttributeValue::Number(y + h / 2.0).write_value(f);
         f.push_str("\" r=\"");
         let _ = AttributeValue::Number(w.min(h) / 2.0).write_value(f);
-        f.push_str("\" fill=\"url(#fm-node-gradient)\"/>");
+        f.push_str("\" fill=\"url(#fm-node-gradient)\"");
+        write_special_fill_style_into(f, special_fill);
+        f.push_str("/>");
     }
     // <text x y text-anchor="middle" font-size=".." fill="..">label</text>
     f.push_str("<text x=\"");
@@ -5500,6 +5537,7 @@ fn render_node_into(
             colors.text.as_str(),
             user_classes,
             shape,
+            common_fragment_special_fill(node),
         );
         return;
     }
@@ -5648,6 +5686,7 @@ fn render_node(
             colors.text.as_str(),
             user_classes,
             shape,
+            common_fragment_special_fill(node),
         ));
     }
 
