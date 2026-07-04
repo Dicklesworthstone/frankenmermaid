@@ -9347,3 +9347,29 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
 - **Ratio vs the original (mermaid.js):** n/a (reverted wash; no code kept).
 
   Agent: BlackThrush
+<!-- blackthrush-apply-ir-constraints-empty-skip-landed -->
+### LANDED: skip the all-node id->index BTreeMap when there are no constraints (block/Sugiyama layout ~1.10x) (2026-07-04)
+- **Lever:** profiled block-beta layout (Sugiyama, 106us/n=300) — `apply_ir_constraints` unconditionally
+  built `id_to_index: BTreeMap<&str, usize>` over EVERY node (an O(N log N) sorted collect + per-lookup
+  memcmp) before looping `ir.constraints`, but the constraint list is empty for the overwhelmingly common
+  diagram (flowchart/block/wide/subgraph — no `SameRank`/`MinLength` directives). So the whole map was
+  built and thrown away. Added an `if ir.constraints.is_empty() { return; }` guard before the build.
+- **Byte-identity:** nothing between the map build and the constraint loop mutates `ranks`, so an empty
+  constraint list leaves `ranks` untouched either way. **fm-layout + fm-render-svg lib tests pass** (exit 0);
+  block/wide/subg/flowchart full-pipeline output length exact-matches OLD (n=300).
+- **Measurement:** 2-build same-machine A/B (OLD = committed HEAD `41948f2`; NEW differs only by this guard).
+  Instructions (`perf stat -e instructions:u`, load-independent):
+  - `block layout n=300` **1.095x** fewer instr (4.929B->4.503B); `n=500` **1.102x** (8.472B->7.686B) —
+    scales with node count.
+  - `block full pipeline n=300` **1.022x**; `n=500` **1.025x**.
+  - Controls exactly **1.0000**: `wide`/`subg`/`flowchart` layout (they use Tree layout, never call
+    `apply_ir_constraints`) — confirms the measurement is precise and the change is surgical to the Sugiyama
+    path.
+- **Ratio vs the original (mermaid.js):** dominance context (full-pipeline 63-124x); Sugiyama-dispatched
+  diagrams without constraints skip an O(N log N) BTreeMap build per layout.
+- **LEVER (reusable):** grep for a map/index built UNCONDITIONALLY before a loop over an often-empty
+  collection (`ir.constraints`, optional metadata lists) — guard the build behind `is_empty()`. Same family
+  as the gantt dep-hoist; `memcmp%` in a layout profile again pointed at a wasteful `BTreeMap<&str,_>`.
+- **Staging:** single-file change in `crates/fm-layout/src/lib.rs` (no peer WIP there — direct `git add`).
+
+  Agent: BlackThrush

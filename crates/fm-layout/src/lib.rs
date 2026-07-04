@@ -8708,6 +8708,15 @@ fn cycle_removal_greedy(
 fn apply_ir_constraints(ir: &MermaidDiagramIr, ranks: &mut BTreeMap<usize, usize>) {
     use fm_core::IrConstraint;
 
+    // The overwhelmingly common case (flowchart/block/wide/subgraph — anything without explicit
+    // `SameRank`/`MinLength` directives) has no constraints, and nothing below the `id_to_index` build
+    // mutates `ranks` unless the constraint loop runs. Bail before building the O(N log N)
+    // `BTreeMap<&str, usize>` of every node id (its sorted-collect + per-lookup memcmp was pure waste on
+    // constraint-free graphs). Byte-identical: an empty constraint list leaves `ranks` untouched either way.
+    if ir.constraints.is_empty() {
+        return;
+    }
+
     // Build node-id-to-index lookup.
     let id_to_index: BTreeMap<&str, usize> = ir
         .nodes
