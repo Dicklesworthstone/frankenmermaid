@@ -7,10 +7,15 @@ fn rich_class(n: usize, members: usize) -> String {
     let mut l = vec!["classDiagram".to_string()];
     for i in 0..n {
         l.push(format!("  class C{i} {{"));
-        for m in 0..members { l.push(format!("    +int field{m}")); l.push(format!("    +method{m}(int a) bool")); }
+        for m in 0..members {
+            l.push(format!("    +int field{m}"));
+            l.push(format!("    +method{m}(int a) bool"));
+        }
         l.push("  }".into());
     }
-    for i in 0..n.saturating_sub(1) { l.push(format!("  C{i} <|-- C{}", i+1)); }
+    for i in 0..n.saturating_sub(1) {
+        l.push(format!("  C{i} <|-- C{}", i + 1));
+    }
     l.join("\n")
 }
 fn main() {
@@ -22,11 +27,20 @@ fn main() {
         let layout = fm_layout::layout_diagram(&pf.ir);
         if mode == "hash" {
             let svg = render_svg_with_layout(&pf.ir, &layout, &cfg);
-            let mut h = DefaultHasher::new(); svg.hash(&mut h);
+            let mut h = DefaultHasher::new();
+            svg.hash(&mut h);
             println!("n={n} mem={mem} len={} hash={:016x}", svg.len(), h.finish());
         } else {
             let mut best = u128::MAX;
-            for _ in 0..2000 { let t=Instant::now(); let v=render_svg_with_layout(&pf.ir,&layout,&cfg); let e=t.elapsed().as_nanos(); if e<best{best=e;} std::hint::black_box(&v); }
+            for _ in 0..2000 {
+                let t = Instant::now();
+                let v = render_svg_with_layout(&pf.ir, &layout, &cfg);
+                let e = t.elapsed().as_nanos();
+                if e < best {
+                    best = e;
+                }
+                std::hint::black_box(&v);
+            }
             println!("n={n} mem={mem} render_min={best}ns");
         }
     }

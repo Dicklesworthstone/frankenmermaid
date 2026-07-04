@@ -343,7 +343,9 @@ impl FontMetrics {
         // `memchr`-split lines fed through the same left-to-right `f32::max` from a 0.0 seed
         // (empty text yields 0.0, matching `fold(0.0, f32::max)` on an empty `lines()`).
         let mut max_width = 0.0_f32;
-        for_each_line(text, |line| max_width = max_width.max(self.estimate_width(line)));
+        for_each_line(text, |line| {
+            max_width = max_width.max(self.estimate_width(line))
+        });
         max_width
     }
 

@@ -151,6 +151,24 @@ fn gen_highlighted_wide(layers: usize, width: usize) -> String {
     lines.join("\n")
 }
 
+fn gen_requirement_chain(node_count: usize) -> String {
+    let mut lines = vec![String::from("requirementDiagram")];
+    for i in 0..node_count {
+        lines.push(format!("  requirement R{i} {{"));
+        lines.push(format!("    id: REQ-{i:04}"));
+        lines.push(format!(
+            "    text: Requirement {i} must preserve rendered output"
+        ));
+        lines.push("    risk: high".to_string());
+        lines.push("    verifymethod: test".to_string());
+        lines.push("  }".to_string());
+    }
+    for i in 0..node_count.saturating_sub(1) {
+        lines.push(format!("  R{i} - satisfies -> R{}", i + 1));
+    }
+    lines.join("\n")
+}
+
 fn gen_mindmap(node_count: usize) -> String {
     let mut lines = Vec::with_capacity(node_count.saturating_add(1));
     lines.push(String::from("mindmap"));
@@ -502,6 +520,33 @@ fn bench_highlighted_wide_stages(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_requirement_stages(c: &mut Criterion) {
+    let mut group = c.benchmark_group("requirement_stages");
+    let config = fm_render_svg::SvgRenderConfig::default();
+
+    for (label, node_count) in [("64", 64_usize), ("256", 256), ("512", 512)] {
+        let input = gen_requirement_chain(node_count);
+        let parsed = fm_parser::parse(&input);
+        let layout = fm_layout::layout_diagram(&parsed.ir);
+
+        group.bench_with_input(BenchmarkId::new("parse", label), &input, |b, input| {
+            b.iter(|| fm_parser::parse(input));
+        });
+        group.bench_with_input(BenchmarkId::new("layout", label), &parsed.ir, |b, ir| {
+            b.iter(|| fm_layout::layout_diagram(ir));
+        });
+        group.bench_with_input(
+            BenchmarkId::new("render", label),
+            &(&parsed.ir, &layout),
+            |b, (ir, layout)| {
+                b.iter(|| fm_render_svg::render_svg_with_layout(ir, layout, &config));
+            },
+        );
+    }
+
+    group.finish();
+}
+
 /// Render the wide corpus with `include_source_spans = true`. Source-span metadata is
 /// off by default (matching Mermaid.js, which emits no source maps), so the default-config
 /// groups never exercise the span-emission path. This group isolates the spans-on render
@@ -547,6 +592,7 @@ criterion_group!(
     bench_dotted_wide_stages,
     bench_marker_start_wide_stages,
     bench_highlighted_wide_stages,
+    bench_requirement_stages,
     bench_render_spans_on
 );
 criterion_main!(benches);

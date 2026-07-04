@@ -3621,7 +3621,16 @@ fn render_quadrant_svg(
 /// Stream a gantt task bar `<rect>` byte-identical to the slow path's `Element::rect()`:
 /// `x y width height fill stroke stroke-width="1" rx="3" class="fm-gantt-task {type_class}"`.
 #[allow(clippy::too_many_arguments)]
-fn write_gantt_bar_into(f: &mut String, x: f32, y: f32, w: f32, h: f32, fill: &str, stroke: &str, type_class: &str) {
+fn write_gantt_bar_into(
+    f: &mut String,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    fill: &str,
+    stroke: &str,
+    type_class: &str,
+) {
     use crate::attributes::{AttributeValue, write_escaped_attr};
     f.push_str("<rect x=\"");
     let _ = AttributeValue::Number(x).write_value(f);
@@ -3643,7 +3652,16 @@ fn write_gantt_bar_into(f: &mut String, x: f32, y: f32, w: f32, h: f32, fill: &s
 /// Stream a gantt task label `<text>` byte-identical to the slow path's `Element::text()`:
 /// `x y text-anchor="middle" dominant-baseline="central" font-size [font-family] fill class`.
 #[allow(clippy::too_many_arguments)]
-fn write_gantt_label_into(f: &mut String, x: f32, y: f32, font_size: f32, family: &str, embed: bool, fill: &str, label: &str) {
+fn write_gantt_label_into(
+    f: &mut String,
+    x: f32,
+    y: f32,
+    font_size: f32,
+    family: &str,
+    embed: bool,
+    fill: &str,
+    label: &str,
+) {
     use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
     f.push_str("<text x=\"");
     let _ = AttributeValue::Number(x).write_value(f);
@@ -3766,7 +3784,14 @@ fn render_gantt_svg(
                 let r = h.min(w) * 0.4;
                 let d = format!(
                     "M{},{} L{},{} L{},{} L{},{} Z",
-                    cx, cy - r, cx + r, cy, cx, cy + r, cx - r, cy
+                    cx,
+                    cy - r,
+                    cx + r,
+                    cy,
+                    cx,
+                    cy + r,
+                    cx - r,
+                    cy
                 );
                 task_svg.push_str("<path d=\"");
                 task_svg.push_str(&d);
@@ -4788,7 +4813,16 @@ fn write_class_compartments_into(
         } else {
             format!("{vis}{}", attr.name)
         };
-        write_class_text_into(f, text_x, cursor_y, "start", member_font_size, "", fill, &text);
+        write_class_text_into(
+            f,
+            text_x,
+            cursor_y,
+            "start",
+            member_font_size,
+            "",
+            fill,
+            &text,
+        );
     }
     if !meta.attributes.is_empty() && !meta.methods.is_empty() {
         cursor_y += line_h * 0.3;
@@ -4814,7 +4848,16 @@ fn write_class_compartments_into(
             .map(|t| format!(": {t}"))
             .unwrap_or_default();
         let text = format!("{vis}{}{suffix}{ret}", method.name);
-        write_class_text_into(f, text_x, cursor_y, "start", member_font_size, "", fill, &text);
+        write_class_text_into(
+            f,
+            text_x,
+            cursor_y,
+            "start",
+            member_font_size,
+            "",
+            fill,
+            &text,
+        );
     }
 }
 
@@ -4901,8 +4944,23 @@ fn build_common_node_fragment(
     // plus the fixed tag/literal bytes.
     let mut f = String::with_capacity(label.len() + raw_label.len() * 2 + user_classes.len() + 340);
     write_common_node_fragment_into(
-        &mut f, node_id, node_index, accent, raw_label, label, x, y, w, h, rx, text_x, text_y,
-        font_size, text_fill, user_classes, shape,
+        &mut f,
+        node_id,
+        node_index,
+        accent,
+        raw_label,
+        label,
+        x,
+        y,
+        w,
+        h,
+        rx,
+        text_x,
+        text_y,
+        font_size,
+        text_fill,
+        user_classes,
+        shape,
     );
     f
 }
@@ -5120,10 +5178,9 @@ fn render_node_into(
     // node whose custom classes are all simple; `None` (slow path) when a class needs conditional render.
     let user_class_suffix = ir_node.and_then(simple_node_user_class_suffix);
     if matches!(
-            shape,
-            NodeShape::Rect | NodeShape::Circle | NodeShape::Rounded | NodeShape::Stadium
-        )
-        && config.embed_theme_css
+        shape,
+        NodeShape::Rect | NodeShape::Circle | NodeShape::Rounded | NodeShape::Stadium
+    ) && config.embed_theme_css
         && config.node_gradients
         && !emit_classdef_classes
         && !config.animations_enabled
@@ -6032,7 +6089,10 @@ fn render_node(
                         .attr("dominant-baseline", "central")
                         .attr_num("font-size", subtitle_font_size)
                         .attr("font-style", "italic")
-                        .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                        .font_family_unless_embedded_css(
+                            &config.font_family,
+                            config.embed_theme_css,
+                        )
                         .fill(&colors.text)
                         .class("fm-req-type-label");
                     type_elem = apply_label_class(type_elem);
@@ -6096,7 +6156,10 @@ fn render_node(
                         .attr("text-anchor", "middle")
                         .attr("dominant-baseline", "central")
                         .attr_num("font-size", subtitle_font_size)
-                        .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                        .font_family_unless_embedded_css(
+                            &config.font_family,
+                            config.embed_theme_css,
+                        )
                         .fill(&colors.text)
                         .attr("opacity", "0.7")
                         .class("fm-req-metadata");
@@ -6430,7 +6493,9 @@ fn render_class_compartments(
     // other case (label style, classdef, non-embedded CSS) falls through.
     if label_style.is_none() && !emit_classdef_classes && config.embed_theme_css {
         let mut f = String::new();
-        write_class_compartments_into(&mut f, node, meta, ir, x, y, w, h, font_size, config, colors);
+        write_class_compartments_into(
+            &mut f, node, meta, ir, x, y, w, h, font_size, config, colors,
+        );
         group = group.child(Element::raw_svg(f));
         return group;
     }
@@ -8701,6 +8766,71 @@ mod tests {
             assert_eq!(
                 frag, expected,
                 "streamed edge fragment must equal the Element serialization (d={d:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn requirement_subtitle_streaming_matches_element_render() {
+        let cases = [
+            (
+                123.25,
+                45.5,
+                10.75,
+                " font-style=\"italic\"",
+                "",
+                "fm-req-type-label",
+                "\u{00ab}functional & safe\u{00bb}",
+                true,
+            ),
+            (
+                -2.0,
+                77.25,
+                9.5,
+                "",
+                " opacity=\"0.7\"",
+                "fm-req-metadata",
+                "Risk: high | Verify: test <manual>",
+                false,
+            ),
+        ];
+
+        for (x, y, font_size, before_fill, after_fill, class, text, italic) in cases {
+            let mut elem = Element::text()
+                .x(x)
+                .y(y)
+                .content(text)
+                .attr("text-anchor", "middle")
+                .attr("dominant-baseline", "central")
+                .attr_num("font-size", font_size);
+            if italic {
+                elem = elem.attr("font-style", "italic");
+            }
+            elem = elem.fill("#1a1a2e");
+            if !after_fill.is_empty() {
+                elem = elem.attr("opacity", "0.7");
+            }
+            elem = elem.class(class);
+
+            let mut expected = String::new();
+            elem.write_to_string(&mut expected);
+
+            let mut streamed = String::new();
+            write_req_subtitle_into(
+                &mut streamed,
+                x,
+                y,
+                font_size,
+                before_fill,
+                after_fill,
+                "#1a1a2e",
+                class,
+                text,
+            );
+
+            assert_eq!(
+                streamed, expected,
+                "streamed requirement subtitle must match Element render for {class}"
             );
         }
     }

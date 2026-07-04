@@ -8,7 +8,14 @@ fn main() {
     let pf = parse(&input);
     let layout = fm_layout::layout_diagram(&pf.ir);
     let svg = render_svg_with_layout(&pf.ir, &layout, &SvgRenderConfig::default());
-    let mut h = DefaultHasher::new(); svg.hash(&mut h);
+    let mut h = DefaultHasher::new();
+    svg.hash(&mut h);
     let t = fm_layout::layout_diagram_traced(&pf.ir);
-    eprintln!("{path}: nodes={} selected={:?} len={} hash={:016x}", pf.ir.nodes.len(), t.trace.dispatch.selected, svg.len(), h.finish());
+    eprintln!(
+        "{path}: nodes={} selected={:?} len={} hash={:016x}",
+        pf.ir.nodes.len(),
+        t.trace.dispatch.selected,
+        svg.len(),
+        h.finish()
+    );
 }

@@ -1298,7 +1298,9 @@ impl IrNode {
     /// `click` callback function name, if any.
     #[must_use]
     pub fn callback(&self) -> Option<&str> {
-        self.interaction.as_ref().and_then(|i| i.callback.as_deref())
+        self.interaction
+            .as_ref()
+            .and_then(|i| i.callback.as_deref())
     }
     /// `click` tooltip text, if any.
     #[must_use]
@@ -1307,7 +1309,8 @@ impl IrNode {
     }
     /// Mutable access to the icon/link/interaction fields, allocating the box on first use.
     pub fn interaction_mut(&mut self) -> &mut IrNodeInteraction {
-        self.interaction.get_or_insert_with(|| Box::new(IrNodeInteraction::default()))
+        self.interaction
+            .get_or_insert_with(|| Box::new(IrNodeInteraction::default()))
     }
 }
 
@@ -1404,12 +1407,16 @@ impl IrEdge {
     /// Source-side cardinality label, if any.
     #[must_use]
     pub fn source_cardinality(&self) -> Option<&str> {
-        self.extras.as_ref().and_then(|e| e.source_cardinality.as_deref())
+        self.extras
+            .as_ref()
+            .and_then(|e| e.source_cardinality.as_deref())
     }
     /// Target-side cardinality label, if any.
     #[must_use]
     pub fn target_cardinality(&self) -> Option<&str> {
-        self.extras.as_ref().and_then(|e| e.target_cardinality.as_deref())
+        self.extras
+            .as_ref()
+            .and_then(|e| e.target_cardinality.as_deref())
     }
     /// State-transition guard, if any.
     #[must_use]
@@ -1423,7 +1430,8 @@ impl IrEdge {
     }
     /// Mutable access to the diagram-specific extras, allocating the box on first use.
     pub fn extras_mut(&mut self) -> &mut IrEdgeExtras {
-        self.extras.get_or_insert_with(|| Box::new(IrEdgeExtras::default()))
+        self.extras
+            .get_or_insert_with(|| Box::new(IrEdgeExtras::default()))
     }
 }
 
@@ -3983,7 +3991,10 @@ impl StructuredDiagnostic {
     #[must_use]
     pub fn from_diagnostic(diagnostic: &Diagnostic) -> Self {
         let (source_line, source_column) = diagnostic.span.map_or((None, None), |span| {
-            (Some(span.start.line as usize), Some(span.start.col as usize))
+            (
+                Some(span.start.line as usize),
+                Some(span.start.col as usize),
+            )
         });
 
         Self {
@@ -4955,8 +4966,12 @@ pub fn resolve_span_text_range(source: &str, span: Span) -> Option<MermaidTextRa
         span.start.col as usize,
     )?;
     let end_col_exclusive = span.end.col as usize + 1;
-    let end_byte =
-        byte_index_for_line_col(source, &line_starts, span.end.line as usize, end_col_exclusive)?;
+    let end_byte = byte_index_for_line_col(
+        source,
+        &line_starts,
+        span.end.line as usize,
+        end_col_exclusive,
+    )?;
     (end_byte >= start_byte).then_some(MermaidTextRange {
         start_byte,
         end_byte,
@@ -5214,15 +5229,26 @@ mod tests {
         for raw in cases {
             // streaming fragment sanitizer == reference
             let streamed = super::sanitize_render_element_fragment(raw);
-            assert_eq!(streamed, sanitize_reference(raw), "fragment sanitize diverged for {raw:?}");
+            assert_eq!(
+                streamed,
+                sanitize_reference(raw),
+                "fragment sanitize diverged for {raw:?}"
+            );
             // direct node-id writer == the String-building (no-variant) builder, for several indices
             for index in [0usize, 7, 42, 1000, 999_999] {
                 let mut written = String::new();
                 super::write_mermaid_node_element_id_into(&mut written, raw, index);
                 let built = super::mermaid_node_element_id(raw, index);
-                let with_variant_none = super::mermaid_node_element_id_with_variant(raw, index, None);
-                assert_eq!(written, built, "id writer != builder for ({raw:?}, {index})");
-                assert_eq!(written, with_variant_none, "id writer != variant(None) for ({raw:?}, {index})");
+                let with_variant_none =
+                    super::mermaid_node_element_id_with_variant(raw, index, None);
+                assert_eq!(
+                    written, built,
+                    "id writer != builder for ({raw:?}, {index})"
+                );
+                assert_eq!(
+                    written, with_variant_none,
+                    "id writer != variant(None) for ({raw:?}, {index})"
+                );
             }
         }
     }

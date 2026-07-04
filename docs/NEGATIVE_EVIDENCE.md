@@ -9249,6 +9249,38 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
 
   Agent: CodDig
 
+<!-- tansparrow-requirement-subtitle-streaming-landed -->
+### LANDED: stream requirement subtitle text fragments (requirement render 1.08x) (2026-07-04)
+- **Lever:** requirement nodes build two metadata subtitle `<text>` elements on the slow path:
+  the `<<type>>` header and the `Risk ... | Verify ...` line. Under the common themed config
+  (`embed_theme_css`, no per-label classdef/style), these attributes are fixed. Stream those
+  two text fragments directly with `write_req_subtitle_into` instead of constructing `Element`
+  and `Attributes` objects for every requirement node.
+- **Byte-identity:** the stream writer uses the same number formatter and attribute/text escapers
+  as `Element`. New `requirement_subtitle_streaming_matches_element_render` compares both subtitle
+  variants byte-for-byte against the canonical `Element::text()` serialization; `fm-render-svg`
+  lib tests passed with 239 tests.
+- **Measurement:** per-crate short Criterion on `frankenmermaid-cli`, bench
+  `pipeline_bench`, filter `requirement_stages/render/512`, with
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod`. The same benchmark harness was
+  applied to baseline commit `5f97dd6` and candidate `18dea05`. RCH had no admissible workers
+  for the proof runs and used local fail-open for both sides: baseline `1.8386 ms`; candidate
+  `1.7035 ms`; speedup `1.0793x`, delta `-7.35%`.
+- **Ratio vs the original (mermaid.js):** candidate `1.7035 ms` versus the standing Mermaid.js
+  `11.15.0` Chromium wide `16x32` denominator `3453.9 ms` gives
+  frankenmermaid/Mermaid `0.0004932x`; Mermaid.js is `2027.53x` slower on that standing denominator.
+- **Validation:** `cargo check -p frankenmermaid-cli --benches` passed via RCH on `vmi1293453`;
+  `cargo test -p fm-render-svg --lib` passed via RCH on `vmi1149989`; `cargo clippy -p
+  fm-render-svg --lib -- -D warnings` passed via RCH on `vmi1293453`; `cargo fmt --check -p
+  frankenmermaid-cli -p fm-render-svg -p fm-core` passed locally. A first clippy attempt on `hz1`
+  failed before Rust analysis because that worker lacked `libclang` for `highs-sys`; the pinned
+  rerun on `vmi1293453` passed.
+- **Tooling note:** Agent Mail registration/reservation as `TanSparrow` remained blocked by the
+  SQLite corruption circuit breaker. Literal `cargo bench --release` is rejected by this Cargo bench
+  target, so release-profile benches used `cargo bench --profile release`.
+
+  Agent: TanSparrow
+
 <!-- blackthrush-pie-streaming-landed -->
 ### LANDED: stream the whole pie chart (title + wedges + labels + legend) (pie render 1.88-1.98x) (2026-07-04)
 - **Lever:** the last big render gap. pie built ~4 `Element`s per slice (wedge `<path>`/`<circle>` + label

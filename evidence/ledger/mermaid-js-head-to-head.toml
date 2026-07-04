@@ -2952,3 +2952,39 @@ bench_syntax_note = "Literal cargo bench --release is rejected by this Cargo; re
 [post_measurement_highlighted_node_class_writer_2026_07_04.decision]
 kept = true
 reason = "Same-worker vmi1152480 release Criterion A/B cuts highlighted-wide render from 1.9428 ms to 1.6606 ms (1.17x). The lever removes one temporary String per slow-path user node class and keeps serialization byte order unchanged."
+
+[post_measurement_requirement_subtitle_streaming_2026_07_04]
+date = "2026-07-04"
+agent = "TanSparrow"
+status = "keep"
+baseline_commit = "5f97dd6"
+candidate_commit = "18dea05"
+candidate_summary = "Stream requirement-node subtitle text fragments directly under the common embedded-CSS config instead of building Element and Attributes values for the requirement type header and risk/verify metadata line."
+graveyard_route = "Extreme optimization renderer allocation lever on the requirement-node slow path, after already-covered generic node and edge streaming paths."
+rust_baseline_command = "AGENT_NAME=TanSparrow RCH_WORKER=vmi1152480 CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod RCH_QUEUE_WHEN_BUSY=1 RCH_FORCE_REMOTE=1 RUSTFLAGS='-C metadata=tansparrow_req_base_profile' rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- requirement_stages/render/512 --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot"
+rust_candidate_command = "AGENT_NAME=TanSparrow RCH_WORKER=vmi1152480 CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod RCH_QUEUE_WHEN_BUSY=1 RCH_FORCE_REMOTE=1 RUSTFLAGS='-C metadata=tansparrow_req_cand_profile' rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- requirement_stages/render/512 --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot"
+rust_worker = "local fail-open for both accepted baseline and candidate proof runs because RCH reported no admissible workers (critical_pressure/insufficient_slots); same machine and same target dir."
+mermaid_js_command = "Standing comparator from scripts/mermaid_headtohead_cc.mjs: Mermaid.js 11.15.0 via Puppeteer/system Chromium, wide 16x32 median render 3453.9 ms."
+behavior_proof = "New fm-render-svg unit test requirement_subtitle_streaming_matches_element_render compares the streamed requirement subtitle writer against Element::text() byte-for-byte for type and metadata subtitle variants."
+agent_mail = "Agent Mail registration/reservation as TanSparrow was blocked by the SQLite corruption circuit breaker; no reservation was available."
+bench_syntax_note = "Literal cargo bench --release is rejected by this Cargo; release-profile bench used --profile release."
+
+[post_measurement_requirement_subtitle_streaming_2026_07_04.metrics]
+"requirement_render_512_baseline_ms" = 1.8386
+"requirement_render_512_candidate_ms" = 1.7035
+"requirement_render_512_speedup_x" = 1.0793
+"requirement_render_512_delta_pct" = -7.35
+"standing_wide_16x32_mermaid_js_ms" = 3453.9
+"requirement_candidate_over_standing_mermaid_js" = 0.0004932
+"standing_mermaid_js_over_requirement_candidate" = 2027.53
+
+[post_measurement_requirement_subtitle_streaming_2026_07_04.validation]
+"cargo_check_cli_benches" = "passed via RCH vmi1293453: cargo check -p frankenmermaid-cli --benches"
+"cargo_test_fm_render_svg_lib" = "passed via RCH vmi1149989: 239 tests"
+"cargo_clippy_fm_render_svg_lib" = "passed via RCH vmi1293453: cargo clippy -p fm-render-svg --lib -- -D warnings"
+"cargo_fmt_check_packages" = "passed locally: cargo fmt --check -p frankenmermaid-cli -p fm-render-svg -p fm-core"
+"clippy_worker_note" = "an earlier clippy attempt on hz1 failed before Rust analysis because highs-sys bindgen could not find libclang; pinned vmi1293453 rerun passed"
+
+[post_measurement_requirement_subtitle_streaming_2026_07_04.decision]
+kept = true
+reason = "Same-machine local fail-open release Criterion A/B cuts requirement render/512 from 1.8386 ms to 1.7035 ms (1.08x). The lever removes Element/Attributes construction from two fixed subtitle text fragments per requirement node and preserves serialization byte order."

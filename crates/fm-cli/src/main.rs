@@ -3386,7 +3386,12 @@ fn collect_fnx_diagnostics(results: &FnxAnalysisResults) -> Vec<ValidationDiagno
 
         let (source_line, source_column) = diag
             .span
-            .map(|span| (Some(span.start.line as usize), Some(span.start.col as usize)))
+            .map(|span| {
+                (
+                    Some(span.start.line as usize),
+                    Some(span.start.col as usize),
+                )
+            })
             .unwrap_or((None, None));
 
         diagnostics.push(ValidationDiagnostic {

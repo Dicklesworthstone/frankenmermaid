@@ -497,7 +497,11 @@ impl Element {
     /// Set a custom numeric attribute. Borrows a `&'static str` name (all call sites are literals, e.g.
     /// `font-size`, `x1`) instead of a per-call `name.to_string()` allocation. Byte-identical.
     #[must_use]
-    pub fn attr_num<K: Into<std::borrow::Cow<'static, str>>>(mut self, name: K, value: f32) -> Self {
+    pub fn attr_num<K: Into<std::borrow::Cow<'static, str>>>(
+        mut self,
+        name: K,
+        value: f32,
+    ) -> Self {
         self.attrs = self.attrs.num(name, value);
         self
     }
