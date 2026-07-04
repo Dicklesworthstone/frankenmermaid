@@ -5063,6 +5063,162 @@ fn write_common_node_fragment_into(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
+fn write_requirement_node_fragment_into(
+    out: &mut String,
+    meta: &fm_core::IrRequirementNodeMeta,
+    node_id: &str,
+    node_index: usize,
+    raw_label: &str,
+    label: &str,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    rx: f32,
+    cx: f32,
+    font_size: f32,
+    config: &SvgRenderConfig,
+    colors: &ThemeColors,
+) {
+    use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
+    use std::fmt::Write as _;
+
+    out.push_str("<g id=\"");
+    fm_core::write_mermaid_node_element_id_into(out, node_id, node_index);
+    out.push_str("\" class=\"fm-node fm-node-accent-");
+    let _ = write!(out, "{}", stable_accent_index(node_id));
+    out.push_str(" fm-node-shape-rect");
+    if let Some(risk) = meta.risk.as_deref() {
+        out.push_str(" fm-req-risk-");
+        write_sanitized_css_token_into(out, &risk.to_ascii_lowercase());
+    }
+    if let Some(req_type) = meta.requirement_type.as_deref() {
+        out.push_str(" fm-req-type-");
+        write_sanitized_css_token_into(out, &req_type.to_ascii_lowercase());
+    }
+    if meta.verify_method.is_some() {
+        out.push_str(" fm-req-has-verify");
+    }
+    out.push_str("\" data-id=\"");
+    let _ = write_escaped_attr(out, node_id);
+    out.push_str("\" role=\"graphics-symbol\" aria-label=\"");
+    let _ = write_escaped_attr(out, raw_label);
+    out.push_str("\" tabindex=\"0\">");
+
+    out.push_str("<rect x=\"");
+    let _ = AttributeValue::Number(x).write_value(out);
+    out.push_str("\" y=\"");
+    let _ = AttributeValue::Number(y).write_value(out);
+    out.push_str("\" width=\"");
+    let _ = AttributeValue::Number(w).write_value(out);
+    out.push_str("\" height=\"");
+    let _ = AttributeValue::Number(h).write_value(out);
+    out.push_str("\" rx=\"");
+    let _ = AttributeValue::Number(rx).write_value(out);
+    out.push_str("\" fill=\"url(#fm-node-gradient)\"");
+    if let Some(fill) = requirement_risk_fill(meta) {
+        out.push_str(" style=\"fill: ");
+        out.push_str(fill);
+        out.push('"');
+    }
+    out.push_str("/>");
+
+    let subtitle_font_size = clamp_font_size(font_size * 0.75, config.min_font_size);
+    let mut text_y = y + h * 0.25 + font_size * 0.35;
+    if let Some(req_type) = meta.requirement_type.as_deref() {
+        let type_label = format!("\u{00ab}{req_type}\u{00bb}");
+        write_req_subtitle_into(
+            out,
+            cx,
+            text_y,
+            subtitle_font_size,
+            " font-style=\"italic\"",
+            "",
+            &colors.text,
+            "fm-req-type-label",
+            &type_label,
+        );
+        text_y += font_size * 0.85;
+    }
+
+    out.push_str("<text x=\"");
+    let _ = AttributeValue::Number(cx).write_value(out);
+    out.push_str("\" y=\"");
+    let _ = AttributeValue::Number(text_y).write_value(out);
+    out.push_str("\" text-anchor=\"middle\" font-size=\"");
+    let _ = AttributeValue::Number(font_size).write_value(out);
+    out.push_str("\" fill=\"");
+    let _ = write_escaped_attr(out, &colors.text);
+    out.push_str("\">");
+    let _ = write_escaped_text(out, label);
+    out.push_str("</text>");
+    text_y += font_size * 0.85;
+
+    match (meta.risk.as_deref(), meta.verify_method.as_deref()) {
+        (Some(risk), Some(verify_method)) => {
+            let info_text = format!("Risk: {risk} | Verify: {verify_method}");
+            write_req_subtitle_into(
+                out,
+                cx,
+                text_y,
+                subtitle_font_size,
+                "",
+                " opacity=\"0.7\"",
+                &colors.text,
+                "fm-req-metadata",
+                &info_text,
+            );
+        }
+        (Some(risk), None) => {
+            let info_text = format!("Risk: {risk}");
+            write_req_subtitle_into(
+                out,
+                cx,
+                text_y,
+                subtitle_font_size,
+                "",
+                " opacity=\"0.7\"",
+                &colors.text,
+                "fm-req-metadata",
+                &info_text,
+            );
+        }
+        (None, Some(verify_method)) => {
+            let info_text = format!("Verify: {verify_method}");
+            write_req_subtitle_into(
+                out,
+                cx,
+                text_y,
+                subtitle_font_size,
+                "",
+                " opacity=\"0.7\"",
+                &colors.text,
+                "fm-req-metadata",
+                &info_text,
+            );
+        }
+        (None, None) => {}
+    }
+
+    out.push_str("<title>Node: ");
+    let _ = write_escaped_text(out, raw_label);
+    out.push_str(", rectangle</title></g>");
+}
+
+fn requirement_risk_fill(meta: &fm_core::IrRequirementNodeMeta) -> Option<&'static str> {
+    let risk = meta.risk.as_deref()?;
+    if risk.eq_ignore_ascii_case("high") {
+        Some("#fca5a5")
+    } else if risk.eq_ignore_ascii_case("medium") {
+        Some("#fde68a")
+    } else if risk.eq_ignore_ascii_case("low") {
+        Some("#bbf7d0")
+    } else {
+        None
+    }
+}
+
 /// Render a single node straight into the output buffer. For the overwhelmingly common themed rectangle
 /// node (the same gate as `render_node`'s fast path) the `<g><rect/><text/><title/></g>` is streamed
 /// directly into `out` via `write_common_node_fragment_into` — eliminating the per-node fragment `String`
@@ -5123,6 +5279,53 @@ fn render_node_into(
         .map(str::trim)
         .filter(|icon| !icon.is_empty())
         .filter(|_| ir_node.is_none_or(|node| node.class_meta.is_none() && node.c4_meta.is_none()));
+
+    if let Some(node) = ir_node
+        && matches!(shape, NodeShape::Rect)
+        && let Some(meta) = node.requirement_meta.as_deref()
+        && detail.show_node_labels
+        && config.embed_theme_css
+        && config.node_gradients
+        && !emit_classdef_classes
+        && !config.animations_enabled
+        && !config.include_source_spans
+        && config.a11y.aria_labels
+        && config.a11y.keyboard_nav
+        && config.a11y.text_alternatives
+        && shape_style.is_none()
+        && text_style.is_none()
+        && node_icon.is_none()
+        && !placeholder_space_node
+        && !label_text.contains('\n')
+        && !label_text.contains('\r')
+        && lookup_centrality_tier(centrality_map, node_box.node_index).is_none()
+        && label_id.is_none_or(|id| ir.label_markup.get(&id).is_none_or(|s| s.is_empty()))
+        && node.class_meta.is_none()
+        && node.c4_meta.is_none()
+        && node.classes.is_empty()
+        && node.menu_links.is_empty()
+        && node.href().is_none()
+        && node.callback().is_none()
+    {
+        write_requirement_node_fragment_into(
+            out,
+            meta,
+            node_id,
+            node_box.node_index,
+            raw_label_text,
+            &label_text,
+            x,
+            y,
+            w,
+            h,
+            config.rounded_corners * 0.55,
+            cx,
+            node_font_size,
+            config,
+            colors,
+        );
+        return;
+    }
 
     // Whole-class-node streaming fast path: a themed class-diagram node with compartments (name +
     // attribute/method rows) whose config carries no conditional render (same gate class as the common
@@ -8740,6 +8943,76 @@ mod tests {
             svg.contains(expected),
             "full-node fast-path bytes must match the slow path.\nGOT node region:\n{region}\nEXPECTED:\n{expected}"
         );
+    }
+
+    #[test]
+    fn requirement_node_streaming_matches_slow_render() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Requirement);
+        ir.labels.push(IrLabel {
+            text: "Requirement A".to_string(),
+            span: Span::default(),
+        });
+        ir.nodes.push(IrNode {
+            id: "R0".to_string(),
+            label: Some(IrLabelId(0)),
+            shape: NodeShape::Rect,
+            requirement_meta: Some(Box::new(fm_core::IrRequirementNodeMeta {
+                requirement_type: Some("requirement".to_string()),
+                req_id: Some("REQ-0001".to_string()),
+                text: Some("Preserve rendered output".to_string()),
+                risk: Some("high".to_string()),
+                verify_method: Some("test".to_string()),
+            })),
+            ..Default::default()
+        });
+        let node_box = LayoutNodeBox {
+            node_index: 0,
+            node_id: "R0".to_string(),
+            rank: 0,
+            order: 0,
+            span: Span::default(),
+            bounds: fm_layout::LayoutRect {
+                x: 10.0,
+                y: 20.0,
+                width: 140.0,
+                height: 90.0,
+            },
+        };
+        let config = SvgRenderConfig::default();
+        let colors = ThemeColors::default();
+        let detail = resolve_detail_profile(800.0, 600.0, &config);
+        let centrality = HashMap::new();
+
+        let mut streamed = String::new();
+        render_node_into(
+            &mut streamed,
+            &node_box,
+            &ir,
+            0.0,
+            0.0,
+            &config,
+            detail,
+            &colors,
+            false,
+            &centrality,
+        );
+
+        let mut slow = String::new();
+        render_node(
+            &node_box,
+            &ir,
+            0.0,
+            0.0,
+            &config,
+            detail,
+            &colors,
+            false,
+            &centrality,
+            false,
+        )
+        .write_to_string(&mut slow);
+
+        assert_eq!(streamed, slow);
     }
 
     /// The streamed common-edge fragment must be byte-identical to the `Element` the slow path

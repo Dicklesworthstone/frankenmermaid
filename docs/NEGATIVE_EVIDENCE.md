@@ -9718,6 +9718,7 @@ OLD = committed HEAD `bcc41d5`).
   `pipeline_bench.rs` requirement bench was preserved untouched).
 
   Agent: BlackThrush
+
 <!-- blackthrush-lazy-node-class-suffix-noship -->
 ### NO-SHIP (reverted ~0-gain): make the common-node fast-path `user_class_suffix` lazy (2026-07-04)
 - **Hypothesis:** `render_node_into`'s common fast-path gate computed `user_class_suffix =
@@ -9744,3 +9745,34 @@ OLD = committed HEAD `bcc41d5`).
 - **Ratio vs the original (mermaid.js):** n/a (reverted wash; no code kept).
 
   Agent: BlackThrush
+
+<!-- goldenmaple-requirement-whole-node-streaming-landed -->
+### LANDED: stream the whole default requirement node (requirement render 1.85-2.35x local pair) (2026-07-04)
+- **Lever:** after `blackthrush-requirement-subtitle-streaming-landed`, requirement nodes still fell through
+  `render_node`'s `Element` path for the group, gradient rect, main label, and title. Added a conservative
+  `render_node_into` gate for default themed rectangular requirement nodes with no custom classes, links,
+  icons, styles, markdown markup, centrality, source spans, or animation. The new path writes the complete
+  `<g>...<rect/>...<text/>...<title/>...</g>` directly into the output buffer and reuses the existing
+  streamed subtitle writer for the type and metadata rows.
+- **Byte-identity:** added `requirement_node_streaming_matches_slow_render`, which compares the streamed
+  fragment against `render_node(..., permit_fast=false)` for a requirement node carrying type/risk/verify
+  metadata. The focused test passes.
+- **Per-crate bench command:** `AGENT_NAME=GoldenMaple CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod
+  rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench --
+  requirement_stages/render --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot`. The literal
+  `cargo bench --release` form is invalid on this Cargo bench target, so release-profile benches use
+  `--profile release`.
+- **Ratio vs ORIG (current main before candidate, local same-machine paired Criterion A/B):**
+  - `requirement_stages/render/64`: ORIG `521.96 us` -> candidate `282.73 us` = **1.846x** speed.
+  - `requirement_stages/render/256`: ORIG `1.0808 ms` -> candidate `565.99 us` = **1.910x** speed.
+  - `requirement_stages/render/512`: ORIG `2.5723 ms` -> candidate `1.0966 ms` = **2.346x** speed.
+- **RCH note:** the required per-crate RCH bench was run first, but ORIG and candidate landed on different
+  workers (`hz2` ORIG, `vmi1149989` candidate), so those values are supporting/routing evidence only:
+  `290.35 us -> 219.15 us` (**1.325x**), `700.57 us -> 411.91 us` (**1.701x**), and
+  `1.3919 ms -> 785.97 us` (**1.771x**). A final local candidate repeat was frequency-throttled with severe
+  high outliers and Criterion reported no reliable change, so the keep proof is the cleaner paired local
+  A/B plus the byte-identity test rather than that noisy repeat.
+- **Verdict:** keep. This is a structural streaming win over the remaining requirement-node `Element`
+  scaffolding, not a micro capacity tweak.
+
+  Agent: GoldenMaple
