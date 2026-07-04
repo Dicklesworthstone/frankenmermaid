@@ -2961,7 +2961,7 @@ fn render_layout_to_svg(
                 let font_size = config.font_size * 0.7;
                 if !left_label.is_empty() {
                     let p = &edge_path.points[0];
-                    write_er_cardinality_text_into(
+                    write_cardinality_text_into(
                         &mut cardinality_svg,
                         p.x + offset_x + 8.0,
                         p.y + offset_y - 8.0,
@@ -2969,12 +2969,13 @@ fn render_layout_to_svg(
                         &theme.colors.text,
                         &config.font_family,
                         config.embed_theme_css,
+                        "fm-er-cardinality",
                         left_label,
                     );
                 }
                 if !right_label.is_empty() {
                     let p = &edge_path.points[edge_path.points.len() - 1];
-                    write_er_cardinality_text_into(
+                    write_cardinality_text_into(
                         &mut cardinality_svg,
                         p.x + offset_x + 8.0,
                         p.y + offset_y - 8.0,
@@ -2982,6 +2983,7 @@ fn render_layout_to_svg(
                         &theme.colors.text,
                         &config.font_family,
                         config.embed_theme_css,
+                        "fm-er-cardinality",
                         right_label,
                     );
                 }
@@ -2992,52 +2994,47 @@ fn render_layout_to_svg(
         }
     }
 
-    // Render class diagram cardinality labels near edge endpoints.
+    // Render class diagram cardinality labels near edge endpoints — streamed into ONE raw fragment (same
+    // pattern as the ER cardinality above), byte-identical to the per-label `Element::text()`.
+    let mut class_cardinality_svg = String::new();
     for edge_path in &layout.edges {
         if let Some(ir_edge) = ir.edges.get(edge_path.edge_index)
             && (ir_edge.source_cardinality().is_some() || ir_edge.target_cardinality().is_some())
             && edge_path.points.len() >= 2
         {
             let font_size = config.font_size * 0.7;
-
             if let Some(card) = ir_edge.source_cardinality() {
                 let p = &edge_path.points[0];
-                doc = doc.child(
-                    Element::text()
-                        .x(p.x + offset_x + 8.0)
-                        .y(p.y + offset_y - 8.0)
-                        .content(card)
-                        .attr("text-anchor", "start")
-                        .attr("dominant-baseline", "auto")
-                        .attr_num("font-size", font_size)
-                        .font_family_unless_embedded_css(
-                            &config.font_family,
-                            config.embed_theme_css,
-                        )
-                        .fill(&theme.colors.text)
-                        .class("fm-class-cardinality"),
+                write_cardinality_text_into(
+                    &mut class_cardinality_svg,
+                    p.x + offset_x + 8.0,
+                    p.y + offset_y - 8.0,
+                    font_size,
+                    &theme.colors.text,
+                    &config.font_family,
+                    config.embed_theme_css,
+                    "fm-class-cardinality",
+                    card,
                 );
             }
-
             if let Some(card) = ir_edge.target_cardinality() {
                 let p = &edge_path.points[edge_path.points.len() - 1];
-                doc = doc.child(
-                    Element::text()
-                        .x(p.x + offset_x + 8.0)
-                        .y(p.y + offset_y - 8.0)
-                        .content(card)
-                        .attr("text-anchor", "start")
-                        .attr("dominant-baseline", "auto")
-                        .attr_num("font-size", font_size)
-                        .font_family_unless_embedded_css(
-                            &config.font_family,
-                            config.embed_theme_css,
-                        )
-                        .fill(&theme.colors.text)
-                        .class("fm-class-cardinality"),
+                write_cardinality_text_into(
+                    &mut class_cardinality_svg,
+                    p.x + offset_x + 8.0,
+                    p.y + offset_y - 8.0,
+                    font_size,
+                    &theme.colors.text,
+                    &config.font_family,
+                    config.embed_theme_css,
+                    "fm-class-cardinality",
+                    card,
                 );
             }
         }
+    }
+    if !class_cardinality_svg.is_empty() {
+        doc = doc.child(Element::raw_svg(class_cardinality_svg));
     }
 
     // Render nodes. Serialize each node subtree immediately into a shared buffer (as the edge loop
@@ -3290,12 +3287,13 @@ fn render_layout_axis_tick(label: &str, x: f32, y: f32, config: &SvgRenderConfig
 
 /// Parse an ER cardinality notation string (e.g., `"||--o{"`) into display labels
 /// for the left and right endpoints.
-/// Stream one ER cardinality `<text>` directly into `out`, byte-identical to the `Element::text()` the
-/// slow path built: attrs in insertion order `x, y, text-anchor, dominant-baseline, font-size,
+/// Stream one cardinality `<text>` directly into `out`, byte-identical to the `Element::text()` the slow
+/// path built: attrs in insertion order `x, y, text-anchor, dominant-baseline, font-size,
 /// [font-family when NOT embedded], fill, class`, with the label as escaped text content. Numbers use the
 /// shared 2-decimal `AttributeValue::Number` serializer; the label/fill escape identically to the element.
+/// `class_name` is `fm-er-cardinality` (ER) or `fm-class-cardinality` (class relations).
 #[allow(clippy::too_many_arguments)]
-fn write_er_cardinality_text_into(
+fn write_cardinality_text_into(
     out: &mut String,
     x: f32,
     y: f32,
@@ -3303,6 +3301,7 @@ fn write_er_cardinality_text_into(
     fill: &str,
     font_family: &str,
     embed_css: bool,
+    class_name: &str,
     label: &str,
 ) {
     use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
@@ -3320,7 +3319,9 @@ fn write_er_cardinality_text_into(
     }
     out.push_str(" fill=\"");
     let _ = write_escaped_attr(out, fill);
-    out.push_str("\" class=\"fm-er-cardinality\">");
+    out.push_str("\" class=\"");
+    out.push_str(class_name);
+    out.push_str("\">");
     let _ = write_escaped_text(out, label);
     out.push_str("</text>");
 }

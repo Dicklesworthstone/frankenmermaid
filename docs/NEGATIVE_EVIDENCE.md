@@ -9003,3 +9003,25 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   kept the peer WIP intact.
 
   Agent: BlackThrush
+
+<!-- blackthrush-class-cardinality-streaming-landed -->
+### LANDED: stream class-relation cardinality labels (classcard render 1.72-1.77x) (2026-07-04)
+- **Lever:** direct mirror of the ER cardinality streaming (`3feac37`). The class-diagram cardinality loop
+  built an `Element::text()` per `"1"`/`"*"` label pushed to `doc`. Generalized the ER helper to
+  `write_cardinality_text_into(.., class_name, label)` and rewrote the class loop to stream all
+  `fm-class-cardinality` labels into ONE `Element::raw_svg` child. Byte-identical (same attrs/order/values,
+  edge-order sequence, font-family gated).
+- **Measurement:** clean 2-build same-machine A/B (OLD = HEAD code with per-label Elements; NEW = streamed;
+  both profharness binaries carry a new `classcard` shape = `C{i} "1" --> "*" C{i+1}` cardinality-annotated
+  relations). Interleaved `profharness classcard <n> render`, best-of-8 min-ns.
+  - `classcard render n=400` (798 cardinality labels): `338882 ns` -> `196823 ns` = **1.722x**
+  - `classcard render n=800`: `649571 ns` -> `366544 ns` = **1.772x** (consistent)
+  - controls: `er` 0.991x (ER path unchanged by the helper rename), `flow` 0.997x — flat.
+- **Byte-identity:** all **235 fm-render-svg lib tests pass** incl. `golden_svg_test` (both ER and class
+  cardinality diagrams in corpus).
+- **Ratio vs the original (mermaid.js):** dominance context; cardinality-annotated class diagrams (common in
+  UML) now render ~1.7x faster.
+- **Staging:** helper + both cardinality loops in the clean lib.rs sub-region (2961-3330); `git apply
+  --cached` filtered patch kept the peer WIP intact.
+
+  Agent: BlackThrush
