@@ -3802,15 +3802,19 @@ fn estimate_layout_cost(ir: &MermaidDiagramIr, algorithm: LayoutAlgorithm) -> La
             iterations: nodes.saturating_add(4),
             route_ops: edges.saturating_mul(8).saturating_add(nodes),
         },
+        // Radial is a cheap single-pass tree placement: angle assignment plus
+        // straight-line edges, with no obstacle-aware routing or iterative
+        // refinement. The prior estimate made it pricier than `Tree`, which is
+        // backwards for large mindmaps because `Tree` pays dense obstacle-routing
+        // costs that radial skips. Keeping radial's estimate below tree's keeps
+        // mindmaps on their only correct specialized layout under guardrails.
         LayoutAlgorithm::Radial => LayoutCostEstimate {
             time_ms: nodes
-                .saturating_mul(5)
-                .saturating_add(edges.saturating_mul(2))
-                .saturating_add(12),
-            iterations: nodes.saturating_add(6),
-            route_ops: edges
-                .saturating_mul(8)
-                .saturating_add(nodes.saturating_mul(2)),
+                .saturating_mul(3)
+                .saturating_add(edges)
+                .saturating_add(8),
+            iterations: nodes.saturating_add(4),
+            route_ops: edges.saturating_mul(2).saturating_add(nodes),
         },
         LayoutAlgorithm::Timeline
         | LayoutAlgorithm::Gantt
@@ -12807,12 +12811,13 @@ mod tests {
         RegionInput, RegionMemoryBudget, RenderClip, RenderItem, RenderSource, SubgraphRegion,
         SubgraphRegionId, SubgraphRegionKind, build_layout_decision_ledger,
         build_layout_guard_report, build_render_scene, dispatch_layout_algorithm,
-        find_obstacle_nudge_x, find_obstacle_nudge_y, incremental_overlap_alignment, layout,
-        layout_diagram, layout_diagram_force, layout_diagram_force_traced, layout_diagram_gantt,
-        layout_diagram_grid, layout_diagram_incremental_traced_with_config_and_guardrails,
-        layout_diagram_radial, layout_diagram_sankey, layout_diagram_sequence,
-        layout_diagram_sequence_traced, layout_diagram_timeline, layout_diagram_traced,
-        layout_diagram_traced_with_algorithm, layout_diagram_traced_with_algorithm_and_guardrails,
+        evaluate_layout_guardrails, find_obstacle_nudge_x, find_obstacle_nudge_y,
+        incremental_overlap_alignment, layout, layout_diagram, layout_diagram_force,
+        layout_diagram_force_traced, layout_diagram_gantt, layout_diagram_grid,
+        layout_diagram_incremental_traced_with_config_and_guardrails, layout_diagram_radial,
+        layout_diagram_sankey, layout_diagram_sequence, layout_diagram_sequence_traced,
+        layout_diagram_timeline, layout_diagram_traced, layout_diagram_traced_with_algorithm,
+        layout_diagram_traced_with_algorithm_and_guardrails,
         layout_diagram_traced_with_config_and_guardrails, layout_diagram_tree,
         layout_diagram_with_config, layout_diagram_with_cycle_strategy, layout_diagram_xychart,
         layout_source_map, route_edge_points, route_edge_points_with_obstacles,
@@ -16206,6 +16211,21 @@ mod tests {
             traced.trace.guard.initial_algorithm,
             traced.trace.guard.selected_algorithm
         );
+    }
+
+    #[test]
+    fn large_mindmap_guardrail_keeps_radial_as_lowest_cost_fallback() {
+        let edges: Vec<(usize, usize)> = (1..800).map(|node| (0, node)).collect();
+        let ir = graph_ir(DiagramType::Mindmap, 800, &edges);
+        let guard =
+            evaluate_layout_guardrails(&ir, LayoutAlgorithm::Radial, LayoutGuardrails::default());
+
+        assert_eq!(guard.initial_algorithm, LayoutAlgorithm::Radial);
+        assert_eq!(guard.selected_algorithm, LayoutAlgorithm::Radial);
+        assert!(!guard.fallback_applied);
+        assert!(guard.time_budget_exceeded);
+        assert!(guard.iteration_budget_exceeded);
+        assert_eq!(guard.reason, "guardrail_forced_multi_budget");
     }
 
     #[test]
