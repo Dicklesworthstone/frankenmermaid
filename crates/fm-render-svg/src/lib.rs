@@ -2946,6 +2946,12 @@ fn render_layout_to_svg(
 
     // Render ER cardinality labels near edge endpoints.
     if ir.diagram_type == fm_core::DiagramType::Er {
+        // Stream every ER cardinality label into ONE raw fragment instead of building an `Element::text`
+        // per label (2 per edge — the bulk of ER render's child allocations, and ER can't take the
+        // whole-document streaming fast path). Byte-identical: `write_er_cardinality_text_into` emits the
+        // same `<text …>label</text>` bytes in the same left-then-right, edge-order sequence the
+        // `Element` children serialized to.
+        let mut cardinality_svg = String::new();
         for edge_path in &layout.edges {
             if let Some(ir_edge) = ir.edges.get(edge_path.edge_index)
                 && let Some(notation) = ir_edge.er_notation()
@@ -2953,47 +2959,36 @@ fn render_layout_to_svg(
             {
                 let (left_label, right_label) = parse_er_cardinality(notation);
                 let font_size = config.font_size * 0.7;
-
-                // Left cardinality near first waypoint.
                 if !left_label.is_empty() {
                     let p = &edge_path.points[0];
-                    doc = doc.child(
-                        Element::text()
-                            .x(p.x + offset_x + 8.0)
-                            .y(p.y + offset_y - 8.0)
-                            .content(left_label)
-                            .attr("text-anchor", "start")
-                            .attr("dominant-baseline", "auto")
-                            .attr_num("font-size", font_size)
-                            .font_family_unless_embedded_css(
-                                &config.font_family,
-                                config.embed_theme_css,
-                            )
-                            .fill(&theme.colors.text)
-                            .class("fm-er-cardinality"),
+                    write_er_cardinality_text_into(
+                        &mut cardinality_svg,
+                        p.x + offset_x + 8.0,
+                        p.y + offset_y - 8.0,
+                        font_size,
+                        &theme.colors.text,
+                        &config.font_family,
+                        config.embed_theme_css,
+                        left_label,
                     );
                 }
-
-                // Right cardinality near last waypoint.
                 if !right_label.is_empty() {
                     let p = &edge_path.points[edge_path.points.len() - 1];
-                    doc = doc.child(
-                        Element::text()
-                            .x(p.x + offset_x + 8.0)
-                            .y(p.y + offset_y - 8.0)
-                            .content(right_label)
-                            .attr("text-anchor", "start")
-                            .attr("dominant-baseline", "auto")
-                            .attr_num("font-size", font_size)
-                            .font_family_unless_embedded_css(
-                                &config.font_family,
-                                config.embed_theme_css,
-                            )
-                            .fill(&theme.colors.text)
-                            .class("fm-er-cardinality"),
+                    write_er_cardinality_text_into(
+                        &mut cardinality_svg,
+                        p.x + offset_x + 8.0,
+                        p.y + offset_y - 8.0,
+                        font_size,
+                        &theme.colors.text,
+                        &config.font_family,
+                        config.embed_theme_css,
+                        right_label,
                     );
                 }
             }
+        }
+        if !cardinality_svg.is_empty() {
+            doc = doc.child(Element::raw_svg(cardinality_svg));
         }
     }
 
@@ -3295,6 +3290,41 @@ fn render_layout_axis_tick(label: &str, x: f32, y: f32, config: &SvgRenderConfig
 
 /// Parse an ER cardinality notation string (e.g., `"||--o{"`) into display labels
 /// for the left and right endpoints.
+/// Stream one ER cardinality `<text>` directly into `out`, byte-identical to the `Element::text()` the
+/// slow path built: attrs in insertion order `x, y, text-anchor, dominant-baseline, font-size,
+/// [font-family when NOT embedded], fill, class`, with the label as escaped text content. Numbers use the
+/// shared 2-decimal `AttributeValue::Number` serializer; the label/fill escape identically to the element.
+#[allow(clippy::too_many_arguments)]
+fn write_er_cardinality_text_into(
+    out: &mut String,
+    x: f32,
+    y: f32,
+    font_size: f32,
+    fill: &str,
+    font_family: &str,
+    embed_css: bool,
+    label: &str,
+) {
+    use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
+    out.push_str("<text x=\"");
+    let _ = AttributeValue::Number(x).write_value(out);
+    out.push_str("\" y=\"");
+    let _ = AttributeValue::Number(y).write_value(out);
+    out.push_str("\" text-anchor=\"start\" dominant-baseline=\"auto\" font-size=\"");
+    let _ = AttributeValue::Number(font_size).write_value(out);
+    out.push('"');
+    if !embed_css {
+        out.push_str(" font-family=\"");
+        let _ = write_escaped_attr(out, font_family);
+        out.push('"');
+    }
+    out.push_str(" fill=\"");
+    let _ = write_escaped_attr(out, fill);
+    out.push_str("\" class=\"fm-er-cardinality\">");
+    let _ = write_escaped_text(out, label);
+    out.push_str("</text>");
+}
+
 fn parse_er_cardinality(notation: &str) -> (&str, &str) {
     // Find the connector: `--`, `..`, or `==`.
     let connector_idx = notation

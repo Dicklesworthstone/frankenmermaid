@@ -8981,3 +8981,25 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   patch kept the peer WIP intact.
 
   Agent: BlackThrush
+
+<!-- blackthrush-er-cardinality-streaming-landed -->
+### LANDED: stream ER cardinality labels into one raw fragment (er render +20%) (2026-07-04)
+- **Lever:** executes roadmap lever (2) for the #1 render gap. ER diagrams can't take the whole-document
+  streaming fast path (cardinality labels are inserted as "after" children), and each of the ~2 cardinality
+  labels per edge was an `Element::text()` pushed to `doc` — the bulk of ER render's child allocations.
+  Added `write_er_cardinality_text_into` (streams the `<text x y text-anchor dominant-baseline font-size
+  [font-family] fill class>label</text>` bytes) and rewrote the loop to accumulate all labels into ONE
+  `String` added as a single `Element::raw_svg` child. Byte-identical: same attr order/values, same
+  left-then-right edge-order sequence, `font-family` gated on `!embed_theme_css` exactly as the element.
+- **Measurement:** clean 2-build same-machine A/B (OLD = committed HEAD code `5362e5ac`; NEW = `9e45eb0a`,
+  differing only by this change). Interleaved `profharness er <n> render`, best-of-8 min-ns.
+  - `er render n=400`: `792872 ns` -> `661564 ns` = **1.198x** (20% faster)
+  - `er render n=800`: `1571799 ns` -> `1308770 ns` = **1.201x** (consistent)
+  - controls: `flow` 0.972x, `class` 0.983x — ~2-3% layout noise, ≪ the 20% target.
+- **Byte-identity:** all **235 fm-render-svg lib tests pass** incl. `golden_svg_test` (ER diagrams in corpus).
+- **Ratio vs the original (mermaid.js):** dominance context; ER diagrams (the heaviest render type) now
+  render ~1.2x faster.
+- **Staging:** loop + helper in the clean lib.rs sub-region (2946-3320); `git apply --cached` filtered patch
+  kept the peer WIP intact.
+
+  Agent: BlackThrush
