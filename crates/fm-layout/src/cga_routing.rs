@@ -96,7 +96,7 @@ pub fn find_vertical_segment_nudge(
     find_vertical_segment_nudge_iter(segment_start, segment_end, obstacles.iter(), margin)
 }
 
-/// Check candidate obstacle indices, preserving the provided order.
+/// Check candidate obstacle indices and return the nudge for the lowest-index hit.
 #[must_use]
 pub fn find_vertical_segment_nudge_by_indices(
     segment_start: LayoutPoint,
@@ -237,7 +237,7 @@ pub fn find_horizontal_segment_nudge(
     find_horizontal_segment_nudge_iter(segment_start, segment_end, obstacles.iter(), margin)
 }
 
-/// Check candidate obstacle indices, preserving the provided order.
+/// Check candidate obstacle indices and return the nudge for the lowest-index hit.
 #[must_use]
 pub fn find_horizontal_segment_nudge_by_indices(
     segment_start: LayoutPoint,
@@ -470,6 +470,70 @@ mod tests {
         assert!(nudge.is_some());
         // Should nudge to bottom edge y=30 since that's closer
         assert!((nudge.unwrap() - 30.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn indexed_nudge_ignores_candidate_order_and_uses_lowest_hit_index() {
+        let horizontal_obstacles = vec![
+            LayoutRect {
+                x: 20.0,
+                y: 0.0,
+                width: 10.0,
+                height: 20.0,
+            },
+            LayoutRect {
+                x: 70.0,
+                y: 0.0,
+                width: 10.0,
+                height: 20.0,
+            },
+        ];
+        let horizontal_start = LayoutPoint { x: 0.0, y: 15.0 };
+        let horizontal_end = LayoutPoint { x: 100.0, y: 15.0 };
+        let horizontal = find_horizontal_segment_nudge_by_indices(
+            horizontal_start,
+            horizontal_end,
+            &horizontal_obstacles,
+            &[1, 0],
+            0.0,
+        );
+        assert_eq!(
+            horizontal,
+            find_horizontal_segment_nudge(
+                horizontal_start,
+                horizontal_end,
+                &horizontal_obstacles,
+                0.0
+            )
+        );
+
+        let vertical_obstacles = vec![
+            LayoutRect {
+                x: 20.0,
+                y: 0.0,
+                width: 10.0,
+                height: 20.0,
+            },
+            LayoutRect {
+                x: 20.0,
+                y: 50.0,
+                width: 10.0,
+                height: 20.0,
+            },
+        ];
+        let vertical_start = LayoutPoint { x: 25.0, y: -10.0 };
+        let vertical_end = LayoutPoint { x: 25.0, y: 90.0 };
+        let vertical = find_vertical_segment_nudge_by_indices(
+            vertical_start,
+            vertical_end,
+            &vertical_obstacles,
+            &[1, 0],
+            0.0,
+        );
+        assert_eq!(
+            vertical,
+            find_vertical_segment_nudge(vertical_start, vertical_end, &vertical_obstacles, 0.0)
+        );
     }
 
     #[test]
