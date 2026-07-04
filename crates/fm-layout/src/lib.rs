@@ -11463,8 +11463,9 @@ fn apply_parallel_offset(points: &mut [LayoutPoint], offset: f32, horizontal_ran
 /// allocation per occupied cell plus per-insert hashing (it counts then scatters into two
 /// flat `Vec`s), and the query indexes the bucket directly instead of hashing each cell.
 /// Byte-identical to the hash grid: the same `cell_of` mapping fills the same cells with the
-/// same obstacle indices, and `query_segment` still returns the deduped candidate set
-/// `sort_unstable`-ordered (within-cell order never escapes the final sort).
+/// same obstacle indices, and `query_segment` returns the same deduped candidate set (the two
+/// nudge consumers select the minimum-index intersecting obstacle, so candidate order is
+/// irrelevant — see `find_{vertical,horizontal}_segment_nudge_by_indices`).
 struct ObstacleSpatialIndex {
     inv_cell_size: f32,
     min_cx: i32,
@@ -11683,7 +11684,10 @@ impl ObstacleSpatialIndex {
             }
         }
 
-        self.candidates.sort_unstable();
+        // No sort: the two consumers (`find_{vertical,horizontal}_segment_nudge_by_indices`)
+        // select the minimum-index intersecting obstacle directly, which is order-independent.
+        // Sorting the candidate set here was ~40% of layout self-time on obstacle-dense graphs
+        // (e.g. large mindmaps forced to the tree router), and every query paid O(K log K).
         &self.candidates
     }
 }

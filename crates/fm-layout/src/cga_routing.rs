@@ -8,7 +8,7 @@ use fm_core::cga::{CgaLineSegment, CgaPoint, CgaRect};
 use crate::{LayoutPoint, LayoutRect};
 
 /// Convert a LayoutPoint to a CgaPoint.
-#[inline]
+#[inline(always)]
 fn to_cga_point(p: LayoutPoint) -> CgaPoint {
     CgaPoint::new(f64::from(p.x), f64::from(p.y))
 }
@@ -105,14 +105,37 @@ pub fn find_vertical_segment_nudge_by_indices(
     candidate_indices: &[usize],
     margin: f32,
 ) -> Option<f32> {
-    find_vertical_segment_nudge_iter(
-        segment_start,
-        segment_end,
-        candidate_indices
-            .iter()
-            .filter_map(|&idx| obstacles.get(idx)),
-        margin,
-    )
+    let seg = CgaLineSegment::new(to_cga_point(segment_start), to_cga_point(segment_end));
+    let start_cga = to_cga_point(segment_start);
+    let margin_f64 = f64::from(margin);
+    let mid_x = f64::from(segment_start.x);
+    let seg_min_x = f64::from(segment_start.x.min(segment_end.x));
+    let seg_max_x = f64::from(segment_start.x.max(segment_end.x));
+    let seg_min_y = f64::from(segment_start.y.min(segment_end.y));
+    let seg_max_y = f64::from(segment_start.y.max(segment_end.y));
+
+    // The routing result is the nudge of the *minimum-index* obstacle the segment
+    // intersects. Callers used to pre-sort `candidate_indices` ascending and take the
+    // first hit; we instead scan the (unsorted) candidates once and keep the smallest
+    // intersecting index. Byte-identical result, no O(K log K) sort. The `idx >= best_idx`
+    // guard prunes the expensive CGA test for candidates that cannot lower the minimum.
+    let mut best_idx = usize::MAX;
+    let mut best_nudge = None;
+    for &idx in candidate_indices {
+        if idx >= best_idx {
+            continue;
+        }
+        let Some(obs) = obstacles.get(idx) else {
+            continue;
+        };
+        if let Some(nudge) = vertical_nudge_for_obstacle(
+            &seg, &start_cga, obs, margin_f64, mid_x, seg_min_x, seg_max_x, seg_min_y, seg_max_y,
+        ) {
+            best_idx = idx;
+            best_nudge = Some(nudge);
+        }
+    }
+    best_nudge
 }
 
 fn find_vertical_segment_nudge_iter<'a>(
@@ -134,45 +157,70 @@ fn find_vertical_segment_nudge_iter<'a>(
     let seg_max_y = f64::from(segment_start.y.max(segment_end.y));
 
     for obs in obstacles {
-        // Cheap AABB rejection before the (expensive) CGA test. The segment lies
-        // within its bounding box and `start` within that box, so if the box does
-        // not overlap the margin-expanded obstacle the CGA test is guaranteed to
-        // report no intersection/containment — skipping it cannot change the result.
-        let exp_min_x = f64::from(obs.x) - margin_f64;
-        let exp_max_x = f64::from(obs.x) + f64::from(obs.width) + margin_f64;
-        let exp_min_y = f64::from(obs.y) - margin_f64;
-        let exp_max_y = f64::from(obs.y) + f64::from(obs.height) + margin_f64;
-        if seg_max_x < exp_min_x
-            || seg_min_x > exp_max_x
-            || seg_max_y < exp_min_y
-            || seg_min_y > exp_max_y
-        {
-            continue;
-        }
-
-        let expanded = CgaRect::new(
-            f64::from(obs.x) - margin_f64,
-            f64::from(obs.y) - margin_f64,
-            f64::from(obs.width) + 2.0 * margin_f64,
-            f64::from(obs.height) + 2.0 * margin_f64,
-        );
-
-        // Check boundary crossings OR if segment is entirely inside
-        if !expanded.intersect_segment(&seg).is_empty() || expanded.contains(&start_cga) {
-            // Nudge to closer side
-            let left = f64::from(obs.x) - margin_f64;
-            let right = f64::from(obs.x) + f64::from(obs.width) + margin_f64;
-            let left_dist = (mid_x - left).abs();
-            let right_dist = (mid_x - right).abs();
-
-            return if left_dist <= right_dist {
-                Some(left as f32)
-            } else {
-                Some(right as f32)
-            };
+        if let Some(nudge) = vertical_nudge_for_obstacle(
+            &seg, &start_cga, obs, margin_f64, mid_x, seg_min_x, seg_max_x, seg_min_y, seg_max_y,
+        ) {
+            return Some(nudge);
         }
     }
     None
+}
+
+/// Nudge for a single obstacle if the vertical segment intersects it, else `None`.
+/// Extracted so the ordered linear scan (`find_vertical_segment_nudge_iter`) and the
+/// indexed min-index scan (`find_vertical_segment_nudge_by_indices`) share identical
+/// intersection + nudge arithmetic — the two only differ in candidate-selection order.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn vertical_nudge_for_obstacle(
+    seg: &CgaLineSegment,
+    start_cga: &CgaPoint,
+    obs: &LayoutRect,
+    margin_f64: f64,
+    mid_x: f64,
+    seg_min_x: f64,
+    seg_max_x: f64,
+    seg_min_y: f64,
+    seg_max_y: f64,
+) -> Option<f32> {
+    // Cheap AABB rejection before the (expensive) CGA test. The segment lies within its
+    // bounding box and `start` within that box, so if the box does not overlap the
+    // margin-expanded obstacle the CGA test is guaranteed to report no intersection.
+    let exp_min_x = f64::from(obs.x) - margin_f64;
+    let exp_max_x = f64::from(obs.x) + f64::from(obs.width) + margin_f64;
+    let exp_min_y = f64::from(obs.y) - margin_f64;
+    let exp_max_y = f64::from(obs.y) + f64::from(obs.height) + margin_f64;
+    if seg_max_x < exp_min_x
+        || seg_min_x > exp_max_x
+        || seg_max_y < exp_min_y
+        || seg_min_y > exp_max_y
+    {
+        return None;
+    }
+
+    let expanded = CgaRect::new(
+        f64::from(obs.x) - margin_f64,
+        f64::from(obs.y) - margin_f64,
+        f64::from(obs.width) + 2.0 * margin_f64,
+        f64::from(obs.height) + 2.0 * margin_f64,
+    );
+
+    // Check boundary crossings OR if segment is entirely inside
+    if !expanded.intersect_segment(seg).is_empty() || expanded.contains(start_cga) {
+        // Nudge to closer side
+        let left = f64::from(obs.x) - margin_f64;
+        let right = f64::from(obs.x) + f64::from(obs.width) + margin_f64;
+        let left_dist = (mid_x - left).abs();
+        let right_dist = (mid_x - right).abs();
+
+        if left_dist <= right_dist {
+            Some(left as f32)
+        } else {
+            Some(right as f32)
+        }
+    } else {
+        None
+    }
 }
 
 /// Check if a horizontal segment at `y` intersects an obstacle and return nudge.
@@ -198,14 +246,34 @@ pub fn find_horizontal_segment_nudge_by_indices(
     candidate_indices: &[usize],
     margin: f32,
 ) -> Option<f32> {
-    find_horizontal_segment_nudge_iter(
-        segment_start,
-        segment_end,
-        candidate_indices
-            .iter()
-            .filter_map(|&idx| obstacles.get(idx)),
-        margin,
-    )
+    let seg = CgaLineSegment::new(to_cga_point(segment_start), to_cga_point(segment_end));
+    let start_cga = to_cga_point(segment_start);
+    let margin_f64 = f64::from(margin);
+    let mid_y = f64::from(segment_start.y);
+    let seg_min_x = f64::from(segment_start.x.min(segment_end.x));
+    let seg_max_x = f64::from(segment_start.x.max(segment_end.x));
+    let seg_min_y = f64::from(segment_start.y.min(segment_end.y));
+    let seg_max_y = f64::from(segment_start.y.max(segment_end.y));
+
+    // See `find_vertical_segment_nudge_by_indices`: pick the nudge of the minimum-index
+    // intersecting obstacle via a single scan, replacing the caller's ascending sort.
+    let mut best_idx = usize::MAX;
+    let mut best_nudge = None;
+    for &idx in candidate_indices {
+        if idx >= best_idx {
+            continue;
+        }
+        let Some(obs) = obstacles.get(idx) else {
+            continue;
+        };
+        if let Some(nudge) = horizontal_nudge_for_obstacle(
+            &seg, &start_cga, obs, margin_f64, mid_y, seg_min_x, seg_max_x, seg_min_y, seg_max_y,
+        ) {
+            best_idx = idx;
+            best_nudge = Some(nudge);
+        }
+    }
+    best_nudge
 }
 
 fn find_horizontal_segment_nudge_iter<'a>(
@@ -227,45 +295,67 @@ fn find_horizontal_segment_nudge_iter<'a>(
     let seg_max_y = f64::from(segment_start.y.max(segment_end.y));
 
     for obs in obstacles {
-        // Cheap AABB rejection before the (expensive) CGA test. The segment lies
-        // within its bounding box and `start` within that box, so if the box does
-        // not overlap the margin-expanded obstacle the CGA test is guaranteed to
-        // report no intersection/containment — skipping it cannot change the result.
-        let exp_min_x = f64::from(obs.x) - margin_f64;
-        let exp_max_x = f64::from(obs.x) + f64::from(obs.width) + margin_f64;
-        let exp_min_y = f64::from(obs.y) - margin_f64;
-        let exp_max_y = f64::from(obs.y) + f64::from(obs.height) + margin_f64;
-        if seg_max_x < exp_min_x
-            || seg_min_x > exp_max_x
-            || seg_max_y < exp_min_y
-            || seg_min_y > exp_max_y
-        {
-            continue;
-        }
-
-        let expanded = CgaRect::new(
-            f64::from(obs.x) - margin_f64,
-            f64::from(obs.y) - margin_f64,
-            f64::from(obs.width) + 2.0 * margin_f64,
-            f64::from(obs.height) + 2.0 * margin_f64,
-        );
-
-        // Check boundary crossings OR if segment is entirely inside
-        if !expanded.intersect_segment(&seg).is_empty() || expanded.contains(&start_cga) {
-            // Nudge to closer side
-            let top = f64::from(obs.y) - margin_f64;
-            let bottom = f64::from(obs.y) + f64::from(obs.height) + margin_f64;
-            let top_dist = (mid_y - top).abs();
-            let bottom_dist = (mid_y - bottom).abs();
-
-            return if top_dist <= bottom_dist {
-                Some(top as f32)
-            } else {
-                Some(bottom as f32)
-            };
+        if let Some(nudge) = horizontal_nudge_for_obstacle(
+            &seg, &start_cga, obs, margin_f64, mid_y, seg_min_x, seg_max_x, seg_min_y, seg_max_y,
+        ) {
+            return Some(nudge);
         }
     }
     None
+}
+
+/// Nudge for a single obstacle if the horizontal segment intersects it, else `None`.
+/// Shared by `find_horizontal_segment_nudge_iter` and `_by_indices` (see the vertical
+/// counterpart `vertical_nudge_for_obstacle`).
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn horizontal_nudge_for_obstacle(
+    seg: &CgaLineSegment,
+    start_cga: &CgaPoint,
+    obs: &LayoutRect,
+    margin_f64: f64,
+    mid_y: f64,
+    seg_min_x: f64,
+    seg_max_x: f64,
+    seg_min_y: f64,
+    seg_max_y: f64,
+) -> Option<f32> {
+    // Cheap AABB rejection before the (expensive) CGA test.
+    let exp_min_x = f64::from(obs.x) - margin_f64;
+    let exp_max_x = f64::from(obs.x) + f64::from(obs.width) + margin_f64;
+    let exp_min_y = f64::from(obs.y) - margin_f64;
+    let exp_max_y = f64::from(obs.y) + f64::from(obs.height) + margin_f64;
+    if seg_max_x < exp_min_x
+        || seg_min_x > exp_max_x
+        || seg_max_y < exp_min_y
+        || seg_min_y > exp_max_y
+    {
+        return None;
+    }
+
+    let expanded = CgaRect::new(
+        f64::from(obs.x) - margin_f64,
+        f64::from(obs.y) - margin_f64,
+        f64::from(obs.width) + 2.0 * margin_f64,
+        f64::from(obs.height) + 2.0 * margin_f64,
+    );
+
+    // Check boundary crossings OR if segment is entirely inside
+    if !expanded.intersect_segment(seg).is_empty() || expanded.contains(start_cga) {
+        // Nudge to closer side
+        let top = f64::from(obs.y) - margin_f64;
+        let bottom = f64::from(obs.y) + f64::from(obs.height) + margin_f64;
+        let top_dist = (mid_y - top).abs();
+        let bottom_dist = (mid_y - bottom).abs();
+
+        if top_dist <= bottom_dist {
+            Some(top as f32)
+        } else {
+            Some(bottom as f32)
+        }
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
