@@ -10007,3 +10007,36 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   `git add`).
 
   Agent: BlackThrush
+<!-- blackthrush-diamond-node-streaming-fastpath -->
+### LANDED: stream diamond (decision) nodes through the common fast path — render up to 2.53x (2026-07-04)
+- **Lever (streaming playbook, cf. class 7c713d2 2.6x):** the common node streaming fast path
+  (`write_common_node_fragment_into`) handled only `Rect|Circle|Rounded|Stadium`; **Diamond** (decision nodes,
+  ubiquitous in real flowcharts) fell to the slow `Element` `render_node` — a `<g>` + `<path>` + `<text>` +
+  `<title>` Element tree with its `Attributes` Vecs. Measured cost: **~14.3K instr/node vs ~3.7K for a
+  fast-path rect** (diamond render n=800 = 12.8M/iter vs flowchart 4.4M). Diamond differs from the common rect
+  fragment in only two byte-spans: the shape element (`<path>` vs `<rect>`) and the `<title>` shape word
+  (", diamond"). Extended the fast path: a `Diamond` arm emits
+  `<path d="M{cx} {y} L{x+w} {cy} L{cx} {y+h} L{x} {cy} Z" fill="url(#fm-node-gradient)"[style]/>`, a
+  `Diamond` title arm, and `Diamond` added to both fast-path gates.
+- **Byte-identity:** the diamond `d` string exactly reproduces `render_node`'s `PathBuilder::move_to(cx,y)
+  .line_to(x+w,cy).line_to(cx,y+h).line_to(x,cy).close()` (commands joined by single spaces), and coords use
+  `AttributeValue::Number::write_value` which is **provably byte-identical** to `PathBuilder`'s `FmtNum` (both:
+  `let i = n as i32; if i as f32 == n { write_int_into } else { write_fixed2 }`). Verified: diamond dump
+  (streaming) == diamond dump (HEAD Element path) **byte-for-byte at n=8/40/100**; **all 19 diagram types**
+  (flowchart/journey/kanban/class/…/diamond) byte-identical OLD vs NEW (the `if !Circle {rect} else {circle}`
+  → 3-way `match` restructure changed no rect/circle byte). **fm-render-svg lib tests 240/240 pass**; golden
+  RED only on pre-existing `gantt_basic`.
+- **Measurement:** 2-build same-machine A/B (OLD = HEAD 678053a Element path; NEW = +diamond streaming),
+  `perf stat -e instructions:u` (load-independent), render: **diamond n=100 1.509x** (562M→373M), **n=400
+  2.449x** (1296M→529M), **n=800 2.534x** (2538M→1002M) — the win GROWS with N (per-node Element overhead
+  removed scales). Controls **flowchart 0.9997 / journey 0.9999** (≈1.0000 — no effect on non-diamond shapes).
+- **Ratio vs the original (mermaid.js):** dominance context; diamond/decision nodes now stream instead of
+  building a per-node `Element` tree.
+- **LEVER (reusable):** the render streaming playbook extends to the OTHER slow-path shapes too
+  (Hexagon/Parallelogram/Trapezoid/Cylinder/Subroutine/… all still build `Element` path trees) — each is the
+  same surgical add: a shape arm in `write_common_node_fragment_into` (path `d` via `write_value`, matching the
+  slow-path `PathBuilder`), a title arm, and the shape in both gates. Diamond first (most common).
+- **Staging:** single self-contained change in `crates/fm-render-svg/src/lib.rs` (no peer WIP there — direct
+  `git add`).
+
+  Agent: BlackThrush

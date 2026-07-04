@@ -5118,30 +5118,61 @@ fn write_common_node_fragment_into(
     // caller passes each shape's `rx`); `<circle cx cy r …/>` for Circle, whose cx/cy/r match render_node's
     // slow path (cx=x+w/2, cy=y+h/2, r=w.min(h)/2) and whose serialized attr order (cx,cy,r,fill) matches
     // the slow `Element::circle()` after the gradient-fill override.
-    if !matches!(shape, fm_core::NodeShape::Circle) {
-        f.push_str("<rect x=\"");
-        let _ = AttributeValue::Number(x).write_value(f);
-        f.push_str("\" y=\"");
-        let _ = AttributeValue::Number(y).write_value(f);
-        f.push_str("\" width=\"");
-        let _ = AttributeValue::Number(w).write_value(f);
-        f.push_str("\" height=\"");
-        let _ = AttributeValue::Number(h).write_value(f);
-        f.push_str("\" rx=\"");
-        let _ = AttributeValue::Number(rx).write_value(f);
-        f.push_str("\" fill=\"url(#fm-node-gradient)\"");
-        write_special_fill_style_into(f, special_fill);
-        f.push_str("/>");
-    } else {
-        f.push_str("<circle cx=\"");
-        let _ = AttributeValue::Number(x + w / 2.0).write_value(f);
-        f.push_str("\" cy=\"");
-        let _ = AttributeValue::Number(y + h / 2.0).write_value(f);
-        f.push_str("\" r=\"");
-        let _ = AttributeValue::Number(w.min(h) / 2.0).write_value(f);
-        f.push_str("\" fill=\"url(#fm-node-gradient)\"");
-        write_special_fill_style_into(f, special_fill);
-        f.push_str("/>");
+    match shape {
+        fm_core::NodeShape::Circle => {
+            f.push_str("<circle cx=\"");
+            let _ = AttributeValue::Number(x + w / 2.0).write_value(f);
+            f.push_str("\" cy=\"");
+            let _ = AttributeValue::Number(y + h / 2.0).write_value(f);
+            f.push_str("\" r=\"");
+            let _ = AttributeValue::Number(w.min(h) / 2.0).write_value(f);
+            f.push_str("\" fill=\"url(#fm-node-gradient)\"");
+            write_special_fill_style_into(f, special_fill);
+            f.push_str("/>");
+        }
+        fm_core::NodeShape::Diamond => {
+            // `render_node`'s slow path builds this via `PathBuilder::move_to(cx, y).line_to(x+w, cy)
+            // .line_to(cx, y+h).line_to(x, cy).close()`, whose commands join with single spaces →
+            // `M{cx} {y} L{x+w} {cy} L{cx} {y+h} L{x} {cy} Z`. Coords via `AttributeValue::Number`, which
+            // is byte-identical to `PathBuilder`'s `FmtNum` (same whole→int / else→fixed2 branch).
+            let cx = x + w / 2.0;
+            let cy = y + h / 2.0;
+            f.push_str("<path d=\"M");
+            let _ = AttributeValue::Number(cx).write_value(f);
+            f.push(' ');
+            let _ = AttributeValue::Number(y).write_value(f);
+            f.push_str(" L");
+            let _ = AttributeValue::Number(x + w).write_value(f);
+            f.push(' ');
+            let _ = AttributeValue::Number(cy).write_value(f);
+            f.push_str(" L");
+            let _ = AttributeValue::Number(cx).write_value(f);
+            f.push(' ');
+            let _ = AttributeValue::Number(y + h).write_value(f);
+            f.push_str(" L");
+            let _ = AttributeValue::Number(x).write_value(f);
+            f.push(' ');
+            let _ = AttributeValue::Number(cy).write_value(f);
+            f.push_str(" Z\" fill=\"url(#fm-node-gradient)\"");
+            write_special_fill_style_into(f, special_fill);
+            f.push_str("/>");
+        }
+        _ => {
+            // Rect / Rounded / Stadium — all rect elements, differing only in `rx` (set by the caller).
+            f.push_str("<rect x=\"");
+            let _ = AttributeValue::Number(x).write_value(f);
+            f.push_str("\" y=\"");
+            let _ = AttributeValue::Number(y).write_value(f);
+            f.push_str("\" width=\"");
+            let _ = AttributeValue::Number(w).write_value(f);
+            f.push_str("\" height=\"");
+            let _ = AttributeValue::Number(h).write_value(f);
+            f.push_str("\" rx=\"");
+            let _ = AttributeValue::Number(rx).write_value(f);
+            f.push_str("\" fill=\"url(#fm-node-gradient)\"");
+            write_special_fill_style_into(f, special_fill);
+            f.push_str("/>");
+        }
     }
     // <text x y text-anchor="middle" font-size=".." fill="..">label</text>
     f.push_str("<text x=\"");
@@ -5168,6 +5199,7 @@ fn write_common_node_fragment_into(
         fm_core::NodeShape::Rect => ", rectangle</title></g>",
         fm_core::NodeShape::Rounded => ", rounded rectangle</title></g>",
         fm_core::NodeShape::Stadium => ", stadium shape</title></g>",
+        fm_core::NodeShape::Diamond => ", diamond</title></g>",
         _ => ", circle</title></g>",
     });
 }
@@ -5491,7 +5523,11 @@ fn render_node_into(
     let user_class_suffix = ir_node.and_then(simple_node_user_class_suffix);
     if matches!(
         shape,
-        NodeShape::Rect | NodeShape::Circle | NodeShape::Rounded | NodeShape::Stadium
+        NodeShape::Rect
+                | NodeShape::Circle
+                | NodeShape::Rounded
+                | NodeShape::Stadium
+                | NodeShape::Diamond
     ) && config.embed_theme_css
         && config.node_gradients
         && !emit_classdef_classes
@@ -5640,7 +5676,11 @@ fn render_node(
     if permit_fast
         && matches!(
             shape,
-            NodeShape::Rect | NodeShape::Circle | NodeShape::Rounded | NodeShape::Stadium
+            NodeShape::Rect
+                | NodeShape::Circle
+                | NodeShape::Rounded
+                | NodeShape::Stadium
+                | NodeShape::Diamond
         )
         && config.embed_theme_css
         && config.node_gradients
