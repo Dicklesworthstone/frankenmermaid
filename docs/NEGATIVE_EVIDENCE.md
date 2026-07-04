@@ -9927,3 +9927,43 @@ OLD = committed HEAD `bcc41d5`).
   there — direct `git add`).
 
   Agent: BlackThrush
+<!-- blackthrush-constant-factor-washes-post-scaling-frontier -->
+### NO-SHIP (4 washes reverted): constant-factor micro-opts after the scaling frontier closed (2026-07-04)
+Following the closed niche-type scaling frontier (parse+layout linear, render flat), dug four constant-factor
+levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machine A/B). All reverted per
+"Revert ~0-gain."
+- **pie `mid_angle.cos()` hoist (render, reverted):** the pie slice loop called `mid_angle.cos()` 3× (label x
+  + both anchor comparisons). Hoisted to one `mid_cos`. Byte-identical (output len exact n=50..500), control
+  flowchart **1.0000**, but pie render only **1.0001-1.0003** (~0.03%). `cos` is cheap on this hardware and
+  pie render is dominated by per-slice label TEXT (format!/escape/`write_pie_text_into`), not trig. Wash.
+- **`truncate_label` byte-length fast path (render, reverted):** `truncate_label` (called once per node on the
+  common render path) does `chars().clone().count() > limit`; added an `if label.len() <= limit { borrow }`
+  O(1) short-circuit (char count ≤ byte count ⇒ byte-identical). Measured **0.9993-1.0002** across
+  flowchart/class/state/er/wide/styled — a WASH (marginally negative = code-layout noise). Node labels are
+  short ("Node 123"), so `chars().count()` is already ~8 iterations, AND the default detail tier's
+  `node_label_max_chars` is likely `None` (early-return before the added check). Contrast the parser
+  `span_for` win (eec14eb): that removed a full-string scan used as a LENGTH on long-ish lines; a short-label
+  one-time bounded count doesn't translate.
+- **force-layout `dist_sq.sqrt()` dedup (not shipped):** `force_barnes_hut_repulsion` computes
+  `dist_sq.sqrt()` twice per pair (7838/7839, 7852/7853, 7862/7863). NOT pursued: `f32::sqrt` lowers to the
+  pure `llvm.sqrt.f32` intrinsic, which LLVM already CSEs (unlike `cos`, which carries errno), so the dedup is
+  a no-op; and `LayoutAlgorithm::Force` is auto-selected only for dense/cyclic graphs (not the common path).
+- **ER attribute streaming (UNBENCHABLE):** the ER entity attribute path (`render_node`'s
+  `DiagramType::Er && !node.members.is_empty()` arm, ~6448-6517) builds an `Element::text()` per attribute +
+  `format!` per attribute — a textbook streaming-playbook target (cf. class 7c713d2 → 2.6×). BUT an `erattr`
+  profharness generator (`E0 { int id PK … }` blocks) produced output **byte-identical to plain `er`**
+  (acc=380109 at n=100, despite 5× the input) ⇒ this parser does NOT populate `node.members` from ER
+  attribute-block syntax, so the path is dead/rarely-hit and can't be benched via generator. Left for whoever
+  owns ER-attribute parsing.
+- **Other libm sites checked, none cross-cutting:** the remaining `hypot`/`sqrt` in fm-layout (4279, 7728,
+  7903, 16261) are all in the cold force-directed layout or one-shot; `polyline_length` (ba2e219) was the only
+  cross-cutting one. The edge-length stat itself can't be skipped — `total_edge_length` is a public
+  `LayoutStats` field exposed via the wasm API (fm-wasm lib.rs 313-337).
+- **FORWARD LEVER (identified, unverified — symbol-blind):** journey (render 5.7M/iter) and timeline
+  (8.2M/iter) nodes are the heaviest per-node render among benchable types and likely DELEGATE to the slow
+  Element `render_node` (they aren't Rect/Circle/Rounded/Stadium plain nodes, so they fail `render_node_into`'s
+  common fast-path gate ~5455). A journey/timeline node-streaming refactor (the proven playbook) is the next
+  real lever — confirming it needs a symbolized profile, currently blocked (rch strips binaries).
+- **Staging:** only `docs/NEGATIVE_EVIDENCE.md` (all code changes reverted; tree clean at HEAD).
+
+  Agent: BlackThrush
