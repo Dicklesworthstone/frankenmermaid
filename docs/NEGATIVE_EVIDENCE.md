@@ -8702,3 +8702,46 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   seq) which removed allocs on paths where the removed alloc was a LARGE fraction of per-item work.
 
   Agent: BlackThrush
+
+<!-- blackthrush-clean-frontier-exhausted-render-refactor-blocker -->
+### SURFACE: clean measurable optimization frontier exhausted; only remaining gap is the render streaming refactor (blocked) (2026-07-04)
+- **Context:** after landing 6 byte-identical parse wins this campaign (class-clone `bc58db6`, styled-chumsky
+  `0e05f39`, gantt-map `f429a67`, gitgraph `a231d02`, nodelist `9065dc0`, sequence-label `c0202f4`) plus 2
+  below-floor drops (class-render `a4eac9c`, block-borrow `91ed230`), this turn swept the remaining CLEAN
+  (non-peer-contested) crates/paths for a new measurable lever. All are mature or wash — recorded here so
+  future agents skip them:
+  - **fm-core `font_metrics`** (per-node text width, hot in layout for ALL types): already ASCII
+    multiplier-table fast path + memchr line/newline split + fused `estimate_dimensions` one-pass. Mature.
+  - **fm-core cross-phase:** `estimate_dimensions` reuse is owner-gated (pipeline-level plumbing), not a
+    contained lever.
+  - **fm-render-svg `a11y::describe_edge_labels`:** the per-edge `format!` produces the `<title>` text that
+    is actually emitted — a necessary alloc, not waste.
+  - **fm-render-svg `path.rs` edge `d`-string:** `build_smooth_path_by(_into)` already writes bytes directly
+    into a presized/borrowed buffer (no intermediate Vec). Lean.
+  - **fm-render-svg `Attributes { attrs: Vec<Attribute> }` → `SmallVec<[Attribute; N]>`:** REJECTED by
+    analysis — `Attribute` is ~56 B (`Cow<'static,str>` + `AttributeValue` enum), so any inline N that
+    covers the fat ~7-8-attr text elements (N≥8 → ≥448 B inline) bloats every `Element` and its
+    `children: Vec<Element>` moves/copies; small N doesn't cover the fat elements. Classic inline-sizing
+    wash (cf. `cd2b934` N=8 regressed / N=4 won for 16 B LayoutPoint — 56 B Attribute is worse). smallvec
+    is also not a current fm-render-svg dep.
+  - **`Attributes::set` O(K²) dedup `retain`:** the "remove old, append new at END" order is LOAD-BEARING
+    for SVG byte-identity when a name is re-set; cannot be reordered to an in-place update. Not safely
+    optimizable byte-identically.
+  - **fm-layout `node_size_cache` BTreeMap→FxHashMap:** only reached on the INCREMENTAL layout path; fresh
+    `layout_diagram` (what the benches/profharness measure) takes the direct no-cache branch. Not the gap.
+- **The one remaining measurable gap** is fat-node **render** (er ~836 µs, mindmap ~763 µs, git ~728 µs,
+  class ~683 µs at n=400) — these types build `Element` trees (er is excluded from the whole-document
+  streaming fast path by cardinality-label insertion; class/er nodes build compartment `Element` subtrees).
+  Clearing the ~5% render code-layout floor here requires the **structural byte-streaming refactor**
+  (extend `build_common_node_fragment`-style direct byte writing to compartment/entity nodes), NOT another
+  bounded alloc removal (proven below-floor in `a4eac9c`).
+- **BLOCKER:** that refactor lives in `fm-render-svg/src/{lib,attributes,path}.rs`, which has carried
+  uncommitted peer WIP (cosmetic cargo-fmt/const residue of TanSparrow's reverted CSS-mask experiment,
+  md5 `db4fa979…` for lib.rs) **byte-for-byte unchanged for 8+ turns** — almost certainly abandoned. It has
+  been preserved intact across every landing this campaign (staged only own files; backup+`git show`+rebase
+  +restore dance when origin advanced). **Recommendation:** confirm the WIP is abandoned (agent-mail is the
+  channel, but its DB is corrupt — needs `am doctor repair`/`reconstruct` first), then commit-or-clear that
+  WIP so the render streaming refactor can proceed on an uncontested file. That is the highest-value next
+  move and cannot be safely done unilaterally without destroying a peer's uncommitted work.
+
+  Agent: BlackThrush
