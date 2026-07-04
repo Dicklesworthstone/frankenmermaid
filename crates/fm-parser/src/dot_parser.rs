@@ -357,19 +357,19 @@ fn parse_dot_edge_statement(
 }
 
 fn find_edge_operator(statement: &str) -> Option<&'static str> {
-    let mut in_quote: Option<char> = None;
+    let mut in_quote: Option<u8> = None;
     let mut escaped = false;
     let mut html_depth = 0_usize;
 
-    let chars: Vec<char> = statement.chars().collect();
+    let bytes = statement.as_bytes();
     let mut i = 0;
-    while i + 1 < chars.len() {
-        let c = chars[i];
+    while i + 1 < bytes.len() {
+        let c = bytes[i];
 
         if let Some(q) = in_quote {
             if escaped {
                 escaped = false;
-            } else if c == '\\' {
+            } else if c == b'\\' {
                 escaped = true;
             } else if c == q {
                 in_quote = None;
@@ -378,27 +378,27 @@ fn find_edge_operator(statement: &str) -> Option<&'static str> {
             continue;
         }
 
-        if c == '"' || c == '\'' {
+        if c == b'"' || c == b'\'' {
             in_quote = Some(c);
             i += 1;
             continue;
         }
 
-        if c == '<' {
+        if c == b'<' {
             html_depth = html_depth.saturating_add(1);
             i += 1;
             continue;
         }
-        if c == '>' {
+        if c == b'>' {
             html_depth = html_depth.saturating_sub(1);
             i += 1;
             continue;
         }
 
-        if html_depth == 0 && c == '-' {
-            match chars[i + 1] {
-                '>' => return Some("->"),
-                '-' => return Some("--"),
+        if html_depth == 0 && c == b'-' {
+            match bytes[i + 1] {
+                b'>' => return Some("->"),
+                b'-' => return Some("--"),
                 _ => {}
             }
         }
@@ -1109,36 +1109,38 @@ fn strip_html_tags(raw: &str) -> String {
 fn split_dot_by<'a>(line: &'a str, separator: &str) -> Vec<&'a str> {
     let mut parts = Vec::new();
     let mut current_start = 0;
-    let mut in_quote: Option<char> = None;
+    let mut in_quote: Option<u8> = None;
     let mut escaped = false;
     let mut html_depth = 0_usize;
 
-    let chars: Vec<(usize, char)> = line.char_indices().collect();
+    let bytes = line.as_bytes();
+    let separator_bytes = separator.as_bytes();
+    let separator_len = separator_bytes.len();
     let mut i = 0;
 
-    while i < chars.len() {
-        let (byte_idx, c) = chars[i];
+    while i < bytes.len() {
+        let c = bytes[i];
 
         if let Some(quote_char) = in_quote {
             if escaped {
                 escaped = false;
-            } else if c == '\\' {
+            } else if c == b'\\' {
                 escaped = true;
             } else if c == quote_char {
                 in_quote = None;
             }
         } else {
-            if c == '"' || c == '\'' {
+            if c == b'"' || c == b'\'' {
                 in_quote = Some(c);
-            } else if c == '<' {
+            } else if c == b'<' {
                 html_depth = html_depth.saturating_add(1);
-            } else if c == '>' {
+            } else if c == b'>' {
                 html_depth = html_depth.saturating_sub(1);
-            } else if html_depth == 0 && line[byte_idx..].starts_with(separator) {
-                parts.push(line[current_start..byte_idx].trim());
-                current_start = byte_idx + separator.len();
-                let sep_chars = separator.chars().count();
-                i += sep_chars.saturating_sub(1);
+            } else if html_depth == 0 && bytes[i..].starts_with(separator_bytes) {
+                parts.push(line[current_start..i].trim());
+                current_start = i + separator_len;
+                i = current_start;
+                continue;
             }
         }
         i += 1;
@@ -1151,7 +1153,12 @@ fn split_dot_by<'a>(line: &'a str, separator: &str) -> Vec<&'a str> {
 }
 
 fn span_for(line_number: usize, line: &str) -> Span {
-    Span::at_line(line_number, line.chars().count())
+    let width = if line.is_ascii() {
+        line.len()
+    } else {
+        line.chars().count()
+    };
+    Span::at_line(line_number, width)
 }
 
 #[cfg(test)]

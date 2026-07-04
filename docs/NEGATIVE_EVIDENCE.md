@@ -9248,6 +9248,7 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   only narrow it, so it is recorded as negative evidence rather than landed.
 
   Agent: CodDig
+
 <!-- blackthrush-pie-streaming-landed -->
 ### LANDED: stream the whole pie chart (title + wedges + labels + legend) (pie render 1.88-1.98x) (2026-07-04)
 - **Lever:** the last big render gap. pie built ~4 `Element`s per slice (wedge `<path>`/`<circle>` + label
@@ -9626,5 +9627,32 @@ OLD = committed HEAD `bcc41d5`).
 - **Conformance:** no production or benchmark code kept; the final commit is ledger-only. Workspace
   `cargo fmt --check` is already red on broad pre-existing rustfmt drift unrelated to this reverted probe, so
   it is not a signal for this docs-only closeout.
+
+  Agent: CodDig
+
+<!-- coddig-dot-parser-bytescan-landed -->
+### LANDED: byte-scan DOT edge operator/split scanning (parse/dot_50 1.28x) (2026-07-04)
+- **Lever:** DOT parsing still decoded each statement into `Vec<char>` to find `->` / `--`, and decoded
+  every split candidate into `Vec<(byte, char)>` before slicing on `;` or the edge operator. Those sentinels
+  and quote/escape/HTML-depth controls are ASCII. Replaced those hot scans with byte iteration over
+  `as_bytes()`, while keeping slices at ASCII separator byte offsets. Also mirrored the already-landed
+  Mermaid `span_for` ASCII fast path in the DOT bridge.
+- **Correctness:** non-ASCII bytes cannot match the ASCII sentinels, so UTF-8 labels/IDs remain inert while
+  quoted text and HTML labels still suppress operator/split detection exactly as before. The separator call
+  sites are ASCII-only (`;`, `->`, `--`).
+- **Per-crate bench command:** `AGENT_NAME=CodDig CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod
+  rch exec -- cargo bench --profile release -p fm-parser --bench parse_bench -- parse/dot --warm-up-time 1
+  --measurement-time 2 --sample-size 10 --noplot`. The literal `cargo bench --release` form is invalid on
+  this Cargo bench target, so release-profile benches use `--profile release`.
+- **Ratio vs ORIG (current main before candidate, local same-machine paired A/B after RCH switched workers):**
+  - `parse/dot/dot_50`: ORIG `162.06 us` -> candidate `126.59 us` = **1.280x** speed; Criterion reported
+    improvement (`p = 0.00`, change `-20.77%` median).
+  - `parse/dot/dot_200`: ORIG `655.47 us` -> candidate `624.88 us` = **1.049x** raw speed, but Criterion
+    reported no reliable change (`p = 0.50`, CI `[-17.92%, +8.07%]`).
+- **RCH note:** RCH was run per-crate, but selected different workers for the paired proof
+  (`vmi1293453` ORIG, `vmi1152480` candidate); those cross-worker values were treated as routing evidence,
+  not the keep/reject proof.
+- **Verdict:** keep. The small DOT case removes two per-statement allocation/decode passes and wins
+  materially; the larger DOT case is not a measured regression, just noisy/no-change in this short gate.
 
   Agent: CodDig

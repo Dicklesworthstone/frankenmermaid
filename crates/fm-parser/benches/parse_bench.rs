@@ -193,6 +193,19 @@ fn gen_requirement(n: usize) -> String {
     s
 }
 
+/// A DOT graph bridge input: node declarations plus chained directed edges with labels.
+fn gen_dot(nodes: usize) -> String {
+    let mut s = String::from("digraph G {\n");
+    for i in 0..nodes {
+        s.push_str(&format!("  N{i} [label=\"Node {i}\"];\n"));
+    }
+    for i in 0..nodes.saturating_sub(1) {
+        s.push_str(&format!("  N{i} -> N{} [label=\"edge {i}\"];\n", i + 1));
+    }
+    s.push_str("}\n");
+    s
+}
+
 fn bench_parse(c: &mut Criterion) {
     let mut group = c.benchmark_group("parse");
 
@@ -265,6 +278,13 @@ fn bench_parse(c: &mut Criterion) {
     for (label, n) in [("req_30", 30_usize), ("req_100", 100_usize)] {
         let input = gen_requirement(n);
         group.bench_with_input(BenchmarkId::new("requirement", label), &input, |b, input| {
+            b.iter(|| fm_parser::parse(input));
+        });
+    }
+
+    for (label, nodes) in [("dot_50", 50_usize), ("dot_200", 200_usize)] {
+        let input = gen_dot(nodes);
+        group.bench_with_input(BenchmarkId::new("dot", label), &input, |b, input| {
             b.iter(|| fm_parser::parse(input));
         });
     }
