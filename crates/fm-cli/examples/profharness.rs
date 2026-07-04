@@ -40,6 +40,21 @@ fn gen_input(shape: &str, n: usize) -> String {
                 l.push(format!("  E{i} ||--o{{ E{} : has", i + 1));
             }
         }
+        "erattr" => {
+            // ER entities WITH attribute lists (exercises the Element-per-attribute render path).
+            l.push("erDiagram".into());
+            for i in 0..n {
+                l.push(format!("  E{i} {{"));
+                l.push("    int id PK".into());
+                l.push("    string name".into());
+                l.push(format!("    int e{i}_ref FK"));
+                l.push("    string description".into());
+                l.push("  }".into());
+            }
+            for i in 0..n.saturating_sub(1) {
+                l.push(format!("  E{i} ||--o{{ E{} : has", i + 1));
+            }
+        }
         "gantt" => {
             l.push("gantt".into());
             l.push("  title Project".into());
@@ -99,6 +114,16 @@ fn gen_input(shape: &str, n: usize) -> String {
                     ));
                 }
             }
+        }
+        "xychart" => {
+            l.push("xychart-beta".into());
+            l.push("  title Chart".into());
+            let cats: Vec<String> = (0..n).map(|i| format!("c{i}")).collect();
+            l.push(format!("  x-axis [{}]", cats.join(", ")));
+            l.push("  y-axis \"Value\" 0 --> 1000".into());
+            let vals: Vec<String> = (0..n).map(|i| format!("{}", 10 + (i * 7) % 900)).collect();
+            l.push(format!("  line [{}]", vals.join(", ")));
+            l.push(format!("  bar [{}]", vals.join(", ")));
         }
         "quadrant" => {
             l.push("quadrantChart".into());
@@ -236,6 +261,16 @@ fn gen_input(shape: &str, n: usize) -> String {
                 l.push(format!("  N{i}-->N{}", i + 1));
             }
         }
+        "diamond" => {
+            // decision/diamond nodes — NOT in the common fast-path shape set → slow Element path
+            l.push("flowchart TB".into());
+            for i in 0..n {
+                l.push(format!("  N{i}{{Decision {i}}}"));
+            }
+            for i in 0..n.saturating_sub(1) {
+                l.push(format!("  N{i}-->N{}", i + 1));
+            }
+        }
         "flowstad" => {
             l.push("flowchart LR".into());
             for i in 0..n {
@@ -309,6 +344,11 @@ fn main() {
     let cfg = SvgRenderConfig::default();
     let mut acc: usize = 0;
     let layout = fm_layout::layout_diagram(&pf.ir);
+    if phase == "dump" {
+        let v = render_svg_with_layout(&pf.ir, &layout, &cfg);
+        print!("{v}");
+        return;
+    }
     let mut s: Vec<u64> = Vec::with_capacity(iters);
     for _ in 0..iters {
         let t0 = std::time::Instant::now();
