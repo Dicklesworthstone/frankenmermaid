@@ -8503,3 +8503,36 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   the class-clone removal (`bc58db6`) landed under.
 
   Agent: BlackThrush
+
+<!-- blackthrush-class-compartment-alloc-elision-below-floor -->
+### REJECTED: bounded per-node alloc elision in `render_class_compartments` is below the render floor (2026-07-04)
+- **Lever:** two byte-identical per-node heap-alloc removals in
+  `fm-render-svg::render_class_compartments` — (1) `display_name` borrowed via `Cow::Borrowed(class_name)`
+  in the common no-generics case instead of a `class_name.to_string()` copy, and (2) the method member
+  text built in a single `format!` instead of allocating an intermediate `format!(": {t}")` String and
+  copying it into a second `format!` (one wasted alloc per method with a return type).
+- **Hypothesis:** render dominates the pipeline for the fat-compartment types (class render ~683 µs, er
+  ~836 µs, mindmap ~763 µs, git ~728 µs at n=400 — all in `fm-render-svg`), and these types are excluded
+  from the byte-streaming fast path, so they build `Element` trees. Shaving per-member allocs on the
+  class compartment path should show on class render.
+- **Measurement:** same-machine (local), interleaved OLD-vs-NEW `profharness <shape> <n> render`,
+  best-of-6 min-ns. NEW md5 `8dd52711…`, OLD md5 `9711d5a7…` (both carry the identical uncommitted
+  render-svg cosmetic WIP, so it cancels; the only code delta is the two allocs). Build via rch offload,
+  `CARGO_TARGET_DIR=…/frankenmermaid-blackthrush`, release opt=3 fat-LTO.
+  - TARGET `class render n=400`: `706029 ns` -> `702492 ns` = **1.0050x**
+  - TARGET `class render n=800`: `1356773 ns` -> `1340673 ns` = **1.0120x**
+  - CONTROL `er render n=400` (edits do NOT touch er): `850082 ns` -> `845464 ns` = **1.0054x**
+  - CONTROL `flow render n=400`: `124987 ns` -> `124726 ns` = **1.0020x**
+- **Verdict:** ~0 gain. The class-render "win" (0.5–1.2%) is at or below the code-layout/measurement noise
+  floor: the `er` control moved 0.54% with ZERO code change on its path, matching the class n=400 delta.
+  Two short-string mimalloc allocs per node are lost against the `Element`+`Attributes`
+  construction/serialization cost that dominates the fat-node render path. Consistent with the standing
+  finding that bounded render-path edits sit under a ~5% code-layout noise floor and are un-landable.
+- **Revert:** both edits dropped before commit (lib.rs restored to its prior byte state, md5-verified);
+  evidence-only entry.
+- **Do-not-retry:** the viable render frontier for fat-compartment types (class/er) is the STRUCTURAL
+  byte-streaming refactor (extend `build_common_node_fragment`-style direct writing to compartment/entity
+  nodes, bypassing the `Element` tree), not another bounded per-node alloc removal. That refactor is large
+  and currently blocked by concurrent uncommitted peer WIP across `fm-render-svg/src/{lib,attributes,path}.rs`.
+
+  Agent: BlackThrush
