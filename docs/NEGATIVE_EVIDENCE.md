@@ -8608,3 +8608,37 @@ confirms every top lever is now either a public-API refactor or genuinely inhere
   (b) `format!` of a bounded small-cardinality pattern -> static `&str` table.
 
   Agent: BlackThrush
+
+<!-- blackthrush-nodelist-single-node-fastpath-landed -->
+### LANDED: single-node fast path in parse_node_list_with_config (state parse ~1.08-1.09x, edge-heavy types) (2026-07-04)
+- **Lever:** `fm-parser::parse_node_list_with_config` is called for BOTH endpoints of every edge parsed by
+  `parse_edge_statement_asts` (the shared edge parser used by state, er, class relationships, and the
+  flowchart complex-statement fallback). For the common no-`&` endpoint it still called
+  `split_top_level_ampersands(raw)`, which allocates a `vec![raw]` intermediate, then built a second
+  result Vec. Added a no-`&` fast path that skips the `split` allocation and wraps the single parsed node
+  directly — one fewer heap Vec per edge endpoint (two per `A --> B` edge).
+- **Why state:** state transitions (`S0 --> S1`) have NO fast path (unlike flowchart, whose simple edges
+  use `parse_fast_simple_flowchart_edge_parts`); every state edge goes through the general edge parser →
+  `parse_node_list` twice, so state parse was ~2x flow per node despite doing less. This lever removes the
+  per-endpoint wrapper alloc for the whole edge-parser family.
+- **Measurement:** clean 2-build same-machine A/B (OLD = committed HEAD `2aad6113…`, NEW = `385e18c6…`,
+  differing only by the fast path). Interleaved `profharness <shape> <n> parse`, best-of-10 min-ns. Build
+  via rch offload, `CARGO_TARGET_DIR=…/frankenmermaid-blackthrush`, release opt=3 fat-LTO.
+  - `state n=400`: `218003 ns` -> `200120 ns` = **1.089x**
+  - `state n=600`: `329644 ns` -> `305158 ns` = **1.080x**
+  - `er n=600`: `257317 ns` -> `252028 ns` = **1.021x**
+- **Honest noise note:** control `flow` (whose fast-path edges never enter `parse_node_list`) moved
+  **0.971x** (2.9% "slower") — this is pure code-layout noise from changing a heavily-inlined shared
+  function, NOT a real regression (flow does not execute the changed code; the swing flips on any rebuild).
+  state's ~8-9% is well above this ~3% layout-noise band, and the win pattern is coherent: every type that
+  actually uses `parse_node_list` (state, er, class edges) improves; the one that doesn't only jitters.
+- **Byte-identity:** with no `&`, `split_top_level_ampersands` returns exactly `vec![raw]` and the old loop
+  trims/parses that one part — identical to the fast path; `contains_top_level_ampersand` is false so the
+  parallel-list reject never fired. All **408 fm-parser lib tests pass**.
+- **Landable rule:** byte-identical + strictly-less-work on the common path (one fewer Vec alloc per edge
+  endpoint; the added guard is one `contains(&b'&')` byte scan that replaces the same scan inside `split`).
+  Same monotonic-less-work rule as the intern hash-once (4c0cd5e) and this campaign's parse wins.
+- **Ratio vs the original (mermaid.js):** dominance context (parse ~70-100x per
+  `evidence/ledger/mermaid-js-head-to-head.toml`); widens the state/er/class-edge parse margin.
+
+  Agent: BlackThrush

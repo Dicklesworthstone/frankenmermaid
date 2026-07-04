@@ -7071,6 +7071,19 @@ fn parse_node_list_with_config(
     allow_parallel_node_lists: bool,
     config: &ParserConfig,
 ) -> Option<Vec<NodeToken>> {
+    // Common case — an edge endpoint with no `&` fork (every `A --> B` node): the whole string is a
+    // single node, so skip the `split_top_level_ampersands` `vec![raw]` intermediate allocation and wrap
+    // the one parsed node directly. Byte-identical: with no `&` the split returns exactly `vec![raw]` and
+    // the loop below trims/parses that one part, and `contains_top_level_ampersand` is false so the
+    // parallel-list reject never fires.
+    if !raw.as_bytes().contains(&b'&') {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        return Some(vec![parse_node_token_with_config(trimmed, config)?]);
+    }
+
     if !allow_parallel_node_lists && contains_top_level_ampersand(raw) {
         return None;
     }
