@@ -10150,3 +10150,29 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   `git diff --check` passed.
 - **Bench syntax note:** literal `cargo bench --release` is rejected by this Cargo; the release-profile bench
   command uses `--profile release`.
+
+  Agent: GoldenMaple
+<!-- goldenmaple-large-doc-body-streaming-no-ship -->
+### NO-SHIP: large-diagram `to_string_with_body` streaming regresses render (2026-07-05)
+- **Lever:** tried the unattempted large-diagram double-copy idea from the frontier note above. The candidate
+  removed the native `nodes < 2048 && edges < 4096` fast-path gate, factored the existing large edge/node
+  parallel chunk emitters into reusable helpers, and streamed those chunks directly inside
+  `SvgDocument::to_string_with_body` for no-extra-child diagrams. The temporary `large_wide_stages/render/40x80`
+  bench crosses the old gate with `gen_wide(40, 80)` (3200 nodes, 6240 edges).
+- **Measurement:** same-worker `ovh-a`, per-crate Criterion via
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod AGENT_NAME=GoldenMaple RCH_WORKER=ovh-a
+  RCH_REQUIRE_REMOTE=1 RCH_FORCE_REMOTE=1 rch exec -- cargo bench --profile release -p
+  frankenmermaid-cli --bench pipeline_bench -- large_wide_stages/render/40x80 --warm-up-time 1
+  --measurement-time 2 --sample-size 10 --noplot`. Baseline worktree `19c3ce1` plus only the new bench
+  harness: **1.1598 ms** mean [1.1082, 1.2078]. Candidate: **7.2876 ms** mean [7.0091, 7.7670].
+  Ratio: **0.1591x baseline speed** / **6.2835x slower**.
+- **Ratio vs ORIG:** standing Mermaid.js original comparator remains wide 16x32 render **3453.9 ms**.
+  The rejected candidate's large-wide render is **0.0021100x** of that denominator, or ORIG is **473.94x**
+  slower. This is dominance context only, not a same-input browser rerun.
+- **Verdict:** **reverted / no ship.** Eliminating the raw-fragment document copy is dominated by moving the
+  large native parallel path into the body-streaming branch on this workload; the measured result is a large
+  same-worker regression, not the expected small win. The render code change was dropped before commit.
+- **Do-not-retry note:** do not remove the large-diagram streaming gate by simply reusing the parallel chunk
+  writers inside `to_string_with_body`. Any future attempt needs a lower-level writer that preserves the
+  current large fallback's fast parallel behavior without this regression, and must beat the
+  `large_wide_stages/render/40x80` baseline above.

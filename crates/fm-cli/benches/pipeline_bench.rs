@@ -469,6 +469,25 @@ fn bench_wide_stages(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_large_wide_stages(c: &mut Criterion) {
+    let mut group = c.benchmark_group("large_wide_stages");
+    let config = fm_render_svg::SvgRenderConfig::default();
+
+    let input = gen_wide(40, 80);
+    let parsed = fm_parser::parse(&input);
+    let layout = fm_layout::layout_diagram(&parsed.ir);
+
+    group.bench_with_input(
+        BenchmarkId::new("render", "40x80"),
+        &(&parsed.ir, &layout),
+        |b, (ir, layout)| {
+            b.iter(|| fm_render_svg::render_svg_with_layout(ir, layout, &config));
+        },
+    );
+
+    group.finish();
+}
+
 fn bench_dotted_wide_stages(c: &mut Criterion) {
     let mut group = c.benchmark_group("dotted_wide_stages");
     let config = fm_render_svg::SvgRenderConfig::default();
@@ -698,6 +717,7 @@ criterion_group!(
     bench_render_svg,
     bench_full_pipeline,
     bench_wide_stages,
+    bench_large_wide_stages,
     bench_dotted_wide_stages,
     bench_marker_start_wide_stages,
     bench_highlighted_wide_stages,
