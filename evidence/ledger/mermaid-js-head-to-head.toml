@@ -3024,3 +3024,40 @@ bench_syntax_note = "Literal cargo bench --release is rejected by this Cargo; re
 [post_measurement_xychart_series_node_lookup_2026_07_04.decision]
 kept = true
 reason = "Same-worker vmi1227854 release Criterion A/B cuts xychart render/512 from 1.5939 ms to 0.87947 ms (1.81x) by replacing per-series linear node lookups with a first-match node-index table."
+
+[post_measurement_subroutine_node_streaming_2026_07_05]
+date = "2026-07-05"
+agent = "TanSparrow"
+status = "keep"
+baseline_commit = "577e3df"
+candidate_base_commit = "65b5165"
+candidate_summary = "Stream flowchart Subroutine nodes through a dedicated byte writer for their nested shape group instead of building the Element tree."
+graveyard_route = "Alien Graveyard + Extreme Optimization render-frontier lever: extend the proven node-streaming playbook to a still-slow reachable shape, but with a dedicated writer because Subroutine's slow path is not byte-compatible with the common node writer."
+rust_baseline_command = "AGENT_NAME=TanSparrow CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod RCH_WORKER=hz2 RCH_QUEUE_WHEN_BUSY=1 RCH_REQUIRE_REMOTE=1 RUSTFLAGS='-C metadata=tansparrow_subroutine_base_hz2' rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- subroutine_shape_render/render/subroutine --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot"
+rust_candidate_command = "AGENT_NAME=TanSparrow CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod RCH_WORKER=vmi1227854 RCH_QUEUE_WHEN_BUSY=1 RCH_REQUIRE_REMOTE=1 RUSTFLAGS='-C metadata=tansparrow_subroutine_cand_vmi1227854' rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- subroutine_shape_render/render/subroutine --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot"
+rust_worker = "Accepted comparison uses actual worker vmi1227854 for both runs. RCH ignored the requested hz2 worker on the baseline and selected vmi1227854; the candidate was then pinned/requested to vmi1227854 and also ran there."
+mermaid_js_command = "Standing comparator from scripts/mermaid_headtohead_cc.mjs: Mermaid.js 11.15.0 via Puppeteer/system Chromium, wide 16x32 median render 3453.9 ms. No fresh same-input browser subroutine rerun captured."
+behavior_proof = "Existing node_shape_fast_fragments_match_slow_render byte-identity unit test now includes NodeShape::Subroutine and passed via RCH hz2."
+agent_mail = "Agent Mail registration/reservation as TanSparrow was blocked by the SQLite corruption circuit breaker; no reservation was available."
+bench_syntax_note = "Literal cargo bench --release is rejected by this Cargo; release-profile bench used --profile release."
+
+[post_measurement_subroutine_node_streaming_2026_07_05.metrics]
+"subroutine_render_256_baseline_us" = 404.70
+"subroutine_render_256_candidate_us" = 132.41
+"subroutine_render_256_speedup_x" = 3.0564
+"subroutine_render_256_delta_pct" = -67.28
+"standing_wide_16x32_mermaid_js_ms" = 3453.9
+"subroutine_candidate_over_standing_mermaid_js" = 0.00003834
+"standing_mermaid_js_over_subroutine_candidate" = 26084.89
+
+[post_measurement_subroutine_node_streaming_2026_07_05.validation]
+"cargo_test_fm_render_svg_node_shape_fast_fragments" = "passed via RCH hz2: node_shape_fast_fragments_match_slow_render"
+"cargo_check_cli_benches" = "passed via RCH hz2: cargo check -p frankenmermaid-cli --benches"
+"cargo_clippy_fm_render_svg_lib" = "passed via RCH ovh-a: cargo clippy -p fm-render-svg --lib -- -D warnings"
+"cargo_test_frankentui_conformance" = "passed via RCH ovh-a: cargo test -p frankenmermaid-cli --test frankentui_conformance_test"
+"cargo_fmt_check_packages" = "passed locally: cargo fmt --check -p frankenmermaid-cli -p fm-render-svg"
+"git_diff_check" = "passed locally"
+
+[post_measurement_subroutine_node_streaming_2026_07_05.decision]
+kept = true
+reason = "Same-worker vmi1227854 release Criterion A/B cuts subroutine_shape_render/render/subroutine from 404.70 us to 132.41 us (3.06x) by replacing the subroutine node Element tree with byte-identical direct serialization."

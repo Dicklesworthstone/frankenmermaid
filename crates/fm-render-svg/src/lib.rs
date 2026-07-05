@@ -5188,6 +5188,78 @@ fn write_cylinder_shape_into(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn write_subroutine_node_fragment_into(
+    out: &mut String,
+    node_id: &str,
+    node_index: usize,
+    accent: usize,
+    raw_label: &str,
+    label: &str,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    rx: f32,
+    text_x: f32,
+    text_y: f32,
+    font_size: f32,
+    text_fill: &str,
+    user_classes: &str,
+) {
+    use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
+    use std::fmt::Write as _;
+
+    out.push_str("<g id=\"");
+    fm_core::write_mermaid_node_element_id_into(out, node_id, node_index);
+    out.push_str("\" class=\"fm-node fm-node-accent-");
+    let _ = write!(out, "{accent}");
+    out.push(' ');
+    out.push_str(node_shape_css_class(fm_core::NodeShape::Subroutine));
+    out.push_str(user_classes);
+    out.push_str("\" data-id=\"");
+    let _ = write_escaped_attr(out, node_id);
+    out.push_str("\" role=\"graphics-symbol\" aria-label=\"");
+    let _ = write_escaped_attr(out, raw_label);
+    out.push_str("\" tabindex=\"0\"><g><rect x=\"");
+    let _ = AttributeValue::Number(x).write_value(out);
+    out.push_str("\" y=\"");
+    let _ = AttributeValue::Number(y).write_value(out);
+    out.push_str("\" width=\"");
+    let _ = AttributeValue::Number(w).write_value(out);
+    out.push_str("\" height=\"");
+    let _ = AttributeValue::Number(h).write_value(out);
+    out.push_str("\" fill=\"url(#fm-node-gradient)\" rx=\"");
+    let _ = AttributeValue::Number(rx).write_value(out);
+    out.push_str("\"/><line x1=\"");
+    let _ = AttributeValue::Number(x + 8.0).write_value(out);
+    out.push_str("\" y1=\"");
+    let _ = AttributeValue::Number(y).write_value(out);
+    out.push_str("\" x2=\"");
+    let _ = AttributeValue::Number(x + 8.0).write_value(out);
+    out.push_str("\" y2=\"");
+    let _ = AttributeValue::Number(y + h).write_value(out);
+    out.push_str("\" stroke-width=\"1\"/><line x1=\"");
+    let _ = AttributeValue::Number(x + w - 8.0).write_value(out);
+    out.push_str("\" y1=\"");
+    let _ = AttributeValue::Number(y).write_value(out);
+    out.push_str("\" x2=\"");
+    let _ = AttributeValue::Number(x + w - 8.0).write_value(out);
+    out.push_str("\" y2=\"");
+    let _ = AttributeValue::Number(y + h).write_value(out);
+    out.push_str("\" stroke-width=\"1\"/></g><text x=\"");
+    let _ = AttributeValue::Number(text_x).write_value(out);
+    out.push_str("\" y=\"");
+    let _ = AttributeValue::Number(text_y).write_value(out);
+    out.push_str("\" text-anchor=\"middle\" font-size=\"");
+    let _ = AttributeValue::Number(font_size).write_value(out);
+    out.push_str("\" fill=\"");
+    let _ = write_escaped_attr(out, text_fill);
+    out.push_str("\">");
+    let _ = write_escaped_text(out, label);
+    out.push_str("</text></g>");
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build_common_node_fragment(
     node_id: &str,
     node_index: usize,
@@ -5748,6 +5820,52 @@ fn render_node_into(
     // `user_class_suffix` is `Some("")` for the common no-class node and `Some(" fm-node-user-…")` for a
     // node whose custom classes are all simple; `None` (slow path) when a class needs conditional render.
     let user_class_suffix = ir_node.and_then(simple_node_user_class_suffix);
+    if matches!(shape, NodeShape::Subroutine)
+        && config.embed_theme_css
+        && config.node_gradients
+        && !emit_classdef_classes
+        && !config.animations_enabled
+        && !config.include_source_spans
+        && config.a11y.aria_labels
+        && config.a11y.keyboard_nav
+        && config.a11y.text_alternatives
+        && shape_style.is_none()
+        && text_style.is_none()
+        && node_icon.is_none()
+        && !placeholder_space_node
+        && !label_text.contains('\n')
+        && !label_text.contains('\r')
+        && lookup_centrality_tier(centrality_map, node_box.node_index).is_none()
+        && label_id.is_none_or(|id| ir.label_markup.get(&id).is_none_or(|s| s.is_empty()))
+        && let Some(node) = ir_node
+        && let Some(user_classes) = user_class_suffix.as_deref()
+        && common_fragment_special_fill(node).is_none()
+        && node.requirement_meta.is_none()
+        && node.menu_links.is_empty()
+        && node.href().is_none()
+        && node.callback().is_none()
+    {
+        write_subroutine_node_fragment_into(
+            out,
+            node_id,
+            node_box.node_index,
+            stable_accent_index(node_id),
+            raw_label_text,
+            &label_text,
+            x,
+            y,
+            w,
+            h,
+            config.rounded_corners * 0.45,
+            cx,
+            cy + node_font_size / 3.0,
+            node_font_size,
+            colors.text.as_str(),
+            user_classes,
+        );
+        return;
+    }
+
     if matches!(
         shape,
         NodeShape::Rect
@@ -9345,6 +9463,7 @@ mod tests {
         for shape in [
             NodeShape::Diamond,
             NodeShape::Hexagon,
+            NodeShape::Subroutine,
             NodeShape::Cylinder,
             NodeShape::Trapezoid,
             NodeShape::InvTrapezoid,

@@ -10204,3 +10204,33 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   node/edge writers inside `to_string_with_body` and does not remove the native size gate. It only changes the
   internal raw child representation for the existing large fallback from one pre-concatenated `String` to
   ordered parts, preserving parallel chunk behavior while deleting one large memory copy.
+
+<!-- tansparrow-subroutine-node-streaming -->
+### LANDED: stream subroutine nodes through a dedicated fast path (subroutine render 3.06x) (2026-07-05)
+- **Lever:** `[[Subroutine]]` flowchart nodes were still falling through to the slow `Element` renderer even
+  after the common rect/polygon/cylinder node streaming work. Subroutine is not byte-compatible with the
+  common node writer: its slow path emits a nested shape `<g>` with a gradient rect plus two vertical guide
+  lines and returns before adding a `<title>`. Added a dedicated writer for exactly that byte shape and gated
+  it under the same default themed, no-spans, no-animation, no-style, no-markup conditions as the other node
+  streaming paths.
+- **Measurement:** same-worker `vmi1227854`, per-crate Criterion via
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod AGENT_NAME=TanSparrow RCH_WORKER=vmi1227854
+  RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 rch exec -- cargo bench --profile release -p
+  frankenmermaid-cli --bench pipeline_bench -- subroutine_shape_render/render/subroutine --warm-up-time 1
+  --measurement-time 2 --sample-size 10 --noplot`. Baseline detached worktree `577e3df` plus only the new
+  bench fixture: **404.70 us** mean [390.65, 422.30]. Candidate: **132.41 us** mean [124.44, 144.68].
+  Ratio: **3.0564x faster**, **-67.28%** render time.
+- **Ratio vs ORIG:** standing Mermaid.js original comparator remains wide 16x32 render **3453.9 ms**.
+  Candidate subroutine render/256 is **0.00003834x** of that denominator, or ORIG is **26084.89x** slower.
+  This is dominance context only, not a fresh same-input browser subroutine rerun.
+- **Validation:** `node_shape_fast_fragments_match_slow_render` passed via RCH `hz2` and now includes
+  `NodeShape::Subroutine` byte-for-byte against `render_node`; `cargo check -p frankenmermaid-cli --benches`
+  passed via RCH `hz2`; `cargo clippy -p fm-render-svg --lib -- -D warnings` passed via RCH `ovh-a`;
+  `cargo test -p frankenmermaid-cli --test frankentui_conformance_test` passed via RCH `ovh-a`; local
+  `cargo fmt --check -p frankenmermaid-cli -p fm-render-svg` and `git diff --check` passed.
+- **Bench syntax note:** literal `cargo bench --release` is rejected by this Cargo; release-profile benches
+  used `--profile release`.
+- **Tooling note:** Agent Mail registration/reservation as `TanSparrow` was blocked by the SQLite corruption
+  circuit breaker, so no reservation was available.
+
+  Agent: TanSparrow

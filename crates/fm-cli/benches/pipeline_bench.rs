@@ -196,6 +196,7 @@ fn gen_polygon_shape_chain(shape: &str, node_count: usize) -> String {
     for i in 0..node_count {
         let node = match shape {
             "hexagon" => format!("  N{i}{{{{Hex {i}}}}}"),
+            "subroutine" => format!("  N{i}[[Sub {i}]]"),
             "cylinder" => format!("  N{i}[(DB {i})]"),
             "parallel" => format!("  N{i}[/Para {i}/]"),
             "trapez" => format!("  N{i}[/Trap {i}\\]"),
@@ -675,6 +676,25 @@ fn bench_cylinder_shape_render(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_subroutine_shape_render(c: &mut Criterion) {
+    let mut group = c.benchmark_group("subroutine_shape_render");
+    let config = fm_render_svg::SvgRenderConfig::default();
+
+    let input = gen_polygon_shape_chain("subroutine", 256);
+    let parsed = fm_parser::parse(&input);
+    let layout = fm_layout::layout_diagram(&parsed.ir);
+
+    group.bench_with_input(
+        BenchmarkId::new("render", "subroutine"),
+        &(&parsed.ir, &layout),
+        |b, (ir, layout)| {
+            b.iter(|| fm_render_svg::render_svg_with_layout(ir, layout, &config));
+        },
+    );
+
+    group.finish();
+}
+
 /// Render the wide corpus with `include_source_spans = true`. Source-span metadata is
 /// off by default (matching Mermaid.js, which emits no source maps), so the default-config
 /// groups never exercise the span-emission path. This group isolates the spans-on render
@@ -725,6 +745,7 @@ criterion_group!(
     bench_xychart_stages,
     bench_polygon_shape_render,
     bench_cylinder_shape_render,
+    bench_subroutine_shape_render,
     bench_render_spans_on
 );
 criterion_main!(benches);
