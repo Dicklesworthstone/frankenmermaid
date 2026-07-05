@@ -105,7 +105,13 @@ pub struct Element {
     kind: ElementKind,
     attrs: Attributes,
     children: Vec<Self>,
-    text_content: Option<String>,
+    text_content: Option<ElementText>,
+}
+
+#[derive(Debug, Clone)]
+enum ElementText {
+    Text(String),
+    RawParts(Vec<String>),
 }
 
 impl Element {
@@ -116,7 +122,18 @@ impl Element {
             kind: ElementKind::Raw,
             attrs: Attributes::new(),
             children: Vec::new(),
-            text_content: Some(svg),
+            text_content: Some(ElementText::Text(svg)),
+        }
+    }
+
+    /// Create a raw SVG fragment from ordered chunks emitted by this crate's own serializer.
+    #[must_use]
+    pub(crate) fn raw_svg_parts(parts: Vec<String>) -> Self {
+        Self {
+            kind: ElementKind::Raw,
+            attrs: Attributes::new(),
+            children: Vec::new(),
+            text_content: Some(ElementText::RawParts(parts)),
         }
     }
 
@@ -572,7 +589,7 @@ impl Element {
     /// Set text content for text elements.
     #[must_use]
     pub fn content(mut self, text: impl Into<String>) -> Self {
-        self.text_content = Some(text.into());
+        self.text_content = Some(ElementText::Text(text.into()));
         self
     }
 
@@ -608,7 +625,14 @@ impl Element {
     pub fn write_to_string(&self, output: &mut String) {
         if self.kind == ElementKind::Raw {
             if let Some(ref raw_svg) = self.text_content {
-                output.push_str(raw_svg);
+                match raw_svg {
+                    ElementText::Text(raw_svg) => output.push_str(raw_svg),
+                    ElementText::RawParts(parts) => {
+                        for part in parts {
+                            output.push_str(part);
+                        }
+                    }
+                }
             }
             return;
         }
@@ -625,7 +649,7 @@ impl Element {
         } else {
             output.push('>');
 
-            if let Some(ref text) = self.text_content {
+            if let Some(ElementText::Text(text)) = &self.text_content {
                 let _ = crate::attributes::write_escaped_text(output, text);
             }
 
@@ -723,5 +747,16 @@ mod tests {
         assert!(svg.contains("<text"));
         assert!(svg.contains("Hello &amp; World"));
         assert!(svg.ends_with("</text>"));
+    }
+
+    #[test]
+    fn raw_svg_parts_render_in_order_without_escaping() {
+        let elem = Element::raw_svg_parts(vec![
+            "<g>".to_string(),
+            "<path d=\"M0 0\"/>".to_string(),
+            "</g>".to_string(),
+        ]);
+
+        assert_eq!(elem.render(), "<g><path d=\"M0 0\"/></g>");
     }
 }

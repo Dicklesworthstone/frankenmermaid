@@ -2904,9 +2904,8 @@ fn render_layout_to_svg(
     // accumulator and forced a ~370 KB realloc+copy every render. 480 keeps the common wide edge
     // within one allocation. Capacity-only: byte-identical output.
     // Parallel fan-out mirrors the node loop: `render_edge` is pure (reads `edge_path` + the Sync
-    // `EdgeRenderContext`, no shared mutable state), chunks are concatenated in edge order so output is
+    // `EdgeRenderContext`, no shared mutable state), chunks are emitted in edge order so output is
     // byte-identical and thread-count-independent, native-only (WASM serial), size-gated.
-    let mut edge_svg = String::with_capacity(layout.edges.len().saturating_mul(480));
     #[cfg(not(target_arch = "wasm32"))]
     {
         // Threshold 4096, not 256: after the direct-into-buffer serial edge writer (c282ff1) the
@@ -2940,17 +2939,22 @@ fn render_layout_to_svg(
                     .collect();
                 handles.into_iter().map(|h| h.join().unwrap()).collect()
             });
-            for part in &parts {
-                edge_svg.push_str(part);
-            }
+            doc = doc.child(Element::raw_svg_parts(parts));
         } else {
+            let mut edge_svg = String::with_capacity(layout.edges.len().saturating_mul(480));
             render_edges_serial(&mut edge_svg, &layout.edges, &edge_context);
+            if !edge_svg.is_empty() {
+                doc = doc.child(Element::raw_svg(edge_svg));
+            }
         }
     }
     #[cfg(target_arch = "wasm32")]
-    render_edges_serial(&mut edge_svg, &layout.edges, &edge_context);
-    if !edge_svg.is_empty() {
-        doc = doc.child(Element::raw_svg(edge_svg));
+    {
+        let mut edge_svg = String::with_capacity(layout.edges.len().saturating_mul(480));
+        render_edges_serial(&mut edge_svg, &layout.edges, &edge_context);
+        if !edge_svg.is_empty() {
+            doc = doc.child(Element::raw_svg(edge_svg));
+        }
     }
 
     // Render bundle count labels for bundled edges (e.g., "×3").
@@ -3014,12 +3018,11 @@ fn render_layout_to_svg(
     // hundreds of node element trees — each a `<g>` with rect + text children — until final
     // serialization. Byte-identical: the same `render_node` elements are serialized in the same
     // order, just streamed rather than deferred.
-    let mut node_svg = String::with_capacity(layout.nodes.len().saturating_mul(640));
     // The per-node render (`render_node` -> serialize) is the single largest pipeline cost (~43% of the
     // whole pipeline) and is embarrassingly parallel: `render_node` is pure (read-only `ir`/`config`/
     // `theme`/`centrality_map` + `Copy` scalars, no shared mutable state). For large diagrams on native
     // we fan the nodes across stdlib scoped threads (no new dependency — the crate stays zero-dep) and
-    // concatenate the per-chunk buffers IN ORDER, so the output is byte-identical to the serial path.
+    // emit the per-chunk buffers IN ORDER, so the output is byte-identical to the serial path.
     // Below the threshold the thread-spawn overhead would dominate, and WASM (no usable threads) always
     // takes the serial path — so small/medium renders and every browser render are unchanged.
     #[cfg(not(target_arch = "wasm32"))]
@@ -3067,10 +3070,9 @@ fn render_layout_to_svg(
                     .collect();
                 handles.into_iter().map(|h| h.join().unwrap()).collect()
             });
-            for part in &parts {
-                node_svg.push_str(part);
-            }
+            doc = doc.child(Element::raw_svg_parts(parts));
         } else {
+            let mut node_svg = String::with_capacity(layout.nodes.len().saturating_mul(640));
             render_nodes_serial(
                 &mut node_svg,
                 &layout.nodes,
@@ -3083,23 +3085,29 @@ fn render_layout_to_svg(
                 emit_classdef_classes,
                 &centrality_map,
             );
+            if !node_svg.is_empty() {
+                doc = doc.child(Element::raw_svg(node_svg));
+            }
         }
     }
     #[cfg(target_arch = "wasm32")]
-    render_nodes_serial(
-        &mut node_svg,
-        &layout.nodes,
-        ir,
-        offset_x,
-        offset_y,
-        config,
-        detail,
-        &theme.colors,
-        emit_classdef_classes,
-        &centrality_map,
-    );
-    if !node_svg.is_empty() {
-        doc = doc.child(Element::raw_svg(node_svg));
+    {
+        let mut node_svg = String::with_capacity(layout.nodes.len().saturating_mul(640));
+        render_nodes_serial(
+            &mut node_svg,
+            &layout.nodes,
+            ir,
+            offset_x,
+            offset_y,
+            config,
+            detail,
+            &theme.colors,
+            emit_classdef_classes,
+            &centrality_map,
+        );
+        if !node_svg.is_empty() {
+            doc = doc.child(Element::raw_svg(node_svg));
+        }
     }
 
     for node_box in &layout.extensions.sequence_mirror_headers {

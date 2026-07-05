@@ -10176,3 +10176,31 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   writers inside `to_string_with_body`. Any future attempt needs a lower-level writer that preserves the
   current large fallback's fast parallel behavior without this regression, and must beat the
   `large_wide_stages/render/40x80` baseline above.
+
+  Agent: GoldenMaple
+<!-- goldenmaple-raw-svg-parts-large-parallel-landed -->
+### LANDED: scatter/gather raw SVG parts for large parallel render chunks (large-wide render 1.076x) (2026-07-05)
+- **Lever:** used a rope-like raw-fragment primitive instead of retrying the rejected large
+  `to_string_with_body` gate removal. `Element::raw_svg_parts(Vec<String>)` stores the ordered per-thread
+  edge/node chunk strings as one raw child and writes them directly during document serialization. The native
+  large parallel path keeps its existing chunk renderer and document fallback, but skips the extra
+  `parts -> edge_svg/node_svg` concatenation copy before the final document copy. Small/serial and WASM paths
+  still use the old single raw `String`.
+- **Measurement:** same-worker `ovh-a`, per-crate Criterion via
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod AGENT_NAME=GoldenMaple RCH_WORKER=ovh-a
+  RCH_REQUIRE_REMOTE=1 RCH_FORCE_REMOTE=1 rch exec -- cargo bench --profile release -p
+  frankenmermaid-cli --bench pipeline_bench -- large_wide_stages/render/40x80 --warm-up-time 1
+  --measurement-time 2 --sample-size 10 --noplot`. Baseline `577e3df`:
+  **1.1492 ms** mean [1.1271, 1.1712]. Candidate: **1.0678 ms** mean [1.0566, 1.0837];
+  Criterion change **-6.27%** [-8.26%, -4.29%], p < 0.05. Direct mean speedup:
+  **1.0762x faster** / **-7.08%** render time.
+- **Ratio vs ORIG:** standing Mermaid.js original comparator remains wide 16x32 render **3453.9 ms**.
+  Candidate large-wide render is **0.0003092x** of that denominator, or ORIG is **3234.59x** slower. This is
+  dominance context only, not a fresh same-input browser rerun.
+- **Validation:** `cargo check -p frankenmermaid-cli --benches` passed via RCH `ovh-b`; `cargo test -p
+  fm-render-svg --lib` passed via RCH local fallback (242 tests); `cargo clippy -p fm-render-svg --lib -- -D
+  warnings` passed via RCH `hz2`; `cargo fmt --all` and `git diff --check` passed.
+- **Why this is distinct from the rejected large body-streaming lever:** it does not move the large parallel
+  node/edge writers inside `to_string_with_body` and does not remove the native size gate. It only changes the
+  internal raw child representation for the existing large fallback from one pre-concatenated `String` to
+  ordered parts, preserving parallel chunk behavior while deleting one large memory copy.
