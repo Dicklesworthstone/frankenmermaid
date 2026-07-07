@@ -33,19 +33,19 @@ use std::time::Instant;
 
 use fm_core::{
     DiagramType, FxHashMap, FxHashSet, GanttDate, GanttExclude, GanttTaskType, GraphDirection,
-    IrEndpoint,
-    IrGanttMeta, IrNode, IrXyChartMeta, IrXySeriesKind, MermaidComplexity, MermaidConfig,
-    MermaidDecisionWeight, MermaidDiagramIr, MermaidGuardReport, MermaidLayoutDecisionAlternative,
-    MermaidLayoutDecisionExplanation, MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord,
-    MermaidObservabilityIds, MermaidPressureReport, MermaidPressureTier, MermaidSourceMap,
-    MermaidSourceMapEntry, MermaidSourceMapKind, Span, mermaid_cluster_element_id,
-    mermaid_edge_element_id, mermaid_node_element_id, mermaid_node_element_id_with_variant,
+    IrEndpoint, IrGanttMeta, IrNode, IrXyChartMeta, IrXySeriesKind, MermaidComplexity,
+    MermaidConfig, MermaidDecisionWeight, MermaidDiagramIr, MermaidGuardReport,
+    MermaidLayoutDecisionAlternative, MermaidLayoutDecisionExplanation,
+    MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord, MermaidObservabilityIds,
+    MermaidPressureReport, MermaidPressureTier, MermaidSourceMap, MermaidSourceMapEntry,
+    MermaidSourceMapKind, Span, mermaid_cluster_element_id, mermaid_edge_element_id,
+    mermaid_node_element_id, mermaid_node_element_id_with_variant,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use good_lp::solvers::WithTimeLimit;
-use smallvec::{SmallVec, smallvec};
 #[cfg(not(target_arch = "wasm32"))]
 use good_lp::{Expression, Solution, SolverModel, constraint, default_solver, variable};
+use smallvec::{SmallVec, smallvec};
 use tracing::{debug, info, trace, warn};
 
 #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
@@ -5937,8 +5937,7 @@ fn layout_diagram_xychart_from_meta(
             // node_index -> center `FxHashMap` once, then O(1) per edge. Byte-identical: `contains` matches
             // `any`, and the map's center for `node_index` equals the (unique) node the `find` returned;
             // edges are `sort_by_key`ed by `edge_index` below, so push order is irrelevant anyway.
-            let series_members: FxHashSet<usize> =
-                series.nodes.iter().map(|node| node.0).collect();
+            let series_members: FxHashSet<usize> = series.nodes.iter().map(|node| node.0).collect();
             let center_by_index: FxHashMap<usize, _> = nodes
                 .iter()
                 .map(|node| (node.node_index, node.bounds.center()))
@@ -8212,11 +8211,7 @@ fn node_size_cache_key(
 }
 
 fn icon_dimensions(node: &IrNode, metrics: &fm_core::FontMetrics) -> (f32, f32) {
-    let Some(icon) = node
-        .icon()
-        .map(str::trim)
-        .filter(|icon| !icon.is_empty())
-    else {
+    let Some(icon) = node.icon().map(str::trim).filter(|icon| !icon.is_empty()) else {
         return (0.0, 0.0);
     };
 
@@ -8998,18 +8993,23 @@ fn resolved_edges(ir: &MermaidDiagramIr) -> Vec<OrientedEdge> {
     // size-hint gives `collect` no capacity. `edges.len()` is O(1); byte-identical (same order).
     // `resolved_edges` runs per layout (GraphMetrics::from_ir algorithm selection + cycle removal).
     let mut edges = Vec::with_capacity(ir.edges.len());
-    edges.extend(ir.edges.iter().enumerate().filter_map(|(edge_index, edge)| {
-        let source = endpoint_node_index(ir, edge.from)?;
-        let target = endpoint_node_index(ir, edge.to)?;
-        if source >= node_count || target >= node_count {
-            return None;
-        }
-        Some(OrientedEdge {
-            source,
-            target,
-            edge_index,
-        })
-    }));
+    edges.extend(
+        ir.edges
+            .iter()
+            .enumerate()
+            .filter_map(|(edge_index, edge)| {
+                let source = endpoint_node_index(ir, edge.from)?;
+                let target = endpoint_node_index(ir, edge.to)?;
+                if source >= node_count || target >= node_count {
+                    return None;
+                }
+                Some(OrientedEdge {
+                    source,
+                    target,
+                    edge_index,
+                })
+            }),
+    );
     edges
 }
 
@@ -11341,15 +11341,14 @@ fn build_edge_paths_with_orientation(
     // indexing is floored at `DENSE_INDEX_OBSTACLES`. The index query is a conservative
     // superset of the AABB scan, so routing stays byte-identical either way.
     let sparse_routing = ir.edges.len() <= nodes.len().saturating_mul(3) / 2;
-    let index_eligible = sparse_routing
-        || obstacle_bounds.len() >= ObstacleSpatialIndex::DENSE_INDEX_OBSTACLES;
-    let mut obstacle_index = if index_eligible
-        && obstacle_bounds.len() >= ObstacleSpatialIndex::MIN_INDEXED_OBSTACLES
-    {
-        ObstacleSpatialIndex::new(&obstacle_bounds)
-    } else {
-        None
-    };
+    let index_eligible =
+        sparse_routing || obstacle_bounds.len() >= ObstacleSpatialIndex::DENSE_INDEX_OBSTACLES;
+    let mut obstacle_index =
+        if index_eligible && obstacle_bounds.len() >= ObstacleSpatialIndex::MIN_INDEXED_OBSTACLES {
+            ObstacleSpatialIndex::new(&obstacle_bounds)
+        } else {
+            None
+        };
 
     // Presize to `ir.edges.len()` (the max; `filter_map` only drops unresolved-endpoint edges) so
     // the `Vec<LayoutEdgePath>` fills without the log(N) growth reallocs a `filter_map().collect()`
@@ -11654,9 +11653,8 @@ impl ObstacleSpatialIndex {
             return None; // too spread out; the caller uses the linear scan instead
         }
 
-        let lin = |cx: i32, cy: i32| -> usize {
-            (cy - min_cy) as usize * ncols + (cx - min_cx) as usize
-        };
+        let lin =
+            |cx: i32, cy: i32| -> usize { (cy - min_cy) as usize * ncols + (cx - min_cx) as usize };
 
         // Pass 1: count obstacles per cell into offsets[i+1]. The `cx0..=cx1`/`cy0..=cy1` cell walk
         // uses plain loops instead of `RangeInclusive` iterators — the latter's per-step

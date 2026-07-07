@@ -322,9 +322,8 @@ pub fn detect_type_with_confidence_and_config(input: &str, config: &ParserConfig
     let first_line = mermaid_parser::first_significant_line(input).unwrap_or("");
     let lower = first_line.to_ascii_lowercase();
     let keyword = exact_keyword_match(&lower, first_line);
-    let could_be_dot = lower.starts_with("graph")
-        || lower.starts_with("digraph")
-        || lower.starts_with("strict");
+    let could_be_dot =
+        lower.starts_with("graph") || lower.starts_with("digraph") || lower.starts_with("strict");
 
     // Strategy 1: DOT format detection (high priority for interop).
     if (keyword.is_none() || could_be_dot) && looks_like_dot(input) {
@@ -1083,14 +1082,34 @@ mod tests {
     fn matches_keyword_header_ci_is_byte_identical() {
         // Pin the alloc-free CI matcher to `matches_keyword_header(&line.to_ascii_lowercase(), kw)`.
         let lines = [
-            "sankey", "Sankey", "SANKEY-BETA", "sankey-beta", "sankey ", "Sankey-Beta title",
-            "sankeyx", "sankey_beta", "san", "", "sankey\t", "sankey-", "title x", "TITLE",
-            "sÄnkey", "sankeyÄ", "  sankey", "block-beta", "sankey beta extra",
+            "sankey",
+            "Sankey",
+            "SANKEY-BETA",
+            "sankey-beta",
+            "sankey ",
+            "Sankey-Beta title",
+            "sankeyx",
+            "sankey_beta",
+            "san",
+            "",
+            "sankey\t",
+            "sankey-",
+            "title x",
+            "TITLE",
+            "sÄnkey",
+            "sankeyÄ",
+            "  sankey",
+            "block-beta",
+            "sankey beta extra",
         ];
         for kw in ["sankey", "sankey-beta", "title", "block-beta"] {
             for l in lines {
                 let want = super::matches_keyword_header(&l.to_ascii_lowercase(), kw);
-                assert_eq!(super::matches_keyword_header_ci(l, kw), want, "line={l:?} kw={kw:?}");
+                assert_eq!(
+                    super::matches_keyword_header_ci(l, kw),
+                    want,
+                    "line={l:?} kw={kw:?}"
+                );
             }
         }
     }

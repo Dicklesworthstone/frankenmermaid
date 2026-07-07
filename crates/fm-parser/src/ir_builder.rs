@@ -553,7 +553,9 @@ impl IrBuilder {
         let Some(node) = self.ir.nodes.get_mut(node_id.0) else {
             return;
         };
-        let meta = node.class_meta.get_or_insert_with(|| Box::new(IrClassNodeMeta::default()));
+        let meta = node
+            .class_meta
+            .get_or_insert_with(|| Box::new(IrClassNodeMeta::default()));
         match member.kind {
             ClassMemberKind::Attribute => meta.attributes.push(member),
             ClassMemberKind::Method => meta.methods.push(member),

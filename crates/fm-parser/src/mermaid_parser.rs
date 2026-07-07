@@ -1679,7 +1679,8 @@ fn parse_sequence_statement(line: &str) -> Option<SequenceStatement> {
     if let Some(&first) = line.as_bytes().first()
         && !(first.is_ascii_lowercase() || first == b'N' || first == b'H')
     {
-        return parse_sequence_message_ast(line).map(|data| SequenceStatement::Message(Box::new(data)));
+        return parse_sequence_message_ast(line)
+            .map(|data| SequenceStatement::Message(Box::new(data)));
     }
 
     if let Some(autonumber) = parse_sequence_autonumber(line) {
@@ -3366,7 +3367,8 @@ fn parse_mindmap_node_token(raw: &str, config: &ParserConfig) -> Option<NodeToke
         }
 
         // Rounded shape: id(text)
-        if let Some(parsed) = parse_wrapped_with_config(core, '(', ')', NodeShape::Rounded, config) {
+        if let Some(parsed) = parse_wrapped_with_config(core, '(', ')', NodeShape::Rounded, config)
+        {
             return Some(parsed);
         }
 
@@ -6882,7 +6884,8 @@ fn parse_sequence_message_ast(statement: &str) -> Option<SequenceMessageData> {
     let target_raw = strip_sequence_central_prefix(target_raw);
 
     // +/- activation modifiers on the target.
-    let (target_clean, activate, deactivate) = if let Some(stripped) = target_raw.strip_prefix('+') {
+    let (target_clean, activate, deactivate) = if let Some(stripped) = target_raw.strip_prefix('+')
+    {
         (stripped, true, false)
     } else if let Some(stripped) = target_raw.strip_prefix('-') {
         (stripped, false, true)
@@ -6932,8 +6935,18 @@ fn lower_sequence_message(
     // (interning + edge push, in the SAME order as before) run here — no re-parse, no re-normalize.
     let span = span_for(line_number, source_line);
 
-    let from = builder.intern_node_label(&data.from_id, data.left_label.as_ref(), NodeShape::Rect, span);
-    let to = builder.intern_node_label(&data.to_id, data.right_label.as_ref(), NodeShape::Rect, span);
+    let from = builder.intern_node_label(
+        &data.from_id,
+        data.left_label.as_ref(),
+        NodeShape::Rect,
+        span,
+    );
+    let to = builder.intern_node_label(
+        &data.to_id,
+        data.right_label.as_ref(),
+        NodeShape::Rect,
+        span,
+    );
 
     match (from, to) {
         (Some(from_node), Some(to_node)) => {
@@ -7328,7 +7341,12 @@ fn find_operator_from_index<'a>(
     // call `find_operator_core` directly with its precomputed `const` gate (see `SEQUENCE_OP_GATE`)
     // to skip this per-call rebuild — it was the dominant cost of `find_operator` on the hot
     // sequence-message path (26 operators rebuilt into the gate on EVERY message line).
-    find_operator_core(statement, start_index, operators, op_first_byte_gate(operators))
+    find_operator_core(
+        statement,
+        start_index,
+        operators,
+        op_first_byte_gate(operators),
+    )
 }
 
 /// Core operator scan with a caller-supplied first-byte gate: bit `b` is set iff some operator in
@@ -7503,10 +7521,12 @@ fn parse_node_token_with_config(raw: &str, config: &ParserConfig) -> Option<Node
         if let Some(parsed) = parse_wrapped_with_config(core, '[', ']', NodeShape::Rect, config) {
             return Some(parsed);
         }
-        if let Some(parsed) = parse_wrapped_with_config(core, '(', ')', NodeShape::Rounded, config) {
+        if let Some(parsed) = parse_wrapped_with_config(core, '(', ')', NodeShape::Rounded, config)
+        {
             return Some(parsed);
         }
-        if let Some(parsed) = parse_wrapped_with_config(core, '{', '}', NodeShape::Diamond, config) {
+        if let Some(parsed) = parse_wrapped_with_config(core, '{', '}', NodeShape::Diamond, config)
+        {
             return Some(parsed);
         }
         if let Some(parsed) =
@@ -9065,12 +9085,31 @@ mod tests {
     #[test]
     fn ci_prefix_helpers_are_byte_identical() {
         // Pin the alloc-free helpers to the old `to_ascii_lowercase()` forms they replaced.
-        let cases = ["space", "Space", "SPACE:3", "space: 2", "spacex", "space", "block-beta",
-            "Block-Beta x", "columns 4", "COLUMNS 5", "col", "", "spÄce", "space:", " space"];
+        let cases = [
+            "space",
+            "Space",
+            "SPACE:3",
+            "space: 2",
+            "spacex",
+            "space",
+            "block-beta",
+            "Block-Beta x",
+            "columns 4",
+            "COLUMNS 5",
+            "col",
+            "",
+            "spÄce",
+            "space:",
+            " space",
+        ];
         for prefix in ["space", "space:", "block-beta", "columns"] {
             for s in cases {
                 let lower = s.to_ascii_lowercase();
-                assert_eq!(super::starts_with_ci(s, prefix), lower.starts_with(prefix), "{s:?} {prefix:?}");
+                assert_eq!(
+                    super::starts_with_ci(s, prefix),
+                    lower.starts_with(prefix),
+                    "{s:?} {prefix:?}"
+                );
                 // strip_prefix_ci returns the RAW remainder; membership matches lowercase strip.
                 assert_eq!(
                     super::strip_prefix_ci(s, prefix).is_some(),
