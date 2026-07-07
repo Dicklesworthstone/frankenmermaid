@@ -76,7 +76,10 @@ fn gen_class(classes: usize) -> String {
     }
     for i in 0..classes.saturating_sub(1) {
         s.push_str(&format!("  Class{i} <|-- Class{}\n", i + 1));
-        s.push_str(&format!("  Class{i} --> Class{} : uses\n", (i + 2) % classes));
+        s.push_str(&format!(
+            "  Class{i} --> Class{} : uses\n",
+            (i + 2) % classes
+        ));
     }
     s
 }
@@ -119,7 +122,11 @@ fn gen_gantt(tasks: usize) -> String {
         if i == 0 {
             s.push_str(&format!("  Task {i} :a{i}, 2024-01-01, 5d\n"));
         } else {
-            s.push_str(&format!("  Task {i} :a{i}, after a{}, {}d\n", i - 1, 3 + i % 7));
+            s.push_str(&format!(
+                "  Task {i} :a{i}, after a{}, {}d\n",
+                i - 1,
+                3 + i % 7
+            ));
         }
     }
     s
@@ -143,7 +150,12 @@ fn gen_journey(steps: usize) -> String {
         if i % 8 == 0 {
             s.push_str(&format!("  section Section {}\n", i / 8));
         }
-        s.push_str(&format!("    Task {i}: {}: Actor{}, Actor{}\n", 1 + i % 5, i % 3, (i + 1) % 3));
+        s.push_str(&format!(
+            "    Task {i}: {}: Actor{}, Actor{}\n",
+            1 + i % 5,
+            i % 3,
+            (i + 1) % 3
+        ));
     }
     s
 }
@@ -169,13 +181,21 @@ fn gen_c4(elements: usize) -> String {
     let mut s = String::from("C4Context\n  title System Context\n");
     for i in 0..elements {
         if i % 2 == 0 {
-            s.push_str(&format!("  Person(user{i}, \"User {i}\", \"A user number {i}\")\n"));
+            s.push_str(&format!(
+                "  Person(user{i}, \"User {i}\", \"A user number {i}\")\n"
+            ));
         } else {
-            s.push_str(&format!("  System(sys{i}, \"System {i}\", \"The system {i}\")\n"));
+            s.push_str(&format!(
+                "  System(sys{i}, \"System {i}\", \"The system {i}\")\n"
+            ));
         }
     }
     for i in 0..elements.saturating_sub(1) {
-        s.push_str(&format!("  Rel(user{}, sys{}, \"Uses\", \"HTTPS\")\n", i & !1, (i + 1) | 1));
+        s.push_str(&format!(
+            "  Rel(user{}, sys{}, \"Uses\", \"HTTPS\")\n",
+            i & !1,
+            (i + 1) | 1
+        ));
     }
     s
 }
@@ -185,7 +205,9 @@ fn gen_requirement(n: usize) -> String {
     let mut s = String::from("requirementDiagram\n");
     for i in 0..n {
         s.push_str(&format!("  requirement req_{i} {{\n    id: {i}\n    text: requirement text number {i}\n    risk: high\n    verifymethod: test\n  }}\n"));
-        s.push_str(&format!("  element elem_{i} {{\n    type: simulation\n    docref: doc{i}\n  }}\n"));
+        s.push_str(&format!(
+            "  element elem_{i} {{\n    type: simulation\n    docref: doc{i}\n  }}\n"
+        ));
     }
     for i in 0..n.saturating_sub(1) {
         s.push_str(&format!("  elem_{i} - satisfies -> req_{}\n", i + 1));
@@ -209,10 +231,9 @@ fn gen_dot(nodes: usize) -> String {
 fn bench_parse(c: &mut Criterion) {
     let mut group = c.benchmark_group("parse");
 
-    for (label, participants, messages) in [
-        ("seq_12x50", 12_usize, 50_usize),
-        ("seq_12x200", 12, 200),
-    ] {
+    for (label, participants, messages) in
+        [("seq_12x50", 12_usize, 50_usize), ("seq_12x200", 12, 200)]
+    {
         let input = gen_sequence(participants, messages);
         group.bench_with_input(BenchmarkId::new("sequence", label), &input, |b, input| {
             b.iter(|| fm_parser::parse(input));
@@ -277,9 +298,13 @@ fn bench_parse(c: &mut Criterion) {
 
     for (label, n) in [("req_30", 30_usize), ("req_100", 100_usize)] {
         let input = gen_requirement(n);
-        group.bench_with_input(BenchmarkId::new("requirement", label), &input, |b, input| {
-            b.iter(|| fm_parser::parse(input));
-        });
+        group.bench_with_input(
+            BenchmarkId::new("requirement", label),
+            &input,
+            |b, input| {
+                b.iter(|| fm_parser::parse(input));
+            },
+        );
     }
 
     for (label, nodes) in [("dot_50", 50_usize), ("dot_200", 200_usize)] {
