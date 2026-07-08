@@ -3061,3 +3061,51 @@ bench_syntax_note = "Literal cargo bench --release is rejected by this Cargo; re
 [post_measurement_subroutine_node_streaming_2026_07_05.decision]
 kept = true
 reason = "Same-worker vmi1227854 release Criterion A/B cuts subroutine_shape_render/render/subroutine from 404.70 us to 132.41 us (3.06x) by replacing the subroutine node Element tree with byte-identical direct serialization."
+
+[post_measurement_bidirectional_flow_edge_fast_path_2026_07_08]
+date = "2026-07-08"
+agent = "TanSparrow"
+status = "keep"
+bead = "bd-6uux"
+candidate_summary = "Extend the existing hand-rolled simple flowchart edge fast path to plain-id bidirectional operators <-.->, <==>, and <-->, so marker-start edges avoid the chumsky flow-statement path while preserving fallback semantics for labels, shapes, node lists, and chained edges."
+negative_evidence_review = "Consulted docs/NEGATIVE_EVIDENCE.md first and avoided previously rejected parser families: common --> shortcut, borrowed parser hash-key/dedup, broad byte-loop parser rewrites, and label/shape/chained-edge fast-path expansion."
+graveyard_route = "Land-first: a measured parser .scratch-equivalent candidate existed on the hot marker_start_wide_stages/parse row, so no new alien-graveyard primitive was needed."
+rust_baseline_command = "AGENT_NAME=TanSparrow RCH_WORKER=vmi1264463 CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- marker_start_wide_stages/parse --warm-up-time 1 --measurement-time 2"
+rust_candidate_command = "AGENT_NAME=TanSparrow RCH_WORKER=vmi1264463 CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- marker_start_wide_stages/parse --warm-up-time 1 --measurement-time 2"
+rust_worker = "Accepted comparison uses actual same worker vmi1264463 for both candidate and ORIG rerun."
+mermaid_js_command = "Standing comparator from scripts/mermaid_headtohead_cc.mjs: Mermaid.js 11.15.0 via Puppeteer/system Chromium, wide 16x32 median render 3453.9 ms. No fresh same-input browser marker-start rerun captured."
+behavior_proof = "flowchart_fast_path_matches_fallback_for_simple_edges compares the fast path AST against parse_edge_statement_asts(... FLOW_OPERATORS ...) and now includes <-.->, <==>, and <--> cases."
+agent_mail = "Agent Mail registration succeeded as TanSparrow, but reservation failed because the Agent Mail SQLite database is malformed; no reservation was available."
+bench_syntax_note = "Literal cargo bench --release was attempted as requested and rejected by Cargo with unexpected argument '--release'; release-profile bench used --profile release."
+
+[post_measurement_bidirectional_flow_edge_fast_path_2026_07_08.metrics]
+"marker_start_parse_8x16_orig_us" = 698.10
+"marker_start_parse_8x16_candidate_us" = 135.28
+"marker_start_parse_8x16_candidate_over_orig" = 0.1938
+"marker_start_parse_8x16_speedup_x" = 5.1604
+"marker_start_parse_8x16_delta_pct" = -80.62
+"marker_start_parse_12x24_orig_us" = 1746.1
+"marker_start_parse_12x24_candidate_us" = 293.51
+"marker_start_parse_12x24_candidate_over_orig" = 0.1681
+"marker_start_parse_12x24_speedup_x" = 5.9490
+"marker_start_parse_12x24_delta_pct" = -83.19
+"marker_start_parse_16x32_orig_us" = 3480.4
+"marker_start_parse_16x32_candidate_us" = 550.13
+"marker_start_parse_16x32_candidate_over_orig" = 0.1581
+"marker_start_parse_16x32_speedup_x" = 6.3265
+"marker_start_parse_16x32_delta_pct" = -84.19
+"standing_wide_16x32_mermaid_js_ms" = 3453.9
+"marker_start_parse_16x32_candidate_over_standing_mermaid_js" = 0.00015928
+"standing_mermaid_js_over_marker_start_parse_candidate" = 6278.33
+
+[post_measurement_bidirectional_flow_edge_fast_path_2026_07_08.validation]
+"cargo_test_fm_parser_fast_path" = "passed via RCH hz1: cargo test -p fm-parser flowchart_fast_path_matches_fallback_for_simple_edges -- --nocapture"
+"cargo_test_frankentui_conformance" = "passed via RCH vmi1227854: cargo test -p frankenmermaid-cli --test frankentui_conformance_test"
+"cargo_check_workspace_all_targets" = "passed via RCH hz2: cargo check --workspace --all-targets; first run exposed examples/gen_shared.rs missing main and the helper now has a guarded no-op main for Cargo auto-discovery"
+"cargo_clippy_workspace_all_targets" = "passed via RCH vmi1293453: cargo clippy --workspace --all-targets -- -D warnings; hz1 attempt was blocked by missing libclang in highs-sys bindgen"
+"cargo_fmt_check" = "passed locally: cargo fmt --check"
+"ubs_scoped_files" = "ran on scoped changed files; exit 1 from existing broad fm-parser heuristics such as parser token equality flagged as secret comparison, test unwrap inventory, and STATE_PSEUDO_TOKEN false positive"
+
+[post_measurement_bidirectional_flow_edge_fast_path_2026_07_08.decision]
+kept = true
+reason = "Same-worker vmi1264463 release Criterion A/B cuts marker_start_wide_stages/parse from 698.10/1746.1/3480.4 us to 135.28/293.51/550.13 us for 8x16/12x24/16x32 (5.16x-6.33x). The lever only admits plain-id bidirectional flowchart edges and falls back for complex syntax."

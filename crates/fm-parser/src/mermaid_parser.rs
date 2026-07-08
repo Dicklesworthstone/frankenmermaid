@@ -1385,9 +1385,7 @@ fn parse_fast_simple_flowchart_edge_ast(statement: &str) -> Option<FlowAst> {
 /// A single indexed load per byte replaces the 12-way `matches!` compare chain on this hot scan.
 static FAST_EDGE_REJECT: [bool; 256] = {
     let mut t = [false; 256];
-    let rejects = [
-        b'[', b']', b'(', b')', b'{', b'}', b'"', b'\'', b'`', b'|', b'&', b':', b',',
-    ];
+    let rejects = b"[](){}\"'`|&:,";
     let mut i = 0;
     while i < rejects.len() {
         t[rejects[i] as usize] = true;
@@ -1405,24 +1403,27 @@ fn parse_fast_simple_flowchart_edge_parts(statement: &str) -> Option<(&str, Arro
         return None;
     }
 
-    const FAST_OPERATORS: [(&str, ArrowType); 6] = [
+    const FAST_OPERATORS: [(&str, ArrowType); 9] = [
         ("-.->", ArrowType::DottedArrow),
+        ("<-.->", ArrowType::DoubleDottedArrow),
         ("==>", ArrowType::ThickArrow),
+        ("<==>", ArrowType::DoubleThickArrow),
         ("-->", ArrowType::Arrow),
+        ("<-->", ArrowType::DoubleArrow),
         ("---", ArrowType::Line),
         ("--o", ArrowType::Circle),
         ("--x", ArrowType::Cross),
     ];
 
-    // Single byte scan for the leftmost `-`/`=` that starts a fast operator, instead of six full
-    // `str::find` substring searches (1 hit + 5 full-scan misses per edge). Byte-identical: every
-    // fast operator starts with `-` or `=`, and no two are prefixes of one another, so at most one
-    // matches at any position — the leftmost operator necessarily starts at the leftmost
-    // operator-starting `-`/`=` (same result as the old leftmost-index / longest tie-break).
+    // Single byte scan for the leftmost operator-start byte, instead of several full `str::find`
+    // substring searches. Byte-identical: fast operators start with `-`, `=`, or `<`, and no two
+    // are prefixes of one another, so at most one matches at any position — the leftmost operator
+    // necessarily starts at the leftmost matching byte (same result as the old leftmost-index /
+    // longest tie-break).
     let bytes = trimmed.as_bytes();
     let mut matched: Option<(usize, &str, ArrowType)> = None;
     for i in 0..bytes.len() {
-        if matches!(bytes[i], b'-' | b'=') {
+        if matches!(bytes[i], b'-' | b'=' | b'<') {
             for (operator, arrow) in FAST_OPERATORS {
                 if bytes[i..].starts_with(operator.as_bytes()) {
                     matched = Some((i, operator, arrow));
@@ -1442,10 +1443,10 @@ fn parse_fast_simple_flowchart_edge_parts(statement: &str) -> Option<(&str, Arro
         return None;
     }
     // Reject a chained right side (e.g. `a-->b-->c`, where `right` holds a second operator).
-    // Guard the six `contains` substring searches behind a single byte scan: every fast operator
-    // starts with `-` or `=`, so if `right` has neither byte none can match. Byte-identical; saves
-    // 6 substring-search calls per edge for the common single-operator edge.
-    if right.bytes().any(|byte| matches!(byte, b'-' | b'='))
+    // Guard the substring searches behind a single byte scan: every fast operator starts with
+    // `-`, `=`, or `<`, so if `right` has none of those bytes none can match. Byte-identical;
+    // saves substring-search calls per edge for the common single-operator edge.
+    if right.bytes().any(|byte| matches!(byte, b'-' | b'=' | b'<'))
         && FAST_OPERATORS
             .iter()
             .any(|(next_operator, _)| right.contains(next_operator))
@@ -9220,8 +9221,11 @@ mod tests {
             "A-->B",
             "A --> B",
             "left_1 -.-> right.2",
+            "left_1 <-.-> right.2",
             "svc/api ==> db-node",
+            "svc/api <==> db-node",
             "A---B",
+            "A<-->B",
             "A--oB",
             "A--xB",
         ] {
@@ -9927,7 +9931,7 @@ mod tests {
 
         assert!(node_a.is_some());
         let node_a = node_a.expect("node A should exist");
-        assert_eq!(node_a.href().as_deref(), Some("//example.com"));
+        assert_eq!(node_a.href(), Some("//example.com"));
         assert!(
             !parsed
                 .warnings
@@ -9945,7 +9949,7 @@ mod tests {
 
         assert!(node_a.is_some());
         let node_a = node_a.expect("node A should exist");
-        assert_eq!(node_a.href().as_deref(), Some("javascript:alert(1)"));
+        assert_eq!(node_a.href(), Some("javascript:alert(1)"));
         assert!(
             !parsed
                 .warnings
@@ -9972,8 +9976,8 @@ mod tests {
 
         assert!(node_b.is_some());
         let node_b = node_b.expect("node B should exist");
-        assert_eq!(node_b.callback().as_deref(), Some("focusNode"));
-        assert_eq!(node_b.tooltip().as_deref(), Some("Focus node"));
+        assert_eq!(node_b.callback(), Some("focusNode"));
+        assert_eq!(node_b.tooltip(), Some("Focus node"));
         assert!(
             node_b
                 .classes
@@ -10703,7 +10707,7 @@ mod tests {
             .iter()
             .find(|node| node.id == "Child")
             .unwrap();
-        assert_eq!(child.icon().as_deref(), Some("fa fa-book"));
+        assert_eq!(child.icon(), Some("fa fa-book"));
     }
 
     #[test]
@@ -10714,7 +10718,7 @@ mod tests {
             .label
             .and_then(|label_id| parsed.ir.labels.get(label_id.0))
             .map(|label| label.text.as_str());
-        assert_eq!(node.icon().as_deref(), Some("fa:server"));
+        assert_eq!(node.icon(), Some("fa:server"));
         assert_eq!(label, Some("API"));
     }
 
@@ -10726,7 +10730,7 @@ mod tests {
             .label
             .and_then(|label_id| parsed.ir.labels.get(label_id.0))
             .map(|label| label.text.as_str());
-        assert_eq!(node.icon().as_deref(), Some("🚀"));
+        assert_eq!(node.icon(), Some("🚀"));
         assert_eq!(label, Some("Deploy"));
     }
 
@@ -11375,7 +11379,7 @@ fan_in:B --> T:db",
                 .iter()
                 .any(|class_name| class_name == "architecture-icon-server")
         );
-        assert_eq!(api.icon().as_deref(), Some("server"));
+        assert_eq!(api.icon(), Some("server"));
 
         let junction = parsed
             .ir
@@ -13222,8 +13226,8 @@ Rel_Back(db, app, "Responds")"#,
             "flowchart LR\n  A[Node]\n  click A \"https://example.com\" \"My Tooltip\"",
         );
         let node = parsed.ir.nodes.iter().find(|n| n.id == "A").unwrap();
-        assert_eq!(node.href().as_deref(), Some("https://example.com"));
-        assert_eq!(node.tooltip().as_deref(), Some("My Tooltip"));
+        assert_eq!(node.href(), Some("https://example.com"));
+        assert_eq!(node.tooltip(), Some("My Tooltip"));
     }
 
     // ── linkStyle default tests ────────────────────────────────────────
@@ -13546,8 +13550,8 @@ Rel_Back(db, app, "Responds")"#,
         let parsed = parse_mermaid("classDiagram\n  Dog \"1\" --> \"*\" Cat : chases");
         assert!(!parsed.ir.edges.is_empty(), "should have edges");
         let edge = &parsed.ir.edges[0];
-        assert_eq!(edge.source_cardinality().as_deref(), Some("1"));
-        assert_eq!(edge.target_cardinality().as_deref(), Some("*"));
+        assert_eq!(edge.source_cardinality(), Some("1"));
+        assert_eq!(edge.target_cardinality(), Some("*"));
     }
 
     #[test]
@@ -13555,8 +13559,8 @@ Rel_Back(db, app, "Responds")"#,
         let parsed = parse_mermaid("classDiagram\n  Vehicle \"1\" *-- \"0..*\" Wheel");
         assert!(!parsed.ir.edges.is_empty(), "should have edges");
         let edge = &parsed.ir.edges[0];
-        assert_eq!(edge.source_cardinality().as_deref(), Some("1"));
-        assert_eq!(edge.target_cardinality().as_deref(), Some("0..*"));
+        assert_eq!(edge.source_cardinality(), Some("1"));
+        assert_eq!(edge.target_cardinality(), Some("0..*"));
     }
 
     #[test]
@@ -13573,8 +13577,8 @@ Rel_Back(db, app, "Responds")"#,
         let parsed = parse_mermaid("classDiagram\n  Student \"1\" --> \"*\" Course : enrolls");
         assert!(!parsed.ir.edges.is_empty(), "should have an edge");
         let edge = &parsed.ir.edges[0];
-        assert_eq!(edge.source_cardinality().as_deref(), Some("1"));
-        assert_eq!(edge.target_cardinality().as_deref(), Some("*"));
+        assert_eq!(edge.source_cardinality(), Some("1"));
+        assert_eq!(edge.target_cardinality(), Some("*"));
     }
 
     #[test]

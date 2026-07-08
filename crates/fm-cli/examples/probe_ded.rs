@@ -37,36 +37,35 @@ fn main() {
         ("block", LayoutAlgorithm::Grid),
     ];
     for (shape, ded) in cases {
-        for n in [200usize] {
-            let pf = parse(&g::gen_input(shape, n));
-            let ir = &pf.ir;
-            // current dispatch (with default guardrail)
-            let (ct, cn, cf) = bestn(
-                || {
-                    let t = layout_diagram_traced(ir);
-                    (
-                        t.layout.nodes.len(),
-                        t.layout.nodes.iter().all(|b| b.bounds.x.is_finite()),
-                    )
-                },
-                300,
-            );
-            let cur_algo = layout_diagram_traced(ir).trace.dispatch.selected;
-            // dedicated direct (bypass guardrail)
-            let (dt, dn, df) = bestn(
-                || {
-                    let t = layout_diagram_traced_with_algorithm_and_guardrails(ir, ded, huge);
-                    (
-                        t.layout.nodes.len(),
-                        t.layout.nodes.iter().all(|b| b.bounds.x.is_finite()),
-                    )
-                },
-                300,
-            );
-            eprintln!(
-                "{shape:7} n={n}: CURRENT({cur_algo:?}) {ct:>9}ns nodes={cn} fin={cf} | DEDICATED({ded:?}) {dt:>9}ns nodes={dn} fin={df} | dedicated is {:.2}x current",
-                ct as f64 / dt as f64
-            );
-        }
+        let n = 200usize;
+        let pf = parse(&g::gen_input(shape, n));
+        let ir = &pf.ir;
+        // current dispatch (with default guardrail)
+        let (ct, cn, cf) = bestn(
+            || {
+                let t = layout_diagram_traced(ir);
+                (
+                    t.layout.nodes.len(),
+                    t.layout.nodes.iter().all(|b| b.bounds.x.is_finite()),
+                )
+            },
+            300,
+        );
+        let cur_algo = layout_diagram_traced(ir).trace.dispatch.selected;
+        // dedicated direct (bypass guardrail)
+        let (dt, dn, df) = bestn(
+            || {
+                let t = layout_diagram_traced_with_algorithm_and_guardrails(ir, ded, huge);
+                (
+                    t.layout.nodes.len(),
+                    t.layout.nodes.iter().all(|b| b.bounds.x.is_finite()),
+                )
+            },
+            300,
+        );
+        eprintln!(
+            "{shape:7} n={n}: CURRENT({cur_algo:?}) {ct:>9}ns nodes={cn} fin={cf} | DEDICATED({ded:?}) {dt:>9}ns nodes={dn} fin={df} | dedicated is {:.2}x current",
+            ct as f64 / dt as f64
+        );
     }
 }

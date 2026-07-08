@@ -111,3 +111,7 @@ pub fn gen_input(shape: &str, n: usize) -> String {
     }
     l.join("\n")
 }
+
+// Cargo auto-discovers every file in examples/ as an example binary.
+#[allow(dead_code)]
+fn main() {}
