@@ -5435,6 +5435,19 @@ fn write_common_node_fragment_into(
                 special_fill,
             );
         }
+        fm_core::NodeShape::InvParallelogram => {
+            let inset = w * 0.15;
+            write_polygon_shape_into(
+                f,
+                &[
+                    (x, y),
+                    (x + w - inset, y),
+                    (x + w, y + h),
+                    (x + inset, y + h),
+                ],
+                special_fill,
+            );
+        }
         fm_core::NodeShape::Asymmetric => {
             let cy = y + h / 2.0;
             let flag = w * 0.15;
@@ -5498,6 +5511,7 @@ fn write_common_node_fragment_into(
         fm_core::NodeShape::Trapezoid => ", trapezoid</title></g>",
         fm_core::NodeShape::InvTrapezoid => ", inverted trapezoid</title></g>",
         fm_core::NodeShape::Parallelogram => ", parallelogram</title></g>",
+        fm_core::NodeShape::InvParallelogram => ", inverted parallelogram</title></g>",
         fm_core::NodeShape::Asymmetric => ", flag shape</title></g>",
         _ => ", circle</title></g>",
     });
@@ -5878,6 +5892,7 @@ fn render_node_into(
             | NodeShape::Trapezoid
             | NodeShape::InvTrapezoid
             | NodeShape::Parallelogram
+            | NodeShape::InvParallelogram
             | NodeShape::Asymmetric
     ) && config.embed_theme_css
         && config.node_gradients
@@ -6037,6 +6052,7 @@ fn render_node(
                 | NodeShape::Trapezoid
                 | NodeShape::InvTrapezoid
                 | NodeShape::Parallelogram
+                | NodeShape::InvParallelogram
                 | NodeShape::Asymmetric
         )
         && config.embed_theme_css
@@ -9468,6 +9484,7 @@ mod tests {
             NodeShape::Trapezoid,
             NodeShape::InvTrapezoid,
             NodeShape::Parallelogram,
+            NodeShape::InvParallelogram,
             NodeShape::Asymmetric,
         ] {
             let ir = create_ir_with_single_node("N0", shape);

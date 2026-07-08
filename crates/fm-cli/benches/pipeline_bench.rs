@@ -199,6 +199,7 @@ fn gen_polygon_shape_chain(shape: &str, node_count: usize) -> String {
             "subroutine" => format!("  N{i}[[Sub {i}]]"),
             "cylinder" => format!("  N{i}[(DB {i})]"),
             "parallel" => format!("  N{i}[/Para {i}/]"),
+            "invparallel" => format!("  N{i}[\\InvPara {i}\\]"),
             "trapez" => format!("  N{i}[/Trap {i}\\]"),
             "invtrap" => format!("  N{i}[\\Inv {i}/]"),
             "asym" => format!("  N{i}>Flag {i}]"),
@@ -640,7 +641,14 @@ fn bench_polygon_shape_render(c: &mut Criterion) {
     let mut group = c.benchmark_group("polygon_shape_render");
     let config = fm_render_svg::SvgRenderConfig::default();
 
-    for shape in ["hexagon", "parallel", "trapez", "invtrap", "asym"] {
+    for shape in [
+        "hexagon",
+        "parallel",
+        "invparallel",
+        "trapez",
+        "invtrap",
+        "asym",
+    ] {
         let input = gen_polygon_shape_chain(shape, 256);
         let parsed = fm_parser::parse(&input);
         let layout = fm_layout::layout_diagram(&parsed.ir);
@@ -653,6 +661,17 @@ fn bench_polygon_shape_render(c: &mut Criterion) {
             },
         );
     }
+
+    let input = gen_polygon_shape_chain("invparallel", 768);
+    let parsed = fm_parser::parse(&input);
+    let layout = fm_layout::layout_diagram(&parsed.ir);
+    group.bench_with_input(
+        BenchmarkId::new("render_768", "invparallel"),
+        &(&parsed.ir, &layout),
+        |b, (ir, layout)| {
+            b.iter(|| fm_render_svg::render_svg_with_layout(ir, layout, &config));
+        },
+    );
 
     group.finish();
 }

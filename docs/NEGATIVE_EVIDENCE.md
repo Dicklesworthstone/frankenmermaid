@@ -3123,6 +3123,46 @@
 
   Agent: TanSparrow
 
+<!-- tansparrow-invparallelogram-node-streaming -->
+### LANDED: stream inverse-parallelogram nodes through the common fast path (invparallel render 1.10x median) (2026-07-08)
+- **Lever:** parser-reachable `N[\label\]` inverse-parallelogram flowchart nodes were still falling through to
+  the slow `Element` / `PathBuilder` renderer even after the common node streaming frontier had landed. Added
+  `NodeShape::InvParallelogram` to the existing common SVG node writer and fast-path gates, with the same four
+  polygon points and title suffix as the slow renderer.
+- **Measurement:** same-worker profharness on actual worker `vmi1152480` via
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod AGENT_NAME=TanSparrow RCH_WORKER=vmi1152480
+  RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 rch exec -- cargo run --profile release -p
+  frankenmermaid-cli --example profharness -- invparallel 768 5000 render`. ORIG with only the fast gates
+  disabled: **418585 ns** median / **231275 ns** min. Candidate: **379094 ns** median / **223052 ns** min.
+  Ratio: **1.1042x faster** median, **-9.43%** render time.
+- **Short Criterion cross-check:** same-worker actual worker `vmi1227854`, per-crate Criterion via
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod AGENT_NAME=TanSparrow RCH_WORKER=vmi1227854
+  RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 rch exec -- cargo bench --profile release -p
+  frankenmermaid-cli --bench pipeline_bench -- polygon_shape_render/render_768/invparallel --warm-up-time 1
+  --measurement-time 2 --sample-size 10 --noplot`. ORIG: **355.08 us** mean [342.27, 368.01]. Candidate:
+  **326.38 us** mean [309.98, 338.59]. Direct mean ratio: **1.0879x faster** / **-8.08%**. Criterion's own
+  short-row change estimate was **-5.6208%** with p = 0.18 and 4/10 outliers, so this row is supporting
+  evidence rather than the decisive keep proof.
+- **Ratio vs ORIG:** invparallel profharness ORIG to candidate median ratio is **1.1042x**. Standing Mermaid.js
+  original comparator remains wide 16x32 render **3453.9 ms**; candidate invparallel render/768 Criterion mean
+  is **0.00009449x** of that denominator, or ORIG is **10582.45x** slower. This is dominance context only, not
+  a fresh same-input browser invparallel rerun.
+- **Validation:** `node_shape_fast_fragments_match_slow_render` passed via RCH `hz2` and now includes
+  `NodeShape::InvParallelogram` byte-for-byte against `render_node`; `cargo check -p frankenmermaid-cli
+  --benches` passed via RCH `hz2`; `cargo clippy -p fm-render-svg --lib -- -D warnings` passed via RCH `hz2`;
+  `cargo test -p frankenmermaid-cli --test frankentui_conformance_test` passed via RCH `ovh-a`; full
+  `cargo check --workspace --all-targets` and `cargo clippy --workspace --all-targets -- -D warnings` passed
+  via RCH `hz2`; `cargo fmt --check` and `git diff --check` passed locally. Scoped UBS ran on touched files
+  and exited 1 from existing whole-file fm-render-svg/profharness heuristics (token-comparison false positives,
+  pre-existing unwrap/assert/index inventories, and allocation inventories); UBS's embedded fmt, clippy, cargo
+  check, cargo audit, and cargo deny subchecks were clean.
+- **Bench syntax note:** literal `cargo bench --release` is rejected by this Cargo; release-profile benches
+  used `--profile release`.
+- **Tooling note:** Agent Mail registration/reservation as `TanSparrow` was blocked by the SQLite corruption
+  circuit breaker, so no reservation was available.
+
+  Agent: TanSparrow
+
 ### Attributes SmallVec inline storage — REVERTED (2026-06-27)
 - **Lever tested:** `fm-render-svg::Attributes` briefly replaced
   `Vec<Attribute>`/`Vec::with_capacity(12)` with `smallvec::SmallVec`, first with

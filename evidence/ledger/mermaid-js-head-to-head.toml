@@ -3109,3 +3109,54 @@ bench_syntax_note = "Literal cargo bench --release was attempted as requested an
 [post_measurement_bidirectional_flow_edge_fast_path_2026_07_08.decision]
 kept = true
 reason = "Same-worker vmi1264463 release Criterion A/B cuts marker_start_wide_stages/parse from 698.10/1746.1/3480.4 us to 135.28/293.51/550.13 us for 8x16/12x24/16x32 (5.16x-6.33x). The lever only admits plain-id bidirectional flowchart edges and falls back for complex syntax."
+
+[post_measurement_invparallelogram_node_streaming_2026_07_08]
+date = "2026-07-08"
+agent = "TanSparrow"
+status = "keep"
+baseline_commit = "a8a32f5"
+candidate_summary = "Stream parser-reachable flowchart inverse-parallelogram nodes through the common SVG node writer instead of falling back to Element and PathBuilder."
+negative_evidence_review = "Consulted docs/NEGATIVE_EVIDENCE.md first and avoided rejected large-body streaming, broad parser shortcut, and already-landed shape streaming levers. This is the missed InvParallelogram shape in the existing node-streaming frontier."
+graveyard_route = "Alien Graveyard + Alien Artifact Coding + Extreme Optimization: close a missed shape in the mature node-streaming render frontier, turning a still-slow Element path into direct byte serialization."
+rust_baseline_command = "AGENT_NAME=TanSparrow CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod RCH_WORKER=vmi1227854 RCH_QUEUE_WHEN_BUSY=1 RCH_REQUIRE_REMOTE=1 rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- polygon_shape_render/render_768/invparallel --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot"
+rust_candidate_command = "AGENT_NAME=TanSparrow CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod RCH_WORKER=vmi1227854 RCH_QUEUE_WHEN_BUSY=1 RCH_REQUIRE_REMOTE=1 rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- polygon_shape_render/render_768/invparallel --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot"
+profharness_baseline_command = "AGENT_NAME=TanSparrow CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod RCH_WORKER=vmi1152480 RCH_QUEUE_WHEN_BUSY=1 RCH_REQUIRE_REMOTE=1 rch exec -- cargo run --profile release -p frankenmermaid-cli --example profharness -- invparallel 768 5000 render"
+profharness_candidate_command = "AGENT_NAME=TanSparrow CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod RCH_WORKER=vmi1152480 RCH_QUEUE_WHEN_BUSY=1 RCH_REQUIRE_REMOTE=1 rch exec -- cargo run --profile release -p frankenmermaid-cli --example profharness -- invparallel 768 5000 render"
+rust_worker = "Accepted Criterion comparison uses actual worker vmi1227854 for both runs. Accepted profharness comparison uses actual worker vmi1152480 for both runs. RCH ignored or could not honor some requested workers; hz1 attempts failed before Rust analysis because highs-sys bindgen could not find libclang."
+mermaid_js_command = "Standing comparator from scripts/mermaid_headtohead_cc.mjs: Mermaid.js 11.15.0 via Puppeteer/system Chromium, wide 16x32 median render 3453.9 ms. No fresh same-input browser invparallel rerun captured."
+behavior_proof = "node_shape_fast_fragments_match_slow_render now includes NodeShape::InvParallelogram and passed; the direct writer uses the same four polygon points as the Element/PathBuilder slow path and the same title text from the accessibility description."
+agent_mail = "Agent Mail registration/reservation as TanSparrow was blocked by the SQLite corruption circuit breaker; no reservation was available."
+bench_syntax_note = "Literal cargo bench --release is rejected by this Cargo; release-profile benches used --profile release."
+
+[post_measurement_invparallelogram_node_streaming_2026_07_08.metrics]
+"invparallel_prof_render_768_baseline_median_ns" = 418585
+"invparallel_prof_render_768_candidate_median_ns" = 379094
+"invparallel_prof_render_768_speedup_x" = 1.1042
+"invparallel_prof_render_768_delta_pct" = -9.43
+"invparallel_prof_render_768_baseline_min_ns" = 231275
+"invparallel_prof_render_768_candidate_min_ns" = 223052
+"invparallel_criterion_render_768_baseline_mean_us" = 355.08
+"invparallel_criterion_render_768_candidate_mean_us" = 326.38
+"invparallel_criterion_render_768_mean_speedup_x" = 1.0879
+"invparallel_criterion_render_768_mean_delta_pct" = -8.08
+"invparallel_criterion_change_mean_pct" = -5.6208
+"invparallel_criterion_p_value" = 0.18
+"invparallel_criterion_verdict" = "faster mean but not statistically significant in the short 10-sample row; 4/10 outliers"
+"standing_wide_16x32_mermaid_js_ms" = 3453.9
+"invparallel_candidate_over_standing_mermaid_js" = 0.00009449
+"standing_mermaid_js_over_invparallel_candidate" = 10582.45
+
+[post_measurement_invparallelogram_node_streaming_2026_07_08.validation]
+"cargo_test_fm_render_svg_node_shape_fast_fragments" = "passed via RCH hz2: node_shape_fast_fragments_match_slow_render"
+"cargo_check_cli_benches" = "passed via RCH hz2: cargo check -p frankenmermaid-cli --benches"
+"cargo_clippy_fm_render_svg_lib" = "passed via RCH hz2: cargo clippy -p fm-render-svg --lib -- -D warnings"
+"cargo_test_frankentui_conformance" = "passed via RCH ovh-a: cargo test -p frankenmermaid-cli --test frankentui_conformance_test"
+"cargo_check_workspace_all_targets" = "passed via RCH hz2: cargo check --workspace --all-targets"
+"cargo_clippy_workspace_all_targets" = "passed via RCH hz2: cargo clippy --workspace --all-targets -- -D warnings"
+"cargo_fmt_check" = "passed locally: cargo fmt --check"
+"git_diff_check" = "passed locally"
+"ubs_scoped_files" = "ran on scoped touched files; exit 1 from existing whole-file fm-render-svg/profharness heuristics such as token-comparison false positives, pre-existing unwrap/assert/index inventories, and allocation inventories; UBS embedded fmt, clippy, cargo check, cargo audit, and cargo deny subchecks were clean"
+
+[post_measurement_invparallelogram_node_streaming_2026_07_08.decision]
+kept = true
+reason = "Same-worker profharness cuts invparallel render/768 median from 418585 ns to 379094 ns (1.10x); same-worker Criterion mean also improves from 355.08 us to 326.38 us (1.09x), although the short Criterion row was noisy and not p<0.05. The change is byte-identical to the slow renderer and closes a parser-reachable missed shape in the node streaming path."

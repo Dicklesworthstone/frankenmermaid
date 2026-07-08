@@ -289,6 +289,15 @@ fn gen_input(shape: &str, n: usize) -> String {
                 l.push(format!("  N{i}-->N{}", i + 1));
             }
         }
+        "invparallel" => {
+            l.push("flowchart TB".into());
+            for i in 0..n {
+                l.push(format!("  N{i}[\\InvPara {i}\\]"));
+            }
+            for i in 0..n.saturating_sub(1) {
+                l.push(format!("  N{i}-->N{}", i + 1));
+            }
+        }
         "trapez" => {
             l.push("flowchart TB".into());
             for i in 0..n {
