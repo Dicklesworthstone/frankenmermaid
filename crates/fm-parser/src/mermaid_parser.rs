@@ -115,6 +115,7 @@ const fn op_first_byte_gate(operators: &[(&str, ArrowType)]) -> u128 {
 /// Precomputed first-byte gate for [`SEQUENCE_OPERATORS`] (26 entries) — used on the hot per-message
 /// sequence path so `find_operator` doesn't rebuild the gate for every message line.
 const SEQUENCE_OP_GATE: u128 = op_first_byte_gate(&SEQUENCE_OPERATORS);
+const ER_OP_GATE: u128 = op_first_byte_gate(&ER_OPERATORS);
 
 const DANGLING_PLACEHOLDER_PREFIX: &str = "__fm_dangling_line_";
 const JOURNEY_SCORE_CLASSES: [&str; 10] = [
@@ -3521,8 +3522,17 @@ fn parse_er(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
+        if let Some(entity_id) = current_entity
+            && let Some((data_type, name, key)) = parse_simple_er_attribute(trimmed)
+        {
+            builder.add_entity_attribute(entity_id, data_type, name, key, None);
+            continue;
+        }
+
         // Relationship line (outside entity block or mixed)
-        if parse_er_relationship(trimmed, line_number, line, builder) {
+        if parse_plain_er_relationship(trimmed, line_number, line, builder)
+            || parse_er_relationship(trimmed, line_number, line, builder)
+        {
             continue;
         }
 
@@ -3551,6 +3561,137 @@ fn parse_er(input: &str, builder: &mut IrBuilder) {
             "Line {line_number}: unsupported er syntax: {trimmed}"
         ));
     }
+}
+
+fn parse_plain_er_relationship(
+    statement: &str,
+    line_number: usize,
+    source_line: &str,
+    builder: &mut IrBuilder,
+) -> bool {
+    let (relation, label) = if let Some((left, right)) = statement.split_once(':') {
+        let trimmed_label = right.trim();
+        if trimmed_label.is_empty() {
+            (left.trim(), None)
+        } else if is_simple_er_label(trimmed_label) {
+            (left.trim(), Some(trimmed_label))
+        } else {
+            return false;
+        }
+    } else {
+        (statement.trim(), None)
+    };
+
+    let Some((operator_idx, operator, arrow)) = find_plain_er_operator(relation) else {
+        return false;
+    };
+
+    let left_raw = relation[..operator_idx].trim();
+    let right_raw = relation[operator_idx + operator.len()..].trim();
+    if !is_plain_normalized_er_id(left_raw) || !is_plain_normalized_er_id(right_raw) {
+        return false;
+    }
+
+    let span = span_for(line_number, source_line);
+    let Some(from_node) = builder.intern_node(left_raw, None, NodeShape::Rect, span) else {
+        return false;
+    };
+    let Some(to_node) = builder.intern_node(right_raw, None, NodeShape::Rect, span) else {
+        return false;
+    };
+
+    builder.push_edge(from_node, to_node, arrow, label, span);
+    builder.set_last_edge_er_notation(operator);
+    true
+}
+
+fn find_plain_er_operator(relation: &str) -> Option<(usize, &'static str, ArrowType)> {
+    for (idx, &byte) in relation.as_bytes().iter().enumerate() {
+        let cp = u32::from(byte);
+        if cp >= 128 || (ER_OP_GATE >> cp) & 1 == 0 {
+            continue;
+        }
+
+        let tail = &relation[idx..];
+        let mut best_match: Option<(&str, ArrowType)> = None;
+        for (operator, arrow) in &ER_OPERATORS {
+            if tail.starts_with(operator) {
+                match best_match {
+                    Some((best_operator, _)) if operator.len() <= best_operator.len() => {}
+                    _ => best_match = Some((operator, *arrow)),
+                }
+            }
+        }
+
+        if let Some((operator, arrow)) = best_match {
+            return Some((idx, operator, arrow));
+        }
+    }
+
+    None
+}
+
+fn parse_simple_er_attribute(line: &str) -> Option<(&str, &str, IrAttributeKey)> {
+    if line
+        .as_bytes()
+        .iter()
+        .any(|&byte| matches!(byte, b':' | b'"' | b'\'' | b'`'))
+    {
+        return None;
+    }
+
+    let mut parts = line.split_ascii_whitespace();
+    let data_type = parts.next()?;
+    let name = parts.next()?;
+    let key = match parts.next() {
+        Some(raw_key) => parse_er_attribute_key(raw_key)?,
+        None => IrAttributeKey::None,
+    };
+    if parts.next().is_some() {
+        return None;
+    }
+
+    if is_simple_er_data_type(data_type) && is_plain_normalized_er_id(name) {
+        Some((data_type, name, key))
+    } else {
+        None
+    }
+}
+
+fn parse_er_attribute_key(raw: &str) -> Option<IrAttributeKey> {
+    if raw.eq_ignore_ascii_case("PK") {
+        Some(IrAttributeKey::Pk)
+    } else if raw.eq_ignore_ascii_case("FK") {
+        Some(IrAttributeKey::Fk)
+    } else if raw.eq_ignore_ascii_case("UK") {
+        Some(IrAttributeKey::Uk)
+    } else {
+        None
+    }
+}
+
+fn is_plain_normalized_er_id(value: &str) -> bool {
+    !value.is_empty()
+        && !value.ends_with('_')
+        && value
+            .as_bytes()
+            .iter()
+            .all(|&byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/'))
+}
+
+fn is_simple_er_data_type(value: &str) -> bool {
+    !value.is_empty()
+        && value.as_bytes().iter().all(|&byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/' | b'(' | b')')
+        })
+}
+
+fn is_simple_er_label(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .as_bytes()
+            .iter()
+            .all(|&byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/'))
 }
 
 /// Parsed ER attribute.

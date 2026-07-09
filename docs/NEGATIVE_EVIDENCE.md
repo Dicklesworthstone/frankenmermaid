@@ -10299,6 +10299,42 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
 - **Bench syntax note:** release-profile benches used `--profile release`, matching this workspace's Cargo
   profile layout.
 
+<!-- codexperf-er-direct-plain-relationship-attribute -->
+### LANDED: ER parser directly lowers plain relationships and simple attributes (er_100 parse >=1.28x) (2026-07-09)
+- **Ledger review:** read the rejection ledger first and skipped the repeated SVG/render emitters, source-span
+  attributes, highlighted render class scans, class parser relationship/member attempts, Gantt dependency queue,
+  requirement metadata dispatch, timeline class append, DOT preprocessing, and C4 direct-context parser paths.
+  ER render cardinality work had prior coverage; this change is parser-side and does not reopen that renderer path.
+- **Profile route:** fresh profiling first checked the legal CLI render rows:
+  `wide_stages/render/16x32` **313.69 us**, `dotted_wide_stages/render/16x32` **287.44 us**,
+  `marker_start_wide_stages/render/16x32` **320.30 us**, `highlighted_wide_stages/render/16x32`
+  **1.0935 ms**, and `render_spans_on/render/16x32` **1.9796 ms**. The hottest render rows were excluded by
+  the ledger, so the un-attacked `fm-parser` ER row became the scoring target: `parse/er/er_100`, which
+  exercises repeated `ENTITY ||--o{ ENTITY : label` relationships plus entity attribute blocks.
+- **Primitive:** algebraic-fusion/data-layout. The parser now recognizes plain, already-normalized ER
+  relationships and simple attribute lines before the generic quoted-token path. A precomputed first-byte gate
+  finds ER operators, relationship endpoints are interned directly, simple labels stay borrowed, and
+  no-comment attributes lower directly into entity members. Quoted labels, comments, complex types with commas,
+  shaped/quoted node tokens, malformed lines, and any non-simple syntax still fall through to the existing parser.
+- **Measurement:** RCH strict bench first refused remote execution because no admissible worker slots were
+  available (`insufficient_slots=10`, `active_project_exclusion=1`), so scoring used the allowed local fallback
+  with fresh target dirs to avoid local/remote nightly artifact mixing. Command shape:
+  `AGENT_NAME=CodexPerfMermaid CARGO_TARGET_DIR=/data/projects/frankenmermaid/.rch-targets/mermaid-cod-local-er-...
+  cargo bench --profile release -p fm-parser --bench parse_bench -- parse/er/er_100 --warm-up-time 2
+  --measurement-time 5 --sample-size 20 --noplot`. Legacy original detached worktree
+  `/data/projects/frankenmermaid-orig-er-direct-codex-20260709-1033` at `35ad990`.
+  First pair: ORIG **128.85 us** mean [126.65, 130.89], candidate **96.487 us** mean [94.236, 100.01],
+  ratio-vs-ORIG **0.7488x** candidate/ORIG, **1.3353x faster**. Warm rerun pair: ORIG **137.40 us**
+  mean [135.11, 140.45], candidate **100.51 us** mean [96.101, 103.50], ratio-vs-ORIG **0.7315x**
+  candidate/ORIG, **1.3670x faster**. Conservative cross-pair floor using fastest ORIG and slower candidate:
+  **0.7801x** candidate/ORIG, **1.2820x faster**.
+- **Validation:** `cargo test -p fm-parser er_` passed on RCH `hz2` (45 selected tests); `cargo test -p
+  frankenmermaid-cli --test frankentui_conformance_test` passed through local fallback (1 test); `cargo check
+  --workspace --all-targets` passed on RCH `hz2`; `cargo clippy --workspace --all-targets -- -D warnings`
+  passed on RCH `hz2`; `cargo fmt --check` passed locally.
+- **Bench syntax note:** release-profile benches used `--profile release`, matching this workspace's Cargo
+  profile layout.
+
 <!-- tansparrow-requirement-metadata-block-dispatch -->
 ### LANDED: requirement parser block-local metadata dispatch skips keyword scans (parse/512 1.03x) (2026-07-09)
 - **Ledger review:** read the rejection ledger first and avoided repeated SVG render emitters, DOT
