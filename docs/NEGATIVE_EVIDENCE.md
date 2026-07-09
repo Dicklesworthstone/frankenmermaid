@@ -10299,6 +10299,33 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
 - **Bench syntax note:** release-profile benches used `--profile release`, matching this workspace's Cargo
   profile layout.
 
+<!-- codexperf-class-simple-relationship-fusion-rejected -->
+### NO-SHIP: class parser simple-relationship fusion regressed class_100 on same worker (2026-07-09)
+- **Ledger review:** read the rejection ledger first and excluded the long SVG streaming/output seam, DOT
+  preprocessing, journey actor classes, timeline class append, flowchart layout hashing, and crossing rewrites.
+  This attempt nevertheless touched a class-block dense-member component already rejected above when paired with
+  borrowed cardinality text; do not combine that path with new class relationship fast paths.
+- **Profile route:** fresh `fm-parser` profiling on RCH `hz2` selected `parse/class/class_100` as a different
+  non-render, non-DOT, non-journey hot row after recent keeps were excluded. The row parses 100 class blocks
+  with three members each plus simple inheritance and association relationship lines.
+- **Primitive:** algebraic-fusion plus data-layout. The candidate retained the dense `IrNodeId` for an open
+  class block and added a conservative direct lowerer for bare two-endpoint class relationships, bypassing the
+  temporary `ClassStatement`/`FlowAst` path. Cardinality, quotes, chained edges, shaped nodes, ampersands, and
+  complex syntax fell back to the existing parser.
+- **Measurement:** requested release-profile per-crate bench command:
+  `AGENT_NAME=CodexPerfMermaid RCH_QUEUE_WHEN_BUSY=1
+  CARGO_TARGET_DIR=/data/projects/frankenmermaid/.rch-targets/mermaid-cod rch exec -- cargo bench --profile
+  release -p fm-parser --bench parse_bench -- parse/class/class_100 --warm-up-time 2 --measurement-time 5
+  --sample-size 20 --noplot`. Legacy original detached worktree
+  `/data/projects/frankenmermaid-orig-class-dense-codex-0709` at `7655332`, same-worker `hz2`:
+  **219.48 us** mean [212.08, 227.66]. Candidate, same-worker `hz2`: **227.98 us** mean [225.59, 230.23].
+  Ratio vs ORIG: **1.0387x** candidate/ORIG, **+3.87%** slower; Criterion reported **+4.3474%** regression
+  [+1.0822%, +6.8717%], p < 0.05.
+- **Non-scoring routing signal:** candidate on `ovh-a` measured **196.95 us** mean [196.45, 197.46] and reported
+  a local-history improvement, but no same-worker ORIG row was captured there, so it was not used for scoring.
+- **Verdict:** rejected and reverted. Do not retry class simple-relationship fusion on `parse/class/class_100`,
+  and do not stack it with class dense-member insertion.
+
 <!-- tansparrow-class-dense-member-borrowed-cardinality-rejected -->
 ### NO-SHIP: class parser dense member insertion plus borrowed cardinality text slowed class_100 (2026-07-09)
 - **Ledger review:** read the rejection ledger first and avoided the recent DOT preprocessing keep, journey actor
