@@ -10513,3 +10513,35 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   entry.
 - **Bench syntax note:** release-profile benches used `--profile release`, matching this workspace's Cargo
   profile layout.
+
+<!-- codexperf-xychart-borrowed-series-data-plane -->
+### LANDED: xychart parse borrowed series data plane speeds parse_512 1.056x (2026-07-09)
+- **Ledger review:** read the rejection ledger first and avoided the repeated SVG writer/body streaming seam,
+  DOT preprocessing, ER direct lowering, C4 context parsing, Gantt dependency queues, requirement metadata
+  dispatch, class parser dense-member/relationship paths, and xychart render/layout node-index work already
+  recorded above.
+- **Profile route:** fresh parser profiling made `parse/flowchart/large_1000`, `parse/dot/dot_200`,
+  `parse/class/class_100`, `parse/journey/journey_200`, and `parse/wide/16x32` visible but those rows are
+  already heavily mined or ledger-blocked. A separate stage profile selected a different xychart parse path:
+  `xychart_stages/parse/512` measured **550.35 us** on `ovh-a`, while xychart layout/render were already
+  covered by prior keeps. The xychart fixture has seven lines but 1536 series points, so point materialization
+  was the data-plane target.
+- **Primitive:** data-layout plus SIMD-within-register comma topology. Numeric series parsing now reserves from
+  `memchr` comma count and parses borrowed trimmed slices instead of allocating a temporary `Vec<String>`.
+  Generated point labels/ids are assembled with pre-sized buffers, category labels are borrowed for formatting,
+  and first-seen generated series nodes use a fresh-node insertion path that consumes owned id/label strings
+  while preserving duplicate-id fallback behavior for repeated series names.
+- **Measurement:** requested release-profile per-crate bench command with
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod`:
+  `AGENT_NAME=CodexPerfMermaid RCH_QUEUE_WHEN_BUSY=1 rch exec -- cargo bench --profile release -p
+  frankenmermaid-cli --bench pipeline_bench -- xychart_stages/parse/512 --warm-up-time 2 --measurement-time 5
+  --sample-size 20 --noplot`. Legacy original detached worktree
+  `/data/projects/frankenmermaid-orig-xychart-numeric-codex-20260709` at `a9d5b73`, same-worker `hz2`:
+  **587.07 us** mean [583.71, 591.66]. Candidate, same-worker `hz2`: **555.73 us** mean
+  [549.53, 563.80]. Ratio vs ORIG: **0.94662x** candidate/ORIG, **1.0564x faster**.
+- **Validation:** `cargo test -p fm-parser xychart` passed via RCH `ovh-a` (4 selected tests);
+  conformance passed with `cargo test -p frankenmermaid-cli --test frankentui_conformance_test` using the
+  requested target dir local fallback (1 test); `cargo fmt --check` passed. `cargo check --workspace
+  --all-targets` first hit an RCH worker-toolchain failure on `hz1` (`highs-sys` could not find `libclang`);
+  rerunning the same command on `ovh-b` passed. `cargo clippy --workspace --all-targets -- -D warnings`
+  passed on `ovh-b`.

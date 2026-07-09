@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 use chumsky::prelude::*;
 use fm_core::{
@@ -5367,6 +5368,7 @@ fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
 
 fn parse_xychart(input: &str, builder: &mut IrBuilder) {
     let mut xy_chart_meta = IrXyChartMeta::default();
+    let mut seen_base_ids = rustc_hash::FxHashSet::default();
 
     for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
@@ -5420,23 +5422,32 @@ fn parse_xychart(input: &str, builder: &mut IrBuilder) {
             .filter(|name| !name.is_empty())
             .unwrap_or(series_kind);
         let base_id = normalize_compound_identifier(base_name);
+        let use_fresh_nodes = seen_base_ids.insert(base_id.clone());
         let mut previous_node = None;
         let mut series_nodes = Vec::with_capacity(values.len());
 
         for (point_index, value) in values.iter().enumerate() {
-            let x_label = xy_chart_meta
-                .x_axis
-                .categories
-                .get(point_index)
-                .cloned()
-                .unwrap_or_else(|| (point_index + 1).to_string());
-            let node_label = format!("{base_name} {x_label}: {value}");
-            let node_id = format!("{base_id}_{}", point_index + 1);
+            let point_number = point_index + 1;
+            let fallback_x_label;
+            let x_label = match xy_chart_meta.x_axis.categories.get(point_index) {
+                Some(category) => category.as_str(),
+                None => {
+                    fallback_x_label = point_number.to_string();
+                    fallback_x_label.as_str()
+                }
+            };
+            let node_label = xychart_point_label(base_name, x_label, *value);
+            let node_id = xychart_point_id(&base_id, point_number);
             let shape = match series_kind {
                 "bar" => NodeShape::Rect,
                 _ => NodeShape::Circle,
             };
-            let Some(node) = builder.intern_node(&node_id, Some(&node_label), shape, span) else {
+            let node = if use_fresh_nodes {
+                builder.intern_fresh_node_owned_label(node_id, node_label, shape, span)
+            } else {
+                builder.intern_node(&node_id, Some(&node_label), shape, span)
+            };
+            let Some(node) = node else {
                 continue;
             };
             series_nodes.push(node);
@@ -5472,6 +5483,24 @@ fn parse_xychart(input: &str, builder: &mut IrBuilder) {
     {
         builder.set_xy_chart_meta(xy_chart_meta);
     }
+}
+
+fn xychart_point_id(base_id: &str, point_number: usize) -> String {
+    let mut node_id = String::with_capacity(base_id.len() + 21);
+    node_id.push_str(base_id);
+    node_id.push('_');
+    let _ = write!(&mut node_id, "{point_number}");
+    node_id
+}
+
+fn xychart_point_label(base_name: &str, x_label: &str, value: f32) -> String {
+    let mut label = String::with_capacity(base_name.len() + x_label.len() + 16);
+    label.push_str(base_name);
+    label.push(' ');
+    label.push_str(x_label);
+    label.push_str(": ");
+    let _ = write!(&mut label, "{value}");
+    label
 }
 
 fn parse_sankey(input: &str, builder: &mut IrBuilder) {
@@ -8189,8 +8218,13 @@ fn parse_xychart_numeric_values(
     line: &str,
     builder: &mut IrBuilder,
 ) -> Vec<f32> {
-    let mut values = Vec::new();
-    for raw_value in parse_chart_value_list(raw) {
+    let mut values = Vec::with_capacity(memchr::memchr_iter(b',', raw.as_bytes()).count() + 1);
+    for raw_value in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.trim_matches('"').trim_matches('\''))
+    {
         match raw_value.parse::<f32>() {
             Ok(value) if value.is_finite() => values.push(value),
             _ => builder.add_warning(format!(

@@ -1245,6 +1245,83 @@ impl IrBuilder {
         self.intern_node_auto(id, parsed_label.as_ref(), shape, span, false)
     }
 
+    /// Intern a generated node whose id is known fresh by the caller, consuming the
+    /// owned id and plain label instead of cloning them through the generic path.
+    pub(crate) fn intern_fresh_node_owned_label(
+        &mut self,
+        id: String,
+        label: String,
+        shape: NodeShape,
+        span: Span,
+    ) -> Option<IrNodeId> {
+        let normalized_id = id.trim();
+        if normalized_id.is_empty() {
+            self.add_warning("Encountered empty node identifier; skipped node");
+            return None;
+        }
+        if normalized_id.len() != id.len() {
+            return self.intern_node(normalized_id, Some(&label), shape, span);
+        }
+
+        let id_hash = NodeIdIndex::hash_key(&id);
+        if let Some(existing_id) = self
+            .node_id_index
+            .get_with_hash(id_hash, &id, &self.ir.nodes)
+        {
+            let resolved_label = if self
+                .ir
+                .nodes
+                .get(existing_id.0)
+                .and_then(|node| node.label)
+                .is_none()
+            {
+                Some(self.intern_plain_label_owned(label, span))
+            } else {
+                None
+            };
+
+            if let Some(existing_node) = self.ir.nodes.get_mut(existing_id.0) {
+                if existing_node.label.is_none() {
+                    existing_node.label = resolved_label;
+                }
+                if existing_node.shape == NodeShape::Rect && shape != NodeShape::Rect {
+                    existing_node.shape = shape;
+                }
+                if existing_node.implicit {
+                    existing_node.implicit = false;
+                    self.auto_created_nodes.retain(|&id| id != existing_id);
+                }
+            }
+            return Some(existing_id);
+        }
+
+        let label_id = self.intern_plain_label_owned(label, span);
+        let node_id = IrNodeId(self.ir.nodes.len());
+        self.ir.nodes.push(IrNode {
+            id,
+            label: Some(label_id),
+            shape,
+            classes: Vec::new(),
+            interaction: None,
+            span_primary: span,
+            implicit: false,
+            members: Vec::new(),
+            menu_links: Vec::new(),
+            class_meta: None,
+            requirement_meta: None,
+            c4_meta: None,
+            inline_style: None,
+        });
+        self.ir.graph.nodes.push(IrGraphNode {
+            node_id,
+            kind: self.node_kind(),
+            clusters: Vec::new(),
+            subgraphs: Vec::new(),
+        });
+        self.node_id_index.insert_with_hash(id_hash, node_id);
+        Some(node_id)
+    }
+
     /// Intern a node as a placeholder (auto-created for dangling edge recovery).
     #[allow(dead_code)] // Will be used by recovery features
     pub(crate) fn intern_placeholder_node(&mut self, id: &str, span: Span) -> Option<IrNodeId> {
@@ -1480,6 +1557,24 @@ impl IrBuilder {
                 .label_markup
                 .insert(label_id, label.segments.clone());
         }
+        self.label_index.insert_with_hash(label_hash, label_id);
+        label_id
+    }
+
+    fn intern_plain_label_owned(&mut self, text: String, span: Span) -> IrLabelId {
+        let label_hash = LabelIndex::hash_key(&text, &[]);
+        if let Some(existing_id) = self.label_index.get_with_hash(
+            label_hash,
+            &text,
+            &[],
+            &self.ir.labels,
+            &self.ir.label_markup,
+        ) {
+            return existing_id;
+        }
+
+        let label_id = IrLabelId(self.ir.labels.len());
+        self.ir.labels.push(IrLabel { text, span });
         self.label_index.insert_with_hash(label_hash, label_id);
         label_id
     }
