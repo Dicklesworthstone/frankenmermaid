@@ -204,6 +204,9 @@ pub fn crossing_count(upper: &LayerOrdering, lower: &LayerOrdering, edges: &Laye
     if edges.edges.len() < 2 {
         return 0;
     }
+    if let Some(crossings) = crossing_count_dense(upper, lower, edges) {
+        return crossings;
+    }
 
     // Build position maps.
     let upper_pos: BTreeMap<usize, usize> = upper
@@ -236,6 +239,118 @@ pub fn crossing_count(upper: &LayerOrdering, lower: &LayerOrdering, edges: &Laye
     // Count inversions in the lower positions using merge sort.
     let lower_positions: Vec<usize> = edge_positions.iter().map(|&(_, lo)| lo).collect();
     count_inversions(&lower_positions)
+}
+
+fn crossing_count_dense(
+    upper: &LayerOrdering,
+    lower: &LayerOrdering,
+    edges: &LayerEdges,
+) -> Option<usize> {
+    let max_node_id = max_ordering_node_id(upper, lower, edges)?;
+    let domain_len = max_node_id.checked_add(1)?;
+    let useful_slots = upper
+        .len()
+        .saturating_add(lower.len())
+        .saturating_add(edges.edges.len().saturating_mul(2))
+        .max(64);
+    if domain_len > useful_slots.saturating_mul(8) {
+        return None;
+    }
+
+    let missing = usize::MAX;
+    let mut upper_pos = vec![missing; domain_len];
+    for (position, &node_id) in upper.order.iter().enumerate() {
+        upper_pos[node_id] = position;
+    }
+    let mut lower_pos = vec![missing; domain_len];
+    for (position, &node_id) in lower.order.iter().enumerate() {
+        lower_pos[node_id] = position;
+    }
+
+    let mut bucket_counts = vec![0_usize; upper.len()];
+    let mut valid_edges = 0_usize;
+    for &(source, target) in &edges.edges {
+        let source_position = upper_pos.get(source).copied().unwrap_or(missing);
+        let target_position = lower_pos.get(target).copied().unwrap_or(missing);
+        if source_position == missing || target_position == missing {
+            continue;
+        }
+        bucket_counts[source_position] += 1;
+        valid_edges += 1;
+    }
+    if valid_edges < 2 {
+        return Some(0);
+    }
+
+    let mut offsets = vec![0_usize; upper.len() + 1];
+    for (index, count) in bucket_counts.iter().enumerate() {
+        offsets[index + 1] = offsets[index] + count;
+    }
+    let mut cursor = offsets[..upper.len()].to_vec();
+    let mut lower_by_upper = vec![0_usize; valid_edges];
+    for &(source, target) in &edges.edges {
+        let source_position = upper_pos.get(source).copied().unwrap_or(missing);
+        let target_position = lower_pos.get(target).copied().unwrap_or(missing);
+        if source_position == missing || target_position == missing {
+            continue;
+        }
+        let slot = cursor[source_position];
+        lower_by_upper[slot] = target_position;
+        cursor[source_position] += 1;
+    }
+
+    let mut fenwick = vec![0_usize; lower.len() + 1];
+    let mut seen = 0_usize;
+    let mut inversions = 0_usize;
+    for upper_position in 0..upper.len() {
+        let start = offsets[upper_position];
+        let end = offsets[upper_position + 1];
+        let lowers = &lower_by_upper[start..end];
+        for &target_position in lowers {
+            inversions += seen - fenwick_sum(&fenwick, target_position + 1);
+        }
+        for &target_position in lowers {
+            fenwick_add(&mut fenwick, target_position + 1);
+        }
+        seen += lowers.len();
+    }
+
+    Some(inversions)
+}
+
+fn max_ordering_node_id(
+    upper: &LayerOrdering,
+    lower: &LayerOrdering,
+    edges: &LayerEdges,
+) -> Option<usize> {
+    upper
+        .order
+        .iter()
+        .chain(&lower.order)
+        .chain(
+            edges
+                .edges
+                .iter()
+                .flat_map(|(source, target)| [source, target]),
+        )
+        .copied()
+        .max()
+}
+
+fn fenwick_sum(tree: &[usize], mut index: usize) -> usize {
+    let mut sum = 0_usize;
+    while index > 0 {
+        sum += tree[index];
+        index -= index & index.wrapping_neg();
+    }
+    sum
+}
+
+fn fenwick_add(tree: &mut [usize], mut index: usize) {
+    while index < tree.len() {
+        tree[index] += 1;
+        index += index & index.wrapping_neg();
+    }
 }
 
 /// Compute the combined crossing count contributed by one layer against its adjacent layers.
@@ -597,6 +712,28 @@ mod tests {
         let edges = LayerEdges { edges: vec![] };
 
         assert_eq!(crossing_count(&upper, &lower, &edges), 0);
+    }
+
+    #[test]
+    fn crossing_count_edges_from_same_source_do_not_self_cross() {
+        let upper = LayerOrdering::new(vec![0, 1]);
+        let lower = LayerOrdering::new(vec![2, 3]);
+        let edges = LayerEdges {
+            edges: vec![(0, 3), (0, 2), (1, 3)],
+        };
+
+        assert_eq!(crossing_count(&upper, &lower, &edges), 0);
+    }
+
+    #[test]
+    fn crossing_count_handles_sparse_node_ids() {
+        let upper = LayerOrdering::new(vec![10, 1_000_000]);
+        let lower = LayerOrdering::new(vec![20, 2_000_000]);
+        let edges = LayerEdges {
+            edges: vec![(10, 2_000_000), (1_000_000, 20)],
+        };
+
+        assert_eq!(crossing_count(&upper, &lower, &edges), 1);
     }
 
     #[test]

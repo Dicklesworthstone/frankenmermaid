@@ -3160,3 +3160,40 @@ bench_syntax_note = "Literal cargo bench --release is rejected by this Cargo; re
 [post_measurement_invparallelogram_node_streaming_2026_07_08.decision]
 kept = true
 reason = "Same-worker profharness cuts invparallel render/768 median from 418585 ns to 379094 ns (1.10x); same-worker Criterion mean also improves from 355.08 us to 326.38 us (1.09x), although the short Criterion row was noisy and not p<0.05. The change is byte-identical to the slow renderer and closes a parser-reachable missed shape in the node streaming path."
+
+[post_measurement_egraph_crossing_dense_fenwick_2026_07_09]
+date = "2026-07-09"
+agent = "CodexPerfMermaid"
+status = "keep"
+candidate_summary = "Replace the E-graph layer-ordering crossing-count hot kernel's per-call BTreeMap position maps plus allocating recursive merge-sort inversion count with a dense node-position table, contiguous upper-position edge buckets, and a Fenwick inversion counter. Sparse node-id domains keep the old BTreeMap fallback."
+negative_evidence_review = "Read docs/NEGATIVE_EVIDENCE.md first and stopped the parser/SVG seam. Avoided rejected parser fast paths, node-shape streaming, large-body streaming, layout sort-only changes, content-aware edge buffer presizing, and constant-factor SVG/CSS retries."
+graveyard_route = "Profiling Software Performance selected fm-layout crossing minimization instead of parser/render rows. Alien Graveyard + Alien Artifact Coding + Extreme Optimization route: data-layout plus succinct-structure primitive for the E-graph cost function; contiguous position/bucket arrays replace tree maps and recursive allocation in the hottest measured layout row."
+rust_baseline_command = "AGENT_NAME=CodexPerfMermaid CARGO_TARGET_DIR=/data/projects/frankenmermaid/.rch-targets/mermaid-cod rch exec -- cargo bench --profile release -p fm-layout --bench crossing_minimization -- crossing_min/sparse_dag/egraph/50 --warm-up-time 1 --measurement-time 2 (RCH local fallback; baseline ORIG before edit)"
+rust_candidate_command = "AGENT_NAME=CodexPerfMermaid CARGO_TARGET_DIR=/data/projects/frankenmermaid/.rch-targets/mermaid-cod cargo bench --profile release -p fm-layout --bench crossing_minimization -- crossing_min/sparse_dag/egraph/50 --warm-up-time 1 --measurement-time 2 (explicit local fallback to match the ORIG baseline target and machine)"
+rust_worker = "Accepted comparison is same local fallback and same CARGO_TARGET_DIR. A secondary RCH remote candidate run on vmi1227854 measured 206.06 ms mean, but no remote ORIG was captured on that worker, so it is not the scoring comparator."
+mermaid_js_command = "No fresh same-input Mermaid.js crossing-minimization comparator exists; this ledger entry's ratio-vs-ORIG is against the legacy Rust ORIG implementation of the same fm-layout Criterion row."
+behavior_proof = "Existing crossing_count tests plus new repeated-same-source and sparse-node-id tests passed. Dense path preserves same-source no-self-crossing by querying each upper bucket before inserting that bucket into the Fenwick tree; sparse domains fall back to the legacy BTreeMap/merge-sort counter."
+agent_mail = "Agent Mail was not usable in this turn; prior project runs report the SQLite corruption circuit breaker. AGENT_NAME was set for RCH/cargo commands."
+bench_syntax_note = "Release-profile benches used --profile release, matching the current Cargo syntax."
+
+[post_measurement_egraph_crossing_dense_fenwick_2026_07_09.metrics]
+"crossing_min_sparse_dag_egraph_50_orig_mean_ms" = 1038.4
+"crossing_min_sparse_dag_egraph_50_candidate_mean_ms" = 214.08
+"crossing_min_sparse_dag_egraph_50_candidate_over_orig" = 0.20616
+"crossing_min_sparse_dag_egraph_50_speedup_x" = 4.8505
+"crossing_min_sparse_dag_egraph_50_delta_pct" = -79.38
+"crossing_min_sparse_dag_egraph_50_criterion_change_pct" = -79.384
+"crossing_min_sparse_dag_egraph_50_criterion_p_value" = 0.00
+"secondary_remote_vmi1227854_candidate_mean_ms" = 206.06
+
+[post_measurement_egraph_crossing_dense_fenwick_2026_07_09.validation]
+"cargo_test_fm_layout_crossing_count" = "passed via RCH local fallback: cargo test -p fm-layout crossing_count -- --nocapture (9 tests)"
+"cargo_check_workspace_all_targets" = "passed via RCH ovh-b: cargo check --workspace --all-targets"
+"cargo_clippy_workspace_all_targets" = "passed via RCH vmi1149989: cargo clippy --workspace --all-targets -- -D warnings"
+"cargo_test_frankentui_conformance" = "passed via RCH local fallback: cargo test -p frankenmermaid-cli --test frankentui_conformance_test"
+"cargo_fmt_check" = "passed locally: cargo fmt --check"
+"git_diff_check" = "passed locally: git diff --check"
+
+[post_measurement_egraph_crossing_dense_fenwick_2026_07_09.decision]
+kept = true
+reason = "Same-target local release Criterion cuts crossing_min/sparse_dag/egraph/50 from 1038.4 ms to 214.08 ms (4.85x, -79.38%, p=0.00) by replacing tree-map position lookup and recursive merge allocation with dense layout data and a Fenwick inversion counter while keeping a sparse-ID fallback."
