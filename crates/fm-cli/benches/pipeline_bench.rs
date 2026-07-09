@@ -191,6 +191,20 @@ fn gen_xychart(point_count: usize) -> String {
     lines.join("\n")
 }
 
+fn gen_timeline(event_count: usize) -> String {
+    let mut lines = vec![String::from("timeline"), String::from("  title Timeline")];
+    let sections = ((event_count as f64).sqrt() as usize).max(2);
+    for section in 0..sections {
+        lines.push(format!("  section Period {section}"));
+        let per_section = event_count / sections;
+        for item in 0..per_section {
+            let idx = section * per_section + item;
+            lines.push(format!("    {} : Event {idx}", 2000 + idx));
+        }
+    }
+    lines.join("\n")
+}
+
 fn gen_polygon_shape_chain(shape: &str, node_count: usize) -> String {
     let mut lines = vec![String::from("flowchart TB")];
     for i in 0..node_count {
@@ -637,6 +651,30 @@ fn bench_xychart_stages(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_timeline_stages(c: &mut Criterion) {
+    let mut group = c.benchmark_group("timeline_stages");
+    let config = fm_render_svg::SvgRenderConfig::default();
+    let input = gen_timeline(1600);
+    let parsed = fm_parser::parse(&input);
+    let layout = fm_layout::layout_diagram(&parsed.ir);
+
+    group.bench_with_input(BenchmarkId::new("parse", "1600"), &input, |b, input| {
+        b.iter(|| fm_parser::parse(input));
+    });
+    group.bench_with_input(BenchmarkId::new("layout", "1600"), &parsed.ir, |b, ir| {
+        b.iter(|| fm_layout::layout_diagram(ir));
+    });
+    group.bench_with_input(
+        BenchmarkId::new("render", "1600"),
+        &(&parsed.ir, &layout),
+        |b, (ir, layout)| {
+            b.iter(|| fm_render_svg::render_svg_with_layout(ir, layout, &config));
+        },
+    );
+
+    group.finish();
+}
+
 fn bench_polygon_shape_render(c: &mut Criterion) {
     let mut group = c.benchmark_group("polygon_shape_render");
     let config = fm_render_svg::SvgRenderConfig::default();
@@ -762,6 +800,7 @@ criterion_group!(
     bench_highlighted_wide_stages,
     bench_requirement_stages,
     bench_xychart_stages,
+    bench_timeline_stages,
     bench_polygon_shape_render,
     bench_cylinder_shape_render,
     bench_subroutine_shape_render,

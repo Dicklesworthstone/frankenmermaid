@@ -3259,6 +3259,708 @@ fn layout_memo_key(
     }
 }
 
+#[derive(Debug)]
+struct StableHashError;
+
+impl std::fmt::Display for StableHashError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("stable layout hash serialization failed")
+    }
+}
+
+impl std::error::Error for StableHashError {}
+
+impl serde::ser::Error for StableHashError {
+    fn custom<T: std::fmt::Display>(_message: T) -> Self {
+        Self
+    }
+}
+
+struct StableHashSerializer {
+    state: u64,
+}
+
+impl StableHashSerializer {
+    const fn new() -> Self {
+        Self {
+            state: 0xcbf2_9ce4_8422_2325,
+        }
+    }
+
+    const fn finish(self) -> u64 {
+        self.state
+    }
+
+    fn write_tag(&mut self, tag: u8) {
+        self.write_u8(tag);
+    }
+
+    fn write_u8(&mut self, value: u8) {
+        self.state ^= u64::from(value);
+        self.state = self.state.wrapping_mul(0x0100_0000_01b3);
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        for byte in value.to_le_bytes() {
+            self.write_u8(byte);
+        }
+    }
+
+    fn write_i64(&mut self, value: i64) {
+        self.write_u64(value as u64);
+    }
+
+    fn write_usize(&mut self, value: usize) {
+        self.write_u64(value as u64);
+    }
+
+    fn write_bytes(&mut self, bytes: &[u8]) {
+        self.write_usize(bytes.len());
+        for &byte in bytes {
+            self.write_u8(byte);
+        }
+    }
+
+    fn write_str(&mut self, value: &str) {
+        self.write_bytes(value.as_bytes());
+    }
+
+    fn write_f32(&mut self, value: f32) {
+        self.write_u64(u64::from(value.to_bits()));
+    }
+
+    fn write_f64(&mut self, value: f64) {
+        self.write_u64(value.to_bits());
+    }
+
+    fn hash_serialize<T>(&mut self, value: &T)
+    where
+        T: serde::Serialize + ?Sized,
+    {
+        let _ = value.serialize(&mut *self);
+    }
+}
+
+struct StableHashCompound<'a> {
+    serializer: &'a mut StableHashSerializer,
+}
+
+impl<'a> serde::Serializer for &'a mut StableHashSerializer {
+    type Ok = ();
+    type Error = StableHashError;
+    type SerializeSeq = StableHashCompound<'a>;
+    type SerializeTuple = StableHashCompound<'a>;
+    type SerializeTupleStruct = StableHashCompound<'a>;
+    type SerializeTupleVariant = StableHashCompound<'a>;
+    type SerializeMap = StableHashCompound<'a>;
+    type SerializeStruct = StableHashCompound<'a>;
+    type SerializeStructVariant = StableHashCompound<'a>;
+
+    fn serialize_bool(self, value: bool) -> Result<Self::Ok, Self::Error> {
+        self.write_tag(b'b');
+        self.write_u8(u8::from(value));
+        Ok(())
+    }
+
+    fn serialize_i8(self, value: i8) -> Result<Self::Ok, Self::Error> {
+        self.write_tag(b'i');
+        self.write_i64(i64::from(value));
+        Ok(())
+    }
+
+    fn serialize_i16(self, value: i16) -> Result<Self::Ok, Self::Error> {
+        self.write_tag(b'i');
+        self.write_i64(i64::from(value));
+        Ok(())
+    }
+
+    fn serialize_i32(self, value: i32) -> Result<Self::Ok, Self::Error> {
+        self.write_tag(b'i');
+        self.write_i64(i64::from(value));
+        Ok(())
+    }
+
+    fn serialize_i64(self, value: i64) -> Result<Self::Ok, Self::Error> {
+        self.write_tag(b'i');
+        self.write_i64(value);
+        Ok(())
+    }
+
+    fn serialize_u8(self, value: u8) -> Result<Self::Ok, Self::Error> {
+        self.write_tag(b'u');
+        self.write_u64(u64::from(value));
+        Ok(())
+    }
+
+    fn serialize_u16(self, value: u16) -> Result<Self::Ok, Self::Error> {
+        self.write_tag(b'u');
+        self.write_u64(u64::from(value));
+        Ok(())
+    }
+
+    fn serialize_u32(self, value: u32) -> Result<Self::Ok, Self::Error> {
+        self.write_tag(b'u');
+        self.write_u64(u64::from(value));
+        Ok(())
+    }
+
+    fn serialize_u64(self, value: u64) -> Result<Self::Ok, Self::Error> {
+        self.write_tag(b'u');
+        self.write_u64(value);
+        Ok(())
+    }
+
+    fn serialize_f32(self, value: f32) -> Result<Self::Ok, Self::Error> {
+        self.write_tag(b'f');
+        self.write_f32(value);
+        Ok(())
+    }
+
+    fn serialize_f64(self, value: f64) -> Result<Self::Ok, Self::Error> {
+        self.write_tag(b'F');
+        self.write_f64(value);
+        Ok(())
+    }
+
+    fn serialize_char(self, value: char) -> Result<Self::Ok, Self::Error> {
+        self.write_tag(b'c');
+        self.write_u64(u64::from(value as u32));
+        Ok(())
+    }
+
+    fn serialize_str(self, value: &str) -> Result<Self::Ok, Self::Error> {
+        self.write_tag(b's');
+        self.write_str(value);
+        Ok(())
+    }
+
+    fn serialize_bytes(self, value: &[u8]) -> Result<Self::Ok, Self::Error> {
+        self.write_tag(b'B');
+        self.write_bytes(value);
+        Ok(())
+    }
+
+    fn serialize_none(self) -> Result<Self::Ok, Self::Error> {
+        self.write_tag(b'n');
+        Ok(())
+    }
+
+    fn serialize_some<T>(self, value: &T) -> Result<Self::Ok, Self::Error>
+    where
+        T: serde::Serialize + ?Sized,
+    {
+        self.write_tag(b'o');
+        value.serialize(self)
+    }
+
+    fn serialize_unit(self) -> Result<Self::Ok, Self::Error> {
+        self.write_tag(b'z');
+        Ok(())
+    }
+
+    fn serialize_unit_struct(self, name: &'static str) -> Result<Self::Ok, Self::Error> {
+        self.write_tag(b'Z');
+        self.write_str(name);
+        Ok(())
+    }
+
+    fn serialize_unit_variant(
+        self,
+        name: &'static str,
+        variant_index: u32,
+        variant: &'static str,
+    ) -> Result<Self::Ok, Self::Error> {
+        self.write_tag(b'v');
+        self.write_str(name);
+        self.write_u64(u64::from(variant_index));
+        self.write_str(variant);
+        Ok(())
+    }
+
+    fn serialize_newtype_struct<T>(
+        self,
+        name: &'static str,
+        value: &T,
+    ) -> Result<Self::Ok, Self::Error>
+    where
+        T: serde::Serialize + ?Sized,
+    {
+        self.write_tag(b'N');
+        self.write_str(name);
+        value.serialize(self)
+    }
+
+    fn serialize_newtype_variant<T>(
+        self,
+        name: &'static str,
+        variant_index: u32,
+        variant: &'static str,
+        value: &T,
+    ) -> Result<Self::Ok, Self::Error>
+    where
+        T: serde::Serialize + ?Sized,
+    {
+        self.write_tag(b'V');
+        self.write_str(name);
+        self.write_u64(u64::from(variant_index));
+        self.write_str(variant);
+        value.serialize(self)
+    }
+
+    fn serialize_seq(self, len: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
+        self.write_tag(b'[');
+        self.write_usize(len.unwrap_or(usize::MAX));
+        Ok(StableHashCompound { serializer: self })
+    }
+
+    fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple, Self::Error> {
+        self.write_tag(b'(');
+        self.write_usize(len);
+        Ok(StableHashCompound { serializer: self })
+    }
+
+    fn serialize_tuple_struct(
+        self,
+        name: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeTupleStruct, Self::Error> {
+        self.write_tag(b'T');
+        self.write_str(name);
+        self.write_usize(len);
+        Ok(StableHashCompound { serializer: self })
+    }
+
+    fn serialize_tuple_variant(
+        self,
+        name: &'static str,
+        variant_index: u32,
+        variant: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeTupleVariant, Self::Error> {
+        self.write_tag(b'W');
+        self.write_str(name);
+        self.write_u64(u64::from(variant_index));
+        self.write_str(variant);
+        self.write_usize(len);
+        Ok(StableHashCompound { serializer: self })
+    }
+
+    fn serialize_map(self, len: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
+        self.write_tag(b'{');
+        self.write_usize(len.unwrap_or(usize::MAX));
+        Ok(StableHashCompound { serializer: self })
+    }
+
+    fn serialize_struct(
+        self,
+        name: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeStruct, Self::Error> {
+        self.write_tag(b'S');
+        self.write_str(name);
+        self.write_usize(len);
+        Ok(StableHashCompound { serializer: self })
+    }
+
+    fn serialize_struct_variant(
+        self,
+        name: &'static str,
+        variant_index: u32,
+        variant: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeStructVariant, Self::Error> {
+        self.write_tag(b'R');
+        self.write_str(name);
+        self.write_u64(u64::from(variant_index));
+        self.write_str(variant);
+        self.write_usize(len);
+        Ok(StableHashCompound { serializer: self })
+    }
+}
+
+impl serde::ser::SerializeSeq for StableHashCompound<'_> {
+    type Ok = ();
+    type Error = StableHashError;
+
+    fn serialize_element<T>(&mut self, value: &T) -> Result<(), Self::Error>
+    where
+        T: serde::Serialize + ?Sized,
+    {
+        value.serialize(&mut *self.serializer)
+    }
+
+    fn end(self) -> Result<Self::Ok, Self::Error> {
+        Ok(())
+    }
+}
+
+impl serde::ser::SerializeTuple for StableHashCompound<'_> {
+    type Ok = ();
+    type Error = StableHashError;
+
+    fn serialize_element<T>(&mut self, value: &T) -> Result<(), Self::Error>
+    where
+        T: serde::Serialize + ?Sized,
+    {
+        value.serialize(&mut *self.serializer)
+    }
+
+    fn end(self) -> Result<Self::Ok, Self::Error> {
+        Ok(())
+    }
+}
+
+impl serde::ser::SerializeTupleStruct for StableHashCompound<'_> {
+    type Ok = ();
+    type Error = StableHashError;
+
+    fn serialize_field<T>(&mut self, value: &T) -> Result<(), Self::Error>
+    where
+        T: serde::Serialize + ?Sized,
+    {
+        value.serialize(&mut *self.serializer)
+    }
+
+    fn end(self) -> Result<Self::Ok, Self::Error> {
+        Ok(())
+    }
+}
+
+impl serde::ser::SerializeTupleVariant for StableHashCompound<'_> {
+    type Ok = ();
+    type Error = StableHashError;
+
+    fn serialize_field<T>(&mut self, value: &T) -> Result<(), Self::Error>
+    where
+        T: serde::Serialize + ?Sized,
+    {
+        value.serialize(&mut *self.serializer)
+    }
+
+    fn end(self) -> Result<Self::Ok, Self::Error> {
+        Ok(())
+    }
+}
+
+impl serde::ser::SerializeMap for StableHashCompound<'_> {
+    type Ok = ();
+    type Error = StableHashError;
+
+    fn serialize_key<T>(&mut self, key: &T) -> Result<(), Self::Error>
+    where
+        T: serde::Serialize + ?Sized,
+    {
+        self.serializer.write_tag(b'k');
+        key.serialize(&mut *self.serializer)
+    }
+
+    fn serialize_value<T>(&mut self, value: &T) -> Result<(), Self::Error>
+    where
+        T: serde::Serialize + ?Sized,
+    {
+        self.serializer.write_tag(b'=');
+        value.serialize(&mut *self.serializer)
+    }
+
+    fn end(self) -> Result<Self::Ok, Self::Error> {
+        Ok(())
+    }
+}
+
+impl serde::ser::SerializeStruct for StableHashCompound<'_> {
+    type Ok = ();
+    type Error = StableHashError;
+
+    fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<(), Self::Error>
+    where
+        T: serde::Serialize + ?Sized,
+    {
+        self.serializer.write_tag(b'.');
+        self.serializer.write_str(key);
+        value.serialize(&mut *self.serializer)
+    }
+
+    fn end(self) -> Result<Self::Ok, Self::Error> {
+        Ok(())
+    }
+}
+
+impl serde::ser::SerializeStructVariant for StableHashCompound<'_> {
+    type Ok = ();
+    type Error = StableHashError;
+
+    fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<(), Self::Error>
+    where
+        T: serde::Serialize + ?Sized,
+    {
+        self.serializer.write_tag(b'.');
+        self.serializer.write_str(key);
+        value.serialize(&mut *self.serializer)
+    }
+
+    fn end(self) -> Result<Self::Ok, Self::Error> {
+        Ok(())
+    }
+}
+
+fn hash_bool_value(hash: &mut u64, value: bool) {
+    hash_u64(hash, u64::from(value));
+}
+
+fn hash_f32_value(hash: &mut u64, value: f32) {
+    hash_u64(hash, u64::from(value.to_bits()));
+}
+
+fn hash_f64_value(hash: &mut u64, value: f64) {
+    hash_u64(hash, value.to_bits());
+}
+
+fn hash_delimited_str(hash: &mut u64, value: &str) {
+    hash_u64(hash, value.len() as u64);
+    hash_str(hash, value);
+}
+
+fn hash_optional_index(hash: &mut u64, value: Option<usize>) {
+    match value {
+        Some(index) => {
+            hash_u64(hash, 1);
+            hash_u64(hash, index as u64);
+        }
+        None => hash_u64(hash, 0),
+    }
+}
+
+fn hash_span_value(hash: &mut u64, span: Span) {
+    hash_u64(hash, u64::from(span.start.line));
+    hash_u64(hash, u64::from(span.start.col));
+    hash_u64(hash, u64::from(span.start.byte));
+    hash_u64(hash, u64::from(span.end.line));
+    hash_u64(hash, u64::from(span.end.col));
+    hash_u64(hash, u64::from(span.end.byte));
+}
+
+fn hash_endpoint_value(hash: &mut u64, endpoint: IrEndpoint) {
+    match endpoint {
+        IrEndpoint::Unresolved => hash_u64(hash, 0),
+        IrEndpoint::Node(node_id) => {
+            hash_u64(hash, 1);
+            hash_u64(hash, node_id.0 as u64);
+        }
+        IrEndpoint::Port(port_id) => {
+            hash_u64(hash, 2);
+            hash_u64(hash, port_id.0 as u64);
+        }
+    }
+}
+
+fn hash_label_ref(hash: &mut u64, ir: &MermaidDiagramIr, label_id: Option<fm_core::IrLabelId>) {
+    hash_optional_index(hash, label_id.map(|label| label.0));
+    if let Some(label) = label_id.and_then(|label| ir.labels.get(label.0)) {
+        hash_delimited_str(hash, &label.text);
+        hash_span_value(hash, label.span);
+    }
+}
+
+fn hash_request_tail(
+    hash: &mut u64,
+    algorithm: LayoutAlgorithm,
+    config: &LayoutConfig,
+    guardrails: LayoutGuardrails,
+    metrics: &fm_core::FontMetrics,
+) {
+    hash_delimited_str(hash, algorithm.as_str());
+    hash_delimited_str(hash, config.cycle_strategy.as_str());
+    hash_bool_value(hash, config.collapse_cycle_clusters);
+    hash_bool_value(hash, config.fnx_enabled);
+    hash_u64(hash, config.edge_routing as u64);
+    hash_f32_value(hash, config.spacing.node_spacing);
+    hash_f32_value(hash, config.spacing.rank_spacing);
+    hash_f32_value(hash, config.spacing.cluster_padding);
+    hash_f32_value(hash, config.spacing.sequence_participant_gap_extra);
+    hash_f32_value(hash, config.spacing.sequence_min_message_gap);
+    hash_f32_value(hash, metrics.font_size());
+    hash_f32_value(hash, metrics.avg_char_width());
+    hash_f32_value(hash, metrics.line_height_px());
+    hash_u64(hash, guardrails.max_layout_time_ms as u64);
+    hash_u64(hash, guardrails.max_layout_iterations as u64);
+    hash_u64(hash, guardrails.max_route_ops as u64);
+    hash_u64(
+        hash,
+        match config.constraint_solver {
+            ConstraintSolverMode::Disabled => 0,
+            ConstraintSolverMode::Optimize => 1,
+        },
+    );
+    hash_u64(hash, config.constraint_solver_time_limit_ms);
+}
+
+fn flowchart_layout_request_hash(
+    ir: &MermaidDiagramIr,
+    algorithm: LayoutAlgorithm,
+    config: &LayoutConfig,
+    guardrails: LayoutGuardrails,
+    metrics: &fm_core::FontMetrics,
+) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    hash_delimited_str(&mut hash, "flowchart-layout-request-v1");
+    hash_delimited_str(&mut hash, ir.diagram_type.as_str());
+    hash_delimited_str(&mut hash, ir.direction.as_str());
+    hash_request_tail(&mut hash, algorithm, config, guardrails, metrics);
+
+    hash_u64(&mut hash, ir.nodes.len() as u64);
+    for node in &ir.nodes {
+        hash_delimited_str(&mut hash, &node.id);
+        hash_label_ref(&mut hash, ir, node.label);
+        hash_u64(&mut hash, node.shape as u64);
+        hash_delimited_str(&mut hash, node.icon().unwrap_or_default());
+        hash_u64(&mut hash, node.classes.len() as u64);
+        for class_name in &node.classes {
+            hash_delimited_str(&mut hash, class_name);
+        }
+        hash_span_value(&mut hash, node.span_primary);
+        hash_bool_value(&mut hash, node.implicit);
+    }
+
+    hash_u64(&mut hash, ir.ports.len() as u64);
+    for port in &ir.ports {
+        hash_u64(&mut hash, port.node.0 as u64);
+        hash_delimited_str(&mut hash, &port.name);
+        hash_u64(&mut hash, port.side_hint as u64);
+        hash_span_value(&mut hash, port.span);
+    }
+
+    hash_u64(&mut hash, ir.edges.len() as u64);
+    for edge in &ir.edges {
+        hash_endpoint_value(&mut hash, edge.from);
+        hash_endpoint_value(&mut hash, edge.to);
+        hash_delimited_str(&mut hash, edge.arrow.as_str());
+        hash_label_ref(&mut hash, ir, edge.label);
+        hash_span_value(&mut hash, edge.span);
+    }
+
+    hash_u64(&mut hash, ir.clusters.len() as u64);
+    for cluster in &ir.clusters {
+        hash_u64(&mut hash, cluster.id.0 as u64);
+        hash_label_ref(&mut hash, ir, cluster.title);
+        hash_u64(&mut hash, cluster.members.len() as u64);
+        for member in &cluster.members {
+            hash_u64(&mut hash, member.0 as u64);
+        }
+        hash_u64(&mut hash, cluster.grid_span as u64);
+        hash_span_value(&mut hash, cluster.span);
+    }
+
+    hash_u64(&mut hash, ir.graph.nodes.len() as u64);
+    for graph_node in &ir.graph.nodes {
+        hash_u64(&mut hash, graph_node.node_id.0 as u64);
+        hash_u64(&mut hash, graph_node.kind as u64);
+        hash_u64(&mut hash, graph_node.clusters.len() as u64);
+        for cluster in &graph_node.clusters {
+            hash_u64(&mut hash, cluster.0 as u64);
+        }
+        hash_u64(&mut hash, graph_node.subgraphs.len() as u64);
+        for subgraph in &graph_node.subgraphs {
+            hash_u64(&mut hash, subgraph.0 as u64);
+        }
+    }
+
+    hash_u64(&mut hash, ir.graph.edges.len() as u64);
+    for graph_edge in &ir.graph.edges {
+        hash_u64(&mut hash, graph_edge.edge_id as u64);
+        hash_u64(&mut hash, graph_edge.kind as u64);
+        hash_endpoint_value(&mut hash, graph_edge.from);
+        hash_endpoint_value(&mut hash, graph_edge.to);
+        hash_span_value(&mut hash, graph_edge.span);
+    }
+
+    hash_u64(&mut hash, ir.graph.clusters.len() as u64);
+    for graph_cluster in &ir.graph.clusters {
+        hash_u64(&mut hash, graph_cluster.cluster_id.0 as u64);
+        hash_label_ref(&mut hash, ir, graph_cluster.title);
+        hash_u64(&mut hash, graph_cluster.members.len() as u64);
+        for member in &graph_cluster.members {
+            hash_u64(&mut hash, member.0 as u64);
+        }
+        hash_optional_index(&mut hash, graph_cluster.subgraph.map(|subgraph| subgraph.0));
+        hash_u64(&mut hash, graph_cluster.grid_span as u64);
+        hash_span_value(&mut hash, graph_cluster.span);
+    }
+
+    hash_u64(&mut hash, ir.graph.subgraphs.len() as u64);
+    for subgraph in &ir.graph.subgraphs {
+        hash_u64(&mut hash, subgraph.id.0 as u64);
+        hash_delimited_str(&mut hash, &subgraph.key);
+        hash_label_ref(&mut hash, ir, subgraph.title);
+        hash_optional_index(&mut hash, subgraph.parent.map(|parent| parent.0));
+        hash_u64(&mut hash, subgraph.children.len() as u64);
+        for child in &subgraph.children {
+            hash_u64(&mut hash, child.0 as u64);
+        }
+        hash_u64(&mut hash, subgraph.members.len() as u64);
+        for member in &subgraph.members {
+            hash_u64(&mut hash, member.0 as u64);
+        }
+        hash_optional_index(&mut hash, subgraph.cluster.map(|cluster| cluster.0));
+        hash_u64(&mut hash, subgraph.grid_span as u64);
+        hash_span_value(&mut hash, subgraph.span);
+        match subgraph.direction {
+            Some(direction) => {
+                hash_u64(&mut hash, 1);
+                hash_delimited_str(&mut hash, direction.as_str());
+            }
+            None => hash_u64(&mut hash, 0),
+        }
+    }
+
+    hash_u64(&mut hash, ir.constraints.len() as u64);
+    for constraint in &ir.constraints {
+        match constraint {
+            fm_core::IrConstraint::SameRank { node_ids, span } => {
+                hash_u64(&mut hash, 0);
+                hash_u64(&mut hash, node_ids.len() as u64);
+                for node_id in node_ids {
+                    hash_delimited_str(&mut hash, node_id);
+                }
+                hash_span_value(&mut hash, *span);
+            }
+            fm_core::IrConstraint::MinLength {
+                from_id,
+                to_id,
+                min_len,
+                span,
+            } => {
+                hash_u64(&mut hash, 1);
+                hash_delimited_str(&mut hash, from_id);
+                hash_delimited_str(&mut hash, to_id);
+                hash_u64(&mut hash, *min_len as u64);
+                hash_span_value(&mut hash, *span);
+            }
+            fm_core::IrConstraint::Pin {
+                node_id,
+                x,
+                y,
+                span,
+            } => {
+                hash_u64(&mut hash, 2);
+                hash_delimited_str(&mut hash, node_id);
+                hash_f64_value(&mut hash, *x);
+                hash_f64_value(&mut hash, *y);
+                hash_span_value(&mut hash, *span);
+            }
+            fm_core::IrConstraint::OrderInRank { node_ids, span } => {
+                hash_u64(&mut hash, 3);
+                hash_u64(&mut hash, node_ids.len() as u64);
+                for node_id in node_ids {
+                    hash_delimited_str(&mut hash, node_id);
+                }
+                hash_span_value(&mut hash, *span);
+            }
+        }
+    }
+
+    hash
+}
+
 fn stable_layout_request_hash(
     ir: &MermaidDiagramIr,
     algorithm: LayoutAlgorithm,
@@ -3266,70 +3968,17 @@ fn stable_layout_request_hash(
     guardrails: LayoutGuardrails,
     metrics: &fm_core::FontMetrics,
 ) -> u64 {
-    // Hash the FULL IR by streaming its serde serialization straight into the FNV state, then fold
-    // in the scalar config/guardrails tail. `serde_json` has the SAME complete, maintenance-safe
-    // field coverage as the old `format!("{ir:?}")` (both walk every field via a derive) — a new IR
-    // field is captured automatically — but the JSON serializer is ~10-50x cheaper than `Debug`
-    // formatting and writes no giant intermediate `String`. The old `{ir:?}` render was an O(n)
-    // Debug-stringify run on EVERY engine call (including memoized cache hits), which made the
-    // incremental cache-hit slower than a full recompute (see docs/NEGATIVE_EVIDENCE.md 2026-06-29).
-    // The resulting `u64` differs from the old scheme, but the cache only needs internal consistency
-    // (same input -> same key, different input -> different key), which this preserves.
-    struct FnvWriter(u64);
-    impl std::io::Write for FnvWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            let mut hash = self.0;
-            for &byte in buf {
-                hash ^= u64::from(byte);
-                hash = hash.wrapping_mul(0x0100_0000_01b3);
-            }
-            self.0 = hash;
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
+    if ir.diagram_type == DiagramType::Flowchart {
+        return flowchart_layout_request_hash(ir, algorithm, config, guardrails, metrics);
     }
-    let mut writer = FnvWriter(0xcbf2_9ce4_8422_2325);
-    // In-memory `Serialize` cannot fail; ignore defensively. IR maps are `BTreeMap`/`Vec` (ordered),
-    // so the serialization — and thus the key — is deterministic for a given IR.
-    //
-    // This `serde_json` walk is O(nodes+edges) and dominates the memoized cache-hit (~605 us @400
-    // nodes, vs ~23 us for the clone — measured). It is the safe ZERO-WEIGHT fix that wins for the
-    // test + typical interactive sizes and is ~break-even at >=400 nodes. To make a cache HIT a CLEAR
-    // win at large graphs, make THIS line cheaper — bounded options in docs/NEGATIVE_EVIDENCE.md
-    // (2026-06-29): (1) an IR-carried fingerprint (true O(1), needs fm-core/fm-parser + mutation
-    // invalidation), or (2) a zero-weight custom `serde::Serializer` that folds values straight into
-    // the hasher (no JSON text) — correctness-critical (a collision => silent stale layout), so it
-    // warrants review, not a quick slice. `FxHasher` here is sub-noise (serialization, not the FNV,
-    // dominates). Do NOT regress this back to `format!("{ir:?}")`.
-    let _ = serde_json::to_writer(&mut writer, ir);
-    let tail = format!(
-        "|{algorithm}|{cycle_strategy}|{collapse_cycle_clusters}|{fnx_enabled}|\
-         {edge_routing}|{node_spacing}|{rank_spacing}|{cluster_padding}|\
-         {sequence_participant_gap_extra}|\
-         {sequence_min_message_gap}|{font_size}|{avg_char_width}|{line_height_px}|\
-         {max_layout_time_ms}|{max_layout_iterations}|{max_route_ops}",
-        algorithm = algorithm.as_str(),
-        cycle_strategy = config.cycle_strategy.as_str(),
-        collapse_cycle_clusters = config.collapse_cycle_clusters,
-        fnx_enabled = config.fnx_enabled,
-        edge_routing = config.edge_routing as u8,
-        node_spacing = config.spacing.node_spacing,
-        rank_spacing = config.spacing.rank_spacing,
-        cluster_padding = config.spacing.cluster_padding,
-        sequence_participant_gap_extra = config.spacing.sequence_participant_gap_extra,
-        sequence_min_message_gap = config.spacing.sequence_min_message_gap,
-        font_size = metrics.font_size(),
-        avg_char_width = metrics.avg_char_width(),
-        line_height_px = metrics.line_height_px(),
-        max_layout_time_ms = guardrails.max_layout_time_ms,
-        max_layout_iterations = guardrails.max_layout_iterations,
-        max_route_ops = guardrails.max_route_ops,
-    );
-    use std::io::Write;
-    let _ = writer.write(tail.as_bytes());
-    writer.0
+
+    let mut serializer = StableHashSerializer::new();
+    serializer.hash_serialize(ir);
+    serializer.write_tag(b'|');
+    let mut tail_hash = 0xcbf2_9ce4_8422_2325_u64;
+    hash_request_tail(&mut tail_hash, algorithm, config, guardrails, metrics);
+    serializer.write_u64(tail_hash);
+    serializer.finish()
 }
 
 fn saturating_elapsed_micros(duration: std::time::Duration) -> u64 {

@@ -603,6 +603,7 @@ dependencies = [
  "good_lp",
  "nalgebra",
  "proptest",
+ "serde",
  "serde_json",
  "smallvec",
  "tracing",

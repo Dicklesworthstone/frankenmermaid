@@ -1274,6 +1274,24 @@ impl IrBuilder {
         }
     }
 
+    pub(crate) fn add_class_to_node_id(&mut self, node_id: IrNodeId, class_name: &str) {
+        let normalized_class = class_name.trim();
+        if normalized_class.is_empty() {
+            return;
+        }
+
+        let Some(node) = self.ir.nodes.get_mut(node_id.0) else {
+            return;
+        };
+        if !node
+            .classes
+            .iter()
+            .any(|existing| existing == normalized_class)
+        {
+            node.classes.push(normalized_class.to_string());
+        }
+    }
+
     pub(crate) fn set_node_icon(&mut self, node_id: IrNodeId, icon: &str) {
         let icon = icon.trim();
         if icon.is_empty() {

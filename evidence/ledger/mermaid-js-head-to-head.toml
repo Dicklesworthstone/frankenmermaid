@@ -3197,3 +3197,51 @@ bench_syntax_note = "Release-profile benches used --profile release, matching th
 [post_measurement_egraph_crossing_dense_fenwick_2026_07_09.decision]
 kept = true
 reason = "Same-target local release Criterion cuts crossing_min/sparse_dag/egraph/50 from 1038.4 ms to 214.08 ms (4.85x, -79.38%, p=0.00) by replacing tree-map position lookup and recursive merge allocation with dense layout data and a Fenwick inversion counter while keeping a sparse-ID fallback."
+
+[post_measurement_timeline_parse_node_id_class_append_2026_07_09]
+date = "2026-07-09"
+agent = "TanSparrow"
+status = "keep"
+candidate_summary = "Append timeline period/event classes through the IrNodeId returned by intern_node and use a fixed section-class table, avoiding a second node-id hash lookup and per-node section-class formatting."
+negative_evidence_review = "Read docs/NEGATIVE_EVIDENCE.md first and avoided rejected or already-landed SVG attribute/path/string emitters, large body streaming, common node and shape streaming, parser byte-gates/trim/memchr/operator scans, layout comparator rewrites, crossing-map/sort rewrites, and the timeline layout axis-tick row."
+profile_route = "Profiling sampled xychart, requirements, mindmap, wide layout, timeline, gantt, and kanban rows. Timeline parse was selected as a different hot path from the recent render and layout work: profharness timeline 1600 parse local fallback median 2028532 ns, layout median 1153675 ns, render median 5605647 ns; render was skipped because the ledger is heavy with renderer/string/node attempts."
+graveyard_route = "Alien Graveyard + Alien Artifact Coding + Extreme Optimization route: data-layout/API-fusion primitive. Reuse the dense node slot already returned by the builder and replace repeated string-key reentry plus dynamic class-name construction with direct slot mutation and a fixed class table."
+rust_orig_command = "AGENT_NAME=TanSparrow CARGO_TARGET_DIR=/data/projects/frankenmermaid/.rch-targets/mermaid-cod RCH_WORKER=vmi1293453 RCH_QUEUE_WHEN_BUSY=1 rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- timeline_stages/parse/1600 --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot (temporary legacy original timeline class append restored, benchmark row kept)"
+rust_candidate_command = "AGENT_NAME=TanSparrow CARGO_TARGET_DIR=/data/projects/frankenmermaid/.rch-targets/mermaid-cod RCH_WORKER=vmi1293453 RCH_QUEUE_WHEN_BUSY=1 rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- timeline_stages/parse/1600 --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot"
+rust_worker = "Accepted comparison uses actual same worker vmi1293453 for both legacy original and candidate. A prior candidate smoke on ovh-a measured 1.0609 ms mean and is not used for the ratio."
+mermaid_js_command = "No fresh same-input Mermaid.js parser comparator was captured; this entry's ratio-vs-ORIG is against the legacy Rust implementation of the same frankenmermaid-cli Criterion row."
+behavior_proof = "The helper trims class names, ignores empty class names, and preserves old class de-duplication. It is used only after successful intern_node for timeline periods/events, so it cannot create missing nodes that the old reentrant class path would have created."
+agent_mail = "AGENT_NAME was set for RCH/cargo commands. Agent Mail reservation was not used because this run followed the direct land-or-dig path and prior project runs report the SQLite corruption circuit breaker."
+bench_syntax_note = "Release-profile benches used --profile release, matching this workspace's Cargo profile layout."
+
+[post_measurement_timeline_parse_node_id_class_append_2026_07_09.metrics]
+"timeline_stages_parse_1600_orig_mean_ms" = 1.4613
+"timeline_stages_parse_1600_orig_low_ms" = 1.4163
+"timeline_stages_parse_1600_orig_high_ms" = 1.5047
+"timeline_stages_parse_1600_candidate_mean_ms" = 1.2185
+"timeline_stages_parse_1600_candidate_low_ms" = 1.1844
+"timeline_stages_parse_1600_candidate_high_ms" = 1.2665
+"timeline_stages_parse_1600_candidate_over_orig" = 0.83385
+"timeline_stages_parse_1600_speedup_x" = 1.1993
+"timeline_stages_parse_1600_delta_pct" = -16.62
+"timeline_stages_parse_1600_criterion_change_pct" = -16.700
+"timeline_stages_parse_1600_criterion_change_low_pct" = -22.054
+"timeline_stages_parse_1600_criterion_change_high_pct" = -11.657
+"timeline_stages_parse_1600_criterion_p_value" = 0.00
+"profile_timeline_1600_parse_median_ns_local_fallback" = 2028532
+"profile_timeline_1600_layout_median_ns_local_fallback" = 1153675
+"profile_timeline_1600_render_median_ns_local_fallback" = 5605647
+
+[post_measurement_timeline_parse_node_id_class_append_2026_07_09.validation]
+"cargo_test_fm_parser_timeline" = "passed via RCH vmi1167313 after final parser code: cargo test -p fm-parser timeline_ (9 tests)"
+"cargo_check_cli_benches" = "passed via RCH ovh-a before final ledger edit: cargo check -p frankenmermaid-cli --benches"
+"cargo_test_frankentui_conformance" = "passed via RCH local fallback after a narrow local fm-layout serializer lifetime compiler fix: cargo test -p frankenmermaid-cli --test frankentui_conformance_test (1 test)"
+"cargo_check_workspace_all_targets" = "passed via RCH ovh-b: cargo check --workspace --all-targets"
+"cargo_clippy_workspace_all_targets" = "passed via RCH ovh-b: cargo clippy --workspace --all-targets -- -D warnings"
+"cargo_fmt_check" = "passed locally after final edits: cargo fmt --check"
+"git_diff_check" = "passed locally after final edits: git diff --check"
+"ubs_scoped_files" = "ran on scoped changed files; exit 1 from existing broad heuristics such as parser test unwrap inventory, layout token-comparison false positives, STATE_PSEUDO_TOKEN hardcoded-secret false positive, and indexing/allocation inventories. UBS embedded fmt, clippy, cargo check, test build, audit, and deny subchecks were clean."
+
+[post_measurement_timeline_parse_node_id_class_append_2026_07_09.decision]
+kept = true
+reason = "Same-worker vmi1293453 release Criterion cuts timeline_stages/parse/1600 from 1.4613 ms to 1.2185 ms (candidate/ORIG 0.83385x, 1.20x faster, p=0.00) by appending classes through the dense node id returned by intern_node and using a fixed section-class table."

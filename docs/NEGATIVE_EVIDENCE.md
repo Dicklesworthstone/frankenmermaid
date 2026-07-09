@@ -10274,3 +10274,27 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   circuit breaker, so no reservation was available.
 
   Agent: TanSparrow
+
+<!-- tansparrow-timeline-node-id-class-append -->
+### LANDED: timeline parser appends classes by node id (timeline parse 1.20x) (2026-07-09)
+- **Ledger review:** read the rejection ledger first and avoided the repeated SVG attribute/path/string emitters,
+  large body streaming, common node streaming, shape streaming, parser byte-gates/trim/memchr/operator scans,
+  layout comparator rewrites, crossing-map/sort rewrites, and timeline layout axis-tick work. Fresh profiling
+  then sampled xychart, requirements, mindmap, wide layout, timeline, gantt, and kanban rows; timeline parse was
+  a different hot path with no matching rejection family in the ledger.
+- **Primitive:** data-layout/API fusion. Timeline parsing already receives the dense `IrNodeId` from
+  `intern_node`, but then re-entered `add_class_to_node` by string key for every period/event class. The landed
+  path appends classes directly through the dense node slot and replaces per-node `format!("timeline-section-{n}")`
+  with a fixed eight-entry class table. Missing-node and class-dedup behavior stay the same because the new helper
+  is only used after a successful intern and keeps the old trim/dedup checks.
+- **Measurement:** same-worker `vmi1293453`, per-crate Criterion via
+  `AGENT_NAME=TanSparrow CARGO_TARGET_DIR=/data/projects/frankenmermaid/.rch-targets/mermaid-cod
+  RCH_WORKER=vmi1293453 RCH_QUEUE_WHEN_BUSY=1 rch exec -- cargo bench --profile release -p
+  frankenmermaid-cli --bench pipeline_bench -- timeline_stages/parse/1600 --warm-up-time 1
+  --measurement-time 2 --sample-size 10 --noplot`. Legacy original: **1.4613 ms** mean [1.4163, 1.5047].
+  Candidate: **1.2185 ms** mean [1.1844, 1.2665]. Ratio vs ORIG: **0.8338x** candidate/ORIG,
+  **1.1993x faster**, Criterion change **-16.70%** [-22.05%, -11.66%], p < 0.05.
+- **Validation:** `cargo test -p fm-parser timeline_` passed via RCH after the parser change; conformance and
+  workspace gates are recorded in the structured ledger entry for this keep.
+- **Bench syntax note:** release-profile benches used `--profile release`, matching this workspace's Cargo
+  profile layout.

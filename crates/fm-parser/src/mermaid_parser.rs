@@ -4179,6 +4179,17 @@ fn parse_kanban_item(text: &str) -> (String, String) {
     (id, label)
 }
 
+const TIMELINE_SECTION_CLASSES: [&str; 8] = [
+    "timeline-section-0",
+    "timeline-section-1",
+    "timeline-section-2",
+    "timeline-section-3",
+    "timeline-section-4",
+    "timeline-section-5",
+    "timeline-section-6",
+    "timeline-section-7",
+];
+
 fn parse_timeline(input: &str, builder: &mut IrBuilder) {
     let mut previous_period: Option<IrNodeId> = None;
     let mut current_period: Option<IrNodeId> = None;
@@ -4269,13 +4280,12 @@ fn parse_timeline(input: &str, builder: &mut IrBuilder) {
                 builder.intern_node(&period_id, Some(period_text), NodeShape::Rect, span);
 
             if let Some(period_node_id) = period_node {
-                builder.add_class_to_node(&period_id, "timeline-period", span);
+                builder.add_class_to_node_id(period_node_id, "timeline-period");
                 // Section color class for background band differentiation.
-                if current_section.is_some() {
-                    builder.add_class_to_node(
-                        &period_id,
-                        &format!("timeline-section-{}", current_section.unwrap_or(0) % 8),
-                        span,
+                if let Some(section_idx) = current_section {
+                    builder.add_class_to_node_id(
+                        period_node_id,
+                        TIMELINE_SECTION_CLASSES[section_idx % TIMELINE_SECTION_CLASSES.len()],
                     );
                 }
 
@@ -4369,13 +4379,12 @@ fn parse_timeline_events(
         if let Some(event_node_id) =
             builder.intern_node(&event_id, Some(event_text), NodeShape::Rounded, span)
         {
-            builder.add_class_to_node(&event_id, "timeline-event", span);
+            builder.add_class_to_node_id(event_node_id, "timeline-event");
             if let Some(section_idx) = current_section {
                 builder.add_node_to_cluster(section_idx, event_node_id);
-                builder.add_class_to_node(
-                    &event_id,
-                    &format!("timeline-section-{}", section_idx % 8),
-                    span,
+                builder.add_class_to_node_id(
+                    event_node_id,
+                    TIMELINE_SECTION_CLASSES[section_idx % TIMELINE_SECTION_CLASSES.len()],
                 );
             }
             if let Some(subgraph_idx) = current_section_subgraph {

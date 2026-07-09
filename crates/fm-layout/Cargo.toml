@@ -23,6 +23,7 @@ fnx-experimental-directed = ["fnx-integration"]
 [dependencies]
 fm-core.workspace = true
 tracing.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 egg = "0.11.0"
 # Inline storage for short edge paths (already in the lock via transitive deps): every
