@@ -117,6 +117,18 @@ const fn op_first_byte_gate(operators: &[(&str, ArrowType)]) -> u128 {
 const SEQUENCE_OP_GATE: u128 = op_first_byte_gate(&SEQUENCE_OPERATORS);
 
 const DANGLING_PLACEHOLDER_PREFIX: &str = "__fm_dangling_line_";
+const JOURNEY_SCORE_CLASSES: [&str; 10] = [
+    "journey-score-0",
+    "journey-score-1",
+    "journey-score-2",
+    "journey-score-3",
+    "journey-score-4",
+    "journey-score-5",
+    "journey-score-6",
+    "journey-score-7",
+    "journey-score-8",
+    "journey-score-9",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NodeToken {
@@ -3908,18 +3920,12 @@ fn parse_journey(input: &str, builder: &mut IrBuilder) {
         let current_step =
             builder.intern_node(&step_id, Some(&step.name), NodeShape::Rounded, span);
         if let Some(step_node) = current_step {
-            builder.add_class_to_node(&step_id, "journey-step", span);
+            builder.add_class_to_node_id(step_node, "journey-step");
             if let Some(score) = step.score {
-                builder.add_class_to_node(&step_id, &format!("journey-score-{score}"), span);
+                let score_class = journey_score_class(score);
+                builder.add_class_to_node_id(step_node, score_class.as_ref());
             }
-            for actor in &step.actors {
-                builder.add_class_to_node(&step_id, "journey-actor", span);
-                builder.add_class_to_node(
-                    &step_id,
-                    &format!("journey-actor-{}", normalize_compound_identifier(actor)),
-                    span,
-                );
-            }
+            add_journey_actor_classes(builder, step_node, step.actors_raw);
             if let Some(section_idx) = current_section {
                 builder.add_node_to_cluster(section_idx, step_node);
             }
@@ -3936,13 +3942,13 @@ fn parse_journey(input: &str, builder: &mut IrBuilder) {
     }
 }
 
-struct JourneyStep {
+struct JourneyStep<'a> {
     name: String,
     score: Option<u8>,
-    actors: Vec<String>,
+    actors_raw: Option<&'a str>,
 }
 
-fn parse_journey_step(line: &str) -> Option<JourneyStep> {
+fn parse_journey_step(line: &str) -> Option<JourneyStep<'_>> {
     // `trim_fast` (byte ASCII trim) instead of the Unicode `str::trim` on each `:`-split segment —
     // these are raw `Task: score: actors` parts with real surrounding whitespace, so the trim does
     // work (unlike pre-trimmed inputs); it was ~10% of journey parse. Byte-identical.
@@ -3950,20 +3956,43 @@ fn parse_journey_step(line: &str) -> Option<JourneyStep> {
     let name = clean_label(segments.next())?;
 
     let score = segments.next().and_then(|raw| raw.parse::<u8>().ok());
-    let actors = segments
-        .next()
-        .map(|raw| {
-            raw.split(',')
-                .filter_map(|actor| clean_label(Some(actor)))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let actors_raw = segments.next();
 
     Some(JourneyStep {
         name,
         score,
-        actors,
+        actors_raw,
     })
+}
+
+fn journey_score_class(score: u8) -> Cow<'static, str> {
+    JOURNEY_SCORE_CLASSES.get(usize::from(score)).map_or_else(
+        || Cow::Owned(format!("journey-score-{score}")),
+        |class| Cow::Borrowed(*class),
+    )
+}
+
+fn add_journey_actor_classes(
+    builder: &mut IrBuilder,
+    step_node: IrNodeId,
+    actors_raw: Option<&str>,
+) {
+    let Some(actors_raw) = actors_raw else {
+        return;
+    };
+
+    let mut has_actor_class = false;
+    for actor in actors_raw
+        .split(',')
+        .filter_map(|actor| clean_label(Some(actor)))
+    {
+        if !has_actor_class {
+            builder.add_class_to_node_id(step_node, "journey-actor");
+            has_actor_class = true;
+        }
+        let actor_class = format!("journey-actor-{}", normalize_compound_identifier(&actor));
+        builder.add_class_to_node_id(step_node, &actor_class);
+    }
 }
 
 // ---------------------------------------------------------------------------

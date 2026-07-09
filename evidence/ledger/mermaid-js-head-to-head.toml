@@ -3286,6 +3286,50 @@ bench_syntax_note = "Release-profile benches used --profile release, matching th
 kept = true
 reason = "Same-worker vmi1167313 release Criterion cuts single_node_label_edit/incremental/1000 from 5.2886 ms to 4.2115 ms (candidate/ORIG 0.79634x, 1.26x faster) by replacing flowchart request-key JSON/string serialization with a layout-relevant structural fingerprint and keeping generic hashing for other diagram families."
 
+[post_measurement_journey_parse_node_id_actor_fusion_2026_07_09]
+date = "2026-07-09"
+agent = "CodexPerfMermaid"
+status = "keep"
+candidate_summary = "Fuse journey-step actor lowering into parse_journey and append generated classes through the IrNodeId returned by intern_node. A fixed one-digit score class table avoids formatting the common score classes, while actor-specific classes still preserve the old clean-label and normalized-id behavior."
+negative_evidence_review = "Read docs/NEGATIVE_EVIDENCE.md first and avoided the repeated SVG attribute/path/string emitters, large body streaming, common node and shape streaming, raw SVG parts, parser byte-gates/trim/memchr/operator scans, DOT parser work, timeline parse class append, layout comparator/crossing rewrites, and flowchart layout-hash work."
+profile_route = "Profiling Software Performance ran a broad fm-parser parse_bench pass. DOT parse was the hottest row but had peer-owned dot_parser work in the shared checkout, so it was excluded. The next clean parser rows were flowchart/wide, class, journey, and gantt; flowchart/wide byte-scanning and gantt/date metadata already had recent parser keeps, so journey_200 was selected as a different hot path."
+graveyard_route = "Alien Graveyard + Alien Artifact Coding + Extreme Optimization route: algebraic-fusion plus succinct-structure primitive. The parser no longer materializes a Vec<String> of actors only to consume it immediately, and the score class uses a compact table for the common single-byte code range instead of dynamic formatting."
+rust_orig_command = "AGENT_NAME=CodexPerfMermaid RCH_WORKER=vmi1152480 RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod rch exec -- cargo bench --profile release -p fm-parser --bench parse_bench -- parse/journey/journey_200 --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot (detached LEGACY ORIGINAL worktree /data/projects/frankenmermaid-orig-journey-codex-0709 at ff5656e; RCH actually routed to vmi1227854)"
+rust_candidate_command = "AGENT_NAME=CodexPerfMermaid RCH_WORKER=vmi1227854 RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod rch exec -- cargo bench --profile release -p fm-parser --bench parse_bench -- parse/journey/journey_200 --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot"
+rust_worker = "Accepted comparison uses actual same worker vmi1227854 for LEGACY ORIGINAL and candidate. The user-requested CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod was rewritten by RCH to worker-scoped paths for remote execution."
+mermaid_js_command = "No fresh same-input Mermaid.js journey parser comparator exists; this entry's ratio-vs-ORIG is against the legacy Rust implementation of the same fm-parser Criterion row."
+behavior_proof = "The fused path runs only after intern_node succeeds, exactly where the old add_class_to_node calls re-entered the same node by string key. Class order is preserved: journey-step, journey-score-N, journey-actor, then each journey-actor-normalized-name. Actor labels still pass through clean_label and normalize_compound_identifier before class generation."
+agent_mail = "AGENT_NAME was set for RCH/cargo commands. Agent Mail reservation was not used because this run followed the direct land-or-dig path and prior project runs report the SQLite corruption circuit breaker."
+bench_syntax_note = "Release-profile benches used --profile release, matching this workspace's Cargo profile layout."
+
+[post_measurement_journey_parse_node_id_actor_fusion_2026_07_09.metrics]
+"journey_parse_200_orig_low_us" = 268.97
+"journey_parse_200_orig_mean_us" = 284.21
+"journey_parse_200_orig_high_us" = 298.03
+"journey_parse_200_candidate_low_us" = 196.58
+"journey_parse_200_candidate_mean_us" = 203.45
+"journey_parse_200_candidate_high_us" = 208.69
+"journey_parse_200_candidate_over_orig" = 0.71584
+"journey_parse_200_speedup_x" = 1.3970
+"journey_parse_200_delta_pct" = -28.42
+"candidate_criterion_change_pct" = -16.920
+"candidate_criterion_change_low_pct" = -21.204
+"candidate_criterion_change_high_pct" = -12.252
+"candidate_criterion_p_value" = 0.00
+
+[post_measurement_journey_parse_node_id_actor_fusion_2026_07_09.validation]
+"cargo_test_fm_parser_journey" = "passed via RCH vmi1227854: cargo test -p fm-parser journey_ -- --nocapture (2 tests)"
+"cargo_test_frankentui_conformance" = "passed via RCH ovh-a: cargo test -p frankenmermaid-cli --test frankentui_conformance_test (1 test)"
+"cargo_check_workspace_all_targets" = "passed via RCH hz2: cargo check --workspace --all-targets"
+"cargo_clippy_workspace_all_targets" = "passed via RCH hz2: cargo clippy --workspace --all-targets -- -D warnings"
+"cargo_fmt_check" = "passed locally: cargo fmt --all --check"
+"git_diff_check" = "passed locally: git diff --check"
+"ubs_scoped_file" = "ran on crates/fm-parser/src/mermaid_parser.rs; exit 1 from existing broad parser heuristics such as test unwrap inventory, token-comparison false positives, STATE_PSEUDO_TOKEN hardcoded-secret false positive, and indexing/allocation inventories. UBS embedded fmt, clippy, cargo check, test build, audit, and deny subchecks were clean."
+
+[post_measurement_journey_parse_node_id_actor_fusion_2026_07_09.decision]
+kept = true
+reason = "Same-worker vmi1227854 release Criterion cuts parse/journey/journey_200 from 284.21 us to 203.45 us (candidate/ORIG 0.71584x, 1.40x faster) by fusing journey actor lowering into the parser and appending classes through the dense node id returned by intern_node."
+
 [post_measurement_dot_preprocess_fusion_2026_07_09]
 date = "2026-07-09"
 agent = "TanSparrow"
