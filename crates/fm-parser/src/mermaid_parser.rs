@@ -3105,6 +3105,25 @@ fn state_edge_endpoint<'a>(
     }
 }
 
+fn finalize_requirement_block(
+    builder: &mut IrBuilder,
+    current_req_node: &mut Option<fm_core::IrNodeId>,
+    current_req_type: &mut Option<String>,
+) {
+    if let Some(node_id) = *current_req_node
+        && let Some(node) = builder.node_mut(node_id)
+    {
+        let meta = node
+            .requirement_meta
+            .get_or_insert_with(|| Box::new(fm_core::IrRequirementNodeMeta::default()));
+        if meta.requirement_type.is_none() {
+            meta.requirement_type = current_req_type.take();
+        }
+    }
+    *current_req_node = None;
+    *current_req_type = None;
+}
+
 fn parse_requirement(input: &str, builder: &mut IrBuilder) {
     let mut inside_requirement_block = false;
     let mut current_req_node: Option<fm_core::IrNodeId> = None;
@@ -3129,6 +3148,33 @@ fn parse_requirement(input: &str, builder: &mut IrBuilder) {
 
         if trimmed == "requirementDiagram" {
             continue;
+        }
+
+        if inside_requirement_block {
+            if trimmed.starts_with('}') {
+                finalize_requirement_block(builder, &mut current_req_node, &mut current_req_type);
+                inside_requirement_block = false;
+                continue;
+            }
+
+            if let Some((field @ ("id" | "text" | "risk" | "verifymethod"), rest)) =
+                trimmed.split_once(':')
+                && let Some(node_id) = current_req_node
+                && let Some(node) = builder.node_mut(node_id)
+            {
+                let meta = node
+                    .requirement_meta
+                    .get_or_insert_with(|| Box::new(fm_core::IrRequirementNodeMeta::default()));
+                let value = trim_fast(rest).to_string();
+                match field {
+                    "id" => meta.req_id = Some(value),
+                    "text" => meta.text = Some(value),
+                    "risk" => meta.risk = Some(value),
+                    "verifymethod" => meta.verify_method = Some(value),
+                    _ => unreachable!(),
+                }
+                continue;
+            }
         }
 
         // Check for any requirement block start.
@@ -3162,65 +3208,9 @@ fn parse_requirement(input: &str, builder: &mut IrBuilder) {
             continue;
         }
         if trimmed.starts_with('}') {
-            // Finalize the requirement block: store accumulated metadata.
-            if let Some(node_id) = current_req_node
-                && let Some(node) = builder.node_mut(node_id)
-            {
-                let meta = node
-                    .requirement_meta
-                    .get_or_insert_with(|| Box::new(fm_core::IrRequirementNodeMeta::default()));
-                if meta.requirement_type.is_none() {
-                    meta.requirement_type = current_req_type.take();
-                }
-            }
+            finalize_requirement_block(builder, &mut current_req_node, &mut current_req_type);
             inside_requirement_block = false;
-            current_req_node = None;
-            current_req_type = None;
             continue;
-        }
-
-        // Extract metadata fields inside a requirement block.
-        if inside_requirement_block {
-            if let Some(rest) = trimmed.strip_prefix("id:")
-                && let Some(node_id) = current_req_node
-                && let Some(node) = builder.node_mut(node_id)
-            {
-                let meta = node
-                    .requirement_meta
-                    .get_or_insert_with(|| Box::new(fm_core::IrRequirementNodeMeta::default()));
-                meta.req_id = Some(trim_fast(rest).to_string());
-                continue;
-            }
-            if let Some(rest) = trimmed.strip_prefix("text:")
-                && let Some(node_id) = current_req_node
-                && let Some(node) = builder.node_mut(node_id)
-            {
-                let meta = node
-                    .requirement_meta
-                    .get_or_insert_with(|| Box::new(fm_core::IrRequirementNodeMeta::default()));
-                meta.text = Some(trim_fast(rest).to_string());
-                continue;
-            }
-            if let Some(rest) = trimmed.strip_prefix("risk:")
-                && let Some(node_id) = current_req_node
-                && let Some(node) = builder.node_mut(node_id)
-            {
-                let meta = node
-                    .requirement_meta
-                    .get_or_insert_with(|| Box::new(fm_core::IrRequirementNodeMeta::default()));
-                meta.risk = Some(trim_fast(rest).to_string());
-                continue;
-            }
-            if let Some(rest) = trimmed.strip_prefix("verifymethod:")
-                && let Some(node_id) = current_req_node
-                && let Some(node) = builder.node_mut(node_id)
-            {
-                let meta = node
-                    .requirement_meta
-                    .get_or_insert_with(|| Box::new(fm_core::IrRequirementNodeMeta::default()));
-                meta.verify_method = Some(trim_fast(rest).to_string());
-                continue;
-            }
         }
 
         if parse_requirement_relation(trimmed, line_number, line, builder) {
@@ -4566,6 +4556,19 @@ fn parse_er_relationship(
     }
 }
 
+enum PendingGanttDependency {
+    Resolved {
+        node: IrNodeId,
+        from: IrNodeId,
+        span: Span,
+    },
+    Unresolved {
+        node: IrNodeId,
+        dependency: String,
+        span: Span,
+    },
+}
+
 fn parse_gantt(input: &str, builder: &mut IrBuilder) {
     let mut gantt_meta = IrGanttMeta::default();
     let mut current_section_idx = 0_usize;
@@ -4574,7 +4577,9 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
     // O(log N) String-comparison inserts/lookups with O(1) hashing. Byte-identical output.
     let mut task_ids_to_nodes: rustc_hash::FxHashMap<String, IrNodeId> =
         rustc_hash::FxHashMap::default();
-    let mut pending_dependencies: Vec<(IrNodeId, String, Span)> = Vec::new();
+    let mut pending_dependencies: Vec<PendingGanttDependency> = Vec::new();
+    let mut previous_task_id: Option<String> = None;
+    let mut previous_task_node: Option<IrNodeId> = None;
 
     for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
@@ -4687,11 +4692,29 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
         };
 
         let parsed_meta = parse_gantt_task_metadata(raw_meta, gantt_meta.date_format.as_deref());
+        let mut current_task_ref: Option<(String, IrNodeId)> = None;
         if let Some(task_id_ref) = parsed_meta.task_id.as_ref() {
-            task_ids_to_nodes.entry(task_id_ref.clone()).or_insert(node);
+            let task_id_key = task_id_ref.clone();
+            let mapped_node = *task_ids_to_nodes.entry(task_id_key.clone()).or_insert(node);
+            current_task_ref = Some((task_id_key, mapped_node));
         }
         if let Some(after_task_id) = parsed_meta.depends_on.first() {
-            pending_dependencies.push((node, after_task_id.clone(), span));
+            let cached_from = if previous_task_id.as_deref() == Some(after_task_id.as_str()) {
+                previous_task_node
+            } else {
+                None
+            };
+            if let Some(from) =
+                cached_from.or_else(|| task_ids_to_nodes.get(after_task_id).copied())
+            {
+                pending_dependencies.push(PendingGanttDependency::Resolved { node, from, span });
+            } else {
+                pending_dependencies.push(PendingGanttDependency::Unresolved {
+                    node,
+                    dependency: after_task_id.clone(),
+                    span,
+                });
+            }
         }
 
         let mut classes = Vec::new();
@@ -4717,13 +4740,33 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
             progress: parsed_meta.progress,
             task_type: parsed_meta.task_type,
         });
+
+        if let Some((task_id, task_node)) = current_task_ref {
+            previous_task_id = Some(task_id);
+            previous_task_node = Some(task_node);
+        } else {
+            previous_task_id = None;
+            previous_task_node = None;
+        }
     }
 
-    for (node, dependency, span) in pending_dependencies {
-        if let Some(from) = task_ids_to_nodes.get(&dependency).copied() {
-            builder.push_edge(from, node, ArrowType::Arrow, None, span);
-        } else {
-            builder.add_warning(format!("Unresolved gantt dependency 'after {dependency}'"));
+    for dependency in pending_dependencies {
+        match dependency {
+            PendingGanttDependency::Resolved { node, from, span } => {
+                builder.push_edge(from, node, ArrowType::Arrow, None, span);
+            }
+            PendingGanttDependency::Unresolved {
+                node,
+                dependency,
+                span,
+            } => {
+                if let Some(from) = task_ids_to_nodes.get(&dependency).copied() {
+                    builder.push_edge(from, node, ArrowType::Arrow, None, span);
+                } else {
+                    builder
+                        .add_warning(format!("Unresolved gantt dependency 'after {dependency}'"));
+                }
+            }
         }
     }
 

@@ -3418,3 +3418,54 @@ bench_syntax_note = "Release-profile benches used --profile release, matching th
 [post_measurement_class_dense_member_borrowed_cardinality_rejection_2026_07_09.decision]
 kept = false
 reason = "Same-machine local fallback Criterion slowed parse/class/class_100 from 241.84 us to 272.12 us (candidate/ORIG 1.1252x, +12.52%), and the remote candidate did not show a clean win. The dense class-member insertion plus borrowed no-cardinality relationship text candidate was reverted."
+
+[post_measurement_requirement_metadata_block_dispatch_2026_07_09]
+date = "2026-07-09"
+agent = "TanSparrow"
+status = "keep"
+candidate_summary = "Dispatch requirement block-local metadata before diagram-level keyword scanning, fuse id/text/risk/verifymethod handling through one colon split, and share close-brace finalization through a helper."
+negative_evidence_review = "Read docs/NEGATIVE_EVIDENCE.md first and avoided repeated SVG render emitters, DOT preprocessing, journey actor lowering, timeline class append, flowchart layout hashing, class dense-member/simple-relationship attempts, and crossing-map rewrites."
+profile_route = "Profiling Software Performance sampled parser and CLI pipeline rows. After excluding recent render, DOT, journey, timeline, flowchart, and class lanes, requirement_stages/parse/512 was a different non-render hot row at 375.37 us in the stage profile."
+graveyard_route = "Alien Graveyard + Alien Artifact Coding + Extreme Optimization route: data-layout plus algebraic-fusion primitive. Treat the inside-requirement-block state as the discriminator, avoiding repeated outer keyword scans for metadata lines and fusing four metadata prefixes into one field dispatch."
+rust_orig_command = "AGENT_NAME=TanSparrow CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod RCH_QUEUE_WHEN_BUSY=1 rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- requirement_stages/parse/512 --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot (temporary legacy original restored manually before this run)"
+rust_candidate_command = "AGENT_NAME=TanSparrow CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod RCH_WORKER=ovh-a RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench -- requirement_stages/parse/512 --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot"
+rust_worker = "Accepted comparison uses actual same worker ovh-a for both legacy original and candidate. A preliminary original row on vmi1227854 and a local fallback candidate row were not used for scoring."
+mermaid_js_command = "No fresh same-input Mermaid.js requirement parser comparator was captured; this entry's ratio-vs-ORIG is against the legacy Rust implementation of the same frankenmermaid-cli Criterion row."
+behavior_proof = "The new fast path runs only while inside_requirement_block is true. It recognizes the same four metadata field names, still requires current_req_node and node_mut to succeed before consuming the line, and leaves non-metadata block lines to the existing relation/warning path. The finalizer helper contains the old close-brace metadata-type update and clears the same state."
+agent_mail = "AGENT_NAME was set for RCH/cargo commands. Agent Mail reservation was not used because this run followed the direct land-or-dig path and prior project runs report the SQLite corruption circuit breaker."
+bench_syntax_note = "Release-profile benches used --profile release, matching this workspace's Cargo profile layout."
+
+[post_measurement_requirement_metadata_block_dispatch_2026_07_09.metrics]
+"profile_requirement_stages_parse_512_mean_us_vmi1149989" = 375.37
+"preliminary_orig_vmi1227854_low_us_not_scored" = 340.41
+"preliminary_orig_vmi1227854_mean_us_not_scored" = 354.89
+"preliminary_orig_vmi1227854_high_us_not_scored" = 373.62
+"local_candidate_low_us_not_scored" = 371.52
+"local_candidate_mean_us_not_scored" = 384.08
+"local_candidate_high_us_not_scored" = 393.42
+"requirement_parse_512_orig_low_us" = 298.90
+"requirement_parse_512_orig_mean_us" = 299.96
+"requirement_parse_512_orig_high_us" = 300.58
+"requirement_parse_512_candidate_low_us" = 290.16
+"requirement_parse_512_candidate_mean_us" = 290.76
+"requirement_parse_512_candidate_high_us" = 291.37
+"requirement_parse_512_candidate_over_orig" = 0.9693
+"requirement_parse_512_speedup_x" = 1.0316
+"requirement_parse_512_delta_pct" = -3.07
+"requirement_parse_512_criterion_change_pct" = -2.7348
+"requirement_parse_512_criterion_change_low_pct" = -3.7728
+"requirement_parse_512_criterion_change_high_pct" = -1.7605
+"requirement_parse_512_criterion_p_value" = 0.00
+
+[post_measurement_requirement_metadata_block_dispatch_2026_07_09.validation]
+"cargo_test_fm_parser_requirement" = "passed via RCH vmi1149989: cargo test -p fm-parser requirement -- --nocapture (10 selected tests)"
+"cargo_test_frankentui_conformance" = "passed via RCH hz2: cargo test -p frankenmermaid-cli --test frankentui_conformance_test (1 test)"
+"cargo_check_workspace_all_targets" = "passed via RCH hz2: cargo check --workspace --all-targets"
+"cargo_clippy_workspace_all_targets" = "passed via RCH hz2: cargo clippy --workspace --all-targets -- -D warnings"
+"cargo_fmt_check" = "passed locally: cargo fmt --all --check"
+"git_diff_check" = "passed locally: git diff --check"
+"ubs_scoped_file" = "ran on crates/fm-parser/src/mermaid_parser.rs; exit 1 from existing parser-wide heuristics such as test unwrap inventory, token-comparison false positives, STATE_PSEUDO_TOKEN hardcoded-secret false positive, direct-indexing, assert, and allocation inventories. UBS embedded fmt, clippy, cargo check, test build, audit, and deny subchecks were clean."
+
+[post_measurement_requirement_metadata_block_dispatch_2026_07_09.decision]
+kept = true
+reason = "Same-worker ovh-a release Criterion cuts requirement_stages/parse/512 from 299.96 us to 290.76 us (candidate/ORIG 0.9693x, 1.03x faster, p=0.00) by dispatching requirement block metadata before diagram-level keyword scans and fusing field handling through one colon split."

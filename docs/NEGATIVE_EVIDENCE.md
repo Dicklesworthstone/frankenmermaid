@@ -10299,6 +10299,35 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
 - **Bench syntax note:** release-profile benches used `--profile release`, matching this workspace's Cargo
   profile layout.
 
+<!-- tansparrow-requirement-metadata-block-dispatch -->
+### LANDED: requirement parser block-local metadata dispatch skips keyword scans (parse/512 1.03x) (2026-07-09)
+- **Ledger review:** read the rejection ledger first and avoided repeated SVG render emitters, DOT
+  preprocessing, journey actor lowering, timeline class append, flowchart layout hashing, class parser
+  dense-member/simple-relationship attempts, and crossing-map rewrites. Fresh profiling selected a different
+  non-render row: `requirement_stages/parse/512`, where each block has four metadata lines.
+- **Primitive:** data-layout/algebraic-fusion. Requirement parsing now dispatches block-local metadata before
+  scanning the seven diagram-level requirement keywords, and fuses `id`, `text`, `risk`, and `verifymethod`
+  through one colon split. Close-brace finalization moved behind a small helper so brace behavior stays
+  byte-for-byte equivalent for matched blocks and unmatched closing braces.
+- **Measurement:** same-worker `ovh-a`, per-crate Criterion via
+  `AGENT_NAME=TanSparrow CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod RCH_QUEUE_WHEN_BUSY=1
+  rch exec -- cargo bench --profile release -p frankenmermaid-cli --bench pipeline_bench --
+  requirement_stages/parse/512 --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot`.
+  Legacy original: **299.96 us** mean [298.90, 300.58]. Candidate with `RCH_WORKER=ovh-a`: **290.76 us**
+  mean [290.16, 291.37]. Ratio vs ORIG: **0.9693x** candidate/ORIG, **1.0316x faster**, Criterion change
+  **-2.7348%** [-3.7728%, -1.7605%], p < 0.05.
+- **Non-scoring routing signal:** a preliminary original row on `vmi1227854` measured **354.89 us** mean
+  [340.41, 373.62], and a local fallback candidate row measured **384.08 us** mean [371.52, 393.42].
+  These were not used for the keep ratio because the accepted pair above stayed on `ovh-a`.
+- **Validation:** requirement parser tests passed via RCH `vmi1149989` (10 selected tests); conformance passed
+  via RCH `hz2`; workspace `cargo check --workspace --all-targets` and `cargo clippy --workspace
+  --all-targets -- -D warnings` passed via RCH `hz2`; local `cargo fmt --all --check` and `git diff --check`
+  passed. Scoped UBS on `crates/fm-parser/src/mermaid_parser.rs` returned exit 1 from existing parser-wide
+  heuristic inventories, while its embedded fmt, clippy, cargo-check, test-build, audit, and deny subchecks
+  were clean.
+- **Bench syntax note:** release-profile benches used `--profile release`, matching this workspace's Cargo
+  profile layout.
+
 <!-- codexperf-class-simple-relationship-fusion-rejected -->
 ### NO-SHIP: class parser simple-relationship fusion regressed class_100 on same worker (2026-07-09)
 - **Ledger review:** read the rejection ledger first and excluded the long SVG streaming/output seam, DOT
