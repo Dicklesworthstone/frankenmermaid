@@ -3245,3 +3245,43 @@ bench_syntax_note = "Release-profile benches used --profile release, matching th
 [post_measurement_timeline_parse_node_id_class_append_2026_07_09.decision]
 kept = true
 reason = "Same-worker vmi1293453 release Criterion cuts timeline_stages/parse/1600 from 1.4613 ms to 1.2185 ms (candidate/ORIG 0.83385x, 1.20x faster, p=0.00) by appending classes through the dense node id returned by intern_node and using a fixed section-class table."
+
+[post_measurement_flowchart_layout_fast_hash_2026_07_09]
+date = "2026-07-09"
+agent = "CodexPerfMermaid"
+status = "keep"
+candidate_summary = "Replace the fm-layout incremental memo key's full-IR serde_json/text serializer path for flowcharts with a layout-relevant structural fingerprint over nodes, labels, ports, edges, clusters, graph subgraphs, constraints, and the request tail. Non-flowchart diagrams keep the generic serde structural fallback."
+negative_evidence_review = "Read docs/NEGATIVE_EVIDENCE.md first and stopped the rejected parser/SVG/string-emission seams plus the recent E-graph crossing seam. Avoided already-rejected byte gates, trim/operator scans, node/common-shape SVG streaming retries, large body streaming, sort-only layout rewrites, and content-aware render buffer sizing."
+profile_route = "Profiling Software Performance selected the fm-layout incremental single-node label edit path, specifically layout_memo_key/stable_layout_request_hash before selective subgraph relayout, instead of parser or SVG render rows. The initial generic structural serializer candidate measured only 5.2322 ms mean vs ORIG 5.2886 ms and was not accepted; the kept fast flowchart structural digest measured 4.2115 ms mean."
+graveyard_route = "Alien Graveyard + Alien Artifact Coding + Extreme Optimization route: algebraic-fusion plus data-layout primitive. Fuse request-key construction into a compact flowchart layout fingerprint and skip JSON/string materialization while preserving a generic structural fallback for other diagram families."
+rust_orig_command = "AGENT_NAME=CodexPerfMermaid CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod-orig-hashbench-codex rch exec -- cargo bench --profile release -p fm-layout --bench incremental_layout -- single_node_label_edit/incremental/1000 --warm-up-time 1 --measurement-time 2 (detached LEGACY ORIGINAL worktree /data/projects/frankenmermaid-orig-hashbench-codex-0709 at 698eedc)"
+rust_candidate_command = "AGENT_NAME=CodexPerfMermaid RCH_WORKER=vmi1167313 RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod rch exec -- cargo bench --profile release -p fm-layout --bench incremental_layout -- single_node_label_edit/incremental/1000 --warm-up-time 1 --measurement-time 2"
+rust_worker = "Accepted comparison uses the same RCH worker vmi1167313 for ORIG and candidate. The user-requested CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod initially failed on local fallback with stale rustc artifacts; RCH remote rewrote it to worker-scoped paths for the accepted candidate. No target cleanup was performed."
+mermaid_js_command = "No fresh same-input Mermaid.js incremental-layout comparator exists; this entry's ratio-vs-ORIG is against the legacy Rust implementation of the same fm-layout Criterion row."
+behavior_proof = "The fast path is flowchart-only and hashes layout-relevant flowchart structure including node ids, displayed labels, shapes, icons, classes, spans, ports, edge endpoints/arrows/labels, clusters, graph nodes/edges/clusters/subgraphs, constraints, spacing, routing, metrics, guardrails, and solver settings. Non-flowchart requests still use the generic serde structural serializer fallback."
+agent_mail = "AGENT_NAME was set for RCH/cargo commands. Agent Mail reservation was not used because this run followed the direct land-or-dig path and prior project runs report the SQLite corruption circuit breaker."
+bench_syntax_note = "Release-profile benches used --profile release, matching this workspace's Cargo profile layout."
+
+[post_measurement_flowchart_layout_fast_hash_2026_07_09.metrics]
+"single_node_label_edit_incremental_1000_orig_low_ms" = 5.1646
+"single_node_label_edit_incremental_1000_orig_mean_ms" = 5.2886
+"single_node_label_edit_incremental_1000_orig_high_ms" = 5.4224
+"single_node_label_edit_incremental_1000_candidate_low_ms" = 4.0592
+"single_node_label_edit_incremental_1000_candidate_mean_ms" = 4.2115
+"single_node_label_edit_incremental_1000_candidate_high_ms" = 4.3841
+"single_node_label_edit_incremental_1000_candidate_over_orig" = 0.79634
+"single_node_label_edit_incremental_1000_speedup_x" = 1.2558
+"single_node_label_edit_incremental_1000_delta_pct" = -20.37
+"generic_structural_serializer_candidate_mean_ms_not_kept" = 5.2322
+
+[post_measurement_flowchart_layout_fast_hash_2026_07_09.validation]
+"cargo_test_fm_layout_incremental_layout_engine" = "passed via RCH vmi1167313: cargo test -p fm-layout incremental_layout_engine -- --nocapture (13 tests)"
+"cargo_test_frankentui_conformance" = "passed via RCH ovh-a: cargo test -p frankenmermaid-cli --test frankentui_conformance_test (1 test)"
+"cargo_check_workspace_all_targets" = "passed via RCH hz2: cargo check --workspace --all-targets"
+"cargo_clippy_workspace_all_targets" = "passed via RCH vmi1149989: cargo clippy --workspace --all-targets -- -D warnings; prior hz1 attempt failed before linting because that worker lacked libclang for highs-sys bindgen"
+"cargo_fmt_check" = "passed locally: cargo fmt --check"
+"git_diff_check" = "passed locally before ledger append: git diff --check"
+
+[post_measurement_flowchart_layout_fast_hash_2026_07_09.decision]
+kept = true
+reason = "Same-worker vmi1167313 release Criterion cuts single_node_label_edit/incremental/1000 from 5.2886 ms to 4.2115 ms (candidate/ORIG 0.79634x, 1.26x faster) by replacing flowchart request-key JSON/string serialization with a layout-relevant structural fingerprint and keeping generic hashing for other diagram families."
