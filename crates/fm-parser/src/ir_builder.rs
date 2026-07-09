@@ -839,11 +839,6 @@ impl IrBuilder {
         self.node_id_index.get(key, &self.ir.nodes)
     }
 
-    /// Get a node by its `IrNodeId`.
-    pub(crate) fn get_node_by_id(&self, id: IrNodeId) -> Option<&IrNode> {
-        self.ir.nodes.get(id.0)
-    }
-
     /// Finish building the IR, applying semantic recovery.
     pub(crate) fn finish(
         mut self,
@@ -1642,7 +1637,7 @@ mod tests {
 
         assert_eq!(first, second);
 
-        let node = builder.get_node_by_id(first).expect("node should exist");
+        let node = builder.ir.nodes.get(first.0).expect("node should exist");
         assert_eq!(node.shape, NodeShape::Diamond);
         assert!(
             node.label.is_some(),

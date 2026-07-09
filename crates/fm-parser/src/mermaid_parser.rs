@@ -3225,6 +3225,17 @@ fn parse_requirement(input: &str, builder: &mut IrBuilder) {
     }
 }
 
+const MINDMAP_BRANCH_CLASSES: [&str; 8] = [
+    "mindmap-branch-0",
+    "mindmap-branch-1",
+    "mindmap-branch-2",
+    "mindmap-branch-3",
+    "mindmap-branch-4",
+    "mindmap-branch-5",
+    "mindmap-branch-6",
+    "mindmap-branch-7",
+];
+
 fn parse_mindmap(input: &str, builder: &mut IrBuilder) {
     let mut ancestry: Vec<(usize, fm_core::IrNodeId)> = Vec::new();
     let mut last_node_id: Option<fm_core::IrNodeId> = None;
@@ -3260,12 +3271,8 @@ fn parse_mindmap(input: &str, builder: &mut IrBuilder) {
         if let Some(class_suffix) = trimmed.strip_prefix(":::") {
             let classes = class_suffix.trim();
             if let Some(node_id) = last_node_id {
-                let span = span_for(line_number, line);
                 for class in classes.split_whitespace() {
-                    if let Some(node) = builder.get_node_by_id(node_id) {
-                        let key = node.id.clone();
-                        builder.add_class_to_node(&key, class, span);
-                    }
+                    builder.add_class_to_node_id(node_id, class);
                 }
             }
             continue;
@@ -3305,7 +3312,7 @@ fn parse_mindmap(input: &str, builder: &mut IrBuilder) {
         if !root_seen {
             root_seen = true;
             root_depth = Some(depth);
-            builder.add_class_to_node(&node.id, "mindmap-root", span);
+            builder.add_class_to_node_id(node_id, "mindmap-root");
         } else if let Some(rd) = root_depth {
             // First-level children: one indent deeper than root.
             if ancestry.len() <= 2 && depth > rd {
@@ -3313,8 +3320,7 @@ fn parse_mindmap(input: &str, builder: &mut IrBuilder) {
             }
         }
         // Apply branch color class to all nodes.
-        let branch_class = format!("mindmap-branch-{}", branch_index % 8);
-        builder.add_class_to_node(&node.id, &branch_class, span);
+        builder.add_class_to_node_id(node_id, MINDMAP_BRANCH_CLASSES[branch_index & 7]);
     }
 }
 
@@ -8443,10 +8449,10 @@ fn parse_init_payload_value(payload: &str) -> Result<Value, String> {
 
 fn leading_indent_width(line: &str) -> usize {
     let mut width = 0_usize;
-    for ch in line.chars() {
-        match ch {
-            ' ' => width += 1,
-            '\t' => width += 2,
+    for byte in line.as_bytes() {
+        match byte {
+            b' ' => width += 1,
+            b'\t' => width += 2,
             _ => break,
         }
     }

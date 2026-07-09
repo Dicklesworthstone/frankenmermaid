@@ -10545,3 +10545,31 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   --all-targets` first hit an RCH worker-toolchain failure on `hz1` (`highs-sys` could not find `libclang`);
   rerunning the same command on `ovh-b` passed. `cargo clippy --workspace --all-targets -- -D warnings`
   passed on `ovh-b`.
+
+<!-- codexperf-mindmap-branch-class-table -->
+### LANDED: mindmap parser uses compact branch class table (mindmap_200 parse 1.502x) (2026-07-09)
+- **Ledger review:** read the rejection ledger first and avoided the recently landed or rejected DOT, C4, ER,
+  Gantt, requirement, class, timeline, xychart, wide-flowchart, and SVG body/shape-output paths. The selected
+  row is a different parser family from those entries.
+- **Profile route:** fresh RCH profiling sampled full pipeline stages, shape-render rows, and then the parser
+  crate. Larger parser rows were ledger-covered (`flowchart`, `wide`, `DOT`, `class`, `Gantt`, `requirement`)
+  or already had dedicated recent keeps. The eligible row was `parse/mindmap/mindmap_200`, which exercises
+  indentation ancestry plus per-node mindmap branch class assignment.
+- **Primitive:** succinct data-layout table plus direct dense-id mutation. Mindmap branch classes now come from
+  an eight-entry static table instead of formatting `mindmap-branch-{n}` for every node, and class assignment
+  uses the `IrNodeId` returned by interning instead of re-looking up the node by string. The shared indentation
+  scan now walks bytes for the only two recognized indentation tokens, spaces and tabs.
+- **Measurement:** requested release-profile per-crate bench command with
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod`:
+  `AGENT_NAME=CodexPerfMermaid RCH_QUEUE_WHEN_BUSY=1 rch exec -- cargo bench --profile release -p fm-parser
+  --bench parse_bench -- parse/mindmap/mindmap_200 --warm-up-time 2 --measurement-time 5 --sample-size 20
+  --noplot`. Legacy original detached worktree
+  `/data/projects/frankenmermaid-orig-mindmap-classes-codex-20260709` at `a275e52`, same-worker
+  `vmi1152480`: **151.05 us** mean [141.28, 162.94]. Candidate, same-worker `vmi1152480`: **100.54 us**
+  mean [90.816, 110.91]. Ratio vs ORIG: **0.66561x** candidate/ORIG, **1.5024x faster**.
+- **Validation:** `cargo test -p fm-parser mindmap_ --profile release` passed via RCH `hz1` after final cleanup
+  (12 selected tests). Conformance passed via RCH `vmi1227854`:
+  `cargo test -p frankenmermaid-cli --test frankentui_conformance_test` (1 test). Workspace check first hit
+  the known `hz1` `highs-sys` libclang worker failure, then passed on `ovh-b`. Workspace clippy passed on
+  `ovh-b` with `cargo clippy --workspace --all-targets -- -D warnings`. `cargo fmt --check` and
+  `git diff --check` passed locally.
