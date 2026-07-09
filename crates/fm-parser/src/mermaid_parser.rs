@@ -5455,6 +5455,11 @@ fn parse_c4(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
+        let span = span_for(line_number, raw_line);
+        if parse_c4_fast_context_call(trimmed, span, &boundary_stack, builder) {
+            continue;
+        }
+
         let Some((function_name, arguments, opens_block)) = parse_function_call(trimmed) else {
             builder.add_warning(format!(
                 "Line {line_number}: unsupported C4 syntax: {trimmed}"
@@ -5462,7 +5467,6 @@ fn parse_c4(input: &str, builder: &mut IrBuilder) {
             continue;
         };
 
-        let span = span_for(line_number, raw_line);
         match function_name.as_str() {
             "Person" | "Person_Ext" | "System" | "System_Ext" | "SystemDb" | "SystemDb_Ext"
             | "SystemQueue" | "SystemQueue_Ext" | "Container" | "Container_Ext" | "ContainerDb"
@@ -8510,6 +8514,167 @@ fn is_c4_header(line: &str) -> bool {
         line,
         "C4Context" | "C4Container" | "C4Component" | "C4Dynamic" | "C4Deployment"
     )
+}
+
+fn parse_c4_fast_context_call(
+    line: &str,
+    span: Span,
+    boundary_stack: &[(usize, usize)],
+    builder: &mut IrBuilder,
+) -> bool {
+    if let Some(arguments) = c4_fast_arguments(line, "Person") {
+        return parse_c4_fast_node(
+            arguments,
+            "Person",
+            NodeShape::Rounded,
+            &["c4", "c4-person"],
+            span,
+            boundary_stack,
+            builder,
+        );
+    }
+
+    if let Some(arguments) = c4_fast_arguments(line, "System") {
+        return parse_c4_fast_node(
+            arguments,
+            "System",
+            NodeShape::Rect,
+            &["c4", "c4-system"],
+            span,
+            boundary_stack,
+            builder,
+        );
+    }
+
+    if let Some(arguments) = c4_fast_arguments(line, "Rel") {
+        return parse_c4_fast_rel(arguments, span, builder);
+    }
+
+    false
+}
+
+fn c4_fast_arguments<'a>(line: &'a str, function_name: &str) -> Option<[&'a str; 4]> {
+    let remainder = line.strip_prefix(function_name)?.strip_prefix('(')?;
+    let raw_arguments = remainder.strip_suffix(')')?;
+    let mut arguments = [""; 4];
+    let count = split_c4_fast_arguments(raw_arguments, &mut arguments)?;
+    match (function_name, count) {
+        ("Person" | "System", 2 | 3) | ("Rel", 3 | 4) => Some(arguments),
+        _ => None,
+    }
+}
+
+fn split_c4_fast_arguments<'a>(raw: &'a str, arguments: &mut [&'a str; 4]) -> Option<usize> {
+    let mut start = 0_usize;
+    let mut count = 0_usize;
+    let mut in_quote = false;
+
+    for (index, ch) in raw.char_indices() {
+        match ch {
+            '"' => in_quote = !in_quote,
+            '\\' | '\'' | '`' | '(' | ')' => return None,
+            ',' if !in_quote => {
+                if count == arguments.len() {
+                    return None;
+                }
+                let argument = trim_fast(&raw[start..index]);
+                if argument.is_empty() {
+                    return None;
+                }
+                arguments[count] = argument;
+                count += 1;
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
+    if in_quote || count == arguments.len() {
+        return None;
+    }
+
+    let argument = trim_fast(&raw[start..]);
+    if argument.is_empty() {
+        return None;
+    }
+    arguments[count] = argument;
+    Some(count + 1)
+}
+
+fn parse_c4_fast_node(
+    arguments: [&str; 4],
+    element_type: &str,
+    shape: NodeShape,
+    classes: &[&str],
+    span: Span,
+    boundary_stack: &[(usize, usize)],
+    builder: &mut IrBuilder,
+) -> bool {
+    let Some(node_id) = clean_label(Some(arguments[0])) else {
+        return false;
+    };
+    let Some(label) = clean_label(Some(arguments[1])) else {
+        return false;
+    };
+    let description = if arguments[2].is_empty() {
+        None
+    } else {
+        clean_label(Some(arguments[2]))
+    };
+
+    let Some(node_id_value) = builder.intern_node(&node_id, Some(&label), shape, span) else {
+        return false;
+    };
+    builder.set_c4_node_meta(
+        node_id_value,
+        IrC4NodeMeta {
+            element_type: element_type.to_string(),
+            technology: None,
+            description,
+        },
+    );
+    for class_name in classes {
+        builder.add_class_to_node_id(node_id_value, class_name);
+    }
+    add_node_to_active_c4_boundaries(boundary_stack, node_id_value, builder);
+    true
+}
+
+fn parse_c4_fast_rel(arguments: [&str; 4], span: Span, builder: &mut IrBuilder) -> bool {
+    let Some(from_id) = clean_label(Some(arguments[0])) else {
+        return false;
+    };
+    let Some(to_id) = clean_label(Some(arguments[1])) else {
+        return false;
+    };
+    let label = clean_label(Some(arguments[2]));
+    let technology = if arguments[3].is_empty() {
+        None
+    } else {
+        clean_label(Some(arguments[3]))
+    };
+    let combined_label = match (label, technology) {
+        (Some(label), Some(technology)) => Some(format!("{label} [{technology}]")),
+        (Some(label), None) => Some(label),
+        (None, Some(technology)) => Some(format!("[{technology}]")),
+        (None, None) => None,
+    };
+
+    let Some(from_node) = builder.intern_node(&from_id, Some(&from_id), NodeShape::Rect, span)
+    else {
+        return false;
+    };
+    let Some(to_node) = builder.intern_node(&to_id, Some(&to_id), NodeShape::Rect, span) else {
+        return false;
+    };
+    builder.push_edge(
+        from_node,
+        to_node,
+        ArrowType::Arrow,
+        combined_label.as_deref(),
+        span,
+    );
+    true
 }
 
 fn parse_c4_node(

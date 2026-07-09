@@ -10357,6 +10357,47 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   profile layout. RCH worker-affinity env hints were attempted later and ignored by the selector, so only the
   same-worker rows listed above are used for scoring.
 
+<!-- codexperf-c4-direct-context-lowering -->
+### LANDED: C4 parser directly lowers simple context calls (c4_100 parse 1.38x) (2026-07-09)
+- **Ledger review:** read the rejection ledger first and avoided the recent SVG/render emitters, DOT
+  preprocessing, journey actor lowering, timeline class append, requirement block dispatch, Gantt dependency
+  queue, flowchart hashing, and class parser relationship/member attempts. The older C4 keep only sliced
+  generic function-call arguments; this change uses a different primitive and does not reopen that allocation
+  removal path.
+- **Profile route:** clean `fm-parser` profiling on RCH `vmi1167313` left `parse/c4/c4_100` at **338.59 us**
+  mean [322.67, 352.31] after the recent excluded rows were removed from consideration. The row is simple
+  `Person` / `System` / `Rel` C4 context syntax, which previously still built the generic function-call
+  argument vector and then re-dispatched by string.
+- **Primitive:** algebraic-fusion / data-layout. For exactly simple `Person`, `System`, and `Rel` calls, the
+  parser now slices at top-level commas into a fixed four-slot borrowed array and lowers directly into IR nodes,
+  classes, C4 metadata, boundary membership, and edges. Any escape, alternate quote, nested parenthesis,
+  unsupported arity, external/db/container/component variant, back/bidirectional relationship, boundary, or
+  malformed line falls through to the existing generic parser.
+- **Measurement:** requested release-profile per-crate bench command:
+  `AGENT_NAME=CodexPerfMermaid RCH_WORKER=vmi1167313 RCH_WORKERS=vmi1167313
+  RCH_PREFERRED_WORKER=vmi1167313 RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod rch exec -- cargo bench --profile release -p
+  fm-parser --bench parse_bench -- parse/c4/c4_100 --warm-up-time 2 --measurement-time 5 --sample-size 20
+  --noplot`. Legacy original detached worktree `/data/projects/frankenmermaid-orig-c4-direct-codex-0709` at
+  `395f17e`, same worker `vmi1167313`: **332.42 us** mean [320.19, 346.38]. Candidate, same worker
+  `vmi1167313`: **240.86 us** mean [232.37, 247.52]. Ratio vs ORIG: **0.7246x** candidate/ORIG,
+  **1.3802x faster**, Criterion change **-29.100%** [-32.139%, -25.491%], p < 0.05.
+- **Fallback confirmation:** this checkout's RCH selector did not provide a same-worker original/candidate
+  pair during `TanSparrow`'s reruns (`hz2` original, `vmi1149989`/`vmi1227854` candidate rows), so the same
+  target directory was measured locally with identical short Criterion settings:
+  `AGENT_NAME=TanSparrow CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod cargo bench --profile
+  release -p fm-parser --bench parse_bench -- parse/c4/c4_100 --warm-up-time 1 --measurement-time 3
+  --sample-size 12 --noplot`. Original: **136.28 us** mean [131.31, 143.45]. Candidate:
+  **98.743 us** mean [96.064, 100.80]. Ratio vs ORIG: **0.7246x** candidate/ORIG, **1.3802x faster**.
+- **Validation note:** `cargo test -p fm-parser c4_` passed via RCH `ovh-a` before the ratio run; final
+  conformance/gates are recorded with the landing commit. Release-profile benches used `--profile release`,
+  matching this workspace's Cargo profile layout.
+- **TanSparrow gate confirmation:** `cargo test -p fm-parser c4` passed via RCH `vmi1293453`; local
+  `cargo test -p frankenmermaid-cli --test frankentui_conformance_test` passed; local
+  `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets -- -D warnings`, and
+  `cargo fmt --check` passed after `hz1` failed the remote workspace check on missing `libclang` for
+  `highs-sys` bindgen.
+
 <!-- codexperf-class-simple-relationship-fusion-rejected -->
 ### NO-SHIP: class parser simple-relationship fusion regressed class_100 on same worker (2026-07-09)
 - **Ledger review:** read the rejection ledger first and excluded the long SVG streaming/output seam, DOT
