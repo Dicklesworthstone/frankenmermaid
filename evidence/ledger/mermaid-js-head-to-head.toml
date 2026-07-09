@@ -3375,3 +3375,46 @@ bench_syntax_note = "Release-profile benches used --profile release, matching th
 [post_measurement_dot_preprocess_fusion_2026_07_09.decision]
 kept = true
 reason = "Same-worker vmi1293453 release Criterion cuts parse/dot/dot_200 from 547.93 us to 368.92 us (candidate/ORIG 0.67330x, 1.49x faster, p=0.00) by fusing DOT preprocessing around borrowed comment-free input and skipping identity body transforms for simple DOT bodies."
+
+[post_measurement_class_dense_member_borrowed_cardinality_rejection_2026_07_09]
+date = "2026-07-09"
+agent = "TanSparrow"
+status = "reject"
+candidate_summary = "Retain the dense IrNodeId from class block lowering to append block members by node slot, and return borrowed text from strip_class_cardinality for no-cardinality class relationships."
+negative_evidence_review = "Read docs/NEGATIVE_EVIDENCE.md first and avoided the recent DOT preprocessing keep, journey actor lowering keep, timeline class append keep, flowchart layout hashing, crossing-map rewrites, SVG streaming family, and the older rejected class in_block bool rewrite."
+profile_route = "Profiling Software Performance sampled fm-parser parse rows and selected parse/class/class_100 as the hottest non-DOT, non-flowchart, non-journey row after excluding recent keeps. The row exercises class blocks with three members per class plus inheritance and association relationships."
+graveyard_route = "Alien Graveyard + Alien Artifact Coding + Extreme Optimization route: data-layout plus algebraic-fusion primitive. The dense node id should have avoided repeated class-name hash lookups, and the borrowed cardinality return should have avoided a dropped relationship-line copy, but the measured branch/state changes did not pay."
+rust_orig_command = "AGENT_NAME=TanSparrow CARGO_TARGET_DIR=/data/projects/frankenmermaid/.rch-targets/mermaid-cod RCH_QUEUE_WHEN_BUSY=1 rch exec -- cargo bench --profile release -p fm-parser --bench parse_bench -- parse/class/class_100 --warm-up-time 2 --measurement-time 3 --sample-size 15 --noplot (RCH routed to ovh-a; routing evidence only)"
+rust_candidate_command = "AGENT_NAME=TanSparrow CARGO_TARGET_DIR=/data/projects/frankenmermaid/.rch-targets/mermaid-cod RCH_QUEUE_WHEN_BUSY=1 rch exec -- cargo bench --profile release -p fm-parser --bench parse_bench -- parse/class/class_100 --warm-up-time 2 --measurement-time 3 --sample-size 15 --noplot (RCH routed to hz2; routing evidence only). Accepted scoring fallback used local fresh target dirs for original and candidate."
+rust_worker = "Remote RCH rows were not scored because original and candidate routed to different workers. Accepted rejection uses same-machine local fallback with fresh target dirs after the requested local target failed from stale nightly artifacts; no cleanup was performed."
+mermaid_js_command = "No fresh same-input Mermaid.js class parser comparator was captured; this entry's ratio-vs-ORIG is against the legacy Rust implementation of the same fm-parser Criterion row."
+behavior_proof = "Candidate preserved class member order and class cardinality behavior in code review, but the timing was worse; the code was reverted before committing."
+agent_mail = "AGENT_NAME was set for RCH/cargo commands. Agent Mail reservation was not used because this run followed the direct land-or-dig path and prior project runs report the SQLite corruption circuit breaker."
+bench_syntax_note = "Release-profile benches used --profile release, matching this workspace's Cargo profile layout."
+
+[post_measurement_class_dense_member_borrowed_cardinality_rejection_2026_07_09.metrics]
+"profile_parse_class_class_100_mean_us_ovh_a" = 209.98
+"remote_orig_ovh_a_low_us_not_scored" = 199.67
+"remote_orig_ovh_a_mean_us_not_scored" = 200.81
+"remote_orig_ovh_a_high_us_not_scored" = 202.18
+"remote_candidate_hz2_low_us_not_scored" = 215.19
+"remote_candidate_hz2_mean_us_not_scored" = 220.89
+"remote_candidate_hz2_high_us_not_scored" = 225.79
+"local_orig_low_us" = 236.29
+"local_orig_mean_us" = 241.84
+"local_orig_high_us" = 250.97
+"local_candidate_low_us" = 266.99
+"local_candidate_mean_us" = 272.12
+"local_candidate_high_us" = 276.44
+"local_candidate_over_orig" = 1.1252
+"local_candidate_delta_pct" = 12.52
+
+[post_measurement_class_dense_member_borrowed_cardinality_rejection_2026_07_09.validation]
+"cargo_check_fm_parser_benches_fresh_target" = "passed local fallback with fresh target /data/projects/frankenmermaid/.rch-targets/mermaid-cod-local-20260709: cargo check -p fm-parser --benches"
+"code_reverted" = "parser and builder code diff returned clean after manual apply_patch revert; only evidence files remain changed"
+"cargo_test_frankentui_conformance" = "passed via RCH wrapper local fallback: AGENT_NAME=TanSparrow CARGO_TARGET_DIR=/data/projects/frankenmermaid/.rch-targets/mermaid-cod RCH_QUEUE_WHEN_BUSY=1 rch exec -- cargo test -p frankenmermaid-cli --test frankentui_conformance_test (1 test)"
+"git_diff_check" = "passed locally after evidence edits: git diff --check"
+
+[post_measurement_class_dense_member_borrowed_cardinality_rejection_2026_07_09.decision]
+kept = false
+reason = "Same-machine local fallback Criterion slowed parse/class/class_100 from 241.84 us to 272.12 us (candidate/ORIG 1.1252x, +12.52%), and the remote candidate did not show a clean win. The dense class-member insertion plus borrowed no-cardinality relationship text candidate was reverted."

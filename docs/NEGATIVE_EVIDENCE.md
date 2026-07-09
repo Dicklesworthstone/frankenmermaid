@@ -10299,6 +10299,34 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
 - **Bench syntax note:** release-profile benches used `--profile release`, matching this workspace's Cargo
   profile layout.
 
+<!-- tansparrow-class-dense-member-borrowed-cardinality-rejected -->
+### NO-SHIP: class parser dense member insertion plus borrowed cardinality text slowed class_100 (2026-07-09)
+- **Ledger review:** read the rejection ledger first and avoided the recent DOT preprocessing keep, journey actor
+  lowering keep, timeline class append keep, flowchart layout hashing, crossing-map rewrites, and the long SVG
+  streaming family. The older class `in_block` bool rewrite was also explicitly skipped.
+- **Profile route:** fresh parser profiling selected `parse/class/class_100` as the hottest non-DOT,
+  non-flowchart, non-journey row after the recent keeps were excluded. The row exercises class blocks with three
+  members per class plus inheritance and association relationships.
+- **Primitive:** data-layout plus algebraic-fusion attempt. The candidate retained the dense `IrNodeId` returned
+  when opening a class block and appended block members by node slot instead of re-looking up the current class
+  by string. It also changed `strip_class_cardinality` to return borrowed text for the common no-cardinality
+  relationship line and allocate only for quoted cardinalities.
+- **Measurement:** RCH used the requested release-profile command, but routed the original and candidate to
+  different workers, so those rows were not used for scoring. Original on `ovh-a`: **200.81 us** mean
+  [199.67, 202.18]. Candidate on `hz2`: **220.89 us** mean [215.19, 225.79], Criterion no-change
+  [-1.03%, +16.25%].
+- **Scoring fallback:** same-machine local fallback used fresh target dirs because the requested local target
+  contained stale nightly artifacts and no cleanup was performed. Legacy original detached worktree
+  `/data/projects/frankenmermaid-orig-class-dense-codex-0709` at `7655332`: **241.84 us** mean
+  [236.29, 250.97]. Candidate live tree: **272.12 us** mean [266.99, 276.44]. Ratio vs ORIG:
+  **1.1252x** candidate/ORIG, **+12.52%** slower.
+- **Verdict:** rejected and reverted. Do not retry the class-block dense-member insertion or borrowed
+  no-cardinality `strip_class_cardinality` return shape on this benchmark row.
+- **Validation:** parser and builder code diff returned clean after the manual revert. Conformance passed:
+  `AGENT_NAME=TanSparrow CARGO_TARGET_DIR=/data/projects/frankenmermaid/.rch-targets/mermaid-cod
+  RCH_QUEUE_WHEN_BUSY=1 rch exec -- cargo test -p frankenmermaid-cli --test frankentui_conformance_test`
+  (RCH local fallback, 1 test passed).
+
 <!-- tansparrow-dot-preprocess-fusion -->
 ### LANDED: fuse borrowed DOT preprocessing for simple bodies (dot_200 parse 1.49x) (2026-07-09)
 - **Ledger review:** read the rejection ledger first and avoided repeated SVG emitters, render body streaming,
