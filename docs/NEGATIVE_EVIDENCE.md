@@ -10298,3 +10298,28 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   workspace gates are recorded in the structured ledger entry for this keep.
 - **Bench syntax note:** release-profile benches used `--profile release`, matching this workspace's Cargo
   profile layout.
+
+<!-- tansparrow-dot-preprocess-fusion -->
+### LANDED: fuse borrowed DOT preprocessing for simple bodies (dot_200 parse 1.49x) (2026-07-09)
+- **Ledger review:** read the rejection ledger first and avoided repeated SVG emitters, render body streaming,
+  timeline class/layout work, flowchart request hashing, layout crossing rewrites, non-DOT detection preguards,
+  and the prior DOT edge operator/split byte-scan. Fresh profiling selected a different DOT parser hot path:
+  whole-input comment stripping and body normalization work that still ran before statement parsing.
+- **Primitive:** algebraic-fusion/data-layout. DOT detection and parsing now borrow comment-free input with
+  `Cow<str>` after a `memchr2('/', '#')` prefilter, compute graph directedness from the already-cleaned buffer,
+  and skip edge-group expansion plus body normalization when the extracted body has no braces. Inputs with
+  comments or body braces keep the old slow path, so edge groups, subgraphs, comments, quoted labels, and HTML
+  labels preserve behavior.
+- **Measurement:** same-worker `vmi1293453`, per-crate Criterion via
+  `AGENT_NAME=TanSparrow CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod RCH_REQUIRE_REMOTE=1
+  RCH_QUEUE_WHEN_BUSY=1 rch exec -- cargo bench --profile release -p fm-parser --bench parse_bench --
+  parse/dot/dot_200 --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot`. Legacy original:
+  **547.93 us** mean [533.08, 555.93]. Candidate with `RCH_WORKER=vmi1293453`: **368.92 us** mean
+  [362.51, 374.12]. Ratio vs ORIG: **0.67330x** candidate/ORIG, **1.4852x faster**, Criterion change
+  **-33.326%** [-37.737%, -28.861%], p < 0.05.
+- **Validation:** `cargo test -p fm-parser dot_` passed via RCH `hz2` (34 selected tests); conformance passed
+  through a fresh local fallback target after RCH same-project queue contention; workspace check passed via RCH
+  `ovh-b`; workspace clippy passed via RCH `hz2`. Final fmt/diff checks are recorded in the structured ledger
+  entry.
+- **Bench syntax note:** release-profile benches used `--profile release`, matching this workspace's Cargo
+  profile layout.

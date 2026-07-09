@@ -3285,3 +3285,49 @@ bench_syntax_note = "Release-profile benches used --profile release, matching th
 [post_measurement_flowchart_layout_fast_hash_2026_07_09.decision]
 kept = true
 reason = "Same-worker vmi1167313 release Criterion cuts single_node_label_edit/incremental/1000 from 5.2886 ms to 4.2115 ms (candidate/ORIG 0.79634x, 1.26x faster) by replacing flowchart request-key JSON/string serialization with a layout-relevant structural fingerprint and keeping generic hashing for other diagram families."
+
+[post_measurement_dot_preprocess_fusion_2026_07_09]
+date = "2026-07-09"
+agent = "TanSparrow"
+status = "keep"
+candidate_summary = "Fuse the DOT preprocessing path for simple bodies: borrow comment-free input via Cow after a memchr2 slash/hash prefilter, reuse that cleaned buffer for directedness, and skip edge-group expansion plus brace normalization when extract_body has no braces."
+negative_evidence_review = "Read docs/NEGATIVE_EVIDENCE.md first and avoided repeated SVG emitters, render body streaming, timeline class/layout work, flowchart request hashing, layout crossing rewrites, non-DOT detection preguards, and the prior DOT edge operator/split byte-scan keep."
+profile_route = "Profiling Software Performance sampled fm-parser parse rows and selected parse/dot/dot_200 as the hottest different row after stopping the render/timeline/layout seams. Broad profile on vmi1227854 measured parse/dot/dot_200 at 478.88 us mean, ahead of large flowchart parse, wide parse, class parse, journey, gantt, c4, requirement, ER, sequence, mindmap, and gitgraph rows."
+graveyard_route = "Alien Graveyard + Alien Artifact Coding + Extreme Optimization route: algebraic-fusion plus data-layout primitive. Treat DOT preprocessing as an identity transform on the common comment-free, no-inner-brace body shape and keep the allocating slow path only when comments or body braces make it necessary."
+rust_orig_command = "AGENT_NAME=TanSparrow CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 rch exec -- cargo bench --profile release -p fm-parser --bench parse_bench -- parse/dot/dot_200 --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot (temporary legacy original restored manually before this run)"
+rust_candidate_command = "AGENT_NAME=TanSparrow CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod RCH_WORKER=vmi1293453 RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 rch exec -- cargo bench --profile release -p fm-parser --bench parse_bench -- parse/dot/dot_200 --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot"
+rust_worker = "Accepted comparison uses actual same worker vmi1293453 for both legacy original and candidate. A preliminary candidate run on hz2 measured 364.02 us mean but was not used for the ratio; a local fallback attempt on the user target failed from stale rustc artifacts and no cleanup was performed."
+mermaid_js_command = "No fresh same-input Mermaid.js DOT parser comparator was captured; this entry's ratio-vs-ORIG is against the legacy Rust implementation of the same fm-parser Criterion row."
+behavior_proof = "The fast path only borrows when the input contains no slash and no hash, which rules out DOT line, block, and leading-hash comments. Body normalization is skipped only when the extracted body has no braces, so subgraphs and edge groups still run the old expand/normalize path. Directedness now reads the same cleaned buffer parse_dot already uses."
+agent_mail = "AGENT_NAME was set for RCH/cargo commands. Agent Mail reservation was not used because this run followed the direct land-or-dig path and prior project runs report the SQLite corruption circuit breaker."
+bench_syntax_note = "Release-profile benches used --profile release, matching this workspace's Cargo profile layout."
+
+[post_measurement_dot_preprocess_fusion_2026_07_09.metrics]
+"parse_dot_dot_200_orig_low_us" = 533.08
+"parse_dot_dot_200_orig_mean_us" = 547.93
+"parse_dot_dot_200_orig_high_us" = 555.93
+"parse_dot_dot_200_candidate_low_us" = 362.51
+"parse_dot_dot_200_candidate_mean_us" = 368.92
+"parse_dot_dot_200_candidate_high_us" = 374.12
+"parse_dot_dot_200_candidate_over_orig" = 0.67330
+"parse_dot_dot_200_speedup_x" = 1.4852
+"parse_dot_dot_200_delta_pct" = -32.67
+"parse_dot_dot_200_criterion_change_pct" = -33.326
+"parse_dot_dot_200_criterion_change_low_pct" = -37.737
+"parse_dot_dot_200_criterion_change_high_pct" = -28.861
+"parse_dot_dot_200_criterion_p_value" = 0.00
+"profile_parse_dot_dot_200_mean_us_vmi1227854" = 478.88
+"secondary_hz2_candidate_mean_us_not_scoring" = 364.02
+
+[post_measurement_dot_preprocess_fusion_2026_07_09.validation]
+"cargo_test_fm_parser_dot" = "passed via RCH hz2: cargo test -p fm-parser dot_ (34 selected tests)"
+"cargo_test_frankentui_conformance" = "passed local fallback with fresh target /data/projects/.rch-targets/mermaid-cod-local-20260709-dotfusion: cargo test -p frankenmermaid-cli --test frankentui_conformance_test (1 test)"
+"cargo_check_workspace_all_targets" = "passed via RCH ovh-b: cargo check --workspace --all-targets"
+"cargo_clippy_workspace_all_targets" = "passed via RCH hz2: cargo clippy --workspace --all-targets -- -D warnings"
+"cargo_fmt_check" = "passed locally after final edits: cargo fmt --check"
+"git_diff_check" = "passed locally after final edits: git diff --check"
+"ubs_scoped_files" = "exit 0 on scoped changed files; no critical issues, with warning inventories from pre-existing dot_parser test unwraps, direct indexing, assertions, and one existing string allocation heuristic"
+
+[post_measurement_dot_preprocess_fusion_2026_07_09.decision]
+kept = true
+reason = "Same-worker vmi1293453 release Criterion cuts parse/dot/dot_200 from 547.93 us to 368.92 us (candidate/ORIG 0.67330x, 1.49x faster, p=0.00) by fusing DOT preprocessing around borrowed comment-free input and skipping identity body transforms for simple DOT bodies."

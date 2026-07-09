@@ -1,4 +1,7 @@
+use std::borrow::Cow;
+
 use fm_core::{ArrowType, DiagramType, NodeShape, Span};
+use memchr::memchr2;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{DetectionMethod, ParseResult, ir_builder::IrBuilder};
@@ -23,8 +26,8 @@ pub fn looks_like_dot(input: &str) -> bool {
     if !contains_ignore_ascii_case(bytes, b"graph") {
         return false;
     }
-    let cleaned = strip_all_comments(input);
-    if dot_header_kind(&cleaned).is_none() {
+    let cleaned = strip_all_comments_cow(input);
+    if dot_header_kind(cleaned.as_ref()).is_none() {
         return false;
     }
     cleaned.contains('{') && cleaned.contains('}')
@@ -41,11 +44,18 @@ fn contains_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
 #[must_use]
 pub fn parse_dot(input: &str) -> ParseResult {
     let mut builder = IrBuilder::new(DiagramType::Flowchart);
-    let directed = is_directed_graph(input);
-    let cleaned = strip_all_comments(input);
-    let body = extract_body(&cleaned);
-    let expanded_groups = expand_edge_groups(body);
-    let normalized_body = normalize_dot_body(&expanded_groups);
+    let cleaned = strip_all_comments_cow(input);
+    let cleaned = cleaned.as_ref();
+    let directed = is_directed_graph_cleaned(cleaned);
+    let body = extract_body(cleaned);
+    let normalized_body_storage;
+    let normalized_body = if dot_body_needs_normalization(body) {
+        let expanded_groups = expand_edge_groups(body);
+        normalized_body_storage = normalize_dot_body(&expanded_groups);
+        normalized_body_storage.as_str()
+    } else {
+        body
+    };
     let mut active_clusters: Vec<usize> = Vec::new();
     let mut active_subgraphs: Vec<usize> = Vec::new();
 
@@ -152,7 +162,14 @@ pub fn parse_dot(input: &str) -> ParseResult {
     builder.finish(0.95, DetectionMethod::DotFormat)
 }
 
-fn strip_all_comments(input: &str) -> String {
+fn strip_all_comments_cow(input: &str) -> Cow<'_, str> {
+    if memchr2(b'/', b'#', input.as_bytes()).is_none() {
+        return Cow::Borrowed(input);
+    }
+    Cow::Owned(strip_all_comments_slow(input))
+}
+
+fn strip_all_comments_slow(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
     let mut in_quote: Option<char> = None;
     let mut escaped = false;
@@ -755,13 +772,12 @@ fn fnv1a_hash(bytes: &[u8]) -> u64 {
     hash
 }
 
-fn is_directed_graph(input: &str) -> bool {
-    let cleaned = strip_all_comments(input);
-    if let Some(is_directed) = dot_header_kind(&cleaned) {
+fn is_directed_graph_cleaned(cleaned_input: &str) -> bool {
+    if let Some(is_directed) = dot_header_kind(cleaned_input) {
         return is_directed;
     }
 
-    let body = extract_body(&cleaned);
+    let body = extract_body(cleaned_input);
     contains_directed_edge_operator(body)
 }
 
@@ -891,6 +907,10 @@ fn parse_subgraph_start(
     }
     let title = clean_optional(body);
     Some((key, title, opens_scope))
+}
+
+fn dot_body_needs_normalization(body: &str) -> bool {
+    memchr2(b'{', b'}', body.as_bytes()).is_some()
 }
 
 fn normalize_dot_body(body: &str) -> String {
