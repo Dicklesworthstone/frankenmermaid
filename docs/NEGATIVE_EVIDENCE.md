@@ -10328,6 +10328,35 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
 - **Bench syntax note:** release-profile benches used `--profile release`, matching this workspace's Cargo
   profile layout.
 
+<!-- codexperf-gantt-resolved-dependency-queue -->
+### LANDED: gantt parser carries resolved dependency node ids in pending queue (gantt_200 parse 1.05x) (2026-07-09)
+- **Ledger review:** read the rejection ledger first and avoided repeated SVG/render emitters, DOT
+  preprocessing, journey actor lowering, timeline class append, flowchart layout hashing, class parser
+  dense-member/simple-relationship attempts, crossing rewrites, and the prior Gantt task-id map/date-format
+  keeps. Fresh `fm-parser` profiling selected `parse/gantt/gantt_200` as the largest remaining non-excluded
+  parser row after those paths were removed from consideration.
+- **Primitive:** data-layout / online dependency resolution. Gantt parsing still keeps final dependency edge
+  order through a pending queue, but the queue now stores either a resolved `IrNodeId` pair or an unresolved
+  dependency string. Already-seen `after <task>` references avoid cloning the dependency text and avoid the
+  second-pass hash lookup; forward/unresolved references keep the old lookup and warning path.
+- **Measurement:** requested release-profile per-crate bench command:
+  `AGENT_NAME=CodexPerfMermaid RCH_QUEUE_WHEN_BUSY=1 RCH_FORCE_REMOTE=1
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/mermaid-cod rch exec -- cargo bench --profile release -p
+  fm-parser --bench parse_bench -- parse/gantt/gantt_200 --warm-up-time 2 --measurement-time 5
+  --sample-size 20 --noplot`. Legacy original Gantt dependency path, same project root and same worker
+  `vmi1152480`: **287.95 us** mean [259.45, 323.12]. Candidate resolved-id queue, same worker
+  `vmi1152480`: **274.33 us** mean [255.61, 295.22]. Ratio vs ORIG: **0.9527x** candidate/ORIG,
+  **1.0496x faster**. Criterion reported a lower candidate mean with overlapping interval
+  **-8.4026%** [-17.778%, +2.7199%], p = 0.13.
+- **Rejected extension:** a predecessor-cache variant was removed before landing. On `vmi1264463`, that variant
+  measured **519.36 us** mean [469.10, 560.96], while the final resolved-id queue measured **415.41 us** mean
+  [396.22, 439.04] on the same worker, **0.7998x** final/cache and **1.2503x faster**. Do not reintroduce the
+  `previous_task_id` / `previous_task_node` cache for this row.
+- **Validation note:** final conformance/gates are recorded with the commit that removes the rejected cache
+  extension from `main`; release-profile benches used `--profile release`, matching this workspace's Cargo
+  profile layout. RCH worker-affinity env hints were attempted later and ignored by the selector, so only the
+  same-worker rows listed above are used for scoring.
+
 <!-- codexperf-class-simple-relationship-fusion-rejected -->
 ### NO-SHIP: class parser simple-relationship fusion regressed class_100 on same worker (2026-07-09)
 - **Ledger review:** read the rejection ledger first and excluded the long SVG streaming/output seam, DOT

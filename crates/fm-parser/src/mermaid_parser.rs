@@ -4578,8 +4578,6 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
     let mut task_ids_to_nodes: rustc_hash::FxHashMap<String, IrNodeId> =
         rustc_hash::FxHashMap::default();
     let mut pending_dependencies: Vec<PendingGanttDependency> = Vec::new();
-    let mut previous_task_id: Option<String> = None;
-    let mut previous_task_node: Option<IrNodeId> = None;
 
     for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
@@ -4692,21 +4690,11 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
         };
 
         let parsed_meta = parse_gantt_task_metadata(raw_meta, gantt_meta.date_format.as_deref());
-        let mut current_task_ref: Option<(String, IrNodeId)> = None;
         if let Some(task_id_ref) = parsed_meta.task_id.as_ref() {
-            let task_id_key = task_id_ref.clone();
-            let mapped_node = *task_ids_to_nodes.entry(task_id_key.clone()).or_insert(node);
-            current_task_ref = Some((task_id_key, mapped_node));
+            task_ids_to_nodes.entry(task_id_ref.clone()).or_insert(node);
         }
         if let Some(after_task_id) = parsed_meta.depends_on.first() {
-            let cached_from = if previous_task_id.as_deref() == Some(after_task_id.as_str()) {
-                previous_task_node
-            } else {
-                None
-            };
-            if let Some(from) =
-                cached_from.or_else(|| task_ids_to_nodes.get(after_task_id).copied())
-            {
+            if let Some(from) = task_ids_to_nodes.get(after_task_id).copied() {
                 pending_dependencies.push(PendingGanttDependency::Resolved { node, from, span });
             } else {
                 pending_dependencies.push(PendingGanttDependency::Unresolved {
@@ -4740,14 +4728,6 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
             progress: parsed_meta.progress,
             task_type: parsed_meta.task_type,
         });
-
-        if let Some((task_id, task_node)) = current_task_ref {
-            previous_task_id = Some(task_id);
-            previous_task_node = Some(task_node);
-        } else {
-            previous_task_id = None;
-            previous_task_node = None;
-        }
     }
 
     for dependency in pending_dependencies {
