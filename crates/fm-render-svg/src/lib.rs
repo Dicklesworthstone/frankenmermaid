@@ -5087,7 +5087,9 @@ fn write_class_node_fragment_into(
     out.push_str("<g id=\"");
     fm_core::write_mermaid_node_element_id_into(out, node_id, node_index);
     out.push_str("\" class=\"fm-node fm-node-accent-");
-    let _ = write!(out, "{}", stable_accent_index(node_id));
+    // `stable_accent_index` (small palette index) via the digit-table writer, not `write!`'s
+    // Formatter/`pad_integral` machinery. Byte-identical: same decimal digits.
+    let _ = crate::attributes::write_uint_into(out, stable_accent_index(node_id) as u64);
     out.push(' ');
     out.push_str(node_shape_css_class(fm_core::NodeShape::Rect));
     out.push_str(user_classes);
@@ -5616,7 +5618,9 @@ fn write_requirement_node_fragment_into(
     out.push_str("<g id=\"");
     fm_core::write_mermaid_node_element_id_into(out, node_id, node_index);
     out.push_str("\" class=\"fm-node fm-node-accent-");
-    let _ = write!(out, "{}", stable_accent_index(node_id));
+    // `stable_accent_index` (small palette index) via the digit-table writer, not `write!`'s
+    // Formatter/`pad_integral` machinery. Byte-identical: same decimal digits.
+    let _ = crate::attributes::write_uint_into(out, stable_accent_index(node_id) as u64);
     out.push_str(" fm-node-shape-rect");
     if let Some(risk) = meta.risk.as_deref() {
         out.push_str(" fm-req-risk-");

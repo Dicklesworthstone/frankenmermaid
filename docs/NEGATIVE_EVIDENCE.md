@@ -12131,3 +12131,25 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
 - **Scope:** every diagram whose nodes take the common-node streaming path; larger diagrams benefit more. The one
   remaining `write!`-Formatter instance the coordinate digit-table win missed. crates/fm-render-svg is my lane
   (cod on parser/edge-routing). Evidence: `.benchmarks/accent_digit_table_WIN.md`.
+
+### WIN (follow-up to a38a61e): accent digit-table harvest COMPLETE -- class + requirement writers (2026-07-10)
+
+- **Mechanism (same lever, 2 sites a38a61e's `{accent}` grep missed):** the `{accent}` named-arg grep didn't catch
+  two POSITIONAL formatter sites writing the same palette index -- `write!(out, "{}", stable_accent_index(node_id))`
+  in `write_class_node_fragment_into` (lib.rs:5092) and `write_requirement_node_fragment_into` (5623). Same
+  `Formatter`+`pad_integral` per-node chain.
+- **Lever (one):** both -> `crate::attributes::write_uint_into(out, stable_accent_index(node_id) as u64)`. Completes
+  the harvest across ALL FOUR node-fragment writers (common/subroutine landed a38a61e; class/requirement here). The
+  Element/slow path (`class_prefixed_usize`->`push_usize`) is already a manual digit writer -- untouched.
+- **Byte-identical:** same decimal digits; `usize as u64` lossless. 247 fm-render-svg lib tests pass
+  (incl `node_fast_fragment_matches_render`); golden_svg only pre-existing `gantt_basic` (gantt has no
+  class/requirement nodes -> edit provably can't touch it); both edited fns keep another `write!` so the
+  `std::fmt::Write` import stays live (no unused-import warning); the 4 pre-existing fm-render-svg lib warnings
+  unchanged.
+- **Measurement (both arms on hz2, `requirement_stages`, layout/parse = built-in null, gate on median):**
+  null rows (identical code) drift up to +2.4% (layout/64) = the noise floor. render/64 (+0.4%) and render/256
+  (+1.8%) sit INSIDE that envelope = noise. **render/512 = 616.25us [609.2,624.6] vs 638.50us [629.6,649.5] =
+  0.965x (-3.5%), CIs DISJOINT**, vs ~1% null at 512. Per-node saving scales with node count (only clears noise at
+  512) -- same curve a38a61e measured (0.8%->3.0%->4.8%).
+- **Scope:** class + requirement diagrams; sub-noise below ~500 nodes; monotonic-less-work so can only help.
+  Follow-up completing a38a61e, not a new lever. Evidence: `.benchmarks/accent_digit_table_harvest_complete_WIN.md`.
