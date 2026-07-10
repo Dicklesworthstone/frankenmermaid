@@ -10988,3 +10988,47 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   predicted. Top render frame under default is now `write_common_node_fragment_into::<true>` (3.73%) -- the
   streaming writer itself, i.e. time is where it should be.
 - **Evidence:** `docs/PROPOSAL_default_output_profile.md`, `.benchmarks/lean_edge_streaming_a11y_const_generic.md`.
+
+### REJECTED: word-packed incremental span hashing misses the keep gate (2026-07-10)
+- **Agent:** cod_fm. **Lane:** `fm-layout` crossing minimization and incremental edit rerender
+  (`bd-1buv.3`). **Base:** `830d672`; the ORIG `fm-layout` source at `fbd150d` is byte-identical.
+- **Ledger-first routing:** the fresh crossing leader, `egraph_ordering::crossing_count` at **51.37%** flat
+  self time, maps to the closed crossing-count container family (landed cyclic count plus rejected dense
+  position/Fenwick, flat `total_crossings`, and FxHashMap shapes), so it was not retried. Thresholded
+  barycenter accumulation, precomputed barycenter adjacency, endpoint Debug-string hashing, and the
+  topology-stable dependency-cache patch were also respected as closed. The fresh top non-closed incremental
+  frame was `hash_span_value` at **9.58%**.
+- **Profile basis:** symbol-preserving canonical `--profile release` builds (`fm-layout` is opt-level 3; this
+  repo has no separate `release-perf` profile), built through RCH. Every >=0.1% flat frame for both exact rows
+  is ranked in `.benchmarks/incremental_packed_span_hash_NEGATIVE.md`. Incremental leaders were
+  `hash_span_value` 9.58%, `hash_endpoint_value` 8.77%, engine dispatch 8.20%,
+  `dependency_graph_cache_key` 7.56%, `_int_malloc` 7.31%, `compute_node_sizes` 5.48%, IR clone 4.93%, and
+  `malloc_consolidate` 4.14%.
+- **Memory-pressure finding:** `perf stat -r3` measured incremental single/five cache-miss rates of
+  **10.34% / 11.75%** (645.982M / 634.962M cache references). Allocation traffic is material at about 22%
+  of named self frames, but does **not** dominate: the structured fingerprint family totals **31.08%**.
+- **One lever tested and restored:** bijectively pack the six span `u32` fields into three `u64` words before
+  the unchanged deterministic mixer, halving the scalar mixer calls. A focused parity guard mutated every
+  field independently and passed via RCH (1 passed, 433 filtered); formatting passed. The candidate and guard
+  were manually removed after measurement.
+- **Decision-grade same-worker A/B:** separate ORIG/candidate release executables on RCH worker
+  `vmi1227854`, 100 samples / 10 seconds, exact row
+  `five_node_cluster_edit/incremental/1000`: ORIG raw mean **1.192554 ms, CV 4.7905%**; candidate
+  **1.182294 ms, CV 4.6677%**. The candidate is only **0.86% faster**, below the 3% ratchet. Criterion centers
+  (1.2065 -> 1.1839 ms, 1.87%) independently fail the same gate.
+- **All other attempts retained, not scored:** busy local C/O/O/C single/five centers were
+  1.1387/1.2418, 1.1554/1.1550, 1.2133/1.0989, and 1.3635/1.1270 ms. On `vmi1227854`, the single-node
+  candidate/ORIG CVs were 6.1119%/6.7890%; longer candidate/ORIG/ORIG raw means were 1.160579/1.170494/
+  1.191528 ms with CVs 4.9400%/6.3780%/6.6430%. On quiet alternate worker `vmi1293453`, C/O/C raw means
+  were 1.227534/1.189701/1.104255 ms with CVs 7.9427%/4.5856%/6.9648%. These fail the both-sides-under-5%
+  rule and expose order drift, so none was cherry-picked into the verdict.
+- **Verdict: REJECTED.** Three-word span packing does not clear the keep floor. Do not retry this packing or
+  a rearrangement of the same fields unless `hash_span_value` rises above 15% self time with an Amdahl
+  prediction over 3%, or a genuinely different bit-parallel primitive maintains mutation/frontier hashes and
+  removes a whole fingerprint scan. Dig next in a different primitive such as dense arena/CSR dirty-frontier
+  reuse around node sizing or edge routing; this rejection is not a ceiling.
+- **Landing validation:** `git diff --check` passed. UBS was run on both evidence files (Markdown has no UBS
+  scanner) and then on `crates/fm-layout/src/lib.rs`; the Rust scan's cargo-backed fmt, clippy, check,
+  test-build, audit, and deny gates passed, while UBS itself exited 1 on the existing heuristic baseline. No
+  `fm-layout` source diff remains.
+- **Detailed evidence:** `.benchmarks/incremental_packed_span_hash_NEGATIVE.md`.
