@@ -1,8 +1,13 @@
 # Cross-repo recommendation: a bench-harness contract (provenance + noise floor + calibration)
 
-**From:** `cc_fm` (frankenmermaid) · **Date:** 2026-07-10 · **Status:** RECOMMENDATION ONLY.
-**I have not touched any other repository.** This describes three mechanisms proven here, what they cost, and how
-a repo adopts them. Take them, adapt them, or ignore them.
+**From:** `cc_fm` (frankenmermaid) · **Date:** 2026-07-10 · **Status:** RECOMMENDATION TO THE OWNER.
+**I have not touched any other repository.** This describes the mechanisms proven here, what they cost, and how a
+repo adopts them. Take them, adapt them, or ignore them.
+
+> **Field-validated.** The median-gate discipline described here has since unblocked measured wins across the
+> fleet — frankenscipy's 1.745× ISA build fix, frankenlibc's 11× malloc, frankenredis's 17× BITPOS — each decided
+> against a noise floor rather than a `cv` gate the hardware cannot meet. The **one-paragraph owner ask** is at the
+> very bottom ("Adoption in one paragraph").
 
 All three exist because of the same failure mode: **a measurement discipline that a human (or an agent) can
 forget is not a discipline, it is a hope.** Provenance, noise floor, and the floor's own resolution limit should
@@ -230,8 +235,47 @@ Steps 1–3 are the minimum viable contract. Steps 6–8 are what actually caugh
 3. **Self-time verification** — cheapest of the three when a symbolized binary is reachable, and the one that
    caught the largest error in this repo's history.
 
+## 4. Corollary — whole-binary A/Bs (ISA, LTO, allocator) via same-worker matching
+
+Some comparisons cannot use the single-binary `paired()` substrate at all: `-C target-cpu`, `lto`, a global
+allocator swap — each is a **whole-binary** property, so the two arms are two *binaries*. On a remote fleet that
+picks workers non-deterministically, the naive two-invocation A/B is invalid (absolute times aren't comparable
+across workers). The route-around, proven here:
+
+1. Build both binaries remotely (`RUSTFLAGS="-C target-cpu=x86-64-v3" rch exec -- cargo bench …` vs default). It
+   needs **zero local disk** — the "I can't build locally" reflex is a red herring; the remote path handles it.
+2. **Confirm the flag actually reached the remote compiler** — otherwise you measure the same binary twice. The
+   ELF-sha self-report (§1) is exactly the check: same source + same worker + *different* sha ⇒ codegen changed.
+   (I confirmed v2 vs v3 propagation this way: identical 823,304 B, different sha, same worker.)
+3. **Capture the worker id each run lands on, and compare only same-worker pairs.** That controls the one
+   confound (worker identity) that makes two-invocation A/Bs invalid.
+4. **Do not gate on instruction count** — an ISA change retires more work per instruction, so fewer instructions
+   is the *mechanism*, not a neutral proxy. Use wall/cycles on the matched worker, gated on CI overlap.
+
+This is how frankenscipy's 1.745× ISA fix and frankenmermaid's *measured null* (v3/v2 = 0.99× on render — the
+byte-production floor is scalar + `memchr`-runtime-dispatched, so AVX2 does nothing) were both decided honestly.
+A null is as valuable as a win: it closes the question.
+
 ## What I am *not* recommending
 
 Do not centralize these into a shared crate before two or three repos have each written their own. The harnesses
 differ (criterion vs hand-rolled, in-process vs subprocess, remote vs local), and the useful abstraction is not yet
 obvious. Copy the twenty lines; extract later, if a pattern actually emerges.
+
+---
+
+## Adoption in one paragraph (the owner ask)
+
+**To adopt this contract, a repo does five things, in order.** (1) Add `sha2` as a dev-dep and print the bench's
+own `env::current_exe()` SHA-256 as line one of every bench — provenance that cannot be forgotten or faked.
+(2) Factor the measured loop into `paired(arm_a, arm_b)` that times both arms **interleaved inside one round**,
+alternating order, and reports the **median of per-round ratios**; `black_box` inputs *and* results into a printed
+checksum. (3) Call it twice — `paired(base, base)` then `paired(base, cand)` — so every run emits its own noise
+floor next to its claim (cost: 2× wall time). (4) Once per machine class, run a calibration sweep
+(`min_sample × min_of × function`, interleaved) to publish which config decides which effect size, and **gate the
+claim on the null-median 95% CI, never on `cv`** (`cv < 5` is unreachable on a shared, unpinnable fleet; the median
+is tight regardless). (5) Bracket every run with a source hash re-checked at commit time, and profile-verify
+non-zero self-time before honoring any REJECT. Steps 1–3 are the minimum viable contract and cost an afternoon;
+4–5 are what actually caught the errors. **Recommendation: adopt 1–3 fleet-wide now; leave 4–5 per-repo until a
+shared abstraction is obvious. Do not centralize into a crate yet.** Reference implementation lives in this repo:
+`crates/fm-layout/benches/{barycenter_sweep,harness_calibration}.rs`.
