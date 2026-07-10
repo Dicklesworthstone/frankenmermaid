@@ -11528,3 +11528,46 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   executable production statement changed in this certification.
 - **Verdict: CERTIFIED WIN / KEEP.** Full ranked `>=0.1%` frame tables, exact commands, and retained perf paths
   are in `.benchmarks/barycenter_single_pass_WIN.md`.
+
+<!-- cc_fm-null-control-and-harness-contract -->
+### METHODOLOGY: A/A null control wired into the paired sampler; first noise-floor reading (2026-07-10)
+- **Adopted the null-control rule.** Before trusting any A/B ratio, register the **identical arm twice** in the
+  same interleaved routine and measure it. That ratio is the harness's own noise floor. A "win" smaller than the
+  null control's departure from 1.000 is indistinguishable from noise, and **a REJECT of a lever whose effect is
+  below the floor rejects the harness, not the lever.**
+- **Implemented, not just written down.** `crates/fm-layout/benches/barycenter_sweep.rs` now factors the measured
+  loop into `paired(arm_a, arm_b, ..) -> (p50_a, p50_b, ratio_p50, cv_pct, mad_pct, checksum)` and calls it twice
+  per input: `paired(base, base)` (null) then `paired(base, cand)` (claim). Same binary, same invocation, same
+  batch, same alternating round order. **Cost: exactly 2x bench wall time.**
+- **First reading — worker `vmi1264463`, bench ELF sha256
+  `15591dd297913a88652285c70c817338e431392874f4ba289e01f1d66a2670c9` (857,728 bytes):**
+
+  | input | **null A/A ratio** | null cv | null MAD | real A/B ratio | A/B cv |
+  |---|---:|---:|---:|---:|---:|
+  | `cyclic_scc_100` | 1.0357x | 14.17% | 7.51% | 2.611x | 8.57% |
+  | `cyclic_scc_300` | 0.9764x | 12.03% | 5.19% | 3.870x | 37.00% |
+  | `cyclic_scc_800` | 0.9954x | 8.64% | 3.86% | 8.112x | 9.69% |
+
+  **Reading it honestly:** on this loaded, unpinnable worker the harness **cannot decide any lever below ~4%**, and
+  its `cv` gate is not meaningful there at all. It *can* decide a 2.6-8.1x lever. The certified barycenter
+  single-pass win (3.669x, cv 0.94%, peer's quiesced worker) clears this floor by ~2 orders of magnitude and
+  **survives the null control**. So does cod's dense-rank win (1.310x) -- but only just, at ~9x the floor's 3.6%
+  departure, which is worth knowing.
+- ⚠️ **These three rows are PROVISIONAL.** The source changed **mid-run**: a concurrent agent was adding a third
+  const arm (flat-CSR) to `fm-layout/src/lib.rs` while the bench executed. Pre-run hashes did not match post-run
+  hashes for either `lib.rs` or the bench. **By the source-pin rule the ratios are void**; the null-control
+  *mechanism* is the deliverable, and these numbers are its first output, not a certified result.
+- **KEY COROLLARY: the null control must be emitted in the SAME invocation as the claim.** The floor is a property
+  of *this machine, right now*, not of the code -- ours moved by an order of magnitude between workers inside one
+  session. A floor measured on the quiet worker tells you nothing about the run you are about to trust. Note that
+  the two certified barycenter wins (`f8e6ce3`, `6c7a2b0`) predate this rule and carry **no null control**; both
+  clear the floor by a wide margin on the numbers above, but neither measured its own.
+- **Every WIN/REJECT must now record:** binary sha256, self-time per arm, worker id, `cv_pct`, **and the
+  null-control ratio + cv**.
+- **Cross-repo recommendation written, no other tree touched:**
+  `docs/CROSS_REPO_RECOMMENDATION_bench_harness_contract.md` -- self-reporting ELF sha256 (~20 lines, one dev-dep,
+  zero measurement impact) plus the A/A null control (2x wall time), with adoption order, costs, and the caveats
+  each one does *not* cover. Explicitly recommends **against** premature centralization into a shared crate.
+- **Coordination:** `crates/fm-layout/**` is the peer's lane (they are mid-implementation of flat-CSR incidence,
+  `bd-1buv.4`, a third const arm). They **adopted the null control into their harness** -- `paired()` is now used
+  by their `SinglePass` vs `FlatCsr` A/B. I committed nothing into `fm-layout` this turn.
