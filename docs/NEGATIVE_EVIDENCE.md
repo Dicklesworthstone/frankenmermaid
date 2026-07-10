@@ -11867,6 +11867,37 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   then profile that retained copy per arm with zero lost samples. This rejects an incomplete artifact, not the
   primitive and not the clean timing effect.
 
+<!-- cod_fm-packed-crossing-win -->
+### WIN / KEEP: persistent packed Fenwick crossing frontier — 1.131x / 1.054x / 1.033x (2026-07-10)
+- **Ledger-first / one lever:** the post-flat-CSR profile named `total_crossings` at **23.80% self-time**, satisfying
+  the old fresh-table rejection's explicit retry clause. Production now destructively reuses dead CSR storage
+  after the sweep as canonical adjacent-rank edge buckets plus a `u32` Fenwick frontier; repeated e-graph recounts
+  clear/refill the same buffers, with exact fallback on unrepresentable state and no fresh allocation in the
+  counter.
+- **Exact provenance:** production/bench SHA-256 `84c9ffaf...9084cb8` / `28332ab4...14a47f`; worker `ovh-a`
+  (`ubuntu@51.222.245.56`, hostname `fixmydocuments`); one fail-closed RCH invocation, one binary, 41-round
+  per-invocation interleaved A/A+A/B, alternating order, black-boxed input/full result, exact parity/checksum.
+  While live, the binary was retained and independently verified as an unstripped **828,488-byte** ELF SHA-256
+  **`56c674647af20b985afa4a24edd2fbb89168e498ffec2169e8fdce3939f32cf9`**, build ID
+  `31e84d733e339faa0be285681e903fbcf7983a94`.
+- **Decision rows:** SCC-100 flat/packed **25.564/22.558 us**, **1.131x**, A/A CV **0.08%**, A/B CV **0.31%**;
+  SCC-300 **126.415/119.895 us**, **1.054x**, A/A CV **0.19%**, A/B CV **0.26%**; SCC-800
+  **388.161/375.849 us**, **1.033x**, A/A CV **0.06%**, A/B CV **0.19%**. Every row has both CVs `<5%`
+  and clears the 3% ratchet.
+- **Ledger integrity:** exact retained ELF, same quiescent worker, 300,000 iterations/arm, zero lost samples.
+  ORIG `total_crossings` **24.64% self-time** (**7,616 / 0 lost**); CAND `total_crossings_packed`
+  **11.29%** plus `packed_crossing_edge` **24.40% self-time** (**6,790 / 0 lost**). Full `>=0.1%` ranked
+  tables and retained paths are in `.benchmarks/barycenter_flat_csr.md`.
+- **Mechanism / memory pressure:** allocation is material but not dominant. Barycenter reorder and crossing count
+  remain the top frames; eliminating inversion-map/vector construction removes `count_inversions` (3.33% -> 0%)
+  and cuts `memmove` **4.79% -> 1.31%** through persistent packed scratch reuse.
+- **Deterministic parity / gates:** five-arm adversarial exact equality; direct parallel/reversed/same-source/
+  equal-target/rank-boundary/malformed/recount/pointer-stability coverage; fm-layout **437/437** plus doctests,
+  golden determinism **2/2**, conformance **1/1**, workspace check, workspace all-target Clippy `-D warnings`,
+  cargo fmt, UBS, and independent static audit all pass.
+- **Verdict: WIN / KEEP.** Evidence: `.benchmarks/barycenter_flat_csr.md`. Continue from the new exact profile's
+  largest live non-rejected frame; do not reopen fresh-per-call crossing container shapes.
+
 <!-- cc_fm-isa-v3-render-measured-null -->
 ### MEASURED NULL: x86-64-v3 (AVX2/BMI2/FMA) is neutral on the render path — frankenmermaid does NOT vectorize like frankenscipy (2026-07-10)
 - **Correcting my own framing:** the earlier ISA entry called the v2-vs-v3 measurement "blocked on the disk
@@ -11905,3 +11936,44 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   only matter if v3 already moved something -- it did not). If a future render lever introduces a genuinely
   vectorizable inner loop, re-open with a v2/v3 same-worker A/B; until then the ISA question is CLOSED for render.
 - **Worker `hz2`, both binaries built remotely, RUSTFLAGS propagation proven via ELF-sha on `vmi1293453`.**
+
+<!-- cc_fm-layout-render-frontier-styled-profile-SURFACE -->
+### DIG / FRONTIER: styled-diagram profile is NEW; the last in-lane frame (node style re-scan) is synthetic-only, below the noise floor — NO measurable lever remains (2026-07-10)
+- **Profile-first, analysis-only, zero builds.** Cross-scanned 6 existing `perf.data` (wide_8x16/16x32/40x80,
+  dense_dag_200, cyclic_scc_100, lean) + captured 2 NEW ones on STYLED inputs with the existing symbolized binary
+  (`perf record -F 3000 --call-graph=dwarf`, `taskset -c 11`): `class_50` (pinned corpus) and a synthetic
+  `styled300` (300 nodes, 8 classDefs, `:::cN`). Styled inputs had never been profiled — every prior layout/render
+  profile used unstyled `gen_wide`/`cyclic`/`dense` corpora.
+- **Every render frame >=1% self-time on realistic inputs is the byte-production floor** — `write_fixed2`,
+  `write_uint_into`, `write_escaped_attr/text`, `path::build_smooth_path_by_into`, `path::write_cubic`, and the
+  streaming node/edge writers. Ledgered FLOOR (this file, "render frontier is at its FLOOR", edge d-string ~20% =
+  necessary geometry compute+format) and independently **ISA-null-confirmed this session** (v3/v2 = 0.99x, AVX2
+  does nothing for scalar byte production + memchr self-dispatch). No byte-identical render micro-lever remains;
+  the only render lever left is the output-profile flip, which is **owner-gated and with the owner**.
+- **Every layout frame with real self-time is floor / rejected / peer-owned:**
+  - `reorder_rank_by_barycenter` 47.64% (cyclic) → **certified 3.591x**, done.
+  - `find_obstacle_nudge_x/y` 10-19% (dense_dag/wide) → **`bd-taot`**, the REJECTED axis-aligned-CGA-skip family
+    (do-not-retry needs a candidate-count measurement first); already surfaced.
+  - `ObstacleSpatialIndex::query_segment` + `build_edge_paths_with_orientation` + its closure ~24% (wide) →
+    **peer-owned edge routing**, in the contended `fm-layout/src/lib.rs` (peer has uncommitted flat-CSR WIP now).
+  - `simplify_polyline` 1.78% → **LANDED** (in-place compaction, -16% allocs, `6037`).
+  - `build_tree_layout_structure` 2-2.8% → CSR rewrite **DROPPED** ~0 (`layout_outgoing_csr_DROPPED`).
+- **The one genuinely UNEXPLORED in-my-lane frame — measured and judged not worth it:**
+  `fm_render_svg::resolve_node_inline_styles` = **2.49% on the synthetic styled300**, but **<0.3% on the realistic
+  pinned `class_50`** and 0.00% on every unstyled input. Root cause: for any diagram with a classDef, `style_refs`
+  is non-empty, so EVERY node takes the `collect_node_style_directives` path (`lib.rs:1759`) which scans ALL
+  `style_refs` looking for a `Node`-target match — but class-based `:::cN` styling produces `Class`-target refs
+  (emitted as CSS elsewhere), so all 300 nodes scan 8 refs and find nothing: O(nodes x style_refs) wasted.
+  - **Theoretical byte-identical lever:** hoist "does ANY style_ref target a node?" out of the per-node call; if
+    none, skip the scan for all nodes. **NOT attempted** for two honest reasons: (1) the effect is 2.49% on a
+    synthetic worst case and below the calibrated harness noise floor (~1% best case, looser on styled inputs) on
+    every realistic input — landing it is churning a synthetic-only win; (2) byte-identity is NON-trivial: the
+    `else` branch deliberately ignores `node.inline_style` when `style_refs` is non-empty, so any refactor must
+    preserve that exact precedence or it changes output. Reward does not justify the byte-identity risk.
+- **VERDICT (ship-or-surface → SURFACE): the layout/render hot-path frontier is fully mapped and NO measurable,
+  byte-identical, in-scope perf lever remains.** Everything is (a) the byte-production floor (mature + ISA-null),
+  (b) the rejected obstacle-nudge family (`bd-taot`), (c) peer-owned edge routing in a contended file, or (d) a
+  synthetic-only style re-scan below the noise floor. This is not "unprofiled" — it is profiled and floored. The
+  next real render gain is the output-profile decision (owner); the next real layout gain is the peer's edge-routing
+  and flat-CSR work. Recorded rather than churned.
+- **Artifacts:** styled profiles `perf-class.data` / `perf-styled.data` (scratch); no code changed.
