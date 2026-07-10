@@ -11189,7 +11189,7 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
 
   | chain | % pipeline | what it is |
   |---|---:|---|
-  | unresolved kernel chain | 0.72% | page-fault / zeroing of the multi-MB output buffer |
+  | unresolved kernel chain | 0.72% | ~~page-fault / zeroing of the multi-MB output buffer~~ **WRONG — see correction below** |
   | `__memcpy_avx` (inlined, unattributed) | 0.72% | - |
   | `write_common_node_fragment_into::<true>` -> `String::write_fmt` | 0.37% | streaming buffer GROWTH, not a copy |
   | `alloc::str::join_generic_copy` | 0.37% | **copy 1** (parallel chunks -> node_svg/edge_svg) |
@@ -11201,13 +11201,14 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   raw-part-fusion do-not-retry) is a **public API change** to `render_svg_with_layout`'s return type, and it buys
   at most ~3.4% of render on a 3200-node diagram. This also **explains all three prior rejections at once**: each
   attacked a ~0.4% frame. The "one concrete remaining lever" framing in the 2026-07-04 DIG is retired.
-- **What the profile DOES support (parked, not attempted).** The slow path presizes via
-  `layout_svg_capacity_hint` = `16 KiB + 768*nodes + 384*edges + ...`. It never under-reserves; it **over**-reserves
-  **1.33-2.08x** on every item measured (`wide_40x80`: hint 4,855,168 B vs actual 3,475,207 B = **1.38 MB of
-  surplus pages** the kernel maps and zeroes — precisely the 0.72% kernel chain). The contained, byte-identical
-  lever is to **tighten the hint**, not rewrite the output contract. **Do NOT move the constants on this table
-  alone:** a hint that is too small costs a realloc + full-buffer memmove, strictly worse than over-reserving, and
-  the corpus generators emit short labels — this needs a label-heavy corpus first.
+- **What the profile DOES support (parked, not attempted).** ⚠️ **THIS BULLET IS WRONG — REJECTED the same day,
+  see `bd-6rxj` below and `.benchmarks/render_capacity_preshaping_NEGATIVE.md`.** The claim that the 1.38 MB of
+  over-reserved capacity is *"surplus pages the kernel maps and zeroes — precisely the 0.72% kernel chain"* was
+  **inference, not measurement**. Measured afterwards: **14.8 page-faults per render** on `wide_40x80`, versus 848
+  pages for the bytes actually written and 1,185 for the reservation. `String::with_capacity` never touches the
+  surplus, and mimalloc recycles the buffer between renders. The over-reservation is **free**. Original text: the
+  slow path presizes via `layout_svg_capacity_hint` = `16 KiB + 768*nodes + 384*edges + ...`, which never
+  under-reserves and **over**-reserves **1.33-2.08x** on every item measured.
 - **BLOCKER (why parked).** No valid A/B substrate today: local `cargo bench` is prohibited (disk at 96%);
   `rch exec` cannot carry a split A/B (see the CORRECTION entry above — `RCH_WORKER` is ignored); and the
   prescribed one-binary/one-invocation alternating substrate is not expressible because `layout_svg_capacity_hint`
@@ -11274,6 +11275,40 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   deterministic ordering path with no bench that can see it is the exact mistake this entry documents.
 - **Evidence:** `.benchmarks/crossing_min_rejections_benched_dead_code.md`.
 
+<!-- cod_fm-barycenter-packed-rank-win -->
+### WIN: packed node-rank lookup accelerates the live Sugiyama barycenter sweep (`bd-9w78`) (2026-07-10)
+- **Agent / lane:** `cod_fm` (StormyEagle), `fm-layout` crossing minimization. This supersedes the ratio-withheld
+  handoff entry below: the quiesced-tree, low-CV run and per-arm profiles are now complete.
+- **Ledger-first routing:** the four old crossing-min rows remain void because their `layout_wide` inputs take
+  Tree and execute barycenter at **0.000%**. The retry condition was satisfied by the real Sugiyama profile:
+  `reorder_rank_by_barycenter` **47.640%** of the full `cyclic_scc_100` pipeline, versus `total_crossings`
+  0.810%. The top frame therefore licensed packed rank lookup; the colder crossing-count family was not retried.
+- **One lever:** build one node-indexed `Vec<u32>` per `crossing_minimization` and replace only the three hot
+  `ranks: BTreeMap` probes. ORIG and CAND share the old narrow/wide branch, allocations, edge traversal order,
+  integer accumulation, `f32` division, stable sort, and tie-breaks. Oversize ranks take the exact BTree fallback.
+- **Honest A/B substrate:** one `--profile release` binary, one fail-closed RCH invocation on worker `ovh-a`,
+  41 paired samples per row, O/C and C/O order alternating inside each sample, batch calibrated from CAND.
+  Inputs and full results pass through `black_box`; pre-timing full-result equality and a printed checksum guard
+  parity/DCE. Exact executable: **803,704 bytes**, SHA-256
+  `89599720a6cf301a43202c52052c8cbb879fd427cfc70ea98183b08bf8bce7bb`, not stripped. Remote pre-build and
+  local post-run source SHA-256 matched (`lib.rs` `a14d7bc3...b264a6`, bench `6d02a6a...1e056`), eliminating
+  the earlier source-swap race.
+- **Decision numbers:** `cyclic_scc_100` ORIG/CAND p50 **341.7/260.9 us = 1.310x**, ratio `cv_pct`
+  **0.69%**, MAD 0.27%; `cyclic_scc_800` **19,868.0/15,077.1 us = 1.318x**, `cv_pct` **4.57%**, MAD 0.27%.
+  Both clear the <5% dispersion rule and 3% keep ratchet (~24% latency reduction). `cyclic_scc_300` agreed at
+  1.323x but its CV was 7.29%, so it is explicitly corroboration only, not verdict evidence.
+- **Ledger-integrity profiles, exact A/B ELF:** ORIG 19,743 samples / 0 lost,
+  `reorder_rank_by_barycenter::<false>` **93.70% self-time**; CAND 16,268 / 0 lost,
+  `reorder_rank_by_barycenter::<true>` **92.13% self-time**. Direct allocator frames sum to only
+  **1.58% ORIG / 2.05% CAND**, so allocation traffic does not dominate this cyclic kernel. Every frame at or
+  above 0.1% self-time for both arms is ranked in the evidence file.
+- **Behavior / gates:** exact `(crossing_count, ordering_by_rank)` differential parity passed across narrow,
+  threshold, wide, degenerate, acyclic, and heavily cyclic shapes; the paired harness asserts full equality for
+  100/300/800 nodes. Remote all-target fm-layout Clippy passed with `-D warnings`; formatting and diff checks pass.
+- **Verdict: WIN / KEEP.** Deterministic output is preserved and both decision rows clear the ratchet. Continue
+  digging via a different one-lever primitive such as reusable packed position/slot scratch or flat CSR incidence.
+- **Evidence:** `.benchmarks/barycenter_dense_rank_WIN.md`.
+
 <!-- cc_fm-barycenter-dense-rank-measurement-blocked -->
 ### SUBSTRATE + LEVER LANDED, RATIO **NOT** CLAIMED: barycenter dense-rank (`bd-9w78`) (2026-07-10)
 - **Self-time of the function under test (required by the ledger-integrity rule):** ORIG
@@ -11323,3 +11358,80 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   `RCH_REQUIRE_REMOTE` rch silently falls back to a LOCAL build, and a globally exported `CARGO_TARGET_DIR`
   makes remote artifact retrieval return ~0 bytes.
 - **Evidence:** `.benchmarks/crossing_min_rejections_benched_dead_code.md`.
+
+<!-- cod_fm-barycenter-packed-rank-win-closeout -->
+### WIN CLOSEOUT: `bd-9w78` ratio and profile gates are now satisfied (2026-07-10)
+- The paired, single-invocation `ovh-a` rerun kept stable source hashes and produced gate-clean
+  `cyclic_scc_100` **1.310x / CV 0.69%** and `cyclic_scc_800` **1.318x / CV 4.57%** results.
+- Exact-artifact profiles proved non-zero target self-time per arm: **93.70% ORIG / 92.13% CAND**, zero lost
+  samples. This resolves every blocker in the ratio-withheld entry above; the full WIN row and ranked frame
+  tables are under `cod_fm-barycenter-packed-rank-win` and `.benchmarks/barycenter_dense_rank_WIN.md`.
+
+<!-- cc_fm-render-integrity-audit-and-capacity-preshaping-reject -->
+### INTEGRITY AUDIT + REJECT: the 3 double-copy rejections HOLD; capacity pre-shaping (`bd-6rxj`) is REJECTED; large render is at its byte-production floor (2026-07-10)
+- **Analysis only, no builds** (disk constraint). Existing symbolized binary + `perf stat` / `perf record`.
+- **INTEGRITY AUDIT (the rule that voided 4/4 crossing-min rejections).** Applied to the three large-diagram
+  double-copy rejections. **All three PASS — unlike the crossing-min case.** Their bench
+  `large_wide_stages/render/40x80` builds `gen_wide(40, 80)` = **3200 nodes**, and the streaming gate is
+  `no_between_or_after_children && edges < 4096 && nodes < 2048` (lib.rs:2892). 3200 >= 2048, so `stream_fast_path`
+  is **false** and the large slow path — the one that performs the double copy — **does execute**. The rejections
+  are evidence about live code:
+  - large `to_string_with_body` (2026-07-05) — rejected;
+  - raw-part body fusion (`cod_fm`) — **+22.65%**, p=0.01, reverted;
+  - empty between-child guards (`cod_fm`) — flat/+0.85%; note it targeted `write_class_cardinality_labels_into` at
+    **0.49% self-time**, i.e. a *ceiling* problem, not a substrate problem.
+  **Lesson: the integrity rule cuts both ways.** It voided 4/4 in `fm-layout` and confirmed 3/3 here. Run it; do
+  not assume the answer.
+- **SELF-CORRECTION (mine, same day).** The `DIG / NO-SHIP` entry above attributed a 0.72% kernel chain to
+  *"page-fault / zeroing of the multi-MB output buffer"* and filed `bd-6rxj` to tighten `layout_svg_capacity_hint`
+  on that basis. **That was inference, never measured.** Corrected inline above.
+- **REJECT `bd-6rxj` (capacity pre-shaping).** `wide_40x80` (3200 nodes / 6201 edges / 3,475,207 B output),
+  `perf stat` two-point delta (reps 36-6, warmup 2), 60 renders per delta, `FM_H2H_FORCE_PROFILE=default`:
+
+  | event | delta | per render |
+  |---|---:|---:|
+  | `page-faults` | 886 | **14.8** |
+  | `minor-faults` | 917 | **15.3** |
+
+  Against: bytes written 3,475,207 = **848 pages**; hint reservation 4,855,168 = 1,185 pages; **surplus = 336
+  pages**. Measured 14.8 faults/render, **not 848 and not 1,185**. Mechanism: `String::with_capacity(n)` calls
+  `malloc(n)` and **does not touch the memory** — pages fault lazily on first *write*, so the surplus is never
+  touched; and mimalloc **recycles** the 3.47 MB buffer between renders rather than munmap/refault, so even the
+  written pages fault only once and the two-point delta cancels them. **The over-reservation is FREE.** Tightening
+  the constants saves nothing on the upside and risks a realloc + whole-buffer memmove on the downside. An
+  under-reserving hint is strictly worse than an over-reserving one.
+- **SELF-TIME, re-attributed (the memmove frame is NOT the double copy).** `perf record -F 2500 --call-graph=dwarf`,
+  self-time as % of sampled pipeline: `__memmove_avx`+`__memcpy_avx` = **2.54%**, whose dominant call-chain is
+  `String::write_fmt` / `push_str` -> `Vec::extend_from_slice` -> `copy_nonoverlapping` — i.e. **buffer append, the
+  unavoidable act of writing the output bytes**. The *identifiable* double copy is `alloc::str::join_generic_copy`
+  **0.37%** (chunks -> node_svg/edge_svg) + `Element::write_to_string` **0.36%** (raw_svg_parts -> final String)
+  = **0.73% of pipeline ~= 3.4% of render**. Kernel frames total 18.27% and are **not** output-buffer faults
+  (14.8/render); `--call-graph=dwarf` sampling overhead is the plausible bulk. **NO-SHIP the rope/arena output
+  contract stands**, now on re-attributed evidence rather than the earlier partial one.
+- **THE DOUBLE-COPY FRAME PROVABLY DID NOT MOVE.** Both of this session's render landings are structural no-ops on
+  the large slow path (the lean edge fragment only changes the a11y-off profile there; `bd-w5sn`'s post-pass
+  early-returns above `POST_PASS_MAX_SVG_BYTES`). Direct confirmation, `wide_40x80`, `perf stat -e instructions:u`
+  two-point delta:
+
+  | binary | default | lean |
+  |---|---:|---:|
+  | `830d672` (pre-both) | 1.0000x | 1.0000x |
+  | `bc56f72` (lean edge fragment) | 0.9984x | **0.7274x** |
+  | `0f9efd4` (+ single-pass CSS) | 0.9984x | **0.7274x** |
+
+  Default moves **-0.16%**; `bd-w5sn` adds exactly its early-return check and nothing else. **Bonus:** the lean
+  column is **-27.3% pipeline instructions on a 3200-node graph** — the largest measured effect of the
+  edge-fragment lever anywhere, bigger than any corpus item (`wide_16x32` was 0.7359x).
+- **WHERE LARGE-DIAGRAM RENDER TIME ACTUALLY GOES** (self-time, `wide_40x80`): `write_uint_into` **5.31%**,
+  `write_fixed2` **3.61%**, `build_smooth_path_by_into` 2.54%, `write_escaped_attr` 2.51%, `FmtNum::write_into`
+  1.82%, `AttributeValue::write_value` 1.47%, `write_escaped_text` 1.44% => **18.70% of pipeline, 7.4x the entire
+  memmove frame**, and 86% of `fm_render_svg`'s 21.79% self-time.
+  - **That vein is already mature, per this ledger:** `write_uint_into` is digit-table optimized (`e79a7bd`); the
+    `itoa` crate was **REJECTED as a regression** (2026-07-02); removing its `&DIGIT_PAIRS[d..d+2]` char-boundary
+    checks measured **~30% SLOWER**; and an earlier entry already classifies `write_fixed2`+`write_uint_into`+
+    `FmtNum` as *"the inherent byte production"*. No new lever proposed here.
+- **CONCLUSION: large-diagram render is at its byte-production floor.** The remaining lever is not *how fast we
+  write the bytes* but *how many bytes we write* — which is the output-profile decision now with the owner
+  (`docs/PROPOSAL_default_output_profile.md`). The lean column above **is** that lever, already measured at -27.3%
+  on this graph. Nothing was flipped.
+- **Evidence:** `.benchmarks/render_capacity_preshaping_NEGATIVE.md`.
