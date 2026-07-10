@@ -123,11 +123,25 @@ than correlational:
 Captured **53–63% of the isolated ceiling** above; the remainder is the `replace_range` / `format!` / `find`
 work and the two surviving passes, deliberately left alone (one lever per commit).
 
-### B. Criterion, render stage, same worker (the confirmation)
+### B. Criterion, render stage (the confirmation) — ⚠️ SUBSTRATE LATER FOUND INVALID, see the correction below
 
-`rch exec` with `RCH_WORKER=hz1 RCH_REQUIRE_REMOTE=1 RCH_FORCE_REMOTE=1`, `cargo bench -p frankenmermaid-cli
+> **CORRECTION (2026-07-10, same day, self-caught).** This criterion A/B was run as **two separate `rch exec`
+> invocations**. Per the `franken_networkx` `br-r37-c1-839yx` addendum, `rch exec` exposes **no worker-pinning
+> flag** and picks workers non-deterministically, so a split-invocation ratio is invalid by construction.
+> `RCH_WORKER=hz1` below was **silently ignored** — the logs show `[RCH] remote hz2` for *both* arms. They did
+> land on the same physical worker, so the confound did not actually occur, but that was luck, not control.
+>
+> **These numbers are demoted to corroboration. The claim is section A** — a machine-local, same-core,
+> interleaved `perf stat -e instructions:u` A/B that never touches `rch`, carries its own code-layout control
+> (1.0000–1.0003×) and two exact-`1.0000×` null controls, and clears the ledger's ">5% AND a code-layout
+> control" retry-condition on its own. Byte-identity is unaffected.
+>
+> Correct substrate while the rch-only constraint holds: **both arms in ONE binary and ONE invocation**, ORIG
+> kept as a bench-only reference fn in an alternating criterion group.
+
+`rch exec` with `RCH_REQUIRE_REMOTE=1 RCH_FORCE_REMOTE=1` (an `RCH_WORKER=hz1` hint was passed but **ignored**; both arms actually ran on `hz2`), `cargo bench -p frankenmermaid-cli
 --bench pipeline_bench -- render_svg/flowchart --measurement-time 8 --warm-up-time 2 --sample-size 30 --noplot`.
-Both arms on the **same** worker; ORIG obtained by `git show HEAD:<file> > <file>` with the lever restored from
+Both arms happened to land on the same worker (`hz2`), by luck rather than control; ORIG obtained by `git show HEAD:<file> > <file>` with the lever restored from
 a `cp` backup immediately after (sha256 verified equal).
 
 | bench | output bytes | post-pass | ORIG | lever | speedup |

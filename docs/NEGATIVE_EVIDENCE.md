@@ -11116,3 +11116,77 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
     `strip_unused_markers` already uses the right shape: collect ranges, ONE O(n) rebuild.
   - `rch` does not retrieve `--example` binaries; `cargo test` runs fully remote.
 - **Evidence:** `.benchmarks/postpass_single_pass_scan.md`.
+
+<!-- cc_fm-correction-rch-split-invocation-ab -->
+### CORRECTION (self-caught): the `bd-w5sn` criterion A/B used an INVALID substrate — the claim stands on the instruction A/B (2026-07-10)
+- **What is wrong.** The criterion numbers in the `bd-w5sn` WIN entry above were measured as **two separate
+  `rch exec` invocations** (ORIG tree, then CAND tree). Per the `franken_networkx` `br-r37-c1-839yx` addendum,
+  `rch exec` exposes **no worker-pinning flag** and selects workers **non-deterministically**, and the ORIG/CAND
+  ratio is **not worker-invariant**. A split-invocation A/B is therefore invalid by construction.
+- **Confirmed empirically.** I passed `RCH_WORKER=hz1` to both arms. The env var was **silently ignored**: the
+  logs show `[RCH] remote hz2` for the candidate run AND `[RCH] remote hz2` for the ORIG run. Both arms did land
+  on the same physical worker (`hz2`), so the cross-worker confound did **not** actually occur in this instance —
+  but that was luck, not control, and the method must not be reused. **The `bd-w5sn` entry's claim that the runs
+  were pinned to `hz1` is wrong; they ran on `hz2`.**
+- **What is NOT affected: the load-bearing claim.** `bd-w5sn`'s decision metric was the **instruction A/B**, run
+  **locally** on this box: one machine, one pinned core (`taskset -c 7`), all three binaries (ORIG / no-op
+  layout-control / lever) interleaved within each of 3 rounds, `perf stat -e instructions:u` two-point delta.
+  Instruction counts do not depend on a remote worker; nothing about that measurement passes through `rch`. It
+  remains: lever **0.8547-0.9442x** (5.6-14.5% fewer pipeline instructions, DEFAULT profile), code-layout control
+  **1.0000-1.0003x**, and the two null controls (`cyclic_scc_100`, `wide_16x32`, both over the 100 KB cap so the
+  function never runs) at **exactly 1.0000x**. That satisfies the `strip-theme-css-*-RE-REJECTED` retry-condition
+  (">5% AND a code-layout control") on its own, without any criterion number.
+- **Status of the criterion numbers** (small_10 1.082x, medium_100 1.122x, large_500 1.004x null control):
+  **demoted to corroboration**, same-worker-by-accident, not re-measurable today. Do not cite them as the claim.
+  Byte-identity (26/26 corpus SHA-256, the 200k-case differential unit test, 247 lib tests) is unaffected.
+- **CORRECT SUBSTRATE going forward, while the rch-only constraint holds:** bench **both arms in ONE binary and
+  ONE `rch exec` invocation** — keep the ORIG implementation as a bench-only reference fn and register both arms
+  in the same alternating criterion group, so worker identity and drift cancel. Do **not** use the old "stash
+  ORIG, bench, pop, bench NEW" recipe: it assumes one machine *and* uses `git stash`, which is forbidden here.
+  When the disk constraint lifts, prefer the machine-local `perf stat -e instructions:u` two-point A/B with a
+  code-layout control — it resolved a 0.03% effect on this codebase and is immune to BOTH the worker-selection
+  problem and the +/-5% code-layout roulette.
+
+<!-- cc_fm-large-double-copy-over-attributed -->
+### DIG / NO-SHIP: the large-diagram "double-copy" is OVER-ATTRIBUTED — it is ~3.4% of render, not the memmove frame (2026-07-10)
+- **Ledger-grep:** three standing rejections on this frame — large `to_string_with_body` (2026-07-05), raw-part
+  body fusion (`cod_fm`, **+22.65%** regression, reverted), empty between-child guards (`cod_fm`, flat). The
+  2026-07-04 frontier map calls it *"THE concrete remaining lever"* (est. ~3% of large render); cod's profile of
+  `large_wide_stages/render/40x80` puts `__memmove_avx_unaligned_erms` at **14.82%** of the render loop.
+- **No pinned corpus item reaches the slow path.** The streaming gate is `edges < 4096 && nodes < 2048`
+  (lib.rs:2892) and the corpus tops out at 512 nodes — so every earlier corpus profile of "the double copy" was
+  actually profiling the *streaming* path. Generated `wide_40x80` (**3200 nodes / 6201 edges / 3,475,207 B**) and
+  profiled it (`perf record -F 2500 --call-graph=dwarf`, existing symbolized binary; valid post-`bd-w5sn` because
+  `strip_unused_state_css` early-returns above 100 KB — pinned by that entry's exact-`1.0000x` null controls).
+- **Result, as a share of the whole pipeline:** `fm_render_svg` 21.79%, `fm_parser` 14.67%, `fm_layout` 10.41%,
+  `sha2` (harness hashing) 5.37%, **memmove+memcpy 2.54%** (= <=11.7% of render, consistent with cod's 14.82% on
+  a render-only bench). But the folded call-chains split that memmove:
+
+  | chain | % pipeline | what it is |
+  |---|---:|---|
+  | unresolved kernel chain | 0.72% | page-fault / zeroing of the multi-MB output buffer |
+  | `__memcpy_avx` (inlined, unattributed) | 0.72% | - |
+  | `write_common_node_fragment_into::<true>` -> `String::write_fmt` | 0.37% | streaming buffer GROWTH, not a copy |
+  | `alloc::str::join_generic_copy` | 0.37% | **copy 1** (parallel chunks -> node_svg/edge_svg) |
+  | `Element::write_to_string` -> `push_str` | 0.36% | **copy 2** (raw_svg_parts -> final String) |
+
+  **The identifiable double-copy is ~0.73% of pipeline ~= 3.4% of render.** The rest is ordinary `String` growth
+  in the streaming writers plus kernel page-fault cost on a 3.47 MB allocation.
+- **Verdict: NO-SHIP the rope/arena output contract.** A segmented/rope result (the escape hatch named in the
+  raw-part-fusion do-not-retry) is a **public API change** to `render_svg_with_layout`'s return type, and it buys
+  at most ~3.4% of render on a 3200-node diagram. This also **explains all three prior rejections at once**: each
+  attacked a ~0.4% frame. The "one concrete remaining lever" framing in the 2026-07-04 DIG is retired.
+- **What the profile DOES support (parked, not attempted).** The slow path presizes via
+  `layout_svg_capacity_hint` = `16 KiB + 768*nodes + 384*edges + ...`. It never under-reserves; it **over**-reserves
+  **1.33-2.08x** on every item measured (`wide_40x80`: hint 4,855,168 B vs actual 3,475,207 B = **1.38 MB of
+  surplus pages** the kernel maps and zeroes — precisely the 0.72% kernel chain). The contained, byte-identical
+  lever is to **tighten the hint**, not rewrite the output contract. **Do NOT move the constants on this table
+  alone:** a hint that is too small costs a realloc + full-buffer memmove, strictly worse than over-reserving, and
+  the corpus generators emit short labels — this needs a label-heavy corpus first.
+- **BLOCKER (why parked).** No valid A/B substrate today: local `cargo bench` is prohibited (disk at 96%);
+  `rch exec` cannot carry a split A/B (see the CORRECTION entry above — `RCH_WORKER` is ignored); and the
+  prescribed one-binary/one-invocation alternating substrate is not expressible because `layout_svg_capacity_hint`
+  is private and capacity is not a parameter of any public entry point. Unpark by threading the hint through a
+  bench-only parameter, or by waiting for the machine-local `perf stat` substrate. A capacity change is
+  **byte-identical by construction**, so the whole difficulty is measurement, not correctness.
+- **Full write-up + unpark instructions:** `tests/artifacts/perf/PARKED_large_render_capacity_and_double_copy.md`.
