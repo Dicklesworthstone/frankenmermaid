@@ -114,3 +114,81 @@ Profile files are retained without deletion:
 large, but the loaded worker makes the timing inadmissible. Retry this unchanged one-lever source only when the
 selected worker has no concurrent Cargo/rustc/benchmark process, and keep only a run whose same-invocation A/A
 null control and real A/B both have `cv_pct < 5`.
+
+## Attempt 2 — REJECTED SAMPLE (2 ms sampler floor is below worker noise)
+
+Attempt 2 satisfied attempt 1's worker-quiescence condition: `vmi1264463` (`root@38.242.209.154`) had no other
+RCH job during the run and no Cargo, rustc, or benchmark process after it. The production and benchmark source
+hashes remained exactly the same as attempt 1.
+
+- Exact self-reporting and SSH-verified ELF: **857,696 bytes**, SHA-256
+  `291a78bbe9695abaa23318192fc29c5c53db3fd14a0ed28f7b8a5de18208bc9b`, x86-64 PIE, not stripped.
+- Same command, 41 paired alternating rounds, input/output `black_box`, checksums, and same-invocation A/A.
+
+| input | A/A ratio | A/A `cv_pct` | A/A MAD | single-pass p50 | flat-CSR p50 | median paired A/B | A/B `cv_pct` | A/B MAD |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `cyclic_scc_100` | 1.0016x | 12.82% | 6.00% | 187.635 us | 70.331 us | 2.573x | 15.11% | 12.34% |
+| `cyclic_scc_300` | 0.9704x | 12.08% | 8.19% | 1,262.189 us | 326.463 us | 3.979x | 9.07% | 3.46% |
+| `cyclic_scc_800` | 1.0020x | 11.78% | 7.65% | 7,066.016 us | 893.422 us | 7.845x | 10.03% | 6.68% |
+
+The worker is no longer the confound, but the sampler calibrates the faster arm to only 2 ms. A single scheduler
+interrupt is therefore a large fraction of a sample. The A/A ratios center near 1.0 while their CV remains
+11.78–12.82%, naming sampler duration rather than implementation variance as the mechanism.
+
+Exact-ELF profiles on the quiescent worker again prove both arms execute:
+
+- ORIG: 40,000 iterations, 187,354 ns/invocation, about 7K samples / 0 lost; target
+  `reorder_rank_by_barycenter::<true,true,false>` **69.64% self-time**.
+- CAND: 100,000 iterations, 72,462 ns/invocation, about 7K / 0 lost; target
+  `reorder_rank_by_barycenter::<true,true,true>` **25.78% self-time**.
+
+| ORIG self | named frame |
+|---:|---|
+| 69.64% | `reorder_rank_by_barycenter::<true,true,false>` |
+| 11.94% | `total_crossings` |
+| 3.45% | `malloc` |
+| 2.39% | `nodes_by_rank` |
+| 1.90% | `cfree` |
+| 1.44% | `crossing_minimization_single_pass` |
+| 0.91% | `count_inversions` |
+| 0.79% | scored-node insertion sort |
+| 0.29% | `BTreeMap::bulk_build_from_sorted_iter` |
+| 0.21% | `realloc` |
+| 0.21%, 0.20% | `RawVecInner::finish_grow` |
+| 0.20% | crossing-pair insertion sort |
+| 0.16% | `BTreeMap::VacantEntry::insert_entry` |
+| 0.14% | `BTreeMap::IntoIter::dying_next` |
+| 0.13% | `drop_glue<BTreeMap>` |
+| 0.11% | `RawVec<Reverse<_>>::grow_one` |
+| 0.89–0.11% | unresolved code addresses (9 frames) |
+
+| CAND self | named frame |
+|---:|---|
+| 27.05% | `total_crossings` |
+| 25.78% | `reorder_rank_by_barycenter::<true,true,true>` |
+| 6.19% | `malloc` |
+| 4.87% | `nodes_by_rank` |
+| 4.22% | `cfree` |
+| 3.75% | `crossing_minimization_flat_csr` |
+| 3.10% | `count_inversions` |
+| 2.24% | `BarycenterScratch::new::<true,true>` |
+| 2.06% | scored-node insertion sort |
+| 0.96% | `realloc` |
+| 0.92% | `BTreeMap::bulk_build_from_sorted_iter` |
+| 0.51%, 0.39% | `RawVecInner::finish_grow` |
+| 0.48% | `drop_glue<BTreeMap>` |
+| 0.44% | `BTreeMap::VacantEntry::insert_entry` |
+| 0.36% | crossing-pair insertion sort |
+| 0.31% | `RawVec<Reverse<_>>::grow_one` |
+| 0.22%, 0.21% | `BTreeMap::IntoIter::dying_next` |
+| 0.21% | `RawVecInner::grow_amortized` |
+| 0.13% | `barycenter_sweep::time_arm` |
+| 2.18–0.10% | unresolved code addresses (20 frames) |
+
+Retained profiles:
+
+- `/tmp/cod_fm_csr_invalid2_orig_291a78bb_vmi1264463.perf.data`
+- `/tmp/cod_fm_csr_invalid2_cand_291a78bb_vmi1264463.perf.data`
+
+**REJECT THE SAMPLE, NOT THE LEVER.** Retry condition: leave production code and the paired algorithm unchanged,
+raise only `MIN_SAMPLE` from 2 ms to 20 ms, then require A/A and A/B `cv_pct < 5` in the same invocation.

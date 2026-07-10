@@ -11595,3 +11595,21 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
 - **Why rejected / retry condition:** a concurrent `frankenpandas` Cargo/rustc build was live on the worker.
   **REJECT THE SAMPLE, NOT THE LEVER.** Retry the unchanged source only on a worker with no concurrent
   Cargo/rustc/benchmark process, and require both same-invocation A/A and real A/B `cv_pct < 5` before a verdict.
+
+<!-- cod_fm-flat-csr-attempt-2-short-samples -->
+### REJECTED SAMPLE / RETRY OPEN: quiescent flat-CSR run identifies the 2 ms sample floor as the remaining confound (2026-07-10)
+- **Retry condition satisfied:** attempt 2 used quiescent `vmi1264463` (`root@38.242.209.154`) with no other RCH
+  job and no Cargo/rustc/benchmark process after the run. Production and bench source hashes were unchanged.
+- **Exact provenance:** self-reporting and SSH-verified non-empty, unstripped **857,696-byte** ELF, SHA-256
+  **`291a78bbe9695abaa23318192fc29c5c53db3fd14a0ed28f7b8a5de18208bc9b`**; one binary/invocation, alternating
+  pairs, black-boxed inputs/full results, checksums, and same-invocation A/A.
+- **Numbers:** `cyclic_scc_100` single/CSR **187.635/70.331 us**, median paired **2.573x**, A/B CV **15.11%**;
+  `300` **1,262.189/326.463 us**, **3.979x**, CV **9.07%**; `800` **7,066.016/893.422 us**,
+  **7.845x**, CV **10.03%**. A/A controls center near one but remain loose: 1.0016x / **12.82% CV**,
+  0.9704x / **12.08%**, 1.0020x / **11.78%**.
+- **Exact-ELF self-time:** ORIG target **69.64%** (about 7K samples / 0 lost); CAND target **25.78%**
+  (about 7K / 0 lost). CAND CSR construction is 2.24%. Full ranked tables and retained profile paths are in
+  `.benchmarks/barycenter_flat_csr.md`.
+- **Mechanism / retry:** with the worker confound removed, the 2 ms faster-arm calibration floor is too short;
+  one scheduler interrupt dominates a sample. **REJECT THE SAMPLE, NOT THE LEVER.** Keep production and paired
+  logic unchanged, raise only `MIN_SAMPLE` to 20 ms, and require same-invocation A/A and A/B CV both `<5%`.
