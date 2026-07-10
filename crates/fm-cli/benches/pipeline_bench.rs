@@ -303,6 +303,42 @@ fn bench_layout(c: &mut Criterion) {
 // These isolate the crossing-minimization barycenter sweep on graphs whose ranks
 // contain many nodes (the cost driver that linear-chain benches never trigger).
 
+/// Dense DAG: `n` nodes, each with forward edges to a few successors, so `edges ≈ 4·nodes` while the
+/// obstacle count stays `= nodes`. This is the shape the obstacle-index work-gate targets — the count-only
+/// `DENSE_INDEX_OBSTACLES` floor excludes it, but its O(edges·obstacles) linear scan is the cost driver.
+fn gen_dense_dag(n: usize) -> String {
+    let mut lines = vec![String::from("flowchart TD")];
+    for i in 0..n {
+        lines.push(format!("  N{i}[Node {i}]"));
+    }
+    for i in 0..n {
+        for step in [1_usize, 2, 3, 5] {
+            if i + step < n {
+                lines.push(format!("  N{i}-->N{}", i + step));
+            }
+        }
+    }
+    lines.join("\n")
+}
+
+/// Layout of dense DAGs — the workload the obstacle-index work-gate lever affects. `dense_200` mirrors the
+/// corpus `dense_dag_200` (≈200 nodes / ≈790 edges); the larger rows check the O(edges·obstacles) scaling.
+fn bench_layout_dense(c: &mut Criterion) {
+    let mut group = c.benchmark_group("layout_dense");
+    for (label, n) in [
+        ("dense_200", 200_usize),
+        ("dense_400", 400),
+        ("dense_800", 800),
+    ] {
+        let input = gen_dense_dag(n);
+        let parsed = fm_parser::parse(&input);
+        group.bench_with_input(BenchmarkId::new("dag", label), &parsed.ir, |b, ir| {
+            b.iter(|| fm_layout::layout_diagram(ir));
+        });
+    }
+    group.finish();
+}
+
 fn bench_layout_wide(c: &mut Criterion) {
     let mut group = c.benchmark_group("layout_wide");
 
@@ -789,6 +825,7 @@ criterion_group!(
     bench_parse,
     bench_layout,
     bench_layout_wide,
+    bench_layout_dense,
     bench_full_pipeline_wide,
     bench_full_pipeline_mindmap,
     bench_render_svg,

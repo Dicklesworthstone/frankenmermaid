@@ -11977,3 +11977,38 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   next real render gain is the output-profile decision (owner); the next real layout gain is the peer's edge-routing
   and flat-CSR work. Recorded rather than churned.
 - **Artifacts:** styled profiles `perf-class.data` / `perf-styled.data` (scratch); no code changed.
+
+<!-- cc_fm-obstacle-index-work-gate-WIN -->
+### WIN: obstacle-index work-gate — dense-DAG layout 2.34x, byte-identical (2026-07-10)
+- **Profile-first.** `perf --call-graph=dwarf` on `dense_dag_200` (200 nodes / 790 edges): `find_obstacle_nudge_x`
+  = **19.36% of the whole pipeline** (largest non-barycenter layout frame), and the folded chain goes through
+  `find_vertical_segment_nudge_iter` — the **linear scan over ALL obstacles**, i.e. the spatial index was OFF.
+- **Root cause.** `build_edge_paths_with_orientation` (lib.rs:12697) gates the index on
+  `obstacle_bounds.len() >= DENSE_INDEX_OBSTACLES(256)`. That count-only proxy was calibrated on the WIDE family
+  (edges ≈ obstacles); the linear scan's real cost is `edges × obstacles`. `dense_dag_200` has 200 obstacles
+  (< 256, EXCLUDED) but 790 edges → 790×200 ≈ 158k scan tests, the SAME work the already-indexed 12x24 wide graph
+  (288×552 ≈ 159k, index −25%) pays — denied the index because the gate looks at the wrong quantity.
+- **Lever (one, additive):** add `|| ir.edges.len()*obstacle_bounds.len() >= DENSE_INDEX_LINEAR_WORK` (new const
+  = 100_000). Floor sits above the one measured index LOSS (8x16: 128×224 ≈ 29k, +5% → stays excluded) and below
+  the WINS (12x24/16x32 and dense_dag_200 at 158k → newly indexed). Additive ⇒ can only ENABLE indexing for more
+  graphs, never regress a currently-indexed one. One `saturating_mul` at the once-per-layout decision.
+- **Byte-identical** (index query = conservative superset of the linear AABB scan): new
+  `dense_obstacle_field_index_matches_linear_scan` (10×10 grid, index==linear for 24 segments across both axes),
+  new `dense_index_work_gate_matches_measured_crossover` (pins 8x16 out / 12x24 in / dense_dag_200 in / tiny out),
+  439 fm-layout tests, golden_layout 2/2, conformance green, fmt clean, ubs 158→160 (+2 `assert_eq!` `==` false
+  positives).
+- **Measurement — same-worker A/B with a built-in null.** New `layout_dense/dag` bench (fm-cli): `layout_diagram`
+  on dense DAGs. cand (worktree) vs base (`git show HEAD:lib.rs>lib.rs`, lever reverted, bench kept), via
+  `RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec`. **dense_400/dense_800 are NULL controls** (≥256
+  obstacles → both arms behave identically → ratio = pure worker drift).
+  - Run 1 (cand vmi1227854 / base hz2, self-calibrated): dense_200 cand/base **0.454x**, nulls dense_400 1.112x /
+    dense_800 1.109x (agree → worker drift +11%). Worker-corrected treatment = 0.454/1.11 = **0.409x (2.45x)**;
+    nulls → ~1.00 as required.
+  - Run 2 (BOTH arms same worker hz2, direct): dense_200 cand **112.85us [110.53,115.83]** vs base **264.43us
+    [258.04,272.27]** = **0.427x = 2.34x faster**, CIs non-overlapping. Confirms run 1.
+  - **Dense-DAG layout ~57% faster; already-indexed dense_400/800 provably untouched.**
+- **Scope:** helps many-edges-few-obstacles graphs <256 obstacles (dense DAGs, cyclic-SCC, call/dependency
+  graphs). Neutral on wide layered (count-gated) and sparse flowcharts (already indexed). Worker note: the
+  identical-behavior null rows quantify worker drift IN-experiment — the cheapest same-machine control available
+  when rch cannot pin a worker.
+- **Evidence:** `.benchmarks/obstacle_index_work_gate_WIN.md`.

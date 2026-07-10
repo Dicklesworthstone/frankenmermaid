@@ -12694,9 +12694,22 @@ fn build_edge_paths_with_orientation(
     // candidate-sort overhead loses to the already-cheap scan (8x16 +5%), so dense
     // indexing is floored at `DENSE_INDEX_OBSTACLES`. The index query is a conservative
     // superset of the AABB scan, so routing stays byte-identical either way.
+    // The `DENSE_INDEX_OBSTACLES` floor uses OBSTACLE COUNT as the crossover proxy, but it was calibrated
+    // on the wide layered family where edges ≈ obstacles. The linear scan's real cost is `edges ×
+    // obstacles`, so a graph with FEW obstacles but MANY edges (a dense DAG: 200 nodes / 790 edges) pays a
+    // large O(edges·obstacles) scan yet is excluded by the count-only gate. Measured: `find_obstacle_nudge_x`
+    // is 19.36% of the `dense_dag_200` pipeline, all in the per-edge linear obstacle scan, because 200
+    // obstacles < 256 keeps the index off even though 790×200 ≈ 158k scan tests is the SAME work the already-
+    // indexed 12x24 wide graph (288×552 ≈ 159k, index −25%) pays. So add a third, WORK-based disjunct. It is
+    // purely additive — it can only ENABLE the index for more graphs, never disable it, so no currently-
+    // indexed case can regress — and byte-identical for the same reason the count gate is (the index query is
+    // a conservative superset of the AABB scan). The floor 100k sits above the one measured LOSS (8x16:
+    // 128×224 ≈ 29k, index +5%, stays excluded) and below the measured WINS (12x24/16x32 and dense_dag_200).
     let sparse_routing = ir.edges.len() <= nodes.len().saturating_mul(3) / 2;
-    let index_eligible =
-        sparse_routing || obstacle_bounds.len() >= ObstacleSpatialIndex::DENSE_INDEX_OBSTACLES;
+    let linear_scan_work = ir.edges.len().saturating_mul(obstacle_bounds.len());
+    let index_eligible = sparse_routing
+        || obstacle_bounds.len() >= ObstacleSpatialIndex::DENSE_INDEX_OBSTACLES
+        || linear_scan_work >= ObstacleSpatialIndex::DENSE_INDEX_LINEAR_WORK;
     let mut obstacle_index =
         if index_eligible && obstacle_bounds.len() >= ObstacleSpatialIndex::MIN_INDEXED_OBSTACLES {
             ObstacleSpatialIndex::new(&obstacle_bounds)
@@ -12906,6 +12919,13 @@ impl ObstacleSpatialIndex {
     /// crossover sits between the 8x16 wide graph (128 obstacles, scan faster) and the
     /// 12x24 wide graph (288 obstacles, index ~25% faster).
     const DENSE_INDEX_OBSTACLES: usize = 256;
+    /// Linear-scan-work floor (`edges × obstacles`) above which a *dense* graph is indexed regardless of
+    /// obstacle count. Captures the graphs the count-only `DENSE_INDEX_OBSTACLES` gate misses: few obstacles
+    /// but many edges (a dense DAG), whose O(edges·obstacles) linear scan is the actual cost driver. Chosen
+    /// to sit above the one measured index LOSS (8x16: 128×224 ≈ 29k, index +5%) and below the measured WINS
+    /// (12x24: 288×552 ≈ 159k, index −25%; and `dense_dag_200`: 200×790 ≈ 158k). Additive with the count gate,
+    /// so it can only enable indexing for more graphs, never regress a currently-indexed one.
+    const DENSE_INDEX_LINEAR_WORK: usize = 100_000;
     /// Cap on grid cells per obstacle. A layout so spread out that its cell bbox exceeds
     /// this is not worth a dense grid — `new` returns `None` and the caller falls back to
     /// the per-edge linear AABB scan, which is byte-identical (just slower for that rare
@@ -17203,6 +17223,79 @@ mod tests {
         let mut index = ObstacleSpatialIndex::new(&obstacles).expect("compact obstacles index");
         let indexed = find_obstacle_nudge_y(segment, 15.0, &obstacles, Some(&mut index));
         assert_eq!(indexed, full_scan);
+    }
+
+    /// The `DENSE_INDEX_LINEAR_WORK` disjunct must reproduce every *measured* index decision and only ADD
+    /// the dense-DAG case. Guards the calibration boundary so a future edit cannot silently pull the 8x16
+    /// loss-case into indexing or drop the dense_dag_200 win-case out.
+    #[test]
+    fn dense_index_work_gate_matches_measured_crossover() {
+        let eligible = |edges: usize, nodes: usize, obstacles: usize| -> bool {
+            let sparse = edges <= nodes.saturating_mul(3) / 2;
+            sparse
+                || obstacles >= ObstacleSpatialIndex::DENSE_INDEX_OBSTACLES
+                || edges.saturating_mul(obstacles) >= ObstacleSpatialIndex::DENSE_INDEX_LINEAR_WORK
+        };
+        // 8x16 wide: 128 obstacles / 224 edges = 28,672 work -> index measured +5% -> stays EXCLUDED.
+        assert!(
+            !eligible(224, 128, 128),
+            "8x16 must stay on the linear scan (index loses)"
+        );
+        // 12x24 wide: 288 obstacles >= 256 -> already indexed (count gate), unchanged.
+        assert!(eligible(552, 288, 288), "12x24 stays indexed");
+        // dense_dag_200: 200 obstacles < 256 but 790*200 = 158,000 work -> NEWLY indexed (the win).
+        assert!(
+            eligible(790, 200, 200),
+            "dense_dag_200 must now be indexed via the work gate"
+        );
+        // A tiny dense graph stays excluded (below both floors).
+        assert!(
+            !eligible(30, 10, 10),
+            "tiny dense graph stays on the linear scan"
+        );
+    }
+
+    /// The work-gate lever is byte-identical because the indexed route equals the linear-scan route on a
+    /// DENSE obstacle field — the exact property the change relies on (dense_dag_200 flips from linear to
+    /// indexed). Existing tests only cover a 2-obstacle field; this covers a dense grid where the index
+    /// returns a real candidate subset, for both axes and several segments.
+    #[test]
+    fn dense_obstacle_field_index_matches_linear_scan() {
+        // 10x10 grid of obstacles = 100 dense obstacles.
+        let mut obstacles = Vec::new();
+        for row in 0..10 {
+            for col in 0..10 {
+                obstacles.push(LayoutRect {
+                    x: (col * 30) as f32,
+                    y: (row * 30) as f32,
+                    width: 16.0,
+                    height: 16.0,
+                });
+            }
+        }
+        let mut index = ObstacleSpatialIndex::new(&obstacles).expect("dense grid index");
+        // Vertical and horizontal segments threading the grid at several offsets.
+        for k in 0..12 {
+            let off = (k * 23) as f32;
+            let vseg = (
+                LayoutPoint { x: off, y: 0.0 },
+                LayoutPoint { x: off, y: 290.0 },
+            );
+            assert_eq!(
+                find_obstacle_nudge_x(vseg, off, &obstacles, None),
+                find_obstacle_nudge_x(vseg, off, &obstacles, Some(&mut index)),
+                "vertical nudge index != linear scan at x={off}"
+            );
+            let hseg = (
+                LayoutPoint { x: 0.0, y: off },
+                LayoutPoint { x: 290.0, y: off },
+            );
+            assert_eq!(
+                find_obstacle_nudge_y(hseg, off, &obstacles, None),
+                find_obstacle_nudge_y(hseg, off, &obstacles, Some(&mut index)),
+                "horizontal nudge index != linear scan at y={off}"
+            );
+        }
     }
 
     #[test]
