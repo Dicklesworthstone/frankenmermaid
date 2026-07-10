@@ -11189,4 +11189,4 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   is private and capacity is not a parameter of any public entry point. Unpark by threading the hint through a
   bench-only parameter, or by waiting for the machine-local `perf stat` substrate. A capacity change is
   **byte-identical by construction**, so the whole difficulty is measurement, not correctness.
-- **Full write-up + unpark instructions:** `tests/artifacts/perf/PARKED_large_render_capacity_and_double_copy.md`.
+- **Full write-up + unpark instructions:** `.benchmarks/large_render_double_copy_over_attributed_PARKED.md` (tracked; `tests/artifacts/` is gitignored).
