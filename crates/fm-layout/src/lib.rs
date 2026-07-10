@@ -10046,7 +10046,19 @@ fn crossing_minimization(
     ranks: &BTreeMap<usize, usize>,
     config: &LayoutConfig,
 ) -> (usize, BTreeMap<usize, Vec<usize>>) {
-    let mut ordering_by_rank = nodes_by_rank(ir.nodes.len(), ranks);
+    crossing_minimization_impl::<true>(ir, ranks, config)
+}
+
+/// `DENSE_RANK` selects only the node-rank lookup representation used by the barycenter sweep. `true`
+/// is production: one packed `Vec<u32>` is built per crossing minimization and replaces the innermost
+/// `BTreeMap` rank probes. `false` is the live pre-`bd-9w78` reference arm. Every other allocation,
+/// branch, edge traversal, floating-point operation, and ordering tie-break remains shared.
+fn crossing_minimization_impl<const DENSE_RANK: bool>(
+    ir: &MermaidDiagramIr,
+    ranks: &BTreeMap<usize, usize>,
+    config: &LayoutConfig,
+) -> (usize, BTreeMap<usize, Vec<usize>>) {
+    let ordering_by_rank = nodes_by_rank(ir.nodes.len(), ranks);
     if ordering_by_rank.len() <= 1 {
         return (0, ordering_by_rank);
     }
@@ -10062,15 +10074,54 @@ fn crossing_minimization(
 
     let centrality = build_centrality_assist(ir, config);
 
+    // The rank assignment is bounded by node count in normal layout. Keep an exact fallback for an
+    // externally constructed pathological map whose rank cannot fit the packed word.
+    let dense_node_rank = if DENSE_RANK {
+        let mut dense = Vec::with_capacity(ir.nodes.len());
+        for node_index in 0..ir.nodes.len() {
+            let rank = ranks.get(&node_index).copied().unwrap_or(0);
+            let Ok(rank) = u32::try_from(rank) else {
+                return crossing_minimization_sweeps::<false>(
+                    ir,
+                    ranks,
+                    &[],
+                    ordering_by_rank,
+                    centrality,
+                );
+            };
+            dense.push(rank);
+        }
+        dense
+    } else {
+        Vec::new()
+    };
+
+    crossing_minimization_sweeps::<DENSE_RANK>(
+        ir,
+        ranks,
+        &dense_node_rank,
+        ordering_by_rank,
+        centrality,
+    )
+}
+
+fn crossing_minimization_sweeps<const DENSE_RANK: bool>(
+    ir: &MermaidDiagramIr,
+    ranks: &BTreeMap<usize, usize>,
+    dense_node_rank: &[u32],
+    mut ordering_by_rank: BTreeMap<usize, Vec<usize>>,
+    centrality: CentralityAssist,
+) -> (usize, BTreeMap<usize, Vec<usize>>) {
     // Deterministic barycenter sweeps: top-down then bottom-up.
     let rank_keys: Vec<usize> = ordering_by_rank.keys().copied().collect();
     for _ in 0..4 {
         for index in 1..rank_keys.len() {
             let rank = rank_keys[index];
             let upper_rank = rank_keys[index - 1];
-            reorder_rank_by_barycenter(
+            reorder_rank_by_barycenter::<DENSE_RANK>(
                 ir,
                 ranks,
+                dense_node_rank,
                 &mut ordering_by_rank,
                 rank,
                 upper_rank,
@@ -10082,9 +10133,10 @@ fn crossing_minimization(
         for index in (0..rank_keys.len().saturating_sub(1)).rev() {
             let rank = rank_keys[index];
             let lower_rank = rank_keys[index + 1];
-            reorder_rank_by_barycenter(
+            reorder_rank_by_barycenter::<DENSE_RANK>(
                 ir,
                 ranks,
+                dense_node_rank,
                 &mut ordering_by_rank,
                 rank,
                 lower_rank,
@@ -11568,10 +11620,30 @@ fn compute_layout_centrality_tiers(_: &MermaidDiagramIr, _: &LayoutConfig) -> Ve
     Vec::new()
 }
 
+#[inline(always)]
+fn barycenter_node_rank<const DENSE_RANK: bool>(
+    ranks: &BTreeMap<usize, usize>,
+    dense_node_rank: &[u32],
+    node_index: usize,
+) -> usize {
+    if DENSE_RANK {
+        dense_node_rank
+            .get(node_index)
+            .copied()
+            .and_then(|rank| usize::try_from(rank).ok())
+            .unwrap_or(0)
+    } else {
+        ranks.get(&node_index).copied().unwrap_or(0)
+    }
+}
+
+/// Deterministic barycenter sweep shared by both A/B arms. The sole candidate distinction is
+/// `barycenter_node_rank`: production indexes the packed node-rank table, while ORIG probes `ranks`.
 #[allow(unused_variables)] // centrality only used with fnx-integration feature
-fn reorder_rank_by_barycenter(
+fn reorder_rank_by_barycenter<const DENSE_RANK: bool>(
     ir: &MermaidDiagramIr,
     ranks: &BTreeMap<usize, usize>,
+    dense_node_rank: &[u32],
     ordering_by_rank: &mut BTreeMap<usize, Vec<usize>>,
     rank: usize,
     adjacent_rank: usize,
@@ -11603,103 +11675,108 @@ fn reorder_rank_by_barycenter(
     //   fan-out graphs (parallel pipelines, ER/state diagrams, org charts).
     const SINGLE_PASS_RANK_THRESHOLD: usize = 8;
 
-    let mut scored_nodes: Vec<(usize, Option<f32>, usize)> =
-        if current_order.len() < SINGLE_PASS_RANK_THRESHOLD {
-            current_order
-                .iter()
-                .enumerate()
-                .map(|(stable_idx, node_index)| {
-                    let mut total_position = 0_usize;
-                    let mut neighbor_count = 0_usize;
+    let mut scored_nodes: Vec<(usize, Option<f32>, usize)> = if current_order.len()
+        < SINGLE_PASS_RANK_THRESHOLD
+    {
+        current_order
+            .iter()
+            .enumerate()
+            .map(|(stable_idx, node_index)| {
+                let mut total_position = 0_usize;
+                let mut neighbor_count = 0_usize;
 
-                    for edge in &ir.edges {
-                        let Some(source) = endpoint_node_index(ir, edge.from) else {
-                            continue;
-                        };
-                        let Some(target) = endpoint_node_index(ir, edge.to) else {
-                            continue;
-                        };
+                for edge in &ir.edges {
+                    let Some(source) = endpoint_node_index(ir, edge.from) else {
+                        continue;
+                    };
+                    let Some(target) = endpoint_node_index(ir, edge.to) else {
+                        continue;
+                    };
 
-                        let neighbor = if use_incoming {
-                            if target == *node_index
-                                && ranks.get(&source).copied().unwrap_or(0) == adjacent_rank
-                            {
-                                Some(source)
-                            } else {
-                                None
-                            }
-                        } else if source == *node_index
-                            && ranks.get(&target).copied().unwrap_or(0) == adjacent_rank
+                    let neighbor = if use_incoming {
+                        if target == *node_index
+                            && barycenter_node_rank::<DENSE_RANK>(ranks, dense_node_rank, source)
+                                == adjacent_rank
                         {
-                            Some(target)
+                            Some(source)
                         } else {
                             None
-                        };
-
-                        if let Some(adjacent_node) = neighbor
-                            && let Some(position) = adjacent_position.get(&adjacent_node)
-                        {
-                            total_position = total_position.saturating_add(*position);
-                            neighbor_count = neighbor_count.saturating_add(1);
                         }
+                    } else if source == *node_index
+                        && barycenter_node_rank::<DENSE_RANK>(ranks, dense_node_rank, target)
+                            == adjacent_rank
+                    {
+                        Some(target)
+                    } else {
+                        None
+                    };
+
+                    if let Some(adjacent_node) = neighbor
+                        && let Some(position) = adjacent_position.get(&adjacent_node)
+                    {
+                        total_position = total_position.saturating_add(*position);
+                        neighbor_count = neighbor_count.saturating_add(1);
                     }
+                }
 
-                    let barycenter = if neighbor_count == 0 {
-                        None
-                    } else {
-                        Some(total_position as f32 / neighbor_count as f32)
-                    };
-                    (*node_index, barycenter, stable_idx)
-                })
-                .collect()
-        } else {
-            let local_slot: BTreeMap<usize, usize> = current_order
-                .iter()
-                .enumerate()
-                .map(|(slot, node)| (*node, slot))
-                .collect();
-            let mut accumulators: Vec<(usize, usize)> = vec![(0, 0); current_order.len()];
-            for edge in &ir.edges {
-                let Some(source) = endpoint_node_index(ir, edge.from) else {
-                    continue;
-                };
-                let Some(target) = endpoint_node_index(ir, edge.to) else {
-                    continue;
-                };
-                let (node, adjacent_node) = if use_incoming {
-                    (target, source)
+                let barycenter = if neighbor_count == 0 {
+                    None
                 } else {
-                    (source, target)
+                    Some(total_position as f32 / neighbor_count as f32)
                 };
-                let Some(&slot) = local_slot.get(&node) else {
-                    continue;
-                };
-                if ranks.get(&adjacent_node).copied().unwrap_or(0) != adjacent_rank {
-                    continue;
-                }
-                if let Some(position) = adjacent_position.get(&adjacent_node)
-                    && let Some(accumulator) = accumulators.get_mut(slot)
-                {
-                    accumulator.0 = accumulator.0.saturating_add(*position);
-                    accumulator.1 = accumulator.1.saturating_add(1);
-                }
+                (*node_index, barycenter, stable_idx)
+            })
+            .collect()
+    } else {
+        let local_slot: BTreeMap<usize, usize> = current_order
+            .iter()
+            .enumerate()
+            .map(|(slot, node)| (*node, slot))
+            .collect();
+        let mut accumulators: Vec<(usize, usize)> = vec![(0, 0); current_order.len()];
+        for edge in &ir.edges {
+            let Some(source) = endpoint_node_index(ir, edge.from) else {
+                continue;
+            };
+            let Some(target) = endpoint_node_index(ir, edge.to) else {
+                continue;
+            };
+            let (node, adjacent_node) = if use_incoming {
+                (target, source)
+            } else {
+                (source, target)
+            };
+            let Some(&slot) = local_slot.get(&node) else {
+                continue;
+            };
+            if barycenter_node_rank::<DENSE_RANK>(ranks, dense_node_rank, adjacent_node)
+                != adjacent_rank
+            {
+                continue;
             }
+            if let Some(position) = adjacent_position.get(&adjacent_node)
+                && let Some(accumulator) = accumulators.get_mut(slot)
+            {
+                accumulator.0 = accumulator.0.saturating_add(*position);
+                accumulator.1 = accumulator.1.saturating_add(1);
+            }
+        }
 
-            current_order
-                .iter()
-                .enumerate()
-                .map(|(stable_idx, node_index)| {
-                    let (total_position, neighbor_count) =
-                        accumulators.get(stable_idx).copied().unwrap_or((0, 0));
-                    let barycenter = if neighbor_count == 0 {
-                        None
-                    } else {
-                        Some(total_position as f32 / neighbor_count as f32)
-                    };
-                    (*node_index, barycenter, stable_idx)
-                })
-                .collect()
-        };
+        current_order
+            .iter()
+            .enumerate()
+            .map(|(stable_idx, node_index)| {
+                let (total_position, neighbor_count) =
+                    accumulators.get(stable_idx).copied().unwrap_or((0, 0));
+                let barycenter = if neighbor_count == 0 {
+                    None
+                } else {
+                    Some(total_position as f32 / neighbor_count as f32)
+                };
+                (*node_index, barycenter, stable_idx)
+            })
+            .collect()
+    };
 
     #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
     match centrality {
@@ -11731,6 +11808,47 @@ fn reorder_rank_by_barycenter(
             .map(|(node_index, _, _)| node_index)
             .collect(),
     );
+}
+
+/// Bench/test-only access to the two barycenter sweep arms.
+///
+/// An A/B split across two `rch` invocations is invalid. The paired sampler alternates both arms inside
+/// one routine and one binary, so the bench crate needs to reach the reference implementation. Hidden
+/// from docs; not part of the public API contract.
+#[doc(hidden)]
+#[cfg(any(test, feature = "bench-internals"))]
+pub mod bench_internals {
+    use super::{BTreeMap, LayoutConfig, MermaidDiagramIr};
+
+    /// Rank assignment exactly as `layout_diagram_sugiyama_traced_with_config` computes it, so a bench
+    /// feeds `crossing_minimization` the same input production does.
+    #[must_use]
+    pub fn prepare_ranks(ir: &MermaidDiagramIr, config: &LayoutConfig) -> BTreeMap<usize, usize> {
+        let cycle_result = super::cycle_removal(ir, config.cycle_strategy);
+        let mut ranks = super::rank_assignment(ir, &cycle_result);
+        super::apply_ir_constraints(ir, &mut ranks);
+        ranks
+    }
+
+    /// ORIG arm: the pre-`bd-9w78` `BTreeMap` sweep.
+    #[must_use]
+    pub fn crossing_minimization_btreemap(
+        ir: &MermaidDiagramIr,
+        ranks: &BTreeMap<usize, usize>,
+        config: &LayoutConfig,
+    ) -> (usize, BTreeMap<usize, Vec<usize>>) {
+        super::crossing_minimization_impl::<false>(ir, ranks, config)
+    }
+
+    /// CAND arm: one packed node-rank table replacing only the hot `BTreeMap` rank probes.
+    #[must_use]
+    pub fn crossing_minimization_dense_rank(
+        ir: &MermaidDiagramIr,
+        ranks: &BTreeMap<usize, usize>,
+        config: &LayoutConfig,
+    ) -> (usize, BTreeMap<usize, Vec<usize>>) {
+        super::crossing_minimization_impl::<true>(ir, ranks, config)
+    }
 }
 
 /// Adjacent-rank-pair node edges, precomputed once for incremental crossing counting.
@@ -13546,6 +13664,89 @@ fn layout_decision_confidence_permille(
         MermaidPressureTier::Critical => 90,
     };
     confidence.saturating_sub(pressure_penalty)
+}
+
+#[cfg(test)]
+mod barycenter_arms_tests {
+    use super::{LayoutConfig, bench_internals};
+    use fm_core::{ArrowType, DiagramType, IrEdge, IrEndpoint, IrNode, IrNodeId, MermaidDiagramIr};
+
+    /// Build a layered graph with `layers * width` nodes, forward edges (including skips), and
+    /// `back_edges` back-edges so the SCC detector produces cycles — the shape that routes to Sugiyama
+    /// and therefore actually executes the barycenter sweep.
+    fn layered_cyclic_ir(
+        layers: usize,
+        width: usize,
+        back_edges: usize,
+        seed: u64,
+    ) -> MermaidDiagramIr {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for index in 0..layers * width {
+            ir.nodes.push(IrNode {
+                id: format!("N{index}"),
+                ..IrNode::default()
+            });
+        }
+        let mut state = seed | 1;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let edge = |ir: &mut MermaidDiagramIr, from: usize, to: usize| {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        };
+        for layer in 0..layers.saturating_sub(1) {
+            for slot in 0..width {
+                let from = layer * width + slot;
+                // one straight edge plus a pseudo-random skip, to make barycenters non-trivial
+                edge(&mut ir, from, (layer + 1) * width + slot);
+                let target_slot = usize::try_from(next() % (width as u64)).unwrap_or(0);
+                edge(&mut ir, from, (layer + 1) * width + target_slot);
+            }
+        }
+        for k in 0..back_edges {
+            let from = (layers - 1) * width + (k % width);
+            let to = (k * 7) % width;
+            edge(&mut ir, from, to);
+        }
+        ir
+    }
+
+    /// The dense sweep must produce **exactly** the ordering (and crossing count) the `BTreeMap` sweep
+    /// produced. Layout output is a determinism gate for this project, so anything less than equality on
+    /// every rank is a hard failure. Covers narrow ranks (below the old `SINGLE_PASS_RANK_THRESHOLD = 8`,
+    /// which took the per-node rescan branch) and wide ranks (which took the single-pass branch).
+    #[test]
+    fn dense_barycenter_sweep_matches_btreemap_sweep() {
+        let config = LayoutConfig::default();
+        for (layers, width, back_edges) in [
+            (25, 4, 20), // narrow ranks: the old per-node full-edge rescan branch
+            (12, 3, 8),  // narrower still
+            (6, 16, 12), // wide ranks: the old single-pass branch
+            (10, 8, 0),  // exactly at the old threshold, acyclic
+            (3, 1, 0),   // degenerate: one node per rank (fast-path)
+            (18, 6, 30), // heavily cyclic
+        ] {
+            for seed in [0x2545_F491_4F6C_DD1D_u64, 0x9E37_79B9_7F4A_7C15] {
+                let ir = layered_cyclic_ir(layers, width, back_edges, seed);
+                let ranks = bench_internals::prepare_ranks(&ir, &config);
+                let orig = bench_internals::crossing_minimization_btreemap(&ir, &ranks, &config);
+                let dense = bench_internals::crossing_minimization_dense_rank(&ir, &ranks, &config);
+                assert_eq!(
+                    orig, dense,
+                    "dense barycenter sweep diverged from the BTreeMap sweep \
+                     (layers={layers} width={width} back_edges={back_edges} seed={seed:#x})"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -17496,9 +17697,10 @@ mod tests {
         ordering_by_rank.insert(2, vec![4]);
 
         let centrality = super::build_centrality_assist(&ir, &LayoutConfig::default());
-        super::reorder_rank_by_barycenter(
+        super::reorder_rank_by_barycenter::<false>(
             &ir,
             &ranks,
+            &[],
             &mut ordering_by_rank,
             0,
             1,

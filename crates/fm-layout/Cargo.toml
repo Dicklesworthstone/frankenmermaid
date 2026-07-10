@@ -12,6 +12,7 @@ homepage.workspace = true
 
 [features]
 default = []
+bench-internals = []
 fnx-integration = [
     "dep:fnx-runtime",
     "dep:fnx-classes",
@@ -56,3 +57,10 @@ harness = false
 [[bench]]
 name = "crossing_minimization"
 harness = false
+
+# Same-binary A/B for the barycenter sweep (bd-9w78). The hand-rolled paired sampler alternates
+# both arms within each sample; sequential Criterion group members would not cancel drift.
+[[bench]]
+name = "barycenter_sweep"
+harness = false
+required-features = ["bench-internals"]

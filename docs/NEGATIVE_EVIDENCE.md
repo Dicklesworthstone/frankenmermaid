@@ -11273,3 +11273,53 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   dead code. Parked rather than rushed, because the honest first step is a correct bench, and rewriting the
   deterministic ordering path with no bench that can see it is the exact mistake this entry documents.
 - **Evidence:** `.benchmarks/crossing_min_rejections_benched_dead_code.md`.
+
+<!-- cc_fm-barycenter-dense-rank-measurement-blocked -->
+### SUBSTRATE + LEVER LANDED, RATIO **NOT** CLAIMED: barycenter dense-rank (`bd-9w78`) (2026-07-10)
+- **Self-time of the function under test (required by the ledger-integrity rule):** ORIG
+  `reorder_rank_by_barycenter` = **47.640%** of the whole parse+layout+render pipeline on `cyclic_scc_100`
+  (real Sugiyama), **0.000%** on `wide_8x16` / `wide_16x32` / `wide_40x80` (all Tree-path, which is why the four
+  prior rejections measured nothing). Per-arm self-time inside the remote bench binary is **not obtainable**
+  under the disk constraint (`rch` does not retrieve bench binaries), so arm liveness is evidenced instead by:
+  the differential test calling both arms and asserting equal non-trivial output, and the bench's printed
+  `checksum` (a DCE'd arm cannot produce it). Both arms' `black_box`ed timings are milliseconds, not zero.
+- **What landed:** `crossing_minimization_impl<const DENSE_RANK: bool>` — `true` (production) builds one packed
+  `Vec<u32>` node-rank table per crossing minimization and replaces the innermost `BTreeMap` rank probes;
+  `false` is the pre-`bd-9w78` reference arm, kept live. Every other allocation, branch, edge traversal, float
+  op and ordering tie-break is **shared between the arms**, so the A/B isolates exactly one variable.
+  Plus `bench_internals` (feature `bench-internals`), a paired-sample bench, and a differential equality test.
+- **Behaviour parity: PROVEN.** `dense_barycenter_sweep_matches_btreemap_sweep` asserts the two arms return
+  identical `(crossing_count, ordering_by_rank)` across narrow ranks (the old per-node rescan branch), wide
+  ranks (the single-pass branch), the exact threshold, degenerate one-node ranks and heavily cyclic graphs, over
+  two seeds. `cargo test -p fm-layout` **434 passed**; `golden_layout_test` 2/2; `frankentui_conformance_test`
+  green — the layout determinism gate holds. `cargo fmt --check` clean. `ubs` 152 -> 154 criticals, both new ones
+  in the pre-existing `==`/`!=` "secret compared with" false-positive family.
+- **⛔ THE RATIO IS NOT CLAIMED — the keep gate was NOT met.** Two defects, both recorded rather than papered over:
+  1. **`cv_pct` > 5 on every row.** Paired sampler, 41 rounds, arms interleaved back-to-back with alternating
+     order: `cyclic_scc_100` 1.161x (**cv 13.36%**), `cyclic_scc_300` 1.164x (**cv 16.12%**), `cyclic_scc_800`
+     1.125x (**cv 9.45%**). MAD is 1.65-1.97%, i.e. the dispersion is one-sided outliers, but the stated gate is
+     `cv < 5` and it fails. An earlier run with the batch calibrated off the SLOW arm left the fast arm's samples
+     at ~220 us (10x under the 2 ms floor) and read `cv` 5.8-13.4%; calibrating off the FAST arm fixed the floor
+     but not the gate.
+  2. **SOURCE-SWAP RACE.** Two consecutive runs returned **4.347x** and **1.161x** on `cyclic_scc_100`. That is
+     not worker variance: the working tree was edited **between the runs**, so the first run measured a wider
+     lever (dense scratch tables + always-single-pass, removing the per-call `BTreeMap`s and the
+     `SINGLE_PASS_RANK_THRESHOLD` rescan) and the second measured the narrower `DENSE_RANK`-only lever now in
+     the tree. **A benchmark whose source can change between arms measures nothing.** Same family as the
+     build-pollution race in `project_adaptive_obstacle_index_cellsize`.
+- **Verdict: code KEPT (byte-identical, parity-proven, determinism green); PERF CLAIM WITHHELD.** Landing the
+  substrate is what unblocks a real measurement; asserting a ratio from an unstable substrate would repeat, from
+  the other direction, exactly the error this session spent its day correcting.
+- **To close `bd-9w78`:** re-run the paired sampler on a quiesced tree (no concurrent edits), raise rounds until
+  `cv < 5` or switch the claim to the min-based/MAD statistic with that change argued explicitly, and record
+  per-arm self-time. The wider lever (dense scratch + drop `SINGLE_PASS_RANK_THRESHOLD`) measured **4.347x** once
+  and is worth re-measuring properly — it is a strictly larger change than what is in the tree today.
+- **A/B substrate rules now in force (both learned the hard way this session):** `rch exec` cannot pin a worker,
+  so a split-invocation A/B is invalid; and **criterion group members run SEQUENTIALLY, not interleaved**, so two
+  `bench_with_input` arms in one group do NOT cancel drift — the arms must be interleaved inside a single measured
+  routine (this bench alternates them per round and reports the median of per-round ratios). Feed every input
+  through `black_box` and consume every result through `black_box`, else a pure arm is dead-code-eliminated.
+  Always run builds as `RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo ...`: without
+  `RCH_REQUIRE_REMOTE` rch silently falls back to a LOCAL build, and a globally exported `CARGO_TARGET_DIR`
+  makes remote artifact retrieval return ~0 bytes.
+- **Evidence:** `.benchmarks/crossing_min_rejections_benched_dead_code.md`.
