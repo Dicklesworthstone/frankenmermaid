@@ -1,31 +1,50 @@
-//! Calibrate the paired-sampler harness by measuring its **A/A null control** across a sweep of
-//! configurations, so a future sub-2× claim in this repo can be decided at all.
+//! Calibrate the paired-sampler harness: measure its **A/A null control** across a sweep of
+//! configurations *and* across several functions, then publish which configuration can decide a claim of a
+//! given size.
 //!
-//! # Why this exists
+//! # The problem this solves
 //!
-//! The first null-control reading of `barycenter_sweep` was **loose**: on `cyclic_scc_100` the identical
-//! arm measured against itself gave `1.0357×` at `cv 14.17%`. A harness whose own noise floor is 14% cannot
-//! decide a 5% lever, and *rejecting* a lever below that floor rejects the harness, not the lever. The
-//! 3.669× barycenter win survives such a floor by two orders of magnitude; nothing subtler would.
+//! `paired(base, cand)` gives you a ratio. It does not tell you whether that ratio *means* anything. The only
+//! way to know is to run `paired(base, base)` — the same arm on both sides — so that every deviation from
+//! `1.000` is attributable to the harness and never to a lever.
 //!
-//! Three knobs are available. `rch` **cannot pin a worker**, so that lever is out of reach; quiescing the
-//! tree is a coordination act, not a code one. What is left is the *shape of a sample*:
+//! An earlier sweep established two things about this hardware:
 //!
-//! 1. **Sample duration** (`min_sample`) — a preemption costs on the order of a millisecond. If a timed
-//!    sample spans 2 ms, one preemption is a 50% outlier; if it spans 40 ms, it is 2.5%.
-//! 2. **Inner min-of-k** — scheduler noise is *one-sided* (it only ever makes a sample slower). The
-//!    minimum of `k` back-to-back timings is the maximum-likelihood estimate of the noise-free cost.
-//!    This is the single most effective knob and it is why `cv` (which the outliers dominate) collapses
-//!    toward `MAD` (which they do not).
+//! 1. **`cv < 5` is unreachable.** No in-harness knob moves it below ~12% on a loaded, unpinnable worker; a
+//!    20× longer sample moved it only 15.65% → 11.63%. `rch` cannot pin a worker, so a quiet machine is luck.
+//! 2. **The null *median* is tight anyway** (0.11–0.75% from `1.000`). One-sided scheduler outliers inflate
+//!    `cv` and `MAD` without biasing the median of per-round ratios.
 //!
-//! This bench sweeps both against a **pure A/A pair** — the same arm on both sides — so every departure
-//! from `1.000` and every point of `cv` is attributable to the harness, never to a lever.
+//! So the gate is the **median**, not `cv`. But a median has its own sampling error, and quoting it as a bare
+//! point estimate would repeat — one level up — exactly the mistake this harness exists to prevent. This bench
+//! therefore reports a **bootstrap 95% confidence interval on the null median**, and derives the **minimum
+//! decidable effect** for each configuration:
 //!
-//! # Reading the output
+//! > A claim of size `X` is decidable under configuration `C` iff `X` lies outside `C`'s null CI.
+//! > Equivalently: `min_decidable(C) = 1 + max(|ci_hi − 1|, |ci_lo − 1|)`.
 //!
-//! A configuration is **fit to decide levers** when the null ratio sits within ~1% of `1.000` *and* its
-//! `cv` clears the project's `< 5` gate. The smallest real effect it can then resolve is roughly the
-//! null's departure from `1.000`, not its `cv`.
+//! # The floor is per-function
+//!
+//! It is not a property of the machine alone. A function with a different duration, allocation pattern or
+//! cache footprint has a different floor on the same worker. So this sweeps **three arms** — the `BTreeMap`
+//! reference, the packed dense-rank arm, and the single-pass arm — and reports a floor for each. Pick your
+//! configuration from the row matching the *function you are about to benchmark*.
+//!
+//! # Two knobs, and two that are not
+//!
+//! * `min_sample` — how long one timed sample spans (via `batch`).
+//! * `min_of` — inner replicates, keeping the **minimum**. Scheduler noise is one-sided, so the minimum is the
+//!   maximum-likelihood estimate of the noise-free cost.
+//!
+//! Not knobs: `rch` cannot pin a worker (`RCH_WORKER` is ignored; `RCH-E301` refuses non-compilation commands,
+//! so remote `perf` is unavailable too). Quiescing the tree is a coordination act, not a code change.
+//!
+//! # Configurations are interleaved, not swept sequentially
+//!
+//! A sequential sweep confounds the configuration with time-varying machine load — the same error that
+//! arm-interleaving exists to prevent, one level up. (I made it, then fixed it: `min_of=3` appeared to help at
+//! 2 ms and hurt at 10/40 ms, which is incoherent as a configuration effect.) Each round measures **every**
+//! configuration once, with a rotating start.
 
 use fm_core::{ArrowType, DiagramType, IrEdge, IrEndpoint, IrNode, IrNodeId, MermaidDiagramIr};
 use fm_layout::{LayoutConfig, bench_internals};
@@ -49,7 +68,7 @@ fn self_identity() -> String {
 }
 
 /// Exact port of `scripts/headtohead/corpus.mjs::cyclic`: rings of `ring` nodes, each fully cyclic, with
-/// forward links to the next ring. `cyclic_scc_100` is 100 nodes / 195 edges and routes to Sugiyama.
+/// forward links to the next ring. 100 nodes / 195 edges, and it routes to Sugiyama.
 fn cyclic_scc_ir(node_count: usize, ring: usize) -> MermaidDiagramIr {
     let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
     for index in 0..node_count {
@@ -79,9 +98,29 @@ fn cyclic_scc_ir(node_count: usize, ring: usize) -> MermaidDiagramIr {
     ir
 }
 
-/// One timing of the arm: `batch` invocations, inputs and result through `black_box`, folded into a
-/// checksum a dead-code-eliminated arm could not produce. Returns `(nanos_per_invocation, checksum)`.
+/// The functions whose floors we calibrate. All three live in committed `HEAD`; the peer's in-flight
+/// `flat_csr` arm is deliberately not referenced.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Arm {
+    BTreeMap,
+    DenseRank,
+    SinglePass,
+}
+
+impl Arm {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::BTreeMap => "btreemap",
+            Self::DenseRank => "dense_rank",
+            Self::SinglePass => "single_pass",
+        }
+    }
+}
+
+/// One timing: `batch` invocations, inputs and result through `black_box`, folded into a checksum a
+/// dead-code-eliminated arm could not produce. Returns `(nanos_per_invocation, checksum)`.
 fn time_once(
+    arm: Arm,
     ir: &MermaidDiagramIr,
     ranks: &BTreeMap<usize, usize>,
     config: &LayoutConfig,
@@ -90,11 +129,23 @@ fn time_once(
     let mut checksum: u64 = 0;
     let start = Instant::now();
     for _ in 0..batch {
-        let (crossings, ordering) = bench_internals::crossing_minimization_dense_rank(
-            black_box(ir),
-            black_box(ranks),
-            black_box(config),
-        );
+        let (crossings, ordering) = match arm {
+            Arm::BTreeMap => bench_internals::crossing_minimization_btreemap(
+                black_box(ir),
+                black_box(ranks),
+                black_box(config),
+            ),
+            Arm::DenseRank => bench_internals::crossing_minimization_dense_rank(
+                black_box(ir),
+                black_box(ranks),
+                black_box(config),
+            ),
+            Arm::SinglePass => bench_internals::crossing_minimization_single_pass(
+                black_box(ir),
+                black_box(ranks),
+                black_box(config),
+            ),
+        };
         let crossings = black_box(crossings);
         let ordering = black_box(ordering);
         checksum = checksum
@@ -105,9 +156,10 @@ fn time_once(
     (elapsed / u64::from(batch.max(1)), checksum)
 }
 
-/// Minimum of `replicates` back-to-back timings. Scheduler noise is one-sided, so the minimum is the
+/// Minimum of `replicates` back-to-back timings: scheduler noise is one-sided, so the minimum is the
 /// maximum-likelihood estimate of the noise-free cost.
 fn time_arm(
+    arm: Arm,
     ir: &MermaidDiagramIr,
     ranks: &BTreeMap<usize, usize>,
     config: &LayoutConfig,
@@ -117,7 +169,7 @@ fn time_arm(
     let mut best = u64::MAX;
     let mut checksum: u64 = 0;
     for _ in 0..replicates.max(1) {
-        let (ns, c) = time_once(ir, ranks, config, batch);
+        let (ns, c) = time_once(arm, ir, ranks, config, batch);
         best = best.min(ns);
         checksum = checksum.wrapping_add(c);
     }
@@ -134,147 +186,201 @@ fn median(values: &mut [f64]) -> f64 {
     }
 }
 
+/// Percentile-bootstrap 95% CI on the median of `ratios`. Deterministic xorshift so the reported interval is
+/// reproducible from the same samples.
+fn bootstrap_median_ci(ratios: &[f64]) -> (f64, f64) {
+    const RESAMPLES: usize = 2000;
+    let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let mut medians = Vec::with_capacity(RESAMPLES);
+    let mut sample = vec![0.0_f64; ratios.len()];
+    for _ in 0..RESAMPLES {
+        for slot in &mut sample {
+            let index = usize::try_from(next() >> 33).unwrap_or(0) % ratios.len();
+            *slot = ratios[index];
+        }
+        medians.push(median(&mut sample));
+    }
+    medians.sort_by(f64::total_cmp);
+    let lo = medians[RESAMPLES / 40]; // 2.5th percentile
+    let hi = medians[RESAMPLES - 1 - RESAMPLES / 40]; // 97.5th percentile
+    (lo, hi)
+}
+
 /// Smallest `batch` whose single timing spans at least `min_sample`.
-fn calibrate(
+fn calibrate_batch(
+    arm: Arm,
     ir: &MermaidDiagramIr,
     ranks: &BTreeMap<usize, usize>,
     config: &LayoutConfig,
     min_sample: Duration,
 ) -> u32 {
-    let (per_ns, _) = time_once(ir, ranks, config, 1);
+    let (per_ns, _) = time_once(arm, ir, ranks, config, 1);
     let target = u64::try_from(min_sample.as_nanos()).unwrap_or(2_000_000);
     u32::try_from(target / per_ns.max(1)).unwrap_or(1).max(1)
 }
 
-/// The A/A null control: the identical arm on both sides, timed back-to-back per round with the order
-/// alternating, statistic = median of per-round ratios, `cv` taken over those ratios.
-fn null_control(
-    ir: &MermaidDiagramIr,
-    ranks: &BTreeMap<usize, usize>,
-    config: &LayoutConfig,
+struct Config {
+    arm: Arm,
+    min_sample_ms: u64,
+    min_of: u32,
     batch: u32,
-    replicates: u32,
-    rounds: usize,
-) -> (f64, f64, f64, u64, Duration) {
-    let wall = Instant::now();
-    let mut checksum: u64 = 0;
-    let mut ratios = Vec::with_capacity(rounds);
-    for round in 0..rounds {
-        // Both sides are the same arm; alternating still matters because first-mover cache/branch state
-        // is exactly the bias we are trying to expose.
-        let (first, c1) = time_arm(ir, ranks, config, batch, replicates);
-        let (second, c2) = time_arm(ir, ranks, config, batch, replicates);
-        checksum = checksum.wrapping_add(c1).wrapping_add(c2);
-        let (a, b) = if round % 2 == 0 {
-            (first, second)
-        } else {
-            (second, first)
-        };
-        ratios.push(a as f64 / b.max(1) as f64);
-    }
-    let ratio_p50 = median(&mut ratios.clone());
-    let mean: f64 = ratios.iter().sum::<f64>() / ratios.len() as f64;
-    let variance: f64 =
-        ratios.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / ratios.len() as f64;
-    let cv_pct = (variance.sqrt() / mean) * 100.0;
-    let mut deviations: Vec<f64> = ratios.iter().map(|r| (r - ratio_p50).abs()).collect();
-    let mad_pct = (median(&mut deviations) / ratio_p50) * 100.0;
-    (ratio_p50, cv_pct, mad_pct, checksum, wall.elapsed())
-}
-
-/// One A/A paired round for a single configuration. Returns the per-round ratio and a checksum.
-fn null_round(
-    ir: &MermaidDiagramIr,
-    ranks: &BTreeMap<usize, usize>,
-    config: &LayoutConfig,
-    batch: u32,
-    replicates: u32,
-    round: usize,
-) -> (f64, u64) {
-    let (first, c1) = time_arm(ir, ranks, config, batch, replicates);
-    let (second, c2) = time_arm(ir, ranks, config, batch, replicates);
-    let (a, b) = if round % 2 == 0 {
-        (first, second)
-    } else {
-        (second, first)
-    };
-    (a as f64 / b.max(1) as f64, c1.wrapping_add(c2))
-}
-
-fn stats(ratios: &[f64]) -> (f64, f64, f64) {
-    let ratio_p50 = median(&mut ratios.to_vec());
-    let mean: f64 = ratios.iter().sum::<f64>() / ratios.len() as f64;
-    let variance: f64 =
-        ratios.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / ratios.len() as f64;
-    let cv_pct = (variance.sqrt() / mean) * 100.0;
-    let mut deviations: Vec<f64> = ratios.iter().map(|r| (r - ratio_p50).abs()).collect();
-    let mad_pct = (median(&mut deviations) / ratio_p50) * 100.0;
-    (ratio_p50, cv_pct, mad_pct)
+    ratios: Vec<f64>,
 }
 
 fn main() {
     const ROUNDS: usize = 41;
+    const MIN_SAMPLES_MS: [u64; 3] = [2, 10, 40];
+    const MIN_OFS: [u32; 2] = [1, 3];
+
     println!("bench_elf_sha256={}", self_identity());
+    println!("workload=cyclic_scc_100 (100 nodes / 195 edges, Sugiyama)");
     println!(
-        "workload=cyclic_scc_100 (100 nodes / 195 edges, Sugiyama), arm=crossing_minimization_dense_rank"
+        "A/A NULL CONTROL: the same arm on both sides, so every deviation is the harness, not a lever."
     );
-    println!("A/A NULL CONTROL: both sides are the SAME arm, so every deviation is the harness.");
     println!(
-        "Configurations are INTERLEAVED round-robin, not swept sequentially: a sequential sweep confounds\n         the configuration with time-varying machine load, which is the same error that arm-interleaving\n         exists to prevent. Each round measures every configuration once.\n"
+        "Configurations are INTERLEAVED round-robin; a sequential sweep confounds config with load drift.\n"
     );
 
     let config = LayoutConfig::default();
     let ir = cyclic_scc_ir(100, 5);
     let ranks = bench_internals::prepare_ranks(&ir, &config);
 
-    // (min_sample_ms, replicates) -> batch, calibrated once up front.
-    let mut configs: Vec<(u64, u32, u32, Vec<f64>)> = Vec::new();
-    for min_sample_ms in [2_u64, 10, 40] {
-        let batch = calibrate(&ir, &ranks, &config, Duration::from_millis(min_sample_ms));
-        for replicates in [1_u32, 3] {
-            configs.push((min_sample_ms, replicates, batch, Vec::with_capacity(ROUNDS)));
+    let mut configs: Vec<Config> = Vec::new();
+    for arm in [Arm::BTreeMap, Arm::DenseRank, Arm::SinglePass] {
+        for min_sample_ms in MIN_SAMPLES_MS {
+            let batch = calibrate_batch(
+                arm,
+                &ir,
+                &ranks,
+                &config,
+                Duration::from_millis(min_sample_ms),
+            );
+            for min_of in MIN_OFS {
+                configs.push(Config {
+                    arm,
+                    min_sample_ms,
+                    min_of,
+                    batch,
+                    ratios: Vec::with_capacity(ROUNDS),
+                });
+            }
         }
     }
 
     let mut checksum: u64 = 0;
-    for (_, replicates, batch, _) in &configs {
-        let (_, c) = time_arm(&ir, &ranks, &config, *batch, *replicates);
+    for cfg in &configs {
+        let (_, c) = time_arm(cfg.arm, &ir, &ranks, &config, cfg.batch, cfg.min_of);
         checksum = checksum.wrapping_add(c);
     }
 
     let wall = Instant::now();
     for round in 0..ROUNDS {
-        // Rotate the starting configuration each round so no configuration is permanently first.
         for offset in 0..configs.len() {
             let index = (round + offset) % configs.len();
-            let (_, replicates, batch, _) = configs[index];
-            let (ratio, c) = null_round(&ir, &ranks, &config, batch, replicates, round);
-            checksum = checksum.wrapping_add(c);
-            configs[index].3.push(ratio);
+            let (arm, batch, min_of) = {
+                let cfg = &configs[index];
+                (cfg.arm, cfg.batch, cfg.min_of)
+            };
+            let (first, c1) = time_arm(arm, &ir, &ranks, &config, batch, min_of);
+            let (second, c2) = time_arm(arm, &ir, &ranks, &config, batch, min_of);
+            checksum = checksum.wrapping_add(c1).wrapping_add(c2);
+            // Alternate which timing is numerator: first-mover cache/branch state is the bias we expose.
+            let (a, b) = if round % 2 == 0 {
+                (first, second)
+            } else {
+                (second, first)
+            };
+            #[allow(clippy::cast_precision_loss)]
+            configs[index].ratios.push(a as f64 / b.max(1) as f64);
         }
     }
     let wall = wall.elapsed();
 
     println!(
-        "{:>11} {:>7} {:>6} {:>12} {:>9} {:>9} {:>10}",
-        "min_sample", "min_of", "batch", "null_ratio", "null_cv", "null_mad", "resolves"
+        "{:>12} {:>10} {:>6} {:>6} {:>11} {:>19} {:>9} {:>14}",
+        "arm",
+        "min_sample",
+        "min_of",
+        "batch",
+        "null_median",
+        "null 95% CI",
+        "null_cv",
+        "min_decidable"
     );
-    for (min_sample_ms, replicates, batch, ratios) in &configs {
-        let (ratio, cv, mad) = stats(ratios);
-        let departure = (ratio - 1.0).abs() * 100.0;
-        // The smallest effect a harness can resolve is its SYSTEMATIC floor -- how far the A/A median sits
-        // from 1.000 -- not its cv, which one-sided preemption outliers inflate without biasing the median.
+    let mut floors: Vec<(Arm, u64, u32, f64)> = Vec::new();
+    for cfg in &configs {
+        let mut ratios = cfg.ratios.clone();
+        let med = median(&mut ratios);
+        let (lo, hi) = bootstrap_median_ci(&cfg.ratios);
+        #[allow(clippy::cast_precision_loss)]
+        let mean: f64 = cfg.ratios.iter().sum::<f64>() / cfg.ratios.len() as f64;
+        #[allow(clippy::cast_precision_loss)]
+        let variance: f64 =
+            cfg.ratios.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / cfg.ratios.len() as f64;
+        let cv_pct = (variance.sqrt() / mean) * 100.0;
+        // A claim of size X is decidable iff X lies outside the null CI.
+        let half = (hi - 1.0).abs().max((lo - 1.0).abs());
+        floors.push((cfg.arm, cfg.min_sample_ms, cfg.min_of, half));
         println!(
-            "{min_sample_ms:>9}ms {replicates:>7} {batch:>6} {ratio:>11.4}x {cv:>8.2}% {mad:>8.2}% {:>10}",
-            format!("{departure:.2}%"),
+            "{:>12} {:>8}ms {:>6} {:>6} {med:>10.4}x [{lo:>7.4},{hi:>7.4}] {cv_pct:>8.2}% {:>13.3}x",
+            cfg.arm.name(),
+            cfg.min_sample_ms,
+            cfg.min_of,
+            cfg.batch,
+            1.0 + half,
         );
     }
+
+    // Published settings: for each target effect, the cheapest configuration that decides it, per function.
+    println!(
+        "\nCALIBRATED SETTINGS -- cheapest config that decides an effect of size X (PER FUNCTION):"
+    );
+    println!(
+        "{:>12} {:>12} {:>12} {:>12} {:>12} {:>12}",
+        "arm", "1.02x", "1.05x", "1.10x", "1.25x", "1.50x"
+    );
+    for arm in [Arm::BTreeMap, Arm::DenseRank, Arm::SinglePass] {
+        let mut cells = Vec::new();
+        for target in [1.02_f64, 1.05, 1.10, 1.25, 1.50] {
+            // Cheapest = smallest total sample time, i.e. min_sample * min_of.
+            let mut best: Option<(u64, u32)> = None;
+            for (a, ms, mo, half) in &floors {
+                if *a == arm && target > 1.0 + *half {
+                    let candidate = (*ms, *mo);
+                    let cost = |c: (u64, u32)| c.0 * u64::from(c.1);
+                    if best.is_none_or(|b| cost(candidate) < cost(b)) {
+                        best = Some(candidate);
+                    }
+                }
+            }
+            cells.push(best.map_or_else(
+                || "UNDECIDABLE".to_string(),
+                |(ms, mo)| format!("{ms}ms/x{mo}"),
+            ));
+        }
+        println!(
+            "{:>12} {:>12} {:>12} {:>12} {:>12} {:>12}",
+            arm.name(),
+            cells[0],
+            cells[1],
+            cells[2],
+            cells[3],
+            cells[4]
+        );
+    }
+
     println!(
         "\nchecksum={checksum} rounds={ROUNDS} total_wall={:.1}s",
         wall.as_secs_f64()
     );
+    println!("A claim of size X is decidable under config C iff X lies OUTSIDE C's null 95% CI.");
     println!(
-        "rch cannot pin a worker, so worker choice is not a knob. Quiescing the tree is coordination,"
+        "The floor is PER-FUNCTION: read the row for the function you are about to benchmark."
     );
-    println!("not code. What remains is sample duration and inner min-of-k -- both swept above.");
 }

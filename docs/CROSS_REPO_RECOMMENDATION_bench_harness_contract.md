@@ -1,12 +1,16 @@
-# Cross-repo recommendation: a bench-harness contract (provenance + noise floor)
+# Cross-repo recommendation: a bench-harness contract (provenance + noise floor + calibration)
 
 **From:** `cc_fm` (frankenmermaid) · **Date:** 2026-07-10 · **Status:** RECOMMENDATION ONLY.
-**I have not touched any other repository.** This describes two mechanisms proven here, what they cost, and how a
-repo adopts them. Take them, adapt them, or ignore them.
+**I have not touched any other repository.** This describes three mechanisms proven here, what they cost, and how
+a repo adopts them. Take them, adapt them, or ignore them.
 
-Both exist because of the same failure mode: **a measurement discipline that a human (or an agent) can forget is
-not a discipline, it is a hope.** Provenance and noise floor should be *emitted by the harness itself*, on every
-run, whether anyone asked or not.
+All three exist because of the same failure mode: **a measurement discipline that a human (or an agent) can
+forget is not a discipline, it is a hope.** Provenance, noise floor, and the floor's own resolution limit should
+be *emitted by the harness itself*, on every run, whether anyone asked or not.
+
+The three parts compose: **(1)** the ELF hash tells you *which binary ran*; **(2)** the A/A null control tells
+you *the harness's floor on this run*; **(3)** the calibration sweep tells you, ahead of time, *which knob
+setting makes an effect of the size you are chasing decidable at all*. Adopt them in that order.
 
 ---
 
@@ -150,38 +154,52 @@ Exactly 2× the bench wall time. That is the entire price, and it buys you the r
 
 ---
 
----
+## 3. Calibrate the floor, gate on the median, and publish per-function settings
 
-## 3. Calibrate the floor — and then gate on the right statistic
+The null control only helps if you know what its numbers *mean*. So calibrate it: sweep
+`min_sample ∈ {2, 10, 40} ms` × `min_of ∈ {1, 3}` inner replicates × **every function you bench**, **A/A only**,
+configurations interleaved round-robin (a *sequential* config sweep confounds the configuration with
+time-varying machine load — the same mistake arm-interleaving exists to prevent, one level up). Per config, take
+41 A/A ratios → median → a **bootstrap 95% CI on that median**, and derive `min_decidable = 1 + max(|ci −  1|)`.
 
-The null control only helps if you know what its numbers *mean*. So we calibrated it: a sweep of
-`min_sample ∈ {2, 10, 40} ms` × `min_of ∈ {1, 3}` inner replicates, **A/A only**, configurations interleaved
-round-robin (a *sequential* config sweep confounds the configuration with time-varying machine load — the same
-mistake arm-interleaving exists to prevent, one level up).
+### Two results that will save you a week
 
-Worker `vmi1227854`, 41 rounds, 15.7 s total:
+1. **`cv` does not track decidability, and no in-harness knob makes `cv < 5` reachable on a loaded, unpinnable
+   worker.** A 20× longer sample moves `cv` only ~4 points. Two configs of the same function: `cv 2.37%` → floor
+   1.008×, vs `cv 9.66%` (4× worse `cv`) → floor 1.003× (*better*). Gating on `cv` picks the wrong config. **Gate
+   on the median-CI floor.**
+2. **The floor is per-function.** On the same worker, at the naive `2 ms / ×1` default, the A/A floor was 1.048×
+   (`btreemap`), 1.033× (`single_pass`), 1.023× (`dense_rank`) — a 2.1× spread. A config that decides a lever for
+   one function may not for another. Read the row for the function you are about to bench.
 
-| min_sample | min_of | null A/A ratio | null cv | null MAD | systematic floor |
-|---:|---:|---:|---:|---:|---:|
-| 2 ms | 1 | 0.9950× | 15.65% | 2.76% | 0.50% |
-| **2 ms** | **3** | **1.0013×** | 11.98% | 3.56% | **0.13%** |
-| 10 ms | 1 | 0.9934× | 14.02% | 3.58% | 0.66% |
-| 40 ms | 1 | 0.9925× | 11.63% | 4.40% | 0.75% |
-| 40 ms | 3 | 1.0011× | 14.03% | 6.84% | 0.11% |
+### Two knobs, and which one matters
 
-**Two results that will save you a week:**
+- **`min_of` (inner replicates, keep the minimum) is the dominant knob.** At 2 ms, `×1 → ×3` moved the floor
+  1.048× → 1.012×, 1.033× → 1.004×, 1.023× → 1.008×. The minimum of k back-to-back timings discards the
+  one-sided preemption outliers a longer sample cannot.
+- **`min_sample` beyond ~10 ms buys nothing, and 40 ms can be worse** (a longer sample is a bigger target for a
+  preemption). Do not reach for longer samples; reach for `min_of`.
 
-1. **No in-harness knob moves `cv` below ~12% on a loaded, unpinnable worker.** A 20× longer sample moves it from
-   15.65% to 11.63%. Inner `min-of-k` does not help consistently. If your remote-build helper picks workers
-   non-deterministically, a `cv < 5` gate is unreachable *by construction* — and a gate you cannot meet either
-   blocks every claim or quietly invites statistic-shopping.
-2. **The A/A null *median* is tight regardless — 0.11%–0.75% from 1.000.** One-sided scheduler outliers inflate
-   `cv` and `MAD` **without biasing the median of per-round ratios**.
+### PUBLISHED SETTINGS — cheapest config that decides an effect of size X (per function)
 
-**So gate on the floor, not on `cv`.** The smallest effect the harness can resolve is the null median's departure
-from `1.000` (~1% here). Require the claim to exceed that by a wide margin; **report** `cv` rather than gating on
-it, and note whether the worker happened to be quiet. Our two certified wins clear the worst-case 0.75% floor by
-~40× and ~350×.
+Decidable = claim exceeds the floor by a **2× margin** (`X ≥ 1 + 2·half_width`). Worker `hz2`, 18 configs, 19.8 s.
+Full table + CIs: `.benchmarks/harness_calibration_published_settings.md`.
+
+| function | 1.02× | 1.05× | 1.10× | 1.25× | 1.50× |
+|---|---|---|---|---|---|
+| `btreemap` | 10 ms / ×1 | 2 ms / ×3 | 2 ms / ×1 | 2 ms / ×1 | 2 ms / ×1 |
+| `dense_rank` | 2 ms / ×3 | 2 ms / ×1 | 2 ms / ×1 | 2 ms / ×1 | 2 ms / ×1 |
+| `single_pass` | 2 ms / ×3 | 2 ms / ×3 | 2 ms / ×1 | 2 ms / ×1 | 2 ms / ×1 |
+
+A **≥ 1.10× claim is decidable in the cheapest config** for every function. A **1.02× claim needs `min_of = 3`**
+and still sits near the floor — treat sub-1.05× wins here with suspicion regardless of config. **Nothing sub-1.01×
+is decidable on this hardware; do not claim it.** Sensible lane default: **`min_sample = 2 ms, min_of = 3`**
+(floor ≤ 1.012× for every function).
+
+**Gate rule to adopt:** report `cv`, but gate the claim on the null-median CI — *a claim of size X is decidable
+iff X lies outside the arm's A/A null 95% CI*, and prefer a 2× margin. Note whether the worker was quiet; `rch`
+cannot pin one, so quietness is luck, which is why the null must be emitted **in the same invocation** as the
+claim.
 
 ---
 
@@ -198,8 +216,9 @@ it, and note whether the worker happened to be quiet. Our two certified wins cle
 5. **`black_box` inputs and results**, fold results into a printed checksum.
 6. **Bracket the run with a source hash, and re-check it at `git add` time.** The window between "after the last
    run" and "at commit" is where a concurrent editor slips in; it cost us a KEEP row.
-7. **Calibrate the floor once per machine class** (copy `harness_calibration.rs`), then **gate on the null
-   median's departure from 1.000**, not on `cv`.
+7. **Calibrate the floor once per machine class and per function** (copy `harness_calibration.rs`): sweep
+   `min_sample × min_of × arm`, interleaved round-robin, and read off the per-function published-settings table.
+   Then **gate on the null-median 95% CI** (claim decidable iff it lies outside the CI, 2× margin), not on `cv`.
 8. **Profile-verify non-zero self-time** in the function under test before honoring or writing any REJECT.
 
 Steps 1–3 are the minimum viable contract. Steps 6–8 are what actually caught our errors.
