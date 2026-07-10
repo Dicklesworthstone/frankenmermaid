@@ -12174,3 +12174,23 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   `f(&x.to_ascii_lowercase())` where sink `f` self-lowercases / is case-insensitive → drop pre-lowercasing. Left the
   `match x.to_ascii_lowercase().as_str()` sites (6279/6309) — they consume the lowercased value.
   Evidence: `.benchmarks/requirement_class_token_redundant_lowercase_WIN.md`.
+
+### REJECT: stream class-compartment member rows (remove per-row format! alloc) — sub-noise (2026-07-10)
+
+- **Idea:** `write_class_compartments_into` builds each attribute/method row via `format!("{vis}{name}: {ret}")`
+  then `write_class_text_into(&text)` — a throwaway String per member row. Streamed the parts instead
+  (`write_class_text_body_into` closure: push vis raw, write_escaped_text(name), ": " raw, write_escaped_text(ret)),
+  byte-identical (per-char escaping distributes over concatenation; vis `+ - # ~` and method suffix `* $` are
+  escape no-ops). Compiles; 247 lib tests + golden `class_basic` pass (byte-identical confirmed).
+- **Why REJECTED (gate on median vs null):** added a `class_stages` bench (64/256/512, 4 members/class). Same-worker
+  A/B on hz2: render/512 cand 243.45us [240,248] vs base 245.74us [242,251] (−0.9%); **render/256 cand 137.57us
+  [135,140] vs base 133.51us [132,136] = cand +3.0% SLOWER** — contradictory signs; layout null itself swung ±3.5%
+  this run (layout/64 0.965, layout/512 1.031). No render row CI-separates. A re-pair kept landing on a loaded worker
+  (vmi1152480, 40%-wide CIs). No demonstrable win.
+- **Root cause:** class diagrams are **parse-dominated** — at 512 classes render is only ~243us vs parse ~776us
+  (~24% of pipeline). The short member-string allocs are cheap (mimalloc small-alloc), so their removal is below the
+  ~1-3% render noise floor. Unlike the requirement risk-class alloc (−6% on a 616us render, [[requirement risk win]]),
+  the class member allocs don't clear the floor on a small parse-dominated render.
+- **Disposition:** reverted the lib.rs refactor (the closure indirection isn't worth a non-measurable change). KEPT
+  the `class_stages` bench as permanent coverage (only class-diagram bench; documents the parse dominance so future
+  digs target class PARSE, not render). Evidence: this entry.
