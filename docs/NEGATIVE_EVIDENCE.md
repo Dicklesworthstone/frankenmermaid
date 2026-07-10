@@ -10726,3 +10726,39 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
 - **Do-not-retry:** do NOT strip the slow path's `<g>`/`<title>` and re-bless the 37 goldens — the
   comparator says there is nothing to catch up to. Do NOT read the 30.9% byte share as a render-time
   share; render is not purely byte-bound (the `data-fm-source-*` entry was 35% bytes but ~12% render).
+
+### NO-SHIP: large render empty between-child guards are flat/noise (2026-07-10)
+- **Agent:** cod_fm. **Lane:** large-diagram render double-copy. This was a different shape from the
+  rejected large `to_string_with_body` gate removal and the rejected raw-part body fusion: keep the existing
+  raw-part slow path, but precompute/guard empty between-child passes (`bundle_count` labels and class
+  cardinality labels) so a plain large flowchart skips no-op scans before final serialization.
+- **Ledger-first check:** prior closed entries found and respected: large `to_string_with_body` streaming
+  regression (2026-07-05), raw-part body fusion regression (2026-07-10), class dense-member insertion,
+  class simple-relationship fusion, polygon-shape streaming, and pie-fragment presize. This attempt did not
+  route pre-rendered chunks through `to_string_with_body` and did not change `Element::raw_svg_parts`.
+- **Profile basis:** focused render-loop profile on `large_wide_stages/render/40x80`, release profile with
+  symbols preserved only for attribution. `perf stat` on current main showed high memory pressure
+  (44.11B instructions, 33.92B cycles, 351.1M cache misses, 24.11% cache-miss rate over the short Criterion
+  run). Corrected `perf record -- ... --bench --profile-time 10` captured 23K samples; top named user-space
+  hotspot remained `__memmove_avx_unaligned_erms` at 14.82%. The candidate target,
+  `write_class_cardinality_labels_into`, was visible but only 0.49%; `strip_unused_theme_css` was similar at
+  0.47%. A flamegraph was generated from the captured perf data at
+  `/tmp/cod_fm_large_render_renderloop.svg`.
+- **Lever tested and reverted:** add `has_bundle_count_labels = layout.edges.iter().any(...)`, reuse it for
+  the streaming gate and the slow-path bundle-label loop, and guard class cardinality emission with
+  `ir.diagram_type == DiagramType::Class`. Byte behavior for valid class/bundled outputs should be
+  unchanged; large plain flowcharts skip empty passes.
+- **Measurement:** same-machine direct A/B, exact row `large_wide_stages/render/40x80`,
+  `cargo bench -p frankenmermaid-cli --bench pipeline_bench --profile release`, `--warm-up-time 1
+  --measurement-time 5 --sample-size 30 --noplot --discard-baseline`. To avoid polluted saved-baseline
+  state, ORIG was built from a `git archive HEAD` snapshot in `/tmp/frankenmermaid-orig-aafe1c1-1783650284`
+  and CANDIDATE from the edited checkout, both on the same worker.
+  - Symbol-preserving release profile: ORIG **[2.1054, 2.1414, 2.1770] ms**, CANDIDATE
+    **[2.0891, 2.1433, 2.1947] ms** — flat, overlapping intervals.
+  - Actual stripped release profile: ORIG **[2.1797, 2.2372, 2.3072] ms**, CANDIDATE
+    **[2.1551, 2.2561, 2.3753] ms** — median **+0.85% slower**, overlapping intervals.
+- **Verdict: REJECTED and code reverted.** The empty pass is real but below the keep floor; removing it does
+  not attack the dominant raw-chunk-to-final contiguous `String` copy.
+- **Do-not-retry note:** do not retry this empty between-child guard shape (bundle-label preguard plus
+  class-cardinality diagram-type guard) for `large_wide_stages/render/40x80` unless a future profile shows
+  those empty passes as a top-5 render-loop hotspot or the class/bundle insertion model changes.
