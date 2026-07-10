@@ -11190,3 +11190,61 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   bench-only parameter, or by waiting for the machine-local `perf stat` substrate. A capacity change is
   **byte-identical by construction**, so the whole difficulty is measurement, not correctness.
 - **Full write-up + unpark instructions:** `.benchmarks/large_render_double_copy_over_attributed_PARKED.md` (tracked; `tests/artifacts/` is gitignored).
+
+<!-- cc_fm-crossing-min-rejections-benched-dead-code -->
+### DIG / SUBSTRATE DEFECT: the 4 crossing-minimization rejections were benched on a workload where the code never runs (2026-07-10)
+- **Retry-condition satisfied.** `Barycenter sweep precomputed edge adjacency - REJECTED (2026-06-26)` carries a
+  do-not-retry whose escape clause is explicit: *"do not attempt further container/adjacency rewrites of
+  barycenter or crossing counting WITHOUT a CPU profile ... that names the actual dominant function - the live
+  candidates are Brandes-Koepf coordinate assignment and edge routing, not the ordering scans."* Here is that
+  profile. It overturns the premise.
+- **The confound.** `bench_layout_wide` (pipeline_bench.rs:306) builds inputs with `gen_wide()` and registers
+  them as `BenchmarkId::new("layered", ..)`. The name says layered; the auto-selector picks **Tree**. A separate
+  ledger entry from 2026-06-29 - three days AFTER the rejection - already recorded the routing fact ("the
+  Sugiyama crossing-minimization barycenter path contributes ZERO; wide flowcharts route to the Tree/fallback
+  path"). Nobody connected it back to the rejections it invalidates.
+- **Measured** (`perf record -F 2500 --call-graph=dwarf`, existing symbolized binary, self-time as % of the whole
+  parse+layout+render pipeline):
+
+  | input | fm_layout total | `reorder_rank_by_barycenter` + `total_crossings` | sugiyama | `build_tree_layout_structure` |
+  |---|---:|---:|---:|---:|
+  | `wide_8x16` (= `layout_wide/8x16`) | 21.80% | **0.000%** | 0.00% | 2.83% |
+  | `wide_16x32` (= `layout_wide/16x32`) | 14.16% | **0.000%** | 0.00% | 3.66% |
+  | `wide_40x80` | 10.41% | **0.000%** | 0.00% | 3.27% |
+  | **`cyclic_scc_100`** | **70.76%** | **48.450%** | 11.17% | 0.00% |
+
+  All four rejected rewrites were A/B'd on `layout_wide/{8x16,12x24,16x32}` - three inputs on which the code
+  under test executes **zero instructions**. The recorded outcomes are exactly what that predicts: `8x16` +1.40%
+  "No change", `12x24` +1.70% "No change", `16x32` **+5.84% regressed** (the adjacency BUILD cost added to a path
+  that never reads it). **That is not four pieces of evidence that the lever fails; it is one piece of evidence
+  that the bench was wrong, repeated four times.**
+- **Where the time actually is (Sugiyama, `cyclic_scc_100`, 100 nodes / 196 edges, fm_layout = 70.76%):**
+  `reorder_rank_by_barycenter` **47.64%** (the largest single frame anywhere in this repo),
+  `layout_diagram_sugiyama_traced_with_config` 11.17%, `find_obstacle_nudge_y` 5.24%, `find_obstacle_nudge_x`
+  2.21%, `total_crossings` 0.81%, `detect_cycle_components` 0.80%, **`bk_horizontal_compaction::place_block`
+  0.74%**. The reject note's nominated "live candidate", Brandes-Koepf, is **cold**.
+  - Contrast `dense_dag_200` (routes to Tree): fm_layout 26.44%, of which `find_obstacle_nudge_x` alone is
+    **19.36%** and barycenter is 0.000%. **The layout bottleneck is diagram-SHAPE-dependent; no single bench can
+    stand in for the crate.**
+- **Mechanism** (`fm-layout/src/lib.rs:11572`). Called `~rounds(4) * 2 * ranks` times per layout. Each call
+  clones a `Vec<usize>` (1 alloc), builds an `adjacent_position: BTreeMap` (alloc + O(k log k)), and then - for
+  ranks narrower than `SINGLE_PASS_RANK_THRESHOLD = 8`, the common case (~100 nodes over ~25 ranks => ~4/rank) -
+  **rescans the entire `ir.edges` list per node**, doing a `ranks.get(&n)` **BTreeMap** probe per edge. That is
+  `O(rank_size * |E| * log|V|)` per call; ~188k B-tree probes per layout. That is the 47.64%.
+- **The lever this licenses (NOT attempted; see blocker).** The rejected shape was `Vec<Vec<usize>>` adjacency
+  (`~2*node_count` outer + `node_count` inner allocs) - the wrong primitive, and its build cost is exactly what
+  sank it. Instead: **(1) a dense `Vec<u32>` rank array built once per `crossing_minimization`**, replacing the
+  innermost `BTreeMap` probe with an O(1) index - no adjacency built at all; (2) dense `Vec<u32>` scatter tables
+  reusing one scratch buffer for `adjacent_position` / `local_slot` instead of per-call `BTreeMap`s; (3) flat CSR
+  incidence (2 allocs, built once) ONLY if (1)-(2) do not suffice. Do (1) first. Output-identical by construction:
+  `node_rank[n] == ranks.get(&n).copied().unwrap_or(0)`, barycenter arithmetic and the stable sort untouched.
+- **BLOCKER: no bench exercises this function.** `pipeline_bench::layout_wide` is the Tree path (0.000%).
+  `fm-layout/benches/crossing_minimization.rs` benches `crossing_min/{sparse_dag,dense_dag,bipartite}` over
+  synthetic `LayerOrdering`/`LayerEdges` - a **different** crossing minimizer, not `reorder_rank_by_barycenter`
+  (which takes `&MermaidDiagramIr`). A Sugiyama-routing bench must exist FIRST; `cyclic_scc_100` from
+  `scripts/headtohead/corpus.mjs` is a known-good generator. And per the rch substrate rule, ORIG and CAND must be
+  two arms of ONE alternating criterion group in ONE binary and ONE `rch exec` invocation.
+- **Verdict: the crossing-minimization vein is NOT closed - it was never opened.** Every prior attempt measured
+  dead code. Parked rather than rushed, because the honest first step is a correct bench, and rewriting the
+  deterministic ordering path with no bench that can see it is the exact mistake this entry documents.
+- **Evidence:** `.benchmarks/crossing_min_rejections_benched_dead_code.md`.

@@ -23,6 +23,24 @@ and I have laid it out fairly, because I do not think this is my call.
 
 ---
 
+## The evidence pack (four independent pillars)
+
+Everything below is measured, landed, and reproducible from the repo. Nothing is projected.
+
+| # | Evidence | Where | What it establishes |
+|---|---|---|---|
+| 1 | **Upstream mermaid emits ZERO per-element a11y.** On `wide_8x16` (128 nodes / 224 edges) mermaid 11.15.0 emits `role=` ×1 (root only), `tabindex` ×0, `aria-label` ×0, per-element `<title>` ×0, `<desc>` ×0. We emit 353 / 352 / 128 / 353. | `.benchmarks/a11y_contract_SETTLED_mermaid_emits_none.md` · `a5dee40` | The lean profile is **contract-matching**, not contract-breaking. No consumer that works against mermaid's own output can depend on our per-element a11y. |
+| 2 | **Lean edge-fragment streaming: −8…26% instructions.** Const-generic `A11Y` on the whole-edge writer; lean instr 0.7359–1.0004× vs base, default neutral (0.9984–1.0002×). 26/26 corpus SHA-256 identical under both profiles. | `.benchmarks/lean_edge_streaming_a11y_const_generic.md` · `bc56f72` | The 1.5–2.02× "lean is slower" penalty was a **renderer bug**, now fixed. Lean stopped being mispriced. |
+| 3 | **Single-pass CSS post-pass: −7.6…−10.9% render, byte-identical.** 21 full-document `str::contains` scans → 2 `memmem` walks. Instruction A/B 0.8547–0.9442× on the **default** profile, with a code-layout control at 1.0000–1.0003× and two null controls at exactly 1.0000×. | `.benchmarks/postpass_single_pass_scan.md` · `0f9efd4` | A **default-profile** win, independent of this decision. It also halved the artefact in pillar 4. |
+| 4 | **The byte-size post-pass gate.** `strip_unused_state_css` and three sibling passes early-return above `POST_PASS_MAX_SVG_BYTES = 100_000`. That gate measures **output bytes** — a quantity the *output profile* controls. Lean's ~31% shrink drags mid-size diagrams *below* the cap, so lean pays a pass default skips. | this document, "The ⚠ rows" | The two rows where lean looks slower are **an artefact of a size heuristic, not a cost of accessibility.** Disabling the pass collapses them to 0.945× / 0.978×. |
+
+Read together: pillar 1 removes the compatibility objection to lean, pillars 2–3 remove the performance
+objection to lean, and pillar 4 explains away the only rows that still look bad for lean. **The decision is
+therefore no longer technical.** It is a values call about whether per-element accessibility belongs in the
+default output, and that is why I am presenting it rather than making it.
+
+---
+
 ## What changed and what didn't
 
 **Did not change:** the comparator finding. Mermaid 11.15.0 emits **zero per-element accessibility** on
