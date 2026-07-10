@@ -10635,3 +10635,35 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
 - **Do-not-retry note:** do not re-pin the bundle or corpus to "fix" a failing run — a hash mismatch or
   corpus drift means the baseline moved, and re-pinning silently destroys comparability. Do not compare
   absolute ms across runs on this box (load swings 2x); compare ratios, and prefer the min estimator.
+
+### NO-SHIP: large raw-part body fusion regresses large wide render (2026-07-10)
+- **Agent:** cod_fm. **Lane:** large-diagram render double-copy. This was a different shape from the
+  2026-07-05 rejected "render large chunks inside `to_string_with_body`" attempt: edge/node fragments were
+  still rendered into the same ordered per-thread `String` chunks first, then an added large no-interleaving
+  path called `SvgDocument::to_string_with_body` and pushed those already-built parts directly into the body
+  position instead of wrapping them as `Element::raw_svg_parts` children.
+- **Profile basis:** ledger-first check found the closed large `to_string_with_body` regression and the landed
+  `raw_svg_parts` keep. Fresh local profiling on the current lane still pointed at bulk movement, not a Rust
+  compute frame: `perf report` on `profharness wide 3200 1200 render` had `__memmove_avx_unaligned_erms` as
+  the largest resolved self symbol (11.09%), and `perf stat` on `wide 3200 800 render` showed high cache-miss
+  pressure (115,677,960 cache misses, 26.10% of cache references). A full `flamegraph` run against the larger
+  shape was aborted after it ballooned `perf.data`; the smaller `perf record` completed but the release binary
+  was mostly stripped, so symbol detail was limited.
+- **Measurement:** same-worker Criterion A/B on RCH worker `vmi1227854`, release profile, exact row
+  `large_wide_stages/render/40x80`, command shape:
+  `AGENT_NAME=cod_fm CARGO_TARGET_DIR=/data/projects/frankenmermaid/.rch-targets/cod_fm_large_render_candidate
+  RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 rch exec -- cargo bench --profile release -p frankenmermaid-cli
+  --bench pipeline_bench -- large_wide_stages/render/40x80 --warm-up-time 1 --measurement-time 2 --sample-size 10
+  --noplot`.
+  Baseline current main on the same worker: **[2.8529 ms, 3.0663 ms, 3.3002 ms]**. Candidate:
+  **[3.5472 ms, 3.7810 ms, 4.0753 ms]**, Criterion change **+22.654%**, p=0.01; **performance regressed**.
+- **Worker note:** the first strict remote candidate run selected `hz1` and failed before measurement because
+  `highs-sys` bindgen could not find `libclang`; `hz1` was temporarily drained and then re-enabled after the
+  rerun selected `vmi1227854`. That is an RCH worker capability issue, not a code result.
+- **Verdict: REJECTED and code reverted.** Skipping the raw `Element` wrapper does not remove the real
+  fragment-to-final contiguous `String` copy. The extra branch/helper/closure plumbing only adds overhead on
+  the large path.
+- **Do-not-retry note:** do not retry "pre-render chunks, then push those chunks through
+  `to_string_with_body`" or helper-extraction variants. A future attempt needs a genuinely different output
+  contract, such as a non-contiguous rope/segmented SVG return type or a caller-provided write sink that avoids
+  requiring one final contiguous `String`; otherwise the dominant raw-chunk-to-final copy remains.
