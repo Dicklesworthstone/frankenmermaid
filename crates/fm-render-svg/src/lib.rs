@@ -353,23 +353,21 @@ pub fn render_svg_with_layout(
 /// is implausibly large (mis-grab guard). Byte-identical rendering — the dropped selectors match
 /// nothing in the body.
 fn strip_unused_state_css(svg: &mut String) {
-    // This post-pass full-scans the SVG ~20 times (state-class + accent presence checks). The fixed
-    // theme CSS it trims (~1.3 KB of states/accents) is a meaningful fraction only for small/medium
-    // diagrams; on a large SVG it is <1% of output while the repeated scans add measurable render
-    // time. Cap the work to outputs where the win clearly beats the scan cost (covers small flowcharts
+    // The fixed theme CSS this trims (~1.3 KB of states/accents) is a meaningful fraction only for
+    // small/medium diagrams; on a large SVG it is <1% of output while the pass still costs render time.
+    // Cap the work to outputs where the win clearly beats the scan cost (covers small flowcharts
     // through the sequence diagram ~62 KB; skips the 200 KB+ chain / wide renders).
     if svg.len() > POST_PASS_MAX_SVG_BYTES {
         return;
     }
-    const STATE_CLASSES: [&str; 5] = [
-        "fm-node-inactive",
-        "fm-node-block-beta",
-        "fm-node-highlighted",
-        "fm-node-border-dashed",
-        "fm-node-border-double",
-    ];
     let body_start = svg.find("</style>").map_or(0, |i| i + "</style>".len());
-    if STATE_CLASSES.iter().any(|c| svg[body_start..].contains(c)) {
+    // ONE walk of the body answers both questions the per-needle `contains` chain used to ask with a
+    // full body scan each. Computing it BEFORE the inactive-region strip below is sound: that strip
+    // only edits bytes inside the `<style>` block, so the body text — and hence every flag here — is
+    // unchanged by it. That is the same invariant that let the old code re-`find("</style>")`
+    // afterwards and read the identical body.
+    let (state_used, accent_used) = scan_body_fm_node_classes(&svg[body_start..]);
+    if state_used {
         return;
     }
     if let (Some(start), Some(after)) = (
@@ -384,28 +382,7 @@ fn strip_unused_state_css(svg: &mut String) {
     // The 8 accent palettes (`.fm-node-accent-1..8`) are assigned per node, so a diagram with few
     // nodes uses only some. Drop each `.fm-node-accent-N` rule whose class is absent from the body.
     // Body-based + exact-selector; no-op if the class is used or the rule is missing.
-    // Which `.fm-node-accent-N` classes (N=1..=8) appear in the body — collected in ONE scan by
-    // reading the digit after each "fm-node-accent-" match, instead of 8 `contains(&format!(...))`
-    // that each allocate a needle String and re-scan the body. Byte-identical: used[n] is true iff
-    // "fm-node-accent-{n}" occurs (single-digit N), exactly the substring the per-n `contains` tested.
-    // Const needles (not `format!("fm-node-accent-{n}")`) so the presence check allocates nothing —
-    // `str::contains` still SIMD-scans + early-exits exactly as before. Byte-identical, strictly fewer
-    // allocations (8 short Strings/render eliminated).
-    const ACCENT_NEEDLES: [&str; 9] = [
-        "",
-        "fm-node-accent-1",
-        "fm-node-accent-2",
-        "fm-node-accent-3",
-        "fm-node-accent-4",
-        "fm-node-accent-5",
-        "fm-node-accent-6",
-        "fm-node-accent-7",
-        "fm-node-accent-8",
-    ];
-    let body_at = svg.find("</style>").map_or(0, |i| i + "</style>".len());
-    let used: [bool; 9] =
-        std::array::from_fn(|n| n == 0 || svg[body_at..].contains(ACCENT_NEEDLES[n]));
-    for (n, &is_used) in used.iter().enumerate().skip(1) {
+    for (n, &is_used) in accent_used.iter().enumerate().skip(1) {
         if !is_used {
             let selector = format!(".fm-node-accent-{n} {{");
             if let Some(start) = svg.find(&selector)
@@ -418,21 +395,10 @@ fn strip_unused_state_css(svg: &mut String) {
 
     // Drop each `:root` accent custom property `--fm-accent-N` that is no longer referenced anywhere
     // (its accent rule was stripped above and no node-shape/gradient uses it). Reference-counted, so
-    // it is a no-op while ANY `var(--fm-accent-N)` remains — safe. Const needles avoid a per-n
-    // `format!` alloc for the (always-run) reference check; the strip logic is otherwise unchanged.
-    const VAR_NEEDLES: [&str; 9] = [
-        "",
-        "var(--fm-accent-1)",
-        "var(--fm-accent-2)",
-        "var(--fm-accent-3)",
-        "var(--fm-accent-4)",
-        "var(--fm-accent-5)",
-        "var(--fm-accent-6)",
-        "var(--fm-accent-7)",
-        "var(--fm-accent-8)",
-    ];
-    for (n, &needle) in VAR_NEEDLES.iter().enumerate().skip(1) {
-        if !svg.contains(needle) {
+    // it is a no-op while ANY `var(--fm-accent-N)` remains — safe.
+    let var_used = scan_accent_var_refs(svg);
+    for (n, &is_used) in var_used.iter().enumerate().skip(1) {
+        if !is_used {
             let decl = format!("  --fm-accent-{n}:");
             if let Some(start) = svg.find(&decl)
                 && let Some(rel_end) = svg[start..].find(";\n")
@@ -441,6 +407,77 @@ fn strip_unused_state_css(svg: &mut String) {
             }
         }
     }
+}
+
+/// Which of [`strip_unused_state_css`]'s 13 `fm-node-*` needles occur in the rendered body: the 5
+/// node-STATE classes (returned as one "any" flag, since the caller bails out on the first) and the 8
+/// `fm-node-accent-{n}` classes.
+///
+/// **Why one pass.** The old shape was one `str::contains` per needle. `str::contains` on an *absent*
+/// needle scans the whole body, and absent is the common case — a typical flowchart carries no state
+/// class at all — so it was worst-case `O(body_len * 13)`. Measured at **10.6–25.3% of the entire
+/// parse+layout+render pipeline** on every diagram under `POST_PASS_MAX_SVG_BYTES`, in *both* output
+/// profiles.
+///
+/// **Why one pass is byte-identical.** All 13 needles begin with `fm-node-`, which has no self-overlap
+/// (no proper prefix of `fm-node-` is also a proper suffix of it), so a single *non-overlapping*
+/// `memmem` walk observes the start of every occurrence of every needle. At each hit:
+/// - a state class is matched with `starts_with(suffix)`, which accepts exactly the strings
+///   `contains("fm-node-{suffix}")` accepted (including a longer `fm-node-inactive-foo`);
+/// - an accent digit is read with **no terminator check**, because the old needle `fm-node-accent-{n}`
+///   had none — `fm-node-accent-12` marked accent 1 used, and still does.
+fn scan_body_fm_node_classes(body: &str) -> (bool, [bool; 9]) {
+    const PREFIX: &[u8] = b"fm-node-";
+    const STATE_SUFFIXES: [&str; 5] = [
+        "inactive",
+        "block-beta",
+        "highlighted",
+        "border-dashed",
+        "border-double",
+    ];
+    let mut accent = [false; 9];
+    let bytes = body.as_bytes();
+    for at in memchr::memmem::Finder::new(PREFIX).find_iter(bytes) {
+        let rest = &bytes[at + PREFIX.len()..];
+        if let Some(tail) = rest.strip_prefix(b"accent-".as_slice()) {
+            if let Some(&digit) = tail.first()
+                && matches!(digit, b'1'..=b'8')
+            {
+                accent[usize::from(digit - b'0')] = true;
+            }
+        } else if STATE_SUFFIXES
+            .iter()
+            .any(|s| rest.starts_with(s.as_bytes()))
+        {
+            // The caller returns immediately on any state class, so the accent flags gathered so far
+            // are dead — stop walking.
+            return (true, accent);
+        }
+    }
+    (false, accent)
+}
+
+/// Which `var(--fm-accent-{n})` references survive anywhere in `svg`, in ONE pass instead of 8
+/// whole-document `contains` scans (each *absent* one of which scanned the entire document).
+///
+/// Must run AFTER the accent-rule strips — that reference count is the whole point of the check — but a
+/// single pass there is byte-identical to the old per-`n` `svg.contains(..)` evaluated inside the
+/// declaration-strip loop below: the only bytes that loop removes are `  --fm-accent-{n}: <color>;`
+/// lines, and an accent declaration never contains a `var(` (`theme.rs` writes a literal color), so no
+/// iteration can change a later iteration's answer.
+///
+/// The needle keeps its closing `)` — unlike the class needle above — because the old needle had one:
+/// `var(--fm-accent-12)` must NOT mark accent 1 as referenced.
+fn scan_accent_var_refs(svg: &str) -> [bool; 9] {
+    const PREFIX: &[u8] = b"var(--fm-accent-";
+    let mut used = [false; 9];
+    let bytes = svg.as_bytes();
+    for at in memchr::memmem::Finder::new(PREFIX).find_iter(bytes) {
+        if let [digit @ b'1'..=b'8', b')', ..] = &bytes[at + PREFIX.len()..] {
+            used[usize::from(*digit - b'0')] = true;
+        }
+    }
+    used
 }
 
 /// Render post-pass: drop `<marker>` arrowhead defs that the rendered body never references.
@@ -10204,6 +10241,133 @@ mod tests {
                     "lean edge must not emit {banned} for {arrow:?}: {streamed}"
                 );
             }
+        }
+    }
+
+    /// Differential oracle for the single-pass post-pass scanners against the per-needle `str::contains`
+    /// chain they replaced. The reference implementations below are verbatim the pre-`bd-w5sn` logic.
+    ///
+    /// The generated alphabet manufactures exactly the cases the one-pass rewrite could get wrong:
+    /// truncated prefixes (`fm-nod`), longer-than-single-digit accents (`fm-node-accent-12`, which the old
+    /// needle DID match for accent 1), out-of-range digits (`accent-0`, `accent-9`), a `var(--fm-accent-12)`
+    /// that must NOT count as a reference to accent 1, adjacent/overlapping prefixes
+    /// (`fm-node-fm-node-accent-3`), and state classes with trailing text (`fm-node-inactive-foo`).
+    #[test]
+    fn single_pass_scanners_match_per_needle_contains() {
+        const STATE_CLASSES: [&str; 5] = [
+            "fm-node-inactive",
+            "fm-node-block-beta",
+            "fm-node-highlighted",
+            "fm-node-border-dashed",
+            "fm-node-border-double",
+        ];
+        const ACCENT_NEEDLES: [&str; 9] = [
+            "",
+            "fm-node-accent-1",
+            "fm-node-accent-2",
+            "fm-node-accent-3",
+            "fm-node-accent-4",
+            "fm-node-accent-5",
+            "fm-node-accent-6",
+            "fm-node-accent-7",
+            "fm-node-accent-8",
+        ];
+        const VAR_NEEDLES: [&str; 9] = [
+            "",
+            "var(--fm-accent-1)",
+            "var(--fm-accent-2)",
+            "var(--fm-accent-3)",
+            "var(--fm-accent-4)",
+            "var(--fm-accent-5)",
+            "var(--fm-accent-6)",
+            "var(--fm-accent-7)",
+            "var(--fm-accent-8)",
+        ];
+        // Verbatim pre-rewrite logic.
+        let old_body = |body: &str| -> (bool, [bool; 9]) {
+            (
+                STATE_CLASSES.iter().any(|c| body.contains(c)),
+                std::array::from_fn(|n| n != 0 && body.contains(ACCENT_NEEDLES[n])),
+            )
+        };
+        let old_var = |svg: &str| -> [bool; 9] {
+            std::array::from_fn(|n| n != 0 && svg.contains(VAR_NEEDLES[n]))
+        };
+
+        let check = |t: &str| {
+            let (old_state, old_accent) = old_body(t);
+            let (new_state, new_accent) = scan_body_fm_node_classes(t);
+            assert_eq!(old_state, new_state, "state flag mismatch on {t:?}");
+            // The one-pass scanner short-circuits on a state hit, so its accent flags are only defined
+            // (and only ever read by the caller) when no state class is present.
+            if !old_state {
+                assert_eq!(old_accent, new_accent, "accent flags mismatch on {t:?}");
+            }
+            assert_eq!(
+                old_var(t),
+                scan_accent_var_refs(t),
+                "var refs mismatch on {t:?}"
+            );
+        };
+
+        for t in [
+            "",
+            "fm-node-",
+            "fm-node-accent-",
+            "fm-node-accent-0",
+            "fm-node-accent-9",
+            "fm-node-accent-12",
+            "fm-node-inactive-foo",
+            "fm-node-fm-node-accent-3",
+            "xxfm-node-highlighted",
+            "var(--fm-accent-",
+            "var(--fm-accent-3",
+            "var(--fm-accent-12)",
+            "var(--fm-accent-1)",
+            "fm-nod e-accent-1",
+        ] {
+            check(t);
+        }
+
+        const ATOMS: [&str; 22] = [
+            "fm-node-",
+            "accent-",
+            "1",
+            "2",
+            "8",
+            "9",
+            "0",
+            "12",
+            ")",
+            "(",
+            "var(--fm-accent-",
+            "inactive",
+            "block-beta",
+            "highlighted",
+            "border-dashed",
+            "border-double",
+            "fm-node-accent-",
+            "fm-node-inactive-foo",
+            "-",
+            "x",
+            "fm-nod",
+            "e-",
+        ];
+        let mut state: u64 = 0x243F_6A88_85A3_08D3;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            state
+        };
+        let mut scratch = String::new();
+        for _ in 0..200_000 {
+            scratch.clear();
+            let len = (next() >> 60) % 6 + 1;
+            for _ in 0..len {
+                scratch.push_str(ATOMS[usize::try_from(next() >> 33).unwrap_or(0) % ATOMS.len()]);
+            }
+            check(&scratch);
         }
     }
 

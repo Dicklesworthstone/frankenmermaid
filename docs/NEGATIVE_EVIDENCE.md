@@ -11032,3 +11032,87 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   test-build, audit, and deny gates passed, while UBS itself exited 1 on the existing heuristic baseline. No
   `fm-layout` source diff remains.
 - **Detailed evidence:** `.benchmarks/incremental_packed_span_hash_NEGATIVE.md`.
+
+<!-- cc_fm-postpass-single-pass-scan -->
+### WIN: `strip_unused_state_css` 21 full-document scans -> 2 (render -7.6..-10.9%, byte-identical) (`bd-w5sn`) (2026-07-10)
+- **Ledger-grep first (this path has a standing do-not-retry).** `strip-theme-css-memmem-replace-range-RE-REJECTED`
+  (2026-07-03) records a `strip_unused_*` micro-opt landed then reverted, twice: the render-CSS post-pass path has
+  a **~5% CODE-LAYOUT-NOISE floor** where byte-identical edits swing WALL time +/-5% by inlining/alignment alone,
+  so a best-of-N wall A/B here is sign-roulette. Its **retry-condition** is explicit: *"a kept win needs >5% AND a
+  code-layout control"*. Both met below. This lever is **not** "memmem beats `str::contains`" (that stays
+  rejected) -- it is **21 scans -> 2 scans**; the per-scan primitive is unchanged in kind.
+- **Profile -> mechanism (ranked frame, not a guess).** Symbolized `perf record --call-graph=dwarf`, wide_8x16,
+  self-time >=0.1%: `is_contained_in`->`simd_contains` **6.96%**, `StrSearcher::next_match`->`TwoWaySearcher`
+  **4.93%**, `replace_range` 1.41%, `__memmove_avx_unaligned_erms` 7.00%. An env-gated diagnostic build that
+  disables ONLY this function prices it at **10.6-25.3% of the whole parse+layout+render pipeline** on every
+  sub-100 KB diagram (small_10 11.1%, medium_100 13.0%, sequence_20 19.0%, class_50 10.6%, state_40 12.1%,
+  er_40 25.3%, wide_8x16-lean 17.7%). Cause: `str::contains` on an **absent** needle scans the whole body, and
+  absent is the common case -> worst-case `O(len * 21)`.
+- **Lever (one).** All 13 body needles share the prefix `fm-node-`; the 8 var needles share `var(--fm-accent-`.
+  Neither prefix self-overlaps, so one **non-overlapping** `memmem` walk sees every occurrence of every needle.
+  Two private fns: `scan_body_fm_node_classes` (one walk -> any-state + accent[9]) and `scan_accent_var_refs`
+  (one walk, after the accent strips). `replace_range` / `format!` / the 100 KB cap / the other three post-passes
+  all untouched.
+- **Byte-identity.** (a) `single_pass_scanners_match_per_needle_contains` -- a permanent differential unit test
+  running the **verbatim pre-change per-needle logic** against the new scanners over **200,000 generated strings**
+  (alphabet built to manufacture `fm-node-accent-12`, `var(--fm-accent-12)`, `fm-nod`, `fm-node-inactive-foo`,
+  `fm-node-fm-node-accent-3`, accent digits 0/9) + 14 targeted cases; all agree. Three asymmetries pinned: the
+  accent needle had NO terminator (so `accent-12` marks accent 1), the var needle HAD one (so `var(--fm-accent-12)`
+  must NOT), and state classes matched anywhere. (b) **26/26 SHA-256** on the 13-item pinned corpus under BOTH
+  profiles vs a pristine `830d672` build. (c) 247 `fm-render-svg` lib tests, conformance green, golden_layout 2/2,
+  golden_svg = the same single pre-existing `gantt_basic` FNV mismatch (proven pre-existing at untouched HEAD).
+  clippy `-D warnings` clean, fmt clean, ubs 14 = HEAD's 14.
+  - ⚠️**Stated precisely:** the 26-hash dump came from a build made *before* a whitespace-only `cargo fmt` reflow
+    of 3 lines in the new code. rustfmt does not alter tokens, and every *test* above ran on the post-fmt source,
+    but a concurrent disk emergency banned local builds and `rch` does not retrieve `--example` binaries, so the
+    dump was not regenerated. Do byte-identity dumps *before* any cosmetic reformat.
+- **A. Instruction A/B + the mandated code-layout control (THE CLAIM).** `perf stat -e instructions:u`, two-point
+  delta (reps 36-6, warmup 2), `FM_H2H_FORCE_PROFILE` + `batch=1`, `taskset -c 7`, median of 3. ORIG = `e6e0362`;
+  **noop** = ORIG + a work-identical `if svg.is_empty() { return; }` inside the same fn.
+
+  | item | profile | noop/ORIG (layout floor) | lever/ORIG |
+  |---|---|---:|---:|
+  | flowchart_small_10 | default | 1.0003x | **0.9393x** |
+  | flowchart_medium_100 | default | 1.0001x | **0.9310x** |
+  | sequence_20 | default | 1.0002x | **0.8822x** |
+  | class_50 | default | 1.0001x | **0.9442x** |
+  | state_40 | default | 1.0002x | **0.9321x** |
+  | er_40 | default | 1.0002x | **0.8547x** |
+  | wide_8x16 | lean | 1.0001x | **0.9030x** |
+  | *cyclic_scc_100 (107,649 B > cap)* | default | 1.0000x | **1.0000x** |
+  | *wide_16x32 (534,365 B > cap)* | default | 1.0000x | **1.0000x** |
+
+  **5.6-14.5% fewer pipeline instructions on the DEFAULT profile.** Two facts make this causal: the **layout
+  control is 1.0000-1.0003x** (the +/-5% floor is a WALL-TIME artifact; instruction counts are immune to it), and
+  the **two null controls are exactly 1.0000x** -- both exceed the 100 KB cap so the fn early-returns and never
+  runs. Layout noise would have moved them; it did not. Captured **53-63% of the isolated ceiling**; the rest is
+  the `replace_range`/`format!`/`find` work left alone.
+- **B. Criterion render-stage A/B, same worker (confirmation).** `RCH_WORKER=hz1 RCH_REQUIRE_REMOTE=1
+  RCH_FORCE_REMOTE=1 rch exec -- cargo bench -p frankenmermaid-cli --bench pipeline_bench -- render_svg/flowchart
+  --measurement-time 8 --warm-up-time 2 --sample-size 30 --noplot`. ORIG via `git show HEAD:<file> > <file>`,
+  lever restored from a `cp` backup right after (sha256 verified).
+
+  | bench | bytes | post-pass | ORIG | lever | speedup |
+  |---|---:|---|---|---|---:|
+  | render_svg/flowchart/small_10 | 13,218 | **runs** | 57.955 us [56.814, 59.043] | 53.544 us [52.912, 54.276] | **1.082x** (-7.6%) |
+  | render_svg/flowchart/medium_100 | 72,575 | **runs** | 112.82 us [110.55, 115.77] | 100.53 us [99.438, 101.78] | **1.122x** (-10.9%) |
+  | render_svg/flowchart/large_500 | 343,946 | *skipped* | 181.31 us [179.01, 184.29] | 180.67 us [178.90, 183.21] | 1.004x (flat) |
+
+  CIs do not overlap on either pass-running row; `large_500` is a null control **inside criterion** (output over
+  the cap -> pass never runs -> flat). Dispersion as relative CI half-width (criterion prints no `cv_pct`): ORIG
+  <= **2.31%**, lever <= **1.27%**, inside the <5% bar. Both pass-running rows clear the **>5%** retry-condition.
+- **Local wall clock was NOT used for the claim.** During a concurrent disk emergency (11 parallel cargo builds)
+  the harness reported `cv_pct` **11.9-27.7%** and the >100 KB null controls swung +/-3% -- exactly the roulette
+  the ledger warns about. All builds/benches for this entry were offloaded via `rch exec`.
+- **Verdict: KEPT.** Byte-identical, monotonic-less-work, and it speeds the **DEFAULT** profile (not just lean).
+- **Do-not-retry / notes:**
+  - The +/-5% code-layout floor on `strip_unused_*` is **wall-time only**; the measured *instruction* floor on the
+    same fn is **0.03%**. Use instructions here, and always build the no-op control.
+  - Do NOT generalize this into re-attempting memmem swaps on `strip_unused_theme_css` -- still rejected.
+  - Do NOT raise/remove the 100 KB cap to "fix" its profile-dependence: that changes which diagrams get their CSS
+    stripped => output bytes change => 37 goldens re-blessed + a contract decision (see
+    `docs/PROPOSAL_default_output_profile.md`).
+  - Remaining cost here is `replace_range` (whole-tail memmove per strip) + the `format!` needles.
+    `strip_unused_markers` already uses the right shape: collect ranges, ONE O(n) rebuild.
+  - `rch` does not retrieve `--example` binaries; `cargo test` runs fully remote.
+- **Evidence:** `.benchmarks/postpass_single_pass_scan.md`.
