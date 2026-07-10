@@ -72,8 +72,8 @@ fn cyclic_scc_ir(node_count: usize, ring: usize) -> MermaidDiagramIr {
 /// Which implementation an arm runs. Both are reachable from `bench_internals`.
 #[derive(Clone, Copy)]
 enum Arm {
-    OrigBTreeMap,
     DenseRank,
+    SinglePass,
 }
 
 /// Time `batch` invocations of one arm, feeding inputs and results through `black_box`. Returns
@@ -89,12 +89,12 @@ fn time_arm(
     let start = Instant::now();
     for _ in 0..batch {
         let (crossings, ordering) = match arm {
-            Arm::OrigBTreeMap => bench_internals::crossing_minimization_btreemap(
+            Arm::DenseRank => bench_internals::crossing_minimization_dense_rank(
                 black_box(ir),
                 black_box(ranks),
                 black_box(config),
             ),
-            Arm::DenseRank => bench_internals::crossing_minimization_dense_rank(
+            Arm::SinglePass => bench_internals::crossing_minimization_single_pass(
                 black_box(ir),
                 black_box(ranks),
                 black_box(config),
@@ -124,7 +124,7 @@ const MIN_SAMPLE: Duration = Duration::from_millis(2);
 /// noise on the fast arm and read 5.8–13.4%. Both arms share one `batch`, so it must be chosen such
 /// that the SHORTER of the two samples clears the floor; the slower arm then clears it a fortiori.
 fn calibrate(ir: &MermaidDiagramIr, ranks: &BTreeMap<usize, usize>, config: &LayoutConfig) -> u32 {
-    let (per_ns, _) = time_arm(Arm::DenseRank, ir, ranks, config, 1);
+    let (per_ns, _) = time_arm(Arm::SinglePass, ir, ranks, config, 1);
     let target = u64::try_from(MIN_SAMPLE.as_nanos()).unwrap_or(2_000_000);
     u32::try_from(target / per_ns.max(1)).unwrap_or(1).max(1)
 }
@@ -147,8 +147,8 @@ fn profile_arm_if_requested() -> bool {
         return false;
     };
     let arm = match requested.as_str() {
-        "orig" => Arm::OrigBTreeMap,
-        "cand" => Arm::DenseRank,
+        "orig" => Arm::DenseRank,
+        "cand" => Arm::SinglePass,
         _ => panic!("FM_BARYCENTER_PROFILE_ARM must be 'orig' or 'cand'"),
     };
     let iterations = env::var("FM_BARYCENTER_PROFILE_ITERS")
@@ -178,7 +178,7 @@ fn main() {
     let config = LayoutConfig::default();
     println!(
         "{:<10} {:>6} {:>6} {:>13} {:>13} {:>10} {:>8} {:>8}",
-        "case", "nodes", "edges", "orig_p50_us", "dense_p50_us", "speedup", "cv_pct", "mad_pct"
+        "case", "nodes", "edges", "dense_p50_us", "single_p50_us", "speedup", "cv_pct", "mad_pct"
     );
 
     for (label, node_count, ring) in [
@@ -188,18 +188,18 @@ fn main() {
     ] {
         let ir = cyclic_scc_ir(node_count, ring);
         let ranks = bench_internals::prepare_ranks(&ir, &config);
-        let orig = bench_internals::crossing_minimization_btreemap(&ir, &ranks, &config);
-        let candidate = bench_internals::crossing_minimization_dense_rank(&ir, &ranks, &config);
+        let orig = bench_internals::crossing_minimization_dense_rank(&ir, &ranks, &config);
+        let candidate = bench_internals::crossing_minimization_single_pass(&ir, &ranks, &config);
         assert_eq!(
             orig, candidate,
-            "dense-rank candidate changed ordering for {label}"
+            "single-pass candidate changed ordering for {label}"
         );
         let batch = calibrate(&ir, &ranks, &config);
 
         let mut checksum: u64 = 0;
         for _ in 0..WARMUP {
-            let (_, c1) = time_arm(Arm::OrigBTreeMap, &ir, &ranks, &config, batch);
-            let (_, c2) = time_arm(Arm::DenseRank, &ir, &ranks, &config, batch);
+            let (_, c1) = time_arm(Arm::DenseRank, &ir, &ranks, &config, batch);
+            let (_, c2) = time_arm(Arm::SinglePass, &ir, &ranks, &config, batch);
             checksum = checksum.wrapping_add(c1).wrapping_add(c2);
         }
 
@@ -209,13 +209,13 @@ fn main() {
         for round in 0..ROUNDS {
             // Alternate which arm goes first so first-mover bias cancels across rounds.
             let (orig_ns, dense_ns) = if round % 2 == 0 {
-                let (o, c1) = time_arm(Arm::OrigBTreeMap, &ir, &ranks, &config, batch);
-                let (d, c2) = time_arm(Arm::DenseRank, &ir, &ranks, &config, batch);
+                let (o, c1) = time_arm(Arm::DenseRank, &ir, &ranks, &config, batch);
+                let (d, c2) = time_arm(Arm::SinglePass, &ir, &ranks, &config, batch);
                 checksum = checksum.wrapping_add(c1).wrapping_add(c2);
                 (o, d)
             } else {
-                let (d, c2) = time_arm(Arm::DenseRank, &ir, &ranks, &config, batch);
-                let (o, c1) = time_arm(Arm::OrigBTreeMap, &ir, &ranks, &config, batch);
+                let (d, c2) = time_arm(Arm::SinglePass, &ir, &ranks, &config, batch);
+                let (o, c1) = time_arm(Arm::DenseRank, &ir, &ranks, &config, batch);
                 checksum = checksum.wrapping_add(c1).wrapping_add(c2);
                 (o, d)
             };

@@ -11436,3 +11436,64 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   (`docs/PROPOSAL_default_output_profile.md`). The lean column above **is** that lever, already measured at -27.3%
   on this graph. Nothing was flipped.
 - **Evidence:** `.benchmarks/render_capacity_preshaping_NEGATIVE.md`.
+
+<!-- cc_fm-barycenter-single-pass-win -->
+### WIN: always-single-pass barycenter sweep with packed position/slot scratch — 3.591x, `cv_pct` 4.13% (`bd-9w78` follow-up) (2026-07-10)
+- **Independent audit of cod's dense-rank win first.** I recomputed the statistics in
+  `.benchmarks/barycenter_dense_rank_WIN.md` from the **raw 41-pair samples cod published** there: **1.310x
+  cv 0.69%**, 1.323x cv 7.29%, **1.318x cv 4.57%** — reproduce **exactly**. Source hashes in that doc match the
+  tree. Per-arm self-time was obtained (ORIG 93.70%, CAND 92.13%). **`f8e6ce3` is certified.** Also ran the two
+  gates cod did not report: `golden_layout_test` 2/2 and `frankentui_conformance_test` green on that commit.
+- **This lever (one).** The sweep had two shapes chosen by `SINGLE_PASS_RANK_THRESHOLD = 8`: narrow ranks rescan
+  **all of `ir.edges` per node** (`O(rank_size * |E|)` per call); wide ranks take one accumulating edge pass but
+  build two per-call `BTreeMap`s (`adjacent_position`, `local_slot`) whose setup dominated at small widths — **the
+  only reason the threshold existed**. On `cyclic_scc_100` rank width is ~4, so the branch that actually runs pays
+  a 4x edge rescan. A node-indexed `BarycenterScratch` (`position_of`/`slot_of`/`accumulators`) allocated **once per
+  `crossing_minimization`** and reset in O(rank width) per call removes the setup cost, so the single pass is taken
+  for **every** rank width. Zero allocations after construction. `SINGLE_PASS` is a second const parameter, so
+  `DENSE_RANK` stays exactly as certified and the arms differ in **one variable**.
+- **Output-identical by construction:** the code already contained both shapes and selected between them on the
+  explicit premise (old comment; KEPT `single_pass_barycenter.md`) that they *"compute the identical result
+  (integer position sum divided once by the neighbor count)"*. Edge order unchanged, sums are `usize` => the `f32`
+  barycenters and the stable sort are bit-for-bit unchanged.
+- **Substrate v2 honoured.** One binary, ONE `rch` invocation, both arms **interleaved inside a single measured
+  routine** (41 rounds, each timing both arms back-to-back with **alternating order**), batch calibrated off the
+  **faster** arm, inputs and both results through `black_box` and folded into a printed checksum. Statistic = median
+  of per-round ratios; `cv` over those ratios. **Source sha256 pinned before AND after every run — unchanged**
+  (the guard the earlier source-swap race demanded).
+
+  | run / worker | input | dense p50 | single p50 | ratio | cv_pct | MAD | gate |
+  |---|---|---:|---:|---:|---:|---:|---|
+  | 1 / `hz2` (95 s) | `cyclic_scc_100` | 327.9 us | 91.6 us | **3.591x** | **4.13%** | 1.44% | **KEEP** |
+  | 1 / `hz2` | `cyclic_scc_300` | 2,792.7 us | 664.8 us | 4.211x | 15.32% | 1.42% | corrob |
+  | 1 / `hz2` | `cyclic_scc_800` | 19,641.5 us | 4,011.6 us | 4.874x | 6.08% | 2.43% | corrob |
+  | 2 / `vmi1152480` (247 s) | `cyclic_scc_100` | 413.7 us | 111.7 us | 3.851x | 68.24% | 7.63% | unusable |
+  | 2 / `vmi1152480` | `cyclic_scc_300` | 3,543.9 us | 727.5 us | 4.871x | 17.50% | 5.81% | unusable |
+  | 2 / `vmi1152480` | `cyclic_scc_800` | 24,577.0 us | 4,096.4 us | 5.986x | 15.97% | 2.29% | unusable |
+
+  **The claim is exactly ONE row: `cyclic_scc_100`, 3.591x, cv 4.13% < 5.** Everything else is corroboration.
+  Honest reading of run 2: `rch` **cannot pin a worker**, so I could not choose; it landed on a machine 2.6x slower
+  in wall time with cv up to 68%, and its samples cannot carry a cv-gated claim. What it does show is that the
+  **direction and magnitude reproduce on a second, independent machine** (3.59-3.85x / 4.21-4.87x / 4.87-5.99x) —
+  the property the source-swap race destroyed. MAD stays 1.42-2.43% in run 1: the cv failures are one-sided
+  preemption outliers, not instability in the effect.
+- **SELF-TIME PER ARM.** Baseline arm `reorder_rank_by_barycenter::<true, false>` = **92.13% self-time** (cod's
+  measurement on the certified build; `<true>` there is the same code path). ⚠️ **Candidate arm `::<true, true>`:
+  perf self-time NOT obtained** — under the mandated `rch exec -- cargo ...` recipe I cannot run `perf` against a
+  remotely-built bench ELF, and local builds are prohibited. Stated plainly rather than implied. Established
+  instead: the arm executes (3-arm differential test asserts equality; the printed checksum cannot come from a DCE'd
+  arm), it is the **production path** exercised by `golden_layout_test` + `frankentui_conformance_test`, and its
+  measured cost is 91.6 us vs the baseline's 327.9 us.
+- **Parity + gates.** `dense_barycenter_sweep_matches_btreemap_sweep` extended to **three arms** (`btreemap` ==
+  `dense_rank` == `single_pass`) across narrow/wide/threshold/degenerate/acyclic/heavily-cyclic shapes, two seeds.
+  The paired harness asserts full `(crossing_count, ordering_by_rank)` equality before timing. `cargo test -p
+  fm-layout --features bench-internals` **434 passed**. `golden_layout_test` **2/2** and `frankentui_conformance_test`
+  green **with SINGLE_PASS live in production** — the checked-in layout goldens directly certify the new arm's
+  deterministic output. `cargo fmt --check` clean.
+- **Verdict: KEEP.** Byte-identical, monotonic-less-work (removes the `rank_size` factor), 3.591x on the gate-clean
+  row, direction reproduced on two machines.
+- **Still open in this lane:** `SINGLE_PASS_RANK_THRESHOLD` is dead for the production arm but the constant and the
+  narrow branch remain because the `!SINGLE_PASS` reference arm needs them. **Flat CSR incidence** — per-call work
+  proportional to *incident* edges rather than `|E|` — is the next distinct primitive and removes the remaining
+  `|E|` factor. `total_crossings` stays closed on a 0.810% ceiling.
+- **Evidence:** `.benchmarks/barycenter_single_pass_WIN.md`.

@@ -10046,14 +10046,13 @@ fn crossing_minimization(
     ranks: &BTreeMap<usize, usize>,
     config: &LayoutConfig,
 ) -> (usize, BTreeMap<usize, Vec<usize>>) {
-    crossing_minimization_impl::<true>(ir, ranks, config)
+    crossing_minimization_impl::<true, true>(ir, ranks, config)
 }
 
-/// `DENSE_RANK` selects only the node-rank lookup representation used by the barycenter sweep. `true`
-/// is production: one packed `Vec<u32>` is built per crossing minimization and replaces the innermost
-/// `BTreeMap` rank probes. `false` is the live pre-`bd-9w78` reference arm. Every other allocation,
-/// branch, edge traversal, floating-point operation, and ordering tie-break remains shared.
-fn crossing_minimization_impl<const DENSE_RANK: bool>(
+/// Compile-time switches keep the certified production path and both live reference arms in one body:
+/// `DENSE_RANK` selects packed node-rank lookup, while `SINGLE_PASS` selects the reusable packed
+/// position/slot frontier and one edge pass per rank reorder.
+fn crossing_minimization_impl<const DENSE_RANK: bool, const SINGLE_PASS: bool>(
     ir: &MermaidDiagramIr,
     ranks: &BTreeMap<usize, usize>,
     config: &LayoutConfig,
@@ -10081,7 +10080,7 @@ fn crossing_minimization_impl<const DENSE_RANK: bool>(
         for node_index in 0..ir.nodes.len() {
             let rank = ranks.get(&node_index).copied().unwrap_or(0);
             let Ok(rank) = u32::try_from(rank) else {
-                return crossing_minimization_sweeps::<false>(
+                return crossing_minimization_sweeps::<false, SINGLE_PASS>(
                     ir,
                     ranks,
                     &[],
@@ -10096,7 +10095,7 @@ fn crossing_minimization_impl<const DENSE_RANK: bool>(
         Vec::new()
     };
 
-    crossing_minimization_sweeps::<DENSE_RANK>(
+    crossing_minimization_sweeps::<DENSE_RANK, SINGLE_PASS>(
         ir,
         ranks,
         &dense_node_rank,
@@ -10105,22 +10104,28 @@ fn crossing_minimization_impl<const DENSE_RANK: bool>(
     )
 }
 
-fn crossing_minimization_sweeps<const DENSE_RANK: bool>(
+fn crossing_minimization_sweeps<const DENSE_RANK: bool, const SINGLE_PASS: bool>(
     ir: &MermaidDiagramIr,
     ranks: &BTreeMap<usize, usize>,
     dense_node_rank: &[u32],
     mut ordering_by_rank: BTreeMap<usize, Vec<usize>>,
     centrality: CentralityAssist,
 ) -> (usize, BTreeMap<usize, Vec<usize>>) {
+    // Allocated once per crossing minimization and reused by every sweep call; empty for the
+    // `!SINGLE_PASS` arm, which never reads it. The packed arm falls back to the certified
+    // thresholded implementation if a node index cannot fit in u32.
+    let mut scratch = BarycenterScratch::new::<SINGLE_PASS>(ir.nodes.len());
+
     // Deterministic barycenter sweeps: top-down then bottom-up.
     let rank_keys: Vec<usize> = ordering_by_rank.keys().copied().collect();
     for _ in 0..4 {
         for index in 1..rank_keys.len() {
             let rank = rank_keys[index];
             let upper_rank = rank_keys[index - 1];
-            reorder_rank_by_barycenter::<DENSE_RANK>(
+            reorder_rank_by_barycenter::<DENSE_RANK, SINGLE_PASS>(
                 ir,
                 (ranks, dense_node_rank),
+                &mut scratch,
                 &mut ordering_by_rank,
                 rank,
                 upper_rank,
@@ -10132,9 +10137,10 @@ fn crossing_minimization_sweeps<const DENSE_RANK: bool>(
         for index in (0..rank_keys.len().saturating_sub(1)).rev() {
             let rank = rank_keys[index];
             let lower_rank = rank_keys[index + 1];
-            reorder_rank_by_barycenter::<DENSE_RANK>(
+            reorder_rank_by_barycenter::<DENSE_RANK, SINGLE_PASS>(
                 ir,
                 (ranks, dense_node_rank),
+                &mut scratch,
                 &mut ordering_by_rank,
                 rank,
                 lower_rank,
@@ -11635,12 +11641,64 @@ fn barycenter_node_rank<const DENSE_RANK: bool>(
     }
 }
 
-/// Deterministic barycenter sweep shared by both A/B arms. The sole candidate distinction is
-/// `barycenter_node_rank`: production indexes the packed node-rank table, while ORIG probes `ranks`.
+/// Node-indexed scratch for the `SINGLE_PASS` barycenter arm, allocated once per
+/// `crossing_minimization` and reused by every sweep call.
+///
+/// It replaces the two per-call `BTreeMap`s (`adjacent_position`, and the wide branch's `local_slot`) with
+/// O(1)-indexed `u32` tables. Entries touched by a call are reset in O(rank width) afterwards. The
+/// accumulator grows only to the widest observed rank and then reuses that allocation. The `!SINGLE_PASS`
+/// arm keeps all three vectors empty.
+struct BarycenterScratch {
+    /// Position of a node within the adjacent rank's order, or `ABSENT`.
+    position_of: Vec<u32>,
+    /// Slot of a node within the current rank's order, or `ABSENT`.
+    slot_of: Vec<u32>,
+    /// `(position_sum, neighbor_count)` per slot of the current rank.
+    accumulators: Vec<(usize, usize)>,
+}
+
+impl BarycenterScratch {
+    /// Sentinel for "not in the rank currently loaded". The packed arm is enabled only when the node
+    /// count fits in `u32`, so `u32::MAX` can never be a valid position or slot.
+    const ABSENT: u32 = u32::MAX;
+
+    fn new<const SINGLE_PASS: bool>(node_count: usize) -> Self {
+        if SINGLE_PASS && u32::try_from(node_count).is_ok() {
+            Self {
+                position_of: vec![Self::ABSENT; node_count],
+                slot_of: vec![Self::ABSENT; node_count],
+                accumulators: Vec::new(),
+            }
+        } else {
+            Self {
+                position_of: Vec::new(),
+                slot_of: Vec::new(),
+                accumulators: Vec::new(),
+            }
+        }
+    }
+}
+
+/// Deterministic barycenter sweep shared by all A/B arms.
+///
+/// - `DENSE_RANK` (certified `bd-9w78`, `f8e6ce3`): index the packed node-rank table instead of probing
+///   `ranks: &BTreeMap` in the innermost edge loop.
+/// - `SINGLE_PASS`: accumulate over `ir.edges` **once per call** instead of once per node of the current
+///   rank, using `scratch` in place of the two per-call `BTreeMap`s. This removes the `rank_size` factor:
+///   the old narrow branch was `O(rank_size · |E|)` per call, and on `cyclic_scc_100` the rank width is ~4.
+///
+/// **`SINGLE_PASS` is output-identical by construction.** The pre-existing code already contained *both*
+/// shapes and selected between them by `SINGLE_PASS_RANK_THRESHOLD`, on the explicit premise (see the old
+/// comment, and the KEPT `single_pass_barycenter.md`) that they *"compute the identical result (integer
+/// position sum divided once by the neighbor count)"*. The threshold existed only because the wide branch's
+/// per-call `BTreeMap` setup dominated at small rank widths — and that setup is exactly what `scratch`
+/// removes. Accumulation order over `ir.edges` is unchanged and the sums are `usize`, so the resulting `f32`
+/// barycenters and the downstream stable sort are bit-for-bit what they were.
 #[allow(unused_variables)] // centrality only used with fnx-integration feature
-fn reorder_rank_by_barycenter<const DENSE_RANK: bool>(
+fn reorder_rank_by_barycenter<const DENSE_RANK: bool, const SINGLE_PASS: bool>(
     ir: &MermaidDiagramIr,
     rank_lookup: (&BTreeMap<usize, usize>, &[u32]),
+    scratch: &mut BarycenterScratch,
     ordering_by_rank: &mut BTreeMap<usize, Vec<usize>>,
     rank: usize,
     adjacent_rank: usize,
@@ -11654,6 +11712,103 @@ fn reorder_rank_by_barycenter<const DENSE_RANK: bool>(
     let Some(adjacent_order) = ordering_by_rank.get(&adjacent_rank) else {
         return;
     };
+
+    if SINGLE_PASS && !scratch.position_of.is_empty() {
+        for (position, node) in adjacent_order.iter().enumerate() {
+            if let Some(entry) = scratch.position_of.get_mut(*node) {
+                *entry = u32::try_from(position).unwrap_or(BarycenterScratch::ABSENT);
+            }
+        }
+        for (slot, node) in current_order.iter().enumerate() {
+            if let Some(entry) = scratch.slot_of.get_mut(*node) {
+                *entry = u32::try_from(slot).unwrap_or(BarycenterScratch::ABSENT);
+            }
+        }
+        scratch.accumulators.clear();
+        scratch.accumulators.resize(current_order.len(), (0, 0));
+
+        for edge in &ir.edges {
+            let Some(source) = endpoint_node_index(ir, edge.from) else {
+                continue;
+            };
+            let Some(target) = endpoint_node_index(ir, edge.to) else {
+                continue;
+            };
+            let (node, adjacent_node) = if use_incoming {
+                (target, source)
+            } else {
+                (source, target)
+            };
+            let Some(&slot) = scratch.slot_of.get(node) else {
+                continue;
+            };
+            if slot == BarycenterScratch::ABSENT {
+                continue;
+            }
+            let Ok(slot) = usize::try_from(slot) else {
+                continue;
+            };
+            if barycenter_node_rank::<DENSE_RANK>(ranks, dense_node_rank, adjacent_node)
+                != adjacent_rank
+            {
+                continue;
+            }
+            let Some(&position) = scratch.position_of.get(adjacent_node) else {
+                continue;
+            };
+            if position == BarycenterScratch::ABSENT {
+                continue;
+            }
+            let Ok(position) = usize::try_from(position) else {
+                continue;
+            };
+            if let Some(accumulator) = scratch.accumulators.get_mut(slot) {
+                accumulator.0 = accumulator.0.saturating_add(position);
+                accumulator.1 = accumulator.1.saturating_add(1);
+            }
+        }
+
+        // Reset only the entries this call touched: O(rank width), not O(node count).
+        for node in adjacent_order {
+            if let Some(entry) = scratch.position_of.get_mut(*node) {
+                *entry = BarycenterScratch::ABSENT;
+            }
+        }
+        for node in &current_order {
+            if let Some(entry) = scratch.slot_of.get_mut(*node) {
+                *entry = BarycenterScratch::ABSENT;
+            }
+        }
+
+        let mut scored_nodes: Vec<(usize, Option<f32>, usize)> = current_order
+            .iter()
+            .enumerate()
+            .map(|(stable_idx, node_index)| {
+                let (total_position, neighbor_count) = scratch
+                    .accumulators
+                    .get(stable_idx)
+                    .copied()
+                    .unwrap_or((0, 0));
+                let barycenter = if neighbor_count == 0 {
+                    None
+                } else {
+                    #[allow(clippy::cast_precision_loss)]
+                    Some(total_position as f32 / neighbor_count as f32)
+                };
+                (*node_index, barycenter, stable_idx)
+            })
+            .collect();
+
+        sort_scored_nodes(&mut scored_nodes, centrality);
+        ordering_by_rank.insert(
+            rank,
+            scored_nodes
+                .into_iter()
+                .map(|(node_index, _, _)| node_index)
+                .collect(),
+        );
+        return;
+    }
 
     let adjacent_position: BTreeMap<usize, usize> = adjacent_order
         .iter()
@@ -11776,6 +11931,24 @@ fn reorder_rank_by_barycenter<const DENSE_RANK: bool>(
             .collect()
     };
 
+    sort_scored_nodes(&mut scored_nodes, centrality);
+
+    ordering_by_rank.insert(
+        rank,
+        scored_nodes
+            .into_iter()
+            .map(|(node_index, _, _)| node_index)
+            .collect(),
+    );
+}
+
+/// The single, shared ordering comparator for every barycenter arm, so the arms cannot drift apart in the
+/// one place that determines deterministic output.
+#[allow(unused_variables)] // centrality only used with fnx-integration feature
+fn sort_scored_nodes(
+    scored_nodes: &mut [(usize, Option<f32>, usize)],
+    centrality: &CentralityAssist,
+) {
     #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
     match centrality {
         CentralityAssist::Enabled(scores) => {
@@ -11798,14 +11971,6 @@ fn reorder_rank_by_barycenter<const DENSE_RANK: bool>(
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => left.2.cmp(&right.2).then_with(|| left.0.cmp(&right.0)),
     });
-
-    ordering_by_rank.insert(
-        rank,
-        scored_nodes
-            .into_iter()
-            .map(|(node_index, _, _)| node_index)
-            .collect(),
-    );
 }
 
 /// Bench/test-only access to the two barycenter sweep arms.
@@ -11835,7 +12000,7 @@ pub mod bench_internals {
         ranks: &BTreeMap<usize, usize>,
         config: &LayoutConfig,
     ) -> (usize, BTreeMap<usize, Vec<usize>>) {
-        super::crossing_minimization_impl::<false>(ir, ranks, config)
+        super::crossing_minimization_impl::<false, false>(ir, ranks, config)
     }
 
     /// CAND arm: one packed node-rank table replacing only the hot `BTreeMap` rank probes.
@@ -11845,7 +12010,19 @@ pub mod bench_internals {
         ranks: &BTreeMap<usize, usize>,
         config: &LayoutConfig,
     ) -> (usize, BTreeMap<usize, Vec<usize>>) {
-        super::crossing_minimization_impl::<true>(ir, ranks, config)
+        super::crossing_minimization_impl::<true, false>(ir, ranks, config)
+    }
+
+    /// CAND arm for the follow-up lever: dense rank **plus** one accumulating edge pass per call, using
+    /// reusable packed position/slot scratch instead of the two per-call `BTreeMap`s. Removes the
+    /// `rank_size` factor from the old narrow-rank branch.
+    #[must_use]
+    pub fn crossing_minimization_single_pass(
+        ir: &MermaidDiagramIr,
+        ranks: &BTreeMap<usize, usize>,
+        config: &LayoutConfig,
+    ) -> (usize, BTreeMap<usize, Vec<usize>>) {
+        super::crossing_minimization_impl::<true, true>(ir, ranks, config)
     }
 }
 
@@ -13737,6 +13914,13 @@ mod barycenter_arms_tests {
                 let ranks = bench_internals::prepare_ranks(&ir, &config);
                 let orig = bench_internals::crossing_minimization_btreemap(&ir, &ranks, &config);
                 let dense = bench_internals::crossing_minimization_dense_rank(&ir, &ranks, &config);
+                let single =
+                    bench_internals::crossing_minimization_single_pass(&ir, &ranks, &config);
+                assert_eq!(
+                    dense, single,
+                    "single-pass sweep diverged from the dense-rank sweep \
+                     (layers={layers} width={width} back_edges={back_edges} seed={seed:#x})"
+                );
                 assert_eq!(
                     orig, dense,
                     "dense barycenter sweep diverged from the BTreeMap sweep \
@@ -17695,9 +17879,11 @@ mod tests {
         ordering_by_rank.insert(2, vec![4]);
 
         let centrality = super::build_centrality_assist(&ir, &LayoutConfig::default());
-        super::reorder_rank_by_barycenter::<false>(
+        let mut scratch = super::BarycenterScratch::new::<false>(ir.nodes.len());
+        super::reorder_rank_by_barycenter::<false, false>(
             &ir,
             (&ranks, &[]),
+            &mut scratch,
             &mut ordering_by_rank,
             0,
             1,
