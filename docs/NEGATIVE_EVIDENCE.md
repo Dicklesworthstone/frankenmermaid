@@ -11495,5 +11495,36 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
 - **Still open in this lane:** `SINGLE_PASS_RANK_THRESHOLD` is dead for the production arm but the constant and the
   narrow branch remain because the `!SINGLE_PASS` reference arm needs them. **Flat CSR incidence** — per-call work
   proportional to *incident* edges rather than `|E|` — is the next distinct primitive and removes the remaining
-  `|E|` factor. `total_crossings` stays closed on a 0.810% ceiling.
+  `|E|` factor. The already-tested `total_crossings` family stays closed for this attempt; its measured 0.810%
+  share does not constrain a different primitive.
 - **Evidence:** `.benchmarks/barycenter_single_pass_WIN.md`.
+
+<!-- cod_fm-barycenter-single-pass-certification -->
+### WIN CERTIFICATION: packed single-pass barycenter has exact-ELF per-arm profiles and two fresh low-CV rows (2026-07-10)
+- **Ledger-first / scope:** this certifies the already-landed `e8082c0` one-lever change; it does not retry the
+  void `Vec<Vec>` adjacency experiment or the closed `total_crossings` family. The post-packed-rank table still
+  ranked `reorder_rank_by_barycenter::<true, false>` first at **92.30% self-time** on the exact new A/B ELF, so
+  the mechanism remains removal of the narrow-rank `rank_size * |E|` rescan with reusable `u32` position/slot
+  frontiers.
+- **Substrate v2:** one `--profile release` binary in one fail-closed RCH invocation on `ovh-a`
+  (`ubuntu@51.222.245.56`), 41 paired samples, O/C and C/O first-arm order alternating inside each row, batch
+  calibrated from CAND, inputs and complete results black-boxed. Immediate pre/post source hashes were identical
+  and exactly match landed `e8082c0` (`lib.rs` `b6c8ada7...b7a5559`, bench `0ccde29b...aa3e9`).
+- **Binary identity:** Cargo ran a verified non-empty, unstripped x86-64 ELF of **839,016 bytes**, SHA-256
+  **`b9683efd11b5ff501a4658a2353e252e2600ab6be04f7732103fa65624c3a403`**.
+- **Fresh A/B:** `cyclic_scc_100` dense/single p50 **274.3/74.7 us**, median paired ratio **3.669x**,
+  `cv_pct` **0.94%**, MAD 0.26%; `cyclic_scc_300` **2,324.0/524.6 us**, median paired ratio **4.432x**,
+  `cv_pct` **0.57%**, MAD 0.36%. Both clear the `<5%` dispersion
+  rule and 3% ratchet. `cyclic_scc_800` agreed at 5.116x but its CV was **5.01%**, so it is corroboration only.
+- **Ledger integrity, exact same ELF:** ORIG `reorder_rank_by_barycenter::<true, false>` = **92.30% self-time**
+  (**13,908 samples / 0 lost**); CAND `::<true, true>` = **76.84% self-time** (**18,267 / 0 lost**). This closes
+  the candidate-profile gap in the original WIN row. Direct allocator frames total about 2.09% / 6.18% as
+  shares of runtimes differing by 3.7-4.4x, so allocation does not dominate. `total_crossings` is 2.11% / 9.01%
+  share-of-a-smaller-total and remains a distinct future primitive, not part of this lever.
+- **Parity / gates:** the three arms return exact `(crossing_count, ordering_by_rank)` equality across
+  narrow/wide/threshold/degenerate/acyclic/heavily-cyclic fixtures; full `fm-layout` is **434/434** plus doctests;
+  all-target Clippy `-D warnings` and direct nightly rustfmt are clean. A fresh fail-closed remote run on
+  `vmi1227854` passed the FrankenTUI fixture plus golden checksums and repeated-run determinism (**3/3**); no
+  executable production statement changed in this certification.
+- **Verdict: CERTIFIED WIN / KEEP.** Full ranked `>=0.1%` frame tables, exact commands, and retained perf paths
+  are in `.benchmarks/barycenter_single_pass_WIN.md`.

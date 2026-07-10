@@ -106,4 +106,106 @@ failures are one-sided preemption outliers, not instability in the effect.
 `SINGLE_PASS_RANK_THRESHOLD` is now dead for the production arm (both widths take one pass) but the constant and
 the narrow branch remain, because the `!SINGLE_PASS` reference arm needs them. **Flat CSR incidence** — making the
 per-call work proportional to the *incident* edges rather than to `|E|` — is the next distinct primitive, and it is
-the one that removes the remaining `|E|` factor. `total_crossings` stays closed on a 0.810% ceiling.
+the one that removes the remaining `|E|` factor. The already-tested `total_crossings` family stays closed for
+this attempt; its measured 0.810% share does not constrain a different primitive.
+
+---
+
+## Cod certification addendum — exact ELF and per-arm self-time
+
+This closes the only integrity gap in the original WIN: the candidate arm is now profiled with non-zero
+self-time from the **same exact ELF** that produced a fresh paired A/B. No source changed during the run. The
+immediate pre/post SHA-256 values match the landed `e8082c0` files exactly:
+
+| File | SHA-256 |
+|---|---|
+| `crates/fm-layout/src/lib.rs` | `b6c8ada76fdf09c3a7316c32f9e7948df6c5b6da1a8745e05fa8d0477b7a5559` |
+| `crates/fm-layout/benches/barycenter_sweep.rs` | `0ccde29bb95cae75501878dd50fc1804ea947ab3db9fc155af43b913089a429` |
+
+The required one-binary invocation was:
+
+```text
+RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- \
+  cargo bench -p fm-layout --bench barycenter_sweep --features bench-internals --profile release
+```
+
+RCH selected `ovh-a` (`ubuntu@51.222.245.56`). The executable that Cargo printed and ran was verified in place
+as a non-empty, unstripped x86-64 ELF: **839,016 bytes**, SHA-256
+`b9683efd11b5ff501a4658a2353e252e2600ab6be04f7732103fa65624c3a403`.
+
+Fresh paired results (41 O/C or C/O samples per row, alternating first arm, batch calibrated from CAND, both
+inputs and full results passed through `black_box`):
+
+| input | dense-rank ORIG p50 | packed single-pass CAND p50 | median paired ORIG/CAND | `cv_pct` | MAD | gate |
+|---|---:|---:|---:|---:|---:|---|
+| `cyclic_scc_100` | 274.3 us | 74.7 us | **3.669x** | **0.94%** | 0.26% | **KEEP** |
+| `cyclic_scc_300` | 2,324.0 us | 524.6 us | **4.432x** | **0.57%** | 0.36% | **KEEP** |
+| `cyclic_scc_800` | 15,980.8 us | 3,124.3 us | 5.116x | 5.01% | 0.16% | corroboration only |
+
+The 800-node row misses the strict `<5%` CV gate by 0.01 percentage point and is not verdict evidence. The two
+gate-clean rows independently confirm and strengthen the landed 3.591x result.
+
+### Exact-binary profile integrity
+
+The worker had no Cargo/rustc process running before profiling. Each arm was then run from the exact ELF above
+under `sudo perf record -F 2500 -e cycles:u --call-graph=dwarf`; profile timings are attribution evidence only,
+not the A/B verdict.
+
+- ORIG (`::<true, false>`): **13,908 samples / 0 lost**, target frame **92.30% self-time**.
+- CAND (`::<true, true>`): **18,267 samples / 0 lost**, target frame **76.84% self-time**.
+
+Every flat frame at or above 0.10% self-time:
+
+| ORIG self | Frame |
+|---:|---|
+| **92.30%** | `reorder_rank_by_barycenter::<true, false>` |
+| 2.11% | `total_crossings` |
+| 0.95% | `malloc` |
+| 0.84% | `cfree` |
+| 0.84% | `BTreeMap::bulk_build_from_sorted_iter` |
+| 0.38% | `__memmove_avx_unaligned_erms` |
+| 0.35% | tuple insertion sort |
+| 0.33% | `drop_glue<BTreeMap>` |
+| 0.33% | `nodes_by_rank` |
+| 0.30% | `_int_malloc` |
+| 0.25% | `count_inversions` |
+| 0.24% | `crossing_minimization_dense_rank` wrapper |
+
+| CAND self | Frame |
+|---:|---|
+| **76.84%** | `reorder_rank_by_barycenter::<true, true>` |
+| 9.01% | `total_crossings` |
+| 2.53% | `malloc` |
+| 1.58% | `nodes_by_rank` |
+| 1.52% | `cfree` |
+| 1.27% | `__memmove_avx_unaligned_erms` |
+| 1.16% | `crossing_minimization_single_pass` wrapper |
+| 1.04% | `count_inversions` |
+| 0.95% | `_int_malloc` |
+| 0.90% | tuple insertion sort |
+| 0.36% | `_int_free_chunk` |
+| 0.33% | `_int_free_merge_chunk` |
+| 0.28% | `realloc` |
+| 0.21% | `_int_realloc` |
+| 0.21% | `__memset_avx2_unaligned_erms` |
+| 0.21% | `BTreeMap::bulk_build_from_sorted_iter` |
+| 0.20% | `BTreeMap::VacantEntry::insert_entry` |
+| 0.18% | `drop_glue<BTreeMap>` |
+| 0.14% | `RawVecInner::finish_grow` (first instance) |
+| 0.14% | `RawVecInner::finish_grow` (second instance) |
+| 0.12% | `BTreeMap::IntoIter::dying_next` |
+| 0.12% | pair insertion sort in `total_crossings` |
+
+Direct allocator frames are about **2.09% ORIG / 6.18% CAND** as shares of runtimes that differ by 3.7-4.4x;
+allocation therefore still does not dominate this cyclic kernel. `total_crossings` rises to 9.01% only because
+the denominator collapsed; it remains a separate primitive family and is not mixed into this commit.
+
+Profile artifacts remain on the worker without deletion:
+
+- `/tmp/cod_fm_bary_packed_frontier_orig_b9683efd_root.perf.data`
+- `/tmp/cod_fm_bary_packed_frontier_cand_b9683efd_root.perf.data`
+
+Current validation adds a fresh full `fm-layout` run (**434/434**, doctests 1 passed / 1 ignored), all-target
+Clippy with `-D warnings`, direct nightly `rustfmt --check`, the three-arm exact differential parity test, and a
+strict-remote `frankenmermaid-cli` gate on `vmi1227854` where the FrankenTUI fixture, golden checksums, and
+repeated-run determinism all passed (**3/3**).

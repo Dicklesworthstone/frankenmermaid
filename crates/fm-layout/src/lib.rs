@@ -11695,6 +11695,7 @@ impl BarycenterScratch {
 /// removes. Accumulation order over `ir.edges` is unchanged and the sums are `usize`, so the resulting `f32`
 /// barycenters and the downstream stable sort are bit-for-bit what they were.
 #[allow(unused_variables)] // centrality only used with fnx-integration feature
+#[allow(clippy::too_many_arguments)] // Keep both A/B arms in one body so ordering logic cannot drift.
 fn reorder_rank_by_barycenter<const DENSE_RANK: bool, const SINGLE_PASS: bool>(
     ir: &MermaidDiagramIr,
     rank_lookup: (&BTreeMap<usize, usize>, &[u32]),
