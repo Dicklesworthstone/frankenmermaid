@@ -11847,3 +11847,42 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   hashes in a fresh fail-closed RCH invocation using the same micro-interleaved substrate; keep only if one real
   Sugiyama row has A/A and A/B `cv_pct < 5%` and clears the 3% ratchet. This condition reopens an identical-source
   retry without reopening any fresh-per-call crossing-table family.
+
+<!-- cc_fm-isa-v3-render-measured-null -->
+### MEASURED NULL: x86-64-v3 (AVX2/BMI2/FMA) is neutral on the render path — frankenmermaid does NOT vectorize like frankenscipy (2026-07-10)
+- **Correcting my own framing:** the earlier ISA entry called the v2-vs-v3 measurement "blocked on the disk
+  constraint." That was imprecise. Disk blocks nothing -- `rch exec` builds remotely with zero local disk. The
+  real obstacle was the **substrate**: `target-cpu` is a whole-binary flag ⇒ two binaries ⇒ two `rch`
+  invocations ⇒ non-deterministic worker. **Route-around (the sanctioned one): run both via `rch exec`, capture
+  the worker id, and compare only SAME-WORKER pairs.** It works.
+- **RUSTFLAGS propagation through rch: CONFIRMED.** `barycenter_sweep` self-reports its ELF sha256. Default build
+  and `RUSTFLAGS="-C target-cpu=x86-64-v3"` build, BOTH on worker `vmi1293453`, same source, same size (823,304 B),
+  **different sha** (`b576fdbb...` vs `e5e2ffce...`). Same worker + same source + different bytes = the flag
+  reached the remote compiler and changed codegen. (Identical size ⇒ v3 barely touches layout codegen -- scalar
+  BTreeMap/integer work, as expected.)
+- **THE MEASUREMENT (render path, same worker `hz2`, criterion, 30 samples, 8s):**
+
+  | bench | v2 mid | v3 mid | v3/v2 | CIs overlap? |
+  |---|---:|---:|---:|---|
+  | render_svg/flowchart/small_10 | 51.572 us | 50.961 us | 0.988x | yes |
+  | render_svg/flowchart/medium_100 | 99.710 us | 99.937 us | 1.002x | yes |
+  | render_svg/flowchart/large_500 | 187.53 us | 185.63 us | 0.990x | yes ([182.76,193.25] vs [182.63,189.06]) |
+
+  **v3 is NEUTRAL: all three ratios within 1.2% of 1.000, differences ~1% against ~2.8% CI half-width (~0.36 CI
+  widths -- squarely inside noise).** geomean 0.993x.
+- **WHY frankenmermaid is NOT frankenscipy** (which got 1.745x from the same v2->v3 fix): frankenscipy's wall is
+  dense linalg -- wide, data-parallel FP arithmetic, the ideal AVX2/FMA workload. frankenmermaid's render floor
+  (measured 18.70% of large render, see the byte-floor entry) is **scalar, latency-bound byte production**:
+  `write_uint_into` digit-table `push_str`, `write_fixed2`, `build_smooth_path_by_into`. AVX2 256-bit lanes do
+  nothing for sequential digit-table lookups + String appends. AND the byte scans go through the `memchr` crate,
+  which **runtime-dispatches AVX2 internally regardless of the binary's `target-cpu`** -- so the one part that
+  could vectorize already gets AVX2 at run time, independent of the v2 flag.
+- **CONSEQUENCE: the documented v2 portability floor costs frankenmermaid ~nothing in render.** Keeping
+  `target-cpu=x86-64-v2` for the distributed `install.sh` binary (RHEL 9 baseline) is correct AND free on this
+  path. There is no ISA win to chase here -- unlike the fleet siblings whose hot loops are arithmetic-bound.
+- **Rigor / limits:** two-invocation, same-worker-matched (worker confound controlled), gated on criterion CI
+  overlap rather than the interleaved paired null (a whole-binary ISA change cannot use the single-binary paired
+  substrate). Not measured: layout path (barycenter same-size ELF already implies ~0), or `native`/AVX-512 (would
+  only matter if v3 already moved something -- it did not). If a future render lever introduces a genuinely
+  vectorizable inner loop, re-open with a v2/v3 same-worker A/B; until then the ISA question is CLOSED for render.
+- **Worker `hz2`, both binaries built remotely, RUSTFLAGS propagation proven via ELF-sha on `vmi1293453`.**
