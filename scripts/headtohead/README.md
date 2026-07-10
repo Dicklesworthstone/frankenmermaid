@@ -22,6 +22,9 @@ Useful flags: `--only <corpus_id>`, `--reps-scale 0.25` (fast smoke), `--skip-me
 
 Exit codes: `0` green · `1` an engine errored · `3` corpus drift · `4` dispersion gate failed.
 
+A gate failure (`4`) means *the environment was too noisy for that item*, not that the code regressed —
+re-run it. Never re-pin or retune an item to make a gate pass.
+
 ## What is pinned
 
 `pins.json` records everything that can move a number:
@@ -88,13 +91,26 @@ full bytes are compared once outside the timed region. A nondeterministic render
 
 ## Corpus
 
-12 items: flowcharts (10/100/500 nodes), wide layered DAGs (8×16, 12×24, 16×32 — up to 512 nodes /
-960 edges), a dense DAG (200 nodes / 790 edges), an SCC-heavy cyclic graph, and one each of sequence,
-class, state and ER. `flowchart` and `wide` reproduce `crates/fm-cli/benches/pipeline_bench.rs`'s
-generators byte for byte, so harness numbers stay comparable with the criterion history.
+13 items: flowcharts (10/100/500 nodes), wide layered DAGs (8×16, 12×24, 16×32 — up to 512 nodes /
+960 edges), a dense DAG (200 nodes / 790 edges), an SCC-heavy cyclic graph, one each of sequence,
+class, state and ER, and an **edit trace**. `flowchart` and `wide` reproduce
+`crates/fm-cli/benches/pipeline_bench.rs`'s generators byte for byte, so harness numbers stay
+comparable with the criterion history.
 
-**Not yet covered:** incremental edit traces (bd-1buv.1 scope). The comparator is single-shot render
-only. Re-render-after-edit is `bd-1buv.3`'s lane and needs a corpus of revision sequences.
+### Edit traces
+
+`edit_trace_60x20` is an editing session: 21 successive full documents, the edits cycling through
+appending a node, renaming a label, and adding an edge. **One timed sample renders all 21 revisions**,
+because that is what a live preview does — mermaid has no incremental path, so an editor calls
+`mermaid.render()` on every keystroke. The report prints the per-re-render cost, which is the number a
+user actually feels.
+
+Internally every corpus item is a trace; a single-shot item is just a one-revision one. That keeps one
+code path in both engines, and it is why adding traces left all 12 pre-existing corpus hashes
+byte-identical (joining a one-element array yields the element).
+
+Note this measures *full re-render* on both sides, which is the fair comparison. frankenmermaid's
+incremental-layout path is a separate lever (`bd-1buv.3`) and is not exercised here.
 
 ## Output
 

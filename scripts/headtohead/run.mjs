@@ -130,7 +130,7 @@ mkdirSync(outDir, { recursive: true });
 const items = CORPUS.filter((i) => !only || i.id === only);
 const corpusJson = items.map((i) => ({
   id: i.id,
-  text: corpus.get(i.id).text,
+  texts: corpus.get(i.id).texts,
   reps: Math.max(1, Math.round(i.reps_rs * repsScale)),
   warmup: Math.max(1, Math.round(i.warmup_rs * repsScale)),
 }));
@@ -197,6 +197,7 @@ for (const item of items) {
   }
   row.nodes = f.nodes;
   row.edges = f.edges;
+  row.revisions = f.revisions;
   row.fm_p50_ns = f.pipeline_ns.p50;
   row.fm_min_ns = f.pipeline_ns.min;
   row.fm_cv_pct = f.cv_pct;
@@ -235,6 +236,12 @@ for (const item of items) {
   row.speedup_lean = m.render_ns.p50 / f.pipeline_lean_ns.p50;
   row.bytes_ratio = m.output_bytes / f.output_bytes;
   row.bytes_ratio_lean = m.output_bytes / f.output_bytes_lean;
+  if (f.revisions > 1) {
+    // For an editing session the number that matters is the cost of one keystroke's re-render,
+    // not the cost of the whole trace.
+    row.fm_ns_per_revision = f.pipeline_ns.p50 / f.revisions;
+    row.mjs_ns_per_revision = m.render_ns.p50 / m.revisions;
+  }
   // Blocking on our side; advisory on mermaid's, where a 2.9 s/render item cannot afford enough
   // reps to tighten its dispersion and its variance is dwarfed by a 1000x ratio anyway.
   row.mad_gate = f.mad_pct <= MAD_GATE_PCT ? 'pass' : 'fail';
@@ -295,6 +302,9 @@ console.log('');
 if (summary.speedup) {
   console.log(`speedup vs mermaid ${PINS.mermaid.version} (p50):  min ${summary.speedup.min.toFixed(0)}x  median ${summary.speedup.median.toFixed(0)}x  max ${summary.speedup.max.toFixed(0)}x`);
   console.log(`speedup vs mermaid ${PINS.mermaid.version} (min):  min ${summary.speedup_min_estimator.min.toFixed(0)}x  median ${summary.speedup_min_estimator.median.toFixed(0)}x  max ${summary.speedup_min_estimator.max.toFixed(0)}x`);
+}
+for (const r of ok.filter((x) => x.revisions > 1)) {
+  console.log(`edit trace ${r.id}: ${r.revisions} revisions -- per re-render frankenmermaid ${ms(r.fm_ns_per_revision)} ms vs mermaid ${ms(r.mjs_ns_per_revision)} ms (a live preview redraws on every keystroke).`);
 }
 const leanSlow = ok.filter((r) => r.lean_slowdown > 1.05);
 if (leanSlow.length) {

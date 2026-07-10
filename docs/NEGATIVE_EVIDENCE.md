@@ -10667,3 +10667,29 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   `to_string_with_body`" or helper-extraction variants. A future attempt needs a genuinely different output
   contract, such as a non-contiguous rope/segmented SVG return type or a caller-provided write sink that avoids
   requiring one final contiguous `String`; otherwise the dominant raw-chunk-to-final copy remains.
+
+### Head-to-head harness: incremental edit traces (`bd-1buv.1` scope closure) — KEPT (2026-07-09)
+- **Agent:** cc_fm. **HEAD:** `aafe1c1`. Closes the one scope bullet the harness commit left open.
+- **What it measures:** `edit_trace_60x20` is a live-preview editing session — 21 successive full
+  documents, edits cycling through append-a-node, rename-a-label, add-an-edge. One timed sample renders
+  **all 21 revisions**, because that is what an editor does: mermaid has no incremental path, so a live
+  preview calls `mermaid.render()` on every keystroke. This is arguably the most realistic mermaid
+  workload there is, and it was the one workload class the corpus lacked.
+- **Design note:** every corpus item is internally a trace; a single-shot item is a one-revision trace.
+  One code path in both engines. Proof the refactor did not move the baseline: **all 12 pre-existing
+  corpus SHA-256 pins are byte-identical** after it (joining a one-element array yields the element).
+- **Validity:** every revision's SVG is validated on both sides, not just the last — a trace that
+  degrades into mermaid's error placeholder halfway through would otherwise look like a very fast render.
+- **GREEN RUN (2026-07-09, rev `aafe1c1`, 13/13 items pass the MAD gate, max MAD 1.4%):**
+  `edit_trace_60x20` frankenmermaid **4.278 ms** for the whole session vs mermaid **3516.8 ms** =
+  **822x** (800x by the min estimator). **Per re-render: 0.204 ms vs 167.5 ms.** mermaid spends ~1/6 of
+  a second redrawing after every keystroke on a 67-node flowchart; we spend a fifth of a millisecond.
+- **Whole-corpus standing at `aafe1c1`, all 13 green:** median **871x** by p50, **800x** by min; range
+  230x (`sequence_20`) to 4740x (`wide_16x32`, 512 nodes / 960 edges: 0.677 ms vs 3210.8 ms).
+- **The MAD gate proved itself:** the immediately preceding run failed on `state_40` (MAD 7.3%); a re-run
+  with no code change gave 1.0%. A gate failure means the environment was too noisy for that item, not
+  that the code regressed. **Do-not-retry note: never re-pin or retune an item to make a gate pass — the
+  correct response to exit 4 is to re-run.**
+- **Not covered (deliberate):** this measures *full re-render* on both sides, which is the fair
+  comparison. frankenmermaid's incremental-layout path is a distinct lever and belongs to `bd-1buv.3`;
+  exercising it here would compare our incremental path against mermaid's full render.

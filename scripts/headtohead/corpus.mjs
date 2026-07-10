@@ -93,16 +93,64 @@ function erDiagram(n) {
   return lines.join('\n');
 }
 
+/**
+ * An editing session: the successive full documents a live preview would re-render as a user types.
+ * This is the workload a mermaid user actually generates -- an editor calls `mermaid.render()` on
+ * every keystroke, because mermaid has no incremental path. Returns `revisions + 1` documents.
+ *
+ * The edits cycle through the three things people actually do: append a node and wire it up, rename
+ * a label, and add an edge between existing nodes.
+ */
+function editTrace(n, revisions) {
+  const nodes = [];
+  const edges = [];
+  for (let i = 0; i < n; i++) nodes.push(`  N${i}[Node ${i}]`);
+  for (let i = 0; i < n - 1; i++) edges.push(`  N${i}-->N${i + 1}`);
+  const document = () => ['flowchart LR', ...nodes, ...edges].join('\n');
+
+  const texts = [document()];
+  for (let r = 0; r < revisions; r++) {
+    switch (r % 3) {
+      case 0: {
+        // Next free index -- only every third revision appends, so `n + r` would skip ids.
+        const i = nodes.length;
+        nodes.push(`  N${i}[Node ${i}]`);
+        edges.push(`  N${i - 1}-->N${i}`);
+        break;
+      }
+      case 1: {
+        const i = r % nodes.length;
+        nodes[i] = `  N${i}[Renamed ${r}]`;
+        break;
+      }
+      default: {
+        const a = r % n;
+        const b = (r * 7 + 3) % n;
+        if (a !== b) edges.push(`  N${a}-->N${b}`);
+      }
+    }
+    texts.push(document());
+  }
+  return texts;
+}
+
+// Every generator returns an array of documents. A single-shot item is a one-revision trace, which
+// keeps one code path in both engines -- and keeps single-item hashes identical to before traces
+// existed, since joining a one-element array yields the element itself.
 const GENERATORS = {
-  flowchart: (p) => flowchart(p.n),
-  wide: (p) => wide(p.layers, p.width),
-  cyclic: (p) => cyclic(p.n, p.ring),
-  dense_dag: (p) => denseDag(p.n, p.fanout),
-  sequence: (p) => sequence(p.n),
-  class: (p) => classDiagram(p.n),
-  state: (p) => stateDiagram(p.n),
-  er: (p) => erDiagram(p.n),
+  flowchart: (p) => [flowchart(p.n)],
+  wide: (p) => [wide(p.layers, p.width)],
+  cyclic: (p) => [cyclic(p.n, p.ring)],
+  dense_dag: (p) => [denseDag(p.n, p.fanout)],
+  sequence: (p) => [sequence(p.n)],
+  class: (p) => [classDiagram(p.n)],
+  state: (p) => [stateDiagram(p.n)],
+  er: (p) => [erDiagram(p.n)],
+  edit_trace: (p) => editTrace(p.n, p.revisions),
 };
+
+/** Separator used to hash a multi-revision trace as one input. Must match `headtohead.rs`. */
+export const REVISION_SEP = '\n%%--revision--%%\n';
 
 // The fixed corpus. `reps_*` are per-engine iteration counts: mermaid is ~3 orders of
 // magnitude slower, so it gets fewer reps on the heavy items to keep a run under ~2 minutes.
@@ -120,24 +168,29 @@ export const CORPUS = [
   { id: 'class_50',             gen: 'class',     params: { n: 50 },                 reps_js: 15, warmup_js: 3, reps_rs: 100, warmup_rs: 10 },
   { id: 'state_40',             gen: 'state',     params: { n: 40 },                 reps_js: 15, warmup_js: 3, reps_rs: 100, warmup_rs: 10 },
   { id: 'er_40',                gen: 'er',        params: { n: 40 },                 reps_js: 15, warmup_js: 3, reps_rs: 100, warmup_rs: 10 },
+  // A live-preview editing session: 21 successive full documents. One "iteration" renders all 21,
+  // which is what an editor does as the user types -- mermaid has no incremental path.
+  { id: 'edit_trace_60x20',     gen: 'edit_trace', params: { n: 60, revisions: 20 }, reps_js: 3,  warmup_js: 1, reps_rs: 30,  warmup_rs: 3 },
 ];
 
 export function sha256(text) {
   return createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
+/** All documents for a corpus item, in order. Single-shot items yield a one-element array. */
 export function generate(item) {
   const gen = GENERATORS[item.gen];
   if (!gen) throw new Error(`unknown generator: ${item.gen}`);
   return gen(item.params);
 }
 
-/** Generate every corpus input and return `{id -> {text, sha256, bytes}}`. */
+/** Generate every corpus input and return `{id -> {texts, sha256, bytes}}`. */
 export function generateAll() {
   const out = new Map();
   for (const item of CORPUS) {
-    const text = generate(item);
-    out.set(item.id, { text, sha256: sha256(text), bytes: Buffer.byteLength(text, 'utf8') });
+    const texts = generate(item);
+    const joined = texts.join(REVISION_SEP);
+    out.set(item.id, { texts, sha256: sha256(joined), bytes: Buffer.byteLength(joined, 'utf8') });
   }
   return out;
 }

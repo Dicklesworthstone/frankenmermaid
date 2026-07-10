@@ -19,7 +19,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from 
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CORPUS, generate, sha256 } from './corpus.mjs';
+import { CORPUS, REVISION_SEP, generate, sha256 } from './corpus.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PINS = JSON.parse(readFileSync(join(HERE, 'pins.json'), 'utf8'));
@@ -169,17 +169,25 @@ function stats(samples) {
 
 // ---------------------------------------------------------------- in-page benchmark
 
-// Runs inside chromium. Returns timings + the final SVG so the driver can validate it.
-const PAGE_BENCH = `async ({ mmd, reps, warmup, tag }) => {
+// Runs inside chromium. One timed sample renders every revision of the item in order (a single-shot
+// item has exactly one revision), which is what a live preview does as the user edits. Returns the
+// timings plus every SVG so the driver can validate each one and sum the bytes.
+const PAGE_BENCH = `async ({ texts, reps, warmup, tag }) => {
   const m = window.mermaid;
-  const out = { times: [], svg: '', error: null };
+  const out = { times: [], svgs: [], error: null };
   try {
-    for (let i = 0; i < warmup; i++) await m.render(tag + '_w' + i, mmd);
+    for (let i = 0; i < warmup; i++) {
+      for (let k = 0; k < texts.length; k++) await m.render(tag + '_w' + i + '_' + k, texts[k]);
+    }
     for (let i = 0; i < reps; i++) {
       const t0 = performance.now();
-      const r = await m.render(tag + '_r' + i, mmd);
+      const svgs = [];
+      for (let k = 0; k < texts.length; k++) {
+        const r = await m.render(tag + '_r' + i + '_' + k, texts[k]);
+        svgs.push(r.svg);
+      }
       out.times.push(performance.now() - t0);
-      out.svg = r.svg;
+      out.svgs = svgs;
     }
   } catch (e) {
     out.error = String((e && e.message) || e);
@@ -239,12 +247,12 @@ try {
 
   const items = CORPUS.filter((i) => !only || i.id === only);
   for (const item of items) {
-    const mmd = generate(item);
+    const texts = generate(item);
     const reps = Math.max(1, Math.round(item.reps_js * repsScale));
     const warmup = Math.max(1, Math.round(item.warmup_js * repsScale));
     const t0 = Date.now();
 
-    const args = { mmd, reps, warmup, tag: item.id.replace(/[^a-z0-9]/gi, '') };
+    const args = { texts, reps, warmup, tag: item.id.replace(/[^a-z0-9]/gi, '') };
     const res = await cdp.send('Runtime.evaluate', {
       expression: `(${PAGE_BENCH})(${JSON.stringify(args)})`,
       awaitPromise: true,
@@ -253,7 +261,10 @@ try {
 
     if (res.exceptionDetails) throw new Error(`${item.id}: ${res.exceptionDetails.text}`);
     const out = res.result.value;
-    const err = out.error ?? validate(out.svg);
+    const joined = texts.join(REVISION_SEP);
+    // Every revision is validated, not just the last: a trace that silently degrades into mermaid's
+    // error placeholder halfway through would otherwise look like a very fast render.
+    const err = out.error ?? out.svgs.map(validate).find(Boolean) ?? (out.svgs.length === texts.length ? null : 'revision count mismatch');
     const record = {
       engine: 'mermaid-js',
       version,
@@ -261,8 +272,9 @@ try {
       bundle_sha256: bundleSha,
       security_level: securityLevel,
       id: item.id,
-      input_sha256: sha256(mmd),
-      input_bytes: Buffer.byteLength(mmd, 'utf8'),
+      revisions: texts.length,
+      input_sha256: sha256(joined),
+      input_bytes: Buffer.byteLength(joined, 'utf8'),
       wall_s: (Date.now() - t0) / 1000,
     };
     if (err) {
@@ -272,6 +284,7 @@ try {
       continue;
     }
     const ms = stats(out.times);
+    const outputBytes = out.svgs.reduce((a, s) => a + s.length, 0);
     console.log(JSON.stringify({
       ...record,
       status: 'ok',
@@ -283,10 +296,10 @@ try {
       ),
       cv_pct: Number(ms.cv_pct.toFixed(2)),
       mad_pct: Number(ms.mad_pct.toFixed(2)),
-      output_bytes: out.svg.length,
-      output_sha256: sha256(out.svg),
+      output_bytes: outputBytes,
+      output_sha256: sha256(out.svgs.join('')),
     }));
-    log(`ok   ${item.id}  p50=${ms.p50.toFixed(1)}ms mad=${ms.mad_pct.toFixed(1)}% bytes=${out.svg.length}`);
+    log(`ok   ${item.id}  p50=${ms.p50.toFixed(1)}ms mad=${ms.mad_pct.toFixed(1)}% bytes=${outputBytes}`);
   }
 } finally {
   try { cdp.close(); } catch { /* ignore */ }

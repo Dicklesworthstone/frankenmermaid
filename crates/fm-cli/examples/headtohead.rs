@@ -21,10 +21,16 @@ use sha2::{Digest, Sha256};
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// Separator used to hash a multi-revision trace as one input. Must match `corpus.mjs`.
+/// A single-shot item is a one-revision trace, so its joined form is just the document itself.
+const REVISION_SEP: &str = "\n%%--revision--%%\n";
+
 #[derive(Deserialize)]
 struct CorpusItem {
     id: String,
-    text: String,
+    /// Every document the item renders, in order. Length 1 for single-shot items; for an edit trace,
+    /// the successive full documents a live preview would re-render as the user types.
+    texts: Vec<String>,
     reps: usize,
     warmup: usize,
 }
@@ -57,6 +63,15 @@ fn full_pipeline(input: &str, cfg: &SvgRenderConfig) -> String {
     let parsed = parse(input);
     let layout = fm_layout::layout_diagram(&parsed.ir);
     render_svg_with_layout(&parsed.ir, &layout, cfg)
+}
+
+/// Render every revision of an item in order, exactly as `mermaid.render()` is called per keystroke.
+/// Returns the total output bytes so the caller can compare against the comparator's.
+fn render_all(texts: &[String], cfg: &SvgRenderConfig, sink: &mut Vec<String>) {
+    sink.clear();
+    for text in texts {
+        sink.push(full_pipeline(text, cfg));
+    }
 }
 
 struct Stats {
@@ -150,41 +165,63 @@ fn ns_json(s: &Stats) -> serde_json::Value {
 /// Batching is a *timing* device only: every iteration in a batch still renders the whole diagram.
 const MIN_SAMPLE_NS: u64 = 2_000_000;
 
-/// Time `reps` batched full-pipeline samples after `warmup` untimed ones, asserting byte-stable
-/// output across every iteration.
-fn measure(item: &CorpusItem, cfg: &SvgRenderConfig) -> Result<(Stats, String, usize), String> {
+/// The result of timing one corpus item: sample statistics, the batch factor used, the reference
+/// output of every revision, and their total byte count.
+struct Measured {
+    stats: Stats,
+    batch: usize,
+    reference: Vec<String>,
+    output_bytes: usize,
+}
+
+/// Time `reps` batched samples after `warmup` untimed ones. One sample renders *every revision* of
+/// the item in order, so a single-shot item measures one render and an edit trace measures the whole
+/// editing session. Output is checked for byte-stability across samples.
+fn measure(item: &CorpusItem, cfg: &SvgRenderConfig) -> Result<Measured, String> {
+    let mut scratch: Vec<String> = Vec::with_capacity(item.texts.len());
+
     let mut fastest_warmup = u64::MAX;
     for _ in 0..item.warmup.max(1) {
         let t0 = Instant::now();
-        std::hint::black_box(full_pipeline(&item.text, cfg));
+        render_all(&item.texts, cfg, &mut scratch);
+        std::hint::black_box(&scratch);
         fastest_warmup =
             fastest_warmup.min(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX));
     }
     let batch = usize::try_from(MIN_SAMPLE_NS / fastest_warmup.max(1))
         .unwrap_or(1)
         .max(1);
-    let reference = full_pipeline(&item.text, cfg);
+
+    let mut reference: Vec<String> = Vec::with_capacity(item.texts.len());
+    render_all(&item.texts, cfg, &mut reference);
+    let reference_len: usize = reference.iter().map(String::len).sum();
 
     let mut samples = Vec::with_capacity(item.reps);
     let mut stable = true;
     for _ in 0..item.reps {
         let t0 = Instant::now();
         for _ in 0..batch {
-            let svg = full_pipeline(&item.text, cfg);
+            render_all(&item.texts, cfg, &mut scratch);
             // Only an O(1) length check inside the timed region -- byte-comparing a 534 KB SVG per
             // iteration would inflate the measurement by several percent. The full byte comparison
             // happens once, outside the timing loop.
-            stable &= svg.len() == reference.len();
-            std::hint::black_box(&svg);
+            stable &= scratch.iter().map(String::len).sum::<usize>() == reference_len;
+            std::hint::black_box(&scratch);
         }
         let elapsed = u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX);
         samples.push(elapsed / batch as u64);
     }
 
-    if !stable || full_pipeline(&item.text, cfg) != reference {
+    render_all(&item.texts, cfg, &mut scratch);
+    if !stable || scratch != reference {
         return Err(format!("{}: nondeterministic SVG across renders", item.id));
     }
-    Ok((stats(samples), reference, batch))
+    Ok(Measured {
+        stats: stats(samples),
+        batch,
+        reference,
+        output_bytes: reference_len,
+    })
 }
 
 fn main() {
@@ -206,11 +243,17 @@ fn main() {
     let mut failed = false;
 
     for item in &items {
-        let parsed = parse(&item.text);
+        if item.texts.is_empty() {
+            failed = true;
+            eprintln!("[frankenmermaid] FAIL {}: no revisions", item.id);
+            continue;
+        }
+        // Node/edge counts describe the final revision, which is the largest one in an edit trace.
+        let parsed = parse(item.texts.last().expect("non-empty checked above"));
         let nodes = parsed.ir.nodes.len();
         let edges = parsed.ir.edges.len();
 
-        let (default_stats, default_svg, batch) = match measure(item, &default_cfg) {
+        let default_run = match measure(item, &default_cfg) {
             Ok(v) => v,
             Err(e) => {
                 failed = true;
@@ -226,7 +269,7 @@ fn main() {
         };
         // The lean profile is measured on the same corpus so the output-size claim and the cost of
         // reaching it are reported together.
-        let (lean_stats, lean_svg, _) = match measure(item, &lean_cfg) {
+        let lean_run = match measure(item, &lean_cfg) {
             Ok(v) => v,
             Err(e) => {
                 failed = true;
@@ -235,14 +278,23 @@ fn main() {
             }
         };
 
-        if !default_svg.starts_with("<svg") || !default_svg.ends_with("</svg>") {
+        let (default_stats, lean_stats, batch) =
+            (&default_run.stats, &lean_run.stats, default_run.batch);
+        if let Some(bad) = default_run
+            .reference
+            .iter()
+            .find(|svg| !svg.starts_with("<svg") || !svg.ends_with("</svg>"))
+        {
             failed = true;
             eprintln!(
-                "[frankenmermaid] FAIL {}: output is not a bare <svg> document",
-                item.id
+                "[frankenmermaid] FAIL {}: a revision's output is not a bare <svg> document ({} bytes)",
+                item.id,
+                bad.len()
             );
             continue;
         }
+
+        let joined_input = item.texts.join(REVISION_SEP);
 
         println!(
             "{}",
@@ -252,19 +304,20 @@ fn main() {
                 "status": "ok",
                 "warmup": item.warmup,
                 "batch": batch,
-                "input_sha256": sha256_hex(item.text.as_bytes()),
-                "input_bytes": item.text.len(),
+                "revisions": item.texts.len(),
+                "input_sha256": sha256_hex(joined_input.as_bytes()),
+                "input_bytes": joined_input.len(),
                 "nodes": nodes,
                 "edges": edges,
-                "pipeline_ns": ns_json(&default_stats),
+                "pipeline_ns": ns_json(default_stats),
                 "cv_pct": (default_stats.cv_pct * 100.0).round() / 100.0,
                 "mad_pct": (default_stats.mad_pct * 100.0).round() / 100.0,
-                "pipeline_lean_ns": ns_json(&lean_stats),
+                "pipeline_lean_ns": ns_json(lean_stats),
                 "lean_cv_pct": (lean_stats.cv_pct * 100.0).round() / 100.0,
                 "lean_mad_pct": (lean_stats.mad_pct * 100.0).round() / 100.0,
-                "output_bytes": default_svg.len(),
-                "output_bytes_lean": lean_svg.len(),
-                "output_sha256": sha256_hex(default_svg.as_bytes()),
+                "output_bytes": default_run.output_bytes,
+                "output_bytes_lean": lean_run.output_bytes,
+                "output_sha256": sha256_hex(default_run.reference.concat().as_bytes()),
             })
         );
         eprintln!(
@@ -272,8 +325,8 @@ fn main() {
             item.id,
             f64::from(u32::try_from(default_stats.p50 / 1000).unwrap_or(u32::MAX)) / 1000.0,
             default_stats.mad_pct,
-            default_svg.len(),
-            lean_svg.len(),
+            default_run.output_bytes,
+            lean_run.output_bytes,
         );
     }
 
