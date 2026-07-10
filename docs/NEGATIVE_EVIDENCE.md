@@ -10801,3 +10801,46 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   formatting, clippy, cargo check, and test-build clean.
 - **Verdict: KEPT.** This is a one-lever incremental-layout allocation cut with reproducible same-worker
   improvement above the 3% gate and unchanged topology-key behavior.
+
+### REJECTED: topology-stable incremental dependency-cache hit patch is flat/slower (2026-07-10)
+- **Agent:** cod_fm. **Lane:** fm-layout incremental edit rerender (`bd-1buv.3`). **Base:** `fbd150d`.
+  This stayed out of cc's render/lean-profile files and did not retry the mined render double-copy vein.
+- **Ledger-first check:** respected the closed crossing-count container family (dense position maps/Fenwick,
+  flat-array total_crossings tables, FxHashMap cyclic crossing count), the earlier thresholded barycenter keep,
+  the precomputed-adjacency barycenter rejection, and the already-kept endpoint hashing lever. This attempt was
+  a different primitive: memoized incremental relayout metadata reuse for topology-stable node edits.
+- **Profile basis:** release bench binaries with frame pointers/symbols preserved for attribution. Crossing
+  profile on `crossing_min/dense_dag/egraph/20` was still dominated by
+  `fm_layout::egraph_ordering::crossing_count` at **47.51%**, which is adjacent to ledger-closed container
+  shapes. Incremental profile on `single_node_label_edit/incremental/1000` showed the fresh residual pressure:
+  `hash_span_value` **10.30%**, `IncrementalLayoutEngine::layout_diagram_traced_with_config_and_guardrails`
+  **9.06%**, `_int_malloc` **8.31%**, `dependency_graph_cache_key` **7.81%**,
+  `hash_endpoint_value` **7.31%**, `MermaidDiagramIr::clone` **4.54%**, `malloc_consolidate` **4.16%**,
+  `compute_node_sizes` **4.15%**. `perf stat` confirmed high incremental memory traffic:
+  `single_node_label_edit/incremental/1000` had **1.47B cache refs / 164.95M misses / 11.24% miss rate**;
+  `five_node_cluster_edit/incremental/1000` had **1.42B refs / 159.05M misses / 11.18% miss rate**.
+- **Lever tested and reverted:** for topology-stable `NodeChanged` edits, skip the generic
+  `track_dependency_graph_query(ir)` hit path, derive dirty nodes directly from edits, record a synthetic
+  dependency-graph cache hit, and patch the cached IR in place for unchanged label IDs instead of cloning the
+  whole `MermaidDiagramIr`. Behavior guard tests covered label-text changes versus node-id relabels while the
+  candidate was under test.
+- **Same-worker Criterion A/B:** ORIG from a fresh `git archive HEAD` snapshot at `fbd150d`, candidate from the
+  edited checkout, both built with `cargo bench -p fm-layout --bench incremental_layout --profile release
+  --no-run` and run on the same host with `--warm-up-time 1 --measurement-time 10 --sample-size 30 --noplot
+  --discard-baseline`.
+  - Final in-place patch candidate, `single_node_label_edit/incremental/1000`: candidate
+    **[1.0290, 1.0340, 1.0388] ms**, ORIG **[1.0270, 1.0340, 1.0431] ms**. Ratio: **1.000x**, flat.
+  - Final in-place patch candidate, `five_node_cluster_edit/incremental/1000`: candidate
+    **[1.0385, 1.0459, 1.0547] ms**, ORIG **[1.0331, 1.0369, 1.0418] ms**. Ratio:
+    **0.991x**, **0.87% slower** by means.
+  - The earlier skip-only variant also failed to clear the keep gate on longer runs:
+    `single_node_label_edit/incremental/1000` candidate **1.0259 ms** vs ORIG **1.0245 ms** (0.14% slower);
+    `five_node_cluster_edit/incremental/1000` candidate **1.0414 ms** vs ORIG **1.0447 ms** (0.32% faster).
+- **Verdict: REJECTED and code reverted.** The generic dependency-query hit is not the dominant cost after the
+  endpoint-hash keep; edge routing/node sizing/layout object churn swamp the small cache-hit bookkeeping savings
+  at the current 1000-node edit rows.
+- **Do-not-retry note:** do not retry this topology-stable dependency-cache hit patch shape (skip
+  `track_dependency_graph_query`, synthetic dependency-graph hit recording, or unchanged-label cached-IR patch)
+  on `incremental_layout` 1000-node label-edit rows unless a future profile shows that query/clone path as a
+  top-2 incremental hotspot after edge path construction and node-size recomputation are separately controlled,
+  or a new workload changes the per-rerender edit cardinality enough to predict a >3% direct A/B win.
