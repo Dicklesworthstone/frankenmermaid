@@ -12012,3 +12012,28 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   identical-behavior null rows quantify worker drift IN-experiment — the cheapest same-machine control available
   when rch cannot pin a worker.
 - **Evidence:** `.benchmarks/obstacle_index_work_gate_WIN.md`.
+
+<!-- cc_fm-bk-dense-lookup-WIN -->
+### WIN: Brandes-Köpf dense node-rank/position lookup — Sugiyama layout ~1.10x, byte-identical (2026-07-10)
+- **Profile-first.** `perf --call-graph=dwarf` on `cyclic_scc_100`: `layout_diagram_sugiyama_traced_with_config`
+  11.17% self-time, resolving (inlined) to `brandes_kopf_secondary_coords` -> `bk_vertical_alignment` ->
+  `bk_upper_neighbours` with **`BTreeMap<usize,usize>::get` ~= 3.76% of the whole pipeline** in the 4-pass
+  alignment inner loop (two B-tree probes per adjacency edge x 4 directions). Same anti-pattern as the certified
+  barycenter dense-rank win (3.591x), on a sibling function.
+- **Lever (one):** build `dense_node_rank: Vec<usize>` (= `ranks.get(&v).unwrap_or(0)`) and `pos_of: Vec<usize>`
+  (= node's per-rank position, `BK_POS_ABSENT` sentinel where the old `pos_map.get` returned None) ONCE in
+  `brandes_kopf_secondary_coords`; index them O(1) in `bk_vertical_alignment`/`bk_upper_neighbours` instead of
+  probing the B-trees. Eliminates the per-rank `rank_pos_maps: BTreeMap<_,BTreeMap<_,_>>` build; the adjacent-rank
+  existence guard becomes `ordering_by_rank.contains_key`.
+- **Byte-identical, verified by the layout goldens** (BK coords -> node positions, so any change moves output):
+  golden_layout 2/2, conformance green, 439 fm-layout tests. The one subtlety (old `Some`-guard filtered the
+  `adjacent_rank==0` + unranked-node case) preserved by the `pos_of[n] != BK_POS_ABSENT` sentinel. fmt clean,
+  ubs 160->161 (+1 `!=` false positive).
+- **Measurement (new `layout_sugiyama/scc` bench, same-worker A/B, gate on median):** cand vs base
+  (`git show HEAD:lib.rs>lib.rs`). rch can't pin a worker, so retried until BOTH arms hit the same worker.
+  Two independent same-worker pairs on `hz2`: (1) cand 196.85us [191.64,203.88] vs base 220.35us [215.20,225.66]
+  = **0.893x (1.12x)**; (2) cand 198.96us [195.12,202.50] vs base 214.37us [211.07,218.20] = **0.928x (1.08x)**.
+  Both agree (~1.10x), CIs non-overlapping, above the ~1% harness floor. A first cross-worker run read 0.73x
+  (ovh-a faster than hz2) -- discarded; same-worker matching is the honest read.
+- **Scope:** every Sugiyama-routed diagram (cyclic / back-edge graphs) runs BK; neutral on Tree flowcharts.
+  crates/fm-layout is peer-free (cod on rendering). Evidence: `.benchmarks/bk_dense_lookup_WIN.md`.

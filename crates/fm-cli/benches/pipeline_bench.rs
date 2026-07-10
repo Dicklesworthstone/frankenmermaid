@@ -339,6 +339,41 @@ fn bench_layout_dense(c: &mut Criterion) {
     group.finish();
 }
 
+/// Cyclic SCC graph: rings of `ring` nodes each fully cyclic, chained forward — the shape that routes to
+/// Sugiyama (cycles ⇒ `detect_cycle_components`), so `layout_diagram` runs the full Brandes-Köpf coordinate
+/// assignment. Mirrors the corpus `cyclic_scc_100`.
+fn gen_cyclic_scc(node_count: usize, ring: usize) -> String {
+    let mut lines = vec![String::from("flowchart TD")];
+    for i in 0..node_count {
+        lines.push(format!("  C{i}[Node {i}]"));
+    }
+    for i in 0..node_count {
+        let ring_start = (i / ring) * ring;
+        let next = ring_start + ((i - ring_start + 1) % ring);
+        if next < node_count {
+            lines.push(format!("  C{i}-->C{next}"));
+        }
+        if i + ring < node_count {
+            lines.push(format!("  C{i}-->C{}", i + ring));
+        }
+    }
+    lines.join("\n")
+}
+
+/// Layout of cyclic-SCC graphs — the Sugiyama path, exercising Brandes-Köpf coordinate assignment (the
+/// `bk_vertical_alignment` dense-lookup lever). `scc_100` mirrors the corpus `cyclic_scc_100`.
+fn bench_layout_sugiyama(c: &mut Criterion) {
+    let mut group = c.benchmark_group("layout_sugiyama");
+    for (label, n) in [("scc_100", 100_usize), ("scc_300", 300), ("scc_600", 600)] {
+        let input = gen_cyclic_scc(n, 5);
+        let parsed = fm_parser::parse(&input);
+        group.bench_with_input(BenchmarkId::new("scc", label), &parsed.ir, |b, ir| {
+            b.iter(|| fm_layout::layout_diagram(ir));
+        });
+    }
+    group.finish();
+}
+
 fn bench_layout_wide(c: &mut Criterion) {
     let mut group = c.benchmark_group("layout_wide");
 
@@ -826,6 +861,7 @@ criterion_group!(
     bench_layout,
     bench_layout_wide,
     bench_layout_dense,
+    bench_layout_sugiyama,
     bench_full_pipeline_wide,
     bench_full_pipeline_mindmap,
     bench_render_svg,

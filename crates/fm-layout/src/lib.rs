@@ -10308,10 +10308,14 @@ fn crossing_refinement(
 
 /// For each node, collect its neighbours in the specified adjacent rank.
 /// Uses pre-built adjacency for O(1) neighbour lookup per node.
+/// Sentinel in [`bk_pos_of`]: node is not present in any rank ordering (so the original per-rank
+/// `pos_map.get(&n)` returned `None`). `usize::MAX` can never be a real position (bounded by rank width).
+const BK_POS_ABSENT: usize = usize::MAX;
+
 fn bk_upper_neighbours(
     adjacency: &[BTreeSet<usize>],
-    ranks: &BTreeMap<usize, usize>,
-    pos_map: &BTreeMap<usize, usize>,
+    dense_node_rank: &[usize],
+    pos_of: &[usize],
     node_index: usize,
     node_rank: usize,
     upper: bool,
@@ -10328,10 +10332,16 @@ fn bk_upper_neighbours(
     let mut neighbours = Vec::new();
     if let Some(nodes) = adjacency.get(node_index) {
         for &n in nodes {
-            if ranks.get(&n).copied().unwrap_or(0) == adjacent_rank
-                && let Some(&pos) = pos_map.get(&n)
-            {
-                neighbours.push((n, pos));
+            // `dense_node_rank[n]` == the old `ranks.get(&n).copied().unwrap_or(0)`; `pos_of[n]` == the old
+            // `pos_map.get(&n)` for `n`'s rank, or `BK_POS_ABSENT` where that returned `None`. The rank check
+            // plus the sentinel guard reproduce the old `rank == adjacent_rank && Some(pos)` condition exactly
+            // (including the `adjacent_rank == 0` + unranked-node case, where the rank test passed but the
+            // per-rank `pos_map` had no entry).
+            if dense_node_rank.get(n).copied().unwrap_or(0) == adjacent_rank {
+                let pos = pos_of.get(n).copied().unwrap_or(BK_POS_ABSENT);
+                if pos != BK_POS_ABSENT {
+                    neighbours.push((n, pos));
+                }
             }
         }
     }
@@ -10347,11 +10357,12 @@ fn bk_upper_neighbours(
 /// - `root[v]` is the root of the block containing v.
 /// - `align[v]` is the next node in the block chain; `align[v] == v` at the terminal.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn bk_vertical_alignment(
     n: usize,
     adjacency: &[BTreeSet<usize>],
-    rank_pos_maps: &BTreeMap<usize, BTreeMap<usize, usize>>,
-    ranks: &BTreeMap<usize, usize>,
+    dense_node_rank: &[usize],
+    pos_of: &[usize],
     ordering_by_rank: &BTreeMap<usize, Vec<usize>>,
     ordered_ranks: &[usize],
     top_to_bottom: bool,
@@ -10382,7 +10393,7 @@ fn bk_vertical_alignment(
         };
 
         for v in node_iter {
-            let v_rank = ranks.get(&v).copied().unwrap_or(0);
+            let v_rank = dense_node_rank.get(v).copied().unwrap_or(0);
             let adjacent_rank = if top_to_bottom {
                 if v_rank == 0 {
                     continue;
@@ -10392,12 +10403,14 @@ fn bk_vertical_alignment(
                 v_rank + 1
             };
 
-            let Some(pos_map) = rank_pos_maps.get(&adjacent_rank) else {
+            // Existence guard for `adjacent_rank`, equivalent to the old `rank_pos_maps.get(&adjacent_rank)`
+            // (both `rank_pos_maps` and `ordering_by_rank` are keyed by the same set of ranks).
+            if !ordering_by_rank.contains_key(&adjacent_rank) {
                 continue;
-            };
+            }
 
             let neighbours =
-                bk_upper_neighbours(adjacency, ranks, pos_map, v, v_rank, top_to_bottom);
+                bk_upper_neighbours(adjacency, dense_node_rank, pos_of, v, v_rank, top_to_bottom);
 
             if neighbours.is_empty() {
                 continue;
@@ -10630,15 +10643,25 @@ fn brandes_kopf_secondary_coords(
         }
     }
 
-    // Pre-build position maps for each rank.
-    let mut rank_pos_maps: BTreeMap<usize, BTreeMap<usize, usize>> = BTreeMap::new();
-    for (&rank, nodes) in ordering_by_rank {
-        let pos_map: BTreeMap<usize, usize> = nodes
-            .iter()
-            .enumerate()
-            .map(|(pos, &node)| (node, pos))
-            .collect();
-        rank_pos_maps.insert(rank, pos_map);
+    // Dense node-indexed lookups, built ONCE and reused by all four alignment passes, replacing the
+    // per-neighbour `ranks: &BTreeMap` and per-rank `pos_map: &BTreeMap` probes that dominated the BK
+    // vertical-alignment inner loop (measured `BTreeMap<usize,usize>::get` ≈ 3.76% of the `cyclic_scc_100`
+    // pipeline). Same primitive as the certified barycenter dense-rank win. `dense_node_rank[v]` reproduces
+    // `ranks.get(&v).copied().unwrap_or(0)`; `pos_of[v]` reproduces the position `v` had in its rank's
+    // `pos_map`, or `BK_POS_ABSENT` where that map had no entry (node absent from every rank ordering).
+    let mut dense_node_rank = vec![0_usize; n];
+    for (&node, &rank) in ranks {
+        if let Some(slot) = dense_node_rank.get_mut(node) {
+            *slot = rank;
+        }
+    }
+    let mut pos_of = vec![BK_POS_ABSENT; n];
+    for nodes in ordering_by_rank.values() {
+        for (pos, &node) in nodes.iter().enumerate() {
+            if let Some(slot) = pos_of.get_mut(node) {
+                *slot = pos;
+            }
+        }
     }
 
     // Four alignment passes: (top_to_bottom, left_to_right).
@@ -10655,8 +10678,8 @@ fn brandes_kopf_secondary_coords(
         let (root, align) = bk_vertical_alignment(
             n,
             &adjacency,
-            &rank_pos_maps,
-            ranks,
+            &dense_node_rank,
+            &pos_of,
             ordering_by_rank,
             &ordered_ranks,
             top_to_bottom,
