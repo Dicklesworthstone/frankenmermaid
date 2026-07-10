@@ -146,6 +146,30 @@ magnitude ahead of upstream.
 
 ---
 
+## Decision requested
+
+Nothing below has been implemented. Pick one; I'll execute whichever, and none of them is urgent.
+
+| | Option | Effect | Cost | Goldens |
+|---|---|---|---|---|
+| **A** | **Keep `A11yConfig::full()` everywhere** *(recommended, and the status quo)* | Default output keeps per-element `role` / `aria-label` / `tabindex` / `<title>` | Accessibility costs the default **1.55%** of pipeline instructions | none |
+| **B** | Keep `full()` for CLI + library; default the **WASM/browser bundle** to lean | −27.7% bytes exactly where they cross the wire | Browser consumers lose per-element a11y; CLI/library keep it | none — goldens render through the CLI/library default |
+| **C** | Flip the global default to `A11yConfig::none()` | −27.7% bytes everywhere, and ~1.55% faster | Per-element a11y gone from all output; any consumer of `role`/`<title>` breaks | **37 re-blessed** |
+| **D** | Uniform bare edges in *both* profiles (the old 2026-06-28 recommendation) | ~19% render on the edge path | Permanently removes the feature from **both** profiles | 37 re-blessed |
+
+I recommend **A**, and would accept **B** without argument. I recommend **against C** and **strongly against D**.
+
+The one thing worth being explicit about: **the engineering case for lean is now genuinely strong** — it is
+contract-matching, cheaper, and smaller. My recommendation to keep `full()` rests on a *product* judgement (that
+per-element accessibility is a feature worth 1.55%), not on an engineering one. If you disagree with that
+judgement, C is a defensible call and I will not have been able to argue you out of it on the numbers.
+
+**What is NOT part of this decision:** raising or removing `POST_PASS_MAX_SVG_BYTES = 100_000`. That gate is
+profile-dependent (see below) and changing it alters which diagrams get their CSS stripped ⇒ output bytes change
+⇒ 37 goldens. It is a separate memo.
+
+---
+
 ## The two ⚠ rows: a byte-size gate the lean profile silently inverts
 
 Profiling `wide_8x16` under both profiles (symbolized release, `perf record --call-graph=dwarf`, self-time
