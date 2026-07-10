@@ -63,6 +63,12 @@ harness = false
 
 # Same-binary A/B for the barycenter sweep (bd-9w78). The hand-rolled paired sampler alternates
 # both arms within each sample; sequential Criterion group members would not cancel drift.
+# A/A null-control calibration sweep. Separate file, separate owner (cc_fm) from barycenter_sweep.
+[[bench]]
+name = "harness_calibration"
+harness = false
+required-features = ["bench-internals"]
+
 [[bench]]
 name = "barycenter_sweep"
 harness = false

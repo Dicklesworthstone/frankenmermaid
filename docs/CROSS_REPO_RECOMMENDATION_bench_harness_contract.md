@@ -150,6 +150,60 @@ Exactly 2× the bench wall time. That is the entire price, and it buys you the r
 
 ---
 
+---
+
+## 3. Calibrate the floor — and then gate on the right statistic
+
+The null control only helps if you know what its numbers *mean*. So we calibrated it: a sweep of
+`min_sample ∈ {2, 10, 40} ms` × `min_of ∈ {1, 3}` inner replicates, **A/A only**, configurations interleaved
+round-robin (a *sequential* config sweep confounds the configuration with time-varying machine load — the same
+mistake arm-interleaving exists to prevent, one level up).
+
+Worker `vmi1227854`, 41 rounds, 15.7 s total:
+
+| min_sample | min_of | null A/A ratio | null cv | null MAD | systematic floor |
+|---:|---:|---:|---:|---:|---:|
+| 2 ms | 1 | 0.9950× | 15.65% | 2.76% | 0.50% |
+| **2 ms** | **3** | **1.0013×** | 11.98% | 3.56% | **0.13%** |
+| 10 ms | 1 | 0.9934× | 14.02% | 3.58% | 0.66% |
+| 40 ms | 1 | 0.9925× | 11.63% | 4.40% | 0.75% |
+| 40 ms | 3 | 1.0011× | 14.03% | 6.84% | 0.11% |
+
+**Two results that will save you a week:**
+
+1. **No in-harness knob moves `cv` below ~12% on a loaded, unpinnable worker.** A 20× longer sample moves it from
+   15.65% to 11.63%. Inner `min-of-k` does not help consistently. If your remote-build helper picks workers
+   non-deterministically, a `cv < 5` gate is unreachable *by construction* — and a gate you cannot meet either
+   blocks every claim or quietly invites statistic-shopping.
+2. **The A/A null *median* is tight regardless — 0.11%–0.75% from 1.000.** One-sided scheduler outliers inflate
+   `cv` and `MAD` **without biasing the median of per-round ratios**.
+
+**So gate on the floor, not on `cv`.** The smallest effect the harness can resolve is the null median's departure
+from `1.000` (~1% here). Require the claim to exceed that by a wide margin; **report** `cv` rather than gating on
+it, and note whether the worker happened to be quiet. Our two certified wins clear the worst-case 0.75% floor by
+~40× and ~350×.
+
+---
+
+## What a repo must do to adopt this (the whole checklist)
+
+1. **Add `sha2` as a dev-dependency** and print `self_identity()` as the first line of every bench `main`.
+   *(~20 lines, ~1 ms, zero measurement impact.)*
+2. **Factor the measured loop into `paired(arm_a, arm_b) -> (p50_a, p50_b, ratio_p50, cv, mad, checksum)`**, with
+   the two arms timed back-to-back inside one round and the order alternating per round. Statistic = **median of
+   per-round ratios**; `cv`/`MAD` taken over those ratios.
+3. **Call it twice per input:** `paired(base, base)` then `paired(base, cand)`. Print both rows, always.
+   *(Cost: exactly 2× bench wall time.)*
+4. **Calibrate `batch` off the faster arm** so the shorter sample still clears the timer floor.
+5. **`black_box` inputs and results**, fold results into a printed checksum.
+6. **Bracket the run with a source hash, and re-check it at `git add` time.** The window between "after the last
+   run" and "at commit" is where a concurrent editor slips in; it cost us a KEEP row.
+7. **Calibrate the floor once per machine class** (copy `harness_calibration.rs`), then **gate on the null
+   median's departure from 1.000**, not on `cv`.
+8. **Profile-verify non-zero self-time** in the function under test before honoring or writing any REJECT.
+
+Steps 1–3 are the minimum viable contract. Steps 6–8 are what actually caught our errors.
+
 ## Suggested adoption order
 
 1. **Self-reporting ELF sha256** — 20 lines, no measurement impact, immediate provenance. Do this first.

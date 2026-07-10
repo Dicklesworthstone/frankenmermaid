@@ -11613,3 +11613,46 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
 - **Mechanism / retry:** with the worker confound removed, the 2 ms faster-arm calibration floor is too short;
   one scheduler interrupt dominates a sample. **REJECT THE SAMPLE, NOT THE LEVER.** Keep production and paired
   logic unchanged, raise only `MIN_SAMPLE` to 20 ms, and require same-invocation A/A and A/B CV both `<5%`.
+
+<!-- cc_fm-harness-calibration-null-floor -->
+### CALIBRATION: the `cv < 5` gate is UNREACHABLE on a shared worker; the A/A null MEDIAN is the real floor (0.11-0.75%) (2026-07-10)
+- **New bench, separate file, separate owner:** `crates/fm-layout/benches/harness_calibration.rs` (cc_fm). It
+  sweeps the paired sampler's **A/A null control** — the same arm on both sides, so every deviation is the
+  harness, never a lever — across `min_sample ∈ {2, 10, 40} ms` × `min_of ∈ {1, 3}` inner replicates. Nothing in
+  `barycenter_sweep.rs` or `lib.rs` was touched; those are the peer's flat-CSR lane.
+- **First sweep was CONFOUNDED and I corrected it.** Running configurations sequentially conflates the
+  configuration with time-varying machine load: `min_of=3` appeared to *help* at 2 ms and *hurt* at 10/40 ms,
+  which is incoherent as a config effect. Configurations are now **interleaved round-robin** with a rotating
+  start, exactly as arms are — the same error the arm-interleaving rule exists to prevent, one level up.
+- **Result** — worker `vmi1227854`, bench ELF sha256
+  `552f62016fca5f389d0e7b043596754625dc4e8bd0dc0c755de21c76cec7241e` (793,880 bytes), 41 rounds, source sha256
+  verified unchanged across the run, `total_wall=15.7 s`:
+
+  | min_sample | min_of | batch | null A/A ratio | null cv | null MAD | **systematic floor** |
+  |---:|---:|---:|---:|---:|---:|---:|
+  | 2 ms | 1 | 4 | 0.9950x | 15.65% | 2.76% | 0.50% |
+  | 2 ms | 3 | 4 | 1.0013x | 11.98% | 3.56% | **0.13%** |
+  | 10 ms | 1 | 22 | 0.9934x | 14.02% | 3.58% | 0.66% |
+  | 10 ms | 3 | 22 | 0.9943x | 16.26% | 4.29% | 0.57% |
+  | 40 ms | 1 | 101 | 0.9925x | 11.63% | 4.40% | 0.75% |
+  | 40 ms | 3 | 101 | 1.0011x | 14.03% | 6.84% | **0.11%** |
+
+- **FINDING 1: no in-harness knob moves `cv` below ~12% on a loaded, unpinnable worker.** A **20x** longer sample
+  (2 ms -> 40 ms) moves `cv` from 15.65% to 11.63%. Inner `min-of-3` does not help consistently either. The
+  preemption-fraction hypothesis is therefore **wrong**: `cv` of per-round ratios is not a sample-duration artifact.
+- **FINDING 2: the A/A null MEDIAN is tight in every configuration — 0.11% to 0.75% from 1.000.** One-sided
+  scheduler outliers inflate `cv` (and, at `min_of=3`, `MAD`) **without biasing the median of per-round ratios**.
+- **CONSEQUENCE — the gate is wrong, not the harness.** `cv < 5` is unreachable here by construction, so gating on
+  it either blocks every claim or silently invites statistic-shopping. **The resolution limit of this harness is
+  its systematic floor: ~1%.** Report `cv`; gate on the null median's departure from 1.000, and require the claim
+  to exceed it by a wide margin.
+  - Recalibrating the record: cod's dense-rank **1.310x** is ~40x the 0.75% worst-case floor. The single-pass
+    **3.669x** is ~350x it. Both survive comfortably. Nothing sub-1% has ever been claimed in this lane.
+  - **`cv < 5` IS achievable — when the worker happens to be quiet** (the certified rows read 0.94% / 0.57%).
+    `rch` cannot pin a worker, so quietness is luck. **That is precisely why the null must be emitted in the same
+    invocation as the claim:** it tells you whether *this run* can decide *this lever*.
+- **Cheapest fit-for-purpose config: `min_sample = 2 ms`, `min_of = 3`** — floor 0.13%, and the whole 6-config
+  sweep costs 15.7 s. Longer samples buy nothing.
+- **What is NOT a knob:** `rch` cannot pin a worker (`RCH_WORKER` is ignored; `RCH-E301` refuses non-compilation
+  commands). Quiescing the tree is a coordination act, not a code change.
+- **Adoption:** `docs/CROSS_REPO_RECOMMENDATION_bench_harness_contract.md` states plainly what a repo must do.
