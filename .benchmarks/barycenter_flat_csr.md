@@ -758,3 +758,41 @@ Retained exact-ELF profiles:
 meets the strict dual-CV certification gate. Retry condition: unchanged production and bench source hashes, a
 fresh fail-closed RCH worker/invocation, the same micro-interleaved substrate, and a qualifying row with both
 A/A and A/B `cv_pct < 5%` plus a median effect above the 3% ratchet.
+
+## Packed crossing counter Attempt 3: clean timing, exact ELF lost before profiling
+
+This unchanged-source retry produced decisive, low-dispersion wins on `cyclic_scc_100` and
+`cyclic_scc_300`, but RCH's custom-target artifact retrieval raced a target-directory reap immediately after
+the binary exited. The process self-identity proves which non-empty ELF ran, but the path no longer existed for
+independent SSH verification or exact-ELF profiling. Under the ledger-integrity rule this run is rejected as a
+certification artifact, not accepted by borrowing self-time from another build.
+
+### Provenance and timing
+
+- Production/bench SHA-256 remained `84c9ffaf...9084cb8` / `28332ab4...14a47f`.
+- Worker: `hz2` (`root@178.104.77.29`); one fail-closed RCH invocation and the unchanged same-routine,
+  per-invocation interleaved A/A+A/B substrate.
+- The measured process self-reported a non-empty **826,016-byte** ELF SHA-256
+  **`d0b5daa1d88ae0ead9100e329b49263b2a475bea4f6948f85b92865c946d01e9`** at
+  `.rch-target-hz2-pool-100fc87c1da894108803e570d2fc138d/release/deps/barycenter_sweep-ccd51ba108b95431`.
+
+| input | batch | A/A ratio | A/A `cv_pct` | A/A MAD | flat-CSR p50 | packed-count p50 | median paired A/B | A/B `cv_pct` | A/B MAD | timing gate |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| `cyclic_scc_100` | 1635 | 0.9997x | 0.51% | 0.24% | 30.003 us | 27.712 us | **1.078x** | 0.72% | 0.28% | pass |
+| `cyclic_scc_300` | 1040 | 0.9989x | 0.83% | 0.57% | 134.650 us | 127.150 us | **1.058x** | 0.45% | 0.26% | pass |
+| `cyclic_scc_800` | 413 | 0.9999x | 0.41% | 0.19% | 509.897 us | 497.704 us | 1.020x | 0.54% | 0.40% | below 3% ratchet |
+
+### Artifact/profile integrity failure
+
+- RCH completed the remote command with exit 0, then failed all three custom-target retrieval attempts because
+  the exact target directory had disappeared (`rsync` exit 23, `change_dir ... No such file or directory`).
+  A subsequent SSH search confirmed the executable was gone. No local fallback or local artifact was used.
+- Therefore current-binary per-arm self-time is **not recordable**. For dead-code diagnosis only, the
+  source-identical Attempt 2 ELF had already shown ORIG `total_crossings` **24.56% self-time** and CAND
+  `total_crossings_packed` **10.59%** plus `packed_crossing_edge` **24.50%**, all nonzero. Those values prove
+  the unchanged harness reaches both functions, but they are deliberately **not** substituted for this ELF's
+  required exact profile.
+
+**REJECT THIS ARTIFACT; RETRY THE IDENTICAL LEVER.** Retry condition: preserve and independently hash the exact
+ELF while the paired run is still executing, then collect zero-lost-sample per-arm profiles from that retained
+copy. The timing effect remains open; no performance conclusion is taken from an unprofileable binary.

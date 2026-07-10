@@ -11848,6 +11848,25 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   Sugiyama row has A/A and A/B `cv_pct < 5%` and clears the 3% ratchet. This condition reopens an identical-source
   retry without reopening any fresh-per-call crossing-table family.
 
+<!-- cod_fm-packed-crossing-attempt-3-artifact -->
+### REJECT ARTIFACT / RETRY OPEN: clean packed-crossing timing ELF vanished before exact profiling (2026-07-10)
+- **Exact provenance:** unchanged production/bench SHA-256 `84c9ffaf...9084cb8` / `28332ab4...14a47f`;
+  `hz2` (`root@178.104.77.29`); one fail-closed RCH invocation, one binary, per-invocation interleaved A/A+A/B,
+  black-boxed input/full result. The process self-reported a non-empty **826,016-byte** ELF SHA-256
+  **`d0b5daa1d88ae0ead9100e329b49263b2a475bea4f6948f85b92865c946d01e9`**.
+- **Numbers:** SCC-100 flat/packed **30.003/27.712 us**, **1.078x**, A/A CV **0.51%**, A/B CV **0.72%**;
+  SCC-300 **134.650/127.150 us**, **1.058x**, A/A CV **0.83%**, A/B CV **0.45%**; SCC-800
+  **509.897/497.704 us**, 1.020x, A/A CV **0.41%**, A/B CV **0.54%**. The first two clear the 3% ratchet.
+- **Why REJECT:** immediately after exit, RCH's custom-target retrieval failed three times (`rsync` exit 23:
+  target directory no longer exists); SSH confirmed the exact ELF was gone. Its own self-time is therefore
+  **not recordable**, so ledger integrity forbids a keep. The source-identical Attempt 2 ELF had already proved
+  the unchanged harness executes ORIG `total_crossings` at **24.56% self-time** and CAND
+  `total_crossings_packed` at **10.59%** plus `packed_crossing_edge` at **24.50%**, but those nonzero values are
+  diagnostic only and are not misrepresented as this binary's profile.
+- **Retry condition:** preserve and SHA-verify the exact ELF while the next unchanged paired run is still live,
+  then profile that retained copy per arm with zero lost samples. This rejects an incomplete artifact, not the
+  primitive and not the clean timing effect.
+
 <!-- cc_fm-isa-v3-render-measured-null -->
 ### MEASURED NULL: x86-64-v3 (AVX2/BMI2/FMA) is neutral on the render path — frankenmermaid does NOT vectorize like frankenscipy (2026-07-10)
 - **Correcting my own framing:** the earlier ISA entry called the v2-vs-v3 measurement "blocked on the disk
