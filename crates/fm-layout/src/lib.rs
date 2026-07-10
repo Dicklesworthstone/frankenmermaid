@@ -10120,8 +10120,7 @@ fn crossing_minimization_sweeps<const DENSE_RANK: bool>(
             let upper_rank = rank_keys[index - 1];
             reorder_rank_by_barycenter::<DENSE_RANK>(
                 ir,
-                ranks,
-                dense_node_rank,
+                (ranks, dense_node_rank),
                 &mut ordering_by_rank,
                 rank,
                 upper_rank,
@@ -10135,8 +10134,7 @@ fn crossing_minimization_sweeps<const DENSE_RANK: bool>(
             let lower_rank = rank_keys[index + 1];
             reorder_rank_by_barycenter::<DENSE_RANK>(
                 ir,
-                ranks,
-                dense_node_rank,
+                (ranks, dense_node_rank),
                 &mut ordering_by_rank,
                 rank,
                 lower_rank,
@@ -11642,14 +11640,14 @@ fn barycenter_node_rank<const DENSE_RANK: bool>(
 #[allow(unused_variables)] // centrality only used with fnx-integration feature
 fn reorder_rank_by_barycenter<const DENSE_RANK: bool>(
     ir: &MermaidDiagramIr,
-    ranks: &BTreeMap<usize, usize>,
-    dense_node_rank: &[u32],
+    rank_lookup: (&BTreeMap<usize, usize>, &[u32]),
     ordering_by_rank: &mut BTreeMap<usize, Vec<usize>>,
     rank: usize,
     adjacent_rank: usize,
     use_incoming: bool,
     centrality: &CentralityAssist,
 ) {
+    let (ranks, dense_node_rank) = rank_lookup;
     let Some(current_order) = ordering_by_rank.get(&rank).cloned() else {
         return;
     };
@@ -17699,8 +17697,7 @@ mod tests {
         let centrality = super::build_centrality_assist(&ir, &LayoutConfig::default());
         super::reorder_rank_by_barycenter::<false>(
             &ir,
-            &ranks,
-            &[],
+            (&ranks, &[]),
             &mut ordering_by_rank,
             0,
             1,

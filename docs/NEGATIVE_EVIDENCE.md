@@ -11304,7 +11304,8 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   above 0.1% self-time for both arms is ranked in the evidence file.
 - **Behavior / gates:** exact `(crossing_count, ordering_by_rank)` differential parity passed across narrow,
   threshold, wide, degenerate, acyclic, and heavily cyclic shapes; the paired harness asserts full equality for
-  100/300/800 nodes. Remote all-target fm-layout Clippy passed with `-D warnings`; formatting and diff checks pass.
+  100/300/800 nodes. Remote fm-layout tests passed **434/434** plus doctests; all-target Clippy passed with
+  `-D warnings`. Formatting and diff checks pass; UBS ran on every changed file with local Cargo phases disabled.
 - **Verdict: WIN / KEEP.** Deterministic output is preserved and both decision rows clear the ratchet. Continue
   digging via a different one-lever primitive such as reusable packed position/slot scratch or flat CSR incidence.
 - **Evidence:** `.benchmarks/barycenter_dense_rank_WIN.md`.

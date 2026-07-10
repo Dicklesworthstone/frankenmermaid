@@ -132,7 +132,7 @@ fn calibrate(ir: &MermaidDiagramIr, ranks: &BTreeMap<usize, usize>, config: &Lay
 fn median(values: &mut [f64]) -> f64 {
     values.sort_by(f64::total_cmp);
     let mid = values.len() / 2;
-    if values.len() % 2 == 0 {
+    if values.len().is_multiple_of(2) {
         f64::midpoint(values[mid - 1], values[mid])
     } else {
         values[mid]
