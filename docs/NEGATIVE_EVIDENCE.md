@@ -12072,3 +12072,38 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   (barycenter, crossing-count, obstacle-index gate, BK alignment). The next layout gain would need a NEW workload
   class (not in the corpus) or a design change, not a byte-identical micro-lever. `sequence_20` layout is 0.0% —
   sequence/gantt/etc. do specialized non-graph layout already at their floor.
+
+<!-- cc_fm-minify-bulkcopy-RE-CONFIRMED-nonflowchart -->
+### RE-CONFIRMED (clean same-worker): bulk-copy minify_css is sub-noise — and WHY (the 2.26% is the whitespace-decision, not the copy) (2026-07-10)
+- **Retry of the 2026-06-29 "REVERTED: bulk-copy minify hot loop -- sub-noise".** That reject's retry-condition
+  was explicit: it measured on FLOWCHARTS (render_svg bench), was cross-run LOAD-CONTAMINATED, and flagged "their
+  real payoff is on small NON-flowcharts (sequence/class), where the bench does not look." Both conditions met
+  here: fresh profile + a same-worker paired A/B on non-flowcharts.
+- **Profile-first (non-flowchart render, unexplored).** perf on gantt/pie/sankey/xychart/sequence render:
+  `minify_css` (inlined via `minify_style_block` into `render_svg_with_layout`) = **2.26% of the sankey pipeline**
+  — the largest non-byte-production render frame. `minify_css`'s non-whitespace branch copied ONE BYTE AT A TIME
+  (`out.push(other)`); the theme CSS is ~9.7 KB mostly non-whitespace.
+- **Lever + byte-identity (proven, then reverted).** Bulk-copy the non-whitespace run via `extend_from_slice`
+  (memcpy). Byte-identical: the existing whitespace-invariant test + a NEW 40,000-case differential test (bulk-copy
+  vs the verbatim per-byte reference over adversarial CSS-shaped strings) both pass; golden_svg shows only the
+  known pre-existing `gantt_basic` FNV mismatch (gantt geometry, not CSS — confirmed at untouched HEAD repeatedly
+  this session; the 40k differential proves the `<style>` bytes are unchanged for any input).
+- **Measured — same worker `ovh-a`, new `render_nonflowchart/nf` bench (sankey_60 / pie_40 / sequence_40):**
+
+  | bench | cand p50 | base p50 | ratio | CIs |
+  |---|---:|---:|---:|---|
+  | `sankey_60` (the 2.26% profile hotspot) | 124.37 us | 124.12 us | **1.002x (neutral)** | overlap |
+  | `pie_40` | 77.349 us | 78.237 us | 0.989x (1.1%) | non-overlap, n=1 |
+  | `sequence_40` | 128.60 us | 130.64 us | 0.984x (1.6%) | non-overlap, n=1 |
+
+- **Verdict: RE-CONFIRMED sub-noise; reverted.** The decisive signal: **`sankey_60` — the input where `minify_css`
+  profiled at 2.26% — is NEUTRAL.** So the 2.26% self-time is the **whitespace-run DROP-DECISION logic** (the
+  per-run `prev`/`nxt`/`has_nl` boundary computation), NOT the non-whitespace copy the bulk-copy addresses. The
+  pie/sequence 1.1-1.6% are marginal (n=1, at the ~1% median-CI floor). Byte-identical + monotonic-less-work, but
+  the change does not move the frame it targeted -> not worth landing, consistent with the original reject.
+- **Better negative than the 2026-06-29 entry:** that one was load-contaminated and couldn't say why; this one is
+  same-worker-clean and root-causes the cost to the whitespace decision. **Do-not-retry bulk-copy minify.** The
+  only real minify lever would be caching the minified ~9.7 KB STATIC theme-CSS block across renders (it is
+  recomputed every render) — a design/state change, not a byte-identical micro-lever, and owner-gated.
+- **Kept:** `render_nonflowchart` bench (first bench covering sankey/pie/sequence render — closes the coverage gap
+  the original reject flagged). No production code changed.

@@ -442,6 +442,47 @@ fn bench_full_pipeline_mindmap(c: &mut Criterion) {
 
 // ─── Render SVG benchmarks ──────────────────────────────────────────────────
 
+fn gen_sankey(links: usize) -> String {
+    let mut s = String::from("sankey-beta\n");
+    for i in 0..links {
+        s.push_str(&format!("A{i},B{},{}\n", i % 20, 5 + i));
+    }
+    s
+}
+
+fn gen_pie(slices: usize) -> String {
+    let mut s = String::from("pie title Distribution\n");
+    for i in 0..slices {
+        s.push_str(&format!("  \"Category {i}\" : {}\n", 10 + i * 3));
+    }
+    s
+}
+
+/// Render of non-flowchart types where the CSS post-passes (minify) are a larger fraction than on
+/// flowcharts — `minify_css` profiled at 2.26% of the sankey pipeline. The `render_svg` bench above only
+/// covers flowcharts, which is where the 2026-06-29 bulk-copy-minify A/B looked (and missed the payoff).
+fn bench_render_nonflowchart(c: &mut Criterion) {
+    let mut group = c.benchmark_group("render_nonflowchart");
+    let config = fm_render_svg::SvgRenderConfig::default();
+    let inputs = [
+        ("sankey_60", gen_sankey(60)),
+        ("pie_40", gen_pie(40)),
+        ("sequence_40", gen_sequence(40)),
+    ];
+    for (label, input) in &inputs {
+        let parsed = fm_parser::parse(input);
+        let layout = fm_layout::layout_diagram(&parsed.ir);
+        group.bench_with_input(
+            BenchmarkId::new("nf", label),
+            &(&parsed.ir, &layout),
+            |b, (ir, layout)| {
+                b.iter(|| fm_render_svg::render_svg_with_layout(ir, layout, &config));
+            },
+        );
+    }
+    group.finish();
+}
+
 fn bench_render_svg(c: &mut Criterion) {
     let mut group = c.benchmark_group("render_svg");
     let config = fm_render_svg::SvgRenderConfig::default();
@@ -865,6 +906,7 @@ criterion_group!(
     bench_full_pipeline_wide,
     bench_full_pipeline_mindmap,
     bench_render_svg,
+    bench_render_nonflowchart,
     bench_full_pipeline,
     bench_wide_stages,
     bench_large_wide_stages,
