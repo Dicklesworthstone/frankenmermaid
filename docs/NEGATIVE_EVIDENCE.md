@@ -12267,3 +12267,23 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   interning become safe contained levers (a real parse-alloc-reduction primitive); or (b) an owner decision to do the
   full IR string-interning refactor as a multi-commit project with pipeline-level (not SVG-byte) equivalence testing.
   **HELD** pending one of these.
+
+### REJECT: partial ER attribute-row streaming (raw_svg child) — wash; need WHOLE-node bypass (2026-07-10)
+
+- **Profile-first:** added `er_stages` bench (kept as coverage). ER is RENDER-dominated (512 entities: render ~505-517us
+  vs parse ~367us vs layout ~120us — render ~50%), and ER entity attributes render via the Element SLOW path
+  (`render_node`: `group.child(Element::text())` + a `format!` String per attribute) — an un-streamed node type.
+- **Idea:** stream each attribute row's `<text>` into ONE `raw_svg` child (`write_er_attribute_rows_into`), gated on
+  the common config (embed_theme_css && !emit_classdef_classes && text_style.is_none() → no font-family/fm-node-label/
+  style), Element loop as fallback. Byte-identical: golden `er_basic` (USER/ORDER entities with PK/UK/None attrs)
+  passes + 247 lib tests; Element serializes attrs in insertion order, #rrggbb fill escape is a no-op.
+- **Why REJECTED (gate median vs null, same-worker hz2):** render/512 cand 516.86us [511.8,522.8] vs base 516.65us
+  [513.4,521.3] = **1.000** (WASH); render/256 0.989, render/64 1.003 — all CI-overlapping, layout null ±2-3%. No win.
+- **Root cause / LESSON:** partial leaf-streaming INSIDE the Element path doesn't pay — the group/rect/name/divider
+  Elements + the `render_node` Element→String serialization (the real cost) remain, and the per-entity `rows` String +
+  `raw_svg` Element offset the saved attr-Element builds. The class(2.6x)/requirement/diamond wins bypassed the Element
+  path ENTIRELY via a whole-node fast-path GATE (e.g. `write_class_node_fragment_into`), not a partial raw_svg child.
+  ⭐The REAL ER lever is a `write_er_entity_fragment_into` whole-entity fast path (gate like the class fast path,
+  Element fallback) — a big, byte-identity-critical edit like the class-node streaming. Deferred (not this turn).
+- **Disposition:** reverted the lib.rs streaming; KEPT the `er_stages` bench (documents ER render-dominance + that the
+  whole-entity fast path is the outstanding lever). Evidence: this entry.

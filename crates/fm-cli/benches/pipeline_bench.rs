@@ -185,6 +185,22 @@ fn gen_class(class_count: usize) -> String {
     lines.join("\n")
 }
 
+fn gen_er(entity_count: usize) -> String {
+    let mut lines = vec![String::from("erDiagram")];
+    for i in 0..entity_count {
+        lines.push(format!("  E{i} {{"));
+        lines.push("    int id PK".to_string());
+        lines.push("    string name".to_string());
+        lines.push(format!("    int e{i}_ref FK"));
+        lines.push("    string description".to_string());
+        lines.push("  }".to_string());
+    }
+    for i in 0..entity_count.saturating_sub(1) {
+        lines.push(format!("  E{i} ||--o{{ E{} : has", i + 1));
+    }
+    lines.join("\n")
+}
+
 fn gen_xychart(point_count: usize) -> String {
     let mut lines = vec![String::from("xychart-beta")];
     lines.push("  title Throughput".to_string());
@@ -779,6 +795,33 @@ fn bench_class_stages(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_er_stages(c: &mut Criterion) {
+    let mut group = c.benchmark_group("er_stages");
+    let config = fm_render_svg::SvgRenderConfig::default();
+
+    for (label, entity_count) in [("64", 64_usize), ("256", 256), ("512", 512)] {
+        let input = gen_er(entity_count);
+        let parsed = fm_parser::parse(&input);
+        let layout = fm_layout::layout_diagram(&parsed.ir);
+
+        group.bench_with_input(BenchmarkId::new("parse", label), &input, |b, input| {
+            b.iter(|| fm_parser::parse(input));
+        });
+        group.bench_with_input(BenchmarkId::new("layout", label), &parsed.ir, |b, ir| {
+            b.iter(|| fm_layout::layout_diagram(ir));
+        });
+        group.bench_with_input(
+            BenchmarkId::new("render", label),
+            &(&parsed.ir, &layout),
+            |b, (ir, layout)| {
+                b.iter(|| fm_render_svg::render_svg_with_layout(ir, layout, &config));
+            },
+        );
+    }
+
+    group.finish();
+}
+
 fn bench_xychart_stages(c: &mut Criterion) {
     let mut group = c.benchmark_group("xychart_stages");
     let config = fm_render_svg::SvgRenderConfig::default();
@@ -958,6 +1001,7 @@ criterion_group!(
     bench_highlighted_wide_stages,
     bench_requirement_stages,
     bench_class_stages,
+    bench_er_stages,
     bench_xychart_stages,
     bench_timeline_stages,
     bench_polygon_shape_render,
