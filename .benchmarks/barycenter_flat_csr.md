@@ -344,3 +344,148 @@ Profiles retained:
 **REJECT THE SAMPLE, NOT THE LEVER.** Increasing a whole-arm batch by 100x did not make it symmetric. Retry by
 alternating ORIG/CAND at each invocation inside every paired sample and summing per-arm time; keep the 200 ms
 floor, production code, 41-round statistic, and all black-box/checksum rules unchanged.
+
+## Attempt 5 — WIN / KEEP (per-invocation interleaving, 6.880x at `cyclic_scc_800`)
+
+### Retry condition and one-lever mechanism
+
+Attempt 5 satisfied attempt 4's recorded retry condition without changing the production candidate: every paired
+sample now alternates ORIG and CAND at **each individual invocation**, alternates the first arm again by round and
+iteration parity, and sums per-arm nanoseconds. The code lever remains only the two-array flat CSR incidence index:
+incoming and outgoing offsets plus stable edge-order neighbor slices are built once, then each rank sweep visits
+only that rank's incident edges instead of rescanning all of `ir.edges`.
+
+The ledger-first routing remains valid. The void `Vec<Vec<usize>>` adjacency row explicitly reopened a packed
+CSR retry once a real Sugiyama profile named barycenter reorder. The certified single-pass profile did so at
+76.84% self-time, and the fresh ORIG exact-ELF profile below independently reports 75.05%.
+
+### Exact source, worker, binary, and substrate
+
+- `crates/fm-layout/src/lib.rs` pre/post SHA-256:
+  `68ed92d27e4685bd2cfc2ed17793f465b751a4649461be67c2ca5c811d7554f7`.
+- `crates/fm-layout/benches/barycenter_sweep.rs` pre/post SHA-256:
+  `88a7957e579e99856e67b1009ec51483e2e1381525b214c978e5dff2bb2b4dd5`.
+- Command: `RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo bench -p fm-layout
+  --bench barycenter_sweep --features bench-internals --profile release`.
+- Worker: `vmi1152480` (`root@109.205.181.92`). A separate `fnp-python` process was active, so worker load is
+  disclosed rather than called quiescent; the source tree itself stayed hash-identical throughout measurement.
+- Exact running and worker-verified executable:
+  `/data/projects/frankenmermaid/.rch-target-vmi1152480-pool-100fc87c1da894108803e570d2fc138d/release/deps/barycenter_sweep-ccd51ba108b95431`,
+  **858,528 bytes**, SHA-256
+  **`9ba362e7d7f5243761a0f6f85638d886d711490bf3782947088048d09f86394e`**, x86-64 PIE, not stripped.
+- One binary and one RCH invocation contained both the identical-arm A/A control and the real ORIG/CAND pair.
+  Each of 41 rounds micro-interleaved the arms per invocation; all inputs and complete results went through
+  `black_box`, and both results contributed to the printed checksum.
+
+### Honest paired timing
+
+| input | A/A ratio | A/A `cv_pct` | A/A MAD | single-pass p50 | flat-CSR p50 | median paired A/B | A/B `cv_pct` | A/B MAD | verdict |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| `cyclic_scc_100` | 0.9982x | **4.83%** | 1.37% | 112.997 us | 41.988 us | 2.757x | 5.41% | 3.39% | corroboration only |
+| `cyclic_scc_300` | 0.9976x | **3.74%** | 2.11% | 865.465 us | 240.859 us | 3.630x | 6.72% | 2.38% | corroboration only |
+| `cyclic_scc_800` | 1.0006x | **3.05%** | 1.45% | 4,815.561 us | 705.610 us | **6.880x** | **4.52%** | 1.47% | **WIN / KEEP** |
+
+The claim is exactly the 800-node row: both same-invocation null and A/B dispersion clear the strict `<5%` rule,
+the ratio clears the 3% keep ratchet by orders of magnitude, and the null median is 0.06% from unity. The 100- and
+300-node directions reproduce but their A/B CV values miss the gate, so they carry no keep claim.
+
+### Exact-binary profile integrity and mechanism
+
+Both arms were profiled from the exact SHA-256-pinned ELF on the same worker with
+`perf record -F 999 -e cycles:u --call-graph=dwarf`. Both reports had zero lost samples:
+
+- ORIG single-pass: about 6K samples, 120,333 ns/invocation; target
+  `reorder_rank_by_barycenter::<true,true,false>` = **75.05% self-time**.
+- CAND flat CSR: about 7K samples, 41,503 ns/invocation; target
+  `reorder_rank_by_barycenter::<true,true,true>` = **36.15% self-time**; one-time CSR construction = 2.97%.
+
+ORIG frames at or above 0.10% self-time:
+
+| self | frame |
+|---:|---|
+| 75.05% | `reorder_rank_by_barycenter::<true,true,false>` |
+| 9.11% | `total_crossings` |
+| 3.42% | `malloc` |
+| 1.78% | `nodes_by_rank` |
+| 1.16% | `count_inversions` |
+| 1.15% | `cfree` |
+| 1.10% | scored-node insertion sort |
+| 0.94% | unresolved `0x198b66` |
+| 0.84% | `crossing_minimization_single_pass` |
+| 0.48% | unresolved `0x198a85` |
+| 0.31% | `realloc` |
+| 0.28% | `drop_glue<BTreeMap>` |
+| 0.27% | `BTreeMap::bulk_build_from_sorted_iter` |
+| 0.24% | `RawVecInner::finish_grow` |
+| 0.21% | crossing-pair insertion sort |
+| 0.21% | second `RawVecInner::finish_grow` |
+| 0.18% | unresolved `0x198a74` |
+| 0.17% | `BTreeMap::IntoIter::dying_next` |
+| 0.16% | unresolved `0x198a70` |
+| 0.11% | unresolved `0xb28b1` |
+| 0.11% | unresolved kernel address |
+| 0.10% | pair-map `BTreeMap::IntoIter::dying_next` |
+
+CAND frames at or above 0.10% self-time:
+
+| self | frame |
+|---:|---|
+| 36.15% | `reorder_rank_by_barycenter::<true,true,true>` |
+| 23.80% | `total_crossings` |
+| 4.54% | `nodes_by_rank` |
+| 4.17% | `malloc` |
+| 3.25% | scored-node insertion sort |
+| 2.97% | `BarycenterScratch::new::<true,true>` (CSR build) |
+| 2.78% | `cfree` |
+| 2.48% | `crossing_minimization_flat_csr` |
+| 2.44% | unresolved `0x198b66` |
+| 1.90% | `count_inversions` |
+| 1.71% | unresolved `0x198a85` |
+| 1.02% | `drop_glue<BTreeMap>` |
+| 0.84% | `BTreeMap::bulk_build_from_sorted_iter` |
+| 0.70% | `realloc` |
+| 0.48% | `RawVecInner::finish_grow` |
+| 0.46% | crossing-pair insertion sort |
+| 0.41% | `BTreeMap::VacantEntry::insert_entry` |
+| 0.36% | second `RawVecInner::finish_grow` |
+| 0.34% | `RawVec<Reverse<_>>::grow_one` |
+| 0.33% | pair-map `BTreeMap::IntoIter::dying_next` |
+| 0.27% | unresolved `0x198a70` |
+| 0.26% | unresolved `0x198a74` |
+| 0.22% | `RawVecInner::grow_amortized` |
+| 0.18% | unresolved `0xb146d` |
+| 0.17% | unresolved `0x19504` |
+| 0.17% | unresolved `0xb3344` |
+| 0.16% | rank-key `Vec::from_iter` |
+| 0.16% | unresolved `0x19500` |
+| 0.16% | unresolved `0xb3086` |
+| 0.15% | unresolved `0xb28b1` |
+| 0.13% | unresolved `0x1952a` |
+| 0.12% | unresolved `0xb3354` |
+| 0.12% | unresolved `0xb2e76` |
+| 0.12% | unresolved `0x198aa2` |
+| 0.12% | unresolved `0xb2784` |
+| 0.11% | unresolved `0xb4c2d` |
+| 0.11% | unresolved `0xb334e` |
+| 0.10% | unresolved `0xb1383` |
+
+Allocator traffic does **not** dominate this live Sugiyama target: ORIG direct allocator frames are 3.42%
+`malloc`, 1.15% `cfree`, and 0.31% `realloc`, versus 75.05% in the barycenter reorder. The causal mechanism is
+therefore the packed incident-edge frontier and avoided full-edge scans, not an allocation-only hypothesis.
+
+### Behavior proof and quality gates
+
+- The four arms (`BTreeMap`, packed rank, packed single pass, flat CSR) return exact
+  `(crossing_count, ordering_by_rank)` equality across narrow, wide, threshold, degenerate, acyclic, and heavily
+  cyclic fixtures. A structural test also proves stable per-node edge order, parallel-edge multiplicity, self-edge
+  handling, and invalid-endpoint filtering in both CSR directions.
+- The timed harness asserts exact ORIG/CAND full-result equality before every case. Production uses the flat-CSR
+  arm, with the exact single-pass fallback if packed offsets cannot be represented.
+- Fail-closed remote `fm-layout` test: **435/435 passed**, plus doctests. An initial untouched time-budget e-graph
+  test varied its strategy; the exact test passed alone and the clean full rerun passed all 435.
+- Fail-closed remote all-target Clippy with `-D warnings`: clean. Direct nightly rustfmt check: clean.
+- Fail-closed remote golden/conformance: FrankenTUI fixture **1/1**, stable layout checksums and repeated-run
+  determinism **2/2**.
+
+**VERDICT: WIN / KEEP.** Flat packed CSR incidence preserves deterministic output and cuts the gate-clean
+`cyclic_scc_800` crossing-minimization arm by **6.880x** at **4.52% CV**, with a **3.05% CV** same-invocation null.

@@ -11726,3 +11726,33 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   mechanisms composing in order -- ELF sha256 (which binary ran) -> A/A null (this run's floor) -> calibration
   (which config decides your effect). Adoption checklist step 7 names the per-function sweep + median-CI gate.
 - **Evidence:** `.benchmarks/harness_calibration_published_settings.md`. No other repo touched.
+
+<!-- cod_fm-flat-csr-win -->
+### WIN / KEEP: packed flat-CSR barycenter incidence removes full-edge rescans — 6.880x, `cv_pct` 4.52% (2026-07-10)
+- **Ledger-first / one lever:** the void `Vec<Vec<usize>>` adjacency row explicitly reopened a packed CSR retry
+  after a live Sugiyama profile named barycenter reorder. ORIG exact-ELF profiling now places
+  `reorder_rank_by_barycenter::<true,true,false>` at **75.05% self-time**. Production builds one stable-order
+  incoming/outgoing CSR in two persistent packed allocations, then visits only each current node's incident
+  neighbors; the single-pass reference still rescans all edges for every reorder.
+- **Substrate v2:** one fail-closed RCH invocation, one binary, A/A and A/B in the same routine, 41 rounds, and
+  ORIG/CAND interleaved at every individual invocation with round/iteration first-arm parity. Inputs and complete
+  results were black-boxed and checksummed. Source was hash-identical before/after.
+- **Exact provenance:** worker `vmi1152480` (`root@109.205.181.92`); verified non-empty, unstripped **858,528-byte**
+  ELF, SHA-256 **`9ba362e7d7f5243761a0f6f85638d886d711490bf3782947088048d09f86394e`**. Production source SHA-256
+  `68ed92d2...d7554f7`; bench source `88a7957e...b2b4dd5`. A separate `fnp-python` process was active and is
+  disclosed; the per-invocation interleave plus same-run null made the 800-node row decidable despite it.
+- **Decision row:** `cyclic_scc_800` single-pass/CSR p50 **4,815.561/705.610 us**, median paired **6.880x**,
+  A/B `cv_pct` **4.52%**, MAD 1.47%; A/A **1.0006x**, `cv_pct` **3.05%**, MAD 1.45%. This clears both strict
+  `<5%` dispersion gates and the 3% keep ratchet. `cyclic_scc_100` was 2.757x / 5.41% A/B CV and `300` was
+  3.630x / 6.72%; they are corroboration only.
+- **Ledger integrity / exact ELF:** ORIG target **75.05% self-time** (about 6K samples / 0 lost); CAND target
+  `::<true,true,true>` **36.15%** (about 7K / 0 lost), with one-time CSR construction 2.97%. ORIG allocator
+  frames are `malloc` 3.42%, `cfree` 1.15%, `realloc` 0.31%, so allocation traffic does not dominate this live
+  Sugiyama row; the mechanism is incident-edge locality and avoided full-edge scans. Full ranked `>=0.1%` frame
+  tables are in `.benchmarks/barycenter_flat_csr.md`.
+- **Deterministic parity / gates:** exact four-arm equality across adversarial fixture families plus explicit CSR
+  edge-order/multiplicity coverage; timed full-result equality; production fallback for unrepresentable packed
+  offsets. Fail-closed remote `fm-layout` **435/435** plus doctests, all-target Clippy `-D warnings`, nightly
+  rustfmt, FrankenTUI fixture **1/1**, and golden checksum/repeated-run determinism **2/2** all pass.
+- **Verdict: WIN / KEEP.** The gate-clean claim is exactly the 800-node row. Evidence:
+  `.benchmarks/barycenter_flat_csr.md`.

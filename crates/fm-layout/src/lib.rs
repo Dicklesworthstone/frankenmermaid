@@ -10046,13 +10046,18 @@ fn crossing_minimization(
     ranks: &BTreeMap<usize, usize>,
     config: &LayoutConfig,
 ) -> (usize, BTreeMap<usize, Vec<usize>>) {
-    crossing_minimization_impl::<true, true>(ir, ranks, config)
+    crossing_minimization_impl::<true, true, true>(ir, ranks, config)
 }
 
-/// Compile-time switches keep the certified production path and both live reference arms in one body:
+/// Compile-time switches keep the certified production path and all live reference arms in one body:
 /// `DENSE_RANK` selects packed node-rank lookup, while `SINGLE_PASS` selects the reusable packed
-/// position/slot frontier and one edge pass per rank reorder.
-fn crossing_minimization_impl<const DENSE_RANK: bool, const SINGLE_PASS: bool>(
+/// position/slot frontier and one edge pass per rank reorder. `FLAT_CSR` replaces that full edge pass
+/// with a build-once packed incidence index.
+fn crossing_minimization_impl<
+    const DENSE_RANK: bool,
+    const SINGLE_PASS: bool,
+    const FLAT_CSR: bool,
+>(
     ir: &MermaidDiagramIr,
     ranks: &BTreeMap<usize, usize>,
     config: &LayoutConfig,
@@ -10080,7 +10085,7 @@ fn crossing_minimization_impl<const DENSE_RANK: bool, const SINGLE_PASS: bool>(
         for node_index in 0..ir.nodes.len() {
             let rank = ranks.get(&node_index).copied().unwrap_or(0);
             let Ok(rank) = u32::try_from(rank) else {
-                return crossing_minimization_sweeps::<false, SINGLE_PASS>(
+                return crossing_minimization_sweeps::<false, SINGLE_PASS, FLAT_CSR>(
                     ir,
                     ranks,
                     &[],
@@ -10095,7 +10100,7 @@ fn crossing_minimization_impl<const DENSE_RANK: bool, const SINGLE_PASS: bool>(
         Vec::new()
     };
 
-    crossing_minimization_sweeps::<DENSE_RANK, SINGLE_PASS>(
+    crossing_minimization_sweeps::<DENSE_RANK, SINGLE_PASS, FLAT_CSR>(
         ir,
         ranks,
         &dense_node_rank,
@@ -10104,7 +10109,11 @@ fn crossing_minimization_impl<const DENSE_RANK: bool, const SINGLE_PASS: bool>(
     )
 }
 
-fn crossing_minimization_sweeps<const DENSE_RANK: bool, const SINGLE_PASS: bool>(
+fn crossing_minimization_sweeps<
+    const DENSE_RANK: bool,
+    const SINGLE_PASS: bool,
+    const FLAT_CSR: bool,
+>(
     ir: &MermaidDiagramIr,
     ranks: &BTreeMap<usize, usize>,
     dense_node_rank: &[u32],
@@ -10114,7 +10123,7 @@ fn crossing_minimization_sweeps<const DENSE_RANK: bool, const SINGLE_PASS: bool>
     // Allocated once per crossing minimization and reused by every sweep call; empty for the
     // `!SINGLE_PASS` arm, which never reads it. The packed arm falls back to the certified
     // thresholded implementation if a node index cannot fit in u32.
-    let mut scratch = BarycenterScratch::new::<SINGLE_PASS>(ir.nodes.len());
+    let mut scratch = BarycenterScratch::new::<SINGLE_PASS, FLAT_CSR>(ir);
 
     // Deterministic barycenter sweeps: top-down then bottom-up.
     let rank_keys: Vec<usize> = ordering_by_rank.keys().copied().collect();
@@ -10122,7 +10131,7 @@ fn crossing_minimization_sweeps<const DENSE_RANK: bool, const SINGLE_PASS: bool>
         for index in 1..rank_keys.len() {
             let rank = rank_keys[index];
             let upper_rank = rank_keys[index - 1];
-            reorder_rank_by_barycenter::<DENSE_RANK, SINGLE_PASS>(
+            reorder_rank_by_barycenter::<DENSE_RANK, SINGLE_PASS, FLAT_CSR>(
                 ir,
                 (ranks, dense_node_rank),
                 &mut scratch,
@@ -10137,7 +10146,7 @@ fn crossing_minimization_sweeps<const DENSE_RANK: bool, const SINGLE_PASS: bool>
         for index in (0..rank_keys.len().saturating_sub(1)).rev() {
             let rank = rank_keys[index];
             let lower_rank = rank_keys[index + 1];
-            reorder_rank_by_barycenter::<DENSE_RANK, SINGLE_PASS>(
+            reorder_rank_by_barycenter::<DENSE_RANK, SINGLE_PASS, FLAT_CSR>(
                 ir,
                 (ranks, dense_node_rank),
                 &mut scratch,
@@ -11655,6 +11664,12 @@ struct BarycenterScratch {
     slot_of: Vec<u32>,
     /// `(position_sum, neighbor_count)` per slot of the current rank.
     accumulators: Vec<(usize, usize)>,
+    /// Two packed CSR offset tables in one allocation: incoming first, then outgoing. Outgoing
+    /// offsets are absolute indexes into `incidence_neighbors`, beginning after all incoming entries.
+    incidence_offsets: Vec<u32>,
+    /// Incoming neighbors followed by outgoing neighbors, each per-node slice preserving `ir.edges`
+    /// order and parallel-edge multiplicity.
+    incidence_neighbors: Vec<u32>,
 }
 
 impl BarycenterScratch {
@@ -11662,19 +11677,149 @@ impl BarycenterScratch {
     /// count fits in `u32`, so `u32::MAX` can never be a valid position or slot.
     const ABSENT: u32 = u32::MAX;
 
-    fn new<const SINGLE_PASS: bool>(node_count: usize) -> Self {
+    fn new<const SINGLE_PASS: bool, const FLAT_CSR: bool>(ir: &MermaidDiagramIr) -> Self {
+        let node_count = ir.nodes.len();
         if SINGLE_PASS && u32::try_from(node_count).is_ok() {
-            Self {
+            let mut scratch = Self {
                 position_of: vec![Self::ABSENT; node_count],
                 slot_of: vec![Self::ABSENT; node_count],
                 accumulators: Vec::new(),
+                incidence_offsets: Vec::new(),
+                incidence_neighbors: Vec::new(),
+            };
+            if FLAT_CSR {
+                scratch.build_flat_incidence(ir);
             }
+            scratch
         } else {
             Self {
                 position_of: Vec::new(),
                 slot_of: Vec::new(),
                 accumulators: Vec::new(),
+                incidence_offsets: Vec::new(),
+                incidence_neighbors: Vec::new(),
             }
+        }
+    }
+
+    /// Build incoming and outgoing CSR in two persistent allocations. The already-allocated packed
+    /// frontier tables double as fill cursors, avoiding a third temporary vector. Any graph whose
+    /// incidence offsets do not fit in `u32` leaves the tables empty and uses the exact full-edge fallback.
+    fn build_flat_incidence(&mut self, ir: &MermaidDiagramIr) {
+        let node_count = self.position_of.len();
+        let Some(direction_width) = node_count.checked_add(1) else {
+            return;
+        };
+        let Some(offset_count) = direction_width.checked_mul(2) else {
+            return;
+        };
+        self.incidence_offsets.resize(offset_count, 0);
+
+        for edge in &ir.edges {
+            let Some(source) = endpoint_node_index(ir, edge.from) else {
+                continue;
+            };
+            let Some(target) = endpoint_node_index(ir, edge.to) else {
+                continue;
+            };
+            if source >= node_count || target >= node_count {
+                continue;
+            }
+            let incoming_count = &mut self.incidence_offsets[target + 1];
+            let Some(next_incoming) = incoming_count.checked_add(1) else {
+                self.incidence_offsets.clear();
+                return;
+            };
+            *incoming_count = next_incoming;
+
+            let outgoing_count = &mut self.incidence_offsets[direction_width + source + 1];
+            let Some(next_outgoing) = outgoing_count.checked_add(1) else {
+                self.incidence_offsets.clear();
+                return;
+            };
+            *outgoing_count = next_outgoing;
+        }
+
+        for index in 1..=node_count {
+            let Some(prefix) =
+                self.incidence_offsets[index - 1].checked_add(self.incidence_offsets[index])
+            else {
+                self.incidence_offsets.clear();
+                return;
+            };
+            self.incidence_offsets[index] = prefix;
+        }
+        self.incidence_offsets[direction_width] = self.incidence_offsets[node_count];
+        for node in 0..node_count {
+            let index = direction_width + node + 1;
+            let Some(prefix) =
+                self.incidence_offsets[index - 1].checked_add(self.incidence_offsets[index])
+            else {
+                self.incidence_offsets.clear();
+                return;
+            };
+            self.incidence_offsets[index] = prefix;
+        }
+
+        let total_entries = self.incidence_offsets[direction_width + node_count];
+        let Ok(total_entries) = usize::try_from(total_entries) else {
+            self.incidence_offsets.clear();
+            return;
+        };
+        self.incidence_neighbors.resize(total_entries, Self::ABSENT);
+        for node in 0..node_count {
+            self.position_of[node] = self.incidence_offsets[node];
+            self.slot_of[node] = self.incidence_offsets[direction_width + node];
+        }
+
+        let mut valid = true;
+        for edge in &ir.edges {
+            let Some(source) = endpoint_node_index(ir, edge.from) else {
+                continue;
+            };
+            let Some(target) = endpoint_node_index(ir, edge.to) else {
+                continue;
+            };
+            if source >= node_count || target >= node_count {
+                continue;
+            }
+            let Ok(source_word) = u32::try_from(source) else {
+                valid = false;
+                break;
+            };
+            let Ok(target_word) = u32::try_from(target) else {
+                valid = false;
+                break;
+            };
+
+            let Ok(incoming_cursor) = usize::try_from(self.position_of[target]) else {
+                valid = false;
+                break;
+            };
+            let Some(incoming_neighbor) = self.incidence_neighbors.get_mut(incoming_cursor) else {
+                valid = false;
+                break;
+            };
+            *incoming_neighbor = source_word;
+            self.position_of[target] = self.position_of[target].saturating_add(1);
+
+            let Ok(outgoing_cursor) = usize::try_from(self.slot_of[source]) else {
+                valid = false;
+                break;
+            };
+            let Some(outgoing_neighbor) = self.incidence_neighbors.get_mut(outgoing_cursor) else {
+                valid = false;
+                break;
+            };
+            *outgoing_neighbor = target_word;
+            self.slot_of[source] = self.slot_of[source].saturating_add(1);
+        }
+
+        self.position_of.fill(Self::ABSENT);
+        self.slot_of.fill(Self::ABSENT);
+        if !valid {
+            self.incidence_offsets.clear();
+            self.incidence_neighbors.clear();
         }
     }
 }
@@ -11686,17 +11831,24 @@ impl BarycenterScratch {
 /// - `SINGLE_PASS`: accumulate over `ir.edges` **once per call** instead of once per node of the current
 ///   rank, using `scratch` in place of the two per-call `BTreeMap`s. This removes the `rank_size` factor:
 ///   the old narrow branch was `O(rank_size · |E|)` per call, and on `cyclic_scc_100` the rank width is ~4.
+/// - `FLAT_CSR`: build packed incoming/outgoing incidence once, then visit only the current rank's incident
+///   neighbors per call instead of rescanning every edge. Two flat arrays replace the rejected `Vec<Vec>` shape.
 ///
 /// **`SINGLE_PASS` is output-identical by construction.** The pre-existing code already contained *both*
 /// shapes and selected between them by `SINGLE_PASS_RANK_THRESHOLD`, on the explicit premise (see the old
 /// comment, and the KEPT `single_pass_barycenter.md`) that they *"compute the identical result (integer
 /// position sum divided once by the neighbor count)"*. The threshold existed only because the wide branch's
 /// per-call `BTreeMap` setup dominated at small rank widths — and that setup is exactly what `scratch`
-/// removes. Accumulation order over `ir.edges` is unchanged and the sums are `usize`, so the resulting `f32`
-/// barycenters and the downstream stable sort are bit-for-bit what they were.
+/// removes. Each CSR node slice is the same stable `ir.edges` subsequence that fed that node's independent
+/// accumulator, so its integer sum/count, resulting `f32` barycenter, and downstream stable sort are bit-for-bit
+/// what they were.
 #[allow(unused_variables)] // centrality only used with fnx-integration feature
 #[allow(clippy::too_many_arguments)] // Keep both A/B arms in one body so ordering logic cannot drift.
-fn reorder_rank_by_barycenter<const DENSE_RANK: bool, const SINGLE_PASS: bool>(
+fn reorder_rank_by_barycenter<
+    const DENSE_RANK: bool,
+    const SINGLE_PASS: bool,
+    const FLAT_CSR: bool,
+>(
     ir: &MermaidDiagramIr,
     rank_lookup: (&BTreeMap<usize, usize>, &[u32]),
     scratch: &mut BarycenterScratch,
@@ -11720,52 +11872,102 @@ fn reorder_rank_by_barycenter<const DENSE_RANK: bool, const SINGLE_PASS: bool>(
                 *entry = u32::try_from(position).unwrap_or(BarycenterScratch::ABSENT);
             }
         }
-        for (slot, node) in current_order.iter().enumerate() {
-            if let Some(entry) = scratch.slot_of.get_mut(*node) {
-                *entry = u32::try_from(slot).unwrap_or(BarycenterScratch::ABSENT);
-            }
-        }
         scratch.accumulators.clear();
         scratch.accumulators.resize(current_order.len(), (0, 0));
 
-        for edge in &ir.edges {
-            let Some(source) = endpoint_node_index(ir, edge.from) else {
-                continue;
-            };
-            let Some(target) = endpoint_node_index(ir, edge.to) else {
-                continue;
-            };
-            let (node, adjacent_node) = if use_incoming {
-                (target, source)
-            } else {
-                (source, target)
-            };
-            let Some(&slot) = scratch.slot_of.get(node) else {
-                continue;
-            };
-            if slot == BarycenterScratch::ABSENT {
-                continue;
+        if FLAT_CSR && !scratch.incidence_offsets.is_empty() {
+            let direction_width = scratch.position_of.len() + 1;
+            let offset_base = if use_incoming { 0 } else { direction_width };
+            for (slot, node) in current_order.iter().copied().enumerate() {
+                let Some(start_word) = scratch.incidence_offsets.get(offset_base + node) else {
+                    continue;
+                };
+                let Some(end_word) = scratch.incidence_offsets.get(offset_base + node + 1) else {
+                    continue;
+                };
+                let Ok(start) = usize::try_from(*start_word) else {
+                    continue;
+                };
+                let Ok(end) = usize::try_from(*end_word) else {
+                    continue;
+                };
+                let Some(neighbors) = scratch.incidence_neighbors.get(start..end) else {
+                    continue;
+                };
+                for adjacent_word in neighbors {
+                    let Ok(adjacent_node) = usize::try_from(*adjacent_word) else {
+                        continue;
+                    };
+                    if barycenter_node_rank::<DENSE_RANK>(ranks, dense_node_rank, adjacent_node)
+                        != adjacent_rank
+                    {
+                        continue;
+                    }
+                    let Some(&position) = scratch.position_of.get(adjacent_node) else {
+                        continue;
+                    };
+                    if position == BarycenterScratch::ABSENT {
+                        continue;
+                    }
+                    let Ok(position) = usize::try_from(position) else {
+                        continue;
+                    };
+                    if let Some(accumulator) = scratch.accumulators.get_mut(slot) {
+                        accumulator.0 = accumulator.0.saturating_add(position);
+                        accumulator.1 = accumulator.1.saturating_add(1);
+                    }
+                }
             }
-            let Ok(slot) = usize::try_from(slot) else {
-                continue;
-            };
-            if barycenter_node_rank::<DENSE_RANK>(ranks, dense_node_rank, adjacent_node)
-                != adjacent_rank
-            {
-                continue;
+        } else {
+            for (slot, node) in current_order.iter().enumerate() {
+                if let Some(entry) = scratch.slot_of.get_mut(*node) {
+                    *entry = u32::try_from(slot).unwrap_or(BarycenterScratch::ABSENT);
+                }
             }
-            let Some(&position) = scratch.position_of.get(adjacent_node) else {
-                continue;
-            };
-            if position == BarycenterScratch::ABSENT {
-                continue;
+            for edge in &ir.edges {
+                let Some(source) = endpoint_node_index(ir, edge.from) else {
+                    continue;
+                };
+                let Some(target) = endpoint_node_index(ir, edge.to) else {
+                    continue;
+                };
+                let (node, adjacent_node) = if use_incoming {
+                    (target, source)
+                } else {
+                    (source, target)
+                };
+                let Some(&slot) = scratch.slot_of.get(node) else {
+                    continue;
+                };
+                if slot == BarycenterScratch::ABSENT {
+                    continue;
+                }
+                let Ok(slot) = usize::try_from(slot) else {
+                    continue;
+                };
+                if barycenter_node_rank::<DENSE_RANK>(ranks, dense_node_rank, adjacent_node)
+                    != adjacent_rank
+                {
+                    continue;
+                }
+                let Some(&position) = scratch.position_of.get(adjacent_node) else {
+                    continue;
+                };
+                if position == BarycenterScratch::ABSENT {
+                    continue;
+                }
+                let Ok(position) = usize::try_from(position) else {
+                    continue;
+                };
+                if let Some(accumulator) = scratch.accumulators.get_mut(slot) {
+                    accumulator.0 = accumulator.0.saturating_add(position);
+                    accumulator.1 = accumulator.1.saturating_add(1);
+                }
             }
-            let Ok(position) = usize::try_from(position) else {
-                continue;
-            };
-            if let Some(accumulator) = scratch.accumulators.get_mut(slot) {
-                accumulator.0 = accumulator.0.saturating_add(position);
-                accumulator.1 = accumulator.1.saturating_add(1);
+            for node in &current_order {
+                if let Some(entry) = scratch.slot_of.get_mut(*node) {
+                    *entry = BarycenterScratch::ABSENT;
+                }
             }
         }
 
@@ -11775,12 +11977,6 @@ fn reorder_rank_by_barycenter<const DENSE_RANK: bool, const SINGLE_PASS: bool>(
                 *entry = BarycenterScratch::ABSENT;
             }
         }
-        for node in &current_order {
-            if let Some(entry) = scratch.slot_of.get_mut(*node) {
-                *entry = BarycenterScratch::ABSENT;
-            }
-        }
-
         let mut scored_nodes: Vec<(usize, Option<f32>, usize)> = current_order
             .iter()
             .enumerate()
@@ -12001,7 +12197,7 @@ pub mod bench_internals {
         ranks: &BTreeMap<usize, usize>,
         config: &LayoutConfig,
     ) -> (usize, BTreeMap<usize, Vec<usize>>) {
-        super::crossing_minimization_impl::<false, false>(ir, ranks, config)
+        super::crossing_minimization_impl::<false, false, false>(ir, ranks, config)
     }
 
     /// CAND arm: one packed node-rank table replacing only the hot `BTreeMap` rank probes.
@@ -12011,7 +12207,7 @@ pub mod bench_internals {
         ranks: &BTreeMap<usize, usize>,
         config: &LayoutConfig,
     ) -> (usize, BTreeMap<usize, Vec<usize>>) {
-        super::crossing_minimization_impl::<true, false>(ir, ranks, config)
+        super::crossing_minimization_impl::<true, false, false>(ir, ranks, config)
     }
 
     /// CAND arm for the follow-up lever: dense rank **plus** one accumulating edge pass per call, using
@@ -12023,7 +12219,18 @@ pub mod bench_internals {
         ranks: &BTreeMap<usize, usize>,
         config: &LayoutConfig,
     ) -> (usize, BTreeMap<usize, Vec<usize>>) {
-        super::crossing_minimization_impl::<true, true>(ir, ranks, config)
+        super::crossing_minimization_impl::<true, true, false>(ir, ranks, config)
+    }
+
+    /// CAND arm for flat CSR incidence: build packed incoming/outgoing neighbors once, then make each
+    /// reorder proportional to the current rank's incident edges instead of the whole edge list.
+    #[must_use]
+    pub fn crossing_minimization_flat_csr(
+        ir: &MermaidDiagramIr,
+        ranks: &BTreeMap<usize, usize>,
+        config: &LayoutConfig,
+    ) -> (usize, BTreeMap<usize, Vec<usize>>) {
+        super::crossing_minimization_impl::<true, true, true>(ir, ranks, config)
     }
 }
 
@@ -13844,7 +14051,7 @@ fn layout_decision_confidence_permille(
 
 #[cfg(test)]
 mod barycenter_arms_tests {
-    use super::{LayoutConfig, bench_internals};
+    use super::{BarycenterScratch, LayoutConfig, bench_internals};
     use fm_core::{ArrowType, DiagramType, IrEdge, IrEndpoint, IrNode, IrNodeId, MermaidDiagramIr};
 
     /// Build a layered graph with `layers * width` nodes, forward edges (including skips), and
@@ -13917,6 +14124,13 @@ mod barycenter_arms_tests {
                 let dense = bench_internals::crossing_minimization_dense_rank(&ir, &ranks, &config);
                 let single =
                     bench_internals::crossing_minimization_single_pass(&ir, &ranks, &config);
+                let flat_csr =
+                    bench_internals::crossing_minimization_flat_csr(&ir, &ranks, &config);
+                assert_eq!(
+                    single, flat_csr,
+                    "flat-CSR sweep diverged from the single-pass sweep \
+                     (layers={layers} width={width} back_edges={back_edges} seed={seed:#x})"
+                );
                 assert_eq!(
                     dense, single,
                     "single-pass sweep diverged from the dense-rank sweep \
@@ -13929,6 +14143,48 @@ mod barycenter_arms_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn flat_csr_preserves_per_node_edge_order_and_multiplicity() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for index in 0..4 {
+            ir.nodes.push(IrNode {
+                id: format!("N{index}"),
+                ..IrNode::default()
+            });
+        }
+        for (from, to) in [
+            (0, 2),
+            (1, 2),
+            (0, 3),
+            (0, 2), // parallel edge: multiplicity must survive
+            (2, 2), // self edge appears in both directions
+            (99, 0),
+            (0, 99),
+        ] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let scratch = BarycenterScratch::new::<true, true>(&ir);
+        let direction_width = ir.nodes.len() + 1;
+        let neighbors = |node: usize, incoming: bool| {
+            let base = if incoming { 0 } else { direction_width };
+            let start = usize::try_from(scratch.incidence_offsets[base + node]).unwrap_or(0);
+            let end = usize::try_from(scratch.incidence_offsets[base + node + 1]).unwrap_or(0);
+            scratch.incidence_neighbors[start..end].to_vec()
+        };
+
+        assert_eq!(neighbors(2, true), vec![0, 1, 0, 2]);
+        assert_eq!(neighbors(3, true), vec![0]);
+        assert_eq!(neighbors(0, false), vec![2, 3, 2]);
+        assert_eq!(neighbors(1, false), vec![2]);
+        assert_eq!(neighbors(2, false), vec![2]);
     }
 }
 
@@ -17880,8 +18136,8 @@ mod tests {
         ordering_by_rank.insert(2, vec![4]);
 
         let centrality = super::build_centrality_assist(&ir, &LayoutConfig::default());
-        let mut scratch = super::BarycenterScratch::new::<false>(ir.nodes.len());
-        super::reorder_rank_by_barycenter::<false, false>(
+        let mut scratch = super::BarycenterScratch::new::<false, false>(&ir);
+        super::reorder_rank_by_barycenter::<false, false, false>(
             &ir,
             (&ranks, &[]),
             &mut scratch,
