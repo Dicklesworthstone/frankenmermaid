@@ -8465,7 +8465,8 @@ fn write_common_edge_path_tail_with_dasharray_into(
     marker_end: &str,
     dasharray: &str,
 ) {
-    write_common_edge_path_tail_with_markers_into(
+    // `<path>`-child callers: the `id` lives on the enclosing `<g>`, never on the path.
+    write_common_edge_path_tail_with_markers_into::<false>(
         f,
         stroke_width,
         style_class,
@@ -8476,7 +8477,12 @@ fn write_common_edge_path_tail_with_dasharray_into(
     );
 }
 
-fn write_common_edge_path_tail_with_markers_into(
+/// `EDGE_ID` appends the trailing `id="fm-edge-{index}"` that the slow path's final
+/// `elem.id(&mermaid_edge_element_id(edge_index))` puts on an *unwrapped* edge — the shape a lean
+/// (`A11yConfig::none()`) edge takes, since it gets no `<g>` wrapper to carry the id. Group-wrapped
+/// callers pass `false`: there the id is the group's, and `Attributes::set` would have placed it last
+/// anyway, which is why it is written after the markers/dasharray here.
+fn write_common_edge_path_tail_with_markers_into<const EDGE_ID: bool>(
     f: &mut String,
     stroke_width: f32,
     style_class: &str,
@@ -8506,6 +8512,12 @@ fn write_common_edge_path_tail_with_markers_into(
     if !dasharray.is_empty() {
         f.push_str("\" stroke-dasharray=\"");
         let _ = write_escaped_attr(f, dasharray);
+    }
+    if EDGE_ID {
+        // `mermaid_edge_element_id(i)` = "fm-edge-" + decimal(i) — no escapable byte, so the same
+        // `Integer` serializer as `data-fm-edge-id` reproduces it exactly.
+        f.push_str("\" id=\"fm-edge-");
+        let _ = AttributeValue::Integer(edge_index).write_value(f);
     }
     f.push_str("\"/>");
 }
@@ -8550,7 +8562,8 @@ where
     let mut f = String::with_capacity(24 + point_count * 56 + 192);
     // This wrapper serves only the solid-`Arrow` callers (render_edge's fast path + its parity test), so
     // the a11y phrase is the solid-arrow `" points to "`; the Line arm streams via the `_into` form.
-    write_common_edge_full_fragment_into(
+    // `render_edge`'s fast path is gated on full a11y, so only the `A11Y = true` shape is reachable here.
+    write_common_edge_full_fragment_into::<true, _>(
         &mut f,
         point_count,
         point_at,
@@ -8570,8 +8583,24 @@ where
 /// Write-into core of [`build_common_edge_full_fragment`]. Used by `render_edge_into` to stream the whole
 /// common edge straight into the chunk output buffer, with NO per-edge fragment `String` (the fragment
 /// `String` is the single largest remaining per-element render allocation on wide flowcharts).
+///
+/// `A11Y` selects the accessibility variant at compile time, mirroring `write_common_node_fragment_into`:
+///
+/// - `true` (`A11yConfig::full()`, the default profile) emits `<g id … role … tabindex><path/><title/></g>`.
+/// - `false` (`A11yConfig::none()`, the lean profile) emits the **bare `<path …  id="fm-edge-N"/>`** with no
+///   group and no title — exactly what the slow `Element` path produces when every a11y flag is off: the
+///   unlabeled-edge `<title>` group at `render_edge`'s tail is skipped, `role`/`tabindex` are skipped, and
+///   the final `elem.id(&mermaid_edge_element_id(edge_index))` lands on the `<path>` itself (last, because
+///   `Attributes::set` appends).
+///
+/// Making it a const parameter rather than a runtime flag keeps the default monomorphization exactly as
+/// branch-free as it was before the lean variant existed — a runtime flag cost a measured +0.1..0.33%
+/// instructions on the default path when the same move was made for nodes (see `bd-b2b6`).
+///
+/// `arrow_phrase` / `from_label` / `to_label` feed only the `<title>`, so the `A11Y = false`
+/// monomorphization discards them (and its callers need not compute the endpoint labels at all).
 #[allow(clippy::too_many_arguments)]
-fn write_common_edge_full_fragment_into<F>(
+fn write_common_edge_full_fragment_into<const A11Y: bool, F>(
     f: &mut String,
     point_count: usize,
     point_at: F,
@@ -8588,33 +8617,47 @@ fn write_common_edge_full_fragment_into<F>(
     F: FnMut(usize) -> (f32, f32),
 {
     use crate::attributes::{AttributeValue, write_escaped_text};
-    // <g id="fm-edge-N" class="fm-edge" data-fm-edge-id="N" role="graphics-symbol" tabindex="0">
-    // The id is `mermaid_edge_element_id(edge_index)` = "fm-edge-" + decimal(index); it never contains
-    // an escapable byte, so it goes through the same `Integer` serializer as `data-fm-edge-id`.
-    f.push_str("<g id=\"fm-edge-");
-    let _ = AttributeValue::Integer(edge_index).write_value(f);
-    f.push_str("\" class=\"fm-edge\" data-fm-edge-id=\"");
-    let _ = AttributeValue::Integer(edge_index).write_value(f);
-    f.push_str("\" role=\"graphics-symbol\" tabindex=\"0\">");
+    if A11Y {
+        // <g id="fm-edge-N" class="fm-edge" data-fm-edge-id="N" role="graphics-symbol" tabindex="0">
+        // The id is `mermaid_edge_element_id(edge_index)` = "fm-edge-" + decimal(index); it never contains
+        // an escapable byte, so it goes through the same `Integer` serializer as `data-fm-edge-id`.
+        f.push_str("<g id=\"fm-edge-");
+        let _ = AttributeValue::Integer(edge_index).write_value(f);
+        f.push_str("\" class=\"fm-edge\" data-fm-edge-id=\"");
+        let _ = AttributeValue::Integer(edge_index).write_value(f);
+        f.push_str("\" role=\"graphics-symbol\" tabindex=\"0\">");
+    }
     f.push_str("<path d=\"");
     crate::path::build_smooth_path_by_into(f, point_count, point_at);
-    write_common_edge_path_tail_with_markers_into(
-        f,
-        stroke_width,
-        style_class,
-        edge_index,
-        marker_start,
-        marker_end,
-        dasharray,
-    );
-    f.push_str("<title>");
-    let _ = write_escaped_text(f, from_label.unwrap_or("unknown"));
-    // The a11y connective phrase is `describe_edge_labels`'s per-arrow word surrounded by spaces
-    // (`" points to "` for a solid arrow, `" connects to "` for a plain line). It contains no escapable
-    // byte, so writing it verbatim matches the slow path's escaped whole-description byte-for-byte.
-    f.push_str(arrow_phrase);
-    let _ = write_escaped_text(f, to_label.unwrap_or("unknown"));
-    f.push_str("</title></g>");
+    if A11Y {
+        write_common_edge_path_tail_with_markers_into::<false>(
+            f,
+            stroke_width,
+            style_class,
+            edge_index,
+            marker_start,
+            marker_end,
+            dasharray,
+        );
+        f.push_str("<title>");
+        let _ = write_escaped_text(f, from_label.unwrap_or("unknown"));
+        // The a11y connective phrase is `describe_edge_labels`'s per-arrow word surrounded by spaces
+        // (`" points to "` for a solid arrow, `" connects to "` for a plain line). It contains no escapable
+        // byte, so writing it verbatim matches the slow path's escaped whole-description byte-for-byte.
+        f.push_str(arrow_phrase);
+        let _ = write_escaped_text(f, to_label.unwrap_or("unknown"));
+        f.push_str("</title></g>");
+    } else {
+        write_common_edge_path_tail_with_markers_into::<true>(
+            f,
+            stroke_width,
+            style_class,
+            edge_index,
+            marker_start,
+            marker_end,
+            dasharray,
+        );
+    }
 }
 
 fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> Element {
@@ -9424,36 +9467,58 @@ fn render_edge_into(out: &mut String, edge_path: &LayoutEdgePath, context: &Edge
             " optionally points both ways to ",
         ),
     };
+    // Was `text_alternatives && aria_labels && keyboard_nav`. The fragment writer now has a lean
+    // (a11y-off) shape too, so the gate accepts a11y that is uniformly on OR uniformly off and dispatches
+    // to the matching monomorphization. Mixed combinations (e.g. `A11yConfig::minimal()`) still take the
+    // slow `Element` path, exactly as before — a raw fragment cannot express "role but no tabindex".
     if !edge_path.reversed
         && config.embed_theme_css
         && !config.animations_enabled
         && !config.include_source_spans
-        && config.a11y.text_alternatives
-        && config.a11y.aria_labels
-        && config.a11y.keyboard_nav
+        && let Some(a11y) = uniform_a11y(&config.a11y)
         && !(detail.show_edge_labels && ir_edge.and_then(|edge| edge.label).is_some())
         && let Some(edge) = ir_edge
         && resolve_edge_inline_style(ir, edge_index).is_none()
     {
-        let (from_label, to_label) =
-            edge_endpoint_accessible_labels(edge, ir, accessible_node_labels);
-        write_common_edge_full_fragment_into(
-            out,
-            edge_path.points.len(),
-            |index| {
-                let point = &edge_path.points[index];
-                (point.x + offset_x, point.y + offset_y)
-            },
-            stroke_width,
-            style_class,
-            edge_index as i32,
-            marker_start,
-            marker_end,
-            dasharray,
-            arrow_phrase,
-            from_label,
-            to_label,
-        );
+        let point_at = |index: usize| {
+            let point = &edge_path.points[index];
+            (point.x + offset_x, point.y + offset_y)
+        };
+        if a11y {
+            let (from_label, to_label) =
+                edge_endpoint_accessible_labels(edge, ir, accessible_node_labels);
+            write_common_edge_full_fragment_into::<true, _>(
+                out,
+                edge_path.points.len(),
+                point_at,
+                stroke_width,
+                style_class,
+                edge_index as i32,
+                marker_start,
+                marker_end,
+                dasharray,
+                arrow_phrase,
+                from_label,
+                to_label,
+            );
+        } else {
+            // The lean fragment has no `<title>`, so the endpoint-label lookup is skipped entirely rather
+            // than computed and discarded (`accessible_node_labels` is `None` under lean anyway).
+            write_common_edge_full_fragment_into::<false, _>(
+                out,
+                edge_path.points.len(),
+                point_at,
+                stroke_width,
+                style_class,
+                edge_index as i32,
+                marker_start,
+                marker_end,
+                dasharray,
+                "",
+                None,
+                None,
+            );
+        }
         return;
     }
 
@@ -10040,6 +10105,141 @@ mod tests {
                 assert!(streamed.contains("stroke-dasharray=\"5,5\""));
             }
         }
+    }
+
+    /// Build a two-node / one-edge flowchart plus the `EdgeRenderContext` scaffolding the streaming
+    /// parity tests need. Labels carry `& < > "` so escaping divergences surface.
+    fn single_edge_fixture(arrow: ArrowType) -> (MermaidDiagramIr, LayoutEdgePath) {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.nodes.push(IrNode {
+            id: "A <&>".to_string(),
+            ..IrNode::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "B \"q\"".to_string(),
+            ..IrNode::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            arrow,
+            ..IrEdge::default()
+        });
+        let edge_path = LayoutEdgePath {
+            edge_index: 0,
+            span: Span::default(),
+            points: [
+                fm_layout::LayoutPoint { x: 0.0, y: 0.0 },
+                fm_layout::LayoutPoint { x: 32.0, y: 48.0 },
+                fm_layout::LayoutPoint { x: 72.0, y: 48.0 },
+                fm_layout::LayoutPoint { x: 96.0, y: 80.0 },
+            ]
+            .into_iter()
+            .collect(),
+            reversed: false,
+            is_self_loop: false,
+            parallel_offset: 0.0,
+            bundle_count: 1,
+            bundled: false,
+        };
+        (ir, edge_path)
+    }
+
+    /// The lean (`A11yConfig::none()`) edge now streams through the whole-edge fast path instead of
+    /// falling back to the per-element `Element` builder. Unlike the node half — where the fast path took
+    /// over every reachable configuration, so its lean bytes had to be pinned as a literal — `render_edge`
+    /// remains the live slow path here (`render_edge_into` delegates to it for every gated-out edge). So
+    /// this asserts the streamed lean fragment against what the `Element` path *actually* produces, across
+    /// the arrow matrix: bare `<path>` (no `<g>`), no `<title>`, no `role`/`tabindex`, and the trailing
+    /// `id="fm-edge-N"` that the slow path's final `elem.id(..)` appends to an unwrapped edge.
+    #[test]
+    fn lean_edge_streaming_matches_element_render() {
+        let config = SvgRenderConfig {
+            a11y: A11yConfig::none(),
+            accessible: false,
+            ..SvgRenderConfig::default()
+        };
+        let colors = ThemeColors::default();
+        let detail = resolve_detail_profile(800.0, 600.0, &config);
+
+        for arrow in [
+            ArrowType::Arrow,
+            ArrowType::Line,
+            ArrowType::OpenArrow,
+            ArrowType::ThickArrow,
+            ArrowType::DottedArrow,
+            ArrowType::DoubleArrow,
+            ArrowType::DoubleDottedArrow,
+            ArrowType::HalfArrowTopReverse,
+            ArrowType::StickArrowBottomReverseDotted,
+        ] {
+            let (ir, edge_path) = single_edge_fixture(arrow);
+            let context = EdgeRenderContext {
+                ir: &ir,
+                offset_x: 1.5,
+                offset_y: -2.0,
+                config: &config,
+                detail,
+                colors: &colors,
+                accessible_node_labels: None,
+            };
+
+            let mut streamed = String::new();
+            render_edge_into(&mut streamed, &edge_path, &context);
+
+            let mut element_rendered = String::new();
+            render_edge(&edge_path, &context).write_to_string(&mut element_rendered);
+
+            assert_eq!(
+                streamed, element_rendered,
+                "streamed lean edge must match Element render for {arrow:?}"
+            );
+            assert!(
+                streamed.starts_with("<path d=\"") && streamed.ends_with("id=\"fm-edge-0\"/>"),
+                "lean edge is a bare <path> carrying the id: {streamed}"
+            );
+            for banned in ["<g ", "<title>", "role=", "tabindex="] {
+                assert!(
+                    !streamed.contains(banned),
+                    "lean edge must not emit {banned} for {arrow:?}: {streamed}"
+                );
+            }
+        }
+    }
+
+    /// Mixed a11y (`A11yConfig::minimal()` = `aria_labels` only) has no raw-fragment shape — it cannot
+    /// express "role but no tabindex" — so it must keep taking the slow `Element` path and keep honouring
+    /// each flag independently. Guards the `uniform_a11y` gate against being widened to `any a11y`.
+    #[test]
+    fn mixed_a11y_edge_falls_back_to_slow_path() {
+        let config = SvgRenderConfig {
+            a11y: A11yConfig::minimal(),
+            ..SvgRenderConfig::default()
+        };
+        let colors = ThemeColors::default();
+        let detail = resolve_detail_profile(800.0, 600.0, &config);
+        let (ir, edge_path) = single_edge_fixture(ArrowType::Arrow);
+        let context = EdgeRenderContext {
+            ir: &ir,
+            offset_x: 1.5,
+            offset_y: -2.0,
+            config: &config,
+            detail,
+            colors: &colors,
+            accessible_node_labels: None,
+        };
+
+        let mut streamed = String::new();
+        render_edge_into(&mut streamed, &edge_path, &context);
+        let mut element_rendered = String::new();
+        render_edge(&edge_path, &context).write_to_string(&mut element_rendered);
+
+        assert_eq!(streamed, element_rendered);
+        // `minimal()` = aria_labels on, keyboard_nav + text_alternatives off: role, but no tabindex and
+        // no <title>, so no `<g>` wrapper either — the role lands on the unwrapped `<path>`.
+        assert!(streamed.contains("role=\"graphics-symbol\""));
+        assert!(!streamed.contains("tabindex="));
+        assert!(!streamed.contains("<title>"));
     }
 
     use fm_core::{

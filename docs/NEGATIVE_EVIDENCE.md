@@ -10844,3 +10844,76 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   on `incremental_layout` 1000-node label-edit rows unless a future profile shows that query/clone path as a
   top-2 incremental hotspot after edge path construction and node-size recomputation are separately controlled,
   or a new workload changes the per-rerender edit cardinality enough to predict a >3% direct A/B win.
+
+<!-- cc_fm-lean-edge-streaming-a11y-const-generic -->
+### WIN: lean profile streams its edges too — the smaller SVG is now the cheaper one (`bd-6u9o`) (2026-07-10)
+- **Context / prior art:** `bd-b2b6` (landed `2288c78`) fixed the NODE half of the "smaller output costs ~2x
+  render" paradox. Lean (`A11yConfig::none()`) was still **1.40–1.66x slower than default** on wide layered
+  flowcharts because `render_edge_into`'s whole-edge streaming gate was still
+  `text_alternatives && aria_labels && keyboard_nav`. On `wide_8x16` all **224** edges (vs 128 nodes) still
+  built per-element `Element` trees under lean — the larger remaining half.
+- **Ledger check before attempting:** the only edge-adjacent REJECT is
+  `render_edge_direct_stream_NEGATIVE.md` ("eliminate the per-edge fragment `String`" — the hot free list makes
+  it free). That is a **different primitive**: this lever does not remove the fragment `String` (the streaming
+  `_into` form already has none); it adds a lean monomorphization of the fragment *content*. Its retry-condition
+  is not engaged.
+- **Lever (one):** const generic `A11Y: bool` on `write_common_edge_full_fragment_into` (`true` =
+  `<g id … role tabindex><path/><title/></g>`; `false` = bare `<path … id="fm-edge-N"/>`), plus a const generic
+  `EDGE_ID: bool` on `write_common_edge_path_tail_with_markers_into` to emit the trailing `id` the slow path
+  appends to an *unwrapped* edge. `render_edge_into`'s gate relaxed to `uniform_a11y(&config.a11y)` and
+  dispatched. Mixed a11y (`minimal()`) still takes the `Element` path. The lean arm skips
+  `edge_endpoint_accessible_labels` entirely (it fed only the `<title>`).
+- **Behavior parity (strong form):** all 13 pinned head-to-head corpus items dumped under **both** profiles by a
+  pristine `830d672` build and by the candidate — **26/26 SHA-256s identical**. `fm-render-svg --lib` 246 passed
+  (244 before, +2 new). `frankentui_conformance_test` green, `golden_layout_test` green. `golden_svg_test`
+  `gantt_basic` FNV mismatch **reproduced identically at untouched `830d672`** in a detached worktree →
+  pre-existing. clippy `-D warnings` clean, `cargo fmt --check` clean, `ubs` 14 criticals = HEAD's 14.
+- **Better oracle than the node half:** `render_edge` stays a11y-gated on purpose, so it remains a live
+  independent implementation of the lean bytes. The new test
+  `lean_edge_streaming_matches_element_render` asserts `render_edge_into(..) == render_edge(..)` across 9 arrow
+  types under `A11yConfig::none()` — not against a hand-written literal. This closes the exact tautology
+  `golden_svg_RED_root_cause_edge_fast_path.md` diagnosed in the old `edge_fast_fragment_matches_element` pin.
+- **Measurement (deterministic, load-immune):** `perf stat -e instructions:u`, two-point delta
+  (`reps=36` − `reps=6`, `warmup=2`), `FM_H2H_FORCE_PROFILE` pinning both harness passes to one profile and
+  forcing `batch=1`; `taskset -c 7`, median of 3 rounds, both binaries copied out of their target dirs first.
+  Wall clock cannot resolve the default path's ~0.1%.
+
+  | item | lean instr (cand/base) | default instr (cand/base) |
+  |---|---:|---:|
+  | flowchart_small_10 | 0.9699x | 0.9999x |
+  | flowchart_medium_100 | **0.9167x** | 0.9995x |
+  | flowchart_large_500 | **0.7952x** | 0.9987x |
+  | wide_8x16 | **0.8292x** | 0.9987x |
+  | wide_12x24 | **0.7415x** | 0.9984x |
+  | wide_16x32 | **0.7359x** | 0.9984x |
+  | dense_dag_200 | **0.7452x** | 0.9985x |
+  | cyclic_scc_100 | **0.9402x** | 0.9997x |
+  | sequence_20 | 1.0003x | 1.0001x |
+  | class_50 | **0.9531x** | 0.9996x |
+  | state_40 | **0.9411x** | 0.9996x |
+  | er_40 | 1.0004x | 1.0002x |
+  | edit_trace_60x20 | **0.9215x** | 0.9996x |
+
+  **Lean: up to 26.4% fewer instructions. Default: neutral** (worst case `er_40` +0.02%, inside the <=0.03% band
+  the node half accepted; slightly monotonic-better on every large item because `uniform_a11y`'s single 3-bool
+  match replaces a 3-load branch chain). `sequence_20` / `er_40` are ~1.000 because their edges are **labeled**
+  and never reach this gate.
+- **Wall-clock corroboration, NOT the claim:** `taskset -c 9`, 3 rounds, median-of-rounds; `lean_cv_pct` ran
+  **9.5–24.8%**, which does **not** meet the `cv_pct < 5` bar. lean speedup geomean **1.171x**, max **1.444x**
+  (`wide_16x32`); default cand/base geomean 0.9958x. `lean / default` wall time is now **below 1.0 on 10 of 13
+  items** — the paradox is inverted: `wide_16x32` 1.82x -> 1.40x -> **0.95x**; `flowchart_large_500` 1.89x ->
+  1.20x -> **0.93x**; `wide_8x16` 2.07x -> 1.66x -> 1.29x (the one wide item still above 1.0).
+- **Verdict: KEPT.** Byte-identical under both profiles, monotonic-less-work on the default path, large lean win.
+- **Do-not-retry notes:**
+  - Do **not** use a runtime a11y flag inside the fragment writer — measured +0.1…0.33% default instructions
+    when the same move was made for nodes (`lean_node_streaming_a11y_const_generic.md`).
+  - Do **not** widen the gate from `uniform_a11y(..).is_some()` to "any a11y flag": mixed configs have no raw
+    fragment shape (a `raw_svg` Element cannot take `.attr()`/`.id()`). `mixed_a11y_edge_falls_back_to_slow_path`
+    pins this.
+  - Do **not** relax `render_edge`'s own gate 1 to lean — it is what keeps a live slow path for the parity test
+    to compare against; a universal fast path turns that test back into a tautology.
+  - Harness trap: the corpus keys in `scripts/headtohead/corpus.mjs` are `reps_rs` / `warmup_rs`. A hand-built
+    `corpus.json` copying `i.reps` silently drops the field; the harness then exits 2 with empty stdout.
+- **Next levers (filed):** the labeled-edge fast fragment is still full-a11y-gated (that is why `sequence_20` /
+  `er_40` / sankey-style diagrams gain nothing); class/requirement compartment gates are `bd-1dj4`.
+- **Evidence:** `.benchmarks/lean_edge_streaming_a11y_const_generic.md`.
