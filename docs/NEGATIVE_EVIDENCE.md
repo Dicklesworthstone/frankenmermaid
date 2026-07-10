@@ -11631,6 +11631,22 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
 - **Verdict/retry:** **REJECT THE SAMPLE, NOT THE LEVER.** Change only `MIN_SAMPLE` from 20 ms to **200 ms**
   to amortize co-tenant scheduling; production and paired logic remain unchanged. Require A/A and A/B CV `<5%`.
 
+<!-- cod_fm-flat-csr-attempt-4-whole-batch-phase -->
+### REJECTED SAMPLE / RETRY OPEN: 200 ms whole-arm pairs still track co-tenant phases instead of cancelling them (2026-07-10)
+- **Exact provenance:** `vmi1227854` (`root@109.123.245.77`), one binary/invocation and A/A; verified non-empty,
+  unstripped **856,208-byte** ELF, SHA-256
+  **`104445ca4d1d43b852c5572d92cf789b329108210920404b5766274e3e7bb74b`**. Production hash unchanged; bench
+  hash `85fe892f...6a541b` after the recorded 200 ms retry.
+- **Numbers:** `cyclic_scc_100` single/CSR **81.665/31.031 us**, median paired **2.656x**, A/B CV **8.82%**;
+  `300` **596.688/118.401 us**, **5.003x**, CV **9.05%**; `800` **3,400.542/527.061 us**,
+  **6.532x**, CV **5.60%**. A/A CV was **12.37% / 7.77% / 5.96%**. No row clears both gates.
+- **Exact-ELF self-time:** ORIG target **74.66%**, CAND target **33.28%** (about 13K samples each, 0 lost);
+  CAND CSR construction 3.32%. Full tables and retained paths are in `.benchmarks/barycenter_flat_csr.md`.
+- **Mechanism/retry:** a separate long `fnp-python` benchmark was active. Increasing whole-arm batches 100x
+  cannot cancel phase changes that land asymmetrically. **REJECT THE SAMPLE, NOT THE LEVER.** Keep the 200 ms
+  floor but alternate ORIG/CAND per invocation within each paired sample, summing per-arm time; production,
+  41-round statistic, black-box, checksum, and `<5%` gates stay unchanged.
+
 <!-- cc_fm-harness-calibration-null-floor -->
 ### CALIBRATION: the `cv < 5` gate is UNREACHABLE on a shared worker; the A/A null MEDIAN is the real floor (0.11-0.75%) (2026-07-10)
 - **New bench, separate file, separate owner:** `crates/fm-layout/benches/harness_calibration.rs` (cc_fm). It

@@ -269,3 +269,78 @@ Profiles retained on `vmi1264463`:
 
 **REJECT THE SAMPLE, NOT THE LEVER.** Retry condition: change only the bench sampler floor from 20 ms to
 200 ms so each paired observation amortizes co-tenant scheduling; production and paired logic stay unchanged.
+
+## Attempt 4 — REJECTED SAMPLE (200 ms whole-arm batches remain phase-sensitive)
+
+RCH selected `vmi1227854` (`root@109.123.245.77`) alongside a long-running `fnp-python` benchmark. Raising the
+faster-arm floor to 200 ms narrowed the 800-node row to the gate boundary, but whole-arm batches still expose
+co-tenant phase changes asymmetrically.
+
+- Production hash unchanged; bench SHA-256 with `MIN_SAMPLE = 200 ms`:
+  `85fe892f865b90bd56548973a3708494c564b4364a819800080120724c6a541b`.
+- Exact running/SSH-verified ELF: **856,208 bytes**, SHA-256
+  `104445ca4d1d43b852c5572d92cf789b329108210920404b5766274e3e7bb74b`, x86-64 PIE, not stripped.
+
+| input | A/A ratio | A/A `cv_pct` | A/A MAD | single-pass p50 | flat-CSR p50 | median paired A/B | A/B `cv_pct` | A/B MAD |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `cyclic_scc_100` | 1.0090x | 12.37% | 5.52% | 81.665 us | 31.031 us | 2.656x | 8.82% | 4.55% |
+| `cyclic_scc_300` | 1.0030x | 7.77% | 6.51% | 596.688 us | 118.401 us | 5.003x | 9.05% | 4.99% |
+| `cyclic_scc_800` | 0.9909x | 5.96% | 4.12% | 3,400.542 us | 527.061 us | 6.532x | 5.60% | 3.77% |
+
+Exact-ELF profiling after the co-tenant ended produced about 13K samples per arm with zero lost:
+
+- ORIG target `reorder_rank_by_barycenter::<true,true,false>` **74.66% self-time**.
+- CAND target `reorder_rank_by_barycenter::<true,true,true>` **33.28% self-time**; CSR construction 3.32%.
+
+| ORIG self | named frame |
+|---:|---|
+| 74.66% | `reorder_rank_by_barycenter::<true,true,false>` |
+| 9.38% | `total_crossings` |
+| 2.33% | `malloc` |
+| 1.66% | `nodes_by_rank` |
+| 1.52% | `cfree` |
+| 1.11% | scored-node insertion sort |
+| 1.10% | `crossing_minimization_single_pass` |
+| 0.71% | `count_inversions` |
+| 0.33% | `BTreeMap::bulk_build_from_sorted_iter` |
+| 0.29% | `drop_glue<BTreeMap>` |
+| 0.26%, 0.16% | `RawVecInner::finish_grow` |
+| 0.24% | `realloc` |
+| 0.22% | `BTreeMap::VacantEntry::insert_entry` |
+| 0.21% | crossing-pair insertion sort |
+| 0.12% | `BTreeMap::IntoIter::dying_next` |
+| 0.12% | `RawVec<Reverse<_>>::grow_one` |
+| 1.22–0.15% | unresolved code/kernel addresses (5 frames) |
+
+| CAND self | named frame |
+|---:|---|
+| 33.28% | `reorder_rank_by_barycenter::<true,true,true>` |
+| 23.75% | `total_crossings` |
+| 5.48% | `malloc` |
+| 4.36% | `nodes_by_rank` |
+| 3.32% | `BarycenterScratch::new::<true,true>` |
+| 2.79% | `cfree` |
+| 2.67% | `crossing_minimization_flat_csr` |
+| 2.58% | scored-node insertion sort |
+| 1.49% | `count_inversions` |
+| 0.87% | `BTreeMap::bulk_build_from_sorted_iter` |
+| 0.59%, 0.56% | `RawVecInner::finish_grow` |
+| 0.57% | `drop_glue<BTreeMap>` |
+| 0.56% | `realloc` |
+| 0.43% | `BTreeMap::VacantEntry::insert_entry` |
+| 0.42% | crossing-pair insertion sort |
+| 0.28% | `RawVec<Reverse<_>>::grow_one` |
+| 0.26% | `RawVecInner::grow_amortized` |
+| 0.20% | rank-key `Vec::from_iter` |
+| 0.18%, 0.17% | `BTreeMap::IntoIter::dying_next` |
+| 0.15% | `barycenter_sweep::time_arm` |
+| 4.09–0.11% | unresolved code addresses (8 frames) |
+
+Profiles retained:
+
+- `/tmp/cod_fm_csr_invalid4_orig_104445ca_vmi1227854.perf.data`
+- `/tmp/cod_fm_csr_invalid4_cand_104445ca_vmi1227854.perf.data`
+
+**REJECT THE SAMPLE, NOT THE LEVER.** Increasing a whole-arm batch by 100x did not make it symmetric. Retry by
+alternating ORIG/CAND at each invocation inside every paired sample and summing per-arm time; keep the 200 ms
+floor, production code, 41-round statistic, and all black-box/checksum rules unchanged.
