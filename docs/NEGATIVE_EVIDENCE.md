@@ -10762,3 +10762,42 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
 - **Do-not-retry note:** do not retry this empty between-child guard shape (bundle-label preguard plus
   class-cardinality diagram-type guard) for `large_wide_stages/render/40x80` unless a future profile shows
   those empty passes as a top-5 render-loop hotspot or the class/bundle insertion model changes.
+
+### WIN: incremental dependency-graph endpoint hashing removes Debug-string allocation (2026-07-10)
+- **Agent:** cod_fm. **Lane:** fm-layout incremental edit rerender (`bd-1buv.3`). **Base:** `5003c27`.
+  This deliberately leaves the mined render double-copy lane alone and stays out of cc's render files.
+- **Ledger-first check:** respected closed layout entries for acyclic SCC fast-path, thresholded barycenter
+  accumulation, precomputed adjacency rejection, dense crossing-count position-map/Fenwick rejection,
+  flat-array crossing-count rejection, and FxHashMap cyclic crossing-count rejection. The earlier
+  `stable_layout_request_hash` Debug-string entry was the whole-layout memo key; no prior rejection covered
+  `dependency_graph_cache_key` stringifying each `IrEndpoint` with `format!("{:?}", ...)`.
+- **Profile basis:** release bench builds with symbols preserved for attribution. Incremental profile on
+  `single_node_label_edit/incremental/1000` showed high allocation/string pressure:
+  `_int_malloc` 12.93%, `dependency_graph_cache_key` 6.56%, `String::write_str` 6.14%, `__memmove` 4.11%,
+  `_int_free_chunk` 3.60%, and `MermaidDiagramIr::clone` 3.44%. Crossing profile on
+  `crossing_min/dense_dag/egraph/20` still had `egraph_ordering::crossing_count` at 46.27%, but the
+  directly adjacent crossing-count container shapes are ledger-closed, so the fresh top-ranked non-closed
+  lever was incremental cache-key allocation.
+- **Lever kept:** replace the two per-edge `format!("{:?}", endpoint)` calls in
+  `dependency_graph_cache_key` with the existing structured `hash_endpoint_value` variant/index hasher.
+  This preserves the topology-only key semantics and removes a String allocation for every endpoint hashed.
+- **Same-worker A/B:** ORIG from a clean `git archive HEAD` snapshot at `5003c27`, candidate from the edited
+  checkout, both built and run on the same worker with `cargo bench -p fm-layout --bench incremental_layout
+  --profile release -- --warm-up-time 1 --measurement-time 5 --sample-size 20 --noplot --discard-baseline`.
+  - `single_node_label_edit/incremental/1000`: ORIG **[2.0153, 2.0537, 2.1013] ms**, candidate
+    **[1.1191, 1.1302, 1.1430] ms**; repeat candidate **[1.1238, 1.1435, 1.1614] ms**. Primary candidate
+    sample CV **4.42%**. Ratio: **1.82x faster** by first medians, **44.96% lower latency**.
+  - `five_node_cluster_edit/incremental/1000`: ORIG **[2.9528, 3.0204, 3.0740] ms**, candidate
+    **[1.0728, 1.0807, 1.0888] ms**; repeat candidate **[1.0567, 1.0699, 1.0855] ms**. Ratio:
+    **2.79x faster**, **64.22% lower latency**.
+- **Behavior proof:** added `dependency_graph_cache_key_tracks_topology_not_label_text`: relabeling keeps the
+  topology key stable, while rewiring an edge changes it. Determinism is preserved because the hasher consumes
+  the same endpoint variant/index information in stable order without constructing an intermediate string.
+- **Validation:** `cargo fmt --check -p fm-layout`; `rch exec -- cargo check -p fm-layout --all-targets
+  --quiet` passed on `hz2`; `cargo test -p fm-layout dependency_graph_cache_key_tracks_topology_not_label_text
+  --quiet` passed locally after an `hz1` RCH infrastructure miss (`highs-sys` bindgen could not find
+  `libclang`); `cargo clippy -p fm-layout --all-targets --quiet -- -D warnings` passed locally. UBS was run
+  on `crates/fm-layout/src/lib.rs`; it exits 1 on the existing fm-layout baseline/heuristics while reporting
+  formatting, clippy, cargo check, and test-build clean.
+- **Verdict: KEPT.** This is a one-lever incremental-layout allocation cut with reproducible same-worker
+  improvement above the 3% gate and unchanged topology-key behavior.

@@ -1667,8 +1667,8 @@ fn dependency_graph_cache_key(ir: &MermaidDiagramIr) -> u64 {
         }
     }
     for edge in &ir.edges {
-        hash_str(&mut hash, &format!("{:?}", edge.from));
-        hash_str(&mut hash, &format!("{:?}", edge.to));
+        hash_endpoint_value(&mut hash, edge.from);
+        hash_endpoint_value(&mut hash, edge.to);
     }
     for subgraph in &ir.graph.subgraphs {
         hash_u64(&mut hash, subgraph.id.0 as u64);
@@ -20290,6 +20290,31 @@ mod tests {
         );
         assert_eq!(second.trace.incremental.recomputed_nodes, 1);
         assert_eq!(second.trace.incremental.total_nodes, second_ir.nodes.len());
+    }
+
+    #[test]
+    fn dependency_graph_cache_key_tracks_topology_not_label_text() {
+        let baseline = labeled_graph_ir(4, &[(0, 1), (1, 2), (2, 3)]);
+        let baseline_key = crate::dependency_graph_cache_key(&baseline);
+
+        let mut relabeled = baseline.clone();
+        let label_index = relabeled.labels.len();
+        relabeled.labels.push(IrLabel {
+            text: "Renamed without topology change".to_string(),
+            span: Span::default(),
+        });
+        assert!(relabeled.nodes.get_mut(1).is_some());
+        if let Some(node) = relabeled.nodes.get_mut(1) {
+            node.label = Some(IrLabelId(label_index));
+        }
+        assert_eq!(baseline_key, crate::dependency_graph_cache_key(&relabeled));
+
+        let mut rewired = baseline.clone();
+        assert!(rewired.edges.get_mut(1).is_some());
+        if let Some(edge) = rewired.edges.get_mut(1) {
+            edge.to = IrEndpoint::Node(IrNodeId(3));
+        }
+        assert_ne!(baseline_key, crate::dependency_graph_cache_key(&rewired));
     }
 
     #[test]
