@@ -11571,3 +11571,27 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
 - **Coordination:** `crates/fm-layout/**` is the peer's lane (they are mid-implementation of flat-CSR incidence,
   `bd-1buv.4`, a third const arm). They **adopted the null control into their harness** -- `paired()` is now used
   by their `SinglePass` vs `FlatCsr` A/B. I committed nothing into `fm-layout` this turn.
+
+<!-- cod_fm-flat-csr-attempt-1-noisy-sample -->
+### REJECTED SAMPLE / RETRY OPEN: flat-CSR barycenter direction is large, but loaded-worker CV invalidates attempt 1 (2026-07-10)
+- **Ledger-first / one lever:** post-single-pass exact-ELF profiling still put
+  `reorder_rank_by_barycenter::<true,true>` first at **76.84% self-time**, and the void `Vec<Vec>` adjacency row
+  explicitly licenses the different two-array flat-CSR primitive after packed rank plus packed scratch. CAND
+  builds one offsets vector and one neighbors vector once, then visits only each rank's incident edges; ORIG is
+  the landed full-edge single pass. `total_crossings` was not changed.
+- **Exact substrate/provenance:** one fail-closed RCH invocation on `vmi1149989` (`root@212.90.121.76`), one
+  binary, alternating paired rounds, inputs and complete results black-boxed, printed checksums, plus a
+  same-invocation A/A null control. Verified non-empty unstripped ELF: **857,696 bytes**, SHA-256
+  **`ff60655deccf2de0a8deb07a816bc8df2a89e5264fee0d1a695a8032d11e5e8e`**. Pre/post source hashes match:
+  `lib.rs` `68ed92d2...d7554f7`; bench `e89a93c1...a391834`.
+- **Numbers:** `cyclic_scc_100` single/CSR p50 **106.482/35.954 us**, median paired **2.802x**, A/B
+  `cv_pct` **23.95%**; `300` **871.641/201.208 us**, **4.549x**, CV **20.35%**; `800`
+  **3,753.420/549.610 us**, **6.788x**, CV **47.30%**. A/A controls were 0.9885x / **17.42% CV**,
+  0.9870x / **13.44%**, and 0.9966x / **31.09%**. None clears the `<5%` rule.
+- **Ledger integrity, exact same ELF:** ORIG target frame **76.57% self-time** (about 5K samples, 0 lost);
+  CAND target frame **36.97%** (about 5K, 0 lost). CAND `BarycenterScratch::new` including the CSR build is
+  3.52%. Full `>=0.1%` ranked tables and retained perf paths are in
+  `.benchmarks/barycenter_flat_csr.md`.
+- **Why rejected / retry condition:** a concurrent `frankenpandas` Cargo/rustc build was live on the worker.
+  **REJECT THE SAMPLE, NOT THE LEVER.** Retry the unchanged source only on a worker with no concurrent
+  Cargo/rustc/benchmark process, and require both same-invocation A/A and real A/B `cv_pct < 5` before a verdict.
