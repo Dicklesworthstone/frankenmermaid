@@ -1,0 +1,32 @@
+{
+  "_comment": "Provenance pins for the frankenmermaid <-> mermaid-js head-to-head. Any drift here invalidates the recorded ratios. Regenerate the bundle hash with `node mermaid_bench.mjs --pin`, and the corpus hashes with `node run.mjs --update-pins`.",
+  "mermaid": {
+    "version": "11.15.0",
+    "url": "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js",
+    "sha256": "70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de",
+    "npm_dist_integrity": "sha512-pTMbcf3rWdtLiYGpmoTjHEpeY8seiy6sR+9nD7LOs8KfUbHE4lOUAprTRqRAcWSQ6MQpdX+YEsxShtGsINtPtw==",
+    "security_level": "strict",
+    "max_edges": 100000,
+    "max_text_size": 5000000,
+    "_security_level_note": "mermaid's own default is 'strict' (DOMPurify sanitization on). Earlier ad-hoc comparators used 'loose', which makes mermaid *faster* and therefore understates our speedup. We use mermaid's default so the comparison reflects what a mermaid user actually runs.",
+    "_limits_note": "maxEdges/maxTextSize are raised above mermaid's defaults (500 / 50000) only so the large corpus items render at all. They are guardrails, not performance knobs."
+  },
+  "chromium": {
+    "binary": "/usr/bin/chromium-browser",
+    "_note": "Snap-confined Chromium's `home` interface denies hidden dirs under $HOME, so each run gets a fresh mkdtemp profile under ~/snap/chromium/common. Diagram text is injected over CDP; the browser never reads the corpus from disk."
+  },
+  "corpus_sha256": {
+    "flowchart_small_10": "b5402490faa78c6a7c71554296d03b46016ae1156d7cd38d258b280363b6900a",
+    "flowchart_medium_100": "74bd26f73724626255642c427d36844d8a75f7bdf7fd47a69f8541a3ec9aea22",
+    "flowchart_large_500": "7012902b9fdaa3ff2d7a2d0c327eaaea543b347b51155521b86daf7aacd9ec83",
+    "wide_8x16": "61f1747cefcc13449ebf5e9c08b1f039dbf9b218f27b34e19d640076bf0004aa",
+    "wide_12x24": "e05519607415f5370b530fa540bc9fe4374f9a14c28bd444a1ecb91aa2219959",
+    "wide_16x32": "bcd6776815763d34d14d46cc6920a692dd70842c6ec83207d31e9a4b4c11f08b",
+    "dense_dag_200": "a32522f3b7080f48621a9e2cc226920f5dd59eb4239fdd1f480187df0063b3e5",
+    "cyclic_scc_100": "dbc553f665d05c10084949154ba4f24f58a4a363b5ffcb419bedfcc5daf23ab6",
+    "sequence_20": "31c0dd6bc24b571c01c80d6c24d9e6e179f035cd82d226c71d952e8e52498db0",
+    "class_50": "d1d7ef8c8e7c8d1dab2da8fbd56565dc97148e8fb1651d23fe43140e8c4ef831",
+    "state_40": "08a5c38ed30e5aaeddf02f59839e6e36ffa5e91960e3fb966d68281e8937eec3",
+    "er_40": "91764d7d6dd294a65f25e3de7ef9f619ff6b1592a12a0dd0b92de816e2b756f2"
+  }
+}

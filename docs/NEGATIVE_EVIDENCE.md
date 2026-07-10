@@ -10573,3 +10573,65 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   the known `hz1` `highs-sys` libclang worker failure, then passed on `ovh-b`. Workspace clippy passed on
   `ovh-b` with `cargo clippy --workspace --all-targets -- -D warnings`. `cargo fmt --check` and
   `git diff --check` passed locally.
+
+### Pinned mermaid-js head-to-head harness (`bd-1buv.1`) — KEPT (2026-07-09)
+- **Agent:** cc_fm. **HEAD:** `5f3e361`. **What landed:** `scripts/headtohead/` (corpus generators,
+  zero-dependency CDP comparator, driver) + `crates/fm-cli/examples/headtohead.rs`. One command
+  reproduces every dominance ratio; no optimization bead may close without a green run.
+- **Provenance pin:** mermaid `11.15.0`, bundle
+  `https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js`,
+  sha256 `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`, verified on every run
+  (mismatch = hard failure). `securityLevel: "strict"` — mermaid's own default, and *slower* than the
+  `loose` used by earlier ad-hoc comparators, so the recorded margin is understated, not inflated.
+  Each of the 12 corpus inputs is SHA-256 pinned in `scripts/headtohead/pins.json`; a generator edit
+  fails the run (exit 3) instead of silently moving the baseline.
+- **No npm install / no puppeteer.** `mmdc` cannot render in 11.15.0 (bundled `dist/index.html` is an
+  81-byte stub). The harness drives system Chromium `150.0.7871.46` over the DevTools Protocol using
+  node's built-in `WebSocket`/`fetch`, loading the pinned CDN bundle a browser user would load.
+- **Fairness:** both engines consume byte-identical input (the driver cross-checks each engine's
+  reported input sha256 and fails on mismatch). `mermaid.render()` = parse + layout + serialize to an
+  SVG string; the Rust side times exactly those three phases. The frankenmermaid runner is pinned to
+  ONE core (auto-selected as the least busy); Chromium keeps all 64. A mermaid render that throws or
+  returns the "Syntax error" placeholder is `status: "error"` and fails the run — never a silent win.
+- **Methodology corrections this harness makes over the ad-hoc scripts it replaces:**
+  1. *Batched sampling.* A 69 us pipeline cannot be timed one iteration at a time; a single timer
+     interrupt is a large share of the sample. Iterations are batched until a timed sample spans
+     >= 2 ms, then divided. This alone moved `flowchart_small_10` from MAD 6.8% (gate fail) to 0.9%.
+  2. *Gate on MAD, not CV.* Timing noise on a shared box is one-sided — preemption only ever makes an
+     iteration slower — so the right tail inflates sd/CV while the bulk stays tight. The gate is
+     median-absolute-deviation <= 5% of the median (blocking for us, advisory for mermaid). `cv_pct`
+     is still recorded.
+  3. *Two estimators.* `min` is the least-contaminated estimate under one-sided noise. Both the p50-
+     and min-based speedups are reported; **material disagreement means the run was noisy and the
+     claim is not robust.** This immediately caught a `wide_12x24` p50 outlier (4747x by p50 vs 2976x
+     by min — mermaid-side noise, not a real 4747x).
+  4. *Determinism check in-band.* Output length is verified against a reference render every timed
+     iteration; full bytes once outside the timed region. A nondeterministic render fails the run.
+- **GREEN RUN (2026-07-09, rev `5f3e361`, Threadripper PRO 5975WX, load1 ~15, 12/12 items pass the
+  MAD gate, max MAD 3.0%):** frankenmermaid full pipeline p50 vs mermaid 11.15.0 render p50 —
+  `flowchart_small_10` 0.069/30.4 ms **442x**; `flowchart_medium_100` 0.282/217.4 ms **770x**;
+  `flowchart_large_500` 0.424/1233.9 ms **2910x**; `wide_8x16` 0.202/438.6 ms **2174x**;
+  `wide_12x24` 0.386/1832.7 ms **4747x** (min-estimator 2976x — prefer the latter);
+  `wide_16x32` (512 nodes / 960 edges) 0.677/2906.8 ms **4297x**; `dense_dag_200` 0.548/1612.6 ms
+  **2945x**; `cyclic_scc_100` 0.716/453.7 ms **633x**; `sequence_20` 0.161/33.6 ms **209x**;
+  `class_50` 0.223/289.1 ms **1297x**; `state_40` 0.179/132.2 ms **739x**; `er_40` 0.236/98.7 ms
+  **417x**. **Median 770x by p50, 740x by min; range 209x–4747x.** Output bytes: mermaid/frankenmermaid
+  1.25x–4.65x (default a11y profile), 1.47x–6.11x (lean profile).
+- **Sanity check on the absolute numbers (they look too good, so they were verified):** `perf stat`
+  two-point delta on `flowchart_large_500`, full pipeline = **6,670,183 instructions / 1,783,080
+  cycles / iteration, IPC 3.74**, and 1.783M cycles at ~3.95 GHz = 451 us, matching the independently
+  measured profharness median of 451.6 us and the harness p50 of 424 us. Instructions, cycles, wall
+  clock and an independent harness all agree; the sub-millisecond pipeline is real.
+- **The 758x figure in `scripts/mermaid_headtohead_cc.mjs`'s header comment is superseded**: same
+  workload (`wide_16x32`) now measures 4297x, because that script used `securityLevel: 'loose'` and an
+  unpinned corpus, and because ~20 perf levers have landed since. The old script is left in place; new
+  claims must come from `scripts/headtohead/`.
+- **Finding surfaced by the harness (not yet fixed, see the lean-fast-path entry):** the lean output
+  profile (`A11yConfig::none()`) is 1.47x–6.11x smaller than mermaid's output but **1.5x–2.1x SLOWER
+  than our own default profile** on 10/12 items, because the streaming node/edge fast paths are gated
+  on `a11y.aria_labels && keyboard_nav && text_alternatives` and lean output falls back to the
+  per-element `Element` builder. Smaller output currently costs ~2x render time. That is the concrete
+  next lever, and it needs no default-output change.
+- **Do-not-retry note:** do not re-pin the bundle or corpus to "fix" a failing run — a hash mismatch or
+  corpus drift means the baseline moved, and re-pinning silently destroys comparability. Do not compare
+  absolute ms across runs on this box (load swings 2x); compare ratios, and prefer the min estimator.

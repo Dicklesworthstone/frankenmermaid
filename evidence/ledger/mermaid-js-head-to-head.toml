@@ -3469,3 +3469,62 @@ bench_syntax_note = "Release-profile benches used --profile release, matching th
 [post_measurement_requirement_metadata_block_dispatch_2026_07_09.decision]
 kept = true
 reason = "Same-worker ovh-a release Criterion cuts requirement_stages/parse/512 from 299.96 us to 290.76 us (candidate/ORIG 0.9693x, 1.03x faster, p=0.00) by dispatching requirement block metadata before diagram-level keyword scans and fusing field handling through one colon split."
+
+[[run]]
+harness = "scripts/headtohead/run.mjs"
+harness_bead = "bd-1buv.1"
+schema = "frankenmermaid.headtohead.v1"
+status = "green"
+date = "2026-07-09"
+agent = "cc_fm"
+rev = "5f3e361"
+comparator = "mermaid-js 11.15.0"
+comparator_source = "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js"
+comparator_sha256 = "70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de"
+comparator_runtime = "Chromium 150.0.7871.46 headless, DevTools Protocol, no npm install"
+security_level = "strict"
+machine = "AMD Ryzen Threadripper PRO 5975WX (32c/64t), load1 ~15"
+fm_pinned_to_one_core = true
+dispersion_gate = "median-absolute-deviation <= 5% of median (blocking for frankenmermaid)"
+items_total = 12
+items_passing_gate = 12
+max_mad_pct = 3.0
+notes = [
+  "frankenmermaid metric = full parse+layout+render-to-SVG p50; mermaid metric = mermaid.render() p50.",
+  "Both engines consume byte-identical, SHA-256-pinned input; a mismatch fails the run.",
+  "Both p50- and min-based speedups recorded; disagreement flags a noisy run (wide_12x24 did).",
+  "Absolute ms are not comparable across runs on this shared box; ratios are.",
+]
+
+[run.speedup_p50]
+flowchart_small_10 = 442.0
+flowchart_medium_100 = 770.0
+flowchart_large_500 = 2910.0
+wide_8x16 = 2174.0
+wide_12x24 = 4747.0
+wide_16x32 = 4297.0
+dense_dag_200 = 2945.0
+cyclic_scc_100 = 633.0
+sequence_20 = 209.0
+class_50 = 1297.0
+state_40 = 739.0
+er_40 = 417.0
+median = 770.0
+
+[run.speedup_min_estimator]
+median = 740.0
+wide_12x24 = 2976.0
+wide_16x32 = 4183.0
+note = "Preferred estimator under one-sided scheduler noise."
+
+[run.output_bytes_ratio]
+description = "mermaid bytes / frankenmermaid bytes"
+default_profile_min = 1.25
+default_profile_max = 4.65
+lean_profile_min = 1.47
+lean_profile_max = 6.11
+
+[run.open_finding]
+id = "lean-profile-is-slower"
+summary = "A11yConfig::none() output is 1.47-6.11x smaller than mermaid's but 1.5-2.1x SLOWER than our own default profile: the streaming node/edge fast paths are gated on full a11y, so lean output falls back to the per-element Element builder."
+next_lever = "Teach the streaming fast path to emit lean fragments. No default-output change; no golden churn."
