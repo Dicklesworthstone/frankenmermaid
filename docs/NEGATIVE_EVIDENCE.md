@@ -11689,3 +11689,40 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
 - **What is NOT a knob:** `rch` cannot pin a worker (`RCH_WORKER` is ignored; `RCH-E301` refuses non-compilation
   commands). Quiescing the tree is a coordination act, not a code change.
 - **Adoption:** `docs/CROSS_REPO_RECOMMENDATION_bench_harness_contract.md` states plainly what a repo must do.
+
+<!-- cc_fm-published-calibration-settings -->
+### PUBLISHED: per-function calibrated harness settings + bootstrap-CI decidability gate (2026-07-10)
+- **Follow-up to the null-floor calibration.** `harness_calibration.rs` now sweeps `min_sample x min_of x ARM`
+  (3 arms: btreemap / dense_rank / single_pass, all in committed HEAD -- the peer's flat_csr is NOT referenced),
+  reports a **bootstrap 95% CI on each A/A null median** (2000 resamples, deterministic), and derives
+  `min_decidable = 1 + max(|ci-1|)` per config. Worker `hz2`, ELF sha256
+  `245f949bb88038248b248c559609f52e31b39d005c13458e7c9fc833cd7b3278`, source verified unchanged across the run,
+  18 configs, 19.8 s.
+- **THE FLOOR IS PER-FUNCTION.** At the naive `2ms/x1` default the A/A floor was **1.048x (btreemap), 1.033x
+  (single_pass), 1.023x (dense_rank)** -- a 2.1x spread on one worker. A config that decides a lever for one
+  function may not for another.
+- **PUBLISHED SETTINGS -- cheapest config that decides an effect of size X (2x margin, cost = min_sample*min_of):**
+
+  | function | 1.02x | 1.05x | 1.10x | 1.25x | 1.50x |
+  |---|---|---|---|---|---|
+  | btreemap | 10ms/x1 | 2ms/x3 | 2ms/x1 | 2ms/x1 | 2ms/x1 |
+  | dense_rank | 2ms/x3 | 2ms/x1 | 2ms/x1 | 2ms/x1 | 2ms/x1 |
+  | single_pass | 2ms/x3 | 2ms/x3 | 2ms/x1 | 2ms/x1 | 2ms/x1 |
+
+  A **>=1.10x claim is decidable in the cheapest config** for every function; a **1.02x claim needs min_of=3** and
+  still sits near the floor; **nothing sub-1.01x is decidable** on this hardware. Sensible lane default:
+  **2ms/x3** (floor <= 1.012x for every function).
+- **THREE FINDINGS OVERTURNING THE NAIVE DEFAULTS:** (1) **`min_of` is the dominant knob, not `min_sample`** --
+  at 2ms, x1->x3 moved floors 1.048->1.012 / 1.033->1.004 / 1.023->1.008 (the min of k timings discards one-sided
+  outliers a longer sample cannot); (2) **`min_sample` beyond ~10ms buys nothing and 40ms can be worse** (a longer
+  sample is a bigger preemption target); `barycenter_sweep`'s `2ms/x1` default is the WORST cell for 2 of 3
+  functions; (3) **`cv` does NOT track decidability** -- `dense_rank 2ms/x3` cv 2.37% floor 1.008x vs `10ms/x3`
+  cv 9.66% (4x worse) floor 1.003x (better). Gating on `cv` picks the wrong config: empirical proof the median-CI
+  floor is the gate.
+- **GATE RULE:** report `cv`; gate the claim on the arm's A/A null 95% CI -- *decidable iff X lies outside the CI*,
+  2x margin preferred. Certified wins rechecked: single-pass 3.669x and dense-rank 1.310x clear even the worst
+  1.048x floor by ~78x / ~6.5x.
+- **Folded into the cross-repo contract** (`docs/CROSS_REPO_RECOMMENDATION_bench_harness_contract.md`): now three
+  mechanisms composing in order -- ELF sha256 (which binary ran) -> A/A null (this run's floor) -> calibration
+  (which config decides your effect). Adoption checklist step 7 names the per-function sweep + median-CI gate.
+- **Evidence:** `.benchmarks/harness_calibration_published_settings.md`. No other repo touched.
