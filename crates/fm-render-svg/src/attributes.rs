@@ -407,7 +407,7 @@ const DOTPAIRS3: [&str; 100] = [
 /// Emitting the high 1-2 digits then the low pair inline removes that call for the common
 /// range. Byte-identical: the high group is `DIGITS1`/`PAIRS2` exactly as the recursion would
 /// have chosen, followed by `PAIRS2[n % 100]`. Values ≥ 10000 keep the recursive tail.
-fn write_uint_into<W: fmt::Write>(f: &mut W, n: u64) -> fmt::Result {
+pub(crate) fn write_uint_into<W: fmt::Write>(f: &mut W, n: u64) -> fmt::Result {
     if n < 10 {
         f.write_str(DIGITS1[n as usize])
     } else if n < 100 {

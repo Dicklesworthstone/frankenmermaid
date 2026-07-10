@@ -12107,3 +12107,27 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   recomputed every render) — a design/state change, not a byte-identical micro-lever, and owner-gated.
 - **Kept:** `render_nonflowchart` bench (first bench covering sankey/pie/sequence render — closes the coverage gap
   the original reject flagged). No production code changed.
+
+<!-- cc_fm-accent-digit-table-WIN -->
+### WIN: accent index via digit-table, not `write!` — flowchart render up to 4.8%, byte-identical (2026-07-10)
+- **Profile-first.** perf on mindmap render: `<core::fmt::Formatter>::pad_integral::write_prefix` **1.87%** inside
+  `write_common_node_fragment_into` — the std Formatter machinery for the **accent palette index**, written per
+  node as `fm-node-accent-{accent}` via `write!(f, "{accent}")`.
+- **Prior art / retry-condition:** the ledger already fixed this exact anti-pattern for COORDINATES (`<i32 as
+  Display>::fmt + pad_integral = ~8.5% of render`, digit-table `e79a7bd`). The **accent** integer was never
+  covered -- two `write!("{accent}")` sites (`write_common_node_fragment_into`, `write_subroutine_node_fragment_into`).
+- **Lever (one):** make `attributes::write_uint_into` (existing digit-table u64 writer) `pub(crate)`; replace both
+  `write!(<buf>, "{accent}")` with `write_uint_into(<buf>, accent as u64)`. Removes the per-node
+  `format_args!`+`Formatter`+`pad_integral` chain.
+- **Byte-identical:** `write_uint_into` emits the same decimal digits as `write!("{accent}")` (incl. 0->"0");
+  `accent as u64` from usize is exact. `node_fast_fragment_matches_render` (exact-byte pin on the streamed node
+  fragment, covers `fm-node-accent-N`) passes; 247 fm-render-svg lib tests; golden_svg only the pre-existing
+  `gantt_basic` (gantt renders bars, not common-node accents); fmt clean; ubs 14->14.
+- **Measurement (same-worker `ovh-a`, `render_svg/flowchart`, gate on median):**
+  small_10 47.713us vs 48.099us = 0.992x (0.8%, overlap); **medium_100 86.602us vs 89.250us = 0.970x (3.0%,
+  non-overlapping)**; **large_500 149.77us vs 157.34us = 0.952x (4.8%, non-overlapping)**. **Scales cleanly with
+  node count** (0.8%->3.0%->4.8%) = real per-node mechanism, not noise; CIs non-overlapping on the two decision
+  rows, above the ~1% floor. (A 2nd pair hit a slow/loaded worker, 40%-wide CI, timed out -- discarded.)
+- **Scope:** every diagram whose nodes take the common-node streaming path; larger diagrams benefit more. The one
+  remaining `write!`-Formatter instance the coordinate digit-table win missed. crates/fm-render-svg is my lane
+  (cod on parser/edge-routing). Evidence: `.benchmarks/accent_digit_table_WIN.md`.

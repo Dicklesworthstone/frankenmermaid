@@ -5249,7 +5249,9 @@ fn write_subroutine_node_fragment_into(
     out.push_str("<g id=\"");
     fm_core::write_mermaid_node_element_id_into(out, node_id, node_index);
     out.push_str("\" class=\"fm-node fm-node-accent-");
-    let _ = write!(out, "{accent}");
+    // `accent` (small palette index) via the digit-table writer, not `write!`'s Formatter/`pad_integral`
+    // machinery (measured ~1.87% of node-heavy render). Byte-identical: same decimal digits.
+    let _ = crate::attributes::write_uint_into(out, accent as u64);
     out.push(' ');
     out.push_str(node_shape_css_class(fm_core::NodeShape::Subroutine));
     out.push_str(user_classes);
@@ -5394,7 +5396,8 @@ fn write_common_node_fragment_into<const A11Y: bool>(
     // id can never contain `& < > " '`; pinned by `node_fast_fragment_matches_render`.
     fm_core::write_mermaid_node_element_id_into(f, node_id, node_index);
     f.push_str("\" class=\"fm-node fm-node-accent-");
-    let _ = write!(f, "{accent}");
+    // `accent` (small palette index) via the digit-table writer, not `write!`'s Formatter/`pad_integral`.
+    let _ = crate::attributes::write_uint_into(f, accent as u64);
     f.push(' ');
     f.push_str(node_shape_css_class(shape));
     // Simple custom classes (`class X foo` / `:::foo` on nodes with no state-keyword or special class);
