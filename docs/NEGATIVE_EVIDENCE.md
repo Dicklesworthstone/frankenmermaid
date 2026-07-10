@@ -11614,6 +11614,23 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   one scheduler interrupt dominates a sample. **REJECT THE SAMPLE, NOT THE LEVER.** Keep production and paired
   logic unchanged, raise only `MIN_SAMPLE` to 20 ms, and require same-invocation A/A and A/B CV both `<5%`.
 
+<!-- cod_fm-flat-csr-attempt-3-loaded-20ms -->
+### REJECTED SAMPLE / RETRY OPEN: 20 ms flat-CSR samples improve dispersion but do not amortize a co-tenant benchmark (2026-07-10)
+- **Worker/substrate:** `hz2` (`root@178.104.77.29`) simultaneously ran a separate 10+ minute `fnp-python`
+  benchmark. One binary/invocation, alternating pairs, black-boxed inputs/full results, checksums, and A/A.
+- **Exact provenance:** verified non-empty, unstripped **858,832-byte** ELF, SHA-256
+  **`adcd806a20f7c01192a0d69d3f573373d079c57e088d39e7d10efae16ef83570`**; production hash unchanged,
+  bench hash `302420c7...b59099` after the recorded 20 ms retry change.
+- **Numbers:** `cyclic_scc_100` single/CSR **84.185/29.686 us**, median paired **2.800x**, A/B CV **7.40%**;
+  `300` **653.662/108.420 us**, **6.087x**, CV **19.11%**; `800` **3,773.937/482.243 us**,
+  **7.774x**, CV **12.04%**. A/A was 1.0007x / **11.40% CV**, 0.9955x / **13.51%**, and
+  0.9872x / **8.23%**. Direction again reproduces, but every row misses `<5%`.
+- **Exact-ELF self-time:** `hz2` lacks perf, so the SHA-identical ELF was streamed without a local artifact to
+  `vmi1264463` and re-verified there. ORIG target **68.36%** (10K samples / 0 lost); CAND target **25.93%**
+  (12K / 0 lost), CSR construction 3.11%. Full ranked tables and retained paths are in the evidence file.
+- **Verdict/retry:** **REJECT THE SAMPLE, NOT THE LEVER.** Change only `MIN_SAMPLE` from 20 ms to **200 ms**
+  to amortize co-tenant scheduling; production and paired logic remain unchanged. Require A/A and A/B CV `<5%`.
+
 <!-- cc_fm-harness-calibration-null-floor -->
 ### CALIBRATION: the `cv < 5` gate is UNREACHABLE on a shared worker; the A/A null MEDIAN is the real floor (0.11-0.75%) (2026-07-10)
 - **New bench, separate file, separate owner:** `crates/fm-layout/benches/harness_calibration.rs` (cc_fm). It

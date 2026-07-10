@@ -192,3 +192,80 @@ Retained profiles:
 
 **REJECT THE SAMPLE, NOT THE LEVER.** Retry condition: leave production code and the paired algorithm unchanged,
 raise only `MIN_SAMPLE` from 2 ms to 20 ms, then require A/A and A/B `cv_pct < 5` in the same invocation.
+
+## Attempt 3 — REJECTED SAMPLE (20 ms still exposes a co-tenant benchmark)
+
+RCH selected `hz2` (`root@178.104.77.29`) while a separate `fnp-python` benchmark had already occupied the
+worker for more than ten minutes. The 20 ms sampler reduced dispersion but did not clear the gate.
+
+- Production SHA-256 remained `68ed92d2...d7554f7`; the only source change from attempt 2 was bench
+  `MIN_SAMPLE = 20 ms`, producing bench SHA-256
+  `302420c7c5b6f3291178c21169455f60ca025550ebd6759267a9ffa622b59099`.
+- Exact running ELF: **858,832 bytes**, SHA-256
+  `adcd806a20f7c01192a0d69d3f573373d079c57e088d39e7d10efae16ef83570`, x86-64 PIE, not stripped.
+
+| input | A/A ratio | A/A `cv_pct` | A/A MAD | single-pass p50 | flat-CSR p50 | median paired A/B | A/B `cv_pct` | A/B MAD |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `cyclic_scc_100` | 1.0007x | 11.40% | 1.31% | 84.185 us | 29.686 us | 2.800x | 7.40% | 2.61% |
+| `cyclic_scc_300` | 0.9955x | 13.51% | 2.99% | 653.662 us | 108.420 us | 6.087x | 19.11% | 4.93% |
+| `cyclic_scc_800` | 0.9872x | 8.23% | 2.63% | 3,773.937 us | 482.243 us | 7.774x | 12.04% | 3.39% |
+
+`hz2` has no `perf`; the exact ELF was streamed without a local artifact to `vmi1264463`, re-verified there by
+size, SHA-256, and build ID, and retained at `/tmp/cod_fm_barycenter_adcd806a20f7c01192a0d69d3f573373`.
+Exact-ELF profiles there produced 10K/12K samples with zero lost:
+
+- ORIG: target `reorder_rank_by_barycenter::<true,true,false>` **68.36% self-time**.
+- CAND: target `reorder_rank_by_barycenter::<true,true,true>` **25.93% self-time**; CSR construction 3.11%.
+
+Ranked named frames at or above 0.10%:
+
+| ORIG self | frame |
+|---:|---|
+| 68.36% | `reorder_rank_by_barycenter::<true,true,false>` |
+| 12.57% | `total_crossings` |
+| 3.75% | `malloc` |
+| 1.81% | `nodes_by_rank` |
+| 1.64% | `crossing_minimization_single_pass` |
+| 1.61% | `cfree` |
+| 1.05% | `count_inversions` |
+| 0.85% | scored-node insertion sort |
+| 0.38% | `BTreeMap::bulk_build_from_sorted_iter` |
+| 0.32% | `realloc` |
+| 0.25%, 0.20% | `RawVecInner::finish_grow` |
+| 0.20% | `BTreeMap::IntoIter::dying_next` |
+| 0.18% | crossing-pair insertion sort |
+| 0.15% | `RawVec<Reverse<_>>::grow_one` |
+| 0.12% | `BTreeMap::VacantEntry::insert_entry` |
+| 0.11% | `barycenter_sweep::time_arm` |
+| 0.82–0.13% | unresolved code addresses (8 frames) |
+
+| CAND self | frame |
+|---:|---|
+| 27.11% | `total_crossings` |
+| 25.93% | `reorder_rank_by_barycenter::<true,true,true>` |
+| 6.29% | `malloc` |
+| 4.70% | `nodes_by_rank` |
+| 4.02% | `cfree` |
+| 3.15% | `crossing_minimization_flat_csr` |
+| 3.11% | `BarycenterScratch::new::<true,true>` |
+| 2.60% | `count_inversions` |
+| 2.14% | scored-node insertion sort |
+| 0.84% | `BTreeMap::bulk_build_from_sorted_iter` |
+| 0.79% | `realloc` |
+| 0.58%, 0.55% | `RawVecInner::finish_grow` |
+| 0.49% | `BTreeMap::VacantEntry::insert_entry` |
+| 0.41% | crossing-pair insertion sort |
+| 0.38% | `drop_glue<BTreeMap>` |
+| 0.32%, 0.28% | `BTreeMap::IntoIter::dying_next` |
+| 0.26% | `RawVec<Reverse<_>>::grow_one` |
+| 0.20% | `barycenter_sweep::time_arm` |
+| 0.18% | `RawVecInner::grow_amortized` |
+| 2.44–0.10% | unresolved code addresses (16 frames) |
+
+Profiles retained on `vmi1264463`:
+
+- `/tmp/cod_fm_csr_invalid3_orig_adcd806a_vmi1264463.perf.data`
+- `/tmp/cod_fm_csr_invalid3_cand_adcd806a_vmi1264463.perf.data`
+
+**REJECT THE SAMPLE, NOT THE LEVER.** Retry condition: change only the bench sampler floor from 20 ms to
+200 ms so each paired observation amortizes co-tenant scheduling; production and paired logic stay unchanged.
