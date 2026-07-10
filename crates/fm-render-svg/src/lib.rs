@@ -5624,11 +5624,14 @@ fn write_requirement_node_fragment_into(
     out.push_str(" fm-node-shape-rect");
     if let Some(risk) = meta.risk.as_deref() {
         out.push_str(" fm-req-risk-");
-        write_sanitized_css_token_into(out, &risk.to_ascii_lowercase());
+        // `write_sanitized_css_token_into` lowercases every ASCII-alphanumeric char and maps the rest
+        // to `-` regardless of case, so a pre-`to_ascii_lowercase()` (a per-node throwaway String) is
+        // redundant — passing the raw `&str` is byte-identical.
+        write_sanitized_css_token_into(out, risk);
     }
     if let Some(req_type) = meta.requirement_type.as_deref() {
         out.push_str(" fm-req-type-");
-        write_sanitized_css_token_into(out, &req_type.to_ascii_lowercase());
+        write_sanitized_css_token_into(out, req_type);
     }
     if meta.verify_method.is_some() {
         out.push_str(" fm-req-has-verify");

@@ -12153,3 +12153,24 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   512) -- same curve a38a61e measured (0.8%->3.0%->4.8%).
 - **Scope:** class + requirement diagrams; sub-noise below ~500 nodes; monotonic-less-work so can only help.
   Follow-up completing a38a61e, not a new lever. Evidence: `.benchmarks/accent_digit_table_harvest_complete_WIN.md`.
+
+### WIN: drop redundant per-node to_ascii_lowercase() before the self-lowercasing CSS-token sanitizer (2026-07-10)
+
+- **Mechanism (profile-first: render ~66% of pipeline, byte primitives mature → hunt redundant WORK, not bytes):**
+  `write_requirement_node_fragment_into` (requirement fast path, benched by `requirement_stages/render`) called
+  `write_sanitized_css_token_into(out, &risk.to_ascii_lowercase())` at 5627 (+ `requirement_type` at 5631). The
+  sanitizer ALREADY lowercases every ASCII-alphanumeric char and maps the rest to `-` case-independently, so the
+  `.to_ascii_lowercase()` is a per-node throwaway `String` alloc whose only effect is redone.
+- **Lever (one):** pass the raw `&str` at both sites; delete `.to_ascii_lowercase()`. Removes a heap alloc+free per
+  requirement node with a risk/type. `gen_requirement_chain` sets `risk: high` on every node → benched.
+- **Byte-identical:** sanitizer lowercases alphanumerics regardless; non-alnum (incl. all non-ASCII) → `-` regardless
+  of case; ASCII-lowercasing never changes which chars are alphanumeric. 247 fm-render-svg lib tests
+  (incl `node_fast_fragment_matches_render`); golden_svg only pre-existing `gantt_basic` (no requirement nodes).
+- **Measurement (both arms hz2, `requirement_stages`, layout null tight ~1.00, gate median):** render/512
+  589.27us [585.2,594.8] vs 628.97us [622.9,635.9] = **0.937 (-6.3%)**; render/256 311.33 vs 330.04 = **0.943
+  (-5.7%)**; both CI-DISJOINT. render/64 overlap (noise). Layout null 0.4-0.8% drift (worker ruled out). Scales
+  per-node — an alloc+free removed is bigger than the accent Formatter call (~77ns/node).
+- **Scope:** requirement diagrams w/ risk/type. Byte-identical + monotonic-less-work. LEVER: grep
+  `f(&x.to_ascii_lowercase())` where sink `f` self-lowercases / is case-insensitive → drop pre-lowercasing. Left the
+  `match x.to_ascii_lowercase().as_str()` sites (6279/6309) — they consume the lowercased value.
+  Evidence: `.benchmarks/requirement_class_token_redundant_lowercase_WIN.md`.
