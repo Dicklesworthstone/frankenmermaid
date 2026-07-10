@@ -11823,3 +11823,27 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   `clippy::manual_memcpy` in fill-cursor initialization and prescribes a behavior-equivalent `copy_from_slice`.
   Apply only that mechanical change, then rerun the same one-binary timing and exact-ELF profiles. This is a
   build-gate rejection, not a negative performance verdict; the primitive remains open.
+
+<!-- cod_fm-packed-crossing-attempt-2-noisy -->
+### REJECT MEASUREMENT / RETRY OPEN: lint-clean packed crossing run has no dual-CV-qualified row (2026-07-10)
+- **Exact provenance:** final production source SHA-256 `84c9ffaf...9084cb8`; bench source
+  `28332ab4...14a47f`; timing worker `vmi1152480` (`root@109.205.181.92`). One fail-closed RCH invocation,
+  one binary, per-invocation A/A+A/B interleave, alternating order, black-boxed input/full results, exact parity
+  and checksum. SSH verified the non-empty unstripped **824,600-byte** ELF SHA-256
+  **`a6fb4693b24053fa71bd61011ed50275495ab5ed32fce5c5d6a1e76c3453d420`**, build ID
+  `ea9e7fcc753e3a7ed99b81ec7aaec9ac8d3c7c02`.
+- **Numbers:** `cyclic_scc_100` flat/packed **40.179/36.518 us**, 1.111x, A/B CV **4.41%**, but A/A
+  1.0003x / **5.22% CV**; `300` **197.522/174.096 us**, 1.109x, A/B CV **4.80%**, but A/A 0.9991x /
+  **8.24% CV**; `800` **674.578/622.731 us**, 1.061x, A/A CV **3.60%**, but A/B CV **7.19%**. Every
+  median clears 3%, but **no row has both CVs below 5%**, so none supports a keep.
+- **Ledger integrity:** after RCH released the slot, the process-tree check found zero competing build/bench/
+  profile processes. The same exact ELF then produced zero-lost-sample 300,000-iteration profiles: ORIG
+  `total_crossings` **24.56% self-time** (**12,356 samples / 0 lost**); CAND
+  `total_crossings_packed` **10.59%** plus `packed_crossing_edge` **24.50% self-time** (**11,401 / 0 lost**).
+  Full `>=0.1%` tables and retained profile paths are in `.benchmarks/barycenter_flat_csr.md`.
+- **Behavior/build:** fm-layout **437/437** plus doctests, golden layout **2/2**, conformance **1/1**, workspace
+  check, workspace all-target Clippy `-D warnings`, nightly rustfmt, and UBS pass on the final source.
+- **Verdict / retry condition:** **REJECT THIS MEASUREMENT, NOT THE PRIMITIVE.** Retry only with unchanged source
+  hashes in a fresh fail-closed RCH invocation using the same micro-interleaved substrate; keep only if one real
+  Sugiyama row has A/A and A/B `cv_pct < 5%` and clears the 3% ratchet. This condition reopens an identical-source
+  retry without reopening any fresh-per-call crossing-table family.
