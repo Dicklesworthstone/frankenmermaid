@@ -1,4 +1,19 @@
-# NEGATIVE result: local-delta crossing_refinement = ~0 gain
+# ~~NEGATIVE result: local-delta crossing_refinement = ~0 gain~~ — **MEASUREMENT INVALID** (invalidated 2026-07-10)
+
+> 🚫 **This is the 4th of the four crossing-minimization rejections whose bench never ran the code under test.**
+> It was measured on the `layout_wide` / default `layout_diagram` flowchart path, whose inputs (`gen_wide()`)
+> route to the **Tree** layout. On those inputs the whole Sugiyama ordering subtree — `reorder_rank_by_barycenter`,
+> `total_crossings` — has **0.000%** `perf` self-time.
+>
+> **Caveat, stated honestly:** `crossing_refinement` itself shows 0.000% *self*-time on every input profiled,
+> including the real Sugiyama `cyclic_scc_100`. That is consistent with it being **inlined into
+> `layout_diagram_sugiyama_traced_with_config` (11.17%)**, so 0.000% self-time here does NOT prove it never
+> runs — unlike the barycenter case, where the callee's own self-time is the direct witness. So: the *bench* was
+> wrong, but the headroom is **unquantified**, and the sibling counter `total_crossings` is only 0.810% on the
+> Sugiyama input. Treat this as "unmeasured", not "reopened".
+>
+> The one frame with proven headroom is `reorder_rank_by_barycenter` at **47.640%** self-time on
+> `cyclic_scc_100` (`bd-9w78`). Full evidence: `.benchmarks/crossing_min_rejections_benched_dead_code.md`.
 
 **Crate:** `fm-layout` · **Function:** `crossing_refinement` · **Date:** 2026-06-24
 **Agent:** frankenmermaid-cc · **Verdict:** ~0 gain (within noise) → **reverted** (stash@{0}).

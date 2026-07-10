@@ -1496,7 +1496,17 @@
   regressed `render_svg/flowchart`, so only the repeated node/edge names were
   retained.
 
-### Barycenter sweep precomputed edge adjacency — REJECTED (2026-06-26)
+### Barycenter sweep precomputed edge adjacency — ~~REJECTED~~ **MEASUREMENT INVALID / LEVER REOPENED** (2026-06-26; invalidated 2026-07-10)
+> 🚫 **THIS REJECTION IS VOID. Do not cite it.** It was A/B'd on `layout_wide/{8x16,12x24,16x32}`, whose inputs
+> (`gen_wide()`) route to the **Tree** layout. `perf` self-time of the very function under test,
+> `reorder_rank_by_barycenter`: **0.000%** on `wide_8x16`, **0.000%** on `wide_16x32`, **0.000%** on
+> `wide_40x80` — versus **47.640%** on `cyclic_scc_100`, a real Sugiyama graph. The bench never executed the
+> code it claimed to reject, and the `16x32` "+5.84% regressed" is the adjacency *build* cost charged to a path
+> that never reads it. **Headroom is proven (47.640% self-time) and the lever is REOPENED** — see `bd-9w78` and
+> `.benchmarks/crossing_min_rejections_benched_dead_code.md`. The reopened lever must use a *dense/CSR*
+> primitive, not the `Vec<Vec<usize>>` adjacency whose per-layout allocation profile is what this entry's
+> root-cause paragraph actually (correctly) describes.
+
 - **Lever tested:** `fm-layout`'s barycenter crossing-minimization sweep
   (`reorder_rank_by_barycenter`) rescans the *entire* `ir.edges` list on every call
   (~`4 rounds * 2 * ranks` calls per layout). It was changed to build edge adjacency
@@ -1566,7 +1576,15 @@
   CPU/allocation profile shows the per-edge point vector allocation has returned
   to the top renderer costs; the simpler tuple-slice path currently wins.
 
-### Dense crossing-count position maps — REJECTED (2026-06-25)
+### Dense crossing-count position maps — ~~REJECTED~~ **MEASUREMENT INVALID (but headroom NOT proven)** (2026-06-25; invalidated 2026-07-10)
+> 🚫 **The measurement is void; the conclusion may still be right for a different reason.** This was A/B'd on
+> `layout_wide`, where the function under test shows **0.000%** self-time. But `egraph_ordering::*` also shows
+> **0.000%** self-time on `cyclic_scc_100` and `dense_dag_200` — i.e. *no* profiled input exercises it, so
+> unlike the barycenter row above, **no headroom has been demonstrated**. Treat this as "unmeasured", not as
+> "rejected" and not as "reopened". Before retrying, first find an input where `egraph_ordering::crossing_count`
+> has non-zero self-time (it may be gated behind an algorithm/feature selection). See
+> `.benchmarks/crossing_min_rejections_benched_dead_code.md`.
+
 - **Lever tested:** `fm-layout::egraph_ordering::crossing_count` was changed
   locally to build dense node-position vectors where node IDs were compact and to
   count lower-position inversions with a Fenwick tree instead of the existing
@@ -1590,7 +1608,14 @@
   current crossing-refinement workload; do not replace it with dense/Fenwick
   bookkeeping unless a profile shows different crossing-count shape.
 
-### Flat-array `total_crossings` position/edge tables — REJECTED (2026-06-26)
+### Flat-array `total_crossings` position/edge tables — ~~REJECTED~~ **MEASUREMENT INVALID (headroom ≤0.81%, stays closed on CEILING)** (2026-06-26; invalidated 2026-07-10)
+> 🚫 **The measurement is void, but the lever stays closed for an honest reason.** A/B'd on `layout_wide`, where
+> `total_crossings` self-time is **0.000%**. On the one input where it does run — `cyclic_scc_100`, real
+> Sugiyama — its self-time is **0.810%** of the pipeline. So the bench was wrong *and* the ceiling is tiny:
+> even a perfect rewrite buys <1%. **Do not reopen on the strength of the invalidation alone.** Contrast the
+> sibling frame in the same sweep, `reorder_rank_by_barycenter`, at **47.640%** — that is the one worth having
+> (`bd-9w78`). See `.benchmarks/crossing_min_rejections_benched_dead_code.md`.
+
 - **Lever tested:** `fm-layout::lib::total_crossings` (the crossing counter driving
   the transpose + sifting `crossing_refinement` and the e-graph ordering pass) was
   changed locally to drop its per-call nested
