@@ -197,8 +197,9 @@ pub struct IrBuilder {
     current_participant_group: Option<(String, Option<String>, Vec<String>)>,
     /// Stack of open fragments
     fragment_stack: Vec<OpenFragment>,
-    /// Currently open class block (for member accumulation)
-    current_class: Option<String>,
+    /// Node id of the currently open class block, resolved once when the block opens so each member add
+    /// skips a `NodeIdIndex` hash+lookup+id-compare (the class name is invariant across a block's members).
+    current_class_node_id: Option<IrNodeId>,
     /// Stack of open composite states for state diagrams.
     state_stack: Vec<StateCompositeContext>,
     parser_config: ParserConfig,
@@ -238,7 +239,7 @@ impl IrBuilder {
             activation_stacks: BTreeMap::new(),
             current_participant_group: None,
             fragment_stack: Vec::new(),
-            current_class: None,
+            current_class_node_id: None,
             state_stack: Vec::new(),
             parser_config: ParserConfig::default(),
         }
@@ -266,7 +267,7 @@ impl IrBuilder {
             activation_stacks: BTreeMap::new(),
             current_participant_group: None,
             fragment_stack: Vec::new(),
-            current_class: None,
+            current_class_node_id: None,
             state_stack: Vec::new(),
             parser_config: ParserConfig::default(),
         }
@@ -536,18 +537,20 @@ impl IrBuilder {
     }
 
     pub(crate) fn set_current_class(&mut self, name: &str) {
-        self.current_class = Some(name.to_string());
+        // Callers intern the class node immediately before this (see `lower_class_statement`'s
+        // `BlockStart` arm), and node ids are stable append indices, so resolving here is identical to
+        // resolving per member — and lets `add_class_member` skip the lookup entirely.
+        self.current_class_node_id = self.node_id_index.get(name, &self.ir.nodes);
     }
 
     pub(crate) fn clear_current_class(&mut self) {
-        self.current_class = None;
+        self.current_class_node_id = None;
     }
 
     pub(crate) fn add_class_member(&mut self, member: IrClassMember) {
-        let Some(class_name) = self.current_class.as_ref() else {
-            return;
-        };
-        let Some(node_id) = self.node_id_index.get(class_name, &self.ir.nodes) else {
+        // `current_class_node_id` was resolved once in `set_current_class` — same node the per-member
+        // `node_id_index.get(class_name)` would return, without re-hashing the class name each member.
+        let Some(node_id) = self.current_class_node_id else {
             return;
         };
         let Some(node) = self.ir.nodes.get_mut(node_id.0) else {

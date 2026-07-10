@@ -12194,3 +12194,25 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
 - **Disposition:** reverted the lib.rs refactor (the closure indirection isn't worth a non-measurable change). KEPT
   the `class_stages` bench as permanent coverage (only class-diagram bench; documents the parse dominance so future
   digs target class PARSE, not render). Evidence: this entry.
+
+### WIN: hoist per-member class-node lookup out of the block loop — class parse ~6% (2026-07-10)
+
+- **Profile-first:** last turn's `class_stages` bench showed class diagrams are PARSE-dominated (512 classes: parse
+  ~776us vs render ~243us). `add_class_member` (ir_builder.rs) did `node_id_index.get(class_name, &nodes)` PER
+  MEMBER — FxHash(name) + bucket lookup + `id==name` strcmp — 2048x for the bench (512 classes x 4 members), all
+  resolving to the same node within a block (class name invariant across its members).
+- **Lever (one):** resolve the node id ONCE in `set_current_class` (called right after the class node is interned)
+  into a new `current_class_node_id: Option<IrNodeId>`; `add_class_member` reads it directly. Removed the now
+  write-only `current_class: Option<String>` field (also drops a per-block `name.to_string()`). 2048 -> 512 lookups.
+- **Byte-identical:** node ids are stable append indices, node interned before set_current_class → id resolved once
+  == per-member get (incl duplicate-name `Many` buckets). 408 fm-parser lib tests (class-member cases incl);
+  golden_svg only pre-existing `gantt_basic`, `class_basic` passes.
+- **Measurement (same-worker hz2, `class_stages`, layout+render null, gate median):** ADVERSE drift this pairing —
+  nulls show cand ~2% SLOWER on identical code (layout/512 1.021, render/512 1.026). Yet **parse/512 745.74us
+  [736.9,756.7] vs 776.45us [766.6,788.2] = 0.960, CI-DISJOINT** (cand upper < base lower), moving OPPOSITE the
+  drift → drift-corrected ~-6%. Scales with class count (parse/64 masked, 256 marginal, 512 clear = per-member cost
+  removed, ~15-22ns/member). ir_builder.rs has no peer WIP so base = `git show HEAD:ir_builder.rs>` is safe (cod's
+  mermaid_parser.rs git-graph WIP untouched).
+- **Scope:** class diagrams with members. Byte-identical + monotonic-less-work. LEVER: a lookup keyed by a value
+  INVARIANT across an inner loop → resolve once at the loop-entry hook, cache, reuse (cf. gantt dep hoist, BK
+  dense-lookup). Evidence: `.benchmarks/class_member_nodeid_hoist_WIN.md`.
