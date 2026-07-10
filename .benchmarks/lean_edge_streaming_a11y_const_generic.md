@@ -74,6 +74,9 @@ cancel process startup / parse / layout / warmup, `FM_H2H_FORCE_PROFILE` pinning
 to one profile and forcing `batch = 1` so work is exactly proportional to reps. Same machine, core-pinned
 (`taskset -c 7`), median of 3 rounds, both binaries copied out of their target dirs first.
 
+> **Scope of these ratios:** the harness times `full_pipeline` = parse + layout + render. Every number below is
+> therefore a **pipeline** ratio; the render-only effect is strictly larger. These are the conservative numbers.
+
 | item | lean instr (cand/base) | default instr (cand/base) |
 |---|---:|---:|
 | flowchart_small_10 | 0.9699× | 0.9999× |
@@ -115,6 +118,17 @@ lean speedup **geomean 1.171×**, max **1.444×** (`wide_16x32`); default cand/b
 | edit_trace_60x20 | 1.21× | 1.03× | **0.90×** |
 
 Lean output is 1.47–6.13× smaller than mermaid's and now also cheaper than our own default profile to produce.
+
+## Follow-up profile (same session): why `wide_8x16` lean is still 1.29×
+
+A symbolized `perf record` on `wide_8x16` under both profiles found frames present **only under lean**:
+`is_contained_in` 6.96%, `StrSearcher` 4.93%, `replace_range` 1.41%, memmove 7.00% (vs 2.85% default). Cause:
+`strip_unused_state_css` early-returns on `svg.len() > POST_PASS_MAX_SVG_BYTES` (100 KB), then full-scans the
+document ~20 times. The lean profile shrinks output ~31%, dragging `wide_8x16` (134,629 B → 93,077 B) and
+`cyclic_scc_100` (107,649 B → 73,916 B) *below* the cap, so they pay a pass their default counterparts skip.
+Proven with a cap-disabled diagnostic build: `wide_8x16` 1.330× → **0.945×**, `cyclic_scc_100` 1.092× →
+**0.978×**, control `wide_12x24` 0.937× → 0.937× unchanged. **Not an a11y cost.** Filed as `bd-w5sn`; full
+write-up in `docs/PROPOSAL_default_output_profile.md`.
 
 ## What is left (follow-ups, not this lever)
 

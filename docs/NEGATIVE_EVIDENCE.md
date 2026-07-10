@@ -10917,3 +10917,74 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
 - **Next levers (filed):** the labeled-edge fast fragment is still full-a11y-gated (that is why `sequence_20` /
   `er_40` / sankey-style diagrams gain nothing); class/requirement compartment gates are `bd-1dj4`.
 - **Evidence:** `.benchmarks/lean_edge_streaming_a11y_const_generic.md`.
+
+<!-- cc_fm-full-lean-vs-default-ab-and-postpass-gate -->
+### MEASURED: full lean-vs-default A/B + a byte-size post-pass gate the lean profile inverts (2026-07-10)
+- **Context:** closes the loop on `bd-b2b6` (nodes `2288c78`, edges `bc56f72`). With both halves streaming,
+  the full lean-vs-default render A/B is now meaningful. Decision memo for the owner:
+  `docs/PROPOSAL_default_output_profile.md` (recommendation: KEEP `A11yConfig::full()` default; nothing flipped).
+- **⚠ SCOPE CORRECTION applying to this entry AND to the `bd-6u9o` entry above:** the head-to-head harness times
+  `full_pipeline` = parse + layout + render. Every instruction ratio reported for it is therefore a
+  **PIPELINE** ratio; the render-only effect is strictly larger. The numbers are the conservative ones.
+- **Full A/B at `bc56f72`** (`perf stat -e instructions:u`, two-point delta reps 36-6, `FM_H2H_FORCE_PROFILE`
+  pinning both passes + `batch=1`, `taskset`, median of 3; wall = median-of-3-rounds pinned core, cv 9.5-24.8%
+  so corroboration only). **Cross-validation worth keeping: the instruction ratio predicts the wall ratio to
+  within ~2% on all 13 rows** -- that agreement is why the instruction number is trustworthy on a loaded box.
+
+  | item | lean/def instr | lean/def wall | bytes def | bytes lean | byte delta |
+  |---|---:|---:|---:|---:|---:|
+  | flowchart_small_10 | 0.904x | 0.90x | 13,218 | 10,020 | -24.2% |
+  | flowchart_medium_100 | 0.913x | 0.92x | 72,575 | 49,934 | -31.2% |
+  | flowchart_large_500 | 0.929x | 0.93x | 343,946 | 232,778 | -32.3% |
+  | wide_8x16 | 1.330x | 1.29x | 134,629 | 93,077 | -30.9% |
+  | wide_12x24 | 0.937x | 0.94x | 299,617 | 208,934 | -30.3% |
+  | wide_16x32 | 0.935x | 0.95x | 534,365 | 370,609 | -30.6% |
+  | dense_dag_200 | 0.953x | 0.97x | 355,447 | 246,485 | -30.7% |
+  | cyclic_scc_100 | 1.092x | 1.07x | 107,649 | 73,916 | -31.3% |
+  | sequence_20 | 0.962x | 0.94x | 43,562 | 36,946 | -15.2% |
+  | class_50 | 1.047x | 1.11x | 45,992 | 34,990 | -23.9% |
+  | state_40 | 0.913x | 0.91x | 35,447 | 24,590 | -30.6% |
+  | er_40 | 1.044x | 1.09x | 52,760 | 44,781 | -15.1% |
+  | edit_trace_60x20 | 0.912x | 0.90x | 1,047,238 | 728,461 | -30.4% |
+  | **geomean** | **0.984x** | 0.99x | | | **-27.7%** |
+
+  Lean is cheaper on **9/13** items and 27.7% smaller. Per-element a11y now costs geomean **1.6%** of pipeline
+  instructions (5-7% on the largest items). Against mermaid on `wide_8x16`: 292,024 B vs our default 134,629 B
+  (2.17x smaller) vs our lean 93,077 B (3.14x smaller).
+- **PROFILE-DRIVEN FINDING (the mechanism came from the frame table, not a guess).** Symbolized release build
+  (`--config profile.release.strip=false --config profile.release.debug=1`, 12,507 symbols),
+  `perf record -F 3000 --call-graph=dwarf` on `wide_8x16`, self-time frames >=0.1%. Frames present **only under
+  lean**: `<&str as Pattern>::is_contained_in` **6.96%**, `StrSearcher` **4.93%**, `String::replace_range`
+  1.41%, and `__memmove_avx_unaligned_erms` **7.00% (vs 2.85% default)**.
+  - **Cause:** `strip_unused_state_css` (lib.rs:355) early-returns on `svg.len() > POST_PASS_MAX_SVG_BYTES`
+    (= `100_000`, lib.rs:298), then full-scans the document ~20 times (5 state classes + 8 `fm-node-accent-N` +
+    8 `var(--fm-accent-N)`). `str::contains` on an **absent** needle scans the whole document -- the common
+    case. The cap's stated intent is "skip the 200 KB+ wide renders", but it measures **output bytes**, which
+    the lean profile shrinks ~31%. So mid-size diagrams fall *into* the pass only under lean.
+  - **Prediction tested and confirmed** (diagnostic build, cap set to 0, same A/B protocol):
+
+    | item | def bytes | lean bytes | lean/def shipped | lean/def, pass disabled |
+    |---|---:|---:|---:|---:|
+    | wide_8x16 | 134,629 (skips) | 93,077 (**runs**) | 1.330x | **0.945x** |
+    | cyclic_scc_100 | 107,649 (skips) | 73,916 (**runs**) | 1.092x | **0.978x** |
+    | wide_12x24 (control: both skip) | 299,617 | 208,934 | 0.937x | 0.937x |
+
+    The control is unchanged; both straddling items collapse into their siblings' 0.93-0.98x band. The residual
+    0.978x on `cyclic_scc_100` is its 20 back-edges (slow-path in both profiles). `class_50` / `er_40` are below
+    the cap in BOTH profiles, so their 1.04-1.05x is the class-compartment (`bd-1dj4`) and labeled-edge
+    (`bd-u63b`) gates, not this.
+  - **LEVER (filed `bd-w5sn`):** make the pass **single-scan**. All ~20 needles share the prefixes `fm-node-`
+    and `var(--fm-accent-`, so one `memchr::memmem` traversal each collects every hit. Byte-identical, removes
+    the O(n*k), and **also speeds the DEFAULT profile** on every diagram under 100 KB (small_10, medium_100,
+    sequence_20, class_50, state_40, er_40, and every revision of edit_trace).
+  - **Do NOT "fix" it by gating on a profile-invariant proxy (node+edge count).** That changes which diagrams
+    get their CSS stripped => output bytes change => golden re-bless + a contract decision. The single-scan fix
+    is the byte-identical one.
+  - **GENERALIZABLE TRAP:** an optimization gated on **output size** is gated on a quantity the *output profile*
+    controls. Grep for other `svg.len() > CONST` / `bytes >` guards before trusting any A/B that varies config.
+- **Double-copy frame: did NOT move.** Under default, `__memmove_avx_unaligned_erms` is **2.85%** self-time --
+  the structural `raw_svg -> doc -> final String` copy already ledgered NO-SHIP (`41948f2`). The 7.00% under
+  lean is `replace_range`, not that copy. Streaming did not change the double copy, exactly as that entry
+  predicted. Top render frame under default is now `write_common_node_fragment_into::<true>` (3.73%) -- the
+  streaming writer itself, i.e. time is where it should be.
+- **Evidence:** `docs/PROPOSAL_default_output_profile.md`, `.benchmarks/lean_edge_streaming_a11y_const_generic.md`.
