@@ -33,6 +33,7 @@
 
 use fm_core::{ArrowType, DiagramType, IrEdge, IrEndpoint, IrNode, IrNodeId, MermaidDiagramIr};
 use fm_layout::{LayoutConfig, bench_internals};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::env;
 use std::hint::black_box;
@@ -167,9 +168,30 @@ fn profile_arm_if_requested() -> bool {
     true
 }
 
+/// SHA-256 of this executable, reported from inside the measured process. Certification records the
+/// binary identity; computing it in a separate shell step could not prove it was the ELF that ran.
+fn self_identity() -> String {
+    let Ok(path) = env::current_exe() else {
+        return "unavailable".to_string();
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return "unavailable".to_string();
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    format!(
+        "{:x} ({} bytes) {}",
+        hasher.finalize(),
+        bytes.len(),
+        path.display()
+    )
+}
+
 fn main() {
     const ROUNDS: usize = 41;
     const WARMUP: u32 = 3;
+
+    println!("bench_elf_sha256={}", self_identity());
 
     if profile_arm_if_requested() {
         return;

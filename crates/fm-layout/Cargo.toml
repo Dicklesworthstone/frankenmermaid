@@ -49,6 +49,9 @@ proptest = "1.6.0"
 serde_json = "1.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 criterion = { version = "0.5", features = ["html_reports"] }
+# Lets the bench self-report the sha256 of its own ELF, so the certified binary identity comes
+# from inside the measured process rather than from a separate (unpinnable) shell step.
+sha2 = "0.10.9"
 
 [[bench]]
 name = "incremental_layout"

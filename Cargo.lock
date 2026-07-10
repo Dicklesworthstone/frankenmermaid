@@ -605,6 +605,7 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "sha2",
  "smallvec",
  "tracing",
  "tracing-subscriber",
