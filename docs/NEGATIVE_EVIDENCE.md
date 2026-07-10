@@ -11798,3 +11798,28 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   known-modern deployments. This is orthogonal to the portability contract and to all algorithm work.
 - **Reported per the fleet ask; question CLOSED:** the build emits **v2**, the hardware is **≥AVX2 (workers
   AVX-512)**, the gap is real but is a documented policy tradeoff, and no-unsafe blocks the runtime-dispatch escape.
+
+<!-- cod_fm-packed-crossing-attempt-1-clippy -->
+### REJECT BUILD / RETRY OPEN: packed crossing counter wins timing but exact source fails one mechanical Clippy gate (2026-07-10)
+- **Ledger-first / retry legitimacy:** post-flat-CSR exact-ELF profiling put `total_crossings` at **23.80%**.
+  This satisfies the old flat-table row's explicit escape clause: live CPU/allocation profile plus **no fresh
+  per-call tables**. CAND destructively reuses persistent CSR storage as normalized edge buckets and a `u32`
+  Fenwick frontier; it does not retry the rejected fresh `Vec<Vec<_>>` shape.
+- **Exact provenance:** timing worker `hz2` (`root@178.104.77.29`); one binary/invocation, per-call interleaved
+  A/A+A/B, black-boxed inputs/full results, checksums, 41 rounds. Verified non-empty, unstripped **826,208-byte**
+  ELF SHA-256 **`eee5ce68cdc63f52428d5f98ce372cce8c64a9d6654c50c1cd55fe4c8ed8af7a`**; source hashes
+  `lib.rs` `035aa493...b17eea6`, bench `28332ab4...14a47f`.
+- **Numbers:** `cyclic_scc_100` flat/packed **30.092/27.518 us**, **1.094x**, A/B CV **0.61%**, A/A
+  1.0000x / **0.32% CV**; `300` **136.101/130.897 us**, **1.043x**, A/B CV **0.49%**, A/A 0.9996x /
+  **0.47%**. Both clear `<5%` and the 3% ratchet. `800` is precise but sub-ratchet at 1.017x / 0.49% CV.
+- **Ledger integrity:** exact ELF streamed without a local artifact to quiescent `vmi1149989` and re-verified.
+  ORIG `total_crossings` **24.06% self-time** (**11,655 samples / 0 lost**); CAND
+  `total_crossings_packed` **11.51%** plus `packed_crossing_edge` **22.47%** (**9,582 / 0 lost**). Full ranked
+  `>=0.1%` tables and retained remote paths are in `.benchmarks/barycenter_flat_csr.md`.
+- **Behavior:** five-arm corpus equality and direct reversed/parallel/same-source/equal-target/rank-pair/boundary/
+  malformed/repeated-recount tests pass; vector pointers/capacities stay fixed. Full remote suite **437/437**
+  plus doctests passes.
+- **Why this exact build is rejected / retry condition:** strict all-target Clippy reports only
+  `clippy::manual_memcpy` in fill-cursor initialization and prescribes a behavior-equivalent `copy_from_slice`.
+  Apply only that mechanical change, then rerun the same one-binary timing and exact-ELF profiles. This is a
+  build-gate rejection, not a negative performance verdict; the primitive remains open.

@@ -489,3 +489,139 @@ therefore the packed incident-edge frontier and avoided full-edge scans, not an 
 
 **VERDICT: WIN / KEEP.** Flat packed CSR incidence preserves deterministic output and cuts the gate-clean
 `cyclic_scc_800` crossing-minimization arm by **6.880x** at **4.52% CV**, with a **3.05% CV** same-invocation null.
+
+## Packed crossing-count follow-up — Attempt 1: REJECT BUILD / RETRY OPEN
+
+### Ledger-first route and primitive
+
+The post-flat-CSR exact-ELF profile ranked `total_crossings` second at 23.80% self-time. That satisfies the old
+flat-table row's explicit retry condition: a new attempt is allowed only with a live CPU/allocation profile and
+only if it eliminates fresh per-call tables. This candidate does so without retrying the old `Vec<Vec<_>>` shape.
+After barycenter sweeps finish, it destructively reuses the persistent CSR allocations as canonical upper-to-lower
+edge buckets plus a `u32` Fenwick frontier. Repeated e-graph recounts clear and refill the same storage.
+
+### Exact source, worker, binary, and substrate
+
+- `crates/fm-layout/src/lib.rs` pre/post SHA-256:
+  `035aa493a50471bd577abe72ae7e13740aee0c9b608dcde13e485dc57b17eea6`.
+- `crates/fm-layout/benches/barycenter_sweep.rs` pre/post SHA-256:
+  `28332ab40d3eed3162f813296f23f88eedc10f8dbf10107b88453fcb9814a47f`.
+- Command: `RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo bench -p fm-layout
+  --bench barycenter_sweep --features bench-internals --profile release`.
+- Timing worker: `hz2` (`root@178.104.77.29`). One binary/invocation contained same-routine A/A and A/B;
+  every one of 41 rounds interleaved the arms per invocation with rotating first-arm parity. Inputs and complete
+  results were black-boxed and checksummed.
+- The process self-reported, and SSH independently verified, a non-empty **826,208-byte**, unstripped x86-64
+  PIE with SHA-256 **`eee5ce68cdc63f52428d5f98ce372cce8c64a9d6654c50c1cd55fe4c8ed8af7a`** and build ID
+  `58766f3e1a7962fe711d53fdfcb6fd4f75d20bfe`.
+
+### Honest timing
+
+| input | batch | A/A ratio | A/A `cv_pct` | A/A MAD | flat-CSR p50 | packed-count p50 | median paired A/B | A/B `cv_pct` | A/B MAD | performance gate |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| `cyclic_scc_100` | 1647 | 1.0000x | 0.32% | 0.17% | 30.092 us | 27.518 us | **1.094x** | **0.61%** | 0.22% | pass |
+| `cyclic_scc_300` | 1311 | 0.9996x | 0.47% | 0.29% | 136.101 us | 130.897 us | **1.043x** | **0.49%** | 0.35% | pass |
+| `cyclic_scc_800` | 409 | 1.0004x | 0.34% | 0.13% | 497.571 us | 489.124 us | 1.017x | 0.49% | 0.24% | below 3% ratchet |
+
+The 100- and 300-node rows clear both `<5%` dispersion and the 3% keep ratchet. The 800-node row is precise but
+sub-ratchet corroboration only.
+
+### Exact-ELF profile integrity
+
+`hz2` has no `perf`, so the exact ELF was streamed directly, without a local artifact, to quiescent
+`vmi1149989` (`root@212.90.121.76`), where size, SHA-256, build ID, and unstripped status were re-verified.
+Both 300,000-iteration profiles used `perf record -F 999 -e cycles:u --call-graph=dwarf` and lost zero samples:
+
+- ORIG flat CSR: 51,537 ns/invocation under profiling; **11,655 samples / 0 lost**;
+  `total_crossings` = **24.06% self-time**.
+- CAND packed counter: 32,553 ns/invocation under profiling; **9,582 samples / 0 lost**;
+  `total_crossings_packed` = **11.51%** and `packed_crossing_edge` = **22.47% self-time**.
+
+ORIG frames at or above 0.10% self-time:
+
+| self | frame |
+|---:|---|
+| 33.92% | `reorder_rank_by_barycenter::<true,true,true>` |
+| 24.06% | `total_crossings` |
+| 5.16% | `nodes_by_rank` |
+| 4.79% | `malloc` |
+| 3.06% | unresolved libc `0x198b66` |
+| 3.01% | `BarycenterScratch::new::<true,true>` |
+| 2.90% | `crossing_minimization_flat_csr` |
+| 2.68% | scored-node insertion sort |
+| 2.59% | `cfree` |
+| 1.78% | `count_inversions` |
+| 1.54% | unresolved libc `0x198a85` |
+| 0.92% | `BTreeMap::bulk_build_from_sorted_iter` |
+| 0.71% | `realloc` |
+| 0.61% | `RawVecInner::finish_grow` |
+| 0.48% | second `RawVecInner::finish_grow` |
+| 0.48% | crossing-pair insertion sort |
+| 0.45% | unresolved libc `0x198a70` |
+| 0.45% | `BTreeMap::VacantEntry::insert_entry` |
+| 0.43% | `drop_glue<BTreeMap>` |
+| 0.43% | `RawVecInner::grow_amortized` |
+| 0.37% | unresolved libc `0x199504` |
+| 0.33% | `RawVec<Reverse<_>>::grow_one` |
+| 0.32% | unresolved libc `0x198a74` |
+| 0.29% | unresolved libc `0x199500` |
+| 0.29% | pair-map `BTreeMap::IntoIter::dying_next` |
+| 0.21% | rank-key `Vec::from_iter` |
+| 0.20% | `barycenter_sweep::time_arm` |
+| 0.17% | unresolved libc `0xb146d` |
+| 0.15% | position-map `BTreeMap::IntoIter::dying_next` |
+| 0.14% | unresolved libc `0x198b33` |
+| 0.13% | unresolved libc `0xb2bd1` |
+| 0.13% | unresolved kernel frame |
+| 0.12% | unresolved libc `0x19952a` |
+| 0.12% | `RawVec<f64>::grow_one` |
+| 0.12% | unresolved libc `0xb1383` |
+| 0.11% | unresolved libc `0xb28b1` |
+| 0.11% | unresolved libc `0xb2977` |
+| 0.11% | unresolved libc `0x198aa2` |
+
+CAND frames at or above 0.10% self-time:
+
+| self | frame |
+|---:|---|
+| 39.24% | `reorder_rank_by_barycenter::<true,true,true>` |
+| 22.47% | `packed_crossing_edge` |
+| 11.51% | `total_crossings_packed` |
+| 5.18% | `nodes_by_rank` |
+| 3.81% | `malloc` |
+| 3.39% | `BarycenterScratch::new::<true,true>` |
+| 2.93% | scored-node insertion sort |
+| 2.76% | `crossing_minimization_packed_crossings` |
+| 2.48% | `cfree` |
+| 0.70% | `RawVecInner::finish_grow` |
+| 0.41% | `BTreeMap::VacantEntry::insert_entry` |
+| 0.38% | unresolved libc `0x199500` |
+| 0.32% | rank-key `Vec::from_iter` |
+| 0.31% | `RawVecInner::grow_amortized` |
+| 0.29% | `realloc` |
+| 0.27% | unresolved libc `0x199504` |
+| 0.19% | unresolved libc `0x198a70` |
+| 0.14% | `RawVec<f64>::grow_one` |
+| 0.13% | unresolved libc `0xb2c75` |
+| 0.12% | unresolved libc `0xb146d` |
+| 0.11% | unresolved libc `0x198aa2` |
+| 0.10% | unresolved libc `0x199604` |
+| 0.10% | unresolved libc `0x198a74` |
+
+Retained remote profiles:
+
+- `vmi1149989:/tmp/cod_fm_packed_cross_orig_eee5ce68_vmi1149989.perf.data`
+- `vmi1149989:/tmp/cod_fm_packed_cross_cand_eee5ce68_vmi1149989.perf.data`
+
+### Behavior and build verdict
+
+- Five-arm exact `(crossing_count, ordering_by_rank)` equality passed on the cyclic/adversarial corpus.
+- Direct packed/reference tests cover reversed and parallel edges, same-source and equal-target non-crossings,
+  independent rank-pair sums, integer-boundary ranks, malformed ordering, repeated recounts, and unchanged
+  vector pointers/capacities. The full fail-closed remote suite passed **437/437** plus doctests.
+- Strict all-target Clippy rejected only the cursor-copy loop as `clippy::manual_memcpy`, prescribing
+  `scratch.slot_of[..node_count].copy_from_slice(&normalized_offsets[..node_count])`.
+
+**REJECT THIS EXACT BUILD; RETRY THE LEVER.** The performance and profile gates pass, but the exact source is not
+quality-gate clean. Retry condition: apply only Clippy's behavior-equivalent slice copy, then rerun the full
+one-binary A/A+A/B and exact-ELF per-arm profiles because the executable source hash changes.
