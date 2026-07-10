@@ -12238,3 +12238,32 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   consumed by `write_escaped_*` → split the writer into envelope + body-closure, stream the parts. Pays here (render
   dominant) where the class-member twin was sub-noise (parse-dominated). Evidence:
   `.benchmarks/requirement_subtitle_streaming_WIN.md`.
+
+### FRONTIER + HOLD: parse-allocation new-primitive blocked by string-ownership origin in a peer's file (2026-07-10)
+
+Profiled the parser's allocation primitives (profile-first, no lever attempted-and-shipped this turn — held). Findings:
+
+- **Micro-opt frontier (safe files) is at its floor.** This session landed: class-block node-id hoist (`9490378`,
+  parse −6%), requirement `to_ascii_lowercase` drop (`6d43325`, −6%), requirement subtitle streaming (`c4f280f`,
+  −4..9%), accent digit-table harvest, + a `-D warnings` fix; and honestly rejected class-member streaming
+  (parse-dominated → sub-noise). `intern_node_auto` is alloc-optimal (allocs only on node CREATE; edge-endpoint
+  reuse is alloc-free). `intern_label` clones only on a NEW distinct label (necessary storage; dedup-hit path is
+  clone-free). `normalize_identifier` already has a fast path (returns `cleaned.to_owned()`).
+- **New-primitive assessment (the four candidates):**
+  - *String interning of the IR* (replace `IrNode.id`/`IrLabel.text` owned `String` with u32 arena handles): the
+    real remaining parse cost is these NECESSARY owned strings. But this is a cross-cutting `fm-core` IR-representation
+    change CONSUMED by `fm-render-svg`, so it cannot be a single SVG-byte-identical lever (it ripples through render),
+    and the parse-side re-plumbing lives in cod's `mermaid_parser.rs`. Multi-commit project, not a one-lever change.
+  - *Arena AST*: the IR is already `Vec`-backed (arena-ish); residual cost = the owned strings inside → same as above.
+  - *SIMD tokenizer*: line-splitting already uses memchr (self-dispatching AVX2); `find_operator`/`byte_lines` are
+    byte-scan optimized. No safe headroom.
+  - *Incremental layout*: already exists (`IncrementalLayoutEngine`, session memoization; bd-20fq closed).
+- **Precise blocker:** the alloc-avoiding primitives that WOULD pay — `normalize_identifier` → `Cow<str>` at the ~35
+  hot edge/node lookup+intern sites, and by-value (`Option<ParsedLabel>`) label interning instead of the borrowed
+  `Option<&ParsedLabel>` flow — all originate their string ownership in cod's `mermaid_parser.rs` (uncommitted peer
+  WIP: git-graph, 11+/3−, static ~3h). The safe-file (`ir_builder`) captures are cluster/subgraph titles + sequence
+  notes/activations = sub-noise. No byte-identical, safe, one-lever new-primitive win is available right now.
+- **Unblocks:** (a) cod commits/releases `mermaid_parser.rs` → `normalize_identifier`→`Cow` and by-value label
+  interning become safe contained levers (a real parse-alloc-reduction primitive); or (b) an owner decision to do the
+  full IR string-interning refactor as a multi-commit project with pipeline-level (not SVG-byte) equivalence testing.
+  **HELD** pending one of these.
