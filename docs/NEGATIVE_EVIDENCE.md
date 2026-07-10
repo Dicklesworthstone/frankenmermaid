@@ -12216,3 +12216,25 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
 - **Scope:** class diagrams with members. Byte-identical + monotonic-less-work. LEVER: a lookup keyed by a value
   INVARIANT across an inner loop → resolve once at the loop-entry hook, cache, reuse (cf. gantt dep hoist, BK
   dense-lookup). Evidence: `.benchmarks/class_member_nodeid_hoist_WIN.md`.
+
+### WIN: stream requirement-node subtitle text (remove per-node format! alloc) — req render ~4-9% (2026-07-10)
+
+- **Profile-first:** requirement_stages is render-dominated (~616us render vs ~321us parse @512).
+  `write_requirement_node_fragment_into` built each subtitle via `format!("Risk: {risk} | Verify: {vm}")` (+ `«{type}»`
+  and single-field variants) then handed it to `write_req_subtitle_into` (which escapes+writes) — a throwaway String
+  per node. gen_requirement_chain sets risk+verifymethod → every node hits the 2-field branch.
+- **Lever (one):** added `write_req_subtitle_body_into` (same `<text>` envelope, body = caller closure); the 4
+  subtitle sites stream fixed labels + escaped fields instead of format!-allocating. Also removed 4 now-unused
+  `use std::fmt::Write as _;` imports (class/subroutine/common/requirement) the accent commits a38a61e/7379288 left
+  dead — latent -D warnings break; build now warning-clean.
+- **Byte-identical:** write_escaped_text is per-char (escape(a++b)==escape(a)++escape(b)); fixed labels hold no XML
+  specials. 247 fm-render-svg lib tests (incl node_fast_fragment_matches_render); golden_svg only pre-existing
+  gantt_basic, requirement_basic passes.
+- **Measurement (clean same-worker hz2, layout+parse null, gate median; hz1 kept failing exit-101 → routed around):**
+  render/256 293.40us [289.7,298.0] vs 322.32us [317.3,328.4] = **0.910 (-9.0%)**; render/64 0.941 (-5.9%); render/512
+  0.958 (-4.2%) — **all three CI-DISJOINT** vs nulls at ~1.00-1.025 (neutral/mildly adverse). Cross-worker pair (cand
+  on faster ovh-a) drift-corrected ~6-9%, corroborating.
+- **Scope:** requirement diagrams. Byte-identical + monotonic-less-work. LEVER: interpolated `format!` immediately
+  consumed by `write_escaped_*` → split the writer into envelope + body-closure, stream the parts. Pays here (render
+  dominant) where the class-member twin was sub-noise (parse-dominated). Evidence:
+  `.benchmarks/requirement_subtitle_streaming_WIN.md`.

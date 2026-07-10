@@ -5082,7 +5082,6 @@ fn write_class_node_fragment_into(
     user_classes: &str,
 ) {
     use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
-    use std::fmt::Write as _;
     // <g id=".." class="fm-node fm-node-accent-N fm-node-shape-rect[ fm-node-user-…]" data-id=".." …>
     out.push_str("<g id=\"");
     fm_core::write_mermaid_node_element_id_into(out, node_id, node_index);
@@ -5246,7 +5245,6 @@ fn write_subroutine_node_fragment_into(
     user_classes: &str,
 ) {
     use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
-    use std::fmt::Write as _;
 
     out.push_str("<g id=\"");
     fm_core::write_mermaid_node_element_id_into(out, node_id, node_index);
@@ -5389,7 +5387,6 @@ fn write_common_node_fragment_into<const A11Y: bool>(
     special_fill: Option<&str>,
 ) {
     use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
-    use std::fmt::Write as _;
     // <g id=".." class="fm-node fm-node-accent-N fm-node-shape-rect[ fm-node-user-…]" data-id=".." …>
     f.push_str("<g id=\"");
     // The node id is `fm-node-[{sanitized}-]{index}` — only `[a-z0-9-]`, never an escapable byte — so
@@ -5613,7 +5610,6 @@ fn write_requirement_node_fragment_into(
     colors: &ThemeColors,
 ) {
     use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
-    use std::fmt::Write as _;
 
     out.push_str("<g id=\"");
     fm_core::write_mermaid_node_element_id_into(out, node_id, node_index);
@@ -5663,8 +5659,9 @@ fn write_requirement_node_fragment_into(
     let subtitle_font_size = clamp_font_size(font_size * 0.75, config.min_font_size);
     let mut text_y = y + h * 0.25 + font_size * 0.35;
     if let Some(req_type) = meta.requirement_type.as_deref() {
-        let type_label = format!("\u{00ab}{req_type}\u{00bb}");
-        write_req_subtitle_into(
+        // Stream `«{type}»` — «/» are non-XML-special, so this is byte-identical to escaping the
+        // `format!("\u{00ab}{req_type}\u{00bb}")` whole, without the per-node String.
+        write_req_subtitle_body_into(
             out,
             cx,
             text_y,
@@ -5673,7 +5670,11 @@ fn write_requirement_node_fragment_into(
             "",
             &colors.text,
             "fm-req-type-label",
-            &type_label,
+            |f| {
+                f.push_str("\u{00ab}");
+                let _ = write_escaped_text(f, req_type);
+                f.push_str("\u{00bb}");
+            },
         );
         text_y += font_size * 0.85;
     }
@@ -5691,10 +5692,11 @@ fn write_requirement_node_fragment_into(
     out.push_str("</text>");
     text_y += font_size * 0.85;
 
+    // Stream `Risk: …[ | Verify: …]` — the fixed labels hold no XML specials, so streaming the parts is
+    // byte-identical to escaping the old joined `format!` whole, without the per-node String alloc.
     match (meta.risk.as_deref(), meta.verify_method.as_deref()) {
         (Some(risk), Some(verify_method)) => {
-            let info_text = format!("Risk: {risk} | Verify: {verify_method}");
-            write_req_subtitle_into(
+            write_req_subtitle_body_into(
                 out,
                 cx,
                 text_y,
@@ -5703,12 +5705,16 @@ fn write_requirement_node_fragment_into(
                 " opacity=\"0.7\"",
                 &colors.text,
                 "fm-req-metadata",
-                &info_text,
+                |f| {
+                    f.push_str("Risk: ");
+                    let _ = write_escaped_text(f, risk);
+                    f.push_str(" | Verify: ");
+                    let _ = write_escaped_text(f, verify_method);
+                },
             );
         }
         (Some(risk), None) => {
-            let info_text = format!("Risk: {risk}");
-            write_req_subtitle_into(
+            write_req_subtitle_body_into(
                 out,
                 cx,
                 text_y,
@@ -5717,12 +5723,14 @@ fn write_requirement_node_fragment_into(
                 " opacity=\"0.7\"",
                 &colors.text,
                 "fm-req-metadata",
-                &info_text,
+                |f| {
+                    f.push_str("Risk: ");
+                    let _ = write_escaped_text(f, risk);
+                },
             );
         }
         (None, Some(verify_method)) => {
-            let info_text = format!("Verify: {verify_method}");
-            write_req_subtitle_into(
+            write_req_subtitle_body_into(
                 out,
                 cx,
                 text_y,
@@ -5731,7 +5739,10 @@ fn write_requirement_node_fragment_into(
                 " opacity=\"0.7\"",
                 &colors.text,
                 "fm-req-metadata",
-                &info_text,
+                |f| {
+                    f.push_str("Verify: ");
+                    let _ = write_escaped_text(f, verify_method);
+                },
             );
         }
         (None, None) => {}
@@ -7252,7 +7263,39 @@ fn write_req_subtitle_into(
     class: &str,
     text: &str,
 ) {
-    use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
+    write_req_subtitle_body_into(
+        f,
+        x,
+        y,
+        font_size,
+        before_fill,
+        after_fill,
+        fill,
+        class,
+        |f| {
+            let _ = crate::attributes::write_escaped_text(f, text);
+        },
+    );
+}
+
+/// Writes the requirement-subtitle `<text …>…</text>` envelope, leaving the body to a caller closure so
+/// multi-part subtitles (`Risk: {risk} | Verify: {vm}`, `«{type}»`) stream their fixed labels + escaped
+/// fields straight in instead of `format!`-allocating a joined `String` per node. Byte-identical because
+/// `write_escaped_text` escapes per char (escape(a ++ b) == escape(a) ++ escape(b)) and the fixed labels
+/// hold no XML specials.
+#[allow(clippy::too_many_arguments)]
+fn write_req_subtitle_body_into(
+    f: &mut String,
+    x: f32,
+    y: f32,
+    font_size: f32,
+    before_fill: &str,
+    after_fill: &str,
+    fill: &str,
+    class: &str,
+    write_body: impl FnOnce(&mut String),
+) {
+    use crate::attributes::{AttributeValue, write_escaped_attr};
     f.push_str("<text x=\"");
     let _ = AttributeValue::Number(x).write_value(f);
     f.push_str("\" y=\"");
@@ -7268,7 +7311,7 @@ fn write_req_subtitle_into(
     f.push_str(" class=\"");
     f.push_str(class);
     f.push_str("\">");
-    let _ = write_escaped_text(f, text);
+    write_body(f);
     f.push_str("</text>");
 }
 
