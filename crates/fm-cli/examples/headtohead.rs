@@ -188,9 +188,16 @@ fn measure(item: &CorpusItem, cfg: &SvgRenderConfig) -> Result<Measured, String>
         fastest_warmup =
             fastest_warmup.min(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX));
     }
-    let batch = usize::try_from(MIN_SAMPLE_NS / fastest_warmup.max(1))
-        .unwrap_or(1)
-        .max(1);
+    // `batch` is derived from a *timed* warmup, so it drifts with machine load. That is fine for wall
+    // clock, but it would destroy an instruction-count A/B: the two-point delta assumes the work done is
+    // exactly proportional to `reps`. Under the forced-profile measurement mode, pin it to 1.
+    let batch = if std::env::var_os("FM_H2H_FORCE_PROFILE").is_some() {
+        1
+    } else {
+        usize::try_from(MIN_SAMPLE_NS / fastest_warmup.max(1))
+            .unwrap_or(1)
+            .max(1)
+    };
 
     let mut reference: Vec<String> = Vec::with_capacity(item.texts.len());
     render_all(&item.texts, cfg, &mut reference);
@@ -248,8 +255,15 @@ fn main() {
         std::process::exit(2);
     });
 
-    let default_cfg = SvgRenderConfig::default();
-    let lean_cfg = lean_config();
+    // Measurement aid. Each item is normally timed twice, once per profile, so `perf stat` on the whole
+    // process cannot attribute instructions to one of them. Forcing BOTH passes to the same profile makes
+    // the process's instruction count proportional to that profile alone, which turns a load-sensitive
+    // wall-clock A/B into a deterministic, load-immune one. Unset for normal runs.
+    let (default_cfg, lean_cfg) = match std::env::var("FM_H2H_FORCE_PROFILE").as_deref() {
+        Ok("lean") => (lean_config(), lean_config()),
+        Ok("default") => (SvgRenderConfig::default(), SvgRenderConfig::default()),
+        _ => (SvgRenderConfig::default(), lean_config()),
+    };
     let mut failed = false;
 
     for item in &items {

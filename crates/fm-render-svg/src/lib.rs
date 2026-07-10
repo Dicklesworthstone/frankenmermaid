@@ -5259,8 +5259,27 @@ fn write_subroutine_node_fragment_into(
     out.push_str("</text></g>");
 }
 
+/// Whether the per-element accessibility flags are uniformly on (`Some(true)`) or uniformly off
+/// (`Some(false)`), the two shapes the streaming node fragment can emit. Mixed combinations such as
+/// [`A11yConfig::minimal`] return `None` and take the slow `Element` path, as they always have.
+///
+/// `accessibility_css` is deliberately not consulted: it controls a document-level `<style>` block, not
+/// any per-element attribute.
+const fn uniform_a11y(a11y: &A11yConfig) -> Option<bool> {
+    match (a11y.aria_labels, a11y.keyboard_nav, a11y.text_alternatives) {
+        (true, true, true) => Some(true),
+        (false, false, false) => Some(false),
+        _ => None,
+    }
+}
+
+/// `A11Y` selects the accessibility variant at compile time: `true` emits the
+/// `role`/`aria-label`/`tabindex`/`<title>` set that `A11yConfig::full()` produces, `false` emits none of
+/// it, matching `A11yConfig::none()`. Making it a const parameter rather than a runtime flag keeps the
+/// default (full) monomorphization exactly as branch-free as it was before the lean variant existed --
+/// a runtime flag cost a measured +0.1..0.33% instructions on the default path.
 #[allow(clippy::too_many_arguments)]
-fn build_common_node_fragment(
+fn build_common_node_fragment<const A11Y: bool>(
     node_id: &str,
     node_index: usize,
     accent: usize,
@@ -5282,7 +5301,7 @@ fn build_common_node_fragment(
     // `raw_label` is written twice (the `aria-label` and the `<title>` text), so size for both copies
     // plus the fixed tag/literal bytes.
     let mut f = String::with_capacity(label.len() + raw_label.len() * 2 + user_classes.len() + 340);
-    write_common_node_fragment_into(
+    write_common_node_fragment_into::<A11Y>(
         &mut f,
         node_id,
         node_index,
@@ -5308,7 +5327,7 @@ fn build_common_node_fragment(
 /// Write-into core of [`build_common_node_fragment`]: streams the common rect node straight into `f` with
 /// no intermediate `String`, so `render_node_into` can render it directly into the chunk output buffer.
 #[allow(clippy::too_many_arguments)]
-fn write_common_node_fragment_into(
+fn write_common_node_fragment_into<const A11Y: bool>(
     f: &mut String,
     node_id: &str,
     node_index: usize,
@@ -5346,9 +5365,18 @@ fn write_common_node_fragment_into(
     f.push_str(user_classes);
     f.push_str("\" data-id=\"");
     let _ = write_escaped_attr(f, node_id);
-    f.push_str("\" role=\"graphics-symbol\" aria-label=\"");
-    let _ = write_escaped_attr(f, raw_label);
-    f.push_str("\" tabindex=\"0\">");
+    // The a11y attributes appear in the same insertion order `render_node`'s slow path builds them
+    // (`aria_labels` -> role + aria-label, then `keyboard_nav` -> tabindex). `A11Y` is const, so the
+    // full variant compiles to the same straight-line pushes it always did, and the lean variant compiles
+    // them away entirely -- matching, byte for byte, what the slow Element path emits under
+    // `A11yConfig::none()`.
+    if A11Y {
+        f.push_str("\" role=\"graphics-symbol\" aria-label=\"");
+        let _ = write_escaped_attr(f, raw_label);
+        f.push_str("\" tabindex=\"0\">");
+    } else {
+        f.push_str("\">");
+    }
     // Shape element with the gradient fill (stroke/stroke-width are CSS-driven under embedded theme, so
     // absent inline). `<rect x y width height rx …/>` for the rect family (Rect/Rounded/Stadium — the
     // caller passes each shape's `rx`); `<circle cx cy r …/>` for Circle, whose cx/cy/r match render_node's
@@ -5497,24 +5525,31 @@ fn write_common_node_fragment_into(
     // written piecewise so the per-node description String is never allocated. Byte-identical to
     // `write_escaped_text(describe_node(..))` because the `"Node: "` / `", rectangle"` literals carry no
     // escapable byte (escape is the identity on them) and the label is escaped the same either way.
-    // Pinned by `node_fast_fragment_matches_render`.
-    f.push_str("<title>Node: ");
-    let _ = write_escaped_text(f, raw_label);
-    // `describe_node`'s shape word for the gated shapes.
-    f.push_str(match shape {
-        fm_core::NodeShape::Rect => ", rectangle</title></g>",
-        fm_core::NodeShape::Rounded => ", rounded rectangle</title></g>",
-        fm_core::NodeShape::Stadium => ", stadium shape</title></g>",
-        fm_core::NodeShape::Diamond => ", diamond</title></g>",
-        fm_core::NodeShape::Hexagon => ", hexagon</title></g>",
-        fm_core::NodeShape::Cylinder => ", cylinder</title></g>",
-        fm_core::NodeShape::Trapezoid => ", trapezoid</title></g>",
-        fm_core::NodeShape::InvTrapezoid => ", inverted trapezoid</title></g>",
-        fm_core::NodeShape::Parallelogram => ", parallelogram</title></g>",
-        fm_core::NodeShape::InvParallelogram => ", inverted parallelogram</title></g>",
-        fm_core::NodeShape::Asymmetric => ", flag shape</title></g>",
-        _ => ", circle</title></g>",
-    });
+    // Emitted only in the `A11Y` variant, exactly as the slow path's `Element::title` child is gated on
+    // `text_alternatives`. Pinned by `node_fast_fragment_matches_render` (full) and
+    // `node_lean_fast_fragment_omits_a11y` (lean).
+    if A11Y {
+        f.push_str("<title>Node: ");
+        let _ = write_escaped_text(f, raw_label);
+        // `describe_node`'s shape word for the gated shapes; the `</title></g>` tail is fused into the
+        // literal so the full variant emits the whole title in one `push_str`, as it did before.
+        f.push_str(match shape {
+            fm_core::NodeShape::Rect => ", rectangle</title></g>",
+            fm_core::NodeShape::Rounded => ", rounded rectangle</title></g>",
+            fm_core::NodeShape::Stadium => ", stadium shape</title></g>",
+            fm_core::NodeShape::Diamond => ", diamond</title></g>",
+            fm_core::NodeShape::Hexagon => ", hexagon</title></g>",
+            fm_core::NodeShape::Cylinder => ", cylinder</title></g>",
+            fm_core::NodeShape::Trapezoid => ", trapezoid</title></g>",
+            fm_core::NodeShape::InvTrapezoid => ", inverted trapezoid</title></g>",
+            fm_core::NodeShape::Parallelogram => ", parallelogram</title></g>",
+            fm_core::NodeShape::InvParallelogram => ", inverted parallelogram</title></g>",
+            fm_core::NodeShape::Asymmetric => ", flag shape</title></g>",
+            _ => ", circle</title></g>",
+        });
+    } else {
+        f.push_str("</g>");
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5899,9 +5934,12 @@ fn render_node_into(
         && !emit_classdef_classes
         && !config.animations_enabled
         && !config.include_source_spans
-        && config.a11y.aria_labels
-        && config.a11y.keyboard_nav
-        && config.a11y.text_alternatives
+        // Was `aria_labels && keyboard_nav && text_alternatives`. The fragment writer now has a lean
+        // monomorphization, so uniformly-OFF a11y streams too -- previously `A11yConfig::none()` fell all
+        // the way back to the per-element `Element` builder, which made the *smaller* output ~2x more
+        // expensive to produce. Mixed combinations (e.g. `A11yConfig::minimal()`) still take the slow
+        // path, exactly as they did before.
+        && uniform_a11y(&config.a11y).is_some()
         && shape_style.is_none()
         && text_style.is_none()
         && node_icon.is_none()
@@ -5917,7 +5955,12 @@ fn render_node_into(
         && node.href().is_none()
         && node.callback().is_none()
     {
-        write_common_node_fragment_into(
+        let write = if matches!(uniform_a11y(&config.a11y), Some(true)) {
+            write_common_node_fragment_into::<true>
+        } else {
+            write_common_node_fragment_into::<false>
+        };
+        write(
             out,
             node_id,
             node_box.node_index,
@@ -6060,9 +6103,8 @@ fn render_node(
         && !emit_classdef_classes
         && !config.animations_enabled
         && !config.include_source_spans
-        && config.a11y.aria_labels
-        && config.a11y.keyboard_nav
-        && config.a11y.text_alternatives
+        // See the sibling gate in `render_node_into`. Keep these two gates in lockstep.
+        && uniform_a11y(&config.a11y).is_some()
         && shape_style.is_none()
         && text_style.is_none()
         && node_icon.is_none()
@@ -6078,7 +6120,12 @@ fn render_node(
         && node.href().is_none()
         && node.callback().is_none()
     {
-        return Element::raw_svg(build_common_node_fragment(
+        let build = if matches!(uniform_a11y(&config.a11y), Some(true)) {
+            build_common_node_fragment::<true>
+        } else {
+            build_common_node_fragment::<false>
+        };
+        return Element::raw_svg(build(
             node_id,
             node_box.node_index,
             stable_accent_index(node_id),
@@ -9467,6 +9514,68 @@ mod tests {
             svg.contains(expected),
             "full-node fast-path bytes must match the slow path.\nGOT node region:\n{region}\nEXPECTED:\n{expected}"
         );
+    }
+
+    /// The lean (`A11yConfig::none()`) node now streams through the same fast path. These bytes are the
+    /// ones the slow `Element` path produced before the lean monomorphization existed -- verified at the
+    /// time by rendering the whole 13-item head-to-head corpus with both builds and comparing SHA-256s.
+    /// They are pinned here because, with the fast path now handling lean, no configuration can reach the
+    /// slow path to re-derive them.
+    #[test]
+    fn node_lean_fast_fragment_omits_a11y() {
+        let ir = create_ir_with_single_node("N0", NodeShape::Rect);
+        let config = SvgRenderConfig {
+            a11y: A11yConfig::none(),
+            accessible: false,
+            ..SvgRenderConfig::default()
+        };
+        let svg = render_svg_with_config(&ir, &config);
+        let expected = concat!(
+            "<g id=\"fm-node-n0-0\" class=\"fm-node fm-node-accent-4 fm-node-shape-rect\" ",
+            "data-id=\"N0\">",
+            "<rect x=\"92\" y=\"92\" width=\"148.73\" height=\"66.50\" rx=\"5.50\" ",
+            "fill=\"url(#fm-node-gradient)\"/>",
+            "<text x=\"166.36\" y=\"129.85\" text-anchor=\"middle\" font-size=\"13.80\" ",
+            "fill=\"#1a1a2e\">Single Node</text></g>",
+        );
+        let region = svg.find("<g id=\"fm-node").map_or("", |s| &svg[s..]);
+        assert!(
+            svg.contains(expected),
+            "lean-node fast-path bytes must match the slow path's a11y-off output.\nGOT node region:\n{region}\nEXPECTED:\n{expected}"
+        );
+        assert!(
+            !svg.contains("role=\"graphics-symbol\""),
+            "lean output must not carry per-element role"
+        );
+        assert!(
+            !svg.contains("tabindex="),
+            "lean output must not carry tabindex"
+        );
+        assert!(
+            !svg.contains("<title>Node:"),
+            "lean output must not carry per-node <title>"
+        );
+    }
+
+    /// A mixed `A11yConfig` cannot be represented by either fragment monomorphization, so it must fall to
+    /// the slow `Element` path -- which still honours each flag individually.
+    #[test]
+    fn mixed_a11y_falls_back_to_slow_path_and_honours_each_flag() {
+        assert_eq!(uniform_a11y(&A11yConfig::full()), Some(true));
+        assert_eq!(uniform_a11y(&A11yConfig::none()), Some(false));
+        assert_eq!(uniform_a11y(&A11yConfig::minimal()), None);
+
+        let ir = create_ir_with_single_node("N0", NodeShape::Rect);
+        let config = SvgRenderConfig {
+            a11y: A11yConfig::minimal(),
+            ..SvgRenderConfig::default()
+        };
+        let svg = render_svg_with_config(&ir, &config);
+        // minimal() = aria_labels only.
+        assert!(svg.contains("role=\"graphics-symbol\""));
+        assert!(svg.contains("aria-label=\"Single Node\""));
+        assert!(!svg.contains("tabindex="));
+        assert!(!svg.contains("<title>Node:"));
     }
 
     #[test]

@@ -3528,3 +3528,50 @@ lean_profile_max = 6.11
 id = "lean-profile-is-slower"
 summary = "A11yConfig::none() output is 1.47-6.11x smaller than mermaid's but 1.5-2.1x SLOWER than our own default profile: the streaming node/edge fast paths are gated on full a11y, so lean output falls back to the per-element Element builder."
 next_lever = "Teach the streaming fast path to emit lean fragments. No default-output change; no golden churn."
+
+[[lever]]
+id = "lean-node-streaming-const-generic"
+bead = "bd-b2b6"
+status = "kept"
+date = "2026-07-09"
+agent = "cc_fm"
+base_rev = "a5dee40"
+file_scope = ["crates/fm-render-svg/src/lib.rs (node fast path + gates)", "crates/fm-cli/examples/headtohead.rs (measurement mode)"]
+not_touched = "render_layout_to_svg / element.rs / attributes.rs / buffer plumbing (cod pane owns the large-diagram double-copy)"
+summary = "The streaming node fast paths were gated on full a11y, so A11yConfig::none() fell back to the per-element Element builder: the SMALLER SVG cost ~2x the render. A const-generic A11Y parameter gives the writer a lean monomorphization; both node gates now accept uniformly-on or uniformly-off a11y. Default output and default cost are unchanged."
+behaviour_parity = "26/26 SHA-256 match across the 13-item pinned corpus under BOTH profiles (13 default + 13 lean) vs a pristine HEAD build. 244 fm-render-svg lib tests (+2 new pin tests), conformance green, golden_layout green. golden_svg's gantt_basic failure reproduces identically at untouched HEAD (pre-existing)."
+measurement = "perf stat -e instructions:u, two-point delta (reps 36 - reps 6), FM_H2H_FORCE_PROFILE pins both passes to one profile and forces batch=1 so work is exactly proportional to reps. Deterministic, load-immune, reproducible to 4 decimals. Wall clock reported only as corroboration: load average was 50, cv_pct 3.3-11.8%, which does not meet the <5% bar."
+
+[lever.instructions_lean_cand_over_base]
+flowchart_medium_100 = 0.8562
+flowchart_large_500 = 0.7099
+wide_8x16 = 0.8578
+wide_16x32 = 0.8052
+dense_dag_200 = 0.9030
+edit_trace_60x20 = 0.8695
+class_50 = 1.0031
+
+[lever.instructions_default_cand_over_base]
+note = "Neutral. A runtime a11y flag was implemented first and measured +0.1..0.33% here; the const generic removes it."
+flowchart_medium_100 = 1.0001
+flowchart_large_500 = 1.0003
+wide_8x16 = 1.0002
+wide_16x32 = 1.0002
+edit_trace_60x20 = 1.0001
+
+[lever.wallclock_corroboration]
+lean_speedup_geomean = 1.197
+lean_speedup_max = 1.517
+default_ratio_geomean = 0.9906
+caveat = "load average 50; cv_pct 3.3-11.8%; corroboration only, not the claim."
+
+[lever.lean_over_default_walltime]
+description = "How much more expensive the lean profile is than the default profile, before -> after."
+wide_8x16 = [2.07, 1.66]
+flowchart_large_500 = [1.89, 1.20]
+wide_16x32 = [1.82, 1.40]
+edit_trace_60x20 = [1.21, 1.03]
+
+[lever.remaining]
+edges = "render_edge's whole-edge and inner-path fast paths are still gated on all three a11y flags; in lean all 224 wide_8x16 edges still build Elements. Same const-generic move; the larger remaining half."
+compartments = "class/requirement compartment fast paths remain a11y-gated; class_50 lean is +0.31% because the common gate now evaluates further before failing for class nodes."
