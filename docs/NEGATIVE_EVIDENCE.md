@@ -12037,3 +12037,38 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   (ovh-a faster than hz2) -- discarded; same-worker matching is the honest read.
 - **Scope:** every Sugiyama-routed diagram (cyclic / back-edge graphs) runs BK; neutral on Tree flowcharts.
   crates/fm-layout is peer-free (cod on rendering). Evidence: `.benchmarks/bk_dense_lookup_WIN.md`.
+
+<!-- cc_fm-bk-median-of-four-freelist-NEGATIVE -->
+### REJECTED (~0, free-list-recycled) + FRONTIER SURFACE: BK median-of-four per-node Vec, and the layout frontier after three wins (2026-07-10)
+- **Profile-first, unexplored territory.** After barycenter (peer, 3.591x), the obstacle-index work-gate (2.34x),
+  and the BK dense-lookup (~1.10x), I profiled the NON-FLOWCHART layout paths my changes never touched (stale sym
+  binary is fully valid there): class_50 (fm_layout 14.6%), er_40 (6.8%), state_40 (13.9%), sequence_20 (0.0%).
+- **The one new lever candidate:** `brandes_kopf_secondary_coords`'s median-of-four step (lib.rs:10716) allocated
+  a `Vec<f32>` PER NODE to hold exactly four values (`all_coords` = the four alignment passes) — a per-node
+  alloc+free showing **~1.38% self-time** inside the state_40 sugiyama frame. Replaced with a stack `[f32; 4]`.
+- **Byte-identical** (same four values, same total-order sort, same midpoint of `vals[1]`/`vals[2]`): golden_layout
+  2/2, conformance green, 439 fm-layout lib tests.
+- **REJECTED — measures ~0.** Same-worker A/B (both arms on `ovh-a`), `layout_sugiyama/scc/scc_600` (600 nodes =
+  600 fewer allocs, the best case): cand (`[f32;4]`) **207.04us [206.68,207.38]** vs base (per-node Vec)
+  **207.55us [206.85,208.43]** = **0.997x, CIs overlap** = within noise. **mimalloc recycles the 16-byte Vec from
+  its hot free list**, so removing it saves nothing — the same lesson as `render_edge_direct_stream_NEGATIVE`.
+  Reverted (byte-identical + monotonic-less-work, but not a measurable perf win — landing it would misrepresent).
+  **Do-not-retry:** a per-node small-Vec alloc in a layout hot loop shows real *profile* self-time but is
+  free-list-recycled; do not "remove the alloc" without a same-worker A/B proving it clears the ~1% floor.
+- **FRONTIER SURFACE (well-founded, not fatigue — every shape profiled, every frame accounted):** after the three
+  wins, no measurable byte-identical single-crate layout lever remains above the fleet's ~1% floor. The remaining
+  frames are, exhaustively:
+  - **render byte-production** (write_fixed2/uint/escaped/cubic/smooth_path) — mature + ISA-null-confirmed.
+  - **`find_obstacle_nudge_*`** — either fixed (dense graphs, the work-gate) or on the indexed/wide path where the
+    axis-aligned-CGA-skip is `bd-taot`-rejected (candidates already minimized / wide-index measured +5%).
+  - **BK alignment BTreeMap probes** — just harvested (the dense-lookup win).
+  - **diffuse sub-1.4% frames** — the median-of-four (free-list, above), `coordinate_assignment`'s Vec<f32>
+    combination, a `BTreeMap Iter`, `remove_node` (1.05%), `select_min_loss_algorithm` (1.01%), `place_block`
+    (0.74%) — each below the ~1% median-CI floor calibrated in `harness_calibration.rs`, so not decidable on this
+    fleet even if a lever existed.
+  - **`build_edge_paths_with_orientation`** (2-4%) — the per-edge routing container; necessary work, no probe/O(N^2)
+    left after the work-gate.
+  **The B-tree-probe / wrong-metric-threshold family in the layout ordering+coordinate hot path is harvested**
+  (barycenter, crossing-count, obstacle-index gate, BK alignment). The next layout gain would need a NEW workload
+  class (not in the corpus) or a design change, not a byte-identical micro-lever. `sequence_20` layout is 0.0% —
+  sequence/gantt/etc. do specialized non-graph layout already at their floor.
