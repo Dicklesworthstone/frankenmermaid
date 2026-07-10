@@ -796,3 +796,151 @@ certification artifact, not accepted by borrowing self-time from another build.
 **REJECT THIS ARTIFACT; RETRY THE IDENTICAL LEVER.** Retry condition: preserve and independently hash the exact
 ELF while the paired run is still executing, then collect zero-lost-sample per-arm profiles from that retained
 copy. The timing effect remains open; no performance conclusion is taken from an unprofileable binary.
+
+## Packed crossing counter Attempt 4: WIN / KEEP
+
+This retry satisfies Attempt 3's exact condition. The ELF was copied to a retained path while the paired run was
+still live, then independently size/hash/build-ID checked. All three real Sugiyama graphs have dual CV below 5%;
+all three favor CAND, and even the 800-node row clears the 3% ratchet. The exact retained ELF was subsequently
+profiled per arm on the same quiescent host with zero lost samples.
+
+### Lever and deterministic behavior
+
+After the final barycenter sweep, production destructively reuses the now-dead flat-CSR allocations as canonical
+upper-to-lower edge buckets and a `u32` Fenwick frontier. The packed counter:
+
+- rebuilds current dense node positions in persistent scratch;
+- canonicalizes reversed adjacent-rank edges and preserves parallel multiplicity;
+- queries every edge in a same-source group before inserting the group, so same-source edges never self-cross;
+- counts only strict target inversions, so equal-target bundles do not cross;
+- clears/refills the same storage for each e-graph recount, with no fresh allocation in the counter; and
+- falls back to the reference counter on any unrepresentable offset, capacity, or malformed packed state.
+
+Five implementation arms are compared for exact `(crossing_count, ordering_by_rank)` equality across cyclic and
+adversarial fixtures. Direct tests pin descending same-source targets, 2x3 parallel bundles, equal targets,
+reversed edges, independent rank-pair sums, `usize::MAX` boundary ranks, malformed/omitted/duplicate ordering,
+repeated recounts, and stable scratch pointers/capacities.
+
+### Exact source, worker, binary, and substrate
+
+- Production source SHA-256:
+  `84c9ffafe2c1fbba477e9a0d1bcfc305a557e622b73da521c511d81289084cb8`.
+- Bench source SHA-256:
+  `28332ab40d3eed3162f813296f23f88eedc10f8dbf10107b88453fcb9814a47f`.
+- Command: `RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo bench -p fm-layout
+  --bench barycenter_sweep --features bench-internals --profile release`.
+- Timing/profile worker: `ovh-a` (`ubuntu@51.222.245.56`, hostname `fixmydocuments`). One fail-closed RCH
+  invocation, one binary, 41-round same-routine A/A+A/B, per-invocation interleave, alternating round/iteration
+  first-arm parity, black-boxed inputs and full results, out-of-band exact parity assert, printed checksum.
+- While the run was live, the binary was copied to `/tmp/cod_fm_crossing_56c674_saved`; SSH independently
+  verified a non-empty, unstripped **828,488-byte** x86-64 PIE, SHA-256
+  **`56c674647af20b985afa4a24edd2fbb89168e498ffec2169e8fdce3939f32cf9`**, build ID
+  `31e84d733e339faa0be285681e903fbcf7983a94`.
+
+### Honest paired timing
+
+| input | batch | A/A ratio | A/A `cv_pct` | A/A MAD | flat-CSR p50 | packed-count p50 | median paired A/B | A/B `cv_pct` | A/B MAD | gate |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| `cyclic_scc_100` | 5232 | 0.9996x | **0.08%** | 0.04% | 25.564 us | 22.558 us | **1.131x** | **0.31%** | 0.08% | pass |
+| `cyclic_scc_300` | 1545 | 1.0001x | **0.19%** | 0.04% | 126.415 us | 119.895 us | **1.054x** | **0.26%** | 0.16% | pass |
+| `cyclic_scc_800` | 534 | 0.9999x | **0.06%** | 0.03% | 388.161 us | 375.849 us | **1.033x** | **0.19%** | 0.09% | pass |
+
+Every row passes both strict `<5%` dispersion controls. The 100- and 300-node rows clear the ratchet by 13.1%
+and 5.4%; the 800-node row clears it by 3.3%, so this is not a small-input-only keep.
+
+### Exact-ELF profiles
+
+Before each profile, the complete process-tree check found zero `cargo`, `rustc`, `barycenter_sweep`,
+`fnp-python`, or `perf record` processes. Both profiles ran the retained SHA-exact ELF for 300,000 iterations
+with `perf record -F 999 -e cycles:u --call-graph=dwarf`:
+
+- ORIG flat CSR: 25,388 ns/invocation; **7,616 samples / 0 lost**;
+  `total_crossings` = **24.64% self-time**.
+- CAND packed counter: 22,459 ns/invocation; **6,790 samples / 0 lost**;
+  `total_crossings_packed` = **11.29%** and `packed_crossing_edge` = **24.40% self-time**.
+
+ORIG frames at or above 0.10% self-time:
+
+| self | frame |
+|---:|---|
+| 31.78% | `reorder_rank_by_barycenter::<true,true,true>` |
+| 24.64% | `total_crossings` |
+| 5.49% | `malloc` |
+| 4.79% | `__memmove_avx_unaligned_erms` |
+| 4.30% | `nodes_by_rank` |
+| 3.74% | `cfree` |
+| 3.45% | `_int_malloc` |
+| 3.33% | `count_inversions` |
+| 3.31% | `BarycenterScratch::new::<true,true>` |
+| 2.87% | `crossing_minimization_flat_csr` |
+| 2.12% | scored-node insertion sort |
+| 1.15% | `_int_free_merge_chunk` |
+| 1.01% | `_int_realloc` |
+| 0.89% | `__memset_avx2_unaligned_erms` |
+| 0.80% | `realloc` |
+| 0.78% | `BTreeMap::bulk_build_from_sorted_iter` |
+| 0.63% | `_int_free_chunk` |
+| 0.50% | `unlink_chunk` |
+| 0.50% | `RawVecInner::finish_grow` |
+| 0.49% | `BTreeMap::VacantEntry::insert_entry` |
+| 0.47% | second `RawVecInner::finish_grow` |
+| 0.43% | `drop_glue<BTreeMap>` |
+| 0.41% | crossing-pair insertion sort |
+| 0.36% | pair-map `BTreeMap::IntoIter::dying_next` |
+| 0.32% | `_int_free_maybe_consolidate` |
+| 0.32% | `RawVec<Reverse<_>>::grow_one` |
+| 0.25% | `malloc_consolidate` |
+| 0.22% | rank-map `BTreeMap::IntoIter::dying_next` |
+| 0.16% | `RawVec<usize>::grow_one` |
+| 0.14% | `__libc_malloc2` |
+| 0.13% | `barycenter_sweep::time_arm` |
+| 0.12% | rank-key `Vec::from_iter` |
+
+CAND frames at or above 0.10% self-time:
+
+| self | frame |
+|---:|---|
+| 36.04% | `reorder_rank_by_barycenter::<true,true,true>` |
+| 24.40% | `packed_crossing_edge` |
+| 11.29% | `total_crossings_packed` |
+| 5.37% | `nodes_by_rank` |
+| 4.09% | `malloc` |
+| 4.03% | `BarycenterScratch::new::<true,true>` |
+| 3.55% | `crossing_minimization_packed_crossings` |
+| 2.53% | scored-node insertion sort |
+| 2.46% | `cfree` |
+| 1.31% | `__memmove_avx_unaligned_erms` |
+| 1.04% | `_int_malloc` |
+| 0.82% | `__memset_avx2_unaligned_erms` |
+| 0.70% | `BTreeMap::VacantEntry::insert_entry` |
+| 0.40% | `_int_free_chunk` |
+| 0.30% | `realloc` |
+| 0.27% | `malloc_consolidate` |
+| 0.26% | `_int_realloc` |
+| 0.22% | `RawVecInner::finish_grow` |
+| 0.19% | `RawVec<usize>::grow_one` |
+| 0.18% | `barycenter_sweep::time_arm` |
+| 0.18% | `unlink_chunk` |
+
+Retained exact-ELF profiles:
+
+- `ovh-a:/tmp/cod_fm_crossing_56c674_orig_sudo.data`
+- `ovh-a:/tmp/cod_fm_crossing_56c674_cand_sudo.data`
+
+Allocation traffic is material but does not dominate the live Sugiyama profile: the top algorithm frames remain
+barycenter reorder and crossing count. The mechanism is nevertheless visible in the allocation/data-movement
+tail: `count_inversions` disappears and `memmove` falls from 4.79% to 1.31%, while the packed counter reuses
+persistent CSR storage instead of constructing per-rank-pair maps, vectors, sorts, and merge buffers.
+
+### Final gates
+
+- Fail-closed remote fm-layout tests: **437/437**, plus doctests.
+- Layout golden checksums and repeated-run determinism: **2/2**.
+- FrankenTUI fixture conformance: **1/1**.
+- Fail-closed remote workspace check and workspace all-target Clippy `-D warnings`: pass.
+- `cargo fmt --check`, changed-Rust UBS, `git diff --check`: pass; UBS reports zero critical/warning issues.
+- Independent static audit found no correctness, fallback, determinism, or A/B-substrate blocker.
+
+**WIN / KEEP.** The 1.131x / 1.054x / 1.033x real-Sugiyama improvement is exact-output preserving, profile-
+attributed, dual-CV-qualified, and quality-gate clean. The next profile-led target is the now-largest
+`reorder_rank_by_barycenter` frame, not another fresh-per-call crossing container.

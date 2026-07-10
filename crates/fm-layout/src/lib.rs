@@ -10046,17 +10046,19 @@ fn crossing_minimization(
     ranks: &BTreeMap<usize, usize>,
     config: &LayoutConfig,
 ) -> (usize, BTreeMap<usize, Vec<usize>>) {
-    crossing_minimization_impl::<true, true, true>(ir, ranks, config)
+    crossing_minimization_impl::<true, true, true, true>(ir, ranks, config)
 }
 
 /// Compile-time switches keep the certified production path and all live reference arms in one body:
 /// `DENSE_RANK` selects packed node-rank lookup, while `SINGLE_PASS` selects the reusable packed
 /// position/slot frontier and one edge pass per rank reorder. `FLAT_CSR` replaces that full edge pass
-/// with a build-once packed incidence index.
+/// with a build-once packed incidence index. `PACKED_CROSSINGS` destructively reuses that index after
+/// the final sweep as normalized adjacency plus a word-packed Fenwick frontier.
 fn crossing_minimization_impl<
     const DENSE_RANK: bool,
     const SINGLE_PASS: bool,
     const FLAT_CSR: bool,
+    const PACKED_CROSSINGS: bool,
 >(
     ir: &MermaidDiagramIr,
     ranks: &BTreeMap<usize, usize>,
@@ -10085,13 +10087,12 @@ fn crossing_minimization_impl<
         for node_index in 0..ir.nodes.len() {
             let rank = ranks.get(&node_index).copied().unwrap_or(0);
             let Ok(rank) = u32::try_from(rank) else {
-                return crossing_minimization_sweeps::<false, SINGLE_PASS, FLAT_CSR>(
-                    ir,
-                    ranks,
-                    &[],
-                    ordering_by_rank,
-                    centrality,
-                );
+                return crossing_minimization_sweeps::<
+                    false,
+                    SINGLE_PASS,
+                    FLAT_CSR,
+                    PACKED_CROSSINGS,
+                >(ir, ranks, &[], ordering_by_rank, centrality);
             };
             dense.push(rank);
         }
@@ -10100,7 +10101,7 @@ fn crossing_minimization_impl<
         Vec::new()
     };
 
-    crossing_minimization_sweeps::<DENSE_RANK, SINGLE_PASS, FLAT_CSR>(
+    crossing_minimization_sweeps::<DENSE_RANK, SINGLE_PASS, FLAT_CSR, PACKED_CROSSINGS>(
         ir,
         ranks,
         &dense_node_rank,
@@ -10113,6 +10114,7 @@ fn crossing_minimization_sweeps<
     const DENSE_RANK: bool,
     const SINGLE_PASS: bool,
     const FLAT_CSR: bool,
+    const PACKED_CROSSINGS: bool,
 >(
     ir: &MermaidDiagramIr,
     ranks: &BTreeMap<usize, usize>,
@@ -10159,11 +10161,22 @@ fn crossing_minimization_sweeps<
         }
     }
 
-    let barycenter_crossing_count = total_crossings(ir, ranks, &ordering_by_rank);
+    let barycenter_crossing_count = if PACKED_CROSSINGS {
+        total_crossings_packed(ir, ranks, &ordering_by_rank, &mut scratch)
+            .unwrap_or_else(|| total_crossings(ir, ranks, &ordering_by_rank))
+    } else {
+        total_crossings(ir, ranks, &ordering_by_rank)
+    };
     let crossing_count = if barycenter_crossing_count == 0 {
         0
     } else {
-        apply_egraph_ordering_pass(ir, ranks, &mut ordering_by_rank, barycenter_crossing_count)
+        apply_egraph_ordering_pass::<PACKED_CROSSINGS>(
+            ir,
+            ranks,
+            &mut ordering_by_rank,
+            barycenter_crossing_count,
+            &mut scratch,
+        )
     };
     debug!(
         crossings_after_barycenter = barycenter_crossing_count,
@@ -11527,11 +11540,12 @@ fn egraph_optimized_order_for_rank(
     (result.crossing_count < local_crossings_before).then_some((local_crossings_before, result))
 }
 
-fn apply_egraph_ordering_pass(
+fn apply_egraph_ordering_pass<const PACKED_CROSSINGS: bool>(
     ir: &MermaidDiagramIr,
     ranks: &BTreeMap<usize, usize>,
     ordering_by_rank: &mut BTreeMap<usize, Vec<usize>>,
     mut best_crossings: usize,
+    scratch: &mut BarycenterScratch,
 ) -> usize {
     let rank_keys: Vec<usize> = ordering_by_rank.keys().copied().collect();
     for _ in 0..2 {
@@ -11549,7 +11563,12 @@ fn apply_egraph_ordering_pass(
             let (estimated_egraph_nodes, estimated_egraph_bytes) =
                 crate::egraph_ordering::estimate_egraph_size(original_order.len());
             ordering_by_rank.insert(rank, result.ordering.order.clone());
-            let total_after = total_crossings(ir, ranks, ordering_by_rank);
+            let total_after = if PACKED_CROSSINGS {
+                total_crossings_packed(ir, ranks, ordering_by_rank, scratch)
+                    .unwrap_or_else(|| total_crossings(ir, ranks, ordering_by_rank))
+            } else {
+                total_crossings(ir, ranks, ordering_by_rank)
+            };
 
             if total_after < best_crossings {
                 improved = true;
@@ -12197,7 +12216,7 @@ pub mod bench_internals {
         ranks: &BTreeMap<usize, usize>,
         config: &LayoutConfig,
     ) -> (usize, BTreeMap<usize, Vec<usize>>) {
-        super::crossing_minimization_impl::<false, false, false>(ir, ranks, config)
+        super::crossing_minimization_impl::<false, false, false, false>(ir, ranks, config)
     }
 
     /// CAND arm: one packed node-rank table replacing only the hot `BTreeMap` rank probes.
@@ -12207,7 +12226,7 @@ pub mod bench_internals {
         ranks: &BTreeMap<usize, usize>,
         config: &LayoutConfig,
     ) -> (usize, BTreeMap<usize, Vec<usize>>) {
-        super::crossing_minimization_impl::<true, false, false>(ir, ranks, config)
+        super::crossing_minimization_impl::<true, false, false, false>(ir, ranks, config)
     }
 
     /// CAND arm for the follow-up lever: dense rank **plus** one accumulating edge pass per call, using
@@ -12219,7 +12238,7 @@ pub mod bench_internals {
         ranks: &BTreeMap<usize, usize>,
         config: &LayoutConfig,
     ) -> (usize, BTreeMap<usize, Vec<usize>>) {
-        super::crossing_minimization_impl::<true, true, false>(ir, ranks, config)
+        super::crossing_minimization_impl::<true, true, false, false>(ir, ranks, config)
     }
 
     /// CAND arm for flat CSR incidence: build packed incoming/outgoing neighbors once, then make each
@@ -12230,7 +12249,18 @@ pub mod bench_internals {
         ranks: &BTreeMap<usize, usize>,
         config: &LayoutConfig,
     ) -> (usize, BTreeMap<usize, Vec<usize>>) {
-        super::crossing_minimization_impl::<true, true, true>(ir, ranks, config)
+        super::crossing_minimization_impl::<true, true, true, false>(ir, ranks, config)
+    }
+
+    /// CAND arm for the packed crossing counter: reuse the flat CSR storage after the last barycenter
+    /// sweep as normalized rank-pair buckets plus an allocation-free `u32` Fenwick frontier.
+    #[must_use]
+    pub fn crossing_minimization_packed_crossings(
+        ir: &MermaidDiagramIr,
+        ranks: &BTreeMap<usize, usize>,
+        config: &LayoutConfig,
+    ) -> (usize, BTreeMap<usize, Vec<usize>>) {
+        super::crossing_minimization_impl::<true, true, true, true>(ir, ranks, config)
     }
 }
 
@@ -12322,6 +12352,180 @@ fn pair_crossings(
         .map(|(_source_position, target_position)| target_position)
         .collect();
     count_inversions(&mut target_positions)
+}
+
+/// Normalize one countable edge to `(upper_node, lower_position)` using the current ordering.
+/// Returning the lower position directly lets the packed counter overwrite the no-longer-needed CSR
+/// neighbor IDs with its Fenwick input without another lookup during the hot count.
+fn packed_crossing_edge(
+    ir: &MermaidDiagramIr,
+    ranks: &BTreeMap<usize, usize>,
+    positions: &[u32],
+    from: IrEndpoint,
+    to: IrEndpoint,
+) -> Option<(usize, u32)> {
+    let mut source = endpoint_node_index(ir, from)?;
+    let mut target = endpoint_node_index(ir, to)?;
+    let mut source_rank = ranks.get(&source).copied()?;
+    let mut target_rank = ranks.get(&target).copied()?;
+
+    if source_rank == target_rank {
+        return None;
+    }
+    if source_rank > target_rank {
+        std::mem::swap(&mut source, &mut target);
+        std::mem::swap(&mut source_rank, &mut target_rank);
+    }
+    if target_rank != source_rank.saturating_add(1) {
+        return None;
+    }
+
+    let source_position = positions.get(source).copied()?;
+    let target_position = positions.get(target).copied()?;
+    if source_position == BarycenterScratch::ABSENT || target_position == BarycenterScratch::ABSENT
+    {
+        return None;
+    }
+    Some((source, target_position))
+}
+
+#[inline]
+fn packed_fenwick_prefix(tree: &[u32], mut index: usize) -> usize {
+    let mut sum = 0_usize;
+    while index > 0 {
+        sum = sum.saturating_add(usize::try_from(tree[index]).unwrap_or(usize::MAX));
+        index &= index - 1;
+    }
+    sum
+}
+
+#[inline]
+fn packed_fenwick_add(tree: &mut [u32], mut index: usize) {
+    while index < tree.len() {
+        tree[index] = tree[index].saturating_add(1);
+        let step = index & index.wrapping_neg();
+        index = index.saturating_add(step);
+    }
+}
+
+/// Allocation-free crossing count for the packed production arm.
+///
+/// Barycenter sweeps are finished before this runs, so their CSR can be destructively repurposed:
+/// the first offset half becomes normalized upper-node buckets, the first neighbor half stores lower
+/// positions, and the second offset half is a word-packed Fenwick frontier. Repeated e-graph probes
+/// rebuild those same buffers in place; no nested map, edge bucket, sort buffer, or merge allocation
+/// is created by the counter.
+fn total_crossings_packed(
+    ir: &MermaidDiagramIr,
+    ranks: &BTreeMap<usize, usize>,
+    ordering_by_rank: &BTreeMap<usize, Vec<usize>>,
+    scratch: &mut BarycenterScratch,
+) -> Option<usize> {
+    let node_count = ir.nodes.len();
+    if scratch.position_of.len() != node_count || scratch.slot_of.len() != node_count {
+        return None;
+    }
+    let direction_width = node_count.checked_add(1)?;
+    let offset_count = direction_width.checked_mul(2)?;
+    if scratch.incidence_offsets.len() < offset_count
+        || !scratch.incidence_neighbors.len().is_multiple_of(2)
+    {
+        return None;
+    }
+    let edge_capacity = scratch.incidence_neighbors.len() / 2;
+
+    // Rebuild the current node-position table. Entries whose ordering rank disagrees with `ranks`
+    // are deliberately absent, matching the old per-rank position-map lookup.
+    scratch.position_of.fill(BarycenterScratch::ABSENT);
+    for (rank, ordered_nodes) in ordering_by_rank {
+        for (position, node) in ordered_nodes.iter().copied().enumerate() {
+            if ranks.get(&node).copied() != Some(*rank) {
+                continue;
+            }
+            let entry = scratch.position_of.get_mut(node)?;
+            *entry = u32::try_from(position).ok()?;
+        }
+    }
+
+    // Count normalized adjacent-rank edges per upper node into the first offset half.
+    let (normalized_offsets, fenwick_storage) =
+        scratch.incidence_offsets.split_at_mut(direction_width);
+    normalized_offsets.fill(0);
+    for edge in &ir.edges {
+        let Some((upper_node, _lower_position)) =
+            packed_crossing_edge(ir, ranks, &scratch.position_of, edge.from, edge.to)
+        else {
+            continue;
+        };
+        let count = normalized_offsets.get_mut(upper_node.checked_add(1)?)?;
+        *count = count.checked_add(1)?;
+    }
+    for index in 1..direction_width {
+        normalized_offsets[index] =
+            normalized_offsets[index - 1].checked_add(normalized_offsets[index])?;
+    }
+    let packed_edge_count = usize::try_from(normalized_offsets[node_count]).ok()?;
+    if packed_edge_count > edge_capacity || fenwick_storage.len() < direction_width {
+        return None;
+    }
+
+    // `slot_of` is now a fill cursor; the original outgoing CSR is dead after the final sweep.
+    scratch.slot_of[..node_count].copy_from_slice(&normalized_offsets[..node_count]);
+    let normalized_positions = scratch.incidence_neighbors.get_mut(..edge_capacity)?;
+    for edge in &ir.edges {
+        let Some((upper_node, lower_position)) =
+            packed_crossing_edge(ir, ranks, &scratch.position_of, edge.from, edge.to)
+        else {
+            continue;
+        };
+        let cursor = usize::try_from(*scratch.slot_of.get(upper_node)?).ok()?;
+        *normalized_positions.get_mut(cursor)? = lower_position;
+        scratch.slot_of[upper_node] = scratch.slot_of[upper_node].checked_add(1)?;
+    }
+
+    // Process one layer pair at a time. Query every edge of a source group before inserting that
+    // group, so edges sharing a source never count as crossings (the old tuple sort's secondary key
+    // provided the same property). Parallel and reversed edges retain their exact multiplicity.
+    let mut total = 0_usize;
+    for (upper_rank, upper_order) in ordering_by_rank {
+        let Some(lower_rank) = upper_rank.checked_add(1) else {
+            continue;
+        };
+        let Some(lower_order) = ordering_by_rank.get(&lower_rank) else {
+            continue;
+        };
+        let fenwick_len = lower_order.len().checked_add(1)?;
+        let fenwick = fenwick_storage.get_mut(..fenwick_len)?;
+        fenwick.fill(0);
+        let mut seen_edges = 0_usize;
+
+        for (source_position, source) in upper_order.iter().copied().enumerate() {
+            if ranks.get(&source).copied() != Some(*upper_rank)
+                || scratch.position_of.get(source).copied() != u32::try_from(source_position).ok()
+            {
+                continue;
+            }
+            let start = usize::try_from(*normalized_offsets.get(source)?).ok()?;
+            let end = usize::try_from(*normalized_offsets.get(source.checked_add(1)?)?).ok()?;
+            let targets = normalized_positions.get(start..end)?;
+
+            for target_position in targets.iter().copied() {
+                let target_position = usize::try_from(target_position).ok()?;
+                if target_position >= lower_order.len() {
+                    return None;
+                }
+                let at_or_before = packed_fenwick_prefix(fenwick, target_position + 1);
+                total = total.saturating_add(seen_edges.saturating_sub(at_or_before));
+            }
+            for target_position in targets.iter().copied() {
+                let target_position = usize::try_from(target_position).ok()?;
+                packed_fenwick_add(fenwick, target_position + 1);
+                seen_edges = seen_edges.saturating_add(1);
+            }
+        }
+    }
+
+    Some(total)
 }
 
 fn total_crossings(
@@ -14051,7 +14255,11 @@ fn layout_decision_confidence_permille(
 
 #[cfg(test)]
 mod barycenter_arms_tests {
-    use super::{BarycenterScratch, LayoutConfig, bench_internals};
+    use std::collections::BTreeMap;
+
+    use super::{
+        BarycenterScratch, LayoutConfig, bench_internals, total_crossings, total_crossings_packed,
+    };
     use fm_core::{ArrowType, DiagramType, IrEdge, IrEndpoint, IrNode, IrNodeId, MermaidDiagramIr};
 
     /// Build a layered graph with `layers * width` nodes, forward edges (including skips), and
@@ -14126,6 +14334,13 @@ mod barycenter_arms_tests {
                     bench_internals::crossing_minimization_single_pass(&ir, &ranks, &config);
                 let flat_csr =
                     bench_internals::crossing_minimization_flat_csr(&ir, &ranks, &config);
+                let packed_crossings =
+                    bench_internals::crossing_minimization_packed_crossings(&ir, &ranks, &config);
+                assert_eq!(
+                    flat_csr, packed_crossings,
+                    "packed crossing count diverged from the flat-CSR sweep \
+                     (layers={layers} width={width} back_edges={back_edges} seed={seed:#x})"
+                );
                 assert_eq!(
                     single, flat_csr,
                     "flat-CSR sweep diverged from the single-pass sweep \
@@ -14185,6 +14400,171 @@ mod barycenter_arms_tests {
         assert_eq!(neighbors(0, false), vec![2, 3, 2]);
         assert_eq!(neighbors(1, false), vec![2]);
         assert_eq!(neighbors(2, false), vec![2]);
+    }
+
+    #[test]
+    fn packed_total_crossings_matches_maps_across_repeated_reorders() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for index in 0..7 {
+            ir.nodes.push(IrNode {
+                id: format!("N{index}"),
+                ..IrNode::default()
+            });
+        }
+        for (from, to) in [
+            (0, 3),
+            (1, 4),
+            (2, 5),
+            (4, 0), // reversed adjacent-rank edge
+            (0, 5),
+            (0, 5), // parallel edge: multiplicity must survive
+            (1, 0), // same-rank edge: ignored
+            (2, 6), // long edge: ignored
+            (5, 6),
+            (99, 0),
+            (0, 99),
+        ] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let ranks = BTreeMap::from([(0, 0), (1, 0), (2, 0), (3, 1), (4, 1), (5, 1), (6, 2)]);
+        let mut ordering = BTreeMap::from([(0, vec![2, 0, 1]), (1, vec![4, 3, 5]), (2, vec![6])]);
+        let mut scratch = BarycenterScratch::new::<true, true>(&ir);
+        let offset_ptr = scratch.incidence_offsets.as_ptr();
+        let neighbor_ptr = scratch.incidence_neighbors.as_ptr();
+        let offset_capacity = scratch.incidence_offsets.capacity();
+        let neighbor_capacity = scratch.incidence_neighbors.capacity();
+
+        for _ in 0..3 {
+            let expected = total_crossings(&ir, &ranks, &ordering);
+            let actual = total_crossings_packed(&ir, &ranks, &ordering, &mut scratch)
+                .expect("packed scratch should represent this graph");
+            assert_eq!(expected, actual);
+            assert_eq!(scratch.incidence_offsets.as_ptr(), offset_ptr);
+            assert_eq!(scratch.incidence_neighbors.as_ptr(), neighbor_ptr);
+            assert_eq!(scratch.incidence_offsets.capacity(), offset_capacity);
+            assert_eq!(scratch.incidence_neighbors.capacity(), neighbor_capacity);
+            ordering.get_mut(&1).expect("rank exists").rotate_left(1);
+        }
+    }
+
+    #[test]
+    fn packed_total_crossings_preserves_exact_edge_semantics() {
+        let check = |node_count: usize,
+                     rank_entries: &[(usize, usize)],
+                     ordering: BTreeMap<usize, Vec<usize>>,
+                     edges: &[(usize, usize)],
+                     expected: usize| {
+            let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+            for index in 0..node_count {
+                ir.nodes.push(IrNode {
+                    id: format!("N{index}"),
+                    ..IrNode::default()
+                });
+            }
+            for &(from, to) in edges {
+                ir.edges.push(IrEdge {
+                    from: IrEndpoint::Node(IrNodeId(from)),
+                    to: IrEndpoint::Node(IrNodeId(to)),
+                    arrow: ArrowType::Arrow,
+                    ..IrEdge::default()
+                });
+            }
+            let ranks: BTreeMap<usize, usize> = rank_entries.iter().copied().collect();
+            let reference = total_crossings(&ir, &ranks, &ordering);
+            assert_eq!(reference, expected, "reference case is malformed");
+            let mut scratch = BarycenterScratch::new::<true, true>(&ir);
+            assert_eq!(
+                total_crossings_packed(&ir, &ranks, &ordering, &mut scratch),
+                Some(expected)
+            );
+        };
+
+        // Target order within one source is irrelevant: same-source edges never cross.
+        check(
+            3,
+            &[(0, 0), (1, 1), (2, 1)],
+            BTreeMap::from([(0, vec![0]), (1, vec![1, 2])]),
+            &[(0, 2), (0, 1)],
+            0,
+        );
+        // Every edge in the 2-wide upper-left bundle crosses every edge in the 3-wide
+        // upper-right bundle; multiplicity is exact.
+        check(
+            4,
+            &[(0, 0), (1, 0), (2, 1), (3, 1)],
+            BTreeMap::from([(0, vec![0, 1]), (1, vec![2, 3])]),
+            &[(0, 3), (0, 3), (1, 2), (1, 2), (1, 2)],
+            6,
+        );
+        // Equal-target parallel bundles do not cross.
+        check(
+            3,
+            &[(0, 0), (1, 0), (2, 1)],
+            BTreeMap::from([(0, vec![0, 1]), (1, vec![2])]),
+            &[(0, 2), (0, 2), (1, 2), (1, 2), (1, 2)],
+            0,
+        );
+        // One edge is stored lower-to-upper in the IR but participates after rank normalization.
+        check(
+            4,
+            &[(0, 0), (1, 0), (2, 1), (3, 1)],
+            BTreeMap::from([(0, vec![0, 1]), (1, vec![2, 3])]),
+            &[(3, 0), (1, 2)],
+            1,
+        );
+        // Adjacent rank pairs are independent sums, never one flattened inversion stream.
+        check(
+            6,
+            &[(0, 0), (1, 0), (2, 1), (3, 1), (4, 2), (5, 2)],
+            BTreeMap::from([(0, vec![0, 1]), (1, vec![2, 3]), (2, vec![4, 5])]),
+            &[(0, 3), (1, 2), (2, 5), (3, 4)],
+            2,
+        );
+        // Sparse ranks at the integer boundary preserve saturating-adjacency semantics.
+        check(
+            4,
+            &[
+                (0, usize::MAX - 1),
+                (1, usize::MAX - 1),
+                (2, usize::MAX),
+                (3, usize::MAX),
+            ],
+            BTreeMap::from([(usize::MAX - 1, vec![0, 1]), (usize::MAX, vec![2, 3])]),
+            &[(0, 3), (1, 2)],
+            1,
+        );
+
+        // Wrong-rank occurrences are ignored, duplicate nodes use their last position, omitted nodes
+        // stay absent, and invalid endpoints follow the reference counter's filters.
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for index in 0..5 {
+            ir.nodes.push(IrNode {
+                id: format!("N{index}"),
+                ..IrNode::default()
+            });
+        }
+        for (from, to) in [(0, 3), (1, 2), (4, 2), (99, 0), (0, 99)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+        let ranks = BTreeMap::from([(0, 0), (1, 0), (2, 1), (3, 1), (4, 0)]);
+        let ordering = BTreeMap::from([(0, vec![2, 0, 1, 0]), (1, vec![2, 3])]);
+        let expected = total_crossings(&ir, &ranks, &ordering);
+        let mut scratch = BarycenterScratch::new::<true, true>(&ir);
+        assert_eq!(
+            total_crossings_packed(&ir, &ranks, &ordering, &mut scratch),
+            Some(expected)
+        );
     }
 }
 

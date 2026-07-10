@@ -1,4 +1,4 @@
-//! Same-binary **paired-sample** A/B for packed flat-CSR barycenter incidence (`bd-1buv.4`).
+//! Same-binary **paired-sample** A/B for the zero-allocation packed crossing counter (`bd-1buv.4`).
 //!
 //! # Why this harness exists instead of a criterion group
 //!
@@ -73,8 +73,8 @@ fn cyclic_scc_ir(node_count: usize, ring: usize) -> MermaidDiagramIr {
 /// Which implementation an arm runs. Both are reachable from `bench_internals`.
 #[derive(Clone, Copy)]
 enum Arm {
-    SinglePass,
     FlatCsr,
+    PackedCrossings,
 }
 
 /// Time `batch` invocations of one arm, feeding inputs and results through `black_box`. Returns
@@ -90,12 +90,12 @@ fn time_arm(
     let start = Instant::now();
     for _ in 0..batch {
         let (crossings, ordering) = match arm {
-            Arm::SinglePass => bench_internals::crossing_minimization_single_pass(
+            Arm::FlatCsr => bench_internals::crossing_minimization_flat_csr(
                 black_box(ir),
                 black_box(ranks),
                 black_box(config),
             ),
-            Arm::FlatCsr => bench_internals::crossing_minimization_flat_csr(
+            Arm::PackedCrossings => bench_internals::crossing_minimization_packed_crossings(
                 black_box(ir),
                 black_box(ranks),
                 black_box(config),
@@ -120,12 +120,12 @@ const MIN_SAMPLE: Duration = Duration::from_millis(200);
 
 /// Size the batch from the **faster** arm.
 ///
-/// Calibrating on the slow arm can leave the CSR arm's samples under `MIN_SAMPLE`, so the *ratio's* `cv`
+/// Calibrating on the slow arm can leave the packed arm's samples under `MIN_SAMPLE`, so the *ratio's* `cv`
 /// would be dominated by timer
 /// noise on the fast arm and read 5.8–13.4%. Both arms share one `batch`, so it must be chosen such
 /// that the SHORTER of the two samples clears the floor; the slower arm then clears it a fortiori.
 fn calibrate(ir: &MermaidDiagramIr, ranks: &BTreeMap<usize, usize>, config: &LayoutConfig) -> u32 {
-    let (per_ns, _) = time_arm(Arm::FlatCsr, ir, ranks, config, 1);
+    let (per_ns, _) = time_arm(Arm::PackedCrossings, ir, ranks, config, 1);
     let target = u64::try_from(MIN_SAMPLE.as_nanos()).unwrap_or(2_000_000);
     u32::try_from(target / per_ns.max(1)).unwrap_or(1).max(1)
 }
@@ -148,8 +148,8 @@ fn profile_arm_if_requested() -> bool {
         return false;
     };
     let arm = match requested.as_str() {
-        "orig" => Arm::SinglePass,
-        "cand" => Arm::FlatCsr,
+        "orig" => Arm::FlatCsr,
+        "cand" => Arm::PackedCrossings,
         _ => panic!("FM_BARYCENTER_PROFILE_ARM must be 'orig' or 'cand'"),
     };
     let iterations = env::var("FM_BARYCENTER_PROFILE_ITERS")
@@ -304,18 +304,19 @@ fn main() {
     ] {
         let ir = cyclic_scc_ir(node_count, ring);
         let ranks = bench_internals::prepare_ranks(&ir, &config);
-        let orig = bench_internals::crossing_minimization_single_pass(&ir, &ranks, &config);
-        let candidate = bench_internals::crossing_minimization_flat_csr(&ir, &ranks, &config);
+        let orig = bench_internals::crossing_minimization_flat_csr(&ir, &ranks, &config);
+        let candidate =
+            bench_internals::crossing_minimization_packed_crossings(&ir, &ranks, &config);
         assert_eq!(
             orig, candidate,
-            "flat-CSR candidate changed ordering for {label}"
+            "packed crossing counter changed ordering for {label}"
         );
         let batch = calibrate(&ir, &ranks, &config);
 
         let mut checksum: u64 = 0;
         for _ in 0..WARMUP {
-            let (_, c1) = time_arm(Arm::SinglePass, &ir, &ranks, &config, batch);
-            let (_, c2) = time_arm(Arm::FlatCsr, &ir, &ranks, &config, batch);
+            let (_, c1) = time_arm(Arm::FlatCsr, &ir, &ranks, &config, batch);
+            let (_, c2) = time_arm(Arm::PackedCrossings, &ir, &ranks, &config, batch);
             checksum = checksum.wrapping_add(c1).wrapping_add(c2);
         }
 
@@ -323,8 +324,8 @@ fn main() {
         // This is the harness's noise floor. A ratio far from 1.000, or a loose cv, means the harness
         // is not fit to decide the lever -- fix the harness before drawing any conclusion.
         let (_, _, null_ratio, null_cv, null_mad, c_null) = paired(
-            Arm::SinglePass,
-            Arm::SinglePass,
+            Arm::FlatCsr,
+            Arm::FlatCsr,
             &ir,
             &ranks,
             &config,
@@ -332,9 +333,9 @@ fn main() {
             ROUNDS,
         );
         // The real A/B, measured by the same routine.
-        let (single_p50, csr_p50, ratio, cv_pct, mad_pct, c_ab) = paired(
-            Arm::SinglePass,
+        let (flat_p50, packed_p50, ratio, cv_pct, mad_pct, c_ab) = paired(
             Arm::FlatCsr,
+            Arm::PackedCrossings,
             &ir,
             &ranks,
             &config,
@@ -355,7 +356,7 @@ fn main() {
             mad_pct,
         );
         println!(
-            "                 single_p50={single_p50:.1}ns csr_p50={csr_p50:.1}ns \
+            "                 flat_p50={flat_p50:.1}ns packed_p50={packed_p50:.1}ns \
 checksum={checksum} batch={batch} rounds={ROUNDS}"
         );
     }
