@@ -11756,3 +11756,45 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
   rustfmt, FrankenTUI fixture **1/1**, and golden checksum/repeated-run determinism **2/2** all pass.
 - **Verdict: WIN / KEEP.** The gate-clean claim is exactly the 800-node row. Evidence:
   `.benchmarks/barycenter_flat_csr.md`.
+
+<!-- cc_fm-isa-baseline-check -->
+### FLEET ISA-BASELINE CHECK: build emits x86-64-v2 (NO AVX2) on AVX-512 workers — a DOCUMENTED policy, not a defect (2026-07-10)
+- **Prompted by** frankenredis (BITCOUNT SSE2->AVX2 3.045-3.188x) and frankenscipy (dense-linalg wall = SSE2-on-AVX2)
+  both finding the same fleet-wide compile-target gap. Checked frankenmermaid.
+- **What the build emits:** `.cargo/config.toml` sets `rustflags = ["-C", "target-cpu=x86-64-v2"]` for
+  `cfg(target_arch = "x86_64")`. **x86-64-v2 = SSE4.2 / SSSE3 / POPCNT / CMPXCHG16B (Nehalem, ~2009). NO AVX2, NO
+  BMI2, NO FMA, NO 256-bit vectors.**
+- **What the hardware supports (measured, not assumed):**
+  - **rch worker** (`rustc --print cfg -C target-cpu=native` run remotely via `rch exec`): **AVX-512** —
+    `avx512f/bw/cd/dq/vl/vnni/vbmi/vbmi2/ifma/bitalg/vpopcntdq`, plus `avx2`, `bmi1`, `bmi2`, `fma`, `f16c`, `adx`,
+    `gfni`, `aes`. Far above v2.
+  - **local profiling box:** AMD Ryzen Threadripper PRO 5975WX = `avx2`, `bmi2`, `fma`, `sse4_2` (x86-64-v3 minus
+    AVX-512).
+  - ⇒ **YES, there is an ISA-baseline gap:** every machine that builds/runs/benchmarks this code is at least AVX2,
+    and the codegen is v2. The auto-vectorized byte scans (`memchr`, escape scanning, `write_escaped_*`) and the
+    render number-format floor (18.70% of large-render pipeline) are exactly the code AVX2 256-bit would widen.
+- **BUT — this is DELIBERATE and DOCUMENTED, unlike frankenredis/frankenscipy.** The config comment already names
+  the upgrade path: *"to go further on known-modern hardware, use x86-64-v3 (AVX2, Haswell 2013+) or native."* v2
+  itself was a landed win (`f49bf26`, +5.3% instr / +4.7% task-clock over generic SSE2). v2 was chosen as the
+  **portability floor for the DISTRIBUTED `install.sh` binary** (RHEL 9's x86-64-v2 baseline) — a real contract,
+  not an oversight.
+- **Runtime `#[target_feature]` dispatch is OFF THE TABLE by crate policy:** every crate is
+  `#![forbid(unsafe_code)]`, and `#[target_feature(enable="avx2")]` requires `unsafe`. So the user's "runtime
+  dispatch with safe fallback" option cannot apply here. **The only lever is the whole-binary `target-cpu` flag.**
+- **A valid v2-vs-v3 perf A/B is currently BLOCKED — surfaced, not measured:**
+  1. `target-cpu` is a **whole-binary** flag ⇒ v2 and v3 are two different binaries ⇒ a two-`rch`-invocation A/B,
+     which is invalid because `rch` picks workers non-deterministically (absolute ns not comparable across workers).
+  2. **Instruction-count A/B is meaningless for an ISA change** — AVX2 retires more work per instruction, so fewer
+     instructions is the *mechanism*, not a neutral proxy. Must use cycles/wall on one machine.
+  3. `rch` refuses non-compilation commands (`RCH-E301`), so no remote `perf`; local builds are disk-banned; and
+     the fleet was saturated during this attempt (`no admissible workers: insufficient_slots`). rch correctly
+     **failed closed** rather than building locally.
+  - **The clean measurement needs the disk constraint lifted:** build v2 and v3 `headtohead` binaries locally on
+    the AVX2 box, run alternating on one pinned core (the same-machine substrate that carried the v2 landing), and
+    gate on the null median. Filed as a bead.
+- **OWNER DECISION (not mine to make):** keep v2 as the **distributed-binary** floor (the portability contract is
+  real). Separately, consider a **bench/native profile** — e.g. `RUSTFLAGS=-C target-cpu=native` for local +
+  worker perf runs — so measurements reflect the hardware they run on, and/or a `-v3` release variant for
+  known-modern deployments. This is orthogonal to the portability contract and to all algorithm work.
+- **Reported per the fleet ask; question CLOSED:** the build emits **v2**, the hardware is **≥AVX2 (workers
+  AVX-512)**, the gap is real but is a documented policy tradeoff, and no-unsafe blocks the runtime-dispatch escape.
