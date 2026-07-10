@@ -226,9 +226,19 @@ fn measure(item: &CorpusItem, cfg: &SvgRenderConfig) -> Result<Measured, String>
 
 fn main() {
     let path = std::env::args().nth(1).unwrap_or_else(|| {
-        eprintln!("usage: headtohead <corpus.json>");
+        eprintln!("usage: headtohead <corpus.json> [dump-svg-dir]");
         std::process::exit(2);
     });
+    // Optional: write each item's final default/lean SVG to <dir>/<id>.{default,lean}.svg. Two uses:
+    // settling output-contract questions against mermaid's real output, and pinning byte-identity of
+    // the lean profile across a refactor (see bd-b2b6).
+    let dump_dir = std::env::args().nth(2);
+    if let Some(dir) = dump_dir.as_deref()
+        && let Err(e) = std::fs::create_dir_all(dir)
+    {
+        eprintln!("cannot create {dir}: {e}");
+        std::process::exit(2);
+    }
     let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| {
         eprintln!("cannot read {path}: {e}");
         std::process::exit(2);
@@ -295,6 +305,18 @@ fn main() {
         }
 
         let joined_input = item.texts.join(REVISION_SEP);
+
+        if let Some(dir) = dump_dir.as_deref() {
+            let last = |v: &[String]| v.last().cloned().unwrap_or_default();
+            let _ = std::fs::write(
+                format!("{dir}/{}.default.svg", item.id),
+                last(&default_run.reference),
+            );
+            let _ = std::fs::write(
+                format!("{dir}/{}.lean.svg", item.id),
+                last(&lean_run.reference),
+            );
+        }
 
         println!(
             "{}",

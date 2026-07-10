@@ -209,6 +209,10 @@ function validate(svg) {
 const only = arg('only');
 const repsScale = Number(arg('reps-scale', '1'));
 const securityLevel = arg('security-level', PINS.mermaid.security_level);
+// Writes each item's final SVG to <dir>/<id>.mermaid.svg. Used to settle output-contract questions
+// ("does mermaid emit per-element role/tabindex/<title>?") against the real comparator output.
+const dumpSvgDir = arg('dump-svg');
+if (dumpSvgDir) mkdirSync(dumpSvgDir, { recursive: true });
 
 const { text: bundleText, version, url, sha256: bundleSha } = await bundle();
 const { proc, cdp, info } = await launchChromium();
@@ -285,6 +289,7 @@ try {
     }
     const ms = stats(out.times);
     const outputBytes = out.svgs.reduce((a, s) => a + s.length, 0);
+    if (dumpSvgDir) writeFileSync(join(dumpSvgDir, `${item.id}.mermaid.svg`), out.svgs[out.svgs.length - 1]);
     console.log(JSON.stringify({
       ...record,
       status: 'ok',

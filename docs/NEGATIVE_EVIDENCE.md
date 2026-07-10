@@ -10693,3 +10693,36 @@ levers; all measured ~0-gain (`perf stat -e instructions:u`, 2-build same-machin
 - **Not covered (deliberate):** this measures *full re-render* on both sides, which is the fair
   comparison. frankenmermaid's incremental-layout path is a distinct lever and belongs to `bd-1buv.3`;
   exercising it here would compare our incremental path against mermaid's full render.
+
+### a11y output contract SETTLED by the comparator: mermaid emits zero per-element a11y — KEEP our default (2026-07-09)
+- **Agent:** cc_fm. **HEAD:** `59b237b`. **Bead:** bd-b2b6. **Supersedes the owner-decision framing in**
+  `.benchmarks/edge_a11y_is_19pct_render_MEASURED.md` **and** `.benchmarks/BLOCKER_render_perf_double_gated.md`,
+  both of which blocked on "needs the Mermaid comparator to confirm mermaid omits per-element
+  `<title>`/`role`/`aria`". The comparator now exists (bd-1buv.1); the answer is measured.
+- **Measurement** (same graph `wide_8x16` = 128 nodes / 224 edges, byte-identical input, mermaid 11.15.0
+  pinned bundle, dumped via `mermaid_bench.mjs --dump-svg` and `headtohead <corpus> <dir>`):
+  mermaid **292,024 B** with `role=` x1 (root `graphics-document document`), `tabindex` x0,
+  `aria-label` x0, `<title>` x0, `<desc>` x0, and no `aria-describedby`/`aria-labelledby`/`accTitle`/
+  `focusable`. frankenmermaid default **134,629 B** with `role=` x353, `tabindex` x352, `aria-label` x128,
+  `<title>` x353 (= 1 root + 128 nodes + 224 edges, nodes-only for aria-label — internally consistent).
+  frankenmermaid lean (`A11yConfig::none()`) **93,077 B**, all zero. Per-element a11y = **41,552 B =
+  30.9% of our default output**.
+- **Verdict — the decision goes the OTHER way from the recorded recommendation.** The old note called the
+  uniform bare-edge reduction "the biggest measurable render win on the board" (-19% render). Its premise
+  is false: (1) we are already **2.17x smaller than mermaid WITH full per-element a11y** (and 2174x faster
+  on this item), so output-size dominance requires dropping nothing; (2) our default is **strictly more
+  accessible than the original** — trading a shipped a11y advantage for 19% render on a path already three
+  orders of magnitude ahead is a bad trade at any exchange rate; (3) mermaid-parity output already exists
+  via `A11yConfig::none()`. **KEEP `A11yConfig::full()` as the default.**
+- **The real lever (bd-b2b6):** the lean profile is **1.5-2.02x SLOWER than our own default** on 11/13
+  corpus items, because the streaming fast paths are gated on
+  `a11y.aria_labels && keyboard_nav && text_alternatives` (~5746/5798/5843/5902/6063 in
+  `fm-render-svg/src/lib.rs`) and lean output falls back to the per-element `Element` builder. Less output
+  costs more work. Fix: emit lean fragments from the fast path, relax the gate to "a11y uniformly on OR
+  uniformly off". Default output unchanged => no golden re-bless.
+- **Verification oracle (built, ready):** `headtohead <corpus.json> <dump-dir>` writes `<id>.lean.svg`;
+  capture its SHA-256 before the change and require it unchanged after (proves the fast path reproduces
+  the slow path's lean bytes exactly), then require `lean_slowdown <= 1.0` on every harness row.
+- **Do-not-retry:** do NOT strip the slow path's `<g>`/`<title>` and re-bless the 37 goldens — the
+  comparator says there is nothing to catch up to. Do NOT read the 30.9% byte share as a render-time
+  share; render is not purely byte-bound (the `data-fm-source-*` entry was 35% bytes but ~12% render).
