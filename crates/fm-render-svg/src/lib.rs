@@ -4745,22 +4745,51 @@ fn render_xychart_svg(
 
         match series.kind {
             IrXySeriesKind::Bar => {
-                for node in series_nodes {
-                    let mut rect = Element::rect()
-                        .x(node.bounds.x + offset_x)
-                        .y(node.bounds.y + offset_y)
-                        .width(node.bounds.width)
-                        .height(node.bounds.height)
-                        .fill(color)
-                        .fill_opacity(0.78)
-                        .stroke(color)
-                        .stroke_width(1.0)
-                        .rx((config.rounded_corners * 0.45).max(3.0))
-                        .class("fm-xychart-bar");
-                    if config.include_source_spans {
-                        rect = apply_span_metadata(rect, node.span);
+                let rx = (config.rounded_corners * 0.45).max(3.0);
+                if config.include_source_spans {
+                    // Spans on: keep the per-bar `Element` build so `apply_span_metadata` can attach the
+                    // `data-fm-source-*` attributes (rare config; not worth reproducing inline).
+                    for node in series_nodes {
+                        let rect = Element::rect()
+                            .x(node.bounds.x + offset_x)
+                            .y(node.bounds.y + offset_y)
+                            .width(node.bounds.width)
+                            .height(node.bounds.height)
+                            .fill(color)
+                            .fill_opacity(0.78)
+                            .stroke(color)
+                            .stroke_width(1.0)
+                            .rx(rx)
+                            .class("fm-xychart-bar");
+                        doc = doc.child(apply_span_metadata(rect, node.span));
                     }
-                    doc = doc.child(rect);
+                } else {
+                    // Stream the bar `<rect>`s straight into one `raw_svg` child instead of building ~N
+                    // per-bar `Element`/`Attributes` trees (Attributes churn was ~18% of xychart render).
+                    // Byte-identical to the `Element` build above: same attribute order (x, y, width,
+                    // height, fill, fill-opacity, stroke, stroke-width, rx, class), same `write_value`
+                    // number formatting, same `write_escaped_attr` for the colour. `fill-opacity="0.78"`
+                    // and `stroke-width="1"` are the fixed serializations of `0.78`/`1.0`.
+                    use crate::attributes::{AttributeValue, write_escaped_attr};
+                    let mut bar_svg = String::new();
+                    for node in series_nodes {
+                        bar_svg.push_str("<rect x=\"");
+                        let _ = AttributeValue::Number(node.bounds.x + offset_x).write_value(&mut bar_svg);
+                        bar_svg.push_str("\" y=\"");
+                        let _ = AttributeValue::Number(node.bounds.y + offset_y).write_value(&mut bar_svg);
+                        bar_svg.push_str("\" width=\"");
+                        let _ = AttributeValue::Number(node.bounds.width).write_value(&mut bar_svg);
+                        bar_svg.push_str("\" height=\"");
+                        let _ = AttributeValue::Number(node.bounds.height).write_value(&mut bar_svg);
+                        bar_svg.push_str("\" fill=\"");
+                        let _ = write_escaped_attr(&mut bar_svg, color);
+                        bar_svg.push_str("\" fill-opacity=\"0.78\" stroke=\"");
+                        let _ = write_escaped_attr(&mut bar_svg, color);
+                        bar_svg.push_str("\" stroke-width=\"1\" rx=\"");
+                        let _ = AttributeValue::Number(rx).write_value(&mut bar_svg);
+                        bar_svg.push_str("\" class=\"fm-xychart-bar\"/>");
+                    }
+                    doc = doc.child(Element::raw_svg(bar_svg));
                 }
             }
             IrXySeriesKind::Line | IrXySeriesKind::Area => {
@@ -4812,20 +4841,43 @@ fn render_xychart_svg(
                         .class("fm-xychart-line"),
                 );
 
-                for node in series_nodes {
-                    let center = node.bounds.center();
-                    let mut point = Element::circle()
-                        .cx(center.x + offset_x)
-                        .cy(center.y + offset_y)
-                        .r((node.bounds.width.min(node.bounds.height) / 2.0).max(3.5))
-                        .fill(color)
-                        .stroke(&theme.colors.background)
-                        .stroke_width(2.0)
-                        .class("fm-xychart-point");
-                    if config.include_source_spans {
-                        point = apply_span_metadata(point, node.span);
+                if config.include_source_spans {
+                    for node in series_nodes {
+                        let center = node.bounds.center();
+                        let point = Element::circle()
+                            .cx(center.x + offset_x)
+                            .cy(center.y + offset_y)
+                            .r((node.bounds.width.min(node.bounds.height) / 2.0).max(3.5))
+                            .fill(color)
+                            .stroke(&theme.colors.background)
+                            .stroke_width(2.0)
+                            .class("fm-xychart-point");
+                        doc = doc.child(apply_span_metadata(point, node.span));
                     }
-                    doc = doc.child(point);
+                } else {
+                    // Stream the series point `<circle>`s (see the bar-`<rect>` streaming above). Same
+                    // attribute order as the `Element` build (cx, cy, r, fill, stroke, stroke-width, class);
+                    // `stroke-width="2"` is the fixed serialization of `2.0`. Byte-identical.
+                    use crate::attributes::{AttributeValue, write_escaped_attr};
+                    let mut point_svg = String::new();
+                    for node in series_nodes {
+                        let center = node.bounds.center();
+                        point_svg.push_str("<circle cx=\"");
+                        let _ = AttributeValue::Number(center.x + offset_x).write_value(&mut point_svg);
+                        point_svg.push_str("\" cy=\"");
+                        let _ = AttributeValue::Number(center.y + offset_y).write_value(&mut point_svg);
+                        point_svg.push_str("\" r=\"");
+                        let _ = AttributeValue::Number(
+                            (node.bounds.width.min(node.bounds.height) / 2.0).max(3.5),
+                        )
+                        .write_value(&mut point_svg);
+                        point_svg.push_str("\" fill=\"");
+                        let _ = write_escaped_attr(&mut point_svg, color);
+                        point_svg.push_str("\" stroke=\"");
+                        let _ = write_escaped_attr(&mut point_svg, &theme.colors.background);
+                        point_svg.push_str("\" stroke-width=\"2\" class=\"fm-xychart-point\"/>");
+                    }
+                    doc = doc.child(Element::raw_svg(point_svg));
                 }
             }
         }
