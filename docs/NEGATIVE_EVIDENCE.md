@@ -13015,3 +13015,29 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   --sample-size 50 --noplot`. Score Criterion `median.point_estimate`; require CAND/ORIG `<= 0.97`, disjoint median
   95% CIs, no neighboring regression, identical parser IR, and the already-established filtered `er_basic` proof.
 - **Verdict: SURFACE / HOLD.** `bd-1buv.2.3` closes this release-era admission attempt without changing source.
+
+### SURFACE / HOLD: xychart category tick-line streaming stopped before profile on degraded RCH (2026-07-11)
+
+- **Negative-ledger + BV first:** `bv --robot-triage` data hash `4472fffa1955e180` reported 52 open / 39
+  actionable issues and no dependency cycles. Its global top picks are architectural feature work, not bounded
+  performance levers; the applicable ready P0 performance parent remains `bd-1buv.2`. The ledger excludes the
+  already-landed xychart bar/point streaming and invariant-colour/radius hoist, and explicitly leaves the N-sized
+  category tick lines and text labels as separate follow-ups.
+- **One held lever:** stream only the per-category x-axis `fm-xychart-tick` `<line>` loop in
+  `render_xychart_svg` into one raw SVG child. Only `x` varies; `x1 == x2`, while `y1`, `y2`, stroke,
+  stroke-width, class, and attribute order are invariant. Category/axis `TextBuilder` labels are explicitly out of
+  scope so the next measurement remains one lever. A candidate diff is present in the shared checkout, but it was
+  neither benchmarked nor staged by this attempt.
+- **Why profiling/building stopped:** before any Cargo command, `rch status --json` at
+  `2026-07-11T15:14:39-04:00` reported `posture: degraded` (`9/12` workers healthy, `35/76` slots available).
+  The active contract is **RCH degraded = SURFACE**. Therefore no benchmark, test, build, queue/retry, or local
+  Cargo fallback ran. No candidate performance claim is made; committed `HEAD` remains `c1cbbc6`, so shipped SVG
+  bytes remain unchanged.
+- **Exact healthy-posture unblock gate:** first profile current `HEAD`, then run ORIG and CAND on the same actual
+  worker via `RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo bench --profile release -p
+  frankenmermaid-cli --bench pipeline_bench -- xychart_stages/render/512 --warm-up-time 3 --measurement-time 8
+  --sample-size 50 --noplot`; use `xychart_stages/render/128` as the crossover guard. Score Criterion
+  `median.point_estimate`; require CAND/ORIG `<= 0.97`, disjoint median 95% CIs, no neighboring regression, focused
+  renderer tests, and exact xychart SVG byte identity. Tracker: `bd-1buv.2.4`.
+- **Verdict: SURFACE / HOLD.** The tick-line candidate stays unshipped until RCH posture is healthy and the strict
+  remote median/parity gate can run.
