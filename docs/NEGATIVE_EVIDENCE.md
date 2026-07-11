@@ -13041,3 +13041,35 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   renderer tests, and exact xychart SVG byte identity. Tracker: `bd-1buv.2.4`.
 - **Verdict: SURFACE / HOLD.** The tick-line candidate stays unshipped until RCH posture is healthy and the strict
   remote median/parity gate can run.
+
+### SURFACE / HOLD: Kanban dense-ID class appends stopped before profile on degraded RCH (2026-07-11)
+
+- **Parser lane, negative-ledger + BV first:** `bv --robot-triage` data hash `ca22e1db45ba1983` reported 52 open /
+  39 actionable issues and no dependency cycles. Its ParseLens recommendation is architectural product work rather
+  than a bounded performance lever; the applicable ready P0 performance parent remains `bd-1buv.2`. The ledger
+  excludes the prior ER-header, rich-label, GitGraph-current-head, class-relationship/dense-member, global-trim,
+  and parser-wide single-byte-memchr families.
+- **One fresh held lever:** `parse_kanban` receives the dense `IrNodeId` from `intern_node`, then discards that
+  advantage and re-enters key-based `add_class_to_node(&card_key, ...)` for the base `kanban-card` class and each
+  optional priority, assignee, and tag class. Replace only those successful-card appends with the existing
+  `add_class_to_node_id(nid, ...)`; metadata parsing/sanitization, string construction, ordering, and every other
+  diagram family remain out of scope. This is the same already-proven lookup-hoist primitive as the timeline class
+  append keep, applied to a distinct parser path with one to four redundant lookups per card.
+- **Isomorphism candidate:** `nid` is the id returned by the immediately preceding successful intern. The dense-id
+  helper preserves class trimming, empty-class rejection, insertion order, and dedup behavior, while avoiding only
+  the repeated card-key hash lookup. Node/label/class bytes, diagnostics, tie-breaking, floating point, and RNG are
+  unchanged. This remains an argument to prove, not a performance or byte-identity claim.
+- **Why profile/build/edit stopped:** before any Cargo command, `rch status --json` at
+  `2026-07-11T15:22:35-04:00` reported `posture: degraded` (`9/12` workers healthy, `25/76` slots available), plus
+  a stale-progress warning on an active worker. The explicit contract is **RCH degraded = SURFACE**. No benchmark,
+  test, build, queue/retry, local Cargo fallback, benchmark seam, or parser edit ran. Committed parser/output bytes
+  therefore remain identical to `a85ab2b`.
+- **Exact healthy-posture unblock gate:** add the same `parse/kanban/kanban_1600` Criterion seam to both arms,
+  modeled on the existing Kanban profharness generator; profile current `origin/main`, then score exact-source ORIG
+  and CAND on the same actual worker via `RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo bench
+  --profile release -p fm-parser --bench parse_bench -- parse/kanban/kanban_1600 --warm-up-time 3
+  --measurement-time 8 --sample-size 50 --noplot`. Gate on `median.point_estimate`; require CAND/ORIG `<= 0.97`,
+  disjoint median 95% CIs, no neighboring-row regression, serialized IR identity, focused parser gates, and exact
+  SVG byte identity. Tracker: `bd-1buv.2.5`.
+- **Verdict: SURFACE / HOLD.** The parser lever remains unimplemented and unshipped until the shared strict-remote
+  measurement substrate is healthy.
