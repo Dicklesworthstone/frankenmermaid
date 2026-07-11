@@ -913,6 +913,31 @@
   bulk `push_str`. The win is proportional to how often the input needs no transform (here: ~always, the
   tokens are internal lowercase literals).
 
+### LANDED: stream xychart bar/point markers instead of Element trees — xychart render −35% (2026-07-11)
+- **Profile (non-flowchart cont.):** xychart was the last big type on the SLOW `Element`/`Attributes`
+  path — `Attributes::set::<&str,f32>` 10.3% + `set::<&str,&str>` 8.6% + `write_into` 8.5% + drop_glue,
+  all inside `render_xychart_svg`. The two N-sized DATA loops dominate: bar `<rect>`s and line/area point
+  `<circle>`s (both `doc.child(Element::…build())` per datum).
+- **Lever (9cf568b):** stream each marker loop straight into one `Element::raw_svg(String)` child (the
+  pie pattern), byte-identical to the `Element` serialization. Got the exact bytes by DUMPING a small
+  xychart and matching: attribute order = builder order (`x,y,width,height,fill,fill-opacity,stroke,
+  stroke-width,rx,class` for the rect), `AttributeValue::Number(..).write_value` for every coord (same
+  int-or-2dp formatting), `write_escaped_attr` for the colour, and the fixed literals
+  `fill-opacity="0.78"` / `stroke-width="1"|"2"`. Gated on `!include_source_spans` — the rare spans-on
+  path keeps the per-element `Element` build so `apply_span_metadata` still attaches `data-fm-source-*`.
+- **Measured (min-of-8 instr):** `xychart/50 −18.6%`, `xychart/200 −35.0%`, `xychart/400 −35.1%`;
+  wall-time `xychart/400 380k→249k ns (−35%)`, non-overlapping over 5 reps. `flowchart/300 +0.009%`
+  (unaffected). Byte-identical (xychart 1..300 + 6 shapes `sha256`; 251 lib tests incl.
+  `xychart_bar_series_renders_rects`, `renders_xychart_axes_bars_and_line_series`); clippy green.
+- **META:** the `Element`/`Attributes` path is ~35% pure overhead per repeated element (empty Vec alloc +
+  per-attr `retain` dedup on `set` + `write_into` dispatch + drop) — for any type still building N
+  same-shape Elements in a loop, stream them into a `raw_svg` child. ⭐**To get byte-identity without
+  reverse-engineering, DUMP a small instance and match the exact bytes** (attr order = builder call order;
+  numbers via `write_value`; string attrs via `write_escaped_attr`). Gate on the rare span/config paths
+  that add attributes and keep those on `Element`. REMAINING xychart loops (still `Element`): the per-
+  category x-tick `<line>`s (`fm-xychart-tick`, N-sized) and category/axis `TextBuilder` labels — next
+  chain step (text streaming is more involved than shapes).
+
 ## Kept Wins Also Recorded Here By Request
 
 ### Acyclic SCC fast-path in `GraphMetrics::from_ir` — −27 to −29% layout (Auto-selection overhead) (2026-06-27)
