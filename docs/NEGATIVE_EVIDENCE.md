@@ -892,6 +892,27 @@
   FAMILY: adjacent geometric primitives that share an endpoint (arc/segment chains) format that shared
   coordinate twice — cache + reuse the shared-vertex text when the shared float is provably bit-identical.
 
+### LANDED: bulk-copy already-clean CSS class tokens — 5 class-carrying niche types −4.3..−6.2% instr (2026-07-11)
+- **Profile the NON-flowchart types (cont.):** per-type render profiles showed `write_sanitized_css_token
+  _into` hot across the class-CARRYING niche types (journey 9.2%, kanban 7.3%, timeline 6.8%, block 6.4%,
+  git) — it decoded every class `char` and `push`ed it one at a time. But the classes those types emit
+  (`kanban-card`, `journey-actor-actor0`, `timeline-section-0`, `block-beta`, `git-*`) are already valid
+  lowercase CSS tokens that map to themselves.
+- **Lever (a26bc2c):** fast path — `if value.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()
+  || b == b'-' || b == b'_') { buf.push_str(value); return; }` before the per-char loop. Byte-identical:
+  on an all-clean token the loop reproduces `value` verbatim (`to_ascii_lowercase` is the identity, every
+  char kept). `.all` short-circuits on the first transforming byte, so upper/special classes (styled's
+  camelCase `:::myCustomNodeClass`) keep the slow path with no regression.
+- **Measured (min-of-8 instr):** `kanban/400 −5.8%`, `block/400 −5.8%`, `timeline/400 −6.2%`, `git/400
+  −4.9%`, `journey/400 −4.3%`; `styled/400 +0.003%` and `flowchart/400 −0.002%` (no clean user class →
+  fast path never fires, no regression). Byte-identical (11 shapes × 3 sizes `sha256`; 251 lib tests);
+  clippy `-D warnings` green.
+- **META:** same ASCII bulk-copy family as `sanitize_render_element_fragment` (28859ad) and the parser
+  byte-scan wins — grep render `f()->push per char`/`.chars()` transforms on per-node/edge paths where
+  the COMMON input is already in the target form → gate on a cheap `bytes().all(is-already-clean)` and
+  bulk `push_str`. The win is proportional to how often the input needs no transform (here: ~always, the
+  tokens are internal lowercase literals).
+
 ## Kept Wins Also Recorded Here By Request
 
 ### Acyclic SCC fast-path in `GraphMetrics::from_ir` — −27 to −29% layout (Auto-selection overhead) (2026-06-27)
