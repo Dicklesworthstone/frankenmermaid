@@ -12516,3 +12516,39 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   byte-identical. ⭐⭐META: a 2-invocation rch A/B manufactures fake deltas even WITH parse/layout null controls when
   the changed phase has a different worker-sensitivity than the nulls; for a fixed-size primitive, a same-invocation
   INTERLEAVED micro-bench (both arms per iteration, noop floor subtracted) is the trustworthy gate.
+
+### REJECT: memoize `Theme::to_svg_style` output — build is only ~772 ns, caching saves ~600 ns (2026-07-11)
+
+- **Profile-first (same-invocation micro-bench, `tosvgstyle_ab`, noop null):** hypothesized the ~9 KB theme
+  `<style>` rebuilt per render (`theme.to_svg_style`) was a big fixed cost worth memoizing. MEASURED: fresh build
+  = **772 ns** (6768 bytes, ~8.7 GB/s — the giant `write!` compiles to efficient `push_str` chunks), cache-clone
+  = 170 ns → **potential saving only ~600 ns/render**. The CSS *build* is cheap; the expensive theme-CSS work was
+  the STRIP (~11 µs, 4 reallocs — already fixed by the `find`+`drain` win above).
+- **Why REJECTED:** ~600 ns is below the whole-render noise floor and does not justify a cache layer (keying on
+  theme+config, invalidation, hidden state). Not worth it. LESSON: measure the *build* before assuming a fresh
+  per-render string is the hotspot — a monolithic `write!` of static chunks is near memcpy speed.
+
+### FRONTIER + HOLD: arrowhead-marker `<defs>` memoization — measured ~1-6 µs/render, IMPLEMENTED, blocked on rch (2026-07-11)
+
+- **Profile-first (same-invocation micro-bench, `defs_ab`, cache-clone null):** both render backends rebuild the
+  arrowhead-marker `<defs>` from scratch every render — N `ArrowheadMarker` structs (2 `to_string` each) → each
+  `to_element()` Element tree → serialize. MEASURED: **2-marker basic-flowchart set = ~1.0 µs**, **12-marker fancy
+  set = ~6.0 µs** (fires on EVERY non-flowchart diagram: sequence/class/ER/state/gitgraph), rock-stable across 3
+  runs. The set is a pure function of `(edge_color, emit_fancy)` — the single largest render fixed-overhead cost
+  found after the theme-CSS strip.
+- **Lever (implemented, uncommitted — `scratchpad/marker_defs_lever.patch`):** `marker_defs_body(edge, fancy)`
+  serializes the exact per-marker sequence once and memoizes the DEFAULT theme via process-global `OnceLock`s
+  (built from the real markers → byte-identical by construction, no source drift, no unbounded cache); custom
+  themes build fresh. New `DefsBuilder::raw_markers` inserts the body in the MARKERS slot (before gradients/filters/
+  custom) — ⭐the legacy (DEFAULT) backend adds `filter`+`gradient` AFTER the markers, and `to_element` serializes
+  markers→gradients→filters→custom, so a naive `.custom(raw_svg)` would REORDER them (caught by inspection, avoided
+  by the dedicated markers-slot field). Parity tests written: `marker_defs_body_streams_byte_identical` (streamed
+  `<defs>` == per-marker render, default+custom color × basic+fancy, with trailing filter+custom to pin ordering)
+  and `default_edge_color_matches_preset`.
+- **HOLD reason:** rch is fleet-DEGRADED (posture degraded; 2 workers offline, hz1 critical disk pressure;
+  admission refused `insufficient_slots=9, hard_preflight=1` on every attempt for 15+ min). The byte-identity gate
+  (247 lib tests + golden + the 2 parity tests) and the median A/B (`er_stages`/`class_stages` non-flowchart
+  render) both REQUIRE rch. Mandate = never local cargo + gate on median, so NOT committed unverified. Ready to
+  ship the instant rch admits: `cargo test -p fm-render-svg` → null-controlled A/B on `er_stages` → commit.
+  LEVER (general): a per-render Element-tree build whose output is a pure function of a few config values →
+  serialize once + memoize (OnceLock for the common key), stream via a raw fragment in the correct defs slot.
