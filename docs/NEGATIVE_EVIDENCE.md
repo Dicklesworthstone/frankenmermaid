@@ -12349,3 +12349,38 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   that result was discarded, and it neither changed source nor produced project-target evidence.
 - **Verdict: WIN / KEEP.** This is the contained, safe-file form of the earlier by-value-label frontier: borrow the
   probe and allocate only when the IR actually takes ownership.
+
+<!-- codex-er-entity-header-direct-lower-remote-surface -->
+### SURFACE / REMOTE BLOCKER: ER entity-header direct lowering held before edit (2026-07-11)
+
+- **Different subsystem / ledger guard:** this pass stayed entirely in `fm-parser`; render and layout remained
+  untouched. The ledger excludes the already-closed DOT, flowchart, class, wide-flowchart, journey, Gantt,
+  requirement, C4, mindmap, GitGraph, and plain-label allocation families. The shared checkout also has live
+  GitGraph clone-removal work, so the clean baseline was detached `origin/main` at `43a90e8`.
+- **Fresh strict-remote profile:** one full `fm-parser` Criterion sweep ran through fail-closed RCH on
+  `vmi1293453` with source SHA-256 `5ed811afba3b18984365ed593d5bf40b80cfe649b4c8d425f8121258c191c95f`.
+  The largest median rows were DOT-200 **364.510 us**, flowchart-1000 **317.638 us**, class-100 **239.754 us**,
+  wide-16x32 **230.389 us**, and journey-200 **194.793 us**; every one is closed by prior evidence. The fresh ER
+  secondary row was `parse/er/er_100` median **68.957 us** (95% CI **67.245..71.128 us**). The realistic scoring
+  row is the existing `er_stages/parse/512` benchmark (historically about **367 us**).
+- **ONE lever selected, not implemented:** for an entity-block header `ENTITY {`, guard with the existing
+  `is_plain_normalized_er_id(entity_name)` predicate and directly call
+  `builder.intern_node(entity_name, None, NodeShape::Rect, span)`; keep
+  `parse_node_token_with_config` as the fallback. The 512-entity row executes this path 512 times. This removes
+  the temporary normalized-id `String` and generic token/label work for the plain header while leaving the prior
+  direct relationship/attribute keep unchanged.
+- **Isomorphism argument:** under that predicate, `normalize_identifier(entity_name)` is the identity and the
+  generic node-token parser yields the same id, `label=None`, `icon=None`, `shape=Rect`, and source span. The
+  direct builder call therefore preserves node/label insertion order, ids, tie-breaking, and all IR fields;
+  shaped, quoted, classed, malformed, or otherwise non-plain headers retain the exact old fallback. Floating
+  point and RNG are N/A. This is a proof candidate only: no source was edited and no SVG hash was claimed.
+- **Hard remote blocker:** the required pre-edit realistic baseline command was attempted exactly through
+  `RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo bench --profile release -p
+  frankenmermaid-cli --bench pipeline_bench -- er_stages/parse/512 --warm-up-time 2 --measurement-time 5
+  --sample-size 30 --noplot`. RCH refused before build with `no admissible workers: insufficient_slots=8,
+  hard_preflight=2` and `remote required; refusing local fallback`. Per the remote-only rule, there was no queue,
+  retry, local Cargo command, candidate edit, or unscored fallback.
+- **Unblock / keep gate (`bd-1buv.2`):** only reopen when RCH admits the realistic baseline and candidate. Score
+  exact-source, same-worker `median.point_estimate` values; require candidate/ORIG <= **0.97**, disjoint median
+  95% CIs, no neighboring regression, remote parser/conformance/check/clippy gates, and exact ER SVG SHA-256
+  equality before shipping. Otherwise revert the one source lever and replace this surface with a measured reject.
