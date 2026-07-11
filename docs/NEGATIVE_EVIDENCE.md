@@ -837,6 +837,35 @@
   are all already skip-escaped (path `d`) or memchr'd (CSS block); short user content
   (ids/labels) must be escaped and its scan is already compiler-optimal.
 
+### LANDED: fuse node fast-path gate newline scans + FRONTIER (node writer at byte floor) (2026-07-11)
+- **Win (ad97ce5):** the node fast-path gates checked `!label_text.contains('\n') &&
+  !label_text.contains('\r')` — the compiler emitted **two separate scalar scan loops**, so the
+  common single-line label was read twice per node (`render_nodes_serial`'s hottest self-line, a
+  `cmpb $0xa` loop at 8.5% of that fn). Fused into one `label_has_line_break` pass
+  (`s.as_bytes().iter().any(|&b| b == b'\n' || b == b'\r')`) at all 4 node gates + the inverse
+  multi-line check. Byte-identical by De Morgan (both needles ASCII). Same landable family as
+  parser 6924 (`contains([set])`→`bytes().any`) and render 28859ad. **Min-of-8 instruction count
+  −0.32..−0.55% on EVERY shape** (flowchart −0.46%, diamond −0.55%, wide/styled/cylinder/hexagon
+  all negative), byte-identical (21 shapes × 3 sizes `sha256`; 251/251 lib tests), wall-time
+  neutral-to-faster. Landable on the strictly-fewer-loads monotonic basis.
+- **FRONTIER (render node/edge hot path confirmed at byte-production floor after this win):** fresh
+  symbolized profile (flowchart/800) top self: `write_uint_into` 15.5% + `write_fixed2` 13%
+  (number-format, ledger-closed) → escape `write_escaped_text` 10.7% + `write_escaped_attr` 8.9%
+  (floor, 2026-07-11 rejects) → `write_common_node_fragment_into` 8.8% (annotated: inherent —
+  accent `write_uint` + `write_value` coord + `movb` static-string stores, NO redundant work) →
+  `render_nodes_serial` 7% (this win) → `write_mermaid_node_element_id_into`/sanitizer 2.7%
+  (already byte-scan-optimized 28859ad; remaining is inherent per-byte lowercase-transform + push,
+  no all-safe fast path since flowchart ids need lowercasing).
+- **`.contains`-family sweep (the winning lever family) is EXHAUSTED in render:** remaining
+  `.contains(char)`/`.contains("str")` sites are niche + short — `er_marker_to_label` (1–2-byte ER
+  cardinality markers), C4 boundary title checks (`System_Boundary` etc., per-title not per-node).
+  Neither is a measurable lever. Do not re-dig the render node/edge writers for a general lever;
+  the levers are diagram-type-specific niche or ledger-closed.
+- **CI-hygiene fix shipped alongside (cfff0e1):** `fm-layout::bk_vertical_alignment` had a duplicated
+  `#[allow(clippy::too_many_arguments)]` — a `-D warnings`-only `duplicated attribute` error that
+  passed `cargo check` but red-blocked the whole workspace clippy gate. Removed the dup; workspace
+  `clippy --all-targets -- -D warnings` now exits 0. Byte-identical (lint attr, zero codegen).
+
 ## Kept Wins Also Recorded Here By Request
 
 ### Acyclic SCC fast-path in `GraphMetrics::from_ir` — −27 to −29% layout (Auto-selection overhead) (2026-06-27)
