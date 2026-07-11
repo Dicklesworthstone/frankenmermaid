@@ -937,6 +937,14 @@
   that add attributes and keep those on `Element`. REMAINING xychart loops (still `Element`): the per-
   category x-tick `<line>`s (`fm-xychart-tick`, N-sized) and category/axis `TextBuilder` labels — next
   chain step (text streaming is more involved than shapes).
+- **FOLLOW-UP (0825482): hoist the streamed markers' invariant escapes.** After streaming, `write_escaped
+  _attr` became the top xychart frame — each marker re-escaped its fill/stroke colour (same per-series
+  string, ~1600× for xychart/400) + re-formatted the constant bar `rx`. Hoisted them (escape colour +
+  theme background once per series, format `rx` once) and `push_str` the cached bytes per marker; only
+  cx/cy/r/x/y/w/h format per datum. Byte-identical; **min-of-8 instr xychart/50 −1.7%, /200 −4.0%, /400
+  −4.3%** on top of the −35%. Same loop-invariant-hoist family as the pie boundary reuse — when you stream
+  a repeated element, the colour/opacity/radius/class are usually per-series invariants; escape/format
+  them ONCE outside the loop.
 
 ## Kept Wins Also Recorded Here By Request
 
