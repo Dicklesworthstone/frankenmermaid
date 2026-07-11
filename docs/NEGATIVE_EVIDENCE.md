@@ -1027,6 +1027,33 @@
   +0.25%).** A 4× redundancy on a cheap, low-count operation is not worth a decision-grade win — quantify
   the operation's SHARE (few points × cheap access) before de-duping, not just the multiplier.
 
+### FRONTIER (full symbol accounting): flowchart render is at its floor — every >1% symbol classified (2026-07-11)
+- After this session's wins (newline fusion, css-token bulk-copy, pie boundary reuse, the 4-part xychart
+  streaming chain, `write_number_into` enum-elision) and the two fresh rejects (FmtNum newtype-elision,
+  smooth-path point de-dup), a fresh `flowchart/800` render profile — EVERY self symbol ≥1%, classified:
+  - `write_uint_into` **15.2%** + `write_fixed2` **13.9%** + `write_number_into` **4.7%** = **~34% number
+    formatting** — FLOOR (digit-pair/DOTPAIRS tables landed; inline REJECTED fe88b9e; from_utf8 rejected;
+    enum-elision 6860d2c already done; `write_fixed2`'s f64×100 round_ties_even is byte-exactness-required).
+  - `write_escaped_text` **10.7%** + `write_escaped_attr` **8.5%** = **~19% escaping** — FLOOR (compiler
+    lowers the scan to range-gate+bit-test; pre-scan rejected 2026-06-28; reject-restructure washed b5f0388).
+  - `write_common_node_fragment_into` **7.5%** + `render_nodes_serial` **7.3%** + `write_common_edge_path
+    _tail` **1.9%** — inherent byte production (push_str of static SVG + the necessary format/escape calls);
+    annotated, NO redundant work.
+  - `__memmove_avx` **4.8%** — the structural raw_svg→doc→String DOUBLE-COPY (NO-SHIP, presize/rope rejected).
+  - `FmtNum::write_into` **2.8%** + `build_smooth_path_by_into` **2.7%** — edge-path coord format + smoothing;
+    both fresh ideas WASHED this session (newtype already register-passed; point-access share too small).
+  - `write_mermaid_node_element_id_into` **2.2%** (fm-core sanitizer) — byte-scan optimized (28859ad); the
+    bulk-copy fast path won't fire on the corpus (ids are uppercase `N0`/`E0`/… → always lowercased).
+  - `render_layout_to_svg` 1.8% (dispatch + CSS strip, mature), `resolve_edge_inline_style` 1.1% (cheap
+    per-edge early-return; only a tiny `style_refs.is_empty()` is hoistable — sub-share).
+- **Verdict:** the render/core (`fm-render-svg`, `fm-core`) lane is comprehensively at its byte-identical
+  floor. The dominant ~53% (number-format + escape) is ledger-closed; the rest is inherent byte production,
+  the NO-SHIP double-copy, or cod's edge lane. All FIVE lever classes are exhausted here: streaming (done),
+  abstraction-elision (AttributeValue done / FmtNum washed by size), redundancy-de-dup (washed by share),
+  number-format (floor), escape (floor). A further render win needs an OUTPUT-CONTRACT change (fewer bytes
+  — not byte-identical, and the output-dead-weight frontier is already CLOSED) or a cross-crate IR/parser
+  change (off-lane). DO NOT re-profile flowchart render for a byte-identical micro-lever.
+
 ## Kept Wins Also Recorded Here By Request
 
 ### Acyclic SCC fast-path in `GraphMetrics::from_ir` — −27 to −29% layout (Auto-selection overhead) (2026-06-27)
