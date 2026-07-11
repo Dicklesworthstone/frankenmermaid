@@ -12338,8 +12338,10 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 - **Behavior/build evidence:** remote `fm-parser` **408/408** passes, remote FrankenTUI conformance **1/1** passes,
   remote workspace all-targets check, remote parser `clippy -D warnings`, and direct nightly `rustfmt --check` all
   pass. The golden SVG harness matched every case before the repository's documented pre-existing `gantt_basic`
-  hash mismatch (`57da53e44f35e614` vs checked-in `1e45b85306e2366c`); no golden was blessed. Strict-remote workspace
-  Clippy is blocked in cc-owned layout by duplicate `#[allow(clippy::too_many_arguments)]` attributes at
+  hash mismatch (`57da53e44f35e614` vs checked-in `1e45b85306e2366c`); no golden was blessed. Exact original and final
+  remote-built CLIs also rendered the exercised timeline label path to the same SVG SHA-256
+  `8bce266c879f620d9946559a4e284e2f2153552817ef5edf2a31598d5494a509`. Strict-remote workspace Clippy is blocked
+  in cc-owned layout by duplicate `#[allow(clippy::too_many_arguments)]` attributes at
   `fm-layout/src/lib.rs:10359-10360`; workspace tests reached **438/439** in `fm-layout` before the unrelated
   `fault_deterministic_output_across_runs` strategy assertion failed (`EGraphCompleted` vs `EGraphExceededButWon`).
   Earlier `hz1` attempts also failed in `highs-sys` bindgen because that remote lacks `libclang`; no authoritative
