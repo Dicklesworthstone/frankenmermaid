@@ -12808,3 +12808,43 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 - **Disposition:** reverted (`a11y_rejected.patch`). ⭐LESSON: a `format_inner` self-time attributed to one function
   in `-g none` is often the SHARED format machinery across many callers; converting one caller captures only its
   slice. The theme-CSS/requirement-subtitle streaming wins worked because ONE site dominated; here it's diffuse.
+
+### REJECT: GitGraph current-head in-place update regresses the decisive MEDIAN row (2026-07-11)
+
+- **Reconciliation / provenance:** the recovered parser worktree change was genuinely new rather than superseded:
+  both the pre-rebase local commit and `origin/main` still contained three
+  `set_head(&state.current_branch.clone(), ...)` calls. Per the reconciliation order, that one parser file was
+  committed pathspec-only, then rebased with the cc-owned render commits onto `origin/main` and temporarily pushed
+  as `52c6c43`. This row records its previously missing performance verdict.
+- **Profile-first / one lever:** prior strict-remote profiles of `parse/gitgraph/gitgraph_200` put
+  `GitGraphState::set_head` at **3.41–3.66% self-time**, alongside allocator and memmove frames. The candidate added
+  `set_current_head`: update the existing current-branch `FxHashMap` entry through `get_mut`, cloning the branch
+  name only for a missing-key insertion, and used it at the commit, merge, and cherry-pick head updates. No other
+  parser, AST, render, layout, edge-routing, or benchmark code changed.
+- **Exact source identity:** ORIG was parent `fe88b9e`, parser SHA-256
+  `5ed811afba3b18984365ed593d5bf40b80cfe649b4c8d425f8121258c191c95f`; CAND was `52c6c43`, parser SHA-256
+  `b88fdd6653aa6fd24b54303ed401dfb09ef9121c43c50f5bc6e19c31ad193421`. The parse-bench harness stayed
+  `6092978d065af46dca39b09687eec6c4621e7f431180e6ef8b0529da68019212`.
+- **Strict remote pair:** both exact sources ran on actual worker `vmi1264463` with identical commands:
+  `cargo bench --profile release -p fm-parser --bench parse_bench -- parse/gitgraph/gitgraph_200 --exact
+  --warm-up-time 3 --measurement-time 8 --sample-size 50 --noplot`, behind
+  `RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec --`. ORIG was job `j-29914252970041283`; CAND was
+  `j-29914252970041290`. The initial `hz2` hint was ignored, so the candidate was pinned to the actual baseline
+  worker and the RCH log confirmed both executions were remote. Criterion `new/estimates.json` was captured after
+  each run before comparison.
+- **MEDIAN gate:** ORIG **126.483 us** (95% CI **122.062–133.556 us**) versus CAND **130.747 us**
+  (95% CI **126.077–134.464 us**). CAND/ORIG = **1.03371**, therefore **3.37% slower**; the intervals overlap.
+  This fails both the required `<= 0.97` keep floor and disjoint-CI proof. The decisive 200-command row failed, so
+  no extra remote slot was spent on the smaller `gitgraph_50` guard.
+- **SVG / correctness:** this exact candidate shape and parser hash had already passed the filtered
+  `gitgraph_basic` SVG golden before the wall reset with artifact hash `2df8876a41bce55e`; no golden was blessed.
+  The failed candidate is now removed, and the parser again has the exact ORIG hash above, so the landed parser IR
+  and resulting SVG bytes are identical to the parent by construction.
+- **Remote-discipline note:** every authoritative benchmark and prior SVG proof was remote-only; no direct local
+  Cargo command was used for the verdict. During the required pre-reconciliation UBS scan, UBS itself invoked its
+  local shadow-workspace Cargo checks despite the remote-only contract; those incidental results were discarded
+  and are not cited as evidence. UBS was not rerun for this exact-source restoration because doing so would repeat
+  that forbidden local build behavior.
+- **Verdict: REJECT.** Removing current-branch clones is mechanically less allocation work but does not improve the
+  optimized parser binary at the measured floor. Do not retry this exact `set_current_head/get_mut` helper shape.
+  `bd-1buv.2.2` is closed as rejected.
