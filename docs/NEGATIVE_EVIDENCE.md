@@ -806,6 +806,37 @@
   control**, and must show an instruction-count-neutral-or-better result, not a
   cycles-only gain that trades against a stable instruction increase.
 
+### `write_escaped_text` single-pass tight-reject restructure — REVERTED, wash (2026-07-11)
+- **Lever:** distinct from the already-rejected *pre-scan* (2026-06-28, "text no-special
+  fast-path"). `perf annotate` of `write_escaped_text`'s short-label loop showed the
+  per-byte reject compiles to **three sequential `cmp`s** (`cmp $0x3e` / `cmp $0x26` /
+  `cmp $0x3c`) plus redundant double-index bookkeeping — whereas the sibling
+  `write_escaped_attr` scan got a tight **range-gate + bit-test** (`cmp $0x3e; ja` then
+  `bt`). Since label bytes are almost all letters/digits/space (`> 0x3E`), a range-gate
+  would reject the common byte in ONE compare. The lever added an explicit
+  `if !matches!(b, b'&' | b'<' | b'>') { continue; }` reject *inside the same single-pass
+  loop* (no extra pass), to nudge the compiler into that range-gate form. Byte-identical.
+- **Hypothesis:** the reject is the hot per-byte cost; a range-gate on the `<= 0x3E`
+  small set cuts 3 compares → 1 for the common (letter) byte, reducing instructions.
+- **Baseline → After:** HEAD baseline binary vs candidate, `profharness` render,
+  **min-of-8 instruction count** (load-independent — the decisive metric here). Result is
+  a **wash with inconsistent sign**: `flowchart/500` `+0.13%`, `state/500` `+0.16%`,
+  `seq/500` `+0.22%` (slightly worse) vs `class/500` `−0.18%`, `requirement/500` `−0.21%`,
+  `er/500` `−0.22%` (slightly better). All within ±0.22%. Byte-identical (16 shapes × 3
+  sizes `sha256`-match).
+- **Verdict:** WASH / no decision-grade change. The compiler did not reliably emit the
+  range-gate from the restructure (the candidate's `write_escaped_text::<String>` symbol
+  even changed inlining), and for the short-label shapes (flowchart/state/seq) the extra
+  reject is net overhead — the same short-string lesson that sank the pre-scan. The sign
+  correlates with label length (longer text in class/requirement/er marginally benefits).
+- **Revert:** `git checkout crates/fm-render-svg/src/attributes.rs` before commit.
+- **Do-not-retry note:** the text-escape short-loop is at its floor. The 3-compare reject
+  is NOT worth restructuring — for the short-label corpus the loop is reject-bound and any
+  per-byte rework washes (cf. the 2026-06-28 pre-scan reject and the marker-end short-value
+  wash rule: colors/labels/refs ~7–15B). Escape-path frontier: LONG generated-clean values
+  are all already skip-escaped (path `d`) or memchr'd (CSS block); short user content
+  (ids/labels) must be escaped and its scan is already compiler-optimal.
+
 ## Kept Wins Also Recorded Here By Request
 
 ### Acyclic SCC fast-path in `GraphMetrics::from_ir` — −27 to −29% layout (Auto-selection overhead) (2026-06-27)
