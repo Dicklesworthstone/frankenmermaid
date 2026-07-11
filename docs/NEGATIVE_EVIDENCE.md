@@ -985,6 +985,21 @@
   pie, css-token, and the 4-part xychart chain) has harvested every N-scaled type-specific Element loop.
   Next render work needs a NEW lever class (a byte-reducing output change, an allocator/layout-of-output
   idea, or a number-format breakthrough), not more streaming. DO NOT re-sweep for Element loops.
+- **UPDATE (6860d2c): a NEW lever class WAS found — per-coordinate abstraction overhead.** Every SVG
+  coordinate went through `AttributeValue::Number(x).write_value(f)`, which MATERIALIZED the ~24-byte
+  `AttributeValue` enum (sized by its `String` variant) on the stack to pass `&self` to the out-of-line
+  `write_value` — a stack store+load per coordinate. Extracted a free `write_number_into(f, n)` (write_value
+  delegates to it) and converted all ~110 coordinate sites to call it with `n` in a register — no enum.
+  **Universal: instructions −3..−6% EVERY diagram type; cycles flowchart −1.6%, class −6.9%; flowchart wall
+  MEDIAN −2.2%.** Byte-identical (186 dumps + 251 tests). ⭐⭐META (the crux): `write_number_into` with
+  `#[inline]` REGRESSED — inlining the int-vs-2dp check+branch at 113 sites bloated code and dropped IPC
+  (cycles **+4.6%** even though instructions fell −3.8%). `#[inline(never)]` (ONE shared out-of-line copy)
+  gave the enum-elision saving WITHOUT the i-cache cost (cycles −1.6%). **LESSON: when a small helper is
+  called from 100+ sites, `#[inline]` can lose on IPC even when it wins on instruction count — measure
+  CYCLES, and prefer out-of-line for many-site helpers** (cf. the write_uint_into inline reject fe88b9e).
+  ⭐LEVER (reusable): grep for a small enum/wrapper constructed-then-immediately-consumed on a hot path
+  (`Wrapper::Variant(x).method(...)`) where the wrapper only exists to reach a method — extract the
+  variant's logic to a free fn taking the payload by value, out-of-line.
 
 ## Kept Wins Also Recorded Here By Request
 
