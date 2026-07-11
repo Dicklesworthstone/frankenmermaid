@@ -12310,3 +12310,40 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   (perf/callgrind) to find the per-entity cost before re-attempting; a naive whole-entity stream is NOT a win here.
 - **Disposition:** reverted the lib.rs fast path + helper + pin. `er_stages` bench already landed (fa77e8f).
   ⭐LESSON: whole-node streaming is NOT universally a win — the class 2.6x does not generalize to ER; MEASURE each.
+### WIN / KEEP: borrow plain node labels through lookup, allocate only on insertion — timeline parse 1.039x (2026-07-10)
+
+- **Profile-first / different subsystem:** a strict remote-only `fm-parser` sweep put the largest general rows at
+  DOT-200 `565.97us`, flowchart-1000 `530.80us`, class-100 `415.93us`, and wide-16x32 `358.29us` by Criterion's
+  `median.point_estimate`; those families are already closed above. The unclosed allocation primitive was the
+  plain-label handoff in `IrBuilder::intern_node`, exercised densely by `timeline_stages/parse/1600`.
+- **One lever:** `intern_node` used to allocate a temporary `ParsedLabel::plain` before the node lookup, then
+  `intern_label` cloned its text again when inserting a new label. `NodeLabelInput` now distinguishes rich parsed
+  labels from borrowed plain text, and `intern_plain_label` performs the existing hash/collision lookup by `&str`,
+  allocating the stored `IrLabel.text` only on a miss. A new plain label goes from two string allocations to one;
+  an already-interned label or an already-labelled node goes from one probe allocation to zero. Rich labels and
+  markup keep the original `intern_label` path.
+- **Isomorphism:** the key remains exactly `(text, [])`; collision comparison, first-insertion label ID/order,
+  stored `IrLabel { text, span }`, node shape upgrades, and auto-created-node semantics are unchanged. Floating
+  point and tie-breaking are N/A. The measured source changed only `crates/fm-parser/src/ir_builder.rs`; the live
+  peer GitGraph work in `mermaid_parser.rs` and all render/layout code stayed untouched.
+- **Strict MEDIAN gate, same worker:** fail-closed RCH, `hz2`, same isolated verification worktree path, exact
+  original commit first and the final formatted candidate second; warm-up `2s`, measurement `5s`, 20 samples.
+  Source SHA-256 ORIG `40049fadd565f5d81cf2efe0f4090e2bfda7ca7362977e337306dc2486ea5d1a`, final CAND
+  `16b0412ce74eb628222648ab4e0b8b11f64c271de4b5aee7c3ff18f42fa3f923`.
+  - ORIG median **1168.24us** (95% CI **1161.71..1171.09us**).
+  - CAND median **1124.02us** (95% CI **1117.09..1137.49us**).
+  - CAND/ORIG **0.96214x**, therefore **1.03934x faster** (`3.79%` less time); median CIs are disjoint.
+  An earlier exact-source same-worker pair measured `1.09674x`; a first baseline on a different worker was
+  discarded rather than scored. Only the final formatted-source pair above gates the keep.
+- **Behavior/build evidence:** remote `fm-parser` **408/408** passes, remote FrankenTUI conformance **1/1** passes,
+  remote workspace all-targets check, remote parser `clippy -D warnings`, and direct nightly `rustfmt --check` all
+  pass. The golden SVG harness matched every case before the repository's documented pre-existing `gantt_basic`
+  hash mismatch (`57da53e44f35e614` vs checked-in `1e45b85306e2366c`); no golden was blessed. Strict-remote workspace
+  Clippy is blocked in cc-owned layout by duplicate `#[allow(clippy::too_many_arguments)]` attributes at
+  `fm-layout/src/lib.rs:10359-10360`; workspace tests reached **438/439** in `fm-layout` before the unrelated
+  `fault_deterministic_output_across_runs` strategy assertion failed (`EGraphCompleted` vs `EGraphExceededButWon`).
+  Earlier `hz1` attempts also failed in `highs-sys` bindgen because that remote lacks `libclang`; no authoritative
+  local fallback was used. The mandatory `ubs` wrapper unexpectedly invoked Cargo inside its own local shadow scan;
+  that result was discarded, and it neither changed source nor produced project-target evidence.
+- **Verdict: WIN / KEEP.** This is the contained, safe-file form of the earlier by-value-label frontier: borrow the
+  probe and allocate only when the IR actually takes ownership.

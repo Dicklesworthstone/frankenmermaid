@@ -211,6 +211,12 @@ pub struct ParsedLabel {
     pub(crate) segments: Vec<IrLabelSegment>,
 }
 
+#[derive(Clone, Copy)]
+enum NodeLabelInput<'a> {
+    Parsed(&'a ParsedLabel),
+    Plain(&'a str),
+}
+
 impl ParsedLabel {
     pub(crate) fn plain(text: impl Into<String>) -> Self {
         Self {
@@ -940,10 +946,10 @@ impl IrBuilder {
     }
 
     /// Intern a node, optionally marking it as auto-created (for recovery).
-    pub(crate) fn intern_node_auto(
+    fn intern_node_auto(
         &mut self,
         id: &str,
-        label: Option<&ParsedLabel>,
+        label: Option<NodeLabelInput<'_>>,
         shape: NodeShape,
         span: Span,
         is_auto_created: bool,
@@ -970,7 +976,7 @@ impl IrBuilder {
                 .and_then(|node| node.label)
                 .is_none()
             {
-                label.map(|value| self.intern_label(value, span))
+                label.map(|value| self.intern_node_label_input(value, span))
             } else {
                 None
             };
@@ -997,7 +1003,7 @@ impl IrBuilder {
         }
 
         // Create new node
-        let label_id = label.map(|value| self.intern_label(value, span));
+        let label_id = label.map(|value| self.intern_node_label_input(value, span));
         let node_id = IrNodeId(self.ir.nodes.len());
         let node = IrNode {
             id: normalized_id.to_string(),
@@ -1229,7 +1235,7 @@ impl IrBuilder {
         shape: NodeShape,
         span: Span,
     ) -> Option<IrNodeId> {
-        self.intern_node_auto(id, label, shape, span, false)
+        self.intern_node_auto(id, label.map(NodeLabelInput::Parsed), shape, span, false)
     }
 
     pub(crate) fn intern_node(
@@ -1239,8 +1245,7 @@ impl IrBuilder {
         shape: NodeShape,
         span: Span,
     ) -> Option<IrNodeId> {
-        let parsed_label = label.map(ParsedLabel::plain);
-        self.intern_node_auto(id, parsed_label.as_ref(), shape, span, false)
+        self.intern_node_auto(id, label.map(NodeLabelInput::Plain), shape, span, false)
     }
 
     /// Intern a generated node whose id is known fresh by the caller, consuming the
@@ -1324,7 +1329,13 @@ impl IrBuilder {
     #[allow(dead_code)] // Will be used by recovery features
     pub(crate) fn intern_placeholder_node(&mut self, id: &str, span: Span) -> Option<IrNodeId> {
         let label = ParsedLabel::plain(id);
-        self.intern_node_auto(id, Some(&label), NodeShape::Rect, span, true)
+        self.intern_node_auto(
+            id,
+            Some(NodeLabelInput::Parsed(&label)),
+            NodeShape::Rect,
+            span,
+            true,
+        )
     }
 
     pub(crate) fn add_class_to_node(&mut self, node_key: &str, class_name: &str, span: Span) {
@@ -1555,6 +1566,34 @@ impl IrBuilder {
                 .label_markup
                 .insert(label_id, label.segments.clone());
         }
+        self.label_index.insert_with_hash(label_hash, label_id);
+        label_id
+    }
+
+    fn intern_node_label_input(&mut self, label: NodeLabelInput<'_>, span: Span) -> IrLabelId {
+        match label {
+            NodeLabelInput::Parsed(label) => self.intern_label(label, span),
+            NodeLabelInput::Plain(text) => self.intern_plain_label(text, span),
+        }
+    }
+
+    fn intern_plain_label(&mut self, text: &str, span: Span) -> IrLabelId {
+        let label_hash = LabelIndex::hash_key(text, &[]);
+        if let Some(existing_id) = self.label_index.get_with_hash(
+            label_hash,
+            text,
+            &[],
+            &self.ir.labels,
+            &self.ir.label_markup,
+        ) {
+            return existing_id;
+        }
+
+        let label_id = IrLabelId(self.ir.labels.len());
+        self.ir.labels.push(IrLabel {
+            text: text.to_owned(),
+            span,
+        });
         self.label_index.insert_with_hash(label_hash, label_id);
         label_id
     }
