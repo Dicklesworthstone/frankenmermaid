@@ -12287,3 +12287,26 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   Element fallback) — a big, byte-identity-critical edit like the class-node streaming. Deferred (not this turn).
 - **Disposition:** reverted the lib.rs streaming; KEPT the `er_stages` bench (documents ER render-dominance + that the
   whole-entity fast path is the outstanding lever). Evidence: this entry.
+
+### REJECT: whole-entity ER streaming fast path — byte-identical but REGRESSES render at scale (2026-07-10)
+
+- **Setup:** built the real ER lever deferred last turn — a `write_er_entity_fragment_into` whole-entity fast path
+  (group + rect[gradient] + name <text> + divider <line> + attribute rows + title), gated in `render_node_into`
+  exactly like `write_class_node_fragment_into` (embed_theme_css + node_gradients + full a11y, no shadows/style/
+  classes), bypassing `render_node`'s Element path entirely. Re-added `write_er_attribute_rows_into`.
+- **Byte-identical (both configs):** golden `er_basic` (node_gradients=false → slow path) passes; NEW pin
+  `er_entity_fast_fragment_matches_slow` (renders `er_basic` input under DEFAULT config, node_gradients=true → fast
+  path fires, asserts the exact gradient-rect USER-entity bytes derived from the golden) passes. 248 lib tests.
+- **Why REJECTED (same-worker hz2, layout null IDENTICAL between runs — 119.44 vs 119.07 — so the comparison is
+  valid):** render/64 cand 99.888us vs base 140.82us = **0.709 (faster)**, BUT render/256 335.59 vs 281.56 =
+  **1.192** and render/512 631.93 vs 521.88 = **1.211 — ~20% SLOWER**, tight CIs. A REAL crossover: the fast path
+  cuts FIXED cost (~93us→~19us, wins at tiny N) but RAISES per-entity cost (~0.73us→~1.08us/entity), losing at the
+  scale that matters. cand render/512 (631/hz2, 575/ovh-a) never dips below HEAD's consistent ~504-522us.
+- **Surprise / open question:** this is the OPPOSITE of the class-node streaming win (2.6x FASTER). Same pattern
+  (bypass render_node's Element tree via direct `out` writes), opposite result. Unknown mechanism — hypotheses:
+  the many small `push_str`/`write_value`/`write_escaped_text` calls per entity are less cache-friendly than the
+  batched Element serialization, OR the slow path's doc buffer is presized while the streamed writes into `out`
+  realloc. NOT chased further. If revisited: profile `write_er_entity_fragment_into` vs the Element path
+  (perf/callgrind) to find the per-entity cost before re-attempting; a naive whole-entity stream is NOT a win here.
+- **Disposition:** reverted the lib.rs fast path + helper + pin. `er_stages` bench already landed (fa77e8f).
+  ⭐LESSON: whole-node streaming is NOT universally a win — the class 2.6x does not generalize to ER; MEASURE each.
