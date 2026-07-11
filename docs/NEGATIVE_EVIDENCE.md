@@ -1000,6 +1000,18 @@
   ⭐LEVER (reusable): grep for a small enum/wrapper constructed-then-immediately-consumed on a hot path
   (`Wrapper::Variant(x).method(...)`) where the wrapper only exists to reach a method — extract the
   variant's logic to a free fn taking the payload by value, out-of-line.
+- **REJECTED follow-up: `path::FmtNum(f32)` newtype elision — WASH (2026-07-11).** Applied the exact same
+  lever to `FmtNum(x).write_into(&self, out)` (the per-path-command edge-coordinate formatter, 16 direct
+  sites): extracted `write_path_num_into(out, n)` taking `n` by value. **Instruction count FLAT (±0.01% on
+  flowchart/gantt/state/er/wide)** — the change did nothing mechanically; the ±1-2% cycle wobble (flowchart
+  −2%, wide +0.9%) with flat instructions is pure code-layout noise. Reverted. **⭐⭐WHY (refines the lever):
+  `FmtNum` is a 4-byte NEWTYPE over `f32` — the compiler already passes it in a register even through
+  `&self` (newtype scalar optimization), so there was NO stack round-trip to remove.** The `AttributeValue`
+  win (6860d2c) came specifically from the enum being **24 bytes** (sized by its `String` variant), which
+  forced a real stack store+load. **LESSON: the wrapper-elision lever pays off ONLY for LARGE wrappers
+  (multi-word enums/structs forced to the stack) — a small newtype/`Copy` scalar wrapper is already
+  zero-cost; check the wrapper's SIZE before bothering.** Do not re-try FmtNum or other small-newtype
+  elisions.
 
 ## Kept Wins Also Recorded Here By Request
 
