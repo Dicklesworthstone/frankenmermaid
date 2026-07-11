@@ -12414,3 +12414,38 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 - **Verdict: SURFACE / HOLD, not reject.** Reopen only for one same-worker 50-sample ORIG/candidate pair using the
   longer command above. Ship the six-line lever only if the candidate median is <= **0.97x** ORIG with disjoint
   median CIs and the already-green ER parser/golden proofs remain green; otherwise ledger it as a measured reject.
+
+<!-- codex-rich-label-move-remote-surface -->
+### SURFACE / REMOTE BLOCKER: move-owned rich flowchart labels held before edit (2026-07-11)
+
+- **Different subsystem / ledger guard:** this pass stayed in the parser/AST ownership lane. It did not touch
+  render, layout, edge routing, the held ER header candidate, or the live shared-checkout GitGraph edits. The
+  isolated source was detached origin/main at af62589; mermaid_parser.rs SHA-256 was
+  5ed811afba3b18984365ed593d5bf40b80cfe649b4c8d425f8121258c191c95f.
+- **Profile-first ranking:** the exact-source strict-remote sweep recorded immediately above ranks
+  parse/wide/16x32 among the largest parser rows. That workload creates 512 uniquely rich-labeled FastNode values.
+  The AST already owns each Option<ParsedLabel>, but lower_flow_document_item borrows it and intern_label then
+  clones both label.text and non-empty label.segments on every insertion miss. The newer plain-label keep does not
+  cover this rich-label path.
+- **ONE lever selected, not implemented:** consume FlowDocumentItem values during lowering and add an owned parsed
+  label input to IrBuilder. Preserve the existing hash/collision lookup; discard the payload on a hit and move its
+  text and segments into the same IrLabel and label_markup slots on a miss. This removes one String clone and,
+  when markup is present, one segment-Vec clone per newly interned rich label.
+- **Isomorphism argument:** moving owned String/Vec payloads yields the same bytes as cloning them. The lookup key,
+  collision comparison, first-insertion label id/order, span, markup, node id/shape/icon, diagnostics, edge order,
+  tie-breaking, and render inputs remain unchanged. Floating point and RNG are N/A. A duplicate-label hit still
+  keeps the first stored label and discards the later payload exactly as the borrowed path does.
+- **Hard remote blocker:** RCH reported degraded fleet posture (9/12 healthy) and the fail-closed pre-edit
+  admission probe was refused before build with no admissible workers: insufficient_slots=7,hard_preflight=2,
+  followed by remote required; refusing local fallback. The required command prefix was
+  RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo bench. Per the remote-only rule, there was no
+  local Cargo command, candidate edit, timing claim, or SVG claim.
+- **Unblock / strict MEDIAN gate (bd-1buv.2.1):** run exact-source ORIG then CAND on the same reported worker with
+  cargo bench --profile release -p fm-parser --bench parse_bench -- parse/wide --warm-up-time 3
+  --measurement-time 8 --sample-size 50 --noplot behind the required prefix. Score median.point_estimate from
+  Criterion estimates, not the console slope/mean. Require CAND/ORIG <= 0.97, disjoint median bootstrap 95% CIs,
+  and no neighboring-row regression. Then run remote parser tests, check, clippy, and filtered flowchart_simple plus
+  dense_flowchart_stress SVG goldens without BLESS; also compare exact ORIG/CAND SVG SHA-256 values. Otherwise
+  restore the exact source and replace this surface with a measured reject.
+- **Verdict: SURFACE / HOLD.** Source remained byte-for-byte unchanged. RCH recovery is the only prerequisite for
+  the one-lever A/B; local fallback is forbidden.
