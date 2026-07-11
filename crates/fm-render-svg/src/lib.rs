@@ -4290,6 +4290,14 @@ fn render_pie_svg(
     let pie_head = format!("M {cx} {cy} L ");
     let pie_arc = format!(" A {radius} {radius} 0 ");
     let mut angle = -PI / 2.0;
+    // A normal wedge's END point (at `angle + sweep`) is the NEXT wedge's START point (at the
+    // next `angle`, since `angle += sweep` below) — bit-for-bit the same float, so its
+    // Grisu-formatted `"{x} {y}"` text is identical. Cache it and reuse it as the next wedge's
+    // start instead of re-running Grisu on `x1 y1` (wedge-boundary float formatting is ~19% of
+    // pie render). Only valid immediately after a normal wedge: zero-value and full-circle wedges
+    // emit no boundary point yet still advance `angle`, so they clear the cache. One reused buffer.
+    let mut prev_end_point = String::new();
+    let mut have_prev_end = false;
     for (i, slice) in pie_meta.slices.iter().enumerate() {
         let value = slice.value.max(0.0);
         let sweep = (value / total) * 2.0 * PI;
@@ -4299,6 +4307,7 @@ fn render_pie_svg(
             pie_svg.push_str(
                 "<path d=\"\" fill=\"none\" stroke=\"none\" class=\"fm-pie-slice fm-pie-slice-zero\"/>",
             );
+            have_prev_end = false;
         } else if (sweep - 2.0 * PI).abs() <= 0.0001 {
             pie_svg.push_str("<circle cx=\"");
             let _ = AttributeValue::Number(cx).write_value(&mut pie_svg);
@@ -4311,17 +4320,31 @@ fn render_pie_svg(
             pie_svg.push_str("\" stroke=\"");
             let _ = write_escaped_attr(&mut pie_svg, bg);
             pie_svg.push_str("\" stroke-width=\"2\" class=\"fm-pie-slice fm-pie-slice-full\"/>");
+            have_prev_end = false;
         } else {
-            let x1 = cx + radius * angle.cos();
-            let y1 = cy + radius * angle.sin();
             let x2 = cx + radius * (angle + sweep).cos();
             let y2 = cy + radius * (angle + sweep).sin();
             let large_arc = i32::from(sweep > PI);
             pie_svg.push_str("<path d=\"");
             pie_svg.push_str(&pie_head);
-            let _ = write!(pie_svg, "{x1} {y1}");
+            // Start point: reuse the previous normal wedge's cached end-point text (byte-identical,
+            // skips two Grisu formats + two trig calls), else format `x1 y1` for the first/after-reset wedge.
+            if have_prev_end {
+                pie_svg.push_str(&prev_end_point);
+            } else {
+                let x1 = cx + radius * angle.cos();
+                let y1 = cy + radius * angle.sin();
+                let _ = write!(pie_svg, "{x1} {y1}");
+            }
             pie_svg.push_str(&pie_arc);
-            let _ = write!(pie_svg, "{large_arc} 1 {x2} {y2} Z");
+            // End point, isolated so its exact `"{x2} {y2}"` bytes can seed the next wedge's start.
+            let _ = write!(pie_svg, "{large_arc} 1 ");
+            let end_start = pie_svg.len();
+            let _ = write!(pie_svg, "{x2} {y2}");
+            prev_end_point.clear();
+            prev_end_point.push_str(&pie_svg[end_start..]);
+            have_prev_end = true;
+            pie_svg.push_str(" Z");
             pie_svg.push_str("\" fill=\"");
             let _ = write_escaped_attr(&mut pie_svg, color);
             pie_svg.push_str("\" stroke=\"");
