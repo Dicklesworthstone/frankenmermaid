@@ -4771,6 +4771,14 @@ fn render_xychart_svg(
                     // number formatting, same `write_escaped_attr` for the colour. `fill-opacity="0.78"`
                     // and `stroke-width="1"` are the fixed serializations of `0.78`/`1.0`.
                     use crate::attributes::{AttributeValue, write_escaped_attr};
+                    // Per-series invariants: the fill/stroke colour and the corner radius are identical
+                    // for every bar, so escape/format them ONCE and reuse the bytes rather than
+                    // re-escaping the colour twice + re-formatting `rx` per bar (write_escaped_attr was
+                    // the top xychart frame after marker streaming). Byte-identical.
+                    let mut esc_color = String::new();
+                    let _ = write_escaped_attr(&mut esc_color, color);
+                    let mut rx_text = String::new();
+                    let _ = AttributeValue::Number(rx).write_value(&mut rx_text);
                     let mut bar_svg = String::new();
                     for node in series_nodes {
                         bar_svg.push_str("<rect x=\"");
@@ -4782,11 +4790,11 @@ fn render_xychart_svg(
                         bar_svg.push_str("\" height=\"");
                         let _ = AttributeValue::Number(node.bounds.height).write_value(&mut bar_svg);
                         bar_svg.push_str("\" fill=\"");
-                        let _ = write_escaped_attr(&mut bar_svg, color);
+                        bar_svg.push_str(&esc_color);
                         bar_svg.push_str("\" fill-opacity=\"0.78\" stroke=\"");
-                        let _ = write_escaped_attr(&mut bar_svg, color);
+                        bar_svg.push_str(&esc_color);
                         bar_svg.push_str("\" stroke-width=\"1\" rx=\"");
-                        let _ = AttributeValue::Number(rx).write_value(&mut bar_svg);
+                        bar_svg.push_str(&rx_text);
                         bar_svg.push_str("\" class=\"fm-xychart-bar\"/>");
                     }
                     doc = doc.child(Element::raw_svg(bar_svg));
@@ -4859,6 +4867,12 @@ fn render_xychart_svg(
                     // attribute order as the `Element` build (cx, cy, r, fill, stroke, stroke-width, class);
                     // `stroke-width="2"` is the fixed serialization of `2.0`. Byte-identical.
                     use crate::attributes::{AttributeValue, write_escaped_attr};
+                    // Per-series invariants: fill (series colour) and stroke (theme background) are the
+                    // same for every point — escape once, reuse. Only cx/cy/r vary. Byte-identical.
+                    let mut esc_color = String::new();
+                    let _ = write_escaped_attr(&mut esc_color, color);
+                    let mut esc_bg = String::new();
+                    let _ = write_escaped_attr(&mut esc_bg, &theme.colors.background);
                     let mut point_svg = String::new();
                     for node in series_nodes {
                         let center = node.bounds.center();
@@ -4872,9 +4886,9 @@ fn render_xychart_svg(
                         )
                         .write_value(&mut point_svg);
                         point_svg.push_str("\" fill=\"");
-                        let _ = write_escaped_attr(&mut point_svg, color);
+                        point_svg.push_str(&esc_color);
                         point_svg.push_str("\" stroke=\"");
-                        let _ = write_escaped_attr(&mut point_svg, &theme.colors.background);
+                        point_svg.push_str(&esc_bg);
                         point_svg.push_str("\" stroke-width=\"2\" class=\"fm-xychart-point\"/>");
                     }
                     doc = doc.child(Element::raw_svg(point_svg));
