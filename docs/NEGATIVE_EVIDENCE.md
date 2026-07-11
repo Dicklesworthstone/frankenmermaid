@@ -962,6 +962,30 @@
   `write_escaped_text`; gate on `embed_theme_css` (font-family) + single-line (tspan) + the call-site's
   fixed options (baseline/weight/style).
 
+### FRONTIER: N-scaled Element-loop streaming EXHAUSTED after the xychart chain (2026-07-11)
+- **After streaming xychart end-to-end** (markers −35%, invariant-hoist −4.3%, tick-lines −28%, labels
+  −49% → cumulative xychart/400 ≈ −77%), a systematic sweep for remaining per-item `Element::…build()`
+  loops that add `doc.child()` (awk over `for … { Element::rect|line|circle|path|text }`) found NO more
+  N-scaled common-path Element loops:
+  - **quadrant** `render_quadrant_svg` L3828 (circle+text/node) is a GATED FALLBACK — the common path
+    streams `points_svg` and `return`s at L3825 (streamed by 6ae55f0; profile confirms `Attributes::set`
+    ~0.7%). L3619 is the 4 fixed background rects.
+  - **gantt** `render_gantt_svg` L4002 is per-CLUSTER (√N sections, ~20 for gantt/400) — tasks already
+    streamed (`Attributes::set` 0.16%); the √N section rects/labels are too few to matter.
+  - **xychart** L4816/L4917 (rect/circle) are the `include_source_spans`-ON fallbacks I deliberately kept
+    on `Element`; L4887/L4902 are the 1–2 area/line `<path>`s per series (not N).
+  - TextBuilder loops: only xychart's category labels were N-scaled (now streamed). `render_c4_legend`
+    L8625 + xychart legend L4785 are fixed/few-entry legends.
+- **What remains in render is at its floor or out of lane:** universal number formatting (`write_uint_into`
+  15% / `write_fixed2` 13% on flowchart) — ledger-closed (inline REJECTED fe88b9e; from_utf8 rejected;
+  digit tables landed); the CSS strip (memmem, mature); the escape functions (compiler-optimal, floor per
+  the 2026-07-11 rejects); `render_edges_serial` / edge-path rendering (cod's lane). `render_layout_to_svg`
+  self on point-heavy types (e.g. quadrant 10.6%) is inherent per-point `write_fixed2` coordinate output.
+- **Verdict:** the profile-first, dump-to-match Element→`raw_svg` streaming method (the session's engine —
+  pie, css-token, and the 4-part xychart chain) has harvested every N-scaled type-specific Element loop.
+  Next render work needs a NEW lever class (a byte-reducing output change, an allocator/layout-of-output
+  idea, or a number-format breakthrough), not more streaming. DO NOT re-sweep for Element loops.
+
 ## Kept Wins Also Recorded Here By Request
 
 ### Acyclic SCC fast-path in `GraphMetrics::from_ir` — −27 to −29% layout (Auto-selection overhead) (2026-06-27)
