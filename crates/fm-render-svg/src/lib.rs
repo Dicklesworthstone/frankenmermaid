@@ -4663,18 +4663,38 @@ fn render_xychart_svg(
                 .class("fm-xychart-tick"),
         );
     }
-    for (index, _category) in categories.iter().enumerate() {
-        let x = plot_x + band_width * (index as f32 + 0.5);
-        doc = doc.child(
-            Element::line()
-                .x1(x)
-                .y1(plot_bottom)
-                .x2(x)
-                .y2(plot_bottom + tick_len)
-                .stroke(&theme.colors.text)
-                .stroke_width(1.0)
-                .class("fm-xychart-tick"),
-        );
+    {
+        // Per-category x-axis tick `<line>`s: only `x` varies (x1 == x2 == x); y1 (plot_bottom), y2
+        // (plot_bottom + tick_len), the stroke colour, stroke-width and class are all invariant across
+        // the loop. Hoist those, format `x` once per tick (shared by x1/x2), and stream into one
+        // `raw_svg` child — no span metadata here, so no gate. Byte-identical to the `Element` build
+        // (attribute order x1,y1,x2,y2,stroke,stroke-width,class; `stroke-width="1"` = `1.0`).
+        use crate::attributes::{AttributeValue, write_escaped_attr};
+        let mut y1_text = String::new();
+        let _ = AttributeValue::Number(plot_bottom).write_value(&mut y1_text);
+        let mut y2_text = String::new();
+        let _ = AttributeValue::Number(plot_bottom + tick_len).write_value(&mut y2_text);
+        let mut esc_stroke = String::new();
+        let _ = write_escaped_attr(&mut esc_stroke, &theme.colors.text);
+        let mut x_text = String::new();
+        let mut tick_svg = String::new();
+        for (index, _category) in categories.iter().enumerate() {
+            let x = plot_x + band_width * (index as f32 + 0.5);
+            x_text.clear();
+            let _ = AttributeValue::Number(x).write_value(&mut x_text);
+            tick_svg.push_str("<line x1=\"");
+            tick_svg.push_str(&x_text);
+            tick_svg.push_str("\" y1=\"");
+            tick_svg.push_str(&y1_text);
+            tick_svg.push_str("\" x2=\"");
+            tick_svg.push_str(&x_text);
+            tick_svg.push_str("\" y2=\"");
+            tick_svg.push_str(&y2_text);
+            tick_svg.push_str("\" stroke=\"");
+            tick_svg.push_str(&esc_stroke);
+            tick_svg.push_str("\" stroke-width=\"1\" class=\"fm-xychart-tick\"/>");
+        }
+        doc = doc.child(Element::raw_svg(tick_svg));
     }
 
     // Legend for named series.
