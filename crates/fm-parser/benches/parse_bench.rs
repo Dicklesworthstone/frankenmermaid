@@ -160,6 +160,23 @@ fn gen_journey(steps: usize) -> String {
     s
 }
 
+/// A Kanban board with roughly square column/card dimensions — exercises card interning,
+/// class assignment, and cluster/subgraph membership on the common no-metadata path.
+fn gen_kanban(cards: usize) -> String {
+    let mut s = String::from("kanban\n");
+    let columns = (cards as f64).sqrt() as usize;
+    let columns = columns.max(2);
+    let cards_per_column = cards / columns;
+    for column in 0..columns {
+        s.push_str(&format!("  col{column}[Column {column}]\n"));
+        for card in 0..cards_per_column {
+            let index = column * cards_per_column + card;
+            s.push_str(&format!("    task{index}[Task {index}]\n"));
+        }
+    }
+    s
+}
+
 /// A gitgraph: `commands` commit/branch/checkout/merge commands — exercises the gitgraph command parser.
 fn gen_gitgraph(commands: usize) -> String {
     let mut s = String::from("gitGraph\n");
@@ -278,6 +295,13 @@ fn bench_parse(c: &mut Criterion) {
     for (label, steps) in [("journey_50", 50_usize), ("journey_200", 200_usize)] {
         let input = gen_journey(steps);
         group.bench_with_input(BenchmarkId::new("journey", label), &input, |b, input| {
+            b.iter(|| fm_parser::parse(input));
+        });
+    }
+
+    for (label, cards) in [("kanban_400", 400_usize), ("kanban_1600", 1600_usize)] {
+        let input = gen_kanban(cards);
+        group.bench_with_input(BenchmarkId::new("kanban", label), &input, |b, input| {
             b.iter(|| fm_parser::parse(input));
         });
     }
