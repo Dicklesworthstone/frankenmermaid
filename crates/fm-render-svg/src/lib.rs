@@ -361,7 +361,11 @@ fn strip_unused_state_css(svg: &mut String) {
     if svg.len() > POST_PASS_MAX_SVG_BYTES {
         return;
     }
-    let body_start = svg.find("</style>").map_or(0, |i| i + "</style>".len());
+    // `memmem` (SIMD) instead of `str::find` throughout: `str::find` builds a Two-Way `StrSearcher`
+    // per call (setup measured ~7% of small-diagram render across these post-pass needles); `memmem`
+    // returns the identical first-match byte offset with a cheaper prefilter. Byte-identical.
+    let body_start =
+        memchr::memmem::find(svg.as_bytes(), b"</style>").map_or(0, |i| i + "</style>".len());
     // ONE walk of the body answers both questions the per-needle `contains` chain used to ask with a
     // full body scan each. Computing it BEFORE the inactive-region strip below is sound: that strip
     // only edits bytes inside the `<style>` block, so the body text — and hence every flag here — is
@@ -372,8 +376,8 @@ fn strip_unused_state_css(svg: &mut String) {
         return;
     }
     if let (Some(start), Some(after)) = (
-        svg.find(".fm-node-inactive { opacity:"),
-        svg.find(".fm-cluster { fill-opacity:"),
+        memchr::memmem::find(svg.as_bytes(), b".fm-node-inactive { opacity:"),
+        memchr::memmem::find(svg.as_bytes(), b".fm-cluster { fill-opacity:"),
     ) && after > start
         && after - start < 1500
     {
@@ -386,8 +390,8 @@ fn strip_unused_state_css(svg: &mut String) {
     for (n, &is_used) in accent_used.iter().enumerate().skip(1) {
         if !is_used {
             let selector = format!(".fm-node-accent-{n} {{");
-            if let Some(start) = svg.find(&selector)
-                && let Some(rel_end) = svg[start..].find("}\n")
+            if let Some(start) = memchr::memmem::find(svg.as_bytes(), selector.as_bytes())
+                && let Some(rel_end) = memchr::memmem::find(&svg.as_bytes()[start..], b"}\n")
             {
                 svg.replace_range(start..start + rel_end + 2, "");
             }
@@ -401,8 +405,8 @@ fn strip_unused_state_css(svg: &mut String) {
     for (n, &is_used) in var_used.iter().enumerate().skip(1) {
         if !is_used {
             let decl = format!("  --fm-accent-{n}:");
-            if let Some(start) = svg.find(&decl)
-                && let Some(rel_end) = svg[start..].find(";\n")
+            if let Some(start) = memchr::memmem::find(svg.as_bytes(), decl.as_bytes())
+                && let Some(rel_end) = memchr::memmem::find(&svg.as_bytes()[start..], b";\n")
             {
                 svg.replace_range(start..start + rel_end + 2, "");
             }

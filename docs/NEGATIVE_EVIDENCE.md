@@ -12723,3 +12723,20 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 - **Median gate (interleaved symbolized Finder-base vs cand, flowchart-300 render, 12 runs):** base **87301 ns** vs
   cand **85512 ns = 0.9795 (−2.0%)**, distributions cleanly separated. LEVER: grep number-to-string on a hot path
   using a `%10`/`/10` reverse-buffer loop + `from_utf8` → forward digit-pair table with a `&str` pair const.
+
+### WIN: `strip_unused_state_css` remaining `str::find` → `memmem::find`, small render −1.6% (2026-07-11)
+
+- **Profile-first (symbolized SMALL render, flowchart-10 — the common realistic case / weakest head-to-head
+  speedup):** ~28% of small render is the post-pass string ops. `core::str::pattern::StrSearcher::next_match`
+  (7.08% self) was STILL present after the strip_css_block wins — `strip_unused_state_css` kept 7 `str::find` calls
+  (find `</style>`, `.fm-node-inactive…`, `.fm-cluster…`, and per-accent `&selector`/`}\n`/`&decl`/`;\n` in loops)
+  while its sibling post-passes (`strip_unused_markers`, `strip_dead_marker_css`, `minify_style_block`) already use
+  `memmem`. (0f9efd4 had converted only the body-SCAN half to memmem, not the STRIP half.)
+- **Lever:** all 7 → `memchr::memmem::find(x.as_bytes(), needle.as_bytes())` (SIMD prefilter, cheaper setup than the
+  Two-Way StrSearcher). Byte-identical (identical first-match offset feeds the same `replace_range`).
+- **Byte-identical:** `cargo test -p fm-render-svg` = 251 passed, 0 failed (incl golden_svg); clippy clean.
+- **Median gate (interleaved symbolized base vs cand):** flowchart-10 render **32196 → 31670 ns = 0.9837 (−1.6%)**;
+  flowchart-300 **87035 → 86844 = −0.2%** (post-pass is fixed overhead → biggest relative on small diagrams, where
+  our speedup is weakest). Completes the memmem conversion of ALL render post-passes — no `str::find`/StrSearcher
+  remains on the render path. ⭐LEVER (general): audit ALL sibling functions when one gets a `str::find`→memmem win;
+  a partially-converted function (scan half done, strip half not) leaves the same cost.
