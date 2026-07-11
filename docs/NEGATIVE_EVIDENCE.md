@@ -12643,3 +12643,18 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   implemented, then the byte-identity gate was carried by a low-frequency watcher that caught a later recovery
   window — same held→shipped mechanism as the marker win. ⭐The DefsBuilder now memoizes BOTH markers and the
   gradient → the per-render `<defs>` Element build is essentially free on the default theme.
+
+### REJECT: memoize `effects_css` (and the memoize-per-render pattern for CSS format! builds) — ~130 ns (2026-07-11)
+
+- **Profile-first (`effcss_ab` isolated micro-bench):** `effects_css(config)` is `format!`-built every default
+  render (effects_enabled is true for the default: `cluster_fill_opacity 0.08`, `inactive_opacity 0.40` are both
+  < 0.999). It's a 937-byte CSS template with 2 float interpolations, deterministic for the default config →
+  candidate for the same memoization. MEASURED: fresh build+push **~155 ns** vs memoized (push cached `&str`, no
+  clone needed) **~30 ns → saving only ~130 ns/render**, below the ~1 µs threshold.
+- **Why REJECTED / the pattern boundary:** a `format!` of a large *literal* template compiles to efficient
+  `push_str` of the literal chunks + 2 float formats — already near memcpy (~150 ns). Memoizing it saves almost
+  nothing. ⭐The memoize-per-render-build pattern PAYS for **Element-tree builds** (markers ~6 µs, node gradient
+  ~1.1 µs — Vec + Element allocs + serialize) but NOT for **String `format!` builds** (effects_css ~130 ns,
+  to_svg_style ~772 ns both rejected). The pattern is now MINED on the default render path: the `<defs>` Element
+  builds are memoized (markers + gradient), and the CSS `format!` builds are already fast. Don't re-chase CSS-builder
+  memoization.
