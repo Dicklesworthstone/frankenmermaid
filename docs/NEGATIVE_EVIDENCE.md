@@ -13112,3 +13112,29 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   child only for an exact-source candidate run on `vmi1227854` (or a fresh same-worker ORIG/CAND pair), and require CAND/ORIG
   `<= 0.97`, disjoint median 95% CIs, no 400-card regression, focused parser tests, exact serialized IR, and exact
   SVG bytes before shipping the four-call production change.
+
+### SURFACE / HOLD: timeline owned-ID handoff blocked before baseline by fleet-wide remote admission (2026-07-11)
+
+- **Immediate chain continuation:** after surfacing Kanban, the ledger was reread and `bv --robot-triage` data hash
+  `2e4337ab44080585` again excluded architectural ParseLens work from the bounded perf lane. The next distinct
+  parser candidate is timeline owned-ID handoff; it does not retry Kanban key lookups, rich-label moves, ER header
+  lowering, or GitGraph current-head mutation.
+- **One held lever, not implemented:** timeline already owns each `String` returned by `normalize_identifier` for
+  period/event ids, then passes `&id` through generic interning, which clones it into `IrNode.id` on insertion.
+  Move those owned ids through the existing owned-node insertion path while preserving `period_text.to_owned()` and
+  raw `event_text.to_owned()` labels, duplicate-id fallback, collision checks, label/node insertion order, shapes,
+  spans, implicit-node promotion, diagnostics, and graph order. The existing `timeline_stages/parse/1600` row creates
+  roughly 1,600 periods plus 1,600 events, exposing about 3,200 candidate id clones.
+- **Strict-remote profile blocker:** before any source edit, the required command
+  `RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo bench --profile release -p
+  frankenmermaid-cli --bench pipeline_bench -- timeline_stages/parse/1600 --exact --warm-up-time 3
+  --measurement-time 8 --sample-size 50 --noplot` was refused before sync/build with
+  `no admissible workers: insufficient_slots=7,hard_preflight=2`, followed by
+  `remote required; refusing local fallback`. This is the same fleet-wide admission condition that blocked the
+  preceding Kanban candidate. No queue, retry, alternate worker timing, local Cargo command, benchmark result, or
+  parser edit exists for this lever.
+- **Output identity / disposition:** parser source remains exact SHA-256
+  `5ed811afba3b18984365ed593d5bf40b80cfe649b4c8d425f8121258c191c95f`, so parser IR and SVG bytes are unchanged.
+  `bd-1buv.2.7` is **SURFACE / HOLD**, not reject. Resume only when an admissible remote worker can run both
+  exact-source ORIG and CAND; gate `median.point_estimate` at CAND/ORIG `<= 0.97` with disjoint median 95% CIs and
+  exact serialized IR/SVG identity.
