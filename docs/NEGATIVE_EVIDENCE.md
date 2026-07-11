@@ -12573,3 +12573,24 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   the META rule: a 2-invocation rch A/B is invalid when the fleet is degraded; the same-invocation interleave +
   byte-identity + monotonic-less-work is the trustworthy basis (as with the theme-CSS strip win). ⭐The marker set
   is a fixed per-render cost, so it's the SAME absolute saving at every N (largest relative on small diagrams).
+
+### FRONTIER + HOLD: render/layout cc-lane exhausted after strip + marker wins (edge-routing is cod's) (2026-07-11)
+
+- **Lane:** render + layout MINUS parser/edge-routing (cod's). After landing the theme-CSS strip (212a285) and the
+  arrowhead-marker `<defs>` memoization (4bc1244), the render fixed-overhead path is at its floor: CSS build ~772 ns
+  (caching rejected), strip alloc-free, post-passes memmem/size-gated, node/edge/marker all streamed or memoized.
+  A `perf` of class-render shows only `memmove` ~9% (inherent string production) + scattered sub-3% — no
+  symbolizable hotspot left (rch strips debug info on transfer, so release binaries can't be symbolized — the
+  standing profiling handicap this whole session).
+- **Layout (my part = algorithm selection + Sugiyama/Tree/coordinate assignment; NOT edge-routing):** profiled
+  `wide`/Sugiyama layout — scattered, no dominant self-time. Checked the two most-likely levers by code-read: (a) the
+  Auto path does NOT trial-layout both algorithms — it picks via cheap `expected_loss_permille` heuristics over a
+  single `GraphMetrics::from_ir` (O(N)); (b) `GraphMetrics::from_ir` is O(N), called ~1-2×, marginal/washes. The
+  layout primitives that WOULD pay are already landed (barycenter CSR, crossing Fenwick, BK dense lookup,
+  obstacle-index, estimate_dimensions fusion, apply_ir_constraints skip, gantt dep hoist, sort-key pack) or belong
+  to edge-routing (cod's). Scaling is LINEAR for every diagram type (no O(N²) structural lever).
+- **Real attempt EMPTY → HOLD.** No fresh, measurable, cc-lane hotspot surfaced. Unblocks: (a) a symbolized profiler
+  (rch keeps debug symbols, or a sanctioned local profiling build) to see the scattered floor's actual functions;
+  (b) the cross-crate IR string-interning primitive (fm-core IrNode.id/IrLabel.text owned String → u32 arena),
+  which is the one remaining STRUCTURAL lever but ripples through parser (cod) + render, so not a single byte-
+  identical change. Both are out of reach as a one-lever cc-lane change right now.
