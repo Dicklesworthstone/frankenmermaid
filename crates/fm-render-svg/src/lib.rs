@@ -4577,22 +4577,66 @@ fn render_xychart_svg(
     );
 
     let band_width = plot_bounds.width / categories.len().max(1) as f32;
-    for (index, category) in categories.iter().enumerate() {
-        let x = plot_x + band_width * (index as f32 + 0.5);
-        doc = doc.child(
-            TextBuilder::new(category)
-                .x(x)
-                .y(plot_bottom + 24.0)
-                .anchor(TextAnchor::Middle)
-                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                .font_size(clamp_font_size(
-                    config.font_size * 0.74,
-                    config.min_font_size,
-                ))
-                .fill(&theme.colors.text)
-                .class("fm-xychart-x-tick")
-                .build(),
-        );
+    // Stream the per-category x-tick `<text>` labels when the config matches the fast shape: embedded
+    // theme CSS (so no per-label `font-family` — it is inherited from the root `<svg>`) and every
+    // category single-line (a multi-line label needs `<tspan>` children). Byte-identical to the
+    // TextBuilder/`Element` build: attribute order `x, y, text-anchor, font-size, fill, class` (baseline
+    // is Auto and weight/style unset here, so those are absent), `write_value` numbers, `write_escaped
+    // _attr` fill, and `write_escaped_text` content — exactly what `Element`'s `.content` serializes
+    // (element.rs). Any other config falls back to the TextBuilder path below.
+    let labels_streamable = config.embed_theme_css
+        && categories
+            .iter()
+            .all(|c| !c.contains('\n') && !c.contains('\r'));
+    if labels_streamable {
+        use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
+        let mut y_text = String::new();
+        let _ = AttributeValue::Number(plot_bottom + 24.0).write_value(&mut y_text);
+        let mut fs_text = String::new();
+        let _ = AttributeValue::Number(clamp_font_size(
+            config.font_size * 0.74,
+            config.min_font_size,
+        ))
+        .write_value(&mut fs_text);
+        let mut esc_fill = String::new();
+        let _ = write_escaped_attr(&mut esc_fill, &theme.colors.text);
+        let mut x_text = String::new();
+        let mut label_svg = String::new();
+        for (index, category) in categories.iter().enumerate() {
+            let x = plot_x + band_width * (index as f32 + 0.5);
+            x_text.clear();
+            let _ = AttributeValue::Number(x).write_value(&mut x_text);
+            label_svg.push_str("<text x=\"");
+            label_svg.push_str(&x_text);
+            label_svg.push_str("\" y=\"");
+            label_svg.push_str(&y_text);
+            label_svg.push_str("\" text-anchor=\"middle\" font-size=\"");
+            label_svg.push_str(&fs_text);
+            label_svg.push_str("\" fill=\"");
+            label_svg.push_str(&esc_fill);
+            label_svg.push_str("\" class=\"fm-xychart-x-tick\">");
+            let _ = write_escaped_text(&mut label_svg, category);
+            label_svg.push_str("</text>");
+        }
+        doc = doc.child(Element::raw_svg(label_svg));
+    } else {
+        for (index, category) in categories.iter().enumerate() {
+            let x = plot_x + band_width * (index as f32 + 0.5);
+            doc = doc.child(
+                TextBuilder::new(category)
+                    .x(x)
+                    .y(plot_bottom + 24.0)
+                    .anchor(TextAnchor::Middle)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                    .font_size(clamp_font_size(
+                        config.font_size * 0.74,
+                        config.min_font_size,
+                    ))
+                    .fill(&theme.colors.text)
+                    .class("fm-xychart-x-tick")
+                    .build(),
+            );
+        }
     }
 
     if let Some(title) = diagram_title(ir, xy_chart_meta.title.as_deref()) {
