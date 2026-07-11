@@ -587,6 +587,10 @@ pub struct DefsBuilder {
     /// per-marker `.marker()` children, byte-identically.
     raw_markers: Option<String>,
     markers: Vec<ArrowheadMarker>,
+    /// Pre-serialized gradient fragment, rendered in the GRADIENTS slot ahead of `gradients` (i.e.
+    /// after markers, before filters/custom). Same byte-identical-streaming contract as `raw_markers`,
+    /// for a memoized node gradient.
+    raw_gradients: Option<String>,
     gradients: Vec<Gradient>,
     filters: Vec<Filter>,
     custom_elements: Vec<Element>,
@@ -618,6 +622,17 @@ impl DefsBuilder {
         self
     }
 
+    /// Insert a pre-serialized gradient fragment in the GRADIENTS slot — serialized after markers and
+    /// before filters/custom, exactly where a `.gradient(..)` child would appear. Same
+    /// crate-own-serializer / byte-identical contract as [`Self::raw_markers`]; used to stream a
+    /// memoized node gradient (`<linearGradient>` build+serialize is ~1.1 µs, a pure function of the
+    /// gradient style + theme colors).
+    #[must_use]
+    pub fn raw_gradients(mut self, svg: String) -> Self {
+        self.raw_gradients = Some(svg);
+        self
+    }
+
     /// Add a gradient.
     #[must_use]
     pub fn gradient(mut self, gradient: Gradient) -> Self {
@@ -644,6 +659,7 @@ impl DefsBuilder {
     pub fn is_empty(&self) -> bool {
         self.raw_markers.is_none()
             && self.markers.is_empty()
+            && self.raw_gradients.is_none()
             && self.gradients.is_empty()
             && self.filters.is_empty()
             && self.custom_elements.is_empty()
@@ -662,6 +678,12 @@ impl DefsBuilder {
 
         for marker in &self.markers {
             defs = defs.child(marker.to_element());
+        }
+
+        // Pre-serialized gradient fragment occupies the gradients slot (after markers, before
+        // filters/custom), byte-identical to the per-gradient children it replaces.
+        if let Some(ref raw) = self.raw_gradients {
+            defs = defs.child(Element::raw_svg(raw.clone()));
         }
 
         for gradient in &self.gradients {

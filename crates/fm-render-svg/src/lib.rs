@@ -2041,6 +2041,44 @@ fn node_gradient_for(config: &SvgRenderConfig, theme: &Theme) -> Option<Gradient
     Some(gradient)
 }
 
+/// The default-preset theme's node fill + background — the memo key for [`node_gradient_svg`].
+/// Pinned by `default_node_gradient_colors_match_preset`.
+const DEFAULT_NODE_FILL: &str = "#ffffff";
+const DEFAULT_NODE_BG: &str = "#fafbfc";
+
+/// The node-gradient `<defs>` fragment for `(config, theme)` — the serialized `<linearGradient>`/
+/// `<radialGradient>` that [`node_gradient_for`] builds — memoized for the default theme + style.
+///
+/// Building the 3-stop `Gradient` (Vec + 4-element tree) and serializing it is ~1.1 µs and is a pure
+/// function of `(node_gradient_style, node_fill, background)` — a fixed per-render cost on every
+/// `node_gradients` render (the default, so every flowchart + most types). The overwhelmingly common
+/// default `LinearVertical` + default theme is memoized via a process-global `OnceLock` built from the
+/// real `node_gradient_for` output (byte-identical, no drift); other themes/styles build fresh.
+/// Returns `None` when gradients are off, matching the former `if let Some(gradient)` skip. Streamed as
+/// one [`DefsBuilder::raw_gradients`], byte-identical to the `.gradient(..)` child it replaces.
+fn node_gradient_svg(config: &SvgRenderConfig, theme: &Theme) -> Option<String> {
+    if !config.node_gradients {
+        return None;
+    }
+    if matches!(config.node_gradient_style, NodeGradientStyle::LinearVertical)
+        && theme.colors.node_fill == DEFAULT_NODE_FILL
+        && theme.colors.background == DEFAULT_NODE_BG
+    {
+        static DEFAULT_GRAD: OnceLock<String> = OnceLock::new();
+        return Some(
+            DEFAULT_GRAD
+                .get_or_init(|| {
+                    node_gradient_for(config, theme)
+                        .expect("gradient present when node_gradients is on")
+                        .to_element()
+                        .render()
+                })
+                .clone(),
+        );
+    }
+    Some(node_gradient_for(config, theme)?.to_element().render())
+}
+
 fn effects_css(config: &SvgRenderConfig) -> String {
     let inactive_opacity = clamp_unit_interval(config.inactive_opacity);
     let cluster_fill_opacity = clamp_unit_interval(config.cluster_fill_opacity);
@@ -2401,8 +2439,10 @@ fn render_layout_to_svg(
             &config.glow_color,
         ));
     }
-    if let Some(gradient) = node_gradient_for(config, &theme) {
-        defs = defs.gradient(gradient);
+    // Memoized node-gradient `<defs>` (default theme + style built once; ~1.1 µs build skipped per
+    // render), streamed in the gradients slot — byte-identical to `defs.gradient(node_gradient_for(..))`.
+    if let Some(grad_svg) = node_gradient_svg(config, &theme) {
+        defs = defs.raw_gradients(grad_svg);
     }
 
     doc = doc.defs(defs);
@@ -11958,6 +11998,43 @@ mod tests {
                     "markers+trailer edge={edge} fancy={fancy}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn default_node_gradient_colors_match_preset() {
+        // node_gradient_svg's memo fast path is keyed on these; if the preset colors drift, the default
+        // theme silently falls to build-fresh (still correct, slower) — pin them together.
+        let c = &Theme::from_preset(ThemePreset::Default).colors;
+        assert_eq!(c.node_fill, DEFAULT_NODE_FILL);
+        assert_eq!(c.background, DEFAULT_NODE_BG);
+    }
+
+    #[test]
+    fn node_gradient_svg_streams_byte_identical() {
+        use crate::defs::DefsBuilder;
+        // The streamed raw_gradients(node_gradient_svg(..)) <defs> must equal the old
+        // .gradient(node_gradient_for(..)) render — for the memoized default theme and a custom theme,
+        // and with markers + trailing filter/custom to pin the gradients-slot ordering.
+        let cfg = SvgRenderConfig::default();
+        for preset in [ThemePreset::Default, ThemePreset::Forest] {
+            let theme = Theme::from_preset(preset);
+            let grad = node_gradient_for(&cfg, &theme).expect("gradients on by default");
+            let old = DefsBuilder::new()
+                .raw_markers(marker_defs_body(&theme.colors.edge, true))
+                .gradient(grad)
+                .filter(crate::defs::Filter::drop_shadow("shadow", 2.0, 2.0, 4.0, 0.3))
+                .custom(crate::element::Element::text());
+            let new = DefsBuilder::new()
+                .raw_markers(marker_defs_body(&theme.colors.edge, true))
+                .raw_gradients(node_gradient_svg(&cfg, &theme).expect("gradients on by default"))
+                .filter(crate::defs::Filter::drop_shadow("shadow", 2.0, 2.0, 4.0, 0.3))
+                .custom(crate::element::Element::text());
+            assert_eq!(
+                old.to_element().render(),
+                new.to_element().render(),
+                "preset={preset:?}"
+            );
         }
     }
 

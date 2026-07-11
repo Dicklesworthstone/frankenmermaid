@@ -12622,3 +12622,24 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   Tried to measure (`grad_ab` micro-bench) but rch refused admission (`hard_preflight=2`). TO DO on rch recovery:
   build `grad_ab` → if fresh−clone ≥ ~1 µs, implement + parity-test (streamed gradient `<defs>` == `.gradient(..)`
   render, default+custom color) + verify 249→251 tests + isolated-micro-bench gate + commit; else reject as sub-µs.
+
+### WIN: node-gradient `<defs>` memoization — ~1.11 µs/render, byte-identical (2026-07-11)
+
+- **The candidate above, measured GO and shipped.** `grad_ab` isolated interleaved micro-bench (noop null):
+  fresh build **1142-1152 ns** vs memoized cache-clone **30 ns → ~1.11 µs saved/render, rock-stable ×3** — above
+  the ~1 µs threshold. Fires on every `node_gradients` render (the default → all flowcharts + most types).
+- **Lever:** `node_gradient_svg(config, theme)` serializes the 3-stop `Gradient` once and memoizes the default
+  theme+`LinearVertical` via a process-global `OnceLock` (built from the real `node_gradient_for` → byte-identical,
+  no drift); other themes/styles build fresh. Streamed via the new `DefsBuilder::raw_gradients` in the GRADIENTS
+  slot (after markers, before filters/custom) — same markers-slot-ordering discipline as `raw_markers`. Third
+  instance of the memoize-a-per-render-Element-build pattern (strip → markers → gradient).
+- **Byte-identical:** `cargo test -p fm-render-svg` = **251 passed, 0 failed** (249 prior + 2 new parity tests:
+  `node_gradient_svg_streams_byte_identical` — streamed `<defs>` == `.gradient(node_gradient_for(..))` render for
+  default + custom theme with surrounding markers+filter+custom to pin the gradients-slot ordering;
+  `default_node_gradient_colors_match_preset` pins the memo key #ffffff/#fafbfc) incl golden_svg.
+- **Median gate = the isolated same-invocation micro-bench** (the trustworthy gate under a degraded fleet); no
+  2-invocation whole-render A/B attempted (contaminated during degraded windows, as the marker A/B showed).
+- **META:** rch was `hard_preflight`-degraded for most of the session; the candidate was measured in a brief window,
+  implemented, then the byte-identity gate was carried by a low-frequency watcher that caught a later recovery
+  window — same held→shipped mechanism as the marker win. ⭐The DefsBuilder now memoizes BOTH markers and the
+  gradient → the per-render `<defs>` Element build is essentially free on the default theme.
