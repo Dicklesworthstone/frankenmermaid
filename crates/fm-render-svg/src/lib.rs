@@ -5852,6 +5852,17 @@ fn requirement_risk_fill(meta: &fm_core::IrRequirementNodeMeta) -> Option<&'stat
     }
 }
 
+/// True if `s` contains a line break (`\n` or `\r`). One byte-scan pass, byte-identical to
+/// `s.contains('\n') || s.contains('\r')` (both needles are ASCII, so a byte scan matches the
+/// `char` scan) but the two separate `str::contains(char)` calls each scan the whole label, so the
+/// common single-line label was read twice per node — this reads it once. Same ASCII-`bytes().any`
+/// family as the parser's nested-bracket fast scan. Used by the node fast-path gates, where a
+/// multi-line label must fall back to the slow multi-line `TextBuilder` path.
+#[inline]
+fn label_has_line_break(s: &str) -> bool {
+    s.as_bytes().iter().any(|&b| b == b'\n' || b == b'\r')
+}
+
 /// Render a single node straight into the output buffer. For the overwhelmingly common themed rectangle
 /// node (the same gate as `render_node`'s fast path) the `<g><rect/><text/><title/></g>` is streamed
 /// directly into `out` via `write_common_node_fragment_into` — eliminating the per-node fragment `String`
@@ -5929,8 +5940,7 @@ fn render_node_into(
         && text_style.is_none()
         && node_icon.is_none()
         && !placeholder_space_node
-        && !label_text.contains('\n')
-        && !label_text.contains('\r')
+        && !label_has_line_break(&label_text)
         && lookup_centrality_tier(centrality_map, node_box.node_index).is_none()
         && label_id.is_none_or(|id| ir.label_markup.get(&id).is_none_or(|s| s.is_empty()))
         && node.class_meta.is_none()
@@ -6026,8 +6036,7 @@ fn render_node_into(
         && text_style.is_none()
         && node_icon.is_none()
         && !placeholder_space_node
-        && !label_text.contains('\n')
-        && !label_text.contains('\r')
+        && !label_has_line_break(&label_text)
         && lookup_centrality_tier(centrality_map, node_box.node_index).is_none()
         && label_id.is_none_or(|id| ir.label_markup.get(&id).is_none_or(|s| s.is_empty()))
         && let Some(node) = ir_node
@@ -6088,8 +6097,7 @@ fn render_node_into(
         && text_style.is_none()
         && node_icon.is_none()
         && !placeholder_space_node
-        && !label_text.contains('\n')
-        && !label_text.contains('\r')
+        && !label_has_line_break(&label_text)
         && lookup_centrality_tier(centrality_map, node_box.node_index).is_none()
         && label_id.is_none_or(|id| ir.label_markup.get(&id).is_none_or(|s| s.is_empty()))
         && let Some(node) = ir_node
@@ -6253,8 +6261,7 @@ fn render_node(
         && text_style.is_none()
         && node_icon.is_none()
         && !placeholder_space_node
-        && !label_text.contains('\n')
-        && !label_text.contains('\r')
+        && !label_has_line_break(&label_text)
         && lookup_centrality_tier(centrality_map, node_box.node_index).is_none()
         && label_id.is_none_or(|id| ir.label_markup.get(&id).is_none_or(|s| s.is_empty()))
         && let Some(node) = ir_node
@@ -8281,7 +8288,7 @@ fn render_node_label_text(
         );
     }
 
-    let mut text = if label_text.contains('\n') || label_text.contains('\r') {
+    let mut text = if label_has_line_break(label_text) {
         TextBuilder::new(label_text)
             .x(x)
             .y(y)
