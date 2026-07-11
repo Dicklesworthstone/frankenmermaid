@@ -12594,3 +12594,14 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   (b) the cross-crate IR string-interning primitive (fm-core IrNode.id/IrLabel.text owned String → u32 arena),
   which is the one remaining STRUCTURAL lever but ripples through parser (cod) + render, so not a single byte-
   identical change. Both are out of reach as a one-lever cc-lane change right now.
+
+- **Follow-up profile (2026-07-11): niche-render Element-path inefficiency is REAL but NOT a realistic lever.**
+  ns/kb of output (render_median / output_KB), existing binary: xychart **2052**, journey 1181, pie 1078, timeline
+  982, sankey 899, er 757, requirement 716 — vs the streamed class baseline **570**. So xychart/journey/pie render
+  ~2-3.6× less efficient per byte → per-item `Element` builds (xychart: `Element::rect()` per bar at lib.rs ~4654,
+  `TextBuilder` per category x-tick at ~4487; both loops scale with CATEGORY COUNT). ⭐But the bench generators use
+  400 categories; REALISTIC xychart/journey/pie have ~5-20 items, so the absolute render cost is negligible and the
+  inefficiency only bites at unrealistic scale (same shape as the journey-layout super-linearity — real, not
+  realistic). Streaming these is class-node-analogous BUT carries the ER-regression risk (b09b921: whole-entity
+  streaming regressed at scale). NET: not worth a niche multi-loop streaming rewrite for a non-realistic win; the
+  elevated ns/kb is expected, not a bug. Don't re-chase it.
