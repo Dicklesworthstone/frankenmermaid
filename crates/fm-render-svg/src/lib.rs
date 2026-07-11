@@ -1570,6 +1570,19 @@ fn scan_node_class_keywords(class: &str) -> NodeClassKeywords {
 /// (`sanitize_css_token` was ~4.5-4.9% of classed-node render — mindmap/git/styled — almost entirely the
 /// `collect()` allocation). Byte-identical: same per-char mapping in the same order.
 fn write_sanitized_css_token_into(buf: &mut String, value: &str) {
+    // Fast path: an already-valid lowercase CSS token — the overwhelmingly common class here
+    // (`kanban-card`, `journey-actor-actor0`, `timeline-section-0`, …) — maps to itself, so bulk-copy
+    // it in a single `push_str` instead of a per-`char` decode + map + push. Byte-identical: when every
+    // byte is already lowercase ascii-alnum / `-` / `_`, the loop below reproduces `value` verbatim
+    // (`to_ascii_lowercase` is the identity on it, and each char is kept). `.all` short-circuits on the
+    // first byte that would actually be transformed, so an upper/special class still takes the slow path.
+    if value
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+    {
+        buf.push_str(value);
+        return;
+    }
     for ch in value.chars() {
         let mapped = if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
             ch.to_ascii_lowercase()
