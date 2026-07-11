@@ -753,6 +753,59 @@
   bottleneck at current graph sizes. Route future renderer work toward measured
   element construction or text/style costs instead.
 
+### Make `write_uint_into` inlinable by cold-splitting its recursion — REVERTED (2026-07-11)
+- **Lever:** `fm-render-svg::attributes::write_uint_into` is the single hottest
+  render symbol (`perf record` on `flowchart/800` render: `15.07%` self, with
+  `write_fixed2` `13.36%` calling into it — together ~28% of coordinate-heavy
+  render). It appears as a **non-inlined** top-level symbol because it is
+  self-recursive (the `n >= 10_000` tail calls `write_uint_into(f, n / 100)`), and
+  a self-call makes a function non-inlinable. The lever moved the rare
+  `n >= 10_000` tail into a separate `#[cold] fn write_uint_into_cold`, leaving the
+  hot 1–4-digit body straight-line and therefore inlinable into `write_int_into` /
+  `write_fixed2` / the node+edge fragment writers. Two variants tried: **A** with
+  `#[inline]`, **B** with no attribute. `nm` confirmed the `write_uint_into::<String>`
+  symbol (15% self in baseline) *disappeared* in both — fully inlined either way
+  (LTO inlines it without the hint once the recursion is gone).
+- **Hypothesis:** every SVG coordinate (each ≤ 4 digits) pays a real, non-inlined
+  call to the 15%-self writer; making it inlinable removes the call boundary
+  (call/ret + register spill/reload across it) and should cut coordinate-heavy
+  render time.
+- **Baseline → After:** `crates/fm-cli/examples/profharness.rs` render phase,
+  release binaries built via `rch`, measured locally with `perf stat` (the fleet
+  was under heavy concurrent load during measurement). Byte-identity confirmed
+  first: **251/251** `fm-render-svg --lib` tests pass and **87** SVG dumps (29
+  shapes × sizes 3/50/300) are `sha256`-identical baseline vs candidate.
+  - **Instruction count (load-independent, stable):** candidate is *higher* on
+    every shape — `flowchart/500` `2905.6M → 2921.0M` (`+0.53%`), `class/500`
+    `3774.4M → 3789.0M` (`+0.39%`) (min-of-8). Inlining duplicates the writer body
+    at each call site; the net is **more** instructions, not fewer.
+  - **Cycles (unstable under load):** coordinate-heavy shapes measured `−1.5%` to
+    `−4.4%` (flowchart/wide/styled/cylinder), but the **same binary pair**
+    (`candB` `flowchart/800`) measured `−2.17%` in one round and `−4.40%` in the
+    next — a ~2% run-to-run swing in the *delta*, so the cycle "win" is not
+    decision-grade at current fleet load.
+  - **`class` regresses:** `+0.39%` instructions (stable) plus `+0.67 / +1.59 /
+    +2.41%` cycles growing with class-node count (size 500 → 800) — an
+    instruction-confirmed regression on the text-heavy compartment path, where the
+    inlined writer bloats codegen and the shared out-of-line copy was preferable.
+- **Original comparator:** no fresh same-input Mermaid.js rerun was captured for
+  this rejected microbench-only variant; standing dominance is unchanged (this
+  never touched output bytes). Not used to justify the lever.
+- **Verdict:** **mixed / no decision-grade win.** The only load-independent
+  signal — instruction count — went the *wrong* way on all shapes; the
+  coordinate-shape cycle gains are cycle-only and unstable under machine load; and
+  `class` is a real, instruction-confirmed, size-scaling regression. Byte-identical
+  but not a Pareto win.
+- **Revert:** `git checkout crates/fm-render-svg/src/attributes.rs` before commit;
+  no production diff remains. Evidence-only ledger entry.
+- **Do-not-retry note:** do NOT force `write_uint_into` to inline (via `#[inline]`
+  or by removing its recursion) to chase coordinate-render IPC. The self-recursion
+  is effectively *protective* — one shared, out-of-line copy of the writer is
+  i-cache-friendly and the text-heavy paths (class compartments) prefer the compact
+  call. If ever retried, it must be measured on an **idle** fleet with a **null
+  control**, and must show an instruction-count-neutral-or-better result, not a
+  cycles-only gain that trades against a stable instruction increase.
+
 ## Kept Wins Also Recorded Here By Request
 
 ### Acyclic SCC fast-path in `GraphMetrics::from_ir` — −27 to −29% layout (Auto-selection overhead) (2026-06-27)
