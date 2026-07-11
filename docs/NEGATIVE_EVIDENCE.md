@@ -12740,3 +12740,18 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   our speedup is weakest). Completes the memmem conversion of ALL render post-passes — no `str::find`/StrSearcher
   remains on the render path. ⭐LEVER (general): audit ALL sibling functions when one gets a `str::find`→memmem win;
   a partially-converted function (scan half done, strip half not) leaves the same cost.
+
+### REJECT: stream the a11y `describe_diagram_with_layout` description (format! → push_str) — wash (2026-07-11)
+
+- **Profile-first (symbolized small render):** `describe_diagram_with_layout` was 2.65% (1.69% in `format_inner`) —
+  it builds a `Vec<String>` of ~8 `format!` parts then `join(". ")`. Rewrote it to stream directly into one buffer
+  (push_str + `write_uint_into` for counts, `write!("{:.0}")` for the two floats to keep exact rounding — no
+  ties-even trap; `leading_type_phrase` inlined; inner `key_nodes`/`relationships` joins kept). Byte-identical by
+  construction (part 1 unconditional → `". "` prefixes all others, matching `join(". ")`).
+- **Why REJECTED (interleaved symbolized median, flowchart render):** n=10 **0.9943 (−0.6%, CI-marginal)**, n=300
+  **1.0029 (+0.3%, i.e. slightly SLOWER — noise)**. No clear median win in either direction. The profiled 1.69%
+  `format_inner` is SPREAD across multiple a11y sites (`describe_edge_labels`, `apply_overrides`, the kept inner
+  joins, the `write!` floats), so streaming just this one function doesn't clear the noise floor.
+- **Disposition:** reverted (`a11y_rejected.patch`). ⭐LESSON: a `format_inner` self-time attributed to one function
+  in `-g none` is often the SHARED format machinery across many callers; converting one caller captures only its
+  slice. The theme-CSS/requirement-subtitle streaming wins worked because ONE site dominated; here it's diffuse.
