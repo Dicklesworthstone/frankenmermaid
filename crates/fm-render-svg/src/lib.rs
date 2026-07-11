@@ -867,9 +867,14 @@ const NODE_SHAPE_THEME_CSS: &str = ".fm-node.fm-node-shape-note path,\n.fm-node.
 /// dashed-or-thick edges) all four blocks strip, so this turns 4 fixed-size String allocations +
 /// full-buffer copies per render into 4 tail memmoves — a pure fixed-overhead cut that matters most on
 /// the small diagrams where the ~9 KB `<style>` dominates output. A non-matching block is a no-op
-/// (`find` → `None`), preserving the safe-if-drifts contract of the block constants.
+/// (search → `None`), preserving the safe-if-drifts contract of the block constants.
+///
+/// The search uses `memchr::memmem` (SIMD), not `str::find`: `str::find` builds a Two-Way `StrSearcher`
+/// whose per-call needle-table setup measured ~3.3% of flowchart render across the 4 long (~300-500 B)
+/// block needles. `memmem::find` returns the identical first-match byte offset (byte-identical drain)
+/// with a far cheaper prefilter + a SIMD scan — the same primitive `minify_style_block` already uses.
 fn strip_css_block(css: &mut String, block: &str) {
-    if let Some(pos) = css.find(block) {
+    if let Some(pos) = memchr::memmem::find(css.as_bytes(), block.as_bytes()) {
         css.drain(pos..pos + block.len());
     }
 }

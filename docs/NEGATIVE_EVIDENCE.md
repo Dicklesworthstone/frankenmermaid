@@ -12658,3 +12658,28 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   to_svg_style ~772 ns both rejected). The pattern is now MINED on the default render path: the `<defs>` Element
   builds are memoized (markers + gradient), and the CSS `format!` builds are already fast. Don't re-chase CSS-builder
   memoization.
+
+### ⭐UNBLOCK + WIN: symbolized profiling restored → `strip_css_block` `str::find` → `memmem::find`, render −2.7% (2026-07-11)
+
+- **METHOD UNBLOCK (the session-long handicap lifted):** rch strips debug symbols on transfer, so release perf
+  profiles showed only unresolved addresses all session — every lever was found by code-reading, and the "scattered
+  small-function floor" was invisible. FIX: `rch exec -- cargo build --release --example profharness --config
+  'profile.release.strip="none"' --config 'profile.release.debug=2'` (with a `touch` to force a non-cached rebuild)
+  returns a NON-STRIPPED binary (12388 symbols, 9 debug sections). ⭐`strip="none"` (string) works where
+  `strip=false` did not. `perf record`/`report` now resolves `fm_render_svg::*` functions.
+- **Profile-first (symbolized, flowchart-300 render):** top self-time is the byte-production primitives
+  (`write_uint_into` 13%, `write_fixed2` 11%, `write_escaped_text` 9%, `write_escaped_attr` 7.5% — the inherent
+  floor), BUT ~8% is in `core::str::pattern::StrSearcher` (`next_match` 5.3% + `new` 2.75%) — NOT byte production.
+  Call graph: `StrSearcher::new` (the per-call Two-Way needle-table setup) is dominated by MY OWN `strip_css_block`
+  (~3.3-3.4% of render) — `str::find` over the 4 long (~300-500 B) theme-block needles, every render.
+- **Lever:** `strip_css_block`: `css.find(block)` → `memchr::memmem::find(css.as_bytes(), block.as_bytes())` —
+  SIMD prefilter + lighter setup, the same primitive `minify_style_block` already uses. `drain(pos..pos+len)`
+  unchanged. Byte-identical BY CONSTRUCTION (memmem returns the identical first-match byte offset as str::find).
+- **Byte-identical:** `cargo test -p fm-render-svg` = **251 passed, 0 failed** (incl golden_svg). Clippy clean.
+- **Median gate (interleaved local, symbolized base vs cand, flowchart-300 render, 10 alternating runs):** base
+  (str::find) median **99990 ns** vs cand (memmem) **97290 ns = 0.973 (−2.7%)**, distributions cleanly separated.
+  Re-profiled cand: `StrSearcher` gone. ⭐FOLLOW-UP: memmem still builds a two-way `Searcher::new` per render
+  (~2.5% self on long needles) → a precomputed `memmem::Finder` (static/OnceLock per block) would eliminate that
+  per-render setup too (potential ~5% total). Queued as the next lever.
+- ⭐⭐META: symbolization is the key unlock — the "scattered floor" was hiding a fixable ~3% `str::find` cost this
+  whole session. `str::find`/`contains`/`replace` with LONG needles on a hot path → `memchr::memmem` (SIMD).
