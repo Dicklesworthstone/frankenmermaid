@@ -13079,3 +13079,36 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   SVG byte identity. Tracker: `bd-1buv.2.5`.
 - **Verdict: SURFACE / HOLD.** The parser lever remains unimplemented and unshipped until the shared strict-remote
   measurement substrate is healthy.
+
+#### FOLLOW-UP SURFACE: Kanban baseline profiled remotely; candidate median refused, parser restored (2026-07-11)
+
+- **Ledger/BV reconciliation:** the held Kanban lever above remained distinct from every parser rejection, and
+  `bv --robot-triage` data hash `727e48d35f28f3e6` still routed bounded perf work to the open P0 parent
+  `bd-1buv.2`, not the architectural ParseLens recommendation. The permanent parser-only Criterion seam added by
+  `de03ea2` uses the common no-metadata shape at `parse/kanban/kanban_400` and `kanban_1600`; the latter is exactly
+  40 columns × 40 explicit-id cards.
+- **Profile-first remote baseline:** exact ORIG parser SHA-256
+  `5ed811afba3b18984365ed593d5bf40b80cfe649b4c8d425f8121258c191c95f` and benchmark SHA-256
+  `6a80c1ec2ae7e827d82dc597cb09d37bc8f37b664489ad70e5911579e6dd4c05` ran through
+  `RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo bench --profile release -p fm-parser --bench
+  parse_bench -- parse/kanban --warm-up-time 3 --measurement-time 8 --sample-size 50 --noplot` on actual worker
+  `vmi1227854`, job `j-29914252970041706`. Criterion `median.point_estimate`: 400 cards **217.864 us** (95% CI
+  **210.538..223.452 us**); 1600 cards **803.590 us** (95% CI **789.222..837.980 us**).
+- **ONE candidate attempted:** replace only the successful-card base/priority/assignee/tag
+  `add_class_to_node(&card_key, ..., span)` calls with `add_class_to_node_id(nid, ...)`, where `nid` is returned by
+  the immediately preceding `intern_node`. Metadata parsing, class formatting, ordering, and every other parser
+  path remained unchanged. The candidate plus focused exact-order/dedup test had parser SHA-256
+  `62c540d19488f1221339ad382ef2cbdd0be8596aec30e48ea91eab0d55ea956b`.
+- **Isomorphism argument:** both class helpers trim, reject empty names, deduplicate, and append in the same order.
+  The successful preceding intern has already resolved label, Rounded shape, span, and implicit-node state; the
+  key-based helper's second lookup cannot change them. Duplicate card IDs resolve to the same dense id. This was
+  not promoted to a byte-identity claim because the candidate validation command never ran.
+- **Strict-remote blocker:** the identical candidate command, requesting the baseline worker with both RCH worker
+  selectors, was refused before sync/build/benchmark: `no admissible workers: insufficient_slots=7,hard_preflight=2`
+  followed by `remote required; refusing local fallback`. No alternate-worker timing, queue, retry, test, or local
+  Cargo fallback was used. The candidate was manually restored; parser SHA-256 is again the exact ORIG hash above,
+  so shipped parser/IR/SVG bytes are unchanged.
+- **Verdict: SURFACE / HOLD, not reject.** Keep the Kanban benchmark seam. Resume this held lever under a fresh
+  child only for an exact-source candidate run on `vmi1227854` (or a fresh same-worker ORIG/CAND pair), and require CAND/ORIG
+  `<= 0.97`, disjoint median 95% CIs, no 400-card regression, focused parser tests, exact serialized IR, and exact
+  SVG bytes before shipping the four-call production change.
