@@ -945,6 +945,12 @@
   −4.3%** on top of the −35%. Same loop-invariant-hoist family as the pie boundary reuse — when you stream
   a repeated element, the colour/opacity/radius/class are usually per-series invariants; escape/format
   them ONCE outside the loop.
+- **FOLLOW-UP 2 (143bff1): stream the per-category x-tick `<line>`s.** Same simple-shape method — only
+  `x` varies (x1==x2==x), y1/y2/stroke/width/class invariant → hoist all + format `x` once per tick
+  (shared x1/x2) + stream into one `raw_svg` (no span gate on ticks). Byte-identical; **min-of-8 instr
+  xychart/50 −11.6%, /200 −26.7%, /400 −28.1%**; wall −27%. **Cumulative xychart/400 ≈ −55%** across
+  marker-stream + hoist + tick-stream. REMAINING on Element: category/axis `TextBuilder` labels + the 5
+  y-gridlines/tick-labels (small); text streaming is the involved part left.
 
 ## Kept Wins Also Recorded Here By Request
 
