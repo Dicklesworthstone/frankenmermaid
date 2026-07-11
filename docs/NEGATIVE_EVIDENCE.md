@@ -12444,8 +12444,42 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   cargo bench --profile release -p fm-parser --bench parse_bench -- parse/wide --warm-up-time 3
   --measurement-time 8 --sample-size 50 --noplot behind the required prefix. Score median.point_estimate from
   Criterion estimates, not the console slope/mean. Require CAND/ORIG <= 0.97, disjoint median bootstrap 95% CIs,
-  and no neighboring-row regression. Then run remote parser tests, check, clippy, and filtered flowchart_simple plus
-  dense_flowchart_stress SVG goldens without BLESS; also compare exact ORIG/CAND SVG SHA-256 values. Otherwise
+  and no neighboring-row regression. Then run remote parser tests, check, clippy, and filtered single_node plus
+  stress_120_nodes FastNode SVG goldens without BLESS; also compare exact ORIG/CAND SVG SHA-256 values. Otherwise
   restore the exact source and replace this surface with a measured reject.
 - **Verdict: SURFACE / HOLD.** Source remained byte-for-byte unchanged. RCH recovery is the only prerequisite for
   the one-lever A/B; local fallback is forbidden.
+
+#### FOLLOW-UP REJECT: owned rich-label move fails the decisive large-row MEDIAN gate (2026-07-11)
+
+- **Exact candidate:** FlowDocumentItem lowering consumed values by ownership; the FastNode arm passed its owned
+  ParsedLabel into IrBuilder, whose existing node/label hash and collision checks ran before moving label.text and
+  label.segments into the same IR slots on an insertion miss. The candidate included a focused test comparing
+  borrowed versus owned storage/dedup and asserting that the owned String/Vec buffers themselves moved. No render
+  or layout source changed.
+- **Source identity:** ORIG was cfd62ee with mermaid_parser.rs SHA-256
+  5ed811afba3b18984365ed593d5bf40b80cfe649b4c8d425f8121258c191c95f and ir_builder.rs SHA-256
+  16b0412ce74eb628222648ab4e0b8b11f64c271de4b5aee7c3ff18f42fa3f923. CAND used parser SHA-256
+  214995b94bc74dd6c1c056c1b436dbd7dcbbfff0c8f822117af747677891669a and builder SHA-256
+  28b9070ddb7cd2a2aa142ce066ee2897ff1488f9a0cb5d3363123bce9ef7f4e8. The parse-bench harness stayed
+  6092978d065af46dca39b09687eec6c4621e7f431180e6ef8b0529da68019212.
+- **Remote-only routing:** the first ORIG run landed on vmi1149989 and was discarded for pairing after the requested
+  CAND worker hint routed to vmi1227854. Adding both RCH_WORKER and RCH_WORKERS then admitted the exact restored
+  ORIG on vmi1227854. The scored pair is therefore CAND job j-29914252970040690 followed immediately by ORIG job
+  j-29914252970040695 on the same actual worker, using identical 3-second warm-up, 8-second measurement, and
+  50-sample commands. No local Cargo command ran.
+- **Strict MEDIAN results (Criterion median.point_estimate, candidate/original):**
+  - parse/wide/8x16: ORIG 63.278 us [61.277, 67.847] -> CAND 67.859 us [67.578, 68.309],
+    CAND/ORIG 1.07240 (+7.24%); confidence intervals overlap narrowly.
+  - parse/wide/12x24: ORIG 162.483 us [155.081, 168.131] -> CAND 140.921 us [134.548, 145.663],
+    CAND/ORIG 0.86730 (-13.27%); candidate win has disjoint confidence intervals.
+  - parse/wide/16x32: ORIG 260.210 us [254.806, 273.649] -> CAND 281.879 us [275.888, 289.497],
+    CAND/ORIG 1.08327 (+8.33%); candidate regression has disjoint confidence intervals.
+- **Verdict: REJECT.** The isolated ownership move helps the middle row but materially regresses the decisive
+  512-node row, violating both the <=0.97 keep threshold and the no-neighbor-regression gate. The non-monotonic
+  result also means the removed String clone cannot be credited independently of the changed lowering/code layout.
+  Do not retry this exact by-value FlowDocumentItem plus ParsedOwned variant shape.
+- **SVG / disposition:** the performance gate failed before spending another remote slot on a candidate golden.
+  The candidate was manually removed, including its focused test, and both parser files again match the exact ORIG
+  hashes above. The shipped parser and therefore its SVG bytes are byte-identical to cfd62ee; no golden was blessed.
+  bd-1buv.2.1 is closed as rejected.
