@@ -866,6 +866,32 @@
   passed `cargo check` but red-blocked the whole workspace clippy gate. Removed the dup; workspace
   `clippy --all-targets -- -D warnings` now exits 0. Byte-identical (lint attr, zero codegen).
 
+### LANDED: reuse pie wedge boundary point → halve per-wedge Grisu (pie render up to −22.8% instr / −25% wall) (2026-07-11)
+- **Profile the NON-flowchart types (the flowchart render node path was confirmed at floor).** Fresh
+  per-type render profile surfaced two fat type-specific frames the flowchart profile never showed:
+  **pie `grisu::format_shortest_opt` 19%** (float formatting) and seq `render_svg_with_layout` 21% self
+  — the latter turned out to be the SHARED CSS strip (memmem Finder 10% + memmove 6.8% + replace_range
+  3.2%, mature), not a seq lever. Pie was the real target.
+- **Lever (3837d36):** each pie wedge `<path d>` Grisu-formatted 4 float coords — start `x1 y1` (at
+  `angle`) and end `x2 y2` (at `angle+sweep`). Because the loop does `angle += sweep`, a NORMAL wedge's
+  end point IS the next wedge's start point, bit-for-bit (same float expr → same Grisu text). Cache the
+  end-point text in one reused `String`, reuse it as the next start instead of re-running Grisu (+ two
+  trig) on `x1/y1`. Used ONLY immediately after a normal wedge — zero-value and full-circle wedges emit
+  no boundary point yet still advance `angle`, so they clear the cache (their `angle += sweep` makes the
+  cached point stale). Byte-identical by construction.
+- **Measured:** min-of-8 instruction count `pie/50 −8.8%`, `pie/200 −21.9%`, `pie/400 −22.8%` (scales
+  with wedge count — CSS-strip fixed cost dilutes small pies); `pie/400` wall-time `231k→172k ns
+  (−25%)`, non-overlapping over 5 reps. Non-pie shapes unaffected (`flowchart/300 −0.02%`).
+- **Byte-identical & GREEN:** 112 dump outputs (14 shapes × 8 sizes, pie 1..300 incl. single-slice
+  full-circle) `sha256`-match; 251/251 fm-render-svg lib tests incl. `renders_single_slice_pie_as_full
+  _circle` + `pie_chart_renders_wedge_paths_and_legend`; workspace clippy `-D warnings` exits 0.
+- **META:** ⭐**PROFILE NON-FLOWCHART TYPES** — the flowchart node/edge path is at floor, but per-type
+  render profiles expose fat type-specific frames (pie Grisu, class compartments, gantt cubic paths). ⭐
+  For SEQ/small-node diagrams the top self-frame is the SHARED CSS strip (fixed ~5KB cost dominates when
+  there's little else to render), NOT type-specific — don't mistake it for a per-type lever. ⭐LEVER
+  FAMILY: adjacent geometric primitives that share an endpoint (arc/segment chains) format that shared
+  coordinate twice — cache + reuse the shared-vertex text when the shared float is provably bit-identical.
+
 ## Kept Wins Also Recorded Here By Request
 
 ### Acyclic SCC fast-path in `GraphMetrics::from_ir` — −27 to −29% layout (Auto-selection overhead) (2026-06-27)
