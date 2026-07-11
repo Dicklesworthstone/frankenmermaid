@@ -12605,3 +12605,20 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   realistic). Streaming these is class-node-analogous BUT carries the ER-regression risk (b09b921: whole-entity
   streaming regressed at scale). NET: not worth a niche multi-loop streaming rewrite for a non-realistic win; the
   elevated ns/kb is expected, not a bug. Don't re-chase it.
+
+- **Sequence render is ALREADY fast-pathed (2026-07-11).** seq is our worst mermaid.js speedup (236×) and a common
+  realistic type, but its messages (`->>` → `ArrowType::Arrow`, labeled) already hit the whole-labeled-edge fast
+  fragment (lib.rs ~9125: streamed `<g><path/><rect/><text/><title/></g>`, verified by dumping the SVG — every
+  message is `class="fm-edge-labeled"`). The 1.5× ns/kb vs flowchart (1883 vs 1239) is INHERENT to labeled-edge
+  content (label rect + text + char-width/escaping), not a slow path. No lever.
+
+- **CANDIDATE (unmeasured, rch-blocked): node-gradient `<defs>` memoization — same pattern as the shipped marker
+  win (4bc1244).** `node_gradient_for` (lib.rs 2023) rebuilds a 3-stop `Gradient` (Vec + 4-Element tree +
+  serialize) EVERY `node_gradients` render (the default → all flowcharts + most types), added via
+  `defs.gradient(..)` at 2404. It's theme-deterministic → memoizable exactly like the markers: add a `raw_gradients`
+  field to `DefsBuilder` serialized in the GRADIENTS slot (markers→gradients→filters→custom), a
+  `node_gradient_svg(style, theme)` with an `OnceLock` for the default theme, insert via `defs.raw_gradients(..)`.
+  Estimated ~0.5-1 µs/render (≈ markers' 6 µs × 4-of-24 elements) — MARGINAL but broad + byte-identical + low-risk.
+  Tried to measure (`grad_ab` micro-bench) but rch refused admission (`hard_preflight=2`). TO DO on rch recovery:
+  build `grad_ab` → if fresh−clone ≥ ~1 µs, implement + parity-test (streamed gradient `<defs>` == `.gradient(..)`
+  render, default+custom color) + verify 249→251 tests + isolated-micro-bench gate + commit; else reject as sub-µs.
