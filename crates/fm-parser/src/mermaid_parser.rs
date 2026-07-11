@@ -5890,6 +5890,14 @@ impl GitGraphState {
     fn set_head(&mut self, branch: &str, node_id: IrNodeId) {
         self.branches.insert(branch.to_string(), node_id);
     }
+
+    fn set_current_head(&mut self, node_id: IrNodeId) {
+        if let Some(head) = self.branches.get_mut(&self.current_branch) {
+            *head = node_id;
+        } else {
+            self.branches.insert(self.current_branch.clone(), node_id);
+        }
+    }
 }
 
 enum GitGraphCommand {
@@ -6528,7 +6536,7 @@ fn parse_git_commit(
     }
 
     // Update current branch head
-    state.set_head(&state.current_branch.clone(), node_id);
+    state.set_current_head(node_id);
 }
 
 /// Parsed git commit options.
@@ -6748,7 +6756,7 @@ fn parse_git_merge(
     }
 
     // Update current branch head
-    state.set_head(&state.current_branch.clone(), merge_node);
+    state.set_current_head(merge_node);
 }
 
 fn parse_git_merge_options(spec: &str) -> Option<GitMergeOptions> {
@@ -6816,7 +6824,7 @@ fn parse_git_cherry_pick(
     }
 
     // Update current branch head
-    state.set_head(&state.current_branch.clone(), new_node);
+    state.set_current_head(new_node);
 }
 
 fn parse_git_cherry_pick_id(spec: &str) -> Result<String, &'static str> {
