@@ -12879,3 +12879,30 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 - **Verdict: REJECT.** Removing current-branch clones is mechanically less allocation work but does not improve the
   optimized parser binary at the measured floor. Do not retry this exact `set_current_head/get_mut` helper shape.
   `bd-1buv.2.2` is closed as rejected.
+
+### SURFACE / HOLD: v0.2.0 ER entity-header confirmation stopped on degraded RCH (2026-07-11)
+
+- **Negative-ledger + BV first:** `bv --robot-triage` data hash `8f77a577765bd740` ranked ParseLens as the top
+  parser-labeled task, but that is an architectural feature rather than a bounded performance lever. The actionable
+  P0 performance parent remains `bd-1buv.2`. Its only measured-but-unresolved parser seam is the guarded plain ER
+  entity-block header direct-lower candidate documented above; the rich-label ownership and GitGraph current-head
+  shapes are measured rejects and were not retried.
+- **Release reconciliation:** release commit/tag `cca4fea` / `v0.2.0` changes only release metadata, changelog,
+  lockfile, and README. It does not touch `fm-parser` or `fm-core`. The exact ORIG parser therefore remains SHA-256
+  `5ed811afba3b18984365ed593d5bf40b80cfe649b4c8d425f8121258c191c95f`; the `pipeline_bench` harness is SHA-256
+  `79cd7a4b029dc506d100cd89ceb668c484512c4920c643e9ffcaf7f6670a2c1e`.
+- **One held lever:** for a plain `ENTITY {` header only, guard with `is_plain_normalized_er_id(entity_name)` and
+  directly call `builder.intern_node(entity_name, None, NodeShape::Rect, span)`, preserving the generic
+  `parse_node_token_with_config` fallback. The earlier 30-sample same-worker pair was promising at
+  CAND/ORIG `0.91793`, but its median 95% CIs overlapped narrowly, so only a fresh 50-sample confirmation can ship.
+- **Why no build or edit occurred:** before the required baseline, `rch status --json` reported
+  `posture: degraded` (`9/12` workers healthy, `20` slots available). Although the live-admissibility band reported
+  9 of 11 workers able to run a command, the explicit contract for this pass is **RCH degraded = SURFACE**. No
+  Cargo command ran, no worker was queued or retried, and no parser source was edited. Parser output is therefore
+  byte-for-byte identical to released v0.2.0.
+- **Exact unblock gate:** when RCH posture is healthy, run ORIG and CAND on the same actual worker via
+  `RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo bench --profile release -p
+  frankenmermaid-cli --bench pipeline_bench -- er_stages/parse/512 --warm-up-time 3 --measurement-time 8
+  --sample-size 50 --noplot`. Score Criterion `median.point_estimate`; require CAND/ORIG `<= 0.97`, disjoint median
+  95% CIs, no neighboring regression, identical parser IR, and the already-established filtered `er_basic` proof.
+- **Verdict: SURFACE / HOLD.** `bd-1buv.2.3` closes this release-era admission attempt without changing source.
