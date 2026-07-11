@@ -12703,3 +12703,23 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 - ⭐COMBINED with b86fb20, strip_css_block is ~10% faster render (str::find → memmem one-shot → precomputed Finder).
   LEVER: a `memmem::find(hot_haystack, FIXED_needle)` called repeatedly with a compile-time-constant needle →
   precompute a `Finder` in a `OnceLock` static; the per-call two-way construction dominates for long needles.
+
+### WIN: fm_core `push_usize_decimal` naive loop + from_utf8 → digit-pair table, render −2.0% (2026-07-11)
+
+- **Profile-first (symbolized flowchart-300 render):** after the strip_css_block wins, `fm_core::push_usize_decimal`
+  (1.58% self) + its `core::str::from_utf8` (part of 1.88%) + `write_mermaid_node_element_id_into` (2.25%) writes
+  every node's element-id index and was the top remaining NON-byte-production cost. It was a naive digit-by-digit
+  reverse-buffer loop (`%10`/`/10` per digit) finished with `from_utf8(&buf).unwrap_or("")` — while render's own
+  `write_uint_into` uses a digit-PAIR table.
+- **Lever:** rewrote `push_usize_decimal` forward + table-driven (mirrors `write_uint_into`): two digits/step via
+  slices of `DIGIT_PAIRS_SRC` (a `&str` const = "00".."99" concatenated, so 2-char byte slices push as `&str` with
+  NO `from_utf8`), no per-digit `%10`/`/10`. Byte-identical (same decimal digits); the `&str` const means no
+  revalidation. `fm_core` is the shared IR crate but this is a render-serving formatting util (not parser/edge-
+  routing, cod's lane).
+- **Byte-identical:** new `push_usize_decimal_matches_std_to_string` test (0..2000 exhaustive + edge values incl
+  usize::MAX == `n.to_string()`); `cargo test -p fm-core -p fm-render-svg` = 351 + 251 passed, 0 failed (incl
+  golden_svg). Clippy clean. ⚠️the `DIGIT_PAIRS_SRC` const was hand-typed and had a 202-char/off-by-one error first
+  — VERIFY generated-string consts with a script (`== ''.join(f'{i:02d}'...)`) before trusting.
+- **Median gate (interleaved symbolized Finder-base vs cand, flowchart-300 render, 12 runs):** base **87301 ns** vs
+  cand **85512 ns = 0.9795 (−2.0%)**, distributions cleanly separated. LEVER: grep number-to-string on a hot path
+  using a `%10`/`/10` reverse-buffer loop + `from_utf8` → forward digit-pair table with a `&str` pair const.
