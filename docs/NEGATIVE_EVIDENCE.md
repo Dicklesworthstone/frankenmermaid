@@ -12384,3 +12384,33 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   exact-source, same-worker `median.point_estimate` values; require candidate/ORIG <= **0.97**, disjoint median
   95% CIs, no neighboring regression, remote parser/conformance/check/clippy gates, and exact ER SVG SHA-256
   equality before shipping. Otherwise revert the one source lever and replace this surface with a measured reject.
+
+#### FOLLOW-UP SURFACE: first remote pair is promising; confirmation blocked and source restored (2026-07-11)
+
+- **Attempted ONE lever:** the exact guarded header direct-lower above was implemented as six added lines in
+  `parse_er`; render/layout and the benchmark harness stayed untouched. The benchmarked candidate source SHA-256
+  was `4d00c6cd4a0716509d35ee3191ec252194948ae5d84df8cd23d5533895f8d1e7`. Its final rustfmt form was
+  token-identical and had SHA-256 `44f27cdb85d2e01a5f00e7a52abeec6c1bae729bc18243c7b8e429e301139489`.
+- **First strict-remote MEDIAN pair, same worker `vmi1227854`:** identical commands used warm-up **2 s**,
+  measurement **5 s**, and **30 samples** on `er_stages/parse/512`.
+  - ORIG median **417.314 us** (95% CI **393.042..461.652 us**), exact source SHA-256
+    `5ed811afba3b18984365ed593d5bf40b80cfe649b4c8d425f8121258c191c95f`.
+  - Candidate median **383.066 us** (95% CI **374.374..395.864 us**).
+  - Candidate/ORIG **0.91793197x**: **8.2068% less time**, **1.089405x faster**. Criterion's slope comparison
+    was corroborating only: **-9.2869%**, 95% CI **-13.087..-5.3002%**, `p=0.00`.
+  - **Why this did not ship:** the median bootstrap CIs overlap narrowly (**393.042..395.864 us**), so the
+    pre-recorded disjoint-CI keep gate is not yet satisfied even though the median delta comfortably clears 3%.
+- **Byte-identity / behavior evidence:** remote focused parser tests passed **45/45**. The final rustfmt-form
+  candidate passed the filtered `er_basic` SVG golden remotely on `vmi1149989`; artifact hash
+  `bee1b1766df7f8eb`, checked-in exact SVG SHA-256
+  `fbaa44df3973175a01876e34fe513583ba35c2959e9fdd462033b17764a47d70`. An initial unfiltered golden invocation
+  reached the repository's documented pre-existing `gantt_basic` mismatch before `er_basic`; moving
+  `FM_GOLDEN_CASE=er_basic` inside the remote command produced the authoritative ER-only pass.
+- **Final confirmation blocker:** after manually restoring the exact ORIG source, the longer confirmation baseline
+  (`--warm-up-time 3 --measurement-time 8 --sample-size 50`) was refused before build with
+  `no admissible workers: insufficient_slots=8,hard_preflight=2` and `remote required; refusing local fallback`.
+  Per the strict rule there was no queue, retry, or local Cargo fallback. The parser file is restored byte-for-byte
+  to ORIG SHA-256 `5ed811afba3b18984365ed593d5bf40b80cfe649b4c8d425f8121258c191c95f`.
+- **Verdict: SURFACE / HOLD, not reject.** Reopen only for one same-worker 50-sample ORIG/candidate pair using the
+  longer command above. Ship the six-line lever only if the candidate median is <= **0.97x** ORIG with disjoint
+  median CIs and the already-green ER parser/golden proofs remain green; otherwise ledger it as a measured reject.
