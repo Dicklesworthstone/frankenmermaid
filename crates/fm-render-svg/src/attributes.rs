@@ -29,25 +29,38 @@ impl AttributeValue {
     pub(crate) fn write_value<W: fmt::Write>(&self, out: &mut W) -> fmt::Result {
         match self {
             Self::String(s) => write_escaped_attr(out, s),
-            Self::Number(n) => {
-                // Whole numbers in i32 range serialize as integers; everything else to 2
-                // decimals. `*n as i32` is a saturating cast, so the round-trip compare
-                // `i as f32 == *n` is *exactly* the old `n.fract() == 0.0 && n.is_finite()
-                // && n in i32 range` test: a fractional value truncates and fails the
-                // compare; a whole in-range value round-trips; NaN/±inf and out-of-range
-                // wholes fail the compare and fall to `write_fixed2` (which itself routes
-                // non-finite to the std formatter) — identical bytes in every case. This
-                // avoids the `f32::fract` → `truncf` libm call, which measured ~9% of
-                // coordinate-heavy SVG render (per-attribute number formatting hot path).
-                let i = *n as i32;
-                if i as f32 == *n {
-                    write_int_into(out, i)
-                } else {
-                    write_fixed2(out, *n)
-                }
-            }
+            Self::Number(n) => write_number_into(out, *n),
             Self::Integer(i) => write_int_into(out, *i),
         }
+    }
+}
+
+/// Write `n` as an SVG attribute number — whole values in `i32` range as integers, everything else to
+/// two decimals — the [`AttributeValue::Number`] formatting *without* materializing the enum.
+///
+/// Whole numbers in `i32` range serialize as integers; everything else to 2 decimals. `n as i32` is a
+/// saturating cast, so the round-trip compare `i as f32 == n` is *exactly* the old
+/// `n.fract() == 0.0 && n.is_finite() && n in i32 range` test: a fractional value truncates and fails the
+/// compare; a whole in-range value round-trips; NaN/±inf and out-of-range wholes fail the compare and
+/// fall to [`write_fixed2`] (which itself routes non-finite to the std formatter) — identical bytes in
+/// every case, and no `f32::fract` → `truncf` libm call.
+///
+/// The streamed node/edge fragment writers call this directly instead of
+/// `AttributeValue::Number(n).write_value(f)`: constructing the `AttributeValue` enum (≈24 bytes, sized
+/// by its `String` variant) to pass `&self` to the out-of-line `write_value` forced a stack store+load
+/// per coordinate — pure overhead on the coordinate-heavy render path. Byte-identical.
+///
+/// `#[inline(never)]`: this is called from ~110 coordinate sites; inlining the int-vs-2dp check +
+/// branch at each one bloats code and drops IPC (measured cycles +4.6% at 113 inlined sites even though
+/// instruction count fell −3.8%). Kept as ONE out-of-line copy, callers pass `n` in a register — the
+/// enum-elision saving without the i-cache cost.
+#[inline(never)]
+pub(crate) fn write_number_into<W: fmt::Write>(f: &mut W, n: f32) -> fmt::Result {
+    let i = n as i32;
+    if i as f32 == n {
+        write_int_into(f, i)
+    } else {
+        write_fixed2(f, n)
     }
 }
 

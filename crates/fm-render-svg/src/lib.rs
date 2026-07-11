@@ -3521,13 +3521,13 @@ fn write_cardinality_text_into(
     class_name: &str,
     label: &str,
 ) {
-    use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
+    use crate::attributes::{write_escaped_attr, write_escaped_text};
     out.push_str("<text x=\"");
-    let _ = AttributeValue::Number(x).write_value(out);
+    let _ = crate::attributes::write_number_into(out, x);
     out.push_str("\" y=\"");
-    let _ = AttributeValue::Number(y).write_value(out);
+    let _ = crate::attributes::write_number_into(out, y);
     out.push_str("\" text-anchor=\"start\" dominant-baseline=\"auto\" font-size=\"");
-    let _ = AttributeValue::Number(font_size).write_value(out);
+    let _ = crate::attributes::write_number_into(out, font_size);
     out.push('"');
     if !embed_css {
         out.push_str(" font-family=\"");
@@ -3878,21 +3878,21 @@ fn write_quadrant_point_into(
     text_fill: &str,
     label: &str,
 ) {
-    use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
+    use crate::attributes::{write_escaped_attr, write_escaped_text};
     f.push_str("<circle cx=\"");
-    let _ = AttributeValue::Number(cx).write_value(f);
+    let _ = crate::attributes::write_number_into(f, cx);
     f.push_str("\" cy=\"");
-    let _ = AttributeValue::Number(cy).write_value(f);
+    let _ = crate::attributes::write_number_into(f, cy);
     f.push_str("\" r=\"6\" fill=\"");
     let _ = write_escaped_attr(f, color);
     f.push_str("\" stroke=\"");
     let _ = write_escaped_attr(f, bg);
     f.push_str("\" stroke-width=\"1.50\" class=\"fm-quadrant-point\"/><text x=\"");
-    let _ = AttributeValue::Number(label_x).write_value(f);
+    let _ = crate::attributes::write_number_into(f, label_x);
     f.push_str("\" y=\"");
-    let _ = AttributeValue::Number(label_y).write_value(f);
+    let _ = crate::attributes::write_number_into(f, label_y);
     f.push_str("\" text-anchor=\"start\" font-size=\"");
-    let _ = AttributeValue::Number(label_font_size).write_value(f);
+    let _ = crate::attributes::write_number_into(f, label_font_size);
     f.push_str("\" fill=\"");
     let _ = write_escaped_attr(f, text_fill);
     f.push_str("\" class=\"fm-quadrant-point-label\">");
@@ -3913,15 +3913,15 @@ fn write_gantt_bar_into(
     stroke: &str,
     type_class: &str,
 ) {
-    use crate::attributes::{AttributeValue, write_escaped_attr};
+    use crate::attributes::write_escaped_attr;
     f.push_str("<rect x=\"");
-    let _ = AttributeValue::Number(x).write_value(f);
+    let _ = crate::attributes::write_number_into(f, x);
     f.push_str("\" y=\"");
-    let _ = AttributeValue::Number(y).write_value(f);
+    let _ = crate::attributes::write_number_into(f, y);
     f.push_str("\" width=\"");
-    let _ = AttributeValue::Number(w).write_value(f);
+    let _ = crate::attributes::write_number_into(f, w);
     f.push_str("\" height=\"");
-    let _ = AttributeValue::Number(h).write_value(f);
+    let _ = crate::attributes::write_number_into(f, h);
     f.push_str("\" fill=\"");
     let _ = write_escaped_attr(f, fill);
     f.push_str("\" stroke=\"");
@@ -3944,13 +3944,13 @@ fn write_gantt_label_into(
     fill: &str,
     label: &str,
 ) {
-    use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
+    use crate::attributes::{write_escaped_attr, write_escaped_text};
     f.push_str("<text x=\"");
-    let _ = AttributeValue::Number(x).write_value(f);
+    let _ = crate::attributes::write_number_into(f, x);
     f.push_str("\" y=\"");
-    let _ = AttributeValue::Number(y).write_value(f);
+    let _ = crate::attributes::write_number_into(f, y);
     f.push_str("\" text-anchor=\"middle\" dominant-baseline=\"central\" font-size=\"");
-    let _ = AttributeValue::Number(font_size).write_value(f);
+    let _ = crate::attributes::write_number_into(f, font_size);
     f.push('"');
     if !embed {
         f.push_str(" font-family=\"");
@@ -4044,7 +4044,7 @@ fn render_gantt_svg(
     // bytes in the same per-task order (bar/milestone, then progress, then label) the `Element` children
     // serialized to.
     {
-        use crate::attributes::{AttributeValue, write_escaped_attr};
+        use crate::attributes::write_escaped_attr;
         let mut task_svg = String::new();
         for (node_idx, node_box) in layout.nodes.iter().enumerate() {
             let x = node_box.bounds.x + offset_x;
@@ -4108,13 +4108,13 @@ fn render_gantt_svg(
                 {
                     let progress_w = w * progress.clamp(0.0, 1.0);
                     task_svg.push_str("<rect x=\"");
-                    let _ = AttributeValue::Number(x).write_value(&mut task_svg);
+                    let _ = crate::attributes::write_number_into(&mut task_svg, x);
                     task_svg.push_str("\" y=\"");
-                    let _ = AttributeValue::Number(y).write_value(&mut task_svg);
+                    let _ = crate::attributes::write_number_into(&mut task_svg, y);
                     task_svg.push_str("\" width=\"");
-                    let _ = AttributeValue::Number(progress_w).write_value(&mut task_svg);
+                    let _ = crate::attributes::write_number_into(&mut task_svg, progress_w);
                     task_svg.push_str("\" height=\"");
-                    let _ = AttributeValue::Number(h).write_value(&mut task_svg);
+                    let _ = crate::attributes::write_number_into(&mut task_svg, h);
                     task_svg.push_str("\" fill=\"");
                     let _ = write_escaped_attr(&mut task_svg, fill);
                     task_svg
@@ -4188,11 +4188,11 @@ fn write_pie_text_into(
     class: &str,
     text: &str,
 ) {
-    use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
+    use crate::attributes::{write_escaped_attr, write_escaped_text};
     f.push_str("<text x=\"");
-    let _ = AttributeValue::Number(x).write_value(f);
+    let _ = crate::attributes::write_number_into(f, x);
     f.push_str("\" y=\"");
-    let _ = AttributeValue::Number(y).write_value(f);
+    let _ = crate::attributes::write_number_into(f, y);
     f.push_str("\" text-anchor=\"");
     f.push_str(anchor);
     f.push('"');
@@ -4205,7 +4205,7 @@ fn write_pie_text_into(
         f.push('"');
     }
     f.push_str(" font-size=\"");
-    let _ = AttributeValue::Number(font_size).write_value(f);
+    let _ = crate::attributes::write_number_into(f, font_size);
     f.push('"');
     if weight_600 {
         f.push_str(" font-weight=\"600\"");
@@ -4269,7 +4269,7 @@ fn render_pie_svg(
     // of ~4 `Element`s per slice + the legend group/box/title. Byte-identical: same element bytes/attr
     // order (`TextBuilder`/`Element::rect`/`circle`/`path`) in the same doc-child order; the wedge `<path
     // d>` keeps the same full-precision `format!`; label/legend `font-family` gated on `!embed`.
-    use crate::attributes::{AttributeValue, write_escaped_attr};
+    use crate::attributes::write_escaped_attr;
     let text_fill = theme.colors.text.as_str();
     let family = config.font_family.as_str();
     let embed = config.embed_theme_css;
@@ -4323,11 +4323,11 @@ fn render_pie_svg(
             have_prev_end = false;
         } else if (sweep - 2.0 * PI).abs() <= 0.0001 {
             pie_svg.push_str("<circle cx=\"");
-            let _ = AttributeValue::Number(cx).write_value(&mut pie_svg);
+            let _ = crate::attributes::write_number_into(&mut pie_svg, cx);
             pie_svg.push_str("\" cy=\"");
-            let _ = AttributeValue::Number(cy).write_value(&mut pie_svg);
+            let _ = crate::attributes::write_number_into(&mut pie_svg, cy);
             pie_svg.push_str("\" r=\"");
-            let _ = AttributeValue::Number(radius).write_value(&mut pie_svg);
+            let _ = crate::attributes::write_number_into(&mut pie_svg, radius);
             pie_svg.push_str("\" fill=\"");
             let _ = write_escaped_attr(&mut pie_svg, color);
             pie_svg.push_str("\" stroke=\"");
@@ -4404,15 +4404,15 @@ fn render_pie_svg(
     let legend_height = (pie_meta.slices.len() as f32 * 24.0 + 44.0).max(64.0);
 
     pie_svg.push_str("<g class=\"fm-pie-legend\"><rect x=\"");
-    let _ = AttributeValue::Number(legend_x).write_value(&mut pie_svg);
+    let _ = crate::attributes::write_number_into(&mut pie_svg, legend_x);
     pie_svg.push_str("\" y=\"");
-    let _ = AttributeValue::Number(legend_y).write_value(&mut pie_svg);
+    let _ = crate::attributes::write_number_into(&mut pie_svg, legend_y);
     pie_svg.push_str("\" width=\"");
-    let _ = AttributeValue::Number(legend_width).write_value(&mut pie_svg);
+    let _ = crate::attributes::write_number_into(&mut pie_svg, legend_width);
     pie_svg.push_str("\" height=\"");
-    let _ = AttributeValue::Number(legend_height).write_value(&mut pie_svg);
+    let _ = crate::attributes::write_number_into(&mut pie_svg, legend_height);
     pie_svg.push_str("\" rx=\"");
-    let _ = AttributeValue::Number(config.rounded_corners.max(6.0)).write_value(&mut pie_svg);
+    let _ = crate::attributes::write_number_into(&mut pie_svg, config.rounded_corners.max(6.0));
     pie_svg.push_str("\" fill=\"");
     let _ = write_escaped_attr(&mut pie_svg, &theme.colors.node_fill);
     pie_svg.push_str("\" stroke=\"");
@@ -4443,9 +4443,9 @@ fn render_pie_svg(
             slice.label.clone()
         };
         pie_svg.push_str("<rect x=\"");
-        let _ = AttributeValue::Number(legend_x + 14.0).write_value(&mut pie_svg);
+        let _ = crate::attributes::write_number_into(&mut pie_svg, legend_x + 14.0);
         pie_svg.push_str("\" y=\"");
-        let _ = AttributeValue::Number(row_y - 9.0).write_value(&mut pie_svg);
+        let _ = crate::attributes::write_number_into(&mut pie_svg, row_y - 9.0);
         pie_svg.push_str("\" width=\"12\" height=\"12\" rx=\"2\" fill=\"");
         let _ = write_escaped_attr(&mut pie_svg, color);
         pie_svg.push_str("\" stroke=\"");
@@ -4589,15 +4589,14 @@ fn render_xychart_svg(
             .iter()
             .all(|c| !c.contains('\n') && !c.contains('\r'));
     if labels_streamable {
-        use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
+        use crate::attributes::{write_escaped_attr, write_escaped_text};
         let mut y_text = String::new();
-        let _ = AttributeValue::Number(plot_bottom + 24.0).write_value(&mut y_text);
+        let _ = crate::attributes::write_number_into(&mut y_text, plot_bottom + 24.0);
         let mut fs_text = String::new();
-        let _ = AttributeValue::Number(clamp_font_size(
-            config.font_size * 0.74,
-            config.min_font_size,
-        ))
-        .write_value(&mut fs_text);
+        let _ = crate::attributes::write_number_into(
+            &mut fs_text,
+            clamp_font_size(config.font_size * 0.74, config.min_font_size),
+        );
         let mut esc_fill = String::new();
         let _ = write_escaped_attr(&mut esc_fill, &theme.colors.text);
         let mut x_text = String::new();
@@ -4605,7 +4604,7 @@ fn render_xychart_svg(
         for (index, category) in categories.iter().enumerate() {
             let x = plot_x + band_width * (index as f32 + 0.5);
             x_text.clear();
-            let _ = AttributeValue::Number(x).write_value(&mut x_text);
+            let _ = crate::attributes::write_number_into(&mut x_text, x);
             label_svg.push_str("<text x=\"");
             label_svg.push_str(&x_text);
             label_svg.push_str("\" y=\"");
@@ -4713,11 +4712,11 @@ fn render_xychart_svg(
         // the loop. Hoist those, format `x` once per tick (shared by x1/x2), and stream into one
         // `raw_svg` child — no span metadata here, so no gate. Byte-identical to the `Element` build
         // (attribute order x1,y1,x2,y2,stroke,stroke-width,class; `stroke-width="1"` = `1.0`).
-        use crate::attributes::{AttributeValue, write_escaped_attr};
+        use crate::attributes::write_escaped_attr;
         let mut y1_text = String::new();
-        let _ = AttributeValue::Number(plot_bottom).write_value(&mut y1_text);
+        let _ = crate::attributes::write_number_into(&mut y1_text, plot_bottom);
         let mut y2_text = String::new();
-        let _ = AttributeValue::Number(plot_bottom + tick_len).write_value(&mut y2_text);
+        let _ = crate::attributes::write_number_into(&mut y2_text, plot_bottom + tick_len);
         let mut esc_stroke = String::new();
         let _ = write_escaped_attr(&mut esc_stroke, &theme.colors.text);
         let mut x_text = String::new();
@@ -4725,7 +4724,7 @@ fn render_xychart_svg(
         for (index, _category) in categories.iter().enumerate() {
             let x = plot_x + band_width * (index as f32 + 0.5);
             x_text.clear();
-            let _ = AttributeValue::Number(x).write_value(&mut x_text);
+            let _ = crate::attributes::write_number_into(&mut x_text, x);
             tick_svg.push_str("<line x1=\"");
             tick_svg.push_str(&x_text);
             tick_svg.push_str("\" y1=\"");
@@ -4834,7 +4833,7 @@ fn render_xychart_svg(
                     // height, fill, fill-opacity, stroke, stroke-width, rx, class), same `write_value`
                     // number formatting, same `write_escaped_attr` for the colour. `fill-opacity="0.78"`
                     // and `stroke-width="1"` are the fixed serializations of `0.78`/`1.0`.
-                    use crate::attributes::{AttributeValue, write_escaped_attr};
+                    use crate::attributes::write_escaped_attr;
                     // Per-series invariants: the fill/stroke colour and the corner radius are identical
                     // for every bar, so escape/format them ONCE and reuse the bytes rather than
                     // re-escaping the colour twice + re-formatting `rx` per bar (write_escaped_attr was
@@ -4842,17 +4841,17 @@ fn render_xychart_svg(
                     let mut esc_color = String::new();
                     let _ = write_escaped_attr(&mut esc_color, color);
                     let mut rx_text = String::new();
-                    let _ = AttributeValue::Number(rx).write_value(&mut rx_text);
+                    let _ = crate::attributes::write_number_into(&mut rx_text, rx);
                     let mut bar_svg = String::new();
                     for node in series_nodes {
                         bar_svg.push_str("<rect x=\"");
-                        let _ = AttributeValue::Number(node.bounds.x + offset_x).write_value(&mut bar_svg);
+                        let _ = crate::attributes::write_number_into(&mut bar_svg, node.bounds.x + offset_x);
                         bar_svg.push_str("\" y=\"");
-                        let _ = AttributeValue::Number(node.bounds.y + offset_y).write_value(&mut bar_svg);
+                        let _ = crate::attributes::write_number_into(&mut bar_svg, node.bounds.y + offset_y);
                         bar_svg.push_str("\" width=\"");
-                        let _ = AttributeValue::Number(node.bounds.width).write_value(&mut bar_svg);
+                        let _ = crate::attributes::write_number_into(&mut bar_svg, node.bounds.width);
                         bar_svg.push_str("\" height=\"");
-                        let _ = AttributeValue::Number(node.bounds.height).write_value(&mut bar_svg);
+                        let _ = crate::attributes::write_number_into(&mut bar_svg, node.bounds.height);
                         bar_svg.push_str("\" fill=\"");
                         bar_svg.push_str(&esc_color);
                         bar_svg.push_str("\" fill-opacity=\"0.78\" stroke=\"");
@@ -4930,7 +4929,7 @@ fn render_xychart_svg(
                     // Stream the series point `<circle>`s (see the bar-`<rect>` streaming above). Same
                     // attribute order as the `Element` build (cx, cy, r, fill, stroke, stroke-width, class);
                     // `stroke-width="2"` is the fixed serialization of `2.0`. Byte-identical.
-                    use crate::attributes::{AttributeValue, write_escaped_attr};
+                    use crate::attributes::write_escaped_attr;
                     // Per-series invariants: fill (series colour) and stroke (theme background) are the
                     // same for every point — escape once, reuse. Only cx/cy/r vary. Byte-identical.
                     let mut esc_color = String::new();
@@ -4941,14 +4940,14 @@ fn render_xychart_svg(
                     for node in series_nodes {
                         let center = node.bounds.center();
                         point_svg.push_str("<circle cx=\"");
-                        let _ = AttributeValue::Number(center.x + offset_x).write_value(&mut point_svg);
+                        let _ = crate::attributes::write_number_into(&mut point_svg, center.x + offset_x);
                         point_svg.push_str("\" cy=\"");
-                        let _ = AttributeValue::Number(center.y + offset_y).write_value(&mut point_svg);
+                        let _ = crate::attributes::write_number_into(&mut point_svg, center.y + offset_y);
                         point_svg.push_str("\" r=\"");
-                        let _ = AttributeValue::Number(
+                        let _ = crate::attributes::write_number_into(
+                            &mut point_svg,
                             (node.bounds.width.min(node.bounds.height) / 2.0).max(3.5),
-                        )
-                        .write_value(&mut point_svg);
+                        );
                         point_svg.push_str("\" fill=\"");
                         point_svg.push_str(&esc_color);
                         point_svg.push_str("\" stroke=\"");
@@ -5333,7 +5332,7 @@ fn write_class_node_fragment_into(
     colors: &ThemeColors,
     user_classes: &str,
 ) {
-    use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
+    use crate::attributes::{write_escaped_attr, write_escaped_text};
     // <g id=".." class="fm-node fm-node-accent-N fm-node-shape-rect[ fm-node-user-…]" data-id=".." …>
     out.push_str("<g id=\"");
     fm_core::write_mermaid_node_element_id_into(out, node_id, node_index);
@@ -5351,15 +5350,15 @@ fn write_class_node_fragment_into(
     out.push_str("\" tabindex=\"0\">");
     // <rect x y width height rx fill="url(#fm-node-gradient)"/> — same attr order as the common fragment.
     out.push_str("<rect x=\"");
-    let _ = AttributeValue::Number(x).write_value(out);
+    let _ = crate::attributes::write_number_into(out, x);
     out.push_str("\" y=\"");
-    let _ = AttributeValue::Number(y).write_value(out);
+    let _ = crate::attributes::write_number_into(out, y);
     out.push_str("\" width=\"");
-    let _ = AttributeValue::Number(w).write_value(out);
+    let _ = crate::attributes::write_number_into(out, w);
     out.push_str("\" height=\"");
-    let _ = AttributeValue::Number(h).write_value(out);
+    let _ = crate::attributes::write_number_into(out, h);
     out.push_str("\" rx=\"");
-    let _ = AttributeValue::Number(rx).write_value(out);
+    let _ = crate::attributes::write_number_into(out, rx);
     out.push_str("\" fill=\"url(#fm-node-gradient)\"/>");
     write_class_compartments_into(out, node, meta, ir, x, y, w, h, font_size, config, colors);
     // <title>Node: {raw_label}, rectangle</title></g> — describe_node's Rect form, written piecewise.
@@ -5404,13 +5403,12 @@ fn write_special_fill_style_into(f: &mut String, special_fill: Option<&str>) {
 /// (`M{x0} {y0} L{x1} {y1} … Z`), and coords use `AttributeValue::Number::write_value`, which is bit-for-bit
 /// identical to `PathBuilder`'s `FmtNum` (both: `n as i32` round-trip → `write_int_into` else `write_fixed2`).
 fn write_polygon_shape_into(f: &mut String, points: &[(f32, f32)], special_fill: Option<&str>) {
-    use crate::attributes::AttributeValue;
     f.push_str("<path d=\"");
     for (i, &(px, py)) in points.iter().enumerate() {
         f.push_str(if i == 0 { "M" } else { " L" });
-        let _ = AttributeValue::Number(px).write_value(f);
+        let _ = crate::attributes::write_number_into(f, px);
         f.push(' ');
-        let _ = AttributeValue::Number(py).write_value(f);
+        let _ = crate::attributes::write_number_into(f, py);
     }
     f.push_str(" Z\" fill=\"url(#fm-node-gradient)\"");
     write_special_fill_style_into(f, special_fill);
@@ -5428,7 +5426,6 @@ fn write_cylinder_shape_into(
     h: f32,
     special_fill: Option<&str>,
 ) {
-    use crate::attributes::AttributeValue;
 
     let ry = h * 0.1;
     let rx = w / 2.0;
@@ -5437,41 +5434,41 @@ fn write_cylinder_shape_into(
     let right_x = x + w;
 
     f.push_str("<path d=\"M");
-    let _ = AttributeValue::Number(x).write_value(f);
+    let _ = crate::attributes::write_number_into(f, x);
     f.push(' ');
-    let _ = AttributeValue::Number(top_y).write_value(f);
+    let _ = crate::attributes::write_number_into(f, top_y);
     f.push_str(" A");
-    let _ = AttributeValue::Number(rx).write_value(f);
+    let _ = crate::attributes::write_number_into(f, rx);
     f.push(' ');
-    let _ = AttributeValue::Number(ry).write_value(f);
+    let _ = crate::attributes::write_number_into(f, ry);
     f.push_str(" 0 0 1 ");
-    let _ = AttributeValue::Number(right_x).write_value(f);
+    let _ = crate::attributes::write_number_into(f, right_x);
     f.push(' ');
-    let _ = AttributeValue::Number(top_y).write_value(f);
+    let _ = crate::attributes::write_number_into(f, top_y);
     f.push_str(" L");
-    let _ = AttributeValue::Number(right_x).write_value(f);
+    let _ = crate::attributes::write_number_into(f, right_x);
     f.push(' ');
-    let _ = AttributeValue::Number(bottom_y).write_value(f);
+    let _ = crate::attributes::write_number_into(f, bottom_y);
     f.push_str(" A");
-    let _ = AttributeValue::Number(rx).write_value(f);
+    let _ = crate::attributes::write_number_into(f, rx);
     f.push(' ');
-    let _ = AttributeValue::Number(ry).write_value(f);
+    let _ = crate::attributes::write_number_into(f, ry);
     f.push_str(" 0 0 0 ");
-    let _ = AttributeValue::Number(x).write_value(f);
+    let _ = crate::attributes::write_number_into(f, x);
     f.push(' ');
-    let _ = AttributeValue::Number(bottom_y).write_value(f);
+    let _ = crate::attributes::write_number_into(f, bottom_y);
     f.push_str(" Z M");
-    let _ = AttributeValue::Number(x).write_value(f);
+    let _ = crate::attributes::write_number_into(f, x);
     f.push(' ');
-    let _ = AttributeValue::Number(top_y).write_value(f);
+    let _ = crate::attributes::write_number_into(f, top_y);
     f.push_str(" A");
-    let _ = AttributeValue::Number(rx).write_value(f);
+    let _ = crate::attributes::write_number_into(f, rx);
     f.push(' ');
-    let _ = AttributeValue::Number(ry).write_value(f);
+    let _ = crate::attributes::write_number_into(f, ry);
     f.push_str(" 0 0 0 ");
-    let _ = AttributeValue::Number(right_x).write_value(f);
+    let _ = crate::attributes::write_number_into(f, right_x);
     f.push(' ');
-    let _ = AttributeValue::Number(top_y).write_value(f);
+    let _ = crate::attributes::write_number_into(f, top_y);
     f.push_str("\" fill=\"url(#fm-node-gradient)\"");
     write_special_fill_style_into(f, special_fill);
     f.push_str("/>");
@@ -5496,7 +5493,7 @@ fn write_subroutine_node_fragment_into(
     text_fill: &str,
     user_classes: &str,
 ) {
-    use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
+    use crate::attributes::{write_escaped_attr, write_escaped_text};
 
     out.push_str("<g id=\"");
     fm_core::write_mermaid_node_element_id_into(out, node_id, node_index);
@@ -5512,37 +5509,37 @@ fn write_subroutine_node_fragment_into(
     out.push_str("\" role=\"graphics-symbol\" aria-label=\"");
     let _ = write_escaped_attr(out, raw_label);
     out.push_str("\" tabindex=\"0\"><g><rect x=\"");
-    let _ = AttributeValue::Number(x).write_value(out);
+    let _ = crate::attributes::write_number_into(out, x);
     out.push_str("\" y=\"");
-    let _ = AttributeValue::Number(y).write_value(out);
+    let _ = crate::attributes::write_number_into(out, y);
     out.push_str("\" width=\"");
-    let _ = AttributeValue::Number(w).write_value(out);
+    let _ = crate::attributes::write_number_into(out, w);
     out.push_str("\" height=\"");
-    let _ = AttributeValue::Number(h).write_value(out);
+    let _ = crate::attributes::write_number_into(out, h);
     out.push_str("\" fill=\"url(#fm-node-gradient)\" rx=\"");
-    let _ = AttributeValue::Number(rx).write_value(out);
+    let _ = crate::attributes::write_number_into(out, rx);
     out.push_str("\"/><line x1=\"");
-    let _ = AttributeValue::Number(x + 8.0).write_value(out);
+    let _ = crate::attributes::write_number_into(out, x + 8.0);
     out.push_str("\" y1=\"");
-    let _ = AttributeValue::Number(y).write_value(out);
+    let _ = crate::attributes::write_number_into(out, y);
     out.push_str("\" x2=\"");
-    let _ = AttributeValue::Number(x + 8.0).write_value(out);
+    let _ = crate::attributes::write_number_into(out, x + 8.0);
     out.push_str("\" y2=\"");
-    let _ = AttributeValue::Number(y + h).write_value(out);
+    let _ = crate::attributes::write_number_into(out, y + h);
     out.push_str("\" stroke-width=\"1\"/><line x1=\"");
-    let _ = AttributeValue::Number(x + w - 8.0).write_value(out);
+    let _ = crate::attributes::write_number_into(out, x + w - 8.0);
     out.push_str("\" y1=\"");
-    let _ = AttributeValue::Number(y).write_value(out);
+    let _ = crate::attributes::write_number_into(out, y);
     out.push_str("\" x2=\"");
-    let _ = AttributeValue::Number(x + w - 8.0).write_value(out);
+    let _ = crate::attributes::write_number_into(out, x + w - 8.0);
     out.push_str("\" y2=\"");
-    let _ = AttributeValue::Number(y + h).write_value(out);
+    let _ = crate::attributes::write_number_into(out, y + h);
     out.push_str("\" stroke-width=\"1\"/></g><text x=\"");
-    let _ = AttributeValue::Number(text_x).write_value(out);
+    let _ = crate::attributes::write_number_into(out, text_x);
     out.push_str("\" y=\"");
-    let _ = AttributeValue::Number(text_y).write_value(out);
+    let _ = crate::attributes::write_number_into(out, text_y);
     out.push_str("\" text-anchor=\"middle\" font-size=\"");
-    let _ = AttributeValue::Number(font_size).write_value(out);
+    let _ = crate::attributes::write_number_into(out, font_size);
     out.push_str("\" fill=\"");
     let _ = write_escaped_attr(out, text_fill);
     out.push_str("\">");
@@ -5638,7 +5635,7 @@ fn write_common_node_fragment_into<const A11Y: bool>(
     shape: fm_core::NodeShape,
     special_fill: Option<&str>,
 ) {
-    use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
+    use crate::attributes::{write_escaped_attr, write_escaped_text};
     // <g id=".." class="fm-node fm-node-accent-N fm-node-shape-rect[ fm-node-user-…]" data-id=".." …>
     f.push_str("<g id=\"");
     // The node id is `fm-node-[{sanitized}-]{index}` — only `[a-z0-9-]`, never an escapable byte — so
@@ -5676,11 +5673,11 @@ fn write_common_node_fragment_into<const A11Y: bool>(
     match shape {
         fm_core::NodeShape::Circle => {
             f.push_str("<circle cx=\"");
-            let _ = AttributeValue::Number(x + w / 2.0).write_value(f);
+            let _ = crate::attributes::write_number_into(f, x + w / 2.0);
             f.push_str("\" cy=\"");
-            let _ = AttributeValue::Number(y + h / 2.0).write_value(f);
+            let _ = crate::attributes::write_number_into(f, y + h / 2.0);
             f.push_str("\" r=\"");
-            let _ = AttributeValue::Number(w.min(h) / 2.0).write_value(f);
+            let _ = crate::attributes::write_number_into(f, w.min(h) / 2.0);
             f.push_str("\" fill=\"url(#fm-node-gradient)\"");
             write_special_fill_style_into(f, special_fill);
             f.push_str("/>");
@@ -5785,15 +5782,15 @@ fn write_common_node_fragment_into<const A11Y: bool>(
         _ => {
             // Rect / Rounded / Stadium — all rect elements, differing only in `rx` (set by the caller).
             f.push_str("<rect x=\"");
-            let _ = AttributeValue::Number(x).write_value(f);
+            let _ = crate::attributes::write_number_into(f, x);
             f.push_str("\" y=\"");
-            let _ = AttributeValue::Number(y).write_value(f);
+            let _ = crate::attributes::write_number_into(f, y);
             f.push_str("\" width=\"");
-            let _ = AttributeValue::Number(w).write_value(f);
+            let _ = crate::attributes::write_number_into(f, w);
             f.push_str("\" height=\"");
-            let _ = AttributeValue::Number(h).write_value(f);
+            let _ = crate::attributes::write_number_into(f, h);
             f.push_str("\" rx=\"");
-            let _ = AttributeValue::Number(rx).write_value(f);
+            let _ = crate::attributes::write_number_into(f, rx);
             f.push_str("\" fill=\"url(#fm-node-gradient)\"");
             write_special_fill_style_into(f, special_fill);
             f.push_str("/>");
@@ -5801,11 +5798,11 @@ fn write_common_node_fragment_into<const A11Y: bool>(
     }
     // <text x y text-anchor="middle" font-size=".." fill="..">label</text>
     f.push_str("<text x=\"");
-    let _ = AttributeValue::Number(text_x).write_value(f);
+    let _ = crate::attributes::write_number_into(f, text_x);
     f.push_str("\" y=\"");
-    let _ = AttributeValue::Number(text_y).write_value(f);
+    let _ = crate::attributes::write_number_into(f, text_y);
     f.push_str("\" text-anchor=\"middle\" font-size=\"");
-    let _ = AttributeValue::Number(font_size).write_value(f);
+    let _ = crate::attributes::write_number_into(f, font_size);
     f.push_str("\" fill=\"");
     let _ = write_escaped_attr(f, text_fill);
     f.push_str("\">");
@@ -5861,7 +5858,7 @@ fn write_requirement_node_fragment_into(
     config: &SvgRenderConfig,
     colors: &ThemeColors,
 ) {
-    use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
+    use crate::attributes::{write_escaped_attr, write_escaped_text};
 
     out.push_str("<g id=\"");
     fm_core::write_mermaid_node_element_id_into(out, node_id, node_index);
@@ -5891,15 +5888,15 @@ fn write_requirement_node_fragment_into(
     out.push_str("\" tabindex=\"0\">");
 
     out.push_str("<rect x=\"");
-    let _ = AttributeValue::Number(x).write_value(out);
+    let _ = crate::attributes::write_number_into(out, x);
     out.push_str("\" y=\"");
-    let _ = AttributeValue::Number(y).write_value(out);
+    let _ = crate::attributes::write_number_into(out, y);
     out.push_str("\" width=\"");
-    let _ = AttributeValue::Number(w).write_value(out);
+    let _ = crate::attributes::write_number_into(out, w);
     out.push_str("\" height=\"");
-    let _ = AttributeValue::Number(h).write_value(out);
+    let _ = crate::attributes::write_number_into(out, h);
     out.push_str("\" rx=\"");
-    let _ = AttributeValue::Number(rx).write_value(out);
+    let _ = crate::attributes::write_number_into(out, rx);
     out.push_str("\" fill=\"url(#fm-node-gradient)\"");
     if let Some(fill) = requirement_risk_fill(meta) {
         out.push_str(" style=\"fill: ");
@@ -5932,11 +5929,11 @@ fn write_requirement_node_fragment_into(
     }
 
     out.push_str("<text x=\"");
-    let _ = AttributeValue::Number(cx).write_value(out);
+    let _ = crate::attributes::write_number_into(out, cx);
     out.push_str("\" y=\"");
-    let _ = AttributeValue::Number(text_y).write_value(out);
+    let _ = crate::attributes::write_number_into(out, text_y);
     out.push_str("\" text-anchor=\"middle\" font-size=\"");
-    let _ = AttributeValue::Number(font_size).write_value(out);
+    let _ = crate::attributes::write_number_into(out, font_size);
     out.push_str("\" fill=\"");
     let _ = write_escaped_attr(out, &colors.text);
     out.push_str("\">");
@@ -7487,15 +7484,15 @@ fn write_class_text_into(
     fill: &str,
     text: &str,
 ) {
-    use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
+    use crate::attributes::{write_escaped_attr, write_escaped_text};
     f.push_str("<text x=\"");
-    let _ = AttributeValue::Number(x).write_value(f);
+    let _ = crate::attributes::write_number_into(f, x);
     f.push_str("\" y=\"");
-    let _ = AttributeValue::Number(y).write_value(f);
+    let _ = crate::attributes::write_number_into(f, y);
     f.push_str("\" text-anchor=\"");
     f.push_str(anchor);
     f.push_str("\" font-size=\"");
-    let _ = AttributeValue::Number(font_size).write_value(f);
+    let _ = crate::attributes::write_number_into(f, font_size);
     f.push('"');
     f.push_str(extra);
     f.push_str(" fill=\"");
@@ -7554,13 +7551,13 @@ fn write_req_subtitle_body_into(
     class: &str,
     write_body: impl FnOnce(&mut String),
 ) {
-    use crate::attributes::{AttributeValue, write_escaped_attr};
+    use crate::attributes::write_escaped_attr;
     f.push_str("<text x=\"");
-    let _ = AttributeValue::Number(x).write_value(f);
+    let _ = crate::attributes::write_number_into(f, x);
     f.push_str("\" y=\"");
-    let _ = AttributeValue::Number(y).write_value(f);
+    let _ = crate::attributes::write_number_into(f, y);
     f.push_str("\" text-anchor=\"middle\" dominant-baseline=\"central\" font-size=\"");
-    let _ = AttributeValue::Number(font_size).write_value(f);
+    let _ = crate::attributes::write_number_into(f, font_size);
     f.push('"');
     f.push_str(before_fill);
     f.push_str(" fill=\"");
@@ -7577,15 +7574,14 @@ fn write_req_subtitle_body_into(
 /// Stream a class-compartment separator `<line>` byte-identical to the slow path's `Element::Line` under
 /// embedded CSS (stroke is CSS-driven, so absent inline): `x1 y1 x2 y2 stroke-width="1"`.
 fn write_class_separator_into(f: &mut String, x1: f32, y: f32, x2: f32) {
-    use crate::attributes::AttributeValue;
     f.push_str("<line x1=\"");
-    let _ = AttributeValue::Number(x1).write_value(f);
+    let _ = crate::attributes::write_number_into(f, x1);
     f.push_str("\" y1=\"");
-    let _ = AttributeValue::Number(y).write_value(f);
+    let _ = crate::attributes::write_number_into(f, y);
     f.push_str("\" x2=\"");
-    let _ = AttributeValue::Number(x2).write_value(f);
+    let _ = crate::attributes::write_number_into(f, x2);
     f.push_str("\" y2=\"");
-    let _ = AttributeValue::Number(y).write_value(f);
+    let _ = crate::attributes::write_number_into(f, y);
     f.push_str("\" stroke-width=\"1\"/>");
 }
 
@@ -8842,7 +8838,7 @@ fn write_common_edge_path_tail_with_markers_into<const EDGE_ID: bool>(
 ) {
     use crate::attributes::{AttributeValue, write_escaped_attr};
     f.push_str("\" stroke-width=\"");
-    let _ = AttributeValue::Number(stroke_width).write_value(f);
+    let _ = crate::attributes::write_number_into(f, stroke_width);
     f.push_str("\" class=\"fm-edge ");
     f.push_str(style_class);
     f.push_str("\" data-fm-edge-id=\"");
@@ -9396,23 +9392,23 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
                 marker_end_val,
             );
             f.push_str("<rect x=\"");
-            let _ = AttributeValue::Number(lx - label_width / 2.0).write_value(&mut f);
+            let _ = crate::attributes::write_number_into(&mut f, lx - label_width / 2.0);
             f.push_str("\" y=\"");
-            let _ = AttributeValue::Number(ly - label_height / 2.0 - 1.0).write_value(&mut f);
+            let _ = crate::attributes::write_number_into(&mut f, ly - label_height / 2.0 - 1.0);
             f.push_str("\" width=\"");
-            let _ = AttributeValue::Number(label_width).write_value(&mut f);
+            let _ = crate::attributes::write_number_into(&mut f, label_width);
             f.push_str("\" height=\"");
-            let _ = AttributeValue::Number(label_height).write_value(&mut f);
+            let _ = crate::attributes::write_number_into(&mut f, label_height);
             f.push_str("\" fill=\"");
             let _ = write_escaped_attr(&mut f, &colors.background);
             f.push_str("\" stroke=\"");
             let _ = write_escaped_attr(&mut f, &colors.cluster_stroke);
             f.push_str("\" stroke-width=\"0.75\" rx=\"6\" ry=\"6\"/><text x=\"");
-            let _ = AttributeValue::Number(lx).write_value(&mut f);
+            let _ = crate::attributes::write_number_into(&mut f, lx);
             f.push_str("\" y=\"");
-            let _ = AttributeValue::Number(start_y).write_value(&mut f);
+            let _ = crate::attributes::write_number_into(&mut f, start_y);
             f.push_str("\" text-anchor=\"middle\" font-size=\"");
-            let _ = AttributeValue::Number(label_font_size).write_value(&mut f);
+            let _ = crate::attributes::write_number_into(&mut f, label_font_size);
             f.push_str("\" fill=\"");
             let _ = write_escaped_attr(&mut f, &colors.text);
             f.push_str("\" class=\"edge-label\">");
