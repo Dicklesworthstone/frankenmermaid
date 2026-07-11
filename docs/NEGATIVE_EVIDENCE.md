@@ -951,6 +951,16 @@
   xychart/50 −11.6%, /200 −26.7%, /400 −28.1%**; wall −27%. **Cumulative xychart/400 ≈ −55%** across
   marker-stream + hoist + tick-stream. REMAINING on Element: category/axis `TextBuilder` labels + the 5
   y-gridlines/tick-labels (small); text streaming is the involved part left.
+- **FOLLOW-UP 3 (faef9fd): stream the 400 category `<text>` labels — the single biggest remaining cost.**
+  TextBuilder→Element (Element + content child + 6 attrs + write_into + alloc + drop) per label. Streamed
+  into one `raw_svg`, gated on `embed_theme_css && all-single-line` (no per-label font-family, no tspan).
+  Text streaming safe because Element's `.content` serializes via `write_escaped_text` (element.rs:653) —
+  `write_escaped_text(category)` is byte-identical for ANY category incl. special chars (node fast-path
+  already relies on this). Attr order x,y,text-anchor,font-size,fill,class. **min-of-8 instr xychart/50
+  −15.8%, /200 −45.5%, /400 −49.0%; wall MEDIAN (9-rep) 185k→98k ns (−47.3%).** ⭐**CUMULATIVE xychart/400
+  ≈ −77%** across markers+hoist+ticks+labels. Text streaming IS tractable when the content escaper ==
+  `write_escaped_text`; gate on `embed_theme_css` (font-family) + single-line (tspan) + the call-site's
+  fixed options (baseline/weight/style).
 
 ## Kept Wins Also Recorded Here By Request
 
