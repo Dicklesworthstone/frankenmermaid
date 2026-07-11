@@ -10357,7 +10357,6 @@ fn bk_upper_neighbours(
 /// - `root[v]` is the root of the block containing v.
 /// - `align[v]` is the next node in the block chain; `align[v] == v` at the terminal.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn bk_vertical_alignment(
     n: usize,
     adjacency: &[BTreeSet<usize>],
