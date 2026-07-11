@@ -582,6 +582,10 @@ impl Filter {
 /// Builder for the SVG defs section.
 #[derive(Debug, Clone, Default)]
 pub struct DefsBuilder {
+    /// Pre-serialized marker fragment (emitted by this crate's own marker serializer), rendered in
+    /// the MARKERS slot ahead of `markers`. Lets a caller stream a memoized marker set in place of
+    /// per-marker `.marker()` children, byte-identically.
+    raw_markers: Option<String>,
     markers: Vec<ArrowheadMarker>,
     gradients: Vec<Gradient>,
     filters: Vec<Filter>,
@@ -599,6 +603,18 @@ impl DefsBuilder {
     #[must_use]
     pub fn marker(mut self, marker: ArrowheadMarker) -> Self {
         self.markers.push(marker);
+        self
+    }
+
+    /// Insert a pre-serialized arrowhead-marker fragment in the MARKERS slot — serialized before
+    /// gradients/filters/custom, exactly where per-marker `.marker()` children would appear. The
+    /// fragment must be markup this crate's own marker serializer produced (a concatenation of
+    /// `ArrowheadMarker::…().to_element()` renders), so the output is byte-identical to adding those
+    /// markers one at a time. Used to stream a memoized marker set (the build+serialize of the
+    /// 12-marker set is ~6 µs and is a pure function of the edge color + fancy flag).
+    #[must_use]
+    pub fn raw_markers(mut self, svg: String) -> Self {
+        self.raw_markers = Some(svg);
         self
     }
 
@@ -626,7 +642,8 @@ impl DefsBuilder {
     /// Check if the defs section is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.markers.is_empty()
+        self.raw_markers.is_none()
+            && self.markers.is_empty()
             && self.gradients.is_empty()
             && self.filters.is_empty()
             && self.custom_elements.is_empty()
@@ -636,6 +653,12 @@ impl DefsBuilder {
     #[must_use]
     pub fn to_element(&self) -> Element {
         let mut defs = Element::new(crate::element::ElementKind::Defs);
+
+        // The pre-serialized marker fragment occupies the markers slot (before gradients/filters/
+        // custom), byte-identical to the per-marker children it replaces.
+        if let Some(ref raw) = self.raw_markers {
+            defs = defs.child(Element::raw_svg(raw.clone()));
+        }
 
         for marker in &self.markers {
             defs = defs.child(marker.to_element());

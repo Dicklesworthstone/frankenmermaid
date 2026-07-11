@@ -37,6 +37,7 @@ pub use transform::{Transform, TransformBuilder};
 use std::{
     borrow::Cow,
     collections::{BTreeMap, HashMap},
+    sync::OnceLock,
 };
 
 use fm_core::{
@@ -732,6 +733,65 @@ fn minify_css(css: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| css.to_string())
 }
 
+/// The default-preset theme's edge color. The arrowhead-marker `<defs>` for this color are memoized
+/// (see [`marker_defs_body`]). Pinned to the preset by `default_edge_color_matches_preset`.
+const DEFAULT_EDGE_COLOR: &str = "#94a3b8";
+
+/// Serialize the arrowhead-marker `<defs>` children for `edge_color` EXACTLY as the per-marker
+/// `ArrowheadMarker::…(id, edge_color).to_element()` sequence (same order + `emit_fancy` gating) that
+/// both render backends add via `DefsBuilder::marker`. Byte-identical to those children because it
+/// calls the same `Element::write_to_string`.
+fn build_marker_defs_body(edge_color: &str, emit_fancy: bool) -> String {
+    use crate::defs::MarkerOrient;
+    let mut s = String::new();
+    let push = |s: &mut String, m: ArrowheadMarker| m.to_element().write_to_string(s);
+    push(&mut s, ArrowheadMarker::standard("arrow-end", edge_color));
+    if emit_fancy {
+        push(&mut s, ArrowheadMarker::filled("arrow-filled", edge_color));
+    }
+    push(&mut s, ArrowheadMarker::open("arrow-open", edge_color));
+    if emit_fancy {
+        push(&mut s, ArrowheadMarker::half_top("arrow-half-top", edge_color));
+        push(&mut s, ArrowheadMarker::half_bottom("arrow-half-bottom", edge_color));
+        push(&mut s, ArrowheadMarker::stick_top("arrow-stick-top", edge_color));
+        push(&mut s, ArrowheadMarker::stick_bottom("arrow-stick-bottom", edge_color));
+        push(
+            &mut s,
+            ArrowheadMarker::standard("arrow-start", edge_color)
+                .with_orient(MarkerOrient::AutoStartReverse),
+        );
+        push(
+            &mut s,
+            ArrowheadMarker::filled("arrow-start-filled", edge_color)
+                .with_orient(MarkerOrient::AutoStartReverse),
+        );
+        push(&mut s, ArrowheadMarker::circle_marker("arrow-circle", edge_color));
+        push(&mut s, ArrowheadMarker::cross_marker("arrow-cross", edge_color));
+        push(&mut s, ArrowheadMarker::diamond_marker("arrow-diamond", edge_color));
+    }
+    s
+}
+
+/// The arrowhead-marker `<defs>` body for `(edge_color, emit_fancy)`, memoized for the default theme.
+///
+/// Building + serializing the marker set is ~1 µs (2-marker flowchart) to ~6 µs (12-marker non-
+/// flowchart) and is a pure function of `(edge_color, emit_fancy)` — a fixed per-render cost paid on
+/// every diagram. The overwhelmingly common default theme is memoized via process-global `OnceLock`s
+/// built once from the real markers (byte-identical by construction, no source drift, no unbounded
+/// cache); custom themes build fresh (rare). The returned body is streamed as one
+/// `DefsBuilder::raw_markers`, byte-identical to the per-marker children it replaces.
+fn marker_defs_body(edge_color: &str, emit_fancy: bool) -> String {
+    if edge_color == DEFAULT_EDGE_COLOR {
+        static BASIC: OnceLock<String> = OnceLock::new();
+        static FANCY: OnceLock<String> = OnceLock::new();
+        let cell = if emit_fancy { &FANCY } else { &BASIC };
+        return cell
+            .get_or_init(|| build_marker_defs_body(edge_color, emit_fancy))
+            .clone();
+    }
+    build_marker_defs_body(edge_color, emit_fancy)
+}
+
 /// Render a target-agnostic scene to SVG string with custom configuration.
 #[must_use]
 pub fn render_scene_to_svg(scene: &RenderScene, config: &SvgRenderConfig) -> String {
@@ -1003,34 +1063,11 @@ fn render_scene_document_with_ir(
                 .any(|edge| !arrow_uses_only_basic_markers(edge.arrow))
     });
     let edge_color = &theme.colors.edge;
-    defs = defs.marker(ArrowheadMarker::standard("arrow-end", edge_color));
-    if emit_fancy_markers {
-        defs = defs.marker(ArrowheadMarker::filled("arrow-filled", edge_color));
-    }
-    defs = defs.marker(ArrowheadMarker::open("arrow-open", edge_color));
-    if emit_fancy_markers {
-        defs = defs.marker(ArrowheadMarker::half_top("arrow-half-top", edge_color));
-        defs = defs.marker(ArrowheadMarker::half_bottom(
-            "arrow-half-bottom",
-            edge_color,
-        ));
-        defs = defs.marker(ArrowheadMarker::stick_top("arrow-stick-top", edge_color));
-        defs = defs.marker(ArrowheadMarker::stick_bottom(
-            "arrow-stick-bottom",
-            edge_color,
-        ));
-        defs = defs.marker(
-            ArrowheadMarker::standard("arrow-start", edge_color)
-                .with_orient(crate::defs::MarkerOrient::AutoStartReverse),
-        );
-        defs = defs.marker(
-            ArrowheadMarker::filled("arrow-start-filled", edge_color)
-                .with_orient(crate::defs::MarkerOrient::AutoStartReverse),
-        );
-        defs = defs.marker(ArrowheadMarker::circle_marker("arrow-circle", edge_color));
-        defs = defs.marker(ArrowheadMarker::cross_marker("arrow-cross", edge_color));
-        defs = defs.marker(ArrowheadMarker::diamond_marker("arrow-diamond", edge_color));
-    }
+    // The 2- (basic) or 12-marker (fancy) arrowhead `<defs>` — a pure function of the edge color and
+    // `emit_fancy_markers`, memoized for the default theme (see `marker_defs_body`). Streamed in the
+    // markers slot so the output is byte-identical to the per-marker `.marker()` children it replaces,
+    // skipping the ~1-6 µs of Element construction + serialization rebuilt on every render.
+    defs = defs.raw_markers(marker_defs_body(edge_color, emit_fancy_markers));
 
     let mut clip_defs = Vec::new();
     let mut clip_id_counter = 0usize;
@@ -2324,34 +2361,11 @@ fn render_layout_to_svg(
             .iter()
             .any(|edge| !arrow_uses_only_basic_markers(edge.arrow));
     let edge_color = &theme.colors.edge;
-    defs = defs.marker(ArrowheadMarker::standard("arrow-end", edge_color));
-    if emit_fancy_markers {
-        defs = defs.marker(ArrowheadMarker::filled("arrow-filled", edge_color));
-    }
-    defs = defs.marker(ArrowheadMarker::open("arrow-open", edge_color));
-    if emit_fancy_markers {
-        defs = defs.marker(ArrowheadMarker::half_top("arrow-half-top", edge_color));
-        defs = defs.marker(ArrowheadMarker::half_bottom(
-            "arrow-half-bottom",
-            edge_color,
-        ));
-        defs = defs.marker(ArrowheadMarker::stick_top("arrow-stick-top", edge_color));
-        defs = defs.marker(ArrowheadMarker::stick_bottom(
-            "arrow-stick-bottom",
-            edge_color,
-        ));
-        defs = defs.marker(
-            ArrowheadMarker::standard("arrow-start", edge_color)
-                .with_orient(crate::defs::MarkerOrient::AutoStartReverse),
-        );
-        defs = defs.marker(
-            ArrowheadMarker::filled("arrow-start-filled", edge_color)
-                .with_orient(crate::defs::MarkerOrient::AutoStartReverse),
-        );
-        defs = defs.marker(ArrowheadMarker::circle_marker("arrow-circle", edge_color));
-        defs = defs.marker(ArrowheadMarker::cross_marker("arrow-cross", edge_color));
-        defs = defs.marker(ArrowheadMarker::diamond_marker("arrow-diamond", edge_color));
-    }
+    // The 2- (basic) or 12-marker (fancy) arrowhead `<defs>` — a pure function of the edge color and
+    // `emit_fancy_markers`, memoized for the default theme (see `marker_defs_body`). Streamed in the
+    // markers slot so the output is byte-identical to the per-marker `.marker()` children it replaces,
+    // skipping the ~1-6 µs of Element construction + serialization rebuilt on every render.
+    defs = defs.raw_markers(marker_defs_body(edge_color, emit_fancy_markers));
 
     // Add drop shadow filter if enabled. Skip the `<filter id="drop-shadow">` def when the theme
     // CSS is embedded: its only referrer is the inline `filter="url(#drop-shadow)"` on node shapes,
@@ -11881,6 +11895,70 @@ mod tests {
             at = id_end;
         }
         assert!(checked >= 1, "expected at least the arrow-end marker");
+    }
+
+    #[test]
+    fn default_edge_color_matches_preset() {
+        // The memoized-marker fast path in `marker_defs_body` is keyed on this literal; if the preset
+        // edge color ever changes, the default theme silently falls to the build-fresh path (still
+        // correct, just slower) — this pins the two together so that regression is caught.
+        assert_eq!(
+            Theme::from_preset(ThemePreset::Default).colors.edge,
+            DEFAULT_EDGE_COLOR
+        );
+    }
+
+    #[test]
+    fn marker_defs_body_streams_byte_identical() {
+        use crate::defs::{DefsBuilder, MarkerOrient};
+        // Reproduce the exact per-marker `.marker()` sequence both render backends used, then assert
+        // the streamed `raw_markers(marker_defs_body(..))` <defs> is byte-for-byte identical — for the
+        // default (memoized) color and a custom (build-fresh) color, basic and fancy, and with a
+        // trailing filter + custom element to prove the markers-slot ordering is preserved.
+        for &fancy in &[false, true] {
+            for edge in [DEFAULT_EDGE_COLOR, "#ff0000"] {
+                let mut old = DefsBuilder::new().marker(ArrowheadMarker::standard("arrow-end", edge));
+                if fancy {
+                    old = old.marker(ArrowheadMarker::filled("arrow-filled", edge));
+                }
+                old = old.marker(ArrowheadMarker::open("arrow-open", edge));
+                if fancy {
+                    old = old
+                        .marker(ArrowheadMarker::half_top("arrow-half-top", edge))
+                        .marker(ArrowheadMarker::half_bottom("arrow-half-bottom", edge))
+                        .marker(ArrowheadMarker::stick_top("arrow-stick-top", edge))
+                        .marker(ArrowheadMarker::stick_bottom("arrow-stick-bottom", edge))
+                        .marker(
+                            ArrowheadMarker::standard("arrow-start", edge)
+                                .with_orient(MarkerOrient::AutoStartReverse),
+                        )
+                        .marker(
+                            ArrowheadMarker::filled("arrow-start-filled", edge)
+                                .with_orient(MarkerOrient::AutoStartReverse),
+                        )
+                        .marker(ArrowheadMarker::circle_marker("arrow-circle", edge))
+                        .marker(ArrowheadMarker::cross_marker("arrow-cross", edge))
+                        .marker(ArrowheadMarker::diamond_marker("arrow-diamond", edge));
+                }
+                let new = DefsBuilder::new().raw_markers(marker_defs_body(edge, fancy));
+                assert_eq!(
+                    old.to_element().render(),
+                    new.to_element().render(),
+                    "markers-only edge={edge} fancy={fancy}"
+                );
+
+                // Trailing filter + custom: markers must still serialize before them in both.
+                let trailer = |d: DefsBuilder| {
+                    d.filter(crate::defs::Filter::drop_shadow("shadow", 2.0, 2.0, 4.0, 0.3))
+                        .custom(crate::element::Element::text())
+                };
+                assert_eq!(
+                    trailer(old).to_element().render(),
+                    trailer(new).to_element().render(),
+                    "markers+trailer edge={edge} fancy={fancy}"
+                );
+            }
+        }
     }
 
     #[test]

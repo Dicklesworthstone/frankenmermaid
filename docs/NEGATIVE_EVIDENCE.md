@@ -12552,3 +12552,24 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   ship the instant rch admits: `cargo test -p fm-render-svg` → null-controlled A/B on `er_stages` → commit.
   LEVER (general): a per-render Element-tree build whose output is a pure function of a few config values →
   serialize once + memoize (OnceLock for the common key), stream via a raw fragment in the correct defs slot.
+
+### WIN (shipped from the held frontier): arrowhead-marker `<defs>` memoization — verified when rch recovered (2026-07-11)
+
+- **Follow-up to the FRONTIER+HOLD above.** rch recovered after ~35 min of `hard_preflight=1`; the held lever was
+  verified and landed. `marker_defs_body` serializes the exact per-marker sequence once, memoizes the DEFAULT theme
+  via process-global `OnceLock`s (built from the real markers), and streams the body through the new
+  `DefsBuilder::raw_markers` (markers slot, before gradients/filters/custom).
+- **Byte-identical:** `cargo test -p fm-render-svg` = **249 passed, 0 failed** (247 prior + 2 new parity tests:
+  `marker_defs_body_streams_byte_identical` — streamed `<defs>` == per-marker render for default+custom color ×
+  basic+fancy, with trailing filter+custom to pin the markers-slot ordering; `default_edge_color_matches_preset`)
+  incl golden_svg. Clippy `-p fm-render-svg --no-deps -D warnings` clean.
+- **Median gate = the same-invocation interleaved micro-bench** (`defs_ab`, noop-clone null): fresh build ~6.0 µs
+  (12-marker) / ~1.0 µs (2-marker) vs memoized cache-clone ~70 ns → the fixed per-render marker cost drops to
+  ~140 ns (double-clone: `get_or_init().clone()` + `to_element`'s `raw.clone()`; ~40× less, still vastly < rebuild).
+- ⚠️**Whole-render 2-invocation A/B was WORKER-VARIANCE-CONTAMINATED and NOT relied upon:** candidate (benched right
+  at rch recovery, degraded worker) vs baseline (later, healthy worker) showed EVERY bench — including the
+  byte-identical parse/layout NULLS — 2.3–3.6× "slower", which is mechanically impossible from a markers-only
+  change → the runs landed on wildly different-speed workers; the ~1-2% render signal is swamped. This re-confirms
+  the META rule: a 2-invocation rch A/B is invalid when the fleet is degraded; the same-invocation interleave +
+  byte-identity + monotonic-less-work is the trustworthy basis (as with the theme-CSS strip win). ⭐The marker set
+  is a fixed per-render cost, so it's the SAME absolute saving at every N (largest relative on small diagrams).
