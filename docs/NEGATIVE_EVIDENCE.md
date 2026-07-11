@@ -12483,3 +12483,36 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   The candidate was manually removed, including its focused test, and both parser files again match the exact ORIG
   hashes above. The shipped parser and therefore its SVG bytes are byte-identical to cfd62ee; no golden was blessed.
   bd-1buv.2.1 is closed as rejected.
+### WIN: allocation-free theme-CSS strip — `str::replace`×4 → `find`+`drain`×4, strip 27.6% cheaper (2026-07-10)
+
+- **Profile-first:** the head-to-head shows our WEAKEST speedups are the SMALL diagrams (`sequence_20` 236x,
+  `flowchart_small_10` 410x vs the 800-4400x on large ones) — realistic mermaid diagrams are 5-30 nodes, where the
+  ~9 KB `<style>` fixed overhead dominates. A `perf record` of `render` on a 10-node flowchart put
+  `__memmove_avx_unaligned_erms` at ~8% self. Reading the fixed-overhead path, `strip_unused_theme_css` did up to
+  FOUR sequential `*css = css.replace(BLOCK, "")` calls per render (cluster block, cluster `:root` vars, node-shape
+  block, edge-style block) — and on the overwhelmingly common flowchart (no clusters / special shapes / dashed-thick
+  edges) ALL FOUR fire, so every render paid 4 heap allocations + 4 full-buffer copies-and-drops of the multi-KB CSS.
+- **Lever (one):** a `strip_css_block(css, block)` helper doing `if let Some(p)=css.find(block){ css.drain(p..p+len) }`
+  — `str::replace` ALWAYS heap-allocates a fresh String and copies the retained bytes in; `drain` shifts only the tail
+  left in place (0 alloc, 0 free). Byte-identical because each block is emitted EXACTLY once by `Theme::to_svg_style`
+  (first-occurrence == all-occurrences == what `replace` removed); a non-matching block is a no-op (`find`→`None`),
+  preserving the safe-if-drifts contract. Runs for EVERY `embed_theme_css` render (all diagram types), not just
+  flowcharts.
+- **Byte-identical:** 247 fm-render-svg lib tests pass (golden_svg lives in-crate); direct byte-diff of the rebuilt
+  profharness `dump` vs the pre-edit binary — flowchart/subg/diamond/flowx all IDENTICAL; and an isolated harness
+  asserted `strip_old(css)==strip_new(css)` on the reconstructed 7.2 KB CSS before timing.
+- **Measurement (SAME-INVOCATION interleaved micro-bench — the load-robust gate; noop clone-floor 110 ns as paired
+  null):** strip-only median (noop subtracted) **old(replace×4)=11171/11290/11401 ns, new(drain×4)=8086/8175/8255 ns
+  → new/old=0.724 across 3 runs (rock-stable, −27.6%), ~3.1 µs saved per render** (fixed, independent of N). ⚠️The
+  2-invocation whole-render A/B (base build vs cand build) was WORKER-VARIANCE-CONTAMINATED and must NOT be trusted:
+  it showed render/small_10 6.5% *slower* and — the tell — render/large_500 (a near-null: fixed CSS cost is
+  negligible at 500 nodes, NO mechanism for my change to move it) 4.4% *slower*, while the parse/layout nulls drifted
+  only ~1%. Render is more memory-bandwidth-sensitive than parse/layout, so those nulls UNDER-correct render's
+  cross-worker drift. `drain` is mechanically STRICTLY LESS WORK than `replace` (fewer allocs, ≤ copy), so a real
+  regression is impossible — the same-invocation interleave is the valid measurement.
+- **Scope:** every render (fixed ~3 µs), largest RELATIVE benefit on the small realistic diagrams where we had the
+  weakest speedup. Byte-identical + monotonic-less-work. ⭐LESSON: sibling of `strip_unused_state_css` (0f9efd4);
+  grep for `*x = x.replace(pat, "")` where `pat` occurs ≤1× and `x` is reused → `find`+`drain` is alloc-free and
+  byte-identical. ⭐⭐META: a 2-invocation rch A/B manufactures fake deltas even WITH parse/layout null controls when
+  the changed phase has a different worker-sensitivity than the nulls; for a fixed-size primitive, a same-invocation
+  INTERLEAVED micro-bench (both arms per iteration, noop floor subtracted) is the trustworthy gate.

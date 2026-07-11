@@ -799,17 +799,32 @@ const CLUSTER_THEME_CSS: &str = ".fm-cluster {\n  fill: var(--fm-cluster-fill);\
 /// as `CLUSTER_THEME_CSS`.
 const NODE_SHAPE_THEME_CSS: &str = ".fm-node.fm-node-shape-note path,\n.fm-node.fm-node-shape-note rect {\n  fill: var(--fm-node-fill);\n  fill: color-mix(in srgb, #fef3c7 40%, var(--fm-node-fill));\n}\n.fm-node.fm-node-shape-cloud path {\n  fill: var(--fm-node-fill);\n  fill: color-mix(in srgb, var(--fm-accent-2) 15%, var(--fm-node-fill));\n}\n.fm-node.fm-node-shape-cylinder path {\n  fill: var(--fm-node-fill);\n  fill: color-mix(in srgb, var(--fm-accent-1) 12%, var(--fm-node-fill));\n}\n.fm-node.fm-node-shape-star path,\n.fm-node.fm-node-shape-pentagon path {\n  stroke-width: 1.8;\n}\n";
 
+/// Remove the first occurrence of `block` from `css` in place. Equivalent to
+/// `*css = css.replace(block, "")` for every theme rule block here, because each is emitted EXACTLY
+/// once by `Theme::to_svg_style` (so "first occurrence" == "all occurrences"), but allocation-free:
+/// `str::replace` always heap-allocates a fresh String and copies the retained bytes into it, whereas
+/// `drain` shifts only the tail left in place. On the common flowchart (no clusters / special shapes /
+/// dashed-or-thick edges) all four blocks strip, so this turns 4 fixed-size String allocations +
+/// full-buffer copies per render into 4 tail memmoves — a pure fixed-overhead cut that matters most on
+/// the small diagrams where the ~9 KB `<style>` dominates output. A non-matching block is a no-op
+/// (`find` → `None`), preserving the safe-if-drifts contract of the block constants.
+fn strip_css_block(css: &mut String, block: &str) {
+    if let Some(pos) = css.find(block) {
+        css.drain(pos..pos + block.len());
+    }
+}
+
 /// Drop theme CSS rule blocks the diagram cannot use — the cluster block when there are no clusters,
 /// and the special-node-shape block when none of those shapes are present. Byte-identical rendering
 /// (the removed selectors match nothing); safe by construction (a non-matching constant is a no-op).
 fn strip_unused_theme_css(css: &mut String, ir: Option<&MermaidDiagramIr>) {
     if !ir.is_some_and(|ir| !ir.clusters.is_empty()) {
-        *css = css.replace(CLUSTER_THEME_CSS, "");
+        strip_css_block(css, CLUSTER_THEME_CSS);
         // The `:root` cluster-only custom properties feed ONLY the stripped cluster rules, so they
         // are dead too when there are no clusters. Same exact-substring / safe-no-op contract.
-        *css = css.replace(
+        strip_css_block(
+            css,
             "  --fm-cluster-label-color: var(--fm-text-color);\n  --fm-cluster-c4-fill: var(--fm-cluster-fill);\n  --fm-cluster-c4-stroke: var(--fm-cluster-stroke);\n  --fm-cluster-swimlane-fill: var(--fm-cluster-fill);\n  --fm-cluster-swimlane-stroke: var(--fm-cluster-stroke);\n",
-            "",
         );
     }
     let has_special_shapes = ir.is_some_and(|ir| {
@@ -825,7 +840,7 @@ fn strip_unused_theme_css(css: &mut String, ir: Option<&MermaidDiagramIr>) {
         })
     });
     if !has_special_shapes {
-        *css = css.replace(NODE_SHAPE_THEME_CSS, "");
+        strip_css_block(css, NODE_SHAPE_THEME_CSS);
     }
     // `.fm-edge-dashed`/`.fm-edge-thick` style only dotted/thick arrows. The arrow lists below are
     // copied VERBATIM from `render_edge`'s `style_class` match so detection cannot drift from the
@@ -855,7 +870,7 @@ fn strip_unused_theme_css(css: &mut String, ir: Option<&MermaidDiagramIr>) {
         })
     });
     if !has_dashed_or_thick {
-        *css = css.replace(EDGE_STYLE_THEME_CSS, "");
+        strip_css_block(css, EDGE_STYLE_THEME_CSS);
     }
 }
 
