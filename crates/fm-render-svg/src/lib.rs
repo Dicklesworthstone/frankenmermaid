@@ -869,28 +869,36 @@ const NODE_SHAPE_THEME_CSS: &str = ".fm-node.fm-node-shape-note path,\n.fm-node.
 /// the small diagrams where the ~9 KB `<style>` dominates output. A non-matching block is a no-op
 /// (search → `None`), preserving the safe-if-drifts contract of the block constants.
 ///
-/// The search uses `memchr::memmem` (SIMD), not `str::find`: `str::find` builds a Two-Way `StrSearcher`
-/// whose per-call needle-table setup measured ~3.3% of flowchart render across the 4 long (~300-500 B)
-/// block needles. `memmem::find` returns the identical first-match byte offset (byte-identical drain)
-/// with a far cheaper prefilter + a SIMD scan — the same primitive `minify_style_block` already uses.
-fn strip_css_block(css: &mut String, block: &str) {
-    if let Some(pos) = memchr::memmem::find(css.as_bytes(), block.as_bytes()) {
+/// The search uses a PRECOMPUTED `memchr::memmem::Finder` (SIMD), not `str::find` nor one-shot
+/// `memmem::find`: `str::find`'s Two-Way `StrSearcher::new` needle-table setup measured ~3.3% of flowchart
+/// render across the 4 long (~300-500 B) block needles, and even one-shot `memmem::find` rebuilds a
+/// two-way `Searcher::new` (~2.5%) every call. Building one `Finder` per block ONCE (process-global
+/// `OnceLock`) moves that setup off the per-render path entirely; only the SIMD scan remains. The
+/// returned first-match byte offset is identical to `str::find`, so the `drain` is byte-identical.
+fn strip_css_block(css: &mut String, cell: &OnceLock<memchr::memmem::Finder<'static>>, block: &'static str) {
+    let finder = cell.get_or_init(|| memchr::memmem::Finder::new(block.as_bytes()));
+    if let Some(pos) = finder.find(css.as_bytes()) {
         css.drain(pos..pos + block.len());
     }
 }
+
+/// The `:root` cluster-only custom properties — dead when there are no clusters (they feed only the
+/// stripped cluster rules). Named so its `strip_css_block` finder can be a `OnceLock` like the others.
+const CLUSTER_VARS_THEME_CSS: &str = "  --fm-cluster-label-color: var(--fm-text-color);\n  --fm-cluster-c4-fill: var(--fm-cluster-fill);\n  --fm-cluster-c4-stroke: var(--fm-cluster-stroke);\n  --fm-cluster-swimlane-fill: var(--fm-cluster-fill);\n  --fm-cluster-swimlane-stroke: var(--fm-cluster-stroke);\n";
 
 /// Drop theme CSS rule blocks the diagram cannot use — the cluster block when there are no clusters,
 /// and the special-node-shape block when none of those shapes are present. Byte-identical rendering
 /// (the removed selectors match nothing); safe by construction (a non-matching constant is a no-op).
 fn strip_unused_theme_css(css: &mut String, ir: Option<&MermaidDiagramIr>) {
+    static CLUSTER_F: OnceLock<memchr::memmem::Finder<'static>> = OnceLock::new();
+    static CLUSTER_VARS_F: OnceLock<memchr::memmem::Finder<'static>> = OnceLock::new();
+    static NODE_SHAPE_F: OnceLock<memchr::memmem::Finder<'static>> = OnceLock::new();
+    static EDGE_STYLE_F: OnceLock<memchr::memmem::Finder<'static>> = OnceLock::new();
     if !ir.is_some_and(|ir| !ir.clusters.is_empty()) {
-        strip_css_block(css, CLUSTER_THEME_CSS);
+        strip_css_block(css, &CLUSTER_F, CLUSTER_THEME_CSS);
         // The `:root` cluster-only custom properties feed ONLY the stripped cluster rules, so they
         // are dead too when there are no clusters. Same exact-substring / safe-no-op contract.
-        strip_css_block(
-            css,
-            "  --fm-cluster-label-color: var(--fm-text-color);\n  --fm-cluster-c4-fill: var(--fm-cluster-fill);\n  --fm-cluster-c4-stroke: var(--fm-cluster-stroke);\n  --fm-cluster-swimlane-fill: var(--fm-cluster-fill);\n  --fm-cluster-swimlane-stroke: var(--fm-cluster-stroke);\n",
-        );
+        strip_css_block(css, &CLUSTER_VARS_F, CLUSTER_VARS_THEME_CSS);
     }
     let has_special_shapes = ir.is_some_and(|ir| {
         ir.nodes.iter().any(|node| {
@@ -905,7 +913,7 @@ fn strip_unused_theme_css(css: &mut String, ir: Option<&MermaidDiagramIr>) {
         })
     });
     if !has_special_shapes {
-        strip_css_block(css, NODE_SHAPE_THEME_CSS);
+        strip_css_block(css, &NODE_SHAPE_F, NODE_SHAPE_THEME_CSS);
     }
     // `.fm-edge-dashed`/`.fm-edge-thick` style only dotted/thick arrows. The arrow lists below are
     // copied VERBATIM from `render_edge`'s `style_class` match so detection cannot drift from the
@@ -935,7 +943,7 @@ fn strip_unused_theme_css(css: &mut String, ir: Option<&MermaidDiagramIr>) {
         })
     });
     if !has_dashed_or_thick {
-        strip_css_block(css, EDGE_STYLE_THEME_CSS);
+        strip_css_block(css, &EDGE_STYLE_F, EDGE_STYLE_THEME_CSS);
     }
 }
 

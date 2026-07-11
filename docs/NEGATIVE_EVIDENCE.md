@@ -12683,3 +12683,23 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   per-render setup too (potential ~5% total). Queued as the next lever.
 - ⭐⭐META: symbolization is the key unlock — the "scattered floor" was hiding a fixable ~3% `str::find` cost this
   whole session. `str::find`/`contains`/`replace` with LONG needles on a hot path → `memchr::memmem` (SIMD).
+
+### ⭐WIN (follow-up to b86fb20): precompute `memmem::Finder` per block — render −7.2% MORE (2026-07-11)
+
+- **The queued follow-up, measured much bigger than expected.** One-shot `memmem::find` still rebuilds a two-way
+  `Searcher` EVERY call: the candidate profile showed `Searcher::new` 2.5% + `twoway::Suffix::forward` 3.75% +
+  `searcher_kind_two_way_with_prefilter` 1.1% — the whole two-way FACTORIZATION of the needle, redone per render.
+- **Lever:** build one `memchr::memmem::Finder` PER block ONCE via process-global `OnceLock`s (`strip_css_block`
+  now takes `&OnceLock<Finder<'static>>` + the `&'static` block; `get_or_init` builds the Finder on first render,
+  reuses it forever). The cluster-`:root`-vars literal became a named const `CLUSTER_VARS_THEME_CSS` for its own
+  finder. `Finder` is `Send+Sync` so a `static OnceLock<Finder<'static>>` compiles. Only the SIMD prefilter scan
+  remains on the per-render path.
+- **Byte-identical:** `Finder::find` returns the identical first-match offset as `memmem::find`/`str::find`;
+  `cargo test -p fm-render-svg` = **251 passed, 0 failed** (incl golden); clippy clean.
+- **Median gate (interleaved local, memmem-base vs Finder-cand, flowchart-300 render, 12 alternating runs):** base
+  **98511 ns** vs cand **91423 ns = 0.928 (−7.2%)**, distributions cleanly separated. Bigger than the ~2.5%
+  estimate because the two-way `Searcher::new` construction (which internally runs the `Suffix::forward` critical
+  factorization) is ~7% of render for these long needles, ALL of it removed by precomputing.
+- ⭐COMBINED with b86fb20, strip_css_block is ~10% faster render (str::find → memmem one-shot → precomputed Finder).
+  LEVER: a `memmem::find(hot_haystack, FIXED_needle)` called repeatedly with a compile-time-constant needle →
+  precompute a `Finder` in a `OnceLock` static; the per-call two-way construction dominates for long needles.
