@@ -1012,6 +1012,20 @@
   (multi-word enums/structs forced to the stack) — a small newtype/`Copy` scalar wrapper is already
   zero-cost; check the wrapper's SIZE before bothering.** Do not re-try FmtNum or other small-newtype
   elisions.
+- **REJECTED: sliding-window de-dup of `point_at` in `build_smooth_path_by_into` — sub-threshold WASH
+  (2026-07-11).** The Catmull-Rom loop calls the point closure ~4× per iteration (`p_prev/p_cur/p_next/
+  p_next2`, overlapping 3-of-4 between consecutive `i`), re-evaluating each index up to 4× (≈4n over the
+  loop). Rewrote it as a sliding window evaluating `point_at` once per index (≈n), carrying the window
+  across iterations. Byte-identical / ULP-exact (110 dumps sha256; `point_at` is a pure index→coord map,
+  so a carried value == a re-evaluated one bit-for-bit). **But min-of-8 instruction count barely moved:
+  flowchart −0.15%, wide −0.14%, state −0.14%, class −0.10%, er −0.05%, gantt +0.25% (mixed sign);
+  cycles ±1-2% = layout noise.** Reverted. **⭐WHY (the profile-first lesson): the redundancy is REAL but
+  its absolute cost is tiny — flowchart/wide edges are SHORT (n≈3-4 points after orthogonal routing), so
+  the redundant work is a handful of index+offset adds per edge, and edge-`d` cost is dominated by
+  coordinate FORMATTING (`write_cubic`→`FmtNum`→`write_fixed2`/`write_uint_into`), NOT point access. The
+  sliding-window's shift + `if i+1<n-1` branch ~offsets the tiny savings on short edges (hence gantt
+  +0.25%).** A 4× redundancy on a cheap, low-count operation is not worth a decision-grade win — quantify
+  the operation's SHARE (few points × cheap access) before de-duping, not just the multiplier.
 
 ## Kept Wins Also Recorded Here By Request
 
