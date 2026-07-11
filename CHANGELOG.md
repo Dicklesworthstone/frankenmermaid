@@ -9,13 +9,112 @@ All notable changes to **frankenmermaid** are documented here.
 > Repository: <https://github.com/Dicklesworthstone/frankenmermaid>
 > Live demo: <https://dicklesworthstone.github.io/frankenmermaid/>
 
-There are no tagged releases yet — the workspace is at version `0.1.0` across
-all crates and crates.io publishing is being prepared (see
+The first tagged release is **`v0.2.0`** — the workspace is at version `0.2.0`
+across all crates and crates.io publishing is being prepared (see
 [`CRATES_IO_PUBLISHING.md`](https://github.com/Dicklesworthstone/frankenmermaid/blob/main/CRATES_IO_PUBLISHING.md)).
 The sections below are organized chronologically and grouped by capability
 area. Every commit link points to the canonical GitHub history. Beads issue
 identifiers (`bd-XXXX`) reference the dependency-aware task tracker in
 [`.beads/`](https://github.com/Dicklesworthstone/frankenmermaid/tree/main/.beads).
+
+---
+
+## v0.2.0 — 2026-07-11 — Performance campaign
+
+First tagged release. A sustained, profile-first performance campaign across the
+render, parser, and layout crates. Every kept lever was measured against a
+current-HEAD baseline, preserves **byte-identical** output where it touches
+serialization, and every reverted/washed experiment is logged in the
+negative-evidence ledger (win-rate is auditable, not survivorship-filtered).
+
+**Headline:** on the pinned browser harness the full parse → layout →
+render-to-SVG pipeline is a **median ≈871× faster** (range 230× – 4,740×;
+conservative min-estimator median ≈800×) than the reference **mermaid-js
+`11.15.0`** renderer across an identical 13-diagram corpus, all items passing the
+5% median-absolute-deviation gate; wide-graph full pipelines run **63.7× – 124×**
+faster ([`evidence/ledger/mermaid-js-head-to-head.toml`](https://github.com/Dicklesworthstone/frankenmermaid/blob/main/evidence/ledger/mermaid-js-head-to-head.toml)).
+
+### SVG rendering (`fm-render-svg`, `fm-core`)
+
+- **Whole-fragment streaming fast paths** that write node/edge SVG bytes directly
+  into the output buffer instead of building per-element `Element`/`Attributes`
+  trees: diamond/decision nodes through the common fast path (render up to
+  **2.53×**, [ea6628b](https://github.com/Dicklesworthstone/frankenmermaid/commit/ea6628b)),
+  lean node/edge fragments (lean render **−10..29% instr**,
+  [2288c78](https://github.com/Dicklesworthstone/frankenmermaid/commit/2288c78),
+  [bc56f72](https://github.com/Dicklesworthstone/frankenmermaid/commit/bc56f72)),
+  polygon shapes ([19585b2](https://github.com/Dicklesworthstone/frankenmermaid/commit/19585b2)),
+  subroutine nodes ([036fbf5](https://github.com/Dicklesworthstone/frankenmermaid/commit/036fbf5)),
+  and quadrant data points (quadrant render **1.56–3.04×**,
+  [6ae55f0](https://github.com/Dicklesworthstone/frankenmermaid/commit/6ae55f0)).
+- **SIMD/`memmem` CSS post-processing.** Single-pass the theme-CSS strip scans
+  (render **−7.6..−10.9%**, [0f9efd4](https://github.com/Dicklesworthstone/frankenmermaid/commit/0f9efd4)),
+  precompute a `memmem::Finder` per theme block (render **−7.2%**,
+  [ef7776b](https://github.com/Dicklesworthstone/frankenmermaid/commit/ef7776b)),
+  `str::find` → `memmem::find` for the CSS block strip (render **−2.7%**,
+  [c9b8a51](https://github.com/Dicklesworthstone/frankenmermaid/commit/c9b8a51)) and
+  the state-CSS strip ([f1c4845](https://github.com/Dicklesworthstone/frankenmermaid/commit/f1c4845)),
+  and an allocation-free `find`+`drain` theme-CSS strip
+  ([d081a1f](https://github.com/Dicklesworthstone/frankenmermaid/commit/d081a1f)).
+- **Digit-table number formatting** for SVG coordinates and accents — accent index
+  via digit-table instead of `write!`/`Formatter` (flowchart render up to **4.8%**,
+  [a38a61e](https://github.com/Dicklesworthstone/frankenmermaid/commit/a38a61e),
+  [7379288](https://github.com/Dicklesworthstone/frankenmermaid/commit/7379288)) and
+  a digit-pair `push_usize_decimal` (render **−2.0%**,
+  [1a53ba4](https://github.com/Dicklesworthstone/frankenmermaid/commit/1a53ba4)).
+- **`<defs>` memoization** — node gradient and arrowhead-marker definitions are
+  built once and streamed into their slot
+  ([c48a773](https://github.com/Dicklesworthstone/frankenmermaid/commit/c48a773),
+  [531e103](https://github.com/Dicklesworthstone/frankenmermaid/commit/531e103)).
+
+### Parser (`fm-parser`)
+
+- **ASCII byte-scanning over char iteration** where only ASCII is matched:
+  `span_for` uses `line.len()` for ASCII lines instead of `chars().count()`
+  (parse **0.7–3.4× across all shapes**,
+  [eec14eb](https://github.com/Dicklesworthstone/frankenmermaid/commit/eec14eb));
+  byte-scan DOT edge splitting
+  ([3636b78](https://github.com/Dicklesworthstone/frankenmermaid/commit/3636b78)).
+- **First-byte dispatch gates** — skip the ~18-check sequence-keyword chain for the
+  common message statement (seq parse **5.1% wall / 2.4% instr**,
+  [bcc41d5](https://github.com/Dicklesworthstone/frankenmermaid/commit/bcc41d5)); fast-path
+  bidirectional flow edges
+  ([a8a32f5](https://github.com/Dicklesworthstone/frankenmermaid/commit/a8a32f5)).
+- **Allocation removal** — resolve a class-block node id once rather than per member
+  ([9490378](https://github.com/Dicklesworthstone/frankenmermaid/commit/9490378)) and
+  intern plain labels lazily
+  ([411f8ab](https://github.com/Dicklesworthstone/frankenmermaid/commit/411f8ab)).
+
+### Layout (`fm-layout`)
+
+- **O(N²) → O(N) niche-diagram fixes** — kanban/journey lane bands in one pass
+  (journey layout **3.3–4.9×**,
+  [f852a86](https://github.com/Dicklesworthstone/frankenmermaid/commit/f852a86)),
+  O(1) timeline axis-tick lookup (timeline layout **1.27–1.46×**,
+  [9ea1e72](https://github.com/Dicklesworthstone/frankenmermaid/commit/9ea1e72)),
+  O(1) xychart line/area edge geometry
+  ([621721b](https://github.com/Dicklesworthstone/frankenmermaid/commit/621721b)).
+- **Crossing-minimization core** — always-single-pass barycenter sweep with packed
+  scratch (**3.591×**, [e8082c0](https://github.com/Dicklesworthstone/frankenmermaid/commit/e8082c0)),
+  a work-based obstacle-index gate (dense-DAG layout **2.34×**,
+  [aa3903d](https://github.com/Dicklesworthstone/frankenmermaid/commit/aa3903d)), and a
+  dense node-rank/position lookup in Brandes-Köpf (Sugiyama **~1.10×**,
+  [e8dc551](https://github.com/Dicklesworthstone/frankenmermaid/commit/e8dc551)).
+- **libm avoidance** — axis-aligned fast-path in `polyline_length` skips `hypotf`
+  ([ba2e219](https://github.com/Dicklesworthstone/frankenmermaid/commit/ba2e219)).
+
+### Evidence sources
+
+Numbers above are reproducible from the committed evidence, not prose:
+
+- **Head-to-head dominance:** [`evidence/ledger/mermaid-js-head-to-head.toml`](https://github.com/Dicklesworthstone/frankenmermaid/blob/main/evidence/ledger/mermaid-js-head-to-head.toml)
+  and the raw harness runs in
+  [`.benchmarks/headtohead/`](https://github.com/Dicklesworthstone/frankenmermaid/tree/main/.benchmarks/headtohead)
+  (`scripts/mermaid_headtohead_cc.mjs`, pinned Chromium + mermaid-js `11.15.0`).
+- **Per-lever A/B methodology and every rejected/washed experiment:**
+  [`docs/NEGATIVE_EVIDENCE.md`](https://github.com/Dicklesworthstone/frankenmermaid/blob/main/docs/NEGATIVE_EVIDENCE.md)
+  (median/MAD gate, paired-null controls, load-independent instruction-count arbiter,
+  ≥3%-with-no-regression keep bar, `sha256`-identical SVG requirement).
 
 ---
 

@@ -210,7 +210,7 @@ cargo build --release --workspace
 
 ### JavaScript / WASM
 
-> **Note on npm distribution.** The `@frankenmermaid/core` package builds cleanly to `pkg/` via `./build-wasm.sh` and the `npm-publish` CI job in `.github/workflows/ci.yml` is wired up, but it is gated to `refs/tags/v*` pushes and the project has not yet cut a tagged release — so the package is not currently on npm. Until a version is published, use one of the two methods below.
+> **Note on npm distribution.** The `@frankenmermaid/core` package builds cleanly to `pkg/` via `./build-wasm.sh` and the `npm-publish` CI job in `.github/workflows/ci.yml` is wired up, but it is gated to `refs/tags/v*` pushes; the `v0.2.0` tag is the project's first tagged release and triggers that job. Until the publish job's first run is confirmed, use one of the two methods below.
 
 **Option 1 — build from source (recommended):**
 
@@ -240,7 +240,7 @@ Default builds remain FNX-free and crates.io-clean. As of 2026-04-21 the formerl
 
 ### Crates.io status
 
-The workspace is at version `0.1.0`. Per [`CRATES_IO_PUBLISHING.md`](CRATES_IO_PUBLISHING.md), the publish order is:
+The workspace is at version `0.2.0`. Per [`CRATES_IO_PUBLISHING.md`](CRATES_IO_PUBLISHING.md), the publish order is:
 
 ```
 fm-core → fm-parser → fm-layout → fm-render-svg → fm-render-term →
@@ -648,7 +648,7 @@ The complete runtime configuration surface, defined in `fm-core/src/lib.rs`:
 
 ```
 frankenmermaid/
-├── Cargo.toml                 # Workspace root (version 0.1.0)
+├── Cargo.toml                 # Workspace root (version 0.2.0)
 ├── rust-toolchain.toml        # Nightly toolchain pin
 ├── crates/
 │   ├── fm-core/               # Shared IR, config, errors, diagnostics, CGA primitives
@@ -1587,6 +1587,29 @@ fn traced_layout_is_deterministic() {
 Property-based tests verify determinism across random graph shapes (up to 20 nodes × 5 directions per run, with proptest case count configurable via `.ci/quality-gates.toml`).
 
 ## Performance and scaling
+
+### Measured head-to-head vs mermaid-js
+
+On a pinned browser harness (`scripts/mermaid_headtohead_cc.mjs`, Chromium, Node `v24.14.0`) comparing frankenmermaid's full parse → layout → render-to-SVG pipeline against the reference **mermaid-js `11.15.0`** renderer on an identical 13-diagram corpus:
+
+| Metric | Speedup (frankenmermaid vs mermaid-js) |
+|---|---|
+| **Median** | **≈871×** faster |
+| Range across corpus | 230× – 4,740× |
+| Conservative min-estimator median | ≈800× |
+| Wide-graph full pipeline (8×16 – 16×32) | 63.7× – 124× ([`evidence/ledger/mermaid-js-head-to-head.toml`](evidence/ledger/mermaid-js-head-to-head.toml)) |
+
+**How these numbers are kept honest** (this is a performance-campaign release — see [`CHANGELOG.md`](CHANGELOG.md)):
+
+- **Same-input, same-target comparison.** A dominance claim counts only as `frankenmermaid_time / mermaid_js_time` for the *same* diagram, render target, warmup policy, and output-validity gate — never cross-machine or cross-workload.
+- **Median gate, not cherry-picked means.** The harness reports the **median** speedup with a **5% median-absolute-deviation (MAD) gate** (all 13 corpus items passed), plus a conservative **min-estimator** row so the headline is not the luckiest run.
+- **Paired-null for micro-levers.** Individual optimizations are A/B'd same-invocation with interleaved arms and a no-op/null control; because code-layout noise moves wall-time by ~5%, load-independent **instruction-count** is the arbiter for sub-noise levers.
+- **SVG output stays byte-identical.** Render optimizations are gated on `sha256`-identical SVG across the shape battery + golden snapshots — a faster renderer that changed a single byte is rejected.
+- **Every rejected lever is logged.** [`docs/NEGATIVE_EVIDENCE.md`](docs/NEGATIVE_EVIDENCE.md) records the reverted/washed experiments alongside the kept wins, so the campaign's win-rate is auditable rather than survivorship-filtered.
+
+Environment for the headline run: AMD Ryzen Threadripper PRO 5975WX, `rustc` nightly, release profile (`opt-level=3` for the hot crates, `lto=fat`, `codegen-units=1`, `target-cpu=x86-64-v2`).
+
+### Per-phase scaling
 
 The engine is designed for diagrams in the 1–500 node range (typical documentation diagrams), with graceful degradation up to 10,000+ nodes via the guardrail fallback chain. Approximate per-phase scaling:
 
@@ -2562,7 +2585,7 @@ The exhaustive backlog lives in [`.beads/`](.beads/). The largest pieces of in-f
 | **WebGPU diagram renderer** (`bd-2u0.2`) | Partial | The WebRenderer selector exists; Canvas2D is the current fallback; full WebGPU implementation is queued |
 | **Web Worker / OffscreenCanvas path** (`bd-2u0.6`) | Planned | Off-main-thread rendering for large in-browser diagrams |
 | **LP/MIP solver backend for constraint layout** (`bd-1fef.2`) | Partial | Constraint-based layout exists; the LP/MIP backend would replace the heuristic solver for hard constraints |
-| **`@frankenmermaid/core` npm publish** | CI wired, awaiting tag | The npm-publish CI job exists (`bd-hye0`) and is gated to `refs/tags/v*`. The first `v0.1.0` tag will publish to npm automatically; the job idempotently no-ops if the version is already on npm |
+| **`@frankenmermaid/core` npm publish** | CI wired, awaiting tag | The npm-publish CI job exists (`bd-hye0`) and is gated to `refs/tags/v*`. The first `v0.2.0` tag publishes to npm automatically; the job idempotently no-ops if the version is already on npm |
 | **Crates.io publish** | Blocker-clear | Per `CRATES_IO_PUBLISHING.md`, all blockers are resolved as of 2026-04-21 (`franken-kernel` migrated). Awaiting publish-order execution |
 | **Swiss Tables for node/edge maps** (`bd-2gr9`) | Planned | Replace `BTreeMap` hot paths with deterministic hash-based maps; needs a determinism story |
 | **Triage UBS warning baseline** (`bd-tp4z`) | In progress | Bringing the UBS scanner output to zero |
