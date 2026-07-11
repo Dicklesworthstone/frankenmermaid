@@ -5686,9 +5686,9 @@ fn write_requirement_node_fragment_into(
             &colors.text,
             "fm-req-type-label",
             |f| {
-                f.push_str("\u{00ab}");
+                f.push('\u{00ab}');
                 let _ = write_escaped_text(f, req_type);
-                f.push_str("\u{00bb}");
+                f.push('\u{00bb}');
             },
         );
         text_y += font_size * 0.85;
