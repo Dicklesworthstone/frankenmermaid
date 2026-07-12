@@ -1216,6 +1216,20 @@
   eyeball "cheap" per-call helpers on per-item hot loops. Grep the doc loops of other diagram parsers
   (class/state/er at `split_statements(line)`) for the same producer-already-trimmed re-trim.
 
+### WIN: use the loop's `edge` for the span instead of re-fetching by index — −0.42% layout (2026-07-12)
+- **Context — LAYOUT profile (first this session).** @flowchart/800 layout (2.50M instr/iter): dominant is
+  `build_edge_paths_with_orientation` 18.6% self, then `ObstacleSpatialIndex::query_segment` 8.0%,
+  `compute_traced_layout…guardrails` 10.6%, `build_tree_layout_structure` 8.0%. `query_segment` is at floor (no
+  sort, plain-loop cell walk, generation dedup — all documented). Obstacle routing is the seam but heavily tuned.
+- **Lever:** `build_edge_paths`'s per-edge closure binds `edge` (`ir.edges.iter().enumerate()`), yet the
+  `LayoutEdgePath.span` used `ir.edges.get(edge_index).map_or(Span::default(), |e| e.span)` — re-fetching the same
+  element behind a bounds check + never-taken default, ~799×/layout. → `edge.span`. Byte-identical (`edge_index`
+  is the enumerate position).
+- **Measured:** HEAD 2,497,835 → CAND 2,487,441 instr/iter = **−10,394/iter (−0.42%)**; variance ~30k out of 10B
+  (signal ~1,400×). Byte-identical across 20 shapes; 439/439 fm-layout tests; clippy PRE-commit. Landed `abf42b7`.
+- **LEVER (grep): `xs.get(i).map_or(default, …)` inside a `for (i, x) in xs.iter().enumerate()`** — the `get(i)`
+  re-fetches `x` behind a redundant bounds check; use `x` directly. Small but free.
+
 ### REJECT (WASH): clean-scan fast path for `write_escaped_text` short labels — 0.00% render (2026-07-12)
 - **Context — PHASE PIVOT.** After ~−22% of flowchart-*parse* wins dropped parse to 2.88M instr/iter, a phase
   comparison showed **render is now dominant at 3.65M** (parse 2.88M, layout 2.50M @flowchart/800). A render
