@@ -1253,6 +1253,17 @@
   crate: IR carries a "clean, keyword-free" bit per class). A contained render-only fusion of the two per-class
   scans is possible but risky (keyword `matches_ci_at` lookahead + clean-validation in one pass). Target for a
   focused non-flowchart-render session; not attempted as a "small increment" this turn.
+- **FOLLOW-UP WIN (contained render lever after all): fuse the two per-class scans — timeline render −1.16%
+  (`c690f2a`).** The surface above said "structural only," but the contained half is real and NOT risky: the two
+  per-class scans (`scan_node_class_keywords` keyword gate + `write_sanitized_css_token_into`'s `all(clean)`
+  check) are independent READ-only passes over the same string, so `scan_class_keywords_and_clean` returns
+  `(keywords, is_clean)` in ONE pass (keyword arms live in one place; `scan_node_class_keywords` delegates);
+  callers `push_str` a clean class directly, skipping the sanitizer's re-scan. HALVES per-class scanning.
+  timeline render 9,817,848 → 9,704,181 instr/iter (−1.16%); flowchart neutral (no user classes → loop never
+  entered); byte-identical 23 shapes incl. all classed types; 251/251 render tests (golden). The other half —
+  skip scanning ENTIRELY for parser-known-safe classes — remains the STRUCTURAL lever. −1.16% << the 11.5%
+  sample share (sample-overstates-instr again). LEVER: two independent read-only scans of the same buffer whose
+  results are BOTH consumed → fuse to one pass returning a tuple.
 
 ### WIN: use the loop's `edge` for the span instead of re-fetching by index — −0.42% layout (2026-07-12)
 - **Context — LAYOUT profile (first this session).** @flowchart/800 layout (2.50M instr/iter): dominant is
