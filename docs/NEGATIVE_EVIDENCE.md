@@ -1317,6 +1317,22 @@
   non-inlined CALL is ~2.4% ×2400. Gate the call on a once-computed `is_empty()` flag. Grep hot per-item loops
   for helper calls that iterate a collection that's usually empty on the benchmark shape (active clusters/subgraphs,
   styles, warnings, dangling-recovery lists).
+
+### WIN: fuse the per-line `%`/`;` scans and skip both passes on a plain line — −4.16% parse (BIGGEST single win of the cycle) (2026-07-12)
+- **Lever (SCAN FUSION + no-op-call gate, combined).** The flowchart doc loop ran TWO full-line passes per
+  source line: `strip_flowchart_inline_comment` (scans `%`) then `split_statements` (scans `;`) — two non-inlined
+  calls + two internal byte scans. A line with neither is a single clean statement equal to the already-`trim_fast`'d
+  `trimmed`. Do ONE fused `.iter().any(|&b| b == b'%' || b == b';')`; when false, skip strip (`uncommented_line =
+  trimmed`) and yield `SplitStatements::Single(once(trimmed))` instead of calling `split_statements`.
+- **Measured:** HEAD **3,074,568** → CAND **2,946,611** instr/iter = **−127,958/iter (−4.16%)**; variance ~9k out
+  of 11.8B (signal ~55,000×). Byte-identical across 24 shapes; **408/408 tests incl. the semicolon-separator +
+  inline-comment tests that exercise the `has_special` (strip+split) path the dump diff cannot reach**; clippy
+  PRE-commit (2-byte predicate does NOT trip `manual_contains`, unlike the single-byte a27bd56). Landed `a0cd014`.
+- **LESSON: when N independent single-byte early-out scans run per item on the same buffer, FUSE them into one
+  `.iter().any(|b| b==X || b==Y || …)` and gate the downstream passes on the combined flag.** Doubly wins: one
+  pass instead of N (less loop/iterator overhead), AND the per-pass non-inlined calls are skipped on the common
+  (no-special-byte) line. The gate flag replaces each pass's own internal presence-scan too. First parse win >4%
+  since the trim harvest floored — the "cheap per-item helper" seam is deep because NONE of these were inlined.
 ### Acyclic SCC fast-path in `GraphMetrics::from_ir` — −27 to −29% layout (Auto-selection overhead) (2026-06-27)
 - **Lever (the 203µs Auto overhead pinned last cycle):** the Auto algorithm selection
   (`select_general_graph_algorithm_with_config`) calls `GraphMetrics::from_ir` on **every** layout —
