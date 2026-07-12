@@ -8525,7 +8525,10 @@ fn split_statements(line: &str) -> SplitStatements<'_> {
     // Statements are separated by `;` (outside quotes/brackets). When the line contains no `;` at all it
     // is a single statement, so skip the quote/bracket-aware scan AND the `Vec` allocation — yield the
     // whole line via `Once`. Output-identical: the full scan yields exactly `[line]` in that case.
-    if !line.as_bytes().contains(&b';') {
+    // Scalar `.iter().any()` rather than `<[u8]>::contains` (which is memchr-specialized): this scans a
+    // short source line (~tens of bytes) per statement, and a compiler-vectorized scalar scan beats
+    // memchr's per-call SIMD setup on short haystacks (see the ByteLines `\n` reject in NEGATIVE_EVIDENCE).
+    if !line.as_bytes().iter().any(|&byte| byte == b';') {
         return SplitStatements::Single(std::iter::once(line));
     }
     let mut statements = Vec::new();
@@ -9197,8 +9200,10 @@ fn is_architecture_side_token(token: &str) -> bool {
 fn strip_flowchart_inline_comment(line: &str) -> &str {
     // Inline comments begin with `%%`; if there is no `%` at all there is nothing to
     // strip, so skip the quote/bracket-aware scan entirely. Output-identical: the full
-    // scan returns `line` unchanged when it finds no `%%`.
-    if !line.as_bytes().contains(&b'%') {
+    // scan returns `line` unchanged when it finds no `%%`. Scalar `.iter().any()` rather than
+    // memchr-specialized `<[u8]>::contains` — this per-line scan is over a short haystack where a
+    // vectorized scalar loop beats memchr's setup (see the ByteLines `\n` reject in NEGATIVE_EVIDENCE).
+    if !line.as_bytes().iter().any(|&byte| byte == b'%') {
         return line;
     }
 
