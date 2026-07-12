@@ -1216,6 +1216,24 @@
   eyeball "cheap" per-call helpers on per-item hot loops. Grep the doc loops of other diagram parsers
   (class/state/er at `split_statements(line)`) for the same producer-already-trimmed re-trim.
 
+### REJECT: consolidate `extract_style_directives`'s 3-scan gate to 2 via a shorter shared needle — +4.4% styled3 REGRESSION (2026-07-12)
+- **Hypothesis:** `extract_style_directives`'s early-out does three full-input `str::contains(&str)` searches
+  (`"class"`, `"style"`, `"linkStyle"`) — the `<&str as Pattern>::is_contained_in` at ~2.31% of parse, once per
+  parse. Since both `style` (`s·tyle`) and `linkStyle` (`linkS·tyle`) contain lowercase `"tyle"`, replace those
+  two with one `"tyle"` search → 2 scans instead of 3. Output-identical (the gate is a fast-path skip; the per-line
+  prefix matcher is the source of truth). Measured **−0.52%** on the plain flowchart (one fewer 24 KB scan).
+- **Why it's a NET LOSS:** `"tyle"` also matches the lowercase tail of camelCase `Style` in inline class names.
+  The `styled3` shape's `:::serviceNodeStyle:::…` labels contain `serviceNodeStyle` → lowercase `tyle`, so the
+  looser gate PROCEEDS into the full per-line loop (span_for + prefix checks) that the tight lowercase-`style`
+  gate correctly SKIPPED. **styled3 parse +4.4%** (64.95B → 67.81B instr, ×4000) — output byte-identical (24
+  shapes incl. styled3), just a wasted second pass. `styled` (`:::myCustomNodeClass`, has capital `Class`, no
+  lowercase `class`/`tyle`) was fine (−0.25%).
+- **LESSON: the 3-scan style gate is DELIBERATELY tight — each needle is LOWERCASE-specific to avoid matching
+  camelCase class/style identifiers** (`NodeStyle`, `serviceNodeStyle`, `myCustomNodeClass`), which are extremely
+  common (inline `:::className` styling). A shorter/looser shared substring trades one 24 KB scan on plain
+  flowcharts for a whole extra per-line pass on styled ones — the wrong trade. Reverted; not committed. Don't
+  loosen a substring gate whose needles are case-tuned to exclude identifier text.
+
 ### WIN: scalar `.iter().any()` over memchr-backed `contains` in per-line early-outs — −0.38% parse (2026-07-12)
 - **Lever (the INVERSE of the ByteLines memchr reject).** `strip_flowchart_inline_comment` (early-out on `%`) and
   `split_statements` (early-out on `;`) each did `line.as_bytes().contains(&byte)`, once per source line in the
