@@ -1433,7 +1433,7 @@ impl IrBuilder {
     }
 
     pub(crate) fn add_class_to_node(&mut self, node_key: &str, class_name: &str, span: Span) {
-        let normalized_class = class_name.trim();
+        let normalized_class = trim_fast(class_name);
         if normalized_class.is_empty() {
             return;
         }
@@ -1455,7 +1455,7 @@ impl IrBuilder {
     }
 
     pub(crate) fn add_class_to_node_id(&mut self, node_id: IrNodeId, class_name: &str) {
-        let normalized_class = class_name.trim();
+        let normalized_class = trim_fast(class_name);
         if normalized_class.is_empty() {
             return;
         }
