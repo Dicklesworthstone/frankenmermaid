@@ -973,10 +973,23 @@ impl IrBuilder {
     ) -> Option<IrNodeId> {
         // `trim_fast` == `str::trim` byte-for-byte (ASCII byte scan, Unicode fallback only when a
         // non-ASCII byte sits at a trimmed boundary) but skips the `char::is_whitespace` CharSearcher.
-        // This normalizes the id on every node intern and both endpoints of every edge — the hot
-        // flowchart intern path — where the ids are already `trim_ascii`'d, so the Unicode trim was
-        // pure overhead. Byte-identical.
-        let normalized_id = trim_fast(id);
+        // Normalize a possibly-untrimmed id, then delegate to the normalized core.
+        self.intern_node_auto_normalized(trim_fast(id), label, shape, span, is_auto_created)
+    }
+
+    /// Core of [`Self::intern_node_auto`] taking an ALREADY-trimmed `normalized_id`. The flowchart
+    /// fast paths (`parse_fast_simple_flowchart_node_borrowed` / `_edge_parts`) hand in ids that are
+    /// already `trim_ascii`'d AND validated as pure-ASCII `is_fast_flow_identifier`s (no whitespace),
+    /// so `trim_fast(id) == id` there — they intern through this directly to skip the redundant
+    /// per-intern trim (~2400 interns per flowchart/800 parse).
+    fn intern_node_auto_normalized(
+        &mut self,
+        normalized_id: &str,
+        label: Option<NodeLabelInput<'_>>,
+        shape: NodeShape,
+        span: Span,
+        is_auto_created: bool,
+    ) -> Option<IrNodeId> {
         if normalized_id.is_empty() {
             self.add_warning("Encountered empty node identifier; skipped node");
             return None;
@@ -1260,8 +1273,21 @@ impl IrBuilder {
         self.intern_node_auto(id, label.map(NodeLabelInput::Parsed), shape, span, false)
     }
 
+    /// Intern a flowchart fast-path edge endpoint (label-less Rect node) whose id is already
+    /// `trim_ascii`'d and `is_fast_flow_identifier`-validated (pure ASCII, no whitespace) — so
+    /// `trim_fast(id) == id`. Interns through the normalized core to skip that redundant trim.
+    pub(crate) fn intern_edge_endpoint_pretrimmed(
+        &mut self,
+        id: &str,
+        span: Span,
+    ) -> Option<IrNodeId> {
+        self.intern_node_auto_normalized(id, None, NodeShape::Rect, span, false)
+    }
+
     /// Like [`Self::intern_node_label`] but consumes an owned label, moving it into the IR instead of
-    /// cloning (see [`Self::intern_label_owned`]). For the flowchart lowering pass's `FastNode`.
+    /// cloning (see [`Self::intern_label_owned`]). For the flowchart lowering pass's `FastNode`, whose
+    /// id is already `trim_ascii`'d + `is_fast_flow_identifier`-validated — so intern through the
+    /// normalized core to skip the redundant `trim_fast`.
     pub(crate) fn intern_node_label_owned(
         &mut self,
         id: &str,
@@ -1269,7 +1295,7 @@ impl IrBuilder {
         shape: NodeShape,
         span: Span,
     ) -> Option<IrNodeId> {
-        self.intern_node_auto(id, label.map(NodeLabelInput::ParsedOwned), shape, span, false)
+        self.intern_node_auto_normalized(id, label.map(NodeLabelInput::ParsedOwned), shape, span, false)
     }
 
     pub(crate) fn intern_node(

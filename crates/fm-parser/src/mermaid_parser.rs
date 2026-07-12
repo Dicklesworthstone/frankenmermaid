@@ -916,15 +916,17 @@ fn lower_flow_document_item(
             source_line,
         } => {
             let span = span_for(line_number, source_line);
+            // `from`/`to` come from `parse_fast_simple_flowchart_edge_parts`, already `trim_ascii`'d and
+            // `is_fast_flow_identifier`-validated — intern through the pre-trimmed endpoint path.
             let from_id = if is_dangling_placeholder_node_id(from) {
                 builder.intern_placeholder_node(from, span)
             } else {
-                builder.intern_node_label(from, None, NodeShape::Rect, span)
+                builder.intern_edge_endpoint_pretrimmed(from, span)
             };
             let to_id = if is_dangling_placeholder_node_id(to) {
                 builder.intern_placeholder_node(to, span)
             } else {
-                builder.intern_node_label(to, None, NodeShape::Rect, span)
+                builder.intern_edge_endpoint_pretrimmed(to, span)
             };
             if let (Some(f), Some(t)) = (from_id, to_id) {
                 add_node_to_active_groups(builder, active_clusters, active_subgraphs, f);
