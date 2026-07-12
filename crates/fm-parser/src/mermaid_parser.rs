@@ -8192,16 +8192,25 @@ fn is_dangling_placeholder_node_id(id: &str) -> bool {
     id.starts_with(DANGLING_PLACEHOLDER_PREFIX)
 }
 
+/// `str::trim_matches(c)` for an ASCII byte `c`, without the `char` `CharSearcher` (a byte scan from
+/// both ends). Byte-identical for ASCII `c`: `c`'s every byte index is a char boundary, so the trimmed
+/// slice equals what `trim_matches::<char>` returns (all leading and all trailing `c` stripped; an
+/// all-`c` string yields `""`).
+fn trim_matches_ascii(s: &str, c: u8) -> &str {
+    let b = s.as_bytes();
+    let start = b.iter().position(|&x| x != c).unwrap_or(b.len());
+    let end = b.iter().rposition(|&x| x != c).map_or(start, |p| p + 1);
+    &s[start..end]
+}
+
 fn normalize_compound_identifier(raw: &str) -> String {
-    // trim_fast for the two whitespace trims (the char `trim_matches` quote strips stay — memchr, not
-    // the `is_whitespace` CharSearcher). Called per gantt task / journey step / kanban card / mindmap
-    // node / xychart series across ~10 sites.
-    let cleaned = trim_fast(
-        trim_fast(raw)
-            .trim_matches('"')
-            .trim_matches('\'')
-            .trim_matches('`'),
-    );
+    // Whitespace trims via `trim_fast`; the quote strips via `trim_matches_ascii` (byte scan, no `char`
+    // CharSearcher — measured ~8% of journey parse across the three quote passes). Called per gantt task /
+    // journey step / kanban card / mindmap node / xychart series across ~10 sites.
+    let cleaned = trim_fast(trim_matches_ascii(
+        trim_matches_ascii(trim_matches_ascii(trim_fast(raw), b'"'), b'\''),
+        b'`',
+    ));
     if cleaned.is_empty() {
         return String::new();
     }
@@ -8218,7 +8227,31 @@ fn normalize_compound_identifier(raw: &str) -> String {
         }
     }
 
-    normalized.trim_matches('_').to_string()
+    // Strip leading/trailing `_`. The overwhelmingly common id has none (a mid-string separator, not an
+    // edge one), so return the OWNED `normalized` verbatim instead of the old `trim_matches('_').to_string()`
+    // — which always allocated a second String and re-copied even when the trim was a no-op. When an edge
+    // `_` IS present, trim it in place (truncate the tail, drain the head). Byte-identical to `trim_matches('_')`.
+    let start = normalized.bytes().position(|x| x != b'_');
+    match start {
+        None => {
+            // all underscores (or empty) → trims to ""
+            normalized.clear();
+            normalized
+        }
+        Some(head) => {
+            let tail = normalized
+                .bytes()
+                .rposition(|x| x != b'_')
+                .map_or(head, |p| p + 1);
+            if tail < normalized.len() {
+                normalized.truncate(tail);
+            }
+            if head > 0 {
+                normalized.drain(..head);
+            }
+            normalized
+        }
+    }
 }
 
 fn clean_label(raw: Option<&str>) -> Option<String> {
