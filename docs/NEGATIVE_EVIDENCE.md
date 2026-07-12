@@ -1056,6 +1056,29 @@
 
 ## Kept Wins Also Recorded Here By Request
 
+### WIN: normalize_compound_identifier — byte-scan quote/underscore trims + drop redundant realloc — journey −5.7% / gantt −5.1% (2026-07-12)
+- **Re-profile of the next-heaviest per-byte parse types.** A parse-timing sweep flagged journey (159µs) and
+  block (173µs) as high per-byte. A symbolized `journey/300` parse profile showed `str::trim_matches::<char>`
+  at ~8% self (+ CharSearcher) and ~40% malloc/free churn; `normalize_compound_identifier` (called per gantt
+  task / journey step / kanban card / mindmap node / xychart series) was 12% self.
+- **Two byte-identical inefficiencies fixed:**
+  1. Three quote strips `.trim_matches('"').trim_matches('\'').trim_matches('`')` each built a `char`
+     `CharSearcher` (the ~8% symbol — a PRIOR comment here mislabeled it "memchr"). Replaced with
+     `trim_matches_ascii` (byte scan from both ends). Byte-identical for an ASCII delimiter (`"`/`'`/`` ` ``
+     only ever appear as their own ASCII byte, never a UTF-8 continuation).
+  2. The final `normalized.trim_matches('_').to_string()` ALWAYS allocated a second String + re-copied
+     `normalized`, even on a no-op trim (the common case — a mid-string separator, not an edge one). Now
+     returns the OWNED `normalized` verbatim when no `_`-trim is needed, else trims in place (truncate tail /
+     drain head). `normalized` is pure ASCII (build loop only pushes ascii-alnum / `_-./`) → every
+     truncate/drain index is a char boundary.
+- **Measured (`perf stat instructions:u`, symbolized, interleaved, min of 5, size 300 × 8000):** journey
+  16.167B → 15.248B = **−5.69%**; gantt 16.984B → 16.111B = **−5.14%** (compounds with `9dc51ae` — gantt task
+  metadata also normalizes ids); kanban −0.25%; mindmap/xychart wash. Byte-identical dump across 10 shapes;
+  408/408 tests. Clippy clean. Landed `9fd5049`.
+- **⭐⭐REUSABLE LEVERS:** (a) `trim_matches::<char>` for an ASCII delimiter is a **CharSearcher, NOT memchr** —
+  byte-scan it. (b) `owned_string.trim_matches(c).to_string()` is a **guaranteed realloc+copy even on a no-op
+  trim** — return the owned value (or trim in place) instead. Grep for both idioms.
+
 ### WIN: gantt task-id build — reuse owned id + push_usize_decimal, not format! — gantt parse −7.9% (2026-07-12)
 - **Phase sweep → biggest un-mined absolute cost.** A parse/layout/render timing sweep (size 300) put
   timeline render (469µs) biggest but generic-Element-bound (needs the streaming rewrite, not a small
