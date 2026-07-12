@@ -14414,3 +14414,33 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   permanent bench hashes are again `b7877e330301fe66ae61a6e60868439400ffafde56aa863cf3403a7d3964dc37` and
   `6a80c1ec2ae7e827d82dc597cb09d37bc8f37b664489ad70e5911579e6dd4c05`. Do not retry this exact dense-ID
   substitution on the common no-metadata Kanban seam without a materially different workload.
+
+### REJECT: `coordinate_assignment` per-rank `Vec<usize>` clone elision is flat (2026-07-12)
+
+- **Negative-ledger first:** no exact attempt or commit existed for the two transient rank-vector clones in
+  `coordinate_assignment`. Nearby boundaries are distinct: the output `node.id.clone()` is contract-bound, BK
+  neighbour precomputation is a no-retry regression, and the per-node four-float allocation measured at ~0. The
+  ledger did warn that remaining coordinate-assignment frames were diffuse/sub-floor, so this candidate required a
+  strict same-worker decision rather than being assumed beneficial.
+- **One candidate:** borrow the selected `ordering_by_rank` or fallback vector in the primary-span pass and output
+  pass, iterating by copied `usize`, instead of cloning it in each pass. This removes two allocations per rank and
+  copies of roughly `2 * node_count` indexes. Present-empty versus absent-fallback behavior, rank and node order,
+  `enumerate()` order fields, node-size lookup sequence, floating-point operations, BK tie-breaking, and RNG are
+  identical.
+- **Isolated remote seam:** ongoing parser work made the first full-pipeline baseline unsuitable for exact-source
+  A/B, so it was discarded. A temporary crate-local `coordinate_assignment/scc_600` Criterion row reproduced the
+  existing cyclic rings plus forward links, forcing full Sugiyama layout without compiling or timing the parser.
+  Both authoritative arms ran through `RCH_REQUIRE_REMOTE=1 RCH_WORKER=vmi1227854 env -u CARGO_TARGET_DIR rch
+  exec -- cargo bench --profile release -p fm-layout --bench incremental_layout --
+  coordinate_assignment/scc_600 --exact --warm-up-time 1 --measurement-time 3 --sample-size 20 --noplot` on actual
+  worker `vmi1227854`; baseline name was `coord-clone-local-0e86afb`.
+- **Result:** ORIG median **271.524 us** (95% CI **266.787..288.495 us**) versus CAND **273.765 us**
+  (**267.973..283.058 us**), CAND/ORIG **1.00825**. The paired median change was **+0.8250%** (95% CI
+  **-5.8929%..+5.3216%**); Criterion reported no detectable change (`p = 0.64`). This fails the `<= 0.97` keep
+  floor and disjoint-CI proof.
+- **Restoration / verdict:** **REJECT.** The production candidate and temporary seam were manually removed. Final
+  layout, incremental bench, and permanent pipeline-bench SHA-256 values are again
+  `fb5d6c682dff1bc0cb37baf134de9ecc52a345f80178704890f01cd26bd6234a`,
+  `50545a9e75dad144f5d623aafd4c11af54e3ad2c9b950b3ef4177fd6bddafc63`, and
+  `79cd7a4b029dc506d100cd89ceb668c484512c4920c643e9ffcaf7f6670a2c1e`. No local or cross-worker timing entered
+  the verdict. Do not retry this exact two-clone substitution on the 600-node cyclic SCC workload.
