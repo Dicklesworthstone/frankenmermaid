@@ -1056,6 +1056,30 @@
 
 ## Kept Wins Also Recorded Here By Request
 
+### Byte-exact fast trims on the hot flowchart parse path — −1.65% parse (2026-07-11)
+- **Frontier shift:** after the render lane closed at its byte-identical floor (prior entry), a fresh
+  per-phase instruction count (`default/800/4000`, `perf stat instructions:u`) put **parse co-dominant
+  with render** — parse 3.72M instr/iter, render 3.64M, layout 2.50M. So parse is now the live vein.
+- **Lever:** a symbolized `flowchart/800` parse profile showed the Unicode `char::is_whitespace`
+  CharSearcher at **~7.5% self-time** across two symbols — `trim_matches` **6.26%** + `trim_start_matches`
+  **1.23%** — despite an existing byte-exact `trim_fast` (2.35%) already used at 23 sites. Four hot sites
+  still called `str::trim` / `str::trim_start` directly: `parse_fast_simple_flowchart_node_borrowed`
+  (label), `parse_label` fast path (plain label), `extract_icon_prefix` (label text) — all per-node — and
+  `parse_subgraph_statement` (leading trim, per statement, on already-`trim_fast`'d input). Routed all
+  four through `trim_fast` / a new byte-exact `trim_start_fast` sibling (ASCII byte scan, Unicode fallback
+  only when a non-ASCII byte sits at a trimmed boundary → identical slice to `str::trim*` in every case).
+- **Measured (clean same-session rebuild A/B, `perf stat instructions:u`, deterministic ±0.0003%):**
+  HEAD baseline **14,895,856,205** → candidate **14,649,463,143** = **−1.65% parse instructions**.
+  Byte-identical output across 11 diagram shapes (incl. the subgraph path); fm-parser lib tests pass;
+  clippy clean. Landed `0562251`.
+- **META — sample-share overstates instruction cost for branchy code:** the 7.5% perf-record self-share
+  (cycle/time-sampled) mapped to only −1.65% *instructions*, because the generic CharSearcher has poor
+  IPC — its cycle share sits far above its instruction share. When a `perf record` symbol is a branchy
+  generic (CharSearcher, decode loops), expect the instruction win to be a fraction of the sampled %;
+  the label-only 2-site variant was just −0.47%, the per-statement `trim_start` + icon-trim sites added
+  the rest. **Instruction count stays the only arbiter.** Remaining parse `trim_matches` self-time (still
+  ~4.4% post-change) is now inherent-shape work, not a stray direct-`.trim()` caller on this corpus.
+
 ### Acyclic SCC fast-path in `GraphMetrics::from_ir` — −27 to −29% layout (Auto-selection overhead) (2026-06-27)
 - **Lever (the 203µs Auto overhead pinned last cycle):** the Auto algorithm selection
   (`select_general_graph_algorithm_with_config`) calls `GraphMetrics::from_ir` on **every** layout —
