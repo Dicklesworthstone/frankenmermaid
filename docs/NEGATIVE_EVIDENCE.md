@@ -1240,6 +1240,19 @@
   `RawVec<IrNodeId>::grow_one` at 3.3% (some un-presized `Vec<IrNodeId>`) was not located — worth a targeted hunt.
   Next layout lever needs STRUCTURAL work (router exclusion params, or non-incremental GraphMetrics cache), not a
   contained edit.
+- **SURFACE — NON-FLOWCHART render outlier: TIMELINE is 3.4× flowchart** (full pipeline @400: timeline 15.6M vs
+  flowchart 4.56M instr/iter; also high: journey 11.4M, class 10.2M, requirement 9.2M). Timeline cost is in
+  RENDER (9.8M; parse 3.0M, layout 2.7M). Render hotspots: num-format `write_uint`/`write_fixed2`/`write_number`
+  ~20% (inherent, ledger-closed), `scan_node_class_keywords` ~11.5% + `write_sanitized_css_token_into` ~5.6%,
+  `__memmove` 10% (structural raw_svg→doc→String), `write_escaped_attr` ~7%. ROOT of the class cost: each timeline
+  node carries TWO parser-generated user classes (`timeline-event`/`timeline-period` + `timeline-section-N`), and
+  each is byte-scanned TWICE per render — once by `scan_node_class_keywords` (state-keyword gate) and once by
+  `write_sanitized_css_token_into` (clean-check). These classes are ALWAYS lowercase-clean and NEVER contain a
+  state keyword, so both scans are provably no-ops for generated classes — but the renderer can't assume that. The
+  real lever is STRUCTURAL: have the parser flag generated/known-safe classes so render skips both scans (cross-
+  crate: IR carries a "clean, keyword-free" bit per class). A contained render-only fusion of the two per-class
+  scans is possible but risky (keyword `matches_ci_at` lookahead + clean-validation in one pass). Target for a
+  focused non-flowchart-render session; not attempted as a "small increment" this turn.
 
 ### WIN: use the loop's `edge` for the span instead of re-fetching by index — −0.42% layout (2026-07-12)
 - **Context — LAYOUT profile (first this session).** @flowchart/800 layout (2.50M instr/iter): dominant is
