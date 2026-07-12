@@ -1267,6 +1267,24 @@
   The parser per-line trim vein (`line` + `raw_line` loops) is now fully harvested; residual parse `trim_matches`
   is shape-inherent or in cold directive branches.
 
+### WIN: byte-scan `:::` (find_triple_colon) not contains/split TwoWaySearcher — styled −8%, diamond −5% (2026-07-12)
+- **Re-profiling styled3 (after the find_operator dedup) exposed a residual TwoWaySearcher storm** — `StrSearcher::new`
+  4% + `TwoWaySearcher::new` 3.3% + `is_contained_in` 2.7% ≈ 10%. Source: the 3-char `:::` inline-class needle in
+  `statement.contains(":::")` (the chumsky-skip guard, per flowchart statement) and `trimmed.split(":::")` (per
+  `:::`-class node, ×2) each builds a `TwoWaySearcher` (maximal-suffix factorization).
+- **Lever:** add `find_triple_colon` — memchr on `:` + a prefix verify (the refined byte-scan lever: memchr keeps the
+  SIMD first-byte skip, unlike `windows(runtime)`) — and route all three sites through it (`contains` → `is_some`;
+  `split(":::").next()` → prefix slice). Byte-identical to the std searches.
+- **Measured (`perf stat instructions:u`, interleaved, min of 4, size 300 × 2000):** `styled` **−8.395%**, `styled3`
+  **−5.917%**, `diamond` **−4.610%**, `hexagon` **−3.352%**; flowo/wide −0.03% (short statements). **Note the breadth:
+  hexagon/diamond have NO `:::`, but still pay the per-statement guard `contains(":::")` — memchr beats TwoWaySearcher
+  for the no-match case too, so this helps ALL flowchart shape types.** Byte-identical across 33 shapes; clippy clean.
+  Landed `59470a4`.
+- **META:** the chumsky EmptyErr + find_operator dedup + this = **three compounding wins on the same shaped-flowchart
+  parse path, each found by re-profiling after the last** (hexagon: 11.46B → 5.26B → ~5.1B → ~4.9B). The re-profile
+  discipline turns one big win into a cascade. And the searcher-kind distinction held: this was a genuine `&str`
+  TwoWaySearcher (needs memchr byte-scan), the styled3-45% one was `find_operator` redundancy (needs compute-once).
+
 ### WIN: reuse the `:::`-class operator position — drop 2 redundant find_operator scans (styled3 parse −34%) (2026-07-12)
 - **Found by profiling styled3 (which was NEUTRAL on the EmptyErr win — it hits the `:::` chumsky-skip guard).**
   `find_operator_core` was **45% self** on styled3: styled node lines
