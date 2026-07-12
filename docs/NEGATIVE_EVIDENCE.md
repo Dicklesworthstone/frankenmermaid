@@ -1268,6 +1268,23 @@
   const-folds per wrapper, so there's zero runtime branch and zero logic duplication. Applied to: intern id-trim
   (efa2141 −3.18%), doc-loop stmt re-trim (706c97a −1.66%), now label re-trim. Remaining: `extract_icon_prefix`
   also re-`trim_fast`s `label.text` (already trimmed by `parse_label`) — next candidate.
+
+### WIN: drop the redundant top trim in the icon-prefix split helpers — −2.21% parse (2026-07-12)
+- **Lever (UNCONDITIONAL redundant-work removal — even simpler than the const-flag core).**
+  `split_fontawesome_icon_prefix` and `split_emoji_icon_prefix` each opened with `trim_fast(text)`, but their
+  **sole** caller `extract_icon_prefix` always passes `trim_fast(&label.text)`, and `trim_fast` is IDEMPOTENT, so
+  `trim_fast(text) == text` there for ALL callers — no const-flag/variant needed, just delete the trim and use
+  `text`. Both fire once per labelled node (fontawesome returns `None` first → emoji helper runs for every one):
+  ~1600 no-op `trim_fast` calls/parse. Kept the post-icon remainder trims (load-bearing).
+- **Measured (deterministic `perf stat instructions:u`, flowchart/800 parse ×4000, interleaved):** HEAD
+  **3,252,956** instr/iter → CAND **3,180,941** = **−72,015/iter (−2.21%)**; variance ~20k out of 12.7B (signal
+  ~14,000× the noise). Byte-identical across 24 shapes; 408/408 tests incl. the fontawesome + emoji
+  icon-extraction tests (exercise these helpers directly); clippy verified PRE-commit. Landed `1ced23c`.
+- **LESSON: when a redundant helper has a SINGLE caller that always pre-normalizes, prefer UNCONDITIONAL removal
+  over the const-flag core.** Idempotent-normalizer + sole-pre-normalizing-caller ⇒ the helper's normalize is
+  provably dead for everyone → delete it outright (no wrapper, no flag). Again ~2% for a "no-op" — non-inlined
+  per-item helper calls keep paying off. Cumulative trim/normalize harvest this cycle: efa2141(−3.18%) +
+  5cd410a(−1.05%) + 1ced23c(−2.21%) + 706c97a(−1.66%) + earlier trim wins.
 ### Acyclic SCC fast-path in `GraphMetrics::from_ir` — −27 to −29% layout (Auto-selection overhead) (2026-06-27)
 - **Lever (the 203µs Auto overhead pinned last cycle):** the Auto algorithm selection
   (`select_general_graph_algorithm_with_config`) calls `GraphMetrics::from_ir` on **every** layout —
