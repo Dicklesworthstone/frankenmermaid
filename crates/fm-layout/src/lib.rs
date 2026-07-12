@@ -7801,25 +7801,55 @@ fn build_tree_layout_structure(ir: &MermaidDiagramIr) -> TreeLayoutStructure {
             .then_with(|| left.cmp(right))
     };
 
-    let mut outgoing = vec![Vec::new(); node_count];
+    // CSR adjacency: one flat `Vec` of targets + per-source `[out_start[n], out_start[n]+out_len[n])`
+    // ranges, instead of a `Vec<Vec<usize>>` that heap-allocated one inner `Vec` per source (~one per
+    // node on a chain/tree). Two cheap `endpoint_node_index` passes over the edges (a bounds-checked
+    // field read): count raw out-degrees + indegrees, then fill. Each source's segment is sorted and
+    // deduped IN PLACE, its post-dedup length recorded in `out_len`. Byte-identical to the old
+    // push-then-`sort_by`+`dedup`: same targets, same order, same consecutive-duplicate removal, and
+    // `indegree` still counts RAW edges (pre-dedup) exactly as the old push loop did.
     let mut indegree = vec![0_usize; node_count];
-    for edge in &ir.edges {
-        let Some(source) = endpoint_node_index(ir, edge.from) else {
-            continue;
-        };
-        let Some(target) = endpoint_node_index(ir, edge.to) else {
-            continue;
-        };
+    let mut out_start = vec![0_usize; node_count + 1];
+    let resolve = |edge: &fm_core::IrEdge| -> Option<(usize, usize)> {
+        let source = endpoint_node_index(ir, edge.from)?;
+        let target = endpoint_node_index(ir, edge.to)?;
         if source >= node_count || target >= node_count || source == target {
-            continue;
+            return None;
         }
-        outgoing[source].push(target);
-        indegree[target] = indegree[target].saturating_add(1);
+        Some((source, target))
+    };
+    for edge in &ir.edges {
+        if let Some((source, target)) = resolve(edge) {
+            out_start[source + 1] += 1;
+            indegree[target] = indegree[target].saturating_add(1);
+        }
     }
-
-    for neighbors in &mut outgoing {
-        neighbors.sort_by(&cmp_by_id);
-        neighbors.dedup();
+    for i in 1..out_start.len() {
+        out_start[i] += out_start[i - 1];
+    }
+    let mut out_flat = vec![0_usize; out_start[node_count]];
+    let mut out_len = vec![0_usize; node_count];
+    {
+        let mut cursor = out_start.clone();
+        for edge in &ir.edges {
+            if let Some((source, target)) = resolve(edge) {
+                out_flat[cursor[source]] = target;
+                cursor[source] += 1;
+            }
+        }
+    }
+    for node in 0..node_count {
+        let segment = &mut out_flat[out_start[node]..out_start[node + 1]];
+        segment.sort_by(&cmp_by_id);
+        // Compact consecutive duplicates to the front (== `Vec::dedup` on the sorted segment).
+        let mut len = 0_usize;
+        for r in 0..segment.len() {
+            if len == 0 || segment[r] != segment[len - 1] {
+                segment[len] = segment[r];
+                len += 1;
+            }
+        }
+        out_len[node] = len;
     }
 
     let mut sorted_nodes: Vec<usize> = (0..node_count).collect();
@@ -7866,7 +7896,7 @@ fn build_tree_layout_structure(ir: &MermaidDiagramIr) -> TreeLayoutStructure {
             // Children are appended contiguously while `node` is being processed, so a single flat `Vec`
             // + per-node start/len reproduces the old per-node `Vec` exactly (CSR).
             children.start[node] = children.flat.len();
-            for &child in &outgoing[node] {
+            for &child in &out_flat[out_start[node]..out_start[node] + out_len[node]] {
                 if visited[child] {
                     continue;
                 }
