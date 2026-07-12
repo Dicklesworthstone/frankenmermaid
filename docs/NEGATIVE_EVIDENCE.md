@@ -1198,6 +1198,28 @@
   just the leaf body. The precomputed-const-gate pattern was already in the codebase for two paths; the lever was
   extending it to the three that were skipped. `find_operator` gate rebuild is now fully eliminated on all paths.
 
+### WIN: trim_fast the per-id normalize_identifier trim — seq parse −0.41%, broad across types (2026-07-12)
+- **A cross-cutting trim_fast site the type-specific harvests missed.** After the operator-gate win, a `classcard`
+  profile put `normalize_identifier` (fm-parser **`lib.rs`**, crate-public) at **4.38% total / 4.08% self**. It
+  opens with std `str::trim` — the Unicode `char::is_whitespace` CharSearcher — and is called per **node / actor /
+  period / slice / point** id across nearly every diagram type (~30 call sites in `mermaid_parser.rs` +
+  `ir_builder.rs`), almost always on an already-trimmed ASCII id where the trim is a no-op that still pays the
+  CharSearcher setup.
+- **Lever:** route line 26 through `crate::mermaid_parser::trim_fast` (already `pub(crate)`; lib.rs already uses
+  `crate::mermaid_parser::` paths). One line, byte-identical, monotonic-less-work (`trim_fast ≤ str::trim` always).
+- **Measured (`perf stat instructions:u`, interleaved, min of 4, size 300 × 3000 iters):**
+  - `seq` **−0.408%**, `pie` **−0.364%**, `timeline` **−0.283%**, `class` **−0.206%**, `classcard` **−0.177%**,
+    `gantt` **−0.137%** — a broad win across 6 types.
+  - `er` / `flowo` **neutral** (≤0.001%): ER interns ids without this path; flowchart's fast node path bypasses
+    `normalize_identifier` entirely.
+- **Byte-identical** dump across **25 profharness shapes at n=40 and n=300**; clippy clean. Landed `3787c4d`.
+- **META:** the type-specific trim harvests (flowchart, then class) each found their own hot trims, but a
+  **crate-shared** helper on the id path served *all* types and was still on std `str::trim` — worth grepping the
+  whole crate (not just the type parser) for `.trim()`/`.trim_start()`/`.trim_end()` that bypass `trim_fast`.
+  `normalize_identifier`'s remaining self-time is its `to_owned()` alloc on the fast path — a structural Cow/borrow
+  lever (return `&str`/`Cow` when unchanged so the interner clones once instead of twice), deferred as it touches
+  ~30 callers.
+
 ### REJECT: fuse the fast-node reject + `[`-locate scans into one table-driven pass — +0.74% parse REGRESSION (2026-07-12)
 - **Hypothesis (looked obvious):** `parse_fast_simple_flowchart_node_borrowed` (10.17% self on the
   flowchart/800 parse profile) does two byte scans per statement — a reject `.bytes().any(matches!(byte,
