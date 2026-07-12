@@ -1267,6 +1267,23 @@
   The parser per-line trim vein (`line` + `raw_line` loops) is now fully harvested; residual parse `trim_matches`
   is shape-inherent or in cold directive branches.
 
+### WIN: trim_fast the shared normalize_compound_identifier whitespace trims — gantt −0.7%, journey −0.6% (2026-07-12)
+- **A second crate-shared id helper still on std trim** (the `normalize_identifier` sibling). A gantt profile showed
+  `trim_matches::<is_whitespace>` 4.7% from `normalize_compound_identifier` — called per gantt task / journey step /
+  kanban card / mindmap node / xychart series across **~10 sites** — which opened with
+  `raw.trim().trim_matches('"').trim_matches('\'').trim_matches('`').trim()`: TWO std whitespace `.trim()` per call.
+- **Lever:** route the two whitespace trims through `trim_fast` (the char `trim_matches` quote strips stay — memchr,
+  not the CharSearcher); also `parse_gantt`'s per-task `raw_meta.trim()`. Byte-identical.
+- **Measured (`perf stat instructions:u`, interleaved, min of 4, size 300 × 3000):** `gantt` **−0.671%**, `journey`
+  **−0.645%**; kanban/mindmap/xychart neutral (their ids reach the helper already pre-trimmed, so the trims are
+  no-ops there). Byte-identical across 24 shapes; clippy clean. Landed `d7f135b`.
+- **META (reinforces 3787c4d):** the crate-shared id-normalization helpers (`normalize_identifier`,
+  `normalize_compound_identifier`) each carry std whitespace trims that serve *all* types — worth grepping fm-parser
+  for `fn normalize*` / id/label helpers and their `.trim()`/`.trim_matches` chains. Also profiled hexagon/diamond
+  (chumsky-bound: `add_alt` 17.7% + `truncate` 11.4% ≈ 30% error-tracking on successful parses) and other types for
+  the grisu float-format lever (xychart was the only one). The chumsky overhead on shaped flowchart nodes is
+  structural (a fast-path bypass, byte-identity-hard) — a future lever, not a small increment.
+
 ### WIN: integer fast-path for xychart point-label float formatting — xychart parse −9.7% (2026-07-12)
 - **A new lever kind — grisu float-format elision, found by profiling xychart.** A xychart parse profile was ~30%
   **float-to-string formatting**: `grisu::format_shortest_opt` 8.5% + `core::fmt::write` 9.9% + `float_to_decimal_common_shortest::<f32>` 6.7%.
