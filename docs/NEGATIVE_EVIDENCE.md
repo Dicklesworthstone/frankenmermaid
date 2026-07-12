@@ -1133,6 +1133,37 @@
   next class-parse lever is the trims in `parse_class_assignment_ast` / `split_statements`, not the node/edge
   path just harvested.
 
+### WIN: trim_fast the class member + block-start declaration parse trims — class parse −0.87% (2026-07-12)
+- **Follow-up to the entry above** (`812b246` predicted this). A fresh symbolized `class 300` parse profile
+  (`perf record --call-graph dwarf` on the post-`812b246` binary) still showed
+  `<str>::trim_matches::<is_whitespace>` at **7.13% total / 6.92% self** — the member path. `parse_class_member`
+  never appears as its own frame because it is **inlined** into the class-block loop, so its per-member trims
+  surface as `trim_matches` self-time, not a named symbol. (Confirmed the caller at mermaid_parser.rs:2530 —
+  `if in_block.is_some() { parse_class_member(trimmed) }` — fires for every `+int field`/`+method() bool`
+  block-body line, 2×/class.)
+- **Lever:** route the class-only hot trims through the `trim_fast` family (byte-exact drop-ins, no new helper
+  needed):
+  - `parse_class_member` (2×/class): top line trim, post-visibility-prefix (`+`/`-`/`#`/`~`) trim, post-`$`/`*`
+    static/abstract-marker trim, colon `name`/`type` trims, and the post-`)` return-type trim.
+  - `parse_class_statements` `class X {` block-start (1×/class): the two `.trim()` in the
+    `trim_start_matches("class").trim().trim_end_matches('{').trim()` chain (kept the `str`/`char`-pattern
+    `trim_*_matches`, swapped only the whitespace `.trim()`s).
+- **Left `parse_class_assignment_ast` untouched:** its `statement.strip_prefix("class ")?` returns `None` for
+  relation lines (`C0 <|-- C1`), so its trims never run on this corpus — profile-confirmed cold, no edit.
+- **Measured (`perf stat instructions:u`, same-session symbolized release binaries, interleaved, min of 5,
+  size 300 × 3000 iters):**
+  - `class` parse **14,791,589,177 → 14,663,685,301 = −0.865%** (the member-heavy shape — the target).
+  - `classbad` parse −0.130%, `classcard` parse −0.229% (smaller: fewer/no block members).
+  - `flowo` / `wide` parse **−0.001% / 0.000%** — exactly neutral, because both functions are reachable only
+    through the class-diagram parser (flowchart never calls them). No code-layout regression.
+- **Byte-identical** dump across **34 profharness shapes at n=40 and n=300**; clippy clean. Landed `700ec88`.
+- **META:** the two class-parse trim commits (`812b246` node/edge, `700ec88` member) split the ~15.6% class
+  `trim_matches` sample-share into a combined ~−1.4% on `class` / ~−1.3% on `classcard` — again a fraction of
+  the sampled %, consistent with the CharSearcher-IPC lesson. The remaining `trim_matches` on `class` is now
+  `find_operator_core` / `split_whitespace` shape-inherent work, not stray direct-`.trim()` callers. The
+  class-parse trim harvest is exhausted; the next class-parse lever is structural (`find_operator_core` 5.85%
+  self on the relation path, or the `split_statements` segment trims if a non-class corpus exercises them).
+
 ### REJECT: fuse the fast-node reject + `[`-locate scans into one table-driven pass — +0.74% parse REGRESSION (2026-07-12)
 - **Hypothesis (looked obvious):** `parse_fast_simple_flowchart_node_borrowed` (10.17% self on the
   flowchart/800 parse profile) does two byte scans per statement — a reject `.bytes().any(matches!(byte,
