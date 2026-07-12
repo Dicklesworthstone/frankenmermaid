@@ -907,6 +907,11 @@ fn lower_flow_document_item(
     active_clusters: &[usize],
     active_subgraphs: &[usize],
 ) {
+    // `add_node_to_active_groups` only does work when a cluster or subgraph is open; on a flat
+    // flowchart both are empty (this fn is entered with `&[], &[]` and only recurses non-empty inside
+    // a subgraph body), so it is a no-op called ~2400×/parse (both endpoints per edge + each node).
+    // Gate the calls on this once-computed flag — byte-identical (skips a provable no-op).
+    let in_groups = !active_clusters.is_empty() || !active_subgraphs.is_empty();
     match item {
         FlowDocumentItem::FastEdge {
             from,
@@ -929,8 +934,10 @@ fn lower_flow_document_item(
                 builder.intern_edge_endpoint_pretrimmed(to, span)
             };
             if let (Some(f), Some(t)) = (from_id, to_id) {
-                add_node_to_active_groups(builder, active_clusters, active_subgraphs, f);
-                add_node_to_active_groups(builder, active_clusters, active_subgraphs, t);
+                if in_groups {
+                    add_node_to_active_groups(builder, active_clusters, active_subgraphs, f);
+                    add_node_to_active_groups(builder, active_clusters, active_subgraphs, t);
+                }
                 builder.push_edge(f, t, arrow, None, span);
             }
         }
@@ -955,7 +962,9 @@ fn lower_flow_document_item(
                 if let Some(icon) = icon.as_deref() {
                     builder.set_node_icon(node_id, icon);
                 }
-                add_node_to_active_groups(builder, active_clusters, active_subgraphs, node_id);
+                if in_groups {
+                    add_node_to_active_groups(builder, active_clusters, active_subgraphs, node_id);
+                }
             }
         }
         FlowDocumentItem::Statements {
