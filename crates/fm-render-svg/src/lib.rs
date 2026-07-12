@@ -1512,10 +1512,25 @@ fn matches_ci_at(haystack: &[u8], at: usize, needle: &[u8]) -> bool {
 /// the old per-needle scan would match is routed to that needle's `matches_ci_at`, which re-verifies
 /// the full substring (no false positives from the loose first-byte dispatch).
 fn scan_node_class_keywords(class: &str) -> NodeClassKeywords {
+    scan_class_keywords_and_clean(class).0
+}
+
+/// One pass over `class` that both detects the state keywords (as [`scan_node_class_keywords`]) AND
+/// reports whether the class is an already-valid lowercase CSS token (the `all(clean)` fast-path check
+/// [`write_sanitized_css_token_into`] does). The node-class fast paths call this once and reuse both
+/// results, replacing TWO independent byte scans of the same string with one — on classed nodes
+/// (timeline/journey/class/…) each node has 1-2 user classes, so this halves the per-class scan work.
+/// Byte-identical: the keyword arms are unchanged and `clean` matches `write_sanitized`'s predicate.
+fn scan_class_keywords_and_clean(class: &str) -> (NodeClassKeywords, bool) {
     let b = class.as_bytes();
     let mut f = NodeClassKeywords::default();
+    let mut clean = true;
     for i in 0..b.len() {
-        match b[i] | 0x20 {
+        let raw = b[i];
+        if !(raw.is_ascii_lowercase() || raw.is_ascii_digit() || raw == b'-' || raw == b'_') {
+            clean = false;
+        }
+        match raw | 0x20 {
             b'h' if matches_ci_at(b, i, b"highlight") => {
                 f.highlighted = true;
             }
@@ -1561,7 +1576,7 @@ fn scan_node_class_keywords(class: &str) -> NodeClassKeywords {
             _ => {}
         }
     }
-    f
+    (f, clean)
 }
 
 /// Write the CSS-sanitized form of `value` straight into `buf` — the alloc-free core of
@@ -5097,7 +5112,9 @@ fn simple_node_user_class_suffix(node: &fm_core::IrNode) -> Option<String> {
     let mut suffix = String::new();
     let mut block_beta = false;
     for class in &node.classes {
-        let kw = scan_node_class_keywords(class);
+        // One fused pass yields both the keyword flags (for the reject gate) and whether the class is an
+        // already-clean CSS token (so the write below can bulk-`push_str` without re-scanning).
+        let (kw, is_clean) = scan_class_keywords_and_clean(class);
         if kw.highlighted
             || kw.inactive
             || kw.dashed_border
@@ -5115,9 +5132,15 @@ fn simple_node_user_class_suffix(node: &fm_core::IrNode) -> Option<String> {
         }
         // A non-empty class always sanitizes to a non-empty token (every char maps to one char), so gate
         // on the raw class and write the token straight into `suffix` — no throwaway per-class `String`.
+        // `is_clean` from the fused scan skips `write_sanitized_css_token_into`'s redundant `all(clean)`
+        // re-scan on the common already-clean class.
         if !class.is_empty() {
             suffix.push_str(" fm-node-user-");
-            write_sanitized_css_token_into(&mut suffix, class);
+            if is_clean {
+                suffix.push_str(class);
+            } else {
+                write_sanitized_css_token_into(&mut suffix, class);
+            }
         }
     }
     // The slow path appends `fm-node-block-beta` AFTER the per-class `fm-node-user-…` loop (see the
@@ -5138,7 +5161,7 @@ fn simple_node_user_class_suffix(node: &fm_core::IrNode) -> Option<String> {
 fn simple_class_node_user_suffix(node: &fm_core::IrNode) -> Option<String> {
     let mut suffix = String::new();
     for class in &node.classes {
-        let kw = scan_node_class_keywords(class);
+        let (kw, is_clean) = scan_class_keywords_and_clean(class);
         if kw.highlighted
             || kw.inactive
             || kw.dashed_border
@@ -5165,7 +5188,11 @@ fn simple_class_node_user_suffix(node: &fm_core::IrNode) -> Option<String> {
         }
         if !class.is_empty() {
             suffix.push_str(" fm-node-user-");
-            write_sanitized_css_token_into(&mut suffix, class);
+            if is_clean {
+                suffix.push_str(class);
+            } else {
+                write_sanitized_css_token_into(&mut suffix, class);
+            }
         }
     }
     Some(suffix)
