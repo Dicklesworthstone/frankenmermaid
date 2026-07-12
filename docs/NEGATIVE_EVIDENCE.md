@@ -1215,6 +1215,20 @@
   boundary checks + call overhead) and it fires per item. Estimated ~0.3%, measured −1.66% — MEASURE, don't
   eyeball "cheap" per-call helpers on per-item hot loops. Grep the doc loops of other diagram parsers
   (class/state/er at `split_statements(line)`) for the same producer-already-trimmed re-trim.
+
+### WIN: scalar `.iter().any()` over memchr-backed `contains` in per-line early-outs — −0.38% parse (2026-07-12)
+- **Lever (the INVERSE of the ByteLines memchr reject).** `strip_flowchart_inline_comment` (early-out on `%`) and
+  `split_statements` (early-out on `;`) each did `line.as_bytes().contains(&byte)`, once per source line in the
+  flowchart doc loop. `<[u8]>::contains` is **memchr-specialized** in std (`SliceContains for u8` → `memchr::memchr`).
+  The ByteLines `\n` reject already proved memchr loses to a compiler-vectorized scalar scan on short
+  (~tens-of-bytes) per-line haystacks. Swapped both to `.iter().any(|&b| b == byte)` — byte-identical presence test.
+- **Measured (deterministic `perf stat instructions:u`, flowchart/800 parse ×4000, interleaved):** HEAD
+  **3,408,098** instr/iter → CAND **3,395,294** = **−12,804/iter (−0.38%)**; variance ~3k out of 13.6B (signal
+  ~17,000× the noise). Byte-identical across 19 shapes; 408/408 tests. Landed `a27bd56`.
+- **LESSON: the ByteLines reject is a REUSABLE LEVER read backwards.** `<[u8]>::contains(&byte)` / `iter().position`
+  vs `memchr` — for SHORT per-line/per-item haystacks, prefer the scalar `.iter().any()`/`.position()`; std's
+  memchr specialization on `contains` is a pessimization there. (For long single haystacks — whole-input newline
+  counting — memchr still wins; see `ca95fe4`.) Grep hot short-scan sites for `.as_bytes().contains(&b`.
 ### Acyclic SCC fast-path in `GraphMetrics::from_ir` — −27 to −29% layout (Auto-selection overhead) (2026-06-27)
 - **Lever (the 203µs Auto overhead pinned last cycle):** the Auto algorithm selection
   (`select_general_graph_algorithm_with_config`) calls `GraphMetrics::from_ir` on **every** layout —
