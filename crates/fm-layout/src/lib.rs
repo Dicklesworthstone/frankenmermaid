@@ -6259,7 +6259,13 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
     let mut explicit_starts = vec![None; task_count];
     let mut durations = vec![1_i32; task_count];
     let mut milestones = vec![false; task_count];
-    let mut task_id_to_idx = BTreeMap::new();
+    // Lookup-only (built once below, read via `.get` for dependency resolution; never iterated — the
+    // resolved order comes from the task list). An `FxHashMap` replaces the `BTreeMap<String, _>`'s
+    // O(log N) String-comparison (memcmp) inserts/lookups with O(1) hashing — memcmp was ~25% of gantt
+    // layout on the fixture's `after t{n-1}` dependency chain. Presized to task_count to avoid rehashing.
+    // Mirrors the parser's `parse_gantt` `task_ids_to_nodes` FxHashMap. Byte-identical output.
+    let mut task_id_to_idx: FxHashMap<String, usize> =
+        FxHashMap::with_capacity_and_hasher(task_count, Default::default());
     let excluded_dates = expand_gantt_excluded_dates(gantt_meta);
     let skip_weekends = gantt_meta
         .excludes
