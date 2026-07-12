@@ -1229,6 +1229,27 @@
   vs `memchr` — for SHORT per-line/per-item haystacks, prefer the scalar `.iter().any()`/`.position()`; std's
   memchr specialization on `contains` is a pessimization there. (For long single haystacks — whole-input newline
   counting — memchr still wins; see `ca95fe4`.) Grep hot short-scan sites for `.as_bytes().contains(&b`.
+
+### WIN: skip the redundant id-trim for flowchart fast-path interns — −3.18% parse (2026-07-12)
+- **Lever (REDUNDANT-WORK removal on the hottest symbol; biggest single win of the cycle).** `intern_node_auto`
+  (top parse self-time) normalized every id with `trim_fast(id)`, but the flowchart fast paths
+  (`parse_fast_simple_flowchart_node_borrowed` / `_edge_parts`) hand in ids already `trim_ascii`'d AND validated
+  as pure-ASCII `is_fast_flow_identifier`s (non-empty, no whitespace) — so `trim_fast(id) == id` and the trim is a
+  proven no-op there. It ran on ~2400 interns/parse (800 nodes + both endpoints of ~799 edges).
+- **Change:** split `intern_node_auto` into a trimming wrapper + an `intern_node_auto_normalized` core (id assumed
+  pre-trimmed); point the fast-path interns at the core — `intern_node_label_owned` (FastNode) and a new
+  `intern_edge_endpoint_pretrimmed` (FastEdge, replacing `intern_node_label` in the lowering arm). General callers
+  still trim via `intern_node_auto`. Byte-identical (removed trim never changed the pre-trimmed pure-ASCII ids; the
+  empty-id guard still runs in the core and those ids are non-empty by validation).
+- **Measured (deterministic `perf stat instructions:u`, flowchart/800 parse ×4000, interleaved):** HEAD
+  **3,395,296** instr/iter → CAND **3,287,366** = **−107,930/iter (−3.18%)**; variance ~20k out of 13.1B (signal
+  ~20,000× the noise). Byte-identical across 24 shapes; 408/408 tests; clippy verified PRE-commit. Landed `efa2141`.
+- **LESSON: estimated ~0.5%, measured −3.18% — a `trim_fast`/helper call is NOT free even when its body is a
+  no-op, because it was NOT inlined at the call site (full call overhead ×2400 on the hottest path).** When a
+  shared normalizer (trim/validate/dedup) sits on a hot intern/insert path and a subset of callers pre-satisfy its
+  precondition, split off a `_normalized`/`_pretrimmed` core and route the fast callers around the guard. This is
+  the same producer-already-normalized pattern as the −1.66% doc-loop re-trim, but at the intern boundary and 2×
+  the calls. Look for other shared hot helpers (`hash_key`, label normalize) whose fast-path callers pre-satisfy them.
 ### Acyclic SCC fast-path in `GraphMetrics::from_ir` — −27 to −29% layout (Auto-selection overhead) (2026-06-27)
 - **Lever (the 203µs Auto overhead pinned last cycle):** the Auto algorithm selection
   (`select_general_graph_algorithm_with_config`) calls `GraphMetrics::from_ir` on **every** layout —
