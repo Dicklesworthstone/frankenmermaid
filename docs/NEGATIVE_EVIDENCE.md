@@ -1301,6 +1301,22 @@
   pre-normalizing callers through it (111ba9f / 5cd410a / efa2141).** The flowchart node label pipeline is now
   trim-clean end to end: label_raw trim (1) → parse_label_pretrimmed (no re-trim) → extract_icon_prefix_pretrimmed
   (no re-trim) → split helpers (no top re-trim). One necessary trim where there were four.
+
+### WIN: gate the no-op `add_node_to_active_groups` calls in flowchart lowering — −2.41% parse (2026-07-12)
+- **Lever (GATE A NO-OP CALL — new flavor: not a redundant normalize, but a call that does nothing on the common
+  input shape).** `add_node_to_active_groups` appends the node to every open cluster/subgraph, but a flat
+  flowchart has none — lowering is entered with `&[], &[]` and only recurses non-empty inside a subgraph body —
+  so it is a no-op called ~2400×/parse (both endpoints per edge + each node). Compute `in_groups =
+  !active_clusters.is_empty() || !active_subgraphs.is_empty()` once at the top of `lower_flow_document_item` and
+  gate the FastEdge (×2) + FastNode (×1) calls. Byte-identical (skips a provable no-op; non-empty path unchanged).
+- **Measured:** HEAD **3,150,524** → CAND **3,074,568** instr/iter = **−75,956/iter (−2.41%)**; variance ~7k out
+  of 12.3B (signal ~40,000×). Byte-identical across 21 shapes **incl. `subg`** (exercises the non-empty gate
+  path); 408/408 tests incl. subgraph/cluster membership tests; clippy PRE-commit. Landed `318fede`.
+- **LESSON: the "non-inlined helper isn't free" rule generalizes beyond re-normalization to ANY per-item helper
+  that's a no-op on the common input.** Empty-collection loops (`for x in &[] {}`) look free but the enclosing
+  non-inlined CALL is ~2.4% ×2400. Gate the call on a once-computed `is_empty()` flag. Grep hot per-item loops
+  for helper calls that iterate a collection that's usually empty on the benchmark shape (active clusters/subgraphs,
+  styles, warnings, dangling-recovery lists).
 ### Acyclic SCC fast-path in `GraphMetrics::from_ir` — −27 to −29% layout (Auto-selection overhead) (2026-06-27)
 - **Lever (the 203µs Auto overhead pinned last cycle):** the Auto algorithm selection
   (`select_general_graph_algorithm_with_config`) calls `GraphMetrics::from_ir` on **every** layout —
