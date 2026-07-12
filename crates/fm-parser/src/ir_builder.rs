@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::collections::hash_map::Entry;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -88,16 +89,22 @@ impl NodeIdIndex {
     /// guarantee the id is not already present (`intern_node_auto` checks `get_with_hash` first),
     /// so an occupied slot here is always a hash COLLISION between distinct ids.
     fn insert_with_hash(&mut self, hash: u64, node_id: IrNodeId) {
-        match self.buckets.get_mut(&hash) {
-            None => {
-                self.buckets.insert(hash, NodeIdBucket::One(node_id));
+        // `entry` locates the slot in ONE probe; the old `get_mut(&hash)` + `insert(hash, ..)` pair
+        // probed the bucket map twice on the common vacant path (every distinct node id). The bucket
+        // transitions are identical, so this is behaviour-identical.
+        match self.buckets.entry(hash) {
+            Entry::Vacant(slot) => {
+                slot.insert(NodeIdBucket::One(node_id));
             }
-            Some(NodeIdBucket::One(existing)) => {
-                let existing = *existing;
-                self.buckets
-                    .insert(hash, NodeIdBucket::Many(vec![existing, node_id]));
+            Entry::Occupied(mut slot) => {
+                let bucket = slot.get_mut();
+                match bucket {
+                    NodeIdBucket::One(existing) => {
+                        *bucket = NodeIdBucket::Many(vec![*existing, node_id]);
+                    }
+                    NodeIdBucket::Many(candidates) => candidates.push(node_id),
+                }
             }
-            Some(NodeIdBucket::Many(candidates)) => candidates.push(node_id),
         }
     }
 }
@@ -158,16 +165,22 @@ impl LabelIndex {
     /// guarantee the pair is not already present (`intern_label` checks `get_with_hash` first),
     /// so an occupied slot is always a hash COLLISION.
     fn insert_with_hash(&mut self, hash: u64, label_id: IrLabelId) {
-        match self.buckets.get_mut(&hash) {
-            None => {
-                self.buckets.insert(hash, LabelBucket::One(label_id));
+        // One-probe `entry` in place of `get_mut` + `insert` (two probes on the vacant path, hit for
+        // every distinct label). Bucket transitions identical — behaviour-identical. See
+        // `NodeIdIndex::insert_with_hash`.
+        match self.buckets.entry(hash) {
+            Entry::Vacant(slot) => {
+                slot.insert(LabelBucket::One(label_id));
             }
-            Some(LabelBucket::One(existing)) => {
-                let existing = *existing;
-                self.buckets
-                    .insert(hash, LabelBucket::Many(vec![existing, label_id]));
+            Entry::Occupied(mut slot) => {
+                let bucket = slot.get_mut();
+                match bucket {
+                    LabelBucket::One(existing) => {
+                        *bucket = LabelBucket::Many(vec![*existing, label_id]);
+                    }
+                    LabelBucket::Many(candidates) => candidates.push(label_id),
+                }
             }
-            Some(LabelBucket::Many(candidates)) => candidates.push(label_id),
         }
     }
 }
