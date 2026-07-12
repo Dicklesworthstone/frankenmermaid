@@ -1267,6 +1267,27 @@
   The parser per-line trim vein (`line` + `raw_line` loops) is now fully harvested; residual parse `trim_matches`
   is shape-inherent or in cold directive branches.
 
+### WASH: move-through `normalize_sequence_display_text` to skip the entity-decode copy — seq −0.016% (2026-07-12)
+- **Hypothesis.** A seq profile put `decode_mermaid_entities` at **2.44% self**. It allocates a `String` +
+  copies the whole label **unconditionally**, even for an entity-free label (the common `A->>B: msg` case), where
+  the decode is the identity. Since the source label (from `clean_label`) is already an owned `String`, change
+  `normalize_sequence_display_text(&str)` → `(String)` and **move the owned allocation through** when no `<`/`&`/`#`
+  is present (both `replace_br_with_newlines` and `decode_mermaid_entities` are then the identity), eliminating the
+  redundant decoded-copy alloc. Updated all 5 callers (`mem::take` for the 3 participant `value.text` reassigns,
+  `to_string()` for the cold note path, by-value `.map(...)` for the hot message-label path).
+- **Byte-identical** (25 shapes, n=40 & n=300) — `<`/`&`/`#` aren't whitespace, so scanning full `text` matches
+  scanning `text.trim()`; the length check preserves the leading trim for any untrimmed caller.
+- **Measured (`perf stat instructions:u`, interleaved, min of 5, size 300 × 3000):** `seq` **−0.016%** — a **wash,
+  within run-to-run noise**. flowo/er/class neutral (function is seq-only).
+- **Verdict: REJECT / revert** (working tree back to exact HEAD, shipped bytes unchanged). The eliminated alloc is a
+  **mimalloc small-object alloc + a ~3-byte copy** — far too cheap to measure. `decode_mermaid_entities`'s 2.44%
+  self-time is its `String::with_capacity` + the **two** per-iteration `find('&')`/`find('#')` scans + call
+  overhead, NOT the tiny alloc I removed; and the move-through fast path re-adds an `any(<|&|#)` scan + a `trim()`
+  scan, roughly cancelling. **LESSON: an "eliminate an allocation" lever only pays when the allocation is large or
+  frequent relative to the surrounding scan work — a per-item small-String copy is near-free under mimalloc.** If
+  `decode_mermaid_entities` is revisited, the lever is fusing its two `find` scans into one `position(b==&||b==#)`
+  pass (byte-identical, no signature change), not the alloc.
+
 ### REJECT: first-byte guard before `starts_with` in the operator scan — wins seq/class but +13.4% ER, +1.1% styled3 (2026-07-12)
 - **Hypothesis.** A `seq 300` parse profile showed `__memcmp_avx2_movbe` (a **libc call**) at **12.55%** — `find_operator_core`'s
   inner loop `for op in operators { if tail.starts_with(op) … }` lowers each `starts_with` to a libc `memcmp`, and at a
