@@ -1267,6 +1267,28 @@
   The parser per-line trim vein (`line` + `raw_line` loops) is now fully harvested; residual parse `trim_matches`
   is shape-inherent or in cold directive branches.
 
+### WIN: byte-scan the requirement-relation operator splits — requirement parse −5.7% (2026-07-12)
+- **The prior SURFACE was too pessimistic — profiling ONE MORE not-yet-examined dedicated parser found a fat win.**
+  A `requirement 300` parse profile showed a **TwoWaySearcher storm**: `StrSearcher::new` **3.3%** +
+  `<StrSearcher as ReverseSearcher>::next_match_back` **1.8%** (→ `TwoWaySearcher::new` + `maximal_suffix` +
+  `reverse_maximal_suffix`). Source: `parse_requirement_relation` ran **`statement.split_once("->")`** and
+  **`left_raw.rfind(" - ")`** per relation line — each a multi-char `&str` pattern that builds a `TwoWaySearcher`
+  (maximal-suffix factorization). On the short relation-line haystack (`R0 - satisfies -> R1`) the per-line
+  **searcher setup dwarfs the actual scan** — the exact baaccaa `<br>`-replace / 44fa4ec render pattern.
+- **Lever:** replace both with byte scans — `statement.as_bytes().windows(2).position(|w| w == b"->")` for the
+  first `->`, `left_raw.as_bytes().windows(3).rposition(|w| w == b" - ")` for the last ` - `. Byte-identical:
+  `position`/`rposition` return the exact first/last match index, and both needles are ASCII (char-boundary safe).
+- **Measured (`perf stat instructions:u`, interleaved, min of 5, size 300 × 3000):** `requirement` parse
+  **7,654,260,641 → 7,220,428,512 = −5.668%**; `flowo` neutral (`parse_requirement_relation` is requirement-only).
+- **Byte-identical** across 23 shapes (n=40 & n=300); clippy clean. Landed `28417b6`.
+- **META — my −0.13% pre-estimate was 40× too LOW; MEASURE.** A `TwoWaySearcher::new` for even a 2–3 byte needle is
+  ~80–120 instr of factorization setup, not the handful I assumed. **REUSABLE LEVER (frontier reopened): grep every
+  dedicated type parser for `split_once("<multi-char>")` / `.find("…")` / `.rfind("…")` / `.contains("…")` /
+  `.replace("…")` with a `&str` (not `char`) literal on a per-line/per-item hot path → replace with a byte scan
+  (`windows(N).position`/`memchr`).** The `char`-pattern forms (memchr) are already fine; only the multi-byte `&str`
+  patterns build the TwoWaySearcher. Candidates to check next: the other relation/statement parsers (state, class,
+  gantt, xychart, mindmap) for multi-char `&str` split/find on their hot lines.
+
 ### SURFACE: render + layout profiling sweep — both at mature floor, remaining levers are structural (2026-07-12)
 - **Context.** After 6 landed parse wins + 2 clean parse rejects this session, the parser clean veins are mined, so
   I pivoted to profile the two phases untouched this session (`perf record --call-graph dwarf`, current-HEAD binary).
