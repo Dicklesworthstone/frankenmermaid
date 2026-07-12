@@ -1267,6 +1267,26 @@
   The parser per-line trim vein (`line` + `raw_line` loops) is now fully harvested; residual parse `trim_matches`
   is shape-inherent or in cold directive branches.
 
+### REJECT: first-byte guard before `starts_with` in the operator scan — wins seq/class but +13.4% ER, +1.1% styled3 (2026-07-12)
+- **Hypothesis.** A `seq 300` parse profile showed `__memcmp_avx2_movbe` (a **libc call**) at **12.55%** — `find_operator_core`'s
+  inner loop `for op in operators { if tail.starts_with(op) … }` lowers each `starts_with` to a libc `memcmp`, and at a
+  gated position it probes up to 26 operators, most mismatching on byte 0. Idea: guard each `starts_with` with an explicit
+  `if op[0] != byte { continue; }` (byte-identical — `starts_with` requires `op[0]==byte` anyway) to skip the memcmp call
+  for the non-matching operators. Applied to `find_operator_core` (flow/class/seq/packet) and `find_plain_er_operator` (ER).
+- **Byte-identical** (26 shapes, n=40 & n=300) — the guard skips exactly what `starts_with` would reject.
+- **Measured (`perf stat instructions:u`, interleaved, min of 5–6, size 300 × 3000):** **MIXED and net-negative.**
+  - Wins: `seq` **−1.424%**, `class` **−1.107%**, `classcard` **−0.538%**.
+  - **Regressions: `er` +13.373%** (stable across 6 rounds, +383M instr) and `styled3` **+1.092%**; flowo/wide neutral.
+- **Verdict: REJECT (reverted, working tree back to exact HEAD, shipped bytes unchanged).** The added data-dependent
+  branch **defeats the compiler's vectorized/unrolled `starts_with` loop** over the small `const` operator array — for
+  `ER_OPERATORS` (14 six-byte relation glyphs like `||--o{`, mostly sharing first byte `|`/`}`) the baseline loop was
+  evidently SIMD/unrolled, and the per-op branch collapsed it to scalar (+13%). Same family as the 319b512 table/fuse
+  reject: **a `matches!`/`starts_with` chain over a small const set auto-vectorizes; a per-element data-dependent branch
+  can destroy that.** The win is real only where the list is long and the input long (seq, 26 ops) — not worth a +13% ER
+  regression. If revisited, it must be **gated per operator-list** (e.g. a `starts_with`-loop only for `SEQUENCE_OPERATORS`),
+  not applied to the shared core. The seq memcmp cost stands as the seq frontier; reducing it needs a vectorization-safe
+  restructure (first-byte-bucketed operator table), not a scalar guard.
+
 ### REJECT: fuse the fast-node reject + `[`-locate scans into one table-driven pass — +0.74% parse REGRESSION (2026-07-12)
 - **Hypothesis (looked obvious):** `parse_fast_simple_flowchart_node_borrowed` (10.17% self on the
   flowchart/800 parse profile) does two byte scans per statement — a reject `.bytes().any(matches!(byte,
