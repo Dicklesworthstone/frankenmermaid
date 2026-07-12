@@ -1206,7 +1206,12 @@ fn parse_flowchart_document_items<'a>(
         let mut parsed_line = false;
 
         for statement in split_statements(uncommented_line) {
-            let normalized_statement = trim_fast(statement);
+            // `split_statements` already yields trimmed segments: its `;`-split path `trim`s each
+            // segment, and its no-`;` fast path yields `uncommented_line` verbatim — which is itself
+            // the `trim_fast`'d `trimmed` (optionally `trim_end`'d by comment stripping). So this
+            // statement is already trimmed; the previous `trim_fast(statement)` here re-scanned it for
+            // nothing. Downstream `parse_fast_simple_*` still trim their input defensively.
+            let normalized_statement = statement;
             if normalized_statement.is_empty() {
                 parsed_line = true;
                 continue;
