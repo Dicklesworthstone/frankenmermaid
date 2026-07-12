@@ -14383,3 +14383,34 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   again `b7877e330301fe66ae61a6e60868439400ffafde56aa863cf3403a7d3964dc37`; the permanent parser bench SHA-256 is
   again `6a80c1ec2ae7e827d82dc597cb09d37bc8f37b664489ad70e5911579e6dd4c05`. Do not retry this exact architecture
   group-index substitution without a materially different workload or implementation.
+
+### REJECT: Kanban dense-ID class appends miss the decisive large-row floor (2026-07-12)
+
+- **Negative-ledger-first resumption:** this closes the explicit Kanban HOLD above rather than opening a new
+  parser family. The one candidate replaced only the successful-card base/priority/assignee/tag
+  `add_class_to_node(&card_key, ..., span)` calls with `add_class_to_node_id(nid, ...)`, using the `IrNodeId`
+  returned by the immediately preceding `intern_node`. Metadata parsing, class formatting, ordering, and all
+  other parser paths were unchanged.
+- **Isomorphism:** both helpers trim and reject empty class names, deduplicate against the same node class vector,
+  and append in the same order. `nid` already identifies the node found or inserted for `card_key`, including
+  duplicate-card resolution. Diagnostics, spans, node/label/class bytes, floating point, tie-breaking, and RNG are
+  unchanged.
+- **Authoritative strict-remote pair:** ORIG and CAND used committed base `c3b723a`, the permanent
+  `parse/kanban/{kanban_400,kanban_1600}` seam, and actual worker `vmi1156319`. Both ran via
+  `RCH_REQUIRE_REMOTE=1 RCH_WORKER=vmi1156319 env -u CARGO_TARGET_DIR rch exec -- cargo bench -j1 --profile
+  release -p fm-parser --bench parse_bench -- parse/kanban --warm-up-time 2 --measurement-time 5 --sample-size
+  30 --noplot`; the baseline was saved as `kanban-key-c3b723a`. ORIG parser/IR-builder SHA-256 was
+  `b7877e330301fe66ae61a6e60868439400ffafde56aa863cf3403a7d3964dc37` /
+  `b0187593bd67ce9f5d0a5b3153069b91a597375148255852f7ffbc28c53bbd87`; CAND changed only the parser to
+  `12739f195d038a9d0dd1857d3ba1c7aa23b6ba92c74ef46829e2f084293d8085`.
+- **Medians:** 400 cards moved **415.929 us** (95% CI **404.842..431.686 us**) to **399.639 us**
+  (**392.815..408.395 us**), ratio **0.96084**; the absolute intervals still overlap. The decisive 1,600-card row
+  moved **1.611452 ms** (**1.582279..1.645159 ms**) to **1.568567 ms** (**1.508339..1.627921 ms**), ratio
+  **0.97339**. Its paired median change was **-2.6613%** (95% CI **-6.9860%..+1.4304%**), short of the required
+  `<= 0.97` ratio and overlapping zero. Criterion likewise reported no detectable change (`p = 0.18`).
+- **Evidence hygiene / verdict:** two earlier baselines were discarded because concurrent `ir_builder.rs` work
+  changed the source between arms; an initially misrouted worker was cancelled before compilation. No cross-worker
+  or local timing entered this verdict. **REJECT.** The candidate was manually removed; the tracked parser and
+  permanent bench hashes are again `b7877e330301fe66ae61a6e60868439400ffafde56aa863cf3403a7d3964dc37` and
+  `6a80c1ec2ae7e827d82dc597cb09d37bc8f37b664489ad70e5911579e6dd4c05`. Do not retry this exact dense-ID
+  substitution on the common no-metadata Kanban seam without a materially different workload.
