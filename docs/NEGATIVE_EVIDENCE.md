@@ -1267,6 +1267,25 @@
   The parser per-line trim vein (`line` + `raw_line` loops) is now fully harvested; residual parse `trim_matches`
   is shape-inherent or in cold directive branches.
 
+### REJECT + SURFACE: pie render is 56% grisu (full-precision arc coords); integer fast-path regressed +0.2% (2026-07-12)
+- **SURFACE (the big finding).** A render-phase grisu scan across types found **pie render is 80% float-formatting,
+  56% of it `grisu::format_shortest`** (`core::fmt::write` 20% + `Argument::fmt` 18% + `float_to_decimal::<f32>` 16%
+  + `format_shortest_opt` 12%). Cause: `render_pie_svg` writes the arc **endpoint coordinates** via
+  `write!(pie_svg, "{x1} {y1}")` / `"{x2} {y2}"` — **full-precision std grisu** (dump shows `300.4853`, `221.09802`,
+  `95.114914`). But `cx`/`cy`/`radius` (and **every other diagram type's coords**) use `write_number_into` →
+  **`write_fixed2`** (2 decimals). So pie is the lone type rendering coords at full grisu precision.
+  **Switching the arc coords to `write_number_into` (fixed-2) would cut pie render ~50%** — but it CHANGES OUTPUT
+  bytes (`300.4853` → `300.49`), so it is NOT byte-exact: a **rendering-consistency decision** needing a golden
+  regen, and verification that mermaid-js pie coords aren't full-precision. Surfaced, not shipped.
+- **REJECT (the byte-identical attempt).** Tried the proven integer fast-path (`write_shortest_f32`: whole-number
+  coords < 2^24 → `write_int_into`, else grisu) on the arc coords. **Regressed pie render +0.197%.** Two causes:
+  (1) pie arc coords are **~90% non-integer** (trig results), so the round-trip check is pure overhead on the
+  majority; (2) splitting the combined `write!("{x1} {y1}")` (ONE `fmt::write`) into two `write_shortest_f32` calls
+  **doubles the `fmt::write` dispatch** for the non-integer majority. Byte-identical (24 shapes) but net-negative →
+  reverted to exact HEAD. **META: the grisu-elision integer fast-path only wins when values are USUALLY integers
+  (xychart parse) — on a usually-non-integer stream (pie coords) the check + any fmt-call-splitting loses.** A
+  combined multi-value `write!("{a} {b}")` is also cheaper than N separate writes (one format_args dispatch).
+
 ### WIN: trim_fast the remaining `.map(str::trim)` per-item sites — xychart parse −1.0% (2026-07-12)
 - **Continuation of the per-item trim harvest.** Six `.split(…).map(str::trim)` sites still used std whitespace
   trim (the `is_whitespace` CharSearcher) per split item. `trim_fast` has the same `fn(&str) -> &str` signature, so
