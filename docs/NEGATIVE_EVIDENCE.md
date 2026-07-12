@@ -1056,6 +1056,27 @@
 
 ## Kept Wins Also Recorded Here By Request
 
+### WIN: gantt axis-tick date via direct byte write, not format!/pad_integral — gantt LAYOUT −11.7% (2026-07-12)
+- **Pivot from parse to LAYOUT (fresh vein — parse trim vein exhausted).** A `gantt/300` LAYOUT profile
+  showed ~30% in `format!` machinery (format_inner 11.5% + fmt::write 10% + `<i32 as Display>::fmt` 8.4% +
+  write_str 4.5% + `Formatter::pad_integral` 4.2%). Source: `format_gantt_axis_tick`, called once per axis-tick
+  DAY across the ENTIRE timeline span (`(0..=total_span_days).map(...)`, ~300 ticks), which formatted its date
+  via `format!("{year:04}-{month:02}-{day:02}")` — three zero-padded `pad_integral` fields per tick.
+- **Lever:** write the fixed 10-byte `YYYY-MM-DD` straight into a byte buffer (mirrors the parser's landed
+  `normalize_gantt_date_with_format` fast path). Gated so each field is exactly its padded width — year 0..10000
+  (4 digits), month/day 0..100 (2 digits, always true for the algorithm's 1..=12 / 1..=31); wider/negative
+  years keep `format!`.
+- **Byte-identical:** EXHAUSTIVELY verified the byte-write == `format!` for ALL 100,000,000 gated
+  (year,month,day) triples; dump identical across 5 shapes; 439/439 fm-layout tests. gantt-only. Clippy clean.
+- **Measured (`perf stat instructions:u`, interleaved, min of 6, gantt 300 × 8000):** 13.738B → 12.137B =
+  **−11.66%**. Landed `18902e7`.
+- **⭐⭐REUSABLE LEVER: `format!("{:0N}", int)` zero-pad drags in Formatter + `pad_integral` (~10× a direct
+  byte write) — on a hot per-item FIXED-WIDTH numeric string, write the bytes directly. Grep BOTH parser AND
+  layout/render for padded-int format!.** Same fast-path pattern the parser already used — apply cross-crate.
+- **⚠️NEXT (gantt layout): `__memcmp_avx2_movbe` still 22% total** — a separate string/byte-compare storm
+  (BTreeSet<i32> excluded-dates lookups? node-id map compares?) not yet chased; `layout_diagram_gantt_traced`
+  25.6% self + build_edge_paths 8.3% + layout_bounds_for_nodes 7% remain.
+
 ### WIN: block-beta token path trim_fast + drop redundant re-trims — block parse −0.88% (2026-07-12)
 - **Re-profile of the highest per-byte parse type (block 173µs).** `str::trim_matches::<is_whitespace>` ~6.8%
   + a TRIPLE-trim: `split_block_beta_defs` already `trim_fast`'s every token before pushing, yet
