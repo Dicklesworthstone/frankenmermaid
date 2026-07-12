@@ -8054,7 +8054,12 @@ fn extract_icon_prefix(label: Option<&mut ParsedLabel>) -> Option<String> {
 }
 
 fn split_fontawesome_icon_prefix(text: &str) -> Option<(&str, Option<&str>)> {
-    let trimmed = text.trim();
+    // `trim_fast` == `str::trim` byte-for-byte but skips the `char::is_whitespace` CharSearcher.
+    // The sole caller (`extract_icon_prefix`) already passes a `trim_fast`'d slice, so this top trim
+    // is a no-op on the common path — but it still fires for every labelled node, and the Unicode
+    // `trim_matches::<is_whitespace>` showed as ~6% of flowchart parse. The remainder trim below
+    // strips post-icon whitespace and is byte-identical under `trim_fast` too.
+    let trimmed = trim_fast(text);
     let remainder = trimmed.strip_prefix("fa:")?;
     let icon_end = remainder
         .find(|ch: char| ch.is_whitespace())
@@ -8064,12 +8069,15 @@ fn split_fontawesome_icon_prefix(text: &str) -> Option<(&str, Option<&str>)> {
     }
 
     let icon = &trimmed[..3 + icon_end];
-    let remainder = remainder[icon_end..].trim();
+    let remainder = trim_fast(&remainder[icon_end..]);
     Some((icon, (!remainder.is_empty()).then_some(remainder)))
 }
 
 fn split_emoji_icon_prefix(text: &str) -> Option<(&str, Option<&str>)> {
-    let trimmed = text.trim();
+    // Same `trim_fast` == `str::trim` swap as `split_fontawesome_icon_prefix`: the caller already
+    // trimmed `text`, but this runs once per labelled node (fontawesome returns `None` first on
+    // plain labels), so the Unicode CharSearcher trim here is on the hot flowchart-parse path.
+    let trimmed = trim_fast(text);
     let mut chars = trimmed.char_indices();
     let (_, first) = chars.next()?;
     if first.is_ascii() {
@@ -8078,7 +8086,7 @@ fn split_emoji_icon_prefix(text: &str) -> Option<(&str, Option<&str>)> {
 
     let next_boundary = chars.next().map_or(trimmed.len(), |(idx, _)| idx);
     let icon = &trimmed[..next_boundary];
-    let remainder = trimmed[next_boundary..].trim();
+    let remainder = trim_fast(&trimmed[next_boundary..]);
     Some((icon, (!remainder.is_empty()).then_some(remainder)))
 }
 
