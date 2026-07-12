@@ -1267,6 +1267,26 @@
   The parser per-line trim vein (`line` + `raw_line` loops) is now fully harvested; residual parse `trim_matches`
   is shape-inherent or in cold directive branches.
 
+### WIN: fused `[`-or-forbidden scan in fast node parser, early-reject `:::` nodes — styled3 parse −17% (2026-07-12)
+- **5th compounding shaped-flowchart win, via re-profile.** After the gate-byte pre-scan, styled3's top was
+  `parse_fast_simple_flowchart_node_borrowed` (14% self): styled node lines
+  (`N0[Node 0]:::serviceNodeStyle:::…`) hit the whole-line forbidden-byte scan, then fail the `ends_with(']')`
+  check anyway (the `[…]` is not the tail).
+- **Lever + a caught regression.** A naive reorder (find `[` first via `position(b'[')`, then `ends_with`) gave
+  styled3 −17% BUT **regressed diamond/hexagon +2%** — for `{`/`(`-shaped nodes the original forbidden-byte scan
+  short-circuits at the first `{`, whereas `position(b'[')` scans the whole non-`[` line. The fix: a **single fused
+  scan** for the first `[` OR forbidden byte — `[` first ⇒ require `ends_with(']')` (a `:::` node fails here,
+  skipping the rest); forbidden first ⇒ reject (diamond/hexagon short-circuit preserved); neither ⇒ plain node
+  (`is_fast_flow_identifier` subsumes the forbidden check). Byte-identical: same `Option` in every case.
+- **Measured (`perf stat instructions:u`, interleaved, min of 4, size 300 × 2000):** `styled3` **−16.521%**, `styled`
+  **−8.467%**, `asym` **−1.343%**; flowo/wide/parallel −0.5..0.6% (fused single pass is a small broad gain);
+  **diamond/hexagon EXACTLY 0.000%** (early-reject preserved). Byte-identical across 33 shapes; clippy clean. Landed
+  `e86de7a`.
+- **META — FIVE compounding shaped-flowchart wins** (chumsky EmptyErr → `:::` op reuse → find_triple_colon →
+  gate-byte pre-scan → this): styled3 parse is now **~30%** of 5 wins ago. And a reused lesson: **when reordering
+  checks in a hot dispatcher, a scan that was cheap because it short-circuited on the common reject (the `{`/`(`
+  forbidden byte) can silently regress if reordered — FUSE the concerns into one scan rather than sequencing them.**
+
 ### WIN: SIMD gate-byte pre-scan skips find_operator on `:::`-node lines — styled3 parse −23% (2026-07-12)
 - **4th compounding shaped-flowchart win, again via re-profile.** After `find_triple_colon`, styled3 STILL had
   `find_operator_core` at **24% self**: the `:::` guard computes `find_operator` on every styled node-declaration line
