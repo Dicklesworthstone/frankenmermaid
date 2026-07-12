@@ -1102,6 +1102,30 @@
   Instruction count remains the only arbiter. The trim_fast harvest on the flowchart node-label path is now
   genuinely exhausted (no `trim_matches::<is_whitespace>` caller remains on this corpus).
 
+### REJECT: fuse the fast-node reject + `[`-locate scans into one table-driven pass — +0.74% parse REGRESSION (2026-07-12)
+- **Hypothesis (looked obvious):** `parse_fast_simple_flowchart_node_borrowed` (10.17% self on the
+  flowchart/800 parse profile) does two byte scans per statement — a reject `.bytes().any(matches!(byte,
+  '(' | ')' | '{' | '}' | '"' | '\'' | '`' | '|' | '&' | ','))` 10-way compare chain, then a separate
+  `.iter().position(|&b| b == b'[')`. The **edge** fast path already replaced its analogous 12-way `matches!`
+  chain with a `FAST_EDGE_REJECT: [bool;256]` lookup table (a landed win). So: add a `FAST_NODE_REJECT` table
+  and fold both scans into one pass (table load per byte + record first `[`), mirroring the proven edge-path
+  pattern. Byte-identical by construction (reject set unchanged, first `[` = same split point).
+- **Measured (deterministic `perf stat instructions:u`, flowchart/800 parse ×4000, same-session symbolized
+  binaries, interleaved):** HEAD **14,579,073,642** → candidate **14,687,462,625** = **+108.4M instr, +0.74%
+  REGRESSION**. Output byte-identical across 19 flowchart/graph shapes (the change was correct — just slower).
+  Reverted; source restored to HEAD, not committed.
+- **Why it regressed (the lesson):** the "obvious" table+fuse *defeats auto-vectorization* that the original
+  two scans enjoy. `.any(matches!(..const set..))` over ≤10 constant bytes lowers to branchless SIMD byte
+  compares, and the reject branch is *never taken* on the hot path (perfectly predicted). `.position(== b'[')`
+  is likewise a simple vectorizable scan. The fused loop replaces both with (a) a **data-dependent table load**
+  per byte and (b) a **loop-carried `first_bracket.is_none()` write** — LLVM can vectorize neither, so it runs
+  scalar. **A lookup table is NOT universally faster than a `matches!` chain**: over a *small constant* set the
+  compiler vectorizes the compares, and a 256-byte table load + stateful fold is slower. The edge-path table
+  won for reasons specific to that path, not a general rule. Grep-for-`matches!`-and-tablify is a trap here.
+- **Corollary:** these fast-node scans are already near their instruction floor for this corpus; the branchy
+  form is the *fast* form. Don't re-attempt table/fuse variants on `parse_fast_simple_flowchart_node_borrowed`
+  without a fresh `perf stat` proving a vectorizable rewrite.
+
 ### Acyclic SCC fast-path in `GraphMetrics::from_ir` — −27 to −29% layout (Auto-selection overhead) (2026-06-27)
 - **Lever (the 203µs Auto overhead pinned last cycle):** the Auto algorithm selection
   (`select_general_graph_algorithm_with_config`) calls `GraphMetrics::from_ir` on **every** layout —
