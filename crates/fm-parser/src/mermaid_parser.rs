@@ -3689,8 +3689,12 @@ fn parse_er(input: &str, builder: &mut IrBuilder) {
         // Start of entity block: ENTITY_NAME {
         if trimmed.ends_with('{') {
             let entity_name = trimmed.trim_end_matches('{').trim();
+            let span = span_for(line_number, line);
+            if is_plain_normalized_er_id(entity_name) {
+                current_entity = builder.intern_node(entity_name, None, NodeShape::Rect, span);
+                continue;
+            }
             if let Some(node) = parse_node_token_with_config(entity_name, builder.parser_config()) {
-                let span = span_for(line_number, line);
                 current_entity = intern_node_token(builder, &node, span);
                 continue;
             }
