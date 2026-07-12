@@ -1267,6 +1267,30 @@
   The parser per-line trim vein (`line` + `raw_line` loops) is now fully harvested; residual parse `trim_matches`
   is shape-inherent or in cold directive branches.
 
+### WIN: flow_statement_parser uses EmptyErr not Rich error type — hexagon parse −54%, diamond −40% (2026-07-12)
+- **This overturns the prior "chumsky is structural" surface — it was a ONE-LINE config change, not a bypass.**
+  I had profiled hexagon/diamond/styled3 (~17B, biggest parse types) as ~30% chumsky `add_alt` + `truncate` and
+  filed it as a "structural, byte-identity-hard fast-path bypass" (deferred, not small). WRONG. `add_alt`/`truncate`
+  are how the **`Rich<char>` error type** records the set of **expected-token alternatives at every choice point**
+  (for nice error messages) — and `parse_flowchart_statement_asts` **discards the error content**, checking only
+  `errors.is_empty()` for success/failure, with no `recover_with` consuming it. So all that tracking is pure waste.
+- **Lever:** change `flow_statement_parser`'s error type from `extra::Err<Rich<'a, char>>` to
+  `extra::Err<EmptyErr>` (one line). Output-identical: the combinators and their success/failure decisions are
+  unchanged; only the discarded expected-token detail is no longer tracked (on failure the error Vec still gets an
+  `EmptyErr` entry, so `errors.is_empty()` still gates correctly). Verified `Rich` had **no other reference** in the
+  crate — no `.labelled()`/`.map_err`/`recover_with` — so nothing consumes the rich detail.
+- **Measured (`perf stat instructions:u`, interleaved, min of 4, size 300 × 2000):** `hexagon` parse **−54.093%**
+  (11.46B → 5.26B), `diamond` **−39.937%**, `asym` **−32.869%**; styled3 neutral (hits the `:::` chumsky-skip guard
+  1397); parallel/trapez/flowo/wide neutral (fast path / few choice points). The realized win (~50%) far exceeded
+  the profiled self-time (~30%) — the `Rich` tracking is heavily inlined into the combinator `go` methods.
+- **Byte-identical** across **33 shapes at n=40 and n=300**; clippy clean. Landed `ced3c6f`.
+- **META — a huge lesson: profile SELF-TIME named a library-internal symbol (`add_alt`) as "structural", but the
+  fix was a parser-CONFIG change.** When a parser-combinator/error library dominates a hot path, check whether the
+  expensive machinery (error tracking, spans, recovery) is actually CONSUMED — if the caller discards it, swap to
+  the cheapest error/extra type. `Rich` → `EmptyErr` / `Cheap` is a byte-identical drop-in when only
+  `errors.is_empty()` is used. **I nearly left a −54% win on the table by mislabeling it "structural" — always ask
+  "is this cost feeding a result anyone reads?" before deferring a library-dominated hotspot.**
+
 ### SURFACE: byte-exact small-increment veins exhausted across all phases; next wins are structural/decisions (2026-07-12)
 - **Context.** After ~15 landed byte-exact parse/render wins this session, this turn swept the remaining candidates
   and confirmed the clean small-increment veins are exhausted. Findings:
