@@ -1056,6 +1056,31 @@
 
 ## Kept Wins Also Recorded Here By Request
 
+### WIN: gantt task-id build — reuse owned id + push_usize_decimal, not format! — gantt parse −7.9% (2026-07-12)
+- **Phase sweep → biggest un-mined absolute cost.** A parse/layout/render timing sweep (size 300) put
+  timeline render (469µs) biggest but generic-Element-bound (needs the streaming rewrite, not a small
+  increment), then class parse (mined), then **gantt parse (194µs)**. A symbolized `gantt/300` parse profile
+  put `format!` at **~30%**: `alloc::fmt::format::format_inner` 12.9% + `core::fmt::write` 10.9% +
+  `String::write_str` 7.7%.
+- **Lever.** The sole hot `format!` was the per-task id build `let task_id = format!("{task_id_raw}_{line_number}")`
+  — it allocates a FRESH String and re-copies `task_id_raw` through the `Formatter` (+ the usize Display
+  machinery), though `task_id_raw` is an owned String unused afterward. Fix: MOVE `task_id_raw` into `task_id`,
+  `push('_')`, append the line number via `fm_core::push_usize_decimal` (the existing table-driven decimal
+  writer, made `pub`). Reuses the allocation, skips `format_inner`/`Formatter` entirely.
+- **Byte-identical:** `push_usize_decimal` == `usize` `Display` (pinned by its own test); dump identical across
+  10 shapes; 408/408 fm-parser lib tests + the fm-core decimal test pass. Only the gantt task path changed.
+- **Measured (`perf stat instructions:u`, symbolized release, interleaved, min of 6, gantt 300 × 8000):**
+  18.432B → 16.984B instructions = **−7.86%**. Clippy clean. Landed `9dc51ae`.
+- **⭐⭐REUSABLE LEVER (grep-able): `format!("{a}_{b}")` / `format!("{a}…")` where `a` is an OWNED, about-to-be-
+  dropped `String` on a hot id/label build path** — MOVE `a`, `push` the separator, append `b` with
+  `push_usize_decimal` (or `push_str`) instead of allocating a fresh String and re-copying `a` through the
+  Formatter. `format!` here is BOTH an alloc AND a full fmt-machinery pass; the move-and-append is neither.
+- **DEFERRED (timeline/er render):** biggest render costs but generic Element-tree architecture (Attributes::set
+  / Element drop / write_into) + inherent num-format (write_uint 22%/write_fixed2 15%) + escaping. The one
+  targeted symbol is `scan_class_keywords_and_clean` (15% of timeline render — timeline nodes carry 2 repetitive
+  classes `timeline-period`/`timeline-event` + `timeline-section-N`, re-scanned per node) but it's already the
+  optimized 1-level-trie scan; a per-render content-keyed cache is a structural change, NOT a small increment.
+
 ### WIN: trim_fast the edge/state-transition label helpers — state parse −0.26% (2026-07-12)
 - **Re-profile after the class-cardinality win.** A symbolized `state/300` parse profile put
   `find_operator_core` at **12.7% self** + `__memcmp_avx2_movbe` **~15%** (the FLOW_OPERATORS `starts_with`
