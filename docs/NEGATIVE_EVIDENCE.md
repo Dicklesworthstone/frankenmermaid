@@ -1267,6 +1267,18 @@
   The parser per-line trim vein (`line` + `raw_line` loops) is now fully harvested; residual parse `trim_matches`
   is shape-inherent or in cold directive branches.
 
+### WIN: trim_fast the remaining `.map(str::trim)` per-item sites — xychart parse −1.0% (2026-07-12)
+- **Continuation of the per-item trim harvest.** Six `.split(…).map(str::trim)` sites still used std whitespace
+  trim (the `is_whitespace` CharSearcher) per split item. `trim_fast` has the same `fn(&str) -> &str` signature, so
+  `.map(trim_fast)` is a byte-identical drop-in (no closure, no ceremony).
+- **Measured (`perf stat instructions:u`, interleaved, min of 4, size 300 × 3000):** `xychart` parse **−0.971%**
+  (the hot site is `parse_xychart_numeric_values`, per data value); class/styled3/pie/gantt/flowo neutral (their
+  `.map(str::trim)` sites — class CSS-list, gantt excludes, seq participant visuals, chart category list — are cold
+  for their corpora). Byte-identical across 24 shapes; clippy clean. Landed `31d1d59`.
+- **META:** `.map(str::trim)` is a grep-able idiom for a per-item std whitespace trim — swap the function item to
+  `.map(trim_fast)` verbatim. Combined with the earlier per-line-loop and shared-id-helper harvests, the parser's
+  `str::trim` whitespace-CharSearcher surface is now essentially fully converted to `trim_fast`.
+
 ### WIN: trim_fast the shared normalize_compound_identifier whitespace trims — gantt −0.7%, journey −0.6% (2026-07-12)
 - **A second crate-shared id helper still on std trim** (the `normalize_identifier` sibling). A gantt profile showed
   `trim_matches::<is_whitespace>` 4.7% from `normalize_compound_identifier` — called per gantt task / journey step /
