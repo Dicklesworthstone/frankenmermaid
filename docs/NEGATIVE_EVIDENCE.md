@@ -1056,6 +1056,19 @@
 
 ## Kept Wins Also Recorded Here By Request
 
+### WIN: block-beta token path trim_fast + drop redundant re-trims — block parse −0.88% (2026-07-12)
+- **Re-profile of the highest per-byte parse type (block 173µs).** `str::trim_matches::<is_whitespace>` ~6.8%
+  + a TRIPLE-trim: `split_block_beta_defs` already `trim_fast`'s every token before pushing, yet
+  `parse_block_beta_blocks` re-`.trim()`'d it AND `try_parse_block_beta_def` `.trim()`'d it a 3rd time.
+  Dropped the middle (pass borrowed token through), `trim_fast`'d the rest, and deduped the double
+  `candidate_span.trim()` (digit check `chars().all`→`bytes().all`, empty-span vacuous-true preserved).
+- **Measured (`perf stat instructions:u`, interleaved, min of 6, block 300 × 8000):** 18.998B → 18.832B =
+  **−0.88%** (166M delta vs ~150k variance = signal). byte-id 10 shapes, 408 tests (incl 24 block). Landed `f968fbf`.
+- **⚠️BLOCK STRUCTURAL FRONTIER (deferred):** the larger residual is per-item `source_line: line.to_string()`
+  (4 sites — needs a `&'a str` lifetime-borrow refactor of `BlockBetaDocumentItem` + recursion, mechanical
+  but rippling; block is niche) + the find_operator op-table (same frontier as seq/state). trim vein now
+  mostly harvested across block too.
+
 ### WIN: normalize_compound_identifier — byte-scan quote/underscore trims + drop redundant realloc — journey −5.7% / gantt −5.1% (2026-07-12)
 - **Re-profile of the next-heaviest per-byte parse types.** A parse-timing sweep flagged journey (159µs) and
   block (173µs) as high per-byte. A symbolized `journey/300` parse profile showed `str::trim_matches::<char>`
