@@ -212,10 +212,13 @@ pub struct ParsedLabel {
     pub(crate) segments: Vec<IrLabelSegment>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum NodeLabelInput<'a> {
     Parsed(&'a ParsedLabel),
     Plain(&'a str),
+    /// Owned label the caller hands over by value (moved, not cloned, into the IR on the create
+    /// path). Used by the flowchart lowering pass to consume its `FastNode` label.
+    ParsedOwned(ParsedLabel),
 }
 
 impl ParsedLabel {
@@ -1244,6 +1247,18 @@ impl IrBuilder {
         self.intern_node_auto(id, label.map(NodeLabelInput::Parsed), shape, span, false)
     }
 
+    /// Like [`Self::intern_node_label`] but consumes an owned label, moving it into the IR instead of
+    /// cloning (see [`Self::intern_label_owned`]). For the flowchart lowering pass's `FastNode`.
+    pub(crate) fn intern_node_label_owned(
+        &mut self,
+        id: &str,
+        label: Option<ParsedLabel>,
+        shape: NodeShape,
+        span: Span,
+    ) -> Option<IrNodeId> {
+        self.intern_node_auto(id, label.map(NodeLabelInput::ParsedOwned), shape, span, false)
+    }
+
     pub(crate) fn intern_node(
         &mut self,
         id: &str,
@@ -1582,7 +1597,37 @@ impl IrBuilder {
         match label {
             NodeLabelInput::Parsed(label) => self.intern_label(label, span),
             NodeLabelInput::Plain(text) => self.intern_plain_label(text, span),
+            NodeLabelInput::ParsedOwned(label) => self.intern_label_owned(label, span),
         }
+    }
+
+    /// Owned-label variant of [`Self::intern_label`]: consumes the `ParsedLabel` and MOVES its text
+    /// and segments into the IR on the create path instead of cloning them. Byte-identical to
+    /// `intern_label` (same hash, same dedup, same insertion order); on a dedup hit the owned label is
+    /// dropped — exactly what happens to the borrowed form's owner. Lets the flowchart lowering pass
+    /// hand its owned `FlowDocumentItem::FastNode` label straight in, avoiding a `String` clone (and
+    /// that clone's later free when the document `Vec` drops) per distinct node label.
+    fn intern_label_owned(&mut self, label: ParsedLabel, span: Span) -> IrLabelId {
+        let label_hash = LabelIndex::hash_key(&label.text, &label.segments);
+        if let Some(existing_id) = self.label_index.get_with_hash(
+            label_hash,
+            &label.text,
+            &label.segments,
+            &self.ir.labels,
+            &self.ir.label_markup,
+        ) {
+            return existing_id;
+        }
+
+        let label_id = IrLabelId(self.ir.labels.len());
+        let ParsedLabel { text, segments } = label;
+        let has_segments = !segments.is_empty();
+        self.ir.labels.push(IrLabel { text, span });
+        if has_segments {
+            self.ir.label_markup.insert(label_id, segments);
+        }
+        self.label_index.insert_with_hash(label_hash, label_id);
+        label_id
     }
 
     fn intern_plain_label(&mut self, text: &str, span: Span) -> IrLabelId {

@@ -902,7 +902,7 @@ fn lower_flow_ast(
 }
 
 fn lower_flow_document_item(
-    item: &FlowDocumentItem<'_>,
+    item: FlowDocumentItem<'_>,
     builder: &mut IrBuilder,
     active_clusters: &[usize],
     active_subgraphs: &[usize],
@@ -915,7 +915,7 @@ fn lower_flow_document_item(
             line_number,
             source_line,
         } => {
-            let span = span_for(*line_number, source_line);
+            let span = span_for(line_number, source_line);
             let from_id = if is_dangling_placeholder_node_id(from) {
                 builder.intern_placeholder_node(from, span)
             } else {
@@ -929,7 +929,7 @@ fn lower_flow_document_item(
             if let (Some(f), Some(t)) = (from_id, to_id) {
                 add_node_to_active_groups(builder, active_clusters, active_subgraphs, f);
                 add_node_to_active_groups(builder, active_clusters, active_subgraphs, t);
-                builder.push_edge(f, t, *arrow, None, span);
+                builder.push_edge(f, t, arrow, None, span);
             }
         }
         FlowDocumentItem::FastNode {
@@ -940,12 +940,14 @@ fn lower_flow_document_item(
             source_line,
         } => {
             // Exact mirror of the `FlowAst::Node` arm of `lower_flow_ast` / `intern_flow_ast_node`
-            // for a Rect node — interns straight from the borrowed id slice.
-            let span = span_for(*line_number, source_line);
+            // for a Rect node — interns straight from the borrowed id slice. `item` is consumed by
+            // value so the owned `label` is MOVED into the interner (no `String` clone; see
+            // `intern_node_label_owned`) instead of being cloned from a borrow.
+            let span = span_for(line_number, source_line);
             let node_id = if is_dangling_placeholder_node_id(id) {
                 builder.intern_placeholder_node(id, span)
             } else {
-                builder.intern_node_label(id, label.as_ref(), NodeShape::Rect, span)
+                builder.intern_node_label_owned(id, label, NodeShape::Rect, span)
             };
             if let Some(node_id) = node_id {
                 if let Some(icon) = icon.as_deref() {
@@ -959,11 +961,10 @@ fn lower_flow_document_item(
             line_number,
             source_line,
         } => {
-            let source_line: &str = source_line;
-            for ast in asts {
+            for ast in &asts {
                 lower_flow_ast(
                     ast,
-                    *line_number,
+                    line_number,
                     source_line,
                     builder,
                     active_clusters,
@@ -978,9 +979,8 @@ fn lower_flow_document_item(
             source_line,
             body,
         } => {
-            let source_line: &str = source_line;
-            let span = span_for(*line_number, source_line);
-            let lookup_key = flow_subgraph_lookup_key(id, title.as_deref());
+            let span = span_for(line_number, source_line);
+            let lookup_key = flow_subgraph_lookup_key(&id, title.as_deref());
             let Some(cluster_index) = builder.ensure_cluster(&lookup_key, title.as_deref(), span)
             else {
                 return;
@@ -988,7 +988,7 @@ fn lower_flow_document_item(
             let parent_subgraph = active_subgraphs.last().copied();
             let Some(subgraph_index) = builder.ensure_subgraph(
                 &lookup_key,
-                id,
+                &id,
                 title.as_deref(),
                 span,
                 parent_subgraph,
@@ -1028,7 +1028,7 @@ fn parse_flowchart(input: &str, builder: &mut IrBuilder) {
     for warning in &document.warnings {
         builder.add_warning(warning.clone());
     }
-    for item in &document.items {
+    for item in document.items {
         lower_flow_document_item(item, builder, &[], &[]);
     }
 
