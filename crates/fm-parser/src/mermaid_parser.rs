@@ -1399,11 +1399,22 @@ fn parse_flowchart_statement_asts(
     // and any statement with a flow operator (e.g. `A -->|x:::y| B`, `A:::x --> B`) keeps its normal
     // edge handling — both stay on the chumsky path. Behavior-identical: for the skipped statements
     // chumsky returned a parse error and contributed nothing.
-    let chumsky_would_fail = statement.contains(":::")
-        && !statement.starts_with("style ")
-        && !statement.starts_with("linkStyle ")
-        && !statement.starts_with("classDef ")
-        && find_operator(statement, &FLOW_OPERATORS, FLOW_OP_GATE).is_none();
+    // Capture the operator position for `:::`-class statements ONCE: the chumsky-skip guard AND the
+    // edge-vs-node decision at the tail both need it, and on a long `:::`-suffixed node line (styled
+    // flowcharts) `find_operator` was re-scanning the whole statement up to 3× (guard + the tail's
+    // `parse_edge_statement_asts` + its `is_some()` re-check). Non-`:::` statements keep the lazy path,
+    // so plain flowcharts (no `:::`) do not pay an extra scan.
+    let class_suffix_op = statement
+        .contains(":::")
+        .then(|| find_operator(statement, &FLOW_OPERATORS, FLOW_OP_GATE));
+    let chumsky_would_fail = matches!(
+        &class_suffix_op,
+        Some(op)
+            if op.is_none()
+                && !statement.starts_with("style ")
+                && !statement.starts_with("linkStyle ")
+                && !statement.starts_with("classDef ")
+    );
     if !chumsky_would_fail {
         let (ast, errors) = flow_statement_parser()
             .parse(statement)
@@ -1427,13 +1438,42 @@ fn parse_flowchart_statement_asts(
         // but the side effect populates ir.style_refs via the builder.
         return Some(vec![FlowAst::StyleOrLinkStyle]);
     }
-    if let Some(asts) =
-        parse_edge_statement_asts(statement, &FLOW_OPERATORS, FLOW_OP_GATE, true, config, line_number)
-    {
-        return Some(asts);
-    }
-    if find_operator(statement, &FLOW_OPERATORS, FLOW_OP_GATE).is_some() {
-        return None;
+    // Reuse the `:::`-class operator position found above to avoid re-scanning: a `:::` node line has
+    // no operator, so it goes straight to `parse_node_token_with_config` — skipping the edge-parse scan
+    // and its `is_some()` re-scan (styled flowcharts are node-declaration-heavy). Non-`:::` statements
+    // take the original lazy path. Byte-identical: `parse_edge_statement_asts` returns `None` for a
+    // no-operator statement anyway, and the `is_some()` branch only mattered when an operator existed.
+    match &class_suffix_op {
+        Some(op) => {
+            if op.is_some() {
+                if let Some(asts) = parse_edge_statement_asts(
+                    statement,
+                    &FLOW_OPERATORS,
+                    FLOW_OP_GATE,
+                    true,
+                    config,
+                    line_number,
+                ) {
+                    return Some(asts);
+                }
+                return None;
+            }
+        }
+        None => {
+            if let Some(asts) = parse_edge_statement_asts(
+                statement,
+                &FLOW_OPERATORS,
+                FLOW_OP_GATE,
+                true,
+                config,
+                line_number,
+            ) {
+                return Some(asts);
+            }
+            if find_operator(statement, &FLOW_OPERATORS, FLOW_OP_GATE).is_some() {
+                return None;
+            }
+        }
     }
     if let Some(node) = parse_node_token_with_config(statement, config) {
         return Some(vec![FlowAst::Node(FlowAstNode {
