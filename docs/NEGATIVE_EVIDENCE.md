@@ -1241,6 +1241,14 @@
   flowchart −4.00%, er −4.12%, wide −3.59% (more edges → bigger adjacency win). The two CSRs together = flowchart
   layout ~−8%. ⚠️when the buckets can shrink (dedup/filter) the CSR needs start+len, not just offsets. 439/439
   tests, byte-id 21 shapes, clippy pre-commit.
+- **STACKED FOLLOW-UP #2 (`5bcb2a3`, flowchart layout −4.96%): same CSR on `count_back_edges`'s DFS adjacency**
+  (`vec![vec![]; n]`, run every layout via `GraphMetrics::from_ir` for Auto selection). No sort/dedup → offsets
+  alone (no len); iterative DFS reads `adj_flat[adj_start[n]..adj_start[n+1]]` by index. flowchart −4.96%, er
+  −5.14%, wide −4.45%. **Three CSRs stacked: flowchart layout ~2.50M → 2.155M instr/iter ≈ −14%.** ⚠️the win
+  (−4.96%) EXCEEDS `count_back_edges`'s self-time — the ~800 tiny allocs land in `mi_malloc`/`mi_free`/`finish_grow`,
+  NOT the function's self-time, so profile alloc SYMBOLS (not just the hot fn) to price a `Vec<Vec>`. The
+  `Vec<Vec<T>>`→CSR vein in layout is now largely mined (3 sites); `finish_grow` fell out of the top-18, malloc/free
+  ~10% → ~7%.
 
 ### WIN: detect parallel edges with a set pass, skip the count map on the no-parallel path — −0.72% layout (2026-07-12)
 - **Lever (skip building a structure only READ on a rare branch).** `build_edge_paths_with_orientation`
