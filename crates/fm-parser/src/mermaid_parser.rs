@@ -1747,7 +1747,7 @@ fn looks_like_explicit_subgraph_id(raw: &str) -> bool {
 fn parse_sequence(input: &str, builder: &mut IrBuilder) {
     for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
@@ -2480,7 +2480,7 @@ fn parse_class(input: &str, builder: &mut IrBuilder) {
 
     for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
@@ -2850,7 +2850,7 @@ fn parse_state(input: &str, builder: &mut IrBuilder) {
 
     for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
 
         // Inside a multi-line note block: collect until `end note`.
         if let Some((target, position, mut lines, start)) = note_block.take() {
@@ -3330,7 +3330,7 @@ fn parse_mindmap(input: &str, builder: &mut IrBuilder) {
 
     for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
@@ -3587,7 +3587,7 @@ fn parse_er(input: &str, builder: &mut IrBuilder) {
 
     for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
@@ -3801,7 +3801,7 @@ struct ErAttribute {
 /// - `varchar(255) email UK`
 /// - `date created_at`
 fn parse_er_attribute(line: &str) -> Option<ErAttribute> {
-    let trimmed = line.trim();
+    let trimmed = trim_fast(line);
     if trimmed.is_empty() {
         return None;
     }
@@ -4228,7 +4228,7 @@ fn parse_kanban(input: &str, builder: &mut IrBuilder) {
 
     for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
@@ -4448,7 +4448,7 @@ fn parse_timeline(input: &str, builder: &mut IrBuilder) {
 
     for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
@@ -4652,7 +4652,7 @@ fn parse_packet(input: &str, builder: &mut IrBuilder) {
 
     for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
@@ -4812,7 +4812,7 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
 
     for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
@@ -5270,7 +5270,7 @@ fn parse_pie(input: &str, builder: &mut IrBuilder) {
 
     for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
@@ -5355,7 +5355,7 @@ fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
 
     for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
@@ -5461,7 +5461,7 @@ fn parse_xychart(input: &str, builder: &mut IrBuilder) {
 
     for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
@@ -5595,7 +5595,7 @@ fn xychart_point_label(base_name: &str, x_label: &str, value: f32) -> String {
 fn parse_sankey(input: &str, builder: &mut IrBuilder) {
     for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
@@ -6044,7 +6044,7 @@ fn parse_block_beta_document_items(
     while let Some((line_number, line)) = lines.get(*next_index).copied() {
         *next_index += 1;
 
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
@@ -6408,7 +6408,7 @@ fn parse_gitgraph(input: &str, builder: &mut IrBuilder) {
 
     for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
@@ -7229,11 +7229,11 @@ fn parse_sequence_message_ast(statement: &str) -> Option<SequenceMessageData> {
     // was already paid, twice per message. Skip `parse_label` when the trimmed token already equals the
     // id (the only case that yields `None`): a token needing quote/entity/`_`-trim normalization has
     // `id != token.trim()` and still takes the full path. Byte-identical.
-    let left_label = (from_id.as_str() != left.trim())
+    let left_label = (from_id.as_str() != trim_fast(left))
         .then(|| parse_label(Some(left)))
         .flatten()
         .filter(|label| label.text != from_id);
-    let right_label = (to_id.as_str() != target_clean.trim())
+    let right_label = (to_id.as_str() != trim_fast(target_clean))
         .then(|| parse_label(Some(target_clean)))
         .flatten()
         .filter(|label| label.text != to_id);
@@ -8424,7 +8424,7 @@ fn parse_init_directives(input: &str, builder: &mut IrBuilder) {
     }
     for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         let Some(payload) = extract_init_payload(trimmed) else {
             continue;
         };
@@ -9571,7 +9571,7 @@ fn extract_accessibility_directives(input: &str, builder: &mut IrBuilder) {
     let mut descr_lines: Vec<&str> = Vec::new();
 
     for line in input.lines() {
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
 
         if in_acc_descr_block {
             if trimmed == "}" {
