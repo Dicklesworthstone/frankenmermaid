@@ -1159,6 +1159,27 @@
   vectorized) scalar loop that beats `memchr`'s per-call SIMD setup/dispatch overhead. The `ca95fe4` win was
   *counting* newlines across the WHOLE input (one long haystack); per-line splitting is the opposite shape.
   Don't `memchr`-ify a scan whose effective haystack is a single short line.
+
+### WIN: move FastNode labels into the interner instead of cloning — −1.84% parse (2026-07-12)
+- **Lever (the biggest parse win of the cycle — an ALLOCATION lever, not a scan lever).** After micro-scan
+  levers floored out (the two rejects above), the profile's alloc/free/drop cluster (`RawVecInner::deallocate`
+  ~5%, `mi_*`, `drop_glue::<ParseResult>` 3%, `drop_glue::<Vec<FlowDocumentItem>>`) pointed at the two-pass
+  flowchart design: `parse_flowchart_document_items` builds `Vec<FlowDocumentItem>` where each `FastNode` owns
+  its `ParsedLabel`; the lowering pass borrowed the items (`&FlowDocumentItem`), so `intern_label` **cloned**
+  `label.text` into `ir.labels`, and the original `String` was freed when the `Vec` dropped. Per node: alloc in
+  parse, clone in intern, free at drop.
+- **Change:** consume the item `Vec` **by value** in lowering; move each `FastNode` label into a new
+  `intern_node_label_owned` → `intern_label_owned` path that MOVES text+segments into the IR on the create path
+  (dedup hit still drops the owned label, exactly as the borrowed owner would). Removes the per-label clone and
+  its later free. `NodeLabelInput` gains a `ParsedOwned` arm (loses its now-unused `Copy`); `Statements` still
+  lowers `&asts` by shared ref, `Subgraph` recurses by value — behaviour unchanged.
+- **Measured (deterministic `perf stat instructions:u`, flowchart/800 parse ×4000, interleaved):** HEAD
+  **3,618,387** instr/iter → CAND **3,551,689** = **−66,699/iter (−1.84%)**; variance ~30k out of 14.2B (signal
+  ~9,000× the noise). Byte-identical rendered SVG across 25 shapes; 408/408 fm-parser tests pass. Landed `c223870`.
+- **LESSON: when byte-scan micro-levers floor out, pivot to ALLOCATION.** Two-pass parse→Vec→lower designs that
+  hand *borrowed* owned data to an interner pay a clone-then-free per item; consuming the intermediate Vec by
+  value and moving the owned field in erases both. −1.84% dwarfs every scan lever this cycle (−0.48%/−0.72%).
+  Candidates elsewhere: any `intern_*`/`push` fed from a `&`-borrow of a soon-dropped owned buffer.
 ### Acyclic SCC fast-path in `GraphMetrics::from_ir` — −27 to −29% layout (Auto-selection overhead) (2026-06-27)
 - **Lever (the 203µs Auto overhead pinned last cycle):** the Auto algorithm selection
   (`select_general_graph_algorithm_with_config`) calls `GraphMetrics::from_ir` on **every** layout —
