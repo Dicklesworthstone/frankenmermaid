@@ -1216,6 +1216,24 @@
   eyeball "cheap" per-call helpers on per-item hot loops. Grep the doc loops of other diagram parsers
   (class/state/er at `split_statements(line)`) for the same producer-already-trimmed re-trim.
 
+### REJECT (WASH): clean-scan fast path for `write_escaped_text` short labels — 0.00% render (2026-07-12)
+- **Context — PHASE PIVOT.** After ~−22% of flowchart-*parse* wins dropped parse to 2.88M instr/iter, a phase
+  comparison showed **render is now dominant at 3.65M** (parse 2.88M, layout 2.50M @flowchart/800). A render
+  profile: number formatters `write_uint_into` 15.4% + `write_fixed2` 12.5% + `write_number_into` 5% (~33%),
+  escapers `write_escaped_text` 10.9% + `write_escaped_attr` 8.6% (~19%) — matching the "render at FLOOR,
+  num-format+escape ledger-closed" evidence (`e17ee3f`).
+- **Hypothesis:** `write_escaped_attr` has a clean-string fast path (`if !any(&<>"')  { write_str }`), but
+  `write_escaped_text` only fast-paths LONG text (≥256B via memchr); the ~800 short clean node labels fall to its
+  per-byte loop. Added the analogous `if !any(&<>) { write_str }` (byte-identical: `>` escapes only inside `]]>`).
+- **Measured: 0.00% render** (14,594,640,332 → 14,594,643,041 instr, ×4000 — +0.00002%, pure noise). Byte-identical
+  across 24 shapes. Reverted, not committed.
+- **LESSON: a match-`continue` per-byte loop over a clean string ALREADY auto-vectorizes to the same scan** an
+  explicit `.iter().any()` fast path would — the compiler was doing it. Adding the fast path is dead code. The
+  `write_escaped_attr` fast path helps only because its slow path does extra `write_str` slicing bookkeeping;
+  `write_escaped_text`'s clean loop bottoms out at one trailing `write_str` either way. Render escape IS at floor
+  (confirms `e17ee3f`); don't re-add "obvious" clean-string fast paths without measuring — the codegen may already
+  match. Render's real cost is num-format (~33%, ledger-closed) + the structural raw_svg→doc→String memmove.
+
 ### REJECT: consolidate `extract_style_directives`'s 3-scan gate to 2 via a shorter shared needle — +4.4% styled3 REGRESSION (2026-07-12)
 - **Hypothesis:** `extract_style_directives`'s early-out does three full-input `str::contains(&str)` searches
   (`"class"`, `"style"`, `"linkStyle"`) — the `<&str as Pattern>::is_contained_in` at ~2.31% of parse, once per
