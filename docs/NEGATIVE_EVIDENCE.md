@@ -1056,6 +1056,33 @@
 
 ## Kept Wins Also Recorded Here By Request
 
+### WIN: gate `strip_class_cardinality` on a `"` pre-scan — class parse −6.9% (2026-07-12)
+- **Re-profiled the biggest ABSOLUTE parse cost, not the biggest per-byte.** A per-byte parse sweep across
+  shapes flagged asym/hexagon/diamond as ns/byte outliers, but `class` was the largest *absolute* (407µs at
+  size 300). A symbolized `class/300` parse profile put `find_operator_core` at **9.76% total** and showed
+  `parse_node_token_with_config` / `parse_edge_statement_asts` / malloc churn on the relationship path.
+- **Lever — a per-line routine that discarded all its work on the common case.** `strip_class_cardinality`
+  ran on EVERY class relationship line: a full `find_operator(CLASS_OPERATORS)` scan (which the edge parser
+  then *repeats*) plus `left.to_string()` / `right.to_string()` rebuilds. For the common line
+  (`A --> B : label`, no cardinality) it threw all three away and returned `(statement.to_string(), None,
+  None)` that the caller ignored in favour of the borrowed `statement`. Cardinality labels are ALWAYS quoted
+  (`"1"`, `"*"`), so gate the whole routine behind one vectorized `memchr(b'"')`: no `"` ⇒ return `None` ⇒
+  caller feeds the edge parser the original borrowed statement — **zero rebuild alloc, zero extra operator
+  scan**. Return type became `Option<…>` (was a discarded `String`); `Some` now implies ≥1 cardinality was
+  extracted, so the caller's `is_some()` re-check is gone.
+- **Byte-identical:** the old code returned `(statement.to_string(), None, None)` for any quote-free
+  statement, which the caller treated exactly like the original. Verified byte-identical dump across 10
+  profharness shapes (n=120); 408/408 fm-parser lib tests pass incl. the 4 class-cardinality tests that
+  exercise the `Some` (quoted) path.
+- **Measured (`perf stat instructions:u`, symbolized release, interleaved, min of 6, class size 300 × 8000):**
+  **37.865B → 35.253B instructions = −6.90%.** Only `strip_class_cardinality` (class-only) changed, so other
+  diagram types are untouched (all 10 shape dumps identical). Clippy clean. Landed `99569af`.
+- **META — profile the biggest ABSOLUTE cost, and audit per-line helpers that rebuild-then-discard.** A helper
+  whose result the caller *conditionally ignores* (here: uses the borrowed original unless a card is Some) is
+  paying alloc + scan for nothing on the common branch — gate it on the cheap byte-scan that proves the branch,
+  and hand back `None`/`Cow` so the common path borrows. Also: the same `find_operator` was scanned twice per
+  line (strip + edge parser); killing one is a direct hit on the top profile symbol.
+
 ### Byte-exact fast trims on the hot flowchart parse path — −1.65% parse (2026-07-11)
 - **Frontier shift:** after the render lane closed at its byte-identical floor (prior entry), a fresh
   per-phase instruction count (`default/800/4000`, `perf stat instructions:u`) put **parse co-dominant
