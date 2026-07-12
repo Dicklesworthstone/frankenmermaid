@@ -3202,7 +3202,11 @@ fn extract_state_guard_action(
     let Some(label) = label else {
         return (None, None, None);
     };
-    let label = label.trim();
+    // Whitespace trims routed through the byte-exact `trim_fast`/`trim_end_fast`/`trim_start_fast`
+    // siblings (identical slice to `str::trim*`, no `char::is_whitespace` CharSearcher). The entry trim
+    // fires once per labelled state transition; the guard/action trims fire on the `[cond]` / `/action`
+    // branches.
+    let label = trim_fast(label);
     if label.is_empty() {
         return (None, None, None);
     }
@@ -3216,27 +3220,25 @@ fn extract_state_guard_action(
         && let Some(bracket_end) = clean[bracket_start..].find(']')
     {
         guard = Some(
-            clean[bracket_start + 1..bracket_start + bracket_end]
-                .trim()
-                .to_string(),
+            trim_fast(&clean[bracket_start + 1..bracket_start + bracket_end]).to_string(),
         );
         clean = format!(
             "{}{}",
-            clean[..bracket_start].trim_end(),
-            clean[bracket_start + bracket_end + 1..].trim_start()
+            trim_end_fast(&clean[..bracket_start]),
+            trim_start_fast(&clean[bracket_start + bracket_end + 1..])
         );
     }
 
     // Extract action: / action()
     if let Some(slash_pos) = clean.find(" / ") {
-        action = Some(clean[slash_pos + 3..].trim().to_string());
-        clean = clean[..slash_pos].trim().to_string();
+        action = Some(trim_fast(&clean[slash_pos + 3..]).to_string());
+        clean = trim_fast(&clean[..slash_pos]).to_string();
     } else if let Some(slash_pos) = clean.find('/') {
         // Also handle without spaces: "/action"
-        let after = clean[slash_pos + 1..].trim();
+        let after = trim_fast(&clean[slash_pos + 1..]);
         if !after.is_empty() {
             action = Some(after.to_string());
-            clean = clean[..slash_pos].trim().to_string();
+            clean = trim_fast(&clean[..slash_pos]).to_string();
         }
     }
 
@@ -7891,7 +7893,11 @@ fn find_operator_core<'a>(
 }
 
 fn extract_pipe_label(right_hand_side: &str) -> (Option<String>, &str) {
-    let trimmed = right_hand_side.trim();
+    // Both callers (`parse_edge_statement_asts` / `parse_edge_statement`) pass an already-`trim_fast`'d
+    // `right_segment`, so `trim_fast` here is byte-identical to `str::trim` (and a no-op on the pre-trimmed
+    // input) but skips the `char::is_whitespace` CharSearcher — this fires once per edge on every
+    // edge-based diagram (state/class/er/packet, and complex flowchart edges).
+    let trimmed = trim_fast(right_hand_side);
     let Some(after_open) = trimmed.strip_prefix('|') else {
         return (None, trimmed);
     };
@@ -7900,7 +7906,7 @@ fn extract_pipe_label(right_hand_side: &str) -> (Option<String>, &str) {
     };
 
     let label = clean_label(Some(&after_open[..close_idx]));
-    let remainder = after_open[close_idx + 1..].trim();
+    let remainder = trim_fast(&after_open[close_idx + 1..]);
     (label, remainder)
 }
 
