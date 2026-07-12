@@ -1056,6 +1056,27 @@
 
 ## Kept Wins Also Recorded Here By Request
 
+### WIN: trim_fast the edge/state-transition label helpers — state parse −0.26% (2026-07-12)
+- **Re-profile after the class-cardinality win.** A symbolized `state/300` parse profile put
+  `find_operator_core` at **12.7% self** + `__memcmp_avx2_movbe` **~15%** (the FLOW_OPERATORS `starts_with`
+  sweep — state reuses `FLOW_OPERATORS`) as the dominant mass, with a residual
+  `str::trim_matches::<is_whitespace>` CharSearcher (~1.1%) on the per-edge label helpers.
+- **Lever (the clean, byte-identical part):** `extract_pipe_label` opened with `right_hand_side.trim()`
+  (+ a remainder `.trim()`) though BOTH callers already pass a `trim_fast`'d `right_segment` — a redundant
+  whitespace CharSearcher once per edge on every edge-based diagram (state/class/er/packet). And
+  `extract_state_guard_action` (once per labelled transition) used `str::trim*` at entry + in the
+  `[guard]`/`/action` branches. Routed all through `trim_fast`/`trim_end_fast`/`trim_start_fast`
+  (byte-exact, no CharSearcher). Unconditionally byte-identical.
+- **Measured (`perf stat instructions:u`, symbolized release, interleaved, min of 5, size 300 × 8000):**
+  state 14.656B → 14.618B = **−0.261%** (variance <100k of 14.6B → the ~38M-instr delta is signal);
+  class −0.08%, er wash. Byte-identical dump across 9 shapes; 408/408 lib tests pass. Clippy clean. Landed
+  `fc80583`.
+- **FRONTIER — state parse is now trim-exhausted; the remaining mass is the structural find_operator
+  op-table** (`find_operator_core` 12.7% + memcmp ~15% on the FLOW_OPERATORS `starts_with` longest-match
+  sweep). `071ec24` proved a scalar first-byte guard REGRESSES ER +13.4% (collapses the vectorized
+  `starts_with` loop); the real lever is a vectorization-safe first-byte-BUCKETED op table (longest-match
+  tie-break preserved) — NOT a small increment, deferred.
+
 ### WIN: gate `strip_class_cardinality` on a `"` pre-scan — class parse −6.9% (2026-07-12)
 - **Re-profiled the biggest ABSOLUTE parse cost, not the biggest per-byte.** A per-byte parse sweep across
   shapes flagged asym/hexagon/diamond as ns/byte outliers, but `class` was the largest *absolute* (407µs at
