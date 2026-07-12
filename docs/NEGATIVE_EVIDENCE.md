@@ -1250,6 +1250,24 @@
   precondition, split off a `_normalized`/`_pretrimmed` core and route the fast callers around the guard. This is
   the same producer-already-normalized pattern as the −1.66% doc-loop re-trim, but at the intern boundary and 2×
   the calls. Look for other shared hot helpers (`hash_key`, label normalize) whose fast-path callers pre-satisfy them.
+
+### WIN: skip `parse_label`'s redundant re-trim for the pre-trimmed flowchart label — −1.05% parse (2026-07-12)
+- **Lever (the `hash_key`/label-normalize follow-up flagged by efa2141).** `parse_fast_simple_flowchart_node_borrowed`
+  computes `label_raw = trim_fast(...)` then hands it to `parse_label`, whose plain-label fast path re-runs
+  `trim_fast(raw)` — a no-op on already-trimmed input, ~800×/parse (one per labelled node).
+- **Change:** split `parse_label` into a `parse_label_inner(raw, pretrimmed)` core + a `parse_label_pretrimmed`
+  wrapper; the node fast path calls the wrapper, which skips the fast-path trim. `pretrimmed` is a **const per
+  wrapper**, so the branch folds away (no runtime flag), and the special-char gate stays single-sourced in the
+  core (no duplication). Byte-identical (pre-trimmed `raw == trim_fast(raw)`; empty raw → `None` via the same guard).
+- **Measured (deterministic `perf stat instructions:u`, flowchart/800 parse ×4000, interleaved):** HEAD
+  **3,287,362** instr/iter → CAND **3,252,951** = **−34,411/iter (−1.05%)**; variance ~35k out of 13.1B (signal
+  ~4,000× the noise). Byte-identical across 24 shapes; 408/408 tests; clippy verified PRE-commit. Landed `5cd410a`.
+- **PATTERN (now 3× proven this cycle): const-flag `_pretrimmed`/`_normalized` core.** For a shared hot helper
+  (trim/validate/normalize) whose fast-path callers pre-satisfy its precondition, split a core taking a
+  compile-time-const `pretrimmed: bool` (or a distinct entry) and route fast callers through it — the guard
+  const-folds per wrapper, so there's zero runtime branch and zero logic duplication. Applied to: intern id-trim
+  (efa2141 −3.18%), doc-loop stmt re-trim (706c97a −1.66%), now label re-trim. Remaining: `extract_icon_prefix`
+  also re-`trim_fast`s `label.text` (already trimmed by `parse_label`) — next candidate.
 ### Acyclic SCC fast-path in `GraphMetrics::from_ir` — −27 to −29% layout (Auto-selection overhead) (2026-06-27)
 - **Lever (the 203µs Auto overhead pinned last cycle):** the Auto algorithm selection
   (`select_general_graph_algorithm_with_config`) calls `GraphMetrics::from_ir` on **every** layout —
