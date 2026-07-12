@@ -1179,6 +1179,26 @@ fn trim_start_fast(s: &str) -> &str {
     &s[start..]
 }
 
+/// `str::trim_end` equivalent that skips ASCII trailing whitespace by byte, falling back to the
+/// Unicode `char::is_whitespace` scan only when a non-ASCII byte sits at the trimmed end boundary —
+/// where a multi-byte Unicode-whitespace char could remain. Byte-identical to `str::trim_end` in
+/// every case; used on the class-relation parse path where a symbolized profile showed
+/// `trim_end_matches::<char::is_whitespace>` / `CharSearcher::next_match_back` as self-symbols.
+fn trim_end_fast(s: &str) -> &str {
+    let b = s.as_bytes();
+    let mut end = b.len();
+    while end > 0 && b[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    // A non-ASCII byte at the trimmed end may be part of a Unicode-whitespace char the ASCII scan
+    // left; defer to `str::trim_end` to stay byte-identical. Otherwise `end` sits just past an ASCII
+    // byte (a char boundary), so the slice is valid and identical to the Unicode trim.
+    if end > 0 && b[end - 1] >= 0x80 {
+        return s.trim_end();
+    }
+    &s[..end]
+}
+
 fn parse_flowchart_document_items<'a>(
     lines: &[(usize, &'a str)],
     next_index: &mut usize,
@@ -2662,7 +2682,7 @@ fn strip_class_cardinality(statement: &str) -> (String, Option<String>, Option<S
         let before_last_quote = &left[..q_start];
         if let Some(q_open) = before_last_quote.rfind('"') {
             source_card = Some(left[q_open + 1..q_start].to_string());
-            cleaned_left = format!("{}{}", left[..q_open].trim_end(), " ");
+            cleaned_left = format!("{}{}", trim_end_fast(&left[..q_open]), " ");
         } else {
             cleaned_left = left.to_string();
         }
@@ -2672,7 +2692,7 @@ fn strip_class_cardinality(statement: &str) -> (String, Option<String>, Option<S
 
     // Extract target cardinality from right side: `"*" ClassB : label` → `ClassB : label`, `"*"`
     let cleaned_right;
-    let trimmed_right = right.trim_start();
+    let trimmed_right = trim_start_fast(right);
     if let Some(after_quote) = trimmed_right.strip_prefix('"') {
         if let Some(close_quote) = after_quote.find('"') {
             target_card = Some(after_quote[..close_quote].to_string());
@@ -2688,7 +2708,7 @@ fn strip_class_cardinality(statement: &str) -> (String, Option<String>, Option<S
         return (statement.to_string(), None, None);
     }
 
-    let result = format!("{}{}{}", cleaned_left.trim_end(), op_str, cleaned_right);
+    let result = format!("{}{}{}", trim_end_fast(&cleaned_left), op_str, cleaned_right);
     (result, source_card, target_card)
 }
 
@@ -7304,7 +7324,7 @@ fn parse_edge_statement_asts(
     line_number: usize,
 ) -> Option<Vec<FlowAst>> {
     let (first_operator_idx, first_operator, first_arrow) = find_operator(statement, operators)?;
-    let left_raw = statement[..first_operator_idx].trim();
+    let left_raw = trim_fast(&statement[..first_operator_idx]);
     if left_raw.is_empty() {
         return None;
     }
@@ -7328,24 +7348,22 @@ fn parse_edge_statement_asts(
         if is_arrow_prefix(operator)
             && let Some((n_idx, n_op, n_arrow)) = next_operator
         {
-            let label_part = statement[rhs_start..n_idx].trim();
+            let label_part = trim_fast(&statement[rhs_start..n_idx]);
             edge_label = clean_label(Some(label_part));
             current_arrow = n_arrow;
 
             // Now we need to find the node AFTER the second operator
             let after_next_start = n_idx + n_op.len();
             next_operator = find_operator_from_index(statement, after_next_start, operators);
-            right_without_label = match next_operator {
+            right_without_label = trim_fast(match next_operator {
                 Some((next_idx, _, _)) => &statement[after_next_start..next_idx],
                 None => &statement[after_next_start..],
-            }
-            .trim();
+            });
         } else {
-            let right_segment = match next_operator {
+            let right_segment = trim_fast(match next_operator {
                 Some((next_idx, _, _)) => &statement[rhs_start..next_idx],
                 None => &statement[rhs_start..],
-            }
-            .trim();
+            });
 
             if right_segment.is_empty() {
                 if !config.create_placeholder_nodes {
@@ -7419,7 +7437,7 @@ fn parse_node_list_with_config(
     // the loop below trims/parses that one part, and `contains_top_level_ampersand` is false so the
     // parallel-list reject never fires.
     if !raw.as_bytes().contains(&b'&') {
-        let trimmed = raw.trim();
+        let trimmed = trim_fast(raw);
         if trimmed.is_empty() {
             return None;
         }
@@ -7437,7 +7455,7 @@ fn parse_node_list_with_config(
 
     let mut nodes = Vec::with_capacity(parts.len());
     for part in parts {
-        let trimmed = part.trim();
+        let trimmed = trim_fast(part);
         if trimmed.is_empty() {
             return None;
         }
@@ -7537,7 +7555,7 @@ fn parse_edge_statement_with_nodes(
     builder: &mut IrBuilder,
 ) -> Option<Vec<IrNodeId>> {
     let (first_operator_idx, first_operator, first_arrow) = find_operator(statement, operators)?;
-    let left_raw = statement[..first_operator_idx].trim();
+    let left_raw = trim_fast(&statement[..first_operator_idx]);
     if left_raw.is_empty() {
         return None;
     }
@@ -7560,11 +7578,10 @@ fn parse_edge_statement_with_nodes(
     loop {
         let rhs_start = operator_idx + operator.len();
         let next_operator = find_operator_from_index(statement, rhs_start, operators);
-        let right_segment = match next_operator {
+        let right_segment = trim_fast(match next_operator {
             Some((next_idx, _, _)) => &statement[rhs_start..next_idx],
             None => &statement[rhs_start..],
-        }
-        .trim();
+        });
 
         if right_segment.is_empty() {
             let to_node = if builder.parser_config().create_placeholder_nodes {
@@ -7774,7 +7791,7 @@ fn extract_pipe_label(right_hand_side: &str) -> (Option<String>, &str) {
 }
 
 fn parse_node_token_with_config(raw: &str, config: &ParserConfig) -> Option<NodeToken> {
-    let trimmed = raw.trim();
+    let trimmed = trim_fast(raw);
     if trimmed.is_empty() {
         return None;
     }
