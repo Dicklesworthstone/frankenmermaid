@@ -1264,6 +1264,19 @@
   skip scanning ENTIRELY for parser-known-safe classes — remains the STRUCTURAL lever. −1.16% << the 11.5%
   sample share (sample-overstates-instr again). LEVER: two independent read-only scans of the same buffer whose
   results are BOTH consumed → fuse to one pass returning a tuple.
+- **SURFACE — timeline render at floor for small increments (post-fusion re-profile).** After `c690f2a`,
+  `scan_class_keywords_and_clean` still SAMPLES at 13.7% of timeline render, but its REAL instruction cost is
+  ~2-3%: halving the scans (the fusion) gained only −1.16%, so the sample overstates ~4-5× (branchy generic +
+  `matches_ci_at`, the recurring lesson). Therefore a class-scan CACHE (dedup scans across nodes — timeline has
+  ~22 distinct classes over ~840 instances) is NOT worth it: a per-render `HashMap` needs invasive lifetime-
+  threading through render_layout→render_nodes_serial→render_node(_into)→simple_*_suffix, and a thread-local
+  version adds RefCell-borrow overhead + unbounded memory growth (needs per-render clear) — all to chase a
+  ~2-3% real symbol whose hit-path (hash+probe) is a similar cost to the scan it replaces. The remaining timeline
+  render costs are inherent/structural: num-format (`write_uint`/`write_fixed2`/`write_number`) ~22% (ledger-
+  closed), Attributes-builder (`set`/`write_into`) ~14% (would need per-element Element→raw_svg streaming à la
+  xychart `9cf568b` — a focused refactor per element type: bands / axis-ticks / connecting edges), memmove ~10%
+  (structural raw_svg→doc→String). No CLEAN SMALL increment remains in classed-node render; next wins there are
+  the STRUCTURAL parser-class-flag (skip scans entirely) or per-element streaming refactors.
 
 ### WIN: use the loop's `edge` for the span instead of re-fetching by index — −0.42% layout (2026-07-12)
 - **Context — LAYOUT profile (first this session).** @flowchart/800 layout (2.50M instr/iter): dominant is
