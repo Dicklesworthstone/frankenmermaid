@@ -1083,6 +1083,16 @@ impl IrBuilder {
             return None;
         }
 
+        // Reserve the `add_node_to_cluster` dedup set once, when the FIRST cluster is created — it fills
+        // to ~node-count as members accumulate, so this skips the geometric `reserve_rehash` (~5.8% of
+        // section-heavy parse: timeline −0.98%, journey −1.19%). Done here (per-section, cold) rather than
+        // in the per-node `add_node_to_cluster` so the flowchart node hot path is byte-for-byte unchanged
+        // (moving it into the hot path regressed flowchart +0.11% via inlining), and a subgraph-free diagram
+        // never reaches here so pays no unused-map allocation. Capacity-only ⇒ behavior-identical.
+        if self.cluster_member_set.capacity() == 0 {
+            self.cluster_member_set.reserve(self.ir.nodes.capacity().max(4));
+        }
+
         if let Some(&existing_index) = self.cluster_index_by_key.get(normalized_key) {
             // If the re-opened cluster has a title but the existing one doesn't,
             // update it.
@@ -1173,6 +1183,11 @@ impl IrBuilder {
         let normalized_public_key = public_key.trim();
         if normalized_lookup_key.is_empty() || normalized_public_key.is_empty() {
             return None;
+        }
+
+        // See `ensure_cluster`: one-time member-set reserve on first subgraph, off the per-node hot path.
+        if self.subgraph_member_set.capacity() == 0 {
+            self.subgraph_member_set.reserve(self.ir.nodes.capacity().max(4));
         }
 
         if let Some(&existing_index) = self.subgraph_index_by_key.get(normalized_lookup_key) {
