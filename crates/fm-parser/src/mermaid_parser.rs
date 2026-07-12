@@ -2589,7 +2589,7 @@ fn extract_class_generics(raw_name: &str) -> (&str, Vec<String>) {
 
 /// Parse a class member declaration like `+String name`, `-int age`, `#doSomething() void`.
 fn parse_class_member(line: &str) -> Option<fm_core::IrClassMember> {
-    let trimmed = line.trim();
+    let trimmed = trim_fast(line);
     if trimmed.is_empty() {
         return None;
     }
@@ -2603,7 +2603,7 @@ fn parse_class_member(line: &str) -> Option<fm_core::IrClassMember> {
         _ => (fm_core::ClassVisibility::Public, trimmed),
     };
 
-    let rest = rest.trim();
+    let rest = trim_fast(rest);
     if rest.is_empty() {
         return None;
     }
@@ -2614,17 +2614,17 @@ fn parse_class_member(line: &str) -> Option<fm_core::IrClassMember> {
     // Check for static ($) and abstract (*) markers at end
     let is_static = rest.ends_with('$');
     let is_abstract = rest.ends_with('*');
-    let rest = rest.trim_end_matches('$').trim_end_matches('*').trim();
+    let rest = trim_fast(rest.trim_end_matches('$').trim_end_matches('*'));
 
     // Parse type annotation
     let (name_part, return_type) = if let Some((name, typ)) = rest.rsplit_once(':') {
         // Colon-separated: `name : Type` or `method() : ReturnType`
-        (name.trim(), Some(typ.trim().to_string()))
+        (trim_fast(name), Some(trim_fast(typ).to_string()))
     } else if is_method {
         // For methods without colon, check for return type after closing paren
         // e.g., `eat() void` → name="eat()", return_type=Some("void")
         if let Some(paren_end) = rest.rfind(')') {
-            let after_paren = rest[paren_end + 1..].trim();
+            let after_paren = trim_fast(&rest[paren_end + 1..]);
             if after_paren.is_empty() {
                 (rest, None)
             } else {
@@ -2714,11 +2714,9 @@ fn strip_class_cardinality(statement: &str) -> (String, Option<String>, Option<S
 
 fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<ClassStatement>> {
     if line.starts_with("class ") && line.ends_with('{') {
-        let raw_name = line
-            .trim_start_matches("class")
-            .trim()
-            .trim_end_matches('{')
-            .trim();
+        let raw_name = trim_fast(
+            trim_fast(line.trim_start_matches("class")).trim_end_matches('{'),
+        );
         let (class_name, generics) = extract_class_generics(raw_name);
         return Some(vec![ClassStatement::BlockStart(
             class_name.to_string(),
