@@ -23,7 +23,7 @@ pub use mermaid_parser::first_significant_line;
 /// for backend layout engines and rendering formats.
 #[must_use]
 pub fn normalize_identifier(raw: &str) -> String {
-    let trimmed = raw.trim();
+    let trimmed = crate::mermaid_parser::trim_fast(raw);
     if trimmed.is_empty() {
         return String::new();
     }
