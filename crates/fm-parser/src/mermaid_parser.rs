@@ -2746,15 +2746,22 @@ fn parse_class_member(line: &str) -> Option<fm_core::IrClassMember> {
 /// The source cardinality is a quoted string after the left-hand class name
 /// and before the operator.  The target cardinality is a quoted string after
 /// the operator and before the right-hand class name.
-fn strip_class_cardinality(statement: &str) -> (String, Option<String>, Option<String>) {
+fn strip_class_cardinality(statement: &str) -> Option<(String, Option<String>, Option<String>)> {
+    // Cardinality labels are ALWAYS quoted (`"1"`, `"*"`). A statement with no `"` therefore carries
+    // no cardinality to strip — the common class relationship line (`A --> B : label`). Gate the whole
+    // routine (a `find_operator` scan the edge parser repeats anyway, plus the left/right rebuild
+    // allocations) behind a single vectorized `memchr(b'"')`. `None` tells the caller to use the
+    // borrowed `statement` verbatim. Byte-identical: the old code returned `(statement.to_string(),
+    // None, None)` for any quote-free statement, which the caller treats exactly like the original.
+    if !statement.as_bytes().contains(&b'"') {
+        return None;
+    }
+
     let mut source_card = None;
     let mut target_card = None;
 
     // Find operator position.
-    let op_pos = find_operator(statement, &CLASS_OPERATORS, CLASS_OP_GATE);
-    let Some((op_idx, op_str, _)) = op_pos else {
-        return (statement.to_string(), None, None);
-    };
+    let (op_idx, op_str, _) = find_operator(statement, &CLASS_OPERATORS, CLASS_OP_GATE)?;
 
     let left = &statement[..op_idx];
     let right = &statement[op_idx + op_str.len()..];
@@ -2788,11 +2795,11 @@ fn strip_class_cardinality(statement: &str) -> (String, Option<String>, Option<S
     }
 
     if source_card.is_none() && target_card.is_none() {
-        return (statement.to_string(), None, None);
+        return None;
     }
 
     let result = format!("{}{}{}", trim_end_fast(&cleaned_left), op_str, cleaned_right);
-    (result, source_card, target_card)
+    Some((result, source_card, target_card))
 }
 
 fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<ClassStatement>> {
@@ -2855,20 +2862,21 @@ fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<Class
             }
         }
 
-        // Try edge parsing — first strip cardinality labels if present.
-        let (cleaned_statement, source_card, target_card) = strip_class_cardinality(statement);
-        let edge_input = if source_card.is_some() || target_card.is_some() {
-            cleaned_statement.as_str()
-        } else {
-            statement
+        // Try edge parsing — first strip cardinality labels if present. `None` ⇒ no quoted
+        // cardinality, so the edge parser sees the original borrowed `statement` (no rebuild alloc).
+        let stripped = strip_class_cardinality(statement);
+        let edge_input = match &stripped {
+            Some((cleaned, ..)) => cleaned.as_str(),
+            None => statement,
         };
         if let Some(asts) =
             parse_edge_statement_asts(edge_input, &CLASS_OPERATORS, CLASS_OP_GATE, false, config, 0)
         {
             for ast in asts {
                 statements.push(ClassStatement::Ast(ast));
-                // Attach cardinality to this edge in lower_class_statement.
-                if source_card.is_some() || target_card.is_some() {
+                // Attach cardinality to this edge in lower_class_statement. `stripped` is `Some`
+                // only when at least one cardinality was extracted, so no is_some() re-check.
+                if let Some((_, source_card, target_card)) = &stripped {
                     statements.push(ClassStatement::Cardinality(
                         source_card.clone(),
                         target_card.clone(),
