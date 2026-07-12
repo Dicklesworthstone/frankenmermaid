@@ -1460,10 +1460,11 @@ static FAST_EDGE_REJECT: [bool; 256] = {
 };
 
 fn parse_fast_simple_flowchart_edge_parts(statement: &str) -> Option<(&str, ArrowType, &str)> {
-    // ASCII byte-level trim (auto-vectorizable) instead of the Unicode `char::is_whitespace` scan.
-    // Byte-identical here: any non-ASCII left after the trim is rejected by `is_fast_flow_identifier`
-    // below, falling back to the slow path which uses the Unicode `.trim()`.
-    let trimmed = statement.trim_ascii();
+    // Every caller (the flowchart doc loop, directly or via the `_ast` chain) passes an already
+    // `trim_fast`'d statement — no leading/trailing whitespace (ASCII or Unicode) remains — so the old
+    // top `trim_ascii` was a no-op. Use `statement` directly. (`left`/`right` around the operator are
+    // still trimmed below, where whitespace like `N0 --> N1` IS possible.)
+    let trimmed = statement;
     if trimmed.is_empty() || trimmed.bytes().any(|byte| FAST_EDGE_REJECT[byte as usize]) {
         return None;
     }
@@ -1540,9 +1541,10 @@ fn parse_fast_simple_flowchart_node_ast(statement: &str) -> Option<FlowAstNode> 
 fn parse_fast_simple_flowchart_node_borrowed(
     statement: &str,
 ) -> Option<(&str, Option<ParsedLabel>, Option<String>)> {
-    // ASCII byte-level trim; any non-ASCII survivor is rejected by `is_fast_flow_identifier` /
-    // the byte checks below, so this stays byte-identical to the Unicode `.trim()` slow path.
-    let trimmed = statement.trim_ascii();
+    // Every caller passes an already `trim_fast`'d statement (see
+    // `parse_fast_simple_flowchart_edge_parts`), so the top `trim_ascii` was a no-op — use `statement`
+    // directly. The `id` before `[` is still trimmed below (`N0 [x]` has interior whitespace).
+    let trimmed = statement;
     if trimmed.is_empty()
         || trimmed.bytes().any(|byte| {
             matches!(
