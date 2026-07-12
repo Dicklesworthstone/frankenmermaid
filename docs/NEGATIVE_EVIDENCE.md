@@ -1267,6 +1267,32 @@
   The parser per-line trim vein (`line` + `raw_line` loops) is now fully harvested; residual parse `trim_matches`
   is shape-inherent or in cold directive branches.
 
+### SURFACE: render + layout profiling sweep — both at mature floor, remaining levers are structural (2026-07-12)
+- **Context.** After 6 landed parse wins + 2 clean parse rejects this session, the parser clean veins are mined, so
+  I pivoted to profile the two phases untouched this session (`perf record --call-graph dwarf`, current-HEAD binary).
+- **Timeline RENDER (the biggest single cost, ~9.8M):** dominated by number formatting — `write_uint_into` **10.0%**
+  + `write_fixed2` **7.8%** + `write_number_into` 2.7% + `FmtNum::write_into` 2.3% ≈ **23%**, all at their
+  digit-table/DOTPAIRS floor (e79a7bd/dddc2ea); `write_escaped_attr`+`write_escaped_text` ~9% (byte-scan floor);
+  `memcpy`+`memmove` ~11% (the structural raw_svg→doc→String double-copy, 41948f2); `scan_class_keywords_and_clean`
+  **6.8%** — a tight single-pass byte scan (c690f2a) that is **not redundant** (the fast-path fires once per class;
+  moving it to parse is **net-zero** work since render runs once per parse). No small lever.
+- **Flowchart LAYOUT (800):** `build_edge_paths_with_orientation` **20.0% self** (obstacle routing — structural);
+  `query_segment` **9.6%** (floor, sort load-bearing); `build_tree_layout_structure` **9.4%** (already CSR, c2a9e77);
+  `GraphMetrics::from_ir` **4.4%** (inherent in-degree/root scan; `resolved_edges` called **once** per flowchart
+  layout — the 1306/9019 sites are the incremental-cache and cyclic Sugiyama paths, off the TREE path, so no
+  compute-once dedup); `FontMetrics::estimate_width`+`estimate_dimensions` ~5% — **bit-identity-locked**: the ASCII
+  path already uses a multiplier table, and factoring `avg` out of / precomputing `avg*mult` cannot help because the
+  in-order f32 `.sum()` (required for `{:.2}`-exact bit-identity, so un-vectorizable) is **add-latency-bound** — the
+  per-char multiply is already hidden under the f32-add dependency chain (a precompute would be a u128-storage-style
+  wash and bloat `FontMetrics` by 512 B). `memchr` `\n`-scan 2.8% is the 5bffc86 reject shape.
+- **Verdict: SURFACE.** No byte-identical small-increment lever in the profiled render/layout hot paths. The
+  remaining wins are all **structural / multi-crate**: (a) a class/generic-node render fast-path streaming boxes to
+  the output buffer (like the flowchart render −43% path — multi-hour, byte-identity-hard); (b) a non-incremental
+  `GraphMetrics`/edge-resolution cache shared across the layout's algorithm-selection + build passes; (c)
+  parser-flagged known-safe classes to skip the render scan (net-zero unless render is re-run). Parse remains the
+  mined-but-highest-yield phase; the next tractable parse lever is the seq operator **first-byte-bucketed table**
+  (the vectorization-safe form the 071ec24 scalar-guard reject pointed to). Shipped bytes unchanged (profiling only).
+
 ### WASH: move-through `normalize_sequence_display_text` to skip the entity-decode copy — seq −0.016% (2026-07-12)
 - **Hypothesis.** A seq profile put `decode_mermaid_entities` at **2.44% self**. It allocates a `String` +
   copies the whole label **unconditionally**, even for an entity-free label (the common `A->>B: msg` case), where
