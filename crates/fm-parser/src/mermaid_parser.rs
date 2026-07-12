@@ -5789,7 +5789,7 @@ fn parse_architecture(input: &str, builder: &mut IrBuilder) {
 
     for (index, raw_line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = strip_flowchart_inline_comment(raw_line).trim();
+        let trimmed = trim_fast(strip_flowchart_inline_comment(raw_line));
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
@@ -9436,7 +9436,7 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
     let mut first_style_span = None;
 
     for (line_number, raw_line) in byte_lines(input).enumerate() {
-        let line = raw_line.trim();
+        let line = trim_fast(raw_line);
         let span = span_for(line_number + 1, raw_line);
 
         if let Some(rest) = line.strip_prefix("classDef ") {
