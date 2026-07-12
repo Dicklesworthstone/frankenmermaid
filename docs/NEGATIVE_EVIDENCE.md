@@ -1216,6 +1216,24 @@
   eyeball "cheap" per-call helpers on per-item hot loops. Grep the doc loops of other diagram parsers
   (class/state/er at `split_statements(line)`) for the same producer-already-trimmed re-trim.
 
+### WIN: CSR bucketing in `rank_orders_from_key` instead of a Vec-per-rank — −4.36% flowchart layout (BIGGEST layout win) (2026-07-12)
+- **Lever (Vec-of-Vec → CSR flat + offsets; found by profiling a NON-flowchart type).** Profiling `er` layout
+  surfaced `RawVecInner::finish_grow` at ~6% spread across `rank_orders_from_key`/`build_tree`/`GraphMetrics`.
+  `rank_orders_from_key` bucketed node indices with `Vec<Vec<usize>>` indexed by rank — ONE heap alloc per rank.
+  On the common deep chain/tree graph each rank holds a single node, so that's ~one tiny `Vec` alloc+free PER NODE
+  (~800 for flowchart/800). Replaced with a CSR: counting-sort node indices into per-rank offsets (`rank_start`) +
+  one flat `Vec`, then sort + order-number each rank's contiguous segment. ~800 allocs → ~4.
+- **Measured (deterministic, layout ×4000, interleaved):** flowchart/800 2,469,621 → 2,362,041 instr/iter =
+  **−4.36%** (variance ~35k/9.9B); er/800 −4.35%; wide/800 −0.77% (many nodes/rank → fewer per-rank Vecs → smaller
+  win). Shared layout → helps EVERY diagram type. Byte-identical rendered SVG across 21 shapes (the end-to-end
+  layout-order gate — positions depend on this fn's output); clippy PRE-commit. Landed `0079152`. **Estimated
+  ~1%, measured −4.36%** — a swarm of tiny per-item `Vec` allocs (alloc+free+`Vec<Vec>` header/indirection) costs
+  far more than "cheap small allocs" suggests.
+- **LEVER: `Vec<Vec<T>>` indexed by a dense small key, where each inner Vec is TINY on the common input → CSR it**
+  (count → prefix-sum offsets → one flat `Vec` filled by per-bucket cursor; segment-sort in place). Same pattern
+  `build_tree_layout_structure` already uses (`children.flat` + start/len). Grep layout/parse for `vec![Vec::new();
+  n]` / `Vec<Vec<_>>` fed by `[key].push(x)` on a per-node/per-rank key.
+
 ### WIN: detect parallel edges with a set pass, skip the count map on the no-parallel path — −0.72% layout (2026-07-12)
 - **Lever (skip building a structure only READ on a rare branch).** `build_edge_paths_with_orientation`
   unconditionally built an `FxHashMap<(usize,usize),usize>` endpoint-pair count + a per-edge `Vec<usize>` index,
