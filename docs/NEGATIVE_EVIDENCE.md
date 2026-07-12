@@ -14444,3 +14444,31 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   `50545a9e75dad144f5d623aafd4c11af54e3ad2c9b950b3ef4177fd6bddafc63`, and
   `79cd7a4b029dc506d100cd89ceb668c484512c4920c643e9ffcaf7f6670a2c1e`. No local or cross-worker timing entered
   the verdict. Do not retry this exact two-clone substitution on the 600-node cyclic SCC workload.
+
+### REJECT: BK direction iterators do not prove a stable gain (2026-07-12)
+
+- **Negative-ledger first:** no exact attempt existed for `bk_vertical_alignment`'s direction-materialization
+  vectors. The closest boundary is the distinct `coordinate_assignment` two-clone reject above; BK neighbour
+  precomputation and the four-float median allocation are also separate no-retry families. The candidate therefore
+  remained eligible, but the adjacent flat results required a strict same-worker, nonzero-interval keep gate.
+- **One candidate:** replace only the outer `rank_iter` vector and each rank's `node_iter` vector with one
+  double-ended slice iterator, selecting `next()` or `next_back()` for the existing direction flags. Across the
+  four Brandes-Kopf alignment passes this removes approximately `4 + 4 * rank_count` transient vectors and
+  `4 * (rank_count + node_count)` copied indexes. Rank/node visit order, threshold updates, neighbour and median
+  order, root/align mutation order, floating-point work, tie-breaking, and RNG remain identical.
+- **Authoritative isolated pair:** a temporary crate-local `coordinate_assignment/scc_600` Criterion row reused
+  the 600-node cyclic-ring plus forward-link workload, forcing full Sugiyama/BK layout without parser churn. Both
+  arms ran through `RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 RCH_WORKER=vmi1227854 env -u CARGO_TARGET_DIR rch
+  exec -- cargo bench --profile release -p fm-layout --bench incremental_layout --
+  coordinate_assignment/scc_600 --exact --warm-up-time 1 --measurement-time 3 --sample-size 20 --noplot` on actual
+  worker `vmi1227854`; baseline name was `bk-traversal-5d0a7cb`.
+- **Result:** ORIG Criterion median **279.890 us** (95% CI **272.308..295.644 us**) versus CAND **270.200 us**
+  (**265.866..279.171 us**), CAND/ORIG **0.96538**. Although the point ratio nominally clears 3%, the paired median
+  change was **-3.4621%** with 95% CI **-8.9704%..+1.0650%**, crossing zero; Criterion reported no detectable
+  change. This fails the predeclared stable-gain proof.
+- **Restoration / verdict:** **REJECT.** The production candidate and temporary seam were manually removed. Final
+  layout and incremental-bench SHA-256 values are again
+  `fb5d6c682dff1bc0cb37baf134de9ecc52a345f80178704890f01cd26bd6234a` and
+  `50545a9e75dad144f5d623aafd4c11af54e3ad2c9b950b3ef4177fd6bddafc63`. No local or cross-worker timing entered
+  the verdict. Do not retry this exact BK direction-vector substitution on the 600-node cyclic SCC workload
+  without a materially different implementation or workload.
