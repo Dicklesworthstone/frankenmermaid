@@ -5066,7 +5066,9 @@ const DIGIT_PAIRS_SRC: &str = "0001020304050607080910111213141516171819202122232
 /// [`DIGIT_PAIRS_SRC`] slices, no per-digit `%10`/`/10`, and no `from_utf8` revalidation of a scratch
 /// buffer. Node/edge element-id index writing measured ~3.8% of coordinate-heavy render (the naive loop
 /// plus its `from_utf8`).
-fn push_usize_decimal(out: &mut String, value: usize) {
+// `pub` so id-building callers in other workspace crates (e.g. the gantt task-id `"{id}_{line}"`
+// concatenation in `fm-parser`) can append a decimal without the `format!`/`Formatter` machinery.
+pub fn push_usize_decimal(out: &mut String, value: usize) {
     if value < 10 {
         out.push_str(&DIGIT_PAIRS_SRC[value * 2 + 1..value * 2 + 2]);
     } else if value < 100 {

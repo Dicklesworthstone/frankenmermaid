@@ -5010,7 +5010,14 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
             ));
             continue;
         }
-        let task_id = format!("{task_id_raw}_{line_number}");
+        // `format!("{task_id_raw}_{line_number}")` ran once per gantt task and was ~30% of gantt parse
+        // (format_inner + fmt::write + write_str): it allocated a NEW String and re-copied `task_id_raw`
+        // through the `Formatter`. `task_id_raw` is owned and unused after this, so MOVE it and append the
+        // `_line` suffix in place — reusing its allocation and writing the line number via the table-driven
+        // `push_usize_decimal` (byte-identical to `usize`'s `Display`, no Formatter). Byte-identical.
+        let mut task_id = task_id_raw;
+        task_id.push('_');
+        fm_core::push_usize_decimal(&mut task_id, line_number);
 
         let span = span_for(line_number, line);
         let Some(node) = builder.intern_node(&task_id, Some(&task_name), NodeShape::Rect, span)
