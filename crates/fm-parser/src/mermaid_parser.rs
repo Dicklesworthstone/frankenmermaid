@@ -8521,6 +8521,10 @@ impl<'a> Iterator for SplitStatements<'a> {
     }
 }
 
+// `manual_contains` would rewrite the `.iter().any(== b';')` below back to `<[u8]>::contains`, whose
+// u8 specialization is `memchr` — measurably SLOWER than a scalar scan on these short per-line
+// haystacks (see the scalar-scan win / ByteLines reject in NEGATIVE_EVIDENCE). Keep the scalar form.
+#[allow(clippy::manual_contains)]
 fn split_statements(line: &str) -> SplitStatements<'_> {
     // Statements are separated by `;` (outside quotes/brackets). When the line contains no `;` at all it
     // is a single statement, so skip the quote/bracket-aware scan AND the `Vec` allocation — yield the
@@ -9197,6 +9201,9 @@ fn is_architecture_side_token(token: &str) -> bool {
     matches!(token, "L" | "R" | "T" | "B")
 }
 
+// See `split_statements`: keep the scalar `.iter().any(== b'%')`; `manual_contains` would swap in the
+// memchr-backed `<[u8]>::contains`, which is slower on this short per-line haystack.
+#[allow(clippy::manual_contains)]
 fn strip_flowchart_inline_comment(line: &str) -> &str {
     // Inline comments begin with `%%`; if there is no `%` at all there is nothing to
     // strip, so skip the quote/bracket-aware scan entirely. Output-identical: the full
