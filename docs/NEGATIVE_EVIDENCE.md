@@ -1102,6 +1102,37 @@
   Instruction count remains the only arbiter. The trim_fast harvest on the flowchart node-label path is now
   genuinely exhausted (no `trim_matches::<is_whitespace>` caller remains on this corpus).
 
+### WIN: trim_fast the class-relation + shared node/edge parse trims — classcard parse −1.05% (2026-07-12)
+- **Non-flowchart profiling paid off again.** The flowchart trim harvest (prior two entries) exhausted the
+  *flowchart* node-label path, but a symbolized **`class` parse** profile showed the same Unicode CharSearcher
+  wide open on the dedicated class parser: `<str>::trim_matches::<is_whitespace>` **~15.6% total**,
+  `CharSearcher::next_match_back` **~7.1%**, `memrchr` **~6.2%**. The class parser never adopted `trim_fast`.
+- **Lever:** route the 10 hot per-relation / per-node / per-edge trims through the byte-exact `trim_fast`
+  family, and add a **`trim_end_fast`** sibling (mirrors `trim_fast`/`trim_start_fast`: ASCII byte scan back
+  from the end, defer to `str::trim_end` only when a non-ASCII byte sits at the trimmed boundary → slice is
+  byte-identical to `str::trim_end` in every case). The class-card path is the *only* `trim_end` caller, which
+  is exactly why `next_match_back` (the back-scan) showed up in the profile. Sites: `strip_class_cardinality`
+  (trim_end/trim_start/trim_end, per class relation), `parse_edge_statement_asts` +
+  `parse_edge_statement_with_nodes` (left/right/label segment trims, per edge — shared with flowchart/state/er),
+  `parse_node_list_with_config` + `parse_node_token_with_config` (per-node trims).
+- **Measured (`perf stat instructions:u`, same-session symbolized release binaries, interleaved, min of 5
+  rounds, size 300 × 3000 iters):**
+  - `classcard` parse **11,525,650,766 → 11,405,182,004 = −1.045%** (the cardinality shape — hits
+    `strip_class_cardinality`'s trim_end/trim_start hardest).
+  - `class` parse **14,870,928,537 → 14,791,583,848 = −0.534%** (smaller: the `class` member corpus spends most
+    of its trim budget in `parse_class_assignment_ast`/member parsing, an untouched follow-up vein).
+  - `flowo` / `wide` / `er` parse **neutral (+0.001..0.031%)** — at the ~0.03% instruction code-layout floor.
+    Those paths reach the shared node/edge helpers with strings *already `trim_fast`'d* at the document/line
+    level, so the inner trim finds no whitespace and does no work either way. Win is concentrated exactly where
+    trims still do real work (cardinality extraction produces untrimmed `left[..q_open]` remainders).
+- **Byte-identical** dump (serialized parsed IR) across **34 profharness shapes at n=40 and n=300**; clippy
+  clean. Landed `812b246`.
+- **META:** the class-parse `trim_matches` sample-share (~15.6%) again *overstated* the instruction win (−0.5..
+  −1.0%) — the branchy generic CharSearcher's cycle share sits well above its instruction share (see the two
+  prior entries). And the follow-up vein is now visible: `class` (not `classcard`) is member-parse-bound, so the
+  next class-parse lever is the trims in `parse_class_assignment_ast` / `split_statements`, not the node/edge
+  path just harvested.
+
 ### REJECT: fuse the fast-node reject + `[`-locate scans into one table-driven pass — +0.74% parse REGRESSION (2026-07-12)
 - **Hypothesis (looked obvious):** `parse_fast_simple_flowchart_node_borrowed` (10.17% self on the
   flowchart/800 parse profile) does two byte scans per statement — a reject `.bytes().any(matches!(byte,
