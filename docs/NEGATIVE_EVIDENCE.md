@@ -1145,6 +1145,20 @@
   survives a targeted sweep, grep the WHOLE crate — `grep -rn '\.trim()' crates/fm-parser/src/` — not just the
   file you were editing. Remaining hot `.trim()` in ir_builder are on cold paths (cluster/class/interaction).
 
+### REJECT: `memchr::memchr` for `\n` in `ByteLines::next` — +0.26% parse REGRESSION (2026-07-12)
+- **Hypothesis:** `ByteLines::next` (5.31% self on the flowchart/800 parse profile — the per-line splitter)
+  finds the next newline via `bytes[self.start..].iter().position(|&b| b == b'\n')`. There's a landed precedent
+  (`ca95fe4`) for SIMD `memchr` newline *counting*, so swap this scan to `memchr::memchr(b'\n', ..)` (already a
+  dep, used in dot_parser). Same first-`\n` index → byte-identical.
+- **Measured (deterministic `perf stat instructions:u`, flowchart/800 parse ×4000, interleaved):** HEAD
+  **14,473,524,027** → cand **14,511,303,047** = **+37.8M instr, +0.26% REGRESSION**. Byte-identical across 16
+  shapes (correct, just slower). Reverted, not committed.
+- **Why (the rule, reconfirmed):** `memchr` wins only for **short-needle + LONG-haystack** scans hoisted from a
+  loop (see the render `memmem` entry). Here each `next()` scans only until the *first* newline — one line, ~30
+  bytes — so the haystack is short. `.iter().position(==b'\n')` over ~30 bytes lowers to a tight (compiler-
+  vectorized) scalar loop that beats `memchr`'s per-call SIMD setup/dispatch overhead. The `ca95fe4` win was
+  *counting* newlines across the WHOLE input (one long haystack); per-line splitting is the opposite shape.
+  Don't `memchr`-ify a scan whose effective haystack is a single short line.
 ### Acyclic SCC fast-path in `GraphMetrics::from_ir` — −27 to −29% layout (Auto-selection overhead) (2026-06-27)
 - **Lever (the 203µs Auto overhead pinned last cycle):** the Auto algorithm selection
   (`select_general_graph_algorithm_with_config`) calls `GraphMetrics::from_ir` on **every** layout —
