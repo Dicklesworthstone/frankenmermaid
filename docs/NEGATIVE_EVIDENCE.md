@@ -1267,6 +1267,29 @@
   The parser per-line trim vein (`line` + `raw_line` loops) is now fully harvested; residual parse `trim_matches`
   is shape-inherent or in cold directive branches.
 
+### WIN: reuse the `:::`-class operator position — drop 2 redundant find_operator scans (styled3 parse −34%) (2026-07-12)
+- **Found by profiling styled3 (which was NEUTRAL on the EmptyErr win — it hits the `:::` chumsky-skip guard).**
+  `find_operator_core` was **45% self** on styled3: styled node lines
+  (`N0[Node 0]:::serviceNodeStyle:::regionUsEastPrimary:::observabilityDashboard`, ~70 chars, no operator) called
+  `find_operator` **~3×** each — the `chumsky_would_fail` guard, the tail's `parse_edge_statement_asts` (re-finds it
+  internally), and the following `find_operator(...).is_some()` re-check — each re-scanning the whole long line to
+  find nothing.
+- **Lever:** the guard already locates the operator for `:::` statements — capture it once (`class_suffix_op`) and
+  reuse it for the edge-vs-node decision: a `:::` node line (no operator) goes straight to
+  `parse_node_token_with_config`, skipping the edge-parse scan and the `is_some()` re-scan. **Non-`:::` statements
+  keep the original lazy path** — plain flowcharts never computed find_operator in the guard, so they pay no extra
+  scan. Byte-identical: `parse_edge_statement_asts` returns `None` for a no-operator statement anyway, and the
+  `is_some()` branch only mattered when an operator existed.
+- **Measured (`perf stat instructions:u`, interleaved, min of 4, size 300 × 2000):** `styled3` parse **−34.172%**,
+  `styled` **−22.427%**; **`flowo`/`wide` EXACTLY 0.000%** (the design's key property — no regression on plain
+  flowcharts, which are the common case); diamond +0.05% (layout noise). Byte-identical across 33 shapes; clippy
+  clean. Landed `cb981c1`.
+- **META (reinforces the chumsky win's lesson):** re-profiling AFTER a big win exposed the next one — the EmptyErr
+  win left styled3 dominated by a *different* cost (redundant find_operator, not error-tracking). And the redundancy
+  lever (compute-once, reuse) is the classic one, but the care was **not regressing the common path**: the guard
+  computes find_operator only for `:::`, so the reuse had to be scoped to `:::` statements, keeping non-`:::` on the
+  lazy path. Always check the win is gated to where the redundancy actually is.
+
 ### WIN: flow_statement_parser uses EmptyErr not Rich error type — hexagon parse −54%, diamond −40% (2026-07-12)
 - **This overturns the prior "chumsky is structural" surface — it was a ONE-LINE config change, not a bypass.**
   I had profiled hexagon/diamond/styled3 (~17B, biggest parse types) as ~30% chumsky `add_alt` + `truncate` and
