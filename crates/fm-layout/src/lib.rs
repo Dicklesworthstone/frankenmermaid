@@ -10412,7 +10412,7 @@ fn crossing_refinement(
 const BK_POS_ABSENT: usize = usize::MAX;
 
 fn bk_upper_neighbours(
-    adjacency: &[BTreeSet<usize>],
+    adjacency: &[FxHashSet<usize>],
     dense_node_rank: &[usize],
     pos_of: &[usize],
     node_index: usize,
@@ -10458,7 +10458,7 @@ fn bk_upper_neighbours(
 #[allow(clippy::too_many_arguments)]
 fn bk_vertical_alignment(
     n: usize,
-    adjacency: &[BTreeSet<usize>],
+    adjacency: &[FxHashSet<usize>],
     dense_node_rank: &[usize],
     pos_of: &[usize],
     ordering_by_rank: &BTreeMap<usize, Vec<usize>>,
@@ -10727,8 +10727,13 @@ fn brandes_kopf_secondary_coords(
 
     let ordered_ranks: Vec<usize> = ordering_by_rank.keys().copied().collect();
 
-    // Pre-build undirected adjacency for O(1) neighbour lookup.
-    let mut adjacency = vec![BTreeSet::new(); n];
+    // Pre-build undirected adjacency for O(1) neighbour lookup. `FxHashSet` (was `BTreeSet<usize>`)
+    // keeps the same set semantics — unique neighbours, membership — but swaps the per-insert O(log deg)
+    // B-tree node allocation for O(1) hashing (the `BTreeSet<usize>` insert + build was ~14% of Sugiyama
+    // layout: `place_block`/`nodes_by_rank`-adjacent). Iteration order is irrelevant: the sole consumer
+    // (`bk_upper_neighbours`) re-sorts the collected neighbours by position, and distinct same-rank nodes
+    // have distinct positions, so the sorted order is fully determined regardless of set iteration order.
+    let mut adjacency: Vec<FxHashSet<usize>> = vec![FxHashSet::default(); n];
     for edge in &ir.edges {
         if let Some(s) = endpoint_node_index(ir, edge.from)
             && let Some(t) = endpoint_node_index(ir, edge.to)
