@@ -1244,6 +1244,29 @@
   line and convert in bulk rather than per-type. Remaining: the `raw_line`-based loops (journey/others at
   mermaid_parser.rs:5677/5790/9438) are the same lever on a differently-named variable.
 
+### WIN: trim_fast the raw_line-loop trims the per-line batch missed — class parse −1.0% (2026-07-12)
+- **The `raw_line` follow-up the entry above scoped.** Three parser loops iterate `raw_line` (not `line`) and were
+  skipped by 516e9ce's `line.trim()` batch. The C4 loop (5677) was already `trim_fast`; two still used std trim:
+  - **`extract_style_directives`** (9439): `let line = raw_line.trim()`, scanning **every source line** on any
+    parse whose input contains `class`/`style`/`linkStyle` — which is **always true for class diagrams** (the
+    `classDiagram` header contains "class"), so its early-bail gate never fires there and every line is trimmed.
+    This was the ~2.67% `extract_style_directives` self-time seen on class-parse profiles.
+  - **`parse_architecture`** (5790, architecture-beta): `strip_flowchart_inline_comment(raw_line).trim()`.
+- **Lever:** route both per-line trims through `trim_fast`. Byte-identical, monotonic-less-work.
+- **Measured (`perf stat instructions:u`, interleaved, min of 4, size 300 × 3000 iters):**
+  - `class` **−0.997%** (headline — class diagrams scan every line through `extract_style_directives`),
+    `classcard` **−0.243%**.
+  - `styled3` / `styled` / `flowo` **neutral** (their totals dwarf the per-line trim, or the gate bails);
+    `state` **+0.042%** is code-layout noise — the state corpus has no `class`/`style`/`linkStyle`, so the gate
+    early-returns and 9439 never executes (functionally unaffected; the shift is the `parse_architecture` edit
+    moving addresses).
+- **Byte-identical** dump across **25 profharness shapes at n=40 and n=300**; clippy clean. Landed `5034f91`.
+- **META:** the nested directive-branch trims inside `extract_style_directives` (`classDef`/`class `/`style `
+  parsing) were **left as-is** — profile-confirmed cold on every bench corpus, since none of the generated inputs
+  contain actual directive lines (styled3's `:::className` is parsed elsewhere, not via `strip_prefix("class ")`).
+  The parser per-line trim vein (`line` + `raw_line` loops) is now fully harvested; residual parse `trim_matches`
+  is shape-inherent or in cold directive branches.
+
 ### REJECT: fuse the fast-node reject + `[`-locate scans into one table-driven pass — +0.74% parse REGRESSION (2026-07-12)
 - **Hypothesis (looked obvious):** `parse_fast_simple_flowchart_node_borrowed` (10.17% self on the
   flowchart/800 parse profile) does two byte scans per statement — a reject `.bytes().any(matches!(byte,
