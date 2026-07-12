@@ -1216,6 +1216,19 @@
   eyeball "cheap" per-call helpers on per-item hot loops. Grep the doc loops of other diagram parsers
   (class/state/er at `split_statements(line)`) for the same producer-already-trimmed re-trim.
 
+### WIN: detect parallel edges with a set pass, skip the count map on the no-parallel path — −0.72% layout (2026-07-12)
+- **Lever (skip building a structure only READ on a rare branch).** `build_edge_paths_with_orientation`
+  unconditionally built an `FxHashMap<(usize,usize),usize>` endpoint-pair count + a per-edge `Vec<usize>` index,
+  but the routing loop reads them only `if any_parallel`; the common flowchart has none. Detect parallels with an
+  `FxHashSet` pass that breaks at the first duplicate, and build the map+index only in the (rare) parallel case.
+- **Measured:** HEAD 2,487,444 → CAND 2,469,623 instr/iter = **−17,821/iter (−0.72%)**; variance ~40k out of 9.9B
+  (signal ~1,800×). Byte-identical across 20 shapes (no-parallel path); 439/439 fm-layout tests; clippy PRE-commit.
+  Landed `77cf5d2`. Parallel branch is a VERBATIM copy of the original count loop; `any_parallel` = "duplicate pair
+  exists" identically (old `values().any(>1)` = new `insert` returns false).
+- **LEVER: an up-front `HashMap`/`Vec` consumed only on a conditional branch → gate its construction on a cheap
+  detector.** Same family as the "gate a no-op call" lesson but for a whole precompute. Detector: a `HashSet` that
+  stops early (`insert` returns false) is cheaper than a full `HashMap<_,count>`+`Vec` when you only need existence.
+
 ### WIN: use the loop's `edge` for the span instead of re-fetching by index — −0.42% layout (2026-07-12)
 - **Context — LAYOUT profile (first this session).** @flowchart/800 layout (2.50M instr/iter): dominant is
   `build_edge_paths_with_orientation` 18.6% self, then `ObstacleSpatialIndex::query_segment` 8.0%,
