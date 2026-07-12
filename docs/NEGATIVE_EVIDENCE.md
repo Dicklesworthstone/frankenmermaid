@@ -1080,6 +1080,28 @@
   the rest. **Instruction count stays the only arbiter.** Remaining parse `trim_matches` self-time (still
   ~4.4% post-change) is now inherent-shape work, not a stray direct-`.trim()` caller on this corpus.
 
+### Follow-up: trim_fast the icon-prefix helpers — −0.48% parse; the "inherent-shape" trim was TWO more stray callers (2026-07-11)
+- **Correction to the prior entry.** A fresh symbolized `flowchart/800` parse profile (post-`0562251`)
+  still showed `<str>::trim_matches::<is_whitespace>` at **3.72% self / 6.09% total** — *not* inherent-shape
+  work as the prior entry guessed. `extract_icon_prefix` was already `trim_fast`'d, but it calls two
+  helpers one level down — `split_fontawesome_icon_prefix` and `split_emoji_icon_prefix` — and **both**
+  opened with a direct `str::trim` (the Unicode CharSearcher). Both fire once per labelled node (fontawesome
+  returns `None` first, so the emoji helper's trim runs for every plain label too), so the audit must
+  chase the call tree, not stop at the direct caller.
+- **Lever:** swap all four `.trim()` in those two helpers to `trim_fast` (2 hot top trims + 2 post-icon
+  remainder trims). Unconditionally byte-identical (trim_fast == str::trim by construction), so no
+  caller-invariant proof needed.
+- **Measured (deterministic `perf stat instructions:u`, flowchart/800 parse ×4000, same-session symbolized
+  release binaries, interleaved):** ORIG **3,662,376** instr/iter → CAND **3,644,769** = **−17,607/iter
+  (−0.48%)**; run-to-run variance <60 instr out of 14.6B (signal ~1.2M× the noise). Byte-identical output
+  across 22 profharness shapes; 408/408 fm-parser tests pass (incl. the fontawesome + emoji icon-extraction
+  tests that exercise the remainder trims); clippy clean. Landed `19f69a3`.
+- **META reinforced:** the −0.48% again lands far below the 6.09% perf-record share — the branchy generic
+  CharSearcher's cycle share overstates its instruction share (see prior entry). This is the same magnitude
+  as the prior "label-only 2-site variant was just −0.47%": 2 trims per node ≈ the same ~18k instr/iter.
+  Instruction count remains the only arbiter. The trim_fast harvest on the flowchart node-label path is now
+  genuinely exhausted (no `trim_matches::<is_whitespace>` caller remains on this corpus).
+
 ### Acyclic SCC fast-path in `GraphMetrics::from_ir` — −27 to −29% layout (Auto-selection overhead) (2026-06-27)
 - **Lever (the 203µs Auto overhead pinned last cycle):** the Auto algorithm selection
   (`select_general_graph_algorithm_with_config`) calls `GraphMetrics::from_ir` on **every** layout —
