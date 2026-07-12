@@ -1312,6 +1312,23 @@
   (structural raw_svg→doc→String). No CLEAN SMALL increment remains in classed-node render; next wins there are
   the STRUCTURAL parser-class-flag (skip scans entirely) or per-element streaming refactors.
 
+### SURFACE — Element-rendered types (journey/class/requirement) are Attributes-builder-bound (2026-07-12)
+- **Context.** After the 3 layout CSRs (which help every type's layout ~−14%) and the class-scan fusion, a fresh
+  full-pipeline scan (@400): timeline 15.5M, journey 11.4M, class 10.1M, requirement 9.1M — these are RENDER-heavy.
+  journey render (7.1M) profile: num-format `write_uint`/`write_fixed2`/`write_number` ~16% (inherent), memmove
+  ~12% (structural raw_svg→doc→String), `scan_class_keywords_and_clean` ~11% (fused, further = structural
+  parser-flag), `write_escaped_attr` ~11% (fast-path'd), and **the Attributes BUILDER ~23%**: `Attributes::set::
+  <f32>` + `set::<&str>` + `write_into`.
+- **The Attributes cost breaks down:** (a) `set` does `attrs.retain(|a| a.name != name)` — a linear override-dedup
+  scan per set → O(K²) per element, but K≤12 so only ~2% (and it's LOAD-BEARING: span-metadata / class overrides
+  move an attr to the end; removing it breaks byte-identity). (b) `AttributeValue::String(String)` + `From<&str>`
+  does `s.to_string()` — **one heap alloc per string attribute** (`set::<&str,&str>` ~4%). (c) `write_into` is
+  already hand-optimized (direct `write_char`/`write_str`, no `format!`) — at floor.
+- **No CLEAN SMALL increment.** Killing the string alloc needs a lifetime/`Cow<'a>` on `AttributeValue` threaded
+  through `Attributes`/`Element` (invasive), or converting these types' Element trees to `raw_svg` streaming (the
+  diamond/xychart `9cf568b` method — a focused per-element-type refactor that also erases the retain + the
+  raw_svg→doc double-copy). Both are STRUCTURAL. The Element-rendered render frontier = streaming refactor, per type.
+
 ### WIN: use the loop's `edge` for the span instead of re-fetching by index — −0.42% layout (2026-07-12)
 - **Context — LAYOUT profile (first this session).** @flowchart/800 layout (2.50M instr/iter): dominant is
   `build_edge_paths_with_orientation` 18.6% self, then `ObstacleSpatialIndex::query_segment` 8.0%,
