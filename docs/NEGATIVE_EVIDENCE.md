@@ -1220,6 +1220,30 @@
   lever (return `&str`/`Cow` when unchanged so the interner clones once instead of twice), deferred as it touches
   ~30 callers.
 
+### WIN: trim_fast the per-line trims in ALL non-flowchart parser loops — erattr −2.6%, broad (2026-07-12)
+- **The single most-common untapped trim in the crate.** The flowchart document loop was `trim_fast`'d long ago
+  (0562251), but **every other diagram type's parser loop still opened each source line with std `str::trim`**.
+  A `seq 300` parse profile made it obvious: `parse_sequence`'s per-line `let trimmed = line.trim();` drove
+  `trim_matches::<is_whitespace>` **4.3%** + `CharSearcher::next_match` **5.2%** (~9.5%) — the top non-scan cost,
+  and it fires once per source line for the whole parser.
+- **Lever:** route all **18** per-line `let trimmed = line.trim();` loop trims (sequence, state, class, er, gantt,
+  journey, timeline, pie, xychart, quadrant, kanban, mindmap, git, sankey, requirement, block, …) + `parse_er_attribute`
+  (per attribute) + the two seq message-path token trims in `parse_sequence_message_ast` through the byte-exact
+  `trim_fast`. Byte-identical to `str::trim` in every case, monotonic-less-work (a plain `replace_all` of the
+  identical statement; flowchart's loop and 4 already-converted sites were untouched).
+- **Measured (`perf stat instructions:u`, interleaved, min of 4, size 300 × 3000 iters):**
+  - `erattr` **−2.631%** (standout — ER attributes hit `parse_er_attribute` per attribute *and* the er per-line
+    loop), `class` **−0.918%**, `seq` **−0.906%**, `pie` **−0.897%**, `er` **−0.839%**, `kanban` **−0.807%**,
+    `timeline` **−0.590%**, `state` **−0.482%**, `gantt` **−0.359%**.
+  - `journey` **neutral** (its loop iterates `raw_line`, a different variable not in the batch — a follow-up site);
+    `flowo` **neutral** (flowchart loop already `trim_fast`).
+- **Byte-identical** dump across **26 profharness shapes at n=40 and n=300**; clippy clean. Landed `516e9ce`.
+- **META:** the per-type trim harvests kept finding hot trims one function at a time, but the biggest single vein
+  was the **structurally identical per-line loop trim replicated across ~18 type parsers** — one `replace_all`
+  caught them all. When an idiom (`let trimmed = line.trim();`) is copy-pasted across every parser, grep the exact
+  line and convert in bulk rather than per-type. Remaining: the `raw_line`-based loops (journey/others at
+  mermaid_parser.rs:5677/5790/9438) are the same lever on a differently-named variable.
+
 ### REJECT: fuse the fast-node reject + `[`-locate scans into one table-driven pass — +0.74% parse REGRESSION (2026-07-12)
 - **Hypothesis (looked obvious):** `parse_fast_simple_flowchart_node_borrowed` (10.17% self on the
   flowchart/800 parse profile) does two byte scans per statement — a reject `.bytes().any(matches!(byte,
