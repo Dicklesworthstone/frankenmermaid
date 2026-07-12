@@ -1267,6 +1267,35 @@
   The parser per-line trim vein (`line` + `raw_line` loops) is now fully harvested; residual parse `trim_matches`
   is shape-inherent or in cold directive branches.
 
+### SURFACE: byte-exact small-increment veins exhausted across all phases; next wins are structural/decisions (2026-07-12)
+- **Context.** After ~15 landed byte-exact parse/render wins this session, this turn swept the remaining candidates
+  and confirmed the clean small-increment veins are exhausted. Findings:
+  - **Parse trims/searchers/floats: mined.** The std-`trim` CharSearcher surface is fully `trim_fast`'d (per-line
+    loops, shared id helpers, `.map(str::trim)`); TwoWaySearcher storms byte-scanned (requirement/block/asym); the
+    grisu integer fast-path landed where values are integers (xychart). Remaining `.to_ascii_lowercase()`/`.to_uppercase()`
+    case-conversion allocs are all on **cold** directive paths (gantt tickInterval/weekday `5228`/`5264`, xychart
+    header `5477`, `is_flowchart_header` `9445`, seq box-color `2125`) — not hit by any bench corpus, so converting
+    to `eq_ignore_ascii_case` would not measure.
+  - **Render: at floor / structural.** Profiled pie, xychart, timeline, journey. All dominated by digit-table
+    num-format (`write_uint_into`/`write_fixed2`/`write_number_into`, optimized), byte-scan escaping
+    (`write_escaped_attr`), the streamed double-copy (`memcpy`/`memmove` ~12–25%, structural per 41948f2), the
+    Element builder (`Attributes::set` O(K²) override-dedup ~10%, load-bearing), and `scan_class_keywords_and_clean`
+    (single-pass, structural). Per-node `format!("fill: {…}")` (`7096`–`7102`) is not top-12 on journey.
+  - **Layout: 3 CSRs done, obstacle routing structural.**
+- **The concrete next levers — all LARGER or requiring a DECISION (surfaced, ranked):**
+  1. **Pie arc coords full-precision grisu → `write_number_into` (fixed-2):** ~50% pie render, but CHANGES OUTPUT
+     (golden regen; verify vs mermaid-js precision). A **rendering-consistency decision**, not byte-exact.
+  2. **Chumsky bypass for shaped flowchart nodes:** hexagon/diamond/styled3 (~17B, biggest parse types) are ~30%
+     chumsky `Rich`-error-tracking on *successful* parses. Byte-exact-ACHIEVABLE (extend the fast path to parse
+     `{{}}`/`{}`/`((` shapes and match chumsky's AST exactly, like `parse_fast_simple_flowchart_statement_ast` does
+     for simple edges) but a **structural, byte-identity-hard refactor** — not a small increment.
+  3. **Alloc Cow refactors:** `normalize_identifier`/`normalize_compound_identifier` return `String` (fast-path
+     `to_owned`) then interners clone — a `Cow`/borrow return could save one alloc per id, but touches ~30 callers
+     and the benefit depends on the interner's move-vs-clone signature.
+- **Verdict: SURFACE.** The byte-exact "small, land often" cadence has reached its ceiling for this codebase. The
+  next meaningful wins are (1) a **user decision** on pie coord precision, or (2) a **deliberate structural lever**
+  (chumsky bypass = highest byte-exact value). Shipped bytes unchanged (profiling only).
+
 ### REJECT + SURFACE: pie render is 56% grisu (full-precision arc coords); integer fast-path regressed +0.2% (2026-07-12)
 - **SURFACE (the big finding).** A render-phase grisu scan across types found **pie render is 80% float-formatting,
   56% of it `grisu::format_shortest`** (`core::fmt::write` 20% + `Argument::fmt` 18% + `float_to_decimal::<f32>` 16%
