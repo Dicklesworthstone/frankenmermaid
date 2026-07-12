@@ -1198,6 +1198,23 @@
   check-then-insert on a `HashMap`/`FxHashMap` (`if map.get(k).is_none() { map.insert(k, v) }`, or a `match
   get_mut { None => insert, .. }`) probes twice; `entry` probes once and hands back the slot. On a hot
   build-the-index path this is a free ~2-2.5% — grep for `get_mut(&`/`.get(&` immediately followed by `.insert(`.
+
+### WIN: drop the redundant per-statement re-trim in the flowchart doc loop — −1.66% parse (2026-07-12)
+- **Lever (REDUNDANT-WORK removal — cheapest kind).** The document loop did `let normalized_statement =
+  trim_fast(statement)` for every statement, but `split_statements` **already** yields trimmed segments: its
+  `;`-split path `.trim()`s each segment, and its no-`;` fast path yields `uncommented_line` verbatim — which is
+  the `trim_fast`'d `trimmed` line (optionally `trim_end`'d by comment stripping). So the statement was already
+  trimmed and the re-trim scanned it for nothing, ~800×/parse. Replaced with `let normalized_statement =
+  statement;`. Downstream `parse_fast_simple_*` still `trim_ascii` their input defensively, so nothing else moved.
+- **Measured (deterministic `perf stat instructions:u`, flowchart/800 parse ×4000, interleaved):** HEAD
+  **3,465,703** instr/iter → CAND **3,408,099** = **−57,604/iter (−1.66%)**; variance ~2k out of 13.6B (signal
+  ~100,000× the noise). Byte-identical across 23 shapes; 408/408 tests. Landed `706c97a`.
+- **LESSON: audit for DOUBLE-TRIM across a producer/consumer boundary.** When a splitter/tokenizer already
+  normalizes its output (here `split_statements` trims segments), the consumer re-trimming is pure waste — far
+  bigger than expected (−1.66% for one removed call/statement) because `trim_fast` isn't free per call (bounds +
+  boundary checks + call overhead) and it fires per item. Estimated ~0.3%, measured −1.66% — MEASURE, don't
+  eyeball "cheap" per-call helpers on per-item hot loops. Grep the doc loops of other diagram parsers
+  (class/state/er at `split_statements(line)`) for the same producer-already-trimmed re-trim.
 ### Acyclic SCC fast-path in `GraphMetrics::from_ir` — −27 to −29% layout (Auto-selection overhead) (2026-06-27)
 - **Lever (the 203µs Auto overhead pinned last cycle):** the Auto algorithm selection
   (`select_general_graph_algorithm_with_config`) calls `GraphMetrics::from_ir` on **every** layout —
