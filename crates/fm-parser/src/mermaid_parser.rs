@@ -1204,7 +1204,17 @@ fn parse_flowchart_document_items<'a>(
             continue;
         }
 
-        let uncommented_line = strip_flowchart_inline_comment(trimmed);
+        // Single byte scan for the only two bytes that drive the comment-strip (`%`) and statement-split
+        // (`;`) passes; a line with neither — the overwhelmingly common case — is one clean statement
+        // equal to `trimmed`, so skip both passes (their per-line calls AND their internal `%`/`;` scans)
+        // entirely. Byte-identical: `strip_flowchart_inline_comment` returns `trimmed` unchanged when there
+        // is no `%`, and `split_statements` yields exactly `[trimmed]` when there is no `;`.
+        let has_special = trimmed.as_bytes().iter().any(|&b| b == b'%' || b == b';');
+        let uncommented_line = if has_special {
+            strip_flowchart_inline_comment(trimmed)
+        } else {
+            trimmed
+        };
         if uncommented_line.is_empty() {
             continue;
         }
@@ -1216,7 +1226,12 @@ fn parse_flowchart_document_items<'a>(
         // way. Removing it is behavior-identical.
         let mut parsed_line = false;
 
-        for statement in split_statements(uncommented_line) {
+        let statements = if has_special {
+            split_statements(uncommented_line)
+        } else {
+            SplitStatements::Single(std::iter::once(uncommented_line))
+        };
+        for statement in statements {
             // `split_statements` already yields trimmed segments: its `;`-split path `trim`s each
             // segment, and its no-`;` fast path yields `uncommented_line` verbatim — which is itself
             // the `trim_fast`'d `trimmed` (optionally `trim_end`'d by comment stripping). So this
