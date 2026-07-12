@@ -117,6 +117,9 @@ const fn op_first_byte_gate(operators: &[(&str, ArrowType)]) -> u128 {
 /// sequence path so `find_operator` doesn't rebuild the gate for every message line.
 const SEQUENCE_OP_GATE: u128 = op_first_byte_gate(&SEQUENCE_OPERATORS);
 const ER_OP_GATE: u128 = op_first_byte_gate(&ER_OPERATORS);
+const FLOW_OP_GATE: u128 = op_first_byte_gate(&FLOW_OPERATORS);
+const CLASS_OP_GATE: u128 = op_first_byte_gate(&CLASS_OPERATORS);
+const PACKET_OP_GATE: u128 = op_first_byte_gate(&PACKET_OPERATORS);
 
 const DANGLING_PLACEHOLDER_PREFIX: &str = "__fm_dangling_line_";
 const JOURNEY_SCORE_CLASSES: [&str; 10] = [
@@ -1395,7 +1398,7 @@ fn parse_flowchart_statement_asts(
         && !statement.starts_with("style ")
         && !statement.starts_with("linkStyle ")
         && !statement.starts_with("classDef ")
-        && find_operator(statement, &FLOW_OPERATORS).is_none();
+        && find_operator(statement, &FLOW_OPERATORS, FLOW_OP_GATE).is_none();
     if !chumsky_would_fail {
         let (ast, errors) = flow_statement_parser()
             .parse(statement)
@@ -1420,11 +1423,11 @@ fn parse_flowchart_statement_asts(
         return Some(vec![FlowAst::StyleOrLinkStyle]);
     }
     if let Some(asts) =
-        parse_edge_statement_asts(statement, &FLOW_OPERATORS, true, config, line_number)
+        parse_edge_statement_asts(statement, &FLOW_OPERATORS, FLOW_OP_GATE, true, config, line_number)
     {
         return Some(asts);
     }
-    if find_operator(statement, &FLOW_OPERATORS).is_some() {
+    if find_operator(statement, &FLOW_OPERATORS, FLOW_OP_GATE).is_some() {
         return None;
     }
     if let Some(node) = parse_node_token_with_config(statement, config) {
@@ -2668,7 +2671,7 @@ fn strip_class_cardinality(statement: &str) -> (String, Option<String>, Option<S
     let mut target_card = None;
 
     // Find operator position.
-    let op_pos = find_operator(statement, &CLASS_OPERATORS);
+    let op_pos = find_operator(statement, &CLASS_OPERATORS, CLASS_OP_GATE);
     let Some((op_idx, op_str, _)) = op_pos else {
         return (statement.to_string(), None, None);
     };
@@ -2780,7 +2783,7 @@ fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<Class
             statement
         };
         if let Some(asts) =
-            parse_edge_statement_asts(edge_input, &CLASS_OPERATORS, false, config, 0)
+            parse_edge_statement_asts(edge_input, &CLASS_OPERATORS, CLASS_OP_GATE, false, config, 0)
         {
             for ast in asts {
                 statements.push(ClassStatement::Ast(ast));
@@ -2952,7 +2955,7 @@ fn parse_state_statements(line: &str, config: &ParserConfig) -> Option<Vec<State
     // `[*]` standalone is handled as a node in the edge parsing
     let mut statements = Vec::new();
     for statement in split_statements(line) {
-        if let Some(asts) = parse_edge_statement_asts(statement, &FLOW_OPERATORS, false, config, 0)
+        if let Some(asts) = parse_edge_statement_asts(statement, &FLOW_OPERATORS, FLOW_OP_GATE, false, config, 0)
         {
             statements.push(StateStatement::Edge(asts));
             continue;
@@ -4713,7 +4716,7 @@ fn parse_packet(input: &str, builder: &mut IrBuilder) {
         // Fallback: try generic node/edge parsing.
         let mut parsed_line = false;
         for statement in split_statements(trimmed) {
-            if parse_edge_statement(statement, line_number, line, &PACKET_OPERATORS, builder) {
+            if parse_edge_statement(statement, line_number, line, &PACKET_OPERATORS, PACKET_OP_GATE, builder) {
                 parsed_line = true;
                 continue;
             }
@@ -4743,7 +4746,7 @@ fn parse_er_relationship(
         (statement.trim(), None)
     };
 
-    let Some((operator_idx, operator, arrow)) = find_operator(relation, &ER_OPERATORS) else {
+    let Some((operator_idx, operator, arrow)) = find_operator(relation, &ER_OPERATORS, ER_OP_GATE) else {
         return false;
     };
 
@@ -6086,7 +6089,7 @@ fn parse_block_beta_document_items(
         }
 
         if let Some(asts) =
-            parse_edge_statement_asts(trimmed, &FLOW_OPERATORS, false, config, line_number)
+            parse_edge_statement_asts(trimmed, &FLOW_OPERATORS, FLOW_OP_GATE, false, config, line_number)
         {
             items.push(BlockBetaDocumentItem::Statement {
                 statement: BlockBetaStatement::Edges(asts),
@@ -6374,7 +6377,7 @@ fn try_parse_block_beta_def(token: &str, config: &ParserConfig) -> Option<BlockD
         return None;
     }
 
-    if find_operator(trimmed, &FLOW_OPERATORS).is_some() {
+    if find_operator(trimmed, &FLOW_OPERATORS, FLOW_OP_GATE).is_some() {
         return None;
     }
 
@@ -7308,20 +7311,23 @@ fn parse_edge_statement(
     line_number: usize,
     source_line: &str,
     operators: &[(&str, ArrowType)],
+    gate: u128,
     builder: &mut IrBuilder,
 ) -> bool {
-    parse_edge_statement_with_nodes(statement, line_number, source_line, operators, builder)
+    parse_edge_statement_with_nodes(statement, line_number, source_line, operators, gate, builder)
         .is_some()
 }
 
 fn parse_edge_statement_asts(
     statement: &str,
     operators: &[(&str, ArrowType)],
+    gate: u128,
     allow_parallel_node_lists: bool,
     config: &ParserConfig,
     line_number: usize,
 ) -> Option<Vec<FlowAst>> {
-    let (first_operator_idx, first_operator, first_arrow) = find_operator(statement, operators)?;
+    let (first_operator_idx, first_operator, first_arrow) =
+        find_operator(statement, operators, gate)?;
     let left_raw = trim_fast(&statement[..first_operator_idx]);
     if left_raw.is_empty() {
         return None;
@@ -7336,7 +7342,7 @@ fn parse_edge_statement_asts(
 
     loop {
         let rhs_start = operator_idx + operator.len();
-        let mut next_operator = find_operator_from_index(statement, rhs_start, operators);
+        let mut next_operator = find_operator_from_index(statement, rhs_start, operators, gate);
 
         let edge_label;
         let right_without_label;
@@ -7352,7 +7358,7 @@ fn parse_edge_statement_asts(
 
             // Now we need to find the node AFTER the second operator
             let after_next_start = n_idx + n_op.len();
-            next_operator = find_operator_from_index(statement, after_next_start, operators);
+            next_operator = find_operator_from_index(statement, after_next_start, operators, gate);
             right_without_label = trim_fast(match next_operator {
                 Some((next_idx, _, _)) => &statement[after_next_start..next_idx],
                 None => &statement[after_next_start..],
@@ -7550,9 +7556,11 @@ fn parse_edge_statement_with_nodes(
     line_number: usize,
     source_line: &str,
     operators: &[(&str, ArrowType)],
+    gate: u128,
     builder: &mut IrBuilder,
 ) -> Option<Vec<IrNodeId>> {
-    let (first_operator_idx, first_operator, first_arrow) = find_operator(statement, operators)?;
+    let (first_operator_idx, first_operator, first_arrow) =
+        find_operator(statement, operators, gate)?;
     let left_raw = trim_fast(&statement[..first_operator_idx]);
     if left_raw.is_empty() {
         return None;
@@ -7575,7 +7583,7 @@ fn parse_edge_statement_with_nodes(
 
     loop {
         let rhs_start = operator_idx + operator.len();
-        let next_operator = find_operator_from_index(statement, rhs_start, operators);
+        let next_operator = find_operator_from_index(statement, rhs_start, operators, gate);
         let right_segment = trim_fast(match next_operator {
             Some((next_idx, _, _)) => &statement[rhs_start..next_idx],
             None => &statement[rhs_start..],
@@ -7647,25 +7655,22 @@ fn parse_edge_statement_with_nodes(
 fn find_operator<'a>(
     statement: &str,
     operators: &'a [(&'a str, ArrowType)],
+    gate: u128,
 ) -> Option<(usize, &'a str, ArrowType)> {
-    find_operator_from_index(statement, 0, operators)
+    find_operator_from_index(statement, 0, operators, gate)
 }
 
 fn find_operator_from_index<'a>(
     statement: &str,
     start_index: usize,
     operators: &'a [(&'a str, ArrowType)],
+    gate: u128,
 ) -> Option<(usize, &'a str, ArrowType)> {
-    // Build this list's first-byte gate, then scan. Callers with a `'static` operator list should
-    // call `find_operator_core` directly with its precomputed `const` gate (see `SEQUENCE_OP_GATE`)
-    // to skip this per-call rebuild — it was the dominant cost of `find_operator` on the hot
-    // sequence-message path (26 operators rebuilt into the gate on EVERY message line).
-    find_operator_core(
-        statement,
-        start_index,
-        operators,
-        op_first_byte_gate(operators),
-    )
+    // `gate` is the caller's precomputed first-byte gate for `operators` (a `const` such as
+    // `FLOW_OP_GATE` / `CLASS_OP_GATE` / `SEQUENCE_OP_GATE`). Threading it in — rather than rebuilding
+    // `op_first_byte_gate(operators)` on every call — was the dominant cost of the operator scan on the
+    // hot per-message / per-relation paths (e.g. 14 flow / 26 sequence operators re-hashed every line).
+    find_operator_core(statement, start_index, operators, gate)
 }
 
 /// Core operator scan with a caller-supplied first-byte gate: bit `b` is set iff some operator in
@@ -9665,7 +9670,8 @@ mod tests {
     };
 
     use super::{
-        FLOW_OPERATORS, STYLE_DIRECTIVE_DIAGNOSTIC_MESSAGE, byte_lines, flow_statement_parser,
+        FLOW_OP_GATE, FLOW_OPERATORS, STYLE_DIRECTIVE_DIAGNOSTIC_MESSAGE, byte_lines,
+        flow_statement_parser,
         is_dangling_placeholder_node_id, parse_edge_statement_asts,
         parse_fast_simple_flowchart_statement_ast, parse_mermaid,
     };
@@ -9770,6 +9776,7 @@ mod tests {
             let fallback = parse_edge_statement_asts(
                 statement,
                 &FLOW_OPERATORS,
+                FLOW_OP_GATE,
                 true,
                 &ParserConfig::default(),
                 0,
