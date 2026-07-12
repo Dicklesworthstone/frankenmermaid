@@ -12824,10 +12824,10 @@ fn build_edge_paths_with_orientation(
 
             Some(LayoutEdgePath {
                 edge_index,
-                span: ir
-                    .edges
-                    .get(edge_index)
-                    .map_or(Span::default(), |edge| edge.span),
+                // The closure already holds `edge` (the `enumerate` index IS its position in
+                // `ir.edges`), so the old `ir.edges.get(edge_index)` re-fetched the same element behind
+                // a bounds check + never-taken `map_or` default. Byte-identical: `edge.span`.
+                span: edge.span,
                 points,
                 reversed: highlighted_edge_indexes.contains(&edge_index),
                 is_self_loop,
