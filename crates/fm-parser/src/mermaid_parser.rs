@@ -4959,7 +4959,7 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
         gantt_meta.tasks.push(IrGanttTask {
             node,
             section_idx: current_section_idx,
-            meta: raw_meta.trim().to_string(),
+            meta: trim_fast(raw_meta).to_string(),
             task_id: parsed_meta.task_id,
             start: parsed_meta.start,
             end: parsed_meta.end,
@@ -8092,12 +8092,15 @@ fn is_dangling_placeholder_node_id(id: &str) -> bool {
 }
 
 fn normalize_compound_identifier(raw: &str) -> String {
-    let cleaned = raw
-        .trim()
-        .trim_matches('"')
-        .trim_matches('\'')
-        .trim_matches('`')
-        .trim();
+    // trim_fast for the two whitespace trims (the char `trim_matches` quote strips stay — memchr, not
+    // the `is_whitespace` CharSearcher). Called per gantt task / journey step / kanban card / mindmap
+    // node / xychart series across ~10 sites.
+    let cleaned = trim_fast(
+        trim_fast(raw)
+            .trim_matches('"')
+            .trim_matches('\'')
+            .trim_matches('`'),
+    );
     if cleaned.is_empty() {
         return String::new();
     }
