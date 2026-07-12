@@ -841,7 +841,7 @@ fn lower_flow_ast(
             }
         }
         FlowAst::ClassAssign { nodes, class } => {
-            for class_name in class.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            for class_name in class.split(',').map(trim_fast).filter(|s| !s.is_empty()) {
                 for node_key in nodes {
                     builder.add_class_to_node(node_key, class_name, span);
                 }
@@ -5241,7 +5241,7 @@ fn parse_gantt_excludes(raw: &str, date_format: Option<&str>) -> Vec<GanttExclud
 
     for token in raw
         .split(',')
-        .map(str::trim)
+        .map(trim_fast)
         .filter(|token| !token.is_empty())
     {
         if token.eq_ignore_ascii_case("weekends") {
@@ -7175,7 +7175,7 @@ fn sequence_participant_visuals(
     actor_keyword: bool,
 ) -> (NodeShape, Vec<&'static str>) {
     match participant_type
-        .map(str::trim)
+        .map(trim_fast)
         .filter(|value| !value.is_empty())
         .map(str::to_ascii_lowercase)
         .as_deref()
@@ -8377,7 +8377,7 @@ fn bracket_contents(line: &str) -> Option<&str> {
 
 fn parse_chart_value_list(raw: &str) -> Vec<String> {
     raw.split(',')
-        .map(str::trim)
+        .map(trim_fast)
         .filter(|value| !value.is_empty())
         .map(|value| value.trim_matches('"').trim_matches('\'').to_string())
         .collect()
@@ -8392,7 +8392,7 @@ fn parse_xychart_numeric_values(
     let mut values = Vec::with_capacity(memchr::memchr_iter(b',', raw.as_bytes()).count() + 1);
     for raw_value in raw
         .split(',')
-        .map(str::trim)
+        .map(trim_fast)
         .filter(|value| !value.is_empty())
         .map(|value| value.trim_matches('"').trim_matches('\''))
     {
@@ -9429,7 +9429,7 @@ fn span_for(line_number: usize, line: &str) -> Span {
 
 pub fn first_significant_line(input: &str) -> Option<&str> {
     let (content, _) = split_front_matter_block(input);
-    content.lines().map(str::trim).find(|line| {
+    content.lines().map(trim_fast).find(|line| {
         !line.is_empty() && !is_comment(line) && !line.starts_with("%%{") && !line.ends_with("}%%")
     })
 }
