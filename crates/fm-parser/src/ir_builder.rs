@@ -272,15 +272,15 @@ impl IrBuilder {
     ///
     /// Heuristic: each non-empty input line produces ~0.5 nodes and ~0.3 edges.
     pub(crate) fn with_capacity_hint(diagram_type: DiagramType, input_lines: usize) -> Self {
-        let estimated_nodes = (input_lines / 2).max(4);
-        let estimated_edges = (input_lines / 3).max(2);
-        // Labels ≈ nodes for EDGE-HEAVY diagrams (flowchart/er/state/class — nodes shared across many
-        // edge lines, so distinct nodes ≈ input_lines/2), but ≈ input_lines for NODE-PER-LINE diagrams
-        // (timeline/journey/gantt/… — each meaningful line declares one labelled node/item). The `/2`
-        // node estimate underestimated the latter's label count ~2×, so the `LabelIndex` rehashed
-        // (`reserve_rehash` ~6% of timeline/journey parse). Size it to `input_lines` for those types;
-        // edge-heavy types keep the tighter estimate (no over-reservation). Capacity-only ⇒ behavior-identical.
-        let estimated_labels = match diagram_type {
+        // NODE-PER-LINE diagrams (timeline/journey/gantt/mindmap/kanban/pie/xychart — each meaningful line
+        // declares a labelled node/item) have ~`input_lines` distinct nodes AND labels; EDGE-HEAVY diagrams
+        // (flowchart/er/state/class — nodes shared across many edge lines) have ~`input_lines/2`. Sizing the
+        // node & label indexes per-type shrinks the `NodeIdIndex`/`LabelIndex`/member-set `reserve_rehash`
+        // (the `/2` estimate was ~2-4× short — timeline builds a year + event node per line) WITHOUT
+        // over-reserving the edge-heavy common case (the `_` arm is byte-for-byte unchanged: flowchart/er
+        // NEUTRAL). `with_capacity_hint` runs once per parse (cold) ⇒ no hot-path codegen change.
+        // Capacity-only ⇒ behavior-identical.
+        let estimated_nodes = match diagram_type {
             DiagramType::Timeline
             | DiagramType::Journey
             | DiagramType::Gantt
@@ -288,8 +288,10 @@ impl IrBuilder {
             | DiagramType::Kanban
             | DiagramType::Pie
             | DiagramType::XyChart => input_lines.max(4),
-            _ => estimated_nodes,
+            _ => (input_lines / 2).max(4),
         };
+        let estimated_edges = (input_lines / 3).max(2);
+        let estimated_labels = estimated_nodes;
         let mut ir = MermaidDiagramIr::empty(diagram_type);
         ir.reserve_capacity(estimated_nodes, estimated_edges, estimated_labels);
         Self {
