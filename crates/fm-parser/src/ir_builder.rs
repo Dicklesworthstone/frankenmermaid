@@ -14,6 +14,7 @@ use fm_core::{
     NotePosition, Span,
 };
 
+use crate::mermaid_parser::trim_fast;
 use crate::{ParseResult, ParserConfig, normalize_identifier};
 
 /// Open fragment entry: (kind, label, `start_edge`, alternatives, `child_fragment_indices`).
@@ -954,7 +955,12 @@ impl IrBuilder {
         span: Span,
         is_auto_created: bool,
     ) -> Option<IrNodeId> {
-        let normalized_id = id.trim();
+        // `trim_fast` == `str::trim` byte-for-byte (ASCII byte scan, Unicode fallback only when a
+        // non-ASCII byte sits at a trimmed boundary) but skips the `char::is_whitespace` CharSearcher.
+        // This normalizes the id on every node intern and both endpoints of every edge — the hot
+        // flowchart intern path — where the ids are already `trim_ascii`'d, so the Unicode trim was
+        // pure overhead. Byte-identical.
+        let normalized_id = trim_fast(id);
         if normalized_id.is_empty() {
             self.add_warning("Encountered empty node identifier; skipped node");
             return None;
@@ -1257,7 +1263,9 @@ impl IrBuilder {
         shape: NodeShape,
         span: Span,
     ) -> Option<IrNodeId> {
-        let normalized_id = id.trim();
+        // Byte-exact `trim_fast` for the same reason as `intern_node_auto` — normalizes the owned
+        // generated id without the Unicode `char::is_whitespace` CharSearcher. Byte-identical.
+        let normalized_id = trim_fast(&id);
         if normalized_id.is_empty() {
             self.add_warning("Encountered empty node identifier; skipped node");
             return None;

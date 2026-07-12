@@ -1128,7 +1128,7 @@ fn parse_flowchart_document<'a>(
 /// ~4.5% of parse self-time. This trims ASCII whitespace by byte, then falls back to `str::trim`
 /// only when a non-ASCII byte sits at a trimmed boundary — where a multi-byte Unicode-whitespace
 /// char could remain — so the returned slice is exactly what `str::trim` would return in every case.
-fn trim_fast(s: &str) -> &str {
+pub(crate) fn trim_fast(s: &str) -> &str {
     let b = s.as_bytes();
     let mut start = 0;
     let mut end = b.len();
