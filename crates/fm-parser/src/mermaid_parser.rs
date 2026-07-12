@@ -1422,9 +1422,18 @@ fn parse_flowchart_statement_asts(
     // flowcharts) `find_operator` was re-scanning the whole statement up to 3× (guard + the tail's
     // `parse_edge_statement_asts` + its `is_some()` re-check). Non-`:::` statements keep the lazy path,
     // so plain flowcharts (no `:::`) do not pay an extra scan.
-    let class_suffix_op = find_triple_colon(statement)
-        .is_some()
-        .then(|| find_operator(statement, &FLOW_OPERATORS, FLOW_OP_GATE));
+    let class_suffix_op = find_triple_colon(statement).is_some().then(|| {
+        // Every flow operator starts with one of `- < = .` (the first bytes of `FLOW_OPERATORS` /
+        // `FLOW_OP_GATE`). A `:::` node declaration (`A[Label]:::class…`) contains none of them, so this
+        // auto-vectorizing byte-set scan skips the depth-tracking `find_operator` SCALAR scan of the
+        // (often long) node line. Byte-identical: no such byte ⇒ no operator ⇒ `find_operator` is `None`.
+        statement
+            .as_bytes()
+            .iter()
+            .any(|&b| matches!(b, b'-' | b'<' | b'=' | b'.'))
+            .then(|| find_operator(statement, &FLOW_OPERATORS, FLOW_OP_GATE))
+            .flatten()
+    });
     let chumsky_would_fail = matches!(
         &class_suffix_op,
         Some(op)
