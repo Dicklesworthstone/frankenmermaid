@@ -1640,50 +1640,58 @@ fn parse_fast_simple_flowchart_node_borrowed(
     // `parse_fast_simple_flowchart_edge_parts`), so the top `trim_ascii` was a no-op — use `statement`
     // directly. The `id` before `[` is still trimmed below (`N0 [x]` has interior whitespace).
     let trimmed = statement;
-    if trimmed.is_empty()
-        || trimmed.bytes().any(|byte| {
-            matches!(
-                byte,
-                b'(' | b')' | b'{' | b'}' | b'"' | b'\'' | b'`' | b'|' | b'&' | b','
-            )
-        })
-    {
+    if trimmed.is_empty() {
         return None;
     }
 
-    // One byte scan for the first `[` replaces `contains('[')` + `split_once('[')` — each a
-    // separate `CharSearcher` char-by-char decode (measured as CharSearcher::next_match on the
-    // node parse path). `[` is ASCII, so its byte index is a char boundary and
-    // `trimmed[..bracket]` / `trimmed[bracket + 1..]` reproduce `split_once('[')` exactly. This
-    // also folds the old double scan (contains, then split_once) into a single pass.
-    if let Some(bracket) = trimmed.as_bytes().iter().position(|&b| b == b'[') {
-        if !trimmed.ends_with(']') {
-            return None;
+    // Single scan for the first `[` OR forbidden byte (paren/brace/quote/pipe/amp/comma). Fusing them
+    // keeps the early reject for `{`/`(`-shaped nodes — diamond/hexagon fail at the first byte, as the
+    // old whole-line forbidden scan did — AND lets a bracketed node skip the rest of the scan when it
+    // isn't `]`-terminated (a `:::`-class suffix `N0[label]:::x`, the hot styled-flowchart
+    // node-declaration line). `[` is ASCII, so its byte index is a char boundary and the slices
+    // reproduce `split_once('[')` exactly.
+    let first_special = trimmed.as_bytes().iter().position(|&b| {
+        matches!(
+            b,
+            b'[' | b'(' | b')' | b'{' | b'}' | b'"' | b'\'' | b'`' | b'|' | b'&' | b','
+        )
+    });
+    match first_special {
+        Some(bracket) if trimmed.as_bytes()[bracket] == b'[' => {
+            // `[` came before any forbidden byte, so the id (before `[`) is already clean.
+            if !trimmed.ends_with(']') {
+                return None;
+            }
+            // The remainder (label + tail) must also carry no forbidden byte.
+            if trimmed.as_bytes()[bracket + 1..].iter().any(|&b| {
+                matches!(
+                    b,
+                    b'(' | b')' | b'{' | b'}' | b'"' | b'\'' | b'`' | b'|' | b'&' | b','
+                )
+            }) {
+                return None;
+            }
+            let id = trimmed[..bracket].trim_ascii();
+            // `trim_fast` is byte-identical to `str::trim` but skips the `char::is_whitespace`
+            // CharSearcher — this label trim fires once per bracketed node.
+            let label_raw = trim_fast(trimmed[bracket + 1..].strip_suffix(']')?);
+            // Byte scan for a nested `[`/`]` rather than `contains(['[', ']'])`; both are ASCII.
+            if !is_fast_flow_identifier(id)
+                || label_raw.as_bytes().iter().any(|&b| b == b'[' || b == b']')
+            {
+                return None;
+            }
+            // `label_raw` is `trim_fast`'d above; `parse_label_pretrimmed` skips the redundant re-trim.
+            let mut label = parse_label_pretrimmed(label_raw);
+            let icon = extract_icon_prefix_pretrimmed(label.as_mut());
+            clear_empty_label(&mut label);
+            Some((id, label, icon))
         }
-        let id = trimmed[..bracket].trim_ascii();
-        // `trim_fast` is byte-identical to `str::trim` (ASCII byte scan, Unicode fallback at a
-        // non-ASCII boundary) but skips the `char::is_whitespace` CharSearcher — this label trim
-        // fires once per bracketed node and showed as a top parse self-symbol.
-        let label_raw = trim_fast(trimmed[bracket + 1..].strip_suffix(']')?);
-        // Byte scan for a nested `[`/`]` rather than `contains(['[', ']'])`, whose `MultiCharEqSearcher`
-        // decodes every char of the label (~4% of flowchart parse). Both brackets are ASCII, so the
-        // byte scan is identical.
-        if !is_fast_flow_identifier(id)
-            || label_raw.as_bytes().iter().any(|&b| b == b'[' || b == b']')
-        {
-            return None;
-        }
-        // `label_raw` is `trim_fast`'d above; `parse_label_pretrimmed` skips the redundant re-trim
-        // (and returns `None` for an empty label, matching the old `then_some` guard). The resulting
-        // `label.text` is therefore already trimmed, so `extract_icon_prefix_pretrimmed` skips its
-        // re-trim too.
-        let mut label = parse_label_pretrimmed(label_raw);
-        let icon = extract_icon_prefix_pretrimmed(label.as_mut());
-        clear_empty_label(&mut label);
-        return Some((id, label, icon));
+        // A forbidden byte before any `[` (paren/brace/… shaped node — diamond/hexagon/…).
+        Some(_) => None,
+        // No `[` and no forbidden byte: a plain identifier node.
+        None => is_fast_flow_identifier(trimmed).then_some((trimmed, None, None)),
     }
-
-    is_fast_flow_identifier(trimmed).then_some((trimmed, None, None))
 }
 
 fn is_fast_flow_identifier(value: &str) -> bool {
