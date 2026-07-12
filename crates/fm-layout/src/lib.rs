@@ -1703,10 +1703,27 @@ fn count_back_edges(node_count: usize, edges: &[OrientedEdge]) -> usize {
     if node_count == 0 {
         return 0;
     }
-    let mut adj = vec![vec![]; node_count];
+    // CSR adjacency (flat targets + per-source offsets) instead of `vec![vec![]; n]` — one heap alloc
+    // per source, i.e. ~one per node on a chain/tree. Count out-degrees, prefix-sum to offsets, fill;
+    // the DFS reads each source's `[adj_start[n], adj_start[n+1])` segment in edge order. Byte-identical
+    // (same neighbors in the same order → same back-edge count). No sort/dedup, so offsets suffice.
+    let mut adj_start = vec![0_usize; node_count + 1];
     for edge in edges {
         if edge.source < node_count && edge.target < node_count {
-            adj[edge.source].push(edge.target);
+            adj_start[edge.source + 1] += 1;
+        }
+    }
+    for i in 1..adj_start.len() {
+        adj_start[i] += adj_start[i - 1];
+    }
+    let mut adj_flat = vec![0_usize; adj_start[node_count]];
+    {
+        let mut cursor = adj_start.clone();
+        for edge in edges {
+            if edge.source < node_count && edge.target < node_count {
+                adj_flat[cursor[edge.source]] = edge.target;
+                cursor[edge.source] += 1;
+            }
         }
     }
     let mut color = vec![0_u8; node_count];
@@ -1719,8 +1736,8 @@ fn count_back_edges(node_count: usize, edges: &[OrientedEdge]) -> usize {
         stack.push((start, 0));
         color[start] = 1;
         while let Some((node, idx)) = stack.last_mut() {
-            if *idx < adj[*node].len() {
-                let neighbor = adj[*node][*idx];
+            if *idx < adj_start[*node + 1] - adj_start[*node] {
+                let neighbor = adj_flat[adj_start[*node] + *idx];
                 *idx += 1;
                 match color[neighbor] {
                     0 => {
