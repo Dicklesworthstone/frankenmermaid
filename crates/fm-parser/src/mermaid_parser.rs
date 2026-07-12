@@ -1379,6 +1379,24 @@ fn parse_flowchart_document_items<'a>(
     (items, unclosed_subgraphs)
 }
 
+/// Byte index of the first `:::` (the inline-class suffix) in `s`, or `None`. Locates it via `memchr`
+/// on `:` plus a cheap prefix verify, avoiding the `TwoWaySearcher` (maximal-suffix factorization) that
+/// `str::contains(":::")` / `str::split(":::")` build per call — a per-statement + per-`:::`-node cost on
+/// flowchart parse. Byte-identical to those std searches (memchr keeps the SIMD first-byte skip, so a
+/// `:`-free statement — the common plain flowchart line — returns `None` in one vectorized scan).
+fn find_triple_colon(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = memchr::memchr(b':', &bytes[from..]) {
+        let idx = from + rel;
+        if bytes[idx..].starts_with(b":::") {
+            return Some(idx);
+        }
+        from = idx + 1;
+    }
+    None
+}
+
 fn parse_flowchart_statement_asts(
     statement: &str,
     line_number: usize,
@@ -1404,8 +1422,8 @@ fn parse_flowchart_statement_asts(
     // flowcharts) `find_operator` was re-scanning the whole statement up to 3× (guard + the tail's
     // `parse_edge_statement_asts` + its `is_some()` re-check). Non-`:::` statements keep the lazy path,
     // so plain flowcharts (no `:::`) do not pay an extra scan.
-    let class_suffix_op = statement
-        .contains(":::")
+    let class_suffix_op = find_triple_colon(statement)
+        .is_some()
         .then(|| find_operator(statement, &FLOW_OPERATORS, FLOW_OP_GATE));
     let chumsky_would_fail = matches!(
         &class_suffix_op,
@@ -3463,7 +3481,7 @@ fn parse_mindmap_node_token(raw: &str, config: &ParserConfig) -> Option<NodeToke
     // Strip class suffix (:::class1 class2) from the node definition. The `:::` split builds a
     // substring searcher; guard it behind a cheap `memchr(':')` — the common mindmap node has no colon.
     let core = if trimmed.as_bytes().contains(&b':') {
-        trimmed.split(":::").next().unwrap_or(trimmed).trim()
+        trim_fast(find_triple_colon(trimmed).map_or(trimmed, |pos| &trimmed[..pos]))
     } else {
         trimmed
     };
@@ -7879,7 +7897,7 @@ fn parse_node_token_with_config(raw: &str, config: &ParserConfig) -> Option<Node
     // The `:::className` CSS-class shorthand needs a `:`; guard the multi-char `split(":::")` (which
     // builds a substring searcher) behind a cheap `memchr(':')` — the common node token has no colon.
     let core = if trimmed.as_bytes().contains(&b':') {
-        trimmed.split(":::").next().unwrap_or(trimmed).trim()
+        trim_fast(find_triple_colon(trimmed).map_or(trimmed, |pos| &trimmed[..pos]))
     } else {
         trimmed
     };
