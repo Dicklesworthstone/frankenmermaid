@@ -14358,3 +14358,28 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   `bd-1buv.2.7` is **SURFACE / HOLD**, not reject. Resume only when an admissible remote worker can run both
   exact-source ORIG and CAND; gate `median.point_estimate` at CAND/ORIG `<= 0.97` with disjoint median 95% CIs and
   exact serialized IR/SVG identity.
+
+### REJECT: architecture group index `BTreeMap<String, _>` to `FxHashMap` (2026-07-12)
+
+- **Negative-ledger + BV first:** no architecture-specific map-index attempt was recorded. The applicable ready P0
+  performance parent remains `bd-1buv.2`; BV data hash `8879de4a7e98f9ad` reported 52 open / 39 actionable issues,
+  while its global recommendations were architectural feature work rather than a bounded parser lever.
+- **One candidate:** replace only `parse_architecture`'s lookup-only group index and the helper reference type from
+  `BTreeMap<String, (usize, usize)>` to `rustc_hash::FxHashMap`. The map is inserted into and key-read but never
+  iterated, so builder/input order, duplicate overwrite behavior, diagnostics, floating point, tie-breaking, and
+  RNG are unchanged. A temporary `parse/architecture/architecture_1600` seam used 400 groups with four services
+  each, exercising 400 inserts and 1,600 parent membership lookups.
+- **Strict remote same-worker pair:** both authoritative runs used actual worker `vmi1293453` through
+  `RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo bench --profile release -p fm-parser --bench
+  parse_bench -- parse/architecture/architecture_1600 --exact --warm-up-time 2 --measurement-time 5 --sample-size
+  30 --noplot`. The candidate added only Cargo `-j1` to fit the same worker's remaining admission slot; this changes
+  compile parallelism, not the benchmark binary or runtime workload. Several no-slot attempts failed closed, and
+  one differently routed job was cancelled before compilation; no local or cross-worker timing entered the verdict.
+- **Result:** ORIG Criterion time estimate was **2.0787 ms** (95% CI **1.9989..2.1516 ms**). CAND was
+  **2.5357 ms** (95% CI **2.1564..2.9352 ms**) with four high outliers. Criterion's paired change estimate was
+  **+9.5412%** (95% CI **-0.3061%..+19.840%**, `p = 0.08`), explicitly reporting no detectable improvement.
+  This cannot satisfy the required `<= 0.97` keep floor or a disjoint positive-gain interval.
+- **Restoration / verdict:** **REJECT.** The candidate and temporary seam were manually removed. Parser SHA-256 is
+  again `b7877e330301fe66ae61a6e60868439400ffafde56aa863cf3403a7d3964dc37`; the permanent parser bench SHA-256 is
+  again `6a80c1ec2ae7e827d82dc597cb09d37bc8f37b664489ad70e5911579e6dd4c05`. Do not retry this exact architecture
+  group-index substitution without a materially different workload or implementation.
