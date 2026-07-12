@@ -1333,6 +1333,18 @@
   pass instead of N (less loop/iterator overhead), AND the per-pass non-inlined calls are skipped on the common
   (no-special-byte) line. The gate flag replaces each pass's own internal presence-scan too. First parse win >4%
   since the trim harvest floored — the "cheap per-item helper" seam is deep because NONE of these were inlined.
+
+### WIN: drop the redundant top trim in the fast edge/node classifiers — −2.11% parse (2026-07-12)
+- **Lever (unconditional removal — same as 1ced23c).** `parse_fast_simple_flowchart_edge_parts` /
+  `..._node_borrowed` opened with `statement.trim_ascii()`, but every caller (doc loop directly + the `_ast`
+  chain) passes a fully `trim_fast`'d statement, so the top trim was a no-op on ALL paths. Ran ~2400×/parse
+  (edge_parts once per statement, node_borrowed once per non-edge). Removed; interior `left`/`right`/`id` trims
+  stay (whitespace around operator/bracket is still possible).
+- **Measured:** HEAD **2,946,611** → CAND **2,884,548** instr/iter = **−62,063/iter (−2.11%)**; variance ~13k out
+  of 11.5B (signal ~19,000×). Byte-identical across 23 shapes; 408/408 tests; clippy PRE-commit. Landed `689502f`.
+- **NOTE: `trim_ascii` is NOT as cheap as it looks even when inlined** (estimated ~0.4%, measured −2.11%): on a
+  hot per-item path the two-ended byte scan + the `is_empty` check + register pressure add up ×2400. Cumulative
+  parse harvest since the trim floor is now ~−22% (3.66M → 2.88M instr/iter, byte-identical throughout).
 ### Acyclic SCC fast-path in `GraphMetrics::from_ir` — −27 to −29% layout (Auto-selection overhead) (2026-06-27)
 - **Lever (the 203µs Auto overhead pinned last cycle):** the Auto algorithm selection
   (`select_general_graph_algorithm_with_config`) calls `GraphMetrics::from_ir` on **every** layout —
