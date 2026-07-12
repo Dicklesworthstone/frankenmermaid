@@ -5330,7 +5330,7 @@ fn parse_pie(input: &str, builder: &mut IrBuilder) {
         }
 
         // Extract numeric value after the colon.
-        let value = match trimmed.split_once(':').map(|(_, v)| v.trim()) {
+        let value = match trimmed.split_once(':').map(|(_, v)| trim_fast(v)) {
             Some(v) if !v.is_empty() => {
                 if let Ok(n) = v.parse::<f32>() {
                     n
@@ -8345,7 +8345,9 @@ fn normalize_subgraph_title(raw: &str) -> Option<String> {
 
 fn parse_name_before_colon(line: &str) -> Option<&str> {
     let (left, _) = line.split_once(':')?;
-    let candidate = left.trim().trim_matches('"').trim_matches('\'').trim();
+    // trim_fast for the two whitespace trims (the char `trim_matches` quote strips stay — they are
+    // memchr, not the `is_whitespace` CharSearcher). Called per pie slice / xychart point.
+    let candidate = trim_fast(trim_fast(left).trim_matches('"').trim_matches('\''));
     (!candidate.is_empty()).then_some(candidate)
 }
 
