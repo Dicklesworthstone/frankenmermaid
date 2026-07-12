@@ -1267,6 +1267,27 @@
   The parser per-line trim vein (`line` + `raw_line` loops) is now fully harvested; residual parse `trim_matches`
   is shape-inherent or in cold directive branches.
 
+### WIN: SIMD gate-byte pre-scan skips find_operator on `:::`-node lines — styled3 parse −23% (2026-07-12)
+- **4th compounding shaped-flowchart win, again via re-profile.** After `find_triple_colon`, styled3 STILL had
+  `find_operator_core` at **24% self**: the `:::` guard computes `find_operator` on every styled node-declaration line
+  (`N0[Node 0]:::serviceNodeStyle:::regionUsEastPrimary:::observabilityDashboard`, ~70 chars) to find no operator — a
+  **depth-tracking SCALAR scan** of the whole line (no `starts_with` fires because the line has no operator byte).
+- **Lever:** every flow operator starts with one of `- < = .` (`FLOW_OPERATORS`' first bytes); a `:::` node line
+  contains none. Gate the `find_operator` call behind an **auto-vectorizing byte-set pre-scan**
+  (`.any(|&b| matches!(b, b'-'|b'<'|b'='|b'.'))`) — no such byte ⇒ no operator ⇒ skip `find_operator` (which returns
+  `None`). The SIMD scan replaces the scalar depth-tracking scan for no-operator lines. Byte-identical; scoped to the
+  `:::` path (inside the `class_suffix_op` closure) so plain flowcharts/non-`:::` shapes are untouched.
+- **Measured (`perf stat instructions:u`, interleaved, min of 4, size 300 × 2000):** `styled3` **−23.282%**, `styled`
+  **−12.981%**; flowo/wide/diamond/hexagon EXACTLY neutral. Byte-identical across 33 shapes; clippy clean (the
+  multi-value `matches!` does not trip `manual_contains`). Landed `97a78bb`.
+- **META — FOUR compounding wins on the shaped-flowchart parse path**, each found by re-profiling after the last:
+  chumsky `Rich`→`EmptyErr` (`ced3c6f`, hexagon −54%) → reuse `:::` operator position (`cb981c1`, styled3 −34%) →
+  `find_triple_colon` byte-scan (`59470a4`, −6%) → this gate-byte pre-scan (styled3 −23%). styled3 parse is now
+  **~40%** of where it was 4 wins ago. **A `.any(matches!(small const set))` pre-scan that gates a scalar per-byte
+  loop auto-vectorizes and is a byte-identical drop-in when the byte-set is a NECESSARY condition for the loop's hit
+  — the inverse of the 071ec24 first-byte-guard reject (a branch INSIDE the loop killed vectorization; a SEPARATE
+  pre-scan restores it).**
+
 ### WIN: byte-scan `:::` (find_triple_colon) not contains/split TwoWaySearcher — styled −8%, diamond −5% (2026-07-12)
 - **Re-profiling styled3 (after the find_operator dedup) exposed a residual TwoWaySearcher storm** — `StrSearcher::new`
   4% + `TwoWaySearcher::new` 3.3% + `is_contained_in` 2.7% ≈ 10%. Source: the 3-char `:::` inline-class needle in
