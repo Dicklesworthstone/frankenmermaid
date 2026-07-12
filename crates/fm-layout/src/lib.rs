@@ -6883,6 +6883,28 @@ fn format_gantt_axis_tick(days_since_epoch: i32) -> String {
     let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
     let month = month_prime + if month_prime < 10 { 3 } else { -9 };
     let year = year + i32::from(month <= 2);
+    // Fast path: write the fixed 10-byte `YYYY-MM-DD` directly instead of `format!`'s
+    // `Formatter`/`pad_integral` zero-pad machinery — this runs once per axis-tick DAY (the entire
+    // timeline span) and was ~30% of gantt layout (format_inner + fmt::write + i32 Display + pad_integral).
+    // Gated so every field is exactly its padded width: year 4 digits (0..10000), month/day 2 digits
+    // (0..100 — always true for the 1..=12 / 1..=31 the civil-date algorithm above yields). Byte-identical
+    // to the `format!` fallback on this range; wider/negative years (unreachable for real gantt dates) keep
+    // `format!`. Mirrors the parser's `normalize_gantt_date_with_format` fast path.
+    if (0..10_000).contains(&year) && (0..100).contains(&month) && (0..100).contains(&day) {
+        let y = year as u32;
+        let m = month as u32;
+        let d = day as u32;
+        let mut b = [b'-'; 10];
+        b[0] = b'0' + (y / 1000) as u8;
+        b[1] = b'0' + (y / 100 % 10) as u8;
+        b[2] = b'0' + (y / 10 % 10) as u8;
+        b[3] = b'0' + (y % 10) as u8;
+        b[5] = b'0' + (m / 10) as u8;
+        b[6] = b'0' + (m % 10) as u8;
+        b[8] = b'0' + (d / 10) as u8;
+        b[9] = b'0' + (d % 10) as u8;
+        return String::from_utf8(b.to_vec()).expect("ascii date digits");
+    }
     format!("{year:04}-{month:02}-{day:02}")
 }
 
