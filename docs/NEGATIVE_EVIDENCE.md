@@ -1285,6 +1285,22 @@
   provably dead for everyone → delete it outright (no wrapper, no flag). Again ~2% for a "no-op" — non-inlined
   per-item helper calls keep paying off. Cumulative trim/normalize harvest this cycle: efa2141(−3.18%) +
   5cd410a(−1.05%) + 1ced23c(−2.21%) + 706c97a(−1.66%) + earlier trim wins.
+
+### WIN: skip `extract_icon_prefix`'s re-trim for the pre-trimmed flowchart label — −0.96% parse (2026-07-12)
+- **Lever (const-flag core; the multi-caller sibling of the 1ced23c unconditional removal).**
+  `extract_icon_prefix` re-trims `label.text` with `trim_fast`, but the flowchart node fast path hands it a
+  label from `parse_label_pretrimmed` (text already trimmed) → no-op there, once per labelled node. Unlike the
+  split helpers, `extract_icon_prefix` has ~10 callers (not all pre-trimmed), so I could NOT delete the trim
+  unconditionally — used the const-flag core: `extract_icon_prefix_inner(label, pretrimmed)` +
+  `extract_icon_prefix_pretrimmed` wrapper, routed only the node fast path through it.
+- **Measured:** HEAD **3,180,933** → CAND **3,150,524** instr/iter = **−30,409/iter (−0.96%)**; variance ~4k out
+  of 12.6B (signal ~30,000×). Byte-identical across 24 shapes; 408/408 tests incl. icon tests; clippy PRE-commit.
+  Landed `111ba9f`.
+- **DECISION RULE (redundant-normalizer removal): sole caller pre-normalizes + normalizer idempotent → DELETE
+  outright (1ced23c). Multiple callers, only some pre-normalize → const-flag `_pretrimmed` core, route the
+  pre-normalizing callers through it (111ba9f / 5cd410a / efa2141).** The flowchart node label pipeline is now
+  trim-clean end to end: label_raw trim (1) → parse_label_pretrimmed (no re-trim) → extract_icon_prefix_pretrimmed
+  (no re-trim) → split helpers (no top re-trim). One necessary trim where there were four.
 ### Acyclic SCC fast-path in `GraphMetrics::from_ir` — −27 to −29% layout (Auto-selection overhead) (2026-06-27)
 - **Lever (the 203µs Auto overhead pinned last cycle):** the Auto algorithm selection
   (`select_general_graph_algorithm_with_config`) calls `GraphMetrics::from_ir` on **every** layout —
