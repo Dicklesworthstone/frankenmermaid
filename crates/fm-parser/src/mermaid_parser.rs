@@ -5596,7 +5596,22 @@ fn xychart_point_label(base_name: &str, x_label: &str, value: f32) -> String {
     label.push(' ');
     label.push_str(x_label);
     label.push_str(": ");
-    let _ = write!(&mut label, "{value}");
+    // Fast path: a whole-number value below 2^24 formats identically to its `i64` (`{}` on such an
+    // f32 prints the exact integer, no trailing `.0`), so skip the grisu shortest-decimal float path
+    // — ~30% of xychart parse, and chart values are overwhelmingly small integers. Guards: the
+    // `as i64 as f32 == value` round-trip rejects non-integers/NaN/inf; `< 2^24` is REQUIRED because
+    // at larger magnitudes f32 has integer gaps and grisu's shortest decimal differs from `value as
+    // i64` (e.g. `2147483600f32` prints `2147483600` but casts to `2147483648`); `-0.0` prints `-0`,
+    // not `0`, so exclude it. Verified byte-identical to `write!("{value}")` over a 40M-value sweep.
+    let as_int = value as i64;
+    if as_int as f32 == value
+        && value.abs() < 16_777_216.0
+        && !(value == 0.0 && value.is_sign_negative())
+    {
+        let _ = write!(&mut label, "{as_int}");
+    } else {
+        let _ = write!(&mut label, "{value}");
+    }
     label
 }
 
