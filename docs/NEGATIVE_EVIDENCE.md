@@ -1267,6 +1267,27 @@
   The parser per-line trim vein (`line` + `raw_line` loops) is now fully harvested; residual parse `trim_matches`
   is shape-inherent or in cold directive branches.
 
+### WIN: integer fast-path for xychart point-label float formatting — xychart parse −9.7% (2026-07-12)
+- **A new lever kind — grisu float-format elision, found by profiling xychart.** A xychart parse profile was ~30%
+  **float-to-string formatting**: `grisu::format_shortest_opt` 8.5% + `core::fmt::write` 9.9% + `float_to_decimal_common_shortest::<f32>` 6.7%.
+  Source: `xychart_point_label` runs `write!(&mut label, "{value}")` for **every** data point's f32 value, and chart
+  values are overwhelmingly **small integers** — grisu's shortest-decimal machinery is wasted on them.
+- **Lever:** fast-path whole-number values by formatting `value as i64` (a cheap digit loop, no grisu). **The guard
+  is subtle and load-bearing — three conditions, all required for byte-identity:**
+  1. `as i64 as f32 == value` round-trip → rejects non-integers, NaN, inf (their casts don't round-trip).
+  2. **`value.abs() < 2^24`** → at larger magnitudes **f32 has integer gaps** and grisu's *shortest decimal* differs
+     from `value as i64` (e.g. `2147483600f32` Displays `"2147483600"` but casts to `2147483648`). This was caught
+     by a standalone 40M-value sweep — the naive version (no magnitude guard) diverged on 2 of 40M.
+  3. exclude **`-0.0`** (Displays `"-0"`, but `0i64` prints `"0"`; and `-0.0 == 0.0` is true so the round-trip passes).
+  Uses the cast round-trip rather than `fract()` to avoid the libm call (per bbfa640). Verified byte-identical over
+  the 40M-value + edge-case sweep (0 mismatches).
+- **Measured (`perf stat instructions:u`, interleaved, min of 4, size 300 × 3000):** `xychart` parse **−9.671%**;
+  `flowo` neutral (`xychart_point_label` is xychart-only). Byte-identical across 24 shapes; clippy clean. Landed `035a5b6`.
+- **META — REUSABLE LEVER: grep hot paths for `write!("{…}", <f32/f64>)` / `.to_string()` on a float that is usually
+  a whole number → integer fast-path guarded by `as-int round-trip` + `abs() < 2^24` (f32) / `< 2^53` (f64) + `-0.0`
+  exclusion.** The grisu shortest-decimal path is ~8% each call; skipping it on integers is a big per-item win.
+  ⚠️The `< 2^24` magnitude guard is NOT optional — without it, large integer-valued f32 diverge (grisu shortest ≠ cast).
+
 ### WIN: trim_fast the per-item name/value trims in pie + quadrant — pie −1.3%, quadrant −0.6% (2026-07-12)
 - **The "pie/quadrant storm" was CharSearcher, not TwoWaySearcher.** The per-type scan flagged pie 7.1% / quadrant
   8.1% "searcher", but a pie profile showed it was **std-trim CharSearcher** (`trim_matches::<is_whitespace>` 4.8% +
