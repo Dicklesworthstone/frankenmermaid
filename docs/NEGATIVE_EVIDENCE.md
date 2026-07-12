@@ -1267,6 +1267,23 @@
   The parser per-line trim vein (`line` + `raw_line` loops) is now fully harvested; residual parse `trim_matches`
   is shape-inherent or in cold directive branches.
 
+### WIN: trim_fast the per-item name/value trims in pie + quadrant — pie −1.3%, quadrant −0.6% (2026-07-12)
+- **The "pie/quadrant storm" was CharSearcher, not TwoWaySearcher.** The per-type scan flagged pie 7.1% / quadrant
+  8.1% "searcher", but a pie profile showed it was **std-trim CharSearcher** (`trim_matches::<is_whitespace>` 4.8% +
+  `CharSearcher::next_match` 6.0%) — the scan's `next_match` grep caught the *whitespace* CharSearcher, not a
+  multi-char `&str` TwoWaySearcher. (`normalize_identifier` is separately 11.9% on pie — its **slow path**, since
+  spaced/quoted slice names can't take the clean fast path; that's structural.)
+- **Lever:** `parse_name_before_colon` (called **per pie slice AND per quadrant point**) ran TWO std whitespace
+  `.trim()` per item (`left.trim().trim_matches('"').trim_matches('\'').trim()`), and `parse_pie` ran `v.trim()` per
+  slice value. Route the whitespace trims through `trim_fast` (the char `trim_matches('"'/'\'')` quote strips stay —
+  they're memchr, not the `is_whitespace` CharSearcher). Byte-identical.
+- **Measured (`perf stat instructions:u`, interleaved, min of 4, size 300 × 3000):** `pie` **−1.338%**, `quadrant`
+  **−0.605%**; `xychart`/`flowo` neutral (xychart doesn't call `parse_name_before_colon`).
+- **Byte-identical** across 24 shapes (n=40 & n=300); clippy clean. Landed `4e39b5e`.
+- **META:** when scanning for "searcher" cost, `CharSearcher::next_match`/`trim_matches::<is_whitespace>` (std
+  whitespace trim → `trim_fast`) and `StrSearcher/TwoWaySearcher` (multi-char `&str` → memchr/byte-scan) are
+  **different levers with different fixes** — separate them in the grep. The pie/quadrant flag was the former.
+
 ### WIN: memchr the multi-char open delimiter in parse_wrapped_str_with_config — block −1.8%, asym −2.7% (2026-07-12)
 - **Continuing the reopened TwoWaySearcher-storm frontier.** A per-type searcher-cost scan found **block 18.9%**,
   quadrant 8.1%, pie 7.1% (state 0%, erattr's is the shared whole-input gates). A block profile pinned it:
