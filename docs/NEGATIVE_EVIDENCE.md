@@ -1056,6 +1056,25 @@
 
 ## Kept Wins Also Recorded Here By Request
 
+### WIN: gantt task_id_to_idx BTreeMap<String> → presized FxHashMap — gantt LAYOUT −21% (2026-07-12)
+- **Re-profile after the axis-tick date fix (the flagged NEXT target).** `gantt/300` layout showed
+  `__memcmp_avx2_movbe` at ~25% — String-key comparisons from `task_id_to_idx`, a `BTreeMap<String, usize>`
+  built + looked up per task on the fixture's `after t{n-1}` DEPENDENCY CHAIN (300 O(log N) inserts + 300
+  O(log N) dep-resolution `.get`s, each a stack of memcmps).
+- **Lever:** `task_id_to_idx` is lookup-only (built once, read via `.get`, never iterated — layout order
+  comes from the task list) → swap to `FxHashMap<String, usize>` presized to task_count (O(1) hashing, no
+  rehash). Mirrors the parser's `parse_gantt` `task_ids_to_nodes` FxHashMap (same swap, same rationale — the
+  layout twin was simply missed). `section_to_nodes` stays BTreeMap (it IS iterated sorted for section bands
+  → order load-bearing).
+- **Byte-identical:** dump identical across 6 shapes at n=120 AND full gantt at n=300 (whole dependency chain
+  + all sections); 439/439 fm-layout tests. gantt-only. Clippy clean.
+- **Measured (`perf stat instructions:u`, interleaved, min of 6, gantt 300 × 8000):** 12.137B → 9.588B =
+  **−21.0%**. Landed `a0853a2`. (Compounds with `18902e7` — gantt layout is now ~2× faster than two turns ago.)
+- **⭐⭐REUSABLE LEVER: a lookup-only `BTreeMap<String, _>` on a hot path is a memcmp storm — grep BOTH parser
+  AND layout for `BTreeMap<String`/`BTreeMap::new()` whose keys are strings and whose ITERATION ORDER IS
+  UNUSED → swap to FxHashMap.** Check `.iter()`/`.values()`/`.keys()` uses first: if any feeds output, the
+  sorted order is load-bearing (keep BTreeMap); if only `.get`/`.entry`/`.contains`, it's free.
+
 ### WIN: gantt axis-tick date via direct byte write, not format!/pad_integral — gantt LAYOUT −11.7% (2026-07-12)
 - **Pivot from parse to LAYOUT (fresh vein — parse trim vein exhausted).** A `gantt/300` LAYOUT profile
   showed ~30% in `format!` machinery (format_inner 11.5% + fmt::write 10% + `<i32 as Display>::fmt` 8.4% +
