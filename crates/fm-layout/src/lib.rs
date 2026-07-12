@@ -7493,7 +7493,11 @@ fn layout_diagram_kanban_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     // Byte-identical: same per-rank min/max (over the same nodes, in the same `layout.nodes` order) and
     // the same `min-padding` / `padding.mul_add(2.0, span)` rect as `layout_bounds_for_nodes(.., 20.0)`;
     // ranks with no node produce no bounds entry, exactly like that fn's `None`.
-    let mut rank_bounds: FxHashMap<usize, (f32, f32, f32, f32)> = FxHashMap::default();
+    // Presize to the node count (an upper bound on the distinct-rank count) so the per-node `.entry`
+    // inserts below don't grow+rehash the table as ranks accumulate (`RawTable::reserve_rehash` was ~5%
+    // of journey/kanban layout). Over-reservation is free (never touches the surplus).
+    let mut rank_bounds: FxHashMap<usize, (f32, f32, f32, f32)> =
+        FxHashMap::with_capacity_and_hasher(traced.layout.nodes.len(), Default::default());
     for node_box in &traced.layout.nodes {
         let entry = rank_bounds.entry(node_box.rank).or_insert((
             f32::INFINITY,
@@ -7513,7 +7517,14 @@ fn layout_diagram_kanban_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             let (min_x, min_y, max_x, max_y) = *rank_bounds.get(&rank)?;
             Some(LayoutBand {
                 kind: LayoutBandKind::Lane,
-                label: format!("lane {}", rank + 1),
+                // `format!("lane {}", rank + 1)` per lane went through the Formatter (~15% of
+                // journey/kanban layout: format_inner + fmt::write). Build it directly; byte-identical
+                // (`push_usize_decimal` == `usize`'s Display).
+                label: {
+                    let mut label = String::from("lane ");
+                    fm_core::push_usize_decimal(&mut label, rank + 1);
+                    label
+                },
                 bounds: LayoutRect {
                     x: min_x - 20.0,
                     y: min_y - 20.0,
