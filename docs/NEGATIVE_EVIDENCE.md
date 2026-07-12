@@ -1228,6 +1228,18 @@
 - **LEVER: an up-front `HashMap`/`Vec` consumed only on a conditional branch → gate its construction on a cheap
   detector.** Same family as the "gate a no-op call" lesson but for a whole precompute. Detector: a `HashSet` that
   stops early (`insert` returns false) is cheaper than a full `HashMap<_,count>`+`Vec` when you only need existence.
+- **SURFACE — layout floor map (post-`77cf5d2`, so the next pass doesn't re-explore).** Re-profiled flowchart/800
+  layout (~2.47M instr/iter). Remaining hot symbols are at their floor for *quick* levers: `build_edge_paths`
+  16.3% self (per-edge obstacle parking / anchors / `LayoutEdgePath` build — all necessary; router excludes an
+  edge's own endpoints by FAR_AWAY-parking, restructuring to pass exclusions is a router-signature change);
+  `query_segment` 8% (no-sort cell-walk + generation dedup, ledger-tuned); `GraphMetrics::from_ir` 4.3% (Auto
+  algorithm-selection recompute — its cache lives in `ACTIVE_INCREMENTAL_STATE`, a thread-local that's ABSENT in
+  the non-incremental bench/CLI path, so it recomputes every layout; adding a non-incremental metrics cache is the
+  one real lever but touches selection semantics); `node_boxes_from_centers` clones `node.id` per node but the
+  `String` is read by render/lookups (inherent); `resolved_edges`/`simplify_polyline` already optimized. A
+  `RawVec<IrNodeId>::grow_one` at 3.3% (some un-presized `Vec<IrNodeId>`) was not located — worth a targeted hunt.
+  Next layout lever needs STRUCTURAL work (router exclusion params, or non-incremental GraphMetrics cache), not a
+  contained edit.
 
 ### WIN: use the loop's `edge` for the span instead of re-fetching by index — −0.42% layout (2026-07-12)
 - **Context — LAYOUT profile (first this session).** @flowchart/800 layout (2.50M instr/iter): dominant is
