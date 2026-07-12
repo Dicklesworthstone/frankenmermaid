@@ -1180,6 +1180,24 @@
   hand *borrowed* owned data to an interner pay a clone-then-free per item; consuming the intermediate Vec by
   value and moving the owned field in erases both. −1.84% dwarfs every scan lever this cycle (−0.48%/−0.72%).
   Candidates elsewhere: any `intern_*`/`push` fed from a `&`-borrow of a soon-dropped owned buffer.
+
+### WIN: one-probe `entry()` for node/label index inserts — −2.42% parse (2026-07-12)
+- **Lever (biggest of the cycle; a HASHMAP-PROBE lever).** With the label clone gone, the profile's dedup
+  cluster stood out — LabelIndex `HashMap::insert` 7.45%, `get_with_hash` 3.65%, `hash_key` 2.63%. Both
+  `NodeIdIndex::insert_with_hash` and `LabelIndex::insert_with_hash` did `self.buckets.get_mut(&hash)` **then**
+  `self.buckets.insert(hash, ..)` — TWO full bucket-map probes on the common vacant path, hit for every distinct
+  node id and every distinct label (~1600 inserts/parse; every flowchart label is unique → dedup always misses
+  then inserts). Replaced with a single `entry(hash)`: Vacant inserts into the located slot (no re-probe),
+  Occupied does the identical One→Many upgrade.
+- **Measured (deterministic `perf stat instructions:u`, flowchart/800 parse ×4000, interleaved):** HEAD
+  **3,551,689** instr/iter → CAND **3,465,711** = **−85,982/iter (−2.42%)**; variance ~12k out of 13.9B (signal
+  ~28,000× the noise). Byte-identical across 18 shapes; 408/408 tests. Landed `3150ae2`. **Bigger than expected**
+  — the redundant `get_mut` probe cost more than a hash+compare because the follow-up `insert` re-ran the full
+  RawTable find-or-insert from scratch (two independent table walks, not one walk + a cheap write).
+- **LESSON: `get_mut(k).is_none()`-then-`insert(k, v)` is a DOUBLE hashmap walk — use `entry(k)`.** Any
+  check-then-insert on a `HashMap`/`FxHashMap` (`if map.get(k).is_none() { map.insert(k, v) }`, or a `match
+  get_mut { None => insert, .. }`) probes twice; `entry` probes once and hands back the slot. On a hot
+  build-the-index path this is a free ~2-2.5% — grep for `get_mut(&`/`.get(&` immediately followed by `.insert(`.
 ### Acyclic SCC fast-path in `GraphMetrics::from_ir` — −27 to −29% layout (Auto-selection overhead) (2026-06-27)
 - **Lever (the 203µs Auto overhead pinned last cycle):** the Auto algorithm selection
   (`select_general_graph_algorithm_with_config`) calls `GraphMetrics::from_ir` on **every** layout —
