@@ -1553,9 +1553,11 @@ fn parse_fast_simple_flowchart_node_borrowed(
             return None;
         }
         // `label_raw` is `trim_fast`'d above; `parse_label_pretrimmed` skips the redundant re-trim
-        // (and returns `None` for an empty label, matching the old `then_some` guard).
+        // (and returns `None` for an empty label, matching the old `then_some` guard). The resulting
+        // `label.text` is therefore already trimmed, so `extract_icon_prefix_pretrimmed` skips its
+        // re-trim too.
         let mut label = parse_label_pretrimmed(label_raw);
-        let icon = extract_icon_prefix(label.as_mut());
+        let icon = extract_icon_prefix_pretrimmed(label.as_mut());
         clear_empty_label(&mut label);
         return Some((id, label, icon));
     }
@@ -8039,10 +8041,27 @@ fn clear_empty_label(label: &mut Option<ParsedLabel>) {
 }
 
 fn extract_icon_prefix(label: Option<&mut ParsedLabel>) -> Option<String> {
+    extract_icon_prefix_inner(label, false)
+}
+
+/// [`extract_icon_prefix`] where the caller guarantees `label.text` is already `trim_fast`'d, so the
+/// initial re-trim is skipped. Used by `parse_fast_simple_flowchart_node_borrowed`, whose label comes
+/// from `parse_label_pretrimmed` (text already trimmed) — ~once per labelled node.
+fn extract_icon_prefix_pretrimmed(label: Option<&mut ParsedLabel>) -> Option<String> {
+    extract_icon_prefix_inner(label, true)
+}
+
+fn extract_icon_prefix_inner(label: Option<&mut ParsedLabel>, pretrimmed: bool) -> Option<String> {
     let label = label?;
     // `trim_fast` == `str::trim` byte-for-byte, without the `char::is_whitespace` CharSearcher; this
     // runs once per node label (extract_icon_prefix is called for every labelled flowchart node).
-    let trimmed = trim_fast(&label.text);
+    // When the caller already trimmed `label.text` (`pretrimmed`, a const per wrapper → the branch
+    // folds away), `trim_fast(&label.text) == label.text`, so use it directly.
+    let trimmed = if pretrimmed {
+        label.text.as_str()
+    } else {
+        trim_fast(&label.text)
+    };
     if trimmed.is_empty() {
         return None;
     }
