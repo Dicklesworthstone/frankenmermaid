@@ -1552,7 +1552,9 @@ fn parse_fast_simple_flowchart_node_borrowed(
         {
             return None;
         }
-        let mut label = parse_label((!label_raw.is_empty()).then_some(label_raw));
+        // `label_raw` is `trim_fast`'d above; `parse_label_pretrimmed` skips the redundant re-trim
+        // (and returns `None` for an empty label, matching the old `then_some` guard).
+        let mut label = parse_label_pretrimmed(label_raw);
         let icon = extract_icon_prefix(label.as_mut());
         clear_empty_label(&mut label);
         return Some((id, label, icon));
@@ -8098,7 +8100,17 @@ fn split_emoji_icon_prefix(text: &str) -> Option<(&str, Option<&str>)> {
 }
 
 fn parse_label(raw: Option<&str>) -> Option<ParsedLabel> {
-    let raw = raw?;
+    parse_label_inner(raw?, false)
+}
+
+/// [`parse_label`] where the caller guarantees `raw` is already `trim_fast`'d, so the plain-label fast
+/// path skips the redundant re-trim. Used by `parse_fast_simple_flowchart_node_borrowed`, whose
+/// `label_raw` is `trim_fast`'d immediately before this call (~800 labelled nodes per flowchart/800 parse).
+fn parse_label_pretrimmed(raw: &str) -> Option<ParsedLabel> {
+    parse_label_inner(raw, true)
+}
+
+fn parse_label_inner(raw: &str, pretrimmed: bool) -> Option<ParsedLabel> {
     // Fast path: a label with no surrounding quotes (`"` `'`), markdown backtick, or HTML entity
     // (`&` `#`) reduces to a plain trimmed copy -- the quote-stripping, markdown, and entity-decode
     // passes below all leave it unchanged. Byte-identical: for such a label the full path also ends
@@ -8109,9 +8121,10 @@ fn parse_label(raw: Option<&str>) -> Option<ParsedLabel> {
         .bytes()
         .any(|byte| matches!(byte, b'"' | b'\'' | b'`' | b'&' | b'#'))
     {
-        // `trim_fast` == `str::trim` byte-for-byte but skips the `char::is_whitespace` CharSearcher;
-        // this fast-path trim runs once per node label (parse_label's hottest arm on plain labels).
-        let trimmed = trim_fast(raw);
+        // `trim_fast` == `str::trim` byte-for-byte but skips the `char::is_whitespace` CharSearcher.
+        // When the caller already trimmed (`pretrimmed`), `trim_fast(raw) == raw`, so skip it entirely
+        // (`pretrimmed` is a const per wrapper, so this branch folds away). Runs once per node label.
+        let trimmed = if pretrimmed { raw } else { trim_fast(raw) };
         return (!trimmed.is_empty()).then(|| ParsedLabel::plain(trimmed));
     }
 
