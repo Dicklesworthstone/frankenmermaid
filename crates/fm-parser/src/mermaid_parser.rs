@@ -7990,7 +7990,25 @@ fn parse_wrapped_str_with_config(
     shape: NodeShape,
     config: &ParserConfig,
 ) -> Option<NodeToken> {
-    let start = raw.find(open)?;
+    // Locate the (multi-char) open delimiter via memchr on its first byte + a cheap prefix verify,
+    // rather than `raw.find(open)` which builds a `TwoWaySearcher` (maximal-suffix factorization) per
+    // call — pure setup, and node/block shape probing calls this with several delimiters (`((`, `[[`,
+    // `{{`, `[/`, …) that mostly miss. memchr keeps the SIMD first-byte search; only the factorization
+    // setup is dropped. Byte-identical: returns the first full-match index `find(open)` would.
+    let open_bytes = open.as_bytes();
+    let hay = raw.as_bytes();
+    let first = *open_bytes.first()?;
+    let start = {
+        let mut from = 0;
+        loop {
+            let rel = memchr::memchr(first, &hay[from..])?;
+            let cand = from + rel;
+            if hay[cand..].starts_with(open_bytes) {
+                break cand;
+            }
+            from = cand + 1;
+        }
+    };
     if !raw.ends_with(close) && !config.auto_close_delimiters {
         return None;
     }
