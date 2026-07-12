@@ -7454,11 +7454,18 @@ fn layout_diagram_kanban_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     }
 
     let ranks = layered_ranks(ir);
-    let mut nodes_by_rank: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    // Dense rank index: kanban/journey assign ~a distinct rank per row, so ranks run 0..max densely.
+    // A `Vec<Vec>` indexed by rank iterates in the SAME sorted-rank order as the old `BTreeMap<usize,
+    // Vec>` (index order == key order) while dropping the per-node O(log) B-tree insert + node allocs
+    // and the tree-walk iterations below (`nodes_by_rank` insert + keys-scan was ~13% of journey layout).
+    // Byte-identical: a gap (empty) rank produces no `rank_bounds` entry, so the band `filter_map` skips
+    // it exactly as an absent BTreeMap key did; and the centre loop's empty inner loop is a no-op there.
+    let rank_count = ranks.iter().copied().max().map_or(0, |m| m + 1);
+    let mut nodes_by_rank: Vec<Vec<usize>> = vec![Vec::new(); rank_count];
     for (node_index, rank) in ranks.iter().copied().enumerate() {
-        nodes_by_rank.entry(rank).or_default().push(node_index);
+        nodes_by_rank[rank].push(node_index);
     }
-    for nodes in nodes_by_rank.values_mut() {
+    for nodes in nodes_by_rank.iter_mut() {
         nodes.sort_by(|left, right| compare_node_indices(ir, *left, *right));
     }
 
@@ -7469,10 +7476,10 @@ fn layout_diagram_kanban_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 
     let column_gap = spacing.rank_spacing + 170.0;
     let row_gap = spacing.node_spacing + 22.0;
-    for (rank, nodes) in &nodes_by_rank {
+    for (rank, nodes) in nodes_by_rank.iter().enumerate() {
         for (order_index, node_index) in nodes.iter().enumerate() {
-            centers[*node_index] = (*rank as f32 * column_gap, order_index as f32 * row_gap);
-            rank_by_node[*node_index] = *rank;
+            centers[*node_index] = (rank as f32 * column_gap, order_index as f32 * row_gap);
+            rank_by_node[*node_index] = rank;
             order_by_node[*node_index] = order_index;
         }
     }
@@ -7510,9 +7517,7 @@ fn layout_diagram_kanban_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         entry.2 = entry.2.max(node_box.bounds.x + node_box.bounds.width);
         entry.3 = entry.3.max(node_box.bounds.y + node_box.bounds.height);
     }
-    traced.layout.extensions.bands = nodes_by_rank
-        .keys()
-        .copied()
+    traced.layout.extensions.bands = (0..nodes_by_rank.len())
         .filter_map(|rank| {
             let (min_x, min_y, max_x, max_y) = *rank_bounds.get(&rank)?;
             Some(LayoutBand {
