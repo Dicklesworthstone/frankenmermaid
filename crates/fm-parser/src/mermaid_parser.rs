@@ -3873,12 +3873,20 @@ fn parse_requirement_relation(
     //   `A - satisfies -> B`  or  `A -> B`
     // The relationship type label appears between `- ` and ` ->`.
 
-    let Some((left_raw, right_raw)) = statement.split_once("->") else {
+    // Find the first `->` by byte scan rather than `split_once("->")`, which builds a `TwoWaySearcher`
+    // (maximal-suffix factorization) per relation line — pure setup overhead on the short relation-line
+    // haystack. Byte-identical: `windows(2).position` returns the first `->` index `split_once` would,
+    // and `->` is ASCII so both boundaries are char boundaries.
+    let Some(arrow_idx) = statement.as_bytes().windows(2).position(|w| w == b"->") else {
         return false;
     };
+    let (left_raw, right_raw) = (&statement[..arrow_idx], &statement[arrow_idx + 2..]);
 
-    // Extract relationship type from `A - type ` prefix.
-    let (left_part, relation_label) = if let Some(dash_pos) = left_raw.rfind(" - ") {
+    // Extract relationship type from `A - type ` prefix. Byte-scan the last ` - ` (was `rfind(" - ")`,
+    // another per-line `TwoWaySearcher`). Byte-identical: `rposition` returns the last ` - ` start index.
+    let (left_part, relation_label) = if let Some(dash_pos) =
+        left_raw.as_bytes().windows(3).rposition(|w| w == b" - ")
+    {
         let rel_type = left_raw[dash_pos + 3..].trim();
         let left = left_raw[..dash_pos].trim();
         if rel_type.is_empty() {
