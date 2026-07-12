@@ -1126,6 +1126,25 @@
   form is the *fast* form. Don't re-attempt table/fuse variants on `parse_fast_simple_flowchart_node_borrowed`
   without a fresh `perf stat` proving a vectorizable rewrite.
 
+### WIN: trim_fast the node-id normalization on the intern path — −0.72% parse (2026-07-12)
+- **Lever (found by chasing the profile symbol into a DIFFERENT crate).** After the node-label trim harvest,
+  `<str>::trim_matches::<is_whitespace>` self-time persisted — the remaining hot caller was
+  `IrBuilder::intern_node_auto` (ir_builder.rs, not mermaid_parser.rs): `let normalized_id = id.trim();`. It
+  runs on **every node intern and both endpoints of every edge** (~2400× per flowchart/800 parse), and the ids
+  handed in by the flowchart fast paths are already `trim_ascii`'d, so the Unicode CharSearcher trim was pure
+  overhead. Routed both node-id normalizations (`intern_node_auto` + the owned-id `intern_fresh_node_owned_label`)
+  through `trim_fast`, which was made `pub(crate)` and imported into `ir_builder`. Unconditionally byte-identical
+  (trim_fast == str::trim by construction).
+- **Measured (deterministic `perf stat instructions:u`, flowchart/800 parse ×4000, same-session symbolized
+  binaries, interleaved):** HEAD **3,644,771** instr/iter → CAND **3,618,386** = **−26,385/iter (−0.72%)**;
+  variance ~7k out of 14.6B (signal ~15,000× the noise). Byte-identical rendered SVG across 19 shapes; 408/408
+  fm-parser tests pass. Landed `2794955`. **Bigger than the icon-trim win (−0.48%)** because the intern trim
+  fires ~2400×/parse (nodes + both edge endpoints) vs the icon path's ~1600 (2 per labelled node).
+- **LESSON: the trim harvest wasn't crate-local.** The mermaid_parser trim sweep missed `intern_*`'s `id.trim()`
+  because it lives in `ir_builder.rs`. When a `perf record` symbol (here `trim_matches::<is_whitespace>`)
+  survives a targeted sweep, grep the WHOLE crate — `grep -rn '\.trim()' crates/fm-parser/src/` — not just the
+  file you were editing. Remaining hot `.trim()` in ir_builder are on cold paths (cluster/class/interaction).
+
 ### Acyclic SCC fast-path in `GraphMetrics::from_ir` — −27 to −29% layout (Auto-selection overhead) (2026-06-27)
 - **Lever (the 203µs Auto overhead pinned last cycle):** the Auto algorithm selection
   (`select_general_graph_algorithm_with_config`) calls `GraphMetrics::from_ir` on **every** layout —
