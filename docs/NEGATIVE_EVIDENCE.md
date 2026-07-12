@@ -1164,6 +1164,40 @@
   class-parse trim harvest is exhausted; the next class-parse lever is structural (`find_operator_core` 5.85%
   self on the relation path, or the `split_statements` segment trims if a non-class corpus exercises them).
 
+### WIN: precompute operator first-byte gates for flow/class/packet — classcard parse −2.07%, class −1.60% (2026-07-12)
+- **The structural `find_operator` lever the entry above flagged.** A post-`700ec88` `class 300` profile put
+  `find_operator_core` at **6.68% total / 6.34% self** — the top named leaf. Cause was NOT the scan itself but
+  `find_operator_from_index` **rebuilding `op_first_byte_gate(operators)` on every call**. Only the sequence and
+  ER paths had precomputed `const` gates (`SEQUENCE_OP_GATE`/`ER_OP_GATE`, added earlier for the hot seq path)
+  and called `find_operator_core` directly; the flow/class/packet callers re-hashed the gate (14 flow / 6 class
+  operator first-bytes into a `u128`) on **every** `find_operator` call. The class relation path pays it **3–4×
+  per relation**: `strip_class_cardinality` (find the operator to split cardinality) + `parse_edge_statement_asts`
+  (first-op + the multi-hop next-op `find_operator_from_index` loop).
+- **Lever:** add `const FLOW_OP_GATE` / `CLASS_OP_GATE` / `PACKET_OP_GATE` and thread a precomputed `gate: u128`
+  through `find_operator`, `find_operator_from_index`, `parse_edge_statement_asts`,
+  `parse_edge_statement_with_nodes`, and `parse_edge_statement`; each of the 11 call sites passes its list's
+  const gate. `op_first_byte_gate` now runs **only at const-init time**, never per parse call. Byte-identical by
+  construction — the threaded gate is the exact value the per-call rebuild produced — and any mismatched gate
+  would mis-scan and break byte-identity (a strong safety net, since a too-narrow gate skips operator positions).
+- **Measured (`perf stat instructions:u`, same-session symbolized release, interleaved, min of 5, size 300 ×
+  3000 iters):**
+  - `classcard` parse **11,379,065,829 → 11,143,978,602 = −2.066%** (pure relations — every line hits the
+    rebuild 3–4×; the biggest single parse win of the class cycle).
+  - `class` parse **14,663,683,007 → 14,428,592,438 = −1.603%** (relations + members; members don't call
+    find_operator, diluting the share).
+  - `er` / `flowo` / `wide` / `seq` parse **neutral (≤0.001%)**: seq/er already used const gates; **flowchart's
+    fast path** (`parse_fast_simple_flowchart_statement_ast`, own `FAST_OPERATORS` scan) bypasses the
+    `find_operator` classification + `parse_edge_statement_asts` fallback entirely on simple `A --> B` corpora,
+    so only the **no-fast-path** class/classcard relations were paying the rebuild.
+- **Byte-identical** dump across **34 profharness shapes at n=40 and n=300**; clippy clean (test module needed
+  `FLOW_OP_GATE` added to its `use super::{…}` — the release binary is `#[cfg(test)]`-independent, so the A/B was
+  unaffected). Landed `dc4fcf0`.
+- **META:** the profile pointed at `find_operator_core`'s *scan* self-time, but the real cost was the *gate
+  rebuild* one frame up in `find_operator_from_index` (inlined into the scan's attribution). **A hot leaf's
+  self-time can be a caller's setup cost inlined into it** — check what the hot leaf's wrapper does per call, not
+  just the leaf body. The precomputed-const-gate pattern was already in the codebase for two paths; the lever was
+  extending it to the three that were skipped. `find_operator` gate rebuild is now fully eliminated on all paths.
+
 ### REJECT: fuse the fast-node reject + `[`-locate scans into one table-driven pass — +0.74% parse REGRESSION (2026-07-12)
 - **Hypothesis (looked obvious):** `parse_fast_simple_flowchart_node_borrowed` (10.17% self on the
   flowchart/800 parse profile) does two byte scans per statement — a reject `.bytes().any(matches!(byte,
