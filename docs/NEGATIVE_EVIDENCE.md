@@ -1233,6 +1233,14 @@
   (count → prefix-sum offsets → one flat `Vec` filled by per-bucket cursor; segment-sort in place). Same pattern
   `build_tree_layout_structure` already uses (`children.flat` + start/len). Grep layout/parse for `vec![Vec::new();
   n]` / `Vec<Vec<_>>` fed by `[key].push(x)` on a per-node/per-rank key.
+- **STACKED FOLLOW-UP (`c2a9e77`, flowchart layout −4.00%): same CSR on `build_tree_layout_structure`'s `outgoing`
+  adjacency.** `outgoing: Vec<Vec<usize>>` was another ~one-tiny-alloc-per-node structure. CSR'd with the added
+  wrinkle of `dedup` (which SHRINKS a bucket): two `endpoint_node_index` passes (count out-deg+indeg, then fill),
+  sort+dedup each segment in place keeping a separate `out_len` (start+len, since dedup shortens), BFS reads
+  `out_flat[start..start+len]`. `indegree` still counts RAW edges pre-dedup (root detection `==0` unchanged).
+  flowchart −4.00%, er −4.12%, wide −3.59% (more edges → bigger adjacency win). The two CSRs together = flowchart
+  layout ~−8%. ⚠️when the buckets can shrink (dedup/filter) the CSR needs start+len, not just offsets. 439/439
+  tests, byte-id 21 shapes, clippy pre-commit.
 
 ### WIN: detect parallel edges with a set pass, skip the count map on the no-parallel path — −0.72% layout (2026-07-12)
 - **Lever (skip building a structure only READ on a rare branch).** `build_edge_paths_with_orientation`
