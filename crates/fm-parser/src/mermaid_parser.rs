@@ -566,7 +566,12 @@ struct BlockBetaDocumentParseResult {
 // Document structure (lines, comments, header) is handled by the outer loop.
 
 /// Build a chumsky parser for a single flowchart statement.
-fn flow_statement_parser<'a>() -> impl Parser<'a, &'a str, FlowAst, extra::Err<Rich<'a, char>>> {
+// Error type is `EmptyErr` (not `Rich`): the caller only checks `errors.is_empty()` (success/failure)
+// and discards the error content, so tracking the expected-token alternatives that `Rich` records at
+// every choice point — `InputRef::add_alt` + `Vec<Located<Rich>>::truncate`, ~30% of shaped-node parse
+// (hexagon/diamond/…) on SUCCESSFUL parses — is pure waste. Output-identical: the combinators and their
+// success/failure are unchanged; only the discarded error detail is cheaper, and no `recover_with` uses it.
+fn flow_statement_parser<'a>() -> impl Parser<'a, &'a str, FlowAst, extra::Err<chumsky::error::EmptyErr>> {
     // -- Whitespace helpers --------------------------------------------------
     let ws_char = any().filter(|c: &char| *c == ' ' || *c == '\t');
     let inline_ws = ws_char.repeated().to(());
