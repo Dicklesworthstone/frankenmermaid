@@ -8056,19 +8056,36 @@ fn rank_orders_from_key(
     let Some(&max_rank) = rank_by_node.iter().max() else {
         return Vec::new(); // no nodes
     };
-    let mut by_rank: Vec<Vec<usize>> = vec![Vec::new(); max_rank + 1];
+    let n = rank_by_node.len();
+    // CSR bucketing: one flat `Vec` + per-rank offsets replaces the `Vec<Vec<usize>>` — which heap-
+    // allocated one inner `Vec` per rank, i.e. ~one per node on the common deep-chain/tree graph (each
+    // rank holds a single node). Counting-sort node indices into rank-ordered `flat`, then sort and
+    // order-number each rank's contiguous segment exactly as the per-rank `Vec`s were. Byte-identical:
+    // same nodes per rank in the same pre-sort (node-index) order, same (unstable, total-order)
+    // comparator, same `0..k` order assignment.
+    let mut rank_start = vec![0_usize; max_rank + 2];
+    for &rank in rank_by_node {
+        rank_start[rank + 1] += 1;
+    }
+    for i in 1..rank_start.len() {
+        rank_start[i] += rank_start[i - 1];
+    }
+    let mut flat = vec![0_usize; n];
+    let mut cursor = rank_start.clone();
     for (node_index, &rank) in rank_by_node.iter().enumerate() {
-        by_rank[rank].push(node_index);
+        flat[cursor[rank]] = node_index;
+        cursor[rank] += 1;
     }
 
-    let mut order_by_node = vec![0_usize; rank_by_node.len()];
-    for node_indexes in &mut by_rank {
-        node_indexes.sort_by(|left, right| {
+    let mut order_by_node = vec![0_usize; n];
+    for rank in 0..=max_rank {
+        let segment = &mut flat[rank_start[rank]..rank_start[rank + 1]];
+        segment.sort_by(|left, right| {
             key_by_node[*left]
                 .total_cmp(&key_by_node[*right])
                 .then_with(|| compare_node_indices(ir, *left, *right))
         });
-        for (order, &node_index) in node_indexes.iter().enumerate() {
+        for (order, &node_index) in segment.iter().enumerate() {
             order_by_node[node_index] = order;
         }
     }
