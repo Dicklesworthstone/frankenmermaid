@@ -6418,7 +6418,7 @@ fn parse_block_beta_blocks(line: &str, line_number: usize, config: &ParserConfig
     // `space:` is numeric (case-invariant). Byte-identical to the old lowercased-copy comparisons.
     if line.eq_ignore_ascii_case("space") || starts_with_ci(line, "space:") {
         let span_cols = strip_prefix_ci(line, "space:")
-            .and_then(|value| value.trim().parse::<usize>().ok())
+            .and_then(|value| trim_fast(value).parse::<usize>().ok())
             .unwrap_or(1);
         return vec![BlockDef {
             id: format!("__space_{line_number}"),
@@ -6429,9 +6429,12 @@ fn parse_block_beta_blocks(line: &str, line_number: usize, config: &ParserConfig
         }];
     }
 
+    // `split_block_beta_defs` already `trim_fast`'d every token before pushing it (below), and
+    // `try_parse_block_beta_def` trims its input too, so the old per-token `token.trim()` here was a
+    // redundant third whitespace `CharSearcher` pass — pass the borrowed token straight through.
     split_block_beta_defs(line)
         .into_iter()
-        .filter_map(|token| try_parse_block_beta_def(token.trim(), config))
+        .filter_map(|token| try_parse_block_beta_def(&token, config))
         .collect()
 }
 
@@ -6473,7 +6476,7 @@ fn split_block_beta_defs(line: &str) -> Vec<String> {
                 current.push(ch);
             }
             _ if ch.is_whitespace() && square_depth == 0 => {
-                let segment = current.trim();
+                let segment = trim_fast(&current);
                 if !segment.is_empty() {
                     tokens.push(segment.to_string());
                 }
@@ -6483,7 +6486,7 @@ fn split_block_beta_defs(line: &str) -> Vec<String> {
         }
     }
 
-    let segment = current.trim();
+    let segment = trim_fast(&current);
     if !segment.is_empty() {
         tokens.push(segment.to_string());
     }
@@ -6492,7 +6495,7 @@ fn split_block_beta_defs(line: &str) -> Vec<String> {
 }
 
 fn try_parse_block_beta_def(token: &str, config: &ParserConfig) -> Option<BlockDef> {
-    let trimmed = token.trim();
+    let trimmed = trim_fast(token);
     if trimmed.is_empty() {
         return None;
     }
@@ -6501,16 +6504,19 @@ fn try_parse_block_beta_def(token: &str, config: &ParserConfig) -> Option<BlockD
         return None;
     }
 
+    // `candidate_span` was trimmed twice (guard + body) via the whitespace `CharSearcher`; trim it once
+    // with `trim_fast` and reuse. `bytes().all(is_ascii_digit)` matches the old `chars().all(..)` byte
+    // for byte (digits are ASCII; the empty-span vacuous-true is preserved, so `id:` still spans 1).
     let (core, span_cols) = match trimmed.rsplit_once(':') {
-        Some((candidate_core, candidate_span))
-            if candidate_span.trim().chars().all(|ch| ch.is_ascii_digit()) =>
-        {
-            (
-                candidate_core.trim(),
-                candidate_span.trim().parse::<usize>().ok().unwrap_or(1),
-            )
+        Some((candidate_core, candidate_span)) => {
+            let span = trim_fast(candidate_span);
+            if span.bytes().all(|b| b.is_ascii_digit()) {
+                (trim_fast(candidate_core), span.parse::<usize>().ok().unwrap_or(1))
+            } else {
+                (trimmed, 1)
+            }
         }
-        _ => (trimmed, 1),
+        None => (trimmed, 1),
     };
 
     let node = parse_node_token_with_config(core, config)?;
