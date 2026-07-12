@@ -5350,8 +5350,13 @@ pub fn layout_diagram_timeline_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     }
     period_indexes.sort_by(|left, right| compare_node_indices(ir, *left, *right));
 
-    let period_set: BTreeSet<usize> = period_indexes.iter().copied().collect();
-    let mut events_by_period: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    // `period_set` / `events_by_period` are read by membership/key only (never iterated for output
+    // order — the layout order comes from `period_indexes` below), so `FxHash*` replaces the
+    // `BTreeSet`/`BTreeMap`'s O(log N) inserts/lookups + per-node B-tree allocations (the `BTreeMap<usize,
+    // …>::insert` was ~9% of timeline layout) with O(1) hashing. `values_mut()` only sorts each Vec
+    // independently, so iteration order there is irrelevant. Byte-identical output.
+    let period_set: FxHashSet<usize> = period_indexes.iter().copied().collect();
+    let mut events_by_period: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
     for edge in &ir.edges {
         let Some(source) = endpoint_node_index(ir, edge.from) else {
             continue;
@@ -5370,7 +5375,9 @@ pub fn layout_diagram_timeline_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 
     let period_gap_x = spacing.rank_spacing + 104.0;
     let event_gap_y = spacing.node_spacing + 22.0;
-    let mut assigned = BTreeSet::new();
+    // Membership set (`.insert` returns the same newly-inserted bool, `.contains` the same result); never
+    // iterated, so `FxHashSet` is byte-identical and skips the BTreeSet's O(log N) inserts + node allocs.
+    let mut assigned: FxHashSet<usize> = FxHashSet::default();
 
     for (period_order, period_index) in period_indexes.iter().enumerate() {
         let x = period_order as f32 * period_gap_x;
