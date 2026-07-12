@@ -1056,6 +1056,25 @@
 
 ## Kept Wins Also Recorded Here By Request
 
+### WIN: timeline layout membership sets BTreeSet/BTreeMap<usize> → FxHash* — timeline LAYOUT −22.5% (2026-07-12)
+- **Applied the gantt BTreeMap→FxHashMap lever to a fresh type (timeline layout, 137µs).** Profile:
+  `BTreeMap<usize, SetValZST>::insert` (a `BTreeSet<usize>`) ~9% self + a `BTreeMap<usize, Vec<usize>>` insert
+  — the three usize-keyed containers in `layout_diagram_timeline_traced`, each O(log N) insert + per-node
+  B-tree allocation. (Stacks were broken with 0x0/0x1 frames — located the sets by reading the timeline fn,
+  not the callgraph.)
+- **Lever:** `period_set` (`.contains` only), `events_by_period` (`.entry().push()` + `.values_mut()`
+  sort-each + `.get`), `assigned` (`.insert`-bool/`.contains`) — NONE iterated for output order (layout order
+  comes from `period_indexes`) → all three to `FxHashSet`/`FxHashMap` (O(1), no B-tree node allocs).
+- **Byte-identical:** dump identical across 6 shapes at n=120 AND timeline at n=300; 439/439 tests.
+  Timeline-only. Clippy clean.
+- **Measured (`perf stat instructions:u`, interleaved, min of 6, timeline 300 × 8000):** 15.630B → 12.114B =
+  **−22.5%**. Landed `8eb0b74`.
+- **⭐⭐REUSABLE LEVER (now GENERALIZED from the String-key version): a `BTreeSet<K>`/`BTreeMap<K,_>` for ANY
+  key type (String OR usize) used only for membership/keyed-lookup — never iterated for output order — is
+  O(log N) + per-node allocation waste → swap to FxHash*.** Grep layout for `BTreeSet<`/`BTreeMap<` and check
+  `.iter()`/`.values()`/`.keys()` feeds no output. usize-key BTreeSet is NOT a memcmp storm (int compare) but
+  STILL pays O(log N) + B-tree node allocs — the win is the allocation + tree-walk, not just memcmp.
+
 ### WIN: gantt task_id_to_idx BTreeMap<String> → presized FxHashMap — gantt LAYOUT −21% (2026-07-12)
 - **Re-profile after the axis-tick date fix (the flagged NEXT target).** `gantt/300` layout showed
   `__memcmp_avx2_movbe` at ~25% — String-key comparisons from `task_id_to_idx`, a `BTreeMap<String, usize>`
