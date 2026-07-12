@@ -1267,6 +1267,29 @@
   The parser per-line trim vein (`line` + `raw_line` loops) is now fully harvested; residual parse `trim_matches`
   is shape-inherent or in cold directive branches.
 
+### WIN: memchr the multi-char open delimiter in parse_wrapped_str_with_config — block −1.8%, asym −2.7% (2026-07-12)
+- **Continuing the reopened TwoWaySearcher-storm frontier.** A per-type searcher-cost scan found **block 18.9%**,
+  quadrant 8.1%, pie 7.1% (state 0%, erattr's is the shared whole-input gates). A block profile pinned it:
+  `parse_wrapped_str_with_config(raw, open: &str, …)` ran `raw.find(open)` where `open` is a multi-char delimiter,
+  and node/block shape probing calls it with several delimiters (`((`, `[[`, `{{`, `[/`, …) per token — each a
+  `TwoWaySearcher::new` (maximal-suffix factorization) that mostly misses.
+- **First attempt REGRESSED — the requirement lever does NOT generalize verbatim.** `windows(open.len()).position(|w| w == open)`
+  gave block **+4.6%** / styled3 +1.2%. Cause: a **runtime-length** window compiles to a scalar per-position slice
+  compare with **no SIMD skip**, whereas `find(&str)` uses `TwoWaySearcher` which searches via **memchr (SIMD)**
+  internally — so for a runtime needle that often *misses*, the searcher beats the naive byte scan. (Requirement's
+  win held because `windows(2)` had a **const** size AND the `->` needle was usually **found** → short scan.)
+- **Correct fix:** memchr on the open delimiter's **first byte** + a cheap `starts_with` verify. Keeps the SIMD
+  first-byte search; drops only the per-call factorization setup. Byte-identical: returns the first full-match index
+  `find(open)` would.
+- **Measured (`perf stat instructions:u`, interleaved, min of 3–4, size 300 × 3000):** `asym` **−2.659%**,
+  `block` **−1.827%**, `styled3` **−0.765%**; hexagon/diamond/parallel/trapez/invtrap/flowo/wide/subg **neutral**
+  (their multi-char shape is *present* so the probe finds it fast — the win is on tokens whose probes miss).
+- **Byte-identical** across 32 shapes (n=40 & n=300); clippy clean. Landed `59e7004`.
+- **META — refines the reopened-frontier lever:** replacing `find(&str)`/`split_once(&str)` with a byte scan wins
+  ONLY when (a) the needle is a **const literal** (so `windows(CONST)`/`== b"…"` optimizes) OR you use **memchr on
+  the first byte**, AND ideally (b) misses are cheap. A `windows(runtime_len).position` is a **pessimization** vs
+  `TwoWaySearcher` (which is memchr-backed). Default to **memchr-first-byte + verify** for runtime `&str` needles.
+
 ### WIN: byte-scan the requirement-relation operator splits — requirement parse −5.7% (2026-07-12)
 - **The prior SURFACE was too pessimistic — profiling ONE MORE not-yet-examined dedicated parser found a fat win.**
   A `requirement 300` parse profile showed a **TwoWaySearcher storm**: `StrSearcher::new` **3.3%** +
