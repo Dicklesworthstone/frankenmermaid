@@ -1148,6 +1148,26 @@ fn trim_fast(s: &str) -> &str {
     &s[start..end]
 }
 
+/// `str::trim_start` equivalent that skips ASCII leading whitespace by byte (auto-vectorizable),
+/// falling back to the Unicode `char::is_whitespace` scan only when a non-ASCII byte sits at the
+/// trimmed start boundary — where a multi-byte Unicode-whitespace char could remain. Byte-identical
+/// to `str::trim_start` in every case; used on the per-statement flowchart path where a symbolized
+/// profile showed `trim_start_matches::<char::is_whitespace>` as a self-symbol.
+fn trim_start_fast(s: &str) -> &str {
+    let b = s.as_bytes();
+    let mut start = 0;
+    while start < b.len() && b[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    // A non-ASCII byte at the trimmed start may begin a Unicode-whitespace char the ASCII scan left;
+    // defer to `str::trim_start` to stay byte-identical. Otherwise `start` sits on an ASCII byte (a
+    // char boundary), so the slice is valid and identical to the Unicode trim.
+    if start < b.len() && b[start] >= 0x80 {
+        return s.trim_start();
+    }
+    &s[start..]
+}
+
 fn parse_flowchart_document_items<'a>(
     lines: &[(usize, &'a str)],
     next_index: &mut usize,
@@ -1513,7 +1533,10 @@ fn parse_fast_simple_flowchart_node_borrowed(
             return None;
         }
         let id = trimmed[..bracket].trim_ascii();
-        let label_raw = trimmed[bracket + 1..].strip_suffix(']')?.trim();
+        // `trim_fast` is byte-identical to `str::trim` (ASCII byte scan, Unicode fallback at a
+        // non-ASCII boundary) but skips the `char::is_whitespace` CharSearcher — this label trim
+        // fires once per bracketed node and showed as a top parse self-symbol.
+        let label_raw = trim_fast(trimmed[bracket + 1..].strip_suffix(']')?);
         // Byte scan for a nested `[`/`]` rather than `contains(['[', ']'])`, whose `MultiCharEqSearcher`
         // decodes every char of the label (~4% of flowchart parse). Both brackets are ASCII, so the
         // byte scan is identical.
@@ -1588,7 +1611,9 @@ fn parse_subgraph_statement(
     statement: &str,
     config: &ParserConfig,
 ) -> Option<(String, Option<String>)> {
-    let statement = statement.trim_start();
+    // `trim_start_fast` is byte-identical to `str::trim_start` but skips the CharSearcher; this runs
+    // once per flowchart statement (before the node/edge classifiers) on an already-trimmed line.
+    let statement = trim_start_fast(statement);
     let rest = statement.strip_prefix("subgraph")?;
     let first = rest.chars().next()?;
     if !first.is_whitespace() {
@@ -8006,7 +8031,9 @@ fn clear_empty_label(label: &mut Option<ParsedLabel>) {
 
 fn extract_icon_prefix(label: Option<&mut ParsedLabel>) -> Option<String> {
     let label = label?;
-    let trimmed = label.text.trim();
+    // `trim_fast` == `str::trim` byte-for-byte, without the `char::is_whitespace` CharSearcher; this
+    // runs once per node label (extract_icon_prefix is called for every labelled flowchart node).
+    let trimmed = trim_fast(&label.text);
     if trimmed.is_empty() {
         return None;
     }
@@ -8067,7 +8094,9 @@ fn parse_label(raw: Option<&str>) -> Option<ParsedLabel> {
         .bytes()
         .any(|byte| matches!(byte, b'"' | b'\'' | b'`' | b'&' | b'#'))
     {
-        let trimmed = raw.trim();
+        // `trim_fast` == `str::trim` byte-for-byte but skips the `char::is_whitespace` CharSearcher;
+        // this fast-path trim runs once per node label (parse_label's hottest arm on plain labels).
+        let trimmed = trim_fast(raw);
         return (!trimmed.is_empty()).then(|| ParsedLabel::plain(trimmed));
     }
 
