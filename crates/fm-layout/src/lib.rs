@@ -12688,18 +12688,41 @@ fn build_edge_paths_with_orientation(
     // determinism-safe and turns the O(log n) keyed inserts/lookups — 2 per edge — into
     // O(1); the common flowchart has no parallel edges, so `any_parallel` lets the hot
     // per-edge path skip the lookup entirely.
-    let mut edge_pair_count: FxHashMap<(usize, usize), usize> = FxHashMap::default();
-    edge_pair_count.reserve(ir.edges.len());
-    let mut edge_pair_index: Vec<usize> = Vec::with_capacity(ir.edges.len());
+    // Detect parallel edges (two edges sharing an unordered endpoint pair) with a cheap set pass that
+    // stops at the first duplicate. The per-edge `(total, index)` counts are only READ when parallels
+    // exist (see the routing loop's `if any_parallel`), and the common flowchart has none — so skip
+    // building the count map AND the per-edge index Vec entirely in that case (a `FxHashSet` insert is
+    // cheaper than `entry().or_insert()` + `Vec::push`, and the index Vec's alloc is avoided).
+    let mut seen_pairs: FxHashSet<(usize, usize)> = FxHashSet::default();
+    seen_pairs.reserve(ir.edges.len());
+    let mut any_parallel = false;
     for edge in &ir.edges {
         let source = endpoint_node_index(ir, edge.from).unwrap_or(usize::MAX);
         let target = endpoint_node_index(ir, edge.to).unwrap_or(usize::MAX);
-        let key = (source.min(target), source.max(target));
-        let count = edge_pair_count.entry(key).or_insert(0);
-        edge_pair_index.push(*count);
-        *count += 1;
+        if !seen_pairs.insert((source.min(target), source.max(target))) {
+            any_parallel = true;
+            break;
+        }
     }
-    let any_parallel = edge_pair_count.values().any(|&count| count > 1);
+    // Only when parallels exist do we need the per-edge `(pair_total, pair_idx)`. Rebuilt identically
+    // to the original single-pass counts; byte-identical for the routing loop below.
+    let (edge_pair_count, edge_pair_index): (FxHashMap<(usize, usize), usize>, Vec<usize>) =
+        if any_parallel {
+            let mut count = FxHashMap::default();
+            count.reserve(ir.edges.len());
+            let mut index = Vec::with_capacity(ir.edges.len());
+            for edge in &ir.edges {
+                let source = endpoint_node_index(ir, edge.from).unwrap_or(usize::MAX);
+                let target = endpoint_node_index(ir, edge.to).unwrap_or(usize::MAX);
+                let key = (source.min(target), source.max(target));
+                let c = count.entry(key).or_insert(0);
+                index.push(*c);
+                *c += 1;
+            }
+            (count, index)
+        } else {
+            (FxHashMap::default(), Vec::new())
+        };
 
     // Build the obstacle set (all node bounds) **once** and reuse it for every edge,
     // instead of rebuilding an all-nodes-except-endpoints `Vec` per edge (O(edges*nodes)).
