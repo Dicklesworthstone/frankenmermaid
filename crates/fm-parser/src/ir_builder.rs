@@ -274,7 +274,22 @@ impl IrBuilder {
     pub(crate) fn with_capacity_hint(diagram_type: DiagramType, input_lines: usize) -> Self {
         let estimated_nodes = (input_lines / 2).max(4);
         let estimated_edges = (input_lines / 3).max(2);
-        let estimated_labels = estimated_nodes;
+        // Labels ≈ nodes for EDGE-HEAVY diagrams (flowchart/er/state/class — nodes shared across many
+        // edge lines, so distinct nodes ≈ input_lines/2), but ≈ input_lines for NODE-PER-LINE diagrams
+        // (timeline/journey/gantt/… — each meaningful line declares one labelled node/item). The `/2`
+        // node estimate underestimated the latter's label count ~2×, so the `LabelIndex` rehashed
+        // (`reserve_rehash` ~6% of timeline/journey parse). Size it to `input_lines` for those types;
+        // edge-heavy types keep the tighter estimate (no over-reservation). Capacity-only ⇒ behavior-identical.
+        let estimated_labels = match diagram_type {
+            DiagramType::Timeline
+            | DiagramType::Journey
+            | DiagramType::Gantt
+            | DiagramType::Mindmap
+            | DiagramType::Kanban
+            | DiagramType::Pie
+            | DiagramType::XyChart => input_lines.max(4),
+            _ => estimated_nodes,
+        };
         let mut ir = MermaidDiagramIr::empty(diagram_type);
         ir.reserve_capacity(estimated_nodes, estimated_edges, estimated_labels);
         Self {
