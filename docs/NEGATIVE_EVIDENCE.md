@@ -14472,3 +14472,30 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   `50545a9e75dad144f5d623aafd4c11af54e3ad2c9b950b3ef4177fd6bddafc63`. No local or cross-worker timing entered
   the verdict. Do not retry this exact BK direction-vector substitution on the 600-node cyclic SCC workload
   without a materially different implementation or workload.
+
+### REJECT: timeline owned-ID handoff is flat-to-slower (2026-07-12)
+
+- **Negative-ledger-first resumption:** this closes the explicit timeline owned-ID HOLD above. The candidate is
+  distinct from Kanban dense-ID class appends, ER header lowering, generic parser capacity hints, and GitGraph
+  current-head mutation. The prior allocation profile identified new-node string ownership as the remaining
+  primitive, and `timeline_stages/parse/1600` exposes about 1,600 periods plus 1,600 events.
+- **One candidate:** pass the three already-owned `normalize_identifier` results (colon-period, bare-period, and
+  event) through the existing `intern_fresh_node_owned_label` path, with `period_text.to_owned()` or raw
+  `event_text.to_owned()` labels, instead of borrowing each id through `intern_node` and cloning it on insertion.
+  The owned path preserves hash/collision lookup, duplicate fallback, label/node insertion order, shape upgrades,
+  implicit-node promotion, spans, diagnostics, graph order, floating point, tie-breaking, and RNG.
+- **Authoritative strict-remote pair:** an initial full-parallel baseline request failed closed before sync/build
+  (`insufficient_slots=9,hard_preflight=2`); no local fallback ran. Both valid arms used Cargo `-j1` only to reduce
+  compile admission demand and ran through `RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 RCH_WORKER=ovh-b env -u
+  CARGO_TARGET_DIR rch exec -- cargo bench -j1 --profile release -p frankenmermaid-cli --bench pipeline_bench --
+  timeline_stages/parse/1600 --exact --warm-up-time 3 --measurement-time 8 --sample-size 50 --noplot` on actual
+  worker `ovh-b`; baseline name was `timeline-owned-cdd9a17`.
+- **Result:** ORIG Criterion median **1.764926 ms** (95% CI **1.751373..1.781107 ms**) versus CAND
+  **1.782355 ms** (**1.771733..1.792937 ms**), CAND/ORIG **1.00988**. The paired median change was **+0.9875%**
+  (95% CI **-0.2045%..+2.0961%**); Criterion reported no detectable change. This fails the `<= 0.97` keep floor
+  and disjoint-CI proof.
+- **Restoration / verdict:** **REJECT.** The candidate was manually removed. Parser and permanent pipeline-bench
+  SHA-256 values are again `b7877e330301fe66ae61a6e60868439400ffafde56aa863cf3403a7d3964dc37` and
+  `79cd7a4b029dc506d100cd89ceb668c484512c4920c643e9ffcaf7f6670a2c1e`; candidate parser SHA-256 was
+  `849210b3fa272e438946ea65382eef7e5610d2ae4dad49081b68400aae3d42bd`. No local or cross-worker timing entered
+  the verdict. Do not retry this exact three-call owned-ID handoff on the common 1,600-period/event workload.
