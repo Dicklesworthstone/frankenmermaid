@@ -5120,10 +5120,13 @@ fn lookup_centrality_tier(
 /// any class needs the `Element` slow path, so the fast node fragment stays byte-identical. Empty/no
 /// classes yield `Some("")` (no allocation).
 fn simple_node_user_class_suffix(node: &fm_core::IrNode) -> Option<String> {
-    // Nodes with compartments (class diagrams) or C4 metadata render extra content the plain-rect fast
-    // fragment does not produce; they were implicitly excluded by the old `classes.is_empty()` gate, so
-    // keep excluding them now that arbitrary simple classes are allowed.
-    if node.class_meta.is_some() || node.c4_meta.is_some() {
+    // Nodes with compartments (class diagrams), an ER entity's attribute list, or C4 metadata render
+    // extra content the plain-rect fast fragment does not produce; they were implicitly excluded by the
+    // old `classes.is_empty()` gate, so keep excluding them now that arbitrary simple classes are allowed.
+    // `members` is populated only for ER entities (`render_node`'s ER branch draws a name header + divider
+    // + one `<text>` per attribute); without this exclusion a themed ER entity (the default `node_gradients`
+    // config) was streamed as a plain rectangle with only its name, silently dropping every attribute row.
+    if node.class_meta.is_some() || node.c4_meta.is_some() || !node.members.is_empty() {
         return None;
     }
     let mut suffix = String::new();
@@ -10379,6 +10382,99 @@ mod tests {
         )
         .write_to_string(&mut slow);
 
+        assert_eq!(streamed, slow);
+    }
+
+    /// Regression: a themed ER entity (default `node_gradients` config) must render its attribute
+    /// compartments, not be claimed by the plain-rectangle common fast path. Before `simple_node_user_
+    /// class_suffix` excluded `members`, the whole attribute list was silently dropped whenever gradients
+    /// were on (the `er` golden runs gradients-OFF, so it never caught this). Asserts the entity body is
+    /// present AND that the streaming path is byte-identical to the `Element` slow path.
+    #[test]
+    fn er_entity_renders_attributes_with_gradients_on() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Er);
+        ir.labels.push(IrLabel {
+            text: "USER".to_string(),
+            span: Span::default(),
+        });
+        ir.nodes.push(IrNode {
+            id: "USER".to_string(),
+            label: Some(IrLabelId(0)),
+            shape: NodeShape::Rect,
+            members: vec![
+                fm_core::IrEntityAttribute {
+                    data_type: "int".to_string(),
+                    name: "id".to_string(),
+                    key: fm_core::IrAttributeKey::Pk,
+                    comment: None,
+                },
+                fm_core::IrEntityAttribute {
+                    data_type: "string".to_string(),
+                    name: "email".to_string(),
+                    key: fm_core::IrAttributeKey::Uk,
+                    comment: None,
+                },
+            ],
+            ..Default::default()
+        });
+        let node_box = LayoutNodeBox {
+            node_index: 0,
+            node_id: "USER".to_string(),
+            rank: 0,
+            order: 0,
+            span: Span::default(),
+            bounds: fm_layout::LayoutRect {
+                x: 12.0,
+                y: 24.0,
+                width: 150.0,
+                height: 110.0,
+            },
+        };
+        let config = SvgRenderConfig::default();
+        assert!(config.node_gradients, "test assumes gradients-on default");
+        let colors = ThemeColors::default();
+        let detail = resolve_detail_profile(800.0, 600.0, &config);
+        let centrality = HashMap::new();
+
+        let mut streamed = String::new();
+        render_node_into(
+            &mut streamed,
+            &node_box,
+            &ir,
+            0.0,
+            0.0,
+            &config,
+            detail,
+            &colors,
+            false,
+            &centrality,
+        );
+
+        // The attribute compartments must be present (the bug dropped them).
+        assert!(
+            streamed.contains("fm-er-entity-name"),
+            "ER entity name header missing: {streamed}"
+        );
+        assert!(
+            streamed.contains("fm-er-attribute"),
+            "ER attribute rows missing (dropped by the common fast path?): {streamed}"
+        );
+
+        // …and the streamed output must match the `Element` slow path byte-for-byte.
+        let mut slow = String::new();
+        render_node(
+            &node_box,
+            &ir,
+            0.0,
+            0.0,
+            &config,
+            detail,
+            &colors,
+            false,
+            &centrality,
+            false,
+        )
+        .write_to_string(&mut slow);
         assert_eq!(streamed, slow);
     }
 
