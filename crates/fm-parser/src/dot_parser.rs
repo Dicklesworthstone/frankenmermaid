@@ -1168,7 +1168,13 @@ fn split_dot_by<'a>(line: &'a str, separator: &str) -> Vec<&'a str> {
             } else if c == b'>' {
                 html_depth = html_depth.saturating_sub(1);
             } else if html_depth == 0 && bytes[i..].starts_with(separator_bytes) {
-                parts.push(line[current_start..i].trim());
+                // Skip empty (post-trim) parts at push time rather than materializing them and
+                // then dropping them with `into_iter().filter().collect()`, which allocated a
+                // whole second `Vec`. Byte-identical: same non-empty parts in the same order.
+                let part = line[current_start..i].trim();
+                if !part.is_empty() {
+                    parts.push(part);
+                }
                 current_start = i + separator_len;
                 i = current_start;
                 continue;
@@ -1178,9 +1184,12 @@ fn split_dot_by<'a>(line: &'a str, separator: &str) -> Vec<&'a str> {
     }
 
     if current_start < line.len() {
-        parts.push(line[current_start..].trim());
+        let part = line[current_start..].trim();
+        if !part.is_empty() {
+            parts.push(part);
+        }
     }
-    parts.into_iter().filter(|s| !s.is_empty()).collect()
+    parts
 }
 
 fn span_for(line_number: usize, line: &str) -> Span {
