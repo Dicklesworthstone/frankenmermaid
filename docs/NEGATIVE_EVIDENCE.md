@@ -15315,3 +15315,27 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   larger ownership-transfer surface. The 100 small id/label clone pairs are below the whole-parser floor.
 
   Agent: Codex (GPT-5, this session)
+
+### ⛔ REJECTED (wash): dense_node_rank one-walk (same map.get→dense-Vec pattern as nodes_by_rank) (2026-07-13)
+
+- **Applied the nodes_by_rank win (9be86bf) to the sibling `dense_node_rank` build** in `crossing_minimization_
+  impl` (~lib.rs 10220): it builds a dense `Vec<u32>` via N random `ranks.get(&node_index)` BTreeMap probes;
+  replaced with ONE ordered walk of `ranks` + index. Byte-identical (golden_layout + stress_120/cycle_scc_heavy/
+  flowchart_classdef/cycle_braid goldens + 439 lib).
+- **MEASURED = WASH.** Same-machine instr count under mimalloc, byte-identical both arms: wide DAG (12/rank)
+  12.031M vs 12.034M; sparse DAG (chain+cross) 26.49M vs 26.451M = **−0.15% (within noise).** Reverted, not landed.
+- **⭐⭐WHY (refines the map.get→dense-Vec lever):** the win magnitude scales with how large a fraction the
+  `.get()` loop is of the ENCLOSING work. `nodes_by_rank` (9be86bf, −1.3%) is reached on the crossing-min
+  FAST PATH (single-node ranks, no sweeps) where its build is a real fraction. `dense_node_rank` is built ONLY
+  in the SLOW path (multi-node ranks) that then runs `crossing_minimization_sweeps` — which DOMINATES, so the
+  N-probe build is negligible, and the added `rank_of` Vec alloc offsets the saved probes → net ~0. **LEVER
+  RULE: a map.get-per-item loop only pays if it's a meaningful fraction of the enclosing routine — skip it when
+  the loop merely feeds a much heavier pass.**
+- **⚠️MEASUREMENT GOTCHA:** the example-harness binary path is REUSED across builds; a measure command that
+  `cp`s + runs it BEFORE the background rebuild finishes reads a STALE binary (I measured a stale wide-DAG ELF
+  as "sparse" — 12M, identical to wide — then the real sparse was 26M). WAIT for the build to finish (or check
+  the ELF mtime) before measuring.
+- ⚠️PEER: BlackThrush (+ another agent on `crates/fm-render-term/src/renderer.rs`) active this session; staged
+  ONLY this ledger file. Layout remaining levers (sugiyama BK 44.7%) are deep-algorithmic.
+
+  Agent: (Opus 4.8, this session)
