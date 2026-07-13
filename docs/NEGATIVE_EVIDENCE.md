@@ -14919,3 +14919,31 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   (ER/class) Element-tree streaming refactor.
 
   Agent: AmberFinch
+
+### DONE + NEXT LEVER: labeled edges LANDED (`aa31ba6`); the ER-entity compartment is un-streamed (2026-07-13)
+
+- **LANDED `aa31ba6`:** the labeled-`Arrow` edge double-copy is fixed — `render_edge_into` now streams the
+  labeled fragment directly (shared `compute_edge_label` + `write_labeled_edge_fragment_into` helpers) instead of
+  `render_edge(..).write_to_string(out)`. Measured **er_40 +12.3% / sequence_40 +17.0%** (p=0.00) vs the pie_40
+  +3.2% no-labeled-edge drift baseline. Added a permanent `render_nonflowchart/nf/er_40` bench row (uses existing
+  `gen_er`). ⚠️2-invocation drift was ±15% here — trust WITHIN-run relative ordering (pie = 0-labeled-edge floor).
+- **Render map after that:** node fast-path gates are kept **in lockstep** (`render_node` raw_svg gate ~6444 ==
+  `render_node_into` fast gate; comment at 6465) so there is NO node double-copy for common nodes. ER cardinality
+  labels are already streamed (`write_er_cardinality_labels_into`). Class compartments are already streamed
+  (`write_class_compartments_into`, gated `label_style.is_none() && !emit_classdef_classes && embed_theme_css`,
+  lib.rs ~7657).
+- **THE next render lever — ER entities are NOT streamed (build ~10 `Element`s each):** in `render_node`
+  (lib.rs ~7305-7374, branch `node.members non-empty && diagram_type == Er`) an ER entity builds its name `<text>`
+  + a divider `<line>` + a per-attribute loop of `format!("{key_prefix}{data_type} {name}")` `<text>` Elements.
+  For er_40 (40 entities × 4 attrs) that is ~400 `Element` allocs. **Fix:** add a `write_er_entity_into(out, ..)`
+  that streams those exact bytes and take it under the SAME gate the class path uses (`text_style.is_none() &&
+  !emit_classdef_classes && embed_theme_css`), mirroring `write_class_compartments_into` — use THAT function as
+  the byte-format reference (how `Element::text`/`Element::line` serialize: attr order, escaping, `apply_label_class`
+  = no-op when `!emit_classdef_classes`). Byte-identity pinned by the `er` `golden_svg_test` case (validate with
+  `gantt_basic`+`pie_basic` temp-skipped) + `fm-render-svg` lib tests; measurable via `render_nonflowchart/nf/er_40`.
+- **Why deferred:** unlike the edge lever (which EXTRACTED an existing `raw_svg` fragment), this needs a NEW
+  byte-writer written from scratch to match the `Element` serialization — byte-identity-critical, do fresh, not
+  rushed. This is the concrete #1 render lever now; after it, the remaining is the full compartment/class node
+  wrapper streaming (`<g>`+rect+title around the streamed content, still copied once).
+
+  Agent: AmberFinch
