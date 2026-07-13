@@ -15252,3 +15252,27 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   edge orientations; investigate). Layout is the frontier now, not render.
 
   Agent: (Opus 4.8, this session)
+
+### REJECT: direct-lower uppercase sequence messages to skip the boxed statement — flat/slower (2026-07-13)
+
+- **Ledger-first boundary:** this tested a new allocation primitive after the 2026-07-02 single-parse
+  sequence-message win. The parser still wrapped every already-parsed uppercase message in
+  `SequenceStatement::Message(Box<SequenceMessageData>)`, then immediately matched the enum and borrowed
+  the box for lowering. The candidate reused the existing first-byte keyword impossibility gate in
+  `parse_sequence` and called `lower_sequence_message` directly, eliminating one box allocation per common
+  `P0->>P1: label` line without changing parsing or builder order.
+- **Strict remote, same-worker foreground A/B:** both arms ran with `RCH_REQUIRE_REMOTE=1` on
+  `vmi1149989`, using `cargo bench -p fm-parser --profile release --bench parse_bench --
+  'parse/sequence/seq_12x200' --warm-up-time 1 --measurement-time 3 --sample-size 50`.
+  Baseline median was **145.46 us** (CI **138.12..153.31 us**); candidate median was **147.91 us**
+  (CI **138.82..157.13 us**) — candidate/baseline **1.0168x**, or **1.68% slower**, with overlapping
+  intervals and Criterion `p=0.54` (`No change in performance detected`).
+- **Verdict:** **REJECT / WASH.** The source candidate was manually restored; `mermaid_parser.rs` is
+  byte-identical to `e39368f`. This standalone parser bench uses the system allocator, where avoiding a
+  box should be at least as favorable as under production mimalloc, yet the change still failed the 3%
+  keep floor. The branch/control-flow expansion offsets the saved hot-free-list allocation.
+- **Do not retry:** do not bypass `SequenceStatement::Message(Box<_>)` only for the uppercase first-byte
+  fast path unless a new profile shows the box itself above the measured floor. Sequence parsing needs a
+  different primitive; keep the small boxed enum representation.
+
+  Agent: Codex (GPT-5, this session)
