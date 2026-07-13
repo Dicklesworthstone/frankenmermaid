@@ -3,6 +3,8 @@
 //! Provides builders for creating reusable definitions like arrowhead markers,
 //! linear/radial gradients, and filter effects (drop shadow, blur).
 
+use std::borrow::Cow;
+
 use crate::element::Element;
 use crate::path::PathBuilder;
 
@@ -585,12 +587,12 @@ pub struct DefsBuilder {
     /// Pre-serialized marker fragment (emitted by this crate's own marker serializer), rendered in
     /// the MARKERS slot ahead of `markers`. Lets a caller stream a memoized marker set in place of
     /// per-marker `.marker()` children, byte-identically.
-    raw_markers: Option<String>,
+    raw_markers: Option<Cow<'static, str>>,
     markers: Vec<ArrowheadMarker>,
     /// Pre-serialized gradient fragment, rendered in the GRADIENTS slot ahead of `gradients` (i.e.
     /// after markers, before filters/custom). Same byte-identical-streaming contract as `raw_markers`,
     /// for a memoized node gradient.
-    raw_gradients: Option<String>,
+    raw_gradients: Option<Cow<'static, str>>,
     gradients: Vec<Gradient>,
     filters: Vec<Filter>,
     custom_elements: Vec<Element>,
@@ -617,8 +619,8 @@ impl DefsBuilder {
     /// markers one at a time. Used to stream a memoized marker set (the build+serialize of the
     /// 12-marker set is ~6 µs and is a pure function of the edge color + fancy flag).
     #[must_use]
-    pub fn raw_markers(mut self, svg: String) -> Self {
-        self.raw_markers = Some(svg);
+    pub fn raw_markers(mut self, svg: impl Into<Cow<'static, str>>) -> Self {
+        self.raw_markers = Some(svg.into());
         self
     }
 
@@ -628,8 +630,8 @@ impl DefsBuilder {
     /// memoized node gradient (`<linearGradient>` build+serialize is ~1.1 µs, a pure function of the
     /// gradient style + theme colors).
     #[must_use]
-    pub fn raw_gradients(mut self, svg: String) -> Self {
-        self.raw_gradients = Some(svg);
+    pub fn raw_gradients(mut self, svg: impl Into<Cow<'static, str>>) -> Self {
+        self.raw_gradients = Some(svg.into());
         self
     }
 
@@ -673,7 +675,7 @@ impl DefsBuilder {
         // The pre-serialized marker fragment occupies the markers slot (before gradients/filters/
         // custom), byte-identical to the per-marker children it replaces.
         if let Some(ref raw) = self.raw_markers {
-            defs = defs.child(Element::raw_svg(raw.clone()));
+            defs = defs.child(Element::raw_svg(raw.clone().into_owned()));
         }
 
         for marker in &self.markers {
@@ -683,7 +685,7 @@ impl DefsBuilder {
         // Pre-serialized gradient fragment occupies the gradients slot (after markers, before
         // filters/custom), byte-identical to the per-gradient children it replaces.
         if let Some(ref raw) = self.raw_gradients {
-            defs = defs.child(Element::raw_svg(raw.clone()));
+            defs = defs.child(Element::raw_svg(raw.clone().into_owned()));
         }
 
         for gradient in &self.gradients {

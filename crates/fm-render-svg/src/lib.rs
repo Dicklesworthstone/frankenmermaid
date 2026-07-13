@@ -784,16 +784,17 @@ fn build_marker_defs_body(edge_color: &str, emit_fancy: bool) -> String {
 /// built once from the real markers (byte-identical by construction, no source drift, no unbounded
 /// cache); custom themes build fresh (rare). The returned body is streamed as one
 /// `DefsBuilder::raw_markers`, byte-identical to the per-marker children it replaces.
-fn marker_defs_body(edge_color: &str, emit_fancy: bool) -> String {
+fn marker_defs_body(edge_color: &str, emit_fancy: bool) -> Cow<'static, str> {
     if edge_color == DEFAULT_EDGE_COLOR {
         static BASIC: OnceLock<String> = OnceLock::new();
         static FANCY: OnceLock<String> = OnceLock::new();
         let cell = if emit_fancy { &FANCY } else { &BASIC };
-        return cell
-            .get_or_init(|| build_marker_defs_body(edge_color, emit_fancy))
-            .clone();
+        // Borrow the process-global memoized body instead of cloning it into a fresh `String` on
+        // every render — `DefsBuilder::raw_markers` now streams it via `push_str`, so a borrow is
+        // sufficient. Custom themes still build fresh (rare) as `Cow::Owned`.
+        return Cow::Borrowed(cell.get_or_init(|| build_marker_defs_body(edge_color, emit_fancy)).as_str());
     }
-    build_marker_defs_body(edge_color, emit_fancy)
+    Cow::Owned(build_marker_defs_body(edge_color, emit_fancy))
 }
 
 /// Render a target-agnostic scene to SVG string with custom configuration.
@@ -2101,7 +2102,7 @@ const DEFAULT_NODE_BG: &str = "#fafbfc";
 /// real `node_gradient_for` output (byte-identical, no drift); other themes/styles build fresh.
 /// Returns `None` when gradients are off, matching the former `if let Some(gradient)` skip. Streamed as
 /// one [`DefsBuilder::raw_gradients`], byte-identical to the `.gradient(..)` child it replaces.
-fn node_gradient_svg(config: &SvgRenderConfig, theme: &Theme) -> Option<String> {
+fn node_gradient_svg(config: &SvgRenderConfig, theme: &Theme) -> Option<Cow<'static, str>> {
     if !config.node_gradients {
         return None;
     }
@@ -2110,7 +2111,9 @@ fn node_gradient_svg(config: &SvgRenderConfig, theme: &Theme) -> Option<String> 
         && theme.colors.background == DEFAULT_NODE_BG
     {
         static DEFAULT_GRAD: OnceLock<String> = OnceLock::new();
-        return Some(
+        // Borrow the memoized default gradient rather than cloning it every render — `raw_gradients`
+        // streams it via `push_str`. Custom gradients build fresh as `Cow::Owned`.
+        return Some(Cow::Borrowed(
             DEFAULT_GRAD
                 .get_or_init(|| {
                     node_gradient_for(config, theme)
@@ -2118,10 +2121,12 @@ fn node_gradient_svg(config: &SvgRenderConfig, theme: &Theme) -> Option<String> 
                         .to_element()
                         .render()
                 })
-                .clone(),
-        );
+                .as_str(),
+        ));
     }
-    Some(node_gradient_for(config, theme)?.to_element().render())
+    Some(Cow::Owned(
+        node_gradient_for(config, theme)?.to_element().render(),
+    ))
 }
 
 fn effects_css(config: &SvgRenderConfig) -> String {
