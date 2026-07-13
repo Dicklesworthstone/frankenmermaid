@@ -1195,8 +1195,13 @@ impl GraphMetrics {
         let (scc_count, max_scc_size) = if back_edge_count == 0 {
             (0, 1)
         } else {
-            let node_priority = stable_node_priorities(ir);
-            let cycle_detection = detect_cycle_components(node_count, &edges, &node_priority);
+            // `scc_count` + `max_scc_size` are invariant to the SCC visit order (the strongly-connected
+            // decomposition is unique — only the component LIST ORDER depends on the priority, and the
+            // metrics never read the order). So skip `stable_node_priorities`'s O(N log N) node-id
+            // String-memcmp sort (its only purpose is deterministic component order) and pass an identity
+            // priority. Byte-identical `scc_count`/`max_scc_size` ⇒ byte-identical algorithm selection.
+            let identity_priority: Vec<usize> = (0..node_count).collect();
+            let cycle_detection = detect_cycle_components(node_count, &edges, &identity_priority);
             let scc_count = cycle_detection.cyclic_component_indexes.len();
             let max_scc_size = cycle_detection
                 .components
