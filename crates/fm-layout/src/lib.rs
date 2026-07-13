@@ -575,7 +575,11 @@ struct CachedDependencyGraph {
 #[derive(Debug, Clone, Default, PartialEq)]
 struct IncrementalCacheState {
     graph_metrics_cache: Option<(u64, GraphMetrics)>,
-    node_size_cache: BTreeMap<String, CachedNodeSize>,
+    // Lookup-only cache: get/insert by `node.id`, never iterated for output order, so an
+    // `FxHashMap` replaces the `BTreeMap<String, _>`'s O(log N) String-memcmp probe per node with
+    // an O(1) hash on the incremental relayout path (`compute_node_sizes` maps over all nodes).
+    // Byte-identical: the map's iteration order never reaches any output.
+    node_size_cache: FxHashMap<String, CachedNodeSize>,
     dependency_graph_cache: Option<CachedDependencyGraph>,
     current_summary: IncrementalLayoutSummary,
 }
@@ -1034,7 +1038,8 @@ struct LayoutMemoKey {
 pub struct IncrementalLayoutEngine {
     cached: Option<CachedTracedLayout>,
     graph_metrics_cache: Option<(u64, GraphMetrics)>,
-    node_size_cache: BTreeMap<String, CachedNodeSize>,
+    // See `IncrementalCacheState::node_size_cache`: lookup-only, never iterated for output.
+    node_size_cache: FxHashMap<String, CachedNodeSize>,
     dependency_graph_cache: Option<CachedDependencyGraph>,
 }
 
