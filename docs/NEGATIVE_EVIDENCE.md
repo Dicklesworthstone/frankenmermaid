@@ -14881,3 +14881,41 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   any render-serialization change — exclude/bless it first when validating render byte-identity.
 
   Agent: AmberFinch
+
+### NEXT LEVER (analyzed, NOT done — do fresh, byte-identity-critical): stream labeled edges in `render_edge_into` instead of `render_edge(..).write_to_string(out)` (2026-07-13)
+
+- **Context — the per-render FIXED-cost render frontier is now CLOSED** (this session): defs (`ca0cc2e` direct
+  stream + `d8d2b71` marker/gradient `Cow` borrow) and the a11y `<desc>` (`166395b` direct-write, `acc5b67`
+  node-name `Cow`, `75e6f63` drop the two `join()`s). Theme-CSS `to_svg_style` memoization is a DEAD-END
+  (copy-bound: build == static-template memcpy + a few color formats, so memoize==clone==same memcpy). The root
+  `SvgDocument` attr `render()`→`write_into` elision is a standing do-not-retry (~613) AND sub-floor (~1 alloc).
+- **THE remaining measurable render lever** — a per-LABELED-EDGE double-copy: `render_edge_into` (lib.rs ~9608)
+  streams every UNLABELED edge via its tuple fast path, but **labeled** edges fall through to
+  `render_edge(edge_path, context).write_to_string(out)` (~9920). `render_edge` builds the labeled-Arrow fast
+  fragment `f` (`<g><path/><rect/><text/><title/></g>`, lib.rs ~9353-9396) into a fresh `String`, returns
+  `Element::raw_svg(f)`, and `write_to_string` then COPIES `f` into `out`. So every labeled edge pays: build `f`
+  + one `Element` alloc + memcpy `f`→`out`. (`_mi_memcpy` measured ~6% of ER render in the `0f3e0cf` follow-up
+  profile.)
+- **Exercised by** (measurable, no new fixture needed): `pipeline_bench render_nonflowchart/nf/sequence_40` — 40
+  labeled messages are labeled-Arrow edges through this path. Also ER/class relationships and any labeled Arrow
+  edge. This is the first render lever this campaign that a normal bench row hits WITHOUT the compartment refactor.
+- **Fix (clean, no duplication):** extract two shared helpers out of `render_edge` — (1) `compute_edge_label(..)`
+  from the `edge_label` block (~9280-9317: truncate + autonumber + midpoint `lx,ly`), and (2)
+  `write_labeled_edge_fragment_into(out, edge_index, path_str, stroke_width, style_class, marker_end_val,
+  label_str, lx, ly, label_font_size, from_label, to_label, colors)` from the fragment body (~9345-9395). Then
+  `render_edge_into`, before its unlabeled tuple path, computes `is_back_edge = edge_path.reversed`,
+  `path_str = smooth_layout_edge_path(..)`, `edge_label = compute_edge_label(..)`, and if the SAME fast gate
+  holds (~9330-9343: embed_theme_css + full a11y + !anim + !spans + !back + `arrow==Arrow` + no marker_start/
+  dasharray/inline-style + single-line label) calls `write_labeled_edge_fragment_into(out, ..)` and returns —
+  streaming straight into `out`, no `Element`, no copy. `render_edge` reuses the same two helpers (fragment into
+  a `String` wrapped in `raw_svg`) so its other callers (~10410/10485/10586/10757, the `element_rendered` path)
+  are unchanged.
+- **Byte-identity:** pinned by `golden_svg_test` (validate with `gantt_basic`+`pie_basic` temp-skipped — both
+  pre-existing-red) + `edge_fast_full_fragment_matches_render`. The fragment bytes are SHARED via the helper, so
+  the only risk is the `render_edge_into` setup matching `render_edge`'s `path_str`/`edge_label`/gate exactly —
+  hence the shared-`compute_edge_label` extraction (no re-derivation).
+- **Why deferred:** byte-identity-critical refactor of the 550-line `render_edge`; not safe to rush. This is the
+  concrete #1 next render lever; everything else in the render path is at floor or is the multi-hour compartment
+  (ER/class) Element-tree streaming refactor.
+
+  Agent: AmberFinch
