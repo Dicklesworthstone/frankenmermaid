@@ -14982,3 +14982,39 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   fresh not rushed. This is the concrete #1 next render lever for ER after the body-streaming above.
 
   Agent: (Opus 4.8, this session)
+
+### ⚠️CORRECTNESS BUG found + fixed (93754b4): ER attributes silently dropped with gradients ON (2026-07-13)
+
+- **What I was doing:** implementing the documented "ER whole-node wrapper streaming" perf lever
+  (`render_node_into` had no ER fast path → ER entities fell to `render_node(..).write_to_string`
+  double-copy). Built `write_er_node_fragment_into` + gate, proven byte-identical by a dedicated
+  fast-vs-slow test (`render_node_into` vs `render_node(permit_fast=false)`, gradients-ON default config).
+- **The surprise:** the `render_nonflowchart/nf/er_40` criterion A/B read **+34% REGRESSION**. First
+  suspected the rch cross-worker artifact (2-invocation A/B on different-speed workers), so confirmed with a
+  **same-machine instruction count** (fixed-iteration `perf stat`, load-independent): HEAD 19.49B vs mine
+  26.94B over 20k renders = **+38% REAL**, not a worker artifact. A byte-identical-INTENDED change with +38%
+  instrs is physically impossible from removing work → checked OUTPUT: mine 85101 B vs HEAD **52760 B** for
+  `gen_er(40)`. Mine had 40 entity-name headers + 160 attribute rows; **HEAD had 0 and 0**.
+- **ROOT CAUSE (pre-existing bug, unrelated to my lever):** `simple_node_user_class_suffix` — the gate for
+  BOTH common-node fast paths — excluded `class_meta`/`c4_meta` (compartment nodes) but NOT ER entities
+  (`node.members`). So a themed ER entity (Rect, no class_meta) under the DEFAULT `node_gradients:true`
+  config was streamed by the plain-rect common fast path as JUST ITS NAME, dropping the whole attribute
+  compartment. Invisible to tests: the `er_basic` golden pins `node_gradients:false`, where the common fast
+  path's gradient gate keeps ER on the correct slow path. **Exactly the journey/kanban-fill trap class**
+  (common fast path drops content, masked by the gradients-OFF golden blind spot).
+- **FIX (landed 93754b4, minimal + robust):** add `|| !node.members.is_empty()` to
+  `simple_node_user_class_suffix`'s exclusion → ER entities always take the compartment-rendering slow path,
+  like `class_meta`. Regression test `er_entity_renders_attributes_with_gradients_on` (gradients-ON, asserts
+  `fm-er-attribute` present + byte-identical to the Element slow path) locks it. lib 252/252 + er golden green.
+- **⚠️⚠️CONSEQUENCE for perf work:** `render_nonflowchart/nf/er_40` is now LEGITIMATELY heavier (~975K→1.35M
+  instr/render; it was under-rendering). Do NOT "optimize" it back by re-dropping attributes. Any er_40
+  A/B before this commit was measuring a bug.
+- **⭐NEXT (real perf lever, now on the CORRECTED baseline):** the ER whole-node wrapper IS still un-streamed
+  (ER entity now correctly takes the slow Element path: group+rect+title Elements + serialize+copy). My
+  `write_er_node_fragment_into` + `render_node_into` ER gate (proven byte-identical, output == the fixed slow
+  path's 85101 B) is a genuine perf win to land NEXT — but MUST be re-benched against 93754b4 (post-fix), not
+  the buggy pre-fix baseline. ⭐⭐META-LESSON: when a byte-identical-INTENDED change shows a big INSTRUCTION
+  increase (same-machine, not wall-time), CHECK OUTPUT LENGTH before concluding "perf regression" — the
+  BASELINE may be buggy (under-rendering) and your change may be the fix.
+
+  Agent: (Opus 4.8, this session)
