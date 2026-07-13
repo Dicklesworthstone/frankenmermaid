@@ -15108,3 +15108,32 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   builds — measurable via a sequence fixture WITH activations/notes.
 
   Agent: (Opus 4.8, this session)
+
+### ✅✅LANDED (5502060): axis ticks streamed — tick-heavy render −25% (2026-07-13)
+
+- **The axis-ticks lever from the prior ledger note, LANDED** (mirrors the bands fix 8b035b4). Axis ticks
+  (gantt date labels / timeline period markers / xychart axis labels) were each a `<g class="fm-axis-tick">
+  <line/><text>label</text></g>` Element tree pushed as a separate `doc.child`.
+- **Fix:** `write_layout_axis_tick_into` streams a tick byte-identically. The line/text attr order replicates
+  `render_layout_axis_tick`; the label `<text>` mirrors `TextBuilder::build` under this call set —
+  `x y text-anchor="start" [font-family] font-size fill class` then escaped content, `font-family` present
+  ONLY when `!embed_theme_css` (default embeds → absent). The ticks loop streams all ticks into ONE raw
+  fragment. `render_layout_axis_tick`→`#[cfg(test)]` oracle for `layout_axis_tick_streaming_matches_element`
+  (both embed modes × XML-special label).
+- **Byte-identical:** that test + `renders_layout_extensions_for_bands_and_axis_ticks` + `timeline_basic`
+  (period ticks) / `xychart_basic` / `xychart_comprehensive` goldens + 255 lib tests.
+- **Measured (same-machine fixed-iter perf stat, byte-id 116064 B both arms), a 40-period timeline (40 axis
+  ticks): 1.382M → 1.037M instr/render = −25%.** ⚠️MEASUREMENT GOTCHA: my first fixture was a gantt, but the
+  dates wrapped into one month → total_span_days small → 0 ticks (gantt ticks are `(0..=total_span_days)`).
+  Switched to a 40-period TIMELINE (period_indexes → axis_ticks, layout.rs ~5443) — 40 ticks, clean measure.
+  ⭐DUMP + grep the marker (`fm-axis-tick-label`) to confirm the target element is actually PRESENT in the
+  fixture before measuring (same lesson as the mirrorActors 0-mirror-header trap).
+- **⭐NEXT (the band/tick pattern applied to the remaining sequence extension loops):** the
+  `activation_bars` (rect per `->>+`/`-->>-` activation), `sequence_notes` (rect + wrapped text per note),
+  `sequence_lifecycle_markers` (2 lines per destroy), and `sequence_fragments` (loop/alt/opt frames: rect +
+  label) loops are all still per-item `doc.child` Element builds (lib.rs ~2620-2760). Same streaming fix;
+  needs a sequence fixture WITH activations/notes/loops (`A->>+B`, `note over A: …`, `loop … end`) to bench
+  — the default gen_sequence has none. Notes/fragments carry wrapped multi-line text (tspans) → replicate via
+  the reuse-the-TextBuilder-Element-in-place trick (as the labelled band does) to stay byte-identical.
+
+  Agent: (Opus 4.8, this session)
