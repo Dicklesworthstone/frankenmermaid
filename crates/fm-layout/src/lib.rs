@@ -10593,28 +10593,23 @@ fn bk_vertical_alignment(
 /// Brandes-Köpf horizontal compaction for one alignment.
 ///
 /// Returns secondary-axis coordinates indexed by `node_index`.
+#[allow(clippy::too_many_arguments)]
 fn bk_horizontal_compaction(
     node_count: usize,
     node_sizes: &[(f32, f32)],
     ordering_by_rank: &BTreeMap<usize, Vec<usize>>,
     root: &[usize],
     align: &[usize],
+    // `pred_in_rank` (each node's left neighbour in its rank) depends only on `ordering_by_rank`, which
+    // is identical across all four BK alignment passes — so it's built ONCE by the caller and shared
+    // here instead of being rebuilt per pass.
+    pred_in_rank: &[Option<usize>],
     node_spacing: f32,
     horizontal_ranks: bool,
 ) -> Vec<f32> {
     let mut x = vec![f32::NEG_INFINITY; node_count];
     let mut sink: Vec<usize> = (0..node_count).collect();
     let mut shift = vec![f32::INFINITY; node_count];
-
-    // Build predecessor-in-rank lookup: for each node, its left neighbour in the same rank.
-    let mut pred_in_rank: Vec<Option<usize>> = vec![None; node_count];
-    for nodes in ordering_by_rank.values() {
-        for i in 1..nodes.len() {
-            if nodes[i] < node_count && nodes[i - 1] < node_count {
-                pred_in_rank[nodes[i]] = Some(nodes[i - 1]);
-            }
-        }
-    }
 
     /// Minimum separation between two adjacent nodes in the same rank.
     fn delta(
@@ -10722,7 +10717,7 @@ fn bk_horizontal_compaction(
             &mut shift,
             root,
             align,
-            &pred_in_rank,
+            pred_in_rank,
             node_sizes,
             node_spacing,
             horizontal_ranks,
@@ -10803,6 +10798,18 @@ fn brandes_kopf_secondary_coords(
         }
     }
 
+    // Each node's left neighbour in its rank — a pure function of `ordering_by_rank`, identical across all
+    // four alignment passes. Build it ONCE here instead of rebuilding it inside each `bk_horizontal_
+    // compaction` call (3 of 4 builds were pure waste). Byte-identical (same values, same order).
+    let mut pred_in_rank: Vec<Option<usize>> = vec![None; n];
+    for nodes in ordering_by_rank.values() {
+        for i in 1..nodes.len() {
+            if nodes[i] < n && nodes[i - 1] < n {
+                pred_in_rank[nodes[i]] = Some(nodes[i - 1]);
+            }
+        }
+    }
+
     // Four alignment passes: (top_to_bottom, left_to_right).
     let directions = [
         (true, true),   // upper-left
@@ -10831,6 +10838,7 @@ fn brandes_kopf_secondary_coords(
             ordering_by_rank,
             &root,
             &align,
+            &pred_in_rank,
             spacing.node_spacing,
             horizontal_ranks,
         );
