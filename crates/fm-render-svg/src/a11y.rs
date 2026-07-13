@@ -2,6 +2,7 @@
 //!
 //! Provides ARIA attributes, text alternatives, and accessibility CSS utilities.
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 
 use fm_core::{ArrowType, IrNode, MermaidDiagramIr};
@@ -127,7 +128,7 @@ fn plural_suffix(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
 }
 
-fn summarize_key_nodes(ir: &MermaidDiagramIr) -> Vec<String> {
+fn summarize_key_nodes(ir: &MermaidDiagramIr) -> Vec<Cow<'_, str>> {
     ir.nodes
         .iter()
         .filter_map(|node| node_label(node, ir))
@@ -160,12 +161,16 @@ fn summarize_key_relationships(ir: &MermaidDiagramIr) -> Vec<String> {
         .collect()
 }
 
-fn node_label(node: &IrNode, ir: &MermaidDiagramIr) -> Option<String> {
+fn node_label<'a>(node: &'a IrNode, ir: &'a MermaidDiagramIr) -> Option<Cow<'a, str>> {
+    // Borrow the name (trimmed label text, or the id fallback) instead of `to_string()`/`clone()` —
+    // `summarize_key_nodes` only `join`s these into the `<desc>`, which reads them by reference.
+    // Byte-identical: `str::trim` returns a slice of the same bytes.
     node.label
         .and_then(|lid| ir.labels.get(lid.0))
-        .map(|label| label.text.trim().to_string())
+        .map(|label| label.text.trim())
         .filter(|label| !label.is_empty())
-        .or_else(|| (!node.id.is_empty()).then(|| node.id.clone()))
+        .map(Cow::Borrowed)
+        .or_else(|| (!node.id.is_empty()).then_some(Cow::Borrowed(node.id.as_str())))
 }
 
 /// Generate a text alternative for a node.
