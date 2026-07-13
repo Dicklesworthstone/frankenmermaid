@@ -14947,3 +14947,38 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   wrapper streaming (`<g>`+rect+title around the streamed content, still copied once).
 
   Agent: AmberFinch
+
+### DONE + NEXT LEVER: ER entity body streamed (`455419b`); the ER whole-node wrapper is still Element-built + double-copied (2026-07-13)
+
+- **LANDED `455419b`:** the ER entity body (name `<text>` + divider `<line>` + one `<text>` per
+  attribute) is streamed. `render_node`'s ER branch now takes a fast path gated
+  `text_style.is_none() && !emit_classdef_classes && config.embed_theme_css` (the same gate class as
+  `render_class_compartments`' shipped compartment fast path) that calls the new `write_er_entity_into`
+  and adds ONE `Element::raw_svg(fragment)` child instead of ~2 + N per-element `Element`s. For er_40
+  (40 entities × 4 attrs) that is ~240 → ~40 child allocs/render. The slow `Element` path is kept
+  reachable for every other config. **Byte-identical**, pinned green by the `er_basic` `golden_svg_test`.
+  ⚠️GOTCHA that the golden caught: `Element::line().stroke_width(0.8)` serializes via `write_number_into`
+  to `stroke-width="0.80"` (2-decimal), NOT the literal `"0.8"` — a hardcoded `"0.8"` fails the golden.
+- **Measurement:** `render_nonflowchart/nf/er_40` 69.1µs → 66.3µs, −1.4% point est but p=0.39 (within the
+  documented ±15% er_40 noise — see the `aa31ba6` note above). Landed on the **byte-identical +
+  monotonic-fewer-allocs** basis (the intern-hash-once rule), not the wall-time. The win is smaller than
+  the labeled-edge sibling (`aa31ba6` +12%) because the ER entity STILL pays the whole-node group
+  serialize+copy (below) — this lever only killed the per-child Element allocs.
+- **THE next render lever — the ER entity whole-node wrapper is NOT streamed:** `render_node_into` has no
+  ER fast path, so an ER entity falls all the way through to `render_node(..).write_to_string(out)`
+  (lib.rs ~6349) — building the group `<g>` `Element` + the `<rect>` `Element` + the `<title>` `Element`,
+  serializing the whole group into a temp, then COPYING it into `out`. This is the exact double-copy the
+  class node killed with `write_class_node_fragment_into` (render_node_into's class gate ~6185). **Fix:**
+  add an ER whole-node fast path in `render_node_into` mirroring the class one — stream `<g>` + gradient
+  `<rect>` + (the already-extracted) `write_er_entity_into` body + `<title>` directly into `out`, gated on
+  the same class-gate specifics (embed_theme_css, node_gradients, uniform a11y, no icon/centrality/menu/
+  href/callback, `text_style.is_none()`, `!emit_classdef_classes`). Use `write_class_node_fragment_into`
+  as the byte template for the `<g>`/rect/title bytes (Rect shape, `node.members` non-empty + `Er`). The
+  body writer already exists (`write_er_entity_into`), so this is the wrapper only. Byte-identity pinned by
+  the same `er_basic` golden.
+- **Why deferred:** the wrapper `<g>`/rect/title bytes must match `render_node`'s group build exactly
+  (accent class suffix, gradient rect fill, the requirement/class conditionals that must all be absent under
+  the gate) — a from-the-`write_class_node_fragment_into`-template refactor, byte-identity-critical, do
+  fresh not rushed. This is the concrete #1 next render lever for ER after the body-streaming above.
+
+  Agent: (Opus 4.8, this session)
