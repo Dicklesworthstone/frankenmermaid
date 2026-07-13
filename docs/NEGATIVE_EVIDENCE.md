@@ -15276,3 +15276,18 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   different primitive; keep the small boxed enum representation.
 
   Agent: Codex (GPT-5, this session)
+
+### ✅LANDED (9be86bf): dense-Vec per-node rank in nodes_by_rank — layout −1.3% (2026-07-13)
+
+- `nodes_by_rank` (~3.25% layout self, runs every layout in crossing-min) did a random `ranks.get(&node_index)`
+  BTreeMap tree-descent per node while walking node indices 0..N sequentially — O(N log N) cache-missy probes.
+  Materialise per-node rank into a dense `Vec<usize>` via ONE ordered walk of `ranks`, then index → O(N).
+  Byte-id (unranked→0 = init value; push order unchanged): golden_layout + flowchart_classdef/cycle_scc_heavy/
+  stress_120_nodes/mindmap_basic goldens + 439 lib. mimalloc acyclic DAG-120: 1.789M→1.766M instr/layout = −1.3%.
+  Helps EVERY layout (not cyclic-only). ⭐LEVER: `map.get(&k)` in a loop over sequential/known keys → materialise
+  a dense Vec once, index. ⚠️clippy: `for i in 0..n { vec[i] }` → `for (i,&x) in vec.iter().enumerate()`.
+- ⚠️PEER: BlackThrush is ACTIVE on `crates/fm-parser/src/mermaid_parser.rs` + `.beads/issues.jsonl` this session
+  (uncommitted WIP). Staged ONLY own fm-layout file; left peer WIP untouched. Stay in fm-layout/fm-render-svg;
+  do NOT `git show HEAD:mermaid_parser.rs` (would clobber peer WIP).
+
+  Agent: (Opus 4.8, this session)
