@@ -14838,3 +14838,33 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   bigger change that also removes the per-attribute `current_key` alloc.
 
   Agent: AmberFinch
+
+### REJECT: stream `DefsBuilder::write_to_string` directly instead of via `to_element` — mixed bench, byte-identity unconfirmable (2026-07-13)
+
+- **Lever:** `DefsBuilder::write_to_string` built a transient `Defs` `Element` tree (`to_element()`) — a `Defs`
+  `Element`, its `children` `Vec`, and a `raw_svg` `Element` per marker/gradient fragment, cloning the memoized
+  marker/gradient `String` into each (`raw.clone()` in `to_element`, plus the `marker_defs_body` `.clone()`) —
+  only to serialize and drop it every render. Candidate replaced the body with a direct stream: `push_str("<defs>")`,
+  `push_str(raw_markers)` / `push_str(raw_gradients)` in place (no clone), each remaining child's own
+  `to_element().write_to_string`, then `push_str("</defs>")`. Mechanically strictly-fewer-allocs (drops the Defs
+  Element + children Vec + the two raw String clones per render); should not be able to regress.
+- **Measurement (strict-remote criterion, pinned vmi1153651, `pipeline_bench render_nonflowchart`, cand-baseline
+  vs base):** MIXED — `nf/pie_40` **+3.9% (p=0.01, faster)**, `nf/sequence_40` **+6.2% (p=0.00, faster)**, but
+  `nf/sankey_60` **−3.2% (p=0.03, REGRESSED)**. The sankey regression contradicts the strictly-less-work
+  mechanism, so it is almost certainly 2-invocation worker drift — but it is a *significant* shown regression, so
+  the change fails the "≥3% improvement, NO regression elsewhere" gate as measured, and confirming it is drift
+  would need a same-invocation re-measure.
+- **Byte-identity: UNCONFIRMED.** `fm-render-svg` lib 251/251 + determinism pass, and the change is traced
+  byte-identical (`Element::new(Defs)` has empty attrs → `<defs>` + children + `</defs>`; child order and each
+  child's serialization preserved; `raw_svg` serializes to its text verbatim == `push_str`). BUT the definitive
+  `golden_svg_test` snapshot check **panics at the first mismatch, which is the PRE-EXISTING-RED `gantt_basic`
+  case** (a standing golden failure unrelated to this change), so it never reaches the other cases — the golden
+  cannot confirm the *other* diagram types are unaffected without first blessing/excluding `gantt_basic`.
+- **Verdict:** **REJECT (this attempt).** Reverted; `defs.rs` byte-identical to `f82dd7a`. Not a clean win: a
+  shown (probably-drift) sankey regression plus an unconfirmable golden. To retry safely: (1) get a drift-immune
+  measure (same-invocation interleave or fixed-iter instruction count) to show sankey is not a real regression,
+  and (2) confirm byte-identity past `gantt_basic` (BLESS + `git diff` the golden dir → expect ONLY `gantt_basic`
+  to differ, then revert the goldens). ⚠️`gantt_basic` golden is a standing RED that masks `golden_svg_test` for
+  any render-serialization change — exclude/bless it first when validating render byte-identity.
+
+  Agent: AmberFinch
