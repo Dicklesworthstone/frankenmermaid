@@ -1907,6 +1907,30 @@
   drift outside the candidate hunks. `git diff --check` is clean. UBS found no candidate-local defect; its nonzero exit
   is the unchanged file-wide test/assert/indexing inventory.
 
+### REJECT: borrow state-label cleanup and action prefixes with `Cow` — +11.52% midpoint (2026-07-13)
+- **Negative-ledger-first target:** `extract_state_guard_action` eagerly copied every nonempty pipe label and copied the
+  cleaned prefix again for 200 of the 300 measured action labels. No exact attempt existed. This is distinct from the
+  rejected borrowed `push_edge` interner probe (a later allocation) and terminal `FlowAst` moves (earlier AST clones).
+- **Candidate:** return `Option<Cow<'_, str>>`, borrow guard-free labels from the input, and preserve borrowed prefixes
+  across spaced and bare action delimiters. Guard removal remained owned because it joins noncontiguous slices. On
+  `state_labels_300` this removes 500 temporary `String` allocation/copy/free cycles per parse: 300 entry copies plus
+  200 action-prefix copies.
+- **Behavior proof:** the sole production caller already consumed the clean label through `as_deref`; trimming,
+  guard/action text, spaced-delimiter priority, empty bare-action behavior, byte indices, label interning order,
+  diagnostics, floating point, and RNG were unchanged. The seven focused helper tests cover guard-only, action-only,
+  combined, later-spaced precedence, empty action, plain labels, and `None`.
+- **Strict remote-only same-worker A/B:** exact `parse/state_labels/state_labels_300`, 50 samples, 2 s warm-up + 8 s
+  measurement, both arms on pin-honored `vmi1293453`. Benchmark SHA-256
+  `cee31491ee3b5bdf1ed7dbaf39663c335b5843950eb29eebb81880603a3108bf` and `Cargo.lock` SHA-256
+  `b7c9fab36b1085a6f3f61fedb2464bae6b27059a01d55055a8129e5003833309` were unchanged. Control at `6d0e289` was
+  **[267.74, 274.79, 282.04] µs**; candidate was **[287.53, 306.45, 329.35] µs**, midpoint ratio **1.1152**
+  (**+11.52%**). Criterion's paired estimate was **+2.6906%** (95% CI **−2.4592%..+8.6206%**, `p=0.35`) and
+  reported no change.
+- **Verdict: REJECT.** The midpoint regressed substantially and the paired interval permits an 8.6% regression; it
+  does not clear the 3% keep floor. Do not retry this exact `Cow` handoff from allocation counts alone. Candidate
+  parser SHA-256 was `243afc18e63b8cf53e3eef3573eec4145f5b00d7cb524ad204f0af5af37b9a55`; source is restored exactly to
+  control SHA-256 `702bf84f686df487ee465baa3c73ae426fba71125dd9130a0bb56fcaa403a33c`, so no production code ships.
+
 ### REJECT (valid retry): borrow cleaned edge-label probes into the interner — paired +3.05% (2026-07-13)
 - **Negative-ledger-first resolution:** the earlier `push_edge` attempt above was correctly reclassified VOID because
   `parse/state/state_100` never supplied a pipe label. Commit `0a7700d` added target-valid `parse/state_labels/*` rows
