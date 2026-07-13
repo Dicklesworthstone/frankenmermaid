@@ -2617,13 +2617,23 @@ fn render_layout_to_svg(
         }
         doc = doc.child(Element::raw_svg(bands_svg));
     }
-    for tick in &layout.extensions.axis_ticks {
-        doc = doc.child(render_layout_axis_tick(
-            tick.label.as_str(),
-            tick.position + offset_x,
-            layout.bounds.y + offset_y - 12.0,
-            config,
-        ));
+    // Stream all axis ticks (gantt date labels / xychart axis labels) into ONE raw fragment instead of N
+    // group+line+text element trees as separate `doc.child`ren — the same win as the bands loop above.
+    // Byte-identical: `write_layout_axis_tick_into` emits the same bytes as
+    // `render_layout_axis_tick(..).write_to_string`, and concatenated children serialize identically.
+    if !layout.extensions.axis_ticks.is_empty() {
+        let mut ticks_svg = String::new();
+        let tick_y = layout.bounds.y + offset_y - 12.0;
+        for tick in &layout.extensions.axis_ticks {
+            write_layout_axis_tick_into(
+                &mut ticks_svg,
+                tick.label.as_str(),
+                tick.position + offset_x,
+                tick_y,
+                config,
+            );
+        }
+        doc = doc.child(Element::raw_svg(ticks_svg));
     }
 
     // Render sequence diagram activation bars.
@@ -3510,6 +3520,42 @@ fn render_layout_band(
     group
 }
 
+/// Stream an axis tick (`<g class="fm-axis-tick"><line/><text>label</text></g>`) directly into `out`,
+/// byte-identical to [`render_layout_axis_tick`]'s `Element`. The `<line>` and `<text>` attrs replicate
+/// that builder's call order; float attrs go through `write_number_into`. The label `<text>` mirrors
+/// `TextBuilder::build` under this call set: `x y text-anchor="start" [font-family] font-size fill class`
+/// then escaped content (default anchor is `Start`; `font-family` present only when the theme CSS is NOT
+/// embedded). Lets the axis-ticks loop stream N group+line+text `Element`s into one raw fragment.
+fn write_layout_axis_tick_into(out: &mut String, label: &str, x: f32, y: f32, config: &SvgRenderConfig) {
+    use crate::attributes::{write_escaped_attr, write_escaped_text, write_number_into};
+    out.push_str("<g class=\"fm-axis-tick\"><line x1=\"");
+    let _ = write_number_into(out, x);
+    out.push_str("\" y1=\"");
+    let _ = write_number_into(out, y + 4.0);
+    out.push_str("\" x2=\"");
+    let _ = write_number_into(out, x);
+    out.push_str("\" y2=\"");
+    let _ = write_number_into(out, y + 16.0);
+    out.push_str("\" stroke=\"var(--fm-edge-color, #94a3b8)\" stroke-width=\"1\"/><text x=\"");
+    let _ = write_number_into(out, x + 3.0);
+    out.push_str("\" y=\"");
+    let _ = write_number_into(out, y);
+    out.push_str("\" text-anchor=\"start\"");
+    if !config.embed_theme_css {
+        out.push_str(" font-family=\"");
+        let _ = write_escaped_attr(out, &config.font_family);
+        out.push('"');
+    }
+    out.push_str(" font-size=\"");
+    let _ = write_number_into(out, clamp_font_size(config.font_size * 0.72, config.min_font_size));
+    out.push_str("\" fill=\"var(--fm-text-color, #64748b)\" class=\"fm-axis-tick-label\">");
+    let _ = write_escaped_text(out, label);
+    out.push_str("</text></g>");
+}
+
+/// The `Element`-building axis-tick renderer, superseded by [`write_layout_axis_tick_into`] on the render
+/// path and retained only as the byte-identity oracle for `layout_axis_tick_streaming_matches_element`.
+#[cfg(test)]
 fn render_layout_axis_tick(label: &str, x: f32, y: f32, config: &SvgRenderConfig) -> Element {
     let mut group = Element::group().class("fm-axis-tick");
     group = group.child(
@@ -12577,6 +12623,26 @@ mod tests {
                 let mut slow = String::new();
                 render_layout_band(&band, 3.0, 5.0, &config).write_to_string(&mut slow);
                 assert_eq!(streamed, slow, "band kind {kind:?} label {label:?}");
+            }
+        }
+    }
+
+    /// The streamed axis-tick fragment (`write_layout_axis_tick_into`) must be byte-identical to the
+    /// `Element` slow path (`render_layout_axis_tick`) — including an XML-special label and both the
+    /// embedded-CSS (no font-family) and attribute-driven (font-family present) configs.
+    #[test]
+    fn layout_axis_tick_streaming_matches_element() {
+        for embed in [true, false] {
+            let config = SvgRenderConfig {
+                embed_theme_css: embed,
+                ..SvgRenderConfig::default()
+            };
+            for label in ["2026-02-01", "a<b>&c"] {
+                let mut streamed = String::new();
+                write_layout_axis_tick_into(&mut streamed, label, 42.5, 17.0, &config);
+                let mut slow = String::new();
+                render_layout_axis_tick(label, 42.5, 17.0, &config).write_to_string(&mut slow);
+                assert_eq!(streamed, slow, "embed {embed} label {label:?}");
             }
         }
     }
