@@ -15051,3 +15051,32 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   mirror the same whole-node fast-path pattern. Byte-pin with a c4 golden + a fast-vs-slow test.
 
   Agent: (Opus 4.8, this session)
+
+### ✅LANDED (ae979a2) sequence mirror-header streaming (mirrorActors −7.6%); ⚠️the DEFAULT sequence cost is elsewhere (2026-07-13)
+
+- **Profiled the 4 benched nonflowchart render types (ONE rch invocation = valid relative order):**
+  sankey_60 ~100µs, pie_40 ~73µs, **sequence_40 ~112µs (HEAVIEST)**, er_40 ~88µs. Sequence is the biggest
+  nonflowchart render.
+- **First hypothesis (WRONG for the default):** the streaming fast-path gate excludes `sequence_mirror_headers`
+  → thought sequence was forced onto the slow double-copy path. **Reality:** `mirror_actors_enabled =
+  ir.meta.init.config.sequence_mirror_actors.unwrap_or(false)` — mirror actors are **OPT-IN (off by default)**,
+  so `gen_sequence(40)` (default config) has **0 mirror headers** and was ALREADY on the streaming fast path.
+  ⭐LESSON: verify the gate-disqualifying condition is actually PRESENT in the benched input (dump + grep the
+  marker) before assuming it forces the slow path — I built the harness twice before catching that the default
+  had 0 mirror headers.
+- **LANDED ae979a2 anyway (real win for the opt-in config):** stream the mirror headers into `out` after the
+  nodes (their slow-path child position) via `render_node(..).id(..).class(..).write_to_string`, and drop the
+  `sequence_mirror_headers.is_empty()` gate term. Byte-identical (`sequence_basic`+`sequence_advanced` goldens +
+  253 lib tests); no-op for the default sequence (empty loop + unchanged gate value) and all non-sequence types.
+  Measured with `mirrorActors:true` (same-machine instr count, byte-id 75719 B both arms): **2.372M→2.191M
+  instr/render = −7.6%.**
+- **⭐NEXT (the DEFAULT sequence lever, un-mined):** the default `sequence_40` render (~112µs, heaviest
+  nonflowchart) is dominated NOT by mirror headers but by the **sequence-specific extension elements**:
+  `layout.extensions.activation_bars`, `sequence_notes`, `sequence_lifecycle_markers`, lifelines/bands. Check
+  how those are rendered (grep their render sites near the `finish_layout_svg_document` / slow-path child
+  inserts ~3128-3313) — if any build `Element` trees per item instead of streaming, that's the win. The
+  participant nodes stream (common fast path) and the labeled messages stream (aa31ba6), so the residual cost
+  is the lifeline/activation/note layer. Bench via a new `render_nonflowchart` row or the fixed-iter perf-stat
+  harness (gen_sequence(40), DEFAULT config — no mirrorActors).
+
+  Agent: (Opus 4.8, this session)
