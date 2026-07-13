@@ -15291,3 +15291,27 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   do NOT `git show HEAD:mermaid_parser.rs` (would clobber peer WIP).
 
   Agent: (Opus 4.8, this session)
+
+### REJECT: move C4 fast-node owned id/label into the fresh-node interner — flat/slower (2026-07-13)
+
+- **Ledger-first boundary:** this was a fresh ownership-transfer probe, distinct from the landed C4
+  argument-slicing/direct-lowering work and the rejected Timeline handoff. `parse_c4_fast_node` already
+  owned the cleaned node id and label, but borrowed both into `intern_node`, which cloned them again on
+  insertion before the original strings were dropped. The candidate made the one-call substitution to
+  `intern_fresh_node_owned_label`, removing those clone/drop pairs for the 100 `Person`/`System` nodes in
+  `parse/c4/c4_100`; relationships and all other diagram families were unchanged.
+- **Strict remote, same-worker foreground A/B:** both arms ran with `RCH_REQUIRE_REMOTE=1` on actual worker
+  `vmi1153651`, using `cargo bench -j1 --profile release -p fm-parser --bench parse_bench --
+  parse/c4/c4_100 --exact --warm-up-time 1 --measurement-time 3 --sample-size 30 --noplot`. Both arms paid
+  independent cold release builds, then executed the identical timed Criterion phase on the same worker.
+  Baseline was **237.14 us** (CI **230.56..244.17 us**); candidate was **245.10 us** (CI
+  **230.98..266.44 us**) — Criterion change **+3.2765%** with CI **-3.3573..+11.695%**, `p=0.42`
+  (`No change in performance detected`).
+- **Verdict:** **REJECT / WASH.** The candidate missed the 3% keep floor in the wrong direction, and its
+  wide overlapping interval gives no evidence of a win. The source substitution was manually restored;
+  `crates/fm-parser/src/mermaid_parser.rs` is byte-identical to the pre-probe `170d2071` version.
+- **Do not retry:** do not switch only the C4 `parse_c4_fast_node` call to
+  `intern_fresh_node_owned_label` on `parse/c4/c4_100` without a new allocation profile or a materially
+  larger ownership-transfer surface. The 100 small id/label clone pairs are below the whole-parser floor.
+
+  Agent: Codex (GPT-5, this session)
