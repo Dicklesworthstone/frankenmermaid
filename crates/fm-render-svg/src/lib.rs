@@ -5350,6 +5350,94 @@ fn write_class_compartments_into(
     }
 }
 
+/// Stream an ER entity's body (name header `<text>` + divider `<line>` + one `<text>` per attribute)
+/// byte-identical to what `render_node`'s ER branch builds via `Element`s under embedded CSS with no
+/// per-label style and no classdef class. Attrs replicate that branch's builder call order exactly:
+/// name/attr `<text>` carry `x, y, text-anchor, dominant-baseline, font-size, font-weight, fill, class`
+/// (font-family is embedded-CSS-driven, so absent); the divider `<line>` carries `x1, y1, x2, y2,
+/// stroke-width` (stroke is CSS-driven, so absent). The per-attribute content `{key_prefix}{data_type}
+/// {name}` streams in pieces instead of a `format!` temp — byte-identical because `write_escaped_text`
+/// escapes per char and `key_prefix`/the separating space hold no XML specials. Used only via the ER
+/// branch's fast path, mirroring [`write_class_compartments_into`]; replaces ~2 + N `Element`s per
+/// entity (~400 for a 40-entity diagram) with one raw fragment.
+#[allow(clippy::too_many_arguments)]
+fn write_er_entity_into(
+    f: &mut String,
+    node: &fm_core::IrNode,
+    label_text: &str,
+    cx: f32,
+    x: f32,
+    y: f32,
+    w: f32,
+    node_font_size: f32,
+    config: &SvgRenderConfig,
+    colors: &ThemeColors,
+) {
+    use crate::attributes::{write_escaped_attr, write_escaped_text, write_number_into};
+    let attr_font_size = clamp_font_size(node_font_size * 0.8, config.min_font_size);
+    let header_height = node_font_size * 1.5;
+    let fill = colors.text.as_str();
+
+    // Entity name header.
+    f.push_str("<text x=\"");
+    let _ = write_number_into(f, cx);
+    f.push_str("\" y=\"");
+    let _ = write_number_into(f, y + header_height * 0.6);
+    f.push_str("\" text-anchor=\"middle\" dominant-baseline=\"central\" font-size=\"");
+    let _ = write_number_into(f, node_font_size);
+    f.push_str("\" font-weight=\"bold\" fill=\"");
+    let _ = write_escaped_attr(f, fill);
+    f.push_str("\" class=\"fm-er-entity-name\">");
+    let _ = write_escaped_text(f, label_text);
+    f.push_str("</text>");
+
+    // Divider line.
+    f.push_str("<line x1=\"");
+    let _ = write_number_into(f, x + 2.0);
+    f.push_str("\" y1=\"");
+    let _ = write_number_into(f, y + header_height);
+    f.push_str("\" x2=\"");
+    let _ = write_number_into(f, x + w - 2.0);
+    f.push_str("\" y2=\"");
+    let _ = write_number_into(f, y + header_height);
+    // `stroke_width(0.8)` serializes via `write_number_into` -> two decimals ("0.80"), NOT "0.8".
+    f.push_str("\" stroke-width=\"0.80\"/>");
+
+    // Attribute list.
+    let mut attr_y = y + header_height + attr_font_size * 0.9;
+    for attr in &node.members {
+        let key_prefix = match attr.key {
+            fm_core::IrAttributeKey::Pk => "PK ",
+            fm_core::IrAttributeKey::Fk => "FK ",
+            fm_core::IrAttributeKey::Uk => "UK ",
+            fm_core::IrAttributeKey::None => "",
+        };
+        let font_weight = if attr.key == fm_core::IrAttributeKey::None {
+            "normal"
+        } else {
+            "bold"
+        };
+        f.push_str("<text x=\"");
+        let _ = write_number_into(f, x + 8.0);
+        f.push_str("\" y=\"");
+        let _ = write_number_into(f, attr_y);
+        f.push_str("\" text-anchor=\"start\" dominant-baseline=\"central\" font-size=\"");
+        let _ = write_number_into(f, attr_font_size);
+        f.push_str("\" font-weight=\"");
+        f.push_str(font_weight);
+        f.push_str("\" fill=\"");
+        let _ = write_escaped_attr(f, fill);
+        f.push_str("\" class=\"fm-er-attribute\">");
+        // `attr_text = format!("{key_prefix}{data_type} {name}")`, escaped in pieces (identical bytes).
+        f.push_str(key_prefix);
+        let _ = write_escaped_text(f, &attr.data_type);
+        f.push(' ');
+        let _ = write_escaped_text(f, &attr.name);
+        f.push_str("</text>");
+        attr_y += attr_font_size * 1.3;
+    }
+}
+
 /// Stream a complete class-diagram node (`<g>` + gradient `<rect>` + compartment stack + `<title>`)
 /// directly into `out`, **byte-identical** to what `render_node` builds via `Element`s — the class-node
 /// analogue of [`write_common_node_fragment_into`]. The `<g>`/rect/title bytes replicate that helper's
@@ -7307,6 +7395,28 @@ fn render_node(
             && ir.diagram_type == fm_core::DiagramType::Er
         {
             // ER entity: render name + attribute list.
+            // Streaming fast path: embedded CSS, no per-label style, no classdef class -> the header +
+            // divider + attribute rows are a fixed set of `<text>`/`<line>` bytes with no per-element
+            // conditional class/style, so stream them into ONE raw fragment instead of ~2 + N `Element`s
+            // per entity (~400 for a 40-entity diagram). Byte-identical to the Element path below (same
+            // attrs/order/positions/cursor advance); mirrors `render_class_compartments`' fast path.
+            // Every other case (per-label style, classdef, non-embedded CSS) falls through.
+            if text_style.is_none() && !emit_classdef_classes && config.embed_theme_css {
+                let mut fragment = String::new();
+                write_er_entity_into(
+                    &mut fragment,
+                    node,
+                    label_text.as_ref(),
+                    cx,
+                    x,
+                    y,
+                    w,
+                    node_font_size,
+                    config,
+                    colors,
+                );
+                group = group.child(Element::raw_svg(fragment));
+            } else {
             let attr_font_size = clamp_font_size(node_font_size * 0.8, config.min_font_size);
             let header_height = node_font_size * 1.5;
 
@@ -7371,6 +7481,7 @@ fn render_node(
                 }
                 group = group.child(attr_elem);
                 attr_y += attr_font_size * 1.3;
+            }
             }
         } else if let Some(node) = ir_node
             && let Some(ref c4_meta) = node.c4_meta
