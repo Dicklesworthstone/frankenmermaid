@@ -1701,6 +1701,22 @@
   patterns build the TwoWaySearcher. Candidates to check next: the other relation/statement parsers (state, class,
   gantt, xychart, mindmap) for multi-char `&str` split/find on their hot lines.
 
+### REJECT: `trim_fast` the remaining requirement header/relation trims — +13.5% parse regression (2026-07-12)
+- **Negative-ledger-first gap:** the earlier requirement trim keep converted the hot per-line trim and four block
+  field-value trims, while the relation search keep above removed its two `TwoWaySearcher`s. Six requirement-only
+  standard trims remained: block name/type normalization plus the relationship type/left-endpoint branches.
+- **One lever:** replace exactly those six `str::trim` calls with the existing byte-exact `trim_fast`. Ordering,
+  requirement type/label text, relationship endpoints, spans, diagnostics, floating point, tie-breaking, and RNG
+  are unchanged; `trim_fast` falls back to standard Unicode trimming when a non-ASCII boundary requires it.
+- **Authoritative strict-remote pair:** permanent exact row `parse/requirement/req_100`, 50 samples, 2 s warm-up
+  + 8 s measure, both arms on pin-honored `vmi1149989` through `RCH_REQUIRE_REMOTE=1 ... rch exec -- cargo bench
+  -j1 --profile release -p fm-parser`; baseline name `req-trims-a2f599f-base`. Control at `a2f599f` was
+  **[155.03, 158.80, 162.32] µs**; candidate was **[169.53, 174.77, 180.28] µs**, midpoint ratio **1.10057**.
+  Criterion measured a decisive **+13.532%** regression (95% CI **+9.0789%..+18.412%**, `p=0.00`).
+- **Verdict: REJECT.** This six-site shared-helper conversion is materially worse on the short requirement slices;
+  do not retry the exact batch. Parser source was restored exactly
+  to control SHA-256 `903d89f463bc5342de089793acd3c67ea5c0d386b6f3ed2b9a9110d383bc38f2`; shipped parser/IR/SVG bytes are unchanged.
+
 ### SURFACE: render + layout profiling sweep — both at mature floor, remaining levers are structural (2026-07-12)
 - **Context.** After 6 landed parse wins + 2 clean parse rejects this session, the parser clean veins are mined, so
   I pivoted to profile the two phases untouched this session (`perf record --call-graph dwarf`, current-HEAD binary).
