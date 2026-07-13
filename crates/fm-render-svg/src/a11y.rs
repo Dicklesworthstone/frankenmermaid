@@ -2,6 +2,8 @@
 //!
 //! Provides ARIA attributes, text alternatives, and accessibility CSS utilities.
 
+use std::fmt::Write as _;
+
 use fm_core::{ArrowType, IrNode, MermaidDiagramIr};
 use fm_layout::DiagramLayout;
 
@@ -17,7 +19,14 @@ pub fn describe_diagram_with_layout(
     ir: &MermaidDiagramIr,
     layout: Option<&DiagramLayout>,
 ) -> String {
-    let mut parts = Vec::new();
+    // Build the description straight into one `String` instead of collecting a `Vec<String>` of
+    // `format!`-allocated parts and `join(". ")`-ing them. `join(". ")` inserts ". " BETWEEN parts,
+    // so the first part is written bare and every subsequent (conditionally present) part is prefixed
+    // with ". " — byte-identical to the old collect+join. Drops the parts `Vec`, each part's
+    // intermediate `format!` `String`, and the final join allocation per render. Capacity covers the
+    // bounded worst case (counts + direction + up to 3 key nodes + 3 relationship sentences + the
+    // layout line) so the common desc never reallocs — the old `join` allocated the result exactly.
+    let mut desc = String::with_capacity(512);
 
     let type_desc = match ir.diagram_type.as_str() {
         "flowchart" => "flowchart diagram",
@@ -35,15 +44,16 @@ pub fn describe_diagram_with_layout(
     };
 
     let diagnostics = ir.diagnostic_counts();
-    parts.push(format!(
+    let _ = write!(
+        desc,
         "{} with {} nodes and {} edges",
         leading_type_phrase(type_desc),
         ir.nodes.len(),
         ir.edges.len()
-    ));
+    );
 
     if !ir.clusters.is_empty() {
-        parts.push(format!("organized in {} groups", ir.clusters.len()));
+        let _ = write!(desc, ". organized in {} groups", ir.clusters.len());
     }
 
     let direction_desc = match ir.direction {
@@ -52,16 +62,16 @@ pub fn describe_diagram_with_layout(
         fm_core::GraphDirection::TB | fm_core::GraphDirection::TD => "flowing top to bottom",
         fm_core::GraphDirection::BT => "flowing bottom to top",
     };
-    parts.push(direction_desc.to_string());
+    let _ = write!(desc, ". {direction_desc}");
 
     let key_nodes = summarize_key_nodes(ir);
     if !key_nodes.is_empty() {
-        parts.push(format!("Key nodes: {}.", key_nodes.join(", ")));
+        let _ = write!(desc, ". Key nodes: {}.", key_nodes.join(", "));
     }
 
     let relationships = summarize_key_relationships(ir);
     if !relationships.is_empty() {
-        parts.push(format!("Key relationships: {}.", relationships.join("; ")));
+        let _ = write!(desc, ". Key relationships: {}.", relationships.join("; "));
     }
 
     if diagnostics.warnings > 0 || diagnostics.errors > 0 {
@@ -80,27 +90,29 @@ pub fn describe_diagram_with_layout(
                 plural_suffix(diagnostics.errors)
             ));
         }
-        parts.push(format!("Diagnostics: {}.", diag_parts.join(", ")));
+        let _ = write!(desc, ". Diagnostics: {}.", diag_parts.join(", "));
     }
 
     if let Some(layout) = layout {
-        parts.push(format!(
-            "Layout spans {:.0} by {:.0} units with {} rendered node boxes and {} routed edge paths.",
+        let _ = write!(
+            desc,
+            ". Layout spans {:.0} by {:.0} units with {} rendered node boxes and {} routed edge paths.",
             layout.bounds.width,
             layout.bounds.height,
             layout.nodes.len(),
             layout.edges.len()
-        ));
+        );
         if layout.stats.crossing_count > 0 {
-            parts.push(format!(
-                "The layout currently contains {} edge crossing{}.",
+            let _ = write!(
+                desc,
+                ". The layout currently contains {} edge crossing{}.",
                 layout.stats.crossing_count,
                 plural_suffix(layout.stats.crossing_count)
-            ));
+            );
         }
     }
 
-    parts.join(". ")
+    desc
 }
 
 fn leading_type_phrase(type_desc: &str) -> String {
