@@ -65,14 +65,25 @@ pub fn describe_diagram_with_layout(
     };
     let _ = write!(desc, ". {direction_desc}");
 
+    // Write the joined lists element-by-element rather than `join(sep)`-ing into a temporary String:
+    // `join(sep)` == first element, then each subsequent prefixed with `sep`. Byte-identical, drops the
+    // intermediate join allocation.
     let key_nodes = summarize_key_nodes(ir);
-    if !key_nodes.is_empty() {
-        let _ = write!(desc, ". Key nodes: {}.", key_nodes.join(", "));
+    if let Some((first, rest)) = key_nodes.split_first() {
+        let _ = write!(desc, ". Key nodes: {first}");
+        for node in rest {
+            let _ = write!(desc, ", {node}");
+        }
+        desc.push('.');
     }
 
     let relationships = summarize_key_relationships(ir);
-    if !relationships.is_empty() {
-        let _ = write!(desc, ". Key relationships: {}.", relationships.join("; "));
+    if let Some((first, rest)) = relationships.split_first() {
+        let _ = write!(desc, ". Key relationships: {first}");
+        for rel in rest {
+            let _ = write!(desc, "; {rel}");
+        }
+        desc.push('.');
     }
 
     if diagnostics.warnings > 0 || diagnostics.errors > 0 {
