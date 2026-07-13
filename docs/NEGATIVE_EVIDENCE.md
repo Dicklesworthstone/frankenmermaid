@@ -15164,3 +15164,36 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   is effectively CLOSED after bands (the only group-wrapped one).
 
   Agent: (Opus 4.8, this session)
+
+### 🔬 ORIENTATION + ⚠️MEGA MEASUREMENT FINDING: example harnesses missed mimalloc → alloc wins overstated (2026-07-13)
+
+- **Confirmed two frontiers CLOSED/STALE before profiling:** (1) render streaming is EXHAUSTED — every
+  group-wrapped per-item loop (bands/axis-ticks/ER/class nodes) is streamed, and the bare-single-leaf loops
+  (activations/notes/fragments/clusters) are a proven WASH (f1a75f8 heuristic). (2) The ledger's "gantt layout
+  __memcmp 22% NEXT" is STALE — the task_id_to_idx FxHash swap + dep-idx hoist (fm-layout ~6276-6316) already
+  killed that memcmp; `section_to_nodes` (the remaining String-BTreeMap) is iterated in KEY ORDER for the section
+  bands, so it can't be FxHash-swapped, and its per-task label clone has "Backlog"/"Section N" edge cases (skip).
+- **Profiled the full pipeline (parse+layout+render, flowchart-120):** `perf record` shows **ALLOCATION DOMINATES
+  — `_int_malloc` 11% + `__libc_malloc2` 11% + memmove 5% + malloc_consolidate/cfree/malloc/free ~15% = ~40%+**.
+  The next real lever is allocation reduction (parse+layout, the alloc-heavy phases; render Element-building is
+  largely streamed).
+- **⚠️⚠️⚠️MEGA METHODOLOGY BUG (in MY measurements, not the repo):** the profile showed **libc `_int_malloc`, not
+  mimalloc** — because my throwaway instruction-count EXAMPLE HARNESSES (`erbench_tmp`/`seqbench_tmp`/`ganttbench
+  _tmp`/`actbench_tmp`) had **no `#[global_allocator]`**, so they ran on the SYSTEM (libc) allocator. Production
+  (`fm-cli/src/main.rs`) AND the criterion `pipeline_bench` (its line 13-17) BOTH use mimalloc. So every
+  alloc-reduction A/B I ran via an example harness measured the WRONG allocator → **OVERSTATED the win** (libc
+  malloc is heavier, so removing an alloc saves more instructions there than under mimalloc).
+- **QUANTIFIED** (axis-tick streaming 5502060, 40-tick timeline, byte-identical both arms): **−25% on a libc
+  harness vs −19.2% on a mimalloc harness** (baseline 24.70M→19.96M instr/render). The win HOLDS under production
+  (−19.2% is large + real); the magnitude was inflated ~6pp. Same applies to the bands (−15.5%) / ER (−26%) libc
+  numbers — real wins, magnitudes ~20-25% relative overstatement. **No landed work needs reverting** (fewer allocs
+  is fewer allocs under any allocator; the "activation=wash" rejection is even STRONGER under mimalloc).
+- **⭐⭐⭐DURABLE RULE: every instruction-count EXAMPLE HARNESS must add `#[global_allocator] static G:
+  mimalloc::MiMalloc = mimalloc::MiMalloc;` at the top** (mimalloc is a normal dep of fm-cli, so examples/benches
+  can use it) — otherwise it measures libc malloc and overstates alloc-reduction wins vs the shipped binary.
+- **⭐NEXT LEVER (data-driven): allocation reduction in the parse/layout phases**, measured on a mimalloc harness.
+  The perf-record leaf is `_int_malloc` but the harness-binary caller frames didn't symbolize (fp/dwarf both gave
+  `[unknown]`) — re-profile with the frame-pointer-preserving build or attribute via a heap profiler / manual
+  alloc-symbol grep (mi_malloc/finish_grow) to find the top allocation SITES.
+
+  Agent: (Opus 4.8, this session)
