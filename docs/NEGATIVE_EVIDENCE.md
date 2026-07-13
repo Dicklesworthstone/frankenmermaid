@@ -14772,3 +14772,39 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   bytes; for ≤3-byte needles keep `str::contains`.**
 - **Verdict:** **REJECT.** The candidate was reverted; `mermaid_parser.rs` is byte-identical to HEAD (`12587e0`).
   Do not retry the `memmem` swap on the `%%{` init gate (or any ≤3-byte-needle whole-input gate).
+
+### SURFACE: mindmap full-pipeline (radial) is at a flat floor; layout compute-once levers already closed (2026-07-13)
+
+- **Negative-ledger first:** after landing `72ffc1f` (incremental `node_size_cache` BTreeMap→FxHashMap,
+  incremental relayout −5..14%), I swept fm-layout/fm-render-svg for a second *dominant-path* lever.
+  Every candidate resolved to an already-closed boundary — recorded here so the next agent skips the sweep.
+- **`resolved_edges(ir)` compute-once dedup across `GraphMetrics::from_ir` + the layout algorithm — DEAD
+  (re-confirm of ~1731):** on the dominant flowchart **TREE** path `resolved_edges` is called **once**
+  (inside `GraphMetrics::from_ir` for Auto selection). The other 5 call sites are off the TREE path — the
+  `graph_metrics_cache_key` site is incremental-cache-only, and the `cycle_removal` / `build_cycle_cluster_map`
+  sites run only for **cyclic** Sugiyama graphs (noted as a cyclic-only candidate at ~3555). So there is no
+  redundant edge-resolution to hoist on the common DAG layout, and threading an `&[OrientedEdge]` through the
+  public `GraphMetrics::from_ir` signature + the whole algorithm dispatch would be a medium multi-site refactor
+  for a below-floor payoff (one ~E-element `Vec<OrientedEdge>` alloc + O(E) pass). Do not retry.
+- **`graph_metrics_cache_key` throwaway-`resolved_edges` — already REJECTED at ~7960** (incremental-only, dead
+  on the batch pipeline). Still closed.
+- **`sort_by → sort_unstable_by` on the 19 usize index-tiebreak layout sorts — already REJECTED at ~8762**
+  (Rust's stable driftsort is adaptive and competitive/better on near-sorted layout orderings; wash + shape-
+  dependent regressions). `stable_node_priorities` cross-call memoization — already REJECTED at ~3522 (~0 gain).
+  Still closed.
+- **Fresh data point — mindmap radial pipeline profile (NOT in the ledger; the ~1729 floor map is flowchart
+  TREE, ~1723 is timeline render):** `perf record --call-graph dwarf -F 999` on
+  `full_pipeline_mindmap/parse_layout_svg/1600` (`pipeline_bench`, `--profile-time 8`, 8123 samples) is a
+  **flat floor** — top self-symbol is `__memmove_avx_unaligned_erms` **2.42%** (the structural
+  raw_svg→doc→String double-copy, cf. `41948f2`), `__memcmp_avx2_movbe` 0.52%, `__sincosf_fma` 0.29% (radial
+  angle trig); **no in-binary code symbol exceeds ~1% self-time**. (Symbols were unresolved because
+  `[profile.release] strip = true` strips the bench binary; the flat *distribution* is still conclusive —
+  a >3% lever would show as a single tall bar regardless of symbolication.) Consistent with the standing
+  SURFACE verdict at ~1738: the only remaining fm-render-svg wins are **structural / multi-crate** — the
+  class/ER compartment-node byte-streaming refactor (~1739), which is multi-hour and byte-identity-hard, not a
+  small-increment lever.
+- **Verdict:** **SURFACE / no small-increment lever this turn.** Next real move is the compartment-render
+  streaming refactor (dedicated fast path emitting compartment box bytes directly to the output buffer, gated
+  like the landed rect/polygon/cylinder/subroutine streamers), on the now-uncontested `fm-render-svg` files.
+
+  Agent: AmberFinch
