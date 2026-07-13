@@ -482,7 +482,16 @@ fn parse_dot_node_fragment(raw: &str) -> Option<DotNode> {
     }
 
     let label = attrs.and_then(parse_dot_label);
-    let shape = attrs.and_then(parse_dot_shape).unwrap_or(NodeShape::Rect);
+    // Most DOT nodes carry no `shape=` attribute, yet `parse_dot_shape` would run a full
+    // `extract_dot_attribute_raw` scan (allocating a `current_key`/`current_val` String per
+    // attribute) only to find no match. `extract` matches keys case-insensitively, so gate on a
+    // cheap allocation-free case-insensitive `shape` substring test first: `extract` can only match
+    // a `shape` key when that substring is present, so this is byte-identical (mirrors the landed
+    // `looks_like_dot` "graph" pre-guard).
+    let shape = attrs
+        .filter(|a| contains_ignore_ascii_case(a.as_bytes(), b"shape"))
+        .and_then(parse_dot_shape)
+        .unwrap_or(NodeShape::Rect);
 
     Some(DotNode { id, label, shape })
 }
