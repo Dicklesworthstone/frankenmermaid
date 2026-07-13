@@ -1852,6 +1852,29 @@
 - **Verdict: WIN.** Keep the first-match return plus the table-order invariant. This is distinct from the rejected
   first-byte guard: misses use the exact prior `starts_with` loop, while successful scans stop once their result is known.
 
+### REJECT: borrow cleaned edge-label probes into the interner — state +2.84% midpoint (2026-07-12)
+- **Negative-ledger-first hypothesis:** the landed plain-node label path borrows through `LabelIndex` and allocates only
+  on insertion, while `IrBuilder::push_edge` still allocated a cleaned `String`, moved it into an empty-segment
+  `ParsedLabel`, cloned the text into `IrLabel` on a miss, then freed the probe. The candidate factored the exact existing
+  trim/quote/backtick/trim chain into a borrowed helper and routed edge labels through `intern_plain_label`.
+- **Behavior proof:** both paths use the identical cleaned bytes, hash/collision key `(text, [])`, first-insertion label
+  ID/order, stored span, and dedup behavior. Empty labels remain `None`; rich markup is impossible on `push_edge`'s
+  `Option<&str>` API. The only intended difference was ownership: zero probe allocation on a hit and only the stored
+  text allocation on a miss.
+- **Strict remote-only same-worker A/B:** exact permanent row `parse/state/state_100` (99 uniquely labelled
+  transitions), 50 samples, 2 s warm-up + 8 s measurement, both arms on pin-honored `vmi1293453`; `parse_bench.rs`
+  SHA-256 `37771f5d2ebaede0d56b881658d143f000da09329e69c78fed5043eccb1830eb` and `Cargo.lock` SHA-256
+  `b7c9fab36b1085a6f3f61fedb2464bae6b27059a01d55055a8129e5003833309` were unchanged. Control at `fbd28a1` was
+  **[71.118, 72.943, 74.940] µs**; candidate was **[73.072, 75.014, 76.895] µs**, midpoint ratio **1.0284**
+  (**+2.84%**). Criterion detected no improvement: paired estimate **+2.4632%** (95% CI
+  **−3.9083%..+7.5673%**, `p=0.46`).
+- **Verdict: REJECT.** The proof-clean allocation deletion has no wall-time headroom on the permanent state row; the
+  tiny edge-label probe allocation/copy/free is effectively free under the current allocator and surrounding parse work.
+  Restored `ir_builder.rs` exactly to control SHA-256
+  `560fe6bde41935e91d255f920bced3c8bf79c830554313f90ba438075e8ba514`; rejected candidate SHA-256 was
+  `2404297afac01b2bb324312ad5dfd828a95a123ba48d43cae7c2226e7ffd77f2`. Shipped parser bytes are unchanged; do not
+  retry this exact borrowed `push_edge` handoff from allocation counts alone.
+
 ### REJECT: fuse the fast-node reject + `[`-locate scans into one table-driven pass — +0.74% parse REGRESSION (2026-07-12)
 - **Hypothesis (looked obvious):** `parse_fast_simple_flowchart_node_borrowed` (10.17% self on the
   flowchart/800 parse profile) does two byte scans per statement — a reject `.bytes().any(matches!(byte,
