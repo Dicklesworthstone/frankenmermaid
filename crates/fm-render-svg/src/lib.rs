@@ -2901,13 +2901,25 @@ fn render_layout_to_svg(
 
         // Cluster label if present
         if detail.show_cluster_labels && !title_text.is_empty() {
-            // For C4 boundaries, strip the boundary type prefix for display
+            // For C4 boundaries, strip the boundary type prefix for display. A boundary carries
+            // exactly ONE of these type keywords, so the old 4-chained `String::replace` allocated a
+            // full fresh copy for each of the (typically 3) absent needles — pure alloc+memcpy waste.
+            // Gate each removal on `contains` and only allocate when the needle is actually present;
+            // byte-identical (an absent-needle `replace` returns an identical copy) with the same
+            // left-to-right application order, but ≤1 allocation instead of 4.
             let display_title = if is_c4_boundary {
-                title_text
-                    .replace("System_Boundary", "")
-                    .replace("Container_Boundary", "")
-                    .replace("Enterprise_Boundary", "")
-                    .replace("Deployment_Node", "")
+                let mut stripped = std::borrow::Cow::Borrowed(title_text);
+                for keyword in [
+                    "System_Boundary",
+                    "Container_Boundary",
+                    "Enterprise_Boundary",
+                    "Deployment_Node",
+                ] {
+                    if stripped.contains(keyword) {
+                        stripped = std::borrow::Cow::Owned(stripped.replace(keyword, ""));
+                    }
+                }
+                stripped
                     .trim_matches(|c: char| c == '(' || c == ')' || c == ',' || c.is_whitespace())
                     .to_string()
             } else if is_swimlane && title_text.starts_with("swimlane:") {
