@@ -14808,3 +14808,33 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   like the landed rect/polygon/cylinder/subroutine streamers), on the now-uncontested `fm-render-svg` files.
 
   Agent: AmberFinch
+
+### REJECT: skip building the throwaway value String for non-matching DOT attributes — conditional-push wash/regression (2026-07-13)
+
+- **Negative-ledger first / lever:** follow-on to the landed `219520e` (two per-statement alloc removals in
+  `extract_dot_attribute_raw`). That function still builds `current_val` (a value String) for EVERY attribute it
+  scans before the key check, so `parse_dot_shape` — run on every DOT node — allocates a throwaway value String
+  for the `label` attribute it scans past. Attempt: compute `is_match = current_key.eq_ignore_ascii_case(key)`
+  BEFORE the value loops and guard each `current_val.push(..)` with `if is_match`; `String::new()` doesn't
+  allocate until first push, so a non-matching attribute would allocate nothing.
+- **Byte-identity:** CONFIRMED — `cargo test -p fm-parser dot` 39/39; iterator advancement is identical on both
+  paths, only the pushes are gated, so the returned value is unchanged.
+- **Measurement (strict-remote criterion, pinned worker vmi1153651, `parse_bench parse/dot`, warm-up 2 / measure
+  5 / 60 samples, cand-baseline vs base):** base (unconditional push) measured **faster** than the is_match
+  candidate — `parse/dot/dot_50` change **−12.7% (p=0.00, base faster ⇒ candidate REGRESSES)**,
+  `parse/dot/dot_200` **−2.3% (p=0.15, wash)**. Fails the ≥3%-improvement / no-regression gate.
+- **Root cause:** the guard adds an `if is_match` branch **per value char** in the hot MATCHING path (every
+  `label=` value IS built), and the loop-invariant bool did NOT get unswitched out of the
+  `for vc in chars.by_ref()` / `while peek` loops under opt=3+LTO. The added per-char branch cost outweighs the
+  single `mimalloc` value-String alloc saved on the non-matching `parse_dot_shape` scan (mimalloc small allocs
+  are cheap; the true effect is ≤ the dot_200 noise floor). The large dot_50 figure is partly 2-invocation worker
+  drift, but the sign is mechanistically real (candidate not faster on either size).
+- **Verdict:** **REJECT.** Reverted; `dot_parser.rs` byte-identical to `219520e`. Do not retry the
+  conditional-`push` value-skip. A branch-free variant (duplicate the value-consume logic into a separate
+  no-alloc SKIP path so the matching path keeps the original branch-free loop) MIGHT recover the alloc saving,
+  but the ceiling is ≤2-3% (below the reliable parse/dot gate), so it is not worth the code duplication. The
+  higher-value DOT lever remains the **parse-attrs-once** refactor (scan the attribute list a single time into
+  key/value spans; `parse_dot_label` + `parse_dot_shape` currently each re-scan the whole attr string) — a
+  bigger change that also removes the per-attribute `current_key` alloc.
+
+  Agent: AmberFinch
