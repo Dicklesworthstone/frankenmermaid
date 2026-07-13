@@ -747,7 +747,13 @@ fn normalize_identifier(raw: &str) -> String {
         }
     }
 
-    let mut result = out.trim_end_matches('_').to_string();
+    // Drop trailing `_` in place instead of `out.trim_end_matches('_').to_string()`, which
+    // allocates a second String and copies the whole id. `_` is single-byte ASCII, so the trimmed
+    // byte length is a valid truncation boundary — byte-identical, and a no-op when there is no
+    // trailing `_` (the common case for well-formed DOT ids), reusing `out`'s allocation.
+    let trimmed_len = out.trim_end_matches('_').len();
+    out.truncate(trimmed_len);
+    let mut result = out;
     if result.is_empty() {
         let mut fallback = String::with_capacity(cleaned.len());
         for grapheme in cleaned.graphemes(true) {
