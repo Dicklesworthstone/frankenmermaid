@@ -15223,3 +15223,32 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   the `.len()` semantics differ for sparse ranks). Layout is otherwise at a mature floor under mimalloc.
 
   Agent: (Opus 4.8, this session)
+
+### ✅LANDED (f246914): drop node-id sort in GraphMetrics SCC pass — cyclic-graph pipeline −2.3% (2026-07-13)
+
+- **Full-pipeline profile under mimalloc (symbols; flowchart-120, fresh parse each iter) — the FIRST correct
+  post-render-wins phase breakdown:** **Layout 53.6%** (DOMINANT — render streaming dropped render to ~20%,
+  so layout is now the biggest phase & it's UNCONTESTED), **Parse 24.6%** (BlackThrush's lane), **Render 19.8%**.
+  This flips the old "render 52/parse 32/layout 16" split — render optimization SUCCEEDED, now layout leads.
+- **The lever:** `GraphMetrics::from_ir` (5.02%, rebuilt cache-cold every layout for Auto algorithm-selection)
+  ran `stable_node_priorities` (1.83%, O(N log N) node-id String sort) ONLY to feed `detect_cycle_components`,
+  then read ONLY `scc_count`+`max_scc_size` — which are INVARIANT to SCC visit order (the SCC decomposition is
+  unique; the priority only sets component LIST order, which metrics never read). Pass identity priority
+  `(0..N)` → no sort, byte-identical scc_count/max_scc_size ⇒ byte-identical algorithm selection ⇒ byte-id layout.
+  Only fires for graphs WITH a back edge (acyclic DAGs skip the SCC block → no change).
+- **Byte-identical:** golden_layout + cycle_scc_heavy/flowchart_cycle/cycle_braid/cycle_feedback/cycle_ladder/
+  er_basic/state_composite goldens + 439 lib tests. **Measured mimalloc, cyclic flowchart-120: 3.849M→3.761M
+  instr/render = −2.3% full pipeline.**
+- **⚠️⚠️MEASUREMENT GOTCHA (cost me a null result first):** `GraphMetrics::from_ir` has a `try_graph_metrics_
+  cache_hit(ir)` cache. A harness that parses ONCE and re-lays out the SAME `ir` → cache HITS after iter 1 → the
+  change shows ZERO (both arms ~56.40M). Production parses each diagram fresh (cache COLD). **Parse FRESH each
+  iteration** in the harness so cache-cold paths (GraphMetrics, and any per-ir memoization) actually execute.
+- **⭐LEVER (reusable):** a full graph/SCC/sort pass computed to extract only ORDER-INVARIANT scalars (count,
+  max, sum) doesn't need the ordering key — pass an identity/cheap key. Grep for `stable_node_priorities`/
+  sort-by-id feeding a computation whose caller reads only counts/sizes.
+- **⭐NEXT (layout, the 53.6% is uncontested & now the top phase):** sugiyama BK 44.72% self is the core
+  (hard); `nodes_by_rank` 3.25% (BTreeMap→Vec<Vec> owner-gated), `remove_node` 2.26% (BTreeSet→Vec<bool>, risky
+  FAS), `detect_cycle_components` still computed 2× (GraphMetrics + cycle_removal — could share, but different
+  edge orientations; investigate). Layout is the frontier now, not render.
+
+  Agent: (Opus 4.8, this session)
