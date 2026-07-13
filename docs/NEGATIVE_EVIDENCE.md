@@ -1768,6 +1768,26 @@
   not applied to the shared core. The seq memcmp cost stands as the seq frontier; reducing it needs a vectorization-safe
   restructure (first-byte-bucketed operator table), not a scalar guard.
 
+### REJECT: sequence-only two-byte operator buckets — point estimate −5.1%, uncertainty spans +18.0% (2026-07-12)
+- **Negative-ledger redirect tested.** The entry above ruled out a scalar guard inside the shared operator loop and
+  explicitly redirected the remaining sequence `memcmp` cost to a sequence-only bucketed table. The candidate grouped
+  all 26 `SEQUENCE_OPERATORS` into 12 contiguous two-byte buckets and selected the bucket once per eligible position;
+  the common `->>` family then checked 2 operators instead of 26. FLOW/ER/CLASS/PACKET kept the original flat scanner.
+- **Semantics construction:** every sequence operator is ASCII and at least two bytes; operators in different buckets
+  cannot both match one tail, and relative order stayed unchanged inside each bucket. The candidate retained the existing
+  leftmost-position + longest-token rule and included an exhaustive assertion over all 26 operator/arrow pairs.
+- **Strict remote-only A/B:** exact permanent row `parse/sequence/seq_12x200`, 30 samples, 2 s warm-up + 5 s measure,
+  both arms on pin-honored `vmi1156319`; parser benchmark and `Cargo.lock` hashes stayed identical. Control at `ccaabdb`
+  was **[213.55, 220.41, 229.29] µs**; candidate was **[199.08, 209.08, 220.12] µs** (midpoint ratio **0.9486**), but
+  Criterion's relative interval was **[−6.3099%, +17.982%]**, estimate **+3.7890%**, `p=0.59`: no detected change.
+- **Verdict: REJECT.** The apparent absolute −5.1% point shift does not clear the repo's keep gate because the paired
+  interval includes zero and a large regression. Reverted the parser source exactly to its control SHA-256
+  `903d89f463bc5342de089793acd3c67ea5c0d386b6f3ed2b9a9110d383bc38f2`; shipped bytes remain unchanged. Do not retry
+  this two-byte-bucket + generic selector shape from wall-time point estimates alone.
+- **Invalid attempts excluded:** one remote candidate invocation compiled but Criterion rejected mutually exclusive
+  `--baseline`/`--save-baseline` flags before sampling; one retry hit RCH dependency-preflight `RCH-E412` and strict
+  remote-only mode refused local fallback. Neither run contributed timing evidence.
+
 ### REJECT: fuse the fast-node reject + `[`-locate scans into one table-driven pass — +0.74% parse REGRESSION (2026-07-12)
 - **Hypothesis (looked obvious):** `parse_fast_simple_flowchart_node_borrowed` (10.17% self on the
   flowchart/800 parse profile) does two byte scans per statement — a reject `.bytes().any(matches!(byte,
