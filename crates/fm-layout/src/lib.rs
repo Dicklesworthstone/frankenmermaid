@@ -4738,7 +4738,11 @@ fn layout_diagram_sugiyama_traced_with_config(
         .clone()
         .unwrap_or_else(fm_core::FontMetrics::default_metrics);
     let node_sizes = compute_node_sizes(ir, &metrics);
-    let cycle_result = cycle_removal(ir, config.cycle_strategy);
+    // Node id-order priorities are a pure function of `ir` (an O(N log N) String-memcmp sort of node ids).
+    // `cycle_removal`, `rank_assignment`, and `build_cycle_cluster_map` each recomputed it — hoist to ONE
+    // computation and thread it through. Byte-identical (same Vec); removes 1-2 redundant sorts per layout.
+    let node_priority = stable_node_priorities(ir);
+    let cycle_result = cycle_removal(ir, config.cycle_strategy, &node_priority);
     push_snapshot(
         &mut trace,
         "cycle_removal",
@@ -4749,12 +4753,12 @@ fn layout_diagram_sugiyama_traced_with_config(
     );
 
     let collapse_map = if config.collapse_cycle_clusters {
-        Some(build_cycle_cluster_map(ir, &cycle_result))
+        Some(build_cycle_cluster_map(ir, &cycle_result, &node_priority))
     } else {
         None
     };
 
-    let mut ranks = rank_assignment(ir, &cycle_result);
+    let mut ranks = rank_assignment(ir, &cycle_result, &node_priority);
     apply_ir_constraints(ir, &mut ranks);
     push_snapshot(
         &mut trace,
@@ -9062,7 +9066,11 @@ fn default_cycle_strategy() -> CycleStrategy {
         .unwrap_or_default()
 }
 
-fn cycle_removal(ir: &MermaidDiagramIr, cycle_strategy: CycleStrategy) -> CycleRemovalResult {
+fn cycle_removal(
+    ir: &MermaidDiagramIr,
+    cycle_strategy: CycleStrategy,
+    node_priority: &[usize],
+) -> CycleRemovalResult {
     let node_count = ir.nodes.len();
     if node_count == 0 {
         return CycleRemovalResult {
@@ -9081,8 +9089,7 @@ fn cycle_removal(ir: &MermaidDiagramIr, cycle_strategy: CycleStrategy) -> CycleR
         };
     }
 
-    let node_priority = stable_node_priorities(ir);
-    let dfs_back_edges = cycle_removal_dfs_back(node_count, &edges, &node_priority);
+    let dfs_back_edges = cycle_removal_dfs_back(node_count, &edges, node_priority);
     // A directed graph is acyclic iff a DFS finds no back edge. When the graph is
     // acyclic there are no cyclic components and the cycle summary is empty, so the
     // (otherwise unconditional) strongly-connected-components pass is pure waste — the
@@ -9092,14 +9099,14 @@ fn cycle_removal(ir: &MermaidDiagramIr, cycle_strategy: CycleStrategy) -> CycleR
     let cycle_detection = if dfs_back_edges.is_empty() {
         CycleDetection::default()
     } else {
-        detect_cycle_components(node_count, &edges, &node_priority)
+        detect_cycle_components(node_count, &edges, node_priority)
     };
 
     let reversed_edge_indexes = match cycle_strategy {
-        CycleStrategy::Greedy => cycle_removal_greedy(node_count, &edges, &node_priority),
+        CycleStrategy::Greedy => cycle_removal_greedy(node_count, &edges, node_priority),
         CycleStrategy::DfsBack => dfs_back_edges.clone(),
         CycleStrategy::MfasApprox => {
-            cycle_removal_mfas_approx(node_count, &edges, &node_priority, &cycle_detection)
+            cycle_removal_mfas_approx(node_count, &edges, node_priority, &cycle_detection)
         }
         CycleStrategy::CycleAware => {
             // For CycleAware, we still want to break cycles for the ranking phase
@@ -9568,9 +9575,12 @@ fn apply_ir_constraints(ir: &MermaidDiagramIr, ranks: &mut BTreeMap<usize, usize
     }
 }
 
-fn rank_assignment(ir: &MermaidDiagramIr, cycles: &CycleRemovalResult) -> BTreeMap<usize, usize> {
+fn rank_assignment(
+    ir: &MermaidDiagramIr,
+    cycles: &CycleRemovalResult,
+    node_priority: &[usize],
+) -> BTreeMap<usize, usize> {
     let node_count = ir.nodes.len();
-    let node_priority = stable_node_priorities(ir);
     let edges = oriented_edges(ir, &cycles.reversed_edge_indexes);
 
     let mut ranks = vec![0_usize; node_count];
@@ -9586,7 +9596,7 @@ fn rank_assignment(ir: &MermaidDiagramIr, cycles: &CycleRemovalResult) -> BTreeM
     }
 
     for targets in &mut outgoing {
-        targets.sort_by(|left, right| compare_priority(*left, *right, &node_priority));
+        targets.sort_by(|left, right| compare_priority(*left, *right, node_priority));
     }
 
     let mut heap: BinaryHeap<Reverse<(usize, usize)>> = BinaryHeap::new();
@@ -12350,8 +12360,9 @@ pub mod bench_internals {
     /// feeds `crossing_minimization` the same input production does.
     #[must_use]
     pub fn prepare_ranks(ir: &MermaidDiagramIr, config: &LayoutConfig) -> BTreeMap<usize, usize> {
-        let cycle_result = super::cycle_removal(ir, config.cycle_strategy);
-        let mut ranks = super::rank_assignment(ir, &cycle_result);
+        let node_priority = super::stable_node_priorities(ir);
+        let cycle_result = super::cycle_removal(ir, config.cycle_strategy, &node_priority);
+        let mut ranks = super::rank_assignment(ir, &cycle_result, &node_priority);
         super::apply_ir_constraints(ir, &mut ranks);
         ranks
     }
@@ -13957,11 +13968,11 @@ fn polyline_length(points: &[LayoutPoint]) -> f32 {
 fn build_cycle_cluster_map(
     ir: &MermaidDiagramIr,
     cycle_result: &CycleRemovalResult,
+    node_priority: &[usize],
 ) -> CycleClusterMap {
     let node_count = ir.nodes.len();
     let edges = resolved_edges(ir);
-    let node_priority = stable_node_priorities(ir);
-    let detection = detect_cycle_components(node_count, &edges, &node_priority);
+    let detection = detect_cycle_components(node_count, &edges, node_priority);
 
     let mut node_representative = (0..node_count).collect::<Vec<_>>();
     let mut cluster_heads = BTreeSet::new();
@@ -13979,12 +13990,12 @@ fn build_cycle_cluster_map(
         // Choose the lowest-priority node as the representative (cluster head).
         let head = *component_nodes
             .iter()
-            .min_by(|a, b| compare_priority(**a, **b, &node_priority))
+            .min_by(|a, b| compare_priority(**a, **b, node_priority))
             .unwrap_or(&component_nodes[0]);
 
         cluster_heads.insert(head);
         let mut members = component_nodes.clone();
-        members.sort_by(|a, b| compare_priority(*a, *b, &node_priority));
+        members.sort_by(|a, b| compare_priority(*a, *b, node_priority));
         for &member in &members {
             node_representative[member] = head;
         }
