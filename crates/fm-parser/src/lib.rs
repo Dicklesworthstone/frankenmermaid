@@ -83,7 +83,13 @@ pub fn normalize_identifier(raw: &str) -> String {
         }
     }
 
-    let mut result = out.trim_end_matches('_').to_string();
+    // `out` is a fresh owned String; the old `out.trim_end_matches('_').to_string()` reallocated a
+    // second buffer on EVERY identifier even when nothing is trimmed (no trailing `_` — the common
+    // case, e.g. "Event_0"). `trim_end_matches` only removes from the tail, so the kept text is the
+    // `out[..k]` prefix — truncate in place and move `out` instead of copying. Byte-identical.
+    let trimmed_len = out.trim_end_matches('_').len();
+    out.truncate(trimmed_len);
+    let mut result = out;
     if result.is_empty() {
         let mut fallback = String::with_capacity(cleaned.len());
         for grapheme in cleaned.graphemes(true) {
