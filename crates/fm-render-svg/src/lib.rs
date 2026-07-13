@@ -3011,13 +3011,13 @@ fn render_layout_to_svg(
     // slow-path fallback below. Keep this in sync with those insertion guards.
     // The only children the slow path inserts BETWEEN the edge and node fragments are the ER / class
     // cardinality labels and bundle-count labels; the only ones AFTER are sequence mirror headers and the
-    // C4 legend. Bundle labels / mirror / legend still force the slow path, but ER and class cardinality
-    // are now emitted INSIDE the streaming body (between edges and nodes, byte-identical order), so they no
-    // longer disqualify a diagram. This pulls ER and class-relation diagrams (previously always slow-path)
-    // onto the streaming path — killing the second copy of `edge_svg`+`cardinality_svg`+`node_svg`.
-    let no_between_or_after_children = layout.extensions.sequence_mirror_headers.is_empty()
-        && !legend_enabled
-        && layout.edges.iter().all(|edge| edge.bundle_count <= 1);
+    // C4 legend. Bundle labels / legend still force the slow path, but ER and class cardinality (between
+    // edges and nodes) AND sequence mirror headers (after nodes) are now emitted INSIDE the streaming body
+    // in byte-identical order, so they no longer disqualify a diagram. This pulls ER, class-relation, and
+    // sequence diagrams (previously always slow-path) onto the streaming path — killing the second copy of
+    // `edge_svg`+`cardinality_svg`+`node_svg`+mirror-header fragments.
+    let no_between_or_after_children =
+        !legend_enabled && layout.edges.iter().all(|edge| edge.bundle_count <= 1);
     #[cfg(not(target_arch = "wasm32"))]
     let stream_fast_path =
         no_between_or_after_children && layout.edges.len() < 4096 && layout.nodes.len() < 2048;
@@ -3061,6 +3061,33 @@ fn render_layout_to_svg(
                 emit_classdef_classes,
                 &centrality_map,
             );
+            // Sequence mirror headers (participant boxes repeated at the bottom) sit AFTER the nodes in the
+            // slow path's child order; stream each straight into `out` in the same position instead of
+            // building it as a `doc.child` the final `to_string` copies a second time. Byte-identical: the
+            // same `render_node(..).id(..).class(..)` Element bytes, written directly. No-op for non-sequence
+            // diagrams (`sequence_mirror_headers` is empty).
+            for node_box in &layout.extensions.sequence_mirror_headers {
+                render_node(
+                    node_box,
+                    ir,
+                    offset_x,
+                    offset_y,
+                    config,
+                    detail,
+                    &theme.colors,
+                    emit_classdef_classes,
+                    &centrality_map,
+                    // Post-processed (.id + .class) — must NOT take the opaque fast path.
+                    false,
+                )
+                .id(&mermaid_node_element_id_with_variant(
+                    &node_box.node_id,
+                    node_box.node_index,
+                    Some("mirror-header"),
+                ))
+                .class("fm-sequence-mirror-header")
+                .write_to_string(out);
+            }
         });
     }
 
