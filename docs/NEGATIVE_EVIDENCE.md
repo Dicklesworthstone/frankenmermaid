@@ -1931,6 +1931,33 @@
   `2404297afac01b2bb324312ad5dfd828a95a123ba48d43cae7c2226e7ffd77f2`; source is restored exactly to control SHA-256
   `560fe6bde41935e91d255f920bced3c8bf79c830554313f90ba438075e8ba514`, so no production code ships.
 
+### REJECT: move terminal 1×1 edge components into `FlowAst` — paired inconclusive (2026-07-13)
+- **Negative-ledger-first target:** `parse_edge_statement_asts` cloned both endpoint `NodeToken`s and the optional edge
+  label into every `FlowAst::Edge`, then dropped the source vectors and label. No exact move attempt existed; the
+  earlier no-ampersand endpoint fast path and owned FastNode-label handoff were positive precedents, while the rejected
+  borrowed `push_edge` probe above operates later and removes only one different allocation.
+- **Candidate:** on only the terminal iteration (`next_operator.is_none()`) with exactly one source and one target, pop
+  and move both nodes plus `edge_label` into the AST. Chained edges retain their target vector for the next source;
+  parallel edges retain the existing Cartesian clone loop. This removes three transient String clone/allocation/free
+  pairs per measured transition.
+- **Behavior proof:** the terminal AST remains at the same final index with the same `current_arrow`, endpoint values,
+  label, span, and lowering path. Chain order/source reuse, parallel multiplicity and Cartesian order, dangling
+  placeholders, node/label interning order, diagnostics, floating point, and RNG are unchanged. Existing parser tests
+  cover simple and chained edges, parallel source/target/both-side expansion, placeholder recovery, and state
+  guard/action labels.
+- **Strict remote-only same-worker A/B:** exact `parse/state_labels/state_labels_300`, 50 samples, 2 s warm-up + 8 s
+  measurement, both arms on pin-honored `vmi1293453`. Benchmark SHA-256
+  `cee31491ee3b5bdf1ed7dbaf39663c335b5843950eb29eebb81880603a3108bf` and `Cargo.lock` SHA-256
+  `b7c9fab36b1085a6f3f61fedb2464bae6b27059a01d55055a8129e5003833309` were unchanged. Control at `cdd30a7` was
+  **[276.81, 289.32, 301.25] µs**; candidate was **[274.13, 279.79, 285.71] µs**, midpoint ratio **0.9671**
+  (**−3.29%**). Criterion's paired estimate was only **−0.7642%** (95% CI **−4.2850%..+2.5963%**, `p=0.68`) and
+  reported no change.
+- **Verdict: REJECT.** The midpoint barely crosses 3%, but the paired interval includes regression and does not clear
+  the calibrated null floor. Do not retry this exact terminal move from allocation counts alone without a lower-noise
+  substrate. Candidate parser SHA-256 was `5d2c7720eedc7daee16a518dcb57e4cf6f33cad39024c4906cacd6e39f2e38e4`;
+  source is restored exactly to control SHA-256
+  `702bf84f686df487ee465baa3c73ae426fba71125dd9130a0bb56fcaa403a33c`, so no production code ships.
+
 ### REJECT: fuse the fast-node reject + `[`-locate scans into one table-driven pass — +0.74% parse REGRESSION (2026-07-12)
 - **Hypothesis (looked obvious):** `parse_fast_simple_flowchart_node_borrowed` (10.17% self on the
   flowchart/800 parse profile) does two byte scans per statement — a reject `.bytes().any(matches!(byte,
