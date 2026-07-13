@@ -488,7 +488,6 @@ fn parse_dot_node_fragment(raw: &str) -> Option<DotNode> {
 }
 
 fn extract_dot_attribute_raw(attributes: &str, key: &str) -> Option<String> {
-    let lower_key = key.to_ascii_lowercase();
     let mut chars = attributes.chars().peekable();
 
     while let Some(ch) = chars.next() {
@@ -531,6 +530,12 @@ fn extract_dot_attribute_raw(attributes: &str, key: &str) -> Option<String> {
         if has_eq && let Some(&c) = chars.peek() {
             if c == '"' {
                 chars.next();
+                // Seed the opening quote and append the closing quote in place instead of
+                // wrapping via `format!("\"{current_val}\"")`, which allocates a second buffer
+                // and re-copies the whole value. Byte-identical: the closing `"` is pushed
+                // unconditionally after the loop (matching the old `format!` wrap even when the
+                // quoted value is unterminated).
+                current_val.push('"');
                 let mut escaped = false;
                 for vc in chars.by_ref() {
                     if escaped {
@@ -545,7 +550,7 @@ fn extract_dot_attribute_raw(attributes: &str, key: &str) -> Option<String> {
                         current_val.push(vc);
                     }
                 }
-                current_val = format!("\"{current_val}\"");
+                current_val.push('"');
             } else {
                 let mut html_depth = 0;
                 while let Some(&vc) = chars.peek() {
@@ -564,7 +569,7 @@ fn extract_dot_attribute_raw(attributes: &str, key: &str) -> Option<String> {
             }
         }
 
-        if current_key.eq_ignore_ascii_case(&lower_key) {
+        if current_key.eq_ignore_ascii_case(key) {
             return Some(current_val);
         }
     }
