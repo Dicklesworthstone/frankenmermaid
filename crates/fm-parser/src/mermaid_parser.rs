@@ -1075,7 +1075,11 @@ impl<'a> Iterator for ByteLines<'a> {
         if self.start > bytes.len() {
             return None;
         }
-        match bytes[self.start..].iter().position(|&b| b == b'\n') {
+        // SIMD `memchr` for the `\n` scan instead of the scalar `.iter().position(|&b| b == b'\n')`
+        // (which does not auto-vectorize — a symbolized `requirement/parse` profile showed
+        // `ByteLines::next` at ~10% self). Single-byte `memchr` has negligible per-call setup, so it
+        // wins even on short lines. Byte-identical: both return the first `\n` offset within the slice.
+        match memchr::memchr(b'\n', &bytes[self.start..]) {
             Some(rel) => {
                 let nl = self.start + rel;
                 let end = if nl > self.start && bytes[nl - 1] == b'\r' {
