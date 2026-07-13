@@ -1907,6 +1907,30 @@
   drift outside the candidate hunks. `git diff --check` is clean. UBS found no candidate-local defect; its nonzero exit
   is the unchanged file-wide test/assert/indexing inventory.
 
+### REJECT (valid retry): borrow cleaned edge-label probes into the interner — paired +3.05% (2026-07-13)
+- **Negative-ledger-first resolution:** the earlier `push_edge` attempt above was correctly reclassified VOID because
+  `parse/state/state_100` never supplied a pipe label. Commit `0a7700d` added target-valid `parse/state_labels/*` rows
+  and explicitly reopened this exact ownership lever, so this retry used `_300`, where all 300 transitions reach the
+  candidate.
+- **Candidate:** factor the exact sequential `trim -> trim_matches('"') -> trim_matches('\'') -> trim_matches('`') ->
+  trim` chain into a borrowed helper, retain the owned wrapper for every other caller, and route `push_edge`'s cleaned
+  `&str` directly to `intern_plain_label`. This deletes one probe `String` allocation/copy/free and the empty-segment
+  `ParsedLabel` on every labelled edge. The interning key `(text, [])`, collision verification, first-insertion label
+  ID/order/span, dedup behavior, quote semantics, Unicode whitespace behavior, diagnostics, floating point, and RNG are
+  unchanged.
+- **Strict remote-only same-worker A/B:** exact `parse/state_labels/state_labels_300`, 50 samples, 2 s warm-up + 8 s
+  measurement, both arms on pin-honored `vmi1293453`. Benchmark SHA-256
+  `cee31491ee3b5bdf1ed7dbaf39663c335b5843950eb29eebb81880603a3108bf` and `Cargo.lock` SHA-256
+  `b7c9fab36b1085a6f3f61fedb2464bae6b27059a01d55055a8129e5003833309` were unchanged. Control at `0a7700d` was
+  **[300.53, 313.28, 330.90] µs**; candidate was **[297.16, 308.43, 322.10] µs**, midpoint ratio **0.9845**
+  (**−1.55%**). Criterion's paired estimate was **+3.0485%** (95% CI **−1.6043%..+8.3274%**, `p=0.24`) and reported
+  no change.
+- **Verdict: REJECT.** The midpoint misses the 3% keep floor and the paired interval cannot exclude an 8.3%
+  regression. This valid retry closes the earlier VOID: do not retry the exact borrowed `push_edge` handoff from
+  allocation counts alone. Candidate `ir_builder.rs` SHA-256 was
+  `2404297afac01b2bb324312ad5dfd828a95a123ba48d43cae7c2226e7ffd77f2`; source is restored exactly to control SHA-256
+  `560fe6bde41935e91d255f920bced3c8bf79c830554313f90ba438075e8ba514`, so no production code ships.
+
 ### REJECT: fuse the fast-node reject + `[`-locate scans into one table-driven pass — +0.74% parse REGRESSION (2026-07-12)
 - **Hypothesis (looked obvious):** `parse_fast_simple_flowchart_node_borrowed` (10.17% self on the
   flowchart/800 parse profile) does two byte scans per statement — a reject `.bytes().any(matches!(byte,
