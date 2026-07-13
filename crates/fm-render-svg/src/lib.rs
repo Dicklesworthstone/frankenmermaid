@@ -5502,6 +5502,66 @@ fn write_class_node_fragment_into(
     out.push_str(", rectangle</title></g>");
 }
 
+/// Stream a complete ER entity node (`<g>` + gradient `<rect>` + entity body + `<title>`) directly into
+/// `out`, **byte-identical** to what `render_node` builds via `Element`s — the ER analogue of
+/// [`write_class_node_fragment_into`]. The `<g>`/rect/title bytes replicate that helper's (proven)
+/// sequence for a `Rect` shape (a Rect ER entity's shape and `describe_node` form are both identical to a
+/// class node's); the body is [`write_er_entity_into`] (the same code `render_node`'s ER fast path runs).
+/// Used only via `render_node_into`'s ER gate, which guarantees none of `render_node`'s conditional
+/// classes/children/post-processing apply. Skips the group + rect `Element` builds, their `Attributes`
+/// Vecs, the entity-body fragment's second copy, and the whole-group serialize+copy.
+#[allow(clippy::too_many_arguments)]
+fn write_er_node_fragment_into(
+    out: &mut String,
+    node: &fm_core::IrNode,
+    node_id: &str,
+    node_index: usize,
+    raw_label: &str,
+    label_text: &str,
+    cx: f32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    rx: f32,
+    font_size: f32,
+    config: &SvgRenderConfig,
+    colors: &ThemeColors,
+    user_classes: &str,
+) {
+    use crate::attributes::{write_escaped_attr, write_escaped_text};
+    // <g id=".." class="fm-node fm-node-accent-N fm-node-shape-rect[ fm-node-user-…]" data-id=".." …>
+    out.push_str("<g id=\"");
+    fm_core::write_mermaid_node_element_id_into(out, node_id, node_index);
+    out.push_str("\" class=\"fm-node fm-node-accent-");
+    let _ = crate::attributes::write_uint_into(out, stable_accent_index(node_id) as u64);
+    out.push(' ');
+    out.push_str(node_shape_css_class(fm_core::NodeShape::Rect));
+    out.push_str(user_classes);
+    out.push_str("\" data-id=\"");
+    let _ = write_escaped_attr(out, node_id);
+    out.push_str("\" role=\"graphics-symbol\" aria-label=\"");
+    let _ = write_escaped_attr(out, raw_label);
+    out.push_str("\" tabindex=\"0\">");
+    // <rect x y width height rx fill="url(#fm-node-gradient)"/> — same attr order as the class fragment.
+    out.push_str("<rect x=\"");
+    let _ = crate::attributes::write_number_into(out, x);
+    out.push_str("\" y=\"");
+    let _ = crate::attributes::write_number_into(out, y);
+    out.push_str("\" width=\"");
+    let _ = crate::attributes::write_number_into(out, w);
+    out.push_str("\" height=\"");
+    let _ = crate::attributes::write_number_into(out, h);
+    out.push_str("\" rx=\"");
+    let _ = crate::attributes::write_number_into(out, rx);
+    out.push_str("\" fill=\"url(#fm-node-gradient)\"/>");
+    write_er_entity_into(out, node, label_text, cx, x, y, w, font_size, config, colors);
+    // <title>Node: {raw_label}, rectangle</title></g> — describe_node's Rect form, written piecewise.
+    out.push_str("<title>Node: ");
+    let _ = write_escaped_text(out, raw_label);
+    out.push_str(", rectangle</title></g>");
+}
+
 /// The inline `style="fill: …"` color the slow path (`render_node`) applies to a node's shape rect for
 /// journey-score / kanban-priority classes (`journey_score_fill`/`kanban_priority_fill`). The common
 /// streaming fragment must emit the identical `style` or it silently drops the score/priority color under
@@ -6304,6 +6364,61 @@ fn render_node_into(
             node_box.node_index,
             raw_label_text,
             ir,
+            x,
+            y,
+            w,
+            h,
+            config.rounded_corners * 0.55,
+            node_font_size,
+            config,
+            colors,
+            &user_classes,
+        );
+        return;
+    }
+
+    // Whole-ER-entity streaming fast path: a themed ER entity (a `Rect` node with a non-empty attribute
+    // list) whose config carries no conditional render. `render_node`'s slow path would build a group
+    // `Element` + rect `Element` + the entity-body fragment child + a title `Element`, serialize the whole
+    // group into a temp, then COPY it into `out`. Stream the whole `<g>…</g>` in place instead — the exact
+    // double-copy the class node fast path above kills, now for ER. Gate mirrors the class one (the ER
+    // branch sits after class/requirement in `render_node`'s content chain, so `class_meta`/`c4_meta`/
+    // `requirement_meta` must be absent; `show_node_labels` gates the body). Byte-identical (pinned by
+    // `er_entity_node_streaming_matches_slow_render`).
+    if let Some(node) = ir_node
+        && matches!(shape, NodeShape::Rect)
+        && !node.members.is_empty()
+        && ir.diagram_type == fm_core::DiagramType::Er
+        && detail.show_node_labels
+        && config.embed_theme_css
+        && config.node_gradients
+        && !emit_classdef_classes
+        && !config.animations_enabled
+        && !config.include_source_spans
+        && config.a11y.aria_labels
+        && config.a11y.keyboard_nav
+        && config.a11y.text_alternatives
+        && shape_style.is_none()
+        && text_style.is_none()
+        && node_icon.is_none()
+        && !placeholder_space_node
+        && lookup_centrality_tier(centrality_map, node_box.node_index).is_none()
+        && node.class_meta.is_none()
+        && node.c4_meta.is_none()
+        && node.requirement_meta.is_none()
+        && node.menu_links.is_empty()
+        && node.href().is_none()
+        && node.callback().is_none()
+        && let Some(user_classes) = simple_class_node_user_suffix(node)
+    {
+        write_er_node_fragment_into(
+            out,
+            node,
+            node_id,
+            node_box.node_index,
+            raw_label_text,
+            label_text.as_ref(),
+            cx,
             x,
             y,
             w,
@@ -10476,6 +10591,99 @@ mod tests {
         )
         .write_to_string(&mut slow);
         assert_eq!(streamed, slow);
+    }
+
+    /// The whole-ER-entity streaming fast path (`write_er_node_fragment_into`, via `render_node_into`'s
+    /// ER gate) must be byte-identical to the `Element` slow path (`render_node`). Uses the default config
+    /// (`node_gradients` + embedded CSS on) so the gradient `<rect>` fast path is exercised — the `er`
+    /// golden runs with gradients OFF. Mixed attribute keys (Pk/None/Uk → both font-weights + the `PK `/
+    /// `UK ` prefixes) and an XML-special attribute name exercise the body writer's per-piece escaping.
+    #[test]
+    fn er_entity_node_streaming_matches_slow_render() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Er);
+        ir.labels.push(IrLabel {
+            text: "USER".to_string(),
+            span: Span::default(),
+        });
+        ir.nodes.push(IrNode {
+            id: "USER".to_string(),
+            label: Some(IrLabelId(0)),
+            shape: NodeShape::Rect,
+            members: vec![
+                fm_core::IrEntityAttribute {
+                    data_type: "int".to_string(),
+                    name: "id".to_string(),
+                    key: fm_core::IrAttributeKey::Pk,
+                    comment: None,
+                },
+                fm_core::IrEntityAttribute {
+                    data_type: "string".to_string(),
+                    name: "na<me>".to_string(),
+                    key: fm_core::IrAttributeKey::None,
+                    comment: None,
+                },
+                fm_core::IrEntityAttribute {
+                    data_type: "string".to_string(),
+                    name: "email".to_string(),
+                    key: fm_core::IrAttributeKey::Uk,
+                    comment: None,
+                },
+            ],
+            ..Default::default()
+        });
+        let node_box = LayoutNodeBox {
+            node_index: 0,
+            node_id: "USER".to_string(),
+            rank: 0,
+            order: 0,
+            span: Span::default(),
+            bounds: fm_layout::LayoutRect {
+                x: 12.0,
+                y: 24.0,
+                width: 150.0,
+                height: 110.0,
+            },
+        };
+        let config = SvgRenderConfig::default();
+        let colors = ThemeColors::default();
+        let detail = resolve_detail_profile(800.0, 600.0, &config);
+        let centrality = HashMap::new();
+
+        let mut streamed = String::new();
+        render_node_into(
+            &mut streamed,
+            &node_box,
+            &ir,
+            0.0,
+            0.0,
+            &config,
+            detail,
+            &colors,
+            false,
+            &centrality,
+        );
+
+        let mut slow = String::new();
+        render_node(
+            &node_box,
+            &ir,
+            0.0,
+            0.0,
+            &config,
+            detail,
+            &colors,
+            false,
+            &centrality,
+            false,
+        )
+        .write_to_string(&mut slow);
+
+        assert_eq!(streamed, slow);
+        // Confirm the whole-node fast path actually fired (gradient rect + streamed body).
+        assert!(streamed.contains("url(#fm-node-gradient)"));
+        assert!(streamed.contains("fm-er-entity-name"));
+        // Text content escapes `<` (and `&`) but leaves a standalone `>` literal (only `]]>` escapes it).
+        assert!(streamed.contains("na&lt;me>"));
     }
 
     /// The streamed common-edge fragment must be byte-identical to the `Element` the slow path
