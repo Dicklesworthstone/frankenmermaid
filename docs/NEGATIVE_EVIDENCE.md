@@ -15018,3 +15018,36 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   BASELINE may be buggy (under-rendering) and your change may be the fix.
 
   Agent: (Opus 4.8, this session)
+
+### ✅✅LANDED (ada5608): ER whole-node wrapper streamed — the ER render frontier is now closed (2026-07-13)
+
+- **LANDED ada5608:** the ER entity whole-node wrapper is streamed. `render_node_into` now has an ER fast
+  path (`write_er_node_fragment_into` + a gate mirroring the class one) that streams `<g>` + gradient
+  `<rect>` + `write_er_entity_into` body + `<title>` directly into `out`, instead of falling through to
+  `render_node(..).write_to_string(out)` (which built group/rect/title `Element`s, serialized the whole
+  group to a temp, then COPIED it — the wrapper double-copy the class node killed via
+  `write_class_node_fragment_into`). The `<g>`/rect/title bytes reuse the class fragment's proven Rect
+  sequence (an ER entity is a Rect node; `describe_node`'s form is identical); user classes via
+  `simple_class_node_user_suffix`.
+- **Byte-identical:** `er_entity_node_streaming_matches_slow_render` (gradients-ON default config, mixed
+  attribute keys Pk/None/Uk → both font-weights, XML-special name) asserts `render_node_into` ==
+  `render_node` Element slow path. lib 253/253 + er_basic golden green.
+- **Measured (same-machine fixed-iteration `perf stat`, load-independent — NOT rch wall-time),** gen_er(40)
+  full render, byte-identical **85101-byte** output both arms: baseline (slow Element path, 93754b4)
+  **1.819M instr/render → 1.347M → −26%**. Big because it eliminates 40× (group Element + rect Element +
+  title Element + Attributes Vecs + whole-group serialize + memcpy) per render. ⚠️Measured against the
+  POST-fix baseline (93754b4), not the pre-fix buggy one — the whole-node fast path's output == the fixed
+  slow path's output (both 85101 B), so this is a pure streaming win layered on the correctness fix.
+- **ER render frontier now CLOSED:** labeled edges streamed (aa31ba6), ER cardinality labels streamed
+  (`write_er_cardinality_labels_into`), ER entity body streamed (455419b), ER whole-node wrapper streamed
+  (ada5608), defs streamed (ca0cc2e), a11y desc direct-write (166395b+). Every ER-specific render element
+  now streams; no ER Element-tree build remains on the common gradients-on path.
+- **⭐NEXT node-streaming frontier (non-ER):** `render_node_into`'s fast paths now cover requirement/class/
+  ER/subroutine/common (Rect/Circle/Rounded/Stadium/Diamond/Hexagon/Cylinder/Trapezoid/InvTrapezoid/
+  Parallelogram/InvParallelogram/Asymmetric). Still un-streamed → slow `render_node` Element path + the
+  whole-group serialize+copy: **C4 nodes** (`c4_meta`, `render_c4_node_content` builds an Element subtree)
+  and the exotic shapes NOT in the common match (Note/FilledCircle/HorizontalBar/Triangle/Pentagon/Star/
+  Cloud/Tag/CrossedCircle/DoubleCircle). C4 is the higher-value target (multi-element content like ER/class);
+  mirror the same whole-node fast-path pattern. Byte-pin with a c4 golden + a fast-vs-slow test.
+
+  Agent: (Opus 4.8, this session)
