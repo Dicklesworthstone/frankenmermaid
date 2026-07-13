@@ -11598,9 +11598,18 @@ fn subgraph_secondary_key(
 }
 
 fn nodes_by_rank(node_count: usize, ranks: &BTreeMap<usize, usize>) -> BTreeMap<usize, Vec<usize>> {
+    // Materialise the per-node rank into a dense Vec via ONE ordered walk of `ranks`, instead of a random
+    // `ranks.get(&node_index)` BTreeMap tree-descent per node (O(N) sequential vs O(N log N) cache-missy
+    // probes). Byte-identical: unranked nodes keep rank 0 — the Vec's init value equals the old
+    // `.unwrap_or(0)` default — and the per-rank push order (node_index 0..N) is unchanged.
+    let mut rank_of = vec![0_usize; node_count];
+    for (&node_index, &rank) in ranks {
+        if node_index < node_count {
+            rank_of[node_index] = rank;
+        }
+    }
     let mut nodes_by_rank: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for node_index in 0..node_count {
-        let rank = ranks.get(&node_index).copied().unwrap_or(0);
+    for (node_index, &rank) in rank_of.iter().enumerate() {
         nodes_by_rank.entry(rank).or_default().push(node_index);
     }
     nodes_by_rank
