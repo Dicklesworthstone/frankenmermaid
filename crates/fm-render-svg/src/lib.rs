@@ -9049,6 +9049,127 @@ fn write_common_edge_full_fragment_into<const A11Y: bool, F>(
     }
 }
 
+/// Compute the rendered edge label (truncated text with optional sequence autonumber prefix) and its
+/// midpoint, exactly as the labeled-edge fragments need them. Shared by `render_edge` (slow/`Element`
+/// path) and `render_edge_into` (streaming path) so both derive byte-identical label text + position.
+fn compute_edge_label<'a>(
+    ir: &'a MermaidDiagramIr,
+    edge_path: &LayoutEdgePath,
+    edge_index: usize,
+    detail: RenderDetailProfile,
+    offset_x: f32,
+    offset_y: f32,
+) -> Option<(Cow<'a, str>, f32, f32)> {
+    let ir_edge = ir.edges.get(edge_index);
+    if detail.show_edge_labels
+        && edge_path.points.len() >= 2
+        && let Some(label_id) = ir_edge.and_then(|e| e.label)
+        && let Some(label) = ir.labels.get(label_id.0)
+    {
+        let base_label = truncate_label(&label.text, detail.edge_label_max_chars);
+        let label_text: Cow<'a, str> = if let Some(number) = ir
+            .sequence_meta
+            .as_ref()
+            .and_then(|meta| meta.autonumber_value(edge_index))
+        {
+            Cow::Owned(format!("{number} {}", base_label.as_ref()))
+        } else {
+            base_label
+        };
+        let (lx, ly) = if edge_path.points.len() == 4 {
+            let p1 = &edge_path.points[1];
+            let p2 = &edge_path.points[2];
+            (
+                f32::midpoint(p1.x, p2.x) + offset_x,
+                f32::midpoint(p1.y, p2.y) + offset_y - 8.0,
+            )
+        } else if edge_path.points.len() == 2 {
+            let p1 = &edge_path.points[0];
+            let p2 = &edge_path.points[1];
+            (
+                f32::midpoint(p1.x, p2.x) + offset_x,
+                f32::midpoint(p1.y, p2.y) + offset_y - 8.0,
+            )
+        } else {
+            let mid_idx = edge_path.points.len() / 2;
+            let mid_point = &edge_path.points[mid_idx];
+            (mid_point.x + offset_x, mid_point.y + offset_y - 8.0)
+        };
+        Some((label_text, lx, ly))
+    } else {
+        None
+    }
+}
+
+/// Stream the whole labeled-`Arrow` edge fragment (`<g><path/><rect/><text/><title/></g>`) directly into
+/// `out`. Shared by `render_edge` (into a fresh String wrapped in `Element::raw_svg`) and
+/// `render_edge_into` (straight into the output buffer, avoiding the per-edge fragment String + `Element`
+/// + the copy). Byte-identical (pinned by `golden_svg_test` + `edge_fast_full_fragment_matches_render`).
+#[allow(clippy::too_many_arguments)]
+fn write_labeled_edge_fragment_into(
+    out: &mut String,
+    edge_index: usize,
+    path_str: &str,
+    stroke_width: f32,
+    style_class: &str,
+    marker_end_val: &str,
+    label_str: &str,
+    lx: f32,
+    ly: f32,
+    label_font_size: f32,
+    avg_char_width: f32,
+    from_label: Option<&str>,
+    to_label: Option<&str>,
+    colors: &ThemeColors,
+) {
+    use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text, write_number_into};
+    let label_width = (label_str.chars().count() as f32 * avg_char_width) + 8.0 + 20.0;
+    let label_height = label_font_size + 14.0;
+    let start_y = ly + (label_font_size / 4.0);
+    out.push_str("<g id=\"fm-edge-");
+    let _ = AttributeValue::Integer(edge_index as i32).write_value(out);
+    out.push_str("\" class=\"fm-edge-labeled\" data-fm-edge-id=\"");
+    let _ = AttributeValue::Integer(edge_index as i32).write_value(out);
+    out.push_str("\" role=\"graphics-symbol\" tabindex=\"0\">");
+    write_common_edge_path_into(
+        out,
+        path_str,
+        stroke_width,
+        style_class,
+        edge_index as i32,
+        marker_end_val,
+    );
+    out.push_str("<rect x=\"");
+    let _ = write_number_into(out, lx - label_width / 2.0);
+    out.push_str("\" y=\"");
+    let _ = write_number_into(out, ly - label_height / 2.0 - 1.0);
+    out.push_str("\" width=\"");
+    let _ = write_number_into(out, label_width);
+    out.push_str("\" height=\"");
+    let _ = write_number_into(out, label_height);
+    out.push_str("\" fill=\"");
+    let _ = write_escaped_attr(out, &colors.background);
+    out.push_str("\" stroke=\"");
+    let _ = write_escaped_attr(out, &colors.cluster_stroke);
+    out.push_str("\" stroke-width=\"0.75\" rx=\"6\" ry=\"6\"/><text x=\"");
+    let _ = write_number_into(out, lx);
+    out.push_str("\" y=\"");
+    let _ = write_number_into(out, start_y);
+    out.push_str("\" text-anchor=\"middle\" font-size=\"");
+    let _ = write_number_into(out, label_font_size);
+    out.push_str("\" fill=\"");
+    let _ = write_escaped_attr(out, &colors.text);
+    out.push_str("\" class=\"edge-label\">");
+    let _ = write_escaped_text(out, label_str);
+    out.push_str("</text><title>");
+    let _ = write_escaped_text(out, from_label.unwrap_or("unknown"));
+    out.push_str(" points to ");
+    let _ = write_escaped_text(out, to_label.unwrap_or("unknown"));
+    out.push_str(" with label: ");
+    let _ = write_escaped_text(out, label_str);
+    out.push_str("</title></g>");
+}
+
 fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> Element {
     use fm_core::ArrowType;
 
@@ -9277,49 +9398,10 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
     // straight into its fragment above and returned).
     let path_str = smooth_layout_edge_path(edge_path, offset_x, offset_y);
 
-    // Extract the rendered label (text + midpoint) once, up front, so the labeled fast fragment
-    // below can return BEFORE the `elem` path-`Element` is built. On the labeled fast path `elem` was
-    // constructed (a full `Element` + its `Attributes` Vec) only to be discarded — the fragment
-    // re-serializes `path_str` itself — so every labeled edge (ER/class relationships all carry a
-    // label) paid a throwaway per-edge allocation. Byte-identical (same extraction as the slow block).
-    let edge_label: Option<(Cow<'_, str>, f32, f32)> = if detail.show_edge_labels
-        && edge_path.points.len() >= 2
-        && let Some(label_id) = ir_edge.and_then(|e| e.label)
-        && let Some(label) = ir.labels.get(label_id.0)
-    {
-        let base_label = truncate_label(&label.text, detail.edge_label_max_chars);
-        let label_text: Cow<'_, str> = if let Some(number) = ir
-            .sequence_meta
-            .as_ref()
-            .and_then(|meta| meta.autonumber_value(edge_index))
-        {
-            Cow::Owned(format!("{number} {}", base_label.as_ref()))
-        } else {
-            base_label
-        };
-        let (lx, ly) = if edge_path.points.len() == 4 {
-            let p1 = &edge_path.points[1];
-            let p2 = &edge_path.points[2];
-            (
-                f32::midpoint(p1.x, p2.x) + offset_x,
-                f32::midpoint(p1.y, p2.y) + offset_y - 8.0,
-            )
-        } else if edge_path.points.len() == 2 {
-            let p1 = &edge_path.points[0];
-            let p2 = &edge_path.points[1];
-            (
-                f32::midpoint(p1.x, p2.x) + offset_x,
-                f32::midpoint(p1.y, p2.y) + offset_y - 8.0,
-            )
-        } else {
-            let mid_idx = edge_path.points.len() / 2;
-            let mid_point = &edge_path.points[mid_idx];
-            (mid_point.x + offset_x, mid_point.y + offset_y - 8.0)
-        };
-        Some((label_text, lx, ly))
-    } else {
-        None
-    };
+    // Extract the rendered label (text + midpoint) once, up front, so the labeled fast fragment below
+    // can return before the `elem` path-`Element` is built. Shared with `render_edge_into` via
+    // `compute_edge_label` so the streaming path derives byte-identical text + position.
+    let edge_label = compute_edge_label(ir, edge_path, edge_index, detail, offset_x, offset_y);
 
     // Whole labeled-edge fast fragment, hoisted above `elem`: for the common single-line solid-`Arrow`
     // label under embedded CSS + default a11y, stream `<g><path/><rect/><text/><title/></g>` and RETURN
@@ -9342,57 +9424,26 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
             && let Some(marker_end_val) = marker_end
             && let Some(edge) = ir_edge
         {
-            use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text};
             let label_font_size = detail.edge_font_size;
-            let label_width =
-                (label_str.chars().count() as f32 * config.avg_char_width) + 8.0 + 20.0;
-            let label_height = label_font_size + 14.0;
-            let start_y = *ly + (label_font_size / 4.0);
             let (from_label, to_label) =
                 edge_endpoint_accessible_labels(edge, ir, accessible_node_labels);
             let mut f = String::with_capacity(path_str.len() + label_str.len() * 3 + 360);
-            f.push_str("<g id=\"fm-edge-");
-            let _ = AttributeValue::Integer(edge_index as i32).write_value(&mut f);
-            f.push_str("\" class=\"fm-edge-labeled\" data-fm-edge-id=\"");
-            let _ = AttributeValue::Integer(edge_index as i32).write_value(&mut f);
-            f.push_str("\" role=\"graphics-symbol\" tabindex=\"0\">");
-            write_common_edge_path_into(
+            write_labeled_edge_fragment_into(
                 &mut f,
+                edge_index,
                 &path_str,
                 stroke_width,
                 style_class,
-                edge_index as i32,
                 marker_end_val,
+                label_str,
+                *lx,
+                *ly,
+                label_font_size,
+                config.avg_char_width,
+                from_label,
+                to_label,
+                colors,
             );
-            f.push_str("<rect x=\"");
-            let _ = crate::attributes::write_number_into(&mut f, *lx - label_width / 2.0);
-            f.push_str("\" y=\"");
-            let _ = crate::attributes::write_number_into(&mut f, *ly - label_height / 2.0 - 1.0);
-            f.push_str("\" width=\"");
-            let _ = crate::attributes::write_number_into(&mut f, label_width);
-            f.push_str("\" height=\"");
-            let _ = crate::attributes::write_number_into(&mut f, label_height);
-            f.push_str("\" fill=\"");
-            let _ = write_escaped_attr(&mut f, &colors.background);
-            f.push_str("\" stroke=\"");
-            let _ = write_escaped_attr(&mut f, &colors.cluster_stroke);
-            f.push_str("\" stroke-width=\"0.75\" rx=\"6\" ry=\"6\"/><text x=\"");
-            let _ = crate::attributes::write_number_into(&mut f, *lx);
-            f.push_str("\" y=\"");
-            let _ = crate::attributes::write_number_into(&mut f, start_y);
-            f.push_str("\" text-anchor=\"middle\" font-size=\"");
-            let _ = crate::attributes::write_number_into(&mut f, label_font_size);
-            f.push_str("\" fill=\"");
-            let _ = write_escaped_attr(&mut f, &colors.text);
-            f.push_str("\" class=\"edge-label\">");
-            let _ = write_escaped_text(&mut f, label_str);
-            f.push_str("</text><title>");
-            let _ = write_escaped_text(&mut f, from_label.unwrap_or("unknown"));
-            f.push_str(" points to ");
-            let _ = write_escaped_text(&mut f, to_label.unwrap_or("unknown"));
-            f.push_str(" with label: ");
-            let _ = write_escaped_text(&mut f, label_str);
-            f.push_str("</title></g>");
             return Element::raw_svg(f);
         }
     }
@@ -9613,12 +9664,58 @@ fn render_edge_into(out: &mut String, edge_path: &LayoutEdgePath, context: &Edge
         offset_y,
         config,
         detail,
+        colors,
         accessible_node_labels,
-        ..
     } = *context;
     let edge_index = edge_path.edge_index;
     let ir_edge = ir.edges.get(edge_index);
     let arrow = ir_edge.map_or(ArrowType::Arrow, |edge| edge.arrow);
+    let is_back_edge = edge_path.reversed;
+
+    // Stream the labeled-`Arrow` fast fragment straight into `out` instead of falling through to
+    // `render_edge(..).write_to_string(out)`, which builds the fragment String + an `Element::raw_svg`
+    // then COPIES it in (a per-labeled-edge double-copy — sequence messages / ER-class relationships).
+    // The labeled fast path is Arrow-only, so `render_edge`'s Arrow-derived width/class/marker are the
+    // constants below (1.8 / "fm-edge-solid" / "url(#arrow-end)"); the same gate + the shared
+    // `compute_edge_label`/`write_labeled_edge_fragment_into` helpers keep the bytes identical. Only
+    // labeled Arrow edges enter here; unlabeled edges (`compute_edge_label` -> None) and every other
+    // labeled/complex case fall through to the tuple fast path / `Element` slow path exactly as before.
+    if arrow == ArrowType::Arrow
+        && !is_back_edge
+        && config.embed_theme_css
+        && config.a11y.aria_labels
+        && config.a11y.keyboard_nav
+        && config.a11y.text_alternatives
+        && !config.animations_enabled
+        && !config.include_source_spans
+        && let Some(edge) = ir_edge
+        && let Some((label_text, lx, ly)) =
+            compute_edge_label(ir, edge_path, edge_index, detail, offset_x, offset_y)
+    {
+        let label_str = label_text.as_ref();
+        if !label_str.contains('\n') && resolve_edge_inline_style(ir, edge_index).is_none() {
+            let path_str = smooth_layout_edge_path(edge_path, offset_x, offset_y);
+            let (from_label, to_label) =
+                edge_endpoint_accessible_labels(edge, ir, accessible_node_labels);
+            write_labeled_edge_fragment_into(
+                out,
+                edge_index,
+                &path_str,
+                1.8,
+                "fm-edge-solid",
+                "url(#arrow-end)",
+                label_str,
+                lx,
+                ly,
+                detail.edge_font_size,
+                config.avg_char_width,
+                from_label,
+                to_label,
+                colors,
+            );
+            return;
+        }
+    }
 
     // The whole-edge streaming fragment handles every non-reversed arrow whose slow-path `render_edge`
     // shape is a single `<path>`. Each tuple below is `(stroke_width, style_class, marker_start,

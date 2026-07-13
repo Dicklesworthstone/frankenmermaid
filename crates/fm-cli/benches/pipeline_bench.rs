@@ -500,6 +500,7 @@ fn bench_render_nonflowchart(c: &mut Criterion) {
         ("sankey_60", gen_sankey(60)),
         ("pie_40", gen_pie(40)),
         ("sequence_40", gen_sequence(40)),
+        ("er_40", gen_er(40)),
     ];
     for (label, input) in &inputs {
         let parsed = fm_parser::parse(input);
