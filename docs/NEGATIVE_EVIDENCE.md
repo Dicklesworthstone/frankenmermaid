@@ -15080,3 +15080,31 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   harness (gen_sequence(40), DEFAULT config — no mirrorActors).
 
   Agent: (Opus 4.8, this session)
+
+### ✅✅LANDED (8b035b4): layout bands streamed — default sequence render −15.5% (2026-07-13)
+
+- **The default-sequence lever from the prior ledger note, LANDED.** Dumped `gen_sequence(40)` (DEFAULT config,
+  the heaviest benched nonflowchart render ~112µs): 40 participant nodes (STREAM via common fast path), 40
+  labelled messages (STREAM via aa31ba6), and **40 lifeline BANDS** (`<g class="fm-band fm-band-lane"><rect/></g>`)
+  built as `Element` trees + `doc.child`ren — 0 activations/notes (plain `->>`). So the lifeline bands were the
+  LAST per-item Element-build loop in the sequence render.
+- **Fix:** `write_layout_band_into` streams a band byte-identically (rect attr order `x y width height rx fill
+  stroke stroke-width stroke-dasharray fill-opacity stroke-opacity`; floats via `write_number_into` → `0.8`
+  serializes `"0.80"`; the rare labelled band — journey sections / xychart columns — reuses the exact
+  `TextBuilder` `Element` written in place, no from-scratch text replication). The bands loop now streams all
+  bands into ONE raw fragment (`doc.child(raw_svg)`) instead of N group+rect element trees. `render_layout_band`
+  kept as a `#[cfg(test)]` oracle for `layout_band_streaming_matches_element` (all 3 kinds × labelled/unlabelled).
+- **Byte-identical:** that test + `sequence_basic`/`sequence_advanced` (unlabelled Lane) + `xychart_basic`
+  (Column) goldens + 254 lib tests. ⚠️`render_layout_band` had to go `#[cfg(test)]` or clippy `-D warnings`
+  fails ("function never used") — its only caller is now the test.
+- **Measured (same-machine fixed-iter perf stat, byte-id 58269 B both arms), gen_sequence(40) DEFAULT config:
+  1.443M → 1.218M instr/render = −15.5%.** Bigger than expected — bands were the dominant remaining Element
+  build. Applies to EVERY band-bearing type: sequence lifelines, journey sections, xychart/gantt columns.
+- **⭐NEXT (sequence, if pushing further):** after nodes+messages+bands stream, the residual sequence render is
+  fixed-cost (defs, a11y desc, the SvgDocument wrapper) + the axis-ticks loop (`render_layout_axis_tick`, still
+  `doc.child` group+line+text Elements — but gantt/xychart, not sequence). Sequence render is now near its
+  streaming floor. Broader NEXT: the axis-ticks loop mirrors the bands one (stream `render_layout_axis_tick`);
+  and activation-bars/notes/fragments loops (sequence with `->>+`/notes/loops) are still `doc.child` Element
+  builds — measurable via a sequence fixture WITH activations/notes.
+
+  Agent: (Opus 4.8, this session)
