@@ -15197,3 +15197,29 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   alloc-symbol grep (mi_malloc/finish_grow) to find the top allocation SITES.
 
   Agent: (Opus 4.8, this session)
+
+### ✅LANDED (192fd4a): hoist redundant stable_node_priorities node-id sort — layout −2.5% (2026-07-13)
+
+- **First correct layout profile under mimalloc** (the production allocator; harness with the mimalloc
+  global_allocator per 66c48af, built `CARGO_PROFILE_RELEASE_STRIP=false CARGO_PROFILE_RELEASE_DEBUG=
+  line-tables-only RUSTFLAGS="-C target-cpu=x86-64-v2 -C force-frame-pointers=yes"` so perf symbolizes —
+  the default `[profile.release] strip=true` is why earlier harness frames showed `[unknown]`). Layout
+  self-time: **`layout_diagram_sugiyama_traced_with_config` 35.6%** (core BK coord assignment — spread,
+  no single lever line), allocation only **~17%** (mimalloc — NOT the ~40% the libc profile showed;
+  reconfirms 66c48af), `__memcmp_avx2` 3.3%.
+- **The 3.3% memcmp = `stable_node_priorities`** (a pure O(N log N) String-memcmp sort of every node id).
+  It was recomputed by `cycle_removal` + `rank_assignment` (+ `build_cycle_cluster_map` when cluster
+  collapse is on), all from the same sugiyama entry — 2-3 IDENTICAL sorts per layout.
+- **Fix:** compute once in the caller, thread `&[usize]` through the three callees. Byte-identical
+  (golden_layout + cycle_scc_heavy/flowchart_cycle/stress_120_nodes SVG goldens + 439 lib tests).
+  **Measured under mimalloc, flowchart-120: 2.105M→2.052M instr/layout = −2.5%.**
+- **⭐LEVER (reusable):** a `stable_node_priorities`-style PURE function of `ir` (or any pure derived
+  structure) called independently by sibling phases (`cycle_removal`/`rank_assignment`/…) → hoist to the
+  common caller and thread through. Grep for the same pure-fn call in ≥2 sibling functions.
+- **⭐NEXT (layout, harder):** the remaining layout cost is `layout_diagram_sugiyama_traced_with_config`
+  35.6% self (the BK coordinate assignment: align/root/pos_of loops at lib.rs ~10460-10632, plus a
+  `search.rs` linear scan ~4.6% and `remove_node` 3.08% BTreeSet-contains in greedy FAS). No cheap line;
+  needs algorithmic work or a risky BTreeSet→Vec<bool>/BTreeMap<usize,Vec>→Vec<Vec> refactor (owner-gated,
+  the `.len()` semantics differ for sparse ranks). Layout is otherwise at a mature floor under mimalloc.
+
+  Agent: (Opus 4.8, this session)
