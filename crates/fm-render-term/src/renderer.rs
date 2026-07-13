@@ -1786,6 +1786,32 @@ fn render_gantt_cell(
         return;
     }
 
+    // Large Gantt charts previously scanned every layout node for every task, making terminal rendering
+    // O(tasks * nodes). Build an order-preserving dense index once when it can amortize the allocation.
+    // Only fill an empty slot so duplicate node indexes retain `.find()`'s first-match behavior; sparse
+    // external layouts keep the allocation-free linear path rather than sizing from an arbitrary index.
+    let layout_nodes_by_index = (gantt_meta.tasks.len() >= 16)
+        .then(|| {
+            layout
+                .nodes
+                .iter()
+                .map(|node| node.node_index)
+                .max()
+                .map_or(0, |max_index| max_index.saturating_add(1))
+        })
+        .filter(|lookup_len| *lookup_len <= layout.nodes.len().saturating_mul(2))
+        .map(|lookup_len| {
+            let mut nodes_by_index = vec![None; lookup_len];
+            for node in &layout.nodes {
+                if let Some(slot) = nodes_by_index.get_mut(node.node_index)
+                    && slot.is_none()
+                {
+                    *slot = Some(node);
+                }
+            }
+            nodes_by_index
+        });
+
     // Title
     if let Some(title) = &gantt_meta.title {
         let tx = cell_width.saturating_sub(title.len()) / 2;
@@ -1830,10 +1856,14 @@ fn render_gantt_cell(
             buffer.set_string(0, row, &task_label);
 
             let bar_origin = label_width + 2;
-            let (bar_start, bar_end) = layout
-                .nodes
-                .iter()
-                .find(|node_box| node_box.node_index == task.node.0)
+            let node_box = match &layout_nodes_by_index {
+                Some(nodes_by_index) => nodes_by_index.get(task.node.0).and_then(|node| *node),
+                None => layout
+                    .nodes
+                    .iter()
+                    .find(|node| node.node_index == task.node.0),
+            };
+            let (bar_start, bar_end) = node_box
                 .map(|node_box| {
                     let start_ratio =
                         ((node_box.bounds.x - layout.bounds.x) / schedule_width).clamp(0.0, 1.0);
@@ -2472,30 +2502,40 @@ mod tests {
             label: Some(IrLabelId(1)),
             ..Default::default()
         });
+        let mut tasks = vec![
+            IrGanttTask {
+                node: IrNodeId(0),
+                section_idx: 0,
+                task_id: Some("build_1".to_string()),
+                start: Some(GanttDate::Absolute("2026-02-01".to_string())),
+                end: Some(GanttDate::DurationDays(2)),
+                task_type: GanttTaskType::Done,
+                ..Default::default()
+            },
+            IrGanttTask {
+                node: IrNodeId(1),
+                section_idx: 0,
+                task_id: Some("verify_1".to_string()),
+                start: Some(GanttDate::Absolute("2026-02-05".to_string())),
+                end: Some(GanttDate::DurationDays(2)),
+                ..Default::default()
+            },
+        ];
+        // Exercise the dense node-box lookup used by larger Gantt diagrams.
+        for index in 2..16 {
+            tasks.push(IrGanttTask {
+                node: IrNodeId(index % 2),
+                section_idx: 0,
+                task_type: GanttTaskType::Normal,
+                ..Default::default()
+            });
+        }
         ir.gantt_meta = Some(IrGanttMeta {
             title: Some("Roadmap".to_string()),
             sections: vec![IrGanttSection {
                 name: "Alpha".to_string(),
             }],
-            tasks: vec![
-                IrGanttTask {
-                    node: IrNodeId(0),
-                    section_idx: 0,
-                    task_id: Some("build_1".to_string()),
-                    start: Some(GanttDate::Absolute("2026-02-01".to_string())),
-                    end: Some(GanttDate::DurationDays(2)),
-                    task_type: GanttTaskType::Done,
-                    ..Default::default()
-                },
-                IrGanttTask {
-                    node: IrNodeId(1),
-                    section_idx: 0,
-                    task_id: Some("verify_1".to_string()),
-                    start: Some(GanttDate::Absolute("2026-02-05".to_string())),
-                    end: Some(GanttDate::DurationDays(2)),
-                    ..Default::default()
-                },
-            ],
+            tasks,
             ..Default::default()
         });
 
@@ -2524,6 +2564,20 @@ mod tests {
                         x: 60.0,
                         y: 10.0,
                         width: 20.0,
+                        height: 6.0,
+                    },
+                },
+                // A duplicate index proves the dense lookup retains the old linear search's first match.
+                LayoutNodeBox {
+                    node_index: 0,
+                    node_id: "duplicate_build".to_string(),
+                    rank: 2,
+                    order: 2,
+                    span: Default::default(),
+                    bounds: LayoutRect {
+                        x: 90.0,
+                        y: 20.0,
+                        width: 10.0,
                         height: 6.0,
                     },
                 },

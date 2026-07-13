@@ -15339,3 +15339,35 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   ONLY this ledger file. Layout remaining levers (sugiyama BK 44.7%) are deep-algorithmic.
 
   Agent: (Opus 4.8, this session)
+
+### ✅LANDED: dense terminal Gantt node-box lookup — 28.3% faster at 4,000 tasks (2026-07-13)
+
+- **Ledger-first boundary:** no earlier terminal Gantt lookup probe was recorded. This stayed in
+  `fm-render-term`, away from the concurrently active parser/layout lanes, and changed only the repeated
+  `layout.nodes.iter().find(...)` inside `render_gantt_cell`.
+- **Lever:** diagrams with at least 16 Gantt tasks now build one order-preserving dense node-box index, turning
+  the hot lookup from **O(tasks * nodes)** into **O(tasks + nodes)**. Small diagrams retain the allocation-free
+  linear path; unusually sparse externally supplied layouts also fall back rather than allocate from an
+  arbitrary node index. Empty-slot-only insertion preserves the old linear search's first-match behavior for
+  duplicate indexes.
+- **Strict-remote same-worker foreground A/B:** both arms ran with `RCH_REQUIRE_REMOTE=1` on actual worker
+  `vmi1152480`, using `cargo test -j1 --profile release -p fm-render-term
+  renderer::tests::terminal_gantt_node_lookup_perf_probe -- --ignored --nocapture --exact`. The inline probe
+  rendered a precomputed 4,000-task layout five times per sample across nine samples; both arms paid independent
+  cold release builds. Baseline median was **11,104,330 ns/render** (samples **9,822,033; 10,227,555;
+  11,007,523; 11,093,718; 11,104,330; 11,762,351; 11,775,623; 11,796,524; 11,926,254**). Candidate median was
+  **7,960,430 ns/render** (samples **5,160,988; 5,515,301; 6,605,560; 7,578,188; 7,960,430; 9,467,028;
+  10,738,414; 13,024,871; 16,748,817**). Candidate/baseline was **0.716876x**, or **28.312% faster**
+  (**1.395x speedup**); both produced the same output-length digest, **275596**.
+- **Correctness:** the production test now forces the indexed branch, checks task-label/layout-position output,
+  and includes a later duplicate index whose geometry would fail the positional assertion if insertion stopped
+  preserving the first match. The temporary timing probe was removed after the decision.
+- **Validation:** strict-remote focused test passed on actual worker `vmi1152480`; final-snapshot
+  `cargo check -j1 --workspace --all-targets` passed on `vmi1149989`, and final-snapshot
+  `cargo clippy -j1 --workspace --all-targets -- -D warnings` passed on `vmi1153651`. Direct `rustfmt --check`
+  and the non-build UBS scan also passed. The only Cargo diagnostic was the pre-existing duplicate-bin-target
+  manifest warning for `fm-cli/src/main.rs`.
+- **Verdict:** **KEEP / LANDED.** The result comfortably clears the 3% floor while retaining the old small and
+  sparse-layout paths.
+
+  Agent: Codex (GPT-5, this session)
