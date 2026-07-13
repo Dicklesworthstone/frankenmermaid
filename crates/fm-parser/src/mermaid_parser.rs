@@ -3229,11 +3229,33 @@ fn extract_state_guard_action(
         );
     }
 
-    // Extract action: / action()
-    if let Some(slash_pos) = clean.find(" / ") {
+    // Extract action: / action(). Preserve the existing priority: the first spaced delimiter wins
+    // even when an earlier bare slash exists. One byte pass records both candidates so the common
+    // slash-free label does not run two independent searches.
+    let mut first_slash = None;
+    let mut first_spaced_slash = None;
+    let clean_bytes = clean.as_bytes();
+    for (index, &byte) in clean_bytes.iter().enumerate() {
+        if byte != b'/' {
+            continue;
+        }
+        if first_slash.is_none() {
+            first_slash = Some(index);
+        }
+        if index > 0
+            && index + 1 < clean_bytes.len()
+            && clean_bytes[index - 1] == b' '
+            && clean_bytes[index + 1] == b' '
+        {
+            first_spaced_slash = Some(index - 1);
+            break;
+        }
+    }
+
+    if let Some(slash_pos) = first_spaced_slash {
         action = Some(trim_fast(&clean[slash_pos + 3..]).to_string());
         clean = trim_fast(&clean[..slash_pos]).to_string();
-    } else if let Some(slash_pos) = clean.find('/') {
+    } else if let Some(slash_pos) = first_slash {
         // Also handle without spaces: "/action"
         let after = trim_fast(&clean[slash_pos + 1..]);
         if !after.is_empty() {
@@ -14418,6 +14440,22 @@ Rel_Back(db, app, "Responds")"#,
         assert_eq!(label.as_deref(), Some("complete"));
         assert!(guard.is_none());
         assert_eq!(action.as_deref(), Some("cleanup()"));
+    }
+
+    #[test]
+    fn extract_action_prefers_later_spaced_delimiter() {
+        let (label, guard, action) = super::extract_state_guard_action(Some("go/a / b"));
+        assert_eq!(label.as_deref(), Some("go/a"));
+        assert!(guard.is_none());
+        assert_eq!(action.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn extract_empty_bare_action_preserves_label() {
+        let (label, guard, action) = super::extract_state_guard_action(Some("complete/"));
+        assert_eq!(label.as_deref(), Some("complete/"));
+        assert!(guard.is_none());
+        assert!(action.is_none());
     }
 
     #[test]

@@ -1852,7 +1852,7 @@
 - **Verdict: WIN.** Keep the first-match return plus the table-order invariant. This is distinct from the rejected
   first-byte guard: misses use the exact prior `starts_with` loop, while successful scans stop once their result is known.
 
-### REJECT: borrow cleaned edge-label probes into the interner — state +2.84% midpoint (2026-07-12)
+### VOID / INVALID (correction): borrowed edge-label probe A/B missed the target path (2026-07-12)
 - **Negative-ledger-first hypothesis:** the landed plain-node label path borrows through `LabelIndex` and allocates only
   on insertion, while `IrBuilder::push_edge` still allocated a cleaned `String`, moved it into an empty-segment
   `ParsedLabel`, cloned the text into `IrLabel` on a miss, then freed the probe. The candidate factored the exact existing
@@ -1861,19 +1861,51 @@
   ID/order, stored span, and dedup behavior. Empty labels remain `None`; rich markup is impossible on `push_edge`'s
   `Option<&str>` API. The only intended difference was ownership: zero probe allocation on a hit and only the stored
   text allocation on a miss.
-- **Strict remote-only same-worker A/B:** exact permanent row `parse/state/state_100` (99 uniquely labelled
-  transitions), 50 samples, 2 s warm-up + 8 s measurement, both arms on pin-honored `vmi1293453`; `parse_bench.rs`
+- **Recorded but invalid strict remote-only A/B:** exact row `parse/state/state_100`, 50 samples, 2 s warm-up + 8 s
+  measurement, both arms on pin-honored `vmi1293453`; `parse_bench.rs`
   SHA-256 `37771f5d2ebaede0d56b881658d143f000da09329e69c78fed5043eccb1830eb` and `Cargo.lock` SHA-256
   `b7c9fab36b1085a6f3f61fedb2464bae6b27059a01d55055a8129e5003833309` were unchanged. Control at `fbd28a1` was
   **[71.118, 72.943, 74.940] µs**; candidate was **[73.072, 75.014, 76.895] µs**, midpoint ratio **1.0284**
   (**+2.84%**). Criterion detected no improvement: paired estimate **+2.4632%** (95% CI
   **−3.9083%..+7.5673%**, `p=0.46`).
-- **Verdict: REJECT.** The proof-clean allocation deletion has no wall-time headroom on the permanent state row; the
-  tiny edge-label probe allocation/copy/free is effectively free under the current allocator and surrounding parse work.
-  Restored `ir_builder.rs` exactly to control SHA-256
-  `560fe6bde41935e91d255f920bced3c8bf79c830554313f90ba438075e8ba514`; rejected candidate SHA-256 was
-  `2404297afac01b2bb324312ad5dfd828a95a123ba48d43cae7c2226e7ffd77f2`. Shipped parser bytes are unchanged; do not
-  retry this exact borrowed `push_edge` handoff from allocation counts alone.
+- **Correction / verdict: VOID, not reject.** A follow-up path audit proved `gen_state`'s colon suffix is parsed as
+  right-node syntax, not as the pipe edge label consumed by `extract_pipe_label`; `push_edge` therefore received `None`
+  and the candidate never hit the timed path. The numbers above are a code-layout null and cannot accept or reject the
+  ownership lever. `ir_builder.rs` was nevertheless restored exactly to control SHA-256
+  `560fe6bde41935e91d255f920bced3c8bf79c830554313f90ba438075e8ba514`; measured candidate SHA-256 was
+  `2404297afac01b2bb324312ad5dfd828a95a123ba48d43cae7c2226e7ffd77f2`. Shipped parser bytes were unchanged. The prior
+  do-not-retry conclusion is withdrawn; any revisit must use the dedicated `parse/state_labels/*` rows added below.
+
+### WIN: fuse state action-delimiter searches into one precedence-preserving byte pass — −8.95% (2026-07-12)
+- **Negative-ledger-first target:** `extract_state_guard_action` retained two serial scans after its landed trim cleanup:
+  `find(" / ")`, then `find('/')` on a miss. The requirement relation parser previously won by deleting short-string
+  searcher setup, while the ByteLines and sequence-entity rows show that `memchr` dispatch is the wrong shape for these
+  short labels. No exact state slash-fusion attempt existed, so this candidate used one scalar byte pass.
+- **Lever:** record the first slash while scanning once and stop at the first slash surrounded by ASCII spaces. The
+  existing unusual priority remains exact: a later `" / "` outranks an earlier bare slash; when no spaced delimiter
+  exists, the first bare slash wins. The scan still runs after guard removal, so slashes inside `[guard]` stay ignored.
+- **Behavior proof:** stored byte indices preserve the old spaced boundaries (`slash - 1`, `slash + 2`) and bare
+  boundaries (`slash`, `slash + 1`); tabs, Unicode prefixes, URLs, empty bare actions, label trimming, guard/action
+  ownership, edge order, and diagnostics are unchanged. Focused pins cover later-spaced precedence and the load-bearing
+  rule that a trailing bare slash with an empty action does not split the label. Floating point and RNG are N/A.
+- **Valid permanent benchmark added:** `parse/state_labels/state_labels_100` and `_300` use actual pipe labels and mix
+  slashless, spaced, and bare action forms. This corrects the older `state_100` assumption above: colon suffixes do not
+  reach this helper. Both A/B arms used benchmark SHA-256
+  `cee31491ee3b5bdf1ed7dbaf39663c335b5843950eb29eebb81880603a3108bf` and unchanged `Cargo.lock` SHA-256
+  `b7c9fab36b1085a6f3f61fedb2464bae6b27059a01d55055a8129e5003833309`.
+- **Strict remote-only same-worker A/B:** exact `parse/state_labels/state_labels_300`, 50 samples, 2 s warm-up + 8 s
+  measurement, both arms on pin-honored `vmi1293453`. Control at `2ab851b` was
+  **[304.46, 313.33, 323.65] µs**; candidate was **[278.80, 285.29, 291.87] µs**, midpoint ratio **0.9105**
+  (**−8.95%**). Criterion's paired estimate was **−9.1723%** (95% CI **−12.211%..−6.1755%**, `p=0.00`): a clear
+  improvement. Candidate parser SHA-256 was `702bf84f686df487ee465baa3c73ae426fba71125dd9130a0bb56fcaa403a33c`.
+- **Verdict: WIN.** Keep the one-pass scan, precedence pins, and permanent target-valid rows. The candidate clears the
+  3% floor with a fully negative paired interval and does not rely on the invalid generic-state timing surface.
+- **Validation:** strict remote-only `cargo test -j1 -p fm-parser` passed all **411** tests on pin-honored
+  `vmi1293453`; strict remote-only parser all-target clippy with warnings denied passed on `vmi1149989`; strict
+  remote-only workspace all-target check and clippy with warnings denied passed on `vmi1152480` and `vmi1153651`.
+  Direct `rustfmt --check` passed for the new benchmark; the parser file still reports only its pre-existing formatting
+  drift outside the candidate hunks. `git diff --check` is clean. UBS found no candidate-local defect; its nonzero exit
+  is the unchanged file-wide test/assert/indexing inventory.
 
 ### REJECT: fuse the fast-node reject + `[`-locate scans into one table-driven pass — +0.74% parse REGRESSION (2026-07-12)
 - **Hypothesis (looked obvious):** `parse_fast_simple_flowchart_node_borrowed` (10.17% self on the

@@ -84,8 +84,8 @@ fn gen_class(classes: usize) -> String {
     s
 }
 
-/// A state diagram: `states` states with transitions (and a couple of guarded/labelled ones) —
-/// exercises the state transition parser (shares `find_operator` + the general parser).
+/// A state diagram: `states` states with transitions — exercises the state transition parser
+/// (shares `find_operator` + the general parser).
 fn gen_state(states: usize) -> String {
     let mut s = String::from("stateDiagram-v2\n");
     s.push_str("  [*] --> S0\n");
@@ -93,6 +93,22 @@ fn gen_state(states: usize) -> String {
         s.push_str(&format!("  S{i} --> S{} : event{i}\n", i + 1));
     }
     s.push_str(&format!("  S{} --> [*]\n", states.saturating_sub(1)));
+    s
+}
+
+/// State transitions with real pipe labels, covering slashless labels plus spaced and bare action
+/// delimiters. Unlike the colon-suffix state corpus, these labels reach `extract_state_guard_action`.
+fn gen_state_labels(transitions: usize) -> String {
+    let mut s = String::from("stateDiagram-v2\n  [*] --> S0\n");
+    for i in 0..transitions {
+        let label = match i % 3 {
+            0 => format!("event{i}"),
+            1 => format!("event{i} / cleanup{i}()"),
+            _ => format!("event{i}/cleanup{i}()"),
+        };
+        s.push_str(&format!("  S{i} -->|{label}| S{}\n", i + 1));
+    }
+    s.push_str(&format!("  S{transitions} --> [*]\n"));
     s
 }
 
@@ -284,6 +300,20 @@ fn bench_parse(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("state", label), &input, |b, input| {
             b.iter(|| fm_parser::parse(input));
         });
+    }
+
+    for (label, transitions) in [
+        ("state_labels_100", 100_usize),
+        ("state_labels_300", 300_usize),
+    ] {
+        let input = gen_state_labels(transitions);
+        group.bench_with_input(
+            BenchmarkId::new("state_labels", label),
+            &input,
+            |b, input| {
+                b.iter(|| fm_parser::parse(input));
+            },
+        );
     }
 
     for (label, entities) in [("er_30", 30_usize), ("er_100", 100_usize)] {
