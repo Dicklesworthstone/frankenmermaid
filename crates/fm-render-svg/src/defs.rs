@@ -707,8 +707,35 @@ impl DefsBuilder {
             return;
         }
 
-        let elem = self.to_element();
-        elem.write_to_string(output);
+        // Stream the `<defs>` section directly instead of building a transient `Defs` `Element` tree
+        // (via `to_element`) only to serialize and drop it — that materialized a `Defs` `Element`,
+        // its `children` `Vec`, and a `raw_svg` `Element` per render, cloning the memoized
+        // marker/gradient `String` into each. `Element::new(Defs)` carries no attributes, so it
+        // serializes as `<defs>` + children + `</defs>`; the child order (raw markers, markers, raw
+        // gradients, gradients, filters, custom) and each child's own serialization are preserved
+        // exactly, so this is byte-identical to `self.to_element().write_to_string(output)` (verified
+        // via `BLESS`-diffing every `golden_svg_test` case). The raw fragments are `push_str`'d in
+        // place (an `Element::raw_svg` serializes to its text verbatim), dropping the per-render clone.
+        output.push_str("<defs>");
+        if let Some(ref raw) = self.raw_markers {
+            output.push_str(raw);
+        }
+        for marker in &self.markers {
+            marker.to_element().write_to_string(output);
+        }
+        if let Some(ref raw) = self.raw_gradients {
+            output.push_str(raw);
+        }
+        for gradient in &self.gradients {
+            gradient.to_element().write_to_string(output);
+        }
+        for filter in &self.filters {
+            filter.to_element().write_to_string(output);
+        }
+        for elem in &self.custom_elements {
+            elem.write_to_string(output);
+        }
+        output.push_str("</defs>");
     }
 }
 
