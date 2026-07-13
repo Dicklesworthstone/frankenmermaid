@@ -15137,3 +15137,30 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   the reuse-the-TextBuilder-Element-in-place trick (as the labelled band does) to stay byte-identical.
 
   Agent: (Opus 4.8, this session)
+
+### ⛔ REJECTED (wash): streaming the sequence ACTIVATION-BAR / lifecycle-marker loops (2026-07-13)
+
+- **Hypothesis (from the axis-tick ledger note):** the `activation_bars` (rect per `->>+`/`-->>-`) +
+  `sequence_lifecycle_markers` (2 lines per destroy) loops are per-item `doc.child` Element builds — stream
+  them into one raw fragment like the bands (8b035b4, −15.5%) and axis-ticks (5502060, −25%) wins.
+- **Implemented + PROVEN byte-identical** (`write_sequence_activation_layer_into` + a
+  `sequence_activation_layer_streaming_matches_element` inline-oracle test + `sequence_advanced` golden which
+  covers 1 activation bar; 256 lib tests, clippy clean).
+- **MEASURED = WASH.** Activation-heavy fixture (40 `A->>+B`/`B-->>-A` pairs → 40 activation bars),
+  same-machine fixed-iter perf stat, byte-identical 57751-byte output both arms: HEAD 33.02M vs streamed
+  33.16M instr/20k-batch → **+0.4% (a tiny REGRESSION, not a win).** Reverted, not landed.
+- **⭐⭐WHY (the refined heuristic — the reason bands/ticks won but this didn't):** the streaming win scales
+  with the per-item **Element NESTING**, not the item count. Bands = `<g>` + child `<rect>` (2 Elements +
+  the group's recursive `write_to_string`); axis-ticks = `<g>` + `<line>` + `<text>` (3). Streaming those
+  eliminates the GROUP WRAPPER's nested-Element overhead. An activation bar is a **bare single `<rect>`**
+  `doc.child` (no group) — already cheap; replacing 40 cheap leaf rects with a String fragment + a raw_svg
+  wrapper + 40× `write_number_into` is a WASH (the fragment alloc + push_str calls offset the saved leaf
+  Element). **LEVER RULE: only stream `for x { doc.child(render_X(x)) }` loops where render_X builds a GROUP
+  (wrapper + ≥1 child); a bare-single-leaf loop (one rect/line/text, no `<g>`) is already at floor — skip it.**
+- **CONSEQUENCE for the remaining sequence loops:** `sequence_notes` = `<rect>` + a SEPARATE `<text>`
+  doc.child (2 leaves, no group) and `sequence_fragments` = `<rect>` [+ label-bg `<rect>` + label `<text>`]
+  (2-3 leaves, no group) — same bare-leaf shape as activations → expected WASH too. Do NOT pursue unless a
+  profile shows their text/tspan Element build (not the rect) is hot. The sequence render extension frontier
+  is effectively CLOSED after bands (the only group-wrapped one).
+
+  Agent: (Opus 4.8, this session)
