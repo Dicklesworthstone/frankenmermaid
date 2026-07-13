@@ -14533,3 +14533,28 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   peer formatting drift outside this hunk; the capacity arm and new benchmark row are formatted. Measured candidate
   parser SHA-256 was `fdea01a710c1024892756e8be37d8a41033ecd5d3afb69fa94a11153ddce429d`; final
   `ir_builder.rs` SHA-256 is `560fe6bde41935e91d255f920bced3c8bf79c830554313f90ba438075e8ba514` after comment-only clarification.
+
+### REJECT: memmem the `parse_init_directives` `%%{` gate — input-dependent, regresses comment-heavy (2026-07-12)
+
+- **Negative-ledger first / lever:** `parse_init_directives` runs on every parse of every diagram type and
+  early-outs on `!input.contains("%%{")`. The landed sibling `12587e0` converted the two *other* post-parse
+  gates (`extract_style_directives` `class`/`style`/`linkStyle`; `extract_accessibility_directives`
+  `accTitle`/`accDescr`) from `str::contains` to `memchr::memmem::find` for a measured win, so extending the same
+  swap to the `%%{` gate looked free. It is not.
+- **Isomorphism:** `memmem::find(bytes, b"%%{").is_none()` is the identical ASCII-substring presence test as
+  `!input.contains("%%{")` (byte-identical output); only the scan implementation changes.
+- **Measurement (local deterministic `perf stat -e instructions:u`, load-independent; NOT strict-remote — this is
+  an instruction-count reject, no wall-time entered the verdict):**
+  - No-`%` inputs (flowchart 1000 + timeline 1600 + er 256, 500 iters): OLD `contains` 11,449,533,425 → NEW
+    `memmem` 11,443,317,750 = **-6.2M instr (-0.054%)**, a marginal win.
+  - Comment-heavy input (flowchart 1000 with 1000 leading `%%` comment lines, 1000 iters): OLD 4,453,646,299 →
+    NEW 4,470,584,479 = **+16.9M instr (+0.38% REGRESSION)**. Variance <2k/3 rounds on both.
+- **Root cause / refined rule:** for the very short 3-byte needle `%%{`, `str::contains` hits a std short-needle
+  fast path that beats `memmem::find`'s per-call SIMD-prefilter construction; the net sign flips with input, and
+  the realistic comment-heavy case (`%%` is common in hand-written mermaid) regresses. The `12587e0` swap does NOT
+  share this failure — its needles are 5–9 bytes; re-measured on the SAME comment-heavy timeline+er workload it is
+  `contains` 11,520,908,356 → `memmem` 11,475,244,211 = **-0.40%** (a *larger* win than its -0.21% no-comment
+  measurement), so `12587e0` stays. **Rule: `str::contains(needle)` → `memmem::find` only pays for needles ≥5
+  bytes; for ≤3-byte needles keep `str::contains`.**
+- **Verdict:** **REJECT.** The candidate was reverted; `mermaid_parser.rs` is byte-identical to HEAD (`12587e0`).
+  Do not retry the `memmem` swap on the `%%{` init gate (or any ≤3-byte-needle whole-input gate).
