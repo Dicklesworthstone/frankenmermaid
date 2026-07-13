@@ -496,25 +496,31 @@ fn parse_dot_node_fragment(raw: &str) -> Option<DotNode> {
     Some(DotNode { id, label, shape })
 }
 
-fn extract_dot_attribute_raw(attributes: &str, key: &str) -> Option<String> {
-    let mut chars = attributes.chars().peekable();
+fn extract_dot_attribute_raw<'a>(attributes: &'a str, key: &str) -> Option<Cow<'a, str>> {
+    // `char_indices` lets the key and value be returned as BORROWED slices of `attributes` instead
+    // of char-by-char-built Strings: the key token and every value form except the (malformed)
+    // unterminated-quoted case are contiguous substrings. Byte-identical to the prior String build
+    // — the quoted value keeps escapes verbatim, so it is exactly the span from the opening `"` to
+    // the closing `"` inclusive; an unterminated quote still gets the same synthetic closing `"`
+    // (the only case that allocates, via `Cow::Owned`).
+    let mut chars = attributes.char_indices().peekable();
 
-    while let Some(ch) = chars.next() {
+    while let Some((key_start, ch)) = chars.next() {
         if ch.is_whitespace() || ch == '[' || ch == ']' || ch == ',' {
             continue;
         }
 
-        let mut current_key = String::new();
-        current_key.push(ch);
-        while let Some(&c) = chars.peek() {
+        let mut key_end = attributes.len();
+        while let Some(&(idx, c)) = chars.peek() {
             if c == '=' || c.is_whitespace() || c == '[' || c == ']' || c == ',' {
+                key_end = idx;
                 break;
             }
-            current_key.push(c);
             chars.next();
         }
+        let current_key = &attributes[key_start..key_end];
 
-        while let Some(&c) = chars.peek() {
+        while let Some(&(_, c)) = chars.peek() {
             if c.is_whitespace() {
                 chars.next();
             } else {
@@ -523,10 +529,10 @@ fn extract_dot_attribute_raw(attributes: &str, key: &str) -> Option<String> {
         }
 
         let mut has_eq = false;
-        if chars.peek() == Some(&'=') {
+        if let Some(&(_, '=')) = chars.peek() {
             has_eq = true;
             chars.next();
-            while let Some(&c) = chars.peek() {
+            while let Some(&(_, c)) = chars.peek() {
                 if c.is_whitespace() {
                     chars.next();
                 } else {
@@ -535,34 +541,37 @@ fn extract_dot_attribute_raw(attributes: &str, key: &str) -> Option<String> {
             }
         }
 
-        let mut current_val = String::new();
-        if has_eq && let Some(&c) = chars.peek() {
+        let mut current_val: Cow<'_, str> = Cow::Borrowed("");
+        if has_eq && let Some(&(val_start, c)) = chars.peek() {
             if c == '"' {
                 chars.next();
-                // Seed the opening quote and append the closing quote in place instead of
-                // wrapping via `format!("\"{current_val}\"")`, which allocates a second buffer
-                // and re-copies the whole value. Byte-identical: the closing `"` is pushed
-                // unconditionally after the loop (matching the old `format!` wrap even when the
-                // quoted value is unterminated).
-                current_val.push('"');
                 let mut escaped = false;
-                for vc in chars.by_ref() {
+                let mut close_idx = None;
+                while let Some(&(idx, vc)) = chars.peek() {
                     if escaped {
-                        current_val.push(vc);
                         escaped = false;
+                        chars.next();
                     } else if vc == '\\' {
                         escaped = true;
-                        current_val.push(vc);
+                        chars.next();
                     } else if vc == '"' {
+                        close_idx = Some(idx);
+                        chars.next();
                         break;
                     } else {
-                        current_val.push(vc);
+                        chars.next();
                     }
                 }
-                current_val.push('"');
+                current_val = match close_idx {
+                    // From the opening `"` (val_start) to the closing `"` inclusive.
+                    Some(ci) => Cow::Borrowed(&attributes[val_start..ci + 1]),
+                    // Unterminated: the old loop appended a synthetic closing `"`.
+                    None => Cow::Owned(format!("{}\"", &attributes[val_start..])),
+                };
             } else {
                 let mut html_depth = 0;
-                while let Some(&vc) = chars.peek() {
+                let mut val_end = attributes.len();
+                while let Some(&(idx, vc)) = chars.peek() {
                     if vc == '<' {
                         html_depth += 1;
                     } else if vc == '>' && html_depth > 0 {
@@ -570,11 +579,12 @@ fn extract_dot_attribute_raw(attributes: &str, key: &str) -> Option<String> {
                     }
 
                     if html_depth == 0 && (vc.is_whitespace() || vc == ',' || vc == ']') {
+                        val_end = idx;
                         break;
                     }
-                    current_val.push(vc);
                     chars.next();
                 }
+                current_val = Cow::Borrowed(&attributes[val_start..val_end]);
             }
         }
 
@@ -1508,13 +1518,13 @@ fn dot_compass_points_stripped() {
 fn extract_attribute_with_spaces() {
     let attr = "shape = box";
     assert_eq!(
-        extract_dot_attribute_raw(attr, "shape"),
-        Some("box".to_string())
+        extract_dot_attribute_raw(attr, "shape").as_deref(),
+        Some("box")
     );
     let attr2 = "shape= box";
     assert_eq!(
-        extract_dot_attribute_raw(attr2, "shape"),
-        Some("box".to_string())
+        extract_dot_attribute_raw(attr2, "shape").as_deref(),
+        Some("box")
     );
 }
 
