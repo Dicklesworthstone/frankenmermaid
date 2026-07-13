@@ -2605,8 +2605,17 @@ fn render_layout_to_svg(
         );
     }
 
-    for band in &layout.extensions.bands {
-        doc = doc.child(render_layout_band(band, offset_x, offset_y, config));
+    // Stream all bands (sequence lifelines / journey sections / xychart columns) into ONE raw fragment
+    // instead of building N `<g><rect/></g>` element trees as separate `doc.child`ren. Byte-identical:
+    // `write_layout_band_into` emits the same bytes `render_layout_band(..).write_to_string` does, and the
+    // concatenated children serialize identically to the same sequence of `doc.child`ren. For sequence
+    // diagrams these lifeline bands are the LAST per-item Element-build loop (nodes + messages stream).
+    if !layout.extensions.bands.is_empty() {
+        let mut bands_svg = String::new();
+        for band in &layout.extensions.bands {
+            write_layout_band_into(&mut bands_svg, band, offset_x, offset_y, config);
+        }
+        doc = doc.child(Element::raw_svg(bands_svg));
     }
     for tick in &layout.extensions.axis_ticks {
         doc = doc.child(render_layout_axis_tick(
@@ -3380,6 +3389,73 @@ fn layout_svg_capacity_hint(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> us
         + auxiliary_items.saturating_mul(AUXILIARY_ITEM_BYTES)
 }
 
+/// Stream a layout band (`<g class="fm-band fm-band-…"><rect/>[<text>label</text>]</g>`) directly into
+/// `out`, byte-identical to [`render_layout_band`]'s `Element`. The rect attrs replicate that builder's
+/// call order exactly (`x y width height rx fill stroke stroke-width stroke-dasharray fill-opacity
+/// stroke-opacity`); float attrs go through `write_number_into` (so `0.8`→`"0.80"`). The optional band
+/// label is rare (journey sections / xychart columns; sequence lifelines are unlabelled), so it reuses the
+/// exact `TextBuilder` `Element` written in place — no from-scratch text replication. Lets the bands loop
+/// stream N group+rect `Element`s into one raw fragment instead of N `doc.child` element trees.
+fn write_layout_band_into(
+    out: &mut String,
+    band: &LayoutBand,
+    offset_x: f32,
+    offset_y: f32,
+    config: &SvgRenderConfig,
+) {
+    use crate::attributes::{write_escaped_attr, write_number_into};
+    let (fill, stroke, class_name) = match band.kind {
+        LayoutBandKind::Section => (
+            "rgba(191,219,254,0.18)",
+            "#bfd7ff",
+            "fm-band fm-band-section",
+        ),
+        LayoutBandKind::Lane => ("rgba(196,181,253,0.14)", "#c4b5fd", "fm-band fm-band-lane"),
+        LayoutBandKind::Column => (
+            "rgba(254,240,138,0.16)",
+            "#fde68a",
+            "fm-band fm-band-column",
+        ),
+    };
+    out.push_str("<g class=\"");
+    out.push_str(class_name);
+    out.push_str("\"><rect x=\"");
+    let _ = write_number_into(out, band.bounds.x + offset_x);
+    out.push_str("\" y=\"");
+    let _ = write_number_into(out, band.bounds.y + offset_y);
+    out.push_str("\" width=\"");
+    let _ = write_number_into(out, band.bounds.width);
+    out.push_str("\" height=\"");
+    let _ = write_number_into(out, band.bounds.height);
+    out.push_str("\" rx=\"");
+    let _ = write_number_into(out, config.rounded_corners.max(4.0));
+    out.push_str("\" fill=\"");
+    let _ = write_escaped_attr(out, fill);
+    out.push_str("\" stroke=\"");
+    let _ = write_escaped_attr(out, stroke);
+    out.push_str("\" stroke-width=\"1\" stroke-dasharray=\"6,4\" fill-opacity=\"");
+    let _ = write_number_into(out, 0.8);
+    out.push_str("\" stroke-opacity=\"");
+    let _ = write_number_into(out, 0.9);
+    out.push_str("\"/>");
+    if !band.label.is_empty() {
+        // Rare labelled band: reuse the exact slow-path `TextBuilder` `Element`, written in place.
+        TextBuilder::new(&band.label)
+            .x(band.bounds.x + offset_x + 8.0)
+            .y(band.bounds.y + offset_y + 16.0)
+            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+            .font_size(clamp_font_size(config.font_size * 0.82, config.min_font_size))
+            .fill("var(--fm-text-color, #4a5568)")
+            .class("fm-band-label")
+            .build()
+            .write_to_string(out);
+    }
+    out.push_str("</g>");
+}
+
+/// The `Element`-building band renderer, now superseded by [`write_layout_band_into`] on the render path
+/// and retained only as the byte-identity oracle for `layout_band_streaming_matches_element`.
+#[cfg(test)]
 fn render_layout_band(
     band: &LayoutBand,
     offset_x: f32,
@@ -12471,6 +12547,38 @@ mod tests {
         assert!(svg.contains("fm-band-label"));
         assert!(svg.contains("fm-axis-tick"));
         assert!(svg.contains("2026-02-01"));
+    }
+
+    /// The streamed band fragment (`write_layout_band_into`) must be byte-identical to the `Element` the
+    /// slow path builds (`render_layout_band`), across every kind and both labelled and unlabelled bands
+    /// (sequence lifelines are unlabelled `Lane`s; journey sections / xychart columns carry a label).
+    #[test]
+    fn layout_band_streaming_matches_element() {
+        let config = SvgRenderConfig::default();
+        let kinds = [
+            LayoutBandKind::Section,
+            LayoutBandKind::Lane,
+            LayoutBandKind::Column,
+        ];
+        for kind in kinds {
+            for label in ["", "Phase <1> & more"] {
+                let band = LayoutBand {
+                    kind,
+                    label: label.to_string(),
+                    bounds: fm_layout::LayoutRect {
+                        x: 12.5,
+                        y: 24.0,
+                        width: 180.0,
+                        height: 83.5,
+                    },
+                };
+                let mut streamed = String::new();
+                write_layout_band_into(&mut streamed, &band, 3.0, 5.0, &config);
+                let mut slow = String::new();
+                render_layout_band(&band, 3.0, 5.0, &config).write_to_string(&mut slow);
+                assert_eq!(streamed, slow, "band kind {kind:?} label {label:?}");
+            }
+        }
     }
 
     #[test]
