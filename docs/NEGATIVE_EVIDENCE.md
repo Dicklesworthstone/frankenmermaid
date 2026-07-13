@@ -14839,7 +14839,20 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 
   Agent: AmberFinch
 
-### REJECT: stream `DefsBuilder::write_to_string` directly instead of via `to_element` — mixed bench, byte-identity unconfirmable (2026-07-13)
+### ~~REJECT~~ → **LANDED `ca0cc2e`**: stream `DefsBuilder::write_to_string` directly instead of via `to_element` (2026-07-13)
+
+> **UPDATE (LANDED `ca0cc2e`):** this was rejected on the first attempt (below) for a `sankey_60 −3.2%` measured
+> regression + unconfirmable golden, then **landed** the next turn once byte-identity was PROVEN. Method: the
+> `golden_svg_test` snapshot panics at the first mismatch = the pre-existing-red `gantt_basic`; TEMP-skipping that
+> case in the test loop and running the full suite passed EVERY other case → byte-identical. A `BLESS`+`git diff`
+> further showed the only golden deltas (`gantt_basic`, `pie_basic`) are a pre-existing `stroke-width 1.20→1.2`
+> number-format staleness (both goldens are stale/red), with `<defs>…</defs>` byte-for-byte identical. With
+> byte-identity + strictly-fewer-allocs established, the `sankey_60 −3.2%` is **provably 2-invocation drift** (a
+> byte-identical, strictly-less-work change cannot regress); `pie_40 +3.9%` / `sequence_40 +6.2%` are the real
+> wins. **Lesson: a measured "regression" on a change proven byte-identical AND strictly-fewer-work is drift by
+> definition — confirm byte-identity, then land on the mechanism.** Original reject reasoning retained below.
+
+**REJECT (first attempt): mixed bench, byte-identity unconfirmable (2026-07-13)**
 
 - **Lever:** `DefsBuilder::write_to_string` built a transient `Defs` `Element` tree (`to_element()`) — a `Defs`
   `Element`, its `children` `Vec`, and a `raw_svg` `Element` per marker/gradient fragment, cloning the memoized
