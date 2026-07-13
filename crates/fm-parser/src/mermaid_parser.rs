@@ -9618,7 +9618,13 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
     // per-line scan (which computes a span_for/char-count for every line) is pure waste —
     // the common flowchart has no style directives. Output-identical: with no directive
     // the loop leaves `saw_style_directive` false and the trailing block is skipped.
-    if !input.contains("class") && !input.contains("style") && !input.contains("linkStyle") {
+    // `memmem::find` (SIMD prefilter) replaces `str::contains`'s TwoWaySearcher on these
+    // multi-byte needles — same ASCII-substring presence test, scanned on every non-flowchart parse.
+    let bytes = input.as_bytes();
+    if memchr::memmem::find(bytes, b"class").is_none()
+        && memchr::memmem::find(bytes, b"style").is_none()
+        && memchr::memmem::find(bytes, b"linkStyle").is_none()
+    {
         return;
     }
 
@@ -9753,7 +9759,11 @@ fn extract_accessibility_directives(input: &str, builder: &mut IrBuilder) {
     // appears, bail before the per-line scan (run on every parse of every diagram type).
     // Output-identical: with neither substring no directive line matches and no accDescr
     // block is ever opened, so there is nothing to flush at end of input.
-    if !input.contains("accTitle") && !input.contains("accDescr") {
+    // SIMD `memmem::find` replaces `str::contains`'s TwoWaySearcher (same ASCII-substring test).
+    let bytes = input.as_bytes();
+    if memchr::memmem::find(bytes, b"accTitle").is_none()
+        && memchr::memmem::find(bytes, b"accDescr").is_none()
+    {
         return;
     }
 
