@@ -1748,6 +1748,27 @@
   `decode_mermaid_entities` is revisited, the lever is fusing its two `find` scans into one `position(b==&||b==#)`
   pass (byte-identical, no signature change), not the alloc.
 
+### REJECT: fuse sequence entity-marker scans with `memchr2` — lint-clean source +3.8%, no detected gain (2026-07-12)
+- **Explicit redirect tested.** The WASH above left `decode_mermaid_entities`' two full suffix searches
+  (`find('&')` plus `find('#')`, then `min`) as the next sequence-label lever. The candidate replaced them with
+  one `memchr::memchr2(b'&', b'#', ...)`; allocation, semicolon search, token decoding, and cursor advancement
+  were unchanged. `memchr2` returns the same earliest ASCII byte as the minimum of the two old searches, and the
+  focused mixed `&amp;`/numeric-entity test passed remotely.
+- **Authoritative strict-remote pair:** permanent exact row `parse/sequence/seq_12x200`, 50 samples, 2 s warm-up
+  + 8 s measure, both arms on pin-honored `vmi1293453` through `RCH_REQUIRE_REMOTE=1 ... rch exec -- cargo bench
+  -j1 --profile release -p fm-parser`. Control at `ecdd06e` was **[101.62, 103.57, 105.63] µs**; the lint-clean
+  candidate was **[104.21, 107.46, 111.52] µs**, midpoint ratio **1.03756**. Criterion's paired estimate was
+  **+1.5299%** (95% CI **−2.0169%..+4.9471%**, `p=0.39`): no detected improvement.
+- **Evidence hygiene:** an earlier candidate arm using `text[cursor..].as_bytes()` reported an apparent −10.8%,
+  but workspace Clippy rejected that exact source (`sliced_string_as_bytes`). Applying Clippy's mechanical
+  `&text.as_bytes()[cursor..]` form erased the win and exposed the later/slower point estimate. The contradictory
+  equivalent-source wall results are worker/runtime drift, not keep-quality proof; only the lint-clean final form
+  controls the verdict. Workspace check passed remotely; the Clippy failure itself caused the exact-source rescore.
+- **Verdict: REJECT.** Restored parser SHA-256 exactly to control
+  `dd28c225d0105fae415881e0dfab4769bbde8290bdf4f4b7265b4462cd885359`; shipped parser/IR/SVG bytes are unchanged.
+  Do not retry this exact `memchr2` substitution from an isolated wall-time arm without a stable null control or
+  deterministic instruction-count proof.
+
 ### REJECT: first-byte guard before `starts_with` in the operator scan — wins seq/class but +13.4% ER, +1.1% styled3 (2026-07-12)
 - **Hypothesis.** A `seq 300` parse profile showed `__memcmp_avx2_movbe` (a **libc call**) at **12.55%** — `find_operator_core`'s
   inner loop `for op in operators { if tail.starts_with(op) … }` lowers each `starts_with` to a libc `memcmp`, and at a
