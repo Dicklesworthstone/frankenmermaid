@@ -1825,6 +1825,33 @@
   `--baseline`/`--save-baseline` flags before sampling; one retry hit RCH dependency-preflight `RCH-E412` and strict
   remote-only mode refused local fallback. Neither run contributed timing evidence.
 
+### WIN: stop the operator scan at the first table-ordered match — state parse −24.0% midpoint (2026-07-12)
+- **Negative-ledger-first redirect.** The scalar per-operator first-byte guard above was a mixed-family reject, and the
+  sequence-only bucket follow-up was too noisy to ship. This candidate leaves the vectorization-sensitive miss path and
+  every operator table unchanged. It targets only the redundant work *after* a successful match: `find_operator_core`
+  previously remembered the longest match but still probed every remaining operator at that byte position.
+- **Lever:** return immediately from the existing `tail.starts_with(operator)` success branch. The common state `-->`
+  token is the sixth of 14 flow operators, so a successful edge no longer performs the eight guaranteed-useless suffix
+  probes. No new branch is added to the pre-match loop.
+- **Behavior proof:** all five live tables (flow, sequence, class, packet, ER) already place every longer token before its
+  shorter prefix. A new exhaustive invariant test rejects any later operator for which `later.starts_with(earlier)`,
+  including accidental duplicates. Therefore the first match is exactly the previous longest match; leftmost byte,
+  arrow type, and table-order tie priority are unchanged.
+- **Strict remote-only same-worker A/B:** exact permanent row `parse/state/state_100`, 50 samples, 2 s warm-up + 8 s
+  measurement, both arms on pin-honored `vmi1149989`; `parse_bench.rs` SHA-256
+  `37771f5d2ebaede0d56b881658d143f000da09329e69c78fed5043eccb1830eb` and `Cargo.lock` SHA-256
+  `b7c9fab36b1085a6f3f61fedb2464bae6b27059a01d55055a8129e5003833309` were unchanged. Control at `9cdbe14` was
+  **[83.229, 89.397, 95.194] µs**; candidate was **[66.848, 67.950, 69.239] µs**, midpoint ratio **0.7601**
+  (**−23.99%**). Criterion's paired estimate was **−17.774%** (95% CI **−26.619%..−8.7263%**, `p=0.00`): a clear
+  improvement despite the noisy control tail.
+- **Validation:** strict remote-only `cargo test -p fm-parser` passed all **409** tests; strict remote-only
+  `cargo clippy -p fm-parser --all-targets -- -D warnings`, `cargo check --workspace --all-targets`, and
+  `cargo clippy --workspace --all-targets -- -D warnings` passed. `git diff --check` was clean, and no UBS finding
+  pointed at either changed hunk; UBS's whole-file findings were pre-existing parser-test inventory and token-classification
+  false positives.
+- **Verdict: WIN.** Keep the first-match return plus the table-order invariant. This is distinct from the rejected
+  first-byte guard: misses use the exact prior `starts_with` loop, while successful scans stop once their result is known.
+
 ### REJECT: fuse the fast-node reject + `[`-locate scans into one table-driven pass — +0.74% parse REGRESSION (2026-07-12)
 - **Hypothesis (looked obvious):** `parse_fast_simple_flowchart_node_borrowed` (10.17% self on the
   flowchart/800 parse profile) does two byte scans per statement — a reject `.bytes().any(matches!(byte,

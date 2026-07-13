@@ -7807,7 +7807,9 @@ fn find_operator_from_index<'a>(
 /// `operators` starts with ASCII byte `b`. Every operator starts with one specific ASCII byte (`-`,
 /// `<`, etc.), so at a position whose byte can't start ANY operator the `starts_with` loop is
 /// guaranteed to miss — skipping it turns the O(chars × operators) sweep into O(operator-start
-/// positions × operators). Byte-identical: the gate only skips positions the loop would reject.
+/// positions × operators). Operator tables must put a token before every shorter prefix of that
+/// token, so the first match is also the longest match. Byte-identical: the gate only skips positions
+/// the loop would reject, and table-order ties retain their existing priority.
 fn find_operator_core<'a>(
     statement: &str,
     start_index: usize,
@@ -7891,18 +7893,10 @@ fn find_operator_core<'a>(
         }
 
         let tail = &statement[idx..];
-        let mut best_match: Option<(&str, ArrowType)> = None;
         for (operator, arrow) in operators {
             if tail.starts_with(operator) {
-                match best_match {
-                    Some((best_operator, _)) if operator.len() <= best_operator.len() => {}
-                    _ => best_match = Some((operator, *arrow)),
-                }
+                return Some((idx, operator, *arrow));
             }
-        }
-
-        if let Some((operator, arrow)) = best_match {
-            return Some((idx, operator, arrow));
         }
     }
 
@@ -9870,8 +9864,8 @@ mod tests {
     };
 
     use super::{
-        FLOW_OP_GATE, FLOW_OPERATORS, STYLE_DIRECTIVE_DIAGNOSTIC_MESSAGE, byte_lines,
-        flow_statement_parser,
+        CLASS_OPERATORS, ER_OPERATORS, FLOW_OP_GATE, FLOW_OPERATORS, PACKET_OPERATORS,
+        SEQUENCE_OPERATORS, STYLE_DIRECTIVE_DIAGNOSTIC_MESSAGE, byte_lines, flow_statement_parser,
         is_dangling_placeholder_node_id, parse_edge_statement_asts,
         parse_fast_simple_flowchart_statement_ast, parse_mermaid,
     };
@@ -9904,6 +9898,26 @@ mod tests {
             let expected: Vec<&str> = case.lines().collect();
             let got: Vec<&str> = byte_lines(case).collect();
             assert_eq!(got, expected, "byte_lines mismatch for {case:?}");
+        }
+    }
+
+    #[test]
+    fn operator_tables_are_longest_prefix_first() {
+        for (table_name, operators) in [
+            ("flow", FLOW_OPERATORS.as_slice()),
+            ("sequence", SEQUENCE_OPERATORS.as_slice()),
+            ("class", CLASS_OPERATORS.as_slice()),
+            ("packet", PACKET_OPERATORS.as_slice()),
+            ("er", ER_OPERATORS.as_slice()),
+        ] {
+            for (index, (earlier, _)) in operators.iter().enumerate() {
+                for (later, _) in &operators[index + 1..] {
+                    assert!(
+                        !later.starts_with(earlier),
+                        "{table_name} operator {later:?} must precede its prefix {earlier:?}"
+                    );
+                }
+            }
         }
     }
 
