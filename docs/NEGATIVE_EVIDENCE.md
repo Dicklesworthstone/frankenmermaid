@@ -14499,3 +14499,37 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   `79cd7a4b029dc506d100cd89ceb668c484512c4920c643e9ffcaf7f6670a2c1e`; candidate parser SHA-256 was
   `849210b3fa272e438946ea65382eef7e5610d2ae4dad49081b68400aae3d42bd`. No local or cross-worker timing entered
   the verdict. Do not retry this exact three-call owned-ID handoff on the common 1,600-period/event workload.
+
+### WIN: Timeline two-nodes-per-line capacity removes the final node/label growth wave (2026-07-12)
+
+- **Negative-ledger first:** no exact Timeline-only `2 * input_lines` capacity attempt existed in the ledger,
+  history, reflogs, or stashes. The adjacent `06700b4` one-per-line keep measured Timeline -1.42% but explicitly
+  left `LabelBucket::reserve_rehash` at 3.57% and member-set rehashing at 2.82% because each Timeline data line
+  creates a period plus an event. Rejected edge-capacity scans are distinct and remain closed; edge sizing is
+  unchanged here.
+- **One lever:** split `DiagramType::Timeline` from the other node-per-line diagrams and reserve
+  `input_lines.saturating_mul(2)` nodes and labels. On the 1,642-line seam this gives a 3,284-entry hint for 3,200
+  nodes/labels and both 3,200-entry member sets. This right-sizes the IR node/graph-node/label vectors,
+  `NodeIdIndex`, `LabelIndex`, and the first-section cluster/subgraph member sets without adding a scan.
+- **Isomorphism:** only allocation capacities change. Indexes are lookup-only, member sets only gate append-order
+  vectors, and every node, label, edge, diagnostic, span, class, insertion order, floating-point operation,
+  tie-break, and RNG path is unchanged.
+- **Authoritative strict-remote pair:** both valid arms used the permanent parser-only
+  `parse/timeline/timeline_1600` seam and actual worker `vmi1227854` via `RCH_REQUIRE_REMOTE=1
+  RCH_QUEUE_WHEN_BUSY=1 RCH_WORKER=vmi1227854 env -u CARGO_TARGET_DIR rch exec -- cargo bench -j1 --profile
+  release -p fm-parser --bench parse_bench -- parse/timeline/timeline_1600 --exact --warm-up-time 2
+  --measurement-time 5 --sample-size 30 --noplot`; baseline name was `timeline-capacity-d8d256f`. The matching
+  arms used identical peer `lib.rs` / `mermaid_parser.rs` SHA-256 values
+  `a421b7909472d7053972203299d57bcdbc8c7a8e9871a877ebfb99ca5cb8cc06` /
+  `b7877e330301fe66ae61a6e60868439400ffafde56aa863cf3403a7d3964dc37` and bench SHA-256
+  `37771f5d2ebaede0d56b881658d143f000da09329e69c78fed5043eccb1830eb`. A second baseline on
+  `vmi1293453` was discarded because the peer file differed; no cross-worker or local timing entered the result.
+- **Result:** ORIG Criterion median **1.900771 ms** (95% CI **1.779848..1.958656 ms**) versus CAND
+  **1.446254 ms** (**1.395710..1.531296 ms**), CAND/ORIG **0.76088**. The paired median change was **-23.9123%**
+  (95% CI **-27.5501%..-18.1037%**); Criterion reported improvement at `p = 0.00`.
+- **Validation / verdict:** **WIN / KEEP.** Strict-remote `cargo test -j1 -p fm-parser timeline_` passed 9/9;
+  workspace `cargo check --all-targets` and Clippy `-D warnings` passed on `vmi1293453` / `vmi1156319`.
+  `git diff --check` passed for both owned files. The repository-wide formatter remains blocked only by pre-existing
+  peer formatting drift outside this hunk; the capacity arm and new benchmark row are formatted. Measured candidate
+  parser SHA-256 was `fdea01a710c1024892756e8be37d8a41033ecd5d3afb69fa94a11153ddce429d`; final
+  `ir_builder.rs` SHA-256 is `560fe6bde41935e91d255f920bced3c8bf79c830554313f90ba438075e8ba514` after comment-only clarification.

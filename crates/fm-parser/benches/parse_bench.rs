@@ -160,6 +160,21 @@ fn gen_journey(steps: usize) -> String {
     s
 }
 
+/// A timeline with one period and one event node per data line.
+fn gen_timeline(event_count: usize) -> String {
+    let mut lines = vec![String::from("timeline"), String::from("  title Timeline")];
+    let sections = ((event_count as f64).sqrt() as usize).max(2);
+    for section in 0..sections {
+        lines.push(format!("  section Period {section}"));
+        let per_section = event_count / sections;
+        for item in 0..per_section {
+            let index = section * per_section + item;
+            lines.push(format!("    {} : Event {index}", 2000 + index));
+        }
+    }
+    lines.join("\n")
+}
+
 /// A Kanban board with roughly square column/card dimensions — exercises card interning,
 /// class assignment, and cluster/subgraph membership on the common no-metadata path.
 fn gen_kanban(cards: usize) -> String {
@@ -298,6 +313,15 @@ fn bench_parse(c: &mut Criterion) {
             b.iter(|| fm_parser::parse(input));
         });
     }
+
+    let input = gen_timeline(1600);
+    group.bench_with_input(
+        BenchmarkId::new("timeline", "timeline_1600"),
+        &input,
+        |b, input| {
+            b.iter(|| fm_parser::parse(input));
+        },
+    );
 
     for (label, cards) in [("kanban_400", 400_usize), ("kanban_1600", 1600_usize)] {
         let input = gen_kanban(cards);

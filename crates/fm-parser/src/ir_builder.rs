@@ -272,17 +272,17 @@ impl IrBuilder {
     ///
     /// Heuristic: each non-empty input line produces ~0.5 nodes and ~0.3 edges.
     pub(crate) fn with_capacity_hint(diagram_type: DiagramType, input_lines: usize) -> Self {
-        // NODE-PER-LINE diagrams (timeline/journey/gantt/mindmap/kanban/pie/xychart — each meaningful line
-        // declares a labelled node/item) have ~`input_lines` distinct nodes AND labels; EDGE-HEAVY diagrams
-        // (flowchart/er/state/class — nodes shared across many edge lines) have ~`input_lines/2`. Sizing the
+        // Timeline creates a period AND event node per data line, so it needs ~`2 * input_lines` nodes/labels.
+        // Other NODE-PER-LINE diagrams (journey/gantt/mindmap/kanban/pie/xychart) need ~`input_lines`, while
+        // EDGE-HEAVY diagrams (flowchart/er/state/class) need ~`input_lines/2`. Sizing the
         // node & label indexes per-type shrinks the `NodeIdIndex`/`LabelIndex`/member-set `reserve_rehash`
         // (the `/2` estimate was ~2-4× short — timeline builds a year + event node per line) WITHOUT
         // over-reserving the edge-heavy common case (the `_` arm is byte-for-byte unchanged: flowchart/er
         // NEUTRAL). `with_capacity_hint` runs once per parse (cold) ⇒ no hot-path codegen change.
         // Capacity-only ⇒ behavior-identical.
         let estimated_nodes = match diagram_type {
-            DiagramType::Timeline
-            | DiagramType::Journey
+            DiagramType::Timeline => input_lines.saturating_mul(2).max(4),
+            DiagramType::Journey
             | DiagramType::Gantt
             | DiagramType::Mindmap
             | DiagramType::Kanban
