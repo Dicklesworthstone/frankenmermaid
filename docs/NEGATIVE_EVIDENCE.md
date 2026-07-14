@@ -15808,3 +15808,23 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
 - **Verdict: KEEP / LANDED.**
 
   Agent: (Opus 4.8, this session)
+
+### ❌REJECTED: reuse the rank `Vec` buffer (get_mut+clear+extend) vs `insert(rank, collect())` in barycenter — scc_300 +4.9% (2026-07-13)
+
+- **Follow-on to the current_order clone win (983570cd).** `reorder_rank_by_barycenter` ends its SINGLE_PASS branch
+  with `ordering_by_rank.insert(rank, scored_nodes…collect())` (a fresh `Vec<usize>` alloc per rank per sweep).
+  Tried reusing the rank's existing buffer: `get_mut(&rank).clear() + extend(…)`. Byte-identical (same sequence;
+  rank guaranteed present).
+- **Same-pinned-pool A/B (Criterion vs `bcbase2` = 983570cd):** scc_100 −2.01% (p=0.12), **scc_300 +4.94%
+  REGRESSION (change CI [+2.51%, +7.56%], p=0.00)**, scc_600 +2.77% (p=0.06). Opposite-direction significant swing
+  = code-layout noise; net a regression. REJECT.
+- **⭐⭐⭐WHY THIS WASHED/REGRESSED where the current_order CLONE deletion WON (−6.65%): work-removal vs
+  alloc-only-removal.** The current_order `.cloned()` deletion removed a real COPY (rank_width usizes) AND its
+  alloc. This buffer-reuse removes ONLY the ALLOCATION — the O(n) fill happens either way (`collect` vs `extend`),
+  and the alloc is mimalloc free-list-recycled → the net work change is below the code-layout floor even in the 47%
+  barycenter loop, so noise dominates. LESSON (refines "barycenter is a live clone/alloc-deletion surface"): only
+  CLONE/COPY-deletions (remove real per-call work) clear the floor there; buffer-reuse / insert→get_mut-extend
+  removes just a free-list alloc = wash-or-noise. Don't chase alloc-only reductions even in a hot loop.
+- **Verdict: REJECT.** Reverted; lib.rs byte-identical to 983570cd.
+
+  Agent: (Opus 4.8, this session)
