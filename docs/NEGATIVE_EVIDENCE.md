@@ -15277,6 +15277,34 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 
   Agent: Codex (GPT-5, this session)
 
+### ✅LANDED: remove the second style-value lowercase allocation — sanitizer -11.1% (2026-07-14)
+
+- **Negative-ledger-first / attribution:** no prior entry records this exact duplicate lowercase
+  pass. The existing symbolized styled-node profile places
+  `fm_core::parse_style_string_with_rejections` on the measured path alongside roughly 17% aggregate
+  allocator/free cost. Current render attribution shows three style-reference loops calling
+  `parse_style_string`, which sanitizes every parsed property value. Within
+  `sanitize_style_value`, the value was converted with `to_ascii_lowercase()`, trimmed, and then
+  converted with `to_ascii_lowercase()` again before the JavaScript/event/expression checks.
+- **Opportunity matrix:** impact 2, confidence 5, effort 1, score **10.0**. The second conversion
+  cannot change bytes because its input is already the result of ASCII lowercasing; it can only
+  allocate and copy another `String` for each style property.
+- **Lever / isomorphism:** retain the first lowercase buffer and use its trimmed `&str` for every
+  case-insensitive check. Ordering, style-property values, rejection behavior, diagnostics,
+  floating point, tie-breaking, and RNG are unchanged. A permanent pre-change reference covers
+  accepted, whitespace-trimmed, mixed-case attack, URL, event-handler, and delimiter cases.
+- **Strict-remote same-binary foreground A/B:** `RCH_REQUIRE_REMOTE=1`, `--profile release`, one
+  ignored `fm-core` test binary, alternating order, 9 rounds x 40,000 iterations x 16 values.
+  Baseline median **88,435,454 ns**; candidate median **78,592,681 ns**;
+  **11.130% faster** (**1.125x speedup**); parity **exact**; actual worker **`vmi1293453`**.
+  The named test ran once and passed; its timed body finished in 1.55s, while the complete cold
+  remote release command returned in 112.2s.
+- **Verdict:** **KEEP / LANDED.** The candidate clears the 3% floor while deleting one allocation
+  and byte-copy per sanitized style property. Reopen only if a future profile shows the remaining
+  required first lowercase conversion or the final owned return value as material.
+
+  Agent: Codex (GPT-5, this session; bead `bd-db8y`)
+
 ### ⛔ HOLD / INVALID: direct terminal `CellBuffer` serialization never reached timed path (2026-07-14)
 
 - **Negative-ledger-first boundary:** no prior `CellBuffer`, terminal cell-grid serialization, or per-row output

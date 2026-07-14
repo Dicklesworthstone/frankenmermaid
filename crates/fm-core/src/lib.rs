@@ -1796,7 +1796,7 @@ pub fn is_allowed_style_property(property: &str) -> bool {
 #[must_use]
 pub fn sanitize_style_value(value: &str) -> Option<String> {
     let lower = value.to_ascii_lowercase();
-    let trimmed = lower.trim();
+    let lower_trimmed = lower.trim();
 
     let contains_url_function = |input: &str| -> bool {
         let bytes = input.as_bytes();
@@ -1825,23 +1825,22 @@ pub fn sanitize_style_value(value: &str) -> Option<String> {
     };
 
     // Reject url() values — can load external resources.
-    if contains_url_function(trimmed) {
+    if contains_url_function(lower_trimmed) {
         return None;
     }
     // Reject CSS comment markers to prevent obfuscated url()/javascript: payloads.
     if value.contains("/*") || value.contains("*/") {
         return None;
     }
-    let lower = trimmed.to_ascii_lowercase();
     // Reject javascript: protocol (case-insensitive).
-    if lower.contains("javascript:") {
+    if lower_trimmed.contains("javascript:") {
         return None;
     }
     // Reject event-handler attributes smuggled as values.
-    if lower.contains("onclick")
-        || lower.contains("onerror")
-        || lower.contains("onload")
-        || lower.contains("onmouseover")
+    if lower_trimmed.contains("onclick")
+        || lower_trimmed.contains("onerror")
+        || lower_trimmed.contains("onload")
+        || lower_trimmed.contains("onmouseover")
     {
         return None;
     }
@@ -1858,7 +1857,7 @@ pub fn sanitize_style_value(value: &str) -> Option<String> {
         return None;
     }
     // Reject expression() (IE legacy XSS vector).
-    if lower.contains("expression(") {
+    if lower_trimmed.contains("expression(") {
         return None;
     }
 
@@ -8209,6 +8208,162 @@ mod tests {
     #[test]
     fn sanitize_trims_whitespace() {
         assert_eq!(sanitize_style_value("  #fff  ").unwrap(), "#fff");
+    }
+
+    fn sanitize_style_value_double_lowercase_reference(value: &str) -> Option<String> {
+        let lower = value.to_ascii_lowercase();
+        let trimmed = lower.trim();
+
+        let contains_url_function = |input: &str| -> bool {
+            let bytes = input.as_bytes();
+            let mut index = 0usize;
+            while index + 3 <= bytes.len() {
+                if bytes[index] == b'u' && bytes[index + 1] == b'r' && bytes[index + 2] == b'l' {
+                    if index > 0
+                        && (bytes[index - 1].is_ascii_alphanumeric()
+                            || bytes[index - 1] == b'-'
+                            || bytes[index - 1] == b'_')
+                    {
+                        index += 1;
+                        continue;
+                    }
+                    let mut cursor = index + 3;
+                    while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                        cursor += 1;
+                    }
+                    if cursor < bytes.len() && bytes[cursor] == b'(' {
+                        return true;
+                    }
+                }
+                index += 1;
+            }
+            false
+        };
+
+        if contains_url_function(trimmed) {
+            return None;
+        }
+        if value.contains("/*") || value.contains("*/") {
+            return None;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.contains("javascript:") {
+            return None;
+        }
+        if lower.contains("onclick")
+            || lower.contains("onerror")
+            || lower.contains("onload")
+            || lower.contains("onmouseover")
+        {
+            return None;
+        }
+        if value.contains('<') || value.contains('>') {
+            return None;
+        }
+        if value.contains('{') || value.contains('}') {
+            return None;
+        }
+        if value.contains('\\') || value.chars().any(char::is_control) {
+            return None;
+        }
+        if lower.contains("expression(") {
+            return None;
+        }
+
+        Some(value.trim().to_owned())
+    }
+
+    const SANITIZE_STYLE_VALUE_PERF_CORPUS: &[&str] = &[
+        "#f9f",
+        "  #334155  ",
+        "2px",
+        "0.75",
+        "rgb(255,128,0)",
+        "rgba(15,23,42,0.65)",
+        "bold",
+        "Inter, sans-serif",
+        "drop-shadow(0 1px 2px #000)",
+        "5,5,10",
+        "round",
+        "none",
+        "JaVaScRiPt:alert(1)",
+        "url (#marker)",
+        "OnLoAd=alert(1)",
+        "red} .evil{color:red",
+    ];
+
+    #[test]
+    fn sanitize_style_value_single_lowercase_matches_reference() {
+        for value in SANITIZE_STYLE_VALUE_PERF_CORPUS {
+            assert_eq!(
+                sanitize_style_value(value),
+                sanitize_style_value_double_lowercase_reference(value),
+                "style value {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "manual short release A/B"]
+    fn perf_sanitize_style_value_redundant_lowercase_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ITERATIONS: usize = 40_000;
+        const ROUNDS: usize = 9;
+
+        fn measure(
+            sanitizer: fn(&str) -> Option<String>,
+            iterations: usize,
+        ) -> std::time::Duration {
+            let started = Instant::now();
+            for _ in 0..iterations {
+                for value in SANITIZE_STYLE_VALUE_PERF_CORPUS {
+                    black_box(sanitizer(black_box(value)));
+                }
+            }
+            started.elapsed()
+        }
+
+        for value in SANITIZE_STYLE_VALUE_PERF_CORPUS {
+            assert_eq!(
+                sanitize_style_value(value),
+                sanitize_style_value_double_lowercase_reference(value)
+            );
+        }
+
+        black_box(measure(
+            sanitize_style_value_double_lowercase_reference,
+            ITERATIONS / 10,
+        ));
+        black_box(measure(sanitize_style_value, ITERATIONS / 10));
+
+        let mut baseline_ns = Vec::with_capacity(ROUNDS);
+        let mut candidate_ns = Vec::with_capacity(ROUNDS);
+        for round in 0..ROUNDS {
+            if round % 2 == 0 {
+                baseline_ns.push(
+                    measure(sanitize_style_value_double_lowercase_reference, ITERATIONS).as_nanos(),
+                );
+                candidate_ns.push(measure(sanitize_style_value, ITERATIONS).as_nanos());
+            } else {
+                candidate_ns.push(measure(sanitize_style_value, ITERATIONS).as_nanos());
+                baseline_ns.push(
+                    measure(sanitize_style_value_double_lowercase_reference, ITERATIONS).as_nanos(),
+                );
+            }
+        }
+        baseline_ns.sort_unstable();
+        candidate_ns.sort_unstable();
+        let baseline_median_ns = baseline_ns[ROUNDS / 2];
+        let candidate_median_ns = candidate_ns[ROUNDS / 2];
+        let improvement_pct = (baseline_median_ns as f64 - candidate_median_ns as f64) * 100.0
+            / baseline_median_ns as f64;
+
+        println!(
+            "PERF sanitize_style_value redundant_lowercase baseline_median_ns={baseline_median_ns} candidate_median_ns={candidate_median_ns} improvement_pct={improvement_pct:.3} parity=exact rounds={ROUNDS} iterations={ITERATIONS} values={}",
+            SANITIZE_STYLE_VALUE_PERF_CORPUS.len()
+        );
     }
 
     #[test]
