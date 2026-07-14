@@ -15363,6 +15363,35 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 
   Agent: Codex (GPT-5, this session)
 
+### REJECT: pre-size terminal diff node output — 0.881% faster/noisy (2026-07-13)
+
+- **Ledger-first boundary:** after the landed node-ID merge and the rejected sorted-Vec index substitution,
+  `diff_nodes` still grew its public `Vec<DiffNode>` from zero. No prior terminal-diff output-capacity probe was
+  recorded; the rejected flowchart line-vector pre-scan is a different parser path and required an extra scan,
+  while this candidate reused already-known map cardinalities.
+- **Candidate:** compute `max(old_by_id.len(), new_by_id.len())` before consuming the two ordered indexes and
+  initialize `results` with that capacity. This is exact for identical/common-overlap diagrams and a safe
+  under-reservation for more-disjoint unions; ordering, counts, comparisons, cloning, and public output types are
+  unchanged.
+- **Strict-remote same-binary foreground A/B:** both arms ran inside one release test binary via
+  `RCH_REQUIRE_REMOTE=1` with no local fallback on actual worker `vmi1293453`, using `cargo test -j1 --profile
+  release -p fm-render-term diff::tests::terminal_diff_node_output_capacity_perf_probe -- --ignored --nocapture
+  --exact`. The temporary probe diffed two separately owned, identical 4,096-node IRs with deterministically
+  shuffled IDs and no edges, three calls per sample across nine alternating paired samples. Baseline median was
+  **2,739,145 ns/diff** (samples **1,671,645; 2,002,513; 2,606,420; 2,700,571; 2,739,145; 2,755,593;
+  2,877,435; 2,899,435; 3,905,110**). Candidate median was **2,715,013 ns/diff** (samples **1,562,922;
+  1,938,016; 2,317,401; 2,605,305; 2,715,013; 2,897,933; 2,988,124; 3,388,821; 3,778,327**) — only
+  **0.881% faster**, with heavily overlapping ranges.
+- **Exact-output proof:** the complete debug representation for node outputs and count tuples matched exactly,
+  producing FNV digest **`801de37df866ccd6`**. `DiffNode` is **240 bytes**, but geometric output-buffer growth is
+  still below the full-operation noise floor beside B-tree indexing and required deep node clones.
+- **Verdict:** **REJECT / WASH.** The point estimate is favorable but far below the 3% keep floor and unsupported
+  by the overlapping samples. The candidate and temporary probe were manually restored; `diff.rs` is
+  byte-identical to current `main`. Do not retry output pre-sizing alone without an allocation profile showing
+  result-vector growth above the full-operation floor.
+
+  Agent: Codex (GPT-5, this session)
+
 ### ✅LANDED (9be86bf): dense-Vec per-node rank in nodes_by_rank — layout −1.3% (2026-07-13)
 
 - `nodes_by_rank` (~3.25% layout self, runs every layout in crossing-min) did a random `ranks.get(&node_index)`
