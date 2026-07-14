@@ -15910,3 +15910,20 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
 - **Verdict: REJECT.** Reverted (8 edits; git restore is dcg-blocked); lib.rs byte-identical to 983570cd.
 
   Agent: (Opus 4.8, this session)
+
+### ❌REJECTED (confirm): egraph `layer_edges` dense-probe on `layout_dense` (the ledger-recommended bench) also washes (2026-07-13)
+
+- **Followed the prior entry's own recommendation** ("optimize egraph only with a bench where barycenter leaves
+  residual crossings"): re-applied the identical byte-safe dense-probe change and A/B'd on `layout_dense` (dense DAG
+  `gen_dense_dag`: i→{i+1,i+2,i+3,i+5}, cross-edges → barycenter should leave crossings → egraph should run).
+- **A/B (Criterion vs `densebase` = HEAD):** dense_200 +0.03% (p=0.97), dense_400 −0.46% (p=0.72), dense_800 −1.80%
+  (p=0.14, directional but NOT significant). All wash.
+- **Conclusion: the egraph/`layer_edges` optimization is dead on EVERY available bench.** The dense_800 directional
+  −1.8% (bigger than dense_200's 0%) shows egraph DOES run on dense DAGs and its `layer_edges` probes DO grow with
+  N — but `layer_edges` is a SMALL fraction of even the dense layout, so removing its O(N×E) B-tree probes is
+  sub-floor. Combined with the scc result (egraph gated out entirely), the whole egraph/`layer_edges`/`LayerOrdering`
+  surface is NOT a productive optimization target on `layout_sugiyama` OR `layout_dense`. Do not revisit without a
+  profile showing egraph as a top frame on some benched workload.
+- **Verdict: REJECT.** Reverted (8 edits again); lib.rs byte-identical to cc588036 baseline.
+
+  Agent: (Opus 4.8, this session)
