@@ -15658,3 +15658,25 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 - **Verdict: REJECT.** Reverted; lib.rs byte-identical to 2b6bdc2e.
 
   Agent: (Opus 4.8, this session)
+
+### ❌REJECTED: delete the (provably dead) per-node `outgoing.sort_by` in `rank_assignment` — code-layout noise (2026-07-13)
+
+- **The sort IS dead (byte-identical to remove).** `rank_assignment` sorts each node's `outgoing` targets by
+  `compare_priority` before the Kahn loop, but the loop pops nodes solely in the min-heap's total-key order
+  `(node_priority[node], node_index)` (node_index unique ⇒ pop order independent of push order), and `ranks` is
+  longest-path max-relaxation (order-independent); the residual-cycle fallback and component compaction iterate
+  `edges`, not `outgoing`. **Verified: 439 fm-layout lib tests pass, all non-gantt goldens match** — the only
+  golden failure (`gantt_basic`) is PRE-EXISTING (fails identically on clean HEAD; gantt uses specialized non-graph
+  layout, not `rank_assignment`). So the sort provably does nothing for output.
+- **But removing it is code-layout-noise-dominated (Criterion vs `rabase`):** scc_100 **−7.60% (p=0.00)**, scc_300
+  **+4.99% REGRESSION (p=0.00)**, scc_600 +1.32% (p=0.33). Opposite-direction SIGNIFICANT swings from deleting ~600
+  tiny (≤4-elem) one-time sorts cannot be a real algorithmic effect — it's binary-alignment/inlining noise (the
+  ~5% wall-time code-layout floor). The +5% scc_300 regression makes it a net-negative to ship.
+- **Verdict: REJECT — leave the dead sort in place.** Unlike the dedup deletion (75e3e4ad, per-node-per-PASS ×4,
+  real −2.7%), this sort is ONE-TIME and tiny, so its removal has no signal above the code-layout floor and lands
+  on the wrong side of it here. ⭐LESSON: "dead code" removal is only a perf lever when the dead work is
+  ACTUALLY HOT (per-pass/per-node-per-pass); a one-time tiny dead pass is below the code-layout-noise floor, and
+  removing it just reshuffles alignment (can regress). Don't chase one-time dead passes for perf. lib.rs reverted,
+  byte-identical to 2b6bdc2e.
+
+  Agent: (Opus 4.8, this session)
