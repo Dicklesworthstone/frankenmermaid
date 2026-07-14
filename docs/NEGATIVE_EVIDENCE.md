@@ -16671,3 +16671,24 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   infer value from allocation counts or reopen via another cold solver-stack build.
 
   Agent: Codex (GPT-5, this session)
+
+### LANDED: reserve the budget ledger's complete event lifecycle (2026-07-14)
+
+- **Negative-ledger-first boundary:** no prior `MermaidBudgetLedger` event-vector reserve or
+  lifecycle-capacity probe was recorded; the preceding WASM hold concerned a deep ledger clone and
+  never reached timing.
+- **Profile attribution:** five production CLI/WASM render paths construct a budget ledger. A normal
+  parse/layout/render lifecycle emits 11 records, or 12 under conservative telemetry. Starting with
+  `Vec::new()` grows 0→4→8→16, causing three allocations and moving 4 then 8 already-populated event
+  records. Owned event strings remain unchanged.
+- **One lever:** reserve 12 event slots at construction. One same-binary, alternating-order,
+  nine-round `--profile release` A/B compares capacity zero with capacity 12 over 30,000 complete
+  small ledger lifecycles. Keep only with exact ledger equality and at least 3% median improvement.
+- **Remote evidence:** `RCH_REQUIRE_REMOTE=1 rch --no-self-healing exec -- cargo test -j1
+  --profile release -p fm-core tests::perf_budget_ledger_event_capacity_ab -- --ignored --exact
+  --nocapture` ran on `vmi1293453` as job `j-29928833041828665` and completed in 120.7 s.
+- **Result:** exact ledger parity; baseline median 27,783,962 ns versus candidate median
+  25,954,204 ns across nine alternating rounds, a **6.586% improvement**. This clears the 3% keep
+  gate, so the 12-slot reserve is retained.
+
+  Agent: Codex (GPT-5, this session)

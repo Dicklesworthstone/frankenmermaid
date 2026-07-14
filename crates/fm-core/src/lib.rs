@@ -2832,8 +2832,14 @@ impl Default for MermaidBudgetLedger {
 }
 
 impl MermaidBudgetLedger {
+    const EXPECTED_EVENT_CAPACITY: usize = 12;
+
     #[must_use]
     pub fn new(pressure: &MermaidPressureReport) -> Self {
+        Self::new_with_event_capacity(pressure, Self::EXPECTED_EVENT_CAPACITY)
+    }
+
+    fn new_with_event_capacity(pressure: &MermaidPressureReport, event_capacity: usize) -> Self {
         let total_budget_ms: u64 = match pressure.tier {
             MermaidPressureTier::Unknown | MermaidPressureTier::High => 120,
             MermaidPressureTier::Nominal => 250,
@@ -2861,7 +2867,7 @@ impl MermaidBudgetLedger {
             layout: MermaidStageBudgetLedger::new("layout", layout_budget_ms),
             render: MermaidStageBudgetLedger::new("render", render_budget_ms),
             notes,
-            events: Vec::new(),
+            events: Vec::with_capacity(event_capacity),
         };
         ledger.push_stage_event(
             "allocate",
@@ -6316,6 +6322,75 @@ mod tests {
         assert!(broker.events.iter().any(|event| {
             event.kind == "accounting" && event.note.as_deref() == Some("global budget exhausted")
         }));
+    }
+
+    #[test]
+    #[ignore = "manual short release A/B"]
+    fn perf_budget_ledger_event_capacity_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ITERATIONS: usize = 30_000;
+        const ROUNDS: usize = 9;
+
+        fn build_lifecycle(
+            pressure: &MermaidPressureReport,
+            event_capacity: usize,
+        ) -> MermaidBudgetLedger {
+            let mut broker = MermaidBudgetLedger::new_with_event_capacity(pressure, event_capacity);
+            broker.record_parse(5);
+            broker.record_layout(30);
+            broker.record_render(10);
+            broker
+        }
+
+        fn measure(pressure: &MermaidPressureReport, event_capacity: usize) -> (u128, usize, u64) {
+            let mut event_count = 0usize;
+            let mut remaining_total = 0u64;
+            let started = Instant::now();
+            for _ in 0..ITERATIONS {
+                let broker = build_lifecycle(black_box(pressure), black_box(event_capacity));
+                event_count += black_box(broker.events.len());
+                remaining_total ^= black_box(broker.remaining_total_ms);
+                black_box(broker);
+            }
+            (started.elapsed().as_nanos(), event_count, remaining_total)
+        }
+
+        let pressure = MermaidNativePressureSignals::default().into_report();
+        let baseline = build_lifecycle(&pressure, 0);
+        let candidate = build_lifecycle(&pressure, MermaidBudgetLedger::EXPECTED_EVENT_CAPACITY);
+        assert_eq!(candidate, baseline);
+        assert_eq!(candidate.events.len(), 12);
+
+        let mut baseline_ns = Vec::with_capacity(ROUNDS);
+        let mut candidate_ns = Vec::with_capacity(ROUNDS);
+        for round in 0..ROUNDS {
+            let (baseline, candidate) = if round % 2 == 0 {
+                (
+                    measure(&pressure, 0),
+                    measure(&pressure, MermaidBudgetLedger::EXPECTED_EVENT_CAPACITY),
+                )
+            } else {
+                let candidate = measure(&pressure, MermaidBudgetLedger::EXPECTED_EVENT_CAPACITY);
+                let baseline = measure(&pressure, 0);
+                (baseline, candidate)
+            };
+            assert_eq!((baseline.1, baseline.2), (candidate.1, candidate.2));
+            baseline_ns.push(baseline.0);
+            candidate_ns.push(candidate.0);
+        }
+
+        baseline_ns.sort_unstable();
+        candidate_ns.sort_unstable();
+        let baseline_median_ns = baseline_ns[ROUNDS / 2];
+        let candidate_median_ns = candidate_ns[ROUNDS / 2];
+        let improvement_pct = (baseline_median_ns as f64 - candidate_median_ns as f64) * 100.0
+            / baseline_median_ns as f64;
+
+        println!(
+            "PERF budget_ledger_event_capacity baseline_median_ns={baseline_median_ns} candidate_median_ns={candidate_median_ns} improvement_pct={improvement_pct:.3} parity=exact rounds={ROUNDS} iterations={ITERATIONS} events=12"
+        );
     }
 
     #[test]
