@@ -15886,3 +15886,27 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
 - **Verdict: REJECT.** Reverted; lib.rs byte-identical to 983570cd.
 
   Agent: (Opus 4.8, this session)
+
+### ❌REJECTED: dense_node_rank in egraph `layer_edges_between_ranks` (probe→dense) — scc_300 +3.6% (2026-07-13)
+
+- **Probe-DELETION attempt (rank_exists family).** `layer_edges_between_ranks` (egraph crossing-min) rescans ALL
+  `ir.edges` with two `ranks.get(&node)` B-tree probes per edge, per adjacent rank pair → O(ranks×edges) probes.
+  Verified byte-safe first: `rank_assignment` returns `(0..node_count).map(|i| (i, ranks[i])).collect()`, so EVERY
+  node is ranked and layer_edges' `else continue` is dead — the dense table equals `ranks` for all nodes. Threaded
+  `dense_node_rank: &[u32]` through apply_egraph_ordering_pass → egraph_optimized_order_for_rank →
+  layer_edges_between_ranks; swapped the probes for a dense slice load (empty-dense → `ranks` fallback). 439
+  fm-layout lib tests pass (byte-identical).
+- **A/B (Criterion vs `bcbase2` = 983570cd):** scc_100 +2.30% (p=0.10), **scc_300 +3.58% REGRESSION (p=0.00)**,
+  scc_600 +0.46% (p=0.69). All non-negative; scc_300 significant. REJECT.
+- **ROOT CAUSE — egraph is GATED OUT of scc (so the change is inert; the regression is code-layout noise).**
+  `apply_egraph_ordering_pass` is only called when `barycenter_crossing_count != 0` (lib.rs ~10305). On the cyclic
+  SCC bench the certified barycenter already drives crossings to 0, so egraph NEVER RUNS → `layer_edges` is never
+  called → the dense swap does nothing, and the only measured effect is the threading perturbing inlining/register
+  allocation in the hot crossing-min functions (all-non-negative swing = noise, not a genuine dense-load cost).
+- **⭐LESSON: VERIFY THE OPTIMIZED PATH EXECUTES ON THE BENCH INPUT (the crossing-min "N rewrites failed" rule
+  reconfirmed).** `layer_edges`/egraph LOOK hot (O(ranks×edges) B-tree probes) but are gated behind
+  `barycenter_crossing_count != 0`, which scc's certified barycenter zeroes out. The egraph/layer_edges surface is
+  NOT reachable on cyclic_scc — optimize it only with a bench where barycenter leaves residual crossings.
+- **Verdict: REJECT.** Reverted (8 edits; git restore is dcg-blocked); lib.rs byte-identical to 983570cd.
+
+  Agent: (Opus 4.8, this session)
