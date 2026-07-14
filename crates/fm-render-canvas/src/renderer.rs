@@ -105,6 +105,7 @@ pub struct Canvas2dRenderer {
 }
 
 const DENSE_SOURCE_INDEX_LIMIT: usize = 65_536;
+const LEGACY_DOTTED_EDGE_DASH: [f64; 2] = [5.0, 5.0];
 
 #[derive(Debug, Default)]
 struct SourceIndexSet {
@@ -943,19 +944,12 @@ impl Canvas2dRenderer {
             }
 
             // Set edge style
-            let (stroke_width, dash_pattern) = match arrow {
-                ArrowType::ThickArrow => (2.5, None),
-                ArrowType::DottedArrow => (1.5, Some(vec![5.0, 5.0])),
-                _ => (self.config.edge_stroke_width, None),
-            };
+            let (stroke_width, dash_pattern) =
+                legacy_edge_stroke(arrow, self.config.edge_stroke_width);
 
             ctx.set_stroke_style(&self.config.edge_stroke);
             ctx.set_line_width(stroke_width);
-            if let Some(pattern) = dash_pattern {
-                ctx.set_line_dash(&pattern);
-            } else {
-                ctx.set_line_dash(&[]);
-            }
+            ctx.set_line_dash(dash_pattern);
 
             // Draw edge path
             ctx.begin_path();
@@ -1516,6 +1510,15 @@ fn fragment_kind_label(kind: fm_core::FragmentKind) -> &'static str {
 }
 
 #[inline]
+fn legacy_edge_stroke(arrow: ArrowType, default_width: f64) -> (f64, &'static [f64]) {
+    match arrow {
+        ArrowType::ThickArrow => (2.5, &[]),
+        ArrowType::DottedArrow => (1.5, &LEGACY_DOTTED_EDGE_DASH),
+        _ => (default_width, &[]),
+    }
+}
+
+#[inline]
 fn with_canvas_dash_f64<T>(dash: &[f32], use_dash: impl FnOnce(&[f64]) -> T) -> T {
     if let [first, second] = dash {
         use_dash(&[f64::from(*first), f64::from(*second)])
@@ -1549,6 +1552,17 @@ mod tests {
         LayoutActivationBar, LayoutExtensions, LayoutRect, LayoutStats, build_render_scene,
         layout_diagram,
     };
+
+    fn owned_legacy_edge_stroke_reference(
+        arrow: ArrowType,
+        default_width: f64,
+    ) -> (f64, Option<Vec<f64>>) {
+        match arrow {
+            ArrowType::ThickArrow => (2.5, None),
+            ArrowType::DottedArrow => (1.5, Some(vec![5.0, 5.0])),
+            _ => (default_width, None),
+        }
+    }
 
     fn geometry_bits(geometry: (f64, f64, f64)) -> (u64, u64, u64) {
         (
@@ -1709,6 +1723,113 @@ mod tests {
             });
             assert_eq!(actual, expected);
         }
+    }
+
+    #[test]
+    fn legacy_edge_stroke_borrow_preserves_branch_mappings() {
+        let default_width = 1.25;
+        for arrow in [
+            ArrowType::ThickArrow,
+            ArrowType::DottedArrow,
+            ArrowType::Arrow,
+            ArrowType::DottedLine,
+            ArrowType::DoubleDottedArrow,
+        ] {
+            let (expected_width, expected_dash) =
+                owned_legacy_edge_stroke_reference(arrow, default_width);
+            let (actual_width, actual_dash) = legacy_edge_stroke(arrow, default_width);
+            assert_eq!(
+                actual_width.to_bits(),
+                expected_width.to_bits(),
+                "{arrow:?}"
+            );
+            assert_eq!(
+                actual_dash
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                expected_dash
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                "{arrow:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "foreground release-only performance probe"]
+    fn legacy_dotted_edge_dash_borrow_perf_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ITERATIONS: usize = 1_048_576;
+        const ROUNDS: usize = 9;
+
+        legacy_edge_stroke_borrow_preserves_branch_mappings();
+
+        fn digest(width: f64, dash: &[f64]) -> u64 {
+            dash.iter().fold(width.to_bits(), |state, value| {
+                state.rotate_left(9) ^ value.to_bits()
+            })
+        }
+
+        fn measure_owned() -> (u128, u64) {
+            let mut checksum = 0_u64;
+            let start = Instant::now();
+            for _ in 0..ITERATIONS {
+                let (width, dash) = owned_legacy_edge_stroke_reference(
+                    black_box(ArrowType::DottedArrow),
+                    black_box(1.25),
+                );
+                let dash = black_box(dash);
+                checksum =
+                    checksum.wrapping_add(digest(width, dash.as_deref().unwrap_or(black_box(&[]))));
+            }
+            (start.elapsed().as_nanos(), black_box(checksum))
+        }
+
+        fn measure_borrowed() -> (u128, u64) {
+            let mut checksum = 0_u64;
+            let start = Instant::now();
+            for _ in 0..ITERATIONS {
+                let (width, dash) =
+                    legacy_edge_stroke(black_box(ArrowType::DottedArrow), black_box(1.25));
+                checksum = checksum.wrapping_add(digest(width, black_box(dash)));
+            }
+            (start.elapsed().as_nanos(), black_box(checksum))
+        }
+
+        let mut baseline = [0_u128; ROUNDS];
+        let mut candidate = [0_u128; ROUNDS];
+        for round in 0..ROUNDS {
+            let (baseline_ns, baseline_digest, candidate_ns, candidate_digest) = if round % 2 == 0 {
+                let (baseline_ns, baseline_digest) = measure_owned();
+                let (candidate_ns, candidate_digest) = measure_borrowed();
+                (baseline_ns, baseline_digest, candidate_ns, candidate_digest)
+            } else {
+                let (candidate_ns, candidate_digest) = measure_borrowed();
+                let (baseline_ns, baseline_digest) = measure_owned();
+                (baseline_ns, baseline_digest, candidate_ns, candidate_digest)
+            };
+            assert_eq!(candidate_digest, baseline_digest, "round {round}");
+            baseline[round] = baseline_ns;
+            candidate[round] = candidate_ns;
+        }
+
+        baseline.sort_unstable();
+        candidate.sort_unstable();
+        let baseline_median = baseline[ROUNDS / 2];
+        let candidate_median = candidate[ROUNDS / 2];
+        let improvement =
+            (baseline_median as f64 - candidate_median as f64) * 100.0 / baseline_median as f64;
+        println!(
+            "PERF legacy_canvas_dotted_dash baseline_median_ns={baseline_median} \
+             candidate_median_ns={candidate_median} improvement_pct={improvement:.3} \
+             parity=exact rounds={ROUNDS} iterations={ITERATIONS}"
+        );
     }
 
     #[test]

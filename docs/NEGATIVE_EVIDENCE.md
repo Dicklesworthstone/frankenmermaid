@@ -16765,3 +16765,31 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   binary; allocation counting alone is not keep evidence.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.12`)
+
+### 🟢LANDED: borrow the legacy Canvas dotted-edge dash slice after warm-up (2026-07-14)
+
+- **Negative-ledger-first boundary:** `bd-1buv.12` is an INVALID / HOLD because its cold worker
+  target never built the named test binary; neither A/B arm executed, so it provides no timing
+  verdict. The earlier landed Canvas dash conversion remains a distinct shared-`RenderScene`
+  `Vec<f32>` conversion path, not this legacy `DiagramLayout::draw_edges` allocation.
+- **Profile attribution:** every legacy-layout `DottedArrow` constructs and drops
+  `vec![5.0_f64, 5.0]` solely to call `Canvas2dContext::set_line_dash` by slice. A 4,096-edge dotted
+  scene therefore makes 4,096 allocator round trips for two compile-time constants.
+- **One lever and corrected measurement order:** borrow one static `[5.0, 5.0]` slice while
+  preserving arrow classification, stroke-width bits, dash bits, setter order, and empty-dash
+  behavior. First complete an untimed fail-closed remote `--profile release --no-run` warm-up with
+  no timeout; only then run one same-binary, alternating-order, nine-round A/B over the owned and
+  borrowed dispatches. Keep only with exact branch parity and at least 3% median improvement.
+- **Untimed warm-up:** fail-closed RCH job `j-29928833041828720` completed the release test-binary
+  build on `vmi1293453` in 438.8 s. This compile-only step supplied no timing evidence and had no
+  timeout.
+- **Remote A/B:** fail-closed RCH job `j-29928833041828729` ran the exact ignored test on the same
+  worker with `cargo test -j1 --profile release -p fm-render-canvas --lib
+  renderer::tests::legacy_dotted_edge_dash_borrow_perf_ab -- --ignored --exact --nocapture`.
+  The worker cache unexpectedly missed again, but the in-process measurement completed after the
+  build; compile time was excluded from both timed arms.
+- **Result:** exact all-branch mapping parity and checksum parity; baseline median 19,172,906 ns
+  versus candidate median 2,951,806 ns across nine alternating rounds of 1,048,576 dispatches, an
+  **84.604% improvement**. This clears the 3% keep gate, so the borrowed static dash is retained.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.13`)
