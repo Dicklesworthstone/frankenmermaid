@@ -15306,6 +15306,34 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 
   Agent: Codex (GPT-5, this session)
 
+### ✅LANDED: merge-walk terminal diff node IDs — 43.886% faster (2026-07-13)
+
+- **Ledger-first boundary:** no prior `diff_nodes` ID-union merge probe was recorded. The node path already used
+  borrowed `&str` map keys, but still materialized a transient `BTreeSet<&str>` and performed two B-tree lookups
+  for every selected ID.
+- **Lever:** consume the already-sorted old/new node-index `BTreeMap` iterators with a two-way merge. Each loop
+  selects the minimum pending ID and consumes it from one or both iterators, eliminating the ID-set allocation,
+  its insertion/traversal work, and both map re-lookups. Node comparison, cloning, counts, and public output types
+  are unchanged.
+- **Strict-remote same-binary foreground A/B:** both arms ran inside one release test binary via
+  `RCH_REQUIRE_REMOTE=1` with no local fallback on actual worker `vmi1293453`, using `cargo test -j1 --profile
+  release -p fm-render-term diff::tests::terminal_diff_node_pair_merge_perf_probe -- --ignored --nocapture
+  --exact`. The temporary inline probe diffed two separately owned, identical 4,096-node IRs with no edges, three
+  calls per sample across nine paired samples, alternating arm order. Baseline median was **2,386,693 ns/diff**
+  (samples **1,881,398; 2,091,425; 2,224,257; 2,253,314; 2,386,693; 2,409,982; 2,413,934; 2,586,779;
+  2,660,373**). Candidate median was **1,339,263 ns/diff** (samples **982,920; 1,036,617; 1,302,755;
+  1,310,884; 1,339,263; 1,361,843; 1,369,358; 1,374,202; 1,509,268**) — **43.886% faster**. The sample
+  ranges do not overlap.
+- **Exact-output proof:** the probe asserted equality of the complete debug representation for node outputs and
+  count tuples, producing identical FNV digest **`8da0bb3d154acf6e`**. A merge of two sorted unique-key iterators
+  produces the same lexicographic union as the removed `BTreeSet`; original enumeration indices remain attached
+  to their nodes, equal IDs consume both entries, and one-sided IDs preserve added/removed behavior. A permanent
+  test freezes interleaved removed/added/shared/exhausted ordering.
+- **Verdict:** **KEEP / LANDED.** The node-only shipping boundary wins decisively with full result parity.
+  LEVER↺: when ordered maps are unioned only to look both keys up again, consume the maps in a two-way merge.
+
+  Agent: Codex (GPT-5, this session)
+
 ### ✅LANDED (9be86bf): dense-Vec per-node rank in nodes_by_rank — layout −1.3% (2026-07-13)
 
 - `nodes_by_rank` (~3.25% layout self, runs every layout in crossing-min) did a random `ranks.get(&node_index)`

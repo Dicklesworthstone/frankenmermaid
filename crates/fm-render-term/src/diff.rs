@@ -6,7 +6,7 @@
 use crate::{TermRenderConfig, render_diagram_with_config};
 use fm_core::{ArrowType, IrEndpoint, IrNode, MermaidDiagramIr, NodeShape};
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 /// Status of a diff element.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -182,7 +182,8 @@ fn diff_nodes(
         .map(|(i, n)| (n.id.as_str(), (i, n)))
         .collect();
 
-    let all_ids: BTreeSet<&str> = old_by_id.keys().chain(new_by_id.keys()).copied().collect();
+    let mut old_by_id = old_by_id.into_iter().peekable();
+    let mut new_by_id = new_by_id.into_iter().peekable();
 
     let mut results = Vec::new();
     let mut added = 0_usize;
@@ -190,11 +191,28 @@ fn diff_nodes(
     let mut changed = 0_usize;
     let mut unchanged = 0_usize;
 
-    for id in all_ids {
-        match (old_by_id.get(id), new_by_id.get(id)) {
+    loop {
+        let next_id = match (
+            old_by_id.peek().map(|(id, _)| *id),
+            new_by_id.peek().map(|(id, _)| *id),
+        ) {
+            (Some(old_id), Some(new_id)) => old_id.min(new_id),
+            (Some(old_id), None) => old_id,
+            (None, Some(new_id)) => new_id,
+            (None, None) => break,
+        };
+
+        let old_entry = old_by_id
+            .next_if(|(id, _)| *id == next_id)
+            .map(|(_, entry)| entry);
+        let new_entry = new_by_id
+            .next_if(|(id, _)| *id == next_id)
+            .map(|(_, entry)| entry);
+
+        match (old_entry, new_entry) {
             (None, Some((_idx, new_node))) => {
                 results.push(DiffNode {
-                    id: id.to_string(),
+                    id: next_id.to_string(),
                     status: DiffStatus::Added,
                     node: (*new_node).clone(),
                     changes: Vec::new(),
@@ -203,7 +221,7 @@ fn diff_nodes(
             }
             (Some((_idx, old_node)), None) => {
                 results.push(DiffNode {
-                    id: id.to_string(),
+                    id: next_id.to_string(),
                     status: DiffStatus::Removed,
                     node: (*old_node).clone(),
                     changes: Vec::new(),
@@ -211,10 +229,10 @@ fn diff_nodes(
                 removed += 1;
             }
             (Some((old_idx, old_node)), Some((_new_idx, new_node))) => {
-                let changes = compare_nodes(old, old_node, *old_idx, new, new_node);
+                let changes = compare_nodes(old, old_node, old_idx, new, new_node);
                 if changes.is_empty() {
                     results.push(DiffNode {
-                        id: id.to_string(),
+                        id: next_id.to_string(),
                         status: DiffStatus::Unchanged,
                         node: (*new_node).clone(),
                         changes: Vec::new(),
@@ -222,7 +240,7 @@ fn diff_nodes(
                     unchanged += 1;
                 } else {
                     results.push(DiffNode {
-                        id: id.to_string(),
+                        id: next_id.to_string(),
                         status: DiffStatus::Changed,
                         node: (*new_node).clone(),
                         changes,
@@ -967,6 +985,29 @@ mod tests {
             });
         }
         ir
+    }
+
+    #[test]
+    fn node_pair_merge_preserves_sorted_union_order() {
+        let old = make_ir_with_nodes(&["A", "C"]);
+        let new = make_ir_with_nodes(&["B", "C", "D"]);
+
+        let diff = diff_diagrams(&old, &new);
+        let ordered_nodes: Vec<(&str, DiffStatus)> = diff
+            .nodes
+            .iter()
+            .map(|node| (node.id.as_str(), node.status))
+            .collect();
+
+        assert_eq!(
+            ordered_nodes,
+            vec![
+                ("A", DiffStatus::Removed),
+                ("B", DiffStatus::Added),
+                ("C", DiffStatus::Unchanged),
+                ("D", DiffStatus::Added),
+            ]
+        );
     }
 
     #[test]
