@@ -15371,3 +15371,35 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   sparse-layout paths.
 
   Agent: Codex (GPT-5, this session)
+
+### ✅LANDED: port the already-clean fast path into DOT's `normalize_identifier` copy — parse/dot −11..14% (2026-07-13)
+
+- **Negative-ledger-first / root cause:** the "normalize_identifier already-clean fast path — non-flowchart parse
+  −4–5% (2026-07-02)" entry above records a byte pre-check (`cleaned` all-allowed + last byte != `_` → return
+  `cleaned.to_owned()`) that skips the char-by-char rebuild. That win lives on the **canonical** `pub fn
+  normalize_identifier` in `lib.rs`. But `dot_parser.rs` carries its **own private copy** of the function
+  (they diverge: `raw.trim()` vs `trim_fast`, and a different empty-result fallback), and that copy **never had
+  the fast path** — so the entire DOT parse path still ran the branchy `chars()` push loop for every already-clean
+  id. `git log -S` confirms the pre-check was never present in `dot_parser.rs`.
+- **Lever:** add the same byte pre-check to the DOT copy. gen_dot ids (`N0`..`N199`, `label="Node i"`) are all
+  clean, so the fast path fires on every node id + both edge endpoints (~600 calls for `dot_200`). Replaces
+  UTF-8-decoding `chars()` iteration + per-char branchy `push` with one `bytes().all(..)` scan + a single
+  `to_owned()` memcpy. Same alloc count; strictly less/simpler per-id work.
+- **Byte-identical:** verbatim of the ledger-proven-identical `lib.rs` fast path — for an all-allowed id with no
+  trailing `_`, the slow loop pushes each char unchanged, `trim_end_matches('_')` is a no-op, and the fallback is
+  unreachable (result non-empty), so it equals `cleaned.to_owned()`. `cargo test -p fm-parser --lib dot`: **39
+  passed, 0 failed.**
+- **Sequential same-pinned-pool foreground A/B (Criterion, worker `vmi1152480`, `parse/dot`, `--save-baseline
+  dotbase` then `--baseline dotbase`):** `dot_50` **−10.969%** (change CI [−14.091%, −7.784%], p=0.00; 77.4→68.3µs
+  median) and `dot_200` **−14.268%** (change CI [−17.045%, −11.502%], p=0.00; 296.0→258.3µs median). Both CIs
+  entirely negative, both far above the 3% floor.
+- **Cross-worker-artifact rule-out:** the ~1-invocation-per-worker fake-win failure mode would inflate *both*
+  sizes by the *same* worker-speed ratio. Instead `dot_200` (−14.3%) beats `dot_50` (−11.0%) by 3.3pp — a
+  **dose-response that tracks normalize_identifier call density** (dot_200 has 4× the nodes/edges), which only the
+  genuine lever explains. Baseline confirmed on `vmi1152480`; the project routes to a pinned
+  `.rch-target-vmi1152480-pool-*`.
+- **Verdict:** **KEEP / LANDED.** Same lever as the 2026-07-02 win, applied to the second (DOT) copy that had been
+  missed. LEVER↺: when a helper is **duplicated across files**, a fast path landed on one copy does NOT cover the
+  others — grep sibling copies for the same missed pre-check.
+
+  Agent: (Opus 4.8, this session)

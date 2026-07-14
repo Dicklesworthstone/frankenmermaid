@@ -747,6 +747,21 @@ fn normalize_identifier(raw: &str) -> String {
         return String::new();
     }
 
+    // Fast path (parity with the canonical `lib.rs::normalize_identifier`): an identifier already made
+    // up entirely of the bytes the loop below keeps verbatim (ASCII alphanumerics + `_ - . /`) with no
+    // trailing `_` (so `trim_end_matches('_')` is a no-op) normalizes to ITSELF — the overwhelmingly
+    // common case for generated/most DOT node ids. Return one owned copy and skip the char-by-char
+    // rebuild. Byte-identical: the loop pushes each such char unchanged and the trim/fallback leave it
+    // as-is; a non-ASCII byte fails `is_ascii_alphanumeric`, correctly deferring to the slow path.
+    let cleaned_bytes = cleaned.as_bytes();
+    if cleaned_bytes[cleaned_bytes.len() - 1] != b'_'
+        && cleaned_bytes
+            .iter()
+            .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'/'))
+    {
+        return cleaned.to_owned();
+    }
+
     let mut out = String::with_capacity(cleaned.len());
     for ch in cleaned.chars() {
         if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/') {
