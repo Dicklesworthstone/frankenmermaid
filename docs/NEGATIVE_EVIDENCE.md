@@ -15277,6 +15277,34 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 
   Agent: Codex (GPT-5, this session)
 
+### ❌REJECTED: pack terminal diff LCS scores from `usize` to `u16` — 4.284% slower (2026-07-14)
+
+- **Ledger-first boundary:** the immediately preceding `lcs_pairs` win flattened the dense terminal-diff LCS table,
+  but no entry had changed the score width. This follow-up targeted a different primitive: cache traffic and working-set
+  size inside the retained flat O(m·n) table, without reopening its already-landed indexing or allocation shape.
+- **Lever:** parameterized the existing flat DP over its score type and dispatched to `u16` whenever
+  `min(old_lines.len(), new_lines.len()) <= u16::MAX`, retaining the byte-for-byte `usize` algorithm above that bound.
+  Since an LCS score cannot exceed the shorter input, the narrow arm cannot overflow. On the 768×768 probe, this
+  reduced the 591,361-cell table from about 4.51 MiB to 1.13 MiB while preserving reconstruction and the old-side
+  tie-break exactly.
+- **Strict-remote same-binary foreground A/B:** one release test binary interleaved nine samples of six full table
+  fills per arm on RCH worker **`vmi1152480`**, job **`j-29928833041828239`**, with strict fail-closed flags:
+  `RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 RCH_QUEUE_WHEN_BUSY=1 env -u CARGO_TARGET_DIR rch
+  --no-self-healing exec -- cargo test -j1 --profile release -p fm-render-term
+  diff::tests::packed_lcs_cell_perf_probe -- --ignored --nocapture --exact`. Baseline `usize` samples were
+  **[26260403, 29274779, 29627776, 29993240, 30803400, 33698677, 33704785, 34633501, 37690200] ns**; candidate
+  `u16` samples were **[27769324, 27884745, 29385204, 30761857, 32123086, 33400052, 33907728, 37971559,
+  41770806] ns**. Medians: **30,803,400 → 32,123,086 ns** — **4.284% slower**, with heavily overlapping
+  distributions.
+- **Exact-output proof:** the candidate anchor vector equaled the original `usize` implementation before timing;
+  154 ordered pairs produced FNV digest **`047acd826d3dcf0d`**, and the remote assertion passed.
+- **Verdict: REJECT / REVERTED.** The smaller table does not repay narrower-score arithmetic/generic codegen on this
+  hot string-comparison DP; the source and temporary probe were removed, leaving `diff.rs` byte-identical to HEAD.
+  Do not retry score-width packing on `lcs_pairs` without a materially different reconstruction algorithm or a profile
+  proving memory bandwidth, rather than comparisons/control flow, dominates a larger real workload.
+
+  Agent: Codex (GPT-5, this session)
+
 ### ✅LANDED: deque-backed terminal-diff parallel-edge groups — 80.101% faster (2026-07-14)
 
 - **Ledger-first boundary:** the landed endpoint-pair merge explicitly left its parallel-edge vectors and greedy
