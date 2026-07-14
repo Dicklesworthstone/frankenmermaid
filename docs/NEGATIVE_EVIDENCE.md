@@ -15455,6 +15455,36 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 
   Agent: Claude (Opus 4.8, this session)
 
+### ❌REJECT (firms a prior soft-dismissal, now MEASURED at N=600): precompute node→style map to kill the O(N·S) per-node style-ref scan — isolated +11.2% but sub-floor in full render (2026-07-14)
+
+- **Ledger-first boundary:** an earlier "layout/render frontier fully mapped" entry (2026-07-10, `perf-styled.data`)
+  measured `resolve_node_inline_styles` at **2.49% on synthetic styled300 / <0.3% on realistic class_50 / 0.00%
+  unstyled** and *soft-dismissed* it — it proposed only the weak "skip if no style_ref targets a node" hoist and
+  declined for churn + byte-identity risk. It never tried the **stronger precompute-map** lever, and only measured
+  at N=300. Per the soft-dismissal-plus-dedicated-bench rule, I re-measured the real O(N²)→O(N) fix at 2× scale.
+- **Root cause / candidate:** `collect_node_style_directives` (lib.rs:1865) scans ALL `ir.style_refs` for **every**
+  node (`render_node_into` → `resolve_node_inline_styles` per node) → O(nodes·style_refs). Candidate: one grouping
+  pass over `style_refs` into `HashMap<node_index, BTreeMap<prop,val>>` (Node-target refs merged in ref order,
+  byte-identical to the per-node merge), then O(1) per-node lookup + `split_style_properties`/`style_map_to_css`.
+- **Isolated strict-remote mimalloc A/B** (probe compared the two style-resolution strategies directly, no render
+  plumbing): 600-node styled flowchart, every node carrying a `style Ni fill:…,stroke:…,stroke-width,color` (S=600
+  Node-target refs), 9 interleaved samples × 10 reps. Baseline median **1,380,443 ns**; candidate median
+  **1,225,403 ns** — **11.2% faster**, but overlapping samples (base 1.10–1.52 M + a 4.38 M outlier; cand
+  0.94–1.39 M) and byte-identical output (parity FNV **`20e2218a60cc2b09`**).
+- **Why it's a REJECT despite the isolated 11%:** the O(N·S) part is only **cheap enum comparisons** — `parse_style_string`
+  runs O(N) times (once per matching ref) in **both** arms, so it dominates both and caps the win. In the FULL render
+  the whole style-resolution step is ~2.5% (prior data), so an 11% cut to it is **sub-1% of full render — below the
+  calibrated noise floor** — and would be diluted further by the rest of `render_node_into`. Landing it needs threading
+  a precomputed map through the serial / parallel-chunk / slow render paths, with the documented byte-identity risk
+  (the `style_refs.is_empty()` branch must keep ignoring `node.inline_style`). Not justified. Source untouched
+  (probe-only, reverted byte-identical to `HEAD`); mimalloc dev-dep removed.
+- **Verdict:** **REJECT (measured).** LEVER↺: an O(N²) whose inner op is a **cheap comparison** while the real cost
+  (here `parse_style_string`) is already O(N) in both arms yields only a constant-factor trim, not a scaling win —
+  measure the inner-op cost, not just the loop shape, before plumbing. Do not re-open without an above-floor
+  **full-render** styled benchmark.
+
+  Agent: Claude (Opus 4.8, this session)
+
 ### ✅LANDED: flatten terminal diff LCS table (Vec<Vec<usize>> → single flat Vec) — 30.550% faster (2026-07-14)
 
 - **Ledger-first boundary:** no prior `lcs_pairs`, `align_rendered_lines`, or LCS-table entry exists. Distinct from
