@@ -15512,6 +15512,32 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 
   Agent: Codex (GPT-5, this session)
 
+### ✅LANDED: read Canvas marker-end geometry from the final path segment — 96.996% faster (2026-07-14)
+
+- **Negative-ledger-first / profile attribution:** no prior `path_marker_end_geometry`, marker-tangent traversal, or
+  Canvas path-tail probe was recorded. `build_edge_layer` assigns end markers to ordinary Arrow edges and expands
+  multi-point routes into one `CubicTo` per segment. After those commands are emitted, `draw_path_markers` called
+  `path_marker_end_geometry`, whose forward walk computed `atan2` for every segment while repeatedly overwriting
+  `last`; only the final tangent survived. Thus a 64-segment routed edge paid 64 trigonometric calls to return one.
+- **Lever:** for structurally valid `MoveTo`-led paths, derive a final line tangent from its preceding endpoint or a
+  final quadratic/cubic tangent directly from its last control point. Degenerate controls, a preceding `Close`,
+  trailing `MoveTo`/`Close`, empty paths, and malformed paths retain the original full traversal exactly.
+- **Strict-remote same-binary foreground A/B:** one `--profile release` test binary alternated the exact old
+  forward traversal and candidate on RCH worker **`vmi1293453`**, job **`j-29928833041828405`**, with
+  `RCH_REQUIRE_REMOTE=1` and no local fallback. Each sample evaluated 2,048 realistic `MoveTo` + 64-`CubicTo`
+  paths for 16 repetitions. Sorted baseline samples were **[33335822, 34319964, 34709767, 35636984, 38396172,
+  38782190, 38812756, 41190974, 43834308] ns**; candidate samples were **[734048, 736702, 993016, 1131844,
+  1153485, 1179865, 1180056, 1225433, 1396769] ns**. Medians: **38,396,172 -> 1,153,485 ns**
+  (**96.996% faster, 33.287x speedup**), with every candidate sample below every baseline sample.
+- **Exact-output proof:** every one of the 2,048 timed paths matched the old implementation bit-for-bit for endpoint
+  coordinates and `f64` angle, producing digest **`31295ca6ca622325`**. Additional parity cases covered empty and
+  malformed paths, line/quad/cubic tails, degenerate controls, `Close`, and a trailing `MoveTo`. Permanent tests
+  freeze fast-path and fallback geometry; all temporary reference/timing code was removed.
+- **Verdict: KEEP / LANDED.** This replaces O(segments) matches, conversions, and `atan2` calls with one tail
+  tangent on the common marked routed-edge path while preserving the full arbitrary-path fallback.
+
+  Agent: Codex (GPT-5, this session)
+
 ### ✅LANDED: merge-walk terminal diff endpoint-pair groups — 24.905% faster (2026-07-13)
 
 - **Ledger-first boundary:** no prior `diff_edges` pair-union merge probe was recorded. The earlier borrowed-key keep

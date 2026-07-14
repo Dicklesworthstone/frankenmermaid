@@ -1392,6 +1392,43 @@ fn path_marker_start_geometry(commands: &[PathCmd]) -> Option<(f64, f64, f64)> {
 }
 
 fn path_marker_end_geometry(commands: &[PathCmd]) -> Option<(f64, f64, f64)> {
+    if matches!(commands.first(), Some(PathCmd::MoveTo { .. }))
+        && let Some((last_command, preceding_commands)) = commands.split_last()
+    {
+        match *last_command {
+            PathCmd::LineTo { x, y } => {
+                let start = match preceding_commands.last().copied() {
+                    Some(
+                        PathCmd::MoveTo { x, y }
+                        | PathCmd::LineTo { x, y }
+                        | PathCmd::QuadTo { x, y, .. }
+                        | PathCmd::CubicTo { x, y, .. },
+                    ) => Some((f64::from(x), f64::from(y))),
+                    Some(PathCmd::Close) | None => None,
+                };
+                if let Some(start) = start {
+                    let end = (f64::from(x), f64::from(y));
+                    return Some((end.0, end.1, angle_between(start, end)));
+                }
+            }
+            PathCmd::QuadTo { cx, cy, x, y } => {
+                let control = (f64::from(cx), f64::from(cy));
+                let end = (f64::from(x), f64::from(y));
+                if points_are_distinct(control, end) {
+                    return Some((end.0, end.1, angle_between(control, end)));
+                }
+            }
+            PathCmd::CubicTo { c2x, c2y, x, y, .. } => {
+                let control = (f64::from(c2x), f64::from(c2y));
+                let end = (f64::from(x), f64::from(y));
+                if points_are_distinct(control, end) {
+                    return Some((end.0, end.1, angle_between(control, end)));
+                }
+            }
+            PathCmd::MoveTo { .. } | PathCmd::Close => {}
+        }
+    }
+
     let mut current = None;
     let mut subpath_start = None;
     let mut last = None;
@@ -1512,6 +1549,112 @@ mod tests {
         LayoutActivationBar, LayoutExtensions, LayoutRect, LayoutStats, build_render_scene,
         layout_diagram,
     };
+
+    fn geometry_bits(geometry: (f64, f64, f64)) -> (u64, u64, u64) {
+        (
+            geometry.0.to_bits(),
+            geometry.1.to_bits(),
+            geometry.2.to_bits(),
+        )
+    }
+
+    #[test]
+    fn marker_end_geometry_preserves_tail_and_fallback_contracts() {
+        let cubic = [
+            PathCmd::MoveTo { x: 1.0, y: 2.0 },
+            PathCmd::CubicTo {
+                c1x: 2.0,
+                c1y: 3.0,
+                c2x: 4.0,
+                c2y: 5.0,
+                x: 6.0,
+                y: 8.0,
+            },
+            PathCmd::CubicTo {
+                c1x: 7.0,
+                c1y: 9.0,
+                c2x: 10.0,
+                c2y: 11.0,
+                x: 13.0,
+                y: 15.0,
+            },
+        ];
+        assert_eq!(
+            geometry_bits(path_marker_end_geometry(&cubic).expect("cubic geometry")),
+            geometry_bits((13.0, 15.0, angle_between((10.0, 11.0), (13.0, 15.0))))
+        );
+
+        let quad = [
+            PathCmd::MoveTo { x: 1.0, y: 2.0 },
+            PathCmd::QuadTo {
+                cx: 4.0,
+                cy: 5.0,
+                x: 7.0,
+                y: 9.0,
+            },
+        ];
+        assert_eq!(
+            geometry_bits(path_marker_end_geometry(&quad).expect("quadratic geometry")),
+            geometry_bits((7.0, 9.0, angle_between((4.0, 5.0), (7.0, 9.0))))
+        );
+
+        let line = [
+            PathCmd::MoveTo { x: 1.0, y: 2.0 },
+            PathCmd::LineTo { x: 7.0, y: 9.0 },
+        ];
+        assert_eq!(
+            geometry_bits(path_marker_end_geometry(&line).expect("line geometry")),
+            geometry_bits((7.0, 9.0, angle_between((1.0, 2.0), (7.0, 9.0))))
+        );
+
+        let degenerate_cubic = [
+            PathCmd::MoveTo { x: 1.0, y: 2.0 },
+            PathCmd::LineTo { x: 3.0, y: 4.0 },
+            PathCmd::CubicTo {
+                c1x: 5.0,
+                c1y: 6.0,
+                c2x: 8.0,
+                c2y: 9.0,
+                x: 8.0,
+                y: 9.0,
+            },
+        ];
+        assert_eq!(
+            geometry_bits(
+                path_marker_end_geometry(&degenerate_cubic).expect("degenerate cubic geometry")
+            ),
+            geometry_bits((8.0, 9.0, angle_between((3.0, 4.0), (8.0, 9.0))))
+        );
+
+        let closed = [
+            PathCmd::MoveTo { x: 1.0, y: 2.0 },
+            PathCmd::LineTo { x: 3.0, y: 4.0 },
+            PathCmd::Close,
+        ];
+        assert_eq!(
+            geometry_bits(path_marker_end_geometry(&closed).expect("closed geometry")),
+            geometry_bits((1.0, 2.0, angle_between((3.0, 4.0), (1.0, 2.0))))
+        );
+
+        let trailing_move = [
+            PathCmd::MoveTo { x: 1.0, y: 2.0 },
+            PathCmd::LineTo { x: 3.0, y: 4.0 },
+            PathCmd::MoveTo { x: 8.0, y: 9.0 },
+        ];
+        assert_eq!(
+            geometry_bits(
+                path_marker_end_geometry(&trailing_move).expect("trailing move geometry")
+            ),
+            geometry_bits((3.0, 4.0, angle_between((1.0, 2.0), (3.0, 4.0))))
+        );
+
+        let malformed = [
+            PathCmd::LineTo { x: 1.0, y: 2.0 },
+            PathCmd::MoveTo { x: 3.0, y: 4.0 },
+            PathCmd::LineTo { x: 5.0, y: 6.0 },
+        ];
+        assert!(path_marker_end_geometry(&malformed).is_none());
+    }
 
     #[test]
     fn renderer_handles_empty_diagram() {
