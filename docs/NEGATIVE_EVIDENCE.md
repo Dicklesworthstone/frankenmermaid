@@ -15392,6 +15392,35 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 
   Agent: Codex (GPT-5, this session)
 
+### ✅LANDED: skip terminal diff member formatting when raw members match — 58.427% faster (2026-07-14)
+
+- **Ledger-first boundary:** no prior terminal `node_member_strings`, `MembersChanged`, or equal-member formatting
+  guard probe was recorded. The rejected edge-label borrow substituted string ownership in `compare_edges`; this
+  is a different primitive that skips two whole `Vec<String>` builds and every per-member `format!` when matched
+  ER nodes carry identical raw members.
+- **Lever:** compare `old_node.members` and `new_node.members` before formatting their public diff strings. Raw
+  equality covers every `IrEntityAttribute` field consumed by `node_member_strings`, so equal vectors necessarily
+  format equally. Unequal vectors still take the original format-both-sides, compare, and `MembersChanged` output
+  path, preserving its exact string-level semantics, ordering, and collision behavior.
+- **Strict-remote same-binary foreground A/B:** both arms ran inside one release test binary via
+  `RCH_REQUIRE_REMOTE=1` with no local fallback on actual worker `vmi1152480`, using `cargo test -j1 --profile
+  release -p fm-render-term diff::tests::terminal_diff_equal_members_perf_probe -- --ignored --nocapture
+  --exact`. The temporary probe diffed two separately owned, identical 2,048-node ER IRs with eight fully
+  populated members per node, two calls per sample across nine alternating paired samples. Baseline median was
+  **18,118,603 ns/diff** (samples **16,622,669; 16,728,063; 17,097,833; 17,236,541; 18,118,603; 18,433,576;
+  18,958,310; 19,832,093; 21,250,920**). Candidate median was **7,532,370 ns/diff** (samples **7,053,189;
+  7,412,063; 7,442,243; 7,461,232; 7,532,370; 7,979,781; 8,175,415; 8,964,075; 10,458,997**) —
+  **58.427% faster**, with non-overlapping ranges.
+- **Exact-output proof:** before timing, the full node-diff vector and count tuple matched byte-for-byte in their
+  debug representation, producing FNV digest **`8451b957290ab6cf`**. The temporary baseline/probe machinery was
+  removed; a permanent focused test covers independently owned nodes with identical populated members.
+- **Verdict:** **KEEP / LANDED.** The raw-equality guard is a decisive full-operation win on member-heavy unchanged
+  ER diffs and adds only a cheap equality check before the unchanged slow path. LEVER↺: when an expensive formatted
+  representation is needed only for a change payload, prove raw equality first and defer formatting to unequal
+  values.
+
+  Agent: Codex (GPT-5, this session)
+
 ### ✅LANDED (9be86bf): dense-Vec per-node rank in nodes_by_rank — layout −1.3% (2026-07-13)
 
 - `nodes_by_rank` (~3.25% layout self, runs every layout in crossing-min) did a random `ranks.get(&node_index)`

@@ -300,13 +300,15 @@ fn compare_nodes(
         });
     }
 
-    let old_members = node_member_strings(old_node);
-    let new_members = node_member_strings(new_node);
-    if old_members != new_members {
-        changes.push(NodeChange::MembersChanged {
-            old: old_members,
-            new: new_members,
-        });
+    if old_node.members != new_node.members {
+        let old_members = node_member_strings(old_node);
+        let new_members = node_member_strings(new_node);
+        if old_members != new_members {
+            changes.push(NodeChange::MembersChanged {
+                old: old_members,
+                new: new_members,
+            });
+        }
     }
 
     if old_node.href() != new_node.href() {
@@ -1071,6 +1073,25 @@ mod tests {
             diff.nodes[0].changes[0],
             NodeChange::MembersChanged { .. }
         ));
+    }
+
+    #[test]
+    fn identical_node_members_stay_unchanged() {
+        let member = IrEntityAttribute {
+            data_type: "varchar(255)".to_string(),
+            name: "account_name".to_string(),
+            key: IrAttributeKey::Uk,
+            comment: Some("stable member comment".to_string()),
+        };
+        let mut old = make_ir_with_nodes(&["A"]);
+        let mut new = make_ir_with_nodes(&["A"]);
+        old.nodes[0].members.push(member.clone());
+        new.nodes[0].members.push(member);
+
+        let diff = diff_diagrams(&old, &new);
+        assert_eq!(diff.changed_nodes, 0);
+        assert_eq!(diff.unchanged_nodes, 1);
+        assert!(diff.nodes[0].changes.is_empty());
     }
 
     #[test]
