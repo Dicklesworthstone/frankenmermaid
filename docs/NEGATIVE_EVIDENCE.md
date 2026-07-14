@@ -15277,6 +15277,33 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 
   Agent: Codex (GPT-5, this session)
 
+### ✅LANDED: inline the shipped two-value Canvas dash conversion — 75.681% faster (2026-07-14)
+
+- **Ledger-first boundary:** no prior Canvas `StrokeStyle::dash_array` f32-to-f64 conversion probe was
+  recorded. Source inspection showed every nonempty dash pattern produced by `fm-layout` is exactly two values:
+  `[6.0, 4.0]` or `[4.0, 4.0]`; arbitrary externally constructed lengths remain supported.
+- **Lever:** `fm-render-canvas::Canvas2dRenderer::apply_stroke` previously allocated and filled a `Vec<f64>`
+  before every nonempty `set_line_dash` call. A small `with_canvas_dash_f64` helper now converts the shipped
+  two-value shape into a stack `[f64; 2]` and lends its slice to the context. Other lengths retain the original
+  owned-`Vec` fallback, so the optimization changes only the common representation boundary.
+- **Strict-remote same-binary foreground A/B:** one release test binary alternated the old owned-`Vec` arm and
+  candidate stack arm for 1,048,576 conversions per sample, nine samples per arm, under mimalloc. It ran via
+  `RCH_REQUIRE_REMOTE=1` on worker **`vmi1293453`**, job **`j-29928833041828098`**, using
+  `cargo test -j1 --profile release -p fm-render-canvas
+  renderer::tests::canvas_two_value_dash_conversion_perf_probe -- --ignored --nocapture --exact`. Sorted old-arm
+  samples were **[28840117, 29573144, 29963638, 30334843, 30493080, 30599689, 30707360, 30833288,
+  31142400] ns**; candidate samples were **[7089609, 7136229, 7247105, 7271591, 7415736, 7590629,
+  7675666, 7730688, 7853512] ns**. Medians: **30,493,080 -> 7,415,736 ns** (**75.681% faster,
+  4.112x throughput**), with every candidate sample below every baseline sample.
+- **Exact-output proof:** both A/B arms produced digest **`7010000000000080`**. Permanent coverage compares ordered
+  `f64::to_bits()` results for empty, shipped two-value, one-value, and five-value inputs, proving the stack fast
+  path and owned fallback preserve conversion order and every float bit.
+- **Verdict:** **KEEP / LANDED.** This clears the 3% floor decisively and removes one heap allocation from every
+  shipped dashed Canvas stroke without narrowing the public input domain. The temporary benchmark allocator,
+  dependency, and ignored probe were removed before landing.
+
+  Agent: Codex (GPT-5, this session)
+
 ### ✅LANDED: borrow Canvas render-path marker colors — unmarked marker dispatch 81.676% faster (2026-07-14)
 
 - **Negative-ledger-first boundary:** no earlier `draw_path_markers`, marker stroke-color clone, or
