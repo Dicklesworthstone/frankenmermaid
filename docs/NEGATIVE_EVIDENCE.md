@@ -15483,3 +15483,30 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   the slow path ALLOCATE?", not merely "does it loop?".
 
   Agent: (Opus 4.8, this session)
+
+### ❌REJECTED: `normalize_compound_identifier` already-clean fast path — WASH on gantt/journey/kanban/mindmap (2026-07-13)
+
+- **Hypothesis:** `normalize_compound_identifier` (mermaid_parser.rs:8232, called per gantt task / journey step /
+  kanban card / mindmap node / xychart series across ~10 sites) runs a `chars()` decode + push loop and lacked the
+  already-clean byte pre-check that won −11..14% on DOT `normalize_identifier` (9829964c). Ported the same
+  pre-check (all bytes ∈ alnum+`_-./`, no leading/trailing `_` → return `cleaned.to_owned()`). Byte-identical
+  (kept `_` runs don't collapse; both-end trim is a no-op; non-kept/non-ASCII bytes defer to the slow path).
+- **File coordination:** held an exclusive agent-mail reservation on mermaid_parser.rs (BlackThrush's file, but
+  their task is state-label, a different path; idle ~13h). No conflict.
+- **Sequential same-pinned-pool A/B (Criterion, baseline `ncibase`):** ALL WASH — gantt_50 −0.28% (p=0.81),
+  gantt_200 +1.15% (p=0.51), mindmap_50 −0.68% (p=0.58), mindmap_200 −2.46% (p=0.05, not <), journey_50 +1.60%
+  (p=0.24), journey_200 +0.08% (p=0.96), kanban_400 +2.70% (p=0.07), kanban_1600 +3.37% (p=0.09). Point estimates
+  mixed, several slightly POSITIVE; nothing clears the floor.
+- **Why it washed here but WON on DOT — the deciding difference:** DOT's gen ids are `N0`/`N1` — always clean, so
+  the fast path fires on 100% of ~600 calls/parse, and normalize_identifier dominates DOT parse. Here the fixtures'
+  normalized strings are **human-readable spaced names** — gantt `Task {i}` / `section Section {n}`, journey steps,
+  kanban `Task {i}` labels — which contain a space, so the fast path MISSES and its `all()` byte scan is pure
+  wasted overhead before the slow path (the slight positive lean on kanban/journey). And normalize_compound_
+  identifier is a much smaller fraction of these parses (dates, sections, layout metadata dominate) than
+  normalize_identifier is of DOT. Reverted.
+- **LESSON (refines the identity-common-case lever again):** the clean-id fast path pays only when the COMMON input
+  is actually clean. Generated/machine ids (DOT `N0`) are; human-readable diagram labels (`Task 5`, `Section 0`)
+  are NOT — the space forces the slow path, so the pre-check is dead weight. Before porting a clean-id fast path to
+  a new call site, check the FIXTURE's id shape: spaced/punctuated names ⇒ expect a wash.
+
+  Agent: (Opus 4.8, this session)
