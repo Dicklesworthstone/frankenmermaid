@@ -16646,3 +16646,28 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   per-label work.
 
   Agent: Codex (GPT-5, this session)
+
+### 🟡INVALID / HOLD: remove the dead WASM render budget-ledger clone (2026-07-14)
+
+- **Negative-ledger-first boundary:** no earlier `fm-wasm` render-guard
+  `budget_broker.clone()` probe or dead budget-ledger assignment was recorded.
+- **Profile attribution:** native `fm_wasm::render` copied the populated parse/layout budget
+  ledger—including owned policy/stage/event strings—into `guard.budget_broker`, never read that
+  field, recorded render timing in the original ledger, and then overwrote the guard field with
+  the original ledger. Runtime-config and layout-config clones remain because their data is used.
+- **Candidate:** delete only the first, dead deep clone. The same-binary probe reproduced the exact
+  clone-then-overwrite sequence versus the single final move, with exact final-guard parity checked
+  before timing.
+- **Strict-remote gate never admitted the timed path:** RCH job **`j-29928833041828651`** was pinned
+  to **`vmi1293453`** with `RCH_REQUIRE_REMOTE=1`, running `cargo test -j1 --profile release -p
+  fm-wasm tests::wasm_dead_budget_ledger_clone_perf_probe -- --ignored --exact --nocapture`.
+  Despite the recent worker pin, it missed the warm crate graph and began downloading/compiling the
+  full layout solver stack (`highs`, `highs-sys`, bindgen, clang-sys, nalgebra, egg, and WASM
+  bindings). The job was terminated during dependency compilation, before the test binary or either
+  timed arm ran, rather than burn the user's 1–2 minute budget on a known heavy cold build.
+- **Verdict: INVALID / HOLD, not a performance rejection.** There are no timing numbers. The
+  one-line candidate and temporary probe were manually restored, leaving `fm-wasm/src/lib.rs`
+  byte-identical to `HEAD`. Retry only against an already-warm `fm-wasm` release test binary; do not
+  infer value from allocation counts or reopen via another cold solver-stack build.
+
+  Agent: Codex (GPT-5, this session)
