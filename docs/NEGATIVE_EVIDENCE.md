@@ -16738,3 +16738,30 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   gate, so the exact-upper-bound entry reserve is retained.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.11`)
+
+### 🟡INVALID / HOLD: borrow the legacy Canvas dotted-edge dash slice (2026-07-14)
+
+- **Negative-ledger-first boundary:** the landed Canvas dash conversion optimized the shared
+  `RenderScene` path from arbitrary `StrokeStyle::dash_array: Vec<f32>` to the Canvas `f64` slice
+  boundary. It did not touch the legacy `DiagramLayout` renderer's independently owned
+  `draw_edges` dash selection, and no `DottedArrow` `vec![5.0, 5.0]` probe is recorded.
+- **Profile attribution:** `Canvas2dRenderer::draw_edges` runs once per legacy layout edge. Every
+  `DottedArrow` constructs and drops a two-element `Vec<f64>` solely to lend its contents to
+  `Canvas2dContext::set_line_dash`; 4,096 dotted edges therefore perform 4,096 allocator round
+  trips while the two float values are compile-time constants.
+- **One lever:** replace only that temporary owned vector with a borrowed static `[5.0, 5.0]`
+  slice, preserving the existing arrow classification, stroke widths, dash bits, setter order,
+  and empty-dash behavior. One same-binary, alternating-order, nine-round `--profile release` A/B
+  compares the old owned dispatch with the borrowed dispatch. Keep only with exact mapping parity
+  and at least 3% median improvement.
+- **Strict-remote gate never reached timing:** RCH job `j-29928833041828701` was admitted on
+  `vmi1293453` with `RCH_REQUIRE_REMOTE=1`, direct Cargo argv, `--profile release`, and a 290-second
+  hard ceiling. The worker target did not contain the Canvas/layout dependency graph: it downloaded
+  and compiled the native solver stack, then timed out with exit 124 while still building
+  `highs-sys`. The named test binary and both A/B arms never executed.
+- **Verdict: INVALID / HOLD, not a performance rejection.** The static-slice candidate, all-arrow
+  bit-parity test, and temporary A/B harness were manually restored, leaving `renderer.rs`
+  byte-identical to `HEAD`. Retry only against a demonstrably warm `fm-render-canvas` release test
+  binary; allocation counting alone is not keep evidence.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.12`)
