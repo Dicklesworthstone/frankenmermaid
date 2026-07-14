@@ -1924,6 +1924,10 @@ pub fn is_safe_link_target(target: &str, sanitize_mode: MermaidSanitizeMode) -> 
 
 fn decode_percent_triplets(input: &str) -> String {
     let bytes = input.as_bytes();
+    if !bytes.contains(&b'%') {
+        return input.to_owned();
+    }
+
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0;
 
@@ -8424,6 +8428,150 @@ mod tests {
             "javascript:alert(1)",
             MermaidSanitizeMode::Lenient
         ));
+    }
+
+    fn decode_percent_triplets_linear_reference(input: &str) -> String {
+        let bytes = input.as_bytes();
+        let mut decoded = Vec::with_capacity(bytes.len());
+        let mut index = 0usize;
+
+        while index < bytes.len() {
+            if bytes[index] == b'%' && index + 2 < bytes.len() {
+                let high = super::decode_hex_nibble(bytes[index + 1]);
+                let low = super::decode_hex_nibble(bytes[index + 2]);
+                if let (Some(high), Some(low)) = (high, low) {
+                    decoded.push((high << 4) | low);
+                    index += 3;
+                    continue;
+                }
+            }
+
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+
+        String::from_utf8_lossy(&decoded).to_string()
+    }
+
+    fn is_safe_link_target_linear_decode_reference(
+        target: &str,
+        sanitize_mode: MermaidSanitizeMode,
+    ) -> bool {
+        let decoded = decode_percent_triplets_linear_reference(target);
+        let trimmed = decoded.trim_matches(|c: char| c.is_whitespace() || c.is_control());
+        if trimmed.is_empty() {
+            return false;
+        }
+        if sanitize_mode == MermaidSanitizeMode::Lenient {
+            return true;
+        }
+        if trimmed.starts_with("//") || trimmed.starts_with("\\\\") {
+            return false;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+
+        if let Some(colon_idx) = lower.find(':') {
+            matches!(&lower[..colon_idx], "http" | "https" | "mailto" | "tel")
+        } else {
+            !lower.contains("&#") && !lower.contains("&colon")
+        }
+    }
+
+    const SAFE_LINK_TARGET_PERF_CORPUS: &[&str] = &[
+        "https://example.com/docs/index.html",
+        "http://example.com/a?b=c#fragment",
+        "mailto:user@example.com",
+        "tel:+15551234567",
+        "/docs/guide/index.html",
+        "../relative/path",
+        "#section-anchor",
+        "docs/My Diagram.html",
+        "https://例え.テスト/路径",
+        "  HTTPS://EXAMPLE.COM/docs  ",
+        "javascript:alert(1)",
+        "data:text/html,evil",
+        "//evil.example/path",
+        "\\\\evil.example\\share",
+        "java&#115;cript:alert(1)",
+        "relative&colon;payload",
+        "",
+        "   ",
+        "%68ttps://example.com",
+        "java%73cript:alert(1)",
+        "https%3A//example.com/docs",
+        "%2F%2Fevil.example/path",
+        "%FF",
+        "relative%20path",
+    ];
+
+    #[test]
+    fn safe_link_target_no_percent_fast_path_matches_reference() {
+        for mode in [MermaidSanitizeMode::Strict, MermaidSanitizeMode::Lenient] {
+            for target in SAFE_LINK_TARGET_PERF_CORPUS {
+                assert_eq!(
+                    is_safe_link_target(target, mode),
+                    is_safe_link_target_linear_decode_reference(target, mode),
+                    "link target {target:?} in {mode:?} mode"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual short release A/B"]
+    fn perf_safe_link_target_no_percent_decode_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ITERATIONS: usize = 30_000;
+        const ROUNDS: usize = 9;
+
+        fn measure(
+            validator: fn(&str, MermaidSanitizeMode) -> bool,
+            iterations: usize,
+        ) -> (u128, usize) {
+            let mut accepted = 0usize;
+            let started = Instant::now();
+            for _ in 0..iterations {
+                for mode in [MermaidSanitizeMode::Strict, MermaidSanitizeMode::Lenient] {
+                    for target in SAFE_LINK_TARGET_PERF_CORPUS {
+                        accepted +=
+                            usize::from(black_box(validator(black_box(target), black_box(mode))));
+                    }
+                }
+            }
+            (started.elapsed().as_nanos(), accepted)
+        }
+
+        let mut baseline_ns = Vec::with_capacity(ROUNDS);
+        let mut candidate_ns = Vec::with_capacity(ROUNDS);
+        for round in 0..ROUNDS {
+            let (baseline, candidate) = if round % 2 == 0 {
+                (
+                    measure(is_safe_link_target_linear_decode_reference, ITERATIONS),
+                    measure(is_safe_link_target, ITERATIONS),
+                )
+            } else {
+                let candidate = measure(is_safe_link_target, ITERATIONS);
+                let baseline = measure(is_safe_link_target_linear_decode_reference, ITERATIONS);
+                (baseline, candidate)
+            };
+            assert_eq!(baseline.1, candidate.1);
+            baseline_ns.push(baseline.0);
+            candidate_ns.push(candidate.0);
+        }
+
+        baseline_ns.sort_unstable();
+        candidate_ns.sort_unstable();
+        let baseline_median_ns = baseline_ns[ROUNDS / 2];
+        let candidate_median_ns = candidate_ns[ROUNDS / 2];
+        let improvement_pct = (baseline_median_ns as f64 - candidate_median_ns as f64) * 100.0
+            / baseline_median_ns as f64;
+
+        println!(
+            "PERF safe_link_target_decode linear_median_ns={baseline_median_ns} no_percent_fast_median_ns={candidate_median_ns} improvement_pct={improvement_pct:.3} parity=exact rounds={ROUNDS} iterations={ITERATIONS} targets={} modes=2",
+            SAFE_LINK_TARGET_PERF_CORPUS.len()
+        );
     }
 
     #[test]

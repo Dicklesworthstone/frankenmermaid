@@ -15331,6 +15331,35 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 
   Agent: Codex (GPT-5, this session; bead `bd-24cn`)
 
+### ✅LANDED: bypass percent decoding for ordinary link targets — validation -40.1% (2026-07-14)
+
+- **Negative-ledger-first / attribution:** no earlier `decode_percent_triplets`, percent-decoder,
+  or `is_safe_link_target` optimization probe is recorded. Five production call sites across the
+  parser and SVG renderer validate link targets. Before checking schemes, every call decoded percent
+  triplets by allocating and filling a `Vec<u8>`, then allocating and copying the decoded bytes into
+  a second `String`, including ordinary targets that contain no percent marker.
+- **Opportunity matrix:** impact 2, confidence 5, effort 1, score **10.0**. The ranked removable
+  costs are the decoder's two allocations/copies first, required lowercase normalization second, and
+  the final scheme scan third.
+- **Single lever / isomorphism:** when `input.as_bytes()` contains no `%`, return the already-valid
+  UTF-8 bytes as one owned `String`; percent-bearing inputs retain the exact old decoder body. For
+  no-percent input the old `String::from_utf8_lossy` result is byte-identical because `input` is a
+  valid `&str`. Strict/lenient decisions, trimming, scheme checks, diagnostics, ordering, floating
+  point, tie-breaking, and RNG are unchanged. The parity oracle retains the complete old validator
+  and covers ordinary, dangerous, Unicode, whitespace, empty, and percent-encoded targets.
+- **Strict-remote same-binary foreground A/B:** `RCH_REQUIRE_REMOTE=1`, `--profile release`, one
+  ignored `fm-core` test binary, alternating order, 9 rounds x 30,000 iterations x 24 targets x 2
+  sanitize modes. Linear-decoder median **108,413,335 ns**; no-percent-fast median
+  **64,925,256 ns**; **40.113% faster** (**1.670x speedup**); parity **exact**; actual worker
+  **`vmi1293453`**. The named test ran once and passed; its timed body finished in 1.55s, the remote
+  command in 104.1s, and the complete strict-remote command in 134.0s.
+- **Verdict:** **KEEP / LANDED.** The candidate decisively clears the 3% floor while removing one
+  allocation plus the entire byte-vector fill/copy from the common no-percent path. Percent-bearing
+  inputs retain the old decoder, and the full validator oracle proves identical decisions in both
+  sanitize modes.
+
+  Agent: Codex (GPT-5, this session; bead `bd-txmp`)
+
 ### ⛔ HOLD / INVALID: direct terminal `CellBuffer` serialization never reached timed path (2026-07-14)
 
 - **Negative-ledger-first boundary:** no prior `CellBuffer`, terminal cell-grid serialization, or per-row output
