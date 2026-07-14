@@ -15709,3 +15709,28 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   byte-identical to 2b6bdc2e.
 
   Agent: (Opus 4.8, this session)
+
+### 🟡SCOPED (deferred, not a single-turn lever): C4 whole-node render streaming (2026-07-13)
+
+- **The lever & its value:** C4 nodes still take the SLOW `render_c4_node_content` path (lib.rs ~8190) — build an
+  Element `group` subtree → serialize+copy, the whole-group copy that ER/class node streaming eliminated
+  (−12..−26% on those). Expected an ER-sized win.
+- **Enabling work DONE (88a9ae10):** added the first C4 render bench, `render_nonflowchart/nf/c4_40` — SLOW-path
+  baseline **~228µs**. Pin #2 = the existing `c4_basic.svg` golden.
+- **Why it's NOT a single-turn byte-exact land (the blocker, confirmed by reading the code):** ER/class streaming
+  was tractable because a themed Rect node's wrapper is written by a reusable helper (`write_common_node_fragment_
+  into`) they mirror. **C4's wrapper DIVERGES and has no reusable helper:** the golden shows a `fm-node-shape-
+  rounded` node with a SOLID `fill="#ffffff" rx="10"` rect (the NON-gradient path, unlike class's
+  `fill="url(#fm-node-gradient)"`) plus `fm-node-user-c4 fm-node-user-c4-{person|system}` user-classes — and that
+  wrapper is emitted across ~1000 lines of `render_node`'s (6721) conditional shape/fill/class/gradient logic. A
+  byte-exact `write_c4_node_fragment_into` must replicate BOTH that divergent wrapper AND the conditional
+  multi-element content: stereotype `<<type>>` (escaped `&lt;&lt;…>>`), optional `render_c4_person_icon` (a 6-child
+  `<g>`: circle + 4 lines, only for `classes.contains("c4-person")`), name, optional `[technology]`, and a
+  wrapped-description (tspans, exact `cursor_y` float arithmetic: line_h*0.95/*0.9…). That is a multi-hour,
+  multi-iteration effort against the golden — not "quick, THIS turn."
+- **Verdict: DEFERRED to a dedicated pass.** Both pins are ready (nf/c4_40 baseline + c4_basic golden); plan in
+  memory [[project_er_mindmap_render_frontier]]. Do NOT scope this as a quick ER-mirror — the divergent
+  non-gradient wrapper is the reason it isn't. Next agent: dump c4_basic node bytes, replicate wrapper+content,
+  gate narrowly (person/system, single-line desc, no technology), byte-pin, A/B nf/c4_40 vs `c4base`.
+
+  Agent: (Opus 4.8, this session)
