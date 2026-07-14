@@ -15786,3 +15786,25 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   with `node.c4_meta.is_some()`; keep it conservative (reject technology + multi-line description initially).
 
   Agent: (Opus 4.8, this session)
+
+### ✅LANDED: drop the per-rank-per-sweep `current_order` clone in `reorder_rank_by_barycenter` — scc_100 −6.6% (2026-07-13)
+
+- **Clone-DELETION in the hottest layout function.** `reorder_rank_by_barycenter` (lib.rs, ≈47% of the cyclic-SCC
+  pipeline, ~92% self-time in the barycenter phase) did `ordering_by_rank.get(&rank).cloned()` per rank per sweep
+  (~8×rank_count calls: 4 sweeps × 2 directions). But `current_order` is READ-ONLY through the `scored_nodes`
+  construction, and the final `ordering_by_rank.insert(rank, …)` runs strictly after that last read — so NLL drops
+  the borrow before the `&mut`, and no clone is needed. Changed `.get(&rank).cloned()` → `.get(&rank)` (borrow),
+  plus one `for node in &current_order` → `for node in current_order`. Compiles cleanly (confirms NLL allows it).
+- **Byte-identical:** same values read, just not copied. 439 fm-layout lib tests pass; clippy clean.
+- **Sequential same-pinned-pool A/B (Criterion vs `bcbase`):** **scc_100 −6.65% (change CI [−9.25%, −3.87%],
+  p=0.00)**, scc_300 +0.03% (p=0.98, wash), scc_600 −1.70% (p=0.14, directional). One significant, all non-positive,
+  none regressed.
+- **⭐⭐⭐WHY THIS WON where the coordinate_assignment two-clone REJECTED (14632, +0.8% free-list wash):** that clone
+  was per-rank-ONCE in a COOLER post-barycenter function; THIS one is per-rank-per-SWEEP (~8× more frequent) in the
+  47%/92%-self-time barycenter hot loop, so its alloc+copy is a MEANINGFUL fraction there. Confirms the meta-rule:
+  a "clone-removal washes" reject is function-specific — RE-MEASURE the same primitive in a HOTTER path (dedicated
+  bench). And it's a DELETION (borrow eliminates the clone), not an alloc-reduction — deletions clear the floor
+  where free-list reductions don't.
+- **Verdict: KEEP / LANDED.**
+
+  Agent: (Opus 4.8, this session)
