@@ -1315,6 +1315,21 @@ impl TermRenderer {
     fn truncate_label(&self, text: &str) -> String {
         let max_chars = self.config.max_label_chars.max(1);
         let max_lines = self.config.max_label_lines.max(1);
+        let bytes = text.as_bytes();
+        let mut previous_space = false;
+        let unchanged_short_ascii = bytes.len() <= max_chars
+            && bytes.first() != Some(&b' ')
+            && bytes.iter().copied().all(|byte| {
+                let is_space = byte == b' ';
+                let valid = byte.is_ascii_graphic() || (is_space && !previous_space);
+                previous_space = is_space;
+                valid
+            })
+            && !previous_space;
+        if unchanged_short_ascii {
+            return text.to_owned();
+        }
+
         let sanitized: String = text
             .chars()
             .map(|ch| match ch {
@@ -2166,6 +2181,22 @@ mod tests {
         }
         let result = render_diagram(&ir);
         assert!(!result.output.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn short_ascii_label_fast_path_preserves_wrapping_contract() {
+        let renderer = TermRenderer::new(ResolvedConfig::resolve(
+            &TermRenderConfig::default(),
+            120,
+            40,
+        ));
+        assert_eq!(renderer.truncate_label("Node 42"), "Node 42");
+        assert_eq!(renderer.truncate_label(""), "");
+        assert_eq!(renderer.truncate_label(" leading"), "leading");
+        assert_eq!(renderer.truncate_label("trailing "), "trailing");
+        assert_eq!(renderer.truncate_label("two  spaces"), "two spaces");
+        assert_eq!(renderer.truncate_label("tab\there"), "tab here");
+        assert_eq!(renderer.truncate_label("界面 42"), "界面 42");
     }
 
     #[test]

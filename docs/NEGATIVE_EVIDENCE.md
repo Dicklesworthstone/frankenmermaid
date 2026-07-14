@@ -15277,6 +15277,35 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 
   Agent: Codex (GPT-5, this session)
 
+### ✅LANDED: bypass terminal label sanitize/wrap/join for unchanged short ASCII — 47.20% faster (2026-07-14)
+
+- **Ledger-first boundary / attribution:** no prior terminal `TermRenderer::truncate_label` identity-path probe was
+  recorded. The older SVG `truncate_label` byte-length guard reject avoided only a `chars().count()` scan; this
+  distinct terminal path allocated a sanitized `String`, a source-line `Vec`, wrapped-line `String`/`Vec`, an
+  output-line `Vec`, and the final joined `String` for every node/title label. Call-site inspection showed
+  `node_display_label` routes each rendered node label through this pipeline even when the common short printable
+  ASCII input is already the exact required output.
+- **Lever:** recognize at most `max_label_chars` bytes consisting only of ASCII graphic characters and single
+  interior ASCII spaces, then return the one required owned output directly. Empty input is also an identity case.
+  Leading/trailing/repeated whitespace, Unicode, controls, multiline text, and long labels conservatively retain
+  the original sanitizer and word-wrap path.
+- **Strict-remote same-binary foreground A/B:** one `--profile release` test binary alternated the exact old
+  allocating implementation and candidate on RCH worker **`vmi1152480`**, with `RCH_REQUIRE_REMOTE=1`, no local
+  fallback, 4,096 mixed labels per repetition (75% short printable ASCII, 12.5% long, 12.5% Unicode), 32
+  repetitions, and nine samples per arm. Sorted baseline samples were **[66259064, 66638399, 67424011, 67443661,
+  69377966, 69600968, 71988220, 74264075, 76631647] ns**; candidate samples were **[33120749, 33972139,
+  34388020, 34413126, 36633348, 37651218, 39103263, 39123223, 43334246] ns**. Medians:
+  **69,377,966 -> 36,633,348 ns** (**47.20% faster, 1.894x speedup**).
+- **Exact-output proof:** the probe compared every candidate output with the old implementation across all 4,096
+  workload labels plus empty, punctuation, leading/trailing/repeated spaces, tab, newline, long, Unicode,
+  non-breaking-space, and terminal-control cases. Both timed arms produced FNV digest **`fe6eda37b1b163c5`**.
+  Permanent coverage keeps the identity result and each conservative fallback boundary explicit; all temporary
+  timing and baseline code was removed.
+- **Verdict: KEEP / LANDED.** This deletes four intermediate allocation layers and their scans from the common
+  unchanged-label path, clears the 3% floor decisively, and leaves the output contract unchanged.
+
+  Agent: Codex (GPT-5, this session)
+
 ### ✅KEEP: fuse ANSI stripping into terminal-diff display-width scan — 52.644% faster (2.112×, 2026-07-14)
 
 - **Ledger-first boundary:** the measured per-line output-`format!` rejection above identified `pad_display` and
