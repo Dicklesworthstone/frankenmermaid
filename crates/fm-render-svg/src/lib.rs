@@ -5651,6 +5651,170 @@ fn write_class_node_fragment_into(
     out.push_str(", rectangle</title></g>");
 }
 
+/// Stream a complete C4 node (`<g>` + solid-fill rounded `<rect>` + stereotype/[person icon]/name/description +
+/// `<title>`) directly into `out`, **byte-identical** to what `render_node` builds via `Element`s (the C4
+/// analogue of [`write_class_node_fragment_into`]). Used only via `render_node_into`'s C4 gate, which guarantees
+/// a `Rounded` node with `c4_meta`, no `technology`, and an absent-or-single-line description — so none of
+/// `render_node`'s conditional classes/children/post-processing apply. The wrapper mirrors the class fragment's
+/// (proven) `<g>`/title bytes; the rect uses the Rounded shape's SOLID `node_fill` (NOT the gradient the class/ER
+/// fragments use, matching `render_node`'s `NodeShape::Rounded => rect.fill(node_fill).rx(rounded_corners)`); the
+/// content mirrors `render_c4_node_content`. Skips the group + rect + per-`<text>` `Element` builds and the
+/// whole-group serialize+copy.
+#[allow(clippy::too_many_arguments)]
+fn write_c4_node_fragment_into(
+    out: &mut String,
+    node: &fm_core::IrNode,
+    c4_meta: &fm_core::IrC4NodeMeta,
+    node_id: &str,
+    node_index: usize,
+    raw_label: &str,
+    ir: &MermaidDiagramIr,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    rx: f32,
+    font_size: f32,
+    config: &SvgRenderConfig,
+    colors: &ThemeColors,
+    user_classes: &str,
+) {
+    use crate::attributes::{write_escaped_attr, write_escaped_text, write_number_into};
+    // <g id=".." class="fm-node fm-node-accent-N fm-node-shape-rounded[ fm-node-user-…]" data-id=".." …>
+    out.push_str("<g id=\"");
+    fm_core::write_mermaid_node_element_id_into(out, node_id, node_index);
+    out.push_str("\" class=\"fm-node fm-node-accent-");
+    let _ = crate::attributes::write_uint_into(out, stable_accent_index(node_id) as u64);
+    out.push(' ');
+    out.push_str(node_shape_css_class(fm_core::NodeShape::Rounded));
+    out.push_str(user_classes);
+    out.push_str("\" data-id=\"");
+    let _ = write_escaped_attr(out, node_id);
+    out.push_str("\" role=\"graphics-symbol\" aria-label=\"");
+    let _ = write_escaped_attr(out, raw_label);
+    out.push_str("\" tabindex=\"0\">");
+    // <rect x y width height rx fill="url(#fm-node-gradient)"/> — under `node_gradients` the Rounded rect's
+    // fill is overridden to the gradient (same attr order the class fragment uses), NOT `node_fill`. (The
+    // `c4_basic` golden's solid `#ffffff` is the gradients-OFF path, which this fast path is gated out of.)
+    out.push_str("<rect x=\"");
+    let _ = write_number_into(out, x);
+    out.push_str("\" y=\"");
+    let _ = write_number_into(out, y);
+    out.push_str("\" width=\"");
+    let _ = write_number_into(out, w);
+    out.push_str("\" height=\"");
+    let _ = write_number_into(out, h);
+    out.push_str("\" rx=\"");
+    let _ = write_number_into(out, rx);
+    out.push_str("\" fill=\"url(#fm-node-gradient)\"/>");
+
+    // Content — mirrors `render_c4_node_content` (same arithmetic + `write_number_into`, so numbers are identical).
+    let label_text = node
+        .label
+        .and_then(|lid| ir.labels.get(lid.0))
+        .map(|label| label.text.as_str())
+        .unwrap_or(node.id.as_str());
+    let line_h = font_size * config.line_height;
+    let small_font = clamp_font_size(font_size * 0.78, config.min_font_size);
+    let description_font = clamp_font_size(font_size * 0.72, config.min_font_size);
+    let mut cursor_y = y + (small_font * 1.25);
+
+    // Stereotype `<<type>>` — `write_escaped_text("<<…>>")` = `&lt;&lt;…>>` (`<` escaped, `>` literal), in pieces.
+    out.push_str("<text x=\"");
+    let _ = write_number_into(out, x + w / 2.0);
+    out.push_str("\" y=\"");
+    let _ = write_number_into(out, cursor_y);
+    out.push_str("\" text-anchor=\"middle\" font-size=\"");
+    let _ = write_number_into(out, small_font);
+    out.push_str("\" font-weight=\"600\" fill=\"");
+    let _ = write_escaped_attr(out, &colors.cluster_stroke);
+    out.push_str("\" class=\"fm-c4-type-label\">&lt;&lt;");
+    let _ = write_escaped_text(out, &c4_meta.element_type);
+    out.push_str(">></text>");
+
+    // Optional person icon.
+    if node.classes.iter().any(|class_name| class_name == "c4-person") {
+        write_c4_person_icon_into(out, x + 18.0, y + 18.0, &colors.node_stroke);
+    }
+
+    // Name.
+    cursor_y += line_h * 0.95;
+    out.push_str("<text x=\"");
+    let _ = write_number_into(out, x + w / 2.0);
+    out.push_str("\" y=\"");
+    let _ = write_number_into(out, cursor_y);
+    out.push_str("\" text-anchor=\"middle\" font-size=\"");
+    let _ = write_number_into(out, font_size);
+    out.push_str("\" font-weight=\"600\" fill=\"");
+    let _ = write_escaped_attr(out, &colors.text);
+    out.push_str("\" class=\"fm-c4-name\">");
+    let _ = write_escaped_text(out, label_text);
+    out.push_str("</text>");
+
+    // Description (gate guarantees single-line, so no tspans / no `line-height` attr and `description_height` = 0).
+    if let Some(description) = &c4_meta.description {
+        cursor_y += line_h * 0.9;
+        let available_width = (w - 20.0).max(32.0);
+        let description_lines =
+            wrap_text_to_lines(description, available_width, config.avg_char_width * 0.92);
+        if !description_lines.is_empty() {
+            let description_height = (description_lines.len().saturating_sub(1) as f32)
+                * description_font
+                * config.line_height;
+            let baseline_y =
+                (cursor_y + description_height.min((h * 0.35).max(0.0))).min(y + h - 8.0);
+            out.push_str("<text x=\"");
+            let _ = write_number_into(out, x + w / 2.0);
+            out.push_str("\" y=\"");
+            let _ = write_number_into(out, baseline_y);
+            out.push_str("\" text-anchor=\"middle\" font-size=\"");
+            let _ = write_number_into(out, description_font);
+            out.push_str("\" fill=\"");
+            let _ = write_escaped_attr(out, &colors.text);
+            out.push_str("\" class=\"fm-c4-description\">");
+            let _ = write_escaped_text(out, &description_lines.join("\n"));
+            out.push_str("</text>");
+        }
+    }
+
+    // <title>Node: {raw_label}, rounded rectangle</title></g>
+    out.push_str("<title>Node: ");
+    let _ = write_escaped_text(out, raw_label);
+    out.push_str(", rounded rectangle</title></g>");
+}
+
+/// Stream `render_c4_person_icon`'s `<g class="fm-c4-person-icon">` (circle + 4 lines) byte-identically.
+fn write_c4_person_icon_into(f: &mut String, x: f32, y: f32, stroke: &str) {
+    use crate::attributes::{write_escaped_attr, write_number_into};
+    f.push_str("<g class=\"fm-c4-person-icon\"><circle cx=\"");
+    let _ = write_number_into(f, x);
+    f.push_str("\" cy=\"");
+    let _ = write_number_into(f, y - 6.0);
+    f.push_str("\" r=\"3\" fill=\"none\" stroke=\"");
+    let _ = write_escaped_attr(f, stroke);
+    f.push_str("\" stroke-width=\"1.10\"/>");
+    write_c4_icon_line_into(f, x, y - 2.0, x, y + 7.0, stroke);
+    write_c4_icon_line_into(f, x - 5.0, y + 1.0, x + 5.0, y + 1.0, stroke);
+    write_c4_icon_line_into(f, x, y + 7.0, x - 4.5, y + 13.0, stroke);
+    write_c4_icon_line_into(f, x, y + 7.0, x + 4.5, y + 13.0, stroke);
+    f.push_str("</g>");
+}
+
+fn write_c4_icon_line_into(f: &mut String, x1: f32, y1: f32, x2: f32, y2: f32, stroke: &str) {
+    use crate::attributes::{write_escaped_attr, write_number_into};
+    f.push_str("<line x1=\"");
+    let _ = write_number_into(f, x1);
+    f.push_str("\" y1=\"");
+    let _ = write_number_into(f, y1);
+    f.push_str("\" x2=\"");
+    let _ = write_number_into(f, x2);
+    f.push_str("\" y2=\"");
+    let _ = write_number_into(f, y2);
+    f.push_str("\" stroke=\"");
+    let _ = write_escaped_attr(f, stroke);
+    f.push_str("\" stroke-width=\"1.10\"/>");
+}
+
 /// Stream a complete ER entity node (`<g>` + gradient `<rect>` + entity body + `<title>`) directly into
 /// `out`, **byte-identical** to what `render_node` builds via `Element`s — the ER analogue of
 /// [`write_class_node_fragment_into`]. The `<g>`/rect/title bytes replicate that helper's (proven)
@@ -6518,6 +6682,62 @@ fn render_node_into(
             w,
             h,
             config.rounded_corners * 0.55,
+            node_font_size,
+            config,
+            colors,
+            &user_classes,
+        );
+        return;
+    }
+
+    // Whole-C4-node streaming fast path: a themed C4 node (a `Rounded` node with `c4_meta`) with no `technology`
+    // and an absent/single-line description, whose config carries no conditional render — the C4 twin of the
+    // class/ER fast paths. `render_node`'s slow path builds a group `Element` + solid-fill rect `Element` +
+    // `render_c4_node_content`'s child subtree + a title, serializes the whole group, then COPIES it into `out`;
+    // stream the `<g>…</g>` in place instead. Reuses `simple_class_node_user_suffix` (byte-identical
+    // ` fm-node-user-c4…` output; rejects the `c4-external` variant → slow path). Byte-identical, pinned by
+    // `svg_golden_snapshots_are_stable`'s `c4_basic`.
+    if let Some(node) = ir_node
+        && matches!(shape, NodeShape::Rounded)
+        && let Some(c4_meta) = node.c4_meta.as_deref()
+        && c4_meta.technology.is_none()
+        && node.class_meta.is_none()
+        && node.requirement_meta.is_none()
+        && node.members.is_empty()
+        && config.embed_theme_css
+        && config.node_gradients
+        && !emit_classdef_classes
+        && !config.animations_enabled
+        && !config.include_source_spans
+        && config.a11y.aria_labels
+        && config.a11y.keyboard_nav
+        && config.a11y.text_alternatives
+        && shape_style.is_none()
+        && text_style.is_none()
+        && node_icon.is_none()
+        && !placeholder_space_node
+        && lookup_centrality_tier(centrality_map, node_box.node_index).is_none()
+        && node.menu_links.is_empty()
+        && node.href().is_none()
+        && node.callback().is_none()
+        && c4_meta.description.as_ref().is_none_or(|d| {
+            wrap_text_to_lines(d, (w - 20.0).max(32.0), config.avg_char_width * 0.92).len() <= 1
+        })
+        && let Some(user_classes) = simple_class_node_user_suffix(node)
+    {
+        write_c4_node_fragment_into(
+            out,
+            node,
+            c4_meta,
+            node_id,
+            node_box.node_index,
+            raw_label_text,
+            ir,
+            x,
+            y,
+            w,
+            h,
+            config.rounded_corners,
             node_font_size,
             config,
             colors,
@@ -10833,6 +11053,83 @@ mod tests {
         assert!(streamed.contains("fm-er-entity-name"));
         // Text content escapes `<` (and `&`) but leaves a standalone `>` literal (only `]]>` escapes it).
         assert!(streamed.contains("na&lt;me>"));
+    }
+
+    /// The streamed whole-C4-node fragment must be byte-identical to the `Element` the slow path builds,
+    /// under the DEFAULT (gradients-on) config the C4 fast-path gate fires on. The `c4_basic` golden uses
+    /// `node_gradients: false` (so the fast path does NOT fire there), so THIS is the real byte-pin for it.
+    #[test]
+    fn c4_node_streaming_matches_slow_render() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::C4Context);
+        ir.labels.push(IrLabel {
+            text: "User".to_string(),
+            span: Span::default(),
+        });
+        ir.nodes.push(IrNode {
+            id: "user".to_string(),
+            label: Some(IrLabelId(0)),
+            shape: NodeShape::Rounded,
+            classes: vec!["c4".to_string(), "c4-person".to_string()],
+            c4_meta: Some(Box::new(fm_core::IrC4NodeMeta {
+                element_type: "Person".to_string(),
+                technology: None,
+                description: Some("A customer".to_string()),
+            })),
+            ..Default::default()
+        });
+        let node_box = LayoutNodeBox {
+            node_index: 0,
+            node_id: "user".to_string(),
+            rank: 0,
+            order: 0,
+            span: Span::default(),
+            bounds: fm_layout::LayoutRect {
+                x: 12.0,
+                y: 24.0,
+                width: 150.0,
+                height: 90.0,
+            },
+        };
+        let config = SvgRenderConfig::default();
+        let colors = ThemeColors::default();
+        let detail = resolve_detail_profile(800.0, 600.0, &config);
+        let centrality = HashMap::new();
+
+        let mut streamed = String::new();
+        render_node_into(
+            &mut streamed,
+            &node_box,
+            &ir,
+            0.0,
+            0.0,
+            &config,
+            detail,
+            &colors,
+            false,
+            &centrality,
+        );
+
+        let mut slow = String::new();
+        render_node(
+            &node_box,
+            &ir,
+            0.0,
+            0.0,
+            &config,
+            detail,
+            &colors,
+            false,
+            &centrality,
+            false,
+        )
+        .write_to_string(&mut slow);
+
+        assert_eq!(streamed, slow);
+        // Confirm the whole-C4-node fast path actually fired (stereotype + person icon + solid, non-gradient fill).
+        assert!(streamed.contains("fm-c4-type-label"));
+        assert!(streamed.contains("fm-c4-person-icon"));
+        assert!(streamed.contains("&lt;&lt;Person>>"));
+        assert!(streamed.contains("url(#fm-node-gradient)"));
     }
 
     /// The streamed common-edge fragment must be byte-identical to the `Element` the slow path
