@@ -272,23 +272,26 @@ fn compare_nodes(
         });
     }
 
-    // Compare labels.
+    // Compare labels. Borrow each label's text and only clone when they
+    // differ, so unchanged nodes (the common diff case) allocate nothing —
+    // the node's `label` is a `LabelId` index, so the text lives outside the
+    // per-node clone and would otherwise be duplicated here for free.
     let old_label = old_node
         .label
         .and_then(|lid| old_ir.labels.get(lid.0))
-        .map(|l| l.text.clone())
-        .unwrap_or_default();
+        .map(|l| l.text.as_str())
+        .unwrap_or("");
 
     let new_label = new_node
         .label
         .and_then(|lid| new_ir.labels.get(lid.0))
-        .map(|l| l.text.clone())
-        .unwrap_or_default();
+        .map(|l| l.text.as_str())
+        .unwrap_or("");
 
     if old_label != new_label {
         changes.push(NodeChange::LabelChanged {
-            old: old_label,
-            new: new_label,
+            old: old_label.to_string(),
+            new: new_label.to_string(),
         });
     }
 
@@ -1087,6 +1090,21 @@ mod tests {
         let mut new = make_ir_with_nodes(&["A"]);
         old.nodes[0].members.push(member.clone());
         new.nodes[0].members.push(member);
+
+        let diff = diff_diagrams(&old, &new);
+        assert_eq!(diff.changed_nodes, 0);
+        assert_eq!(diff.unchanged_nodes, 1);
+        assert!(diff.nodes[0].changes.is_empty());
+    }
+
+    #[test]
+    fn identical_node_labels_stay_unchanged() {
+        // Two independently-owned IRs whose matched node carries identical label
+        // text must diff to Unchanged with no borrowed-text clone leaking into a
+        // change payload.
+        let old = make_ir_with_nodes(&["A"]);
+        let new = make_ir_with_nodes(&["A"]);
+        assert_eq!(old.labels[0].text, new.labels[0].text);
 
         let diff = diff_diagrams(&old, &new);
         assert_eq!(diff.changed_nodes, 0);

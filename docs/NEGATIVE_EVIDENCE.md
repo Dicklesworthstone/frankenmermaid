@@ -15392,6 +15392,40 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 
   Agent: Codex (GPT-5, this session)
 
+### ✅LANDED (label sibling of the member guard): borrow terminal diff node labels, clone only on change — 18.495% faster (2026-07-14)
+
+- **Ledger-first boundary:** the ledger's prior label-borrow entries all live in the *parse/lowering* path
+  (`intern_label` Cow, `parse_fast_simple_flowchart_node_borrowed`, plain-node `LabelIndex`). None touched
+  `fm-render-term::compare_nodes`, which unconditionally cloned both node label texts (`l.text.clone()` +
+  `unwrap_or_default()`) purely to compare them. This is the label sibling of the just-landed member-formatting
+  guard: `IrNode.label` is a `LabelId` index, so the label text lives in `ir.labels`, *outside* the per-node
+  `(*new_node).clone()` — those two clones were pure waste on every matched pair whose label is unchanged.
+- **Lever:** borrow each label as `&str` (`.map(|l| l.text.as_str()).unwrap_or("")`), compare the borrows, and
+  only `to_string()` when they differ (feeding the existing `LabelChanged` payload). Unchanged labels — the
+  common diff case — now allocate nothing; changed labels pay the identical two `String` allocations they did
+  before, just after the comparison instead of before. Output is byte-identical (empty-vs-`""` label compares
+  equal exactly as `String::default()` did).
+- **Strict-remote same-binary foreground A/B:** both arms ran in one release test binary via `RCH_REQUIRE_REMOTE=1`
+  with `#[global_allocator] mimalloc::MiMalloc` (production allocator, so the alloc delta is not libc-inflated) on
+  a real worker, using `cargo test -j1 --profile release -p fm-render-term
+  diff::tests::compare_nodes_label_borrow_perf_probe -- --ignored --nocapture --exact`. The probe swept 4,096
+  matched, label-heavy / member-empty flowchart node pairs through a faithful `diff_nodes` inner loop (compare +
+  full `DiffNode { id, node.clone(), … }` construction identical in both arms, so the measured denominator
+  includes the structural node clone). Baseline median **750,598 ns/sweep** (samples **743610 745030 745195
+  749881 750598 750737 753928 754017 758971**); candidate median **611,778 ns/sweep** (samples **605604 607000
+  610448 610921 611778 612242 612716 613949 615297**) — **18.495% faster**, fully non-overlapping ranges.
+- **Exact-output proof:** before timing, a mixed IR (changed label on one node, added member on another) was diffed
+  through both the clone-always baseline and the borrow candidate; the per-node `NodeChange` debug vectors hashed
+  identically to FNV digest **`351d0b107770f7fa`**. The temporary probe + baseline copy + mimalloc dev-dep were
+  removed; a permanent test `identical_node_labels_stay_unchanged` covers two independently-owned IRs with equal
+  label text (`detects_changed_node_labels` already covers the divergent path).
+- **Verdict:** **KEEP / LANDED.** Monotonic-less-work on the unchanged path (strictly fewer allocations, never
+  more) with a decisive measured win on label-heavy flowchart diffs. LEVER↺: a "clone both, compare, keep only on
+  diff" pattern where the compared value is an index-referenced string is a free borrow-and-defer — the member and
+  label guards are the same shape one level apart.
+
+  Agent: Claude (Opus 4.8, this session)
+
 ### ✅LANDED: skip terminal diff member formatting when raw members match — 58.427% faster (2026-07-14)
 
 - **Ledger-first boundary:** no prior terminal `node_member_strings`, `MembersChanged`, or equal-member formatting
@@ -15956,3 +15990,35 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
 - **Verdict: REJECT.** Reverted (8 edits again); lib.rs byte-identical to cc588036 baseline.
 
   Agent: (Opus 4.8, this session)
+
+### REJECT: iterate canvas text lines twice to avoid the transient `Vec<&str>` — 0.684% (2026-07-14)
+
+- **Lever:** changed `fm-render-canvas::Canvas2dRenderer::render_text_item` from collecting
+  `text.text.lines()` into a `Vec<&str>` to counting one `str::Lines` iterator for baseline
+  positioning and creating a second iterator for drawing. This removes one transient heap
+  allocation per text primitive at the cost of scanning the label bytes twice.
+- **Hypothesis:** shared render scenes are dominated by single-line node and edge labels, so
+  eliminating a per-label allocation should outweigh the second, short `str::lines` scan.
+  The probe exercised 8,192 realistic single-line labels per sweep through the full private
+  text-item method, including fill/font/alignment setup and mock Canvas2D operations.
+- **Exact-output proof:** the old collect path and candidate produced identical
+  `MockCanvas2dContext` operation streams, draw-call counts, and label counts for empty,
+  single-line, trailing-newline, and multiline text under top/middle/bottom baselines. The
+  combined operation-trace FNV digest was **`c9f3c514501d0358`**.
+- **Strict-remote same-binary foreground A/B:** one release test binary ran both arms in
+  alternating order on RCH worker **`vmi1149989`** with `RCH_REQUIRE_REMOTE=1` and no local
+  fallback. Nine sorted baseline samples were **[2961912, 2972006, 3053379, 3070264,
+  3075742, 3121892, 3142533, 3196584, 3422645] ns/sweep**; candidate samples were
+  **[2872026, 2936843, 3050634, 3052987, 3054711, 3063644, 3064455, 3138456,
+  3167900] ns/sweep**. Medians: **3,075,742 -> 3,054,711 ns/sweep** (**0.684% faster**).
+- **Verdict: REJECT.** The distributions overlap heavily and the median shift is far below
+  the ledger's 3% keep floor. The allocation is real, but its removal is noise-scale inside
+  the complete text-item path and does not justify replacing one scan with two.
+- **Revert / do-not-retry:** removed the temporary A/B harness and restored
+  `crates/fm-render-canvas/src/renderer.rs` byte-identical to HEAD (SHA-256
+  **`4c34d905cc8af73b0b27dc6addc2d097c18f20f55fd09af5704289ee8b6acc71`**). Do not retry
+  this exact double-iterator rewrite from allocation counts alone; reopen only with a profile
+  showing text-line collection as material or a broader renderer change that eliminates more
+  per-label work.
+
+  Agent: Codex (GPT-5, this session)
