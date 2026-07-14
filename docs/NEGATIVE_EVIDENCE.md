@@ -15277,6 +15277,32 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 
   Agent: Codex (GPT-5, this session)
 
+### ✅LANDED: stream ANSI minimap colorization into one buffer — 53.866% faster (2026-07-14)
+
+- **Negative-ledger-first / profile attribution:** no prior `colorize_output`, colored-minimap ANSI, or minimap
+  per-character allocation probe was recorded. `render_minimap_from_layout` unconditionally calls
+  `colorize_output` when `use_color` is enabled. The old iterator returned a fresh `String` for every input scalar:
+  `format!` for border/block/Braille glyphs and `char::to_string` even for unchanged spaces and text. Thus a normal
+  80x24 colored minimap created roughly two thousand transient heap strings in this mandatory render pass.
+- **Lever:** replace the `map(char -> String).collect()` data plane with one output `String` and direct
+  `push_str`/`push` branches. Character classification, ANSI prefixes/suffixes, scalar order, and untouched bytes are
+  unchanged; this removes only the per-character temporary allocations.
+- **Strict-remote same-binary foreground A/B:** one `--profile release` test binary alternated the exact old and
+  candidate functions on RCH worker **`vmi1293453`**, job **`j-29928833041828441`**, with
+  `RCH_REQUIRE_REMOTE=1` and no local fallback. Each sample colorized a realistic 80x24 Unicode/Braille minimap 256
+  times (4,707 input bytes, 16,182 output bytes). Sorted baseline samples were **[16246449, 17366768, 17680608,
+  17722100, 17954577, 18318703, 18773364, 18943317, 19184799] ns**; candidate samples were **[7433522,
+  7669055, 7675434, 8165298, 8283114, 8885226, 9182321, 9307027, 9315340] ns**. Medians:
+  **17,954,577 -> 8,283,114 ns** (**53.866% faster, 2.168x speedup**), with every candidate sample below every
+  baseline sample. This is a colorization-kernel result, not a claimed full minimap pipeline ratio.
+- **Exact-output proof:** old and candidate outputs matched byte-for-byte before timing, with FNV digest
+  **`7c2cd0da2b636ea0`**. A permanent test freezes ASCII and Unicode borders, blocks, both Braille range endpoints,
+  uncolored text/emoji/newline, and empty input. All temporary reference/timing code was removed.
+- **Verdict: KEEP / LANDED.** The measured 53.866% kernel win is far above the 3% floor and comes from deleting
+  thousands of allocations without changing the emitted ANSI stream.
+
+  Agent: Codex (GPT-5, this session)
+
 ### ✅LANDED: bypass terminal label sanitize/wrap/join for unchanged short ASCII — 47.20% faster (2026-07-14)
 
 - **Ledger-first boundary / attribution:** no prior terminal `TermRenderer::truncate_label` identity-path probe was
