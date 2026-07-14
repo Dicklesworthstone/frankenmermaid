@@ -1630,20 +1630,38 @@ impl MermaidGraphIr {
     /// Returns unique member nodes from this subgraph and all descendant subgraphs.
     #[must_use]
     pub fn subgraph_members_recursive(&self, subgraph_id: IrSubgraphId) -> Vec<IrNodeId> {
-        let mut members = Vec::new();
+        let mut seen = vec![false; self.nodes.len()];
+        let mut out_of_range = Vec::new();
         let mut stack = vec![subgraph_id];
 
         while let Some(current_id) = stack.pop() {
             let Some(subgraph) = self.subgraph(current_id) else {
                 continue;
             };
-            members.extend(subgraph.members.iter().copied());
-            // Order does not matter since we sort and dedup at the end.
+            for &member in &subgraph.members {
+                if member.0 < seen.len() {
+                    seen[member.0] = true;
+                } else {
+                    // Preserve the public helper's behavior for malformed IR whose
+                    // membership IDs do not have corresponding graph-node records.
+                    out_of_range.push(member);
+                }
+            }
+            // Traversal order does not matter because IDs are emitted in sorted order.
             stack.extend(subgraph.children.iter().copied());
         }
 
-        members.sort_unstable();
-        members.dedup();
+        out_of_range.sort_unstable();
+        out_of_range.dedup();
+
+        let valid_count = seen.iter().filter(|&&is_member| is_member).count();
+        let mut members = Vec::with_capacity(valid_count + out_of_range.len());
+        for (index, is_member) in seen.into_iter().enumerate() {
+            if is_member {
+                members.push(IrNodeId(index));
+            }
+        }
+        members.extend(out_of_range);
         members
     }
 }
@@ -7330,6 +7348,142 @@ mod tests {
                 .map(|subgraph| subgraph.id)
                 .collect::<Vec<_>>(),
             vec![IrSubgraphId(0), IrSubgraphId(1), IrSubgraphId(2)]
+        );
+    }
+
+    fn subgraph_members_recursive_sort_reference(
+        graph: &super::MermaidGraphIr,
+        subgraph_id: IrSubgraphId,
+    ) -> Vec<IrNodeId> {
+        let mut members = Vec::new();
+        let mut stack = vec![subgraph_id];
+
+        while let Some(current_id) = stack.pop() {
+            let Some(subgraph) = graph.subgraph(current_id) else {
+                continue;
+            };
+            members.extend(subgraph.members.iter().copied());
+            stack.extend(subgraph.children.iter().copied());
+        }
+
+        members.sort_unstable();
+        members.dedup();
+        members
+    }
+
+    #[test]
+    fn subgraph_members_recursive_preserves_out_of_range_ids() {
+        let mut graph = super::MermaidGraphIr::default();
+        graph.nodes.extend((0..2).map(|index| IrGraphNode {
+            node_id: IrNodeId(index),
+            ..Default::default()
+        }));
+        graph.subgraphs.push(IrSubgraph {
+            id: IrSubgraphId(0),
+            children: vec![IrSubgraphId(1)],
+            members: vec![IrNodeId(9), IrNodeId(1), IrNodeId(3), IrNodeId(1)],
+            ..Default::default()
+        });
+        graph.subgraphs.push(IrSubgraph {
+            id: IrSubgraphId(1),
+            parent: Some(IrSubgraphId(0)),
+            members: vec![IrNodeId(0), IrNodeId(9), IrNodeId(4)],
+            ..Default::default()
+        });
+
+        let expected = subgraph_members_recursive_sort_reference(&graph, IrSubgraphId(0));
+        assert_eq!(
+            expected,
+            vec![
+                IrNodeId(0),
+                IrNodeId(1),
+                IrNodeId(3),
+                IrNodeId(4),
+                IrNodeId(9)
+            ]
+        );
+        assert_eq!(graph.subgraph_members_recursive(IrSubgraphId(0)), expected);
+    }
+
+    fn nested_subgraph_perf_graph() -> super::MermaidGraphIr {
+        const NODE_COUNT: usize = 256;
+        const DEPTH: usize = 12;
+
+        let mut graph = super::MermaidGraphIr::default();
+        graph.nodes.extend((0..NODE_COUNT).map(|index| IrGraphNode {
+            node_id: IrNodeId(index),
+            ..Default::default()
+        }));
+        for depth in 0..DEPTH {
+            graph.subgraphs.push(IrSubgraph {
+                id: IrSubgraphId(depth),
+                parent: (depth > 0).then_some(IrSubgraphId(depth - 1)),
+                children: (depth + 1 < DEPTH)
+                    .then(|| vec![IrSubgraphId(depth + 1)])
+                    .unwrap_or_default(),
+                members: (0..NODE_COUNT).map(IrNodeId).collect(),
+                ..Default::default()
+            });
+        }
+        graph
+    }
+
+    #[test]
+    #[ignore = "manual short release A/B"]
+    fn perf_subgraph_members_recursive_marking_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ITERATIONS: usize = 1_500;
+        const ROUNDS: usize = 9;
+
+        fn marked(graph: &super::MermaidGraphIr, id: IrSubgraphId) -> Vec<IrNodeId> {
+            graph.subgraph_members_recursive(id)
+        }
+
+        fn measure(
+            graph: &super::MermaidGraphIr,
+            traversal: fn(&super::MermaidGraphIr, IrSubgraphId) -> Vec<IrNodeId>,
+        ) -> (u128, usize) {
+            let mut member_count = 0usize;
+            let started = Instant::now();
+            for _ in 0..ITERATIONS {
+                member_count += black_box(traversal(black_box(graph), IrSubgraphId(0))).len();
+            }
+            (started.elapsed().as_nanos(), member_count)
+        }
+
+        let graph = nested_subgraph_perf_graph();
+        let expected = subgraph_members_recursive_sort_reference(&graph, IrSubgraphId(0));
+        assert_eq!(graph.subgraph_members_recursive(IrSubgraphId(0)), expected);
+
+        let mut baseline_ns = Vec::with_capacity(ROUNDS);
+        let mut candidate_ns = Vec::with_capacity(ROUNDS);
+        for round in 0..ROUNDS {
+            let (baseline, candidate) = if round % 2 == 0 {
+                (
+                    measure(&graph, subgraph_members_recursive_sort_reference),
+                    measure(&graph, marked),
+                )
+            } else {
+                let candidate = measure(&graph, marked);
+                let baseline = measure(&graph, subgraph_members_recursive_sort_reference);
+                (baseline, candidate)
+            };
+            assert_eq!(baseline.1, candidate.1);
+            baseline_ns.push(baseline.0);
+            candidate_ns.push(candidate.0);
+        }
+
+        baseline_ns.sort_unstable();
+        candidate_ns.sort_unstable();
+        let baseline_median_ns = baseline_ns[ROUNDS / 2];
+        let candidate_median_ns = candidate_ns[ROUNDS / 2];
+        let improvement_pct = (baseline_median_ns as f64 - candidate_median_ns as f64) * 100.0
+            / baseline_median_ns as f64;
+
+        println!(
+            "PERF subgraph_members_recursive sort_median_ns={baseline_median_ns} mark_median_ns={candidate_median_ns} improvement_pct={improvement_pct:.3} parity=exact rounds={ROUNDS} iterations={ITERATIONS} nodes=256 depth=12"
         );
     }
 

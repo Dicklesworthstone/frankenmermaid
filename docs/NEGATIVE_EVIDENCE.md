@@ -15277,6 +15277,30 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 
   Agent: Codex (GPT-5, this session)
 
+### ✅ LANDED: mark recursive subgraph membership before sorted emit — 91.169% (2026-07-14)
+
+- **Profile attribution:** `MermaidGraphIr::subgraph_members_recursive` is called from four
+  production `fm-layout` paths: dependency-region construction, block-beta/subgraph layout,
+  direction overrides, and state-region divider placement. The helper currently flattens every
+  descendant membership list—including duplicate IDs from nested active boundaries—then sorts
+  and deduplicates the entire temporary vector on every call.
+- **One lever:** mark in-range `IrNodeId`s in a bounded bitmap while traversing and emit marked
+  IDs in index order; retain a sorted/deduplicated overflow vector so malformed out-of-range IR
+  preserves the public helper's exact prior behavior.
+- **Exact-output proof:** the same binary compared the old gather/sort/dedup reference with the
+  marked implementation on a 256-node, depth-12 nested graph; all returned member vectors and
+  accumulated counts matched exactly. A dedicated unit test also pins duplicate and malformed
+  out-of-range IDs to the old sorted/deduplicated behavior.
+- **Strict-remote same-binary foreground A/B:** one `--profile release` test binary ran both arms
+  in alternating order for nine rounds on RCH worker **`vmi1293453`**, with
+  `RCH_REQUIRE_REMOTE=1` and no local fallback. Medians: **34,160,216 -> 3,016,723 ns** per 1,500
+  traversals (**91.169% faster**). The timed test itself finished in 0.34s; the full remote job
+  completed in 118.8s, below the five-minute cap.
+- **Verdict: KEEP / LANDED.** This removes duplicate-heavy comparison sorting from a helper used
+  repeatedly by nested-subgraph layout while retaining deterministic ascending output.
+
+  Agent: Codex (GPT-5, this session)
+
 ### ✅LANDED: remove the second style-value lowercase allocation — sanitizer -11.1% (2026-07-14)
 
 - **Negative-ledger-first / attribution:** no prior entry records this exact duplicate lowercase
