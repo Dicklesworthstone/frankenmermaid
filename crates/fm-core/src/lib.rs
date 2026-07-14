@@ -4918,11 +4918,20 @@ pub enum MermaidLensError {
 
 #[must_use]
 pub fn build_lens_bindings(source: &str, source_map: &MermaidSourceMap) -> Vec<MermaidLensBinding> {
+    let line_starts = source_map
+        .entries
+        .iter()
+        .any(|entry| span_needs_line_starts(entry.span))
+        .then(|| source_line_starts(source));
     source_map
         .entries
         .iter()
         .map(|entry| {
-            let text_range = resolve_span_text_range(source, entry.span);
+            let text_range = resolve_span_text_range_with_line_starts(
+                source,
+                entry.span,
+                line_starts.as_deref(),
+            );
             let snippet = text_range
                 .as_ref()
                 .and_then(|range| source.get(range.start_byte..range.end_byte))
@@ -4974,6 +4983,18 @@ pub fn apply_lens_edit(
 
 #[must_use]
 pub fn resolve_span_text_range(source: &str, span: Span) -> Option<MermaidTextRange> {
+    resolve_span_text_range_with_line_starts(source, span, None)
+}
+
+fn span_needs_line_starts(span: Span) -> bool {
+    !span.is_unknown() && span.end.byte <= span.start.byte
+}
+
+fn resolve_span_text_range_with_line_starts(
+    source: &str,
+    span: Span,
+    shared_line_starts: Option<&[usize]>,
+) -> Option<MermaidTextRange> {
     if span.is_unknown() {
         return None;
     }
@@ -4985,17 +5006,24 @@ pub fn resolve_span_text_range(source: &str, span: Span) -> Option<MermaidTextRa
         });
     }
 
-    let line_starts = source_line_starts(source);
+    let owned_line_starts;
+    let line_starts = match shared_line_starts {
+        Some(line_starts) => line_starts,
+        None => {
+            owned_line_starts = source_line_starts(source);
+            &owned_line_starts
+        }
+    };
     let start_byte = byte_index_for_line_col(
         source,
-        &line_starts,
+        line_starts,
         span.start.line as usize,
         span.start.col as usize,
     )?;
     let end_col_exclusive = span.end.col as usize + 1;
     let end_byte = byte_index_for_line_col(
         source,
-        &line_starts,
+        line_starts,
         span.end.line as usize,
         end_col_exclusive,
     )?;
@@ -5336,8 +5364,8 @@ mod tests {
         MermaidConfig, MermaidDecisionWeight, MermaidDegradationPlan, MermaidDiagramIr,
         MermaidError, MermaidErrorCode, MermaidFallbackAction, MermaidFallbackPolicy,
         MermaidFidelity, MermaidGlyphMode, MermaidGuardReport, MermaidLayoutDecisionAlternative,
-        MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord, MermaidLensEdit,
-        MermaidNativePressureSignals, MermaidPressureReport, MermaidPressureTier,
+        MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord, MermaidLensBinding,
+        MermaidLensEdit, MermaidNativePressureSignals, MermaidPressureReport, MermaidPressureTier,
         MermaidQualityMode, MermaidSanitizeMode, MermaidSourceMap, MermaidSourceMapEntry,
         MermaidSourceMapKind, MermaidSupportLevel, MermaidWarningCode, MermaidWasmPressureSignals,
         NodeMap, NodeSet, NodeShape, NotePosition, Position, Span, StructuredDiagnostic,
@@ -5362,6 +5390,32 @@ mod tests {
                 byte: 0,
             },
         )
+    }
+
+    fn build_lens_bindings_repeated_line_starts_reference(
+        source: &str,
+        source_map: &MermaidSourceMap,
+    ) -> Vec<MermaidLensBinding> {
+        source_map
+            .entries
+            .iter()
+            .map(|entry| {
+                let text_range = resolve_span_text_range(source, entry.span);
+                let snippet = text_range
+                    .as_ref()
+                    .and_then(|range| source.get(range.start_byte..range.end_byte))
+                    .map(str::to_string);
+                MermaidLensBinding {
+                    kind: entry.kind,
+                    index: entry.index,
+                    element_id: entry.element_id.clone(),
+                    source_id: entry.source_id.clone(),
+                    span: entry.span,
+                    text_range,
+                    snippet,
+                }
+            })
+            .collect()
     }
 
     #[test]
@@ -5736,6 +5790,148 @@ mod tests {
         let bindings = build_lens_bindings(source, &source_map);
         assert_eq!(bindings[0].snippet.as_deref(), Some("A"));
         assert_eq!(bindings[1].snippet.as_deref(), Some("A-->B"));
+    }
+
+    #[test]
+    fn shared_lens_line_starts_match_repeated_reference() {
+        let source = "flowchart LR\r\nα-->β\r\nC-->D\r\n";
+        let direct_start = source.find('C').expect("direct span start");
+        let direct_end = direct_start + 'C'.len_utf8();
+        let source_map = MermaidSourceMap {
+            diagram_type: DiagramType::Flowchart,
+            entries: vec![
+                MermaidSourceMapEntry {
+                    kind: MermaidSourceMapKind::Edge,
+                    index: 0,
+                    element_id: "fm-edge-0".to_string(),
+                    source_id: None,
+                    span: sample_span(2, 1, 5),
+                },
+                MermaidSourceMapEntry {
+                    kind: MermaidSourceMapKind::Node,
+                    index: 1,
+                    element_id: "fm-node-c-1".to_string(),
+                    source_id: Some("C".to_string()),
+                    span: Span::new(
+                        Position {
+                            line: 3,
+                            col: 1,
+                            byte: u32::try_from(direct_start).expect("small source"),
+                        },
+                        Position {
+                            line: 3,
+                            col: 1,
+                            byte: u32::try_from(direct_end).expect("small source"),
+                        },
+                    ),
+                },
+                MermaidSourceMapEntry {
+                    kind: MermaidSourceMapKind::Cluster,
+                    index: 0,
+                    element_id: "fm-cluster-0".to_string(),
+                    source_id: None,
+                    span: Span::default(),
+                },
+            ],
+        };
+
+        assert_eq!(
+            build_lens_bindings(source, &source_map),
+            build_lens_bindings_repeated_line_starts_reference(source, &source_map)
+        );
+    }
+
+    #[test]
+    #[ignore = "manual short release A/B"]
+    fn perf_shared_lens_line_starts_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const LINES: usize = 128;
+        const ITERATIONS: usize = 200;
+        const ROUNDS: usize = 9;
+
+        type BindingBuilder = fn(&str, &MermaidSourceMap) -> Vec<MermaidLensBinding>;
+
+        fn measure(
+            source: &str,
+            source_map: &MermaidSourceMap,
+            iterations: usize,
+            builder: BindingBuilder,
+        ) -> (u128, usize) {
+            let mut binding_count = 0usize;
+            let started = Instant::now();
+            for _ in 0..iterations {
+                let bindings = black_box(builder(black_box(source), black_box(source_map)));
+                binding_count = binding_count.wrapping_add(bindings.len());
+                black_box(bindings);
+            }
+            (started.elapsed().as_nanos(), binding_count)
+        }
+
+        let mut source = String::from("flowchart LR\n");
+        let mut entries = Vec::with_capacity(LINES);
+        for index in 0..LINES {
+            let line = format!("N{index:03} --> N{:03}: label-{index:03}\n", index + 1);
+            let line_number = u32::try_from(index + 2).expect("small corpus");
+            let end_col = u32::try_from(line.trim_end().chars().count()).expect("short line");
+            source.push_str(&line);
+            entries.push(MermaidSourceMapEntry {
+                kind: MermaidSourceMapKind::Edge,
+                index,
+                element_id: format!("fm-edge-{index}"),
+                source_id: None,
+                span: sample_span(line_number, 1, end_col),
+            });
+        }
+        let source_map = MermaidSourceMap {
+            diagram_type: DiagramType::Flowchart,
+            entries,
+        };
+        assert_eq!(
+            build_lens_bindings(&source, &source_map),
+            build_lens_bindings_repeated_line_starts_reference(&source, &source_map)
+        );
+
+        let mut repeated_ns = Vec::with_capacity(ROUNDS);
+        let mut shared_ns = Vec::with_capacity(ROUNDS);
+        for round in 0..ROUNDS {
+            let (repeated, shared) = if round % 2 == 0 {
+                (
+                    measure(
+                        &source,
+                        &source_map,
+                        ITERATIONS,
+                        build_lens_bindings_repeated_line_starts_reference,
+                    ),
+                    measure(&source, &source_map, ITERATIONS, build_lens_bindings),
+                )
+            } else {
+                let shared = measure(&source, &source_map, ITERATIONS, build_lens_bindings);
+                let repeated = measure(
+                    &source,
+                    &source_map,
+                    ITERATIONS,
+                    build_lens_bindings_repeated_line_starts_reference,
+                );
+                (repeated, shared)
+            };
+            assert_eq!(repeated.1, shared.1);
+            repeated_ns.push(repeated.0);
+            shared_ns.push(shared.0);
+        }
+
+        repeated_ns.sort_unstable();
+        shared_ns.sort_unstable();
+        let repeated_median_ns = repeated_ns[ROUNDS / 2];
+        let shared_median_ns = shared_ns[ROUNDS / 2];
+        let improvement_pct = (repeated_median_ns as f64 - shared_median_ns as f64) * 100.0
+            / repeated_median_ns as f64;
+
+        println!(
+            "PERF lens_line_starts repeated_median_ns={repeated_median_ns} shared_median_ns={shared_median_ns} improvement_pct={improvement_pct:.3} parity=exact rounds={ROUNDS} iterations={ITERATIONS} entries={LINES} source_bytes={}",
+            source.len()
+        );
     }
 
     #[test]

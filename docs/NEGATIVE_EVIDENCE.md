@@ -15360,6 +15360,34 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 
   Agent: Codex (GPT-5, this session; bead `bd-txmp`)
 
+### ✅ LANDED: share the ParseLens line-start index across bindings — bindings -95.821% (2026-07-14)
+
+- **Negative-ledger-first / BV boundary:** `bv --robot-triage` reports a cycle-free graph and ranks ParseLens
+  (`bd-1t7l.1`) as its top concrete recommendation. Earlier entries correctly excluded the whole architectural
+  feature from older bounded parser lanes, but no `build_lens_bindings`, `resolve_span_text_range`, or shared
+  line-start-index performance probe is recorded. This is a narrow child (`bd-1t7l.1.1`), not an attempt to
+  complete the parent feature.
+- **Profile / attribution:** production `build_parse_lens` constructs a source map and immediately calls
+  `build_lens_bindings`. Both Mermaid and DOT parser `span_for` functions use `Span::at_line`, whose byte offsets
+  are zero. Every such node/edge/cluster binding therefore called `resolve_span_text_range`, rescanned the full
+  source, and allocated/fill-copied a complete line-start `Vec`. Ranked cost: (1) repeated O(entries x source
+  bytes) indexing plus one allocation per binding; (2) required snippet/ID ownership; (3) required per-line
+  Unicode column walks. Impact 4 x confidence 5 / effort 1 = score **20**.
+- **Single lever / isomorphism:** build the immutable line-start index once per binding batch only when any span
+  requires line/column resolution, then share its slice across entries. Direct-byte and unknown-only maps avoid
+  the scan; the public single-span resolver keeps its old per-call path. Entry order, ranges, CRLF trimming,
+  Unicode columns, snippets, IDs, diagnostics, floating point, tie-breaking, and RNG are unchanged. An exact old
+  whole-builder oracle covers line-only, direct-byte, unknown, LF/CRLF, and multibyte inputs.
+- **Strict-remote same-binary foreground A/B:** on `vmi1293453`, `RCH_REQUIRE_REMOTE=1`, `--profile release`, one
+  exact ignored `fm-core` test, alternating order, 9 rounds x 200 builds x 128 line-only bindings over a 3,213-byte
+  source. Repeated-index median **51,545,821 ns** versus shared-index median **2,154,163 ns**: **-95.821%**,
+  approximately **23.93x** faster, with exact full-binding parity. The timed test body completed in 0.49s; the
+  foreground remote command completed in 128.8s including a cache-miss release compile, below the 290s ceiling.
+- **Verdict:** **KEEP.** The same-binary result clears the 3% floor by a wide margin and removes an attributed
+  O(entries x source bytes) scan/allocation multiplier without changing binding semantics.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1t7l.1.1`)
+
 ### ⛔ HOLD / INVALID: direct terminal `CellBuffer` serialization never reached timed path (2026-07-14)
 
 - **Negative-ledger-first boundary:** no prior `CellBuffer`, terminal cell-grid serialization, or per-row output
