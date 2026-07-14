@@ -937,14 +937,17 @@ fn align_changed_block(old_lines: &[&str], new_lines: &[&str]) -> Vec<AlignedDif
 }
 
 fn lcs_pairs(old_lines: &[&str], new_lines: &[&str]) -> Vec<(usize, usize)> {
-    let mut dp = vec![vec![0_usize; new_lines.len() + 1]; old_lines.len() + 1];
+    let row_len = new_lines.len() + 1;
+    let mut dp = vec![0_usize; (old_lines.len() + 1) * row_len];
 
     for old_index in (0..old_lines.len()).rev() {
+        let row_start = old_index * row_len;
+        let next_row_start = row_start + row_len;
         for new_index in (0..new_lines.len()).rev() {
-            dp[old_index][new_index] = if old_lines[old_index] == new_lines[new_index] {
-                dp[old_index + 1][new_index + 1] + 1
+            dp[row_start + new_index] = if old_lines[old_index] == new_lines[new_index] {
+                dp[next_row_start + new_index + 1] + 1
             } else {
-                dp[old_index + 1][new_index].max(dp[old_index][new_index + 1])
+                dp[next_row_start + new_index].max(dp[row_start + new_index + 1])
             };
         }
     }
@@ -957,7 +960,9 @@ fn lcs_pairs(old_lines: &[&str], new_lines: &[&str]) -> Vec<(usize, usize)> {
             pairs.push((old_index, new_index));
             old_index += 1;
             new_index += 1;
-        } else if dp[old_index + 1][new_index] >= dp[old_index][new_index + 1] {
+        } else if dp[(old_index + 1) * row_len + new_index]
+            >= dp[old_index * row_len + new_index + 1]
+        {
             old_index += 1;
         } else {
             new_index += 1;
@@ -990,6 +995,20 @@ mod tests {
             });
         }
         ir
+    }
+
+    #[test]
+    fn flat_lcs_preserves_indices_and_tie_breaking() {
+        let old = ["header", "node A", "node B", "footer"];
+        let new = ["header", "inserted", "node A", "node B", "footer"];
+        assert_eq!(lcs_pairs(&old, &new), vec![(0, 0), (1, 2), (2, 3), (3, 4)]);
+
+        // The reconstruction deliberately advances the old side when both
+        // successor cells have equal scores. Flat indexing must retain that
+        // observable tie-break from the former row-vector table.
+        assert_eq!(lcs_pairs(&["a", "b"], &["b", "a"]), vec![(1, 0)]);
+        assert!(lcs_pairs(&[], &["new"]).is_empty());
+        assert!(lcs_pairs(&["old"], &[]).is_empty());
     }
 
     #[test]

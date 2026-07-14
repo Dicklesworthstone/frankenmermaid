@@ -15392,6 +15392,39 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 
   Agent: Codex (GPT-5, this session)
 
+### ✅LANDED: flatten terminal diff LCS table (Vec<Vec<usize>> → single flat Vec) — 30.550% faster (2026-07-14)
+
+- **Ledger-first boundary:** no prior `lcs_pairs`, `align_rendered_lines`, or LCS-table entry exists. Distinct from
+  the node-index merge-walk (bd-984a) and the member/label borrow guards — this targets the O(m·n) line-alignment
+  DP used when rendering a *changed block* of a terminal diff (`align_rendered_lines` → `lcs_pairs`, reached from
+  the diff-render path at diff.rs:701 via each changed node's rendered ASCII).
+- **Lever:** `lcs_pairs` allocated its DP table as `vec![vec![0; n+1]; m+1]` — `m+1` separate heap inner-Vecs plus
+  a pointer-chased `dp[i][j]` (load row ptr, then load cell) on every one of the ~`m·n` fill and backtrack
+  accesses. Replace with one flat `vec![0; (m+1)*(n+1)]` indexed `dp[i*row_len + j]`, hoisting `row_start` /
+  `next_row_start` out of the inner loop. Removes `m` heap allocations and one indirection per cell; contiguous
+  memory improves cache locality on the hot O(m·n) loop (a win mimalloc's free-list recycling does *not* wash,
+  unlike a pure setup-alloc removal — this also kills the per-access pointer chase).
+- **Strict-remote same-binary foreground A/B:** both arms in one release test binary via `RCH_REQUIRE_REMOTE=1`
+  with `#[global_allocator] mimalloc::MiMalloc`, interleaved 9 samples, on a real worker:
+  `cargo test -j1 --profile release -p fm-render-term diff::tests::flat_lcs_table_perf_probe -- --ignored`. Workload:
+  two 640-line rendered terminal outputs with periodic shared anchors + changed rows, 4 full `align_rendered_lines`
+  calls per sample. Baseline median **23,053,245 ns** (samples 21259562 21370827 22522775 22720900 23053245
+  23167164 23436845 23717756 29492809); candidate median **16,010,473 ns** (samples 15148888 15849023 15942301
+  15977473 16010473 16086675 16180505 20953988 24158772) — **30.550% faster**; the candidate's seven best samples
+  all beat the baseline's fastest.
+- **Exact-output proof:** six alignment parity cases (identity, insertion, removal, reorder, repeats) diffed through
+  the nested-row baseline and the flat candidate produced byte-identical `Vec<AlignedDiffLine>` debug output, FNV
+  digest **`8072da4559eddba7`**; the probe's `assert_eq!` passed (`test result: ok`). The temporary probe +
+  row-baseline copies + mimalloc dev-dep were removed; a permanent test `flat_lcs_preserves_indices_and_tie_breaking`
+  locks the anchor indices, the old-side-advance tie-break (`["a","b"]` vs `["b","a"]` → `[(1,0)]`), and both empty
+  edges.
+- **Verdict:** **KEEP / LANDED.** A structural flatten of a hot O(m·n) DP — fewer allocs, no per-cell indirection,
+  contiguous memory — is a decisive win, not an alloc-count wash. LEVER↺: `vec![vec![_; n]; m]` on a hot inner loop
+  is a flatten candidate whenever the table is dense and index math is cheap; the double-indirection removal carries
+  the win even where the allocation count alone would wash.
+
+  Agent: Claude (Opus 4.8, this session)
+
 ### ✅LANDED (label sibling of the member guard): borrow terminal diff node labels, clone only on change — 18.495% faster (2026-07-14)
 
 - **Ledger-first boundary:** the ledger's prior label-borrow entries all live in the *parse/lowering* path
