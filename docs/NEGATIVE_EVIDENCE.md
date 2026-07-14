@@ -15538,3 +15538,27 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   transient `String` keys, borrow through grouping/order/removal and allocate only at the public output boundary.
 
   Agent: Codex (GPT-5, this session)
+
+### ❌REJECTED: BK `contains_key(&adjacent_rank)` → `ordered_ranks.binary_search` — scc_300 REGRESSED +5% (2026-07-13)
+
+- **Follow-on to the LANDED c1243337** (ordered_roots `keys()+get()`→`values()`, scc_300 −4.7%). Same hot BK path:
+  `bk_vertical_alignment` runs `ordering_by_rank.contains_key(&adjacent_rank)` per node per pass (~2400 probes for
+  scc_600). Hypothesis: swap the pointer-chasing BTreeMap probe for `ordered_ranks.binary_search(&adjacent_rank)`
+  — `ordered_ranks` is the already-threaded sorted key slice, so it's byte-identical (`.is_ok()` ≡ `contains_key`),
+  contiguous, zero new alloc/arg.
+- **Sequential same-pinned-pool A/B (Criterion, baseline `bkbase2` = HEAD c1243337):** scc_100 +0.58% (p=0.76),
+  **scc_300 +5.05% REGRESSION (change CI [+2.25%, +7.63%], p=0.00)**, scc_600 −1.28% (p=0.39). Net a wash-plus-one-
+  significant-regression. REJECT.
+- **Root cause — `binary_search` branch misprediction on small arrays.** `slice::binary_search` does ~log2(rank_
+  count) data-dependent 50/50 branches the predictor cannot learn; on a small (~tens-of-ranks) array that
+  misprediction cost exceeds the pointer-chase it replaces (and for a small warm BTreeMap, `contains_key` is
+  already cheap). The contiguous-memory advantage did NOT beat the branch-prediction penalty.
+- **⭐⭐⭐KEY DISTINCTION (refines the c1243337 win):** probe-**REMOVAL** wins — `keys()+get()`→`values()` *deletes*
+  a lookup with no replacement (c1243337, −4.7%). Probe-**REPLACEMENT** (BTreeMap→binary_search) is a gamble: you
+  trade one probe's cost for another's, and `binary_search`'s mispredicts often lose on small arrays. Do NOT
+  "optimize" a map existence-check into a binary_search on a small sorted Vec. If a probe must stay, a dense
+  `Vec<bool>` (O(1), no branch, but +1 alloc) is the only replacement worth measuring — not binary_search.
+- **Verdict: REJECT.** Reverted; lib.rs byte-identical to c1243337. Do-not-retry the binary_search substitution on
+  this existence guard.
+
+  Agent: (Opus 4.8, this session)
