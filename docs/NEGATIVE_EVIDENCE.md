@@ -15277,6 +15277,34 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 
   Agent: Codex (GPT-5, this session)
 
+### ✅LANDED: stream ASCII line classification instead of collecting `Vec<char>` — 13.134% faster (2026-07-14)
+
+- **Negative-ledger-first boundary:** no prior `classify_line`, ASCII line-classification, or terminal ASCII
+  detection allocation probe is recorded. The superficially similar `Vec<char>` entries are DOT-parser work on
+  different syntax and call paths.
+- **Profile / attribution:** `detect_diagram_blocks` calls `classify_line` for every input line and can call it a
+  second time for the next-line lookahead. Each non-empty call collected every Unicode scalar into a fresh
+  `Vec<char>` only to read its length and iterate it once: one allocation plus one full scalar copy per
+  classification. Opportunity score: frequency **3** (per line and lookahead), cost **2** (allocation + copy),
+  removable fraction **2** (entire temporary), score **12**.
+- **Single lever:** count `total` while streaming the existing `trimmed.chars()` classification pass. Thresholds,
+  floating-point operations, branch order, public types, and caller behavior are unchanged. A permanent parity
+  test compares the old collecting algorithm and streaming implementation across empty, ASCII, Unicode,
+  whitespace, text, mixed, and diagram lines.
+- **Strict-remote same-binary foreground A/B:** one exact `cargo test -j1 --profile release -p fm-render-term
+  ascii::tests::classify_line_streaming_perf_probe -- --ignored --exact --nocapture` ran on pinned RCH worker
+  **`vmi1293453`** with `RCH_REQUIRE_REMOTE=1` and no local fallback. Nine sorted baseline samples were
+  **[105606891, 114986091, 116505183, 116672824, 117194894, 119875495, 120666066, 123075401, 130028219]
+  ns/sweep**; candidate samples were **[92996079, 94925195, 95958570, 100905009, 101803002, 104169302,
+  104997469, 107078984, 110808393] ns/sweep**. Medians: **117,194,894 → 101,803,002 ns/sweep**,
+  **13.134% faster / 1.151x**.
+- **Exact-output proof:** both arms classified the same 4,096-line ASCII/Unicode corpus for 64 sweeps per sample
+  and produced digest **`3b9d4e92bd0e2325`**; the release probe executed one named test with 88 others filtered.
+- **Verdict:** **KEEP / LANDED.** The allocation-and-copy deletion clears the 3% floor while preserving the old
+  threshold arithmetic and classifications exactly.
+
+  Agent: Codex (GPT-5, this session)
+
 ### ✅LANDED: stream ANSI minimap colorization into one buffer — 53.866% faster (2026-07-14)
 
 - **Negative-ledger-first / profile attribution:** no prior `colorize_output`, colored-minimap ANSI, or minimap
