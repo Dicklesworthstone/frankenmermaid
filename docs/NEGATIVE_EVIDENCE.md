@@ -15430,3 +15430,33 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   different workload or a longer controlled profile showing the second buffer itself above the noise floor.
 
   Agent: Codex (GPT-5, this session)
+
+### ✅LANDED: DOT `decode_escapes` no-backslash fast path — parse/dot dot_50 −9.5%, dot_200 −3.8% (2026-07-13)
+
+- **Same vein as the normalize_identifier fast-path port committed earlier this session (9829964c).** `decode_escapes`
+  (dot_parser.rs) runs on EVERY DOT node/edge label (via `parse_dot_label`), but for a label with no `\` escape —
+  the overwhelmingly common case, and 100% of the gen_dot fixture (`label="Node i"` / `label="edge i"`) — it still
+  allocated `String::with_capacity` and rebuilt the string char-by-char via a `chars()` decode + branchy push loop,
+  returning a verbatim copy of the input.
+- **Lever:** a byte pre-check `if !raw.as_bytes().contains(&b'\\') { return raw.to_owned(); }` at the top — one
+  scan + one memcpy instead of the char-by-char rebuild. Scalar `[u8]::contains` (not memchr) because labels are
+  short (~6–8 bytes) and single-byte memchr loses to scalar scan on short haystacks.
+- **Byte-identical:** with no `\`, `escaped` never flips, so every char takes the `else { output.push(ch) }` branch
+  and the trailing `if escaped` is false → `output == raw`; with a `\` present the guard is false and the original
+  loop runs untouched. `\` is single-byte ASCII (never a UTF-8 continuation byte), so the byte scan is correct.
+  `cargo test -p fm-parser --lib dot`: **39 passed, 0 failed.**
+- **Sequential same-pinned-pool foreground A/B (Criterion, `parse/dot`, baseline `dotbase2` = HEAD incl 9829964c,
+  then `--baseline dotbase2`):** `dot_50` **−9.50%** (change CI [−12.05%, −7.05%], p=0.00; 72.5→68.8µs median) and
+  `dot_200` **−3.83%** (change CI [−5.54%, −2.05%], p=0.00; 267.2→259.1µs median). dot_50 decisively clears the 3%
+  floor; dot_200's point estimate clears it though its CI straddles.
+- **Genuine-effect / artifact rule-out:** the ABSOLUTE win scales with label count — dot_50 −3.7µs vs dot_200 −8µs
+  across 4× the labels — a per-label dose-response a uniform cross-worker speed artifact cannot produce.
+- **Land-below-floor justification (per the 8f345bd rule):** the mechanism is monotonic-less-work — the common path
+  strictly replaces the char-decode-push loop with scan+memcpy; the only added cost is a short-circuiting byte scan
+  on the rare escape-bearing label. No path does materially more work, so no regression mechanism.
+- **Verdict:** **KEEP / LANDED.** LEVER↺: a `decode`/`unescape`/`normalize` fn that RETURNS String and rebuilds via
+  a per-`chars()` push loop almost always has an identity-transform common case (no trigger byte present) — gate on
+  a scalar single-byte `contains` and return `raw.to_owned()`. Same family as normalize_identifier and the 2026-07-02
+  lib.rs fast path.
+
+  Agent: (Opus 4.8, this session)

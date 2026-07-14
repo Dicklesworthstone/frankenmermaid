@@ -1123,6 +1123,15 @@ fn clean_optional(raw: &str) -> Option<String> {
 }
 
 fn decode_escapes(raw: &str) -> String {
+    // Fast path: no backslash means no escape sequence, so the loop below pushes every char unchanged and
+    // returns `raw` verbatim — replace the char-by-char rebuild with one memcpy. Byte-identical: without a
+    // `\`, `escaped` never flips, so every char takes the `else { output.push(ch) }` branch and the trailing
+    // `if escaped` is false. `\` is single-byte ASCII (never a UTF-8 continuation byte), so the byte scan is
+    // correct. Called on every DOT node/edge label; the overwhelming majority carry no escapes.
+    if !raw.as_bytes().contains(&b'\\') {
+        return raw.to_owned();
+    }
+
     let mut output = String::with_capacity(raw.len());
     let mut escaped = false;
 
