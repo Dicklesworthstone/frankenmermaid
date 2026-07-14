@@ -15403,3 +15403,30 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   others — grep sibling copies for the same missed pre-check.
 
   Agent: (Opus 4.8, this session)
+
+### REJECT: collapse terminal Canvas pixel state into generation stamps — slower/wash (2026-07-13)
+
+- **Ledger-first boundary:** no prior `Canvas::pixel_gen`, `Vec<bool>`, Braille pixel-state, or generation-counter
+  optimization attempt was recorded. The probe stayed in `fm-render-term/src/canvas.rs`, outside the active
+  parser/layout lanes, and tested exactly one representation change.
+- **Candidate:** remove the redundant bit-packed `pixels: Vec<bool>` allocation and encode a set pixel solely as
+  `pixel_gen[index] == generation`; `unset_pixel` writes reserved sentinel zero, while generation wrap already
+  resets every stamp to zero before restoring generation one. This removes one allocation and one conditional
+  bit-vector access from the sub-cell path without changing set/unset/clear semantics.
+- **Strict-remote same-worker foreground A/B:** both arms ran independently cold on actual worker
+  `vmi1149989` with `RCH_REQUIRE_REMOTE=1`, using `cargo test -j1 --profile release -p fm-render-term
+  canvas::tests::canvas_generation_state_perf_probe -- --ignored --nocapture --exact`. The inline probe built,
+  drew, and rendered a deterministic 200x60 Braille canvas 25 times per sample across nine samples. Baseline
+  median was **304,328 ns/render** (samples **266,081; 281,866; 287,543; 294,568; 304,328; 306,818; 348,890;
+  349,823; 357,599**). Candidate median was **315,924 ns/render** (samples **296,385; 304,565; 307,706;
+  311,663; 315,924; 330,224; 375,185; 378,583; 425,550**) — candidate/baseline **1.038104x**, or **3.810%
+  slower**. Both arms produced FNV digest **10414098220485309467** and output length **36,059**.
+- **Verdict:** **REJECT / WASH.** The median missed the 3% keep floor in the wrong direction and the sample
+  ranges overlap broadly, so there is no timing evidence for the otherwise monotonic memory reduction. The
+  bit-packed boolean buffer is small beside the `u32` stamps, and generation mismatch already short-circuits
+  most boolean reads. The candidate and temporary probe were manually restored; `canvas.rs` is byte-identical
+  to the pre-probe `9829964c` version.
+- **Do not retry:** do not remove only `Canvas::pixels` under the current generation scheme without a materially
+  different workload or a longer controlled profile showing the second buffer itself above the noise floor.
+
+  Agent: Codex (GPT-5, this session)
