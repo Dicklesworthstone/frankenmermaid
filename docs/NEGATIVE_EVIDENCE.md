@@ -15734,3 +15734,27 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   gate narrowly (person/system, single-line desc, no technology), byte-pin, A/B nf/c4_40 vs `c4base`.
 
   Agent: (Opus 4.8, this session)
+
+### 🟡C4 STREAM — pinpointed mechanics (de-risks the deferred lever to mechanical work) (2026-07-13)
+
+Follow-up to the scope entry above: read the code and located every piece, so the next pass is byte-matching, not
+reverse-engineering. `write_c4_node_fragment_into` should mirror `write_class_node_fragment_into` (lib.rs:5601)
+with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
+- **Wrapper `<g>` open:** identical to the class fragment EXCEPT `node_shape_css_class(NodeShape::Rounded)` (C4
+  nodes are `Rounded`), and the user-class suffix can **REUSE `simple_class_node_user_suffix(node)`** as-is — for a
+  C4 node it yields ` fm-node-user-c4 fm-node-user-c4-{person|system}` (and correctly returns None for `c4-external`
+  → slow path). No new suffix helper needed.
+- **Rect (the key divergence): SOLID fill, NOT gradient.** `render_node`'s shape match builds
+  `NodeShape::Rounded => Element::rect().fill(&colors.node_fill).rx(config.rounded_corners)`. So the fragment writes
+  `<rect x y width height fill="{colors.node_fill}" rx="{config.rounded_corners}"/>` — golden confirms
+  `fill="#ffffff" rx="10"` (default). (Class/ER fragments use `fill="url(#fm-node-gradient)"`; C4 does not.)
+- **Content:** replicate `render_c4_node_content` (lib.rs:8190) text elements. ⚠️GOTCHA: `TextBuilder` serializes a
+  **FIXED attr order** — golden is `x, y, text-anchor, font-size, font-weight, fill, class` (NOT the method-call
+  order) — so match the golden's order, not the `.x().font_size().anchor()` call order. Stereotype text is
+  `write_escaped_text("<<Type>>")` → `&lt;&lt;Type>>` (`<` escaped, `>` literal). Person icon fires only for
+  `classes.contains("c4-person")` = `<g class="fm-c4-person-icon"><circle/><line/>×4</g>` (stroke_width 1.1→"1.10").
+- **Title:** `<title>Node: {raw_label}, rounded rectangle</title>`. **Gate:** mirror the class gate (lib.rs:6485)
+  conditions (embed_theme_css, !emit_classdef_classes, a11y flags, text/shape_style None, no icon/href/callback…)
+  with `node.c4_meta.is_some()`; keep it conservative (reject technology + multi-line description initially).
+
+  Agent: (Opus 4.8, this session)
