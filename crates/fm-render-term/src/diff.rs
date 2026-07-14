@@ -782,18 +782,11 @@ fn colorize_marker(marker: char, status: DiffStatus, use_colors: bool) -> String
 }
 
 fn display_width(value: &str) -> usize {
-    strip_ansi(value)
-        .chars()
-        .map(|c| if fm_core::is_east_asian_wide(c) { 2 } else { 1 })
-        .sum()
-}
-
-fn strip_ansi(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
+    let mut width = 0;
     let mut in_escape = false;
     let mut in_bracket = false;
 
-    for c in input.chars() {
+    for c in value.chars() {
         if in_escape {
             if c == '[' {
                 in_bracket = true;
@@ -808,10 +801,11 @@ fn strip_ansi(input: &str) -> String {
         } else if c == '\x1b' {
             in_escape = true;
         } else {
-            result.push(c);
+            width += if fm_core::is_east_asian_wide(c) { 2 } else { 1 };
         }
     }
-    result
+
+    width
 }
 
 fn truncate_display(value: &str, max_width: usize) -> String {
@@ -1359,6 +1353,10 @@ mod tests {
         let colored = format!("{}Added{}", colors::ADDED, colors::RESET);
         assert_eq!(display_width(&colored), 5);
         assert_eq!(display_width("Plain"), 5);
+        assert_eq!(display_width("界"), 2);
+        assert_eq!(display_width("\x1b[31m界\x1b[0m"), 2);
+        assert_eq!(display_width("dangling \x1b"), 9);
+        assert_eq!(display_width("non-CSI \x1bXvisible"), 15);
     }
 
     // ─── End-to-end diff tests using parsed Mermaid input ───

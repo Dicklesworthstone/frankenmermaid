@@ -15277,6 +15277,31 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 
   Agent: Codex (GPT-5, this session)
 
+### ✅KEEP: fuse ANSI stripping into terminal-diff display-width scan — 52.644% faster (2.112×, 2026-07-14)
+
+- **Ledger-first boundary:** the measured per-line output-`format!` rejection above identified `pad_display` and
+  `truncate_display` as dominant remaining work because both walk `display_width`; no prior fused ANSI/width scan
+  attempt was recorded. This is a different primitive from output assembly and the landed LCS prefix pruning.
+- **Lever (`bd-vmfv`):** `display_width` previously allocated a full-capacity `String` in `strip_ansi`, copied every
+  visible character into it, then decoded that string again to sum terminal cell widths. The retained implementation
+  folds the unchanged ANSI escape-state machine and East Asian width sum into one character pass, eliminating the
+  temporary allocation, visible-character copy, and second UTF-8 decode.
+- **Strict-remote same-binary foreground A/B:** one `--profile release` test binary ran both implementations in
+  alternating order for nine samples × 32 sweeps over 8,192 realistic plain, ANSI-colored, and wide-character diff
+  lines on RCH worker **`vmi1152480`**, admitted with `RCH_REQUIRE_REMOTE=1` and no local fallback. Baseline samples
+  were **[299112380, 324411289, 325041229, 326176491, 327266476, 335821281, 336954360, 351063927, 393631842] ns**;
+  candidate samples were **[147650979, 150091508, 150191598, 150588008, 154979986, 157875624, 158914512,
+  159471764, 161239479] ns**. Medians: **327,266,476 → 154,979,986 ns**, **52.644% faster / 2.112×**.
+- **Exact-behavior proof:** the A/B asserted equal widths for empty, ASCII, East Asian wide, SGR-colored, dangling
+  escape, non-CSI escape, and unterminated CSI cases, then for every one of the 8,192 workload lines before timing.
+  All timed arms also produced the identical rolling digest **`4d729079016f9000`**. Permanent tests retain colored,
+  wide-colored, dangling-escape, and non-CSI coverage.
+- **Verdict: KEEP / LANDED.** This clears the 3% keep floor with non-overlapping distributions and removes material
+  work from every terminal-diff padding/truncation width query. The temporary old implementation and probe were
+  removed; only the fused production scan and focused parity assertions remain.
+
+  Agent: Codex (GPT-5, this session)
+
 ### ✅LANDED: prune the common rendered prefix before terminal diff LCS — 94.248% faster (2026-07-14)
 
 - **Ledger-first boundary:** the flat-table win changed the LCS table's allocation shape, and the subsequent `u16`
