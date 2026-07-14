@@ -15389,6 +15389,34 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 
   Agent: Codex (GPT-5, this session)
 
+### ⛔ HOLD / INVALID RETRY: direct terminal `CellBuffer` serialization again missed timed path (2026-07-14)
+
+- **Negative-ledger-first retry boundary:** the preceding `bd-mpr9` attempt is **HOLD / INVALID**, not a
+  speed rejection: its cold-worker `highs-sys` build never reached the named test. The source was restored,
+  leaving the mandatory Compact/CellOnly finalizer unchanged. This retry uses a new bead (`bd-1buv.5`) and
+  keeps the invalid attempt intact for audit history.
+- **Profile / attribution:** `render_cell_mode` still ends by formatting `CellBuffer`. Display allocates and
+  fills one `String` per row, performs Unicode `trim_end`, then copies retained scalars again into the final
+  formatter-owned `String`. Ranked costs remain: (1) height allocations plus two cell-grid copies; (2) the
+  required reverse whitespace scan; (3) required newline emission. Impact 4 x confidence 5 / effort 1 =
+  score **20**.
+- **Single lever / isomorphism:** serialize directly into one preallocated output buffer, reverse-scan each
+  `Vec<char>` row with `char::is_whitespace`, and append only its retained prefix. Display remains unchanged
+  as the exact oracle. Row order, Unicode scalar encoding, blank rows, internal/trailing whitespace semantics,
+  inter-row newlines, dimensions, drawing, floating point, tie-breaking, and RNG are unchanged.
+- **Strict-remote foreground retry:** the sole command used `RCH_REQUIRE_REMOTE=1`, `--profile release`, one
+  exact ignored `fm-render-term` test, and a 290s hard ceiling. Job **`j-29928833041828576`** stayed on the
+  requested **`vmi1293453`**, but that pool downloaded and compiled the full `fm-layout` dependency graph,
+  including native `highs-sys`, then remained in the release build/link path until `timeout` returned 124.
+  The named test never launched, so no A/B samples or parity result exist.
+- **Verdict:** **HOLD / INVALID EVIDENCE, NOT A PERFORMANCE REJECT.** The one command exhausted the allowed
+  290s foreground budget before reaching timed code. The production method and temporary parity/A/B harness
+  were manually restored, leaving `renderer.rs` byte-identical to `HEAD`. Do not spend another interactive
+  turn retrying this lever until a pre-existing `fm-render-term --profile release` test binary is demonstrably
+  warm on the admitted worker; the optimization hypothesis itself remains unscored.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.5`)
+
 ### ✅LANDED: stream ASCII line classification instead of collecting `Vec<char>` — 13.134% faster (2026-07-14)
 
 - **Negative-ledger-first boundary:** no prior `classify_line`, ASCII line-classification, or terminal ASCII
