@@ -15277,6 +15277,40 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 
   Agent: Codex (GPT-5, this session)
 
+### ✅LANDED: prune the common rendered prefix before terminal diff LCS — 94.248% faster (2026-07-14)
+
+- **Ledger-first boundary:** the flat-table win changed the LCS table's allocation shape, and the subsequent `u16`
+  probe changed cell width. Neither removed table dimensions. This fresh lever targets late diagram edits where
+  `render_diff_terminal_with_config` produces old/new terminal outputs with a long identical prefix before the first
+  changed row, while retaining the landed flat `usize` DP for the remaining suffix.
+- **Lever:** scan the maximal equal prefix once, emit its `(index, index)` anchors directly, and allocate/fill the
+  O(m·n) table only for the two remaining tails. On the 768×768 late-edit probe with 576 shared leading rows, the DP
+  shrank from 591,361 cells to 37,249 cells (**15.876× fewer**). Common-suffix pruning is intentionally out of scope:
+  repeated lines can make a forced suffix change the existing reconstruction tie-break.
+- **Isomorphism proof:** the old reconstruction unconditionally pairs equal current lines before consulting any DP
+  score, so every maximal leading `(i, i)` pair is already forced in the same order. The tail runs the identical fill
+  loop and the identical `>=` old-side tie-break with only a constant index offset. Before timing, the full ordered
+  anchor vector matched the untrimmed implementation exactly: **614 pairs**, FNV digest **`3a3a70047054f739`**.
+  Permanent test `common_prefix_lcs_matches_full_table` covers a repeated/tie-sensitive tail and an entirely identical
+  input; floating-point and RNG behavior are N/A.
+- **Strict-remote same-binary foreground A/B:** one release test binary interleaved nine samples of six full LCS calls
+  per arm on RCH worker **`vmi1152480`**, job **`j-29928833041828256`**, via
+  `RCH_WORKER=vmi1152480 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 RCH_QUEUE_WHEN_BUSY=1 env -u
+  CARGO_TARGET_DIR rch --no-self-healing exec -- cargo test -j1 --profile release -p fm-render-term
+  diff::tests::common_prefix_lcs_perf_probe -- --ignored --nocapture --exact`. Baseline samples were
+  **[28691832, 28736488, 29569869, 30349062, 31177555, 32387378, 33407828, 43764330, 48167520] ns**; candidate
+  samples were **[1725231, 1768576, 1786493, 1791919, 1793263, 1819191, 1899240, 1917617, 1938077] ns**.
+  Medians: **31,177,555 → 1,793,263 ns** — **94.248% faster / 17.386× speedup**; every candidate sample beat the
+  fastest baseline by more than 14×.
+- **Gates:** strict-remote `fm-render-term` release tests passed (**85 unit + 5 doctests**); strict-remote workspace
+  `cargo check --all-targets` and `cargo clippy --all-targets -- -D warnings` passed; workspace rustfmt check passed;
+  UBS exited 0 with no critical finding in the changed source. The one-shot timing harness was removed.
+- **Verdict: KEEP / LANDED.** This is algorithmic work avoidance, not another allocation-only micro-tweak: late edits
+  now pay quadratic work only after the first changed rendered row. LEVER↺: for a deterministic DP whose forward
+  reconstruction greedily accepts equal prefixes, extract that forced prefix before allocating the dense table.
+
+  Agent: Codex (GPT-5, this session)
+
 ### ❌REJECTED: pack terminal diff LCS scores from `usize` to `u16` — 4.284% slower (2026-07-14)
 
 - **Ledger-first boundary:** the immediately preceding `lcs_pairs` win flattened the dense terminal-diff LCS table,

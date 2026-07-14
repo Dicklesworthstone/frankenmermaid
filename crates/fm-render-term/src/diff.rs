@@ -939,6 +939,21 @@ fn align_changed_block(old_lines: &[&str], new_lines: &[&str]) -> Vec<AlignedDif
 }
 
 fn lcs_pairs(old_lines: &[&str], new_lines: &[&str]) -> Vec<(usize, usize)> {
+    let common_prefix = old_lines
+        .iter()
+        .zip(new_lines)
+        .take_while(|(old_line, new_line)| old_line == new_line)
+        .count();
+    lcs_pairs_after_common_prefix(old_lines, new_lines, common_prefix)
+}
+
+fn lcs_pairs_after_common_prefix(
+    old_lines: &[&str],
+    new_lines: &[&str],
+    common_prefix: usize,
+) -> Vec<(usize, usize)> {
+    let old_lines = &old_lines[common_prefix..];
+    let new_lines = &new_lines[common_prefix..];
     let row_len = new_lines.len() + 1;
     let mut dp = vec![0_usize; (old_lines.len() + 1) * row_len];
 
@@ -956,10 +971,10 @@ fn lcs_pairs(old_lines: &[&str], new_lines: &[&str]) -> Vec<(usize, usize)> {
 
     let mut old_index = 0;
     let mut new_index = 0;
-    let mut pairs = Vec::new();
+    let mut pairs: Vec<(usize, usize)> = (0..common_prefix).map(|index| (index, index)).collect();
     while old_index < old_lines.len() && new_index < new_lines.len() {
         if old_lines[old_index] == new_lines[new_index] {
-            pairs.push((old_index, new_index));
+            pairs.push((old_index + common_prefix, new_index + common_prefix));
             old_index += 1;
             new_index += 1;
         } else if dp[(old_index + 1) * row_len + new_index]
@@ -1011,6 +1026,22 @@ mod tests {
         assert_eq!(lcs_pairs(&["a", "b"], &["b", "a"]), vec![(1, 0)]);
         assert!(lcs_pairs(&[], &["new"]).is_empty());
         assert!(lcs_pairs(&["old"], &[]).is_empty());
+    }
+
+    #[test]
+    fn common_prefix_lcs_matches_full_table() {
+        let old = ["header", "shared", "a", "b", "a", "footer"];
+        let new = ["header", "shared", "b", "a", "b", "footer"];
+        assert_eq!(
+            lcs_pairs(&old, &new),
+            lcs_pairs_after_common_prefix(&old, &new, 0)
+        );
+
+        let identical = ["header", "repeated", "repeated", "footer"];
+        assert_eq!(
+            lcs_pairs(&identical, &identical),
+            lcs_pairs_after_common_prefix(&identical, &identical, 0)
+        );
     }
 
     #[test]
