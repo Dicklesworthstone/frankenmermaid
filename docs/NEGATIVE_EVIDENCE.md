@@ -15305,6 +15305,32 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 
   Agent: Codex (GPT-5, this session; bead `bd-db8y`)
 
+### ✅LANDED: compile the style-property allowlist into a literal match — lookup -47.3% (2026-07-14)
+
+- **Negative-ledger-first / attribution:** no earlier `is_allowed_style_property`, allowed-style
+  slice lookup, or literal-match probe is recorded. The profiled styled-node path reparses style
+  references through `parse_style_string_with_rejections`; after the duplicate lowercase allocation
+  was removed, the next removable per-property work is `ALLOWED_STYLE_PROPERTIES.contains`, a linear
+  scan across 21 strings. Both `IrInlineStyle::from_pairs` and the raw style parser call this lookup.
+- **Opportunity matrix:** impact 2, confidence 4, effort 1, score **8.0**. Replace only the linear
+  slice search with a `matches!` over the identical literal set. Property case sensitivity, accepted
+  and rejected sets, insertion order, values, diagnostics, floating point, tie-breaking, and RNG are
+  unchanged; the pre-change slice remains test-only as the exhaustive accepted-set oracle.
+- **Strict-remote same-binary foreground A/B:** `RCH_REQUIRE_REMOTE=1`, `--profile release`, one
+  ignored `fm-core` test binary, alternating order, 9 rounds x 250,000 iterations x 32 properties.
+  Linear median **51,210,760 ns**; literal-match median **26,974,138 ns**;
+  **47.327% faster** (**1.898x throughput**); parity **exact** across 5,250,000 accepted
+  lookups per sample; actual worker **`vmi1293453`**. The timed body finished in 0.74s and
+  the complete cold-pool remote release command returned in 119.2s.
+- **Measurement hygiene:** initial remote job `j-29928833041828551` stopped at a missing
+  test-oracle import before executing the named test and contributed no timings. After the
+  harness-only import fix, job `j-29928833041828553` ran the single decision-grade A/B above.
+- **Verdict:** **KEEP / LANDED.** The literal set is identical to the old slice oracle and
+  decisively clears the 3% floor. This closes lookup selection only; it does not change style
+  parsing, sanitization, or the set of accepted CSS properties.
+
+  Agent: Codex (GPT-5, this session; bead `bd-24cn`)
+
 ### ⛔ HOLD / INVALID: direct terminal `CellBuffer` serialization never reached timed path (2026-07-14)
 
 - **Negative-ledger-first boundary:** no prior `CellBuffer`, terminal cell-grid serialization, or per-row output

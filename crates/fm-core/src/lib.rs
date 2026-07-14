@@ -1758,7 +1758,8 @@ impl IrInlineStyle {
 /// The set of CSS-like properties that are safe to pass through to SVG
 /// attributes. Anything not in this list is silently dropped by the
 /// style parsing helpers (e.g. [`parse_style_string_with_rejections`]).
-const ALLOWED_STYLE_PROPERTIES: &[&str] = &[
+#[cfg(test)]
+const ALLOWED_STYLE_PROPERTIES_REFERENCE: &[&str] = &[
     "fill",
     "stroke",
     "stroke-width",
@@ -1785,7 +1786,30 @@ const ALLOWED_STYLE_PROPERTIES: &[&str] = &[
 /// Returns `true` if `property` is in the allowed-list.
 #[must_use]
 pub fn is_allowed_style_property(property: &str) -> bool {
-    ALLOWED_STYLE_PROPERTIES.contains(&property)
+    matches!(
+        property,
+        "fill"
+            | "stroke"
+            | "stroke-width"
+            | "stroke-dasharray"
+            | "stroke-linecap"
+            | "stroke-linejoin"
+            | "stroke-opacity"
+            | "fill-opacity"
+            | "opacity"
+            | "filter"
+            | "color"
+            | "font-size"
+            | "font-weight"
+            | "font-family"
+            | "font-style"
+            | "text-decoration"
+            | "background"
+            | "border-radius"
+            | "padding"
+            | "rx"
+            | "ry"
+    )
 }
 
 /// Sanitize a CSS-like value for safe inclusion in SVG.
@@ -5295,25 +5319,25 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        ArrowType, DegradationContext, DegradationOperator, Diagnostic, DiagnosticCategory,
-        DiagnosticSeverity, DiagramPalettePreset, DiagramType, EdgeMap, FragmentAlternative,
-        FragmentKind, GanttDate, GanttExclude, GanttTaskType, GanttTickInterval, GraphDirection,
-        IrActivation, IrAttributeKey, IrCluster, IrClusterId, IrEdge, IrEdgeKind, IrEndpoint,
-        IrEntityAttribute, IrGanttMeta, IrGanttSection, IrGanttTask, IrGraphCluster, IrGraphEdge,
-        IrGraphNode, IrInlineStyle, IrLabel, IrLabelId, IrLifecycleEvent, IrNode, IrNodeId,
-        IrNodeKind, IrParticipantGroup, IrPort, IrPortId, IrPortSideHint, IrSequenceFragment,
-        IrSequenceMeta, IrSequenceNote, IrStyleDef, IrStyleRef, IrStyleTarget, IrSubgraph,
-        IrSubgraphId, IrXyAxis, IrXyChartMeta, IrXySeries, IrXySeriesKind, LifecycleEventKind,
-        MERMAID_SCHEMA_VERSION, MermaidBudgetLedger, MermaidConfig, MermaidDecisionWeight,
-        MermaidDegradationPlan, MermaidDiagramIr, MermaidError, MermaidErrorCode,
-        MermaidFallbackAction, MermaidFallbackPolicy, MermaidFidelity, MermaidGlyphMode,
-        MermaidGuardReport, MermaidLayoutDecisionAlternative, MermaidLayoutDecisionLedger,
-        MermaidLayoutDecisionRecord, MermaidLensEdit, MermaidNativePressureSignals,
-        MermaidPressureReport, MermaidPressureTier, MermaidQualityMode, MermaidSanitizeMode,
-        MermaidSourceMap, MermaidSourceMapEntry, MermaidSourceMapKind, MermaidSupportLevel,
-        MermaidWarningCode, MermaidWasmPressureSignals, NodeMap, NodeSet, NodeShape, NotePosition,
-        Position, Span, StructuredDiagnostic, apply_lens_edit, build_lens_bindings,
-        capability_matrix, capability_matrix_json_pretty,
+        ALLOWED_STYLE_PROPERTIES_REFERENCE, ArrowType, DegradationContext, DegradationOperator,
+        Diagnostic, DiagnosticCategory, DiagnosticSeverity, DiagramPalettePreset, DiagramType,
+        EdgeMap, FragmentAlternative, FragmentKind, GanttDate, GanttExclude, GanttTaskType,
+        GanttTickInterval, GraphDirection, IrActivation, IrAttributeKey, IrCluster, IrClusterId,
+        IrEdge, IrEdgeKind, IrEndpoint, IrEntityAttribute, IrGanttMeta, IrGanttSection,
+        IrGanttTask, IrGraphCluster, IrGraphEdge, IrGraphNode, IrInlineStyle, IrLabel, IrLabelId,
+        IrLifecycleEvent, IrNode, IrNodeId, IrNodeKind, IrParticipantGroup, IrPort, IrPortId,
+        IrPortSideHint, IrSequenceFragment, IrSequenceMeta, IrSequenceNote, IrStyleDef, IrStyleRef,
+        IrStyleTarget, IrSubgraph, IrSubgraphId, IrXyAxis, IrXyChartMeta, IrXySeries,
+        IrXySeriesKind, LifecycleEventKind, MERMAID_SCHEMA_VERSION, MermaidBudgetLedger,
+        MermaidConfig, MermaidDecisionWeight, MermaidDegradationPlan, MermaidDiagramIr,
+        MermaidError, MermaidErrorCode, MermaidFallbackAction, MermaidFallbackPolicy,
+        MermaidFidelity, MermaidGlyphMode, MermaidGuardReport, MermaidLayoutDecisionAlternative,
+        MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord, MermaidLensEdit,
+        MermaidNativePressureSignals, MermaidPressureReport, MermaidPressureTier,
+        MermaidQualityMode, MermaidSanitizeMode, MermaidSourceMap, MermaidSourceMapEntry,
+        MermaidSourceMapKind, MermaidSupportLevel, MermaidWarningCode, MermaidWasmPressureSignals,
+        NodeMap, NodeSet, NodeShape, NotePosition, Position, Span, StructuredDiagnostic,
+        apply_lens_edit, build_lens_bindings, capability_matrix, capability_matrix_json_pretty,
         capability_readme_supported_diagram_types_markdown, capability_readme_surface_markdown,
         documented_diagram_types, is_allowed_style_property, is_safe_link_target,
         mermaid_layout_guard_observability, parse_mermaid_js_config_value, parse_style_string,
@@ -8582,6 +8606,93 @@ mod tests {
         assert!(is_allowed_style_property("filter"));
         assert!(!is_allowed_style_property("display"));
         assert!(!is_allowed_style_property("position"));
+    }
+
+    const REJECTED_STYLE_PROPERTIES: &[&str] = &[
+        "",
+        "Fill",
+        "display",
+        "position",
+        "visibility",
+        "transform",
+        "stroke_width",
+        "font",
+        "font-colour",
+        "onclick",
+        "--custom",
+    ];
+
+    fn is_allowed_style_property_linear_reference(property: &str) -> bool {
+        ALLOWED_STYLE_PROPERTIES_REFERENCE.contains(&property)
+    }
+
+    #[test]
+    fn style_property_literal_match_equals_linear_reference() {
+        for property in ALLOWED_STYLE_PROPERTIES_REFERENCE
+            .iter()
+            .chain(REJECTED_STYLE_PROPERTIES)
+        {
+            assert_eq!(
+                is_allowed_style_property(property),
+                is_allowed_style_property_linear_reference(property),
+                "style property {property:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "manual short release A/B"]
+    fn perf_style_property_literal_match_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ITERATIONS: usize = 250_000;
+        const ROUNDS: usize = 9;
+
+        fn measure(validator: fn(&str) -> bool, iterations: usize) -> (u128, usize) {
+            let mut accepted = 0usize;
+            let started = Instant::now();
+            for _ in 0..iterations {
+                for property in ALLOWED_STYLE_PROPERTIES_REFERENCE
+                    .iter()
+                    .chain(REJECTED_STYLE_PROPERTIES)
+                {
+                    accepted += usize::from(black_box(validator(black_box(property))));
+                }
+            }
+            (started.elapsed().as_nanos(), accepted)
+        }
+
+        let expected_accepted = ALLOWED_STYLE_PROPERTIES_REFERENCE.len() * ITERATIONS;
+        let mut baseline_ns = Vec::with_capacity(ROUNDS);
+        let mut candidate_ns = Vec::with_capacity(ROUNDS);
+        for round in 0..ROUNDS {
+            let (first, first_accepted, second, second_accepted) = if round % 2 == 0 {
+                let baseline = measure(is_allowed_style_property_linear_reference, ITERATIONS);
+                let candidate = measure(is_allowed_style_property, ITERATIONS);
+                (baseline.0, baseline.1, candidate.0, candidate.1)
+            } else {
+                let candidate = measure(is_allowed_style_property, ITERATIONS);
+                let baseline = measure(is_allowed_style_property_linear_reference, ITERATIONS);
+                (baseline.0, baseline.1, candidate.0, candidate.1)
+            };
+            assert_eq!(first_accepted, expected_accepted);
+            assert_eq!(second_accepted, expected_accepted);
+            baseline_ns.push(first);
+            candidate_ns.push(second);
+        }
+
+        baseline_ns.sort_unstable();
+        candidate_ns.sort_unstable();
+        let baseline_median_ns = baseline_ns[ROUNDS / 2];
+        let candidate_median_ns = candidate_ns[ROUNDS / 2];
+        let improvement_pct = (baseline_median_ns as f64 - candidate_median_ns as f64) * 100.0
+            / baseline_median_ns as f64;
+
+        println!(
+            "PERF style_property_lookup linear_median_ns={baseline_median_ns} literal_match_median_ns={candidate_median_ns} improvement_pct={improvement_pct:.3} parity=exact accepted={expected_accepted} rounds={ROUNDS} iterations={ITERATIONS} values={}",
+            ALLOWED_STYLE_PROPERTIES_REFERENCE.len() + REJECTED_STYLE_PROPERTIES.len()
+        );
     }
 
     #[test]
