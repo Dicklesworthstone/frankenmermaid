@@ -15608,3 +15608,31 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 - **Verdict: KEEP / LANDED.**
 
   Agent: (Opus 4.8, this session)
+
+### REJECT: borrow terminal diff edge labels before comparison — +20.5% slower/noisy (2026-07-13)
+
+- **Ledger-first boundary:** no prior terminal `compare_edges`, `EdgeChange::LabelChanged`, or borrowed diff-label
+  comparison probe was recorded. The existing borrowed edge-label rejects are parser cleanup/interner work, not
+  this terminal diff path.
+- **Candidate:** resolve old/new edge labels as `&str`, compare them borrowed, and call `to_owned()` only when
+  constructing a real `LabelChanged` output. The baseline cloned both label strings before every comparison, even
+  for unchanged labeled edges. This was exactly one ownership-boundary lever; endpoint grouping and public output
+  types stayed untouched.
+- **Strict-remote same-worker foreground A/B:** both arms ran via `RCH_REQUIRE_REMOTE=1` on actual worker
+  `vmi1152480` using `cargo test -j1 --profile release -p fm-render-term
+  diff::tests::terminal_diff_label_borrow_perf_probe -- --ignored --nocapture --exact`. The temporary inline probe
+  diffed separately owned, identical IRs with 64 nodes and every ordered endpoint pair carrying a distinct
+  67-byte label (4,096 unchanged labeled edges), five calls per sample across nine samples. Baseline median was
+  **4,577,196 ns/diff** (samples **4,219,237; 4,242,069; 4,356,871; 4,359,399; 4,577,196; 4,608,004;
+  4,948,363; 6,025,090; 8,320,876**). Candidate median was **5,517,003 ns/diff** (samples **4,526,204;
+  4,962,453; 4,992,004; 5,309,217; 5,517,003; 5,751,179; 5,969,382; 6,058,099; 6,546,472**) —
+  candidate/baseline **1.20532x**, or **20.532% slower**. The ranges overlap, but the median moves decisively in
+  the wrong direction.
+- **Exact-output proof:** both arms returned 64 unchanged nodes and 4,096 unchanged edges with ordered-output FNV
+  digest **`75e597960560ae2d`**. The candidate was structurally behavior-preserving, but allocation-count reasoning
+  did not translate into a full-operation timing win on the shipping boundary.
+- **Verdict:** **REJECT.** The source change and temporary probe were manually restored; `diff.rs` is byte-identical
+  to current `HEAD`. Do not retry the exact borrowed-label substitution in `compare_edges` without a materially
+  different profile or benchmark boundary that explains this regression.
+
+  Agent: Codex (GPT-5, this session)
