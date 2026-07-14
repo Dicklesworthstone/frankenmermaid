@@ -15636,3 +15636,25 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   different profile or benchmark boundary that explains this regression.
 
   Agent: Codex (GPT-5, this session)
+
+### ❌REJECTED: `crossing_minimization_impl` dense_node_rank build via iterate-ranks — scc_100 REGRESSED +5.6% (2026-07-13)
+
+- **Hypothesis (probe-avoidance family, after the rank_exists win 2b6bdc2e):** the DENSE_RANK build did
+  `for node_index in 0..len { ranks.get(&node_index) }` — N per-node B-tree tree-descents. Replace with a single
+  `ranks` iteration (`vec![0u32; len]` + `for (&ni,&r) in ranks { dense[ni]=r }`), the "iterate not probe" pattern
+  brandes_kopf uses. Byte-identical.
+- **Sequential same-pinned-pool A/B (Criterion vs `bkbase5` = clean 2b6bdc2e):** **scc_100 +5.59% REGRESSION
+  (change CI [+2.19%, +8.77%], p=0.00)**, scc_300 +1.74% (p=0.24), scc_600 +0.08% (p=0.95). REJECT.
+- **Root cause — the rewrite ADDS a `memset(N)` pass.** `vec![0u32; len]` zero-fills all N words up front; the old
+  `Vec::with_capacity + push` writes each word exactly once. Since `ranks` is DENSE (an entry per node on this
+  workload), the iterate overwrites all N anyway, so the candidate does ~2N writes (zero-init + overwrite) vs the
+  old N. On the small graph the BTreeMap `get`s it removed are cheap (small, cache-warm tree), so the extra memset
+  dominates → net regression; on larger graphs the deeper/colder tree makes the probes cost more and it washes.
+- **⭐LESSON (bounds the "iterate not probe" / dense-build win):** building a dense table by `vec![0;N]` +
+  scatter-write only beats `with_capacity + get-per-node-push` when the map is SPARSE (few writes) OR the probe is
+  genuinely expensive (large/cold map). For a DENSE small/warm source map, the get-per-node is already cheap and
+  the up-front `memset(N)` is pure added traffic. NOT the same as the rank_exists win (2b6bdc2e), which removed a
+  per-node-per-PASS probe (2400×, amortizing its one small table) — here the probe was one-time O(N).
+- **Verdict: REJECT.** Reverted; lib.rs byte-identical to 2b6bdc2e.
+
+  Agent: (Opus 4.8, this session)
