@@ -15460,3 +15460,26 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   lib.rs fast path.
 
   Agent: (Opus 4.8, this session)
+
+### ❌REJECTED: DOT `find_edge_operator` no-dash fast path — dot_50 REGRESSED +8% (code-layout noise) (2026-07-13)
+
+- **Hypothesis (same fast-path family as the two wins that landed just before it):** `find_edge_operator` runs a
+  quote/html-tracking byte loop on EVERY DOT statement (it's tried as an edge before a node), including every node
+  statement, e.g. `N0 [label="Node 0"]`, which contains no `-`. An edge operator is always `->`/`--`, so a
+  `if !statement.as_bytes().contains(&b'-') { return None; }` pre-check would skip the loop for all node
+  statements. Byte-identical (the loop only returns Some at a `-` byte; no ledger entry existed).
+- **Sequential same-pinned-pool A/B (Criterion `parse/dot`, baseline `dotbase3` = HEAD incl 9829964c+9f0bf815):**
+  `dot_50` **+8.09% REGRESSION** (change CI [+3.88%, +12.23%], p=0.00) and `dot_200` **+0.83%** (p=0.53, no change).
+- **Why REJECT (not just below floor):** a real algorithmic regression would grow with size; here the SMALL bench
+  regresses and the LARGE one is flat — the signature of **code-layout noise** (added early-return shifted
+  inlining/alignment), which is wall-time-only. And there is a genuine (tiny) regression mechanism: for edge
+  statements the `contains` scan is pure added work before the loop that already finds `-` immediately. Unlike a
+  clean identity-common-case (normalize_identifier/decode_escapes replaced an ALLOC + char loop), this one removes
+  no alloc and only trades one short scan for another — the loop it skips is already alloc-free and cheap, so
+  there is nothing above the code-layout floor to gain. Reverted.
+- **LESSON (refines the identity-common-case lever):** the fast-path-on-trigger-byte lever pays when the skipped
+  work is an **allocation + char rebuild**; it does NOT pay (and code-layout noise can make it look like a
+  regression) when the skipped work is an **alloc-free byte scan** that's already cheap. Gate the lever on "does
+  the slow path ALLOCATE?", not merely "does it loop?".
+
+  Agent: (Opus 4.8, this session)
