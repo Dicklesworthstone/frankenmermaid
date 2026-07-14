@@ -15392,6 +15392,34 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 
   Agent: Codex (GPT-5, this session)
 
+### ❌REJECT: drop the per-line `format!` temporary in the render_diff output loop — −1.571% (wash, 2026-07-14)
+
+- **Ledger-first boundary:** no prior `render_diff_terminal_with_config`, per-line output-assembly, or
+  `format!`-temporary probe was recorded on this terminal-diff render loop. Distinct from the landed LCS/member/
+  label diff levers (which touch alignment + `compare_nodes`); this is the final line-emit loop that pads and
+  writes each aligned line into the output `String`.
+- **Candidate:** the loop did `output.push_str(&format!("{marker}  {old_padded} | {new_trimmed}\n"))` — one
+  throwaway `format!` `String` per aligned line plus the `fmt::Arguments` machinery. Replace with six direct
+  `output.push_str(&marker)` / `push_str("  ")` / … / `push('\n')` appends (byte-identical bytes, no temporary).
+- **Strict-remote same-binary foreground A/B:** both loop variants in one release test binary via
+  `RCH_REQUIRE_REMOTE=1` with `#[global_allocator] mimalloc::MiMalloc`, interleaved 9 samples × 20 reps over a
+  640-line aligned block (mixed unchanged/changed/removed/added), on a real worker:
+  `cargo test -j1 --profile release -p fm-render-term diff::tests::render_diff_loop_format_removal_perf_probe`.
+  Baseline median **1,167,078 ns** (samples 1135901 1137007 1142025 1150631 1167078 1171655 1262470 1322831
+  1495853); candidate median **1,185,407 ns** (samples 1075916 1094918 1098774 1133927 1185407 1189772 1319186
+  1462664 2168156) — **−1.571% (candidate slower)**, heavily overlapping ranges with a large candidate outlier.
+- **Exact-output proof:** the two variants produced byte-identical output over the 640-line block, FNV digest
+  **`e1d6f9ce4ff5bc97`**; the probe's `assert_eq!` passed.
+- **Verdict:** **REJECT.** The `format!` temporary is a negligible fraction of the per-line work — `pad_display`,
+  `truncate_display` (both allocate + walk `display_width`), and `colorize_marker` dominate — so removing it is
+  noise-negative, not a win. Source + probe + mimalloc dev-dep reverted; `diff.rs`/`Cargo.toml` byte-identical to
+  `HEAD`. LEVER↺: `format!`-temporary / alloc-count removal only pays when it is a MEANINGFUL FRACTION of the
+  enclosing per-item work; on a loop already dominated by pad/truncate/colorize allocations it washes (matches the
+  layout "setup micro-opts pay only if a meaningful fraction" family). Do not retry without moving the dominant
+  pad/truncate allocations too.
+
+  Agent: Claude (Opus 4.8, this session)
+
 ### ✅LANDED: flatten terminal diff LCS table (Vec<Vec<usize>> → single flat Vec) — 30.550% faster (2026-07-14)
 
 - **Ledger-first boundary:** no prior `lcs_pairs`, `align_rendered_lines`, or LCS-table entry exists. Distinct from
