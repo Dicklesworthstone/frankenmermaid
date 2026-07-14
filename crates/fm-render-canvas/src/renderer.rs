@@ -104,11 +104,42 @@ pub struct Canvas2dRenderer {
     draw_calls: usize,
 }
 
+const DENSE_SOURCE_INDEX_LIMIT: usize = 65_536;
+
+#[derive(Debug, Default)]
+struct SourceIndexSet {
+    words: Vec<u64>,
+    sparse: BTreeSet<usize>,
+    len: usize,
+}
+
+impl SourceIndexSet {
+    fn insert(&mut self, index: usize) {
+        if index < DENSE_SOURCE_INDEX_LIMIT {
+            let word_index = index / u64::BITS as usize;
+            if word_index >= self.words.len() {
+                self.words.resize(word_index + 1, 0);
+            }
+            let mask = 1_u64 << (index % u64::BITS as usize);
+            if self.words[word_index] & mask == 0 {
+                self.words[word_index] |= mask;
+                self.len += 1;
+            }
+        } else if self.sparse.insert(index) {
+            self.len += 1;
+        }
+    }
+
+    const fn len(&self) -> usize {
+        self.len
+    }
+}
+
 #[derive(Debug, Default)]
 struct SceneRenderStats {
-    node_sources: BTreeSet<usize>,
-    edge_sources: BTreeSet<usize>,
-    cluster_sources: BTreeSet<usize>,
+    node_sources: SourceIndexSet,
+    edge_sources: SourceIndexSet,
+    cluster_sources: SourceIndexSet,
     labels_drawn: usize,
 }
 
@@ -1535,6 +1566,26 @@ mod tests {
             });
             assert_eq!(actual, expected);
         }
+    }
+
+    #[test]
+    fn source_index_set_counts_dense_duplicates_and_sparse_indexes() {
+        let mut indexes = SourceIndexSet::default();
+        for index in [
+            0,
+            0,
+            63,
+            64,
+            DENSE_SOURCE_INDEX_LIMIT - 1,
+            DENSE_SOURCE_INDEX_LIMIT,
+            usize::MAX,
+            usize::MAX,
+        ] {
+            indexes.insert(index);
+        }
+        assert_eq!(indexes.len(), 6);
+        assert_eq!(indexes.words.len(), DENSE_SOURCE_INDEX_LIMIT / 64);
+        assert_eq!(indexes.sparse.len(), 2);
     }
 
     #[test]

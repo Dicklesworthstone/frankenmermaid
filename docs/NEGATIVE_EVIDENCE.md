@@ -15277,6 +15277,34 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 
   Agent: Codex (GPT-5, this session)
 
+### ✅LANDED: bitset Canvas render-scene source accounting — 37.185% faster (2026-07-14)
+
+- **Ledger-first boundary:** no prior `SceneRenderStats`, `node_sources` / `edge_sources` / `cluster_sources`, or
+  Canvas render-scene source-cardinality probe was recorded. The earlier Canvas generation-stamp rejection was
+  terminal pixel-buffer state, and the dash/text probes exercised unrelated drawing primitives.
+- **Hot-path lever:** `Canvas2dRenderer::render_scene` used three `BTreeSet<usize>` values solely to return unique
+  node, edge, and cluster counts. Every rendered path visits this accounting path, while generated
+  `RenderSource` values are dense indexes into IR/layout arrays. `SourceIndexSet` now records indexes below 65,536
+  in packed `u64` words (one bit per source, at most 8 KiB per kind) and retains a `BTreeSet` fallback for larger
+  sparse external indexes. Duplicate detection and arbitrary `usize` support remain exact.
+- **Strict-remote same-binary foreground A/B:** one mimalloc release test binary rendered the same scene through
+  the old tree-backed and new packed trackers in alternating order on RCH worker **`vmi1293453`**, job
+  **`j-29928833041828147`**, via `cargo test -j1 --profile release -p fm-render-canvas
+  renderer::tests::canvas_scene_source_accounting_perf_probe -- --ignored --nocapture --exact`. Each sample timed
+  four full `render_scene` calls over 4,096 unique node sources represented by two stroked paths each (8,192
+  render items per call). Sorted baseline samples were **[3614908, 3649419, 4153995, 4154135, 4494424,
+  4553572, 5826216, 6021628, 7287532] ns**; candidate samples were **[2663865, 2747670, 2775303,
+  2798937, 2823153, 3086027, 3089723, 3181279, 3280797] ns**. Medians: **4,494,424 -> 2,823,153 ns**
+  (**37.185% faster, 1.592x throughput**), with every candidate sample below every baseline sample.
+- **Exact-output proof:** both arms returned identical node/edge/cluster/label/draw-call counts and identical
+  `MockCanvas2dContext` operation streams; the paired result/operation digest was **`401d6b3ce6b88000`**.
+  Permanent coverage pins duplicate handling, both dense-word boundaries, the 65,536 sparse cutoff, and
+  `usize::MAX`; existing scene tests continue to pin renderer counts and operations.
+- **Verdict:** **KEEP / LANDED.** This is structural hot-loop work removal rather than allocator-only reuse. The
+  temporary allocator dependency, baseline tracker, and ignored benchmark were removed before landing.
+
+  Agent: Codex (GPT-5, this session)
+
 ### ✅LANDED: inline the shipped two-value Canvas dash conversion — 75.681% faster (2026-07-14)
 
 - **Ledger-first boundary:** no prior Canvas `StrokeStyle::dash_array` f32-to-f64 conversion probe was
