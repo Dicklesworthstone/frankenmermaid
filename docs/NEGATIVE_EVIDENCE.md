@@ -16716,3 +16716,25 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   allocation count.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.10`)
+
+### LANDED: reserve `MermaidDiagramIr::source_map` entry capacity (2026-07-14)
+
+- **Negative-ledger-first boundary:** no prior `MermaidSourceMapEntry`, source-map entry-capacity,
+  or `source_map` reserve probe is recorded. The nearby ParseLens win shared line-start indexing
+  after source-map construction and did not alter this owned entry vector.
+- **Profile attribution:** parser lens construction and two WASM source-map surfaces call
+  `MermaidDiagramIr::source_map`. The method knows the exact entry upper bound from node, edge, and
+  cluster counts, yet grew `entries` from an empty `Vec`, reallocating and moving already-built
+  records while required element/source strings dominated the remaining owned work.
+- **One lever:** reserve `nodes + edges + clusters` before preserving the existing unknown-span
+  filtering and node→edge→cluster order. One same-binary, alternating-order, nine-round `--profile
+  release` A/B compares capacity zero with the known upper bound over 256 complete 1,088-entry maps.
+  Keep only with exact source-map equality and at least 3% median improvement.
+- **Remote evidence:** `RCH_REQUIRE_REMOTE=1 rch --no-self-healing exec -- cargo test -j1
+  --profile release -p fm-core tests::perf_source_map_entry_capacity_ab -- --ignored --exact
+  --nocapture` ran on `vmi1293453` as job `j-29928833041828689` and completed in 120.2 s.
+- **Result:** exact full-map parity; baseline median 16,496,744 ns versus candidate median
+  15,046,604 ns across nine alternating rounds, an **8.790% improvement**. This clears the 3% keep
+  gate, so the exact-upper-bound entry reserve is retained.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.11`)

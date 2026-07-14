@@ -4818,7 +4818,12 @@ impl MermaidDiagramIr {
 
     #[must_use]
     pub fn source_map(&self) -> MermaidSourceMap {
-        let mut entries = Vec::new();
+        let entry_capacity = self.nodes.len() + self.edges.len() + self.clusters.len();
+        self.source_map_with_entry_capacity(entry_capacity)
+    }
+
+    fn source_map_with_entry_capacity(&self, entry_capacity: usize) -> MermaidSourceMap {
+        let mut entries = Vec::with_capacity(entry_capacity);
 
         for (index, node) in self.nodes.iter().enumerate() {
             if node.span_primary.is_unknown() {
@@ -5814,6 +5819,113 @@ mod tests {
         let bindings = build_lens_bindings(source, &source_map);
         assert_eq!(bindings[0].snippet.as_deref(), Some("A"));
         assert_eq!(bindings[1].snippet.as_deref(), Some("A-->B"));
+    }
+
+    #[test]
+    fn source_map_reserved_capacity_preserves_filtering_and_order() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.nodes.push(IrNode {
+            id: "A".to_string(),
+            span_primary: Span::at_line(2, 1),
+            ..IrNode::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "unknown".to_string(),
+            ..IrNode::default()
+        });
+        ir.edges.push(IrEdge {
+            span: Span::at_line(2, 5),
+            ..IrEdge::default()
+        });
+        ir.clusters.push(IrCluster {
+            id: IrClusterId(7),
+            span: Span::at_line(3, 8),
+            ..IrCluster::default()
+        });
+
+        assert_eq!(ir.source_map(), ir.source_map_with_entry_capacity(0));
+    }
+
+    #[test]
+    #[ignore = "manual short release A/B"]
+    fn perf_source_map_entry_capacity_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const NODES: usize = 512;
+        const CLUSTERS: usize = 64;
+        const ITERATIONS: usize = 256;
+        const ROUNDS: usize = 9;
+
+        fn measure(ir: &MermaidDiagramIr, entry_capacity: usize) -> (u128, usize, usize) {
+            let mut entry_count = 0usize;
+            let mut element_bytes = 0usize;
+            let started = Instant::now();
+            for _ in 0..ITERATIONS {
+                let source_map =
+                    black_box(ir).source_map_with_entry_capacity(black_box(entry_capacity));
+                entry_count = entry_count.wrapping_add(source_map.entries.len());
+                element_bytes = element_bytes.wrapping_add(
+                    source_map
+                        .entries
+                        .iter()
+                        .map(|entry| entry.element_id.len())
+                        .sum::<usize>(),
+                );
+                black_box(&source_map);
+            }
+            (started.elapsed().as_nanos(), entry_count, element_bytes)
+        }
+
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for index in 0..NODES {
+            ir.nodes.push(IrNode {
+                id: format!("N{index}"),
+                span_primary: Span::at_line(index + 2, 12),
+                ..IrNode::default()
+            });
+            ir.edges.push(IrEdge {
+                span: Span::at_line(index + 2, 18),
+                ..IrEdge::default()
+            });
+        }
+        for index in 0..CLUSTERS {
+            ir.clusters.push(IrCluster {
+                id: IrClusterId(index),
+                span: Span::at_line(NODES + index + 2, 10),
+                ..IrCluster::default()
+            });
+        }
+        let entry_capacity = ir.nodes.len() + ir.edges.len() + ir.clusters.len();
+        assert_eq!(
+            ir.source_map_with_entry_capacity(0),
+            ir.source_map_with_entry_capacity(entry_capacity)
+        );
+
+        let mut baseline_ns = Vec::with_capacity(ROUNDS);
+        let mut candidate_ns = Vec::with_capacity(ROUNDS);
+        for round in 0..ROUNDS {
+            let (baseline, candidate) = if round % 2 == 0 {
+                (measure(&ir, 0), measure(&ir, entry_capacity))
+            } else {
+                let candidate = measure(&ir, entry_capacity);
+                let baseline = measure(&ir, 0);
+                (baseline, candidate)
+            };
+            assert_eq!((baseline.1, baseline.2), (candidate.1, candidate.2));
+            baseline_ns.push(baseline.0);
+            candidate_ns.push(candidate.0);
+        }
+
+        baseline_ns.sort_unstable();
+        candidate_ns.sort_unstable();
+        let baseline_median_ns = baseline_ns[ROUNDS / 2];
+        let candidate_median_ns = candidate_ns[ROUNDS / 2];
+        let improvement_pct = (baseline_median_ns as f64 - candidate_median_ns as f64) * 100.0
+            / baseline_median_ns as f64;
+        println!(
+            "PERF source_map_entry_capacity baseline_median_ns={baseline_median_ns} candidate_median_ns={candidate_median_ns} improvement_pct={improvement_pct:.3} parity=exact rounds={ROUNDS} iterations={ITERATIONS} entries={entry_capacity}"
+        );
     }
 
     #[test]
