@@ -581,12 +581,7 @@ impl Canvas2dRenderer {
         if stroke.dash_array.is_empty() {
             ctx.set_line_dash(&[]);
         } else {
-            let dash: Vec<f64> = stroke
-                .dash_array
-                .iter()
-                .map(|value| f64::from(*value))
-                .collect();
-            ctx.set_line_dash(&dash);
+            with_canvas_dash_f64(&stroke.dash_array, |dash| ctx.set_line_dash(dash));
         }
         ctx.set_line_cap(match stroke.line_cap {
             IrLineCap::Butt => LineCap::Butt,
@@ -1452,6 +1447,16 @@ fn fragment_kind_label(kind: fm_core::FragmentKind) -> &'static str {
     }
 }
 
+#[inline]
+fn with_canvas_dash_f64<T>(dash: &[f32], use_dash: impl FnOnce(&[f64]) -> T) -> T {
+    if let [first, second] = dash {
+        use_dash(&[f64::from(*first), f64::from(*second)])
+    } else {
+        let converted: Vec<f64> = dash.iter().copied().map(f64::from).collect();
+        use_dash(&converted)
+    }
+}
+
 fn class_vis_char(vis: fm_core::ClassVisibility) -> char {
     match vis {
         fm_core::ClassVisibility::Public => '+',
@@ -1509,6 +1514,27 @@ mod tests {
         assert!(!config.font_family.is_empty());
         assert!(config.font_size > 0.0);
         assert!(config.padding > 0.0);
+    }
+
+    #[test]
+    fn canvas_dash_conversion_preserves_order_and_float_bits() {
+        let corpus: &[&[f32]] = &[&[], &[6.0, 4.0], &[3.25], &[1.0, 2.0, 3.0, 4.0, 5.0]];
+        for &values in corpus {
+            let expected: Vec<u64> = values
+                .iter()
+                .copied()
+                .map(f64::from)
+                .map(f64::to_bits)
+                .collect();
+            let actual = with_canvas_dash_f64(values, |converted| {
+                converted
+                    .iter()
+                    .copied()
+                    .map(f64::to_bits)
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(actual, expected);
+        }
     }
 
     #[test]
