@@ -10636,12 +10636,13 @@ fn bk_horizontal_compaction(
     // roots are placed before the blocks that depend on them (the original BK
     // algorithm handles this via recursion in `place_block`).
     let mut ordered_roots: Vec<usize> = Vec::new();
-    for rank_key in ordering_by_rank.keys() {
-        if let Some(nodes) = ordering_by_rank.get(rank_key) {
-            for &v in nodes {
-                if v < node_count && root[v] == v {
-                    ordered_roots.push(v);
-                }
+    // Iterate `values()` directly: the old `keys()` + `get(rank_key)` did a redundant per-rank BTreeMap probe
+    // (pointer-chasing, cache-missy) on each of the four BK compaction passes. `values()` yields the same rank
+    // node-lists in the same sorted-key order, so this is byte-identical — it just drops the O(log ranks) lookup.
+    for nodes in ordering_by_rank.values() {
+        for &v in nodes {
+            if v < node_count && root[v] == v {
+                ordered_roots.push(v);
             }
         }
     }
