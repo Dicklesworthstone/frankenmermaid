@@ -442,10 +442,19 @@ impl Canvas2dRenderer {
         offset_x: f64,
         offset_y: f64,
     ) {
-        let stroke_color: String = path.stroke.as_ref().map_or_else(
-            || self.config.edge_stroke.clone(),
-            |stroke| stroke.color.clone(),
-        );
+        // Most scene paths have no markers. Avoid cloning a color before discovering
+        // there is nothing to draw, and borrow the path-owned color when markers exist.
+        if path.marker_start == MarkerKind::None && path.marker_end == MarkerKind::None {
+            return;
+        }
+
+        let fallback_color;
+        let stroke_color = if let Some(stroke) = &path.stroke {
+            stroke.color.as_str()
+        } else {
+            fallback_color = self.config.edge_stroke.clone();
+            fallback_color.as_str()
+        };
 
         if path.marker_start != MarkerKind::None
             && let Some((x, y, angle)) = path_marker_start_geometry(&path.commands)
@@ -456,7 +465,7 @@ impl Canvas2dRenderer {
                 x + offset_x,
                 y + offset_y,
                 angle,
-                &stroke_color,
+                stroke_color,
             );
         }
 
@@ -469,7 +478,7 @@ impl Canvas2dRenderer {
                 x + offset_x,
                 y + offset_y,
                 angle,
-                &stroke_color,
+                stroke_color,
             );
         }
     }

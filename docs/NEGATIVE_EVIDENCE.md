@@ -15277,6 +15277,41 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 
   Agent: Codex (GPT-5, this session)
 
+### ✅LANDED: borrow Canvas render-path marker colors — unmarked marker dispatch 81.676% faster (2026-07-14)
+
+- **Negative-ledger-first boundary:** no earlier `draw_path_markers`, marker stroke-color clone, or
+  Canvas render-path marker-color probe was recorded. The immediately preceding Canvas text-line
+  allocation probe was a different primitive and a measured reject. This lever stayed in the clean
+  `fm-render-canvas` scene path while a peer owned terminal-diff work.
+- **Lever:** `draw_path_markers` previously cloned either `path.stroke.color` or the renderer's
+  fallback edge color before checking whether either marker existed. It now returns immediately when
+  both markers are `None`, borrows the path-owned stroke color for marked paths, and retains an owned
+  fallback copy only for the rare marker-without-stroke case required by Rust's mutable renderer
+  borrow. Marker geometry, start-before-end ordering, draw-call accounting, and fallback color are
+  unchanged.
+- **Strict-remote same-binary foreground A/B:** one mimalloc release test binary alternated the old
+  owned-color helper and production borrowed-color path across nine samples on actual RCH worker
+  **`vmi1293453`**, job **`j-29928833041828014`**, with `RCH_REQUIRE_REMOTE=1` and no local fallback.
+  Each sample dispatched **1,048,576** realistic stroked paths whose start/end markers were both
+  `None`. Sorted baseline samples were **[11467855, 12059280, 13487075, 13890519, 14567401,
+  16659110, 16873201, 17057086, 20329681] ns**; candidate samples were **[1566173, 1644701,
+  2165870, 2404627, 2669354, 2843064, 2924415, 2926677, 3083674] ns**. Medians were
+  **14,567,401 -> 2,669,354 ns** (**81.676% faster**, candidate/baseline **0.183242x**), and every
+  candidate sample beat every baseline sample.
+- **Exact-output proof:** the same binary exercised a stroked path with a circle start marker and
+  arrow end marker through both implementations. `MockCanvas2dContext` operation streams and renderer
+  draw-call counts were exactly equal; the operation-stream FNV digest was
+  **`c5ed3e4b525ba298`**. Existing Canvas scene tests permanently cover marker geometry and unmarked
+  render paths after the temporary A/B harness was removed.
+- **Measurement hygiene:** the first strict-remote attempt, job **`j-29928833041827998`**, stopped at
+  a compile-time borrow-check error before executing the test and contributed no timing evidence.
+  The corrected candidate above was the only measured run.
+- **Verdict: KEEP / LANDED.** This removes one allocation and color copy from every unmarked scene
+  path and from normal marked paths with an explicit stroke; the only retained clone is the behavioral
+  fallback for a marked path with no stroke.
+
+  Agent: Codex (GPT-5, this session)
+
 ### ✅LANDED: merge-walk terminal diff endpoint-pair groups — 24.905% faster (2026-07-13)
 
 - **Ledger-first boundary:** no prior `diff_edges` pair-union merge probe was recorded. The earlier borrowed-key keep
