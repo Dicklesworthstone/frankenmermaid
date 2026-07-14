@@ -15473,6 +15473,32 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 
   Agent: Codex (GPT-5, this session)
 
+### ⛔ HOLD / INVALID: stream ASCII block line iteration never reached timed path (2026-07-14)
+
+- **Negative-ledger-first / BV boundary:** `bv --robot-triage` reports a cycle-free graph with 39 actionable
+  beads. The adjacent ASCII entry covers only `classify_line`'s former `Vec<char>`; no prior
+  `detect_diagram_blocks`, whole-document `Vec<&str>`, or streaming line-iteration probe is recorded. This is
+  the narrow P0 performance child `bd-1buv.6`.
+- **Profile / attribution:** `detect_diagram_blocks` unconditionally collected every `text.lines()` item into a
+  `Vec<&str>` and then traversed that whole allocation, even though only detected block lines need ownership.
+  On a 64-bit target that temporary stores 16 bytes per document line before allocator growth/copy costs. A
+  first scan-fusion idea was rejected before code because the old boundary searches short-circuit at normal box
+  borders; removing the unconditional whole-document allocation is the attributed cost. Impact 4 x confidence
+  5 / effort 1 = score **20**.
+- **Single lever / isomorphism:** traverse `text.lines().enumerate().peekable()` once and accumulate owned block
+  lines only while a block is open. The same `classify_line`, one-line lookahead, start/end indices, byte-column
+  bounds, interior blank/text retention, trailing-block handling, and line bytes remain unchanged. A permanent
+  old-whole-function oracle covers empty, prose-only, ASCII, Unicode, indentation, interior gaps, and EOF blocks.
+- **Strict-remote foreground gate:** **INVALID / no timing.** Job `j-29928833041828620` was admitted on pinned
+  worker `vmi1293453` with `RCH_REQUIRE_REMOTE=1`, direct Cargo argv, `--profile release`, and no local fallback.
+  The worker-scoped target unexpectedly cold-built the dependency graph, including `highs-sys`; the named test
+  never launched before the 290s foreground ceiling and `timeout` returned **124**.
+- **Verdict:** **HOLD / INVALID EVIDENCE, NOT A PERFORMANCE REJECT.** The production method plus temporary
+  parity/A-B harness were manually restored, leaving `ascii.rs` byte-identical to `HEAD`. Retry only after an
+  existing `fm-render-term --profile release` test binary is demonstrably warm on the admitted worker.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.6`)
+
 ### ✅LANDED: stream ANSI minimap colorization into one buffer — 53.866% faster (2026-07-14)
 
 - **Negative-ledger-first / profile attribution:** no prior `colorize_output`, colored-minimap ANSI, or minimap
