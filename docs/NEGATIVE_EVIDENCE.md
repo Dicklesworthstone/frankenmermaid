@@ -16692,3 +16692,27 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   gate, so the 12-slot reserve is retained.
 
   Agent: Codex (GPT-5, this session)
+
+### 🟡INVALID / HOLD: count compact terminal node-label width without `Vec<char>` (2026-07-14)
+
+- **Negative-ledger-first boundary:** no earlier `render_node_cell`, compact terminal label-width,
+  or per-line `Vec<char>` probe is recorded. The Canvas text-line rejection concerned a different
+  renderer and removed a `Vec<&str>` by scanning lines twice; this candidate removes a scalar-copy
+  allocation without adding a scan.
+- **Profile attribution:** compact/`CellOnly` rendering calls `render_node_cell` for every layout
+  node and sequence mirror header. Each label line was collected into `Vec<char>` solely to read
+  its scalar count, after which `CellBuffer::set_string` scanned the original line for emission.
+- **Candidate:** use `line.chars().count()` for the unchanged Unicode-scalar centering rule. The
+  same-binary harness compared the old collecting width path with the candidate over 4,096
+  realistic ASCII, Unicode, and multiline labels and asserted exact cell parity before timing.
+- **Strict-remote gate never reached timing:** RCH job **`j-29928833041828675`** was admitted on
+  **`vmi1152480`** with `RCH_REQUIRE_REMOTE=1`, direct Cargo argv, `--profile release`, and a
+  290-second hard ceiling. Its worker-scoped target was cold: it downloaded the full layout solver
+  graph and began compiling `highs-sys`. The run was stopped after roughly one minute, before the
+  named test binary or either timed arm executed.
+- **Verdict: INVALID / HOLD, not a performance rejection.** The one-line candidate and temporary
+  A/B harness were manually restored, leaving `renderer.rs` byte-identical to `HEAD`. Retry only
+  against a demonstrably warm `fm-render-term` release test binary; do not infer a win from the
+  allocation count.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.10`)
