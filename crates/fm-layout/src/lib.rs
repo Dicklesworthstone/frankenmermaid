@@ -10502,6 +10502,7 @@ fn bk_vertical_alignment(
     pos_of: &[usize],
     ordering_by_rank: &BTreeMap<usize, Vec<usize>>,
     ordered_ranks: &[usize],
+    rank_exists: &[bool],
     top_to_bottom: bool,
     left_to_right: bool,
 ) -> (Vec<usize>, Vec<usize>) {
@@ -10540,9 +10541,10 @@ fn bk_vertical_alignment(
                 v_rank + 1
             };
 
-            // Existence guard for `adjacent_rank`, equivalent to the old `rank_pos_maps.get(&adjacent_rank)`
-            // (both `rank_pos_maps` and `ordering_by_rank` are keyed by the same set of ranks).
-            if !ordering_by_rank.contains_key(&adjacent_rank) {
+            // Existence guard for `adjacent_rank`. `rank_exists[r]` == `ordering_by_rank.contains_key(&r)` for
+            // in-range `r`, and `.get` reads an out-of-range index as absent — byte-identical to the old B-tree
+            // probe, but an O(1) branchless slice load instead of a per-node pointer-chase.
+            if !rank_exists.get(adjacent_rank).copied().unwrap_or(false) {
                 continue;
             }
 
@@ -10762,6 +10764,18 @@ fn brandes_kopf_secondary_coords(
 
     let ordered_ranks: Vec<usize> = ordering_by_rank.keys().copied().collect();
 
+    // Dense rank-existence table, built ONCE and shared by all four alignment passes, replacing the per-node
+    // `ordering_by_rank.contains_key(&adjacent_rank)` B-tree probe (a pointer-chase per node per pass) in
+    // `bk_vertical_alignment`'s inner loop with an O(1) branchless slice load. `rank_exists[r]` is true iff `r`
+    // is a key of `ordering_by_rank`; an out-of-range `adjacent_rank` (via `.get`) reads as absent, exactly like
+    // `contains_key`. (A `binary_search` on `ordered_ranks` was rejected — branch mispredicts on the small
+    // sorted array; a dense bool table is O(1) and branchless.)
+    let max_rank = ordered_ranks.iter().copied().max().unwrap_or(0);
+    let mut rank_exists = vec![false; max_rank + 1];
+    for &r in &ordered_ranks {
+        rank_exists[r] = true;
+    }
+
     // Pre-build undirected adjacency for O(1) neighbour lookup. `FxHashSet` (was `BTreeSet<usize>`)
     // keeps the same set semantics — unique neighbours, membership — but swaps the per-insert O(log deg)
     // B-tree node allocation for O(1) hashing (the `BTreeSet<usize>` insert + build was ~14% of Sugiyama
@@ -10832,6 +10846,7 @@ fn brandes_kopf_secondary_coords(
             &pos_of,
             ordering_by_rank,
             &ordered_ranks,
+            &rank_exists,
             top_to_bottom,
             left_to_right,
         );

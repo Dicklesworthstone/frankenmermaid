@@ -15583,3 +15583,28 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 - **Verdict: KEEP / LANDED.**
 
   Agent: (Opus 4.8, this session)
+
+### ✅LANDED: dense `rank_exists: Vec<bool>` for the BK `adjacent_rank` guard — scc_100 −7.4%, scc_300 −4.2% (2026-07-13)
+
+- **This is the un-tried option the binary_search REJECT (873b98b6) explicitly flagged:** "if a probe must STAY
+  (not be deleted), only a dense `Vec<bool>` (O(1), branchless, +1 alloc) is worth measuring — never binary_search."
+  `bk_vertical_alignment` runs `ordering_by_rank.contains_key(&adjacent_rank)` per node per pass (~2400 probes for
+  scc_600) — a B-tree pointer-chase. The guard can't be DELETED (dropping it makes bk_upper_neighbours run for
+  boundary nodes = more work), so it had to be made cheaper.
+- **Lever:** build a `rank_exists: Vec<bool>` ONCE in `brandes_kopf_secondary_coords` (`rank_exists[r] == true` iff
+  `r` is a key of `ordering_by_rank`), thread `&rank_exists` into `bk_vertical_alignment`, replace the probe with
+  `rank_exists.get(adjacent_rank).copied().unwrap_or(false)` — an O(1) branchless slice load (no B-tree chase, no
+  binary_search mispredict). Byte-identical (`.get` reads out-of-range as absent, matching `contains_key`).
+- **Sequential same-pinned-pool A/B (Criterion vs `bkbase4` = clean 75e3e4ad):** **scc_100 −7.42% (CI [−10.36%,
+  −4.39%], p=0.00), scc_300 −4.25% (CI [−6.36%, −2.02%], p=0.00)**, scc_600 +0.27% (p=0.82, wash, no regression).
+  Two significant wins. 439 fm-layout lib tests green; clippy clean.
+- **Why this WON where binary_search REGRESSED (+5% scc_300):** both replace the same probe, but `binary_search`'s
+  data-dependent branches mispredict on a small array, whereas a dense `Vec<bool>` is a single predictable load.
+  The +1 alloc (one small bool table, built once) is amortized across ~2400 probe removals — well under the win.
+- **⭐⭐⭐SYNTHESIS of the layout probe family (this session): probe-DELETION wins (c1243337 `values()`, 75e3e4ad
+  no-op dedup); probe-REPLACEMENT wins ONLY with a dense O(1) branchless table (THIS), LOSES with binary_search
+  (873b98b6); alloc-removal (Vec clone elision) WASHES (free-list, 14632). The BK B-tree-probe family is now
+  harvested via dense tables.**
+- **Verdict: KEEP / LANDED.**
+
+  Agent: (Opus 4.8, this session)
