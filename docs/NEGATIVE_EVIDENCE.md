@@ -15562,3 +15562,24 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   this existence guard.
 
   Agent: (Opus 4.8, this session)
+
+### ✅LANDED: delete the provably-no-op `neighbours.dedup()` in `bk_upper_neighbours` — scc_600 −2.7% (2026-07-13)
+
+- **Probe-DELETION family (the live layout lever, per c1243337).** `bk_upper_neighbours` (the hottest per-node BK
+  inner call) did `sort_by_key(pos)` then `neighbours.dedup()`. But `neighbours` is collected by iterating
+  `adjacency[node_index]`, a `FxHashSet<usize>`, so each neighbour index `n` is pushed AT MOST ONCE — no two
+  `(n, pos)` entries can be equal, making `dedup()` an **unconditional no-op** (depends only on set uniqueness, not
+  on the sort). Deleted it: removes an O(len) pass per node per pass (4×node_count calls). Pure deletion — no
+  replacement, no added alloc/branch, zero regression mechanism.
+- **Byte-identical:** the argument holds regardless of layout shape (HashSet ⇒ unique `n`). `cargo test -p
+  fm-layout --lib`: **439 passed, 0 failed** (incl golden/property); 6 BK tests; clippy clean.
+- **Sequential same-pinned-pool A/B (Criterion vs `bkbase2` = clean c1243337 lib.rs):** scc_100 −0.83% (p=0.62),
+  scc_300 −1.07% (p=0.33), **scc_600 −2.72% (change CI [−5.31%, −0.10%], p=0.04)**. All three point estimates
+  negative; scc_600 significant. Dose-response (−0.8%→−1.1%→−2.7% tracks node count = more bk_upper_neighbours
+  calls) confirms a genuine effect, not noise.
+- **LESSON:** a `dedup()` after a `sort` is dead code when the collection source already guarantees uniqueness
+  (HashSet / de-duped set). Grep hot paths for `set.iter()…push…sort…dedup` — the dedup is a removable O(len) pass.
+  Reinforces c1243337: probe/pass-DELETION is the live layout lever (vs the rejected binary_search substitution).
+- **Verdict: KEEP / LANDED.**
+
+  Agent: (Opus 4.8, this session)

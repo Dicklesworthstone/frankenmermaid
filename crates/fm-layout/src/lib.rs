@@ -10482,7 +10482,10 @@ fn bk_upper_neighbours(
     }
 
     neighbours.sort_by_key(|&(_, pos)| pos);
-    neighbours.dedup();
+    // No `dedup()`: `neighbours` is collected by iterating `adjacency[node_index]`, a `FxHashSet<usize>`, so each
+    // neighbour index `n` is pushed at most once — no two `(n, pos)` entries can be equal, making `dedup()` an
+    // unconditional no-op (it depends only on set uniqueness, not on the sort). Dropping it removes an O(len)
+    // pass from the hottest BK inner call (per node, per pass). Byte-identical.
     neighbours
 }
 
