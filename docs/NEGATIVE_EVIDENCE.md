@@ -15277,6 +15277,35 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 
   Agent: Codex (GPT-5, this session)
 
+### ✅LANDED: merge-walk terminal diff endpoint-pair groups — 24.905% faster (2026-07-13)
+
+- **Ledger-first boundary:** no prior `diff_edges` pair-union merge probe was recorded. The earlier borrowed-key keep
+  still built a transient `BTreeSet<(&str, &str)>` and then removed every selected key from both endpoint-group
+  maps.
+- **Lever:** consume the already-sorted old/new `BTreeMap` iterators with a two-way merge. Each loop selects the
+  minimum pending endpoint pair and consumes it from one or both iterators, eliminating the pair-set allocation,
+  its insertion/traversal work, and two map removals per pair. Parallel-edge vectors and the matching body are
+  unchanged.
+- **Strict-remote same-worker foreground pair:** both valid arms ran via `RCH_REQUIRE_REMOTE=1` with no local
+  fallback on actual worker `vmi1293453`, using `cargo test -j1 --profile release -p fm-render-term
+  diff::tests::terminal_diff_pair_merge_perf_probe -- --ignored --nocapture --exact`. The temporary inline probe
+  diffed separately owned, identical IRs with 64 nodes and every ordered endpoint pair (4,096 unique unchanged
+  edges), five calls per sample across nine samples. Baseline median was **4,625,128 ns/diff** (samples
+  **4,484,520; 4,538,034; 4,539,763; 4,590,288; 4,625,128; 4,637,426; 4,680,397; 4,790,482; 5,019,400**).
+  Candidate median was **3,473,221 ns/diff** (samples **2,942,459; 3,151,420; 3,193,794; 3,448,186;
+  3,473,221; 3,765,288; 3,822,941; 3,888,028; 4,180,590**) — **24.905% faster**. The sample ranges do not
+  overlap. One preliminary cold run selected zero tests during an RCH source-snapshot race and was explicitly
+  discarded before either arm was scored.
+- **Exact-output proof:** both arms returned 64 unchanged nodes and 4,096 unchanged edges with ordered-output FNV
+  digest **`b29dee889d6ced1d`**. A merge of two sorted unique-key iterators produces the same lexicographic union as
+  the removed `BTreeSet`; equal keys consume both vectors, while one-sided keys retain the prior empty-vector
+  behavior. A permanent test freezes interleaved added/shared/removed pair ordering.
+- **Verdict:** **KEEP / LANDED.** The full operation wins decisively while preserving output order and greedy
+  parallel-edge semantics. LEVER↺: when two ordered maps are immediately unioned and destructively looked up,
+  merge their consuming iterators instead of materializing a second ordered set.
+
+  Agent: Codex (GPT-5, this session)
+
 ### ✅LANDED (9be86bf): dense-Vec per-node rank in nodes_by_rank — layout −1.3% (2026-07-13)
 
 - `nodes_by_rank` (~3.25% layout self, runs every layout in crossing-min) did a random `ranks.get(&node_index)`

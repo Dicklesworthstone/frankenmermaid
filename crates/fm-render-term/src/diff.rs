@@ -334,11 +334,8 @@ fn diff_edges(
         }
     }
 
-    let all_pairs: BTreeSet<(&str, &str)> = old_groups
-        .keys()
-        .copied()
-        .chain(new_groups.keys().copied())
-        .collect();
+    let mut old_groups = old_groups.into_iter().peekable();
+    let mut new_groups = new_groups.into_iter().peekable();
 
     let mut results = Vec::new();
     let mut added = 0_usize;
@@ -346,9 +343,26 @@ fn diff_edges(
     let mut changed = 0_usize;
     let mut unchanged = 0_usize;
 
-    for (from_id, to_id) in all_pairs {
-        let mut old_list = old_groups.remove(&(from_id, to_id)).unwrap_or_default();
-        let mut new_list = new_groups.remove(&(from_id, to_id)).unwrap_or_default();
+    loop {
+        let next_pair = match (
+            old_groups.peek().map(|(pair, _)| *pair),
+            new_groups.peek().map(|(pair, _)| *pair),
+        ) {
+            (Some(old_pair), Some(new_pair)) => old_pair.min(new_pair),
+            (Some(old_pair), None) => old_pair,
+            (None, Some(new_pair)) => new_pair,
+            (None, None) => break,
+        };
+
+        let mut old_list = old_groups
+            .next_if(|(pair, _)| *pair == next_pair)
+            .map(|(_, edges)| edges)
+            .unwrap_or_default();
+        let mut new_list = new_groups
+            .next_if(|(pair, _)| *pair == next_pair)
+            .map(|(_, edges)| edges)
+            .unwrap_or_default();
+        let (from_id, to_id) = next_pair;
 
         // 1. Match identical edges first (Unchanged)
         let mut i = 0;
@@ -1123,6 +1137,41 @@ mod tests {
         assert_eq!(diff.changed_edges, 1);
         assert_eq!(diff.added_edges, 0);
         assert_eq!(diff.removed_edges, 0);
+    }
+
+    #[test]
+    fn edge_pair_merge_preserves_sorted_union_order() {
+        fn edge(from: usize, to: usize) -> IrEdge {
+            IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..Default::default()
+            }
+        }
+
+        let mut old = make_ir_with_nodes(&["A", "B", "C", "D"]);
+        old.edges.extend([edge(0, 2), edge(1, 0)]);
+
+        let mut new = make_ir_with_nodes(&["A", "B", "C", "D"]);
+        new.edges.extend([edge(0, 1), edge(0, 2), edge(2, 3)]);
+
+        let diff = diff_diagrams(&old, &new);
+        let ordered_pairs: Vec<(&str, &str, DiffStatus)> = diff
+            .edges
+            .iter()
+            .map(|edge| (edge.from_id.as_str(), edge.to_id.as_str(), edge.status))
+            .collect();
+
+        assert_eq!(
+            ordered_pairs,
+            vec![
+                ("A", "B", DiffStatus::Added),
+                ("A", "C", DiffStatus::Unchanged),
+                ("B", "A", DiffStatus::Removed),
+                ("C", "D", DiffStatus::Added),
+            ]
+        );
     }
 
     #[test]
