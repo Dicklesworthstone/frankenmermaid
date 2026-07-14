@@ -15334,6 +15334,35 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 
   Agent: Codex (GPT-5, this session)
 
+### REJECT: sort contiguous terminal diff node indexes — 3.155% slower/noisy (2026-07-13)
+
+- **Ledger-first boundary:** the landed node-ID merge removed the transient union set and follow-up map lookups,
+  but still built one `BTreeMap<&str, (usize, &IrNode)>` per input. No earlier terminal-diff probe replaced those
+  ordered indexes with sorted contiguous storage.
+- **Candidate:** collect borrowed `(id, original_index, node)` entries into two `Vec`s, sort each by
+  `(id, original_index)`, collapse duplicate IDs while retaining the highest original index to reproduce
+  `BTreeMap::collect`'s last-input-wins behavior, then feed the existing two-way merge unchanged. This removed
+  per-entry B-tree allocation and pointer traversal while preserving public output ownership.
+- **Strict-remote same-binary foreground A/B:** both arms ran inside one release test binary via
+  `RCH_REQUIRE_REMOTE=1` with no local fallback on actual worker `vmi1293453`, using `cargo test -j1 --profile
+  release -p fm-render-term diff::tests::terminal_diff_sorted_node_index_perf_probe -- --ignored --nocapture
+  --exact`. The temporary probe diffed two separately owned, identical 4,096-node IRs with deterministically
+  shuffled IDs and no edges, three calls per sample across nine alternating paired samples. Current-main
+  `BTreeMap` median was **1,977,775 ns/diff** (samples **1,724,099; 1,804,496; 1,916,697; 1,949,676;
+  1,977,775; 1,992,500; 2,034,717; 2,039,971; 2,489,654**). The sorted-`Vec` candidate median was
+  **2,040,181 ns/diff** (samples **1,713,787; 1,743,047; 1,901,911; 2,035,358; 2,040,181; 2,078,789;
+  2,103,172; 2,199,443; 2,320,881**) — **3.155% slower**. The sample ranges overlap heavily.
+- **Exact-output proof:** before timing, the probe asserted equality of the complete debug representation for
+  node outputs and count tuples, producing identical FNV digest **`801de37df866ccd6`**. Sorting ties by original
+  index and retaining the last tie reproduced duplicate-ID semantics as well as lexicographic union order.
+- **Verdict:** **REJECT / WASH.** Contiguous sorting and its duplicate-compaction pass do not beat the current
+  post-merge `BTreeMap` indexes; output cloning remains dominant and tuple movement adds enough work to erase the
+  allocation hypothesis. The candidate and temporary probe were manually restored, leaving `diff.rs`
+  byte-identical to current `main`. Do not retry this index substitution without a fresh profile showing B-tree
+  construction above the full-operation noise floor.
+
+  Agent: Codex (GPT-5, this session)
+
 ### ✅LANDED (9be86bf): dense-Vec per-node rank in nodes_by_rank — layout −1.3% (2026-07-13)
 
 - `nodes_by_rank` (~3.25% layout self, runs every layout in crossing-min) did a random `ranks.get(&node_index)`
