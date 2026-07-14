@@ -6,7 +6,7 @@
 use crate::{TermRenderConfig, render_diagram_with_config};
 use fm_core::{ArrowType, IrEndpoint, IrNode, MermaidDiagramIr, NodeShape};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 /// Status of a diff element.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -343,17 +343,17 @@ fn diff_edges(
     new: &MermaidDiagramIr,
 ) -> (Vec<DiffEdge>, (usize, usize, usize, usize)) {
     // Group edges by their endpoint pair (from_id, to_id).
-    let mut old_groups: BTreeMap<(&str, &str), Vec<&fm_core::IrEdge>> = BTreeMap::new();
+    let mut old_groups: BTreeMap<(&str, &str), VecDeque<&fm_core::IrEdge>> = BTreeMap::new();
     for e in &old.edges {
         if let (Some(f), Some(t)) = (endpoint_id(old, e.from), endpoint_id(old, e.to)) {
-            old_groups.entry((f, t)).or_default().push(e);
+            old_groups.entry((f, t)).or_default().push_back(e);
         }
     }
 
-    let mut new_groups: BTreeMap<(&str, &str), Vec<&fm_core::IrEdge>> = BTreeMap::new();
+    let mut new_groups: BTreeMap<(&str, &str), VecDeque<&fm_core::IrEdge>> = BTreeMap::new();
     for e in &new.edges {
         if let (Some(f), Some(t)) = (endpoint_id(new, e.from), endpoint_id(new, e.to)) {
-            new_groups.entry((f, t)).or_default().push(e);
+            new_groups.entry((f, t)).or_default().push_back(e);
         }
     }
 
@@ -403,8 +403,8 @@ fn diff_edges(
                         changes: Vec::new(),
                     });
                     unchanged += 1;
-                    old_list.remove(i);
-                    new_list.remove(j);
+                    let _ = old_list.remove(i);
+                    let _ = new_list.remove(j);
                     matched = true;
                     break;
                 }
@@ -416,8 +416,10 @@ fn diff_edges(
 
         // 2. Match remaining edges as Changed (greedy)
         while !old_list.is_empty() && !new_list.is_empty() {
-            let old_e = old_list.remove(0);
-            let new_e = new_list.remove(0);
+            let old_e = old_list[0];
+            let new_e = new_list[0];
+            let _ = old_list.pop_front();
+            let _ = new_list.pop_front();
             let changes = compare_edges(old, old_e, new, new_e);
             results.push(DiffEdge {
                 from_id: from_id.to_owned(),
@@ -1210,6 +1212,54 @@ mod tests {
         assert_eq!(diff.added_edges, 1);
         assert_eq!(diff.unchanged_edges, 2);
         assert_eq!(diff.removed_edges, 0);
+    }
+
+    #[test]
+    fn parallel_edge_matching_preserves_greedy_order() {
+        fn edge(arrow: ArrowType) -> IrEdge {
+            IrEdge {
+                from: IrEndpoint::Node(IrNodeId(0)),
+                to: IrEndpoint::Node(IrNodeId(1)),
+                arrow,
+                ..Default::default()
+            }
+        }
+
+        let mut old = make_ir_with_nodes(&["A", "B"]);
+        old.edges.extend([
+            edge(ArrowType::Arrow),
+            edge(ArrowType::Line),
+            edge(ArrowType::OpenArrow),
+        ]);
+
+        let mut new = make_ir_with_nodes(&["A", "B"]);
+        new.edges.extend([
+            edge(ArrowType::Line),
+            edge(ArrowType::Arrow),
+            edge(ArrowType::Cross),
+        ]);
+
+        let diff = diff_diagrams(&old, &new);
+        let status_and_arrow: Vec<(DiffStatus, ArrowType)> = diff
+            .edges
+            .iter()
+            .map(|edge| (edge.status, edge.arrow))
+            .collect();
+        assert_eq!(
+            status_and_arrow,
+            vec![
+                (DiffStatus::Unchanged, ArrowType::Arrow),
+                (DiffStatus::Unchanged, ArrowType::Line),
+                (DiffStatus::Changed, ArrowType::Cross),
+            ]
+        );
+        assert_eq!(
+            diff.edges[2].changes,
+            vec![EdgeChange::ArrowChanged {
+                old: ArrowType::OpenArrow,
+                new: ArrowType::Cross,
+            }]
+        );
     }
 
     #[test]

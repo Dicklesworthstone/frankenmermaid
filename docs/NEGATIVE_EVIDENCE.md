@@ -15277,6 +15277,35 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 
   Agent: Codex (GPT-5, this session)
 
+### ✅LANDED: deque-backed terminal-diff parallel-edge groups — 80.101% faster (2026-07-14)
+
+- **Ledger-first boundary:** the landed endpoint-pair merge explicitly left its parallel-edge vectors and greedy
+  matching body unchanged. No prior `VecDeque`, `old_list.remove(0)`, `new_list.remove(0)`, or parallel-edge
+  front-removal probe was recorded. This is also distinct from the rejected edge-label borrow: label ownership and
+  `compare_edges` are untouched.
+- **Hot-path lever:** `diff_edges` stored every endpoint-pair group in a `Vec<&IrEdge>`. For aligned identical
+  parallel edges, greedy matching repeatedly removed index zero from both vectors, shifting every remaining edge
+  reference on every match. At 8,192 edges that is 67,100,672 pointer moves. The groups now use `VecDeque`; indexed
+  search and arbitrary-position removal retain the same first-match semantics, while the aligned/common
+  `remove(0)` and changed-edge front consumption become O(1) pops instead of O(k) shifts.
+- **Strict-remote same-binary foreground A/B:** one release test binary ran the previous Vec implementation and
+  the candidate in alternating order on RCH worker **`vmi1293453`**, job **`j-29928833041828196`**, via
+  `cargo test -j1 --profile release -p fm-render-term
+  diff::tests::parallel_edge_group_deque_perf_probe -- --ignored --nocapture --exact`. The workload diffed two
+  independently owned IRs containing 8,192 identical parallel `A -> B` edges. Sorted Vec samples were
+  **[5933256, 6073106, 6154297, 6229260, 6250571, 6252745, 6667666, 7118050, 7191479] ns**; deque samples were
+  **[975158, 1059585, 1209090, 1229409, 1243821, 1250220, 1296279, 1296901, 1360646] ns**. Medians:
+  **6,250,571 -> 1,243,821 ns** (**80.101% faster, 5.025x throughput**), with every candidate sample below every
+  baseline sample.
+- **Exact-output proof:** both arms produced identical ordered `DiffEdge` values and count tuples; the full debug
+  representation hashed to **`631c1944c0e84ff9`**. Permanent coverage now freezes mixed parallel-edge first-match
+  ordering and the resulting changed-edge payload, while the existing identical-parallel and endpoint-pair tests
+  cover multiplicity and inter-group order.
+- **Verdict:** **KEEP / LANDED.** This removes quadratic pointer shifting from the live greedy matching body. The
+  temporary Vec baseline and ignored probe were removed before landing; no benchmark dependency was added.
+
+  Agent: Codex (GPT-5, this session)
+
 ### ✅LANDED: bitset Canvas render-scene source accounting — 37.185% faster (2026-07-14)
 
 - **Ledger-first boundary:** no prior `SceneRenderStats`, `node_sources` / `edge_sources` / `cluster_sources`, or
