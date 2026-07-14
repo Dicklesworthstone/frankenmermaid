@@ -320,24 +320,24 @@ fn diff_edges(
     new: &MermaidDiagramIr,
 ) -> (Vec<DiffEdge>, (usize, usize, usize, usize)) {
     // Group edges by their endpoint pair (from_id, to_id).
-    let mut old_groups: BTreeMap<(String, String), Vec<&fm_core::IrEdge>> = BTreeMap::new();
+    let mut old_groups: BTreeMap<(&str, &str), Vec<&fm_core::IrEdge>> = BTreeMap::new();
     for e in &old.edges {
         if let (Some(f), Some(t)) = (endpoint_id(old, e.from), endpoint_id(old, e.to)) {
             old_groups.entry((f, t)).or_default().push(e);
         }
     }
 
-    let mut new_groups: BTreeMap<(String, String), Vec<&fm_core::IrEdge>> = BTreeMap::new();
+    let mut new_groups: BTreeMap<(&str, &str), Vec<&fm_core::IrEdge>> = BTreeMap::new();
     for e in &new.edges {
         if let (Some(f), Some(t)) = (endpoint_id(new, e.from), endpoint_id(new, e.to)) {
             new_groups.entry((f, t)).or_default().push(e);
         }
     }
 
-    let all_pairs: BTreeSet<(String, String)> = old_groups
+    let all_pairs: BTreeSet<(&str, &str)> = old_groups
         .keys()
-        .cloned()
-        .chain(new_groups.keys().cloned())
+        .copied()
+        .chain(new_groups.keys().copied())
         .collect();
 
     let mut results = Vec::new();
@@ -347,12 +347,8 @@ fn diff_edges(
     let mut unchanged = 0_usize;
 
     for (from_id, to_id) in all_pairs {
-        let mut old_list = old_groups
-            .remove(&(from_id.clone(), to_id.clone()))
-            .unwrap_or_default();
-        let mut new_list = new_groups
-            .remove(&(from_id.clone(), to_id.clone()))
-            .unwrap_or_default();
+        let mut old_list = old_groups.remove(&(from_id, to_id)).unwrap_or_default();
+        let mut new_list = new_groups.remove(&(from_id, to_id)).unwrap_or_default();
 
         // 1. Match identical edges first (Unchanged)
         let mut i = 0;
@@ -363,8 +359,8 @@ fn diff_edges(
                 let new_e = new_list[j];
                 if compare_edges(old, old_e, new, new_e).is_empty() {
                     results.push(DiffEdge {
-                        from_id: from_id.clone(),
-                        to_id: to_id.clone(),
+                        from_id: from_id.to_owned(),
+                        to_id: to_id.to_owned(),
                         status: DiffStatus::Unchanged,
                         arrow: new_e.arrow,
                         changes: Vec::new(),
@@ -387,8 +383,8 @@ fn diff_edges(
             let new_e = new_list.remove(0);
             let changes = compare_edges(old, old_e, new, new_e);
             results.push(DiffEdge {
-                from_id: from_id.clone(),
-                to_id: to_id.clone(),
+                from_id: from_id.to_owned(),
+                to_id: to_id.to_owned(),
                 status: DiffStatus::Changed,
                 arrow: new_e.arrow,
                 changes,
@@ -399,8 +395,8 @@ fn diff_edges(
         // 3. Any leftover old edges are Removed
         for old_e in old_list {
             results.push(DiffEdge {
-                from_id: from_id.clone(),
-                to_id: to_id.clone(),
+                from_id: from_id.to_owned(),
+                to_id: to_id.to_owned(),
                 status: DiffStatus::Removed,
                 arrow: old_e.arrow,
                 changes: Vec::new(),
@@ -411,8 +407,8 @@ fn diff_edges(
         // 4. Any leftover new edges are Added
         for new_e in new_list {
             results.push(DiffEdge {
-                from_id: from_id.clone(),
-                to_id: to_id.clone(),
+                from_id: from_id.to_owned(),
+                to_id: to_id.to_owned(),
                 status: DiffStatus::Added,
                 arrow: new_e.arrow,
                 changes: Vec::new(),
@@ -470,10 +466,10 @@ fn compare_edges(
     changes
 }
 
-fn endpoint_id(ir: &MermaidDiagramIr, endpoint: IrEndpoint) -> Option<String> {
+fn endpoint_id(ir: &MermaidDiagramIr, endpoint: IrEndpoint) -> Option<&str> {
     ir.resolve_endpoint_node(endpoint)
         .and_then(|id| ir.node(id))
-        .map(|n| n.id.clone())
+        .map(|n| n.id.as_str())
 }
 
 fn node_member_strings(node: &IrNode) -> Vec<String> {
@@ -1037,6 +1033,8 @@ mod tests {
         let diff = diff_diagrams(&old, &new);
         assert!(diff.has_changes());
         assert_eq!(diff.added_edges, 1);
+        assert_eq!(diff.edges[0].from_id, "A");
+        assert_eq!(diff.edges[0].to_id, "B");
     }
 
     #[test]

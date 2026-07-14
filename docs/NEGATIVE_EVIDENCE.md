@@ -15510,3 +15510,31 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
   a new call site, check the FIXTURE's id shape: spaced/punctuated names ⇒ expect a wash.
 
   Agent: (Opus 4.8, this session)
+
+### ✅LANDED: borrow terminal diff endpoint-pair keys — 4,096-edge diff −57.8% (2026-07-13)
+
+- **Ledger-first boundary:** no prior `diff_edges`, `endpoint_id`, `old_groups`, `new_groups`, or borrowed terminal
+  diff-key probe was recorded. The rejected parser edge-label borrowing work is a different allocation and path.
+  The sibling `diff_nodes` path already used borrowed `&str` B-tree keys, making `diff_edges` the missed twin.
+- **Lever:** keep endpoint IDs borrowed through edge grouping, pair-set construction, and group removal with
+  `BTreeMap<(&str, &str), _>` / `BTreeSet<(&str, &str)>`; allocate owned strings only when constructing the public
+  `DiffEdge`. For a unique unchanged edge this removes twelve of fourteen endpoint-string clones while retaining
+  the two contract-required output strings. B-tree ordering, parallel-edge grouping, and greedy matching are
+  unchanged.
+- **Strict-remote same-worker foreground A/B:** both arms ran via `RCH_REQUIRE_REMOTE=1` on actual worker
+  `vmi1152480` using `cargo test -j1 --profile release -p fm-render-term
+  diff::tests::terminal_diff_edge_key_perf_probe -- --ignored --nocapture --exact`. The temporary inline probe
+  diffed two separately owned, identical IRs with 64 nodes and every ordered endpoint pair (4,096 unique edges),
+  five calls per sample across nine samples. Baseline median was **9,233,061 ns/diff** (samples **6,326,731;
+  6,515,664; 7,087,289; 7,189,732; 9,233,061; 9,951,194; 10,903,665; 12,159,062; 12,745,974**). Candidate
+  median was **3,896,036 ns/diff** (samples **3,006,223; 3,239,032; 3,301,779; 3,443,060; 3,896,036;
+  3,916,198; 4,184,601; 4,285,852; 4,574,140**) — **57.803% faster**. The sample ranges do not overlap.
+- **Exact-output proof:** both arms returned 64 unchanged nodes and 4,096 unchanged edges with ordered-output FNV
+  digest **`8cc86d3c11bbee95`**. Borrowed `&str` and owned `String` use the same lexicographic `Ord`; endpoint
+  resolution and invalid-endpoint omission are untouched. Permanent endpoint assertions plus the existing
+  parallel-edge and replacement tests cover the output contract after removing the temporary probe.
+- **Verdict:** **KEEP / LANDED.** Required output ownership remains unchanged; only temporary key ownership and
+  allocation traffic are reduced. LEVER↺: when a grouping path mirrors an already-borrowed sibling but owns
+  transient `String` keys, borrow through grouping/order/removal and allocate only at the public output boundary.
+
+  Agent: Codex (GPT-5, this session)
