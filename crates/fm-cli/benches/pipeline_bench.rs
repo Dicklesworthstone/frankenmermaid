@@ -490,6 +490,23 @@ fn gen_pie(slices: usize) -> String {
     s
 }
 
+/// A C4 context diagram: Person/System elements (multi-element node content: stereotype + name +
+/// description, plus a person icon) — the render path whose nodes still build an `Element` subtree.
+fn gen_c4(elements: usize) -> String {
+    let mut s = String::from("C4Context\n  title System Context\n");
+    for i in 0..elements {
+        if i % 2 == 0 {
+            s.push_str(&format!("  Person(user{i}, \"User {i}\", \"A user number {i}\")\n"));
+        } else {
+            s.push_str(&format!("  System(sys{i}, \"System {i}\", \"The system {i}\")\n"));
+        }
+    }
+    for i in 0..elements.saturating_sub(1) {
+        s.push_str(&format!("  Rel(user{}, sys{}, \"Uses\", \"HTTPS\")\n", i & !1, (i + 1) | 1));
+    }
+    s
+}
+
 /// Render of non-flowchart types where the CSS post-passes (minify) are a larger fraction than on
 /// flowcharts — `minify_css` profiled at 2.26% of the sankey pipeline. The `render_svg` bench above only
 /// covers flowcharts, which is where the 2026-06-29 bulk-copy-minify A/B looked (and missed the payoff).
@@ -501,6 +518,7 @@ fn bench_render_nonflowchart(c: &mut Criterion) {
         ("pie_40", gen_pie(40)),
         ("sequence_40", gen_sequence(40)),
         ("er_40", gen_er(40)),
+        ("c4_40", gen_c4(40)),
     ];
     for (label, input) in &inputs {
         let parsed = fm_parser::parse(input);
