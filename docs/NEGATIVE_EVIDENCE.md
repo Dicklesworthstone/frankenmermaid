@@ -15277,6 +15277,35 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 
   Agent: Codex (GPT-5, this session)
 
+### ⛔ HOLD / INVALID: direct terminal `CellBuffer` serialization never reached timed path (2026-07-14)
+
+- **Negative-ledger-first boundary:** no prior `CellBuffer`, terminal cell-grid serialization, or per-row output
+  allocation probe is recorded. Earlier terminal work optimized label preparation, ANSI width scans, diffing, and
+  minimap colorization; none changes this mandatory Compact/CellOnly finalizer.
+- **Profile / attribution:** `TermRenderer::render_cell_mode` unconditionally ended with `buffer.to_string()`.
+  `CellBuffer`'s `Display` implementation allocated and filled one complete `String` for every row, called
+  Unicode `trim_end`, then copied every surviving row again through the formatter into its final `String`.
+  Ranked within finalization: (1) row materialization/copy — **height allocations + O(width×height)** copied
+  scalars; (2) whitespace-tail scan — O(width×height), retained; (3) newline emission — O(height), retained.
+  Opportunity score: impact **4** × confidence **5** ÷ effort **1** = **20**.
+- **Single lever / isomorphism:** add one direct serializer that preallocates the final buffer, locates each row's
+  last non-Unicode-whitespace scalar (the exact `str::trim_end` contract), and extends the output directly from the
+  cell slice. Row order, Unicode scalar order, blank rows, embedded whitespace, and inter-row newlines are
+  unchanged. `Display` remains as the exact baseline and compatibility surface.
+- **Strict-remote foreground attempt:** the sole command was capped with `timeout --foreground --signal=TERM
+  290s` and invoked `cargo test -j1 --profile release -p fm-render-term
+  renderer::tests::cell_buffer_direct_output_perf_probe -- --ignored --exact --nocapture` under
+  `RCH_REQUIRE_REMOTE=1`. Although `RCH_WORKER=vmi1293453` requested the release pool warmed by the immediately
+  preceding turn, RCH routed job **`j-29928833041828529`** to **`vmi1152480`**. That worker downloaded the full
+  dependency graph and entered a cold `highs-sys` native build; the named test never started. The job was
+  terminated early once the cold path was certain, rather than allowing a benchmark command to approach or
+  exceed the five-minute ceiling.
+- **Verdict:** **HOLD / INVALID EVIDENCE, NOT A PERFORMANCE REJECT.** No timing samples exist, so the candidate
+  cannot be kept or rejected on speed. The production change and inline probe were manually removed; retry only
+  when RCH can demonstrably admit the intended warm release pool within the time budget.
+
+  Agent: Codex (GPT-5, this session)
+
 ### ✅LANDED: stream ASCII line classification instead of collecting `Vec<char>` — 13.134% faster (2026-07-14)
 
 - **Negative-ledger-first boundary:** no prior `classify_line`, ASCII line-classification, or terminal ASCII
