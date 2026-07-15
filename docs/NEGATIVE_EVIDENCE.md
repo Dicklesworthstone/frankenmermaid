@@ -16994,3 +16994,41 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   preserves every byte offset while avoiding UTF-8 scalar decoding across the whole source.
 
   Agent: Codex (GPT-5, this session; bead `bd-1t7l.1.3`)
+
+### 🟢LANDED: direct-index ASCII ParseLens columns (2026-07-14)
+
+- **Negative-ledger-first boundary:** the prior ParseLens keeps removed repeated whole-source line
+  indexes, whole-binding materialization, and UTF-8 decoding from newline discovery. None changes
+  `byte_index_for_line_col`, and no ASCII-prefix column-index probe is recorded. The earlier
+  `span_for` ASCII-length keep establishes the representation fact, but targets parser span creation
+  rather than lens byte resolution.
+- **Profile attribution:** the prior direct-edit candidate took 404,926 ns for 64 edits (6,327 ns/edit).
+  The newly measured `memchr` line index costs 7,177,397 ns per 4,096 scans (1,752 ns/scan, about
+  27.7% of that per-edit path). After that scan, each line/column span makes two
+  `byte_index_for_line_col` calls; the end-column call decodes every scalar through the selected
+  line even though the benchmark corpus is ASCII. Remaining required work is the element-ID search,
+  source/result ownership, and splice. Impact 3 x confidence 5 / effort 1 = **15**.
+- **One lever and proof gate:** if the byte prefix before a requested column is ASCII, its character
+  count equals its byte length, so return the direct byte offset; otherwise retain the exact
+  `char_indices` fallback. Preserve zero/one-based bounds, empty lines, LF/CRLF trimming, mixed
+  Unicode, end-exclusive positions, and out-of-range rejection. One same-binary alternating
+  `--profile release` A/B keeps only at 3% or better with exact offset/digest parity.
+- **Measurement protocol:** reuse the warm `fm-core` release test target when admitted; otherwise
+  build it remotely without a timeout, then run exactly one cheap foreground ignored A/B. RCH
+  compilation and transfer remain outside both in-process timers.
+- **Remote proof:** fail-closed `RCH_REQUIRE_REMOTE=1`, direct Cargo argv, `--profile release`,
+  worker `vmi1293453`. Untimed warm-up/correctness job `j-29928833041828975` built the release test
+  binary and passed the permanent mixed-Unicode boundary oracle. Foreground job
+  `j-29928833041828980` ran exactly one ignored A/B; RCH rebuilt despite the warm-up, but its compile
+  and transfer stayed outside both timers (test body 0.06 s).
+- **Real alternating A/B (9 rounds, 1,024 sweeps x 256 ASCII lines x 2 columns):** `char_indices`
+  samples `[4039722, 4097989, 4608802, 4621471, 4795932, 4814771, 4954549, 5167108,
+  5423692]` ns; ASCII-prefix samples `[1312192, 1408538, 1438381, 1495838, 1716458,
+  1851810, 1874563, 1986531, 2208012]` ns. Exact offset/digest parity
+  (`a555b623c1e22325`); median improved **4,795,932 -> 1,716,458 ns (64.210%, 2.794x)**,
+  decisively clearing the 3% keep gate.
+- **Decision:** keep. An ASCII prefix has identical byte and scalar counts, including the empty
+  prefix for column one and the full-line prefix for the end-exclusive column; any non-ASCII or
+  non-boundary prefix retains the old iterator unchanged.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1t7l.1.4`)

@@ -5088,6 +5088,11 @@ fn byte_index_for_line_col(
     }
 
     let line_slice = source.get(line_start..line_end)?;
+    let byte_offset = col - 1;
+    if line_slice.get(..byte_offset).is_some_and(str::is_ascii) {
+        return Some(line_start + byte_offset);
+    }
+
     let mut current_col = 1;
     for (offset, _) in line_slice.char_indices() {
         if current_col == col {
@@ -5853,6 +5858,37 @@ mod tests {
         starts
     }
 
+    fn byte_index_for_line_col_char_reference(
+        source: &str,
+        line_starts: &[usize],
+        line: usize,
+        col: usize,
+    ) -> Option<usize> {
+        if line == 0 || col == 0 {
+            return None;
+        }
+
+        let line_start = *line_starts.get(line - 1)?;
+        let mut line_end = line_starts.get(line).copied().unwrap_or(source.len());
+        if source.as_bytes().get(line_end.wrapping_sub(1)) == Some(&b'\n') {
+            line_end -= 1;
+        }
+        if source.as_bytes().get(line_end.wrapping_sub(1)) == Some(&b'\r') {
+            line_end -= 1;
+        }
+
+        let line_slice = source.get(line_start..line_end)?;
+        let mut current_col = 1;
+        for (offset, _) in line_slice.char_indices() {
+            if current_col == col {
+                return Some(line_start + offset);
+            }
+            current_col += 1;
+        }
+
+        (current_col == col).then_some(line_end)
+    }
+
     #[test]
     fn memchr_line_starts_match_char_reference() {
         let cases = [
@@ -5874,6 +5910,136 @@ mod tests {
                 "source={source:?}"
             );
         }
+    }
+
+    #[test]
+    fn ascii_prefix_column_indexes_match_char_reference() {
+        let cases = [
+            "",
+            "\n",
+            "abc",
+            "abc\n",
+            "abc\r\n",
+            "αβ",
+            "abcαdef",
+            "αabc",
+            "a🙂b\r\n東京\nlast",
+            "ascii first\r\nα then ascii\n\r\n",
+        ];
+
+        for source in cases {
+            let line_starts = super::source_line_starts(source);
+            for line in 0..=line_starts.len() + 1 {
+                for col in 0..=16 {
+                    assert_eq!(
+                        super::byte_index_for_line_col(source, &line_starts, line, col),
+                        byte_index_for_line_col_char_reference(source, &line_starts, line, col),
+                        "source={source:?} line={line} col={col}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual short release A/B"]
+    fn perf_ascii_prefix_column_index_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const LINES: usize = 256;
+        const ITERATIONS: usize = 1_024;
+        const ROUNDS: usize = 9;
+
+        type ColumnIndexer = fn(&str, &[usize], usize, usize) -> Option<usize>;
+
+        fn measure(
+            source: &str,
+            line_starts: &[usize],
+            end_columns: &[usize],
+            indexer: ColumnIndexer,
+        ) -> (u128, u64) {
+            let mut digest = 0xcbf2_9ce4_8422_2325_u64;
+            let started = Instant::now();
+            for _ in 0..ITERATIONS {
+                for (index, &end_column) in end_columns.iter().enumerate() {
+                    let line = index + 2;
+                    for column in [1, end_column] {
+                        let byte = indexer(
+                            black_box(source),
+                            black_box(line_starts),
+                            black_box(line),
+                            black_box(column),
+                        )
+                        .expect("benchmark column should resolve");
+                        digest ^= byte as u64;
+                        digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+                    }
+                }
+            }
+            (started.elapsed().as_nanos(), digest)
+        }
+
+        let mut source = String::from("flowchart LR\r\n");
+        let mut end_columns = Vec::with_capacity(LINES);
+        for index in 0..LINES {
+            let line = format!("N{index:03} --> N{:03}: label-{index:03}\r\n", index + 1);
+            end_columns.push(line.trim_end().chars().count() + 1);
+            source.push_str(&line);
+        }
+        let line_starts = super::source_line_starts(&source);
+
+        let mut char_ns = Vec::with_capacity(ROUNDS);
+        let mut ascii_ns = Vec::with_capacity(ROUNDS);
+        let mut proof_digest = 0_u64;
+        for round in 0..ROUNDS {
+            let (char_scan, ascii_prefix) = if round % 2 == 0 {
+                (
+                    measure(
+                        &source,
+                        &line_starts,
+                        &end_columns,
+                        byte_index_for_line_col_char_reference,
+                    ),
+                    measure(
+                        &source,
+                        &line_starts,
+                        &end_columns,
+                        super::byte_index_for_line_col,
+                    ),
+                )
+            } else {
+                let ascii_prefix = measure(
+                    &source,
+                    &line_starts,
+                    &end_columns,
+                    super::byte_index_for_line_col,
+                );
+                let char_scan = measure(
+                    &source,
+                    &line_starts,
+                    &end_columns,
+                    byte_index_for_line_col_char_reference,
+                );
+                (char_scan, ascii_prefix)
+            };
+            assert_eq!(char_scan.1, ascii_prefix.1);
+            proof_digest = ascii_prefix.1;
+            char_ns.push(char_scan.0);
+            ascii_ns.push(ascii_prefix.0);
+        }
+
+        char_ns.sort_unstable();
+        ascii_ns.sort_unstable();
+        let char_median_ns = char_ns[ROUNDS / 2];
+        let ascii_median_ns = ascii_ns[ROUNDS / 2];
+        let improvement_pct =
+            (char_median_ns as f64 - ascii_median_ns as f64) * 100.0 / char_median_ns as f64;
+        let speedup = char_median_ns as f64 / ascii_median_ns as f64;
+        println!(
+            "PERF ascii_prefix_columns char_ns={char_ns:?} ascii_ns={ascii_ns:?} char_median_ns={char_median_ns} ascii_median_ns={ascii_median_ns} improvement_pct={improvement_pct:.3} speedup={speedup:.3}x parity=exact digest={proof_digest:016x} rounds={ROUNDS} iterations={ITERATIONS} lines={LINES} source_bytes={}",
+            source.len()
+        );
     }
 
     #[test]
