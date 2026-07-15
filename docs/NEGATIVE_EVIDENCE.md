@@ -17406,3 +17406,31 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   allocation instead of F, with no drawing-contract change.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.26`)
+
+### 🟡INVALID/HOLD: Canvas class-compartment font hoist did not reach remote proof (2026-07-15)
+
+- **Negative-ledger-first boundary / attribution:** the preceding standard-node font keep explicitly
+  excludes class-compartment fonts. Canvas `draw_nodes` still formats an invariant bold header font
+  and invariant member font for every qualifying class node, while renderer configuration is private
+  and immutable. That makes the proposed one-per-call font-pair cache a distinct 2C-to-2 allocation
+  candidate (impact 4 x confidence 5 / effort 1 = **20**), not a retry of the rejected SVG member-row
+  streaming primitive.
+- **Candidate prepared, then restored:** the exact font pair was lazily cached on the first qualifying
+  class node; a permanent exact-CSS oracle and an alternating paired allocation probe were prepared.
+  Ordering, floating point, labels, and Canvas calls were unchanged. All candidate source and probe
+  edits were manually restored after the remote gate failed to reach executable code; no production
+  change ships in this closeout.
+- **Fail-closed remote blocker:** direct Cargo argv with `RCH_REQUIRE_REMOTE=1`,
+  `RCH_NO_SELF_HEALING=1`, and `--profile release` was attempted four times. Jobs
+  `j-29928833041829292` (`vmi1293453`), `j-29928833041829300` and
+  `j-29928833041829308` (`vmi1152480`), and `j-29928833041829319` (`vmi1153651`)
+  each entered a cold `highs-sys` build and then emitted no output for more than the mandated two-minute
+  liveness window. Each was interrupted and retried; no local Cargo fallback occurred. RCH diagnosis
+  also showed requested `hz2` placement silently resolving to `vmi1152480`; draining that presumed-dead
+  worker moved the final retry to `vmi1153651`, and the drained worker was re-enabled afterward.
+- **Evidence classification:** **INVALID / HOLD, not a reject.** Neither the format oracle nor either
+  timed A/B arm executed, so there is no performance ratio and a timeout is not benchmark evidence.
+  Revisit only when an already-warm remote test binary is reusable or RCH can keep a cold native build
+  observable within the required liveness window.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.27`)
