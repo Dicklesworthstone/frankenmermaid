@@ -22,6 +22,7 @@ pub use font_metrics::{
     FontPreset, is_east_asian_wide,
 };
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub use franken_kernel::{Budget, Cx, DecisionId, NoCaps, PolicyId, SchemaVersion, TraceId};
@@ -2810,8 +2811,8 @@ impl MermaidStageBudgetLedger {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MermaidBudgetEvent {
-    pub kind: String,
-    pub stage: Option<String>,
+    pub kind: Cow<'static, str>,
+    pub stage: Option<Cow<'static, str>>,
     pub allocated_ms: Option<u64>,
     pub used_ms: Option<u64>,
     pub remaining_ms: Option<u64>,
@@ -2907,7 +2908,7 @@ impl MermaidBudgetLedger {
         );
         if pressure.conservative_fallback {
             ledger.events.push(MermaidBudgetEvent {
-                kind: String::from("policy_note"),
+                kind: Cow::Borrowed("policy_note"),
                 stage: None,
                 allocated_ms: None,
                 used_ms: None,
@@ -3029,7 +3030,7 @@ impl MermaidBudgetLedger {
         self.remaining_total_ms = self.total_budget_ms.saturating_sub(used_total);
         self.exhausted = used_total > self.total_budget_ms;
         self.events.push(MermaidBudgetEvent {
-            kind: String::from("accounting"),
+            kind: Cow::Borrowed("accounting"),
             stage: None,
             allocated_ms: None,
             used_ms: Some(used_total),
@@ -3047,8 +3048,8 @@ impl MermaidBudgetLedger {
     #[allow(clippy::too_many_arguments)]
     fn push_stage_event(
         &mut self,
-        kind: &str,
-        stage: &str,
+        kind: &'static str,
+        stage: &'static str,
         allocated_ms: u64,
         used_ms: u64,
         remaining_ms: u64,
@@ -3056,8 +3057,8 @@ impl MermaidBudgetLedger {
         note: Option<String>,
     ) {
         self.events.push(MermaidBudgetEvent {
-            kind: kind.to_string(),
-            stage: Some(stage.to_string()),
+            kind: Cow::Borrowed(kind),
+            stage: Some(Cow::Borrowed(stage)),
             allocated_ms: Some(allocated_ms),
             used_ms: Some(used_ms),
             remaining_ms: Some(remaining_ms),
@@ -5548,6 +5549,7 @@ mod tests {
         }
     }
 
+    use std::borrow::Cow;
     use std::collections::BTreeMap;
 
     use super::{
@@ -7500,12 +7502,73 @@ mod tests {
         broker.record_layout(40);
         broker.record_render(20);
         assert!(broker.exhausted);
+        assert!(broker.events.iter().all(|event| {
+            matches!(event.kind, Cow::Borrowed(_))
+                && event
+                    .stage
+                    .as_ref()
+                    .is_none_or(|stage| matches!(stage, Cow::Borrowed(_)))
+        }));
         assert!(broker.events.iter().any(|event| {
             event.kind == "rebalance" && event.stage.as_deref() == Some("layout")
         }));
         assert!(broker.events.iter().any(|event| {
             event.kind == "accounting" && event.note.as_deref() == Some("global budget exhausted")
         }));
+    }
+
+    const BUDGET_EVENT_TAGS: [(&str, Option<&str>); 12] = [
+        ("allocate", Some("parse")),
+        ("allocate", Some("layout")),
+        ("allocate", Some("render")),
+        ("policy_note", None),
+        ("consume", Some("parse")),
+        ("rebalance", Some("layout")),
+        ("rebalance", Some("render")),
+        ("accounting", None),
+        ("consume", Some("layout")),
+        ("accounting", None),
+        ("consume", Some("render")),
+        ("accounting", None),
+    ];
+
+    fn build_budget_events_with(
+        tag: impl Fn(&'static str) -> Cow<'static, str> + Copy,
+    ) -> Vec<crate::MermaidBudgetEvent> {
+        let mut events = Vec::with_capacity(BUDGET_EVENT_TAGS.len());
+        for (index, &(kind, stage)) in BUDGET_EVENT_TAGS.iter().enumerate() {
+            events.push(crate::MermaidBudgetEvent {
+                kind: tag(kind),
+                stage: stage.map(tag),
+                allocated_ms: Some(120 - index as u64),
+                used_ms: Some(index as u64),
+                remaining_ms: Some(120 - index as u64),
+                remaining_total_ms: 120 - index as u64,
+                exceeded: false,
+                note: None,
+            });
+        }
+        events
+    }
+
+    #[test]
+    fn borrowed_budget_event_tags_match_owned_json_reference() {
+        let borrowed = build_budget_events_with(Cow::Borrowed);
+        let owned = build_budget_events_with(|tag| Cow::Owned(tag.to_owned()));
+        assert_eq!(borrowed, owned);
+        assert!(borrowed.iter().all(|event| {
+            matches!(event.kind, Cow::Borrowed(_))
+                && event
+                    .stage
+                    .as_ref()
+                    .is_none_or(|stage| matches!(stage, Cow::Borrowed(_)))
+        }));
+
+        let borrowed_json = serde_json::to_string(&borrowed).unwrap();
+        assert_eq!(borrowed_json, serde_json::to_string(&owned).unwrap());
+        let roundtrip: Vec<crate::MermaidBudgetEvent> =
+            serde_json::from_str(&borrowed_json).unwrap();
+        assert_eq!(roundtrip, borrowed);
     }
 
     #[test]

@@ -17217,3 +17217,33 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   fuzzy misses retain the original lowercase input and behavior.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.20`)
+
+### 🟢LANDED: borrow static budget-event kind/stage tags (2026-07-15)
+
+- **Negative-ledger-first boundary:** the preceding budget-ledger keep reserved the complete
+  event lifecycle and explicitly left owned event strings unchanged. No earlier row records a
+  `MermaidBudgetEvent` tag-ownership, `Cow<'static, str>`, or borrowed evidence-tag probe. This
+  follows the measured capacity residual without reopening its already-landed vector-growth lever.
+- **Profile / attribution:** five CLI/WASM processing paths build a ledger. The normal 11-event
+  lifecycle allocated 19 `kind`/`stage` strings; conservative telemetry adds `policy_note` for 20.
+  Every constructor is private and every tag input is a static literal, while tags are serialized
+  and compared but never mutated. Impact 4 x confidence 5 / effort 1 = **20**.
+- **One lever / exact isomorphism:** store only `MermaidBudgetEvent.kind` and `.stage` as
+  `Cow<'static, str>` and borrow the static production tags. Event notes, vector capacity, event
+  order, accounting, and numeric fields are unchanged. Deserialization still accepts arbitrary
+  strings as owned `Cow`s. A permanent oracle proves borrowed-vs-owned struct equality,
+  byte-identical JSON, deserialize round-trip equality, and borrowed tags in the real lifecycle.
+- **Remote correctness:** fail-closed `RCH_REQUIRE_REMOTE=1`, direct Cargo argv,
+  `--profile release`, worker `vmi1293453`. Untimed warm-up job `j-29928833041829125` passed the
+  JSON/round-trip oracle (1 passed, 0 failed) with no candidate compiler warning.
+- **One foreground same-binary A/B:** job `j-29928833041829127`, alternating order, 9 rounds x
+  80,000 twelve-event batches. Owned-tag samples `[46910490, 47158401, 47452512, 47696466,
+  49262829, 50957815, 51270442, 52547422, 60505199]` ns; borrowed-tag samples `[11432203,
+  11467677, 11638101, 11949667, 11978530, 12097038, 12167082, 12887761, 13334208]` ns.
+  Exact vector/digest parity (`960000`); median improved **49,262,829 -> 11,978,530 ns
+  (75.684%, 4.113x)**, with non-overlapping distributions. The timed test body took 0.57 s;
+  RCH's repeated cold compilation stayed outside both in-process arms.
+- **Decision:** keep. Every shipped ledger lifecycle now avoids 19 or 20 heap allocations while
+  preserving its complete serialized evidence contract.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.21`)
