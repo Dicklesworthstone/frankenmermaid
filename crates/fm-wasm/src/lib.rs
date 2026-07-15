@@ -750,7 +750,6 @@ pub fn render(input: &str) -> WasmRenderOutput {
         );
         guard.observability = observability;
     }
-    guard.budget_broker = budget_broker.clone();
     let source_spans = collect_source_spans(&parsed.ir, &traced_layout.layout);
     let mut svg_config = runtime.svg;
     apply_budget_svg_simplifications(&mut svg_config, &budget_broker);
@@ -1412,8 +1411,8 @@ mod tests {
         render_svg_js, requested_theme_preset, resolve_renderer, write_runtime_config,
     };
     use fm_core::{
-        MermaidLensBinding, MermaidLensEdit, MermaidLensEditResult, MermaidLensError,
-        MermaidPressureTier, MermaidWasmPressureSignals,
+        MermaidBudgetLedger, MermaidGuardReport, MermaidLensBinding, MermaidLensEdit,
+        MermaidLensEditResult, MermaidLensError, MermaidPressureTier, MermaidWasmPressureSignals,
     };
     use fm_layout::{
         IncrementalLayoutEngine, LayoutAlgorithm, LayoutConfig, LayoutGuardrails,
@@ -1505,6 +1504,108 @@ mod tests {
         assert_eq!(output.layout.edge_count, 1);
         assert!(output.source_spans.iter().any(|span| span.kind == "node"));
         assert!(output.source_spans.iter().any(|span| span.kind == "edge"));
+    }
+
+    #[test]
+    #[ignore = "manual short release A/B"]
+    fn wasm_dead_budget_ledger_clone_perf_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ITERATIONS: usize = 16_384;
+        const ROUNDS: usize = 9;
+
+        #[inline(never)]
+        fn finish_render_guard(
+            mut guard: MermaidGuardReport,
+            mut budget_broker: MermaidBudgetLedger,
+        ) -> MermaidGuardReport {
+            black_box((&guard.degradation, budget_broker.should_simplify_render()));
+            budget_broker.record_render(7);
+            guard.budget_broker = budget_broker;
+            guard
+        }
+
+        #[inline(never)]
+        fn baseline(
+            mut guard: MermaidGuardReport,
+            budget_broker: MermaidBudgetLedger,
+        ) -> MermaidGuardReport {
+            guard.budget_broker = budget_broker.clone();
+            finish_render_guard(guard, budget_broker)
+        }
+
+        #[inline(never)]
+        fn candidate(
+            guard: MermaidGuardReport,
+            budget_broker: MermaidBudgetLedger,
+        ) -> MermaidGuardReport {
+            finish_render_guard(guard, budget_broker)
+        }
+
+        fn measure(
+            guard: &MermaidGuardReport,
+            budget_broker: &MermaidBudgetLedger,
+            run: fn(MermaidGuardReport, MermaidBudgetLedger) -> MermaidGuardReport,
+        ) -> (u128, u64) {
+            let mut checksum = 0_u64;
+            let started = Instant::now();
+            for iteration in 0..ITERATIONS {
+                let final_guard = run(guard.clone(), budget_broker.clone());
+                checksum = checksum
+                    .wrapping_mul(0x100_0000_01b3)
+                    .wrapping_add(final_guard.budget_broker.events.len() as u64)
+                    .wrapping_add(final_guard.budget_broker.remaining_total_ms)
+                    .wrapping_add(iteration as u64);
+                black_box(final_guard);
+            }
+            (started.elapsed().as_nanos(), checksum)
+        }
+
+        let pressure = MermaidWasmPressureSignals::default().into_report();
+        let mut budget_broker = MermaidBudgetLedger::new(&pressure);
+        budget_broker.record_parse(5);
+        budget_broker.record_layout(30);
+        let mut guard = MermaidGuardReport {
+            pressure,
+            ..MermaidGuardReport::default()
+        };
+        guard.degradation.hide_labels = true;
+
+        let baseline_output = baseline(guard.clone(), budget_broker.clone());
+        let candidate_output = candidate(guard.clone(), budget_broker.clone());
+        assert_eq!(candidate_output, baseline_output);
+        assert_eq!(candidate_output.budget_broker.events.len(), 12);
+
+        let mut baseline_ns = Vec::with_capacity(ROUNDS);
+        let mut candidate_ns = Vec::with_capacity(ROUNDS);
+        for round in 0..ROUNDS {
+            let (baseline_result, candidate_result) = if round % 2 == 0 {
+                (
+                    measure(&guard, &budget_broker, baseline),
+                    measure(&guard, &budget_broker, candidate),
+                )
+            } else {
+                let candidate_result = measure(&guard, &budget_broker, candidate);
+                let baseline_result = measure(&guard, &budget_broker, baseline);
+                (baseline_result, candidate_result)
+            };
+            assert_eq!(baseline_result.1, candidate_result.1);
+            baseline_ns.push(baseline_result.0);
+            candidate_ns.push(candidate_result.0);
+        }
+
+        baseline_ns.sort_unstable();
+        candidate_ns.sort_unstable();
+        let baseline_median_ns = baseline_ns[ROUNDS / 2];
+        let candidate_median_ns = candidate_ns[ROUNDS / 2];
+        let improvement_pct = (baseline_median_ns as f64 - candidate_median_ns as f64) * 100.0
+            / baseline_median_ns as f64;
+
+        println!(
+            "PERF wasm_dead_budget_ledger_clone baseline_median_ns={baseline_median_ns} candidate_median_ns={candidate_median_ns} improvement_pct={improvement_pct:.3} parity=exact rounds={ROUNDS} iterations={ITERATIONS} checksum={}",
+            baseline_output.budget_broker.events.len()
+        );
     }
 
     #[test]

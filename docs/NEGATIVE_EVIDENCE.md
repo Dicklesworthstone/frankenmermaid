@@ -16866,3 +16866,33 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   retained.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.15`)
+
+### 🟢LANDED: remove the dead WASM render budget-ledger clone after warm-up (2026-07-14)
+
+- **Negative-ledger-first boundary:** `bd-1buv.8` is INVALID / HOLD because its cold
+  strict-remote build never launched the named test; neither A/B arm ran, so it is not a
+  performance verdict. The later budget-ledger capacity keep changes vector growth but does not
+  remove this render-guard deep clone.
+- **Profile attribution:** native `fm_wasm::render` assigns the populated parse/layout
+  `MermaidBudgetLedger` to `guard.budget_broker` by deep clone, performs no guard or output read of
+  that copy, records render timing in the original ledger, then unconditionally overwrites the
+  guard field with the original. The removable work is one clone of the policy, stages, notes,
+  and event records on every native render.
+- **One lever and proof gate:** delete only the first dead assignment. Preserve the final move,
+  layout/render ordering, degradation inputs, and returned guard exactly. A same-binary,
+  alternating-order `--profile release` probe will reproduce the clone-then-overwrite baseline
+  versus the final-move-only candidate, assert exact final-ledger equality, and keep only at a 3%
+  or larger median improvement.
+- **Untimed warm-up:** fail-closed RCH job `j-29928833041828838` built the `fm-wasm` release test
+  binary on `vmi1293453` in 512.5 s. This cold compile-only step had no timeout and supplied no
+  timing evidence.
+- **Remote A/B:** fail-closed RCH job `j-29928833041828850` ran `cargo test -j1 --profile release
+  -p fm-wasm --lib tests::wasm_dead_budget_ledger_clone_perf_ab -- --ignored --exact --nocapture`
+  on the same worker and target. RCH missed the just-warmed cache again, but compilation remained
+  outside the in-process timer; the complete alternating A/B itself finished in 0.62 s.
+- **Result:** exact final `MermaidGuardReport` and per-round checksum parity; baseline median
+  41,827,949 ns versus candidate median 26,985,667 ns across nine alternating rounds of 16,384
+  finalizations is a **35.484% improvement**. This clears the 3% keep gate, so the dead deep clone
+  is removed.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.16`)
