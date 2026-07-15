@@ -17538,3 +17538,41 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   allocations while retaining arbitrary deserialized or caller-owned stage names.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.30`)
+
+### 🔴REJECTED: borrow ordinary link targets during validation (2026-07-15)
+
+- **Negative-ledger-first boundary:** the earlier no-percent decoder keep removed the byte-vector
+  fill and one allocation for ordinary link targets, but deliberately still returned an owned
+  `String`. No prior row records a `Cow`/borrowed decode probe. This tested only that remaining
+  ownership boundary, without reopening percent decoding, lowercase normalization, or scheme
+  matching.
+- **Profile / attribution:** five production parser/SVG call sites enter `is_safe_link_target`.
+  On every no-percent target, current `decode_percent_triplets` copies the complete target into an
+  owned decoded string; lenient mode then returns immediately and strict mode separately allocates
+  its required lowercase representation. The prior validator A/B ranked decoder ownership ahead of
+  lowercase and scheme work. Removing this one residual copy scored impact 2 x confidence 4 /
+  effort 1 = **8**.
+- **One lever / exact isomorphism:** temporarily return `Cow::Borrowed(input)` when no percent byte
+  exists and `Cow::Owned` from the unchanged percent-bearing decoder. A permanent candidate oracle
+  compared the old owned fast path, the original linear decoder, and production decisions across
+  all 24 targets in strict and lenient modes, while also proving ordinary inputs borrowed and every
+  percent-bearing input owned. All candidate source and oracle changes were manually restored after
+  measurement.
+- **Remote correctness:** fail-closed direct Cargo argv with `RCH_REQUIRE_REMOTE=1`,
+  `RCH_NO_SELF_HEALING=1`, and `--profile release` on worker `vmi1152480`. Untimed cold warm-up job
+  `j-29928833041829466` passed the ownership/byte-parity oracle (1 passed, 0 failed). Its 92.9-second
+  build was not timed evidence.
+- **One foreground same-binary A/B:** job `j-29928833041829472`, alternating order, 9 rounds x
+  30,000 iterations x 24 mixed targets x 2 sanitize modes. Owned-decode samples `[60697978,
+  66411341, 72965098, 74165258, 74273058, 79469750, 79629949, 79937930, 82297269]` ns;
+  borrowed-decode samples `[67348618, 67902875, 70235365, 70618256, 72694173, 76252521,
+  76950222, 77122519, 85099960]` ns. Exact decision/count parity held; median improved
+  **74,273,058 -> 72,694,173 ns (2.126%, 1.022x)**. The timed body took 1.33s; the repeated
+  97.5-second cold build stayed outside both timers and is not evidence.
+- **Decision:** reject and restore. The favorable point estimate is below the 3% keep gate and the
+  sample ranges overlap broadly. One ordinary-target allocation is below the full-validator noise
+  floor beside trimming, strict lowercase normalization, and scheme/entity scans. Do not retry this
+  exact `Cow` ownership substitution alone without allocation-profile evidence that it has crossed
+  the enclosing-operation floor.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.31`)
