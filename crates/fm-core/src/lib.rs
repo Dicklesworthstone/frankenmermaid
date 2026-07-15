@@ -4995,11 +4995,11 @@ pub fn apply_lens_edit(
         .map(str::to_string)
         .ok_or_else(|| MermaidLensError::UnresolvedSpan(edit.element_id.clone()))?;
 
-    let mut updated_source = source.to_string();
-    updated_source.replace_range(
-        replaced_range.start_byte..replaced_range.end_byte,
-        &edit.replacement,
-    );
+    let mut updated_source =
+        String::with_capacity(source.len() - previous_snippet.len() + edit.replacement.len());
+    updated_source.push_str(&source[..replaced_range.start_byte]);
+    updated_source.push_str(&edit.replacement);
+    updated_source.push_str(&source[replaced_range.end_byte..]);
 
     Ok(MermaidLensEditResult {
         element_id: entry.element_id.clone(),
@@ -6586,6 +6586,254 @@ mod tests {
             replacement: edit.replacement.clone(),
             updated_source,
         })
+    }
+
+    fn apply_lens_edit_replace_range_reference(
+        source: &str,
+        source_map: &MermaidSourceMap,
+        edit: &MermaidLensEdit,
+    ) -> Result<MermaidLensEditResult, MermaidLensError> {
+        let entry = source_map
+            .entries
+            .iter()
+            .find(|entry| entry.element_id == edit.element_id)
+            .ok_or_else(|| MermaidLensError::ElementNotFound(edit.element_id.clone()))?;
+        let replaced_range = resolve_span_text_range(source, entry.span)
+            .ok_or_else(|| MermaidLensError::UnresolvedSpan(edit.element_id.clone()))?;
+        let previous_snippet = source
+            .get(replaced_range.start_byte..replaced_range.end_byte)
+            .map(str::to_string)
+            .ok_or_else(|| MermaidLensError::UnresolvedSpan(edit.element_id.clone()))?;
+
+        let mut updated_source = source.to_string();
+        updated_source.replace_range(
+            replaced_range.start_byte..replaced_range.end_byte,
+            &edit.replacement,
+        );
+
+        Ok(MermaidLensEditResult {
+            element_id: entry.element_id.clone(),
+            replaced_range,
+            previous_snippet,
+            replacement: edit.replacement.clone(),
+            updated_source,
+        })
+    }
+
+    #[test]
+    fn final_size_lens_splice_matches_replace_range_reference() {
+        let source = "flowchart LR\r\n\u{03b1}-->\u{03b2}\r\nA-->B\r\nC-->D\r\n";
+        let direct_span = |needle: &str| {
+            let start = source.find(needle).expect("fixture needle");
+            Span::new(
+                Position {
+                    line: 0,
+                    col: 0,
+                    byte: u32::try_from(start).expect("small fixture"),
+                },
+                Position {
+                    line: 0,
+                    col: 0,
+                    byte: u32::try_from(start + needle.len()).expect("small fixture"),
+                },
+            )
+        };
+        let source_map = MermaidSourceMap {
+            diagram_type: DiagramType::Flowchart,
+            entries: vec![
+                MermaidSourceMapEntry {
+                    kind: MermaidSourceMapKind::Edge,
+                    index: 0,
+                    element_id: "unicode-first".to_string(),
+                    source_id: None,
+                    span: direct_span("\u{03b1}-->\u{03b2}"),
+                },
+                MermaidSourceMapEntry {
+                    kind: MermaidSourceMapKind::Edge,
+                    index: 1,
+                    element_id: "middle".to_string(),
+                    source_id: None,
+                    span: direct_span("A-->B"),
+                },
+                MermaidSourceMapEntry {
+                    kind: MermaidSourceMapKind::Edge,
+                    index: 2,
+                    element_id: "last".to_string(),
+                    source_id: None,
+                    span: direct_span("C-->D"),
+                },
+                MermaidSourceMapEntry {
+                    kind: MermaidSourceMapKind::Cluster,
+                    index: 0,
+                    element_id: "unresolved".to_string(),
+                    source_id: None,
+                    span: Span::default(),
+                },
+            ],
+        };
+        let edits = [
+            MermaidLensEdit {
+                element_id: "unicode-first".to_string(),
+                replacement: "X".to_string(),
+            },
+            MermaidLensEdit {
+                element_id: "middle".to_string(),
+                replacement: "A-.->B".to_string(),
+            },
+            MermaidLensEdit {
+                element_id: "last".to_string(),
+                replacement: String::new(),
+            },
+            MermaidLensEdit {
+                element_id: "unresolved".to_string(),
+                replacement: "ignored".to_string(),
+            },
+            MermaidLensEdit {
+                element_id: "missing".to_string(),
+                replacement: "ignored".to_string(),
+            },
+        ];
+
+        for edit in edits {
+            assert_eq!(
+                apply_lens_edit(source, &source_map, &edit),
+                apply_lens_edit_replace_range_reference(source, &source_map, &edit),
+                "edit={edit:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "manual short release A/B"]
+    fn perf_final_size_lens_splice_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ENTRIES: usize = 256;
+        const ITERATIONS: usize = 256;
+        const ROUNDS: usize = 9;
+
+        type LensEditor = fn(
+            &str,
+            &MermaidSourceMap,
+            &MermaidLensEdit,
+        ) -> Result<MermaidLensEditResult, MermaidLensError>;
+
+        fn measure(
+            source: &str,
+            source_map: &MermaidSourceMap,
+            edits: &[MermaidLensEdit],
+            editor: LensEditor,
+        ) -> (u128, u64) {
+            let mut digest = 0xcbf2_9ce4_8422_2325_u64;
+            let started = Instant::now();
+            for _ in 0..ITERATIONS {
+                for edit in edits {
+                    let result = editor(black_box(source), black_box(source_map), black_box(edit))
+                        .expect("edit should resolve");
+                    for value in [
+                        result.replaced_range.start_byte,
+                        result.replaced_range.end_byte,
+                        result.previous_snippet.len(),
+                        result.replacement.len(),
+                        result.updated_source.len(),
+                    ] {
+                        digest ^= value as u64;
+                        digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+                    }
+                    black_box(result);
+                }
+            }
+            (started.elapsed().as_nanos(), digest)
+        }
+
+        let mut source = String::from("flowchart LR\r\n");
+        let mut entries = Vec::with_capacity(ENTRIES);
+        for index in 0..ENTRIES {
+            let line = format!("N{index:03} --> N{:03}: label-{index:03}\r\n", index + 1);
+            let line_number = u32::try_from(index + 2).expect("small corpus");
+            let end_col = u32::try_from(line.trim_end().chars().count()).expect("short line");
+            source.push_str(&line);
+            entries.push(MermaidSourceMapEntry {
+                kind: MermaidSourceMapKind::Edge,
+                index,
+                element_id: format!("fm-edge-{index}"),
+                source_id: None,
+                span: sample_span(line_number, 1, end_col),
+            });
+        }
+        let source_map = MermaidSourceMap {
+            diagram_type: DiagramType::Flowchart,
+            entries,
+        };
+        let edits = [
+            MermaidLensEdit {
+                element_id: "fm-edge-0".to_string(),
+                replacement: "N000 --> N001: label-000".to_string(),
+            },
+            MermaidLensEdit {
+                element_id: "fm-edge-85".to_string(),
+                replacement: "N085-->N086".to_string(),
+            },
+            MermaidLensEdit {
+                element_id: "fm-edge-170".to_string(),
+                replacement: "N170 -.-> N171: updated-with-a-longer-label".to_string(),
+            },
+            MermaidLensEdit {
+                element_id: "fm-edge-255".to_string(),
+                replacement: String::new(),
+            },
+        ];
+        for edit in &edits {
+            assert_eq!(
+                apply_lens_edit(&source, &source_map, edit),
+                apply_lens_edit_replace_range_reference(&source, &source_map, edit)
+            );
+        }
+
+        let mut replace_range_ns = Vec::with_capacity(ROUNDS);
+        let mut final_size_ns = Vec::with_capacity(ROUNDS);
+        let mut proof_digest = 0_u64;
+        for round in 0..ROUNDS {
+            let (replace_range, final_size) = if round % 2 == 0 {
+                (
+                    measure(
+                        &source,
+                        &source_map,
+                        &edits,
+                        apply_lens_edit_replace_range_reference,
+                    ),
+                    measure(&source, &source_map, &edits, apply_lens_edit),
+                )
+            } else {
+                let final_size = measure(&source, &source_map, &edits, apply_lens_edit);
+                let replace_range = measure(
+                    &source,
+                    &source_map,
+                    &edits,
+                    apply_lens_edit_replace_range_reference,
+                );
+                (replace_range, final_size)
+            };
+            assert_eq!(replace_range.1, final_size.1);
+            proof_digest = final_size.1;
+            replace_range_ns.push(replace_range.0);
+            final_size_ns.push(final_size.0);
+        }
+
+        replace_range_ns.sort_unstable();
+        final_size_ns.sort_unstable();
+        let replace_range_median_ns = replace_range_ns[ROUNDS / 2];
+        let final_size_median_ns = final_size_ns[ROUNDS / 2];
+        let improvement_pct = (replace_range_median_ns as f64 - final_size_median_ns as f64)
+            * 100.0
+            / replace_range_median_ns as f64;
+        let speedup = replace_range_median_ns as f64 / final_size_median_ns as f64;
+        println!(
+            "PERF final_size_lens_splice replace_range_ns={replace_range_ns:?} final_size_ns={final_size_ns:?} replace_range_median_ns={replace_range_median_ns} final_size_median_ns={final_size_median_ns} improvement_pct={improvement_pct:.3} speedup={speedup:.3}x parity=exact digest={proof_digest:016x} rounds={ROUNDS} iterations={ITERATIONS} edits_per_iteration={} entries={ENTRIES} source_bytes={}",
+            edits.len(),
+            source.len()
+        );
     }
 
     #[test]

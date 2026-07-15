@@ -17070,3 +17070,42 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   implementation, and both paths reuse identical CRLF and column logic.
 
   Agent: Codex (GPT-5, this session; bead `bd-1t7l.1.5`)
+
+### 🟢LANDED: build edited ParseLens source at final size (2026-07-14)
+
+- **Negative-ledger-first boundary:** the five landed ParseLens changes remove repeated line-start
+  indexes, whole-binding materialization, scalar newline scans, ASCII column walks, and the owned
+  all-lines index for a single-line edit. None changes the final source splice, and no exact-size
+  single-splice probe is recorded. Earlier `replace_range` results concern repeated CSS removals or
+  unrelated builders, not this one validated replacement.
+- **Profile attribution:** the latest single-line resolver takes 5,561,609 ns for 4,096 calls
+  (about 1.36 us/edit), while the earlier full direct-edit result took about 6.33 us/edit before the
+  subsequent resolver keeps. The remaining path still copies the complete 6.7 KB source into a
+  same-sized `String`; a length-changing `replace_range` must then move the suffix and can grow the
+  allocation. Source construction is therefore the largest distinct residual beside the required
+  first-match ID scan. Impact 4 x confidence 4 / effort 1 = **16**.
+- **One lever and proof gate:** allocate the final length once, then append the validated prefix,
+  replacement, and suffix. Preserve all result fields and exact bytes for shorter, equal, longer,
+  empty, UTF-8, CRLF, first/middle/last, missing-ID, and unresolved-span cases. Compare the complete
+  production edit against an otherwise identical test-only `to_string` + `replace_range` reference;
+  keep only at 3% or better with exact result/digest parity.
+- **Measurement protocol:** first run an untimed strict-remote `--profile release` correctness
+  warm-up, then exactly one cheap foreground ignored A/B on the pinned worker. Compilation and
+  transfer remain outside both in-process timed arms.
+- **Remote proof:** fail-closed `RCH_REQUIRE_REMOTE=1`, direct Cargo argv, `--profile release`,
+  worker `vmi1293453`. Initial warm-up job `j-29928833041829014` compiled the release target but
+  its unqualified exact filter admitted zero tests, so it is not correctness evidence. Corrected
+  untimed job `j-29928833041829017` passed the permanent exact-result oracle. Foreground job
+  `j-29928833041829021` ran exactly one ignored A/B; its cold RCH rebuild remained outside both
+  in-process timers (test body 0.02 s).
+- **Real alternating A/B (9 rounds, 256 iterations x 4 edits, 256 entries, 6,670-byte source):**
+  `to_string` + `replace_range` samples `[1028090, 1069271, 1104593, 1166606, 1166856,
+  1238424, 1266787, 1298173, 1313917]` ns; exact-final-size samples `[952615, 962070,
+  990002, 992325, 1010683, 1096050, 1249310, 1309731, 1385924]` ns. Exact result/digest parity
+  (`e2b92837c8ce7725`); median improved **1,166,856 -> 1,010,683 ns (13.384%, 1.155x)**,
+  decisively clearing the 3% keep gate.
+- **Decision:** keep. One exact-capacity allocation and three appends avoid suffix movement and
+  growth after the initial whole-source copy while retaining identical bytes for equal, shorter,
+  longer, empty, UTF-8, CRLF, success, and error cases.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1t7l.1.6`)
