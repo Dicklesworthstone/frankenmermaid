@@ -17281,3 +17281,35 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   telemetry avoids six, with the complete serialized evidence contract unchanged.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.22`)
+
+### 🟢LANDED: hoist invariant Canvas node-label font formatting (2026-07-15)
+
+- **Negative-ledger-first pivot:** the two budget-event ownership residuals are now exhausted, so
+  this moves to the clean `fm-render-canvas` legacy render path. Existing Canvas rows cover source
+  accounting, dash conversion, marker color/geometry, and multiline iteration. No earlier row
+  records `draw_nodes`, standard node-font construction, or invariant Canvas font hoisting.
+- **Profile / attribution:** the standard-label branch runs once per nonempty labeled node and
+  formatted the identical `"{font_size}px {font_family}"` string inside that loop. Configuration has
+  no mutation path after renderer construction, so a 4,096-node render performed 4,096 allocator
+  round trips for identical bytes. Impact 4 x confidence 5 / effort 1 = **20**.
+- **One lever / exact isomorphism:** lazily construct the standard node-label font once per
+  `draw_nodes` call and borrow it for each standard label. Class-compartment fonts, RenderScene
+  text, context-call order, node/label order, coordinates, draw counts, and configuration remain
+  unchanged. A permanent oracle covers zero, fractional, and default font sizes plus quoted and
+  fallback-family strings, proving exact CSS bytes.
+- **Remote correctness:** fail-closed `RCH_REQUIRE_REMOTE=1`, direct Cargo argv,
+  `--profile release`, worker `vmi1293453`. The untimed cold warm-up job
+  `j-29928833041829161` passed the exact-format oracle (1 passed, 0 failed). UBS on the owned Canvas
+  file reported zero critical findings and exited 0.
+- **One foreground same-binary A/B:** job `j-29928833041829169`, alternating order, 9 rounds over
+  256 renders x 4,096 standard labels. Per-node-format samples `[122423635, 126773052, 128002351,
+  128313314, 132991042, 135766494, 136519991, 136926981, 139291788]` ns; hoisted samples
+  `[1640353, 1893292, 2048885, 2229504, 2243455, 2379841, 2381643, 2383365, 2549423]` ns.
+  Exact font digest parity held (`5235940524032`); median improved **132,991,042 -> 2,243,455 ns
+  (98.313%, 59.28x)** with non-overlapping distributions. The timed test body took 1.21 s. RCH
+  missed its just-warmed cache and repeated a 7m01s native build, but compilation remained outside
+  both in-process arms and was not treated as benchmark evidence.
+- **Decision:** keep. A standard N-node Canvas render now performs one invariant font allocation
+  instead of N, with no serialized or drawing-contract change.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.23`)

@@ -1105,6 +1105,7 @@ impl Canvas2dRenderer {
         labels_drawn: &mut usize,
     ) -> usize {
         let mut count = 0;
+        let mut standard_label_font = None;
 
         for node_box in &layout.nodes {
             let ir_node = ir.nodes.get(node_box.node_index);
@@ -1223,10 +1224,9 @@ impl Canvas2dRenderer {
                     let cy = y + h / 2.0;
 
                     ctx.set_fill_style(&self.config.label_color);
-                    ctx.set_font(&format!(
-                        "{}px {}",
-                        self.config.font_size, self.config.font_family
-                    ));
+                    ctx.set_font(
+                        standard_label_font.get_or_insert_with(|| standard_node_font(&self.config)),
+                    );
                     ctx.set_text_align(TextAlign::Center);
                     ctx.set_text_baseline(TextBaseline::Middle);
 
@@ -1537,6 +1537,10 @@ fn class_vis_char(vis: fm_core::ClassVisibility) -> char {
     }
 }
 
+fn standard_node_font(config: &CanvasRenderConfig) -> String {
+    format!("{}px {}", config.font_size, config.font_family)
+}
+
 fn generic_canvas_diagram_title(ir: &MermaidDiagramIr) -> Option<&str> {
     // The canvas backend has dedicated pie chart rendering. Gantt/xy/quadrant still use
     // the generic node/edge path, so the generic title fallback remains enabled.
@@ -1702,6 +1706,22 @@ mod tests {
         assert!(!config.font_family.is_empty());
         assert!(config.font_size > 0.0);
         assert!(config.padding > 0.0);
+    }
+
+    #[test]
+    fn standard_node_font_preserves_canvas_css_format() {
+        for (font_size, font_family, expected) in [
+            (0.0, "sans-serif", "0px sans-serif"),
+            (12.5, "Test Sans, serif", "12.5px Test Sans, serif"),
+            (14.0, "'Inter', Arial", "14px 'Inter', Arial"),
+        ] {
+            let config = CanvasRenderConfig {
+                font_size,
+                font_family: font_family.to_owned(),
+                ..CanvasRenderConfig::default()
+            };
+            assert_eq!(standard_node_font(&config), expected);
+        }
     }
 
     #[test]
