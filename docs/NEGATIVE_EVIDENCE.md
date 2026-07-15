@@ -17181,3 +17181,39 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   full source traversal and exposing the two dependency chains to instruction-level parallelism.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.19`)
+
+### 🟢LANDED: match exact diagram headers without a lowercase allocation (2026-07-14)
+
+- **Negative-ledger-first boundary:** the parser ledger's earlier broad alloc-lowercase closeout
+  enumerated per-type body parsers and warned against more leaf substitutions, while the dedicated
+  detector entries optimized the DOT probe ordering. Neither recorded an A/B for the remaining
+  top-level `detect_type_with_confidence_and_config` lowercase copy. The diff, font-metrics, and
+  style-precompute veins were also explicitly mined or rejected, so this is the narrow untried
+  parser-front-door primitive rather than a retry of a recorded per-type probe.
+- **Profile / attribution:** every nonempty `parse_with_mode_and_config` call enters type detection.
+  The common exact-header path copied and ASCII-lowercased its first significant line, used the
+  owned string only for exact keyword comparisons and three DOT-prefix checks, then returned.
+  The parser already had a proven allocation-free `matches_keyword_header_ci` byte matcher. Impact
+  4 x confidence 5 / effort 1 = **20**.
+- **One lever / exact isomorphism:** run the same ordered keyword cascade against the original line
+  with ASCII-insensitive byte comparisons, perform the three DOT-prefix checks directly on bytes,
+  and allocate the lowercase string only after an exact miss when fuzzy inference actually needs
+  it. ASCII folding, accepted whitespace/`-` delimiters, C4 spellings, BlockBeta aliases, keyword
+  order, confidence, and DOT precedence are unchanged. A permanent reference oracle compares all
+  26 accepted headers in original/uppercase/directed/`-beta`/invalid-suffix forms plus empty,
+  whitespace-prefixed, underscore, unknown, and non-ASCII cases.
+- **Remote correctness:** fail-closed `RCH_REQUIRE_REMOTE=1`, direct Cargo argv, `--profile release`,
+  worker `vmi1293453`. Untimed job `j-29928833041829102` passed the exact reference oracle (1
+  passed, 0 failed) with no candidate warning. RCH discarded the nominally warm target between
+  jobs, so its repeated cold compilation was kept outside every in-process timer.
+- **One foreground same-binary A/B:** job `j-29928833041829108`, alternating order, 9 rounds x 64
+  sweeps over 4,096 mixed exact headers. Lowercase-copy samples `[16178741, 16282706, 17657973,
+  19013320, 21344497, 21960749, 22089853, 22132115, 23397468]` ns; direct-CI samples
+  `[8348358, 9516315, 9521291, 9687781, 10373137, 11572821, 12125346, 12580258, 14173791]`
+  ns. Exact result/digest parity (`34ade18de6334fa5`); median improved **21,344,497 ->
+  10,373,137 ns (51.402%, 2.058x)**. The timed test body took 0.28 s; remote compilation stayed
+  outside both measured arms.
+- **Decision:** keep. Exact Mermaid headers now avoid their unconditional heap allocation and copy;
+  fuzzy misses retain the original lowercase input and behavior.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.20`)

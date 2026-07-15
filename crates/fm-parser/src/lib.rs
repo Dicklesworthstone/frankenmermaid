@@ -326,10 +326,13 @@ pub fn detect_type_with_confidence_and_config(input: &str, config: &ParserConfig
     // `graph`/`digraph`/`strict`/comment/unknown first lines can actually be DOT, so those still run
     // `looks_like_dot`. Byte-identical: a real DOT header always starts with one of those prefixes.
     let first_line = mermaid_parser::first_significant_line(input).unwrap_or("");
-    let lower = first_line.to_ascii_lowercase();
-    let keyword = exact_keyword_match(&lower, first_line);
-    let could_be_dot =
-        lower.starts_with("graph") || lower.starts_with("digraph") || lower.starts_with("strict");
+    let keyword = exact_keyword_match(first_line);
+    let could_be_dot = ["graph", "digraph", "strict"].iter().any(|prefix| {
+        first_line
+            .as_bytes()
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
+    });
 
     // Strategy 1: DOT format detection (high priority for interop).
     if (keyword.is_none() || could_be_dot) && looks_like_dot(input) {
@@ -348,6 +351,7 @@ pub fn detect_type_with_confidence_and_config(input: &str, config: &ParserConfig
 
     if config.intent_inference {
         // Strategy 3: Fuzzy keyword match
+        let lower = first_line.to_ascii_lowercase();
         if let Some(detected) = fuzzy_keyword_match(&lower, config.fuzzy_keyword_distance) {
             return detected;
         }
@@ -368,76 +372,73 @@ pub fn detect_type_with_confidence_and_config(input: &str, config: &ParserConfig
 }
 
 /// Exact keyword matching for diagram type detection.
-fn exact_keyword_match(lower: &str, original: &str) -> Option<DetectedType> {
-    let (diagram_type, confidence) =
-        if matches_keyword_header(lower, "flowchart") || matches_keyword_header(lower, "graph") {
-            (DiagramType::Flowchart, 1.0)
-        } else if matches_keyword_header(lower, "sequencediagram") {
-            (DiagramType::Sequence, 1.0)
-        } else if matches_keyword_header(lower, "classdiagram") {
-            (DiagramType::Class, 1.0)
-        } else if matches_keyword_header(lower, "statediagram") {
-            (DiagramType::State, 1.0)
-        } else if matches_keyword_header(lower, "gantt") {
-            (DiagramType::Gantt, 1.0)
-        } else if matches_keyword_header(lower, "erdiagram") {
-            (DiagramType::Er, 1.0)
-        } else if matches_keyword_header(lower, "mindmap") {
-            (DiagramType::Mindmap, 1.0)
-        } else if matches_keyword_header(lower, "pie") {
-            (DiagramType::Pie, 1.0)
-        } else if matches_keyword_header(lower, "gitgraph") {
-            (DiagramType::GitGraph, 1.0)
-        } else if matches_keyword_header(lower, "journey") {
-            (DiagramType::Journey, 1.0)
-        } else if matches_keyword_header(lower, "requirementdiagram") {
-            (DiagramType::Requirement, 1.0)
-        } else if matches_keyword_header(lower, "timeline") {
-            (DiagramType::Timeline, 1.0)
-        } else if matches_keyword_header(lower, "quadrantchart") {
-            (DiagramType::QuadrantChart, 1.0)
-        } else if matches_keyword_header(lower, "sankey") {
-            (DiagramType::Sankey, 1.0)
-        } else if matches_keyword_header(lower, "xychart") {
-            (DiagramType::XyChart, 1.0)
-        } else if is_block_beta_header(lower) {
-            (DiagramType::BlockBeta, 1.0)
-        } else if matches_keyword_header(lower, "packet-beta") {
-            (DiagramType::PacketBeta, 1.0)
-        } else if matches_keyword_header(lower, "architecture-beta") {
-            (DiagramType::ArchitectureBeta, 1.0)
-        } else if matches_keyword_header(original, "C4Context")
-            || matches_keyword_header(lower, "c4context")
-        {
-            (DiagramType::C4Context, 1.0)
-        } else if matches_keyword_header(original, "C4Container")
-            || matches_keyword_header(lower, "c4container")
-        {
-            (DiagramType::C4Container, 1.0)
-        } else if matches_keyword_header(original, "C4Component")
-            || matches_keyword_header(lower, "c4component")
-        {
-            (DiagramType::C4Component, 1.0)
-        } else if matches_keyword_header(original, "C4Dynamic")
-            || matches_keyword_header(lower, "c4dynamic")
-        {
-            (DiagramType::C4Dynamic, 1.0)
-        } else if matches_keyword_header(original, "C4Deployment")
-            || matches_keyword_header(lower, "c4deployment")
-        {
-            (DiagramType::C4Deployment, 1.0)
-        } else if matches_keyword_header(lower, "kanban") {
-            (DiagramType::Kanban, 1.0)
-        } else {
-            return None;
-        };
+fn exact_keyword_match(line: &str) -> Option<DetectedType> {
+    let diagram_type = exact_diagram_type_with(line, matches_keyword_header_ci)?;
 
     Some(DetectedType {
         diagram_type,
-        confidence,
+        confidence: 1.0,
         method: DetectionMethod::ExactKeyword,
         warnings: vec![],
     })
+}
+
+#[inline]
+fn exact_diagram_type_with(
+    line: &str,
+    matches: impl Fn(&str, &str) -> bool + Copy,
+) -> Option<DiagramType> {
+    if matches(line, "flowchart") || matches(line, "graph") {
+        Some(DiagramType::Flowchart)
+    } else if matches(line, "sequencediagram") {
+        Some(DiagramType::Sequence)
+    } else if matches(line, "classdiagram") {
+        Some(DiagramType::Class)
+    } else if matches(line, "statediagram") {
+        Some(DiagramType::State)
+    } else if matches(line, "gantt") {
+        Some(DiagramType::Gantt)
+    } else if matches(line, "erdiagram") {
+        Some(DiagramType::Er)
+    } else if matches(line, "mindmap") {
+        Some(DiagramType::Mindmap)
+    } else if matches(line, "pie") {
+        Some(DiagramType::Pie)
+    } else if matches(line, "gitgraph") {
+        Some(DiagramType::GitGraph)
+    } else if matches(line, "journey") {
+        Some(DiagramType::Journey)
+    } else if matches(line, "requirementdiagram") {
+        Some(DiagramType::Requirement)
+    } else if matches(line, "timeline") {
+        Some(DiagramType::Timeline)
+    } else if matches(line, "quadrantchart") {
+        Some(DiagramType::QuadrantChart)
+    } else if matches(line, "sankey") {
+        Some(DiagramType::Sankey)
+    } else if matches(line, "xychart") {
+        Some(DiagramType::XyChart)
+    } else if matches(line, "block-beta") || matches(line, "block") {
+        Some(DiagramType::BlockBeta)
+    } else if matches(line, "packet-beta") {
+        Some(DiagramType::PacketBeta)
+    } else if matches(line, "architecture-beta") {
+        Some(DiagramType::ArchitectureBeta)
+    } else if matches(line, "c4context") {
+        Some(DiagramType::C4Context)
+    } else if matches(line, "c4container") {
+        Some(DiagramType::C4Container)
+    } else if matches(line, "c4component") {
+        Some(DiagramType::C4Component)
+    } else if matches(line, "c4dynamic") {
+        Some(DiagramType::C4Dynamic)
+    } else if matches(line, "c4deployment") {
+        Some(DiagramType::C4Deployment)
+    } else if matches(line, "kanban") {
+        Some(DiagramType::Kanban)
+    } else {
+        None
+    }
 }
 
 /// Known diagram keywords for fuzzy matching.
@@ -463,10 +464,6 @@ const DIAGRAM_KEYWORDS: &[(&str, DiagramType)] = &[
 
 pub(crate) fn is_sankey_header(line: &str) -> bool {
     matches_keyword_header_ci(line, "sankey") || matches_keyword_header_ci(line, "sankey-beta")
-}
-
-pub(crate) fn is_block_beta_header(line: &str) -> bool {
-    matches_keyword_header(line, "block-beta") || matches_keyword_header(line, "block")
 }
 
 pub(crate) fn matches_keyword_header(line: &str, keyword: &str) -> bool {
@@ -1119,6 +1116,80 @@ mod tests {
             }
         }
     }
+
+    fn exact_keyword_match_lower_reference(line: &str) -> Option<super::DetectedType> {
+        let lower = line.to_ascii_lowercase();
+        let diagram_type = super::exact_diagram_type_with(&lower, super::matches_keyword_header)?;
+        Some(super::DetectedType {
+            diagram_type,
+            confidence: 1.0,
+            method: super::DetectionMethod::ExactKeyword,
+            warnings: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn exact_keyword_match_ci_matches_lowercase_reference() {
+        let headers = [
+            "flowchart",
+            "graph",
+            "sequenceDiagram",
+            "classDiagram",
+            "stateDiagram",
+            "gantt",
+            "erDiagram",
+            "mindmap",
+            "pie",
+            "gitGraph",
+            "journey",
+            "requirementDiagram",
+            "timeline",
+            "quadrantChart",
+            "sankey",
+            "xychart",
+            "block-beta",
+            "block",
+            "packet-beta",
+            "architecture-beta",
+            "C4Context",
+            "C4Container",
+            "C4Component",
+            "C4Dynamic",
+            "C4Deployment",
+            "kanban",
+        ];
+
+        for header in headers {
+            for line in [
+                header.to_string(),
+                header.to_ascii_uppercase(),
+                format!("{header} LR"),
+                format!("{header}-beta"),
+                format!("{header}x"),
+            ] {
+                assert_eq!(
+                    super::exact_keyword_match(&line),
+                    exact_keyword_match_lower_reference(&line),
+                    "line={line:?}"
+                );
+            }
+        }
+
+        for line in [
+            "",
+            " flowchart",
+            "sequence_Diagram",
+            "not-a-diagram",
+            "Ägraph",
+        ] {
+            assert_eq!(
+                super::exact_keyword_match(line),
+                exact_keyword_match_lower_reference(line),
+                "line={line:?}"
+            );
+        }
+    }
+
     use fm_core::{
         ArrowType, DiagnosticCategory, DiagramType, GraphDirection, IrEndpoint, MermaidDiagramIr,
         MermaidLensEdit, MermaidParseMode,
