@@ -17341,3 +17341,37 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   allocation instead of E, with no drawing-contract change.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.24`)
+
+### 🟢LANDED: hoist invariant Canvas sequence-note font formatting (2026-07-15)
+
+- **Negative-ledger-first boundary:** the preceding Canvas rows cover standard node labels and edge
+  labels only. Existing sequence-note rows concern SVG Element streaming and explicitly reject a
+  different bare-leaf serialization idea; no row records Canvas `draw_sequence_notes` font
+  construction. This takes that distinct residual without reopening SVG streaming.
+- **Profile / attribution:** each nonempty sequence note formatted the same
+  `"{font_size * 0.85}px {font_family}"` string inside the note loop. That is the exact operation the
+  preceding edge-label A/B identified as dominant, and renderer configuration is private and
+  immutable, so an N-note render performed N allocator round trips for identical bytes. Impact 4 x
+  confidence 5 / effort 1 = **20**.
+- **One lever / exact isomorphism:** lazily construct the secondary-label font once per
+  `draw_sequence_notes` call and borrow it for every nonempty note. The private edge-specific helper
+  name was generalized because edge labels and note labels have the same exact CSS contract.
+  Context-call order, font bytes, note backgrounds/text, coordinates, label counts, empty-note
+  handling, and every non-note drawing path remain unchanged. The permanent oracle covers zero,
+  fractional, and integral derived sizes plus quoted and fallback family strings.
+- **Remote correctness:** fail-closed `RCH_REQUIRE_REMOTE=1`, direct Cargo argv,
+  `--profile release`, worker `vmi1293453`. Untimed cold warm-up job `j-29928833041829231` passed
+  the exact-format oracle (1 passed, 0 failed). UBS on the owned Canvas file exited 0 with zero
+  critical findings.
+- **One foreground same-binary A/B:** job `j-29928833041829239`, alternating order, 9 rounds over
+  256 renders x 4,096 nonempty notes. Per-note-format samples `[112883360, 113914111, 115580754,
+  116720388, 119647439, 120823507, 122748407, 123498720, 125028208]` ns; hoisted samples
+  `[15988959, 16122779, 16359955, 16994233, 17691466, 17878446, 18103762, 18309410,
+  20167891]` ns. Exact font digest parity held (`267884695170056192`); median improved
+  **119,647,439 -> 17,691,466 ns (85.214%, 6.76x)** with non-overlapping distributions. The timed
+  test body took 1.23 s. RCH again discarded its just-warmed cache and repeated a 6m41s native
+  build, but compilation stayed outside both in-process arms and was not treated as evidence.
+- **Decision:** keep. A Canvas render with N nonempty sequence notes now performs one invariant font
+  allocation instead of N, with no drawing-contract change.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.25`)

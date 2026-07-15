@@ -893,6 +893,8 @@ impl Canvas2dRenderer {
         offset_y: f64,
         labels_drawn: &mut usize,
     ) {
+        let mut note_font = None;
+
         for note in &layout.extensions.sequence_notes {
             let x = f64::from(note.bounds.x) + offset_x;
             let y = f64::from(note.bounds.y) + offset_y;
@@ -909,11 +911,9 @@ impl Canvas2dRenderer {
             // Note text.
             if !note.text.is_empty() {
                 ctx.set_fill_style(&self.config.label_color);
-                ctx.set_font(&format!(
-                    "{}px {}",
-                    self.config.font_size * 0.85,
-                    self.config.font_family
-                ));
+                let note_font =
+                    note_font.get_or_insert_with(|| secondary_label_font_css(&self.config));
+                ctx.set_font(note_font.as_str());
                 ctx.set_text_align(TextAlign::Center);
                 ctx.set_text_baseline(TextBaseline::Middle);
                 ctx.fill_text(&note.text, x + w / 2.0, y + h / 2.0);
@@ -1045,7 +1045,7 @@ impl Canvas2dRenderer {
                 };
 
                 let edge_label_font =
-                    edge_label_font.get_or_insert_with(|| edge_label_font_css(&self.config));
+                    edge_label_font.get_or_insert_with(|| secondary_label_font_css(&self.config));
                 ctx.set_font(edge_label_font.as_str());
 
                 // Background for label
@@ -1539,7 +1539,7 @@ fn standard_node_font(config: &CanvasRenderConfig) -> String {
     format!("{}px {}", config.font_size, config.font_family)
 }
 
-fn edge_label_font_css(config: &CanvasRenderConfig) -> String {
+fn secondary_label_font_css(config: &CanvasRenderConfig) -> String {
     format!("{}px {}", config.font_size * 0.85, config.font_family)
 }
 
@@ -1727,7 +1727,7 @@ mod tests {
     }
 
     #[test]
-    fn edge_label_font_preserves_canvas_css_format() {
+    fn secondary_label_font_preserves_canvas_css_format() {
         for (font_size, font_family, expected) in [
             (0.0, "sans-serif", "0px sans-serif"),
             (10.0, "Test Sans", "8.5px Test Sans"),
@@ -1738,7 +1738,7 @@ mod tests {
                 font_family: font_family.to_owned(),
                 ..CanvasRenderConfig::default()
             };
-            assert_eq!(edge_label_font_css(&config), expected);
+            assert_eq!(secondary_label_font_css(&config), expected);
         }
     }
 
