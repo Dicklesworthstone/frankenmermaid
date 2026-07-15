@@ -17313,3 +17313,31 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   instead of N, with no serialized or drawing-contract change.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.23`)
+
+### 🟢LANDED: hoist invariant Canvas edge-label font formatting (2026-07-15)
+
+- **Negative-ledger-first boundary:** the preceding Canvas keep covers only standard labels in
+  `draw_nodes`. No earlier row records the separately scoped edge-label font in `draw_edges`; this
+  takes that residual without reopening node, class-compartment, note, or RenderScene text paths.
+- **Profile / attribution:** every labeled edge formatted the identical
+  `"{font_size * 0.85}px {font_family}"` string inside the edge loop. Renderer configuration has no
+  mutation path, so an E-label render performed E allocator round trips for identical bytes.
+  Impact 4 x confidence 5 / effort 1 = **20**.
+- **One lever / exact isomorphism:** lazily construct the edge-label font once per `draw_edges`
+  call and borrow it for every edge label. Context-call order, font bytes, text measurement,
+  backgrounds, label lines, coordinates, draw counts, and all non-edge font paths are unchanged.
+  A permanent oracle covers zero, fractional, and integral derived sizes plus quoted and fallback
+  family strings.
+- **Remote correctness:** fail-closed `RCH_REQUIRE_REMOTE=1`, direct Cargo argv,
+  `--profile release`, worker `vmi1293453`. Untimed cold warm-up job `j-29928833041829195` passed
+  the exact-format oracle (1 passed, 0 failed). UBS on the owned Canvas file exited 0 with zero
+  critical findings.
+- **One foreground same-binary A/B:** job `j-29928833041829207`, alternating order, 9 rounds over
+  256 renders x 4,096 labeled edges. Exact font digest parity held
+  (`267884695170056192`); median improved **122,112,387 -> 19,574,906 ns (83.970%, 6.24x)**.
+  The timed test body took 1.43 s. RCH discarded its just-warmed cache and repeated a 7m28s native
+  build, but compilation remained outside both in-process arms and was not treated as evidence.
+- **Decision:** keep. A Canvas render with E labeled edges now performs one invariant font
+  allocation instead of E, with no drawing-contract change.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.24`)

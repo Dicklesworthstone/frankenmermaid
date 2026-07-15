@@ -934,6 +934,7 @@ impl Canvas2dRenderer {
         labels_drawn: &mut usize,
     ) -> usize {
         let mut count = 0;
+        let mut edge_label_font = None;
 
         for edge_path in &layout.edges {
             let ir_edge = ir.edges.get(edge_path.edge_index);
@@ -1043,12 +1044,9 @@ impl Canvas2dRenderer {
                     )
                 };
 
-                let edge_label_font = format!(
-                    "{}px {}",
-                    self.config.font_size * 0.85,
-                    self.config.font_family
-                );
-                ctx.set_font(&edge_label_font);
+                let edge_label_font =
+                    edge_label_font.get_or_insert_with(|| edge_label_font_css(&self.config));
+                ctx.set_font(edge_label_font.as_str());
 
                 // Background for label
                 let lines: Vec<&str> = label.text.lines().collect();
@@ -1074,7 +1072,7 @@ impl Canvas2dRenderer {
 
                 // Label text
                 ctx.set_fill_style(&self.config.label_color);
-                ctx.set_font(&edge_label_font);
+                ctx.set_font(edge_label_font.as_str());
                 ctx.set_text_align(TextAlign::Center);
                 ctx.set_text_baseline(TextBaseline::Middle);
 
@@ -1541,6 +1539,10 @@ fn standard_node_font(config: &CanvasRenderConfig) -> String {
     format!("{}px {}", config.font_size, config.font_family)
 }
 
+fn edge_label_font_css(config: &CanvasRenderConfig) -> String {
+    format!("{}px {}", config.font_size * 0.85, config.font_family)
+}
+
 fn generic_canvas_diagram_title(ir: &MermaidDiagramIr) -> Option<&str> {
     // The canvas backend has dedicated pie chart rendering. Gantt/xy/quadrant still use
     // the generic node/edge path, so the generic title fallback remains enabled.
@@ -1721,6 +1723,22 @@ mod tests {
                 ..CanvasRenderConfig::default()
             };
             assert_eq!(standard_node_font(&config), expected);
+        }
+    }
+
+    #[test]
+    fn edge_label_font_preserves_canvas_css_format() {
+        for (font_size, font_family, expected) in [
+            (0.0, "sans-serif", "0px sans-serif"),
+            (10.0, "Test Sans", "8.5px Test Sans"),
+            (20.0, "'Inter', Arial", "17px 'Inter', Arial"),
+        ] {
+            let config = CanvasRenderConfig {
+                font_size,
+                font_family: font_family.to_owned(),
+                ..CanvasRenderConfig::default()
+            };
+            assert_eq!(edge_label_font_css(&config), expected);
         }
     }
 
