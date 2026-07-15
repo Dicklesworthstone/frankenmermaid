@@ -5035,6 +5035,18 @@ fn resolve_span_text_range_with_line_starts(
         });
     }
 
+    if shared_line_starts.is_none() && span.start.line == span.end.line {
+        let (line_start, line_end) = source_line_bounds(source, span.start.line as usize)?;
+        let start_byte =
+            byte_index_for_line_bounds(source, line_start, line_end, span.start.col as usize)?;
+        let end_byte =
+            byte_index_for_line_bounds(source, line_start, line_end, span.end.col as usize + 1)?;
+        return (end_byte >= start_byte).then_some(MermaidTextRange {
+            start_byte,
+            end_byte,
+        });
+    }
+
     let owned_line_starts;
     let line_starts = match shared_line_starts {
         Some(line_starts) => line_starts,
@@ -5068,6 +5080,32 @@ fn source_line_starts(source: &str) -> Vec<usize> {
     starts
 }
 
+fn source_line_bounds(source: &str, line: usize) -> Option<(usize, usize)> {
+    if line == 0 {
+        return None;
+    }
+
+    let bytes = source.as_bytes();
+    let line_start = if line == 1 {
+        0
+    } else {
+        memchr::memchr_iter(b'\n', bytes).nth(line - 2)? + 1
+    };
+    let next_line_start = memchr::memchr(b'\n', &bytes[line_start..])
+        .map_or(source.len(), |offset| line_start + offset + 1);
+    Some((line_start, trimmed_source_line_end(bytes, next_line_start)))
+}
+
+fn trimmed_source_line_end(bytes: &[u8], mut line_end: usize) -> usize {
+    if bytes.get(line_end.wrapping_sub(1)) == Some(&b'\n') {
+        line_end -= 1;
+    }
+    if bytes.get(line_end.wrapping_sub(1)) == Some(&b'\r') {
+        line_end -= 1;
+    }
+    line_end
+}
+
 fn byte_index_for_line_col(
     source: &str,
     line_starts: &[usize],
@@ -5079,14 +5117,23 @@ fn byte_index_for_line_col(
     }
 
     let line_start = *line_starts.get(line - 1)?;
-    let mut line_end = line_starts.get(line).copied().unwrap_or(source.len());
-    if source.as_bytes().get(line_end.wrapping_sub(1)) == Some(&b'\n') {
-        line_end -= 1;
-    }
-    if source.as_bytes().get(line_end.wrapping_sub(1)) == Some(&b'\r') {
-        line_end -= 1;
-    }
+    let line_end = trimmed_source_line_end(
+        source.as_bytes(),
+        line_starts.get(line).copied().unwrap_or(source.len()),
+    );
 
+    byte_index_for_line_bounds(source, line_start, line_end, col)
+}
+
+fn byte_index_for_line_bounds(
+    source: &str,
+    line_start: usize,
+    line_end: usize,
+    col: usize,
+) -> Option<usize> {
+    if col == 0 {
+        return None;
+    }
     let line_slice = source.get(line_start..line_end)?;
     let byte_offset = col - 1;
     if line_slice.get(..byte_offset).is_some_and(str::is_ascii) {
@@ -5398,9 +5445,9 @@ mod tests {
         MermaidLensEdit, MermaidLensEditResult, MermaidLensError, MermaidNativePressureSignals,
         MermaidPressureReport, MermaidPressureTier, MermaidQualityMode, MermaidSanitizeMode,
         MermaidSourceMap, MermaidSourceMapEntry, MermaidSourceMapKind, MermaidSupportLevel,
-        MermaidWarningCode, MermaidWasmPressureSignals, NodeMap, NodeSet, NodeShape, NotePosition,
-        Position, Span, StructuredDiagnostic, apply_lens_edit, build_lens_bindings,
-        capability_matrix, capability_matrix_json_pretty,
+        MermaidTextRange, MermaidWarningCode, MermaidWasmPressureSignals, NodeMap, NodeSet,
+        NodeShape, NotePosition, Position, Span, StructuredDiagnostic, apply_lens_edit,
+        build_lens_bindings, capability_matrix, capability_matrix_json_pretty,
         capability_readme_supported_diagram_types_markdown, capability_readme_surface_markdown,
         documented_diagram_types, is_allowed_style_property, is_safe_link_target,
         mermaid_layout_guard_observability, parse_mermaid_js_config_value, parse_style_string,
@@ -5889,6 +5936,39 @@ mod tests {
         (current_col == col).then_some(line_end)
     }
 
+    fn resolve_span_text_range_indexed_reference(
+        source: &str,
+        span: Span,
+    ) -> Option<MermaidTextRange> {
+        if span.is_unknown() {
+            return None;
+        }
+        if span.end.byte > span.start.byte {
+            return Some(MermaidTextRange {
+                start_byte: span.start.byte as usize,
+                end_byte: span.end.byte as usize,
+            });
+        }
+
+        let line_starts = super::source_line_starts(source);
+        let start_byte = super::byte_index_for_line_col(
+            source,
+            &line_starts,
+            span.start.line as usize,
+            span.start.col as usize,
+        )?;
+        let end_byte = super::byte_index_for_line_col(
+            source,
+            &line_starts,
+            span.end.line as usize,
+            span.end.col as usize + 1,
+        )?;
+        (end_byte >= start_byte).then_some(MermaidTextRange {
+            start_byte,
+            end_byte,
+        })
+    }
+
     #[test]
     fn memchr_line_starts_match_char_reference() {
         let cases = [
@@ -5939,6 +6019,141 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn single_line_span_resolution_matches_indexed_reference() {
+        let direct_bytes = Span::new(
+            Position {
+                line: 99,
+                col: 99,
+                byte: 1,
+            },
+            Position {
+                line: 99,
+                col: 99,
+                byte: 3,
+            },
+        );
+        let multi_line = Span::new(
+            Position {
+                line: 1,
+                col: 1,
+                byte: 0,
+            },
+            Position {
+                line: 2,
+                col: 2,
+                byte: 0,
+            },
+        );
+        let spans = [
+            Span::default(),
+            sample_span(1, 0, 1),
+            sample_span(1, 1, 1),
+            sample_span(1, 1, 8),
+            sample_span(2, 1, 1),
+            sample_span(2, 1, 4),
+            sample_span(3, 1, 8),
+            sample_span(4, 1, 1),
+            multi_line,
+            direct_bytes,
+        ];
+        let sources = [
+            "",
+            "\n",
+            "head\nbody\n",
+            "head\r\nbody\r\n",
+            "head\r\nαβ🙂\r\nlast\n",
+            "東京\nabcαdef\n\r\n",
+        ];
+
+        for source in sources {
+            for span in spans {
+                assert_eq!(
+                    resolve_span_text_range(source, span),
+                    resolve_span_text_range_indexed_reference(source, span),
+                    "source={source:?} span={span:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual short release A/B"]
+    fn perf_single_line_span_without_index_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const LINES: usize = 256;
+        const ITERATIONS: usize = 4_096;
+        const ROUNDS: usize = 9;
+
+        type SpanResolver = fn(&str, Span) -> Option<MermaidTextRange>;
+
+        fn measure(source: &str, span: Span, resolver: SpanResolver) -> (u128, u64) {
+            let mut digest = 0xcbf2_9ce4_8422_2325_u64;
+            let started = Instant::now();
+            for _ in 0..ITERATIONS {
+                let range = resolver(black_box(source), black_box(span))
+                    .expect("benchmark span should resolve");
+                for value in [range.start_byte, range.end_byte] {
+                    digest ^= value as u64;
+                    digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+                black_box(range);
+            }
+            (started.elapsed().as_nanos(), digest)
+        }
+
+        let mut source = String::from("flowchart LR\r\n");
+        let mut last_end_col = 0;
+        for index in 0..LINES {
+            let line = format!("N{index:03} --> N{:03}: label-{index:03}\r\n", index + 1);
+            last_end_col = line.trim_end().chars().count();
+            source.push_str(&line);
+        }
+        let span = sample_span(
+            u32::try_from(LINES + 1).expect("small corpus"),
+            1,
+            u32::try_from(last_end_col).expect("short line"),
+        );
+        assert_eq!(
+            resolve_span_text_range(&source, span),
+            resolve_span_text_range_indexed_reference(&source, span)
+        );
+
+        let mut indexed_ns = Vec::with_capacity(ROUNDS);
+        let mut direct_ns = Vec::with_capacity(ROUNDS);
+        let mut proof_digest = 0_u64;
+        for round in 0..ROUNDS {
+            let (indexed, direct) = if round % 2 == 0 {
+                (
+                    measure(&source, span, resolve_span_text_range_indexed_reference),
+                    measure(&source, span, resolve_span_text_range),
+                )
+            } else {
+                let direct = measure(&source, span, resolve_span_text_range);
+                let indexed = measure(&source, span, resolve_span_text_range_indexed_reference);
+                (indexed, direct)
+            };
+            assert_eq!(indexed.1, direct.1);
+            proof_digest = direct.1;
+            indexed_ns.push(indexed.0);
+            direct_ns.push(direct.0);
+        }
+
+        indexed_ns.sort_unstable();
+        direct_ns.sort_unstable();
+        let indexed_median_ns = indexed_ns[ROUNDS / 2];
+        let direct_median_ns = direct_ns[ROUNDS / 2];
+        let improvement_pct =
+            (indexed_median_ns as f64 - direct_median_ns as f64) * 100.0 / indexed_median_ns as f64;
+        let speedup = indexed_median_ns as f64 / direct_median_ns as f64;
+        println!(
+            "PERF single_line_span indexed_ns={indexed_ns:?} direct_ns={direct_ns:?} indexed_median_ns={indexed_median_ns} direct_median_ns={direct_median_ns} improvement_pct={improvement_pct:.3} speedup={speedup:.3}x parity=exact digest={proof_digest:016x} rounds={ROUNDS} iterations={ITERATIONS} lines={LINES} source_bytes={}",
+            source.len()
+        );
     }
 
     #[test]

@@ -17032,3 +17032,41 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   non-boundary prefix retains the old iterator unchanged.
 
   Agent: Codex (GPT-5, this session; bead `bd-1t7l.1.4`)
+
+### 🟢LANDED: resolve one-line ParseLens spans without an index `Vec` (2026-07-14)
+
+- **Negative-ledger-first boundary:** the prior ParseLens keeps share a line-start index across
+  batch bindings, resolve only the selected edit entry, accelerate newline discovery, and
+  direct-index ASCII columns. None removes the owned all-lines index from the public single-span
+  resolver used by `apply_lens_edit`; no direct one-line-bound probe is recorded.
+- **Profile attribution:** the measured 6.7 KB/256-line index build takes 7,177,397 ns per 4,096
+  calls (1,752 ns/call). The new ASCII column path takes 1,716,458 ns for 524,288 lookups
+  (about 3.3 ns/lookup, or 6.6 ns for both endpoints). Thus the allocated whole-source index is
+  over 99% of the measured line/column resolution primitive on this direct-edit workload. Required
+  residual work is the ID search, selected snippet/result ownership, and source splice. Impact 4 x
+  confidence 5 / effort 2 = **10**.
+- **One lever and proof gate:** when an unshared span starts and ends on one line, locate only that
+  line's bounds with `memchr` and reuse the identical column resolver; keep shared batch indexes and
+  the indexed multi-line fallback unchanged. Preserve unknown/direct-byte spans, one-based bounds,
+  empty and trailing-empty lines, LF/CRLF trimming, Unicode columns, invalid positions, ordering,
+  floating point, tie-breaking, and RNG. One same-binary alternating `--profile release` A/B keeps
+  only at 3% or better with exact range/digest parity.
+- **Measurement protocol:** use an untimed strict-remote release correctness run as the warm-up,
+  then run exactly one cheap foreground ignored A/B on the pinned worker. RCH compilation and
+  transfer stay outside both in-process timers.
+- **Remote proof:** fail-closed `RCH_REQUIRE_REMOTE=1`, direct Cargo argv, `--profile release`,
+  worker `vmi1293453`. The first untimed build (`j-29928833041828993`) caught a missing test-only
+  import before measurement; corrected warm-up/correctness job `j-29928833041828997` passed the
+  complete indexed-reference oracle. Foreground job `j-29928833041829001` ran exactly one ignored
+  A/B; RCH rebuilt despite the warm-up, outside both timers (test body 0.11 s).
+- **Real alternating A/B (9 rounds, 4,096 last-line resolutions over 256 lines):** indexed samples
+  `[6015818, 6538270, 6556808, 6619882, 6825700, 7179779, 7283013, 7293209, 7457294]`
+  ns; direct-bound samples `[5243684, 5261990, 5360209, 5513196, 5561609, 5719405,
+  5784602, 5789299, 6053576]` ns. Exact range/digest parity (`c3cdb15433c72325`);
+  median improved **6,825,700 -> 5,561,609 ns (18.520%, 1.227x)**, decisively clearing the
+  3% keep gate.
+- **Decision:** keep. Single-line unshared resolution scans to the selected line without allocating
+  or filling every line start; shared batch resolution and multi-line fallback retain the indexed
+  implementation, and both paths reuse identical CRLF and column logic.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1t7l.1.5`)
