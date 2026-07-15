@@ -2783,7 +2783,7 @@ impl MermaidWasmPressureSignals {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MermaidStageBudgetLedger {
-    pub stage: String,
+    pub stage: Cow<'static, str>,
     pub allocated_ms: u64,
     pub used_ms: u64,
     pub remaining_ms: u64,
@@ -2792,9 +2792,9 @@ pub struct MermaidStageBudgetLedger {
 
 impl MermaidStageBudgetLedger {
     #[must_use]
-    pub fn new(stage: &str, allocated_ms: u64) -> Self {
+    pub fn new(stage: impl Into<Cow<'static, str>>, allocated_ms: u64) -> Self {
         Self {
-            stage: stage.to_string(),
+            stage: stage.into(),
             allocated_ms,
             used_ms: 0,
             remaining_ms: allocated_ms,
@@ -7515,6 +7515,37 @@ mod tests {
         assert!(broker.events.iter().any(|event| {
             event.kind == "accounting" && event.note.as_deref() == Some("global budget exhausted")
         }));
+    }
+
+    fn budget_ledger_with_owned_stage_names(
+        pressure: &MermaidPressureReport,
+    ) -> MermaidBudgetLedger {
+        let mut broker = MermaidBudgetLedger::new(pressure);
+        broker.parse.stage = Cow::Owned(broker.parse.stage.to_string());
+        broker.layout.stage = Cow::Owned(broker.layout.stage.to_string());
+        broker.render.stage = Cow::Owned(broker.render.stage.to_string());
+        broker
+    }
+
+    #[test]
+    fn borrowed_budget_stage_names_match_owned_json_reference() {
+        let pressure = MermaidNativePressureSignals::default().into_report();
+        let borrowed = MermaidBudgetLedger::new(&pressure);
+        let owned = budget_ledger_with_owned_stage_names(&pressure);
+
+        assert_eq!(borrowed, owned);
+        assert!(matches!(&borrowed.parse.stage, Cow::Borrowed("parse")));
+        assert!(matches!(&borrowed.layout.stage, Cow::Borrowed("layout")));
+        assert!(matches!(&borrowed.render.stage, Cow::Borrowed("render")));
+
+        let borrowed_json = serde_json::to_string(&borrowed).unwrap();
+        assert_eq!(borrowed_json, serde_json::to_string(&owned).unwrap());
+        let roundtrip: MermaidBudgetLedger = serde_json::from_str(&borrowed_json).unwrap();
+        assert_eq!(roundtrip, borrowed);
+        assert!(matches!(roundtrip.parse.stage, Cow::Owned(_)));
+
+        let dynamic = crate::MermaidStageBudgetLedger::new(String::from("custom"), 10);
+        assert!(matches!(dynamic.stage, Cow::Owned(ref stage) if stage == "custom"));
     }
 
     const BUDGET_EVENT_TAGS: [(&str, Option<&str>); 12] = [

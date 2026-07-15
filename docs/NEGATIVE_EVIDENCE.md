@@ -17504,3 +17504,37 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   retaining exact parsing semantics.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.29`)
+
+### 🟢LANDED: borrow static budget stage-ledger names (2026-07-15)
+
+- **Negative-ledger-first boundary:** the adjacent budget lifecycle work already reserved the event
+  vector and borrowed static event tags and notes, but explicitly left the three
+  `MermaidStageBudgetLedger.stage` strings owned. No prior row records stage-ledger name ownership;
+  this does not reopen any capacity, event-field, parser, renderer, or diff lever.
+- **Profile / attribution:** five CLI/WASM processing paths construct a budget ledger. Every
+  construction allocated separate `String`s for `parse`, `layout`, and `render`, even though all
+  production call sites are static literals and stage names are only compared and serialized.
+  Removing those three allocator round trips scores impact 4 x confidence 5 / effort 1 = **20**.
+- **One lever / exact isomorphism:** store `MermaidStageBudgetLedger.stage` as
+  `Cow<'static, str>` and let the constructor borrow literals while retaining owned storage for
+  dynamic `String` inputs. Numeric accounting, stage order, event order, pressure handling, notes,
+  and JSON bytes are unchanged. A permanent oracle proves borrowed-vs-owned ledger equality,
+  byte-identical JSON, deserialize round-trip equality, borrowed production names, and an owned
+  dynamic name.
+- **Remote correctness:** fail-closed direct Cargo argv with `RCH_REQUIRE_REMOTE=1`,
+  `RCH_NO_SELF_HEALING=1`, and `--profile release` on worker `vmi1153651`. Initial untimed warm-up
+  job `j-29928833041829441` caught a test-only type-qualification error before timed code ran;
+  corrected job `j-29928833041829444` passed the full oracle (1 passed, 0 failed). UBS was blocked
+  only by the pre-existing false positive at line 4737 that classifies a graph node-ID comparison
+  as a secret comparison; it reported no changed-path critical finding.
+- **One foreground same-binary A/B:** job `j-29928833041829450`, alternating order, 9 rounds x
+  80,000 complete conservative ledger lifecycles. Owned-stage samples `[33014356, 33053499,
+  33796059, 34200150, 34391536, 34503754, 36814471, 37729403, 42886729]` ns; borrowed-stage
+  samples `[29499111, 29791404, 31728025, 31775693, 32035997, 33170176, 36370436, 36388769,
+  36756373]` ns. Exact ledger/JSON and per-round digest parity held (`1360000,0`); median improved
+  **34,391,536 -> 32,035,997 ns (6.849%, 1.074x)**. The timed body took 0.62s. RCH repeated a
+  CMake-free 2m45s cold compilation outside both timed arms; no silent interval crossed two minutes.
+- **Decision:** keep. Every shipped budget-ledger lifecycle now avoids three stage-name heap
+  allocations while retaining arbitrary deserialized or caller-owned stage names.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.30`)
