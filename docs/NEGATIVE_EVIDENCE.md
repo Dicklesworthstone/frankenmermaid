@@ -17434,3 +17434,38 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   observable within the required liveness window.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.27`)
+
+### 🟢LANDED: hoist invariant Canvas class-compartment font pair (2026-07-15)
+
+- **Negative-ledger-first boundary / retry gate:** `bd-1buv.27` classified this exact candidate as
+  INVALID/HOLD because its release test never reached executable code under the then-required
+  two-minute cold-build cutoff; it recorded no performance verdict. The retry condition is now met:
+  an untimed strict-remote cold build was explicitly allowed to finish. The preceding Canvas keeps
+  cover standard-node, edge-label, sequence-note, and sequence-fragment fonts, not the class
+  header/member pair.
+- **Profile / attribution:** every qualifying class node in `draw_nodes` formatted the same bold
+  header CSS and 0.9-scale member CSS from private, immutable renderer configuration. A render with
+  C class-compartment nodes therefore performed 2C heap allocations for invariant bytes. Impact 4
+  x confidence 5 / effort 1 = **20**.
+- **One lever / exact isomorphism:** lazily create `(header_font, member_font)` on the first
+  qualifying class node and reuse both strings for the rest of that `draw_nodes` call. Font bytes,
+  text/layout arithmetic, branch selection, Canvas call order, labels, and draw counts are
+  unchanged. A permanent oracle covers zero, fractional, integral, quoted, and fallback-family CSS.
+- **Remote correctness:** fail-closed direct Cargo argv with `RCH_REQUIRE_REMOTE=1`,
+  `RCH_NO_SELF_HEALING=1`, and `--profile release` on worker `vmi1152480`. The first untimed cold
+  warm-up job `j-29928833041829341` completed the 9m31s native build but selected zero tests because
+  its exact filter missed; it is not correctness evidence. Corrected untimed job
+  `j-29928833041829354` rebuilt cold and passed the real exact-format oracle (1 passed, 0 failed).
+  UBS on the owned Canvas file found zero critical issues and exited 0.
+- **One foreground same-binary A/B:** job `j-29928833041829366`, alternating order, 9 rounds over
+  128 renders x 4,096 qualifying class nodes. Per-node-pair format samples
+  `[129176887, 130883087, 143828088, 148968189, 152759443, 165947198, 166739882, 174933554,
+  197734382]` ns; one-pair-per-render samples `[375982, 401399, 426037, 433198, 436142,
+  472677, 485506, 497514, 578705]` ns. Exact digest parity held (`36175872`); median improved
+  **152,759,443 -> 436,142 ns (99.714%, 350.25x)**. The timed body took 1.58s. RCH discarded the
+  nominally warmed target and repeated a 9m57s cold build, but compilation remained outside both
+  in-process arms and is not benchmark evidence.
+- **Decision:** keep. A Canvas render with C qualifying class nodes now allocates the invariant CSS
+  pair once instead of twice per node, with the drawing and formatting contracts unchanged.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.28`)

@@ -1101,6 +1101,7 @@ impl Canvas2dRenderer {
         labels_drawn: &mut usize,
     ) -> usize {
         let mut count = 0;
+        let mut class_compartment_fonts = None;
         let mut standard_label_font = None;
 
         for node_box in &layout.nodes {
@@ -1150,10 +1151,9 @@ impl Canvas2dRenderer {
                     format!("{class_name}<{}>", meta.generics.join(", "))
                 };
 
-                ctx.set_font(&format!(
-                    "bold {}px {}",
-                    self.config.font_size, self.config.font_family
-                ));
+                let class_fonts = class_compartment_fonts
+                    .get_or_insert_with(|| class_compartment_font_css(&self.config));
+                ctx.set_font(class_fonts.0.as_str());
                 ctx.set_text_align(TextAlign::Center);
                 let mut cursor_y = y + line_h;
                 ctx.fill_text(&display_name, x + w / 2.0, cursor_y);
@@ -1170,7 +1170,7 @@ impl Canvas2dRenderer {
                 cursor_y += member_font * 0.5;
 
                 // Attributes.
-                ctx.set_font(&format!("{}px {}", member_font, self.config.font_family));
+                ctx.set_font(class_fonts.1.as_str());
                 ctx.set_text_align(TextAlign::Left);
                 for attr in &meta.attributes {
                     if cursor_y > y + h - line_h * 0.5 {
@@ -1545,6 +1545,13 @@ fn sequence_fragment_font_css(config: &CanvasRenderConfig) -> String {
     format!("bold {}px {}", config.font_size * 0.8, config.font_family)
 }
 
+fn class_compartment_font_css(config: &CanvasRenderConfig) -> (String, String) {
+    (
+        format!("bold {}px {}", config.font_size, config.font_family),
+        format!("{}px {}", config.font_size * 0.9, config.font_family),
+    )
+}
+
 fn generic_canvas_diagram_title(ir: &MermaidDiagramIr) -> Option<&str> {
     // The canvas backend has dedicated pie chart rendering. Gantt/xy/quadrant still use
     // the generic node/edge path, so the generic title fallback remains enabled.
@@ -1757,6 +1764,33 @@ mod tests {
                 ..CanvasRenderConfig::default()
             };
             assert_eq!(sequence_fragment_font_css(&config), expected);
+        }
+    }
+
+    #[test]
+    fn class_compartment_fonts_preserve_canvas_css_format() {
+        for (font_size, font_family, expected) in [
+            (0.0, "sans-serif", ("bold 0px sans-serif", "0px sans-serif")),
+            (
+                12.5,
+                "Test Sans, serif",
+                ("bold 12.5px Test Sans, serif", "11.25px Test Sans, serif"),
+            ),
+            (
+                20.0,
+                "'Inter', Arial",
+                ("bold 20px 'Inter', Arial", "18px 'Inter', Arial"),
+            ),
+        ] {
+            let config = CanvasRenderConfig {
+                font_size,
+                font_family: font_family.to_owned(),
+                ..CanvasRenderConfig::default()
+            };
+            assert_eq!(
+                class_compartment_font_css(&config),
+                (expected.0.to_owned(), expected.1.to_owned())
+            );
         }
     }
 
