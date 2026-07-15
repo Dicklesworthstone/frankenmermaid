@@ -37,6 +37,11 @@ pub struct TermRenderer {
     cluster_glyphs: ClusterGlyphs,
 }
 
+#[inline]
+fn compact_label_width(line: &str) -> usize {
+    line.chars().count()
+}
+
 impl TermRenderer {
     /// Create a new renderer with resolved configuration.
     #[must_use]
@@ -637,8 +642,7 @@ impl TermRenderer {
         let start_y = y + (h.saturating_sub(lines.len())) / 2;
 
         for (i, line) in lines.iter().enumerate() {
-            let label_chars: Vec<char> = line.chars().collect();
-            let label_len = label_chars.len();
+            let label_len = compact_label_width(line);
             let label_x = x + (w.saturating_sub(label_len)) / 2;
             buffer.set_string(label_x, start_y + i, line);
         }
@@ -2197,6 +2201,137 @@ mod tests {
         assert_eq!(renderer.truncate_label("two  spaces"), "two spaces");
         assert_eq!(renderer.truncate_label("tab\there"), "tab here");
         assert_eq!(renderer.truncate_label("界面 42"), "界面 42");
+    }
+
+    #[inline]
+    fn owned_compact_label_width_reference(line: &str) -> usize {
+        let chars: Vec<char> = line.chars().collect();
+        chars.len()
+    }
+
+    #[test]
+    fn compact_label_width_preserves_unicode_scalar_centering() {
+        for line in [
+            "",
+            "Node 42",
+            "界面 → 缓存",
+            "e\u{301}quipe",
+            "🦀 worker",
+            "مرحبا",
+            "🏳️‍🌈",
+        ] {
+            assert_eq!(
+                compact_label_width(line),
+                owned_compact_label_width_reference(line),
+                "Unicode-scalar width changed for {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "release-only same-binary performance probe"]
+    fn compact_label_width_streaming_perf_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const SAMPLE_COUNT: usize = 9;
+        const SWEEPS: usize = 16;
+        const BOX_WIDTH: usize = 48;
+        const BOX_X: usize = 7;
+
+        let patterns = [
+            "Node 0042",
+            "API gateway",
+            "界面 → 缓存",
+            "e\u{301}quipe worker",
+            "Δ-state_17",
+            "🦀 render worker",
+            "مرحبا service",
+            "request\nresponse",
+        ];
+        let labels: Vec<String> = (0..4_096)
+            .map(|index| format!("{}-{index}", patterns[index % patterns.len()]))
+            .collect();
+
+        fn centered_cell_stream(
+            labels: &[String],
+            width: impl Fn(&str) -> usize,
+        ) -> Vec<(usize, usize, usize, char)> {
+            let mut cells = Vec::new();
+            for (label_index, label) in labels.iter().enumerate() {
+                for (line_index, line) in label.lines().enumerate() {
+                    let label_x = BOX_X + (BOX_WIDTH.saturating_sub(width(line))) / 2;
+                    cells.extend(
+                        line.chars()
+                            .enumerate()
+                            .map(|(offset, ch)| (label_index, line_index, label_x + offset, ch)),
+                    );
+                }
+            }
+            cells
+        }
+
+        fn measure(labels: &[String], width: impl Fn(&str) -> usize) -> (u128, u64) {
+            let started = Instant::now();
+            let mut digest = 0xcbf2_9ce4_8422_2325_u64;
+            for _ in 0..SWEEPS {
+                for label in labels {
+                    for line in black_box(label.as_str()).lines() {
+                        let label_width = black_box(width(black_box(line)));
+                        let label_x = BOX_X + (BOX_WIDTH.saturating_sub(label_width)) / 2;
+                        digest ^= label_width as u64;
+                        digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+                        digest ^= label_x as u64;
+                        digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+                        for (offset, ch) in line.chars().enumerate() {
+                            digest ^= ((label_x + offset) as u64).rotate_left(32)
+                                ^ u64::from(u32::from(ch));
+                            digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+                        }
+                    }
+                }
+            }
+            (started.elapsed().as_nanos(), black_box(digest))
+        }
+
+        assert_eq!(
+            centered_cell_stream(&labels, owned_compact_label_width_reference),
+            centered_cell_stream(&labels, compact_label_width),
+        );
+
+        let mut baseline_samples = Vec::with_capacity(SAMPLE_COUNT);
+        let mut candidate_samples = Vec::with_capacity(SAMPLE_COUNT);
+        let mut expected_digest = None;
+        for sample in 0..SAMPLE_COUNT {
+            let (baseline, candidate) = if sample % 2 == 0 {
+                (
+                    measure(&labels, owned_compact_label_width_reference),
+                    measure(&labels, compact_label_width),
+                )
+            } else {
+                let candidate = measure(&labels, compact_label_width);
+                let baseline = measure(&labels, owned_compact_label_width_reference);
+                (baseline, candidate)
+            };
+            assert_eq!(candidate.1, baseline.1);
+            assert_eq!(*expected_digest.get_or_insert(baseline.1), baseline.1);
+            baseline_samples.push(baseline.0);
+            candidate_samples.push(candidate.0);
+        }
+
+        baseline_samples.sort_unstable();
+        candidate_samples.sort_unstable();
+        let baseline_median = baseline_samples[SAMPLE_COUNT / 2];
+        let candidate_median = candidate_samples[SAMPLE_COUNT / 2];
+        let improvement = (1.0 - candidate_median as f64 / baseline_median as f64) * 100.0;
+
+        eprintln!("baseline_ns={baseline_samples:?}");
+        eprintln!("candidate_ns={candidate_samples:?}");
+        eprintln!(
+            "PERF compact_terminal_label_width baseline_median_ns={baseline_median} candidate_median_ns={candidate_median} improvement_pct={improvement:.3} parity=exact rounds={SAMPLE_COUNT} labels={} sweeps={SWEEPS} digest={:016x}",
+            labels.len(),
+            expected_digest.expect("at least one performance sample")
+        );
     }
 
     #[test]

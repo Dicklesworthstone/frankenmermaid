@@ -16793,3 +16793,38 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   **84.604% improvement**. This clears the 3% keep gate, so the borrowed static dash is retained.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.13`)
+
+### 🟢LANDED: count compact terminal node-label width without `Vec<char>` after warm-up (2026-07-14)
+
+- **Negative-ledger-first boundary:** `bd-1buv.10` is INVALID / HOLD because its cold worker
+  target never built the named test binary; neither timed arm ran, so it provides no performance
+  verdict. The landed terminal label fast path removes sanitize/wrap/join work before rendering,
+  while this retry targets the remaining Unicode-scalar width allocation inside compact
+  `render_node_cell`.
+- **Profile attribution:** compact/`CellOnly` rendering calls `render_node_cell` once for every
+  layout node and sequence mirror header. Each label line collects all scalars into `Vec<char>`
+  solely to read `.len()`, then `CellBuffer::set_string` scans the original line for emission.
+  Ranked against the unavoidable emission scan and border writes, removing this allocator round
+  trip scores impact 3 × confidence 5 ÷ effort 1 = 15.
+- **One lever and proof:** replace only the owned scalar collection used for width with
+  `line.chars().count()`, preserving label line splitting, Unicode-scalar width semantics,
+  centering, and cell writes. A same-binary alternating-order A/B covers 4,096 realistic ASCII,
+  Unicode, and multiline label lines and requires exact width/position/cell-stream parity plus at
+  least 3% median improvement.
+- **Corrected remote protocol:** first complete a fail-closed, untimed `--profile release --no-run`
+  build on the pinned worker with no timeout; only then run the cheap ignored A/B against that
+  worker-scoped target. Compilation time is not timing evidence.
+- **Untimed warm-up:** fail-closed RCH job `j-29928833041828759` built the release test binary on
+  `vmi1293453` in 544.5 s. This compile-only cache miss had no timeout and supplied no timing
+  evidence.
+- **Remote A/B:** fail-closed RCH job `j-29928833041828772` ran `cargo test -j1 --profile release
+  -p fm-render-term --lib renderer::tests::compact_label_width_streaming_perf_ab -- --ignored
+  --exact --nocapture` on the same worker and target. RCH unexpectedly missed its just-warmed cache
+  again, but compilation remained outside the in-process timer; the complete A/B itself finished
+  in 0.26 s.
+- **Result:** exact Unicode-scalar width, centered cell-stream, and per-round digest parity
+  (`2c503b62719a5e65`). Baseline median 18,248,203 ns versus candidate median 10,127,472 ns across
+  nine alternating rounds over 4,096 labels × 16 sweeps is a **44.502% improvement**. This clears
+  the 3% keep gate, so the allocation-free scalar count is retained.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.14`)
