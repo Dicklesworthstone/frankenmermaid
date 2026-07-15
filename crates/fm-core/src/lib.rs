@@ -2818,7 +2818,7 @@ pub struct MermaidBudgetEvent {
     pub remaining_ms: Option<u64>,
     pub remaining_total_ms: u64,
     pub exceeded: bool,
-    pub note: Option<String>,
+    pub note: Option<Cow<'static, str>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2915,7 +2915,7 @@ impl MermaidBudgetLedger {
                 remaining_ms: None,
                 remaining_total_ms: ledger.snapshot_remaining_total_ms(),
                 exceeded: false,
-                note: Some(String::from(
+                note: Some(Cow::Borrowed(
                     "telemetry unavailable; broker used conservative global budget defaults",
                 )),
             });
@@ -3004,9 +3004,7 @@ impl MermaidBudgetLedger {
             self.layout.used_ms,
             self.layout.remaining_ms,
             self.layout.exceeded,
-            Some(String::from(
-                "layout share increased after parse arbitration",
-            )),
+            Some("layout share increased after parse arbitration"),
         );
         self.push_stage_event(
             "rebalance",
@@ -3015,9 +3013,7 @@ impl MermaidBudgetLedger {
             self.render.used_ms,
             self.render.remaining_ms,
             self.render.exceeded,
-            Some(String::from(
-                "render tail budget recalculated after parse arbitration",
-            )),
+            Some("render tail budget recalculated after parse arbitration"),
         );
     }
 
@@ -3037,11 +3033,11 @@ impl MermaidBudgetLedger {
             remaining_ms: None,
             remaining_total_ms: self.snapshot_remaining_total_ms(),
             exceeded: self.exhausted,
-            note: Some(if self.exhausted {
-                String::from("global budget exhausted")
+            note: Some(Cow::Borrowed(if self.exhausted {
+                "global budget exhausted"
             } else {
-                String::from("global budget accounting updated")
-            }),
+                "global budget accounting updated"
+            })),
         });
     }
 
@@ -3054,7 +3050,7 @@ impl MermaidBudgetLedger {
         used_ms: u64,
         remaining_ms: u64,
         exceeded: bool,
-        note: Option<String>,
+        note: Option<&'static str>,
     ) {
         self.events.push(MermaidBudgetEvent {
             kind: Cow::Borrowed(kind),
@@ -3064,7 +3060,7 @@ impl MermaidBudgetLedger {
             remaining_ms: Some(remaining_ms),
             remaining_total_ms: self.snapshot_remaining_total_ms(),
             exceeded,
-            note,
+            note: note.map(Cow::Borrowed),
         });
     }
 
@@ -7508,6 +7504,10 @@ mod tests {
                     .stage
                     .as_ref()
                     .is_none_or(|stage| matches!(stage, Cow::Borrowed(_)))
+                && event
+                    .note
+                    .as_ref()
+                    .is_none_or(|note| matches!(note, Cow::Borrowed(_)))
         }));
         assert!(broker.events.iter().any(|event| {
             event.kind == "rebalance" && event.stage.as_deref() == Some("layout")
@@ -7532,8 +7532,24 @@ mod tests {
         ("accounting", None),
     ];
 
+    const BUDGET_EVENT_NOTES: [Option<&str>; 12] = [
+        None,
+        None,
+        None,
+        Some("telemetry unavailable; broker used conservative global budget defaults"),
+        None,
+        Some("layout share increased after parse arbitration"),
+        Some("render tail budget recalculated after parse arbitration"),
+        Some("global budget accounting updated"),
+        None,
+        Some("global budget accounting updated"),
+        None,
+        Some("global budget accounting updated"),
+    ];
+
     fn build_budget_events_with(
         tag: impl Fn(&'static str) -> Cow<'static, str> + Copy,
+        note: impl Fn(&'static str) -> Cow<'static, str> + Copy,
     ) -> Vec<crate::MermaidBudgetEvent> {
         let mut events = Vec::with_capacity(BUDGET_EVENT_TAGS.len());
         for (index, &(kind, stage)) in BUDGET_EVENT_TAGS.iter().enumerate() {
@@ -7545,7 +7561,7 @@ mod tests {
                 remaining_ms: Some(120 - index as u64),
                 remaining_total_ms: 120 - index as u64,
                 exceeded: false,
-                note: None,
+                note: BUDGET_EVENT_NOTES[index].map(note),
             });
         }
         events
@@ -7553,8 +7569,8 @@ mod tests {
 
     #[test]
     fn borrowed_budget_event_tags_match_owned_json_reference() {
-        let borrowed = build_budget_events_with(Cow::Borrowed);
-        let owned = build_budget_events_with(|tag| Cow::Owned(tag.to_owned()));
+        let borrowed = build_budget_events_with(Cow::Borrowed, Cow::Borrowed);
+        let owned = build_budget_events_with(|tag| Cow::Owned(tag.to_owned()), Cow::Borrowed);
         assert_eq!(borrowed, owned);
         assert!(borrowed.iter().all(|event| {
             matches!(event.kind, Cow::Borrowed(_))
@@ -7569,6 +7585,49 @@ mod tests {
         let roundtrip: Vec<crate::MermaidBudgetEvent> =
             serde_json::from_str(&borrowed_json).unwrap();
         assert_eq!(roundtrip, borrowed);
+    }
+
+    #[test]
+    fn borrowed_budget_event_notes_match_owned_json_reference() {
+        let borrowed = build_budget_events_with(Cow::Borrowed, Cow::Borrowed);
+        let owned = build_budget_events_with(Cow::Borrowed, |note| Cow::Owned(note.to_owned()));
+        assert_eq!(borrowed, owned);
+        assert_eq!(
+            borrowed.iter().filter(|event| event.note.is_some()).count(),
+            6
+        );
+        assert!(borrowed.iter().all(|event| {
+            event
+                .note
+                .as_ref()
+                .is_none_or(|note| matches!(note, Cow::Borrowed(_)))
+        }));
+
+        let borrowed_json = serde_json::to_string(&borrowed).unwrap();
+        assert_eq!(borrowed_json, serde_json::to_string(&owned).unwrap());
+        let roundtrip: Vec<crate::MermaidBudgetEvent> =
+            serde_json::from_str(&borrowed_json).unwrap();
+        assert_eq!(roundtrip, borrowed);
+
+        let pressure = MermaidNativePressureSignals::default().into_report();
+        let mut broker = MermaidBudgetLedger::new(&pressure);
+        broker.record_parse(5);
+        broker.record_layout(30);
+        broker.record_render(10);
+        assert_eq!(
+            broker
+                .events
+                .iter()
+                .filter(|event| event.note.is_some())
+                .count(),
+            6
+        );
+        assert!(broker.events.iter().all(|event| {
+            event
+                .note
+                .as_ref()
+                .is_none_or(|note| matches!(note, Cow::Borrowed(_)))
+        }));
     }
 
     #[test]

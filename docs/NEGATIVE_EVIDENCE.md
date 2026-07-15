@@ -17247,3 +17247,37 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   preserving its complete serialized evidence contract.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.21`)
+
+### 🟢LANDED: borrow static budget-event notes (2026-07-15)
+
+- **Negative-ledger-first boundary:** the immediately preceding budget-event tag keep explicitly
+  left event notes owned. No earlier row records a `MermaidBudgetEvent.note` ownership or borrowed
+  note probe. This takes that named residual without reopening tag ownership, event capacity, or
+  any rejected renderer/parser family.
+- **Profile / attribution:** the normal 11-event budget lifecycle allocates five note strings: two
+  parse-arbitration rebalance notes and one accounting note after each of parse, layout, and render.
+  Conservative telemetry adds a sixth allocation for `policy_note`. Every event-note constructor is
+  private, every production value is a static literal, and notes are serialized and compared but
+  never mutated. Impact 4 x confidence 5 / effort 1 = **20**.
+- **One lever / exact isomorphism:** store only `MermaidBudgetEvent.note` as
+  `Option<Cow<'static, str>>` and borrow its static production literals. Ledger-level `notes`, event
+  tags, capacity, order, accounting, and numeric fields are unchanged; deserialization still owns
+  arbitrary input strings. A permanent oracle proves borrowed-vs-owned struct equality,
+  byte-identical JSON, deserialize round-trip equality, six-note coverage, and borrowed notes in a
+  real conservative lifecycle.
+- **Remote correctness:** fail-closed `RCH_REQUIRE_REMOTE=1`, direct Cargo argv,
+  `--profile release`, worker `vmi1293453`. Untimed warm-up job `j-29928833041829141` passed the
+  JSON/round-trip/real-lifecycle oracle (1 passed, 0 failed). UBS found only the pre-existing false
+  positive that treats a graph node-ID comparison as a secret comparison, plus pre-existing
+  file-wide inventory warnings; it found no changed-path defect.
+- **One foreground same-binary A/B:** job `j-29928833041829145`, alternating order, 9 rounds x
+  80,000 twelve-event batches with six notes. Owned-note samples `[16309067, 17176526, 17221553,
+  17499940, 18647496, 18941386, 18957230, 20513777, 30677222]` ns; borrowed-note samples
+  `[13753685, 13811631, 13944369, 13968096, 14162768, 14231580, 14696515, 16399223,
+  23156371]` ns. Exact vector and JSON parity held; median improved **18,647,496 -> 14,162,768 ns
+  (24.050%, 1.317x)**. The timed test body took 0.31 s; RCH's cold compilation stayed outside both
+  in-process arms.
+- **Decision:** keep. Each shipped normal lifecycle avoids five heap allocations; conservative
+  telemetry avoids six, with the complete serialized evidence contract unchanged.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.22`)
