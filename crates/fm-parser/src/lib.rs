@@ -873,43 +873,55 @@ fn collect_quoted_literals(
     quoted_literals: &mut Vec<MermaidQuotedSpan>,
     offsets: &[usize],
 ) {
-    let mut active: Option<(MermaidQuoteStyle, usize, char)> = None;
-    let mut escaped = false;
+    let bytes = source.as_bytes();
+    let mut cursor = 0_usize;
 
-    for (byte_index, ch) in source.char_indices() {
-        if let Some((style, start_byte, terminator)) = active {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            if terminator != '`' && ch == '\\' {
-                escaped = true;
-                continue;
-            }
-            if ch == terminator {
-                push_quoted_span(
-                    source,
-                    quoted_literals,
-                    style,
-                    start_byte,
-                    byte_index + ch.len_utf8(),
-                    offsets,
-                );
-                active = None;
-            }
-            continue;
-        }
-
-        let style = match ch {
-            '"' => Some(MermaidQuoteStyle::Double),
-            '\'' => Some(MermaidQuoteStyle::Single),
-            '`' => Some(MermaidQuoteStyle::Backtick),
-            _ => None,
+    while cursor < bytes.len() {
+        let Some(relative_start) = memchr::memchr3(b'"', b'\'', b'`', &bytes[cursor..]) else {
+            break;
         };
-        if let Some(style) = style {
-            active = Some((style, byte_index, ch));
-            escaped = false;
-        }
+        let start_byte = cursor + relative_start;
+        let (style, terminator) = match bytes[start_byte] {
+            b'"' => (MermaidQuoteStyle::Double, b'"'),
+            b'\'' => (MermaidQuoteStyle::Single, b'\''),
+            _ => (MermaidQuoteStyle::Backtick, b'`'),
+        };
+        cursor = start_byte + 1;
+
+        let end_byte = if terminator == b'`' {
+            memchr::memchr(terminator, &bytes[cursor..]).map(|relative| cursor + relative + 1)
+        } else {
+            let mut end_byte = None;
+            while cursor < bytes.len() {
+                let Some(relative) = memchr::memchr2(terminator, b'\\', &bytes[cursor..]) else {
+                    break;
+                };
+                let delimiter = cursor + relative;
+                if bytes[delimiter] == terminator {
+                    end_byte = Some(delimiter + 1);
+                    break;
+                }
+
+                cursor = delimiter + 1;
+                if let Some(escaped) = source[cursor..].chars().next() {
+                    cursor += escaped.len_utf8();
+                }
+            }
+            end_byte
+        };
+
+        let Some(end_byte) = end_byte else {
+            break;
+        };
+        push_quoted_span(
+            source,
+            quoted_literals,
+            style,
+            start_byte,
+            end_byte,
+            offsets,
+        );
+        cursor = end_byte;
     }
 }
 
@@ -1326,6 +1338,77 @@ mod tests {
                 newline_metadata_scalar_reference(source),
                 "source={source:?}"
             );
+        }
+    }
+
+    fn quoted_literals_scalar_reference(
+        source: &str,
+        offsets: &[usize],
+    ) -> Vec<super::MermaidQuotedSpan> {
+        let mut quoted_literals = Vec::new();
+        let mut active: Option<(super::MermaidQuoteStyle, usize, char)> = None;
+        let mut escaped = false;
+
+        for (byte_index, ch) in source.char_indices() {
+            if let Some((style, start_byte, terminator)) = active {
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                if terminator != '`' && ch == '\\' {
+                    escaped = true;
+                    continue;
+                }
+                if ch == terminator {
+                    super::push_quoted_span(
+                        source,
+                        &mut quoted_literals,
+                        style,
+                        start_byte,
+                        byte_index + ch.len_utf8(),
+                        offsets,
+                    );
+                    active = None;
+                }
+                continue;
+            }
+
+            let style = match ch {
+                '"' => Some(super::MermaidQuoteStyle::Double),
+                '\'' => Some(super::MermaidQuoteStyle::Single),
+                '`' => Some(super::MermaidQuoteStyle::Backtick),
+                _ => None,
+            };
+            if let Some(style) = style {
+                active = Some((style, byte_index, ch));
+                escaped = false;
+            }
+        }
+
+        quoted_literals
+    }
+
+    #[test]
+    fn delimiter_indexed_quoted_literals_match_scalar_reference() {
+        for source in [
+            "",
+            "flowchart LR\nA --> B\n",
+            "A[\"double\"] B['single'] C[`backtick`]",
+            r#"A["escaped \" quote"] B['escaped \' quote']"#,
+            "A[`backslash does not escape \\` tail `]",
+            "A[\"Unicode αβ 中文 🚀\"] --> B['café']",
+            "A[\"line one\nline two\"]\r\nB[`multi\nline`]",
+            "\"outer 'single' `tick` outer\" 'outer \"double\" outer'",
+            "dangling \"quote",
+            "dangling 'escape\\",
+            "%%{init: {\"theme\":\"dark\", \"label\":\"a\\\"b\"}}%%",
+            "'' \"\" `` '\\\\' \"\\\\\"",
+        ] {
+            let (offsets, _) = super::line_offsets_and_ending_style(source);
+            let expected = quoted_literals_scalar_reference(source, &offsets);
+            let mut actual = Vec::new();
+            super::collect_quoted_literals(source, &mut actual, &offsets);
+            assert_eq!(actual, expected, "source={source:?}");
         }
     }
 

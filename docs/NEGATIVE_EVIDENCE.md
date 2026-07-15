@@ -17615,3 +17615,43 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   retained.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.33`)
+
+### 🟢LANDED: index ParseLens quoted literals by ASCII delimiters (2026-07-15)
+
+- **Negative-ledger-first boundary:** the previous format-capture keep fused newline metadata but
+  left `collect_quoted_literals` as an unconditional whole-source `char_indices` traversal. No
+  prior row records delimiter-indexed quote capture; the nearby ParseLens line-index and ASCII
+  column keeps operate on source-map editing rather than this parser-side format-complement pass.
+- **Profile / attribution:** existing same-worker evidence attributes **8.5-8.8% of parse** to
+  `capture_format_complement`. After newline fusion, quoted-literal discovery remained its only
+  unconditional whole-source UTF-8 scalar pass, even on the common quote-sparse input. It also
+  performs no useful work between the ASCII quote, terminator, and escape sentinels. Impact 4 x
+  confidence 5 / effort 1 = **20**.
+- **One lever / exact isomorphism:** replace scalar decoding between sentinels with `memchr3` for
+  opening single/double/backtick quotes, `memchr2` for a non-backtick terminator or backslash, and
+  `memchr` for a backtick terminator. Escaped single Unicode scalars, backtick non-escaping,
+  unmatched quotes, byte ranges, span order, copied text, line/column positions, ownership,
+  floating point, tie-breaking, and RNG are unchanged. A permanent scalar-reference oracle covers
+  empty and quote-free sources, every quote style, empty literals, nested foreign quote styles,
+  ASCII and Unicode escapes, multiline/CRLF text, directives, and unmatched endings.
+- **Remote correctness / cache pivot:** fail-closed direct Cargo argv with
+  `RCH_REQUIRE_REMOTE=1`, `RCH_NO_SELF_HEALING=1`, `--profile release`, and explicit
+  `--config profile.release.lto=false`. Untimed cold warm-up job `j-29928833041829522` on
+  `vmi1153651` passed the exact oracle; when that worker evicted the identical target before the
+  measurement, the rebuild was killed. Switched-worker warm-up job `j-29928833041829534` on
+  `vmi1293453` also passed. That worker likewise discarded the target, so its first rebuild was
+  killed and the proof mechanics pivoted to one uncapped Cargo invocation whose compile stayed
+  outside the in-process timers; no timeout or partial build was scored.
+- **One foreground same-binary A/B:** job `j-29928833041829541` on `vmi1293453`, alternating
+  order, 9 rounds x 128 sweeps over a 34,324-byte / 1,024-line mixed flowchart with 320 quoted
+  spans. Scalar samples `[11533767, 11187139, 11039918, 11574979, 11114239, 10915423,
+  8973966, 10311808, 11495459]` ns; delimiter-indexed samples `[6323451, 5702392,
+  5661140, 5721791, 5482353, 5701931, 4512552, 5505136, 5298638]` ns. Exact 320-span and
+  digest parity held (`1332356848818939264`); median improved **11,114,239 -> 5,661,140 ns
+  (49.064%, 1.963x)**. The timed test body took 0.15s; the repeated 143.8-second no-LTO build
+  stayed outside both arms.
+- **Decision:** keep. ParseLens/evidence quote capture now visits sparse ASCII delimiters instead
+  of decoding every Unicode scalar in the complete source, with the one-shot A/B removed and the
+  scalar-reference oracle retained.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.34`)
