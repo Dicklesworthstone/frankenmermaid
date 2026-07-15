@@ -835,6 +835,8 @@ impl Canvas2dRenderer {
         offset_x: f64,
         offset_y: f64,
     ) {
+        let mut fragment_font = None;
+
         for fragment in &layout.extensions.sequence_fragments {
             let x = f64::from(fragment.bounds.x) + offset_x;
             let y = f64::from(fragment.bounds.y) + offset_y;
@@ -856,11 +858,9 @@ impl Canvas2dRenderer {
             if fragment.label.is_empty() {
                 let label = fragment_kind_label(fragment.kind);
                 ctx.set_fill_style(&self.config.label_color);
-                ctx.set_font(&format!(
-                    "bold {}px {}",
-                    self.config.font_size * 0.8,
-                    self.config.font_family
-                ));
+                let fragment_font =
+                    fragment_font.get_or_insert_with(|| sequence_fragment_font_css(&self.config));
+                ctx.set_font(fragment_font.as_str());
                 ctx.set_text_align(TextAlign::Left);
                 ctx.set_text_baseline(TextBaseline::Top);
                 ctx.fill_text(label, x + 6.0, y + 4.0);
@@ -871,11 +871,9 @@ impl Canvas2dRenderer {
                     fragment.label
                 );
                 ctx.set_fill_style(&self.config.label_color);
-                ctx.set_font(&format!(
-                    "bold {}px {}",
-                    self.config.font_size * 0.8,
-                    self.config.font_family
-                ));
+                let fragment_font =
+                    fragment_font.get_or_insert_with(|| sequence_fragment_font_css(&self.config));
+                ctx.set_font(fragment_font.as_str());
                 ctx.set_text_align(TextAlign::Left);
                 ctx.set_text_baseline(TextBaseline::Top);
                 ctx.fill_text(&label, x + 6.0, y + 4.0);
@@ -1543,6 +1541,10 @@ fn secondary_label_font_css(config: &CanvasRenderConfig) -> String {
     format!("{}px {}", config.font_size * 0.85, config.font_family)
 }
 
+fn sequence_fragment_font_css(config: &CanvasRenderConfig) -> String {
+    format!("bold {}px {}", config.font_size * 0.8, config.font_family)
+}
+
 fn generic_canvas_diagram_title(ir: &MermaidDiagramIr) -> Option<&str> {
     // The canvas backend has dedicated pie chart rendering. Gantt/xy/quadrant still use
     // the generic node/edge path, so the generic title fallback remains enabled.
@@ -1739,6 +1741,22 @@ mod tests {
                 ..CanvasRenderConfig::default()
             };
             assert_eq!(secondary_label_font_css(&config), expected);
+        }
+    }
+
+    #[test]
+    fn sequence_fragment_font_preserves_canvas_css_format() {
+        for (font_size, font_family, expected) in [
+            (0.0, "sans-serif", "bold 0px sans-serif"),
+            (10.0, "Test Sans", "bold 8px Test Sans"),
+            (20.0, "'Inter', Arial", "bold 16px 'Inter', Arial"),
+        ] {
+            let config = CanvasRenderConfig {
+                font_size,
+                font_family: font_family.to_owned(),
+                ..CanvasRenderConfig::default()
+            };
+            assert_eq!(sequence_fragment_font_css(&config), expected);
         }
     }
 

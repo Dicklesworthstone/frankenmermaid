@@ -17375,3 +17375,34 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   allocation instead of N, with no drawing-contract change.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.25`)
+
+### 🟢LANDED: hoist invariant Canvas sequence-fragment font formatting (2026-07-15)
+
+- **Negative-ledger-first boundary:** the preceding Canvas rows cover node, edge, and sequence-note
+  fonts. Existing sequence-fragment rows concern SVG Element serialization and reject a distinct
+  bare-leaf streaming mechanism; no row records Canvas `draw_sequence_fragments` font construction.
+- **Profile / attribution:** every sequence fragment, in both empty-label and custom-label branches,
+  formatted the identical `"bold {font_size * 0.8}px {font_family}"` string inside the fragment
+  loop. Renderer configuration is private and immutable, so an F-fragment render performed F heap
+  allocations for identical bytes. Impact 4 x confidence 5 / effort 1 = **20**.
+- **One lever / exact isomorphism:** lazily construct that bold font once per
+  `draw_sequence_fragments` call and borrow it in both label branches. Label-string creation,
+  branch selection, context-call order, font bytes, coordinates, draw counts, and all other Canvas
+  paths remain unchanged. A permanent oracle covers zero and integral derived sizes plus plain,
+  quoted, and fallback-family strings.
+- **Remote correctness:** fail-closed `RCH_REQUIRE_REMOTE=1`, direct Cargo argv,
+  `--profile release`, worker `vmi1293453`. Untimed cold warm-up job `j-29928833041829261` passed
+  the exact-format oracle (1 passed, 0 failed). UBS on the owned Canvas file exited 0 with zero
+  critical findings.
+- **One foreground same-binary A/B:** job `j-29928833041829270`, alternating order, 9 rounds over
+  256 renders x 4,096 fragments. Per-fragment-format samples `[190909483, 192908403, 193274160,
+  198191827, 201284363, 204179334, 212106142, 215019820, 215671576]` ns; hoisted samples
+  `[29033753, 31444349, 31515676, 31845619, 32301272, 33741276, 34961410, 35037075,
+  36698890]` ns. Exact font digest parity held (`2468502043878227968`); median improved
+  **201,284,363 -> 32,301,272 ns (83.952%, 6.23x)** with non-overlapping distributions. The timed
+  test body took 2.12 s. RCH discarded the just-warmed target and repeated a 7m25s native build,
+  but compilation remained outside both in-process arms and was not treated as evidence.
+- **Decision:** keep. A Canvas render with F sequence fragments now performs one invariant font
+  allocation instead of F, with no drawing-contract change.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.26`)
