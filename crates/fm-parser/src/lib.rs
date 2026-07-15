@@ -677,7 +677,7 @@ pub fn apply_parse_lens_edit(
 
 #[must_use]
 pub fn capture_format_complement(input: &str) -> MermaidFormatComplement {
-    let offsets = line_offsets(input);
+    let (offsets, line_ending) = line_offsets_and_ending_style(input);
     let mut whitespace = Vec::new();
     let mut comments = Vec::new();
     let mut directives = Vec::new();
@@ -752,7 +752,7 @@ pub fn capture_format_complement(input: &str) -> MermaidFormatComplement {
     collect_quoted_literals(input, &mut quoted_literals, &offsets);
 
     MermaidFormatComplement {
-        line_ending: detect_line_ending_style(input),
+        line_ending,
         trailing_newline: input.ends_with('\n'),
         whitespace,
         comments,
@@ -840,33 +840,6 @@ pub fn parse_evidence_json(parsed: &ParseResult) -> String {
         },
     })
     .to_string()
-}
-
-fn detect_line_ending_style(input: &str) -> MermaidLineEndingStyle {
-    let mut crlf = 0_usize;
-    let mut lf = 0_usize;
-    let bytes = input.as_bytes();
-    let mut index = 0_usize;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'\r' if bytes.get(index + 1) == Some(&b'\n') => {
-                crlf += 1;
-                index += 2;
-            }
-            b'\n' => {
-                lf += 1;
-                index += 1;
-            }
-            _ => index += 1,
-        }
-    }
-
-    match (crlf > 0, lf > 0) {
-        (false, false) => MermaidLineEndingStyle::None,
-        (false, true) => MermaidLineEndingStyle::Lf,
-        (true, false) => MermaidLineEndingStyle::Crlf,
-        (true, true) => MermaidLineEndingStyle::Mixed,
-    }
 }
 
 fn collect_inter_token_whitespace(
@@ -1036,14 +1009,26 @@ fn push_quoted_span(
     });
 }
 
-fn line_offsets(source: &str) -> Vec<usize> {
+fn line_offsets_and_ending_style(source: &str) -> (Vec<usize>, MermaidLineEndingStyle) {
+    let bytes = source.as_bytes();
     let mut offsets = vec![0];
-    for (i, b) in source.bytes().enumerate() {
-        if b == b'\n' {
-            offsets.push(i + 1);
+    let mut has_crlf = false;
+    let mut has_lf = false;
+    for newline in memchr::memchr_iter(b'\n', bytes) {
+        offsets.push(newline + 1);
+        if newline > 0 && bytes[newline - 1] == b'\r' {
+            has_crlf = true;
+        } else {
+            has_lf = true;
         }
     }
-    offsets
+    let line_ending = match (has_crlf, has_lf) {
+        (false, false) => MermaidLineEndingStyle::None,
+        (false, true) => MermaidLineEndingStyle::Lf,
+        (true, false) => MermaidLineEndingStyle::Crlf,
+        (true, true) => MermaidLineEndingStyle::Mixed,
+    };
+    (offsets, line_ending)
 }
 
 fn span_for_range(source: &str, start_byte: usize, end_byte: usize, offsets: &[usize]) -> Span {
@@ -1283,6 +1268,65 @@ mod tests {
                 .iter()
                 .any(|whitespace| whitespace.kind == MermaidWhitespaceKind::BlankLine)
         );
+    }
+
+    fn newline_metadata_scalar_reference(source: &str) -> (Vec<usize>, MermaidLineEndingStyle) {
+        let mut offsets = vec![0];
+        for (index, byte) in source.bytes().enumerate() {
+            if byte == b'\n' {
+                offsets.push(index + 1);
+            }
+        }
+
+        let mut crlf = 0_usize;
+        let mut lf = 0_usize;
+        let bytes = source.as_bytes();
+        let mut index = 0_usize;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'\r' if bytes.get(index + 1) == Some(&b'\n') => {
+                    crlf += 1;
+                    index += 2;
+                }
+                b'\n' => {
+                    lf += 1;
+                    index += 1;
+                }
+                _ => index += 1,
+            }
+        }
+
+        let style = match (crlf > 0, lf > 0) {
+            (false, false) => MermaidLineEndingStyle::None,
+            (false, true) => MermaidLineEndingStyle::Lf,
+            (true, false) => MermaidLineEndingStyle::Crlf,
+            (true, true) => MermaidLineEndingStyle::Mixed,
+        };
+        (offsets, style)
+    }
+
+    #[test]
+    fn fused_newline_metadata_matches_scalar_reference() {
+        for source in [
+            "",
+            "no newline",
+            "\n",
+            "\r\n",
+            "lone carriage return\r",
+            "one\n",
+            "one\r\n",
+            "one\ntwo\r\nthree",
+            "α\r\nβ\n中文",
+            "\n\n",
+            "\r\n\r\n",
+            "prefix\r\r\nsuffix",
+        ] {
+            assert_eq!(
+                super::line_offsets_and_ending_style(source),
+                newline_metadata_scalar_reference(source),
+                "source={source:?}"
+            );
+        }
     }
 
     #[test]

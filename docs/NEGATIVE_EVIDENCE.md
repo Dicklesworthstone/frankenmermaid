@@ -17576,3 +17576,42 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   the enclosing-operation floor.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.31`)
+
+### 🟢LANDED: fuse ParseLens format-capture newline metadata scans (2026-07-15)
+
+- **Negative-ledger-first boundary:** the earlier format-complement keep removed capture from the
+  ordinary parse/layout/render path but retained it for ParseLens and evidence consumers; the six
+  recent ParseLens keeps optimize source-map bindings and editing, not parser-side format capture.
+  No prior row records fused line-offset/line-ending discovery. Profiling first also eliminated a
+  tempting `CharIndices::last()` to `next_back()` substitution before measurement: this Rust
+  toolchain already implements `last()` by calling `next_back()`, so bead `bd-1buv.32` closed as a
+  compiled no-op rather than being misreported as a performance reject.
+- **Profile / attribution:** prior same-worker evidence attributes **8.5-8.8% of parse** to
+  `capture_format_complement`. Current capture scalar-scanned every source byte once to build line
+  offsets, then scalar-scanned the complete source again to classify LF versus CRLF. These results
+  depend on the same newline positions, making the second traversal redundant. Impact 4 x
+  confidence 5 / effort 1 = **20**.
+- **One lever / exact isomorphism:** replace the two scalar traversals with one
+  `memchr::memchr_iter(b'\n', bytes)` pass that both appends the identical newline+1 offsets and
+  classifies each newline from its preceding byte. Span contents/order, byte ranges, line/column
+  positions, empty/trailing-line behavior, ownership, floating point, tie-breaking, and RNG are
+  unchanged. The permanent scalar-reference oracle covers empty, no-newline, lone CR, LF, CRLF,
+  mixed, repeated, trailing, Unicode, and adjacent-CR cases.
+- **Remote correctness:** fail-closed direct Cargo argv with `RCH_REQUIRE_REMOTE=1`,
+  `RCH_NO_SELF_HEALING=1`, `--profile release`, and explicit
+  `--config profile.release.lto=false` on worker `vmi1152480`. Untimed cold warm-up job
+  `j-29928833041829500` passed the exact offset/style oracle (1 passed, 0 failed). Its 178.6-second
+  build was outside timing and is not benchmark evidence.
+- **One foreground same-binary A/B:** job `j-29928833041829504`, alternating order, 9 rounds x
+  256 sweeps over a 28,929-byte / 1,024-line mixed-LF/CRLF source. Two-scan scalar samples
+  `[5776342, 7794462, 7960188, 8185683, 8763996, 9449498, 11235130, 26212049, 46978109]`
+  ns; fused `memchr` samples `[1780785, 1821205, 1827485, 1872902, 2069145, 2097818,
+  2106350, 2465406, 26436624]` ns. Exact offset/style digest parity held
+  (`16942526935452785152`); median improved **8,763,996 -> 2,069,145 ns (76.390%, 4.24x)**.
+  The timed body took 0.23s; the repeated 198.6-second no-LTO build remained outside both arms and
+  no silent interval crossed two minutes.
+- **Decision:** keep. ParseLens/evidence format capture now discovers every newline once instead of
+  walking the full source twice, with the temporary A/B removed and the exhaustive scalar oracle
+  retained.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.33`)
