@@ -17147,3 +17147,37 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   `reserve` + `repeat_n(char)` shape without a materially different bulk-fill primitive.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.18`)
+
+### 🟢LANDED: hash both observability trace halves in one source pass (2026-07-14)
+
+- **Negative-ledger-first boundary:** no earlier row records a `stable_u128_hash`,
+  `mermaid_trace_id`, or two-state observability-hash probe. The older incremental-layout
+  cache-key blocker concerns a different Debug-formatted descriptor and a different hash
+  implementation. The six recent ParseLens keeps and the rejected terminal-diff ownership
+  handoff therefore do not overlap this runtime observability path.
+- **Profile / attribution:** `mermaid_layout_guard_observability` is called by CLI render, CLI
+  validate, and WASM render. It hashes the complete Mermaid source into a stable 128-bit trace ID.
+  The previous `stable_u128_hash` called the same scalar FNV loop twice over the domain and every
+  part—once with the `upper` salt and once with `lower`—so the source, which dominates the input,
+  was loaded and traversed twice. Impact 4 x confidence 5 / effort 1 = **20**.
+- **One lever / exact isomorphism:** seed the two independent FNV states with their original salts,
+  then feed each subsequent byte to both states in one traversal. Each state receives the same
+  bytes in the same order with the same XOR and wrapping multiply, so the combined `u128` is
+  unchanged. A permanent two-pass reference oracle covers empty parts, decision IDs, Unicode,
+  and a long Mermaid source.
+- **Remote correctness:** fail-closed `RCH_REQUIRE_REMOTE=1`, direct Cargo argv,
+  `--profile release`, worker `vmi1293453`. Untimed warm-up job `j-29928833041829073` passed the
+  exact parity oracle (1 passed, 0 failed). UBS's non-build scan reported only existing whole-file
+  findings; formatting and `git diff --check` passed.
+- **One foreground same-binary A/B:** job `j-29928833041829079`, alternating order, 9 rounds x
+  384 iterations over a 1,024-line / 33,537-byte source. Two-pass samples
+  `[26481691, 27300905, 27379674, 28620990, 28954949, 30559800, 31021360, 31207578,
+  32287613]` ns; one-pass samples `[13723112, 13776842, 13930542, 14499091, 14606091,
+  15642682, 16511992, 24267208, 27333844]` ns. Exact digest parity
+  (`ffffffffffffffffffffffffffffffff`); median improved **28,954,949 -> 14,606,091 ns
+  (49.556%, 1.982x)**. The timed test body took 0.46 s; remote compilation stayed outside both
+  measured arms.
+- **Decision:** keep. CLI/WASM observability retains identical stable IDs while avoiding a second
+  full source traversal and exposing the two dependency chains to instruction-level parallelism.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.19`)

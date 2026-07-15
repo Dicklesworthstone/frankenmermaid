@@ -78,27 +78,36 @@ pub fn mermaid_decision_id(
 }
 
 fn stable_u128_hash(domain: &str, parts: &[&str]) -> u128 {
-    let upper = stable_u64_hash("upper", domain, parts);
-    let lower = stable_u64_hash("lower", domain, parts);
-    (u128::from(upper) << 64) | u128::from(lower)
-}
+    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0100_0000_01b3;
 
-fn stable_u64_hash(salt: &str, domain: &str, parts: &[&str]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    let mut upper = OFFSET_BASIS;
+    let mut lower = OFFSET_BASIS;
+    for &byte in b"upper" {
+        upper ^= u64::from(byte);
+        upper = upper.wrapping_mul(PRIME);
+    }
+    for &byte in b"lower" {
+        lower ^= u64::from(byte);
+        lower = lower.wrapping_mul(PRIME);
+    }
 
-    let mut update = |s: &str| {
-        for byte in s.as_bytes() {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x0100_0000_01b3);
+    let mut update_both = |s: &str| {
+        for &byte in s.as_bytes() {
+            let byte = u64::from(byte);
+            upper ^= byte;
+            upper = upper.wrapping_mul(PRIME);
+            lower ^= byte;
+            lower = lower.wrapping_mul(PRIME);
         }
     };
 
-    update(salt);
-    update(domain);
+    update_both(domain);
     for part in parts {
-        update(part);
+        update_both(part);
     }
-    hash
+
+    (u128::from(upper) << 64) | u128::from(lower)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -5338,6 +5347,120 @@ mod schema_version_semver {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+
+    fn stable_u128_hash_two_pass_reference(domain: &str, parts: &[&str]) -> u128 {
+        fn hash_half(salt: &str, domain: &str, parts: &[&str]) -> u64 {
+            let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+            let mut update = |s: &str| {
+                for &byte in s.as_bytes() {
+                    hash ^= u64::from(byte);
+                    hash = hash.wrapping_mul(0x0100_0000_01b3);
+                }
+            };
+
+            update(salt);
+            update(domain);
+            for part in parts {
+                update(part);
+            }
+            hash
+        }
+
+        let upper = hash_half("upper", domain, parts);
+        let lower = hash_half("lower", domain, parts);
+        (u128::from(upper) << 64) | u128::from(lower)
+    }
+
+    #[test]
+    fn stable_u128_hash_single_pass_matches_two_pass_reference() {
+        let long_source = "flowchart LR\nnode_a[Alpha] --> node_b[Beta]\n".repeat(512);
+        let cases = [
+            ("", Vec::new()),
+            ("trace", vec!["cli.render", ""]),
+            (
+                "decision",
+                vec!["0", "fm.layout.guard", "1", "layout.guard"],
+            ),
+            (
+                "trace",
+                vec!["wasm.render", "stateDiagram-v2\nA --> B: café 💡"],
+            ),
+            ("trace", vec!["cli.validate", long_source.as_str()]),
+        ];
+
+        for (domain, parts) in cases {
+            assert_eq!(
+                super::stable_u128_hash(domain, &parts),
+                stable_u128_hash_two_pass_reference(domain, &parts),
+                "hash mismatch for domain={domain:?} parts={parts:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "manual short release A/B"]
+    fn perf_stable_u128_hash_single_pass_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ROUNDS: usize = 9;
+        const ITERATIONS: usize = 384;
+        const LINES: usize = 1024;
+
+        let source = (0..LINES)
+            .map(|index| format!("node_{index}[Label {index}] --> node_{}\n", index + 1))
+            .collect::<String>();
+        let parts = ["cli.render", source.as_str()];
+
+        let measure = |hasher: fn(&str, &[&str]) -> u128| {
+            let mut digest = 0_u128;
+            let started = Instant::now();
+            for _ in 0..ITERATIONS {
+                digest ^= black_box(hasher(black_box("trace"), black_box(&parts)));
+                digest = digest.rotate_left(1);
+            }
+            (started.elapsed().as_nanos(), digest)
+        };
+
+        let expected = stable_u128_hash_two_pass_reference("trace", &parts);
+        assert_eq!(super::stable_u128_hash("trace", &parts), expected);
+        black_box(measure(stable_u128_hash_two_pass_reference));
+        black_box(measure(super::stable_u128_hash));
+
+        let mut two_pass_ns = Vec::with_capacity(ROUNDS);
+        let mut single_pass_ns = Vec::with_capacity(ROUNDS);
+        let mut proof_digest = 0_u128;
+        for round in 0..ROUNDS {
+            let ((baseline_ns, baseline_digest), (candidate_ns, candidate_digest)) =
+                if round % 2 == 0 {
+                    (
+                        measure(stable_u128_hash_two_pass_reference),
+                        measure(super::stable_u128_hash),
+                    )
+                } else {
+                    let candidate = measure(super::stable_u128_hash);
+                    let baseline = measure(stable_u128_hash_two_pass_reference);
+                    (baseline, candidate)
+                };
+            assert_eq!(baseline_digest, candidate_digest);
+            proof_digest ^= baseline_digest.rotate_left(round as u32);
+            two_pass_ns.push(baseline_ns);
+            single_pass_ns.push(candidate_ns);
+        }
+
+        two_pass_ns.sort_unstable();
+        single_pass_ns.sort_unstable();
+        let two_pass_median_ns = two_pass_ns[ROUNDS / 2];
+        let single_pass_median_ns = single_pass_ns[ROUNDS / 2];
+        let improvement_pct = (two_pass_median_ns as f64 - single_pass_median_ns as f64) * 100.0
+            / two_pass_median_ns as f64;
+        let speedup = two_pass_median_ns as f64 / single_pass_median_ns as f64;
+
+        eprintln!(
+            "PERF stable_u128_hash two_pass_ns={two_pass_ns:?} single_pass_ns={single_pass_ns:?} two_pass_median_ns={two_pass_median_ns} single_pass_median_ns={single_pass_median_ns} improvement_pct={improvement_pct:.3} speedup={speedup:.3}x parity=exact digest={proof_digest:032x} rounds={ROUNDS} iterations={ITERATIONS} lines={LINES} source_bytes={}",
+            source.len()
+        );
+    }
 
     #[test]
     fn push_usize_decimal_matches_std_to_string() {
