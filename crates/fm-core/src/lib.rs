@@ -5064,11 +5064,7 @@ fn resolve_span_text_range_with_line_starts(
 
 fn source_line_starts(source: &str) -> Vec<usize> {
     let mut starts = vec![0];
-    for (idx, ch) in source.char_indices() {
-        if ch == '\n' {
-            starts.push(idx + ch.len_utf8());
-        }
-    }
+    starts.extend(memchr::memchr_iter(b'\n', source.as_bytes()).map(|index| index + 1));
     starts
 }
 
@@ -5845,6 +5841,114 @@ mod tests {
         });
 
         assert_eq!(ir.source_map(), ir.source_map_with_entry_capacity(0));
+    }
+
+    fn source_line_starts_char_reference(source: &str) -> Vec<usize> {
+        let mut starts = vec![0];
+        for (index, ch) in source.char_indices() {
+            if ch == '\n' {
+                starts.push(index + ch.len_utf8());
+            }
+        }
+        starts
+    }
+
+    #[test]
+    fn memchr_line_starts_match_char_reference() {
+        let cases = [
+            "",
+            "one line",
+            "\n",
+            "\n\n",
+            "alpha\nbeta",
+            "alpha\nbeta\n",
+            "alpha\r\nbeta\r\n",
+            "東京\nα-->β\n🙂 end",
+            "mixed\r\n東京\n\r\nlast\n",
+        ];
+
+        for source in cases {
+            assert_eq!(
+                super::source_line_starts(source),
+                source_line_starts_char_reference(source),
+                "source={source:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "manual short release A/B"]
+    fn perf_memchr_line_starts_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const LINES: usize = 256;
+        const ITERATIONS: usize = 4_096;
+        const ROUNDS: usize = 9;
+
+        type LineIndexer = fn(&str) -> Vec<usize>;
+
+        fn measure(source: &str, indexer: LineIndexer) -> (u128, u64) {
+            let mut digest = 0xcbf2_9ce4_8422_2325_u64;
+            let started = Instant::now();
+            for _ in 0..ITERATIONS {
+                let starts = indexer(black_box(source));
+                for value in [starts.len(), starts.last().copied().unwrap_or_default()] {
+                    digest ^= value as u64;
+                    digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+                black_box(starts);
+            }
+            (started.elapsed().as_nanos(), digest)
+        }
+
+        let mut source = String::from("flowchart LR\r\n");
+        for index in 0..LINES {
+            if index % 16 == 0 {
+                source.push_str(&format!("N{index:03}[東京🙂] --> N{:03}\r\n", index + 1));
+            } else {
+                source.push_str(&format!(
+                    "N{index:03} --> N{:03}: label-{index:03}\r\n",
+                    index + 1
+                ));
+            }
+        }
+        assert_eq!(
+            super::source_line_starts(&source),
+            source_line_starts_char_reference(&source)
+        );
+
+        let mut char_ns = Vec::with_capacity(ROUNDS);
+        let mut memchr_ns = Vec::with_capacity(ROUNDS);
+        let mut proof_digest = 0_u64;
+        for round in 0..ROUNDS {
+            let (char_scan, memchr_scan) = if round % 2 == 0 {
+                (
+                    measure(&source, source_line_starts_char_reference),
+                    measure(&source, super::source_line_starts),
+                )
+            } else {
+                let memchr_scan = measure(&source, super::source_line_starts);
+                let char_scan = measure(&source, source_line_starts_char_reference);
+                (char_scan, memchr_scan)
+            };
+            assert_eq!(char_scan.1, memchr_scan.1);
+            proof_digest = memchr_scan.1;
+            char_ns.push(char_scan.0);
+            memchr_ns.push(memchr_scan.0);
+        }
+
+        char_ns.sort_unstable();
+        memchr_ns.sort_unstable();
+        let char_median_ns = char_ns[ROUNDS / 2];
+        let memchr_median_ns = memchr_ns[ROUNDS / 2];
+        let improvement_pct =
+            (char_median_ns as f64 - memchr_median_ns as f64) * 100.0 / char_median_ns as f64;
+        let speedup = char_median_ns as f64 / memchr_median_ns as f64;
+        println!(
+            "PERF memchr_line_starts char_ns={char_ns:?} memchr_ns={memchr_ns:?} char_median_ns={char_median_ns} memchr_median_ns={memchr_median_ns} improvement_pct={improvement_pct:.3} speedup={speedup:.3}x parity=exact digest={proof_digest:016x} rounds={ROUNDS} iterations={ITERATIONS} lines={LINES} source_bytes={}",
+            source.len()
+        );
     }
 
     #[test]

@@ -16960,3 +16960,37 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   and teardown; only the selected entry and final source copy are materialized.
 
   Agent: Codex (GPT-5, this session; bead `bd-1t7l.1.2`)
+
+### 🟢LANDED: scan ParseLens line starts with `memchr` (2026-07-14)
+
+- **Negative-ledger-first boundary:** the shared-index keep (`bd-1t7l.1.1`) removed repeated
+  per-binding scans, and the direct-edit keep (`bd-1t7l.1.2`) removed whole-binding materialization.
+  Neither changes the remaining `source_line_starts` scanner. The ledger contains a successful
+  long-input `memchr` newline-count precedent and tiny-haystack rejections, but no line-start byte
+  index probe; this 6.7 KB source is the former workload class.
+- **Profile attribution:** every line/column span resolution still walks the complete source with
+  `char_indices`, decoding every UTF-8 scalar solely to test `ch == '\n'`. The prior direct-edit A/B
+  calls this scan 64 times over a 6,670-byte/256-line source inside its 404,926 ns candidate median.
+  Newline is one ASCII byte and cannot occur inside another UTF-8 encoding, so scalar decoding is
+  removable. Impact 4 x confidence 5 / effort 1 = **20**.
+- **One lever and proof gate:** replace only the `char_indices` newline scan with
+  `memchr::memchr_iter(b'\n', source.as_bytes())`, retaining leading zero and every newline+1 byte
+  offset. Empty, no-newline, LF, CRLF, Unicode, consecutive-newline, and trailing-newline indexes
+  must remain exact. One same-binary alternating `--profile release` A/B keeps only at 3% or better.
+- **Measurement protocol:** build the changed `fm-core` release test binary remotely without a
+  timeout if cold, then run exactly one cheap foreground ignored test; build and transfer time are
+  excluded from both in-process arms.
+- **Remote proof:** fail-closed `RCH_REQUIRE_REMOTE=1`, direct Cargo argv, `--profile release`,
+  worker `vmi1293453`. Untimed warm-up job `j-29928833041828954` built the test binary without a
+  timeout. Foreground job `j-29928833041828959` ran exactly one ignored A/B test; its RCH rebuild
+  stayed outside both in-process timers (test body 0.23 s).
+- **Real alternating A/B (9 rounds, 4,096 scans/arm/round, 256 lines, 6,686 bytes):** `char_indices`
+  samples `[15780774, 15903868, 16254873, 17279304, 18018700, 18093241, 18113801,
+  19129650, 23273633]` ns; `memchr` samples `[5894830, 6760254, 6977137, 7131778,
+  7177397, 7410815, 7916251, 8384411, 9170295]` ns. Exact index/digest parity
+  (`cd0b253991ed2325`); median improved **18,018,700 -> 7,177,397 ns (60.167%, 2.510x)**,
+  decisively clearing the 3% keep gate.
+- **Decision:** keep. ASCII newline cannot appear inside another UTF-8 code point, so byte scanning
+  preserves every byte offset while avoiding UTF-8 scalar decoding across the whole source.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1t7l.1.3`)
