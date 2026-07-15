@@ -4983,16 +4983,16 @@ pub fn apply_lens_edit(
     source_map: &MermaidSourceMap,
     edit: &MermaidLensEdit,
 ) -> Result<MermaidLensEditResult, MermaidLensError> {
-    let binding = build_lens_bindings(source, source_map)
-        .into_iter()
-        .find(|binding| binding.element_id == edit.element_id)
+    let entry = source_map
+        .entries
+        .iter()
+        .find(|entry| entry.element_id == edit.element_id)
         .ok_or_else(|| MermaidLensError::ElementNotFound(edit.element_id.clone()))?;
-    let replaced_range = binding
-        .text_range
+    let replaced_range = resolve_span_text_range(source, entry.span)
         .ok_or_else(|| MermaidLensError::UnresolvedSpan(edit.element_id.clone()))?;
-    let previous_snippet = binding
-        .snippet
-        .clone()
+    let previous_snippet = source
+        .get(replaced_range.start_byte..replaced_range.end_byte)
+        .map(str::to_string)
         .ok_or_else(|| MermaidLensError::UnresolvedSpan(edit.element_id.clone()))?;
 
     let mut updated_source = source.to_string();
@@ -5002,7 +5002,7 @@ pub fn apply_lens_edit(
     );
 
     Ok(MermaidLensEditResult {
-        element_id: binding.element_id,
+        element_id: entry.element_id.clone(),
         replaced_range,
         previous_snippet,
         replacement: edit.replacement.clone(),
@@ -5394,11 +5394,12 @@ mod tests {
         MermaidError, MermaidErrorCode, MermaidFallbackAction, MermaidFallbackPolicy,
         MermaidFidelity, MermaidGlyphMode, MermaidGuardReport, MermaidLayoutDecisionAlternative,
         MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord, MermaidLensBinding,
-        MermaidLensEdit, MermaidNativePressureSignals, MermaidPressureReport, MermaidPressureTier,
-        MermaidQualityMode, MermaidSanitizeMode, MermaidSourceMap, MermaidSourceMapEntry,
-        MermaidSourceMapKind, MermaidSupportLevel, MermaidWarningCode, MermaidWasmPressureSignals,
-        NodeMap, NodeSet, NodeShape, NotePosition, Position, Span, StructuredDiagnostic,
-        apply_lens_edit, build_lens_bindings, capability_matrix, capability_matrix_json_pretty,
+        MermaidLensEdit, MermaidLensEditResult, MermaidLensError, MermaidNativePressureSignals,
+        MermaidPressureReport, MermaidPressureTier, MermaidQualityMode, MermaidSanitizeMode,
+        MermaidSourceMap, MermaidSourceMapEntry, MermaidSourceMapKind, MermaidSupportLevel,
+        MermaidWarningCode, MermaidWasmPressureSignals, NodeMap, NodeSet, NodeShape, NotePosition,
+        Position, Span, StructuredDiagnostic, apply_lens_edit, build_lens_bindings,
+        capability_matrix, capability_matrix_json_pretty,
         capability_readme_supported_diagram_types_markdown, capability_readme_surface_markdown,
         documented_diagram_types, is_allowed_style_property, is_safe_link_target,
         mermaid_layout_guard_observability, parse_mermaid_js_config_value, parse_style_string,
@@ -6066,6 +6067,221 @@ mod tests {
 
         println!(
             "PERF lens_line_starts repeated_median_ns={repeated_median_ns} shared_median_ns={shared_median_ns} improvement_pct={improvement_pct:.3} parity=exact rounds={ROUNDS} iterations={ITERATIONS} entries={LINES} source_bytes={}",
+            source.len()
+        );
+    }
+
+    fn apply_lens_edit_materialized_reference(
+        source: &str,
+        source_map: &MermaidSourceMap,
+        edit: &MermaidLensEdit,
+    ) -> Result<MermaidLensEditResult, MermaidLensError> {
+        let binding = build_lens_bindings(source, source_map)
+            .into_iter()
+            .find(|binding| binding.element_id == edit.element_id)
+            .ok_or_else(|| MermaidLensError::ElementNotFound(edit.element_id.clone()))?;
+        let replaced_range = binding
+            .text_range
+            .ok_or_else(|| MermaidLensError::UnresolvedSpan(edit.element_id.clone()))?;
+        let previous_snippet = binding
+            .snippet
+            .clone()
+            .ok_or_else(|| MermaidLensError::UnresolvedSpan(edit.element_id.clone()))?;
+
+        let mut updated_source = source.to_string();
+        updated_source.replace_range(
+            replaced_range.start_byte..replaced_range.end_byte,
+            &edit.replacement,
+        );
+
+        Ok(MermaidLensEditResult {
+            element_id: binding.element_id,
+            replaced_range,
+            previous_snippet,
+            replacement: edit.replacement.clone(),
+            updated_source,
+        })
+    }
+
+    #[test]
+    fn direct_lens_edit_matches_materialized_reference() {
+        let source = "flowchart LR\r\nα-->β\r\nC-->D\r\n";
+        let c_start = source.find('C').expect("C byte offset");
+        let c_end = c_start + 'C'.len_utf8();
+        let source_map = MermaidSourceMap {
+            diagram_type: DiagramType::Flowchart,
+            entries: vec![
+                MermaidSourceMapEntry {
+                    kind: MermaidSourceMapKind::Cluster,
+                    index: 0,
+                    element_id: "unresolved-other".to_string(),
+                    source_id: None,
+                    span: Span::default(),
+                },
+                MermaidSourceMapEntry {
+                    kind: MermaidSourceMapKind::Edge,
+                    index: 0,
+                    element_id: "target".to_string(),
+                    source_id: None,
+                    span: sample_span(2, 1, 5),
+                },
+                MermaidSourceMapEntry {
+                    kind: MermaidSourceMapKind::Node,
+                    index: 1,
+                    element_id: "target".to_string(),
+                    source_id: Some("C".to_string()),
+                    span: Span::new(
+                        Position {
+                            line: 3,
+                            col: 1,
+                            byte: u32::try_from(c_start).expect("small source"),
+                        },
+                        Position {
+                            line: 3,
+                            col: 1,
+                            byte: u32::try_from(c_end).expect("small source"),
+                        },
+                    ),
+                },
+            ],
+        };
+        let edit = MermaidLensEdit {
+            element_id: "target".to_string(),
+            replacement: "X-->Y".to_string(),
+        };
+        assert_eq!(
+            apply_lens_edit(source, &source_map, &edit),
+            apply_lens_edit_materialized_reference(source, &source_map, &edit)
+        );
+
+        let unresolved = MermaidLensEdit {
+            element_id: "unresolved-other".to_string(),
+            replacement: "ignored".to_string(),
+        };
+        assert_eq!(
+            apply_lens_edit(source, &source_map, &unresolved),
+            apply_lens_edit_materialized_reference(source, &source_map, &unresolved)
+        );
+
+        let missing = MermaidLensEdit {
+            element_id: "missing".to_string(),
+            replacement: "ignored".to_string(),
+        };
+        assert_eq!(
+            apply_lens_edit(source, &source_map, &missing),
+            apply_lens_edit_materialized_reference(source, &source_map, &missing)
+        );
+    }
+
+    #[test]
+    #[ignore = "manual short release A/B"]
+    fn perf_direct_lens_edit_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ENTRIES: usize = 256;
+        const ITERATIONS: usize = 64;
+        const ROUNDS: usize = 9;
+
+        type LensEditor = fn(
+            &str,
+            &MermaidSourceMap,
+            &MermaidLensEdit,
+        ) -> Result<MermaidLensEditResult, MermaidLensError>;
+
+        fn measure(
+            source: &str,
+            source_map: &MermaidSourceMap,
+            edit: &MermaidLensEdit,
+            editor: LensEditor,
+        ) -> (u128, u64) {
+            let mut digest = 0xcbf2_9ce4_8422_2325_u64;
+            let started = Instant::now();
+            for _ in 0..ITERATIONS {
+                let result = editor(black_box(source), black_box(source_map), black_box(edit))
+                    .expect("edit should resolve");
+                for value in [
+                    result.replaced_range.start_byte,
+                    result.replaced_range.end_byte,
+                    result.previous_snippet.len(),
+                    result.updated_source.len(),
+                ] {
+                    digest ^= value as u64;
+                    digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+                black_box(result);
+            }
+            (started.elapsed().as_nanos(), digest)
+        }
+
+        let mut source = String::from("flowchart LR\r\n");
+        let mut entries = Vec::with_capacity(ENTRIES);
+        for index in 0..ENTRIES {
+            let line = format!("N{index:03} --> N{:03}: label-{index:03}\r\n", index + 1);
+            let line_number = u32::try_from(index + 2).expect("small corpus");
+            let end_col = u32::try_from(line.trim_end().chars().count()).expect("short line");
+            source.push_str(&line);
+            entries.push(MermaidSourceMapEntry {
+                kind: MermaidSourceMapKind::Edge,
+                index,
+                element_id: format!("fm-edge-{index}"),
+                source_id: None,
+                span: sample_span(line_number, 1, end_col),
+            });
+        }
+        let source_map = MermaidSourceMap {
+            diagram_type: DiagramType::Flowchart,
+            entries,
+        };
+        let edit = MermaidLensEdit {
+            element_id: format!("fm-edge-{}", ENTRIES - 1),
+            replacement: "N255 -.-> N256: updated".to_string(),
+        };
+        assert_eq!(
+            apply_lens_edit(&source, &source_map, &edit),
+            apply_lens_edit_materialized_reference(&source, &source_map, &edit)
+        );
+
+        let mut materialized_ns = Vec::with_capacity(ROUNDS);
+        let mut direct_ns = Vec::with_capacity(ROUNDS);
+        let mut proof_digest = 0_u64;
+        for round in 0..ROUNDS {
+            let (materialized, direct) = if round % 2 == 0 {
+                (
+                    measure(
+                        &source,
+                        &source_map,
+                        &edit,
+                        apply_lens_edit_materialized_reference,
+                    ),
+                    measure(&source, &source_map, &edit, apply_lens_edit),
+                )
+            } else {
+                let direct = measure(&source, &source_map, &edit, apply_lens_edit);
+                let materialized = measure(
+                    &source,
+                    &source_map,
+                    &edit,
+                    apply_lens_edit_materialized_reference,
+                );
+                (materialized, direct)
+            };
+            assert_eq!(materialized.1, direct.1);
+            proof_digest = direct.1;
+            materialized_ns.push(materialized.0);
+            direct_ns.push(direct.0);
+        }
+
+        materialized_ns.sort_unstable();
+        direct_ns.sort_unstable();
+        let materialized_median_ns = materialized_ns[ROUNDS / 2];
+        let direct_median_ns = direct_ns[ROUNDS / 2];
+        let improvement_pct = (materialized_median_ns as f64 - direct_median_ns as f64) * 100.0
+            / materialized_median_ns as f64;
+        let speedup = materialized_median_ns as f64 / direct_median_ns as f64;
+        println!(
+            "PERF direct_lens_edit materialized_ns={materialized_ns:?} direct_ns={direct_ns:?} materialized_median_ns={materialized_median_ns} direct_median_ns={direct_median_ns} improvement_pct={improvement_pct:.3} speedup={speedup:.3}x parity=exact digest={:016x} rounds={ROUNDS} iterations={ITERATIONS} entries={ENTRIES} source_bytes={}",
+            proof_digest,
             source.len()
         );
     }

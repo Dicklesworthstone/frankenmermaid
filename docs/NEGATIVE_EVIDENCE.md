@@ -16929,3 +16929,34 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   different ownership strategy.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.17`)
+
+### 🟢LANDED: resolve one ParseLens edit without materializing every binding (2026-07-14)
+
+- **Negative-ledger-first boundary:** the landed ParseLens line-start-index change accelerates
+  batch `build_lens_bindings` and does not alter `apply_lens_edit`; no prior direct single-edit
+  source-map resolution probe is recorded. This is a fresh edit/synchronization path, outside the
+  mined terminal, Canvas, parser, and SVG seams.
+- **Profile attribution:** `apply_lens_edit` unconditionally calls `build_lens_bindings`, which
+  resolves every source-map span and clones every element ID, source ID, and available source
+  snippet into an owned vector. It then linearly finds the first matching element and drops all
+  other bindings. A single edit therefore pays O(entries) owned allocation before its required
+  source copy. Impact 5 x confidence 5 / effort 2 = **12.5**.
+- **One lever:** find the same first matching `MermaidSourceMapEntry` directly, resolve only its
+  span/snippet, and retain the existing source replacement. The permanent oracle covers first-match
+  duplicate IDs, direct-byte and line/column spans, UTF-8/CRLF handling, unrelated and selected
+  unresolved spans, missing IDs, all result fields, and exact updated-source bytes.
+- **Remote proof:** fail-closed `RCH_REQUIRE_REMOTE=1`, direct Cargo argv, `--profile release`,
+  worker `vmi1293453`. Untimed warm-up job `j-29928833041828941` built the test binary without a
+  timeout. Foreground job `j-29928833041828945` ran exactly one ignored A/B test; RCH rebuilt the
+  small crate graph, but compilation and transfer stayed outside both in-process timers (test body
+  0.02 s).
+- **Real alternating A/B (9 rounds, 64 edits/round, 256-entry source map, target last):** materialized
+  samples `[2134083, 2136767, 2158160, 2179452, 2191188, 2275845, 2292950, 2327692,
+  2478299]` ns; direct samples `[353148, 387489, 396533, 402171, 404926, 409402, 419087,
+  420229, 430444]` ns. Exact result/digest parity (`773a97bd4539ca25`); median improved
+  **2,191,188 -> 404,926 ns (81.520%, 5.411x)**, decisively clearing the 3% keep gate.
+- **Decision:** keep. Single-edit application remains O(entries) for the required first-match ID
+  search, but removes O(entries) span resolution, snippet ownership, field cloning, vector growth,
+  and teardown; only the selected entry and final source copy are materialized.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1t7l.1.2`)
