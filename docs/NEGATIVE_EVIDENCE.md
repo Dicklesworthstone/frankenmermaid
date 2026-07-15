@@ -17109,3 +17109,41 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   longer, empty, UTF-8, CRLF, success, and error cases.
 
   Agent: Codex (GPT-5, this session; bead `bd-1t7l.1.6`)
+
+### 🔴REJECTED: pad owned terminal-diff rows in place (2026-07-14)
+
+- **Negative-ledger-first boundary:** the earlier per-line `format!` removal was a measured wash
+  and attributed the loop to `truncate_display`, `pad_display`, and marker ownership; the later
+  fused ANSI-width keep removed a temporary scan buffer but did not change the ownership boundary
+  between truncation and padding. No owned-string/in-place padding probe is recorded.
+- **Profile attribution:** the existing 640-line output-loop A/B measured a 1,167,078 ns baseline
+  median and showed the output `format!` temporary below the noise floor. On every old-pane row,
+  `truncate_display` already returns an owned `String`, but `pad_display(&str, ..)` then scans it
+  and either clones it again or allocates both a repeated-space string and a final concatenation.
+  This is the largest removable ownership cost left in the attributed loop. Impact 4 x confidence
+  5 / effort 1 = **20**.
+- **One lever and proof gate:** pass the truncated `String` by value into padding; return it directly
+  when wide enough or extend it with spaces in place. Preserve exact bytes for empty, short, exact,
+  long/truncated, ANSI, dangling/non-CSI escape, and East Asian wide rows. Ordering is unchanged;
+  floating point and RNG are N/A. Compare only this handoff against the old borrowed/cloning helper
+  in one same-binary alternating `--profile release` A/B, keeping only at 3% or better.
+- **Measurement protocol:** run an untimed strict-remote correctness warm-up if the
+  `fm-render-term` release test target is cold, then exactly one cheap foreground ignored A/B on
+  the pinned worker. Compilation and transfer remain outside both in-process timed arms.
+- **Remote proof:** fail-closed `RCH_REQUIRE_REMOTE=1`, direct Cargo argv, `--profile release`,
+  worker `vmi1293453`. Untimed cold-build job `j-29928833041829032` compiled for 8m17s and passed
+  the permanent byte-parity oracle. RCH then discarded that worker target instead of reusing it;
+  foreground job `j-29928833041829047` rebuilt cold for 8m04s, but compilation remained outside
+  both in-process timers and the actual test body took 0.35 s.
+- **Real alternating A/B (9 rounds, 16 sweeps x 2,048 mixed rows, width 48):** borrowed/cloning
+  samples `[16909879, 17413482, 17812889, 17942234, 18056904, 18336594, 18343103,
+  18436803, 18921698]` ns; owned/in-place samples `[17665529, 18712545, 19017532,
+  20290156, 20516113, 20709114, 20718346, 21973434, 23921729]` ns. Exact output/digest
+  parity (`b6ab088d1d8ea325`); median regressed **18,056,904 -> 20,516,113 ns
+  (-13.619%, 0.880x)**, far below the 3% keep gate.
+- **Decision:** reject and restore. Reallocating the truncated buffer and extending it through a
+  char iterator costs more than the baseline's fresh bulk concatenation on padding-heavy rows;
+  fewer allocation calls do not imply lower wall time here. Do not retry this exact by-value
+  `reserve` + `repeat_n(char)` shape without a materially different bulk-fill primitive.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.18`)
