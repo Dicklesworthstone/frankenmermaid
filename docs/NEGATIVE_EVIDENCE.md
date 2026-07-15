@@ -16828,3 +16828,41 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   the 3% keep gate, so the allocation-free scalar count is retained.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.14`)
+
+### 🟢LANDED: serialize terminal `CellBuffer` directly after a warm release build (2026-07-14)
+
+- **Negative-ledger-first boundary:** the earlier `CellBuffer` attempts, including `bd-1buv.5`,
+  are INVALID / HOLD because cold native builds prevented the named A/B from executing. They
+  contain no timing verdict. The just-landed compact label-width change removes a per-label scalar
+  collection before cells are written; this retry targets the separate mandatory whole-grid
+  finalizer after every cell has been drawn.
+- **Profile attribution:** `render_cell_mode` unconditionally calls `buffer.to_string()`.
+  `CellBuffer::fmt` allocates and fills one complete `String` per row, applies required Unicode
+  `trim_end`, then copies each retained row again into the formatter-owned final `String`. Ranked
+  removable cost is height row allocations plus one full-grid materialization/copy; the reverse
+  Unicode-whitespace scan and newline emission remain required. Impact 4 × confidence 5 ÷ effort
+  1 = 20.
+- **One lever and exact proof:** add one direct serializer that preallocates the final `String`,
+  reverse-scans each cell row with `char::is_whitespace`, and extends the output from the retained
+  cell prefix. Keep `Display` unchanged as the baseline/oracle. Row order, Unicode scalar order,
+  blank rows, internal/trailing whitespace, and inter-row newlines must match byte-for-byte.
+- **Measurement protocol:** reuse the `fm-render-term --profile release` worker target built by
+  jobs `j-29928833041828759` and `j-29928833041828772`; if RCH nevertheless rebuilds, allow it to
+  complete without a timeout and exclude compile time from the in-process A/B. One same-binary,
+  alternating-order, nine-round foreground probe keeps only with exact output parity and at least
+  3% median improvement.
+- **Untimed warm-up:** fail-closed RCH job `j-29928833041828799` compiled the release test binary
+  on `vmi1293453` in 532.9 s. RCH again reported a cache miss; this no-timeout, compile-only step
+  supplied no timing evidence.
+- **Remote A/B:** fail-closed RCH job `j-29928833041828808` ran `cargo test -j1 --profile release
+  -p fm-render-term --lib renderer::tests::cell_buffer_direct_output_perf_ab -- --ignored --exact
+  --nocapture` on the same worker and target. RCH missed the just-warmed cache again, but the
+  in-process A/B completed in 0.79 s after compilation and excluded all build time.
+- **Result:** byte-exact output parity against unchanged `Display` for zero-width, blank,
+  ASCII, Unicode, internal-whitespace, Unicode-trailing-whitespace, clipped, and full-row cases;
+  every timed round also produced digest `7c31adca7369a7ed`. Baseline median 67,791,815 ns versus
+  candidate median 18,913,070 ns across nine alternating rounds of 512 serializations of a 160×72
+  grid is a **72.101% improvement**. This clears the 3% keep gate, so direct serialization is
+  retained.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.15`)

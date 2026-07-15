@@ -148,7 +148,7 @@ impl TermRenderer {
         }
 
         self.render_generic_diagram_title(&mut buffer.cells, cell_width, ir);
-        let output = buffer.to_string();
+        let output = buffer.to_output_string();
 
         TermRenderResult {
             output,
@@ -1618,6 +1618,27 @@ impl CellBuffer {
             self.set(x + i, y, ch);
         }
     }
+
+    fn to_output_string(&self) -> String {
+        let mut output = String::with_capacity(
+            self.cells
+                .len()
+                .saturating_add(self.height.saturating_sub(1)),
+        );
+        for y in 0..self.height {
+            if y > 0 {
+                output.push('\n');
+            }
+            let start = y * self.width;
+            let row = &self.cells[start..start + self.width];
+            let retained_len = row
+                .iter()
+                .rposition(|ch| !ch.is_whitespace())
+                .map_or(0, |index| index + 1);
+            output.extend(row[..retained_len].iter().copied());
+        }
+        output
+    }
 }
 
 impl std::fmt::Display for CellBuffer {
@@ -2330,6 +2351,106 @@ mod tests {
         eprintln!(
             "PERF compact_terminal_label_width baseline_median_ns={baseline_median} candidate_median_ns={candidate_median} improvement_pct={improvement:.3} parity=exact rounds={SAMPLE_COUNT} labels={} sweeps={SWEEPS} digest={:016x}",
             labels.len(),
+            expected_digest.expect("at least one performance sample")
+        );
+    }
+
+    #[test]
+    fn cell_buffer_direct_output_matches_display() {
+        for (width, height) in [(0, 0), (0, 3), (1, 1), (12, 4)] {
+            let mut buffer = CellBuffer::new(width, height);
+            if width >= 12 && height >= 4 {
+                buffer.set_string(1, 0, "Node A");
+                buffer.set_string(1, 1, "界面 → 缓存");
+                buffer.set_string(1, 2, "a\tb\u{00a0}\u{2003}");
+                buffer.set_string(0, 3, "full-row-1234");
+            }
+            assert_eq!(
+                buffer.to_output_string(),
+                buffer.to_string(),
+                "direct output changed Display semantics for {width}x{height} buffer"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "release-only same-binary performance probe"]
+    fn cell_buffer_direct_output_perf_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const SAMPLE_COUNT: usize = 9;
+        const ITERATIONS: usize = 512;
+        const WIDTH: usize = 160;
+        const HEIGHT: usize = 72;
+
+        let mut buffer = CellBuffer::new(WIDTH, HEIGHT);
+        for row in 0..HEIGHT {
+            match row % 7 {
+                0 => buffer.set_string(2, row, "service_0042 --> cache"),
+                1 => buffer.set_string(3, row, "界面 → 缓存 🦀"),
+                2 => buffer.set_string(4, row, "internal   spaces remain"),
+                3 => buffer.set_string(5, row, "a\tb\u{00a0}c\u{2003}"),
+                4 => buffer.set_string(1, row, "request\u{2003}\u{00a0}"),
+                5 => {}
+                _ => {
+                    for column in 0..WIDTH {
+                        buffer.set(column, row, if column % 17 == 0 { '┼' } else { '─' });
+                    }
+                }
+            }
+        }
+
+        let baseline_output = buffer.to_string();
+        let candidate_output = buffer.to_output_string();
+        assert_eq!(candidate_output, baseline_output);
+
+        fn measure(buffer: &CellBuffer, serializer: impl Fn(&CellBuffer) -> String) -> (u128, u64) {
+            let started = Instant::now();
+            let mut digest = 0xcbf2_9ce4_8422_2325_u64;
+            for iteration in 0..ITERATIONS {
+                let output = black_box(serializer(black_box(buffer)));
+                let bytes = black_box(output.as_bytes());
+                digest ^= bytes.len() as u64;
+                if !bytes.is_empty() {
+                    digest ^= u64::from(bytes[(iteration * 131) % bytes.len()]);
+                }
+                digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+                black_box(output);
+            }
+            (started.elapsed().as_nanos(), black_box(digest))
+        }
+
+        let mut baseline_samples = Vec::with_capacity(SAMPLE_COUNT);
+        let mut candidate_samples = Vec::with_capacity(SAMPLE_COUNT);
+        let mut expected_digest = None;
+        for sample in 0..SAMPLE_COUNT {
+            let (baseline, candidate) = if sample % 2 == 0 {
+                (
+                    measure(&buffer, CellBuffer::to_string),
+                    measure(&buffer, CellBuffer::to_output_string),
+                )
+            } else {
+                let candidate = measure(&buffer, CellBuffer::to_output_string);
+                let baseline = measure(&buffer, CellBuffer::to_string);
+                (baseline, candidate)
+            };
+            assert_eq!(candidate.1, baseline.1);
+            assert_eq!(*expected_digest.get_or_insert(baseline.1), baseline.1);
+            baseline_samples.push(baseline.0);
+            candidate_samples.push(candidate.0);
+        }
+
+        baseline_samples.sort_unstable();
+        candidate_samples.sort_unstable();
+        let baseline_median = baseline_samples[SAMPLE_COUNT / 2];
+        let candidate_median = candidate_samples[SAMPLE_COUNT / 2];
+        let improvement = (1.0 - candidate_median as f64 / baseline_median as f64) * 100.0;
+
+        eprintln!("baseline_ns={baseline_samples:?}");
+        eprintln!("candidate_ns={candidate_samples:?}");
+        eprintln!(
+            "PERF terminal_cell_buffer_direct_output baseline_median_ns={baseline_median} candidate_median_ns={candidate_median} improvement_pct={improvement:.3} parity=exact rounds={SAMPLE_COUNT} iterations={ITERATIONS} dimensions={WIDTH}x{HEIGHT} digest={:016x}",
             expected_digest.expect("at least one performance sample")
         );
     }
