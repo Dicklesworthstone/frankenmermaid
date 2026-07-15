@@ -16896,3 +16896,36 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   is removed.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.16`)
+
+### 🔴REJECTED: streaming ASCII block detection regresses sparse documents (2026-07-14)
+
+- **Negative-ledger-first boundary:** `bd-1buv.6` is INVALID / HOLD because its cold remote
+  build never launched the named test; neither timed arm ran. The adjacent landed ASCII change
+  streams `classify_line` scalars, but does not remove `detect_diagram_blocks`' whole-document
+  line-pointer vector.
+- **Profile attribution:** every call first collects all `text.lines()` entries into
+  `Vec<&str>`—16 bytes per line on the remote 64-bit target plus growth/copies—then walks that
+  allocation. Only detected block lines require ownership. The existing ledger scores this
+  allocation cut at impact 4 x confidence 5 / effort 1 = **20**.
+- **One lever:** replaced only the whole-document collection with one
+  `text.lines().enumerate().peekable()` traversal, accumulating owned strings while a block is
+  open. Preserve line classification, one-line lookahead, start/end indices, byte-column bounds,
+  retained interior text/empty lines, EOF handling, ordering, and exact `DiagramBlock` contents.
+- **Correctness:** the candidate matched the collect baseline exactly across empty, prose-only,
+  ASCII, Unicode/indented, interior-gap, EOF, and single-line cases. The measured corpus also
+  matched exactly (`digest=ce696205a5185d25`).
+- **Remote proof:** fail-closed `RCH_REQUIRE_REMOTE=1`, `--profile release`, worker
+  `vmi1293453`. Untimed warm-up job `j-29928833041828904` passed. Foreground A/B job
+  `j-29928833041828916` ran one ignored test successfully; RCH unexpectedly rebuilt dependencies,
+  but that build was outside both in-process timed arms (test body: 0.34 s).
+- **Real alternating A/B (9 samples, 64 sweeps/sample, sparse 2,048-line document):** baseline
+  samples `[15683277, 16647810, 17638582, 18108567, 18237611, 20193849, 21128377,
+  21355736, 23199216]` ns; candidate samples `[17487147, 17777290, 17960685, 18328867,
+  19004628, 19011009, 19336666, 19492779, 20649820]` ns. Median regressed
+  **18,237,611 -> 19,004,628 ns (-4.206%, 0.960x)**, below the 3% keep gate.
+- **Decision:** reject and restore the collect implementation. Owning block lines during traversal
+  adds enough eager allocation/copy cost to outweigh removing the non-owning line-pointer vector
+  on this sparse workload. Do not retry this exact streaming/owned-line shape without a materially
+  different ownership strategy.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.17`)
