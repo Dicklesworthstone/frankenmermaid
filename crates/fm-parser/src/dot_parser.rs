@@ -1,4 +1,4 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, iter::Peekable, str::CharIndices};
 
 use fm_core::{ArrowType, DiagramType, NodeShape, Span};
 use memchr::memchr2;
@@ -481,125 +481,156 @@ fn parse_dot_node_fragment(raw: &str) -> Option<DotNode> {
         return None;
     }
 
-    let label = attrs.and_then(parse_dot_label);
-    // Most DOT nodes carry no `shape=` attribute, yet `parse_dot_shape` would run a full
-    // `extract_dot_attribute_raw` scan (allocating a `current_key`/`current_val` String per
-    // attribute) only to find no match. `extract` matches keys case-insensitively, so gate on a
-    // cheap allocation-free case-insensitive `shape` substring test first: `extract` can only match
-    // a `shape` key when that substring is present, so this is byte-identical (mirrors the landed
-    // `looks_like_dot` "graph" pre-guard).
-    let shape = attrs
-        .filter(|a| contains_ignore_ascii_case(a.as_bytes(), b"shape"))
-        .and_then(parse_dot_shape)
-        .unwrap_or(NodeShape::Rect);
+    let (label, shape) = attrs.map_or((None, NodeShape::Rect), parse_dot_node_attributes);
 
     Some(DotNode { id, label, shape })
 }
 
-fn extract_dot_attribute_raw<'a>(attributes: &'a str, key: &str) -> Option<Cow<'a, str>> {
-    // `char_indices` lets the key and value be returned as BORROWED slices of `attributes` instead
-    // of char-by-char-built Strings: the key token and every value form except the (malformed)
-    // unterminated-quoted case are contiguous substrings. Byte-identical to the prior String build
-    // — the quoted value keeps escapes verbatim, so it is exactly the span from the opening `"` to
-    // the closing `"` inclusive; an unterminated quote still gets the same synthetic closing `"`
-    // (the only case that allocates, via `Cow::Owned`).
-    let mut chars = attributes.char_indices().peekable();
+struct DotAttributeIter<'a> {
+    attributes: &'a str,
+    chars: Peekable<CharIndices<'a>>,
+}
 
-    while let Some((key_start, ch)) = chars.next() {
-        if ch.is_whitespace() || ch == '[' || ch == ']' || ch == ',' {
-            continue;
+impl<'a> DotAttributeIter<'a> {
+    fn new(attributes: &'a str) -> Self {
+        Self {
+            attributes,
+            chars: attributes.char_indices().peekable(),
         }
+    }
+}
 
-        let mut key_end = attributes.len();
-        while let Some(&(idx, c)) = chars.peek() {
-            if c == '=' || c.is_whitespace() || c == '[' || c == ']' || c == ',' {
-                key_end = idx;
-                break;
+impl<'a> Iterator for DotAttributeIter<'a> {
+    type Item = (&'a str, Cow<'a, str>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let attributes = self.attributes;
+
+        loop {
+            let (key_start, ch) = self.chars.next()?;
+            if ch.is_whitespace() || ch == '[' || ch == ']' || ch == ',' {
+                continue;
             }
-            chars.next();
-        }
-        let current_key = &attributes[key_start..key_end];
 
-        while let Some(&(_, c)) = chars.peek() {
-            if c.is_whitespace() {
-                chars.next();
-            } else {
-                break;
+            let mut key_end = attributes.len();
+            while let Some(&(idx, c)) = self.chars.peek() {
+                if c == '=' || c.is_whitespace() || c == '[' || c == ']' || c == ',' {
+                    key_end = idx;
+                    break;
+                }
+                self.chars.next();
             }
-        }
+            let current_key = &attributes[key_start..key_end];
 
-        let mut has_eq = false;
-        if let Some(&(_, '=')) = chars.peek() {
-            has_eq = true;
-            chars.next();
-            while let Some(&(_, c)) = chars.peek() {
+            while let Some(&(_, c)) = self.chars.peek() {
                 if c.is_whitespace() {
-                    chars.next();
+                    self.chars.next();
                 } else {
                     break;
                 }
             }
-        }
 
-        let mut current_val: Cow<'_, str> = Cow::Borrowed("");
-        if has_eq && let Some(&(val_start, c)) = chars.peek() {
-            if c == '"' {
-                chars.next();
-                let mut escaped = false;
-                let mut close_idx = None;
-                while let Some(&(idx, vc)) = chars.peek() {
-                    if escaped {
-                        escaped = false;
-                        chars.next();
-                    } else if vc == '\\' {
-                        escaped = true;
-                        chars.next();
-                    } else if vc == '"' {
-                        close_idx = Some(idx);
-                        chars.next();
-                        break;
+            let mut has_eq = false;
+            if let Some(&(_, '=')) = self.chars.peek() {
+                has_eq = true;
+                self.chars.next();
+                while let Some(&(_, c)) = self.chars.peek() {
+                    if c.is_whitespace() {
+                        self.chars.next();
                     } else {
-                        chars.next();
-                    }
-                }
-                current_val = match close_idx {
-                    // From the opening `"` (val_start) to the closing `"` inclusive.
-                    Some(ci) => Cow::Borrowed(&attributes[val_start..ci + 1]),
-                    // Unterminated: the old loop appended a synthetic closing `"`.
-                    None => Cow::Owned(format!("{}\"", &attributes[val_start..])),
-                };
-            } else {
-                let mut html_depth = 0;
-                let mut val_end = attributes.len();
-                while let Some(&(idx, vc)) = chars.peek() {
-                    if vc == '<' {
-                        html_depth += 1;
-                    } else if vc == '>' && html_depth > 0 {
-                        html_depth -= 1;
-                    }
-
-                    if html_depth == 0 && (vc.is_whitespace() || vc == ',' || vc == ']') {
-                        val_end = idx;
                         break;
                     }
-                    chars.next();
                 }
-                current_val = Cow::Borrowed(&attributes[val_start..val_end]);
             }
-        }
 
-        if current_key.eq_ignore_ascii_case(key) {
-            return Some(current_val);
+            let mut current_val: Cow<'_, str> = Cow::Borrowed("");
+            if has_eq && let Some(&(val_start, c)) = self.chars.peek() {
+                if c == '"' {
+                    self.chars.next();
+                    let mut escaped = false;
+                    let mut close_idx = None;
+                    while let Some(&(idx, vc)) = self.chars.peek() {
+                        if escaped {
+                            escaped = false;
+                            self.chars.next();
+                        } else if vc == '\\' {
+                            escaped = true;
+                            self.chars.next();
+                        } else if vc == '"' {
+                            close_idx = Some(idx);
+                            self.chars.next();
+                            break;
+                        } else {
+                            self.chars.next();
+                        }
+                    }
+                    current_val = match close_idx {
+                        Some(ci) => Cow::Borrowed(&attributes[val_start..ci + 1]),
+                        None => Cow::Owned(format!("{}\"", &attributes[val_start..])),
+                    };
+                } else {
+                    let mut html_depth = 0;
+                    let mut val_end = attributes.len();
+                    while let Some(&(idx, vc)) = self.chars.peek() {
+                        if vc == '<' {
+                            html_depth += 1;
+                        } else if vc == '>' && html_depth > 0 {
+                            html_depth -= 1;
+                        }
+
+                        if html_depth == 0 && (vc.is_whitespace() || vc == ',' || vc == ']') {
+                            val_end = idx;
+                            break;
+                        }
+                        self.chars.next();
+                    }
+                    current_val = Cow::Borrowed(&attributes[val_start..val_end]);
+                }
+            }
+
+            return Some((current_key, current_val));
         }
     }
-    None
 }
 
-/// Extract `shape=...` from DOT attribute list and map to `NodeShape`.
-fn parse_dot_shape(attributes: &str) -> Option<NodeShape> {
-    let value = extract_dot_attribute_raw(attributes, "shape")?;
+fn parse_dot_node_attributes(attributes: &str) -> (Option<String>, NodeShape) {
+    let mut label_value = None;
+    let mut shape_value = None;
+
+    for (key, value) in DotAttributeIter::new(attributes) {
+        if label_value.is_none() && key.eq_ignore_ascii_case("label") {
+            label_value = Some(value);
+        } else if shape_value.is_none() && key.eq_ignore_ascii_case("shape") {
+            shape_value = Some(value);
+        }
+        if label_value.is_some() && shape_value.is_some() {
+            break;
+        }
+    }
+
+    let label = label_value.as_deref().and_then(parse_dot_label_value);
+    let shape = shape_value
+        .as_deref()
+        .and_then(parse_dot_shape_value)
+        .unwrap_or(NodeShape::Rect);
+    (label, shape)
+}
+
+fn parse_dot_shape_value(value: &str) -> Option<NodeShape> {
     let shape_name = value.trim().trim_matches('"').to_ascii_lowercase();
     dot_shape_to_node_shape(&shape_name)
+}
+
+#[cfg(test)]
+fn extract_dot_attribute_raw<'a>(attributes: &'a str, key: &str) -> Option<Cow<'a, str>> {
+    DotAttributeIter::new(attributes)
+        .find_map(|(current_key, value)| current_key.eq_ignore_ascii_case(key).then_some(value))
+}
+
+#[cfg(test)]
+fn parse_dot_shape(attributes: &str) -> Option<NodeShape> {
+    let value = extract_dot_attribute_raw(attributes, "shape")?;
+    parse_dot_shape_value(value.as_ref())
 }
 
 /// Map DOT shape names to frankenmermaid `NodeShape`.
@@ -685,8 +716,7 @@ fn split_endpoint_and_attrs(fragment: &str) -> (&str, Option<&str>) {
     (endpoint, Some(attrs))
 }
 
-fn parse_dot_label(attributes: &str) -> Option<String> {
-    let value = extract_dot_attribute_raw(attributes, "label")?;
+fn parse_dot_label_value(value: &str) -> Option<String> {
     let value = value.trim();
 
     if let Some(quoted) = value.strip_prefix('"') {
@@ -704,6 +734,24 @@ fn parse_dot_label(attributes: &str) -> Option<String> {
     let raw_label = value.trim_matches('"');
     let decoded_label = decode_escapes(raw_label);
     (!decoded_label.is_empty()).then_some(decoded_label)
+}
+
+#[cfg(test)]
+fn parse_dot_label(attributes: &str) -> Option<String> {
+    let value = extract_dot_attribute_raw(attributes, "label")?;
+    parse_dot_label_value(value.as_ref())
+}
+
+#[cfg(test)]
+fn parse_dot_node_attributes_sequential(attributes: &str) -> (Option<String>, NodeShape) {
+    let label = parse_dot_label(attributes);
+    let shape = if contains_ignore_ascii_case(attributes.as_bytes(), b"shape") {
+        parse_dot_shape(attributes)
+    } else {
+        None
+    }
+    .unwrap_or(NodeShape::Rect);
+    (label, shape)
 }
 
 fn find_unescaped_quote_end(input: &str) -> Option<usize> {
@@ -1550,6 +1598,27 @@ fn extract_attribute_with_spaces() {
         extract_dot_attribute_raw(attr2, "shape").as_deref(),
         Some("box")
     );
+}
+
+#[test]
+fn dot_node_attribute_single_pass_matches_sequential_reference() {
+    for attributes in [
+        r#"label="Node", shape=diamond"#,
+        r#"SHAPE = "circle", color=red, LABEL = <b>Alpha</b>"#,
+        r#"color=red, label="Line\nBreak", style=filled, shape=roundedbox"#,
+        r#"label="", xlabel="shape", myshape=star"#,
+        r#"shape=unknown, shape=diamond, label="first", label="second""#,
+        r#"color=red, label="unterminated"#,
+        r#"tooltip="shape=diamond", label="Tooltip only""#,
+        r#"shape=hexagon"#,
+        "",
+    ] {
+        assert_eq!(
+            parse_dot_node_attributes(attributes),
+            parse_dot_node_attributes_sequential(attributes),
+            "attribute list: {attributes:?}"
+        );
+    }
 }
 
 #[test]

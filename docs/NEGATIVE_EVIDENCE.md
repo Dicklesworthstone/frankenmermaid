@@ -17469,3 +17469,38 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   pair once instead of twice per node, with the drawing and formatting contracts unchanged.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.28`)
+
+### 🟢LANDED: scan DOT node label and shape attributes once (2026-07-15)
+
+- **Negative-ledger-first boundary:** the 2026-07-13 conditional-push experiment above rejected a
+  per-value-character branch and explicitly named `parse-attrs-once` as the higher-value successor.
+  This is that distinct structural lever, not a retry: `parse_dot_node_fragment` previously called
+  `parse_dot_label` and then `parse_dot_shape`, causing shape-bearing nodes to tokenize the same
+  attribute list twice.
+- **Profile / attribution:** the second scan repeated key allocation, delimiter handling, quoted-value
+  traversal, and value extraction for every shape-bearing DOT node. On a realistic attribute list with
+  `label`, `color`, `tooltip`, `penwidth`, `shape`, and `style`, the opportunity scored impact 4 x
+  confidence 4 / effort 2 = **8**.
+- **One lever / exact isomorphism:** add a borrowing `DotAttributeIter` and consume it once to capture
+  the first case-insensitive `label` and `shape` values. Label decoding, first-key precedence, known and
+  unknown shape handling, unterminated quoted values, and the default rectangle remain unchanged. A
+  permanent oracle compares the single-pass result with the exact sequential reference across ordering,
+  casing, HTML/escaped/empty labels, duplicate keys, unknown shapes, false `shape` substrings, and malformed
+  quotes.
+- **Remote correctness:** fail-closed direct Cargo argv with `RCH_REQUIRE_REMOTE=1`,
+  `RCH_NO_SELF_HEALING=1`, and `--profile release` on worker `vmi1153651`. Initial untimed warm-up job
+  `j-29928833041829400` caught a probe-fixture raw-string delimiter error before any timed code ran;
+  corrected job `j-29928833041829407` passed the exact oracle (1 passed, 0 failed). UBS on the owned parser
+  file exited 0 with zero critical findings.
+- **One foreground same-binary A/B:** job `j-29928833041829416`, alternating order, 9 rounds over 2,048
+  shape-heavy attribute lists x 8 sweeps. Sequential two-scan samples `[11630909, 11692853, 11820120,
+  11989665, 12316192, 12447888, 12592035, 12791807, 13023779]` ns; single-pass samples `[6577891,
+  8315253, 8410560, 8516557, 8523459, 8767764, 8792279, 9269868, 9367440]` ns. Exact digest parity held
+  (`154960`); median improved **12,316,192 -> 8,523,459 ns (30.795%, 1.44x)**, with non-overlapping
+  distributions. The timed test body took 0.21s. RCH discarded the nominally warmed target and rebuilt for
+  4m42s outside both timed arms. The link emitted no output for 121s; the mandated interrupt crossed with
+  already-buffered successful completion, so the full exit-0 A/B was returned and no retry was needed.
+- **Decision:** keep. Shape-bearing DOT nodes now tokenize their attribute list once instead of twice while
+  retaining exact parsing semantics.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.29`)
