@@ -15953,6 +15953,47 @@ Profiled the parser's allocation primitives (profile-first, no lever attempted-a
 
   Agent: Claude (Opus 4.8, this session)
 
+### 🟢LANDED: reuse dead CSR degree storage for fill cursors — isolated sparse builder 35.61% faster (2026-07-16)
+
+- **Negative-ledger-first / fresh subsystem:** no prior row covers `CsrGraph::from_edges`; the only
+  succinct-structure row targets `BitVector::select`. There is currently no production caller in this
+  repository, so this is deliberately classified as an **isolated public primitive**, not an end-to-end
+  Mermaid speedup. Opportunity score: impact 3, confidence 5, effort 1 = **15/30**.
+- **Profile first:** fail-closed RCH job `j-29933730227290633` built the untouched, unstripped,
+  LTO-disabled `--profile release` test binary on actual worker `vmi1152480`. A foreground `perf record`
+  over 32 sparse 1,048,576-node / 65,536-edge builds took **374,327,637 ns**, captured 161 cycle samples
+  with zero loss, and attributed **33.97%** to `CsrGraph::from_edges`. Page clearing and zero-fill work was
+  prominent in the same profile (`folio_remove_rmap_ptes` 8.04%, `clear_page_rep` 7.89%,
+  `free_frozen_page_commit` 4.19%, `__memset_avx2_unaligned_erms` 2.56%), with zeroed allocation stacks
+  rooted under the builder, clearing the profile gate before the production edit.
+- **One lever / exact isomorphism:** while building offsets, zero each consumed degree count and then move
+  that now-dead `Vec<u32>` into the per-node fill cursor instead of allocating a second node-sized zeroed
+  vector. Valid-edge filtering, directed/undirected self-loop handling, offsets, target write positions,
+  final per-node sorting, and public graph bytes are unchanged. A permanent oracle compares the candidate
+  with an exact copy of the old separate-cursor implementation across empty, duplicate, self-loop,
+  out-of-range, directed, and undirected inputs.
+- **Foreground same-binary A/B:** fail-closed job `j-29933730227290650` built the exact LTO-disabled
+  release binary on actual worker `vmi1152480`; that binary ran directly on the actual worker under a cap
+  applied only to the measurement. Eleven alternating rounds over the profiled sparse fixture, with
+  fixture construction outside the timers and full `CsrGraph` equality every round, produced separate-
+  cursor samples `[5264040, 6456049, 6619391, 6871228, 7578581, 8371133, 9129884, 9490703, 9730119,
+  11899945, 19334933]` ns and reused-degree samples `[2323424, 3620900, 3818723, 4004972, 5095158,
+  5389927, 5963463, 5987479, 6034949, 7031645, 9089414]` ns. Medians improved **8,371,133 ->
+  5,389,927 ns**, candidate/baseline **0.643871x** (**35.61% faster**, 1.5531x throughput).
+- **Correctness / gates:** the measured release binary passed the A/B parity test and all 11 non-ignored
+  CSR tests (two reproducible release perf probes ignored), including the exact old-vs-new oracle.
+  Targeted UBS exited 0 with no critical finding; `succinct.rs` is rustfmt- and diff-check-clean. Strict
+  remote all-targets `fm-core` Clippy stopped only at the unrelated pre-existing
+  `clippy::obfuscated_if_else` lint in `fm-core/src/lib.rs:8943` (job `j-29933730227290663`). After
+  `vmi1264463` immediately evicted its just-built release cache on the one-lint retry, that redundant job
+  was cancelled and the gate was switched to `ovh-b`; it passed with only the unrelated lint allowed
+  (job `j-29933730227290671`). Build/cache timings are infrastructure evidence only and do not contribute
+  to the A/B.
+- **Decision:** keep. The CSR builder removes one `num_nodes * 4`-byte zeroed allocation and reuses storage
+  at its exact lifetime boundary while preserving the complete graph representation.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.53`, Agent Mail `PeachCreek`)
+
 ### ❌REJECT (firms a prior soft-dismissal, now MEASURED at N=600): precompute node→style map to kill the O(N·S) per-node style-ref scan — isolated +11.2% but sub-floor in full render (2026-07-14)
 
 - **Ledger-first boundary:** an earlier "layout/render frontier fully mapped" entry (2026-07-10, `perf-styled.data`)
