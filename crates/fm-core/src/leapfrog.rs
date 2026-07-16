@@ -242,11 +242,19 @@ pub fn leapfrog_anti_join(base: &SortedRelation, exclude: &[&SortedRelation]) ->
 
     // Use union of all exclude sets: a key is excluded if it appears in ANY exclude relation.
     let excluded = leapfrog_union(exclude);
-    let excluded_set = SortedRelation::new(excluded);
+    let mut excluded_pos = 0;
 
     base.keys
         .iter()
-        .filter(|&&k| !excluded_set.contains(k))
+        .filter(|&&key| {
+            while excluded
+                .get(excluded_pos)
+                .is_some_and(|&excluded_key| excluded_key < key)
+            {
+                excluded_pos += 1;
+            }
+            excluded.get(excluded_pos).copied() != Some(key)
+        })
         .copied()
         .collect()
 }
@@ -291,6 +299,139 @@ pub fn leapfrog_union(relations: &[&SortedRelation]) -> Vec<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    fn anti_join_profile_fixture() -> (SortedRelation, Vec<SortedRelation>) {
+        const BASE_LEN: u64 = 262_144;
+
+        let base = SortedRelation::new((0..BASE_LEN).collect());
+        let exclusions = (0_u64..8)
+            .map(|relation| {
+                let start = relation * 7;
+                let stride = 48 + relation as usize * 8;
+                SortedRelation::new((start..BASE_LEN + 8_192).step_by(stride).collect())
+            })
+            .collect();
+        (base, exclusions)
+    }
+
+    fn anti_join_digest(values: &[u64]) -> u64 {
+        (values.len() as u64)
+            .wrapping_add(values.first().copied().unwrap_or(0))
+            .wrapping_add(values.last().copied().unwrap_or(0))
+    }
+
+    fn leapfrog_anti_join_binary_reference(
+        base: &SortedRelation,
+        exclude: &[&SortedRelation],
+    ) -> Vec<u64> {
+        if exclude.is_empty() {
+            return base.keys.clone();
+        }
+
+        let excluded = leapfrog_union(exclude);
+        let excluded_set = SortedRelation::new(excluded);
+        base.keys
+            .iter()
+            .filter(|&&key| !excluded_set.contains(key))
+            .copied()
+            .collect()
+    }
+
+    fn anti_join_sample<F>(
+        mut anti_join: F,
+        base: &SortedRelation,
+        exclusions: &[&SortedRelation],
+    ) -> (u128, u64)
+    where
+        F: FnMut(&SortedRelation, &[&SortedRelation]) -> Vec<u64>,
+    {
+        let started = Instant::now();
+        let mut digest = 0_u64;
+        for _ in 0..8 {
+            let result = anti_join(black_box(base), black_box(exclusions));
+            digest = digest.wrapping_add(anti_join_digest(black_box(&result)));
+        }
+        (started.elapsed().as_nanos(), digest)
+    }
+
+    fn median(samples: &mut [u128]) -> u128 {
+        samples.sort_unstable();
+        samples[samples.len() / 2]
+    }
+
+    #[test]
+    #[ignore = "release-only leapfrog anti-join profile"]
+    fn leapfrog_anti_join_profile() {
+        let (base, exclusions) = anti_join_profile_fixture();
+        let exclusion_refs: Vec<&SortedRelation> = exclusions.iter().collect();
+        let started = Instant::now();
+        let mut digest = 0_u64;
+        for _ in 0..64 {
+            let result = leapfrog_anti_join(black_box(&base), black_box(&exclusion_refs));
+            digest = digest.wrapping_add(anti_join_digest(black_box(&result)));
+        }
+        eprintln!(
+            "leapfrog_anti_join_profile base={} exclusions={} elapsed_ns={} digest={digest}",
+            base.len(),
+            exclusions.len(),
+            started.elapsed().as_nanos()
+        );
+    }
+
+    #[test]
+    #[ignore = "release-only leapfrog anti-join A/B"]
+    fn leapfrog_anti_join_ab() {
+        let (base, exclusions) = anti_join_profile_fixture();
+        let exclusion_refs: Vec<&SortedRelation> = exclusions.iter().collect();
+        let expected = leapfrog_anti_join_binary_reference(&base, &exclusion_refs);
+        assert_eq!(leapfrog_anti_join(&base, &exclusion_refs), expected);
+
+        for _ in 0..2 {
+            black_box(leapfrog_anti_join_binary_reference(
+                black_box(&base),
+                black_box(&exclusion_refs),
+            ));
+            black_box(leapfrog_anti_join(
+                black_box(&base),
+                black_box(&exclusion_refs),
+            ));
+        }
+
+        let mut baseline_ns = Vec::with_capacity(11);
+        let mut candidate_ns = Vec::with_capacity(11);
+        let mut baseline_digest = 0_u64;
+        let mut candidate_digest = 0_u64;
+        for round in 0..11 {
+            let (baseline, candidate) = if round % 2 == 0 {
+                (
+                    anti_join_sample(leapfrog_anti_join_binary_reference, &base, &exclusion_refs),
+                    anti_join_sample(leapfrog_anti_join, &base, &exclusion_refs),
+                )
+            } else {
+                let candidate = anti_join_sample(leapfrog_anti_join, &base, &exclusion_refs);
+                let baseline =
+                    anti_join_sample(leapfrog_anti_join_binary_reference, &base, &exclusion_refs);
+                (baseline, candidate)
+            };
+            baseline_ns.push(baseline.0);
+            candidate_ns.push(candidate.0);
+            baseline_digest = baseline_digest.wrapping_add(baseline.1);
+            candidate_digest = candidate_digest.wrapping_add(candidate.1);
+        }
+        assert_eq!(baseline_digest, candidate_digest);
+
+        let baseline_samples = baseline_ns.clone();
+        let candidate_samples = candidate_ns.clone();
+        let baseline_median_ns = median(&mut baseline_ns);
+        let candidate_median_ns = median(&mut candidate_ns);
+        let improvement = 100.0 * (baseline_median_ns as f64 - candidate_median_ns as f64)
+            / baseline_median_ns as f64;
+        eprintln!(
+            "leapfrog_anti_join_ab baseline_ns={baseline_samples:?} candidate_ns={candidate_samples:?} baseline_median_ns={baseline_median_ns} candidate_median_ns={candidate_median_ns} improvement_pct={improvement:.2} digest={baseline_digest}"
+        );
+    }
 
     #[test]
     fn sorted_relation_from_unsorted() {
@@ -413,6 +554,51 @@ mod tests {
         let base = SortedRelation::from_slice(&[1, 2, 3]);
         let result = leapfrog_anti_join(&base, &[]);
         assert_eq!(result, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn anti_join_matches_binary_search_reference() {
+        let fixtures = [
+            (
+                SortedRelation::new(Vec::new()),
+                vec![SortedRelation::from_slice(&[1, 2, 3])],
+            ),
+            (SortedRelation::from_slice(&[1, 2, 3]), Vec::new()),
+            (
+                SortedRelation::from_slice(&[10, 20, 30]),
+                vec![SortedRelation::new(Vec::new())],
+            ),
+            (
+                SortedRelation::from_slice(&[10, 20, 30]),
+                vec![SortedRelation::from_slice(&[1, 2, 40, 50])],
+            ),
+            (
+                SortedRelation::from_slice(&[10, 20, 30]),
+                vec![SortedRelation::from_slice(&[10, 20, 30])],
+            ),
+            (
+                SortedRelation::from_slice(&[1, 2, 3, 4, 5, 6, 7]),
+                vec![
+                    SortedRelation::from_slice(&[1, 3, 5, 9]),
+                    SortedRelation::from_slice(&[2, 3, 6, 10]),
+                ],
+            ),
+        ];
+
+        for (base, exclusions) in fixtures {
+            let exclusion_refs: Vec<&SortedRelation> = exclusions.iter().collect();
+            assert_eq!(
+                leapfrog_anti_join(&base, &exclusion_refs),
+                leapfrog_anti_join_binary_reference(&base, &exclusion_refs)
+            );
+        }
+
+        let (base, exclusions) = anti_join_profile_fixture();
+        let exclusion_refs: Vec<&SortedRelation> = exclusions.iter().collect();
+        assert_eq!(
+            leapfrog_anti_join(&base, &exclusion_refs),
+            leapfrog_anti_join_binary_reference(&base, &exclusion_refs)
+        );
     }
 
     #[test]
