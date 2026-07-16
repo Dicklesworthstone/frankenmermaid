@@ -307,10 +307,11 @@ impl TermRenderer {
             );
         }
 
-        // Render canvas to string and overlay labels.
-        let base_output = canvas.render();
+        // Render the canvas straight to its char grid (skipping the String the overlay would re-parse)
+        // and overlay labels.
+        let base_grid = canvas.render_char_grid();
         let output = self.overlay_labels(
-            base_output,
+            base_grid,
             ir,
             layout,
             cell_width,
@@ -1095,7 +1096,7 @@ impl TermRenderer {
     #[allow(clippy::too_many_arguments)]
     fn overlay_labels(
         &self,
-        base: String,
+        mut lines: Vec<Vec<char>>,
         ir: &MermaidDiagramIr,
         layout: &DiagramLayout,
         cell_width: usize,
@@ -1103,7 +1104,9 @@ impl TermRenderer {
         scale_x: f32,
         scale_y: f32,
     ) -> String {
-        let mut lines: Vec<Vec<char>> = base.lines().map(|l| l.chars().collect()).collect();
+        // `lines` arrives as the canvas's char grid (`Canvas::render_char_grid`) — one row per cell
+        // row — instead of a rendered `String` this fn used to re-parse with `lines().chars().collect()`.
+        // Skips a full encode+decode of the whole raster.
 
         // Pad lines to consistent width.
         for line in &mut lines {

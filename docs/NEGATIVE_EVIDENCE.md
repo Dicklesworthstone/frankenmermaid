@@ -18089,3 +18089,32 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   two. Compounds with the two prior term levers (class term render is now a fraction of its original cost).
 
   Agent: Claude (Opus 4.8, this session; bead bd-1buv.44)
+
+### 🟢LANDED: render straight to the char grid, skip the overlay String round-trip — term render gantt −16% / class −15% (2026-07-16)
+
+- **Negative-ledger-first:** fourth lever in the term-canvas vein. After draw_line/braille/buffer-merge,
+  a re-profile put the OUTPUT-building path on top: `Canvas::render` 17.4% + `String::push` 16% +
+  `encode_utf8` 9.4% (per-cell `output.push(char)`), plus `Chars::next`/`Vec<char>` extend ~8% in the
+  label overlay. Cause: `render_layout` did `canvas.render()` → `String`, then `overlay_labels`
+  IMMEDIATELY re-parsed that String back into `Vec<Vec<char>>` (`base.lines().map(|l|
+  l.chars().collect())`) to index `grid[row][col]` for label stamping — a full encode THEN decode of the
+  whole raster, every render.
+- **One lever / exact isomorphism:** add `Canvas::render_char_grid() -> Vec<Vec<char>>` (each cell's
+  `char` pushed straight into a row `Vec<char>`, no `String`/`encode_utf8`) and change `overlay_labels`
+  to take that grid instead of a `String` (deleting the `lines()`/`chars().collect()` parse). The final
+  `grid → String` join is unchanged, so the output is encoded ONCE at the end instead of encoded (render)
+  → decoded (overlay parse) → encoded (join). Byte-identical: `render_char_grid` yields exactly
+  `render().lines().map(|l| l.chars().collect()).collect()` — the canvas's `cell_width`/`cell_height`
+  equal the overlay's params (same locals in `render_layout`), so the pad-to-width/height loops stay
+  no-ops. `Canvas::render` kept (minimap + tests still use it).
+- **A/B (same machine, same build flags, my files only):** baseline = pre-edit binary (with the 3 prior
+  term levers). `perf stat -e instructions` /200/2000×termrender: gantt 0.8405× (−16.0%), class 0.8543×
+  (−14.6%), seq 0.8670×, state 0.8716×, flowchart 0.8777×, journey 0.8835×, mindmap 0.8836×, er 0.8978×.
+  Interleaved wall-min ×4: gantt ~0.829-0.849×, class ~0.802-0.836× (one noisy 1.18 min outlier under
+  load; instr is the deterministic arbiter). **Output byte-length identical for all shapes.**
+- **Correctness:** `cargo test -p fm-render-term` green (canvas render + overlay golden snapshots);
+  `clippy -D warnings` clean.
+- **Decision:** keep. The whole-raster encode→decode→encode round-trip becomes a single encode; every
+  labelled term diagram benefits.
+
+  Agent: Claude (Opus 4.8, this session; bead bd-1buv.46)

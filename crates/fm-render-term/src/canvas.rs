@@ -291,6 +291,26 @@ impl Canvas {
         output
     }
 
+    /// Render each cell's character into a `cell_height × cell_width` grid of `char`s. This is what the
+    /// label overlay needs (it indexes `grid[row][col]` to stamp label chars), so producing the grid
+    /// directly lets the caller skip the [`render`] → `String` → `str::lines().chars().collect()` round
+    /// trip — one fewer full encode (per-cell `String::push` + `encode_utf8`) and decode of the whole
+    /// output. Byte-identical to `render().lines().map(|l| l.chars().collect()).collect()`: every row
+    /// holds exactly this canvas's `cell_width` cells in `render`'s column order (no inter-row `\n`, which
+    /// `lines()` strips anyway).
+    #[must_use]
+    pub fn render_char_grid(&self) -> Vec<Vec<char>> {
+        let mut grid = Vec::with_capacity(self.cell_height);
+        for cell_y in 0..self.cell_height {
+            let mut row = Vec::with_capacity(self.cell_width);
+            for cell_x in 0..self.cell_width {
+                row.push(self.render_cell(cell_x, cell_y));
+            }
+            grid.push(row);
+        }
+        grid
+    }
+
     /// Render a single cell to its character.
     #[must_use]
     fn render_cell(&self, cell_x: usize, cell_y: usize) -> char {
