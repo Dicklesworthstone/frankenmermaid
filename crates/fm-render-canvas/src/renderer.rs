@@ -685,6 +685,12 @@ impl Canvas2dRenderer {
     ) -> usize {
         let mut count = 0;
 
+        // The cluster label font is a pure function of `config` (invariant across clusters), so format it
+        // once and reuse it — the prior canvas font-hoist campaign missed this site. Lazy (like the
+        // `standard_label_font` site) so a cluster-free diagram never formats it. Byte-identical to the
+        // per-cluster `format!("{}px {}", font_size*0.9, font_family)`.
+        let mut cluster_label_font: Option<String> = None;
+
         for cluster_box in &layout.clusters {
             let x = f64::from(cluster_box.bounds.x) + offset_x;
             let y = f64::from(cluster_box.bounds.y) + offset_y;
@@ -724,11 +730,9 @@ impl Canvas2dRenderer {
 
             if let Some(title_text) = title_text {
                 ctx.set_fill_style(&self.config.label_color);
-                ctx.set_font(&format!(
-                    "{}px {}",
-                    self.config.font_size * 0.9,
-                    self.config.font_family
-                ));
+                ctx.set_font(cluster_label_font.get_or_insert_with(|| {
+                    format!("{}px {}", self.config.font_size * 0.9, self.config.font_family)
+                }));
                 ctx.set_text_align(TextAlign::Left);
                 ctx.set_text_baseline(TextBaseline::Top);
                 ctx.fill_text(title_text, x + 8.0, y + 4.0);
@@ -750,6 +754,10 @@ impl Canvas2dRenderer {
         offset_y: f64,
     ) {
         use fm_layout::LayoutBandKind;
+        // Invariant section-label font, formatted once and reused across bands (lazy so a band-free
+        // diagram never formats it). Byte-identical to the per-band
+        // `format!("bold {}px {}", font_size*0.85, font_family)`.
+        let mut section_label_font: Option<String> = None;
         for band in &layout.extensions.bands {
             let x = f64::from(band.bounds.x) + offset_x;
             let y = f64::from(band.bounds.y) + offset_y;
@@ -776,11 +784,13 @@ impl Canvas2dRenderer {
                     ctx.fill_rect(x, y, w, h);
                     if !band.label.is_empty() {
                         ctx.set_fill_style(&self.config.label_color);
-                        ctx.set_font(&format!(
-                            "bold {}px {}",
-                            self.config.font_size * 0.85,
-                            self.config.font_family
-                        ));
+                        ctx.set_font(section_label_font.get_or_insert_with(|| {
+                            format!(
+                                "bold {}px {}",
+                                self.config.font_size * 0.85,
+                                self.config.font_family
+                            )
+                        }));
                         ctx.set_text_align(TextAlign::Left);
                         ctx.set_text_baseline(TextBaseline::Top);
                         ctx.fill_text(&band.label, x + 4.0, y + 2.0);
@@ -1288,6 +1298,14 @@ impl Canvas2dRenderer {
 
         let mut angle = -std::f64::consts::FRAC_PI_2;
 
+        // Invariant slice-label font, hoisted out of the per-slice loop (byte-identical to the per-slice
+        // `format!("{}px {}", font_size*0.8, font_family)`).
+        let slice_label_font = format!(
+            "{}px {}",
+            self.config.font_size * 0.8,
+            self.config.font_family
+        );
+
         for (i, slice) in pie_meta.slices.iter().enumerate() {
             let value = f64::from(slice.value.max(0.0));
             let sweep = (value / total) * 2.0 * std::f64::consts::PI;
@@ -1313,11 +1331,7 @@ impl Canvas2dRenderer {
             let label = format!("{}: {pct:.1}%", slice.label);
 
             ctx.set_fill_style(&self.config.label_color);
-            ctx.set_font(&format!(
-                "{}px {}",
-                self.config.font_size * 0.8,
-                self.config.font_family
-            ));
+            ctx.set_font(&slice_label_font);
             ctx.set_text_align(TextAlign::Center);
             ctx.set_text_baseline(TextBaseline::Middle);
             ctx.fill_text(&label, lx, ly);

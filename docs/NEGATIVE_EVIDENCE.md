@@ -18216,3 +18216,32 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   workload. No build time or cancelled job contributed to the performance verdict.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.47`)
+
+### 🟢LANDED: hoist invariant cluster/section/pie label fonts in the Canvas2D renderer — pie canvas −40% / gantt −6% (2026-07-16)
+
+- **Negative-ledger-first / FRESH subsystem:** `fm-render-canvas` (the WASM/HTML Canvas2D backend). The
+  earlier canvas font-hoist campaign (bd-1buv.23-28) hoisted the node/edge-label/fragment/note fonts but
+  MISSED three per-item `ctx.set_font(&format!("{}px {}", config.font_size * K, config.font_family))`
+  sites — each a pure function of `config`, formatted once PER cluster (727), per gantt/section band
+  (779), and per PIE SLICE (1316). Profiled via a new profharness `canvasrender` phase driving the real
+  renderer through a lightweight no-op `NopCanvas` context (uncommitted harness; `MockCanvas2dContext`
+  records every op into a Vec + String and buries the renderer). `format_inner`/`fmt::write` was the top
+  renderer cost.
+- **One lever / exact isomorphism:** hoist each invariant font string out of its loop. Cluster and
+  section fonts use the lazy `Option::get_or_insert_with` pattern (mirroring the already-cached
+  `standard_label_font` site) so a cluster-free / band-free diagram never formats it; the pie-slice font
+  is eager (its fn only runs for pie diagrams). Byte-identical: the hoisted string equals the per-item
+  `format!` every iteration (config is invariant), so `set_font` receives identical bytes and the draw-op
+  count is unchanged for every shape.
+- **A/B (same machine, same build flags, my file only; baseline = pre-edit no-op-context binary):**
+  `perf stat -e instructions` /300/3000×canvasrender: **pie 0.5949× (−40.5%)**, gantt 0.9371× (−6.3%);
+  every non-cluster/band/pie shape (state/class/er/flowchart/mindmap/seq) 0.999-1.001× — NEUTRAL (the
+  lazy `Option` avoids the eager-hoist +0.6% regression a first attempt showed on those shapes).
+  Interleaved wall-min ×4: **pie ~0.552-0.572× (−43%)**, gantt ~0.899-0.952×. **Draw-op count identical
+  for every shape.**
+- **Correctness:** `cargo test -p fm-render-canvas` green (draw-op golden sequences); `clippy -D warnings`
+  clean.
+- **Decision:** keep. Pie canvas render nearly halves; any diagram with clusters or gantt sections sheds a
+  per-item font `format!`. Completes the font-hoist campaign the prior work started.
+
+  Agent: Claude (Opus 4.8, this session; bead bd-1buv.48)
