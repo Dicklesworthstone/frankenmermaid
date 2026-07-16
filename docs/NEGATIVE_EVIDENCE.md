@@ -18339,3 +18339,51 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   per-label `Vec<&str>` alloc; no wall regression on unlabeled-edge diagrams.
 
   Agent: Claude (Opus 4.8, this session; bead bd-1buv.52)
+
+### 🟢LANDED: skip impossible ConstraintSet conflict scans — isolated non-conflicting add 99.773% faster (2026-07-16)
+
+- **Negative-ledger-first / fresh subsystem:** no prior row covers `ConstraintSet::add`,
+  `detect_conflict`, or constraint-conflict scanning. The initially scouted layout-shape seam was
+  abandoned before profiling or production edits when its cold remote build pulled the full
+  `highs-sys` graph and RCH ignored the requested fallback worker; it has no performance verdict.
+  This pivot targets a public `fm-core` constraint-validation primitive with no current in-repo
+  production caller, so the result is deliberately classified as an **isolated primitive**, not an
+  end-to-end Mermaid speedup. Opportunity score: impact 5, confidence 5, effort 1 = **25/30**.
+- **Profile first:** fail-closed RCH job `j-29933730227290554` built the untouched, unstripped,
+  LTO-disabled `--profile release` test binary on actual worker `ovh-b`. A foreground
+  `perf record` over eight 8,192-constraint batches took **332,425,714 ns** and captured 187 cycle
+  samples with zero loss. `ConstraintSet::add` accounted for **92.42%** of sampled cycles;
+  inlined `detect_conflict` alone accounted for **63.38%**, while iterator advancement contributed
+  another 28.46% in the same frame. The scan therefore cleared the profile gate before editing.
+- **One lever / exact isomorphism:** bypass the existing-constraint scan only when the incoming
+  variant is Align, Group, Spacing, or Mirror. `detect_conflict` has productive arms only for
+  Pin/Pin and Order/Order, so those four incoming variants can never emit a conflict. Incoming Pin
+  and Order constraints retain the exact old full scan; stored constraint order, conflict order,
+  original/new indices, descriptions, and values are unchanged. A permanent mixed-variant oracle
+  compares the candidate with an exact copy of the old full-scan implementation, including equal
+  and conflicting pins plus both forms of contradictory ordering.
+- **Foreground same-binary A/B:** fail-closed job `j-29933730227290564` built the exact
+  LTO-disabled release binary on actual worker `vmi1152480`; RCH ignored the requested `ovh-b`
+  selection, so the already-built binary was executed directly on that actual worker. Eleven
+  alternating rounds over 8,192 non-conflicting Align/Group/Spacing/Mirror constraints, with fixture
+  clones outside the timers, produced full-scan samples `[81080504, 81358166, 81865519, 82081701,
+  82092978, 83203430, 85403891, 88984184, 92641674, 94591724, 99914078]` ns and candidate samples
+  `[123484, 135281, 137053, 139908, 159677, 188910, 191855, 201900, 217163, 230151, 479112]` ns.
+  Exact stored-constraint and conflict-signature parity held every round. Medians improved
+  **83,203,430 -> 188,910 ns**, candidate/baseline **0.002270x** (**99.773% faster**, 440.4395x
+  throughput).
+- **Correctness / gates:** the measured release binary passed all 15 non-ignored constraint tests
+  (two reproducible release perf probes ignored), including the exact old-vs-new oracle. Targeted
+  UBS exited 0 with no critical finding, and `constraints.rs` is rustfmt- and diff-check-clean.
+  Strict remote all-targets `fm-core` Clippy stopped only at the unrelated pre-existing
+  `clippy::obfuscated_if_else` lint in `fm-core/src/lib.rs:8943` (job
+  `j-29933730227290577`); the retry passed with only that lint allowed (job
+  `j-29933730227290583`). Workspace rustfmt remains blocked by peer-owned CLI/canvas/SVG edits.
+  A remote workspace check was cancelled when RCH ignored the `hz2` switch, returned to `ovh-b`,
+  and again evicted/redownloaded the full release dependency graph; no build duration contributes to
+  this verdict.
+- **Decision:** keep. Non-conflicting constraint kinds now append in amortized O(1) instead of
+  rescanning the entire set, while every variant capable of producing a conflict follows the old
+  path exactly.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.51`, Agent Mail `PeachCreek`)
