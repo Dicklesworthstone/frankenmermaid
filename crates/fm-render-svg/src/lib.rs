@@ -9830,8 +9830,20 @@ fn compute_edge_label<'a>(
 /// `out`. Shared by `render_edge` (into a fresh String wrapped in `Element::raw_svg`) and
 /// `render_edge_into` (straight into the output buffer, avoiding the per-edge fragment String + `Element`
 /// + the copy). Byte-identical (pinned by `golden_svg_test` + `edge_fast_full_fragment_matches_render`).
+///
+/// `A11Y` selects the accessibility variant at compile time, mirroring
+/// `write_common_edge_full_fragment_into`. `A11Y = true` (`A11yConfig::full()`, default profile) emits the
+/// group with `role="graphics-symbol" tabindex="0"` and the trailing `<title>` text alternative. `A11Y =
+/// false` (`A11yConfig::none()`, lean profile) skips `role`/`tabindex` and the `<title>` entirely — exactly
+/// what the slow `Element` path produces when every a11y flag is off (the `<g id/class/data-fm-edge-id>`
+/// wrapper, `<path>`, `<rect>`, and `<text>` are all a11y-independent, so only those two spots differ). The
+/// `from_label`/`to_label` feed only the `<title>`, so the `false` monomorphization discards them and its
+/// caller need not compute the endpoint labels.
+///
+/// A const parameter rather than a runtime flag keeps the default path exactly as branch-free as before
+/// (a runtime flag measured +0.1..0.33% instructions on the node lever, see `bd-b2b6`).
 #[allow(clippy::too_many_arguments)]
-fn write_labeled_edge_fragment_into(
+fn write_labeled_edge_fragment_into<const A11Y: bool>(
     out: &mut String,
     edge_index: usize,
     path_str: &str,
@@ -9857,7 +9869,11 @@ fn write_labeled_edge_fragment_into(
     let _ = AttributeValue::Integer(edge_index as i32).write_value(out);
     out.push_str("\" class=\"fm-edge-labeled\" data-fm-edge-id=\"");
     let _ = AttributeValue::Integer(edge_index as i32).write_value(out);
-    out.push_str("\" role=\"graphics-symbol\" tabindex=\"0\">");
+    if A11Y {
+        out.push_str("\" role=\"graphics-symbol\" tabindex=\"0\">");
+    } else {
+        out.push_str("\">");
+    }
     write_common_edge_path_into(
         out,
         path_str,
@@ -9888,13 +9904,19 @@ fn write_labeled_edge_fragment_into(
     let _ = write_escaped_attr(out, &colors.text);
     out.push_str("\" class=\"edge-label\">");
     let _ = write_escaped_text(out, label_str);
-    out.push_str("</text><title>");
-    let _ = write_escaped_text(out, from_label.unwrap_or("unknown"));
-    out.push_str(" points to ");
-    let _ = write_escaped_text(out, to_label.unwrap_or("unknown"));
-    out.push_str(" with label: ");
-    let _ = write_escaped_text(out, label_str);
-    out.push_str("</title></g>");
+    if A11Y {
+        out.push_str("</text><title>");
+        let _ = write_escaped_text(out, from_label.unwrap_or("unknown"));
+        out.push_str(" points to ");
+        let _ = write_escaped_text(out, to_label.unwrap_or("unknown"));
+        out.push_str(" with label: ");
+        let _ = write_escaped_text(out, label_str);
+        out.push_str("</title></g>");
+    } else {
+        // Lean: no `<title>`. `from_label`/`to_label` are unused (the caller passes `None`).
+        let _ = (from_label, to_label);
+        out.push_str("</text></g>");
+    }
 }
 
 fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> Element {
@@ -10155,7 +10177,7 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
             let (from_label, to_label) =
                 edge_endpoint_accessible_labels(edge, ir, accessible_node_labels);
             let mut f = String::with_capacity(path_str.len() + label_str.len() * 3 + 360);
-            write_labeled_edge_fragment_into(
+            write_labeled_edge_fragment_into::<true>(
                 &mut f,
                 edge_index,
                 &path_str,
@@ -10407,12 +10429,22 @@ fn render_edge_into(out: &mut String, edge_path: &LayoutEdgePath, context: &Edge
     // `compute_edge_label`/`write_labeled_edge_fragment_into` helpers keep the bytes identical. Only
     // labeled Arrow edges enter here; unlabeled edges (`compute_edge_label` -> None) and every other
     // labeled/complex case fall through to the tuple fast path / `Element` slow path exactly as before.
+    // Was `aria_labels && keyboard_nav && text_alternatives`. The fragment writer now has a lean
+    // (a11y-off) shape too, so the gate accepts a11y that is uniformly on OR uniformly off and dispatches
+    // to the matching monomorphization — label-heavy diagrams (sequence/er/sankey) were the last lean edge
+    // family still falling to the ~5-alloc `Element` slow path. Mixed a11y (`A11yConfig::minimal()`) still
+    // takes the slow path, exactly as before.
     if arrow == ArrowType::Arrow
         && !is_back_edge
+        // Cheap label-presence gate BEFORE `uniform_a11y`/`compute_edge_label`: an unlabeled Arrow edge
+        // (the common flowchart/state case) is handled by the unlabeled fast path below, so short-circuit
+        // it here instead of computing (and discarding) its label. Necessary condition for
+        // `compute_edge_label` to return `Some`; without it, relaxing the a11y gate to `uniform_a11y`
+        // regressed lean flowchart/state ~1% (the old `aria_labels` flag used to short-circuit here).
+        && detail.show_edge_labels
+        && ir_edge.is_some_and(|e| e.label.is_some())
         && config.embed_theme_css
-        && config.a11y.aria_labels
-        && config.a11y.keyboard_nav
-        && config.a11y.text_alternatives
+        && let Some(a11y) = uniform_a11y(&config.a11y)
         && !config.animations_enabled
         && !config.include_source_spans
         && let Some(edge) = ir_edge
@@ -10422,24 +10454,45 @@ fn render_edge_into(out: &mut String, edge_path: &LayoutEdgePath, context: &Edge
         let label_str = label_text.as_ref();
         if !label_str.contains('\n') && resolve_edge_inline_style(ir, edge_index).is_none() {
             let path_str = smooth_layout_edge_path(edge_path, offset_x, offset_y);
-            let (from_label, to_label) =
-                edge_endpoint_accessible_labels(edge, ir, accessible_node_labels);
-            write_labeled_edge_fragment_into(
-                out,
-                edge_index,
-                &path_str,
-                1.8,
-                "fm-edge-solid",
-                "url(#arrow-end)",
-                label_str,
-                lx,
-                ly,
-                detail.edge_font_size,
-                config.avg_char_width,
-                from_label,
-                to_label,
-                colors,
-            );
+            if a11y {
+                let (from_label, to_label) =
+                    edge_endpoint_accessible_labels(edge, ir, accessible_node_labels);
+                write_labeled_edge_fragment_into::<true>(
+                    out,
+                    edge_index,
+                    &path_str,
+                    1.8,
+                    "fm-edge-solid",
+                    "url(#arrow-end)",
+                    label_str,
+                    lx,
+                    ly,
+                    detail.edge_font_size,
+                    config.avg_char_width,
+                    from_label,
+                    to_label,
+                    colors,
+                );
+            } else {
+                // Lean fragment has no `<title>`, so endpoint labels are skipped entirely rather than
+                // computed and discarded (`accessible_node_labels` is `None` under lean anyway).
+                write_labeled_edge_fragment_into::<false>(
+                    out,
+                    edge_index,
+                    &path_str,
+                    1.8,
+                    "fm-edge-solid",
+                    "url(#arrow-end)",
+                    label_str,
+                    lx,
+                    ly,
+                    detail.edge_font_size,
+                    config.avg_char_width,
+                    None,
+                    None,
+                    colors,
+                );
+            }
             return;
         }
     }
