@@ -17859,3 +17859,33 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   byte keyword-match dispatch; the win scales with classes-per-node (journey's 4 → −5%).
 
   Agent: Claude (Opus 4.8, this session; bead bd-1buv.37)
+
+### 🟢LANDED: bulk-copy the clean prefix in write_sanitized_css_token_into — journey render −4.9% instr (2026-07-16)
+
+- **Negative-ledger-first boundary:** `write_sanitized_css_token_into` was a prior win (bulk-copy the
+  WHOLLY-clean token; skip the per-char decode). But its NON-clean path — hit by every capitalised user
+  class — re-decoded the ENTIRE token char-by-char. No prior lever on that path. A re-profile after my
+  band-label + class-scan wins put it at 6.64% of journey render (journey ACTOR classes are
+  `journey-actor-Actor1` — a capitalised actor name → non-clean → sanitised per node; real journey/styled
+  diagrams have capitalised user classes, so this is representative, not a fixture artifact).
+- **Profile / attribution:** the old code ran `.all(is_clean)` (which short-circuits AT the first non-
+  clean byte, i.e. scans the clean prefix) and, on failure, a full `value.chars()` map+push loop — so the
+  long clean prefix (`journey-actor-`) was processed TWICE.
+- **One lever / exact isomorphism:** `position()` the first non-clean byte, `push_str` the clean prefix in
+  bulk, then `char`-map only the dirty tail. Byte-identical: every clean-prefix byte maps to itself
+  (`to_ascii_lowercase` identity on lowercase alnum / `-` / `_`, each kept), so the bulk copy reproduces
+  what the char loop emitted; the tail loop is unchanged; a wholly-clean token still copies in one shot
+  (`position` == the old `.all` scan, so no extra work on either case). `clean_len` lands on an ASCII
+  boundary so both slices are valid UTF-8.
+- **A/B (same machine, same build flags, my file only):** baseline = pre-edit profharness binary;
+  candidate = same flags with only this edit. `perf stat -e instructions` journey/300/4000×render:
+  2,984,718 → 2,838,648 = 0.9510× (−4.90%). Interleaved wall-min ×5: ~0.951-0.983× (avg ~0.962×, ~−4%).
+  NULL CONTROLS timeline 1.0003×, mindmap 0.9997×, kanban 1.0000×, flowchart 1.0000× — all have
+  already-clean lowercase classes (same bulk-copy path both arms), so the change is isolated to
+  capitalised/dirty user classes (journey actors here).
+- **Correctness:** `cargo test -p fm-render-svg` green; `clippy -D warnings` clean; golden snapshots pin
+  byte-identity.
+- **Decision:** keep. Any diagram with capitalised or special-char user classes (journey actors, `:::MyClass`
+  styled flowcharts) copies the long clean run in bulk instead of re-decoding it char-by-char.
+
+  Agent: Claude (Opus 4.8, this session; bead bd-1buv.38)

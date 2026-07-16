@@ -1646,20 +1646,24 @@ fn scan_class_keywords_and_clean(class: &str) -> (NodeClassKeywords, bool) {
 /// (`sanitize_css_token` was ~4.5-4.9% of classed-node render — mindmap/git/styled — almost entirely the
 /// `collect()` allocation). Byte-identical: same per-char mapping in the same order.
 fn write_sanitized_css_token_into(buf: &mut String, value: &str) {
-    // Fast path: an already-valid lowercase CSS token — the overwhelmingly common class here
-    // (`kanban-card`, `journey-actor-actor0`, `timeline-section-0`, …) — maps to itself, so bulk-copy
-    // it in a single `push_str` instead of a per-`char` decode + map + push. Byte-identical: when every
-    // byte is already lowercase ascii-alnum / `-` / `_`, the loop below reproduces `value` verbatim
-    // (`to_ascii_lowercase` is the identity on it, and each char is kept). `.all` short-circuits on the
-    // first byte that would actually be transformed, so an upper/special class still takes the slow path.
-    if value
+    // Bulk-copy the already-clean PREFIX, then per-`char` map only the tail. Every byte before the first
+    // non-`[a-z0-9-_]` byte maps to itself (`to_ascii_lowercase` is the identity on lowercase alnum / `-` /
+    // `_`, and each is kept), so it can go in one `push_str` instead of a per-`char` decode+map+push. A
+    // fully-clean token (`kanban-card`, `timeline-section-0`, …) copies in one shot and returns; a
+    // capitalised user class (`journey-actor-Actor1`, `:::MyClass`) — the common non-clean case — still
+    // copies its long clean run in bulk and only decodes the short dirty tail. `position` scans exactly the
+    // clean prefix the old `.all` did before it short-circuited, so no extra work on either case.
+    // Byte-identical to the old fast-path-then-full-char-loop. `clean_len` lands on an ASCII byte boundary
+    // (every clean char is single-byte), so both slices are valid UTF-8.
+    let clean_len = value
         .bytes()
-        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
-    {
-        buf.push_str(value);
+        .position(|b| !(b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_'))
+        .unwrap_or(value.len());
+    buf.push_str(&value[..clean_len]);
+    if clean_len == value.len() {
         return;
     }
-    for ch in value.chars() {
+    for ch in value[clean_len..].chars() {
         let mapped = if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
             ch.to_ascii_lowercase()
         } else {
