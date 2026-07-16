@@ -18118,3 +18118,28 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   labelled term diagram benefits.
 
   Agent: Claude (Opus 4.8, this session; bead bd-1buv.46)
+
+### 🔴REJECTED: hoist the per-cell render-mode dispatch in Canvas::render_char_grid — instr −1.8% but wall +9% (2026-07-16)
+
+- **Hypothesis:** after the four landed term-canvas levers, `Canvas::render_cell` was the top self-time
+  symbol (21.7% of gantt term render). It `match self.mode`es and calls the concrete cell renderer PER
+  CELL (16 k× on a 200×80 grid), and shows as a distinct non-inlined symbol, so hoisting the mode
+  dispatch out of the loop should drop the per-cell match + call.
+- **Change:** `render_char_grid` matches `self.mode` ONCE and hands the concrete cell renderer
+  (`Self::render_braille_cell`, …) to a generic `build_char_grid(&self, cell: impl Fn(&Self, usize,
+  usize) -> char)`, so each mode monomorphises to a single-mode loop.
+- **A/B (same machine, same build flags, only this edit; baseline = the 4-term-win binary):**
+  `perf stat -e instructions` /200/2000×termrender IMPROVED: gantt 0.9823× (−1.8%), all shapes −0.9..1.8%,
+  **output byte-length identical**. But interleaved **wall-min ×5 REGRESSED**: gantt 134µs → 147µs =
+  **1.093-1.109× (+9..11%)**, tight and consistent (not noise).
+- **Why (instr↓ but wall↑):** passing a cell renderer as `impl Fn`/fn-item to a generic did NOT inline
+  the big `render_braille_cell` — it became an INDIRECT call per cell (fn-pointer), which mispredicts,
+  plus the 4-way monomorphisation bloats the hot loop's code (I-cache). The removed `match` (a cheap,
+  well-predicted branch) is far outweighed. Classic instr-vs-wall divergence — **wall is the arbiter**.
+- **Decision:** REJECT, reverted. The per-cell mode `match` is already near-free (the −1.8% instr shows
+  the compiler was mostly handling it); do NOT re-attempt via `impl Fn`/generics. A macro that TRULY
+  inlines each mode's loop (no fn-pointer) might avoid the indirection, but the instr ceiling is only
+  ~1.8% and code-layout risk is real — not worth it. `render_cell`'s 21.7% is dominated by
+  `render_braille_cell`'s code-point assembly, not the dispatch.
+
+  Agent: Claude (Opus 4.8, this session)
