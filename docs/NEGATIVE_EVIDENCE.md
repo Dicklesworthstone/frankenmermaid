@@ -18501,3 +18501,37 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   per-edge `SmallVec` derefs; no regression on edge-free diagrams.
 
   Agent: Claude (Opus 4.8, this session; bead bd-1buv.54)
+
+### 🔴REJECTED: emit fixed-width FNV-1a hex with direct nibble pushes — isolated primitive only 1.60% faster (2026-07-16)
+
+- **Negative-ledger-first / fresh subsystem:** no prior row covers `fm-core::evidence::fnv1a_hex`,
+  fixed-width hash encoding, or generic `LowerHex` finalization. This is an isolated evidence primitive:
+  in-repo callers are evidence/corpus surfaces rather than a current non-test production hot path.
+  Opportunity score: impact 2, confidence 5, effort 1 = **10/30**.
+- **Profile first:** fail-closed RCH job `j-29933730227290719` built the untouched, unstripped,
+  LTO-disabled `--profile release` test binary on actual worker `vmi1153651`. A capped foreground
+  `perf record` over 2,000,000 calls across eight mixed evidence strings took **215,217,466 ns** and
+  captured 227 cycle samples with zero loss. `alloc::fmt::format::format_inner` accounted for
+  **61.97%** of child cycles, `core::fmt::write` **51.43%**, and the `LowerHex` formatter **43.91%**;
+  reserve/grow work beneath formatting accounted for **16.01%**. The finalizer therefore cleared the
+  profile gate before editing.
+- **One lever / exact isomorphism:** preserve the FNV-1a loop byte-for-byte and replace only
+  `format!("{hash:016x}")` with a capacity-16 `String` plus sixteen high-to-low lowercase nibble
+  pushes. The exact candidate release binary matched the old formatter for leading-zero and boundary
+  values plus 4,096 deterministic `u64` values; the timed fixture outputs and work checksums also
+  matched every round.
+- **Foreground same-binary A/B:** the first candidate build, job `j-29933730227290733` on
+  `vmi1153651`, was cancelled when that worker evicted the just-warmed release cache and began
+  redownloading/rebuilding dependencies. Cold fallback job `j-29933730227290737` completed an uncapped
+  warm-up on actual worker `ovh-b`; only then was that exact binary measured under a 20-second cap.
+  Eleven alternating 250,000-call rounds produced formatter samples `[16176884, 16180999, 16214247,
+  16240530, 16274194, 16321329, 16375732, 16379871, 16389406, 16485281, 20118286]` ns and direct-push
+  samples `[15897749, 15944155, 15995431, 16002323, 16007233, 16060216, 16110238, 16137573,
+  16380567, 16732053, 18449448]` ns. Medians improved **16,321,329 -> 16,060,216 ns**,
+  candidate/baseline **0.984002x** (**1.600% faster**).
+- **Decision:** reject and restore production source. The real gain is below the 3% keep floor for an
+  isolated primitive and does not justify bespoke encoding code. The temporary profile/A/B/oracle
+  harness was removed after capture; this row is the only surviving change. Do not retry this direct
+  `String::push` formulation without evidence that `fnv1a_hex` has become a production hot path.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.55`, Agent Mail `PeachCreek`)
