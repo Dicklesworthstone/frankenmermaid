@@ -18625,3 +18625,53 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   no end-to-end layout or renderer claim is inferred.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.56`, Agent Mail `PeachCreek`)
+
+### 🟢LANDED: pack boolean slices one word at a time in `BitVector::from_bools` — isolated primitive −88.64% (bd-1buv.59, 2026-07-16)
+
+- **Negative-ledger-first / fresh seam:** existing rows already cover `BitVector::select` and
+  `CsrGraph::from_edges`, but not boolean-slice construction. The first fresh-subsystem attempt,
+  terminal minimap bead `bd-1buv.58`, received no performance verdict: untouched cold warm-up jobs
+  `j-29933730227290854` and `j-29933730227290864` both entered the full `highs-sys` dependency build
+  and then exceeded the two-minute no-output boundary on different workers. Both jobs were cancelled,
+  its temporary probe was removed, and that bead remains open. The pivoted `from_bools` primitive has
+  no non-test in-repo caller, so this row deliberately makes no end-to-end Mermaid claim. Opportunity
+  score: impact 2 × confidence 5 / effort 1 = **10**.
+- **Profile first:** fail-closed RCH job `j-29933730227290889` completed the uncapped cold warm-up of
+  an unstripped, debug-info-enabled, LTO-disabled `--profile release` fm-core test binary on actual
+  worker `vmi1227854` (AMD EPYC, 10 physical cores, no SMT; rustc 1.98.0-nightly beae78130; binary
+  SHA-256 `6d8ffb4eada284b631eaeb6fc148b607209a04a370b96a74e5c863507f057893`). Only the foreground
+  profile process was capped. Across 256 constructions of 1,048,579 mixed-density bits, the probe took
+  **1,438,992,660 ns** and recorded 1,377 cycle samples with zero loss. `BitVector::from_bools` held
+  **97.53% self / 98.83% children**; its inlined per-bit `set` path held 38.13-38.77% and iterator
+  advancement/end machinery held 32.78-33.16%, while `build_rank` held only 0.25% self / 0.94%
+  children. This cleared the profile gate before editing.
+- **One lever / exact isomorphism:** replace the per-true-bit `set(i)` loop with 64-bit chunks that
+  assemble one local `u64` and assign each backing word once. Allocation, bit order, false-bit
+  handling, zeroed high tail bits, logical length, and `build_rank` are unchanged. A permanent exact
+  old-path oracle covers lengths 0, 1, 2, 63, 64, 65, 127, 513, and 4,099 with empty/dense,
+  alternating, sparse, and deterministic mixed patterns; it compares the full private structure plus
+  `get`, `rank`, `count_ones`, and every valid/first-invalid `select` result.
+- **Foreground same-binary A/B:** after the profile worker and then `ovh-b` evicted their just-warmed
+  release pools, their rebuilds were cancelled and the worker was switched as required. Uncapped RCH
+  job `j-29933730227290920` built the exact LTO-disabled release binary on actual worker
+  `vmi1293453`; that binary passed the permanent oracle and was then executed directly so compilation
+  could not enter the capped interval. Eleven alternating rounds × 32 constructions of 1,048,579 bits
+  produced old per-bit samples `[130323413, 131057943, 131425982, 132206510, 136578039, 137941148,
+  138158023, 141831538, 144207971, 145540094, 163149373]` ns and word-packing samples `[14209154,
+  14815972, 14989600, 15316671, 15422529, 15676488, 15740043, 16359810, 17470892, 17631693,
+  17938902]` ns. Medians improved **137,941,148 → 15,676,488 ns**; candidate/baseline
+  **0.113646×** (**88.635% faster**, 8.799× throughput). The 20-second cap wrapped only this 1.73-second
+  measurement process, and both arms produced identical work checksums every round.
+- **Correctness / gates / routing evidence:** final-source, fail-closed, all-target release Clippy
+  passed with `-D warnings` on switched worker `vmi1167313` (job `j-29933730227290931`, allowing only
+  the known unrelated `clippy::obfuscated_if_else` class). The measured release binary passed the exact
+  oracle before the temporary timing harness was removed; direct final-source rustfmt and diff checks
+  passed, and targeted UBS exited 0 with no critical finding. Candidate jobs
+  `j-29933730227290902`, `j-29933730227290916`, and
+  `j-29933730227290927` were cancelled when their workers discarded the warmed release pool and began
+  redownloading dependencies. Those build events are infrastructure evidence only, never benchmark
+  rejects.
+- **Decision:** keep. Word-at-a-time packing removes repeated division, word lookup, and read-modify-
+  write traffic from the profiled constructor while preserving the exact succinct representation.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.59`, Agent Mail `PeachCreek`)

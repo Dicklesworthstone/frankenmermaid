@@ -49,10 +49,14 @@ impl BitVector {
     #[must_use]
     pub fn from_bools(bits: &[bool]) -> Self {
         let mut bv = Self::new(bits.len());
-        for (i, &b) in bits.iter().enumerate() {
-            if b {
-                bv.set(i);
+        for (word_index, chunk) in bits.chunks(64).enumerate() {
+            let mut word = 0_u64;
+            for (bit_index, &bit) in chunk.iter().enumerate() {
+                if bit {
+                    word |= 1_u64 << bit_index;
+                }
             }
+            bv.words[word_index] = word;
         }
         bv.build_rank();
         bv
@@ -546,6 +550,61 @@ mod tests {
         assert!(!bv.get(1));
         assert!(bv.get(2));
         assert_eq!(bv.count_ones(), 3);
+    }
+
+    #[inline(never)]
+    fn bitvec_from_bools_set_reference(bits: &[bool]) -> BitVector {
+        let mut bv = BitVector::new(bits.len());
+        for (i, &bit) in bits.iter().enumerate() {
+            if bit {
+                bv.set(i);
+            }
+        }
+        bv.build_rank();
+        bv
+    }
+
+    fn assert_from_bools_parity(bits: &[bool]) {
+        let reference = bitvec_from_bools_set_reference(bits);
+        let candidate = BitVector::from_bools(bits);
+
+        assert_eq!(candidate, reference);
+        for i in 0..=bits.len() {
+            assert_eq!(candidate.get(i), reference.get(i), "get({i})");
+            assert_eq!(candidate.rank(i), reference.rank(i), "rank({i})");
+        }
+        assert_eq!(
+            candidate.rank(bits.len().saturating_add(17)),
+            reference.rank(bits.len().saturating_add(17))
+        );
+
+        let ones = reference.count_ones();
+        assert_eq!(candidate.count_ones(), ones);
+        for k in 0..=ones {
+            assert_eq!(candidate.select(k), reference.select(k), "select({k})");
+        }
+        assert_eq!(candidate.select(u32::MAX), reference.select(u32::MAX));
+    }
+
+    #[test]
+    fn bitvec_from_bools_word_packing_matches_set_reference() {
+        for len in [0, 1, 2, 63, 64, 65, 127, 513, 4_099] {
+            let patterns = [
+                vec![false; len],
+                vec![true; len],
+                (0..len).map(|i| i.is_multiple_of(2)).collect(),
+                (0..len).map(|i| i.is_multiple_of(17)).collect(),
+                (0..len)
+                    .map(|i| {
+                        let mixed = i.wrapping_mul(0x9e37_79b9).rotate_left(11) ^ (i >> 3);
+                        mixed.count_ones().is_multiple_of(2)
+                    })
+                    .collect(),
+            ];
+            for bits in &patterns {
+                assert_from_bools_parity(bits);
+            }
+        }
     }
 
     // -- CSR graph tests --
