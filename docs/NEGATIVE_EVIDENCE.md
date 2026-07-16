@@ -17998,3 +17998,29 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   claim construction or serialization.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.40`)
+
+### 🟢LANDED: read braille cell sub-pixels off one base index — term render gantt −18% instr / −22% wall (2026-07-16)
+
+- **Negative-ledger-first:** follow-up in the term-canvas vein my draw_line lever (bd-1buv.41) just
+  opened. After that landed, a re-profile of class term render put the RENDER-side pixel reads at the top:
+  `get_pixel` 15% + `pixel_index` 13% = 28%. Source: `render_braille_cell` reads the 8 dots of each 2×4
+  cell via 8 `get_pixel` calls, each recomputing `pixel_index` (bounds check + `y*width+x` multiply +
+  `Option`). Braille is the DEFAULT render mode, so this runs once per output cell of every diagram.
+- **One lever / exact isomorphism:** when the whole 2×4 block is in the grid (`px+1 < pixel_width &&
+  py+3 < pixel_height`), compute `base = py*width + px` ONCE and read the 8 dots by fixed offset
+  (`base`, `base+1`, `base+w`, `base+w+1`, `base+2w`, …) through a new `pixel_set_at(index)` helper (the
+  body of `get_pixel` minus the `pixel_index` recompute). Edge cells keep the bounds-safe per-pixel
+  `get_pixel`. Byte-identical: each `pixel_set_at(base + r*w + c)` == `get_pixel(px+c, py+r)` because the
+  gate guarantees `(px+c, py+r)` is in bounds and maps to exactly that index.
+- **A/B (same machine, same build flags, my file only):** baseline = pre-edit binary (with the landed
+  draw_line fast path). `perf stat -e instructions` /200/2000×termrender: gantt 0.8215× (−17.9%), state
+  0.8717×, class 0.8595×, flowchart 0.8626×, journey 0.8675×, mindmap 0.8683×, er 0.8931×. Interleaved
+  wall-min ×4: gantt ~0.776-0.791× (−22%), mindmap ~0.833-0.839× (−17%) — LARGER than instr (fewer
+  bounds/multiply/branches). **Output byte-length identical for all shapes.**
+- **Correctness:** `cargo test -p fm-render-term` green (braille-cell + golden term snapshots);
+  `clippy -D warnings` clean.
+- **Decision:** keep. Every braille-mode render (the default) reads each cell's sub-pixels off one
+  precomputed base index instead of 8 `pixel_index` recomputes. Block/HalfBlock cell renderers have the
+  same pattern (future follow-up), left on `get_pixel` here.
+
+  Agent: Claude (Opus 4.8, this session; bead bd-1buv.42)

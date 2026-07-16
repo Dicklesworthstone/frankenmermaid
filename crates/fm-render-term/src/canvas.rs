@@ -91,8 +91,19 @@ impl Canvas {
     #[must_use]
     pub fn get_pixel(&self, x: usize, y: usize) -> bool {
         self.pixel_index(x, y)
-            .map(|index| self.pixel_gen[index] == self.generation && self.pixels[index])
+            .map(|index| self.pixel_set_at(index))
             .unwrap_or(false)
+    }
+
+    /// Whether the pixel at a KNOWN-valid buffer `index` is set this generation. The caller must have
+    /// established `index < pixels.len()` (e.g. from a cell wholly inside the pixel grid); this is the
+    /// body of [`get_pixel`] without the per-call `pixel_index` bounds-check + multiply + `Option`, so a
+    /// cell renderer that reads several fixed-offset sub-pixels off one precomputed base index skips that
+    /// recompute per sub-pixel. Byte-identical to `get_pixel(x, y)` for the in-bounds `(x, y)` that maps
+    /// to `index`.
+    #[inline]
+    fn pixel_set_at(&self, index: usize) -> bool {
+        self.pixel_gen[index] == self.generation && self.pixels[index]
     }
 
     /// Draw a line from (x0, y0) to (x1, y1) using Bresenham's algorithm.
@@ -309,31 +320,66 @@ impl Canvas {
 
         let mut code_point = 0x2800_u32; // Unicode Braille base
 
-        // Dot positions mapped to bit offsets
-        if self.get_pixel(px, py) {
-            code_point |= 0x01;
-        } // Dot 1
-        if self.get_pixel(px, py + 1) {
-            code_point |= 0x02;
-        } // Dot 2
-        if self.get_pixel(px, py + 2) {
-            code_point |= 0x04;
-        } // Dot 3
-        if self.get_pixel(px + 1, py) {
-            code_point |= 0x08;
-        } // Dot 4
-        if self.get_pixel(px + 1, py + 1) {
-            code_point |= 0x10;
-        } // Dot 5
-        if self.get_pixel(px + 1, py + 2) {
-            code_point |= 0x20;
-        } // Dot 6
-        if self.get_pixel(px, py + 3) {
-            code_point |= 0x40;
-        } // Dot 7
-        if self.get_pixel(px + 1, py + 3) {
-            code_point |= 0x80;
-        } // Dot 8
+        // Fast path: the whole 2x4 sub-pixel block is inside the grid, so compute the base index ONCE
+        // and read the 8 dots by fixed offset (`base + row*width + col`) instead of 8 `get_pixel` calls,
+        // each of which recomputes `pixel_index` (bounds check + `y*width+x` multiply + `Option`). This
+        // is the default (Braille) render mode, called once per output cell. Byte-identical: every
+        // `pixel_set_at(base + r*w + c)` equals `get_pixel(px+c, py+r)` because the gate guarantees each
+        // `(px+c, py+r)` is in bounds and maps to exactly that index.
+        if px + 1 < self.pixel_width && py + 3 < self.pixel_height {
+            let w = self.pixel_width;
+            let base = py * w + px;
+            if self.pixel_set_at(base) {
+                code_point |= 0x01;
+            } // Dot 1 (px, py)
+            if self.pixel_set_at(base + w) {
+                code_point |= 0x02;
+            } // Dot 2 (px, py+1)
+            if self.pixel_set_at(base + 2 * w) {
+                code_point |= 0x04;
+            } // Dot 3 (px, py+2)
+            if self.pixel_set_at(base + 1) {
+                code_point |= 0x08;
+            } // Dot 4 (px+1, py)
+            if self.pixel_set_at(base + w + 1) {
+                code_point |= 0x10;
+            } // Dot 5 (px+1, py+1)
+            if self.pixel_set_at(base + 2 * w + 1) {
+                code_point |= 0x20;
+            } // Dot 6 (px+1, py+2)
+            if self.pixel_set_at(base + 3 * w) {
+                code_point |= 0x40;
+            } // Dot 7 (px, py+3)
+            if self.pixel_set_at(base + 3 * w + 1) {
+                code_point |= 0x80;
+            } // Dot 8 (px+1, py+3)
+        } else {
+            // Edge cell: bounds-safe per-pixel reads (unchanged).
+            if self.get_pixel(px, py) {
+                code_point |= 0x01;
+            }
+            if self.get_pixel(px, py + 1) {
+                code_point |= 0x02;
+            }
+            if self.get_pixel(px, py + 2) {
+                code_point |= 0x04;
+            }
+            if self.get_pixel(px + 1, py) {
+                code_point |= 0x08;
+            }
+            if self.get_pixel(px + 1, py + 1) {
+                code_point |= 0x10;
+            }
+            if self.get_pixel(px + 1, py + 2) {
+                code_point |= 0x20;
+            }
+            if self.get_pixel(px, py + 3) {
+                code_point |= 0x40;
+            }
+            if self.get_pixel(px + 1, py + 3) {
+                code_point |= 0x80;
+            }
+        }
 
         char::from_u32(code_point).unwrap_or(' ')
     }
