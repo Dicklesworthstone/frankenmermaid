@@ -221,6 +221,16 @@ fn gen_packet(fields: usize) -> String {
     s
 }
 
+/// A Sankey diagram with repeated targets and unique sources. This exercises CSV record parsing,
+/// node interning, class attachment, and edge creation on the dedicated Sankey path.
+fn gen_sankey(links: usize) -> String {
+    let mut s = String::from("sankey-beta\n");
+    for i in 0..links {
+        s.push_str(&format!("Source {i},Target {},{}\n", i % 32, i + 1));
+    }
+    s
+}
+
 /// A gitgraph: `commands` commit/branch/checkout/merge commands — exercises the gitgraph command parser.
 fn gen_gitgraph(commands: usize) -> String {
     let mut s = String::from("gitGraph\n");
@@ -376,6 +386,13 @@ fn bench_parse(c: &mut Criterion) {
     for (label, fields) in [("packet_400", 400_usize), ("packet_1600", 1600_usize)] {
         let input = gen_packet(fields);
         group.bench_with_input(BenchmarkId::new("packet", label), &input, |b, input| {
+            b.iter(|| fm_parser::parse(input));
+        });
+    }
+
+    for (label, links) in [("sankey_400", 400_usize), ("sankey_1600", 1600_usize)] {
+        let input = gen_sankey(links);
+        group.bench_with_input(BenchmarkId::new("sankey", label), &input, |b, input| {
             b.iter(|| fm_parser::parse(input));
         });
     }

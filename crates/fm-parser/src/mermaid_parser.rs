@@ -5797,8 +5797,8 @@ fn parse_sankey(input: &str, builder: &mut IrBuilder) {
             continue;
         };
 
-        builder.add_class_to_node(&source_label, "sankey-node", span);
-        builder.add_class_to_node(&target_label, "sankey-node", span);
+        builder.add_class_to_node_id(source_node, "sankey-node");
+        builder.add_class_to_node_id(target_node, "sankey-node");
 
         builder.push_edge(
             source_node,
@@ -9984,6 +9984,13 @@ mod tests {
         assert!(parsed.ir.nodes.iter().any(|node| node.id == "A"));
         assert!(parsed.ir.nodes.iter().any(|node| node.id == "B"));
         assert!(parsed.ir.nodes.iter().any(|node| node.id == "C"));
+        assert!(
+            parsed
+                .ir
+                .nodes
+                .iter()
+                .all(|node| node.classes == ["sankey-node"])
+        );
     }
 
     #[test]

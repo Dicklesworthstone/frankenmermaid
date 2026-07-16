@@ -17728,3 +17728,42 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   the shared band path) sheds a per-band Element/Attributes build+serialize+copy.
 
   Agent: Claude (Opus 4.8, this session; bead `bd-1buv.35`)
+
+### 🟢LANDED: attach Sankey node classes by returned IDs (2026-07-15)
+
+- **Negative-ledger-first boundary:** Sankey had no dedicated parser timing row and no prior
+  returned-ID class-attachment lever. Existing Sankey evidence covers header recognition,
+  renderer/CSS behavior, and shared parser machinery, so this is a fresh parser subsystem rather
+  than another pass over the exhausted state-label or landed xychart/mindmap families. Permanent
+  Criterion rows now cover `parse/sankey/sankey_400` and `parse/sankey/sankey_1600`.
+- **Profile / attribution:** for each CSV record, `parse_sankey` already receives both exact
+  `IrNodeId`s from `intern_node`, but discarded them for class attachment and re-entered the
+  string-key interner twice. The 1,600-link fixture therefore performs exactly **3,200 avoidable
+  hash-map/interner lookups**. This ranked impact 4 x confidence 5 / effort 1 = **20**. Symbolized
+  profiling was unavailable on the remote workers (`perf_event_paranoid=4`; Valgrind absent), so
+  these attempts produced no timing and are **INVALID infrastructure, not rejects**.
+- **One lever / exact isomorphism:** pass the two returned IDs to `add_class_to_node_id` instead of
+  looking the source and target labels up again. Node/edge IDs, labels, spans, flow values, class
+  trimming, duplicate suppression, append order, warnings, floating point, tie-breaking, and RNG
+  are unchanged. The missing-node fallback in the key-based helper cannot occur because both IDs
+  came from the immediately preceding successful intern operations. The permanent Sankey oracle
+  asserts every node has exactly the single `sankey-node` class, including a node encountered as
+  both a target and a later source.
+- **Strict-remote same-worker foreground A/B:** both arms used actual worker `vmi1156319`,
+  `RCH_REQUIRE_REMOTE=1`, `--profile release`, and explicit
+  `--config profile.release.lto=false`. Each foreground Cargo invocation performed its cold,
+  uncapped compile before Criterion's cheap 1-second warm-up and 3-second / 30-sample measurement;
+  no build timeout contributed evidence. Baseline job `j-29933307944763638` measured
+  **3.4714 ms** median `[3.2674, 3.7216]`; candidate job `j-29933307944763641` measured
+  **3.2668 ms** `[3.1491, 3.3711]`. Candidate/baseline is **0.9411x time**, a **5.894% reduction**
+  (1.0626x throughput). The confidence intervals overlap, so this remains deliberately cheap
+  evidence; the same-worker median nevertheless clears the 3% keep gate and matches the exact
+  removal of 3,200 lookups.
+- **Remote correctness / cache routing:** the candidate passed focused Sankey tests on
+  `vmi1156319` and release-profile Clippy with `-D warnings` on `vmi1293453`. An initial `perf`
+  wrapper refusal, the kernel counter restriction, missing Valgrind, and a discarded cold pool on
+  `ovh-b` all occurred before an accepted timed result; none was scored as a reject.
+- **Decision:** keep. Sankey parsing now attaches the class to the nodes already in hand instead of
+  hashing and looking up both CSV labels again.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.2.9`)
