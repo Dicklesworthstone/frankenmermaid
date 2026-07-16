@@ -6320,15 +6320,14 @@ fn lower_block_beta_document_item(
                             continue;
                         };
 
-                        builder.add_class_to_node(&block.id, "block-beta", span);
+                        builder.add_class_to_node_id(node_id, "block-beta");
                         if block.is_space {
-                            builder.add_class_to_node(&block.id, "block-beta-space", span);
+                            builder.add_class_to_node_id(node_id, "block-beta-space");
                         }
                         if span_cols > 1 {
-                            builder.add_class_to_node(
-                                &block.id,
+                            builder.add_class_to_node_id(
+                                node_id,
                                 &format!("block-beta-span-{span_cols}"),
-                                span,
                             );
                         }
 
@@ -11210,9 +11209,18 @@ mod tests {
         let parsed = parse_mermaid("block-beta\nsvc[Service] db[(Database)] cache:2");
         assert_eq!(parsed.ir.diagram_type, DiagramType::BlockBeta);
         assert_eq!(parsed.ir.nodes.len(), 3);
-        assert!(parsed.ir.nodes.iter().any(|node| node.id == "svc"));
+        let svc = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "svc")
+            .unwrap();
         assert!(parsed.ir.nodes.iter().any(|node| node.id == "db"));
         assert!(parsed.ir.nodes.iter().any(|node| node.id == "cache"));
+        assert_eq!(
+            svc.classes.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["block-beta"]
+        );
 
         let db = parsed.ir.nodes.iter().find(|node| node.id == "db").unwrap();
         assert_eq!(db.shape, NodeShape::Cylinder);
@@ -11222,11 +11230,9 @@ mod tests {
             .iter()
             .find(|node| node.id == "cache")
             .unwrap();
-        assert!(
-            cache
-                .classes
-                .iter()
-                .any(|class_name| class_name == "block-beta-span-2")
+        assert_eq!(
+            cache.classes.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["block-beta", "block-beta-span-2"]
         );
     }
 
@@ -11280,11 +11286,9 @@ mod tests {
         assert_eq!(parsed.ir.nodes.len(), 1);
         let space = &parsed.ir.nodes[0];
         assert!(space.id.starts_with("__space_"));
-        assert!(
-            space
-                .classes
-                .iter()
-                .any(|class_name| class_name == "block-beta-space")
+        assert_eq!(
+            space.classes.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["block-beta", "block-beta-space", "block-beta-span-2"]
         );
         assert_eq!(parsed.ir.meta.block_beta_columns, None);
         assert!(

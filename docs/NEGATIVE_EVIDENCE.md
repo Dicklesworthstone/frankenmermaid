@@ -17795,3 +17795,36 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
 - **Decision:** keep. gantt layout sheds ~583 transient String allocs/render with identical output.
 
   Agent: Claude (Opus 4.8, this session; bead bd-1buv.36)
+
+### 🟢LANDED: attach BlockBeta classes by returned node ID (2026-07-16)
+
+- **Negative-ledger-first boundary:** Existing BlockBeta evidence covers header case-folding,
+  the rejected `source_line` borrow, renderer streaming, and layout paths; none covers returned-ID
+  class attachment. Permanent Criterion rows now cover `parse/block_beta/block_beta_400` and
+  `parse/block_beta/block_beta_1600`.
+- **Profile / attribution:** `lower_block_beta_document_item` already receives the exact
+  `IrNodeId` from `intern_node`, but discarded it for one to three class attachments and re-entered
+  the string-key interner each time. The 1,600-block fixture performs 1,600 `block-beta`, 1,600
+  `block-beta-span-2`, and 200 `block-beta-space` attachments: exactly **3,400 avoidable
+  hash-map/interner lookups**. This ranked impact 4 x confidence 5 / effort 1 = **20**.
+- **One lever / exact isomorphism:** pass the returned ID to `add_class_to_node_id` for all three
+  BlockBeta class kinds. IDs, labels, spans, class trimming, empty rejection, duplicate
+  suppression, string allocation, and append order are unchanged. Focused parity tests assert the
+  exact ordinary, spanned, and space-block class arrays.
+- **Strict-remote same-worker foreground A/B:** both accepted arms ran on actual RCH worker
+  `ovh-b`, with `RCH_REQUIRE_REMOTE=1`, `--profile release`, and explicit
+  `--config profile.release.lto=false`. Baseline job `j-29933307944763790` measured **3.0910 ms**
+  median `[2.9940, 3.2093]`; candidate job `j-29933307944763794` measured **2.7707 ms**
+  `[2.7545, 2.7865]`. Candidate/baseline is **0.896377x time**, a **10.3623% reduction**
+  (1.1156x throughput), with non-overlapping intervals.
+- **Remote correctness / infrastructure classification:** job `j-29933307944763799` passed all
+  nine focused BlockBeta tests; parser-scoped all-target release check job
+  `j-29933307944763822` and Clippy `-D warnings` job `j-29933307944763829` passed. The
+  workspace-wide check reached unrelated `highs-sys` and was interrupted after two minutes with
+  no output, exactly at the RCH stop boundary. Earlier cold-build, worker-routing, and discarded
+  release-cache attempts never produced an accepted timed path. These are **INVALID
+  infrastructure, not rejects**; no build timeout contributed performance evidence.
+- **Decision:** keep. BlockBeta lowering now attaches classes to the node already in hand instead
+  of hashing and looking up the same synthetic ID up to three more times.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.2.10`)

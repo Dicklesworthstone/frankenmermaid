@@ -231,6 +231,20 @@ fn gen_sankey(links: usize) -> String {
     s
 }
 
+/// A BlockBeta grid with ordinary and space blocks spanning two columns. This exercises node
+/// interning followed by the common two- and three-class attachment paths.
+fn gen_block_beta(blocks: usize) -> String {
+    let mut s = String::from("block-beta\ncolumns 8\n");
+    for i in 0..blocks {
+        if i % 8 == 0 {
+            s.push_str("  space:2\n");
+        } else {
+            s.push_str(&format!("  B{i}[\"Block {i}\"]:2\n"));
+        }
+    }
+    s
+}
+
 /// A gitgraph: `commands` commit/branch/checkout/merge commands — exercises the gitgraph command parser.
 fn gen_gitgraph(commands: usize) -> String {
     let mut s = String::from("gitGraph\n");
@@ -393,6 +407,16 @@ fn bench_parse(c: &mut Criterion) {
     for (label, links) in [("sankey_400", 400_usize), ("sankey_1600", 1600_usize)] {
         let input = gen_sankey(links);
         group.bench_with_input(BenchmarkId::new("sankey", label), &input, |b, input| {
+            b.iter(|| fm_parser::parse(input));
+        });
+    }
+
+    for (label, blocks) in [
+        ("block_beta_400", 400_usize),
+        ("block_beta_1600", 1600_usize),
+    ] {
+        let input = gen_block_beta(blocks);
+        group.bench_with_input(BenchmarkId::new("block_beta", label), &input, |b, input| {
             b.iter(|| fm_parser::parse(input));
         });
     }
