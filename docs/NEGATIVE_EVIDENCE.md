@@ -17960,3 +17960,41 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   orthogonal connectors; box-heavy diagrams (class/er/state) nearly halve term render.
 
   Agent: Claude (Opus 4.8, this session; bead bd-1buv.41)
+
+### 🔴REJECTED: defer capability status-key ownership until the final map (2026-07-16)
+
+- **Negative-ledger-first / fresh subsystem:** no prior row covers `capability_matrix`,
+  `CapabilityMatrix::status_counts`, or capability-metadata aggregation. The 36 checked-in claims
+  contain only three distinct statuses (`implemented`, `partial`, and `experimental`), but the
+  production loop materialized an owned status `String` for every claim before `BTreeMap::entry`
+  discarded 33 duplicate keys. This capability-reporting seam is separate from the recently mined
+  budget-ledger, parser, layout, and renderer families.
+- **Profile first:** an unchanged `fm-core` release test binary (`--profile release`, LTO explicitly
+  disabled) ran 100,000 complete `capability_matrix()` lifecycles on strict-remote worker
+  `vmi1153651`. The 6.375 s workload produced 5,315 `cycles:u` samples with zero loss. `malloc` and
+  `free` accounted for **6.53%** and **7.26%** of samples; the exact status-key `to_string` path
+  accounted for **0.43%**, while owned-string `BTreeMap::entry` comparison accounted for another
+  **0.41%**.
+- **One lever / exact isomorphism:** accumulate counts in `BTreeMap<&'static str, usize>`, then own
+  only the three final public `BTreeMap<String, usize>` keys. The A/B asserted exact
+  `CapabilityMatrix` equality and byte-identical compact JSON before timing; claim order, status
+  ordering, public types, and checked-in capability evidence were unchanged.
+- **Strict-remote foreground A/B:** RCH job `j-29933730227290118` built the LTO-disabled release
+  test binary on switched worker `ovh-b`; a 120-second cap wrapped only the foreground test process.
+  One same binary alternated 9 rounds × 10,000 complete matrix lifecycles. Sorted baseline samples
+  were `[317022686, 317631502, 318516225, 318967793, 319698460, 320484880, 321181472,
+  321849495, 322137488]` ns; candidate samples were `[311810275, 313106368, 314498503,
+  314670920, 315275831, 316175292, 316854686, 317760305, 321656425]` ns. Medians were
+  **319,698,460 -> 315,275,831 ns**, candidate/baseline **0.986166x** (**1.383% faster**).
+- **Infrastructure discipline:** the first candidate rebuild, RCH job `j-29933730227290114`, was
+  cancelled when `vmi1153651` immediately evicted the just-warmed release cache; the build was
+  switched to `ovh-b` rather than waiting. Neither build time nor the cancelled build contributes
+  to the A/B result.
+- **Verdict: REJECT.** The full production-lifecycle improvement is below the ledger's 3% keep
+  floor. The candidate and temporary harness were manually removed, restoring
+  `crates/fm-core/src/lib.rs` byte-identical to `HEAD` (SHA-256
+  `b0204896c1bf3580bd22b82cb82bc2b2599e6c9bb29e20fdc2adf9cbaad77a54`). Do not retry this
+  status-key ownership cut alone; reopen only as part of a broader profiled reduction in capability
+  claim construction or serialization.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.40`)
