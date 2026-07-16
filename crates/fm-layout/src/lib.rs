@@ -13363,18 +13363,35 @@ impl ObstacleSpatialIndex {
         // outside the grid clamps to qx0 > qx1), so guard it; break-before-increment is overflow-safe
         // when a clamped `qx1`/`qy1` reaches `i32::MAX`. Byte-identical to the inclusive ranges.
         if qx0 <= qx1 && qy0 <= qy1 {
+            // Bind the loop-invariant `self` fields to locals ONCE. `candidates.push` below takes
+            // `&mut self.candidates`, which forces LLVM to conservatively RELOAD `self.flat`/`self.seen`/
+            // `self.offsets` (base+len) and `self.generation` through the `self` pointer every inner
+            // iteration (measured: ~8% of `query_segment` self-time in reload movs). These four fields are
+            // disjoint from `candidates`, so binding shared/`&mut` slices to them keeps their base pointers
+            // in registers across the push. Byte-identical: same reads/writes in the same order.
+            let (min_cx, min_cy, ncols) = (self.min_cx, self.min_cy, self.ncols);
+            let generation = self.generation;
+            let offsets = self.offsets.as_slice();
+            let flat = self.flat.as_slice();
+            let seen = self.seen.as_mut_slice();
+            let candidates = &mut self.candidates;
             let mut cx = qx0;
             loop {
                 let mut cy = qy0;
                 loop {
-                    let ci = (cy - self.min_cy) as usize * self.ncols + (cx - self.min_cx) as usize;
-                    let start = self.offsets[ci] as usize;
-                    let end = self.offsets[ci + 1] as usize;
+                    let ci = (cy - min_cy) as usize * ncols + (cx - min_cx) as usize;
+                    let start = offsets[ci] as usize;
+                    let end = offsets[ci + 1] as usize;
+                    // Index `flat[k]` directly rather than iterating `&flat[start..end]`: cells hold ~1
+                    // obstacle each, so the sub-slice's per-cell bounds check costs more than the
+                    // per-element bounds check it would elide (measured +0.15% layout instrs for the
+                    // slice form vs −0.52% for this one).
+                    #[allow(clippy::needless_range_loop)]
                     for k in start..end {
-                        let idx = self.flat[k] as usize;
-                        if self.seen[idx] != self.generation {
-                            self.seen[idx] = self.generation;
-                            self.candidates.push(idx);
+                        let idx = flat[k] as usize;
+                        if seen[idx] != generation {
+                            seen[idx] = generation;
+                            candidates.push(idx);
                         }
                     }
                     if cy == qy1 {
