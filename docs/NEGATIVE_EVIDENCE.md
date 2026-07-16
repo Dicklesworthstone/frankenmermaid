@@ -18184,3 +18184,35 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   exactly.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.45`)
+
+### 🔴REJECTED: mask QuotientFilter circular slot steps — isolated query +4.364% slower (2026-07-16)
+
+- **Negative-ledger-first / fresh subsystem:** no prior row covers `QuotientFilter`, quotient-filter
+  membership, or its circular slot scans. This public `fm-core` primitive has no current in-repo
+  caller, so the result is an **isolated primitive** verdict rather than an end-to-end Mermaid claim.
+  The scenario filled a 16,384-slot filter to 70% and issued 22,936 alternating hit/absent queries.
+- **Profile first:** before the production edit, fail-closed RCH job `j-29933730227290409` built an
+  unstripped, LTO-disabled `--profile release` binary on actual worker `vmi1227854`. The foreground
+  profile ran 512 query sweeps in **52,396,535 ns**, capturing 69 cycle samples with zero loss.
+  `QuotientFilter::may_contain` accounted for 31.40% of the inlined frame and
+  `find_run_start` another 17.32%; disassembly confirmed repeated dynamic `div` instructions in the
+  circular scan. The one-lever opportunity therefore cleared the profile gate before editing.
+- **One lever / exact isomorphism:** replace each `(slot + 1) % table_size` and wrapped predecessor
+  operation with `& (table_size - 1)` through two private helpers. Every reachable filter constructs
+  its private `table_size` as `1 << q_bits`, with `q_bits` clamped to 1..=24, so slot order, wrap
+  points, metadata reads/writes, hashes, false-positive behavior, and early exits are identical.
+- **Foreground same-binary A/B:** after `vmi1227854` repeatedly evicted the warmed release pool, the
+  job was cancelled. The cold fallback then received one uncapped, untimed warm-up build:
+  fail-closed RCH job `j-29933730227290425`, which also produced the exact LTO-disabled release
+  binary later measured on `vmi1156319`. Nine
+  alternating rounds x 32 sweeps produced modulo samples `[11556727, 11893154, 12020811, 12062109,
+  12148388, 12215314, 12745041, 13454062, 13691503]` ns and mask samples `[11073938, 11590009,
+  11918401, 12512878, 12678567, 13097096, 13111473, 13316945, 18311880]` ns. Every query result and
+  per-round digest matched exactly, but medians regressed **12,148,388 -> 12,678,567 ns**:
+  candidate/baseline **1.043642x** (**4.364% slower**, 0.9582x throughput).
+- **Decision:** reject and restore both production code and measurement scaffolding. LLVM's existing
+  layout/code generation plus the added helper/mask sequence loses despite the visible division
+  instructions; do not retry power-of-two mask wrapping without a materially different compiler or
+  workload. No build time or cancelled job contributed to the performance verdict.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.47`)
