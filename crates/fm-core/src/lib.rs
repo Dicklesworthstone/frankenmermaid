@@ -2823,7 +2823,7 @@ pub struct MermaidBudgetEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MermaidBudgetLedger {
-    pub arbitration_policy: String,
+    pub arbitration_policy: Cow<'static, str>,
     pub total_budget_ms: u64,
     pub remaining_total_ms: u64,
     pub exhausted: bool,
@@ -2842,6 +2842,7 @@ impl Default for MermaidBudgetLedger {
 }
 
 impl MermaidBudgetLedger {
+    const ARBITRATION_POLICY: &'static str = "parse_first_then_layout_heavy_then_render_tail";
     const EXPECTED_EVENT_CAPACITY: usize = 12;
 
     #[must_use]
@@ -2868,7 +2869,7 @@ impl MermaidBudgetLedger {
             ));
         }
         let mut ledger = Self {
-            arbitration_policy: String::from("parse_first_then_layout_heavy_then_render_tail"),
+            arbitration_policy: Cow::Borrowed(Self::ARBITRATION_POLICY),
             total_budget_ms,
             remaining_total_ms: total_budget_ms,
             exhausted: false,
@@ -7527,6 +7528,40 @@ mod tests {
         broker
     }
 
+    fn budget_ledger_with_owned_arbitration_policy(
+        pressure: &MermaidPressureReport,
+    ) -> MermaidBudgetLedger {
+        let mut broker = MermaidBudgetLedger::new(pressure);
+        broker.arbitration_policy = Cow::Owned(broker.arbitration_policy.to_string());
+        broker
+    }
+
+    #[test]
+    fn borrowed_budget_arbitration_policy_matches_owned_json_reference() {
+        let pressure = MermaidNativePressureSignals::default().into_report();
+        let borrowed = MermaidBudgetLedger::new(&pressure);
+        let owned = budget_ledger_with_owned_arbitration_policy(&pressure);
+
+        assert_eq!(borrowed, owned);
+        assert!(matches!(
+            &borrowed.arbitration_policy,
+            Cow::Borrowed("parse_first_then_layout_heavy_then_render_tail")
+        ));
+
+        let borrowed_json = serde_json::to_string(&borrowed).unwrap();
+        assert_eq!(borrowed_json, serde_json::to_string(&owned).unwrap());
+        let roundtrip: MermaidBudgetLedger = serde_json::from_str(&borrowed_json).unwrap();
+        assert_eq!(roundtrip, borrowed);
+        assert!(matches!(roundtrip.arbitration_policy, Cow::Owned(_)));
+
+        let mut dynamic = MermaidBudgetLedger::new(&pressure);
+        dynamic.arbitration_policy = Cow::Owned(String::from("custom"));
+        assert!(matches!(
+            dynamic.arbitration_policy,
+            Cow::Owned(ref policy) if policy == "custom"
+        ));
+    }
+
     #[test]
     fn borrowed_budget_stage_names_match_owned_json_reference() {
         let pressure = MermaidNativePressureSignals::default().into_report();
@@ -7727,6 +7762,81 @@ mod tests {
 
         println!(
             "PERF budget_ledger_event_capacity baseline_median_ns={baseline_median_ns} candidate_median_ns={candidate_median_ns} improvement_pct={improvement_pct:.3} parity=exact rounds={ROUNDS} iterations={ITERATIONS} events=12"
+        );
+    }
+
+    #[test]
+    #[ignore = "manual short release A/B"]
+    fn perf_budget_arbitration_policy_borrow_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ITERATIONS: usize = 150_000;
+        const ROUNDS: usize = 9;
+
+        fn measure(pressure: &MermaidPressureReport, owned_policy: bool) -> (u128, usize, u64) {
+            let mut policy_bytes = 0usize;
+            let mut remaining_total = 0u64;
+            let started = Instant::now();
+            for _ in 0..ITERATIONS {
+                let mut broker = MermaidBudgetLedger::new(black_box(pressure));
+                if black_box(owned_policy) {
+                    broker.arbitration_policy =
+                        Cow::Owned(String::from(MermaidBudgetLedger::ARBITRATION_POLICY));
+                }
+                policy_bytes += black_box(broker.arbitration_policy.len());
+                remaining_total ^= black_box(broker.remaining_total_ms);
+                black_box(broker);
+            }
+            (started.elapsed().as_nanos(), policy_bytes, remaining_total)
+        }
+
+        let pressure = MermaidNativePressureSignals {
+            cpu_pressure_permille: Some(100),
+            memory_pressure_permille: Some(100),
+            io_pressure_permille: Some(100),
+            available_parallelism: Some(16),
+            rss_mib: Some(128),
+        }
+        .into_report();
+        assert!(!pressure.conservative_fallback);
+        assert!(pressure.notes.is_empty());
+
+        let baseline = budget_ledger_with_owned_arbitration_policy(&pressure);
+        let candidate = MermaidBudgetLedger::new(&pressure);
+        assert_eq!(candidate, baseline);
+        assert_eq!(
+            serde_json::to_string(&candidate).unwrap(),
+            serde_json::to_string(&baseline).unwrap()
+        );
+
+        let mut baseline_ns = Vec::with_capacity(ROUNDS);
+        let mut candidate_ns = Vec::with_capacity(ROUNDS);
+        for round in 0..ROUNDS {
+            let (baseline, candidate) = if round % 2 == 0 {
+                (measure(&pressure, true), measure(&pressure, false))
+            } else {
+                let candidate = measure(&pressure, false);
+                let baseline = measure(&pressure, true);
+                (baseline, candidate)
+            };
+            assert_eq!((baseline.1, baseline.2), (candidate.1, candidate.2));
+            baseline_ns.push(baseline.0);
+            candidate_ns.push(candidate.0);
+        }
+
+        baseline_ns.sort_unstable();
+        candidate_ns.sort_unstable();
+        let baseline_median_ns = baseline_ns[ROUNDS / 2];
+        let candidate_median_ns = candidate_ns[ROUNDS / 2];
+        let candidate_over_baseline = candidate_median_ns as f64 / baseline_median_ns as f64;
+        let improvement_pct = (1.0 - candidate_over_baseline) * 100.0;
+
+        println!(
+            "PERF budget_arbitration_policy_borrow baseline_median_ns={baseline_median_ns} candidate_median_ns={candidate_median_ns} candidate_over_baseline={candidate_over_baseline:.6} improvement_pct={improvement_pct:.3} parity=exact rounds={ROUNDS} iterations={ITERATIONS}"
+        );
+        println!(
+            "PERF budget_arbitration_policy_borrow baseline_ns={baseline_ns:?} candidate_ns={candidate_ns:?}"
         );
     }
 

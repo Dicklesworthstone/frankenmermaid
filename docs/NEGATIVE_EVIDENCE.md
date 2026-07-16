@@ -17889,3 +17889,42 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   styled flowcharts) copies the long clean run in bulk instead of re-decoding it char-by-char.
 
   Agent: Claude (Opus 4.8, this session; bead bd-1buv.38)
+
+### 🟢LANDED: borrow the invariant budget arbitration policy — constructor −15.3% (2026-07-16)
+
+- **Negative-ledger-first boundary:** prior budget-ledger work covers event-vector capacity,
+  borrowed event tags/notes, borrowed stage names, and a dead WASM ledger clone. No row covers
+  `MermaidBudgetLedger::arbitration_policy`, even though every constructor stored the same static
+  literal in a fresh `String`. This fresh `fm-core` seam scored impact 3 × confidence 5 / effort 1
+  = **15** and avoids reopening the recently mined parser and renderer veins.
+- **Profile / attribution first:** a symbolized, strict-remote `perf record` on worker
+  `vmi1156319` used the unchanged release test binary (`--profile release`, LTO explicitly off).
+  `MermaidBudgetLedger::new_with_event_capacity` accounted for **8.13%** of sampled cycles; its
+  inlined `<String as From<&str>>::from` allocation path accounted for **1.06%**. The profiled
+  lifecycle completed 540,000 ledger constructions and captured 344 cycle samples with zero loss.
+- **One lever / exact isomorphism:** represent `arbitration_policy` as `Cow<'static, str>` and use
+  `Cow::Borrowed` for the invariant built-in policy. Deserialization and callers can still retain
+  arbitrary owned policy text. Field value, serialized JSON bytes, and policy selection are
+  unchanged; only the built-in constructor's allocation and corresponding free disappear.
+- **Strict-remote same-worker foreground A/B:** after an untimed cold warm-up, one warmed release
+  test binary on actual worker `vmi1156319` alternated 9 rounds × 150,000 constructions. The owned
+  reference median was **27,225,538 ns** and the borrowed production candidate was
+  **23,058,123 ns**: candidate/baseline **0.846930×**, a **15.307% reduction**. Sorted raw arms were
+  baseline `[24766121, 24998564, 25566370, 26092721, 27225538, 27304014, 31003109, 32383448,
+  40543645]` and candidate `[21818266, 22303849, 22389930, 22769344, 23058123, 24877158,
+  25066450, 26111265, 26693649]` ns. The test asserted exact ledger equality and byte-identical
+  JSON before timing.
+- **Correctness / gates:** strict-remote `fm-core` release tests passed **367/367** (14 manual perf
+  probes ignored); the all-target release check and production-library Clippy `-D warnings` passed;
+  package formatting and `git diff --check` passed. The all-target Clippy test build is blocked by
+  a pre-existing `clippy::obfuscated_if_else` finding in the unrelated recursive-subgraph perf test,
+  outside this change's hunks.
+- **Infrastructure classification:** two earlier `fm-layout` profile warm-ups and the final
+  workspace-wide release check were stopped after the two-minute no-output boundary in `highs-sys`;
+  one core route was also rejected remotely for an unwritable worker `CARGO_HOME`. None reached a
+  timed path, so they are **INVALID infrastructure, not performance rejects** and do not contribute
+  to this decision.
+- **Decision:** keep. Every built-in budget-ledger construction now borrows its static arbitration
+  policy instead of allocating and freeing an identical heap string.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.39`)
