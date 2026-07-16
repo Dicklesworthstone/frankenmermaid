@@ -208,6 +208,19 @@ fn gen_kanban(cards: usize) -> String {
     s
 }
 
+/// A packet diagram with bit-range fields of varied widths. This exercises field interning,
+/// width-class attachment, and the sequential field-edge chain on the dedicated packet path.
+fn gen_packet(fields: usize) -> String {
+    let mut s = String::from("packet-beta\n");
+    for i in 0..fields {
+        let width = [4_usize, 8, 16, 32][i % 4];
+        let start = i * 32;
+        let end = start + width - 1;
+        s.push_str(&format!("  {start}-{end}: \"Field {i}\"\n"));
+    }
+    s
+}
+
 /// A gitgraph: `commands` commit/branch/checkout/merge commands — exercises the gitgraph command parser.
 fn gen_gitgraph(commands: usize) -> String {
     let mut s = String::from("gitGraph\n");
@@ -356,6 +369,13 @@ fn bench_parse(c: &mut Criterion) {
     for (label, cards) in [("kanban_400", 400_usize), ("kanban_1600", 1600_usize)] {
         let input = gen_kanban(cards);
         group.bench_with_input(BenchmarkId::new("kanban", label), &input, |b, input| {
+            b.iter(|| fm_parser::parse(input));
+        });
+    }
+
+    for (label, fields) in [("packet_400", 400_usize), ("packet_1600", 1600_usize)] {
+        let input = gen_packet(fields);
+        group.bench_with_input(BenchmarkId::new("packet", label), &input, |b, input| {
             b.iter(|| fm_parser::parse(input));
         });
     }

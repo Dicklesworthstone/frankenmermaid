@@ -4806,7 +4806,7 @@ fn parse_packet(input: &str, builder: &mut IrBuilder) {
                 if let Some(node_id) =
                     builder.intern_node(&field_id, Some(&display_label), NodeShape::Rect, span)
                 {
-                    builder.add_class_to_node(&field_id, "packet-field", span);
+                    builder.add_class_to_node_id(node_id, "packet-field");
 
                     // Parse bit range for width hint.
                     if let Some((start_str, end_str)) = range.split_once('-')
@@ -4816,13 +4816,9 @@ fn parse_packet(input: &str, builder: &mut IrBuilder) {
                         )
                     {
                         let bit_width = end.saturating_sub(start) + 1;
-                        builder.add_class_to_node(
-                            &field_id,
-                            &format!("packet-bits-{bit_width}"),
-                            span,
-                        );
+                        builder.add_class_to_node_id(node_id, &format!("packet-bits-{bit_width}"));
                         if bit_width > 8 {
-                            builder.add_class_to_node(&field_id, "packet-field-wide", span);
+                            builder.add_class_to_node_id(node_id, "packet-field-wide");
                         }
                     }
 
@@ -14809,6 +14805,22 @@ Rel_Back(db, app, "Responds")"#,
             node.classes.iter().any(|c| c == "packet-bits-32"),
             "should have packet-bits-32 class"
         );
+    }
+
+    #[test]
+    fn packet_beta_preserves_field_class_order() {
+        let parsed =
+            parse_mermaid("packet-beta\n  0-7: \"Byte\"\n  8-23: \"Wide\"\n  24: \"Single Bit\"");
+
+        assert_eq!(
+            parsed.ir.nodes[0].classes,
+            ["packet-field", "packet-bits-8"]
+        );
+        assert_eq!(
+            parsed.ir.nodes[1].classes,
+            ["packet-field", "packet-bits-16", "packet-field-wide"]
+        );
+        assert_eq!(parsed.ir.nodes[2].classes, ["packet-field"]);
     }
 
     #[test]

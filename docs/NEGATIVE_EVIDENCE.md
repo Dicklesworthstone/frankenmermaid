@@ -17655,3 +17655,41 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   scalar-reference oracle retained.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.34`)
+
+### 🟢LANDED: attach Packet field classes by returned node ID (2026-07-15)
+
+- **Negative-ledger-first boundary:** Packet parsing had no dedicated timing row and no prior
+  node-class lookup lever. The only Packet references in this ledger cover shared edge operators or
+  renderer-side marker allocation, so this fresh parser subsystem does not reopen the exhausted
+  state-label allocation family or the landed xychart/mindmap paths. Permanent Criterion rows now
+  cover `parse/packet/packet_400` and `parse/packet/packet_1600`.
+- **Profile / attribution:** `parse_packet` already receives the exact `IrNodeId` from
+  `intern_node`, but then discarded it for class attachment and re-entered the string-key interner.
+  The 1,600-field profile performs 1,600 `packet-field`, 1,600 `packet-bits-N`, and 800
+  `packet-field-wide` attachments: 4,000 avoidable hash-map lookups of freshly formatted field IDs.
+  This ranked impact 4 x confidence 5 / effort 1 = **20**.
+- **One lever / exact isomorphism:** pass that returned `IrNodeId` to `add_class_to_node_id` for
+  all three Packet class kinds. Class trimming, empty rejection, duplicate detection, string
+  allocation, append order, labels, spans, field indexing, and edge chaining are unchanged. The
+  missing-node fallback in the key-based helper cannot occur because the ID was returned by the
+  immediately preceding successful intern. A permanent oracle covers 8-bit, 16-bit, and un-ranged
+  fields and asserts the exact class order.
+- **Strict-remote same-worker foreground A/B:** both accepted arms ran on actual RCH worker
+  `vmi1153651`, with `RCH_REQUIRE_REMOTE=1`, `--profile release`, explicit
+  `--config profile.release.lto=false`, one untimed `cargo bench --no-run`, then only the identical
+  Criterion measurement capped at 120 seconds inside the same foreground job. Baseline job
+  `j-29933307944763502` measured **4.0278 ms** median `[3.7270, 4.3462]`; candidate job
+  `j-29933307944763513` measured **3.5765 ms** `[3.3639, 3.8078]`. Candidate/baseline is
+  **0.888x time**, an **11.2% reduction** (1.126x throughput). Each second Cargo invocation reused
+  its just-built binary (0.37 s baseline, 1.56 s candidate); cold compilation was outside Criterion.
+- **Remote correctness / infrastructure classification:** job `j-29933307944763527` passed all
+  five Packet tests (including exact class order) and `cargo clippy -p fm-parser --all-targets --
+  -D warnings`. A pre-existing normal-build defect had marked `parse_dot_label` and its raw-attribute
+  helper test-only; restoring their normal visibility preceded both accepted arms and receives no
+  performance credit. Earlier cold builds that hit that compiler error, a shell-quoting error, or
+  RCH's discarded cross-job release pool produced no timing and are **INVALID infrastructure, not
+  rejects**.
+- **Decision:** keep. Packet fields now mutate the node already in hand instead of hashing and
+  looking up the same synthetic key up to three more times, with exact parser semantics retained.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.2.8`)
