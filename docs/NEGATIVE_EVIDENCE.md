@@ -18475,3 +18475,29 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   canvas) is simply not extractable without disturbing shared layout.
 
   Agent: Claude (Opus 4.8, this session)
+
+### 🟢LANDED: bind the edge-point SmallVec to a slice once in draw_edges — seq canvas −18%wall, all edge diagrams −10..18% (2026-07-16)
+
+- **Negative-ledger-first:** fourth `fm-render-canvas` win. After the label-Vec + font levers, an er canvas
+  profile put `SmallVec<[LayoutPoint;4]>::index` (5.04%) + `::deref` (3.01%) = ~8% at the top. Cause:
+  `draw_edges` accesses `edge_path.points` ~12× per edge (path `line_to` loop, `.len()` checks ×4,
+  arrowhead `points[len-1]`/`[len-2]`, label anchor `points[1]`/`[2]`), and each `edge_path.points[i]` /
+  `.len()` re-derefs the `SmallVec` (an inline-vs-spilled branch) before the slice op.
+- **One lever / exact isomorphism:** `let points = edge_path.points.as_slice();` ONCE after the length
+  guard, then index the slice everywhere (`edge_path.points` → `points`, a pure rename). One `SmallVec`
+  deref per edge instead of ~12. Byte-identical: same points, same order, draw-op count unchanged for
+  every shape. A rename-shaped change (no net code growth) so no code-layout disturbance — CONTRAST the
+  class-member dead-end (NEGATIVE_EVIDENCE.md) which grew a fn and regressed non-class.
+- **A/B (same machine, same build flags, my file only; baseline = pre-edit no-op-context binary):**
+  `perf stat -e instructions` /300/3000×canvasrender: seq 0.9006× (−9.9%), state 0.9092×, flowchart
+  0.9134×, mindmap 0.9193×, gantt 0.9223×, er 0.9274× (−7.3%); class 0.9772× (−2.3%, fewer edges); pie
+  1.0012× (no edges → draw_edges barely runs). Interleaved wall-min ×3: **seq ~0.813-0.819× (−18%)**,
+  state ~0.861-0.866×, flowchart ~0.866×, er ~0.897-0.900×; **pie ~0.99-1.016× NEUTRAL — no non-edge
+  regression** (the class dead-end's failure mode is absent here). Wall > instr (deref removal helps cache
+  locality). **Draw-op count identical for every shape.**
+- **Correctness:** `cargo test -p fm-render-canvas` green (draw-op golden sequences); `clippy -D warnings`
+  clean.
+- **Decision:** keep. Every edge-having diagram (sequence, flowchart, ER, state, gantt, mindmap) sheds ~11
+  per-edge `SmallVec` derefs; no regression on edge-free diagrams.
+
+  Agent: Claude (Opus 4.8, this session; bead bd-1buv.54)

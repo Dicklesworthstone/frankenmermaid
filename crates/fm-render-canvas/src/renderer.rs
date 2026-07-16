@@ -948,7 +948,11 @@ impl Canvas2dRenderer {
             let ir_edge = ir.edges.get(edge_path.edge_index);
             let arrow = ir_edge.map_or(ArrowType::Arrow, |e| e.arrow);
 
-            if edge_path.points.len() < 2 {
+            // Deref the point `SmallVec` to a slice ONCE — the edge draw below indexes it ~12× (path
+            // loop, arrowhead direction, label anchor), and each `edge_path.points[i]` / `.len()` was a
+            // fresh `SmallVec` deref (inline-vs-spilled branch). Byte-identical: same points, same order.
+            let points = edge_path.points.as_slice();
+            if points.len() < 2 {
                 continue;
             }
 
@@ -962,19 +966,19 @@ impl Canvas2dRenderer {
 
             // Draw edge path
             ctx.begin_path();
-            let first = &edge_path.points[0];
+            let first = &points[0];
             ctx.move_to(f64::from(first.x) + offset_x, f64::from(first.y) + offset_y);
 
-            for point in edge_path.points.iter().skip(1) {
+            for point in points.iter().skip(1) {
                 ctx.line_to(f64::from(point.x) + offset_x, f64::from(point.y) + offset_y);
             }
             ctx.stroke();
             self.draw_calls += 1;
 
             // Draw arrowhead at end
-            if edge_path.points.len() >= 2 {
-                let end = &edge_path.points[edge_path.points.len() - 1];
-                let prev = &edge_path.points[edge_path.points.len() - 2];
+            if points.len() >= 2 {
+                let end = &points[points.len() - 1];
+                let prev = &points[points.len() - 2];
                 let angle = f64::from(end.y - prev.y).atan2(f64::from(end.x - prev.x));
 
                 let ex = f64::from(end.x) + offset_x;
@@ -1011,8 +1015,8 @@ impl Canvas2dRenderer {
                         | ArrowType::DoubleThickArrow
                         | ArrowType::DoubleDottedArrow
                 ) {
-                    let start = &edge_path.points[0];
-                    let next = &edge_path.points[1];
+                    let start = &points[0];
+                    let next = &points[1];
                     let start_angle =
                         f64::from(start.y - next.y).atan2(f64::from(start.x - next.x));
                     let sx = f64::from(start.x) + offset_x;
@@ -1026,26 +1030,26 @@ impl Canvas2dRenderer {
             // Draw edge label if present
             if let Some(label_id) = ir_edge.and_then(|e| e.label)
                 && let Some(label) = ir.labels.get(label_id.0)
-                && edge_path.points.len() >= 2
+                && points.len() >= 2
             {
                 let label_offset = self.config.font_size * 0.8;
-                let (lx, ly) = if edge_path.points.len() == 4 {
-                    let p1 = &edge_path.points[1];
-                    let p2 = &edge_path.points[2];
+                let (lx, ly) = if points.len() == 4 {
+                    let p1 = &points[1];
+                    let p2 = &points[2];
                     (
                         f64::from(f32::midpoint(p1.x, p2.x)) + offset_x,
                         f64::from(f32::midpoint(p1.y, p2.y)) + offset_y - label_offset,
                     )
-                } else if edge_path.points.len() == 2 {
-                    let p1 = &edge_path.points[0];
-                    let p2 = &edge_path.points[1];
+                } else if points.len() == 2 {
+                    let p1 = &points[0];
+                    let p2 = &points[1];
                     (
                         f64::from(f32::midpoint(p1.x, p2.x)) + offset_x,
                         f64::from(f32::midpoint(p1.y, p2.y)) + offset_y - label_offset,
                     )
                 } else {
-                    let mid_idx = edge_path.points.len() / 2;
-                    let mid = &edge_path.points[mid_idx];
+                    let mid_idx = points.len() / 2;
+                    let mid = &points[mid_idx];
                     (
                         f64::from(mid.x) + offset_x,
                         f64::from(mid.y) + offset_y - label_offset,
