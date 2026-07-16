@@ -621,7 +621,6 @@ fn parse_dot_shape_value(value: &str) -> Option<NodeShape> {
     dot_shape_to_node_shape(&shape_name)
 }
 
-#[cfg(test)]
 fn extract_dot_attribute_raw<'a>(attributes: &'a str, key: &str) -> Option<Cow<'a, str>> {
     DotAttributeIter::new(attributes)
         .find_map(|(current_key, value)| current_key.eq_ignore_ascii_case(key).then_some(value))
@@ -736,7 +735,6 @@ fn parse_dot_label_value(value: &str) -> Option<String> {
     (!decoded_label.is_empty()).then_some(decoded_label)
 }
 
-#[cfg(test)]
 fn parse_dot_label(attributes: &str) -> Option<String> {
     let value = extract_dot_attribute_raw(attributes, "label")?;
     parse_dot_label_value(value.as_ref())
