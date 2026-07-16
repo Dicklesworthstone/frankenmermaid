@@ -18535,3 +18535,50 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   `String::push` formulation without evidence that `fnv1a_hex` has become a production hot path.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.55`, Agent Mail `PeachCreek`)
+
+### REJECTED: axis-aligned CGA-skip in `vertical_nudge_for_obstacle` — CGA test reached 0× (bd-taot, 2026-07-16)
+- **Lever (bd-taot's proposal):** for an exactly-vertical segment (`seg_min_x == seg_max_x`, which
+  `find_obstacle_nudge_x` segments are), AABB-overlap is provably an exact rect intersection, so the
+  `expanded.intersect_segment(seg)` CGA test in `cga_routing::vertical_nudge_for_obstacle` (a
+  `Vec<CgaPoint>`-allocating 4-edge test) is redundant. Gate it behind `is_vertical`.
+- **THE decisive measurement the bead demanded (candidate-count-per-segment on dense_dag_200):**
+  instrumented `vertical_nudge_for_obstacle` with atomic counters (calls / aabb_pass / cga_hit),
+  ran `layout_diagram` on `gen_dense_dag(n)` for n=200/400/800. Result: `calls=1020/2282/4666`,
+  **`aabb_pass=0` at every size** — the AABB reject rejects EVERY vertical candidate; the CGA test is
+  reached **zero** times. The lever removes 0 work. Case (b) from the bead ("AABB already rejects most,
+  ~0 like the revert"), confirmed by direct count, not inference.
+- **Why the 19.36% profile misled:** the AABB pre-filter (`85b54d0f`, 2026-06-24) predates the bead's
+  profile, so the CGA test was already dead there. Fresh symbolized **non-LTO** `perf record` (opt=3,
+  the bench config), densedag-200 layout self-time: `build_edge_paths_with_orientation` **18.82%**,
+  `ObstacleSpatialIndex::query_segment` **15.82%**, `simplify_polyline` 9.31%, `find_obstacle_nudge_y`
+  6.19%, `CgaRect::intersect_segment` **2.07% total (0% for vertical)**, `find_obstacle_nudge_x` 1.31%.
+  The "19.36% find_obstacle_nudge_x" was an LTO-build inlining attribution of the whole edge-path build;
+  the actual CGA-intersect cost is 2.07% and none of it is vertical.
+- **Do-not-retry:** the vertical CGA test cannot be made cheaper because it does not run. Any future
+  attempt must first re-check `aabb_pass > 0` for vertical segments on the target shape. Real remaining
+  layout cost is `query_segment` (candidate generation) — see the WIN below, and `build_edge_paths`.
+
+  Agent: BlackThrush
+
+### WIN: bind `query_segment` loop-invariant `self` fields to locals — −0.49% instr / −3.45% wall layout (bd-1buv.57, 2026-07-16)
+- **Context — LAYOUT profile (densedag-200, fresh non-LTO opt=3 `perf record` this session).**
+  `ObstacleSpatialIndex::query_segment` is 15.82% layout self-time (2nd-hottest frame). `perf annotate`
+  of its inner CSR cell-walk shows the compiler RELOADING `self.flat` (base), `self.seen` (base+len),
+  `self.offsets`, and `self.generation` through the `self` pointer every iteration (~8% of the
+  function's samples in reload `mov`s: 0x20/0x38/0x40/0x7c off `%rbx`). Cause: `self.candidates.push(idx)`
+  in the loop takes `&mut self.candidates`, so LLVM conservatively assumes the other fields may change.
+- **Lever:** before the cell walk, bind the four loop-invariant fields (all disjoint from `candidates`)
+  to locals once — `let (min_cx,min_cy,ncols)=…; let generation=self.generation; let offsets=self.offsets.as_slice();
+  let flat=self.flat.as_slice(); let seen=self.seen.as_mut_slice(); let candidates=&mut self.candidates;`
+  — and reference only locals inside the loop. Byte-identical: same reads/writes, same order (verified
+  by 6-shape SVG dump: densedag/flowo/mindmap/gantt/state/class all sha256-identical).
+- **Measured (non-LTO release opt=3, densedag-200 layout, interleaved, base vs cand):**
+  instructions/8k-iters base 11,762.9M → cand 11,705.3M = **−0.49%** (run-to-run spread ~2.2M, signal
+  ~26×); wall-median/20k-iters base ~97,114 ns → cand ~93,764 ns = **−3.45%** (cand < base in 3/3 reps).
+  Wall≫instr as expected for load-port relief. 439 fm-layout tests + clippy `-D` green.
+- **Sub-lever REJECTED (kept as note):** the clippy-clean `for &raw in &flat[start..end]` slice-iter
+  form REGRESSES to **+0.15% instr** — cells hold ~1 obstacle each, so the sub-slice's per-cell bounds
+  check costs more than the per-element check it elides. Kept the range-index `for k in start..end` form
+  with `#[allow(clippy::needless_range_loop)]`; the local `flat` alone captures the win.
+
+  Agent: BlackThrush
