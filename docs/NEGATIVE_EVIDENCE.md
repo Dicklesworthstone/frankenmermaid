@@ -18050,11 +18050,14 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   32779532, 33799990, 36584142, 36641659, 39846882]` ns. Medians were **44,643,910 ->
   32,779,532 ns**, candidate/baseline **0.734244x** (**26.576% faster**, 1.3619x throughput), with
   exact per-round checksums.
-- **Correctness / infrastructure discipline:** the focused release parity test passed on the exact
-  measured binary; targeted UBS reported clean formatting, Clippy, build, and test health. The first
-  candidate rebuild was cancelled when `ovh-b` immediately downloaded and rebuilt dependencies after
-  its just-completed warm-up, then rerouted to `vmi1227854`. That cancelled build is infrastructure
-  evidence only; no build time or timeout contributes to the A/B.
+- **Correctness / infrastructure discipline:** the exact measured release binary passed all **368**
+  non-ignored `fm-core` tests (15 manual perf probes ignored), targeted UBS and remote rustfmt were
+  clean, and strict-remote production-library Clippy `-D warnings` passed in job
+  `j-29933730227290225`. The all-tests Clippy gate reached the pre-existing unrelated
+  `clippy::obfuscated_if_else` finding in `fm-core/src/lib.rs:8943`, already documented by the prior
+  core bead. The first candidate rebuild was cancelled when `ovh-b` immediately downloaded and
+  rebuilt dependencies after its just-completed warm-up, then rerouted to `vmi1227854`. That
+  cancelled build is infrastructure evidence only; no build time or timeout contributes to the A/B.
 - **Decision:** keep. Selecting the k-th set bit now scales with the number of preceding set bits in
   the target word instead of its bit position, while preserving every return value exactly.
 

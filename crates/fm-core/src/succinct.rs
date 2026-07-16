@@ -155,19 +155,14 @@ impl BitVector {
             let word = self.words[word_idx];
             let pc = word.count_ones();
             if pc >= remaining {
-                // The target bit is in this word.
+                // The target bit is in this word. Discard the preceding set bits,
+                // then locate the remaining least-significant bit directly.
                 let mut w = word;
-                let mut r = remaining;
-                for bit in 0..64 {
-                    if w & 1 == 1 {
-                        r -= 1;
-                        if r == 0 {
-                            let pos = word_idx * 64 + bit;
-                            return if pos < self.len { Some(pos) } else { None };
-                        }
-                    }
-                    w >>= 1;
+                for _ in 1..remaining {
+                    w &= w - 1;
                 }
+                let pos = word_idx * 64 + w.trailing_zeros() as usize;
+                return if pos < self.len { Some(pos) } else { None };
             }
             remaining -= pc;
         }
@@ -407,6 +402,136 @@ mod tests {
         assert_eq!(bv.select(1), Some(30));
         assert_eq!(bv.select(2), Some(50));
         assert_eq!(bv.select(3), None);
+    }
+
+    #[inline(never)]
+    fn select_shift_reference(bv: &BitVector, k: u32) -> Option<usize> {
+        let mut remaining = k.checked_add(1)?;
+        let block_idx = bv
+            .rank_blocks
+            .partition_point(|&rank| rank < remaining)
+            .saturating_sub(1);
+
+        if let Some(&block_rank) = bv.rank_blocks.get(block_idx) {
+            remaining -= block_rank;
+        }
+
+        let start_word = block_idx * 8;
+        let end_word = (start_word + 8).min(bv.words.len());
+        for word_idx in start_word..end_word {
+            let word = bv.words[word_idx];
+            let pc = word.count_ones();
+            if pc >= remaining {
+                let mut w = word;
+                let mut rank = remaining;
+                for bit in 0..64 {
+                    if w & 1 == 1 {
+                        rank -= 1;
+                        if rank == 0 {
+                            let pos = word_idx * 64 + bit;
+                            return if pos < bv.len { Some(pos) } else { None };
+                        }
+                    }
+                    w >>= 1;
+                }
+            }
+            remaining -= pc;
+        }
+        None
+    }
+
+    #[inline(never)]
+    fn select_candidate(bv: &BitVector, k: u32) -> Option<usize> {
+        bv.select(k)
+    }
+
+    fn select_fixture(len: usize) -> BitVector {
+        let mut bv = BitVector::new(len);
+        for i in (0..len).step_by(7) {
+            bv.set(i);
+        }
+        bv.build_rank();
+        bv
+    }
+
+    #[test]
+    fn bitvec_select_matches_shift_reference() {
+        let bv = select_fixture(4_123);
+        let ones = bv.count_ones();
+        for k in 0..=ones {
+            assert_eq!(bv.select(k), select_shift_reference(&bv, k), "k={k}");
+        }
+        assert_eq!(bv.select(u32::MAX), select_shift_reference(&bv, u32::MAX));
+    }
+
+    #[test]
+    #[ignore = "manual short release A/B"]
+    fn perf_bitvec_select_target_word_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const LEN: usize = 131_072;
+        const PASSES: usize = 64;
+        const ROUNDS: usize = 9;
+
+        #[inline(never)]
+        fn measure(
+            bv: &BitVector,
+            ones: u32,
+            passes: usize,
+            select: fn(&BitVector, u32) -> Option<usize>,
+        ) -> (u128, usize) {
+            let started = Instant::now();
+            let mut checksum = 0_usize;
+            for pass in 0..passes {
+                for k in 0..ones {
+                    let selected = black_box(select)(black_box(bv), black_box(k))
+                        .expect("measured queries stay in range");
+                    checksum = checksum.wrapping_add(selected ^ pass);
+                }
+            }
+            (started.elapsed().as_nanos(), black_box(checksum))
+        }
+
+        let bv = select_fixture(LEN);
+        let ones = bv.count_ones();
+        for k in 0..=ones {
+            assert_eq!(select_candidate(&bv, k), select_shift_reference(&bv, k));
+        }
+
+        let warm_baseline = measure(&bv, ones, 8, select_shift_reference);
+        let warm_candidate = measure(&bv, ones, 8, select_candidate);
+        assert_eq!(warm_baseline.1, warm_candidate.1);
+
+        let mut baseline_ns = Vec::with_capacity(ROUNDS);
+        let mut candidate_ns = Vec::with_capacity(ROUNDS);
+        for round in 0..ROUNDS {
+            let (baseline, candidate) = if round % 2 == 0 {
+                (
+                    measure(&bv, ones, PASSES, select_shift_reference),
+                    measure(&bv, ones, PASSES, select_candidate),
+                )
+            } else {
+                let candidate = measure(&bv, ones, PASSES, select_candidate);
+                let baseline = measure(&bv, ones, PASSES, select_shift_reference);
+                (baseline, candidate)
+            };
+            assert_eq!(baseline.1, candidate.1);
+            baseline_ns.push(baseline.0);
+            candidate_ns.push(candidate.0);
+        }
+
+        baseline_ns.sort_unstable();
+        candidate_ns.sort_unstable();
+        let baseline_median_ns = baseline_ns[ROUNDS / 2];
+        let candidate_median_ns = candidate_ns[ROUNDS / 2];
+        let improvement_pct = (baseline_median_ns as f64 - candidate_median_ns as f64) * 100.0
+            / baseline_median_ns as f64;
+
+        println!(
+            "PERF bitvec_select_target_word baseline_median_ns={baseline_median_ns} candidate_median_ns={candidate_median_ns} improvement_pct={improvement_pct:.3} parity=exact rounds={ROUNDS} passes={PASSES} calls_per_arm={} baseline_ns={baseline_ns:?} candidate_ns={candidate_ns:?}",
+            usize::try_from(ones).expect("bit count fits usize") * PASSES
+        );
     }
 
     #[test]
