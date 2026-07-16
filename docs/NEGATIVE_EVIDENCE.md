@@ -18582,3 +18582,46 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   with `#[allow(clippy::needless_range_loop)]`; the local `flat` alone captures the win.
 
   Agent: BlackThrush
+
+### 🟢LANDED: prefilter later `CgaRect` boundary square roots — isolated primitive −8.9% (bd-1buv.56, 2026-07-16)
+
+- **Negative-ledger-first / fresh subsystem:** no prior row covers `CgaRect::closest_boundary_point`
+  or squared-distance prefiltering, and the in-repo search found no production caller to inflate the
+  claim beyond this isolated public primitive. Opportunity score was impact 2 × confidence 4 / effort
+  1 = **8**. The target was selected only after the established CSR, constraint, canvas, and FNV veins
+  were accounted for in this ledger.
+- **Profile first:** fail-closed RCH job `j-29933730227290780` completed the cold, uncapped warm-up of
+  an unstripped, debug-info-enabled, LTO-disabled `--profile release` fm-core test binary on actual worker
+  `vmi1227854` (AMD EPYC, 10 physical cores, no SMT; rustc 1.98.0-nightly beae78130). Only the profile
+  measurement was capped: foreground `timeout 20s perf record -F 999 -g --call-graph dwarf` covered
+  4,000,000 mixed interior/exterior calls in **83,618,486 ns**, recording 98 cycle samples with zero
+  loss. The profile subject held 92.40%; `CgaRect::closest_boundary_point` descendants held 91.09%,
+  `CgaLineSegment::closest_point` 33.89%, and the repeated point-distance path 31.34%. This cleared the
+  profile gate before editing.
+- **One lever / exact isomorphism:** retain the first edge's original square root, compare later squared
+  distances as a cheap prefilter, and execute the original square root plus strict `<` comparison for
+  every possible winner. The squared minimum advances only when that original comparison wins. This
+  preserves first-edge ties, rounded-square-root ties, NaN/infinity behavior, and returned x/y bits.
+  A permanent old-path oracle verifies eight directed fixtures, four signed-zero/NaN/infinity/extreme
+  fixtures, and 20,000 deterministic finite rectangles and points.
+- **Foreground same-binary A/B:** cold job `j-29933730227290800` built the exact LTO-disabled release
+  binary on actual worker `vmi1149989`; the uncapped build was followed by only a capped foreground
+  measurement. Eleven alternating 1,000,000-call rounds gave baseline samples `[18995923, 19068042,
+  19668656, 19946545, 20965669, 21176136, 21230027, 21751101, 22694121, 24248923, 27151214]` ns and
+  candidate samples `[17050964, 17512089, 17714474, 17857970, 18731455, 19287833, 19916819,
+  21923061, 23527977, 23547046, 24402324]` ns. Medians improved **21,176,136 → 19,287,833 ns**;
+  candidate/baseline **0.910829×** (**8.917% faster**). Both arms produced the same checksum in every
+  round, and the same exact binary passed the 20,012-case bit oracle.
+- **Remote-routing evidence:** jobs `j-29933730227290776`, `j-29933730227290792`,
+  `j-29933730227290804`, and `j-29933730227290812` were cancelled when the selected worker drifted or
+  a just-warmed release cache was evicted and dependencies began rebuilding. Their build durations are
+  infrastructure evidence only, never benchmark rejects. Final-source exact-oracle job
+  `j-29933730227290806` passed on `vmi1167313`; scoped all-target release Clippy job
+  `j-29933730227290818` passed on `vmi1293453` with `-D warnings` (allowing only the known unrelated
+  `clippy::obfuscated_if_else` class). Direct `rustfmt --check`, diff-check, and UBS on the owned source
+  passed; fail-closed RCH correctly refused `cargo fmt --check` rather than falling back locally because
+  formatting is not a compilation command.
+- **Decision:** keep. The measured claim remains deliberately scoped to the isolated public primitive;
+  no end-to-end layout or renderer claim is inferred.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.56`, Agent Mail `PeachCreek`)
