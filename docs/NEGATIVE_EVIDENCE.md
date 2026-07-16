@@ -17693,3 +17693,38 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   looking up the same synthetic key up to three more times, with exact parser semantics retained.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.2.8`)
+
+### 🟢LANDED: stream labelled layout band labels straight into the buffer — journey render −24..26% wall / −21.5% instr (2026-07-16)
+
+- **Negative-ledger-first boundary:** Journey render had no dedicated render-side lever in this ledger
+  (only journey PARSE byte-trims and journey/kanban LAYOUT lane-band passes). The single journey render
+  note is the 2026-07-04 CORRECTNESS restore of the score/priority fill; the SURFACE note (2026-07-12)
+  flags journey/class/requirement as Attributes-builder-bound but was never harvested for the band
+  label. Fresh subsystem `fm-render-svg::write_layout_band_into`, distinct from the active parser lane
+  (peer MaroonRidge) and the thinning crossing-min vein.
+- **Profile / attribution:** journey render is the least byte-efficient shape at 11.5 instr/output-byte
+  vs ~6 for the harvested ER path. A symbolised `perf record` (dwarf) put `TextBuilder::build` +
+  `Attributes::set`/`write_into` at ~8.4% and mimalloc malloc/free/realloc churn at ~6.8%. Cause: a
+  300-task journey emits 289 labelled LANE bands, and `write_layout_band_into` streamed the band RECT
+  but fell back to `TextBuilder::new(..).build().write_to_string(out)` for the LABEL — a per-band
+  `Element` + `Attributes` Vec build + serialize + copy, on what the code called the "rare labelled
+  band" but is journey's per-item common case.
+- **One lever / exact isomorphism:** stream the single-line label `<text>` straight into `out`
+  (`x y text-anchor="start" [font-family] font-size fill class` + escaped content), mirroring the
+  existing axis-tick streamer. A multi-line label (`\n`, which `TextBuilder::build` splits into
+  `<tspan>`s) keeps the exact slow path. Byte-identical: `write_number_into` == the builder's `attr_num`
+  serialisation (proven by the axis-tick oracle), and `layout_band_streaming_matches_element` was
+  extended to cover both embed states × empty/XML-special/multi-line labels for all 3 band kinds.
+- **A/B (same machine, same build flags, my file only):** baseline = pre-edit symbolised profharness
+  binary; candidate = same flags (`--config lto=false strip=false debug=1`) with only the band-label
+  edit. `perf stat -e instructions` journey/300/4000×render: base 4,010,060 → cand 3,147,583
+  instr/render = 0.785× (−21.5%). Interleaved wall-min ×4: base ~260-266µs → cand ~197µs = 0.74-0.76×
+  (−24..26%, tighter than instr because malloc/free latency isn't counted). NULL CONTROL flowchart
+  render 0.9996× and kanban 1.0001× (kanban bands aren't labelled) — the change is causally isolated to
+  labelled-band diagrams (journey).
+- **Correctness:** `cargo test -p fm-render-svg` green; `layout_band_streaming_matches_element`
+  (extended) + `svg_golden_snapshots_are_stable` pin byte-identity.
+- **Decision:** keep. Journey (and any future labelled Lane/Section/Column diagram whose renderer uses
+  the shared band path) sheds a per-band Element/Attributes build+serialize+copy.
+
+  Agent: Claude (Opus 4.8, this session; bead `bd-1buv.35`)

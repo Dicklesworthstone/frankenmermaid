@@ -3443,7 +3443,7 @@ fn write_layout_band_into(
     offset_y: f32,
     config: &SvgRenderConfig,
 ) {
-    use crate::attributes::{write_escaped_attr, write_number_into};
+    use crate::attributes::{write_escaped_attr, write_escaped_text, write_number_into};
     let (fill, stroke, class_name) = match band.kind {
         LayoutBandKind::Section => (
             "rgba(191,219,254,0.18)",
@@ -3479,19 +3479,46 @@ fn write_layout_band_into(
     let _ = write_number_into(out, 0.9);
     out.push_str("\"/>");
     if !band.label.is_empty() {
-        // Rare labelled band: reuse the exact slow-path `TextBuilder` `Element`, written in place.
-        TextBuilder::new(&band.label)
-            .x(band.bounds.x + offset_x + 8.0)
-            .y(band.bounds.y + offset_y + 16.0)
-            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-            .font_size(clamp_font_size(
-                config.font_size * 0.82,
-                config.min_font_size,
-            ))
-            .fill("var(--fm-text-color, #4a5568)")
-            .class("fm-band-label")
-            .build()
-            .write_to_string(out);
+        // A journey/gantt/kanban diagram puts a LABEL on every lane/section/column band (289 per
+        // 300-task journey render), so this is a per-item hot path, not the "rare" case it once was.
+        // Stream the single-line label `<text>` straight into `out` — byte-identical to the
+        // `TextBuilder` `Element` under this call set (`x y text-anchor="start" [font-family] font-size
+        // fill class` then escaped content; default anchor is `Start`, `font-family` present only when
+        // the theme CSS is NOT embedded), exactly as the axis-tick streamer does. This kills the
+        // per-band `Element` + `Attributes` Vec build + serialize + copy (TextBuilder/Attributes builder
+        // was ~8% of journey render, plus the malloc/free churn on those transient Vecs). A multi-line
+        // label (`\n`), which `TextBuilder::build` splits into `<tspan>`s, keeps the exact slow path.
+        // Pinned by `layout_band_streaming_matches_element`.
+        if band.label.contains('\n') {
+            TextBuilder::new(&band.label)
+                .x(band.bounds.x + offset_x + 8.0)
+                .y(band.bounds.y + offset_y + 16.0)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                .font_size(clamp_font_size(config.font_size * 0.82, config.min_font_size))
+                .fill("var(--fm-text-color, #4a5568)")
+                .class("fm-band-label")
+                .build()
+                .write_to_string(out);
+        } else {
+            out.push_str("<text x=\"");
+            let _ = write_number_into(out, band.bounds.x + offset_x + 8.0);
+            out.push_str("\" y=\"");
+            let _ = write_number_into(out, band.bounds.y + offset_y + 16.0);
+            out.push_str("\" text-anchor=\"start\"");
+            if !config.embed_theme_css {
+                out.push_str(" font-family=\"");
+                let _ = write_escaped_attr(out, &config.font_family);
+                out.push('"');
+            }
+            out.push_str(" font-size=\"");
+            let _ = write_number_into(
+                out,
+                clamp_font_size(config.font_size * 0.82, config.min_font_size),
+            );
+            out.push_str("\" fill=\"var(--fm-text-color, #4a5568)\" class=\"fm-band-label\">");
+            let _ = write_escaped_text(out, &band.label);
+            out.push_str("</text>");
+        }
     }
     out.push_str("</g>");
 }
@@ -12963,29 +12990,38 @@ mod tests {
     /// (sequence lifelines are unlabelled `Lane`s; journey sections / xychart columns carry a label).
     #[test]
     fn layout_band_streaming_matches_element() {
-        let config = SvgRenderConfig::default();
         let kinds = [
             LayoutBandKind::Section,
             LayoutBandKind::Lane,
             LayoutBandKind::Column,
         ];
-        for kind in kinds {
-            for label in ["", "Phase <1> & more"] {
-                let band = LayoutBand {
-                    kind,
-                    label: label.to_string(),
-                    bounds: fm_layout::LayoutRect {
-                        x: 12.5,
-                        y: 24.0,
-                        width: 180.0,
-                        height: 83.5,
-                    },
-                };
-                let mut streamed = String::new();
-                write_layout_band_into(&mut streamed, &band, 3.0, 5.0, &config);
-                let mut slow = String::new();
-                render_layout_band(&band, 3.0, 5.0, &config).write_to_string(&mut slow);
-                assert_eq!(streamed, slow, "band kind {kind:?} label {label:?}");
+        // Cover both the embedded-CSS config (no inline `font-family`) and the attribute-driven config
+        // (font-family present), plus a plain label, an XML-special label (escaping), and a multi-line
+        // label (`TextBuilder` `<tspan>` fallback) so every branch of the streamed label writer is
+        // byte-checked against the `Element` slow path.
+        for embed in [true, false] {
+            let config = SvgRenderConfig {
+                embed_theme_css: embed,
+                ..SvgRenderConfig::default()
+            };
+            for kind in kinds {
+                for label in ["", "Phase <1> & more", "Line 1\nLine 2"] {
+                    let band = LayoutBand {
+                        kind,
+                        label: label.to_string(),
+                        bounds: fm_layout::LayoutRect {
+                            x: 12.5,
+                            y: 24.0,
+                            width: 180.0,
+                            height: 83.5,
+                        },
+                    };
+                    let mut streamed = String::new();
+                    write_layout_band_into(&mut streamed, &band, 3.0, 5.0, &config);
+                    let mut slow = String::new();
+                    render_layout_band(&band, 3.0, 5.0, &config).write_to_string(&mut slow);
+                    assert_eq!(streamed, slow, "band kind {kind:?} embed {embed} label {label:?}");
+                }
             }
         }
     }
