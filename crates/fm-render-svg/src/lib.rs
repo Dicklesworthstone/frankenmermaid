@@ -1550,14 +1550,46 @@ fn scan_node_class_keywords(class: &str) -> NodeClassKeywords {
 /// results, replacing TWO independent byte scans of the same string with one — on classed nodes
 /// (timeline/journey/class/…) each node has 1-2 user classes, so this halves the per-class scan work.
 /// Byte-identical: the keyword arms are unchanged and `clean` matches `write_sanitized`'s predicate.
+/// Per-byte gate for [`scan_class_keywords_and_clean`], indexed by the raw byte. Bit 0 (`SCAN_NOT_CLEAN`)
+/// is set when the byte is NOT a valid lowercase CSS token char (`[a-z0-9-_]`); bit 1
+/// (`SCAN_KW_CANDIDATE`) is set when the byte's lowercased form is a keyword START byte (`h s a f i m d b`,
+/// either case). The overwhelmingly common class byte (a clean lowercase letter that starts no keyword,
+/// e.g. every byte of `journey-actor`/`timeline-section-…`) has flags `0`, so the per-byte work collapses
+/// to one table load + two predicted-not-taken branches — skipping BOTH the 4-way clean OR-chain and the
+/// `match raw|0x20` keyword dispatch. Bit-identical to the inline predicates it replaces.
+const SCAN_NOT_CLEAN: u8 = 1;
+const SCAN_KW_CANDIDATE: u8 = 2;
+const CLASS_SCAN_GATE: [u8; 256] = {
+    let mut t = [0u8; 256];
+    let mut i = 0usize;
+    while i < 256 {
+        let b = i as u8;
+        if !(b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_') {
+            t[i] |= SCAN_NOT_CLEAN;
+        }
+        match b | 0x20 {
+            b'h' | b's' | b'a' | b'f' | b'i' | b'm' | b'd' | b'b' => t[i] |= SCAN_KW_CANDIDATE,
+            _ => {}
+        }
+        i += 1;
+    }
+    t
+};
+
 fn scan_class_keywords_and_clean(class: &str) -> (NodeClassKeywords, bool) {
     let b = class.as_bytes();
     let mut f = NodeClassKeywords::default();
     let mut clean = true;
     for i in 0..b.len() {
         let raw = b[i];
-        if !(raw.is_ascii_lowercase() || raw.is_ascii_digit() || raw == b'-' || raw == b'_') {
+        let gate = CLASS_SCAN_GATE[raw as usize];
+        if gate & SCAN_NOT_CLEAN != 0 {
             clean = false;
+        }
+        // Only keyword-START bytes (`h s a f i m d b`) can begin a state keyword; every other byte would
+        // hit the old `match`'s `_ => {}`, so gate the whole dispatch behind the candidate bit.
+        if gate & SCAN_KW_CANDIDATE == 0 {
+            continue;
         }
         match raw | 0x20 {
             b'h' if matches_ci_at(b, i, b"highlight") => {

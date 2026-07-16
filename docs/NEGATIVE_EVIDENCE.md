@@ -17828,3 +17828,34 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   of hashing and looking up the same synthetic ID up to three more times.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.2.10`)
+
+### 🟢LANDED: gate-table the per-byte class keyword scan — journey render −5.1% / timeline −2.6% instr (2026-07-16)
+
+- **Negative-ledger-first boundary:** `scan_class_keywords_and_clean` was itself a prior win (fused ~11
+  `contains_ascii_ci` scans into one pass) but its per-BYTE cost had never been reduced. A symbolised
+  render profile put it at **8.45% of journey / 10.17% of timeline** render (every classed node scans each
+  class byte). Fresh angle on the shared classed-diagram render path — distinct from the parser lane
+  (peer) and my just-landed band-label / gantt-clone veins.
+- **Profile / attribution:** every byte of every user class ran BOTH a 4-way clean OR-chain
+  (`is_ascii_lowercase||is_ascii_digit||-||_`) AND a `match raw|0x20` keyword dispatch. Keyword-START
+  bytes are only `{h s a f i m d b}`, so on the common class (`journey-actor`, `timeline-section-N`,
+  `journey-score-N` — 4 classes/journey node) almost every byte pays the match dispatch only to hit
+  `_ => {}`.
+- **One lever / exact isomorphism:** a `const CLASS_SCAN_GATE: [u8; 256]` precomputes, per byte, `bit0 =
+  NOT clean` and `bit1 = keyword-candidate`. The loop does one table load; a non-candidate byte updates
+  `clean` and `continue`s, skipping the whole `match`. Candidate bytes run the identical match. Bit-
+  identical: the table encodes the exact clean predicate and the exact candidate set the arms key on
+  (`matches_ci_at` logic untouched); every non-candidate byte would have hit `_ => {}` anyway.
+- **A/B (same machine, same build flags, my file only):** baseline = pre-edit profharness binary;
+  candidate = same flags with only this edit. `perf stat -e instructions` /300/4000×render:
+  journey 3,146,980 → 2,985,307 = 0.9486× (−5.14%); timeline 5,202,221 → 5,069,869 = 0.9745× (−2.55%);
+  mindmap 0.9878×, kanban 0.9878×, git 0.9868× (−1.2..1.3%). Interleaved wall-min ×4: journey ~0.92-0.99×,
+  timeline ~0.957-0.99× (noisier, consistently <1). NULL CONTROLS flowchart 0.9999× and styled 0.9999×
+  (styled's classDef nodes take the slow path, no `simple_node_user_class_suffix` scan) — the change is
+  isolated to nodes whose classes go through the fast-path class scan.
+- **Correctness:** `cargo test -p fm-render-svg` green; `clippy -D warnings` clean; golden snapshots pin
+  byte-identity across the classed diagram types.
+- **Decision:** keep. All classed diagrams (journey/timeline/mindmap/kanban/git) shed the per-non-candidate-
+  byte keyword-match dispatch; the win scales with classes-per-node (journey's 4 → −5%).
+
+  Agent: Claude (Opus 4.8, this session; bead bd-1buv.37)
