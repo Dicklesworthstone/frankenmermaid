@@ -18411,3 +18411,26 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   Option cache + `cursor_y`), left for a dedicated follow-up. Do NOT reland the in-place buffer.
 
   Agent: Claude (Opus 4.8, this session)
+
+### 🔴REJECTED (follow-up): the `draw_class_compartments` EXTRACTION does NOT fix the non-class wall regression — class-member `format!` optimization is a code-layout DEAD-END (2026-07-16)
+
+- **Context:** the prior reject (in-place `member_text` buffer) proposed landing the −28% class win behind
+  a function extraction so `draw_nodes` stays small. This turn I did exactly that: pulled the whole
+  class-compartment block into `fn draw_class_compartments(...)` (10 params incl. the fonts Option cache),
+  with the reused `member_text` buffer inside it. `draw_nodes` now just calls it for class nodes.
+- **A/B (same machine, same flags; baseline = 3-canvas-win no-op-context binary):** class STILL won —
+  0.7193× instr (−28.1%), **−28% wall**, draw-op count identical, non-class INSTR blip SHRANK to +0.2-0.4%
+  (from +0.5-0.8%). BUT the non-class **WALL regression PERSISTED**: flowchart +7.2-7.6%, er +7.4-9.0%,
+  state +3.8-6.2%, mindmap +6.3-6.6% (×3, consistent). The extraction did NOT localise the layout impact —
+  adding the method shifted the WHOLE crate's code layout, and the common non-class render path (draw_nodes
+  else-branch, draw_edges, draw_shape) landed at slower addresses.
+- **Conclusion — firm no-retry:** the class-member `format!`→push optimization broadly regresses non-class
+  canvas render +5-9% wall in BOTH in-place and extracted forms. The renderer's code layout is too fragile
+  for the +0.3% instr this adds to translate to a wall win on non-class; instead ANY code addition here
+  slows the dominant non-class path. Compounded by the measurement being a profharness+NopCanvas binary
+  whose layout ≠ the real WASM build, so neither the class win nor the non-class regression is verifiable
+  for production. **Do NOT re-attempt the class-member text optimization** (in-place, extracted, helper-fn,
+  or buffer) — every variant tried regresses the common case. The class `format!` self-cost (~15% of class
+  canvas) is simply not extractable without disturbing shared layout.
+
+  Agent: Claude (Opus 4.8, this session)
