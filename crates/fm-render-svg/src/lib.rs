@@ -755,10 +755,22 @@ fn build_marker_defs_body(edge_color: &str, emit_fancy: bool) -> String {
     }
     push(&mut s, ArrowheadMarker::open("arrow-open", edge_color));
     if emit_fancy {
-        push(&mut s, ArrowheadMarker::half_top("arrow-half-top", edge_color));
-        push(&mut s, ArrowheadMarker::half_bottom("arrow-half-bottom", edge_color));
-        push(&mut s, ArrowheadMarker::stick_top("arrow-stick-top", edge_color));
-        push(&mut s, ArrowheadMarker::stick_bottom("arrow-stick-bottom", edge_color));
+        push(
+            &mut s,
+            ArrowheadMarker::half_top("arrow-half-top", edge_color),
+        );
+        push(
+            &mut s,
+            ArrowheadMarker::half_bottom("arrow-half-bottom", edge_color),
+        );
+        push(
+            &mut s,
+            ArrowheadMarker::stick_top("arrow-stick-top", edge_color),
+        );
+        push(
+            &mut s,
+            ArrowheadMarker::stick_bottom("arrow-stick-bottom", edge_color),
+        );
         push(
             &mut s,
             ArrowheadMarker::standard("arrow-start", edge_color)
@@ -769,9 +781,18 @@ fn build_marker_defs_body(edge_color: &str, emit_fancy: bool) -> String {
             ArrowheadMarker::filled("arrow-start-filled", edge_color)
                 .with_orient(MarkerOrient::AutoStartReverse),
         );
-        push(&mut s, ArrowheadMarker::circle_marker("arrow-circle", edge_color));
-        push(&mut s, ArrowheadMarker::cross_marker("arrow-cross", edge_color));
-        push(&mut s, ArrowheadMarker::diamond_marker("arrow-diamond", edge_color));
+        push(
+            &mut s,
+            ArrowheadMarker::circle_marker("arrow-circle", edge_color),
+        );
+        push(
+            &mut s,
+            ArrowheadMarker::cross_marker("arrow-cross", edge_color),
+        );
+        push(
+            &mut s,
+            ArrowheadMarker::diamond_marker("arrow-diamond", edge_color),
+        );
     }
     s
 }
@@ -792,7 +813,10 @@ fn marker_defs_body(edge_color: &str, emit_fancy: bool) -> Cow<'static, str> {
         // Borrow the process-global memoized body instead of cloning it into a fresh `String` on
         // every render — `DefsBuilder::raw_markers` now streams it via `push_str`, so a borrow is
         // sufficient. Custom themes still build fresh (rare) as `Cow::Owned`.
-        return Cow::Borrowed(cell.get_or_init(|| build_marker_defs_body(edge_color, emit_fancy)).as_str());
+        return Cow::Borrowed(
+            cell.get_or_init(|| build_marker_defs_body(edge_color, emit_fancy))
+                .as_str(),
+        );
     }
     Cow::Owned(build_marker_defs_body(edge_color, emit_fancy))
 }
@@ -880,7 +904,11 @@ const NODE_SHAPE_THEME_CSS: &str = ".fm-node.fm-node-shape-note path,\n.fm-node.
 /// two-way `Searcher::new` (~2.5%) every call. Building one `Finder` per block ONCE (process-global
 /// `OnceLock`) moves that setup off the per-render path entirely; only the SIMD scan remains. The
 /// returned first-match byte offset is identical to `str::find`, so the `drain` is byte-identical.
-fn strip_css_block(css: &mut String, cell: &OnceLock<memchr::memmem::Finder<'static>>, block: &'static str) {
+fn strip_css_block(
+    css: &mut String,
+    cell: &OnceLock<memchr::memmem::Finder<'static>>,
+    block: &'static str,
+) {
     let finder = cell.get_or_init(|| memchr::memmem::Finder::new(block.as_bytes()));
     if let Some(pos) = finder.find(css.as_bytes()) {
         css.drain(pos..pos + block.len());
@@ -2106,8 +2134,10 @@ fn node_gradient_svg(config: &SvgRenderConfig, theme: &Theme) -> Option<Cow<'sta
     if !config.node_gradients {
         return None;
     }
-    if matches!(config.node_gradient_style, NodeGradientStyle::LinearVertical)
-        && theme.colors.node_fill == DEFAULT_NODE_FILL
+    if matches!(
+        config.node_gradient_style,
+        NodeGradientStyle::LinearVertical
+    ) && theme.colors.node_fill == DEFAULT_NODE_FILL
         && theme.colors.background == DEFAULT_NODE_BG
     {
         static DEFAULT_GRAD: OnceLock<String> = OnceLock::new();
@@ -3454,7 +3484,10 @@ fn write_layout_band_into(
             .x(band.bounds.x + offset_x + 8.0)
             .y(band.bounds.y + offset_y + 16.0)
             .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-            .font_size(clamp_font_size(config.font_size * 0.82, config.min_font_size))
+            .font_size(clamp_font_size(
+                config.font_size * 0.82,
+                config.min_font_size,
+            ))
             .fill("var(--fm-text-color, #4a5568)")
             .class("fm-band-label")
             .build()
@@ -3526,7 +3559,13 @@ fn render_layout_band(
 /// `TextBuilder::build` under this call set: `x y text-anchor="start" [font-family] font-size fill class`
 /// then escaped content (default anchor is `Start`; `font-family` present only when the theme CSS is NOT
 /// embedded). Lets the axis-ticks loop stream N group+line+text `Element`s into one raw fragment.
-fn write_layout_axis_tick_into(out: &mut String, label: &str, x: f32, y: f32, config: &SvgRenderConfig) {
+fn write_layout_axis_tick_into(
+    out: &mut String,
+    label: &str,
+    x: f32,
+    y: f32,
+    config: &SvgRenderConfig,
+) {
     use crate::attributes::{write_escaped_attr, write_escaped_text, write_number_into};
     out.push_str("<g class=\"fm-axis-tick\"><line x1=\"");
     let _ = write_number_into(out, x);
@@ -3547,7 +3586,10 @@ fn write_layout_axis_tick_into(out: &mut String, label: &str, x: f32, y: f32, co
         out.push('"');
     }
     out.push_str(" font-size=\"");
-    let _ = write_number_into(out, clamp_font_size(config.font_size * 0.72, config.min_font_size));
+    let _ = write_number_into(
+        out,
+        clamp_font_size(config.font_size * 0.72, config.min_font_size),
+    );
     out.push_str("\" fill=\"var(--fm-text-color, #64748b)\" class=\"fm-axis-tick-label\">");
     let _ = write_escaped_text(out, label);
     out.push_str("</text></g>");
@@ -5026,13 +5068,21 @@ fn render_xychart_svg(
                     let mut bar_svg = String::new();
                     for node in series_nodes {
                         bar_svg.push_str("<rect x=\"");
-                        let _ = crate::attributes::write_number_into(&mut bar_svg, node.bounds.x + offset_x);
+                        let _ = crate::attributes::write_number_into(
+                            &mut bar_svg,
+                            node.bounds.x + offset_x,
+                        );
                         bar_svg.push_str("\" y=\"");
-                        let _ = crate::attributes::write_number_into(&mut bar_svg, node.bounds.y + offset_y);
+                        let _ = crate::attributes::write_number_into(
+                            &mut bar_svg,
+                            node.bounds.y + offset_y,
+                        );
                         bar_svg.push_str("\" width=\"");
-                        let _ = crate::attributes::write_number_into(&mut bar_svg, node.bounds.width);
+                        let _ =
+                            crate::attributes::write_number_into(&mut bar_svg, node.bounds.width);
                         bar_svg.push_str("\" height=\"");
-                        let _ = crate::attributes::write_number_into(&mut bar_svg, node.bounds.height);
+                        let _ =
+                            crate::attributes::write_number_into(&mut bar_svg, node.bounds.height);
                         bar_svg.push_str("\" fill=\"");
                         bar_svg.push_str(&esc_color);
                         bar_svg.push_str("\" fill-opacity=\"0.78\" stroke=\"");
@@ -5121,9 +5171,15 @@ fn render_xychart_svg(
                     for node in series_nodes {
                         let center = node.bounds.center();
                         point_svg.push_str("<circle cx=\"");
-                        let _ = crate::attributes::write_number_into(&mut point_svg, center.x + offset_x);
+                        let _ = crate::attributes::write_number_into(
+                            &mut point_svg,
+                            center.x + offset_x,
+                        );
                         point_svg.push_str("\" cy=\"");
-                        let _ = crate::attributes::write_number_into(&mut point_svg, center.y + offset_y);
+                        let _ = crate::attributes::write_number_into(
+                            &mut point_svg,
+                            center.y + offset_y,
+                        );
                         point_svg.push_str("\" r=\"");
                         let _ = crate::attributes::write_number_into(
                             &mut point_svg,
@@ -5733,7 +5789,11 @@ fn write_c4_node_fragment_into(
     out.push_str(">></text>");
 
     // Optional person icon.
-    if node.classes.iter().any(|class_name| class_name == "c4-person") {
+    if node
+        .classes
+        .iter()
+        .any(|class_name| class_name == "c4-person")
+    {
         write_c4_person_icon_into(out, x + 18.0, y + 18.0, &colors.node_stroke);
     }
 
@@ -5868,7 +5928,9 @@ fn write_er_node_fragment_into(
     out.push_str("\" rx=\"");
     let _ = crate::attributes::write_number_into(out, rx);
     out.push_str("\" fill=\"url(#fm-node-gradient)\"/>");
-    write_er_entity_into(out, node, label_text, cx, x, y, w, font_size, config, colors);
+    write_er_entity_into(
+        out, node, label_text, cx, x, y, w, font_size, config, colors,
+    );
     // <title>Node: {raw_label}, rectangle</title></g> — describe_node's Rect form, written piecewise.
     out.push_str("<title>Node: ");
     let _ = write_escaped_text(out, raw_label);
@@ -5934,7 +5996,6 @@ fn write_cylinder_shape_into(
     h: f32,
     special_fill: Option<&str>,
 ) {
-
     let ry = h * 0.1;
     let rx = w / 2.0;
     let top_y = y + ry;
@@ -7904,71 +7965,74 @@ fn render_node(
                 );
                 group = group.child(Element::raw_svg(fragment));
             } else {
-            let attr_font_size = clamp_font_size(node_font_size * 0.8, config.min_font_size);
-            let header_height = node_font_size * 1.5;
+                let attr_font_size = clamp_font_size(node_font_size * 0.8, config.min_font_size);
+                let header_height = node_font_size * 1.5;
 
-            // Entity name header
-            let mut name_elem = Element::text()
-                .x(cx)
-                .y(y + header_height * 0.6)
-                .content(label_text.as_ref())
-                .attr("text-anchor", "middle")
-                .attr("dominant-baseline", "central")
-                .attr_num("font-size", node_font_size)
-                .attr("font-weight", "bold")
-                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                .fill(&colors.text)
-                .class("fm-er-entity-name");
-            name_elem = apply_label_class(name_elem);
-            if let Some(style) = text_style.as_deref() {
-                name_elem = name_elem.attr("style", style);
-            }
-            group = group.child(name_elem);
-
-            // Divider line
-            group = group.child(
-                Element::line()
-                    .x1(x + 2.0)
-                    .y1(y + header_height)
-                    .x2(x + w - 2.0)
-                    .y2(y + header_height)
-                    .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
-                    .stroke_width(0.8),
-            );
-
-            // Attribute list
-            let mut attr_y = y + header_height + attr_font_size * 0.9;
-            for attr in &node.members {
-                let key_prefix = match attr.key {
-                    fm_core::IrAttributeKey::Pk => "PK ",
-                    fm_core::IrAttributeKey::Fk => "FK ",
-                    fm_core::IrAttributeKey::Uk => "UK ",
-                    fm_core::IrAttributeKey::None => "",
-                };
-                let attr_text = format!("{key_prefix}{} {}", attr.data_type, attr.name);
-                let font_weight = if attr.key == fm_core::IrAttributeKey::None {
-                    "normal"
-                } else {
-                    "bold"
-                };
-                let mut attr_elem = Element::text()
-                    .x(x + 8.0)
-                    .y(attr_y)
-                    .content(&attr_text)
-                    .attr("text-anchor", "start")
+                // Entity name header
+                let mut name_elem = Element::text()
+                    .x(cx)
+                    .y(y + header_height * 0.6)
+                    .content(label_text.as_ref())
+                    .attr("text-anchor", "middle")
                     .attr("dominant-baseline", "central")
-                    .attr_num("font-size", attr_font_size)
-                    .attr("font-weight", font_weight)
+                    .attr_num("font-size", node_font_size)
+                    .attr("font-weight", "bold")
                     .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                     .fill(&colors.text)
-                    .class("fm-er-attribute");
-                attr_elem = apply_label_class(attr_elem);
+                    .class("fm-er-entity-name");
+                name_elem = apply_label_class(name_elem);
                 if let Some(style) = text_style.as_deref() {
-                    attr_elem = attr_elem.attr("style", style);
+                    name_elem = name_elem.attr("style", style);
                 }
-                group = group.child(attr_elem);
-                attr_y += attr_font_size * 1.3;
-            }
+                group = group.child(name_elem);
+
+                // Divider line
+                group = group.child(
+                    Element::line()
+                        .x1(x + 2.0)
+                        .y1(y + header_height)
+                        .x2(x + w - 2.0)
+                        .y2(y + header_height)
+                        .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                        .stroke_width(0.8),
+                );
+
+                // Attribute list
+                let mut attr_y = y + header_height + attr_font_size * 0.9;
+                for attr in &node.members {
+                    let key_prefix = match attr.key {
+                        fm_core::IrAttributeKey::Pk => "PK ",
+                        fm_core::IrAttributeKey::Fk => "FK ",
+                        fm_core::IrAttributeKey::Uk => "UK ",
+                        fm_core::IrAttributeKey::None => "",
+                    };
+                    let attr_text = format!("{key_prefix}{} {}", attr.data_type, attr.name);
+                    let font_weight = if attr.key == fm_core::IrAttributeKey::None {
+                        "normal"
+                    } else {
+                        "bold"
+                    };
+                    let mut attr_elem = Element::text()
+                        .x(x + 8.0)
+                        .y(attr_y)
+                        .content(&attr_text)
+                        .attr("text-anchor", "start")
+                        .attr("dominant-baseline", "central")
+                        .attr_num("font-size", attr_font_size)
+                        .attr("font-weight", font_weight)
+                        .font_family_unless_embedded_css(
+                            &config.font_family,
+                            config.embed_theme_css,
+                        )
+                        .fill(&colors.text)
+                        .class("fm-er-attribute");
+                    attr_elem = apply_label_class(attr_elem);
+                    if let Some(style) = text_style.as_deref() {
+                        attr_elem = attr_elem.attr("style", style);
+                    }
+                    group = group.child(attr_elem);
+                    attr_y += attr_font_size * 1.3;
+                }
             }
         } else if let Some(node) = ir_node
             && let Some(ref c4_meta) = node.c4_meta
@@ -9720,7 +9784,9 @@ fn write_labeled_edge_fragment_into(
     to_label: Option<&str>,
     colors: &ThemeColors,
 ) {
-    use crate::attributes::{AttributeValue, write_escaped_attr, write_escaped_text, write_number_into};
+    use crate::attributes::{
+        AttributeValue, write_escaped_attr, write_escaped_text, write_number_into,
+    };
     let label_width = (label_str.chars().count() as f32 * avg_char_width) + 8.0 + 20.0;
     let label_height = label_font_size + 14.0;
     let start_y = ly + (label_font_size / 4.0);
@@ -13203,7 +13269,8 @@ mod tests {
         // trailing filter + custom element to prove the markers-slot ordering is preserved.
         for &fancy in &[false, true] {
             for edge in [DEFAULT_EDGE_COLOR, "#ff0000"] {
-                let mut old = DefsBuilder::new().marker(ArrowheadMarker::standard("arrow-end", edge));
+                let mut old =
+                    DefsBuilder::new().marker(ArrowheadMarker::standard("arrow-end", edge));
                 if fancy {
                     old = old.marker(ArrowheadMarker::filled("arrow-filled", edge));
                 }
@@ -13235,8 +13302,10 @@ mod tests {
 
                 // Trailing filter + custom: markers must still serialize before them in both.
                 let trailer = |d: DefsBuilder| {
-                    d.filter(crate::defs::Filter::drop_shadow("shadow", 2.0, 2.0, 4.0, 0.3))
-                        .custom(crate::element::Element::text())
+                    d.filter(crate::defs::Filter::drop_shadow(
+                        "shadow", 2.0, 2.0, 4.0, 0.3,
+                    ))
+                    .custom(crate::element::Element::text())
                 };
                 assert_eq!(
                     trailer(old).to_element().render(),
@@ -13269,12 +13338,16 @@ mod tests {
             let old = DefsBuilder::new()
                 .raw_markers(marker_defs_body(&theme.colors.edge, true))
                 .gradient(grad)
-                .filter(crate::defs::Filter::drop_shadow("shadow", 2.0, 2.0, 4.0, 0.3))
+                .filter(crate::defs::Filter::drop_shadow(
+                    "shadow", 2.0, 2.0, 4.0, 0.3,
+                ))
                 .custom(crate::element::Element::text());
             let new = DefsBuilder::new()
                 .raw_markers(marker_defs_body(&theme.colors.edge, true))
                 .raw_gradients(node_gradient_svg(&cfg, &theme).expect("gradients on by default"))
-                .filter(crate::defs::Filter::drop_shadow("shadow", 2.0, 2.0, 4.0, 0.3))
+                .filter(crate::defs::Filter::drop_shadow(
+                    "shadow", 2.0, 2.0, 4.0, 0.3,
+                ))
                 .custom(crate::element::Element::text());
             assert_eq!(
                 old.to_element().render(),
