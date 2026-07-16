@@ -97,6 +97,45 @@ impl Canvas {
 
     /// Draw a line from (x0, y0) to (x1, y1) using Bresenham's algorithm.
     pub fn draw_line(&mut self, x0: isize, y0: isize, x1: isize, y1: isize) {
+        // Axis-aligned fast paths. Rect outlines (`draw_rect`) and orthogonal connector segments are
+        // horizontal or vertical, and Bresenham's per-pixel `set_pixel` recomputes `pixel_index`
+        // (bounds check + multiply + `Option`) and stamps two buffers on every step. A horizontal run has
+        // CONTIGUOUS indices, so one `fill(true)`/`fill(generation)` replaces the whole loop; a vertical
+        // run has a fixed `pixel_width` stride, so the index increments with no per-pixel multiply.
+        // Byte-identical to the Bresenham path: it sets exactly the same in-bounds pixel set (0≤x<width,
+        // 0≤y<height, endpoints inclusive — pixel order is irrelevant to the final buffer) with the same
+        // `true` + `generation` stamp.
+        if y0 == y1 {
+            if y0 >= 0 && (y0 as usize) < self.pixel_height {
+                let x_lo = x0.min(x1).max(0);
+                let x_hi = x0.max(x1).min(self.pixel_width as isize - 1);
+                if x_lo <= x_hi {
+                    let base = (y0 as usize) * self.pixel_width;
+                    let lo = base + x_lo as usize;
+                    let hi = base + x_hi as usize;
+                    self.pixels[lo..=hi].fill(true);
+                    self.pixel_gen[lo..=hi].fill(self.generation);
+                }
+            }
+            return;
+        }
+        if x0 == x1 {
+            if x0 >= 0 && (x0 as usize) < self.pixel_width {
+                let y_lo = y0.min(y1).max(0);
+                let y_hi = y0.max(y1).min(self.pixel_height as isize - 1);
+                if y_lo <= y_hi {
+                    let x = x0 as usize;
+                    let mut index = (y_lo as usize) * self.pixel_width + x;
+                    for _ in y_lo..=y_hi {
+                        self.pixels[index] = true;
+                        self.pixel_gen[index] = self.generation;
+                        index += self.pixel_width;
+                    }
+                }
+            }
+            return;
+        }
+
         let dx = (x1 - x0).abs();
         let dy = -(y1 - y0).abs();
         let sx = if x0 < x1 { 1 } else { -1 };

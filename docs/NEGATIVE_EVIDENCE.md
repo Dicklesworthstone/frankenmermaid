@@ -17928,3 +17928,35 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   policy instead of allocating and freeing an identical heap string.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.39`)
+
+### 🟢LANDED: axis-aligned fast paths in Canvas::draw_line — term render class −42% / er −36% / state −40% (2026-07-16)
+
+- **Negative-ledger-first / FRESH subsystem:** `fm-render-term`'s Canvas had NO prior lever in this ledger
+  (the 3 recorded term wins are all in `diff.rs` / renderer streaming, never the pixel raster). Extended
+  the scratch profharness with a `termrender` phase (uncommitted harness change) to profile it: term
+  render is ~55% pixel ops — `Canvas::pixel_index` 16% + `draw_line` 14% + `get_pixel` 13% + `set_pixel`
+  12%.
+- **Profile / attribution:** `draw_line` used Bresenham for EVERY line, calling `set_pixel` per pixel;
+  each `set_pixel` recomputes `pixel_index` (bounds check + `y*width+x` multiply + `Option`) and stamps
+  two buffers. Rect outlines (`draw_rect` = 4 axis-aligned lines) and orthogonal connectors are
+  horizontal/vertical, so box-heavy diagrams (class/er/state) spend nearly all pixel time in axis-aligned
+  Bresenham.
+- **One lever / exact isomorphism:** add a horizontal fast path (contiguous indices →
+  `pixels[lo..=hi].fill(true)` + `pixel_gen[lo..=hi].fill(generation)`, one bulk fill instead of the
+  loop) and a vertical fast path (fixed `pixel_width` stride → increment the index, no per-pixel multiply
+  / bounds / `Option`). Diagonal lines keep Bresenham. Byte-identical: sets exactly the same in-bounds
+  pixel set (`0≤x<width, 0≤y<height`, endpoints inclusive; pixel ORDER is irrelevant to the final
+  buffer) with the same `true` + `generation` stamp — negative/OOB coords clip to the same range
+  Bresenham's `x≥0 && y≥0` guard + `set_pixel`'s upper-bound check produce.
+- **A/B (same machine, same build flags, my file only):** baseline = pre-edit term-profharness binary.
+  `perf stat -e instructions` /200/2000×termrender: class 0.5786× (−42.1%), state 0.6016× (−39.8%),
+  er 0.6434× (−35.7%), mindmap 0.7759× (−22.4%), gantt 0.8060× (−19.4%), flowchart 0.8297× (−17.0%),
+  journey 0.8345× (−16.6%), seq 0.9122× (−8.8%). Interleaved wall-min ×4: class ~0.564-0.578× (−42%),
+  flowchart ~0.905-0.934×. **Output byte-length identical for all shapes** (class/er/state/flowchart/
+  mindmap) — a real win, not under-rendering (checked per the byte-id trap).
+- **Correctness:** `cargo test -p fm-render-term` 90 passed (incl. `draw_line_*` exact-pixel tests +
+  term golden snapshots); `clippy -D warnings` clean.
+- **Decision:** keep. Every diagram sheds the per-pixel Bresenham on its axis-aligned rect edges /
+  orthogonal connectors; box-heavy diagrams (class/er/state) nearly halve term render.
+
+  Agent: Claude (Opus 4.8, this session; bead bd-1buv.41)
