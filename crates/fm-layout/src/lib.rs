@@ -6284,8 +6284,9 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
     // resolved order comes from the task list). An `FxHashMap` replaces the `BTreeMap<String, _>`'s
     // O(log N) String-comparison (memcmp) inserts/lookups with O(1) hashing — memcmp was ~25% of gantt
     // layout on the fixture's `after t{n-1}` dependency chain. Presized to task_count to avoid rehashing.
-    // Mirrors the parser's `parse_gantt` `task_ids_to_nodes` FxHashMap. Byte-identical output.
-    let mut task_id_to_idx: FxHashMap<String, usize> =
+    // Keys BORROW from `gantt_meta` (which outlives this call) rather than owning per-task `String`
+    // clones — the clone showed as ~3.5% of gantt layout. Byte-identical output.
+    let mut task_id_to_idx: FxHashMap<&str, usize> =
         FxHashMap::with_capacity_and_hasher(task_count, Default::default());
     let excluded_dates = expand_gantt_excluded_dates(gantt_meta);
     let skip_weekends = gantt_meta
@@ -6300,7 +6301,7 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
         milestones[task_idx] =
             matches!(task.task_type, GanttTaskType::Milestone) || durations[task_idx] == 0;
         if let Some(task_id) = task.task_id.as_ref() {
-            task_id_to_idx.entry(task_id.clone()).or_insert(task_idx);
+            task_id_to_idx.entry(task_id.as_str()).or_insert(task_idx);
         }
     }
 
@@ -6389,10 +6390,10 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
         }
 
         let section_idx = task.section_idx.min(section_count.saturating_sub(1));
-        let section_label = gantt_meta
+        let section_label: &str = gantt_meta
             .sections
             .get(section_idx)
-            .map_or_else(|| "Backlog".to_string(), |section| section.name.clone());
+            .map_or("Backlog", |section| section.name.as_str());
 
         while section_to_nodes.len() <= section_idx {
             let idx = section_to_nodes.len();
@@ -6417,10 +6418,18 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
         rank_by_node[node_index] =
             usize::try_from((start_days[task_idx] - min_start_day).max(0)).unwrap_or(0);
         order_by_node[node_index] = row_index + section_idx * 128;
-        section_to_nodes
-            .entry(section_label)
-            .or_default()
-            .push(node_index);
+        // The pre-populate loop above already inserted every present section, so `entry` would clone
+        // `section_label` only to drop it on the (common) hit. Borrow-lookup first; allocate a key
+        // just on the rare miss — the empty-sections `"Backlog"` case, exactly as the original did.
+        // Byte-identical map contents.
+        if let Some(nodes) = section_to_nodes.get_mut(section_label) {
+            nodes.push(node_index);
+        } else {
+            section_to_nodes
+                .entry(section_label.to_string())
+                .or_default()
+                .push(node_index);
+        }
         per_section_counts[section_idx] += 1;
 
         let next_is_new_section = gantt_meta

@@ -17767,3 +17767,31 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   hashing and looking up both CSV labels again.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.2.9`)
+
+### 🟢LANDED: elide per-task String-key clones in the gantt layout loop — gantt layout −7.7% instr / −11..13% wall (2026-07-16)
+
+- **Negative-ledger-first boundary:** gantt layout's prior wins (FxHashMap dep table, task-dep hoist,
+  O(N²) obstacle-index / band-membership fixes) all removed *lookup* cost; none touched the per-task
+  String-KEY clones that FEED those maps. Fresh angle on `layout_diagram_gantt_from_meta`, distinct
+  from the active parser lane (peer MaroonRidge) and my just-landed render-svg band-label vein.
+- **Profile / attribution:** symbolised `perf record` of `layout` phase / gantt/300 put
+  `<String as Clone>::clone` at 3.49% (+ its `mi_free` tail) — the two per-task clones in the task
+  loop: `task_id_to_idx.entry(task_id.clone())` (300/render) and `section_label = section.name.clone()`
+  (300/render). `task_id_to_idx` is lookup-only (built once, read via `.get`, never iterated); the
+  section map is pre-populated by the loop above, so its `entry(section_label)` clones only to DROP the
+  key on the common hit.
+- **One lever / exact isomorphism:** (1) `task_id_to_idx: FxHashMap<String,_>` → `FxHashMap<&str,_>`
+  with keys borrowed from `gantt_meta` (which outlives the call); (2) `section_label` → borrowed `&str`
+  + `get_mut(&str)`-first, allocating a key only on the rare `"Backlog"` miss (empty-sections case,
+  matching the original). Byte-identical map contents in every case (min/max over the same node set is
+  order/dup-independent; missing-section "Backlog" vs pre-populated "Section N" split preserved).
+- **A/B (same machine, same build flags, my file only):** baseline = pre-edit profharness binary;
+  candidate = same flags (`lto=false strip=false debug=1`) with only this edit. `perf stat -e
+  instructions` gantt/300/4000×layout: base 1,206,552 → cand 1,114,170 = 0.9234× (−7.66%). Interleaved
+  wall-min ×4: base ~83.1-83.8µs → cand ~73.2-73.7µs = 0.873-0.886× (−11.4..12.7%, larger than instr
+  because malloc/free latency isn't counted). NULL CONTROL flowchart layout 0.9999× (no gantt path) —
+  change isolated to the gantt specialized layout.
+- **Correctness:** `cargo test -p fm-layout` green; `cargo clippy -p fm-layout -D warnings` clean.
+- **Decision:** keep. gantt layout sheds ~583 transient String allocs/render with identical output.
+
+  Agent: Claude (Opus 4.8, this session; bead bd-1buv.36)
