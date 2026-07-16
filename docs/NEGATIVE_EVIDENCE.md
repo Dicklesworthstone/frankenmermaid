@@ -18024,3 +18024,65 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   same pattern (future follow-up), left on `get_pixel` here.
 
   Agent: Claude (Opus 4.8, this session; bead bd-1buv.42)
+
+### 🟢LANDED: clear preceding set bits before BitVector select — isolated primitive −26.6% (2026-07-16)
+
+- **Negative-ledger-first / fresh subsystem:** no prior row covers `succinct::BitVector`, rank/select,
+  or broadword selection. This is a public `fm-core` primitive with no current in-repo caller, so the
+  result is deliberately classified as an **isolated primitive**, not an end-to-end Mermaid speedup.
+  The 131,072-bit fixture sets every seventh bit and repeatedly selects every valid rank, exercising
+  target words across 256 rank blocks.
+- **Profile first:** before the production edit, strict-remote RCH job `j-29933730227290171` built an
+  LTO-disabled `--profile release` test binary on actual worker `ovh-b`. A foreground `perf record`
+  captured 316 cycle samples with zero loss over 4,793,600 baseline selects. `BitVector::select`
+  accounted for **91.12%** of sampled cycles; annotated assembly attributed about **32%** of the
+  function-local samples to the final target-word shift/test loop.
+- **One lever / exact isomorphism:** once `count_ones()` proves the target is in a word, clear the
+  `remaining - 1` least-significant set bits with `w &= w - 1`, then locate the surviving bit with
+  `trailing_zeros()`. The rank-block search, word scan, checked `k + 1`, tail-length guard, and public
+  API are unchanged. Exhaustive parity checked every valid rank plus the first out-of-range rank on
+  both a 4,123-bit proof fixture and the measured 131,072-bit fixture; `u32::MAX` retains `None`.
+- **Strict-remote foreground same-binary A/B:** after switching away from an evicting worker, RCH job
+  `j-29933730227290205` built one LTO-disabled release test binary on actual worker `vmi1227854`.
+  That binary alternated 9 rounds x 64 full-rank passes (1,198,400 calls per arm). Sorted baseline
+  samples were `[36067198, 37303161, 40098198, 40480011, 44643910, 44728598, 45110631,
+  47096986, 50530021]` ns; candidate samples were `[24649368, 25740513, 28344855, 31376128,
+  32779532, 33799990, 36584142, 36641659, 39846882]` ns. Medians were **44,643,910 ->
+  32,779,532 ns**, candidate/baseline **0.734244x** (**26.576% faster**, 1.3619x throughput), with
+  exact per-round checksums.
+- **Correctness / infrastructure discipline:** the focused release parity test passed on the exact
+  measured binary; targeted UBS reported clean formatting, Clippy, build, and test health. The first
+  candidate rebuild was cancelled when `ovh-b` immediately downloaded and rebuilt dependencies after
+  its just-completed warm-up, then rerouted to `vmi1227854`. That cancelled build is infrastructure
+  evidence only; no build time or timeout contributes to the A/B.
+- **Decision:** keep. Selecting the k-th set bit now scales with the number of preceding set bits in
+  the target word instead of its bit position, while preserving every return value exactly.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.43`)
+
+### 🟢LANDED: fuse Canvas pixel + generation buffers into one Vec<u32> — term render class −14% / mindmap −13% (2026-07-16)
+
+- **Negative-ledger-first:** third lever in the term-canvas vein (after draw_line bd-1buv.41 and braille
+  base-index bd-1buv.42). A re-profile of gantt term render put `pixel_set_at` at 15.3% — it read BOTH
+  `pixel_gen: Vec<u32>` (generation stamp) AND `pixels: Vec<bool>` (set flag) per sub-pixel, two separate
+  allocations / cache lines, even though `pixels[i]` was only meaningful when `pixel_gen[i] ==
+  generation`.
+- **One lever / exact isomorphism:** replace the two buffers with a single `cell_gen: Vec<u32>` where
+  `cell_gen[i] == generation` ⟺ set THIS generation. `set_pixel` writes `generation`, `unset_pixel`
+  writes 0, `get`/`pixel_set_at` is `== generation`, `draw_line`'s horizontal fill fills `generation`.
+  Byte-identical: `generation` is never 0 (starts at 1, `clear` wraps to 1) so 0 always reads unset; the
+  old `unset` also wrote `pixel_gen = generation` but that was UNOBSERVABLE (`get` returned false via the
+  `false` flag anyway), so `cell_gen = 0` reproduces the same `get` result; the fused buffer is fully
+  encapsulated (no external `.pixels`/`.pixel_gen` reader). One read/write per pixel op instead of two,
+  one cache line instead of two, and 4 B/pixel instead of 5.
+- **A/B (same machine, same build flags, my file only):** baseline = pre-edit binary (with draw_line +
+  braille levers). `perf stat -e instructions` /200/2000×termrender: class 0.8624× (−13.8%), mindmap
+  0.8673×, flowchart 0.8685×, journey 0.8701×, state 0.8765×, er 0.8990×, gantt 0.9094× (−9.1%).
+  Interleaved wall-min ×4: class ~0.863-0.896×, mindmap ~0.889-0.891×. **Output byte-length identical
+  for all shapes.**
+- **Correctness:** `cargo test -p fm-render-term` green (pixel set/get/clear + golden term snapshots);
+  `clippy -D warnings` clean.
+- **Decision:** keep. Every pixel op — the raster's hottest inner loop — touches one buffer instead of
+  two. Compounds with the two prior term levers (class term render is now a fraction of its original cost).
+
+  Agent: Claude (Opus 4.8, this session; bead bd-1buv.44)

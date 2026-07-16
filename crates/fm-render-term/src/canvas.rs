@@ -10,8 +10,13 @@ use fm_core::MermaidRenderMode;
 /// A pixel-level canvas that maps to terminal cells.
 #[derive(Debug, Clone)]
 pub struct Canvas {
-    /// Pixel buffer: true = set, false = unset.
-    pixels: Vec<bool>,
+    /// Fused pixel + generation buffer: `cell_gen[i] == generation` iff the pixel is set THIS
+    /// generation (0 = unset / never touched). This unifies the old `pixels: Vec<bool>` +
+    /// `pixel_gen: Vec<u32>` — a set/get touched BOTH (two separate allocations / cache lines) even
+    /// though `pixels[i]` was only meaningful when `pixel_gen[i] == generation`. Now one read/write per
+    /// pixel op. Byte-identical: set writes `generation`, unset writes 0, get is `== generation`
+    /// (`generation` is never 0 — starts at 1, `clear` wraps to 1 — so 0 always reads as unset).
+    cell_gen: Vec<u32>,
     /// Width in pixels.
     pixel_width: usize,
     /// Height in pixels.
@@ -24,8 +29,6 @@ pub struct Canvas {
     mode: MermaidRenderMode,
     /// Generation counter for O(1) clear.
     generation: u32,
-    /// Per-pixel generation for O(1) clear.
-    pixel_gen: Vec<u32>,
 }
 
 impl Canvas {
@@ -38,14 +41,13 @@ impl Canvas {
         let size = pixel_width.saturating_mul(pixel_height);
 
         Self {
-            pixels: vec![false; size],
+            cell_gen: vec![0; size],
             pixel_width,
             pixel_height,
             cell_width,
             cell_height,
             mode,
             generation: 1,
-            pixel_gen: vec![0; size],
         }
     }
 
@@ -55,7 +57,7 @@ impl Canvas {
         if self.generation == 0 {
             // Wrapped around, need to reset everything.
             self.generation = 1;
-            self.pixel_gen.fill(0);
+            self.cell_gen.fill(0);
         }
     }
 
@@ -74,16 +76,16 @@ impl Canvas {
     /// Set a pixel at (x, y).
     pub fn set_pixel(&mut self, x: usize, y: usize) {
         if let Some(index) = self.pixel_index(x, y) {
-            self.pixels[index] = true;
-            self.pixel_gen[index] = self.generation;
+            self.cell_gen[index] = self.generation;
         }
     }
 
     /// Unset a pixel at (x, y).
     pub fn unset_pixel(&mut self, x: usize, y: usize) {
         if let Some(index) = self.pixel_index(x, y) {
-            self.pixels[index] = false;
-            self.pixel_gen[index] = self.generation;
+            // 0 reads as unset for any `generation >= 1`; matches the old `pixels[i]=false` result
+            // (the old `pixel_gen[i]=generation` write was unobservable — `get` returned false anyway).
+            self.cell_gen[index] = 0;
         }
     }
 
@@ -96,14 +98,14 @@ impl Canvas {
     }
 
     /// Whether the pixel at a KNOWN-valid buffer `index` is set this generation. The caller must have
-    /// established `index < pixels.len()` (e.g. from a cell wholly inside the pixel grid); this is the
+    /// established `index < cell_gen.len()` (e.g. from a cell wholly inside the pixel grid); this is the
     /// body of [`get_pixel`] without the per-call `pixel_index` bounds-check + multiply + `Option`, so a
     /// cell renderer that reads several fixed-offset sub-pixels off one precomputed base index skips that
     /// recompute per sub-pixel. Byte-identical to `get_pixel(x, y)` for the in-bounds `(x, y)` that maps
     /// to `index`.
     #[inline]
     fn pixel_set_at(&self, index: usize) -> bool {
-        self.pixel_gen[index] == self.generation && self.pixels[index]
+        self.cell_gen[index] == self.generation
     }
 
     /// Draw a line from (x0, y0) to (x1, y1) using Bresenham's algorithm.
@@ -124,8 +126,7 @@ impl Canvas {
                     let base = (y0 as usize) * self.pixel_width;
                     let lo = base + x_lo as usize;
                     let hi = base + x_hi as usize;
-                    self.pixels[lo..=hi].fill(true);
-                    self.pixel_gen[lo..=hi].fill(self.generation);
+                    self.cell_gen[lo..=hi].fill(self.generation);
                 }
             }
             return;
@@ -138,8 +139,7 @@ impl Canvas {
                     let x = x0 as usize;
                     let mut index = (y_lo as usize) * self.pixel_width + x;
                     for _ in y_lo..=y_hi {
-                        self.pixels[index] = true;
-                        self.pixel_gen[index] = self.generation;
+                        self.cell_gen[index] = self.generation;
                         index += self.pixel_width;
                     }
                 }
