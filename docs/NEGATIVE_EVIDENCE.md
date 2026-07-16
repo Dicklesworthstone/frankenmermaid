@@ -18143,3 +18143,44 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   `render_braille_cell`'s code-point assembly, not the dispatch.
 
   Agent: Claude (Opus 4.8, this session)
+
+### 🟢LANDED: traverse ART children with a stack enum — isolated prefix search −28.1% (2026-07-16)
+
+- **Negative-ledger-first / fresh subsystem:** no prior row covers `AdaptiveRadixTree`,
+  `ArtChildren`, `prefix_search`, or boxed ART traversal. The tree is a public `fm-core` primitive
+  with no current in-repo caller, so this is deliberately classified as an **isolated primitive**,
+  not an end-to-end Mermaid speedup. The measured tree contains 16,384 realistic
+  `subgraph_NNN/node_NNNNN` keys and exercises both small-vector and `BTreeMap` child stores.
+- **Profile first:** before the production edit, fail-closed RCH job `j-29933730227290306` built an
+  unstripped, LTO-disabled `--profile release` test binary on actual worker `vmi1227854`. A
+  foreground `perf record` of 128 complete prefix traversals captured 99 cycle samples with zero
+  loss; the untouched path took **157,991,149 ns**. `ArtChildren::iter` plus its erased iterator
+  adapters accounted for about **9.4%** of samples directly, while allocator/deallocator symbols
+  accounted for another **14.3%** across iterator boxes and unavoidable result-key clones.
+- **One lever / exact isomorphism:** replace only `Box<dyn Iterator>` child traversal with a
+  two-variant `ArtChildrenIter` stack enum over `slice::Iter` and `btree_map::Iter`. Small children
+  retain insertion order, map children retain key order, recursive path push/pop points are
+  unchanged, and no public API changes. A permanent oracle compares the old boxed traversal with
+  the candidate for empty, broad, narrow, and missing prefixes, then compares the complete sorted
+  output; both child-store variants are covered.
+- **Foreground same-binary A/B:** fail-closed RCH job `j-29933730227290342` built the exact
+  LTO-disabled release binary on `vmi1227854`; the already-built binary was then run directly on
+  that same worker so RCH cache eviction could not trigger another compile. Nine alternating rounds
+  x 32 complete 16,384-result traversals produced boxed samples `[29919463, 30724481, 30767586,
+  30956458, 30967815, 31724880, 31918209, 32530357, 44741975]` ns and stack-enum samples
+  `[21766907, 21968831, 21971486, 22188409, 22255068, 23430090, 23440506, 24960093,
+  25552461]` ns. Exact ordered-result and per-round digest parity held. Medians improved
+  **30,967,815 -> 22,255,068 ns**, candidate/baseline **0.718652x** (**28.135% faster**, 1.3915x
+  throughput).
+- **Correctness / gates:** the measured release binary passed all **369** non-ignored `fm-core`
+  tests (16 manual perf probes ignored). Production-library Clippy `-D warnings` passed remotely in
+  job `j-29933730227290359`; targeted UBS exited 0 with no critical finding. Workspace rustfmt was
+  blocked only by pre-existing peer formatting in `fm-render-svg/src/lib.rs`, while `art.rs` itself
+  is rustfmt-clean. The all-tests Clippy gate reached the pre-existing unrelated
+  `clippy::obfuscated_if_else` finding in `fm-core/src/lib.rs:8943` (job
+  `j-29933730227290352`), so only owned files are staged.
+- **Decision:** keep. Every visited ART node now advances a concrete stack iterator instead of
+  allocating and freeing a trait-object box, with byte-key order and returned values preserved
+  exactly.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.45`)
