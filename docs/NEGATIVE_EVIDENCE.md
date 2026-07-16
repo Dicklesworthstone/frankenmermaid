@@ -18675,3 +18675,48 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   write traffic from the profiled constructor while preserving the exact succinct representation.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.59`, Agent Mail `PeachCreek`)
+
+### 🔴REJECTED: binary-search structured class definitions — realistic styled-300 path 13.62% slower (bd-1buv.60, 2026-07-16)
+
+- **Negative-ledger-first / production seam:** no prior row covers
+  `MermaidDiagramIr::populate_structured_styles`, its `style_defs` lookup, or the parser-finalization
+  call into this method. Rows for renderer-side `collect_node_style_directives` style-map construction
+  are a separate full-render family and were not reopened. Because `fm-parser::ir_builder` calls this
+  method after parsing, the claim is scoped to the structured-style finalization primitive rather than
+  an isolated no-caller helper. Opportunity score: impact 4 × confidence 5 / effort 1 = **20**.
+- **Profile first, untouched source:** fail-closed RCH job `j-29933730227290965` completed the cold,
+  uncapped warm-up of an unstripped, debug-info-enabled, LTO-disabled `--profile release` fm-core test
+  binary on actual worker `vmi1156319` (AMD EPYC, 8 cores, no SMT; rustc 1.98.0-nightly beae78130).
+  Only the foreground profile process was capped. Across 4,096 calls on a realistic 300-node fixture
+  with eight class definitions, the untouched method took **785,775,098 ns** and `perf record`
+  captured 726 cycle samples with zero loss. `populate_structured_styles` ranked sixth by self time at
+  **5.20%**; line annotation attributed **27.47%** of its local sampled cycles to the length load and
+  loop branch at the linear `style_defs` walk. This cleared the profile gate before editing.
+- **One lever / exact isomorphism:** replace only
+  `style_defs.iter().find(|def| def.name == class_name)` with `binary_search_by` over the definitions
+  that the same method has just collected from a `BTreeMap`. Definition construction, sorted unique
+  names, class cascade order, unknown-class behavior, property cloning, direct node overrides, link
+  styles, and idempotence remained unchanged. A same-binary oracle compared the full IR against an
+  exact copy of the old method across unsorted and duplicate definitions, multiple/unknown/Unicode
+  classes, direct node overrides, default/specific link styles, and a second idempotence pass.
+- **Foreground same-binary A/B:** after cache-evicting routes on `vmi1156319`, `vmi1227854`, and
+  `ovh-b` were cancelled and excluded, uncapped RCH job `j-29933730227291003` built the exact
+  LTO-disabled release binary on actual worker `vmi1167313` (AMD EPYC, 6 cores, no SMT; rustc
+  1.98.0-nightly beae78130; binary SHA-256
+  `68baf5f239180a5f25e8e2b540cf8a93287994a242d1c6728965fa468382dad8`). That binary passed the
+  oracle before the 20-second cap wrapped only the 1.81-second A/B process. Nine alternating rounds ×
+  512 calls on the same 300-node/eight-definition fixture produced linear samples `[77370682,
+  72999074, 84148749, 182953807, 151302378, 77097905, 74727053, 74821349, 92297963]` ns and
+  binary-search samples `[77125787, 77016343, 75771623, 87909102, 121512705, 133635389, 94992677,
+  78114453, 134395190]` ns. Medians regressed **77,370,682 → 87,909,102 ns**;
+  candidate/baseline **1.136207×** (**13.621% slower**), with exact full-IR and checksum parity after
+  every pair.
+- **Routing evidence:** the cancelled rebuilds and one corrected compile error are infrastructure or
+  development evidence only; none is used as a performance reject. The verdict comes solely from the
+  completed same-binary A/B above. The temporary profile/A/B/oracle harness and the production edit
+  were manually removed after capture, leaving production source byte-identical to `HEAD`.
+- **Decision:** reject. At the observed Mermaid-like cardinality of eight class definitions, binary
+  search's branch/control overhead outweighs the few comparisons it avoids. Do not retry this lookup
+  form without a separately profiled workload whose class-definition cardinality is materially higher.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.60`, Agent Mail `PeachCreek`)
