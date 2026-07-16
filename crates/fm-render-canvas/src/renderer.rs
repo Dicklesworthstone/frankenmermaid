@@ -1056,39 +1056,67 @@ impl Canvas2dRenderer {
                     edge_label_font.get_or_insert_with(|| secondary_label_font_css(&self.config));
                 ctx.set_font(edge_label_font.as_str());
 
-                // Background for label
-                let lines: Vec<&str> = label.text.lines().collect();
-                let mut max_text_width = 0.0_f64;
-                for line in &lines {
-                    let text_metrics = ctx.measure_text(line);
-                    max_text_width = max_text_width.max(text_metrics.width);
-                }
-
-                let label_width = max_text_width + 8.0;
                 let line_height = self.config.font_size * 1.2;
-                let total_height = lines.len() as f64 * line_height;
-                let label_height = total_height + 4.0;
 
-                ctx.set_fill_style(&self.config.node_fill);
-                ctx.fill_rect(
-                    lx - label_width / 2.0,
-                    ly - label_height / 2.0,
-                    label_width,
-                    label_height,
-                );
-                self.draw_calls += 1;
+                // The common single-line edge label (`:has`, `-->|x|`, …) draws exactly `label.text` at
+                // `ly`, so measure it directly and skip the `Vec<&str>` collect. Only a genuinely
+                // multi-line label (`\n`) needs the split (it's re-read for max-width + count + per-line
+                // draw). Byte-identical: for a `\n`-free label the sole `lines()` item IS `label.text`,
+                // `total_height == line_height`, and `start_y == ly`.
+                if !label.text.contains('\n') {
+                    let label_width = ctx.measure_text(&label.text).width + 8.0;
+                    let label_height = line_height + 4.0;
 
-                // Label text
-                ctx.set_fill_style(&self.config.label_color);
-                ctx.set_font(edge_label_font.as_str());
-                ctx.set_text_align(TextAlign::Center);
-                ctx.set_text_baseline(TextBaseline::Middle);
+                    ctx.set_fill_style(&self.config.node_fill);
+                    ctx.fill_rect(
+                        lx - label_width / 2.0,
+                        ly - label_height / 2.0,
+                        label_width,
+                        label_height,
+                    );
+                    self.draw_calls += 1;
 
-                let start_y = ly - (total_height / 2.0) + (line_height / 2.0);
-                for (i, line) in lines.iter().enumerate() {
-                    ctx.fill_text(line, lx, start_y + (i as f64) * line_height);
+                    ctx.set_fill_style(&self.config.label_color);
+                    ctx.set_font(edge_label_font.as_str());
+                    ctx.set_text_align(TextAlign::Center);
+                    ctx.set_text_baseline(TextBaseline::Middle);
+                    ctx.fill_text(&label.text, lx, ly);
                     self.draw_calls += 1;
                     *labels_drawn += 1;
+                } else {
+                    // Background for label
+                    let lines: Vec<&str> = label.text.lines().collect();
+                    let mut max_text_width = 0.0_f64;
+                    for line in &lines {
+                        let text_metrics = ctx.measure_text(line);
+                        max_text_width = max_text_width.max(text_metrics.width);
+                    }
+
+                    let label_width = max_text_width + 8.0;
+                    let total_height = lines.len() as f64 * line_height;
+                    let label_height = total_height + 4.0;
+
+                    ctx.set_fill_style(&self.config.node_fill);
+                    ctx.fill_rect(
+                        lx - label_width / 2.0,
+                        ly - label_height / 2.0,
+                        label_width,
+                        label_height,
+                    );
+                    self.draw_calls += 1;
+
+                    // Label text
+                    ctx.set_fill_style(&self.config.label_color);
+                    ctx.set_font(edge_label_font.as_str());
+                    ctx.set_text_align(TextAlign::Center);
+                    ctx.set_text_baseline(TextBaseline::Middle);
+
+                    let start_y = ly - (total_height / 2.0) + (line_height / 2.0);
+                    for (i, line) in lines.iter().enumerate() {
+                        ctx.fill_text(line, lx, start_y + (i as f64) * line_height);
+                        self.draw_calls += 1;
+                        *labels_drawn += 1;
+                    }
                 }
             }
 

@@ -18313,3 +18313,29 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   (measure/len/draw) — not a clean elision, left for a follow-up.
 
   Agent: Claude (Opus 4.8, this session; bead bd-1buv.50)
+
+### 🟢LANDED: single-line fast path for canvas edge labels — seq canvas −25%instr/−35%wall, er −20% (2026-07-16)
+
+- **Negative-ledger-first:** third lever in the `fm-render-canvas` vein. After the node-label Vec elision
+  (bd-1buv.50), a re-profile of er canvas render still showed `text.lines().collect::<Vec<&str>>()` at
+  ~14% — now from the EDGE-label site (`draw_edges`), where the sibling node-label fix didn't reach. The
+  `Vec` there is read 3× (max-width measure loop, `len()` for total_height, per-line draw), so a plain
+  `.count()` swap doesn't work — but a single-line label needs none of it.
+- **One lever / exact isomorphism:** gate on `!label.text.contains('\n')`: measure `label.text` directly
+  (`+8` width), `label_height = line_height + 4`, draw `label.text` at `ly` — no `Vec`. A `\n`-containing
+  label keeps the exact multi-line `Vec` path. Byte-identical: for a `\n`-free label the sole `lines()`
+  item IS `label.text`, `total_height == 1*line_height`, and `start_y == ly - lh/2 + lh/2 == ly`; a
+  trailing-newline label has `\n` so it stays on the Vec path (as before). Draw-op count unchanged.
+- **A/B (same machine, same build flags, my file only; baseline = pre-edit binary):** `perf stat -e
+  instructions` /300/3000×canvasrender: **seq 0.7521× (−24.8%), er 0.8031× (−19.7%)** (single-line edge
+  labels); class 0.9996× neutral. Unlabeled-edge shapes (flowchart/state/gantt/mindmap) show +0.4-0.5%
+  INSTR — but they never execute the gated label block, so it's code-layout noise: interleaved wall-min
+  ×4 shows **seq ~0.652-0.691× (−31..35%)** and **flowchart ~0.963-0.967× (−3.4%, i.e. FASTER not
+  slower)** — the instr blip does NOT translate to a wall regression. **Draw-op count identical for every
+  shape.**
+- **Correctness:** `cargo test -p fm-render-canvas` green (draw-op golden sequences); `clippy -D warnings`
+  clean.
+- **Decision:** keep. Edge-label-heavy diagrams (sequence messages, ER cardinality/relations) shed the
+  per-label `Vec<&str>` alloc; no wall regression on unlabeled-edge diagrams.
+
+  Agent: Claude (Opus 4.8, this session; bead bd-1buv.52)
