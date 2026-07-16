@@ -18245,3 +18245,71 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   per-item font `format!`. Completes the font-hoist campaign the prior work started.
 
   Agent: Claude (Opus 4.8, this session; bead bd-1buv.48)
+
+### 🟢LANDED: merge-walk leapfrog anti-join exclusions — isolated primitive −82.9% (2026-07-16)
+
+- **Negative-ledger-first / fresh subsystem:** no prior row covers `leapfrog_anti_join`,
+  `SortedRelation`, or anti-join exclusion membership. This public `fm-core` primitive has no
+  current in-repo caller, so the result is deliberately classified as an **isolated primitive**,
+  not an end-to-end Mermaid speedup. The measured fixture anti-joins 262,144 sorted base keys
+  against eight overlapping sorted exclusions.
+- **Profile first:** fail-closed RCH job `j-29933730227290460` built the untouched, unstripped,
+  LTO-disabled `--profile release` test binary on actual worker `vmi1156319`. A foreground
+  `perf record` captured 396 cycle samples with zero loss while 64 complete anti-joins took
+  **879,632,452 ns**. `leapfrog_anti_join` accounted for **88.58%** of sampled cycles; its inlined
+  `SortedRelation::contains` / slice binary-search membership chain dominated that frame, while
+  `leapfrog_union` accounted for only **9.29%**.
+- **One lever / exact isomorphism:** retain the exclusion union and output collection, but replace
+  one binary search per base key with a monotone cursor over the already-sorted, deduplicated union.
+  Both sequences are strictly increasing, so advancing past exclusion keys below the current base
+  key and rejecting only equality preserves every output key and its order exactly, reducing the
+  membership tail from O(B log E) to O(B + E). A permanent oracle compares the old binary-search
+  implementation with the merge walk across empty base/exclusions, empty relations, disjoint ranges,
+  full coverage, overlapping exclusions, and the measured fixture.
+- **Foreground same-binary A/B:** after `vmi1156319` evicted the just-warmed release cache, RCH job
+  `j-29933730227290472` was cancelled and the cold fallback received one uncapped, untimed warm-up:
+  job `j-29933730227290478` built the exact LTO-disabled release binary on `ovh-b`. That binary then
+  alternated 11 rounds x 8 complete calls per arm. Baseline samples were `[70349403, 70428737,
+  70663646, 68957965, 72759484, 70296519, 69389841, 70021391, 70942119, 70773009, 69269153]` ns;
+  candidate samples were `[12063389, 12010287, 11628993, 11460428, 12166762, 12057912,
+  11827438, 11778743, 12320302, 12313090, 11669016]` ns. Medians improved **70,349,403 ->
+  12,010,287 ns**, candidate/baseline **0.170723x** (**82.928% faster**, 5.8574x throughput), with
+  exact vector and aggregate-digest parity.
+- **Correctness / gates:** the measured release binary passed all 20 non-ignored leapfrog tests
+  (two reproducible release perf probes ignored), including the exhaustive old-vs-new fixture oracle.
+  Targeted UBS exited 0 with no critical finding, `leapfrog.rs` is rustfmt- and diff-check-clean, and
+  the remote all-targets Clippy retry passed with only the unrelated pre-existing
+  `clippy::obfuscated_if_else` lint in `fm-core/src/lib.rs:8943` explicitly allowed. Strict Clippy
+  without that allowance stopped only at that peer-owned test lint; workspace rustfmt likewise
+  remains blocked only by peer-owned files. Repeated RCH dependency-cache evictions were cancelled
+  or rerouted and are infrastructure evidence only; no build duration contributes to the A/B.
+- **Decision:** keep. Anti-join exclusion membership now walks the sorted union once instead of
+  restarting a binary search for every base key, while preserving exact public results.
+
+  Agent: Codex (GPT-5, this session; bead `bd-1buv.49`, Agent Mail `PeachCreek`)
+
+### 🟢LANDED: avoid the per-node-label Vec<&str> line collect on the single-line path — canvas render flowchart/state −30% instr / −40% wall (2026-07-16)
+
+- **Negative-ledger-first:** second lever in the freshly-opened `fm-render-canvas` vein (after the font
+  hoist bd-1buv.48). A clean canvas profile (no-op context) put `text.lines().collect::<Vec<&str>>()` +
+  its `SpecFromIterNested`/alloc at ~21% of the (confounded) er render. Cause: `draw_nodes` built
+  `let lines: Vec<&str> = label_text.lines().collect()` for EVERY node label, then — on the
+  overwhelmingly common single-line branch (`lines.len() <= 1`) — drew `label_text` directly and never
+  touched the `Vec`. So the `Vec` alloc + `from_iter` was pure waste on every single-line label.
+- **One lever / exact isomorphism:** pick the branch with `label_text.lines().count() <= 1` (no alloc)
+  and materialise the `Vec<&str>` only inside the rare multi-line branch (which genuinely re-reads it for
+  count + per-line draw). Byte-identical: `lines().count()` equals the old `collect().len()`, so the same
+  branch is taken and the same text is drawn; draw-op count unchanged for every shape.
+- **A/B (same machine, same build flags, my file only; baseline = pre-edit no-op-context binary):**
+  `perf stat -e instructions` /300/3000×canvasrender: **state 0.6848× (−31.5%), flowchart 0.6923×
+  (−30.8%), gantt 0.7037×, mindmap 0.7095×** (single-line node labels); er 0.8605× (−14%), pie 0.8917×;
+  class 0.9979× / seq 0.9872× (multi-line compartment/message labels — the count scan is negligible).
+  Interleaved wall-min ×4: **flowchart ~0.606-0.609× (−39%), state ~0.592-0.599× (−40%)** — LARGER than
+  instr (the `Vec` alloc/dealloc latency isn't counted). **Draw-op count identical for every shape.**
+- **Correctness:** `cargo test -p fm-render-canvas` green (draw-op golden sequences); `clippy -D warnings`
+  clean.
+- **Decision:** keep. Every single-line node label (the common case for flowchart/state/gantt/mindmap/er)
+  sheds a per-label `Vec<&str>` heap alloc + collect. Sibling edge-label site (~1060) uses its `Vec` 3×
+  (measure/len/draw) — not a clean elision, left for a follow-up.
+
+  Agent: Claude (Opus 4.8, this session; bead bd-1buv.50)

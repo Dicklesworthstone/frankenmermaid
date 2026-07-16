@@ -1236,12 +1236,16 @@ impl Canvas2dRenderer {
                     ctx.set_text_align(TextAlign::Center);
                     ctx.set_text_baseline(TextBaseline::Middle);
 
-                    let lines: Vec<&str> = label_text.lines().collect();
-                    if lines.len() <= 1 {
+                    // The overwhelmingly common single-line label draws `label_text` directly and never
+                    // touches the split lines, so only COUNT them (no `Vec<&str>` alloc) to pick the
+                    // branch; materialise the `Vec` only on the rare multi-line path. Byte-identical:
+                    // `lines().count()` equals the old `collect().len()`.
+                    if label_text.lines().count() <= 1 {
                         ctx.fill_text(label_text, cx, cy);
                         self.draw_calls += 1;
                         *labels_drawn += 1;
                     } else {
+                        let lines: Vec<&str> = label_text.lines().collect();
                         let line_height = self.config.font_size * 1.2;
                         let total_height = lines.len() as f64 * line_height;
                         let start_y = cy - (total_height / 2.0) + (line_height / 2.0);
