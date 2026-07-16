@@ -18387,3 +18387,27 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   path exactly.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.51`, Agent Mail `PeachCreek`)
+
+### 🔴REJECTED (as-is; needs function extraction): reuse a scratch buffer for class-member text — class −28% but code-layout-regresses ALL non-class canvas +5-7% wall (2026-07-16)
+
+- **Hypothesis:** class canvas render (highest, 61µs) was ~15% `format!` machinery (format_inner/
+  fmt::write/write_char/pad) + ~15% alloc churn, from `let text = format!("{vis}{}", name)` PER class
+  attribute (renderer.rs ~1218) and PER method (~1241). Replacing with one reused `member_text` buffer
+  (`clear()`+`push(vis)`+`push_str(name)`, byte-identical since `vis` is a single ASCII char) should drop
+  both the Formatter machinery and the per-member alloc.
+- **A/B (same machine, same flags; baseline = 3-canvas-win no-op-context binary):** the TARGET won big —
+  **class 0.7149× instr (−28.5%), wall −26..29%** (61µs→44µs), draw-op count identical. BUT every
+  NON-class shape (er/state/flowchart/gantt/seq/mindmap) — which never executes the class-compartment
+  block — showed +0.3-0.8% INSTR and, decisively, a **consistent +5-7% WALL regression** (er +6.6%,
+  mindmap +6.5%, state +5-6%, seq +5%, flowchart +7.8%). Not noise (tight ×3-4).
+- **Why:** the buffer + restructured loop GREW `draw_nodes`, shifting the common `else` (standard single-
+  label node) branch's code layout / alignment enough to slow the node loop every non-class diagram runs.
+  Classic instr-vs-wall divergence, but here the WALL regression (+5-7%) dwarfs the instr blip (+0.5%) and
+  is BROAD — since flowchart/er/state vastly outnumber class in real use, net-negative.
+- **Decision:** REJECT as-is, reverted. The −28% class win is REAL and worth capturing, but only behind a
+  **function extraction**: pull the whole class-compartment block into `fn draw_class_compartments(...)`
+  (as the SVG renderer structures it) so `draw_nodes` shrinks back to its original size and the common
+  node path's layout is stable. That's a larger refactor (≈10 params incl. the `class_compartment_fonts`
+  Option cache + `cursor_y`), left for a dedicated follow-up. Do NOT reland the in-place buffer.
+
+  Agent: Claude (Opus 4.8, this session)
