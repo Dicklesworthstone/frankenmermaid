@@ -5716,8 +5716,13 @@ fn write_er_entity_into(
 /// `render_class_compartments`' fast path runs). Used only via `render_node_into`'s class gate, which
 /// guarantees none of `render_node`'s conditional classes/children/post-processing apply. Skips the
 /// group + rect `Element` builds, their `Attributes` Vecs, and the compartment fragment's second copy.
+/// `A11Y` selects the accessibility variant at compile time, mirroring `write_common_node_fragment_into`.
+/// `true` (`A11yConfig::full()`, default) emits `role="graphics-symbol" aria-label=".." tabindex="0"` and the
+/// trailing `<title>`; `false` (`A11yConfig::none()`, lean) skips exactly those two spots — the `<g id/class/
+/// data-id>` wrapper, `<rect>`, and the compartment stack are all a11y-independent, so the lean fragment is
+/// the slow `Element` path's lean output by construction.
 #[allow(clippy::too_many_arguments)]
-fn write_class_node_fragment_into(
+fn write_class_node_fragment_into<const A11Y: bool>(
     out: &mut String,
     node: &fm_core::IrNode,
     meta: &fm_core::IrClassNodeMeta,
@@ -5748,9 +5753,13 @@ fn write_class_node_fragment_into(
     out.push_str(user_classes);
     out.push_str("\" data-id=\"");
     let _ = write_escaped_attr(out, node_id);
-    out.push_str("\" role=\"graphics-symbol\" aria-label=\"");
-    let _ = write_escaped_attr(out, raw_label);
-    out.push_str("\" tabindex=\"0\">");
+    if A11Y {
+        out.push_str("\" role=\"graphics-symbol\" aria-label=\"");
+        let _ = write_escaped_attr(out, raw_label);
+        out.push_str("\" tabindex=\"0\">");
+    } else {
+        out.push_str("\">");
+    }
     // <rect x y width height rx fill="url(#fm-node-gradient)"/> — same attr order as the common fragment.
     out.push_str("<rect x=\"");
     let _ = crate::attributes::write_number_into(out, x);
@@ -5764,10 +5773,14 @@ fn write_class_node_fragment_into(
     let _ = crate::attributes::write_number_into(out, rx);
     out.push_str("\" fill=\"url(#fm-node-gradient)\"/>");
     write_class_compartments_into(out, node, meta, ir, x, y, w, h, font_size, config, colors);
-    // <title>Node: {raw_label}, rectangle</title></g> — describe_node's Rect form, written piecewise.
-    out.push_str("<title>Node: ");
-    let _ = write_escaped_text(out, raw_label);
-    out.push_str(", rectangle</title></g>");
+    if A11Y {
+        // <title>Node: {raw_label}, rectangle</title></g> — describe_node's Rect form, written piecewise.
+        out.push_str("<title>Node: ");
+        let _ = write_escaped_text(out, raw_label);
+        out.push_str(", rectangle</title></g>");
+    } else {
+        out.push_str("</g>");
+    }
 }
 
 /// Stream a complete C4 node (`<g>` + solid-fill rounded `<rect>` + stereotype/[person icon]/name/description +
@@ -6473,7 +6486,11 @@ fn write_common_node_fragment_into<const A11Y: bool>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn write_requirement_node_fragment_into(
+/// `A11Y` selects the accessibility variant at compile time (see `write_class_node_fragment_into`): `true`
+/// emits `role`/`aria-label`/`tabindex` + the trailing `<title>`; `false` (lean) skips exactly those two
+/// spots. The `<g id/class/data-id>` wrapper, `<rect>`, and the subtitle rows are a11y-independent, so the
+/// lean fragment matches the slow `Element` path's lean output by construction.
+fn write_requirement_node_fragment_into<const A11Y: bool>(
     out: &mut String,
     meta: &fm_core::IrRequirementNodeMeta,
     node_id: &str,
@@ -6515,9 +6532,13 @@ fn write_requirement_node_fragment_into(
     }
     out.push_str("\" data-id=\"");
     let _ = write_escaped_attr(out, node_id);
-    out.push_str("\" role=\"graphics-symbol\" aria-label=\"");
-    let _ = write_escaped_attr(out, raw_label);
-    out.push_str("\" tabindex=\"0\">");
+    if A11Y {
+        out.push_str("\" role=\"graphics-symbol\" aria-label=\"");
+        let _ = write_escaped_attr(out, raw_label);
+        out.push_str("\" tabindex=\"0\">");
+    } else {
+        out.push_str("\">");
+    }
 
     out.push_str("<rect x=\"");
     let _ = crate::attributes::write_number_into(out, x);
@@ -6629,9 +6650,13 @@ fn write_requirement_node_fragment_into(
         (None, None) => {}
     }
 
-    out.push_str("<title>Node: ");
-    let _ = write_escaped_text(out, raw_label);
-    out.push_str(", rectangle</title></g>");
+    if A11Y {
+        out.push_str("<title>Node: ");
+        let _ = write_escaped_text(out, raw_label);
+        out.push_str(", rectangle</title></g>");
+    } else {
+        out.push_str("</g>");
+    }
 }
 
 fn requirement_risk_fill(meta: &fm_core::IrRequirementNodeMeta) -> Option<&'static str> {
@@ -6719,6 +6744,9 @@ fn render_node_into(
         .filter(|icon| !icon.is_empty())
         .filter(|_| ir_node.is_none_or(|node| node.class_meta.is_none() && node.c4_meta.is_none()));
 
+    // Two a11y-uniform gates (see the class path below for the rationale): the full-a11y gate is unchanged
+    // (direct `::<true>`) so the default path takes no regression; the lean gate streams a11y-off
+    // requirement nodes that used to fall to the slow `Element` path. Mixed a11y → slow path, as before.
     if let Some(node) = ir_node
         && matches!(shape, NodeShape::Rect)
         && let Some(meta) = node.requirement_meta.as_deref()
@@ -6745,22 +6773,41 @@ fn render_node_into(
         && node.href().is_none()
         && node.callback().is_none()
     {
-        write_requirement_node_fragment_into(
-            out,
-            meta,
-            node_id,
-            node_box.node_index,
-            raw_label_text,
-            &label_text,
-            x,
-            y,
-            w,
-            h,
-            config.rounded_corners * 0.55,
-            cx,
-            node_font_size,
-            config,
-            colors,
+        write_requirement_node_fragment_into::<true>(
+            out, meta, node_id, node_box.node_index, raw_label_text, &label_text, x, y, w, h,
+            config.rounded_corners * 0.55, cx, node_font_size, config, colors,
+        );
+        return;
+    }
+    if let Some(node) = ir_node
+        && matches!(shape, NodeShape::Rect)
+        && let Some(meta) = node.requirement_meta.as_deref()
+        && detail.show_node_labels
+        && config.embed_theme_css
+        && config.node_gradients
+        && !emit_classdef_classes
+        && !config.animations_enabled
+        && !config.include_source_spans
+        && !config.a11y.aria_labels
+        && !config.a11y.keyboard_nav
+        && !config.a11y.text_alternatives
+        && shape_style.is_none()
+        && text_style.is_none()
+        && node_icon.is_none()
+        && !placeholder_space_node
+        && !label_has_line_break(&label_text)
+        && lookup_centrality_tier(centrality_map, node_box.node_index).is_none()
+        && label_id.is_none_or(|id| ir.label_markup.get(&id).is_none_or(|s| s.is_empty()))
+        && node.class_meta.is_none()
+        && node.c4_meta.is_none()
+        && node.classes.is_empty()
+        && node.menu_links.is_empty()
+        && node.href().is_none()
+        && node.callback().is_none()
+    {
+        write_requirement_node_fragment_into::<false>(
+            out, meta, node_id, node_box.node_index, raw_label_text, &label_text, x, y, w, h,
+            config.rounded_corners * 0.55, cx, node_font_size, config, colors,
         );
         return;
     }
@@ -6770,6 +6817,12 @@ fn render_node_into(
     // node fast path, plus the class-node specifics). `render_node`'s slow path would build a group
     // `Element` + rect `Element` + a *separate* compartment fragment `String` wrapped in a child; stream
     // the whole `<g>…</g>` in place instead. Byte-identical (pinned by `svg_golden_snapshots_are_stable`).
+    // Two a11y-uniform gates instead of one relaxed `uniform_a11y()` gate + runtime dispatch. Keeping the
+    // default (full-a11y) gate exactly as it was — direct `::<true>`, no `uniform_a11y` in the per-node hot
+    // path — avoids a measured +0.37% default-`class` regression the single relaxed gate caused. The second
+    // gate is the new lean behaviour: it streams a11y-off class nodes (`::<false>`) that used to fall to the
+    // common gate (the +0.31% class_50 regression from bd-b2b6). `A11yConfig::minimal()` matches neither
+    // (`aria_labels` on but `keyboard_nav`/`text_alternatives` off) → slow `Element` path, exactly as before.
     if let Some(node) = ir_node
         && matches!(shape, NodeShape::Rect)
         && let Some(meta) = node.class_meta.as_deref()
@@ -6793,23 +6846,38 @@ fn render_node_into(
         && node.callback().is_none()
         && let Some(user_classes) = simple_class_node_user_suffix(node)
     {
-        write_class_node_fragment_into(
-            out,
-            node,
-            meta,
-            node_id,
-            node_box.node_index,
-            raw_label_text,
-            ir,
-            x,
-            y,
-            w,
-            h,
-            config.rounded_corners * 0.55,
-            node_font_size,
-            config,
-            colors,
-            &user_classes,
+        write_class_node_fragment_into::<true>(
+            out, node, meta, node_id, node_box.node_index, raw_label_text, ir, x, y, w, h,
+            config.rounded_corners * 0.55, node_font_size, config, colors, &user_classes,
+        );
+        return;
+    }
+    if let Some(node) = ir_node
+        && matches!(shape, NodeShape::Rect)
+        && let Some(meta) = node.class_meta.as_deref()
+        && (!meta.attributes.is_empty() || !meta.methods.is_empty())
+        && config.embed_theme_css
+        && config.node_gradients
+        && !emit_classdef_classes
+        && !config.animations_enabled
+        && !config.include_source_spans
+        && !config.a11y.aria_labels
+        && !config.a11y.keyboard_nav
+        && !config.a11y.text_alternatives
+        && shape_style.is_none()
+        && text_style.is_none()
+        && node_icon.is_none()
+        && !placeholder_space_node
+        && lookup_centrality_tier(centrality_map, node_box.node_index).is_none()
+        && node.requirement_meta.is_none()
+        && node.menu_links.is_empty()
+        && node.href().is_none()
+        && node.callback().is_none()
+        && let Some(user_classes) = simple_class_node_user_suffix(node)
+    {
+        write_class_node_fragment_into::<false>(
+            out, node, meta, node_id, node_box.node_index, raw_label_text, ir, x, y, w, h,
+            config.rounded_corners * 0.55, node_font_size, config, colors, &user_classes,
         );
         return;
     }
