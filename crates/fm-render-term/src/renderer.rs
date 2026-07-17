@@ -1144,13 +1144,16 @@ impl TermRenderer {
             let start_y = y + (h.saturating_sub(label_lines.len())) / 2;
 
             for (i, line) in label_lines.iter().enumerate() {
-                let label_chars: Vec<char> = line.chars().collect();
-                let label_len = label_chars.len();
+                // Iterate the label line's chars directly for both the centering width and the placement —
+                // the previous `chars().collect::<Vec<char>>()` allocated a Vec per label line only to read
+                // its `.len()` and then consume it sequentially. `chars().count()` gives the same width and
+                // `chars().enumerate()` the same `(j, ch)`. Byte-identical, no per-line allocation.
+                let label_len = line.chars().count();
                 let label_x = x + (w.saturating_sub(label_len)) / 2;
                 let label_y = start_y + i;
 
                 if label_y < lines.len() {
-                    for (j, ch) in label_chars.into_iter().enumerate() {
+                    for (j, ch) in line.chars().enumerate() {
                         let col = label_x + j;
                         if col < cell_width && col < lines[label_y].len() {
                             lines[label_y][col] = ch;
@@ -1176,13 +1179,16 @@ impl TermRenderer {
             let start_y = y + (h.saturating_sub(label_lines.len())) / 2;
 
             for (i, line) in label_lines.iter().enumerate() {
-                let label_chars: Vec<char> = line.chars().collect();
-                let label_len = label_chars.len();
+                // Iterate the label line's chars directly for both the centering width and the placement —
+                // the previous `chars().collect::<Vec<char>>()` allocated a Vec per label line only to read
+                // its `.len()` and then consume it sequentially. `chars().count()` gives the same width and
+                // `chars().enumerate()` the same `(j, ch)`. Byte-identical, no per-line allocation.
+                let label_len = line.chars().count();
                 let label_x = x + (w.saturating_sub(label_len)) / 2;
                 let label_y = start_y + i;
 
                 if label_y < lines.len() {
-                    for (j, ch) in label_chars.into_iter().enumerate() {
+                    for (j, ch) in line.chars().enumerate() {
                         let col = label_x + j;
                         if col < cell_width && col < lines[label_y].len() {
                             lines[label_y][col] = ch;
@@ -1232,13 +1238,14 @@ impl TermRenderer {
                 let start_y = mid_y.saturating_sub(label_lines.len() / 2);
 
                 for (i, line) in label_lines.iter().enumerate() {
-                    let label_chars: Vec<char> = line.chars().collect();
-                    let label_len = label_chars.len();
+                    // Iterate chars directly (see the node-label loops above): `chars().count()` for the
+                    // centering width, `chars().enumerate()` for placement — no per-line Vec allocation.
+                    let label_len = line.chars().count();
                     let label_x = mid_x.saturating_sub(label_len / 2);
                     let label_y = start_y + i;
 
                     if label_y < lines.len() {
-                        for (j, ch) in label_chars.into_iter().enumerate() {
+                        for (j, ch) in line.chars().enumerate() {
                             let col = label_x + j;
                             if col < cell_width && col < lines[label_y].len() {
                                 lines[label_y][col] = ch;
@@ -1284,11 +1291,12 @@ impl TermRenderer {
         }
 
         let title = self.truncate_label(title);
-        let title_chars: Vec<char> = title.chars().collect();
-        let title_len = title_chars.len().min(row_width);
+        // Iterate the title chars directly (matches the other title path above): `chars().count()` for the
+        // width, `chars().take().enumerate()` for placement — no per-title Vec<char> allocation.
+        let title_len = title.chars().count().min(row_width);
         let start_x = row_width.saturating_sub(title_len) / 2;
 
-        for (index, ch) in title_chars.into_iter().take(title_len).enumerate() {
+        for (index, ch) in title.chars().take(title_len).enumerate() {
             cells[start_x + index] = ch;
         }
     }
