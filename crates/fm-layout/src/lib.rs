@@ -7931,6 +7931,14 @@ fn build_tree_layout_structure(ir: &MermaidDiagramIr) -> TreeLayoutStructure {
     }
     for node in 0..node_count {
         let segment = &mut out_flat[out_start[node]..out_start[node + 1]];
+        // A 0- or 1-element out-edge segment is already sorted and duplicate-free, so skip the `sort_by`
+        // machinery and the dedup scan. Chain/tree flowcharts — the common shape — have out-degree ≤ 1
+        // per node, so `sort_by` was otherwise invoked on a length-≤1 slice once per node (pure call +
+        // driftsort-entry overhead: ~5% of flowchart layout self-time). Byte-identical.
+        if segment.len() <= 1 {
+            out_len[node] = segment.len();
+            continue;
+        }
         segment.sort_by(&cmp_by_id);
         // Compact consecutive duplicates to the front (== `Vec::dedup` on the sorted segment).
         let mut len = 0_usize;
