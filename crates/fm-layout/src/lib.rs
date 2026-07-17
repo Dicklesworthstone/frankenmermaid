@@ -8008,11 +8008,22 @@ fn build_tree_layout_structure(ir: &MermaidDiagramIr) -> TreeLayoutStructure {
         }
     }
 
-    // Sort each node's child segment in place — byte-identical to sorting the old per-node `Vec`s.
+    // No per-node child-segment sort: each node's children are appended from its `out_flat` out-edge
+    // segment — which was sorted by `cmp_by_id` above — in order, skipping already-visited nodes. A
+    // subsequence of a sequence sorted by a total order (`cmp_by_id`'s final tiebreak is the node index)
+    // is itself sorted, so the previous `sort_by(&cmp_by_id)` here was re-sorting already-sorted data.
+    // The `debug_assert` guards the invariant (held across all 439 layout tests incl. the random-edit /
+    // equivalence / determinism suites + goldens); it compiles out of release builds.
+    #[cfg(debug_assertions)]
     for node in 0..node_count {
         let start = children.start[node];
         let end = start + children.len[node];
-        children.flat[start..end].sort_by(&cmp_by_id);
+        debug_assert!(
+            children.flat[start..end]
+                .windows(2)
+                .all(|w| cmp_by_id(&w[0], &w[1]) != std::cmp::Ordering::Greater),
+            "children segment already sorted (appended from sorted out_flat)"
+        );
     }
 
     let max_depth = depth.iter().copied().max().unwrap_or(0);
