@@ -349,28 +349,35 @@ impl Canvas {
         if px + 1 < self.pixel_width && py + 3 < self.pixel_height {
             let w = self.pixel_width;
             let base = py * w + px;
-            if self.pixel_set_at(base) {
+            let cur_gen = self.generation;
+            // Slice `cell_gen` ONCE over the cell's `[base, base + 3w + 1]` span (the maximum dot index),
+            // then read the 8 dots by relative offset. Each offset is `<= 3w + 1 == cell.len() - 1`, so the
+            // compiler proves every `cell[offset]` in-bounds from the single slice length and drops the
+            // per-dot bounds check that the 8 `pixel_set_at` calls each paid (it was not inlined — a
+            // separate ~13% frame). Byte-identical: `cell[o] == gen` == `pixel_set_at(base + o)`.
+            let cell = &self.cell_gen[base..=base + 3 * w + 1];
+            if cell[0] == cur_gen {
                 code_point |= 0x01;
             } // Dot 1 (px, py)
-            if self.pixel_set_at(base + w) {
+            if cell[w] == cur_gen {
                 code_point |= 0x02;
             } // Dot 2 (px, py+1)
-            if self.pixel_set_at(base + 2 * w) {
+            if cell[2 * w] == cur_gen {
                 code_point |= 0x04;
             } // Dot 3 (px, py+2)
-            if self.pixel_set_at(base + 1) {
+            if cell[1] == cur_gen {
                 code_point |= 0x08;
             } // Dot 4 (px+1, py)
-            if self.pixel_set_at(base + w + 1) {
+            if cell[w + 1] == cur_gen {
                 code_point |= 0x10;
             } // Dot 5 (px+1, py+1)
-            if self.pixel_set_at(base + 2 * w + 1) {
+            if cell[2 * w + 1] == cur_gen {
                 code_point |= 0x20;
             } // Dot 6 (px+1, py+2)
-            if self.pixel_set_at(base + 3 * w) {
+            if cell[3 * w] == cur_gen {
                 code_point |= 0x40;
             } // Dot 7 (px, py+3)
-            if self.pixel_set_at(base + 3 * w + 1) {
+            if cell[3 * w + 1] == cur_gen {
                 code_point |= 0x80;
             } // Dot 8 (px+1, py+3)
         } else {
