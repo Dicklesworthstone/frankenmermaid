@@ -5960,7 +5960,11 @@ fn write_c4_icon_line_into(f: &mut String, x1: f32, y1: f32, x2: f32, y2: f32, s
 /// classes/children/post-processing apply. Skips the group + rect `Element` builds, their `Attributes`
 /// Vecs, the entity-body fragment's second copy, and the whole-group serialize+copy.
 #[allow(clippy::too_many_arguments)]
-fn write_er_node_fragment_into(
+/// `A11Y` selects the accessibility variant at compile time (see `write_class_node_fragment_into`): `true`
+/// emits `role`/`aria-label`/`tabindex` + the trailing `<title>`; `false` (lean) skips exactly those two
+/// spots. The `<g id/class/data-id>` wrapper, `<rect>`, and the entity attribute body are a11y-independent,
+/// so the lean fragment matches the slow `Element` path's lean output by construction.
+fn write_er_node_fragment_into<const A11Y: bool>(
     out: &mut String,
     node: &fm_core::IrNode,
     node_id: &str,
@@ -5989,9 +5993,13 @@ fn write_er_node_fragment_into(
     out.push_str(user_classes);
     out.push_str("\" data-id=\"");
     let _ = write_escaped_attr(out, node_id);
-    out.push_str("\" role=\"graphics-symbol\" aria-label=\"");
-    let _ = write_escaped_attr(out, raw_label);
-    out.push_str("\" tabindex=\"0\">");
+    if A11Y {
+        out.push_str("\" role=\"graphics-symbol\" aria-label=\"");
+        let _ = write_escaped_attr(out, raw_label);
+        out.push_str("\" tabindex=\"0\">");
+    } else {
+        out.push_str("\">");
+    }
     // <rect x y width height rx fill="url(#fm-node-gradient)"/> — same attr order as the class fragment.
     out.push_str("<rect x=\"");
     let _ = crate::attributes::write_number_into(out, x);
@@ -6007,10 +6015,14 @@ fn write_er_node_fragment_into(
     write_er_entity_into(
         out, node, label_text, cx, x, y, w, font_size, config, colors,
     );
-    // <title>Node: {raw_label}, rectangle</title></g> — describe_node's Rect form, written piecewise.
-    out.push_str("<title>Node: ");
-    let _ = write_escaped_text(out, raw_label);
-    out.push_str(", rectangle</title></g>");
+    if A11Y {
+        // <title>Node: {raw_label}, rectangle</title></g> — describe_node's Rect form, written piecewise.
+        out.push_str("<title>Node: ");
+        let _ = write_escaped_text(out, raw_label);
+        out.push_str(", rectangle</title></g>");
+    } else {
+        out.push_str("</g>");
+    }
 }
 
 /// The inline `style="fill: …"` color the slow path (`render_node`) applies to a node's shape rect for
@@ -6946,6 +6958,9 @@ fn render_node_into(
     // branch sits after class/requirement in `render_node`'s content chain, so `class_meta`/`c4_meta`/
     // `requirement_meta` must be absent; `show_node_labels` gates the body). Byte-identical (pinned by
     // `er_entity_node_streaming_matches_slow_render`).
+    // Two a11y-uniform gates (see the class path for the rationale): the full-a11y gate is unchanged
+    // (direct `::<true>`) so the default path takes no regression; the lean gate streams a11y-off ER
+    // entities that used to fall to the ~1-Element-per-attribute slow path. Mixed a11y → slow path.
     if let Some(node) = ir_node
         && matches!(shape, NodeShape::Rect)
         && !node.members.is_empty()
@@ -6972,7 +6987,53 @@ fn render_node_into(
         && node.callback().is_none()
         && let Some(user_classes) = simple_class_node_user_suffix(node)
     {
-        write_er_node_fragment_into(
+        write_er_node_fragment_into::<true>(
+            out,
+            node,
+            node_id,
+            node_box.node_index,
+            raw_label_text,
+            label_text.as_ref(),
+            cx,
+            x,
+            y,
+            w,
+            h,
+            config.rounded_corners * 0.55,
+            node_font_size,
+            config,
+            colors,
+            &user_classes,
+        );
+        return;
+    }
+    if let Some(node) = ir_node
+        && matches!(shape, NodeShape::Rect)
+        && !node.members.is_empty()
+        && ir.diagram_type == fm_core::DiagramType::Er
+        && detail.show_node_labels
+        && config.embed_theme_css
+        && config.node_gradients
+        && !emit_classdef_classes
+        && !config.animations_enabled
+        && !config.include_source_spans
+        && !config.a11y.aria_labels
+        && !config.a11y.keyboard_nav
+        && !config.a11y.text_alternatives
+        && shape_style.is_none()
+        && text_style.is_none()
+        && node_icon.is_none()
+        && !placeholder_space_node
+        && lookup_centrality_tier(centrality_map, node_box.node_index).is_none()
+        && node.class_meta.is_none()
+        && node.c4_meta.is_none()
+        && node.requirement_meta.is_none()
+        && node.menu_links.is_empty()
+        && node.href().is_none()
+        && node.callback().is_none()
+        && let Some(user_classes) = simple_class_node_user_suffix(node)
+    {
+        write_er_node_fragment_into::<false>(
             out,
             node,
             node_id,
