@@ -544,6 +544,15 @@ pub(crate) fn write_escaped_text<W: fmt::Write>(f: &mut W, s: &str) -> fmt::Resu
         }
         return f.write_str(&s[start..]);
     }
+    // Clean fast path for the SHORT strings this handles below (node/edge labels + `<title>` text): a
+    // single vectorizable "byte ∈ {& < >}" scan, so the common label with no special byte bulk-copies in
+    // one `write_str` instead of the per-byte match loop (measured: that loop dominates this function's
+    // self-time). Byte-identical: with no `&`/`<`/`>` the loop below would emit `s` verbatim (a `>`
+    // escapes only inside `]]>`, which necessarily contains a `>`, so any `]]>` fails this check and falls
+    // through). Placed AFTER the length-gated CSS path so the ~5 KB `<style>` never pays this extra scan.
+    if !bytes.iter().any(|&b| matches!(b, b'&' | b'<' | b'>')) {
+        return f.write_str(s);
+    }
     let mut start = 0;
     for (i, &b) in bytes.iter().enumerate() {
         let replacement = match b {
