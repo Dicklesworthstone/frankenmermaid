@@ -1270,11 +1270,22 @@ impl TermRenderer {
             }
         }
 
-        lines
-            .into_iter()
-            .map(|l| l.into_iter().collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n")
+        // Single-pass serialization: push every cell char into one pre-sized `String`, with a `'\n'`
+        // between rows. The previous `map(collect::<String>).collect::<Vec>().join("\n")` built one
+        // `String` per row (cell_height allocations) and then RE-COPIED every byte in `join`. Byte-
+        // identical: same chars in row-major order, `'\n'` between rows, no trailing newline. Reserve for
+        // the worst case (every cell a 3-byte U+2800.. braille/box glyph) so no push ever reallocates.
+        let total_chars: usize = lines.iter().map(Vec::len).sum();
+        let mut out = String::with_capacity(total_chars * 3 + lines.len());
+        for (row_index, row) in lines.into_iter().enumerate() {
+            if row_index > 0 {
+                out.push('\n');
+            }
+            for ch in row {
+                out.push(ch);
+            }
+        }
+        out
     }
 
     fn render_generic_diagram_title(
