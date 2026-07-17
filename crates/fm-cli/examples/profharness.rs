@@ -1,6 +1,68 @@
 //! Scratch profiling harness (not committed).
 use fm_parser::parse;
+use fm_render_canvas::{
+    Canvas2dContext, CanvasRenderConfig, LineCap, LineJoin, TextAlign, TextBaseline, TextMetrics,
+    render_to_canvas_with_layout,
+};
 use fm_render_svg::{SvgRenderConfig, render_svg_with_layout};
+use fm_render_term::{TermRenderConfig, render_term_with_layout_and_config};
+
+// A do-nothing Canvas2D context: unlike MockCanvas2dContext (which records every op into a Vec + clones
+// color/text Strings, dominating the profile), this drops every call so the profile reflects the RENDERER.
+// `measure_text` returns a plausible width so text-fit logic doesn't degenerate.
+struct NopCanvas {
+    font_px: f64,
+}
+#[rustfmt::skip]
+impl Canvas2dContext for NopCanvas {
+    fn width(&self) -> f64 { 2000.0 }
+    fn height(&self) -> f64 { 2000.0 }
+    fn save(&mut self) {}
+    fn restore(&mut self) {}
+    fn set_fill_style(&mut self, _c: &str) {}
+    fn set_stroke_style(&mut self, _c: &str) {}
+    fn set_line_width(&mut self, _w: f64) {}
+    fn set_line_cap(&mut self, _c: LineCap) {}
+    fn set_line_join(&mut self, _j: LineJoin) {}
+    fn set_line_dash(&mut self, _p: &[f64]) {}
+    fn set_global_alpha(&mut self, _a: f64) {}
+    fn set_font(&mut self, font: &str) {
+        // Track px so measure_text tracks the renderer's font like MockCanvas2dContext does.
+        if let Some(px) = font.split_whitespace().find_map(|t| t.strip_suffix("px")).and_then(|n| n.parse::<f64>().ok()) {
+            self.font_px = px;
+        }
+    }
+    fn set_text_align(&mut self, _a: TextAlign) {}
+    fn set_text_baseline(&mut self, _b: TextBaseline) {}
+    fn begin_path(&mut self) {}
+    fn close_path(&mut self) {}
+    fn move_to(&mut self, _x: f64, _y: f64) {}
+    fn line_to(&mut self, _x: f64, _y: f64) {}
+    fn quadratic_curve_to(&mut self, _a: f64, _b: f64, _c: f64, _d: f64) {}
+    fn bezier_curve_to(&mut self, _a: f64, _b: f64, _c: f64, _d: f64, _e: f64, _f: f64) {}
+    fn arc(&mut self, _x: f64, _y: f64, _r: f64, _s: f64, _e: f64) {}
+    fn arc_to(&mut self, _a: f64, _b: f64, _c: f64, _d: f64, _e: f64) {}
+    fn rect(&mut self, _x: f64, _y: f64, _w: f64, _h: f64) {}
+    fn fill(&mut self) {}
+    fn stroke(&mut self) {}
+    fn fill_rect(&mut self, _x: f64, _y: f64, _w: f64, _h: f64) {}
+    fn stroke_rect(&mut self, _x: f64, _y: f64, _w: f64, _h: f64) {}
+    fn clear_rect(&mut self, _x: f64, _y: f64, _w: f64, _h: f64) {}
+    fn fill_text(&mut self, _t: &str, _x: f64, _y: f64) {}
+    fn stroke_text(&mut self, _t: &str, _x: f64, _y: f64) {}
+    fn measure_text(&self, text: &str) -> TextMetrics {
+        TextMetrics { width: text.len() as f64 * self.font_px * 0.57, height: self.font_px }
+    }
+    fn set_transform(&mut self, _a: f64, _b: f64, _c: f64, _d: f64, _e: f64, _f: f64) {}
+    fn reset_transform(&mut self) {}
+    fn translate(&mut self, _x: f64, _y: f64) {}
+    fn scale(&mut self, _x: f64, _y: f64) {}
+    fn rotate(&mut self, _a: f64) {}
+    fn clip(&mut self) {}
+    fn set_shadow_blur(&mut self, _b: f64) {}
+    fn set_shadow_color(&mut self, _c: &str) {}
+    fn set_shadow_offset(&mut self, _x: f64, _y: f64) {}
+}
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -32,6 +94,20 @@ fn gen_input(shape: &str, n: usize) -> String {
             l.push("classDiagram".into());
             for i in 0..n.saturating_sub(1) {
                 l.push(format!("  C{i} \"1\" --> \"*\" C{} : rel{i}", i + 1));
+            }
+        }
+        "requirement" => {
+            l.push("requirementDiagram".into());
+            for i in 0..n {
+                l.push(format!("requirement req{i} {{"));
+                l.push(format!("  id: {i}"));
+                l.push(format!("  text: the requirement text number {i}"));
+                l.push("  risk: high".into());
+                l.push("  verifymethod: test".into());
+                l.push("}".into());
+            }
+            for i in 0..n.saturating_sub(1) {
+                l.push(format!("req{i} - satisfies -> req{}", i + 1));
             }
         }
         "er" => {
@@ -280,6 +356,20 @@ fn gen_input(shape: &str, n: usize) -> String {
                 l.push(format!("  N{i}-->N{}", i + 1));
             }
         }
+        "densedag" => {
+            // Mirrors bench gen_dense_dag: N nodes, edges N{i}-->N{i+step} for step in {1,2,3,5}.
+            l.push("flowchart TD".into());
+            for i in 0..n {
+                l.push(format!("  N{i}[Node {i}]"));
+            }
+            for i in 0..n {
+                for step in [1_usize, 2, 3, 5] {
+                    if i + step < n {
+                        l.push(format!("  N{i}-->N{}", i + step));
+                    }
+                }
+            }
+        }
         "parallel" => {
             l.push("flowchart TB".into());
             for i in 0..n {
@@ -395,12 +485,23 @@ fn main() {
         "shape={shape} size={size} iters={iters} phase={phase} bytes={}",
         input.len()
     );
-    let cfg = SvgRenderConfig::default();
+    let mut cfg = SvgRenderConfig::default();
+    // Lean profile (a11y off) when FM_LEAN=1 — exercises the lean streaming fast paths (bd-u63b etc).
+    if std::env::var("FM_LEAN").is_ok() {
+        cfg.a11y = fm_render_svg::A11yConfig::none();
+        cfg.accessible = false;
+    }
     let mut acc: usize = 0;
     let layout = fm_layout::layout_diagram(&pf.ir);
     if phase == "dump" {
         let v = render_svg_with_layout(&pf.ir, &layout, &cfg);
         print!("{v}");
+        return;
+    }
+    if phase == "dumpterm" {
+        let tcfg = TermRenderConfig::default();
+        let r = render_term_with_layout_and_config(&pf.ir, &layout, &tcfg, 200, 80);
+        print!("{}", r.output);
         return;
     }
     let mut s: Vec<u64> = Vec::with_capacity(iters);
@@ -411,6 +512,19 @@ fn main() {
                 let v = render_svg_with_layout(&pf.ir, &layout, &cfg);
                 acc = acc.wrapping_add(v.len());
                 std::hint::black_box(&v);
+            }
+            "termrender" => {
+                let tcfg = TermRenderConfig::default();
+                let r = render_term_with_layout_and_config(&pf.ir, &layout, &tcfg, 200, 80);
+                acc = acc.wrapping_add(r.output.len());
+                std::hint::black_box(&r);
+            }
+            "canvasrender" => {
+                let ccfg = CanvasRenderConfig::default();
+                let mut ctx = NopCanvas { font_px: 14.0 };
+                let r = render_to_canvas_with_layout(&pf.ir, &layout, &mut ctx, &ccfg);
+                acc = acc.wrapping_add(r.draw_calls);
+                std::hint::black_box(&r);
             }
             "layout" => {
                 let x = fm_layout::layout_diagram(&pf.ir);

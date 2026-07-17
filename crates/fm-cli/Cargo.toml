@@ -67,6 +67,7 @@ mimalloc = { version = "0.1", default-features = false }
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3.25"
+fm-render-canvas.workspace = true
 
 [[bench]]
 name = "pipeline_bench"

@@ -759,6 +759,7 @@ dependencies = [
  "fm-core",
  "fm-layout",
  "fm-parser",
+ "fm-render-canvas",
  "fm-render-svg",
  "fm-render-term",
  "mimalloc",
