@@ -18720,3 +18720,25 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   form without a separately profiled workload whose class-definition cardinality is materially higher.
 
   Agent: Codex (GPT-5, this session; bead `bd-1buv.60`, Agent Mail `PeachCreek`)
+
+### REJECTED: `sort_by` → `sort_unstable_by` for the `cmp_by_id` layout sorts — +6..17% layout REGRESSION (2026-07-16)
+- **Lever:** `cmp_by_id` in `layered_ranks` and `build_tree_layout_structure` (fm-layout/src/lib.rs) is a
+  strict total order (final tie-break is the unique node index → never returns `Equal`), so the 4
+  `sort_by(&cmp_by_id)` calls (per-node out-edge segments + full `sorted_nodes`) are byte-identical under
+  `sort_unstable_by`. Hypothesis: unstable avoids stable sort's scratch-buffer allocation and uses a faster
+  algorithm → win.
+- **Byte-identity:** confirmed — full SVG dump identical across all 21 profharness shapes (tree + radial +
+  layered layouts), both profiles.
+- **Measured (non-LTO release opt=3, profharness layout 400 nodes, `perf stat -e instructions:u`):**
+  candidate/baseline **mindmap 1.1720 (+17.2%)**, flowchart 1.0665, subg 1.0683, state/class 1.0689,
+  parallel 1.0658, gantt 0.9999. Rock-stable (mindmap 1.1720 across reps).
+- **Why it lost:** the sorts are dominated by MANY TINY per-node out-edge segments (2–5 elements on branchy
+  trees like mindmap). Rust's stable `sort_by` (driftsort) has a highly-optimized in-place small-slice
+  insertion path and does NOT allocate for small slices, so there was no scratch alloc to save; the unstable
+  sort (ipnsort) has a heavier small-slice path here. The hypothesized alloc saving does not exist at this
+  slice size, and the small-slice constant factor is worse.
+- **Do-not-retry:** do not swap these (or similar many-tiny-slice) `sort_by` calls to `sort_unstable_by`.
+  Stable sort is FASTER for many-tiny-slice workloads; unstable only wins on large slices with real scratch
+  allocation. Reverted; no code change landed.
+
+  Agent: BlackThrush
