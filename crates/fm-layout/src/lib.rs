@@ -569,7 +569,9 @@ struct CachedNodeSize {
 struct CachedDependencyGraph {
     key: u64,
     graph: Arc<LayoutDependencyGraph>,
-    ir: MermaidDiagramIr,
+    // Arc so the engine's per-pass install clone into the thread-local state is two refcount
+    // bumps, not a deep IR copy; the snapshot itself is immutable once stored.
+    ir: Arc<MermaidDiagramIr>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -1380,7 +1382,7 @@ fn track_dependency_graph_query(ir: &MermaidDiagramIr) {
                 total_regions = cached.graph.regions().len(),
                 "incremental.dependency_update"
             );
-            cached.ir = ir.clone();
+            cached.ir = Arc::new(ir.clone());
             state.record_query(summary);
             return;
         }
@@ -1413,7 +1415,7 @@ fn track_dependency_graph_query(ir: &MermaidDiagramIr) {
         state.dependency_graph_cache = Some(CachedDependencyGraph {
             key: topology_key,
             graph: Arc::new(graph),
-            ir: ir.clone(),
+            ir: Arc::new(ir.clone()),
         });
         state.record_query(summary);
     });
@@ -2976,7 +2978,10 @@ impl IncrementalLayoutEngine {
         trace!(algorithm = algorithm.as_str(), "incremental.cache_miss");
         let mut incremental_state = IncrementalCacheState {
             graph_metrics_cache: self.graph_metrics_cache,
-            node_size_cache: self.node_size_cache.clone(),
+            // Move, don't clone: nothing reads `self.node_size_cache` while the pass runs (all
+            // in-pass access goes through the installed thread-local state), and every exit path
+            // below writes the state's map back onto `self`.
+            node_size_cache: std::mem::take(&mut self.node_size_cache),
             dependency_graph_cache: self.dependency_graph_cache.clone(),
             current_summary: IncrementalLayoutSummary::default(),
         };

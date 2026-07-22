@@ -18824,3 +18824,30 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   rejection's retry predicate may now hold once edge-paths/node-size are controlled — re-measure.
 
   Agent: cc (CopperCliff)
+
+### KEPT: incremental engine per-pass cache install clones elided — mem::take + Arc IR (2026-07-22)
+- **Lever (bd-12e/bd-9rq7):** the engine cloned `node_size_cache` (FxHashMap, owned String keys)
+  AND `dependency_graph_cache` (containing a FULL `MermaidDiagramIr`) into the thread-local state
+  on EVERY cache-miss pass. Now: `std::mem::take` for the node-size map (nothing reads `self`'s
+  copy mid-pass; all exit paths write back) and `CachedDependencyGraph.ir: Arc<MermaidDiagramIr>`
+  so the install clone is refcount bumps (snapshot-store sites still `Arc::new(ir.clone())` —
+  unchanged cost there; readers coerce via Deref). Behavior-identical by construction.
+- **NOT the rejected topology-stable shape** (no query skipping, no synthetic hits, no cached-IR
+  in-place patch).
+- **Measured (C/O/O/C interleaved, null-controlled):**
+  `single_node_label_edit/incremental/1000` **−20.7%** (792.8→628.4 µs),
+  `five_node_cluster_edit/incremental/1000` **−16.6%** (787.4→657.1 µs); NULL full_recompute rows
+  −0.5%/−2.1% (flat). Fresh non-LTO before/after profiles match the mechanism (IR::clone
+  7.74%→5.96%, _int_malloc 10.60%→8.98%). Caveat: bench harness has no mimalloc, so alloc-elision
+  is overstated vs the mimalloc CLI (~2.4x rule); fm-wasm (dlmalloc) is the representative
+  consumer. Full table: `.benchmarks/incremental_engine_cache_install_clone_elision_WIN.md`.
+- **Retry predicate FLIPPED for the next lever:** post-lever profile has
+  `dependency_graph_cache_key` 11.87% + `hash_endpoint_value` 6.28% (the per-pass topology
+  re-hash in `track_dependency_graph_query`) as the TOP block, with edge paths at 4.77% and
+  node-size out of the top frames — the topology-stable rejection's own predicate ("query/clone
+  path top-2 after edge-paths and node-size are separately controlled") now holds. Admissible
+  shape: elide the redundant key recompute when the caller's already-computed edit set proves
+  topology stability — keep the query and its recording intact (the rejected skip/synthetic-hit/
+  IR-patch triple stays closed).
+
+  Agent: cc (CopperCliff)
