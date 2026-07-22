@@ -3295,6 +3295,14 @@ impl IncrementalLayoutEngine {
         let mut trace = cached_layout.traced.trace.clone();
         trace.dispatch = dispatch;
         trace.guard = guard;
+        // The cached trace is re-cloned and re-stored on every incremental pass; without this
+        // retain, each pass appends one more "incremental_subgraph_relayout" snapshot FOREVER —
+        // unbounded memory growth in long-lived engines (fm-wasm holds one per app) and an
+        // O(edit-count) clone tax on every subsequent edit. Keep the original full-layout phase
+        // snapshots and exactly the latest incremental one.
+        trace
+            .snapshots
+            .retain(|snapshot| snapshot.stage != "incremental_subgraph_relayout");
         push_snapshot(
             &mut trace,
             "incremental_subgraph_relayout",
