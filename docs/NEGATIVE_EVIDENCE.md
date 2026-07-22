@@ -1,5 +1,40 @@
 # Negative Evidence Ledger — frankenmermaid perf swarm
 
+### REJECT: dense single-ID endpoint slot is slower (2026-07-22)
+
+- **Third numeric-index variant:** direct `Vec<Option<IrNodeId>>` slots for canonical `N<number>` edge
+  endpoints, with generic fallback. CPU45 pinned p50 moved flowchart-500 **336,282 -> ~361,000 ns
+  (+7.4%)** and wide-16x32 **570,280 -> ~628,000 ns (+10.1%)**; SVG bytes stayed identical.
+- **Verdict: REJECT, third consecutive in the numeric-index vein.** Retry only with a profiled no-parse
+  endpoint token path; require one-binary A/B/null/B/A, CV<5%, >=3% on both shapes, exact IR/SVG,
+  conformance, and no generic-ID regression. Artifact:
+  `.benchmarks/bd_1buv_2_numeric_dense_endpoint_NEGATIVE.md`.
+
+### REJECT: endpoint-only numeric node-index representation is slower (2026-07-22)
+
+- **Distinct follow-up:** limited canonical numeric-ID lookup to fast-path flowchart edge endpoints;
+  ordinary node declarations retained the existing hash index. Pinned CPU45 release headtohead p50 was
+  about **336,282 -> 368,000 ns (+9.4%)** on flowchart-500 and **570,280 -> 627,000 ns (+10.0%)** on
+  wide-16x32. Output bytes remained identical (343,946 / 534,365) and SVG hashes matched.
+- **Verdict: REJECT.** Retry only if endpoint key construction profiles below 1% self and a direct-address
+  representation removes the typed-map overhead; require one-binary A/B/null/B/A, CV<5%, >=3% on both
+  pinned shapes, exact IR/SVG, conformance, and no generic-ID regression. Artifact:
+  `.benchmarks/bd_1buv_2_numeric_endpoint_index_NEGATIVE.md`.
+
+### REJECT: canonical numeric node-index representation is slower (2026-07-22)
+
+- **Profile-first / distinct primitive:** `NodeIdIndex::get_with_hash` was 9.39% of flowchart-5000 parse
+  self and 3.10% of wide-1024 full-pipeline self. The candidate added a collision-free typed index for
+  canonical `N<number>` and `N<number>_<number>` IDs, retaining the existing generic hash index fallback.
+- **Pinned release headtohead, CPU45:** flowchart-500 p50 **336,282 -> 348,084 ns (+3.51%)** and
+  wide-16x32 **570,280 -> 589,171 ns (+3.31%)**. Candidate CV was 13.52% and 9.31%; both failed the
+  mandatory KEEP CV<5% gate. Output byte counts and SHA-256 were identical (flow 343,946 bytes,
+  `408ecdcc...2d2d21`; wide 534,365 bytes, `30d79510...81fce`). Candidate removed; source matches HEAD.
+- **Verdict: REJECT. Retry predicate:** only retry with an already-tokenized endpoint representation that
+  avoids per-intern decimal parsing, after a fresh profile shows >=8% full-pipeline self. Require one-binary
+  interleaved A/B/null/B/A, every scored arm CV<5%, >=3% on both pinned shapes, exact IR/SVG, conformance,
+  and no generic-ID regression. Full artifact: `.benchmarks/bd_1buv_2_numeric_node_index_NEGATIVE.md`.
+
 ### REJECT: fusing fast-edge reject/operator/chained scans regresses headline flow pipeline (2026-07-22)
 
 - **Profile-first / distinct primitive:** `parse_fast_simple_flowchart_edge_parts` was 8.53% parse self.
