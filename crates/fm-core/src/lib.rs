@@ -8940,9 +8940,11 @@ mod tests {
             graph.subgraphs.push(IrSubgraph {
                 id: IrSubgraphId(depth),
                 parent: (depth > 0).then_some(IrSubgraphId(depth - 1)),
-                children: (depth + 1 < DEPTH)
-                    .then(|| vec![IrSubgraphId(depth + 1)])
-                    .unwrap_or_default(),
+                children: if depth + 1 < DEPTH {
+                    vec![IrSubgraphId(depth + 1)]
+                } else {
+                    Vec::new()
+                },
                 members: (0..NODE_COUNT).map(IrNodeId).collect(),
                 ..Default::default()
             });

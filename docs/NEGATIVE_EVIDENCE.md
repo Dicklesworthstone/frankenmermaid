@@ -1,5 +1,35 @@
 # Negative Evidence Ledger — frankenmermaid perf swarm
 
+### SURFACE / BLOCKER: two-entry endpoint temporal cache held by stale parser leases (2026-07-22)
+
+- **Negative-evidence-first boundary:** the identifier-classification LUT is a recorded ~0-gain reject;
+  the forbidden-byte LUT, single operator scan, Fx/hash-once intern index, and one-probe insert are already
+  landed; the hot SVG number writers are ledger-closed. No closed primitive was retried.
+- **Fresh strict-remote profile:** symbolized `flowchart 5000 1800 parse` (4,499 samples, zero lost) put
+  `NodeIdIndex::get_with_hash` at **9.39% self**, second only to document-item parsing. The full
+  `wide 1024 3000 pipeline` profile (2,572 samples, zero lost) put it at **3.10% self**. This selected a
+  different alien temporal-locality primitive: a two-entry, exact-node-id-verified endpoint lookup cache.
+- **Opportunity quantified without editing:** the pinned endpoint streams would hit such a cache on
+  **498/998 (49.9%)** lookups for `flowchart_large_500`, **959/1,920 (49.9%)** for `wide_16x32`,
+  592/1,580 (37.5%) for `dense_dag_200`, and 99/390 (25.4%) for `cyclic_scc_100`.
+- **Fresh pinned mermaid-js 11.15.0 baseline:** `flowchart_large_500` fm p50/min
+  **336.275/332.821 us**, MAD 0.52%, CV 5.69%, versus mermaid **1,339.7 ms** p50 = **3,983.94x**
+  p50 speedup (**3,685.46x** by min). `wide_16x32` fm p50/min **572.200/562.246 us**, MAD 0.87%,
+  CV 5.92%, versus mermaid **3,012.2 ms** p50 = **5,264.24x** (**5,206.80x** by min). Both Rust
+  MAD gates passed; these are comparator baselines, not a candidate claim, and the >5% CV prevents KEEP use.
+- **Required-command blocker:** the exact requested
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenmermaid-cod-b rch exec -- cargo bench -p frankenmermaid-cli --bench pipeline_bench --release -- --warm-up-time 1 --measurement-time 2`
+  was attempted and Cargo rejected `--release` before timing. No alternate bench syntax was silently scored.
+- **Coordination blocker:** Agent Mail kept exclusive `CopperCliff` leases on both
+  `crates/fm-parser/src/ir_builder.rs` and `crates/fm-parser/src/mermaid_parser.rs` through
+  2026-07-22T19:17:31Z. The six-file WIP had landed in `643b7cd4`, but repeated release requests received
+  no reply. Per the reservation contract, no parser source was edited; peer `fm-core`/`fm-layout` dirt was untouched.
+- **Verdict: SURFACE / BLOCKER, not REJECT. Retry predicate:** only after both parser leases release/expire
+  and the owner corrects the command to an accepted release-profile form. Then test only the two-entry exact
+  cache with one-binary, same-worker interleaved `A/B/null/B/A`; require scored CV <5%, median candidate/original
+  <=0.97 on a pinned large flowchart, no neighbor regression, exact IR/SVG identity, conformance, and full gates.
+  Full evidence: `.benchmarks/bd_1buv_2_endpoint_temporal_cache_SETTLED.md`.
+
 > **Purpose.** Record perf levers that were tried and **reverted** (zero-gain, regression,
 > or correctness/determinism risk) so the swarm does not waste cycles re-attempting them.
 > Every entry must cite a *measured* head-to-head (cargo bench, per-crate) and the commit/
