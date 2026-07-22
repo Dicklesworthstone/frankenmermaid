@@ -1,5 +1,23 @@
 # Negative Evidence Ledger — frankenmermaid perf swarm
 
+### REJECT: fusing fast-edge reject/operator/chained scans regresses headline flow pipeline (2026-07-22)
+
+- **Profile-first / distinct primitive:** `parse_fast_simple_flowchart_edge_parts` was 8.53% parse self.
+  Existing reject LUT, one-pass operator search, endpoint ASCII trims, and chained-right anchor guard remained;
+  this tested Alien Graveyard §6.5 loop fusion across those passes, with the same nine operators and slices.
+- **Isolated CPU45 `A/B/null/B/A`:** 5,000-node linear parse baseline/null median **1,299,976 ns** versus
+  candidate midpoint **1,280,134 ns** = only **1.53% faster**, below 3%. Wide-1024 was **0.55% slower**
+  (234,385 vs 235,678 ns).
+- **Pinned full pipeline, CPU45, 10x reps:** flow baseline/null median p50 **337,097 ns** versus candidate
+  **347,063 ns** = **+2.96% slower**. Wide was only **0.49% faster** (583,710 vs 580,821 ns). Flow A2,
+  wide null, and wide A2 exceeded CV 5%. Every arm's SVG SHA-256 and byte counts matched exactly; focused
+  strict-remote equivalence tests passed 3/3. Candidate removed; parser source matches `HEAD` SHA-256.
+- **Verdict: REJECT, third consecutive. Retry predicate:** exact scan fusion is closed unless a fresh
+  full-pipeline profile attributes >=8% self to this classifier and a corpus averages >=64 bytes per edge
+  statement. Require pre-null CV <5% and >=3% on both pinned shapes. The next dig must switch away from
+  parser byte scanning to a different Alien Graveyard primitive. Full artifact:
+  `.benchmarks/bd_1buv_2_fast_edge_scan_fusion_NEGATIVE.md`.
+
 ### REJECT: streaming the flowchart line table is slower on both pinned large shapes (2026-07-22)
 
 - **Profile-first / distinct primitive:** symbolized parse put `parse_flowchart_document_items` at 9.88%
