@@ -583,6 +583,10 @@ struct IncrementalCacheState {
     node_size_cache: FxHashMap<String, CachedNodeSize>,
     dependency_graph_cache: Option<CachedDependencyGraph>,
     current_summary: IncrementalLayoutSummary,
+    // One IR snapshot per engine pass, created lazily and shared by every cache store site
+    // (dependency-graph hit/miss stores here, memo store in the engine after `finish()`), so a
+    // pass deep-clones the IR at most once instead of once per store.
+    pass_snapshot: Option<Arc<MermaidDiagramIr>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -608,6 +612,7 @@ pub struct IncrementalTracedLayout {
 impl IncrementalCacheState {
     fn begin_pass(&mut self) {
         self.current_summary = IncrementalLayoutSummary::default();
+        self.pass_snapshot = None;
     }
 
     fn record_query(&mut self, summary: IncrementalQuerySummary) {
@@ -1010,7 +1015,8 @@ impl Default for IncrementalRecomputeTrace {
 #[derive(Debug, Clone, PartialEq)]
 struct CachedTracedLayout {
     key: LayoutMemoKey,
-    ir: MermaidDiagramIr,
+    // Shares the pass snapshot with `CachedDependencyGraph.ir` when the pass produced one.
+    ir: Arc<MermaidDiagramIr>,
     traced: TracedLayout,
 }
 
@@ -1361,6 +1367,10 @@ fn track_dependency_graph_query(ir: &MermaidDiagramIr) {
             return;
         }
 
+        let snapshot = state
+            .pass_snapshot
+            .get_or_insert_with(|| Arc::new(ir.clone()))
+            .clone();
         if let Some(cached) = state.dependency_graph_cache.as_mut()
             && dependency_topology_equal(&cached.ir, ir)
         {
@@ -1380,7 +1390,7 @@ fn track_dependency_graph_query(ir: &MermaidDiagramIr) {
                 total_regions = cached.graph.regions().len(),
                 "incremental.dependency_update"
             );
-            cached.ir = Arc::new(ir.clone());
+            cached.ir = snapshot;
             state.record_query(summary);
             return;
         }
@@ -1412,7 +1422,7 @@ fn track_dependency_graph_query(ir: &MermaidDiagramIr) {
         );
         state.dependency_graph_cache = Some(CachedDependencyGraph {
             graph: Arc::new(graph),
-            ir: Arc::new(ir.clone()),
+            ir: snapshot,
         });
         state.record_query(summary);
     });
@@ -2991,6 +3001,7 @@ impl IncrementalLayoutEngine {
             node_size_cache: std::mem::take(&mut self.node_size_cache),
             dependency_graph_cache: self.dependency_graph_cache.clone(),
             current_summary: IncrementalLayoutSummary::default(),
+            pass_snapshot: None,
         };
         incremental_state.begin_pass();
         let state_guard = ActiveIncrementalStateGuard::install(incremental_state);
@@ -2998,7 +3009,11 @@ impl IncrementalLayoutEngine {
             self.try_incremental_subgraph_relayout(ir, algorithm, &config, guardrails)
         {
             let selective_recomputed_nodes = traced.trace.incremental.recomputed_nodes.max(1);
-            let incremental_state = state_guard.finish();
+            let mut incremental_state = state_guard.finish();
+            let snapshot = incremental_state
+                .pass_snapshot
+                .take()
+                .unwrap_or_else(|| Arc::new(ir.clone()));
             let recompute_duration_us = saturating_elapsed_micros(start.elapsed());
 
             self.graph_metrics_cache = incremental_state.graph_metrics_cache;
@@ -3024,7 +3039,7 @@ impl IncrementalLayoutEngine {
             );
             self.cached = Some(CachedTracedLayout {
                 key,
-                ir: ir.clone(),
+                ir: snapshot,
                 traced: traced.clone(),
             });
             return traced;
@@ -3032,7 +3047,11 @@ impl IncrementalLayoutEngine {
 
         let mut traced =
             compute_traced_layout_with_config_and_guardrails(ir, algorithm, config, guardrails);
-        let incremental_state = state_guard.finish();
+        let mut incremental_state = state_guard.finish();
+        let snapshot = incremental_state
+            .pass_snapshot
+            .take()
+            .unwrap_or_else(|| Arc::new(ir.clone()));
 
         let recompute_duration_us = saturating_elapsed_micros(start.elapsed());
 
@@ -3067,7 +3086,7 @@ impl IncrementalLayoutEngine {
         );
         self.cached = Some(CachedTracedLayout {
             key,
-            ir: ir.clone(),
+            ir: snapshot,
             traced: traced.clone(),
         });
         traced

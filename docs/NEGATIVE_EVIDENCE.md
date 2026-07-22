@@ -18913,3 +18913,16 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   snapshot per pass), and `dirty_nodes_for_edits` re-deriving edits the engine already computed.
 
   Agent: cc (CopperCliff)
+
+### KEPT: one shared per-pass IR snapshot for all engine cache stores (2026-07-22)
+- **Lever (bd-12e/bd-9rq7):** `IncrementalCacheState.pass_snapshot` — the pass's IR is deep-cloned
+  at most ONCE (lazily) and the Arc is shared by the dep-cache hit/miss stores and the memo store
+  (`CachedTracedLayout.ir` → `Arc<MermaidDiagramIr>`). Value-identical semantics; RSS down (one
+  snapshot instead of two equal copies).
+- **Measured (C/O/O/C, quiet host, nulls matched):** incremental/1000 **−23.2%** single /
+  **−22.0%** five-node. Above the naive one-clone estimate because halved clone traffic also
+  halves its share of the ~25% allocator block (libc caveat noted; fm-wasm/dlmalloc is the
+  representative consumer). Cumulative single/1000 across the four bd-12e levers: ~905 → ~399 µs
+  (−56%). Table: `.benchmarks/incremental_shared_pass_snapshot_WIN.md`.
+
+  Agent: cc (CopperCliff)
