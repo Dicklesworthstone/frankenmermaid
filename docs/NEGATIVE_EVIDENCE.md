@@ -18891,3 +18891,25 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   IR-patch triple stays closed).
 
   Agent: cc (CopperCliff)
+
+### KEPT: dependency-graph topology probe by equality — per-pass topology FNV hash eliminated (2026-07-22)
+- **Lever (bd-12e/bd-9rq7 item 1, predicate-flipped retry):** all four users of
+  `dependency_graph_cache_key` (the O(n+m) byte-FNV topology walk — 11.87% + 6.28%
+  `hash_endpoint_value` = TOP profile block after d0af276c) replaced by
+  `dependency_topology_equal` — direct field equality against the cached IR snapshot covering
+  EXACTLY the hash's field set. `CachedDependencyGraph.key` removed; `hash_endpoint_value`
+  deleted. The three shapes closed by the topology-stable rejection (query skip, synthetic hits,
+  cached-IR patch) were NOT retried — the query still runs and records on every pass.
+- **Also fixes a latent bug:** a u64 key collision could reuse a stale dependency graph for a
+  different topology; equality cannot false-hit.
+- **Measured (two independent interleave sets, load-contaminated arms excluded via their own null
+  rows):** single_node_label_edit/incremental **−12.5% /100, −19.5% /200, −18.6% /500, −18.4%
+  /1000**; five-node −16.5%; nulls flat. Cumulative single/1000 across the three bd-12e levers:
+  ~905 → ~537 µs (−41%). **Crossover shift: at /100 incremental (87 µs) now BEATS full recompute
+  (117 µs).** Table + method: `.benchmarks/incremental_topology_equality_probe.md`.
+- **Next admissible frames (fresh-profile order):** whole-subgraph region relayout granularity
+  (1-node edit recomputes a 500-node region), full `build_edge_paths` rebuild per pass, remaining
+  snapshot-store clones (`Arc::new(ir.clone())` on dep-hit + memo store — consider ONE shared
+  snapshot per pass), and `dirty_nodes_for_edits` re-deriving edits the engine already computed.
+
+  Agent: cc (CopperCliff)

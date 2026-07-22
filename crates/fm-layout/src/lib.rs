@@ -567,7 +567,6 @@ struct CachedNodeSize {
 
 #[derive(Debug, Clone, PartialEq)]
 struct CachedDependencyGraph {
-    key: u64,
     graph: Arc<LayoutDependencyGraph>,
     // Arc so the engine's per-pass install clone into the thread-local state is two refcount
     // bumps, not a deep IR copy; the snapshot itself is immutable once stored.
@@ -1362,9 +1361,8 @@ fn track_dependency_graph_query(ir: &MermaidDiagramIr) {
             return;
         }
 
-        let topology_key = dependency_graph_cache_key(ir);
         if let Some(cached) = state.dependency_graph_cache.as_mut()
-            && cached.key == topology_key
+            && dependency_topology_equal(&cached.ir, ir)
         {
             let dirty_nodes = dirty_nodes_for_edits(&cached.graph, &cached.graph, &cached.ir, ir);
             let summary = IncrementalQuerySummary {
@@ -1413,7 +1411,6 @@ fn track_dependency_graph_query(ir: &MermaidDiagramIr) {
             "incremental.dependency_update"
         );
         state.dependency_graph_cache = Some(CachedDependencyGraph {
-            key: topology_key,
             graph: Arc::new(graph),
             ir: Arc::new(ir.clone()),
         });
@@ -1441,9 +1438,7 @@ fn dirty_node_indexes_for_edits(
         return BTreeSet::new();
     }
 
-    let previous_key = dependency_graph_cache_key(previous_ir);
-    let current_key = dependency_graph_cache_key(current_ir);
-    let same_topology = previous_key == current_key;
+    let same_topology = dependency_topology_equal(previous_ir, current_ir);
     let mut dirty_current = DirtySet::default();
     let mut dirty_previous = DirtySet::default();
 
@@ -1727,36 +1722,48 @@ fn memo_ir_equal(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> boo
         && *diagnostics == current.diagnostics
 }
 
-fn dependency_graph_cache_key(ir: &MermaidDiagramIr) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    hash_u64(&mut hash, ir.nodes.len() as u64);
-    hash_u64(&mut hash, ir.edges.len() as u64);
-    hash_u64(&mut hash, ir.graph.subgraphs.len() as u64);
-    for (node_index, node) in ir.nodes.iter().enumerate() {
-        hash_str(&mut hash, &node.id);
-        if let Some(graph_node) = ir.graph.nodes.get(node_index) {
-            hash_u64(&mut hash, graph_node.subgraphs.len() as u64);
-            for subgraph in &graph_node.subgraphs {
-                hash_u64(&mut hash, subgraph.0 as u64);
-            }
-        }
-    }
-    for edge in &ir.edges {
-        hash_endpoint_value(&mut hash, edge.from);
-        hash_endpoint_value(&mut hash, edge.to);
-    }
-    for subgraph in &ir.graph.subgraphs {
-        hash_u64(&mut hash, subgraph.id.0 as u64);
-        hash_u64(
-            &mut hash,
-            subgraph.parent.map_or(u64::MAX, |parent| parent.0 as u64),
-        );
-        hash_u64(&mut hash, subgraph.members.len() as u64);
-        for node in &subgraph.members {
-            hash_u64(&mut hash, node.0 as u64);
-        }
-    }
-    hash
+/// Exact topology equality between two IRs, covering precisely the fields the former
+/// `dependency_graph_cache_key` FNV hash covered: node/edge/subgraph counts, node ids,
+/// per-node subgraph memberships, edge endpoints, and subgraph id/parent/members. Everything
+/// else (labels, spans, styles, meta) is intentionally NOT compared — label-only edits must
+/// keep reusing the cached dependency graph. Short-circuits at the first difference and,
+/// unlike the hash, cannot false-hit on a collision.
+fn dependency_topology_equal(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> bool {
+    previous.nodes.len() == current.nodes.len()
+        && previous.edges.len() == current.edges.len()
+        && previous.graph.subgraphs.len() == current.graph.subgraphs.len()
+        && previous.nodes.iter().zip(&current.nodes).enumerate().all(
+            |(node_index, (previous_node, current_node))| {
+                previous_node.id == current_node.id
+                    && previous
+                        .graph
+                        .nodes
+                        .get(node_index)
+                        .map(|node| &node.subgraphs)
+                        == current
+                            .graph
+                            .nodes
+                            .get(node_index)
+                            .map(|node| &node.subgraphs)
+            },
+        )
+        && previous
+            .edges
+            .iter()
+            .zip(&current.edges)
+            .all(|(previous_edge, current_edge)| {
+                previous_edge.from == current_edge.from && previous_edge.to == current_edge.to
+            })
+        && previous
+            .graph
+            .subgraphs
+            .iter()
+            .zip(&current.graph.subgraphs)
+            .all(|(previous_subgraph, current_subgraph)| {
+                previous_subgraph.id == current_subgraph.id
+                    && previous_subgraph.parent == current_subgraph.parent
+                    && previous_subgraph.members == current_subgraph.members
+            })
 }
 
 fn hash_u64(hash: &mut u64, value: u64) {
@@ -3120,9 +3127,7 @@ impl IncrementalLayoutEngine {
         let all_node_changes = edits
             .iter()
             .all(|e| matches!(e, LayoutEdit::NodeChanged { .. }));
-        let current_graph = if all_node_changes
-            || dependency_graph_cache_key(&cached_graph.ir) == dependency_graph_cache_key(ir)
-        {
+        let current_graph = if all_node_changes || dependency_topology_equal(&cached_graph.ir, ir) {
             Arc::clone(&cached_graph.graph)
         } else {
             Arc::new(LayoutDependencyGraph::from_ir(ir))
@@ -3358,20 +3363,6 @@ fn layout_memo_key(
         max_layout_time_ms: guardrails.max_layout_time_ms,
         max_layout_iterations: guardrails.max_layout_iterations,
         max_route_ops: guardrails.max_route_ops,
-    }
-}
-
-fn hash_endpoint_value(hash: &mut u64, endpoint: IrEndpoint) {
-    match endpoint {
-        IrEndpoint::Unresolved => hash_u64(hash, 0),
-        IrEndpoint::Node(node_id) => {
-            hash_u64(hash, 1);
-            hash_u64(hash, node_id.0 as u64);
-        }
-        IrEndpoint::Port(port_id) => {
-            hash_u64(hash, 2);
-            hash_u64(hash, port_id.0 as u64);
-        }
     }
 }
 
@@ -21046,9 +21037,8 @@ mod tests {
     }
 
     #[test]
-    fn dependency_graph_cache_key_tracks_topology_not_label_text() {
+    fn dependency_topology_equal_tracks_topology_not_label_text() {
         let baseline = labeled_graph_ir(4, &[(0, 1), (1, 2), (2, 3)]);
-        let baseline_key = crate::dependency_graph_cache_key(&baseline);
 
         let mut relabeled = baseline.clone();
         let label_index = relabeled.labels.len();
@@ -21060,14 +21050,20 @@ mod tests {
         if let Some(node) = relabeled.nodes.get_mut(1) {
             node.label = Some(IrLabelId(label_index));
         }
-        assert_eq!(baseline_key, crate::dependency_graph_cache_key(&relabeled));
+        assert!(crate::dependency_topology_equal(&baseline, &relabeled));
 
         let mut rewired = baseline.clone();
         assert!(rewired.edges.get_mut(1).is_some());
         if let Some(edge) = rewired.edges.get_mut(1) {
             edge.to = IrEndpoint::Node(IrNodeId(3));
         }
-        assert_ne!(baseline_key, crate::dependency_graph_cache_key(&rewired));
+        assert!(!crate::dependency_topology_equal(&baseline, &rewired));
+
+        let mut renamed_node = baseline.clone();
+        if let Some(node) = renamed_node.nodes.get_mut(1) {
+            node.id = "renamed_node_id".to_string();
+        }
+        assert!(!crate::dependency_topology_equal(&baseline, &renamed_node));
     }
 
     #[test]
