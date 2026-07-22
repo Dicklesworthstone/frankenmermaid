@@ -1,5 +1,27 @@
 # Negative Evidence Ledger — frankenmermaid perf swarm
 
+### REJECT: streaming the flowchart line table is slower on both pinned large shapes (2026-07-22)
+
+- **Profile-first / distinct primitive:** symbolized parse put `parse_flowchart_document_items` at 9.88%
+  self and `ByteLines::next` at 5.37%; full wide pipeline put them at 3.24% and 1.23%. The prior line-Vec
+  presize reject allowed retry when line count was already known; this candidate reused the top-level
+  `input_lines` count and removed the transient `Vec<(usize, &str)>` entirely, streaming one iterator
+  through recursive subgraph parsing while keeping the landed item-Vec capacity.
+- **Pinned same-host CPU0 `A/B/null/B/A`, 10x Rust reps:** flow baseline/null median p50 **345,828 ns**
+  versus candidate midpoint **348,956 ns** = **+0.90% slower**. Wide baseline/null median **576,529 ns**
+  versus candidate midpoint **588,154 ns** = **+2.02% slower**. Every arm failed the mandatory CV-under-5%
+  KEEP gate due extreme right-tail preemption; robust MAD was below 3.2% except flow A2. The candidate's
+  unfavorable direction on both shapes is decisive regardless.
+- **Isomorphism:** every arm produced the identical pinned SVG SHA-256 and byte count: flow
+  `408ecdcc...2d2d21` / 343,946 bytes and wide `30d79510...81fce` / 534,365 bytes. Strict-remote parser
+  tests were 415/416; the sole failure is a byte-for-byte baseline test defect that asks a flowchart for
+  the Sankey-only class. Candidate removed; parser source hash matches `HEAD` exactly.
+- **Verdict: REJECT. Retry predicate:** do not retry line-table-only streaming. Reopen only in a different
+  fused parse-and-lower design that also removes `Vec<FlowDocumentItem>`, after a fresh full-pipeline
+  profile attributes >=8% self to document materialization. Require a pre-recorded null CV <5%, >=3%
+  direction-consistent wins on both pinned shapes, and exact IR/SVG plus conformance proof. Full artifact:
+  `.benchmarks/bd_1buv_2_flow_line_table_stream_NEGATIVE.md`.
+
 ### REJECT: two-entry endpoint temporal cache misses flow gate and regresses wide (2026-07-22)
 
 - **Profile-first / distinct primitive:** `NodeIdIndex::get_with_hash` was 9.39% parse self and 3.10%
