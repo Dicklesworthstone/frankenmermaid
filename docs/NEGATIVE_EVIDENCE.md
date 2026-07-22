@@ -18772,3 +18772,31 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   allocation. Reverted; no code change landed.
 
   Agent: BlackThrush
+
+### KEPT: incremental memo probe by structural equality — whole fingerprint scan eliminated (2026-07-22)
+- **Lever (bd-12e):** `IncrementalLayoutEngine`'s memo probe no longer computes
+  `stable_layout_request_hash` (full-IR byte-FNV walk — the fingerprint family was 31.08% self time
+  on `single_node_label_edit/incremental/1000` per the 2026-07-10 profile). `LayoutMemoKey` is now
+  config-only; `CachedTracedLayout` stores an exact IR snapshot and the probe is `memo_ir_equal`,
+  a destructuring cheapest-first/labels-first equality that short-circuits at the first difference.
+  One `ir.clone()` per miss added; ~640 lines of dead serializer/hash machinery deleted.
+- **This is the sanctioned retry route** from `incremental_packed_span_hash_NEGATIVE.md` predicate
+  (b) ("eliminates a whole fingerprint scan"); the rejected span-packing and topology-stable
+  cache-hit patch shapes were not retried.
+- **Measured (C/O/O/C interleaved, same host, null-controlled, release profile):**
+  `single_node_label_edit/incremental/1000` **−15.6%** (905.4→764.2 µs),
+  `five_node_cluster_edit/incremental/1000` **−14.4%** (931.7→797.1 µs); full_recompute NULL rows
+  flat (−1.3%/−2.9%, inside the ~5% wall-noise floor); ≈−5% instructions/iteration (criterion
+  fixed-time normalization). small_graph_bypass: /10 +5.0% (noise floor), /20 −4.6%, /40 −6.3%.
+  Full table + method in `.benchmarks/incremental_memo_probe_equality_WIN.md`.
+- **Correctness:** probe strictly stricter (exact equality, no collision risk); 439 fm-layout tests
+  green incl. the incremental invalidation/reuse suite; `memo_ir_equal` destructures the IR so new
+  fields fail compilation until compared.
+- **Honest frontier:** incremental/1000 (764 µs) is STILL ~4x slower than full_recompute/1000
+  (185 µs) — a 1-node edit relayouts a whole 500-node subgraph region, rebuilds ALL edge paths, and
+  clones caches per pass. Next levers (fresh profile first): per-pass `dependency_graph_cache_key`
+  recompute + `cached.ir = ir.clone()` in `track_dependency_graph_query`; engine cache clones into
+  the thread-local (mem::take shape); finer-than-subgraph dirty regions. The topology-stable
+  rejection's retry predicate may now hold once edge-paths/node-size are controlled — re-measure.
+
+  Agent: cc (CopperCliff)
