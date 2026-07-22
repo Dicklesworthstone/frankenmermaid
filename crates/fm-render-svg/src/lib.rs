@@ -3530,7 +3530,10 @@ fn write_layout_band_into(
                 .x(band.bounds.x + offset_x + 8.0)
                 .y(band.bounds.y + offset_y + 16.0)
                 .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                .font_size(clamp_font_size(config.font_size * 0.82, config.min_font_size))
+                .font_size(clamp_font_size(
+                    config.font_size * 0.82,
+                    config.min_font_size,
+                ))
                 .fill("var(--fm-text-color, #4a5568)")
                 .class("fm-band-label")
                 .build()
@@ -6786,8 +6789,21 @@ fn render_node_into(
         && node.callback().is_none()
     {
         write_requirement_node_fragment_into::<true>(
-            out, meta, node_id, node_box.node_index, raw_label_text, &label_text, x, y, w, h,
-            config.rounded_corners * 0.55, cx, node_font_size, config, colors,
+            out,
+            meta,
+            node_id,
+            node_box.node_index,
+            raw_label_text,
+            &label_text,
+            x,
+            y,
+            w,
+            h,
+            config.rounded_corners * 0.55,
+            cx,
+            node_font_size,
+            config,
+            colors,
         );
         return;
     }
@@ -6818,8 +6834,21 @@ fn render_node_into(
         && node.callback().is_none()
     {
         write_requirement_node_fragment_into::<false>(
-            out, meta, node_id, node_box.node_index, raw_label_text, &label_text, x, y, w, h,
-            config.rounded_corners * 0.55, cx, node_font_size, config, colors,
+            out,
+            meta,
+            node_id,
+            node_box.node_index,
+            raw_label_text,
+            &label_text,
+            x,
+            y,
+            w,
+            h,
+            config.rounded_corners * 0.55,
+            cx,
+            node_font_size,
+            config,
+            colors,
         );
         return;
     }
@@ -6859,8 +6888,22 @@ fn render_node_into(
         && let Some(user_classes) = simple_class_node_user_suffix(node)
     {
         write_class_node_fragment_into::<true>(
-            out, node, meta, node_id, node_box.node_index, raw_label_text, ir, x, y, w, h,
-            config.rounded_corners * 0.55, node_font_size, config, colors, &user_classes,
+            out,
+            node,
+            meta,
+            node_id,
+            node_box.node_index,
+            raw_label_text,
+            ir,
+            x,
+            y,
+            w,
+            h,
+            config.rounded_corners * 0.55,
+            node_font_size,
+            config,
+            colors,
+            &user_classes,
         );
         return;
     }
@@ -6888,8 +6931,22 @@ fn render_node_into(
         && let Some(user_classes) = simple_class_node_user_suffix(node)
     {
         write_class_node_fragment_into::<false>(
-            out, node, meta, node_id, node_box.node_index, raw_label_text, ir, x, y, w, h,
-            config.rounded_corners * 0.55, node_font_size, config, colors, &user_classes,
+            out,
+            node,
+            meta,
+            node_id,
+            node_box.node_index,
+            raw_label_text,
+            ir,
+            x,
+            y,
+            w,
+            h,
+            config.rounded_corners * 0.55,
+            node_font_size,
+            config,
+            colors,
+            &user_classes,
         );
         return;
     }
@@ -13238,7 +13295,10 @@ mod tests {
                     write_layout_band_into(&mut streamed, &band, 3.0, 5.0, &config);
                     let mut slow = String::new();
                     render_layout_band(&band, 3.0, 5.0, &config).write_to_string(&mut slow);
-                    assert_eq!(streamed, slow, "band kind {kind:?} embed {embed} label {label:?}");
+                    assert_eq!(
+                        streamed, slow,
+                        "band kind {kind:?} embed {embed} label {label:?}"
+                    );
                 }
             }
         }

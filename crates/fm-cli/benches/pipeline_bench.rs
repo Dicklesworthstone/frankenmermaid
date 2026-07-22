@@ -496,13 +496,21 @@ fn gen_c4(elements: usize) -> String {
     let mut s = String::from("C4Context\n  title System Context\n");
     for i in 0..elements {
         if i % 2 == 0 {
-            s.push_str(&format!("  Person(user{i}, \"User {i}\", \"A user number {i}\")\n"));
+            s.push_str(&format!(
+                "  Person(user{i}, \"User {i}\", \"A user number {i}\")\n"
+            ));
         } else {
-            s.push_str(&format!("  System(sys{i}, \"System {i}\", \"The system {i}\")\n"));
+            s.push_str(&format!(
+                "  System(sys{i}, \"System {i}\", \"The system {i}\")\n"
+            ));
         }
     }
     for i in 0..elements.saturating_sub(1) {
-        s.push_str(&format!("  Rel(user{}, sys{}, \"Uses\", \"HTTPS\")\n", i & !1, (i + 1) | 1));
+        s.push_str(&format!(
+            "  Rel(user{}, sys{}, \"Uses\", \"HTTPS\")\n",
+            i & !1,
+            (i + 1) | 1
+        ));
     }
     s
 }

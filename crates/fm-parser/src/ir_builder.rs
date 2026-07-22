@@ -1107,7 +1107,8 @@ impl IrBuilder {
         // (moving it into the hot path regressed flowchart +0.11% via inlining), and a subgraph-free diagram
         // never reaches here so pays no unused-map allocation. Capacity-only ⇒ behavior-identical.
         if self.cluster_member_set.capacity() == 0 {
-            self.cluster_member_set.reserve(self.ir.nodes.capacity().max(4));
+            self.cluster_member_set
+                .reserve(self.ir.nodes.capacity().max(4));
         }
 
         if let Some(&existing_index) = self.cluster_index_by_key.get(normalized_key) {
@@ -1204,7 +1205,8 @@ impl IrBuilder {
 
         // See `ensure_cluster`: one-time member-set reserve on first subgraph, off the per-node hot path.
         if self.subgraph_member_set.capacity() == 0 {
-            self.subgraph_member_set.reserve(self.ir.nodes.capacity().max(4));
+            self.subgraph_member_set
+                .reserve(self.ir.nodes.capacity().max(4));
         }
 
         if let Some(&existing_index) = self.subgraph_index_by_key.get(normalized_lookup_key) {
@@ -1327,7 +1329,13 @@ impl IrBuilder {
         shape: NodeShape,
         span: Span,
     ) -> Option<IrNodeId> {
-        self.intern_node_auto_normalized(id, label.map(NodeLabelInput::ParsedOwned), shape, span, false)
+        self.intern_node_auto_normalized(
+            id,
+            label.map(NodeLabelInput::ParsedOwned),
+            shape,
+            span,
+            false,
+        )
     }
 
     pub(crate) fn intern_node(

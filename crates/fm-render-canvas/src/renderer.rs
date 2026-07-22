@@ -731,7 +731,11 @@ impl Canvas2dRenderer {
             if let Some(title_text) = title_text {
                 ctx.set_fill_style(&self.config.label_color);
                 ctx.set_font(cluster_label_font.get_or_insert_with(|| {
-                    format!("{}px {}", self.config.font_size * 0.9, self.config.font_family)
+                    format!(
+                        "{}px {}",
+                        self.config.font_size * 0.9,
+                        self.config.font_family
+                    )
                 }));
                 ctx.set_text_align(TextAlign::Left);
                 ctx.set_text_baseline(TextBaseline::Top);

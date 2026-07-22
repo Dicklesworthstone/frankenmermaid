@@ -571,7 +571,8 @@ struct BlockBetaDocumentParseResult {
 // every choice point — `InputRef::add_alt` + `Vec<Located<Rich>>::truncate`, ~30% of shaped-node parse
 // (hexagon/diamond/…) on SUCCESSFUL parses — is pure waste. Output-identical: the combinators and their
 // success/failure are unchanged; only the discarded error detail is cheaper, and no `recover_with` uses it.
-fn flow_statement_parser<'a>() -> impl Parser<'a, &'a str, FlowAst, extra::Err<chumsky::error::EmptyErr>> {
+fn flow_statement_parser<'a>()
+-> impl Parser<'a, &'a str, FlowAst, extra::Err<chumsky::error::EmptyErr>> {
     // -- Whitespace helpers --------------------------------------------------
     let ws_char = any().filter(|c: &char| *c == ' ' || *c == '\t');
     let inline_ws = ws_char.repeated().to(());
@@ -2798,15 +2799,18 @@ fn strip_class_cardinality(statement: &str) -> Option<(String, Option<String>, O
         return None;
     }
 
-    let result = format!("{}{}{}", trim_end_fast(&cleaned_left), op_str, cleaned_right);
+    let result = format!(
+        "{}{}{}",
+        trim_end_fast(&cleaned_left),
+        op_str,
+        cleaned_right
+    );
     Some((result, source_card, target_card))
 }
 
 fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<ClassStatement>> {
     if line.starts_with("class ") && line.ends_with('{') {
-        let raw_name = trim_fast(
-            trim_fast(line.trim_start_matches("class")).trim_end_matches('{'),
-        );
+        let raw_name = trim_fast(trim_fast(line.trim_start_matches("class")).trim_end_matches('{'));
         let (class_name, generics) = extract_class_generics(raw_name);
         return Some(vec![ClassStatement::BlockStart(
             class_name.to_string(),
@@ -2869,9 +2873,14 @@ fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<Class
             Some((cleaned, ..)) => cleaned.as_str(),
             None => statement,
         };
-        if let Some(asts) =
-            parse_edge_statement_asts(edge_input, &CLASS_OPERATORS, CLASS_OP_GATE, false, config, 0)
-        {
+        if let Some(asts) = parse_edge_statement_asts(
+            edge_input,
+            &CLASS_OPERATORS,
+            CLASS_OP_GATE,
+            false,
+            config,
+            0,
+        ) {
             for ast in asts {
                 statements.push(ClassStatement::Ast(ast));
                 // Attach cardinality to this edge in lower_class_statement. `stripped` is `Some`
@@ -3043,7 +3052,8 @@ fn parse_state_statements(line: &str, config: &ParserConfig) -> Option<Vec<State
     // `[*]` standalone is handled as a node in the edge parsing
     let mut statements = Vec::new();
     for statement in split_statements(line) {
-        if let Some(asts) = parse_edge_statement_asts(statement, &FLOW_OPERATORS, FLOW_OP_GATE, false, config, 0)
+        if let Some(asts) =
+            parse_edge_statement_asts(statement, &FLOW_OPERATORS, FLOW_OP_GATE, false, config, 0)
         {
             statements.push(StateStatement::Edge(asts));
             continue;
@@ -3219,9 +3229,7 @@ fn extract_state_guard_action(
     if let Some(bracket_start) = clean.find('[')
         && let Some(bracket_end) = clean[bracket_start..].find(']')
     {
-        guard = Some(
-            trim_fast(&clean[bracket_start + 1..bracket_start + bracket_end]).to_string(),
-        );
+        guard = Some(trim_fast(&clean[bracket_start + 1..bracket_start + bracket_end]).to_string());
         clean = format!(
             "{}{}",
             trim_end_fast(&clean[..bracket_start]),
@@ -4000,19 +4008,18 @@ fn parse_requirement_relation(
 
     // Extract relationship type from `A - type ` prefix. Byte-scan the last ` - ` (was `rfind(" - ")`,
     // another per-line `TwoWaySearcher`). Byte-identical: `rposition` returns the last ` - ` start index.
-    let (left_part, relation_label) = if let Some(dash_pos) =
-        left_raw.as_bytes().windows(3).rposition(|w| w == b" - ")
-    {
-        let rel_type = left_raw[dash_pos + 3..].trim();
-        let left = left_raw[..dash_pos].trim();
-        if rel_type.is_empty() {
-            (left_raw.trim(), None)
+    let (left_part, relation_label) =
+        if let Some(dash_pos) = left_raw.as_bytes().windows(3).rposition(|w| w == b" - ") {
+            let rel_type = left_raw[dash_pos + 3..].trim();
+            let left = left_raw[..dash_pos].trim();
+            if rel_type.is_empty() {
+                (left_raw.trim(), None)
+            } else {
+                (left, Some(rel_type))
+            }
         } else {
-            (left, Some(rel_type))
-        }
-    } else {
-        (left_raw.trim(), None)
-    };
+            (left_raw.trim(), None)
+        };
 
     let left_id = left_part
         .split_whitespace()
@@ -4836,7 +4843,14 @@ fn parse_packet(input: &str, builder: &mut IrBuilder) {
         // Fallback: try generic node/edge parsing.
         let mut parsed_line = false;
         for statement in split_statements(trimmed) {
-            if parse_edge_statement(statement, line_number, line, &PACKET_OPERATORS, PACKET_OP_GATE, builder) {
+            if parse_edge_statement(
+                statement,
+                line_number,
+                line,
+                &PACKET_OPERATORS,
+                PACKET_OP_GATE,
+                builder,
+            ) {
                 parsed_line = true;
                 continue;
             }
@@ -4866,7 +4880,8 @@ fn parse_er_relationship(
         (statement.trim(), None)
     };
 
-    let Some((operator_idx, operator, arrow)) = find_operator(relation, &ER_OPERATORS, ER_OP_GATE) else {
+    let Some((operator_idx, operator, arrow)) = find_operator(relation, &ER_OPERATORS, ER_OP_GATE)
+    else {
         return false;
     };
 
@@ -6230,9 +6245,14 @@ fn parse_block_beta_document_items(
             continue;
         }
 
-        if let Some(asts) =
-            parse_edge_statement_asts(trimmed, &FLOW_OPERATORS, FLOW_OP_GATE, false, config, line_number)
-        {
+        if let Some(asts) = parse_edge_statement_asts(
+            trimmed,
+            &FLOW_OPERATORS,
+            FLOW_OP_GATE,
+            false,
+            config,
+            line_number,
+        ) {
             items.push(BlockBetaDocumentItem::Statement {
                 statement: BlockBetaStatement::Edges(asts),
                 line_number,
@@ -6532,7 +6552,10 @@ fn try_parse_block_beta_def(token: &str, config: &ParserConfig) -> Option<BlockD
         Some((candidate_core, candidate_span)) => {
             let span = trim_fast(candidate_span);
             if span.bytes().all(|b| b.is_ascii_digit()) {
-                (trim_fast(candidate_core), span.parse::<usize>().ok().unwrap_or(1))
+                (
+                    trim_fast(candidate_core),
+                    span.parse::<usize>().ok().unwrap_or(1),
+                )
             } else {
                 (trimmed, 1)
             }
@@ -7461,8 +7484,15 @@ fn parse_edge_statement(
     gate: u128,
     builder: &mut IrBuilder,
 ) -> bool {
-    parse_edge_statement_with_nodes(statement, line_number, source_line, operators, gate, builder)
-        .is_some()
+    parse_edge_statement_with_nodes(
+        statement,
+        line_number,
+        source_line,
+        operators,
+        gate,
+        builder,
+    )
+    .is_some()
 }
 
 fn parse_edge_statement_asts(
