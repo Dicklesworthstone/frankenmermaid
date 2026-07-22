@@ -1,5 +1,29 @@
 # Negative Evidence Ledger — frankenmermaid perf swarm
 
+### REJECT: two-entry endpoint temporal cache misses flow gate and regresses wide (2026-07-22)
+
+- **Profile-first / distinct primitive:** `NodeIdIndex::get_with_hash` was 9.39% parse self and 3.10%
+  full-wide-pipeline self. The pinned endpoint streams have 49.9% two-entry temporal reuse. This tested
+  exact-ID-verified move-to-front endpoint caching, not the already-landed Fx/hash-once/one-probe work.
+- **Candidate:** two `Option<IrNodeId>` slots in `IrBuilder`; `intern_edge_endpoint_pretrimmed` compared
+  exact node-ID bytes at those indices, returned the identical `IrNodeId` on a hit, and otherwise used the
+  existing intern/index path. The focused placeholder-upgrade/cache-order test passed remotely on `ovh-a`.
+- **Pinned same-host CPU0 `A/B/null/B/A`, 10x Rust reps:** flow p50s were A1 **352,762 ns** (CV 20.39%),
+  B1 **341,458** (2.67%), null-A **348,711** (3.24%), B2 **340,916** (5.12%), A2 **349,993**
+  (2.09%). B1/A1 was -3.20%, but B2/null only -2.24%; central delta **-2.52%**, below 3%.
+  Wide p50s were A1 **581,472 ns** (CV 5.26%), B1 **593,064** (4.98%), null-A **592,646**
+  (5.52%), B2 **582,043** (8.17%), A2 **583,392** (5.12%): central delta **+0.71% slower**.
+  Several arms also fail the mandatory CV-under-5% gate. Default/lean byte counts were identical.
+- **Fresh restored comparator:** after manual removal, source matched `HEAD` SHA-256
+  `c6fcdc2e12cd735bc47a30eda82b777c5f1a22eb29d3ec926f1b4f7fbc8dc1e8`. Pinned mermaid-js 11.15.0:
+  `flowchart_large_500` fm 349.488 us vs 1,231.1 ms = **3,522.58x**; `wide_16x32` fm 588.025 us
+  vs 3,430.2 ms = **5,833.43x**. Rust MAD 0.69%/0.79%; output 343,946/534,365 bytes.
+- **Verdict: REJECT. Retry predicate:** do not retry this exact two-entry cache. Reopen endpoint locality
+  only if a fresh full-pipeline profile raises node-index lookup above 8% self, or a different representation
+  avoids both candidate string comparisons. Require a pre-recorded null CV <5% and direction-consistent >=3%
+  on both pinned large-flowchart shapes. Full artifact:
+  `.benchmarks/bd_1buv_2_endpoint_temporal_cache_NEGATIVE.md`.
+
 ### SURFACE / BLOCKER: two-entry endpoint temporal cache held by stale parser leases (2026-07-22)
 
 - **Negative-evidence-first boundary:** the identifier-classification LUT is a recorded ~0-gain reject;
