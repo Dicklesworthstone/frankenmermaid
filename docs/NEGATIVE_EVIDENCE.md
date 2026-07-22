@@ -18926,3 +18926,17 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   (−56%). Table: `.benchmarks/incremental_shared_pass_snapshot_WIN.md`.
 
   Agent: cc (CopperCliff)
+
+### KEPT: graph-metrics probe by equality — third per-pass FNV walk eliminated (2026-07-22)
+- **Lever (bd-12e/bd-9rq7):** `graph_metrics_cache` keyed by `Arc<MermaidDiagramIr>` snapshot +
+  `metrics_topology_equal` (node count, raw endpoints, port→node — exactly `resolved_edges`'
+  inputs) instead of the FNV hash over resolved index pairs (which also allocated a Vec per
+  probe). Miss-store reuses the shared pass_snapshot when equal (no extra clone in steady state).
+- **Measured (two interleave sets, opposite orders, pooled):** single **−6.3%**, five **−8.6%**
+  (≈−6% null-adjusted). Cumulative bd-12e: ~905 → ~375 µs (−59%) on single/1000. Table:
+  `.benchmarks/incremental_metrics_topology_equality_WIN.md`.
+- **The hash→equality family is now complete** (memo 211c5ced, dependency bcf8c44d, metrics here):
+  zero per-pass FNV topology walks remain. Next: edge-path rebuild, redundant dirty re-derive,
+  region granularity.
+
+  Agent: cc (CopperCliff)

@@ -575,7 +575,7 @@ struct CachedDependencyGraph {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 struct IncrementalCacheState {
-    graph_metrics_cache: Option<(u64, GraphMetrics)>,
+    graph_metrics_cache: Option<(Arc<MermaidDiagramIr>, GraphMetrics)>,
     // Lookup-only cache: get/insert by `node.id`, never iterated for output order, so an
     // `FxHashMap` replaces the `BTreeMap<String, _>`'s O(log N) String-memcmp probe per node with
     // an O(1) hash on the incremental relayout path (`compute_node_sizes` maps over all nodes).
@@ -1052,7 +1052,7 @@ struct LayoutMemoKey {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct IncrementalLayoutEngine {
     cached: Option<CachedTracedLayout>,
-    graph_metrics_cache: Option<(u64, GraphMetrics)>,
+    graph_metrics_cache: Option<(Arc<MermaidDiagramIr>, GraphMetrics)>,
     // See `IncrementalCacheState::node_size_cache`: lookup-only, never iterated for output.
     node_size_cache: FxHashMap<String, CachedNodeSize>,
     dependency_graph_cache: Option<CachedDependencyGraph>,
@@ -1257,10 +1257,10 @@ fn try_graph_metrics_cache_hit(ir: &MermaidDiagramIr) -> Option<GraphMetrics> {
     ACTIVE_INCREMENTAL_STATE.with(|slot| {
         let mut state = slot.borrow_mut();
         let state = state.as_mut()?;
-        let topology_key = graph_metrics_cache_key(ir);
-        if let Some((cached_key, cached_metrics)) = state.graph_metrics_cache
-            && cached_key == topology_key
+        if let Some((cached_ir, cached_metrics)) = state.graph_metrics_cache.as_ref()
+            && metrics_topology_equal(cached_ir, ir)
         {
+            let cached_metrics = *cached_metrics;
             let total_nodes = ir.nodes.len();
             let summary = IncrementalQuerySummary {
                 query_type: "graph_metrics",
@@ -1295,9 +1295,18 @@ fn record_graph_metrics_cache_miss(
         let Some(state) = state.as_mut() else {
             return;
         };
-        let topology_key = graph_metrics_cache_key(ir);
         let recompute_duration_us = duration.as_micros().try_into().unwrap_or(u64::MAX);
-        state.graph_metrics_cache = Some((topology_key, metrics));
+        // Reuse the pass snapshot as the comparison anchor when it matches the queried IR (it
+        // always does for the engine's own pass); only exotic callers pay a fresh clone. The
+        // stored snapshot only needs to be metrics-topology-equal to the IR whose metrics were
+        // cached, so reusing an equal snapshot is exact.
+        let snapshot = state
+            .pass_snapshot
+            .as_ref()
+            .filter(|snapshot| metrics_topology_equal(snapshot, ir))
+            .cloned()
+            .unwrap_or_else(|| Arc::new(ir.clone()));
+        state.graph_metrics_cache = Some((snapshot, metrics));
         let summary = IncrementalQuerySummary {
             query_type: "graph_metrics",
             cache_hit: false,
@@ -1312,7 +1321,6 @@ fn record_graph_metrics_cache_miss(
         trace!(
             query_type = summary.query_type,
             dependency = "graph_topology",
-            topology_key,
             "incremental.dependency_update"
         );
         trace!(
@@ -1327,16 +1335,28 @@ fn record_graph_metrics_cache_miss(
     });
 }
 
-fn graph_metrics_cache_key(ir: &MermaidDiagramIr) -> u64 {
-    let edges = resolved_edges(ir);
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    hash_u64(&mut hash, ir.nodes.len() as u64);
-    hash_u64(&mut hash, edges.len() as u64);
-    for edge in edges {
-        hash_u64(&mut hash, edge.source as u64);
-        hash_u64(&mut hash, edge.target as u64);
-    }
-    hash
+/// Metrics-relevant topology equality, covering exactly the inputs of `resolved_edges` (whose
+/// resolved index pairs the former `graph_metrics_cache_key` hashed): node count, raw edge
+/// endpoints, and port→node assignments (port resolution feeds resolved endpoints). No
+/// allocation, short-circuits at the first difference, and cannot false-hit on a hash collision.
+/// Conservative vs the hash: an edit that changes raw endpoints while resolving to identical
+/// index pairs now misses and recomputes the same metrics instead of hitting.
+fn metrics_topology_equal(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> bool {
+    previous.nodes.len() == current.nodes.len()
+        && previous.edges.len() == current.edges.len()
+        && previous.ports.len() == current.ports.len()
+        && previous
+            .edges
+            .iter()
+            .zip(&current.edges)
+            .all(|(previous_edge, current_edge)| {
+                previous_edge.from == current_edge.from && previous_edge.to == current_edge.to
+            })
+        && previous
+            .ports
+            .iter()
+            .zip(&current.ports)
+            .all(|(previous_port, current_port)| previous_port.node == current_port.node)
 }
 
 const INCREMENTAL_DEPENDENCY_GRAPH_BYPASS_NODE_THRESHOLD: usize = 50;
@@ -2994,7 +3014,7 @@ impl IncrementalLayoutEngine {
 
         trace!(algorithm = algorithm.as_str(), "incremental.cache_miss");
         let mut incremental_state = IncrementalCacheState {
-            graph_metrics_cache: self.graph_metrics_cache,
+            graph_metrics_cache: self.graph_metrics_cache.take(),
             // Move, don't clone: nothing reads `self.node_size_cache` while the pass runs (all
             // in-pass access goes through the installed thread-local state), and every exit path
             // below writes the state's map back onto `self`.
@@ -21200,7 +21220,7 @@ mod tests {
         );
 
         engine.graph_metrics_cache = Some((
-            u64::MAX,
+            Arc::new(MermaidDiagramIr::empty(DiagramType::Flowchart)),
             GraphMetrics {
                 node_count: 999,
                 edge_count: 999,
