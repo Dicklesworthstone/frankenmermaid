@@ -214,20 +214,6 @@ fn gen_input(shape: &str, n: usize) -> String {
                 ));
             }
         }
-        "requirement" => {
-            l.push("requirementDiagram".into());
-            for i in 0..n {
-                l.push(format!("  requirement R{i} {{"));
-                l.push(format!("    id: {i}"));
-                l.push("    text: the requirement text".into());
-                l.push("    risk: high".into());
-                l.push("    verifymethod: test".into());
-                l.push("  }".into());
-            }
-            for i in 0..n.saturating_sub(1) {
-                l.push(format!("  R{i} - satisfies -> R{}", i + 1));
-            }
-        }
         "timeline" => {
             l.push("timeline".into());
             l.push("  title Timeline".into());
