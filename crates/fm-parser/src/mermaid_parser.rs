@@ -1820,8 +1820,8 @@ fn looks_like_explicit_subgraph_id(raw: &str) -> bool {
         .trim_matches('\'')
         .trim_matches('`');
     !trimmed.is_empty()
-        && trimmed.chars().all(|ch| {
-            ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '_' | '-' | '.' | '/')
+        && trimmed.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-' | b'.' | b'/')
         })
 }
 
@@ -2119,7 +2119,7 @@ fn decode_mermaid_entity_token(token: &str) -> Option<char> {
             return char::from_u32(value);
         }
 
-        if numeric.chars().all(|ch| ch.is_ascii_digit()) {
+        if numeric.bytes().all(|b| b.is_ascii_digit()) {
             let value = numeric.parse::<u32>().ok()?;
             return char::from_u32(value);
         }
@@ -6442,7 +6442,7 @@ fn parse_block_beta_group_start(line: &str) -> Option<(String, Option<usize>)> {
 
     let (raw_key, span_cols) = match rest.rsplit_once(':') {
         Some((candidate_key, candidate_span))
-            if candidate_span.trim().chars().all(|ch| ch.is_ascii_digit()) =>
+            if candidate_span.trim().bytes().all(|b| b.is_ascii_digit()) =>
         {
             (
                 candidate_key.trim(),
