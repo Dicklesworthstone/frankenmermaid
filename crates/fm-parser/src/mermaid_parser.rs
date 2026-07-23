@@ -1238,7 +1238,7 @@ fn parse_flowchart_document_items<'a>(
         // equal to `trimmed`, so skip both passes (their per-line calls AND their internal `%`/`;` scans)
         // entirely. Byte-identical: `strip_flowchart_inline_comment` returns `trimmed` unchanged when there
         // is no `%`, and `split_statements` yields exactly `[trimmed]` when there is no `;`.
-        let has_special = trimmed.as_bytes().iter().any(|&b| b == b'%' || b == b';');
+        let has_special = memchr::memchr2(b'%', b';', trimmed.as_bytes()).is_some();
         let uncommented_line = if has_special {
             strip_flowchart_inline_comment(trimmed)
         } else {
