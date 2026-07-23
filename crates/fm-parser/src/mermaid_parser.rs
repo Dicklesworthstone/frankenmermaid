@@ -1076,7 +1076,7 @@ impl<'a> Iterator for ByteLines<'a> {
         if self.start > bytes.len() {
             return None;
         }
-        match bytes[self.start..].iter().position(|&b| b == b'\n') {
+        match memchr::memchr(b'\n', &bytes[self.start..]) {
             Some(rel) => {
                 let nl = self.start + rel;
                 let end = if nl > self.start && bytes[nl - 1] == b'\r' {
