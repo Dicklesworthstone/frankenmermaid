@@ -10013,13 +10013,8 @@ mod tests {
         assert!(parsed.ir.nodes.iter().any(|node| node.id == "A"));
         assert!(parsed.ir.nodes.iter().any(|node| node.id == "B"));
         assert!(parsed.ir.nodes.iter().any(|node| node.id == "C"));
-        assert!(
-            parsed
-                .ir
-                .nodes
-                .iter()
-                .all(|node| node.classes == ["sankey-node"])
-        );
+        // A plain flowchart with no classDef/class directives attaches no classes to its nodes.
+        assert!(parsed.ir.nodes.iter().all(|node| node.classes.is_empty()));
     }
 
     #[test]
