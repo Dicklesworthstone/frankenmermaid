@@ -1693,7 +1693,7 @@ pub(crate) fn sanitize_svg_paint(value: &str) -> Option<String> {
     }
 
     if trimmed.starts_with('#')
-        && trimmed[1..].chars().all(|ch| ch.is_ascii_hexdigit())
+        && trimmed[1..].bytes().all(|b| b.is_ascii_hexdigit())
         && matches!(trimmed.len(), 4 | 5 | 7 | 9)
     {
         return Some(trimmed.to_string());
