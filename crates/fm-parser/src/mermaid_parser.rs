@@ -2672,8 +2672,10 @@ fn extract_class_generics(raw_name: &str) -> (&str, Vec<String>) {
 }
 
 /// Parse a class member declaration like `+String name`, `-int age`, `#doSomething() void`.
-fn parse_class_member(line: &str) -> Option<fm_core::IrClassMember> {
-    let trimmed = trim_fast(line);
+fn parse_class_member(trimmed: &str) -> Option<fm_core::IrClassMember> {
+    // The sole caller (the `parse_class_statements` line loop) already `trim_fast`s the line and
+    // `continue`s on an empty/comment line, so `trimmed` is a non-empty, whitespace-trimmed slice.
+    // Re-trimming here re-scanned every member line for whitespace that is provably absent.
     if trimmed.is_empty() {
         return None;
     }
