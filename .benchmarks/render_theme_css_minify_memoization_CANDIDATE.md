@@ -40,6 +40,30 @@ effort rather than rushed. Retry predicate: implement option 1 (lowest risk), pr
 byte-identical (`cargo test -p fm-render-svg` + workspace goldens), then one-binary interleaved A/B on
 `render_nonflowchart/nf/{er_40,sequence_40,class_50}` at CPU-load <8, require ≥3% wall with CV<5%.
 
+## Concrete design (informed by reading the code, 2026-07-23)
+
+The fully-processed theme CSS is a PURE FUNCTION of a tiny key: `to_svg_style(shadows, has_edge_labels)`
+then `strip_unused_theme_css` gates on exactly 3 ir booleans (`has_clusters`, `has_special_shapes`
+{Note/Cloud/Cylinder/Star/Pentagon}, `has_dashed_or_thick`). So `minify_css(to_svg_style+strip)` depends
+only on `(theme_identity, shadows, has_edge_labels, has_clusters, has_special_shapes, has_dashed_or_thick)`
+— ≤32 classes per theme. `theme_identity` MUST hash the full theme surface that `to_svg_style` reads
+(`theme.colors.write_css_vars`, `theme.font.write_css`, plus any `theme_variables` overrides) — a missed
+field silently ships WRONG COLORS (golden tests cover only the default theme, so this is the real hazard).
+
+Implementation:
+1. Thread-safe memo (e.g. `Mutex<Vec<(Key, Arc<str>)>>` or `OnceLock` per class; ≤32 entries) returning the
+   MINIFIED theme CSS for a key. Miss → `minify_css(strip(to_svg_style(...)))` → store.
+2. Push the cached minified theme CSS.
+3. Track whether any PRETTY (unminified) dynamic CSS (classDef/style/inline) is pushed after it. If none
+   (the common no-custom-styling render — most of the corpus), the whole `<style>` block is already
+   minified → **skip `minify_style_block`** (that skip is where the 9.5% is actually reclaimed; caching
+   alone doesn't help because `minify_style_block` re-scans the block regardless).
+4. If pretty dynamic CSS WAS added, run `minify_style_block` as today (correctness preserved).
+
+Risk/reward: ~2% end-to-end on small diagrams (already ≫100× mermaid-js), against a cache-key correctness
+surface that can ship wrong colors for non-default themes if incomplete. Marginal EV, real risk ⇒ warrants
+a focused session with per-theme golden coverage, NOT a cycle-tail rush.
+
 ## Marker-scan fuse (sub-lever, below floor)
 
 `strip_unused_markers` (builds `referenced` from `url(#…)`, strips dead marker defs) and
