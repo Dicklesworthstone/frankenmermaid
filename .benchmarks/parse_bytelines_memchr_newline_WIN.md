@@ -57,3 +57,27 @@ against `git show HEAD:...` (fails identically), unrelated to newline scanning (
 broken test on main, not touched per AGENTS.md). clippy `-D warnings` + `cargo fmt --check` clean.
 
 ## Verdict: KEEP. One-line change; wins non-flowchart parse 2-6%, flat on flowchart.
+
+---
+
+## FOLLOW-ON (c86f06a3): memchr2 the per-line `%`/`;` `has_special` gate
+
+The flowchart line loop's `has_special = trimmed.as_bytes().iter().any(|&b| b == b'%' || b == b';')`
+gate is a 2-byte-OR closure that (unlike a single-byte `str::find`, which std specializes to memchr)
+does NOT autovectorize, and for the common CLEAN line scans every byte with no early exit. Swapped to
+`memchr::memchr2(b'%', b';', ...).is_some()` (byte-identical). Directionally faster in every
+interleaved A/B run: **~2% on flowchart parse** (medium_100 ~2-6%, large_1000 ~1.5-3.7%; the synthetic
+8-byte lines are memchr2's WORST case — the win is bigger on real labeled-edge lines). 416/416 tests.
+Kept as a simple byte-identical directionally-positive one-liner on the dominant corpus weight.
+
+### memchr byte-scan vein — analysis (which patterns win)
+
+- `str::find/contains/rfind(char)` already route to std memchr / memrchr — NOT candidates.
+- `slice.iter().position(|&b| b==X)` / `.any(|&b| b==X || b==Y)` (raw-slice byte-eq CLOSURES) do NOT
+  autovectorize → real memchr/memchr2 candidates. **Wins scale with haystack length and require the
+  scan to run to completion (no early exit) on the common case.** `ByteLines::next` newline (full
+  line, per line) and `has_special` (full line, per line) both won.
+- REMAINING candidates rejected pre-build: `label_raw ... any(|&b| b=='[' || b==']')` (line ~1681) is
+  COLD — the bracketed-node path isn't exercised by `gen_flowchart`'s plain ids; `right.bytes().any(
+  matches!(b'-'|b'='|b'<'))` (line ~1611, fast-edge path) scans the 2-3 byte `right` node id where
+  memchr3 setup exceeds the scalar scan → would flat-or-REGRESS on the hottest path. Vein exhausted.
