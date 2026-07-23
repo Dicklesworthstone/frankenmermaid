@@ -636,6 +636,25 @@ thread_local! {
     static ACTIVE_INCREMENTAL_SESSION: RefCell<Option<SharedIncrementalLayoutSession>> = const { RefCell::new(None) };
 }
 
+// Test-only escape hatch to force the incremental engine down the slow selective relayout path
+// even when the size-stable memo fast path would fire, so a test can prove the two paths produce
+// byte-identical output. Compiles to a `const false` in release, so the fast-path gate collapses
+// to its production form with zero overhead.
+#[cfg(test)]
+thread_local! {
+    static DISABLE_SIZE_STABLE_FAST_PATH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn size_stable_fast_path_disabled() -> bool {
+    DISABLE_SIZE_STABLE_FAST_PATH.with(std::cell::Cell::get)
+}
+
+#[cfg(not(test))]
+const fn size_stable_fast_path_disabled() -> bool {
+    false
+}
+
 struct ActiveIncrementalStateGuard;
 
 impl ActiveIncrementalStateGuard {
@@ -3026,7 +3045,7 @@ impl IncrementalLayoutEngine {
         incremental_state.begin_pass();
         let state_guard = ActiveIncrementalStateGuard::install(incremental_state);
         if let Some(mut traced) =
-            self.try_incremental_subgraph_relayout(ir, algorithm, &config, guardrails)
+            self.try_incremental_subgraph_relayout(ir, algorithm, &config, guardrails, key)
         {
             let selective_recomputed_nodes = traced.trace.incremental.recomputed_nodes.max(1);
             let mut incremental_state = state_guard.finish();
@@ -3040,7 +3059,9 @@ impl IncrementalLayoutEngine {
             self.node_size_cache = incremental_state.node_size_cache;
             self.dependency_graph_cache = incremental_state.dependency_graph_cache;
             traced.trace.incremental = IncrementalRecomputeTrace {
-                query_type: "layout_incremental_subgraph_relayout",
+                // Preserve the inner path's query_type: the size-stable fast path reports a
+                // distinct marker so tests and diagnostics can verify it actually fired.
+                query_type: traced.trace.incremental.query_type,
                 cache_hit: false,
                 recomputed_nodes: selective_recomputed_nodes,
                 total_nodes: incremental_state
@@ -3125,6 +3146,7 @@ impl IncrementalLayoutEngine {
         algorithm: LayoutAlgorithm,
         config: &LayoutConfig,
         guardrails: LayoutGuardrails,
+        key: LayoutMemoKey,
     ) -> Option<TracedLayout> {
         let cached_layout = self.cached.as_ref()?;
         let cached_graph = self.dependency_graph_cache.as_ref()?;
@@ -3135,11 +3157,6 @@ impl IncrementalLayoutEngine {
             return None;
         }
 
-        let dispatch = dispatch_layout_algorithm(ir, algorithm);
-        let guard = evaluate_layout_guardrails(ir, dispatch.selected, guardrails);
-        if guard.fallback_applied || guard.selected_algorithm != LayoutAlgorithm::Sugiyama {
-            return None;
-        }
         if ir.nodes.len() != cached_graph.ir.nodes.len() {
             return None;
         }
@@ -3157,15 +3174,163 @@ impl IncrementalLayoutEngine {
             return None;
         }
 
-        track_dependency_graph_query(ir);
-        let incremental_start = std::time::Instant::now();
-
-        // Fast path: for label/style-only edits, reuse the cached dependency graph
-        // (topology unchanged) and derive dirty set directly from edits, avoiding
-        // the expensive dirty_node_indexes_for_edits walk.
+        // Label/style-only edits leave the dependency topology unchanged, so the cached
+        // dependency graph can be reused and the dirty set derived directly from edits.
         let all_node_changes = edits
             .iter()
             .all(|e| matches!(e, LayoutEdit::NodeChanged { .. }));
+
+        let metrics = config
+            .font_metrics
+            .clone()
+            .unwrap_or_else(fm_core::FontMetrics::default_metrics);
+
+        // Size-stable memo fast path (Adapton region memoization), checked BEFORE algorithm
+        // dispatch and guardrail evaluation: when the config key is unchanged, the topology is
+        // unchanged (label-text-only node edits), and every dirty node's freshly measured size
+        // is bit-equal to its cached box, every downstream phase — dispatch, guardrail fallback
+        // selection, and the full deterministic layout — is a pure function of inputs that have
+        // not changed, so the cached geometry (and the cached dispatch/guard decisions carried
+        // in its trace) is exactly what recomputing would produce. Serving it keeps size-stable
+        // label edits cheap even on graphs large enough that guardrails re-route the pipeline
+        // off Sugiyama, where the selective region relayout below is unavailable.
+        if all_node_changes && cached_layout.key == key && !size_stable_fast_path_disabled() {
+            let dirty_node_indexes: BTreeSet<usize> = edits
+                .iter()
+                .filter_map(|e| match e {
+                    LayoutEdit::NodeChanged { node_index } => Some(*node_index),
+                    _ => None,
+                })
+                .collect();
+            let label_text_only_and_size_stable = !dirty_node_indexes.is_empty()
+                && dirty_node_indexes.iter().all(|&node_index| {
+                    match (
+                        cached_graph.ir.nodes.get(node_index),
+                        ir.nodes.get(node_index),
+                        cached_layout.traced.layout.nodes.get(node_index),
+                    ) {
+                        (Some(previous), Some(node), Some(node_box)) => {
+                            // NodeChanged also fires for id and subgraph-membership edits,
+                            // which can move the node between regions and clusters; cached
+                            // geometry only stays valid for label-TEXT-only changes.
+                            previous.id == node.id
+                                && cached_graph
+                                    .ir
+                                    .graph
+                                    .nodes
+                                    .get(node_index)
+                                    .map(|graph_node| &graph_node.subgraphs)
+                                    == ir
+                                        .graph
+                                        .nodes
+                                        .get(node_index)
+                                        .map(|graph_node| &graph_node.subgraphs)
+                                && {
+                                    let (width, height) = compute_node_size(ir, node, &metrics);
+                                    width.to_bits() == node_box.bounds.width.to_bits()
+                                        && height.to_bits() == node_box.bounds.height.to_bits()
+                                }
+                        }
+                        _ => false,
+                    }
+                });
+            if label_text_only_and_size_stable {
+                let mut dirty = DirtySet::default();
+                let mut recomputed_node_count = 0usize;
+                for (region_id, region) in cached_graph.graph.regions() {
+                    if !region.node_indexes.is_disjoint(&dirty_node_indexes) {
+                        dirty.insert(*region_id);
+                        recomputed_node_count += region.node_indexes.len();
+                    }
+                }
+                if !dirty.is_empty() {
+                    // Maintains the dependency cache and installs the shared per-pass IR
+                    // snapshot exactly like the slow path, so cache freshness semantics are
+                    // identical whichever path serves the request.
+                    track_dependency_graph_query(ir);
+                    let incremental_start = std::time::Instant::now();
+
+                    let mut nodes = cached_layout.traced.layout.nodes.clone();
+                    for (node_index, node_box) in nodes.iter_mut().enumerate() {
+                        node_box.span = ir
+                            .nodes
+                            .get(node_index)
+                            .map_or(Span::default(), |node| node.span_primary);
+                    }
+                    let dirty_regions: Vec<LayoutRect> = dirty
+                        .regions
+                        .iter()
+                        .filter_map(|region_id| {
+                            cached_graph.graph.regions().get(region_id).map(|region| {
+                                layout_bounds_for_members(
+                                    &region.node_indexes.iter().copied().collect::<Vec<_>>(),
+                                    &nodes,
+                                )
+                                .unwrap_or(LayoutRect {
+                                    x: 0.0,
+                                    y: 0.0,
+                                    width: 0.0,
+                                    height: 0.0,
+                                })
+                            })
+                        })
+                        .collect();
+
+                    // The cached trace already carries the dispatch and guard decisions
+                    // computed for this same topology and config; reuse them verbatim.
+                    let mut trace = cached_layout.traced.trace.clone();
+                    // Same retention rule as the slow path below: keep the original
+                    // full-layout phase snapshots plus exactly the latest incremental one.
+                    trace
+                        .snapshots
+                        .retain(|snapshot| snapshot.stage != "incremental_subgraph_relayout");
+                    push_snapshot(
+                        &mut trace,
+                        "incremental_subgraph_relayout",
+                        ir.nodes.len(),
+                        ir.edges.len(),
+                        cached_layout.traced.layout.stats.reversed_edges,
+                        cached_layout.traced.layout.stats.crossing_count,
+                    );
+                    let mut stats = cached_layout.traced.layout.stats;
+                    stats.phase_iterations = trace.snapshots.len();
+
+                    return Some(TracedLayout {
+                        layout: DiagramLayout {
+                            nodes,
+                            clusters: cached_layout.traced.layout.clusters.clone(),
+                            cycle_clusters: cached_layout.traced.layout.cycle_clusters.clone(),
+                            edges: cached_layout.traced.layout.edges.clone(),
+                            bounds: cached_layout.traced.layout.bounds,
+                            stats,
+                            extensions: cached_layout.traced.layout.extensions.clone(),
+                            dirty_regions,
+                        },
+                        trace: LayoutTrace {
+                            incremental: IncrementalRecomputeTrace {
+                                query_type: "layout_incremental_subgraph_relayout_size_stable",
+                                cache_hit: false,
+                                recomputed_nodes: recomputed_node_count,
+                                total_nodes: ir.nodes.len(),
+                                recompute_duration_us: saturating_elapsed_micros(
+                                    incremental_start.elapsed(),
+                                ),
+                            },
+                            ..trace
+                        },
+                    });
+                }
+            }
+        }
+
+        let dispatch = dispatch_layout_algorithm(ir, algorithm);
+        let guard = evaluate_layout_guardrails(ir, dispatch.selected, guardrails);
+        if guard.fallback_applied || guard.selected_algorithm != LayoutAlgorithm::Sugiyama {
+            return None;
+        }
+
+        track_dependency_graph_query(ir);
+        let incremental_start = std::time::Instant::now();
         let current_graph = if all_node_changes || dependency_topology_equal(&cached_graph.ir, ir) {
             Arc::clone(&cached_graph.graph)
         } else {
@@ -3198,10 +3363,6 @@ impl IncrementalLayoutEngine {
             return None;
         }
 
-        let metrics = config
-            .font_metrics
-            .clone()
-            .unwrap_or_else(fm_core::FontMetrics::default_metrics);
         let node_sizes = compute_node_sizes(ir, &metrics);
         let spacing = config.spacing;
         let mut nodes = cached_layout.traced.layout.nodes.clone();
@@ -14277,7 +14438,7 @@ mod tests {
         LayoutConfig, LayoutDependencyGraph, LayoutEdit, LayoutGuardrails, LayoutNodeBox,
         LayoutPoint, LayoutRect, LayoutSequenceLifecycleMarkerKind, ObstacleSpatialIndex,
         RegionInput, RegionMemoryBudget, RenderClip, RenderItem, RenderSource, SubgraphRegion,
-        SubgraphRegionId, SubgraphRegionKind, build_layout_decision_ledger,
+        SubgraphRegionId, SubgraphRegionKind, TracedLayout, build_layout_decision_ledger,
         build_layout_guard_report, build_render_scene, dispatch_layout_algorithm,
         evaluate_layout_guardrails, find_obstacle_nudge_x, find_obstacle_nudge_y,
         incremental_overlap_alignment, layout, layout_diagram, layout_diagram_force,
@@ -14530,14 +14691,19 @@ mod tests {
     }
 
     fn large_subgraph_dependency_ir() -> MermaidDiagramIr {
+        sized_subgraph_dependency_ir(32)
+    }
+
+    fn sized_subgraph_dependency_ir(nodes_per_subgraph: usize) -> MermaidDiagramIr {
+        let total = nodes_per_subgraph * 2;
         let mut edges = Vec::new();
-        for node_index in 0..31 {
+        for node_index in 0..nodes_per_subgraph - 1 {
             edges.push((node_index, node_index + 1));
         }
-        for node_index in 32..63 {
+        for node_index in nodes_per_subgraph..total - 1 {
             edges.push((node_index, node_index + 1));
         }
-        let mut ir = labeled_graph_ir(64, &edges);
+        let mut ir = labeled_graph_ir(total, &edges);
         ir.graph.nodes = (0..ir.nodes.len())
             .map(|node_index| IrGraphNode {
                 node_id: IrNodeId(node_index),
@@ -14564,7 +14730,7 @@ mod tests {
             title: None,
             parent: None,
             children: Vec::new(),
-            members: (0..32).map(IrNodeId).collect(),
+            members: (0..nodes_per_subgraph).map(IrNodeId).collect(),
             cluster: None,
             grid_span: 1,
             span: Span::at_line(1, 1),
@@ -14576,16 +14742,16 @@ mod tests {
             title: None,
             parent: None,
             children: Vec::new(),
-            members: (32..64).map(IrNodeId).collect(),
+            members: (nodes_per_subgraph..total).map(IrNodeId).collect(),
             cluster: None,
             grid_span: 1,
             span: Span::at_line(2, 1),
             direction: None,
         });
-        for node_index in 0..32 {
+        for node_index in 0..nodes_per_subgraph {
             ir.graph.nodes[node_index].subgraphs.push(IrSubgraphId(0));
         }
-        for node_index in 32..64 {
+        for node_index in nodes_per_subgraph..total {
             ir.graph.nodes[node_index].subgraphs.push(IrSubgraphId(1));
         }
         ir
@@ -14941,6 +15107,104 @@ mod tests {
                 "clean region drifted for node {node_index}"
             );
         }
+    }
+
+    /// Drive `warm -> "Edited v0" -> "Edited v1"` and return the final traced layout. The two
+    /// edits share a digit-only tail, so both spell the same width class: the first widens the
+    /// label (refreshing the cached geometry for that width) and the second is size-stable.
+    fn size_stable_edit_sequence_final(nodes_per_subgraph: usize) -> TracedLayout {
+        let mut engine = IncrementalLayoutEngine::default();
+        let baseline = sized_subgraph_dependency_ir(nodes_per_subgraph);
+        let config = super::LayoutConfig::default();
+        let guardrails = LayoutGuardrails::default();
+
+        let _ = engine.layout_diagram_traced_with_config_and_guardrails(
+            &baseline,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+
+        let mut edited = baseline;
+        let label_index = edited.nodes[5]
+            .label
+            .expect("labeled graph should assign every node a label")
+            .0;
+        edited.labels[label_index].text = "Edited v0".to_string();
+        let _ = engine.layout_diagram_traced_with_config_and_guardrails(
+            &edited,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+
+        edited.labels[label_index].text = "Edited v1".to_string();
+        engine.layout_diagram_traced_with_config_and_guardrails(
+            &edited,
+            LayoutAlgorithm::Auto,
+            config,
+            guardrails,
+        )
+    }
+
+    /// Faithful-memoization proof: the size-stable memo fast path must produce byte-identical
+    /// output to the slow selective relayout it stands in for (NOT to a from-scratch full
+    /// recompute — the selective path is a stability-preserving approximation that legitimately
+    /// differs from full recompute for the dirty region). Compare the two by running the same
+    /// edit sequence with the fast path enabled and with it forced off via the test escape hatch.
+    fn assert_size_stable_fast_path_matches_slow_path(nodes_per_subgraph: usize) {
+        let fast = size_stable_edit_sequence_final(nodes_per_subgraph);
+        assert_eq!(
+            fast.trace.incremental.query_type, "layout_incremental_subgraph_relayout_size_stable",
+            "size-stable fast path did not fire at {nodes_per_subgraph} nodes/subgraph"
+        );
+
+        super::DISABLE_SIZE_STABLE_FAST_PATH.with(|flag| flag.set(true));
+        let slow = size_stable_edit_sequence_final(nodes_per_subgraph);
+        super::DISABLE_SIZE_STABLE_FAST_PATH.with(|flag| flag.set(false));
+
+        assert_ne!(
+            slow.trace.incremental.query_type, "layout_incremental_subgraph_relayout_size_stable",
+            "fast path leaked past the disable flag at {nodes_per_subgraph} nodes/subgraph"
+        );
+        // User-visible geometry must be byte-identical to the slow path. `dirty_regions` is an
+        // incremental redraw hint, not geometry — the fast path is entitled to populate it even
+        // where the slow-path fallback (a guardrail-forced full recompute at large sizes) leaves
+        // it empty, so it is intentionally excluded from this equality.
+        assert_eq!(
+            fast.layout.nodes, slow.layout.nodes,
+            "node geometry diverged from slow path at {nodes_per_subgraph} nodes/subgraph"
+        );
+        assert_eq!(
+            fast.layout.edges, slow.layout.edges,
+            "edge geometry diverged from slow path at {nodes_per_subgraph} nodes/subgraph"
+        );
+        assert_eq!(
+            fast.layout.clusters, slow.layout.clusters,
+            "cluster geometry diverged from slow path at {nodes_per_subgraph} nodes/subgraph"
+        );
+        assert_eq!(
+            fast.layout.cycle_clusters, slow.layout.cycle_clusters,
+            "cycle-cluster geometry diverged from slow path at {nodes_per_subgraph} nodes/subgraph"
+        );
+        assert_eq!(
+            fast.layout.bounds, slow.layout.bounds,
+            "bounds diverged from slow path at {nodes_per_subgraph} nodes/subgraph"
+        );
+        assert_eq!(
+            fast.layout.extensions, slow.layout.extensions,
+            "extensions diverged from slow path at {nodes_per_subgraph} nodes/subgraph"
+        );
+    }
+
+    #[test]
+    fn incremental_layout_engine_serves_size_stable_label_edits_from_region_memo() {
+        // 32/subgraph (64 total): selective region relayout is the slow-path baseline.
+        assert_size_stable_fast_path_matches_slow_path(32);
+        // 500/subgraph (1000 total): matches the incremental bench primary row, large enough
+        // that guardrails re-route off Sugiyama — proving the fast path fires ahead of dispatch
+        // and still matches the (full-recompute) slow-path fallback there.
+        assert_size_stable_fast_path_matches_slow_path(500);
     }
 
     #[test]
