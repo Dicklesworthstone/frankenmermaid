@@ -64,6 +64,47 @@ Risk/reward: ~2% end-to-end on small diagrams (already ≫100× mermaid-js), aga
 surface that can ship wrong colors for non-default themes if incomplete. Marginal EV, real risk ⇒ warrants
 a focused session with per-theme golden coverage, NOT a cycle-tail rush.
 
+## FRESH CONFIRMATION (2026-07-24, cc/Opus 4.8) — this is the TOP unmined bd-1buv frame
+
+Full-pipeline `perf record` of `profharness er 40 … full` (non-LTO attribution build), 8000 iters,
+`taskset -c 3`, load ~2.3. Ranked ALL-symbol self profile:
+
+| self | frame |
+|---:|---|
+| 16.06% | `render_svg_with_layout` (CSS post-passes are largely inlined here) |
+| **14.41%** | `memchr::…::find_impl` — the `strip_unused_state_css` / `strip_dead_marker_css` needle scans |
+| **6.00%** | `__memmove_avx` — the strip `drain` / `minify` `replace_range` rebuilds |
+| 7.93% | `write_uint_into` (mined) |
+| 5.05% | `parse_mermaid_with_detection_and_config` |
+
+So the CSS post-passes (`strip_unused_state_css` + `strip_unused_markers` + `strip_dead_marker_css` +
+`minify_style_block`) are **~20% of the ER full pipeline** — the largest unmined block, and it recurs on
+every non-flowchart small render (er/seq/class/state/pie). CONFIRMED real compute (byte scan + memmove,
+NOT alloc ⇒ will not mimalloc-wash).
+
+### Why it was NOT landed this session (deferred again, deliberately)
+
+1. **The dominant cost is the STRIP passes (14.41% memchr), not `minify_css`.** The strip decisions
+   depend on the BODY (which node types / markers / shapes occur), which changes across live edits, so a
+   naive content-keyed memo of the whole `<style>` processing is a BENCH ARTIFACT (identical re-renders
+   hit; real label-edit renders whose body text changed miss) — the same trap as the edit-session
+   Arc-input reject. The production-real win requires memoizing the strip DECISION keyed on the small flag
+   set (node-type presence / marker presence / theme identity), then applying it — a refactor of each
+   strip pass, not a wrapper.
+2. **`minify_style_block` re-scans regardless**, so caching the minified theme alone saves nothing (the
+   candidate's original point) — the scan must be SKIPPED, which needs theme/dynamic boundary tracking.
+3. Correctness surface: the strip-decision key must capture every body factor each pass reads, or it
+   ships WRONG (missing/extra) CSS; goldens cover only the default theme + a few diagram types.
+
+### Sharpened plan for a focused effort (retry predicate unchanged: ≥3% wall, CV<5%, all goldens byte-identical)
+
+- Refactor `strip_unused_state_css` + `strip_dead_marker_css` to compute their body-derived KEY (set of
+  present node-type needles / live marker ids) ONCE, then memoize `(key, theme_identity) → processed
+  theme-CSS prefix` thread-locally. Apply the cached prefix; run the dynamic-CSS tail through the passes
+  as today. This hits across LABEL edits (key stable) → production-real, not a bench artifact.
+- Prove byte-identity on `cargo test -p fm-render-svg` + workspace goldens, per-theme if possible, and a
+  same-binary interleaved A/B on `er 40` / `seq` / `class 50` full pipeline (≥3% wall, CV<5%).
+
 ## Marker-scan fuse (sub-lever, below floor)
 
 `strip_unused_markers` (builds `referenced` from `url(#…)`, strips dead marker defs) and
