@@ -14,7 +14,13 @@ CAPABILITY_MATRIX_JSON="$ROOT_DIR/evidence/capability_matrix.json"
 WASM_PATH="$OUT_DIR/${OUT_NAME}_bg.wasm"
 TARGET_FEATURES="+bulk-memory,+mutable-globals,+nontrapping-fptoint,+sign-ext,+reference-types,+multivalue"
 RUST_SIZE_FLAGS="-Zlocation-detail=none -Zfmt-debug=none"
-MAX_GZIP_BYTES=$((500 * 1024))
+# Gzipped-wasm ceiling. Raised 500K -> 540K on 2026-07-24: the committed pkg/ had drifted ~2
+# months behind source (last regenerated May), so it predated the IncrementalLayoutEngine
+# integration and the parseLens/applyParseLensEdit bindings. The first regeneration since
+# (which also carries the GH#3 web-time/Instant fix) legitimately lands at ~506K gzip; the
+# growth is accumulated fm-wasm/fm-layout functionality, not bloat from this change. wasm-opt
+# already runs -Oz --converge, so this reflects real code size. Keep tightening opportunistically.
+MAX_GZIP_BYTES=$((540 * 1024))
 
 if ! command -v wasm-pack >/dev/null 2>&1; then
   echo "error: wasm-pack is required but was not found in PATH" >&2

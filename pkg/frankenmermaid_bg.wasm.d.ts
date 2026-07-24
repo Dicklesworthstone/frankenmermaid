@@ -3,6 +3,7 @@
 export const memory: WebAssembly.Memory;
 export const __wbg_diagram_free: (a: number, b: number) => void;
 export const applyLensEdit: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
+export const applyParseLensEdit: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
 export const describeDiagram: (a: number, b: number, c: number) => void;
 export const detectType: (a: number, b: number, c: number) => void;
 export const diagramLens: (a: number, b: number, c: number) => void;
@@ -13,6 +14,7 @@ export const diagram_render: (a: number, b: number, c: number, d: number, e: num
 export const diagram_setTheme: (a: number, b: number, c: number, d: number) => void;
 export const init: (a: number, b: number) => void;
 export const parse: (a: number, b: number, c: number) => void;
+export const parseLens: (a: number, b: number, c: number) => void;
 export const renderSvg: (a: number, b: number, c: number, d: number) => void;
 export const __wbindgen_export: (a: number, b: number) => number;
 export const __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;

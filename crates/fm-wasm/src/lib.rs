@@ -1,7 +1,12 @@
 #![forbid(unsafe_code)]
 
 use std::sync::{LazyLock, RwLock};
-use std::time::Instant;
+// NOT `std::time::Instant`: wasm32-unknown-unknown std has no clock, so `Instant::now()`
+// panics and `panic = "abort"` turns that into an `unreachable` trap — which is exactly what
+// made every browser `renderSvg`/`Diagram::render` call fail with `RuntimeError: unreachable`
+// while `parse`/`detectType` (untimed) kept working (GH#3). `web_time::Instant` is a drop-in
+// re-export of `std::time::Instant` off-wasm and `performance.now()` in the browser.
+use web_time::Instant;
 
 #[cfg(any(not(target_arch = "wasm32"), test))]
 use fm_core::MermaidGuardReport;
