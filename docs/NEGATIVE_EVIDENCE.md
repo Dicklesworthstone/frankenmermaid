@@ -19058,3 +19058,27 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   `.benchmarks/bd_1buv_2_parse_layout_svg_floor_NEGATIVE.md`.
 
   Agent: cod (MagentaGull)
+
+### BLOCKER / NEGATIVE: bd-1buv.2 current-head frontier revalidated after explicit continuation (2026-07-24)
+- **Fresh profile:** current `8c2cd60b`, fail-closed RCH attribution build on `vmi1149989`,
+  12,000 pinned-equivalent full-pipeline iterations, 4,407 cycle samples, zero lost. The largest
+  self frames were `write_uint_into` 5.86%, `write_fixed2` 5.21%, edge routing 4.45%,
+  `render_nodes_serial` 3.67%, the common node writer 3.59%, and `write_escaped_text` 3.58%.
+- **Admission result:** every frame maps to a landed, load-bearing, or dated-REJECT family. No
+  unledgered frame reaches 8% self and no single contained call-chain reaches 10%; combining
+  unrelated output/routing/parser frames would violate one-lever discipline. The cc-owned
+  incremental/API lane was not touched.
+- **Pinned `scripts/headtohead` proof:** final doubled-repetition row used the exact 500-node,
+  499-edge, 15,060-byte corpus. Frankenmermaid measured 351,977 ns p50 at CV 2.34% and MAD 0.53%;
+  mermaid-js 11.15.0 measured 1.1896 s at CV 4.95% and MAD 2.09%. Current dominance is
+  **3,379.77x by p50** and **3,303.93x by min**. SVG stayed exactly 343,946 bytes with SHA-256
+  `408ecdccfba04fb4aa84526b565e0397383bb4c0dca9184e33e01b7ef2dd2d21`.
+- **Rejected evidence:** two earlier same-production-binary attempts had frankenmermaid CV 5.64%
+  and 5.44%, so neither is used. No production source edit was made.
+- **Retry predicate:** resume only after a production-equivalent profile exposes an unmined frame
+  >=8% self or one contained call-chain >=10%, a source change invalidates a specific dated
+  no-retry mechanism, or ownership explicitly transfers an architectural/output-contract change.
+  Full commands, binary hashes, ranked profile, and exact proof are in
+  `.benchmarks/bd_1buv_2_parse_layout_svg_floor_NEGATIVE.md`.
+
+  Agent: cod (MagentaGull)

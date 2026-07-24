@@ -125,3 +125,53 @@ Reopen `bd-1buv.2` micro-lever work only when at least one of these is true:
 Any retried candidate still requires a same-binary, same-worker A/B plus reference/reference null,
 every scored arm CV `<5%`, null median delta `<1%`, a null-adjusted realistic-case win `>=3%`,
 exact IR/SVG identity where the contract is unchanged, and conformance.
+
+## Revalidation after explicit continuation (2026-07-24)
+
+The user explicitly reopened the measured-frontier cycle after the three node-metadata REJECTs.
+Current `main` was `8c2cd60b`; the only intervening production-source commit since the original
+profile was cc's incremental `Arc<DiagramLayout>` change. Production source had no worktree diff.
+
+The symbolized `profharness` binary was rebuilt fail-closed through RCH on `vmi1149989` with the
+same release optimization, frame-pointer, debug-symbol, and no-LTO attribution settings used above.
+Its SHA-256 was
+`a09ee7ad30c9e30412110bae3c7474e30bb8ba9f1cb453383a9c26bca7565a58`.
+`taskset -c 3 perf record -F 999 --call-graph fp` captured 4,407 cycle samples with zero lost
+across 12,000 complete `flowchart_large_500` parse-layout-SVG iterations. The median was 365,372 ns.
+
+The ranked current self profile still did not admit a lever:
+
+| Self | Frame | Existing classification |
+|---:|---|---|
+| 5.86% | `attributes::write_uint_into<String>` | landed digit writer; alternate inlining/itoa shapes rejected |
+| 5.21% | `attributes::write_fixed2<String>` | landed exact writer; pair-LUT rejected |
+| 4.45% | `build_edge_paths_with_orientation` | mined routing family |
+| 3.67% | `render_nodes_serial` | direct output streaming |
+| 3.59% | `write_common_node_fragment_into<true>` | output-byte production; fresh metadata siblings rejected |
+| 3.58% | `attributes::write_escaped_text<String>` | clean bulk path landed; scalar alternatives rejected |
+| 3.05% | `IrBuilder::intern_node_auto_normalized` | numeric-index family closed |
+| 2.90% | `layout_diagram_tree_traced` | load-bearing O(n) passes; incremental ownership is cc's lane |
+| 2.79% | `ObstacleSpatialIndex::query_segment` | mined obstacle-index family |
+
+No unledgered frame reached the 8% self admission gate and no single contained call-chain reached
+10%. Combining the formatter, escape, routing, and node-streaming rows would be a multi-lever
+rewrite and would violate the measured-frontier and negative-evidence constraints.
+
+A separate production `headtohead` binary was built remotely on `hz1`; SHA-256
+`899bf24ef887d4cf0c13b3e3809dcf1507b61b1424a82937f46cfe59e31df236`.
+The final doubled-repetition pinned row used the exact 15,060-byte corpus input and passed the
+user's stricter dual-CV gate:
+
+- frankenmermaid: 351,977 ns p50, 347,526 ns min, CV 2.34%, MAD 0.53%, 100 samples;
+- mermaid-js 11.15.0: 1.1896 s p50, 1.1482 s min, CV 4.95%, MAD 2.09%, 14 samples;
+- dominance: **3,379.77x by p50**, **3,303.93x by min**;
+- exact frankenmermaid SVG: 343,946 bytes, SHA-256
+  `408ecdccfba04fb4aa84526b565e0397383bb4c0dca9184e33e01b7ef2dd2d21`.
+
+The first two same-binary attempts had frankenmermaid CV 5.64% and 5.44% and were rejected as
+inadmissible under the explicit CV `<5%` rule. The final row, not either retry, supports the current
+dominance statement.
+
+**Verdict: BLOCKER / NEGATIVE.** No production source lever is admitted and no source change
+ships. Resume only when one of the existing retry predicates above becomes true. In particular,
+ordinary timing drift or another sub-8% microframe is not sufficient to retry a dated family.
