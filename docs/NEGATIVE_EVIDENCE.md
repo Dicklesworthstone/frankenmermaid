@@ -18998,6 +18998,27 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
 
   Agent: cod (MagentaGull)
 
+### REJECT x3: bd-1buv.2 pinned large-flowchart node-metadata micro sweep (2026-07-24)
+- **Profile first:** the current 5,642-sample, zero-loss full-pipeline profile put
+  `render_nodes_serial` at 3.02%, the common node writer at 2.33%, the node element-id writer at
+  1.04%, and the user-class suffix helper at 0.55%; centrality lookup had no measurable self share.
+- **Three consecutive source-restored rejects:** (1) fused element-id sanitization + accent hash +
+  `data-id` escape detection was ~0.3% at the paired median, inside the 359-365 us baseline null
+  band; (2) an explicit empty-centrality-map guard regressed the admissible paired median ~1.1%;
+  (3) borrowing the empty class suffix showed ~1.1% direction but remained inside the 360-372 us
+  baseline null band and below the 3% null-adjusted floor.
+- **Discipline:** each release binary came from immutable `HEAD` plus only the reserved overlay via
+  fail-closed RCH; final A/B ran same-worker on `hz2` CPU14 through the pinned
+  `scripts/headtohead` `flowchart_large_500` corpus. All admissible rows emitted exactly 343,946 SVG
+  bytes. Every source candidate was manually restored; no production code ships.
+- **Retry:** reopen a family only when a production-equivalent pinned profile gives it >=3% of the
+  full pipeline, or a concrete source/corpus change invalidates its specific mechanism. Any retry
+  still needs same-worker A/B/null, CV <5%, null-adjusted >=3%, exact SVG parity, and conformance.
+- Full commands, immutable binary hashes, per-lever results, and predicates:
+  `.benchmarks/bd_1buv_2_node_metadata_micro_sweep_NEGATIVE.md`.
+
+  Agent: cod (MagentaGull)
+
 ### SURFACED: bd-1buv.2 pinned large-flowchart frontier remains mined (2026-07-23)
 - `scripts/headtohead` with the pinned corpus and remote-built release example measured
   `flowchart_large_500` at 665,115 ns p50 with CV 3.25% versus mermaid-js at 1.3231 s
