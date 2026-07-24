@@ -2038,7 +2038,12 @@ pub struct DiagramLayout {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TracedLayout {
-    pub layout: DiagramLayout,
+    /// Shared behind `Arc` so the incremental engine can store a cached copy and return the
+    /// same geometry without a second deep clone: `traced.clone()` bumps a refcount instead of
+    /// memcpying every node/edge/cluster. Consumers read `&DiagramLayout` transparently via
+    /// `Deref`; the ~10 non-traced `layout_diagram*` wrappers extract an owned value with
+    /// `Arc::try_unwrap` (refcount 1 at those call sites ⇒ a move, never a clone).
+    pub layout: Arc<DiagramLayout>,
     pub trace: LayoutTrace,
 }
 
@@ -2802,7 +2807,7 @@ pub fn layout(ir: &MermaidDiagramIr, algorithm: LayoutAlgorithm) -> LayoutStats 
 
 #[must_use]
 pub fn layout_diagram(ir: &MermaidDiagramIr) -> DiagramLayout {
-    layout_diagram_traced(ir).layout
+    Arc::unwrap_or_clone(layout_diagram_traced(ir).layout)
 }
 
 #[must_use]
@@ -2810,12 +2815,14 @@ pub fn layout_diagram_with_cycle_strategy(
     ir: &MermaidDiagramIr,
     cycle_strategy: CycleStrategy,
 ) -> DiagramLayout {
-    layout_diagram_traced_with_cycle_strategy(ir, cycle_strategy).layout
+    Arc::unwrap_or_clone(layout_diagram_traced_with_cycle_strategy(ir, cycle_strategy).layout)
 }
 
 #[must_use]
 pub fn layout_diagram_with_config(ir: &MermaidDiagramIr, config: LayoutConfig) -> DiagramLayout {
-    layout_diagram_traced_with_config(ir, LayoutAlgorithm::Auto, config).layout
+    Arc::unwrap_or_clone(
+        layout_diagram_traced_with_config(ir, LayoutAlgorithm::Auto, config).layout,
+    )
 }
 
 #[must_use]
@@ -2991,7 +2998,9 @@ fn compute_traced_layout_with_config_and_guardrails(
             edge_count: ir.edges.len(),
         },
     );
-    traced.layout.stats.phase_iterations = traced.trace.snapshots.len();
+    let phase_iterations = traced.trace.snapshots.len();
+    // Freshly built by the dispatch match (refcount 1) ⇒ clone-free `make_mut`.
+    Arc::make_mut(&mut traced.layout).stats.phase_iterations = phase_iterations;
     traced
 }
 
@@ -3296,7 +3305,7 @@ impl IncrementalLayoutEngine {
                     stats.phase_iterations = trace.snapshots.len();
 
                     return Some(TracedLayout {
-                        layout: DiagramLayout {
+                        layout: Arc::new(DiagramLayout {
                             nodes,
                             clusters: cached_layout.traced.layout.clusters.clone(),
                             cycle_clusters: cached_layout.traced.layout.cycle_clusters.clone(),
@@ -3305,7 +3314,7 @@ impl IncrementalLayoutEngine {
                             stats,
                             extensions: cached_layout.traced.layout.extensions.clone(),
                             dirty_regions,
-                        },
+                        }),
                         trace: LayoutTrace {
                             incremental: IncrementalRecomputeTrace {
                                 query_type: "layout_incremental_subgraph_relayout_size_stable",
@@ -3512,7 +3521,7 @@ impl IncrementalLayoutEngine {
             .collect();
 
         Some(TracedLayout {
-            layout: DiagramLayout {
+            layout: Arc::new(DiagramLayout {
                 nodes,
                 clusters,
                 cycle_clusters,
@@ -3524,7 +3533,7 @@ impl IncrementalLayoutEngine {
                     ..LayoutExtensions::default()
                 },
                 dirty_regions,
-            },
+            }),
             trace: LayoutTrace {
                 incremental: IncrementalRecomputeTrace {
                     query_type: "layout_incremental_subgraph_relayout",
@@ -4429,7 +4438,7 @@ fn layout_diagram_sugiyama_traced_with_config(
     let node_centrality = compute_layout_centrality_tiers(ir, &config);
 
     TracedLayout {
-        layout: DiagramLayout {
+        layout: Arc::new(DiagramLayout {
             nodes,
             clusters,
             cycle_clusters,
@@ -4442,7 +4451,7 @@ fn layout_diagram_sugiyama_traced_with_config(
                 ..LayoutExtensions::default()
             },
             dirty_regions: Vec::new(),
-        },
+        }),
         trace,
     }
 }
@@ -4453,7 +4462,7 @@ fn layout_diagram_sugiyama_traced_with_config(
 /// diagrams, generic graphs with no clear flow direction.
 #[must_use]
 pub fn layout_diagram_force(ir: &MermaidDiagramIr) -> DiagramLayout {
-    layout_diagram_force_traced(ir).layout
+    Arc::unwrap_or_clone(layout_diagram_force_traced(ir).layout)
 }
 
 /// Lay out with force-directed algorithm and return tracing information.
@@ -4467,7 +4476,7 @@ pub fn layout_diagram_force_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 
     if n == 0 {
         return TracedLayout {
-            layout: DiagramLayout {
+            layout: Arc::new(DiagramLayout {
                 nodes: vec![],
                 clusters: vec![],
                 cycle_clusters: vec![],
@@ -4481,7 +4490,7 @@ pub fn layout_diagram_force_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                 stats: LayoutStats::default(),
                 extensions: LayoutExtensions::default(),
                 dirty_regions: Vec::new(),
-            },
+            }),
             trace,
         };
     }
@@ -4571,7 +4580,7 @@ pub fn layout_diagram_force_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     };
 
     TracedLayout {
-        layout: DiagramLayout {
+        layout: Arc::new(DiagramLayout {
             nodes,
             clusters,
             cycle_clusters: vec![],
@@ -4580,7 +4589,7 @@ pub fn layout_diagram_force_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             stats,
             extensions: LayoutExtensions::default(),
             dirty_regions: Vec::new(),
-        },
+        }),
         trace,
     }
 }
@@ -4588,7 +4597,7 @@ pub fn layout_diagram_force_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 /// Lay out a diagram using a deterministic tidy-tree algorithm.
 #[must_use]
 pub fn layout_diagram_tree(ir: &MermaidDiagramIr) -> DiagramLayout {
-    layout_diagram_tree_traced(ir).layout
+    Arc::unwrap_or_clone(layout_diagram_tree_traced(ir).layout)
 }
 
 /// Lay out using the tree algorithm and return tracing information.
@@ -4601,7 +4610,7 @@ pub fn layout_diagram_tree_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 
     if node_count == 0 {
         return TracedLayout {
-            layout: DiagramLayout {
+            layout: Arc::new(DiagramLayout {
                 nodes: Vec::new(),
                 clusters: Vec::new(),
                 cycle_clusters: Vec::new(),
@@ -4615,7 +4624,7 @@ pub fn layout_diagram_tree_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                 stats: LayoutStats::default(),
                 extensions: LayoutExtensions::default(),
                 dirty_regions: Vec::new(),
-            },
+            }),
             trace,
         };
     }
@@ -4716,7 +4725,7 @@ pub fn layout_diagram_tree_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     };
 
     TracedLayout {
-        layout: DiagramLayout {
+        layout: Arc::new(DiagramLayout {
             nodes,
             clusters,
             cycle_clusters: Vec::new(),
@@ -4725,7 +4734,7 @@ pub fn layout_diagram_tree_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             stats,
             extensions: LayoutExtensions::default(),
             dirty_regions: Vec::new(),
-        },
+        }),
         trace,
     }
 }
@@ -4733,7 +4742,7 @@ pub fn layout_diagram_tree_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 /// Lay out a diagram using a deterministic radial tree variant.
 #[must_use]
 pub fn layout_diagram_radial(ir: &MermaidDiagramIr) -> DiagramLayout {
-    layout_diagram_radial_traced(ir).layout
+    Arc::unwrap_or_clone(layout_diagram_radial_traced(ir).layout)
 }
 
 /// Lay out using the radial tree algorithm and return tracing information.
@@ -4746,7 +4755,7 @@ pub fn layout_diagram_radial_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 
     if node_count == 0 {
         return TracedLayout {
-            layout: DiagramLayout {
+            layout: Arc::new(DiagramLayout {
                 nodes: Vec::new(),
                 clusters: Vec::new(),
                 cycle_clusters: Vec::new(),
@@ -4760,7 +4769,7 @@ pub fn layout_diagram_radial_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                 stats: LayoutStats::default(),
                 extensions: LayoutExtensions::default(),
                 dirty_regions: Vec::new(),
-            },
+            }),
             trace,
         };
     }
@@ -4880,7 +4889,7 @@ pub fn layout_diagram_radial_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     };
 
     TracedLayout {
-        layout: DiagramLayout {
+        layout: Arc::new(DiagramLayout {
             nodes,
             clusters,
             cycle_clusters: Vec::new(),
@@ -4889,14 +4898,14 @@ pub fn layout_diagram_radial_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             stats,
             extensions: LayoutExtensions::default(),
             dirty_regions: Vec::new(),
-        },
+        }),
         trace,
     }
 }
 
 #[must_use]
 pub fn layout_diagram_timeline(ir: &MermaidDiagramIr) -> DiagramLayout {
-    layout_diagram_timeline_traced(ir).layout
+    Arc::unwrap_or_clone(layout_diagram_timeline_traced(ir).layout)
 }
 
 #[must_use]
@@ -5015,7 +5024,10 @@ pub fn layout_diagram_timeline_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         .iter()
         .map(|node| (node.node_index, node.bounds.center().x))
         .collect();
-    traced.layout.extensions.axis_ticks = period_indexes
+    // Freshly built by `finalize_specialized_layout` (refcount 1), so `make_mut` is a
+    // clone-free borrow that lets us attach the timeline extensions in place.
+    let layout = Arc::make_mut(&mut traced.layout);
+    layout.extensions.axis_ticks = period_indexes
         .into_iter()
         .filter_map(|node_index| {
             let position = *center_x_by_index.get(&node_index)?;
@@ -5025,8 +5037,7 @@ pub fn layout_diagram_timeline_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             })
         })
         .collect();
-    traced.layout.extensions.bands = traced
-        .layout
+    layout.extensions.bands = layout
         .clusters
         .iter()
         .filter_map(|cluster| {
@@ -5054,7 +5065,7 @@ pub fn layout_diagram_timeline_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 /// messages stacked vertically in declaration order.
 #[must_use]
 pub fn layout_diagram_sequence(ir: &MermaidDiagramIr) -> DiagramLayout {
-    layout_diagram_sequence_traced(ir).layout
+    Arc::unwrap_or_clone(layout_diagram_sequence_traced(ir).layout)
 }
 
 #[must_use]
@@ -5073,7 +5084,7 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 
     if node_count == 0 {
         return TracedLayout {
-            layout: DiagramLayout {
+            layout: Arc::new(DiagramLayout {
                 nodes: Vec::new(),
                 clusters: Vec::new(),
                 cycle_clusters: Vec::new(),
@@ -5087,7 +5098,7 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                 stats: LayoutStats::default(),
                 extensions: LayoutExtensions::default(),
                 dirty_regions: Vec::new(),
-            },
+            }),
             trace,
         };
     }
@@ -5522,7 +5533,7 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     };
 
     TracedLayout {
-        layout: DiagramLayout {
+        layout: Arc::new(DiagramLayout {
             nodes,
             clusters: participant_group_clusters,
             cycle_clusters: Vec::new(),
@@ -5556,7 +5567,7 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                 node_centrality: Vec::new(),
             },
             dirty_regions: Vec::new(),
-        },
+        }),
         trace,
     }
 }
@@ -5704,7 +5715,7 @@ fn build_sequence_fragment_geometry(
 
 #[must_use]
 pub fn layout_diagram_gantt(ir: &MermaidDiagramIr) -> DiagramLayout {
-    layout_diagram_gantt_traced(ir).layout
+    Arc::unwrap_or_clone(layout_diagram_gantt_traced(ir).layout)
 }
 
 #[must_use]
@@ -5796,21 +5807,23 @@ fn layout_diagram_gantt_fallback(ir: &MermaidDiagramIr) -> TracedLayout {
         trace,
         true,
     );
-    traced.layout.extensions.axis_ticks = ordered_hints
+    // Freshly built by `finalize_specialized_layout` (refcount 1) ⇒ clone-free `make_mut`.
+    let layout = Arc::make_mut(&mut traced.layout);
+    layout.extensions.axis_ticks = ordered_hints
         .iter()
         .enumerate()
         .filter_map(|(slot, hint)| {
-            let node = traced.layout.nodes.iter().find(|node| node.rank == slot)?;
+            let node = layout.nodes.iter().find(|node| node.rank == slot)?;
             Some(LayoutAxisTick {
                 label: hint.to_string(),
                 position: node.bounds.center().x,
             })
         })
         .collect();
-    traced.layout.extensions.bands = section_to_nodes
+    layout.extensions.bands = section_to_nodes
         .iter()
         .filter_map(|(section, node_indexes)| {
-            let bounds = layout_bounds_for_nodes(&traced.layout, node_indexes, 24.0)?;
+            let bounds = layout_bounds_for_nodes(&*layout, node_indexes, 24.0)?;
             Some(LayoutBand {
                 kind: LayoutBandKind::Section,
                 label: section.clone(),
@@ -6018,16 +6031,18 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
         true,
     );
 
-    traced.layout.extensions.axis_ticks = (0..=total_span_days)
+    // Freshly built by `finalize_specialized_layout` (refcount 1) ⇒ clone-free `make_mut`.
+    let layout = Arc::make_mut(&mut traced.layout);
+    layout.extensions.axis_ticks = (0..=total_span_days)
         .map(|day_offset| LayoutAxisTick {
             label: format_gantt_axis_tick(min_start_day.saturating_add(day_offset as i32)),
             position: day_offset as f32 * base_col_width,
         })
         .collect();
-    traced.layout.extensions.bands = section_to_nodes
+    layout.extensions.bands = section_to_nodes
         .iter()
         .filter_map(|(section, node_indexes)| {
-            let bounds = layout_bounds_for_nodes(&traced.layout, node_indexes, 24.0)?;
+            let bounds = layout_bounds_for_nodes(&*layout, node_indexes, 24.0)?;
             Some(LayoutBand {
                 kind: LayoutBandKind::Section,
                 label: section.clone(),
@@ -6040,7 +6055,7 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
 
 #[must_use]
 pub fn layout_diagram_xychart(ir: &MermaidDiagramIr) -> DiagramLayout {
-    layout_diagram_xychart_traced(ir).layout
+    Arc::unwrap_or_clone(layout_diagram_xychart_traced(ir).layout)
 }
 
 #[must_use]
@@ -6063,7 +6078,7 @@ pub fn layout_diagram_xychart_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         0,
     );
     TracedLayout {
-        layout: DiagramLayout {
+        layout: Arc::new(DiagramLayout {
             nodes: Vec::new(),
             clusters: Vec::new(),
             cycle_clusters: Vec::new(),
@@ -6090,7 +6105,7 @@ pub fn layout_diagram_xychart_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             },
             extensions: LayoutExtensions::default(),
             dirty_regions: Vec::new(),
-        },
+        }),
         trace,
     }
 }
@@ -6253,7 +6268,7 @@ fn layout_diagram_xychart_from_meta(
     let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
 
     TracedLayout {
-        layout: DiagramLayout {
+        layout: Arc::new(DiagramLayout {
             nodes,
             clusters: Vec::new(),
             cycle_clusters: Vec::new(),
@@ -6275,7 +6290,7 @@ fn layout_diagram_xychart_from_meta(
             },
             extensions: LayoutExtensions::default(),
             dirty_regions: Vec::new(),
-        },
+        }),
         trace,
     }
 }
@@ -6512,7 +6527,7 @@ fn format_gantt_axis_tick(days_since_epoch: i32) -> String {
 
 #[must_use]
 pub fn layout_diagram_sankey(ir: &MermaidDiagramIr) -> DiagramLayout {
-    layout_diagram_sankey_traced(ir).layout
+    Arc::unwrap_or_clone(layout_diagram_sankey_traced(ir).layout)
 }
 
 #[must_use]
@@ -6594,12 +6609,14 @@ pub fn layout_diagram_sankey_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         trace,
         true,
     );
-    traced.layout.extensions.bands = nodes_by_rank
+    // Freshly built by `finalize_specialized_layout` (refcount 1) ⇒ clone-free `make_mut`.
+    let layout = Arc::make_mut(&mut traced.layout);
+    layout.extensions.bands = nodes_by_rank
         .keys()
         .copied()
         .filter_map(|rank| {
             layout_band_for_rank(
-                &traced.layout,
+                &*layout,
                 rank,
                 LayoutBandKind::Column,
                 format!("column {}", rank + 1),
@@ -6612,7 +6629,7 @@ pub fn layout_diagram_sankey_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 
 #[must_use]
 pub fn layout_diagram_grid(ir: &MermaidDiagramIr) -> DiagramLayout {
-    layout_diagram_grid_traced(ir).layout
+    Arc::unwrap_or_clone(layout_diagram_grid_traced(ir).layout)
 }
 
 #[must_use]
@@ -6811,7 +6828,7 @@ fn layout_diagram_pie_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     }
 
     TracedLayout {
-        layout: DiagramLayout {
+        layout: Arc::new(DiagramLayout {
             nodes,
             clusters: Vec::new(),
             cycle_clusters: Vec::new(),
@@ -6823,7 +6840,7 @@ fn layout_diagram_pie_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             },
             extensions: LayoutExtensions::default(),
             dirty_regions: Vec::new(),
-        },
+        }),
         trace,
     }
 }
@@ -6894,7 +6911,7 @@ fn layout_diagram_quadrant_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let total_h = margin_top + chart_h + 40.0;
 
     TracedLayout {
-        layout: DiagramLayout {
+        layout: Arc::new(DiagramLayout {
             nodes,
             clusters: Vec::new(),
             cycle_clusters: Vec::new(),
@@ -6911,7 +6928,7 @@ fn layout_diagram_quadrant_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             },
             extensions: LayoutExtensions::default(),
             dirty_regions: Vec::new(),
-        },
+        }),
         trace,
     }
 }
@@ -6926,7 +6943,7 @@ fn layout_diagram_gitgraph_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 
     if node_count == 0 {
         return TracedLayout {
-            layout: DiagramLayout {
+            layout: Arc::new(DiagramLayout {
                 nodes: Vec::new(),
                 clusters: Vec::new(),
                 cycle_clusters: Vec::new(),
@@ -6940,7 +6957,7 @@ fn layout_diagram_gitgraph_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                 stats: LayoutStats::default(),
                 extensions: LayoutExtensions::default(),
                 dirty_regions: Vec::new(),
-            },
+            }),
             trace,
         };
     }
@@ -7006,7 +7023,7 @@ fn layout_diagram_gitgraph_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     );
 
     TracedLayout {
-        layout: DiagramLayout {
+        layout: Arc::new(DiagramLayout {
             nodes,
             clusters,
             cycle_clusters: Vec::new(),
@@ -7019,7 +7036,7 @@ fn layout_diagram_gitgraph_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             },
             extensions: LayoutExtensions::default(),
             dirty_regions: Vec::new(),
-        },
+        }),
         trace,
     }
 }
@@ -7106,7 +7123,9 @@ fn layout_diagram_kanban_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         entry.2 = entry.2.max(node_box.bounds.x + node_box.bounds.width);
         entry.3 = entry.3.max(node_box.bounds.y + node_box.bounds.height);
     }
-    traced.layout.extensions.bands = (0..nodes_by_rank.len())
+    // Freshly built by `finalize_specialized_layout` (refcount 1) ⇒ clone-free `make_mut`.
+    let layout = Arc::make_mut(&mut traced.layout);
+    layout.extensions.bands = (0..nodes_by_rank.len())
         .filter_map(|rank| {
             let (min_x, min_y, max_x, max_y) = *rank_bounds.get(&rank)?;
             Some(LayoutBand {
@@ -7355,7 +7374,7 @@ fn finalize_specialized_layout(
     };
 
     TracedLayout {
-        layout: DiagramLayout {
+        layout: Arc::new(DiagramLayout {
             nodes,
             clusters,
             cycle_clusters: Vec::new(),
@@ -7364,7 +7383,7 @@ fn finalize_specialized_layout(
             stats,
             extensions: LayoutExtensions::default(),
             dirty_regions: Vec::new(),
-        },
+        }),
         trace,
     }
 }
@@ -21445,8 +21464,11 @@ mod tests {
             guardrails,
         );
         if let Some(cached) = engine.cached.as_mut() {
-            cached.traced.layout.nodes[0].bounds.x = 9_999.0;
-            cached.traced.layout.nodes[0].bounds.y = -9_999.0;
+            // Poison the cached geometry in place; `make_mut` gives the cache its own copy to
+            // corrupt (the warm result still holds the pristine `Arc`).
+            let layout = Arc::make_mut(&mut cached.traced.layout);
+            layout.nodes[0].bounds.x = 9_999.0;
+            layout.nodes[0].bounds.y = -9_999.0;
         }
 
         let mut edited = baseline.clone();
@@ -21514,7 +21536,9 @@ mod tests {
             },
         );
         if let Some(cached) = engine.cached.as_mut() {
-            cached.traced.layout.nodes[0].bounds.width = 42_000.0;
+            Arc::make_mut(&mut cached.traced.layout).nodes[0]
+                .bounds
+                .width = 42_000.0;
         }
 
         engine.clear();
