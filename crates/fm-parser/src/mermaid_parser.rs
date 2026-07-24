@@ -7259,7 +7259,9 @@ fn parse_sequence_participant_declaration(
     declaration: &str,
     actor_keyword: bool,
 ) -> Option<SequenceParticipantDeclaration> {
-    let trimmed = declaration.trim();
+    // `trim_fast` is byte-identical to `str::trim` but skips the `char::is_whitespace` CharSearcher
+    // (a profiled self-symbol on sequence parse); this fires once per participant declaration.
+    let trimmed = trim_fast(declaration);
     if trimmed.is_empty() {
         return None;
     }
@@ -7291,7 +7293,7 @@ fn parse_sequence_participant_declaration(
             (before_alias, None)
         };
 
-    let raw_id = without_config.trim();
+    let raw_id = trim_fast(without_config);
 
     let participant_id = normalize_identifier(raw_id);
     if participant_id.is_empty() {
