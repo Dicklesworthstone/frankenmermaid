@@ -38,8 +38,30 @@ Two consequences:
 ## Direction for bd-12e (re-baselined)
 
 To make incremental beat full recompute on LARGE graphs under production, the per-pass overhead must
-drop below the guardrail-capped full recompute (~167µs @1000). Non-washing (compute/memcpy, not pure
-alloc) targets: (a) the geometry clone — `traced.layout.nodes/edges` are deep-cloned to return owned
-`DiagramLayout`; an `Arc<DiagramLayout>` on the fast path would share cached geometry by refcount and
-skip the memcpy (renderers already take `&DiagramLayout`); (b) `derive_layout_edits` O(n) IR diff.
-All future incremental levers MUST be measured under this mimalloc bench — libc verdicts are void.
+drop below the guardrail-capped full recompute (~167µs @1000). All future incremental levers MUST be
+measured under this mimalloc bench — libc verdicts are void.
+
+### True fast-path frontier UNDER MIMALLOC (non-LTO profile, incremental/1000)
+
+The libc profile showed `_int_malloc`/`_int_free` at ~37% (overstated). Under mimalloc those vanish;
+the real cost is **compute + clone MEMCPY** (genuine work, not alloc):
+- `MermaidDiagramIr::clone` **12.2%** self (+ its `Vec<IrNode>` to_vec 7.3%, `String` clone 6.6%) — the
+  per-pass IR snapshot memcpy.
+- `derive_layout_edits` **11.3%** self — the O(n) IR diff (compute; inherent to diff-based incremental).
+- geometry clone: `Vec<LayoutEdgePath>` **8.7%** + `LayoutEdgePath` 7.0% — the fast path deep-clones
+  cached edges/nodes to return owned `DiagramLayout`.
+- `dependency_topology_equal` 5.8% (compute; do-not-retry topology-recheck, and NOT top-2).
+- raw `memcpy`/`memmove` ~12% — the physical copies behind the clones above.
+
+### Two now-justified Arc levers (the reject was libc-based)
+
+The top-2 frames (IR clone, geometry clone) are **memcpy**, which Arc-sharing eliminates — real work
+under mimalloc, NOT the alloc-wash the libc bench suggested:
+1. **edit-session Arc-input** (IR snapshot) — REJECTED earlier as mimalloc-wash, but that verdict came
+   from the LIBC bench; its retry predicate ("IR clone top-2 wall frame") is now SATISFIED under
+   mimalloc. Needs re-measurement with the fresh-IR bench under this allocator.
+2. **`Arc<DiagramLayout>`** on `TracedLayout.layout` — the fast path shares cached geometry by refcount
+   instead of deep-cloning (renderers take `&DiagramLayout`, unchanged via Deref). Wide (~53
+   construction sites wrap in `Arc::new`, cheap for freshly-built layouts) but mechanical.
+Both are focused architectural efforts (wide edits + a fresh-IR bench), warranting careful A/B under
+this mimalloc bench rather than a cycle-tail rush.
