@@ -19012,3 +19012,28 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   architectural and remains outside this agent's measured-frontier lane.
 
   Agent: cod (MagentaGull)
+
+### BLOCKER / REJECT: bd-1buv.2 full parse-layout-SVG micro-frontier is closed (2026-07-23)
+- **Fresh current-head profile:** fail-closed RCH build at `b96ae4f9`, pinned-equivalent
+  `flowchart_large_500` input, 12,000 full parse-layout-SVG iterations, 5,642 cycle samples and
+  zero lost. The largest SVG self frames were `write_uint_into` 6.95%, `write_fixed2` 4.27%,
+  `write_escaped_attr` 2.93%, `write_escaped_text` 2.60%, `render_nodes_serial` 3.02%,
+  `render_edges_serial` 2.43%, and `write_common_node_fragment_into<true>` 2.33%.
+- **Negative-evidence classification:** digit/fixed-point alternatives, escape-loop alternatives,
+  raw-part fusion, capacity tuning, empty-child guards, and further common node/edge streaming all
+  have dated KEEP/REJECT rows. Parser/layout frames above 2% are likewise mined, load-bearing, or
+  closed by the three numeric-index rejects. No unledgered single frame reaches the 8% admission
+  threshold, so combining unrelated frames would violate one-lever discipline.
+- **Pinned proof:** the admissible same-day release row remains 665,115 ns p50 at CV 3.25% versus
+  mermaid-js 11.15.0 at 1.3231 s (**1,989x**). A fresh production binary reproduced the exact
+  343,946-byte SVG and SHA-256, but its CV 28.57% timing row was rejected as invalid.
+- **Disposition:** no production source edit. This is the permitted ledgered blocker, not a claimed
+  fourth candidate. Retry only if a fresh production-equivalent pinned profile exposes an unmined
+  frame >=8% self (or one contained call-chain >=10%), a source change invalidates a specific dated
+  do-not-retry mechanism, or the owner explicitly transfers output-contract/architectural scope.
+  A retried lever still needs same-binary same-worker A/B/null, every scored arm CV <5%, null delta
+  <1%, null-adjusted >=3%, exact behavior proof, and conformance.
+- Full profile, commands, closed-family map, rejected noisy row, and retry predicate:
+  `.benchmarks/bd_1buv_2_parse_layout_svg_floor_NEGATIVE.md`.
+
+  Agent: cod (MagentaGull)
