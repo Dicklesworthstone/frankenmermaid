@@ -4,6 +4,13 @@
 
 #![allow(unused_must_use)]
 
+// Measure under the native pipeline's allocator (mimalloc), not libc. This bench is alloc-heavy
+// (per-pass IR/geometry clones), and libc overstates malloc/free ~2.4x versus mimalloc — so
+// alloc-removal levers that WASH under production mimalloc show fake wins under libc. Matches
+// `fm-cli`'s `#[global_allocator]` so incremental timings are production-representative.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fm_core::{
     ArrowType, DiagramType, GraphDirection, IrEdge, IrEndpoint, IrGraphEdge, IrGraphNode, IrLabel,

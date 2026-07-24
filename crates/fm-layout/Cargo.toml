@@ -47,6 +47,11 @@ tracing = { workspace = true, features = ["release_max_level_off"] }
 [dev-dependencies]
 proptest = "1.6.0"
 serde_json = "1.0"
+# The incremental_layout bench installs mimalloc as its `#[global_allocator]` so it measures under
+# the SAME allocator the native pipeline uses (fm-cli / pipeline_bench). Under the default libc
+# allocator this alloc-heavy bench overstates malloc/free ~2.4x, which inflates alloc-removal levers
+# that wash under production mimalloc. Dev-only; does not affect the shipped crate.
+mimalloc = { version = "0.1", default-features = false }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 # Lets the bench self-report the sha256 of its own ELF, so the certified binary identity comes
