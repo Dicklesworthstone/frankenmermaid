@@ -121,6 +121,21 @@ memo hits across LABEL edits without re-scanning the SVG — a focused refactor 
 only the default theme). Confirmed NOT landable as a safe micro-lever; it is the standing focused-effort
 item. This is the bd-1buv small-non-flowchart-render LEDGERED BLOCKER for the safe-micro-lever lane.
 
+### Exhaustive confirmation across 3 workloads + code read (2026-07-24, cc) — no safe sub-lever remains
+
+Profiled `dense`, `er 40`, `seq 40` full pipelines: ALL small non-flowchart renders share the identical
+bottleneck — `render_svg_with_layout` self ~16-18% (CSS assembly) + `memchr find_impl` ~13-14% (strip
+needle scans, stack shows shape/`fm-node-*` needles) + `memmove` ~6%. Read every strip pass:
+`strip_unused_state_css` is gated + all-`memmem` with a SINGLE body walk (`scan_body_fm_node_classes`);
+`scan_accent_var_refs` is already "ONE pass instead of 8"; the accent/var strip `find`s and the marker
+passes are each individually optimized. The cost is INHERENT per-render re-processing of the invariant
+CSS distributed across already-floored passes. Confirmed: **no single sub-fusion clears ≥3%** (the
+accent-scan and marker-scan fuses are ~1-2% each, below floor); the ONLY ≥3% lever is memoizing the
+WHOLE post-pass sequence keyed on an IR/config-derived body-feature fingerprint — a focused refactor
+with a wrong-CSS correctness surface (re-couples the drift-proof body-based passes to renderer emission),
+verified only by exhaustive per-diagram-type + per-theme byte-identity goldens. **This is a focused
+architectural effort, NOT a safe micro-lever — the bd-1buv small-non-flowchart LEDGERED BLOCKER stands.**
+
 ## Marker-scan fuse (sub-lever, below floor)
 
 `strip_unused_markers` (builds `referenced` from `url(#…)`, strips dead marker defs) and
