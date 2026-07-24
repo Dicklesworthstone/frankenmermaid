@@ -2726,14 +2726,19 @@ fn parse_class_member(trimmed: &str) -> Option<fm_core::IrClassMember> {
     let is_abstract = rest.ends_with('*');
     let rest = trim_fast(rest.trim_end_matches('$').trim_end_matches('*'));
 
-    // Parse type annotation
-    let (name_part, return_type) = if let Some((name, typ)) = rest.rsplit_once(':') {
+    // Parse type annotation. `rsplit_once(':')` / `rfind(')')` on a single ASCII char go through
+    // the scalar `CharSearcher` reverse searcher (a profiled self-symbol on class parse); the SIMD
+    // `memchr::memrchr` finds the same last-byte index (`:` / `)` are ASCII ⇒ char boundaries).
+    let (name_part, return_type) = if let Some(colon) = memchr::memrchr(b':', rest.as_bytes()) {
         // Colon-separated: `name : Type` or `method() : ReturnType`
-        (trim_fast(name), Some(trim_fast(typ).to_string()))
+        (
+            trim_fast(&rest[..colon]),
+            Some(trim_fast(&rest[colon + 1..]).to_string()),
+        )
     } else if is_method {
         // For methods without colon, check for return type after closing paren
         // e.g., `eat() void` → name="eat()", return_type=Some("void")
-        if let Some(paren_end) = rest.rfind(')') {
+        if let Some(paren_end) = memchr::memrchr(b')', rest.as_bytes()) {
             let after_paren = trim_fast(&rest[paren_end + 1..]);
             if after_paren.is_empty() {
                 (rest, None)
