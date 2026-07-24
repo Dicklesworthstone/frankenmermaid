@@ -3911,27 +3911,24 @@ fn parse_er_attribute_key(raw: &str) -> Option<IrAttributeKey> {
 }
 
 fn is_plain_normalized_er_id(value: &str) -> bool {
+    // Same accept set as `is_fast_flow_identifier` — reuse its `[bool;256]` table (1 load/byte).
     !value.is_empty()
         && !value.ends_with('_')
-        && value
-            .as_bytes()
-            .iter()
-            .all(|&byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/'))
+        && value.bytes().all(|byte| FAST_ID_CHAR[byte as usize])
 }
 
 fn is_simple_er_data_type(value: &str) -> bool {
+    // `FAST_ID_CHAR` set plus `(` `)`; table load then two cheap byte compares, vs the former
+    // ~7-comparison predicate per byte. Byte-identical.
     !value.is_empty()
-        && value.as_bytes().iter().all(|&byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/' | b'(' | b')')
-        })
+        && value
+            .bytes()
+            .all(|byte| FAST_ID_CHAR[byte as usize] || byte == b'(' || byte == b')')
 }
 
 fn is_simple_er_label(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .as_bytes()
-            .iter()
-            .all(|&byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/'))
+    // Same accept set as `is_fast_flow_identifier` — reuse its table.
+    !value.is_empty() && value.bytes().all(|byte| FAST_ID_CHAR[byte as usize])
 }
 
 /// Parsed ER attribute.
