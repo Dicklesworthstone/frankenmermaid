@@ -32,6 +32,9 @@ egg = "0.11.0"
 # heap-free — eliding one malloc+free per edge and giving render sequential (cache-local)
 # point access instead of chasing a per-edge heap pointer.
 smallvec = "1"
+# Portable monotonic clock: plain `std::time::Instant` panics on wasm32-unknown-unknown, and
+# the traced-layout entry points time themselves on every call (GH#3).
+web-time.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 nalgebra.workspace = true

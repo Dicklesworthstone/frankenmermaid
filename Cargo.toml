@@ -49,6 +49,12 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
 wasm-bindgen = "0.2.108"
 web-sys = { version = "0.3.85", features = ["CanvasRenderingContext2d", "EventTarget", "HtmlCanvasElement", "TextMetrics"] }
+# `std::time::Instant::now()` PANICS on wasm32-unknown-unknown ("time not implemented on this
+# platform"), which under `panic = "abort"` lowers to an `unreachable` trap — every browser
+# render call that timed a pipeline stage aborted with `RuntimeError: unreachable` (GH#3).
+# web-time is a drop-in: it re-exports `std::time` off-wasm and backs Instant with
+# `performance.now()` on wasm32-unknown-unknown.
+web-time = "1.1.0"
 good_lp = { version = "1.15.0", default-features = false }
 
 [profile.release]

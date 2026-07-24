@@ -29,7 +29,11 @@ use std::f32::consts::PI;
 use std::mem::size_of;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
+// NOT `std::time::Instant`: on wasm32-unknown-unknown std has no clock and `Instant::now()`
+// panics ("time not implemented on this platform"), which `panic = "abort"` lowers to an
+// `unreachable` trap. `web_time::Instant` is `std::time::Instant` everywhere else and
+// `performance.now()` in the browser (GH#3).
+use web_time::Instant;
 
 use fm_core::{
     DiagramType, FxHashMap, FxHashSet, GanttDate, GanttExclude, GanttTaskType, GraphDirection,
@@ -2908,7 +2912,7 @@ pub fn layout_diagram_traced_with_config_and_guardrails(
     config: LayoutConfig,
     guardrails: LayoutGuardrails,
 ) -> TracedLayout {
-    let start = std::time::Instant::now();
+    let start = Instant::now();
     let mut traced =
         compute_traced_layout_with_config_and_guardrails(ir, algorithm, config, guardrails);
     let recompute_duration_us = saturating_elapsed_micros(start.elapsed());
@@ -3013,7 +3017,7 @@ impl IncrementalLayoutEngine {
         config: LayoutConfig,
         guardrails: LayoutGuardrails,
     ) -> TracedLayout {
-        let start = std::time::Instant::now();
+        let start = Instant::now();
         let key = layout_memo_key(algorithm, &config, guardrails);
 
         if let Some(cached) = &self.cached
@@ -3257,7 +3261,7 @@ impl IncrementalLayoutEngine {
                     // snapshot exactly like the slow path, so cache freshness semantics are
                     // identical whichever path serves the request.
                     track_dependency_graph_query(ir);
-                    let incremental_start = std::time::Instant::now();
+                    let incremental_start = Instant::now();
 
                     let mut nodes = cached_layout.traced.layout.nodes.clone();
                     for (node_index, node_box) in nodes.iter_mut().enumerate() {
@@ -3339,7 +3343,7 @@ impl IncrementalLayoutEngine {
         }
 
         track_dependency_graph_query(ir);
-        let incremental_start = std::time::Instant::now();
+        let incremental_start = Instant::now();
         let current_graph = if all_node_changes || dependency_topology_equal(&cached_graph.ir, ir) {
             Arc::clone(&cached_graph.graph)
         } else {
@@ -20688,7 +20692,7 @@ mod tests {
     }
 
     fn measure_layout_ns(ir: &MermaidDiagramIr, algorithm: LayoutAlgorithm) -> u128 {
-        let start = std::time::Instant::now();
+        let start = web_time::Instant::now();
         let _traced = layout_diagram_traced_with_algorithm(ir, algorithm);
         start.elapsed().as_nanos()
     }
@@ -21433,7 +21437,7 @@ mod tests {
         let edges: Vec<(usize, usize)> = (0..node_count - 1).map(|i| (i, i + 1)).collect();
         let ir = graph_ir(DiagramType::Flowchart, node_count, &edges);
 
-        let start = std::time::Instant::now();
+        let start = web_time::Instant::now();
         let traced = layout_diagram_traced_with_config_and_guardrails(
             &ir,
             LayoutAlgorithm::Auto,
