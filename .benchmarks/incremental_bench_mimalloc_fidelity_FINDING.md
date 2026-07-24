@@ -65,3 +65,24 @@ under mimalloc, NOT the alloc-wash the libc bench suggested:
    construction sites wrap in `Arc::new`, cheap for freshly-built layouts) but mechanical.
 Both are focused architectural efforts (wide edits + a fresh-IR bench), warranting careful A/B under
 this mimalloc bench rather than a cycle-tail rush.
+
+### `Arc<DiagramLayout>` — confirmed-feasible plan (2026-07-24)
+
+Feasibility audit (clean): **0** functions take `DiagramLayout` by value; **0** post-construction
+mutations of `traced.layout.*` in fm-layout or any consumer; all renderers take `&DiagramLayout`
+(unchanged via `Arc` Deref). Steps:
+1. `TracedLayout.layout: DiagramLayout` → `Arc<DiagramLayout>`.
+2. ~53 `TracedLayout { layout: DiagramLayout {…} }` sites → `layout: Arc::new(DiagramLayout {…})`
+   (compiler-guided; mechanical). Fresh-built layouts ⇒ `Arc::new` is one cheap alloc each.
+3. Size-stable fast path: return `Arc::clone(&cached.traced.layout)` (+ refreshed trace) instead of
+   deep-cloning nodes/edges/clusters — node spans don't change on a label edit, so the refresh loop
+   is a no-op and can be dropped. THIS is the win (~15-20% of the fast path = the geometry memcpy).
+4. Non-traced `layout_diagram*` (~10 fns returning owned `DiagramLayout`): extract via
+   `Arc::try_unwrap(traced.layout).unwrap_or_else(|a| (*a).clone())` — refcount 1 ⇒ moves out, no
+   clone; no regression for the full-layout path.
+5. BONUS: memo-cache store `traced.clone()` becomes an Arc refcount bump (cheaper), and the top-level
+   memo-hit return likewise.
+Safety net: 440 fm-layout tests + workspace goldens catch any drift. Measure the fast path A/B under
+THIS mimalloc bench (expect incremental/1000 to drop below full_recompute, turning the /500-/1000 tie
+into a win). Best done with reliable Agent-Mail coordination (was degraded) and a quiet machine
+(load was fluctuating 4→140 this session) — hence scoped here rather than rushed.
