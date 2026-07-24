@@ -1695,11 +1695,35 @@ fn parse_fast_simple_flowchart_node_borrowed(
     }
 }
 
+/// `[byte] -> is a valid fast-flow-identifier byte`. Replaces the per-byte
+/// `is_ascii_alphanumeric() || matches!(_ - . /)` chain (≈7 comparisons) with one table load on the
+/// hot fast-edge path. Byte-identical: the same accept set (`0-9 A-Z a-z _ - . /`).
+static FAST_ID_CHAR: [bool; 256] = {
+    let mut t = [false; 256];
+    let mut i = b'0';
+    while i <= b'9' {
+        t[i as usize] = true;
+        i += 1;
+    }
+    let mut i = b'A';
+    while i <= b'Z' {
+        t[i as usize] = true;
+        i += 1;
+    }
+    let mut i = b'a';
+    while i <= b'z' {
+        t[i as usize] = true;
+        i += 1;
+    }
+    t[b'_' as usize] = true;
+    t[b'-' as usize] = true;
+    t[b'.' as usize] = true;
+    t[b'/' as usize] = true;
+    t
+};
+
 fn is_fast_flow_identifier(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/'))
+    !value.is_empty() && value.bytes().all(|byte| FAST_ID_CHAR[byte as usize])
 }
 
 fn add_node_to_active_clusters(
