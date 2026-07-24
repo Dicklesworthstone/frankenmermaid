@@ -18975,3 +18975,40 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   region granularity.
 
   Agent: cc (CopperCliff)
+
+### REJECTED: minimap overlay row streaming — signal present, strict dispersion gate failed (2026-07-23)
+- **Lever (bd-1buv.58):** consume `main_output.lines()` directly into the mutable overlay result
+  grid instead of collecting every Unicode row and cloning the first `main_height` rows.
+- **Profile-first predicate cleared:** on `vmi1227854`, the untouched ragged-Unicode overlay ranked
+  `Chars::next` at 15.11%, `Vec<char>::extend_desugared` at 8.61%, `Vec<u8>::reserve` at 8.18%,
+  and `realloc` at 1.35% (8,281 samples, zero lost).
+- **Correctness cleared:** the candidate matched a verbatim old-path oracle byte-for-byte across
+  40 empty/ragged/overlong/extra-row/Unicode/clipping/corner cases.
+- **Why rejected:** alternating same-binary production-release A/B on `vmi1149989` showed a 5.32%
+  raw median win at 30 x 1,500 calls/sample, but candidate/null-B CVs were 5.41%/5.46%. The
+  predeclared final 24 x 3,000 run still had a 5.13% raw direction, while reference/candidate/null-A
+  CVs were 5.29%/7.70%/8.86% and null delta was 4.01%. This fails CV < 5% and the null-control
+  floor; no source code ships.
+- **Retry predicate:** obtain an exclusive or isolated worker/core and first pass two consecutive
+  reference/reference preflights with every null CV < 3% and null delta < 1%; only then retry the
+  candidate under production release, requiring all scored arms CV < 5% and a null-adjusted win
+  >= 3%.
+- Full profile, A/B sequence, commands, and table:
+  `.benchmarks/bd_1buv_58_minimap_overlay_stream_NEGATIVE.md`.
+
+  Agent: cod (MagentaGull)
+
+### SURFACED: bd-1buv.2 pinned large-flowchart frontier remains mined (2026-07-23)
+- `scripts/headtohead` with the pinned corpus and remote-built release example measured
+  `flowchart_large_500` at 665,115 ns p50 with CV 3.25% versus mermaid-js at 1.3231 s
+  (1,989x p50 speedup). `wide_16x32` measured 1,166,584 ns p50 versus 3.2876 s (2,818x), but
+  frankenmermaid CV was 7.59%, so the wide row is not admissible under this sweep's CV < 5% rule.
+- The requested literal `cargo bench ... --release` form reached remote worker `vmi1149989` but
+  this Cargo rejected `--release` as an unexpected argument before timing; it is a surfaced command
+  blocker, not benchmark evidence. The repository-supported retry is the equivalent
+  `--profile release` form.
+- Existing `.benchmarks/bd_1buv_2_flowchart_parse_layout_floor_ANALYSIS.md` plus the current profile
+  scan closes the remaining parse/layout micro-paths. The next known lever is incremental/
+  architectural and remains outside this agent's measured-frontier lane.
+
+  Agent: cod (MagentaGull)
