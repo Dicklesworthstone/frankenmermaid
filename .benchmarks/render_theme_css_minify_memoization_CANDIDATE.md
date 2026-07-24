@@ -105,6 +105,22 @@ NOT alloc ⇒ will not mimalloc-wash).
 - Prove byte-identity on `cargo test -p fm-render-svg` + workspace goldens, per-theme if possible, and a
   same-binary interleaved A/B on `er 40` / `seq` / `class 50` full pipeline (≥3% wall, CV<5%).
 
+### The safe/simple pieces are BELOW the ≥3% bar (2026-07-24, cc) — only the strip-decision refactor clears it
+
+Checked the lowest-risk piece, memoizing `Theme::to_svg_style` generation (a pure fn of the theme + 2
+bools, safely equality-keyed, byte-identical). In the ER profile its self is **0.00%** (`to_svg_style`
+0.29% total; `write_css_vars` 0.15%, `FontConfig::write_css` 0.45%, `core::fmt::write` 2.48% at 0.15%
+self). Theme CSS GENERATION is cheap (~2-3% total) → memoizing it does NOT clear ≥3%. The ~20% is
+almost entirely the STRIP passes' body-dependent needle scans (`memchr find_impl` 14.41% — the stack
+shows the `fm-node-*`/shape needle strings) + their `memmove` rebuilds.
+
+⇒ **The ONLY ≥3% win here is eliminating/memoizing the body-dependent strip DECISION**, which needs the
+IR/config-derived feature fingerprint (node-type set, marker refs, shapes, clusters, dashed/thick) so the
+memo hits across LABEL edits without re-scanning the SVG — a focused refactor of `strip_unused_state_css`
+/ `strip_dead_marker_css` / `strip_unused_theme_css` with a wrong-CSS correctness surface (goldens cover
+only the default theme). Confirmed NOT landable as a safe micro-lever; it is the standing focused-effort
+item. This is the bd-1buv small-non-flowchart-render LEDGERED BLOCKER for the safe-micro-lever lane.
+
 ## Marker-scan fuse (sub-lever, below floor)
 
 `strip_unused_markers` (builds `referenced` from `url(#…)`, strips dead marker defs) and
