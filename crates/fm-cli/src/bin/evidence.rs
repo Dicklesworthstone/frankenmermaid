@@ -1984,13 +1984,13 @@ fn sha256_file(path: &Path) -> Result<String> {
         }
         hasher.update(&buf[..read]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(encode_hex(&hasher.finalize()))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    encode_hex(&hasher.finalize())
 }
 
 fn verify_bundle_links(bundle_dir: &Path) -> Result<()> {
@@ -2822,4 +2822,19 @@ mod tests {
         .expect_err("unknown gate should fail");
         assert!(error.to_string().contains("unknown gate"));
     }
+}
+
+/// Lowercase hex encoding for digest output.
+///
+/// RustCrypto 0.11 moved digest results from `GenericArray` to `hybrid_array::Array`,
+/// which does not implement `LowerHex`, so the previous `format!("{:x}", ..)` no
+/// longer compiles. Encoding explicitly keeps this dependency-free.
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
 }

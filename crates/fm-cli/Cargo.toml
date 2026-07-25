@@ -35,7 +35,7 @@ fnx-experimental-directed = ["fm-layout/fnx-experimental-directed"]
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-crossterm = "0.28.1"
+crossterm = "0.29"
 fm-core.workspace = true
 fm-layout.workspace = true
 fm-parser.workspace = true
@@ -44,9 +44,9 @@ fm-render-term.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9.34"
-sha2 = "0.10.9"
+sha2 = "0.11"
 time = { version = "0.3.41", features = ["formatting", "parsing"] }
-toml = "0.8.23"
+toml = "1.1"
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json"] }
 
@@ -65,7 +65,7 @@ usvg = { version = "0.47", optional = true, default-features = false }
 mimalloc = { version = "0.1", default-features = false }
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 tempfile = "3.25"
 fm-render-canvas.workspace = true
 
