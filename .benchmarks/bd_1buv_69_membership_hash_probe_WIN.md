@@ -117,9 +117,26 @@ here, not the gate.
 
 ## Correctness
 
-- Byte-identity across all 19 corpus items (above), including subgraph-heavy `arch_100x50`.
+- **Byte-identity across all 19 corpus items** (above). This is the strongest evidence here, and it
+  covers every diagram class that routes through the two changed functions: `arch_100x50` (100
+  subgraphs), `state_40` (`attach_state_node` calls both), and the ER/class items.
 - `cargo clippy -p frankenmermaid-cli --example headtohead -- -D warnings`: clean.
-- `cargo test -p fm-parser`: see the commit message for the run this landed on.
+- `cargo test -p fm-parser`: **green, exit 0, `ovh-a`, 23.9 s**, run against this candidate source
+  after the arms were built.
+
+**Blocker on the test-count record.** Six subsequent attempts to re-run `cargo test -p fm-parser` for
+visible pass/fail counts were refused by rch admission, including one pinned to `ovh-a`:
+
+```
+[RCH] remote required; refusing local fallback (no admissible workers:
+  insufficient_slots=4, insufficient_total_slots=5, hard_preflight=1, active_project_exclusion=2)
+```
+
+The fleet reported 47/76 slots free at the time; `active_project_exclusion=2` means rch was excluding
+the workers already running this project's other lane. No local fallback was taken (it drains
+`/data`). **This refusal exits `1`, exactly like a failing test** — the two are distinguishable only
+by the message, and mistaking one for the other would have produced a false "tests failed" row in
+this ledger. The green run above stands; only the printed counts are missing.
 
 ## Retry / rollback
 
