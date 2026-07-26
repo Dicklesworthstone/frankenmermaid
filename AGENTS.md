@@ -725,6 +725,53 @@ git push                # Push to remote
 
 ---
 
+## Ledger Integrity Preflight — Mandatory
+
+Before editing a performance lever, run:
+
+```bash
+node scripts/ledger_preflight.mjs \
+  --lever "<proposed mechanism>" \
+  --surface "<target file, function, or benchmark>"
+```
+
+Exit `0` means no matching REJECT was found. Exit `2` means blocked: read every
+reported row and satisfy its concrete retry predicate before proceeding.
+
+New performance verdict rows use explicit evidence markers so prose cannot be
+mistaken for proof:
+
+```markdown
+**A/A null control (same invocation):** baseline/null median ratio ..., CI ...
+```
+
+or:
+
+```markdown
+**Counted mechanism:** instructions/cycles/syscalls/allocations/faults ...
+```
+
+A structural argument, theoretical ceiling, unrelated control phase, future
+retry requirement, or source-file hash does not satisfy the REJECT gate.
+
+Every KEEP row must also record:
+
+```markdown
+**Executing ELF SHA-256 (self-reported by process):** `<64 lowercase hex characters>`
+```
+
+Computing a hash beside the run is not sufficient. The executing process must
+identify its own ELF. The local pre-commit hook checks the staged ledger, and CI
+checks it against the merge base:
+
+```bash
+node scripts/ledger_preflight.mjs --lint --staged --base HEAD
+```
+
+Do not bypass this gate.
+
+---
+
 ## cass — Cross-Agent Session Search
 
 `cass` indexes prior agent conversations (Claude Code, Codex, Cursor, Gemini, ChatGPT, etc.) so we can reuse solved problems.

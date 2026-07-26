@@ -1,12 +1,34 @@
 # Ledger Resurrection — per-row table (six-class taxonomy)
 
-Companion to [`LEDGER_RESURRECTION.md`](LEDGER_RESURRECTION.md) §7. Source: `docs/NEGATIVE_EVIDENCE.md`
-@ `ca4e1d65`. **250 REJECT-verdict rows** of 668 entries, screened mechanically then hand-adjudicated
-at the head of the queue (§7.3). Sorted VOID-NONULL → VOID-CV → VOID-ZEROSELF → VALID-*, then by
-target-frame self-time.
+> **Canonical correction (cod / Lane L, 2026-07-26):** the generated `Screen` and `Final` columns
+> below are historical triage only. In particular, “VALID-MECHANISM (structural)” is not a fleet
+> class. The hand-adjudicated manifest immediately below is authoritative and corresponds to
+> `LEDGER_RESURRECTION.md` §10.
+
+Companion to [`LEDGER_RESURRECTION.md`](LEDGER_RESURRECTION.md) §10. Source:
+`docs/NEGATIVE_EVIDENCE.md` blob `34c1d8ae1ccffdce420a1bdf9ff5f4e82954c30f`. The historical
+classifier selected **250 candidate rows** from 668 entries and sorted them
+VOID-NONULL → VOID-CV → VOID-ZEROSELF → VALID-*, then by target-frame self-time.
 
 `Screen` is the mechanical class. `Final` applies the structural-mechanism rescue of §7.4. Neither
 column is a substitute for reading the row: three of the top six were overturned by hand.
+
+## Canonical hand-adjudication manifest
+
+Every one of the 250 mechanically selected entries was read in full. Numbers below refer to the
+table's `#` column. `EXCLUDED` means the entry is not an actual performance REJECT verdict; it is not
+a seventh taxonomy class.
+
+- `VALID-PROFILE` (4): 81, 152, 218, 245
+- `VALID-MECHANISM` (21): 95, 171, 180, 181, 183, 185, 186, 187, 190, 192, 201, 203, 204, 211, 212, 214, 215, 219, 221, 222, 231
+- `VALID-AB` (5): 235, 236, 238, 248, 249
+- `VOID-CV` (6): 168, 232, 242, 243, 244, 247
+- `VOID-ZEROSELF` (7): 27, 167, 170, 172, 173, 174, 177
+- `VOID-NONULL` (146): 1, 3, 4, 5, 6, 7, 8, 9, 10, 13, 14, 15, 16, 17, 18, 19, 20, 21, 23, 24, 25, 26, 32, 33, 34, 36, 37, 38, 39, 40, 42, 43, 48, 51, 52, 54, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 72, 73, 77, 78, 79, 86, 88, 89, 92, 94, 96, 97, 98, 99, 100, 101, 102, 103, 104, 106, 107, 108, 110, 111, 112, 113, 115, 118, 119, 120, 122, 123, 125, 126, 127, 128, 129, 131, 132, 134, 135, 136, 138, 139, 140, 141, 142, 143, 144, 148, 149, 150, 151, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 165, 166, 176, 179, 182, 184, 188, 189, 191, 193, 194, 195, 196, 199, 200, 202, 205, 206, 207, 208, 209, 210, 213, 216, 217, 223, 226, 227, 228, 229, 230, 239, 240, 241
+- `EXCLUDED` (61): 2, 11, 12, 22, 28, 29, 30, 31, 35, 41, 44, 45, 46, 47, 49, 50, 53, 55, 56, 57, 58, 71, 74, 75, 76, 80, 82, 83, 84, 85, 87, 90, 91, 93, 105, 109, 114, 116, 117, 121, 124, 130, 133, 137, 145, 146, 147, 164, 169, 175, 178, 197, 198, 220, 224, 225, 233, 234, 237, 246, 250
+
+Check: 4 + 21 + 5 + 6 + 7 + 146 = 189 actual REJECTs; 189 + 61 excluded = 250
+screened candidates. The strict VOID rate is 159/189 = 84.1%.
 
 | # | Line | Entry | Effect | Self-time | Null? | Counted mech? | Bin sha? | Screen | Final |
 |---|---|---|---|---|:--:|:--:|:--:|---|---|

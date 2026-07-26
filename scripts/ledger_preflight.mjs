@@ -7,17 +7,19 @@
 //
 // Two modes, both exit non-zero to block:
 //
-//   --lever "<text>" [--frame <symbol>]   BEFORE mutating source. Greps the negative-evidence
-//                                          ledger for a prior dated REJECT covering this mechanism.
-//                                          exit 2 = BLOCKED (a matching REJECT exists).
+//   --lever "<text>" --surface "<text>"    BEFORE mutating source. Greps the negative-evidence
+//                                          ledger for a prior dated REJECT covering this mechanism
+//                                          and target surface. exit 2 = BLOCKED.
 //
-//   --lint [--base <git-ref>]              BEFORE committing. Every REJECT row ADDED relative to
-//                                          <git-ref> must carry an A/A null control or a counted
-//                                          mechanism. exit 1 = a row would be unfalsifiable.
+//   --lint [--base <git-ref>] [--staged]   BEFORE committing. Every REJECT row ADDED relative to
+//                                          <git-ref> must carry a same-invocation A/A null control
+//                                          or a counted mechanism. Every KEEP must carry the
+//                                          executing process's self-reported ELF SHA-256.
+//                                          exit 1 = an inadmissible row.
 //
-// The --lint predicates are deliberately the SAME ones docs/LEDGER_RESURRECTION.md section 7 audits
-// with, so the gate and the audit agree by construction: a row this gate admits is a row that audit
-// classifies VALID-*, and a row it rejects is one that audit would classify VOID-NONULL.
+// Evidence markers are deliberately explicit. Natural-language regexes confused retry predicates,
+// source hashes, structural arguments, and unrelated "null" phases with actual evidence during the
+// resurrection audit. New rows must use one of the markers documented in AGENTS.md.
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
@@ -27,25 +29,24 @@ import { fileURLToPath } from 'node:url';
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const LEDGER = join(REPO, 'docs', 'NEGATIVE_EVIDENCE.md');
 
-// --- the shared predicates (keep in lockstep with docs/LEDGER_RESURRECTION.md section 7) ---------
+// --- mandatory evidence markers ---------------------------------------------------------------
 
-/** An A/A null control was actually recorded. */
-const NULL_CTRL =
-  /(A\/B\/null|A\/A\b|null[- ]control|null arm|noop floor|null floor|null median|null delta|paired\(base, ?base\)|null CV|null-adjusted|noop null|null cv)/i;
-/** A COUNTED mechanism: instructions / cycles / syscalls / allocations / faults. */
-const MECHANISM =
-  /(instructions?\b|\binstr\b|perf stat|cycles\b|syscall|allocations? (count|unchanged|identical)|page[- ]fault|branch[- ]miss|retired|counted)/i;
-const MECH_UNCHANGED =
-  /(unchanged|identical|flat|no (measurable |material )?(change|difference)|same instruction|instruction[- ]identical|0\.0[0-9]?% instr|no work (was )?removed)/i;
-/** A structural refutation: the row proves no work was removed by argument (see section 7.4). */
-const STRUCTURAL =
-  /\*\*(mechanism|why (it'?s )?~?0|why ~0|root cause|why the profile lied|why it looked|why not a free win|why it'?s (below|fragile)|lesson|mechanism trade-off)/i;
-/** A stated ceiling bounds the claim without needing a null. */
-const CEILING = /(ceiling|Amdahl|upper bound|theoretical (max|limit)|at (its |the )?floor)/i;
+const NULL_MARKER = '**A/A null control (same invocation):**';
+const COUNTED_MARKER = '**Counted mechanism:**';
+const ELF_MARKER = '**Executing ELF SHA-256 (self-reported by process):**';
+const COUNTED_METRIC = /\b(instructions?|cycles?|syscalls?|allocations?|faults?)\b/i;
+const MEASURED_VALUE =
+  /(?:\d[\d,]*(?:\.\d+)?(?:%|x|ns|us|µs|ms|s)?|unchanged|identical|flat|no (?:measurable |material )?(?:work|change|difference))/i;
+const NULL_VALUE = /\b(?:ratio|median|p50|CI|delta|samples?|baseline)\b[^.\n]*\d/i;
+const ELF_VALUE = /\b[a-f0-9]{64}\b/;
 
 const REJECT_TITLE =
   /\b(REJECT|REJECTED|NO-SHIP|NOSHIP|REVERT|REVERTED|NEGATIVE|ZERO-GAIN|~0-GAIN|WASH|ABANDON|DEAD|INVALID|VOID|SUB-BAR)\b/i;
 const KEEP_TITLE = /^\s*(WIN|KEPT|KEEP|LANDED|VERIFIED|SHIPPED|✅|🟢)/i;
+const REJECT_VERDICT =
+  /(?:^|\n)[^\n]{0,24}\b(?:Verdict|Decision|Disposition)\b[^\n]{0,32}\b(?:REJECT|NO-SHIP|REVERT|WASH)\b/im;
+const KEEP_VERDICT =
+  /(?:^|\n)[^\n]{0,24}\b(?:Verdict|Decision|Disposition)\b[^\n]{0,32}\b(?:KEEP|KEPT|LANDED|SHIP)\b/im;
 
 /** Split a ledger into `### ` entries. */
 function entries(text) {
@@ -57,16 +58,61 @@ function entries(text) {
   });
 }
 
-const isRejectRow = (e) => !KEEP_TITLE.test(e.title) && REJECT_TITLE.test(e.title);
+const isKeepRow = (e) => KEEP_TITLE.test(e.title) || KEEP_VERDICT.test(e.body);
+const isRejectRow = (e) =>
+  !isKeepRow(e) && (REJECT_TITLE.test(e.title) || REJECT_VERDICT.test(e.body));
 
-/** Would section 7 classify this row VALID-*? */
-function isFalsifiable(body) {
-  if (NULL_CTRL.test(body)) return { ok: true, why: 'A/A null control recorded' };
-  if (MECHANISM.test(body) && MECH_UNCHANGED.test(body))
-    return { ok: true, why: 'counted mechanism recorded (work shown unchanged)' };
-  if (STRUCTURAL.test(body)) return { ok: true, why: 'structural refutation paragraph' };
-  if (CEILING.test(body)) return { ok: true, why: 'stated ceiling bounds the claim' };
+function markerParagraph(body, marker) {
+  const start = body.indexOf(marker);
+  if (start < 0) return '';
+  const rest = body.slice(start + marker.length);
+  const end = rest.search(/\n\s*\n|\n-\s+\*\*[^*]+:\*\*/);
+  return (end < 0 ? rest : rest.slice(0, end)).trim();
+}
+
+function rejectEvidence(body) {
+  const nullEvidence = markerParagraph(body, NULL_MARKER);
+  if (nullEvidence && NULL_VALUE.test(nullEvidence))
+    return { ok: true, why: 'same-invocation A/A null control recorded' };
+
+  const countedEvidence = markerParagraph(body, COUNTED_MARKER);
+  if (
+    countedEvidence &&
+    COUNTED_METRIC.test(countedEvidence) &&
+    MEASURED_VALUE.test(countedEvidence)
+  )
+    return { ok: true, why: 'counted mechanism recorded' };
+
   return { ok: false, why: null };
+}
+
+function keepEvidence(body) {
+  const elfEvidence = markerParagraph(body, ELF_MARKER);
+  return ELF_VALUE.test(elfEvidence);
+}
+
+function addedEntries(before, after) {
+  const remaining = new Map();
+  for (const e of entries(before)) {
+    const key = e.body.trimEnd();
+    remaining.set(key, (remaining.get(key) ?? 0) + 1);
+  }
+  const added = [];
+  for (const e of entries(after)) {
+    const key = e.body.trimEnd();
+    const count = remaining.get(key) ?? 0;
+    if (count > 0) remaining.set(key, count - 1);
+    else added.push(e);
+  }
+  return added;
+}
+
+function retryPredicate(body) {
+  const flat = body.replace(/\s+/g, ' ');
+  const predicate = flat.match(
+    /\b(?:if retried|retry (?:only )?(?:if|when|predicate|condition)?|do[- ]not[- ]retry|reopen only|unblock(?:ed)?(?: if| when)?)[^.!?]*(?:[.!?]|$)/i,
+  );
+  return predicate ? predicate[0].trim().slice(0, 700) : null;
 }
 
 const arg = (n, d = null) => {
@@ -80,28 +126,76 @@ if (!existsSync(LEDGER)) {
   process.exit(3);
 }
 
+// ---------------------------------------------------------------- mode: --self-test
+if (has('self-test')) {
+  const hash = 'a'.repeat(64);
+  const cases = [
+    ['structural prose is not counted evidence', !rejectEvidence('**Root cause:** no work.').ok],
+    ['ceiling prose is not counted evidence', !rejectEvidence('Amdahl ceiling: 1%.').ok],
+    [
+      'retry-only A/A prose is not evidence',
+      !rejectEvidence('Retry only when same-invocation A/A ratio is below 1.01.').ok,
+    ],
+    [
+      'empty A/A marker is rejected',
+      !rejectEvidence(`${NULL_MARKER} required before retry.`).ok,
+    ],
+    [
+      'measured A/A marker is accepted',
+      rejectEvidence(
+        `${NULL_MARKER} baseline/null median ratio 1.0012x, CI [0.999, 1.003].`,
+      ).ok,
+    ],
+    [
+      'counted marker is accepted',
+      rejectEvidence(`${COUNTED_MARKER} instructions 12,004 -> 12,004 (unchanged).`).ok,
+    ],
+    ['source SHA is not an ELF self-report', !keepEvidence(`source SHA-256 ${hash}`)],
+    [
+      'uppercase SHA is rejected by the lowercase contract',
+      !keepEvidence(`${ELF_MARKER} \`${hash.toUpperCase()}\``),
+    ],
+    ['self-reported executing ELF is accepted', keepEvidence(`${ELF_MARKER} \`${hash}\``)],
+  ];
+  const failed = cases.filter(([, ok]) => !ok);
+  for (const [name, ok] of cases) console.log(`[self-test] ${ok ? 'ok' : 'FAIL'}  ${name}`);
+  process.exit(failed.length === 0 ? 0 : 1);
+}
+
 // ---------------------------------------------------------------- mode: --lever
 if (has('lever')) {
   const lever = arg('lever', '');
-  const frame = arg('frame');
-  const terms = [frame, ...lever.split(/\s+/).filter((w) => w.length >= 5)]
-    .filter(Boolean)
-    .map((t) => t.toLowerCase().replace(/[^a-z0-9_:<>-]/g, ''))
-    .filter(Boolean);
+  const surface = arg('surface', arg('frame'));
+  if (!surface) {
+    console.error('[preflight] --lever requires --surface "<target file/function/benchmark>"');
+    process.exit(3);
+  }
+  const terms = [
+    ...new Set(
+      [surface, ...surface.split(/\s+/), ...lever.split(/\s+/).filter((w) => w.length >= 5)]
+        .filter(Boolean)
+        .map((t) => t.toLowerCase().replace(/[^a-z0-9_:<>-]/g, ''))
+        .filter(Boolean),
+    ),
+  ];
   if (terms.length === 0) {
-    console.error('[preflight] --lever needs a description, and --frame <symbol> is strongly advised');
+    console.error('[preflight] --lever and --surface need searchable descriptions');
     process.exit(3);
   }
   const rows = entries(readFileSync(LEDGER, 'utf8')).filter(isRejectRow);
-  const hits = rows
+  const ranked = rows
     .map((e) => {
       const hay = e.body.toLowerCase();
       const matched = terms.filter((t) => hay.includes(t));
-      return { e, matched, score: matched.length + (frame && hay.includes(frame.toLowerCase()) ? 5 : 0) };
+      const surfaceHit = hay.includes(surface.toLowerCase());
+      return { e, matched, score: matched.length + (surfaceHit ? 8 : 0), surfaceHit };
     })
-    .filter((h) => (frame ? h.score >= 5 : h.matched.length >= 2))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 8);
+    .sort((a, b) => b.score - a.score);
+  const exactSurfaceHits = ranked.filter((h) => h.surfaceHit);
+  const hits = (exactSurfaceHits.length > 0
+    ? exactSurfaceHits
+    : ranked.filter((h) => h.matched.length >= 2)
+  ).slice(0, 8);
 
   if (hits.length === 0) {
     console.log(`[preflight] OK — no prior REJECT row matches (${rows.length} reject rows scanned).`);
@@ -113,8 +207,9 @@ if (has('lever')) {
     console.error(`  docs/NEGATIVE_EVIDENCE.md:${h.e.line}`);
     console.error(`    ${h.e.title}`);
     console.error(`    matched: ${h.matched.join(', ')}`);
-    const retry = h.e.body.match(/[Rr]etry (only )?(if|predicate|condition)[^\n]{0,220}/);
-    if (retry) console.error(`    retry predicate: ${retry[0].trim()}`);
+    const retry = retryPredicate(h.e.body);
+    if (retry) console.error(`    retry predicate: ${retry}`);
+    else console.error('    retry predicate: none recorded');
     console.error('');
   }
   console.error('[preflight] Satisfy the retry predicate and say so in your row, or pick another lever.');
@@ -123,52 +218,81 @@ if (has('lever')) {
 
 // ---------------------------------------------------------------- mode: --lint
 if (has('lint')) {
-  const base = arg('base', 'origin/main');
+  const staged = has('staged');
+  const base = arg('base', staged ? 'HEAD' : 'origin/main');
   let before = '';
   try {
     before = execFileSync('git', ['-C', REPO, 'show', `${base}:docs/NEGATIVE_EVIDENCE.md`], {
-      encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
     });
   } catch {
     console.error(`[preflight] cannot read docs/NEGATIVE_EVIDENCE.md at ${base}; linting the whole file`);
   }
-  const oldTitles = new Set(entries(before).map((e) => e.title));
-  const added = entries(readFileSync(LEDGER, 'utf8'))
-    .filter(isRejectRow)
-    .filter((e) => !oldTitles.has(e.title));
+  let current;
+  if (staged) {
+    try {
+      current = execFileSync('git', ['-C', REPO, 'show', ':docs/NEGATIVE_EVIDENCE.md'], {
+        encoding: 'utf8',
+        maxBuffer: 64 * 1024 * 1024,
+      });
+    } catch {
+      console.error('[preflight] cannot read staged docs/NEGATIVE_EVIDENCE.md');
+      process.exit(3);
+    }
+  } else {
+    current = readFileSync(LEDGER, 'utf8');
+  }
+  const added = addedEntries(before, current).filter((e) => isRejectRow(e) || isKeepRow(e));
 
   if (added.length === 0) {
-    console.log(`[preflight] OK — no REJECT rows added vs ${base}.`);
+    console.log(
+      `[preflight] OK — no REJECT or KEEP rows added vs ${base}${staged ? ' in the index' : ''}.`,
+    );
     process.exit(0);
   }
   const bad = [];
   for (const e of added) {
-    const v = isFalsifiable(e.body);
-    if (v.ok) console.log(`[preflight] ok    L${e.line}  ${v.why}\n              ${e.title.slice(0, 96)}`);
-    else bad.push(e);
+    if (isKeepRow(e)) {
+      if (keepEvidence(e.body))
+        console.log(
+          `[preflight] ok    L${e.line}  executing ELF SHA-256 self-report recorded\n              ${e.title.slice(0, 96)}`,
+        );
+      else bad.push({ e, kind: 'KEEP', why: `missing ${ELF_MARKER}` });
+      continue;
+    }
+    const verdict = rejectEvidence(e.body);
+    if (verdict.ok)
+      console.log(
+        `[preflight] ok    L${e.line}  ${verdict.why}\n              ${e.title.slice(0, 96)}`,
+      );
+    else
+      bad.push({
+        e,
+        kind: 'REJECT',
+        why: `missing ${NULL_MARKER} or ${COUNTED_MARKER}`,
+      });
   }
   if (bad.length === 0) {
-    console.log(`\n[preflight] OK — all ${added.length} new REJECT row(s) are falsifiable.`);
+    console.log(`\n[preflight] OK — all ${added.length} new ledger verdict row(s) satisfy the contract.`);
     process.exit(0);
   }
-  console.error(`\n[preflight] BLOCKED — ${bad.length} new REJECT row(s) record neither an A/A null,`);
-  console.error('            a counted mechanism, a structural refutation, nor a ceiling.');
-  console.error('            As written they cannot distinguish the lever from the harness — this is');
-  console.error('            the VOID-NONULL class that is 167 of this ledger\'s 250 reject rows.\n');
-  for (const e of bad) {
-    console.error(`  docs/NEGATIVE_EVIDENCE.md:${e.line}`);
-    console.error(`    ${e.title}\n`);
+  console.error(`\n[preflight] BLOCKED — ${bad.length} new ledger verdict row(s) violate the contract.\n`);
+  for (const { e, kind, why } of bad) {
+    console.error(`  ${kind} at docs/NEGATIVE_EVIDENCE.md:${e.line}`);
+    console.error(`    ${e.title}`);
+    console.error(`    ${why}\n`);
   }
-  console.error('  Add ONE of:');
-  console.error('    - an A/A null control from the same invocation (campaign section 2.2), or');
-  console.error('    - a counted mechanism: instructions/cycles/syscalls/allocations shown unchanged');
-  console.error('      (a null cannot change the fact that no work was removed), or');
-  console.error('    - a **Mechanism** / **Why ~0** paragraph proving no work was removed, or');
-  console.error('    - a computed ceiling that bounds the claim.');
+  console.error('  REJECT rows need measured evidence under at least one of:');
+  console.error(`    ${NULL_MARKER}`);
+  console.error(`    ${COUNTED_MARKER}`);
+  console.error('  Structural prose and ceilings do not satisfy this gate.');
+  console.error(`  KEEP rows need: ${ELF_MARKER} <64 lowercase hex characters>`);
   process.exit(1);
 }
 
 console.error(`usage:
-  node scripts/ledger_preflight.mjs --lever "<description>" [--frame <symbol>]
-  node scripts/ledger_preflight.mjs --lint [--base <git-ref>]`);
+  node scripts/ledger_preflight.mjs --lever "<description>" --surface "<file/function/bench>"
+  node scripts/ledger_preflight.mjs --lint [--base <git-ref>] [--staged]
+  node scripts/ledger_preflight.mjs --self-test`);
 process.exit(3);

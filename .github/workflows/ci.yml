@@ -202,9 +202,9 @@ jobs:
 
       # Fleet campaign Meta-Lever #1: ledger integrity DECAYS. A repo that audits once and stops
       # drifts back to a 25-91% void rate; the one repo that institutionalized the check sits at
-      # 1.7%. This makes a REJECT row that cannot distinguish the lever from the harness a BUILD
-      # FAILURE rather than a style note. See docs/LEDGER_RESURRECTION.md section 7.
-      - name: New REJECT rows must be falsifiable
+      # 1.7%. This blocks a REJECT without A/A or counted evidence and a KEEP without the
+      # process-self-reported executing ELF SHA-256. See docs/LEDGER_RESURRECTION.md section 10.
+      - name: New performance verdicts must satisfy the ledger contract
         run: |
           BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
           if [ -z "$BASE" ] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then

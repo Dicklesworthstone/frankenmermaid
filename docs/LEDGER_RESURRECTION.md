@@ -1,10 +1,15 @@
 # Ledger Resurrection Audit — frankenmermaid
 
+> **Canonical correction (cod / Lane L, 2026-07-26): §10 supersedes §§7–9.**
+> Sections 7–9 are retained as audit history, but their structural/ceiling extension to
+> `VALID-MECHANISM`, their partial hand review, their counts, and their rerun queue are withdrawn.
+> The fleet taxonomy is counted-only and §10 records the completed row-by-row adjudication.
+
 **Campaign:** `perf-campaign-20260725`, fleet Meta-Lever #1.
 **Lane:** cc / STRUCTURAL (`BoldPanther`, Opus 5).
 **Audited:** `docs/NEGATIVE_EVIDENCE.md` @ `ca4e1d65`, 667 entries / 19,084 lines.
-**Re-audited 2026-07-26** under frankenfs's six-class taxonomy (fleet broadcast) — see §7, which
-supersedes the four-grade scheme in §1 and reaches a different answer.
+**Re-audited 2026-07-26** under frankenfs's six-class taxonomy (fleet broadcast) — see canonical
+§10, which supersedes the earlier schemes and reaches a different answer.
 
 The premise of the fleet-wide audit is that a large fraction of negative-evidence rows are **VOID** —
 not "the lever did not work" but "the measurement could not have detected the lever". frankenlibc
@@ -241,7 +246,7 @@ non-flowchart renders are the thing being measured.
 
 ---
 
-## 7. Re-audit under the six-class taxonomy (2026-07-26)
+## 7. Historical mechanical re-audit (superseded by §10)
 
 The fleet broadcast directs every repo to adopt frankenfs's taxonomy verbatim, and corrects the
 campaign's own prediction: **the CV gate is not the dominant void class.** frankenfs found only 4
@@ -374,7 +379,7 @@ because the binary could not emit AVX2.
 
 ---
 
-## 8. Institutionalization — because ledger integrity decays
+## 8. Historical first gate design (superseded by §10.4)
 
 Fleet broadcast 2 (2026-07-26) supplies the decisive data point. Void rates across the fleet:
 franken_networkx 91%, frankenfs 79.3%, frankenpandas 39.1%, frankenmermaid 24.7% (71.6% under the
@@ -432,7 +437,7 @@ would degrade the ledger, not protect it.
 
 ---
 
-## 9. Correction to §7.5 — the re-run queue is one row, not two
+## 9. Historical partial correction (superseded by §10.3)
 
 Written during the 2026-07-26 disk emergency, document-only. Reading both §7.5 candidates *in full*
 — which §7.5 had not done, having promoted them from the screen plus their verdict lines — overturns
@@ -500,3 +505,105 @@ window to learn what the row already says. The row's own retry predicate is the 
 | Genuine re-run candidates after full hand adjudication | **1** (L5492, redesigned) |
 | Withdrawn on full reading | 1 (L8376 → VALID-MECHANISM) |
 | Blocked on | a build; this repo is Lane L, and builds are halted fleet-wide (disk) |
+
+---
+
+## 10. Canonical strict six-class audit — every candidate read by hand
+
+This is the authoritative audit. It uses the method and taxonomy from
+`/data/projects/frankenfs/docs/LEDGER_RESURRECTION.md` without local extensions. The source snapshot
+is the 668-entry `docs/NEGATIVE_EVIDENCE.md` blob
+`34c1d8ae1ccffdce420a1bdf9ff5f4e82954c30f` (19,111 lines).
+
+The mechanical screen selected 250 candidate entries. Cod then read each complete entry, from its
+`###` heading through the next heading, and adjudicated it manually. Sixty-one candidates are not
+performance REJECT verdicts: they are KEEP/LANDED corrections, profile/survey surfaces, blockers or
+holds without an A/B verdict, invalid runs with no timed candidate path, correctness/build-only
+failures, or templates. They are excluded rather than forced into a performance class. The remaining
+189 rows are the strict REJECT population. The exact per-screen-row manifest is in
+`docs/LEDGER_RESURRECTION_TABLE.md`.
+
+### 10.1 Taxonomy, verbatim
+
+| Class | Definition |
+|---|---|
+| `VALID-PROFILE` | Rejected before any source edit on a named frame with non-zero self-time plus a computed Amdahl ceiling. |
+| `VALID-MECHANISM` | No A/A null, but refuted on a **counted** mechanism — instructions, cycles, syscalls, allocations, or faults unchanged — because a null control cannot change the fact that no work was removed. |
+| `VALID-AB` | A/B with a recorded A/A null and the effect sits inside it. |
+| `VOID-CV` | Killed **only** by a `cv < 5%` gate. |
+| `VOID-ZEROSELF` | Target frame had approximately zero self-time in the profile the benchmark actually ran. |
+| `VOID-NONULL` | Near-1.0 ratio, no null, and no counted mechanism. The row cannot distinguish the lever from the harness. |
+
+Structural explanations and theoretical ceilings do **not** become
+`VALID-MECHANISM`; only a counted mechanism does. A sentence that says a future retry needs A/A is
+not an A/A result. A source, benchmark, output, or externally computed binary hash is not a
+process-self-report of the ELF that executed.
+
+### 10.2 Final counts
+
+| Population/class | Rows |
+|---|---:|
+| Mechanical candidates read in full | 250 |
+| Excluded non-REJECT entries | 61 |
+| **Actual performance REJECT verdicts** | **189** |
+| `VALID-PROFILE` | 4 |
+| `VALID-MECHANISM` | 21 |
+| `VALID-AB` | 5 |
+| `VOID-CV` | 6 |
+| `VOID-ZEROSELF` | 7 |
+| **`VOID-NONULL`** | **146** |
+| **All VALID** | **30 / 189 = 15.9%** |
+| **All VOID** | **159 / 189 = 84.1%** |
+| Process-self-reported executing ELF SHA-256 | **2 / 189 = 1.1%** |
+
+The fleet correction is stronger here than the mechanical screen suggested. `VOID-CV` is six rows;
+`VOID-NONULL` is 146. The earlier 52-row `VALID-MECHANISM` count falsely admitted structural prose,
+ceilings, and generic uses of words such as “counted.” The earlier 18-row `VALID-AB` count mistook
+retry predicates and unrelated null phases for an A/A measurement. The earlier 26-row SHA count
+mixed source/output hashes and hashes computed beside the run with the two rows where the process
+actually self-reported its executing ELF.
+
+### 10.3 Ranked resurrection queue
+
+The numerically higher flat-CSR, barycenter, and packed-crossing rows collapse into already
+resurrected families with landed outcomes; repeating them would duplicate completed resurrection
+work. After excluding those completed duplicate families and the 61 non-REJECT entries, these are
+the five highest target-self-time unresolved distinct VOID rows:
+
+| Rank | Ledger row | Attributed self-time | Strict class | Concrete retry predicate |
+|---:|---|---:|---|---|
+| 1 | L9613 parser `trim_ws` | 9.46% | `VOID-NONULL` | Reopen only if a current real workload contains material boundary whitespace and a fresh profile again attributes non-zero self-time to trim. Measure same-invocation A/A+A/B and retired instructions; keep already-trimmed substrings as a negative control. |
+| 2 | L5020 path `d` raw serialization | 8.32% | `VOID-NONULL` | Do not re-add an `AttributeValue` variant. Retry only a design that bypasses the generated-path escape scan without perturbing the global attribute match; use same-invocation A/A+A/B, retired instructions, and an all-attribute regression control. |
+| 3 | L7861 `write_fixed2` `from_utf8` | 7.40% | `VOID-NONULL` | Re-profile current head and proceed only if safe UTF-8 validation still has non-zero self-time. Unsafe remains forbidden. Any safe formulation needs same-invocation A/A+A/B plus retired instructions. |
+| 4 | L5492 `build_smooth_path` capacity | 7.11% | `VOID-NONULL` | Re-profile first. Preserve `n*24` for `n < 4`; use `24 + (n-1)*56` only for `n >= 4`. Require same-invocation A/A+A/B, retired instructions, exact output identity, and a short orthogonal-edge negative control. |
+| 5 | L9250 `u32` ID-rank sort key | 6.20% | `VOID-NONULL` | Retry only on a long-ID workload whose fresh profile is comparator-bound rather than `logical_merge`/`merge_up`/memmove-bound. Require same-invocation A/A+A/B and retired instructions. |
+
+No rerun was started. The fleet disk emergency explicitly forbids Cargo builds, tests, benches, and
+RCH jobs, and the allocation addendum assigns this repo to Lane L with no worker. The queue is
+banked as `bd-8f9a`; it may run only after an explicit disk all-clear and a measurement window. This
+is resurrection work, not permission to resume micro-lever mining.
+
+### 10.4 Institutionalized gate
+
+`scripts/ledger_preflight.mjs` now makes the contract mechanical:
+
+```bash
+# Before source mutation: exit 2 if the ledger already covers the target surface.
+node scripts/ledger_preflight.mjs \
+  --lever "<proposed mechanism>" \
+  --surface "<file, function, or benchmark>"
+
+# Before commit: inspect only verdict entries added or modified in the index.
+node scripts/ledger_preflight.mjs --lint --staged --base HEAD
+```
+
+Candidate mode prints every matching prior row and its concrete retry predicate when present. Lint
+mode refuses a new REJECT unless it contains at least one of the explicit evidence records documented
+in `AGENTS.md`: a measured same-invocation A/A null control or a counted mechanism. It refuses a KEEP
+without the executing process's self-reported ELF SHA-256. Structural prose, ceilings, future
+requirements, and adjacent hashes cannot satisfy the gate.
+
+The live chain runner executes
+`.git/hooks/hooks.d/pre-commit/40-ledger-integrity`; CI runs the same linter against the merge base in
+`.github/workflows/ci.yml`. Thus an undecidable new REJECT or an unprovenanced KEEP is a non-zero
+pre-commit/CI result, not a documentation suggestion.
