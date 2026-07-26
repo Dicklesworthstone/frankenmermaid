@@ -1,31 +1,40 @@
 # Pinned mermaid-js head-to-head harness (`bd-1buv.1`)
 
 A repeatable comparator that measures frankenmermaid against the **original** mermaid-js on a fixed
-corpus, with pinned provenance, warmup discipline, an environment fingerprint, and a dispersion gate.
+corpus, with pinned provenance, warmup discipline, an environment fingerprint, and a measured
+same-invocation noise floor.
 Every dominance claim in `evidence/ledger/mermaid-js-head-to-head.toml` should be reproducible with
 one command here.
 
 ## Run it
 
 ```bash
-# 1. build the frankenmermaid side (per-crate; never a workspace-wide cargo command)
-CARGO_TARGET_DIR=/data/projects/.rch-targets/<yours> \
-  cargo build --release -p frankenmermaid-cli --example headtohead
+# 1. normal compile/test validation is strict-remote and never writes a local target
+df -h /data  # abort and report if available space is below 120G
+RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- \
+  cargo test --profile release -p frankenmermaid-cli --example headtohead
 
-# 2. run both engines over byte-identical inputs
+# 2. a full browser head-to-head genuinely needs the executable locally. Only in an assigned
+#    measurement window, reuse this repo's one existing target/ directory; never mint a task target.
+df -h /data  # the same 120G floor applies
+env -u CARGO_TARGET_DIR cargo build --profile release \
+  -p frankenmermaid-cli --example headtohead
+
+# 3. run both engines over byte-identical inputs
 node scripts/headtohead/run.mjs \
-  --fm-bin /data/projects/.rch-targets/<yours>/release/examples/headtohead
+  --fm-bin target/release/examples/headtohead
 ```
 
 Useful flags: `--only <corpus_id>[,<corpus_id>…]`, `--reps-scale 0.25` (fast smoke),
 `--js-budget-scale 0.1` (shrink the mermaid wall budgets for a smoke run), `--skip-mermaid`,
 `--pin-cpu auto|N|off`, `--out <dir>`, `--update-pins`.
 
-Exit codes: `0` green · `1` an engine errored · `3` corpus drift · `4` dispersion gate failed.
+Exit codes: `0` green · `1` an engine errored · `3` corpus drift · `4` median-CI gate failed.
 A comparator **DNF** is not an error and does not fail the run — see "Did not finish" below.
 
-A gate failure (`4`) means *the environment was too noisy for that item*, not that the code regressed —
-re-run it. Never re-pin or retune an item to make a gate pass.
+A gate failure (`4`) means either the claimed ratio did not clear the measured A/A floor or an arm
+could not produce the minimum null sample. It is **inconclusive**, not a regression. Re-run in an
+assigned quiet window; never re-pin or retune an item to force a pass.
 
 ## What is pinned
 
@@ -75,18 +84,29 @@ timer interrupt is a large fraction of the sample. The Rust runner therefore bat
 each timed sample spans ≥ 2 ms and divides. Batching is a timing device only: every iteration still
 renders the whole diagram. mermaid's items are all ≥ 30 ms, so they need no batching.
 
-**Dispersion gate: MAD, not CV.** Timing noise on a shared machine is *one-sided* — preemption,
-interrupts and frequency dips only ever make an iteration slower. That right tail inflates the
-standard deviation (and so the coefficient of variation) even when the bulk of iterations are tightly
-clustered. The harness therefore gates on **median absolute deviation** ≤ 5 % of the median, which
-measures dispersion of the uncontaminated regime. `cv_pct` is still recorded, just not gated on. The
-gate is blocking for frankenmermaid and advisory for mermaid, whose slowest item cannot afford enough
-reps to tighten its dispersion (and whose variance is dwarfed by a 1000× ratio).
+**Same-invocation A/A.** The Rust runner factors timing into one paired routine. For every item it
+first calls that routine with `(default, default)`, then with `(default, lean)`. Both arms are timed
+back-to-back inside each round, order alternates, both calls use the same batch, and the statistic is
+the median of per-round ratios. Each row prints the A/A and A/B ratio, bootstrap 95 % CI, CV/MAD, and
+both output checksums.
 
-**Two estimators.** Because noise is one-sided, `min` is the least-contaminated estimate of the true
-cost. The harness reports both the `p50`-based and the `min`-based speedup. **If the two disagree
-materially, the run was noisy and the claim is not robust** — this is the harness's own check on
-itself, and it is how the `wide_12x24` p50 outlier (4747× vs 2976× by min) was caught.
+The cross-runtime headline is a whole-runtime comparison: Rust and JavaScript cannot be two arms in
+one binary. The mermaid runner therefore emits its own in-browser `(mermaid, mermaid)` paired null in
+the same Chromium invocation. The driver uses the **larger** of the Rust and mermaid A/A CI radii, so
+the claim must clear both runtimes' measured floors.
+
+**Median-CI gate, never CV or MAD.** For each engine,
+`radius = max(abs(ci95_lo - 1), abs(ci95_hi - 1))`. A ratio passes only when its magnitude is at least
+`max(1.01, 1 + 2 * max(radius_rs, radius_js))`. Each null has at least nine paired rounds. `cv_pct`
+and `mad_pct` remain in every record as provenance, with `cv_gate: "never"`; neither can block a
+verdict.
+
+On a budgeted XL item that cannot afford nine comparator null rounds, the harness still attempts one
+real sample. A timeout can honestly establish DNF. If it completes, the row is inconclusive and the
+median-CI gate fails because its null control is insufficient.
+
+**Two report-only estimators.** The harness reports both p50-based and min-based speedup. Their
+agreement is useful diagnostic context, but only the same-invocation null median-CI decides the row.
 
 **Determinism.** Every timed iteration's output length is checked against a reference render, and the
 full bytes are compared once outside the timed region. A nondeterministic render fails the run.
@@ -147,9 +167,10 @@ was impatient.
 ### Which binary produced the numbers
 
 The frankenmermaid runner hashes its own `env::current_exe()` and emits that SHA-256 as its first
-stdout record; `run.mjs` copies it into the summary's environment fingerprint. A hash computed by a
-shell step *next to* the run proves nothing about which ELF actually executed — `rch` compiles into
-an opaque per-worker pool target dir, and agents have edited crates mid-benchmark in this fleet.
+stdout record; `run.mjs` copies it into the summary's environment fingerprint and fails closed unless
+it is a lowercase 64-hex digest with a positive ELF byte count. A hash computed by a shell step
+*next to* the run proves nothing about which ELF actually executed — `rch` compiles into an opaque
+per-worker pool target dir, and agents have edited crates mid-benchmark in this fleet.
 
 ### Edit traces
 
@@ -171,4 +192,5 @@ incremental-layout path is a separate lever (`bd-1buv.3`) and is not exercised h
 `.benchmarks/headtohead/run-<rev>-<ts>.jsonl` — one event per engine per item.
 `.benchmarks/headtohead/summary-<rev>-<ts>.json` — env fingerprint, pins, joined rows, ratios, gate.
 
-Both are schema-stable (`frankenmermaid.headtohead.v1`) for the evidence perf-report path.
+Both use schema `frankenmermaid.headtohead.v2`; v2 adds per-engine null controls and replaces the
+old MAD verdict fields with `median_ci_gate`.

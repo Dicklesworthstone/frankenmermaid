@@ -25,10 +25,13 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from 
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { Script } from 'node:vm';
 import { CORPUS, REVISION_SEP, generate, sha256 } from './corpus.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PINS = JSON.parse(readFileSync(join(HERE, 'pins.json'), 'utf8'));
+const MIN_NULL_ROUNDS = 9;
+const BOOTSTRAP_RESAMPLES = 2_000;
 
 // Bundle cache. Read by node, never by the browser, so a hidden dir is fine here.
 const CACHE = join(homedir(), '.cache', 'fm-headtohead');
@@ -177,7 +180,8 @@ function stats(samples) {
   const mean = xs.reduce((a, b) => a + b, 0) / n;
   const variance = n > 1 ? xs.reduce((a, b) => a + (b - mean) ** 2, 0) / (n - 1) : 0;
   const sd = Math.sqrt(variance);
-  const median = pct(50);
+  const mid = Math.floor(n / 2);
+  const median = n % 2 === 0 ? (xs[mid - 1] + xs[mid]) / 2 : xs[mid];
   // See the `mad_pct` doc comment in crates/fm-cli/examples/headtohead.rs: timing noise is
   // one-sided, so MAD measures dispersion of the uncontaminated regime while sd does not.
   const devs = xs.map((x) => Math.abs(x - median)).sort((a, b) => a - b);
@@ -197,27 +201,133 @@ function stats(samples) {
   };
 }
 
+function median(samples) {
+  const xs = [...samples].sort((a, b) => a - b);
+  const mid = Math.floor(xs.length / 2);
+  return xs.length % 2 === 0 ? (xs[mid - 1] + xs[mid]) / 2 : xs[mid];
+}
+
+/** Deterministic percentile-bootstrap 95% CI on the median. */
+function bootstrapMedianCi(ratios) {
+  let state = 0x4f6cdd1d;
+  const next = () => {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    return state >>> 0;
+  };
+  const medians = [];
+  for (let i = 0; i < BOOTSTRAP_RESAMPLES; i++) {
+    const sample = [];
+    for (let k = 0; k < ratios.length; k++) sample.push(ratios[next() % ratios.length]);
+    medians.push(median(sample));
+  }
+  medians.sort((a, b) => a - b);
+  const tail = Math.floor(BOOTSTRAP_RESAMPLES / 40);
+  return [medians[tail], medians[BOOTSTRAP_RESAMPLES - 1 - tail]];
+}
+
+function nullControl(ratios, checksumBytes) {
+  if (ratios.length === 0) {
+    return {
+      n: 0,
+      sufficient: false,
+      median: null,
+      ci95_lo: null,
+      ci95_hi: null,
+      half_width: null,
+      min_decidable_2x: null,
+      cv_pct: null,
+      mad_pct: null,
+      cv_gate: 'never',
+      checksum_bytes: checksumBytes,
+    };
+  }
+  const ratioMedian = median(ratios);
+  const mean = ratios.reduce((a, b) => a + b, 0) / ratios.length;
+  const variance = ratios.length > 1
+    ? ratios.reduce((a, b) => a + (b - mean) ** 2, 0) / (ratios.length - 1)
+    : 0;
+  const sd = Math.sqrt(variance);
+  const mad = median(ratios.map((x) => Math.abs(x - ratioMedian)));
+  const [ci95Lo, ci95Hi] = bootstrapMedianCi(ratios);
+  const halfWidth = Math.max(Math.abs(ci95Hi - 1), Math.abs(ci95Lo - 1));
+  return {
+    n: ratios.length,
+    sufficient: ratios.length >= MIN_NULL_ROUNDS,
+    median: ratioMedian,
+    ci95_lo: ci95Lo,
+    ci95_hi: ci95Hi,
+    half_width: halfWidth,
+    min_decidable_2x: Math.max(1.01, 1 + 2 * halfWidth),
+    cv_pct: Number((mean === 0 ? 0 : (sd / mean) * 100).toFixed(2)),
+    mad_pct: Number((ratioMedian === 0 ? 0 : (mad / ratioMedian) * 100).toFixed(2)),
+    cv_gate: 'never',
+    checksum_bytes: checksumBytes,
+  };
+}
+
 // ---------------------------------------------------------------- in-page benchmark
 
 // Runs inside chromium. One timed sample renders every revision of the item in order (a single-shot
 // item has exactly one revision), which is what a live preview does as the user edits. Returns the
 // timings plus every SVG so the driver can validate each one and sum the bytes.
-const PAGE_BENCH = `async ({ texts, reps, warmup, tag }) => {
+const PAGE_BENCH = `async ({ texts, reps, warmup, nullReps, tag }) => {
   const m = window.mermaid;
-  const out = { times: [], svgs: [], error: null };
+  const out = {
+    times: [],
+    svgs: [],
+    nullRatios: [],
+    nullChecksumBytes: 0,
+    nullOutputValid: true,
+    error: null,
+  };
+  const plausibleSvg = (svg) =>
+    typeof svg === 'string' &&
+    svg.includes('<svg') &&
+    svg.includes('</svg>') &&
+    !svg.includes('aria-roledescription="error"') &&
+    !/Syntax error in text/i.test(svg);
+  const renderAll = async (suffix) => {
+    const svgs = [];
+    for (let k = 0; k < texts.length; k++) {
+      const r = await m.render(tag + suffix + '_' + k, texts[k]);
+      svgs.push(r.svg);
+    }
+    return svgs;
+  };
+  const timed = async (suffix) => {
+    const t0 = performance.now();
+    const svgs = await renderAll(suffix);
+    return { ms: performance.now() - t0, svgs };
+  };
   try {
     for (let i = 0; i < warmup; i++) {
-      for (let k = 0; k < texts.length; k++) await m.render(tag + '_w' + i + '_' + k, texts[k]);
+      await renderAll('_w' + i);
+    }
+    for (let i = 0; i < nullReps; i++) {
+      let a;
+      let b;
+      if (i % 2 === 0) {
+        a = await timed('_null_' + i + '_a');
+        b = await timed('_null_' + i + '_b');
+      } else {
+        b = await timed('_null_' + i + '_b');
+        a = await timed('_null_' + i + '_a');
+      }
+      out.nullRatios.push(a.ms / Math.max(Number.EPSILON, b.ms));
+      out.nullOutputValid =
+        out.nullOutputValid &&
+        a.svgs.every(plausibleSvg) &&
+        b.svgs.every(plausibleSvg);
+      out.nullChecksumBytes +=
+        a.svgs.reduce((sum, svg) => sum + svg.length, 0) +
+        b.svgs.reduce((sum, svg) => sum + svg.length, 0);
     }
     for (let i = 0; i < reps; i++) {
-      const t0 = performance.now();
-      const svgs = [];
-      for (let k = 0; k < texts.length; k++) {
-        const r = await m.render(tag + '_r' + i + '_' + k, texts[k]);
-        svgs.push(r.svg);
-      }
-      out.times.push(performance.now() - t0);
-      out.svgs = svgs;
+      const measured = await timed('_r' + i);
+      out.times.push(measured.ms);
+      out.svgs = measured.svgs;
     }
   } catch (e) {
     out.error = String((e && e.message) || e);
@@ -233,6 +343,27 @@ const PAGE_PROBE = `async ({ text, tag }) => {
   const r = await window.mermaid.render(tag + '_probe', text);
   return { ms: performance.now() - t0, bytes: r.svg.length, svg: r.svg };
 }`;
+
+if (has('self-test')) {
+  if (stats([1, 3]).p50 !== 2) throw new Error('timing median must average the two middle values');
+  const perfect = nullControl(Array.from({ length: 41 }, () => 1), 1234);
+  if (perfect.ci95_lo !== 1 || perfect.ci95_hi !== 1 || perfect.half_width !== 0) {
+    throw new Error(`perfect-null bootstrap regression: ${JSON.stringify(perfect)}`);
+  }
+  const insufficient = nullControl([1], 7);
+  if (insufficient.sufficient || insufficient.n !== 1) {
+    throw new Error(`null sample-floor regression: ${JSON.stringify(insufficient)}`);
+  }
+  new Script(`(${PAGE_BENCH})`);
+  new Script(`(${PAGE_PROBE})`);
+  console.log(JSON.stringify({
+    self_test: 'ok',
+    perfect,
+    insufficient,
+    page_functions_compiled: 2,
+  }));
+  process.exit(0);
+}
 
 /** mermaid renders a placeholder SVG on parse failure instead of throwing; treat that as an error. */
 function validate(svg) {
@@ -291,7 +422,12 @@ async function newBrowser() {
   if (inject.exceptionDetails) throw new Error(`bundle eval failed: ${inject.exceptionDetails.text}`);
 
   const init = await cdp.send('Runtime.evaluate', { expression: INIT_EXPR, returnByValue: true }, sessionId);
-  if (init.result.value !== 'ok') throw new Error(String(init.result.value));
+  switch (init.result.value) {
+    case 'ok':
+      break;
+    default:
+      throw new Error(String(init.result.value));
+  }
   return { proc, cdp, sessionId, info };
 }
 
@@ -323,6 +459,7 @@ try {
   for (const item of items) {
     const texts = generate(item);
     let reps = Math.max(1, Math.round(item.reps_js * repsScale));
+    let nullReps = Math.max(MIN_NULL_ROUNDS, reps);
     // A declared `warmup_js: 0` means zero, not one: on an item that takes minutes per render, a
     // warmup pass doubles the item for no statistical gain. `Math.max(1, ...)` still guards the
     // pinned items, whose warmup must never be scaled away by `--reps-scale`.
@@ -391,15 +528,23 @@ try {
         );
         continue;
       }
-      // Spend what is left of the budget on as many whole samples as fit, never more than declared.
+      // Reserve two renders per A/A round before sizing the real arm. If the declared budget cannot
+      // afford a valid null, still attempt one real sample: it can honestly establish a DNF, but a
+      // completed timing remains inconclusive and the top-level median-CI gate will reject it.
       const perSample = Math.max(1, probeMs * texts.length);
       const left = budgetMs - (Date.now() - t0);
       const affordable = Math.floor(left / perSample);
-      if (affordable < 1 + warmup) warmup = 0;
-      reps = Math.max(1, Math.min(reps, Math.max(1, affordable - warmup)));
+      if (affordable < 2 * nullReps + 1 + warmup) warmup = 0;
+      if (affordable < 2 * nullReps + 1) nullReps = MIN_NULL_ROUNDS;
+      if (affordable < 2 * MIN_NULL_ROUNDS + 1) {
+        nullReps = 0;
+        reps = 1;
+      } else {
+        reps = Math.max(1, Math.min(reps, affordable - warmup - 2 * nullReps));
+      }
     }
 
-    const args = { texts, reps, warmup, tag };
+    const args = { texts, reps, warmup, nullReps, tag };
     let res;
     try {
       res = await evaluateInPage(PAGE_BENCH, args, budgetMs ? budgetMs - (Date.now() - t0) : null);
@@ -417,7 +562,11 @@ try {
     const out = res.result.value;
     // Every revision is validated, not just the last: a trace that silently degrades into mermaid's
     // error placeholder halfway through would otherwise look like a very fast render.
-    const err = out.error ?? out.svgs.map(validate).find(Boolean) ?? (out.svgs.length === texts.length ? null : 'revision count mismatch');
+    const err =
+      out.error ??
+      (out.nullOutputValid ? null : 'A/A null control produced invalid SVG') ??
+      out.svgs.map(validate).find(Boolean) ??
+      (out.svgs.length === texts.length ? null : 'revision count mismatch');
     record.wall_s = (Date.now() - t0) / 1000;
     if (err) {
       // An in-page failure on a budgeted item is mermaid's own guardrail or an OOM at a size it
@@ -432,6 +581,7 @@ try {
       continue;
     }
     const ms = stats(out.times);
+    const nullStats = nullControl(out.nullRatios, out.nullChecksumBytes);
     const outputBytes = out.svgs.reduce((a, s) => a + s.length, 0);
     if (dumpSvgDir) writeFileSync(join(dumpSvgDir, `${item.id}.mermaid.svg`), out.svgs[out.svgs.length - 1]);
     console.log(JSON.stringify({
@@ -439,6 +589,7 @@ try {
       status: 'ok',
       warmup,
       reps,
+      null_reps: nullReps,
       budget_ms: budgetMs,
       probe_ms: probeMs === null ? null : Math.round(probeMs),
       render_ns: Object.fromEntries(
@@ -448,10 +599,15 @@ try {
       ),
       cv_pct: Number(ms.cv_pct.toFixed(2)),
       mad_pct: Number(ms.mad_pct.toFixed(2)),
+      null_control: nullStats,
       output_bytes: outputBytes,
       output_sha256: sha256(out.svgs.join('')),
     }));
-    log(`ok   ${item.id}  p50=${ms.p50.toFixed(1)}ms mad=${ms.mad_pct.toFixed(1)}% bytes=${outputBytes}`);
+    log(
+      `ok   ${item.id}  p50=${ms.p50.toFixed(1)}ms ` +
+      `null=${nullStats.median === null ? 'missing' : `${nullStats.median.toFixed(6)} [${nullStats.ci95_lo.toFixed(6)},${nullStats.ci95_hi.toFixed(6)}]`} ` +
+      `bytes=${outputBytes}`,
+    );
   }
 } finally {
   killBrowser(browser);

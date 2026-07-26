@@ -6,7 +6,7 @@
 //   1. Generate the fixed corpus and verify every input against the SHA-256 pins in pins.json.
 //   2. Capture an environment fingerprint (git rev, toolchain, browser, CPU, load).
 //   3. Run both engines over byte-identical inputs with warmup discipline.
-//   4. Join the results, apply the coefficient-of-variation gate, and compute ratios.
+//   4. Join the results, gate ratios against same-invocation A/A median CIs, and compute ratios.
 //   5. Emit JSONL events plus a summary that evidence/ledger can ingest.
 //
 // A mermaid render that fails is an explicit comparator failure: the run exits non-zero and the
@@ -24,11 +24,7 @@ const REPO = resolve(HERE, '..', '..');
 const PINS_PATH = join(HERE, 'pins.json');
 const PINS = JSON.parse(readFileSync(PINS_PATH, 'utf8'));
 
-// Dispersion gate. See the `mad_pct` doc comment in crates/fm-cli/examples/headtohead.rs for why
-// this gates on median absolute deviation rather than the coefficient of variation: scheduler
-// preemption on a shared box adds a one-sided right tail that inflates sd without touching the
-// bulk of the distribution. cv_pct is still recorded, just not gated on.
-const MAD_GATE_PCT = 5.0;
+const MIN_CLAIM_RATIO = 1.01;
 
 function arg(name, fallback = null) {
   const i = process.argv.indexOf(`--${name}`);
@@ -96,6 +92,86 @@ function fingerprint() {
 function pct(p, xs) {
   const s = [...xs].sort((a, b) => a - b);
   return s[Math.min(s.length - 1, Math.max(0, Math.ceil((p / 100) * s.length) - 1))];
+}
+
+function validElfSelfReport(record) {
+  return (
+    record?.record === 'binary' &&
+    /^[0-9a-f]{64}$/.test(record.elf_sha256) &&
+    Number.isSafeInteger(record.elf_bytes) &&
+    record.elf_bytes > 0
+  );
+}
+
+/**
+ * Decide a cross-runtime ratio against the more conservative of the two engines' in-process A/A
+ * floors. The runtimes cannot share one binary, so each measures its own identical arm twice inside
+ * one invocation; the headline claim must clear both bootstrap median CIs by a 2x margin.
+ */
+function medianCiGate(claimRatio, controls) {
+  const complete =
+    Number.isFinite(claimRatio) &&
+    claimRatio > 0 &&
+    controls.length > 0 &&
+    controls.every(
+      (control) =>
+        control?.sufficient === true &&
+        Number.isFinite(control.half_width) &&
+        Number.isFinite(control.ci95_lo) &&
+        Number.isFinite(control.ci95_hi),
+    );
+  if (!complete) {
+    return {
+      verdict: 'fail',
+      rule: 'null_ci95_2x_margin',
+      cv_gate: 'never',
+      reason: 'missing or insufficient same-invocation A/A null control',
+      claim_ratio: claimRatio,
+      claim_magnitude: null,
+      null_radius: null,
+      min_decidable_2x: null,
+    };
+  }
+  const claimMagnitude = Math.max(claimRatio, 1 / claimRatio);
+  const nullRadius = Math.max(...controls.map((control) => control.half_width));
+  const minDecidable = Math.max(MIN_CLAIM_RATIO, 1 + 2 * nullRadius);
+  return {
+    verdict: claimMagnitude >= minDecidable ? 'pass' : 'fail',
+    rule: 'null_ci95_2x_margin',
+    cv_gate: 'never',
+    reason: claimMagnitude >= minDecidable ? null : 'claim does not clear 2x the A/A median-CI radius',
+    claim_ratio: claimRatio,
+    claim_magnitude: claimMagnitude,
+    null_radius: nullRadius,
+    min_decidable_2x: minDecidable,
+  };
+}
+
+if (has('self-test')) {
+  const perfect = { sufficient: true, n: 9, ci95_lo: 1, ci95_hi: 1, half_width: 0 };
+  const noisy = { sufficient: true, n: 9, ci95_lo: 0.98, ci95_hi: 1.02, half_width: 0.02 };
+  const cases = [
+    [1.009, [perfect, perfect], 'fail'],
+    [1.01, [perfect, perfect], 'pass'],
+    [1.039, [perfect, noisy], 'fail'],
+    [1.04, [perfect, noisy], 'pass'],
+    [2, [perfect, null], 'fail'],
+  ];
+  for (const [ratio, controls, want] of cases) {
+    const got = medianCiGate(ratio, controls).verdict;
+    if (got !== want) throw new Error(`median-CI gate regression: ratio=${ratio} want=${want} got=${got}`);
+  }
+  const validElf = { record: 'binary', elf_sha256: 'a'.repeat(64), elf_bytes: 1 };
+  if (!validElfSelfReport(validElf) || validElfSelfReport({ ...validElf, elf_sha256: 'unavailable' })) {
+    throw new Error('executing-ELF self-report validation regression');
+  }
+  console.log(JSON.stringify({
+    self_test: 'ok',
+    cases: cases.length,
+    elf_self_report_gate: 'required',
+    cv_gate: 'never',
+  }));
+  process.exit(0);
 }
 
 // ---------------------------------------------------------------- corpus
@@ -188,6 +264,10 @@ const binaryRecord = fm.records.find((r) => r.record === 'binary');
 env.fm_elf_sha256 = binaryRecord?.elf_sha256 ?? 'not reported';
 env.fm_elf_bytes = binaryRecord?.elf_bytes ?? null;
 console.error(`[run] fm elf sha256=${String(env.fm_elf_sha256).slice(0, 16)} (${env.fm_elf_bytes} bytes)`);
+const elfSelfReportValid = validElfSelfReport(binaryRecord);
+if (!elfSelfReportValid) {
+  console.error('[run] INVALID: frankenmermaid did not self-report a lowercase SHA-256 for its executing ELF');
+}
 
 const mjsArgs = [join(HERE, 'mermaid_bench.mjs')];
 if (only) mjsArgs.push('--only', only);
@@ -202,7 +282,7 @@ const fmById = byId(fm.records);
 const mjsById = byId(mjs.records);
 
 const rows = [];
-let hardFail = false;
+let hardFail = !elfSelfReportValid;
 
 for (const item of items) {
   const f = fmById.get(item.id);
@@ -228,6 +308,8 @@ for (const item of items) {
   row.fm_min_ns = f.pipeline_ns.min;
   row.fm_cv_pct = f.cv_pct;
   row.fm_mad_pct = f.mad_pct;
+  row.fm_null_control = f.null_control ?? null;
+  row.fm_profile_ab = f.profile_ab ?? null;
   row.fm_bytes = f.output_bytes;
   row.fm_bytes_lean = f.output_bytes_lean;
   row.fm_lean_p50_ns = f.pipeline_lean_ns.p50;
@@ -256,7 +338,13 @@ for (const item of items) {
     row.speedup_lower_bound = row.mjs_dnf_kind === 'timeout'
       ? (m.budget_ms * 1e6) / f.pipeline_ns.p50
       : null;
-    row.mad_gate = f.mad_pct <= MAD_GATE_PCT ? 'pass' : 'fail';
+    // A DNF is a completion result, not a timing-ratio claim. There is no comparator median and
+    // therefore no ratio for a median-CI gate to decide.
+    row.median_ci_gate = {
+      verdict: 'not_applicable',
+      rule: 'dnf_has_no_point_ratio',
+      cv_gate: 'never',
+    };
     rows.push(row);
     continue;
   }
@@ -275,6 +363,7 @@ for (const item of items) {
   row.mjs_min_ns = m.render_ns.min;
   row.mjs_cv_pct = m.cv_pct;
   row.mjs_mad_pct = m.mad_pct;
+  row.mjs_null_control = m.null_control ?? null;
   row.mjs_bytes = m.output_bytes;
   row.speedup = m.render_ns.p50 / f.pipeline_ns.p50;
   // Noise is one-sided, so the min-vs-min ratio is the estimate least contaminated by preemption.
@@ -289,10 +378,9 @@ for (const item of items) {
     row.fm_ns_per_revision = f.pipeline_ns.p50 / f.revisions;
     row.mjs_ns_per_revision = m.render_ns.p50 / m.revisions;
   }
-  // Blocking on our side; advisory on mermaid's, where a 2.9 s/render item cannot afford enough
-  // reps to tighten its dispersion and its variance is dwarfed by a 1000x ratio anyway.
-  row.mad_gate = f.mad_pct <= MAD_GATE_PCT ? 'pass' : 'fail';
-  row.comparator_mad_gate = m.mad_pct <= MAD_GATE_PCT ? 'pass' : 'warn';
+  // CV and MAD remain provenance only. The only blocking statistical decision is whether the
+  // cross-runtime median ratio clears both same-invocation null-CI floors.
+  row.median_ci_gate = medianCiGate(row.speedup, [f.null_control, m.null_control]);
   row.status = 'ok';
   rows.push(row);
 }
@@ -302,7 +390,7 @@ const dnf = rows.filter((r) => r.status === 'comparator_dnf');
 const speedups = ok.map((r) => r.speedup);
 const speedupsMin = ok.map((r) => r.speedup_min);
 const summary = {
-  schema: 'frankenmermaid.headtohead.v1',
+  schema: 'frankenmermaid.headtohead.v2',
   env,
   pins: { mermaid: PINS.mermaid.version, bundle_url: PINS.mermaid.url, security_level: PINS.mermaid.security_level },
   corpus_items: items.length,
@@ -314,8 +402,11 @@ const summary = {
     id: r.id, budget_ms: r.mjs_budget_ms, phase: r.mjs_dnf_phase,
     fm_p50_ns: r.fm_p50_ns, speedup_lower_bound: r.speedup_lower_bound, error: r.error,
   })),
-  mad_gate_pct: MAD_GATE_PCT,
-  mad_gate_failures: ok.filter((r) => r.mad_gate === 'fail').map((r) => r.id),
+  median_ci_gate_rule: 'claim magnitude >= max(1.01, 1 + 2 * max(per-engine A/A CI radius))',
+  cv_gate: 'never',
+  median_ci_gate_failures: ok
+    .filter((r) => r.median_ci_gate.verdict === 'fail')
+    .map((r) => r.id),
   speedup: speedups.length
     ? { min: Math.min(...speedups), median: pct(50, speedups), max: Math.max(...speedups) }
     : null,
@@ -348,7 +439,7 @@ for (const r of rows) {
       `${pad(r.id, 22)}${lpad(r.nodes, 6)}${lpad(r.edges, 7)}${lpad(ms(r.fm_p50_ns), 12)}` +
       `${lpad(timedOut ? `DNF>${(r.mjs_budget_ms / 1000).toFixed(0)}s` : 'CANNOT', 12)}` +
       `${lpad(timedOut ? `>${r.speedup_lower_bound.toFixed(0)}x` : 'n/a', 10)}` +
-      `${lpad('-', 10)}${lpad(r.fm_mad_pct.toFixed(1), 9)}${lpad('-', 9)}${lpad('-', 8)}  ${r.mad_gate}`,
+      `${lpad('-', 10)}${lpad(r.fm_mad_pct.toFixed(1), 9)}${lpad('-', 9)}${lpad('-', 8)}  n/a`,
     );
     continue;
   }
@@ -360,7 +451,7 @@ for (const r of rows) {
     pad(r.id, 22) + lpad(r.nodes, 6) + lpad(r.edges, 7) + lpad(ms(r.fm_p50_ns), 12) + lpad(ms(r.mjs_p50_ns), 12) +
     lpad(`${r.speedup.toFixed(0)}x`, 10) + lpad(`${r.speedup_min.toFixed(0)}x`, 10) + lpad(r.fm_mad_pct.toFixed(1), 9) +
     lpad(`${r.bytes_ratio.toFixed(2)}x`, 9) + lpad(`${r.bytes_ratio_lean.toFixed(2)}x`, 8) +
-    `  ${r.mad_gate}${r.comparator_mad_gate === 'warn' ? ' (cmp noisy)' : ''}`,
+    `  ${r.median_ci_gate.verdict}`,
   );
 }
 console.log('');
@@ -397,7 +488,9 @@ if (leanSlow.length) {
   const worst = leanSlow.reduce((a, b) => (b.lean_slowdown > a.lean_slowdown ? b : a));
   console.log(`note: the lean output profile is smaller but SLOWER on ${leanSlow.length}/${ok.length} items (worst ${worst.id}: ${worst.lean_slowdown.toFixed(2)}x) -- A11yConfig::none() falls off the streaming fast path.`);
 }
-if (summary.mad_gate_failures.length) console.log(`MAD GATE FAIL (fm mad > ${MAD_GATE_PCT}%): ${summary.mad_gate_failures.join(', ')}`);
+if (summary.median_ci_gate_failures.length) {
+  console.log(`MEDIAN-CI GATE FAIL: ${summary.median_ci_gate_failures.join(', ')}`);
+}
 console.log(`\nevents:  ${jsonlPath}`);
 console.log(`summary: ${join(outDir, `summary-${stamp}.json`)}`);
 
@@ -405,4 +498,4 @@ if (hardFail || fm.code !== 0 || mjs.code !== 0) {
   console.error('\n[run] FAILED: at least one engine reported an error (see rows above)');
   process.exit(1);
 }
-if (summary.mad_gate_failures.length) process.exit(4);
+if (summary.median_ci_gate_failures.length) process.exit(4);

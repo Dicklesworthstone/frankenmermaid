@@ -147,3 +147,32 @@ re-decided and rejected; that result lives in `docs/NEGATIVE_EVIDENCE.md`.
   byte-determinism, DNF classification, and same-invocation noise-floor contract. Re-audit a fleet
   repo only after it claims a gate change; the decisive check is whether its next REJECT cites CV.
   The deferred measurement window is tracked by `bd-ktx5`.
+
+## CORRECTION: the live head-to-head now satisfies harness parts 1–3 (2026-07-26)
+
+**Bead:** `bd-w1po`. **Lane:** L / LEDGER+LOW BURN (`CreamGorge`).
+**Contract detail:** `docs/HARNESS_CONTRACT_ADOPTION.md`.
+
+- **Why this correction exists.** The `bd-jil4` fleet audit found A/A and bootstrap-CI helpers in
+  the repo and marked frankenmermaid complete without tracing the published head-to-head exit path.
+  That path self-reported its ELF, but ran no A/A control and exited on a 5% MAD threshold. The
+  status claim was therefore too generous even though the fleet inventory was otherwise useful.
+- **Live contract now.** The Rust process calls one paired routine as A/A and then A/B, timing both
+  arms back-to-back inside each round with alternating order, one batch, median of per-round ratios,
+  deterministic bootstrap 95% CIs, and output SHA-256 checksums. The driver rejects a missing or
+  malformed executing-ELF self-report. The Chromium process emits its own paired A/A null. The
+  cross-runtime gate uses the larger per-engine null-CI radius and requires
+  `magnitude >= max(1.01, 1 + 2 * radius)`. Every record says `cv_gate=never`; CV and MAD are
+  report-only. A missing or fewer-than-nine-round null fails closed.
+- **No performance claim.** No corpus item was timed: Lane L still requires the campaign-owned
+  quiet window for the new architecture/ER, live-edit, and CI-scale classes. This is harness
+  conformance, not a speedup.
+- **Validation.** Both JavaScript files pass `node --check`; both deterministic self-test modes
+  pass. Strict-remote focused Rust tests passed on `ovh-a` (2/2). Strict-remote workspace check and
+  workspace Clippy with `-D warnings` passed on `hz2`. The broader workspace test run reached an
+  unrelated pre-existing `gantt_basic` golden-SVG hash mismatch; the modified example/driver is not
+  in that render path.
+- **Retry / re-check predicate.** Re-open immediately if an `ok` head-to-head row can be emitted
+  without a self-reported executing ELF hash, two sufficient per-engine A/A controls, or
+  `median_ci_gate.rule == "null_ci95_2x_margin"`; or if any live exit path again depends on CV or
+  MAD. Run the unmeasured corpus only when `bd-ktx5` receives a quiet measurement window.

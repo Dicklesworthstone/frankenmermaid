@@ -4,6 +4,7 @@
 **Contract:** [`CROSS_REPO_RECOMMENDATION_bench_harness_contract.md`](CROSS_REPO_RECOMMENDATION_bench_harness_contract.md),
 campaign `perf-campaign-20260725` §2.
 **Audited:** 2026-07-26, all 11 campaign repos, at their then-current working trees.
+**frankenmermaid correction:** `bd-w1po`, after the rollout audit re-opened the live decision path.
 
 ## How this was audited
 
@@ -29,7 +30,7 @@ Part 3 = gate on the median-CI, never on `cv`.
 | Repo | P1 ELF sha | P2 A/A null | P3 median-CI gate | Live `cv` gate still in code? |
 |---|:--:|:--:|:--:|---|
 | **frankensqlite** | ✅ | ✅ | ✅ | **No — explicitly `cv_gate=never`** |
-| **frankenmermaid** | ✅ | ✅ | ✅ | No (MAD gate; cv reported only) |
+| **frankenmermaid** | ✅ | ✅ | ✅ | No — `cv` and MAD are report-only |
 | **frankenredis** | ✅ | ⚠️ | ✅ | ⚠️ `fr-bench` batch ratchet: `cv_pct > 5 is not keep-eligible` |
 | **frankenlibc** | ✅ | ✅ | ✅ | ❌ **`fn cv_gate_pass() { …all(\|cv\| cv < 5.0) }`** in `malloc_bench.rs` |
 | **frankenpandas** | ✅ | ✅ | ✅ | ❌ **`assert!(orig_cv < 5.0)` / `assert!(candidate_cv < 5.0)`** in `fp-frame` |
@@ -75,12 +76,35 @@ should copy that line's shape rather than invent one.
 
 ## What this repo did
 
-frankenmermaid wrote the contract and had parts 2 and 3 already (A/A null; MAD rather than cv, on
-the argument that timing noise is one-sided so MAD measures the uncontaminated regime while sd does
-not). Part 1 landed 2026-07-25 in `crates/fm-cli/examples/headtohead.rs`: the runner hashes its own
-`env::current_exe()` and emits it as its first record, verified against `sha256sum` of the on-disk
-binary. A hash computed by a shell step *beside* the run proves nothing about which ELF executed —
-rch builds into an opaque per-worker target dir.
+The first rollout audit was too generous to frankenmermaid itself. It found A/A and bootstrap-CI
+machinery elsewhere in the repo, then marked the repo complete without tracing the **live
+head-to-head verdict**. That path self-hashed its ELF, but timed default and lean sequentially, ran no
+same-invocation A/A control for either runtime, and exited on `fm.mad_pct > 5`. In other words, the
+status table said P2/P3 while the published comparator still had neither. `bd-w1po` corrected the
+code and this claim.
+
+Part 1 remains in `crates/fm-cli/examples/headtohead.rs`: the runner hashes its own
+`env::current_exe()` and emits it as its first record; the driver fails closed unless that record
+contains a lowercase 64-hex SHA-256 and a positive ELF byte count. A hash computed by a shell step
+*beside* the run proves nothing about which ELF executed — rch builds into an opaque per-worker
+target dir.
+
+Parts 2 and 3 now live in the actual decision path:
+
+- Rust calls one paired routine as `(default, default)` and then `(default, lean)`, with both arms
+  back-to-back in each round, alternating order, the same batch, output checksums, and the median of
+  per-round ratios.
+- The browser runner emits its own `(mermaid, mermaid)` paired null from the same Chromium
+  invocation. Since a Rust process and a JavaScript runtime cannot be arms in one binary, the
+  cross-runtime driver conservatively uses the larger of the two per-engine A/A CI radii.
+- The only blocking gate is
+  `claim magnitude >= max(1.01, 1 + 2 * max(null CI radius))`. Records say
+  `cv_gate=never`; CV and MAD are provenance only. A DNF has no point ratio and is explicitly
+  `not_applicable`, never smuggled through a dispersion gate.
+
+This correction changed no parser, layout, or renderer behavior and made no performance claim. The
+deterministic bootstrap/gate self-tests and Rust quality gates are the acceptance evidence; actual
+corpus timing still requires the campaign-owned quiet window tracked by `bd-ktx5`.
 
 One addition from `bd-1buv.69`, offered to the fleet: **for a work-removal lever, gate on
 instructions, not wall.** Measured at load ~12, same corpus, arms alternated: the A/A null was

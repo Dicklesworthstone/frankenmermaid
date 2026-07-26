@@ -87,7 +87,7 @@ fn full_pipeline(input: &str, cfg: &SvgRenderConfig) -> String {
 fn render_all(texts: &[String], cfg: &SvgRenderConfig, sink: &mut Vec<String>) {
     sink.clear();
     for text in texts {
-        sink.push(full_pipeline(text, cfg));
+        sink.push(full_pipeline(std::hint::black_box(text.as_str()), cfg));
     }
 }
 
@@ -101,13 +101,8 @@ struct Stats {
     mean: f64,
     sd: f64,
     cv_pct: f64,
-    /// Median absolute deviation, as a percentage of the median.
-    ///
-    /// Timing noise on a shared box is *one-sided*: preemption, interrupts and frequency dips can
-    /// only ever make an iteration slower, never faster. That skews the sample right, which inflates
-    /// the standard deviation (and so `cv_pct`) even when the bulk of iterations are tightly
-    /// clustered. MAD ignores the tail, so it measures the dispersion of the uncontaminated regime.
-    /// The harness gates on this and reports `min` alongside `p50` for the same reason.
+    /// Median absolute deviation, as a percentage of the median. Report-only: decidability is gated
+    /// exclusively on the same-invocation A/A bootstrap CI below.
     mad_pct: f64,
 }
 
@@ -135,7 +130,13 @@ fn stats(mut xs: Vec<u64>) -> Stats {
         0.0
     };
     let sd = variance.sqrt();
-    let median = pct(50);
+    let mid = n / 2;
+    let median = if n.is_multiple_of(2) {
+        let lower = xs[mid - 1];
+        lower + (xs[mid] - lower) / 2
+    } else {
+        xs[mid]
+    };
     let mut deviations: Vec<u64> = xs.iter().map(|&x| x.abs_diff(median)).collect();
     deviations.sort_unstable();
     let mad = deviations[(n.div_ceil(2)).saturating_sub(1)];
@@ -175,76 +176,258 @@ fn ns_json(s: &Stats) -> serde_json::Value {
     })
 }
 
+const BOOTSTRAP_RESAMPLES: usize = 2_000;
+const MIN_NULL_ROUNDS: usize = 9;
+
+#[derive(Debug)]
+struct RatioStats {
+    n: usize,
+    median: f64,
+    ci95_lo: f64,
+    ci95_hi: f64,
+    half_width: f64,
+    min_decidable_2x: f64,
+    cv_pct: f64,
+    mad_pct: f64,
+}
+
+fn median(values: &mut [f64]) -> f64 {
+    values.sort_by(f64::total_cmp);
+    let mid = values.len() / 2;
+    if values.len().is_multiple_of(2) {
+        f64::midpoint(values[mid - 1], values[mid])
+    } else {
+        values[mid]
+    }
+}
+
+/// Deterministic percentile-bootstrap 95% CI on the median.
+fn bootstrap_median_ci(ratios: &[f64]) -> (f64, f64) {
+    let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let mut medians = Vec::with_capacity(BOOTSTRAP_RESAMPLES);
+    let mut sample = vec![0.0_f64; ratios.len()];
+    for _ in 0..BOOTSTRAP_RESAMPLES {
+        for slot in &mut sample {
+            let index = usize::try_from(next() >> 33).unwrap_or(0) % ratios.len();
+            *slot = ratios[index];
+        }
+        medians.push(median(&mut sample));
+    }
+    medians.sort_by(f64::total_cmp);
+    let tail = BOOTSTRAP_RESAMPLES / 40;
+    (medians[tail], medians[BOOTSTRAP_RESAMPLES - 1 - tail])
+}
+
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "short ratio samples and timing magnitudes fit f64 exactly enough for statistics"
+)]
+fn ratio_stats(ratios: &[f64]) -> RatioStats {
+    let mut for_median = ratios.to_vec();
+    let ratio_median = median(&mut for_median);
+    let mean = ratios.iter().sum::<f64>() / ratios.len() as f64;
+    let variance = if ratios.len() > 1 {
+        ratios.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (ratios.len() - 1) as f64
+    } else {
+        0.0
+    };
+    let sd = variance.sqrt();
+    let mut deviations = ratios
+        .iter()
+        .map(|x| (x - ratio_median).abs())
+        .collect::<Vec<_>>();
+    let mad = median(&mut deviations);
+    let (ci95_lo, ci95_hi) = bootstrap_median_ci(ratios);
+    let half_width = (ci95_hi - 1.0).abs().max((ci95_lo - 1.0).abs());
+    RatioStats {
+        n: ratios.len(),
+        median: ratio_median,
+        ci95_lo,
+        ci95_hi,
+        half_width,
+        min_decidable_2x: 1.0 + 2.0 * half_width,
+        cv_pct: if mean == 0.0 { 0.0 } else { sd / mean * 100.0 },
+        mad_pct: if ratio_median == 0.0 {
+            0.0
+        } else {
+            mad / ratio_median * 100.0
+        },
+    }
+}
+
+fn ratio_json(
+    s: &RatioStats,
+    kind: &str,
+    arm_a_sha256: &str,
+    arm_b_sha256: &str,
+) -> serde_json::Value {
+    let is_null = kind == "aa_null";
+    serde_json::json!({
+        "kind": kind,
+        "n": s.n,
+        "sufficient": !is_null || s.n >= MIN_NULL_ROUNDS,
+        "median": s.median,
+        "ci95_lo": s.ci95_lo,
+        "ci95_hi": s.ci95_hi,
+        "half_width": is_null.then_some(s.half_width),
+        "min_decidable_2x": is_null.then_some(s.min_decidable_2x.max(1.01)),
+        "cv_pct": (s.cv_pct * 100.0).round() / 100.0,
+        "mad_pct": (s.mad_pct * 100.0).round() / 100.0,
+        "cv_gate": "never",
+        "arm_a_sha256": arm_a_sha256,
+        "arm_b_sha256": arm_b_sha256,
+    })
+}
+
 /// Each timed sample must span at least this long. A single timer interrupt or scheduler preemption
 /// costs on the order of microseconds; timing a 74 us pipeline one iteration at a time therefore
-/// measures the kernel as much as the renderer. Batching until a sample spans ~2 ms drops that
-/// contamination to well under a percent, which is what lets the small items clear the MAD gate.
+/// measures the kernel as much as the renderer. Batching until a sample spans ~2 ms makes the
+/// same-invocation null CI narrow enough to decide useful effects.
 /// Batching is a *timing* device only: every iteration in a batch still renders the whole diagram.
 const MIN_SAMPLE_NS: u64 = 2_000_000;
 
-/// The result of timing one corpus item: sample statistics, the batch factor used, the reference
-/// output of every revision, and their total byte count.
-struct Measured {
-    stats: Stats,
-    batch: usize,
-    reference: Vec<String>,
-    output_bytes: usize,
+struct PairedMeasured {
+    arm_a_stats: Stats,
+    arm_b_stats: Stats,
+    ratio: RatioStats,
+    arm_a_reference: Vec<String>,
+    arm_b_reference: Vec<String>,
+    arm_a_output_bytes: usize,
+    arm_b_output_bytes: usize,
 }
 
-/// Time `reps` batched samples after `warmup` untimed ones. One sample renders *every revision* of
-/// the item in order, so a single-shot item measures one render and an edit trace measures the whole
-/// editing session. Output is checked for byte-stability across samples.
-fn measure(item: &CorpusItem, cfg: &SvgRenderConfig) -> Result<Measured, String> {
+/// Calibrate once off the faster arm; both the A/A and A/B routines then use this exact batch.
+fn calibrate_batch(item: &CorpusItem, cfg_a: &SvgRenderConfig, cfg_b: &SvgRenderConfig) -> usize {
     let mut scratch: Vec<String> = Vec::with_capacity(item.texts.len());
-
     let mut fastest_warmup = u64::MAX;
     for _ in 0..item.warmup.max(1) {
-        let t0 = Instant::now();
-        render_all(&item.texts, cfg, &mut scratch);
-        std::hint::black_box(&scratch);
-        fastest_warmup =
-            fastest_warmup.min(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX));
+        for cfg in [cfg_a, cfg_b] {
+            let t0 = Instant::now();
+            render_all(&item.texts, cfg, &mut scratch);
+            std::hint::black_box(&scratch);
+            fastest_warmup =
+                fastest_warmup.min(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX));
+        }
     }
-    // `batch` is derived from a *timed* warmup, so it drifts with machine load. That is fine for wall
-    // clock, but it would destroy an instruction-count A/B: the two-point delta assumes the work done is
-    // exactly proportional to `reps`. Under the forced-profile measurement mode, pin it to 1.
-    let batch = if std::env::var_os("FM_H2H_FORCE_PROFILE").is_some() {
+    if std::env::var_os("FM_H2H_FORCE_PROFILE").is_some() {
         1
     } else {
         usize::try_from(MIN_SAMPLE_NS / fastest_warmup.max(1))
             .unwrap_or(1)
             .max(1)
-    };
+    }
+}
 
-    let mut reference: Vec<String> = Vec::with_capacity(item.texts.len());
-    render_all(&item.texts, cfg, &mut reference);
-    let reference_len: usize = reference.iter().map(String::len).sum();
+fn time_arm(
+    item: &CorpusItem,
+    cfg: &SvgRenderConfig,
+    batch: usize,
+    scratch: &mut Vec<String>,
+    reference_len: usize,
+    stable: &mut bool,
+) -> u64 {
+    let t0 = Instant::now();
+    for _ in 0..batch {
+        render_all(&item.texts, cfg, scratch);
+        // Full byte comparison stays outside the timed region; the O(1) length check catches drift
+        // during the rounds without charging a multi-megabyte comparison to the arm.
+        *stable &= scratch.iter().map(String::len).sum::<usize>() == reference_len;
+        std::hint::black_box(&scratch);
+    }
+    let elapsed = u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    elapsed / u64::try_from(batch).unwrap_or(1).max(1)
+}
 
-    let mut samples = Vec::with_capacity(item.reps);
-    let mut stable = true;
-    for _ in 0..item.reps {
-        let t0 = Instant::now();
-        for _ in 0..batch {
-            render_all(&item.texts, cfg, &mut scratch);
-            // Only an O(1) length check inside the timed region -- byte-comparing a 534 KB SVG per
-            // iteration would inflate the measurement by several percent. The full byte comparison
-            // happens once, outside the timing loop.
-            stable &= scratch.iter().map(String::len).sum::<usize>() == reference_len;
-            std::hint::black_box(&scratch);
-        }
-        let elapsed = u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX);
-        samples.push(elapsed / batch as u64);
+/// Measure two arms back-to-back inside every round and alternate their order. The median is taken
+/// over per-round ratios. This same routine is called first as A/A and then as A/B.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "nanosecond timing magnitudes fit f64 exactly enough for ratio statistics"
+)]
+fn paired(
+    item: &CorpusItem,
+    cfg_a: &SvgRenderConfig,
+    cfg_b: &SvgRenderConfig,
+    batch: usize,
+    rounds: usize,
+) -> Result<PairedMeasured, String> {
+    let mut arm_a_reference = Vec::with_capacity(item.texts.len());
+    let mut arm_b_reference = Vec::with_capacity(item.texts.len());
+    render_all(&item.texts, cfg_a, &mut arm_a_reference);
+    render_all(&item.texts, cfg_b, &mut arm_b_reference);
+    let arm_a_output_bytes = arm_a_reference.iter().map(String::len).sum();
+    let arm_b_output_bytes = arm_b_reference.iter().map(String::len).sum();
+    let mut scratch = Vec::with_capacity(item.texts.len());
+    let mut arm_a_samples = Vec::with_capacity(rounds);
+    let mut arm_b_samples = Vec::with_capacity(rounds);
+    let mut ratios = Vec::with_capacity(rounds);
+    let mut arm_a_stable = true;
+    let mut arm_b_stable = true;
+
+    for round in 0..rounds {
+        let (arm_a_ns, arm_b_ns) = if round.is_multiple_of(2) {
+            let a = time_arm(
+                item,
+                cfg_a,
+                batch,
+                &mut scratch,
+                arm_a_output_bytes,
+                &mut arm_a_stable,
+            );
+            let b = time_arm(
+                item,
+                cfg_b,
+                batch,
+                &mut scratch,
+                arm_b_output_bytes,
+                &mut arm_b_stable,
+            );
+            (a, b)
+        } else {
+            let b = time_arm(
+                item,
+                cfg_b,
+                batch,
+                &mut scratch,
+                arm_b_output_bytes,
+                &mut arm_b_stable,
+            );
+            let a = time_arm(
+                item,
+                cfg_a,
+                batch,
+                &mut scratch,
+                arm_a_output_bytes,
+                &mut arm_a_stable,
+            );
+            (a, b)
+        };
+        arm_a_samples.push(arm_a_ns);
+        arm_b_samples.push(arm_b_ns);
+        ratios.push(arm_a_ns as f64 / arm_b_ns.max(1) as f64);
     }
 
-    render_all(&item.texts, cfg, &mut scratch);
-    if !stable || scratch != reference {
+    render_all(&item.texts, cfg_a, &mut scratch);
+    let arm_a_exact = scratch == arm_a_reference;
+    render_all(&item.texts, cfg_b, &mut scratch);
+    let arm_b_exact = scratch == arm_b_reference;
+    if !arm_a_stable || !arm_b_stable || !arm_a_exact || !arm_b_exact {
         return Err(format!("{}: nondeterministic SVG across renders", item.id));
     }
-    Ok(Measured {
-        stats: stats(samples),
-        batch,
-        reference,
-        output_bytes: reference_len,
+    Ok(PairedMeasured {
+        arm_a_stats: stats(arm_a_samples),
+        arm_b_stats: stats(arm_b_samples),
+        ratio: ratio_stats(&ratios),
+        arm_a_reference,
+        arm_b_reference,
+        arm_a_output_bytes,
+        arm_b_output_bytes,
     })
 }
 
@@ -316,7 +499,9 @@ fn main() {
             edges_total += parsed.ir.edges.len();
         }
 
-        let default_run = match measure(item, &default_cfg) {
+        let batch = calibrate_batch(item, &default_cfg, &lean_cfg);
+        let rounds = item.reps.max(MIN_NULL_ROUNDS);
+        let null_run = match paired(item, &default_cfg, &default_cfg, batch, rounds) {
             Ok(v) => v,
             Err(e) => {
                 failed = true;
@@ -330,9 +515,13 @@ fn main() {
                 continue;
             }
         };
-        // The lean profile is measured on the same corpus so the output-size claim and the cost of
-        // reaching it are reported together.
-        let lean_run = match measure(item, &lean_cfg) {
+        if null_run.arm_a_reference != null_run.arm_b_reference {
+            failed = true;
+            eprintln!("[frankenmermaid] FAIL {}: A/A output mismatch", item.id);
+            continue;
+        }
+        // Same paired routine, same invocation, same batch: A/A first, then the real default/lean A/B.
+        let profile_run = match paired(item, &default_cfg, &lean_cfg, batch, rounds) {
             Ok(v) => v,
             Err(e) => {
                 failed = true;
@@ -341,10 +530,9 @@ fn main() {
             }
         };
 
-        let (default_stats, lean_stats, batch) =
-            (&default_run.stats, &lean_run.stats, default_run.batch);
-        if let Some(bad) = default_run
-            .reference
+        let (default_stats, lean_stats) = (&profile_run.arm_a_stats, &profile_run.arm_b_stats);
+        if let Some(bad) = profile_run
+            .arm_a_reference
             .iter()
             .find(|svg| !svg.starts_with("<svg") || !svg.ends_with("</svg>"))
         {
@@ -363,14 +551,18 @@ fn main() {
             let last = |v: &[String]| v.last().cloned().unwrap_or_default();
             let _ = std::fs::write(
                 format!("{dir}/{}.default.svg", item.id),
-                last(&default_run.reference),
+                last(&profile_run.arm_a_reference),
             );
             let _ = std::fs::write(
                 format!("{dir}/{}.lean.svg", item.id),
-                last(&lean_run.reference),
+                last(&profile_run.arm_b_reference),
             );
         }
 
+        let default_sha256 = sha256_hex(profile_run.arm_a_reference.concat().as_bytes());
+        let lean_sha256 = sha256_hex(profile_run.arm_b_reference.concat().as_bytes());
+        let null_a_sha256 = sha256_hex(null_run.arm_a_reference.concat().as_bytes());
+        let null_b_sha256 = sha256_hex(null_run.arm_b_reference.concat().as_bytes());
         println!(
             "{}",
             serde_json::json!({
@@ -392,22 +584,58 @@ fn main() {
                 "pipeline_lean_ns": ns_json(lean_stats),
                 "lean_cv_pct": (lean_stats.cv_pct * 100.0).round() / 100.0,
                 "lean_mad_pct": (lean_stats.mad_pct * 100.0).round() / 100.0,
-                "output_bytes": default_run.output_bytes,
-                "output_bytes_lean": lean_run.output_bytes,
-                "output_sha256": sha256_hex(default_run.reference.concat().as_bytes()),
+                "null_control": ratio_json(
+                    &null_run.ratio,
+                    "aa_null",
+                    &null_a_sha256,
+                    &null_b_sha256,
+                ),
+                "profile_ab": ratio_json(
+                    &profile_run.ratio,
+                    "default_vs_lean",
+                    &default_sha256,
+                    &lean_sha256,
+                ),
+                "output_bytes": profile_run.arm_a_output_bytes,
+                "output_bytes_lean": profile_run.arm_b_output_bytes,
+                "output_sha256": default_sha256,
+                "output_sha256_lean": lean_sha256,
             })
         );
         eprintln!(
-            "[frankenmermaid] ok   {}  p50={:.3}ms mad={:.1}% bytes={} lean={}",
+            "[frankenmermaid] ok   {}  p50={:.3}ms null={:.6} [{:.6},{:.6}] bytes={} lean={}",
             item.id,
             f64::from(u32::try_from(default_stats.p50 / 1000).unwrap_or(u32::MAX)) / 1000.0,
-            default_stats.mad_pct,
-            default_run.output_bytes,
-            lean_run.output_bytes,
+            null_run.ratio.median,
+            null_run.ratio.ci95_lo,
+            null_run.ratio.ci95_hi,
+            profile_run.arm_a_output_bytes,
+            profile_run.arm_b_output_bytes,
         );
     }
 
     if failed {
         std::process::exit(2);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bootstrap_median_ci, median, ratio_stats, stats};
+
+    #[test]
+    fn median_averages_the_two_middle_values() {
+        assert_eq!(median(&mut [4.0, 1.0, 3.0, 2.0]), 2.5);
+        assert_eq!(stats(vec![1, 3]).p50, 2);
+    }
+
+    #[test]
+    fn bootstrap_ci_is_exact_for_a_perfect_null() {
+        let ratios = vec![1.0; 41];
+        assert_eq!(bootstrap_median_ci(&ratios), (1.0, 1.0));
+        let stats = ratio_stats(&ratios);
+        assert_eq!(stats.median, 1.0);
+        assert_eq!(stats.half_width, 0.0);
+        assert_eq!(stats.min_decidable_2x, 1.0);
     }
 }
