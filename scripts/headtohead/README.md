@@ -93,7 +93,7 @@ full bytes are compared once outside the timed region. A nondeterministic render
 
 ## Corpus
 
-21 items in two tiers.
+25 items in two tiers.
 
 **The pinned baseline (13).** Flowcharts (10/100/500 nodes), wide layered DAGs (8×16, 12×24, 16×32 —
 up to 512 nodes / 960 edges), a dense DAG (200 nodes / 790 edges), an SCC-heavy cyclic graph, one
@@ -101,15 +101,20 @@ each of sequence, class, state and ER, and an **edit trace**. `flowchart` and `w
 `crates/fm-cli/benches/pipeline_bench.rs`'s generators byte for byte, so harness numbers stay
 comparable with the criterion history. Their input hashes have never moved.
 
-**Workload classes the baseline never covered (8).** The items above top out at 500-node flowcharts.
+**Workload classes the baseline never covered (12).** The items above top out at 500-node flowcharts.
 That is neither where mermaid is used nor where it hurts, and a self-time profile measured only
 there is a statement about the corpus as much as about the code. Three classes were added:
 
 | Class | Items | What it is |
 |---|---|---|
-| **XL** | `flowchart_xl_2000`, `flowchart_xl_5000`, `arch_100x50`, `arch_200x50`, `er_schema_1000x6`, `er_schema_2500x8` | Thousands of nodes, up to **10,000**: architecture maps drawn with `subgraph`, and database schemas with attribute blocks. This is the regime where mermaid-js stops finishing. |
-| **EDIT** | `edit_trace_200x200` | A real editing session — 201 successive documents, not 21. |
-| **DOC_BUILD** | `doc_build_40` | Every diagram on a docs page, or in one CI job: 40 diagrams across five types, timed as one batch. |
+| **XL** | `flowchart_xl_2000`, `flowchart_xl_5000`, `arch_100x50`, `arch_200x50`, `er_schema_1000x6`, `er_schema_2500x8`, `er_schema_5000x8`, `er_schema_10000x8` | Thousands of nodes, through the campaign's explicit **5,000–10,000-node** architecture and ER range. Architecture maps use `subgraph`; schemas carry attribute blocks. |
+| **EDIT** | `edit_trace_200x200`, `edit_trace_500x1000` | Live-preview sessions of 201 and 1,001 successive full documents, rather than a 21-edit sketch. |
+| **DOC_BUILD / CI** | `doc_build_40`, `ci_batch_500` | A docs page and a repository-scale CI job: 40 and 500 diagrams across five syntax families, each timed as one batch. |
+
+The 5k/10k ER endpoints, 1,001-revision trace, and 500-diagram CI batch were admitted and pinned by
+Lane L without running either engine. They are **unmeasured workloads**, not performance claims.
+Run them only when the campaign assigns a quiet measurement window; until then their only certified
+facts are deterministic generation, stable hashes, and unchanged hashes for every older item.
 
 `architecture` uses `subgraph`, which is a different layout problem from the flat generators: the
 cluster boundaries constrain placement and force the router around obstacles the flat shapes never

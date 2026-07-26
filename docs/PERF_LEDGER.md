@@ -120,3 +120,30 @@ re-decided and rejected; that result lives in `docs/NEGATIVE_EVIDENCE.md`.
 - **Retry / re-check predicate.** Re-run the cold-per-batch probe if marker identities, any cached
   post-pass, the 100 KB cap, or representative cache cardinality changes. Revert only if the A/B
   lower CI crosses the mandatory 2x null threshold or any cached/uncached byte comparison fails.
+
+## CERTIFIED INFRASTRUCTURE: fleet harness rollout and unmeasured corpus admission (2026-07-26)
+
+**Bead:** `bd-jil4`. **Lane:** L / LEDGER+LOW BURN (`CreamGorge`).
+**Full status:** `docs/HARNESS_CONTRACT_ADOPTION.md`.
+
+- **No performance claim.** Lane L requested no RCH worker and timed neither engine. This row
+  certifies reproducible measurement infrastructure, not a speedup.
+- **Fleet contract status.** All 11 campaign repositories were audited against code. Ten have
+  executing-ELF SHA-256, same-invocation A/A, and median-CI verdict machinery in at least one
+  harness. franken_numpy still lacks executing-ELF self-report and a true bootstrap median-CI gate.
+  Live hard-CV verdicts remain in frankenredis, frankenlibc, and frankenpandas; franken_networkx has
+  only one fully converted harness. Exact corrective handoffs were sent to the active owner in all
+  ten other repositories under Agent Mail thread `harness-contract-20260725`.
+- **New unmeasured boundaries.** The additive corpus now includes:
+  `er_schema_5000x8` (`f43a2b41…e46c56`), `er_schema_10000x8`
+  (`185a597d…7b341`), `edit_trace_500x1000` (`4813beb8…aa2cb`), and
+  `ci_batch_500` (`65b8f69a…de432f`). Together they cover 5k/10k-node ER, 1,001 live revisions,
+  and a 500-diagram CI job; the existing 5k/10k architecture endpoints complete the named range.
+- **Construction proof.** Both JavaScript modules pass `node --check`; importing the deterministic
+  generators yields 25 unique items; every generated hash matches `pins.json`; and all 21 older
+  hashes remain unchanged. The new trace has 1,001 revisions and the CI batch has 500.
+- **Measurement / re-check predicate.** Do not time these rows until the campaign grants
+  frankenmermaid a quiet measurement window. When granted, use the existing self-ELF provenance,
+  byte-determinism, DNF classification, and same-invocation noise-floor contract. Re-audit a fleet
+  repo only after it claims a gate change; the decisive check is whether its next REJECT cites CV.
+  The deferred measurement window is tracked by `bd-ktx5`.
