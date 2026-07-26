@@ -1829,7 +1829,7 @@ fn round6(v: f32) -> f64 {
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    encode_hex(&hasher.finalize())
 }
 
 fn canonical_layout(ir: &MermaidDiagramIr) -> String {
@@ -5312,4 +5312,19 @@ fn open_browser(url: &str) -> Result<()> {
         .status()?;
 
     Ok(())
+}
+
+/// Lowercase hex encoding for digest output.
+///
+/// RustCrypto 0.11 moved digest results from `GenericArray` to `hybrid_array::Array`,
+/// which does not implement `LowerHex`, so the previous `format!("{:x}", ..)` no
+/// longer compiles. Encoding explicitly keeps this dependency-free.
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
 }
