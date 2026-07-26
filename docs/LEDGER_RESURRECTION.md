@@ -404,9 +404,12 @@ node scripts/ledger_preflight.mjs --lever "<description>" --frame <symbol>
 
 # BEFORE committing — is every REJECT row I am adding falsifiable?
 node scripts/ledger_preflight.mjs --lint --base origin/main
-#   exit 0  every new REJECT row records a null, a counted mechanism, a structural
-#           refutation, or a ceiling
-#   exit 1  BLOCKED — lists the rows that cannot distinguish lever from harness
+#   exit 0  every new REJECT row carries an explicit A/A-null or counted-mechanism
+#           marker with a measured value, and every new KEEP carries a self-reported
+#           executing-ELF SHA-256
+#   exit 1  BLOCKED — lists the inadmissible rows
+
+node scripts/ledger_preflight.mjs --self-test   # 9 cases; asserts the gate's own boundaries
 ```
 
 The `--lint` predicates are **deliberately the same regexes §7 audits with**, so the gate and the
@@ -429,11 +432,47 @@ Verified against real history rather than a synthetic fixture:
 base. A new REJECT row that cannot distinguish the lever from the harness is now a **build failure**,
 not a style note — which is what "impossible rather than discouraged" requires.
 
-The guard deliberately accepts four justifications, not one. Requiring an A/A null on *every* row
-would be wrong: a row that refutes a lever on a counted mechanism does not need a null (a null cannot
-change the fact that no work was removed), and §7.3 found three rows at the head of this queue that
-are sound on a structural refutation alone. A gate that forced those rows to fabricate a null control
-would degrade the ledger, not protect it.
+### 8.1 Correction — the gate as shipped accepts TWO justifications, not four
+
+This section originally claimed the guard accepts four justifications (null, counted mechanism,
+structural refutation, ceiling) and argued that requiring a null on every row would degrade the
+ledger. **The gate as shipped accepts two**, and after the hardening pass by the cod lane
+(`CreamGorge`) that is the right design. Recording the disagreement and its resolution, because the
+earlier text is what the fleet was pointed at.
+
+My version detected the four justifications with natural-language regexes over prose
+(`**Mechanism**`, `**Why ~0**`, `ceiling`, `Amdahl`). The hardened version requires **explicit
+markers carrying a measured value**, documented in `AGENTS.md`:
+
+```
+**A/A null control (same invocation):** baseline/null median ratio …, CI …
+**Counted mechanism:** instructions/cycles/syscalls/allocations/faults …
+**Executing ELF SHA-256 (self-reported by process):** `<64 lowercase hex>`   ← required on KEEP rows
+```
+
+Its `--self-test` asserts the boundaries directly, including that structural prose and ceiling prose
+are **not** accepted, that a retry predicate merely *mentioning* an A/A is not evidence, that an empty
+marker is rejected, and that a *source* SHA is not an executing-ELF self-report.
+
+**The concession.** My §7.4 claim still stands *epistemically* — a structural refutation really is as
+good as a counted one, because a null control cannot change the fact that no work was removed. But it
+is not **machine-checkable**, and a regex that tries to infer it will mis-fire. Mine demonstrably did:
+§9 records that my own screen filed L8376 as VOID-NONULL, §7.5 promoted it into the re-run queue, and
+only reading the row in full revealed the quantified structural refutation that made it
+VALID-MECHANISM. A gate built on that inference would have been unreliable in both directions.
+
+**The resolution, which is a genuine split and worth copying:**
+
+- The **taxonomy** is retrospective and human. It keeps `VALID-MECHANISM (structural)` — §7.4's 34
+  rescued rows are correctly classified, and re-litigating them would be wrong.
+- The **gate** is prospective and mechanical. It demands an explicit marker, because it runs in CI
+  against rows nobody has read yet. An author with a structural argument should still write it — and
+  additionally record either a counted mechanism or a null. That is a *higher* bar for new rows than
+  the ledger's own history meets, which is the point: 179 of 250 existing rows would fail it.
+
+So the earlier worry — that the gate would force authors to fabricate a null — is misplaced. It
+forces them to *count something*, which is cheap (`perf stat -e instructions` on both arms) and is
+exactly the instrument §7.5 identifies as the fix for the dominant void class.
 
 ---
 
