@@ -371,3 +371,61 @@ pins `target-cpu=x86-64-v2` in `.cargo/config.toml` for a documented, measured r
 (`round_ties_even`/`floor` lowering to hardware `roundsd`/`floorss`, instructions −5.3%), and its
 levers are byte-scan and formatting shaped rather than SIMD-kernel shaped. No row here was rejected
 because the binary could not emit AVX2.
+
+---
+
+## 8. Institutionalization — because ledger integrity decays
+
+Fleet broadcast 2 (2026-07-26) supplies the decisive data point. Void rates across the fleet:
+franken_networkx 91%, frankenfs 79.3%, frankenpandas 39.1%, frankenmermaid 24.7% (71.6% under the
+§7 taxonomy), **frankensqlite 1.7%**. frankensqlite is not lenient — it ran this same audit four
+months ago, triggered by *this repo's* crossing-minimization finding, then **strengthened** it: an
+AUDIT v2 with an exact-dispatch-count reachability proof plus `sql_pipeline_candidate_preflight`
+(exit 2 = BLOCKED) that greps the ledger before any source mutation.
+
+**The lesson is that a one-time cleanup is worth ~4 months.** A repo that audits and institutionalizes
+sits at 1.7%; repos that audited once sit at 25–91%. This repo has now audited twice in two days and
+would decay identically without a gate.
+
+### `scripts/ledger_preflight.mjs`
+
+Two modes, both blocking, no build and no worker required:
+
+```bash
+# BEFORE mutating source — has this mechanism already been rejected?
+node scripts/ledger_preflight.mjs --lever "<description>" --frame <symbol>
+#   exit 0  no prior REJECT matches
+#   exit 2  BLOCKED — prints each matching row with its retry predicate
+
+# BEFORE committing — is every REJECT row I am adding falsifiable?
+node scripts/ledger_preflight.mjs --lint --base origin/main
+#   exit 0  every new REJECT row records a null, a counted mechanism, a structural
+#           refutation, or a ceiling
+#   exit 1  BLOCKED — lists the rows that cannot distinguish lever from harness
+```
+
+The `--lint` predicates are **deliberately the same regexes §7 audits with**, so the gate and the
+audit agree by construction: a row the gate admits is a row the audit classifies `VALID-*`, and a row
+it rejects is one the audit would classify `VOID-NONULL`. If the taxonomy changes, both change
+together.
+
+Verified against real history rather than a synthetic fixture:
+
+- `--lever "numeric node index" --frame NodeIdIndex` → **exit 2**, surfacing both 2026-07-22 numeric-
+  index rejections and their retry predicates. A nonsense lever exits 0.
+- `--lint --base 243f9586` → **exit 0**; the one REJECT row added since is admitted, correctly, for
+  recording an A/A null.
+- `--lint` against a pre-2026-06-28 base → **exit 1**, admitting 90 rows and blocking 4 that record
+  none of the four justifications.
+
+### Enforcement
+
+`.github/workflows/ci.yml` gains a `ledger-integrity-guard` job running `--lint` against the PR merge
+base. A new REJECT row that cannot distinguish the lever from the harness is now a **build failure**,
+not a style note — which is what "impossible rather than discouraged" requires.
+
+The guard deliberately accepts four justifications, not one. Requiring an A/A null on *every* row
+would be wrong: a row that refutes a lever on a counted mechanism does not need a null (a null cannot
+change the fact that no work was removed), and §7.3 found three rows at the head of this queue that
+are sound on a structural refutation alone. A gate that forced those rows to fabricate a null control
+would degrade the ledger, not protect it.

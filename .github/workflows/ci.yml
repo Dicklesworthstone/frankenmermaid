@@ -185,6 +185,35 @@ jobs:
       - name: Run png smoke tests
         run: cargo test -p fm-cli --features png png_ -- --nocapture
 
+  ledger-integrity-guard:
+    name: Ledger Integrity Guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # The guard diffs the ledger against the merge base, so it needs history.
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Fleet campaign Meta-Lever #1: ledger integrity DECAYS. A repo that audits once and stops
+      # drifts back to a 25-91% void rate; the one repo that institutionalized the check sits at
+      # 1.7%. This makes a REJECT row that cannot distinguish the lever from the harness a BUILD
+      # FAILURE rather than a style note. See docs/LEDGER_RESURRECTION.md section 7.
+      - name: New REJECT rows must be falsifiable
+        run: |
+          BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -z "$BASE" ] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            BASE="origin/main"
+            git fetch --no-tags --depth=1 origin main || true
+          fi
+          echo "linting docs/NEGATIVE_EVIDENCE.md against $BASE"
+          node scripts/ledger_preflight.mjs --lint --base "$BASE"
+
   golden-checksum-guard:
     name: Golden Checksum Guard
     needs: quality-gate-config
