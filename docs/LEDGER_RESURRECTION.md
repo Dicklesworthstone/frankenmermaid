@@ -3,6 +3,8 @@
 **Campaign:** `perf-campaign-20260725`, fleet Meta-Lever #1.
 **Lane:** cc / STRUCTURAL (`BoldPanther`, Opus 5).
 **Audited:** `docs/NEGATIVE_EVIDENCE.md` @ `ca4e1d65`, 667 entries / 19,084 lines.
+**Re-audited 2026-07-26** under frankenfs's six-class taxonomy (fleet broadcast) — see §7, which
+supersedes the four-grade scheme in §1 and reaches a different answer.
 
 The premise of the fleet-wide audit is that a large fraction of negative-evidence rows are **VOID** —
 not "the lever did not work" but "the measurement could not have detected the lever". frankenlibc
@@ -236,3 +238,136 @@ non-flowchart renders are the thing being measured.
   emitted as the first stdout record, verified against `sha256sum` of the on-disk binary:
   `f4d035f2cf4676424fe402728f4bcdbee008d96332a68f0964bcdab2ceca1289`). The A/A null control and the
   MAD-not-CV dispersion gate were already in place and are this repo's own contribution to the fleet.
+
+---
+
+## 7. Re-audit under the six-class taxonomy (2026-07-26)
+
+The fleet broadcast directs every repo to adopt frankenfs's taxonomy verbatim, and corrects the
+campaign's own prediction: **the CV gate is not the dominant void class.** frankenfs found only 4
+VOID-CV against 214 VOID-NONULL. This section re-runs frankenmermaid's audit on that basis. It
+supersedes §1–§2; the §3 ranked queue and its yield stand unchanged and are re-confirmed below.
+
+### 7.1 Classes
+
+| Class | Meaning | Sound? |
+|---|---|---|
+| `VALID-PROFILE` | Rejected before any source edit, on a named frame with non-zero self-time and a computed ceiling. | ✅ |
+| `VALID-MECHANISM` | No A/A null, but refuted on a **counted** mechanism — instructions/cycles/syscalls/allocations/faults unchanged. A null cannot change "no work was removed". | ✅ |
+| `VALID-AB` | A/B with a recorded A/A null; the effect sits inside it. | ✅ |
+| `VOID-CV` | Killed **only** by a `cv < 5%` gate. | ❌ |
+| `VOID-ZEROSELF` | Target frame ~0% self-time in the profile the bench actually ran. | ❌ |
+| `VOID-NONULL` | Near-1.0 ratio, no null, no counted mechanism. Cannot distinguish lever from harness. | ❌ |
+
+### 7.2 Mechanical screen
+
+| Metric | frankenmermaid | frankenfs (for comparison) |
+|---|---:|---:|
+| Ledger entries parsed | 668 | 1,031 |
+| **REJECT-verdict audited** | **250** | 276 |
+| VALID-AB | 18 | 34 |
+| VALID-PROFILE | 1 | 12 |
+| VALID-MECHANISM | 52 | 11 |
+| **VOID-NONULL** | **167** | **214** |
+| VOID-CV | 2 | 4 |
+| VOID-ZEROSELF | 10 | 1 |
+| VOID total (screen) | 179 / 250 = **71.6%** | 219 / 276 = 79.3% |
+| Rows carrying a binary sha256 | 26 / 250 = **10.4%** | 30 / 276 = 10.9% |
+
+**The broadcast's correction is confirmed independently here.** VOID-NONULL is the epidemic (167);
+VOID-CV is negligible (2). My earlier §1–§2 scheme graded "no null" rows by *effect size* and so
+filed 155 of them as `SOUND-noNull`; grading on **whether a counted mechanism was recorded** is the
+correct test and moves most of that population. The binary-sha figures — 10.4% here, 10.9% at
+frankenfs — agreeing to within half a point across two independently written screens is the
+strongest signal in this table that the provenance gap is a fleet-wide property, not a local habit.
+
+`VALID-MECHANISM` is 52 here against 11 at frankenfs. That is this repo's instruction-count
+discipline showing up as a rescue: a large minority of its rejections were refuted by counting work,
+not by timing it.
+
+### 7.3 Hand adjudication — where the screen is wrong
+
+The broadcast is emphatic that the regex is triage. Reading the ranked head confirms it: **the top
+of the queue is the least void part of the population**, because larger frames got more careful
+write-ups. Of the top six VOID rows by target-frame self-time, **three are overturned by hand**:
+
+| Rank | Row | Screen | Hand verdict |
+|---:|---|---|---|
+| 2 | L5352 CGA axis-aligned skip, "31% self" | VOID-NONULL | **Not void.** The row *withdraws its own 31% figure*: it was taken on a stale debug binary predating the spatial-index router. It then names why the lever is ~0 — the index already minimises CGA candidates. Ranking on that 31% was my error, not the row's. |
+| 5 | L9613 parser `trim_ws`, 9.46% self | VOID-NONULL | **Not void.** Records the root cause: the win needs whitespace *to strip*, and real parser trims are already-clean short substrings. Also notes `trim_ws` is **not strictly-less-work**, so it cannot be justified as monotonic either. |
+| 6 | L5020 path `d` raw serialization, 8.32% self | VOID-NONULL | **Not void — it is a measured regression**, +7.60%/+11.18%/**+25.54%** across two independent measurements, with a mechanism (a 4th `AttributeValue` variant de-optimises the `write_value` match that runs for every attribute). Nowhere near 1.0. |
+
+**A caution for anyone ranking by self-time:** rows frequently quote a self-time *in order to refute
+it*. Rank 2 quotes 31% precisely to explain that the number was stale. A screen that extracts the
+largest percentage in the body will rank the most thoroughly-debunked rows highest. Extract the
+self-time that is the lever's **attribution**, not every percentage in the prose.
+
+### 7.4 A proposed refinement, offered back to the fleet
+
+frankenfs defines `VALID-MECHANISM` on a **counted** mechanism. The justifying principle — *"a null
+control cannot change the fact that no work was removed"* — holds just as well when a row proves no
+work was removed **structurally** rather than by a counter. Ranks 2, 5 and 6 above are all of that
+shape, and none would be rescued by the counted-only definition.
+
+Screening the whole VOID-NONULL population for a causal-refutation paragraph (`**Mechanism**`,
+`**Why ~0**`, `**Root cause**`, `**Why the profile lied**`) or a stated ceiling:
+
+| | Rows | Share of VOID-NONULL |
+|---|---:|---:|
+| Causal mechanism paragraph | 21 | 13% |
+| Stated ceiling / Amdahl | 18 | 11% |
+| **Either — rescue candidates** | **34** | **20%** |
+| Neither — true VOID-NONULL | 133 | 80% |
+
+Applying that rescue honestly (it cuts both ways — 80% are *not* rescued):
+
+| Class | Screen | After hand adjudication |
+|---|---:|---:|
+| VALID-AB | 18 | 18 |
+| VALID-PROFILE | 1 | 1 |
+| VALID-MECHANISM (counted + structural) | 52 | **86** |
+| VOID-NONULL | 167 | **133** |
+| VOID-CV | 2 | 2 |
+| VOID-ZEROSELF | 10 | 10 |
+| **VOID total** | 179 / 250 = 71.6% | **145 / 250 = 58.0%** |
+
+frankenmermaid's void rate is genuinely lower than frankenfs's 79.3%, and the reason is a property
+of this ledger's house style — rows here characteristically explain *why* a null result is null —
+not an argument for grading its own homework leniently. The 133 true VOID-NONULL rows remain void.
+
+### 7.5 Ranked re-run queue after hand adjudication
+
+Ranks 1, 3 and 7 of the screen were already adjudicated in §3 and are **already re-won** (`460990ab`,
+`aa4d10cf`) or belong to the cod lane's standing blocker; `CreamGorge` has since certified them
+against a 2× null-CI gate (§3). Rank 4 is a survey row, not a lever, and is excluded exactly as
+frankenfs excludes its SURVEY class. After removing those and the three hand-rescued rows, **two
+genuine re-run candidates remain**:
+
+1. **L5492 — `build_smooth_path` `d` capacity `n*24 → n*56`** (7.11% self). Verdict was literally
+   *"INCONCLUSIVE — the box…"*, load-contaminated, with an acknowledged over-allocation trade-off.
+   The textbook VOID-NONULL: an effect that may be real, on a measurement that could not decide.
+2. **L8376 — extend `trim_fast` to `intern_node_auto` `id.trim()` + node-parser `label.trim()`**
+   (3.00% self). Verdict: *"real but sub-threshold + noise-obscured, fails the reproducible-≥3% keep
+   gate"*, non-reproducible back to back. The row itself says the effect is **real**.
+
+**Both are decidable by instruction count, and that is the general point.** VOID-NONULL is defined
+by a near-1.0 *wall* ratio with no null — and this repo measured an A/A null of **±0.011% on
+instructions against ±0.145% on wall** (`bd-1buv.69`, §3 of `docs/PERF_LEDGER.md`). A lever that is
+sub-threshold and noise-obscured on wall is routinely decidable on instructions, provided it
+**removes work** (the §2.6 scope limit: not for ISA/LTO/allocator changes). So the fleet's dominant
+void class is not only a documentation failure — it is an instrument failure, and the instrument
+already exists.
+
+### 7.6 Blocker — this lane cannot execute the re-runs
+
+Both candidates were reverted or stashed, so re-running them means re-implementing and building two
+arms. **This repo is Lane L (throttled, no worker) under the allocation addendum**, and the standing
+rule is to request a window rather than take one. Both rows are handed to whichever lane next holds
+measurement rights in this repo, with the instrument named above. Requested on Agent Mail thread
+`perf-campaign-20260725`; not started here.
+
+Unrelated to the queue: `VOID-ISA` (frankenfs §6) was checked and does not apply. This workspace
+pins `target-cpu=x86-64-v2` in `.cargo/config.toml` for a documented, measured reason
+(`round_ties_even`/`floor` lowering to hardware `roundsd`/`floorss`, instructions −5.3%), and its
+levers are byte-scan and formatting shaped rather than SIMD-kernel shaped. No row here was rejected
+because the binary could not emit AVX2.
