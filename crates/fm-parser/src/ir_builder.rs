@@ -1167,24 +1167,38 @@ impl IrBuilder {
     }
 
     pub(crate) fn add_node_to_cluster(&mut self, cluster_index: usize, node_id: IrNodeId) {
-        let Some(cluster) = self.ir.clusters.get_mut(cluster_index) else {
+        if self.ir.clusters.get(cluster_index).is_none() {
             return;
+        }
+        let cluster_id = IrClusterId(cluster_index);
+        // The membership index is already here: `ir.graph.nodes[i].clusters` is appended ONLY below,
+        // starts empty, and grows on exactly the calls that append to `clusters[i].members`. So the
+        // per-node list answers "is this node already in this cluster" without a second structure —
+        // and it answers it from ~1 element (a node is in its own group plus its ancestors) instead
+        // of a hash probe into a set sized to the whole diagram. See `add_node_to_subgraph` for the
+        // mirrored site; both were paying this, and on a subgraph-heavy diagram the shared
+        // `FxHashSet<(usize, IrNodeId)>::insert` was the single largest self-time frame (8.73% on
+        // `arch_100x50`, 5,000 nodes in 100 subgraphs).
+        let already = match self.ir.graph.nodes.get(node_id.0) {
+            Some(graph_node) => graph_node.clusters.contains(&cluster_id),
+            // No mirror to consult. Unreachable via the interner -- `ir.nodes` and `ir.graph.nodes`
+            // are pushed in lockstep, so an id is never handed out before its graph node exists --
+            // but keep the original set-based dedup rather than assume it. The two paths partition
+            // node ids (a given id either has a graph node on every call or on none), so a node can
+            // never dedup against the wrong one.
+            None => !self.cluster_member_set.insert((cluster_index, node_id)),
         };
-        // O(1) dedup via `cluster_member_set` instead of the O(members) `contains` scans (this was
-        // O(subgraph²) on big clusters). `ir.clusters[i].members` and `ir.graph.clusters[i].members`
-        // are created together and only appended here in lockstep, so one set key gates both — the
-        // set is empty exactly when both Vecs lack `node_id`. Byte-identical.
-        if self.cluster_member_set.insert((cluster_index, node_id)) {
+        if already {
+            return;
+        }
+        if let Some(cluster) = self.ir.clusters.get_mut(cluster_index) {
             cluster.members.push(node_id);
-            if let Some(graph_cluster) = self.ir.graph.clusters.get_mut(cluster_index) {
-                graph_cluster.members.push(node_id);
-            }
+        }
+        if let Some(graph_cluster) = self.ir.graph.clusters.get_mut(cluster_index) {
+            graph_cluster.members.push(node_id);
         }
         if let Some(graph_node) = self.ir.graph.nodes.get_mut(node_id.0) {
-            let cluster_id = IrClusterId(cluster_index);
-            if !graph_node.clusters.contains(&cluster_id) {
-                graph_node.clusters.push(cluster_id);
-            }
+            graph_node.clusters.push(cluster_id);
         }
     }
 
@@ -1264,19 +1278,25 @@ impl IrBuilder {
     }
 
     pub(crate) fn add_node_to_subgraph(&mut self, subgraph_index: usize, node_id: IrNodeId) {
-        let Some(subgraph) = self.ir.graph.subgraphs.get_mut(subgraph_index) else {
+        if self.ir.graph.subgraphs.get(subgraph_index).is_none() {
             return;
+        }
+        let subgraph_id = IrSubgraphId(subgraph_index);
+        // Mirrors `add_node_to_cluster`: `ir.graph.nodes[i].subgraphs` is appended only below, starts
+        // empty, and grows on exactly the calls that append to `subgraphs[i].members`, so it already
+        // is the membership index and the parallel hash set is redundant on this path.
+        let already = match self.ir.graph.nodes.get(node_id.0) {
+            Some(graph_node) => graph_node.subgraphs.contains(&subgraph_id),
+            None => !self.subgraph_member_set.insert((subgraph_index, node_id)),
         };
-        // O(1) dedup (was O(subgraph²) — see `add_node_to_cluster`). `subgraph_member_set` mirrors
-        // `subgraph.members` exactly (empty start, appended only here). Byte-identical.
-        if self.subgraph_member_set.insert((subgraph_index, node_id)) {
+        if already {
+            return;
+        }
+        if let Some(subgraph) = self.ir.graph.subgraphs.get_mut(subgraph_index) {
             subgraph.members.push(node_id);
         }
         if let Some(graph_node) = self.ir.graph.nodes.get_mut(node_id.0) {
-            let subgraph_id = IrSubgraphId(subgraph_index);
-            if !graph_node.subgraphs.contains(&subgraph_id) {
-                graph_node.subgraphs.push(subgraph_id);
-            }
+            graph_node.subgraphs.push(subgraph_id);
         }
     }
 
