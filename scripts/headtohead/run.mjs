@@ -124,10 +124,20 @@ if (drift.length > 0) {
 
 const only = arg('only');
 const repsScale = Number(arg('reps-scale', '1'));
+// Scales the per-item mermaid wall budget (see `js_budget_ms` in corpus.mjs). A DNF is only a claim
+// about mermaid if the budget was generous, so smoke runs must say so by shrinking it explicitly.
+const budgetScale = Number(arg('js-budget-scale', '1'));
 const outDir = arg('out', join(REPO, '.benchmarks', 'headtohead'));
 mkdirSync(outDir, { recursive: true });
 
-const items = CORPUS.filter((i) => !only || i.id === only);
+// `--only` takes one id or a comma-separated list, so a class of items can be re-run without
+// re-running the whole corpus (the XL items cost minutes each).
+const onlyIds = only ? new Set(only.split(',').map((s) => s.trim())) : null;
+const items = CORPUS.filter((i) => !onlyIds || onlyIds.has(i.id));
+if (onlyIds && items.length === 0) {
+  console.error(`[run] --only ${only} matched no corpus item`);
+  process.exit(2);
+}
 const corpusJson = items.map((i) => ({
   id: i.id,
   texts: corpus.get(i.id).texts,
@@ -171,9 +181,18 @@ env.pinned_cpu = pin;
 
 const [fmCmd, fmArgs] = pin ? ['taskset', ['-c', String(pin.cpu), fmBin, corpusPath]] : [fmBin, [corpusPath]];
 const fm = runJsonl('frankenmermaid', fmCmd, fmArgs);
+// The measured binary hashes itself and prints that as its first record. A sha computed by a shell
+// step next to the run proves nothing about which ELF executed -- rch builds into an opaque
+// per-worker target dir, and agents have edited crates mid-benchmark in this fleet.
+const binaryRecord = fm.records.find((r) => r.record === 'binary');
+env.fm_elf_sha256 = binaryRecord?.elf_sha256 ?? 'not reported';
+env.fm_elf_bytes = binaryRecord?.elf_bytes ?? null;
+console.error(`[run] fm elf sha256=${String(env.fm_elf_sha256).slice(0, 16)} (${env.fm_elf_bytes} bytes)`);
+
 const mjsArgs = [join(HERE, 'mermaid_bench.mjs')];
 if (only) mjsArgs.push('--only', only);
 if (repsScale !== 1) mjsArgs.push('--reps-scale', String(repsScale));
+if (budgetScale !== 1) mjsArgs.push('--js-budget-scale', String(budgetScale));
 const mjs = has('skip-mermaid') ? { records: [], code: 0 } : runJsonl('mermaid-js', process.execPath, mjsArgs);
 
 // ---------------------------------------------------------------- join + gate
@@ -195,8 +214,15 @@ for (const item of items) {
     rows.push({ ...row, status: 'error', engine: 'frankenmermaid', error: f?.error ?? 'no result' });
     continue;
   }
-  row.nodes = f.nodes;
-  row.edges = f.edges;
+  row.class = item.class ?? 'single';
+  // For a doc build the batch total is the size that means anything; for everything else it is the
+  // largest single diagram. Both are recorded either way.
+  row.nodes = row.class === 'doc_build' ? (f.nodes_total ?? f.nodes) : f.nodes;
+  row.edges = row.class === 'doc_build' ? (f.edges_total ?? f.edges) : f.edges;
+  row.nodes_max = f.nodes;
+  row.edges_max = f.edges;
+  row.nodes_total = f.nodes_total ?? f.nodes;
+  row.edges_total = f.edges_total ?? f.edges;
   row.revisions = f.revisions;
   row.fm_p50_ns = f.pipeline_ns.p50;
   row.fm_min_ns = f.pipeline_ns.min;
@@ -211,6 +237,27 @@ for (const item of items) {
 
   if (has('skip-mermaid')) {
     rows.push({ ...row, status: 'fm_only' });
+    continue;
+  }
+  // A did-not-finish is a *result*: mermaid was given a wall budget at this size and did not
+  // produce a render inside it. We record the budget and derive a lower bound on the speedup; we
+  // never invent a time for mermaid, and DNF rows stay out of the ratio aggregate below because a
+  // bound and a point estimate do not belong in the same median.
+  if (m && m.status === 'dnf') {
+    row.status = 'comparator_dnf';
+    row.mjs_dnf_kind = m.kind ?? 'timeout';
+    row.mjs_budget_ms = m.budget_ms;
+    row.mjs_elapsed_ms = m.elapsed_ms;
+    row.mjs_dnf_phase = m.phase;
+    row.error = m.error;
+    // Only a timeout bounds the ratio: mermaid was still working when the budget expired, so its
+    // render costs at least the budget. A `failed` DNF bounds nothing -- mermaid raised, and waiting
+    // longer would not have produced an SVG. Reporting a bound there would be inventing a number.
+    row.speedup_lower_bound = row.mjs_dnf_kind === 'timeout'
+      ? (m.budget_ms * 1e6) / f.pipeline_ns.p50
+      : null;
+    row.mad_gate = f.mad_pct <= MAD_GATE_PCT ? 'pass' : 'fail';
+    rows.push(row);
     continue;
   }
   if (!m || m.status !== 'ok') {
@@ -251,6 +298,7 @@ for (const item of items) {
 }
 
 const ok = rows.filter((r) => r.status === 'ok');
+const dnf = rows.filter((r) => r.status === 'comparator_dnf');
 const speedups = ok.map((r) => r.speedup);
 const speedupsMin = ok.map((r) => r.speedup_min);
 const summary = {
@@ -259,6 +307,13 @@ const summary = {
   pins: { mermaid: PINS.mermaid.version, bundle_url: PINS.mermaid.url, security_level: PINS.mermaid.security_level },
   corpus_items: items.length,
   ok_items: ok.length,
+  // Items where mermaid produced no render inside its wall budget. Reported separately from
+  // `speedup` on purpose: these carry lower bounds, not measured ratios.
+  dnf_items: dnf.length,
+  dnf: dnf.map((r) => ({
+    id: r.id, budget_ms: r.mjs_budget_ms, phase: r.mjs_dnf_phase,
+    fm_p50_ns: r.fm_p50_ns, speedup_lower_bound: r.speedup_lower_bound, error: r.error,
+  })),
   mad_gate_pct: MAD_GATE_PCT,
   mad_gate_failures: ok.filter((r) => r.mad_gate === 'fail').map((r) => r.id),
   speedup: speedups.length
@@ -287,6 +342,16 @@ console.log('');
 console.log(`${pad('item', 22)}${lpad('nodes', 6)}${lpad('edges', 7)}${lpad('fm p50 ms', 12)}${lpad('mermaid ms', 12)}${lpad('speedup', 10)}${lpad('(by min)', 10)}${lpad('fm mad%', 9)}${lpad('bytes x', 9)}${lpad('lean x', 8)}  gate`);
 console.log('-'.repeat(116));
 for (const r of rows) {
+  if (r.status === 'comparator_dnf') {
+    const timedOut = r.mjs_dnf_kind === 'timeout';
+    console.log(
+      `${pad(r.id, 22)}${lpad(r.nodes, 6)}${lpad(r.edges, 7)}${lpad(ms(r.fm_p50_ns), 12)}` +
+      `${lpad(timedOut ? `DNF>${(r.mjs_budget_ms / 1000).toFixed(0)}s` : 'CANNOT', 12)}` +
+      `${lpad(timedOut ? `>${r.speedup_lower_bound.toFixed(0)}x` : 'n/a', 10)}` +
+      `${lpad('-', 10)}${lpad(r.fm_mad_pct.toFixed(1), 9)}${lpad('-', 9)}${lpad('-', 8)}  ${r.mad_gate}`,
+    );
+    continue;
+  }
   if (r.status !== 'ok') {
     console.log(`${pad(r.id, 22)}  ${r.status.toUpperCase()}: ${r.error ?? ''}`);
     continue;
@@ -304,7 +369,28 @@ if (summary.speedup) {
   console.log(`speedup vs mermaid ${PINS.mermaid.version} (min):  min ${summary.speedup_min_estimator.min.toFixed(0)}x  median ${summary.speedup_min_estimator.median.toFixed(0)}x  max ${summary.speedup_min_estimator.max.toFixed(0)}x`);
 }
 for (const r of ok.filter((x) => x.revisions > 1)) {
-  console.log(`edit trace ${r.id}: ${r.revisions} revisions -- per re-render frankenmermaid ${ms(r.fm_ns_per_revision)} ms vs mermaid ${ms(r.mjs_ns_per_revision)} ms (a live preview redraws on every keystroke).`);
+  const unit = r.class === 'doc_build' ? 'diagram' : 're-render';
+  const what = r.class === 'doc_build'
+    ? `${r.revisions} diagrams in one batch`
+    : `${r.revisions} revisions`;
+  const why = r.class === 'doc_build'
+    ? 'a docs build or CI job pays this per diagram.'
+    : 'a live preview redraws on every keystroke.';
+  console.log(`${r.class} ${r.id}: ${what} -- per ${unit} frankenmermaid ${ms(r.fm_ns_per_revision)} ms vs mermaid ${ms(r.mjs_ns_per_revision)} ms (${why})`);
+}
+if (dnf.length) {
+  console.log('');
+  console.log(`DID NOT FINISH -- mermaid ${PINS.mermaid.version} produced no render on ${dnf.length} item(s):`);
+  for (const r of dnf) {
+    console.log(`  ${pad(r.id, 22)} ${r.nodes} nodes / ${r.edges} edges -- ${r.mjs_dnf_phase} phase, budget ${(r.mjs_budget_ms / 1000).toFixed(0)}s`);
+    if (r.mjs_dnf_kind === 'timeout') {
+      console.log(`  ${' '.repeat(22)} still working when the budget expired (${r.error}).`);
+      console.log(`  ${' '.repeat(22)} frankenmermaid: ${ms(r.fm_p50_ns)} ms, so the speedup is at least ${r.speedup_lower_bound.toFixed(0)}x -- a bound, not a measurement.`);
+    } else {
+      console.log(`  ${' '.repeat(22)} FAILED after ${(r.mjs_elapsed_ms / 1000).toFixed(1)}s: ${r.error}`);
+      console.log(`  ${' '.repeat(22)} frankenmermaid: ${ms(r.fm_p50_ns)} ms. mermaid does not render this input at any budget, so there is no ratio to state.`);
+    }
+  }
 }
 const leanSlow = ok.filter((r) => r.lean_slowdown > 1.05);
 if (leanSlow.length) {

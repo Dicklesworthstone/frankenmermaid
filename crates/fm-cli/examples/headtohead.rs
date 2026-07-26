@@ -47,6 +47,23 @@ fn sha256_hex(bytes: &[u8]) -> String {
         })
 }
 
+/// SHA-256 of the ELF that is *actually executing*, hashed by that ELF itself.
+///
+/// A hash computed by a shell step next to the run proves nothing about which binary ran: `rch`
+/// compiles into an opaque per-worker pool target dir whose path cannot be predicted from here, and
+/// concurrent agents have edited crates mid-benchmark in this fleet. Self-reporting closes both
+/// gaps -- the number and its provenance come out of the same process. Emitted once before any
+/// measurement, so it costs nothing inside a timed region.
+fn self_elf_sha256() -> (String, u64) {
+    let Ok(path) = std::env::current_exe() else {
+        return ("unavailable".to_owned(), 0);
+    };
+    match std::fs::read(&path) {
+        Ok(bytes) => (sha256_hex(&bytes), bytes.len() as u64),
+        Err(_) => ("unreadable".to_owned(), 0),
+    }
+}
+
 /// The lean output profile: no per-element accessibility metadata, no source spans.
 /// This is what `A11yConfig::none()` already produces today; it exists as a config, never as a
 /// default. Reported here so output-size dominance is measured, not asserted.
@@ -255,6 +272,19 @@ fn main() {
         std::process::exit(2);
     });
 
+    // Line 1 of stdout: which ELF produced everything below it.
+    let (elf_sha256, elf_bytes) = self_elf_sha256();
+    println!(
+        "{}",
+        serde_json::json!({
+            "engine": "frankenmermaid",
+            "id": "__binary__",
+            "record": "binary",
+            "elf_sha256": elf_sha256,
+            "elf_bytes": elf_bytes,
+        })
+    );
+
     // Measurement aid. Each item is normally timed twice, once per profile, so `perf stat` on the whole
     // process cannot attribute instructions to one of them. Forcing BOTH passes to the same profile makes
     // the process's instruction count proportional to that profile alone, which turns a load-sensitive
@@ -272,10 +302,19 @@ fn main() {
             eprintln!("[frankenmermaid] FAIL {}: no revisions", item.id);
             continue;
         }
-        // Node/edge counts describe the final revision, which is the largest one in an edit trace.
-        let parsed = parse(item.texts.last().expect("non-empty checked above"));
-        let nodes = parsed.ir.nodes.len();
-        let edges = parsed.ir.edges.len();
+        // Size is reported two ways because a multi-document item can mean two different things.
+        // For an edit trace the interesting size is the largest revision (the session grows). For a
+        // doc build it is the total across the batch -- reporting only the last document would
+        // describe a 40-diagram CI job by whichever diagram happened to be last. Single-shot items
+        // have one revision, so both numbers equal the old one.
+        let (mut nodes, mut edges, mut nodes_total, mut edges_total) = (0, 0, 0, 0);
+        for text in &item.texts {
+            let parsed = parse(text);
+            nodes = nodes.max(parsed.ir.nodes.len());
+            edges = edges.max(parsed.ir.edges.len());
+            nodes_total += parsed.ir.nodes.len();
+            edges_total += parsed.ir.edges.len();
+        }
 
         let default_run = match measure(item, &default_cfg) {
             Ok(v) => v,
@@ -345,6 +384,8 @@ fn main() {
                 "input_bytes": joined_input.len(),
                 "nodes": nodes,
                 "edges": edges,
+                "nodes_total": nodes_total,
+                "edges_total": edges_total,
                 "pipeline_ns": ns_json(default_stats),
                 "cv_pct": (default_stats.cv_pct * 100.0).round() / 100.0,
                 "mad_pct": (default_stats.mad_pct * 100.0).round() / 100.0,

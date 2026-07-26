@@ -94,6 +94,66 @@ function erDiagram(n) {
 }
 
 /**
+ * A software-architecture diagram: `groups` subgraphs of `perGroup` services, chained inside each
+ * group and cross-linked between adjacent groups.
+ *
+ * This is the shape architecture diagrams actually have -- people draw them with `subgraph`, not as
+ * a flat node list -- and it is a different layout problem from `flowchart`/`wide`: the cluster
+ * boundaries constrain node placement and force the router around obstacles the flat generators
+ * never produce. At thousands of nodes it is also the regime where mermaid-js stops finishing.
+ */
+function architecture(groups, perGroup) {
+  const lines = ['flowchart TB'];
+  for (let g = 0; g < groups; g++) {
+    lines.push(`  subgraph G${g}[Group ${g}]`);
+    for (let i = 0; i < perGroup; i++) lines.push(`    G${g}N${i}[Svc ${g}.${i}]`);
+    for (let i = 0; i < perGroup - 1; i++) lines.push(`    G${g}N${i}-->G${g}N${i + 1}`);
+    lines.push('  end');
+  }
+  for (let g = 0; g < groups - 1; g++) lines.push(`  G${g}N${perGroup - 1}-->G${g + 1}N0`);
+  return lines.join('\n');
+}
+
+/**
+ * A database-schema ER diagram: `entities` tables each carrying an attribute block, chained by
+ * relationships.
+ *
+ * The pinned `er` generator emits relationships only. A real schema diagram is dominated by
+ * attribute rows, which makes it text-measurement-bound rather than graph-bound -- a different cost
+ * profile, and the one an ER user actually pays.
+ */
+function erSchema(entities, attrs) {
+  const lines = ['erDiagram'];
+  for (let i = 0; i < entities - 1; i++) lines.push(`  E${i} ||--o{ E${i + 1} : has`);
+  for (let i = 0; i < entities; i++) {
+    lines.push(`  E${i} {`);
+    lines.push('    int id PK');
+    for (let a = 0; a < attrs - 1; a++) lines.push(`    string field${a}`);
+    lines.push('  }');
+  }
+  return lines.join('\n');
+}
+
+/**
+ * A documentation build: every diagram one docs page -- or one CI job -- renders in a batch.
+ *
+ * Returns one document per diagram, so the existing trace machinery times the whole batch as a
+ * unit, which is what a docs pipeline actually costs. The per-diagram number this yields is the one
+ * a CI owner budgets against. Sizes vary per copy so the batch is not N renders of one cached shape.
+ */
+function docBuild(copies) {
+  const out = [];
+  for (let c = 0; c < copies; c++) {
+    out.push(flowchart(12 + (c % 7)));
+    out.push(sequence(6 + (c % 5)));
+    out.push(classDiagram(8 + (c % 4)));
+    out.push(stateDiagram(10 + (c % 6)));
+    out.push(erDiagram(9 + (c % 3)));
+  }
+  return out;
+}
+
+/**
  * An editing session: the successive full documents a live preview would re-render as a user types.
  * This is the workload a mermaid user actually generates -- an editor calls `mermaid.render()` on
  * every keystroke, because mermaid has no incremental path. Returns `revisions + 1` documents.
@@ -147,6 +207,9 @@ const GENERATORS = {
   state: (p) => [stateDiagram(p.n)],
   er: (p) => [erDiagram(p.n)],
   edit_trace: (p) => editTrace(p.n, p.revisions),
+  architecture: (p) => [architecture(p.groups, p.per_group)],
+  er_schema: (p) => [erSchema(p.entities, p.attrs)],
+  doc_build: (p) => docBuild(p.copies),
 };
 
 /** Separator used to hash a multi-revision trace as one input. Must match `headtohead.rs`. */
@@ -171,6 +234,36 @@ export const CORPUS = [
   // A live-preview editing session: 21 successive full documents. One "iteration" renders all 21,
   // which is what an editor does as the user types -- mermaid has no incremental path.
   { id: 'edit_trace_60x20',     gen: 'edit_trace', params: { n: 60, revisions: 20 }, reps_js: 3,  warmup_js: 1, reps_rs: 30,  warmup_rs: 3 },
+
+  // ---------------------------------------------------------------------------------------------
+  // Workload classes the 13-item baseline never covered (bd-1buv, cc/STRUCTURAL lane).
+  //
+  // The items above top out at 500-node flowcharts and 512-node layered DAGs. That is not where
+  // mermaid is used and it is not where mermaid hurts. The three classes below are:
+  //
+  //   XL         diagrams of thousands of nodes -- architecture maps and database schemas. This is
+  //              the regime where mermaid-js may not finish at all, which is a stronger result than
+  //              any ratio; see `dnf_allowed` and `js_budget_ms` below.
+  //   EDIT       a real editing session, hundreds of revisions rather than 21.
+  //   DOC_BUILD  every diagram on a docs page / in a CI job, timed as one batch.
+  //
+  // `js_budget_ms` is a wall budget for the mermaid arm of that item. Exceeding it is recorded as
+  // `status: "dnf"` with the budget attached -- an honest "did not finish", never a silent win and
+  // never a hard run failure. `dnf_allowed` items also downgrade a comparator *error* (mermaid's own
+  // size guardrails, an OOM) to a DNF. The 13 pinned items above set neither field, so a failure
+  // there stays a hard failure exactly as before.
+  //
+  // `warmup_js: 0` on the heaviest items is deliberate: a warmup render doubles an item that may
+  // already take minutes, and these samples are long enough that v8 is warm within the first few
+  // renders of the timed sample itself.
+  { id: 'flowchart_xl_2000',    gen: 'flowchart',    params: { n: 2000 },                    class: 'single',     reps_js: 3, warmup_js: 1, reps_rs: 20, warmup_rs: 3, js_budget_ms: 300_000, dnf_allowed: true },
+  { id: 'flowchart_xl_5000',    gen: 'flowchart',    params: { n: 5000 },                    class: 'single',     reps_js: 2, warmup_js: 0, reps_rs: 12, warmup_rs: 2, js_budget_ms: 600_000, dnf_allowed: true },
+  { id: 'arch_100x50',          gen: 'architecture', params: { groups: 100, per_group: 50 }, class: 'single',     reps_js: 2, warmup_js: 0, reps_rs: 12, warmup_rs: 2, js_budget_ms: 600_000, dnf_allowed: true },
+  { id: 'er_schema_1000x6',     gen: 'er_schema',    params: { entities: 1000, attrs: 6 },   class: 'single',     reps_js: 3, warmup_js: 1, reps_rs: 20, warmup_rs: 3, js_budget_ms: 300_000, dnf_allowed: true },
+  // 201 successive documents: a real editing session, not a 21-keystroke sketch.
+  { id: 'edit_trace_200x200',   gen: 'edit_trace',   params: { n: 200, revisions: 200 },     class: 'edit_trace', reps_js: 2, warmup_js: 0, reps_rs: 10, warmup_rs: 2, js_budget_ms: 600_000, dnf_allowed: true },
+  // 40 diagrams across five types -- one docs page, or one CI batch job.
+  { id: 'doc_build_40',         gen: 'doc_build',    params: { copies: 8 },                  class: 'doc_build',  reps_js: 3, warmup_js: 1, reps_rs: 30, warmup_rs: 3, js_budget_ms: 300_000, dnf_allowed: true },
 ];
 
 export function sha256(text) {
