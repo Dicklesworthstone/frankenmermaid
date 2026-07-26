@@ -112,6 +112,24 @@ came out of rows that had been sitting in this ledger marked REJECT. That is the
 reproduced independently, and it is the strongest available argument for running this audit in the
 eight repos that have not.
 
+**Certified re-measurement (cod lane, `CreamGorge`, `bd-1buv.67`).** In parallel with this audit the
+cod lane re-ran ranks 1–5 on strict-remote `ovh-a` under the corrected harness — same-invocation
+A/A + A/B, bootstrap median 95% CI, mandatory 2× null-CI gate, exact parity on every arm, ELF
+`42e6c3bf…6f3a`. All 15 comparisons clear the gate, weakest clearance 56.81×:
+
+| Row | SCC 100 | SCC 300 | SCC 800 |
+|---|---:|---:|---:|
+| direct VOID adjacency `BTreeMap`→flat-CSR | 11.945× | 21.027× | 44.255× |
+| flat-CSR | 3.032× | 4.566× | 8.437× |
+| single-pass | 3.481× | 4.169× | 4.775× |
+| dense-rank | 1.123× | 1.114× | 1.096× |
+| packed crossings | 1.159× | 1.082× | 1.061× |
+
+Those are the same rows that four separate reject entries dismissed for failing `cv<5%`. Under a
+median-CI gate they clear by one to two orders of magnitude. The two columns of the table in §3 are
+complementary: the "Status today" column records the commit that shipped, this one records the
+certified ratio.
+
 ---
 
 ## 4. Rows that are void but not worth resurrecting
@@ -170,6 +188,42 @@ regime where mermaid-js does not finish at all).
 **Re-audit predicate.** Once a profile of the new workload classes exists, every VOID-A row of the
 "dead frame" form must be re-checked against *that* profile before it may be cited as closed. A row
 that says "0.000% self-time" is a statement about a corpus, and the corpus has changed.
+
+### 5.1 The prediction, tested
+
+The standing frontier blocker (rank 8; `docs/NEGATIVE_EVIDENCE.md` L19037/L19061) rests on a
+specific claim:
+
+> "No unledgered frame reaches 8% self and no single contained call-chain reaches 10%."
+
+That claim was measured on `flowchart_large_500`, and on that workload it is **true** — the top frame
+there is `write_uint_into` at 6.13%. Profiling the new classes with the same instrument
+(non-LTO, `strip=false`, `debug=true`, symbolized, single pinned core, `perf record -F 999`;
+`sha2` frames excluded as harness self-hashing outside the timed region) gives:
+
+| Workload | Top self-time frame | Self-time | Present at `flowchart_large_500`? |
+|---|---|---:|---|
+| `flowchart_large_500` (baseline) | `write_uint_into` | 6.13% | — |
+| `flowchart_xl_5000` | `lower_flow_document_item` | **8.72%** | yes, at 2.63% — it more than triples with scale |
+| `arch_100x50` | `FxHashSet<(usize, IrNodeId)>::insert` | **7.19–8.73%** | **absent entirely** |
+| `er_schema_1000x6` | `parse_mermaid_with_detection_and_config` | **9.37%** | not in the top 20 |
+| `doc_build_40` | `render_svg_with_layout` | **20.02%** | not in the top 20 |
+| `doc_build_40` (2nd) | `memchr…Finder::find_impl` (theme-CSS post-pass) | **9.00%** | not in the top 20 |
+
+Four workloads, five frames at or above the 8% admission threshold, four of which do not appear in
+the baseline profile at all. The blocker is not wrong about the code; it is a true statement about
+`flowchart_large_500` that was being read as a statement about frankenmermaid.
+
+The `arch_100x50` frame is the sharpest case. `FxHashSet<(usize, IrNodeId)>::insert` is the dedup set
+behind `add_node_to_cluster`/`add_node_to_subgraph`, and **no benchmark in this repo has ever routed
+through it at scale** — the only subgraph fixture, `flowchart_subgraph.mmd`, has four nodes. It is
+the same VOID predicate as the crossing-minimization rows, one scope out.
+
+`doc_build_40` is the second: at 40 small diagrams in a batch, the per-render fixed cost (theme
+`<style>` strip + minify) is ~34% of the profile once `memmove` is counted. The ledger already names
+this as "the top unmined frame … ~20% of SMALL non-flowchart renders" and bead `bd-dh1c` already
+proposes memoizing it. What was missing was never the idea; it was a workload where small
+non-flowchart renders are the thing being measured.
 
 ---
 
