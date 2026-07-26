@@ -429,3 +429,74 @@ would be wrong: a row that refutes a lever on a counted mechanism does not need 
 change the fact that no work was removed), and §7.3 found three rows at the head of this queue that
 are sound on a structural refutation alone. A gate that forced those rows to fabricate a null control
 would degrade the ledger, not protect it.
+
+---
+
+## 9. Correction to §7.5 — the re-run queue is one row, not two
+
+Written during the 2026-07-26 disk emergency, document-only. Reading both §7.5 candidates *in full*
+— which §7.5 had not done, having promoted them from the screen plus their verdict lines — overturns
+one of them. Recording it here rather than quietly dropping it, because the failure mode is the one
+this whole audit is about.
+
+### L8376 `trim_fast` extension — WITHDRAWN, it is VALID-MECHANISM
+
+§7.5 listed it on the strength of its verdict line, *"real but sub-threshold + noise-obscured"*. The
+full row carries a **"Why it's below the bar"** paragraph that refutes the lever structurally:
+
+> `id` is already `trim_ascii`'d by the fast edge/node parsers and the labels here have no boundary
+> whitespace, so `str::trim` is already a near-no-op (checks 1 char each end). The byte-vs-char
+> saving is ~2%, below the noise floor.
+
+That is a mechanism, and it is *quantified*. It also carries an explicit do-not-retry with a durable
+lesson (trims on already-trimmed inputs are near-free; only raw source lines are worth converting,
+which `a39648b` already did). Under this document's own §7.4 refinement the row is
+**VALID-MECHANISM (structural)** and should never have entered the queue. **My screen mis-filed it
+and §7.5 repeated the error.**
+
+The irony is exact: §7.3 warns that the regex is triage and that the head of the queue is the least
+void part of the population — and then §7.5 promoted a row on its verdict line without reading its
+mechanism paragraph. A screen is not a verdict *even when you wrote the screen*.
+
+### L5492 `build_smooth_path` capacity — stands, but NOT as originally written
+
+This one is a genuine VOID-NONULL: the A/B is unusable (box load swung 90→55 mid-run, producing an
+impossible **+266%** artifact, and 16x32 sign-flipped between orders). Nothing can be concluded from
+it in either direction.
+
+But the row also names a real trade-off that a naive re-run would walk straight back into:
+
+> most wide edges are short (n=2–3 points, orthogonal routing) and never regrew at `n*24` (a 2-point
+> path is ~32 bytes < 48), so `n*56` just OVER-ALLOCATES them with no benefit
+
+So **re-running the original `n*24 → n*56` would likely reproduce the wash**, and would burn a worker
+window to learn what the row already says. The row's own retry predicate is the design:
+
+> size per-edge from the actual point count (only bump when n>=4) and measure on a quiet box
+
+**Execution-ready handoff** for whoever holds the first window after the all-clear:
+
+- **Lever:** in `fm-render-svg::path::build_smooth_path`, size the `d` `String` conditionally —
+  keep `n*24` for `n < 4`, use `24 + (n-1)*56` for `n >= 4`. This is the shape already landed for
+  `build_smooth_path_by` (see the KEEP row *"cubic-only `d` capacity (n>=3 -> 24+(n-1)*56)"*), so it
+  is a port of an accepted design, not a new one.
+- **Why it is admissible:** capacity-only ⇒ byte-identical output; `with_capacity` never touches the
+  surplus, so over-reserving is free but *unnecessary* over-reserving still costs the allocator a
+  larger block — which is exactly the trade-off the original tripped over and the conditional avoids.
+- **Attribution to re-confirm first:** `__memmove_avx` at 7.11% render self. That figure predates the
+  edge-streaming wins; **re-profile before touching source** — a stale attribution is what voided
+  §7.3 rank 2.
+- **Gate:** instructions, not wall. A capacity change that removes a realloc+copy is work removal, so
+  it is in scope for the instruction gate (A/A null ±0.011% vs ±0.145% on wall — `bd-1buv.69`), and
+  wall is precisely what the original measurement could not resolve. Add the `flowchart_large_500`
+  negative control: it is orthogonally routed and short-edged, so it should sit inside the null.
+- **Byte-identity:** all 21 corpus items via `scripts/headtohead/run.mjs`, comparing `output_sha256`.
+- **Preflight:** `node scripts/ledger_preflight.mjs --lever "build_smooth_path d capacity per-edge point count" --frame build_smooth_path` — it will surface this row and its retry predicate. Satisfying that predicate (conditional sizing + quiet box) is the admission argument, and the new row must say so.
+
+### Revised yield
+
+| Metric | Count |
+|---|---:|
+| Genuine re-run candidates after full hand adjudication | **1** (L5492, redesigned) |
+| Withdrawn on full reading | 1 (L8376 → VALID-MECHANISM) |
+| Blocked on | a build; this repo is Lane L, and builds are halted fleet-wide (disk) |
