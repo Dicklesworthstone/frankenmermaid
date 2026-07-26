@@ -20,8 +20,9 @@
 //! therefore reports a **bootstrap 95% confidence interval on the null median**, and derives the **minimum
 //! decidable effect** for each configuration:
 //!
-//! > A claim of size `X` is decidable under configuration `C` iff `X` lies outside `C`'s null CI.
-//! > Equivalently: `min_decidable(C) = 1 + max(|ci_hi − 1|, |ci_lo − 1|)`.
+//! > A claim of size `X` is certifiable under configuration `C` iff its distance from `1.0` is at
+//! > least twice the null CI half-width.
+//! > Equivalently: `min_decidable_2x(C) = 1 + 2 * max(|ci_hi − 1|, |ci_lo − 1|)`.
 //!
 //! # The floor is per-function
 //!
@@ -56,6 +57,8 @@ use std::time::{Duration, Instant};
 /// SHA-256 of this executable, reported from inside the measured process. A hash computed by a shell step
 /// next to the run proves nothing about which ELF actually executed.
 fn self_identity() -> String {
+    use std::fmt::Write as _;
+
     let Ok(path) = std::env::current_exe() else {
         return "unavailable".to_string();
     };
@@ -64,7 +67,12 @@ fn self_identity() -> String {
     };
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
-    format!("{:x} ({} bytes)", hasher.finalize(), bytes.len())
+    let digest = hasher.finalize();
+    let mut sha256 = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(sha256, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    format!("{sha256} ({} bytes)", bytes.len())
 }
 
 /// Exact port of `scripts/headtohead/corpus.mjs::cyclic`: rings of `ring` nodes, each fully cyclic, with
@@ -311,7 +319,7 @@ fn main() {
         "null_median",
         "null 95% CI",
         "null_cv",
-        "min_decidable"
+        "min_decidable_2x"
     );
     let mut floors: Vec<(Arm, u64, u32, f64)> = Vec::new();
     for cfg in &configs {
@@ -324,7 +332,7 @@ fn main() {
         let variance: f64 =
             cfg.ratios.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / cfg.ratios.len() as f64;
         let cv_pct = (variance.sqrt() / mean) * 100.0;
-        // A claim of size X is decidable iff X lies outside the null CI.
+        // Certification requires the claim to clear the null-CI half-width by a 2x margin.
         let half = (hi - 1.0).abs().max((lo - 1.0).abs());
         floors.push((cfg.arm, cfg.min_sample_ms, cfg.min_of, half));
         println!(
@@ -333,7 +341,7 @@ fn main() {
             cfg.min_sample_ms,
             cfg.min_of,
             cfg.batch,
-            1.0 + half,
+            1.0 + 2.0 * half,
         );
     }
 
@@ -351,7 +359,7 @@ fn main() {
             // Cheapest = smallest total sample time, i.e. min_sample * min_of.
             let mut best: Option<(u64, u32)> = None;
             for (a, ms, mo, half) in &floors {
-                if *a == arm && target > 1.0 + *half {
+                if *a == arm && target >= 1.0 + 2.0 * *half {
                     let candidate = (*ms, *mo);
                     let cost = |c: (u64, u32)| c.0 * u64::from(c.1);
                     if best.is_none_or(|b| cost(candidate) < cost(b)) {
@@ -379,7 +387,9 @@ fn main() {
         "\nchecksum={checksum} rounds={ROUNDS} total_wall={:.1}s",
         wall.as_secs_f64()
     );
-    println!("A claim of size X is decidable under config C iff X lies OUTSIDE C's null 95% CI.");
+    println!(
+        "A claim is certifiable only when it clears the null 95% CI half-width by a 2x margin."
+    );
     println!(
         "The floor is PER-FUNCTION: read the row for the function you are about to benchmark."
     );

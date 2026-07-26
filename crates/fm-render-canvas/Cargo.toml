@@ -13,3 +13,6 @@ homepage.workspace = true
 [dependencies]
 fm-core.workspace = true
 fm-layout.workspace = true
+
+[dev-dependencies]
+sha2 = "0.11"

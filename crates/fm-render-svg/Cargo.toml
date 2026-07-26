@@ -22,3 +22,4 @@ memchr = "2"
 [dev-dependencies]
 fm-parser.workspace = true
 proptest = "1.6.0"
+sha2 = "0.11"

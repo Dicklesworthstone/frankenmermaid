@@ -18998,6 +18998,33 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
 
   Agent: cod (MagentaGull)
 
+### REJECT: dense-rank crossing stage is decisively slower on current SCC fixtures (2026-07-25)
+
+- **Campaign / bead:** `perf-campaign-20260725`, `bd-1buv.67`; cod /
+  HARNESS+FRONTIER (`CreamGorge`).
+- **Hypothesis:** remapping sparse rank keys to dense indices before crossing minimization would
+  replace ordered-map lookups cheaply enough to beat the direct `BTreeMap` lineage on cyclic
+  Sugiyama inputs.
+- **Contract:** one strict-remote invocation on worker `ovh-a`, 41 interleaved rounds, minimum of
+  three, bootstrap median 95% CIs, exact result parity. The process self-reported ELF SHA-256
+  `2439b3cad0ddd002ca7c697aa1d0ce6b21079b6c29038771dfa95705d2bd994c`
+  (909,752 bytes). CV and MAD were report-only.
+- **Result:** baseline/candidate speedup was **0.847x** with 95% CI
+  **[0.8467, 0.8491]** at SCC 100, **0.821x [0.8196, 0.8212]** at SCC 300, and
+  **0.793x [0.7925, 0.7936]** at SCC 800. Same-invocation A/A CIs were
+  **[0.9993, 1.0007]**, **[0.9994, 1.0030]**, and **[0.9994, 1.0016]**,
+  respectively. SCC 300's null CV was 5.54%, but its median CI was tight and the slowdown was
+  decisive; CV did not decide the row.
+- **Verdict:** **REJECT.** Dense rank is 15.3% to 20.7% slower on all three current SCC sizes.
+  No production edit existed to revert because both lineage arms remain bench internals. Full
+  evidence: `.benchmarks/bd-1buv.67_harness_resurrection.md`.
+- **Concrete retry predicate:** do not propose dense rank alone again on SCC graphs unless a
+  production change materially alters that arm and a profile-admitted non-SCC workload yields an
+  A/B 95% CI wholly above the mandatory 2x A/A null-CI threshold, while exact parity holds and SCC
+  100/300/800 do not regress.
+
+  Agent: cod (CreamGorge)
+
 ### REJECT x3: bd-1buv.2 pinned large-flowchart node-metadata micro sweep (2026-07-24)
 - **Profile first:** the current 5,642-sample, zero-loss full-pipeline profile put
   `render_nodes_serial` at 3.02%, the common node writer at 2.33%, the node element-id writer at

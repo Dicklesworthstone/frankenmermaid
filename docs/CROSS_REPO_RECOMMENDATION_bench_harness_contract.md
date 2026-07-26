@@ -47,6 +47,7 @@ artifact, and cannot be forgotten.
 
 ```rust
 use sha2::{Digest, Sha256};
+use std::fmt::Write as _;
 
 /// SHA-256 of this executable, reported from inside the measured process.
 fn self_identity() -> String {
@@ -54,7 +55,12 @@ fn self_identity() -> String {
     let Ok(bytes) = std::fs::read(&path) else { return "unavailable".into() };
     let mut h = Sha256::new();
     h.update(&bytes);
-    format!("{:x} ({} bytes) {}", h.finalize(), bytes.len(), path.display())
+    let digest = h.finalize();
+    let mut sha256 = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(sha256, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    format!("{sha256} ({} bytes) {}", bytes.len(), path.display())
 }
 
 fn main() {
@@ -63,7 +69,7 @@ fn main() {
 }
 ```
 
-`sha2 = "0.10"` as a **dev-dependency** only.
+`sha2 = "0.11"` as a **dev-dependency** only.
 
 ### Cost
 
@@ -165,7 +171,9 @@ The null control only helps if you know what its numbers *mean*. So calibrate it
 `min_sample ∈ {2, 10, 40} ms` × `min_of ∈ {1, 3}` inner replicates × **every function you bench**, **A/A only**,
 configurations interleaved round-robin (a *sequential* config sweep confounds the configuration with
 time-varying machine load — the same mistake arm-interleaving exists to prevent, one level up). Per config, take
-41 A/A ratios → median → a **bootstrap 95% CI on that median**, and derive `min_decidable = 1 + max(|ci −  1|)`.
+41 A/A ratios → median → a **bootstrap 95% CI on that median**. Let
+`half_width = max(|ci_hi − 1|, |ci_lo − 1|)` and derive the certification threshold
+`min_decidable_2x = 1 + 2·half_width`.
 
 ### Two results that will save you a week
 
@@ -201,10 +209,10 @@ and still sits near the floor — treat sub-1.05× wins here with suspicion rega
 is decidable on this hardware; do not claim it.** Sensible lane default: **`min_sample = 2 ms, min_of = 3`**
 (floor ≤ 1.012× for every function).
 
-**Gate rule to adopt:** report `cv`, but gate the claim on the null-median CI — *a claim of size X is decidable
-iff X lies outside the arm's A/A null 95% CI*, and prefer a 2× margin. Note whether the worker was quiet; `rch`
-cannot pin one, so quietness is luck, which is why the null must be emitted **in the same invocation** as the
-claim.
+**Gate rule to adopt:** report `cv`, but gate the claim on the null-median CI — *a claim of size X is
+certifiable only when its distance from 1.0 clears the arm's A/A null 95% CI half-width by a 2× margin*.
+Note whether the worker was quiet; `rch` cannot pin one, so quietness is luck, which is why the null must be
+emitted **in the same invocation** as the claim.
 
 ---
 
@@ -223,7 +231,7 @@ claim.
    run" and "at commit" is where a concurrent editor slips in; it cost us a KEEP row.
 7. **Calibrate the floor once per machine class and per function** (copy `harness_calibration.rs`): sweep
    `min_sample × min_of × arm`, interleaved round-robin, and read off the per-function published-settings table.
-   Then **gate on the null-median 95% CI** (claim decidable iff it lies outside the CI, 2× margin), not on `cv`.
+   Then **gate on the null-median 95% CI** (the claim must clear the CI half-width by a 2× margin), not on `cv`.
 8. **Profile-verify non-zero self-time** in the function under test before honoring or writing any REJECT.
 
 Steps 1–3 are the minimum viable contract. Steps 6–8 are what actually caught our errors.
@@ -273,8 +281,9 @@ alternating order, and reports the **median of per-round ratios**; `black_box` i
 checksum. (3) Call it twice — `paired(base, base)` then `paired(base, cand)` — so every run emits its own noise
 floor next to its claim (cost: 2× wall time). (4) Once per machine class, run a calibration sweep
 (`min_sample × min_of × function`, interleaved) to publish which config decides which effect size, and **gate the
-claim on the null-median 95% CI, never on `cv`** (`cv < 5` is unreachable on a shared, unpinnable fleet; the median
-is tight regardless). (5) Bracket every run with a source hash re-checked at commit time, and profile-verify
+claim on the null-median 95% CI at a mandatory 2× half-width margin, never on `cv`** (`cv < 5` is unreachable on
+a shared, unpinnable fleet; the median is tight regardless). (5) Bracket every run with a source hash re-checked
+at commit time, and profile-verify
 non-zero self-time before honoring any REJECT. Steps 1–3 are the minimum viable contract and cost an afternoon;
 4–5 are what actually caught the errors. **Recommendation: adopt 1–3 fleet-wide now; leave 4–5 per-repo until a
 shared abstraction is obvious. Do not centralize into a crate yet.** Reference implementation lives in this repo:

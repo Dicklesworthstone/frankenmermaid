@@ -12,10 +12,11 @@
 //!    single measured routine*.
 //!
 //! So this is a hand-rolled paired sampler. Each **round** times both arms back-to-back and emits one
-//! `(orig_ns, cand_ns)` pair; the statistic reported is the median of the **per-round ratios**, whose
-//! `cv` is computed over those ratios. Drift that is slow relative to a round cancels inside the pair.
-//! Round order alternates (`orig,cand` / `cand,orig`) so first-mover cache/branch-predictor bias cancels
-//! across rounds too.
+//! `(orig_ns, cand_ns)` pair; the statistic reported is the median of the **per-round ratios** with a
+//! bootstrap 95% CI. `cv` and MAD are report-only provenance: the verdict is gated against the A/A
+//! null-median CI at a mandatory 2× margin. Drift that is slow relative to a round cancels inside the
+//! pair. Round order alternates (`orig,cand` / `cand,orig`) so first-mover cache/branch-predictor bias
+//! cancels across rounds too.
 //!
 //! # Anti-DCE discipline
 //!
@@ -70,11 +71,27 @@ fn cyclic_scc_ir(node_count: usize, ring: usize) -> MermaidDiagramIr {
     ir
 }
 
-/// Which implementation an arm runs. Both are reachable from `bench_internals`.
+/// Historical-to-current implementation lineage. Keeping every arm in one executable lets the
+/// ledger-resurrection audit re-adjudicate the formerly VOID comparisons without cross-worker drift.
 #[derive(Clone, Copy)]
 enum Arm {
+    BTreeMap,
+    DenseRank,
+    SinglePass,
     FlatCsr,
     PackedCrossings,
+}
+
+impl Arm {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::BTreeMap => "btreemap",
+            Self::DenseRank => "dense_rank",
+            Self::SinglePass => "single_pass",
+            Self::FlatCsr => "flat_csr",
+            Self::PackedCrossings => "packed_crossings",
+        }
+    }
 }
 
 /// Time `batch` invocations of one arm, feeding inputs and results through `black_box`. Returns
@@ -90,6 +107,21 @@ fn time_arm(
     let start = Instant::now();
     for _ in 0..batch {
         let (crossings, ordering) = match arm {
+            Arm::BTreeMap => bench_internals::crossing_minimization_btreemap(
+                black_box(ir),
+                black_box(ranks),
+                black_box(config),
+            ),
+            Arm::DenseRank => bench_internals::crossing_minimization_dense_rank(
+                black_box(ir),
+                black_box(ranks),
+                black_box(config),
+            ),
+            Arm::SinglePass => bench_internals::crossing_minimization_single_pass(
+                black_box(ir),
+                black_box(ranks),
+                black_box(config),
+            ),
             Arm::FlatCsr => bench_internals::crossing_minimization_flat_csr(
                 black_box(ir),
                 black_box(ranks),
@@ -114,9 +146,10 @@ fn time_arm(
     (per, checksum)
 }
 
-/// Smallest `batch` whose single timing spans at least this long. A sample shorter than a few timer
-/// interrupts measures the kernel, not the sweep.
-const MIN_SAMPLE: Duration = Duration::from_millis(200);
+/// Calibrated lane default: short samples plus three back-to-back replicates produce a tighter
+/// null-median CI than long samples on shared workers. `cv` is not a gate.
+const MIN_SAMPLE: Duration = Duration::from_millis(2);
+const MIN_OF: u32 = 3;
 
 /// Size the batch from the **faster** arm.
 ///
@@ -124,10 +157,18 @@ const MIN_SAMPLE: Duration = Duration::from_millis(200);
 /// would be dominated by timer
 /// noise on the fast arm and read 5.8–13.4%. Both arms share one `batch`, so it must be chosen such
 /// that the SHORTER of the two samples clears the floor; the slower arm then clears it a fortiori.
-fn calibrate(ir: &MermaidDiagramIr, ranks: &BTreeMap<usize, usize>, config: &LayoutConfig) -> u32 {
-    let (per_ns, _) = time_arm(Arm::PackedCrossings, ir, ranks, config, 1);
+fn calibrate(
+    arm_a: Arm,
+    arm_b: Arm,
+    ir: &MermaidDiagramIr,
+    ranks: &BTreeMap<usize, usize>,
+    config: &LayoutConfig,
+) -> u32 {
+    let (a_ns, _) = time_arm(arm_a, ir, ranks, config, 1);
+    let (b_ns, _) = time_arm(arm_b, ir, ranks, config, 1);
+    let faster_ns = a_ns.min(b_ns);
     let target = u64::try_from(MIN_SAMPLE.as_nanos()).unwrap_or(2_000_000);
-    u32::try_from(target / per_ns.max(1)).unwrap_or(1).max(1)
+    u32::try_from(target / faster_ns.max(1)).unwrap_or(1).max(1)
 }
 
 fn median(values: &mut [f64]) -> f64 {
@@ -140,6 +181,53 @@ fn median(values: &mut [f64]) -> f64 {
     }
 }
 
+/// Percentile-bootstrap 95% CI on the median of `ratios`. The deterministic xorshift makes the
+/// reported interval reproducible from the same samples.
+fn bootstrap_median_ci(ratios: &[f64]) -> (f64, f64) {
+    const RESAMPLES: usize = 2_000;
+    let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let mut medians = Vec::with_capacity(RESAMPLES);
+    let mut sample = vec![0.0_f64; ratios.len()];
+    for _ in 0..RESAMPLES {
+        for slot in &mut sample {
+            let index = usize::try_from(next() >> 33).unwrap_or(0) % ratios.len();
+            *slot = ratios[index];
+        }
+        medians.push(median(&mut sample));
+    }
+    medians.sort_by(f64::total_cmp);
+    (
+        medians[RESAMPLES / 40],
+        medians[RESAMPLES - 1 - RESAMPLES / 40],
+    )
+}
+
+/// Minimum of `replicates` back-to-back timings. Shared-worker scheduling noise is one-sided, so
+/// the minimum is the best estimate of the unpreempted cost.
+fn time_arm_min(
+    arm: Arm,
+    ir: &MermaidDiagramIr,
+    ranks: &BTreeMap<usize, usize>,
+    config: &LayoutConfig,
+    batch: u32,
+    replicates: u32,
+) -> (u64, u64) {
+    let mut best = u64::MAX;
+    let mut checksum = 0_u64;
+    for _ in 0..replicates.max(1) {
+        let (ns, arm_checksum) = time_arm(arm, ir, ranks, config, batch);
+        best = best.min(ns);
+        checksum = checksum.wrapping_add(arm_checksum);
+    }
+    (best, checksum)
+}
+
 /// Profile one arm in isolation from the exact same executable used for the paired A/B. This mode is
 /// never used for the timing verdict; it exists solely for the ledger-integrity requirement that each
 /// arm show non-zero self-time in the function under test.
@@ -150,7 +238,15 @@ fn profile_arm_if_requested() -> bool {
     let arm = match requested.as_str() {
         "orig" => Arm::FlatCsr,
         "cand" => Arm::PackedCrossings,
-        _ => panic!("FM_BARYCENTER_PROFILE_ARM must be 'orig' or 'cand'"),
+        "btreemap" => Arm::BTreeMap,
+        "dense_rank" => Arm::DenseRank,
+        "single_pass" => Arm::SinglePass,
+        "flat_csr" => Arm::FlatCsr,
+        "packed_crossings" => Arm::PackedCrossings,
+        _ => panic!(
+            "FM_BARYCENTER_PROFILE_ARM must be orig, cand, btreemap, dense_rank, \
+             single_pass, flat_csr, or packed_crossings"
+        ),
     };
     let iterations = env::var("FM_BARYCENTER_PROFILE_ITERS")
         .ok()
@@ -161,7 +257,8 @@ fn profile_arm_if_requested() -> bool {
     let ranks = bench_internals::prepare_ranks(&ir, &config);
     let (per_ns, checksum) = time_arm(arm, &ir, &ranks, &config, iterations);
     println!(
-        "profile_arm={requested} nodes={} edges={} iterations={iterations} per_ns={per_ns} checksum={checksum}",
+        "profile_arm={} nodes={} edges={} iterations={iterations} per_ns={per_ns} checksum={checksum}",
+        arm.name(),
         ir.nodes.len(),
         ir.edges.len(),
     );
@@ -171,6 +268,8 @@ fn profile_arm_if_requested() -> bool {
 /// SHA-256 of this executable, reported from inside the measured process. Certification records the
 /// binary identity; computing it in a separate shell step could not prove it was the ELF that ran.
 fn self_identity() -> String {
+    use std::fmt::Write as _;
+
     let Ok(path) = env::current_exe() else {
         return "unavailable".to_string();
     };
@@ -179,12 +278,12 @@ fn self_identity() -> String {
     };
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
-    format!(
-        "{:x} ({} bytes) {}",
-        hasher.finalize(),
-        bytes.len(),
-        path.display()
-    )
+    let digest = hasher.finalize();
+    let mut sha256 = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(sha256, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    format!("{} ({} bytes) {}", sha256, bytes.len(), path.display())
 }
 
 /// One micro-interleaved paired round. Every iteration times one invocation of each arm, and both the
@@ -205,13 +304,13 @@ fn paired_round(
     for iteration in 0..batch.max(1) {
         let iteration_a_first = (iteration.is_multiple_of(2)) == a_first;
         let (a_ns, b_ns) = if iteration_a_first {
-            let (a, c1) = time_arm(arm_a, ir, ranks, config, 1);
-            let (b, c2) = time_arm(arm_b, ir, ranks, config, 1);
+            let (a, c1) = time_arm_min(arm_a, ir, ranks, config, 1, MIN_OF);
+            let (b, c2) = time_arm_min(arm_b, ir, ranks, config, 1, MIN_OF);
             checksum = checksum.wrapping_add(c1).wrapping_add(c2);
             (a, b)
         } else {
-            let (b, c2) = time_arm(arm_b, ir, ranks, config, 1);
-            let (a, c1) = time_arm(arm_a, ir, ranks, config, 1);
+            let (b, c2) = time_arm_min(arm_b, ir, ranks, config, 1, MIN_OF);
+            let (a, c1) = time_arm_min(arm_a, ir, ranks, config, 1, MIN_OF);
             checksum = checksum.wrapping_add(c1).wrapping_add(c2);
             (a, b)
         };
@@ -226,9 +325,19 @@ fn paired_round(
     )
 }
 
+struct PairedStats {
+    a_p50_ns: f64,
+    b_p50_ns: f64,
+    ratio_p50: f64,
+    ratio_ci: (f64, f64),
+    cv_pct: f64,
+    mad_pct: f64,
+    checksum: u64,
+}
+
 /// One paired measurement: `ROUNDS` rounds, each micro-interleaving `arm_a` and `arm_b` per invocation.
-/// Returns `(p50_a_ns, p50_b_ns, ratio_p50, cv_pct, mad_pct, checksum)` where `ratio = a / b` and
-/// `cv` is taken over the **per-round ratios** — the quantity being claimed.
+/// `ratio = a / b`; the claim is the median of per-round ratios and its bootstrap CI. `cv` and MAD
+/// are retained only as provenance.
 ///
 /// Passing the SAME arm twice makes this an **A/A null control**: it measures the harness's own noise
 /// floor. Any "win" smaller than the null control's departure from 1.000 is indistinguishable from noise,
@@ -241,7 +350,7 @@ fn paired(
     config: &LayoutConfig,
     batch: u32,
     rounds: usize,
-) -> (f64, f64, f64, f64, f64, u64) {
+) -> PairedStats {
     let mut checksum: u64 = 0;
     let mut a_samples = Vec::with_capacity(rounds);
     let mut b_samples = Vec::with_capacity(rounds);
@@ -261,16 +370,38 @@ fn paired(
         b_samples.push(b_ns as f64);
         ratios.push(a_ns as f64 / b_ns.max(1) as f64);
     }
-    let a_p50 = median(&mut a_samples.clone());
-    let b_p50 = median(&mut b_samples.clone());
+    let a_p50 = median(&mut a_samples);
+    let b_p50 = median(&mut b_samples);
     let ratio_p50 = median(&mut ratios.clone());
+    let ratio_ci = bootstrap_median_ci(&ratios);
     let mean: f64 = ratios.iter().sum::<f64>() / ratios.len() as f64;
     let variance: f64 =
         ratios.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / ratios.len() as f64;
     let cv_pct = (variance.sqrt() / mean) * 100.0;
     let mut deviations: Vec<f64> = ratios.iter().map(|r| (r - ratio_p50).abs()).collect();
     let mad_pct = (median(&mut deviations) / ratio_p50) * 100.0;
-    (a_p50, b_p50, ratio_p50, cv_pct, mad_pct, checksum)
+    PairedStats {
+        a_p50_ns: a_p50,
+        b_p50_ns: b_p50,
+        ratio_p50,
+        ratio_ci,
+        cv_pct,
+        mad_pct,
+        checksum,
+    }
+}
+
+/// A claim is certifiable only when its distance from 1.0 clears the A/A null CI half-width by
+/// at least 2×. The returned margin is reportable even for an indeterminate result.
+fn clears_null_ci_at_two_x(null_ci: (f64, f64), claim: f64) -> (bool, f64) {
+    let half_width = (null_ci.0 - 1.0).abs().max((null_ci.1 - 1.0).abs());
+    let distance = (claim - 1.0).abs();
+    let margin = if half_width > 0.0 {
+        distance / half_width
+    } else {
+        f64::INFINITY
+    };
+    (distance >= 2.0 * half_width, margin)
 }
 
 fn main() {
@@ -285,17 +416,29 @@ fn main() {
 
     let config = LayoutConfig::default();
     println!(
-        "{:<16} {:>6} {:>6} {:>11} {:>8} {:>8}  {:>11} {:>8} {:>8}",
+        "{:<17} {:<16} {:>6} {:>6} {:>11} {:>19} {:>11} {:>19} {:>9} {:>15}",
+        "comparison",
         "case",
         "nodes",
         "edges",
         "NULL a/a",
-        "null_cv",
-        "null_mad",
+        "null 95% CI",
         "A/B ratio",
-        "cv_pct",
-        "mad_pct"
+        "A/B 95% CI",
+        "CI margin",
+        "verdict"
     );
+
+    // Five ledger-resurrection comparisons. The first directly re-runs the 2026-06-26 VOID
+    // adjacency hypothesis against the historical BTreeMap implementation; the remaining four
+    // isolate each production stage in the lineage so every claimed increment gets its own null.
+    let comparisons = [
+        ("void_adjacency", Arm::BTreeMap, Arm::FlatCsr),
+        ("dense_rank", Arm::BTreeMap, Arm::DenseRank),
+        ("single_pass", Arm::DenseRank, Arm::SinglePass),
+        ("flat_csr", Arm::SinglePass, Arm::FlatCsr),
+        ("packed_crossings", Arm::FlatCsr, Arm::PackedCrossings),
+    ];
 
     for (label, node_count, ring) in [
         ("cyclic_scc_100", 100_usize, 5_usize),
@@ -304,60 +447,88 @@ fn main() {
     ] {
         let ir = cyclic_scc_ir(node_count, ring);
         let ranks = bench_internals::prepare_ranks(&ir, &config);
-        let orig = bench_internals::crossing_minimization_flat_csr(&ir, &ranks, &config);
-        let candidate =
-            bench_internals::crossing_minimization_packed_crossings(&ir, &ranks, &config);
-        assert_eq!(
-            orig, candidate,
-            "packed crossing counter changed ordering for {label}"
-        );
-        let batch = calibrate(&ir, &ranks, &config);
-
-        let mut checksum: u64 = 0;
-        for _ in 0..WARMUP {
-            let (_, c1) = time_arm(Arm::FlatCsr, &ir, &ranks, &config, batch);
-            let (_, c2) = time_arm(Arm::PackedCrossings, &ir, &ranks, &config, batch);
-            checksum = checksum.wrapping_add(c1).wrapping_add(c2);
-        }
-
-        // NULL CONTROL first: the identical arm against itself, same interleaved routine, same batch.
-        // This is the harness's noise floor. A ratio far from 1.000, or a loose cv, means the harness
-        // is not fit to decide the lever -- fix the harness before drawing any conclusion.
-        let (_, _, null_ratio, null_cv, null_mad, c_null) = paired(
-            Arm::FlatCsr,
-            Arm::FlatCsr,
-            &ir,
-            &ranks,
-            &config,
-            batch,
-            ROUNDS,
-        );
-        // The real A/B, measured by the same routine.
-        let (flat_p50, packed_p50, ratio, cv_pct, mad_pct, c_ab) = paired(
+        let expected = bench_internals::crossing_minimization_btreemap(&ir, &ranks, &config);
+        for arm in [
+            Arm::DenseRank,
+            Arm::SinglePass,
             Arm::FlatCsr,
             Arm::PackedCrossings,
-            &ir,
-            &ranks,
-            &config,
-            batch,
-            ROUNDS,
-        );
-        checksum = checksum.wrapping_add(c_null).wrapping_add(c_ab);
+        ] {
+            assert_eq!(
+                expected,
+                match arm {
+                    Arm::DenseRank => {
+                        bench_internals::crossing_minimization_dense_rank(&ir, &ranks, &config)
+                    }
+                    Arm::SinglePass => {
+                        bench_internals::crossing_minimization_single_pass(&ir, &ranks, &config)
+                    }
+                    Arm::FlatCsr => {
+                        bench_internals::crossing_minimization_flat_csr(&ir, &ranks, &config)
+                    }
+                    Arm::PackedCrossings => {
+                        bench_internals::crossing_minimization_packed_crossings(
+                            &ir, &ranks, &config,
+                        )
+                    }
+                    Arm::BTreeMap => unreachable!("BTreeMap is the expected reference"),
+                },
+                "{} changed ordering for {label}",
+                arm.name(),
+            );
+        }
 
-        println!(
-            "{label:<16} {:>6} {:>6} {:>10.4}x {:>8.2} {:>8.2}  {:>10.3}x {:>8.2} {:>8.2}",
-            ir.nodes.len(),
-            ir.edges.len(),
-            null_ratio,
-            null_cv,
-            null_mad,
-            ratio,
-            cv_pct,
-            mad_pct,
-        );
-        println!(
-            "                 flat_p50={flat_p50:.1}ns packed_p50={packed_p50:.1}ns \
-checksum={checksum} batch={batch} rounds={ROUNDS}"
-        );
+        for (comparison, arm_a, arm_b) in comparisons {
+            let batch = calibrate(arm_a, arm_b, &ir, &ranks, &config);
+            let mut checksum: u64 = 0;
+            for _ in 0..WARMUP {
+                let (_, c1) = time_arm_min(arm_a, &ir, &ranks, &config, batch, MIN_OF);
+                let (_, c2) = time_arm_min(arm_b, &ir, &ranks, &config, batch, MIN_OF);
+                checksum = checksum.wrapping_add(c1).wrapping_add(c2);
+            }
+
+            // NULL CONTROL first: the identical baseline arm against itself, same routine and batch.
+            // CV and MAD are printed but never gate the verdict.
+            let null = paired(arm_a, arm_a, &ir, &ranks, &config, batch, ROUNDS);
+            let real = paired(arm_a, arm_b, &ir, &ranks, &config, batch, ROUNDS);
+            checksum = checksum
+                .wrapping_add(null.checksum)
+                .wrapping_add(real.checksum);
+            let (decidable, ci_margin) = clears_null_ci_at_two_x(null.ratio_ci, real.ratio_p50);
+            let verdict = if !decidable {
+                "INDETERMINATE"
+            } else if real.ratio_p50 > 1.0 {
+                "CAND_FASTER"
+            } else {
+                "CAND_SLOWER"
+            };
+
+            println!(
+                "{comparison:<17} {label:<16} {:>6} {:>6} {:>10.4}x \
+[{:>7.4},{:>7.4}] {:>10.3}x [{:>7.4},{:>7.4}] {:>8.2}x {verdict:>15}",
+                ir.nodes.len(),
+                ir.edges.len(),
+                null.ratio_p50,
+                null.ratio_ci.0,
+                null.ratio_ci.1,
+                real.ratio_p50,
+                real.ratio_ci.0,
+                real.ratio_ci.1,
+                ci_margin,
+            );
+            println!(
+                "  arms={}/{} a_p50={:.1}ns b_p50={:.1}ns null_cv={:.2}% null_mad={:.2}% \
+ab_cv={:.2}% ab_mad={:.2}% checksum={checksum} batch={batch} min_of={MIN_OF} \
+rounds={ROUNDS}",
+                arm_a.name(),
+                arm_b.name(),
+                real.a_p50_ns,
+                real.b_p50_ns,
+                null.cv_pct,
+                null.mad_pct,
+                real.cv_pct,
+                real.mad_pct,
+            );
+        }
     }
 }

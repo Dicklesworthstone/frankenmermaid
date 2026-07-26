@@ -697,6 +697,7 @@ version = "0.2.0"
 dependencies = [
  "fm-core",
  "fm-layout",
+ "sha2",
 ]
 
 [[package]]
@@ -709,6 +710,7 @@ dependencies = [
  "memchr",
  "proptest",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

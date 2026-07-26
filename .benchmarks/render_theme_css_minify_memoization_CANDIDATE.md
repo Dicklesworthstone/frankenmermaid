@@ -1,4 +1,4 @@
-# CANDIDATE (not yet attempted): memoize/pre-minify the invariant theme `<style>` CSS (2026-07-23)
+# WIN: feature-keyed memo of the transformed theme `<style>` CSS (2026-07-25)
 
 Agent: CopperCliff (cc). Profiling analysis, NOT a measured reject — logged as a precise target.
 
@@ -144,3 +144,60 @@ architectural effort, NOT a safe micro-lever — the bd-1buv small-non-flowchart
 elides one `<marker >` re-scan, but it is only ~1–2% and threading owned marker ids across two
 `&mut String` passes (the rebuild invalidates `&str` borrows) is fiddly — below the ≥3% KEEP floor on
 its own. Fold it into option 1/2 if that work happens, don't ship standalone.
+
+## IMPLEMENTED + KEPT (2026-07-25, cod/CreamGorge)
+
+The focused architectural predicate above is now satisfied. The implementation caches only the
+**transformed `<style>` content**, keyed by:
+
+- the exact raw CSS bytes (full equality, not hash-only);
+- the exact state/accent and body `var(--fm-accent-N)` masks observed by the existing scanners; and
+- the exact live built-in marker mask returned by marker pruning.
+
+This key excludes labels and geometry, so it hits across distinct diagrams and label-only edits while
+remaining output-equivalent to replaying the current strip/minify passes. The cache is thread-local and
+bounded to 32 entries. A future/custom or malformed marker identity bypasses it and takes the legacy
+passes; outputs above the standing 100 KB post-pass cap are unchanged.
+
+### Profile attribution
+
+The non-LTO symbolized `doc_build_40` profile admitted this vein: `render_svg_with_layout` was
+**20.02% self**, `memchr::memmem::Finder::find_impl` in the theme-CSS post-passes was **9.00% self**,
+and the associated memmove brought the fixed strip/minify block to roughly 34% of the profile.
+The exact profiling record is `.benchmarks/bd_1buv_68_workload_class_profiles.md`.
+
+### Correctness
+
+- Exact pinned workload input SHA-256:
+  `8badedbf69bc204d952af1ba780c07569b7eb1091ff5d0fdd400dd2e3f6b59d7`.
+- The release A/B asserted all 40 candidate SVGs byte-equal to the uncached reference before timing.
+- A permanent matrix compared cache miss and cache hit with the uncached path across the 40-document
+  corpus plus dynamic class/style CSS, special shapes/clusters, dotted markers, and an edgeless pie,
+  under all four theme presets, effects/animation/print CSS, and the scene backend: **264/264 exact**.
+- A dedicated unknown-marker test proves the conservative bypass matches the legacy path.
+
+### Same-binary gate (`ovh-a`, strict remote)
+
+The candidate cache is cleared at the start of **every** timed 40-document batch, so the result models
+one cold docs build and cannot borrow warm state from an earlier benchmark sample. Each timing is the
+minimum of three back-to-back full-pipeline runs; 41 rounds are interleaved in one invocation.
+
+- Self-reported ELF SHA-256:
+  `85a81ad5c196a27ed56503ca7756c6a68e4de2fa74ef7a30c4cab8624dbad786`
+  (10,931,720 bytes).
+- A/A baseline/baseline speedup median **0.991926**, bootstrap 95% CI
+  **[0.988105, 1.000418]**.
+- A/B baseline/candidate speedup median **1.306114**, bootstrap 95% CI
+  **[1.302648, 1.318433]**.
+- Mandatory threshold was `max(1.03, 1 + 2×null-CI-radius)` = **1.030000**; the A/B lower
+  bound cleared it by 27.26 percentage points.
+- CV was report-only: baseline 3.27%, candidate 3.36%. It neither decided nor rescued the row.
+
+**Verdict: KEEP.** The exact cold-batch workload is **30.61% faster** at the median and its entire
+95% CI is beyond the mandatory null-CI threshold.
+
+**Retry / re-check predicate:** re-run this same cold-per-batch A/A+A/B only if a change adds a new
+marker identity, changes any of `strip_unused_state_css` / `strip_dead_marker_css` /
+`minify_style_block`, changes the 100 KB cap, or makes the cache exceed 32 distinct keys in a
+representative docs build. Disable/revert the cache only if the candidate 95% CI crosses the
+mandatory 2× null threshold or any cached-vs-uncached byte comparison fails.

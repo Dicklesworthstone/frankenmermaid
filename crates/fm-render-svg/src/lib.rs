@@ -36,6 +36,7 @@ pub use transform::{Transform, TransformBuilder};
 
 use std::{
     borrow::Cow,
+    cell::RefCell,
     collections::{BTreeMap, HashMap},
     sync::OnceLock,
 };
@@ -322,6 +323,15 @@ pub fn render_svg_with_layout(
     layout: &DiagramLayout,
     config: &SvgRenderConfig,
 ) -> String {
+    render_svg_with_layout_impl(ir, layout, config, true)
+}
+
+fn render_svg_with_layout_impl(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    config: &SvgRenderConfig,
+    use_post_pass_cache: bool,
+) -> String {
     let mut svg = match config.backend {
         SvgBackend::LegacyLayout => render_layout_to_svg(layout, ir, config),
         SvgBackend::Scene => {
@@ -329,20 +339,7 @@ pub fn render_svg_with_layout(
             render_scene_document_with_ir(&scene, config, Some(ir))
         }
     };
-    strip_unused_state_css(&mut svg);
-    // The output post-passes below (marker-def strip, dead-marker-CSS prune, CSS minify) each walk
-    // the SVG and rebuild a buffer. On a SMALL/MEDIUM diagram that is cheap and the byte win is a
-    // meaningful fraction (the fixed CSS + the 12-marker set dominate small output). On a LARGE
-    // render the output saving is <0.5% (the geometry dominates) while the rebuilds add measurable
-    // render time — a measured net-negative (render_svg/large_500 regressed ~+37% with them on). Cap
-    // the work to the size range where the win clears the cost, exactly like `strip_unused_state_css`
-    // (which self-guards at the same threshold). No golden exceeds this cap, so output is unchanged
-    // for every checked-in case.
-    if svg.len() <= POST_PASS_MAX_SVG_BYTES {
-        strip_unused_markers(&mut svg);
-        strip_dead_marker_css(&mut svg);
-        minify_style_block(&mut svg);
-    }
+    apply_output_post_passes(&mut svg, use_post_pass_cache);
     svg
 }
 
@@ -500,12 +497,12 @@ fn scan_accent_var_refs(svg: &str) -> [bool; 9] {
 /// construction: any referenced or future marker is kept; a CSS/markup drift can only leave a dead
 /// def in place, never strip a live one. Single O(n) rebuild (no per-marker rescans), so it adds
 /// no large-render cost — and large flowcharts already emit a minimal marker set (nothing to strip).
-fn strip_unused_markers(svg: &mut String) {
+fn strip_unused_markers(svg: &mut String) -> Option<u16> {
     // Multi-byte needles searched in tight loops (once per `url(#…)` ref / `<marker>` def): build each
     // SIMD `Finder` ONCE and reuse it, instead of `str::find` rebuilding a `TwoWaySearcher` per call.
     let marker_finder = memchr::memmem::Finder::new(b"<marker ");
     if marker_finder.find(svg.as_bytes()).is_none() {
-        return;
+        return Some(0);
     }
     let url_finder = memchr::memmem::Finder::new(b"url(#");
     // 1. Collect every id referenced via `url(#id)` (marker assignments live only here).
@@ -525,10 +522,13 @@ fn strip_unused_markers(svg: &mut String) {
     let endmarker_finder = memchr::memmem::Finder::new(b"</marker>");
     let id_finder = memchr::memmem::Finder::new(b"id=\"");
     let mut dead_spans: Vec<(usize, usize)> = Vec::new();
+    let mut live_mask = 0u16;
+    let mut cacheable = true;
     let mut at = 0;
     while let Some(rel) = marker_finder.find(&svg.as_bytes()[at..]) {
         let m_start = at + rel;
         let Some(end_rel) = endmarker_finder.find(&svg.as_bytes()[m_start..]) else {
+            cacheable = false;
             break;
         };
         let m_end = m_start + end_rel + "</marker>".len();
@@ -541,13 +541,23 @@ fn strip_unused_markers(svg: &mut String) {
                 let id = &svg[id_start..id_start + idclose];
                 if !referenced.contains(id) {
                     dead_spans.push((m_start, m_end));
+                } else if let Some(bit) = marker_id_bit(id) {
+                    live_mask |= bit;
+                } else {
+                    // A future/custom marker can still take the exact legacy passes. It is excluded
+                    // from the cache until its identity is represented in the bounded key.
+                    cacheable = false;
                 }
+            } else {
+                cacheable = false;
             }
+        } else {
+            cacheable = false;
         }
         at = m_end;
     }
     if dead_spans.is_empty() {
-        return;
+        return cacheable.then_some(live_mask);
     }
     // 3. Rebuild once, skipping the dead spans (O(n), no repeated tail-shifts).
     let mut out = String::with_capacity(svg.len());
@@ -558,6 +568,27 @@ fn strip_unused_markers(svg: &mut String) {
     }
     out.push_str(&svg[cursor..]);
     *svg = out;
+    cacheable.then_some(live_mask)
+}
+
+fn marker_id_bit(id: &str) -> Option<u16> {
+    const IDS: [&str; 12] = [
+        "arrow-end",
+        "arrow-filled",
+        "arrow-open",
+        "arrow-half-top",
+        "arrow-half-bottom",
+        "arrow-stick-top",
+        "arrow-stick-bottom",
+        "arrow-start",
+        "arrow-start-filled",
+        "arrow-circle",
+        "arrow-cross",
+        "arrow-diamond",
+    ];
+    IDS.iter()
+        .position(|candidate| *candidate == id)
+        .map(|index| 1u16 << index)
 }
 
 /// Companion to [`strip_unused_markers`]: prune `marker#arrow-*` selectors from the theme CSS once
@@ -735,6 +766,175 @@ fn minify_css(css: &str) -> String {
     // A pure whitespace transformation over valid UTF-8 input is always valid UTF-8; the fallback
     // is defensive only.
     String::from_utf8(out).unwrap_or_else(|_| css.to_string())
+}
+
+const CSS_POST_PASS_CACHE_CAPACITY: usize = 32;
+
+struct CssPostPassCacheEntry {
+    raw_css: Box<str>,
+    state_used: bool,
+    accent_mask: u16,
+    body_var_mask: u16,
+    live_marker_mask: u16,
+    processed_css: Box<str>,
+}
+
+thread_local! {
+    /// A render thread usually sees only a handful of theme/config/feature combinations. Keep the
+    /// cache thread-local so the hot path needs no lock, and bound it so custom themes cannot grow
+    /// process memory without limit.
+    static CSS_POST_PASS_CACHE: RefCell<Vec<CssPostPassCacheEntry>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+fn style_content_bounds(svg: &str) -> Option<(usize, usize)> {
+    let open = memchr::memmem::find(svg.as_bytes(), b"<style")?;
+    let gt = memchr::memchr(b'>', &svg.as_bytes()[open..])?;
+    let content_start = open + gt + 1;
+    let end = memchr::memmem::find(&svg.as_bytes()[content_start..], b"</style>")?;
+    Some((content_start, content_start + end))
+}
+
+fn bool_mask(flags: &[bool]) -> u16 {
+    flags.iter().enumerate().fold(0u16, |mask, (index, used)| {
+        mask | (u16::from(*used) << index)
+    })
+}
+
+fn css_post_pass_observation(svg: &str) -> Option<(usize, usize, bool, u16, u16)> {
+    let (content_start, content_end) = style_content_bounds(svg)?;
+    let body_start = content_end + "</style>".len();
+    let body = svg.get(body_start..)?;
+    let (state_used, accent_used) = scan_body_fm_node_classes(body);
+    let body_var_used = scan_accent_var_refs(body);
+    Some((
+        content_start,
+        content_end,
+        state_used,
+        bool_mask(&accent_used),
+        bool_mask(&body_var_used),
+    ))
+}
+
+fn cached_processed_css(
+    raw_css: &str,
+    state_used: bool,
+    accent_mask: u16,
+    body_var_mask: u16,
+    live_marker_mask: u16,
+) -> Option<String> {
+    CSS_POST_PASS_CACHE.with(|cache| {
+        cache
+            .borrow()
+            .iter()
+            .rev()
+            .find(|entry| {
+                entry.state_used == state_used
+                    && entry.accent_mask == accent_mask
+                    && entry.body_var_mask == body_var_mask
+                    && entry.live_marker_mask == live_marker_mask
+                    && entry.raw_css.as_ref() == raw_css
+            })
+            .map(|entry| entry.processed_css.to_string())
+    })
+}
+
+fn cache_processed_css(
+    raw_css: String,
+    state_used: bool,
+    accent_mask: u16,
+    body_var_mask: u16,
+    live_marker_mask: u16,
+    processed_css: String,
+) {
+    CSS_POST_PASS_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() == CSS_POST_PASS_CACHE_CAPACITY {
+            cache.remove(0);
+        }
+        cache.push(CssPostPassCacheEntry {
+            raw_css: raw_css.into_boxed_str(),
+            state_used,
+            accent_mask,
+            body_var_mask,
+            live_marker_mask,
+            processed_css: processed_css.into_boxed_str(),
+        });
+    });
+}
+
+#[cfg(test)]
+fn clear_css_post_pass_cache() {
+    CSS_POST_PASS_CACHE.with(|cache| cache.borrow_mut().clear());
+}
+
+/// Apply the output-size post-passes, memoizing the exact transformed stylesheet for the bounded
+/// `(raw CSS, body state/accent usage, live markers)` feature key. The key is deliberately derived
+/// with the same scanners as the legacy passes; label text and geometry are absent, so separate
+/// diagrams and label-only edits can hit without risking stale CSS. Any unknown marker identity
+/// takes the legacy path.
+fn apply_output_post_passes(svg: &mut String, use_cache: bool) {
+    if !use_cache {
+        strip_unused_state_css(svg);
+        if svg.len() <= POST_PASS_MAX_SVG_BYTES {
+            let _ = strip_unused_markers(svg);
+            strip_dead_marker_css(svg);
+            minify_style_block(svg);
+        }
+        return;
+    }
+
+    // Preserve the exact large-output behavior: state stripping self-gates at this threshold and
+    // the other three passes do not run.
+    if svg.len() > POST_PASS_MAX_SVG_BYTES {
+        strip_unused_state_css(svg);
+        return;
+    }
+
+    // Marker pruning changes only <defs>; doing it first exposes the live-marker feature mask while
+    // leaving the raw stylesheet and every state/accent body observation unchanged.
+    let live_marker_mask = strip_unused_markers(svg);
+    let Some((content_start, content_end, state_used, accent_mask, body_var_mask)) =
+        css_post_pass_observation(svg)
+    else {
+        strip_unused_state_css(svg);
+        strip_dead_marker_css(svg);
+        minify_style_block(svg);
+        return;
+    };
+    let Some(live_marker_mask) = live_marker_mask else {
+        strip_unused_state_css(svg);
+        strip_dead_marker_css(svg);
+        minify_style_block(svg);
+        return;
+    };
+
+    if let Some(processed_css) = cached_processed_css(
+        &svg[content_start..content_end],
+        state_used,
+        accent_mask,
+        body_var_mask,
+        live_marker_mask,
+    ) {
+        svg.replace_range(content_start..content_end, &processed_css);
+        return;
+    }
+
+    let raw_css = svg[content_start..content_end].to_string();
+    strip_unused_state_css(svg);
+    strip_dead_marker_css(svg);
+    minify_style_block(svg);
+    let Some((processed_start, processed_end)) = style_content_bounds(svg) else {
+        return;
+    };
+    cache_processed_css(
+        raw_css,
+        state_used,
+        accent_mask,
+        body_var_mask,
+        live_marker_mask,
+        svg[processed_start..processed_end].to_string(),
+    );
 }
 
 /// The default-preset theme's edge color. The arrowhead-marker `<defs>` for this color are memoized
@@ -12471,6 +12671,75 @@ mod tests {
         ir
     }
 
+    fn doc_build_inputs() -> Vec<String> {
+        fn flowchart(node_count: usize) -> String {
+            let mut lines = vec![String::from("flowchart LR")];
+            for index in 0..node_count {
+                lines.push(format!("  N{index}[Node {index}]"));
+            }
+            for index in 0..node_count.saturating_sub(1) {
+                lines.push(format!("  N{index}-->N{}", index + 1));
+            }
+            lines.join("\n")
+        }
+
+        fn sequence(participant_count: usize) -> String {
+            let mut lines = vec![String::from("sequenceDiagram")];
+            for index in 0..participant_count {
+                lines.push(format!("  participant P{index}"));
+            }
+            for index in 0..participant_count.saturating_sub(1) {
+                lines.push(format!("  P{index}->>P{}: request {index}", index + 1));
+                lines.push(format!("  P{}-->>P{index}: response {index}", index + 1));
+            }
+            lines.join("\n")
+        }
+
+        fn class_diagram(class_count: usize) -> String {
+            let mut lines = vec![String::from("classDiagram")];
+            for index in 0..class_count {
+                lines.push(format!("  class C{index} {{"));
+                lines.push(format!("    +int field{index}"));
+                lines.push(format!("    +method{index}() bool"));
+                lines.push(String::from("  }"));
+            }
+            for index in 0..class_count.saturating_sub(1) {
+                lines.push(format!("  C{index} <|-- C{}", index + 1));
+            }
+            lines.join("\n")
+        }
+
+        fn state_diagram(state_count: usize) -> String {
+            let mut lines = vec![
+                String::from("stateDiagram-v2"),
+                String::from("  [*] --> S0"),
+            ];
+            for index in 0..state_count.saturating_sub(1) {
+                lines.push(format!("  S{index} --> S{}: event{index}", index + 1));
+            }
+            lines.push(format!("  S{} --> [*]", state_count.saturating_sub(1)));
+            lines.join("\n")
+        }
+
+        fn er_diagram(entity_count: usize) -> String {
+            let mut lines = vec![String::from("erDiagram")];
+            for index in 0..entity_count.saturating_sub(1) {
+                lines.push(format!("  E{index} ||--o{{ E{} : has", index + 1));
+            }
+            lines.join("\n")
+        }
+
+        let mut inputs = Vec::with_capacity(40);
+        for copy in 0..8 {
+            inputs.push(flowchart(12 + copy % 7));
+            inputs.push(sequence(6 + copy % 5));
+            inputs.push(class_diagram(8 + copy % 4));
+            inputs.push(state_diagram(10 + copy % 6));
+            inputs.push(er_diagram(9 + copy % 3));
+        }
+        inputs
+    }
+
     fn create_scene_with_path_and_text() -> RenderScene {
         let mut root =
             RenderGroup::new(Some(String::from("scene-root"))).with_source(RenderSource::Diagram);
@@ -13516,6 +13785,245 @@ mod tests {
     }
 
     #[test]
+    fn cached_css_post_passes_match_uncached_across_doc_build_matrix() {
+        let mut inputs = doc_build_inputs();
+        inputs.extend([
+            String::from(
+                "flowchart LR\n  A:::hot-.->B\n  classDef hot fill:#f00,stroke:#111\n  style B fill:#0f0",
+            ),
+            String::from("flowchart LR\n  A[/note/]-->B[(store)]\n  subgraph G\n    B-->C\n  end"),
+            String::from("sequenceDiagram\n  A-xB: stop\n  B-->>A: retry"),
+            String::from("pie title Pets\n  \"Dogs\": 3\n  \"Cats\": 2"),
+        ]);
+
+        let mut configs: Vec<SvgRenderConfig> = [
+            ThemePreset::Default,
+            ThemePreset::Dark,
+            ThemePreset::Forest,
+            ThemePreset::Neutral,
+        ]
+        .into_iter()
+        .map(|theme| SvgRenderConfig {
+            theme,
+            ..SvgRenderConfig::default()
+        })
+        .collect();
+        configs.push(SvgRenderConfig {
+            animations_enabled: true,
+            print_optimized: true,
+            glow_enabled: true,
+            ..SvgRenderConfig::default()
+        });
+        configs.push(SvgRenderConfig {
+            backend: SvgBackend::Scene,
+            ..SvgRenderConfig::default()
+        });
+
+        for (config_index, config) in configs.iter().enumerate() {
+            clear_css_post_pass_cache();
+            for (input_index, input) in inputs.iter().enumerate() {
+                let parsed = fm_parser::parse(input);
+                let layout = fm_layout::layout_diagram(&parsed.ir);
+                let expected = render_svg_with_layout_impl(&parsed.ir, &layout, config, false);
+                let first = render_svg_with_layout_impl(&parsed.ir, &layout, config, true);
+                let hit = render_svg_with_layout_impl(&parsed.ir, &layout, config, true);
+                assert_eq!(
+                    first, expected,
+                    "cache miss drifted: config={config_index}, input={input_index}"
+                );
+                assert_eq!(
+                    hit, expected,
+                    "cache hit drifted: config={config_index}, input={input_index}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_marker_identity_bypasses_css_post_pass_cache() {
+        let raw = String::from(
+            "<svg><defs>\
+             <marker id=\"arrow-future\"><path/></marker>\
+             </defs><style>\
+.fm-node-inactive { opacity: 0.4; }\n\
+.fm-cluster { fill-opacity: 0.8; }\n\
+marker#arrow-future path { fill: red; }\n\
+</style><path marker-end=\"url(#arrow-future)\"/></svg>",
+        );
+        let mut expected = raw.clone();
+        apply_output_post_passes(&mut expected, false);
+        let mut actual = raw;
+        apply_output_post_passes(&mut actual, true);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    #[ignore = "release-only, same-binary doc_build_40 performance probe"]
+    fn theme_css_post_pass_cache_doc_build_perf_ab() {
+        use sha2::{Digest, Sha256};
+        use std::{fmt::Write as _, hint::black_box, time::Instant};
+
+        const ROUNDS: usize = 41;
+        const BOOTSTRAP_RESAMPLES: usize = 20_000;
+        const PINNED_INPUT_SHA256: &str =
+            "8badedbf69bc204d952af1ba780c07569b7eb1091ff5d0fdd400dd2e3f6b59d7";
+
+        fn sha256_hex(bytes: &[u8]) -> String {
+            let digest = Sha256::digest(bytes);
+            let mut hex = String::with_capacity(digest.len() * 2);
+            for byte in digest {
+                write!(hex, "{byte:02x}").expect("writing to String cannot fail");
+            }
+            hex
+        }
+
+        fn median(values: &[f64]) -> f64 {
+            let mut sorted = values.to_vec();
+            sorted.sort_by(f64::total_cmp);
+            sorted[sorted.len() / 2]
+        }
+
+        fn bootstrap_median_ci(values: &[f64]) -> (f64, f64) {
+            let mut seed = 0x4d59_5df4_d0f3_3173u64;
+            let mut medians = Vec::with_capacity(BOOTSTRAP_RESAMPLES);
+            let mut sample = vec![0.0; values.len()];
+            for _ in 0..BOOTSTRAP_RESAMPLES {
+                for slot in &mut sample {
+                    seed = seed
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    let index = usize::try_from(seed >> 32).unwrap_or(0) % values.len();
+                    *slot = values[index];
+                }
+                medians.push(median(&sample));
+            }
+            medians.sort_by(f64::total_cmp);
+            (
+                medians[BOOTSTRAP_RESAMPLES / 40],
+                medians[BOOTSTRAP_RESAMPLES * 39 / 40],
+            )
+        }
+
+        fn cv_pct(values: &[f64]) -> f64 {
+            let mean = values.iter().sum::<f64>() / values.len() as f64;
+            let variance = values
+                .iter()
+                .map(|value| (value - mean).powi(2))
+                .sum::<f64>()
+                / (values.len() - 1) as f64;
+            variance.sqrt() / mean * 100.0
+        }
+
+        fn render_doc_build(inputs: &[String], use_cache: bool) -> Vec<String> {
+            if use_cache {
+                // One cold process rendering one docs page: the cache may warm only from earlier
+                // diagrams in this same 40-document batch.
+                clear_css_post_pass_cache();
+            }
+            let config = SvgRenderConfig::default();
+            inputs
+                .iter()
+                .map(|input| {
+                    let parsed = fm_parser::parse(input);
+                    let layout = fm_layout::layout_diagram(&parsed.ir);
+                    render_svg_with_layout_impl(&parsed.ir, &layout, &config, use_cache)
+                })
+                .collect()
+        }
+
+        fn measure_min_of_three(inputs: &[String], use_cache: bool) -> f64 {
+            let mut best = f64::INFINITY;
+            for _ in 0..3 {
+                let start = Instant::now();
+                let rendered = render_doc_build(inputs, use_cache);
+                black_box(&rendered);
+                best = best.min(start.elapsed().as_nanos() as f64);
+            }
+            best
+        }
+
+        let inputs = doc_build_inputs();
+        let joined = inputs.join("\n%%--revision--%%\n");
+        assert_eq!(
+            sha256_hex(joined.as_bytes()),
+            PINNED_INPUT_SHA256,
+            "Rust doc-build generator drifted from scripts/headtohead/corpus.mjs"
+        );
+
+        let expected = render_doc_build(&inputs, false);
+        let actual = render_doc_build(&inputs, true);
+        assert_eq!(
+            actual, expected,
+            "cached and uncached doc-build SVG bytes differ"
+        );
+
+        let executable = std::env::current_exe().expect("current test executable");
+        let executable_bytes = std::fs::read(&executable).expect("read current test executable");
+        println!(
+            "binary elf_sha256={} elf_bytes={} rounds={} min_of=3",
+            sha256_hex(&executable_bytes),
+            executable_bytes.len(),
+            ROUNDS
+        );
+        println!(
+            "corpus id=doc_build_40 input_sha256={} documents={} parity=exact",
+            PINNED_INPUT_SHA256,
+            inputs.len()
+        );
+
+        // Untimed code/data warmup. Candidate samples still clear the content cache themselves.
+        black_box(render_doc_build(&inputs, false));
+        black_box(render_doc_build(&inputs, true));
+
+        let mut null_ratios = Vec::with_capacity(ROUNDS);
+        let mut ab_ratios = Vec::with_capacity(ROUNDS);
+        let mut baseline_samples = Vec::with_capacity(ROUNDS);
+        let mut candidate_samples = Vec::with_capacity(ROUNDS);
+        for round in 0..ROUNDS {
+            let (null_a, candidate, null_b, baseline) = if round % 2 == 0 {
+                (
+                    measure_min_of_three(&inputs, false),
+                    measure_min_of_three(&inputs, true),
+                    measure_min_of_three(&inputs, false),
+                    measure_min_of_three(&inputs, false),
+                )
+            } else {
+                let baseline = measure_min_of_three(&inputs, false);
+                let null_b = measure_min_of_three(&inputs, false);
+                let candidate = measure_min_of_three(&inputs, true);
+                let null_a = measure_min_of_three(&inputs, false);
+                (null_a, candidate, null_b, baseline)
+            };
+            null_ratios.push(null_a / null_b);
+            ab_ratios.push(baseline / candidate);
+            baseline_samples.push(baseline);
+            candidate_samples.push(candidate);
+        }
+
+        let null_median = median(&null_ratios);
+        let (null_low, null_high) = bootstrap_median_ci(&null_ratios);
+        let ab_median = median(&ab_ratios);
+        let (ab_low, ab_high) = bootstrap_median_ci(&ab_ratios);
+        let null_radius = (1.0 - null_low).abs().max((null_high - 1.0).abs());
+        let required_speedup = 1.03f64.max(1.0 + 2.0 * null_radius);
+        println!("A/A speedup_median={null_median:.6} ci95=[{null_low:.6},{null_high:.6}]");
+        println!(
+            "A/B speedup_median={ab_median:.6} ci95=[{ab_low:.6},{ab_high:.6}] \
+             required_lower_bound={required_speedup:.6}"
+        );
+        println!(
+            "report_only baseline_cv_pct={:.2} candidate_cv_pct={:.2}",
+            cv_pct(&baseline_samples),
+            cv_pct(&candidate_samples)
+        );
+        assert!(
+            ab_low > required_speedup,
+            "REJECT: A/B lower CI {ab_low:.6} does not clear max(1.03, 2x null) \
+             {required_speedup:.6}; CV is report-only"
+        );
+    }
+
+    #[test]
     fn strip_unused_markers_keeps_only_referenced_defs() {
         // Hand-built SVG: two marker defs, only one referenced.
         let mut svg = String::from(
@@ -13525,7 +14033,7 @@ mod tests {
              </defs>\
              <path class=\"fm-edge\" marker-end=\"url(#arrow-end)\" d=\"M0 0 L9 9\"/></svg>",
         );
-        strip_unused_markers(&mut svg);
+        let _ = strip_unused_markers(&mut svg);
         assert!(
             svg.contains("id=\"arrow-end\""),
             "referenced marker must stay"

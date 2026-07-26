@@ -1906,13 +1906,80 @@ mod tests {
     #[test]
     #[ignore = "foreground release-only performance probe"]
     fn legacy_dotted_edge_dash_borrow_perf_ab() {
+        use sha2::{Digest, Sha256};
         use std::hint::black_box;
         use std::time::Instant;
 
-        const ITERATIONS: usize = 1_048_576;
-        const ROUNDS: usize = 9;
+        const ROUNDS: usize = 41;
+        const MIN_OF: u32 = 3;
+        const MIN_SAMPLE_NS: u64 = 2_000_000;
 
-        legacy_edge_stroke_borrow_preserves_branch_mappings();
+        #[derive(Clone, Copy)]
+        enum Arm {
+            Owned,
+            Borrowed,
+        }
+
+        struct Stats {
+            a_p50_ns: f64,
+            b_p50_ns: f64,
+            ratio_p50: f64,
+            ratio_ci: (f64, f64),
+            cv_pct: f64,
+            mad_pct: f64,
+            checksum: u64,
+        }
+
+        fn self_identity() -> String {
+            use std::fmt::Write as _;
+
+            let Ok(path) = std::env::current_exe() else {
+                return "unavailable".to_owned();
+            };
+            let Ok(bytes) = std::fs::read(&path) else {
+                return "unavailable".to_owned();
+            };
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            let digest = hasher.finalize();
+            let mut sha256 = String::with_capacity(digest.len() * 2);
+            for byte in digest {
+                write!(sha256, "{byte:02x}").expect("writing to String cannot fail");
+            }
+            format!("{} ({} bytes) {}", sha256, bytes.len(), path.display())
+        }
+
+        fn median(values: &mut [f64]) -> f64 {
+            values.sort_by(f64::total_cmp);
+            let middle = values.len() / 2;
+            if values.len().is_multiple_of(2) {
+                f64::midpoint(values[middle - 1], values[middle])
+            } else {
+                values[middle]
+            }
+        }
+
+        fn bootstrap_median_ci(ratios: &[f64]) -> (f64, f64) {
+            const RESAMPLES: usize = 2_000;
+            let mut state = 0x2545_F491_4F6C_DD1D_u64;
+            let mut medians = Vec::with_capacity(RESAMPLES);
+            let mut sample = vec![0.0_f64; ratios.len()];
+            for _ in 0..RESAMPLES {
+                for slot in &mut sample {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    let index = usize::try_from(state >> 33).unwrap_or(0) % ratios.len();
+                    *slot = ratios[index];
+                }
+                medians.push(median(&mut sample));
+            }
+            medians.sort_by(f64::total_cmp);
+            (
+                medians[RESAMPLES / 40],
+                medians[RESAMPLES - 1 - RESAMPLES / 40],
+            )
+        }
 
         fn digest(width: f64, dash: &[f64]) -> u64 {
             dash.iter().fold(width.to_bits(), |state, value| {
@@ -1920,59 +1987,142 @@ mod tests {
             })
         }
 
-        fn measure_owned() -> (u128, u64) {
+        fn time_arm(arm: Arm, iterations: u32) -> (u64, u64) {
             let mut checksum = 0_u64;
             let start = Instant::now();
-            for _ in 0..ITERATIONS {
-                let (width, dash) = owned_legacy_edge_stroke_reference(
-                    black_box(ArrowType::DottedArrow),
-                    black_box(1.25),
-                );
-                let dash = black_box(dash);
-                checksum =
-                    checksum.wrapping_add(digest(width, dash.as_deref().unwrap_or(black_box(&[]))));
+            for _ in 0..iterations.max(1) {
+                match arm {
+                    Arm::Owned => {
+                        let (width, dash) = owned_legacy_edge_stroke_reference(
+                            black_box(ArrowType::DottedArrow),
+                            black_box(1.25),
+                        );
+                        let dash = black_box(dash);
+                        checksum = checksum
+                            .wrapping_add(digest(width, dash.as_deref().unwrap_or(black_box(&[]))));
+                    }
+                    Arm::Borrowed => {
+                        let (width, dash) =
+                            legacy_edge_stroke(black_box(ArrowType::DottedArrow), black_box(1.25));
+                        checksum = checksum.wrapping_add(digest(width, black_box(dash)));
+                    }
+                }
             }
-            (start.elapsed().as_nanos(), black_box(checksum))
+            (
+                u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                black_box(checksum),
+            )
         }
 
-        fn measure_borrowed() -> (u128, u64) {
+        fn time_min(arm: Arm, iterations: u32) -> (u64, u64) {
+            let mut best = u64::MAX;
             let mut checksum = 0_u64;
-            let start = Instant::now();
-            for _ in 0..ITERATIONS {
-                let (width, dash) =
-                    legacy_edge_stroke(black_box(ArrowType::DottedArrow), black_box(1.25));
-                checksum = checksum.wrapping_add(digest(width, black_box(dash)));
+            for _ in 0..MIN_OF {
+                let (elapsed, digest) = time_arm(arm, iterations);
+                best = best.min(elapsed);
+                checksum = checksum.wrapping_add(digest);
             }
-            (start.elapsed().as_nanos(), black_box(checksum))
+            (best, checksum)
         }
 
-        let mut baseline = [0_u128; ROUNDS];
-        let mut candidate = [0_u128; ROUNDS];
-        for round in 0..ROUNDS {
-            let (baseline_ns, baseline_digest, candidate_ns, candidate_digest) = if round % 2 == 0 {
-                let (baseline_ns, baseline_digest) = measure_owned();
-                let (candidate_ns, candidate_digest) = measure_borrowed();
-                (baseline_ns, baseline_digest, candidate_ns, candidate_digest)
-            } else {
-                let (candidate_ns, candidate_digest) = measure_borrowed();
-                let (baseline_ns, baseline_digest) = measure_owned();
-                (baseline_ns, baseline_digest, candidate_ns, candidate_digest)
-            };
-            assert_eq!(candidate_digest, baseline_digest, "round {round}");
-            baseline[round] = baseline_ns;
-            candidate[round] = candidate_ns;
+        fn calibrate() -> u32 {
+            let mut iterations = 1_024_u32;
+            loop {
+                let (elapsed, _) = time_arm(Arm::Borrowed, iterations);
+                if elapsed >= MIN_SAMPLE_NS || iterations >= 1 << 28 {
+                    return iterations;
+                }
+                iterations = iterations.saturating_mul(2);
+            }
         }
 
-        baseline.sort_unstable();
-        candidate.sort_unstable();
-        let baseline_median = baseline[ROUNDS / 2];
-        let candidate_median = candidate[ROUNDS / 2];
-        let improvement =
-            (baseline_median as f64 - candidate_median as f64) * 100.0 / baseline_median as f64;
+        fn paired(arm_a: Arm, arm_b: Arm, iterations: u32) -> Stats {
+            let mut a_samples = Vec::with_capacity(ROUNDS);
+            let mut b_samples = Vec::with_capacity(ROUNDS);
+            let mut ratios = Vec::with_capacity(ROUNDS);
+            let mut checksum = 0_u64;
+            for round in 0..ROUNDS {
+                let (a_ns, b_ns, a_digest, b_digest) = if round.is_multiple_of(2) {
+                    let (a_ns, a_digest) = time_min(arm_a, iterations);
+                    let (b_ns, b_digest) = time_min(arm_b, iterations);
+                    (a_ns, b_ns, a_digest, b_digest)
+                } else {
+                    let (b_ns, b_digest) = time_min(arm_b, iterations);
+                    let (a_ns, a_digest) = time_min(arm_a, iterations);
+                    (a_ns, b_ns, a_digest, b_digest)
+                };
+                checksum = checksum.wrapping_add(a_digest).wrapping_add(b_digest);
+                a_samples.push(a_ns as f64);
+                b_samples.push(b_ns as f64);
+                ratios.push(a_ns as f64 / b_ns.max(1) as f64);
+            }
+            let a_p50_ns = median(&mut a_samples);
+            let b_p50_ns = median(&mut b_samples);
+            let ratio_p50 = median(&mut ratios.clone());
+            let ratio_ci = bootstrap_median_ci(&ratios);
+            let mean = ratios.iter().sum::<f64>() / ratios.len() as f64;
+            let variance = ratios
+                .iter()
+                .map(|ratio| (ratio - mean).powi(2))
+                .sum::<f64>()
+                / ratios.len() as f64;
+            let mut deviations = ratios
+                .iter()
+                .map(|ratio| (ratio - ratio_p50).abs())
+                .collect::<Vec<_>>();
+            Stats {
+                a_p50_ns,
+                b_p50_ns,
+                ratio_p50,
+                ratio_ci,
+                cv_pct: variance.sqrt() / mean * 100.0,
+                mad_pct: median(&mut deviations) / ratio_p50 * 100.0,
+                checksum,
+            }
+        }
+
+        println!("bench_elf_sha256={}", self_identity());
+        legacy_edge_stroke_borrow_preserves_branch_mappings();
+
+        let iterations = calibrate();
+        let null = paired(Arm::Owned, Arm::Owned, iterations);
+        let real = paired(Arm::Owned, Arm::Borrowed, iterations);
+        let null_half_width = (null.ratio_ci.0 - 1.0)
+            .abs()
+            .max((null.ratio_ci.1 - 1.0).abs());
+        let ci_margin = if null_half_width > 0.0 {
+            (real.ratio_p50 - 1.0).abs() / null_half_width
+        } else {
+            f64::INFINITY
+        };
+        let decidable = ci_margin >= 2.0;
+        let verdict = if !decidable {
+            "INDETERMINATE"
+        } else if real.ratio_p50 > 1.0 {
+            "CAND_FASTER"
+        } else {
+            "CAND_SLOWER"
+        };
         println!(
-            "PERF legacy_canvas_dotted_dash baseline_median_ns={baseline_median} \
-             candidate_median_ns={candidate_median} improvement_pct={improvement:.3} \
-             parity=exact rounds={ROUNDS} iterations={ITERATIONS}"
+            "PERF legacy_canvas_dotted_dash null_ratio={:.6} \
+             null_ci95=[{:.6},{:.6}] ab_ratio={:.6} ab_ci95=[{:.6},{:.6}] \
+             ci_margin={ci_margin:.2}x verdict={verdict} baseline_p50_ns={:.0} \
+             candidate_p50_ns={:.0} null_cv={:.2}% null_mad={:.2}% ab_cv={:.2}% \
+             ab_mad={:.2}% parity=exact checksum={} iterations={iterations} min_of={MIN_OF} \
+             rounds={ROUNDS}",
+            null.ratio_p50,
+            null.ratio_ci.0,
+            null.ratio_ci.1,
+            real.ratio_p50,
+            real.ratio_ci.0,
+            real.ratio_ci.1,
+            real.a_p50_ns,
+            real.b_p50_ns,
+            null.cv_pct,
+            null.mad_pct,
+            real.cv_pct,
+            real.mad_pct,
+            null.checksum.wrapping_add(real.checksum),
         );
     }
 

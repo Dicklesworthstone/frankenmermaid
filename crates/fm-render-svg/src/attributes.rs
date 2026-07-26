@@ -656,6 +656,290 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "foreground release-only performance probe"]
+    fn write_escaped_text_short_clean_perf_ab() {
+        use sha2::{Digest, Sha256};
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ROUNDS: usize = 41;
+        const MIN_OF: u32 = 3;
+        const MIN_SAMPLE_NS: u64 = 2_000_000;
+        const LABELS: &[&str] = &[
+            "Gateway",
+            "API Service",
+            "Event Router",
+            "Primary Database",
+            "Read Replica",
+            "Authorization",
+            "Background Worker",
+            "Metrics Collector",
+            "Notification Queue",
+            "Object Storage",
+            "Search Index",
+            "Audit Log",
+            "Regional Cache",
+            "Build Pipeline",
+            "Deployment Target",
+            "Health Monitor",
+        ];
+
+        #[derive(Clone, Copy)]
+        enum Arm {
+            ScalarReference,
+            CleanFastPath,
+        }
+
+        struct Stats {
+            a_p50_ns: f64,
+            b_p50_ns: f64,
+            ratio_p50: f64,
+            ratio_ci: (f64, f64),
+            cv_pct: f64,
+            mad_pct: f64,
+            checksum: u64,
+        }
+
+        /// Exact pre-`bdbff236` implementation: retain the long-text path but omit only the
+        /// short-clean pre-scan that this resurrection reruns.
+        fn scalar_reference<W: std::fmt::Write>(f: &mut W, s: &str) -> std::fmt::Result {
+            let bytes = s.as_bytes();
+            if bytes.len() >= 256 && !s.contains("]]>") {
+                let mut start = 0;
+                let mut from = 0;
+                while let Some(relative) = memchr::memchr2(b'&', b'<', &bytes[from..]) {
+                    let index = from + relative;
+                    let replacement = if bytes[index] == b'&' {
+                        "&amp;"
+                    } else {
+                        "&lt;"
+                    };
+                    f.write_str(&s[start..index])?;
+                    f.write_str(replacement)?;
+                    start = index + 1;
+                    from = index + 1;
+                }
+                return f.write_str(&s[start..]);
+            }
+            let mut start = 0;
+            for (index, &byte) in bytes.iter().enumerate() {
+                let replacement = match byte {
+                    b'&' => "&amp;",
+                    b'<' => "&lt;",
+                    b'>' if index >= 2 && bytes[index - 1] == b']' && bytes[index - 2] == b']' => {
+                        "&gt;"
+                    }
+                    _ => continue,
+                };
+                f.write_str(&s[start..index])?;
+                f.write_str(replacement)?;
+                start = index + 1;
+            }
+            f.write_str(&s[start..])
+        }
+
+        fn self_identity() -> String {
+            use std::fmt::Write as _;
+
+            let Ok(path) = std::env::current_exe() else {
+                return "unavailable".to_owned();
+            };
+            let Ok(bytes) = std::fs::read(&path) else {
+                return "unavailable".to_owned();
+            };
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            let digest = hasher.finalize();
+            let mut sha256 = String::with_capacity(digest.len() * 2);
+            for byte in digest {
+                write!(sha256, "{byte:02x}").expect("writing to String cannot fail");
+            }
+            format!("{} ({} bytes) {}", sha256, bytes.len(), path.display())
+        }
+
+        fn median(values: &mut [f64]) -> f64 {
+            values.sort_by(f64::total_cmp);
+            let middle = values.len() / 2;
+            if values.len().is_multiple_of(2) {
+                f64::midpoint(values[middle - 1], values[middle])
+            } else {
+                values[middle]
+            }
+        }
+
+        fn bootstrap_median_ci(ratios: &[f64]) -> (f64, f64) {
+            const RESAMPLES: usize = 2_000;
+            let mut state = 0x2545_F491_4F6C_DD1D_u64;
+            let mut medians = Vec::with_capacity(RESAMPLES);
+            let mut sample = vec![0.0_f64; ratios.len()];
+            for _ in 0..RESAMPLES {
+                for slot in &mut sample {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    let index = usize::try_from(state >> 33).unwrap_or(0) % ratios.len();
+                    *slot = ratios[index];
+                }
+                medians.push(median(&mut sample));
+            }
+            medians.sort_by(f64::total_cmp);
+            (
+                medians[RESAMPLES / 40],
+                medians[RESAMPLES - 1 - RESAMPLES / 40],
+            )
+        }
+
+        fn time_arm(arm: Arm, batch: u32) -> (u64, u64) {
+            let mut output = String::with_capacity(64);
+            let mut checksum = 0_u64;
+            let start = Instant::now();
+            for _ in 0..batch.max(1) {
+                for &label in LABELS {
+                    output.clear();
+                    let label = black_box(label);
+                    match arm {
+                        Arm::ScalarReference => scalar_reference(&mut output, label).unwrap(),
+                        Arm::CleanFastPath => write_escaped_text(&mut output, label).unwrap(),
+                    }
+                    let bytes = black_box(output.as_bytes());
+                    checksum = checksum
+                        .rotate_left(7)
+                        .wrapping_add(bytes.len() as u64)
+                        .wrapping_add(u64::from(bytes.first().copied().unwrap_or_default()));
+                }
+            }
+            (
+                u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                black_box(checksum),
+            )
+        }
+
+        fn time_min(arm: Arm, batch: u32) -> (u64, u64) {
+            let mut best = u64::MAX;
+            let mut checksum = 0_u64;
+            for _ in 0..MIN_OF {
+                let (elapsed, digest) = time_arm(arm, batch);
+                best = best.min(elapsed);
+                checksum = checksum.wrapping_add(digest);
+            }
+            (best, checksum)
+        }
+
+        fn paired(arm_a: Arm, arm_b: Arm, batch: u32) -> Stats {
+            let mut a_samples = Vec::with_capacity(ROUNDS);
+            let mut b_samples = Vec::with_capacity(ROUNDS);
+            let mut ratios = Vec::with_capacity(ROUNDS);
+            let mut checksum = 0_u64;
+            for round in 0..ROUNDS {
+                let (a_ns, b_ns, a_digest, b_digest) = if round.is_multiple_of(2) {
+                    let (a_ns, a_digest) = time_min(arm_a, batch);
+                    let (b_ns, b_digest) = time_min(arm_b, batch);
+                    (a_ns, b_ns, a_digest, b_digest)
+                } else {
+                    let (b_ns, b_digest) = time_min(arm_b, batch);
+                    let (a_ns, a_digest) = time_min(arm_a, batch);
+                    (a_ns, b_ns, a_digest, b_digest)
+                };
+                checksum = checksum.wrapping_add(a_digest).wrapping_add(b_digest);
+                a_samples.push(a_ns as f64);
+                b_samples.push(b_ns as f64);
+                ratios.push(a_ns as f64 / b_ns.max(1) as f64);
+            }
+            let a_p50_ns = median(&mut a_samples);
+            let b_p50_ns = median(&mut b_samples);
+            let ratio_p50 = median(&mut ratios.clone());
+            let ratio_ci = bootstrap_median_ci(&ratios);
+            let mean = ratios.iter().sum::<f64>() / ratios.len() as f64;
+            let variance = ratios
+                .iter()
+                .map(|ratio| (ratio - mean).powi(2))
+                .sum::<f64>()
+                / ratios.len() as f64;
+            let mut deviations = ratios
+                .iter()
+                .map(|ratio| (ratio - ratio_p50).abs())
+                .collect::<Vec<_>>();
+            Stats {
+                a_p50_ns,
+                b_p50_ns,
+                ratio_p50,
+                ratio_ci,
+                cv_pct: variance.sqrt() / mean * 100.0,
+                mad_pct: median(&mut deviations) / ratio_p50 * 100.0,
+                checksum,
+            }
+        }
+
+        println!("bench_elf_sha256={}", self_identity());
+
+        for input in [
+            "",
+            "Gateway",
+            "A & B",
+            "<service>",
+            "a]]>b",
+            "café ☕",
+            "div > p",
+        ] {
+            let mut reference = String::new();
+            let mut candidate = String::new();
+            scalar_reference(&mut reference, input).unwrap();
+            write_escaped_text(&mut candidate, input).unwrap();
+            assert_eq!(candidate, reference, "{input:?}");
+        }
+        let long = format!("{}&<tail", "x".repeat(300));
+        let mut reference = String::new();
+        let mut candidate = String::new();
+        scalar_reference(&mut reference, &long).unwrap();
+        write_escaped_text(&mut candidate, &long).unwrap();
+        assert_eq!(candidate, reference, "long-path parity");
+
+        let (candidate_ns, _) = time_arm(Arm::CleanFastPath, 1);
+        let batch = u32::try_from(MIN_SAMPLE_NS.div_ceil(candidate_ns.max(1)))
+            .unwrap_or(1)
+            .max(1);
+        let null = paired(Arm::ScalarReference, Arm::ScalarReference, batch);
+        let real = paired(Arm::ScalarReference, Arm::CleanFastPath, batch);
+        let null_half_width = (null.ratio_ci.0 - 1.0)
+            .abs()
+            .max((null.ratio_ci.1 - 1.0).abs());
+        let ci_margin = if null_half_width > 0.0 {
+            (real.ratio_p50 - 1.0).abs() / null_half_width
+        } else {
+            f64::INFINITY
+        };
+        let decidable = ci_margin >= 2.0;
+        let verdict = if !decidable {
+            "INDETERMINATE"
+        } else if real.ratio_p50 > 1.0 {
+            "CAND_FASTER"
+        } else {
+            "CAND_SLOWER"
+        };
+        println!(
+            "PERF write_escaped_text_short_clean null_ratio={:.6} \
+             null_ci95=[{:.6},{:.6}] ab_ratio={:.6} ab_ci95=[{:.6},{:.6}] \
+             ci_margin={ci_margin:.2}x verdict={verdict} baseline_p50_ns={:.0} \
+             candidate_p50_ns={:.0} null_cv={:.2}% null_mad={:.2}% ab_cv={:.2}% \
+             ab_mad={:.2}% parity=exact checksum={} batch={batch} min_of={MIN_OF} \
+             rounds={ROUNDS}",
+            null.ratio_p50,
+            null.ratio_ci.0,
+            null.ratio_ci.1,
+            real.ratio_p50,
+            real.ratio_ci.0,
+            real.ratio_ci.1,
+            real.a_p50_ns,
+            real.b_p50_ns,
+            null.cv_pct,
+            null.mad_pct,
+            real.cv_pct,
+            real.mad_pct,
+            null.checksum.wrapping_add(real.checksum),
+        );
+    }
+
+    #[test]
     fn write_fixed2_byte_identical_to_std_format() {
         let check = |v: f32| {
             let mut got = String::new();
