@@ -1,13 +1,6 @@
-# Cross-repo recommendation: a bench-harness contract (provenance + noise floor + calibration)
+# Cross-repo recommendation: a bench-harness contract
 
-**From:** `cc_fm` (frankenmermaid) · **Date:** 2026-07-10 · **Status:** RECOMMENDATION TO THE OWNER.
-**I have not touched any other repository.** This describes the mechanisms proven here, what they cost, and how a
-repo adopts them. Take them, adapt them, or ignore them.
-
-> **Field-validated.** The median-gate discipline described here has since unblocked measured wins across the
-> fleet — frankenscipy's 1.745× ISA build fix, frankenlibc's 11× malloc, frankenredis's 17× BITPOS — each decided
-> against a noise floor rather than a `cv` gate the hardware cannot meet. The **one-paragraph owner ask** is at the
-> very bottom ("Adoption in one paragraph").
+**From:** frankenmermaid · **Status:** current fleet contract.
 
 All three exist because of the same failure mode: **a measurement discipline that a human (or an agent) can
 forget is not a discipline, it is a hope.** Provenance, noise floor, and the floor's own resolution limit should
@@ -32,13 +25,11 @@ bench_elf_sha256=15591dd297913a88652285c70c817338e431392874f4ba289e01f1d66a2670c
 
 ### Why it must be inside the process
 
-A hash computed by a shell step *next to* the run proves nothing about **which ELF actually executed**. In this
-repo that gap was not theoretical:
+A hash computed by a shell step *next to* the run proves nothing about **which ELF actually executed**:
 
 - Our remote-build helper (`rch`) refuses non-compilation commands (`RCH-E301`), does not retrieve bench binaries,
   and compiles into an **opaque per-worker pool target dir** whose path you cannot predict.
-- Concurrent agents edited the crate **mid-benchmark** at least three times; one run measured a source that no
-  longer matched the commit, and I had to downgrade my own WIN row to corroboration because of it.
+- Concurrent edits can move source state while a benchmark is running.
 
 A hash the binary emits about itself survives all of that. It cannot be stale, cannot point at a different
 artifact, and cannot be forgotten.
@@ -80,8 +71,7 @@ thing that is definitionally present at run time.
 ### Caveat
 
 It identifies the *binary*, not the *source*. Pair it with a source hash checked **before the bench and again at
-`git add` time** — the gap between "after the last run" and "at commit" is exactly where a concurrent editor slips
-in. That is the specific hole that cost me a KEEP row here.
+`git add` time** so the measured source and committed source remain identical.
 
 ---
 
@@ -101,24 +91,6 @@ Because the floor is not a property of the code — it is a property of *this ma
 order of magnitude between workers within a single session. A floor measured yesterday, or on the quiet worker,
 tells you nothing about the run you are about to trust. Emit it **in the same invocation**, from the same routine,
 on the same batch size.
-
-### First reading from this repo (provisional — see caveat)
-
-Same binary, one invocation, `paired(arm, arm)` versus `paired(arm_a, arm_b)`:
-
-| input | **null A/A ratio** | null cv | real A/B ratio | A/B cv |
-|---|---:|---:|---:|---:|
-| `cyclic_scc_100` | 1.0357× | 14.17% | 2.611× | 8.57% |
-| `cyclic_scc_300` | 0.9764× | 12.03% | 3.870× | 37.00% |
-| `cyclic_scc_800` | 0.9954× | 8.64% | 8.112× | 9.69% |
-
-Read that honestly: on this (loaded, unpinnable) worker the harness **cannot decide any lever below ~4%**, and its
-`cv` gate is not meaningful there at all. It *can* decide a 2.6–8.1× lever, which is what we had. The certified
-barycenter win (3.669×) clears this floor by roughly two orders of magnitude and survives.
-
-*Caveat, stated because the rule demands it: the source changed mid-run (a concurrent agent), so these three rows
-are **provisional**. The null-control mechanism is what I am recommending; these numbers are its first output, not
-a certified result.*
 
 ### How a repo adopts it
 
@@ -159,9 +131,7 @@ Exactly 2× the bench wall time. That is the entire price, and it buys you the r
 - `black_box` the **inputs and the results**, then fold results into a printed checksum. A dead-code-eliminated
   arm cannot produce the checksum.
 - **Profile-verify non-zero self-time** in the function under test before honoring or writing any REJECT. In this
-  repo, four crossing-minimization rejections had stood for months on a bench where the target function had
-  **0.000% self-time** — the auto-selector routed those inputs to a different algorithm. Re-measured on a workload
-  that actually executes it, that "dead" lever is a certified **3.591×**.
+  situation the workload must route through the named target frame and the frame must carry measurable self-time.
 
 ---
 
@@ -216,6 +186,27 @@ emitted **in the same invocation** as the claim.
 
 ---
 
+## 4. Campaign result classification
+
+A repository's own code before versus after is a `maintenance-self-speedup`. It can justify landing
+an improvement, but it is not campaign output and must not be quoted as a competitive claim.
+
+An `incumbent-win` requires the **actual legacy incumbent** as one arm, side-by-side with the
+candidate in the same harness invocation. The ledger row must pin the incumbent name, version, and
+artifact SHA-256; record the shared invocation ID and measured ratio; and carry the A/A null and the
+candidate process's self-reported ELF SHA-256. A previous revision of the candidate project is not
+the incumbent.
+
+For frankenmermaid the actual incumbent is mermaid-js. Its exact ledger markers are:
+
+```markdown
+**Campaign result class:** incumbent-win
+**A/A null control (same invocation):** baseline/null median ratio ..., CI ...
+**Legacy incumbent arm (same invocation):** name=mermaid-js version=<pin> artifact_sha256=<64 lowercase hex> invocation_id=<id> measured_ratio=<number>x
+```
+
+---
+
 ## What a repo must do to adopt this (the whole checklist)
 
 1. **Add `sha2` as a dev-dependency** and print `self_identity()` as the first line of every bench `main`.
@@ -227,42 +218,39 @@ emitted **in the same invocation** as the claim.
    *(Cost: exactly 2× bench wall time.)*
 4. **Calibrate `batch` off the faster arm** so the shorter sample still clears the timer floor.
 5. **`black_box` inputs and results**, fold results into a printed checksum.
-6. **Bracket the run with a source hash, and re-check it at `git add` time.** The window between "after the last
-   run" and "at commit" is where a concurrent editor slips in; it cost us a KEEP row.
+6. **Bracket the run with a source hash, and re-check it at `git add` time.**
 7. **Calibrate the floor once per machine class and per function** (copy `harness_calibration.rs`): sweep
    `min_sample × min_of × arm`, interleaved round-robin, and read off the per-function published-settings table.
    Then **gate on the null-median 95% CI** (the claim must clear the CI half-width by a 2× margin), not on `cv`.
 8. **Profile-verify non-zero self-time** in the function under test before honoring or writing any REJECT.
+9. **Classify every kept result** as `maintenance-self-speedup` or `incumbent-win`; require a pinned,
+   same-invocation actual-incumbent arm for the latter.
 
-Steps 1–3 are the minimum viable contract. Steps 6–8 are what actually caught our errors.
+Steps 1–3 are the minimum viable measurement contract. Steps 6–9 make source attribution, target
+routing, and campaign-output classification enforceable.
 
 ## Suggested adoption order
 
 1. **Self-reporting ELF sha256** — 20 lines, no measurement impact, immediate provenance. Do this first.
 2. **Null control** — a refactor of the measured loop plus 2× wall time. Do this before you trust any sub-10% ratio.
-3. **Self-time verification** — cheapest of the three when a symbolized binary is reachable, and the one that
-   caught the largest error in this repo's history.
+3. **Self-time verification** — confirm the named target is on the measured path before accepting a verdict.
+4. **Result classification** — make self-speedup maintenance and incumbent-win distinct machine values.
 
-## 4. Corollary — whole-binary A/Bs (ISA, LTO, allocator) via same-worker matching
+## 5. Corollary — whole-binary A/Bs (ISA, LTO, allocator) via same-worker matching
 
 Some comparisons cannot use the single-binary `paired()` substrate at all: `-C target-cpu`, `lto`, a global
 allocator swap — each is a **whole-binary** property, so the two arms are two *binaries*. On a remote fleet that
 picks workers non-deterministically, the naive two-invocation A/B is invalid (absolute times aren't comparable
-across workers). The route-around, proven here:
+across workers). The required protocol is:
 
 1. Build both binaries remotely (`RUSTFLAGS="-C target-cpu=x86-64-v3" rch exec -- cargo bench …` vs default). It
-   needs **zero local disk** — the "I can't build locally" reflex is a red herring; the remote path handles it.
+   needs **zero local disk**.
 2. **Confirm the flag actually reached the remote compiler** — otherwise you measure the same binary twice. The
    ELF-sha self-report (§1) is exactly the check: same source + same worker + *different* sha ⇒ codegen changed.
-   (I confirmed v2 vs v3 propagation this way: identical 823,304 B, different sha, same worker.)
 3. **Capture the worker id each run lands on, and compare only same-worker pairs.** That controls the one
    confound (worker identity) that makes two-invocation A/Bs invalid.
 4. **Do not gate on instruction count** — an ISA change retires more work per instruction, so fewer instructions
    is the *mechanism*, not a neutral proxy. Use wall/cycles on the matched worker, gated on CI overlap.
-
-This is how frankenscipy's 1.745× ISA fix and frankenmermaid's *measured null* (v3/v2 = 0.99× on render — the
-byte-production floor is scalar + `memchr`-runtime-dispatched, so AVX2 does nothing) were both decided honestly.
-A null is as valuable as a win: it closes the question.
 
 ## What I am *not* recommending
 
@@ -274,7 +262,7 @@ obvious. Copy the twenty lines; extract later, if a pattern actually emerges.
 
 ## Adoption in one paragraph (the owner ask)
 
-**To adopt this contract, a repo does five things, in order.** (1) Add `sha2` as a dev-dep and print the bench's
+**To adopt this contract, a repo does six things, in order.** (1) Add `sha2` as a dev-dep and print the bench's
 own `env::current_exe()` SHA-256 as line one of every bench — provenance that cannot be forgotten or faked.
 (2) Factor the measured loop into `paired(arm_a, arm_b)` that times both arms **interleaved inside one round**,
 alternating order, and reports the **median of per-round ratios**; `black_box` inputs *and* results into a printed
@@ -283,8 +271,9 @@ floor next to its claim (cost: 2× wall time). (4) Once per machine class, run a
 (`min_sample × min_of × function`, interleaved) to publish which config decides which effect size, and **gate the
 claim on the null-median 95% CI at a mandatory 2× half-width margin, never on `cv`** (`cv < 5` is unreachable on
 a shared, unpinnable fleet; the median is tight regardless). (5) Bracket every run with a source hash re-checked
-at commit time, and profile-verify
-non-zero self-time before honoring any REJECT. Steps 1–3 are the minimum viable contract and cost an afternoon;
-4–5 are what actually caught the errors. **Recommendation: adopt 1–3 fleet-wide now; leave 4–5 per-repo until a
-shared abstraction is obvious. Do not centralize into a crate yet.** Reference implementation lives in this repo:
+at commit time, and profile-verify non-zero self-time before honoring any REJECT. (6) Classify a
+before/after self-comparison as maintenance and reserve campaign-win status for a pinned actual-incumbent arm
+run in the same invocation. Steps 1–3 are the minimum viable measurement contract. **Recommendation: adopt
+1–3 fleet-wide now; make steps 4–6 mandatory before publishing a result. Do not centralize into a crate yet.**
+Reference implementation lives in this repo:
 `crates/fm-layout/benches/{barycenter_sweep,harness_calibration}.rs`.

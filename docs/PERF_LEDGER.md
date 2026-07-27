@@ -1,4 +1,4 @@
-# Performance Ledger — frankenmermaid (KEEP rows)
+# Performance Ledger — frankenmermaid
 
 Campaign `perf-campaign-20260725` §4 splits the record: **KEEP → this file, REJECT →
 `docs/NEGATIVE_EVIDENCE.md`.** Rows are never deleted.
@@ -6,15 +6,38 @@ Campaign `perf-campaign-20260725` §4 splits the record: **KEEP → this file, R
 Historically this repo recorded kept wins inside `docs/NEGATIVE_EVIDENCE.md` (see its "Kept Wins Also
 Recorded Here By Request" section); those rows stay where they are. New KEEP rows land here.
 
-Every row records: hypothesis · profile-first attribution (samples, % self-time) · the ONE lever ·
-byte-identity proof · A/B **and A/A null** with worker id and binary sha · verdict · retry predicate.
+Every kept performance row records: hypothesis · profile-first attribution (samples, % self-time) ·
+the ONE lever · byte-identity proof · A/B **and A/A null** with worker id and binary sha · verdict ·
+retry predicate · one exact result class:
+
+- `maintenance-self-speedup` means this repository's own code before versus after. It may justify
+  landing a maintenance improvement, but it is not campaign output and is never a competitive claim.
+- `incumbent-win` means the actual legacy incumbent, **mermaid-js**, ran side-by-side with
+  frankenmermaid in the same harness invocation. The row must name and pin that incumbent artifact,
+  share one invocation ID, report the measured ratio, and carry the run's A/A null.
+
+The required machine-readable markers are:
+
+```markdown
+**Campaign result class:** maintenance-self-speedup
+```
+
+or:
+
+```markdown
+**Campaign result class:** incumbent-win
+**Legacy incumbent arm (same invocation):** name=mermaid-js version=<pin> artifact_sha256=<64 lowercase hex> invocation_id=<id> measured_ratio=<number>x
+```
+
+`scripts/ledger_preflight.mjs` enforces these classes for every added or modified kept result.
 
 ---
 
-## KEEP: drop the redundant membership hash probe — `arch_100x50` −2.92% instructions (2026-07-25)
+## MAINTENANCE SELF-SPEEDUP (KEEP): drop the redundant membership hash probe — `arch_100x50` −2.92% instructions (2026-07-25)
 
 **Bead:** `bd-1buv.69` (parent `bd-1buv`). **Lane:** cc/STRUCTURAL (`BoldPanther`).
 **Full artifact:** `.benchmarks/bd_1buv_69_membership_hash_probe_WIN.md`.
+**Campaign result class:** maintenance-self-speedup
 
 - **Profile-first attribution.** Non-LTO (`lto=false strip=false debug=true`) symbolized build,
   `perf record -F 999`, single pinned core. On `arch_100x50` (5,000 nodes across 100 subgraphs) the
@@ -66,10 +89,11 @@ byte-identity proof · A/B **and A/A null** with worker id and binary sha · ver
   shows `contains` on `graph_node.{clusters,subgraphs}` exceeding 3% self-time, which would mean the
   per-node lists have grown long enough (deep nesting) that a set is the right structure after all.
 
-## KEEP (historical re-certification; not the strict queue): five resurrection reruns (2026-07-25)
+## MAINTENANCE SELF-SPEEDUP RE-CERTIFICATION (KEEP; not the strict queue): five resurrection reruns (2026-07-25)
 
 **Bead:** `bd-1buv.67`. **Lane:** cod / HARNESS+FRONTIER (`CreamGorge`).
 **Full artifact:** `.benchmarks/bd-1buv.67_harness_resurrection.md`.
+**Campaign result class:** maintenance-self-speedup
 
 > **Model-integrity correction (2026-07-27):** the five measurements below retain their
 > ELF/A/A/parity evidence, but the phrase “ranked top five” came from the superseded mechanical
@@ -107,10 +131,11 @@ profile puts its target below 3% self-time. A retry remains admissible only with
 self-reported ELF identity, and the same-invocation A/A median-CI gate. Dense rank was also
 re-decided and rejected; that result lives in `docs/NEGATIVE_EVIDENCE.md`.
 
-## KEEP: feature-keyed transformed theme-CSS cache — `doc_build_40` +30.61% (2026-07-25)
+## MAINTENANCE SELF-SPEEDUP (KEEP): feature-keyed transformed theme-CSS cache — `doc_build_40` +30.61% (2026-07-25)
 
 **Bead:** `bd-1buv.67`. **Lane:** cod / HARNESS+FRONTIER (`CreamGorge`).
 **Full artifact:** `.benchmarks/render_theme_css_minify_memoization_CANDIDATE.md`.
+**Campaign result class:** maintenance-self-speedup
 
 - **Profile-first attribution.** On the pinned 40-document workload,
   `render_svg_with_layout` was **20.02% self** and the theme-CSS post-pass

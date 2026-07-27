@@ -3,8 +3,8 @@
 A repeatable comparator that measures frankenmermaid against the **original** mermaid-js on a fixed
 corpus, with pinned provenance, warmup discipline, an environment fingerprint, and a measured
 same-invocation noise floor.
-Every dominance claim in `evidence/ledger/mermaid-js-head-to-head.toml` should be reproducible with
-one command here.
+Only a measured mermaid-js/frankenmermaid ratio produced by one driver invocation can be classified
+as an incumbent win. Internal frankenmermaid before/after ratios are maintenance self-speedups.
 
 ## Run it
 
@@ -65,8 +65,7 @@ side writes to disk or touches the DOM afterwards.
 
 Choices that deliberately understate our margin:
 
-- `securityLevel: "strict"` is mermaid's default, but slower than the `loose` earlier ad-hoc
-  comparators used (DOMPurify sanitization stays on).
+- `securityLevel: "strict"` is mermaid's default, with DOMPurify sanitization enabled.
 - The frankenmermaid runner is pinned to **one** core; Chromium keeps the whole machine.
 - `maxEdges` / `maxTextSize` are raised above mermaid's defaults so the large items render at all.
   These are guardrails, not performance knobs.
@@ -88,7 +87,7 @@ renders the whole diagram. mermaid's items are all ≥ 30 ms, so they need no ba
 first calls that routine with `(default, default)`, then with `(default, lean)`. Both arms are timed
 back-to-back inside each round, order alternates, both calls use the same batch, and the statistic is
 the median of per-round ratios. Each row prints the A/A and A/B ratio, bootstrap 95 % CI, CV/MAD, and
-both output checksums.
+both output checksums. The default/lean A/B is a maintenance self-speedup, not campaign output.
 
 The cross-runtime headline is a whole-runtime comparison: Rust and JavaScript cannot be two arms in
 one binary. The mermaid runner therefore emits its own in-browser `(mermaid, mermaid)` paired null in
@@ -121,9 +120,8 @@ each of sequence, class, state and ER, and an **edit trace**. `flowchart` and `w
 `crates/fm-cli/benches/pipeline_bench.rs`'s generators byte for byte, so harness numbers stay
 comparable with the criterion history. Their input hashes have never moved.
 
-**Workload classes the baseline never covered (12).** The items above top out at 500-node flowcharts.
-That is neither where mermaid is used nor where it hurts, and a self-time profile measured only
-there is a statement about the corpus as much as about the code. Three classes were added:
+**Extended workload classes (12).** The baseline tier tops out at 500-node flowcharts. The extended
+tier covers three additional classes:
 
 | Class | Items | What it is |
 |---|---|---|
@@ -131,10 +129,9 @@ there is a statement about the corpus as much as about the code. Three classes w
 | **EDIT** | `edit_trace_200x200`, `edit_trace_500x1000` | Live-preview sessions of 201 and 1,001 successive full documents, rather than a 21-edit sketch. |
 | **DOC_BUILD / CI** | `doc_build_40`, `ci_batch_500` | A docs page and a repository-scale CI job: 40 and 500 diagrams across five syntax families, each timed as one batch. |
 
-The 5k/10k ER endpoints, 1,001-revision trace, and 500-diagram CI batch were admitted and pinned by
-Lane L without running either engine. They are **unmeasured workloads**, not performance claims.
-Run them only when the campaign assigns a quiet measurement window; until then their only certified
-facts are deterministic generation, stable hashes, and unchanged hashes for every older item.
+The 5k/10k ER endpoints, 1,001-revision trace, and 500-diagram CI batch are **unmeasured
+workloads**, not performance claims. Their current certified facts are deterministic generation and
+the hashes pinned in `pins.json`.
 
 `architecture` uses `subgraph`, which is a different layout problem from the flat generators: the
 cluster boundaries constrain placement and force the router around obstacles the flat shapes never
@@ -181,8 +178,7 @@ because that is what a live preview does — mermaid has no incremental path, so
 user actually feels.
 
 Internally every corpus item is a trace; a single-shot item is just a one-revision one. That keeps one
-code path in both engines, and it is why adding traces left all 12 pre-existing corpus hashes
-byte-identical (joining a one-element array yields the element).
+code path in both engines; joining a one-element revision list yields the original item bytes.
 
 Note this measures *full re-render* on both sides, which is the fair comparison. frankenmermaid's
 incremental-layout path is a separate lever (`bd-1buv.3`) and is not exercised here.
@@ -192,5 +188,5 @@ incremental-layout path is a separate lever (`bd-1buv.3`) and is not exercised h
 `.benchmarks/headtohead/run-<rev>-<ts>.jsonl` — one event per engine per item.
 `.benchmarks/headtohead/summary-<rev>-<ts>.json` — env fingerprint, pins, joined rows, ratios, gate.
 
-Both use schema `frankenmermaid.headtohead.v2`; v2 adds per-engine null controls and replaces the
-old MAD verdict fields with `median_ci_gate`.
+Both use schema `frankenmermaid.headtohead.v2`; every record carries per-engine null controls and a
+`median_ci_gate` verdict.

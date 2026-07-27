@@ -11,11 +11,14 @@
 //                                          ledger for a prior dated REJECT covering this mechanism
 //                                          and target surface. exit 2 = BLOCKED.
 //
-//   --lint [--base <git-ref>] [--staged]   BEFORE committing. Every REJECT or KEEP row ADDED or
-//                                          MODIFIED relative to <git-ref>, across both split
-//                                          ledgers, must satisfy its evidence contract. REJECT
-//                                          needs same-invocation A/A or a counted mechanism; KEEP
-//                                          needs the process-self-reported executing ELF SHA-256.
+//   --lint [--base <git-ref>] [--staged]   BEFORE committing. Every REJECT or performance-result
+//                                          row ADDED or MODIFIED relative to <git-ref>, across both
+//                                          split ledgers, must satisfy its evidence contract.
+//                                          REJECT needs same-invocation A/A or a counted mechanism.
+//                                          Every kept result needs the process-self-reported
+//                                          executing ELF SHA-256 and an explicit result class.
+//                                          An incumbent-win additionally needs a measured,
+//                                          same-invocation mermaid-js arm and its A/A null.
 //                                          exit 1 = an inadmissible row.
 //
 // Evidence markers are deliberately explicit. Natural-language regexes confused retry predicates,
@@ -43,15 +46,26 @@ const LEDGERS = [NEGATIVE_LEDGER, PERFORMANCE_LEDGER];
 const NULL_MARKER = '**A/A null control (same invocation):**';
 const COUNTED_MARKER = '**Counted mechanism:**';
 const ELF_MARKER = '**Executing ELF SHA-256 (self-reported by process):**';
+const RESULT_CLASS_MARKER = '**Campaign result class:**';
+const INCUMBENT_MARKER = '**Legacy incumbent arm (same invocation):**';
+const MAINTENANCE_SELF_SPEEDUP = 'maintenance-self-speedup';
+const INCUMBENT_WIN = 'incumbent-win';
 const COUNTED_METRIC = /\b(instructions?|cycles?|syscalls?|allocations?|faults?)\b/i;
 const MEASURED_VALUE =
   /(?:\d[\d,]*(?:\.\d+)?(?:%|x|ns|us|µs|ms|s)?|unchanged|identical|flat|no (?:measurable |material )?(?:work|change|difference))/i;
 const NULL_VALUE = /\b(?:ratio|median|p50|CI|delta|samples?|baseline)\b[^.\n]*\d/i;
 const ELF_VALUE = /\b[a-f0-9]{64}\b/;
+const INCUMBENT_NAME = /\bname=mermaid-js\b/;
+const INCUMBENT_VERSION = /\bversion=[a-z0-9][a-z0-9.+_-]*\b/i;
+const INCUMBENT_ARTIFACT = /\bartifact_sha256=[a-f0-9]{64}\b/;
+const INCUMBENT_INVOCATION = /\binvocation_id=[a-z0-9][a-z0-9._:-]*\b/i;
+const INCUMBENT_RATIO = /\bmeasured_ratio=\d+(?:\.\d+)?x\b/i;
 
 const REJECT_TITLE =
   /\b(REJECT|REJECTED|NO-SHIP|NOSHIP|REVERT|REVERTED|NEGATIVE|ZERO-GAIN|~0-GAIN|WASH|ABANDON|DEAD|INVALID|VOID|SUB-BAR)\b/i;
 const KEEP_TITLE = /^\s*(WIN|KEPT|KEEP|LANDED|VERIFIED|SHIPPED|✅|🟢)/i;
+const RESULT_TITLE =
+  /^\s*(?:MAINTENANCE\s+SELF[- ]SPEEDUP|SELF[- ]SPEEDUP|CAMPAIGN\s+WIN|INCUMBENT\s+WIN)\b/i;
 const REJECT_VERDICT =
   /(?:^|\n)[^\n]{0,24}\b(?:Verdict|Decision|Disposition)\b[^\n]{0,32}\b(?:REJECT|NO-SHIP|REVERT|WASH)\b/im;
 const KEEP_VERDICT =
@@ -74,7 +88,11 @@ function entries(text, ledger = NEGATIVE_LEDGER) {
   });
 }
 
-const isKeepRow = (e) => KEEP_TITLE.test(e.title) || KEEP_VERDICT.test(e.body);
+const isKeepRow = (e) =>
+  KEEP_TITLE.test(e.title) ||
+  RESULT_TITLE.test(e.title) ||
+  KEEP_VERDICT.test(e.body) ||
+  resultClass(e.body) !== null;
 const isRejectRow = (e) =>
   !isKeepRow(e) && (REJECT_TITLE.test(e.title) || REJECT_VERDICT.test(e.body));
 
@@ -105,6 +123,50 @@ function rejectEvidence(body) {
 function keepEvidence(body) {
   const elfEvidence = markerParagraph(body, ELF_MARKER);
   return ELF_VALUE.test(elfEvidence);
+}
+
+function resultClass(body) {
+  const value = markerParagraph(body, RESULT_CLASS_MARKER)
+    .replaceAll('`', '')
+    .split(/\s/)[0];
+  return value === MAINTENANCE_SELF_SPEEDUP || value === INCUMBENT_WIN ? value : null;
+}
+
+function incumbentEvidence(body) {
+  const evidence = markerParagraph(body, INCUMBENT_MARKER);
+  const nullEvidence = markerParagraph(body, NULL_MARKER);
+  const missing = [];
+  if (!INCUMBENT_NAME.test(evidence)) missing.push('name=mermaid-js');
+  if (!INCUMBENT_VERSION.test(evidence)) missing.push('version=<pin>');
+  if (!INCUMBENT_ARTIFACT.test(evidence)) missing.push('artifact_sha256=<64 lowercase hex>');
+  if (!INCUMBENT_INVOCATION.test(evidence)) missing.push('invocation_id=<shared invocation>');
+  if (!INCUMBENT_RATIO.test(evidence)) missing.push('measured_ratio=<number>x');
+  if (!NULL_VALUE.test(nullEvidence)) missing.push(NULL_MARKER);
+  return { ok: missing.length === 0, missing };
+}
+
+function resultEvidence(body) {
+  if (!keepEvidence(body)) return { ok: false, why: `missing ${ELF_MARKER}` };
+
+  const classification = resultClass(body);
+  if (!classification) {
+    return {
+      ok: false,
+      why: `missing ${RESULT_CLASS_MARKER} ${MAINTENANCE_SELF_SPEEDUP}|${INCUMBENT_WIN}`,
+    };
+  }
+  if (classification === MAINTENANCE_SELF_SPEEDUP) {
+    return { ok: true, why: 'maintenance self-speedup (not campaign output)' };
+  }
+
+  const incumbent = incumbentEvidence(body);
+  if (!incumbent.ok) {
+    return {
+      ok: false,
+      why: `incomplete ${INCUMBENT_MARKER} ${incumbent.missing.join(', ')}`,
+    };
+  }
+  return { ok: true, why: 'same-invocation actual-incumbent win' };
 }
 
 function addedEntries(before, after, ledger = NEGATIVE_LEDGER) {
@@ -154,6 +216,18 @@ if (has('self-test')) {
     `## KEEP: exact marker\n\n${ELF_MARKER} \`${hash}\`\n\n**Verdict:** KEEP.\n`,
     PERFORMANCE_LEDGER,
   )[0];
+  const maintenanceWithoutClass = entries(
+    `## MAINTENANCE SELF-SPEEDUP: missing class marker\n\n${ELF_MARKER} \`${hash}\`\n`,
+    PERFORMANCE_LEDGER,
+  )[0];
+  const selfSpeedup = `${ELF_MARKER} \`${hash}\`
+
+${RESULT_CLASS_MARKER} ${MAINTENANCE_SELF_SPEEDUP}`;
+  const incumbentWin = `${selfSpeedup.replace(MAINTENANCE_SELF_SPEEDUP, INCUMBENT_WIN)}
+
+${NULL_MARKER} baseline/null median ratio 1.0012x, CI [0.999, 1.003].
+
+${INCUMBENT_MARKER} name=mermaid-js version=11.15.0 artifact_sha256=${hash} invocation_id=run-42 measured_ratio=871.0x`;
   const cases = [
     ['structural prose is not counted evidence', !rejectEvidence('**Root cause:** no work.').ok],
     ['ceiling prose is not counted evidence', !rejectEvidence('Amdahl ceiling: 1%.').ok],
@@ -192,6 +266,47 @@ if (has('self-test')) {
     [
       'PERF_LEDGER KEEP with an exact ELF marker is accepted',
       isKeepRow(perfKeepWithElf) && keepEvidence(perfKeepWithElf.body),
+    ],
+    [
+      'a result without an explicit class is rejected',
+      !resultEvidence(`${ELF_MARKER} \`${hash}\``).ok,
+    ],
+    [
+      'a maintenance title cannot evade the result-class gate',
+      isKeepRow(maintenanceWithoutClass) && !resultEvidence(maintenanceWithoutClass.body).ok,
+    ],
+    [
+      'a self-speedup is accepted only as maintenance',
+      resultEvidence(selfSpeedup).ok &&
+        resultEvidence(selfSpeedup).why === 'maintenance self-speedup (not campaign output)',
+    ],
+    [
+      'an incumbent-win without the actual incumbent arm is rejected',
+      !resultEvidence(
+        `${selfSpeedup.replace(MAINTENANCE_SELF_SPEEDUP, INCUMBENT_WIN)}
+
+${NULL_MARKER} baseline/null median ratio 1.0x, CI [0.99, 1.01].`,
+      ).ok,
+    ],
+    [
+      'a self baseline cannot masquerade as the legacy incumbent',
+      !resultEvidence(
+        incumbentWin.replace('name=mermaid-js', 'name=self-baseline'),
+      ).ok,
+    ],
+    [
+      'an incumbent-win without an A/A null is rejected',
+      !resultEvidence(
+        incumbentWin.replace(
+          `${NULL_MARKER} baseline/null median ratio 1.0012x, CI [0.999, 1.003].\n\n`,
+          '',
+        ),
+      ).ok,
+    ],
+    [
+      'a pinned mermaid-js arm in the same invocation is accepted',
+      resultEvidence(incumbentWin).ok &&
+        resultEvidence(incumbentWin).why === 'same-invocation actual-incumbent win',
     ],
     [
       'modified PERF_LEDGER KEEP appears in the lint delta',
@@ -307,11 +422,12 @@ if (has('lint')) {
   const bad = [];
   for (const e of added) {
     if (isKeepRow(e)) {
-      if (keepEvidence(e.body))
+      const evidence = resultEvidence(e.body);
+      if (evidence.ok)
         console.log(
-          `[preflight] ok    ${e.ledger}:L${e.line}  executing ELF SHA-256 self-report recorded\n              ${e.title.slice(0, 96)}`,
+          `[preflight] ok    ${e.ledger}:L${e.line}  ${evidence.why}; executing ELF SHA-256 self-report recorded\n              ${e.title.slice(0, 96)}`,
         );
-      else bad.push({ e, kind: 'KEEP', why: `missing ${ELF_MARKER}` });
+      else bad.push({ e, kind: 'RESULT', why: evidence.why });
       continue;
     }
     const verdict = rejectEvidence(e.body);
@@ -340,7 +456,16 @@ if (has('lint')) {
   console.error(`    ${NULL_MARKER}`);
   console.error(`    ${COUNTED_MARKER}`);
   console.error('  Structural prose and ceilings do not satisfy this gate.');
-  console.error(`  KEEP rows need: ${ELF_MARKER} <64 lowercase hex characters>`);
+  console.error(`  Every kept result needs: ${ELF_MARKER} <64 lowercase hex characters>`);
+  console.error(
+    `  Every kept result needs: ${RESULT_CLASS_MARKER} ${MAINTENANCE_SELF_SPEEDUP}|${INCUMBENT_WIN}`,
+  );
+  console.error(`  ${MAINTENANCE_SELF_SPEEDUP} is maintenance, never campaign output.`);
+  console.error(`  ${INCUMBENT_WIN} also needs:`);
+  console.error(`    ${NULL_MARKER}`);
+  console.error(
+    `    ${INCUMBENT_MARKER} name=mermaid-js version=<pin> artifact_sha256=<sha> invocation_id=<id> measured_ratio=<number>x`,
+  );
   process.exit(1);
 }
 

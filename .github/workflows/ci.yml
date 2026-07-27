@@ -202,8 +202,9 @@ jobs:
 
       # Fleet campaign Meta-Lever #1: ledger integrity DECAYS. A repo that audits once and stops
       # drifts back to a 25-91% void rate; the one repo that institutionalized the check sits at
-      # 1.7%. This blocks a REJECT without A/A or counted evidence and a KEEP without the
-      # process-self-reported executing ELF SHA-256. See docs/LEDGER_RESURRECTION.md section 10.
+      # 1.7%. This blocks a REJECT without A/A or counted evidence, any kept result without the
+      # process-self-reported executing ELF SHA-256 and a result class, and an incumbent-win
+      # without a pinned same-invocation mermaid-js arm. See docs/LEDGER_RESURRECTION.md section 10.
       - name: New performance verdicts must satisfy the ledger contract
         run: |
           BASE="${{ github.event.pull_request.base.sha || github.event.before }}"

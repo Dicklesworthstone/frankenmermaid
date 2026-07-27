@@ -761,15 +761,60 @@ Every KEEP row must also record:
 ```
 
 Computing a hash beside the run is not sufficient. The executing process must
-identify its own ELF. The local pre-commit hook checks added or modified verdict
-entries in both `docs/NEGATIVE_EVIDENCE.md` and `docs/PERF_LEDGER.md`; CI checks
-the same two ledgers against the merge base:
+identify its own ELF.
+
+Every kept performance result must also use exactly one result class:
+
+```markdown
+**Campaign result class:** maintenance-self-speedup
+```
+
+Use `maintenance-self-speedup` for this repository's own before/after comparison.
+It may justify landing a maintenance improvement, but it is not campaign output
+and must never be quoted as a competitive claim.
+
+A campaign win requires the actual legacy incumbent, mermaid-js, measured
+side-by-side in the same harness invocation:
+
+```markdown
+**Campaign result class:** incumbent-win
+**A/A null control (same invocation):** baseline/null median ratio ..., CI ...
+**Legacy incumbent arm (same invocation):** name=mermaid-js version=<pin> artifact_sha256=<64 lowercase hex> invocation_id=<id> measured_ratio=<number>x
+```
+
+A self baseline, a prior frankenmermaid revision, separate invocations, or an
+un-pinned comparator cannot satisfy `incumbent-win`.
+
+The local pre-commit hook checks added or modified verdict entries in both
+`docs/NEGATIVE_EVIDENCE.md` and `docs/PERF_LEDGER.md`; CI checks the same two
+ledgers against the merge base:
 
 ```bash
 node scripts/ledger_preflight.mjs --lint --staged --base HEAD
 ```
 
 Do not bypass this gate.
+
+---
+
+## Public Performance Claims
+
+Public surfaces — `README.md`, scorecards, website copy, and release notes —
+state only the current correct claim. Replace an obsolete figure in place; do
+not publish retraction narratives, previously-claimed prose, withdrawal
+explanations, or self-critical framing.
+
+Retraction and correction history belongs in internal evidence machinery:
+`docs/NEGATIVE_EVIDENCE.md`, `docs/LEDGER_RESURRECTION.md`,
+`docs/progress/perf-negative-results.md`, `docs/PERF_LEDGER.md`, and Beads
+bodies. Those records remain complete so future agents do not retry dead work.
+
+Only a measurement against the actual legacy incumbent, produced side-by-side
+in the same invocation, may support a public competitive ratio. New campaign
+rows supporting such a claim must be classified `incumbent-win`.
+`maintenance-self-speedup` figures stay in the internal performance ledger and
+must not be promoted to README, scorecards, website copy, or release notes as
+campaign output.
 
 ---
 
