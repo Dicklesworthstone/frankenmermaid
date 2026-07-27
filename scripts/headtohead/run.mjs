@@ -266,13 +266,35 @@ const [fmCmd, fmArgs] = pin ? ['taskset', ['-c', String(pin.cpu), fmBin, corpusP
 // So sample machine busyness across each phase and report the asymmetry. A run whose phases saw
 // materially different load is not a clean comparison regardless of what the per-engine nulls say.
 const phaseLoad = [];
+
+/** Aggregate busy/total jiffies across all CPUs, from /proc/stat. Passive: no busy-wait. */
+function cpuTotals() {
+  const line = readFileSync('/proc/stat', 'utf8').split('\n').find((l) => /^cpu\s/.test(l));
+  const n = line.trim().split(/\s+/).slice(1, 9).map(Number);
+  const total = n.reduce((a, b) => a + b, 0);
+  const idle = n[3] + n[4];
+  return { total, idle };
+}
+
+/**
+ * Measure machine busyness ACROSS the phase, not at its endpoints.
+ *
+ * The first version of this guard compared `loadavg()[0]` before and after each phase. That is the
+ * wrong instrument here: our arm takes ~19 s and mermaid's ~841 s, and a 1-minute load average
+ * sampled around a 19 s phase describes the minute *preceding* it. On a box that is quieting down
+ * -- which it was, 21.8 -> 6.6 over the run -- that alone manufactures an apparent asymmetry.
+ * /proc/stat deltas are exact over whatever interval they span, so they compare like with like
+ * regardless of how differently long the two phases are.
+ */
 function timedPhase(label, fn) {
-  const before = loadavg()[0];
+  const c0 = cpuTotals();
   const t0 = Date.now();
   const out = fn();
   const seconds = (Date.now() - t0) / 1000;
-  const after = loadavg()[0];
-  phaseLoad.push({ phase: label, seconds, load_before: before, load_after: after, load_mean: (before + after) / 2 });
+  const c1 = cpuTotals();
+  const dTotal = Math.max(1, c1.total - c0.total);
+  const busy = 1 - (c1.idle - c0.idle) / dTotal;
+  phaseLoad.push({ phase: label, seconds, busy_fraction: Number(busy.toFixed(4)) });
   return out;
 }
 
@@ -305,16 +327,17 @@ function armAsymmetry() {
   const fmPhase = phaseLoad.find((p) => p.phase === 'frankenmermaid');
   const mjsPhase = phaseLoad.find((p) => p.phase === 'mermaid-js');
   if (!fmPhase || !mjsPhase) return null;
-  const lo = Math.min(fmPhase.load_mean, mjsPhase.load_mean);
-  const hi = Math.max(fmPhase.load_mean, mjsPhase.load_mean);
+  const lo = Math.min(fmPhase.busy_fraction, mjsPhase.busy_fraction);
+  const hi = Math.max(fmPhase.busy_fraction, mjsPhase.busy_fraction);
   const ratio = lo > 0 ? hi / lo : null;
   return {
     phases: phaseLoad,
-    load_ratio: ratio,
-    // Which arm had it easier. If mermaid ran under heavier load than we did, the ratio flatters us.
-    heavier_phase: fmPhase.load_mean > mjsPhase.load_mean ? 'frankenmermaid' : 'mermaid-js',
+    busy_ratio: ratio,
+    // Which arm had it harder. If mermaid ran under heavier load than we did, the ratio flatters us;
+    // if we did, our own numbers are conservative. Either way the run is not a clean comparison.
+    heavier_phase: fmPhase.busy_fraction > mjsPhase.busy_fraction ? 'frankenmermaid' : 'mermaid-js',
     verdict: ratio === null ? 'unknown' : ratio <= 1.25 ? 'pass' : 'fail',
-    rule: 'phase mean-load ratio <= 1.25',
+    rule: 'phase CPU-busy ratio <= 1.25',
   };
 }
 
@@ -538,7 +561,7 @@ if (summary.median_ci_gate_failures.length) {
 const asym = summary.arm_asymmetry;
 if (asym && asym.verdict !== 'pass') {
   console.log('');
-  console.log(`ARM ASYMMETRY ${asym.verdict.toUpperCase()} (${asym.rule}): phase mean-load ratio ${asym.load_ratio?.toFixed(2)}, heavier on ${asym.heavier_phase}.`);
+  console.log(`ARM ASYMMETRY ${asym.verdict.toUpperCase()} (${asym.rule}): phase CPU-busy ratio ${asym.busy_ratio?.toFixed(2)}, heavier on ${asym.heavier_phase}.`);
   console.log('  The engines are separate runtimes and cannot be interleaved in one measured routine,');
   console.log('  so a load difference between phases biases the ratio directly. Re-run on a quiet box.');
 }

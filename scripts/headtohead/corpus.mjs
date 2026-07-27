@@ -259,7 +259,7 @@ export const CORPUS = [
   { id: 'flowchart_xl_2000',    gen: 'flowchart',    params: { n: 2000 },                    class: 'single',     reps_js: 3, warmup_js: 1, reps_rs: 20, warmup_rs: 3, js_budget_ms: 300_000, dnf_allowed: true },
   { id: 'flowchart_xl_5000',    gen: 'flowchart',    params: { n: 5000 },                    class: 'single',     reps_js: 2, warmup_js: 0, reps_rs: 12, warmup_rs: 2, js_budget_ms: 600_000, dnf_allowed: true },
   { id: 'arch_100x50',          gen: 'architecture', params: { groups: 100, per_group: 50 }, class: 'single',     reps_js: 2, warmup_js: 0, reps_rs: 12, warmup_rs: 2, js_budget_ms: 600_000, dnf_allowed: true },
-  { id: 'er_schema_1000x6',     gen: 'er_schema',    params: { entities: 1000, attrs: 6 },   class: 'single',     reps_js: 3, warmup_js: 1, reps_rs: 20, warmup_rs: 3, js_budget_ms: 300_000, dnf_allowed: true },
+  { id: 'er_schema_1000x6',     gen: 'er_schema',    params: { entities: 1000, attrs: 6 },   class: 'single',     reps_js: 3, warmup_js: 1, reps_rs: 20, warmup_rs: 3, js_budget_ms: 900_000, dnf_allowed: true },
   // The top of the range the campaign named (5-10k nodes). mermaid-js already fails at 2,000, so
   // these exist to characterise *our* scaling where the comparator has no curve left to measure --
   // and because every ledger self-time percentage is a claim about a workload, so the frontier at
