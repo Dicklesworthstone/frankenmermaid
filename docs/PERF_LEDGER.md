@@ -41,6 +41,10 @@ byte-identity proof · A/B **and A/A null** with worker id and binary sha · ver
   Both ELFs built back to back from explicit source states on the **same worker `hz2`**:
   base `d00c33b8c701005474f4431f…`, candidate `0c0b7469d44364050f100cd0…`.
 
+  **Executing ELF SHA-256 (self-reported by process):**
+  `0c0b7469d44364050f100cd04bcaed404e8264af9ea56fbbb6756cc57cc2bfa8`
+  (candidate; full raw record in `.benchmarks/headtohead/run-1049817b-1785035827138.jsonl`).
+
   | workload | A/A null (median) | A/B (median) | verdict |
   |---|---:|---:|---|
   | `arch_100x50` | 1.000050 (range 0.999982–1.000204) | **0.970791** (range 0.970682–0.972152) | **−2.92%**, ~265× the null half-width; every round outside the entire A/A range |
@@ -62,14 +66,20 @@ byte-identity proof · A/B **and A/A null** with worker id and binary sha · ver
   shows `contains` on `graph_node.{clusters,subgraphs}` exceeding 3% self-time, which would mean the
   per-node lists have grown long enough (deep nesting) that a set is the right structure after all.
 
-## CERTIFIED: ranked top-five VOID resurrection under the median-CI contract (2026-07-25)
+## KEEP (historical re-certification; not the strict queue): five resurrection reruns (2026-07-25)
 
 **Bead:** `bd-1buv.67`. **Lane:** cod / HARNESS+FRONTIER (`CreamGorge`).
 **Full artifact:** `.benchmarks/bd-1buv.67_harness_resurrection.md`.
 
+> **Model-integrity correction (2026-07-27):** the five measurements below retain their
+> ELF/A/A/parity evidence, but the phrase “ranked top five” came from the superseded mechanical
+> two-class screen. They are historical re-certifications, not the strict unresolved queue.
+> `docs/LEDGER_RESURRECTION.md` §10.3 and `bd-8f9a` are authoritative.
+
 The mechanical audit found **62 / 251 reject-class entries (24.7%)** whose original verdict was
 VOID: 19 VOID-A plus 43 VOID-B. Only 22 / 251 had an A/A control and only 5 / 251 recorded a bench
-binary SHA-256. The ranked top five were re-run on current code with an in-process ELF hash,
+binary SHA-256. Five entries selected by that historical screen were re-run on current code with an
+in-process ELF hash,
 same-invocation A/A plus A/B, bootstrap median 95% CIs, and CV/MAD report-only:
 
 | rank / resurrected lineage | A/A median 95% CI | A/B median 95% CI | disposition |
@@ -86,6 +96,11 @@ rank 4 used `08d4042140f76ef95071f8872a4826b63666e947305fbf27d4fa64f906630f8c`
 on `vmi1293453`; rank 5 used
 `7d9314ae65055046e7b138fd6c3ea62345a02f444caa9afbc09f6e9c59c4c014`
 on `ovh-a`. All arms proved exact parity.
+
+**Executing ELF SHA-256 (self-reported by process):**
+crossing `2439b3cad0ddd002ca7c697aa1d0ce6b21079b6c29038771dfa95705d2bd994c`;
+escape `08d4042140f76ef95071f8872a4826b63666e947305fbf27d4fa64f906630f8c`;
+Canvas `7d9314ae65055046e7b138fd6c3ea62345a02f444caa9afbc09f6e9c59c4c014`.
 
 **Retry / re-check predicate:** repeat a row only if its production lineage changes or a current
 profile puts its target below 3% self-time. A retry remains admissible only with exact parity,
@@ -115,6 +130,8 @@ re-decided and rejected; that result lives in `docs/NEGATIVE_EVIDENCE.md`.
   (10,931,720 bytes). A/A median **0.991926**, 95% CI **[0.988105, 1.000418]**.
   A/B median **1.306114**, 95% CI **[1.302648, 1.318433]**. The mandatory lower threshold was
   **1.030000**. CV was report-only at 3.27% / 3.36%.
+- **Executing ELF SHA-256 (self-reported by process):**
+  `85a81ad5c196a27ed56503ca7756c6a68e4de2fa74ef7a30c4cab8624dbad786`.
 - **Verdict: KEEP.** The exact cold docs-build corpus is **30.61% faster at the median** and the
   complete A/B CI clears twice the A/A null-CI margin.
 - **Retry / re-check predicate.** Re-run the cold-per-batch probe if marker identities, any cached
@@ -201,7 +218,7 @@ or this re-audit narrows a claim; it does not discard unaffected artifacts.
 | `83533872` | **CORRECTED** | The 10k architecture and 2.5k ER inputs, hashes, self-ELF records, and mermaid `RangeError` failures are real. The commit wrongly marked frankenmermaid P2/P3-complete by finding helpers outside the published decision path, and selected absolute Rust latency ranges with the old MAD gate and no paired A/A. `8379f65e` fixed the live path; this audit reclassifies those absolute timings as exploratory in `README.md`. Re-certify them only through `bd-ktx5` under v2; the comparator `CANNOT` rows stand unless the mermaid pin changes. |
 | `2fef0bf7` | **CORRECTED** | The additive 5k/10k ER, 1,001-edit, and 500-render generators are sound: 25 unique items regenerate all 25 pins, the older pins are unchanged, and the new batch cardinalities are exact. The fleet snapshot inherited the same false local P2/P3 completion claim; `8379f65e` corrects it. Re-audit a fleet row when its recorded tip moves, and re-pin only after intentional generator review. |
 | `c4f3e3a7` | **CORRECTED** | It correctly adopted the six class names and identified `VOID-NONULL` as dominant, but its regex admitted structural prose/ceilings as `VALID-MECHANISM` and its queue promoted rows before full reading. Sections 9–10 later correct both errors: the strict population is 189 REJECTs, 159 VOID, and the unresolved top five are `L9613`, `L5020`, `L7861`, `L5492`, and `L9250`. Re-run only those rows, only in an assigned window, and only after satisfying each recorded predicate. |
-| `90934f71` | **CORRECTED** | The first preflight accepted four prose-shaped justifications and did not enforce executing-ELF provenance on KEEP rows, so it could still admit undecidable verdicts. `ce58ca06` replaced inference with explicit A/A/counted-mechanism/ELF markers, installed the local pre-commit chain and CI check, and added boundary self-tests; `c681aa80` corrected the documentation. Re-open if self-test, staged lint, hook wiring, or the two-evidence-shape contract regresses. |
+| `90934f71` | **CORRECTED** | The first preflight accepted four prose-shaped justifications and did not enforce executing-ELF provenance on KEEP rows. `ce58ca06` replaced inference with explicit markers, but the final closeout found that its parser still read only `docs/NEGATIVE_EVIDENCE.md`; therefore it could not enforce KEEP provenance in `docs/PERF_LEDGER.md`. `bd-ckm0` extends linting and boundary tests to both ledgers. `c681aa80` corrected the earlier documentation. Re-open if self-test, staged lint, hook wiring, either ledger path, or the two-evidence-shape contract regresses. |
 
 No commit is retracted wholesale. The two source KEEPs (`16c2bb96` and the CSS cache inside
 `1049817b`) remain justified by their own routing, proof, and numbers. The corrections are to
@@ -209,6 +226,34 @@ classification, reproducibility claims, and pre-contract timing status.
 
 **Lane-L continuation.** No micro-lever or benchmark was started. The current live harness
 self-tests pass with `cv_gate=never`; all 25 corpus pins regenerate exactly; the 1,001-revision and
-500-render cardinalities are correct; and the strict ledger preflight passes all nine boundary
+500-render cardinalities are correct; and the strict ledger preflight passes all thirteen boundary
 self-tests. The measurement work remains explicitly queued in `bd-8f9a` and `bd-ktx5` for a
 campaign-assigned quiet window.
+
+### Final remediation reconciliation (2026-07-27)
+
+All seven `CORRECTED` verdicts now map to durable fixes on `main`; there are zero `RETRACTED`
+verdicts and therefore no retraction dependents to preserve or remove.
+
+| Corrected commit | Landed remediation |
+|---|---|
+| `bb84aa3b` | `d229bdd7` records `RangeError` as `kind=failed`, `CANNOT`, and no ratio; `b1a11a98` corrects the README claim. |
+| `88ade078` | `1049817b` replaces provisional measurements; `ce58ca06` plus §10 replace the two-class screen and queue. |
+| `1049817b` | This row, its full artifact, and bead `bd-1buv.67` now label the five measurements as historical re-certifications; §10.3/`bd-8f9a` own the strict queue. |
+| `83533872` | `8379f65e` fixes the live P2/P3 path; `b1a11a98` labels its old absolute timings pre-contract and exploratory. |
+| `2fef0bf7` | `8379f65e` corrects the inherited local P2/P3 status while preserving the additive corpus and pins. |
+| `c4f3e3a7` | `b75cd101`, `ce58ca06`, and `c681aa80` withdraw prose/ceiling mechanism inference and install the strict six-class hand audit. |
+| `90934f71` | `ce58ca06` installs explicit evidence markers; `bd-ckm0` closes the missed split-ledger path by linting both REJECT and KEEP ledgers. |
+
+**Gate retry predicate:** the remediation is incomplete if a modified `## KEEP` in
+`docs/PERF_LEDGER.md` without the exact process-self-report marker exits zero, if a modified
+`### REJECT` in `docs/NEGATIVE_EVIDENCE.md` without A/A or counted work exits zero, or if either
+ledger is silently skipped.
+
+**Gate self-check:** before repairing the historical marker spelling, the corrected dual-ledger
+tool was run against the repository's own post-`470ca188` ledger delta. It exited 1 and named the
+previously invisible KEEP rows at `docs/PERF_LEDGER.md` L14 and L95 (plus the historical
+re-certification and one independently inadmissible REJECT). After the exact markers and ranking
+correction above, linting the current delta against `origin/main` accepts all three modified KEEP
+rows. All thirteen boundary self-tests pass. This is a fail-then-pass check on the real ledger, not
+only a synthetic unit fixture.

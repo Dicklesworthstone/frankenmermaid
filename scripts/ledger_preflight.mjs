@@ -11,10 +11,11 @@
 //                                          ledger for a prior dated REJECT covering this mechanism
 //                                          and target surface. exit 2 = BLOCKED.
 //
-//   --lint [--base <git-ref>] [--staged]   BEFORE committing. Every REJECT row ADDED relative to
-//                                          <git-ref> must carry a same-invocation A/A null control
-//                                          or a counted mechanism. Every KEEP must carry the
-//                                          executing process's self-reported ELF SHA-256.
+//   --lint [--base <git-ref>] [--staged]   BEFORE committing. Every REJECT or KEEP row ADDED or
+//                                          MODIFIED relative to <git-ref>, across both split
+//                                          ledgers, must satisfy its evidence contract. REJECT
+//                                          needs same-invocation A/A or a counted mechanism; KEEP
+//                                          needs the process-self-reported executing ELF SHA-256.
 //                                          exit 1 = an inadmissible row.
 //
 // Evidence markers are deliberately explicit. Natural-language regexes confused retry predicates,
@@ -27,7 +28,15 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const LEDGER = join(REPO, 'docs', 'NEGATIVE_EVIDENCE.md');
+const NEGATIVE_LEDGER = {
+  path: 'docs/NEGATIVE_EVIDENCE.md',
+  heading: '### ',
+};
+const PERFORMANCE_LEDGER = {
+  path: 'docs/PERF_LEDGER.md',
+  heading: '## ',
+};
+const LEDGERS = [NEGATIVE_LEDGER, PERFORMANCE_LEDGER];
 
 // --- mandatory evidence markers ---------------------------------------------------------------
 
@@ -48,13 +57,20 @@ const REJECT_VERDICT =
 const KEEP_VERDICT =
   /(?:^|\n)[^\n]{0,24}\b(?:Verdict|Decision|Disposition)\b[^\n]{0,32}\b(?:KEEP|KEPT|LANDED|SHIP)\b/im;
 
-/** Split a ledger into `### ` entries. */
-function entries(text) {
+/** Split one ledger into its configured verdict-entry headings. */
+function entries(text, ledger = NEGATIVE_LEDGER) {
   const lines = text.split('\n');
-  const idx = lines.map((l, i) => (l.startsWith('### ') ? i : -1)).filter((i) => i >= 0);
+  const idx = lines
+    .map((line, i) => (line.startsWith(ledger.heading) ? i : -1))
+    .filter((i) => i >= 0);
   return idx.map((s, k) => {
     const e = k + 1 < idx.length ? idx[k + 1] : lines.length;
-    return { line: s + 1, title: lines[s].slice(4).trim(), body: lines.slice(s, e).join('\n') };
+    return {
+      ledger: ledger.path,
+      line: s + 1,
+      title: lines[s].slice(ledger.heading.length).trim(),
+      body: lines.slice(s, e).join('\n'),
+    };
   });
 }
 
@@ -91,14 +107,14 @@ function keepEvidence(body) {
   return ELF_VALUE.test(elfEvidence);
 }
 
-function addedEntries(before, after) {
+function addedEntries(before, after, ledger = NEGATIVE_LEDGER) {
   const remaining = new Map();
-  for (const e of entries(before)) {
+  for (const e of entries(before, ledger)) {
     const key = e.body.trimEnd();
     remaining.set(key, (remaining.get(key) ?? 0) + 1);
   }
   const added = [];
-  for (const e of entries(after)) {
+  for (const e of entries(after, ledger)) {
     const key = e.body.trimEnd();
     const count = remaining.get(key) ?? 0;
     if (count > 0) remaining.set(key, count - 1);
@@ -121,14 +137,23 @@ const arg = (n, d = null) => {
 };
 const has = (n) => process.argv.includes(`--${n}`);
 
-if (!existsSync(LEDGER)) {
-  console.error(`[preflight] missing ${LEDGER}`);
+const missingLedgers = LEDGERS.filter((ledger) => !existsSync(join(REPO, ledger.path)));
+if (missingLedgers.length > 0) {
+  console.error(`[preflight] missing ${missingLedgers.map((ledger) => ledger.path).join(', ')}`);
   process.exit(3);
 }
 
 // ---------------------------------------------------------------- mode: --self-test
 if (has('self-test')) {
   const hash = 'a'.repeat(64);
+  const perfKeepWithoutElf = entries(
+    '## KEEP: parsed from the performance ledger\n\n**Verdict:** KEEP.\n',
+    PERFORMANCE_LEDGER,
+  )[0];
+  const perfKeepWithElf = entries(
+    `## KEEP: exact marker\n\n${ELF_MARKER} \`${hash}\`\n\n**Verdict:** KEEP.\n`,
+    PERFORMANCE_LEDGER,
+  )[0];
   const cases = [
     ['structural prose is not counted evidence', !rejectEvidence('**Root cause:** no work.').ok],
     ['ceiling prose is not counted evidence', !rejectEvidence('Amdahl ceiling: 1%.').ok],
@@ -156,6 +181,26 @@ if (has('self-test')) {
       !keepEvidence(`${ELF_MARKER} \`${hash.toUpperCase()}\``),
     ],
     ['self-reported executing ELF is accepted', keepEvidence(`${ELF_MARKER} \`${hash}\``)],
+    [
+      'PERF_LEDGER KEEP headings are parsed as KEEP rows',
+      perfKeepWithoutElf?.ledger === PERFORMANCE_LEDGER.path && isKeepRow(perfKeepWithoutElf),
+    ],
+    [
+      'PERF_LEDGER KEEP without an ELF marker is rejected',
+      !keepEvidence(perfKeepWithoutElf?.body ?? ''),
+    ],
+    [
+      'PERF_LEDGER KEEP with an exact ELF marker is accepted',
+      isKeepRow(perfKeepWithElf) && keepEvidence(perfKeepWithElf.body),
+    ],
+    [
+      'modified PERF_LEDGER KEEP appears in the lint delta',
+      addedEntries(
+        '## KEEP: exact marker\n\nold body\n',
+        `## KEEP: exact marker\n\n${ELF_MARKER} \`${hash}\`\n`,
+        PERFORMANCE_LEDGER,
+      ).length === 1,
+    ],
   ];
   const failed = cases.filter(([, ok]) => !ok);
   for (const [name, ok] of cases) console.log(`[self-test] ${ok ? 'ok' : 'FAIL'}  ${name}`);
@@ -182,7 +227,10 @@ if (has('lever')) {
     console.error('[preflight] --lever and --surface need searchable descriptions');
     process.exit(3);
   }
-  const rows = entries(readFileSync(LEDGER, 'utf8')).filter(isRejectRow);
+  const rows = entries(
+    readFileSync(join(REPO, NEGATIVE_LEDGER.path), 'utf8'),
+    NEGATIVE_LEDGER,
+  ).filter(isRejectRow);
   const ranked = rows
     .map((e) => {
       const hay = e.body.toLowerCase();
@@ -204,7 +252,7 @@ if (has('lever')) {
   }
   console.error(`[preflight] BLOCKED — ${hits.length} prior REJECT row(s) cover this mechanism:\n`);
   for (const h of hits) {
-    console.error(`  docs/NEGATIVE_EVIDENCE.md:${h.e.line}`);
+    console.error(`  ${h.e.ledger}:${h.e.line}`);
     console.error(`    ${h.e.title}`);
     console.error(`    matched: ${h.matched.join(', ')}`);
     const retry = retryPredicate(h.e.body);
@@ -220,34 +268,39 @@ if (has('lever')) {
 if (has('lint')) {
   const staged = has('staged');
   const base = arg('base', staged ? 'HEAD' : 'origin/main');
-  let before = '';
-  try {
-    before = execFileSync('git', ['-C', REPO, 'show', `${base}:docs/NEGATIVE_EVIDENCE.md`], {
-      encoding: 'utf8',
-      maxBuffer: 64 * 1024 * 1024,
-    });
-  } catch {
-    console.error(`[preflight] cannot read docs/NEGATIVE_EVIDENCE.md at ${base}; linting the whole file`);
-  }
-  let current;
-  if (staged) {
+  const added = [];
+  for (const ledger of LEDGERS) {
+    let before = '';
     try {
-      current = execFileSync('git', ['-C', REPO, 'show', ':docs/NEGATIVE_EVIDENCE.md'], {
+      before = execFileSync('git', ['-C', REPO, 'show', `${base}:${ledger.path}`], {
         encoding: 'utf8',
         maxBuffer: 64 * 1024 * 1024,
       });
     } catch {
-      console.error('[preflight] cannot read staged docs/NEGATIVE_EVIDENCE.md');
-      process.exit(3);
+      console.error(`[preflight] cannot read ${ledger.path} at ${base}; linting the whole file`);
     }
-  } else {
-    current = readFileSync(LEDGER, 'utf8');
+    let current;
+    if (staged) {
+      try {
+        current = execFileSync('git', ['-C', REPO, 'show', `:${ledger.path}`], {
+          encoding: 'utf8',
+          maxBuffer: 64 * 1024 * 1024,
+        });
+      } catch {
+        console.error(`[preflight] cannot read staged ${ledger.path}`);
+        process.exit(3);
+      }
+    } else {
+      current = readFileSync(join(REPO, ledger.path), 'utf8');
+    }
+    added.push(
+      ...addedEntries(before, current, ledger).filter((e) => isRejectRow(e) || isKeepRow(e)),
+    );
   }
-  const added = addedEntries(before, current).filter((e) => isRejectRow(e) || isKeepRow(e));
 
   if (added.length === 0) {
     console.log(
-      `[preflight] OK — no REJECT or KEEP rows added vs ${base}${staged ? ' in the index' : ''}.`,
+      `[preflight] OK — no REJECT or KEEP rows added across ${LEDGERS.map((ledger) => ledger.path).join(', ')} vs ${base}${staged ? ' in the index' : ''}.`,
     );
     process.exit(0);
   }
@@ -256,7 +309,7 @@ if (has('lint')) {
     if (isKeepRow(e)) {
       if (keepEvidence(e.body))
         console.log(
-          `[preflight] ok    L${e.line}  executing ELF SHA-256 self-report recorded\n              ${e.title.slice(0, 96)}`,
+          `[preflight] ok    ${e.ledger}:L${e.line}  executing ELF SHA-256 self-report recorded\n              ${e.title.slice(0, 96)}`,
         );
       else bad.push({ e, kind: 'KEEP', why: `missing ${ELF_MARKER}` });
       continue;
@@ -264,7 +317,7 @@ if (has('lint')) {
     const verdict = rejectEvidence(e.body);
     if (verdict.ok)
       console.log(
-        `[preflight] ok    L${e.line}  ${verdict.why}\n              ${e.title.slice(0, 96)}`,
+        `[preflight] ok    ${e.ledger}:L${e.line}  ${verdict.why}\n              ${e.title.slice(0, 96)}`,
       );
     else
       bad.push({
@@ -279,7 +332,7 @@ if (has('lint')) {
   }
   console.error(`\n[preflight] BLOCKED — ${bad.length} new ledger verdict row(s) violate the contract.\n`);
   for (const { e, kind, why } of bad) {
-    console.error(`  ${kind} at docs/NEGATIVE_EVIDENCE.md:${e.line}`);
+    console.error(`  ${kind} at ${e.ledger}:${e.line}`);
     console.error(`    ${e.title}`);
     console.error(`    ${why}\n`);
   }

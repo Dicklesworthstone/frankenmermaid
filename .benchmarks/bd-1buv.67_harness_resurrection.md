@@ -1,5 +1,11 @@
 # bd-1buv.67 — bench-contract adoption, VOID resurrection, and frontier keep
 
+> **Model-integrity correction (2026-07-27):** the five rerun measurements in this artifact retain
+> their executing-ELF, same-invocation A/A, median-CI, and parity evidence. Their original
+> “ranked top five” label came from the superseded mechanical two-class screen and is withdrawn.
+> They are historical re-certifications. The strict unresolved queue is
+> `docs/LEDGER_RESURRECTION.md` §10.3 / `bd-8f9a`.
+
 **Campaign:** `perf-campaign-20260725`
 **Lane:** cod / HARNESS+FRONTIER (`CreamGorge`)
 **Date:** 2026-07-25
@@ -37,11 +43,11 @@ The complete mechanical audit is `docs/LEDGER_RESURRECTION.md` plus
 - only 22 / 251 recorded an A/A control;
 - only 5 / 251 recorded a bench-binary SHA-256.
 
-Historically, seven distinct VOID levers had already been re-run: four re-won and shipped, while
-three were correctly closed. This turn re-certified the ranked top five on current code under the
-new contract.
+Historically, seven distinct candidates selected by that screen had already been re-run: four
+re-won and shipped, while three were correctly closed. This turn re-certified five historical
+entries on current code under the new contract; it did not establish the later strict queue.
 
-## 3. Ranked top-five resurrection
+## 3. Five historical resurrection re-certifications
 
 ### Ranks 1–3: crossing-minimization harness
 

@@ -211,7 +211,7 @@ jobs:
             BASE="origin/main"
             git fetch --no-tags --depth=1 origin main || true
           fi
-          echo "linting docs/NEGATIVE_EVIDENCE.md against $BASE"
+          echo "linting docs/NEGATIVE_EVIDENCE.md and docs/PERF_LEDGER.md against $BASE"
           node scripts/ledger_preflight.mjs --lint --base "$BASE"
 
   golden-checksum-guard:

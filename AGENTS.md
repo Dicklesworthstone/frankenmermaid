@@ -761,8 +761,9 @@ Every KEEP row must also record:
 ```
 
 Computing a hash beside the run is not sufficient. The executing process must
-identify its own ELF. The local pre-commit hook checks the staged ledger, and CI
-checks it against the merge base:
+identify its own ELF. The local pre-commit hook checks added or modified verdict
+entries in both `docs/NEGATIVE_EVIDENCE.md` and `docs/PERF_LEDGER.md`; CI checks
+the same two ledgers against the merge base:
 
 ```bash
 node scripts/ledger_preflight.mjs --lint --staged --base HEAD

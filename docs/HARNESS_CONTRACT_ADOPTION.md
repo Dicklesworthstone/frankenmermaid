@@ -106,6 +106,17 @@ This correction changed no parser, layout, or renderer behavior and made no perf
 deterministic bootstrap/gate self-tests and Rust quality gates are the acceptance evidence; actual
 corpus timing still requires the campaign-owned quiet window tracked by `bd-ktx5`.
 
+### Prospective ledger-gate correction (`bd-ckm0`, 2026-07-27)
+
+The first institutionalized preflight enforced explicit A/A/counted-mechanism markers in
+`docs/NEGATIVE_EVIDENCE.md`, but it did not parse the split KEEP ledger
+`docs/PERF_LEDGER.md`. Its KEEP provenance rule was therefore documented but unreachable for the
+normal place where new KEEPs land. The corrected guard parses both heading schemes, compares added
+or modified entries in both files, and has boundary tests that fail a `## KEEP` without the exact
+process-self-reported executing-ELF marker. Repositories copying the rollout must verify the
+verdict-bearing files their own tool actually parses; a correct evidence predicate behind an
+unreachable path is not adoption.
+
 One addition from `bd-1buv.69`, offered to the fleet: **for a work-removal lever, gate on
 instructions, not wall.** Measured at load ~12, same corpus, arms alternated: the A/A null was
 **±0.011% on instructions vs ±0.145% on wall**, and two of five wall rounds were contaminated past
@@ -130,7 +141,8 @@ performance owner in each of the other ten repositories under Agent Mail thread
 
 The rollout owner does not call a repo complete merely because a helper exists. Completion means
 the next verdict produced by that repo is self-identifying, carries a same-invocation A/A row, and
-is decided by the median CI rather than CV.
+is decided by the median CI rather than CV. The 2026-07-27 correction adds one more mechanical
+check: every split KEEP/REJECT ledger must be in the preflight's parsed path set.
 
 ## Lane L corpus admission (`bd-jil4`)
 

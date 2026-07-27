@@ -637,10 +637,13 @@ node scripts/ledger_preflight.mjs --lint --staged --base HEAD
 ```
 
 Candidate mode prints every matching prior row and its concrete retry predicate when present. Lint
-mode refuses a new REJECT unless it contains at least one of the explicit evidence records documented
-in `AGENTS.md`: a measured same-invocation A/A null control or a counted mechanism. It refuses a KEEP
-without the executing process's self-reported ELF SHA-256. Structural prose, ceilings, future
-requirements, and adjacent hashes cannot satisfy the gate.
+mode parses both split ledgers—`###` entries in `docs/NEGATIVE_EVIDENCE.md` and `##` entries in
+`docs/PERF_LEDGER.md`—and refuses an added or modified REJECT unless it contains at least one of the
+explicit evidence records documented in `AGENTS.md`: a measured same-invocation A/A null control or
+a counted mechanism. It refuses an added or modified KEEP without the executing process's
+self-reported ELF SHA-256. Structural prose, ceilings, future requirements, and adjacent hashes
+cannot satisfy the gate. This dual-ledger coverage was added by `bd-ckm0` after the model-integrity
+closeout proved that the first strict version had enforced only the REJECT ledger.
 
 The live chain runner executes
 `.git/hooks/hooks.d/pre-commit/40-ledger-integrity`; CI runs the same linter against the merge base in
