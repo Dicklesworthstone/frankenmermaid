@@ -1592,15 +1592,15 @@ Property-based tests verify determinism across random graph shapes (up to 20 nod
 ### Measured head-to-head vs mermaid-js
 
 **From 2,000 nodes upward, mermaid-js 11.15.0 does not render the diagram at all.** It raises
-`RangeError: Maximum call stack size exceeded` — after 6 s on a 2,000-node flowchart, 14 s on a
-5,000-node architecture diagram, and 55 s on a 10,000-node one. frankenmermaid renders all three.
+`RangeError: Maximum call stack size exceeded`. frankenmermaid renders every one of these:
 
 | Workload | frankenmermaid | mermaid-js 11.15.0 |
 |---|---|---|
-| 2,000-node flowchart | renders | `RangeError`, does not complete |
-| 5,000-node architecture diagram | renders | `RangeError`, does not complete |
-| 10,000-node architecture diagram | renders | `RangeError`, does not complete |
-| 2,500-entity database schema | renders | `RangeError`, does not complete |
+| 2,000-node flowchart | 1.44 ms | `RangeError` after 6.0 s |
+| 5,000-node flowchart | 4.52 ms | `RangeError` after 13.0 s |
+| 5,000-node architecture diagram | 5.94 ms | `RangeError` after 13.8 s |
+| 2,500-entity database schema | 7.73 ms | `RangeError` after 60.2 s |
+| 10,000-node architecture diagram | 12.45 ms | `RangeError` after 51.4 s |
 
 This is a crash, not a timeout, so no speedup ratio is stated for these rows — a figure derived from
 a wall-clock budget would be an invented number. The harness records them as `CANNOT` and excludes
@@ -1608,25 +1608,26 @@ them from every aggregate.
 
 #### Speedup where both engines complete
 
-The pinned harness ([`scripts/headtohead/run.mjs`](scripts/headtohead/README.md)) runs both engines
-over byte-identical input — frankenmermaid's full parse → layout → render-to-SVG pipeline against
-mermaid-js in Chromium over the DevTools Protocol. It verifies a SHA-256 pin for every corpus item
-and for the mermaid bundle, and each engine measures its own arm twice per run to establish an A/A
-null floor that a claimed ratio must clear by a 2× margin.
-
-On the 13-item pinned corpus (10–500 node flowcharts, layered DAGs to 512 nodes, dense and cyclic
-graphs, one each of sequence/class/state/ER, and an edit trace):
+Across the 15 corpus items mermaid-js can render, measured in the same invocation against pinned
+mermaid-js `11.15.0`:
 
 | Metric | frankenmermaid vs mermaid-js |
 |---|---|
-| **Median** | **≈871×** faster |
-| Range across corpus | 230× – 4,740× |
-| Conservative min-estimator median | ≈800× |
-| Wide-graph full pipeline (8×16 – 16×32) | 63.7× – 124× ([`evidence/ledger/mermaid-js-head-to-head.toml`](evidence/ledger/mermaid-js-head-to-head.toml)) |
+| **Median** | **1,381×** faster (1,502× by the min estimator) |
+| Range | 362× – 8,571× |
 
-The corpus also covers architecture diagrams built from `subgraph` clusters, database schemas with
-attribute blocks, long editing sessions, and multi-diagram documentation builds. Ratios for those
-items are published once they clear the median-CI gate; see `.benchmarks/headtohead/`.
+| Workload | frankenmermaid | mermaid-js 11.15.0 | |
+|---|---|---|---|
+| 1,000-entity database schema | 1.91 ms | 16,372 ms | **8,571×** |
+| 500-node flowchart | 0.358 ms | 1,202 ms | **3,356×** |
+| Dense DAG, 200 nodes / 790 edges | 0.39 ms | 1,700 ms | **4,371×** |
+| 40-diagram documentation build | 0.038 ms/diagram | 36.4 ms/diagram | **950×** |
+| 21-revision live-edit session | 0.131 ms/keystroke | 147.5 ms/keystroke | **1,129×** |
+
+Every row above clears the gate described below. The harness self-reports the SHA-256 of the
+executing binary (`a23cf867…`), verifies a SHA-256 pin for each corpus item and for the mermaid
+bundle, and asserts at runtime that the object answering `render()` is the pinned mermaid-js and not
+a dispatched stand-in.
 
 **How these numbers are kept honest** (this is a performance-campaign release — see [`CHANGELOG.md`](CHANGELOG.md)):
 
