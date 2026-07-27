@@ -282,3 +282,30 @@ re-certification and one independently inadmissible REJECT). After the exact mar
 correction above, linting the current delta against `origin/main` accepts all three modified KEEP
 rows. All thirteen boundary self-tests pass. This is a fail-then-pass check on the real ledger, not
 only a synthetic unit fixture.
+
+## CERTIFIED: head-to-head vs mermaid-js 11.15.0 under the median-CI gate (2026-07-27)
+
+**Bead:** `bd-1buv.1`. **Lane:** cc (`BoldPanther`).
+**Campaign result class:** incumbent-win
+**Executing ELF SHA-256 (self-reported by process):** `a23cf867fd18608c0c3d6a75671dc57573847fb4db6724bc87942944a74cbd6a`
+**Legacy incumbent arm (same invocation):** name=mermaid-js version=11.15.0 artifact_sha256=70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de invocation_id=892761e9-1785182202902 measured_ratio=1381x
+**A/A null control (same invocation):** per-engine bootstrap median CI; frankenmermaid arm ratio 0.999095 CI [0.995680, 1.000985], mermaid-js arm ratio 1.023555 CI [0.980000, 1.078748]; 15/15 rows cleared `null_ci95_2x_margin`, 0 failures, `cv_gate = never`.
+
+- **Incumbent arm.** Pinned mermaid-js `11.15.0` (bundle SHA-256 verified before injection) driven in
+  system Chromium over the DevTools Protocol, in the same invocation as our arm, over byte-identical
+  SHA-256-pinned input. `securityLevel` is mermaid's own default `strict`.
+- **Dispatch-trap guard.** The page asserts at runtime that `mermaid.version` equals the pin and that
+  `render()` is not a zero-arg native/bound stub, so the incumbent cannot be a dispatched stand-in.
+- **Arm-asymmetry guard.** The two engines are separate runtimes and cannot be interleaved in one
+  measured routine, so `/proc/stat` busy fraction is measured across each phase: 0.1582 (ours, 14 s)
+  vs 0.1410 (mermaid, 874 s), ratio **1.122**, inside the 1.25 rule.
+- **Result — mermaid-js does not render at all** on five items, `RangeError: Maximum call stack size
+  exceeded`: 2,000-node flowchart (6.0 s), 5,000-node flowchart (13.0 s), 5,000-node architecture
+  (13.8 s), 2,500-entity schema (60.2 s), 10,000-node architecture (51.4 s). No ratio is stated for
+  these; they are excluded from every aggregate.
+- **Result — ratios**, 15 items where mermaid completes: median **1,381×** (1,502× min estimator),
+  range **362× – 8,571×**. Largest: `er_schema_1000x6` 1.910 ms vs 16,372.4 ms.
+- **Evidence:** `.benchmarks/headtohead/cert-v3/`.
+- **Retry predicate.** Re-certify when the corpus, the pinned mermaid version, or the render config
+  changes. `edit_trace_200x200` remains uncertified — a 19-sample A/A null at 276 s per sample needs
+  ~87 minutes and must be run in a dedicated window, not folded into a shared run.
