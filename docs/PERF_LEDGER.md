@@ -176,3 +176,39 @@ re-decided and rejected; that result lives in `docs/NEGATIVE_EVIDENCE.md`.
   without a self-reported executing ELF hash, two sufficient per-engine A/A controls, or
   `median_ci_gate.rule == "null_ci95_2x_margin"`; or if any live exit path again depends on CV or
   MAD. Run the unmeasured corpus only when `bd-ktx5` receives a quiet measurement window.
+
+## MODEL INTEGRITY RE-AUDIT: fallback-window commits (2026-07-27)
+
+**Bead:** `bd-yp9s`. **Audited window:** 2026-07-25 20:40 through 2026-07-26 00:35
+America/New_York. **Scope:** the exact 11 commits authored on `main` during the provider's silent
+model fallback.
+
+This was a judgment audit, not a wholesale remeasurement. In-process ELF self-reports,
+same-invocation A/A controls, exact byte/parity proofs, and raw comparator failures were preserved.
+Each commit was re-read for workload routing, proof soundness, whether its own numbers support its
+verdict, and code quality outside the original gates. `CORRECTED` means a durable later correction
+or this re-audit narrows a claim; it does not discard unaffected artifacts.
+
+| Commit | Verdict | Re-audit finding and concrete re-check predicate |
+|---|---|---|
+| `bb84aa3b` | **CORRECTED** | The generators, pins, process-self ELF report, and 16 completed rows route through the intended full pipelines. Its first XL artifact nevertheless assigned budget-derived lower bounds to three `RangeError` failures that ended after 6–15 seconds; a failure is not a timeout. `d229bdd7` supplies the corrected `kind=failed`, `CANNOT`, no-ratio artifact. Re-check only if DNF classification changes; only `kind=timeout` may carry a budget lower bound. |
+| `243f9586` | **SOUND** | This is a clean two-parent merge with no combined conflict-resolution diff. Parent two is the independently tested dependency/API update; the lowercase digest encoder preserves the prior SHA-256 text contract. Re-check if a bumped dependency changes output hashes, golden SVGs, or the digest API. |
+| `88ade078` | **CORRECTED** | The four discovery workloads genuinely route through the named frames: the subgraph hash insert appears only at architecture scale and the fixed CSS pass is paid by every document in `doc_build_40`. The profiles were correctly labelled non-LTO discovery evidence. Its provisional resurrection ratios and two-class ranking were later superseded by the final artifact in `1049817b` and the strict six-class audit in §10 of `docs/LEDGER_RESURRECTION.md`. Re-profile if a generator, routing selector, or production lineage changes. |
+| `16c2bb96` | **SOUND** | The parser KEEP measured the right path: `arch_100x50` makes the removed membership probe the top frame, while the no-subgraph control stays inside its A/A range. The behavior proof holds: both builder node-issuance sites append `ir.nodes` and `ir.graph.nodes` in lockstep, and the only builder mutation sites for the mirror memberships are the two changed functions. Exact 19-item output identity plus −2.92% instructions outside the complete null range justify KEEP. Re-open on vector-length divergence or if deep nesting puts mirror `contains` above 3% self-time. |
+| `d229bdd7` | **SOUND** | Raw rows record `kind=failed`, `RangeError`, positive elapsed time, `speedup_lower_bound=null`, and a self-reported ELF; the commit correctly replaces the flattering DNF bounds with `CANNOT`. Re-check if mermaid's pinned version or error/timeout mapping changes. |
+| `470ca188` | **SOUND** | Documentation-only provenance correction: it distinguishes one green parser test from later RCH admission refusals and does not turn an exit-1 infrastructure refusal into a test failure. The 19-item byte proof remains the correctness gate. Re-check only if the cited artifact or RCH result is amended. |
+| `1049817b` | **CORRECTED** | The transformed-CSS cache KEEP stands: raw CSS is equality-checked; state, accent, body-variable, and live-marker observations cover every post-pass dependency; unknown markers bypass; the cache is thread-local and bounded; 264/264 permanent comparisons and the timed 40-document outputs are exact. Its 1.306114x median and CI [1.302648, 1.318433] clear the A/A-derived 1.03 floor. The five resurrection measurements also retain ELF/A/A/parity evidence, but calling them the strict “ranked top five” was wrong; §10.3 owns the unresolved strict queue. Re-check the KEEP on any cache-key/post-pass/marker/cap change. |
+| `83533872` | **CORRECTED** | The 10k architecture and 2.5k ER inputs, hashes, self-ELF records, and mermaid `RangeError` failures are real. The commit wrongly marked frankenmermaid P2/P3-complete by finding helpers outside the published decision path, and selected absolute Rust latency ranges with the old MAD gate and no paired A/A. `8379f65e` fixed the live path; this audit reclassifies those absolute timings as exploratory in `README.md`. Re-certify them only through `bd-ktx5` under v2; the comparator `CANNOT` rows stand unless the mermaid pin changes. |
+| `2fef0bf7` | **CORRECTED** | The additive 5k/10k ER, 1,001-edit, and 500-render generators are sound: 25 unique items regenerate all 25 pins, the older pins are unchanged, and the new batch cardinalities are exact. The fleet snapshot inherited the same false local P2/P3 completion claim; `8379f65e` corrects it. Re-audit a fleet row when its recorded tip moves, and re-pin only after intentional generator review. |
+| `c4f3e3a7` | **CORRECTED** | It correctly adopted the six class names and identified `VOID-NONULL` as dominant, but its regex admitted structural prose/ceilings as `VALID-MECHANISM` and its queue promoted rows before full reading. Sections 9–10 later correct both errors: the strict population is 189 REJECTs, 159 VOID, and the unresolved top five are `L9613`, `L5020`, `L7861`, `L5492`, and `L9250`. Re-run only those rows, only in an assigned window, and only after satisfying each recorded predicate. |
+| `90934f71` | **CORRECTED** | The first preflight accepted four prose-shaped justifications and did not enforce executing-ELF provenance on KEEP rows, so it could still admit undecidable verdicts. `ce58ca06` replaced inference with explicit A/A/counted-mechanism/ELF markers, installed the local pre-commit chain and CI check, and added boundary self-tests; `c681aa80` corrected the documentation. Re-open if self-test, staged lint, hook wiring, or the two-evidence-shape contract regresses. |
+
+No commit is retracted wholesale. The two source KEEPs (`16c2bb96` and the CSS cache inside
+`1049817b`) remain justified by their own routing, proof, and numbers. The corrections are to
+classification, reproducibility claims, and pre-contract timing status.
+
+**Lane-L continuation.** No micro-lever or benchmark was started. The current live harness
+self-tests pass with `cv_gate=never`; all 25 corpus pins regenerate exactly; the 1,001-revision and
+500-render cardinalities are correct; and the strict ledger preflight passes all nine boundary
+self-tests. The measurement work remains explicitly queued in `bd-8f9a` and `bd-ktx5` for a
+campaign-assigned quiet window.

@@ -1607,36 +1607,46 @@ graphs, one each of sequence/class/state/ER, and a 21-revision edit trace):
 | Conservative min-estimator median | ≈800× |
 | Wide-graph full pipeline (8×16 – 16×32) | 63.7× – 124× ([`evidence/ledger/mermaid-js-head-to-head.toml`](evidence/ledger/mermaid-js-head-to-head.toml)) |
 
-**The corpus is now 21 items.** Eight were added in 2026-07 to cover workload classes the original
-corpus never reached — architecture diagrams built from `subgraph` clusters, database schemas with
-attribute blocks, a 201-revision editing session, and a 40-diagram documentation build. Across the
-**16 items where mermaid-js completes**, the median is **≈1,490×**, with a new maximum of **9,400×**
-on a 1,000-entity ER schema (17.5 s → 1.86 ms).
+**The historical measured expansion contained 21 items.** Eight were added in 2026-07 to cover
+workload classes the original corpus never reached — architecture diagrams built from `subgraph`
+clusters, database schemas with attribute blocks, a 201-revision editing session, and a 40-diagram
+documentation build. Across the **16 items where mermaid-js completed**, the observed median was
+**≈1,490×**, with a maximum of **9,400×** on a 1,000-entity ER schema (17.5 s → 1.86 ms).
 
-**On the other five, mermaid-js does not produce a render at all.** At 2,000 nodes and above it
+The pinned corpus now contains **25 items**: the later 5k/10k ER endpoints, 1,001-revision trace, and
+500-diagram CI batch are construction-verified but deliberately unmeasured pending `bd-ktx5`.
+The 21-item results above predate the live paired-null median-CI gate. Their input/output pins,
+self-reported executing ELF, and orders-of-magnitude separation make them useful historical
+observations, but they are not presented as post-contract certifications.
+
+**On the other five measured rows, mermaid-js did not produce a render at all.** At 2,000 nodes and above it
 raises `RangeError: Maximum call stack size exceeded` — in 6 s at 2,000 nodes, 55 s at 10,000. This
 is a crash, not a timeout, so **no ratio is claimed for those rows**: the table records `CANNOT`,
-because a speedup figure derived from a wall-clock budget would be an invented number. For reference,
-frankenmermaid renders the 10,000-node architecture diagram in 10.9–11.5 ms and the 2,500-entity
-schema in 7.1–7.7 ms (ranges across gate-passing runs, not best-of).
+because a speedup figure derived from a wall-clock budget would be an invented number. The crash
+classification is independent of timing dispersion and stands. The old absolute frankenmermaid
+latencies were selected with the superseded MAD gate and no same-invocation A/A, so they are retained
+in `.benchmarks/headtohead/` as exploratory artifacts rather than quoted as certified current timing.
 
-| Workload | frankenmermaid | mermaid-js 11.15.0 |
+| Workload | historical frankenmermaid observation | mermaid-js 11.15.0 |
 |---|---|---|
-| 1,000-entity ER schema | 1.86 ms | 17,499 ms (**9,400×**) |
-| 201-revision editing session | 45.6 ms | 284,288 ms (**6,238×**) |
-| 40-diagram documentation build | 2.43 ms | 1,721 ms (**709×**) |
-| 2,000-node flowchart | 1.37 ms | **does not render** (`RangeError`, 6 s) |
-| 5,000-node architecture diagram | 5.13 ms | **does not render** (`RangeError`, 14 s) |
-| 10,000-node architecture diagram | 10.9–11.5 ms | **does not render** (`RangeError`, 55 s) |
+| 1,000-entity ER schema | 1.86 ms (pre-contract) | 17,499 ms (**9,400×**) |
+| 201-revision editing session | 45.6 ms (pre-contract) | 284,288 ms (**6,238×**) |
+| 40-diagram documentation build | 2.43 ms (pre-contract) | 1,721 ms (**709×**) |
+| 2,000-node flowchart | 1.37 ms (pre-contract) | **does not render** (`RangeError`, 6 s) |
+| 5,000-node architecture diagram | 5.13 ms (pre-contract) | **does not render** (`RangeError`, 14 s) |
+| 10,000-node architecture diagram | 10.3–11.8 ms observed; recertification pending | **does not render** (`RangeError`, 55 s) |
 
 **How these numbers are kept honest** (this is a performance-campaign release — see [`CHANGELOG.md`](CHANGELOG.md)):
 
 - **Same-input, same-target comparison.** A dominance claim counts only as `frankenmermaid_time / mermaid_js_time` for the *same* diagram, render target, warmup policy, and output-validity gate — never cross-machine or cross-workload.
-- **Median gate, not cherry-picked means.** The harness reports the **median** speedup with a **5% median-absolute-deviation (MAD) gate** (all 13 corpus items passed), plus a conservative **min-estimator** row so the headline is not the luckiest run.
+- **Paired-null median-CI gate.** The live v2 harness runs per-engine same-invocation A/A controls,
+  gates the cross-runtime median ratio against twice the larger bootstrap 95% null-CI radius, and
+  treats CV and MAD as report-only. The historical table above is explicitly labelled pre-contract;
+  `bd-ktx5` owns its re-certification.
 - **Paired-null for micro-levers.** Individual optimizations are A/B'd same-invocation with interleaved arms and a no-op/null control; because code-layout noise moves wall-time by ~5%, load-independent **instruction-count** is the arbiter for sub-noise levers.
 - **SVG output stays byte-identical.** Render optimizations are gated on `sha256`-identical SVG across the shape battery + golden snapshots — a faster renderer that changed a single byte is rejected.
 - **Every rejected lever is logged.** [`docs/NEGATIVE_EVIDENCE.md`](docs/NEGATIVE_EVIDENCE.md) records the reverted/washed experiments alongside the kept wins, so the campaign's win-rate is auditable rather than survivorship-filtered.
-- **The rejections are themselves audited, and the audit is enforced.** [`docs/LEDGER_RESURRECTION.md`](docs/LEDGER_RESURRECTION.md) re-examines all 250 REJECT rows and asks a harder question than "was the lever slow" — *could this measurement have detected the lever at all?* 179 could not, overwhelmingly because a near-1.0 result was recorded with no A/A null control. Four such rows were re-run and re-won as shipped commits. `scripts/ledger_preflight.mjs` now fails CI on a new REJECT row that records neither a null control, a counted mechanism, a structural refutation, nor a ceiling, because a ledger that is cleaned once drifts back within months.
+- **The rejections are themselves audited, and the audit is enforced.** [`docs/LEDGER_RESURRECTION.md`](docs/LEDGER_RESURRECTION.md) hand-adjudicates the strict REJECT population and asks a harder question than "was the lever slow" — *could this measurement have detected the lever at all?* **159 of 189** could not, overwhelmingly because a near-1.0 result was recorded with no A/A null control or counted mechanism. The strict unresolved top five remain queued in `bd-8f9a`. `scripts/ledger_preflight.mjs` now fails CI on a new REJECT without an explicit same-invocation A/A result or counted mechanism, and on a new KEEP without a process-self-reported executing-ELF SHA-256.
 - **A comparator that cannot render is never scored as a win.** Where mermaid-js crashes, the harness records `CANNOT` and the row is excluded from the median rather than converted into a speedup.
 
 Environment for the headline run: AMD Ryzen Threadripper PRO 5975WX, `rustc` nightly, release profile (`opt-level=3` for the hot crates, `lto=fat`, `codegen-units=1`, `target-cpu=x86-64-v2`).
@@ -1644,8 +1654,9 @@ Environment for the headline run: AMD Ryzen Threadripper PRO 5975WX, `rustc` nig
 ### Per-phase scaling
 
 The engine is designed for diagrams in the 1–500 node range (typical documentation diagrams) and
-holds up well past it: the 10,000-node case above is a measured ~10.9 ms end to end, so "graceful
-degradation" undersells the guardrail fallback chain.
+the pinned 10,000-node architecture case completes deterministically. Its historical absolute
+latencies are shown above only as pre-contract observations; a certified current latency awaits
+the `bd-ktx5` quiet-window run.
 
 The per-phase table below is a **complexity sketch with order-of-magnitude estimates**, not measured
 figures — it predates the pinned harness and its 1,000-node column does not reconcile with the

@@ -264,13 +264,11 @@ export const CORPUS = [
   // these exist to characterise *our* scaling where the comparator has no curve left to measure --
   // and because every ledger self-time percentage is a claim about a workload, so the frontier at
   // 10k is a different question from the frontier at 500.
-  // `reps_rs` is 40, not the 8 the other XL items use. These two render in ~10 ms, which is already
-  // past the 2 ms batching floor, so each rep is exactly one sample -- and a MAD computed from 8
-  // samples is too coarse to gate on: `er_schema_2500x8` read 0.4% once and 13.8-16.4% on three
-  // consecutive later runs while its sibling passed on the same runs. That is a sample-count
-  // artifact, not the item. Raising the sample count is the documented knob (campaign section 2.4);
-  // it is NOT retuning the item to make a gate pass -- the workload, its hash and its budget are
-  // untouched, and 40 reps costs ~0.4 s.
+  // `reps_rs` is 40, not the 8 the other XL items originally used. Under the v2 harness that means
+  // 40 paired A/A and A/B rounds (well above the fail-closed minimum of 9), which narrows the
+  // bootstrap median CI for these one-sample-per-arm items. Historical MAD varied from 0.4% to
+  // 16.4% across identical inputs; that dispersion is retained as provenance, never as a gate.
+  // The workload, hash, and budget remain untouched, and 40 rounds costs roughly 0.4 s per arm.
   { id: 'arch_200x50',          gen: 'architecture', params: { groups: 200, per_group: 50 }, class: 'single',     reps_js: 1, warmup_js: 0, reps_rs: 40, warmup_rs: 3, js_budget_ms: 600_000, dnf_allowed: true },
   { id: 'er_schema_2500x8',     gen: 'er_schema',    params: { entities: 2500, attrs: 8 },   class: 'single',     reps_js: 1, warmup_js: 0, reps_rs: 40, warmup_rs: 3, js_budget_ms: 600_000, dnf_allowed: true },
   // ER endpoints at the campaign's explicitly named 5k-10k *node* range. The 2,500-entity row
