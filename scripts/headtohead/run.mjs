@@ -256,7 +256,27 @@ if (pinArg !== 'off') {
 env.pinned_cpu = pin;
 
 const [fmCmd, fmArgs] = pin ? ['taskset', ['-c', String(pin.cpu), fmBin, corpusPath]] : [fmBin, [corpusPath]];
-const fm = runJsonl('frankenmermaid', fmCmd, fmArgs);
+// ARM-ASYMMETRY GUARD (trap 3). The two engines are separate runtimes -- a Rust process and
+// Chromium -- so they cannot be interleaved inside one measured routine the way a same-binary A/B
+// can be. They run in sequence, which means host load drifting between the two phases biases the
+// ratio directly, and not symmetrically: frankenfs measured its C arm degrading ~3x harder than its
+// own under load, which inflated the ratio in its favour. Neither engine's internal A/A can see
+// this, because each null is measured entirely inside its own phase.
+//
+// So sample machine busyness across each phase and report the asymmetry. A run whose phases saw
+// materially different load is not a clean comparison regardless of what the per-engine nulls say.
+const phaseLoad = [];
+function timedPhase(label, fn) {
+  const before = loadavg()[0];
+  const t0 = Date.now();
+  const out = fn();
+  const seconds = (Date.now() - t0) / 1000;
+  const after = loadavg()[0];
+  phaseLoad.push({ phase: label, seconds, load_before: before, load_after: after, load_mean: (before + after) / 2 });
+  return out;
+}
+
+const fm = timedPhase('frankenmermaid', () => runJsonl('frankenmermaid', fmCmd, fmArgs));
 // The measured binary hashes itself and prints that as its first record. A sha computed by a shell
 // step next to the run proves nothing about which ELF executed -- rch builds into an opaque
 // per-worker target dir, and agents have edited crates mid-benchmark in this fleet.
@@ -273,7 +293,30 @@ const mjsArgs = [join(HERE, 'mermaid_bench.mjs')];
 if (only) mjsArgs.push('--only', only);
 if (repsScale !== 1) mjsArgs.push('--reps-scale', String(repsScale));
 if (budgetScale !== 1) mjsArgs.push('--js-budget-scale', String(budgetScale));
-const mjs = has('skip-mermaid') ? { records: [], code: 0 } : runJsonl('mermaid-js', process.execPath, mjsArgs);
+const mjs = has('skip-mermaid')
+  ? { records: [], code: 0 }
+  : timedPhase('mermaid-js', () => runJsonl('mermaid-js', process.execPath, mjsArgs));
+
+/**
+ * Ratio of the two phases' mean load. 1.0 means both arms ran under the same machine conditions;
+ * far from 1.0 means one arm was measured on a different machine than the other, in effect.
+ */
+function armAsymmetry() {
+  const fmPhase = phaseLoad.find((p) => p.phase === 'frankenmermaid');
+  const mjsPhase = phaseLoad.find((p) => p.phase === 'mermaid-js');
+  if (!fmPhase || !mjsPhase) return null;
+  const lo = Math.min(fmPhase.load_mean, mjsPhase.load_mean);
+  const hi = Math.max(fmPhase.load_mean, mjsPhase.load_mean);
+  const ratio = lo > 0 ? hi / lo : null;
+  return {
+    phases: phaseLoad,
+    load_ratio: ratio,
+    // Which arm had it easier. If mermaid ran under heavier load than we did, the ratio flatters us.
+    heavier_phase: fmPhase.load_mean > mjsPhase.load_mean ? 'frankenmermaid' : 'mermaid-js',
+    verdict: ratio === null ? 'unknown' : ratio <= 1.25 ? 'pass' : 'fail',
+    rule: 'phase mean-load ratio <= 1.25',
+  };
+}
 
 // ---------------------------------------------------------------- join + gate
 
@@ -403,6 +446,7 @@ const summary = {
     fm_p50_ns: r.fm_p50_ns, speedup_lower_bound: r.speedup_lower_bound, error: r.error,
   })),
   median_ci_gate_rule: 'claim magnitude >= max(1.01, 1 + 2 * max(per-engine A/A CI radius))',
+  arm_asymmetry: armAsymmetry(),
   cv_gate: 'never',
   median_ci_gate_failures: ok
     .filter((r) => r.median_ci_gate.verdict === 'fail')
@@ -490,6 +534,13 @@ if (leanSlow.length) {
 }
 if (summary.median_ci_gate_failures.length) {
   console.log(`MEDIAN-CI GATE FAIL: ${summary.median_ci_gate_failures.join(', ')}`);
+}
+const asym = summary.arm_asymmetry;
+if (asym && asym.verdict !== 'pass') {
+  console.log('');
+  console.log(`ARM ASYMMETRY ${asym.verdict.toUpperCase()} (${asym.rule}): phase mean-load ratio ${asym.load_ratio?.toFixed(2)}, heavier on ${asym.heavier_phase}.`);
+  console.log('  The engines are separate runtimes and cannot be interleaved in one measured routine,');
+  console.log('  so a load difference between phases biases the ratio directly. Re-run on a quiet box.');
 }
 console.log(`\nevents:  ${jsonlPath}`);
 console.log(`summary: ${join(outDir, `summary-${stamp}.json`)}`);

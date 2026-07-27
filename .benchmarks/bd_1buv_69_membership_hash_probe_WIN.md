@@ -1,4 +1,12 @@
-# bd-1buv.69 — drop the redundant membership hash probe — WIN, −2.92% instructions on `arch_100x50`
+# bd-1buv.69 — drop the redundant membership hash probe — self-speedup, −2.92% instructions on `arch_100x50`
+
+**Campaign result class:** maintenance-self-speedup
+
+This is frankenmermaid's own code before versus after. Under the 2026-07-27 campaign policy that is
+**maintenance, not campaign output**, and the −2.92% figure below must never be quoted as a
+competitive claim. A campaign win requires a measured ratio against the actual legacy incumbent,
+produced by a harness running the incumbent side by side in the same invocation — which for this
+repo means `scripts/headtohead/run.mjs` against pinned mermaid-js 11.15.0, not this bench.
 
 ## Provenance
 

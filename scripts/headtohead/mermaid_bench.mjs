@@ -392,9 +392,30 @@ const { text: bundleText, version, url, sha256: bundleSha } = await bundle();
 
 const PAGE_HTML =
   '<!DOCTYPE html><html><head><meta charset="utf-8"></head><body><div id="container"></div></body></html>';
+// DISPATCH-TRAP GUARD. Verifying the bundle's SHA-256 before injection proves which *file* we
+// loaded; it does not prove that the object answering `render()` is that library. franken_networkx
+// published a 2.6x win whose baseline was already dispatched to the fast implementation -- genuine
+// NetworkX was 1.88x SLOWER. So assert the incumbent's identity at RUNTIME, inside the page:
+//   - `mermaid.version` (or the bundle's own reported version) equals the pin, and
+//   - `render` is a function that did not come from us -- its source must not be a bound/proxied
+//     shim, which is what a dispatched baseline looks like from the caller's side.
+// Any mismatch aborts the run rather than producing a number.
 const INIT_EXPR = `(() => {
       if (!window.mermaid) return 'window.mermaid missing after bundle eval';
-      window.mermaid.initialize(${JSON.stringify({
+      const m = window.mermaid;
+      if (typeof m.render !== 'function') return 'mermaid.render is not a function';
+      const src = Function.prototype.toString.call(m.render);
+      if (window.__fm_probe) return 'PROBE src=' + src.slice(0, 160) + ' ver=' + String(m.version);
+      // A dispatched baseline presents as a bound wrapper -- a zero-arg native stub with no body.
+      // A genuine bundled implementation, minified arrow or function, carries its own source text.
+      if (/^\s*function\s*\(\s*\)\s*\{\s*\[native code\]\s*\}\s*$/.test(src))
+        return 'mermaid.render is a bound/native shim, not the library function';
+      const reported = String(m.version ?? (typeof m.getVersion === 'function' ? m.getVersion() : ''));
+      const want = ${JSON.stringify(PINS.mermaid.version)};
+      if (reported && reported !== want)
+        return 'mermaid reports version ' + reported + ', pinned ' + want;
+      window.__fm_incumbent = { version: reported || want, version_reported: Boolean(reported) };
+      m.initialize(${JSON.stringify({
         startOnLoad: false,
         securityLevel,
         maxEdges: PINS.mermaid.max_edges,
