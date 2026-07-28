@@ -276,9 +276,9 @@ export const CORPUS = [
   // Lane M grants a quiet window. Their purpose is to expose frankenmermaid's scaling after the
   // comparator curve has ended, without turning a construction-only Lane L turn into a timing claim.
   { id: 'er_schema_5000x8',     gen: 'er_schema',    params: { entities: 5000, attrs: 8 },   class: 'single',     reps_js: 1, warmup_js: 0, reps_rs: 40, warmup_rs: 3, js_budget_ms: 600_000, dnf_allowed: true },
-  { id: 'er_schema_10000x8',    gen: 'er_schema',    params: { entities: 10000, attrs: 8 },  class: 'single',     reps_js: 1, warmup_js: 0, reps_rs: 40, warmup_rs: 3, js_budget_ms: 600_000, dnf_allowed: true },
+  { id: 'er_schema_10000x8',    gen: 'er_schema',    params: { entities: 10000, attrs: 8 },  class: 'single',     reps_js: 1, warmup_js: 0, reps_rs: 40, warmup_rs: 3, js_budget_ms: 2400_000, dnf_allowed: true },
   // 201 successive documents: a real editing session, not a 21-keystroke sketch.
-  { id: 'edit_trace_200x200',   gen: 'edit_trace',   params: { n: 200, revisions: 200 },     class: 'edit_trace', reps_js: 2, warmup_js: 0, reps_rs: 10, warmup_rs: 2, js_budget_ms: 600_000, dnf_allowed: true },
+  { id: 'edit_trace_200x200',   gen: 'edit_trace',   params: { n: 200, revisions: 200 },     class: 'edit_trace', reps_js: 2, warmup_js: 0, reps_rs: 10, warmup_rs: 2, js_budget_ms: 6000_000, dnf_allowed: true },
   // A sustained live-preview session: 1,001 successive full documents. This is long enough to
   // surface cumulative allocator/cache behavior that a 21- or 201-document trace cannot expose.
   { id: 'edit_trace_500x1000',  gen: 'edit_trace',   params: { n: 500, revisions: 1000 },    class: 'edit_trace', reps_js: 1, warmup_js: 0, reps_rs: 12, warmup_rs: 1, js_budget_ms: 600_000, dnf_allowed: true },
@@ -286,7 +286,7 @@ export const CORPUS = [
   { id: 'doc_build_40',         gen: 'doc_build',    params: { copies: 8 },                  class: 'doc_build',  reps_js: 3, warmup_js: 1, reps_rs: 30, warmup_rs: 3, js_budget_ms: 300_000, dnf_allowed: true },
   // A repository-scale CI render: 500 diagrams across the same five syntax families. It measures
   // one whole job, not a per-diagram microbenchmark, and remains unmeasured until a worker window.
-  { id: 'ci_batch_500',         gen: 'doc_build',    params: { copies: 100 },                class: 'doc_build',  reps_js: 1, warmup_js: 0, reps_rs: 20, warmup_rs: 2, js_budget_ms: 600_000, dnf_allowed: true },
+  { id: 'ci_batch_500',         gen: 'doc_build',    params: { copies: 100 },                class: 'doc_build',  reps_js: 1, warmup_js: 0, reps_rs: 20, warmup_rs: 2, js_budget_ms: 1500_000, dnf_allowed: true },
 ];
 
 export function sha256(text) {
