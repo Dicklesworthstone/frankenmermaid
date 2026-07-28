@@ -1,0 +1,158 @@
+{
+  "schema": "frankenmermaid.headtohead.v2",
+  "env": {
+    "captured_at": "2026-07-28T22:56:25.870Z",
+    "git_rev": "1a528e12c5bdef743082106d51a589455734ecb1",
+    "git_dirty": true,
+    "rustc": "rustc 1.99.0-nightly (09ee43b2d 2026-07-27)",
+    "cargo_profile": "release (opt-level=3 for fm-core/parser/layout/render-svg, lto=fat, codegen-units=1)",
+    "rustflags": "-C target-cpu=x86-64-v2 (.cargo/config.toml)",
+    "node": "v24.14.0",
+    "chromium": "Chromium 150.0.7871.128 snap",
+    "kernel": "6.17.0-35-generic",
+    "cpu_model": "AMD Ryzen Threadripper PRO 5975WX 32-Cores",
+    "cpu_count": 64,
+    "total_mem_gb": 215.8,
+    "loadavg_1m": 9.07,
+    "load_warning": null,
+    "pinned_cpu": {
+      "cpu": 0,
+      "busy_pct": 0
+    },
+    "fm_elf_sha256": "a23cf867fd18608c0c3d6a75671dc57573847fb4db6724bc87942944a74cbd6a",
+    "fm_elf_bytes": 7778704,
+    "fm_bracket_elf_sha256": "a23cf867fd18608c0c3d6a75671dc57573847fb4db6724bc87942944a74cbd6a",
+    "fm_bracket_elf_bytes": 7778704,
+    "fm_bracket_same_elf": true
+  },
+  "pins": {
+    "mermaid": "11.15.0",
+    "bundle_url": "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js",
+    "security_level": "strict"
+  },
+  "corpus_items": 1,
+  "ok_items": 0,
+  "dnf_items": 1,
+  "dnf": [
+    {
+      "id": "edit_trace_500x1000",
+      "budget_ms": 600000,
+      "phase": "timed",
+      "fm_p50_ns": 956305457,
+      "speedup_lower_bound": 627.4145939543666,
+      "error": "mermaid did not finish 1 sample(s), exceeded the 512 s budget"
+    }
+  ],
+  "median_ci_gate_rule": "claim magnitude >= max(1.01, 1 + 2 * max(per-engine A/A CI radius))",
+  "measurement_order": [
+    "frankenmermaid-before",
+    "mermaid-js",
+    "frankenmermaid-after"
+  ],
+  "fm_bracket_gate_rule": "Rust pre/post drift magnitude <= max(1.01, 1 + 2 * Rust A/A CI radius)",
+  "fm_bracket_gate_failures": [],
+  "arm_asymmetry": {
+    "phases": [
+      {
+        "phase": "frankenmermaid-before",
+        "seconds": 55.216,
+        "busy_fraction": 0.1174
+      },
+      {
+        "phase": "mermaid-js",
+        "seconds": 602.154,
+        "busy_fraction": 0.115
+      },
+      {
+        "phase": "frankenmermaid-after",
+        "seconds": 54.602,
+        "busy_fraction": 0.1306
+      }
+    ],
+    "busy_ratio": 1.1356521739130434,
+    "heavier_phase": "frankenmermaid-after",
+    "verdict": "provenance_only",
+    "gate": "never",
+    "rule": "global phase CPU busy is provenance; numeric gate uses bracketed Rust A/A"
+  },
+  "cv_gate": "never",
+  "median_ci_gate_failures": [],
+  "speedup": null,
+  "speedup_min_estimator": null,
+  "rows": [
+    {
+      "id": "edit_trace_500x1000",
+      "fm_bracket": {
+        "verdict": "pass",
+        "rule": "rust_pre_post_drift_inside_aa_median_ci_floor",
+        "cv_gate": "never",
+        "reason": null,
+        "before_p50_ns": 956305457,
+        "after_p50_ns": 947738006,
+        "selected": "before",
+        "drift_ratio": 0.9910410936826851,
+        "drift_magnitude": 1.0090398938797016,
+        "null_radius": 0.2159554797253791,
+        "max_decidable_2x": 1.4319109594507582
+      },
+      "class": "edit_trace",
+      "nodes": 834,
+      "edges": 1166,
+      "nodes_max": 834,
+      "edges_max": 1166,
+      "nodes_total": 667667,
+      "edges_total": 833166,
+      "revisions": 1001,
+      "fm_p50_ns": 956305457,
+      "fm_min_ns": 827656609,
+      "fm_cv_pct": 8.8,
+      "fm_mad_pct": 6.77,
+      "fm_null_control": {
+        "arm_a_sha256": "e3c9f3b34ec6bdfce4abb631934a8a027368094898efe8bdbf804f2d01b0709e",
+        "arm_b_sha256": "e3c9f3b34ec6bdfce4abb631934a8a027368094898efe8bdbf804f2d01b0709e",
+        "ci95_hi": 1.215955479725379,
+        "ci95_lo": 0.8465949703505092,
+        "cv_gate": "never",
+        "cv_pct": 18.12,
+        "half_width": 0.2159554797253791,
+        "kind": "aa_null",
+        "mad_pct": 17.04,
+        "median": 1.0469512431105044,
+        "min_decidable_2x": 1.4319109594507582,
+        "n": 12,
+        "sufficient": true
+      },
+      "fm_profile_ab": {
+        "arm_a_sha256": "e3c9f3b34ec6bdfce4abb631934a8a027368094898efe8bdbf804f2d01b0709e",
+        "arm_b_sha256": "e0bef81f39bae47206f186e4ea9be39411266c03d3555b5f8478059e8bff3121",
+        "ci95_hi": 1.306302279847937,
+        "ci95_lo": 1.0388667737762232,
+        "cv_gate": "never",
+        "cv_pct": 14.33,
+        "half_width": null,
+        "kind": "default_vs_lean",
+        "mad_pct": 14.73,
+        "median": 1.116259582410616,
+        "min_decidable_2x": null,
+        "n": 12,
+        "sufficient": true
+      },
+      "fm_bytes": 550844045,
+      "fm_bytes_lean": 380009832,
+      "fm_lean_p50_ns": 808867142,
+      "lean_slowdown": 0.8458250824349317,
+      "status": "comparator_dnf",
+      "mjs_dnf_kind": "timeout",
+      "mjs_budget_ms": 600000,
+      "mjs_elapsed_ms": 600299,
+      "mjs_dnf_phase": "timed",
+      "error": "mermaid did not finish 1 sample(s), exceeded the 512 s budget",
+      "speedup_lower_bound": 627.4145939543666,
+      "median_ci_gate": {
+        "verdict": "not_applicable",
+        "rule": "dnf_has_no_point_ratio",
+        "cv_gate": "never"
+      }
+    }
+  ]
+}

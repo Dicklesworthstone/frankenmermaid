@@ -19162,10 +19162,25 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   reran only the two failed short rows at start load 6.91. Both median-CI and Rust-bracket gates
   passed; pre/post drift fell to 1.005788× and 1.007437× inside the 1.01× floors. Their accepted
   ratios are recorded in `docs/PERF_LEDGER.md`.
-- **Retry predicate:** retry `ci_batch_500` only with the same contract and enough budget for at
-  least nine mermaid-js null pairs. Retry `er_schema_10000x8` only with a wall budget above 600 s
-  that can decide completion versus a concrete renderer failure. Re-certify the long-edit row only
-  if its pinned input, incumbent bundle, executing ELF, render configuration, sample-isolation
-  contract, or bracket contract changes.
+- **Satisfied CI retry:** `.benchmarks/headtohead/cert-ci500-v1/summary-68a04737-1785279364454.json`
+  used a 1,500 s budget, completed ten isolated mermaid-js A/A pairs plus one real 500-diagram
+  sample, and passed both the median-CI and same-ELF Rust-bracket gates. Its 923.056028× result is
+  recorded in `docs/PERF_LEDGER.md`.
+- **Satisfied ER retry:** `.benchmarks/headtohead/cert-er10k-v1/summary-1a528e12-1785280762909.json`
+  gave `er_schema_10000x8` a 2,400 s budget. Mermaid-js raised `RangeError: Maximum call stack size
+  exceeded` after 625.390 s; the row is `kind=failed`, `CANNOT`, with no ratio or lower bound.
+  Rust selected the slower 33.032404 ms bracket arm after 1.000465× drift cleared its 1.091987×
+  A/A floor.
+- **Measured long-edit DNF:** `.benchmarks/headtohead/cert-edit1001-v1/summary-1a528e12-1785280098686.json`
+  ran the pinned 1,001-revision `edit_trace_500x1000` job. Its largest-revision probe alone took
+  mermaid-js 86.359 s; the complete real sample was still working at the 600.299 s deadline.
+  Frankenmermaid selected the slower 956.305457 ms bracket arm after 1.009040× drift cleared its
+  1.431911× A/A floor. This is `kind=timeout`, not `CANNOT`; there is no point ratio. The artifact
+  records a 627.414594× wall-budget lower bound outside every point-ratio aggregate.
+- **Retry predicate:** retry `edit_trace_500x1000` only with a budget that can complete one real
+  sample plus at least nine full mermaid-js A/A pairs, or after its pinned input, incumbent bundle,
+  executing ELF, render configuration, sample-isolation contract, or bracket contract changes.
+  Re-certify `ci_batch_500` or `er_schema_10000x8` only if the corresponding pinned input,
+  incumbent artifact, executing ELF, or harness contract changes.
 
   Agent: cod (YellowSwan)

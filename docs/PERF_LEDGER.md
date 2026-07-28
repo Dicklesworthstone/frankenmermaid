@@ -324,14 +324,18 @@ only a synthetic unit fixture.
   `RangeError: Maximum call stack size exceeded` results: 2,000-node flowchart (6.5 s),
   5,000-node flowchart (14.4 s), 5,000-node architecture diagram (16.3 s), 10,000-node
   architecture diagram (57.8 s), and 2,500-entity schema (69.3 s). No ratio is stated.
-- **Sixth cannot-render row.** Invocation `7b3caf62-1785229102747` reproduced the same `RangeError`
+- **Additional cannot-render rows.** Invocation `7b3caf62-1785229102747` reproduced the same `RangeError`
   on the 5,000-entity schema after 201.6 s. The identical Rust ELF measured 15.126684 ms before
   Chromium and 14.954413 ms after; 1.011520× drift cleared its 1.023112× A/A floor. No ratio is
-  stated.
+  stated. Invocation `1a528e12-1785280762909` extended the ER schema to 10,000 entities:
+  mermaid-js raised the same `RangeError` after 625.390 s, while the slower bracketed Rust
+  observation was 33.032404 ms. Rust drift was 1.000465× inside its 1.091987× A/A floor. This
+  seventh row is also `CANNOT`, with no ratio or lower bound.
 - **Excluded rows.** `flowchart_small_10` and `flowchart_medium_100` cleared their cross-runtime
   median-CI gates but failed their Rust pre/post bracket at 1.033828× and 1.036809× drift. They are
   absent from this result and were retried separately under the predicate recorded below.
-- **Evidence:** `.benchmarks/headtohead/cert-v8/` and `.benchmarks/headtohead/cert-v10/`.
+- **Evidence:** `.benchmarks/headtohead/cert-v8/`, `.benchmarks/headtohead/cert-v10/`, and
+  `.benchmarks/headtohead/cert-er10k-v1/`.
 - **Retry predicate.** Re-run a row if its input, incumbent bundle, executing ELF, render
   configuration, or bracket contract changes. A bracket failure may be retried only in a quiet
   invocation with the same pinned artifacts; never widen its floor post hoc.
@@ -372,11 +376,33 @@ only a synthetic unit fixture.
   **44.952665 ms**, or **5,885.002591×**. Per revision: **1,316.152 ms** versus **0.223645 ms**.
   The ratio clears the 1.115325× median-CI floor. Mermaid-js CV was 5.07%; this is recorded as
   provenance and does not gate the result.
-- **Corpus aggregate.** Combining the accepted rows in `cert-v8`, `cert-v9`, and this invocation,
-  the 16 measurable rows have median **1,687×** (1,688× min estimator) and range
-  **381× – 9,486×**. The six `RangeError` workloads remain nonnumeric `CANNOT` results outside
+- **Corpus aggregate.** Combining the accepted rows in `cert-v8`, `cert-v9`, this invocation, and
+  `cert-ci500-v1`, the 17 measurable rows have median **1,493×** (1,483× min estimator) and range
+  **381× – 9,486×**. The seven `RangeError` workloads remain nonnumeric `CANNOT` results outside
   every ratio aggregate.
 - **Evidence:** `.benchmarks/headtohead/cert-edit-v7/`; unsuccessful certification attempts and
   their concrete retry predicates remain in `docs/NEGATIVE_EVIDENCE.md`.
 - **Retry predicate.** Re-certify if the trace hash, pinned mermaid-js bundle, render configuration,
   executing Rust ELF, fresh-browser isolation, or Rust-bracket contract changes.
+
+## CERTIFIED INCUMBENT WIN: 500-diagram CI render vs mermaid-js 11.15.0 (2026-07-28)
+
+**Bead:** `bd-ktx5`. **Lane:** cod / HARNESS+FRONTIER (`YellowSwan`).
+**Campaign result class:** incumbent-win
+**Executing ELF SHA-256 (self-reported by process):** `a23cf867fd18608c0c3d6a75671dc57573847fb4db6724bc87942944a74cbd6a`
+**Legacy incumbent arm (same invocation):** name=mermaid-js version=11.15.0 artifact_sha256=70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de invocation_id=68a04737-1785279364454 measured_ratio=923.056028x
+**A/A null control (same invocation):** mermaid-js median 1.007312, 95% CI [0.986341, 1.044076], `n=10`; Rust-before median 0.997020, 95% CI [0.994633, 1.001085], `n=20`; Rust-after median 0.990637, 95% CI [0.986065, 1.006671], `n=20`; largest radius 0.044076, decision floor 1.088153×, `cv_gate=never`.
+
+- **Whole job.** One sample renders 500 diagrams across five syntax families in a single batch.
+  Mermaid-js measured **18,567.800 ms** per job versus frankenmermaid **20.115572 ms**, or
+  **923.056028×**. Per diagram: **37.135600 ms** versus **0.040231 ms**.
+- **Same-ELF phase bracket.** The identical 7,778,704-byte Rust ELF self-reported the same SHA-256
+  before and after Chromium and produced byte-identical default and lean SVG output. Rust-before
+  measured 20.115572 ms; Rust-after measured 19.929141 ms. Drift was 1.009355×, inside the
+  1.027871× Rust A/A floor, so the slower before observation is the denominator.
+- **Gate.** The 923.056028× claim clears the 1.088153× median-CI floor. Mermaid-js CV 4.53% and
+  phase-load asymmetry 1.42× are provenance only and do not gate the result.
+- **Evidence:** `.benchmarks/headtohead/cert-ci500-v1/`.
+- **Retry predicate.** Re-certify if the 500-diagram input hash, diagram mix, pinned mermaid-js
+  bundle, render configuration, executing Rust ELF, fresh-browser isolation, or bracket contract
+  changes.

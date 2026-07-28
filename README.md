@@ -1602,19 +1602,24 @@ Property-based tests verify determinism across random graph shapes (up to 20 nod
 | 2,500-entity database schema | 6.89 ms | `RangeError` after 69.3 s |
 | 5,000-entity database schema | 15.13 ms | `RangeError` after 201.6 s |
 | 10,000-node architecture diagram | 10.80 ms | `RangeError` after 57.8 s |
+| 10,000-entity database schema | 33.03 ms | `RangeError` after 625.4 s |
 
 This is a crash, not a timeout, so no speedup ratio is stated for these rows — a figure derived from
 a wall-clock budget would be an invented number. The harness records them as `CANNOT` and excludes
 them from every aggregate.
 
+A 1,001-revision live-edit job over a growing 500-node flowchart completes in 0.956 s with
+frankenmermaid. Mermaid-js remains working at the 600-second deadline. That row is a `DNF-timeout`,
+not a crash, and has no point ratio.
+
 #### Speedup where both engines complete
 
-Across the 16 corpus items mermaid-js can render, each measured side-by-side in one invocation
+Across the 17 corpus items mermaid-js can render, each measured side-by-side in one invocation
 against pinned mermaid-js `11.15.0`:
 
 | Metric | frankenmermaid vs mermaid-js |
 |---|---|
-| **Median** | **1,687×** faster (1,688× by the min estimator) |
+| **Median** | **1,493×** faster (1,483× by the min estimator) |
 | Range | 381× – 9,486× |
 
 | Workload | frankenmermaid | mermaid-js 11.15.0 | |
@@ -1623,6 +1628,7 @@ against pinned mermaid-js `11.15.0`:
 | 500-node flowchart | 0.350 ms | 1,228 ms | **3,504×** |
 | Dense DAG, 200 nodes / 790 edges | 0.384 ms | 1,805 ms | **4,696×** |
 | 40-diagram documentation build | 0.038 ms/diagram | 37.0 ms/diagram | **964×** |
+| 500-diagram CI render | 20.116 ms/job | 18,567.8 ms/job | **923×** |
 | 21-revision live-edit session | 0.125 ms/keystroke | 148.2 ms/keystroke | **1,185×** |
 | 201-revision live-edit session | 0.224 ms/keystroke | 1,316.2 ms/keystroke | **5,885×** |
 

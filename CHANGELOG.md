@@ -30,17 +30,22 @@ negative-evidence ledger (win-rate is auditable, not survivorship-filtered).
 **Headline:** from 2,000 nodes upward, **mermaid-js `11.15.0` does not render the
 diagram at all** — it raises `RangeError: Maximum call stack size exceeded`.
 frankenmermaid renders a 2,000-node flowchart in 1.43 ms, a 10,000-node
-architecture diagram in 10.80 ms, and a 5,000-entity database schema in 15.13 ms.
+architecture diagram in 10.80 ms, and a 10,000-entity database schema in 33.03 ms.
 No speedup ratio is stated for those workloads; the harness records them as
 `CANNOT` and excludes them from every aggregate.
 
-Across the 16 corpus items mermaid-js can render, the full parse → layout →
-render-to-SVG pipeline is a **median 1,687× faster** (1,688× by the min
+Across the 17 corpus items mermaid-js can render, the full parse → layout →
+render-to-SVG pipeline is a **median 1,493× faster** (1,483× by the min
 estimator; range 381× – 9,486×). For every row, both engines run in the same
 invocation over byte-identical SHA-256-pinned input and each measures an A/A null.
 The identical Rust ELF brackets Chromium, pre/post drift must remain inside its
 A/A floor, and the slower Rust median is used. Every published ratio clears
 twice the largest bootstrap 95% null-CI radius.
+
+The 500-diagram CI job measures 20.116 ms versus 18,567.8 ms (**923×**). The
+1,001-revision live-edit job finishes in 0.956 s with frankenmermaid while
+mermaid-js remains working at the 600-second deadline; that row is a nonnumeric
+`DNF-timeout`.
 
 ### SVG rendering (`fm-render-svg`, `fm-core`)
 

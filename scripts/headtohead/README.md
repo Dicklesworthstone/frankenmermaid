@@ -142,10 +142,10 @@ tier covers three additional classes:
 | **EDIT** | `edit_trace_200x200`, `edit_trace_500x1000` | Live-preview sessions of 201 and 1,001 successive full documents, rather than a 21-edit sketch. |
 | **DOC_BUILD / CI** | `doc_build_40`, `ci_batch_500` | A docs page and a repository-scale CI job: 40 and 500 diagrams across five syntax families, each timed as one batch. |
 
-The 5,000-entity ER endpoint is a certified `RangeError`/`CANNOT`, and the 201-revision trace has a
-certified ratio. The 10,000-entity ER endpoint, 1,001-revision trace, and 500-diagram CI batch remain
-unresolved performance workloads; their certified facts are deterministic generation and the hashes
-pinned in `pins.json`.
+The 5,000- and 10,000-entity ER endpoints are certified `RangeError`/`CANNOT` rows. The
+201-revision trace and 500-diagram CI batch have certified ratios. The 1,001-revision trace is a
+measured `DNF-timeout`: frankenmermaid completes the job, while mermaid-js remains working at the
+600-second deadline. Every input remains deterministic and SHA-256-pinned in `pins.json`.
 
 `architecture` uses `subgraph`, which is a different layout problem from the flat generators: the
 cluster boundaries constrain placement and force the router around obstacles the flat shapes never

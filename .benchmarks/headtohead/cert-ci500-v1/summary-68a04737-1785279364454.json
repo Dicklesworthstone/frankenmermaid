@@ -1,0 +1,181 @@
+{
+  "schema": "frankenmermaid.headtohead.v2",
+  "env": {
+    "captured_at": "2026-07-28T22:48:45.246Z",
+    "git_rev": "68a04737770ddfe0183deaf2cc539848362d29eb",
+    "git_dirty": true,
+    "rustc": "rustc 1.99.0-nightly (09ee43b2d 2026-07-27)",
+    "cargo_profile": "release (opt-level=3 for fm-core/parser/layout/render-svg, lto=fat, codegen-units=1)",
+    "rustflags": "-C target-cpu=x86-64-v2 (.cargo/config.toml)",
+    "node": "v24.14.0",
+    "chromium": "Chromium 150.0.7871.128 snap",
+    "kernel": "6.17.0-35-generic",
+    "cpu_model": "AMD Ryzen Threadripper PRO 5975WX 32-Cores",
+    "cpu_count": 64,
+    "total_mem_gb": 215.8,
+    "loadavg_1m": 9.02,
+    "load_warning": null,
+    "pinned_cpu": {
+      "cpu": 2,
+      "busy_pct": 0
+    },
+    "fm_elf_sha256": "a23cf867fd18608c0c3d6a75671dc57573847fb4db6724bc87942944a74cbd6a",
+    "fm_elf_bytes": 7778704,
+    "fm_bracket_elf_sha256": "a23cf867fd18608c0c3d6a75671dc57573847fb4db6724bc87942944a74cbd6a",
+    "fm_bracket_elf_bytes": 7778704,
+    "fm_bracket_same_elf": true
+  },
+  "pins": {
+    "mermaid": "11.15.0",
+    "bundle_url": "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js",
+    "security_level": "strict"
+  },
+  "corpus_items": 1,
+  "ok_items": 1,
+  "dnf_items": 0,
+  "dnf": [],
+  "median_ci_gate_rule": "claim magnitude >= max(1.01, 1 + 2 * max(per-engine A/A CI radius))",
+  "measurement_order": [
+    "frankenmermaid-before",
+    "mermaid-js",
+    "frankenmermaid-after"
+  ],
+  "fm_bracket_gate_rule": "Rust pre/post drift magnitude <= max(1.01, 1 + 2 * Rust A/A CI radius)",
+  "fm_bracket_gate_failures": [],
+  "arm_asymmetry": {
+    "phases": [
+      {
+        "phase": "frankenmermaid-before",
+        "seconds": 1.917,
+        "busy_fraction": 0.1042
+      },
+      {
+        "phase": "mermaid-js",
+        "seconds": 434.629,
+        "busy_fraction": 0.1477
+      },
+      {
+        "phase": "frankenmermaid-after",
+        "seconds": 1.883,
+        "busy_fraction": 0.1318
+      }
+    ],
+    "busy_ratio": 1.4174664107485604,
+    "heavier_phase": "mermaid-js",
+    "verdict": "provenance_only",
+    "gate": "never",
+    "rule": "global phase CPU busy is provenance; numeric gate uses bracketed Rust A/A"
+  },
+  "cv_gate": "never",
+  "median_ci_gate_failures": [],
+  "speedup": {
+    "min": 923.0560284340908,
+    "median": 923.0560284340908,
+    "max": 923.0560284340908
+  },
+  "speedup_min_estimator": {
+    "min": 943.5279626324755,
+    "median": 943.5279626324755,
+    "max": 943.5279626324755
+  },
+  "rows": [
+    {
+      "id": "ci_batch_500",
+      "fm_bracket": {
+        "verdict": "pass",
+        "rule": "rust_pre_post_drift_inside_aa_median_ci_floor",
+        "cv_gate": "never",
+        "reason": null,
+        "before_p50_ns": 20115572,
+        "after_p50_ns": 19929141,
+        "selected": "before",
+        "drift_ratio": 0.9907320060299553,
+        "drift_magnitude": 1.0093546932103095,
+        "null_radius": 0.013935275208633913,
+        "max_decidable_2x": 1.0278705504172678
+      },
+      "class": "doc_build",
+      "nodes": 5690,
+      "edges": 5890,
+      "nodes_max": 18,
+      "edges_max": 18,
+      "nodes_total": 5690,
+      "edges_total": 5890,
+      "revisions": 500,
+      "fm_p50_ns": 20115572,
+      "fm_min_ns": 19679120,
+      "fm_cv_pct": 5.67,
+      "fm_mad_pct": 0.65,
+      "fm_null_control": {
+        "arm_a_sha256": "28e04524dc7f20cab62bcf3743b7f3e85decb2bde42cf2eedf247d86aee51163",
+        "arm_b_sha256": "28e04524dc7f20cab62bcf3743b7f3e85decb2bde42cf2eedf247d86aee51163",
+        "ci95_hi": 1.0010853776890327,
+        "ci95_lo": 0.9946332035596692,
+        "cv_gate": "never",
+        "cv_pct": 6.23,
+        "half_width": 0.005366796440330779,
+        "kind": "aa_null",
+        "mad_pct": 0.41,
+        "median": 0.9970195318651784,
+        "min_decidable_2x": 1.0107335928806616,
+        "n": 20,
+        "sufficient": true
+      },
+      "fm_profile_ab": {
+        "arm_a_sha256": "28e04524dc7f20cab62bcf3743b7f3e85decb2bde42cf2eedf247d86aee51163",
+        "arm_b_sha256": "417f0942bcb3a30b371c80526fb78bca4701500e76bfdfcc65c5b4e668b90d3a",
+        "ci95_hi": 1.1371772387093477,
+        "ci95_lo": 1.117144969918632,
+        "cv_gate": "never",
+        "cv_pct": 4.26,
+        "half_width": null,
+        "kind": "default_vs_lean",
+        "mad_pct": 1.34,
+        "median": 1.1290515162491834,
+        "min_decidable_2x": null,
+        "n": 20,
+        "sufficient": true
+      },
+      "fm_bytes": 8607008,
+      "fm_bytes_lean": 6847220,
+      "fm_lean_p50_ns": 17867526,
+      "lean_slowdown": 0.8882434961332444,
+      "mjs_p50_ns": 18567800000,
+      "mjs_min_ns": 18567800000,
+      "mjs_cv_pct": 0,
+      "mjs_mad_pct": 0,
+      "mjs_null_control": {
+        "n": 10,
+        "sufficient": true,
+        "median": 1.0073119106377149,
+        "ci95_lo": 0.986341498730955,
+        "ci95_hi": 1.044076404544865,
+        "half_width": 0.044076404544864944,
+        "min_decidable_2x": 1.0881528090897299,
+        "cv_pct": 4.53,
+        "mad_pct": 2.21,
+        "cv_gate": "never",
+        "checksum_bytes": 366936295
+      },
+      "mjs_bytes": 18234826,
+      "speedup": 923.0560284340908,
+      "speedup_min": 943.5279626324755,
+      "speedup_lean": 1039.1925552535924,
+      "bytes_ratio": 2.1186021902152294,
+      "bytes_ratio_lean": 2.6630991847786403,
+      "fm_ns_per_revision": 40231.144,
+      "mjs_ns_per_revision": 37135600,
+      "median_ci_gate": {
+        "verdict": "pass",
+        "rule": "null_ci95_2x_margin",
+        "cv_gate": "never",
+        "reason": null,
+        "claim_ratio": 923.0560284340908,
+        "claim_magnitude": 923.0560284340908,
+        "null_radius": 0.044076404544864944,
+        "min_decidable_2x": 1.0881528090897299
+      },
+      "status": "ok"
+    }
+  ]
+}
