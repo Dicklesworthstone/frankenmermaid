@@ -19109,3 +19109,42 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   `.benchmarks/bd_1buv_2_parse_layout_svg_floor_NEGATIVE.md`.
 
   Agent: cod (MagentaGull)
+
+### INCONCLUSIVE: long-edit and remaining head-to-head certification attempts (2026-07-28)
+
+- **Surface:** pinned mermaid-js `11.15.0` versus the self-reporting frankenmermaid head-to-head
+  path, especially `edit_trace_200x200`. These are harness-adjudication rows, not source levers and
+  not competitive claims. The executing Rust ELF in every attempt self-reported SHA-256
+  `a23cf867fd18608c0c3d6a75671dc57573847fb4db6724bc87942944a74cbd6a`.
+- **Short long-edit attempt:** `.benchmarks/headtohead/cert-edit-v4/summary-a4ba2ab9-1785204806730.json`
+  observed one mermaid-js render at 299.6773 s and one Rust median at 47.014973 ms, but the
+  mermaid-js null had `n=0`. The displayed 6,374.08× ratio is therefore unscored and must not be
+  quoted. Phase CPU busy was also 2.207× heavier during mermaid-js.
+- **Accumulated-browser attempt:** `.benchmarks/headtohead/cert-edit-v4/summary-a4ba2ab9-1785216890622.json`
+  exhausted the 12,000 s deadline after reusing one page across the long null sequence. That harness
+  did not distinguish a target/page failure from an expired command deadline, so its recorded
+  timeout and 260,269× lower bound are inadmissible. There is no ratio or lower-bound claim from
+  this artifact.
+- **Isolated-sample attempt:** `.benchmarks/headtohead/cert-edit-v5/summary-0816752c-1785220125609.json`
+  used a fresh browser for every null arm and the real sample, detected target failure, and completed
+  the real mermaid-js trace in 413.5204 s versus 45.257973 ms for Rust. Its displayed 9,136.96×
+  ratio cleared the per-engine null-CI gate, but mermaid-js ran in a phase with 2.684× the Rust
+  phase's CPU-busy fraction. With no same-ELF Rust observation after Chromium, this result remains
+  inconclusive and is excluded from the certified corpus.
+- **Remaining-endpoint attempt:** `.benchmarks/headtohead/cert-v4/summary-a4ba2ab9-1785205568883.json`
+  established one nonnumeric result: mermaid-js raised `RangeError: Maximum call stack size
+  exceeded` on `er_schema_5000x8` after 212.387 s. `er_schema_10000x8` was still working at its
+  600 s deadline, so it is only a timeout/DNF, not a cannot-render claim. `ci_batch_500` completed
+  once, but its mermaid-js null had `n=0`; the displayed 955.94× ratio is unscored.
+- **A/A null control (same invocation):** the isolated-sample long-edit attempt measured
+  mermaid-js A/A median 0.999813, 95% CI [0.981738, 1.013144], `n=10`, and Rust A/A median
+  1.005705, 95% CI [0.998210, 1.217092], `n=9`; `cv_gate=never`.
+- **Retry predicate:** rerun `edit_trace_200x200` only with fresh-browser-per-arm crash detection
+  plus the same self-reporting Rust ELF measured before and after Chromium; require byte-identical
+  Rust outputs, Rust pre/post drift inside the larger Rust A/A median-CI floor, at least nine paired
+  null rounds per runtime, and the ratio above twice the largest null-CI radius. Retry
+  `ci_batch_500` only with the same contract and enough budget for at least nine mermaid-js null
+  pairs. Retry `er_schema_10000x8` only with a wall budget above 600 s that can decide
+  completion versus a concrete renderer failure.
+
+  Agent: cod (YellowSwan)
