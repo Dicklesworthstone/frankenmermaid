@@ -27,12 +27,18 @@ current-HEAD baseline, preserves **byte-identical** output where it touches
 serialization, and every reverted/washed experiment is logged in the
 negative-evidence ledger (win-rate is auditable, not survivorship-filtered).
 
-**Headline:** on the pinned browser harness the full parse → layout →
-render-to-SVG pipeline is a **median ≈871× faster** (range 230× – 4,740×;
-conservative min-estimator median ≈800×) than the reference **mermaid-js
-`11.15.0`** renderer across an identical 13-diagram corpus, all items passing the
-5% median-absolute-deviation gate; wide-graph full pipelines run **63.7× – 124×**
-faster ([`evidence/ledger/mermaid-js-head-to-head.toml`](https://github.com/Dicklesworthstone/frankenmermaid/blob/main/evidence/ledger/mermaid-js-head-to-head.toml)).
+**Headline:** from 2,000 nodes upward, **mermaid-js `11.15.0` does not render the
+diagram at all** — it raises `RangeError: Maximum call stack size exceeded`.
+frankenmermaid renders a 2,000-node flowchart in 1.44 ms, a 10,000-node
+architecture diagram in 12.45 ms, and a 5,000-entity database schema in 16.96 ms.
+No speedup ratio is stated for those workloads; the harness records them as
+`CANNOT` and excludes them from every aggregate.
+
+Across the 15 corpus items mermaid-js can render, the full parse → layout →
+render-to-SVG pipeline is a **median 1,381× faster** (1,502× by the min
+estimator; range 362× – 8,571×). Both engines run in the same invocation over
+byte-identical SHA-256-pinned input, each measuring a same-invocation A/A null;
+every published ratio clears twice the larger bootstrap 95% null-CI radius.
 
 ### SVG rendering (`fm-render-svg`, `fm-core`)
 
@@ -110,7 +116,7 @@ Numbers above are reproducible from the committed evidence, not prose:
 - **Head-to-head dominance:** [`evidence/ledger/mermaid-js-head-to-head.toml`](https://github.com/Dicklesworthstone/frankenmermaid/blob/main/evidence/ledger/mermaid-js-head-to-head.toml)
   and the raw harness runs in
   [`.benchmarks/headtohead/`](https://github.com/Dicklesworthstone/frankenmermaid/tree/main/.benchmarks/headtohead)
-  (`scripts/mermaid_headtohead_cc.mjs`, pinned Chromium + mermaid-js `11.15.0`).
+  (`scripts/headtohead/run.mjs`, pinned Chromium + mermaid-js `11.15.0`).
 - **Per-lever A/B methodology and every rejected/washed experiment:**
   [`docs/NEGATIVE_EVIDENCE.md`](https://github.com/Dicklesworthstone/frankenmermaid/blob/main/docs/NEGATIVE_EVIDENCE.md)
   (median/MAD gate, paired-null controls, load-independent instruction-count arbiter,
