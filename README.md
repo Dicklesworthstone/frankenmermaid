@@ -1596,12 +1596,12 @@ Property-based tests verify determinism across random graph shapes (up to 20 nod
 
 | Workload | frankenmermaid | mermaid-js 11.15.0 |
 |---|---|---|
-| 2,000-node flowchart | 1.44 ms | `RangeError` after 6.0 s |
-| 5,000-node flowchart | 4.52 ms | `RangeError` after 13.0 s |
-| 5,000-node architecture diagram | 5.94 ms | `RangeError` after 13.8 s |
-| 2,500-entity database schema | 7.73 ms | `RangeError` after 60.2 s |
-| 5,000-entity database schema | 16.96 ms | `RangeError` after 212.4 s |
-| 10,000-node architecture diagram | 12.45 ms | `RangeError` after 51.4 s |
+| 2,000-node flowchart | 1.43 ms | `RangeError` after 6.5 s |
+| 5,000-node flowchart | 4.08 ms | `RangeError` after 14.4 s |
+| 5,000-node architecture diagram | 5.21 ms | `RangeError` after 16.3 s |
+| 2,500-entity database schema | 6.89 ms | `RangeError` after 69.3 s |
+| 5,000-entity database schema | 15.13 ms | `RangeError` after 201.6 s |
+| 10,000-node architecture diagram | 10.80 ms | `RangeError` after 57.8 s |
 
 This is a crash, not a timeout, so no speedup ratio is stated for these rows — a figure derived from
 a wall-clock budget would be an invented number. The harness records them as `CANNOT` and excludes
@@ -1609,21 +1609,22 @@ them from every aggregate.
 
 #### Speedup where both engines complete
 
-Across the 15 corpus items mermaid-js can render, measured in the same invocation against pinned
-mermaid-js `11.15.0`:
+Across the 16 corpus items mermaid-js can render, each measured side-by-side in one invocation
+against pinned mermaid-js `11.15.0`:
 
 | Metric | frankenmermaid vs mermaid-js |
 |---|---|
-| **Median** | **1,381×** faster (1,502× by the min estimator) |
-| Range | 362× – 8,571× |
+| **Median** | **1,687×** faster (1,688× by the min estimator) |
+| Range | 381× – 9,486× |
 
 | Workload | frankenmermaid | mermaid-js 11.15.0 | |
 |---|---|---|---|
-| 1,000-entity database schema | 1.91 ms | 16,372 ms | **8,571×** |
-| 500-node flowchart | 0.358 ms | 1,202 ms | **3,356×** |
-| Dense DAG, 200 nodes / 790 edges | 0.39 ms | 1,700 ms | **4,371×** |
-| 40-diagram documentation build | 0.038 ms/diagram | 36.4 ms/diagram | **950×** |
-| 21-revision live-edit session | 0.131 ms/keystroke | 147.5 ms/keystroke | **1,129×** |
+| 1,000-entity database schema | 1.82 ms | 17,258 ms | **9,486×** |
+| 500-node flowchart | 0.350 ms | 1,228 ms | **3,504×** |
+| Dense DAG, 200 nodes / 790 edges | 0.384 ms | 1,805 ms | **4,696×** |
+| 40-diagram documentation build | 0.038 ms/diagram | 37.0 ms/diagram | **964×** |
+| 21-revision live-edit session | 0.125 ms/keystroke | 148.2 ms/keystroke | **1,185×** |
+| 201-revision live-edit session | 0.224 ms/keystroke | 1,316.2 ms/keystroke | **5,885×** |
 
 Every row above clears the gate described below. The harness self-reports the SHA-256 of the
 executing binary (`a23cf867…`), verifies a SHA-256 pin for each corpus item and for the mermaid
@@ -1632,10 +1633,12 @@ a dispatched stand-in.
 
 **How these numbers are kept honest** (this is a performance-campaign release — see [`CHANGELOG.md`](CHANGELOG.md)):
 
-- **Same-input, same-target comparison.** A dominance claim counts only as `frankenmermaid_time / mermaid_js_time` for the *same* diagram, render target, warmup policy, and output-validity gate — never cross-machine or cross-workload.
-- **Paired-null median-CI gate.** Each engine runs a same-invocation A/A control, and the
-  cross-runtime median ratio must clear twice the larger bootstrap 95% null-CI radius. CV and MAD are
-  reported, never gated on.
+- **Same-input, same-target comparison.** A dominance claim counts only as `mermaid_js_time / frankenmermaid_time` for the *same* diagram, render target, warmup policy, and output-validity gate — never cross-machine or cross-workload.
+- **Paired-null median-CI gate.** Each engine runs a same-invocation A/A control. The driver also
+  runs the identical self-reporting Rust ELF before and after Chromium, requires byte-identical
+  output and pre/post drift inside the Rust A/A floor, and uses the slower Rust median. The
+  cross-runtime ratio must clear twice the largest bootstrap 95% null-CI radius. CV, MAD, and global
+  phase load are reported, never gated on.
 - **Paired-null for micro-levers.** Individual optimizations are A/B'd same-invocation with interleaved arms and a no-op/null control; because code-layout noise moves wall-time by ~5%, load-independent **instruction-count** is the arbiter for sub-noise levers.
 - **SVG output stays byte-identical.** Render optimizations are gated on `sha256`-identical SVG across the shape battery + golden snapshots — a faster renderer that changed a single byte is rejected.
 - **Every rejected lever is logged.** [`docs/NEGATIVE_EVIDENCE.md`](docs/NEGATIVE_EVIDENCE.md) records the reverted/washed experiments alongside the kept wins, so the campaign's win-rate is auditable rather than survivorship-filtered.

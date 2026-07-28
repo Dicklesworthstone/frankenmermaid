@@ -23,6 +23,12 @@ env -u CARGO_TARGET_DIR cargo build --profile release \
 # 3. run both engines over byte-identical inputs
 node scripts/headtohead/run.mjs \
   --fm-bin target/release/examples/headtohead
+
+# The 201-revision certification needs enough wall budget for nine full A/A pairs.
+node scripts/headtohead/run.mjs \
+  --fm-bin target/release/examples/headtohead \
+  --only edit_trace_200x200 \
+  --js-budget-scale 20
 ```
 
 Useful flags: `--only <corpus_id>[,<corpus_id>…]`, `--reps-scale 0.25` (fast smoke),
@@ -136,9 +142,10 @@ tier covers three additional classes:
 | **EDIT** | `edit_trace_200x200`, `edit_trace_500x1000` | Live-preview sessions of 201 and 1,001 successive full documents, rather than a 21-edit sketch. |
 | **DOC_BUILD / CI** | `doc_build_40`, `ci_batch_500` | A docs page and a repository-scale CI job: 40 and 500 diagrams across five syntax families, each timed as one batch. |
 
-The 5k/10k ER endpoints, 1,001-revision trace, and 500-diagram CI batch are **unmeasured
-workloads**, not performance claims. Their current certified facts are deterministic generation and
-the hashes pinned in `pins.json`.
+The 5,000-entity ER endpoint is a certified `RangeError`/`CANNOT`, and the 201-revision trace has a
+certified ratio. The 10,000-entity ER endpoint, 1,001-revision trace, and 500-diagram CI batch remain
+unresolved performance workloads; their certified facts are deterministic generation and the hashes
+pinned in `pins.json`.
 
 `architecture` uses `subgraph`, which is a different layout problem from the flat generators: the
 cluster boundaries constrain placement and force the router around obstacles the flat shapes never
@@ -195,5 +202,5 @@ incremental-layout path is a separate lever (`bd-1buv.3`) and is not exercised h
 `.benchmarks/headtohead/run-<rev>-<ts>.jsonl` — one event per engine per item.
 `.benchmarks/headtohead/summary-<rev>-<ts>.json` — env fingerprint, pins, joined rows, ratios, gate.
 
-Both use schema `frankenmermaid.headtohead.v2`; every record carries per-engine null controls and a
-`median_ci_gate` verdict.
+Both use schema `frankenmermaid.headtohead.v2`; every ratio row carries per-engine null controls, a
+`median_ci_gate` verdict, and a same-ELF Rust-before/Rust-after bracket verdict.

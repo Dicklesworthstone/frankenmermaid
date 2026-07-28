@@ -19131,20 +19131,41 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   ratio cleared the per-engine null-CI gate, but mermaid-js ran in a phase with 2.684× the Rust
   phase's CPU-busy fraction. With no same-ELF Rust observation after Chromium, this result remains
   inconclusive and is excluded from the certified corpus.
+- **Default-budget bracket attempt:** `.benchmarks/headtohead/cert-edit-v6/summary-7b3caf62-1785221762998.json`
+  measured the same Rust ELF before and after Chromium and passed the bracket at 1.018367× drift
+  against a 1.051961× floor. The 600 s item budget afforded one real mermaid-js sample but zero null
+  pairs, so the displayed 5,724.52× ratio is unscored. Its concrete retry predicate was the same
+  pinned workload with a budget large enough for at least nine complete null pairs.
+- **Base-corpus bracket attempt:** `.benchmarks/headtohead/cert-v8/summary-7b3caf62-1785228548577.json`
+  accepted 13 numeric rows and reproduced five nonnumeric `RangeError` results.
+  `flowchart_small_10` and `flowchart_medium_100` cleared their cross-runtime null-CI gates but
+  failed the Rust bracket: pre/post drift was 1.033828× versus a 1.01× floor and 1.036809× versus a
+  1.015791× floor. Their displayed 897.34× and 1,149.51× ratios are unscored. The concrete retry
+  predicate was a quiet invocation of only those two pinned rows with the same ELF and incumbent.
 - **Remaining-endpoint attempt:** `.benchmarks/headtohead/cert-v4/summary-a4ba2ab9-1785205568883.json`
   established one nonnumeric result: mermaid-js raised `RangeError: Maximum call stack size
   exceeded` on `er_schema_5000x8` after 212.387 s. `er_schema_10000x8` was still working at its
   600 s deadline, so it is only a timeout/DNF, not a cannot-render claim. `ci_batch_500` completed
   once, but its mermaid-js null had `n=0`; the displayed 955.94× ratio is unscored.
+- **Current-contract nonnumeric rerun:** `.benchmarks/headtohead/cert-v10/summary-7b3caf62-1785229102747.json`
+  reproduced the `er_schema_5000x8` `RangeError` after 201.575 s. The identical Rust ELF bracket
+  passed at 1.011520× drift against a 1.023112× A/A floor and selected the slower 15.126684 ms
+  observation. This remains `CANNOT` with no ratio.
 - **A/A null control (same invocation):** the isolated-sample long-edit attempt measured
   mermaid-js A/A median 0.999813, 95% CI [0.981738, 1.013144], `n=10`, and Rust A/A median
   1.005705, 95% CI [0.998210, 1.217092], `n=9`; `cv_gate=never`.
-- **Retry predicate:** rerun `edit_trace_200x200` only with fresh-browser-per-arm crash detection
-  plus the same self-reporting Rust ELF measured before and after Chromium; require byte-identical
-  Rust outputs, Rust pre/post drift inside the larger Rust A/A median-CI floor, at least nine paired
-  null rounds per runtime, and the ratio above twice the largest null-CI radius. Retry
-  `ci_batch_500` only with the same contract and enough budget for at least nine mermaid-js null
-  pairs. Retry `er_schema_10000x8` only with a wall budget above 600 s that can decide
-  completion versus a concrete renderer failure.
+- **Satisfied retry:** `.benchmarks/headtohead/cert-edit-v7/summary-7b3caf62-1785227302372.json`
+  used `--js-budget-scale 20`, completed nine isolated mermaid-js A/A pairs and two real samples,
+  passed the median-CI and same-ELF Rust-bracket gates, and is recorded as an incumbent win in
+  `docs/PERF_LEDGER.md`.
+- **Satisfied retry:** `.benchmarks/headtohead/cert-v9/summary-7b3caf62-1785228590266.json`
+  reran only the two failed short rows at start load 6.91. Both median-CI and Rust-bracket gates
+  passed; pre/post drift fell to 1.005788× and 1.007437× inside the 1.01× floors. Their accepted
+  ratios are recorded in `docs/PERF_LEDGER.md`.
+- **Retry predicate:** retry `ci_batch_500` only with the same contract and enough budget for at
+  least nine mermaid-js null pairs. Retry `er_schema_10000x8` only with a wall budget above 600 s
+  that can decide completion versus a concrete renderer failure. Re-certify the long-edit row only
+  if its pinned input, incumbent bundle, executing ELF, render configuration, sample-isolation
+  contract, or bracket contract changes.
 
   Agent: cod (YellowSwan)
