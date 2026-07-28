@@ -390,13 +390,32 @@ const PAGE_BENCH = `async ({ texts, reps, warmup, nullReps, tag }) => {
   return out;
 }`;
 
-// One untimed render of a single document, reporting its own cost. Run before the timed loop on
-// budgeted items so we learn what one render costs *before* committing to `reps` of them -- without
-// it, a 19-item corpus either caps reps blindly or spends an hour discovering a single item is slow.
+// One untimed parse + render of a single document, reporting the render's own cost. Parse acceptance
+// is kept outside the timed region and proves that a render failure is not merely invalid syntax.
+// Run before the timed loop on budgeted items so we learn what one render costs *before* committing
+// to `reps` of them -- without it, a large corpus either caps reps blindly or spends an hour
+// discovering a single item is slow.
 const PAGE_PROBE = `async ({ text, tag }) => {
+  const parsed = await window.mermaid.parse(text);
   const t0 = performance.now();
-  const r = await window.mermaid.render(tag + '_probe', text);
-  return { ms: performance.now() - t0, bytes: r.svg.length, svg: r.svg };
+  try {
+    const r = await window.mermaid.render(tag + '_probe', text);
+    return {
+      ms: performance.now() - t0,
+      bytes: r.svg.length,
+      svg: r.svg,
+      parseAccepted: parsed !== false,
+      renderError: null,
+    };
+  } catch (e) {
+    return {
+      ms: performance.now() - t0,
+      bytes: null,
+      svg: null,
+      parseAccepted: parsed !== false,
+      renderError: String((e && e.message) || e),
+    };
+  }
 }`;
 
 if (has('self-test')) {
@@ -649,6 +668,9 @@ try {
       input_sha256: sha256(joined),
       input_bytes: Buffer.byteLength(joined, 'utf8'),
     };
+    let probeMs = null;
+    let probeInputBytes = null;
+    let probeParseAccepted = null;
 
     /**
      * Record a did-not-finish and re-arm the browser. Only reachable for `dnf_allowed` items.
@@ -671,6 +693,7 @@ try {
         budget_ms: budgetMs,
         elapsed_ms: elapsed,
         wall_s: elapsed / 1000,
+        probe_parse_accepted: probeParseAccepted,
       }));
       // The page is wedged inside mermaid's synchronous layout; nothing short of a new process
       // gets it back.
@@ -680,16 +703,25 @@ try {
 
     // Probe phase: one untimed render of the largest revision, so an item that cannot finish is
     // discovered in one render rather than `warmup + reps` of them.
-    let probeMs = null;
-    let probeInputBytes = null;
     if (budgetMs) {
       try {
         const probe = largestInput(texts);
         probeInputBytes = probe.bytes;
         const p = await evaluateInPage(PAGE_PROBE, { text: probe.text, tag }, budgetMs);
         if (p.exceptionDetails) throw new Error(p.exceptionDetails.text);
-        probeMs = p.result.value.ms;
-        const bad = validate(p.result.value.svg);
+        const probeResult = p.result?.value;
+        if (!probeResult || typeof probeResult !== 'object') {
+          throw new Error('probe returned no structured result');
+        }
+        probeParseAccepted = probeResult.parseAccepted === true;
+        if (!probeParseAccepted) {
+          throw new Error('mermaid.parse did not accept the probe input');
+        }
+        if (probeResult.renderError) {
+          throw new Error(`render failed after parse accepted: ${probeResult.renderError}`);
+        }
+        probeMs = probeResult.ms;
+        const bad = validate(probeResult.svg);
         if (bad) throw new Error(bad);
         log(`probe ${item.id}: ${(probeMs / 1000).toFixed(2)}s for the largest revision`);
       } catch (e) {
@@ -778,6 +810,7 @@ try {
       budget_ms: budgetMs,
       probe_ms: probeMs === null ? null : Math.round(probeMs),
       probe_input_bytes: probeInputBytes,
+      probe_parse_accepted: probeParseAccepted,
       render_ns: Object.fromEntries(
         Object.entries(ms)
           .filter(([k]) => !['cv_pct', 'mad_pct'].includes(k))

@@ -170,9 +170,11 @@ the library work and output serialization that differ between the implementation
 
 At XL sizes the honest question is not "how much faster" but "does the comparator finish at all".
 Items in the new tier carry `js_budget_ms` (a wall budget for the mermaid arm) and `dnf_allowed`.
-The mermaid runner first does one untimed **probe** render of the item's largest UTF-8 input under that
-budget, so an item that cannot be rendered is discovered in one render rather than `warmup + reps`
-of them. Two outcomes are recorded, and they support different claims:
+The mermaid runner first does one untimed `mermaid.parse()` plus **probe** render of the item's
+largest UTF-8 input under that budget. Parse acceptance is recorded separately, so a renderer
+failure cannot be confused with invalid syntax, and an item that cannot be rendered is discovered
+in one render rather than `warmup + reps` of them. Two outcomes are recorded, and they support
+different claims:
 
 - **`kind: "timeout"`** — mermaid was still working when the budget expired. That bounds the speedup
   from below (`budget / fm_p50`), reported as `>Nx`, explicitly a bound and not a measurement.
