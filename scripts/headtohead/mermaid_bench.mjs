@@ -31,6 +31,8 @@ import { CORPUS, REVISION_SEP, generate, sha256 } from './corpus.mjs';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PINS = JSON.parse(readFileSync(join(HERE, 'pins.json'), 'utf8'));
 const MIN_NULL_ROUNDS = 9;
+const ISOLATED_NULL_ROUNDS = 10;
+const ISOLATED_SAMPLE_MIN_DOCUMENTS = 100;
 const BOOTSTRAP_RESAMPLES = 2_000;
 
 // Bundle cache. Read by node, never by the browser, so a hidden dir is fine here.
@@ -85,6 +87,11 @@ async function bundle() {
 class Cdp {
   #ws; #next = 1; #pending = new Map();
 
+  #failPending(error) {
+    for (const pending of this.#pending.values()) pending.reject(error);
+    this.#pending.clear();
+  }
+
   static async attach(wsUrl) {
     const ws = new WebSocket(wsUrl);
     await new Promise((res, rej) => {
@@ -95,12 +102,23 @@ class Cdp {
     c.#ws = ws;
     ws.addEventListener('message', (ev) => {
       const msg = JSON.parse(ev.data);
-      if (!('id' in msg)) return; // a CDP event, not a response to one of our commands
+      if (!('id' in msg)) {
+        if (msg.method === 'Inspector.targetCrashed' || msg.method === 'Target.targetCrashed') {
+          c.#failPending(new Error(`chromium target crashed during benchmark (${msg.method})`));
+        }
+        return;
+      }
       const p = c.#pending.get(msg.id);
       if (!p) return;
       c.#pending.delete(msg.id);
       if (msg.error) p.reject(new Error(`${msg.error.message} (cdp ${msg.error.code})`));
       else p.resolve(msg.result);
+    });
+    ws.addEventListener('close', () => {
+      c.#failPending(new Error('chromium devtools connection closed during benchmark'));
+    });
+    ws.addEventListener('error', () => {
+      c.#failPending(new Error('chromium devtools connection failed during benchmark'));
     });
     return c;
   }
@@ -161,7 +179,11 @@ class Deadline extends Error {}
  * budget is generous -- a DNF must mean mermaid did not finish, never that the harness was impatient.
  */
 function withDeadline(promise, ms) {
-  if (!Number.isFinite(ms) || ms <= 0) return promise;
+  if (!Number.isFinite(ms)) return promise;
+  if (ms <= 0) {
+    promise.catch(() => {});
+    return Promise.reject(new Deadline('item wall budget already exhausted'));
+  }
   let timer;
   return Promise.race([
     promise.finally(() => clearTimeout(timer)),
@@ -267,6 +289,18 @@ function nullControl(ratios, checksumBytes) {
   };
 }
 
+/**
+ * Long edit/CI traces cannot safely repeat every null arm in one Chromium page. mermaid retains
+ * enough process state across hundreds of renders that an A/A prelude can turn the eventual real
+ * sample into the nineteenth consecutive editing session -- or kill the renderer before it gets
+ * there. Each sample therefore gets fresh browser state once an item reaches 100 documents. The
+ * browser processes remain children of this one harness invocation, and every arm still runs the
+ * runtime identity check against the pinned bundle.
+ */
+function isolatesSampleState(documentCount) {
+  return documentCount >= ISOLATED_SAMPLE_MIN_DOCUMENTS;
+}
+
 // ---------------------------------------------------------------- in-page benchmark
 
 // Runs inside chromium. One timed sample renders every revision of the item in order (a single-shot
@@ -354,6 +388,12 @@ if (has('self-test')) {
   if (insufficient.sufficient || insufficient.n !== 1) {
     throw new Error(`null sample-floor regression: ${JSON.stringify(insufficient)}`);
   }
+  if (
+    isolatesSampleState(ISOLATED_SAMPLE_MIN_DOCUMENTS - 1) ||
+    !isolatesSampleState(ISOLATED_SAMPLE_MIN_DOCUMENTS)
+  ) {
+    throw new Error('long-trace sample-isolation threshold regression');
+  }
   new Script(`(${PAGE_BENCH})`);
   new Script(`(${PAGE_PROBE})`);
   console.log(JSON.stringify({
@@ -378,6 +418,7 @@ function validate(svg) {
 
 const only = arg('only');
 const repsScale = Number(arg('reps-scale', '1'));
+const forceSampleIsolation = has('isolate-samples');
 // Scales every item's `js_budget_ms`. A smoke run wants short budgets; a claim run wants the
 // declared ones. Recorded on every DNF row, because "did not finish" is only meaningful with the
 // budget it did not finish inside.
@@ -472,6 +513,87 @@ function evaluateInPage(fn, args, deadlineMs) {
   );
 }
 
+function remainingBudgetMs(startedAt, budgetMs) {
+  if (!Number.isFinite(budgetMs)) return null;
+  const remaining = budgetMs - (Date.now() - startedAt);
+  if (remaining <= 0) throw new Deadline('item wall budget already exhausted');
+  return remaining;
+}
+
+async function replaceBrowser() {
+  killBrowser(browser);
+  browser = await newBrowser();
+}
+
+/**
+ * Render one complete multi-document sample in fresh Chromium state.
+ *
+ * Browser launch and bundle injection are outside the timed interval but inside the item wall
+ * budget. The returned timing still covers every revision, in order, exactly once.
+ */
+async function isolatedSample(texts, tag, startedAt, budgetMs) {
+  await replaceBrowser();
+  const res = await evaluateInPage(
+    PAGE_BENCH,
+    { texts, reps: 1, warmup: 0, nullReps: 0, tag },
+    remainingBudgetMs(startedAt, budgetMs),
+  );
+  if (res.exceptionDetails) throw new Error(res.exceptionDetails.text);
+  const out = res.result.value;
+  const err =
+    out.error ??
+    out.svgs.map(validate).find(Boolean) ??
+    (out.svgs.length === texts.length ? null : 'revision count mismatch') ??
+    (out.times.length === 1 ? null : 'timing sample count mismatch');
+  if (err) throw new Error(err);
+  return {
+    ms: out.times[0],
+    svgs: out.svgs,
+    bytes: out.svgs.reduce((sum, svg) => sum + svg.length, 0),
+  };
+}
+
+/**
+ * Host-orchestrated A/A for long traces. Every arm and every real sample starts from fresh browser
+ * state, but all are children of this one `mermaid_bench.mjs` invocation. Ten null rounds balance
+ * the alternating A-first/B-first order exactly.
+ */
+async function isolatedBenchmark(texts, reps, nullReps, tag, startedAt, budgetMs, itemId) {
+  const nullRatios = [];
+  let nullChecksumBytes = 0;
+  for (let i = 0; i < nullReps; i++) {
+    let a;
+    let b;
+    if (i % 2 === 0) {
+      a = await isolatedSample(texts, `${tag}_null_${i}_a`, startedAt, budgetMs);
+      b = await isolatedSample(texts, `${tag}_null_${i}_b`, startedAt, budgetMs);
+    } else {
+      b = await isolatedSample(texts, `${tag}_null_${i}_b`, startedAt, budgetMs);
+      a = await isolatedSample(texts, `${tag}_null_${i}_a`, startedAt, budgetMs);
+    }
+    nullRatios.push(a.ms / Math.max(Number.EPSILON, b.ms));
+    nullChecksumBytes += a.bytes + b.bytes;
+    log(`null ${itemId}: ${i + 1}/${nullReps}`);
+  }
+
+  const times = [];
+  let svgs = [];
+  for (let i = 0; i < reps; i++) {
+    const measured = await isolatedSample(texts, `${tag}_real_${i}`, startedAt, budgetMs);
+    times.push(measured.ms);
+    svgs = measured.svgs;
+    log(`real ${itemId}: ${i + 1}/${reps}`);
+  }
+  return {
+    times,
+    svgs,
+    nullRatios,
+    nullChecksumBytes,
+    nullOutputValid: true,
+    error: null,
+  };
+}
+
 let failed = false;
 try {
   // Matches run.mjs: one id, or a comma-separated list.
@@ -481,6 +603,8 @@ try {
     const texts = generate(item);
     let reps = Math.max(1, Math.round(item.reps_js * repsScale));
     let nullReps = Math.max(MIN_NULL_ROUNDS, reps);
+    const isolateSamples = forceSampleIsolation || isolatesSampleState(texts.length);
+    if (isolateSamples) nullReps = Math.max(ISOLATED_NULL_ROUNDS, nullReps);
     // A declared `warmup_js: 0` means zero, not one: on an item that takes minutes per render, a
     // warmup pass doubles the item for no statistical gain. `Math.max(1, ...)` still guards the
     // pinned items, whose warmup must never be scaled away by `--reps-scale`.
@@ -567,8 +691,17 @@ try {
 
     const args = { texts, reps, warmup, nullReps, tag };
     let res;
+    let out;
     try {
-      res = await evaluateInPage(PAGE_BENCH, args, budgetMs ? budgetMs - (Date.now() - t0) : null);
+      if (isolateSamples) {
+        out = await isolatedBenchmark(texts, reps, nullReps, tag, t0, budgetMs, item.id);
+      } else {
+        res = await evaluateInPage(
+          PAGE_BENCH,
+          args,
+          budgetMs ? budgetMs - (Date.now() - t0) : null,
+        );
+      }
     } catch (e) {
       if (!item.dnf_allowed) throw new Error(`${item.id}: ${e.message}`);
       await dnf(
@@ -579,8 +712,10 @@ try {
       continue;
     }
 
-    if (res.exceptionDetails) throw new Error(`${item.id}: ${res.exceptionDetails.text}`);
-    const out = res.result.value;
+    if (!isolateSamples) {
+      if (res.exceptionDetails) throw new Error(`${item.id}: ${res.exceptionDetails.text}`);
+      out = res.result.value;
+    }
     // Every revision is validated, not just the last: a trace that silently degrades into mermaid's
     // error placeholder halfway through would otherwise look like a very fast render.
     const err =
@@ -611,6 +746,7 @@ try {
       warmup,
       reps,
       null_reps: nullReps,
+      sample_isolation: isolateSamples ? 'fresh_browser_per_arm' : 'single_browser',
       budget_ms: budgetMs,
       probe_ms: probeMs === null ? null : Math.round(probeMs),
       render_ns: Object.fromEntries(
