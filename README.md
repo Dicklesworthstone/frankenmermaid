@@ -1600,6 +1600,7 @@ Property-based tests verify determinism across random graph shapes (up to 20 nod
 | 5,000-node flowchart | 4.52 ms | `RangeError` after 13.0 s |
 | 5,000-node architecture diagram | 5.94 ms | `RangeError` after 13.8 s |
 | 2,500-entity database schema | 7.73 ms | `RangeError` after 60.2 s |
+| 5,000-entity database schema | 16.96 ms | `RangeError` after 212.4 s |
 | 10,000-node architecture diagram | 12.45 ms | `RangeError` after 51.4 s |
 
 This is a crash, not a timeout, so no speedup ratio is stated for these rows — a figure derived from

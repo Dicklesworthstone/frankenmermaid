@@ -1,0 +1,293 @@
+{
+  "schema": "frankenmermaid.headtohead.v2",
+  "env": {
+    "captured_at": "2026-07-28T02:11:59.841Z",
+    "git_rev": "a4ba2ab9f68e4fa17e0134e75ced72dca631a139",
+    "git_dirty": true,
+    "rustc": "rustc 1.99.0-nightly (dc3f85158 2026-07-26)",
+    "cargo_profile": "release (opt-level=3 for fm-core/parser/layout/render-svg, lto=fat, codegen-units=1)",
+    "rustflags": "-C target-cpu=x86-64-v2 (.cargo/config.toml)",
+    "node": "v24.14.0",
+    "chromium": "Chromium 150.0.7871.128 snap",
+    "kernel": "6.17.0-35-generic",
+    "cpu_model": "AMD Ryzen Threadripper PRO 5975WX 32-Cores",
+    "cpu_count": 64,
+    "total_mem_gb": 215.8,
+    "loadavg_1m": 24.2,
+    "load_warning": "elevated load; absolute timings are not comparable across runs",
+    "pinned_cpu": {
+      "cpu": 16,
+      "busy_pct": 3.6
+    },
+    "fm_elf_sha256": "a23cf867fd18608c0c3d6a75671dc57573847fb4db6724bc87942944a74cbd6a",
+    "fm_elf_bytes": 7778704
+  },
+  "pins": {
+    "mermaid": "11.15.0",
+    "bundle_url": "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js",
+    "security_level": "strict"
+  },
+  "corpus_items": 3,
+  "ok_items": 1,
+  "dnf_items": 2,
+  "dnf": [
+    {
+      "id": "er_schema_5000x8",
+      "budget_ms": 600000,
+      "phase": "probe",
+      "fm_p50_ns": 16959096,
+      "speedup_lower_bound": null,
+      "error": "Uncaught (in promise) RangeError: Maximum call stack size exceeded"
+    },
+    {
+      "id": "er_schema_10000x8",
+      "budget_ms": 600000,
+      "phase": "probe",
+      "fm_p50_ns": 35740553,
+      "speedup_lower_bound": 16787.652949857827,
+      "error": "mermaid did not finish one render, exceeded the 600 s budget"
+    }
+  ],
+  "median_ci_gate_rule": "claim magnitude >= max(1.01, 1 + 2 * max(per-engine A/A CI radius))",
+  "arm_asymmetry": {
+    "phases": [
+      {
+        "phase": "frankenmermaid",
+        "seconds": 12.24,
+        "busy_fraction": 0.2554
+      },
+      {
+        "phase": "mermaid-js",
+        "seconds": 836.025,
+        "busy_fraction": 0.1581
+      }
+    ],
+    "busy_ratio": 1.6154332700822267,
+    "heavier_phase": "frankenmermaid",
+    "verdict": "fail",
+    "rule": "phase CPU-busy ratio <= 1.25"
+  },
+  "cv_gate": "never",
+  "median_ci_gate_failures": [
+    "ci_batch_500"
+  ],
+  "speedup": {
+    "min": 955.9416151062461,
+    "median": 955.9416151062461,
+    "max": 955.9416151062461
+  },
+  "speedup_min_estimator": {
+    "min": 987.3789014893309,
+    "median": 987.3789014893309,
+    "max": 987.3789014893309
+  },
+  "rows": [
+    {
+      "id": "er_schema_5000x8",
+      "class": "single",
+      "nodes": 5000,
+      "edges": 4999,
+      "nodes_max": 5000,
+      "edges_max": 4999,
+      "nodes_total": 5000,
+      "edges_total": 4999,
+      "revisions": 1,
+      "fm_p50_ns": 16959096,
+      "fm_min_ns": 16113187,
+      "fm_cv_pct": 26.91,
+      "fm_mad_pct": 2.75,
+      "fm_null_control": {
+        "arm_a_sha256": "e33d1b8dd4934be05431d20d16ea2d7c71f917d13aa3bf59fe7fb7f6dba0a191",
+        "arm_b_sha256": "e33d1b8dd4934be05431d20d16ea2d7c71f917d13aa3bf59fe7fb7f6dba0a191",
+        "ci95_hi": 1.0040285441279178,
+        "ci95_lo": 0.9695817415774093,
+        "cv_gate": "never",
+        "cv_pct": 28.9,
+        "half_width": 0.030418258422590716,
+        "kind": "aa_null",
+        "mad_pct": 3.15,
+        "median": 0.9944051849664243,
+        "min_decidable_2x": 1.0608365168451814,
+        "n": 40,
+        "sufficient": true
+      },
+      "fm_profile_ab": {
+        "arm_a_sha256": "e33d1b8dd4934be05431d20d16ea2d7c71f917d13aa3bf59fe7fb7f6dba0a191",
+        "arm_b_sha256": "89c8997ede4bdc747a46a774b99f4c559b53ed0a95104c21e1aec325caf15330",
+        "ci95_hi": 1.0721613942940187,
+        "ci95_lo": 1.0196718112882341,
+        "cv_gate": "never",
+        "cv_pct": 22.27,
+        "half_width": null,
+        "kind": "default_vs_lean",
+        "mad_pct": 3.53,
+        "median": 1.0538884194864784,
+        "min_decidable_2x": null,
+        "n": 40,
+        "sufficient": true
+      },
+      "fm_bytes": 13622299,
+      "fm_bytes_lean": 12725466,
+      "fm_lean_p50_ns": 16401694,
+      "lean_slowdown": 0.9671325641413906,
+      "status": "comparator_dnf",
+      "mjs_dnf_kind": "failed",
+      "mjs_budget_ms": 600000,
+      "mjs_elapsed_ms": 212387,
+      "mjs_dnf_phase": "probe",
+      "error": "Uncaught (in promise) RangeError: Maximum call stack size exceeded",
+      "speedup_lower_bound": null,
+      "median_ci_gate": {
+        "verdict": "not_applicable",
+        "rule": "dnf_has_no_point_ratio",
+        "cv_gate": "never"
+      }
+    },
+    {
+      "id": "er_schema_10000x8",
+      "class": "single",
+      "nodes": 10000,
+      "edges": 9999,
+      "nodes_max": 10000,
+      "edges_max": 9999,
+      "nodes_total": 10000,
+      "edges_total": 9999,
+      "revisions": 1,
+      "fm_p50_ns": 35740553,
+      "fm_min_ns": 32467362,
+      "fm_cv_pct": 33.09,
+      "fm_mad_pct": 5.66,
+      "fm_null_control": {
+        "arm_a_sha256": "3fa29bb4bd6515912fc935608ef011cd8066300bfc30b3d46b958582a876ac03",
+        "arm_b_sha256": "3fa29bb4bd6515912fc935608ef011cd8066300bfc30b3d46b958582a876ac03",
+        "ci95_hi": 1.0494242459482597,
+        "ci95_lo": 0.9754026538049714,
+        "cv_gate": "never",
+        "cv_pct": 30.45,
+        "half_width": 0.04942424594825967,
+        "kind": "aa_null",
+        "mad_pct": 8.23,
+        "median": 1.0268330985394036,
+        "min_decidable_2x": 1.0988484918965193,
+        "n": 40,
+        "sufficient": true
+      },
+      "fm_profile_ab": {
+        "arm_a_sha256": "3fa29bb4bd6515912fc935608ef011cd8066300bfc30b3d46b958582a876ac03",
+        "arm_b_sha256": "35073d1f710ff98d0cad69ec26567f212cd29260339fefc777f3f427ed54dc6d",
+        "ci95_hi": 1.06311343121149,
+        "ci95_lo": 1.0160192461582866,
+        "cv_gate": "never",
+        "cv_pct": 32.14,
+        "half_width": null,
+        "kind": "default_vs_lean",
+        "mad_pct": 5.37,
+        "median": 1.0431554385131525,
+        "min_decidable_2x": null,
+        "n": 40,
+        "sufficient": true
+      },
+      "fm_bytes": 27302656,
+      "fm_bytes_lean": 25505820,
+      "fm_lean_p50_ns": 33897453,
+      "lean_slowdown": 0.948431128080195,
+      "status": "comparator_dnf",
+      "mjs_dnf_kind": "timeout",
+      "mjs_budget_ms": 600000,
+      "mjs_elapsed_ms": 600078,
+      "mjs_dnf_phase": "probe",
+      "error": "mermaid did not finish one render, exceeded the 600 s budget",
+      "speedup_lower_bound": 16787.652949857827,
+      "median_ci_gate": {
+        "verdict": "not_applicable",
+        "rule": "dnf_has_no_point_ratio",
+        "cv_gate": "never"
+      }
+    },
+    {
+      "id": "ci_batch_500",
+      "class": "doc_build",
+      "nodes": 5690,
+      "edges": 5890,
+      "nodes_max": 18,
+      "edges_max": 18,
+      "nodes_total": 5690,
+      "edges_total": 5890,
+      "revisions": 500,
+      "fm_p50_ns": 20451249,
+      "fm_min_ns": 19800099,
+      "fm_cv_pct": 6.82,
+      "fm_mad_pct": 1.63,
+      "fm_null_control": {
+        "arm_a_sha256": "28e04524dc7f20cab62bcf3743b7f3e85decb2bde42cf2eedf247d86aee51163",
+        "arm_b_sha256": "28e04524dc7f20cab62bcf3743b7f3e85decb2bde42cf2eedf247d86aee51163",
+        "ci95_hi": 1.0050471827464011,
+        "ci95_lo": 0.9970460727696884,
+        "cv_gate": "never",
+        "cv_pct": 5.3,
+        "half_width": 0.0050471827464011465,
+        "kind": "aa_null",
+        "mad_pct": 0.46,
+        "median": 1.0000045559808899,
+        "min_decidable_2x": 1.0100943654928023,
+        "n": 20,
+        "sufficient": true
+      },
+      "fm_profile_ab": {
+        "arm_a_sha256": "28e04524dc7f20cab62bcf3743b7f3e85decb2bde42cf2eedf247d86aee51163",
+        "arm_b_sha256": "417f0942bcb3a30b371c80526fb78bca4701500e76bfdfcc65c5b4e668b90d3a",
+        "ci95_hi": 1.1315694959095808,
+        "ci95_lo": 1.1107006339366396,
+        "cv_gate": "never",
+        "cv_pct": 6.6,
+        "half_width": null,
+        "kind": "default_vs_lean",
+        "mad_pct": 1.1,
+        "median": 1.1192736477944654,
+        "min_decidable_2x": null,
+        "n": 20,
+        "sufficient": true
+      },
+      "fm_bytes": 8607008,
+      "fm_bytes_lean": 6847220,
+      "fm_lean_p50_ns": 18108651,
+      "lean_slowdown": 0.8854545265181604,
+      "mjs_p50_ns": 19550200000,
+      "mjs_min_ns": 19550200000,
+      "mjs_cv_pct": 0,
+      "mjs_mad_pct": 0,
+      "mjs_null_control": {
+        "n": 0,
+        "sufficient": false,
+        "median": null,
+        "ci95_lo": null,
+        "ci95_hi": null,
+        "half_width": null,
+        "min_decidable_2x": null,
+        "cv_pct": null,
+        "mad_pct": null,
+        "cv_gate": "never",
+        "checksum_bytes": 0
+      },
+      "mjs_bytes": 17842834,
+      "speedup": 955.9416151062461,
+      "speedup_min": 987.3789014893309,
+      "speedup_lean": 1079.6055432290345,
+      "bytes_ratio": 2.073058837635564,
+      "bytes_ratio_lean": 2.6058508416554456,
+      "fm_ns_per_revision": 40902.498,
+      "mjs_ns_per_revision": 39100400,
+      "median_ci_gate": {
+        "verdict": "fail",
+        "rule": "null_ci95_2x_margin",
+        "cv_gate": "never",
+        "reason": "missing or insufficient same-invocation A/A null control",
+        "claim_ratio": 955.9416151062461,
+        "claim_magnitude": null,
+        "null_radius": null,
+        "min_decidable_2x": null
+      },
+      "status": "ok"
+    }
+  ]
+}
