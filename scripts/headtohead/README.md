@@ -29,12 +29,12 @@ Useful flags: `--only <corpus_id>[,<corpus_id>…]`, `--reps-scale 0.25` (fast s
 `--js-budget-scale 0.1` (shrink the mermaid wall budgets for a smoke run), `--skip-mermaid`,
 `--pin-cpu auto|N|off`, `--out <dir>`, `--update-pins`.
 
-Exit codes: `0` green · `1` an engine errored · `3` corpus drift · `4` median-CI gate failed.
+Exit codes: `0` green · `1` an engine errored · `3` corpus drift · `4` median-CI gate failed ·
+`5` the bracketed Rust observations drifted outside their A/A median-CI floor.
 A comparator **DNF** is not an error and does not fail the run — see "Did not finish" below.
 
-A gate failure (`4`) means either the claimed ratio did not clear the measured A/A floor or an arm
-could not produce the minimum null sample. It is **inconclusive**, not a regression. Re-run in an
-assigned quiet window; never re-pin or retune an item to force a pass.
+A gate failure (`4` or `5`) is **inconclusive**, not a regression. Re-run in an assigned quiet
+window; never re-pin or retune an item to force a pass.
 
 ## What is pinned
 
@@ -94,11 +94,18 @@ one binary. The mermaid runner therefore emits its own in-browser `(mermaid, mer
 the same Chromium invocation. The driver uses the **larger** of the Rust and mermaid A/A CI radii, so
 the claim must clear both runtimes' measured floors.
 
+**Same-invocation phase bracket.** The driver runs the identical self-reporting Rust ELF immediately
+before and after the Chromium phase. The two Rust outputs must be byte-identical, and their medians
+must agree inside the larger Rust A/A median-CI floor. Every ratio uses the **slower** Rust median.
+This makes phase-order drift conservative and fail-closed. Aggregate CPU-busy deltas remain
+provenance only because they include each engine's own work and span phases of very different
+lengths.
+
 **Median-CI gate, never CV or MAD.** For each engine,
 `radius = max(abs(ci95_lo - 1), abs(ci95_hi - 1))`. A ratio passes only when its magnitude is at least
-`max(1.01, 1 + 2 * max(radius_rs, radius_js))`. Each null has at least nine paired rounds. `cv_pct`
-and `mad_pct` remain in every record as provenance, with `cv_gate: "never"`; neither can block a
-verdict.
+`max(1.01, 1 + 2 * max(radius_rs_before, radius_rs_after, radius_js))`. Each null has at least nine
+paired rounds. `cv_pct` and `mad_pct` remain in every record as provenance, with
+`cv_gate: "never"`; neither can block a verdict.
 
 On a budgeted XL item that cannot afford nine comparator null rounds, the harness still attempts one
 real sample. A timeout can honestly establish DNF. If it completes, the row is inconclusive and the

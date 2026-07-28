@@ -147,6 +147,64 @@ function medianCiGate(claimRatio, controls) {
   };
 }
 
+/**
+ * Guard a sequential cross-runtime comparison against host drift by measuring the same Rust ELF
+ * on both sides of the Chromium phase. The two Rust observations must agree within their own A/A
+ * median-CI floor; the slower observation is always the denominator used for the public ratio.
+ */
+function fmBracket(before, after) {
+  const controls = [before?.null_control, after?.null_control];
+  const complete =
+    before?.status === 'ok' &&
+    after?.status === 'ok' &&
+    Number.isFinite(before?.pipeline_ns?.p50) &&
+    before.pipeline_ns.p50 > 0 &&
+    Number.isFinite(after?.pipeline_ns?.p50) &&
+    after.pipeline_ns.p50 > 0 &&
+    controls.every(
+      (control) =>
+        control?.sufficient === true &&
+        Number.isFinite(control.half_width) &&
+        Number.isFinite(control.ci95_lo) &&
+        Number.isFinite(control.ci95_hi),
+    );
+  if (!complete) {
+    return {
+      verdict: 'fail',
+      rule: 'rust_pre_post_drift_inside_aa_median_ci_floor',
+      cv_gate: 'never',
+      reason: 'missing or insufficient bracketed Rust A/A measurement',
+      before_p50_ns: before?.pipeline_ns?.p50 ?? null,
+      after_p50_ns: after?.pipeline_ns?.p50 ?? null,
+      selected: null,
+      drift_ratio: null,
+      drift_magnitude: null,
+      max_decidable_2x: null,
+    };
+  }
+
+  const beforeP50 = before.pipeline_ns.p50;
+  const afterP50 = after.pipeline_ns.p50;
+  const driftRatio = afterP50 / beforeP50;
+  const driftMagnitude = Math.max(driftRatio, 1 / driftRatio);
+  const nullRadius = Math.max(...controls.map((control) => control.half_width));
+  const maxDecidable = Math.max(MIN_CLAIM_RATIO, 1 + 2 * nullRadius);
+  const selected = beforeP50 >= afterP50 ? 'before' : 'after';
+  return {
+    verdict: driftMagnitude <= maxDecidable ? 'pass' : 'fail',
+    rule: 'rust_pre_post_drift_inside_aa_median_ci_floor',
+    cv_gate: 'never',
+    reason: driftMagnitude <= maxDecidable ? null : 'Rust phase drift clears its A/A median-CI floor',
+    before_p50_ns: beforeP50,
+    after_p50_ns: afterP50,
+    selected,
+    drift_ratio: driftRatio,
+    drift_magnitude: driftMagnitude,
+    null_radius: nullRadius,
+    max_decidable_2x: maxDecidable,
+  };
+}
+
 if (has('self-test')) {
   const perfect = { sufficient: true, n: 9, ci95_lo: 1, ci95_hi: 1, half_width: 0 };
   const noisy = { sufficient: true, n: 9, ci95_lo: 0.98, ci95_hi: 1.02, half_width: 0.02 };
@@ -165,10 +223,27 @@ if (has('self-test')) {
   if (!validElfSelfReport(validElf) || validElfSelfReport({ ...validElf, elf_sha256: 'unavailable' })) {
     throw new Error('executing-ELF self-report validation regression');
   }
+  const bracketRecord = (p50, nullControl = perfect) => ({
+    status: 'ok',
+    pipeline_ns: { p50 },
+    null_control: nullControl,
+  });
+  const bracketCases = [
+    [bracketRecord(100), bracketRecord(101), 'pass'],
+    [bracketRecord(100), bracketRecord(104, noisy), 'pass'],
+    [bracketRecord(100), bracketRecord(105, noisy), 'fail'],
+    [bracketRecord(100), bracketRecord(101, null), 'fail'],
+  ];
+  for (const [before, after, want] of bracketCases) {
+    const got = fmBracket(before, after).verdict;
+    if (got !== want) throw new Error(`Rust bracket gate regression: want=${want} got=${got}`);
+  }
   console.log(JSON.stringify({
     self_test: 'ok',
-    cases: cases.length,
+    median_ci_cases: cases.length,
+    bracket_cases: bracketCases.length,
     elf_self_report_gate: 'required',
+    rust_pre_post_bracket_gate: 'required',
     cv_gate: 'never',
   }));
   process.exit(0);
@@ -298,16 +373,19 @@ function timedPhase(label, fn) {
   return out;
 }
 
-const fm = timedPhase('frankenmermaid', () => runJsonl('frankenmermaid', fmCmd, fmArgs));
+const fmBefore = timedPhase(
+  'frankenmermaid-before',
+  () => runJsonl('frankenmermaid-before', fmCmd, fmArgs),
+);
 // The measured binary hashes itself and prints that as its first record. A sha computed by a shell
 // step next to the run proves nothing about which ELF executed -- rch builds into an opaque
 // per-worker target dir, and agents have edited crates mid-benchmark in this fleet.
-const binaryRecord = fm.records.find((r) => r.record === 'binary');
-env.fm_elf_sha256 = binaryRecord?.elf_sha256 ?? 'not reported';
-env.fm_elf_bytes = binaryRecord?.elf_bytes ?? null;
+const binaryRecordBefore = fmBefore.records.find((r) => r.record === 'binary');
+env.fm_elf_sha256 = binaryRecordBefore?.elf_sha256 ?? 'not reported';
+env.fm_elf_bytes = binaryRecordBefore?.elf_bytes ?? null;
 console.error(`[run] fm elf sha256=${String(env.fm_elf_sha256).slice(0, 16)} (${env.fm_elf_bytes} bytes)`);
-const elfSelfReportValid = validElfSelfReport(binaryRecord);
-if (!elfSelfReportValid) {
+const elfSelfReportBeforeValid = validElfSelfReport(binaryRecordBefore);
+if (!elfSelfReportBeforeValid) {
   console.error('[run] INVALID: frankenmermaid did not self-report a lowercase SHA-256 for its executing ELF');
 }
 
@@ -318,48 +396,93 @@ if (budgetScale !== 1) mjsArgs.push('--js-budget-scale', String(budgetScale));
 const mjs = has('skip-mermaid')
   ? { records: [], code: 0 }
   : timedPhase('mermaid-js', () => runJsonl('mermaid-js', process.execPath, mjsArgs));
+const fmAfter = has('skip-mermaid')
+  ? fmBefore
+  : timedPhase(
+      'frankenmermaid-after',
+      () => runJsonl('frankenmermaid-after', fmCmd, fmArgs),
+    );
+const binaryRecordAfter = fmAfter.records.find((r) => r.record === 'binary');
+const elfSelfReportAfterValid = validElfSelfReport(binaryRecordAfter);
+const sameElf =
+  elfSelfReportBeforeValid &&
+  elfSelfReportAfterValid &&
+  binaryRecordBefore.elf_sha256 === binaryRecordAfter.elf_sha256 &&
+  binaryRecordBefore.elf_bytes === binaryRecordAfter.elf_bytes;
+env.fm_bracket_elf_sha256 = binaryRecordAfter?.elf_sha256 ?? 'not reported';
+env.fm_bracket_elf_bytes = binaryRecordAfter?.elf_bytes ?? null;
+env.fm_bracket_same_elf = sameElf;
+if (!sameElf) {
+  console.error('[run] INVALID: Rust before/after arms did not self-report the same executing ELF');
+}
 
 /**
- * Ratio of the two phases' mean load. 1.0 means both arms ran under the same machine conditions;
- * far from 1.0 means one arm was measured on a different machine than the other, in effect.
+ * Global CPU busy is useful provenance, but it cannot be a numeric gate here: the phases have very
+ * different durations and include the engines' own CPU consumption. The blocking host-drift check
+ * is the same-ELF Rust-before/Rust-after bracket above.
  */
 function armAsymmetry() {
-  const fmPhase = phaseLoad.find((p) => p.phase === 'frankenmermaid');
+  const fmBeforePhase = phaseLoad.find((p) => p.phase === 'frankenmermaid-before');
   const mjsPhase = phaseLoad.find((p) => p.phase === 'mermaid-js');
-  if (!fmPhase || !mjsPhase) return null;
-  const lo = Math.min(fmPhase.busy_fraction, mjsPhase.busy_fraction);
-  const hi = Math.max(fmPhase.busy_fraction, mjsPhase.busy_fraction);
+  const fmAfterPhase = phaseLoad.find((p) => p.phase === 'frankenmermaid-after');
+  const phases = [fmBeforePhase, mjsPhase, fmAfterPhase].filter(Boolean);
+  if (phases.length < 2) return null;
+  const lo = Math.min(...phases.map((phase) => phase.busy_fraction));
+  const hi = Math.max(...phases.map((phase) => phase.busy_fraction));
   const ratio = lo > 0 ? hi / lo : null;
+  const heavier = phases.reduce((a, b) => (a.busy_fraction >= b.busy_fraction ? a : b));
   return {
     phases: phaseLoad,
     busy_ratio: ratio,
-    // Which arm had it harder. If mermaid ran under heavier load than we did, the ratio flatters us;
-    // if we did, our own numbers are conservative. Either way the run is not a clean comparison.
-    heavier_phase: fmPhase.busy_fraction > mjsPhase.busy_fraction ? 'frankenmermaid' : 'mermaid-js',
-    verdict: ratio === null ? 'unknown' : ratio <= 1.25 ? 'pass' : 'fail',
-    rule: 'phase CPU-busy ratio <= 1.25',
+    heavier_phase: heavier.phase,
+    verdict: 'provenance_only',
+    gate: 'never',
+    rule: 'global phase CPU busy is provenance; numeric gate uses bracketed Rust A/A',
   };
 }
 
 // ---------------------------------------------------------------- join + gate
 
 const byId = (recs) => new Map(recs.map((r) => [r.id, r]));
-const fmById = byId(fm.records);
+const fmBeforeById = byId(fmBefore.records);
+const fmAfterById = byId(fmAfter.records);
 const mjsById = byId(mjs.records);
 
 const rows = [];
-let hardFail = !elfSelfReportValid;
+let hardFail = !sameElf;
 
 for (const item of items) {
-  const f = fmById.get(item.id);
+  const fBefore = fmBeforeById.get(item.id);
+  const fAfter = fmAfterById.get(item.id);
   const m = mjsById.get(item.id);
   const row = { id: item.id };
 
-  if (!f || f.status !== 'ok') {
+  if (!fBefore || fBefore.status !== 'ok' || !fAfter || fAfter.status !== 'ok') {
     hardFail = true;
-    rows.push({ ...row, status: 'error', engine: 'frankenmermaid', error: f?.error ?? 'no result' });
+    rows.push({
+      ...row,
+      status: 'error',
+      engine: 'frankenmermaid',
+      error: fBefore?.error ?? fAfter?.error ?? 'missing before/after result',
+    });
     continue;
   }
+  if (
+    fBefore.input_sha256 !== fAfter.input_sha256 ||
+    fBefore.output_sha256 !== fAfter.output_sha256 ||
+    fBefore.output_sha256_lean !== fAfter.output_sha256_lean
+  ) {
+    hardFail = true;
+    rows.push({
+      ...row,
+      status: 'rust_bracket_mismatch',
+      error: 'Rust before/after arms did not produce byte-identical input and outputs',
+    });
+    continue;
+  }
+  const bracket = fmBracket(fBefore, fAfter);
+  const f = bracket.selected === 'after' ? fAfter : fBefore;
+  row.fm_bracket = bracket;
   row.class = item.class ?? 'single';
   // For a doc build the batch total is the size that means anything; for everything else it is the
   // largest single diagram. Both are recorded either way.
@@ -446,7 +569,10 @@ for (const item of items) {
   }
   // CV and MAD remain provenance only. The only blocking statistical decision is whether the
   // cross-runtime median ratio clears both same-invocation null-CI floors.
-  row.median_ci_gate = medianCiGate(row.speedup, [f.null_control, m.null_control]);
+  row.median_ci_gate = medianCiGate(
+    row.speedup,
+    [fBefore.null_control, fAfter.null_control, m.null_control],
+  );
   row.status = 'ok';
   rows.push(row);
 }
@@ -469,6 +595,13 @@ const summary = {
     fm_p50_ns: r.fm_p50_ns, speedup_lower_bound: r.speedup_lower_bound, error: r.error,
   })),
   median_ci_gate_rule: 'claim magnitude >= max(1.01, 1 + 2 * max(per-engine A/A CI radius))',
+  measurement_order: has('skip-mermaid')
+    ? ['frankenmermaid-before']
+    : ['frankenmermaid-before', 'mermaid-js', 'frankenmermaid-after'],
+  fm_bracket_gate_rule: 'Rust pre/post drift magnitude <= max(1.01, 1 + 2 * Rust A/A CI radius)',
+  fm_bracket_gate_failures: ok
+    .filter((r) => r.fm_bracket.verdict === 'fail')
+    .map((r) => r.id),
   arm_asymmetry: armAsymmetry(),
   cv_gate: 'never',
   median_ci_gate_failures: ok
@@ -485,7 +618,15 @@ const summary = {
 
 const stamp = `${env.git_rev?.slice(0, 8) ?? 'nogit'}-${Date.now()}`;
 const jsonlPath = join(outDir, `run-${stamp}.jsonl`);
-writeFileSync(jsonlPath, [...fm.records, ...mjs.records].map((r) => JSON.stringify(r)).join('\n') + '\n');
+const tagPhase = (records, phase) => records.map((record) => ({ ...record, harness_phase: phase }));
+const events = has('skip-mermaid')
+  ? tagPhase(fmBefore.records, 'frankenmermaid-before')
+  : [
+      ...tagPhase(fmBefore.records, 'frankenmermaid-before'),
+      ...tagPhase(mjs.records, 'mermaid-js'),
+      ...tagPhase(fmAfter.records, 'frankenmermaid-after'),
+    ];
+writeFileSync(jsonlPath, events.map((r) => JSON.stringify(r)).join('\n') + '\n');
 writeFileSync(join(outDir, `summary-${stamp}.json`), `${JSON.stringify(summary, null, 2)}\n`);
 
 // ---------------------------------------------------------------- report
@@ -518,7 +659,7 @@ for (const r of rows) {
     pad(r.id, 22) + lpad(r.nodes, 6) + lpad(r.edges, 7) + lpad(ms(r.fm_p50_ns), 12) + lpad(ms(r.mjs_p50_ns), 12) +
     lpad(`${r.speedup.toFixed(0)}x`, 10) + lpad(`${r.speedup_min.toFixed(0)}x`, 10) + lpad(r.fm_mad_pct.toFixed(1), 9) +
     lpad(`${r.bytes_ratio.toFixed(2)}x`, 9) + lpad(`${r.bytes_ratio_lean.toFixed(2)}x`, 8) +
-    `  ${r.median_ci_gate.verdict}`,
+    `  ${r.median_ci_gate.verdict}/${r.fm_bracket.verdict}`,
   );
 }
 console.log('');
@@ -558,18 +699,20 @@ if (leanSlow.length) {
 if (summary.median_ci_gate_failures.length) {
   console.log(`MEDIAN-CI GATE FAIL: ${summary.median_ci_gate_failures.join(', ')}`);
 }
+if (summary.fm_bracket_gate_failures.length) {
+  console.log(`RUST BRACKET GATE FAIL: ${summary.fm_bracket_gate_failures.join(', ')}`);
+}
 const asym = summary.arm_asymmetry;
-if (asym && asym.verdict !== 'pass') {
+if (asym) {
   console.log('');
-  console.log(`ARM ASYMMETRY ${asym.verdict.toUpperCase()} (${asym.rule}): phase CPU-busy ratio ${asym.busy_ratio?.toFixed(2)}, heavier on ${asym.heavier_phase}.`);
-  console.log('  The engines are separate runtimes and cannot be interleaved in one measured routine,');
-  console.log('  so a load difference between phases biases the ratio directly. Re-run on a quiet box.');
+  console.log(`PHASE-LOAD PROVENANCE (${asym.rule}): CPU-busy ratio ${asym.busy_ratio?.toFixed(2)}, heavier on ${asym.heavier_phase}.`);
 }
 console.log(`\nevents:  ${jsonlPath}`);
 console.log(`summary: ${join(outDir, `summary-${stamp}.json`)}`);
 
-if (hardFail || fm.code !== 0 || mjs.code !== 0) {
+if (hardFail || fmBefore.code !== 0 || mjs.code !== 0 || fmAfter.code !== 0) {
   console.error('\n[run] FAILED: at least one engine reported an error (see rows above)');
   process.exit(1);
 }
 if (summary.median_ci_gate_failures.length) process.exit(4);
+if (summary.fm_bracket_gate_failures.length) process.exit(5);
