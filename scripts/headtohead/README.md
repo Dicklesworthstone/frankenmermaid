@@ -125,7 +125,7 @@ full bytes are compared once outside the timed region. A nondeterministic render
 
 ## Corpus
 
-25 items in two tiers.
+31 items in three tiers.
 
 **The pinned baseline (13).** Flowcharts (10/100/500 nodes), wide layered DAGs (8×16, 12×24, 16×32 —
 up to 512 nodes / 960 edges), a dense DAG (200 nodes / 790 edges), an SCC-heavy cyclic graph, one
@@ -152,11 +152,25 @@ cluster boundaries constrain placement and force the router around obstacles the
 produce. `er_schema` carries attribute blocks, which makes it text-measurement-bound rather than
 graph-bound.
 
+**Realistic end-to-end tier (6 rows, 4 jobs).** These jobs use seeded, right-skewed distributions
+instead of uniform `Node 123` fixtures:
+
+| User job | Items / sizes | Realism carried by the input |
+|---|---|---|
+| Documentation-site render | `docs_site_50`, `docs_site_200` | 50 and 200 diagrams; flowchart-dominated type mix, right-skewed sizes, non-ASCII and escaping-heavy labels. |
+| Live typing preview | `typing_trace_60` | 60 successive keystrokes inside one label of a 40-node flowchart. |
+| Monorepo architecture review | `monorepo_arch_120`, `monorepo_arch_300` | 120 and 300 services across uneven domains; hub-skewed dependencies and cross-domain event links. |
+| Database-catalog publish | `schema_catalog_25` | 25 bounded-context ER diagrams, 8–75 entities each, with skewed relationships and varied field counts/types. |
+
+One sample is the complete named job: source strings in, parse + layout + render, serialized SVG
+strings out. Corpus generation and the caller's final file copy are outside both engines' timers;
+the library work and output serialization that differ between the implementations are inside.
+
 ### Did not finish
 
 At XL sizes the honest question is not "how much faster" but "does the comparator finish at all".
 Items in the new tier carry `js_budget_ms` (a wall budget for the mermaid arm) and `dnf_allowed`.
-The mermaid runner first does one untimed **probe** render of the item's largest document under that
+The mermaid runner first does one untimed **probe** render of the item's largest UTF-8 input under that
 budget, so an item that cannot be rendered is discovered in one render rather than `warmup + reps`
 of them. Two outcomes are recorded, and they support different claims:
 
@@ -190,6 +204,9 @@ appending a node, renaming a label, and adding an edge. **One timed sample rende
 because that is what a live preview does — mermaid has no incremental path, so an editor calls
 `mermaid.render()` on every keystroke. The report prints the per-re-render cost, which is the number a
 user actually feels.
+
+`typing_trace_60` follows the same whole-session rule for 60 successive label keystrokes. It starts
+at the first typed character, so every revision is valid input for both renderers.
 
 Internally every corpus item is a trace; a single-shot item is just a one-revision one. That keeps one
 code path in both engines; joining a one-element revision list yields the original item bytes.

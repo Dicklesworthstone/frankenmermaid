@@ -2627,7 +2627,7 @@ The exhaustive backlog lives in [`.beads/`](.beads/). The largest pieces of in-f
 
 | Area | Status | Notes |
 |---|---|---|
-| **VS Code extension with live preview** (`bd-kgi4`) | Planned | Uses the WASM build; expected to be faster than the mermaid.js extension thanks to incremental computation |
+| **VS Code extension with live preview** (`bd-kgi4`) | Planned | Uses the WASM build and the incremental re-layout path |
 | **CEGIS layout constraint synthesis** (`bd-1iwz`) | Speculative | Counterexample-guided synthesis to auto-generate layout constraints from user-provided examples |
 | **Geometric/Conformal Algebra extensions** (`bd-3cd8`) | In progress | The CGA pipeline currently covers transforms + intersection queries; the broader epic includes coordinate-free PGA/CGA for layout primitives |
 | **Stochastic superoptimization for hot kernels** (`bd-ejxz`) | Speculative | Apply stochastic superoptimization to the crossing-minimization inner loop |

@@ -194,6 +194,252 @@ function editTrace(n, revisions) {
   return texts;
 }
 
+// ---------------------------------------------------------------------------------------------
+// PHASE 2 -- realistic end-to-end workloads.
+//
+// The generators above produce uniform synthetic input: every label is `Node 123`, every diagram in
+// a batch is the same size, and the type mix is a round-robin. Real documentation is none of those,
+// and the differences are not cosmetic:
+//
+//   - Real labels contain `&`, `<`, `>`, apostrophes and non-ASCII. BOTH engines carry escape paths
+//     that a corpus of `Node 123` never exercises, so a synthetic batch measures a path the user
+//     does not take. This is the integration cost a microbench structurally hides.
+//   - Real diagram sizes are strongly right-skewed: mostly 4-12 nodes with a long tail.
+//   - Real type mix is flowchart-dominated, not spread evenly across five types.
+//
+// Deterministic throughout -- a seeded PRNG, never Math.random -- so the corpus stays SHA-256
+// pinnable and a generator edit still fails the drift check rather than moving a baseline quietly.
+
+/** mulberry32: small, fast, deterministic. Seeded per document so every item is reproducible. */
+function rng(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let x = Math.imul(a ^ (a >>> 15), 1 | a);
+    x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x;
+    return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// Label fragments of the kind that actually appear in architecture and process diagrams. The
+// ampersand / apostrophe / angle-bracket / accented entries are deliberate and are ~25% of this pool:
+// they are the escaping realism the synthetic corpus lacks.
+const LABEL_WORDS = [
+  'User', 'Client', 'API Gateway', 'Auth Service', 'Session Store', 'Database', 'Read Replica',
+  'Cache', 'Message Queue', 'Worker', 'Scheduler', 'Load Balancer', 'CDN', 'Object Store',
+  'Validate input', 'Normalize payload', 'Check permissions', 'Emit audit event', 'Persist record',
+  'Rate limit (429)', 'Retry & backoff', 'Fan out', 'Aggregate results', 'Render response',
+  'Parse <config>', 'Diff & merge', 'Sign & upload', 'Rollback on failure',
+  'Café latency', 'naïve retry', 'Ingestion', 'Überprüfung', 'Résumé job', "User's session",
+];
+
+const pick = (r, xs) => xs[Math.floor(r() * xs.length) % xs.length];
+
+/** Right-skewed size: mostly small, occasional large, which is how docs corpora are shaped. */
+function skewedSize(r, min, max) {
+  const u = Math.max(1e-9, r());
+  return min + Math.floor((max - min) * u ** 2.4);
+}
+
+function realisticLabel(r, i) {
+  const base = pick(r, LABEL_WORDS);
+  // ~30% carry a qualifier, which is how real diagrams disambiguate repeated nodes.
+  return r() < 0.3 ? `${base} ${i}` : base;
+}
+
+function docFlowchart(r, n) {
+  const lines = [`flowchart ${pick(r, ['LR', 'TD', 'TB'])}`];
+  for (let i = 0; i < n; i++) lines.push(`  N${i}["${realisticLabel(r, i)}"]`);
+  for (let i = 0; i < n - 1; i++) {
+    // Real flowcharts branch; they are not one chain.
+    const from = r() < 0.75 ? i : Math.floor(r() * (i + 1));
+    if (r() < 0.22) lines.push(`  N${from}-->|"${pick(r, LABEL_WORDS)}"|N${i + 1}`);
+    else lines.push(`  N${from}-->N${i + 1}`);
+  }
+  return lines.join('\n');
+}
+
+function docSequence(r, n) {
+  const lines = ['sequenceDiagram'];
+  const p = Math.max(2, Math.min(6, Math.ceil(n / 3)));
+  for (let i = 0; i < p; i++) lines.push(`  participant P${i} as ${pick(r, LABEL_WORDS)}`);
+  for (let i = 0; i < n; i++) {
+    const a = i % p;
+    const b = (i + 1 + Math.floor(r() * (p - 1))) % p;
+    lines.push(`  P${a}${r() < 0.25 ? '-->>' : '->>'}P${b}: ${realisticLabel(r, i)}`);
+  }
+  return lines.join('\n');
+}
+
+function docClass(r, n) {
+  const lines = ['classDiagram'];
+  for (let i = 0; i < n; i++) {
+    lines.push(`  class C${i} {`);
+    const fields = 1 + Math.floor(r() * 4);
+    for (let f = 0; f < fields; f++) {
+      lines.push(`    +${pick(r, ['int', 'string', 'bool', 'float'])} field${f}`);
+    }
+    lines.push(`    +method${i}() ${pick(r, ['bool', 'void', 'string'])}`);
+    lines.push('  }');
+  }
+  for (let i = 0; i < n - 1; i++) {
+    lines.push(`  C${i} ${pick(r, ['<|--', '*--', 'o--', '-->'])} C${i + 1}`);
+  }
+  return lines.join('\n');
+}
+
+function docState(r, n) {
+  const lines = ['stateDiagram-v2', '  [*] --> S0'];
+  for (let i = 0; i < n - 1; i++) lines.push(`  S${i} --> S${i + 1}: ${pick(r, LABEL_WORDS)}`);
+  lines.push(`  S${n - 1} --> [*]`);
+  return lines.join('\n');
+}
+
+function docEr(r, n) {
+  const lines = ['erDiagram'];
+  for (let i = 0; i < n - 1; i++) {
+    lines.push(`  E${i} ${pick(r, ['||--o{', '||--||', '}o--o{'])} E${i + 1} : ${pick(r, ['has', 'owns', 'refers'])}`);
+  }
+  for (let i = 0; i < n; i++) {
+    lines.push(`  E${i} {`);
+    lines.push('    int id PK');
+    const attrs = 1 + Math.floor(r() * 5);
+    for (let a = 0; a < attrs; a++) lines.push(`    string field${a}`);
+    lines.push('  }');
+  }
+  return lines.join('\n');
+}
+
+/**
+ * A documentation site build: every mermaid block across a docs repo, rendered in one job.
+ *
+ * This is a job a user actually runs -- `mkdocs build`, a Docusaurus production build, a CI docs
+ * check. Flowchart-dominated the way real documentation is, sizes right-skewed, labels carrying the
+ * characters that force escaping.
+ */
+function docsSite(count, seed) {
+  const out = [];
+  for (let d = 0; d < count; d++) {
+    const r = rng(seed + d * 7919);
+    const roll = r();
+    if (roll < 0.58) out.push(docFlowchart(r, skewedSize(r, 4, 60)));
+    else if (roll < 0.74) out.push(docSequence(r, skewedSize(r, 3, 30)));
+    else if (roll < 0.83) out.push(docClass(r, skewedSize(r, 3, 20)));
+    else if (roll < 0.91) out.push(docState(r, skewedSize(r, 3, 24)));
+    else out.push(docEr(r, skewedSize(r, 3, 18)));
+  }
+  return out;
+}
+
+/**
+ * A live editing session as it actually happens: a user TYPES a label one character at a time.
+ *
+ * `edit_trace` models structural edits -- append a node, add an edge. Real editing is dominated by
+ * keystrokes inside a label, which re-render a document nearly identical to the previous one. That
+ * is a different workload: many tiny deltas at high frequency.
+ */
+function typingTrace(baseNodes, phrase, seed) {
+  const r = rng(seed);
+  const nodes = [];
+  for (let i = 0; i < baseNodes; i++) nodes.push(`  N${i}["${realisticLabel(r, i)}"]`);
+  const edges = [];
+  for (let i = 0; i < baseNodes - 1; i++) edges.push(`  N${i}-->N${i + 1}`);
+  const target = Math.floor(baseNodes / 2);
+  const texts = [];
+  for (let k = 1; k <= phrase.length; k++) {
+    nodes[target] = `  N${target}["${phrase.slice(0, k)}"]`;
+    texts.push(['flowchart LR', ...nodes, ...edges].join('\n'));
+  }
+  return texts;
+}
+
+const DOMAIN_NAMES = [
+  'Identity & Access', 'Customer Experience', 'Billing', 'Data Platform', 'Observability',
+  'Fulfillment', 'Search', 'Messaging', 'Developer Platform', 'Risk & Compliance',
+  'Analytics', 'Content Delivery',
+];
+
+const EDGE_LABELS = ['HTTPS', 'gRPC', 'events', 'reads', 'writes', 'publishes', 'subscribes'];
+
+/**
+ * One monorepo service map exported for an architecture review.
+ *
+ * Real service graphs are hub-heavy rather than regular: gateways, event buses, identity and data
+ * services collect much more degree than leaf workers. The `r() ** 2.8` endpoint choice produces
+ * that power-law-like skew while every service still has a route into the graph. Domain assignment
+ * is also skewed, so the subgraphs are not uniformly sized.
+ */
+function monorepoArchitecture(serviceCount, domainCount, seed) {
+  const r = rng(seed);
+  const domains = Array.from({ length: domainCount }, () => []);
+  for (let i = 0; i < serviceCount; i++) {
+    const domain = i < domainCount
+      ? i
+      : Math.min(domainCount - 1, Math.floor(domainCount * r() ** 1.7));
+    domains[domain].push(i);
+  }
+
+  const lines = ['flowchart LR'];
+  for (let d = 0; d < domains.length; d++) {
+    lines.push(`  subgraph D${d}["${DOMAIN_NAMES[d % DOMAIN_NAMES.length]}"]`);
+    for (const i of domains[d]) lines.push(`    S${i}["${realisticLabel(r, i)}"]`);
+    lines.push('  end');
+  }
+
+  // Every non-root service depends on one earlier service, biased strongly toward a small set of
+  // hubs. Additional cross-domain links model shared platforms and event streams.
+  for (let i = 1; i < serviceCount; i++) {
+    const hub = Math.min(i - 1, Math.floor(i * r() ** 2.8));
+    lines.push(`  S${hub} -->|"${pick(r, EDGE_LABELS)}"| S${i}`);
+  }
+  for (let i = 0; i < Math.floor(serviceCount * 0.55); i++) {
+    const from = Math.floor(r() * serviceCount);
+    const to = Math.floor(serviceCount * r() ** 2.8);
+    if (from !== to) lines.push(`  S${from} -.->|"${pick(r, EDGE_LABELS)}"| S${to}`);
+  }
+  return [lines.join('\n')];
+}
+
+const FIELD_NAMES = [
+  'external_id', 'created_at', 'updated_at', 'display_name', 'status', 'owner_id',
+  'region', 'version', 'payload', 'checksum', 'expires_at', 'retry_count',
+];
+
+function catalogSchema(r, schemaIndex, entityCount) {
+  const lines = ['erDiagram'];
+  const entity = (i) => `S${schemaIndex}_E${i}`;
+  for (let i = 0; i < entityCount; i++) {
+    lines.push(`  ${entity(i)} {`);
+    lines.push('    uuid id PK');
+    const fields = 1 + Math.floor(r() ** 1.8 * 8);
+    for (let f = 0; f < fields; f++) {
+      lines.push(`    ${pick(r, ['string', 'int', 'boolean', 'timestamp', 'json'])} ${pick(r, FIELD_NAMES)}_${f}`);
+    }
+    lines.push('  }');
+  }
+  for (let i = 1; i < entityCount; i++) {
+    const parent = Math.min(i - 1, Math.floor(i * r() ** 2.5));
+    lines.push(`  ${entity(parent)} ||--o{ ${entity(i)} : ${pick(r, ['contains', 'owns', 'references'])}`);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * A database documentation publish: render every bounded-context schema in one catalog job.
+ *
+ * Schema sizes are right-skewed and relationship endpoints prefer hubs, matching the common shape
+ * of identity/account/order tables with many small peripheral tables. Attribute counts and types
+ * vary per entity rather than repeating one synthetic block.
+ */
+function schemaCatalog(schemaCount, minEntities, maxEntities, seed) {
+  const out = [];
+  for (let schema = 0; schema < schemaCount; schema++) {
+    const r = rng(seed + schema * 104729);
+    out.push(catalogSchema(r, schema, skewedSize(r, minEntities, maxEntities)));
+  }
+  return out;
+}
+
 // Every generator returns an array of documents. A single-shot item is a one-revision trace, which
 // keeps one code path in both engines -- and keeps single-item hashes identical to before traces
 // existed, since joining a one-element array yields the element itself.
@@ -207,6 +453,10 @@ const GENERATORS = {
   state: (p) => [stateDiagram(p.n)],
   er: (p) => [erDiagram(p.n)],
   edit_trace: (p) => editTrace(p.n, p.revisions),
+  docs_site: (p) => docsSite(p.count, p.seed),
+  typing_trace: (p) => typingTrace(p.nodes, p.phrase, p.seed),
+  monorepo_architecture: (p) => monorepoArchitecture(p.services, p.domains, p.seed),
+  schema_catalog: (p) => schemaCatalog(p.schemas, p.min_entities, p.max_entities, p.seed),
   architecture: (p) => [architecture(p.groups, p.per_group)],
   er_schema: (p) => [erSchema(p.entities, p.attrs)],
   doc_build: (p) => docBuild(p.copies),
@@ -287,6 +537,22 @@ export const CORPUS = [
   // A repository-scale CI render: 500 diagrams across the same five syntax families. It measures
   // one whole job, not a per-diagram microbenchmark, and remains unmeasured until a worker window.
   { id: 'ci_batch_500',         gen: 'doc_build',    params: { copies: 100 },                class: 'doc_build',  reps_js: 1, warmup_js: 0, reps_rs: 20, warmup_rs: 2, js_budget_ms: 1500_000, dnf_allowed: true },
+
+  // ---------------------------------------------------------------------------------------------
+  // PHASE 2 — whole jobs a real user runs, on realistic data. See the generator notes above: these
+  // differ from `doc_build`/`edit_trace` in DISTRIBUTION, not just size — flowchart-dominated type
+  // mix, right-skewed diagram sizes, and labels that actually contain `&`, `<`, `>`, apostrophes and
+  // accented characters, which is the escaping cost a synthetic corpus never charges either engine.
+  { id: 'docs_site_50',         gen: 'docs_site',    params: { count: 50, seed: 20260728 },  class: 'doc_build',  reps_js: 3, warmup_js: 1, reps_rs: 30, warmup_rs: 3, js_budget_ms: 900_000,  dnf_allowed: true },
+  { id: 'docs_site_200',        gen: 'docs_site',    params: { count: 200, seed: 20260728 }, class: 'doc_build',  reps_js: 2, warmup_js: 0, reps_rs: 20, warmup_rs: 2, js_budget_ms: 1500_000, dnf_allowed: true },
+  // 60 keystrokes inside one label: the re-render frequency a live preview actually generates.
+  { id: 'typing_trace_60',      gen: 'typing_trace', params: { nodes: 40, phrase: 'Aggregate results from the upstream ingestion workers safely', seed: 20260728 }, class: 'edit_trace', reps_js: 2, warmup_js: 1, reps_rs: 20, warmup_rs: 2, js_budget_ms: 900_000, dnf_allowed: true },
+  // One architecture-review export at two monorepo sizes. Degree and domain sizes are deliberately
+  // skewed; these are service maps, not regular layered grids.
+  { id: 'monorepo_arch_120',    gen: 'monorepo_architecture', params: { services: 120, domains: 8, seed: 20260728 }, class: 'single', reps_js: 3, warmup_js: 1, reps_rs: 30, warmup_rs: 3, js_budget_ms: 900_000, dnf_allowed: true },
+  { id: 'monorepo_arch_300',    gen: 'monorepo_architecture', params: { services: 300, domains: 12, seed: 20260728 }, class: 'single', reps_js: 2, warmup_js: 0, reps_rs: 20, warmup_rs: 2, js_budget_ms: 1200_000, dnf_allowed: true },
+  // Twenty-five bounded-context ER diagrams rendered as one database-catalog publish.
+  { id: 'schema_catalog_25',    gen: 'schema_catalog', params: { schemas: 25, min_entities: 8, max_entities: 80, seed: 20260728 }, class: 'doc_build', reps_js: 2, warmup_js: 0, reps_rs: 20, warmup_rs: 2, js_budget_ms: 1500_000, dnf_allowed: true },
 ];
 
 export function sha256(text) {

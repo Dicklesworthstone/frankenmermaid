@@ -301,6 +301,27 @@ function isolatesSampleState(documentCount) {
   return documentCount >= ISOLATED_SAMPLE_MIN_DOCUMENTS;
 }
 
+/**
+ * Pick the most expensive-looking document for the preflight probe.
+ *
+ * The original extended corpus grows monotonically, so its final revision is also its largest.
+ * Realistic docs/catalog batches are right-skewed and shuffled; their final document may be the
+ * smallest in the job. Probe the largest UTF-8 input instead, or budget sizing can overcommit null
+ * rounds and manufacture a timeout before the real sample.
+ */
+function largestInput(texts) {
+  let text = texts[0];
+  let bytes = Buffer.byteLength(text, 'utf8');
+  for (let i = 1; i < texts.length; i++) {
+    const candidateBytes = Buffer.byteLength(texts[i], 'utf8');
+    if (candidateBytes > bytes) {
+      text = texts[i];
+      bytes = candidateBytes;
+    }
+  }
+  return { text, bytes };
+}
+
 // ---------------------------------------------------------------- in-page benchmark
 
 // Runs inside chromium. One timed sample renders every revision of the item in order (a single-shot
@@ -393,6 +414,10 @@ if (has('self-test')) {
     !isolatesSampleState(ISOLATED_SAMPLE_MIN_DOCUMENTS)
   ) {
     throw new Error('long-trace sample-isolation threshold regression');
+  }
+  const probe = largestInput(['three', 'ééé']);
+  if (probe.text !== 'ééé' || probe.bytes !== 6) {
+    throw new Error(`largest-input probe regression: ${JSON.stringify(probe)}`);
   }
   new Script(`(${PAGE_BENCH})`);
   new Script(`(${PAGE_PROBE})`);
@@ -656,9 +681,12 @@ try {
     // Probe phase: one untimed render of the largest revision, so an item that cannot finish is
     // discovered in one render rather than `warmup + reps` of them.
     let probeMs = null;
+    let probeInputBytes = null;
     if (budgetMs) {
       try {
-        const p = await evaluateInPage(PAGE_PROBE, { text: texts[texts.length - 1], tag }, budgetMs);
+        const probe = largestInput(texts);
+        probeInputBytes = probe.bytes;
+        const p = await evaluateInPage(PAGE_PROBE, { text: probe.text, tag }, budgetMs);
         if (p.exceptionDetails) throw new Error(p.exceptionDetails.text);
         probeMs = p.result.value.ms;
         const bad = validate(p.result.value.svg);
@@ -749,6 +777,7 @@ try {
       sample_isolation: isolateSamples ? 'fresh_browser_per_arm' : 'single_browser',
       budget_ms: budgetMs,
       probe_ms: probeMs === null ? null : Math.round(probeMs),
+      probe_input_bytes: probeInputBytes,
       render_ns: Object.fromEntries(
         Object.entries(ms)
           .filter(([k]) => !['cv_pct', 'mad_pct'].includes(k))
