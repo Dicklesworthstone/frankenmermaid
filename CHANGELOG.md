@@ -42,7 +42,10 @@ The identical Rust ELF brackets Chromium, pre/post drift must remain inside its
 A/A floor, and the slower Rust median is used. Every published ratio clears
 twice the largest bootstrap 95% null-CI radius.
 
-The 500-diagram CI job measures 20.116 ms versus 18,567.8 ms (**923×**). The
+The 500-diagram CI job measures 21.441 ms on the scalar arm versus 18,490.0 ms
+for mermaid-js (**862×**). A persistent caller pool scales the same job to
+1.133 ms at 64 threads (**18.93×** versus the scalar arm and **16,322×** versus
+mermaid-js); every pooled output is byte-identical to the scalar output. The
 1,001-revision live-edit job finishes in 0.956 s with frankenmermaid while
 mermaid-js remains working at the 600-second deadline; that row is a nonnumeric
 `DNF-timeout`.

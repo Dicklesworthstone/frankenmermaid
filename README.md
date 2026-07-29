@@ -1612,6 +1612,26 @@ A 1,001-revision live-edit job over a growing 500-node flowchart completes in 0.
 frankenmermaid. Mermaid-js remains working at the 600-second deadline. That row is a `DNF-timeout`,
 not a crash, and has no point ratio.
 
+#### CI-scale batch concurrency
+
+On the 32-core / 64-thread Threadripper PRO 5975WX, one persistent caller pool renders the same
+500-diagram CI job at every width below. The incumbent arm is mermaid-js's single-page main-thread
+API in the same invocation; its whole-job median is 18,490.000 ms.
+
+| Caller threads | frankenmermaid whole job | Scaling vs 1 thread | vs mermaid-js 11.15.0 |
+|---:|---:|---:|---:|
+| 1 | 21.441 ms | 1.00× | **862×** |
+| 2 | 11.659 ms | 1.84× | **1,586×** |
+| 4 | 6.047 ms | 3.55× | **3,058×** |
+| 8 | 3.147 ms | 6.81× | **5,875×** |
+| 16 | 1.913 ms | 11.21× | **9,665×** |
+| 32 | 1.232 ms | 17.40× | **15,003×** |
+| 64 | 1.133 ms | 18.93× | **16,322×** |
+
+Every pooled width produces the same input, default-SVG, and lean-SVG SHA-256 as the scalar arm.
+The pool is ISA-neutral caller concurrency rather than an x86-specific renderer path; no Apple
+Silicon timing is claimed.
+
 #### Realistic whole jobs
 
 Each row below is a complete library job: realistic source strings in; parse, layout, render, and
@@ -1647,7 +1667,8 @@ against pinned mermaid-js `11.15.0`:
 | 500-node flowchart | 0.350 ms | 1,228 ms | **3,504×** |
 | Dense DAG, 200 nodes / 790 edges | 0.384 ms | 1,805 ms | **4,696×** |
 | 40-diagram documentation build | 0.038 ms/diagram | 37.0 ms/diagram | **964×** |
-| 500-diagram CI render | 20.116 ms/job | 18,567.8 ms/job | **923×** |
+| 500-diagram CI render, scalar | 21.441 ms/job | 18,490.0 ms/job | **862×** |
+| 500-diagram CI render, 64 caller threads | 1.133 ms/job | 18,490.0 ms/job | **16,322×** |
 | 200-diagram realistic documentation site | 0.095 ms/diagram | 50.8 ms/diagram | **534×** |
 | 25-schema realistic database catalog | 0.634 ms/schema | 261.8 ms/schema | **413×** |
 | 21-revision live-edit session | 0.125 ms/keystroke | 148.2 ms/keystroke | **1,185×** |
@@ -1655,9 +1676,11 @@ against pinned mermaid-js `11.15.0`:
 | 201-revision live-edit session | 0.224 ms/keystroke | 1,316.2 ms/keystroke | **5,885×** |
 
 Every numeric row above clears the gate described below. The harness self-reports the SHA-256 of the
-executing binary (`a23cf867…`), verifies a SHA-256 pin for each corpus item and for the mermaid
-bundle, and asserts at runtime that the object answering `render()` is the pinned mermaid-js and not
-a dispatched stand-in.
+executing binary (`a23cf867…` for the 20 other corpus rows and `600cd6b7…` for the CI thread
+sweep), verifies a SHA-256 pin for each corpus item and for the mermaid bundle, and asserts at
+runtime that the object answering `render()` is the pinned mermaid-js and not a dispatched stand-in.
+The seven CI widths are one workload repeated to measure scaling, so only its scalar row participates
+in the 21-item corpus aggregate.
 
 **How these numbers are kept honest** (this is a performance-campaign release — see [`CHANGELOG.md`](CHANGELOG.md)):
 

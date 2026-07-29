@@ -153,6 +153,15 @@ threads inside each small render regresses, while a CI job supplies hundreds of 
 diagrams over which one pool can amortize startup. Rayon keeps the caller-concurrency mechanism
 portable across x86-64 and aarch64; the harness contains no x86-specific intrinsics.
 
+**Certified Threadripper sweep.** On the 32-core / 64-thread AMD Ryzen Threadripper PRO 5975WX,
+artifact `.benchmarks/headtohead/ci-thread-sweep-v3/summary-ffeab05f-1785311982943.json` passed all
+seven median-CI and same-ELF bracket gates. The 500-diagram job measured 21.441246 ms at one thread
+and 1.132857 ms at 64 threads (18.926701× caller scaling), versus 18,490.000 ms for mermaid-js's
+single-page main-thread API in the same invocation: 862.356600× and 16,321.565740× respectively.
+The process self-reported ELF SHA-256
+`600cd6b79113f01de7526df5a029b7ce5d57d4f06fb1d3772412fb29097bdcf7`; scalar/pooled SVG identity
+passed in both brackets, and every integrated Rust sample exceeded the 50 ms floor.
+
 ## Corpus
 
 31 items in three tiers.

@@ -19232,3 +19232,54 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   additionally requires mermaid-js to return a valid SVG.
 
   Agent: cod (YellowSwan)
+
+### REJECT x2 / HARNESS ARTIFACT: under-resolved CI caller-thread sweeps (2026-07-29)
+
+- **Campaign / bead:** high-core-count incumbent frontier, `bd-1buv.70`; cod /
+  HARNESS+FRONTIER (`YellowSwan`). These are rejected whole-sweep certifications, not renderer
+  regressions. No displayed ratio from either failed invocation is a competitive claim.
+- **Target surface ledger screen.** The prior per-render parallel-cap row rejected fresh scoped
+  threads because startup dominated each small render. Its retry predicate required a persistent
+  executor. These attempts satisfy that mechanism predicate by creating one Rayon pool per process
+  and amortizing it across the complete 500-diagram CI job; they do not raise the renderer's
+  internal parallel cap.
+- **First rejected invocation.**
+  `.benchmarks/headtohead/ci-thread-sweep-v1/summary-e9246537-1785309549183.json` measured widths
+  1/2/4/8/16/32/64 before and after the same mermaid-js arm. The scalar bracket moved
+  19.308655 ms → 20.655690 ms: **1.069763×** drift outside its **1.045807×** A/A floor.
+  The other six brackets and all seven cross-runtime median-CI gates passed, but the driver exited
+  5 and rejected the invocation. The after widths repeated ascending order, leaving asymmetric
+  distance from Chromium.
+- **First concrete retry predicate.** Re-run only after the after phase mirrors the before phase
+  (ascending before Chromium, descending after Chromium), with the same pinned input, bundle,
+  executing ELF, and gate. Commit `f6cb0760` satisfied the ordering predicate.
+- **Second rejected invocation.**
+  `.benchmarks/headtohead/ci-thread-sweep-v2/summary-f6cb0760-1785310166784.json` used the mirrored
+  order. The 16-thread bracket moved 1.542203 ms → 1.760335 ms (**1.141442×** versus a
+  **1.067258×** floor), and the 32-thread bracket moved 1.045516 ms → 1.136834 ms
+  (**1.087343×** versus a **1.075408×** floor). The other five brackets and all seven
+  cross-runtime median-CI gates passed, but every width still used `batch=1`; the high-width
+  observations were approximately one millisecond and under-resolved for a phase separated by the
+  414-second Chromium control.
+- **Second concrete retry predicate.** Re-run only after the harness predeclares a 50 ms minimum
+  integrated sample, calibrates against the measured batch with headroom, records batch and
+  integrated p50 in every row, and fails closed when `batch × per-job p50 < 50 ms`. Commits
+  `a373bf35` and `ffeab05f` implemented a 75 ms calibration target plus that independent floor.
+- **A/A null control (same invocation):** both rejected artifacts carried `n=20` interleaved A/A
+  ratios in every Rust process and `n=10` isolated mermaid-js A/A pairs. Invocation v1's
+  mermaid-js median was 1.009310, 95% CI [0.995757, 1.013969]; v2's was 0.983708,
+  CI [0.939922, 1.002504]. Every control was sufficient, every row recorded `cv_gate=never`, and
+  scalar/pooled input/default/lean SHA-256 identity passed in both brackets.
+- **Executing ELF SHA-256 (self-reported by process):**
+  `eac54b0f5e17e5aa2f549d66ddbeeb41ab88328783484b6f56649191fdeec371`
+  (7,812,176 bytes) in every Rust process of both rejected invocations.
+- **Satisfied retry.**
+  `.benchmarks/headtohead/ci-thread-sweep-v3/summary-ffeab05f-1785311982943.json` recorded
+  integrated Rust medians of 88.003–107.206 ms, passed all seven brackets and median-CI gates, and
+  is banked in `docs/PERF_LEDGER.md`.
+- **Future retry predicate.** Re-open either rejected result only to test a changed input/mix,
+  incumbent bundle or API execution model, executing ELF/compiler profile, persistent-pool
+  semantics, sample floor, median-CI/bracket contract, or host topology. Never resurrect the
+  unbatched displayed ratios.
+
+  Agent: cod (YellowSwan)

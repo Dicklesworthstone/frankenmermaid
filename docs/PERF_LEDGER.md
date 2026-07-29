@@ -461,3 +461,53 @@ four same-ELF Rust brackets passed, with `cv_gate=never`.
   render configuration, executing Rust ELF, timing boundary, or bracket contract changes. Re-open
   the architecture comparator only if mermaid-js, the pinned input, or its layout configuration
   changes enough for `mermaid.render()` to return a valid SVG; until then it has no ratio to score.
+
+## CERTIFIED INCUMBENT WIN: 500-diagram CI caller-thread sweep vs mermaid-js 11.15.0 (2026-07-29)
+
+**Bead:** `bd-1buv.70`. **Lane:** cod / HARNESS+FRONTIER (`YellowSwan`).
+**Campaign result class:** incumbent-win
+**Executing ELF SHA-256 (self-reported by process):** `600cd6b79113f01de7526df5a029b7ce5d57d4f06fb1d3772412fb29097bdcf7`
+**Legacy incumbent arm (same invocation):** name=mermaid-js version=11.15.0 artifact_sha256=70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de invocation_id=ffeab05f-1785311982943 measured_ratio=16321.565740x
+**A/A null control (same invocation):** every Rust-before and Rust-after width carried `n=20`
+interleaved A/A ratios; the mermaid-js arm carried `n=10` isolated A/A pairs with median
+1.000748 and 95% CI [0.986024, 1.014068]. All controls were sufficient, all seven cross-runtime
+median-CI gates passed, all seven same-ELF brackets passed, and `cv_gate=never`.
+
+- **Whole-job boundary.** One sample parses, lays out, renders, and serializes 500 diagrams across
+  five syntax families: 5,690 nodes, 5,890 edges, and 201,534 joined input bytes. The input SHA-256
+  is `65b8f69a7b2ee114cfb2fb49557b34cbc7e2c15f1414a81b7d94215a46de432f`.
+  Deterministic corpus construction and the caller's final file copy are outside both timers.
+- **Execution model.** The scalar width uses no pool. Widths 2–64 reuse one persistent Rayon pool
+  across warmup, A/A, A/B, and measured rounds. The pinned incumbent uses mermaid-js's
+  single-page main-thread API. The driver measures Rust widths ascending before Chromium and
+  descending after it, then selects the slower bracket observation.
+
+| Caller threads | Rust whole-job median | Scaling vs 1t | Parallel efficiency | mermaid-js / Rust | Rust bracket drift / floor | Batch / integrated p50 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 21.441246 ms | 1.000000× | 100.00% | **862.356600×** | 1.054453× / 1.152592× | 5 / 107.206230 ms |
+| 2 | 11.658705 ms | 1.839076× | 91.95% | **1,585.939433×** | 1.056696× / 1.197060× | 9 / 104.928345 ms |
+| 4 | 6.047344 ms | 3.545564× | 88.64% | **3,057.540633×** | 1.096446× / 1.114789× | 16 / 96.757504 ms |
+| 8 | 3.147166 ms | 6.812874× | 85.16% | **5,875.127019×** | 1.007615× / 1.087703× | 29 / 91.267814 ms |
+| 16 | 1.913105 ms | 11.207564× | 70.05% | **9,664.916458×** | 1.063808× / 1.070768× | 46 / 88.002830 ms |
+| 32 | 1.232407 ms | 17.397861× | 54.37% | **15,003.160482×** | 1.056765× / 1.108679× | 72 / 88.733304 ms |
+| 64 | 1.132857 ms | 18.926701× | 29.57% | **16,321.565740×** | 1.015281× / 1.110760× | 81 / 91.761417 ms |
+
+- **Incumbent measurement.** Mermaid-js measured 18,490.000 ms for the same 500-diagram job,
+  or 27.041644 diagrams/s. Its A/A CV was 1.63% and MAD was 1.03%; both are provenance only.
+- **Identity proof.** Every width in both Rust brackets produced input SHA-256
+  `65b8f69a…de432f`, default SVG SHA-256 `28e04524…51163`, and lean SVG SHA-256
+  `417f0942…90d3a`. The driver also required the same self-reported 7,813,328-byte ELF in all
+  fourteen Rust processes.
+- **Sampling floor.** Calibration targeted 75 ms and the driver failed closed below a measured
+  50 ms `batch × per-job p50`; accepted integrated medians were 88.003–107.206 ms.
+- **Portability boundary.** This win is caller concurrency, not x86 SIMD. The harness contains no
+  ISA-specific intrinsic and keeps the scalar arm as the byte-identity reference. These numbers
+  apply to the named Threadripper; Apple M4/M5 requires its own 1/2/4/8/... hardware sweep.
+- **Aggregate treatment.** These seven rows repeat one workload at different caller widths. The
+  21-item corpus aggregate includes the scalar row once and is not inflated with six correlated
+  copies.
+- **Evidence:** `.benchmarks/headtohead/ci-thread-sweep-v3/`.
+- **Retry / re-check predicate.** Re-certify if the input hash or diagram mix, pinned mermaid-js
+  bundle/configuration or API execution model, executing Rust ELF or compiler profile, persistent
+  pool semantics, 50 ms sample floor, median-CI/bracket contract, or host core topology changes.
+  Do not quote this Threadripper scaling curve for Apple Silicon without a native M4/M5 sweep.
