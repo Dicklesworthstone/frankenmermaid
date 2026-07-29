@@ -26,6 +26,7 @@ const PINS = JSON.parse(readFileSync(PINS_PATH, 'utf8'));
 
 const MIN_CLAIM_RATIO = 1.01;
 const THREAD_SWEEP_MIN_SAMPLE_NS = 50_000_000;
+const THREAD_SWEEP_CALIBRATION_TARGET_NS = 75_000_000;
 
 function arg(name, fallback = null) {
   const i = process.argv.indexOf(`--${name}`);
@@ -374,6 +375,7 @@ env.thread_sweep = threadSweep.length > 0
       parallel_executor: 'rayon_persistent_pool',
       incumbent_executor: 'single_page_main_thread',
       min_sample_ns: THREAD_SWEEP_MIN_SAMPLE_NS,
+      calibration_target_ns: THREAD_SWEEP_CALIBRATION_TARGET_NS,
     }
   : null;
 
@@ -486,6 +488,8 @@ const elfSelfReportBeforeValid =
       record.elf_bytes === binaryRecordBefore?.elf_bytes &&
       (threadSweep.length === 0 ||
         record.min_sample_ns === THREAD_SWEEP_MIN_SAMPLE_NS) &&
+      (threadSweep.length === 0 ||
+        record.calibration_target_ns === THREAD_SWEEP_CALIBRATION_TARGET_NS) &&
       (threadSweep.length === 0 || threadSweep.includes(record.worker_threads)),
   );
 if (!elfSelfReportBeforeValid) {
@@ -523,6 +527,8 @@ const elfSelfReportAfterValid =
       record.elf_bytes === binaryRecordBefore?.elf_bytes &&
       (threadSweep.length === 0 ||
         record.min_sample_ns === THREAD_SWEEP_MIN_SAMPLE_NS) &&
+      (threadSweep.length === 0 ||
+        record.calibration_target_ns === THREAD_SWEEP_CALIBRATION_TARGET_NS) &&
       (threadSweep.length === 0 || threadSweep.includes(record.worker_threads)),
   );
 const sameElf =
@@ -665,6 +671,27 @@ for (const { item, threads } of measurements) {
     continue;
   }
   if (
+    threadSweep.length > 0 &&
+    [fBefore, fAfter].some(
+      (record) =>
+        record.min_sample_ns !== THREAD_SWEEP_MIN_SAMPLE_NS ||
+        record.calibration_target_ns !== THREAD_SWEEP_CALIBRATION_TARGET_NS ||
+        !Number.isSafeInteger(record.batch) ||
+        record.batch < 1 ||
+        record.batch * record.pipeline_ns.p50 < THREAD_SWEEP_MIN_SAMPLE_NS,
+    )
+  ) {
+    hardFail = true;
+    rows.push({
+      ...row,
+      status: 'sample_floor_violation',
+      error:
+        `every Rust bracket arm must integrate for at least ` +
+        `${THREAD_SWEEP_MIN_SAMPLE_NS} ns at its p50`,
+    });
+    continue;
+  }
+  if (
     fBefore.input_sha256 !== fAfter.input_sha256 ||
     fBefore.output_sha256 !== fAfter.output_sha256 ||
     fBefore.output_sha256_lean !== fAfter.output_sha256_lean
@@ -683,6 +710,9 @@ for (const { item, threads } of measurements) {
   row.fm_execution_model = f.execution_model ?? 'scalar';
   row.fm_available_parallelism = f.available_parallelism ?? null;
   row.fm_min_sample_ns = f.min_sample_ns ?? null;
+  row.fm_calibration_target_ns = f.calibration_target_ns ?? null;
+  row.fm_batch = f.batch;
+  row.fm_integrated_sample_ns = f.batch * f.pipeline_ns.p50;
   row.fm_output_sha256 = f.output_sha256;
   row.fm_output_sha256_lean = f.output_sha256_lean;
   row.class = item.class ?? 'single';

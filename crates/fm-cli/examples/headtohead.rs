@@ -94,6 +94,7 @@ struct RenderExecutor {
     threads: usize,
     available_parallelism: usize,
     min_sample_ns: u64,
+    calibration_target_ns: u64,
     pool: Option<rayon::ThreadPool>,
 }
 
@@ -119,6 +120,7 @@ impl RenderExecutor {
         if min_sample_ns == 0 {
             return Err("FM_H2H_MIN_SAMPLE_NS must be at least 1".to_owned());
         }
+        let calibration_target_ns = min_sample_ns.saturating_add(min_sample_ns.div_ceil(2));
         let pool = if threads == 1 {
             None
         } else {
@@ -134,6 +136,7 @@ impl RenderExecutor {
             threads,
             available_parallelism,
             min_sample_ns,
+            calibration_target_ns,
             pool,
         })
     }
@@ -384,6 +387,16 @@ fn calibrated_batch(min_sample_ns: u64, fastest_warmup_ns: u64) -> usize {
         .max(1)
 }
 
+fn rescaled_batch(batch: usize, target_ns: u64, elapsed_ns: u64) -> usize {
+    let scaled = u128::try_from(batch)
+        .unwrap_or(u128::MAX)
+        .saturating_mul(u128::from(target_ns))
+        .div_ceil(u128::from(elapsed_ns.max(1)));
+    usize::try_from(scaled)
+        .unwrap_or(usize::MAX)
+        .max(batch.saturating_add(1))
+}
+
 struct PairedMeasured {
     arm_a_stats: Stats,
     arm_b_stats: Stats,
@@ -394,7 +407,7 @@ struct PairedMeasured {
     arm_b_output_bytes: usize,
 }
 
-/// Calibrate once off the faster arm; both the A/A and A/B routines then use this exact batch.
+/// Calibrate off the faster arm; both the A/A and A/B routines then use this exact batch.
 fn calibrate_batch(
     executor: &RenderExecutor,
     item: &CorpusItem,
@@ -413,10 +426,31 @@ fn calibrate_batch(
         }
     }
     if std::env::var_os("FM_H2H_FORCE_PROFILE").is_some() {
-        1
-    } else {
-        calibrated_batch(executor.min_sample_ns, fastest_warmup)
+        return 1;
     }
+
+    let mut batch = calibrated_batch(executor.min_sample_ns, fastest_warmup);
+    // A single-job warmup can overestimate the steady-state cost once caches and the worker pool
+    // are hot. Measure the integrated batch itself and scale proportionally until it clears a 50%
+    // headroom target. The driver separately fails closed unless measured p50 still reaches the
+    // declared minimum, so calibration cannot silently bless a short sample.
+    for _ in 0..4 {
+        let mut fastest_elapsed = u64::MAX;
+        for cfg in [cfg_a, cfg_b] {
+            let t0 = Instant::now();
+            for _ in 0..batch {
+                executor.render_all(&item.texts, cfg, &mut scratch);
+                std::hint::black_box(&scratch);
+            }
+            fastest_elapsed =
+                fastest_elapsed.min(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX));
+        }
+        if fastest_elapsed >= executor.calibration_target_ns {
+            return batch;
+        }
+        batch = rescaled_batch(batch, executor.calibration_target_ns, fastest_elapsed);
+    }
+    batch
 }
 
 fn time_arm(
@@ -573,6 +607,7 @@ fn main() {
             "worker_threads": executor.threads,
             "available_parallelism": executor.available_parallelism,
             "min_sample_ns": executor.min_sample_ns,
+            "calibration_target_ns": executor.calibration_target_ns,
             "execution_model": executor.execution_model(),
         })
     );
@@ -683,6 +718,7 @@ fn main() {
                 "worker_threads": executor.threads,
                 "available_parallelism": executor.available_parallelism,
                 "min_sample_ns": executor.min_sample_ns,
+                "calibration_target_ns": executor.calibration_target_ns,
                 "execution_model": executor.execution_model(),
                 "revisions": item.texts.len(),
                 "input_sha256": sha256_hex(joined_input.as_bytes()),
@@ -737,7 +773,8 @@ mod tests {
     use fm_render_svg::SvgRenderConfig;
 
     use super::{
-        RenderExecutor, bootstrap_median_ci, calibrated_batch, median, ratio_stats, stats,
+        RenderExecutor, bootstrap_median_ci, calibrated_batch, median, ratio_stats, rescaled_batch,
+        stats,
     };
 
     #[test]
@@ -761,6 +798,7 @@ mod tests {
         assert_eq!(calibrated_batch(2_000_000, 1_500_000), 2);
         assert_eq!(calibrated_batch(50_000_000, 1_000_001), 50);
         assert_eq!(calibrated_batch(2_000_000, 3_000_000), 1);
+        assert_eq!(rescaled_batch(8, 75_000_000, 43_000_000), 14);
     }
 
     #[test]
