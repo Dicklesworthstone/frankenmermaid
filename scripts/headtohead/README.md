@@ -46,7 +46,8 @@ Useful flags: `--only <corpus_id>[,<corpus_id>…]`, `--reps-scale 0.25` (fast s
 `--exclusive-host-claim trj-booking:<claim-message-id>`, `--pin-cpu auto|N|off`,
 `--out <dir>`, `--update-pins`.
 
-Exit codes: `0` green · `1` an engine errored · `3` corpus drift · `4` median-CI gate failed ·
+Exit codes: `0` green · `1` an engine errored · `2` invalid arguments or missing mandatory
+environment provenance · `3` corpus drift · `4` median-CI gate failed ·
 `5` the bracketed Rust observations drifted outside their A/A median-CI floor · `6` host-wide
 benchmark exclusivity was not clear immediately before a measured sweep phase.
 A comparator **DNF** is not an error and does not fail the run — see "Did not finish" below.
@@ -137,6 +138,31 @@ median-CI gate fails because its null control is insufficient.
 **Two report-only estimators.** The harness reports both p50-based and min-based speedup. Their
 agreement is useful diagnostic context, but only the same-invocation null median-CI decides the row.
 
+**CPU power-policy and ISA provenance.** Before either engine runs, the driver records the machine
+ISA and its complete feature list. On Linux it enumerates every cpufreq policy, including affected
+CPUs, scaling driver, governor, energy-performance preference, frequency limits, and boost state.
+The policies must cover every online CPU and agree on driver, governor, and exposed EPP; missing or
+mixed policy state makes cross-engine evidence invalid with exit 2. On macOS the corresponding
+artifact records the platform-managed power settings and all exposed `hw.optional` ISA features.
+Governor choice is provenance, not the acceptance statistic: a stable `powersave` run is labelled
+as such rather than silently presented as `performance`. A thread sweep re-reads the whole policy
+before every measured phase and exits 6 if it differs from the baseline.
+
+**Libc-leaf attribution.** A hot `memmove`, `memcpy`, `memcmp`, allocator, or syscall leaf is not
+itself a lever. Profile with call stacks, retain the exact symbol-bearing ELF that self-reported
+during that profile, recover file-relative instruction addresses from `perf`, and resolve each one
+with:
+
+```bash
+addr2line -a -f -C -i -e "$PROFILE_ELF" "$FILE_RELATIVE_IP"
+```
+
+`-i` is required so inlined Rust callers are preserved. For PIE samples reported as runtime virtual
+addresses, normalize through the matching `PERF_RECORD_MMAP` mapping before calling `addr2line`.
+Group the libc-family samples by the deepest project call site, report each call site's self-time,
+and compute its Amdahl ceiling before proposing a source change. “libc leaf is hot” without that
+caller attribution is incomplete profile evidence.
+
 **Determinism.** Every timed iteration's output length is checked against a reference render, and the
 full bytes are compared once outside the timed region. A nondeterministic render fails the run.
 
@@ -151,13 +177,15 @@ record to identify mermaid-js's single-page main-thread execution model, and gat
 own bracket plus both engines' A/A median CIs. Every sweep arm also self-reports the 50 ms minimum
 sample floor and 75 ms calibration target, and the driver verifies that `batch × per-job p50`
 reaches the floor in both brackets. Each row embeds host identity, physical and logical topology,
-RAM, NUMA count, inherited affinity, requested caller threads, caller workers actually observed
-during an untimed batch of the exact workload, the executing Rust ELF SHA-256, and the loaded
-mermaid-js bundle SHA-256. Requested capacity is never substituted for observed participation.
+RAM, NUMA count, inherited affinity, full ISA flags, cpufreq driver/governor/EPP/boost provenance,
+requested caller threads, caller workers actually observed during an untimed batch of the exact
+workload, the executing Rust ELF SHA-256, and the loaded mermaid-js bundle SHA-256. Requested
+capacity is never substituted for observed participation.
 Every sweep additionally requires the complete host cpuset, an Agent Mail claim reference, and a
 one-second idle sample of every logical CPU immediately before every measured phase. Any affinity
-CPU above 20% busy blocks the invocation with exit 6. The artifact retains every per-CPU sample and
-the claim reference. CV and MAD remain provenance only.
+CPU above 20% busy or any power-policy change blocks the invocation with exit 6. The artifact
+retains every per-CPU sample, the baseline and pre-phase power-policy summaries, and the claim
+reference. CV and MAD remain provenance only.
 
 ### Exclusive `trj` booking
 

@@ -150,6 +150,28 @@ function parseCpuList(raw) {
   return [...cpus].sort((a, b) => a - b);
 }
 
+function parseCpuSet(raw) {
+  if (!raw) return [];
+  return parseCpuList(raw.trim().split(/[\s,]+/).join(','));
+}
+
+function sortedUniqueStrings(values) {
+  return [...new Set(values.filter((value) => typeof value === 'string' && value.length > 0))]
+    .sort();
+}
+
+function sortedUniqueNumbers(values) {
+  return [...new Set(values.filter((value) => Number.isSafeInteger(value)))]
+    .sort((left, right) => left - right);
+}
+
+function readInteger(path) {
+  const raw = readText(path);
+  if (raw === null) return null;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) ? value : null;
+}
+
 function hostTopology(cpuRecords) {
   const online = parseCpuList(readText('/sys/devices/system/cpu/online'));
   const logicalThreads = online.length || cpuRecords.length;
@@ -178,6 +200,9 @@ function hostTopology(cpuRecords) {
     host_identity: hostname(),
     physical_cores: physicalCores,
     logical_threads: logicalThreads,
+    online_cpus: online.length > 0
+      ? online
+      : Array.from({ length: logicalThreads }, (_, cpu) => cpu),
     threads_per_core: physicalCores > 0 ? logicalThreads / physicalCores : null,
     ram_bytes: totalmem(),
     numa_nodes: numaNodes,
@@ -189,9 +214,318 @@ function hostTopology(cpuRecords) {
   };
 }
 
+function linuxBoostState() {
+  const cpufreqBoost = readText('/sys/devices/system/cpu/cpufreq/boost');
+  if (cpufreqBoost === '0' || cpufreqBoost === '1') {
+    return {
+      source: '/sys/devices/system/cpu/cpufreq/boost',
+      enabled: cpufreqBoost === '1',
+      raw: cpufreqBoost,
+    };
+  }
+  const intelNoTurbo = readText('/sys/devices/system/cpu/intel_pstate/no_turbo');
+  if (intelNoTurbo === '0' || intelNoTurbo === '1') {
+    return {
+      source: '/sys/devices/system/cpu/intel_pstate/no_turbo',
+      enabled: intelNoTurbo === '0',
+      raw: intelNoTurbo,
+    };
+  }
+  return { source: null, enabled: null, raw: null };
+}
+
+function linuxCpuPowerPolicy() {
+  const base = '/sys/devices/system/cpu/cpufreq';
+  const onlineCpus = parseCpuList(readText('/sys/devices/system/cpu/online'));
+  let policyNames = [];
+  try {
+    policyNames = readdirSync(base)
+      .filter((name) => /^policy\d+$/.test(name))
+      .sort((left, right) => Number(left.slice(6)) - Number(right.slice(6)));
+  } catch {
+    // Missing cpufreq sysfs is an invalid cross-engine baseline, represented below rather than
+    // silently guessed from the CPU model.
+  }
+  const policies = policyNames.map((policy) => {
+    const root = join(base, policy);
+    const affectedRaw =
+      readText(join(root, 'affected_cpus')) ??
+      readText(join(root, 'related_cpus'));
+    return {
+      policy,
+      affected_cpus: parseCpuSet(affectedRaw),
+      driver: readText(join(root, 'scaling_driver')),
+      governor: readText(join(root, 'scaling_governor')),
+      energy_performance_preference: readText(join(root, 'energy_performance_preference')),
+      scaling_min_khz: readInteger(join(root, 'scaling_min_freq')),
+      scaling_max_khz: readInteger(join(root, 'scaling_max_freq')),
+      hardware_min_khz: readInteger(join(root, 'cpuinfo_min_freq')),
+      hardware_max_khz: readInteger(join(root, 'cpuinfo_max_freq')),
+    };
+  });
+  const coveredCpus = [...new Set(policies.flatMap((policy) => policy.affected_cpus))]
+    .sort((left, right) => left - right);
+  const drivers = sortedUniqueStrings(policies.map((policy) => policy.driver));
+  const governors = sortedUniqueStrings(policies.map((policy) => policy.governor));
+  const energyPerformancePreferences = sortedUniqueStrings(
+    policies.map((policy) => policy.energy_performance_preference),
+  );
+  const eppPresenceConsistent =
+    energyPerformancePreferences.length === 0 ||
+    policies.every((policy) => typeof policy.energy_performance_preference === 'string');
+  const coverageComplete =
+    onlineCpus.length > 0 &&
+    onlineCpus.every((cpu) => coveredCpus.includes(cpu));
+  const consistent =
+    policies.length > 0 &&
+    drivers.length === 1 &&
+    governors.length === 1 &&
+    energyPerformancePreferences.length <= 1 &&
+    eppPresenceConsistent;
+  return {
+    kind: 'linux_cpufreq',
+    platform: 'linux',
+    policy_count: policies.length,
+    online_cpus: onlineCpus,
+    covered_online_cpus: coveredCpus,
+    coverage_complete: coverageComplete,
+    consistent,
+    drivers,
+    governors,
+    energy_performance_preferences: energyPerformancePreferences,
+    boost: linuxBoostState(),
+    policies,
+  };
+}
+
+function darwinCpuPowerPolicy() {
+  const powerSettings = sh('pmset', ['-g', 'custom']);
+  return {
+    kind: 'darwin_platform_managed',
+    platform: 'darwin',
+    policy_count: 1,
+    coverage_complete: true,
+    consistent: typeof powerSettings === 'string' && powerSettings.length > 0,
+    drivers: ['darwin-platform-managed'],
+    governors: ['platform-managed'],
+    energy_performance_preferences: [],
+    boost: { source: 'darwin-platform-managed', enabled: null, raw: null },
+    power_settings: powerSettings,
+    policies: [],
+  };
+}
+
+function cpuPowerPolicy() {
+  if (platform() === 'linux') return linuxCpuPowerPolicy();
+  if (platform() === 'darwin') return darwinCpuPowerPolicy();
+  return {
+    kind: 'unsupported',
+    platform: platform(),
+    policy_count: 0,
+    coverage_complete: false,
+    consistent: false,
+    drivers: [],
+    governors: [],
+    energy_performance_preferences: [],
+    boost: { source: null, enabled: null, raw: null },
+    policies: [],
+  };
+}
+
+function cpuIsa() {
+  const architecture = process.arch;
+  const machine = sh('uname', ['-m']) ?? architecture;
+  let flags = [];
+  let source = null;
+  if (platform() === 'linux') {
+    const featureLine = readText('/proc/cpuinfo')
+      ?.split('\n')
+      .find((line) => /^(?:flags|Features)\s*:/.test(line));
+    flags = featureLine
+      ? featureLine.slice(featureLine.indexOf(':') + 1).trim().split(/\s+/)
+      : [];
+    source = '/proc/cpuinfo';
+  } else if (platform() === 'darwin') {
+    const allSysctls = sh('sysctl', ['-a']) ?? '';
+    const optionalFeatures = allSysctls
+      .split('\n')
+      .filter((line) => /^hw\.optional\.[^:]+:\s*1\s*$/.test(line))
+      .map((line) => line.slice(0, line.indexOf(':')));
+    const x86Features = [
+      sh('sysctl', ['-n', 'machdep.cpu.features']),
+      sh('sysctl', ['-n', 'machdep.cpu.leaf7_features']),
+    ].flatMap((value) => value?.split(/\s+/) ?? []);
+    flags = [...optionalFeatures, ...x86Features];
+    source = 'sysctl hw.optional + machdep.cpu features';
+  }
+  flags = sortedUniqueStrings(flags.map((flag) => flag.toLowerCase()));
+  const featureSet = new Set(flags);
+  return {
+    architecture,
+    machine,
+    source,
+    flags,
+    capabilities: {
+      avx2: featureSet.has('avx2'),
+      fma: featureSet.has('fma'),
+      bmi2: featureSet.has('bmi2'),
+      vaes: featureSet.has('vaes'),
+      any_avx512: flags.some((flag) => flag.startsWith('avx512')),
+      neon_or_asimd:
+        featureSet.has('neon') ||
+        featureSet.has('asimd') ||
+        flags.some((flag) => flag.includes('hw.optional.neon')),
+    },
+  };
+}
+
+function sameArray(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function validCpuPowerPolicy(record) {
+  if (record?.kind === 'darwin_platform_managed') {
+    return (
+      record.platform === 'darwin' &&
+      record.policy_count === 1 &&
+      record.coverage_complete === true &&
+      record.consistent === true &&
+      sameArray(record.drivers, ['darwin-platform-managed']) &&
+      sameArray(record.governors, ['platform-managed']) &&
+      typeof record.power_settings === 'string' &&
+      record.power_settings.length > 0
+    );
+  }
+  if (record?.kind !== 'linux_cpufreq' || record.platform !== 'linux') return false;
+  if (!Array.isArray(record.policies) || record.policies.length === 0) return false;
+  if (
+    !record.boost ||
+    !(
+      typeof record.boost.enabled === 'boolean' ||
+      record.boost.enabled === null
+    ) ||
+    !(
+      typeof record.boost.source === 'string' ||
+      record.boost.source === null
+    )
+  ) {
+    return false;
+  }
+  if (
+    record.policies.some(
+      (policy) =>
+        typeof policy.policy !== 'string' ||
+        !Array.isArray(policy.affected_cpus) ||
+        policy.affected_cpus.length === 0 ||
+        typeof policy.driver !== 'string' ||
+        policy.driver.length === 0 ||
+        typeof policy.governor !== 'string' ||
+        policy.governor.length === 0,
+    )
+  ) {
+    return false;
+  }
+  const drivers = sortedUniqueStrings(record.policies.map((policy) => policy.driver));
+  const governors = sortedUniqueStrings(record.policies.map((policy) => policy.governor));
+  const energyPerformancePreferences = sortedUniqueStrings(
+    record.policies.map((policy) => policy.energy_performance_preference),
+  );
+  const coveredCpus = [...new Set(record.policies.flatMap((policy) => policy.affected_cpus))]
+    .sort((left, right) => left - right);
+  const coverageComplete =
+    Array.isArray(record.online_cpus) &&
+    record.online_cpus.length > 0 &&
+    record.online_cpus.every((cpu) => coveredCpus.includes(cpu));
+  const eppPresenceConsistent =
+    energyPerformancePreferences.length === 0 ||
+    record.policies.every(
+      (policy) => typeof policy.energy_performance_preference === 'string',
+    );
+  const consistent =
+    drivers.length === 1 &&
+    governors.length === 1 &&
+    energyPerformancePreferences.length <= 1 &&
+    eppPresenceConsistent;
+  return (
+    record.policy_count === record.policies.length &&
+    sameArray(record.drivers, drivers) &&
+    sameArray(record.governors, governors) &&
+    sameArray(record.energy_performance_preferences, energyPerformancePreferences) &&
+    sameArray(record.covered_online_cpus, coveredCpus) &&
+    record.coverage_complete === coverageComplete &&
+    record.consistent === consistent &&
+    coverageComplete &&
+    consistent
+  );
+}
+
+function validCpuIsa(record) {
+  return (
+    typeof record?.architecture === 'string' &&
+    record.architecture.length > 0 &&
+    typeof record.machine === 'string' &&
+    record.machine.length > 0 &&
+    typeof record.source === 'string' &&
+    record.source.length > 0 &&
+    Array.isArray(record.flags) &&
+    record.flags.length > 0 &&
+    record.flags.every((flag) => typeof flag === 'string' && flag.length > 0)
+  );
+}
+
+function powerPolicyComparable(record) {
+  return {
+    kind: record.kind,
+    platform: record.platform,
+    policy_count: record.policy_count,
+    online_cpus: record.online_cpus,
+    covered_online_cpus: record.covered_online_cpus,
+    coverage_complete: record.coverage_complete,
+    consistent: record.consistent,
+    drivers: record.drivers,
+    governors: record.governors,
+    energy_performance_preferences: record.energy_performance_preferences,
+    boost: record.boost,
+    power_settings: record.power_settings,
+    policies: record.policies,
+  };
+}
+
+function sameCpuPowerPolicy(left, right) {
+  return (
+    validCpuPowerPolicy(left) &&
+    validCpuPowerPolicy(right) &&
+    JSON.stringify(powerPolicyComparable(left)) ===
+      JSON.stringify(powerPolicyComparable(right))
+  );
+}
+
+function powerPolicySummary(record) {
+  return {
+    kind: record.kind,
+    platform: record.platform,
+    policy_count: record.policy_count,
+    coverage_complete: record.coverage_complete,
+    consistent: record.consistent,
+    drivers: record.drivers,
+    governors: record.governors,
+    energy_performance_preferences: record.energy_performance_preferences,
+    boost: record.boost,
+    power_settings: record.power_settings ?? null,
+    scaling_min_khz: sortedUniqueNumbers(
+      (record.policies ?? []).map((policy) => policy.scaling_min_khz),
+    ),
+    scaling_max_khz: sortedUniqueNumbers(
+      (record.policies ?? []).map((policy) => policy.scaling_max_khz),
+    ),
+  };
+}
+
 function fingerprint() {
   const cpu = cpus();
   const topology = hostTopology(cpu);
+  const powerPolicy = cpuPowerPolicy();
+  const isa = cpuIsa();
   const trackedStatus =
     sh('git', ['-C', REPO, 'status', '--porcelain', '--untracked-files=no']) ?? '';
   const allStatus =
@@ -206,15 +540,20 @@ function fingerprint() {
       .filter((line) => line.startsWith('??')).length,
     rustc: sh('rustc', ['--version']),
     cargo_profile: 'release (opt-level=3 for fm-core/parser/layout/render-svg, lto=fat, codegen-units=1)',
-    rustflags: '-C target-cpu=x86-64-v2 (.cargo/config.toml)',
+    rustflags: process.arch === 'x64'
+      ? '-C target-cpu=x86-64-v2 (.cargo/config.toml)'
+      : 'workspace target defaults (the x86-64-v2 override does not apply)',
     node: process.version,
     chromium: sh(PINS.chromium.binary, ['--version'])?.split('\n').pop() ?? 'unknown',
     kernel: release(),
     host_identity: topology.host_identity,
     cpu_model: cpu[0]?.model ?? 'unknown',
+    isa,
+    power_policy: powerPolicy,
     cpu_count: topology.logical_threads,
     physical_cores: topology.physical_cores,
     logical_threads: topology.logical_threads,
+    online_cpus: topology.online_cpus,
     threads_per_core: topology.threads_per_core,
     ram_bytes: topology.ram_bytes,
     numa_nodes: topology.numa_nodes,
@@ -432,8 +771,91 @@ if (has('self-test')) {
   if (!validHostTopology(liveTopology)) {
     throw new Error(`live host-topology provenance is incomplete: ${JSON.stringify(liveTopology)}`);
   }
+  const powerPolicy = {
+    kind: 'linux_cpufreq',
+    platform: 'linux',
+    policy_count: 2,
+    online_cpus: [0, 1],
+    covered_online_cpus: [0, 1],
+    coverage_complete: true,
+    consistent: true,
+    drivers: ['amd-pstate-epp'],
+    governors: ['powersave'],
+    energy_performance_preferences: ['balance_performance'],
+    boost: { source: '/sys/devices/system/cpu/cpufreq/boost', enabled: true, raw: '1' },
+    policies: [0, 1].map((cpu) => ({
+      policy: `policy${cpu}`,
+      affected_cpus: [cpu],
+      driver: 'amd-pstate-epp',
+      governor: 'powersave',
+      energy_performance_preference: 'balance_performance',
+      scaling_min_khz: 400_000,
+      scaling_max_khz: 4_500_000,
+      hardware_min_khz: 400_000,
+      hardware_max_khz: 4_500_000,
+    })),
+  };
+  const mixedGovernorPolicy = {
+    ...powerPolicy,
+    policies: powerPolicy.policies.map((policy, index) =>
+      index === 0 ? policy : { ...policy, governor: 'performance' }),
+  };
+  const incompletePolicy = {
+    ...powerPolicy,
+    online_cpus: [0, 1, 2],
+  };
+  if (
+    !validCpuPowerPolicy(powerPolicy) ||
+    validCpuPowerPolicy(mixedGovernorPolicy) ||
+    validCpuPowerPolicy(incompletePolicy) ||
+    !sameCpuPowerPolicy(powerPolicy, structuredClone(powerPolicy)) ||
+    sameCpuPowerPolicy(powerPolicy, {
+      ...powerPolicy,
+      boost: { ...powerPolicy.boost, enabled: false, raw: '0' },
+    })
+  ) {
+    throw new Error('CPU power-policy provenance validation regression');
+  }
+  const isa = {
+    architecture: 'x64',
+    machine: 'x86_64',
+    source: '/proc/cpuinfo',
+    flags: ['avx2', 'bmi2', 'fma', 'vaes'],
+    capabilities: {
+      avx2: true,
+      fma: true,
+      bmi2: true,
+      vaes: true,
+      any_avx512: false,
+      neon_or_asimd: false,
+    },
+  };
+  if (!validCpuIsa(isa) || validCpuIsa({ ...isa, flags: [] })) {
+    throw new Error('CPU ISA provenance validation regression');
+  }
+  const livePowerPolicy = cpuPowerPolicy();
+  const liveIsa = cpuIsa();
+  if (!validCpuPowerPolicy(livePowerPolicy) || !validCpuIsa(liveIsa)) {
+    throw new Error(
+      `live CPU power/ISA provenance is incomplete: ` +
+      `${JSON.stringify({ power_policy: livePowerPolicy, isa: liveIsa })}`,
+    );
+  }
+  const liveSchedulerTotals = cpuTotals();
+  if (
+    !Number.isFinite(liveSchedulerTotals.total) ||
+    !Number.isFinite(liveSchedulerTotals.idle) ||
+    liveSchedulerTotals.total <= 0 ||
+    liveSchedulerTotals.idle < 0 ||
+    liveSchedulerTotals.idle > liveSchedulerTotals.total
+  ) {
+    throw new Error(`live scheduler-time provenance is invalid: ${JSON.stringify(liveSchedulerTotals)}`);
+  }
   if (JSON.stringify(parseCpuList('0-3,8,10-11,8')) !== JSON.stringify([0, 1, 2, 3, 8, 10, 11])) {
     throw new Error('CPU-list parser regression');
+  }
+  if (JSON.stringify(parseCpuSet('0 4-5 8')) !== JSON.stringify([0, 4, 5, 8])) {
+    throw new Error('CPU-set parser regression');
   }
   for (const invalid of ['2-1', '1-2-3', 'cpu7']) {
     try {
@@ -548,6 +970,14 @@ if (has('self-test')) {
       affinity_logical_cpus: liveTopology.affinity_cpus.length,
     },
     actual_thread_probe_gate: 'required',
+    cpu_power_policy_gate: {
+      required: true,
+      live: powerPolicySummary(livePowerPolicy),
+    },
+    cpu_isa_gate: {
+      required: true,
+      live: liveIsa,
+    },
     host_wide_exclusivity_gate: {
       claim_reference: 'required',
       all_affinity_cpus: 'required',
@@ -670,6 +1100,27 @@ if (!fmBin) {
 
 const env = fingerprint();
 console.error(`[run] rev=${env.git_rev?.slice(0, 8)}${env.git_dirty ? '-dirty' : ''} load1=${env.loadavg_1m.toFixed(2)} cpus=${env.cpu_count}`);
+const powerPolicy = powerPolicySummary(env.power_policy);
+console.error(
+  `[run] power driver=${powerPolicy.drivers.join(',') || 'missing'} ` +
+  `governor=${powerPolicy.governors.join(',') || 'missing'} ` +
+  `epp=${powerPolicy.energy_performance_preferences.join(',') || 'not-exposed'} ` +
+  `boost=${powerPolicy.boost.enabled ?? 'unknown'} ` +
+  `isa=${env.isa.machine}/${env.isa.architecture} flags=${env.isa.flags.length}`,
+);
+const powerAndIsaRequired = !has('skip-mermaid') || threadSweep.length > 0;
+const powerAndIsaValid =
+  validCpuPowerPolicy(env.power_policy) &&
+  validCpuIsa(env.isa);
+if (
+  powerAndIsaRequired &&
+  !powerAndIsaValid
+) {
+  console.error(
+    '[run] INVALID: cross-engine evidence requires complete, internally consistent CPU governor and ISA provenance',
+  );
+  process.exit(2);
+}
 if (threadSweep.length > 0 && !validHostTopology(env)) {
   console.error('[run] INVALID: thread sweeps require host identity, physical/logical topology, RAM, NUMA, and affinity provenance');
   process.exit(2);
@@ -700,6 +1151,8 @@ env.thread_sweep = threadSweep.length > 0
       host_wide_quiescence_required: true,
       host_wide_maximum_busy_fraction: HOST_WIDE_MAX_BUSY_FRACTION,
       host_wide_sample_ms: HOST_WIDE_QUIET_SAMPLE_MS,
+      cpu_power_policy_required: true,
+      cpu_isa_provenance_required: true,
       scalar_reference_threads: 1,
       parallel_executor: 'rayon_persistent_pool',
       incumbent_executor: 'single_page_main_thread',
@@ -730,26 +1183,39 @@ const [fmCmd, fmArgs] = pin ? ['taskset', ['-c', String(pin.cpu), fmBin, corpusP
 // own under load, which inflated the ratio in its favour. Neither engine's internal A/A can see
 // this, because each null is measured entirely inside its own phase.
 //
-// The sweep additionally samples every affinity CPU while the host is idle immediately before each
-// measured phase. Any CPU above the fixed 20% ceiling blocks the invocation before more evidence is
-// produced. Across-phase aggregate busyness remains report-only because it includes the engines'
-// own work.
+// The sweep additionally re-checks the CPU power policy and samples every affinity CPU while the
+// host is idle immediately before each measured phase. Any policy drift or CPU above the fixed 20%
+// ceiling blocks the invocation before more evidence is produced. Across-phase aggregate busyness
+// remains report-only because it includes the engines' own work.
 const phaseLoad = [];
 const hostWideQuiescenceChecks = [];
 
 function requireHostWideQuiescence(label) {
-  const classification = classifyHostWideQuiescence(
+  const livePowerPolicy = cpuPowerPolicy();
+  const livePowerPolicyValid = validCpuPowerPolicy(livePowerPolicy);
+  const powerPolicyMatchesBaseline =
+    livePowerPolicyValid &&
+    sameCpuPowerPolicy(env.power_policy, livePowerPolicy);
+  const cpuClassification = classifyHostWideQuiescence(
     cpuBusy(HOST_WIDE_QUIET_SAMPLE_MS),
     env.affinity_cpus,
     HOST_WIDE_MAX_BUSY_FRACTION,
   );
   const record = {
+    ...cpuClassification,
     phase: label,
     observed_at: new Date().toISOString(),
     sample_ms: HOST_WIDE_QUIET_SAMPLE_MS,
     exclusive_host_claim: exclusiveHostClaim,
     requirement: 'all affinity CPUs must remain at or below the fixed busy-fraction ceiling',
-    ...classification,
+    power_policy_valid: livePowerPolicyValid,
+    power_policy_matches_baseline: powerPolicyMatchesBaseline,
+    power_policy: powerPolicySummary(livePowerPolicy),
+    verdict:
+      cpuClassification.verdict === 'clear' &&
+      powerPolicyMatchesBaseline
+        ? 'clear'
+        : 'blocked',
   };
   hostWideQuiescenceChecks.push(record);
   if (record.verdict !== 'clear') {
@@ -760,6 +1226,7 @@ function requireHostWideQuiescence(label) {
     console.error(
       `[run] HOST-WIDE EXCLUSIVITY BLOCKED before ${label}: ` +
       `missing=[${record.missing_cpus.join(',')}] busy=[${busy}] ` +
+      `power-policy=${livePowerPolicyValid ? (powerPolicyMatchesBaseline ? 'match' : 'changed') : 'invalid'} ` +
       `(limit ${(HOST_WIDE_MAX_BUSY_FRACTION * 100).toFixed(1)}%)`,
     );
     process.exit(6);
@@ -770,13 +1237,15 @@ function requireHostWideQuiescence(label) {
   );
 }
 
-/** Aggregate busy/total jiffies across all CPUs, from /proc/stat. Passive: no busy-wait. */
+/** Aggregate scheduler time across all CPUs. Passive: no busy-wait. */
 function cpuTotals() {
-  const line = readFileSync('/proc/stat', 'utf8').split('\n').find((l) => /^cpu\s/.test(l));
-  const n = line.trim().split(/\s+/).slice(1, 9).map(Number);
-  const total = n.reduce((a, b) => a + b, 0);
-  const idle = n[3] + n[4];
-  return { total, idle };
+  return cpuTimeSnapshot().reduce(
+    (totals, record) => ({
+      total: totals.total + record.total,
+      idle: totals.idle + record.idle,
+    }),
+    { total: 0, idle: 0 },
+  );
 }
 
 /**
@@ -786,9 +1255,10 @@ function cpuTotals() {
  * wrong instrument here: our arm takes ~19 s and mermaid's ~841 s, and a 1-minute load average
  * sampled around a 19 s phase describes the minute *preceding* it. On a box that is quieting down
  * -- which it was, 21.8 -> 6.6 over the run -- that alone manufactures an apparent asymmetry.
- * /proc/stat deltas are exact over whatever interval they span, so they compare like with like
- * regardless of how differently long the two phases are. This remains provenance only; exclusive
- * sweeps additionally block on the idle full-host sample immediately before every phase.
+ * `os.cpus()` scheduler-time deltas cover the exact interval on Linux and macOS, so they compare
+ * like with like regardless of how differently long the two phases are. This remains provenance
+ * only; exclusive sweeps additionally block on the idle full-host sample immediately before every
+ * phase.
  */
 function timedPhase(label, fn) {
   if (threadSweep.length > 0) requireHostWideQuiescence(label);
@@ -974,6 +1444,9 @@ function rowHostWideExclusivity(threads) {
       verdict: check?.verdict ?? 'missing',
       observed_at: check?.observed_at ?? null,
       observed_max_busy_fraction: check?.observed_max_busy_fraction ?? null,
+      power_policy_valid: check?.power_policy_valid ?? false,
+      power_policy_matches_baseline: check?.power_policy_matches_baseline ?? false,
+      power_policy: check?.power_policy ?? null,
     };
   });
   return {
@@ -982,6 +1455,7 @@ function rowHostWideExclusivity(threads) {
     maximum_busy_fraction: HOST_WIDE_MAX_BUSY_FRACTION,
     sample_ms: HOST_WIDE_QUIET_SAMPLE_MS,
     complete_host_cpuset: env.affinity_cpus.length === env.logical_threads,
+    baseline_power_policy: powerPolicySummary(env.power_policy),
     phase_checks: checks,
   };
 }
@@ -1069,6 +1543,8 @@ for (const { item, threads } of measurements) {
     host: {
       identity: env.host_identity,
       cpu_model: env.cpu_model,
+      isa: env.isa,
+      power_policy: powerPolicySummary(env.power_policy),
       physical_cores: env.physical_cores,
       logical_threads: env.logical_threads,
       ram_bytes: env.ram_bytes,
@@ -1088,7 +1564,8 @@ for (const { item, threads } of measurements) {
     rows.push({
       ...row,
       status: 'host_wide_exclusivity_invalid',
-      error: 'every measured sweep phase requires a clear full-host quiescence check',
+      error:
+        'every measured sweep phase requires clear full-host quiescence and the unchanged baseline power policy',
     });
     continue;
   }
@@ -1338,6 +1815,14 @@ const summary = {
     bundle_url: PINS.mermaid.url,
     bundle_sha256: PINS.mermaid.sha256,
     security_level: PINS.mermaid.security_level,
+  },
+  environment_provenance_gate: {
+    verdict: powerAndIsaValid ? 'pass' : (powerAndIsaRequired ? 'fail' : 'not_required'),
+    required: powerAndIsaRequired,
+    rule:
+      'cross-engine evidence requires complete ISA flags and one internally consistent full-CPU power policy',
+    isa: env.isa,
+    power_policy: powerPolicySummary(env.power_policy),
   },
   corpus_items: items.length,
   measurement_rows: rows.length,
