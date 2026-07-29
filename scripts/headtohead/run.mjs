@@ -432,13 +432,13 @@ function timedPhase(label, fn) {
   return out;
 }
 
-function runFrankenmermaidPhase(prefix) {
+function runFrankenmermaidPhase(prefix, sweepOrder = threadSweep) {
   if (threadSweep.length === 0) {
     return timedPhase(prefix, () => runJsonl(prefix, fmCmd, fmArgs));
   }
   const records = [];
   let code = 0;
-  for (const threads of threadSweep) {
+  for (const threads of sweepOrder) {
     const phase = `${prefix}-t${threads}`;
     const result = timedPhase(
       phase,
@@ -493,7 +493,11 @@ const mjs = has('skip-mermaid')
   : timedPhase('mermaid-js', () => runJsonl('mermaid-js', process.execPath, mjsArgs));
 const fmAfter = has('skip-mermaid')
   ? fmBefore
-  : runFrankenmermaidPhase('frankenmermaid-after');
+  // Mirror the before sweep around the incumbent phase. With the same order on both sides, t1
+  // would be far before Chromium but immediately after its process teardown, while t64 would have
+  // the opposite placement. Reversing makes each width's two observations equally placed around
+  // the comparator and removes that avoidable bracket asymmetry without weakening any gate.
+  : runFrankenmermaidPhase('frankenmermaid-after', [...threadSweep].reverse());
 const binaryRecordsAfter = fmAfter.records.filter((record) => record.record === 'binary');
 const binaryRecordAfter = binaryRecordsAfter[0];
 const afterReportedThreads = new Set(

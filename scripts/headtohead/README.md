@@ -134,8 +134,9 @@ full bytes are compared once outside the timed region. A nondeterministic render
 
 **Portable thread sweep.** `--thread-sweep` is accepted for one selected workload and must include
 the scalar `1` arm. The driver starts one Rust invocation per requested width before the incumbent
-phase and another per width after it. Every invocation builds one persistent Rayon pool and reuses it
-for warmup, A/A, A/B, and measured rounds; the scalar arm does not enter Rayon. The driver fails
+phase, then mirrors that order after it so every width has symmetric placement around Chromium.
+Every invocation builds one persistent Rayon pool and reuses it for warmup, A/A, A/B, and measured
+rounds; the scalar arm does not enter Rayon. The driver fails
 closed unless every pooled arm's input, default SVG, and lean SVG SHA-256 exactly match the scalar
 arm in both brackets. It also requires every arm to self-report the same ELF, requires the incumbent
 record to identify mermaid-js's single-page main-thread execution model, and gates each ratio on its
