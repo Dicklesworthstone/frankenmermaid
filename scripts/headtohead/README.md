@@ -30,17 +30,17 @@ node scripts/headtohead/run.mjs \
   --only edit_trace_200x200 \
   --js-budget-scale 20
 
-# CI-scale caller concurrency must run on the 64-thread target machine, not an rch worker.
+# CI-scale caller concurrency must run under the exclusive trj booking, not on an rch worker.
 node scripts/headtohead/run.mjs \
   --fm-bin target/release/examples/headtohead \
   --only ci_batch_500 \
-  --thread-sweep 1,2,4,8,16,32,64 \
+  --thread-sweep 1,2,4,8,16,32,64,96,128 \
   --pin-cpu off
 ```
 
 Useful flags: `--only <corpus_id>[,<corpus_id>…]`, `--reps-scale 0.25` (fast smoke),
 `--js-budget-scale 0.1` (shrink the mermaid wall budgets for a smoke run), `--skip-mermaid`,
-`--thread-sweep 1,2,4,8,16,32,64`, `--pin-cpu auto|N|off`, `--out <dir>`,
+`--thread-sweep 1,2,4,8,16,32,64,96,128`, `--pin-cpu auto|N|off`, `--out <dir>`,
 `--update-pins`.
 
 Exit codes: `0` green · `1` an engine errored · `3` corpus drift · `4` median-CI gate failed ·
@@ -146,7 +146,20 @@ arm in both brackets. It also requires every arm to self-report the same ELF, re
 record to identify mermaid-js's single-page main-thread execution model, and gates each ratio on its
 own bracket plus both engines' A/A median CIs. Every sweep arm also self-reports the 50 ms minimum
 sample floor and 75 ms calibration target, and the driver verifies that `batch × per-job p50`
-reaches the floor in both brackets. CV and MAD remain provenance only.
+reaches the floor in both brackets. Each row embeds host identity, physical and logical topology,
+RAM, NUMA count, inherited affinity, requested caller threads, caller workers actually observed
+during an untimed batch of the exact workload, the executing Rust ELF SHA-256, and the loaded
+mermaid-js bundle SHA-256. Requested capacity is never substituted for observed participation.
+CV and MAD remain provenance only.
+
+### Exclusive `trj` booking
+
+Thread-scaling work on `trj` is exclusive. Before using that host, read Agent Mail thread
+`trj-booking`; claim it with subject `[trj] CLAIM frankenmermaid`, including expected duration and
+measurement scope, only when the six higher-priority repos have released it. Post
+`[trj] RELEASE frankenmermaid` immediately after success or failure. While any sweep claim is
+active, run neither sweep nor non-sweep frankenmermaid work on `trj`. A silent holder past its
+declared duration receives `[trj] PROBE <repo>` and one full wait cycle before any takeover.
 
 The pool is deliberately outside renderer internals. The ledger shows that starting fresh scoped
 threads inside each small render regresses, while a CI job supplies hundreds of independent

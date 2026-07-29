@@ -13,8 +13,8 @@
 // item is reported with `status: "error"`, never dropped from the table.
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { cpus, loadavg, release, tmpdir, totalmem } from 'node:os';
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { cpus, hostname, loadavg, platform, release, tmpdir, totalmem } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CORPUS, generateAll } from './corpus.mjs';
@@ -70,8 +70,76 @@ function sh(cmd, args, opts = {}) {
   }
 }
 
+function readText(path) {
+  try {
+    return readFileSync(path, 'utf8').trim();
+  } catch {
+    return null;
+  }
+}
+
+function parseCpuList(raw) {
+  if (!raw) return [];
+  const cpus = new Set();
+  for (const part of raw.split(',').map((value) => value.trim()).filter(Boolean)) {
+    const match = /^(\d+)(?:-(\d+))?$/.exec(part);
+    const start = Number(match?.[1]);
+    const end = Number(match?.[2] ?? match?.[1]);
+    if (
+      !match ||
+      !Number.isSafeInteger(start) ||
+      !Number.isSafeInteger(end) ||
+      end < start
+    ) {
+      throw new Error(`invalid CPU list component ${JSON.stringify(part)}`);
+    }
+    for (let cpu = start; cpu <= end; cpu += 1) cpus.add(cpu);
+  }
+  return [...cpus].sort((a, b) => a - b);
+}
+
+function hostTopology(cpuRecords) {
+  const online = parseCpuList(readText('/sys/devices/system/cpu/online'));
+  const logicalThreads = online.length || cpuRecords.length;
+  const physicalCoreKeys = new Set();
+  for (const cpu of online) {
+    const packageId = readText(`/sys/devices/system/cpu/cpu${cpu}/topology/physical_package_id`);
+    const coreId = readText(`/sys/devices/system/cpu/cpu${cpu}/topology/core_id`);
+    if (packageId !== null && coreId !== null) physicalCoreKeys.add(`${packageId}:${coreId}`);
+  }
+  const sysctlPhysical = Number(sh('sysctl', ['-n', 'hw.physicalcpu']));
+  const physicalCores = physicalCoreKeys.size ||
+    (Number.isSafeInteger(sysctlPhysical) && sysctlPhysical > 0 ? sysctlPhysical : logicalThreads);
+  let numaNodes = 1;
+  try {
+    const nodes = readdirSync('/sys/devices/system/node').filter((name) => /^node\d+$/.test(name));
+    if (nodes.length > 0) numaNodes = nodes.length;
+  } catch {
+    // Apple Silicon exposes unified memory rather than Linux NUMA sysfs; one visible node is the
+    // portable topology contract until a platform API reports otherwise.
+  }
+  const status = readText('/proc/self/status');
+  const statusValue = (key) =>
+    status?.split('\n').find((line) => line.startsWith(key))?.slice(key.length).trim() ?? null;
+  const affinityList = parseCpuList(statusValue('Cpus_allowed_list:'));
+  return {
+    host_identity: hostname(),
+    physical_cores: physicalCores,
+    logical_threads: logicalThreads,
+    threads_per_core: physicalCores > 0 ? logicalThreads / physicalCores : null,
+    ram_bytes: totalmem(),
+    numa_nodes: numaNodes,
+    affinity_mask: statusValue('Cpus_allowed:') ?? 'all-visible',
+    affinity_cpus: affinityList.length > 0
+      ? affinityList
+      : Array.from({ length: logicalThreads }, (_, cpu) => cpu),
+    affinity_source: affinityList.length > 0 ? 'linux_proc_status' : `${platform()}_visible_cpu_fallback`,
+  };
+}
+
 function fingerprint() {
   const cpu = cpus();
+  const topology = hostTopology(cpu);
   const trackedStatus =
     sh('git', ['-C', REPO, 'status', '--porcelain', '--untracked-files=no']) ?? '';
   const allStatus =
@@ -90,8 +158,17 @@ function fingerprint() {
     node: process.version,
     chromium: sh(PINS.chromium.binary, ['--version'])?.split('\n').pop() ?? 'unknown',
     kernel: release(),
+    host_identity: topology.host_identity,
     cpu_model: cpu[0]?.model ?? 'unknown',
-    cpu_count: cpu.length,
+    cpu_count: topology.logical_threads,
+    physical_cores: topology.physical_cores,
+    logical_threads: topology.logical_threads,
+    threads_per_core: topology.threads_per_core,
+    ram_bytes: topology.ram_bytes,
+    numa_nodes: topology.numa_nodes,
+    affinity_mask: topology.affinity_mask,
+    affinity_cpus: topology.affinity_cpus,
+    affinity_source: topology.affinity_source,
     total_mem_gb: Number((totalmem() / 2 ** 30).toFixed(1)),
     loadavg_1m: loadavg()[0],
     // Recorded because a loaded box inflates both engines; the ratio survives, absolute ms do not.
@@ -110,6 +187,57 @@ function validElfSelfReport(record) {
     /^[0-9a-f]{64}$/.test(record.elf_sha256) &&
     Number.isSafeInteger(record.elf_bytes) &&
     record.elf_bytes > 0
+  );
+}
+
+const validSha256 = (value) => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
+
+function validHostTopology(record) {
+  return (
+    typeof record?.host_identity === 'string' &&
+    record.host_identity.length > 0 &&
+    Number.isSafeInteger(record.physical_cores) &&
+    record.physical_cores > 0 &&
+    Number.isSafeInteger(record.logical_threads) &&
+    record.logical_threads >= record.physical_cores &&
+    Number.isSafeInteger(record.ram_bytes) &&
+    record.ram_bytes > 0 &&
+    Number.isSafeInteger(record.numa_nodes) &&
+    record.numa_nodes > 0 &&
+    typeof record.affinity_mask === 'string' &&
+    record.affinity_mask.length > 0 &&
+    Array.isArray(record.affinity_cpus) &&
+    record.affinity_cpus.length > 0 &&
+    record.affinity_cpus.every((cpu) => Number.isSafeInteger(cpu) && cpu >= 0)
+  );
+}
+
+function validRustThreadProvenance(record, requestedThreads) {
+  const observed = record?.thread_count_actually_used;
+  return (
+    record?.worker_threads === requestedThreads &&
+    record.thread_count_requested === requestedThreads &&
+    Number.isSafeInteger(observed) &&
+    observed >= 1 &&
+    observed <= requestedThreads &&
+    record.thread_probe?.method === 'instrumented_caller_worker_union_over_exact_workload' &&
+    record.thread_probe?.caller_workers_observed === observed &&
+    record.thread_probe?.probe_batch === record.batch &&
+    record.thread_probe?.inside_timed_region === false &&
+    Array.isArray(record.affinity_cpus) &&
+    record.affinity_cpus.length > 0 &&
+    typeof record.affinity_source === 'string'
+  );
+}
+
+function validIncumbentThreadProvenance(record) {
+  return (
+    record?.worker_threads === 1 &&
+    record.thread_count_requested === 1 &&
+    record.thread_count_actually_used === 1 &&
+    record.thread_probe?.method === 'single_cdp_page_main_execution_context' &&
+    record.thread_probe?.caller_workers_observed === 1 &&
+    record.execution_model === 'single_page_main_thread'
   );
 }
 
@@ -233,6 +361,72 @@ if (has('self-test')) {
   if (!validElfSelfReport(validElf) || validElfSelfReport({ ...validElf, elf_sha256: 'unavailable' })) {
     throw new Error('executing-ELF self-report validation regression');
   }
+  const topology = {
+    host_identity: 'threadripperje',
+    physical_cores: 64,
+    logical_threads: 128,
+    ram_bytes: 536_069_869_568,
+    numa_nodes: 1,
+    affinity_mask: 'ff',
+    affinity_cpus: [0, 1, 2, 3],
+  };
+  if (!validHostTopology(topology) || validHostTopology({ ...topology, physical_cores: null })) {
+    throw new Error('host-topology provenance validation regression');
+  }
+  const liveTopology = {
+    ...hostTopology(cpus()),
+    cpu_model: cpus()[0]?.model ?? 'unknown',
+  };
+  if (!validHostTopology(liveTopology)) {
+    throw new Error(`live host-topology provenance is incomplete: ${JSON.stringify(liveTopology)}`);
+  }
+  if (JSON.stringify(parseCpuList('0-3,8,10-11,8')) !== JSON.stringify([0, 1, 2, 3, 8, 10, 11])) {
+    throw new Error('CPU-list parser regression');
+  }
+  for (const invalid of ['2-1', '1-2-3', 'cpu7']) {
+    try {
+      parseCpuList(invalid);
+      throw new Error(`CPU-list parser accepted ${JSON.stringify(invalid)}`);
+    } catch (error) {
+      if (String(error).includes('accepted')) throw error;
+    }
+  }
+  const validThreads = {
+    worker_threads: 4,
+    thread_count_requested: 4,
+    thread_count_actually_used: 3,
+    batch: 7,
+    affinity_cpus: [0, 1, 2, 3],
+    affinity_source: 'linux_proc_status',
+    thread_probe: {
+      method: 'instrumented_caller_worker_union_over_exact_workload',
+      caller_workers_observed: 3,
+      probe_batch: 7,
+      inside_timed_region: false,
+    },
+  };
+  if (
+    !validRustThreadProvenance(validThreads, 4) ||
+    validRustThreadProvenance({ ...validThreads, thread_count_actually_used: null }, 4)
+  ) {
+    throw new Error('actual-thread provenance validation regression');
+  }
+  const validIncumbentThreads = {
+    worker_threads: 1,
+    thread_count_requested: 1,
+    thread_count_actually_used: 1,
+    execution_model: 'single_page_main_thread',
+    thread_probe: {
+      method: 'single_cdp_page_main_execution_context',
+      caller_workers_observed: 1,
+    },
+  };
+  if (
+    !validIncumbentThreadProvenance(validIncumbentThreads) ||
+    validIncumbentThreadProvenance({ ...validIncumbentThreads, thread_count_actually_used: null })
+  ) {
+    throw new Error('incumbent actual-thread provenance validation regression');
+  }
   const bracketRecord = (p50, nullControl = perfect) => ({
     status: 'ok',
     pipeline_ns: { p50 },
@@ -253,6 +447,15 @@ if (has('self-test')) {
     median_ci_cases: cases.length,
     bracket_cases: bracketCases.length,
     elf_self_report_gate: 'required',
+    host_topology_gate: 'required',
+    live_topology: {
+      host_identity: liveTopology.host_identity,
+      physical_cores: liveTopology.physical_cores,
+      logical_threads: liveTopology.logical_threads,
+      numa_nodes: liveTopology.numa_nodes,
+      affinity_logical_cpus: liveTopology.affinity_cpus.length,
+    },
+    actual_thread_probe_gate: 'required',
     rust_pre_post_bracket_gate: 'required',
     cv_gate: 'never',
   }));
@@ -361,9 +564,19 @@ if (!fmBin) {
 
 const env = fingerprint();
 console.error(`[run] rev=${env.git_rev?.slice(0, 8)}${env.git_dirty ? '-dirty' : ''} load1=${env.loadavg_1m.toFixed(2)} cpus=${env.cpu_count}`);
+if (threadSweep.length > 0 && !validHostTopology(env)) {
+  console.error('[run] INVALID: thread sweeps require host identity, physical/logical topology, RAM, NUMA, and affinity provenance');
+  process.exit(2);
+}
 if (threadSweep.some((threads) => threads > env.cpu_count)) {
   console.error(
     `[run] --thread-sweep requests ${Math.max(...threadSweep)} threads, but this host reports only ${env.cpu_count} logical CPUs`,
+  );
+  process.exit(2);
+}
+if (threadSweep.some((threads) => threads > env.affinity_cpus.length)) {
+  console.error(
+    `[run] --thread-sweep requests ${Math.max(...threadSweep)} threads, but this process affinity exposes only ${env.affinity_cpus.length} logical CPUs`,
   );
   process.exit(2);
 }
@@ -450,6 +663,7 @@ function runFrankenmermaidPhase(prefix, sweepOrder = threadSweep) {
         runJsonl(phase, fmCmd, fmArgs, {
           FM_H2H_THREADS: String(threads),
           FM_H2H_MIN_SAMPLE_NS: String(THREAD_SWEEP_MIN_SAMPLE_NS),
+          FM_H2H_THREAD_PROBE: '1',
         }),
     );
     records.push(
@@ -486,6 +700,11 @@ const elfSelfReportBeforeValid =
       validElfSelfReport(record) &&
       record.elf_sha256 === binaryRecordBefore?.elf_sha256 &&
       record.elf_bytes === binaryRecordBefore?.elf_bytes &&
+      (threadSweep.length === 0 ||
+        (record.thread_probe_required === true &&
+          record.thread_count_requested === record.worker_threads &&
+          record.affinity_mask === env.affinity_mask &&
+          JSON.stringify(record.affinity_cpus) === JSON.stringify(env.affinity_cpus))) &&
       (threadSweep.length === 0 ||
         record.min_sample_ns === THREAD_SWEEP_MIN_SAMPLE_NS) &&
       (threadSweep.length === 0 ||
@@ -525,6 +744,11 @@ const elfSelfReportAfterValid =
       validElfSelfReport(record) &&
       record.elf_sha256 === binaryRecordBefore?.elf_sha256 &&
       record.elf_bytes === binaryRecordBefore?.elf_bytes &&
+      (threadSweep.length === 0 ||
+        (record.thread_probe_required === true &&
+          record.thread_count_requested === record.worker_threads &&
+          record.affinity_mask === env.affinity_mask &&
+          JSON.stringify(record.affinity_cpus) === JSON.stringify(env.affinity_cpus))) &&
       (threadSweep.length === 0 ||
         record.min_sample_ns === THREAD_SWEEP_MIN_SAMPLE_NS) &&
       (threadSweep.length === 0 ||
@@ -658,6 +882,19 @@ for (const { item, threads } of measurements) {
   const row = {
     id: item.id,
     fm_worker_threads: threads ?? fBefore?.worker_threads ?? 1,
+    fm_worker_threads_requested: threads ?? fBefore?.thread_count_requested ?? 1,
+    host: {
+      identity: env.host_identity,
+      cpu_model: env.cpu_model,
+      physical_cores: env.physical_cores,
+      logical_threads: env.logical_threads,
+      ram_bytes: env.ram_bytes,
+      numa_nodes: env.numa_nodes,
+    },
+    engine_sha256: {
+      frankenmermaid_elf: binaryRecordBefore?.elf_sha256 ?? null,
+      mermaid_js_bundle: m?.bundle_sha256 ?? null,
+    },
   };
 
   if (!fBefore || fBefore.status !== 'ok' || !fAfter || fAfter.status !== 'ok') {
@@ -667,6 +904,26 @@ for (const { item, threads } of measurements) {
       status: 'error',
       engine: 'frankenmermaid',
       error: fBefore?.error ?? fAfter?.error ?? 'missing before/after result',
+    });
+    continue;
+  }
+  if (
+    threadSweep.length > 0 &&
+    (
+      !validRustThreadProvenance(fBefore, threads) ||
+      !validRustThreadProvenance(fAfter, threads) ||
+      fBefore.affinity_mask !== fAfter.affinity_mask ||
+      fBefore.affinity_mask !== env.affinity_mask ||
+      JSON.stringify(fBefore.affinity_cpus) !== JSON.stringify(fAfter.affinity_cpus) ||
+      JSON.stringify(fBefore.affinity_cpus) !== JSON.stringify(env.affinity_cpus)
+    )
+  ) {
+    hardFail = true;
+    rows.push({
+      ...row,
+      status: 'rust_thread_provenance_invalid',
+      error:
+        'every Rust bracket arm must report requested and actual operation threads plus the exact inherited affinity',
     });
     continue;
   }
@@ -709,6 +966,19 @@ for (const { item, threads } of measurements) {
   row.fm_bracket = bracket;
   row.fm_execution_model = f.execution_model ?? 'scalar';
   row.fm_available_parallelism = f.available_parallelism ?? null;
+  row.fm_worker_threads_actually_used = f.thread_count_actually_used ?? null;
+  row.fm_worker_threads_actually_used_before = fBefore.thread_count_actually_used ?? null;
+  row.fm_worker_threads_actually_used_after = fAfter.thread_count_actually_used ?? null;
+  row.fm_worker_threads_observed_match =
+    fBefore.thread_count_actually_used === fAfter.thread_count_actually_used;
+  row.fm_thread_probe = f.thread_probe ?? null;
+  row.affinity = {
+    mask: f.affinity_mask ?? env.affinity_mask,
+    cpus: f.affinity_cpus ?? env.affinity_cpus,
+    source: f.affinity_source ?? env.affinity_source,
+  };
+  row.fm_elf_sha256 = binaryRecordBefore.elf_sha256;
+  row.fm_elf_bytes = binaryRecordBefore.elf_bytes;
   row.fm_min_sample_ns = f.min_sample_ns ?? null;
   row.fm_calibration_target_ns = f.calibration_target_ns ?? null;
   row.fm_batch = f.batch;
@@ -742,6 +1012,31 @@ for (const { item, threads } of measurements) {
   if (has('skip-mermaid')) {
     rows.push({ ...row, status: 'fm_only' });
     continue;
+  }
+  if (
+    threadSweep.length > 0 &&
+    m &&
+    (
+      !validIncumbentThreadProvenance(m) ||
+      !validSha256(m.bundle_sha256) ||
+      m.bundle_sha256 !== PINS.mermaid.sha256
+    )
+  ) {
+    hardFail = true;
+    rows.push({
+      ...row,
+      status: 'comparator_execution_model_mismatch',
+      error:
+        'thread sweep requires the pinned mermaid-js bundle and an observed single CDP main-thread execution context',
+    });
+    continue;
+  }
+  if (m) {
+    row.mjs_worker_threads = m.worker_threads ?? 1;
+    row.mjs_worker_threads_requested = m.thread_count_requested ?? 1;
+    row.mjs_worker_threads_actually_used = m.thread_count_actually_used ?? null;
+    row.mjs_execution_model = m.execution_model ?? 'single_page_main_thread';
+    row.mjs_bundle_sha256 = m.bundle_sha256 ?? null;
   }
   // A did-not-finish is a *result*: mermaid was given a wall budget at this size and did not
   // produce a render inside it. We record the budget and derive a lower bound on the speedup; we
@@ -780,29 +1075,11 @@ for (const { item, threads } of measurements) {
     rows.push({ ...row, status: 'input_mismatch', error: `fm ${f.input_sha256.slice(0, 12)} != mjs ${m.input_sha256.slice(0, 12)}` });
     continue;
   }
-  if (
-    threadSweep.length > 0 &&
-    (m.worker_threads !== 1 || m.execution_model !== 'single_page_main_thread')
-  ) {
-    hardFail = true;
-    rows.push({
-      ...row,
-      status: 'comparator_execution_model_mismatch',
-      error:
-        `thread sweep requires mermaid-js worker_threads=1 and ` +
-        `execution_model=single_page_main_thread; got ${m.worker_threads}/` +
-        `${m.execution_model}`,
-    });
-    continue;
-  }
-
   row.mjs_p50_ns = m.render_ns.p50;
   row.mjs_min_ns = m.render_ns.min;
   row.mjs_cv_pct = m.cv_pct;
   row.mjs_mad_pct = m.mad_pct;
   row.mjs_null_control = m.null_control ?? null;
-  row.mjs_worker_threads = m.worker_threads ?? 1;
-  row.mjs_execution_model = m.execution_model ?? 'single_page_main_thread';
   row.mjs_bytes = m.output_bytes;
   row.mjs_documents_per_second = (m.revisions * 1e9) / m.render_ns.p50;
   row.speedup = m.render_ns.p50 / f.pipeline_ns.p50;
@@ -842,8 +1119,11 @@ if (threadSweep.length > 0) {
     }
     for (const row of rows.filter((candidate) => candidate.id === item.id)) {
       row.fm_scaling_vs_1t = scalar.fm_p50_ns / row.fm_p50_ns;
-      row.fm_parallel_efficiency =
+      row.fm_parallel_efficiency_requested =
         row.fm_scaling_vs_1t / Math.max(1, row.fm_worker_threads);
+      row.fm_parallel_efficiency_observed =
+        row.fm_scaling_vs_1t / Math.max(1, row.fm_worker_threads_actually_used ?? 1);
+      row.fm_parallel_efficiency = row.fm_parallel_efficiency_requested;
     }
   }
 }
@@ -858,7 +1138,12 @@ const measurementOrder = phaseLoad.map((phase) => phase.phase);
 const summary = {
   schema: 'frankenmermaid.headtohead.v2',
   env,
-  pins: { mermaid: PINS.mermaid.version, bundle_url: PINS.mermaid.url, security_level: PINS.mermaid.security_level },
+  pins: {
+    mermaid: PINS.mermaid.version,
+    bundle_url: PINS.mermaid.url,
+    bundle_sha256: PINS.mermaid.sha256,
+    security_level: PINS.mermaid.security_level,
+  },
   corpus_items: items.length,
   measurement_rows: rows.length,
   ok_items: ok.length,
@@ -878,6 +1163,15 @@ const summary = {
   thread_sweep: threadSweep.length > 0
     ? {
         threads: threadSweep,
+        requested_threads: threadSweep,
+        actual_observed_threads: rows
+          .filter((row) => Number.isSafeInteger(row.fm_worker_threads_actually_used))
+          .map((row) => ({
+            requested: row.fm_worker_threads_requested,
+            before: row.fm_worker_threads_actually_used_before,
+            after: row.fm_worker_threads_actually_used_after,
+            selected: row.fm_worker_threads_actually_used,
+          })),
         scalar_output_identity: sweepOutputIdentity,
         comparison_scope:
           `same ${corpusJson[0].texts.length}-document ${items[0].id} workload; ` +
@@ -975,9 +1269,11 @@ if (summary.thread_sweep) {
       ? `${r.speedup.toFixed(0)}x vs mermaid-js`
       : 'incumbent skipped';
     console.log(
-      `  t${String(r.fm_worker_threads).padStart(2)}  ${ms(r.fm_p50_ns)} ms  ` +
+      `  requested t${String(r.fm_worker_threads_requested).padStart(3)}  ` +
+      `observed ${String(r.fm_worker_threads_actually_used).padStart(3)}  ` +
+      `${ms(r.fm_p50_ns)} ms  ` +
       `${r.fm_scaling_vs_1t.toFixed(2)}x vs t1  ` +
-      `${(r.fm_parallel_efficiency * 100).toFixed(1)}% efficiency  ` +
+      `${(r.fm_parallel_efficiency_observed * 100).toFixed(1)}% observed efficiency  ` +
       versusIncumbent,
     );
   }

@@ -11,6 +11,7 @@
 //!
 //! Run via `scripts/headtohead/run.mjs`, not directly.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use fm_parser::parse;
@@ -83,6 +84,71 @@ fn full_pipeline(input: &str, cfg: &SvgRenderConfig) -> String {
     render_svg_with_layout(&parsed.ir, &layout, cfg)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct ProcessAffinity {
+    mask: Option<String>,
+    cpus: Vec<usize>,
+}
+
+fn parse_cpu_list(raw: &str) -> Result<Vec<usize>, String> {
+    let mut cpus = Vec::new();
+    for part in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        if let Some((start, end)) = part.split_once('-') {
+            let start = start
+                .parse::<usize>()
+                .map_err(|e| format!("invalid CPU range start {start:?}: {e}"))?;
+            let end = end
+                .parse::<usize>()
+                .map_err(|e| format!("invalid CPU range end {end:?}: {e}"))?;
+            if start > end {
+                return Err(format!("invalid descending CPU range {part:?}"));
+            }
+            cpus.extend(start..=end);
+        } else {
+            cpus.push(
+                part.parse::<usize>()
+                    .map_err(|e| format!("invalid CPU id {part:?}: {e}"))?,
+            );
+        }
+    }
+    cpus.sort_unstable();
+    cpus.dedup();
+    Ok(cpus)
+}
+
+/// Affinity of the process that actually executes the benchmark.
+///
+/// Linux exposes the authoritative mask in `/proc/self/status`. Other targets retain a portable
+/// fallback containing every CPU visible through `available_parallelism`; the JSON identifies
+/// that fallback explicitly so it cannot be mistaken for an OS affinity query.
+fn process_affinity(available_parallelism: usize) -> ProcessAffinity {
+    if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+        let value = |key: &str| {
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix(key))
+                .map(str::trim)
+        };
+        if let Some(cpu_list) = value("Cpus_allowed_list:")
+            && let Ok(cpus) = parse_cpu_list(cpu_list)
+            && !cpus.is_empty()
+        {
+            return ProcessAffinity {
+                mask: value("Cpus_allowed:").map(str::to_owned),
+                cpus,
+            };
+        }
+    }
+    ProcessAffinity {
+        mask: Some("all-visible".to_owned()),
+        cpus: (0..available_parallelism).collect(),
+    }
+}
+
 /// Executes independent diagrams through either the scalar path or one persistent portable pool.
 ///
 /// The renderer's existing per-diagram scoped-thread cap is deliberately untouched: the negative
@@ -95,6 +161,7 @@ struct RenderExecutor {
     available_parallelism: usize,
     min_sample_ns: u64,
     calibration_target_ns: u64,
+    thread_probe_enabled: bool,
     pool: Option<rayon::ThreadPool>,
 }
 
@@ -121,6 +188,8 @@ impl RenderExecutor {
             return Err("FM_H2H_MIN_SAMPLE_NS must be at least 1".to_owned());
         }
         let calibration_target_ns = min_sample_ns.saturating_add(min_sample_ns.div_ceil(2));
+        let thread_probe_enabled =
+            matches!(std::env::var("FM_H2H_THREAD_PROBE").as_deref(), Ok("1"));
         let pool = if threads == 1 {
             None
         } else {
@@ -137,6 +206,7 @@ impl RenderExecutor {
             available_parallelism,
             min_sample_ns,
             calibration_target_ns,
+            thread_probe_enabled,
             pool,
         })
     }
@@ -161,21 +231,67 @@ impl RenderExecutor {
     ///
     /// `IndexedParallelIterator::collect::<Vec<_>>()` preserves input order, so concatenating the
     /// result is byte-identical to the scalar path even though work completes out of order.
-    fn render_all(&self, texts: &[String], cfg: &SvgRenderConfig, sink: &mut Vec<String>) {
+    fn render_all_observing(
+        &self,
+        texts: &[String],
+        cfg: &SvgRenderConfig,
+        sink: &mut Vec<String>,
+        workers_seen: Option<&[AtomicBool]>,
+    ) {
         sink.clear();
         if let Some(pool) = &self.pool {
             let rendered = pool.install(|| {
                 texts
                     .par_iter()
-                    .map(|text| full_pipeline(std::hint::black_box(text.as_str()), cfg))
+                    .map(|text| {
+                        if let Some(workers_seen) = workers_seen
+                            && let Some(index) = rayon::current_thread_index()
+                            && let Some(seen) = workers_seen.get(index)
+                        {
+                            seen.store(true, Ordering::Relaxed);
+                        }
+                        full_pipeline(std::hint::black_box(text.as_str()), cfg)
+                    })
                     .collect::<Vec<_>>()
             });
             sink.extend(rendered);
         } else {
+            if let Some(seen) = workers_seen.and_then(|workers| workers.first()) {
+                seen.store(true, Ordering::Relaxed);
+            }
             for text in texts {
                 sink.push(full_pipeline(std::hint::black_box(text.as_str()), cfg));
             }
         }
+    }
+
+    fn render_all(&self, texts: &[String], cfg: &SvgRenderConfig, sink: &mut Vec<String>) {
+        self.render_all_observing(texts, cfg, sink, None);
+    }
+
+    /// Observe workers that execute the exact workload, outside every timed sample.
+    ///
+    /// `ThreadPoolBuilder::num_threads` is only a request. Recording the distinct Rayon worker
+    /// indices that actually run diagram jobs proves operation-level participation on Linux and
+    /// Apple Silicon without relying on ISA- or OS-specific thread APIs.
+    fn probe_operation_threads(
+        &self,
+        texts: &[String],
+        cfg: &SvgRenderConfig,
+        batch: usize,
+    ) -> usize {
+        let workers_seen = (0..self.threads)
+            .map(|_| AtomicBool::new(false))
+            .collect::<Vec<_>>();
+        let mut sink = Vec::with_capacity(texts.len());
+        for _ in 0..batch {
+            self.render_all_observing(texts, cfg, &mut sink, Some(&workers_seen));
+        }
+        workers_seen
+            .iter()
+            .filter(|seen| seen.load(Ordering::Relaxed))
+            .count()
+            .max(1)
     }
 }
 
@@ -593,6 +709,12 @@ fn main() {
         eprintln!("{e}");
         std::process::exit(2);
     });
+    let affinity = process_affinity(executor.available_parallelism);
+    let affinity_source = if affinity.mask.as_deref() == Some("all-visible") {
+        "portable_visible_cpu_fallback"
+    } else {
+        "linux_proc_status"
+    };
 
     // Line 1 of stdout: which ELF produced everything below it.
     let (elf_sha256, elf_bytes) = self_elf_sha256();
@@ -605,7 +727,12 @@ fn main() {
             "elf_sha256": elf_sha256,
             "elf_bytes": elf_bytes,
             "worker_threads": executor.threads,
+            "thread_count_requested": executor.threads,
+            "thread_probe_required": executor.thread_probe_enabled,
             "available_parallelism": executor.available_parallelism,
+            "affinity_mask": affinity.mask.as_deref(),
+            "affinity_cpus": &affinity.cpus,
+            "affinity_source": affinity_source,
             "min_sample_ns": executor.min_sample_ns,
             "calibration_target_ns": executor.calibration_target_ns,
             "execution_model": executor.execution_model(),
@@ -644,6 +771,9 @@ fn main() {
         }
 
         let batch = calibrate_batch(&executor, item, &default_cfg, &lean_cfg);
+        let thread_count_actually_used = executor
+            .thread_probe_enabled
+            .then(|| executor.probe_operation_threads(&item.texts, &default_cfg, batch));
         let rounds = item.reps.max(MIN_NULL_ROUNDS);
         let null_run = match paired(&executor, item, &default_cfg, &default_cfg, batch, rounds) {
             Ok(v) => v,
@@ -716,7 +846,19 @@ fn main() {
                 "warmup": item.warmup,
                 "batch": batch,
                 "worker_threads": executor.threads,
+                "thread_count_requested": executor.threads,
+                "thread_count_actually_used": thread_count_actually_used,
+                "thread_probe": thread_count_actually_used.map(|observed| serde_json::json!({
+                    "method": "instrumented_caller_worker_union_over_exact_workload",
+                    "probe_batch": batch,
+                    "caller_workers_observed": observed,
+                    "portable_across_isa": true,
+                    "inside_timed_region": false,
+                })),
                 "available_parallelism": executor.available_parallelism,
+                "affinity_mask": affinity.mask.as_deref(),
+                "affinity_cpus": &affinity.cpus,
+                "affinity_source": affinity_source,
                 "min_sample_ns": executor.min_sample_ns,
                 "calibration_target_ns": executor.calibration_target_ns,
                 "execution_model": executor.execution_model(),
@@ -773,8 +915,8 @@ mod tests {
     use fm_render_svg::SvgRenderConfig;
 
     use super::{
-        RenderExecutor, bootstrap_median_ci, calibrated_batch, median, ratio_stats, rescaled_batch,
-        stats,
+        RenderExecutor, bootstrap_median_ci, calibrated_batch, median, parse_cpu_list, ratio_stats,
+        rescaled_batch, stats,
     };
 
     #[test]
@@ -817,5 +959,26 @@ mod tests {
         scalar.render_all(&texts, &config, &mut scalar_output);
         parallel.render_all(&texts, &config, &mut parallel_output);
         assert_eq!(parallel_output, scalar_output);
+    }
+
+    #[test]
+    fn operation_probe_reports_workers_that_execute_diagrams() {
+        let texts = (0..64)
+            .map(|index| format!("flowchart LR\nA{index}[First]-->B{index}[Second]"))
+            .collect::<Vec<_>>();
+        let config = SvgRenderConfig::default();
+        let scalar = RenderExecutor::new(1).expect("scalar executor");
+        let parallel = RenderExecutor::new(2).expect("parallel executor");
+        assert_eq!(scalar.probe_operation_threads(&texts, &config, 2), 1);
+        assert_eq!(parallel.probe_operation_threads(&texts, &config, 2), 2);
+    }
+
+    #[test]
+    fn cpu_list_parser_expands_ranges_and_deduplicates() {
+        assert_eq!(
+            parse_cpu_list("0-3,8,10-11,8").expect("valid CPU list"),
+            vec![0, 1, 2, 3, 8, 10, 11]
+        );
+        assert!(parse_cpu_list("4-2").is_err());
     }
 }
