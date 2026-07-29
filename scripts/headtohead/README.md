@@ -94,8 +94,10 @@ as `status: "error"` and fails the whole run. A comparator that cannot render is
 and branch predictors on ours).
 
 **Batching.** A 69 µs pipeline cannot be timed one iteration at a time on a shared box — a single
-timer interrupt is a large fraction of the sample. The Rust runner therefore batches iterations until
-each timed sample spans ≥ 2 ms and divides. Batching is a timing device only: every iteration still
+timer interrupt is a large fraction of the sample. The Rust runner therefore rounds the batch count
+up until each normal timed sample spans ≥ 2 ms and divides. A thread sweep raises that floor to
+50 ms because the high-width whole job can fall below 1 ms and its pre/post observations are
+separated by the long Chromium phase. Batching is a timing device only: every iteration still
 renders the whole diagram. mermaid's items are all ≥ 30 ms, so they need no batching.
 
 **Same-invocation A/A.** The Rust runner factors timing into one paired routine. For every item it
@@ -140,7 +142,8 @@ rounds; the scalar arm does not enter Rayon. The driver fails
 closed unless every pooled arm's input, default SVG, and lean SVG SHA-256 exactly match the scalar
 arm in both brackets. It also requires every arm to self-report the same ELF, requires the incumbent
 record to identify mermaid-js's single-page main-thread execution model, and gates each ratio on its
-own bracket plus both engines' A/A median CIs. CV and MAD remain provenance only.
+own bracket plus both engines' A/A median CIs. Every sweep arm also self-reports the 50 ms minimum
+sample floor. CV and MAD remain provenance only.
 
 The pool is deliberately outside renderer internals. The ledger shows that starting fresh scoped
 threads inside each small render regresses, while a CI job supplies hundreds of independent

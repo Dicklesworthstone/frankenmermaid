@@ -93,6 +93,7 @@ fn full_pipeline(input: &str, cfg: &SvgRenderConfig) -> String {
 struct RenderExecutor {
     threads: usize,
     available_parallelism: usize,
+    min_sample_ns: u64,
     pool: Option<rayon::ThreadPool>,
 }
 
@@ -108,6 +109,16 @@ impl RenderExecutor {
                 "FM_H2H_THREADS={threads} exceeds available_parallelism={available_parallelism}"
             ));
         }
+        let min_sample_ns =
+            std::env::var("FM_H2H_MIN_SAMPLE_NS")
+                .ok()
+                .map_or(Ok(MIN_SAMPLE_NS), |raw| {
+                    raw.parse::<u64>()
+                        .map_err(|e| format!("invalid FM_H2H_MIN_SAMPLE_NS={raw:?}: {e}"))
+                })?;
+        if min_sample_ns == 0 {
+            return Err("FM_H2H_MIN_SAMPLE_NS must be at least 1".to_owned());
+        }
         let pool = if threads == 1 {
             None
         } else {
@@ -122,6 +133,7 @@ impl RenderExecutor {
         Ok(Self {
             threads,
             available_parallelism,
+            min_sample_ns,
             pool,
         })
     }
@@ -360,10 +372,17 @@ fn ratio_json(
 
 /// Each timed sample must span at least this long. A single timer interrupt or scheduler preemption
 /// costs on the order of microseconds; timing a 74 us pipeline one iteration at a time therefore
-/// measures the kernel as much as the renderer. Batching until a sample spans ~2 ms makes the
-/// same-invocation null CI narrow enough to decide useful effects.
+/// measures the kernel as much as the renderer. Normal runs use a 2 ms floor; the thread-sweep
+/// driver raises it to 50 ms because sub-millisecond jobs need more integration time for a stable
+/// bracket across the long Chromium phase.
 /// Batching is a *timing* device only: every iteration in a batch still renders the whole diagram.
 const MIN_SAMPLE_NS: u64 = 2_000_000;
+
+fn calibrated_batch(min_sample_ns: u64, fastest_warmup_ns: u64) -> usize {
+    usize::try_from(min_sample_ns.div_ceil(fastest_warmup_ns.max(1)))
+        .unwrap_or(usize::MAX)
+        .max(1)
+}
 
 struct PairedMeasured {
     arm_a_stats: Stats,
@@ -396,9 +415,7 @@ fn calibrate_batch(
     if std::env::var_os("FM_H2H_FORCE_PROFILE").is_some() {
         1
     } else {
-        usize::try_from(MIN_SAMPLE_NS / fastest_warmup.max(1))
-            .unwrap_or(1)
-            .max(1)
+        calibrated_batch(executor.min_sample_ns, fastest_warmup)
     }
 }
 
@@ -555,6 +572,7 @@ fn main() {
             "elf_bytes": elf_bytes,
             "worker_threads": executor.threads,
             "available_parallelism": executor.available_parallelism,
+            "min_sample_ns": executor.min_sample_ns,
             "execution_model": executor.execution_model(),
         })
     );
@@ -664,6 +682,7 @@ fn main() {
                 "batch": batch,
                 "worker_threads": executor.threads,
                 "available_parallelism": executor.available_parallelism,
+                "min_sample_ns": executor.min_sample_ns,
                 "execution_model": executor.execution_model(),
                 "revisions": item.texts.len(),
                 "input_sha256": sha256_hex(joined_input.as_bytes()),
@@ -717,7 +736,9 @@ fn main() {
 mod tests {
     use fm_render_svg::SvgRenderConfig;
 
-    use super::{RenderExecutor, bootstrap_median_ci, median, ratio_stats, stats};
+    use super::{
+        RenderExecutor, bootstrap_median_ci, calibrated_batch, median, ratio_stats, stats,
+    };
 
     #[test]
     fn median_averages_the_two_middle_values() {
@@ -733,6 +754,13 @@ mod tests {
         assert_eq!(stats.median, 1.0);
         assert_eq!(stats.half_width, 0.0);
         assert_eq!(stats.min_decidable_2x, 1.0);
+    }
+
+    #[test]
+    fn calibrated_batch_rounds_up_to_the_sample_floor() {
+        assert_eq!(calibrated_batch(2_000_000, 1_500_000), 2);
+        assert_eq!(calibrated_batch(50_000_000, 1_000_001), 50);
+        assert_eq!(calibrated_batch(2_000_000, 3_000_000), 1);
     }
 
     #[test]

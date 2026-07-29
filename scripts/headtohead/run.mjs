@@ -25,6 +25,7 @@ const PINS_PATH = join(HERE, 'pins.json');
 const PINS = JSON.parse(readFileSync(PINS_PATH, 'utf8'));
 
 const MIN_CLAIM_RATIO = 1.01;
+const THREAD_SWEEP_MIN_SAMPLE_NS = 50_000_000;
 
 function arg(name, fallback = null) {
   const i = process.argv.indexOf(`--${name}`);
@@ -372,6 +373,7 @@ env.thread_sweep = threadSweep.length > 0
       scalar_reference_threads: 1,
       parallel_executor: 'rayon_persistent_pool',
       incumbent_executor: 'single_page_main_thread',
+      min_sample_ns: THREAD_SWEEP_MIN_SAMPLE_NS,
     }
   : null;
 
@@ -442,7 +444,11 @@ function runFrankenmermaidPhase(prefix, sweepOrder = threadSweep) {
     const phase = `${prefix}-t${threads}`;
     const result = timedPhase(
       phase,
-      () => runJsonl(phase, fmCmd, fmArgs, { FM_H2H_THREADS: String(threads) }),
+      () =>
+        runJsonl(phase, fmCmd, fmArgs, {
+          FM_H2H_THREADS: String(threads),
+          FM_H2H_MIN_SAMPLE_NS: String(THREAD_SWEEP_MIN_SAMPLE_NS),
+        }),
     );
     records.push(
       ...result.records.map((record) => ({
@@ -478,6 +484,8 @@ const elfSelfReportBeforeValid =
       validElfSelfReport(record) &&
       record.elf_sha256 === binaryRecordBefore?.elf_sha256 &&
       record.elf_bytes === binaryRecordBefore?.elf_bytes &&
+      (threadSweep.length === 0 ||
+        record.min_sample_ns === THREAD_SWEEP_MIN_SAMPLE_NS) &&
       (threadSweep.length === 0 || threadSweep.includes(record.worker_threads)),
   );
 if (!elfSelfReportBeforeValid) {
@@ -513,6 +521,8 @@ const elfSelfReportAfterValid =
       validElfSelfReport(record) &&
       record.elf_sha256 === binaryRecordBefore?.elf_sha256 &&
       record.elf_bytes === binaryRecordBefore?.elf_bytes &&
+      (threadSweep.length === 0 ||
+        record.min_sample_ns === THREAD_SWEEP_MIN_SAMPLE_NS) &&
       (threadSweep.length === 0 || threadSweep.includes(record.worker_threads)),
   );
 const sameElf =
@@ -672,6 +682,7 @@ for (const { item, threads } of measurements) {
   row.fm_bracket = bracket;
   row.fm_execution_model = f.execution_model ?? 'scalar';
   row.fm_available_parallelism = f.available_parallelism ?? null;
+  row.fm_min_sample_ns = f.min_sample_ns ?? null;
   row.fm_output_sha256 = f.output_sha256;
   row.fm_output_sha256_lean = f.output_sha256_lean;
   row.class = item.class ?? 'single';
