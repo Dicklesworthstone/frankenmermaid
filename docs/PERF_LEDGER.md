@@ -406,3 +406,58 @@ only a synthetic unit fixture.
 - **Retry predicate.** Re-certify if the 500-diagram input hash, diagram mix, pinned mermaid-js
   bundle, render configuration, executing Rust ELF, fresh-browser isolation, or bracket contract
   changes.
+
+## CERTIFIED INCUMBENT RESULTS: realistic whole jobs vs mermaid-js 11.15.0 (2026-07-28)
+
+**Bead:** `bd-c0bn`. **Lane:** cod / HARNESS+FRONTIER (`YellowSwan`).
+**Campaign result class:** incumbent-win
+**Executing ELF SHA-256 (self-reported by process):** `a23cf867fd18608c0c3d6a75671dc57573847fb4db6724bc87942944a74cbd6a`
+**Legacy incumbent arm (same invocation):** name=mermaid-js version=11.15.0 artifact_sha256=70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de invocation_id=a9373031-1785282503815 measured_ratio=434.107779x; the other numeric invocation IDs are `a9373031-1785282622219` and `a9373031-1785282801275`.
+**A/A null control (same invocation):** every numeric row carried sufficient interleaved
+per-engine A/A samples and bootstrap median 95% CIs; all four cross-runtime median-CI gates and all
+four same-ELF Rust brackets passed, with `cv_gate=never`.
+
+- **Whole-job boundary.** One sample consumes every source string in the named job and includes
+  parse, layout, SVG rendering, and SVG serialization. Deterministic corpus construction and the
+  caller's final file copy are outside both timers. Mermaid runs at its default
+  `securityLevel=strict`; the bundle and every joined input are SHA-256-pinned.
+- **Realistic distributions.** Documentation jobs are flowchart-dominated with right-skewed
+  4–60-node diagrams and escaping/non-ASCII labels. The typing job is 60 successive label
+  keystrokes on one 40-node graph. The catalog contains 25 schemas with 8–75 entities and
+  hub-skewed relationships. Architecture maps use uneven domains and hub-skewed service
+  dependencies.
+
+| User job | Size | Rust / mermaid-js job median | Result | Median-CI floor |
+|---|---|---:|---:|---:|
+| Documentation-site render | 50 diagrams; 940 nodes / 902 edges total | 5.887478 ms / 2,555.800 ms | **434.107779×** | 1.062796× |
+| Documentation-site render | 200 diagrams; 3,164 nodes / 3,176 edges total | 19.013274 ms / 10,160.100 ms | **534.368778×** | 1.038818× |
+| Live typing preview | 60 keystrokes; 40 nodes / 39 edges per revision | 4.412062 ms / 5,264.250 ms | **1,193.149598×** | 1.082235× |
+| Database-catalog publish | 25 schemas; 662 entities / 637 relationships total | 15.856699 ms / 6,546.050 ms | **412.825519×** | 1.315279× |
+
+| Workload | Rust-before A/A median CI | Rust-after A/A median CI | mermaid-js A/A median CI | Rust bracket |
+|---|---:|---:|---:|---:|
+| `docs_site_50` | [0.991972, 1.006976], n=30 | [0.996270, 1.003342], n=30 | [0.968602, 1.009550], n=9 | 1.000767×, pass |
+| `docs_site_200` | [0.995423, 1.019409], n=20 | [0.995197, 1.005408], n=20 | [0.985262, 1.008090], n=10 | 1.011208×, pass |
+| `typing_trace_60` | [1.009642, 1.041117], n=20 | [0.990974, 1.007101], n=20 | [0.963473, 1.032673], n=9 | 1.020432×, pass |
+| `schema_catalog_25` | [0.989758, 1.003641], n=20 | [0.999238, 1.013150], n=20 | [0.842360, 1.047728], n=9 | 1.001622×, pass |
+
+- **Architecture review is nonnumeric.** Pinned mermaid-js's own `mermaid.parse()` accepted both
+  realistic monorepo maps. `mermaid.render()` then raised `TypeError: Cannot set properties of
+  undefined (setting 'order')` after 0.496 s at 120 services / 185 dependencies and 1.578 s at
+  300 services / 464 dependencies. Both records are `kind=failed`, `CANNOT`, with
+  `speedup_lower_bound=null`; no multiplier is stated. The 300-service Rust bracket passed.
+  The 120-service absolute timing is deliberately unclaimed because its parse-proving invocation
+  failed the Rust phase bracket; the incumbent failure itself is independent of Rust timing.
+- **Current aggregate.** The 21 numeric certified rows now have median **1,193.149598×**
+  (**1,206.349853×** by the min estimator) and range **380.754586×–9,486.345682×**. Seven
+  `RangeError` rows and these two parse-accepted `TypeError` rows remain nonnumeric outside the
+  aggregate.
+- **Evidence.** `.benchmarks/headtohead/realistic-docs-v1/`,
+  `.benchmarks/headtohead/realistic-typing-v1/`,
+  `.benchmarks/headtohead/realistic-schema-v1/`, and
+  `.benchmarks/headtohead/realistic-arch-v3/`; superseded/noisy architecture attempts and their
+  predicates are retained in `docs/NEGATIVE_EVIDENCE.md`.
+- **Retry / re-check predicate.** Re-certify a numeric row if its generator/pin, mermaid bundle,
+  render configuration, executing Rust ELF, timing boundary, or bracket contract changes. Re-open
+  the architecture comparator only if mermaid-js, the pinned input, or its layout configuration
+  changes enough for `mermaid.render()` to return a valid SVG; until then it has no ratio to score.

@@ -19184,3 +19184,51 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   incumbent artifact, executing ELF, or harness contract changes.
 
   Agent: cod (YellowSwan)
+
+### REJECT x3 / HARNESS ARTIFACT: 120-service architecture absolute timing and right-skewed probe selection (2026-07-28)
+
+- **Campaign / bead:** Phase 2 realistic whole jobs, `bd-c0bn`; cod /
+  HARNESS+FRONTIER (`YellowSwan`). This row rejects an absolute Rust timing claim, not the
+  independently observed mermaid-js renderer failure.
+- **Probe artifact found before certification.** The historical corpus grew monotonically, so the
+  old mermaid preflight probed `texts[texts.length - 1]`. A seeded realistic batch is shuffled and
+  right-skewed; its final document can be its smallest. A reduced-budget smoke therefore
+  under-estimated the batch cost, over-allocated A/A rounds, and timed out in harness overhead
+  before measuring the job. No number from that smoke is used. The harness now probes the largest
+  UTF-8 input, records `probe_input_bytes`, and has a multibyte regression self-test. The four
+  numeric Phase 2 rows subsequently completed sufficient nulls and passed their gates.
+- **First rejected architecture bracket.**
+  `.benchmarks/headtohead/realistic-arch-v1/summary-a9373031-1785282641651.json` reproduced the
+  incumbent `TypeError` at 120 and 300 services, but the 120-service Rust pre/post medians moved
+  739.932 us → 489.089 us: **1.512878×** drift outside its **1.146595×** A/A floor. The
+  300-service bracket passed. No 120-service Rust time is claimed from this artifact.
+- **Control-only retry.**
+  `.benchmarks/headtohead/realistic-arch120-v2/summary-a9373031-1785282833012.json` obtained a
+  passing 120-service Rust bracket at 1.011526× inside 1.028879×, but that harness revision did not
+  yet persist mermaid parser acceptance. It corroborates Rust output/provenance only and is not
+  spliced into a point ratio.
+- **Second and third rejected brackets.** The parse-hardened invocation
+  `.benchmarks/headtohead/realistic-arch-v3/summary-5ba596e8-1785283062942.json` recorded
+  `probe_parse_accepted=true` for both inputs and the renderer `TypeError`, but the 120-service Rust
+  bracket drifted 1.031235× outside 1.014423×. A final four-times-round retry in
+  `.benchmarks/headtohead/realistic-arch120-v4/summary-5ba596e8-1785283088736.json` still drifted
+  1.037849× outside 1.023189×. Per the three-REJECT vein-switch rule, no fourth timing retry ran.
+- **A/A null control (same invocation):** the parse-proving v3 120-service Rust controls were
+  median 0.999179, 95% CI [0.995119, 1.001044], n=30 before Chromium and median 0.999693,
+  CI [0.993345, 1.007212], n=30 after; v4 used n=120 and still failed the unchanged bracket gate.
+  Every record says `cv_gate=never`.
+- **Executing ELF SHA-256 (self-reported by process):**
+  `a23cf867fd18608c0c3d6a75671dc57573847fb4db6724bc87942944a74cbd6a`
+  (7,778,704 bytes) before and after Chromium in every attempt.
+- **Adjudication.** **REJECT** every absolute 120-service timing above as a competitive claim.
+  Retain only the nonnumeric incumbent result: mermaid-js's own parser accepts the pinned input,
+  `mermaid.render()` raises `TypeError: Cannot set properties of undefined (setting 'order')`, and
+  the row is `kind=failed`, `CANNOT`, `speedup_lower_bound=null`. That conclusion does not depend
+  on a Rust wall-time estimate.
+- **Concrete retry predicate.** Do not time this 120-service row again merely to chase a bracket.
+  Re-open only after the pinned input, mermaid-js bundle/config, executing Rust ELF, or harness
+  timing boundary changes; or after the harness gains a predeclared inner-batch method that reports
+  per-job time and passes two consecutive unchanged A/A/bracket invocations. A competitive ratio
+  additionally requires mermaid-js to return a valid SVG.
+
+  Agent: cod (YellowSwan)

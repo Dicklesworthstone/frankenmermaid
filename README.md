@@ -1612,14 +1612,33 @@ A 1,001-revision live-edit job over a growing 500-node flowchart completes in 0.
 frankenmermaid. Mermaid-js remains working at the 600-second deadline. That row is a `DNF-timeout`,
 not a crash, and has no point ratio.
 
+#### Realistic whole jobs
+
+Each row below is a complete library job: realistic source strings in; parse, layout, render, and
+serialized SVG strings out. The seeded inputs use right-skewed diagram sizes, a
+flowchart-dominated documentation mix, escaping-heavy labels, hub-skewed service dependencies, and
+skewed schema sizes rather than uniform microbench fixtures.
+
+| User job | Realistic size | frankenmermaid | mermaid-js 11.15.0 | Result |
+|---|---|---:|---:|---:|
+| Documentation-site render | 50 diagrams, 940 nodes total | 5.887 ms | 2,555.8 ms | **434×** |
+| Documentation-site render | 200 diagrams, 3,164 nodes total | 19.013 ms | 10,160.1 ms | **534×** |
+| Live typing preview | 60 successive keystrokes on a 40-node diagram | 4.412 ms | 5,264.3 ms | **1,193×** |
+| Database-catalog publish | 25 schemas, 8–75 entities each | 15.857 ms | 6,546.1 ms | **413×** |
+| Monorepo architecture review | 120 and 300 services, 185 and 464 dependencies | Renders both | Parser accepts both; renderer raises `TypeError` | **CANNOT; no ratio** |
+
+The architecture inputs pass mermaid-js's own parser before its renderer raises
+`TypeError: Cannot set properties of undefined (setting 'order')`. They remain nonnumeric and are
+excluded from every speedup aggregate.
+
 #### Speedup where both engines complete
 
-Across the 17 corpus items mermaid-js can render, each measured side-by-side in one invocation
+Across the 21 corpus items mermaid-js can render, each measured side-by-side in one invocation
 against pinned mermaid-js `11.15.0`:
 
 | Metric | frankenmermaid vs mermaid-js |
 |---|---|
-| **Median** | **1,493×** faster (1,483× by the min estimator) |
+| **Median** | **1,193×** faster (1,206× by the min estimator) |
 | Range | 381× – 9,486× |
 
 | Workload | frankenmermaid | mermaid-js 11.15.0 | |
@@ -1629,10 +1648,13 @@ against pinned mermaid-js `11.15.0`:
 | Dense DAG, 200 nodes / 790 edges | 0.384 ms | 1,805 ms | **4,696×** |
 | 40-diagram documentation build | 0.038 ms/diagram | 37.0 ms/diagram | **964×** |
 | 500-diagram CI render | 20.116 ms/job | 18,567.8 ms/job | **923×** |
+| 200-diagram realistic documentation site | 0.095 ms/diagram | 50.8 ms/diagram | **534×** |
+| 25-schema realistic database catalog | 0.634 ms/schema | 261.8 ms/schema | **413×** |
 | 21-revision live-edit session | 0.125 ms/keystroke | 148.2 ms/keystroke | **1,185×** |
+| 60-keystroke realistic typing session | 0.074 ms/keystroke | 87.7 ms/keystroke | **1,193×** |
 | 201-revision live-edit session | 0.224 ms/keystroke | 1,316.2 ms/keystroke | **5,885×** |
 
-Every row above clears the gate described below. The harness self-reports the SHA-256 of the
+Every numeric row above clears the gate described below. The harness self-reports the SHA-256 of the
 executing binary (`a23cf867…`), verifies a SHA-256 pin for each corpus item and for the mermaid
 bundle, and asserts at runtime that the object answering `render()` is the pinned mermaid-js and not
 a dispatched stand-in.

@@ -3575,3 +3575,58 @@ edit_trace_60x20 = [1.21, 1.03]
 [lever.remaining]
 edges = "render_edge's whole-edge and inner-path fast paths are still gated on all three a11y flags; in lean all 224 wide_8x16 edges still build Elements. Same const-generic move; the larger remaining half."
 compartments = "class/requirement compartment fast paths remain a11y-gated; class_50 lean is +0.31% because the common gate now evaluates further before failing for class nodes."
+
+[[run]]
+harness = "scripts/headtohead/run.mjs"
+harness_bead = "bd-c0bn"
+schema = "frankenmermaid.headtohead.v2"
+status = "green"
+date = "2026-07-28"
+agent = "YellowSwan"
+corpus_rev = "a93730317cdf9929ce8e6ff2a85732bfe8a58cbe"
+parse_proof_rev = "5ba596e84501b303a7a92b738a9a83822ca7839f"
+comparator = "mermaid-js 11.15.0"
+comparator_sha256 = "70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de"
+comparator_runtime = "Chromium 150.0.7871.128 headless via DevTools Protocol"
+security_level = "strict"
+executing_elf_sha256 = "a23cf867fd18608c0c3d6a75671dc57573847fb4db6724bc87942944a74cbd6a"
+executing_elf_bytes = 7778704
+items_total = 6
+items_numeric = 4
+items_cannot = 2
+same_invocation = true
+aa_arms_interleaved_per_engine = true
+engine_phase_order = "frankenmermaid-before -> mermaid-js -> same-ELF frankenmermaid-after"
+gate = "bootstrap median 95% A/A CI, twice-largest-radius floor; Rust pre/post bracket; cv_gate=never"
+measurement_boundary = "all source strings in the named job -> parse + layout + render + serialized SVG strings; deterministic corpus construction and caller file copy excluded symmetrically"
+artifacts = [
+  ".benchmarks/headtohead/realistic-docs-v1/summary-a9373031-1785282503815.json",
+  ".benchmarks/headtohead/realistic-typing-v1/summary-a9373031-1785282622219.json",
+  ".benchmarks/headtohead/realistic-schema-v1/summary-a9373031-1785282801275.json",
+  ".benchmarks/headtohead/realistic-arch-v3/summary-5ba596e8-1785283062942.json",
+]
+retry_predicate = "Re-certify after any corpus pin, comparator bundle/config, executing ELF, timing boundary, or gate-contract change. Architecture becomes numeric only if mermaid.render returns valid SVG."
+
+[run.realistic_jobs]
+docs_site_50 = "50 diagrams, 940 nodes / 902 edges; 5.887478 ms vs 2555.800 ms; 434.107779x; gate floor 1.062796x"
+docs_site_200 = "200 diagrams, 3164 nodes / 3176 edges; 19.013274 ms vs 10160.100 ms; 534.368778x; gate floor 1.038818x"
+typing_trace_60 = "60 keystrokes, 40 nodes / 39 edges; 4.412062 ms vs 5264.250 ms; 1193.149598x; gate floor 1.082235x"
+schema_catalog_25 = "25 schemas, 662 entities / 637 relationships; 15.856699 ms vs 6546.050 ms; 412.825519x; gate floor 1.315279x"
+
+[run.null_ci95]
+docs_site_50 = "Rust-before [0.991972,1.006976] n=30; Rust-after [0.996270,1.003342] n=30; mermaid-js [0.968602,1.009550] n=9"
+docs_site_200 = "Rust-before [0.995423,1.019409] n=20; Rust-after [0.995197,1.005408] n=20; mermaid-js [0.985262,1.008090] n=10"
+typing_trace_60 = "Rust-before [1.009642,1.041117] n=20; Rust-after [0.990974,1.007101] n=20; mermaid-js [0.963473,1.032673] n=9"
+schema_catalog_25 = "Rust-before [0.989758,1.003641] n=20; Rust-after [0.999238,1.013150] n=20; mermaid-js [0.842360,1.047728] n=9"
+
+[run.cannot]
+monorepo_arch_120 = "mermaid.parse accepted; mermaid.render TypeError setting order after 0.496 s; kind=failed; no ratio or lower bound; Rust absolute timing unclaimed because parse-proving bracket failed"
+monorepo_arch_300 = "mermaid.parse accepted; mermaid.render TypeError setting order after 1.578 s; kind=failed; no ratio or lower bound; same-ELF Rust bracket passed"
+
+[run.aggregate]
+numeric_rows = 21
+speedup_p50_min = 380.754586
+speedup_p50_median = 1193.149598
+speedup_p50_max = 9486.345682
+speedup_min_estimator_median = 1206.349853
+nonnumeric_cannot_rows = 9

@@ -166,6 +166,12 @@ One sample is the complete named job: source strings in, parse + layout + render
 strings out. Corpus generation and the caller's final file copy are outside both engines' timers;
 the library work and output serialization that differ between the implementations are inside.
 
+Certified artifacts are under `.benchmarks/headtohead/realistic-*`. The 50- and 200-diagram
+documentation jobs measure 434.107779× and 534.368778×; the 60-keystroke session measures
+1,193.149598×; and the 25-schema catalog measures 412.825519×. Both monorepo maps pass
+`mermaid.parse()` but fail in `mermaid.render()` with `TypeError: Cannot set properties of
+undefined (setting 'order')`; they are `CANNOT`, carry no ratio, and stay outside aggregates.
+
 ### Did not finish
 
 At XL sizes the honest question is not "how much faster" but "does the comparator finish at all".

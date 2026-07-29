@@ -1,0 +1,181 @@
+{
+  "schema": "frankenmermaid.headtohead.v2",
+  "env": {
+    "captured_at": "2026-07-28T23:50:51.812Z",
+    "git_rev": "a93730317cdf9929ce8e6ff2a85732bfe8a58cbe",
+    "git_dirty": true,
+    "rustc": "rustc 1.99.0-nightly (09ee43b2d 2026-07-27)",
+    "cargo_profile": "release (opt-level=3 for fm-core/parser/layout/render-svg, lto=fat, codegen-units=1)",
+    "rustflags": "-C target-cpu=x86-64-v2 (.cargo/config.toml)",
+    "node": "v24.14.0",
+    "chromium": "Chromium 150.0.7871.128 snap",
+    "kernel": "6.17.0-35-generic",
+    "cpu_model": "AMD Ryzen Threadripper PRO 5975WX 32-Cores",
+    "cpu_count": 64,
+    "total_mem_gb": 215.8,
+    "loadavg_1m": 16.29,
+    "load_warning": "elevated load; absolute timings are not comparable across runs",
+    "pinned_cpu": {
+      "cpu": 0,
+      "busy_pct": 0
+    },
+    "fm_elf_sha256": "a23cf867fd18608c0c3d6a75671dc57573847fb4db6724bc87942944a74cbd6a",
+    "fm_elf_bytes": 7778704,
+    "fm_bracket_elf_sha256": "a23cf867fd18608c0c3d6a75671dc57573847fb4db6724bc87942944a74cbd6a",
+    "fm_bracket_elf_bytes": 7778704,
+    "fm_bracket_same_elf": true
+  },
+  "pins": {
+    "mermaid": "11.15.0",
+    "bundle_url": "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js",
+    "security_level": "strict"
+  },
+  "corpus_items": 1,
+  "ok_items": 1,
+  "dnf_items": 0,
+  "dnf": [],
+  "median_ci_gate_rule": "claim magnitude >= max(1.01, 1 + 2 * max(per-engine A/A CI radius))",
+  "measurement_order": [
+    "frankenmermaid-before",
+    "mermaid-js",
+    "frankenmermaid-after"
+  ],
+  "fm_bracket_gate_rule": "Rust pre/post drift magnitude <= max(1.01, 1 + 2 * Rust A/A CI radius)",
+  "fm_bracket_gate_failures": [],
+  "arm_asymmetry": {
+    "phases": [
+      {
+        "phase": "frankenmermaid-before",
+        "seconds": 1.487,
+        "busy_fraction": 0.1096
+      },
+      {
+        "phase": "mermaid-js",
+        "seconds": 145.816,
+        "busy_fraction": 0.1569
+      },
+      {
+        "phase": "frankenmermaid-after",
+        "seconds": 1.487,
+        "busy_fraction": 0.0636
+      }
+    ],
+    "busy_ratio": 2.4669811320754715,
+    "heavier_phase": "mermaid-js",
+    "verdict": "provenance_only",
+    "gate": "never",
+    "rule": "global phase CPU busy is provenance; numeric gate uses bracketed Rust A/A"
+  },
+  "cv_gate": "never",
+  "median_ci_gate_failures": [],
+  "speedup": {
+    "min": 412.8255193593572,
+    "median": 412.8255193593572,
+    "max": 412.8255193593572
+  },
+  "speedup_min_estimator": {
+    "min": 413.56691551515416,
+    "median": 413.56691551515416,
+    "max": 413.56691551515416
+  },
+  "rows": [
+    {
+      "id": "schema_catalog_25",
+      "fm_bracket": {
+        "verdict": "pass",
+        "rule": "rust_pre_post_drift_inside_aa_median_ci_floor",
+        "cv_gate": "never",
+        "reason": null,
+        "before_p50_ns": 15831015,
+        "after_p50_ns": 15856699,
+        "selected": "after",
+        "drift_ratio": 1.0016223849197288,
+        "drift_magnitude": 1.0016223849197288,
+        "null_radius": 0.013150101898933286,
+        "max_decidable_2x": 1.0263002037978666
+      },
+      "class": "doc_build",
+      "nodes": 662,
+      "edges": 637,
+      "nodes_max": 75,
+      "edges_max": 74,
+      "nodes_total": 662,
+      "edges_total": 637,
+      "revisions": 25,
+      "fm_p50_ns": 15856699,
+      "fm_min_ns": 15661069,
+      "fm_cv_pct": 1.22,
+      "fm_mad_pct": 0.35,
+      "fm_null_control": {
+        "arm_a_sha256": "c46ed07ef850a8d4cb214a34a11f45b48b32b34f0325b4be6c93318e701f0637",
+        "arm_b_sha256": "c46ed07ef850a8d4cb214a34a11f45b48b32b34f0325b4be6c93318e701f0637",
+        "ci95_hi": 1.0131501018989333,
+        "ci95_lo": 0.9992381103676754,
+        "cv_gate": "never",
+        "cv_pct": 2.28,
+        "half_width": 0.013150101898933286,
+        "kind": "aa_null",
+        "mad_pct": 0.77,
+        "median": 1.0105801033068251,
+        "min_decidable_2x": 1.0263002037978666,
+        "n": 20,
+        "sufficient": true
+      },
+      "fm_profile_ab": {
+        "arm_a_sha256": "c46ed07ef850a8d4cb214a34a11f45b48b32b34f0325b4be6c93318e701f0637",
+        "arm_b_sha256": "7c3c427e28e349ce862226daff01b35e7351f05fe0927b9528f5872d348e44e9",
+        "ci95_hi": 1.0164726715204777,
+        "ci95_lo": 0.9994517172246746,
+        "cv_gate": "never",
+        "cv_pct": 1.42,
+        "half_width": null,
+        "kind": "default_vs_lean",
+        "mad_pct": 0.99,
+        "median": 1.0064150542723205,
+        "min_decidable_2x": null,
+        "n": 20,
+        "sufficient": true
+      },
+      "fm_bytes": 1644968,
+      "fm_bytes_lean": 1490103,
+      "fm_lean_p50_ns": 15698529,
+      "lean_slowdown": 0.9900250361061909,
+      "mjs_p50_ns": 6546050000,
+      "mjs_min_ns": 6476900000,
+      "mjs_cv_pct": 1.49,
+      "mjs_mad_pct": 1.06,
+      "mjs_null_control": {
+        "n": 9,
+        "sufficient": true,
+        "median": 0.9735952871663653,
+        "ci95_lo": 0.842360394549691,
+        "ci95_hi": 1.0477283784833697,
+        "half_width": 0.15763960545030897,
+        "min_decidable_2x": 1.315279210900618,
+        "cv_pct": 18.9,
+        "mad_pct": 3.62,
+        "cv_gate": "never",
+        "checksum_bytes": 213813347
+      },
+      "mjs_bytes": 11854546,
+      "speedup": 412.8255193593572,
+      "speedup_min": 413.56691551515416,
+      "speedup_lean": 416.9849289700965,
+      "bytes_ratio": 7.206551130477918,
+      "bytes_ratio_lean": 7.955521195514672,
+      "fm_ns_per_revision": 634267.96,
+      "mjs_ns_per_revision": 261842000,
+      "median_ci_gate": {
+        "verdict": "pass",
+        "rule": "null_ci95_2x_margin",
+        "cv_gate": "never",
+        "reason": null,
+        "claim_ratio": 412.8255193593572,
+        "claim_magnitude": 412.8255193593572,
+        "null_radius": 0.15763960545030897,
+        "min_decidable_2x": 1.315279210900618
+      },
+      "status": "ok"
+    }
+  ]
+}

@@ -1,0 +1,158 @@
+{
+  "schema": "frankenmermaid.headtohead.v2",
+  "env": {
+    "captured_at": "2026-07-28T23:53:49.544Z",
+    "git_rev": "a93730317cdf9929ce8e6ff2a85732bfe8a58cbe",
+    "git_dirty": true,
+    "rustc": "rustc 1.99.0-nightly (09ee43b2d 2026-07-27)",
+    "cargo_profile": "release (opt-level=3 for fm-core/parser/layout/render-svg, lto=fat, codegen-units=1)",
+    "rustflags": "-C target-cpu=x86-64-v2 (.cargo/config.toml)",
+    "node": "v24.14.0",
+    "chromium": "Chromium 150.0.7871.128 snap",
+    "kernel": "6.17.0-35-generic",
+    "cpu_model": "AMD Ryzen Threadripper PRO 5975WX 32-Cores",
+    "cpu_count": 64,
+    "total_mem_gb": 215.8,
+    "loadavg_1m": 10.03,
+    "load_warning": null,
+    "pinned_cpu": {
+      "cpu": 1,
+      "busy_pct": 0
+    },
+    "fm_elf_sha256": "a23cf867fd18608c0c3d6a75671dc57573847fb4db6724bc87942944a74cbd6a",
+    "fm_elf_bytes": 7778704,
+    "fm_bracket_elf_sha256": "a23cf867fd18608c0c3d6a75671dc57573847fb4db6724bc87942944a74cbd6a",
+    "fm_bracket_elf_bytes": 7778704,
+    "fm_bracket_same_elf": true
+  },
+  "pins": {
+    "mermaid": "11.15.0",
+    "bundle_url": "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js",
+    "security_level": "strict"
+  },
+  "corpus_items": 1,
+  "ok_items": 0,
+  "dnf_items": 1,
+  "dnf": [
+    {
+      "id": "monorepo_arch_120",
+      "budget_ms": 900000,
+      "phase": "probe",
+      "fm_p50_ns": 475916,
+      "speedup_lower_bound": null,
+      "error": "Uncaught (in promise) TypeError: Cannot set properties of undefined (setting 'order')"
+    }
+  ],
+  "median_ci_gate_rule": "claim magnitude >= max(1.01, 1 + 2 * max(per-engine A/A CI radius))",
+  "measurement_order": [
+    "frankenmermaid-before",
+    "mermaid-js",
+    "frankenmermaid-after"
+  ],
+  "fm_bracket_gate_rule": "Rust pre/post drift magnitude <= max(1.01, 1 + 2 * Rust A/A CI radius)",
+  "fm_bracket_gate_failures": [],
+  "arm_asymmetry": {
+    "phases": [
+      {
+        "phase": "frankenmermaid-before",
+        "seconds": 0.25,
+        "busy_fraction": 0.0747
+      },
+      {
+        "phase": "mermaid-js",
+        "seconds": 2.284,
+        "busy_fraction": 0.0861
+      },
+      {
+        "phase": "frankenmermaid-after",
+        "seconds": 0.256,
+        "busy_fraction": 0.07
+      }
+    ],
+    "busy_ratio": 1.2299999999999998,
+    "heavier_phase": "mermaid-js",
+    "verdict": "provenance_only",
+    "gate": "never",
+    "rule": "global phase CPU busy is provenance; numeric gate uses bracketed Rust A/A"
+  },
+  "cv_gate": "never",
+  "median_ci_gate_failures": [],
+  "speedup": null,
+  "speedup_min_estimator": null,
+  "rows": [
+    {
+      "id": "monorepo_arch_120",
+      "fm_bracket": {
+        "verdict": "pass",
+        "rule": "rust_pre_post_drift_inside_aa_median_ci_floor",
+        "cv_gate": "never",
+        "reason": null,
+        "before_p50_ns": 470493,
+        "after_p50_ns": 475916,
+        "selected": "after",
+        "drift_ratio": 1.0115262076162663,
+        "drift_magnitude": 1.0115262076162663,
+        "null_radius": 0.014439577651553792,
+        "max_decidable_2x": 1.0288791553031076
+      },
+      "class": "single",
+      "nodes": 120,
+      "edges": 185,
+      "nodes_max": 120,
+      "edges_max": 185,
+      "nodes_total": 120,
+      "edges_total": 185,
+      "revisions": 1,
+      "fm_p50_ns": 475916,
+      "fm_min_ns": 465792,
+      "fm_cv_pct": 3.4,
+      "fm_mad_pct": 1.06,
+      "fm_null_control": {
+        "arm_a_sha256": "b43669d7fe1e3be34b448290a1ee478cbec80b9c3bdb9b15e54046b23220db10",
+        "arm_b_sha256": "b43669d7fe1e3be34b448290a1ee478cbec80b9c3bdb9b15e54046b23220db10",
+        "ci95_hi": 1.0105198137537266,
+        "ci95_lo": 0.9978152734586375,
+        "cv_gate": "never",
+        "cv_pct": 6.25,
+        "half_width": 0.01051981375372657,
+        "kind": "aa_null",
+        "mad_pct": 0.96,
+        "median": 1.0037000605656448,
+        "min_decidable_2x": 1.0210396275074531,
+        "n": 30,
+        "sufficient": true
+      },
+      "fm_profile_ab": {
+        "arm_a_sha256": "b43669d7fe1e3be34b448290a1ee478cbec80b9c3bdb9b15e54046b23220db10",
+        "arm_b_sha256": "abd3af9513fa4e199f362faa1faac1074e3d164adf1885769640a6c0b7630ff9",
+        "ci95_hi": 1.120159784393247,
+        "ci95_lo": 1.0881982021446077,
+        "cv_gate": "never",
+        "cv_pct": 11.34,
+        "half_width": null,
+        "kind": "default_vs_lean",
+        "mad_pct": 1.85,
+        "median": 1.1099676707151003,
+        "min_decidable_2x": null,
+        "n": 30,
+        "sufficient": true
+      },
+      "fm_bytes": 187446,
+      "fm_bytes_lean": 152421,
+      "fm_lean_p50_ns": 429288,
+      "lean_slowdown": 0.9020247270526731,
+      "status": "comparator_dnf",
+      "mjs_dnf_kind": "failed",
+      "mjs_budget_ms": 900000,
+      "mjs_elapsed_ms": 495,
+      "mjs_dnf_phase": "probe",
+      "error": "Uncaught (in promise) TypeError: Cannot set properties of undefined (setting 'order')",
+      "speedup_lower_bound": null,
+      "median_ci_gate": {
+        "verdict": "not_applicable",
+        "rule": "dnf_has_no_point_ratio",
+        "cv_gate": "never"
+      }
+    }
+  ]
+}

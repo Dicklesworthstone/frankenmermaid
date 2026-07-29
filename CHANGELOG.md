@@ -34,8 +34,8 @@ architecture diagram in 10.80 ms, and a 10,000-entity database schema in 33.03 m
 No speedup ratio is stated for those workloads; the harness records them as
 `CANNOT` and excludes them from every aggregate.
 
-Across the 17 corpus items mermaid-js can render, the full parse → layout →
-render-to-SVG pipeline is a **median 1,493× faster** (1,483× by the min
+Across the 21 corpus items mermaid-js can render, the full parse → layout →
+render-to-SVG pipeline is a **median 1,193× faster** (1,206× by the min
 estimator; range 381× – 9,486×). For every row, both engines run in the same
 invocation over byte-identical SHA-256-pinned input and each measures an A/A null.
 The identical Rust ELF brackets Chromium, pre/post drift must remain inside its
@@ -46,6 +46,13 @@ The 500-diagram CI job measures 20.116 ms versus 18,567.8 ms (**923×**). The
 1,001-revision live-edit job finishes in 0.956 s with frankenmermaid while
 mermaid-js remains working at the 600-second deadline; that row is a nonnumeric
 `DNF-timeout`.
+
+The realistic whole-job tier measures 50- and 200-diagram documentation-site renders
+at **434×** and **534×**, a 60-keystroke live-preview session at **1,193×**, and a
+25-schema database-catalog publish at **413×**. Mermaid-js accepts the 120- and
+300-service monorepo architecture inputs in its parser, then its renderer raises
+`TypeError: Cannot set properties of undefined (setting 'order')`; those rows are
+`CANNOT` with no ratio.
 
 ### SVG rendering (`fm-render-svg`, `fm-core`)
 
