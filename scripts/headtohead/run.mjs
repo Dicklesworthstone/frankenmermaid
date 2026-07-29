@@ -27,6 +27,8 @@ const PINS = JSON.parse(readFileSync(PINS_PATH, 'utf8'));
 const MIN_CLAIM_RATIO = 1.01;
 const THREAD_SWEEP_MIN_SAMPLE_NS = 50_000_000;
 const THREAD_SWEEP_CALIBRATION_TARGET_NS = 75_000_000;
+const HOST_WIDE_MAX_BUSY_FRACTION = 0.20;
+const HOST_WIDE_QUIET_SAMPLE_MS = 1_000;
 
 function arg(name, fallback = null) {
   const i = process.argv.indexOf(`--${name}`);
@@ -34,22 +36,72 @@ function arg(name, fallback = null) {
 }
 const has = (name) => process.argv.includes(`--${name}`);
 
-/** Busy fraction of every CPU over `ms`, from /proc/stat. */
+function cpuTimeSnapshot() {
+  return cpus().map((record, cpu) => ({
+    cpu,
+    idle: record.times.idle,
+    total: Object.values(record.times).reduce((sum, value) => sum + value, 0),
+  }));
+}
+
+function cpuBusyFromSnapshots(before, after) {
+  const afterByCpu = new Map(after.map((record) => [record.cpu, record]));
+  return before.map((record) => {
+    const next = afterByCpu.get(record.cpu);
+    if (!next) throw new Error(`cpu${record.cpu} disappeared during busy sampling`);
+    const total = Math.max(1, next.total - record.total);
+    const idle = Math.max(0, next.idle - record.idle);
+    return {
+      cpu: record.cpu,
+      busy: Math.min(1, Math.max(0, 1 - idle / total)),
+    };
+  });
+}
+
+/** Busy fraction of every logical CPU over an idle synchronous sampling window. */
 function cpuBusy(ms) {
-  const snap = () =>
-    readFileSync('/proc/stat', 'utf8')
-      .split('\n')
-      .filter((l) => /^cpu\d/.test(l))
-      .map((l) => {
-        const p = l.trim().split(/\s+/);
-        const n = p.slice(1, 9).map(Number);
-        return { cpu: Number(p[0].slice(3)), idle: n[3] + n[4], total: n.reduce((a, b) => a + b, 0) };
-      });
-  const a = snap();
-  const until = Date.now() + ms;
-  while (Date.now() < until) { /* busy-wait: we need wall time, not an event loop turn */ }
-  const b = snap();
-  return a.map((x, i) => ({ cpu: x.cpu, busy: 1 - (b[i].idle - x.idle) / Math.max(1, b[i].total - x.total) }));
+  const before = cpuTimeSnapshot();
+  const waitCell = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+  Atomics.wait(waitCell, 0, 0, ms);
+  return cpuBusyFromSnapshots(before, cpuTimeSnapshot());
+}
+
+function classifyHostWideQuiescence(busyRecords, allowedCpus, limit) {
+  const byCpu = new Map(busyRecords.map((record) => [record.cpu, record.busy]));
+  const missingCpus = allowedCpus.filter((cpu) => !byCpu.has(cpu));
+  const measuredRaw = allowedCpus
+    .filter((cpu) => byCpu.has(cpu))
+    .map((cpu) => ({ cpu, busy_fraction: byCpu.get(cpu) }));
+  const measured = measuredRaw.map(({ cpu, busy_fraction }) => ({
+    cpu,
+    busy_fraction: Number(busy_fraction.toFixed(6)),
+  }));
+  const busyCpus = measuredRaw
+    .filter((record) => record.busy_fraction > limit)
+    .sort((left, right) => right.busy_fraction - left.busy_fraction)
+    .map(({ cpu, busy_fraction }) => ({
+      cpu,
+      busy_fraction: Number(busy_fraction.toFixed(6)),
+    }));
+  return {
+    verdict: missingCpus.length === 0 && busyCpus.length === 0 ? 'clear' : 'blocked',
+    allowed_cpu_count: allowedCpus.length,
+    sampled_cpu_count: measured.length,
+    maximum_busy_fraction: limit,
+    observed_max_busy_fraction: measuredRaw.length > 0
+      ? Number(Math.max(...measuredRaw.map((record) => record.busy_fraction)).toFixed(6))
+      : null,
+    missing_cpus: missingCpus,
+    busy_cpus_above_limit: busyCpus,
+    per_cpu_busy_fraction: measured,
+  };
+}
+
+function validExclusiveHostClaim(value) {
+  return (
+    typeof value === 'string' &&
+    /^trj-booking:[1-9]\d*$/.test(value)
+  );
 }
 
 /**
@@ -391,6 +443,46 @@ if (has('self-test')) {
       if (String(error).includes('accepted')) throw error;
     }
   }
+  const busySample = cpuBusyFromSnapshots(
+    [
+      { cpu: 0, idle: 100, total: 200 },
+      { cpu: 1, idle: 100, total: 200 },
+    ],
+    [
+      { cpu: 0, idle: 180, total: 300 },
+      { cpu: 1, idle: 170, total: 300 },
+    ],
+  );
+  const quietHost = classifyHostWideQuiescence(
+    busySample,
+    [0],
+    HOST_WIDE_MAX_BUSY_FRACTION,
+  );
+  const busyHost = classifyHostWideQuiescence(
+    busySample,
+    [0, 1],
+    HOST_WIDE_MAX_BUSY_FRACTION,
+  );
+  const incompleteHost = classifyHostWideQuiescence(
+    busySample,
+    [0, 1, 2],
+    HOST_WIDE_MAX_BUSY_FRACTION,
+  );
+  if (
+    quietHost.verdict !== 'clear' ||
+    busyHost.verdict !== 'blocked' ||
+    incompleteHost.verdict !== 'blocked'
+  ) {
+    throw new Error('host-wide exclusivity classification regression');
+  }
+  if (
+    !validExclusiveHostClaim('trj-booking:1234') ||
+    validExclusiveHostClaim('other-host:1234') ||
+    validExclusiveHostClaim('trj-booking') ||
+    validExclusiveHostClaim('trj-booking:0')
+  ) {
+    throw new Error('exclusive-host claim validation regression');
+  }
   const validThreads = {
     worker_threads: 4,
     thread_count_requested: 4,
@@ -456,6 +548,13 @@ if (has('self-test')) {
       affinity_logical_cpus: liveTopology.affinity_cpus.length,
     },
     actual_thread_probe_gate: 'required',
+    host_wide_exclusivity_gate: {
+      claim_reference: 'required',
+      all_affinity_cpus: 'required',
+      maximum_busy_fraction: HOST_WIDE_MAX_BUSY_FRACTION,
+      sample_ms: HOST_WIDE_QUIET_SAMPLE_MS,
+      before_every_measured_phase: true,
+    },
     rust_pre_post_bracket_gate: 'required',
     cv_gate: 'never',
   }));
@@ -518,6 +617,7 @@ function positiveIntList(raw) {
 }
 
 const threadSweep = positiveIntList(arg('thread-sweep'));
+const exclusiveHostClaim = arg('exclusive-host-claim');
 if (threadSweep.length > 0) {
   if (items.length !== 1) {
     console.error('[run] --thread-sweep requires --only to select exactly one corpus item');
@@ -525,6 +625,12 @@ if (threadSweep.length > 0) {
   }
   if (!threadSweep.includes(1)) {
     console.error('[run] --thread-sweep must include 1 for the scalar byte-identity reference');
+    process.exit(2);
+  }
+  if (!validExclusiveHostClaim(exclusiveHostClaim)) {
+    console.error(
+      '[run] --thread-sweep requires --exclusive-host-claim trj-booking:<Agent-Mail-CLAIM-message-id>',
+    );
     process.exit(2);
   }
 }
@@ -580,10 +686,20 @@ if (threadSweep.some((threads) => threads > env.affinity_cpus.length)) {
   );
   process.exit(2);
 }
+if (threadSweep.length > 0 && env.affinity_cpus.length !== env.logical_threads) {
+  console.error(
+    `[run] host-wide thread sweeps require the complete host cpuset; affinity exposes ${env.affinity_cpus.length} of ${env.logical_threads} logical CPUs`,
+  );
+  process.exit(2);
+}
 env.thread_sweep = threadSweep.length > 0
   ? {
       threads: threadSweep,
       local_machine_required: true,
+      exclusive_host_claim: exclusiveHostClaim,
+      host_wide_quiescence_required: true,
+      host_wide_maximum_busy_fraction: HOST_WIDE_MAX_BUSY_FRACTION,
+      host_wide_sample_ms: HOST_WIDE_QUIET_SAMPLE_MS,
       scalar_reference_threads: 1,
       parallel_executor: 'rayon_persistent_pool',
       incumbent_executor: 'single_page_main_thread',
@@ -614,9 +730,45 @@ const [fmCmd, fmArgs] = pin ? ['taskset', ['-c', String(pin.cpu), fmBin, corpusP
 // own under load, which inflated the ratio in its favour. Neither engine's internal A/A can see
 // this, because each null is measured entirely inside its own phase.
 //
-// So sample machine busyness across each phase and report the asymmetry. A run whose phases saw
-// materially different load is not a clean comparison regardless of what the per-engine nulls say.
+// The sweep additionally samples every affinity CPU while the host is idle immediately before each
+// measured phase. Any CPU above the fixed 20% ceiling blocks the invocation before more evidence is
+// produced. Across-phase aggregate busyness remains report-only because it includes the engines'
+// own work.
 const phaseLoad = [];
+const hostWideQuiescenceChecks = [];
+
+function requireHostWideQuiescence(label) {
+  const classification = classifyHostWideQuiescence(
+    cpuBusy(HOST_WIDE_QUIET_SAMPLE_MS),
+    env.affinity_cpus,
+    HOST_WIDE_MAX_BUSY_FRACTION,
+  );
+  const record = {
+    phase: label,
+    observed_at: new Date().toISOString(),
+    sample_ms: HOST_WIDE_QUIET_SAMPLE_MS,
+    exclusive_host_claim: exclusiveHostClaim,
+    requirement: 'all affinity CPUs must remain at or below the fixed busy-fraction ceiling',
+    ...classification,
+  };
+  hostWideQuiescenceChecks.push(record);
+  if (record.verdict !== 'clear') {
+    const busy = record.busy_cpus_above_limit
+      .slice(0, 12)
+      .map(({ cpu, busy_fraction }) => `cpu${cpu}=${(busy_fraction * 100).toFixed(1)}%`)
+      .join(',');
+    console.error(
+      `[run] HOST-WIDE EXCLUSIVITY BLOCKED before ${label}: ` +
+      `missing=[${record.missing_cpus.join(',')}] busy=[${busy}] ` +
+      `(limit ${(HOST_WIDE_MAX_BUSY_FRACTION * 100).toFixed(1)}%)`,
+    );
+    process.exit(6);
+  }
+  console.error(
+    `[run] host-wide exclusivity clear before ${label}: ` +
+    `${record.allowed_cpu_count} CPUs, max ${(record.observed_max_busy_fraction * 100).toFixed(1)}%`,
+  );
+}
 
 /** Aggregate busy/total jiffies across all CPUs, from /proc/stat. Passive: no busy-wait. */
 function cpuTotals() {
@@ -635,9 +787,11 @@ function cpuTotals() {
  * sampled around a 19 s phase describes the minute *preceding* it. On a box that is quieting down
  * -- which it was, 21.8 -> 6.6 over the run -- that alone manufactures an apparent asymmetry.
  * /proc/stat deltas are exact over whatever interval they span, so they compare like with like
- * regardless of how differently long the two phases are.
+ * regardless of how differently long the two phases are. This remains provenance only; exclusive
+ * sweeps additionally block on the idle full-host sample immediately before every phase.
  */
 function timedPhase(label, fn) {
+  if (threadSweep.length > 0) requireHostWideQuiescence(label);
   const c0 = cpuTotals();
   const t0 = Date.now();
   const out = fn();
@@ -804,6 +958,34 @@ const fmBeforeById = byFmKey(fmBefore.records);
 const fmAfterById = byFmKey(fmAfter.records);
 const mjsById = byId(mjs.records);
 
+function rowHostWideExclusivity(threads) {
+  if (threadSweep.length === 0) return null;
+  const phases = has('skip-mermaid')
+    ? [`frankenmermaid-before-t${threads}`]
+    : [
+        `frankenmermaid-before-t${threads}`,
+        'mermaid-js',
+        `frankenmermaid-after-t${threads}`,
+      ];
+  const checks = phases.map((phase) => {
+    const check = hostWideQuiescenceChecks.find((candidate) => candidate.phase === phase);
+    return {
+      phase,
+      verdict: check?.verdict ?? 'missing',
+      observed_at: check?.observed_at ?? null,
+      observed_max_busy_fraction: check?.observed_max_busy_fraction ?? null,
+    };
+  });
+  return {
+    verdict: checks.every((check) => check.verdict === 'clear') ? 'clear' : 'blocked',
+    exclusive_host_claim: exclusiveHostClaim,
+    maximum_busy_fraction: HOST_WIDE_MAX_BUSY_FRACTION,
+    sample_ms: HOST_WIDE_QUIET_SAMPLE_MS,
+    complete_host_cpuset: env.affinity_cpus.length === env.logical_threads,
+    phase_checks: checks,
+  };
+}
+
 function phaseSweepIdentity(records) {
   if (threadSweep.length === 0) return null;
   const checks = [];
@@ -883,6 +1065,7 @@ for (const { item, threads } of measurements) {
     id: item.id,
     fm_worker_threads: threads ?? fBefore?.worker_threads ?? 1,
     fm_worker_threads_requested: threads ?? fBefore?.thread_count_requested ?? 1,
+    host_wide_exclusivity: rowHostWideExclusivity(threads),
     host: {
       identity: env.host_identity,
       cpu_model: env.cpu_model,
@@ -897,6 +1080,18 @@ for (const { item, threads } of measurements) {
     },
   };
 
+  if (
+    threadSweep.length > 0 &&
+    row.host_wide_exclusivity?.verdict !== 'clear'
+  ) {
+    hardFail = true;
+    rows.push({
+      ...row,
+      status: 'host_wide_exclusivity_invalid',
+      error: 'every measured sweep phase requires a clear full-host quiescence check',
+    });
+    continue;
+  }
   if (!fBefore || fBefore.status !== 'ok' || !fAfter || fAfter.status !== 'ok') {
     hardFail = true;
     rows.push({
@@ -1164,6 +1359,24 @@ const summary = {
     ? {
         threads: threadSweep,
         requested_threads: threadSweep,
+        host_wide_exclusivity: {
+          verdict:
+            hostWideQuiescenceChecks.length ===
+              (has('skip-mermaid') ? threadSweep.length : threadSweep.length * 2 + 1) &&
+            hostWideQuiescenceChecks.every((check) => check.verdict === 'clear')
+              ? 'clear'
+              : 'blocked',
+          exclusive_host_claim: exclusiveHostClaim,
+          claim_reference_format: 'trj-booking:<Agent-Mail-CLAIM-message-id>',
+          complete_host_cpuset: env.affinity_cpus.length === env.logical_threads,
+          maximum_busy_fraction: HOST_WIDE_MAX_BUSY_FRACTION,
+          sample_ms: HOST_WIDE_QUIET_SAMPLE_MS,
+          checked_before_every_measured_phase: true,
+          expected_check_count: has('skip-mermaid')
+            ? threadSweep.length
+            : threadSweep.length * 2 + 1,
+          checks: hostWideQuiescenceChecks,
+        },
         actual_observed_threads: rows
           .filter((row) => Number.isSafeInteger(row.fm_worker_threads_actually_used))
           .map((row) => ({
@@ -1198,6 +1411,12 @@ const summary = {
     : null,
   rows,
 };
+if (
+  summary.thread_sweep &&
+  summary.thread_sweep.host_wide_exclusivity.verdict !== 'clear'
+) {
+  hardFail = true;
+}
 
 const stamp = `${env.git_rev?.slice(0, 8) ?? 'nogit'}-${Date.now()}`;
 const jsonlPath = join(outDir, `run-${stamp}.jsonl`);
@@ -1279,6 +1498,11 @@ if (summary.thread_sweep) {
   }
   console.log(
     `  scalar/parallel SVG identity: ${summary.thread_sweep.scalar_output_identity.verdict}`,
+  );
+  console.log(
+    `  host-wide exclusivity: ${summary.thread_sweep.host_wide_exclusivity.verdict} ` +
+    `(${summary.thread_sweep.host_wide_exclusivity.checks.length} pre-phase checks, ` +
+    `claim ${summary.thread_sweep.host_wide_exclusivity.exclusive_host_claim})`,
   );
   console.log('');
 }

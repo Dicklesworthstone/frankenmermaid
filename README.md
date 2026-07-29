@@ -22,6 +22,12 @@ curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/frankenmermaid/m
 
 ---
 
+## mermaid-js fails to render the certified large-graph corpus from 2,000 nodes upward
+
+`mermaid-js 11.15.0` raises `RangeError: Maximum call stack size exceeded` on all seven pinned
+2,000–10,000-node architecture, flowchart, and database-schema workloads. frankenmermaid renders
+all seven.
+
 <!-- BEGIN GENERATED: runtime-capability-metadata -->
 | Surface | Status | Evidence |
 |---------|--------|----------|
@@ -1631,6 +1637,10 @@ API in the same invocation; its whole-job median is 18,490.000 ms.
 Every pooled width produces the same input, default-SVG, and lean-SVG SHA-256 as the scalar arm.
 The pool is ISA-neutral caller concurrency rather than an x86-specific renderer path; no Apple
 Silicon timing is claimed.
+Thread-sweep admission requires an Agent Mail claim reference plus a clear one-second sample at or
+below 20% busy on every logical CPU in the complete host cpuset before every measured phase.
+The pinned CI corpus also contains realistic 2,000- and 5,000-diagram whole jobs; no performance
+figure is published for those jobs until an exclusive-host invocation passes every gate.
 
 #### Realistic whole jobs
 

@@ -545,6 +545,12 @@ export const CORPUS = [
   // accented characters, which is the escaping cost a synthetic corpus never charges either engine.
   { id: 'docs_site_50',         gen: 'docs_site',    params: { count: 50, seed: 20260728 },  class: 'doc_build',  reps_js: 3, warmup_js: 1, reps_rs: 30, warmup_rs: 3, js_budget_ms: 900_000,  dnf_allowed: true },
   { id: 'docs_site_200',        gen: 'docs_site',    params: { count: 200, seed: 20260728 }, class: 'doc_build',  reps_js: 2, warmup_js: 0, reps_rs: 20, warmup_rs: 2, js_budget_ms: 1500_000, dnf_allowed: true },
+  // CI render-farm jobs over the same realistic, right-skewed distribution. These are deliberately
+  // whole 2,000- and 5,000-diagram invocations rather than a small job multiplied after timing:
+  // corpus traversal, output ownership, allocator pressure, and persistent-pool scheduling remain
+  // inside the boundary a user pays. They are pinned now and require exclusive-trj certification.
+  { id: 'ci_docs_2000',         gen: 'docs_site',    params: { count: 2000, seed: 20260729 }, class: 'doc_build', reps_js: 1, warmup_js: 0, reps_rs: 20, warmup_rs: 2, js_budget_ms: 3600_000, dnf_allowed: true },
+  { id: 'ci_docs_5000',         gen: 'docs_site',    params: { count: 5000, seed: 20260729 }, class: 'doc_build', reps_js: 1, warmup_js: 0, reps_rs: 20, warmup_rs: 2, js_budget_ms: 9000_000, dnf_allowed: true },
   // 60 keystrokes inside one label: the re-render frequency a live preview actually generates.
   { id: 'typing_trace_60',      gen: 'typing_trace', params: { nodes: 40, phrase: 'Aggregate results from the upstream ingestion workers safely', seed: 20260728 }, class: 'edit_trace', reps_js: 2, warmup_js: 1, reps_rs: 20, warmup_rs: 2, js_budget_ms: 900_000, dnf_allowed: true },
   // One architecture-review export at two monorepo sizes. Degree and domain sizes are deliberately

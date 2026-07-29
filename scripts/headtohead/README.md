@@ -31,20 +31,24 @@ node scripts/headtohead/run.mjs \
   --js-budget-scale 20
 
 # CI-scale caller concurrency must run under the exclusive trj booking, not on an rch worker.
+: "${TRJ_CLAIM_MESSAGE_ID:?set this to the Agent Mail CLAIM message id}"
 node scripts/headtohead/run.mjs \
   --fm-bin target/release/examples/headtohead \
   --only ci_batch_500 \
   --thread-sweep 1,2,4,8,16,32,64,96,128 \
+  --exclusive-host-claim "trj-booking:${TRJ_CLAIM_MESSAGE_ID}" \
   --pin-cpu off
 ```
 
 Useful flags: `--only <corpus_id>[,<corpus_id>…]`, `--reps-scale 0.25` (fast smoke),
 `--js-budget-scale 0.1` (shrink the mermaid wall budgets for a smoke run), `--skip-mermaid`,
-`--thread-sweep 1,2,4,8,16,32,64,96,128`, `--pin-cpu auto|N|off`, `--out <dir>`,
-`--update-pins`.
+`--thread-sweep 1,2,4,8,16,32,64,96,128`,
+`--exclusive-host-claim trj-booking:<claim-message-id>`, `--pin-cpu auto|N|off`,
+`--out <dir>`, `--update-pins`.
 
 Exit codes: `0` green · `1` an engine errored · `3` corpus drift · `4` median-CI gate failed ·
-`5` the bracketed Rust observations drifted outside their A/A median-CI floor.
+`5` the bracketed Rust observations drifted outside their A/A median-CI floor · `6` host-wide
+benchmark exclusivity was not clear immediately before a measured sweep phase.
 A comparator **DNF** is not an error and does not fail the run — see "Did not finish" below.
 
 A gate failure (`4` or `5`) is **inconclusive**, not a regression. Re-run in an assigned quiet
@@ -150,7 +154,10 @@ reaches the floor in both brackets. Each row embeds host identity, physical and 
 RAM, NUMA count, inherited affinity, requested caller threads, caller workers actually observed
 during an untimed batch of the exact workload, the executing Rust ELF SHA-256, and the loaded
 mermaid-js bundle SHA-256. Requested capacity is never substituted for observed participation.
-CV and MAD remain provenance only.
+Every sweep additionally requires the complete host cpuset, an Agent Mail claim reference, and a
+one-second idle sample of every logical CPU immediately before every measured phase. Any affinity
+CPU above 20% busy blocks the invocation with exit 6. The artifact retains every per-CPU sample and
+the claim reference. CV and MAD remain provenance only.
 
 ### Exclusive `trj` booking
 
@@ -160,6 +167,10 @@ measurement scope, only when the six higher-priority repos have released it. Pos
 `[trj] RELEASE frankenmermaid` immediately after success or failure. While any sweep claim is
 active, run neither sweep nor non-sweep frankenmermaid work on `trj`. A silent holder past its
 declared duration receives `[trj] PROBE <repo>` and one full wait cycle before any takeover.
+The harness requires the resulting message id as
+`--exclusive-host-claim trj-booking:<claim-message-id>` and independently refuses a sweep unless
+the complete host cpuset is quiet. The Agent Mail booking establishes ownership; the CPU samples
+verify that ownership produced an uncontended measurement host.
 
 The pool is deliberately outside renderer internals. The ledger shows that starting fresh scoped
 threads inside each small render regresses, while a CI job supplies hundreds of independent
@@ -177,7 +188,7 @@ passed in both brackets, and every integrated Rust sample exceeded the 50 ms flo
 
 ## Corpus
 
-31 items in three tiers.
+33 items in three tiers.
 
 **The pinned baseline (13).** Flowcharts (10/100/500 nodes), wide layered DAGs (8×16, 12×24, 16×32 —
 up to 512 nodes / 960 edges), a dense DAG (200 nodes / 790 edges), an SCC-heavy cyclic graph, one
@@ -204,12 +215,13 @@ cluster boundaries constrain placement and force the router around obstacles the
 produce. `er_schema` carries attribute blocks, which makes it text-measurement-bound rather than
 graph-bound.
 
-**Realistic end-to-end tier (6 rows, 4 jobs).** These jobs use seeded, right-skewed distributions
+**Realistic end-to-end tier (8 rows, 5 jobs).** These jobs use seeded, right-skewed distributions
 instead of uniform `Node 123` fixtures:
 
 | User job | Items / sizes | Realism carried by the input |
 |---|---|---|
 | Documentation-site render | `docs_site_50`, `docs_site_200` | 50 and 200 diagrams; flowchart-dominated type mix, right-skewed sizes, non-ASCII and escaping-heavy labels. |
+| CI render farm | `ci_docs_2000`, `ci_docs_5000` | 2,000 and 5,000 diagrams in one whole job, using the same right-skewed five-syntax distribution; traversal, allocation, output ownership, and persistent-pool scheduling stay inside the measured boundary. |
 | Live typing preview | `typing_trace_60` | 60 successive keystrokes inside one label of a 40-node flowchart. |
 | Monorepo architecture review | `monorepo_arch_120`, `monorepo_arch_300` | 120 and 300 services across uneven domains; hub-skewed dependencies and cross-domain event links. |
 | Database-catalog publish | `schema_catalog_25` | 25 bounded-context ER diagrams, 8–75 entities each, with skewed relationships and varied field counts/types. |
