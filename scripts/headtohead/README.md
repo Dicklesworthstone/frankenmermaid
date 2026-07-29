@@ -14,11 +14,11 @@ df -h /data  # abort and report if available space is below 120G
 RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- \
   cargo test --profile release -p frankenmermaid-cli --example headtohead
 
-# 2. a full browser head-to-head genuinely needs the executable locally. Only in an assigned
-#    measurement window, reuse this repo's one existing target/ directory; never mint a task target.
+# 2. strict-remote release builds retrieve the executable into this repo's existing target/.
+#    Never mint a task-specific target directory and never permit silent local fallback.
 df -h /data  # the same 120G floor applies
-env -u CARGO_TARGET_DIR cargo build --profile release \
-  -p frankenmermaid-cli --example headtohead
+RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- \
+  cargo build --profile release -p frankenmermaid-cli --example headtohead
 
 # 3. run both engines over byte-identical inputs
 node scripts/headtohead/run.mjs \
@@ -29,11 +29,19 @@ node scripts/headtohead/run.mjs \
   --fm-bin target/release/examples/headtohead \
   --only edit_trace_200x200 \
   --js-budget-scale 20
+
+# CI-scale caller concurrency must run on the 64-thread target machine, not an rch worker.
+node scripts/headtohead/run.mjs \
+  --fm-bin target/release/examples/headtohead \
+  --only ci_batch_500 \
+  --thread-sweep 1,2,4,8,16,32,64 \
+  --pin-cpu off
 ```
 
 Useful flags: `--only <corpus_id>[,<corpus_id>…]`, `--reps-scale 0.25` (fast smoke),
 `--js-budget-scale 0.1` (shrink the mermaid wall budgets for a smoke run), `--skip-mermaid`,
-`--pin-cpu auto|N|off`, `--out <dir>`, `--update-pins`.
+`--thread-sweep 1,2,4,8,16,32,64`, `--pin-cpu auto|N|off`, `--out <dir>`,
+`--update-pins`.
 
 Exit codes: `0` green · `1` an engine errored · `3` corpus drift · `4` median-CI gate failed ·
 `5` the bracketed Rust observations drifted outside their A/A median-CI floor.
@@ -72,7 +80,8 @@ side writes to disk or touches the DOM afterwards.
 Choices that deliberately understate our margin:
 
 - `securityLevel: "strict"` is mermaid's default, with DOMPurify sanitization enabled.
-- The frankenmermaid runner is pinned to **one** core; Chromium keeps the whole machine.
+- Normal scalar runs pin the frankenmermaid runner to **one** core; Chromium keeps the whole
+  machine. A declared thread sweep disables affinity and records every caller-pool width.
 - `maxEdges` / `maxTextSize` are raised above mermaid's defaults so the large items render at all.
   These are guardrails, not performance knobs.
 
@@ -122,6 +131,20 @@ agreement is useful diagnostic context, but only the same-invocation null median
 
 **Determinism.** Every timed iteration's output length is checked against a reference render, and the
 full bytes are compared once outside the timed region. A nondeterministic render fails the run.
+
+**Portable thread sweep.** `--thread-sweep` is accepted for one selected workload and must include
+the scalar `1` arm. The driver starts one Rust invocation per requested width before the incumbent
+phase and another per width after it. Every invocation builds one persistent Rayon pool and reuses it
+for warmup, A/A, A/B, and measured rounds; the scalar arm does not enter Rayon. The driver fails
+closed unless every pooled arm's input, default SVG, and lean SVG SHA-256 exactly match the scalar
+arm in both brackets. It also requires every arm to self-report the same ELF, requires the incumbent
+record to identify mermaid-js's single-page main-thread execution model, and gates each ratio on its
+own bracket plus both engines' A/A median CIs. CV and MAD remain provenance only.
+
+The pool is deliberately outside renderer internals. The ledger shows that starting fresh scoped
+threads inside each small render regresses, while a CI job supplies hundreds of independent
+diagrams over which one pool can amortize startup. Rayon keeps the caller-concurrency mechanism
+portable across x86-64 and aarch64; the harness contains no x86-specific intrinsics.
 
 ## Corpus
 

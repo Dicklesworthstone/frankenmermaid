@@ -816,6 +816,7 @@ dependencies = [
  "fm-render-term",
  "mimalloc",
  "notify",
+ "rayon",
  "resvg",
  "serde",
  "serde_json",

@@ -70,10 +70,18 @@ function sh(cmd, args, opts = {}) {
 
 function fingerprint() {
   const cpu = cpus();
+  const trackedStatus =
+    sh('git', ['-C', REPO, 'status', '--porcelain', '--untracked-files=no']) ?? '';
+  const allStatus =
+    sh('git', ['-C', REPO, 'status', '--porcelain', '--untracked-files=normal']) ?? '';
   return {
     captured_at: new Date().toISOString(),
     git_rev: sh('git', ['-C', REPO, 'rev-parse', 'HEAD']),
-    git_dirty: (sh('git', ['-C', REPO, 'status', '--porcelain']) ?? '').length > 0,
+    git_dirty: trackedStatus.length > 0,
+    git_dirty_scope: 'tracked_files_only',
+    git_untracked_count: allStatus
+      .split('\n')
+      .filter((line) => line.startsWith('??')).length,
     rustc: sh('rustc', ['--version']),
     cargo_profile: 'release (opt-level=3 for fm-core/parser/layout/render-svg, lto=fat, codegen-units=1)',
     rustflags: '-C target-cpu=x86-64-v2 (.cargo/config.toml)',
@@ -289,6 +297,33 @@ if (onlyIds && items.length === 0) {
   console.error(`[run] --only ${only} matched no corpus item`);
   process.exit(2);
 }
+
+function positiveIntList(raw) {
+  if (raw === null) return [];
+  const values = raw.split(',').map((value) => Number(value.trim()));
+  if (
+    values.length === 0 ||
+    values.some((value) => !Number.isSafeInteger(value) || value < 1) ||
+    new Set(values).size !== values.length
+  ) {
+    console.error(`[run] --thread-sweep must be a unique comma-separated list of positive integers, got ${raw}`);
+    process.exit(2);
+  }
+  return values;
+}
+
+const threadSweep = positiveIntList(arg('thread-sweep'));
+if (threadSweep.length > 0) {
+  if (items.length !== 1) {
+    console.error('[run] --thread-sweep requires --only to select exactly one corpus item');
+    process.exit(2);
+  }
+  if (!threadSweep.includes(1)) {
+    console.error('[run] --thread-sweep must include 1 for the scalar byte-identity reference');
+    process.exit(2);
+  }
+}
+
 const corpusJson = items.map((i) => ({
   id: i.id,
   texts: corpus.get(i.id).texts,
@@ -301,9 +336,14 @@ writeFileSync(corpusPath, JSON.stringify(corpusJson));
 
 // ---------------------------------------------------------------- run both engines
 
-function runJsonl(label, cmd, args) {
+function runJsonl(label, cmd, args, extraEnv = {}) {
   console.error(`[run] ${label}: ${cmd} ${args.join(' ')}`);
-  const res = spawnSync(cmd, args, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'inherit'] });
+  const res = spawnSync(cmd, args, {
+    encoding: 'utf8',
+    maxBuffer: 256 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'inherit'],
+    env: { ...process.env, ...extraEnv },
+  });
   const records = (res.stdout ?? '')
     .split('\n')
     .filter((l) => l.trim().startsWith('{'))
@@ -319,10 +359,29 @@ if (!fmBin) {
 
 const env = fingerprint();
 console.error(`[run] rev=${env.git_rev?.slice(0, 8)}${env.git_dirty ? '-dirty' : ''} load1=${env.loadavg_1m.toFixed(2)} cpus=${env.cpu_count}`);
+if (threadSweep.some((threads) => threads > env.cpu_count)) {
+  console.error(
+    `[run] --thread-sweep requests ${Math.max(...threadSweep)} threads, but this host reports only ${env.cpu_count} logical CPUs`,
+  );
+  process.exit(2);
+}
+env.thread_sweep = threadSweep.length > 0
+  ? {
+      threads: threadSweep,
+      local_machine_required: true,
+      scalar_reference_threads: 1,
+      parallel_executor: 'rayon_persistent_pool',
+      incumbent_executor: 'single_page_main_thread',
+    }
+  : null;
 
 // CPU pinning for the frankenmermaid runner only (Chromium is multi-process; pinning it would be
 // unfair to mermaid, and we would rather understate our margin than overstate it).
 const pinArg = arg('pin-cpu', 'auto');
+if (threadSweep.length > 0 && pinArg !== 'off') {
+  console.error('[run] --thread-sweep requires --pin-cpu off; a one-CPU affinity mask invalidates scaling evidence');
+  process.exit(2);
+}
 let pin = null;
 if (pinArg !== 'off') {
   pin = pinArg === 'auto' ? pickIdleCpu() : { cpu: Number(pinArg), busy_pct: null };
@@ -373,20 +432,56 @@ function timedPhase(label, fn) {
   return out;
 }
 
-const fmBefore = timedPhase(
-  'frankenmermaid-before',
-  () => runJsonl('frankenmermaid-before', fmCmd, fmArgs),
-);
+function runFrankenmermaidPhase(prefix) {
+  if (threadSweep.length === 0) {
+    return timedPhase(prefix, () => runJsonl(prefix, fmCmd, fmArgs));
+  }
+  const records = [];
+  let code = 0;
+  for (const threads of threadSweep) {
+    const phase = `${prefix}-t${threads}`;
+    const result = timedPhase(
+      phase,
+      () => runJsonl(phase, fmCmd, fmArgs, { FM_H2H_THREADS: String(threads) }),
+    );
+    records.push(
+      ...result.records.map((record) => ({
+        ...record,
+        harness_phase: phase,
+      })),
+    );
+    if (result.code !== 0) code = result.code;
+  }
+  return { records, code };
+}
+
+const fmBefore = runFrankenmermaidPhase('frankenmermaid-before');
 // The measured binary hashes itself and prints that as its first record. A sha computed by a shell
 // step next to the run proves nothing about which ELF executed -- rch builds into an opaque
 // per-worker target dir, and agents have edited crates mid-benchmark in this fleet.
-const binaryRecordBefore = fmBefore.records.find((r) => r.record === 'binary');
+const binaryRecordsBefore = fmBefore.records.filter((record) => record.record === 'binary');
+const binaryRecordBefore = binaryRecordsBefore[0];
 env.fm_elf_sha256 = binaryRecordBefore?.elf_sha256 ?? 'not reported';
 env.fm_elf_bytes = binaryRecordBefore?.elf_bytes ?? null;
 console.error(`[run] fm elf sha256=${String(env.fm_elf_sha256).slice(0, 16)} (${env.fm_elf_bytes} bytes)`);
-const elfSelfReportBeforeValid = validElfSelfReport(binaryRecordBefore);
+const expectedBinaryReports = threadSweep.length > 0 ? threadSweep.length : 1;
+const beforeReportedThreads = new Set(
+  binaryRecordsBefore.map((record) => record.worker_threads),
+);
+const elfSelfReportBeforeValid =
+  binaryRecordsBefore.length === expectedBinaryReports &&
+  (threadSweep.length === 0 ||
+    (beforeReportedThreads.size === threadSweep.length &&
+      threadSweep.every((threads) => beforeReportedThreads.has(threads)))) &&
+  binaryRecordsBefore.every(
+    (record) =>
+      validElfSelfReport(record) &&
+      record.elf_sha256 === binaryRecordBefore?.elf_sha256 &&
+      record.elf_bytes === binaryRecordBefore?.elf_bytes &&
+      (threadSweep.length === 0 || threadSweep.includes(record.worker_threads)),
+  );
 if (!elfSelfReportBeforeValid) {
-  console.error('[run] INVALID: frankenmermaid did not self-report a lowercase SHA-256 for its executing ELF');
+  console.error('[run] INVALID: every frankenmermaid sweep arm must self-report the same executing ELF');
 }
 
 const mjsArgs = [join(HERE, 'mermaid_bench.mjs')];
@@ -398,12 +493,24 @@ const mjs = has('skip-mermaid')
   : timedPhase('mermaid-js', () => runJsonl('mermaid-js', process.execPath, mjsArgs));
 const fmAfter = has('skip-mermaid')
   ? fmBefore
-  : timedPhase(
-      'frankenmermaid-after',
-      () => runJsonl('frankenmermaid-after', fmCmd, fmArgs),
-    );
-const binaryRecordAfter = fmAfter.records.find((r) => r.record === 'binary');
-const elfSelfReportAfterValid = validElfSelfReport(binaryRecordAfter);
+  : runFrankenmermaidPhase('frankenmermaid-after');
+const binaryRecordsAfter = fmAfter.records.filter((record) => record.record === 'binary');
+const binaryRecordAfter = binaryRecordsAfter[0];
+const afterReportedThreads = new Set(
+  binaryRecordsAfter.map((record) => record.worker_threads),
+);
+const elfSelfReportAfterValid =
+  binaryRecordsAfter.length === expectedBinaryReports &&
+  (threadSweep.length === 0 ||
+    (afterReportedThreads.size === threadSweep.length &&
+      threadSweep.every((threads) => afterReportedThreads.has(threads)))) &&
+  binaryRecordsAfter.every(
+    (record) =>
+      validElfSelfReport(record) &&
+      record.elf_sha256 === binaryRecordBefore?.elf_sha256 &&
+      record.elf_bytes === binaryRecordBefore?.elf_bytes &&
+      (threadSweep.length === 0 || threadSweep.includes(record.worker_threads)),
+  );
 const sameElf =
   elfSelfReportBeforeValid &&
   elfSelfReportAfterValid &&
@@ -422,10 +529,7 @@ if (!sameElf) {
  * is the same-ELF Rust-before/Rust-after bracket above.
  */
 function armAsymmetry() {
-  const fmBeforePhase = phaseLoad.find((p) => p.phase === 'frankenmermaid-before');
-  const mjsPhase = phaseLoad.find((p) => p.phase === 'mermaid-js');
-  const fmAfterPhase = phaseLoad.find((p) => p.phase === 'frankenmermaid-after');
-  const phases = [fmBeforePhase, mjsPhase, fmAfterPhase].filter(Boolean);
+  const phases = phaseLoad;
   if (phases.length < 2) return null;
   const lo = Math.min(...phases.map((phase) => phase.busy_fraction));
   const hi = Math.max(...phases.map((phase) => phase.busy_fraction));
@@ -444,18 +548,97 @@ function armAsymmetry() {
 // ---------------------------------------------------------------- join + gate
 
 const byId = (recs) => new Map(recs.map((r) => [r.id, r]));
-const fmBeforeById = byId(fmBefore.records);
-const fmAfterById = byId(fmAfter.records);
+const fmKey = (id, threads) =>
+  threadSweep.length > 0 ? `${id}@t${threads}` : id;
+const byFmKey = (recs) =>
+  new Map(
+    recs
+      .filter((record) => record.record !== 'binary')
+      .map((record) => [fmKey(record.id, record.worker_threads), record]),
+  );
+const fmBeforeById = byFmKey(fmBefore.records);
+const fmAfterById = byFmKey(fmAfter.records);
 const mjsById = byId(mjs.records);
 
-const rows = [];
-let hardFail = !sameElf;
+function phaseSweepIdentity(records) {
+  if (threadSweep.length === 0) return null;
+  const checks = [];
+  for (const item of items) {
+    const scalar = records.find(
+      (record) =>
+        record.id === item.id &&
+        record.worker_threads === 1 &&
+        record.status === 'ok',
+    );
+    for (const threads of threadSweep) {
+      const record = records.find(
+        (candidate) =>
+          candidate.id === item.id &&
+          candidate.worker_threads === threads &&
+          candidate.status === 'ok',
+      );
+      checks.push({
+        id: item.id,
+        threads,
+        present: Boolean(record),
+        input_matches_scalar: Boolean(
+          scalar && record && record.input_sha256 === scalar.input_sha256,
+        ),
+        default_output_matches_scalar: Boolean(
+          scalar && record && record.output_sha256 === scalar.output_sha256,
+        ),
+        lean_output_matches_scalar: Boolean(
+          scalar && record && record.output_sha256_lean === scalar.output_sha256_lean,
+        ),
+      });
+    }
+  }
+  const verdict = checks.every(
+    (check) =>
+      check.present &&
+      check.input_matches_scalar &&
+      check.default_output_matches_scalar &&
+      check.lean_output_matches_scalar,
+  )
+    ? 'pass'
+    : 'fail';
+  return {
+    verdict,
+    rule: 'every pooled thread count must match the scalar input/default/lean SHA-256',
+    scalar_threads: 1,
+    checks,
+  };
+}
 
-for (const item of items) {
-  const fBefore = fmBeforeById.get(item.id);
-  const fAfter = fmAfterById.get(item.id);
+const sweepOutputIdentity = threadSweep.length > 0
+  ? {
+      before: phaseSweepIdentity(fmBefore.records),
+      after: phaseSweepIdentity(fmAfter.records),
+    }
+  : null;
+if (sweepOutputIdentity) {
+  sweepOutputIdentity.verdict =
+    sweepOutputIdentity.before.verdict === 'pass' &&
+    sweepOutputIdentity.after.verdict === 'pass'
+      ? 'pass'
+      : 'fail';
+}
+
+const measurements = items.flatMap((item) =>
+  (threadSweep.length > 0 ? threadSweep : [null]).map((threads) => ({ item, threads })),
+);
+const rows = [];
+let hardFail = !sameElf || sweepOutputIdentity?.verdict === 'fail';
+
+for (const { item, threads } of measurements) {
+  const key = fmKey(item.id, threads);
+  const fBefore = fmBeforeById.get(key);
+  const fAfter = fmAfterById.get(key);
   const m = mjsById.get(item.id);
-  const row = { id: item.id };
+  const row = {
+    id: item.id,
+    fm_worker_threads: threads ?? fBefore?.worker_threads ?? 1,
+  };
 
   if (!fBefore || fBefore.status !== 'ok' || !fAfter || fAfter.status !== 'ok') {
     hardFail = true;
@@ -483,6 +666,10 @@ for (const item of items) {
   const bracket = fmBracket(fBefore, fAfter);
   const f = bracket.selected === 'after' ? fAfter : fBefore;
   row.fm_bracket = bracket;
+  row.fm_execution_model = f.execution_model ?? 'scalar';
+  row.fm_available_parallelism = f.available_parallelism ?? null;
+  row.fm_output_sha256 = f.output_sha256;
+  row.fm_output_sha256_lean = f.output_sha256_lean;
   row.class = item.class ?? 'single';
   // For a doc build the batch total is the size that means anything; for everything else it is the
   // largest single diagram. Both are recorded either way.
@@ -502,6 +689,7 @@ for (const item of items) {
   row.fm_bytes = f.output_bytes;
   row.fm_bytes_lean = f.output_bytes_lean;
   row.fm_lean_p50_ns = f.pipeline_lean_ns.p50;
+  row.fm_documents_per_second = (f.revisions * 1e9) / f.pipeline_ns.p50;
   // Recorded because it is currently > 1: the lean output profile is smaller but *slower*, since
   // A11yConfig::none() drops off the streaming fast path onto the per-element Element builder.
   row.lean_slowdown = f.pipeline_lean_ns.p50 / f.pipeline_ns.p50;
@@ -547,13 +735,31 @@ for (const item of items) {
     rows.push({ ...row, status: 'input_mismatch', error: `fm ${f.input_sha256.slice(0, 12)} != mjs ${m.input_sha256.slice(0, 12)}` });
     continue;
   }
+  if (
+    threadSweep.length > 0 &&
+    (m.worker_threads !== 1 || m.execution_model !== 'single_page_main_thread')
+  ) {
+    hardFail = true;
+    rows.push({
+      ...row,
+      status: 'comparator_execution_model_mismatch',
+      error:
+        `thread sweep requires mermaid-js worker_threads=1 and ` +
+        `execution_model=single_page_main_thread; got ${m.worker_threads}/` +
+        `${m.execution_model}`,
+    });
+    continue;
+  }
 
   row.mjs_p50_ns = m.render_ns.p50;
   row.mjs_min_ns = m.render_ns.min;
   row.mjs_cv_pct = m.cv_pct;
   row.mjs_mad_pct = m.mad_pct;
   row.mjs_null_control = m.null_control ?? null;
+  row.mjs_worker_threads = m.worker_threads ?? 1;
+  row.mjs_execution_model = m.execution_model ?? 'single_page_main_thread';
   row.mjs_bytes = m.output_bytes;
+  row.mjs_documents_per_second = (m.revisions * 1e9) / m.render_ns.p50;
   row.speedup = m.render_ns.p50 / f.pipeline_ns.p50;
   // Noise is one-sided, so the min-vs-min ratio is the estimate least contaminated by preemption.
   // If it disagrees with the p50 ratio, the run was noisy and the claim is not robust.
@@ -577,15 +783,39 @@ for (const item of items) {
   rows.push(row);
 }
 
+if (threadSweep.length > 0) {
+  for (const item of items) {
+    const scalar = rows.find(
+      (row) =>
+        row.id === item.id &&
+        row.fm_worker_threads === 1 &&
+        (row.status === 'ok' || row.status === 'fm_only'),
+    );
+    if (!scalar) {
+      hardFail = true;
+      continue;
+    }
+    for (const row of rows.filter((candidate) => candidate.id === item.id)) {
+      row.fm_scaling_vs_1t = scalar.fm_p50_ns / row.fm_p50_ns;
+      row.fm_parallel_efficiency =
+        row.fm_scaling_vs_1t / Math.max(1, row.fm_worker_threads);
+    }
+  }
+}
+
 const ok = rows.filter((r) => r.status === 'ok');
 const dnf = rows.filter((r) => r.status === 'comparator_dnf');
 const speedups = ok.map((r) => r.speedup);
 const speedupsMin = ok.map((r) => r.speedup_min);
+const rowLabel = (row) =>
+  threadSweep.length > 0 ? `${row.id}@t${row.fm_worker_threads}` : row.id;
+const measurementOrder = phaseLoad.map((phase) => phase.phase);
 const summary = {
   schema: 'frankenmermaid.headtohead.v2',
   env,
   pins: { mermaid: PINS.mermaid.version, bundle_url: PINS.mermaid.url, security_level: PINS.mermaid.security_level },
   corpus_items: items.length,
+  measurement_rows: rows.length,
   ok_items: ok.length,
   // Items where mermaid produced no render inside its wall budget. Reported separately from
   // `speedup` on purpose: these carry lower bounds, not measured ratios.
@@ -595,18 +825,32 @@ const summary = {
     fm_p50_ns: r.fm_p50_ns, speedup_lower_bound: r.speedup_lower_bound, error: r.error,
   })),
   median_ci_gate_rule: 'claim magnitude >= max(1.01, 1 + 2 * max(per-engine A/A CI radius))',
-  measurement_order: has('skip-mermaid')
-    ? ['frankenmermaid-before']
-    : ['frankenmermaid-before', 'mermaid-js', 'frankenmermaid-after'],
+  measurement_order: measurementOrder,
   fm_bracket_gate_rule: 'Rust pre/post drift magnitude <= max(1.01, 1 + 2 * Rust A/A CI radius)',
   fm_bracket_gate_failures: ok
     .filter((r) => r.fm_bracket.verdict === 'fail')
-    .map((r) => r.id),
+    .map(rowLabel),
+  thread_sweep: threadSweep.length > 0
+    ? {
+        threads: threadSweep,
+        scalar_output_identity: sweepOutputIdentity,
+        comparison_scope:
+          `same ${corpusJson[0].texts.length}-document ${items[0].id} workload; ` +
+          'frankenmermaid caller pool vs mermaid-js single-page main-thread API',
+        incumbent: {
+          name: 'mermaid-js',
+          version: PINS.mermaid.version,
+          worker_threads: 1,
+          execution_model: 'single_page_main_thread',
+        },
+        corpus_aggregate: false,
+      }
+    : null,
   arm_asymmetry: armAsymmetry(),
   cv_gate: 'never',
   median_ci_gate_failures: ok
     .filter((r) => r.median_ci_gate.verdict === 'fail')
-    .map((r) => r.id),
+    .map(rowLabel),
   speedup: speedups.length
     ? { min: Math.min(...speedups), median: pct(50, speedups), max: Math.max(...speedups) }
     : null,
@@ -618,7 +862,11 @@ const summary = {
 
 const stamp = `${env.git_rev?.slice(0, 8) ?? 'nogit'}-${Date.now()}`;
 const jsonlPath = join(outDir, `run-${stamp}.jsonl`);
-const tagPhase = (records, phase) => records.map((record) => ({ ...record, harness_phase: phase }));
+const tagPhase = (records, phase) =>
+  records.map((record) => ({
+    ...record,
+    harness_phase: record.harness_phase ?? phase,
+  }));
 const events = has('skip-mermaid')
   ? tagPhase(fmBefore.records, 'frankenmermaid-before')
   : [
@@ -641,28 +889,58 @@ console.log('');
 console.log(`${pad('item', 22)}${lpad('nodes', 6)}${lpad('edges', 7)}${lpad('fm p50 ms', 12)}${lpad('mermaid ms', 12)}${lpad('speedup', 10)}${lpad('(by min)', 10)}${lpad('fm mad%', 9)}${lpad('bytes x', 9)}${lpad('lean x', 8)}  gate`);
 console.log('-'.repeat(116));
 for (const r of rows) {
+  const displayId = rowLabel(r);
   if (r.status === 'comparator_dnf') {
     const timedOut = r.mjs_dnf_kind === 'timeout';
     console.log(
-      `${pad(r.id, 22)}${lpad(r.nodes, 6)}${lpad(r.edges, 7)}${lpad(ms(r.fm_p50_ns), 12)}` +
+      `${pad(displayId, 22)}${lpad(r.nodes, 6)}${lpad(r.edges, 7)}${lpad(ms(r.fm_p50_ns), 12)}` +
       `${lpad(timedOut ? `DNF>${(r.mjs_budget_ms / 1000).toFixed(0)}s` : 'CANNOT', 12)}` +
       `${lpad(timedOut ? `>${r.speedup_lower_bound.toFixed(0)}x` : 'n/a', 10)}` +
       `${lpad('-', 10)}${lpad(r.fm_mad_pct.toFixed(1), 9)}${lpad('-', 9)}${lpad('-', 8)}  n/a`,
     );
     continue;
   }
+  if (r.status === 'fm_only') {
+    console.log(
+      `${pad(displayId, 22)}${lpad(r.nodes, 6)}${lpad(r.edges, 7)}` +
+      `${lpad(ms(r.fm_p50_ns), 12)}${lpad('-', 12)}${lpad('-', 10)}` +
+      `${lpad('-', 10)}${lpad(r.fm_mad_pct.toFixed(1), 9)}` +
+      `${lpad('-', 9)}${lpad('-', 8)}  fm-only`,
+    );
+    continue;
+  }
   if (r.status !== 'ok') {
-    console.log(`${pad(r.id, 22)}  ${r.status.toUpperCase()}: ${r.error ?? ''}`);
+    console.log(`${pad(displayId, 22)}  ${r.status.toUpperCase()}: ${r.error ?? ''}`);
     continue;
   }
   console.log(
-    pad(r.id, 22) + lpad(r.nodes, 6) + lpad(r.edges, 7) + lpad(ms(r.fm_p50_ns), 12) + lpad(ms(r.mjs_p50_ns), 12) +
+    pad(displayId, 22) + lpad(r.nodes, 6) + lpad(r.edges, 7) + lpad(ms(r.fm_p50_ns), 12) + lpad(ms(r.mjs_p50_ns), 12) +
     lpad(`${r.speedup.toFixed(0)}x`, 10) + lpad(`${r.speedup_min.toFixed(0)}x`, 10) + lpad(r.fm_mad_pct.toFixed(1), 9) +
     lpad(`${r.bytes_ratio.toFixed(2)}x`, 9) + lpad(`${r.bytes_ratio_lean.toFixed(2)}x`, 8) +
     `  ${r.median_ci_gate.verdict}/${r.fm_bracket.verdict}`,
   );
 }
 console.log('');
+if (summary.thread_sweep) {
+  console.log('frankenmermaid caller-thread scaling (one persistent pool; scalar hash identity required):');
+  for (const r of rows.filter(
+    (row) => row.status === 'ok' || row.status === 'fm_only',
+  )) {
+    const versusIncumbent = Number.isFinite(r.speedup)
+      ? `${r.speedup.toFixed(0)}x vs mermaid-js`
+      : 'incumbent skipped';
+    console.log(
+      `  t${String(r.fm_worker_threads).padStart(2)}  ${ms(r.fm_p50_ns)} ms  ` +
+      `${r.fm_scaling_vs_1t.toFixed(2)}x vs t1  ` +
+      `${(r.fm_parallel_efficiency * 100).toFixed(1)}% efficiency  ` +
+      versusIncumbent,
+    );
+  }
+  console.log(
+    `  scalar/parallel SVG identity: ${summary.thread_sweep.scalar_output_identity.verdict}`,
+  );
+  console.log('');
+}
 if (summary.speedup) {
   console.log(`speedup vs mermaid ${PINS.mermaid.version} (p50):  min ${summary.speedup.min.toFixed(0)}x  median ${summary.speedup.median.toFixed(0)}x  max ${summary.speedup.max.toFixed(0)}x`);
   console.log(`speedup vs mermaid ${PINS.mermaid.version} (min):  min ${summary.speedup_min_estimator.min.toFixed(0)}x  median ${summary.speedup_min_estimator.median.toFixed(0)}x  max ${summary.speedup_min_estimator.max.toFixed(0)}x`);

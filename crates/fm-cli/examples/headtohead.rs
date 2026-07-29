@@ -15,6 +15,7 @@ use std::time::Instant;
 
 use fm_parser::parse;
 use fm_render_svg::{A11yConfig, SvgRenderConfig, render_svg_with_layout};
+use rayon::prelude::*;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -82,12 +83,84 @@ fn full_pipeline(input: &str, cfg: &SvgRenderConfig) -> String {
     render_svg_with_layout(&parsed.ir, &layout, cfg)
 }
 
-/// Render every revision of an item in order, exactly as `mermaid.render()` is called per keystroke.
-/// Returns the total output bytes so the caller can compare against the comparator's.
-fn render_all(texts: &[String], cfg: &SvgRenderConfig, sink: &mut Vec<String>) {
-    sink.clear();
-    for text in texts {
-        sink.push(full_pipeline(std::hint::black_box(text.as_str()), cfg));
+/// Executes independent diagrams through either the scalar path or one persistent portable pool.
+///
+/// The renderer's existing per-diagram scoped-thread cap is deliberately untouched: the negative
+/// evidence ledger shows that raising it above eight regresses because every render pays fresh
+/// thread startup. A CI batch is a different vein. Its diagrams are independent, so one pool can
+/// stay alive across every warmup, A/A arm, and measured sample. Rayon uses the native scheduler on
+/// x86_64 and aarch64; there are no ISA-specific assumptions in this harness.
+struct RenderExecutor {
+    threads: usize,
+    available_parallelism: usize,
+    pool: Option<rayon::ThreadPool>,
+}
+
+impl RenderExecutor {
+    fn new(threads: usize) -> Result<Self, String> {
+        let available_parallelism =
+            std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        if threads == 0 {
+            return Err("FM_H2H_THREADS must be at least 1".to_owned());
+        }
+        if threads > available_parallelism {
+            return Err(format!(
+                "FM_H2H_THREADS={threads} exceeds available_parallelism={available_parallelism}"
+            ));
+        }
+        let pool = if threads == 1 {
+            None
+        } else {
+            Some(
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .thread_name(|index| format!("fm-h2h-{index}"))
+                    .build()
+                    .map_err(|e| format!("cannot build {threads}-thread render pool: {e}"))?,
+            )
+        };
+        Ok(Self {
+            threads,
+            available_parallelism,
+            pool,
+        })
+    }
+
+    fn from_env() -> Result<Self, String> {
+        let threads = std::env::var("FM_H2H_THREADS").ok().map_or(Ok(1), |raw| {
+            raw.parse::<usize>()
+                .map_err(|e| format!("invalid FM_H2H_THREADS={raw:?}: {e}"))
+        })?;
+        Self::new(threads)
+    }
+
+    fn execution_model(&self) -> &'static str {
+        if self.pool.is_some() {
+            "rayon_persistent_pool"
+        } else {
+            "scalar"
+        }
+    }
+
+    /// Render every revision in deterministic input order.
+    ///
+    /// `IndexedParallelIterator::collect::<Vec<_>>()` preserves input order, so concatenating the
+    /// result is byte-identical to the scalar path even though work completes out of order.
+    fn render_all(&self, texts: &[String], cfg: &SvgRenderConfig, sink: &mut Vec<String>) {
+        sink.clear();
+        if let Some(pool) = &self.pool {
+            let rendered = pool.install(|| {
+                texts
+                    .par_iter()
+                    .map(|text| full_pipeline(std::hint::black_box(text.as_str()), cfg))
+                    .collect::<Vec<_>>()
+            });
+            sink.extend(rendered);
+        } else {
+            for text in texts {
+                sink.push(full_pipeline(std::hint::black_box(text.as_str()), cfg));
+            }
+        }
     }
 }
 
@@ -303,13 +376,18 @@ struct PairedMeasured {
 }
 
 /// Calibrate once off the faster arm; both the A/A and A/B routines then use this exact batch.
-fn calibrate_batch(item: &CorpusItem, cfg_a: &SvgRenderConfig, cfg_b: &SvgRenderConfig) -> usize {
+fn calibrate_batch(
+    executor: &RenderExecutor,
+    item: &CorpusItem,
+    cfg_a: &SvgRenderConfig,
+    cfg_b: &SvgRenderConfig,
+) -> usize {
     let mut scratch: Vec<String> = Vec::with_capacity(item.texts.len());
     let mut fastest_warmup = u64::MAX;
     for _ in 0..item.warmup.max(1) {
         for cfg in [cfg_a, cfg_b] {
             let t0 = Instant::now();
-            render_all(&item.texts, cfg, &mut scratch);
+            executor.render_all(&item.texts, cfg, &mut scratch);
             std::hint::black_box(&scratch);
             fastest_warmup =
                 fastest_warmup.min(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX));
@@ -325,6 +403,7 @@ fn calibrate_batch(item: &CorpusItem, cfg_a: &SvgRenderConfig, cfg_b: &SvgRender
 }
 
 fn time_arm(
+    executor: &RenderExecutor,
     item: &CorpusItem,
     cfg: &SvgRenderConfig,
     batch: usize,
@@ -334,7 +413,7 @@ fn time_arm(
 ) -> u64 {
     let t0 = Instant::now();
     for _ in 0..batch {
-        render_all(&item.texts, cfg, scratch);
+        executor.render_all(&item.texts, cfg, scratch);
         // Full byte comparison stays outside the timed region; the O(1) length check catches drift
         // during the rounds without charging a multi-megabyte comparison to the arm.
         *stable &= scratch.iter().map(String::len).sum::<usize>() == reference_len;
@@ -351,6 +430,7 @@ fn time_arm(
     reason = "nanosecond timing magnitudes fit f64 exactly enough for ratio statistics"
 )]
 fn paired(
+    executor: &RenderExecutor,
     item: &CorpusItem,
     cfg_a: &SvgRenderConfig,
     cfg_b: &SvgRenderConfig,
@@ -359,8 +439,8 @@ fn paired(
 ) -> Result<PairedMeasured, String> {
     let mut arm_a_reference = Vec::with_capacity(item.texts.len());
     let mut arm_b_reference = Vec::with_capacity(item.texts.len());
-    render_all(&item.texts, cfg_a, &mut arm_a_reference);
-    render_all(&item.texts, cfg_b, &mut arm_b_reference);
+    executor.render_all(&item.texts, cfg_a, &mut arm_a_reference);
+    executor.render_all(&item.texts, cfg_b, &mut arm_b_reference);
     let arm_a_output_bytes = arm_a_reference.iter().map(String::len).sum();
     let arm_b_output_bytes = arm_b_reference.iter().map(String::len).sum();
     let mut scratch = Vec::with_capacity(item.texts.len());
@@ -373,6 +453,7 @@ fn paired(
     for round in 0..rounds {
         let (arm_a_ns, arm_b_ns) = if round.is_multiple_of(2) {
             let a = time_arm(
+                executor,
                 item,
                 cfg_a,
                 batch,
@@ -381,6 +462,7 @@ fn paired(
                 &mut arm_a_stable,
             );
             let b = time_arm(
+                executor,
                 item,
                 cfg_b,
                 batch,
@@ -391,6 +473,7 @@ fn paired(
             (a, b)
         } else {
             let b = time_arm(
+                executor,
                 item,
                 cfg_b,
                 batch,
@@ -399,6 +482,7 @@ fn paired(
                 &mut arm_b_stable,
             );
             let a = time_arm(
+                executor,
                 item,
                 cfg_a,
                 batch,
@@ -413,9 +497,9 @@ fn paired(
         ratios.push(arm_a_ns as f64 / arm_b_ns.max(1) as f64);
     }
 
-    render_all(&item.texts, cfg_a, &mut scratch);
+    executor.render_all(&item.texts, cfg_a, &mut scratch);
     let arm_a_exact = scratch == arm_a_reference;
-    render_all(&item.texts, cfg_b, &mut scratch);
+    executor.render_all(&item.texts, cfg_b, &mut scratch);
     let arm_b_exact = scratch == arm_b_reference;
     if !arm_a_stable || !arm_b_stable || !arm_a_exact || !arm_b_exact {
         return Err(format!("{}: nondeterministic SVG across renders", item.id));
@@ -454,6 +538,10 @@ fn main() {
         eprintln!("cannot parse {path}: {e}");
         std::process::exit(2);
     });
+    let executor = RenderExecutor::from_env().unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(2);
+    });
 
     // Line 1 of stdout: which ELF produced everything below it.
     let (elf_sha256, elf_bytes) = self_elf_sha256();
@@ -465,6 +553,9 @@ fn main() {
             "record": "binary",
             "elf_sha256": elf_sha256,
             "elf_bytes": elf_bytes,
+            "worker_threads": executor.threads,
+            "available_parallelism": executor.available_parallelism,
+            "execution_model": executor.execution_model(),
         })
     );
 
@@ -499,9 +590,9 @@ fn main() {
             edges_total += parsed.ir.edges.len();
         }
 
-        let batch = calibrate_batch(item, &default_cfg, &lean_cfg);
+        let batch = calibrate_batch(&executor, item, &default_cfg, &lean_cfg);
         let rounds = item.reps.max(MIN_NULL_ROUNDS);
-        let null_run = match paired(item, &default_cfg, &default_cfg, batch, rounds) {
+        let null_run = match paired(&executor, item, &default_cfg, &default_cfg, batch, rounds) {
             Ok(v) => v,
             Err(e) => {
                 failed = true;
@@ -521,7 +612,7 @@ fn main() {
             continue;
         }
         // Same paired routine, same invocation, same batch: A/A first, then the real default/lean A/B.
-        let profile_run = match paired(item, &default_cfg, &lean_cfg, batch, rounds) {
+        let profile_run = match paired(&executor, item, &default_cfg, &lean_cfg, batch, rounds) {
             Ok(v) => v,
             Err(e) => {
                 failed = true;
@@ -571,6 +662,9 @@ fn main() {
                 "status": "ok",
                 "warmup": item.warmup,
                 "batch": batch,
+                "worker_threads": executor.threads,
+                "available_parallelism": executor.available_parallelism,
+                "execution_model": executor.execution_model(),
                 "revisions": item.texts.len(),
                 "input_sha256": sha256_hex(joined_input.as_bytes()),
                 "input_bytes": joined_input.len(),
@@ -621,7 +715,9 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{bootstrap_median_ci, median, ratio_stats, stats};
+    use fm_render_svg::SvgRenderConfig;
+
+    use super::{RenderExecutor, bootstrap_median_ci, median, ratio_stats, stats};
 
     #[test]
     fn median_averages_the_two_middle_values() {
@@ -637,5 +733,23 @@ mod tests {
         assert_eq!(stats.median, 1.0);
         assert_eq!(stats.half_width, 0.0);
         assert_eq!(stats.min_decidable_2x, 1.0);
+    }
+
+    #[test]
+    fn persistent_pool_preserves_scalar_output_order_and_bytes() {
+        let texts = vec![
+            "flowchart LR\nA[First]-->B[Second]".to_owned(),
+            "sequenceDiagram\nAlice->>Bob: Hello".to_owned(),
+            "classDiagram\nclass User".to_owned(),
+            "stateDiagram-v2\n[*]-->Ready".to_owned(),
+        ];
+        let config = SvgRenderConfig::default();
+        let scalar = RenderExecutor::new(1).expect("scalar executor");
+        let parallel = RenderExecutor::new(2).expect("parallel executor");
+        let mut scalar_output = Vec::new();
+        let mut parallel_output = Vec::new();
+        scalar.render_all(&texts, &config, &mut scalar_output);
+        parallel.render_all(&texts, &config, &mut parallel_output);
+        assert_eq!(parallel_output, scalar_output);
     }
 }

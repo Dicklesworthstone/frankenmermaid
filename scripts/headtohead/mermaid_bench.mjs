@@ -663,6 +663,8 @@ try {
       bundle_url: url,
       bundle_sha256: bundleSha,
       security_level: securityLevel,
+      worker_threads: 1,
+      execution_model: 'single_page_main_thread',
       id: item.id,
       revisions: texts.length,
       input_sha256: sha256(joined),
