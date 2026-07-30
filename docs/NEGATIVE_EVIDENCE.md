@@ -19224,6 +19224,66 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
 
   Agent: cod (BlackThrush)
 
+### AUDIT / NO TRANSFER: A/A null precision defect is absent from the head-to-head gate (2026-07-29)
+
+- **Bead / surface:** `bd-9xqt`; `scripts/headtohead/run.mjs::medianCiGate`.
+- **Structural audit:** the live gate does not require `ci95_lo <= 1.0 <= ci95_hi`. A null is
+  complete when it has sufficient rounds and finite CI/radius fields. Its reported `half_width` is
+  conservatively defined as `max(abs(ci95_lo - 1), abs(ci95_hi - 1))`, and the effect must clear
+  twice the larger engine radius. Tightening a shifted null therefore lowers or preserves this
+  floor; it cannot veto a row merely because its CI becomes precise enough to exclude 1.0. As a
+  direct checked-in historical witness, the eight-thread `ci_batch_500` Rust null in
+  `.benchmarks/headtohead/ci-thread-sweep-v3/summary-ffeab05f-1785311982943.json` is entirely above
+  1.0 (`[1.011306, 1.043851]`), yet the median-CI gate records `pass`.
+- **Same-ELF cross-core reproduction:** the current `flowchart_small_10` fixture has one equivalent,
+  zero divergent, and zero unverified diagrams in
+  `.benchmarks/headtohead/null-gate-audit-equivalence/equivalence-76db6f66-1785384170321.json`
+  (SHA-256 `060a027e49daacc7a498ed1f0bcb08dd77c82e49f3d2284755bfc24ebaadb4bd`). The exact same
+  process-self-reporting ELF
+  `08cca9e1f3c90784fc232a510917c5c684f04ae4ec87cb878521a4cef47aa030`
+  (7,812,640 bytes) then ran once pinned to CPU 12 and once pinned to CPU 13 on `thinkstation1`
+  (32 physical cores / 64 logical threads). Both invocations requested and used one scalar Rust
+  caller; the incumbent reported one requested and actually used main execution thread.
+- **Host provenance:** both runs recorded all 64 cpufreq policies under `amd-pstate-epp`, governor
+  `powersave`, EPP `performance`, and boost enabled. ISA recorded AVX2, FMA, BMI2, and VAES, with no
+  AVX-512. CV remained provenance only.
+- **Core 12 diagnostic:** the effect ratio was `894.484267x`; the Rust null median was `1.005353`
+  with CI `[0.998644, 1.012218]`, and the mermaid-js null median was `1.010074` with CI
+  `[0.988175, 1.044259]`. The cross-runtime median-CI gate passed. The independent Rust pre/post
+  bracket failed at `1.050140x` drift outside its `1.024437x` A/A floor.
+- **Core 13 diagnostic:** the effect ratio was `899.197639x`; the Rust null median was `0.996105`
+  with CI `[0.981931, 1.004399]`, and the mermaid-js null median was `1.008897` with CI
+  `[0.971647, 1.029072]`. The cross-runtime median-CI gate passed. The independent bracket passed
+  at `1.013775x` drift inside its `1.036138x` floor.
+- **Stability and integrity result:** the same-direction effect reproduced within `0.52694%`, well
+  below the transfer's `2.5%` comparison bound, and the audited median-CI verdict remained `pass`
+  on both cores. No median-gate loss became a win: both rows were already accepted by the unchanged
+  null gate. A preliminary pair on the same two cores measured `885.162254x` and `906.727436x`
+  (`2.4363%` spread) and also passed the median gate twice. Across four same-ELF invocations, the
+  audited null verdict was therefore stable `pass` in all four; zero losses were converted to wins.
+  These ratios remain internal diagnostics, not campaign output.
+- **Separate finding:** the Rust pre/post bracket moved `fail` to `pass` even though the incumbent
+  effect was stable. That bracket evaluates observed phase drift, not null-CI straddling, so the
+  primitive-transfer change is not applied to it by analogy. Across the four invocations it failed
+  three times and passed once. `bd-ecjg` owns a quiet-host bracket audit with an effect CI and a
+  loss-only integrity control.
+- **Raw evidence:** core 12 summary SHA-256
+  `90f6906e7ee908eccd840e6e0de6288f8ae80756bbba3e7a70c701d168a82348` and JSONL SHA-256
+  `9b7d4625469dc04d84149a4de94b32564863ce7446ccb98ce69d2973ca9b061d`; core 13 summary
+  SHA-256 `1e320d6782cfc38662b7a574fa51b0a4edf5bff7026fb7c32b8376909e5ed0bd`
+  and JSONL SHA-256 `798c0415ab616f0c5242a4a6b7d2f26d2e3b55d2b9eb17c9b3b7c0ff1acb2e48`.
+  The preliminary core 12 summary/JSONL hashes are
+  `02fed30430674af3edf42b5abd2a56bf0af07a9ec662205fb1fc134d929e72bb` /
+  `595598907d896db8c375b174ae82ec8f2578d9a146f0071e7b1f5cc04affe481`; core 13 is
+  `1ea5b9c7dc28b7569f70f1c246cf71405cca734fe562b925426d3fbe34a22f0e` /
+  `98107e98d754814ce921ed0cf8cf829d57601d351dad7a4a0b3d0a07b84e31f0`.
+- **Decision:** leave `medianCiGate` unchanged, exactly as required for its stable cross-core
+  verdict. Re-open only if a future live median gate depends on CI straddling 1.0, or if the same
+  ELF reproduces the same effect on another core while the median-CI verdict changes. Any future
+  correction must carry a loss-only integrity control and must never turn a prior loss into a win.
+
+  Agent: cod (BlackThrush)
+
 ### REJECT x3 / HARNESS ARTIFACT: 120-service architecture absolute timing and right-skewed probe selection (2026-07-28)
 
 - **Campaign / bead:** Phase 2 realistic whole jobs, `bd-c0bn`; cod /
