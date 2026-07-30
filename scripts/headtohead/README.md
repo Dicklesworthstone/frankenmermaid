@@ -9,15 +9,22 @@ as an incumbent win. Internal frankenmermaid before/after ratios are maintenance
 ## Run it
 
 ```bash
-# 1. normal compile/test validation is strict-remote and never writes a local target
+# 1. normal compile/test validation is strict-remote and never writes a local target.
+#    --base/--clean-overlay pin the transferred tree to a commit plus ONLY the paths you name, so
+#    the rch project hash stops moving every time the other agent in this shared checkout saves a
+#    file. Without it the hash misses the remote target cache and every build is cold.
 df -h /data  # abort and report if available space is below 120G
-RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- \
+RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec \
+  --base "$(git rev-parse HEAD)" --clean-overlay --no-overlay -- \
   cargo test --profile release -p frankenmermaid-cli --example headtohead
 
 # 2. strict-remote release builds retrieve the executable into this repo's existing target/.
 #    Never mint a task-specific target directory and never permit silent local fallback.
+#    Replace --no-overlay with one --overlay-path per file you actually changed.
 df -h /data  # the same 120G floor applies
-RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- \
+RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec \
+  --base "$(git rev-parse HEAD)" --clean-overlay \
+  --overlay-path crates/fm-cli/examples/headtohead.rs -- \
   cargo build --profile release -p frankenmermaid-cli --example headtohead
 
 # 3. run both engines over byte-identical inputs
@@ -57,6 +64,48 @@ equivalence verdict; the admission is stamped on the summary and on every affect
 Set `FM_CHROMIUM_BIN=/absolute/path/to/chrome` when the pinned Chromium path is not available on the
 benchmark host. The override must be executable; every incumbent row records the selected path and
 the browser-reported version.
+
+### Building without paying a cold build every time
+
+`cc` and `cod` share one checkout. rch folds working-tree state into its project hash, so every save
+by either agent moves the hash, misses the remote target cache, and buys a full cold build. Pinning a
+worker does not help — the cache *key* moved. `--base <sha> --clean-overlay` transfers that commit
+plus only the paths you name, making the tree a deterministic function of (base, overlay paths,
+contents) and immune to the other agent's churn.
+
+Two traps, both specific to a benchmark repo:
+
+- **`--clean-overlay` EXCLUDES your uncommitted edits unless you list them.** For a perf harness this
+  is worse than a cold build: it silently produces a binary that does not contain your change, and
+  you measure the baseline twice. The defence is already here — the runner self-reports the ELF
+  SHA-256 of the process that executed (see "Which binary produced the numbers"). After a build that
+  should have changed the binary, check that `env.fm_elf_sha256` actually moved. If it did not, your
+  overlay list was incomplete.
+- **Do not auto-derive the overlay list from `git diff --name-only`.** In a shared checkout that list
+  contains the *other* agent's modifications too, which re-imports exactly the churn you are
+  excluding. Enumerate the paths you changed, by name, and keep the list minimal.
+
+**Local builds are frozen while `/data` free space is below 150G**, and this repo needs ≥120G on top
+of that because a strict-remote build *retrieves* the executable into the local `target/`. Check `df`
+before either. `force_local = true` stays banned as an rch config setting — it silently redirects
+every future build.
+
+Two fleet-wide notes do **not** apply here, verified rather than assumed:
+
+- rch's "no artifact retrieval" limitation is not our situation. A strict-remote build logs
+  `Custom CARGO_TARGET_DIR artifacts retrieved` and writes `target/release/examples/headtohead`
+  locally, which is the binary every harness invocation in this README runs. No `scp` out of the
+  worker's `.rch-target-<worker>-pool-*` directory is needed.
+- There is **no `release-perf` profile** in this workspace. The harness builds and measures
+  `--profile release` (workspace `opt-level="z"` with `opt-level=3` overrides on fm-core, fm-parser,
+  fm-layout and fm-render-svg), which is what every number here claims. Nothing is mislabeled.
+
+Worker-built binaries are safe to time on this host, but note the fleet inventory that established
+that missed us: `.cargo/config.toml` pins `-C target-cpu=x86-64-v2` on x86_64. That is a portable
+~2009 baseline, not `native`, so a worker-built binary's ISA is a floor rather than a fingerprint of
+the builder. A worker on a different architecture would produce a binary that fails to execute here
+outright rather than mismeasuring quietly. Record the building worker's identity next to the ELF
+SHA-256 regardless: a binary of unknown origin is not evidence.
 
 Exit codes: `0` green · `1` an engine errored · `2` invalid arguments or missing mandatory
 environment provenance · `3` corpus drift · `4` median-CI gate failed ·
@@ -278,25 +327,13 @@ threads inside each small render regresses, while a CI job supplies hundreds of 
 diagrams over which one pool can amortize startup. Rayon keeps the caller-concurrency mechanism
 portable across x86-64 and aarch64; the harness contains no x86-specific intrinsics.
 
-**Certified Threadripper sweep.** On the 32-core / 64-thread AMD Ryzen Threadripper PRO 5975WX,
-artifact `.benchmarks/headtohead/ci-thread-sweep-v3/summary-ffeab05f-1785311982943.json` passed all
-seven median-CI and same-ELF bracket gates. The 500-diagram job measured 21.441246 ms at one thread
-and 1.132857 ms at 64 threads (18.926701× caller scaling), versus 18,490.000 ms for mermaid-js's
-single-page main-thread API in the same invocation: 862.356600× and 16,321.565740× respectively.
-The process self-reported ELF SHA-256
-`600cd6b79113f01de7526df5a029b7ce5d57d4f06fb1d3772412fb29097bdcf7`; scalar/pooled SVG identity
-passed in both brackets, and every integrated Rust sample exceeded the 50 ms floor.
-
-⚠️ **Those ratios predate the output-equivalence gate and do not carry a content verdict.** The gate
-was run on the same 500-diagram job afterwards
-(`.benchmarks/headtohead/equivalence/equivalence-6bad5768-1785378993496.json`): **400 of 500 diagrams
-are equivalent, 100 are divergent, 0 unverified.** The 100 divergent diagrams are the entire `class`
-family — we render the class name but drop every field and method that mermaid renders (`bd-4isi`).
-flowchart, sequence, state and ER are 100/100 equivalent, with geometric topology decided on all 300
-flowchart/state/ER diagrams. So for 20 % of this job the ratio compares mermaid's full render against
-our partial one, and the whole-job number is not a like-for-like claim until `bd-4isi` is fixed. It is
-reported here rather than withdrawn because the curve's *shape* — caller scaling against a
-single-threaded incumbent — does not depend on the class family, but the headline multiple does.
+**Current CI-batch status.** No competitive ratio is certified for `ci_batch_500`. The exact
+structural-equivalence artifact
+`.benchmarks/headtohead/equivalence/equivalence-6bad5768-1785378993496.json` reports 400 equivalent,
+100 divergent, and 0 unverified diagrams. Every divergent diagram is in the `class` family:
+frankenmermaid renders the class name but omits fields and methods that mermaid-js renders
+(`bd-4isi`). The other four families pass this corpus's content gate, with geometric topology
+decided for all 300 flowchart, state, and ER diagrams.
 
 Recorded thread widths are **requested**; that artifact predates the observed-worker probe. Requested
 and observed were separately confirmed equal for 1, 8, 32 and 64 on `doc_build_40` with
@@ -324,10 +361,11 @@ tier covers three additional classes:
 | **EDIT** | `edit_trace_200x200`, `edit_trace_500x1000` | Live-preview sessions of 201 and 1,001 successive full documents, rather than a 21-edit sketch. |
 | **DOC_BUILD / CI** | `doc_build_40`, `ci_batch_500` | A docs page and a repository-scale CI job: 40 and 500 diagrams across five syntax families, each timed as one batch. |
 
-The 5,000- and 10,000-entity ER endpoints are certified `RangeError`/`CANNOT` rows. The
-201-revision trace and 500-diagram CI batch have certified ratios. The 1,001-revision trace is a
-measured `DNF-timeout`: frankenmermaid completes the job, while mermaid-js remains working at the
-600-second deadline. Every input remains deterministic and SHA-256-pinned in `pins.json`.
+The 5,000- and 10,000-entity ER endpoints are `RangeError`/`CANNOT` rows. The 500-diagram CI batch
+is blocked by its failed output-equivalence verdict. The 1,001-revision trace is a measured
+`DNF-timeout`: frankenmermaid completes the job, while mermaid-js remains working at the 600-second
+deadline. Every input remains deterministic and SHA-256-pinned in `pins.json`; a numeric
+competitive result additionally requires a passing exact-corpus output verdict.
 
 `architecture` uses `subgraph`, which is a different layout problem from the flat generators: the
 cluster boundaries constrain placement and force the router around obstacles the flat shapes never
@@ -349,11 +387,12 @@ One sample is the complete named job: source strings in, parse + layout + render
 strings out. Corpus generation and the caller's final file copy are outside both engines' timers;
 the library work and output serialization that differ between the implementations are inside.
 
-Certified artifacts are under `.benchmarks/headtohead/realistic-*`. The 50- and 200-diagram
-documentation jobs measure 434.107779× and 534.368778×; the 60-keystroke session measures
-1,193.149598×; and the 25-schema catalog measures 412.825519×. Both monorepo maps pass
-`mermaid.parse()` but fail in `mermaid.render()` with `TypeError: Cannot set properties of
-undefined (setting 'order')`; they are `CANNOT`, carry no ratio, and stay outside aggregates.
+Artifacts are under `.benchmarks/headtohead/realistic-*`. The documentation jobs contain class
+diagrams and therefore remain nonnumeric until `bd-4isi` is fixed and their exact output verdicts
+pass. Other previously timed rows likewise require exact-corpus equivalence before publication.
+Both monorepo maps pass `mermaid.parse()` but fail in `mermaid.render()` with
+`TypeError: Cannot set properties of undefined (setting 'order')`; they are `CANNOT` and carry no
+ratio.
 
 ### Did not finish
 
@@ -387,6 +426,11 @@ stdout record; `run.mjs` copies it into the summary's environment fingerprint an
 it is a lowercase 64-hex digest with a positive ELF byte count. A hash computed by a shell step
 *next to* the run proves nothing about which ELF actually executed — `rch` compiles into an opaque
 per-worker pool target dir, and agents have edited crates mid-benchmark in this fleet.
+
+This is also the only check that catches an incomplete `--clean-overlay` overlay list: that build mode
+deliberately excludes uncommitted edits it was not told about, so it can hand you a binary without
+your change in it. The self-reported hash moving (or not) is the evidence. It does **not** yet record
+*which worker* compiled the binary; add that alongside it when a worker-built artifact is timed here.
 
 ### Edit traces
 
