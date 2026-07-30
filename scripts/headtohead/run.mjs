@@ -1091,6 +1091,13 @@ function positiveIntList(raw) {
 
 const threadSweep = positiveIntList(arg('thread-sweep'));
 const exclusiveHostClaim = arg('exclusive-host-claim');
+// A speedup over a render that dropped content is not a speedup. Every measured row must be backed
+// by a passing cross-engine equivalence verdict (see equivalence.mjs) produced from the SAME input,
+// the SAME Rust ELF and the SAME mermaid bundle. `--allow-unverified-output` still permits a run --
+// performance work on a known content gap is legitimate -- but it is recorded in the artifact and
+// stamped on every affected row, so no number can later be quoted without its admission.
+const allowUnverifiedOutput = has('allow-unverified-output');
+const equivalenceDir = arg('equivalence-dir', join(REPO, '.benchmarks', 'headtohead', 'equivalence'));
 if (threadSweep.length > 0) {
   if (items.length !== 1) {
     console.error('[run] --thread-sweep requires --only to select exactly one corpus item');
@@ -1454,6 +1461,68 @@ function armAsymmetry() {
     gate: 'never',
     rule: 'global phase CPU busy is provenance; numeric gate uses bracketed Rust A/A',
   };
+}
+
+// ---------------------------------------------------------------- output equivalence
+
+/**
+ * Newest equivalence artifact that actually applies to this item, or a reason it does not.
+ *
+ * "Applies" is deliberately strict on all three things that can move rendered content: the input
+ * bytes, the Rust ELF that rendered them, and the mermaid bundle it was compared against. A stale
+ * artifact from a different binary is worse than none, because it reads as verification.
+ */
+function findEquivalenceVerdict(id, inputSha, elfSha, bundleSha) {
+  let names;
+  try {
+    names = readdirSync(equivalenceDir).filter((n) => n.startsWith('equivalence-') && n.endsWith('.json'));
+  } catch {
+    return { status: 'no_artifact_directory', directory: equivalenceDir };
+  }
+  // Newest first by the embedded timestamp, NOT by filename: the name is
+  // `equivalence-<gitrev>-<ts>.json`, so a plain sort orders by git hash, which is meaningless.
+  const byNewest = names
+    .map((name) => ({ name, ts: Number(/-(\d+)\.json$/.exec(name)?.[1] ?? 0) }))
+    .sort((a, b) => b.ts - a.ts)
+    .map((entry) => entry.name);
+  const candidates = [];
+  for (const name of byNewest) {
+    let artifact;
+    try {
+      artifact = JSON.parse(readFileSync(join(equivalenceDir, name), 'utf8'));
+    } catch {
+      continue;
+    }
+    const row = (artifact.rows ?? []).find((r) => r.id === id);
+    if (!row) continue;
+    const mismatch = [];
+    if (row.input_sha256 !== inputSha) mismatch.push('input_sha256');
+    if (elfSha && artifact.provenance?.fm_elf_sha256 !== elfSha) mismatch.push('fm_elf_sha256');
+    if (bundleSha && artifact.pins?.bundle_sha256 !== bundleSha) mismatch.push('mermaid_bundle_sha256');
+    if (mismatch.length > 0) {
+      candidates.push({ artifact: name, mismatch });
+      continue;
+    }
+    if (row.status !== 'compared') {
+      return { status: 'not_comparable', artifact: name, reason: row.status, note: row.note ?? null };
+    }
+    const e = row.equivalence;
+    return {
+      status: e.verdict === 'pass' ? 'verified' : 'divergent',
+      artifact: name,
+      method: e.method,
+      claim: e.claim,
+      diagrams: e.diagrams,
+      equivalent: e.equivalent,
+      divergent: e.divergent,
+      unverified: e.unverified,
+      by_family: e.by_family,
+      divergent_families: Object.entries(e.by_family)
+        .filter(([, v]) => v.divergent > 0 || v.unverified > 0)
+        .map(([f, v]) => `${f}:${v.divergent}divergent/${v.unverified}unverified/${v.diagrams}`),
+    };
+  }
+  return { status: 'no_matching_artifact', directory: equivalenceDir, rejected: candidates.slice(0, 4) };
 }
 
 // ---------------------------------------------------------------- join + gate
@@ -1853,6 +1922,24 @@ if (threadSweep.length > 0) {
 
 const ok = rows.filter((r) => r.status === 'ok');
 const dnf = rows.filter((r) => r.status === 'comparator_dnf');
+
+// Attach the cross-engine content verdict to every measured row. A DNF row is exempt: mermaid
+// produced nothing to compare against, which is already reported as a bound rather than a ratio.
+const elfShaForEquivalence = /^[0-9a-f]{64}$/.test(String(env.fm_elf_sha256)) ? env.fm_elf_sha256 : null;
+for (const row of ok) {
+  const verdict = findEquivalenceVerdict(
+    row.id,
+    corpus.get(row.id)?.sha256,
+    elfShaForEquivalence,
+    PINS.mermaid.sha256,
+  );
+  row.output_equivalence = verdict;
+  row.content_verified = verdict.status === 'verified';
+  if (!row.content_verified) row.content_unverified_admitted = allowUnverifiedOutput;
+}
+const equivalenceFailures = ok
+  .filter((r) => !r.content_verified)
+  .map((r) => `${threadSweep.length > 0 ? `${r.id}@t${r.fm_worker_threads}` : r.id}:${r.output_equivalence.status}`);
 const speedups = ok.map((r) => r.speedup);
 const speedupsMin = ok.map((r) => r.speedup_min);
 const rowLabel = (row) =>
@@ -1885,6 +1972,23 @@ const summary = {
     id: r.id, budget_ms: r.mjs_budget_ms, phase: r.mjs_dnf_phase,
     fm_p50_ns: r.fm_p50_ns, speedup_lower_bound: r.speedup_lower_bound, error: r.error,
   })),
+  // A ratio is a claim about two renders of the same diagram. This gate is what makes that true.
+  output_equivalence_gate: {
+    verdict: equivalenceFailures.length === 0
+      ? 'pass'
+      : (allowUnverifiedOutput ? 'admitted_unverified' : 'fail'),
+    rule: 'every measured row needs a passing cross-engine equivalence verdict from the same input, '
+      + 'Rust ELF and mermaid bundle (scripts/headtohead/equivalence.mjs)',
+    method: 'svg_structural (rendered-text token containment + geometrically reconstructed edge '
+      + 'topology); not byte equality, not a rasterized perceptual diff',
+    allow_unverified_output: allowUnverifiedOutput,
+    failures: equivalenceFailures,
+    // Spelled out so a row produced under the override cannot be quoted as verified.
+    caveat: equivalenceFailures.length > 0 && allowUnverifiedOutput
+      ? 'these rows compare renders that are NOT known to carry the same content; the ratio is a '
+        + 'performance observation, not a like-for-like speedup claim'
+      : null,
+  },
   median_ci_gate_rule: 'claim magnitude >= max(1.01, 1 + 2 * max(per-engine A/A CI radius))',
   measurement_order: measurementOrder,
   fm_bracket_gate_rule: 'Rust pre/post drift magnitude <= max(1.01, 1 + 2 * Rust A/A CI radius)',
@@ -2075,6 +2179,22 @@ if (leanSlow.length) {
   const worst = leanSlow.reduce((a, b) => (b.lean_slowdown > a.lean_slowdown ? b : a));
   console.log(`note: the lean output profile is smaller but SLOWER on ${leanSlow.length}/${ok.length} items (worst ${worst.id}: ${worst.lean_slowdown.toFixed(2)}x) -- A11yConfig::none() falls off the streaming fast path.`);
 }
+const equivGate = summary.output_equivalence_gate;
+if (equivGate.verdict !== 'pass') {
+  console.log('');
+  console.log(`OUTPUT EQUIVALENCE GATE ${equivGate.verdict === 'fail' ? 'FAIL' : 'ADMITTED UNVERIFIED'}: `
+    + `${equivGate.failures.join(', ')}`);
+  for (const r of ok.filter((row) => !row.content_verified)) {
+    const e = r.output_equivalence;
+    if (e.status === 'divergent') {
+      console.log(`  ${r.id}: ${e.equivalent}/${e.diagrams} diagrams equivalent; `
+        + `divergent/unverified families: ${e.divergent_families.join(', ')}`);
+    } else {
+      console.log(`  ${r.id}: ${e.status}${e.reason ? ` (${e.reason})` : ''} -- run scripts/headtohead/equivalence.mjs`);
+    }
+  }
+  console.log('  a ratio between renders of different content is not a like-for-like speedup.');
+}
 if (summary.median_ci_gate_failures.length) {
   console.log(`MEDIAN-CI GATE FAIL: ${summary.median_ci_gate_failures.join(', ')}`);
 }
@@ -2095,3 +2215,6 @@ if (hardFail || fmBefore.code !== 0 || mjs.code !== 0 || fmAfter.code !== 0) {
 }
 if (summary.median_ci_gate_failures.length) process.exit(4);
 if (summary.fm_bracket_gate_failures.length) process.exit(5);
+// Last, so a run that is both slow-verified and content-divergent still reports the statistical
+// gates first; content divergence is the more fundamental problem but the least ambiguous to fix.
+if (equivGate.verdict === 'fail') process.exit(7);

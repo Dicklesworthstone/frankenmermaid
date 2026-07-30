@@ -831,6 +831,21 @@ fn main() {
                 format!("{dir}/{}.lean.svg", item.id),
                 last(&profile_run.arm_b_reference),
             );
+            // Cross-engine equivalence (`bd-evx6`) needs EVERY revision, not just the last: a
+            // 500-diagram CI batch is one item whose revisions are the 500 diagrams, and checking
+            // only the last would leave 499 unverified. Default profile only -- that is the arm
+            // compared against mermaid; `lean` is an internal self-speedup.
+            //
+            // `output_sha256` below is the hash of these same bytes concatenated, so the checker can
+            // prove the SVGs it inspected are the ones the timed rounds produced.
+            if std::env::var_os("FM_H2H_DUMP_ALL").is_some() {
+                for (revision, svg) in profile_run.arm_a_reference.iter().enumerate() {
+                    let _ = std::fs::write(
+                        format!("{dir}/{}.rev{revision:05}.default.svg", item.id),
+                        svg,
+                    );
+                }
+            }
         }
 
         let default_sha256 = sha256_hex(profile_run.arm_a_reference.concat().as_bytes());

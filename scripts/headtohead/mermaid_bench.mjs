@@ -532,7 +532,15 @@ const securityLevel = arg('security-level', PINS.mermaid.security_level);
 // Writes each item's final SVG to <dir>/<id>.mermaid.svg. Used to settle output-contract questions
 // ("does mermaid emit per-element role/tabindex/<title>?") against the real comparator output.
 const dumpSvgDir = arg('dump-svg');
+// `--dump-svg` alone keeps its original one-file-per-item behaviour (settling output-contract
+// questions). `--dump-all-revisions` additionally writes every revision, which is what the
+// cross-engine equivalence phase needs for a multi-diagram job.
+const dumpAllRevisions = has('dump-all-revisions');
 if (dumpSvgDir) mkdirSync(dumpSvgDir, { recursive: true });
+if (dumpAllRevisions && !dumpSvgDir) {
+  log('--dump-all-revisions requires --dump-svg <dir>');
+  process.exit(2);
+}
 
 const { text: bundleText, version, url, sha256: bundleSha } = await bundle();
 
@@ -872,7 +880,18 @@ try {
     const ms = stats(out.times);
     const nullStats = nullControl(out.nullRatios, out.nullChecksumBytes);
     const outputBytes = out.svgs.reduce((a, s) => a + s.length, 0);
-    if (dumpSvgDir) writeFileSync(join(dumpSvgDir, `${item.id}.mermaid.svg`), out.svgs[out.svgs.length - 1]);
+    if (dumpSvgDir) {
+      writeFileSync(join(dumpSvgDir, `${item.id}.mermaid.svg`), out.svgs[out.svgs.length - 1]);
+      // Cross-engine equivalence (`bd-evx6`) compares every diagram in the job, not just the
+      // last one. A 500-diagram CI batch is a single item with 500 revisions, so the per-revision
+      // dump is what makes the check cover the whole batch. `output_sha256` below hashes these same
+      // bytes joined, which lets the checker prove it read the measured render.
+      if (dumpAllRevisions) {
+        for (const [revision, svg] of out.svgs.entries()) {
+          writeFileSync(join(dumpSvgDir, `${item.id}.rev${String(revision).padStart(5, '0')}.mermaid.svg`), svg);
+        }
+      }
+    }
     console.log(JSON.stringify({
       ...record,
       status: 'ok',

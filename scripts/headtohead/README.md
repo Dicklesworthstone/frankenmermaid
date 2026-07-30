@@ -30,6 +30,12 @@ node scripts/headtohead/run.mjs \
   --only edit_trace_200x200 \
   --js-budget-scale 20
 
+# 4. cross-engine output equivalence. Required before any ratio for that item can be certified:
+#    run.mjs exits 7 unless a matching passing verdict exists for every measured row.
+node scripts/headtohead/equivalence.mjs \
+  --fm-bin target/release/examples/headtohead \
+  --only ci_batch_500
+
 # CI-scale caller concurrency must run under the exclusive trj booking, not on an rch worker.
 : "${TRJ_CLAIM_MESSAGE_ID:?set this to the Agent Mail CLAIM message id}"
 node scripts/headtohead/run.mjs \
@@ -44,7 +50,9 @@ Useful flags: `--only <corpus_id>[,<corpus_id>…]`, `--reps-scale 0.25` (fast s
 `--js-budget-scale 0.1` (shrink the mermaid wall budgets for a smoke run), `--skip-mermaid`,
 `--thread-sweep 1,2,4,8,16,32,64,96,128`,
 `--exclusive-host-claim trj-booking:<claim-message-id>`, `--pin-cpu auto|N|off`,
-`--out <dir>`, `--update-pins`.
+`--out <dir>`, `--update-pins`, `--allow-unverified-output` (permit a run whose rows have no passing
+equivalence verdict; the admission is stamped on the summary and on every affected row),
+`--equivalence-dir <dir>`.
 
 Set `FM_CHROMIUM_BIN=/absolute/path/to/chrome` when the pinned Chromium path is not available on the
 benchmark host. The override must be executable; every incumbent row records the selected path and
@@ -53,7 +61,8 @@ the browser-reported version.
 Exit codes: `0` green · `1` an engine errored · `2` invalid arguments or missing mandatory
 environment provenance · `3` corpus drift · `4` median-CI gate failed ·
 `5` the bracketed Rust observations drifted outside their A/A median-CI floor · `6` host-wide
-benchmark exclusivity was not clear immediately before a measured sweep phase.
+benchmark exclusivity was not clear immediately before a measured sweep phase · `7` a measured row
+has no passing cross-engine output-equivalence verdict (see "Output equivalence" below).
 A comparator **DNF** is not an error and does not fail the run — see "Did not finish" below.
 
 A gate failure (`4` or `5`) is **inconclusive**, not a regression. Re-run in an assigned quiet
@@ -96,6 +105,66 @@ Choices that deliberately understate our margin:
 
 A mermaid render that throws, or that returns mermaid's "Syntax error" placeholder SVG, is reported
 as `status: "error"` and fails the whole run. A comparator that cannot render is never a silent win.
+
+## Output equivalence (`bd-evx6`)
+
+A renderer that drops an edge or a class member is faster and wrong. Until this phase existed the
+harness proved only that both engines *consumed byte-identical input* and that each was
+*self-deterministic* — never that the two rendered the same diagram. Every ratio was therefore a
+comparison of two possibly-different outputs.
+
+```bash
+node scripts/headtohead/equivalence.mjs \
+  --fm-bin target/release/examples/headtohead \
+  --only ci_batch_500
+```
+
+Exit `0` all equivalent · `7` the gate failed · `1` an engine errored or the dump/hash linkage broke.
+`run.mjs` refuses to certify a measured row without a matching passing verdict and exits `7`;
+`--allow-unverified-output` still permits the run but stamps
+`output_equivalence_gate.verdict: "admitted_unverified"` on the summary and
+`content_verified: false` on every affected row, so no number can be quoted without its admission.
+
+**What is compared, and what is not.** Not byte equality: the engines emit deliberately different
+SVG (mermaid carries labels in `<foreignObject>` HTML, we emit `<text>`; different class
+vocabularies; different layout engines). Not a rasterized perceptual diff either — different fonts,
+paddings and stroke widths would make a pixel diff report a large distance between two *correct*
+renders, so it would measure styling, not content. What is compared is engine-neutral structural
+content, extracted from both engines by **one shared extractor** (`svg_equivalence.mjs`); a
+per-engine extractor pair can drift into agreeing by construction.
+
+| Tier | Scope | Invariant |
+|---|---|---|
+| 1 | every syntax family | **Rendered-text token multiset, containment-gated.** Every text run — `<text>`, `<tspan>`, and the HTML inside a `<foreignObject>` — reduces to one carrier-agnostic leaf scan, then to tokens. Gate: every token mermaid renders must be present in ours. |
+| 2 | flowchart, state (opportunistically ER) | **Edge topology, reconstructed geometrically.** Each edge path's first/last point resolved to the nearest node anchor, giving a derived `src>dst` multiset — compared cross-engine *and* against input-derived ground truth. |
+
+Three deliberate asymmetries, each stated because each weakens or strengthens the claim:
+
+- **The text gate is one-directional.** It fails on content *we* are missing, not on content we add:
+  we render ER relationship cardinalities (`0..*`, `1`) that 11.15.0 omits, which is a feature
+  difference, not a defect. The symmetric difference is still recorded as provenance.
+- **Topology is geometric, not declared.** mermaid records endpoints in `data-id="L_<src>_<dst>_<n>"`;
+  we emit only a positional `fm-edge-<i>`. Adding endpoint attributes to our output would invalidate
+  every pinned checksum and change the artifact being measured, so topology is reconstructed for both
+  sides by the same code instead. Checking it against the input as well as against mermaid makes it
+  engine-vs-**spec**: it cannot be satisfied by both renderers being wrong the same way.
+- **Undecidable is not a pass.** Displacing a node far from its edges does not produce a *wrong*
+  topology, it produces an ambiguous one — every endpoint resolution becomes a coin flip. Collapsing
+  that into "equivalent" would let a renderer evade the gate by degrading its own geometry, so a
+  family that claims Tier 2 and cannot have it decided is reported `unverified`, and `unverified`
+  fails the gate.
+
+**The dumps are provably the measured bytes.** Writing 500 SVGs inside the timed region would measure
+the harness's file I/O, so this phase is untimed and separate. To keep it from becoming "we checked
+*some* render", the concatenation of the dumped revisions must hash to the same `output_sha256` the
+engine reported for its timed rounds; combined with each engine's existing determinism gate, that
+makes the inspected bytes the measured bytes. A mismatch is a hard failure, not a warning.
+
+**The gate has been watched to fail.** `node scripts/headtohead/svg_equivalence.mjs --self-test`
+runs 20 cases including four **mutation controls** — dropped label, dropped edge, rewired edge (same
+count, different endpoints, which a count-only check would pass), displaced node — and two negative
+controls (extra content, differing text segmentation). A gate that has never been observed to fail is
+not evidence.
 
 ## Measurement methodology
 
@@ -218,6 +287,24 @@ The process self-reported ELF SHA-256
 `600cd6b79113f01de7526df5a029b7ce5d57d4f06fb1d3772412fb29097bdcf7`; scalar/pooled SVG identity
 passed in both brackets, and every integrated Rust sample exceeded the 50 ms floor.
 
+⚠️ **Those ratios predate the output-equivalence gate and do not carry a content verdict.** The gate
+was run on the same 500-diagram job afterwards
+(`.benchmarks/headtohead/equivalence/equivalence-6bad5768-1785378993496.json`): **400 of 500 diagrams
+are equivalent, 100 are divergent, 0 unverified.** The 100 divergent diagrams are the entire `class`
+family — we render the class name but drop every field and method that mermaid renders (`bd-4isi`).
+flowchart, sequence, state and ER are 100/100 equivalent, with geometric topology decided on all 300
+flowchart/state/ER diagrams. So for 20 % of this job the ratio compares mermaid's full render against
+our partial one, and the whole-job number is not a like-for-like claim until `bd-4isi` is fixed. It is
+reported here rather than withdrawn because the curve's *shape* — caller scaling against a
+single-threaded incumbent — does not depend on the class family, but the headline multiple does.
+
+Recorded thread widths are **requested**; that artifact predates the observed-worker probe. Requested
+and observed were separately confirmed equal for 1, 8, 32 and 64 on `doc_build_40` with
+`FM_H2H_THREAD_PROBE=1`. A **128 arm is not measurable on a 64-thread host**: the runner refuses
+`FM_H2H_THREADS=128` with `exceeds available_parallelism=64`, because observed workers could never
+exceed 64 and the row would be the 64 row under a misleading label. Measuring 128 needs a
+≥128-thread host, or an explicit oversubscription opt-in that does not exist yet.
+
 ## Corpus
 
 33 items in three tiers.
@@ -324,4 +411,12 @@ incremental-layout path is a separate lever (`bd-1buv.3`) and is not exercised h
 `.benchmarks/headtohead/summary-<rev>-<ts>.json` — env fingerprint, pins, joined rows, ratios, gate.
 
 Both use schema `frankenmermaid.headtohead.v2`; every ratio row carries per-engine null controls, a
-`median_ci_gate` verdict, and a same-ELF Rust-before/Rust-after bracket verdict.
+`median_ci_gate` verdict, a same-ELF Rust-before/Rust-after bracket verdict, and an
+`output_equivalence` verdict plus `content_verified` flag.
+
+`.benchmarks/headtohead/equivalence/equivalence-<rev>-<ts>.json` — schema
+`frankenmermaid.headtohead.equivalence.v1`. Carries host identity, the executing Rust ELF SHA-256, the
+loaded mermaid bundle SHA-256, the dump↔measured-render hash linkage, a per-family breakdown, and the
+full check detail for every divergent diagram. `run.mjs` matches an artifact to a row on all three of
+input SHA-256, ELF SHA-256 and bundle SHA-256 — a stale artifact from a different binary is worse than
+none, because it reads as verification.
