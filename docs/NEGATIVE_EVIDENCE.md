@@ -19382,3 +19382,59 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   unbatched displayed ratios.
 
   Agent: cod (YellowSwan)
+
+### INCONCLUSIVE WIDTHS: equivalence-clean 512-diagram CI sweep t32/t128 null bias (2026-07-30)
+
+- **Bead / surface:** `bd-zwg6`; `ci_equiv_512` whole-job caller concurrency. This section retains
+  rejected rows from the same invocation whose t1, t8, and t64 rows are certified separately in
+  `docs/PERF_LEDGER.md`.
+- **No unequal-work escape hatch.** Both engines received 512 byte-identical flowcharts
+  (`228414f81bb6e73135bcc5244cb93503237f670bfa327b5da9310e6d777904aa`), totaling 10,635 nodes
+  and 10,123 edges. The linked SVG structural artifact decided all 512 diagrams: 512 equivalent,
+  zero divergent, zero unverified. Rendered text, node sets, cross-engine edge topology, and both
+  engines against input truth all passed. Five mutation controls prove that dropped or rewired
+  content fails.
+- **A/A null control (same invocation):** pinned mermaid-js 11.15.0 used 20 balanced, fresh-browser
+  A/A pairs and measured median 1.009424, CI [0.994537, 1.018283]. Every Rust-before and
+  Rust-after width used `n=20`. CV and MAD were provenance only.
+- **t32 rejected.** Requested and operation-observed callers were both 32. Whole-job Rust median
+  was 1.683505 ms versus mermaid-js 24,351.600 ms; the raw effect was 14,464.821904× with
+  bootstrap 95% CI [14,029.697310×, 15,648.501123×]. The effect CI excludes 1.0 and the
+  same-ELF bracket passed, but the Rust-before A/A median was **1.025448**, 2.545% from 1.0.
+  Corrected clause 3 therefore rejects the row.
+- **t128 rejected.** Requested and observed callers were both 128, explicitly oversubscribed on
+  64 logical threads. Whole-job Rust median was 3.440187 ms; the raw effect was 7,078.568694×
+  with CI [6,654.366489×, 7,427.614224×]. Its Rust-before/after null medians were
+  **0.964308 / 0.968836**, both outside 2%. The same-ELF bracket passed, but corrected clause 3
+  rejects the row.
+- **Precision retry did not loosen the gate.** An earlier complete invocation,
+  `.benchmarks/headtohead/ci-equiv-512-sweep/summary-f8040744-1785426843884.json`, measured the
+  same-direction curve but its ten-pair incumbent null median was 0.972663, 2.734% from 1.0, so
+  all five rows were rejected. The terminal retry predeclared 20 balanced incumbent A/A pairs
+  while leaving the input, nine effect samples, ELF, incumbent, and corrected verdict rule
+  unchanged. It released three decidable wins and left the two bad Rust nulls rejected; no
+  performance loss became a win.
+- **Primitive-transfer integrity check.** The required frankenlibc reference correction made all
+  seven `wordexp` rows decidable and all seven remained losses. Frankenmermaid's same-ELF,
+  cross-core audit instead found its live verdict stable, so its non-straddle gate was left
+  unchanged. This retry changed sampling precision, not the verdict rule; it neither recast nor
+  released a prior loss as a win.
+- **Executing ELF SHA-256 (self-reported by process):**
+  `c410a84698acd943dc6d5eb134c119e3239414f9446cfcb702a970620f048d7d`
+  (7,814,880 bytes) in every Rust phase.
+- **Host provenance:** `thinkstation1`, AMD Ryzen Threadripper PRO 5975WX, 32 physical cores /
+  64 logical threads, `amd-pstate-epp`, governor `powersave`, EPP `performance`, boost enabled;
+  x86-64 with AVX2/FMA/BMI2/VAES and no AVX-512. All eleven terminal phases obtained a clear
+  full-host admission under `trj-booking:6933`.
+- **Evidence:** terminal summary
+  `.benchmarks/headtohead/ci-equiv-512-sweep/summary-f8040744-1785428462046.json`
+  (SHA-256 `90eee0dede0e964c80bc41104b93bf855281a812a4128df49f61581a8dae39d2`)
+  and JSONL (SHA-256
+  `563fe621fab938b40464f25a17c7259af69552558fefc1ad736c25e8b5570dd5`).
+- **Concrete retry predicate:** do not rerun this unchanged t32/t128 vein merely to hunt a favorable
+  null. Reopen a width only after a dedicated-host or execution-model change plausibly removes
+  the repeated arm-order bias, or after the input pin, equivalence contract, incumbent artifact,
+  executing ELF, timer floor, corrected gate, or host topology changes. A retry still requires
+  every null median within 2%; never widen that bound.
+
+  Agent: cod (BlackThrush)

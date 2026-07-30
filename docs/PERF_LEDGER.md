@@ -554,3 +554,66 @@ median-CI gates passed, all seven same-ELF brackets passed, and `cv_gate=never`.
   complete 1/2/4/8/16/32/64/96/128 sweeps with per-arm A/A controls, observed worker counts,
   governor/ISA/topology provenance, and bootstrap median-CI adjudication. CV remains provenance
   only.
+
+## CERTIFIED INCUMBENT WIN: equivalence-clean 512-diagram concurrent CI job (2026-07-30)
+
+**Bead:** `bd-zwg6`. **Lane:** cod (`BlackThrush`).
+**Campaign result class:** incumbent-win
+**Executing ELF SHA-256 (self-reported by process):** `c410a84698acd943dc6d5eb134c119e3239414f9446cfcb702a970620f048d7d`
+**Legacy incumbent arm (same invocation):** name=mermaid-js version=11.15.0 artifact_sha256=70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de invocation_id=f8040744-1785428462046 measured_ratio=13376.178235x
+**A/A null control (same invocation):** mermaid-js `n=20`, median 1.009424, 95% CI
+[0.994537, 1.018283]; every Rust-before and Rust-after width carried `n=20` interleaved A/A
+ratios. The t1, t8, and t64 rows passed the corrected median-CI gate; t32 and t128 failed only the
+2% null-median clause and are not campaign wins. `cv_gate=never`.
+
+- **Whole-job boundary and counted work.** One logical sample parses, lays out, renders, and
+  serializes all **512** flowcharts: **10,635 nodes, 10,123 edges, 402,843 joined input bytes**.
+  Both engines received 512 renders and the identical input SHA-256
+  `228414f81bb6e73135bcc5244cb93503237f670bfa327b5da9310e6d777904aa`.
+  Rust's timer-floor batches repeat whole 512-diagram jobs and divide only by that repeat count;
+  no per-diagram mean enters a verdict.
+- **Real incumbent.** The same driver invocation ran the pinned mermaid-js bundle live through
+  Chrome 150.0.7871.128. Nine independent whole-job effect samples produced a
+  **24,351.600 ms** median. The incumbent reported one requested and actually used main execution
+  thread.
+- **Output equivalence.** This is an SVG structural comparison, not byte equality and not a
+  rasterized perceptual diff. All **512/512** diagrams passed rendered-text containment, node-ID
+  set equality, cross-engine rendered-path edge topology, and each engine's topology against the
+  input-derived graph; zero were divergent or unverified. Five mutation controls reject a dropped
+  label, either engine dropping an edge, a rewired edge, and a displaced node.
+- **Corrected gate.** Every effect CI excludes 1.0 and every effect clears twice the largest null
+  radius. A row is accepted only when all three A/A medians—Rust before, Rust after, and
+  mermaid-js—also stay within 2% of 1.0. CV and MAD never gate.
+
+| Host | requested / observed callers | Rust whole-job median | mermaid-js / Rust, bootstrap 95% effect CI | A/A medians (Rust before / after / JS) | disposition |
+|---|---:|---:|---:|---:|---|
+| `thinkstation1` | 1 / 1 | 34.182970 ms | **712.389825×** [699.080772×, 736.410175×] | 0.995269 / 0.995739 / 1.009424 | **incumbent-win** |
+| `thinkstation1` | 8 / 8 | 4.774816 ms | **5,100.008042×** [5,028.063855×, 5,264.077738×] | 1.000205 / 1.006868 / 1.009424 | **incumbent-win** |
+| `thinkstation1` | 32 / 32 | 1.683505 ms | 14,464.821904× [14,029.697310×, 15,648.501123×] | **1.025448** / 1.003877 / 1.009424 | **inconclusive**, clause 3 |
+| `thinkstation1` | 64 / 64 | 1.820520 ms | **13,376.178235×** [13,083.153389×, 13,905.084595×] | 0.991594 / 0.999440 / 1.009424 | **incumbent-win** |
+| `thinkstation1` | 128 / 128, oversubscribed | 3.440187 ms | 7,078.568694× [6,654.366489×, 7,427.614224×] | **0.964308 / 0.968836** / 1.009424 | **inconclusive**, clause 3 |
+
+- **Scaling shape.** The accepted t8 row is 7.16× faster than t1. The valid frontier is t64 at
+  18.78× t1 scaling and 29.3% observed parallel efficiency. The raw t32 point is slightly faster,
+  but its null bias makes it ineligible to headline. Explicit 128-way oversubscription regresses
+  to 3.440187 ms; that diagnostic row is likewise not a campaign win.
+- **Host and executable provenance.** `thinkstation1`, AMD Ryzen Threadripper PRO 5975WX,
+  32 physical cores / 64 logical threads, all 64 CPUs in affinity, `amd-pstate-epp`, governor
+  `powersave`, EPP `performance`, boost enabled. ISA recorded x86-64 with AVX2, FMA, BMI2, and
+  VAES and no AVX-512. RCH builder `vmi1293453`; executing ELF 7,814,880 bytes. All eleven phases
+  passed the fixed 20%-per-CPU host admission under `trj-booking:6933`; 24 samples were needed to
+  obtain those eleven clear admissions.
+- **Evidence.** Summary
+  `.benchmarks/headtohead/ci-equiv-512-sweep/summary-f8040744-1785428462046.json`
+  (SHA-256 `90eee0dede0e964c80bc41104b93bf855281a812a4128df49f61581a8dae39d2`);
+  raw JSONL
+  `.benchmarks/headtohead/ci-equiv-512-sweep/run-f8040744-1785428462046.jsonl`
+  (SHA-256 `563fe621fab938b40464f25a17c7259af69552558fefc1ad736c25e8b5570dd5`);
+  equivalence artifact
+  `.benchmarks/headtohead/ci-equiv-512-equivalence/equivalence-f8040744-1785422935402.json`
+  (SHA-256 `38a3d74fcfb5e0c835e18a9ad41b659bf72de30716d8f77e9b82d0b2d6555f16`).
+- **Retry / re-check predicate.** Re-certify a passing row only if the corpus/input pin,
+  equivalence method, pinned mermaid bundle/configuration, executing ELF/compiler profile,
+  persistent-pool semantics, timer floor, corrected gate, or host topology changes. Do not chase
+  t32 or t128 with another identical timing run; reopen either only after a dedicated-host change
+  addresses its repeated null-median bias or one of those named artifacts/contracts changes.

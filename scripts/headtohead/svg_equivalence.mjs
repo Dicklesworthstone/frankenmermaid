@@ -30,16 +30,20 @@
  * Accessibility text (`<title>`/`<desc>`) is extracted separately and never mixed into the visible
  * multiset, because the engines' a11y policies legitimately differ.
  *
- * **Tier 2 — geometric topology (node/edge families: flowchart, state).**
- * mermaid records each link's endpoints in `data-id="L_<src>_<dst>_<n>"`; we emit only a positional
- * `fm-edge-<i>`. Rather than change our output bytes to add endpoint attributes — which would
- * invalidate every pinned checksum in the ledger and alter the artifact being measured — topology
- * is *reconstructed geometrically for both engines by the same code*: take each edge path's first
- * and last point from its `d` attribute, resolve each to the nearest node anchor, and emit the
- * derived `src>dst` multiset. That multiset is then checked twice: engine against engine, and both
- * engines against the **input-derived ground truth**, since the harness generates the corpus and
- * therefore knows the true edge list. Engine-vs-spec is a stronger claim than engine-vs-engine:
- * it cannot be satisfied by two renderers being wrong in the same way.
+ * **Tier 2 — rendered-path topology (node/edge families: flowchart, state).**
+ * mermaid records each rendered path's endpoints in `data-id="L_<src>_<dst>_<n>"`; we emit only a
+ * positional `fm-edge-<i>`. Frankenmermaid topology is therefore reconstructed geometrically:
+ * take each edge path's first and last point, resolve them to node anchors, and emit the derived
+ * `src>dst` multiset. Mermaid uses the same geometric reconstruction when it is unambiguous and
+ * checks that result against its declared path endpoints. When variable-width labels make nearest
+ * anchors ambiguous, the declared endpoints are accepted only if every rendered path has exactly
+ * one declaration that resolves to the SVG's rendered node-id set. This is structural SVG evidence,
+ * not source metadata: dropping a path also drops its declaration and fails the edge multiset.
+ *
+ * The two endpoint multisets are checked cross-engine and against the **input-derived ground
+ * truth**, since the harness generates the corpus and therefore knows the true edge list.
+ * Engine-vs-spec is stronger than engine-vs-engine: it cannot be satisfied by two renderers being
+ * wrong in the same way.
  *
  * Geometric reconstruction is what catches a *mislaid* subgraph as well as a dropped edge: moving
  * a cluster's nodes without moving its edges makes endpoints resolve to the wrong anchors.
@@ -132,7 +136,10 @@ export function visibleTextRuns(svg) {
   }
 
   const visible = [];
-  const re = />([^<>]+)</g;
+  // A literal `>` is valid XML character data and our renderer intentionally leaves it
+  // unescaped. Only `<` starts markup, so excluding `>` here drops otherwise visible labels such
+  // as `Parse &lt;config>` from the scan.
+  const re = />([^<]+)</g;
   for (let m = re.exec(body); m !== null; m = re.exec(body)) {
     const text = normalizeText(m[1]);
     if (text) visible.push(text);
@@ -458,6 +465,36 @@ const ADAPTERS = { 'mermaid-js': mermaidStructure, frankenmermaid: frankenStruct
 /** Collapse each engine's own pseudo-node name so a shared topology can be stated. */
 const pseudo = (id) => (isSyntheticNode(id) ? '#pseudo' : id);
 
+/**
+ * Resolve mermaid's `L_<source>_<target>_<ordinal>` path declarations against the node ids that
+ * actually occur in the same SVG. Trying every underscore split keeps ids containing underscores
+ * honest: a declaration is accepted only when exactly one split names two rendered nodes.
+ */
+function declaredEdgeTopology(edges, nodeIds) {
+  if (edges.length === 0) return { topology: null, status: 'no_edge_elements' };
+  if (edges.some((edge) => !edge.declared)) {
+    return { topology: null, status: 'missing_path_declaration' };
+  }
+  const nodes = new Set(nodeIds.map((id) => id.toLowerCase()));
+  const topology = [];
+  for (const edge of edges) {
+    const body = /^L_(.+)_\d+$/.exec(edge.declared)?.[1];
+    if (!body) return { topology: null, status: 'malformed_path_declaration' };
+    const candidates = new Set();
+    for (let i = 0; i < body.length; i++) {
+      if (body[i] !== '_') continue;
+      const from = body.slice(0, i).toLowerCase();
+      const to = body.slice(i + 1).toLowerCase();
+      if (nodes.has(from) && nodes.has(to)) candidates.add(`${pseudo(from)}>${pseudo(to)}`);
+    }
+    if (candidates.size !== 1) {
+      return { topology: null, status: `ambiguous_path_declaration(candidates=${candidates.size})` };
+    }
+    topology.push([...candidates][0]);
+  }
+  return { topology: topology.sort(), status: 'declared_path_endpoints' };
+}
+
 // ---------------------------------------------------------------- signatures
 
 /**
@@ -488,6 +525,9 @@ export function signature(svg, engine) {
 
   const ids = [...nodes.keys()];
   const resolvable = edges.length > 0 && anchors.length > 0 && unresolved === 0 && unparsed === 0;
+  const declared = engine === 'mermaid-js'
+    ? declaredEdgeTopology(edges, ids)
+    : { topology: null, status: 'not_emitted' };
   return {
     engine,
     bytes: svg.length,
@@ -498,8 +538,11 @@ export function signature(svg, engine) {
     synthetic_node_count: ids.filter(isSyntheticNode).length,
     node_count: nodes.size,
     edge_element_count: edges.length,
-    // mermaid states endpoints in `data-id`; retained as provenance for the geometric result.
+    // Mermaid states endpoints on each rendered path. These become the topology fallback only when
+    // every declaration uniquely resolves against this same document's rendered node ids.
     declared_edges: edges.map((e) => e.declared).filter(Boolean).sort(),
+    declared_topology: declared.topology,
+    declared_topology_status: declared.status,
     topology: resolvable ? derived.slice().sort() : null,
     topology_status: resolvable
       ? 'geometric'
@@ -638,8 +681,14 @@ export function compareDiagram({ index, family, fmSvg, jsSvg, source }) {
     },
   });
 
-  const bothTopo = fm.topology !== null && js.topology !== null;
-  const topo = bothTopo ? diffMultisets(multiset(fm.topology), multiset(js.topology)) : null;
+  const jsComparableTopology = js.topology ?? js.declared_topology;
+  const jsComparableStatus = js.topology !== null
+    ? js.topology_status
+    : js.declared_topology_status;
+  const bothTopo = fm.topology !== null && jsComparableTopology !== null;
+  const topo = bothTopo
+    ? diffMultisets(multiset(fm.topology), multiset(jsComparableTopology))
+    : null;
   checks.push({
     invariant: 'edge_topology_cross_engine',
     tier: 2,
@@ -647,7 +696,8 @@ export function compareDiagram({ index, family, fmSvg, jsSvg, source }) {
     pass: bothTopo ? topo.equal : null,
     detail: {
       fm_status: fm.topology_status,
-      js_status: js.topology_status,
+      js_status: jsComparableStatus,
+      js_geometric_status: js.topology_status,
       fm_edge_elements: fm.edge_element_count,
       js_edge_elements: js.edge_element_count,
       ...(topo ?? {}),
@@ -657,31 +707,33 @@ export function compareDiagram({ index, family, fmSvg, jsSvg, source }) {
   // mermaid states its own endpoints; when it does, its geometric reconstruction must agree with
   // them. This is the extractor's own null control: it proves the geometry code is not inventing
   // a topology that merely happens to match on both sides.
-  const declaredPairs = js.declared_edges
-    .map((id) => /^L_(.+)_(.+?)_\d+$/.exec(id))
-    .filter(Boolean)
-    .map((m) => `${pseudo(m[1].toLowerCase())}>${pseudo(m[2].toLowerCase())}`)
-    .sort();
-  const declaredDecidable = js.topology !== null && declaredPairs.length === js.declared_edges.length
-    && declaredPairs.length > 0;
-  const declared = declaredDecidable ? diffMultisets(multiset(js.topology), multiset(declaredPairs)) : null;
+  const declaredDecidable = js.topology !== null && js.declared_topology !== null;
+  const declared = declaredDecidable
+    ? diffMultisets(multiset(js.topology), multiset(js.declared_topology))
+    : null;
   checks.push({
     invariant: 'incumbent_geometry_matches_declared_ids',
     tier: 2,
     decided: declaredDecidable,
     pass: declaredDecidable ? declared.equal : null,
-    detail: declared ?? { declared_ids: js.declared_edges.length },
+    detail: declared ?? {
+      declared_ids: js.declared_edges.length,
+      declared_status: js.declared_topology_status,
+      geometric_status: js.topology_status,
+    },
   });
 
   for (const [engine, sig] of [['frankenmermaid', fm], ['mermaid-js', js]]) {
-    const decidable = truth !== null && sig.topology !== null;
-    const against = decidable ? diffMultisets(multiset(sig.topology), multiset(truth.edges)) : null;
+    const topology = engine === 'mermaid-js' ? jsComparableTopology : sig.topology;
+    const topologyStatus = engine === 'mermaid-js' ? jsComparableStatus : sig.topology_status;
+    const decidable = truth !== null && topology !== null;
+    const against = decidable ? diffMultisets(multiset(topology), multiset(truth.edges)) : null;
     checks.push({
       invariant: `edge_topology_vs_input__${engine}`,
       tier: 2,
       decided: decidable,
       pass: decidable ? against.equal : null,
-      detail: against ?? { reason: truth === null ? 'input_not_decodable' : sig.topology_status },
+      detail: against ?? { reason: truth === null ? 'input_not_decodable' : topologyStatus },
     });
   }
 
@@ -701,7 +753,8 @@ export function compareDiagram({ index, family, fmSvg, jsSvg, source }) {
     family,
     verdict,
     unverified_reason: verdict === 'unverified'
-      ? `tier2 claimed for ${family} but topology undecidable (fm=${fm.topology_status}, js=${js.topology_status})`
+      ? `tier2 claimed for ${family} but topology undecidable (fm=${fm.topology_status}, `
+        + `js=${jsComparableStatus}, js_geometry=${js.topology_status})`
       : undefined,
     tiers_decided: [...new Set(decided.map((c) => c.tier))].sort(),
     checks_decided: decided.length,
@@ -711,7 +764,13 @@ export function compareDiagram({ index, family, fmSvg, jsSvg, source }) {
       ? checks.map((c) => ({ invariant: c.invariant, tier: c.tier, gating: c.gating !== false, decided: c.decided, pass: c.pass }))
       : checks,
     fm: { bytes: fm.bytes, node_count: fm.node_count, edge_element_count: fm.edge_element_count, topology_status: fm.topology_status },
-    js: { bytes: js.bytes, node_count: js.node_count, edge_element_count: js.edge_element_count, topology_status: js.topology_status },
+    js: {
+      bytes: js.bytes,
+      node_count: js.node_count,
+      edge_element_count: js.edge_element_count,
+      topology_status: jsComparableStatus,
+      geometric_topology_status: js.topology_status,
+    },
   };
 }
 
@@ -745,8 +804,10 @@ export function summarize(results) {
     rasterized_perceptual_diff: false,
     // Stated explicitly so a reader never has to infer the strength of the claim.
     claim: 'engine-neutral structural equivalence: rendered-text multiset (all families) plus '
-      + 'geometrically reconstructed edge topology cross-engine and against input-derived ground '
-      + 'truth (node/edge families only). Not byte equality; not a pixel diff.',
+      + 'rendered-path edge topology cross-engine and against input-derived ground truth. '
+      + 'Frankenmermaid endpoints are reconstructed geometrically; mermaid-js uses geometric '
+      + 'endpoints when unambiguous and uniquely resolved per-path data-id endpoints otherwise. '
+      + 'Not byte equality; not a pixel diff.',
     diagrams: results.length,
     equivalent: results.length - divergent.length - unverified.length,
     divergent: divergent.length,
@@ -806,6 +867,23 @@ export function selfTest() {
   const base = compareDiagram({ index: 0, family: 'flowchart', fmSvg: fm, jsSvg: js, source });
   record('baseline_pair_is_equivalent', base.verdict === 'equivalent',
     { verdict: base.verdict, failed: failedInvariants(base) });
+
+  // Mermaid's path declaration is the structural fallback when variable-width nodes make its
+  // nearest geometric anchor ambiguous. The declaration still has to resolve uniquely to rendered
+  // node ids and agree with our geometry plus input truth.
+  const ambiguousJsGeometry = js.replace('d="M55,20L145,20"', 'd="M100,20L145,20"');
+  const fallback = compareDiagram({
+    index: 0,
+    family: 'flowchart',
+    fmSvg: fm,
+    jsSvg: ambiguousJsGeometry,
+    source,
+  });
+  record('declared_path_fallback_is_equivalent',
+    fallback.verdict === 'equivalent'
+      && fallback.js.geometric_topology_status.startsWith('ambiguous')
+      && fallback.js.topology_status === 'declared_path_endpoints',
+    { verdict: fallback.verdict, js: fallback.js, failed: failedInvariants(fallback) });
   record('baseline_decides_tier2', base.tiers_decided.includes(2), base.tiers_decided);
   // The extractor's own geometry must agree with mermaid's declared endpoints, or a topology
   // "agreement" downstream proves nothing.
@@ -829,23 +907,33 @@ export function selfTest() {
     && failedInvariants(m2).includes('edge_topology_vs_input__frankenmermaid'),
     { verdict: m2.verdict, failed: failedInvariants(m2) });
 
-  // MUTATION 3 -- we keep the edge count but rewire it (A->C instead of B->C). A count-only check
-  // would pass this; geometric endpoint resolution must not.
-  const rewired = fm.replace('<path d="M155,20L245,20"/>', '<path d="M55,20L245,20"/>');
-  const m3 = compareDiagram({ index: 0, family: 'flowchart', fmSvg: rewired, jsSvg: js, source });
-  record('rewired_edge_is_divergent',
-    m3.verdict === 'divergent' && failedInvariants(m3).includes('edge_topology_cross_engine'),
+  // MUTATION 3 -- the incumbent drops a path. Because declarations live on paths, the fallback
+  // cannot conceal this: both cross-engine and input-grounded topology lose that edge.
+  const droppedJsEdge = js.replace('<path d="M55,20L145,20" class="flowchart-link" data-id="L_A_B_0"/>', '');
+  const m3 = compareDiagram({ index: 0, family: 'flowchart', fmSvg: fm, jsSvg: droppedJsEdge, source });
+  record('incumbent_dropped_edge_is_divergent',
+    m3.verdict === 'divergent'
+      && failedInvariants(m3).includes('edge_topology_cross_engine')
+      && failedInvariants(m3).includes('edge_topology_vs_input__mermaid-js'),
     { verdict: m3.verdict, failed: failedInvariants(m3) });
 
-  // MUTATION 4 -- a node is moved far from its edges ("mislaid subgraph"). Endpoints then resolve
+  // MUTATION 4 -- we keep the edge count but rewire it (A->C instead of B->C). A count-only check
+  // would pass this; geometric endpoint resolution must not.
+  const rewired = fm.replace('<path d="M155,20L245,20"/>', '<path d="M55,20L245,20"/>');
+  const m4 = compareDiagram({ index: 0, family: 'flowchart', fmSvg: rewired, jsSvg: js, source });
+  record('rewired_edge_is_divergent',
+    m4.verdict === 'divergent' && failedInvariants(m4).includes('edge_topology_cross_engine'),
+    { verdict: m4.verdict, failed: failedInvariants(m4) });
+
+  // MUTATION 5 -- a node is moved far from its edges ("mislaid subgraph"). Endpoints then resolve
   // to the wrong anchor.
   const mislaid = fm.replace('<g id="fm-node-b-1" class="fm-node fm-node-shape-rect" transform="translate(150, 20)">',
     '<g id="fm-node-b-1" class="fm-node fm-node-shape-rect" transform="translate(9000, 9000)">');
-  const m4 = compareDiagram({ index: 0, family: 'flowchart', fmSvg: mislaid, jsSvg: js, source });
+  const m5 = compareDiagram({ index: 0, family: 'flowchart', fmSvg: mislaid, jsSvg: js, source });
   // Displacement makes topology ambiguous rather than wrong, so the honest outcome is a refusal to
   // certify -- but it must NOT be "equivalent".
-  record('mislaid_node_is_not_certified', m4.verdict !== 'equivalent',
-    { verdict: m4.verdict, failed: failedInvariants(m4), reason: m4.unverified_reason });
+  record('mislaid_node_is_not_certified', m5.verdict !== 'equivalent',
+    { verdict: m5.verdict, failed: failedInvariants(m5), reason: m5.unverified_reason });
 
   // NEGATIVE CONTROL -- rendering strictly MORE than mermaid is a feature difference, not loss, and
   // must not fail. This is the ER cardinality case (`0..*`, `1`) seen in the real corpus.
@@ -873,6 +961,9 @@ export function selfTest() {
   record('nested_html_label_counted_once',
     visibleTextRuns('<svg><span class="nodeLabel"><p>Node 0</p></span></svg>').visible.join('|') === 'Node 0',
     visibleTextRuns('<svg><span class="nodeLabel"><p>Node 0</p></span></svg>').visible);
+  record('literal_greater_than_is_visible_text',
+    visibleTextRuns('<svg><text>Parse &lt;config></text></svg>').visible.join('|') === 'Parse <config>',
+    visibleTextRuns('<svg><text>Parse &lt;config></text></svg>').visible);
   record('cubic_endpoint_only', (() => {
     const p = pathPoints('M0,0C10,10 20,20 30,30');
     return p.points.length === 2 && p.points[1][0] === 30 && p.points[1][1] === 30;
@@ -897,7 +988,7 @@ export function selfTest() {
   })(), groundTruth('flowchart LR\n  A-->|goes to|B\n'));
   record('non_flow_source_is_not_decodable', groundTruth('classDiagram\n  class C0\n') === null, null);
 
-  return { ok: true, cases: cases.length, mutation_controls: 4, negative_controls: 2 };
+  return { ok: true, cases: cases.length, mutation_controls: 5, negative_controls: 2 };
 }
 
 // Run as a script: `node scripts/headtohead/svg_equivalence.mjs --self-test`

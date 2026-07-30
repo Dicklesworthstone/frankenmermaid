@@ -1620,15 +1620,22 @@ not a crash, and has no point ratio.
 
 #### Numeric campaign status
 
-No numeric competitive ratio is currently published for jobs where both engines complete. The
-fail-closed cross-engine structural gate currently rejects the pinned 500-diagram CI corpus:
-400 diagrams are equivalent, while all 100 class diagrams are divergent because frankenmermaid
-omits fields and methods that mermaid-js renders.
+The certified concurrent CI workload renders 512 right-skewed documentation flowcharts as one job:
+10,635 nodes, 10,123 edges, and 402,843 input bytes. The live pinned mermaid-js 11.15.0 arm took
+24,351.600 ms. These are the caller widths whose whole-job effect CI, same-invocation A/A controls,
+and same-ELF pre/post bracket all passed:
 
-The realistic 2,000- and 5,000-diagram CI corpora contain 190 and 482 class diagrams respectively,
-so they are not admitted to timing. A competitive number requires the exact timed corpus to pass
-with zero divergent or unverified diagrams, linked to the same input SHA-256, process-self-reported
-frankenmermaid ELF, and pinned mermaid-js bundle used by the timing invocation.
+| Caller workers requested / observed | frankenmermaid whole-job median | mermaid-js / frankenmermaid (95% effect CI) |
+|---:|---:|---:|
+| 1 / 1 | 34.182970 ms | **712.389825×** [699.080772×, 736.410175×] |
+| 8 / 8 | 4.774816 ms | **5,100.008042×** [5,028.063855×, 5,264.077738×] |
+| 64 / 64 | 1.820520 ms | **13,376.178235×** [13,083.153389×, 13,905.084595×] |
+
+This is SVG structural equivalence, not a pixel diff: all 512 diagrams passed rendered-text
+containment, node-set equality, cross-engine edge topology, and each engine's topology against the
+input-derived graph. The exact timing input, process-self-reported Rust ELF, and mermaid bundle are
+cryptographically linked to that 512/512 artifact. Widths whose A/A median exceeded the corrected
+2% arm-order-bias limit are excluded from the public claim.
 
 **How numeric claims are admitted:**
 
@@ -1638,7 +1645,8 @@ frankenmermaid ELF, and pinned mermaid-js bundle used by the timing invocation.
   both engines; same-engine byte identity proves determinism but cannot prove equivalent work.
 - **Paired-null median-CI gate.** Each engine carries a same-invocation A/A control. The identical
   self-reporting Rust ELF runs before and after Chromium, and the slower Rust median is used. The
-  ratio must clear twice the largest bootstrap 95% null-CI radius. CV, MAD, and phase load are
+  whole-job effect CI must exclude 1.0, its deviation must clear twice the largest bootstrap 95%
+  null-CI radius, and every null median must remain within 2% of 1.0. CV, MAD, and phase load are
   provenance only.
 - **Counted work before timing.** Requested and rendered revision counts, input hashes, and observed
   worker counts must agree. A renderer that omits content is not a faster implementation of the

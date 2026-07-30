@@ -248,6 +248,7 @@ function stats(samples) {
   const mad = devs[Math.max(0, Math.ceil(n / 2) - 1)];
   return {
     n,
+    samples: xs,
     min: xs[0],
     p50: median,
     // With few reps a p95/p99 is just the max wearing a hat. Report only when the rank is real.
@@ -457,7 +458,9 @@ const PAGE_PROBE = `async ({ text, tag }) => {
 }`;
 
 if (has('self-test')) {
-  if (stats([1, 3]).p50 !== 2) throw new Error('timing median must average the two middle values');
+  const timing = stats([3, 1]);
+  if (timing.p50 !== 2) throw new Error('timing median must average the two middle values');
+  if (timing.samples.join(',') !== '1,3') throw new Error('timing samples must remain available for the effect CI');
   const perfect = nullControl(Array.from({ length: 41 }, () => 1), 1234);
   if (perfect.ci95_lo !== 1 || perfect.ci95_hi !== 1 || perfect.half_width !== 0) {
     throw new Error(`perfect-null bootstrap regression: ${JSON.stringify(perfect)}`);
@@ -536,6 +539,10 @@ const dumpSvgDir = arg('dump-svg');
 // questions). `--dump-all-revisions` additionally writes every revision, which is what the
 // cross-engine equivalence phase needs for a multi-diagram job.
 const dumpAllRevisions = has('dump-all-revisions');
+// Equivalence needs exactly one set of rendered bytes, not timing samples. This mode is deliberately
+// separate from `--reps-scale`: measurement runs must retain the nine-round A/A floor even when
+// their effect sample count is scaled down.
+const renderOnce = has('render-once');
 if (dumpSvgDir) mkdirSync(dumpSvgDir, { recursive: true });
 if (dumpAllRevisions && !dumpSvgDir) {
   log('--dump-all-revisions requires --dump-svg <dir>');
@@ -715,13 +722,21 @@ try {
   for (const item of items) {
     const texts = generate(item);
     let reps = Math.max(1, Math.round(item.reps_js * repsScale));
-    let nullReps = Math.max(MIN_NULL_ROUNDS, reps);
+    // A workload may predeclare more A/A pairs than effect samples when a completed retry has
+    // exposed opposite-sign null-median movement. This raises precision without changing the
+    // effect sample count, input, or verdict rule.
+    let nullReps = Math.max(MIN_NULL_ROUNDS, item.null_reps_js ?? reps);
     const isolateSamples = forceSampleIsolation || isolatesSampleState(texts.length);
     if (isolateSamples) nullReps = Math.max(ISOLATED_NULL_ROUNDS, nullReps);
     // A declared `warmup_js: 0` means zero, not one: on an item that takes minutes per render, a
     // warmup pass doubles the item for no statistical gain. `Math.max(1, ...)` still guards the
     // pinned items, whose warmup must never be scaled away by `--reps-scale`.
     let warmup = item.warmup_js === 0 ? 0 : Math.max(1, Math.round(item.warmup_js * repsScale));
+    if (renderOnce) {
+      reps = 1;
+      nullReps = 0;
+      warmup = 0;
+    }
     const budgetMs = item.js_budget_ms ? item.js_budget_ms * budgetScale : null;
     const tag = item.id.replace(/[^a-z0-9]/gi, '');
     const t0 = Date.now();
@@ -744,6 +759,7 @@ try {
         inside_timed_region: false,
       },
       execution_model: 'single_page_main_thread',
+      render_once: renderOnce,
       id: item.id,
       revisions: texts.length,
       input_sha256: sha256(joined),
@@ -906,7 +922,11 @@ try {
       render_ns: Object.fromEntries(
         Object.entries(ms)
           .filter(([k]) => !['cv_pct', 'mad_pct'].includes(k))
-          .map(([k, v]) => [k, k === 'n' || v === null ? v : Math.round(v * 1e6)]),
+          .map(([k, v]) => {
+            if (k === 'n' || v === null) return [k, v];
+            if (k === 'samples') return [k, v.map((sample) => Math.round(sample * 1e6))];
+            return [k, Math.round(v * 1e6)];
+          }),
       ),
       cv_pct: Number(ms.cv_pct.toFixed(2)),
       mad_pct: Number(ms.mad_pct.toFixed(2)),

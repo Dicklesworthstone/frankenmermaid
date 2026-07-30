@@ -332,6 +332,34 @@ function docsSite(count, seed) {
 }
 
 /**
+ * An equivalence-decidable CI documentation build.
+ *
+ * This keeps the realistic docs generator's right-skewed sizes, labels, and occasional edge labels,
+ * but restricts the job to flat left-to-right process flowcharts. The shared SVG checker can prove
+ * every rendered path structurally against input-derived topology. Branching flowcharts are
+ * excluded because mermaid-js 11.15.0 places some path endpoints equidistant from adjacent node
+ * anchors, making geometry alone honestly undecidable; state is excluded
+ * because the two renderers currently disagree on transition labels containing punctuation. Class
+ * remains excluded while bd-4isi is open (member rows are dropped), and sequence/ER do not expose
+ * enough common geometry to prove that no unlabeled edge disappeared.
+ */
+function equivalenceDecidableDocs(count, seed) {
+  const out = [];
+  for (let d = 0; d < count; d++) {
+    const r = rng(seed + d * 7919);
+    const n = skewedSize(r, 4, 60);
+    const lines = ['flowchart LR'];
+    for (let i = 0; i < n; i++) lines.push(`  N${i}["${realisticLabel(r, i)}"]`);
+    for (let i = 0; i < n - 1; i++) {
+      if (r() < 0.22) lines.push(`  N${i}-->|"${pick(r, LABEL_WORDS)}"|N${i + 1}`);
+      else lines.push(`  N${i}-->N${i + 1}`);
+    }
+    out.push(lines.join('\n'));
+  }
+  return out;
+}
+
+/**
  * A live editing session as it actually happens: a user TYPES a label one character at a time.
  *
  * `edit_trace` models structural edits -- append a node, add an edge. Real editing is dominated by
@@ -454,6 +482,7 @@ const GENERATORS = {
   er: (p) => [erDiagram(p.n)],
   edit_trace: (p) => editTrace(p.n, p.revisions),
   docs_site: (p) => docsSite(p.count, p.seed),
+  equivalence_decidable_docs: (p) => equivalenceDecidableDocs(p.count, p.seed),
   typing_trace: (p) => typingTrace(p.nodes, p.phrase, p.seed),
   monorepo_architecture: (p) => monorepoArchitecture(p.services, p.domains, p.seed),
   schema_catalog: (p) => schemaCatalog(p.schemas, p.min_entities, p.max_entities, p.seed),
@@ -551,6 +580,10 @@ export const CORPUS = [
   // inside the boundary a user pays. They are pinned now and require exclusive-trj certification.
   { id: 'ci_docs_2000',         gen: 'docs_site',    params: { count: 2000, seed: 20260729 }, class: 'doc_build', reps_js: 1, warmup_js: 0, reps_rs: 20, warmup_rs: 2, js_budget_ms: 3600_000, dnf_allowed: true },
   { id: 'ci_docs_5000',         gen: 'docs_site',    params: { count: 5000, seed: 20260729 }, class: 'doc_build', reps_js: 1, warmup_js: 0, reps_rs: 20, warmup_rs: 2, js_budget_ms: 9000_000, dnf_allowed: true },
+  // 512 independent diagrams in one job, not 512 divided timings. Every diagram belongs to a
+  // family whose SVG equivalence can prove rendered edge topology against input ground truth.
+  // Nine live incumbent samples make the cross-runtime bootstrap median-ratio CI decidable.
+  { id: 'ci_equiv_512',         gen: 'equivalence_decidable_docs', params: { count: 512, seed: 20260730 }, class: 'doc_build', reps_js: 9, null_reps_js: 20, warmup_js: 0, reps_rs: 20, warmup_rs: 2, js_budget_ms: 7200_000, dnf_allowed: true, effect_ci_required: true },
   // 60 keystrokes inside one label: the re-render frequency a live preview actually generates.
   { id: 'typing_trace_60',      gen: 'typing_trace', params: { nodes: 40, phrase: 'Aggregate results from the upstream ingestion workers safely', seed: 20260728 }, class: 'edit_trace', reps_js: 2, warmup_js: 1, reps_rs: 20, warmup_rs: 2, js_budget_ms: 900_000, dnf_allowed: true },
   // One architecture-review export at two monorepo sizes. Degree and domain sizes are deliberately

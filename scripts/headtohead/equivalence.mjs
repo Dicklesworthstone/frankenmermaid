@@ -180,7 +180,18 @@ if (fmRun.code !== 0) {
   process.exit(EXIT_ENGINE_ERROR);
 }
 
-const jsArgs = ['--only', [...onlyIds].join(','), '--dump-svg', jsDump, '--dump-all-revisions'];
+// `mermaid_bench.mjs` reads repetition counts from the source corpus rather than the temporary
+// one-render JSON used by the Rust executable. Scale every selected item down far enough that its
+// rounded count is one; equivalence needs one deterministic render, not the timing harness's nine
+// effect/null samples.
+const equivalenceRepsScale = 1 / Math.max(...items.map((item) => item.reps_js));
+const jsArgs = [
+  '--only', [...onlyIds].join(','),
+  '--reps-scale', String(equivalenceRepsScale),
+  '--render-once',
+  '--dump-svg', jsDump,
+  '--dump-all-revisions',
+];
 const jsRun = runJsonl('mermaid-js', 'node', [join(HERE, 'mermaid_bench.mjs'), ...jsArgs]);
 if (jsRun.code !== 0) {
   log(`mermaid_bench exited ${jsRun.code}`);
@@ -306,14 +317,15 @@ const artifact = {
     tier1: 'rendered-text token multiset, containment-gated: every token mermaid-js renders must be '
       + 'present in ours. Applies to every syntax family. Rendering MORE than mermaid is reported, '
       + 'not failed.',
-    tier2: 'edge topology reconstructed geometrically from path endpoints resolved to node anchors, '
-      + 'by one shared extractor, compared cross-engine AND against input-derived ground truth. '
+    tier2: 'rendered-path edge topology compared cross-engine AND against input-derived ground '
+      + 'truth. Frankenmermaid endpoints are reconstructed geometrically; mermaid-js uses the same '
+      + 'geometry when unambiguous and uniquely resolved per-path data-id endpoints otherwise. '
       + `Claimed for: ${[...TIER2_FAMILIES].join(', ')}.`,
     extractor: 'single shared implementation applied to both engines (svg_equivalence.mjs); a '
       + 'per-engine extractor pair could agree by construction',
-    self_test: 'svg_equivalence.mjs --self-test: 4 mutation controls (dropped label, dropped edge, '
-      + 'rewired edge, displaced node) and 2 negative controls (extra content, differing text '
-      + 'segmentation)',
+    self_test: 'svg_equivalence.mjs --self-test: 5 mutation controls (dropped label, either engine '
+      + 'dropping an edge, rewired edge, displaced node) and 2 negative controls (extra content, '
+      + 'differing text segmentation)',
     undecidable_is_not_a_pass: true,
   },
   pins: { mermaid: PINS.mermaid.version, bundle_sha256: jsRun.records[0]?.bundle_sha256 ?? null },
@@ -338,7 +350,7 @@ else log(`dumps kept at ${dumpRoot}`);
 
 console.log('');
 console.log(`equivalence  host=${env.host_identity}  mermaid@${PINS.mermaid.version}  rev=${rev}`);
-console.log('method: SVG structural (text-token containment + geometric topology). Not a pixel diff.');
+console.log('method: SVG structural (text-token containment + rendered-path topology). Not a pixel diff.');
 console.log('');
 console.log('item                  diagrams  equiv  diverg  unver  verdict');
 for (const row of rows) {

@@ -11,6 +11,7 @@ use fm_core::{
     parse_mermaid_js_config_value, to_init_parse,
 };
 use serde_json::Value;
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
     DetectedType, ParseResult, ParserConfig,
@@ -8408,16 +8409,42 @@ fn split_emoji_icon_prefix(text: &str) -> Option<(&str, Option<&str>)> {
     // Same as `split_fontawesome_icon_prefix`: `extract_icon_prefix` already `trim_fast`'d `text`, so
     // skip the idempotent re-trim (drops one `trim_fast` per labelled node — fontawesome returns
     // `None` first on plain labels, so this path runs for every one).
-    let mut chars = text.char_indices();
-    let (_, first) = chars.next()?;
-    if first.is_ascii() {
+    let first = text.chars().next()?;
+    if !is_emoji_base(first) {
         return None;
     }
 
-    let next_boundary = chars.next().map_or(text.len(), |(idx, _)| idx);
+    // Keep variation selectors, skin-tone modifiers, flags, and ZWJ sequences with the icon.
+    let next_boundary = text
+        .grapheme_indices(true)
+        .nth(1)
+        .map_or(text.len(), |(idx, _)| idx);
     let icon = &text[..next_boundary];
     let remainder = trim_fast(&text[next_boundary..]);
     Some((icon, (!remainder.is_empty()).then_some(remainder)))
+}
+
+fn is_emoji_base(ch: char) -> bool {
+    matches!(ch as u32,
+        0x231A..=0x231B
+        | 0x23E9..=0x23F3
+        | 0x23F8..=0x23FA
+        | 0x25AA..=0x25AB
+        | 0x25B6
+        | 0x25C0
+        | 0x25FB..=0x25FE
+        | 0x2600..=0x27BF
+        | 0x2934..=0x2935
+        | 0x2B05..=0x2B07
+        | 0x2B1B..=0x2B1C
+        | 0x2B50
+        | 0x2B55
+        | 0x3030
+        | 0x303D
+        | 0x3297
+        | 0x3299
+        | 0x1F000..=0x1FAFF
+    )
 }
 
 fn parse_label(raw: Option<&str>) -> Option<ParsedLabel> {
@@ -11570,6 +11597,18 @@ mod tests {
             .map(|label| label.text.as_str());
         assert_eq!(node.icon(), Some("🚀"));
         assert_eq!(label, Some("Deploy"));
+    }
+
+    #[test]
+    fn flowchart_preserves_non_ascii_letter_prefix_in_label() {
+        let parsed = parse_mermaid("flowchart LR\nA[Überprüfung]");
+        let node = parsed.ir.nodes.iter().find(|node| node.id == "A").unwrap();
+        let label = node
+            .label
+            .and_then(|label_id| parsed.ir.labels.get(label_id.0))
+            .map(|label| label.text.as_str());
+        assert_eq!(node.icon(), None);
+        assert_eq!(label, Some("Überprüfung"));
     }
 
     #[test]

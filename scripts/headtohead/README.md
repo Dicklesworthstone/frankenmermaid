@@ -18,11 +18,11 @@ RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec \
   --base "$(git rev-parse HEAD)" --clean-overlay --no-overlay -- \
   cargo test --profile release -p frankenmermaid-cli --example headtohead
 
-# 2. strict-remote release builds stay on the worker while the local-build freeze is active.
-#    Never mint a task-specific target directory and never permit silent local fallback.
-#    Replace --no-overlay with one --overlay-path per file you actually changed, then use Route 1
-#    to scp only the executable from the worker's .rch-target-<worker>-pool-* directory.
-df -h /data  # the same strict-remote-only floor applies
+# 2. Preserve the deterministic-overlay project identity for every build. Never mint a
+#    task-specific target directory or permit silent local fallback. Route 1 retrieves only the
+#    executable from the worker's .rch-target-<worker>-pool-* directory; a bounded local build is
+#    also permitted by POLICY_local_perf_binaries.md only after its 150G free-space precheck.
+df -h /data
 RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec \
   --base "$(git rev-parse HEAD)" --clean-overlay \
   --overlay-path crates/fm-cli/examples/headtohead.rs -- \
@@ -42,21 +42,32 @@ node scripts/headtohead/run.mjs \
 #    run.mjs exits 7 unless a matching passing verdict exists for every measured row.
 node scripts/headtohead/equivalence.mjs \
   --fm-bin target/release/examples/headtohead \
-  --only ci_batch_500
+  --only ci_equiv_512 \
+  --out .benchmarks/headtohead/ci-equiv-512-equivalence \
+  --keep-dumps
 
 # CI-scale caller concurrency must run under the exclusive trj booking, not on an rch worker.
+# `ci_equiv_512` predeclares 20 balanced incumbent A/A pairs and nine whole-job effect samples;
+# this stabilizes the arm-order median without changing the corrected verdict rule.
 : "${TRJ_CLAIM_MESSAGE_ID:?set this to the Agent Mail CLAIM message id}"
+: "${FM_H2H_BUILDER:?set this to the rch worker that built the executable}"
 node scripts/headtohead/run.mjs \
   --fm-bin target/release/examples/headtohead \
-  --only ci_batch_500 \
-  --thread-sweep 1,2,4,8,16,32,64,96,128 \
+  --fm-builder "${FM_H2H_BUILDER}" \
+  --only ci_equiv_512 \
+  --thread-sweep 1,8,32,64,128 \
+  --allow-oversubscription \
   --exclusive-host-claim "trj-booking:${TRJ_CLAIM_MESSAGE_ID}" \
+  --equivalence-dir .benchmarks/headtohead/ci-equiv-512-equivalence \
+  --out .benchmarks/headtohead/ci-equiv-512-sweep \
   --pin-cpu off
 ```
 
 Useful flags: `--only <corpus_id>[,<corpus_id>…]`, `--reps-scale 0.25` (fast smoke),
 `--js-budget-scale 0.1` (shrink the mermaid wall budgets for a smoke run), `--skip-mermaid`,
 `--thread-sweep 1,2,4,8,16,32,64,96,128`,
+`--allow-oversubscription` (required when requested workers exceed visible logical CPUs),
+`--fm-builder <rch-worker-id>`,
 `--exclusive-host-claim trj-booking:<claim-message-id>`, `--pin-cpu auto|N|off`,
 `--out <dir>`, `--update-pins`, `--allow-unverified-output` (permit a run whose rows have no passing
 equivalence verdict; the admission is stamped on the summary and on every affected row),
@@ -181,18 +192,20 @@ per-engine extractor pair can drift into agreeing by construction.
 | Tier | Scope | Invariant |
 |---|---|---|
 | 1 | every syntax family | **Rendered-text token multiset, containment-gated.** Every text run — `<text>`, `<tspan>`, and the HTML inside a `<foreignObject>` — reduces to one carrier-agnostic leaf scan, then to tokens. Gate: every token mermaid renders must be present in ours. |
-| 2 | flowchart, state (opportunistically ER) | **Edge topology, reconstructed geometrically.** Each edge path's first/last point resolved to the nearest node anchor, giving a derived `src>dst` multiset — compared cross-engine *and* against input-derived ground truth. |
+| 2 | flowchart, state | **Rendered-path edge topology.** Frankenmermaid path endpoints are resolved geometrically to node anchors. Mermaid-js uses the same reconstruction when unambiguous and otherwise requires every rendered path's `data-id` endpoints to resolve uniquely against the SVG's rendered node-id set. The endpoint multisets are compared cross-engine *and* against input-derived ground truth. |
 
 Three deliberate asymmetries, each stated because each weakens or strengthens the claim:
 
 - **The text gate is one-directional.** It fails on content *we* are missing, not on content we add:
   we render ER relationship cardinalities (`0..*`, `1`) that 11.15.0 omits, which is a feature
   difference, not a defect. The symmetric difference is still recorded as provenance.
-- **Topology is geometric, not declared.** mermaid records endpoints in `data-id="L_<src>_<dst>_<n>"`;
-  we emit only a positional `fm-edge-<i>`. Adding endpoint attributes to our output would invalidate
-  every pinned checksum and change the artifact being measured, so topology is reconstructed for both
-  sides by the same code instead. Checking it against the input as well as against mermaid makes it
-  engine-vs-**spec**: it cannot be satisfied by both renderers being wrong the same way.
+- **Topology is tied to rendered paths, not trusted source metadata.** We emit only a positional
+  `fm-edge-<i>`, so our endpoints are always reconstructed geometrically. Mermaid records
+  `data-id="L_<src>_<dst>_<n>"` on each rendered path. Its geometry is cross-checked against those
+  declarations whenever nearest-anchor resolution is unambiguous; otherwise a declaration is
+  admitted only when every path resolves uniquely to two node ids rendered in that same SVG.
+  Dropping a path therefore drops an endpoint declaration and fails the multiset. Checking both
+  engines against the input makes this engine-vs-**spec**: two equally wrong renders cannot pass.
 - **Undecidable is not a pass.** Displacing a node far from its edges does not produce a *wrong*
   topology, it produces an ambiguous one — every endpoint resolution becomes a coin flip. Collapsing
   that into "equivalent" would let a renderer evade the gate by degrading its own geometry, so a
@@ -223,7 +236,8 @@ up until each normal timed sample spans ≥ 2 ms and divides. A thread sweep rai
 separated by the long Chromium phase. Calibration targets 75 ms to leave headroom for steady-state
 speedup, while the joined result fails closed if either bracket's measured `batch × per-job p50`
 falls below 50 ms. Batching is a timing device only: every iteration still renders the whole
-diagram. mermaid's items are all ≥ 30 ms, so they need no batching.
+job and the result divides only by repeated whole jobs, never by its diagram count. Mermaid's items
+are all ≥ 30 ms, so they need no batching.
 
 **Same-invocation A/A.** The Rust runner factors timing into one paired routine. For every item it
 first calls that routine with `(default, default)`, then with `(default, lean)`. Both arms are timed
@@ -245,10 +259,11 @@ lengths.
 
 **A/A null gate, never CV or MAD.** A row is decidable when all three clauses hold:
 
-1. **the effect CI excludes 1.0** — scored only where an effect CI exists. The headline is
-   cross-runtime, and Rust and JavaScript cannot be two arms of one measured routine, so that ratio
-   has no CI of its own; those rows record `effect_ci_excludes_1: "not_computable"` rather than
-   counting an absent test as satisfied.
+1. **the effect CI excludes 1.0.** Where each engine supplies at least nine raw whole-job samples,
+   the driver independently bootstraps both medians 10,000 times and records the mermaid-js/Rust
+   ratio CI. Items declaring `effect_ci_required` fail closed if that CI is absent or includes 1.0.
+   Older budgeted rows without enough samples retain `not_computable`; they cannot satisfy an item
+   that requires clause 1.
 2. **the effect deviation exceeds 2× the larger null radius**, where
    `radius = max(abs(ci95_lo - 1), abs(ci95_hi - 1))` over the Rust-before, Rust-after and mermaid
    nulls, and the bar is `max(1.01, 1 + 2 * radius)`.
@@ -326,10 +341,17 @@ RAM, NUMA count, inherited affinity, full ISA flags, cpufreq driver/governor/EPP
 requested caller threads, caller workers actually observed during an untimed batch of the exact
 workload, the executing Rust ELF SHA-256, and the loaded mermaid-js bundle SHA-256. Requested
 capacity is never substituted for observed participation.
+An arm above the host's logical CPU count is refused unless `--allow-oversubscription` is present.
+Such a row reports `oversubscribed: true`, the host's logical CPUs, and the exact Rayon workers
+observed executing diagrams. It is an OS-thread scheduling experiment, not a claim that the host
+has that many hardware threads.
 Every sweep additionally requires the complete host cpuset, an Agent Mail claim reference, and a
-one-second idle sample of every logical CPU immediately before every measured phase. Any affinity
-CPU above 20% busy or any power-policy change blocks the invocation with exit 6. The artifact
-retains every per-CPU sample, the baseline and pre-phase power-policy summaries, and the claim
+one-second idle sample of every logical CPU immediately before every measured phase. A phase waits
+for at most 900 consecutive admission samples (15 minutes) and starts only when every affinity CPU
+is at or below
+20% busy with an unchanged power policy; no clear sample within that bounded window blocks the
+invocation with exit 6. The artifact retains every rejected and accepted per-CPU sample, the final
+admission for each phase, the baseline and pre-phase power-policy summaries, and the claim
 reference. CV and MAD remain provenance only.
 
 ### Exclusive `trj` booking
@@ -350,34 +372,28 @@ threads inside each small render regresses, while a CI job supplies hundreds of 
 diagrams over which one pool can amortize startup. Rayon keeps the caller-concurrency mechanism
 portable across x86-64 and aarch64; the harness contains no x86-specific intrinsics.
 
-**Current CI-batch status.** No competitive ratio is certified for `ci_batch_500`. The exact
-structural-equivalence artifact
-`.benchmarks/headtohead/equivalence/equivalence-6bad5768-1785378993496.json` reports 400 equivalent,
-100 divergent, and 0 unverified diagrams. Every divergent diagram is in the `class` family:
-frankenmermaid renders the class name but omits fields and methods that mermaid-js renders
-(`bd-4isi`). The other four families pass this corpus's content gate, with geometric topology
-decided for all 300 flowchart, state, and ER diagrams.
+**Current CI-batch status.** `ci_equiv_512` is a 512-diagram, 10,635-node / 10,123-edge
+equivalence-clean job. Every row ran on `thinkstation1` (32 physical cores / 64 logical threads);
+the process-level worker probe observed exactly the requested participation. The live
+mermaid-js 11.15.0 arm measured 24,351.600 ms for the whole job.
 
-⚠️ **Clause 3 refuses the t=8 row of that sweep.** Its Rust A/A null median sits at 3.154% bias,
-above the 2% bound, so `ci_batch_500@t8` (5,875×) is now **inconclusive pending requalification** in a
-quiet window — not a regression, and not a number to quote. The other six widths survive with null
-median biases of 0.464%–1.424%. Re-certification across the whole artifact history is recorded in
-`.benchmarks/headtohead/recertification/`: 88 rows re-scored, 68 unchanged, 20 previously-passing rows
-refused by clause 3, and **0 rows became newly decidable — so 0 new wins and 0 new losses.** That
-asymmetry is the integrity check: adopting the corrected rule here can only subtract decidability, so
-it cannot have been a loosening. (frankenlibc's adoption released 7 vetoed rows, all of which lost;
-ours releases none, because there was never a straddle veto here to release.)
+| requested | observed | Rust whole-job median | effect ratio and bootstrap 95% CI | corrected gate |
+|---:|---:|---:|---:|---|
+| 1 | 1 | 34.182970 ms | 712.389825× [699.080772×, 736.410175×] | **pass** |
+| 8 | 8 | 4.774816 ms | 5,100.008042× [5,028.063855×, 5,264.077738×] | **pass** |
+| 32 | 32 | 1.683505 ms | 14,464.821904× [14,029.697310×, 15,648.501123×] | **fail** — Rust-before null median 1.025448 |
+| 64 | 64 | 1.820520 ms | 13,376.178235× [13,083.153389×, 13,905.084595×] | **pass** |
+| 128 | 128 (oversubscribed on 64) | 3.440187 ms | 7,078.568694× [6,654.366489×, 7,427.614224×] | **fail** — Rust null medians 0.964308 / 0.968836 |
 
-Recorded thread widths are **requested**; that artifact predates the observed-worker probe. Requested
-and observed were separately confirmed equal for 1, 8, 32 and 64 on `doc_build_40` with
-`FM_H2H_THREAD_PROBE=1`. A **128 arm is not measurable on a 64-thread host**: the runner refuses
-`FM_H2H_THREADS=128` with `exceeds available_parallelism=64`, because observed workers could never
-exceed 64 and the row would be the 64 row under a misleading label. Measuring 128 needs a
-≥128-thread host, or an explicit oversubscription opt-in that does not exist yet.
+Only the three passing rows are competitive claims. The two failed rows are retained because the
+shape is part of the finding, but clause 3 makes them inconclusive. The output gate is SVG
+structural rather than rasterized: 512/512 diagrams passed rendered-text containment, node-set
+equality, cross-engine edge topology, and per-engine topology against input truth. The 128 arm is
+an explicit oversubscription experiment, not a claim that the host has 128 hardware threads.
 
 ## Corpus
 
-33 items in three tiers.
+34 items in three tiers.
 
 **The pinned baseline (13).** Flowcharts (10/100/500 nodes), wide layered DAGs (8×16, 12×24, 16×32 —
 up to 512 nodes / 960 edges), a dense DAG (200 nodes / 790 edges), an SCC-heavy cyclic graph, one
@@ -405,24 +421,27 @@ cluster boundaries constrain placement and force the router around obstacles the
 produce. `er_schema` carries attribute blocks, which makes it text-measurement-bound rather than
 graph-bound.
 
-**Realistic end-to-end tier (8 rows, 5 jobs).** These jobs use seeded, right-skewed distributions
+**Realistic end-to-end tier (9 rows, 5 jobs).** These jobs use seeded, right-skewed distributions
 instead of uniform `Node 123` fixtures:
 
 | User job | Items / sizes | Realism carried by the input |
 |---|---|---|
 | Documentation-site render | `docs_site_50`, `docs_site_200` | 50 and 200 diagrams; flowchart-dominated type mix, right-skewed sizes, non-ASCII and escaping-heavy labels. |
-| CI render farm | `ci_docs_2000`, `ci_docs_5000` | 2,000 and 5,000 diagrams in one whole job, using the same right-skewed five-syntax distribution; traversal, allocation, output ownership, and persistent-pool scheduling stay inside the measured boundary. |
+| CI render farm | `ci_equiv_512`, `ci_docs_2000`, `ci_docs_5000` | `ci_equiv_512` is one 512-process-flowchart job (10,635 nodes, 4–59 per diagram) whose escaping-heavy visible text and every rendered path admit structural, input-grounded comparison. The 2,000/5,000 jobs retain the five-syntax distribution but remain blocked by class-member equivalence. |
 | Live typing preview | `typing_trace_60` | 60 successive keystrokes inside one label of a 40-node flowchart. |
 | Monorepo architecture review | `monorepo_arch_120`, `monorepo_arch_300` | 120 and 300 services across uneven domains; hub-skewed dependencies and cross-domain event links. |
 | Database-catalog publish | `schema_catalog_25` | 25 bounded-context ER diagrams, 8–75 entities each, with skewed relationships and varied field counts/types. |
 
 One sample is the complete named job: source strings in, parse + layout + render, serialized SVG
 strings out. Corpus generation and the caller's final file copy are outside both engines' timers;
-the library work and output serialization that differ between the implementations are inside.
+the library work and output serialization that differ between the implementations are inside. CI
+rows are decided and published as whole-job wall times; a per-diagram mean is not used because it
+would divide away the caller-concurrency effect.
 
-Artifacts are under `.benchmarks/headtohead/realistic-*`. The documentation jobs contain class
-diagrams and therefore remain nonnumeric until `bd-4isi` is fixed and their exact output verdicts
-pass. Other previously timed rows likewise require exact-corpus equivalence before publication.
+Artifacts are under `.benchmarks/headtohead/realistic-*` and
+`.benchmarks/headtohead/ci-equiv-512-*`. The mixed-family documentation jobs contain class diagrams
+and therefore remain nonnumeric until `bd-4isi` is fixed and their exact output verdicts pass.
+Other previously timed rows likewise require exact-corpus equivalence before publication.
 Both monorepo maps pass `mermaid.parse()` but fail in `mermaid.render()` with
 `TypeError: Cannot set properties of undefined (setting 'order')`; they are `CANNOT` and carry no
 ratio.

@@ -172,11 +172,9 @@ impl RenderExecutor {
         if threads == 0 {
             return Err("FM_H2H_THREADS must be at least 1".to_owned());
         }
-        if threads > available_parallelism {
-            return Err(format!(
-                "FM_H2H_THREADS={threads} exceeds available_parallelism={available_parallelism}"
-            ));
-        }
+        // More caller workers than logical CPUs is an explicit oversubscription experiment, not an
+        // invalid pool. The top-level driver requires a separate opt-in before requesting it and
+        // reports both this requested count and the workers actually observed executing diagrams.
         let min_sample_ns =
             std::env::var("FM_H2H_MIN_SAMPLE_NS")
                 .ok()
@@ -225,6 +223,10 @@ impl RenderExecutor {
         } else {
             "scalar"
         }
+    }
+
+    fn oversubscribed(&self) -> bool {
+        self.threads > self.available_parallelism
     }
 
     /// Render every revision in deterministic input order.
@@ -297,6 +299,7 @@ impl RenderExecutor {
 
 struct Stats {
     n: usize,
+    samples: Vec<u64>,
     min: u64,
     p50: u64,
     p95: Option<u64>,
@@ -355,6 +358,7 @@ fn stats(mut xs: Vec<u64>) -> Stats {
     };
     Stats {
         n,
+        samples: xs.clone(),
         min: xs[0],
         p50: median,
         p95: (n >= 20).then(|| pct(95)),
@@ -370,6 +374,7 @@ fn stats(mut xs: Vec<u64>) -> Stats {
 fn ns_json(s: &Stats) -> serde_json::Value {
     serde_json::json!({
         "n": s.n,
+        "samples": &s.samples,
         "min": s.min,
         "p50": s.p50,
         "p95": s.p95,
@@ -730,6 +735,7 @@ fn main() {
             "thread_count_requested": executor.threads,
             "thread_probe_required": executor.thread_probe_enabled,
             "available_parallelism": executor.available_parallelism,
+            "oversubscribed": executor.oversubscribed(),
             "affinity_mask": affinity.mask.as_deref(),
             "affinity_cpus": &affinity.cpus,
             "affinity_source": affinity_source,
@@ -871,6 +877,7 @@ fn main() {
                     "inside_timed_region": false,
                 })),
                 "available_parallelism": executor.available_parallelism,
+                "oversubscribed": executor.oversubscribed(),
                 "affinity_mask": affinity.mask.as_deref(),
                 "affinity_cpus": &affinity.cpus,
                 "affinity_source": affinity_source,
@@ -937,7 +944,9 @@ mod tests {
     #[test]
     fn median_averages_the_two_middle_values() {
         assert_eq!(median(&mut [4.0, 1.0, 3.0, 2.0]), 2.5);
-        assert_eq!(stats(vec![1, 3]).p50, 2);
+        let measured = stats(vec![3, 1]);
+        assert_eq!(measured.p50, 2);
+        assert_eq!(measured.samples, vec![1, 3]);
     }
 
     #[test]

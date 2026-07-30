@@ -25,6 +25,8 @@ const PINS_PATH = join(HERE, 'pins.json');
 const PINS = JSON.parse(readFileSync(PINS_PATH, 'utf8'));
 
 const MIN_CLAIM_RATIO = 1.01;
+const MIN_EFFECT_SAMPLES = 9;
+const EFFECT_BOOTSTRAP_RESAMPLES = 10_000;
 // Clause 3 of the corrected A/A null gate: max |null median - 1|. Bounds arm-order bias without
 // coupling the verdict to the null's precision.
 const NULL_MEDIAN_MAX_BIAS = 0.02;
@@ -32,6 +34,7 @@ const THREAD_SWEEP_MIN_SAMPLE_NS = 50_000_000;
 const THREAD_SWEEP_CALIBRATION_TARGET_NS = 75_000_000;
 const HOST_WIDE_MAX_BUSY_FRACTION = 0.20;
 const HOST_WIDE_QUIET_SAMPLE_MS = 1_000;
+const HOST_WIDE_QUIET_MAX_ATTEMPTS = 900;
 
 function arg(name, fallback = null) {
   const i = process.argv.indexOf(`--${name}`);
@@ -575,6 +578,91 @@ function pct(p, xs) {
   return s[Math.min(s.length - 1, Math.max(0, Math.ceil((p / 100) * s.length) - 1))];
 }
 
+function sampleMedian(samples) {
+  const values = [...samples].sort((a, b) => a - b);
+  const mid = Math.floor(values.length / 2);
+  return values.length % 2 === 0
+    ? (values[mid - 1] + values[mid]) / 2
+    : values[mid];
+}
+
+/**
+ * Independent percentile-bootstrap CI for a ratio of whole-job medians.
+ *
+ * The engines are separate runtimes and cannot be paired inside one timing closure. The enclosing
+ * invocation instead brackets Chromium with the same Rust ELF and gives every engine its own A/A
+ * control. Given those guarded raw whole-job samples, independently resampling the two medians is
+ * the direct effect CI; per-diagram means never enter this calculation.
+ */
+function bootstrapMedianRatioCi(numeratorSamples, denominatorSamples) {
+  const numerator = Array.isArray(numeratorSamples)
+    ? numeratorSamples.filter((value) => Number.isFinite(value) && value > 0)
+    : [];
+  const denominator = Array.isArray(denominatorSamples)
+    ? denominatorSamples.filter((value) => Number.isFinite(value) && value > 0)
+    : [];
+  const sufficient =
+    numerator.length >= MIN_EFFECT_SAMPLES &&
+    denominator.length >= MIN_EFFECT_SAMPLES;
+  const estimate = numerator.length > 0 && denominator.length > 0
+    ? sampleMedian(numerator) / sampleMedian(denominator)
+    : null;
+  if (!sufficient) {
+    return {
+      kind: 'independent_bootstrap_ratio_of_whole_job_medians',
+      sufficient: false,
+      numerator_n: numerator.length,
+      denominator_n: denominator.length,
+      minimum_samples_per_engine: MIN_EFFECT_SAMPLES,
+      resamples: 0,
+      estimate,
+      ci95_lo: null,
+      ci95_hi: null,
+      reason: 'insufficient raw whole-job samples for the cross-runtime effect CI',
+    };
+  }
+
+  let state = 0x9e3779b9;
+  const next = () => {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    return state >>> 0;
+  };
+  const ratios = new Array(EFFECT_BOOTSTRAP_RESAMPLES);
+  const numeratorResample = new Array(numerator.length);
+  const denominatorResample = new Array(denominator.length);
+  for (let iteration = 0; iteration < EFFECT_BOOTSTRAP_RESAMPLES; iteration++) {
+    for (let i = 0; i < numeratorResample.length; i++) {
+      numeratorResample[i] = numerator[next() % numerator.length];
+    }
+    for (let i = 0; i < denominatorResample.length; i++) {
+      denominatorResample[i] = denominator[next() % denominator.length];
+    }
+    ratios[iteration] =
+      sampleMedian(numeratorResample) / sampleMedian(denominatorResample);
+  }
+  ratios.sort((a, b) => a - b);
+  const tail = Math.floor(EFFECT_BOOTSTRAP_RESAMPLES / 40);
+  const ci95Lo = ratios[tail];
+  const ci95Hi = ratios[EFFECT_BOOTSTRAP_RESAMPLES - 1 - tail];
+  return {
+    kind: 'independent_bootstrap_ratio_of_whole_job_medians',
+    sufficient: true,
+    numerator_engine: 'mermaid-js',
+    denominator_engine: 'frankenmermaid',
+    numerator_n: numerator.length,
+    denominator_n: denominator.length,
+    minimum_samples_per_engine: MIN_EFFECT_SAMPLES,
+    resamples: EFFECT_BOOTSTRAP_RESAMPLES,
+    estimate,
+    ci95_lo: ci95Lo,
+    ci95_hi: ci95Hi,
+    excludes_1: ci95Lo > 1 || ci95Hi < 1,
+    unit: 'whole_job_wall_time',
+  };
+}
+
 function validElfSelfReport(record) {
   return (
     record?.record === 'binary' &&
@@ -618,6 +706,7 @@ function validRustThreadProvenance(record, requestedThreads) {
     record.thread_probe?.caller_workers_observed === observed &&
     record.thread_probe?.probe_batch === record.batch &&
     record.thread_probe?.inside_timed_region === false &&
+    record.oversubscribed === (requestedThreads > record.available_parallelism) &&
     Array.isArray(record.affinity_cpus) &&
     record.affinity_cpus.length > 0 &&
     typeof record.affinity_source === 'string'
@@ -687,15 +776,14 @@ function semanticWorkGate(frankenmermaid, incumbent) {
  * [1.011, 1.044] ours is 0.044 against 0.0165. Substituting the narrower reading in the name of
  * "adopting the rule" would have LOOSENED clause 2 while claiming to tighten the gate.
  *
- * Also note what this harness does not have: the headline is cross-runtime, and Rust and JavaScript
- * cannot be two arms of one measured routine, so the effect is a ratio of two separately measured
- * medians with no CI of its own. Clause 1 is therefore reported as `not_computable` for those rows
- * rather than silently counted as satisfied. It is scored where an effect CI does exist.
+ * Cross-runtime rows with enough raw samples use an independent bootstrap ratio-of-medians CI.
+ * Older or explicitly budgeted rows that do not carry enough samples report clause 1 as
+ * `not_computable`; a workload declaring `effectCiRequired` fails closed instead.
  *
  * Null CIs stay in every record as telemetry. They are not a veto: a null whose CI excludes 1.0 has
  * never been able to block a row here, which is the fleet-wide defect this harness never had.
  */
-function medianCiGate(claimRatio, controls, effectCi = null) {
+function medianCiGate(claimRatio, controls, effectCi = null, effectCiRequired = false) {
   const complete =
     Number.isFinite(claimRatio) &&
     claimRatio > 0 &&
@@ -731,9 +819,10 @@ function medianCiGate(claimRatio, controls, effectCi = null) {
   const biases = controls.map((control) => Math.abs(control.median - 1));
   const worstBias = Math.max(...biases);
 
-  const effectCiExcludesOne = effectCi
-    && Number.isFinite(effectCi.ci95_lo)
-    && Number.isFinite(effectCi.ci95_hi)
+  const effectCiAvailable = effectCi?.sufficient !== false
+    && Number.isFinite(effectCi?.ci95_lo)
+    && Number.isFinite(effectCi?.ci95_hi);
+  const effectCiExcludesOne = effectCiAvailable
     ? effectCi.ci95_lo > 1 || effectCi.ci95_hi < 1
     : null;
   const clause2 = claimMagnitude >= minDecidable;
@@ -742,10 +831,14 @@ function medianCiGate(claimRatio, controls, effectCi = null) {
   // stated boundary fail the stated rule. Without this, two repos implementing the same contract
   // can disagree about whether a boundary row is decidable.
   const clause3 = worstBias <= NULL_MEDIAN_MAX_BIAS * (1 + 1e-9);
-  const pass = effectCiExcludesOne !== false && clause2 && clause3;
+  const clause1 = effectCiExcludesOne === true || (!effectCiRequired && effectCiExcludesOne === null);
+  const pass = clause1 && clause2 && clause3;
 
   const reasons = [];
   if (effectCiExcludesOne === false) reasons.push('effect CI includes 1.0');
+  if (effectCiRequired && effectCiExcludesOne === null) {
+    reasons.push('required cross-runtime effect CI is missing or insufficient');
+  }
   if (!clause2) reasons.push('claim does not clear 2x the A/A median-CI radius');
   if (!clause3) {
     reasons.push(
@@ -767,8 +860,9 @@ function medianCiGate(claimRatio, controls, effectCi = null) {
     null_median_max_bias: NULL_MEDIAN_MAX_BIAS,
     clauses: {
       effect_ci_excludes_1: effectCiExcludesOne === null ? 'not_computable' : effectCiExcludesOne,
+      effect_ci_required: effectCiRequired,
       effect_ci_note: effectCiExcludesOne === null
-        ? 'cross-runtime ratio of two separately measured medians has no effect CI'
+        ? 'raw whole-job samples were not sufficient for an independent bootstrap ratio-of-medians CI'
         : null,
       effect_clears_2x_null_radius: clause2,
       null_medians_within_2pct: clause3,
@@ -881,6 +975,23 @@ if (has('self-test')) {
   }
   if (medianCiGate(1000, [perfect, perfect], { ci95_lo: 900, ci95_hi: 1100 }).verdict !== 'pass') {
     throw new Error('an effect CI that excludes 1.0 must satisfy clause 1');
+  }
+  const exactEffect = bootstrapMedianRatioCi(Array(9).fill(200), Array(9).fill(100));
+  if (
+    !exactEffect.sufficient ||
+    exactEffect.estimate !== 2 ||
+    exactEffect.ci95_lo !== 2 ||
+    exactEffect.ci95_hi !== 2 ||
+    medianCiGate(2, [perfect, perfect], exactEffect, true).verdict !== 'pass'
+  ) {
+    throw new Error(`whole-job effect-CI regression: ${JSON.stringify(exactEffect)}`);
+  }
+  const insufficientEffect = bootstrapMedianRatioCi([200], Array(9).fill(100));
+  if (
+    insufficientEffect.sufficient ||
+    medianCiGate(2, [perfect, perfect], insufficientEffect, true).verdict !== 'fail'
+  ) {
+    throw new Error(`required effect-CI sample floor regression: ${JSON.stringify(insufficientEffect)}`);
   }
   // The radius must stay the distance from 1.0 to the FARTHER endpoint, never the CI's own
   // half-width; substituting the latter would loosen clause 2 for every off-centre null.
@@ -1048,6 +1159,8 @@ if (has('self-test')) {
     worker_threads: 4,
     thread_count_requested: 4,
     thread_count_actually_used: 3,
+    available_parallelism: 4,
+    oversubscribed: false,
     batch: 7,
     affinity_cpus: [0, 1, 2, 3],
     affinity_source: 'linux_proc_status',
@@ -1060,6 +1173,14 @@ if (has('self-test')) {
   };
   if (
     !validRustThreadProvenance(validThreads, 4) ||
+    !validRustThreadProvenance({
+      ...validThreads,
+      worker_threads: 8,
+      thread_count_requested: 8,
+      thread_count_actually_used: 7,
+      oversubscribed: true,
+      thread_probe: { ...validThreads.thread_probe, caller_workers_observed: 7 },
+    }, 8) ||
     validRustThreadProvenance({ ...validThreads, thread_count_actually_used: null }, 4)
   ) {
     throw new Error('actual-thread provenance validation regression');
@@ -1124,6 +1245,12 @@ if (has('self-test')) {
       affinity_logical_cpus: liveTopology.affinity_cpus.length,
     },
     actual_thread_probe_gate: 'required',
+    whole_job_effect_ci_gate: {
+      method: 'independent_bootstrap_ratio_of_whole_job_medians',
+      minimum_samples_per_engine: MIN_EFFECT_SAMPLES,
+      resamples: EFFECT_BOOTSTRAP_RESAMPLES,
+      required_when_declared_by_corpus: true,
+    },
     semantic_work_gate: 'required',
     cpu_power_policy_gate: {
       required: true,
@@ -1138,6 +1265,7 @@ if (has('self-test')) {
       all_affinity_cpus: 'required',
       maximum_busy_fraction: HOST_WIDE_MAX_BUSY_FRACTION,
       sample_ms: HOST_WIDE_QUIET_SAMPLE_MS,
+      maximum_admission_attempts: HOST_WIDE_QUIET_MAX_ATTEMPTS,
       before_every_measured_phase: true,
     },
     rust_pre_post_bracket_gate: 'required',
@@ -1203,6 +1331,8 @@ function positiveIntList(raw) {
 
 const threadSweep = positiveIntList(arg('thread-sweep'));
 const exclusiveHostClaim = arg('exclusive-host-claim');
+const allowOversubscription = has('allow-oversubscription');
+const fmBuilder = arg('fm-builder');
 // A speedup over a render that dropped content is not a speedup. Every measured row must be backed
 // by a passing cross-engine equivalence verdict (see equivalence.mjs) produced from the SAME input,
 // the SAME Rust ELF and the SAME mermaid bundle. `--allow-unverified-output` still permits a run --
@@ -1223,6 +1353,10 @@ if (threadSweep.length > 0) {
     console.error(
       '[run] --thread-sweep requires --exclusive-host-claim trj-booking:<Agent-Mail-CLAIM-message-id>',
     );
+    process.exit(2);
+  }
+  if (typeof fmBuilder !== 'string' || fmBuilder.trim().length === 0) {
+    console.error('[run] --thread-sweep requires --fm-builder <rch-worker-id> for executable provenance');
     process.exit(2);
   }
 }
@@ -1287,15 +1421,18 @@ if (threadSweep.length > 0 && !validHostTopology(env)) {
   console.error('[run] INVALID: thread sweeps require host identity, physical/logical topology, RAM, NUMA, and affinity provenance');
   process.exit(2);
 }
-if (threadSweep.some((threads) => threads > env.cpu_count)) {
+const maximumRequestedThreads = threadSweep.length > 0 ? Math.max(...threadSweep) : 1;
+if (maximumRequestedThreads > env.cpu_count && !allowOversubscription) {
   console.error(
-    `[run] --thread-sweep requests ${Math.max(...threadSweep)} threads, but this host reports only ${env.cpu_count} logical CPUs`,
+    `[run] --thread-sweep requests ${maximumRequestedThreads} threads on ${env.cpu_count} logical CPUs; `
+      + 'pass --allow-oversubscription to measure and label that execution model explicitly',
   );
   process.exit(2);
 }
-if (threadSweep.some((threads) => threads > env.affinity_cpus.length)) {
+if (maximumRequestedThreads > env.affinity_cpus.length && !allowOversubscription) {
   console.error(
-    `[run] --thread-sweep requests ${Math.max(...threadSweep)} threads, but this process affinity exposes only ${env.affinity_cpus.length} logical CPUs`,
+    `[run] --thread-sweep requests ${maximumRequestedThreads} threads, but this process affinity exposes only `
+      + `${env.affinity_cpus.length} logical CPUs; pass --allow-oversubscription to measure and label it`,
   );
   process.exit(2);
 }
@@ -1313,6 +1450,7 @@ env.thread_sweep = threadSweep.length > 0
       host_wide_quiescence_required: true,
       host_wide_maximum_busy_fraction: HOST_WIDE_MAX_BUSY_FRACTION,
       host_wide_sample_ms: HOST_WIDE_QUIET_SAMPLE_MS,
+      host_wide_maximum_admission_attempts: HOST_WIDE_QUIET_MAX_ATTEMPTS,
       cpu_power_policy_required: true,
       cpu_isa_provenance_required: true,
       scalar_reference_threads: 1,
@@ -1320,8 +1458,13 @@ env.thread_sweep = threadSweep.length > 0
       incumbent_executor: 'single_page_main_thread',
       min_sample_ns: THREAD_SWEEP_MIN_SAMPLE_NS,
       calibration_target_ns: THREAD_SWEEP_CALIBRATION_TARGET_NS,
+      oversubscription_opt_in: allowOversubscription,
+      maximum_requested_threads: maximumRequestedThreads,
+      host_logical_threads: env.logical_threads,
+      maximum_requested_to_logical_ratio: maximumRequestedThreads / env.logical_threads,
     }
   : null;
+env.fm_builder = fmBuilder;
 
 // CPU pinning for the frankenmermaid runner only (Chromium is multi-process; pinning it would be
 // unfair to mermaid, and we would rather understate our margin than overstate it).
@@ -1353,50 +1496,60 @@ const phaseLoad = [];
 const hostWideQuiescenceChecks = [];
 
 function requireHostWideQuiescence(label) {
-  const livePowerPolicy = cpuPowerPolicy();
-  const livePowerPolicyValid = validCpuPowerPolicy(livePowerPolicy);
-  const powerPolicyMatchesBaseline =
-    livePowerPolicyValid &&
-    sameCpuPowerPolicy(env.power_policy, livePowerPolicy);
-  const cpuClassification = classifyHostWideQuiescence(
-    cpuBusy(HOST_WIDE_QUIET_SAMPLE_MS),
-    env.affinity_cpus,
-    HOST_WIDE_MAX_BUSY_FRACTION,
-  );
-  const record = {
-    ...cpuClassification,
-    phase: label,
-    observed_at: new Date().toISOString(),
-    sample_ms: HOST_WIDE_QUIET_SAMPLE_MS,
-    exclusive_host_claim: exclusiveHostClaim,
-    requirement: 'all affinity CPUs must remain at or below the fixed busy-fraction ceiling',
-    power_policy_valid: livePowerPolicyValid,
-    power_policy_matches_baseline: powerPolicyMatchesBaseline,
-    power_policy: powerPolicySummary(livePowerPolicy),
-    verdict:
-      cpuClassification.verdict === 'clear' &&
-      powerPolicyMatchesBaseline
-        ? 'clear'
-        : 'blocked',
-  };
-  hostWideQuiescenceChecks.push(record);
-  if (record.verdict !== 'clear') {
+  for (let attempt = 1; attempt <= HOST_WIDE_QUIET_MAX_ATTEMPTS; attempt++) {
+    const livePowerPolicy = cpuPowerPolicy();
+    const livePowerPolicyValid = validCpuPowerPolicy(livePowerPolicy);
+    const powerPolicyMatchesBaseline =
+      livePowerPolicyValid &&
+      sameCpuPowerPolicy(env.power_policy, livePowerPolicy);
+    const cpuClassification = classifyHostWideQuiescence(
+      cpuBusy(HOST_WIDE_QUIET_SAMPLE_MS),
+      env.affinity_cpus,
+      HOST_WIDE_MAX_BUSY_FRACTION,
+    );
+    const record = {
+      ...cpuClassification,
+      phase: label,
+      attempt,
+      observed_at: new Date().toISOString(),
+      sample_ms: HOST_WIDE_QUIET_SAMPLE_MS,
+      exclusive_host_claim: exclusiveHostClaim,
+      requirement: 'all affinity CPUs must remain at or below the fixed busy-fraction ceiling',
+      power_policy_valid: livePowerPolicyValid,
+      power_policy_matches_baseline: powerPolicyMatchesBaseline,
+      power_policy: powerPolicySummary(livePowerPolicy),
+      verdict:
+        cpuClassification.verdict === 'clear' &&
+        powerPolicyMatchesBaseline
+          ? 'clear'
+          : 'blocked',
+    };
+    hostWideQuiescenceChecks.push(record);
+    if (record.verdict === 'clear') {
+      console.error(
+        `[run] host-wide exclusivity clear before ${label}: ` +
+        `${record.allowed_cpu_count} CPUs, max ${(record.observed_max_busy_fraction * 100).toFixed(1)}%` +
+        (attempt === 1 ? '' : ` after ${attempt} admission samples`),
+      );
+      return;
+    }
     const busy = record.busy_cpus_above_limit
       .slice(0, 12)
       .map(({ cpu, busy_fraction }) => `cpu${cpu}=${(busy_fraction * 100).toFixed(1)}%`)
       .join(',');
     console.error(
-      `[run] HOST-WIDE EXCLUSIVITY BLOCKED before ${label}: ` +
+      `[run] host-wide exclusivity waiting before ${label} ` +
+      `(attempt ${attempt}/${HOST_WIDE_QUIET_MAX_ATTEMPTS}): ` +
       `missing=[${record.missing_cpus.join(',')}] busy=[${busy}] ` +
       `power-policy=${livePowerPolicyValid ? (powerPolicyMatchesBaseline ? 'match' : 'changed') : 'invalid'} ` +
       `(limit ${(HOST_WIDE_MAX_BUSY_FRACTION * 100).toFixed(1)}%)`,
     );
-    process.exit(6);
   }
   console.error(
-    `[run] host-wide exclusivity clear before ${label}: ` +
-    `${record.allowed_cpu_count} CPUs, max ${(record.observed_max_busy_fraction * 100).toFixed(1)}%`,
+    `[run] HOST-WIDE EXCLUSIVITY BLOCKED before ${label}: no clear sample in ` +
+    `${HOST_WIDE_QUIET_MAX_ATTEMPTS * HOST_WIDE_QUIET_SAMPLE_MS}ms`,
   );
+  process.exit(6);
 }
 
 /** Aggregate scheduler time across all CPUs. Passive: no busy-wait. */
@@ -1662,7 +1815,7 @@ function rowHostWideExclusivity(threads) {
         `frankenmermaid-after-t${threads}`,
       ];
   const checks = phases.map((phase) => {
-    const check = hostWideQuiescenceChecks.find((candidate) => candidate.phase === phase);
+    const check = hostWideQuiescenceChecks.findLast((candidate) => candidate.phase === phase);
     return {
       phase,
       verdict: check?.verdict ?? 'missing',
@@ -1678,6 +1831,7 @@ function rowHostWideExclusivity(threads) {
     exclusive_host_claim: exclusiveHostClaim,
     maximum_busy_fraction: HOST_WIDE_MAX_BUSY_FRACTION,
     sample_ms: HOST_WIDE_QUIET_SAMPLE_MS,
+    maximum_admission_attempts: HOST_WIDE_QUIET_MAX_ATTEMPTS,
     complete_host_cpuset: env.affinity_cpus.length === env.logical_threads,
     baseline_power_policy: powerPolicySummary(env.power_policy),
     phase_checks: checks,
@@ -1763,6 +1917,7 @@ for (const { item, threads } of measurements) {
     id: item.id,
     fm_worker_threads: threads ?? fBefore?.worker_threads ?? 1,
     fm_worker_threads_requested: threads ?? fBefore?.thread_count_requested ?? 1,
+    fm_builder: fmBuilder,
     host_wide_exclusivity: rowHostWideExclusivity(threads),
     host: {
       identity: env.host_identity,
@@ -1862,6 +2017,9 @@ for (const { item, threads } of measurements) {
   row.fm_bracket = bracket;
   row.fm_execution_model = f.execution_model ?? 'scalar';
   row.fm_available_parallelism = f.available_parallelism ?? null;
+  row.fm_oversubscribed = f.oversubscribed === true;
+  row.fm_requested_to_available_ratio =
+    row.fm_worker_threads_requested / Math.max(1, row.fm_available_parallelism ?? 1);
   row.fm_worker_threads_actually_used = f.thread_count_actually_used ?? null;
   row.fm_worker_threads_actually_used_before = fBefore.thread_count_actually_used ?? null;
   row.fm_worker_threads_actually_used_after = fAfter.thread_count_actually_used ?? null;
@@ -1986,14 +2144,20 @@ for (const { item, threads } of measurements) {
   row.mjs_null_control = m.null_control ?? null;
   row.mjs_bytes = m.output_bytes;
   row.mjs_documents_per_second = (m.revisions * 1e9) / m.render_ns.p50;
+  row.measurement_unit = 'whole_job_wall_time';
   row.speedup = m.render_ns.p50 / f.pipeline_ns.p50;
+  row.effect_ci_required = item.effect_ci_required === true;
+  row.effect_ci = bootstrapMedianRatioCi(
+    m.render_ns.samples,
+    f.pipeline_ns.samples,
+  );
   // Noise is one-sided, so the min-vs-min ratio is the estimate least contaminated by preemption.
   // If it disagrees with the p50 ratio, the run was noisy and the claim is not robust.
   row.speedup_min = m.render_ns.min / f.pipeline_ns.min;
   row.speedup_lean = m.render_ns.p50 / f.pipeline_lean_ns.p50;
   row.bytes_ratio = m.output_bytes / f.output_bytes;
   row.bytes_ratio_lean = m.output_bytes / f.output_bytes_lean;
-  if (f.revisions > 1) {
+  if (f.revisions > 1 && row.class !== 'doc_build') {
     // For an editing session the number that matters is the cost of one keystroke's re-render,
     // not the cost of the whole trace.
     row.fm_ns_per_revision = f.pipeline_ns.p50 / f.revisions;
@@ -2004,6 +2168,8 @@ for (const { item, threads } of measurements) {
   row.median_ci_gate = medianCiGate(
     row.speedup,
     [fBefore.null_control, fAfter.null_control, m.null_control],
+    row.effect_ci,
+    row.effect_ci_required,
   );
   row.status = 'ok';
   rows.push(row);
@@ -2057,6 +2223,17 @@ const speedupsMin = ok.map((r) => r.speedup_min);
 const rowLabel = (row) =>
   threadSweep.length > 0 ? `${row.id}@t${row.fm_worker_threads}` : row.id;
 const measurementOrder = phaseLoad.map((phase) => phase.phase);
+const expectedHostWidePhases = threadSweep.length === 0
+  ? []
+  : has('skip-mermaid')
+    ? threadSweep.map((threads) => `frankenmermaid-before-t${threads}`)
+    : [
+        ...threadSweep.map((threads) => `frankenmermaid-before-t${threads}`),
+        'mermaid-js',
+        ...threadSweep.map((threads) => `frankenmermaid-after-t${threads}`),
+      ];
+const finalHostWideChecks = expectedHostWidePhases.map((phase) =>
+  hostWideQuiescenceChecks.findLast((candidate) => candidate.phase === phase));
 const summary = {
   schema: 'frankenmermaid.headtohead.v2',
   env,
@@ -2091,8 +2268,8 @@ const summary = {
       : (allowUnverifiedOutput ? 'admitted_unverified' : 'fail'),
     rule: 'every measured row needs a passing cross-engine equivalence verdict from the same input, '
       + 'Rust ELF and mermaid bundle (scripts/headtohead/equivalence.mjs)',
-    method: 'svg_structural (rendered-text token containment + geometrically reconstructed edge '
-      + 'topology); not byte equality, not a rasterized perceptual diff',
+    method: 'svg_structural (rendered-text token containment + rendered-path edge topology '
+      + 'cross-checked against input truth); not byte equality, not a rasterized perceptual diff',
     allow_unverified_output: allowUnverifiedOutput,
     failures: equivalenceFailures,
     // Spelled out so a row produced under the override cannot be quoted as verified.
@@ -2101,7 +2278,8 @@ const summary = {
         + 'performance observation, not a like-for-like speedup claim'
       : null,
   },
-  median_ci_gate_rule: 'claim magnitude >= max(1.01, 1 + 2 * max(per-engine A/A CI radius))',
+  median_ci_gate_rule: 'effect CI excludes 1.0 when required; claim magnitude >= max(1.01, '
+    + '1 + 2 * max(per-engine A/A CI radius)); every null median stays within 2% of 1.0',
   measurement_order: measurementOrder,
   fm_bracket_gate_rule: 'Rust pre/post drift magnitude <= max(1.01, 1 + 2 * Rust A/A CI radius)',
   fm_bracket_gate_failures: ok
@@ -2113,9 +2291,8 @@ const summary = {
         requested_threads: threadSweep,
         host_wide_exclusivity: {
           verdict:
-            hostWideQuiescenceChecks.length ===
-              (has('skip-mermaid') ? threadSweep.length : threadSweep.length * 2 + 1) &&
-            hostWideQuiescenceChecks.every((check) => check.verdict === 'clear')
+            finalHostWideChecks.length === expectedHostWidePhases.length &&
+            finalHostWideChecks.every((check) => check?.verdict === 'clear')
               ? 'clear'
               : 'blocked',
           exclusive_host_claim: exclusiveHostClaim,
@@ -2123,16 +2300,19 @@ const summary = {
           complete_host_cpuset: env.affinity_cpus.length === env.logical_threads,
           maximum_busy_fraction: HOST_WIDE_MAX_BUSY_FRACTION,
           sample_ms: HOST_WIDE_QUIET_SAMPLE_MS,
+          maximum_admission_attempts: HOST_WIDE_QUIET_MAX_ATTEMPTS,
           checked_before_every_measured_phase: true,
-          expected_check_count: has('skip-mermaid')
-            ? threadSweep.length
-            : threadSweep.length * 2 + 1,
+          expected_phase_count: expectedHostWidePhases.length,
+          sample_attempt_count: hostWideQuiescenceChecks.length,
+          final_phase_checks: finalHostWideChecks,
           checks: hostWideQuiescenceChecks,
         },
         actual_observed_threads: rows
           .filter((row) => Number.isSafeInteger(row.fm_worker_threads_actually_used))
           .map((row) => ({
             requested: row.fm_worker_threads_requested,
+            available_parallelism: row.fm_available_parallelism,
+            oversubscribed: row.fm_oversubscribed,
             before: row.fm_worker_threads_actually_used_before,
             after: row.fm_worker_threads_actually_used_after,
             selected: row.fm_worker_threads_actually_used,
@@ -2242,6 +2422,7 @@ if (summary.thread_sweep) {
     console.log(
       `  requested t${String(r.fm_worker_threads_requested).padStart(3)}  ` +
       `observed ${String(r.fm_worker_threads_actually_used).padStart(3)}  ` +
+      `${r.fm_oversubscribed ? `(oversubscribed on ${r.fm_available_parallelism})  ` : ''}` +
       `${ms(r.fm_p50_ns)} ms  ` +
       `${r.fm_scaling_vs_1t.toFixed(2)}x vs t1  ` +
       `${(r.fm_parallel_efficiency_observed * 100).toFixed(1)}% observed efficiency  ` +
@@ -2262,15 +2443,18 @@ if (summary.speedup) {
   console.log(`speedup vs mermaid ${PINS.mermaid.version} (p50):  min ${summary.speedup.min.toFixed(0)}x  median ${summary.speedup.median.toFixed(0)}x  max ${summary.speedup.max.toFixed(0)}x`);
   console.log(`speedup vs mermaid ${PINS.mermaid.version} (min):  min ${summary.speedup_min_estimator.min.toFixed(0)}x  median ${summary.speedup_min_estimator.median.toFixed(0)}x  max ${summary.speedup_min_estimator.max.toFixed(0)}x`);
 }
-for (const r of ok.filter((x) => x.revisions > 1)) {
-  const unit = r.class === 'doc_build' ? 'diagram' : 're-render';
-  const what = r.class === 'doc_build'
-    ? `${r.revisions} diagrams in one batch`
-    : `${r.revisions} revisions`;
-  const why = r.class === 'doc_build'
-    ? 'a docs build or CI job pays this per diagram.'
-    : 'a live preview redraws on every keystroke.';
-  console.log(`${r.class} ${r.id}: ${what} -- per ${unit} frankenmermaid ${ms(r.fm_ns_per_revision)} ms vs mermaid ${ms(r.mjs_ns_per_revision)} ms (${why})`);
+for (const r of ok.filter((x) => x.class === 'doc_build')) {
+  console.log(
+    `whole job ${r.id}: ${r.revisions} diagrams -- frankenmermaid ${ms(r.fm_p50_ns)} ms vs `
+      + `mermaid ${ms(r.mjs_p50_ns)} ms; no per-diagram mean is used for the verdict`,
+  );
+}
+for (const r of ok.filter((x) => x.class !== 'doc_build' && x.revisions > 1)) {
+  console.log(
+    `${r.class} ${r.id}: ${r.revisions} revisions -- per re-render frankenmermaid `
+      + `${ms(r.fm_ns_per_revision)} ms vs mermaid ${ms(r.mjs_ns_per_revision)} ms `
+      + '(a live preview redraws on every keystroke.)',
+  );
 }
 if (dnf.length) {
   console.log('');
