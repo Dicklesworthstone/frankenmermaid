@@ -25,6 +25,9 @@ const PINS_PATH = join(HERE, 'pins.json');
 const PINS = JSON.parse(readFileSync(PINS_PATH, 'utf8'));
 
 const MIN_CLAIM_RATIO = 1.01;
+// Clause 3 of the corrected A/A null gate: max |null median - 1|. Bounds arm-order bias without
+// coupling the verdict to the null's precision.
+const NULL_MEDIAN_MAX_BIAS = 0.02;
 const THREAD_SWEEP_MIN_SAMPLE_NS = 50_000_000;
 const THREAD_SWEEP_CALIBRATION_TARGET_NS = 75_000_000;
 const HOST_WIDE_MAX_BUSY_FRACTION = 0.20;
@@ -664,7 +667,35 @@ function semanticWorkGate(frankenmermaid, incumbent) {
  * floors. The runtimes cannot share one binary, so each measures its own identical arm twice inside
  * one invocation; the headline claim must clear both bootstrap median CIs by a 2x margin.
  */
-function medianCiGate(claimRatio, controls) {
+/**
+ * Corrected A/A null gate.
+ *
+ * A row is decidable when all three hold:
+ *   1. the effect CI excludes 1.0        -- only where an effect CI exists (see below)
+ *   2. the effect deviation exceeds 2x the larger null radius
+ *   3. EVERY null MEDIAN is within `NULL_MEDIAN_MAX_BIAS` of 1.0
+ *
+ * Clause 3 is the substantive addition, and it is a TIGHTENING. It bounds arm-order bias without
+ * coupling the verdict to how precise the null is. Previously a biased null only inflated the radius
+ * in clause 2, which raises the bar -- but at a 16,000x effect a raised bar is meaningless, so a null
+ * saying "the two identical arms disagreed by 12%" could not stop the row. That is a statement about
+ * the measurement environment being unfit, and it now blocks on its own terms.
+ *
+ * What deliberately did NOT change: `nullRadius` stays `max(|ci95_hi - 1|, |ci95_lo - 1|)`, the
+ * distance from 1.0 to the FARTHER endpoint, not the CI's own half-width `(hi - lo) / 2`. The two
+ * differ whenever a null is off-centre, and ours is always the larger -- for a null of
+ * [1.011, 1.044] ours is 0.044 against 0.0165. Substituting the narrower reading in the name of
+ * "adopting the rule" would have LOOSENED clause 2 while claiming to tighten the gate.
+ *
+ * Also note what this harness does not have: the headline is cross-runtime, and Rust and JavaScript
+ * cannot be two arms of one measured routine, so the effect is a ratio of two separately measured
+ * medians with no CI of its own. Clause 1 is therefore reported as `not_computable` for those rows
+ * rather than silently counted as satisfied. It is scored where an effect CI does exist.
+ *
+ * Null CIs stay in every record as telemetry. They are not a veto: a null whose CI excludes 1.0 has
+ * never been able to block a row here, which is the fleet-wide defect this harness never had.
+ */
+function medianCiGate(claimRatio, controls, effectCi = null) {
   const complete =
     Number.isFinite(claimRatio) &&
     claimRatio > 0 &&
@@ -674,32 +705,80 @@ function medianCiGate(claimRatio, controls) {
         control?.sufficient === true &&
         Number.isFinite(control.half_width) &&
         Number.isFinite(control.ci95_lo) &&
-        Number.isFinite(control.ci95_hi),
+        Number.isFinite(control.ci95_hi) &&
+        // Required by clause 3; a null that cannot report its median cannot be shown unbiased.
+        Number.isFinite(control.median),
     );
+  const rule = 'effect_ci_excludes_1_and_2x_null_radius_and_null_median_within_2pct';
   if (!complete) {
     return {
       verdict: 'fail',
-      rule: 'null_ci95_2x_margin',
+      rule,
       cv_gate: 'never',
       reason: 'missing or insufficient same-invocation A/A null control',
       claim_ratio: claimRatio,
       claim_magnitude: null,
       null_radius: null,
       min_decidable_2x: null,
+      null_median_max_bias: NULL_MEDIAN_MAX_BIAS,
+      clauses: null,
     };
   }
   const claimMagnitude = Math.max(claimRatio, 1 / claimRatio);
   const nullRadius = Math.max(...controls.map((control) => control.half_width));
   const minDecidable = Math.max(MIN_CLAIM_RATIO, 1 + 2 * nullRadius);
+
+  const biases = controls.map((control) => Math.abs(control.median - 1));
+  const worstBias = Math.max(...biases);
+
+  const effectCiExcludesOne = effectCi
+    && Number.isFinite(effectCi.ci95_lo)
+    && Number.isFinite(effectCi.ci95_hi)
+    ? effectCi.ci95_lo > 1 || effectCi.ci95_hi < 1
+    : null;
+  const clause2 = claimMagnitude >= minDecidable;
+  // "Within 2%" is inclusive, so the comparison needs a tolerance: |1.02 - 1| evaluates to
+  // 0.020000000000000018 in binary floating point, which would make a null sitting exactly on the
+  // stated boundary fail the stated rule. Without this, two repos implementing the same contract
+  // can disagree about whether a boundary row is decidable.
+  const clause3 = worstBias <= NULL_MEDIAN_MAX_BIAS * (1 + 1e-9);
+  const pass = effectCiExcludesOne !== false && clause2 && clause3;
+
+  const reasons = [];
+  if (effectCiExcludesOne === false) reasons.push('effect CI includes 1.0');
+  if (!clause2) reasons.push('claim does not clear 2x the A/A median-CI radius');
+  if (!clause3) {
+    reasons.push(
+      `A/A null median bias ${(worstBias * 100).toFixed(3)}% exceeds `
+      + `${(NULL_MEDIAN_MAX_BIAS * 100).toFixed(0)}% (arm-order asymmetry; the measurement `
+      + 'environment was unfit, which says nothing about the effect being real)',
+    );
+  }
+
   return {
-    verdict: claimMagnitude >= minDecidable ? 'pass' : 'fail',
-    rule: 'null_ci95_2x_margin',
+    verdict: pass ? 'pass' : 'fail',
+    rule,
     cv_gate: 'never',
-    reason: claimMagnitude >= minDecidable ? null : 'claim does not clear 2x the A/A median-CI radius',
+    reason: reasons.length === 0 ? null : reasons.join('; '),
     claim_ratio: claimRatio,
     claim_magnitude: claimMagnitude,
     null_radius: nullRadius,
     min_decidable_2x: minDecidable,
+    null_median_max_bias: NULL_MEDIAN_MAX_BIAS,
+    clauses: {
+      effect_ci_excludes_1: effectCiExcludesOne === null ? 'not_computable' : effectCiExcludesOne,
+      effect_ci_note: effectCiExcludesOne === null
+        ? 'cross-runtime ratio of two separately measured medians has no effect CI'
+        : null,
+      effect_clears_2x_null_radius: clause2,
+      null_medians_within_2pct: clause3,
+      null_medians: controls.map((control) => control.median),
+      null_median_biases_pct: biases.map((bias) => Number((bias * 100).toFixed(4))),
+      worst_null_median_bias_pct: Number((worstBias * 100).toFixed(4)),
+      // Retained as telemetry only -- never a veto. See the fleet-wide straddle defect.
+      null_ci95: controls.map((control) => [control.ci95_lo, control.ci95_hi]),
+      null_ci_straddles_1: controls.map((control) => control.ci95_lo <= 1 && control.ci95_hi >= 1),
+    },
   };
 }
 
@@ -762,18 +841,51 @@ function fmBracket(before, after) {
 }
 
 if (has('self-test')) {
-  const perfect = { sufficient: true, n: 9, ci95_lo: 1, ci95_hi: 1, half_width: 0 };
-  const noisy = { sufficient: true, n: 9, ci95_lo: 0.98, ci95_hi: 1.02, half_width: 0.02 };
+  const perfect = { sufficient: true, n: 9, median: 1, ci95_lo: 1, ci95_hi: 1, half_width: 0 };
+  const noisy = { sufficient: true, n: 9, median: 1, ci95_lo: 0.98, ci95_hi: 1.02, half_width: 0.02 };
+  // Clause 3 fixtures. `biased` has a TIGHT CI that excludes 1.0 -- under the fleet-wide straddle
+  // defect this would have vetoed; here it must be judged on its median instead.
+  const biased = { sufficient: true, n: 9, median: 1.05, ci95_lo: 1.048, ci95_hi: 1.052, half_width: 0.052 };
+  const straddleFree = { sufficient: true, n: 9, median: 1.001, ci95_lo: 1.0005, ci95_hi: 1.0015, half_width: 0.0015 };
   const cases = [
     [1.009, [perfect, perfect], 'fail'],
     [1.01, [perfect, perfect], 'pass'],
     [1.039, [perfect, noisy], 'fail'],
     [1.04, [perfect, noisy], 'pass'],
     [2, [perfect, null], 'fail'],
+    // Clause 3 blocks a huge effect when an A/A null shows 5% arm-order asymmetry. Under the old
+    // gate this passed: the bias only raised the bar to 1.104, which 1000x cleared trivially.
+    [1000, [perfect, biased], 'fail'],
+    // A null whose CI EXCLUDES 1.0 but whose median is within 2% must still be decidable. This is
+    // the fleet-wide defect's exact input condition, asserted as a non-veto.
+    [1000, [perfect, straddleFree], 'pass'],
+    // Clause 3 is boundary-exact at 2%.
+    [1000, [perfect, { ...perfect, median: 1.02 }], 'pass'],
+    [1000, [perfect, { ...perfect, median: 1.0201 }], 'fail'],
+    [1000, [perfect, { ...perfect, median: 0.98 }], 'pass'],
+    [1000, [perfect, { ...perfect, median: 0.9799 }], 'fail'],
+    // A null that cannot report a median cannot be shown unbiased.
+    [1000, [perfect, { ...perfect, median: null }], 'fail'],
   ];
   for (const [ratio, controls, want] of cases) {
     const got = medianCiGate(ratio, controls).verdict;
     if (got !== want) throw new Error(`median-CI gate regression: ratio=${ratio} want=${want} got=${got}`);
+  }
+  // Clause 1 is scored only where an effect CI exists, and is never silently counted as satisfied.
+  const noEffectCi = medianCiGate(1000, [perfect, perfect]);
+  if (noEffectCi.clauses.effect_ci_excludes_1 !== 'not_computable') {
+    throw new Error('cross-runtime rows must report clause 1 as not_computable');
+  }
+  if (medianCiGate(1000, [perfect, perfect], { ci95_lo: 0.9, ci95_hi: 1.1 }).verdict !== 'fail') {
+    throw new Error('an effect CI that includes 1.0 must fail clause 1');
+  }
+  if (medianCiGate(1000, [perfect, perfect], { ci95_lo: 900, ci95_hi: 1100 }).verdict !== 'pass') {
+    throw new Error('an effect CI that excludes 1.0 must satisfy clause 1');
+  }
+  // The radius must stay the distance from 1.0 to the FARTHER endpoint, never the CI's own
+  // half-width; substituting the latter would loosen clause 2 for every off-centre null.
+  if (medianCiGate(1.05, [{ ...straddleFree, median: 1.001 }]).null_radius !== 0.0015) {
+    throw new Error('null radius must be max|ci bound - 1|, not (hi-lo)/2');
   }
   const validElf = { record: 'binary', elf_sha256: 'a'.repeat(64), elf_bytes: 1 };
   if (!validElfSelfReport(validElf) || validElfSelfReport({ ...validElf, elf_sha256: 'unavailable' })) {

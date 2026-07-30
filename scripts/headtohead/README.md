@@ -243,11 +243,38 @@ This makes phase-order drift conservative and fail-closed. Aggregate CPU-busy de
 provenance only because they include each engine's own work and span phases of very different
 lengths.
 
-**Median-CI gate, never CV or MAD.** For each engine,
-`radius = max(abs(ci95_lo - 1), abs(ci95_hi - 1))`. A ratio passes only when its magnitude is at least
-`max(1.01, 1 + 2 * max(radius_rs_before, radius_rs_after, radius_js))`. Each null has at least nine
-paired rounds. `cv_pct` and `mad_pct` remain in every record as provenance, with
+**A/A null gate, never CV or MAD.** A row is decidable when all three clauses hold:
+
+1. **the effect CI excludes 1.0** — scored only where an effect CI exists. The headline is
+   cross-runtime, and Rust and JavaScript cannot be two arms of one measured routine, so that ratio
+   has no CI of its own; those rows record `effect_ci_excludes_1: "not_computable"` rather than
+   counting an absent test as satisfied.
+2. **the effect deviation exceeds 2× the larger null radius**, where
+   `radius = max(abs(ci95_lo - 1), abs(ci95_hi - 1))` over the Rust-before, Rust-after and mermaid
+   nulls, and the bar is `max(1.01, 1 + 2 * radius)`.
+3. **every null MEDIAN is within 2% of 1.0** (`null_median_max_bias`), inclusive.
+
+Each null has at least nine paired rounds. `cv_pct` and `mad_pct` remain provenance with
 `cv_gate: "never"`; neither can block a verdict.
+
+**Clause 3 exists because clause 2 alone cannot see arm-order bias.** A biased null inflates the
+radius, which raises the bar — but against a 16,000× effect a raised bar is meaningless, so a null
+reporting that two *identical* arms disagreed by 12% could not stop the row. That is a statement that
+the measurement environment was unfit, and it now blocks on its own terms. Clause 3 is a
+harness-health check, not an effect-size check: it says nothing about whether the effect is real.
+
+**Null CIs are telemetry, never a veto.** A fleet-wide defect in the shared harness contract required
+each null's CI to *include* 1.0 before a row could score, which couples the verdict to the null's
+precision in the wrong direction — a tighter null is likelier to exclude 1.0 and veto its own row.
+This harness never had that clause, and the audit is on the record: seven rows across the artifact
+history carry a null whose CI excludes 1.0, and all seven scored. Every record keeps
+`null_ci_straddles_1` so the absence of a straddle veto stays visible rather than assumed.
+
+**`radius` is not the CI's half-width.** It is the distance from 1.0 to the *farther* endpoint. The
+two differ whenever a null is off-centre and ours is always the larger — for a null of
+`[1.011, 1.044]` ours is `0.044` against `0.0165`. The field is unfortunately named `half_width` in
+the JSON for backwards compatibility; substituting the narrower reading would silently loosen
+clause 2 for every off-centre null.
 
 On a budgeted XL item that cannot afford nine comparator null rounds, the harness still attempts one
 real sample. A timeout can honestly establish DNF. If it completes, the row is inconclusive and the
@@ -330,6 +357,16 @@ structural-equivalence artifact
 frankenmermaid renders the class name but omits fields and methods that mermaid-js renders
 (`bd-4isi`). The other four families pass this corpus's content gate, with geometric topology
 decided for all 300 flowchart, state, and ER diagrams.
+
+⚠️ **Clause 3 refuses the t=8 row of that sweep.** Its Rust A/A null median sits at 3.154% bias,
+above the 2% bound, so `ci_batch_500@t8` (5,875×) is now **inconclusive pending requalification** in a
+quiet window — not a regression, and not a number to quote. The other six widths survive with null
+median biases of 0.464%–1.424%. Re-certification across the whole artifact history is recorded in
+`.benchmarks/headtohead/recertification/`: 88 rows re-scored, 68 unchanged, 20 previously-passing rows
+refused by clause 3, and **0 rows became newly decidable — so 0 new wins and 0 new losses.** That
+asymmetry is the integrity check: adopting the corrected rule here can only subtract decidability, so
+it cannot have been a loosening. (frankenlibc's adoption released 7 vetoed rows, all of which lost;
+ours releases none, because there was never a straddle veto here to release.)
 
 Recorded thread widths are **requested**; that artifact predates the observed-worker probe. Requested
 and observed were separately confirmed equal for 1, 8, 32 and 64 on `doc_build_40` with
