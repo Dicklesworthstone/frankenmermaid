@@ -21,9 +21,17 @@
 
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import {
+  accessSync,
+  constants,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Script } from 'node:vm';
 import { CORPUS, REVISION_SEP, generate, sha256 } from './corpus.mjs';
@@ -51,6 +59,33 @@ function arg(name, fallback = null) {
 }
 const has = (name) => process.argv.includes(`--${name}`);
 const log = (...a) => console.error('[mermaid]', ...a);
+
+function isExecutable(path) {
+  try {
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function resolveChromiumBinary(override, pinned, executable = isExecutable) {
+  const binary = override || pinned;
+  if (
+    typeof binary === 'string' &&
+    binary.length > 0 &&
+    isAbsolute(binary) &&
+    executable(binary)
+  ) {
+    return binary;
+  }
+
+  const source = override ? 'FM_CHROMIUM_BIN' : 'pins.json chromium.binary';
+  throw new Error(
+    `${source} is not an executable absolute path: ${binary || '<missing>'}; ` +
+    'set FM_CHROMIUM_BIN to the absolute path of Chrome or Chromium',
+  );
+}
 
 // ---------------------------------------------------------------- pinned bundle
 
@@ -137,7 +172,7 @@ class Cdp {
 }
 
 async function launchChromium() {
-  const bin = PINS.chromium.binary;
+  const bin = resolveChromiumBinary(process.env.FM_CHROMIUM_BIN, PINS.chromium.binary);
   const profile = mkdtempSync(join(PROFILE_ROOT, 'fm-h2h-profile-'));
   const port = 9500 + Math.floor(Math.random() * 400);
   const proc = spawn(bin, [
@@ -150,15 +185,18 @@ async function launchChromium() {
     '--mute-audio', '--hide-scrollbars',
     'about:blank',
   ], { stdio: ['ignore', 'ignore', 'ignore'] });
+  let spawnError = null;
+  proc.once('error', (error) => { spawnError = error; });
 
   const deadline = Date.now() + 30_000;
   for (;;) {
+    if (spawnError) throw new Error(`chromium failed to start from ${bin}: ${spawnError.message}`);
     if (Date.now() > deadline) { proc.kill('SIGKILL'); throw new Error('chromium did not expose a devtools port within 30s'); }
     try {
       const res = await fetch(`http://127.0.0.1:${port}/json/version`);
       if (res.ok) {
         const info = await res.json();
-        return { proc, port, info, cdp: await Cdp.attach(info.webSocketDebuggerUrl) };
+        return { proc, port, info, bin, cdp: await Cdp.attach(info.webSocketDebuggerUrl) };
       }
     } catch { /* not up yet */ }
     await new Promise((r) => setTimeout(r, 120));
@@ -438,6 +476,28 @@ if (has('self-test')) {
   if (probe.text !== 'ééé' || probe.bytes !== 6) {
     throw new Error(`largest-input probe regression: ${JSON.stringify(probe)}`);
   }
+  if (
+    resolveChromiumBinary('/override/chrome', '/pinned/chromium', (path) => path === '/override/chrome') !==
+    '/override/chrome'
+  ) {
+    throw new Error('chromium override selection regression');
+  }
+  if (
+    resolveChromiumBinary('', '/pinned/chromium', (path) => path === '/pinned/chromium') !==
+    '/pinned/chromium'
+  ) {
+    throw new Error('pinned chromium selection regression');
+  }
+  let missingChromiumRejected = false;
+  try {
+    resolveChromiumBinary('/missing/chrome', '/pinned/chromium', () => false);
+  } catch (error) {
+    missingChromiumRejected =
+      String(error.message).includes(
+        'FM_CHROMIUM_BIN is not an executable absolute path: /missing/chrome',
+      );
+  }
+  if (!missingChromiumRejected) throw new Error('missing chromium executable was not rejected');
   new Script(`(${PAGE_BENCH})`);
   new Script(`(${PAGE_PROBE})`);
   console.log(JSON.stringify({
@@ -445,6 +505,7 @@ if (has('self-test')) {
     perfect,
     insufficient,
     page_functions_compiled: 2,
+    chromium_binary_resolution_cases: 3,
   }));
   process.exit(0);
 }
@@ -515,7 +576,7 @@ const INIT_EXPR = `(() => {
  * followed by a fresh browser before the next item can be measured.
  */
 async function newBrowser() {
-  const { proc, cdp, info } = await launchChromium();
+  const { proc, cdp, info, bin } = await launchChromium();
   const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
   const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
   await cdp.send('Page.enable', {}, sessionId);
@@ -534,7 +595,7 @@ async function newBrowser() {
     default:
       throw new Error(String(init.result.value));
   }
-  return { proc, cdp, sessionId, info };
+  return { proc, cdp, sessionId, info, bin };
 }
 
 function killBrowser(b) {
@@ -543,7 +604,7 @@ function killBrowser(b) {
 }
 
 let browser = await newBrowser();
-log(`browser=${browser.info.Browser} bundle=mermaid@${version}`);
+log(`browser=${browser.info.Browser} binary=${browser.bin} bundle=mermaid@${version}`);
 
 /** Evaluate `fn(args)` in the live page, under an optional wall deadline. */
 function evaluateInPage(fn, args, deadlineMs) {
@@ -662,6 +723,8 @@ try {
       version,
       bundle_url: url,
       bundle_sha256: bundleSha,
+      chromium_binary: browser.bin,
+      chromium_version: browser.info.Browser,
       security_level: securityLevel,
       worker_threads: 1,
       thread_count_requested: 1,

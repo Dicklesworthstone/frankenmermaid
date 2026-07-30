@@ -46,6 +46,10 @@ Useful flags: `--only <corpus_id>[,<corpus_id>…]`, `--reps-scale 0.25` (fast s
 `--exclusive-host-claim trj-booking:<claim-message-id>`, `--pin-cpu auto|N|off`,
 `--out <dir>`, `--update-pins`.
 
+Set `FM_CHROMIUM_BIN=/absolute/path/to/chrome` when the pinned Chromium path is not available on the
+benchmark host. The override must be executable; every incumbent row records the selected path and
+the browser-reported version.
+
 Exit codes: `0` green · `1` an engine errored · `2` invalid arguments or missing mandatory
 environment provenance · `3` corpus drift · `4` median-CI gate failed ·
 `5` the bracketed Rust observations drifted outside their A/A median-CI floor · `6` host-wide

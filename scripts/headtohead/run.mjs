@@ -628,7 +628,11 @@ function validIncumbentThreadProvenance(record) {
     record.thread_count_actually_used === 1 &&
     record.thread_probe?.method === 'single_cdp_page_main_execution_context' &&
     record.thread_probe?.caller_workers_observed === 1 &&
-    record.execution_model === 'single_page_main_thread'
+    record.execution_model === 'single_page_main_thread' &&
+    typeof record.chromium_binary === 'string' &&
+    record.chromium_binary.startsWith('/') &&
+    typeof record.chromium_version === 'string' &&
+    record.chromium_version.length > 0
   );
 }
 
@@ -930,6 +934,8 @@ if (has('self-test')) {
     thread_count_requested: 1,
     thread_count_actually_used: 1,
     execution_model: 'single_page_main_thread',
+    chromium_binary: '/usr/bin/google-chrome',
+    chromium_version: 'Chrome/151.0.0.0',
     thread_probe: {
       method: 'single_cdp_page_main_execution_context',
       caller_workers_observed: 1,
@@ -1709,6 +1715,8 @@ for (const { item, threads } of measurements) {
     row.mjs_worker_threads_actually_used = m.thread_count_actually_used ?? null;
     row.mjs_execution_model = m.execution_model ?? 'single_page_main_thread';
     row.mjs_bundle_sha256 = m.bundle_sha256 ?? null;
+    row.mjs_chromium_binary = m.chromium_binary ?? null;
+    row.mjs_chromium_version = m.chromium_version ?? null;
   }
   // A did-not-finish is a *result*: mermaid was given a wall budget at this size and did not
   // produce a render inside it. We record the budget and derive a lower bound on the speedup; we
