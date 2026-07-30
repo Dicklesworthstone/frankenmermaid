@@ -636,6 +636,29 @@ function validIncumbentThreadProvenance(record) {
   );
 }
 
+function semanticWorkGate(frankenmermaid, incumbent) {
+  const fmCount = frankenmermaid?.revisions;
+  const incumbentCount = incumbent?.revisions;
+  const fmInput = frankenmermaid?.input_sha256;
+  const incumbentInput = incumbent?.input_sha256;
+  const equal =
+    Number.isSafeInteger(fmCount) &&
+    fmCount > 0 &&
+    Number.isSafeInteger(incumbentCount) &&
+    incumbentCount === fmCount &&
+    validSha256(fmInput) &&
+    incumbentInput === fmInput;
+  return {
+    verdict: equal ? 'equal' : 'mismatch',
+    unit: 'diagram_render',
+    frankenmermaid_requested_count: fmCount ?? null,
+    incumbent_requested_count: incumbentCount ?? null,
+    frankenmermaid_input_sha256: fmInput ?? null,
+    incumbent_input_sha256: incumbentInput ?? null,
+    rule: 'both engines must receive the same positive diagram count and byte-identical input',
+  };
+}
+
 /**
  * Decide a cross-runtime ratio against the more conservative of the two engines' in-process A/A
  * floors. The runtimes cannot share one binary, so each measures its own identical arm twice inside
@@ -947,6 +970,19 @@ if (has('self-test')) {
   ) {
     throw new Error('incumbent actual-thread provenance validation regression');
   }
+  const semanticRecord = {
+    revisions: 2_000,
+    input_sha256: 'a'.repeat(64),
+  };
+  if (
+    semanticWorkGate(semanticRecord, semanticRecord).verdict !== 'equal' ||
+    semanticWorkGate(semanticRecord, { ...semanticRecord, revisions: 1_999 }).verdict !==
+      'mismatch' ||
+    semanticWorkGate(semanticRecord, { ...semanticRecord, input_sha256: 'b'.repeat(64) }).verdict !==
+      'mismatch'
+  ) {
+    throw new Error('semantic work-count validation regression');
+  }
   const bracketRecord = (p50, nullControl = perfect) => ({
     status: 'ok',
     pipeline_ns: { p50 },
@@ -976,6 +1012,7 @@ if (has('self-test')) {
       affinity_logical_cpus: liveTopology.affinity_cpus.length,
     },
     actual_thread_probe_gate: 'required',
+    semantic_work_gate: 'required',
     cpu_power_policy_gate: {
       required: true,
       live: powerPolicySummary(livePowerPolicy),
@@ -1717,6 +1754,17 @@ for (const { item, threads } of measurements) {
     row.mjs_bundle_sha256 = m.bundle_sha256 ?? null;
     row.mjs_chromium_binary = m.chromium_binary ?? null;
     row.mjs_chromium_version = m.chromium_version ?? null;
+    row.semantic_work = semanticWorkGate(f, m);
+    if (row.semantic_work.verdict !== 'equal') {
+      hardFail = true;
+      rows.push({
+        ...row,
+        status: 'semantic_work_mismatch',
+        error:
+          'frankenmermaid and mermaid-js must receive the same positive diagram count and byte-identical input',
+      });
+      continue;
+    }
   }
   // A did-not-finish is a *result*: mermaid was given a wall budget at this size and did not
   // produce a render inside it. We record the budget and derive a lower bound on the speedup; we
@@ -1748,11 +1796,6 @@ for (const { item, threads } of measurements) {
   if (!m || m.status !== 'ok') {
     hardFail = true;
     rows.push({ ...row, status: 'comparator_error', error: m?.error ?? 'no result' });
-    continue;
-  }
-  if (f.input_sha256 !== m.input_sha256) {
-    hardFail = true;
-    rows.push({ ...row, status: 'input_mismatch', error: `fm ${f.input_sha256.slice(0, 12)} != mjs ${m.input_sha256.slice(0, 12)}` });
     continue;
   }
   row.mjs_p50_ns = m.render_ns.p50;
