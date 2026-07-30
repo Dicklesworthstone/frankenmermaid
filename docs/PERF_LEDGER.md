@@ -511,3 +511,46 @@ median-CI gates passed, all seven same-ELF brackets passed, and `cv_gate=never`.
   bundle/configuration or API execution model, executing Rust ELF or compiler profile, persistent
   pool semantics, 50 ms sample floor, median-CI/bracket contract, or host core topology changes.
   Do not quote this Threadripper scaling curve for Apple Silicon without a native M4/M5 sweep.
+
+## CANNOT: exact-output gate blocks the realistic 2k/5k CI sweeps (2026-07-29)
+
+**Bead:** `bd-l7d2`. **Lane:** cod (`BlackThrush`).
+
+- **Decision.** No `ci_docs_2000` or `ci_docs_5000` timing was run after the output gate exposed
+  unequal semantic work. Frankenmermaid held no active `trj` claim and did not access the host for
+  this decision; queue withdrawal is Agent Mail message `6501` in `trj-booking`.
+- **Counted mechanism:** the pinned `ci_docs_2000` job contains 190 class diagrams with 3,688 field
+  rows and 1,501 method rows; `ci_docs_5000` contains 482 class diagrams with 9,280 field rows and
+  3,717 method rows. The current frankenmermaid class path omits member content that the incumbent
+  renders, so the target jobs would execute 5,189 and 12,997 fewer rendered member rows
+  respectively. Equal revision counts and input hashes do not make those outputs equivalent.
+- **Fail-closed witness.** Artifact
+  `.benchmarks/headtohead/equivalence/equivalence-6bad5768-1785378993496.json` has SHA-256
+  `a4b8d80c38892062069c9e9e93dbca9a77c0176bad27e7d3b390ccae08d46402`. It links all 500 dumped
+  outputs to the hashes reported by the measured render, records identical input SHA-256
+  `65b8f69a7b2ee114cfb2fb49557b34cbc7e2c15f1414a81b7d94215a46de432f`, and reports 400 equivalent,
+  100 divergent, 0 unverified. Every divergent row is a class diagram. The first sample keeps all
+  eight node IDs and seven edge elements but has 8 frankenmermaid text tokens versus 40 incumbent
+  tokens and omits 32 required member tokens.
+- **Artifact provenance.** The equivalence process self-reported frankenmermaid ELF SHA-256
+  `08cca9e1f3c90784fc232a510917c5c684f04ae4ec87cb878521a4cef47aa030` (7,812,640 bytes).
+  The incumbent was mermaid-js `11.15.0`, bundle SHA-256
+  `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`, through
+  `/usr/bin/chromium-browser`, `Chrome/150.0.7871.128`.
+- **Gate validation.** `node scripts/headtohead/svg_equivalence.mjs --self-test` passed 20 cases:
+  four mutation controls and two negative controls included. The gate treats every divergent or
+  undecidable required invariant as failure.
+- **Historical correction.** The numeric `class_50`, `doc_build_40`, `ci_batch_500`,
+  `docs_site_50`, and `docs_site_200` rows above are known to contain this unequal-work class
+  surface and are not current campaign output. Other numeric rows that predate the exact-output
+  gate remain internal historical measurements, not public competitive claims, until their exact
+  corpora receive a passing linked equivalence artifact. Public docs now state no numeric ratio for
+  jobs where both engines complete.
+- **Concrete retry predicate.** First close `bd-4isi` with class fields and methods present under
+  every production layout/render dispatch used by the harness. Then generate separate exact
+  `ci_docs_2000` and `ci_docs_5000` equivalence artifacts with zero divergent and zero unverified
+  diagrams, linked to the same input SHA-256, process-self-reported ELF, and pinned mermaid-js
+  bundle used for timing. Only after both artifacts pass may a fresh exclusive `trj` claim run the
+  complete 1/2/4/8/16/32/64/96/128 sweeps with per-arm A/A controls, observed worker counts,
+  governor/ISA/topology provenance, and bootstrap median-CI adjudication. CV remains provenance
+  only.

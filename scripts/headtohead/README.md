@@ -13,15 +13,16 @@ as an incumbent win. Internal frankenmermaid before/after ratios are maintenance
 #    --base/--clean-overlay pin the transferred tree to a commit plus ONLY the paths you name, so
 #    the rch project hash stops moving every time the other agent in this shared checkout saves a
 #    file. Without it the hash misses the remote target cache and every build is cold.
-df -h /data  # abort and report if available space is below 120G
+df -h /data  # below 150G means strict-remote-only; never fall back locally
 RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec \
   --base "$(git rev-parse HEAD)" --clean-overlay --no-overlay -- \
   cargo test --profile release -p frankenmermaid-cli --example headtohead
 
-# 2. strict-remote release builds retrieve the executable into this repo's existing target/.
+# 2. strict-remote release builds stay on the worker while the local-build freeze is active.
 #    Never mint a task-specific target directory and never permit silent local fallback.
-#    Replace --no-overlay with one --overlay-path per file you actually changed.
-df -h /data  # the same 120G floor applies
+#    Replace --no-overlay with one --overlay-path per file you actually changed, then use Route 1
+#    to scp only the executable from the worker's .rch-target-<worker>-pool-* directory.
+df -h /data  # the same strict-remote-only floor applies
 RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec \
   --base "$(git rev-parse HEAD)" --clean-overlay \
   --overlay-path crates/fm-cli/examples/headtohead.rs -- \
@@ -85,20 +86,15 @@ Two traps, both specific to a benchmark repo:
   contains the *other* agent's modifications too, which re-imports exactly the churn you are
   excluding. Enumerate the paths you changed, by name, and keep the list minimal.
 
-**Local builds are frozen while `/data` free space is below 150G**, and this repo needs ≥120G on top
-of that because a strict-remote build *retrieves* the executable into the local `target/`. Check `df`
-before either. `force_local = true` stays banned as an rch config setting — it silently redirects
-every future build.
+**Local builds are frozen while `/data` free space is below 150G.** Check `df` before any Cargo
+command. During the freeze, validation uses only
+`RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- ...`; `force_local = true` stays banned.
+When a benchmark executable is needed locally, Route 1 copies that single file from the assigned
+worker's `.rch-target-<worker>-pool-*` directory instead of retrieving a target tree.
 
-Two fleet-wide notes do **not** apply here, verified rather than assumed:
-
-- rch's "no artifact retrieval" limitation is not our situation. A strict-remote build logs
-  `Custom CARGO_TARGET_DIR artifacts retrieved` and writes `target/release/examples/headtohead`
-  locally, which is the binary every harness invocation in this README runs. No `scp` out of the
-  worker's `.rch-target-<worker>-pool-*` directory is needed.
-- There is **no `release-perf` profile** in this workspace. The harness builds and measures
-  `--profile release` (workspace `opt-level="z"` with `opt-level=3` overrides on fm-core, fm-parser,
-  fm-layout and fm-render-svg), which is what every number here claims. Nothing is mislabeled.
+There is **no `release-perf` profile** in this workspace. The harness builds and measures
+`--profile release` (workspace `opt-level="z"` with `opt-level=3` overrides on fm-core, fm-parser,
+fm-layout and fm-render-svg), which is what every number here claims. Nothing is mislabeled.
 
 Worker-built binaries are safe to time on this host, but note the fleet inventory that established
 that missed us: `.cargo/config.toml` pins `-C target-cpu=x86-64-v2` on x86_64. That is a portable

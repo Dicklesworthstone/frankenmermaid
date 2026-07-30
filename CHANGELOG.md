@@ -34,25 +34,20 @@ architecture diagram in 10.80 ms, and a 10,000-entity database schema in 33.03 m
 No speedup ratio is stated for those workloads; the harness records them as
 `CANNOT` and excludes them from every aggregate.
 
-Across the 21 corpus items mermaid-js can render, the full parse → layout →
-render-to-SVG pipeline is a **median 1,193× faster** (1,206× by the min
-estimator; range 381× – 9,486×). For every row, both engines run in the same
-invocation over byte-identical SHA-256-pinned input and each measures an A/A null.
-The identical Rust ELF brackets Chromium, pre/post drift must remain inside its
-A/A floor, and the slower Rust median is used. Every published ratio clears
-twice the largest bootstrap 95% null-CI radius.
+No numeric competitive ratio is currently published for workloads where both
+engines complete. The fail-closed structural-equivalence gate rejects the pinned
+500-diagram CI corpus because all 100 class diagrams omit fields and methods that
+mermaid-js renders. The realistic 2,000- and 5,000-diagram CI jobs contain 190
+and 482 class diagrams respectively and are blocked before timing.
 
-The 500-diagram CI job measures 21.441 ms on the scalar arm versus 18,490.0 ms
-for mermaid-js (**862×**). A persistent caller pool scales the same job to
-1.133 ms at 64 threads (**18.93×** versus the scalar arm and **16,322×** versus
-mermaid-js); every pooled output is byte-identical to the scalar output. The
-1,001-revision live-edit job finishes in 0.956 s with frankenmermaid while
-mermaid-js remains working at the 600-second deadline; that row is a nonnumeric
-`DNF-timeout`.
+Numeric campaign results now require the exact timed corpus to pass with zero
+divergent or unverified diagrams, linked to the same input SHA-256,
+process-self-reported frankenmermaid ELF, and pinned mermaid-js bundle used in the
+same invocation. Each engine also carries a same-invocation A/A control; bootstrap
+median-CI is the acceptance gate and CV is provenance only.
 
-The realistic whole-job tier measures 50- and 200-diagram documentation-site renders
-at **434×** and **534×**, a 60-keystroke live-preview session at **1,193×**, and a
-25-schema database-catalog publish at **413×**. Mermaid-js accepts the 120- and
+The 1,001-revision live-edit job remains a nonnumeric `DNF-timeout`: mermaid-js
+is still working at the 600-second deadline. Mermaid-js accepts the 120- and
 300-service monorepo architecture inputs in its parser, then its renderer raises
 `TypeError: Cannot set properties of undefined (setting 'order')`; those rows are
 `CANNOT` with no ratio.

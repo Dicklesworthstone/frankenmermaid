@@ -1618,95 +1618,35 @@ A 1,001-revision live-edit job over a growing 500-node flowchart completes in 0.
 frankenmermaid. Mermaid-js remains working at the 600-second deadline. That row is a `DNF-timeout`,
 not a crash, and has no point ratio.
 
-#### CI-scale batch concurrency
+#### Numeric campaign status
 
-On the 32-core / 64-thread Threadripper PRO 5975WX, one persistent caller pool renders the same
-500-diagram CI job at every width below. The incumbent arm is mermaid-js's single-page main-thread
-API in the same invocation; its whole-job median is 18,490.000 ms.
+No numeric competitive ratio is currently published for jobs where both engines complete. The
+fail-closed cross-engine structural gate currently rejects the pinned 500-diagram CI corpus:
+400 diagrams are equivalent, while all 100 class diagrams are divergent because frankenmermaid
+omits fields and methods that mermaid-js renders.
 
-| Caller threads | frankenmermaid whole job | Scaling vs 1 thread | vs mermaid-js 11.15.0 |
-|---:|---:|---:|---:|
-| 1 | 21.441 ms | 1.00× | **862×** |
-| 2 | 11.659 ms | 1.84× | **1,586×** |
-| 4 | 6.047 ms | 3.55× | **3,058×** |
-| 8 | 3.147 ms | 6.81× | **5,875×** |
-| 16 | 1.913 ms | 11.21× | **9,665×** |
-| 32 | 1.232 ms | 17.40× | **15,003×** |
-| 64 | 1.133 ms | 18.93× | **16,322×** |
+The realistic 2,000- and 5,000-diagram CI corpora contain 190 and 482 class diagrams respectively,
+so they are not admitted to timing. A competitive number requires the exact timed corpus to pass
+with zero divergent or unverified diagrams, linked to the same input SHA-256, process-self-reported
+frankenmermaid ELF, and pinned mermaid-js bundle used by the timing invocation.
 
-Every pooled width produces the same input, default-SVG, and lean-SVG SHA-256 as the scalar arm.
-The pool is ISA-neutral caller concurrency rather than an x86-specific renderer path; no Apple
-Silicon timing is claimed.
-Thread-sweep admission requires an Agent Mail claim reference plus a clear one-second sample at or
-below 20% busy on every logical CPU in the complete host cpuset before every measured phase.
-The pinned CI corpus also contains realistic 2,000- and 5,000-diagram whole jobs; no performance
-figure is published for those jobs until an exclusive-host invocation passes every gate.
+**How numeric claims are admitted:**
 
-#### Realistic whole jobs
-
-Each row below is a complete library job: realistic source strings in; parse, layout, render, and
-serialized SVG strings out. The seeded inputs use right-skewed diagram sizes, a
-flowchart-dominated documentation mix, escaping-heavy labels, hub-skewed service dependencies, and
-skewed schema sizes rather than uniform microbench fixtures.
-
-| User job | Realistic size | frankenmermaid | mermaid-js 11.15.0 | Result |
-|---|---|---:|---:|---:|
-| Documentation-site render | 50 diagrams, 940 nodes total | 5.887 ms | 2,555.8 ms | **434×** |
-| Documentation-site render | 200 diagrams, 3,164 nodes total | 19.013 ms | 10,160.1 ms | **534×** |
-| Live typing preview | 60 successive keystrokes on a 40-node diagram | 4.412 ms | 5,264.3 ms | **1,193×** |
-| Database-catalog publish | 25 schemas, 8–75 entities each | 15.857 ms | 6,546.1 ms | **413×** |
-| Monorepo architecture review | 120 and 300 services, 185 and 464 dependencies | Renders both | Parser accepts both; renderer raises `TypeError` | **CANNOT; no ratio** |
-
-The architecture inputs pass mermaid-js's own parser before its renderer raises
-`TypeError: Cannot set properties of undefined (setting 'order')`. They remain nonnumeric and are
-excluded from every speedup aggregate.
-
-#### Speedup where both engines complete
-
-Across the 21 corpus items mermaid-js can render, each measured side-by-side in one invocation
-against pinned mermaid-js `11.15.0`:
-
-| Metric | frankenmermaid vs mermaid-js |
-|---|---|
-| **Median** | **1,193×** faster (1,206× by the min estimator) |
-| Range | 381× – 9,486× |
-
-| Workload | frankenmermaid | mermaid-js 11.15.0 | |
-|---|---|---|---|
-| 1,000-entity database schema | 1.82 ms | 17,258 ms | **9,486×** |
-| 500-node flowchart | 0.350 ms | 1,228 ms | **3,504×** |
-| Dense DAG, 200 nodes / 790 edges | 0.384 ms | 1,805 ms | **4,696×** |
-| 40-diagram documentation build | 0.038 ms/diagram | 37.0 ms/diagram | **964×** |
-| 500-diagram CI render, scalar | 21.441 ms/job | 18,490.0 ms/job | **862×** |
-| 500-diagram CI render, 64 caller threads | 1.133 ms/job | 18,490.0 ms/job | **16,322×** |
-| 200-diagram realistic documentation site | 0.095 ms/diagram | 50.8 ms/diagram | **534×** |
-| 25-schema realistic database catalog | 0.634 ms/schema | 261.8 ms/schema | **413×** |
-| 21-revision live-edit session | 0.125 ms/keystroke | 148.2 ms/keystroke | **1,185×** |
-| 60-keystroke realistic typing session | 0.074 ms/keystroke | 87.7 ms/keystroke | **1,193×** |
-| 201-revision live-edit session | 0.224 ms/keystroke | 1,316.2 ms/keystroke | **5,885×** |
-
-Every numeric row above clears the gate described below. The harness self-reports the SHA-256 of the
-executing binary (`a23cf867…` for the 20 other corpus rows and `600cd6b7…` for the CI thread
-sweep), verifies a SHA-256 pin for each corpus item and for the mermaid bundle, and asserts at
-runtime that the object answering `render()` is the pinned mermaid-js and not a dispatched stand-in.
-The seven CI widths are one workload repeated to measure scaling, so only its scalar row participates
-in the 21-item corpus aggregate.
-
-**How these numbers are kept honest** (this is a performance-campaign release — see [`CHANGELOG.md`](CHANGELOG.md)):
-
-- **Same-input, same-target comparison.** A dominance claim counts only as `mermaid_js_time / frankenmermaid_time` for the *same* diagram, render target, warmup policy, and output-validity gate — never cross-machine or cross-workload.
-- **Paired-null median-CI gate.** Each engine runs a same-invocation A/A control. The driver also
-  runs the identical self-reporting Rust ELF before and after Chromium, requires byte-identical
-  output and pre/post drift inside the Rust A/A floor, and uses the slower Rust median. The
-  cross-runtime ratio must clear twice the largest bootstrap 95% null-CI radius. CV, MAD, and global
-  phase load are reported, never gated on.
-- **Paired-null for micro-levers.** Individual optimizations are A/B'd same-invocation with interleaved arms and a no-op/null control; because code-layout noise moves wall-time by ~5%, load-independent **instruction-count** is the arbiter for sub-noise levers.
-- **SVG output stays byte-identical.** Render optimizations are gated on `sha256`-identical SVG across the shape battery + golden snapshots — a faster renderer that changed a single byte is rejected.
-- **Every rejected lever is logged.** [`docs/NEGATIVE_EVIDENCE.md`](docs/NEGATIVE_EVIDENCE.md) records the reverted/washed experiments alongside the kept wins, so the campaign's win-rate is auditable rather than survivorship-filtered.
-- **The rejections are themselves audited, and the audit is enforced.** [`docs/LEDGER_RESURRECTION.md`](docs/LEDGER_RESURRECTION.md) asks of every rejected lever a harder question than "was it slow" — *could this measurement have detected the lever at all?* `scripts/ledger_preflight.mjs` fails CI on a REJECT row without an explicit same-invocation A/A result or counted mechanism, and on a KEEP row without a process-self-reported executing-ELF SHA-256.
-- **A comparator that cannot render is never scored as a win.** Where mermaid-js crashes, the harness records `CANNOT` and the row is excluded from the median rather than converted into a speedup.
-
-Environment for the headline run: AMD Ryzen Threadripper PRO 5975WX, `rustc` nightly, release profile (`opt-level=3` for the hot crates, `lto=fat`, `codegen-units=1`, `target-cpu=x86-64-v2`).
+- **Actual incumbent in the same invocation.** The pinned mermaid-js arm runs beside
+  frankenmermaid over the same input, render target, and warmup policy.
+- **Cross-engine output equivalence.** One shared structural extractor checks rendered content for
+  both engines; same-engine byte identity proves determinism but cannot prove equivalent work.
+- **Paired-null median-CI gate.** Each engine carries a same-invocation A/A control. The identical
+  self-reporting Rust ELF runs before and after Chromium, and the slower Rust median is used. The
+  ratio must clear twice the largest bootstrap 95% null-CI radius. CV, MAD, and phase load are
+  provenance only.
+- **Counted work before timing.** Requested and rendered revision counts, input hashes, and observed
+  worker counts must agree. A renderer that omits content is not a faster implementation of the
+  same job.
+- **Every rejected lever is logged.** [`docs/NEGATIVE_EVIDENCE.md`](docs/NEGATIVE_EVIDENCE.md)
+  records failed and inconclusive experiments with concrete retry predicates.
+- **Comparator failures stay nonnumeric.** A mermaid-js crash is recorded as `CANNOT`, and a
+  timeout as `DNF`; neither is converted into a point ratio or mixed into a numeric aggregate.
 
 ### Per-phase scaling
 
@@ -2167,7 +2107,7 @@ When `fnx-integration` is on, `fm-layout` consults `franken_networkx` for graph 
 
 ### Is the WASM binary small?
 
-The release profile is tuned for it: `opt-level = "z"`, `lto = true`, `codegen-units = 1`, `panic = "abort"`, `strip = true`. The layout crate is the exception (`opt-level = 3`) because it's the computational bottleneck. The exact bundle size depends on which features you enable; the default WASM build is competitive with mermaid-js's gzipped bundle while running orders of magnitude faster on large graphs.
+The release profile is tuned for it: `opt-level = "z"`, `lto = true`, `codegen-units = 1`, `panic = "abort"`, `strip = true`. The layout crate is the exception (`opt-level = 3`) because it's the computational bottleneck. The exact bundle size depends on which features you enable; competitive performance claims are admitted only by the pinned head-to-head output-equivalence and timing gates described above.
 
 ## Using frankenmermaid as a Rust library
 

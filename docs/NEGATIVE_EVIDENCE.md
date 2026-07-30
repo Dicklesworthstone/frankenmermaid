@@ -19185,6 +19185,45 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
 
   Agent: cod (YellowSwan)
 
+### CANNOT: realistic 2k/5k CI sweeps fail semantic-work admission before timing (2026-07-29)
+
+- **Bead / surface:** `bd-l7d2`; `ci_docs_2000` and `ci_docs_5000` whole-job thread sweeps.
+- **Prior gates satisfied off-host:** portable executable `FM_CHROMIUM_BIN` selection landed in
+  `6bad5768`; equal positive revision count plus identical cross-engine input SHA-256 admission
+  landed in `2426fa7a`; the cross-engine structural output gate landed in `9d9a97a7`.
+- **Counted mechanism:** `ci_docs_2000` contains 190 class diagrams, 3,688 field rows, and 1,501
+  method rows. `ci_docs_5000` contains 482 class diagrams, 9,280 field rows, and 3,717 method rows.
+  The current frankenmermaid class path omits this member content while mermaid-js renders it:
+  5,189 and 12,997 rendered member rows of unequal work respectively. This is a correctness
+  admission failure, not a timing loss, noisy sample, CV decision, or theoretical ceiling.
+- **Independent gate result:** the checked-in 500-diagram witness
+  `.benchmarks/headtohead/equivalence/equivalence-6bad5768-1785378993496.json` is SHA-256
+  `a4b8d80c38892062069c9e9e93dbca9a77c0176bad27e7d3b390ccae08d46402` and links every dumped SVG
+  to the output hash reported by its engine. It reports 400 equivalent, 100 divergent, and 0
+  unverified diagrams; all 100 divergent rows are the class family. Its first divergent sample
+  retains eight node IDs and seven edge elements but has only 8 frankenmermaid text tokens versus
+  40 incumbent tokens, with 32 required member tokens missing.
+- **Controls and provenance:** `svg_equivalence.mjs --self-test` passed all 20 cases, including four
+  mutation and two negative controls. The process self-reported frankenmermaid ELF
+  `08cca9e1f3c90784fc232a510917c5c684f04ae4ec87cb878521a4cef47aa030`; the incumbent is pinned
+  mermaid-js `11.15.0`, bundle
+  `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`, in
+  `/usr/bin/chromium-browser` (`Chrome/150.0.7871.128`).
+- **Verdict:** CANNOT, no ratio. No new `trj` claim was acquired, no target-host work ran, and no
+  timing sample exists to quote. Agent Mail `trj-booking` message `6501` withdraws frankenmermaid
+  from the queue without consuming a host window. The invalid numeric mixed-class rows remain only
+  as internal correction history in `docs/PERF_LEDGER.md`; public surfaces contain no numeric
+  competitive claim for jobs where both engines complete.
+- **Concrete retry predicate:** close P0 bug `bd-4isi`, then require separate exact-corpus
+  equivalence artifacts for `ci_docs_2000` and `ci_docs_5000` with zero divergent and zero
+  unverified diagrams. Each artifact must match the timing input SHA-256, process-self-reported
+  frankenmermaid ELF, and pinned mermaid-js bundle. Only then requeue a fresh exclusive `trj`
+  invocation for all nine widths, with per-arm same-invocation A/A, requested and observed worker
+  counts, unchanged governor/ISA/topology provenance, and bootstrap median-CI gating. Never use CV
+  as the acceptance gate.
+
+  Agent: cod (BlackThrush)
+
 ### REJECT x3 / HARNESS ARTIFACT: 120-service architecture absolute timing and right-skewed probe selection (2026-07-28)
 
 - **Campaign / bead:** Phase 2 realistic whole jobs, `bd-c0bn`; cod /
