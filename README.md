@@ -1629,25 +1629,23 @@ out, renders, and serializes all 512 diagrams; frankenmermaid's timer-floor batc
 The comparator is live, not a recorded number: the same driver invocation drove the pinned
 mermaid-js 11.15.0 bundle (SHA-256 `70137e77…`, `securityLevel=strict`) through Chrome
 150.0.7871.128, which reported **one** requested and one actually-used main execution thread. Nine
-independent whole-job samples give a **24,351.600 ms** median.
+independent whole-job samples give a **23,143.400 ms** median.
 
 The full caller-width sweep, with worker threads *observed* by an instrumented caller-worker union
 over the exact workload rather than merely requested:
 
 | Caller workers requested / observed | frankenmermaid whole-job median | mermaid-js / frankenmermaid (95% effect CI) | Disposition |
 |---:|---:|---:|---|
-| 1 / 1 | 34.182970 ms | **712.389825×** [699.080772×, 736.410175×] | published |
-| 8 / 8 | 4.774816 ms | **5,100.008042×** [5,028.063855×, 5,264.077738×] | published |
-| 32 / 32 | 1.683505 ms | 14,464.821904× [14,029.697310×, 15,648.501123×] | *withheld* — A/A null median 1.025448 |
-| 64 / 64 | 1.820520 ms | **13,376.178235×** [13,083.153389×, 13,905.084595×] | published |
-| 128 / 128, oversubscribed | 3.440187 ms | 7,078.568694× [6,654.366489×, 7,427.614224×] | *withheld* — A/A null medians 0.964308 / 0.968836 |
+| 1 / 1 | 27.163878 ms | **851.991752×** [829.496662×, 864.950012×] | published |
+| 16 / 16 | 2.268598 ms | **10,201.631140×** [9,948.470738×, 10,354.943811×] | published |
+| 64 / 64 | 0.844039 ms | **27,419.823018×** [26,615.673663×, 28,086.705990×] | published |
+| 128 / 128, oversubscribed | 0.929700 ms | **24,893.406475×** [24,587.586149×, 25,479.865441×] | published |
 
-Observed width matched the request at every point, and all five widths carried a passing
-equivalence verdict and a passing same-ELF pre/post bracket. The two withheld rows failed only the
-corrected gate's third clause — their same-invocation A/A null medians drifted past the 2%
-arm-order-bias limit — so their ratios are measurements, not claims. The fastest *publishable*
-width is 64 workers, at 18.78× the single-worker job and 29.3% parallel efficiency; 8 workers give
-7.16×. Deliberate 128-way oversubscription regresses to 3.440187 ms.
+Observed width matched the request at every point, and all four widths carried a passing
+equivalence verdict, same-ELF pre/post bracket, and corrected A/A median-CI gate. The fastest width
+is the 64-physical-core frontier: **32.18×** the single-worker job at 50.3% observed parallel
+efficiency. Deliberate 128-way SMT oversubscription remains faster than 16 workers but regresses
+slightly from the physical-core optimum.
 
 **The output-equivalence check is SVG structural equivalence** — not byte equality, and not a
 rasterized perceptual diff. A pixel diff would report a large distance between two correct renders

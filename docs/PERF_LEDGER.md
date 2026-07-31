@@ -1238,3 +1238,60 @@ admissible because a separate mandatory provenance field failed.
   process-self-reporting strict-RCH ELF, complete host/governor/ISA provenance, and the unchanged
   corrected null gate. Never copy the untimed equivalence run's observed count into this rejected
   timing row.
+
+## CERTIFIED INCUMBENT WIN: 512-diagram physical-core render job (2026-07-31)
+
+**Bead:** `bd-yqmd`. **Lane:** cod (`DarkDeer`).
+**Campaign result class:** incumbent-win
+**Executing ELF SHA-256 (self-reported by process):** `c50a54df2be20ee29959297a435f36c2db0500e9c84866dcf31a649aff4398b3`
+**Legacy incumbent arm (same invocation):** name=mermaid-js version=11.15.0 artifact_sha256=70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de invocation_id=a1be1207-1785504206583 measured_ratio=27419.823018x
+**A/A null control (same invocation):** at the selected 64-worker frontier, Rust-before median
+`0.998500`, bootstrap 95% CI `[0.988183, 1.005099]`; Rust-after median `1.000805`, CI
+`[0.995813, 1.007383]`; mermaid-js median `1.001512`, CI `[0.986584, 1.016601]`. Every
+before/after/incumbent null median at every width is inside `[0.98, 1.02]`; `cv_gate=never`.
+**Counted mechanism:** widening the borrowed flowchart-node fast path to complete double-quoted
+rectangular labels reduced an exact-output interleaved screen from `18,527,415,007` to
+`16,150,415,725` instructions (**-12.83%**) and from `8,872,014,959` to `7,766,793,808`
+cycles (**-12.46%**). It bypasses Chumsky for all 10,635 quoted node declarations in this corpus.
+
+- **Whole-job result.** One sample parses, lays out, renders, and serializes all **512** flowcharts
+  as one job: 10,635 nodes, 10,123 edges, 402,843 input bytes. The live incumbent median was
+  **23,143.400 ms** from nine independent whole-job samples. The selected 64-worker Rust median is
+  the slower side of its same-ELF bracket, **0.844039 ms**, for **27,419.823018x** with bootstrap
+  95% effect CI **[26,615.673663x, 28,086.705990x]**.
+
+| requested / observed Rust workers | conservative Rust median | mermaid-js / Rust, bootstrap 95% effect CI | A/A medians (Rust before / after / JS) | verdict |
+|---:|---:|---:|---:|---|
+| 1 / 1 | 27.163878 ms | 851.991752x [829.496662x, 864.950012x] | 1.000067 / 1.001329 / 1.001512 | incumbent-win |
+| 16 / 16 | 2.268598 ms | 10,201.631140x [9,948.470738x, 10,354.943811x] | 1.007489 / 0.999103 / 1.001512 | incumbent-win |
+| **64 / 64** | **0.844039 ms** | **27,419.823018x [26,615.673663x, 28,086.705990x]** | 0.998500 / 1.000805 / 1.001512 | **incumbent-win** |
+| 128 / 128 | 0.929700 ms | 24,893.406475x [24,587.586149x, 25,479.865441x] | 0.994054 / 1.001839 / 1.001512 | incumbent-win |
+
+- **Scaling and identity.** The physical-core frontier scales **32.18x** from the scalar row, with
+  50.3% observed parallel efficiency. SMT oversubscription remains valid but is slower. Every width
+  self-reported its requested worker count and the identical SVG SHA-256
+  `787024772b946413b6d76c7b0293a0e339a6fb3cc565aa07f8fb657153be27a4`.
+- **Output equivalence.** All **512/512** diagrams passed rendered-text, node-ID, cross-engine edge
+  topology, and input-derived topology checks; zero were divergent or unverified. The exact timed
+  dumps link to the equivalence artifact: frankenmermaid SHA-256 `787024772b946413b6d76c7b0293a0e339a6fb3cc565aa07f8fb657153be27a4`,
+  mermaid-js SHA-256 `b4d3ab5b9025d40245c6bfb259af9e61b4446a3790e0e838873968f362337bd4`.
+- **Harness transport boundary.** Mermaid still executes the entire 512-render job in one page
+  evaluation and times it in-page. After that timer stops, the harness retrieves the 20.6 MB SVG
+  array in bounded CDP chunks; this avoids Node's WebSocket frame ceiling without splitting or
+  shortening incumbent work.
+- **Host and executable provenance.** `threadripperje`, AMD Ryzen Threadripper PRO 5995WX,
+  64 physical cores / 128 logical threads, complete 128-CPU affinity, `amd-pstate-epp` performance
+  governor/EPP, boost enabled, AVX2/FMA/BMI2/VAES present and AVX-512 absent. Strict RCH worker
+  `hz2` built the 7,902,736-byte ELF with Rust nightly `8ab9fdff5`; all nine phase admissions passed
+  the fixed 20%-per-CPU gate under central claim `trj-booking:7952`.
+- **Evidence.** Summary
+  `.benchmarks/headtohead/ci-equiv-512-sweep/summary-a1be1207-1785504206583.json`
+  (SHA-256 `0b3807102129d105bc62a68d83968d03d656f5488fd81928dba6b2f3a401fb69`);
+  raw JSONL `.benchmarks/headtohead/ci-equiv-512-sweep/run-a1be1207-1785504206583.jsonl`
+  (SHA-256 `8664f5a86b461a75d85141d05378ea0b9b8a2a726165700b19e32953425574df`);
+  equivalence artifact
+  `.benchmarks/headtohead/ci-equiv-512-equivalence/equivalence-a1be1207-1785502086233.json`
+  (SHA-256 `36882b30c75b604747aa61d6c324e6ed265ff5a000d02cc1922b05fce928457a`).
+- **Retry predicate.** Re-run only if the corpus, equivalence contract, pinned incumbent, executing
+  ELF/compiler profile, persistent-pool semantics, thread frontier, timer boundary, or corrected
+  median-CI gate changes.
