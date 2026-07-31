@@ -32,6 +32,18 @@ const EFFECT_BOOTSTRAP_RESAMPLES = 10_000;
 const NULL_MEDIAN_MAX_BIAS = 0.02;
 const THREAD_SWEEP_MIN_SAMPLE_NS = 50_000_000;
 const THREAD_SWEEP_CALIBRATION_TARGET_NS = 75_000_000;
+// `bd-ap4v` retry predicate. The first public-parser incumbent attempt integrated a 74.420081 ms
+// Rust sample and failed corrected null clause 3 (Rust-before median 0.959104, 4.090% from 1.0).
+// A scalar parse job is short enough that arm-order bias lands inside the sample, so the retry is
+// admitted only at a predeclared 250 ms floor -- five times the sweep floor -- which is declared
+// here, stamped into the artifact, and enforced against every effect AND null arm. Raising the
+// floor is not a retry for a friendlier null: it changes the measured quantity, so the row is
+// re-adjudicated once and a second null failure closes the environment rather than looping.
+// The Rust runner derives its calibration target as floor + ceil(floor/2); this mirror must track
+// that single rule exactly, or the gate rejects every record it is handed.
+const PARSE_MIN_SAMPLE_NS = 250_000_000;
+const PARSE_CALIBRATION_TARGET_NS =
+  PARSE_MIN_SAMPLE_NS + Math.ceil(PARSE_MIN_SAMPLE_NS / 2);
 const HOST_WIDE_MAX_BUSY_FRACTION = 0.20;
 const HOST_WIDE_QUIET_SAMPLE_MS = 1_000;
 const HOST_WIDE_QUIET_MAX_ATTEMPTS = 900;
@@ -46,6 +58,12 @@ if (!['render', 'parse'].includes(measurementMode)) {
   console.error(`[run] --mode must be render or parse, got ${JSON.stringify(measurementMode)}`);
   process.exit(2);
 }
+// One source of truth for the integration floor, so the value handed to the Rust runner, the value
+// stamped into the artifact, and the value the gate re-checks can never drift apart.
+const minSampleNs = () =>
+  measurementMode === 'parse' ? PARSE_MIN_SAMPLE_NS : THREAD_SWEEP_MIN_SAMPLE_NS;
+const calibrationTargetNs = () =>
+  measurementMode === 'parse' ? PARSE_CALIBRATION_TARGET_NS : THREAD_SWEEP_CALIBRATION_TARGET_NS;
 
 function cpuTimeSnapshot() {
   return cpus().map((record, cpu) => ({
@@ -776,8 +794,8 @@ function validParseSampleFloor(record, requireBatchVectors = false) {
   const nullControl = record?.null_control;
   const floor = record?.min_sample_ns;
   const durationsValid =
-    floor === THREAD_SWEEP_MIN_SAMPLE_NS &&
-    record?.calibration_target_ns === THREAD_SWEEP_CALIBRATION_TARGET_NS &&
+    floor === minSampleNs() &&
+    record?.calibration_target_ns === calibrationTargetNs() &&
     Array.isArray(effectSamples) &&
     effectSamples.length === timing?.samples?.length &&
     effectSamples.length > 0 &&
@@ -1449,17 +1467,17 @@ if (has('self-test')) {
       throw new Error('parse semantic-equivalence validation regression');
     }
     const floorRecord = {
-      min_sample_ns: THREAD_SWEEP_MIN_SAMPLE_NS,
-      calibration_target_ns: THREAD_SWEEP_CALIBRATION_TARGET_NS,
+      min_sample_ns: PARSE_MIN_SAMPLE_NS,
+      calibration_target_ns: PARSE_CALIBRATION_TARGET_NS,
       parse_ns: { samples: [10, 11] },
       null_control: { n: 2 },
       effect_integrated_samples_ns: [
-        THREAD_SWEEP_MIN_SAMPLE_NS,
-        THREAD_SWEEP_MIN_SAMPLE_NS + 1,
+        PARSE_MIN_SAMPLE_NS,
+        PARSE_MIN_SAMPLE_NS + 1,
       ],
       null_integrated_samples_ns: Array.from(
         { length: 4 },
-        () => THREAD_SWEEP_MIN_SAMPLE_NS,
+        () => PARSE_MIN_SAMPLE_NS,
       ),
       effect_batches: [4, 4],
       null_batches: [4, 4, 4, 4],
@@ -1470,7 +1488,7 @@ if (has('self-test')) {
         {
           ...floorRecord,
           null_integrated_samples_ns: [
-            THREAD_SWEEP_MIN_SAMPLE_NS - 1,
+            PARSE_MIN_SAMPLE_NS - 1,
             ...floorRecord.null_integrated_samples_ns.slice(1),
           ],
         },
@@ -1479,6 +1497,20 @@ if (has('self-test')) {
       validParseSampleFloor({ ...floorRecord, null_batches: [4] }, true)
     ) {
       throw new Error('parse every-arm sample-floor validation regression');
+    }
+    // The 250 ms parse floor must be the value actually enforced: a record carrying the old
+    // 50 ms sweep floor has to be refused in parse mode, or the predicate is decorative.
+    if (
+      validParseSampleFloor(
+        {
+          ...floorRecord,
+          min_sample_ns: THREAD_SWEEP_MIN_SAMPLE_NS,
+          calibration_target_ns: THREAD_SWEEP_CALIBRATION_TARGET_NS,
+        },
+        true,
+      )
+    ) {
+      throw new Error('parse floor must reject the 50 ms thread-sweep floor');
     }
   }
   if (
@@ -1631,6 +1663,15 @@ if (measurementMode === 'parse' && threadSweep.length > 0) {
   console.error('[run] --mode parse currently supports only the scalar public parser boundary');
   process.exit(2);
 }
+// `bd-ap4v` retry predicate: the parse row is re-adjudicated only under the same dedicated-host
+// booking and the same full-host admission check the thread-sweep driver enforces. The first
+// attempt ran without either, and its Rust-before null drifted 4.090% from 1.0.
+if (measurementMode === 'parse' && !validExclusiveHostClaim(exclusiveHostClaim)) {
+  console.error(
+    '[run] --mode parse requires --exclusive-host-claim trj-booking:<Agent-Mail-CLAIM-message-id>',
+  );
+  process.exit(2);
+}
 if (
   measurementMode === 'parse' &&
   !validRchBuildProvenance(fmBuilder, fmBuildBase, fmBuildCleanOverlay)
@@ -1746,6 +1787,16 @@ if (threadSweep.length > 0 && env.affinity_cpus.length !== env.logical_threads) 
   );
   process.exit(2);
 }
+// The admission check samples this process's affinity set. If the driver itself were confined to a
+// subset, "full-host quiescence" would only ever assert quiet on that subset -- so parse mode
+// requires the whole cpuset for the DRIVER. The measured Rust child is still pinned via taskset
+// below; that narrows the child, not the set this driver admits against.
+if (measurementMode === 'parse' && env.affinity_cpus.length !== env.logical_threads) {
+  console.error(
+    `[run] --mode parse requires the complete host cpuset for the admission check; affinity exposes ${env.affinity_cpus.length} of ${env.logical_threads} logical CPUs`,
+  );
+  process.exit(2);
+}
 env.thread_sweep = threadSweep.length > 0
   ? {
       threads: threadSweep,
@@ -1766,6 +1817,27 @@ env.thread_sweep = threadSweep.length > 0
       maximum_requested_threads: maximumRequestedThreads,
       host_logical_threads: env.logical_threads,
       maximum_requested_to_logical_ratio: maximumRequestedThreads / env.logical_threads,
+    }
+  : null;
+// Stamped so the predeclared floor and the admission contract travel with the numbers. A reader
+// can tell a 250 ms-floor parse row from the superseded 50 ms one without consulting the ledger.
+env.parse_admission = measurementMode === 'parse'
+  ? {
+      boundary: 'public_parse_validate',
+      exclusive_host_claim: exclusiveHostClaim,
+      host_wide_quiescence_required: true,
+      host_wide_maximum_busy_fraction: HOST_WIDE_MAX_BUSY_FRACTION,
+      host_wide_sample_ms: HOST_WIDE_QUIET_SAMPLE_MS,
+      host_wide_maximum_admission_attempts: HOST_WIDE_QUIET_MAX_ATTEMPTS,
+      complete_host_cpuset_required: true,
+      cpu_power_policy_required: true,
+      cpu_isa_provenance_required: true,
+      min_sample_ns: PARSE_MIN_SAMPLE_NS,
+      calibration_target_ns: PARSE_CALIBRATION_TARGET_NS,
+      predeclared_floor_source: 'bd-ap4v retry predicate',
+      superseded_min_sample_ns: THREAD_SWEEP_MIN_SAMPLE_NS,
+      null_median_max_bias: NULL_MEDIAN_MAX_BIAS,
+      incumbent_executor: 'single_page_main_thread',
     }
   : null;
 env.fm_builder = fmBuilder;
@@ -1882,7 +1954,7 @@ function cpuTotals() {
  * phase.
  */
 function timedPhase(label, fn) {
-  if (threadSweep.length > 0) requireHostWideQuiescence(label);
+  if (threadSweep.length > 0 || measurementMode === 'parse') requireHostWideQuiescence(label);
   const c0 = cpuTotals();
   const t0 = Date.now();
   const out = fn();
@@ -1901,7 +1973,7 @@ function runFrankenmermaidPhase(prefix, sweepOrder = threadSweep) {
         FM_H2H_MODE: measurementMode,
         FM_H2H_THREAD_PROBE: measurementMode === 'parse' ? '1' : '0',
         ...(measurementMode === 'parse'
-          ? { FM_H2H_MIN_SAMPLE_NS: String(THREAD_SWEEP_MIN_SAMPLE_NS) }
+          ? { FM_H2H_MIN_SAMPLE_NS: String(PARSE_MIN_SAMPLE_NS) }
           : {}),
       }));
   }
@@ -1965,8 +2037,8 @@ const elfSelfReportBeforeValid =
         record.calibration_target_ns === THREAD_SWEEP_CALIBRATION_TARGET_NS) &&
       (measurementMode !== 'parse' ||
         (
-          record.min_sample_ns === THREAD_SWEEP_MIN_SAMPLE_NS &&
-          record.calibration_target_ns === THREAD_SWEEP_CALIBRATION_TARGET_NS
+          record.min_sample_ns === PARSE_MIN_SAMPLE_NS &&
+          record.calibration_target_ns === PARSE_CALIBRATION_TARGET_NS
         )) &&
       (threadSweep.length === 0 || threadSweep.includes(record.worker_threads)),
   );
@@ -2016,8 +2088,8 @@ const elfSelfReportAfterValid =
         record.calibration_target_ns === THREAD_SWEEP_CALIBRATION_TARGET_NS) &&
       (measurementMode !== 'parse' ||
         (
-          record.min_sample_ns === THREAD_SWEEP_MIN_SAMPLE_NS &&
-          record.calibration_target_ns === THREAD_SWEEP_CALIBRATION_TARGET_NS
+          record.min_sample_ns === PARSE_MIN_SAMPLE_NS &&
+          record.calibration_target_ns === PARSE_CALIBRATION_TARGET_NS
         )) &&
       (threadSweep.length === 0 || threadSweep.includes(record.worker_threads)),
   );
@@ -2293,7 +2365,7 @@ for (const { item, threads } of measurements) {
       status: 'sample_floor_violation',
       error:
         `every Rust parse effect and A/A arm must integrate for at least `
-        + `${THREAD_SWEEP_MIN_SAMPLE_NS} ns`,
+        + `${PARSE_MIN_SAMPLE_NS} ns`,
     });
     continue;
   }
@@ -2529,7 +2601,7 @@ for (const { item, threads } of measurements) {
       status: 'sample_floor_violation',
       error:
         `every mermaid-js parse effect and A/A arm must integrate for at least `
-        + `${THREAD_SWEEP_MIN_SAMPLE_NS} ns`,
+        + `${PARSE_MIN_SAMPLE_NS} ns`,
     });
     continue;
   }

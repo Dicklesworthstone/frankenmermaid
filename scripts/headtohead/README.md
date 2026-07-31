@@ -90,7 +90,14 @@ equivalence verdict; the admission is stamped on the summary and on every affect
 
 Parse mode is deliberately scalar-only, always requires the independent bootstrap effect CI, and
 rejects `--thread-sweep` and `--allow-unverified-output`. Both parser arms calibrate each integrated
-sample to at least 50 ms with a 75 ms target. Every row records the requested and actually observed
+sample to at least **250 ms** with a 375 ms target, and parse mode additionally requires
+`--exclusive-host-claim` plus the same full-host admission check the thread sweep enforces before
+every measured phase, over the complete host cpuset. That floor was 50 ms until `bd-ap4v`: the first
+public-parser attempt integrated a 74.420081 ms Rust sample and failed corrected null clause 3 with a
+Rust-before A/A median 4.090% from 1.0, so the retry predicate predeclared a five-times-larger floor
+before any re-measurement. Raising the floor changes the measured quantity rather than resampling the
+same one, so the row is adjudicated once; a second null failure closes that environment instead of
+triggering further retries. Every row records the requested and actually observed
 single calling context: Rust instruments the thread ID that executes the exact parse calls, while
 the incumbent runs in the observed CDP page-main execution context. These fields do not claim to be
 a census of unrelated process/browser threads. Parse evidence also fails closed unless its row

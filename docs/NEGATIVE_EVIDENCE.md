@@ -19666,3 +19666,118 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   every null median within 2%; never widen that bound.
 
   Agent: cod (BlackThrush)
+
+### RETRY-PREDICATE SWEEP: all 10 ledger predicates adjudicated; 2 satisfied, 8 unchanged (2026-07-31)
+
+- **Scope.** Every row in this ledger carrying an explicit retry/re-check predicate was re-read
+  against current repository state and re-adjudicated. Ten such rows exist. This entry records the
+  verdict for each, **including the ones that stay negative**, so a later reader does not have to
+  re-derive which predicates were checked and found unsatisfied.
+- **Counted mechanism:** this row contains **no timing sample and claims no ratio**; it is an
+  adjudication of predicates, and everything it asserts is counted rather than measured. Counted:
+  10 predicate-bearing rows enumerated by regex over this file's headings and bodies; 3 P0 bead
+  states read from the tracker (`bd-4isi`, `bd-92b6`, `bd-yq3k` — all CLOSED); equivalence counts
+  read from on-disk artifacts (`ci_docs_2000` 2,000/0/0, `ci_docs_5000` 5,000/0/0); and the single
+  harness constant that changed today (`--mode parse` floor 50 -> 250 ms, render/sweep floor
+  unchanged at 50 ms), which is what decides predicate 10. No A/A null control applies because no
+  arm was timed.
+
+| # | Row (line) | Predicate verdict | Basis |
+|---|---|---|---|
+| 1 | incremental cache/clone elision (18919) | **SATISFIED** (already flipped) | post-lever profile put `dependency_graph_cache_key` 11.87% + `hash_endpoint_value` 6.28% top; admissible next lever, not a re-measurement of a negative |
+| 2 | minimap overlay stream, `bd-1buv.58` (18992) | **NOT SATISFIED + predicate obsolete** | needs exclusive worker AND null CV<3%/delta<1%; no exclusive worker obtained. Its CV-based acceptance is superseded by the corrected median-CI gate — CV is provenance only. Predicate must be restated before any retry |
+| 3 | dense rank on SCC, `bd-1buv.67` (19021) | **NOT SATISFIED** | requires a production change materially altering that arm; none occurred. Stays REJECT |
+| 4 | `bd-1buv.2` parse-layout-SVG floor (19105) | **NOT RE-SATISFIED** | its "unmined frame >=8% self" clause already fired once via new workload classes and was harvested as `16c2bb96`; deciding it again needs a fresh production-equivalent profile, which needs a build slot |
+| 5 | `edit_trace_500x1000` DNF-timeout (19180) | **NOT SATISFIED (infeasible)** | needs one real sample plus >=9 full mermaid-js A/A pairs; the incumbent's largest-revision probe alone is 86.359 s and the full sample was still working at 600.299 s, so nine pairs are ~10^4 s. Stays `kind=timeout`, no point ratio |
+| 6 | `bd-l7d2` realistic 2k/5k CI sweeps (19242) | **SEMANTIC HALF SATISFIED** | all three P0 blockers now CLOSED (`bd-4isi`, `bd-92b6`, `bd-yq3k`) and exact-corpus artifacts exist: `ci_docs_2000` 2,000/0/0 and `ci_docs_5000` 5,000/0/0. Timing half still blocked on an exclusive host window. Bead stays OPEN |
+| 7 | `bd-ap4v` parse timing (19434) | **CODE HALF SATISFIED THIS SESSION** | see the dedicated entry below |
+| 8 | `typing_trace_60` semantic (19447) | **SATISFIED-PENDING-COMMIT** | see the oracle finding below |
+| 9 | 120-service architecture row (19555) | **NOT SATISFIED** | no change to pinned input, bundle/config, ELF, or timing boundary; harness gained no predeclared inner-batch method. Stays REJECT/CANNOT |
+| 10 | under-resolved t32/t128 sweeps (19662) | **NOT SATISFIED — deliberately** | its predicate lists "timer floor ... changes" as a reopening condition. A timer floor DID change today (50 -> 250 ms) but **only for `--mode parse`**; the render/sweep floor is untouched at 50 ms. A parse-only change does not reopen a render sweep, and is recorded here so the coincidence is not later mistaken for a trigger |
+
+- **Method note.** Predicate 10 is the one worth remembering: a predicate keyed on "the timer floor
+  changes" is satisfied only by a change to *that row's* timer floor. Reading it as satisfied by any
+  floor change anywhere in the harness would have manufactured a reopening.
+
+  Agent: cc (CobaltFern)
+
+### ORACLE INTEGRITY: `typing_trace_60` flipped fail -> pass on byte-identical dumps (2026-07-31)
+
+- **Observation.** Two equivalence artifacts for `typing_trace_60` exist under
+  `.benchmarks/headtohead/typing-trace-60-requalification-v1/`, three minutes apart, both stamped
+  `3e7edbef`:
+  - `equivalence-3e7edbef-1785490994893.json` — **fail**, 28 equivalent / 0 divergent / 32 unverified
+  - `equivalence-3e7edbef-1785491181243.json` — **pass**, 60 equivalent / 0 divergent / 0 unverified
+- **The dumps are identical.** Both carry `fm_dump_sha256`
+  `826e563060f688301cb2d188cfe3c052f5c93c902ab5733a8432265c557aba97` and `js_dump_sha256`
+  `6d290e8b4c68a6e951ddc3a0b072f9168df8a74f20e320ccd5100d50790320d9`. Neither engine's output
+  changed. **The oracle changed.** A verdict flip with no output change is exactly the shape that
+  must never be accepted on its face, so it was diffed rather than adopted.
+- **Adjudication: the change is a genuine resolution, not a relaxation.** `svg_equivalence.mjs`
+  gained `anchorDistance`, which measures a rendered endpoint to a rect's actual attachment
+  **bounds** instead of its centre. That is the documented cause of the 32 unverified revisions: on
+  a wide node, a boundary endpoint sits farther from its own centre than from a neighbouring narrow
+  node's centre, so the resolver reported `fm=ambiguous(unresolved=1)`. Decisively, the ambiguity
+  guard was **tightened in the same change** — the new `secondD === 0` clause refuses overlapping
+  boundaries that the old `bestD > secondD * ratio` test would have silently resolved — and the
+  0.75 disambiguation margin is unchanged. `selfTest()` reports ok, 42 cases, 16 mutation controls,
+  4 negative controls, including a new `overlapping_rectangle_boundaries_refuse` negative control.
+  This is the sanctioned route in the row's own predicate: "or the oracle unambiguously resolves the
+  wide-node geometry".
+- **Why the row still does not certify.** The enabling oracle edit was uncommitted working-tree
+  state when this was written and **landed during the session as `6bf64c28`** ("test(headtohead):
+  resolve wide-node endpoint topology", `bd-kn9b`), so the reproducibility caveat is discharged:
+  the passing artifact is now derivable from a commit. What remains is that **no timing has ever
+  been run for `typing_trace_60`**. The semantic predicate is satisfied; the row is still
+  semantic-only. **Retry predicate:** produce a 60/0/0 artifact linked to the *timing* ELF, input,
+  and bundle, then run the incumbent arm live in the same invocation under the corrected null gate,
+  before any ratio is quoted.
+- **Evidence hygiene.** Both artifacts are retained deliberately. A passing artifact whose
+  superseded failing twin has been deleted is indistinguishable from a row that always passed.
+
+  Agent: cc (CobaltFern)
+
+### BLOCKED, NO VERDICT ISSUED: `bd-ap4v` parse retry — code predicate discharged, measurement never run (2026-07-31)
+
+- **What the predicate demanded.** "Reopen only after parse mode enforces the thread-sweep driver's
+  full-host admission check under a valid dedicated-host `trj` claim **and** predeclares at least a
+  250 ms Rust integrated sample floor while retaining at least 20 A/A pairs, the corrected 2% median
+  clause, the before/incumbent/after order, and the same-ELF linkage."
+- **Counted mechanism:** this row contains **no timing sample and claims no ratio** — the
+  measurement was never issued, which is the entire point of the entry. Counted, not measured:
+  512/512 equivalent / 0 divergent / 0 unverified on the exact timing ELF; one ELF SHA-256 matched
+  between the equivalence artifact and the built binary; the enforced floor constants (250 ms
+  effect/null floor, 375 ms derived calibration target) asserted by an in-process self-test that
+  rejects the superseded 50 ms floor; and one refusal observed from `run.mjs` when the claim id is
+  absent despite complete build provenance. No A/A null control applies because no arm was timed;
+  the superseded 113.822775x observation is untouched and remains INCONCLUSIVE.
+- **Code half, done and verified.** `--mode parse` now (a) refuses without
+  `--exclusive-host-claim trj-booking:<id>`, (b) runs `requireHostWideQuiescence` before every
+  measured phase, (c) requires the complete host cpuset for the driver so "full-host" is not
+  asserted from a one-CPU mask, and (d) predeclares `PARSE_MIN_SAMPLE_NS = 250 ms` with a 375 ms
+  calibration target, enforced against **every effect and null arm of both engines**. The floor is
+  stamped into the artifact as `env.parse_admission` alongside `superseded_min_sample_ns`, so a
+  250 ms row is distinguishable from the superseded 74.420081 ms one without consulting this ledger.
+  An in-process self-test now asserts the gate **rejects** a record carrying the old 50 ms floor.
+  `mermaid_bench.mjs` moved 50/75 -> 250/375 in lockstep, because `run.mjs` re-checks those exact
+  values on the incumbent record.
+- **A trap avoided.** The Rust runner derives its calibration target as `floor + ceil(floor/2)`.
+  An independently chosen 300 ms mirror constant would have mismatched the derived 375 ms and
+  hard-failed every record. The mirror is now computed by the same rule rather than typed.
+- **Prerequisite satisfied.** A linked full-render equivalence artifact was produced on the exact
+  ELF this row would time: `.benchmarks/headtohead/ci-equiv-512-equivalence/equivalence-3e7edbef-1785492035878.json`,
+  **512/512 equivalent, 0 divergent, 0 unverified**, `fm_elf_sha256`
+  `9b71844b9ccdb92d8e86a7cbfc1debad40be21a8adc401ded555340de8d1fdd8` (7,895,136 bytes), built by
+  RCH worker `vmi1227854` from `--base 3e7edbef --clean-overlay --no-overlay`.
+- **Why no number is reported.** The claim id cannot be minted: the fleet Agent Mail mailbox is in
+  a split-brain state ("supervised restart or operator intervention is required"), held by stuck
+  processes belonging to other lanes, which this lane declined to kill. The `[trj] CLAIM
+  frankenmermaid` message is durably queued as an UNSENT artifact and will replay on recovery.
+  **This is the gate behaving correctly: no claim, no measurement, no number.** The row is
+  BLOCKED, not negative — nothing here weakens or strengthens the superseded 113.822775x
+  observation, which remains INCONCLUSIVE on corrected null clause 3.
+- **Retry predicate.** Replay the queued claim once the mailbox recovers, confirm no
+  higher-priority repo holds the booking, then run the parse row once under the 250 ms floor. A
+  second null failure closes that environment rather than triggering repeated retries.
+
+  Agent: cc (CobaltFern)

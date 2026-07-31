@@ -42,8 +42,12 @@ const MIN_NULL_ROUNDS = 9;
 const ISOLATED_NULL_ROUNDS = 10;
 const ISOLATED_SAMPLE_MIN_DOCUMENTS = 100;
 const BOOTSTRAP_RESAMPLES = 2_000;
-const PARSE_MIN_SAMPLE_MS = 50;
-const PARSE_CALIBRATION_TARGET_MS = 75;
+// `bd-ap4v` retry predicate: the predeclared parse floor rises 50 -> 250 ms for BOTH engines.
+// run.mjs re-checks these exact values on the mermaid-js record, so the two files must move
+// together; the calibration target keeps the runner's floor + ceil(floor/2) rule.
+const PARSE_MIN_SAMPLE_MS = 250;
+const PARSE_CALIBRATION_TARGET_MS =
+  PARSE_MIN_SAMPLE_MS + Math.ceil(PARSE_MIN_SAMPLE_MS / 2);
 
 function effectRepsForMode(reps, parseOnly) {
   return parseOnly ? Math.max(MIN_NULL_ROUNDS, reps) : reps;
