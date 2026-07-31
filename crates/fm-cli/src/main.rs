@@ -2797,35 +2797,46 @@ fn cmd_render_batch(
     let owner_results = run_all(&render_owner);
 
     // Phase 4: every non-owner duplicate copies its owner's bytes. No parse, no layout, no render.
-    let write_duplicate = |index: usize| -> Result<(String, usize)> {
-        let (_, digest) = match &loaded[index] {
-            Ok(pair) => pair,
-            Err(_) => return Ok((String::new(), 0)),
+    //
+    // The pass exists only to service duplicates. When no digest repeats -- a CI re-render of
+    // distinct diagrams, a docs build where every page has its own diagram, and the shape of the
+    // certified 512-diagram corpus -- every index owns its own digest, so each task would take the
+    // early return below and do nothing but clone a path phase 3 already produced. Fanning N tasks
+    // across the pool and joining them to copy N strings is pure overhead, so hand phase 3's
+    // results straight through instead. Byte-identical: phase 3 wrote every file in this case.
+    let results = if reused == 0 {
+        owner_results
+    } else {
+        let write_duplicate = |index: usize| -> Result<(String, usize)> {
+            let (_, digest) = match &loaded[index] {
+                Ok(pair) => pair,
+                Err(_) => return Ok((String::new(), 0)),
+            };
+            if owner_of.get(digest.as_str()) == Some(&index) {
+                return owner_results[index]
+                    .as_ref()
+                    .map(|(p, n)| (p.clone(), *n))
+                    .map_err(|e| anyhow::anyhow!("{e:#}"));
+            }
+            let bytes = {
+                let cache = shared
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("render cache poisoned"))?;
+                cache.get(digest.as_str()).cloned()
+            };
+            let Some(bytes) = bytes else {
+                // Owner failed; surface that failure against this input too.
+                return Err(anyhow::anyhow!(
+                    "duplicate of an input that failed to render"
+                ));
+            };
+            let destination = destination_for(&inputs[index]);
+            std::fs::write(&destination, bytes.as_slice())
+                .with_context(|| format!("cannot write {}", destination.display()))?;
+            Ok((destination.display().to_string(), bytes.len()))
         };
-        if owner_of.get(digest.as_str()) == Some(&index) {
-            return owner_results[index]
-                .as_ref()
-                .map(|(p, n)| (p.clone(), *n))
-                .map_err(|e| anyhow::anyhow!("{e:#}"));
-        }
-        let bytes = {
-            let cache = shared
-                .lock()
-                .map_err(|_| anyhow::anyhow!("render cache poisoned"))?;
-            cache.get(digest.as_str()).cloned()
-        };
-        let Some(bytes) = bytes else {
-            // Owner failed; surface that failure against this input too.
-            return Err(anyhow::anyhow!(
-                "duplicate of an input that failed to render"
-            ));
-        };
-        let destination = destination_for(&inputs[index]);
-        std::fs::write(&destination, bytes.as_slice())
-            .with_context(|| format!("cannot write {}", destination.display()))?;
-        Ok((destination.display().to_string(), bytes.len()))
+        run_all(&write_duplicate)
     };
-    let results = run_all(&write_duplicate);
     let elapsed = started.elapsed();
 
     let mut rendered = 0usize;
