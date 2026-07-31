@@ -504,6 +504,11 @@ mechanism paragraph. A screen is not a verdict *even when you wrote the screen*.
 
 ### L5492 `build_smooth_path` capacity — stands, but NOT as originally written
 
+**Live-lineage correction:** the conditional design below was not merely analogous prior art. Commit
+`4cfe7edc` had already landed it in the surviving `build_smooth_path_by` function before this audit;
+there is no separate live `build_smooth_path` implementation left to port. The historical VOID
+classification stands, but the proposed rerun does not. See canonical §10.3.
+
 This one is a genuine VOID-NONULL: the A/B is unusable (box load swung 90→55 mid-run, producing an
 impossible **+266%** artifact, and 16x32 sign-flipped between orders). Nothing can be concluded from
 it in either direction.
@@ -541,9 +546,9 @@ window to learn what the row already says. The row's own retry predicate is the 
 
 | Metric | Count |
 |---|---:|
-| Genuine re-run candidates after full hand adjudication | **1** (L5492, redesigned) |
+| Genuine re-run candidates after live-lineage reconciliation | **0** |
 | Withdrawn on full reading | 1 (L8376 → VALID-MECHANISM) |
-| Blocked on | a build; this repo is Lane L, and builds are halted fleet-wide (disk) |
+| Historical blocker | builds were halted fleet-wide; later all-clear does not reopen an already-landed design |
 
 ---
 
@@ -606,21 +611,32 @@ actually self-reported its executing ELF.
 
 The numerically higher flat-CSR, barycenter, and packed-crossing rows collapse into already
 resurrected families with landed outcomes; repeating them would duplicate completed resurrection
-work. After excluding those completed duplicate families and the 61 non-REJECT entries, these are
-the five highest target-self-time unresolved distinct VOID rows:
+work.
 
-| Rank | Ledger row | Attributed self-time | Strict class | Concrete retry predicate |
+**Live-lineage correction (2026-07-31).** The source-blob audit correctly classified the five
+historical REJECT rows as VOID, but incorrectly called their mechanism families unresolved. All five
+had already been discharged by narrower or structurally improved landings before this audit was
+written. The current queue is therefore:
+
+| Rank | Ledger row | Attributed self-time | Strict class | Live disposition |
 |---:|---|---:|---|---|
-| 1 | L9613 parser `trim_ws` | 9.46% | `VOID-NONULL` | Reopen only if a current real workload contains material boundary whitespace and a fresh profile again attributes non-zero self-time to trim. Measure same-invocation A/A+A/B and retired instructions; keep already-trimmed substrings as a negative control. |
-| 2 | L5020 path `d` raw serialization | 8.32% | `VOID-NONULL` | Do not re-add an `AttributeValue` variant. Retry only a design that bypasses the generated-path escape scan without perturbing the global attribute match; use same-invocation A/A+A/B, retired instructions, and an all-attribute regression control. |
-| 3 | L7861 `write_fixed2` `from_utf8` | 7.40% | `VOID-NONULL` | Re-profile current head and proceed only if safe UTF-8 validation still has non-zero self-time. Unsafe remains forbidden. Any safe formulation needs same-invocation A/A+A/B plus retired instructions. |
-| 4 | L5492 `build_smooth_path` capacity | 7.11% | `VOID-NONULL` | Re-profile first. Preserve `n*24` for `n < 4`; use `24 + (n-1)*56` only for `n >= 4`. Require same-invocation A/A+A/B, retired instructions, exact output identity, and a short orthogonal-edge negative control. |
-| 5 | L9250 `u32` ID-rank sort key | 6.20% | `VOID-NONULL` | Retry only on a long-ID workload whose fresh profile is comparator-bound rather than `logical_merge`/`merge_up`/memmove-bound. Require same-invocation A/A+A/B and retired instructions. |
+| 1 | L9613 parser `trim_ws` | 9.46% | `VOID-NONULL` | **DISCHARGED on the only admitted surfaces.** The blanket 243-site replacement remains rejected because most operands are already-trimmed short substrings. Material-boundary source lines and split fragments were separately profiled and converted with the byte-identical `trim_fast`: flowchart document lines/statements in `a39648b3`, sequence messages in `8fac67c2`, journey in `d49d7871`, requirement blocks in `303b93c6`, plus later targeted parser paths. Current source has 85 `trim_fast` call sites. Already-clean substrings remain the required negative control, not a rerun target. |
+| 2 | L5020 path `d` raw serialization | 8.32% | `VOID-NONULL` | **DISCHARGED by `e405f54b`.** It bypasses the generated-path escape scan with raw `push_str` without adding an `AttributeValue` variant or perturbing the global match. The direct common-edge streaming path already used the same grammar proof. |
+| 3 | L7861 `write_fixed2` `from_utf8` | 7.40% | `VOID-NONULL` | **DISCHARGED by `16ed6d35`.** The safe formulation streams borrowed static digit-pair slices, removing both the stack byte buffer and UTF-8 revalidation while preserving `#![forbid(unsafe_code)]`; the historical landing recorded byte identity and about 20% render improvement. |
+| 4 | L5492 `build_smooth_path` capacity | 7.11% | `VOID-NONULL` | **DISCHARGED exactly by `4cfe7edc`.** `n <= 2` retains `n*24`; cubic paths use `24 + (n-1)*56`. This is the rejected row's conditional-sizing retry, landed before the audit and still present in `build_smooth_path_by`. |
+| 5 | L9250 `u32` ID-rank sort key | 6.20% | `VOID-NONULL` | **DISCHARGED by the better key design in `e9205c72`.** A packed big-endian first-eight-byte `u64` key accelerates comparisons while retaining the full string and index as lazy tie-breakers, avoids the rejected extra full sort used to build `id_rank`, and recorded a 33–48% primitive-sort reduction with exact layout/SVG parity. The exact `u32 id_rank` shape remains closed. |
+
+This is a lineage reconciliation, not a new performance verdict. The historical timings above
+predate the current corrected null-median clause and process-self-reported-ELF requirement, so this
+correction does not promote them into current campaign claims. It prevents five duplicate reruns:
+there are **zero unresolved mechanism families** in `bd-8f9a` after checking live source and commit
+history.
 
 No rerun was started. The fleet disk emergency explicitly forbids Cargo builds, tests, benches, and
 RCH jobs, and the allocation addendum assigns this repo to Lane L with no worker. The queue is
-banked as `bd-8f9a`; it may run only after an explicit disk all-clear and a measurement window. This
-is resurrection work, not permission to resume micro-lever mining.
+banked as `bd-8f9a`; it may run only after an explicit disk all-clear and a measurement window. The
+disk gate was later cleared, but the live-lineage correction above makes the queued reruns
+unnecessary; `bd-8f9a` closes as already discharged rather than manufacturing duplicate evidence.
 
 ### 10.4 Institutionalized gate
 
