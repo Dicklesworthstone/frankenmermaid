@@ -13726,7 +13726,7 @@ fn bundle_parallel_edges(ir: &MermaidDiagramIr, edges: &mut [LayoutEdgePath]) {
         let Some(target) = endpoint_node_index(ir, edge.to) else {
             continue;
         };
-        let key = (source.min(target), source.max(target), edge.arrow.as_str());
+        let key = (source, target, edge.arrow.as_str());
         groups.entry(key).or_default().push(path_idx);
     }
 
@@ -14698,6 +14698,25 @@ mod tests {
             ..IrEdge::default()
         });
         ir
+    }
+
+    #[test]
+    fn reciprocal_edges_are_not_bundled_as_parallel_duplicates() {
+        let ir = graph_ir(DiagramType::Flowchart, 2, &[(0, 1), (1, 0), (0, 1)]);
+        let layout = layout_diagram(&ir);
+        let edge = |edge_index| {
+            layout
+                .edges
+                .iter()
+                .find(|path| path.edge_index == edge_index)
+                .expect("every IR edge should retain a layout path")
+        };
+
+        assert_eq!(edge(0).bundle_count, 2);
+        assert!(!edge(0).bundled);
+        assert_eq!(edge(1).bundle_count, 1);
+        assert!(!edge(1).bundled);
+        assert!(edge(2).bundled);
     }
 
     fn labeled_graph_ir(node_count: usize, edges: &[(usize, usize)]) -> MermaidDiagramIr {

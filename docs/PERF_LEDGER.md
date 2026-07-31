@@ -340,6 +340,95 @@ only a synthetic unit fixture.
   configuration, or bracket contract changes. A bracket failure may be retried only in a quiet
   invocation with the same pinned artifacts; never widen its floor post hoc.
 
+## SEMANTIC REQUALIFICATION ONLY: 13-row bracketed base slice under the current SVG oracle (2026-07-31)
+
+**Bead:** `bd-4b6s`. **Lane:** cod (`LavenderMill`).
+**Executing ELF SHA-256 (self-reported by process):**
+`c2b0af01dfffab49631d70a2988dfb8fa094f79daa0a14785b5c3683332bc3e2` (7,894,560 bytes).
+**A/A null control (same invocation):** incomplete by construction and therefore not a performance
+gate. Every scalar Rust dump-arm median itself is inside the corrected `[0.98, 1.02]` clause:
+`flowchart_large_500` 1.000850, CI [0.998274, 1.008237]; `wide_8x16` 0.998249,
+CI [0.989442, 1.012851]; `wide_12x24` 1.005128, CI [0.992356, 1.007759];
+`wide_16x32` 0.995935, CI [0.983775, 1.016681]; `dense_dag_200` 1.005775,
+CI [0.998871, 1.007343]; `cyclic_scc_100` 1.005275, CI [0.990499, 1.036888];
+`sequence_20` 0.993613, CI [0.964156, 1.029004]; `class_50` 1.002303,
+CI [0.993262, 1.022934]; `state_40` 1.014488, CI [0.931720, 1.117178]; `er_40`
+1.000100, CI [0.989632, 1.009940]; `edit_trace_60x20` 1.003318,
+CI [0.993903, 1.124430]; `er_schema_1000x6` 1.002529, CI [0.998942, 1.013132];
+and `doc_build_40` 0.983828, CI [0.937485, 1.057207]. The untimed mermaid-js
+`--render-once` arm collected no incumbent A/A pairs. This invocation therefore establishes no
+current ratio, win, loss, or complete corrected-null timing verdict; a future timed invocation must
+also pass the incumbent null, bootstrap-CI, and 2x-null-margin clauses. CV remains provenance only.
+
+- **Exact semantic result.** The current oracle admits all **13/13** named rows and all **72/72**
+  constituent revisions, with zero divergent and zero unverified. In particular,
+  `edit_trace_60x20` is **21/21**, and the mixed-family `doc_build_40` job is **40/40**.
+- **Recovered semantic work.** Revisions 18-20 of `edit_trace_60x20` contain both `N2-->N17` and
+  the reciprocal `N17-->N2`. `bundle_parallel_edges` claimed to group directed
+  `(source, target, arrow)` tuples but implemented an unordered min/max endpoint key, so it
+  absorbed the reciprocal edge as though it were a same-direction duplicate. The key is now
+  directed; a regression test keeps two `0->1` duplicates bundled while preserving the independent
+  `1->0` edge. This was renderer work loss, not extractor ambiguity.
+- **Output-equivalence check.** One shared extractor processes both engines; it never uses a
+  favorable per-engine extractor pair. It gates incumbent-rendered text containment for every
+  family, authored node-ID sets, rendered-path topology cross-engine and against input-derived
+  truth for the families where that invariant is claimed, and class relationship marker kind plus
+  owning end. Referenced diamond geometry/fill and inheritance-triangle fill/direction are checked.
+  Unknown or undecidable required invariants do not pass. This is neither SVG byte equality nor a
+  rasterized perceptual diff. `svg_equivalence.mjs --self-test` passes all 40 cases, including 16
+  mutation controls and 4 negative controls.
+- **Audit trail.** The first current-oracle artifact,
+  `equivalence-2bb114ff-1785488169040.json` (SHA-256
+  `d282192ea30ec39b4c219b6ade5cfa18ab54ffe409732f9c3bbc94da3c9ba064`),
+  exposed an oracle defect: reserved renderer pseudo nodes `__state_start` and `__state_end` were
+  mistaken for authored nodes after exact `data-id` extraction landed. Tight recognition of those
+  reserved IDs, with a near-miss negative control, produced
+  `equivalence-2bb114ff-1785488341521.json` (SHA-256
+  `80c5ad7eae5a41a2b7cdb12e8a55c1c82c7efe1f7ea00cdf5fa89dbf9bf431a1`):
+  12/13 rows passed, while the three reciprocal-edge losses above remained real. The final passing
+  artifact is
+  `.benchmarks/headtohead/cert-v8-requalification-v1/equivalence-2bb114ff-1785489467048.json`
+  (SHA-256 `6a6165bc87f232368c72e5413cd4cb9f0c06f2293eda7eccd49eb95ddee2020b`).
+- **Exact input/output linkage.** Every engine dumped the expected revision count. Each dump hash
+  below exactly equals the output SHA-256 self-reported by that engine:
+
+  | row | revisions | input SHA-256 | frankenmermaid dump SHA-256 | mermaid-js dump SHA-256 |
+  |---|---:|---|---|---|
+  | `flowchart_large_500` | 1 | `7012902b9fdaa3ff2d7a2d0c327eaaea543b347b51155521b86daf7aacd9ec83` | `408ecdccfba04fb4aa84526b565e0397383bb4c0dca9184e33e01b7ef2dd2d21` | `4694da1118ad9b4919530f412507fb8fde7ead391e2b7a120c883ecd1502af78` |
+  | `wide_8x16` | 1 | `61f1747cefcc13449ebf5e9c08b1f039dbf9b218f27b34e19d640076bf0004aa` | `7b1c6a07e46282794717c1d90229c0e44eb0cf5739d2693947eaddf7295990a2` | `96850b91f79b24da943a55667d75a44cde06165368e7a6355cd9154839a42d51` |
+  | `wide_12x24` | 1 | `e05519607415f5370b530fa540bc9fe4374f9a14c28bd444a1ecb91aa2219959` | `ea73f1d73e840f6d01d32c54b841e79e3f7c60c6fe6777b9e872e1581b31c5fd` | `6300b137acb725117cdb5e9f800a5e428dca354c24d30b5452ef98c7618aae63` |
+  | `wide_16x32` | 1 | `bcd6776815763d34d14d46cc6920a692dd70842c6ec83207d31e9a4b4c11f08b` | `30d79510dbc4590b6346742560acc6d2af20b2439f166adc58a93d2529681fce` | `46752d9ce2dd9452b7a67c198828c1cf24a5038bf297ddf2a6373ad5552ce1d5` |
+  | `dense_dag_200` | 1 | `a32522f3b7080f48621a9e2cc226920f5dd59eb4239fdd1f480187df0063b3e5` | `e8e4d888acfce246073d5aeae41d22e2ce5d9fb18950fd368dc383c759016ee2` | `31ef61c6ff34d23ae15b5074afbb25c1a094447a0fee5f62fdcb91b07bd2eb43` |
+  | `cyclic_scc_100` | 1 | `dbc553f665d05c10084949154ba4f24f58a4a363b5ffcb419bedfcc5daf23ab6` | `73df0305e21b1b9ef11e0ffbaa1c64c7cde16583464bbb4c4681d83ba8ada1d4` | `d29393e78702fddbee0a0d79dfd8d1b53711d797d24c3b2a8e4cf1a1b321715e` |
+  | `sequence_20` | 1 | `31c0dd6bc24b571c01c80d6c24d9e6e179f035cd82d226c71d952e8e52498db0` | `f3bfcb1128d2c7a729e81f5227874335d6d541faac51495e08b54c701915bf55` | `bc6e2e0c722e8854d5ef655b24fc9d16af7766a41c5f46fc01ae3f387a64e564` |
+  | `class_50` | 1 | `d1d7ef8c8e7c8d1dab2da8fbd56565dc97148e8fb1651d23fe43140e8c4ef831` | `e97ea9c8683e59b151f7e916b22002d117ef9d40a03fce1a6274688bd9a8c1cd` | `7fc2f5d1a3533f6c06ffa4b2690383bff9889d82483d4959e4392318b863286d` |
+  | `state_40` | 1 | `08a5c38ed30e5aaeddf02f59839e6e36ffa5e91960e3fb966d68281e8937eec3` | `56b696a74ff934d22be792e2b9b7836595a59b140891e923ebab24c64f787286` | `453e35f37a93d4dde709d7699246c3f7a9575d602f4e77451771ee504a0988f9` |
+  | `er_40` | 1 | `91764d7d6dd294a65f25e3de7ef9f619ff6b1592a12a0dd0b92de816e2b756f2` | `354f13007b65bfff6705e1006114e035d29fd81d0d67a261a95c1b0a8820c5b6` | `ea591a75a76ae29b8f6ce95513b28620404180bcf95ea49b8106e9a992fb6b9c` |
+  | `edit_trace_60x20` | 21 | `068270a4e7d6ae7e7ddc8ac86be6d24ba156eb233e64355eb07db2bc26a258e0` | `054f82f5f290d0cd18519281843479ad7cd86121f8db064d11d10a87aad4e2a0` | `5b968f91d34e2b8929968f6f2ed07d2ec92a98b5919fe4f38b4adcb432b3a9d5` |
+  | `er_schema_1000x6` | 1 | `252c8370ef3053801bad7d0ac6f082b3c352622642a668a13b027ed3eb27318f` | `f4bfd5cee24fb788cc367a87b1aec0d45c37b79d9f8e27a047ff1e6860e89d27` | `1d49640503caacbce44c48549afbbbd98b445fcff873b05b84137ebd20b5538a` |
+  | `doc_build_40` | 40 | `8badedbf69bc204d952af1ba780c07569b7eb1091ff5d0fdd400dd2e3f6b59d7` | `56b6b7e0d47647ba847d390f7afe0785ede3bb86a8d33ea46e3d418e5c431c24` | `9fc72662782b2f796c0a49593ee26ff72d8a7e246a17803f3e6add27b0e23a75` |
+
+- **Incumbent, observed threads, and host.** The live comparator is mermaid-js `11.15.0`, bundle
+  SHA-256 `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`,
+  through `/usr/bin/chromium-browser` (`Chrome/150.0.7871.128`). Every row requested and actually
+  observed **1** frankenmermaid scalar worker and **1** mermaid-js browser main execution thread.
+  Host `thinkstation1` is an AMD Ryzen Threadripper PRO 5975WX with 64 logical CPUs, kernel
+  `6.17.0-35-generic`, complete `amd-pstate-epp` provenance (`powersave` governor, `performance`
+  EPP, boost enabled), and complete x86-64 ISA provenance (AVX2/FMA/BMI2/VAES present; AVX-512
+  absent).
+- **Strict build receipt.** Worker `ovh-a` built the executable with
+  `RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch --no-self-healing exec --base 2bb114ff
+  --clean-overlay --overlay-path crates/fm-layout/src/lib.rs -- cargo build -j2 --profile release
+  -p frankenmermaid-cli --example headtohead`. No co-tenant edit entered the binary, no local
+  fallback occurred, and no task-specific Cargo target directory was created.
+- **Disposition / retry predicate.** Semantic admission is current. The historical 13-row ratio is
+  not current for this ELF/oracle because this invocation was deliberately untimed. Take a fresh
+  exclusive central `trj` claim only after earlier bookings and host-wide external work clear, then
+  measure these exact linked rows side-by-side against the live pinned incumbent with the same
+  self-reporting ELF, actual observed threads, complete governor/ISA/topology provenance, and the
+  corrected same-invocation A/A gate above. Reopen semantic admission only if an input pin,
+  incumbent bundle/configuration, executing ELF, or equivalence contract changes.
+
 ## CERTIFIED INCUMBENT WIN: two short-row quiet retries vs mermaid-js 11.15.0 (2026-07-28)
 
 **Bead:** `bd-ktx5`. **Lane:** cod / HARNESS+FRONTIER (`YellowSwan`).

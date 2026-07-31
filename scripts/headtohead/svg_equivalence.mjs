@@ -315,7 +315,8 @@ export function canonicalNodeId(engine, rawId) {
  * strictness on two specific names. No corpus item uses them.
  */
 export function isSyntheticNode(id) {
-  return /^(root[_-])?(state[_-])?(start|end)$/.test(id) || /^root[_-]/.test(id);
+  return /^(?:__)?(?:root[_-])?(?:state[_-])?(?:start|end)$/.test(id)
+    || /^root[_-]/.test(id);
 }
 
 // ---------------------------------------------------------------- engine adapters
@@ -1668,6 +1669,12 @@ export function selfTest() {
     && canonicalNodeId('mermaid-js', 'er40_r14_0-entity-E7-7') === 'e7'
     && canonicalNodeId('frankenmermaid', 'fm-node-e7-7') === 'e7',
     [canonicalNodeId('mermaid-js', 'class50_r14_0-classId-C0-2350'), canonicalNodeId('frankenmermaid', 'fm-node-c0-0')]);
+  record('renderer_state_pseudo_ids_are_synthetic',
+    isSyntheticNode('__state_start')
+    && isSyntheticNode('__state_end')
+    && isSyntheticNode('root_start')
+    && !isSyntheticNode('__state_started'),
+    ['__state_start', '__state_end', 'root_start', '__state_started'].map(isSyntheticNode));
   record('authored_data_id_beats_lossy_element_id',
     nodeIdFromGroup(
       'frankenmermaid',
