@@ -19698,6 +19698,17 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
 - **Method note.** Predicate 10 is the one worth remembering: a predicate keyed on "the timer floor
   changes" is satisfied only by a change to *that row's* timer floor. Reading it as satisfied by any
   floor change anywhere in the harness would have manufactured a reopening.
+- **Predicate 2 is superseded and must not be used as written.** The `bd-1buv.58` minimap row
+  (2026-07-23, line ~18992) states its whole acceptance rule in CV terms: "null CV < 3% and null
+  delta < 1%", then "all scored arms CV < 5% and a null-adjusted win >= 3%". The campaign has since
+  ruled that **CV, MAD, and phase load are provenance only and never an acceptance gate** — a row
+  can pass a CV bound and still be inadmissible, and can fail one and still be sound. The original
+  row is left byte-for-byte intact (rows are never rewritten), so the restatement lives here:
+  a retry of that lever requires an exclusive or isolated worker/core; a same-invocation A/A null on
+  each arm; the effect's bootstrap 95% CI excluding 1.0; the effect deviation clearing twice the
+  largest bootstrap 95% null-CI radius; and **every null median within 2% of 1.0** (corrected
+  clause 3 — never widen it). Its underlying verdict is unchanged and still negative; this is a
+  restatement of the reopening condition, not a re-measurement.
 
   Agent: cc (CobaltFern)
 
