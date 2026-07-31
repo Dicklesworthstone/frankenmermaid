@@ -360,6 +360,38 @@ function equivalenceDecidableDocs(count, seed) {
 }
 
 /**
+ * A related-diagram build whose pages embed one byte-identical platform subgraph.
+ *
+ * Documentation sets routinely repeat the same deployment, authentication, or ingestion block
+ * and attach a page-specific tail. Mermaid-js reparses that shared block for every diagram. This
+ * corpus keeps every diagram distinct while making the repeated work explicit and pinnable.
+ */
+function sharedSubgraphDocs(count, sharedNodes, seed) {
+  const sharedRandom = rng(seed);
+  const prefix = ['flowchart LR', '  subgraph Shared["Shared ingestion platform"]'];
+  for (let i = 0; i < sharedNodes; i++) {
+    prefix.push(`    S${i}["${realisticLabel(sharedRandom, i)}"]`);
+  }
+  for (let i = 0; i < sharedNodes - 1; i++) prefix.push(`    S${i}-->S${i + 1}`);
+  prefix.push('  end');
+  const shared = prefix.join('\n');
+
+  const out = [];
+  for (let d = 0; d < count; d++) {
+    const documentRandom = rng(seed + (d + 1) * 104729);
+    const uniqueNodes = 4 + (d % 9);
+    const suffix = [];
+    for (let i = 0; i < uniqueNodes; i++) {
+      suffix.push(`  D${i}["${realisticLabel(documentRandom, d * 16 + i)}"]`);
+    }
+    suffix.push(`  S${sharedNodes - 1}-->D0`);
+    for (let i = 0; i < uniqueNodes - 1; i++) suffix.push(`  D${i}-->D${i + 1}`);
+    out.push([shared, ...suffix].join('\n'));
+  }
+  return out;
+}
+
+/**
  * A live editing session as it actually happens: a user TYPES a label one character at a time.
  *
  * `edit_trace` models structural edits -- append a node, add an edge. Real editing is dominated by
@@ -483,6 +515,7 @@ const GENERATORS = {
   edit_trace: (p) => editTrace(p.n, p.revisions),
   docs_site: (p) => docsSite(p.count, p.seed),
   equivalence_decidable_docs: (p) => equivalenceDecidableDocs(p.count, p.seed),
+  shared_subgraph_docs: (p) => sharedSubgraphDocs(p.count, p.shared_nodes, p.seed),
   typing_trace: (p) => typingTrace(p.nodes, p.phrase, p.seed),
   monorepo_architecture: (p) => monorepoArchitecture(p.services, p.domains, p.seed),
   schema_catalog: (p) => schemaCatalog(p.schemas, p.min_entities, p.max_entities, p.seed),
@@ -584,6 +617,9 @@ export const CORPUS = [
   // family whose SVG equivalence can prove rendered edge topology against input ground truth.
   // Nine live incumbent samples make the cross-runtime bootstrap median-ratio CI decidable.
   { id: 'ci_equiv_512',         gen: 'equivalence_decidable_docs', params: { count: 512, seed: 20260730 }, class: 'doc_build', reps_js: 9, null_reps_js: 20, warmup_js: 0, reps_rs: 20, warmup_rs: 2, js_budget_ms: 7200_000, dnf_allowed: true, effect_ci_required: true },
+  // 384 distinct docs pages share one complete 48-node platform subgraph and attach independent
+  // tails. The job exposes cross-diagram parser reuse while retaining one full render per page.
+  { id: 'ci_shared_subgraph_384', gen: 'shared_subgraph_docs', params: { count: 384, shared_nodes: 48, seed: 20260731 }, class: 'doc_build', reps_js: 9, null_reps_js: 20, warmup_js: 0, reps_rs: 20, warmup_rs: 2, js_budget_ms: 7200_000, dnf_allowed: true, effect_ci_required: true },
   // 60 keystrokes inside one label: the re-render frequency a live preview actually generates.
   { id: 'typing_trace_60',      gen: 'typing_trace', params: { nodes: 40, phrase: 'Aggregate results from the upstream ingestion workers safely', seed: 20260728 }, class: 'edit_trace', reps_js: 2, warmup_js: 1, reps_rs: 20, warmup_rs: 2, js_budget_ms: 900_000, dnf_allowed: true },
   // One architecture-review export at two monorepo sizes. Degree and domain sizes are deliberately
