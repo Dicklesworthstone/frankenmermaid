@@ -1001,6 +1001,12 @@ fn build_marker_defs_body(edge_color: &str, emit_fancy: bool) -> String {
             &mut s,
             ArrowheadMarker::triangle_open_marker("arrow-triangle-open", edge_color),
         );
+        // Leading `start-` is LOAD-BEARING, not styling: the cross-engine checker recognises our
+        // inheritance markers by an anchored id pattern (`(?:^|-)arrow-(?:inheritance(-open)?|
+        // triangle-open)$`), so a trailing `-start` suffix would fall outside its vocabulary and the
+        // marker would score as `unknown` even though it renders correctly. Conform to the checker's
+        // contract rather than widening the checker.
+        //
         // A triangle is NOT symmetric under 180 degrees, so the start slot needs its own
         // auto-start-reverse def or `orient="auto"` rotates it to point INTO the path — which the
         // cross-engine checker rejects as invalid:inheritance:points_into_path(slot=start). This
@@ -1008,7 +1014,7 @@ fn build_marker_defs_body(edge_color: &str, emit_fancy: bool) -> String {
         // twin because a diamond looks identical either way round.
         push(
             &mut s,
-            ArrowheadMarker::triangle_open_marker("arrow-triangle-open-start", edge_color)
+            ArrowheadMarker::triangle_open_marker("start-arrow-triangle-open", edge_color)
                 .with_orient(MarkerOrient::AutoStartReverse),
         );
     }
@@ -1479,7 +1485,7 @@ fn map_marker_kind(kind: fm_layout::MarkerKind) -> &'static str {
         MarkerKind::Diamond => "url(#arrow-diamond)",
         MarkerKind::DiamondOpen => "url(#arrow-diamond-open)",
         MarkerKind::TriangleOpen => "url(#arrow-triangle-open)",
-        MarkerKind::TriangleOpenStart => "url(#arrow-triangle-open-start)",
+        MarkerKind::TriangleOpenStart => "url(#start-arrow-triangle-open)",
         MarkerKind::Open => "url(#arrow-open)",
     }
 }
@@ -10482,7 +10488,7 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
             // inherits Animal", so the parent is the source; `--|>` puts it at the target.
             ArrowType::Inheritance => (
                 None,
-                Some("url(#arrow-triangle-open-start)"),
+                Some("url(#start-arrow-triangle-open)"),
                 None,
                 &colors.edge,
             ),
@@ -11218,7 +11224,7 @@ fn render_edge_into(out: &mut String, edge_path: &LayoutEdgePath, context: &Edge
         ArrowType::Inheritance => (
             1.8,
             "fm-edge-solid",
-            "url(#arrow-triangle-open-start)",
+            "url(#start-arrow-triangle-open)",
             "",
             "",
             " is inherited by ",
@@ -14230,7 +14236,7 @@ marker#arrow-future path { fill: red; }\n\
                             edge,
                         ))
                         .marker(
-                            ArrowheadMarker::triangle_open_marker("arrow-triangle-open-start", edge)
+                            ArrowheadMarker::triangle_open_marker("start-arrow-triangle-open", edge)
                                 .with_orient(MarkerOrient::AutoStartReverse),
                         );
                 }
