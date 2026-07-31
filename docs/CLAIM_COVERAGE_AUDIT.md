@@ -32,11 +32,11 @@ render against mermaid's full one*.
 
 **Current semantic-conversion update (2026-07-31).** The five demoted class-mixed jobs now pass the
 current oracle but still require fresh timing. Current semantic artifacts also close the cheap
-conversion queue for `schema_catalog_25`, the 201-revision live-edit job, the two short rows, the
-13-row bracketed base slice, and the original 15 measurable median-CI rows. Those artifacts do not
-retroactively validate historical ratios: each ledger row remains semantic-only until a fresh
-same-invocation incumbent run clears the corrected null gate. `typing_trace_60` is the sole
-remaining Tier-2 workload without a current output-equivalence verdict.
+conversion queue for `schema_catalog_25`, the 201-revision live-edit job, `typing_trace_60`, the two
+short rows, the 13-row bracketed base slice, and the original 15 measurable median-CI rows. Those
+artifacts do not retroactively validate historical ratios: each ledger row remains semantic-only
+until a fresh same-invocation incumbent run clears the corrected null gate. There are no remaining
+Tier-2 workloads without a current output-equivalence verdict.
 
 Contamination map, derived from the corpus generators:
 
@@ -45,7 +45,7 @@ Contamination map, derived from the corpus generators:
 | `ci_batch_500`, `doc_build_40` (`docBuild`) | 1 of every 5 diagrams | historical ratios demoted; current semantic artifact passes |
 | `docs_site_50`, `docs_site_200` (`docsSite`) | ~9% (`roll` 0.74–0.83) | historical ratios demoted; current semantic artifact passes |
 | `schema_catalog_25` | ER only | current artifact passes 25/25 |
-| `typing_trace_60` | flowchart only | no current verdict on file; next conversion item |
+| `typing_trace_60` | flowchart only | current artifact passes 60/60; timing null median fails |
 | `ci_equiv_512` | flowchart only, class deliberately excluded | verified 512/512 |
 
 ## Ranked conversion queue
@@ -91,10 +91,11 @@ see below**), `bd-92b6` (`o--`/`*--` fall through to `--`, creating phantom node
 demoted because semantic repair does not refresh a historical timing ratio.
 
 **Tier 2 — incumbent-backed, no equivalence verdict at the audit snapshot, contamination not
-established.** The existing gate has now closed every item except `typing_trace_60`.
+established.** The current gate has now closed every item.
 
 4. `schema_catalog_25` — current artifact passes 25/25.
-5. `typing_trace_60` — **still open; next conversion item.**
+5. `typing_trace_60` — current artifact passes 60/60 after the endpoint resolver learned emitted
+   rectangle boundaries; its Rust null median fails the corrected 2% clause, so it is semantic-only.
 6. 201-revision live-edit trace — current artifact passes 201/201.
 7. two short-row quiet retries (2 rows) — both current artifacts pass.
 8. 13-row bracketed base slice — current artifact passes 13/13 and 72/72 revisions.

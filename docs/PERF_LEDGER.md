@@ -1038,3 +1038,73 @@ ratios. The t1, t8, and t64 rows passed the corrected median-CI gate; t32 and t1
   equivalence verdict and a passing same-ELF bracket, and the only failing clause on t32/t128 is
   the null-median clause. **Published claim** now shows the complete 1/8/32/64/128 sweep with both
   withheld rows and their reason stated inline, rather than the three passing widths alone.
+
+## SEMANTIC ADMISSION ONLY: 60-revision live-typing whole job (2026-07-31)
+
+**Bead:** `bd-kn9b`. **Lane:** cod (`LavenderMill`).
+**Executing ELF SHA-256 (self-reported by process):**
+`c2b0af01dfffab49631d70a2988dfb8fa094f79daa0a14785b5c3683332bc3e2` (7,894,560 bytes).
+**A/A null control (same invocation):** incomplete and failing the corrected median clause, so it
+is not a performance gate. In the final equivalence-clean invocation, the scalar Rust dump arm
+reported median `0.956787`, bootstrap 95% CI `[0.873823, 1.056038]`; the median itself is outside
+the mandatory `[0.98, 1.02]` interval. The untimed mermaid-js `--render-once` arm collected no
+incumbent A/A pairs. The retained first audit invocation had a passing Rust median `0.999667`, CI
+`[0.965844, 1.016315]`, but its then-current oracle left 32 revisions unverified. Evidence from
+those separate invocations is not combined. There is no current ratio, win, loss, or complete
+corrected-null timing verdict; CV remains provenance only.
+
+- **Recognizable whole job.** `typing_trace_60` is one live-preview session containing **60**
+  successive full-document revisions, not a per-diagram kernel mean. Each revision renders 40
+  authored nodes and 39 edges while one production-style node label grows character by character:
+  **2,400 node instances and 2,340 edge instances** across the job. Both engines consumed the
+  identical input SHA-256
+  `1b387d42772f0e4a2e479059cbd60c002aff4451ee7b4a97bf3bd6d82c334a33`.
+- **Oracle dead end and recovery.** The first current-oracle attempt was **28/60 equivalent**,
+  zero divergent, and 32 unverified. Beginning at revision 28, node `N20` becomes wide enough that
+  its outgoing path starts exactly on its emitted rectangle boundary; centre-only distance made
+  the neighbouring narrow node almost as close and correctly refused to guess the endpoint. This
+  is recoverable oracle incompleteness, not an engine semantic mismatch. The shared resolver now
+  measures a path endpoint against emitted rectangle bounds when available, retains conservative
+  centre distance for shapes whose exact boundary is not decoded, and still refuses zero-distance
+  ties. The focused boundary controls and the full oracle self-test pass **42/42** cases.
+- **Exact semantic result.** The corrected replay is **60/60 equivalent**, zero divergent, zero
+  unverified. Every revision passed incumbent-rendered text containment, authored node-ID equality,
+  cross-engine rendered-path topology, and each engine's topology against input-derived truth; all
+  60 therefore received Tier-2 flowchart adjudication.
+- **Output-equivalence check.** One shared extractor processes both engines. It gates rendered-text
+  containment and authored node-ID sets, reconstructs frankenmermaid endpoints from emitted path
+  and node geometry, accepts mermaid-js's per-path declared endpoints only when every declaration
+  uniquely resolves against the rendered node set, compares the resulting topology cross-engine,
+  and independently compares both engines against topology derived from each pinned source
+  revision. Unknown or undecidable required invariants never pass. This is neither SVG byte
+  equality nor a rasterized perceptual diff.
+- **Linked artifacts.** The retained oracle-audit failure
+  `.benchmarks/headtohead/typing-trace-60-requalification-v1/equivalence-3e7edbef-1785490994893.json`
+  has SHA-256 `b25daec77549445d69122741767c2e702f47ebfc28c8fe786a5b134e179352c1`.
+  The passing artifact
+  `.benchmarks/headtohead/typing-trace-60-requalification-v1/equivalence-3e7edbef-1785491181243.json`
+  has SHA-256 `4e36954811ade7daea0a90b25ef0851c2b7382d55ad8939f11ba394d75e242e9`.
+  Frankenmermaid dumped 60/60 revisions with SHA-256
+  `826e563060f688301cb2d188cfe3c052f5c93c902ab5733a8432265c557aba97`;
+  mermaid-js dumped 60/60 with SHA-256
+  `6d290e8b4c68a6e951ddc3a0b072f9168df8a74f20e320ccd5100d50790320d9`.
+  Both concatenated hashes exactly match the values self-reported by their measured arms.
+- **Incumbent, observed threads, and host.** The live comparator is mermaid-js `11.15.0`, bundle
+  SHA-256 `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`,
+  through `/usr/bin/chromium-browser` (`Chrome/150.0.7871.128`). Frankenmermaid requested and
+  actually observed **1** scalar worker; mermaid-js requested and actually observed **1** browser
+  main execution thread. Host `thinkstation1` is an AMD Ryzen Threadripper PRO 5975WX with 64
+  logical CPUs, kernel `6.17.0-35-generic`, complete `amd-pstate-epp` provenance (`powersave`
+  governor, `performance` EPP, boost enabled), and complete x86-64 ISA provenance
+  (AVX2/FMA/BMI2/VAES present; AVX-512 absent).
+- **Strict build receipt.** Worker `ovh-a` built this executable through strict `rch exec` from base
+  `2bb114ff` with `--clean-overlay` and only `crates/fm-layout/src/lib.rs`; no co-tenant edit entered
+  the binary, no local fallback occurred, and no task-specific Cargo target directory was created.
+- **Disposition / retry predicate.** The audit's cheap semantic-conversion queue is now closed, but
+  the historical live-typing ratio remains non-current. Retry timing only after an exclusive
+  central `trj` claim and host-wide external work are clear; run this exact linked 60-revision job
+  side-by-side against the live pinned incumbent with the same self-reporting ELF, actual observed
+  threads, complete governor/ISA/topology provenance, and a corrected same-invocation A/A gate in
+  which every arm's null median is inside `[0.98, 1.02]` and the CI and 2x-null-margin clauses also
+  pass. Reopen semantic admission only if the input pin, incumbent bundle/configuration, executing
+  ELF, or equivalence contract changes.

@@ -254,6 +254,23 @@ export function pathEndpoints(d) {
 const distance = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
 
 /**
+ * Distance from a rendered path endpoint to one node's emitted geometry.
+ *
+ * A centre alone is insufficient for a wide node: an endpoint on its boundary can be closer to
+ * the centre of a neighbouring narrow node. Rectangular bounds let the shared resolver use the
+ * renderer's actual attachment surface while other node shapes retain the conservative
+ * centre-distance fallback.
+ */
+function anchorDistance(point, anchor) {
+  if (Array.isArray(anchor)) return distance(point, anchor);
+  const { center, bounds } = anchor;
+  if (!bounds) return distance(point, center);
+  const dx = Math.max(bounds.min_x - point[0], 0, point[0] - bounds.max_x);
+  const dy = Math.max(bounds.min_y - point[1], 0, point[1] - bounds.max_y);
+  return Math.hypot(dx, dy);
+}
+
+/**
  * Resolve a point to the nearest node anchor, requiring an unambiguous winner.
  *
  * `ratio` guards against a coin-flip: when the two closest anchors are within `ratio` of each
@@ -264,13 +281,13 @@ export function nearestAnchor(point, anchors, ratio = 0.75) {
   let best = null;
   let bestD = Infinity;
   let secondD = Infinity;
-  for (const [id, center] of anchors) {
-    const d = distance(point, center);
+  for (const [id, anchor] of anchors) {
+    const d = anchorDistance(point, anchor);
     if (d < bestD) { secondD = bestD; bestD = d; best = id; }
     else if (d < secondD) { secondD = d; }
   }
   if (best === null) return null;
-  if (Number.isFinite(secondD) && bestD > secondD * ratio) return null;
+  if (Number.isFinite(secondD) && (secondD === 0 || bestD > secondD * ratio)) return null;
   return best;
 }
 
@@ -454,7 +471,12 @@ function frankenStructure(svg) {
   return { nodes, edges };
 }
 
-/** Centre of the first `<rect>`/`<circle>`/`<ellipse>`/`<polygon>` in a node subtree. */
+/**
+ * Geometry of the first `<rect>`/`<circle>`/`<ellipse>`/`<polygon>` in a node subtree.
+ *
+ * Rectangles retain both their centre and attachment bounds. Other shapes retain the centre-only
+ * representation until their exact boundary distance can be recovered without approximating.
+ */
 function shapeAnchor(subtree) {
   const rect = /<rect\b[^>]*>/.exec(subtree)?.[0];
   if (rect) {
@@ -462,7 +484,17 @@ function shapeAnchor(subtree) {
     const y = Number(ATTR(rect, 'y'));
     const w = Number(ATTR(rect, 'width'));
     const h = Number(ATTR(rect, 'height'));
-    if ([x, y, w, h].every(Number.isFinite)) return [x + w / 2, y + h / 2];
+    if ([x, y, w, h].every(Number.isFinite)) {
+      return {
+        center: [x + w / 2, y + h / 2],
+        bounds: {
+          min_x: x,
+          min_y: y,
+          max_x: x + w,
+          max_y: y + h,
+        },
+      };
+    }
   }
   for (const name of ['circle', 'ellipse']) {
     const tag = new RegExp(`<${name}\\b[^>]*>`).exec(subtree)?.[0];
@@ -1663,6 +1695,54 @@ export function selfTest() {
   record('ambiguous_anchor_refuses',
     nearestAnchor([10, 0], [['a', [0, 0]], ['b', [20, 0]]]) === null,
     nearestAnchor([10, 0], [['a', [0, 0]], ['b', [20, 0]]]));
+  record('wide_rectangle_boundary_beats_neighbour_center',
+    nearestAnchor(
+      [200, 0],
+      [
+        ['wide', {
+          center: [100, 0],
+          bounds: { min_x: 0, min_y: -20, max_x: 200, max_y: 20 },
+        }],
+        ['neighbour', [240, 0]],
+      ],
+    ) === 'wide',
+    nearestAnchor(
+      [200, 0],
+      [
+        ['wide', {
+          center: [100, 0],
+          bounds: { min_x: 0, min_y: -20, max_x: 200, max_y: 20 },
+        }],
+        ['neighbour', [240, 0]],
+      ],
+    ));
+  record('overlapping_rectangle_boundaries_refuse',
+    nearestAnchor(
+      [100, 0],
+      [
+        ['left', {
+          center: [50, 0],
+          bounds: { min_x: 0, min_y: -20, max_x: 100, max_y: 20 },
+        }],
+        ['right', {
+          center: [150, 0],
+          bounds: { min_x: 100, min_y: -20, max_x: 200, max_y: 20 },
+        }],
+      ],
+    ) === null,
+    nearestAnchor(
+      [100, 0],
+      [
+        ['left', {
+          center: [50, 0],
+          bounds: { min_x: 0, min_y: -20, max_x: 100, max_y: 20 },
+        }],
+        ['right', {
+          center: [150, 0],
+          bounds: { min_x: 100, min_y: -20, max_x: 200, max_y: 20 },
+        }],
+      ],
+    ));
   record('canonical_ids_agree',
     canonicalNodeId('mermaid-js', 'class50_r14_0-classId-C0-2350') === 'c0'
     && canonicalNodeId('frankenmermaid', 'fm-node-c0-0') === 'c0'
