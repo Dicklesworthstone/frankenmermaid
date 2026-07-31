@@ -1295,3 +1295,49 @@ cycles (**-12.46%**). It bypasses Chumsky for all 10,635 quoted node declaration
 - **Retry predicate.** Re-run only if the corpus, equivalence contract, pinned incumbent, executing
   ELF/compiler profile, persistent-pool semantics, thread frontier, timer boundary, or corrected
   median-CI gate changes.
+
+## CERTIFIED INCUMBENT WIN: 384-diagram shared-subgraph compile/render job (2026-07-31)
+
+**Bead:** `bd-jn5q`. **Lane:** cod (`DarkDeer`).
+**Campaign result class:** incumbent-win
+**Executing ELF SHA-256 (self-reported by process):** `b0f3b58727a349b994fce43d7ffa09a9399c740064f01f7795faa6a6ab1f7491`
+**Legacy incumbent arm (same invocation):** name=mermaid-js version=11.15.0 artifact_sha256=70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de invocation_id=summary-ba809bd4-1785524984520 measured_ratio=17060.38182452497x
+**A/A null control (same invocation):** at the selected 64-worker frontier, Rust-before median
+`0.991830`, bootstrap 95% CI `[0.972711, 1.019545]`; Rust-after median `0.984900`, CI
+`[0.944250, 1.002979]`; mermaid-js median `1.004688`, CI `[1.001903, 1.018114]`. The
+whole-job effect CI excludes 1 and clears twice the largest null radius; `cv_gate=never`.
+
+- **Mechanism.** `FlowchartBatchParsePlan` recognizes complete repeated leading subgraph blocks,
+  parses each exact prefix once into immutable replay syntax, and sends only each diagram's unique
+  suffix through the parser. The plan contains no shared mutable state, so the existing persistent
+  Rayon pool concurrently parses, lays out, renders, and serializes the distinct diagrams without
+  locks or cross-worker IR clones.
+- **Whole-job result.** One sample processes **384 distinct flowcharts** sharing a complete 48-node
+  prefix: 21,495 nodes, 21,111 edges, and 822,360 input bytes. Live mermaid-js measured
+  **51,101.900 ms** versus the slower side of the 64-worker same-ELF bracket, **2.995355 ms**, or
+  **17,060.381825x** with bootstrap 95% effect CI
+  **[16,581.249829x, 17,414.945596x]**. The Rust job sustained **128,198 diagrams/s**.
+- **Scaling and identity.** The same job measured **46.420632 ms** with one requested and observed
+  worker and **2.995355 ms** with 64 requested and observed workers, a **15.50x** whole-pipeline
+  scaling gain. Mermaid-js requested and used one browser main execution thread. Every retained
+  width self-reported the same 7,922,768-byte ELF and SVG SHA-256
+  `033cbbf5c63601787b3b6d7e5230dca8a2d6c2eb7ac58f5d8cb2e8e56a9a82d4`.
+- **Output equivalence.** All **384/384** diagrams passed the shared engine-neutral structural
+  extractor, with zero divergent and zero unverified. The byte-identical input SHA-256 was
+  `4d9914725224c310b44bd1bb4c03cc18575b6c02ef2350a70b6496470e53b464`.
+- **Host and build provenance.** `thinkstation1`, AMD Ryzen Threadripper PRO 5975WX, 32 physical
+  cores / 64 logical threads, complete 64-CPU affinity, AVX2/FMA/BMI2/VAES present and AVX-512
+  absent. Strict RCH worker `hz2` built from base `78615c6b46e879727b715d952061b5b74a335ae4`
+  with a clean overlay and Rust nightly `8ab9fdff5`.
+- **Evidence.** Summary
+  `.benchmarks/headtohead/ci-shared-subgraph-384-sweep-thinkstation1-8229/summary-ba809bd4-1785524984520.json`
+  (SHA-256 `38ebd0e9db800622c8cd5cfe7f3a15fa9df7a5b2e4f9d896cb3dfb976eba9353`);
+  raw JSONL
+  `.benchmarks/headtohead/ci-shared-subgraph-384-sweep-thinkstation1-8229/run-ba809bd4-1785524984520.jsonl`
+  (SHA-256 `0a87a9b9af64be1da425cbccc8abb5c045c4c3f45a5b7b24686ae28f5b625104`);
+  equivalence artifact
+  `.benchmarks/headtohead/ci-shared-subgraph-384-equivalence-b0f3/equivalence-78615c6b-1785514471598.json`
+  (SHA-256 `3a2534d920d0846051284cbcb6708e675fe0b7b309b2261b3410b6106f5a6ac6`).
+- **Retry predicate.** Re-run only if the shared-prefix corpus, parser replay semantics, persistent
+  pool, equivalence contract, pinned incumbent, executing ELF/compiler profile, thread frontier,
+  timer boundary, or corrected median-CI contract changes.

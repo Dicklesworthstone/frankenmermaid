@@ -1647,6 +1647,13 @@ is the 64-physical-core frontier: **32.18×** the single-worker job at 50.3% obs
 efficiency. Deliberate 128-way SMT oversubscription remains faster than 16 workers but regresses
 slightly from the physical-core optimum.
 
+A complementary 384-diagram job exercises structurally repeated documents: every distinct
+flowchart shares one complete 48-node subgraph prefix and has a unique suffix. frankenmermaid
+compiles that prefix once into immutable replay syntax, then parses, lays out, renders, and
+serializes the 384 suffixes across 64 observed workers. The whole job measured **2.995355 ms**
+versus live mermaid-js's **51,101.900 ms**, or **17,060.381825×** with bootstrap 95% effect CI
+**[16,581.249829×, 17,414.945596×]**; all **384/384** outputs passed structural equivalence.
+
 **The output-equivalence check is SVG structural equivalence** — not byte equality, and not a
 rasterized perceptual diff. A pixel diff would report a large distance between two correct renders
 because the engines differ in fonts, padding, and stroke widths, and the engines deliberately emit
