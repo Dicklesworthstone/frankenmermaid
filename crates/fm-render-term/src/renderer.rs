@@ -2217,6 +2217,7 @@ mod tests {
         let config = TermRenderConfig {
             tier: MermaidTier::Compact,
             render_mode: MermaidRenderMode::CellOnly,
+            padding: 0,
             ..Default::default()
         };
         let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 8, 1));
