@@ -19251,6 +19251,77 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
 
   Agent: cod (BlackThrush)
 
+### CANNOT: exact 2k/5k requalification isolates UML inheritance as the sole blocker (2026-07-31)
+
+- **Bead / surface:** reopened `bd-l7d2`; the unchanged, named `ci_docs_2000` and
+  `ci_docs_5000` whole jobs. This is an untimed semantic-admission result, not a performance
+  comparison.
+- **Harness and build isolation:** class relationship Tier 2 landed in `0eac3120`; mandatory
+  actual-thread probing landed in `dafc9923`. The executable was built on RCH worker `hz1` from
+  pinned base `7c464703660eb586c47163a838ef995bb91d39c3` with
+  `rch exec --base ... --clean-overlay --no-overlay`, so the concurrent inheritance edits in the
+  shared checkout could not enter the binary. All four loaded JS harness files matched committed
+  `dafc9923` at the run boundary. The artifact's truthful `git_dirty=true` describes unrelated
+  peer-owned Rust edits in the shared checkout, not either loaded engine or the committed oracle.
+- **Executing ELF SHA-256 (self-reported by process):**
+  `f80ff6881f434e2c3d8b96fdd22c2e8a434847ed8dff75ca360837fe5168da4d`
+  (7,901,264 bytes). The pinned incumbent was live mermaid-js `11.15.0`, bundle SHA-256
+  `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`, in
+  `/usr/bin/chromium-browser` (`Chrome/150.0.7871.128`).
+- **Host / governor / ISA provenance:** `thinkstation1`, Linux `6.17.0-35-generic`, AMD Ryzen
+  Threadripper PRO 5975WX (64 logical threads). All 64 cpufreq policies were observed complete:
+  driver `amd-pstate-epp`, governor `powersave`, EPP `performance`, boost enabled. ISA came from
+  `/proc/cpuinfo` with 142 flags; AVX2/FMA/BMI2/VAES present and AVX-512 absent.
+- **Actual observed threads:** every row records frankenmermaid requested/observed `1/1`
+  (`scalar`) and mermaid-js requested/observed `1/1` (`single_page_main_thread`). The first
+  attempted artifact was refused because the Rust probe was not enabled; `dafc9923` made the
+  out-of-band exact-workload operation probe mandatory rather than substituting the requested
+  width.
+- **Output-equivalence check:** one shared extractor checks rendered-text containment for every
+  family; rendered node IDs; flowchart/state rendered-path topology cross-engine and against
+  source-derived ground truth; and, for class diagrams, each rendered relationship's endpoint-bound
+  marker kind and owning end cross-engine, frankenmermaid-vs-source, and mermaid-js-vs-source.
+  Unknown markers diverge; unresolved required invariants are unverified, never pass. The oracle
+  passed 33 self-test cases, including 11 mutation controls and four negative controls. Each
+  engine's 2,000/2,000 and 5,000/5,000 dumps hash exactly to the output SHA-256 self-reported by
+  that engine in the same invocation.
+- **Artifact:** `.benchmarks/headtohead/ci-docs-2k5k-equivalence-v2/`
+  `equivalence-dafc9923-1785479559075.json`, SHA-256
+  `81cd3844e472ea29f11081ec8ae6136b820620a13c77a0513cc7d55c92b78bf7`.
+  Input SHA-256 is
+  `ae5b6ff4da07288524f948b38d6fc1df065f4797de3f0ab115ac2621cf23598b`
+  for 2k and
+  `26e5710af60c5548521f75aaf047672a4316d657885a8ab1d119338ba1804f41`
+  for 5k, identical across engines.
+- **Exact result:** `ci_docs_2000` is 1,856 equivalent, 144 divergent, 0 unverified;
+  `ci_docs_5000` is 4,647 equivalent, 353 divergent, 0 unverified. Every flowchart
+  (1,149/2,882), sequence (327/804), ER (165/442), and state diagram (169/390) passes.
+  Rendered text passes 2,000/2,000 and 5,000/5,000. Node IDs and every decided topology invariant
+  also pass. The only failures are 144/190 and 353/482 class diagrams containing inheritance.
+- **Precise semantic CANNOT:** `<|--` and its reverse are still represented as ordinary
+  `ArrowType::Arrow`. Frankenmermaid therefore renders
+  `source>target|start=none|end=association`; both the pinned incumbent and source-derived truth
+  require `source>target|start=inheritance|end=none`. This is observed unequal work on the named
+  whole jobs, so timing either job would reward a missing UML triangle and is prohibited.
+- **Recoverability boundary:** the earlier class-member truncation, aggregation/composition
+  phantom-node/marker failures, and all state-label failures are conclusively recovered by this
+  artifact. The remaining 1,856/4,647 passing subsets are not recoverable as the named jobs:
+  filtering them changes the pinned input hash, family mix, traversal, allocation pressure, and
+  scheduling boundary. The complete named jobs become recoverable only after inheritance is fixed.
+- **A/A null control (same invocation):** NOT RUN. Semantic admission failed before the target-host
+  timing invocation, so there is no effect/null sample and no ratio. On retry, the corrected null
+  gate must require the A/A median itself to lie within `[0.98, 1.02]` in addition to the existing
+  bootstrap-CI/null-margin clauses; CV remains provenance only.
+- **Verdict / retry predicate:** conclusive CANNOT for the two pinned jobs on this ELF; no timing
+  number, lower bound, or `trj` claim. Retry only after distinct inheritance variants survive
+  parser, core IR, layout, SVG marker defs/dispatch, canvas dispatch, and focused tests; rebuild
+  that commit with strict RCH `--base` plus `--clean-overlay`; then require this exact 2k+5k linked
+  artifact to report zero divergent and zero unverified. Only that result may trigger a fresh
+  exclusive nine-width timing sweep with the corrected null-median clause, actual observed workers,
+  unchanged governor/ISA/topology provenance, and median-CI gating.
+
+  Agent: cod (LavenderMill)
+
 ### INCONCLUSIVE / SEMANTIC CANNOT: equal-work public-parser incumbent arms (2026-07-31)
 
 - **Campaign / bead:** `bd-ap4v`; scalar whole-job parsing through frankenmermaid's public
