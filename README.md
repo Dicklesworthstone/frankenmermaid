@@ -1620,22 +1620,48 @@ not a crash, and has no point ratio.
 
 #### Numeric campaign status
 
-The certified concurrent CI workload renders 512 right-skewed documentation flowcharts as one job:
-10,635 nodes, 10,123 edges, and 402,843 input bytes. The live pinned mermaid-js 11.15.0 arm took
-24,351.600 ms. These are the caller widths whose whole-job effect CI, same-invocation A/A controls,
-and same-ELF pre/post bracket all passed:
+The certified concurrent CI workload renders 512 right-skewed documentation flowcharts as **one
+job**: 10,635 nodes, 10,123 edges, and 402,843 input bytes, input SHA-256
+`228414f81bb6e73135bcc5244cb93503237f670bfa327b5da9310e6d777904aa`. One logical sample parses, lays
+out, renders, and serializes all 512 diagrams; frankenmermaid's timer-floor batching repeats whole
+512-diagram jobs and divides only by the repeat count, so no per-diagram mean enters a verdict.
 
-| Caller workers requested / observed | frankenmermaid whole-job median | mermaid-js / frankenmermaid (95% effect CI) |
-|---:|---:|---:|
-| 1 / 1 | 34.182970 ms | **712.389825×** [699.080772×, 736.410175×] |
-| 8 / 8 | 4.774816 ms | **5,100.008042×** [5,028.063855×, 5,264.077738×] |
-| 64 / 64 | 1.820520 ms | **13,376.178235×** [13,083.153389×, 13,905.084595×] |
+The comparator is live, not a recorded number: the same driver invocation drove the pinned
+mermaid-js 11.15.0 bundle (SHA-256 `70137e77…`, `securityLevel=strict`) through Chrome
+150.0.7871.128, which reported **one** requested and one actually-used main execution thread. Nine
+independent whole-job samples give a **24,351.600 ms** median.
 
-This is SVG structural equivalence, not a pixel diff: all 512 diagrams passed rendered-text
-containment, node-set equality, cross-engine edge topology, and each engine's topology against the
-input-derived graph. The exact timing input, process-self-reported Rust ELF, and mermaid bundle are
-cryptographically linked to that 512/512 artifact. Widths whose A/A median exceeded the corrected
-2% arm-order-bias limit are excluded from the public claim.
+The full caller-width sweep, with worker threads *observed* by an instrumented caller-worker union
+over the exact workload rather than merely requested:
+
+| Caller workers requested / observed | frankenmermaid whole-job median | mermaid-js / frankenmermaid (95% effect CI) | Disposition |
+|---:|---:|---:|---|
+| 1 / 1 | 34.182970 ms | **712.389825×** [699.080772×, 736.410175×] | published |
+| 8 / 8 | 4.774816 ms | **5,100.008042×** [5,028.063855×, 5,264.077738×] | published |
+| 32 / 32 | 1.683505 ms | 14,464.821904× [14,029.697310×, 15,648.501123×] | *withheld* — A/A null median 1.025448 |
+| 64 / 64 | 1.820520 ms | **13,376.178235×** [13,083.153389×, 13,905.084595×] | published |
+| 128 / 128, oversubscribed | 3.440187 ms | 7,078.568694× [6,654.366489×, 7,427.614224×] | *withheld* — A/A null medians 0.964308 / 0.968836 |
+
+Observed width matched the request at every point, and all five widths carried a passing
+equivalence verdict and a passing same-ELF pre/post bracket. The two withheld rows failed only the
+corrected gate's third clause — their same-invocation A/A null medians drifted past the 2%
+arm-order-bias limit — so their ratios are measurements, not claims. The fastest *publishable*
+width is 64 workers, at 18.78× the single-worker job and 29.3% parallel efficiency; 8 workers give
+7.16×. Deliberate 128-way oversubscription regresses to 3.440187 ms.
+
+**The output-equivalence check is SVG structural equivalence** — not byte equality, and not a
+rasterized perceptual diff. A pixel diff would report a large distance between two correct renders
+because the engines differ in fonts, padding, and stroke widths, and the engines deliberately emit
+different SVG (`foreignObject` labels vs `<text>`, different class vocabularies). A single shared
+extractor is applied to both engines, since a per-engine extractor pair could agree by
+construction. All **512/512** diagrams passed, with zero divergent and zero unverified, on four
+gating invariants: rendered-text token containment (every token mermaid-js renders must be present
+in ours), node-ID set equality, cross-engine rendered-path edge topology, and each engine's edge
+topology checked separately against the input-derived graph. Undecidable is not a pass. The check
+is one-directional on text — rendering *more* than mermaid-js is reported, not failed. Its
+self-test carries 5 mutation controls (dropped label, either engine dropping an edge, rewired edge,
+displaced node) and 2 negative controls. The timing input, the process-self-reported Rust ELF, and
+the mermaid bundle are cryptographically linked to that 512/512 artifact.
 
 **How numeric claims are admitted:**
 

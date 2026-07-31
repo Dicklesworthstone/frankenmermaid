@@ -617,3 +617,13 @@ ratios. The t1, t8, and t64 rows passed the corrected median-CI gate; t32 and t1
   persistent-pool semantics, timer floor, corrected gate, or host topology changes. Do not chase
   t32 or t128 with another identical timing run; reopen either only after a dedicated-host change
   addresses its repeated null-median bias or one of those named artifacts/contracts changes.
+- **Independent re-verification before publication (cc lane, `LilacPike`, 2026-07-30).** All three
+  evidence SHA-256s recomputed and matched. The corpus was regenerated from `corpus.mjs` and
+  reproduced the pinned input SHA-256 `228414f8…`, 402,843 bytes, 512 revisions, and 10,123 edges
+  exactly. `svg_equivalence.mjs --self-test` re-ran clean: `{"ok":true,"cases":23,
+  "mutation_controls":5,"negative_controls":2}`. The equivalence artifact's `fm_dump_sha256` equals
+  the sweep summary's `fm_output_sha256` (`787024…`), so the compared bytes are the measured bytes.
+  Observed caller width equals requested width at all five points; all five carry a passing
+  equivalence verdict and a passing same-ELF bracket, and the only failing clause on t32/t128 is
+  the null-median clause. **Published claim** now shows the complete 1/8/32/64/128 sweep with both
+  withheld rows and their reason stated inline, rather than the three passing widths alone.
