@@ -12287,22 +12287,71 @@ fn pair_crossings(
     ) else {
         return 0;
     };
-    let mut upper_pos: FxHashMap<usize, usize> = FxHashMap::default();
-    for (position, &node) in upper_order.iter().enumerate() {
-        upper_pos.insert(node, position);
-    }
-    let mut lower_pos: FxHashMap<usize, usize> = FxHashMap::default();
-    for (position, &node) in lower_order.iter().enumerate() {
-        lower_pos.insert(node, position);
-    }
+    // Position lookup by DENSE ARRAY, not two from-scratch hash maps.
+    //
+    // This runs in the refinement loop -- a perturbation at rank `r` re-counts the `(r-1, r)` and
+    // `(r, r+1)` pairs -- so these maps were rebuilt from empty over and over for orderings that
+    // barely changed. Built with no capacity, each one grew by repeated `reserve_rehash`; on the
+    // ER catalog workload `reserve_rehash` + `insert` + `build_hasher` measured 19% of the whole
+    // job, on top of `crossing_count` itself. The keys are node indices, i.e. already dense, so a
+    // flat `Vec` indexed by node id answers the same question with one memset and no hashing.
+    //
+    // `crossing_count_dense` in `egraph_ordering` makes exactly this trade; the sparsity guard is
+    // copied from it so a pathological node-id domain still falls back to hashing instead of
+    // allocating a huge mostly-empty array. Byte-identical either way: same positions, pushed in
+    // the same edge order, so `edge_positions` and the inversion count are unchanged.
+    const MISSING: usize = usize::MAX;
+    let dense_domain = upper_order
+        .iter()
+        .chain(lower_order.iter())
+        .copied()
+        .max()
+        .and_then(|max_node| max_node.checked_add(1))
+        .filter(|&domain_len| {
+            let useful_slots = upper_order
+                .len()
+                .saturating_add(lower_order.len())
+                .saturating_add(edges.len().saturating_mul(2))
+                .max(64);
+            domain_len <= useful_slots.saturating_mul(8)
+        });
+
     let mut edge_positions: Vec<(usize, usize)> = Vec::with_capacity(edges.len());
-    for &(source, target) in edges {
-        let (Some(&source_position), Some(&target_position)) =
-            (upper_pos.get(&source), lower_pos.get(&target))
-        else {
-            continue;
-        };
-        edge_positions.push((source_position, target_position));
+    if let Some(domain_len) = dense_domain {
+        let mut upper_pos = vec![MISSING; domain_len];
+        for (position, &node) in upper_order.iter().enumerate() {
+            upper_pos[node] = position;
+        }
+        let mut lower_pos = vec![MISSING; domain_len];
+        for (position, &node) in lower_order.iter().enumerate() {
+            lower_pos[node] = position;
+        }
+        // `.get` not indexing: an edge may name a node absent from these two ranks entirely.
+        for &(source, target) in edges {
+            let source_position = upper_pos.get(source).copied().unwrap_or(MISSING);
+            let target_position = lower_pos.get(target).copied().unwrap_or(MISSING);
+            if source_position == MISSING || target_position == MISSING {
+                continue;
+            }
+            edge_positions.push((source_position, target_position));
+        }
+    } else {
+        let mut upper_pos: FxHashMap<usize, usize> = FxHashMap::default();
+        for (position, &node) in upper_order.iter().enumerate() {
+            upper_pos.insert(node, position);
+        }
+        let mut lower_pos: FxHashMap<usize, usize> = FxHashMap::default();
+        for (position, &node) in lower_order.iter().enumerate() {
+            lower_pos.insert(node, position);
+        }
+        for &(source, target) in edges {
+            let (Some(&source_position), Some(&target_position)) =
+                (upper_pos.get(&source), lower_pos.get(&target))
+            else {
+                continue;
+            };
+            edge_positions.push((source_position, target_position));
+        }
     }
     edge_positions.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
     let mut target_positions: Vec<usize> = edge_positions
