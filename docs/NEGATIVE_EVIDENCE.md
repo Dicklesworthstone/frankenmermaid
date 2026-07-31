@@ -19322,6 +19322,61 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
 
   Agent: cod (LavenderMill)
 
+### RECOVERED SEMANTIC ADMISSION: exact 2k/5k SVG jobs are cross-engine equivalent (2026-07-31)
+
+- **Bead / scope:** the retry predicate from the preceding `bd-l7d2` CANNOT is now satisfied for
+  the unchanged `ci_docs_2000` and `ci_docs_5000` SVG whole jobs. This is an untimed semantic
+  recovery, not a performance comparison or campaign ratio.
+- **Build isolation and executing process:** RCH built the binary from pinned base `85fef646` with
+  `--clean-overlay` and only the explicit committed SVG follow-up represented by `4798d977`; no
+  co-tenant working-tree edit entered the executable. Both terminal artifacts use the same
+  process-self-reporting ELF, SHA-256
+  `499e4bf6b23ef6bfe4fccf9df4a086274d51f42ebe28b2f4ae5cc0c249a4eb47`
+  (7,897,696 bytes). The artifact's `git_dirty=true` reports unrelated shared-checkout state; the
+  dumped/measured output hashes and executing ELF are explicitly linked.
+- **Actual observed threads:** frankenmermaid requested/observed `1/1` (`scalar`) and mermaid-js
+  requested/observed `1/1` (`single_page_main_thread`) in both jobs.
+- **Host / governor / ISA provenance:** `thinkstation1`, Linux `6.17.0-35-generic`, AMD Ryzen
+  Threadripper PRO 5975WX, 64 logical threads. All 64 cpufreq policies report
+  `amd-pstate-epp`, governor `powersave`, EPP `performance`, and boost enabled. `/proc/cpuinfo`
+  ISA capture is complete: AVX2/FMA/BMI2/VAES present and AVX-512 absent.
+- **Pinned incumbent:** live mermaid-js `11.15.0`, bundle SHA-256
+  `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`,
+  under `/usr/bin/chromium-browser` (`Chrome/150.0.7871.128`).
+- **Output-equivalence check:** one engine-neutral extractor applies rendered-text containment to
+  every syntax family; node-ID equality where applicable; rendered-path topology cross-engine and
+  against input-derived truth for flowchart/state; and class relationship marker kind plus owning
+  endpoint cross-engine and against input truth. Referenced marker definitions must encode hollow
+  or filled diamond geometry as appropriate, and inheritance must be a hollow triangle facing
+  away from the path. Unknown markers diverge and undecidable required invariants are unverified,
+  never pass. The mutation suite includes dropped/rewired paths, swapped relationship kinds,
+  wrong owning endpoints, invalid marker bodies, inward/filled inheritance triangles, and
+  cardinality/label drift.
+- **Exact recovered results:** `ci_docs_2000` is **2,000 equivalent / 0 divergent / 0 unverified**;
+  `ci_docs_5000` is **5,000 / 0 / 0**. Both engine input hashes match the unchanged pins
+  (`ae5b6ff4…598b` and `26e5710a…f41`), every revision count matches, and each dumped SVG stream
+  hashes to the output SHA-256 reported by that engine in the same invocation. The 5k family
+  split is flowchart 2,882, sequence 804, ER 442, state 390, and class 482, all zero-divergence.
+- **Evidence:** 2k artifact
+  `.benchmarks/headtohead/equivalence/equivalence-4798d977-1785482425768.json`
+  (SHA-256 `19f1b3c3574491c68688ce088da00d8204dbd7256ab586a4261d234297e50061`);
+  5k artifact
+  `.benchmarks/headtohead/equivalence/equivalence-12ea738f-1785482924267.json`
+  (SHA-256 `ae5cf7be0cd5289b7bec06b52ca4d76c558773b4b2c413ef7de19365abe513b9`).
+- **A/A null control (same invocation):** NOT RUN. These invocations remove the semantic blocker
+  and contain no effect/null timing sample. The timing obligation now reopens, but every future
+  width still requires same-invocation A/A with each null median itself in `[0.98, 1.02]`, the
+  bootstrap-CI/2x-null-margin gates, actual observed workers, unchanged host provenance, and CV
+  as provenance only.
+- **Disposition / remaining blocker:** the complete named SVG jobs are recoverable; filtering is no
+  longer needed. Timing remains blocked on the active central `trj` claim `7231` and the already
+  queued jobs ahead of frankenmermaid. No target-host claim was taken out of order. This recovery
+  does not certify Canvas marker geometry: `fm-render-canvas` still aliases diamond/open-diamond/
+  open-triangle markers to its ordinary arrowhead primitive and remains a separate correctness
+  follow-up.
+
+  Agent: cod (`LavenderMill`)
+
 ### INCONCLUSIVE / SEMANTIC CANNOT: equal-work public-parser incumbent arms (2026-07-31)
 
 - **Campaign / bead:** `bd-ap4v`; scalar whole-job parsing through frankenmermaid's public
