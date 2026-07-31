@@ -24,19 +24,28 @@ incumbent is not measuring against it.
 
 ## A second gap the headline number hides
 
-Of the 8 incumbent-backed sections (20 ratio rows), **only 1 section / 3 rows carries a cross-engine
-output-equivalence verdict.** The other 17 rows predate the `bd-evx6` gate. This matters more than it
-sounds: `bd-4isi` has since proved that frankenmermaid drops class-diagram fields and methods, so any
-corpus containing class diagrams was timing *our partial render against mermaid's full one*.
+At the 2026-07-30 audit snapshot, of the 8 incumbent-backed sections (20 ratio rows), **only 1
+section / 3 rows carried a cross-engine output-equivalence verdict.** The other 17 rows predated the
+`bd-evx6` gate. This mattered more than it sounded: `bd-4isi` proved that frankenmermaid dropped
+class-diagram fields and methods, so any corpus containing class diagrams was timing *our partial
+render against mermaid's full one*.
+
+**Current semantic-conversion update (2026-07-31).** The five demoted class-mixed jobs now pass the
+current oracle but still require fresh timing. Current semantic artifacts also close the cheap
+conversion queue for `schema_catalog_25`, the 201-revision live-edit job, the two short rows, the
+13-row bracketed base slice, and the original 15 measurable median-CI rows. Those artifacts do not
+retroactively validate historical ratios: each ledger row remains semantic-only until a fresh
+same-invocation incumbent run clears the corrected null gate. `typing_trace_60` is the sole
+remaining Tier-2 workload without a current output-equivalence verdict.
 
 Contamination map, derived from the corpus generators:
 
 | Corpus | Class-diagram content | Status |
 |---|---|---|
-| `ci_batch_500`, `doc_build_40` (`docBuild`) | 1 of every 5 diagrams | **contaminated** by bd-4isi |
-| `docs_site_50`, `docs_site_200` (`docsSite`) | ~9% (`roll` 0.74–0.83) | **contaminated** by bd-4isi |
-| `schema_catalog_25` | ER only | bd-4isi-clean; ER equivalence is text-tier only |
-| `typing_trace_60` | flowchart only | expected clean, no verdict on file |
+| `ci_batch_500`, `doc_build_40` (`docBuild`) | 1 of every 5 diagrams | historical ratios demoted; current semantic artifact passes |
+| `docs_site_50`, `docs_site_200` (`docsSite`) | ~9% (`roll` 0.74–0.83) | historical ratios demoted; current semantic artifact passes |
+| `schema_catalog_25` | ER only | current artifact passes 25/25 |
+| `typing_trace_60` | flowchart only | no current verdict on file; next conversion item |
 | `ci_equiv_512` | flowchart only, class deliberately excluded | verified 512/512 |
 
 ## Ranked conversion queue
@@ -77,15 +86,21 @@ see below**), `bd-92b6` (`o--`/`*--` fall through to `--`, creating phantom node
 2. 500-diagram CI render — 1 row, 923.056028×
 3. `docs_site_50` / `docs_site_200` — 2 of the 6 "realistic whole jobs" rows
 
-**Tier 2 — incumbent-backed, no equivalence verdict, contamination not established.** Cheapest fix in
-the queue: run the existing gate against them.
+*Current status (2026-07-31):* `class_50`, `doc_build_40`, `ci_batch_500`, `docs_site_50`, and
+`docs_site_200` all pass the current linked oracle with zero divergent/unverified. They remain
+demoted because semantic repair does not refresh a historical timing ratio.
 
-4. `schema_catalog_25` (ER; tier-2 topology not claimed for ER)
-5. `typing_trace_60`
-6. 201-revision live-edit trace
-7. two short-row quiet retries (2 rows)
-8. 13-row bracketed base slice
-9. head-to-head median-CI section
+**Tier 2 — incumbent-backed, no equivalence verdict at the audit snapshot, contamination not
+established.** The existing gate has now closed every item except `typing_trace_60`.
+
+4. `schema_catalog_25` — current artifact passes 25/25.
+5. `typing_trace_60` — **still open; next conversion item.**
+6. 201-revision live-edit trace — current artifact passes 201/201.
+7. two short-row quiet retries (2 rows) — both current artifacts pass.
+8. 13-row bracketed base slice — current artifact passes 13/13 and 72/72 revisions.
+9. head-to-head median-CI section — unified current artifact passes all 15 measurable rows and
+   74/74 revisions; one Rust null median fails the corrected 2% clause, so the result is expressly
+   semantic-only.
 
 **Tier 3 — 214 ledger-internal levers, never published.** See below; most of these are not
 convertible units at all.
