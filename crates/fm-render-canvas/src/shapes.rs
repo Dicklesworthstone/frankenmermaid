@@ -458,6 +458,61 @@ pub fn draw_arrowhead<C: Canvas2dContext>(
     ctx.restore();
 }
 
+/// Draw a UML diamond marker with its outer tip anchored at the edge endpoint.
+///
+/// A filled diamond denotes composition; passing `None` draws the hollow aggregation marker.
+pub fn draw_diamond_marker<C: Canvas2dContext>(
+    ctx: &mut C,
+    x: f64,
+    y: f64,
+    angle: f64,
+    size: f64,
+    fill: Option<&str>,
+    stroke: &str,
+) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(angle);
+    ctx.begin_path();
+    ctx.move_to(0.0, 0.0);
+    ctx.line_to(-size / 2.0, -size / 2.0);
+    ctx.line_to(-size, 0.0);
+    ctx.line_to(-size / 2.0, size / 2.0);
+    ctx.close_path();
+
+    if let Some(fill) = fill {
+        ctx.set_fill_style(fill);
+        ctx.fill();
+    } else {
+        ctx.set_stroke_style(stroke);
+        ctx.stroke();
+    }
+
+    ctx.restore();
+}
+
+/// Draw a hollow UML inheritance triangle with its point anchored at the edge endpoint.
+pub fn draw_open_triangle_marker<C: Canvas2dContext>(
+    ctx: &mut C,
+    x: f64,
+    y: f64,
+    angle: f64,
+    size: f64,
+    stroke: &str,
+) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(angle);
+    ctx.set_stroke_style(stroke);
+    ctx.begin_path();
+    ctx.move_to(0.0, 0.0);
+    ctx.line_to(-size, -size / 2.0);
+    ctx.line_to(-size, size / 2.0);
+    ctx.close_path();
+    ctx.stroke();
+    ctx.restore();
+}
+
 /// Draw a circle marker at the end of an edge.
 pub fn draw_circle_marker<C: Canvas2dContext>(
     ctx: &mut C,

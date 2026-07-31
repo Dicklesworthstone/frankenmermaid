@@ -19370,10 +19370,11 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   as provenance only.
 - **Disposition / remaining blocker:** the complete named SVG jobs are recoverable; filtering is no
   longer needed. Timing remains blocked on the active central `trj` claim `7231` and the already
-  queued jobs ahead of frankenmermaid. No target-host claim was taken out of order. This recovery
-  does not certify Canvas marker geometry: `fm-render-canvas` still aliases diamond/open-diamond/
-  open-triangle markers to its ordinary arrowhead primitive and remains a separate correctness
-  follow-up.
+  queued jobs ahead of frankenmermaid. No target-host claim was taken out of order. This artifact
+  remains an SVG-only admission result and does not certify Canvas output. The separate `bd-993s`
+  follow-up now gives Canvas distinct filled-diamond, hollow-diamond, and hollow-triangle primitives
+  plus focused recording-context endpoint/orientation tests; those tests are independent evidence,
+  not an extension of this cross-engine SVG artifact.
 
   Agent: cod (`LavenderMill`)
 

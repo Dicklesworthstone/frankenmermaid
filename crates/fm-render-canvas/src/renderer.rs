@@ -3,7 +3,10 @@
 //! Draws diagrams to Canvas2D contexts using computed layouts.
 
 use crate::context::{Canvas2dContext, LineCap, LineJoin, TextAlign, TextBaseline};
-use crate::shapes::{draw_arrowhead, draw_circle_marker, draw_cross_marker, draw_shape};
+use crate::shapes::{
+    draw_arrowhead, draw_circle_marker, draw_cross_marker, draw_diamond_marker,
+    draw_open_triangle_marker, draw_shape,
+};
 use crate::viewport::{Viewport, fit_to_viewport};
 use fm_core::{ArrowType, DiagramType, MermaidDiagramIr, NodeShape};
 use fm_layout::{
@@ -524,32 +527,15 @@ impl Canvas2dRenderer {
         angle: f64,
         stroke_color: &str,
     ) {
-        match marker {
-            MarkerKind::None => {}
-            MarkerKind::Circle => {
-                draw_circle_marker(ctx, x, y, 4.0, &self.config.node_fill, stroke_color);
-                self.draw_calls += 1;
-            }
-            MarkerKind::Cross => {
-                draw_cross_marker(ctx, x, y, 8.0, stroke_color);
-                self.draw_calls += 2;
-            }
-            MarkerKind::Arrow
-            | MarkerKind::ThickArrow
-            | MarkerKind::DottedArrow
-            | MarkerKind::Diamond
-            | MarkerKind::DiamondOpen
-            | MarkerKind::TriangleOpen
-            | MarkerKind::TriangleOpenStart
-            | MarkerKind::Open
-            | MarkerKind::HalfArrowTop
-            | MarkerKind::HalfArrowBottom
-            | MarkerKind::StickArrowTop
-            | MarkerKind::StickArrowBottom => {
-                draw_arrowhead(ctx, x, y, angle, 10.0, stroke_color);
-                self.draw_calls += 1;
-            }
-        }
+        self.draw_calls += draw_marker_primitive(
+            ctx,
+            marker,
+            x,
+            y,
+            angle,
+            &self.config.node_fill,
+            stroke_color,
+        );
     }
 
     fn render_text_item<C: Canvas2dContext>(
@@ -982,8 +968,49 @@ impl Canvas2dRenderer {
             ctx.stroke();
             self.draw_calls += 1;
 
-            // Draw arrowhead at end
-            if points.len() >= 2 {
+            let uml_markers = if edge_path.reversed {
+                None
+            } else {
+                legacy_uml_markers(arrow)
+            };
+            if let Some((marker_start, marker_end)) = uml_markers {
+                let start = &points[0];
+                let next = &points[1];
+                let end = &points[points.len() - 1];
+                let prev = &points[points.len() - 2];
+
+                if marker_start != MarkerKind::None {
+                    let sx = f64::from(start.x) + offset_x;
+                    let sy = f64::from(start.y) + offset_y;
+                    let angle = f64::from(next.y - start.y).atan2(f64::from(next.x - start.x));
+                    let marker_calls = draw_marker_primitive(
+                        ctx,
+                        marker_start,
+                        sx,
+                        sy,
+                        angle,
+                        &self.config.node_fill,
+                        &self.config.edge_stroke,
+                    );
+                    self.draw_calls += marker_calls;
+                }
+
+                if marker_end != MarkerKind::None {
+                    let ex = f64::from(end.x) + offset_x;
+                    let ey = f64::from(end.y) + offset_y;
+                    let angle = f64::from(end.y - prev.y).atan2(f64::from(end.x - prev.x));
+                    let marker_calls = draw_marker_primitive(
+                        ctx,
+                        marker_end,
+                        ex,
+                        ey,
+                        angle,
+                        &self.config.node_fill,
+                        &self.config.edge_stroke,
+                    );
+                    self.draw_calls += marker_calls;
+                }
+            } else {
                 let end = &points[points.len() - 1];
                 let prev = &points[points.len() - 2];
                 let angle = f64::from(end.y - prev.y).atan2(f64::from(end.x - prev.x));
@@ -1386,6 +1413,56 @@ impl Canvas2dRenderer {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn draw_marker_primitive<C: Canvas2dContext>(
+    ctx: &mut C,
+    marker: MarkerKind,
+    x: f64,
+    y: f64,
+    angle: f64,
+    node_fill: &str,
+    stroke_color: &str,
+) -> usize {
+    match marker {
+        MarkerKind::None => 0,
+        MarkerKind::Circle => {
+            draw_circle_marker(ctx, x, y, 4.0, node_fill, stroke_color);
+            1
+        }
+        MarkerKind::Cross => {
+            draw_cross_marker(ctx, x, y, 8.0, stroke_color);
+            2
+        }
+        MarkerKind::Diamond => {
+            draw_diamond_marker(ctx, x, y, angle, 10.0, Some(stroke_color), stroke_color);
+            1
+        }
+        MarkerKind::DiamondOpen => {
+            draw_diamond_marker(ctx, x, y, angle, 10.0, None, stroke_color);
+            1
+        }
+        MarkerKind::TriangleOpen => {
+            draw_open_triangle_marker(ctx, x, y, angle, 10.0, stroke_color);
+            1
+        }
+        MarkerKind::TriangleOpenStart => {
+            draw_open_triangle_marker(ctx, x, y, angle + std::f64::consts::PI, 10.0, stroke_color);
+            1
+        }
+        MarkerKind::Arrow
+        | MarkerKind::ThickArrow
+        | MarkerKind::DottedArrow
+        | MarkerKind::Open
+        | MarkerKind::HalfArrowTop
+        | MarkerKind::HalfArrowBottom
+        | MarkerKind::StickArrowTop
+        | MarkerKind::StickArrowBottom => {
+            draw_arrowhead(ctx, x, y, angle, 10.0, stroke_color);
+            1
+        }
+    }
+}
+
 fn path_marker_start_geometry(commands: &[PathCmd]) -> Option<(f64, f64, f64)> {
     let mut current = None;
     let mut subpath_start = None;
@@ -1571,6 +1648,18 @@ fn legacy_edge_stroke(arrow: ArrowType, default_width: f64) -> (f64, &'static [f
     }
 }
 
+const fn legacy_uml_markers(arrow: ArrowType) -> Option<(MarkerKind, MarkerKind)> {
+    match arrow {
+        ArrowType::Aggregation => Some((MarkerKind::DiamondOpen, MarkerKind::None)),
+        ArrowType::AggregationReverse => Some((MarkerKind::None, MarkerKind::DiamondOpen)),
+        ArrowType::Composition => Some((MarkerKind::Diamond, MarkerKind::None)),
+        ArrowType::CompositionReverse => Some((MarkerKind::None, MarkerKind::Diamond)),
+        ArrowType::Inheritance => Some((MarkerKind::TriangleOpenStart, MarkerKind::None)),
+        ArrowType::InheritanceReverse => Some((MarkerKind::None, MarkerKind::TriangleOpen)),
+        _ => None,
+    }
+}
+
 #[inline]
 fn with_canvas_dash_f64<T>(dash: &[f32], use_dash: impl FnOnce(&[f64]) -> T) -> T {
     if let [first, second] = dash {
@@ -1619,10 +1708,10 @@ fn generic_canvas_diagram_title(ir: &MermaidDiagramIr) -> Option<&str> {
 mod tests {
     use super::*;
     use crate::context::{DrawOperation, MockCanvas2dContext};
-    use fm_core::DiagramType;
+    use fm_core::{DiagramType, IrEdge, IrEndpoint, IrNode, IrNodeId};
     use fm_layout::{
-        LayoutActivationBar, LayoutExtensions, LayoutRect, LayoutStats, build_render_scene,
-        layout_diagram,
+        LayoutActivationBar, LayoutEdgePath, LayoutExtensions, LayoutRect, LayoutStats,
+        build_render_scene, layout_diagram,
     };
 
     fn owned_legacy_edge_stroke_reference(
@@ -1642,6 +1731,192 @@ mod tests {
             geometry.1.to_bits(),
             geometry.2.to_bits(),
         )
+    }
+
+    fn marker_operations(marker: MarkerKind) -> Vec<DrawOperation> {
+        let mut ctx = MockCanvas2dContext::new(120.0, 40.0);
+        assert_eq!(
+            draw_marker_primitive(&mut ctx, marker, 50.0, 20.0, 0.0, "#ffffff", "#112233",),
+            1
+        );
+        ctx.operations().to_vec()
+    }
+
+    fn legacy_uml_edge_operations(arrow: ArrowType) -> Vec<DrawOperation> {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Class);
+        ir.nodes.push(IrNode {
+            id: "Owner".to_string(),
+            ..Default::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "Part".to_string(),
+            ..Default::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            arrow,
+            ..Default::default()
+        });
+
+        let layout = DiagramLayout {
+            nodes: Vec::new(),
+            clusters: Vec::new(),
+            cycle_clusters: Vec::new(),
+            edges: vec![LayoutEdgePath {
+                edge_index: 0,
+                span: Default::default(),
+                points: [
+                    fm_layout::LayoutPoint { x: 10.0, y: 20.0 },
+                    fm_layout::LayoutPoint { x: 110.0, y: 20.0 },
+                ]
+                .into_iter()
+                .collect(),
+                reversed: false,
+                is_self_loop: false,
+                parallel_offset: 0.0,
+                bundle_count: 1,
+                bundled: false,
+            }],
+            bounds: LayoutRect {
+                x: 0.0,
+                y: 0.0,
+                width: 120.0,
+                height: 40.0,
+            },
+            stats: LayoutStats::default(),
+            extensions: LayoutExtensions::default(),
+            dirty_regions: Vec::new(),
+        };
+
+        let config = CanvasRenderConfig {
+            auto_fit: false,
+            padding: 0.0,
+            ..Default::default()
+        };
+        let mut ctx = MockCanvas2dContext::new(120.0, 40.0);
+        let mut renderer = Canvas2dRenderer::new(config);
+        let mut labels_drawn = 0;
+        assert_eq!(
+            renderer.draw_edges(&layout, &ir, &mut ctx, 0.0, 0.0, &mut labels_drawn),
+            1
+        );
+        ctx.operations().to_vec()
+    }
+
+    #[test]
+    fn canvas_uml_marker_primitives_preserve_geometry_fill_and_orientation() {
+        let composition = marker_operations(MarkerKind::Diamond);
+        assert!(
+            composition
+                .iter()
+                .any(|operation| matches!(operation, DrawOperation::Fill))
+        );
+        assert!(
+            !composition
+                .iter()
+                .any(|operation| matches!(operation, DrawOperation::Stroke))
+        );
+        assert_eq!(
+            composition
+                .iter()
+                .filter(|operation| matches!(operation, DrawOperation::LineTo(_, _)))
+                .count(),
+            3
+        );
+        assert!(
+            composition
+                .iter()
+                .any(|operation| matches!(operation, DrawOperation::LineTo(x, y)
+                if (*x + 10.0).abs() < 0.001 && y.abs() < 0.001))
+        );
+
+        let aggregation = marker_operations(MarkerKind::DiamondOpen);
+        assert!(
+            !aggregation
+                .iter()
+                .any(|operation| matches!(operation, DrawOperation::Fill))
+        );
+        assert!(
+            aggregation
+                .iter()
+                .any(|operation| matches!(operation, DrawOperation::Stroke))
+        );
+        assert_eq!(
+            aggregation
+                .iter()
+                .filter(|operation| matches!(operation, DrawOperation::LineTo(_, _)))
+                .count(),
+            3
+        );
+
+        let inheritance_end = marker_operations(MarkerKind::TriangleOpen);
+        assert!(
+            !inheritance_end
+                .iter()
+                .any(|operation| matches!(operation, DrawOperation::Fill))
+        );
+        assert!(
+            inheritance_end
+                .iter()
+                .any(|operation| matches!(operation, DrawOperation::Stroke))
+        );
+        assert_eq!(
+            inheritance_end
+                .iter()
+                .filter(|operation| matches!(operation, DrawOperation::LineTo(_, _)))
+                .count(),
+            2
+        );
+        assert!(
+            inheritance_end
+                .iter()
+                .any(|operation| matches!(operation, DrawOperation::Rotate(angle)
+                if angle.abs() < f64::EPSILON))
+        );
+
+        let inheritance_start = marker_operations(MarkerKind::TriangleOpenStart);
+        assert!(
+            inheritance_start
+                .iter()
+                .any(|operation| matches!(operation, DrawOperation::Rotate(angle)
+                if (*angle - std::f64::consts::PI).abs() < 0.001))
+        );
+    }
+
+    #[test]
+    fn legacy_canvas_places_uml_markers_on_the_owning_endpoint() {
+        for arrow in [
+            ArrowType::Aggregation,
+            ArrowType::Composition,
+            ArrowType::Inheritance,
+        ] {
+            let operations = legacy_uml_edge_operations(arrow);
+            assert!(operations.iter().any(
+                |operation| matches!(operation, DrawOperation::Translate(x, y)
+                    if (*x - 10.0).abs() < 0.001 && (*y - 20.0).abs() < 0.001)
+            ));
+            assert!(!operations.iter().any(
+                |operation| matches!(operation, DrawOperation::Translate(x, y)
+                    if (*x - 110.0).abs() < 0.001 && (*y - 20.0).abs() < 0.001)
+            ));
+        }
+
+        for arrow in [
+            ArrowType::AggregationReverse,
+            ArrowType::CompositionReverse,
+            ArrowType::InheritanceReverse,
+        ] {
+            let operations = legacy_uml_edge_operations(arrow);
+            assert!(!operations.iter().any(
+                |operation| matches!(operation, DrawOperation::Translate(x, y)
+                    if (*x - 10.0).abs() < 0.001 && (*y - 20.0).abs() < 0.001)
+            ));
+            assert!(operations.iter().any(
+                |operation| matches!(operation, DrawOperation::Translate(x, y)
+                    if (*x - 110.0).abs() < 0.001 && (*y - 20.0).abs() < 0.001)
+            ));
+        }
     }
 
     #[test]
