@@ -49,11 +49,12 @@
  * a cluster's nodes without moving its edges makes endpoints resolve to the wrong anchors.
  *
  * Class diagrams additionally compare the semantic marker kind and owning end on every rendered
- * relationship. Inheritance markers are definition-checked too: the triangle must be hollow and
- * face away from the relationship path at either endpoint. Mermaid's per-path `data-id` is used
- * only as an endpoint fallback when geometry is ambiguous; frankenmermaid still has to resolve its
- * rendered path geometrically. Sequence and ER do not expose a recoverable per-edge model in both
- * engines, so those families carry Tier 1 only.
+ * relationship. Frankenmermaid marker definitions are checked rather than trusted by id: UML
+ * aggregation/composition must use hollow/filled diamond geometry, and inheritance must use a
+ * hollow triangle facing away from the relationship path at either endpoint. Mermaid's per-path
+ * `data-id` is used only as an endpoint fallback when geometry is ambiguous; frankenmermaid still
+ * has to resolve its rendered path geometrically. Sequence and ER do not expose a recoverable
+ * per-edge model in both engines, so those families carry Tier 1 only.
  */
 
 // ---------------------------------------------------------------- text extraction
@@ -538,15 +539,8 @@ function markerDefinitions(svg) {
   return definitions;
 }
 
-/**
- * Direction of a triangle's apex in its marker coordinate system.
- *
- * Both engines express inheritance markers as three-point polygons with absolute M/L/H/V
- * commands. Exactly two points form a vertical base; the remaining point is the apex. Positive
- * means the apex faces in the path's forward direction, negative means backward. Anything else is
- * refused rather than guessed.
- */
-function triangleApexDirection(d) {
+/** Closed polygon points from the absolute M/L/H/V marker-path grammar both engines emit. */
+function absolutePolygonPoints(d) {
   if (typeof d !== 'string') return null;
   const points = [];
   let current = null;
@@ -599,6 +593,19 @@ function triangleApexDirection(d) {
   for (const point of points) {
     if (!unique.some(([x, y]) => x === point[0] && y === point[1])) unique.push(point);
   }
+  return unique;
+}
+
+/**
+ * Direction of a triangle's apex in its marker coordinate system.
+ *
+ * Exactly two points form a vertical base; the remaining point is the apex. Positive means the
+ * apex faces in the path's forward direction, negative means backward. Anything else is refused
+ * rather than guessed.
+ */
+function triangleApexDirection(d) {
+  const unique = absolutePolygonPoints(d);
+  if (unique === null) return null;
   if (unique.length !== 3) return null;
   for (let apex = 0; apex < unique.length; apex++) {
     const base = unique.filter((_, index) => index !== apex);
@@ -606,6 +613,29 @@ function triangleApexDirection(d) {
     return Math.sign(unique[apex][0] - base[0][0]);
   }
   return null;
+}
+
+/** The four axis extrema of a renderer marker form one non-degenerate diamond. */
+function isDiamondDefinition(d) {
+  const points = absolutePolygonPoints(d);
+  if (points === null || points.length !== 4) return false;
+  const xs = points.map(([x]) => x);
+  const ys = points.map(([, y]) => y);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  if (minX === maxX || minY === maxY) return false;
+  const centerX = (minX + maxX) / 2;
+  const centerY = (minY + maxY) / 2;
+  const required = [
+    [minX, centerY],
+    [maxX, centerY],
+    [centerX, minY],
+    [centerX, maxY],
+  ];
+  return required.every(([x, y]) =>
+    points.some(([pointX, pointY]) => pointX === x && pointY === y));
 }
 
 /**
@@ -636,6 +666,31 @@ function inheritanceMarkerDefinition(engine, id, slot, definitions) {
   return null;
 }
 
+/** Validate frankenmermaid's referenced marker body rather than trusting a semantic-looking id. */
+function frankenMarkerDefinition(kind, id, definitions) {
+  const definition = definitions.get(id);
+  if (!definition) return 'missing_definition';
+  const fill = (definition.path_fill ?? definition.marker_fill)?.toLowerCase();
+  if (kind === 'aggregation' || kind === 'composition') {
+    if (!isDiamondDefinition(definition.path_d)) return 'unrecognized_diamond_geometry';
+    if (kind === 'aggregation' && fill !== 'none') return 'aggregation_not_hollow';
+    if (kind === 'composition' && (fill === undefined || fill === 'none')) {
+      return 'composition_not_filled';
+    }
+  }
+  if (kind === 'association' && (fill === undefined || fill === 'none')) {
+    return 'association_not_filled';
+  }
+  return null;
+}
+
+function invalidMarker(kind, invalid) {
+  return {
+    kind: `invalid:${kind}:${invalid}`,
+    status: `invalid_${kind}_marker(${invalid})`,
+  };
+}
+
 /**
  * Normalize the marker vocabulary used by each renderer into Mermaid class relationship kinds.
  * The URL target, not the marker definition body, is attached to the rendered relationship path.
@@ -653,30 +708,29 @@ function classMarkerKind(engine, marker, slot, definitions) {
         : emitted;
     if (kind === 'inheritance') {
       const invalid = inheritanceMarkerDefinition(engine, id, slot, definitions);
-      if (invalid) {
-        return {
-          kind: `invalid:inheritance:${invalid}`,
-          status: `invalid_inheritance_marker(${invalid})`,
-        };
-      }
+      if (invalid) return invalidMarker(kind, invalid);
     }
     return kind
       ? { kind, status: 'known' }
       : { kind: `unknown:${id}`, status: `unknown_marker(${id})` };
   }
-  if (/(?:^|-)arrow-diamond-open$/i.test(id)) return { kind: 'aggregation', status: 'known' };
-  if (/(?:^|-)arrow-diamond$/i.test(id)) return { kind: 'composition', status: 'known' };
+  if (/(?:^|-)arrow-diamond-open$/i.test(id)) {
+    const invalid = frankenMarkerDefinition('aggregation', id, definitions);
+    return invalid ? invalidMarker('aggregation', invalid) : { kind: 'aggregation', status: 'known' };
+  }
+  if (/(?:^|-)arrow-diamond$/i.test(id)) {
+    const invalid = frankenMarkerDefinition('composition', id, definitions);
+    return invalid ? invalidMarker('composition', invalid) : { kind: 'composition', status: 'known' };
+  }
   if (/(?:^|-)arrow-(?:inheritance(?:-open)?|triangle-open)$/i.test(id)) {
     const invalid = inheritanceMarkerDefinition(engine, id, slot, definitions);
-    if (invalid) {
-      return {
-        kind: `invalid:inheritance:${invalid}`,
-        status: `invalid_inheritance_marker(${invalid})`,
-      };
-    }
+    if (invalid) return invalidMarker('inheritance', invalid);
     return { kind: 'inheritance', status: 'known' };
   }
-  if (/(?:^|-)arrow-end$/i.test(id)) return { kind: 'association', status: 'known' };
+  if (/(?:^|-)arrow-end$/i.test(id)) {
+    const invalid = frankenMarkerDefinition('association', id, definitions);
+    return invalid ? invalidMarker('association', invalid) : { kind: 'association', status: 'known' };
+  }
   return { kind: `unknown:${id}`, status: `unknown_marker(${id})` };
 }
 
@@ -1149,8 +1203,8 @@ export function summarize(results) {
     // Stated explicitly so a reader never has to infer the strength of the claim.
     claim: 'engine-neutral structural equivalence: rendered-text multiset (all families), '
       + 'rendered-path edge topology cross-engine and against input-derived ground truth, and '
-      + 'class relationship marker kind plus owning end, including hollow inheritance-triangle '
-      + 'direction from the referenced marker definition. '
+      + 'class relationship marker kind plus owning end, including referenced-definition checks '
+      + 'for diamond geometry/fill and hollow inheritance-triangle direction. '
       + 'Frankenmermaid endpoints are reconstructed geometrically; mermaid-js uses geometric '
       + 'endpoints when unambiguous and uniquely resolved per-path data-id endpoints otherwise. '
       + 'Not byte equality; not a pixel diff.',
@@ -1222,7 +1276,11 @@ function classFixturePair() {
     + `d="M345,20L55,20" marker-start="url(#d_class-extensionStart)"/>`
     + `<path class="relation edge-thickness-normal" data-id="id_C0_C4_5" `
     + `d="M55,20L445,20" marker-end="url(#d_class-extensionEnd)"/></svg>`;
-  const fm = `<svg><defs><marker id="arrow-triangle-open" orient="auto-start-reverse">`
+  const fm = `<svg><defs>`
+    + `<marker id="arrow-end" orient="auto"><path d="M0,0 L8,3.5 L0,7 Z" fill="#94a3b8"/></marker>`
+    + `<marker id="arrow-diamond" orient="auto"><path d="M4,0 L8,4 L4,8 L0,4 Z" fill="#94a3b8"/></marker>`
+    + `<marker id="arrow-diamond-open" orient="auto"><path d="M4,0 L8,4 L4,8 L0,4 Z" fill="none"/></marker>`
+    + `<marker id="arrow-triangle-open" orient="auto-start-reverse">`
     + `<path d="M0,0 L10,5 L0,10 Z" fill="none"/></marker></defs>`
     + `${fmNode('C0', 50, 'C0')}${fmNode('C1', 150, 'C1')}`
     + `${fmNode('C2', 250, 'C2')}${fmNode('C3', 350, 'C3')}${fmNode('C4', 450, 'C4')}`
@@ -1424,6 +1482,60 @@ export function selfTest() {
       && failedInvariants(classM8).includes('class_relationship_semantics_vs_input__frankenmermaid'),
     { verdict: classM8.verdict, failed: failedInvariants(classM8) });
 
+  // CLASS MUTATION 9 -- a semantic-looking aggregation id cannot conceal a filled diamond.
+  const filledAggregation = classPair.fm.replace(
+    '<marker id="arrow-diamond-open" orient="auto"><path d="M4,0 L8,4 L4,8 L0,4 Z" fill="none"/></marker>',
+    '<marker id="arrow-diamond-open" orient="auto"><path d="M4,0 L8,4 L4,8 L0,4 Z" fill="#94a3b8"/></marker>',
+  );
+  const classM9 = compareDiagram({
+    index: 0,
+    family: 'class',
+    fmSvg: filledAggregation,
+    jsSvg: classPair.js,
+    source: classPair.source,
+  });
+  record('filled_aggregation_diamond_is_divergent',
+    classM9.verdict === 'divergent'
+      && failedInvariants(classM9).includes('class_relationship_semantics_cross_engine')
+      && failedInvariants(classM9).includes('class_relationship_semantics_vs_input__frankenmermaid'),
+    { verdict: classM9.verdict, failed: failedInvariants(classM9) });
+
+  // CLASS MUTATION 10 -- composition is the filled UML diamond, not the aggregation outline.
+  const hollowComposition = classPair.fm.replace(
+    '<marker id="arrow-diamond" orient="auto"><path d="M4,0 L8,4 L4,8 L0,4 Z" fill="#94a3b8"/></marker>',
+    '<marker id="arrow-diamond" orient="auto"><path d="M4,0 L8,4 L4,8 L0,4 Z" fill="none"/></marker>',
+  );
+  const classM10 = compareDiagram({
+    index: 0,
+    family: 'class',
+    fmSvg: hollowComposition,
+    jsSvg: classPair.js,
+    source: classPair.source,
+  });
+  record('hollow_composition_diamond_is_divergent',
+    classM10.verdict === 'divergent'
+      && failedInvariants(classM10).includes('class_relationship_semantics_cross_engine')
+      && failedInvariants(classM10).includes('class_relationship_semantics_vs_input__frankenmermaid'),
+    { verdict: classM10.verdict, failed: failedInvariants(classM10) });
+
+  // CLASS MUTATION 11 -- fill alone is not enough; the referenced body must be diamond geometry.
+  const triangularComposition = classPair.fm.replace(
+    '<marker id="arrow-diamond" orient="auto"><path d="M4,0 L8,4 L4,8 L0,4 Z" fill="#94a3b8"/></marker>',
+    '<marker id="arrow-diamond" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#94a3b8"/></marker>',
+  );
+  const classM11 = compareDiagram({
+    index: 0,
+    family: 'class',
+    fmSvg: triangularComposition,
+    jsSvg: classPair.js,
+    source: classPair.source,
+  });
+  record('non_diamond_composition_marker_is_divergent',
+    classM11.verdict === 'divergent'
+      && failedInvariants(classM11).includes('class_relationship_semantics_cross_engine')
+      && failedInvariants(classM11).includes('class_relationship_semantics_vs_input__frankenmermaid'),
+    { verdict: classM11.verdict, failed: failedInvariants(classM11) });
+
   // MUTATION 1 -- we drop a node's label. The text gate must catch it.
   const droppedLabel = fm.replace('<text x="0" y="0">Beta</text>', '');
   const m1 = compareDiagram({ index: 0, family: 'flowchart', fmSvg: droppedLabel, jsSvg: js, source });
@@ -1565,7 +1677,7 @@ export function selfTest() {
     groundTruth('sequenceDiagram\n  A->>B: hello\n') === null,
     null);
 
-  return { ok: true, cases: cases.length, mutation_controls: 13, negative_controls: 4 };
+  return { ok: true, cases: cases.length, mutation_controls: 16, negative_controls: 4 };
 }
 
 // Run as a script: `node scripts/headtohead/svg_equivalence.mjs --self-test`
