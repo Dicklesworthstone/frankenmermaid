@@ -42,6 +42,45 @@ fn compact_label_width(line: &str) -> usize {
     line.chars().count()
 }
 
+const fn edge_marker_ends(arrow: ArrowType) -> (bool, bool) {
+    match arrow {
+        ArrowType::Line | ArrowType::ThickLine | ArrowType::DottedLine => (false, false),
+        ArrowType::DoubleArrow | ArrowType::DoubleThickArrow | ArrowType::DoubleDottedArrow => {
+            (true, true)
+        }
+        ArrowType::HalfArrowTopReverse
+        | ArrowType::HalfArrowBottomReverse
+        | ArrowType::StickArrowTopReverse
+        | ArrowType::StickArrowBottomReverse
+        | ArrowType::HalfArrowTopReverseDotted
+        | ArrowType::HalfArrowBottomReverseDotted
+        | ArrowType::StickArrowTopReverseDotted
+        | ArrowType::StickArrowBottomReverseDotted
+        | ArrowType::Aggregation
+        | ArrowType::Composition
+        | ArrowType::Inheritance => (true, false),
+        ArrowType::Arrow
+        | ArrowType::OpenArrow
+        | ArrowType::HalfArrowTop
+        | ArrowType::HalfArrowBottom
+        | ArrowType::StickArrowTop
+        | ArrowType::StickArrowBottom
+        | ArrowType::ThickArrow
+        | ArrowType::DottedArrow
+        | ArrowType::DottedOpenArrow
+        | ArrowType::DottedCross
+        | ArrowType::HalfArrowTopDotted
+        | ArrowType::HalfArrowBottomDotted
+        | ArrowType::StickArrowTopDotted
+        | ArrowType::StickArrowBottomDotted
+        | ArrowType::Circle
+        | ArrowType::Cross
+        | ArrowType::AggregationReverse
+        | ArrowType::CompositionReverse
+        | ArrowType::InheritanceReverse => (false, true),
+    }
+}
+
 impl TermRenderer {
     /// Create a new renderer with resolved configuration.
     #[must_use]
@@ -459,12 +498,12 @@ impl TermRenderer {
             self.draw_line_cell(buffer, x0, y0, x1, y1, glyphs, edge_path.reversed, arrow);
         }
 
-        // Draw arrowhead at start for double arrows.
-        if matches!(
-            arrow,
-            ArrowType::DoubleArrow | ArrowType::DoubleThickArrow | ArrowType::DoubleDottedArrow
-        ) && let Some(first) = edge_path.points.first()
-        {
+        let (marker_at_start, marker_at_end) = edge_marker_ends(arrow);
+
+        // The operator determines the semantic endpoint. In particular, UML ownership and
+        // inheritance operators place their marker at the source for `o--`, `*--`, and `<|--`,
+        // while their reverse spellings place it at the target.
+        if marker_at_start && let Some(first) = edge_path.points.first() {
             let (x, y) = self.point_to_cells(first, scale_x, scale_y);
             if edge_path.points.len() >= 2 {
                 let next = &edge_path.points[1];
@@ -474,8 +513,7 @@ impl TermRenderer {
             }
         }
 
-        // Draw arrowhead at end.
-        if let Some(last) = edge_path.points.last() {
+        if marker_at_end && let Some(last) = edge_path.points.last() {
             let (x, y) = self.point_to_cells(last, scale_x, scale_y);
             let arrow_char = if edge_path.points.len() >= 2 {
                 let prev = &edge_path.points[edge_path.points.len() - 2];
@@ -484,12 +522,7 @@ impl TermRenderer {
             } else {
                 glyphs.arrow_right
             };
-            if !matches!(
-                arrow,
-                ArrowType::Line | ArrowType::ThickLine | ArrowType::DottedLine
-            ) {
-                buffer.set(x, y, arrow_char);
-            }
+            buffer.set(x, y, arrow_char);
         }
     }
 
@@ -2177,6 +2210,69 @@ mod tests {
         assert_eq!(result.node_count, 2);
         assert_eq!(result.edge_count, 1);
         assert!(!result.output.is_empty());
+    }
+
+    #[test]
+    fn cell_mode_places_uml_markers_on_the_semantic_endpoint() {
+        let config = TermRenderConfig {
+            tier: MermaidTier::Compact,
+            render_mode: MermaidRenderMode::CellOnly,
+            ..Default::default()
+        };
+        let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 8, 1));
+        let edge_path = LayoutEdgePath {
+            edge_index: 0,
+            span: Default::default(),
+            points: [
+                fm_layout::LayoutPoint { x: 1.0, y: 0.0 },
+                fm_layout::LayoutPoint { x: 6.0, y: 0.0 },
+            ]
+            .into_iter()
+            .collect(),
+            reversed: false,
+            is_self_loop: false,
+            parallel_offset: 0.0,
+            bundle_count: 1,
+            bundled: false,
+        };
+
+        for arrow in [
+            ArrowType::Aggregation,
+            ArrowType::Composition,
+            ArrowType::Inheritance,
+        ] {
+            let mut ir = sample_ir();
+            ir.edges[0].arrow = arrow;
+            let mut buffer = CellBuffer::new(8, 1);
+            renderer.render_edge_cell(&mut buffer, &ir, &edge_path, 1.0, 1.0);
+            assert_eq!(
+                buffer.cells[1], renderer.edge_glyphs.arrow_left,
+                "{arrow:?} must mark the source"
+            );
+            assert_eq!(
+                buffer.cells[6], renderer.edge_glyphs.line_h,
+                "{arrow:?} must not mark the target"
+            );
+        }
+
+        for arrow in [
+            ArrowType::AggregationReverse,
+            ArrowType::CompositionReverse,
+            ArrowType::InheritanceReverse,
+        ] {
+            let mut ir = sample_ir();
+            ir.edges[0].arrow = arrow;
+            let mut buffer = CellBuffer::new(8, 1);
+            renderer.render_edge_cell(&mut buffer, &ir, &edge_path, 1.0, 1.0);
+            assert_eq!(
+                buffer.cells[1], renderer.edge_glyphs.line_h,
+                "{arrow:?} must not mark the source"
+            );
+            assert_eq!(
+                buffer.cells[6], renderer.edge_glyphs.arrow_right,
+                "{arrow:?} must mark the target"
+            );
+        }
     }
 
     #[test]
