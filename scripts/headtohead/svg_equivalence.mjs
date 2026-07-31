@@ -30,7 +30,7 @@
  * Accessibility text (`<title>`/`<desc>`) is extracted separately and never mixed into the visible
  * multiset, because the engines' a11y policies legitimately differ.
  *
- * **Tier 2 — rendered-path topology (node/edge families: flowchart, state).**
+ * **Tier 2 — rendered-path topology and relationship semantics (flowchart, state, class).**
  * mermaid records each rendered path's endpoints in `data-id="L_<src>_<dst>_<n>"`; we emit only a
  * positional `fm-edge-<i>`. Frankenmermaid topology is therefore reconstructed geometrically:
  * take each edge path's first and last point, resolve them to node anchors, and emit the derived
@@ -48,8 +48,10 @@
  * Geometric reconstruction is what catches a *mislaid* subgraph as well as a dropped edge: moving
  * a cluster's nodes without moving its edges makes endpoints resolve to the wrong anchors.
  *
- * Tier 2 is deliberately not claimed for sequence, class or ER. Their DOM is not a node/edge model
- * with recoverable per-edge paths in both engines, so those families carry Tier 1 only and say so.
+ * Class diagrams additionally compare the semantic marker kind and owning end on every rendered
+ * relationship. Mermaid's per-path `data-id` is used only as an endpoint fallback when geometry is
+ * ambiguous; frankenmermaid still has to resolve its rendered path geometrically. Sequence and ER
+ * do not expose a recoverable per-edge model in both engines, so those families carry Tier 1 only.
  */
 
 // ---------------------------------------------------------------- text extraction
@@ -388,7 +390,12 @@ function mermaidStructure(svg) {
     const d = ATTR(m[0], 'd');
     if (!d) continue;
     const dataId = ATTR(m[0], 'data-id');
-    edges.push({ d, declared: dataId });
+    edges.push({
+      d,
+      declared: dataId,
+      marker_start: ATTR(m[0], 'marker-start'),
+      marker_end: ATTR(m[0], 'marker-end'),
+    });
   }
   return { nodes, edges };
 }
@@ -415,8 +422,16 @@ function frankenStructure(svg) {
     }
     if (/\bfm-edge\b/.test(cls) && ATTR(g.tag, 'data-fm-edge-id') !== null) {
       const subtree = groupSubtree(svg, g.at, g.end);
-      const d = /<path\b[^>]*\bd="([^"]*)"/.exec(subtree)?.[1];
-      if (d) edges.push({ d, declared: null });
+      const path = /<path\b[^>]*>/.exec(subtree)?.[0];
+      const d = path ? ATTR(path, 'd') : null;
+      if (d) {
+        edges.push({
+          d,
+          declared: null,
+          marker_start: ATTR(path, 'marker-start'),
+          marker_end: ATTR(path, 'marker-end'),
+        });
+      }
     }
   }
   return { nodes, edges };
@@ -466,33 +481,114 @@ const ADAPTERS = { 'mermaid-js': mermaidStructure, frankenmermaid: frankenStruct
 const pseudo = (id) => (isSyntheticNode(id) ? '#pseudo' : id);
 
 /**
- * Resolve mermaid's `L_<source>_<target>_<ordinal>` path declarations against the node ids that
- * actually occur in the same SVG. Trying every underscore split keeps ids containing underscores
+ * Resolve one Mermaid path declaration against the node ids that occur in the same SVG. Flow/state
+ * paths use `L_<source>_<target>_<ordinal>` while class relationships use
+ * `id_<source>_<target>_<ordinal>`. Trying every underscore split keeps ids containing underscores
  * honest: a declaration is accepted only when exactly one split names two rendered nodes.
  */
+function declaredEdgePair(edge, nodeIds) {
+  if (!edge.declared) return { pair: null, status: 'missing_path_declaration' };
+  const nodes = new Set(nodeIds.map((id) => id.toLowerCase()));
+  const body = /^(?:L|id)_(.+)_\d+$/.exec(edge.declared)?.[1];
+  if (!body) return { pair: null, status: 'malformed_path_declaration' };
+  const candidates = new Map();
+  for (let i = 0; i < body.length; i++) {
+    if (body[i] !== '_') continue;
+    const from = body.slice(0, i).toLowerCase();
+    const to = body.slice(i + 1).toLowerCase();
+    if (nodes.has(from) && nodes.has(to)) {
+      candidates.set(`${pseudo(from)}>${pseudo(to)}`, { from: pseudo(from), to: pseudo(to) });
+    }
+  }
+  if (candidates.size !== 1) {
+    return { pair: null, status: `ambiguous_path_declaration(candidates=${candidates.size})` };
+  }
+  return { pair: [...candidates.values()][0], status: 'declared_path_endpoints' };
+}
+
 function declaredEdgeTopology(edges, nodeIds) {
   if (edges.length === 0) return { topology: null, status: 'no_edge_elements' };
-  if (edges.some((edge) => !edge.declared)) {
-    return { topology: null, status: 'missing_path_declaration' };
-  }
-  const nodes = new Set(nodeIds.map((id) => id.toLowerCase()));
   const topology = [];
   for (const edge of edges) {
-    const body = /^L_(.+)_\d+$/.exec(edge.declared)?.[1];
-    if (!body) return { topology: null, status: 'malformed_path_declaration' };
-    const candidates = new Set();
-    for (let i = 0; i < body.length; i++) {
-      if (body[i] !== '_') continue;
-      const from = body.slice(0, i).toLowerCase();
-      const to = body.slice(i + 1).toLowerCase();
-      if (nodes.has(from) && nodes.has(to)) candidates.add(`${pseudo(from)}>${pseudo(to)}`);
-    }
-    if (candidates.size !== 1) {
-      return { topology: null, status: `ambiguous_path_declaration(candidates=${candidates.size})` };
-    }
-    topology.push([...candidates][0]);
+    const declared = declaredEdgePair(edge, nodeIds);
+    if (!declared.pair) return { topology: null, status: declared.status };
+    topology.push(`${declared.pair.from}>${declared.pair.to}`);
   }
   return { topology: topology.sort(), status: 'declared_path_endpoints' };
+}
+
+/**
+ * Normalize the marker vocabulary used by each renderer into Mermaid class relationship kinds.
+ * The URL target, not the marker definition body, is attached to the rendered relationship path.
+ */
+function classMarkerKind(engine, marker) {
+  if (marker === null) return { kind: 'none', status: 'none' };
+  const id = /^url\(#([^)]+)\)$/.exec(marker)?.[1] ?? marker;
+  if (engine === 'mermaid-js') {
+    const emitted = /class-(aggregation|composition|extension|dependency)(?:Start|End)(?:-margin)?$/i
+      .exec(id)?.[1]?.toLowerCase();
+    const kind = emitted === 'extension'
+      ? 'inheritance'
+      : emitted === 'dependency'
+        ? 'association'
+        : emitted;
+    return kind
+      ? { kind, status: 'known' }
+      : { kind: `unknown:${id}`, status: `unknown_marker(${id})` };
+  }
+  if (/(?:^|-)arrow-diamond-open$/i.test(id)) return { kind: 'aggregation', status: 'known' };
+  if (/(?:^|-)arrow-diamond$/i.test(id)) return { kind: 'composition', status: 'known' };
+  if (/(?:^|-)arrow-inheritance(?:-open)?$/i.test(id)) {
+    return { kind: 'inheritance', status: 'known' };
+  }
+  if (/(?:^|-)arrow-end$/i.test(id)) return { kind: 'association', status: 'known' };
+  return { kind: `unknown:${id}`, status: `unknown_marker(${id})` };
+}
+
+/**
+ * Per-path class relationship signature: endpoint ids plus semantic marker kind on the start/end.
+ * A marker-kind count alone would miss two relationships exchanging their UML meaning, so the
+ * marker is bound to the recovered rendered endpoints.
+ */
+function classRelationshipSemantics(engine, edges, nodes) {
+  if (edges.length === 0) return { relationships: null, status: 'no_edge_elements' };
+  const anchors = [...nodes.entries()];
+  const nodeIds = [...nodes.keys()];
+  const relationships = [];
+  for (const edge of edges) {
+    const ends = pathEndpoints(edge.d);
+    const from = ends ? nearestAnchor(ends.start, anchors) : null;
+    const to = ends ? nearestAnchor(ends.end, anchors) : null;
+    const geometric = from !== null && to !== null
+      ? { from: pseudo(from), to: pseudo(to) }
+      : null;
+    const declared = engine === 'mermaid-js'
+      ? declaredEdgePair(edge, nodeIds)
+      : { pair: null, status: 'not_emitted' };
+    if (geometric && declared.pair
+      && (geometric.from !== declared.pair.from || geometric.to !== declared.pair.to)) {
+      return { relationships: null, status: 'geometry_declared_endpoint_mismatch' };
+    }
+    const pair = geometric ?? declared.pair;
+    if (!pair) {
+      return {
+        relationships: null,
+        status: ends
+          ? `ambiguous_endpoints(declared=${declared.status})`
+          : `unparsed_path(declared=${declared.status})`,
+      };
+    }
+    const start = classMarkerKind(engine, edge.marker_start);
+    const end = classMarkerKind(engine, edge.marker_end);
+    relationships.push(`${pair.from}>${pair.to}|start=${start.kind}|end=${end.kind}`);
+  }
+  const hasUnknown = relationships.some((relationship) => relationship.includes('unknown:'));
+  return {
+    relationships: relationships.sort(),
+    status: hasUnknown
+      ? 'rendered_relationship_markers_with_unknown'
+      : 'rendered_relationship_markers',
+  };
 }
 
 // ---------------------------------------------------------------- signatures
@@ -528,6 +624,7 @@ export function signature(svg, engine) {
   const declared = engine === 'mermaid-js'
     ? declaredEdgeTopology(edges, ids)
     : { topology: null, status: 'not_emitted' };
+  const classRelationships = classRelationshipSemantics(engine, edges, nodes);
   return {
     engine,
     bytes: svg.length,
@@ -543,6 +640,8 @@ export function signature(svg, engine) {
     declared_edges: edges.map((e) => e.declared).filter(Boolean).sort(),
     declared_topology: declared.topology,
     declared_topology_status: declared.status,
+    class_relationships: classRelationships.relationships,
+    class_relationships_status: classRelationships.status,
     topology: resolvable ? derived.slice().sort() : null,
     topology_status: resolvable
       ? 'geometric'
@@ -557,22 +656,69 @@ export function signature(svg, engine) {
 // ---------------------------------------------------------------- ground truth from input
 
 /**
- * The true node and edge sets of one corpus revision, read from the mermaid source the harness
- * generated. Only the flat `flowchart`/`graph` and `stateDiagram` node/edge forms are decoded;
- * anything else returns `null` and the diagram carries Tier 1 only.
+ * The true node, edge and class-relationship sets of one corpus revision, read from the Mermaid
+ * source the harness generated. Flat `flowchart`/`graph` and the generated `classDiagram` form are
+ * decoded; anything else returns `null` and the diagram carries only output-derived invariants.
  *
  * This is what makes the check engine-vs-spec rather than only engine-vs-engine.
  */
 export function groundTruth(text) {
   const header = text.trimStart().split('\n', 1)[0].trim();
   const isFlow = /^(flowchart|graph)\b/.test(header);
-  if (!isFlow) return null;
 
   const nodes = new Set();
   const edges = [];
   // A hyphen is legal inside a mermaid node id, but a greedy `[\w-]*` swallows the `--` of the
   // following arrow and yields ids like `b--`. Allow `-` only when it does not begin an arrow.
   const NODE = '[A-Za-z_](?:\\w|-(?![->]))*';
+  if (/^classDiagram\b/.test(header)) {
+    const relationships = [];
+    const relationRe = new RegExp(
+      `^(${NODE})(?:\\s+"[^"]*")?\\s*`
+      + '(<\\|--|--\\|>|o--|--o|\\*--|--\\*|\\.\\.>|<\\.\\.|-->|--)'
+      + `\\s*(?:"[^"]*"\\s*)?(${NODE})(?:\\s*:\\s*.*)?$`,
+    );
+    const markerRoles = new Map([
+      ['<|--', ['inheritance', 'none']],
+      ['--|>', ['none', 'inheritance']],
+      ['o--', ['aggregation', 'none']],
+      ['--o', ['none', 'aggregation']],
+      ['*--', ['composition', 'none']],
+      ['--*', ['none', 'composition']],
+      ['<..', ['association', 'none']],
+      ['..>', ['none', 'association']],
+      ['-->', ['none', 'association']],
+      ['--', ['none', 'none']],
+    ]);
+    for (const rawLine of text.split('\n')) {
+      const line = rawLine.trim();
+      if (!line || line === 'classDiagram' || line.startsWith('%%')) continue;
+      const relation = relationRe.exec(line);
+      if (relation) {
+        const from = relation[1].toLowerCase();
+        const to = relation[3].toLowerCase();
+        const [start, end] = markerRoles.get(relation[2]);
+        nodes.add(from);
+        nodes.add(to);
+        edges.push(`${from}>${to}`);
+        relationships.push(`${from}>${to}|start=${start}|end=${end}`);
+        continue;
+      }
+      const declaration = new RegExp(`^class\\s+(${NODE})\\b`).exec(line);
+      if (declaration) nodes.add(declaration[1].toLowerCase());
+      if (/(?:<\|--|--\|>|o--|--o|\*--|--\*|\.\.>|<\.\.|-->|--)/.test(line)) {
+        return null;
+      }
+    }
+    if (nodes.size === 0) return null;
+    return {
+      node_ids: [...nodes].sort(),
+      edges: edges.sort(),
+      class_relationships: relationships.sort(),
+    };
+  }
+  if (!isFlow) return null;
+
   // `A[Label]`, `A(Label)`, `A{Label}` and bare `A`, joined by an arrow with an optional
   // `|edge label|`. Only the two-endpoint form is decoded; chained `A-->B-->C` is expanded.
   const linkRe = new RegExp(
@@ -626,7 +772,16 @@ export function groundTruth(text) {
  * goes undecided. Collapsing that into "equivalent" would hand a renderer a way to evade the gate
  * by degrading its own geometry, so the third verdict exists and the harness gate refuses it.
  */
-export const TIER2_FAMILIES = new Set(['flowchart', 'state']);
+export const TIER2_FAMILIES = new Set(['flowchart', 'state', 'class']);
+const TIER2_REQUIRED_INVARIANTS = new Map([
+  ['flowchart', ['edge_topology_cross_engine']],
+  ['state', ['edge_topology_cross_engine']],
+  ['class', [
+    'class_relationship_semantics_cross_engine',
+    'class_relationship_semantics_vs_input__frankenmermaid',
+    'class_relationship_semantics_vs_input__mermaid-js',
+  ]],
+]);
 
 export function compareDiagram({ index, family, fmSvg, jsSvg, source }) {
   const fm = signature(fmSvg, 'frankenmermaid');
@@ -737,6 +892,40 @@ export function compareDiagram({ index, family, fmSvg, jsSvg, source }) {
     });
   }
 
+  if (family === 'class') {
+    const bothRelationships = fm.class_relationships !== null && js.class_relationships !== null;
+    const relationships = bothRelationships
+      ? diffMultisets(multiset(fm.class_relationships), multiset(js.class_relationships))
+      : null;
+    checks.push({
+      invariant: 'class_relationship_semantics_cross_engine',
+      tier: 2,
+      decided: bothRelationships,
+      pass: bothRelationships ? relationships.equal : null,
+      detail: relationships ?? {
+        fm_status: fm.class_relationships_status,
+        js_status: js.class_relationships_status,
+      },
+    });
+    for (const [engine, sig] of [['frankenmermaid', fm], ['mermaid-js', js]]) {
+      const decidable = truth?.class_relationships && sig.class_relationships !== null;
+      const against = decidable
+        ? diffMultisets(multiset(sig.class_relationships), multiset(truth.class_relationships))
+        : null;
+      checks.push({
+        invariant: `class_relationship_semantics_vs_input__${engine}`,
+        tier: 2,
+        decided: Boolean(decidable),
+        pass: decidable ? against.equal : null,
+        detail: against ?? {
+          reason: truth?.class_relationships
+            ? sig.class_relationships_status
+            : 'class_input_not_decodable',
+        },
+      });
+    }
+  }
+
   // `decided` is the set of invariants this diagram's own output could actually settle. An
   // invariant that could not be decided is reported as such and never counted as a pass.
   const decided = checks.filter((c) => c.decided && c.gating !== false);
@@ -744,8 +933,10 @@ export function compareDiagram({ index, family, fmSvg, jsSvg, source }) {
 
   // Tier 2 is claimed for this family but its own output could not settle it: report `unverified`
   // rather than letting an undecidable check read as agreement.
-  const tier2Missing = TIER2_FAMILIES.has(family)
-    && !decided.some((c) => c.invariant === 'edge_topology_cross_engine');
+  const requiredTier2Invariants = TIER2_REQUIRED_INVARIANTS.get(family);
+  const tier2Missing = requiredTier2Invariants !== undefined
+    && requiredTier2Invariants.some((required) =>
+      !decided.some((c) => c.invariant === required));
   const verdict = failed.length > 0 ? 'divergent' : tier2Missing ? 'unverified' : 'equivalent';
 
   return {
@@ -753,8 +944,11 @@ export function compareDiagram({ index, family, fmSvg, jsSvg, source }) {
     family,
     verdict,
     unverified_reason: verdict === 'unverified'
-      ? `tier2 claimed for ${family} but topology undecidable (fm=${fm.topology_status}, `
-        + `js=${jsComparableStatus}, js_geometry=${js.topology_status})`
+      ? family === 'class'
+        ? `tier2 claimed for class but relationship semantics undecidable `
+          + `(fm=${fm.class_relationships_status}, js=${js.class_relationships_status})`
+        : `tier2 claimed for ${family} but topology undecidable (fm=${fm.topology_status}, `
+          + `js=${jsComparableStatus}, js_geometry=${js.topology_status})`
       : undefined,
     tiers_decided: [...new Set(decided.map((c) => c.tier))].sort(),
     checks_decided: decided.length,
@@ -763,13 +957,20 @@ export function compareDiagram({ index, family, fmSvg, jsSvg, source }) {
     checks: failed.length === 0
       ? checks.map((c) => ({ invariant: c.invariant, tier: c.tier, gating: c.gating !== false, decided: c.decided, pass: c.pass }))
       : checks,
-    fm: { bytes: fm.bytes, node_count: fm.node_count, edge_element_count: fm.edge_element_count, topology_status: fm.topology_status },
+    fm: {
+      bytes: fm.bytes,
+      node_count: fm.node_count,
+      edge_element_count: fm.edge_element_count,
+      topology_status: fm.topology_status,
+      class_relationships_status: fm.class_relationships_status,
+    },
     js: {
       bytes: js.bytes,
       node_count: js.node_count,
       edge_element_count: js.edge_element_count,
       topology_status: jsComparableStatus,
       geometric_topology_status: js.topology_status,
+      class_relationships_status: js.class_relationships_status,
     },
   };
 }
@@ -803,8 +1004,9 @@ export function summarize(results) {
     method: 'svg_structural',
     rasterized_perceptual_diff: false,
     // Stated explicitly so a reader never has to infer the strength of the claim.
-    claim: 'engine-neutral structural equivalence: rendered-text multiset (all families) plus '
-      + 'rendered-path edge topology cross-engine and against input-derived ground truth. '
+    claim: 'engine-neutral structural equivalence: rendered-text multiset (all families), '
+      + 'rendered-path edge topology cross-engine and against input-derived ground truth, and '
+      + 'class relationship marker kind plus owning end. '
       + 'Frankenmermaid endpoints are reconstructed geometrically; mermaid-js uses geometric '
       + 'endpoints when unambiguous and uniquely resolved per-path data-id endpoints otherwise. '
       + 'Not byte equality; not a pixel diff.',
@@ -853,6 +1055,42 @@ function fixturePair() {
   return { js, fm, source };
 }
 
+/** Four class relationship kinds, with their markers attached to the owning path end. */
+function classFixturePair() {
+  const node = (id, x, label) =>
+    `<g class="node default" id="d-classId-${id}-${x}" transform="translate(${x}, 20)">`
+    + `<foreignObject><span class="nodeLabel"><p>${label}</p></span></foreignObject></g>`;
+  const fmNode = (id, x, label) =>
+    `<g id="fm-node-${id.toLowerCase()}-${x}" class="fm-node" transform="translate(${x}, 20)">`
+    + `<text x="0" y="0">${label}</text></g>`;
+  const js = `<svg>${node('C0', 50, 'C0')}${node('C1', 150, 'C1')}`
+    + `${node('C2', 250, 'C2')}${node('C3', 350, 'C3')}`
+    + `<path class="relation edge-thickness-normal" data-id="id_C0_C1_1" `
+    + `d="M55,20L145,20" marker-start="url(#d_class-compositionStart)"/>`
+    + `<path class="relation edge-thickness-normal" data-id="id_C1_C2_2" `
+    + `d="M155,20L245,20" marker-start="url(#d_class-aggregationStart)"/>`
+    + `<path class="relation edge-thickness-normal" data-id="id_C2_C3_3" `
+    + `d="M255,20L345,20" marker-end="url(#d_class-dependencyEnd)"/>`
+    + `<path class="relation edge-thickness-normal" data-id="id_C3_C0_4" `
+    + `d="M345,20L55,20" marker-start="url(#d_class-extensionStart)"/></svg>`;
+  const fm = `<svg>${fmNode('C0', 50, 'C0')}${fmNode('C1', 150, 'C1')}`
+    + `${fmNode('C2', 250, 'C2')}${fmNode('C3', 350, 'C3')}`
+    + `<g class="fm-edge" data-fm-edge-id="0"><path d="M55,20L145,20" `
+    + `marker-start="url(#arrow-diamond)"/></g>`
+    + `<g class="fm-edge" data-fm-edge-id="1"><path d="M155,20L245,20" `
+    + `marker-start="url(#arrow-diamond-open)"/></g>`
+    + `<g class="fm-edge" data-fm-edge-id="2"><path d="M255,20L345,20" `
+    + `marker-end="url(#arrow-end)"/></g>`
+    + `<g class="fm-edge" data-fm-edge-id="3"><path d="M345,20L55,20" `
+    + `marker-start="url(#arrow-inheritance)"/></g></svg>`;
+  const source = 'classDiagram\n'
+    + '  C0 *-- C1\n'
+    + '  C1 o-- C2\n'
+    + '  C2 --> C3\n'
+    + '  C3 <|-- C0\n';
+  return { js, fm, source };
+}
+
 const failedInvariants = (result) =>
   result.checks.filter((c) => c.pass === false && c.decided && c.gating !== false).map((c) => c.invariant);
 
@@ -890,6 +1128,113 @@ export function selfTest() {
   record('baseline_geometry_matches_declared_ids',
     base.checks.some((c) => c.invariant === 'incumbent_geometry_matches_declared_ids' && c.pass === true),
     base.checks.map((c) => [c.invariant, c.pass]));
+
+  const classPair = classFixturePair();
+  const classBase = compareDiagram({
+    index: 0,
+    family: 'class',
+    fmSvg: classPair.fm,
+    jsSvg: classPair.js,
+    source: classPair.source,
+  });
+  record('class_relationship_baseline_is_equivalent',
+    classBase.verdict === 'equivalent'
+      && classBase.checks.some((c) =>
+        c.invariant === 'class_relationship_semantics_cross_engine' && c.pass === true),
+    { verdict: classBase.verdict, failed: failedInvariants(classBase) });
+
+  // CLASS MUTATION 1 -- preserve endpoints but turn composition into aggregation.
+  const wrongClassKind = classPair.fm.replace(
+    'marker-start="url(#arrow-diamond)"',
+    'marker-start="url(#arrow-diamond-open)"',
+  );
+  const classM1 = compareDiagram({
+    index: 0, family: 'class', fmSvg: wrongClassKind, jsSvg: classPair.js, source: classPair.source,
+  });
+  record('class_relationship_kind_mutation_is_divergent',
+    classM1.verdict === 'divergent'
+      && failedInvariants(classM1).includes('class_relationship_semantics_cross_engine')
+      && failedInvariants(classM1).includes('class_relationship_semantics_vs_input__frankenmermaid'),
+    { verdict: classM1.verdict, failed: failedInvariants(classM1) });
+
+  // CLASS MUTATION 2 -- preserve kind and endpoints but put the ownership diamond on the wrong end.
+  const wrongClassEnd = classPair.fm.replace(
+    'marker-start="url(#arrow-diamond)"',
+    'marker-end="url(#arrow-diamond)"',
+  );
+  const classM2 = compareDiagram({
+    index: 0, family: 'class', fmSvg: wrongClassEnd, jsSvg: classPair.js, source: classPair.source,
+  });
+  record('class_relationship_owning_end_mutation_is_divergent',
+    classM2.verdict === 'divergent'
+      && failedInvariants(classM2).includes('class_relationship_semantics_cross_engine'),
+    { verdict: classM2.verdict, failed: failedInvariants(classM2) });
+
+  // CLASS MUTATION 3 -- dropping the inheritance marker must not degrade to a plain line silently.
+  const droppedClassMarker = classPair.fm.replace(' marker-start="url(#arrow-inheritance)"', '');
+  const classM3 = compareDiagram({
+    index: 0,
+    family: 'class',
+    fmSvg: droppedClassMarker,
+    jsSvg: classPair.js,
+    source: classPair.source,
+  });
+  record('class_relationship_marker_drop_is_divergent',
+    classM3.verdict === 'divergent'
+      && failedInvariants(classM3).includes('class_relationship_semantics_vs_input__frankenmermaid'),
+    { verdict: classM3.verdict, failed: failedInvariants(classM3) });
+
+  // CLASS MUTATION 4 -- the exact current inheritance defect: association arrow at the target.
+  const inheritanceAsAssociation = classPair.fm.replace(
+    'marker-start="url(#arrow-inheritance)"',
+    'marker-end="url(#arrow-end)"',
+  );
+  const classM4 = compareDiagram({
+    index: 0,
+    family: 'class',
+    fmSvg: inheritanceAsAssociation,
+    jsSvg: classPair.js,
+    source: classPair.source,
+  });
+  record('class_inheritance_as_association_is_divergent',
+    classM4.verdict === 'divergent'
+      && failedInvariants(classM4).includes('class_relationship_semantics_cross_engine')
+      && failedInvariants(classM4).includes('class_relationship_semantics_vs_input__frankenmermaid'),
+    { verdict: classM4.verdict, failed: failedInvariants(classM4) });
+
+  // CLASS MUTATION 5 -- exchange two kinds while preserving the global marker-kind counts.
+  const swappedClassKinds = classPair.fm
+    .replace('marker-start="url(#arrow-diamond)"', 'marker-start="url(#oracle-swap)"')
+    .replace('marker-start="url(#arrow-diamond-open)"', 'marker-start="url(#arrow-diamond)"')
+    .replace('marker-start="url(#oracle-swap)"', 'marker-start="url(#arrow-diamond-open)"');
+  const classM5 = compareDiagram({
+    index: 0,
+    family: 'class',
+    fmSvg: swappedClassKinds,
+    jsSvg: classPair.js,
+    source: classPair.source,
+  });
+  record('class_relationship_kind_swap_is_divergent',
+    classM5.verdict === 'divergent'
+      && failedInvariants(classM5).includes('class_relationship_semantics_cross_engine'),
+    { verdict: classM5.verdict, failed: failedInvariants(classM5) });
+
+  // CLASS MUTATION 6 -- an attached but unknown marker is observable wrong output, not unverified.
+  const unknownClassMarker = classPair.fm.replace(
+    'marker-start="url(#arrow-diamond)"',
+    'marker-start="url(#arrow-mystery)"',
+  );
+  const classM6 = compareDiagram({
+    index: 0,
+    family: 'class',
+    fmSvg: unknownClassMarker,
+    jsSvg: classPair.js,
+    source: classPair.source,
+  });
+  record('unknown_class_relationship_marker_is_divergent',
+    classM6.verdict === 'divergent'
+      && failedInvariants(classM6).includes('class_relationship_semantics_vs_input__frankenmermaid'),
+    { verdict: classM6.verdict, failed: failedInvariants(classM6) });
 
   // MUTATION 1 -- we drop a node's label. The text gate must catch it.
   const droppedLabel = fm.replace('<text x="0" y="0">Beta</text>', '');
@@ -950,6 +1295,38 @@ export function selfTest() {
   record('segmentation_difference_is_not_a_failure', n2.verdict === 'equivalent',
     { verdict: n2.verdict, failed: failedInvariants(n2) });
 
+  // CLASS NEGATIVE CONTROL -- DOM path order is not relationship identity.
+  const classEdgeGroups = [...classPair.fm.matchAll(/<g class="fm-edge"[\s\S]*?<\/g>/g)]
+    .map((match) => match[0]);
+  const classWithoutEdges = classPair.fm.replace(/<g class="fm-edge"[\s\S]*?<\/g>/g, '');
+  const reorderedClassPaths = classWithoutEdges.replace(
+    '</svg>',
+    `${classEdgeGroups.reverse().join('')}</svg>`,
+  );
+  const classN1 = compareDiagram({
+    index: 0,
+    family: 'class',
+    fmSvg: reorderedClassPaths,
+    jsSvg: classPair.js,
+    source: classPair.source,
+  });
+  record('class_path_order_is_not_semantic', classN1.verdict === 'equivalent',
+    { verdict: classN1.verdict, failed: failedInvariants(classN1) });
+
+  // CLASS NEGATIVE CONTROL -- cardinality and relationship-label syntax preserve kind/endpoints.
+  const classWithLabels = classPair.source
+    .replace('C0 *-- C1', 'C0 "1" *-- "0..*" C1 : owns');
+  const classN2 = compareDiagram({
+    index: 0,
+    family: 'class',
+    fmSvg: classPair.fm,
+    jsSvg: classPair.js,
+    source: classWithLabels,
+  });
+  record('class_cardinality_and_label_preserve_relationship_semantics',
+    classN2.verdict === 'equivalent',
+    { verdict: classN2.verdict, failed: failedInvariants(classN2) });
+
   // Unit-level invariants the above depend on.
   record('entities_decode', decodeEntities('a&lt;b&amp;c&#65;&#x42;') === 'a<b&cAB', decodeEntities('a&lt;b&amp;c&#65;&#x42;'));
   record('style_text_excluded', !visibleTextRuns('<svg><style>.a{fill:red}</style><text>X</text></svg>').visible.join('|').includes('fill'),
@@ -986,9 +1363,21 @@ export function selfTest() {
     const t = groundTruth('flowchart LR\n  A-->|goes to|B\n');
     return t !== null && t.edges.join(',') === 'a>b';
   })(), groundTruth('flowchart LR\n  A-->|goes to|B\n'));
-  record('non_flow_source_is_not_decodable', groundTruth('classDiagram\n  class C0\n') === null, null);
+  record('ground_truth_reads_class_relationship_semantics', (() => {
+    const t = groundTruth('classDiagram\n  C0 *-- C1\n  C1 --o C2\n  C2 <|-- C3\n');
+    return t !== null
+      && t.edges.join(',') === 'c0>c1,c1>c2,c2>c3'
+      && t.class_relationships.join(',') === [
+        'c0>c1|start=composition|end=none',
+        'c1>c2|start=none|end=aggregation',
+        'c2>c3|start=inheritance|end=none',
+      ].join(',');
+  })(), groundTruth('classDiagram\n  C0 *-- C1\n  C1 --o C2\n  C2 <|-- C3\n'));
+  record('unsupported_source_is_not_decodable',
+    groundTruth('sequenceDiagram\n  A->>B: hello\n') === null,
+    null);
 
-  return { ok: true, cases: cases.length, mutation_controls: 5, negative_controls: 2 };
+  return { ok: true, cases: cases.length, mutation_controls: 11, negative_controls: 4 };
 }
 
 // Run as a script: `node scripts/headtohead/svg_equivalence.mjs --self-test`

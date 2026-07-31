@@ -20,7 +20,7 @@
  *
  * Exit codes: `0` every diagram equivalent · `1` an engine errored or the dump/hash linkage broke ·
  * `2` invalid arguments · `3` corpus drift · `7` the equivalence gate failed (a diagram diverged, or
- * a family that claims geometric topology could not have it decided).
+ * a family that claims a Tier 2 semantic invariant could not have it decided).
  *
  * See `svg_equivalence.mjs` for exactly which invariants are checked and which are not.
  */
@@ -28,7 +28,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { cpus, loadavg, release, tmpdir, totalmem } from 'node:os';
+import { cpus, loadavg, platform, release, tmpdir, totalmem } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -59,7 +59,7 @@ function sh(cmd, args) {
 
 /**
  * Which mermaid syntax family a revision is, read from its own source header. The family decides
- * whether Tier 2 (geometric topology) is claimed, so it is derived from the input rather than
+ * whether Tier 2 semantic invariants are claimed, so it is derived from the input rather than
  * guessed from the output -- an engine must not get to choose how strictly it is checked.
  */
 export function familyOf(source) {
@@ -79,6 +79,123 @@ export function familyOf(source) {
 
 // ---------------------------------------------------------------- host provenance
 
+function readText(path) {
+  try {
+    return readFileSync(path, 'utf8').trim();
+  } catch {
+    return null;
+  }
+}
+
+function sortedUnique(values) {
+  return [...new Set(values.filter((value) => typeof value === 'string' && value.length > 0))].sort();
+}
+
+function boostState() {
+  const cpufreqBoost = readText('/sys/devices/system/cpu/cpufreq/boost');
+  if (cpufreqBoost === '0' || cpufreqBoost === '1') {
+    return {
+      source: '/sys/devices/system/cpu/cpufreq/boost',
+      enabled: cpufreqBoost === '1',
+      raw: cpufreqBoost,
+    };
+  }
+  const intelNoTurbo = readText('/sys/devices/system/cpu/intel_pstate/no_turbo');
+  if (intelNoTurbo === '0' || intelNoTurbo === '1') {
+    return {
+      source: '/sys/devices/system/cpu/intel_pstate/no_turbo',
+      enabled: intelNoTurbo === '0',
+      raw: intelNoTurbo,
+    };
+  }
+  return { source: null, enabled: null, raw: null };
+}
+
+function cpuPowerPolicy() {
+  if (platform() !== 'linux') {
+    return {
+      kind: 'unsupported',
+      platform: platform(),
+      complete: false,
+      drivers: [],
+      governors: [],
+      energy_performance_preferences: [],
+      boost: { source: null, enabled: null, raw: null },
+      policies: [],
+    };
+  }
+
+  const base = '/sys/devices/system/cpu/cpufreq';
+  let policyNames = [];
+  try {
+    policyNames = readdirSync(base)
+      .filter((name) => /^policy\d+$/.test(name))
+      .sort((left, right) => Number(left.slice(6)) - Number(right.slice(6)));
+  } catch {
+    // The completeness bit below makes missing cpufreq provenance fail closed.
+  }
+  const policies = policyNames.map((policy) => {
+    const root = join(base, policy);
+    return {
+      policy,
+      affected_cpus: readText(join(root, 'affected_cpus'))
+        ?? readText(join(root, 'related_cpus')),
+      driver: readText(join(root, 'scaling_driver')),
+      governor: readText(join(root, 'scaling_governor')),
+      energy_performance_preference: readText(join(root, 'energy_performance_preference')),
+      scaling_min_khz: readText(join(root, 'scaling_min_freq')),
+      scaling_max_khz: readText(join(root, 'scaling_max_freq')),
+    };
+  });
+  const drivers = sortedUnique(policies.map((policy) => policy.driver));
+  const governors = sortedUnique(policies.map((policy) => policy.governor));
+  const energyPerformancePreferences = sortedUnique(
+    policies.map((policy) => policy.energy_performance_preference),
+  );
+  return {
+    kind: 'linux_cpufreq',
+    platform: 'linux',
+    complete: policies.length > 0
+      && policies.every((policy) => policy.driver !== null && policy.governor !== null),
+    drivers,
+    governors,
+    energy_performance_preferences: energyPerformancePreferences,
+    boost: boostState(),
+    policies,
+  };
+}
+
+function cpuIsa() {
+  const architecture = process.arch;
+  const machine = sh('uname', ['-m']) ?? architecture;
+  const featureLine = platform() === 'linux'
+    ? readText('/proc/cpuinfo')
+      ?.split('\n')
+      .find((line) => /^(?:flags|Features)\s*:/.test(line))
+    : null;
+  const flags = sortedUnique(
+    featureLine
+      ? featureLine.slice(featureLine.indexOf(':') + 1).trim().toLowerCase().split(/\s+/)
+      : [],
+  );
+  const featureSet = new Set(flags);
+  return {
+    architecture,
+    machine,
+    source: platform() === 'linux' ? '/proc/cpuinfo' : null,
+    complete: flags.length > 0,
+    flags,
+    capabilities: {
+      avx2: featureSet.has('avx2'),
+      fma: featureSet.has('fma'),
+      bmi2: featureSet.has('bmi2'),
+      vaes: featureSet.has('vaes'),
+      any_avx512: flags.some((flag) => flag.startsWith('avx512')),
+      neon_or_asimd: featureSet.has('neon') || featureSet.has('asimd'),
+    },
+  };
+}
+
 /** Host identity on the artifact, so a verdict is never separable from the machine that produced it. */
 function hostFingerprint() {
   const cpu = cpus();
@@ -93,6 +210,8 @@ function hostFingerprint() {
     total_mem_gb: Number((totalmem() / 2 ** 30).toFixed(1)),
     loadavg_1m: loadavg()[0],
     node: process.version,
+    cpu_power_policy: cpuPowerPolicy(),
+    isa: cpuIsa(),
     // Equivalence is a byte-content check, so load does not threaten its validity the way it
     // threatens a timing claim. Recorded anyway: provenance is cheap, reconstruction is not.
     load_affects_verdict: false,
@@ -134,6 +253,14 @@ if (items.length === 0) {
 }
 
 const env = hostFingerprint();
+if (!env.cpu_power_policy.complete || !env.isa.complete) {
+  log('host provenance incomplete: equivalence evidence requires observed governor and ISA data');
+  log(JSON.stringify({
+    cpu_power_policy: env.cpu_power_policy,
+    isa: env.isa,
+  }));
+  process.exit(EXIT_ENGINE_ERROR);
+}
 log(`host=${env.host_identity} rev=${env.git_rev?.slice(0, 8)}${env.git_dirty ? '-dirty' : ''} load1=${env.loadavg_1m.toFixed(2)}`);
 
 // One render each is all this phase needs; reps are a timing device and this phase does not time.
@@ -239,6 +366,32 @@ for (const item of items) {
     continue;
   }
 
+  const execution = {
+    frankenmermaid: {
+      requested_worker_threads: fmRecord.thread_count_requested,
+      actual_observed_worker_threads: fmRecord.thread_count_actually_used,
+      execution_model: fmRecord.execution_model,
+    },
+    mermaid_js: {
+      requested_worker_threads: jsRecord.thread_count_requested,
+      actual_observed_worker_threads: jsRecord.thread_count_actually_used,
+      execution_model: jsRecord.execution_model,
+    },
+  };
+  const threadProvenanceComplete = [execution.frankenmermaid, execution.mermaid_js].every(
+    (record) => Number.isSafeInteger(record.requested_worker_threads)
+      && record.requested_worker_threads > 0
+      && Number.isSafeInteger(record.actual_observed_worker_threads)
+      && record.actual_observed_worker_threads > 0
+      && typeof record.execution_model === 'string'
+      && record.execution_model.length > 0,
+  );
+  if (!threadProvenanceComplete) {
+    log(`FAIL ${item.id}: actual observed worker-thread provenance is incomplete`);
+    log(`  ${JSON.stringify(execution)}`);
+    process.exit(EXIT_ENGINE_ERROR);
+  }
+
   const fmSvgs = readRevisions(fmDump, item.id, '.default.svg');
   const jsSvgs = readRevisions(jsDump, item.id, '.mermaid.svg');
 
@@ -287,6 +440,7 @@ for (const item of items) {
     fm_input_sha256: fmRecord.input_sha256,
     js_input_sha256: jsRecord.input_sha256,
     inputs_identical: fmRecord.input_sha256 === jsRecord.input_sha256,
+    execution,
     linkage,
     equivalence,
   });
@@ -318,14 +472,17 @@ const artifact = {
       + 'present in ours. Applies to every syntax family. Rendering MORE than mermaid is reported, '
       + 'not failed.',
     tier2: 'rendered-path edge topology compared cross-engine AND against input-derived ground '
-      + 'truth. Frankenmermaid endpoints are reconstructed geometrically; mermaid-js uses the same '
-      + 'geometry when unambiguous and uniquely resolved per-path data-id endpoints otherwise. '
+      + 'truth for flowchart/state, plus class relationship kind and marker-owning endpoint '
+      + 'compared cross-engine AND against input-derived ground truth. Frankenmermaid endpoints '
+      + 'are reconstructed geometrically; mermaid-js uses the same geometry when unambiguous and '
+      + 'uniquely resolved per-path data-id endpoints otherwise. '
       + `Claimed for: ${[...TIER2_FAMILIES].join(', ')}.`,
     extractor: 'single shared implementation applied to both engines (svg_equivalence.mjs); a '
       + 'per-engine extractor pair could agree by construction',
-    self_test: 'svg_equivalence.mjs --self-test: 5 mutation controls (dropped label, either engine '
-      + 'dropping an edge, rewired edge, displaced node) and 2 negative controls (extra content, '
-      + 'differing text segmentation)',
+    self_test: 'svg_equivalence.mjs --self-test: 11 mutation controls (including dropped or '
+      + 'rewired edges, displaced nodes, swapped class relationship kinds, wrong owning endpoint, '
+      + 'unknown markers, and cardinality/label drift) and 4 negative controls (including benign '
+      + 'path ordering and extra content)',
     undecidable_is_not_a_pass: true,
   },
   pins: { mermaid: PINS.mermaid.version, bundle_sha256: jsRun.records[0]?.bundle_sha256 ?? null },
@@ -350,7 +507,7 @@ else log(`dumps kept at ${dumpRoot}`);
 
 console.log('');
 console.log(`equivalence  host=${env.host_identity}  mermaid@${PINS.mermaid.version}  rev=${rev}`);
-console.log('method: SVG structural (text-token containment + rendered-path topology). Not a pixel diff.');
+console.log('method: SVG structural (text-token containment + rendered-path topology + class relationship semantics). Not a pixel diff.');
 console.log('');
 console.log('item                  diagrams  equiv  diverg  unver  verdict');
 for (const row of rows) {
