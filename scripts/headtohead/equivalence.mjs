@@ -477,16 +477,17 @@ const artifact = {
       + 'not failed.',
     tier2: 'rendered-path edge topology compared cross-engine AND against input-derived ground '
       + 'truth for flowchart/state, plus class relationship kind and marker-owning endpoint '
-      + 'compared cross-engine AND against input-derived ground truth. Frankenmermaid endpoints '
-      + 'are reconstructed geometrically; mermaid-js uses the same geometry when unambiguous and '
-      + 'uniquely resolved per-path data-id endpoints otherwise. '
+      + 'compared cross-engine AND against input-derived ground truth. Inheritance additionally '
+      + 'requires a hollow triangle whose referenced marker definition faces away from the path. '
+      + 'Frankenmermaid endpoints are reconstructed geometrically; mermaid-js uses the same '
+      + 'geometry when unambiguous and uniquely resolved per-path data-id endpoints otherwise. '
       + `Claimed for: ${[...TIER2_FAMILIES].join(', ')}.`,
     extractor: 'single shared implementation applied to both engines (svg_equivalence.mjs); a '
       + 'per-engine extractor pair could agree by construction',
-    self_test: 'svg_equivalence.mjs --self-test: 11 mutation controls (including dropped or '
+    self_test: 'svg_equivalence.mjs --self-test: 13 mutation controls (including dropped or '
       + 'rewired edges, displaced nodes, swapped class relationship kinds, wrong owning endpoint, '
-      + 'unknown markers, and cardinality/label drift) and 4 negative controls (including benign '
-      + 'path ordering and extra content)',
+      + 'unknown markers, inward or filled inheritance triangles, and cardinality/label drift) '
+      + 'and 4 negative controls (including benign path ordering and extra content)',
     undecidable_is_not_a_pass: true,
   },
   pins: { mermaid: PINS.mermaid.version, bundle_sha256: jsRun.records[0]?.bundle_sha256 ?? null },

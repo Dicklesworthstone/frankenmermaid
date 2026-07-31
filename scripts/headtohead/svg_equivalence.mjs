@@ -49,9 +49,11 @@
  * a cluster's nodes without moving its edges makes endpoints resolve to the wrong anchors.
  *
  * Class diagrams additionally compare the semantic marker kind and owning end on every rendered
- * relationship. Mermaid's per-path `data-id` is used only as an endpoint fallback when geometry is
- * ambiguous; frankenmermaid still has to resolve its rendered path geometrically. Sequence and ER
- * do not expose a recoverable per-edge model in both engines, so those families carry Tier 1 only.
+ * relationship. Inheritance markers are definition-checked too: the triangle must be hollow and
+ * face away from the relationship path at either endpoint. Mermaid's per-path `data-id` is used
+ * only as an endpoint fallback when geometry is ambiguous; frankenmermaid still has to resolve its
+ * rendered path geometrically. Sequence and ER do not expose a recoverable per-edge model in both
+ * engines, so those families carry Tier 1 only.
  */
 
 // ---------------------------------------------------------------- text extraction
@@ -517,11 +519,128 @@ function declaredEdgeTopology(edges, nodeIds) {
   return { topology: topology.sort(), status: 'declared_path_endpoints' };
 }
 
+/** Marker definitions keyed by the id referenced from `marker-start` / `marker-end`. */
+function markerDefinitions(svg) {
+  const definitions = new Map();
+  const re = /<marker\b[^>]*>[\s\S]*?<\/marker>/g;
+  for (let match = re.exec(svg); match !== null; match = re.exec(svg)) {
+    const open = /^<marker\b[^>]*>/.exec(match[0])?.[0];
+    const path = /<path\b[^>]*>/.exec(match[0])?.[0];
+    const id = open ? ATTR(open, 'id') : null;
+    if (!id || !path) continue;
+    definitions.set(id, {
+      orient: ATTR(open, 'orient'),
+      marker_fill: ATTR(open, 'fill'),
+      path_d: ATTR(path, 'd'),
+      path_fill: ATTR(path, 'fill'),
+    });
+  }
+  return definitions;
+}
+
+/**
+ * Direction of a triangle's apex in its marker coordinate system.
+ *
+ * Both engines express inheritance markers as three-point polygons with absolute M/L/H/V
+ * commands. Exactly two points form a vertical base; the remaining point is the apex. Positive
+ * means the apex faces in the path's forward direction, negative means backward. Anything else is
+ * refused rather than guessed.
+ */
+function triangleApexDirection(d) {
+  if (typeof d !== 'string') return null;
+  const points = [];
+  let current = null;
+  let unsupported = false;
+  const re = /([A-Za-z])([^A-Za-z]*)/g;
+  for (let match = re.exec(d); match !== null; match = re.exec(d)) {
+    const command = match[1];
+    const numbers = (match[2].match(/-?\d*\.?\d+(?:[eE][-+]?\d+)?/g) ?? []).map(Number);
+    switch (command) {
+      case 'M':
+      case 'L':
+        if (numbers.length === 0 || numbers.length % 2 !== 0) {
+          unsupported = true;
+          break;
+        }
+        for (let i = 0; i < numbers.length; i += 2) {
+          current = [numbers[i], numbers[i + 1]];
+          points.push(current);
+        }
+        break;
+      case 'H':
+        if (current === null || numbers.length === 0) {
+          unsupported = true;
+          break;
+        }
+        for (const x of numbers) {
+          current = [x, current[1]];
+          points.push(current);
+        }
+        break;
+      case 'V':
+        if (current === null || numbers.length === 0) {
+          unsupported = true;
+          break;
+        }
+        for (const y of numbers) {
+          current = [current[0], y];
+          points.push(current);
+        }
+        break;
+      case 'Z':
+      case 'z':
+        break;
+      default:
+        unsupported = true;
+    }
+  }
+  if (unsupported) return null;
+  const unique = [];
+  for (const point of points) {
+    if (!unique.some(([x, y]) => x === point[0] && y === point[1])) unique.push(point);
+  }
+  if (unique.length !== 3) return null;
+  for (let apex = 0; apex < unique.length; apex++) {
+    const base = unique.filter((_, index) => index !== apex);
+    if (base[0][0] !== base[1][0] || unique[apex][0] === base[0][0]) continue;
+    return Math.sign(unique[apex][0] - base[0][0]);
+  }
+  return null;
+}
+
+/**
+ * Prove that a referenced inheritance triangle points out of the path, not into it.
+ *
+ * `orient="auto"` preserves the marker's intrinsic x direction. SVG reverses
+ * `auto-start-reverse` only at `marker-start`, allowing one forward-pointing definition to serve
+ * both ends. Mermaid instead emits distinct backward/forward definitions with `orient="auto"`.
+ */
+function inheritanceMarkerDefinition(engine, id, slot, definitions) {
+  const definition = definitions.get(id);
+  if (!definition) return 'missing_definition';
+  const intrinsic = triangleApexDirection(definition.path_d);
+  if (intrinsic === null) return 'unrecognized_triangle_geometry';
+  const orient = definition.orient?.toLowerCase();
+  if (orient !== 'auto' && orient !== 'auto-start-reverse') {
+    return `unsupported_orient(${definition.orient ?? 'missing'})`;
+  }
+  const effective = slot === 'start' && orient === 'auto-start-reverse'
+    ? -intrinsic
+    : intrinsic;
+  const expected = slot === 'start' ? -1 : 1;
+  if (effective !== expected) return `points_into_path(slot=${slot})`;
+  if (engine === 'frankenmermaid'
+    && (definition.path_fill ?? definition.marker_fill)?.toLowerCase() !== 'none') {
+    return 'triangle_not_hollow';
+  }
+  return null;
+}
+
 /**
  * Normalize the marker vocabulary used by each renderer into Mermaid class relationship kinds.
  * The URL target, not the marker definition body, is attached to the rendered relationship path.
  */
-function classMarkerKind(engine, marker) {
+function classMarkerKind(engine, marker, slot, definitions) {
   if (marker === null) return { kind: 'none', status: 'none' };
   const id = /^url\(#([^)]+)\)$/.exec(marker)?.[1] ?? marker;
   if (engine === 'mermaid-js') {
@@ -532,6 +651,15 @@ function classMarkerKind(engine, marker) {
       : emitted === 'dependency'
         ? 'association'
         : emitted;
+    if (kind === 'inheritance') {
+      const invalid = inheritanceMarkerDefinition(engine, id, slot, definitions);
+      if (invalid) {
+        return {
+          kind: `invalid:inheritance:${invalid}`,
+          status: `invalid_inheritance_marker(${invalid})`,
+        };
+      }
+    }
     return kind
       ? { kind, status: 'known' }
       : { kind: `unknown:${id}`, status: `unknown_marker(${id})` };
@@ -539,6 +667,13 @@ function classMarkerKind(engine, marker) {
   if (/(?:^|-)arrow-diamond-open$/i.test(id)) return { kind: 'aggregation', status: 'known' };
   if (/(?:^|-)arrow-diamond$/i.test(id)) return { kind: 'composition', status: 'known' };
   if (/(?:^|-)arrow-(?:inheritance(?:-open)?|triangle-open)$/i.test(id)) {
+    const invalid = inheritanceMarkerDefinition(engine, id, slot, definitions);
+    if (invalid) {
+      return {
+        kind: `invalid:inheritance:${invalid}`,
+        status: `invalid_inheritance_marker(${invalid})`,
+      };
+    }
     return { kind: 'inheritance', status: 'known' };
   }
   if (/(?:^|-)arrow-end$/i.test(id)) return { kind: 'association', status: 'known' };
@@ -550,7 +685,7 @@ function classMarkerKind(engine, marker) {
  * A marker-kind count alone would miss two relationships exchanging their UML meaning, so the
  * marker is bound to the recovered rendered endpoints.
  */
-function classRelationshipSemantics(engine, edges, nodes) {
+function classRelationshipSemantics(engine, edges, nodes, definitions) {
   if (edges.length === 0) return { relationships: null, status: 'no_edge_elements' };
   const anchors = [...nodes.entries()];
   const nodeIds = [...nodes.keys()];
@@ -578,16 +713,19 @@ function classRelationshipSemantics(engine, edges, nodes) {
           : `unparsed_path(declared=${declared.status})`,
       };
     }
-    const start = classMarkerKind(engine, edge.marker_start);
-    const end = classMarkerKind(engine, edge.marker_end);
+    const start = classMarkerKind(engine, edge.marker_start, 'start', definitions);
+    const end = classMarkerKind(engine, edge.marker_end, 'end', definitions);
     relationships.push(`${pair.from}>${pair.to}|start=${start.kind}|end=${end.kind}`);
   }
   const hasUnknown = relationships.some((relationship) => relationship.includes('unknown:'));
+  const hasInvalid = relationships.some((relationship) => relationship.includes('invalid:'));
   return {
     relationships: relationships.sort(),
-    status: hasUnknown
-      ? 'rendered_relationship_markers_with_unknown'
-      : 'rendered_relationship_markers',
+    status: hasInvalid
+      ? 'rendered_relationship_markers_with_invalid_semantics'
+      : hasUnknown
+        ? 'rendered_relationship_markers_with_unknown'
+        : 'rendered_relationship_markers',
   };
 }
 
@@ -624,7 +762,12 @@ export function signature(svg, engine) {
   const declared = engine === 'mermaid-js'
     ? declaredEdgeTopology(edges, ids)
     : { topology: null, status: 'not_emitted' };
-  const classRelationships = classRelationshipSemantics(engine, edges, nodes);
+  const classRelationships = classRelationshipSemantics(
+    engine,
+    edges,
+    nodes,
+    markerDefinitions(svg),
+  );
   return {
     engine,
     bytes: svg.length,
@@ -1006,7 +1149,8 @@ export function summarize(results) {
     // Stated explicitly so a reader never has to infer the strength of the claim.
     claim: 'engine-neutral structural equivalence: rendered-text multiset (all families), '
       + 'rendered-path edge topology cross-engine and against input-derived ground truth, and '
-      + 'class relationship marker kind plus owning end. '
+      + 'class relationship marker kind plus owning end, including hollow inheritance-triangle '
+      + 'direction from the referenced marker definition. '
       + 'Frankenmermaid endpoints are reconstructed geometrically; mermaid-js uses geometric '
       + 'endpoints when unambiguous and uniquely resolved per-path data-id endpoints otherwise. '
       + 'Not byte equality; not a pixel diff.',
@@ -1055,7 +1199,7 @@ function fixturePair() {
   return { js, fm, source };
 }
 
-/** Four class relationship kinds, with their markers attached to the owning path end. */
+/** Class relationship kinds, including both inheritance directions and their marker definitions. */
 function classFixturePair() {
   const node = (id, x, label) =>
     `<g class="node default" id="d-classId-${id}-${x}" transform="translate(${x}, 20)">`
@@ -1063,8 +1207,11 @@ function classFixturePair() {
   const fmNode = (id, x, label) =>
     `<g id="fm-node-${id.toLowerCase()}-${x}" class="fm-node" transform="translate(${x}, 20)">`
     + `<text x="0" y="0">${label}</text></g>`;
-  const js = `<svg>${node('C0', 50, 'C0')}${node('C1', 150, 'C1')}`
-    + `${node('C2', 250, 'C2')}${node('C3', 350, 'C3')}`
+  const js = `<svg><defs>`
+    + `<marker id="d_class-extensionStart" orient="auto"><path d="M1,7 L18,13 V1 Z"/></marker>`
+    + `<marker id="d_class-extensionEnd" orient="auto"><path d="M1,1 V13 L18,7 Z"/></marker>`
+    + `</defs>${node('C0', 50, 'C0')}${node('C1', 150, 'C1')}`
+    + `${node('C2', 250, 'C2')}${node('C3', 350, 'C3')}${node('C4', 450, 'C4')}`
     + `<path class="relation edge-thickness-normal" data-id="id_C0_C1_1" `
     + `d="M55,20L145,20" marker-start="url(#d_class-compositionStart)"/>`
     + `<path class="relation edge-thickness-normal" data-id="id_C1_C2_2" `
@@ -1072,9 +1219,13 @@ function classFixturePair() {
     + `<path class="relation edge-thickness-normal" data-id="id_C2_C3_3" `
     + `d="M255,20L345,20" marker-end="url(#d_class-dependencyEnd)"/>`
     + `<path class="relation edge-thickness-normal" data-id="id_C3_C0_4" `
-    + `d="M345,20L55,20" marker-start="url(#d_class-extensionStart)"/></svg>`;
-  const fm = `<svg>${fmNode('C0', 50, 'C0')}${fmNode('C1', 150, 'C1')}`
-    + `${fmNode('C2', 250, 'C2')}${fmNode('C3', 350, 'C3')}`
+    + `d="M345,20L55,20" marker-start="url(#d_class-extensionStart)"/>`
+    + `<path class="relation edge-thickness-normal" data-id="id_C0_C4_5" `
+    + `d="M55,20L445,20" marker-end="url(#d_class-extensionEnd)"/></svg>`;
+  const fm = `<svg><defs><marker id="arrow-triangle-open" orient="auto-start-reverse">`
+    + `<path d="M0,0 L10,5 L0,10 Z" fill="none"/></marker></defs>`
+    + `${fmNode('C0', 50, 'C0')}${fmNode('C1', 150, 'C1')}`
+    + `${fmNode('C2', 250, 'C2')}${fmNode('C3', 350, 'C3')}${fmNode('C4', 450, 'C4')}`
     + `<g class="fm-edge" data-fm-edge-id="0"><path d="M55,20L145,20" `
     + `marker-start="url(#arrow-diamond)"/></g>`
     + `<g class="fm-edge" data-fm-edge-id="1"><path d="M155,20L245,20" `
@@ -1082,12 +1233,15 @@ function classFixturePair() {
     + `<g class="fm-edge" data-fm-edge-id="2"><path d="M255,20L345,20" `
     + `marker-end="url(#arrow-end)"/></g>`
     + `<g class="fm-edge" data-fm-edge-id="3"><path d="M345,20L55,20" `
-    + `marker-start="url(#arrow-triangle-open)"/></g></svg>`;
+    + `marker-start="url(#arrow-triangle-open)"/></g>`
+    + `<g class="fm-edge" data-fm-edge-id="4"><path d="M55,20L445,20" `
+    + `marker-end="url(#arrow-triangle-open)"/></g></svg>`;
   const source = 'classDiagram\n'
     + '  C0 *-- C1\n'
     + '  C1 o-- C2\n'
     + '  C2 --> C3\n'
-    + '  C3 <|-- C0\n';
+    + '  C3 <|-- C0\n'
+    + '  C0 --|> C4\n';
   return { js, fm, source };
 }
 
@@ -1236,6 +1390,40 @@ export function selfTest() {
       && failedInvariants(classM6).includes('class_relationship_semantics_vs_input__frankenmermaid'),
     { verdict: classM6.verdict, failed: failedInvariants(classM6) });
 
+  // CLASS MUTATION 7 -- a correctly named triangle at the correct endpoint still points the wrong
+  // way when a forward marker uses plain `auto` at marker-start.
+  const inwardInheritance = classPair.fm.replace(
+    'orient="auto-start-reverse"',
+    'orient="auto"',
+  );
+  const classM7 = compareDiagram({
+    index: 0,
+    family: 'class',
+    fmSvg: inwardInheritance,
+    jsSvg: classPair.js,
+    source: classPair.source,
+  });
+  record('inward_inheritance_triangle_is_divergent',
+    classM7.verdict === 'divergent'
+      && failedInvariants(classM7).includes('class_relationship_semantics_cross_engine')
+      && failedInvariants(classM7).includes('class_relationship_semantics_vs_input__frankenmermaid'),
+    { verdict: classM7.verdict, failed: failedInvariants(classM7) });
+
+  // CLASS MUTATION 8 -- inheritance/generalization is a hollow triangle, not a filled arrowhead.
+  const filledInheritance = classPair.fm.replace('fill="none"', 'fill="#94a3b8"');
+  const classM8 = compareDiagram({
+    index: 0,
+    family: 'class',
+    fmSvg: filledInheritance,
+    jsSvg: classPair.js,
+    source: classPair.source,
+  });
+  record('filled_inheritance_triangle_is_divergent',
+    classM8.verdict === 'divergent'
+      && failedInvariants(classM8).includes('class_relationship_semantics_cross_engine')
+      && failedInvariants(classM8).includes('class_relationship_semantics_vs_input__frankenmermaid'),
+    { verdict: classM8.verdict, failed: failedInvariants(classM8) });
+
   // MUTATION 1 -- we drop a node's label. The text gate must catch it.
   const droppedLabel = fm.replace('<text x="0" y="0">Beta</text>', '');
   const m1 = compareDiagram({ index: 0, family: 'flowchart', fmSvg: droppedLabel, jsSvg: js, source });
@@ -1377,7 +1565,7 @@ export function selfTest() {
     groundTruth('sequenceDiagram\n  A->>B: hello\n') === null,
     null);
 
-  return { ok: true, cases: cases.length, mutation_controls: 11, negative_controls: 4 };
+  return { ok: true, cases: cases.length, mutation_controls: 13, negative_controls: 4 };
 }
 
 // Run as a script: `node scripts/headtohead/svg_equivalence.mjs --self-test`
