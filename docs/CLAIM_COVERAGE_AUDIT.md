@@ -61,9 +61,17 @@ Every other perf-shaped string in `README.md` and `CHANGELOG.md` is a *disclaime
 unsupported ratio claim reaches the public surface**, and the 217 KEEP claims lacking an incumbent
 ratio are all ledger-internal.
 
-**Tier 1 — certified, incumbent-backed, and contaminated.** These rank highest because they read as
-our strongest results while comparing unequal work. They need re-measurement after `bd-4isi`, not
-conversion:
+**Tier 1 — incumbent-backed and contaminated.** These rank highest because they read as our strongest
+results while comparing unequal work. They need re-measurement, not conversion.
+
+*Correction (2026-07-30):* this audit originally described these rows as standing certifications. They
+are not. Commit `5bb2e044` ("Historical correction") already demoted `class_50`, `doc_build_40`,
+`ci_batch_500`, `docs_site_50`, and `docs_site_200` to "known to contain this unequal-work class
+surface and not current campaign output". The demotion landed before this audit and was missed on the
+first pass. The contamination finding stands; the characterization of the rows as still-certified does
+not. Their re-measurement is gated on three P0 bugs, not one: `bd-4isi` (members dropped — **fixed,
+see below**), `bd-92b6` (`o--`/`*--` fall through to `--`, creating phantom nodes), and `bd-yq3k`
+(state labels misparsed as endpoint syntax).
 
 1. 500-diagram CI caller-thread sweep — 7 rows, up to 16,321.565740×
 2. 500-diagram CI render — 1 row, 923.056028×
