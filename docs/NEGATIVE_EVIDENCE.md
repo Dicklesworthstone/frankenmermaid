@@ -19251,6 +19251,80 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
 
   Agent: cod (BlackThrush)
 
+### INCONCLUSIVE / SEMANTIC CANNOT: equal-work public-parser incumbent arms (2026-07-31)
+
+- **Campaign / bead:** `bd-ap4v`; scalar whole-job parsing through frankenmermaid's public
+  parse-and-validate boundary and pinned mermaid-js `mermaid.parse()`. Harness commit `8dedb485`
+  retains and validates every result from every calibrated repetition, keeps serialization and
+  engine-local hashing outside both timers, requires every raw integrated effect/null sample to
+  clear 50 ms, and hard-fails any semantic-work mismatch. This is negative evidence: no ratio in
+  this section is a current campaign claim.
+- **Equal work and incumbent.** Both engines accepted all 512 byte-identical `ci_equiv_512`
+  flowcharts (10,635 nodes / 10,123 edges). The Rust arm used `batch=7`, a 74.420081 ms median
+  integrated sample, and 20 effect samples; mermaid-js used `batch=1`, a 1,210.100 ms median
+  integrated sample, and nine effect samples. The same invocation ran live
+  `mermaid.parse()` from mermaid-js 11.15.0, bundle SHA-256
+  `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`,
+  in Chrome 150.0.7871.128.
+- **Output-equivalence gate.** The linked full-render check is SVG structural equivalence, not byte
+  equality and not a rasterized perceptual diff. It requires rendered-text containment, node-ID
+  set equality, rendered-path topology across engines, and each engine's topology against the
+  input-derived graph. `ci_equiv_512` passed 512/512 diagrams with zero divergent and zero
+  unverified; the compared input, process-self-reported ELF, and mermaid-js bundle match the timing
+  artifact. Five mutations and two negative controls fail the oracle.
+- **Observed result, rejected.** Frankenmermaid's selected before-arm whole-job median was
+  10.631440 ms versus 1,210.100 ms for mermaid-js. The raw 113.822775x ratio had an independent
+  bootstrap 95% effect CI of [112.245733x, 115.211981x] and cleared twice the largest null-CI
+  radius. It is nevertheless **INCONCLUSIVE** and must not be quoted as a win because corrected
+  null clause 3 failed.
+- **A/A null control (same invocation):** Rust-before `n=20`, median **0.959104**, 95% CI
+  [0.892226, 1.037938]; Rust-after `n=20`, median 1.011361, 95% CI
+  [0.977354, 1.032655]; mermaid-js `n=20`, median 0.998713, 95% CI
+  [0.995915, 1.001538]. Every CI straddled 1.0 and the same-ELF pre/post bracket passed, but the
+  Rust-before median was 4.090% from 1.0, outside the mandatory 2% bound. Its null CV was 11.32%;
+  CV is provenance only and does not relax the verdict.
+- **Actual observed execution threads:** requested/operation-observed callers were 1/1 for Rust
+  before and after, using the calling-thread-ID union over the exact public-parse workload
+  (`probe_batch=7`), and 1/1 for mermaid-js's browser main execution thread. These are observed
+  counts, not requested-width substitutions.
+- **Executing ELF SHA-256 (self-reported by process):**
+  `317f66e9b1828d333a3ce68a2dfaf3e3e70018f2bcfebd9e96f6848c758cd38a`
+  (7,889,440 bytes) in both Rust phases and the linked equivalence run. RCH builder `ovh-a` built
+  from `--base 77c3a091ba7a9b4485fcc06c46ab97ad035f9d3c --clean-overlay` with only
+  `crates/fm-cli/examples/headtohead.rs` overlaid (source SHA-256
+  `3981238fb649d7418c5e9333484f741b7a71e7cbf4e4ea8dfc4c80f4c23c1e44`).
+- **Host provenance:** `thinkstation1`, AMD Ryzen Threadripper PRO 5975WX, 32 physical cores /
+  64 logical threads; CPU 0 pinned; `amd-pstate-epp`, governor `powersave`, EPP `performance`,
+  boost enabled; x86-64 with AVX2/FMA/BMI2/VAES and no AVX-512.
+- **Evidence:** summary
+  `.benchmarks/headtohead/parse-incumbent-flow/summary-98043420-1785476922928.json`
+  (SHA-256 `f52e4460e401aa0186d48ab744dd64e91c92c609f2cf1faae908d456aac4ad87`);
+  JSONL `.benchmarks/headtohead/parse-incumbent-flow/run-98043420-1785476922928.jsonl`
+  (SHA-256 `8735717b0101fab885aa526833976404c71ca3ed62ad9b4a6c9519c9703ce929`);
+  equivalence artifact
+  `.benchmarks/headtohead/parse-incumbent-flow-equivalence/equivalence-98043420-1785476737265.json`
+  (SHA-256 `8a1051fb85130a9f4180d9f03b853f5c7efb965279adf51b861149a3b8ea8ce5`).
+- **Concrete timing retry predicate.** Do not rerun this unchanged scalar row to hunt a favorable
+  null. Reopen only after parse mode enforces the thread-sweep driver's full-host admission check
+  under a valid dedicated-host `trj` claim **and** predeclares at least a 250 ms Rust integrated
+  sample floor while retaining at least 20 A/A pairs, the corrected 2% median clause, the
+  before/incumbent/after order, and the same-ELF linkage. One fresh terminal invocation then
+  adjudicates the row; a second null failure closes that environment rather than triggering
+  repeated retries.
+- **`typing_trace_60` is a separate semantic CANNOT.** The same linked run decided only 28/60
+  revisions: 28 equivalent, zero divergent, and **32 unverified**. Revisions 28-59 preserve exact
+  rendered text and node sets, and mermaid-js topology matches input truth, but the current
+  frankenmermaid geometry oracle leaves one path endpoint unresolved in each revision. Filtering
+  to 28 revisions would change the named typing job and is not recoverable evidence for
+  `typing_trace_60`; no timing was run.
+- **Concrete semantic retry predicate.** Reopen `typing_trace_60` only after frankenmermaid SVG
+  supplies deterministic source/target linkage for those paths or the oracle unambiguously
+  resolves the wide-node geometry, and a fresh artifact linked to the same timing ELF/input/bundle
+  reports 60 equivalent, zero divergent, and zero unverified. Until then this arm is a conclusive
+  oracle dead end, not a performance result.
+
+  Agent: cod (`LavenderMill`)
+
 ### AUDIT / NO TRANSFER: A/A null precision defect is absent from the head-to-head gate (2026-07-29)
 
 - **Bead / surface:** `bd-9xqt`; `scripts/headtohead/run.mjs::medianCiGate`.
