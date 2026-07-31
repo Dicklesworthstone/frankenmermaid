@@ -997,6 +997,10 @@ fn build_marker_defs_body(edge_color: &str, emit_fancy: bool) -> String {
             &mut s,
             ArrowheadMarker::diamond_open_marker("arrow-diamond-open", edge_color),
         );
+        push(
+            &mut s,
+            ArrowheadMarker::triangle_open_marker("arrow-triangle-open", edge_color),
+        );
     }
     s
 }
@@ -1464,6 +1468,7 @@ fn map_marker_kind(kind: fm_layout::MarkerKind) -> &'static str {
         MarkerKind::Cross => "url(#arrow-cross)",
         MarkerKind::Diamond => "url(#arrow-diamond)",
         MarkerKind::DiamondOpen => "url(#arrow-diamond-open)",
+        MarkerKind::TriangleOpen => "url(#arrow-triangle-open)",
         MarkerKind::Open => "url(#arrow-open)",
     }
 }
@@ -10462,6 +10467,20 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
             ArrowType::CompositionReverse => {
                 (None, None, Some("url(#arrow-diamond)"), &colors.edge)
             }
+            // UML generalization: hollow triangle on the PARENT end. `Animal <|-- Dog` reads "Dog
+            // inherits Animal", so the parent is the source; `--|>` puts it at the target.
+            ArrowType::Inheritance => (
+                None,
+                Some("url(#arrow-triangle-open)"),
+                None,
+                &colors.edge,
+            ),
+            ArrowType::InheritanceReverse => (
+                None,
+                None,
+                Some("url(#arrow-triangle-open)"),
+                &colors.edge,
+            ),
         }
     };
 
@@ -11184,6 +11203,22 @@ fn render_edge_into(out: &mut String, edge_path: &LayoutEdgePath, context: &Edge
             "url(#arrow-diamond)",
             "",
             " composes ",
+        ),
+        ArrowType::Inheritance => (
+            1.8,
+            "fm-edge-solid",
+            "url(#arrow-triangle-open)",
+            "",
+            "",
+            " is inherited by ",
+        ),
+        ArrowType::InheritanceReverse => (
+            1.8,
+            "fm-edge-solid",
+            "",
+            "url(#arrow-triangle-open)",
+            "",
+            " inherits ",
         ),
     };
     // Was `text_alternatives && aria_labels && keyboard_nav`. The fragment writer now has a lean
@@ -14174,7 +14209,15 @@ marker#arrow-future path { fill: red; }\n\
                         )
                         .marker(ArrowheadMarker::circle_marker("arrow-circle", edge))
                         .marker(ArrowheadMarker::cross_marker("arrow-cross", edge))
-                        .marker(ArrowheadMarker::diamond_marker("arrow-diamond", edge));
+                        .marker(ArrowheadMarker::diamond_marker("arrow-diamond", edge))
+                        .marker(ArrowheadMarker::diamond_open_marker(
+                            "arrow-diamond-open",
+                            edge,
+                        ))
+                        .marker(ArrowheadMarker::triangle_open_marker(
+                            "arrow-triangle-open",
+                            edge,
+                        ));
                 }
                 let new = DefsBuilder::new().raw_markers(marker_defs_body(edge, fancy));
                 assert_eq!(

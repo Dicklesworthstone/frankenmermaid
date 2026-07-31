@@ -2654,7 +2654,8 @@ fn class_relationship_operators_do_not_create_phantom_nodes() {
         ("*--", fm_core::ArrowType::Composition),
         ("--o", fm_core::ArrowType::AggregationReverse),
         ("--*", fm_core::ArrowType::CompositionReverse),
-        ("<|--", fm_core::ArrowType::Arrow),
+        ("<|--", fm_core::ArrowType::Inheritance),
+        ("--|>", fm_core::ArrowType::InheritanceReverse),
         ("-->", fm_core::ArrowType::Arrow),
     ];
 

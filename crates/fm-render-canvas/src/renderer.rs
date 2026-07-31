@@ -539,6 +539,7 @@ impl Canvas2dRenderer {
             | MarkerKind::DottedArrow
             | MarkerKind::Diamond
             | MarkerKind::DiamondOpen
+            | MarkerKind::TriangleOpen
             | MarkerKind::Open
             | MarkerKind::HalfArrowTop
             | MarkerKind::HalfArrowBottom

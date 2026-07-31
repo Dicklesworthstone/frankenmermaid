@@ -1107,6 +1107,12 @@ pub enum ArrowType {
     Composition,
     /// UML composition written target-first (`--*`).
     CompositionReverse,
+    /// UML inheritance (`<|--`): hollow triangle on the PARENT end, which is the source, since
+    /// `Animal <|-- Dog` reads "Dog inherits Animal".
+    Inheritance,
+    /// UML inheritance written child-first (`--|>`), putting the parent — and the triangle — at the
+    /// target end.
+    InheritanceReverse,
 }
 
 impl ArrowType {
@@ -1147,6 +1153,8 @@ impl ArrowType {
             Self::AggregationReverse => "--o",
             Self::Composition => "*--",
             Self::CompositionReverse => "--*",
+            Self::Inheritance => "<|--",
+            Self::InheritanceReverse => "--|>",
         }
     }
 }
@@ -7354,6 +7362,8 @@ mod tests {
             (ArrowType::AggregationReverse, "--o"),
             (ArrowType::Composition, "*--"),
             (ArrowType::CompositionReverse, "--*"),
+            (ArrowType::Inheritance, "<|--"),
+            (ArrowType::InheritanceReverse, "--|>"),
         ];
 
         for (arrow, expected) in expectations {

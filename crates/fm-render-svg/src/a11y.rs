@@ -280,6 +280,15 @@ pub(crate) fn describe_edge_labels(
         ArrowType::DoubleDottedArrow => "optionally points both ways to",
         ArrowType::OpenArrow => "sends to",
         ArrowType::DottedOpenArrow => "optionally sends to",
+        // UML relationships read owner-first, matching the phrases the SVG fragment writer puts in
+        // each edge's `<title>`. Without these the catch-all below said "connects to" here while the
+        // title said "is inherited by", so the two accessibility surfaces disagreed.
+        ArrowType::Inheritance => "is inherited by",
+        ArrowType::InheritanceReverse => "inherits",
+        ArrowType::Aggregation => "aggregates",
+        ArrowType::AggregationReverse => "is aggregated by",
+        ArrowType::Composition => "is composed of",
+        ArrowType::CompositionReverse => "composes",
         _ => "connects to",
     };
 

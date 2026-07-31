@@ -324,6 +324,32 @@ impl ArrowheadMarker {
         }
     }
 
+    /// Hollow triangle, the UML inheritance/generalization marker. Unlike the arrowheads, UML draws
+    /// this as an unfilled outline, which is exactly what distinguishes generalization from a plain
+    /// association arrow.
+    #[must_use]
+    pub fn triangle_open_marker(id: &str, stroke: &str) -> Self {
+        let path = PathBuilder::new()
+            .move_to(0.0, 0.0)
+            .line_to(10.0, 5.0)
+            .line_to(0.0, 10.0)
+            .close()
+            .build();
+
+        Self {
+            id: id.to_string(),
+            marker_width: 10.0,
+            marker_height: 10.0,
+            ref_x: 10.0,
+            ref_y: 5.0,
+            orient: MarkerOrient::Auto,
+            path,
+            fill: "none".to_string(),
+            stroke: Some(stroke.to_string()),
+            stroke_width: Some(1.0),
+        }
+    }
+
     /// Set the orientation of the marker.
     #[must_use]
     pub fn with_orient(mut self, orient: MarkerOrient) -> Self {

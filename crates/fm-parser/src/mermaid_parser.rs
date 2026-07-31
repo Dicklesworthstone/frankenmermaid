@@ -72,8 +72,8 @@ const SEQUENCE_OPERATORS: [(&str, ArrowType); 26] = [
 // byte into the endpoint — which is exactly the bd-92b6 defect: `C3 o-- C4` matched `--` at the `-`,
 // leaving `C3 o` as the source and normalizing it into the phantom node `C3-o`.
 const CLASS_OPERATORS: [(&str, ArrowType); 10] = [
-    ("<|--", ArrowType::Arrow),
-    ("--|>", ArrowType::Arrow),
+    ("<|--", ArrowType::Inheritance),
+    ("--|>", ArrowType::InheritanceReverse),
     ("..>", ArrowType::DottedArrow),
     ("<..", ArrowType::DottedArrow),
     ("o--", ArrowType::Aggregation),
