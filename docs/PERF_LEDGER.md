@@ -696,6 +696,57 @@ bootstrap-CI and 2x-null-margin clauses; CV remains provenance only.
   same ELF identity, actual observed threads, complete governor/ISA/topology provenance, and the
   corrected same-invocation A/A gate above.
 
+## SEMANTIC ADMISSION ONLY: 201-revision live-edit whole job (2026-07-31)
+
+**Bead:** `bd-shou`. **Lane:** cod (`LavenderMill`).
+**Executing ELF SHA-256 (self-reported by process):**
+`499e4bf6b23ef6bfe4fccf9df4a086274d51f42ebe28b2f4ae5cc0c249a4eb47` (7,897,696 bytes).
+**A/A null control (same invocation):** incomplete by construction and therefore not a performance
+gate. The scalar Rust dump arm reported median `0.997721`, bootstrap 95% CI
+`[0.989401, 1.011397]`; the median itself is inside the corrected `[0.98, 1.02]` clause. The
+untimed `--render-once` mermaid-js dump arm collected no incumbent A/A pairs, so this invocation
+establishes no current ratio, win, loss, or corrected-null performance verdict. A future timed
+invocation must independently keep every arm's null median in `[0.98, 1.02]` and pass the
+bootstrap-CI and 2x-null-margin clauses; CV remains provenance only.
+
+- **Recognizable whole job.** `edit_trace_200x200` is one live-preview session containing all
+  **201** successive full-document revisions, not a per-diagram kernel mean. The revisions contain
+  46,967 total node instances and 53,399 total edge instances. Both engines consumed identical
+  input SHA-256 `a0323173208959bd18817c4b4bd7147a79913f06f513ff5669c1b0773e2812f5`.
+- **Exact result.** All **201/201** revisions are equivalent, with zero divergent and zero
+  unverified. Every revision passed rendered-text containment, authored node-id equality,
+  cross-engine rendered-path topology, and topology against input-derived truth for each engine;
+  all 201 therefore received Tier-2 flowchart adjudication.
+- **Output-equivalence check.** One shared extractor processes both engines. It gates
+  incumbent-rendered text containment and authored node-id sets, reconstructs rendered-path
+  endpoint pairs, compares topology cross-engine, and independently compares both engines against
+  topology derived from the pinned source revision. Unknown or undecidable required invariants
+  never pass. This is neither SVG byte equality nor a rasterized perceptual diff.
+- **Linkage and incumbent.** Artifact
+  `.benchmarks/headtohead/edit-trace-200x200-requalification-v1/equivalence-f4bd5b2c-1785487847701.json`
+  has SHA-256 `cd9409f6eacf59bdcb62289297ec3600c7ecf03ed98be817f02d3f7e61e8025e`.
+  Frankenmermaid dumped 201/201 revisions with SHA-256
+  `b206614a5b779e8aa1bde3c64d0617d7acbac3343ffaaee06bf1ccfc85ebd88c`; mermaid-js dumped
+  201/201 with SHA-256
+  `fa5512cd10ca004e1e87b593b3fd29f1fbd3e45d0881dd7eb8d78975c071430a`.
+  Both concatenated hashes exactly match the values self-reported by their measured arms. The live
+  incumbent is mermaid-js `11.15.0`, bundle SHA-256
+  `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`,
+  through `/usr/bin/chromium-browser` (`Chrome/150.0.7871.128`).
+- **Build, thread, and host provenance.** The immutable ELF was built through strict `rch exec`
+  from pinned base `85fef646` with `--clean-overlay`; no co-tenant edit entered the executable.
+  Frankenmermaid requested and actually observed **1** scalar worker; mermaid-js requested and
+  actually observed **1** browser main execution thread. Host `thinkstation1` is an AMD Ryzen
+  Threadripper PRO 5975WX with 64 logical CPUs, complete `amd-pstate-epp` provenance (`powersave`
+  governor, `performance` EPP, boost enabled), and complete ISA provenance (AVX2/FMA/BMI2/VAES
+  present; AVX-512 absent).
+- **Disposition / retry predicate.** Semantic admission is current, but the historical live-edit
+  ratio remains non-current because it was measured with an older ELF in a separate invocation.
+  Take a fresh exclusive central `trj` claim only after all earlier bookings and host-wide external
+  work clear, then measure this exact linked 201-revision job side-by-side against the live pinned
+  incumbent using this ELF, actual observed threads, complete governor/ISA/topology provenance,
+  fresh-browser isolation, and the corrected same-invocation A/A gate above.
+
 ## CERTIFIED INCUMBENT WIN: equivalence-clean 512-diagram concurrent CI job (2026-07-30)
 
 **Bead:** `bd-zwg6`. **Lane:** cod (`BlackThrush`).
