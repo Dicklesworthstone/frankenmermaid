@@ -8584,9 +8584,104 @@ fn compute_node_size(
                 .max(icon_width.mul_add(0.85, label_width))
                 + 72.0;
             let height = label_height + icon_height + 44.0;
-            (width.max(100.0), height.max(52.0))
+            let (width, height) = (width.max(100.0), height.max(52.0));
+            // A class node's box must also hold its compartment stack. The SVG renderer walks the
+            // member rows against the node's own height and `break`s on the first row that would
+            // fall outside it, so a box sized from the label alone SILENTLY DROPS members rather
+            // than overflowing — see `class_compartment_dimensions`.
+            match class_compartment_dimensions(node, metrics) {
+                Some((members_width, members_height)) => {
+                    (width.max(members_width), height.max(members_height))
+                }
+                None => (width, height),
+            }
         }
     }
+}
+
+/// Space a class node needs for its compartment stack (stereotype, name, separators, and one row per
+/// attribute and method). `None` for any node that is not a class node or that declares no members.
+///
+/// This mirrors `fm-render-svg`'s `write_class_compartments_into` cursor advance exactly, because that
+/// renderer drops any member row landing below `y + h - line_h * 0.5` instead of growing the box:
+/// under-sizing here deletes content from the output, so the arithmetic below must stay in step with
+/// the renderer's. Over-sizing is harmless (the extra space renders as padding), so every term is
+/// rounded up rather than fitted tight.
+fn class_compartment_dimensions(node: &IrNode, metrics: &fm_core::FontMetrics) -> Option<(f32, f32)> {
+    let meta = node.class_meta.as_deref()?;
+    if meta.attributes.is_empty() && meta.methods.is_empty() {
+        return None;
+    }
+
+    let line_h = metrics.line_height_px();
+    // Renderer: `member_font_size * config.line_height * 0.9` with `member_font_size = font_size * 0.9`,
+    // i.e. `line_height_px * 0.81`.
+    let row_h = line_h * 0.81;
+
+    // Cursor offsets from the top of the box, in renderer order.
+    let mut height = line_h; // initial `cursor_y = y + line_h` (name baseline)
+    if meta.stereotype.is_some() {
+        height += line_h; // stereotype occupies the first row, name moves down one
+    }
+    height += line_h * 0.5; // name -> separator
+    height += line_h * 0.3; // separator -> first member row
+    height += row_h * meta.attributes.len() as f32;
+    if !meta.attributes.is_empty() && !meta.methods.is_empty() {
+        height += line_h * 0.6; // attribute/method separator (0.3 before + 0.3 after)
+    }
+    height += row_h * meta.methods.len() as f32;
+    // The renderer keeps a row only while `cursor_y <= y + h - line_h * 0.5`, so the box needs that
+    // much slack past the last row's baseline.
+    height += line_h * 0.5;
+    // Mirroring the cursor arithmetic exactly leaves the last row sitting ON the boundary, where f32
+    // rounding — or a render font size that does not match `metrics` — drops it again. Half a row of
+    // margin costs a few pixels of padding and takes the decision off the knife edge.
+    height += row_h * 0.5;
+
+    // Member rows are left-anchored at `x + 8.0`; mirror that padding on the right so the widest row
+    // stays inside the box.
+    let member_width = meta
+        .attributes
+        .iter()
+        .map(|attr| class_member_row_width(attr, false, metrics))
+        .chain(
+            meta.methods
+                .iter()
+                .map(|method| class_member_row_width(method, true, metrics)),
+        )
+        .fold(0.0_f32, f32::max);
+
+    Some((member_width + 16.0, height))
+}
+
+/// Width of one rendered member row. Mirrors the renderer's row text: a visibility symbol, the member
+/// name, a `*`/`$` suffix for abstract/static methods, and a `": {return_type}"` tail.
+fn class_member_row_width(
+    member: &fm_core::IrClassMember,
+    is_method: bool,
+    metrics: &fm_core::FontMetrics,
+) -> f32 {
+    let mut row = String::with_capacity(member.name.len() + 8);
+    row.push(match member.visibility {
+        fm_core::ClassVisibility::Public => '+',
+        fm_core::ClassVisibility::Private => '-',
+        fm_core::ClassVisibility::Protected => '#',
+        fm_core::ClassVisibility::Package => '~',
+    });
+    row.push_str(&member.name);
+    if is_method {
+        if member.is_abstract {
+            row.push('*');
+        } else if member.is_static {
+            row.push('$');
+        }
+    }
+    if let Some(ref return_type) = member.return_type {
+        row.push_str(": ");
+        row.push_str(return_type);
+    }
+    // Rows render at `font_size * 0.9`; `metrics` measures at full size, so scale the estimate down.
+    metrics.estimate_dimensions(&row).0 * 0.9
 }
 
 fn node_size_cache_key(
@@ -8602,6 +8697,21 @@ fn node_size_cache_key(
     hash_u64(&mut hash, u64::from(metrics.font_size().to_bits()));
     hash_u64(&mut hash, u64::from(metrics.avg_char_width().to_bits()));
     hash_u64(&mut hash, u64::from(metrics.line_height_px().to_bits()));
+    // Class members feed `compute_node_size` via `class_compartment_dimensions`, so they belong in the
+    // key: editing a class body without touching its label would otherwise serve the cached size from
+    // before the edit and silently truncate the new members.
+    if let Some(meta) = node.class_meta.as_deref() {
+        hash_u64(&mut hash, meta.attributes.len() as u64);
+        hash_u64(&mut hash, meta.methods.len() as u64);
+        hash_u64(&mut hash, u64::from(meta.stereotype.is_some()));
+        for member in meta.attributes.iter().chain(meta.methods.iter()) {
+            hash_str(&mut hash, &member.name);
+            hash_str(&mut hash, member.return_type.as_deref().unwrap_or_default());
+            hash_u64(&mut hash, member.visibility as u64);
+            hash_u64(&mut hash, u64::from(member.is_static));
+            hash_u64(&mut hash, u64::from(member.is_abstract));
+        }
+    }
     hash
 }
 
