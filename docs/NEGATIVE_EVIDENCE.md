@@ -19760,8 +19760,10 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   between the equivalence artifact and the built binary; the enforced floor constants (250 ms
   effect/null floor, 375 ms derived calibration target) asserted by an in-process self-test that
   rejects the superseded 50 ms floor; and one refusal observed from `run.mjs` when the claim id is
-  absent despite complete build provenance. No A/A null control applies because no arm was timed;
-  the superseded 113.822775x observation is untouched and remains INCONCLUSIVE.
+  absent despite complete build provenance; and 900 of 900 host-wide admission samples rejected
+  under a valid claim, every one with complete CPU coverage and an unchanged power policy. No A/A
+  null control applies because no arm was timed; the superseded 113.822775x observation is
+  untouched and remains INCONCLUSIVE.
 - **Code half, done and verified.** `--mode parse` now (a) refuses without
   `--exclusive-host-claim trj-booking:<id>`, (b) runs `requireHostWideQuiescence` before every
   measured phase, (c) requires the complete host cpuset for the driver so "full-host" is not
@@ -19780,15 +19782,29 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   **512/512 equivalent, 0 divergent, 0 unverified**, `fm_elf_sha256`
   `9b71844b9ccdb92d8e86a7cbfc1debad40be21a8adc401ded555340de8d1fdd8` (7,895,136 bytes), built by
   RCH worker `vmi1227854` from `--base 3e7edbef --clean-overlay --no-overlay`.
-- **Why no number is reported.** The claim id cannot be minted: the fleet Agent Mail mailbox is in
-  a split-brain state ("supervised restart or operator intervention is required"), held by stuck
-  processes belonging to other lanes, which this lane declined to kill. The `[trj] CLAIM
-  frankenmermaid` message is durably queued as an UNSENT artifact and will replay on recovery.
-  **This is the gate behaving correctly: no claim, no measurement, no number.** The row is
-  BLOCKED, not negative — nothing here weakens or strengthens the superseded 113.822775x
-  observation, which remains INCONCLUSIVE on corrected null clause 3.
-- **Retry predicate.** Replay the queued claim once the mailbox recovers, confirm no
-  higher-priority repo holds the booking, then run the parse row once under the 250 ms floor. A
-  second null failure closes that environment rather than triggering repeated retries.
+- **The measurement was attempted under a valid claim and BLOCKED before its first timed phase.**
+  Claim `trj-booking:7793` was taken legitimately, after confirming the thread's latest message was
+  `[trj] RELEASE franken_whisper` (id 7783) with no later claim. The run then exited **6** with
+  `HOST-WIDE EXCLUSIVITY BLOCKED before frankenmermaid-before`: **900 of 900 admission attempts**
+  (900,000 ms) failed to produce one clear sample. It never reached a measured phase, so
+  `.benchmarks/headtohead/parse-incumbent-250ms/` holds no summary and **no ratio exists to quote**.
+  Claim released the same minute as `[trj] RELEASE frankenmermaid` (id 7831).
+- **The block was contention, not instrumentation.** Every attempt reported `missing=[]` — all 64
+  affinity CPUs sampled, no coverage gap — and `power-policy=match`, so the governor/EPP/boost
+  never drifted from baseline. Blocked samples routinely showed 12+ CPUs over the fixed 20% ceiling
+  with recurring 90–100% cores (cpu47, cpu48, cpu40, cpu41, cpu54, cpu26). The sustained consumers
+  were `ffs-mounted-ker` and several `ffs-cli-v3-pgo`: the frankenfs lane was mid-benchmark on the
+  shared host for the entire window, while `trj-booking` showed the host as released. **The Agent
+  Mail queue and the actual host state were out of sync, and only the independent CPU admission
+  caught it.** A harness without that second check would have measured against a 90%-busy host.
+- **This is the gate behaving correctly: no quiet host, no measurement, no number.** The row is
+  BLOCKED with no verdict — nothing here weakens or strengthens the superseded 113.822775x
+  observation, which remains INCONCLUSIVE on corrected null clause 3. The ceiling was not lowered,
+  the window was not re-run to hunt a clear sample, and nothing was displaced.
+- **Retry predicate.** Requeue the claim when `trj` is genuinely idle — confirmed by CPU samples,
+  not solely by the booking thread — then run the parse row once under the 250 ms floor. Do not
+  retry merely because a previous attempt was blocked before timing; a block is not a null failure
+  and consumes none of the row's one adjudication. Once a timed attempt does occur, a second null
+  failure closes that environment rather than triggering repeated retries.
 
   Agent: cc (CobaltFern)
