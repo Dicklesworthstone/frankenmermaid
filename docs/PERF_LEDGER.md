@@ -1108,3 +1108,71 @@ corrected-null timing verdict; CV remains provenance only.
   which every arm's null median is inside `[0.98, 1.02]` and the CI and 2x-null-margin clauses also
   pass. Reopen semantic admission only if the input pin, incumbent bundle/configuration, executing
   ELF, or equivalence contract changes.
+
+## SEMANTIC ADMISSION ONLY: exact 2k/5k CI jobs on the prepared timing ELF (2026-07-31)
+
+**Bead:** `bd-l7d2`. **Lane:** cod (`LavenderMill`).
+**Executing ELF SHA-256 (self-reported by process):**
+`dfd2636c4e841b18b3b24d48108e918a3b1d9aa05d1ab47c9d88ea2182397d7c` (7,897,696 bytes).
+**A/A null control (same invocation):** incomplete and failing the corrected median clause, so this
+is not a performance gate. The scalar Rust dump arms reported median `1.011776`, bootstrap 95% CI
+`[0.924097, 1.081215]` for `ci_docs_2000`, and median **`1.050770`**, CI
+`[0.900900, 1.102413]` for `ci_docs_5000`. The 5k median itself is outside the mandatory
+`[0.98, 1.02]` interval. The untimed mermaid-js `--render-once` arms collected no incumbent A/A
+pairs. This invocation establishes no ratio, win, loss, or complete corrected-null timing verdict;
+CV remains provenance only.
+
+- **Why this replay was required.** Rebuilding the prior source-identical semantic candidate
+  produced a different immutable ELF hash, so the older `499e4bf6…` output artifact could not be
+  cited for timing with this process. No identity equivalence was guessed. The exact two named jobs
+  were replayed end-to-end with the new self-reporting ELF and live incumbent before target-host
+  access.
+- **Recognizable whole jobs and exact result.** `ci_docs_2000` renders **2,000/2,000** complete
+  diagrams and `ci_docs_5000` renders **5,000/5,000**, with zero divergent and zero unverified in
+  either job. The 2k family mix is 1,149 flowcharts, 327 sequence diagrams, 165 ER diagrams, 169
+  state diagrams, and 190 class diagrams. The 5k mix is 2,882 / 804 / 442 / 390 / 482 respectively.
+  Input SHA-256 values remain
+  `ae5b6ff4da07288524f948b38d6fc1df065f4797de3f0ab115ac2621cf23598b` and
+  `26e5710af60c5548521f75aaf047672a4316d657885a8ab1d119338ba1804f41`.
+- **Output-equivalence check.** One shared extractor processes both engines. It gates rendered-text
+  containment for every syntax family; authored node-ID equality where applicable; rendered-path
+  topology cross-engine and against input-derived truth for flowchart/state; and class
+  relationship marker kind plus owning end cross-engine and against input truth. Referenced marker
+  definitions must encode the correct hollow/filled diamond or outward-facing hollow inheritance
+  triangle. Unknown markers diverge and undecidable required invariants are unverified, never pass.
+  This is neither SVG byte equality nor a rasterized perceptual diff.
+- **Artifact and exact linkage.** Artifact
+  `.benchmarks/headtohead/ci-docs-2k5k-equivalence-dfd2636c/equivalence-6bf64c28-1785494049570.json`
+  has SHA-256 `1981e863d39bfd332de531fc4acb4590a4beef8aa2b35af93b8d6c0a7cce9610`.
+  For 2k, frankenmermaid and mermaid-js dumped all 2,000 revisions with SHA-256
+  `7f2cb4af86d3f05d935357843a328e924278934138b6986c9d12f1dbdbb16ded` and
+  `beff28feaec022588f4d051bc35931d2319203fd293564f128379ede1f504acf`.
+  For 5k, the 5,000-revision hashes are
+  `754607625d0e5d332a3ae1c19a4627a01b9a598886e76874c07b8b45e956641e` and
+  `a052ebbb86ef2da26ad8a922bb7b24bb367895b03c481e860c869474b6b57324`.
+  Every revision count matches and every concatenated hash exactly equals its measured arm's
+  self-report.
+- **Incumbent, observed threads, and host.** The live comparator is mermaid-js `11.15.0`, bundle
+  SHA-256 `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`,
+  through `/usr/bin/chromium-browser` (`Chrome/150.0.7871.128`). Both rows requested and actually
+  observed **1** frankenmermaid scalar worker and **1** mermaid-js browser main execution thread.
+  Host `thinkstation1` is an AMD Ryzen Threadripper PRO 5975WX with 64 logical CPUs, kernel
+  `6.17.0-35-generic`, complete `amd-pstate-epp` provenance (`powersave` governor, `performance`
+  EPP, boost enabled), and complete x86-64 ISA provenance (AVX2/FMA/BMI2/VAES present; AVX-512
+  absent).
+- **Strict isolation.** Worker `vmi1264463` built the executable with
+  `RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch --no-self-healing exec --base 4798d977
+  --clean-overlay --no-overlay -- cargo build -j2 --profile release -p frankenmermaid-cli
+  --example headtohead`. No co-tenant edit entered the executable, no local fallback occurred, and
+  no task-specific Cargo target directory was created. The equivalence run used a detached clean
+  `6bf64c28` harness worktree under `/tmp`, so the shared checkout's concurrent script edits did not
+  enter the oracle or Chromium arm.
+- **Disposition / retry predicate.** The prepared ELF is semantically eligible for timing, but
+  target-host access remains blocked. The central `trj-booking` tail reports the hourly fsck process
+  still violating the fixed 20% all-CPU gate, with a pre-existing Whisper exact retry first after a
+  genuine clear. Take no out-of-order claim. After that work formally releases and a fresh
+  per-process/per-CPU census is clear, post a new `[trj] CLAIM frankenmermaid`, run each exact job
+  through the complete 1/2/4/8/16/32/64/96/128 sweep, and accept every row as observed under its
+  same-invocation per-arm A/A controls. Each null median itself must be inside `[0.98, 1.02]`; the
+  bootstrap-CI, 2x-null-margin, scalar byte-identity, actual-worker, host/governor/ISA/topology, and
+  live-incumbent gates remain binding.
