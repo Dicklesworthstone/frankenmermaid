@@ -2584,28 +2584,126 @@ fn cmd_render_batch(
     // `/proc/self/status` read serializes concurrent workers.
     let pressure = MermaidNativePressureSignals::sample().into_report();
 
-    let render_one = |input: &String| -> Result<(String, usize)> {
-        let source = load_input(input, options.max_input_bytes)?;
-        let outcome = render_source_with_pressure(&source, &options, &pressure)?;
+    let destination_for = |input: &String| -> PathBuf {
         let stem = Path::new(input)
             .file_stem()
             .map_or_else(|| "diagram".to_owned(), |s| s.to_string_lossy().into_owned());
-        let destination = out_root.join(format!("{stem}.{extension}"));
-        std::fs::write(&destination, &outcome.rendered)
-            .with_context(|| format!("cannot write {}", destination.display()))?;
-        Ok((destination.display().to_string(), outcome.rendered.len()))
+        out_root.join(format!("{stem}.{extension}"))
     };
 
     let started = Instant::now();
-    let results: Vec<Result<(String, usize)>> = if requested == 1 {
-        inputs.iter().map(render_one).collect()
-    } else {
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(requested)
-            .build()
-            .map_err(|e| anyhow::anyhow!("cannot build {requested}-thread render pool: {e}"))?;
-        pool.install(|| inputs.par_iter().map(render_one).collect())
+
+    // Phase 1: read every source and content-address it. Reading is what we already had to do;
+    // the hash is the only added work.
+    let load_one = |input: &String| -> Result<(String, String)> {
+        let source = load_input(input, options.max_input_bytes)?;
+        let digest = sha256_hex(source.as_bytes());
+        Ok((source, digest))
     };
+    let pool = if requested == 1 {
+        None
+    } else {
+        Some(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(requested)
+                .build()
+                .map_err(|e| anyhow::anyhow!("cannot build {requested}-thread render pool: {e}"))?,
+        )
+    };
+    let run_all = |f: &(dyn Fn(usize) -> Result<(String, usize)> + Sync)| -> Vec<Result<(String, usize)>> {
+        match &pool {
+            None => (0..inputs.len()).map(f).collect(),
+            Some(p) => p.install(|| (0..inputs.len()).into_par_iter().map(f).collect()),
+        }
+    };
+
+    let loaded: Vec<Result<(String, String)>> = match &pool {
+        None => inputs.iter().map(load_one).collect(),
+        Some(p) => p.install(|| inputs.par_iter().map(load_one).collect()),
+    };
+
+    // Phase 2: how many inputs share each digest? A diagram whose source repeats in the batch --
+    // the same architecture snippet embedded across a docs site, or an unchanged file in a CI
+    // re-render -- is the SAME parse, layout and render every time. Rendering it once and reusing
+    // the bytes deletes that work outright rather than doing it faster. Only digests that
+    // actually repeat are memoized, so peak memory tracks the duplicated set, not the batch.
+    let mut digest_counts: std::collections::BTreeMap<&str, usize> =
+        std::collections::BTreeMap::new();
+    for entry in loaded.iter().flatten() {
+        *digest_counts.entry(entry.1.as_str()).or_insert(0) += 1;
+    }
+    // Lowest input index owns each digest, so which diagram is rendered never depends on
+    // completion order.
+    let mut owner_of: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for (index, entry) in loaded.iter().enumerate() {
+        if let Ok((_, digest)) = entry {
+            owner_of.entry(digest.as_str()).or_insert(index);
+        }
+    }
+    let reused = loaded
+        .iter()
+        .flatten()
+        .filter(|(_, d)| digest_counts.get(d.as_str()).copied().unwrap_or(0) > 1)
+        .count()
+        - owner_of
+            .iter()
+            .filter(|(d, _)| digest_counts.get(**d).copied().unwrap_or(0) > 1)
+            .count();
+
+    // Phase 3: render each owner once; keep bytes only for digests that repeat.
+    let shared: std::sync::Mutex<std::collections::BTreeMap<String, std::sync::Arc<Vec<u8>>>> =
+        std::sync::Mutex::new(std::collections::BTreeMap::new());
+    let render_owner = |index: usize| -> Result<(String, usize)> {
+        let (source, digest) = match &loaded[index] {
+            Ok(pair) => pair,
+            Err(error) => return Err(anyhow::anyhow!("{error:#}")),
+        };
+        if owner_of.get(digest.as_str()) != Some(&index) {
+            return Ok((String::new(), 0)); // not the owner; written in phase 4
+        }
+        let outcome = render_source_with_pressure(source, &options, &pressure)?;
+        let destination = destination_for(&inputs[index]);
+        std::fs::write(&destination, &outcome.rendered)
+            .with_context(|| format!("cannot write {}", destination.display()))?;
+        let length = outcome.rendered.len();
+        if digest_counts.get(digest.as_str()).copied().unwrap_or(0) > 1 {
+            shared
+                .lock()
+                .map_err(|_| anyhow::anyhow!("render cache poisoned"))?
+                .insert(digest.clone(), std::sync::Arc::new(outcome.rendered));
+        }
+        Ok((destination.display().to_string(), length))
+    };
+    let owner_results = run_all(&render_owner);
+
+    // Phase 4: every non-owner duplicate copies its owner's bytes. No parse, no layout, no render.
+    let write_duplicate = |index: usize| -> Result<(String, usize)> {
+        let (_, digest) = match &loaded[index] {
+            Ok(pair) => pair,
+            Err(_) => return Ok((String::new(), 0)),
+        };
+        if owner_of.get(digest.as_str()) == Some(&index) {
+            return owner_results[index]
+                .as_ref()
+                .map(|(p, n)| (p.clone(), *n))
+                .map_err(|e| anyhow::anyhow!("{e:#}"));
+        }
+        let bytes = {
+            let cache = shared
+                .lock()
+                .map_err(|_| anyhow::anyhow!("render cache poisoned"))?;
+            cache.get(digest.as_str()).cloned()
+        };
+        let Some(bytes) = bytes else {
+            // Owner failed; surface that failure against this input too.
+            return Err(anyhow::anyhow!("duplicate of an input that failed to render"));
+        };
+        let destination = destination_for(&inputs[index]);
+        std::fs::write(&destination, bytes.as_slice())
+            .with_context(|| format!("cannot write {}", destination.display()))?;
+        Ok((destination.display().to_string(), bytes.len()))
+    };
+    let results = run_all(&write_duplicate);
     let elapsed = started.elapsed();
 
     let mut rendered = 0usize;
@@ -2645,7 +2743,8 @@ fn cmd_render_batch(
 
     if !json {
         eprintln!(
-            "rendered {rendered}/{} diagram(s), {total_bytes} bytes, {} worker(s), {:.3} ms",
+            "rendered {rendered}/{} diagram(s) ({reused} reused from identical sources), \
+             {total_bytes} bytes, {} worker(s), {:.3} ms",
             inputs.len(),
             requested,
             elapsed.as_secs_f64() * 1000.0,
