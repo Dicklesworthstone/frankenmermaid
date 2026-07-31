@@ -637,6 +637,65 @@ only.
   actual observed threads, linked passing output artifact, complete governor/ISA/topology
   provenance, and the corrected same-invocation A/A gate above.
 
+## SEMANTIC ADMISSION ONLY: 25-schema database-catalog publish (2026-07-31)
+
+**Bead:** `bd-j7e7`. **Lane:** cod (`LavenderMill`).
+**Executing ELF SHA-256 (self-reported by process):**
+`499e4bf6b23ef6bfe4fccf9df4a086274d51f42ebe28b2f4ae5cc0c249a4eb47` (7,897,696 bytes).
+**A/A null control (same invocation):** incomplete by construction and therefore not a performance
+gate. The scalar Rust dump arm reported median `0.998408`, bootstrap 95% CI
+`[0.992740, 1.010995]`; the median itself is inside the corrected `[0.98, 1.02]` clause. The
+untimed `--render-once` mermaid-js dump arm collected no incumbent A/A samples, so this invocation
+establishes no current ratio, win, loss, or corrected-null performance verdict. A future timed
+invocation must independently keep every arm's null median in `[0.98, 1.02]` and pass the
+bootstrap-CI and 2x-null-margin clauses; CV remains provenance only.
+
+- **Whole-job semantic boundary.** `schema_catalog_25` renders all 25 generated database schemas,
+  comprising 662 authored entities and 637 relationships. Both engines consumed the identical
+  25-revision input SHA-256
+  `ac7c34e951a2accfcd763d088666a0cbdd4d8770604f556540a9f7a8462df7e7`.
+- **Oracle correction and exact result.** The first current-oracle artifact correctly passed
+  rendered-text containment 25/25 but rejected every node-id set because it reconstructed
+  frankenmermaid's renderer-owned element id `fm-node-s0-e0-0` as `s0-e0`, even though the group
+  retained the exact authored id `S0_E0` in `data-id`. The shared extractor now prefers decoded
+  author-facing `data-id` values for both engines and falls back to canonicalized element ids only
+  when that attribute is absent. A mutation control also proves that this path preserves
+  underscores and does not strip an authored trailing counter. The rerun is **25/25 equivalent**,
+  zero divergent, zero unverified; node-id and text checks passed 25/25, and all 11 diagrams whose
+  ER geometry permitted cross-engine topology adjudication passed it.
+- **Output-equivalence check.** One shared extractor processes both engines. It gates rendered-text
+  containment and authored node-id sets for this ER corpus, and opportunistically compares
+  rendered-path topology when both engines' geometry is unambiguous. Unknown required invariants
+  never pass. ER topology is not yet claimed against input-derived truth, so the 14 geometrically
+  undecidable topology checks are explicitly not promoted to Tier 2. This is neither SVG byte
+  equality nor a rasterized perceptual diff.
+- **Linked artifacts.** The retained failing artifact
+  `.benchmarks/headtohead/schema-catalog-25-requalification-v1/equivalence-8f8169d4-1785486973420.json`
+  has SHA-256 `39fc4ad4d4fd25d947b5672eee3b68d4db6bc87e6cc80793b91af3ac61b997bf`.
+  The passing artifact
+  `.benchmarks/headtohead/schema-catalog-25-requalification-v1/equivalence-8f8169d4-1785487124743.json`
+  has SHA-256 `7f73ba85095f86751edf1749cf8a5ee2a6ae774f55beb011d8e51376d50a42b8`.
+  Frankenmermaid dumped 25/25 revisions with SHA-256
+  `49357f033671feb6de1636d4e45f19f2945dbf60bf789060c5843313a9726b82`; mermaid-js dumped
+  25/25 with SHA-256
+  `2858d502b25b0619273b50d2d4a3acc0d746a94c0faa147523d070db917228f4`.
+  Both hashes exactly match the values self-reported by their measured arms.
+- **Incumbent, thread, and host provenance.** The live comparator is mermaid-js `11.15.0`, bundle
+  SHA-256 `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`,
+  through `/usr/bin/chromium-browser` (`Chrome/150.0.7871.128`). Frankenmermaid requested and
+  actually observed **1** scalar worker; mermaid-js requested and actually observed **1** browser
+  main execution thread. Host `thinkstation1` is an AMD Ryzen Threadripper PRO 5975WX with 64
+  logical CPUs, complete `amd-pstate-epp` provenance (`powersave` governor, `performance` EPP,
+  boost enabled), and complete ISA provenance (AVX2/FMA/BMI2/VAES present; AVX-512 absent). The
+  immutable ELF was built through strict `rch exec` from pinned base `85fef646` with
+  `--clean-overlay`; no co-tenant edit entered the executable.
+- **Disposition / retry predicate.** Semantic admission is current, but the historical
+  database-catalog ratio remains non-current because this was deliberately untimed. Take a fresh
+  exclusive central `trj` claim only after all earlier bookings and host-wide external work clear,
+  then measure this exact linked corpus side-by-side against the live pinned incumbent with the
+  same ELF identity, actual observed threads, complete governor/ISA/topology provenance, and the
+  corrected same-invocation A/A gate above.
+
 ## CERTIFIED INCUMBENT WIN: equivalence-clean 512-diagram concurrent CI job (2026-07-30)
 
 **Bead:** `bd-zwg6`. **Lane:** cod (`BlackThrush`).

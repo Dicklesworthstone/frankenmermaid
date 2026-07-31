@@ -329,6 +329,20 @@ const ATTR = (tag, name) => {
   return m ? m[1] : null;
 };
 
+/**
+ * Prefer the author-facing id when an engine exposes it directly.
+ *
+ * Element ids are renderer-owned and may sanitize separators or append counters. In particular,
+ * frankenmermaid renders authored ER id `S0_E0` as element id `fm-node-s0-e0-0` while retaining
+ * the exact source spelling in `data-id`. Reconstructing from the element id would turn `_` into
+ * `-` and create a false cross-engine node/topology mismatch.
+ */
+function nodeIdFromGroup(engine, tag) {
+  const authored = ATTR(tag, 'data-id');
+  if (authored !== null) return decodeEntities(authored).toLowerCase();
+  return canonicalNodeId(engine, ATTR(tag, 'id'));
+}
+
 /** Every `<g ...>` open tag with its byte offset, so a group's subtree can be sliced out. */
 function openGroups(svg) {
   const out = [];
@@ -378,8 +392,7 @@ function mermaidStructure(svg) {
     const cls = ATTR(g.tag, 'class') ?? '';
     if (!/\bnode\b/.test(cls) || /\bnodeLabel\b/.test(cls)) continue;
     const at = translateOf(g.tag);
-    const raw = ATTR(g.tag, 'data-id') ?? ATTR(g.tag, 'id');
-    const id = canonicalNodeId('mermaid-js', raw);
+    const id = nodeIdFromGroup('mermaid-js', g.tag);
     if (!id || !at) continue;
     // A repeated id is not a node model we can anchor against; drop to Tier 1 by leaving it out.
     if (!nodes.has(id)) nodes.set(id, at);
@@ -413,7 +426,7 @@ function frankenStructure(svg) {
   for (const g of openGroups(svg)) {
     const cls = ATTR(g.tag, 'class') ?? '';
     if (/\bfm-node\b/.test(cls)) {
-      const id = canonicalNodeId('frankenmermaid', ATTR(g.tag, 'id'));
+      const id = nodeIdFromGroup('frankenmermaid', g.tag);
       if (!id) continue;
       const at = translateOf(g.tag);
       if (at) { if (!nodes.has(id)) nodes.set(id, at); continue; }
@@ -1655,6 +1668,25 @@ export function selfTest() {
     && canonicalNodeId('mermaid-js', 'er40_r14_0-entity-E7-7') === 'e7'
     && canonicalNodeId('frankenmermaid', 'fm-node-e7-7') === 'e7',
     [canonicalNodeId('mermaid-js', 'class50_r14_0-classId-C0-2350'), canonicalNodeId('frankenmermaid', 'fm-node-c0-0')]);
+  record('authored_data_id_beats_lossy_element_id',
+    nodeIdFromGroup(
+      'frankenmermaid',
+      '<g id="fm-node-s0-e0-0" class="fm-node" data-id="S0_E0">',
+    ) === 's0_e0'
+    && nodeIdFromGroup(
+      'mermaid-js',
+      '<g id="diagram-flowchart-A-7-19" class="node" data-id="A-7">',
+    ) === 'a-7',
+    [
+      nodeIdFromGroup(
+        'frankenmermaid',
+        '<g id="fm-node-s0-e0-0" class="fm-node" data-id="S0_E0">',
+      ),
+      nodeIdFromGroup(
+        'mermaid-js',
+        '<g id="diagram-flowchart-A-7-19" class="node" data-id="A-7">',
+      ),
+    ]);
   record('ground_truth_reads_chained_edges', (() => {
     const t = groundTruth('flowchart LR\n  A-->B-->C\n');
     return t !== null && t.edges.join(',') === 'a>b,b>c';
