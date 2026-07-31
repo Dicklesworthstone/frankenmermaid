@@ -19209,18 +19209,45 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
   mermaid-js `11.15.0`, bundle
   `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`, in
   `/usr/bin/chromium-browser` (`Chrome/150.0.7871.128`).
+- **Reopened exact-corpus adjudication (2026-07-30):** the current self-reporting ELF
+  `c410a84698acd943dc6d5eb134c119e3239414f9446cfcb702a970620f048d7d` and live pinned incumbent
+  rendered every revision of both target jobs in one untimed equivalence invocation. Artifact
+  `.benchmarks/headtohead/ci-docs-2k5k-equivalence/equivalence-905b01f9-1785459428706.json`
+  (SHA-256 `c3c19c23920ddbbe229006d4f47327428b27cf6e5a24e954d4e2378d14b0640e`)
+  links 2,000/2,000 and 5,000/5,000 dumped outputs to the hashes reported by both engines. The
+  `ci_docs_2000` verdict is 1,705 equivalent, 295 divergent, 0 unverified; `ci_docs_5000` is 4,291
+  equivalent, 709 divergent, 0 unverified.
+- **Exact semantic blockers:** all 190/482 class diagrams lose incumbent-rendered fields or methods.
+  `compute_node_size` sizes those nodes from the class name but not `class_meta.attributes` or
+  `class_meta.methods`; the compartment renderer then stops at the undersized node bound.
+  Additionally, 142/190 and 358/482 class diagrams have unequal node-ID sets: `o--` is absent from
+  `CLASS_OPERATORS`, falls through to the generic `--`, and turns a source such as `C3` into phantom
+  node `C3-o`; `*--` likewise loses composition semantics even when identifier normalization hides
+  the node-set defect (`bd-92b6`). State diagrams diverge 105/169 and 227/390. Top-level `&` in
+  `Retry & backoff`, `Diff & merge`, or `Sign & upload` is misread as a parallel endpoint list,
+  dropping transitions in 75/167 diagrams. `Parse <config>` and `Rate limit (429)` are misread as
+  asymmetric/rounded node delimiters, losing rendered label content in 60/129 diagrams; overlap
+  between these two state failure classes yields the 105/227 totals (`bd-yq3k`).
+- **Recoverability boundary:** every flowchart (1,149/2,882), sequence diagram (327/804), and ER
+  diagram (165/442), plus 64/163 unaffected state diagrams, passed the current structural gate.
+  Extracting those 1,705/4,291 diagrams would change the revision count, family distribution,
+  pinned input hash, corpus traversal, allocation pressure, and scheduling boundary. It is
+  recoverable only as a newly named workload, not as either named whole job. `ci_equiv_512` is the
+  already-certified equivalence-clean realization of that narrower CI workload.
 - **Verdict:** CANNOT, no ratio. No new `trj` claim was acquired, no target-host work ran, and no
   timing sample exists to quote. Agent Mail `trj-booking` message `6501` withdraws frankenmermaid
   from the queue without consuming a host window. The invalid numeric mixed-class rows remain only
   as internal correction history in `docs/PERF_LEDGER.md`; public surfaces contain no numeric
   competitive claim for jobs where both engines complete.
-- **Concrete retry predicate:** close P0 bug `bd-4isi`, then require separate exact-corpus
-  equivalence artifacts for `ci_docs_2000` and `ci_docs_5000` with zero divergent and zero
-  unverified diagrams. Each artifact must match the timing input SHA-256, process-self-reported
-  frankenmermaid ELF, and pinned mermaid-js bundle. Only then requeue a fresh exclusive `trj`
-  invocation for all nine widths, with per-arm same-invocation A/A, requested and observed worker
-  counts, unchanged governor/ISA/topology provenance, and bootstrap median-CI gating. Never use CV
-  as the acceptance gate.
+- **Concrete retry predicate:** close P0 bugs `bd-4isi`, `bd-92b6`, and `bd-yq3k`; prove class
+  fields/methods and relationship kinds plus state transition edges/labels under every production
+  dispatch used by the harness; and extend the linked oracle to cover class relationship semantics.
+  Then require separate exact-corpus artifacts for `ci_docs_2000` and `ci_docs_5000` with zero
+  divergent and zero unverified diagrams. Each artifact must match the pinned input SHA-256,
+  process-self-reported frankenmermaid ELF, and pinned mermaid-js bundle used for timing. Only then
+  requeue a fresh exclusive `trj` invocation for all nine widths, with per-arm same-invocation A/A,
+  requested and observed worker counts, unchanged governor/ISA/topology provenance, and bootstrap
+  median-CI gating. Never use CV as the acceptance gate.
 
   Agent: cod (BlackThrush)
 

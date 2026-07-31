@@ -540,20 +540,43 @@ median-CI gates passed, all seven same-ELF brackets passed, and `cv_gate=never`.
 - **Gate validation.** `node scripts/headtohead/svg_equivalence.mjs --self-test` passed 20 cases:
   four mutation controls and two negative controls included. The gate treats every divergent or
   undecidable required invariant as failure.
+- **Full target-corpus requalification (2026-07-30).** The current self-reporting ELF
+  `c410a84698acd943dc6d5eb134c119e3239414f9446cfcb702a970620f048d7d` and live pinned incumbent
+  rendered every revision of both target jobs in one untimed equivalence invocation. Artifact
+  `.benchmarks/headtohead/ci-docs-2k5k-equivalence/equivalence-905b01f9-1785459428706.json`
+  (SHA-256 `c3c19c23920ddbbe229006d4f47327428b27cf6e5a24e954d4e2378d14b0640e`)
+  links 2,000/2,000 and 5,000/5,000 dumped outputs to each engine's reported output hash.
+  `ci_docs_2000` is 1,705 equivalent / 295 divergent / 0 unverified; `ci_docs_5000` is 4,291 /
+  709 / 0.
+- **Why both named jobs remain CANNOT.** All 190/482 class diagrams lose fields or methods because
+  `compute_node_size` ignores `class_meta.attributes`/`methods` and the renderer clips compartments
+  to that undersized bound. Another 142/190 plus 358/482 have node-set divergence because `o--`
+  falls through to `--` and creates phantom `C*-o` nodes; `*--` silently loses composition
+  semantics (`bd-92b6`). State diagrams diverge 105/169 and 227/390: labels containing a top-level
+  `&` drop transitions in 75/167 diagrams, while `<config>` or `(429)` is misread as node-shape
+  syntax and loses visible content in 60/129 diagrams (`bd-yq3k`). All flowcharts (1,149/2,882),
+  sequence diagrams
+  (327/804), ER diagrams (165/442), and 64/163 unaffected state diagrams pass.
+- **Recoverable work is a different benchmark.** Filtering to the passing 1,705/4,291 diagrams
+  changes the named job's revision count, syntax mix, input hash, traversal, allocation pressure,
+  and caller scheduling boundary. Such a subset may be pinned under a new ID, but cannot inherit
+  either `ci_docs_2000` or `ci_docs_5000`; the certified `ci_equiv_512` job already occupies that
+  equivalence-clean CI lane.
 - **Historical correction.** The numeric `class_50`, `doc_build_40`, `ci_batch_500`,
   `docs_site_50`, and `docs_site_200` rows above are known to contain this unequal-work class
   surface and are not current campaign output. Other numeric rows that predate the exact-output
   gate remain internal historical measurements, not public competitive claims, until their exact
   corpora receive a passing linked equivalence artifact. Public docs now state no numeric ratio for
   jobs where both engines complete.
-- **Concrete retry predicate.** First close `bd-4isi` with class fields and methods present under
-  every production layout/render dispatch used by the harness. Then generate separate exact
-  `ci_docs_2000` and `ci_docs_5000` equivalence artifacts with zero divergent and zero unverified
-  diagrams, linked to the same input SHA-256, process-self-reported ELF, and pinned mermaid-js
-  bundle used for timing. Only after both artifacts pass may a fresh exclusive `trj` claim run the
-  complete 1/2/4/8/16/32/64/96/128 sweeps with per-arm A/A controls, observed worker counts,
-  governor/ISA/topology provenance, and bootstrap median-CI adjudication. CV remains provenance
-  only.
+- **Concrete retry predicate.** First close `bd-4isi`, `bd-92b6`, and `bd-yq3k`, proving class
+  fields/methods and relationship kinds plus state transition edges/labels under every production
+  dispatch used by the harness; extend the linked oracle to cover class relationship semantics.
+  Then generate separate exact `ci_docs_2000` and `ci_docs_5000` artifacts with zero divergent and
+  zero unverified diagrams, linked to the same input SHA-256, process-self-reported ELF, and pinned
+  mermaid-js bundle used for timing. Only after both artifacts pass may a fresh exclusive `trj`
+  claim run the complete 1/2/4/8/16/32/64/96/128 sweeps with per-arm A/A controls, observed worker
+  counts, governor/ISA/topology provenance, and bootstrap median-CI adjudication. CV remains
+  provenance only.
 
 ## CERTIFIED INCUMBENT WIN: equivalence-clean 512-diagram concurrent CI job (2026-07-30)
 

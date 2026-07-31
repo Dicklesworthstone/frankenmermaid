@@ -427,7 +427,7 @@ instead of uniform `Node 123` fixtures:
 | User job | Items / sizes | Realism carried by the input |
 |---|---|---|
 | Documentation-site render | `docs_site_50`, `docs_site_200` | 50 and 200 diagrams; flowchart-dominated type mix, right-skewed sizes, non-ASCII and escaping-heavy labels. |
-| CI render farm | `ci_equiv_512`, `ci_docs_2000`, `ci_docs_5000` | `ci_equiv_512` is one 512-process-flowchart job (10,635 nodes, 4–59 per diagram) whose escaping-heavy visible text and every rendered path admit structural, input-grounded comparison. The 2,000/5,000 jobs retain the five-syntax distribution but remain blocked by class-member equivalence. |
+| CI render farm | `ci_equiv_512`, `ci_docs_2000`, `ci_docs_5000` | `ci_equiv_512` is one 512-process-flowchart job (10,635 nodes, 4–59 per diagram) whose escaping-heavy visible text and every rendered path admit structural, input-grounded comparison. The 2,000/5,000 jobs retain the five-syntax distribution but remain blocked by class member/relationship and state-label correctness defects. |
 | Live typing preview | `typing_trace_60` | 60 successive keystrokes inside one label of a 40-node flowchart. |
 | Monorepo architecture review | `monorepo_arch_120`, `monorepo_arch_300` | 120 and 300 services across uneven domains; hub-skewed dependencies and cross-domain event links. |
 | Database-catalog publish | `schema_catalog_25` | 25 bounded-context ER diagrams, 8–75 entities each, with skewed relationships and varied field counts/types. |
@@ -438,10 +438,15 @@ the library work and output serialization that differ between the implementation
 rows are decided and published as whole-job wall times; a per-diagram mean is not used because it
 would divide away the caller-concurrency effect.
 
-Artifacts are under `.benchmarks/headtohead/realistic-*` and
-`.benchmarks/headtohead/ci-equiv-512-*`. The mixed-family documentation jobs contain class diagrams
-and therefore remain nonnumeric until `bd-4isi` is fixed and their exact output verdicts pass.
-Other previously timed rows likewise require exact-corpus equivalence before publication.
+Artifacts are under `.benchmarks/headtohead/realistic-*`,
+`.benchmarks/headtohead/ci-equiv-512-*`, and `.benchmarks/headtohead/ci-docs-2k5k-equivalence/`.
+The full 2k/5k output run found 1,705/2,000 and 4,291/5,000 equivalent, with zero unverified. Every
+class diagram diverges because members are clipped; `o--` also creates phantom class nodes. State
+labels containing `&`, `<config>`, or `(429)` either drop transitions or are misread as node-shape
+syntax. The named mixed-family jobs therefore remain nonnumeric until `bd-4isi`, `bd-92b6`, and
+`bd-yq3k` are fixed and fresh exact-corpus verdicts pass. Filtering to the passing diagrams would
+change the pinned workload and must use a new corpus ID. Other previously timed rows likewise
+require exact-corpus equivalence before publication.
 Both monorepo maps pass `mermaid.parse()` but fail in `mermaid.render()` with
 `TypeError: Cannot set properties of undefined (setting 'order')`; they are `CANNOT` and carry no
 ratio.
