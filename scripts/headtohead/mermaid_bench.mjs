@@ -884,6 +884,60 @@ function evaluateInPage(fn, args, deadlineMs) {
   );
 }
 
+/**
+ * Evaluate a whole render sample without forcing every SVG through one CDP WebSocket frame.
+ *
+ * The page still executes the complete Mermaid job once and records its own timer around that
+ * unchanged work. Only after the promise resolves do we fetch the returned SVG array in bounded
+ * chunks. Large CI jobs otherwise exceed Node's WebSocket frame ceiling before the harness can
+ * hash or dump the incumbent output, even though Mermaid completed successfully.
+ */
+async function evaluateRenderInPage(fn, args, deadlineMs) {
+  const evaluated = await withDeadline(
+    browser.cdp.send('Runtime.evaluate', {
+      expression: `(${fn})(${JSON.stringify(args)})`,
+      awaitPromise: true,
+      returnByValue: false,
+    }, browser.sessionId),
+    deadlineMs,
+  );
+  const objectId = evaluated.result?.objectId;
+  if (evaluated.exceptionDetails || !objectId) return evaluated;
+
+  try {
+    const metadata = await browser.cdp.send('Runtime.callFunctionOn', {
+      objectId,
+      functionDeclaration: `function () {
+        const { svgs, ...rest } = this;
+        return { ...rest, svgCount: Array.isArray(svgs) ? svgs.length : 0 };
+      }`,
+      returnByValue: true,
+    }, browser.sessionId);
+    if (metadata.exceptionDetails) return metadata;
+
+    const value = metadata.result.value;
+    const svgs = [];
+    for (let offset = 0; offset < value.svgCount; offset += 8) {
+      const chunk = await browser.cdp.send('Runtime.callFunctionOn', {
+        objectId,
+        functionDeclaration:
+          'function (start, count) { return this.svgs.slice(start, start + count); }',
+        arguments: [{ value: offset }, { value: 8 }],
+        returnByValue: true,
+      }, browser.sessionId);
+      if (chunk.exceptionDetails) return chunk;
+      svgs.push(...chunk.result.value);
+    }
+    delete value.svgCount;
+    value.svgs = svgs;
+    return { result: { value } };
+  } finally {
+    await browser.cdp
+      .send('Runtime.releaseObject', { objectId }, browser.sessionId)
+      .catch(() => {});
+  }
+}
+
 function remainingBudgetMs(startedAt, budgetMs) {
   if (!Number.isFinite(budgetMs)) return null;
   const remaining = budgetMs - (Date.now() - startedAt);
@@ -904,7 +958,7 @@ async function replaceBrowser() {
  */
 async function isolatedSample(texts, tag, startedAt, budgetMs) {
   await replaceBrowser();
-  const res = await evaluateInPage(
+  const res = await evaluateRenderInPage(
     PAGE_BENCH,
     { texts, reps: 1, warmup: 0, nullReps: 0, tag },
     remainingBudgetMs(startedAt, budgetMs),
