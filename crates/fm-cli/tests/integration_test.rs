@@ -2576,6 +2576,71 @@ fn e2e_pipeline_class() {
     );
 }
 
+/// bd-yq3k: state transition labels were handed to the generic flowchart edge parser, which knows
+/// only `-->|text|`. The colon suffix therefore reached it as node-token syntax — `&` read as a
+/// parallel-endpoint separator, `(` and `<` as node-shape delimiters — and in the benign case the
+/// whole `S1: text` became the TARGET NODE's label while the edge got none.
+///
+/// Asserts the label lands on the EDGE and the node keeps a clean id, because node and edge COUNTS
+/// are correct in the plain case and in two of the three corrupting forms: a count-only check passes
+/// while the label sits in the wrong place entirely.
+#[test]
+fn state_transition_labels_attach_to_the_edge_not_the_node() {
+    let labels = [
+        "plain label",
+        "Retry & backoff",   // top-level `&` read as a parallel endpoint list
+        "Parse <config>",    // `<` `>` read as asymmetric node delimiters
+        "Rate limit (429)",  // `(` `)` read as a rounded node delimiter
+        "Diff & merge",
+        "Sign & upload",
+    ];
+
+    for label in labels {
+        let source = format!("stateDiagram-v2\n  [*] --> S0\n  S0 --> S1: {label}\n  S1 --> [*]\n");
+        let result = parse(&source);
+        assert_eq!(result.ir.diagram_type, DiagramType::State);
+
+        let ids: Vec<&str> = result
+            .ir
+            .nodes
+            .iter()
+            .map(|n| n.id.as_str())
+            .filter(|id| !id.starts_with("__state_"))
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["S0", "S1"],
+            "label {label:?} produced node ids {ids:?}; anything else means the suffix leaked into \
+             an endpoint (bd-yq3k)"
+        );
+
+        let labelled: Vec<&str> = result
+            .ir
+            .edges
+            .iter()
+            .filter_map(|e| e.label)
+            .filter_map(|id| result.ir.labels.get(id.0))
+            .map(|l| l.text.as_str())
+            .collect();
+        assert!(
+            labelled.contains(&label),
+            "label {label:?} never reached an edge; edge labels were {labelled:?} (bd-yq3k)"
+        );
+
+        for node in &result.ir.nodes {
+            let node_label = node.label.and_then(|id| result.ir.labels.get(id.0));
+            if let Some(text) = node_label {
+                assert!(
+                    !text.text.contains(':'),
+                    "node {:?} absorbed the transition label as {:?} (bd-yq3k)",
+                    node.id,
+                    text.text
+                );
+            }
+        }
+    }
+}
+
 /// bd-92b6: `o--` and `*--` were absent from `CLASS_OPERATORS`, so the operator scan matched the
 /// trailing `--` instead and swallowed the marker byte into the endpoint — `C0 o-- C1` parsed with
 /// `C0 o` as the source, which normalized into the phantom node `C0-o`. The reversed `--o` / `--*`

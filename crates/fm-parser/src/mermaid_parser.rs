@@ -3094,9 +3094,37 @@ fn parse_state_statements(line: &str, config: &ParserConfig) -> Option<Vec<State
     // `[*]` standalone is handled as a node in the edge parsing
     let mut statements = Vec::new();
     for statement in split_statements(line) {
+        // A state transition spells its label `S0 --> S1: text`, but the edge parser below is the
+        // generic FLOWCHART one, which knows only `-->|text|` and `-- text -->`. Left intact, the
+        // suffix reaches it as node-token syntax: `&` reads as a parallel-endpoint separator, `(`/`<`
+        // as node-shape delimiters, and in the benign case the whole `S1: text` becomes the TARGET
+        // NODE's label while the edge gets none (bd-yq3k). Split the label off first.
+        let (edge_source, transition_label) = split_state_transition_label(statement);
         if let Some(asts) =
-            parse_edge_statement_asts(statement, &FLOW_OPERATORS, FLOW_OP_GATE, false, config, 0)
+            parse_edge_statement_asts(edge_source, &FLOW_OPERATORS, FLOW_OP_GATE, false, config, 0)
         {
+            let asts = match transition_label {
+                // `label.or(..)` not `Some(..)`: an explicit `-->|text|` already parsed a label and
+                // must win over the colon suffix rather than be overwritten by it.
+                Some(text) => asts
+                    .into_iter()
+                    .map(|ast| match ast {
+                        FlowAst::Edge {
+                            from,
+                            arrow,
+                            label,
+                            to,
+                        } => FlowAst::Edge {
+                            from,
+                            arrow,
+                            label: label.or_else(|| Some(text.to_string())),
+                            to,
+                        },
+                        other => other,
+                    })
+                    .collect(),
+                None => asts,
+            };
             statements.push(StateStatement::Edge(asts));
             continue;
         }
@@ -3106,6 +3134,66 @@ fn parse_state_statements(line: &str, config: &ParserConfig) -> Option<Vec<State
     }
 
     (!statements.is_empty()).then_some(statements)
+}
+
+/// Split a state transition's `: label` suffix off its edge text.
+///
+/// Returns `(edge_text, label)`. The colon is only meaningful AFTER an edge operator — a bare
+/// `S1: description` is mermaid's state-description syntax, which sets the state's own label and must
+/// keep flowing to the node parser untouched — so a statement with no operator is returned unchanged.
+///
+/// The scan tracks quotes and bracket depth exactly as [`find_operator_core`] does, so a colon inside
+/// `"..."` or inside `[*]`/`(...)`/`{...}` is not mistaken for the separator. The FIRST top-level
+/// colon wins, matching mermaid: `S0 --> S1: Rate limit: 429` labels the edge `Rate limit: 429`.
+fn split_state_transition_label(statement: &str) -> (&str, Option<&str>) {
+    let Some((operator_idx, operator, _)) = find_operator(statement, &FLOW_OPERATORS, FLOW_OP_GATE)
+    else {
+        return (statement, None);
+    };
+
+    let scan_from = operator_idx + operator.len();
+    let mut in_quote: Option<u8> = None;
+    let mut escaped = false;
+    let mut square_depth = 0_usize;
+    let mut paren_depth = 0_usize;
+    let mut brace_depth = 0_usize;
+
+    for (idx, &byte) in statement.as_bytes().iter().enumerate() {
+        if idx < scan_from {
+            continue;
+        }
+        if let Some(quote) = in_quote {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' && quote != b'`' {
+                escaped = true;
+            } else if byte == quote {
+                in_quote = None;
+            }
+            continue;
+        }
+        match byte {
+            b'"' | b'\'' | b'`' => in_quote = Some(byte),
+            b'[' => square_depth = square_depth.saturating_add(1),
+            b']' => square_depth = square_depth.saturating_sub(1),
+            b'(' => paren_depth = paren_depth.saturating_add(1),
+            b')' => paren_depth = paren_depth.saturating_sub(1),
+            b'{' => brace_depth = brace_depth.saturating_add(1),
+            b'}' => brace_depth = brace_depth.saturating_sub(1),
+            b':' if square_depth == 0 && paren_depth == 0 && brace_depth == 0 => {
+                let label = trim_fast(&statement[idx + 1..]);
+                // An empty suffix (`S0 --> S1:`) carries no label; leave the edge unlabelled rather
+                // than attaching an empty string.
+                return (
+                    &statement[..idx],
+                    (!label.is_empty()).then_some(label),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    (statement, None)
 }
 
 fn parse_state_note(line: &str) -> Option<StateStatement> {
