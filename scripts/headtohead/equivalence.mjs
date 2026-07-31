@@ -301,6 +301,9 @@ const fmRun = runJsonl('frankenmermaid', fmBin, [corpusPath, fmDump], {
   // Scalar: this phase checks content, and the sweep already proves pooled output is byte-identical
   // to the scalar arm, so checking scalar transfers to every width.
   FM_H2H_THREADS: '1',
+  // Requested width is configuration, not evidence. Observe the caller threads that execute this
+  // exact workload outside the measured samples so every equivalence row carries the actual count.
+  FM_H2H_THREAD_PROBE: '1',
 });
 if (fmRun.code !== 0) {
   log(`frankenmermaid exited ${fmRun.code}`);
@@ -383,6 +386,7 @@ for (const item of items) {
       && record.requested_worker_threads > 0
       && Number.isSafeInteger(record.actual_observed_worker_threads)
       && record.actual_observed_worker_threads > 0
+      && record.actual_observed_worker_threads === record.requested_worker_threads
       && typeof record.execution_model === 'string'
       && record.execution_model.length > 0,
   );
