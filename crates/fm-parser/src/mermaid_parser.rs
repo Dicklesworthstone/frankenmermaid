@@ -1047,16 +1047,219 @@ fn flow_subgraph_lookup_key(id: &str, title: Option<&str>) -> String {
     }
 }
 
-/// Parser state after lowering a complete, closed flowchart-prefix subgraph.
+/// Owned flowchart document item compiled once and replayed into independent batch builders.
 ///
-/// The state is immutable after construction. Each related diagram clones it, then lowers only its
-/// suffix. Cloning the already-interned vectors and indexes is substantially cheaper than repeatedly
-/// tokenizing, classifying, normalizing, and interning the same subgraph source.
+/// The ordinary parser moves labels directly from its transient AST into the IR. A compiled item
+/// keeps that AST immutable, so replay clones only values the resulting independent IR must own;
+/// tokenization, statement classification, and recursive subgraph parsing disappear entirely.
+enum CompiledFlowDocumentItem {
+    FastEdge {
+        from: String,
+        arrow: ArrowType,
+        to: String,
+        line_number: usize,
+        source_line: String,
+    },
+    FastNode {
+        id: String,
+        label: Option<ParsedLabel>,
+        icon: Option<String>,
+        line_number: usize,
+        source_line: String,
+    },
+    Statements {
+        asts: Vec<FlowAst>,
+        line_number: usize,
+        source_line: String,
+    },
+    Subgraph {
+        id: String,
+        title: Option<String>,
+        line_number: usize,
+        source_line: String,
+        body: Vec<Self>,
+    },
+}
+
+impl From<FlowDocumentItem<'_>> for CompiledFlowDocumentItem {
+    fn from(item: FlowDocumentItem<'_>) -> Self {
+        match item {
+            FlowDocumentItem::FastEdge {
+                from,
+                arrow,
+                to,
+                line_number,
+                source_line,
+            } => Self::FastEdge {
+                from: from.to_owned(),
+                arrow,
+                to: to.to_owned(),
+                line_number,
+                source_line: source_line.to_owned(),
+            },
+            FlowDocumentItem::FastNode {
+                id,
+                label,
+                icon,
+                line_number,
+                source_line,
+            } => Self::FastNode {
+                id: id.to_owned(),
+                label,
+                icon,
+                line_number,
+                source_line: source_line.to_owned(),
+            },
+            FlowDocumentItem::Statements {
+                asts,
+                line_number,
+                source_line,
+            } => Self::Statements {
+                asts,
+                line_number,
+                source_line: source_line.to_owned(),
+            },
+            FlowDocumentItem::Subgraph {
+                id,
+                title,
+                line_number,
+                source_line,
+                body,
+            } => Self::Subgraph {
+                id,
+                title,
+                line_number,
+                source_line: source_line.to_owned(),
+                body: body.into_iter().map(Self::from).collect(),
+            },
+        }
+    }
+}
+
+fn lower_compiled_flow_document_item(
+    item: &CompiledFlowDocumentItem,
+    builder: &mut IrBuilder,
+    active_clusters: &[usize],
+    active_subgraphs: &[usize],
+) {
+    let in_groups = !active_clusters.is_empty() || !active_subgraphs.is_empty();
+    match item {
+        CompiledFlowDocumentItem::FastEdge {
+            from,
+            arrow,
+            to,
+            line_number,
+            source_line,
+        } => {
+            let span = span_for(*line_number, source_line);
+            let from_id = if is_dangling_placeholder_node_id(from) {
+                builder.intern_placeholder_node(from, span)
+            } else {
+                builder.intern_edge_endpoint_pretrimmed(from, span)
+            };
+            let to_id = if is_dangling_placeholder_node_id(to) {
+                builder.intern_placeholder_node(to, span)
+            } else {
+                builder.intern_edge_endpoint_pretrimmed(to, span)
+            };
+            if let (Some(from_id), Some(to_id)) = (from_id, to_id) {
+                if in_groups {
+                    add_node_to_active_groups(builder, active_clusters, active_subgraphs, from_id);
+                    add_node_to_active_groups(builder, active_clusters, active_subgraphs, to_id);
+                }
+                builder.push_edge(from_id, to_id, *arrow, None, span);
+            }
+        }
+        CompiledFlowDocumentItem::FastNode {
+            id,
+            label,
+            icon,
+            line_number,
+            source_line,
+        } => {
+            let span = span_for(*line_number, source_line);
+            let node_id = if is_dangling_placeholder_node_id(id) {
+                builder.intern_placeholder_node(id, span)
+            } else {
+                builder.intern_node_label_owned(id, label.clone(), NodeShape::Rect, span)
+            };
+            if let Some(node_id) = node_id {
+                if let Some(icon) = icon.as_deref() {
+                    builder.set_node_icon(node_id, icon);
+                }
+                if in_groups {
+                    add_node_to_active_groups(builder, active_clusters, active_subgraphs, node_id);
+                }
+            }
+        }
+        CompiledFlowDocumentItem::Statements {
+            asts,
+            line_number,
+            source_line,
+        } => {
+            for ast in asts {
+                lower_flow_ast(
+                    ast,
+                    *line_number,
+                    source_line,
+                    builder,
+                    active_clusters,
+                    active_subgraphs,
+                );
+            }
+        }
+        CompiledFlowDocumentItem::Subgraph {
+            id,
+            title,
+            line_number,
+            source_line,
+            body,
+        } => {
+            let span = span_for(*line_number, source_line);
+            let lookup_key = flow_subgraph_lookup_key(id, title.as_deref());
+            let Some(cluster_index) = builder.ensure_cluster(&lookup_key, title.as_deref(), span)
+            else {
+                return;
+            };
+            let parent_subgraph = active_subgraphs.last().copied();
+            let Some(subgraph_index) = builder.ensure_subgraph(
+                &lookup_key,
+                id,
+                title.as_deref(),
+                span,
+                parent_subgraph,
+                Some(cluster_index),
+            ) else {
+                return;
+            };
+            let mut child_clusters = active_clusters.to_vec();
+            child_clusters.push(cluster_index);
+            let mut child_subgraphs = active_subgraphs.to_vec();
+            child_subgraphs.push(subgraph_index);
+            for child in body {
+                lower_compiled_flow_document_item(
+                    child,
+                    builder,
+                    &child_clusters,
+                    &child_subgraphs,
+                );
+            }
+        }
+    }
+}
+
+/// Parsed syntax for a complete, closed flowchart-prefix subgraph.
+///
+/// Every related diagram replays this immutable syntax into its own builder, then parses its unique
+/// suffix. This removes repeated parsing without cloning a populated IR or coordinating workers.
 pub(crate) struct CompiledFlowchartPrefix {
     prefix: String,
-    builder: IrBuilder,
+    items: Vec<CompiledFlowDocumentItem>,
+    warnings: Vec<String>,
+    header_direction: Option<GraphDirection>,
     detection: DetectedType,
     parse_mode: MermaidParseMode,
+    parser_config: ParserConfig,
     line_offset: usize,
 }
 
@@ -1073,28 +1276,38 @@ impl CompiledFlowchartPrefix {
             return None;
         }
 
-        let input_lines = memchr::memchr_iter(b'\n', prefix.as_bytes()).count() + 1;
-        let mut builder = IrBuilder::with_capacity_hint(DiagramType::Flowchart, input_lines);
-        builder.set_parse_mode(parse_mode);
-        builder.set_parser_config(*config);
-        for warning in &detection.warnings {
-            builder.add_warning(warning.clone());
-        }
-        parse_flowchart(prefix, &mut builder);
+        let document = parse_flowchart_document(prefix, 0, config);
 
         Some(Self {
             prefix: prefix.to_owned(),
-            builder,
+            items: document.items.into_iter().map(Into::into).collect(),
+            warnings: document.warnings,
+            header_direction: document.header_direction,
             detection,
             parse_mode,
+            parser_config: *config,
             line_offset: memchr::memchr_iter(b'\n', prefix.as_bytes()).count(),
         })
     }
 
     pub(crate) fn parse(&self, input: &str) -> Option<ParseResult> {
         let suffix = input.strip_prefix(&self.prefix)?;
-        let mut builder = self.builder.clone();
+        let input_lines = memchr::memchr_iter(b'\n', input.as_bytes()).count() + 1;
+        let mut builder = IrBuilder::with_capacity_hint(DiagramType::Flowchart, input_lines);
         builder.set_parse_mode(self.parse_mode);
+        builder.set_parser_config(self.parser_config);
+        for warning in &self.detection.warnings {
+            builder.add_warning(warning.clone());
+        }
+        if let Some(direction) = self.header_direction {
+            builder.set_direction(direction);
+        }
+        for warning in &self.warnings {
+            builder.add_warning(warning.clone());
+        }
+        for item in &self.items {
+            lower_compiled_flow_document_item(item, &mut builder, &[], &[]);
+        }
         parse_flowchart_with_line_offset(suffix, self.line_offset, &mut builder);
         if builder.node_count() == 0 && builder.edge_count() == 0 {
             builder.add_warning("No parseable nodes or edges were found");
@@ -1181,6 +1394,21 @@ pub(crate) fn reusable_flowchart_prefix(input: &str) -> Option<&str> {
         return None;
     }
     Some(&input[..end])
+}
+
+/// Check another batch input against an already-validated reusable prefix.
+///
+/// The expensive structural walk belongs to the first member of an exact-prefix group. Subsequent
+/// members only need a vectorized byte-prefix comparison plus a scan of their unique suffix for
+/// directives whose scope could cross the boundary.
+pub(crate) fn can_reuse_flowchart_prefix(input: &str, prefix: &str) -> bool {
+    let Some(suffix) = input.strip_prefix(prefix) else {
+        return false;
+    };
+    !suffix.is_empty()
+        && !byte_lines(suffix)
+            .map(trim_fast)
+            .any(shared_prefix_global_directive)
 }
 
 fn is_subgraph_block_start(line: &str) -> bool {

@@ -174,6 +174,30 @@ pub struct FlowchartBatchParsePlan {
 impl FlowchartBatchParsePlan {
     #[must_use]
     pub fn new(inputs: &[&str], parse_mode: MermaidParseMode, config: &ParserConfig) -> Self {
+        if let Some(prefix) = inputs
+            .first()
+            .and_then(|input| mermaid_parser::reusable_flowchart_prefix(input))
+            && inputs.len() >= 2
+            && inputs
+                .iter()
+                .all(|input| mermaid_parser::can_reuse_flowchart_prefix(input, prefix))
+            && let Some(prefix_parser) =
+                mermaid_parser::CompiledFlowchartPrefix::new(prefix, parse_mode, config)
+        {
+            return Self {
+                compiled: vec![prefix_parser],
+                assignment: vec![Some(0); inputs.len()],
+                parse_mode,
+                parser_config: *config,
+                stats: FlowchartBatchParseStats {
+                    shared_prefix_groups: 1,
+                    shared_prefix_inputs: inputs.len(),
+                    reused_prefix_parses: inputs.len() - 1,
+                    reused_prefix_bytes: prefix.len().saturating_mul(inputs.len() - 1),
+                },
+            };
+        }
+
         let mut groups: std::collections::BTreeMap<&str, Vec<usize>> =
             std::collections::BTreeMap::new();
         for (index, input) in inputs.iter().enumerate() {
