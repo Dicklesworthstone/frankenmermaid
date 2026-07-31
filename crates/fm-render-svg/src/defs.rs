@@ -297,6 +297,33 @@ impl ArrowheadMarker {
         }
     }
 
+    /// Hollow diamond, the UML aggregation marker. Same geometry as [`Self::diamond_marker`] (the
+    /// filled composition diamond); only the fill differs, which is precisely what distinguishes
+    /// aggregation from composition in UML.
+    #[must_use]
+    pub fn diamond_open_marker(id: &str, stroke: &str) -> Self {
+        let path = PathBuilder::new()
+            .move_to(4.0, 0.0)
+            .line_to(8.0, 4.0)
+            .line_to(4.0, 8.0)
+            .line_to(0.0, 4.0)
+            .close()
+            .build();
+
+        Self {
+            id: id.to_string(),
+            marker_width: 8.0,
+            marker_height: 8.0,
+            ref_x: 8.0,
+            ref_y: 4.0,
+            orient: MarkerOrient::Auto,
+            path,
+            fill: "none".to_string(),
+            stroke: Some(stroke.to_string()),
+            stroke_width: Some(1.0),
+        }
+    }
+
     /// Set the orientation of the marker.
     #[must_use]
     pub fn with_orient(mut self, orient: MarkerOrient) -> Self {

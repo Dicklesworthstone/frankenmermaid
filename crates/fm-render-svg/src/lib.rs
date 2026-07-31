@@ -993,6 +993,10 @@ fn build_marker_defs_body(edge_color: &str, emit_fancy: bool) -> String {
             &mut s,
             ArrowheadMarker::diamond_marker("arrow-diamond", edge_color),
         );
+        push(
+            &mut s,
+            ArrowheadMarker::diamond_open_marker("arrow-diamond-open", edge_color),
+        );
     }
     s
 }
@@ -1459,6 +1463,7 @@ fn map_marker_kind(kind: fm_layout::MarkerKind) -> &'static str {
         MarkerKind::Circle => "url(#arrow-circle)",
         MarkerKind::Cross => "url(#arrow-cross)",
         MarkerKind::Diamond => "url(#arrow-diamond)",
+        MarkerKind::DiamondOpen => "url(#arrow-diamond-open)",
         MarkerKind::Open => "url(#arrow-open)",
     }
 }
@@ -10436,6 +10441,27 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
                 Some("url(#arrow-end)"),
                 &colors.edge,
             ),
+            // UML aggregation/composition put the diamond on the OWNING end, which is the source for
+            // `o--`/`*--` and the target for the reversed `--o`/`--*` — hence marker-start vs -end
+            // rather than one variant plus a flag. Hollow diamond = aggregation, filled = composition.
+            ArrowType::Aggregation => (
+                None,
+                Some("url(#arrow-diamond-open)"),
+                None,
+                &colors.edge,
+            ),
+            ArrowType::AggregationReverse => (
+                None,
+                None,
+                Some("url(#arrow-diamond-open)"),
+                &colors.edge,
+            ),
+            ArrowType::Composition => {
+                (None, Some("url(#arrow-diamond)"), None, &colors.edge)
+            }
+            ArrowType::CompositionReverse => {
+                (None, None, Some("url(#arrow-diamond)"), &colors.edge)
+            }
         }
     };
 
@@ -11123,6 +11149,41 @@ fn render_edge_into(out: &mut String, edge_path: &LayoutEdgePath, context: &Edge
             "url(#arrow-end)",
             "5,5",
             " optionally points both ways to ",
+        ),
+        // The diamond marks the OWNING end: source for `o--`/`*--`, target for `--o`/`--*`. The
+        // spoken phrase reads owner-first in every case, so the reversed forms invert the wording
+        // rather than the marker slot alone.
+        ArrowType::Aggregation => (
+            1.8,
+            "fm-edge-solid",
+            "url(#arrow-diamond-open)",
+            "",
+            "",
+            " aggregates ",
+        ),
+        ArrowType::AggregationReverse => (
+            1.8,
+            "fm-edge-solid",
+            "",
+            "url(#arrow-diamond-open)",
+            "",
+            " is aggregated by ",
+        ),
+        ArrowType::Composition => (
+            1.8,
+            "fm-edge-solid",
+            "url(#arrow-diamond)",
+            "",
+            "",
+            " is composed of ",
+        ),
+        ArrowType::CompositionReverse => (
+            1.8,
+            "fm-edge-solid",
+            "",
+            "url(#arrow-diamond)",
+            "",
+            " composes ",
         ),
     };
     // Was `text_alternatives && aria_labels && keyboard_nav`. The fragment writer now has a lean

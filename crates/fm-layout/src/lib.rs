@@ -2228,6 +2228,8 @@ pub enum MarkerKind {
     Circle,
     Cross,
     Diamond,
+    /// Hollow diamond — UML aggregation, as distinct from `Diamond`'s filled composition marker.
+    DiamondOpen,
     Open,
 }
 
@@ -2610,6 +2612,20 @@ fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
                         stroke.line_cap = LineCap::Round;
                         marker_start = MarkerKind::Arrow;
                         marker_end = MarkerKind::Arrow;
+                    }
+                    // UML aggregation/composition mark the OWNING end: the source for `o--`/`*--`,
+                    // the target for the reversed `--o`/`--*`.
+                    fm_core::ArrowType::Aggregation => {
+                        marker_start = MarkerKind::DiamondOpen;
+                    }
+                    fm_core::ArrowType::AggregationReverse => {
+                        marker_end = MarkerKind::DiamondOpen;
+                    }
+                    fm_core::ArrowType::Composition => {
+                        marker_start = MarkerKind::Diamond;
+                    }
+                    fm_core::ArrowType::CompositionReverse => {
+                        marker_end = MarkerKind::Diamond;
                     }
                 }
             }

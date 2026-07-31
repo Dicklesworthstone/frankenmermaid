@@ -65,11 +65,21 @@ const SEQUENCE_OPERATORS: [(&str, ArrowType); 26] = [
     ("-x", ArrowType::Cross),
 ];
 
-const CLASS_OPERATORS: [(&str, ArrowType); 6] = [
+// ORDER IS LOAD-BEARING. `find_operator_core` scans left to right by byte position and, at the first
+// position that can start an operator, returns the FIRST entry in this table that `starts_with`.
+// Position ordering makes `o--`/`*--` win on their own leading byte, but `--o`/`--*` share the `--`
+// prefix, so they must precede the bare `--` or it matches first and swallows the trailing marker
+// byte into the endpoint — which is exactly the bd-92b6 defect: `C3 o-- C4` matched `--` at the `-`,
+// leaving `C3 o` as the source and normalizing it into the phantom node `C3-o`.
+const CLASS_OPERATORS: [(&str, ArrowType); 10] = [
     ("<|--", ArrowType::Arrow),
     ("--|>", ArrowType::Arrow),
     ("..>", ArrowType::DottedArrow),
     ("<..", ArrowType::DottedArrow),
+    ("o--", ArrowType::Aggregation),
+    ("*--", ArrowType::Composition),
+    ("--o", ArrowType::AggregationReverse),
+    ("--*", ArrowType::CompositionReverse),
     ("-->", ArrowType::Arrow),
     ("--", ArrowType::Line),
 ];

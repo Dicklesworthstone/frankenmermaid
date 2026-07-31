@@ -1098,6 +1098,15 @@ pub enum ArrowType {
     DoubleArrow,
     DoubleThickArrow,
     DoubleDottedArrow,
+    /// UML aggregation (`o--`): hollow diamond on the owning end. The diamond marks the *source*,
+    /// so `AggregationReverse` is a distinct variant rather than a rendering flag.
+    Aggregation,
+    /// UML aggregation written target-first (`--o`).
+    AggregationReverse,
+    /// UML composition (`*--`): filled diamond on the owning end.
+    Composition,
+    /// UML composition written target-first (`--*`).
+    CompositionReverse,
 }
 
 impl ArrowType {
@@ -1134,6 +1143,10 @@ impl ArrowType {
             Self::DoubleArrow => "<-->",
             Self::DoubleThickArrow => "<==>",
             Self::DoubleDottedArrow => "<-.->",
+            Self::Aggregation => "o--",
+            Self::AggregationReverse => "--o",
+            Self::Composition => "*--",
+            Self::CompositionReverse => "--*",
         }
     }
 }
@@ -7335,6 +7348,12 @@ mod tests {
             (ArrowType::DoubleArrow, "<-->"),
             (ArrowType::DoubleThickArrow, "<==>"),
             (ArrowType::DoubleDottedArrow, "<-.->"),
+            (ArrowType::Aggregation, "o--"),
+            // Shares its rendering with `Circle`'s "--o": `as_str` is display-only (there is no
+            // reverse mapping), and the two are the same surface syntax in different diagram types.
+            (ArrowType::AggregationReverse, "--o"),
+            (ArrowType::Composition, "*--"),
+            (ArrowType::CompositionReverse, "--*"),
         ];
 
         for (arrow, expected) in expectations {

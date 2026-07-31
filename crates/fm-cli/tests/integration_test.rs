@@ -2576,6 +2576,48 @@ fn e2e_pipeline_class() {
     );
 }
 
+/// bd-92b6: `o--` and `*--` were absent from `CLASS_OPERATORS`, so the operator scan matched the
+/// trailing `--` instead and swallowed the marker byte into the endpoint — `C0 o-- C1` parsed with
+/// `C0 o` as the source, which normalized into the phantom node `C0-o`. The reversed `--o` / `--*`
+/// forms had the identical defect from the other side. This corrupted the node SET, which is why the
+/// cross-engine gate found 142/190 and 358/482 class diagrams divergent.
+#[test]
+fn class_relationship_operators_do_not_create_phantom_nodes() {
+    // (source, operator, expected arrow type)
+    let cases = [
+        ("o--", fm_core::ArrowType::Aggregation),
+        ("*--", fm_core::ArrowType::Composition),
+        ("--o", fm_core::ArrowType::AggregationReverse),
+        ("--*", fm_core::ArrowType::CompositionReverse),
+        ("<|--", fm_core::ArrowType::Arrow),
+        ("-->", fm_core::ArrowType::Arrow),
+    ];
+
+    for (operator, expected_arrow) in cases {
+        let source = format!("classDiagram\n  C0 {operator} C1\n");
+        let result = parse(&source);
+        assert_eq!(result.ir.diagram_type, DiagramType::Class);
+
+        let mut ids: Vec<&str> = result.ir.nodes.iter().map(|n| n.id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(
+            ids,
+            vec!["C0", "C1"],
+            "operator {operator:?} produced node set {ids:?}; a third id means the operator was \
+             mis-split and part of it leaked into an endpoint (bd-92b6)"
+        );
+        assert_eq!(
+            result.ir.edges.len(),
+            1,
+            "operator {operator:?} should yield exactly one relationship"
+        );
+        assert_eq!(
+            result.ir.edges[0].arrow, expected_arrow,
+            "operator {operator:?} lost its UML relationship kind"
+        );
+    }
+}
+
 /// bd-4isi: class members were silently dropped from the rendered SVG. The renderer walks each member
 /// row against the node's height and `break`s on the first row that falls outside it, while node sizing
 /// measured only the class name — so every method vanished, and fields vanished too once a larger
