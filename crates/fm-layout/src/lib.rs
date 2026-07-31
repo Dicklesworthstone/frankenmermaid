@@ -2230,8 +2230,11 @@ pub enum MarkerKind {
     Diamond,
     /// Hollow diamond — UML aggregation, as distinct from `Diamond`'s filled composition marker.
     DiamondOpen,
-    /// Hollow triangle — UML inheritance/generalization.
+    /// Hollow triangle — UML inheritance/generalization, target slot.
     TriangleOpen,
+    /// Hollow triangle for the START slot, which needs the reversed-orientation marker def so the
+    /// point faces out of the path rather than into it.
+    TriangleOpenStart,
     Open,
 }
 
@@ -2631,7 +2634,7 @@ fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
                     }
                     // Generalization marks the PARENT end: source for `<|--`, target for `--|>`.
                     fm_core::ArrowType::Inheritance => {
-                        marker_start = MarkerKind::TriangleOpen;
+                        marker_start = MarkerKind::TriangleOpenStart;
                     }
                     fm_core::ArrowType::InheritanceReverse => {
                         marker_end = MarkerKind::TriangleOpen;

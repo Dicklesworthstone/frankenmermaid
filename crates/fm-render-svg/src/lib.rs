@@ -1001,6 +1001,16 @@ fn build_marker_defs_body(edge_color: &str, emit_fancy: bool) -> String {
             &mut s,
             ArrowheadMarker::triangle_open_marker("arrow-triangle-open", edge_color),
         );
+        // A triangle is NOT symmetric under 180 degrees, so the start slot needs its own
+        // auto-start-reverse def or `orient="auto"` rotates it to point INTO the path — which the
+        // cross-engine checker rejects as invalid:inheritance:points_into_path(slot=start). This
+        // mirrors the existing arrow-start / arrow-start-filled pair. The diamonds need no such
+        // twin because a diamond looks identical either way round.
+        push(
+            &mut s,
+            ArrowheadMarker::triangle_open_marker("arrow-triangle-open-start", edge_color)
+                .with_orient(MarkerOrient::AutoStartReverse),
+        );
     }
     s
 }
@@ -1469,6 +1479,7 @@ fn map_marker_kind(kind: fm_layout::MarkerKind) -> &'static str {
         MarkerKind::Diamond => "url(#arrow-diamond)",
         MarkerKind::DiamondOpen => "url(#arrow-diamond-open)",
         MarkerKind::TriangleOpen => "url(#arrow-triangle-open)",
+        MarkerKind::TriangleOpenStart => "url(#arrow-triangle-open-start)",
         MarkerKind::Open => "url(#arrow-open)",
     }
 }
@@ -10471,7 +10482,7 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
             // inherits Animal", so the parent is the source; `--|>` puts it at the target.
             ArrowType::Inheritance => (
                 None,
-                Some("url(#arrow-triangle-open)"),
+                Some("url(#arrow-triangle-open-start)"),
                 None,
                 &colors.edge,
             ),
@@ -11207,7 +11218,7 @@ fn render_edge_into(out: &mut String, edge_path: &LayoutEdgePath, context: &Edge
         ArrowType::Inheritance => (
             1.8,
             "fm-edge-solid",
-            "url(#arrow-triangle-open)",
+            "url(#arrow-triangle-open-start)",
             "",
             "",
             " is inherited by ",
@@ -14217,7 +14228,11 @@ marker#arrow-future path { fill: red; }\n\
                         .marker(ArrowheadMarker::triangle_open_marker(
                             "arrow-triangle-open",
                             edge,
-                        ));
+                        ))
+                        .marker(
+                            ArrowheadMarker::triangle_open_marker("arrow-triangle-open-start", edge)
+                                .with_orient(MarkerOrient::AutoStartReverse),
+                        );
                 }
                 let new = DefsBuilder::new().raw_markers(marker_defs_body(edge, fancy));
                 assert_eq!(

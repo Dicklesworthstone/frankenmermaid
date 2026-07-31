@@ -540,6 +540,7 @@ impl Canvas2dRenderer {
             | MarkerKind::Diamond
             | MarkerKind::DiamondOpen
             | MarkerKind::TriangleOpen
+            | MarkerKind::TriangleOpenStart
             | MarkerKind::Open
             | MarkerKind::HalfArrowTop
             | MarkerKind::HalfArrowBottom
