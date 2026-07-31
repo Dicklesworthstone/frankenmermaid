@@ -2576,6 +2576,45 @@ fn e2e_pipeline_class() {
     );
 }
 
+/// bd-4isi: class members were silently dropped from the rendered SVG. The renderer walks each member
+/// row against the node's height and `break`s on the first row that falls outside it, while node sizing
+/// measured only the class name — so every method vanished, and fields vanished too once a larger
+/// diagram shrank the boxes. The head-to-head equivalence gate caught it as 100/500 divergent diagrams.
+///
+/// Sizes are swept because the original defect was size-dependent: a 2-class diagram rendered its
+/// fields while a 50-class one did not, so a single small case would have passed against the bug.
+#[test]
+fn class_members_survive_rendering_at_every_diagram_size() {
+    for class_count in [2_usize, 10, 50] {
+        let mut source = String::from("classDiagram\n");
+        for i in 0..class_count {
+            source.push_str(&format!(
+                "  class C{i} {{\n    +int field{i}\n    +method{i}() bool\n  }}\n"
+            ));
+        }
+        for i in 0..class_count.saturating_sub(1) {
+            source.push_str(&format!("  C{i} <|-- C{}\n", i + 1));
+        }
+
+        let result = parse(&source);
+        assert_eq!(result.ir.diagram_type, DiagramType::Class);
+        let svg = render_svg(&result.ir);
+
+        for i in 0..class_count {
+            assert!(
+                svg.contains(&format!("field{i}")),
+                "class_count={class_count}: field{i} missing from rendered SVG \
+                 (node box too short for its compartment stack — see bd-4isi)"
+            );
+            assert!(
+                svg.contains(&format!("method{i}")),
+                "class_count={class_count}: method{i} missing from rendered SVG \
+                 (node box too short for its compartment stack — see bd-4isi)"
+            );
+        }
+    }
+}
+
 #[test]
 fn e2e_pipeline_state() {
     assert_pipeline_roundtrip(
