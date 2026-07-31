@@ -538,7 +538,7 @@ function classMarkerKind(engine, marker) {
   }
   if (/(?:^|-)arrow-diamond-open$/i.test(id)) return { kind: 'aggregation', status: 'known' };
   if (/(?:^|-)arrow-diamond$/i.test(id)) return { kind: 'composition', status: 'known' };
-  if (/(?:^|-)arrow-inheritance(?:-open)?$/i.test(id)) {
+  if (/(?:^|-)arrow-(?:inheritance(?:-open)?|triangle-open)$/i.test(id)) {
     return { kind: 'inheritance', status: 'known' };
   }
   if (/(?:^|-)arrow-end$/i.test(id)) return { kind: 'association', status: 'known' };
@@ -1082,7 +1082,7 @@ function classFixturePair() {
     + `<g class="fm-edge" data-fm-edge-id="2"><path d="M255,20L345,20" `
     + `marker-end="url(#arrow-end)"/></g>`
     + `<g class="fm-edge" data-fm-edge-id="3"><path d="M345,20L55,20" `
-    + `marker-start="url(#arrow-inheritance)"/></g></svg>`;
+    + `marker-start="url(#arrow-triangle-open)"/></g></svg>`;
   const source = 'classDiagram\n'
     + '  C0 *-- C1\n'
     + '  C1 o-- C2\n'
@@ -1171,7 +1171,7 @@ export function selfTest() {
     { verdict: classM2.verdict, failed: failedInvariants(classM2) });
 
   // CLASS MUTATION 3 -- dropping the inheritance marker must not degrade to a plain line silently.
-  const droppedClassMarker = classPair.fm.replace(' marker-start="url(#arrow-inheritance)"', '');
+  const droppedClassMarker = classPair.fm.replace(' marker-start="url(#arrow-triangle-open)"', '');
   const classM3 = compareDiagram({
     index: 0,
     family: 'class',
@@ -1186,7 +1186,7 @@ export function selfTest() {
 
   // CLASS MUTATION 4 -- the exact current inheritance defect: association arrow at the target.
   const inheritanceAsAssociation = classPair.fm.replace(
-    'marker-start="url(#arrow-inheritance)"',
+    'marker-start="url(#arrow-triangle-open)"',
     'marker-end="url(#arrow-end)"',
   );
   const classM4 = compareDiagram({
