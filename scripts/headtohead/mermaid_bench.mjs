@@ -9,9 +9,9 @@
 // `mmdc` (@mermaid-js/mermaid-cli) is deliberately not used: in 11.15.0 its bundled dist/index.html
 // is an 81-byte stub and the CLI cannot render at all.
 //
-// Emits one JSON object per corpus item on stdout. A mermaid render that throws, or that produces
-// mermaid's "Syntax error" placeholder SVG, is reported as `status: "error"` and makes the process
-// exit non-zero -- a failed comparator render is never a silent win for frankenmermaid.
+// Emits one JSON object per corpus item on stdout. The default mode times `mermaid.render()`; the
+// explicit `--mode parse` boundary times `mermaid.parse()` for equal-work parser comparisons. A
+// rejected parse or a render that throws/produces mermaid's error SVG is never a silent win.
 //
 // DID-NOT-FINISH. The XL corpus items reach sizes where mermaid may not complete at all. That is a
 // result, not a harness failure, so items carrying `dnf_allowed` report `status: "dnf"` with the
@@ -42,6 +42,12 @@ const MIN_NULL_ROUNDS = 9;
 const ISOLATED_NULL_ROUNDS = 10;
 const ISOLATED_SAMPLE_MIN_DOCUMENTS = 100;
 const BOOTSTRAP_RESAMPLES = 2_000;
+const PARSE_MIN_SAMPLE_MS = 50;
+const PARSE_CALIBRATION_TARGET_MS = 75;
+
+function effectRepsForMode(reps, parseOnly) {
+  return parseOnly ? Math.max(MIN_NULL_ROUNDS, reps) : reps;
+}
 
 // Bundle cache. Read by node, never by the browser, so a hidden dir is fine here.
 const CACHE = join(homedir(), '.cache', 'fm-headtohead');
@@ -429,6 +435,135 @@ const PAGE_BENCH = `async ({ texts, reps, warmup, nullReps, tag }) => {
   return out;
 }`;
 
+// Parse-only equal-work boundary. The timer covers only the public `mermaid.parse()` calls for the
+// complete job. Result normalization happens after `performance.now()` so neither engine is charged
+// for serializing its native parse representation. A linked full-render equivalence artifact in the
+// top-level driver proves the two native representations carry equivalent user-visible semantics.
+const PAGE_PARSE_BENCH = `async ({
+  texts, reps, warmup, nullReps, minSampleMs, calibrationTargetMs,
+}) => {
+  const m = window.mermaid;
+  const out = {
+    times: [],
+    signatures: [],
+    parseRecords: [],
+    nullRatios: [],
+    nullChecksumBytes: 0,
+    nullOutputValid: true,
+    effectIntegratedSampleMs: [],
+    nullIntegratedSampleMs: [],
+    effectBatches: [],
+    nullBatches: [],
+    deterministicOutput: true,
+    batch: 1,
+    error: null,
+  };
+  const normalize = (parsed) => {
+    const config =
+      parsed && typeof parsed === 'object' && parsed.config && typeof parsed.config === 'object'
+        ? parsed.config
+        : null;
+    return {
+      accepted: parsed !== false,
+      diagramType: parsed && typeof parsed === 'object' ? (parsed.diagramType ?? null) : null,
+      configNonempty: config !== null && Object.keys(config).length > 0,
+    };
+  };
+  const parseAll = async () => {
+    const parsed = [];
+    for (const text of texts) parsed.push(await m.parse(text));
+    return parsed;
+  };
+  const inspect = (parsed) => ({
+    records: parsed.map(normalize),
+    signatures: parsed.map((value) => JSON.stringify(value)),
+  });
+  const same = (left, right) =>
+    left.length === right.length && left.every((value, index) => value === right[index]);
+  const integrated = async (batch) => {
+    const parsedBatches = new Array(batch);
+    const t0 = performance.now();
+    for (let i = 0; i < batch; i++) parsedBatches[i] = await parseAll();
+    const integratedMs = performance.now() - t0;
+    const inspectedBatches = parsedBatches.map(inspect);
+    const inspected = inspectedBatches[inspectedBatches.length - 1];
+    return {
+      ms: integratedMs / batch,
+      integratedMs,
+      records: inspected.records,
+      signatures: inspected.signatures,
+      inspectedBatches,
+    };
+  };
+  try {
+    for (let i = 0; i < warmup; i++) await parseAll();
+    const reference = inspect(await parseAll());
+    out.signatures = reference.signatures;
+    out.parseRecords = reference.records;
+    const validateDeterminism = (sample, label) => {
+      for (const inspected of sample.inspectedBatches ?? [sample]) {
+        if (
+          !same(inspected.signatures, reference.signatures) ||
+          JSON.stringify(inspected.records) !== JSON.stringify(reference.records)
+        ) {
+          out.deterministicOutput = false;
+          throw new Error('nondeterministic mermaid.parse result in ' + label);
+        }
+      }
+    };
+    let batch = 1;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const calibration = await integrated(batch);
+      validateDeterminism(calibration, 'calibration sample ' + (attempt + 1));
+      if (calibration.integratedMs >= calibrationTargetMs) break;
+      batch = Math.max(
+        batch + 1,
+        Math.ceil(batch * calibrationTargetMs / Math.max(Number.EPSILON, calibration.integratedMs)),
+      );
+    }
+    out.batch = batch;
+    for (let i = 0; i < nullReps; i++) {
+      let a;
+      let b;
+      if (i % 2 === 0) {
+        a = await integrated(batch);
+        b = await integrated(batch);
+      } else {
+        b = await integrated(batch);
+        a = await integrated(batch);
+      }
+      validateDeterminism(a, 'A/A arm A sample ' + (i + 1));
+      validateDeterminism(b, 'A/A arm B sample ' + (i + 1));
+      out.nullRatios.push(a.ms / Math.max(Number.EPSILON, b.ms));
+      out.nullIntegratedSampleMs.push(a.integratedMs, b.integratedMs);
+      out.nullBatches.push(batch, batch);
+      out.nullOutputValid =
+        out.nullOutputValid &&
+        a.records.every((record) => record.accepted === true) &&
+        b.records.every((record) => record.accepted === true);
+      out.nullChecksumBytes +=
+        a.signatures.reduce((sum, value) => sum + value.length, 0) +
+        b.signatures.reduce((sum, value) => sum + value.length, 0);
+    }
+    for (let i = 0; i < reps; i++) {
+      const measured = await integrated(batch);
+      validateDeterminism(measured, 'effect sample ' + (i + 1));
+      out.times.push(measured.ms);
+      out.effectIntegratedSampleMs.push(measured.integratedMs);
+      out.effectBatches.push(batch);
+    }
+    const after = inspect(await parseAll());
+    validateDeterminism(after, 'post-measurement check');
+    out.sampleFloorValid =
+      out.effectIntegratedSampleMs.length > 0 &&
+      [...out.effectIntegratedSampleMs, ...out.nullIntegratedSampleMs]
+        .every((value) => value >= minSampleMs);
+  } catch (e) {
+    out.error = String((e && e.message) || e);
+  }
+  return out;
+}`;
+
 // One untimed parse + render of a single document, reporting the render's own cost. Parse acceptance
 // is kept outside the timed region and proves that a render failure is not merely invalid syntax.
 // Run before the timed loop on budgeted items so we learn what one render costs *before* committing
@@ -501,13 +636,113 @@ if (has('self-test')) {
       );
   }
   if (!missingChromiumRejected) throw new Error('missing chromium executable was not rejected');
+  if (
+    effectRepsForMode(2, true) !== MIN_NULL_ROUNDS ||
+    effectRepsForMode(12, true) !== 12 ||
+    effectRepsForMode(2, false) !== 2
+  ) {
+    throw new Error('parse effect-sample floor regression');
+  }
   new Script(`(${PAGE_BENCH})`);
+  new Script(`(${PAGE_PARSE_BENCH})`);
   new Script(`(${PAGE_PROBE})`);
+  let parseCalls = 0;
+  const parsePage = new Script(`(${PAGE_PARSE_BENCH})`).runInNewContext({
+    window: {
+      mermaid: {
+        parse: async (text) => {
+          parseCalls += 1;
+          return { diagramType: text };
+        },
+      },
+    },
+    performance: globalThis.performance,
+  });
+  const parsePageResult = await parsePage({
+    texts: ['flowchart-v2', 'stateDiagram'],
+    reps: 2,
+    warmup: 1,
+    nullReps: 1,
+    minSampleMs: 0,
+    calibrationTargetMs: 0,
+  });
+  if (
+    parsePageResult.batch !== 1 ||
+    parsePageResult.times.length !== 2 ||
+    parsePageResult.nullRatios.length !== 1 ||
+    parsePageResult.effectIntegratedSampleMs.length !== 2 ||
+    parsePageResult.nullIntegratedSampleMs.length !== 2 ||
+    parsePageResult.deterministicOutput !== true ||
+    parsePageResult.parseRecords.map((record) => record.diagramType).join(',') !==
+      'flowchart-v2,stateDiagram' ||
+    parseCalls !== 16
+  ) {
+    throw new Error(`parse page protocol regression: ${JSON.stringify({ parsePageResult, parseCalls })}`);
+  }
+  let unstableCalls = 0;
+  const unstableParsePage = new Script(`(${PAGE_PARSE_BENCH})`).runInNewContext({
+    window: {
+      mermaid: {
+        parse: async () => {
+          unstableCalls += 1;
+          return { diagramType: `flowchart-v${unstableCalls}` };
+        },
+      },
+    },
+    performance: globalThis.performance,
+  });
+  const unstableResult = await unstableParsePage({
+    texts: ['flowchart'],
+    reps: 1,
+    warmup: 0,
+    nullReps: 0,
+    minSampleMs: 0,
+    calibrationTargetMs: 0,
+  });
+  if (
+    unstableResult.deterministicOutput !== false ||
+    !unstableResult.error?.includes('nondeterministic mermaid.parse result')
+  ) {
+    throw new Error(`parse determinism mutation escaped: ${JSON.stringify(unstableResult)}`);
+  }
+  let transientCalls = 0;
+  let clockIndex = 0;
+  const clock = [0, 1, 2, 4];
+  const transientParsePage = new Script(`(${PAGE_PARSE_BENCH})`).runInNewContext({
+    window: {
+      mermaid: {
+        parse: async () => {
+          transientCalls += 1;
+          return { diagramType: transientCalls === 3 ? 'stateDiagram' : 'flowchart-v2' };
+        },
+      },
+    },
+    performance: {
+      now: () => clock[clockIndex++] ?? clock[clock.length - 1],
+    },
+  });
+  const transientResult = await transientParsePage({
+    texts: ['flowchart'],
+    reps: 1,
+    warmup: 0,
+    nullReps: 0,
+    minSampleMs: 0,
+    calibrationTargetMs: 2,
+  });
+  if (
+    transientResult.deterministicOutput !== false ||
+    !transientResult.error?.includes('nondeterministic mermaid.parse result')
+  ) {
+    throw new Error(`inner-batch parse mutation escaped: ${JSON.stringify(transientResult)}`);
+  }
   console.log(JSON.stringify({
     self_test: 'ok',
     perfect,
     insufficient,
-    page_functions_compiled: 2,
+    page_functions_compiled: 3,
+    parse_page_calls: parseCalls,
+    parse_determinism_mutation: 'rejected',
+    inner_batch_determinism_mutation: 'rejected',
     chromium_binary_resolution_cases: 3,
   }));
   process.exit(0);
@@ -525,6 +760,12 @@ function validate(svg) {
 // ---------------------------------------------------------------- main
 
 const only = arg('only');
+const mode = arg('mode', 'render');
+if (!['render', 'parse'].includes(mode)) {
+  log(`--mode must be render or parse, got ${JSON.stringify(mode)}`);
+  process.exit(2);
+}
+const parseOnly = mode === 'parse';
 const repsScale = Number(arg('reps-scale', '1'));
 const forceSampleIsolation = has('isolate-samples');
 // Scales every item's `js_budget_ms`. A smoke run wants short budgets; a claim run wants the
@@ -565,12 +806,18 @@ const INIT_EXPR = `(() => {
       if (!window.mermaid) return 'window.mermaid missing after bundle eval';
       const m = window.mermaid;
       if (typeof m.render !== 'function') return 'mermaid.render is not a function';
-      const src = Function.prototype.toString.call(m.render);
-      if (window.__fm_probe) return 'PROBE src=' + src.slice(0, 160) + ' ver=' + String(m.version);
+      if (typeof m.parse !== 'function') return 'mermaid.parse is not a function';
+      const renderSrc = Function.prototype.toString.call(m.render);
+      const parseSrc = Function.prototype.toString.call(m.parse);
+      if (window.__fm_probe)
+        return 'PROBE render=' + renderSrc.slice(0, 80) + ' parse=' + parseSrc.slice(0, 80)
+          + ' ver=' + String(m.version);
       // A dispatched baseline presents as a bound wrapper -- a zero-arg native stub with no body.
       // A genuine bundled implementation, minified arrow or function, carries its own source text.
-      if (/^\s*function\s*\(\s*\)\s*\{\s*\[native code\]\s*\}\s*$/.test(src))
+      if (/^\s*function\s*\(\s*\)\s*\{\s*\[native code\]\s*\}\s*$/.test(renderSrc))
         return 'mermaid.render is a bound/native shim, not the library function';
+      if (/^\s*function\s*\(\s*\)\s*\{\s*\[native code\]\s*\}\s*$/.test(parseSrc))
+        return 'mermaid.parse is a bound/native shim, not the library function';
       const reported = String(m.version ?? (typeof m.getVersion === 'function' ? m.getVersion() : ''));
       const want = ${JSON.stringify(PINS.mermaid.version)};
       if (reported && reported !== want)
@@ -619,7 +866,7 @@ function killBrowser(b) {
 }
 
 let browser = await newBrowser();
-log(`browser=${browser.info.Browser} binary=${browser.bin} bundle=mermaid@${version}`);
+log(`browser=${browser.info.Browser} binary=${browser.bin} bundle=mermaid@${version} mode=${mode}`);
 
 /** Evaluate `fn(args)` in the live page, under an optional wall deadline. */
 function evaluateInPage(fn, args, deadlineMs) {
@@ -714,6 +961,114 @@ async function isolatedBenchmark(texts, reps, nullReps, tag, startedAt, budgetMs
   };
 }
 
+async function isolatedParseSample(texts, startedAt, budgetMs) {
+  await replaceBrowser();
+  const res = await evaluateInPage(
+    PAGE_PARSE_BENCH,
+    {
+      texts,
+      reps: 1,
+      warmup: 1,
+      nullReps: 0,
+      minSampleMs: PARSE_MIN_SAMPLE_MS,
+      calibrationTargetMs: PARSE_CALIBRATION_TARGET_MS,
+    },
+    remainingBudgetMs(startedAt, budgetMs),
+  );
+  if (res.exceptionDetails) throw new Error(res.exceptionDetails.text);
+  const out = res.result.value;
+  const err =
+    out.error ??
+    (out.signatures.length === texts.length ? null : 'parse revision count mismatch') ??
+    (out.times.length === 1 ? null : 'parse timing sample count mismatch') ??
+    (out.parseRecords.every((record) => record.accepted === true)
+      ? null
+      : 'mermaid.parse rejected a revision') ??
+    (out.sampleFloorValid ? null : 'parse integrated sample missed the floor');
+  if (err) throw new Error(err);
+  return {
+    ms: out.times[0],
+    signatures: out.signatures,
+    records: out.parseRecords,
+    batch: out.batch,
+    integratedMs: out.effectIntegratedSampleMs[0],
+    bytes: out.signatures.reduce((sum, value) => sum + value.length, 0),
+  };
+}
+
+async function isolatedParseBenchmark(texts, reps, nullReps, startedAt, budgetMs, itemId) {
+  const nullRatios = [];
+  const nullIntegratedSampleMs = [];
+  const nullBatches = [];
+  let nullChecksumBytes = 0;
+  let referenceSignatures = null;
+  let referenceRecords = null;
+  const checkDeterminism = (sample, label) => {
+    const signatures = JSON.stringify(sample.signatures);
+    const records = JSON.stringify(sample.records);
+    referenceSignatures ??= signatures;
+    referenceRecords ??= records;
+    if (signatures !== referenceSignatures || records !== referenceRecords) {
+      throw new Error(`nondeterministic mermaid.parse result across isolated ${label}`);
+    }
+  };
+  for (let i = 0; i < nullReps; i++) {
+    let a;
+    let b;
+    if (i % 2 === 0) {
+      a = await isolatedParseSample(texts, startedAt, budgetMs);
+      b = await isolatedParseSample(texts, startedAt, budgetMs);
+    } else {
+      b = await isolatedParseSample(texts, startedAt, budgetMs);
+      a = await isolatedParseSample(texts, startedAt, budgetMs);
+    }
+    checkDeterminism(a, `A/A arm A sample ${i + 1}`);
+    checkDeterminism(b, `A/A arm B sample ${i + 1}`);
+    nullRatios.push(a.ms / Math.max(Number.EPSILON, b.ms));
+    nullIntegratedSampleMs.push(a.integratedMs, b.integratedMs);
+    nullBatches.push(a.batch, b.batch);
+    nullChecksumBytes += a.bytes + b.bytes;
+    log(`parse null ${itemId}: ${i + 1}/${nullReps}`);
+  }
+
+  const times = [];
+  let signatures = [];
+  let records = [];
+  let batch = null;
+  const effectIntegratedSampleMs = [];
+  const effectBatches = [];
+  for (let i = 0; i < reps; i++) {
+    const measured = await isolatedParseSample(texts, startedAt, budgetMs);
+    checkDeterminism(measured, `effect sample ${i + 1}`);
+    times.push(measured.ms);
+    effectIntegratedSampleMs.push(measured.integratedMs);
+    effectBatches.push(measured.batch);
+    signatures = measured.signatures;
+    records = measured.records;
+    batch = measured.batch;
+    log(`parse real ${itemId}: ${i + 1}/${reps}`);
+  }
+  return {
+    times,
+    signatures,
+    parseRecords: records,
+    batch,
+    effectIntegratedSampleMs,
+    nullIntegratedSampleMs,
+    effectBatches,
+    nullBatches,
+    deterministicOutput: true,
+    sampleFloorValid:
+      effectIntegratedSampleMs.length > 0 &&
+      [...effectIntegratedSampleMs, ...nullIntegratedSampleMs]
+        .every((value) => value >= PARSE_MIN_SAMPLE_MS),
+    nullRatios,
+    nullChecksumBytes,
+    nullOutputValid: true,
+    error: null,
+  };
+}
+
 let failed = false;
 try {
   // Matches run.mjs: one id, or a comma-separated list.
@@ -726,12 +1081,23 @@ try {
     // exposed opposite-sign null-median movement. This raises precision without changing the
     // effect sample count, input, or verdict rule.
     let nullReps = Math.max(MIN_NULL_ROUNDS, item.null_reps_js ?? reps);
-    const isolateSamples = forceSampleIsolation || isolatesSampleState(texts.length);
+    // `mermaid.parse()` clears the diagram DB and reparses on every call. Keep its page hot so the
+    // public parser boundary excludes one-time registration/JIT work; render mode retains the
+    // fresh-browser isolation required for stateful long traces.
+    const isolateSamples =
+      !parseOnly && (forceSampleIsolation || isolatesSampleState(texts.length));
     if (isolateSamples) nullReps = Math.max(ISOLATED_NULL_ROUNDS, nullReps);
     // A declared `warmup_js: 0` means zero, not one: on an item that takes minutes per render, a
     // warmup pass doubles the item for no statistical gain. `Math.max(1, ...)` still guards the
     // pinned items, whose warmup must never be scaled away by `--reps-scale`.
     let warmup = item.warmup_js === 0 ? 0 : Math.max(1, Math.round(item.warmup_js * repsScale));
+    if (parseOnly) {
+      warmup = Math.max(1, warmup);
+      // The parse driver requires an independent cross-runtime effect CI on every row. Many
+      // render-era corpora predate that rule and carry only 1-3 expensive render samples; public
+      // parse calls are cheap, so raise their effect arm to the same nine-sample minimum as A/A.
+      reps = effectRepsForMode(reps, true);
+    }
     if (renderOnce) {
       reps = 1;
       nullReps = 0;
@@ -759,6 +1125,8 @@ try {
         inside_timed_region: false,
       },
       execution_model: 'single_page_main_thread',
+      measurement_mode: mode,
+      measurement_boundary: parseOnly ? 'public_parse_validate' : 'parse_layout_render_svg',
       render_once: renderOnce,
       id: item.id,
       revisions: texts.length,
@@ -800,7 +1168,7 @@ try {
 
     // Probe phase: one untimed render of the largest revision, so an item that cannot finish is
     // discovered in one render rather than `warmup + reps` of them.
-    if (budgetMs) {
+    if (budgetMs && !parseOnly) {
       try {
         const probe = largestInput(texts);
         probeInputBytes = probe.bytes;
@@ -846,21 +1214,33 @@ try {
       }
     }
 
-    const args = { texts, reps, warmup, nullReps, tag };
+    const args = {
+      texts,
+      reps,
+      warmup,
+      nullReps,
+      tag,
+      minSampleMs: PARSE_MIN_SAMPLE_MS,
+      calibrationTargetMs: PARSE_CALIBRATION_TARGET_MS,
+    };
     let res;
     let out;
     try {
       if (isolateSamples) {
-        out = await isolatedBenchmark(texts, reps, nullReps, tag, t0, budgetMs, item.id);
+        out = parseOnly
+          ? await isolatedParseBenchmark(texts, reps, nullReps, t0, budgetMs, item.id)
+          : await isolatedBenchmark(texts, reps, nullReps, tag, t0, budgetMs, item.id);
       } else {
         res = await evaluateInPage(
-          PAGE_BENCH,
+          parseOnly ? PAGE_PARSE_BENCH : PAGE_BENCH,
           args,
           budgetMs ? budgetMs - (Date.now() - t0) : null,
         );
       }
     } catch (e) {
-      if (!item.dnf_allowed) throw new Error(`${item.id}: ${e.message}`);
+      if (!item.dnf_allowed || (parseOnly && !(e instanceof Deadline))) {
+        throw new Error(`${item.id}: ${e.message}`);
+      }
       await dnf(
         'timed',
         e instanceof Deadline ? 'timeout' : 'failed',
@@ -873,18 +1253,26 @@ try {
       if (res.exceptionDetails) throw new Error(`${item.id}: ${res.exceptionDetails.text}`);
       out = res.result.value;
     }
-    // Every revision is validated, not just the last: a trace that silently degrades into mermaid's
-    // error placeholder halfway through would otherwise look like a very fast render.
-    const err =
-      out.error ??
-      (out.nullOutputValid ? null : 'A/A null control produced invalid SVG') ??
-      out.svgs.map(validate).find(Boolean) ??
-      (out.svgs.length === texts.length ? null : 'revision count mismatch');
+    // Every revision is validated, not just the last. Parse mode requires public-API acceptance;
+    const outputs = parseOnly ? out.signatures : out.svgs;
+    const err = parseOnly
+      ? out.error ??
+        (out.deterministicOutput ? null : 'nondeterministic mermaid.parse result') ??
+        (out.nullOutputValid ? null : 'A/A null control rejected a parse') ??
+        (outputs.length === texts.length ? null : 'parse revision count mismatch') ??
+        (out.parseRecords.every((record) => record.accepted === true)
+          ? null
+          : 'mermaid.parse rejected a revision') ??
+        (out.sampleFloorValid ? null : 'parse integrated sample missed the floor')
+      : out.error ??
+        (out.nullOutputValid ? null : 'A/A null control produced invalid SVG') ??
+        outputs.map(validate).find(Boolean) ??
+        (outputs.length === texts.length ? null : 'revision count mismatch');
     record.wall_s = (Date.now() - t0) / 1000;
     if (err) {
       // An in-page failure on a budgeted item is mermaid's own guardrail or an OOM at a size it
       // cannot serve -- a did-not-finish, not a broken harness.
-      if (item.dnf_allowed) {
+      if (item.dnf_allowed && !parseOnly) {
         await dnf('timed', 'failed', err);
         continue;
       }
@@ -895,19 +1283,28 @@ try {
     }
     const ms = stats(out.times);
     const nullStats = nullControl(out.nullRatios, out.nullChecksumBytes);
-    const outputBytes = out.svgs.reduce((a, s) => a + s.length, 0);
-    if (dumpSvgDir) {
-      writeFileSync(join(dumpSvgDir, `${item.id}.mermaid.svg`), out.svgs[out.svgs.length - 1]);
+    const outputBytes = outputs.reduce((a, value) => a + value.length, 0);
+    if (dumpSvgDir && !parseOnly) {
+      writeFileSync(join(dumpSvgDir, `${item.id}.mermaid.svg`), outputs[outputs.length - 1]);
       // Cross-engine equivalence (`bd-evx6`) compares every diagram in the job, not just the
       // last one. A 500-diagram CI batch is a single item with 500 revisions, so the per-revision
       // dump is what makes the check cover the whole batch. `output_sha256` below hashes these same
       // bytes joined, which lets the checker prove it read the measured render.
       if (dumpAllRevisions) {
-        for (const [revision, svg] of out.svgs.entries()) {
+        for (const [revision, svg] of outputs.entries()) {
           writeFileSync(join(dumpSvgDir, `${item.id}.rev${String(revision).padStart(5, '0')}.mermaid.svg`), svg);
         }
       }
     }
+    const durationNs = Object.fromEntries(
+      Object.entries(ms)
+        .filter(([k]) => !['cv_pct', 'mad_pct'].includes(k))
+        .map(([k, v]) => {
+          if (k === 'n' || v === null) return [k, v];
+          if (k === 'samples') return [k, v.map((sample) => Math.round(sample * 1e6))];
+          return [k, Math.round(v * 1e6)];
+        }),
+    );
     console.log(JSON.stringify({
       ...record,
       status: 'ok',
@@ -915,27 +1312,53 @@ try {
       reps,
       null_reps: nullReps,
       sample_isolation: isolateSamples ? 'fresh_browser_per_arm' : 'single_browser',
+      batch: parseOnly ? out.batch : 1,
+      min_sample_ns: parseOnly ? PARSE_MIN_SAMPLE_MS * 1e6 : null,
+      calibration_target_ns: parseOnly ? PARSE_CALIBRATION_TARGET_MS * 1e6 : null,
+      integrated_sample_ns: parseOnly
+        ? Math.round(stats(out.effectIntegratedSampleMs).p50 * 1e6)
+        : null,
+      effect_integrated_samples_ns: parseOnly
+        ? out.effectIntegratedSampleMs.map((sample) => Math.round(sample * 1e6))
+        : null,
+      null_integrated_samples_ns: parseOnly
+        ? out.nullIntegratedSampleMs.map((sample) => Math.round(sample * 1e6))
+        : null,
+      effect_batches: parseOnly ? out.effectBatches : null,
+      null_batches: parseOnly ? out.nullBatches : null,
+      parse_deterministic_output: parseOnly ? out.deterministicOutput : null,
       budget_ms: budgetMs,
       probe_ms: probeMs === null ? null : Math.round(probeMs),
       probe_input_bytes: probeInputBytes,
-      probe_parse_accepted: probeParseAccepted,
-      render_ns: Object.fromEntries(
-        Object.entries(ms)
-          .filter(([k]) => !['cv_pct', 'mad_pct'].includes(k))
-          .map(([k, v]) => {
-            if (k === 'n' || v === null) return [k, v];
-            if (k === 'samples') return [k, v.map((sample) => Math.round(sample * 1e6))];
-            return [k, Math.round(v * 1e6)];
-          }),
-      ),
+      probe_parse_accepted: parseOnly ? true : probeParseAccepted,
+      ...(parseOnly ? { parse_ns: durationNs } : { render_ns: durationNs }),
       cv_pct: Number(ms.cv_pct.toFixed(2)),
       mad_pct: Number(ms.mad_pct.toFixed(2)),
       null_control: nullStats,
-      output_bytes: outputBytes,
-      output_sha256: sha256(out.svgs.join('')),
+      parse_accepted_revisions: parseOnly
+        ? out.parseRecords.filter((record) => record.accepted === true).length
+        : null,
+      parse_diagram_types: parseOnly
+        ? [...new Set(out.parseRecords.map((record) => record.diagramType).filter(Boolean))].sort()
+        : null,
+      parse_diagram_types_ordered: parseOnly
+        ? out.parseRecords.map((record) => record.diagramType)
+        : null,
+      parse_nonempty_config_revisions: parseOnly
+        ? out.parseRecords.filter((record) => record.configNonempty).length
+        : null,
+      ...(parseOnly
+        ? {
+            parse_result_bytes: outputBytes,
+            parse_result_sha256: sha256(outputs.join('')),
+          }
+        : {
+            output_bytes: outputBytes,
+            output_sha256: sha256(outputs.join('')),
+          }),
     }));
     log(
-      `ok   ${item.id}  p50=${ms.p50.toFixed(1)}ms ` +
+      `ok   ${item.id}  ${parseOnly ? 'parse-' : ''}p50=${ms.p50.toFixed(1)}ms ` +
       `null=${nullStats.median === null ? 'missing' : `${nullStats.median.toFixed(6)} [${nullStats.ci95_lo.toFixed(6)},${nullStats.ci95_hi.toFixed(6)}]`} ` +
       `bytes=${outputBytes}`,
     );

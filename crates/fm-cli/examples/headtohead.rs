@@ -1,8 +1,9 @@
 //! frankenmermaid side of the pinned mermaid-js head-to-head harness (bead bd-1buv.1).
 //!
 //! Reads a corpus JSON file produced by `scripts/headtohead/run.mjs` (the generators live in
-//! `scripts/headtohead/corpus.mjs` so both engines consume byte-identical input), then times the
-//! full parse -> layout -> render-to-SVG pipeline, which is the same work `mermaid.render()` does.
+//! `scripts/headtohead/corpus.mjs` so both engines consume byte-identical input), then times either
+//! the full parse -> layout -> render-to-SVG pipeline or the public parser boundary selected by
+//! `FM_H2H_MODE=render|parse`.
 //!
 //! Emits one JSON object per corpus item on stdout, matching the schema of `mermaid_bench.mjs`.
 //! Determinism is checked in-process (length per iteration, full bytes once outside the timed
@@ -11,10 +12,11 @@
 //!
 //! Run via `scripts/headtohead/run.mjs`, not directly.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use fm_parser::parse;
+use fm_parser::{ParseResult, parse};
 use fm_render_svg::{A11yConfig, SvgRenderConfig, render_svg_with_layout};
 use rayon::prelude::*;
 use serde::Deserialize;
@@ -35,6 +37,39 @@ struct CorpusItem {
     texts: Vec<String>,
     reps: usize,
     warmup: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkloadMode {
+    Render,
+    Parse,
+}
+
+impl WorkloadMode {
+    fn from_env() -> Result<Self, String> {
+        match std::env::var("FM_H2H_MODE").as_deref() {
+            Ok("parse") => Ok(Self::Parse),
+            Ok("render") | Err(std::env::VarError::NotPresent) => Ok(Self::Render),
+            Ok(value) => Err(format!(
+                "invalid FM_H2H_MODE={value:?}; expected \"render\" or \"parse\""
+            )),
+            Err(error) => Err(format!("cannot read FM_H2H_MODE: {error}")),
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Render => "render",
+            Self::Parse => "parse",
+        }
+    }
+
+    const fn boundary(self) -> &'static str {
+        match self {
+            Self::Render => "parse_layout_render_svg",
+            Self::Parse => "public_parse_validate",
+        }
+    }
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -528,6 +563,232 @@ struct PairedMeasured {
     arm_b_output_bytes: usize,
 }
 
+#[derive(PartialEq, Eq)]
+struct ParseReference {
+    serialized: Vec<String>,
+    accepted_revisions: usize,
+    recovery_revisions: usize,
+    warning_revisions: usize,
+    unsupported_revisions: usize,
+    diagram_types_ordered: Vec<String>,
+    diagram_types: Vec<String>,
+}
+
+impl ParseReference {
+    fn output_bytes(&self) -> usize {
+        self.serialized.iter().map(String::len).sum()
+    }
+
+    fn output_sha256(&self) -> String {
+        sha256_hex(self.serialized.concat().as_bytes())
+    }
+}
+
+fn parse_results_reference(parsed_results: &[ParseResult]) -> Result<ParseReference, String> {
+    let mut serialized = Vec::with_capacity(parsed_results.len());
+    let mut accepted_revisions = 0;
+    let mut recovery_revisions = 0;
+    let mut warning_revisions = 0;
+    let mut unsupported_revisions = 0;
+    let mut diagram_types_ordered = Vec::with_capacity(parsed_results.len());
+    for parsed in parsed_results {
+        let diagram_type = parsed.ir.diagram_type.as_str();
+        let recovered = parsed.parse_mode().as_str() == "recover";
+        let warned = !parsed.warnings.is_empty() || parsed.ir.has_warnings();
+        let unsupported = parsed.ir.diagram_type.support_label() != "full";
+        recovery_revisions += usize::from(recovered);
+        warning_revisions += usize::from(warned);
+        unsupported_revisions += usize::from(unsupported);
+        if diagram_type != "unknown"
+            && !parsed.ir.has_errors()
+            && !recovered
+            && !warned
+            && !unsupported
+        {
+            accepted_revisions += 1;
+        }
+        diagram_types_ordered.push(diagram_type.to_owned());
+        serialized.push(
+            serde_json::to_string(&parsed)
+                .map_err(|error| format!("cannot serialize parser reference: {error}"))?,
+        );
+    }
+    let mut diagram_types = diagram_types_ordered.clone();
+    diagram_types.sort();
+    diagram_types.dedup();
+    Ok(ParseReference {
+        serialized,
+        accepted_revisions,
+        recovery_revisions,
+        warning_revisions,
+        unsupported_revisions,
+        diagram_types_ordered,
+        diagram_types,
+    })
+}
+
+fn parse_reference(texts: &[String]) -> Result<ParseReference, String> {
+    parse_results_reference(&parse_all(texts))
+}
+
+fn parse_all(texts: &[String]) -> Vec<ParseResult> {
+    texts
+        .iter()
+        .map(|text| parse(std::hint::black_box(text.as_str())))
+        .collect()
+}
+
+fn parse_batches_into(texts: &[String], batch: usize, parsed_batches: &mut Vec<Vec<ParseResult>>) {
+    for _ in 0..batch {
+        parsed_batches.push(parse_all(texts));
+    }
+}
+
+fn calibrate_parse_batch(executor: &RenderExecutor, item: &CorpusItem) -> usize {
+    let mut fastest_warmup = u64::MAX;
+    for _ in 0..item.warmup.max(1) {
+        let t0 = Instant::now();
+        std::hint::black_box(parse_all(&item.texts));
+        fastest_warmup =
+            fastest_warmup.min(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX));
+    }
+    let mut batch = calibrated_batch(executor.min_sample_ns, fastest_warmup);
+    for _ in 0..4 {
+        let mut parsed_batches = Vec::with_capacity(batch);
+        let t0 = Instant::now();
+        parse_batches_into(&item.texts, batch, &mut parsed_batches);
+        let elapsed = u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        std::hint::black_box(parsed_batches);
+        if elapsed >= executor.calibration_target_ns {
+            return batch;
+        }
+        batch = rescaled_batch(batch, executor.calibration_target_ns, elapsed);
+    }
+    batch
+}
+
+struct ParseArmTiming {
+    per_job_ns: u64,
+    integrated_ns: u64,
+    references: Vec<ParseReference>,
+}
+
+fn time_parse_arm(item: &CorpusItem, batch: usize) -> Result<ParseArmTiming, String> {
+    let mut parsed_batches = Vec::with_capacity(batch);
+    let t0 = Instant::now();
+    parse_batches_into(&item.texts, batch, &mut parsed_batches);
+    let integrated_ns = u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    Ok(ParseArmTiming {
+        per_job_ns: integrated_ns / u64::try_from(batch).unwrap_or(1).max(1),
+        integrated_ns,
+        references: parsed_batches
+            .iter()
+            .map(|parsed| parse_results_reference(parsed))
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+struct ParseMeasured {
+    work_stats: Stats,
+    null_ratio: RatioStats,
+    reference: ParseReference,
+    batch: usize,
+    observed_threads: usize,
+    work_integrated_samples_ns: Vec<u64>,
+    null_integrated_samples_ns: Vec<u64>,
+}
+
+fn probe_parse_threads(texts: &[String], batch: usize) -> usize {
+    let mut observed = HashSet::new();
+    for _ in 0..batch {
+        observed.insert(std::thread::current().id());
+        std::hint::black_box(parse_all(texts));
+    }
+    observed.len()
+}
+
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "nanosecond timing magnitudes fit f64 exactly enough for ratio statistics"
+)]
+fn measure_parse(
+    executor: &RenderExecutor,
+    item: &CorpusItem,
+    rounds: usize,
+) -> Result<ParseMeasured, String> {
+    let before = parse_reference(&item.texts)?;
+    let batch = calibrate_parse_batch(executor, item);
+    let observed_threads = probe_parse_threads(&item.texts, batch);
+    let mut ratios = Vec::with_capacity(rounds);
+    let mut null_integrated_samples_ns = Vec::with_capacity(rounds.saturating_mul(2));
+    for round in 0..rounds {
+        let (a, b) = if round.is_multiple_of(2) {
+            (time_parse_arm(item, batch)?, time_parse_arm(item, batch)?)
+        } else {
+            let b = time_parse_arm(item, batch)?;
+            let a = time_parse_arm(item, batch)?;
+            (a, b)
+        };
+        if a.references
+            .iter()
+            .chain(&b.references)
+            .any(|reference| reference != &before)
+        {
+            return Err(format!(
+                "{}: nondeterministic parser output in A/A sample {}",
+                item.id,
+                round + 1
+            ));
+        }
+        ratios.push(a.per_job_ns as f64 / b.per_job_ns.max(1) as f64);
+        null_integrated_samples_ns.extend([a.integrated_ns, b.integrated_ns]);
+    }
+    let mut work_samples = Vec::with_capacity(rounds);
+    let mut work_integrated_samples_ns = Vec::with_capacity(rounds);
+    for round in 0..rounds {
+        let measured = time_parse_arm(item, batch)?;
+        if measured
+            .references
+            .iter()
+            .any(|reference| reference != &before)
+        {
+            return Err(format!(
+                "{}: nondeterministic parser output in effect sample {}",
+                item.id,
+                round + 1
+            ));
+        }
+        work_samples.push(measured.per_job_ns);
+        work_integrated_samples_ns.push(measured.integrated_ns);
+    }
+    if work_integrated_samples_ns
+        .iter()
+        .chain(&null_integrated_samples_ns)
+        .any(|sample| *sample < executor.min_sample_ns)
+    {
+        return Err(format!(
+            "{}: at least one integrated parse effect/null sample missed the {} ns floor",
+            item.id, executor.min_sample_ns
+        ));
+    }
+    let after = parse_reference(&item.texts)?;
+    if before != after {
+        return Err(format!(
+            "{}: nondeterministic parser output across timed samples",
+            item.id
+        ));
+    }
+    Ok(ParseMeasured {
+        work_stats: stats(work_samples),
+        null_ratio: ratio_stats(&ratios),
+        reference: before,
+        batch,
+        observed_threads,
+        work_integrated_samples_ns,
+        null_integrated_samples_ns,
+    })
+}
+
 /// Calibrate off the faster arm; both the A/A and A/B routines then use this exact batch.
 fn calibrate_batch(
     executor: &RenderExecutor,
@@ -714,6 +975,14 @@ fn main() {
         eprintln!("{e}");
         std::process::exit(2);
     });
+    let workload_mode = WorkloadMode::from_env().unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(2);
+    });
+    if workload_mode == WorkloadMode::Parse && executor.threads != 1 {
+        eprintln!("parse-only comparisons require FM_H2H_THREADS=1");
+        std::process::exit(2);
+    }
     let affinity = process_affinity(executor.available_parallelism);
     let affinity_source = if affinity.mask.as_deref() == Some("all-visible") {
         "portable_visible_cpu_fallback"
@@ -742,6 +1011,8 @@ fn main() {
             "min_sample_ns": executor.min_sample_ns,
             "calibration_target_ns": executor.calibration_target_ns,
             "execution_model": executor.execution_model(),
+            "measurement_mode": workload_mode.as_str(),
+            "measurement_boundary": workload_mode.boundary(),
         })
     );
 
@@ -774,6 +1045,99 @@ fn main() {
             edges = edges.max(parsed.ir.edges.len());
             nodes_total += parsed.ir.nodes.len();
             edges_total += parsed.ir.edges.len();
+        }
+
+        if workload_mode == WorkloadMode::Parse {
+            let rounds = item.reps.max(MIN_NULL_ROUNDS);
+            let measured = match measure_parse(&executor, item, rounds) {
+                Ok(value) => value,
+                Err(error) => {
+                    failed = true;
+                    eprintln!("[frankenmermaid] FAIL {error}");
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "engine": "frankenmermaid",
+                            "id": item.id,
+                            "status": "error",
+                            "error": error,
+                            "measurement_mode": workload_mode.as_str(),
+                            "measurement_boundary": workload_mode.boundary(),
+                        })
+                    );
+                    continue;
+                }
+            };
+            let joined_input = item.texts.join(REVISION_SEP);
+            let output_sha256 = measured.reference.output_sha256();
+            println!(
+                "{}",
+                serde_json::json!({
+                    "engine": "frankenmermaid",
+                    "id": item.id,
+                    "status": "ok",
+                    "measurement_mode": workload_mode.as_str(),
+                    "measurement_boundary": workload_mode.boundary(),
+                    "warmup": item.warmup,
+                    "batch": measured.batch,
+                    "worker_threads": 1,
+                    "thread_count_requested": 1,
+                    "thread_count_actually_used": measured.observed_threads,
+                    "thread_probe": {
+                        "method": "instrumented_calling_thread_id_union_over_exact_parse_workload",
+                        "probe_batch": measured.batch,
+                        "caller_workers_observed": measured.observed_threads,
+                        "portable_across_isa": true,
+                        "inside_timed_region": false,
+                    },
+                    "available_parallelism": executor.available_parallelism,
+                    "oversubscribed": false,
+                    "affinity_mask": affinity.mask.as_deref(),
+                    "affinity_cpus": &affinity.cpus,
+                    "affinity_source": affinity_source,
+                    "min_sample_ns": executor.min_sample_ns,
+                    "calibration_target_ns": executor.calibration_target_ns,
+                    "effect_integrated_samples_ns": &measured.work_integrated_samples_ns,
+                    "null_integrated_samples_ns": &measured.null_integrated_samples_ns,
+                    "execution_model": "single_calling_thread",
+                    "revisions": item.texts.len(),
+                    "input_sha256": sha256_hex(joined_input.as_bytes()),
+                    "input_bytes": joined_input.len(),
+                    "nodes": nodes,
+                    "edges": edges,
+                    "nodes_total": nodes_total,
+                    "edges_total": edges_total,
+                    "parse_ns": ns_json(&measured.work_stats),
+                    "cv_pct": (measured.work_stats.cv_pct * 100.0).round() / 100.0,
+                    "mad_pct": (measured.work_stats.mad_pct * 100.0).round() / 100.0,
+                    "null_control": ratio_json(
+                        &measured.null_ratio,
+                        "aa_null",
+                        &output_sha256,
+                        &output_sha256,
+                    ),
+                    "parse_accepted_revisions": measured.reference.accepted_revisions,
+                    "parse_recovery_revisions": measured.reference.recovery_revisions,
+                    "parse_warning_revisions": measured.reference.warning_revisions,
+                    "parse_unsupported_revisions": measured.reference.unsupported_revisions,
+                    "parse_diagram_types_ordered": &measured.reference.diagram_types_ordered,
+                    "parse_diagram_types": &measured.reference.diagram_types,
+                    "parse_result_bytes": measured.reference.output_bytes(),
+                    "parse_result_sha256": output_sha256,
+                })
+            );
+            eprintln!(
+                "[frankenmermaid] ok   {}  parse-p50={:.3}ms null={:.6} [{:.6},{:.6}] accepted={}/{}",
+                item.id,
+                f64::from(u32::try_from(measured.work_stats.p50 / 1000).unwrap_or(u32::MAX))
+                    / 1000.0,
+                measured.null_ratio.median,
+                measured.null_ratio.ci95_lo,
+                measured.null_ratio.ci95_hi,
+                measured.reference.accepted_revisions,
+                item.texts.len(),
+            );
+            continue;
         }
 
         let batch = calibrate_batch(&executor, item, &default_cfg, &lean_cfg);
@@ -864,6 +1228,8 @@ fn main() {
                 "engine": "frankenmermaid",
                 "id": item.id,
                 "status": "ok",
+                "measurement_mode": workload_mode.as_str(),
+                "measurement_boundary": workload_mode.boundary(),
                 "warmup": item.warmup,
                 "batch": batch,
                 "worker_threads": executor.threads,
@@ -937,8 +1303,8 @@ mod tests {
     use fm_render_svg::SvgRenderConfig;
 
     use super::{
-        RenderExecutor, bootstrap_median_ci, calibrated_batch, median, parse_cpu_list, ratio_stats,
-        rescaled_batch, stats,
+        CorpusItem, RenderExecutor, WorkloadMode, bootstrap_median_ci, calibrated_batch,
+        measure_parse, median, parse_cpu_list, ratio_stats, rescaled_batch, stats,
     };
 
     #[test]
@@ -1004,5 +1370,51 @@ mod tests {
             vec![0, 1, 2, 3, 8, 10, 11]
         );
         assert!(parse_cpu_list("4-2").is_err());
+    }
+
+    #[test]
+    fn parse_mode_produces_a_deterministic_full_result_signature() {
+        let item = CorpusItem {
+            id: "parse-mode-test".to_owned(),
+            texts: vec![
+                "flowchart LR\nA[First]-->B[Second]".to_owned(),
+                "flowchart TD\nC[Third]-->D[Fourth]".to_owned(),
+            ],
+            reps: 9,
+            warmup: 1,
+        };
+        let executor = RenderExecutor::new(1).expect("scalar executor");
+        let measured = measure_parse(&executor, &item, 9).expect("parse measurement");
+        assert_eq!(measured.reference.accepted_revisions, item.texts.len());
+        assert_eq!(measured.reference.recovery_revisions, 0);
+        assert_eq!(measured.reference.warning_revisions, 0);
+        assert_eq!(measured.reference.unsupported_revisions, 0);
+        assert_eq!(
+            measured.reference.diagram_types,
+            vec!["flowchart".to_owned()]
+        );
+        assert_eq!(
+            measured.reference.diagram_types_ordered,
+            vec!["flowchart".to_owned(), "flowchart".to_owned()]
+        );
+        assert_eq!(measured.work_stats.n, 9);
+        assert_eq!(measured.null_ratio.n, 9);
+        assert_eq!(measured.work_integrated_samples_ns.len(), 9);
+        assert_eq!(measured.null_integrated_samples_ns.len(), 18);
+        assert!(
+            measured
+                .work_integrated_samples_ns
+                .iter()
+                .chain(&measured.null_integrated_samples_ns)
+                .all(|sample| *sample >= executor.min_sample_ns)
+        );
+        assert_eq!(measured.observed_threads, 1);
+        assert_eq!(measured.reference.output_sha256().len(), 64);
+    }
+
+    #[test]
+    fn workload_modes_report_distinct_boundaries() {
+        assert_eq!(WorkloadMode::Render.boundary(), "parse_layout_render_svg");
+        assert_eq!(WorkloadMode::Parse.boundary(), "public_parse_validate");
     }
 }

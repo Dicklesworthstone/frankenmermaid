@@ -41,6 +41,11 @@ function arg(name, fallback = null) {
   return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : fallback;
 }
 const has = (name) => process.argv.includes(`--${name}`);
+const measurementMode = arg('mode', 'render');
+if (!['render', 'parse'].includes(measurementMode)) {
+  console.error(`[run] --mode must be render or parse, got ${JSON.stringify(measurementMode)}`);
+  process.exit(2);
+}
 
 function cpuTimeSnapshot() {
   return cpus().map((record, cpu) => ({
@@ -674,6 +679,16 @@ function validElfSelfReport(record) {
 
 const validSha256 = (value) => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
 
+function validRchBuildProvenance(builder, base, cleanOverlay) {
+  return (
+    typeof builder === 'string' &&
+    builder.trim().length > 0 &&
+    typeof base === 'string' &&
+    /^[0-9a-f]{40}$/.test(base) &&
+    cleanOverlay === true
+  );
+}
+
 function validHostTopology(record) {
   return (
     typeof record?.host_identity === 'string' &&
@@ -728,26 +743,176 @@ function validIncumbentThreadProvenance(record) {
   );
 }
 
+function validParseThreadProvenance(record) {
+  return (
+    record?.measurement_boundary === 'public_parse_validate' &&
+    record.worker_threads === 1 &&
+    record.thread_count_requested === 1 &&
+    record.thread_count_actually_used === 1 &&
+    record.thread_probe?.method ===
+      'instrumented_calling_thread_id_union_over_exact_parse_workload' &&
+    record.thread_probe?.caller_workers_observed === 1 &&
+    record.thread_probe?.probe_batch === record.batch &&
+    record.thread_probe?.inside_timed_region === false &&
+    record.execution_model === 'single_calling_thread' &&
+    Array.isArray(record.affinity_cpus) &&
+    record.affinity_cpus.length > 0
+  );
+}
+
+function medianNumber(values) {
+  if (!Array.isArray(values) || values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[middle - 1] + sorted[middle]) / 2
+    : sorted[middle];
+}
+
+function validParseSampleFloor(record, requireBatchVectors = false) {
+  const effectSamples = record?.effect_integrated_samples_ns;
+  const nullSamples = record?.null_integrated_samples_ns;
+  const timing = record?.parse_ns;
+  const nullControl = record?.null_control;
+  const floor = record?.min_sample_ns;
+  const durationsValid =
+    floor === THREAD_SWEEP_MIN_SAMPLE_NS &&
+    record?.calibration_target_ns === THREAD_SWEEP_CALIBRATION_TARGET_NS &&
+    Array.isArray(effectSamples) &&
+    effectSamples.length === timing?.samples?.length &&
+    effectSamples.length > 0 &&
+    Array.isArray(nullSamples) &&
+    nullSamples.length === 2 * (nullControl?.n ?? -1) &&
+    [...effectSamples, ...nullSamples].every(
+      (sample) => Number.isSafeInteger(sample) && sample >= floor,
+    );
+  if (!durationsValid || !requireBatchVectors) return durationsValid;
+  return (
+    Array.isArray(record.effect_batches) &&
+    record.effect_batches.length === effectSamples.length &&
+    Array.isArray(record.null_batches) &&
+    record.null_batches.length === nullSamples.length &&
+    [...record.effect_batches, ...record.null_batches].every(
+      (batch) => Number.isSafeInteger(batch) && batch >= 1,
+    )
+  );
+}
+
+function comparatorDnfLowerBound(record, rustP50Ns) {
+  return (
+    record?.status === 'dnf' &&
+    record.kind === 'timeout' &&
+    record.phase === 'probe' &&
+    Number.isFinite(record.budget_ms) &&
+    record.budget_ms > 0 &&
+    Number.isFinite(rustP50Ns) &&
+    rustP50Ns > 0
+  )
+    ? (record.budget_ms * 1e6) / rustP50Ns
+    : null;
+}
+
+function timingStats(record) {
+  return measurementMode === 'parse' ? record?.parse_ns : record?.pipeline_ns;
+}
+
+function incumbentTimingStats(record) {
+  return measurementMode === 'parse' ? record?.parse_ns : record?.render_ns;
+}
+
+function nativeResultSha256(record) {
+  return measurementMode === 'parse' ? record?.parse_result_sha256 : record?.output_sha256;
+}
+
+function nativeResultBytes(record) {
+  return measurementMode === 'parse' ? record?.parse_result_bytes : record?.output_bytes;
+}
+
+const PARSE_TYPE_NORMALIZATION = new Map([
+  ['flowchart', 'flowchart'],
+  ['flowchart-v2', 'flowchart'],
+  ['sequence', 'sequence'],
+  ['class', 'class'],
+  ['state', 'state'],
+  ['stateDiagram', 'state'],
+  ['stateDiagram-v2', 'state'],
+  ['er', 'er'],
+]);
+
+function normalizeParseTypes(values) {
+  if (!Array.isArray(values)) return { valid: false, normalized: null, unknown: ['<missing>'] };
+  const unknown = values.filter((value) => !PARSE_TYPE_NORMALIZATION.has(value));
+  return {
+    valid: unknown.length === 0,
+    normalized: unknown.length === 0
+      ? values.map((value) => PARSE_TYPE_NORMALIZATION.get(value))
+      : null,
+    unknown: [...new Set(unknown)],
+  };
+}
+
 function semanticWorkGate(frankenmermaid, incumbent) {
   const fmCount = frankenmermaid?.revisions;
   const incumbentCount = incumbent?.revisions;
   const fmInput = frankenmermaid?.input_sha256;
   const incumbentInput = incumbent?.input_sha256;
+  const expectedBoundary =
+    measurementMode === 'parse' ? 'public_parse_validate' : 'parse_layout_render_svg';
+  const fmTypes = normalizeParseTypes(frankenmermaid?.parse_diagram_types_ordered);
+  const incumbentTypes = normalizeParseTypes(incumbent?.parse_diagram_types_ordered);
+  const parseSemantics =
+    measurementMode !== 'parse' ||
+    incumbent?.status !== 'ok' ||
+    (
+      fmTypes.valid &&
+      incumbentTypes.valid &&
+      JSON.stringify(fmTypes.normalized) === JSON.stringify(incumbentTypes.normalized) &&
+      frankenmermaid?.parse_recovery_revisions === 0 &&
+      frankenmermaid?.parse_warning_revisions === 0 &&
+      frankenmermaid?.parse_unsupported_revisions === 0 &&
+      incumbent?.parse_nonempty_config_revisions === 0 &&
+      incumbent?.parse_deterministic_output === true
+    );
+  const accepted =
+    measurementMode !== 'parse' ||
+    incumbent?.status !== 'ok' ||
+    (
+      frankenmermaid?.parse_accepted_revisions === fmCount &&
+      incumbent?.parse_accepted_revisions === incumbentCount
+    );
   const equal =
     Number.isSafeInteger(fmCount) &&
     fmCount > 0 &&
     Number.isSafeInteger(incumbentCount) &&
     incumbentCount === fmCount &&
     validSha256(fmInput) &&
-    incumbentInput === fmInput;
+    incumbentInput === fmInput &&
+    frankenmermaid?.measurement_boundary === expectedBoundary &&
+    incumbent?.measurement_boundary === expectedBoundary &&
+    accepted &&
+    parseSemantics;
   return {
     verdict: equal ? 'equal' : 'mismatch',
-    unit: 'diagram_render',
+    unit: measurementMode === 'parse' ? 'diagram_parse' : 'diagram_render',
+    measurement_boundary: expectedBoundary,
     frankenmermaid_requested_count: fmCount ?? null,
     incumbent_requested_count: incumbentCount ?? null,
+    frankenmermaid_accepted_count: frankenmermaid?.parse_accepted_revisions ?? null,
+    incumbent_accepted_count: incumbent?.parse_accepted_revisions ?? null,
+    frankenmermaid_recovery_count: frankenmermaid?.parse_recovery_revisions ?? null,
+    frankenmermaid_warning_count: frankenmermaid?.parse_warning_revisions ?? null,
+    frankenmermaid_unsupported_count: frankenmermaid?.parse_unsupported_revisions ?? null,
+    incumbent_nonempty_config_count: incumbent?.parse_nonempty_config_revisions ?? null,
+    incumbent_deterministic_output: incumbent?.parse_deterministic_output ?? null,
+    frankenmermaid_normalized_types: fmTypes.normalized,
+    incumbent_normalized_types: incumbentTypes.normalized,
+    unknown_frankenmermaid_types: fmTypes.unknown,
+    unknown_incumbent_types: incumbentTypes.unknown,
     frankenmermaid_input_sha256: fmInput ?? null,
     incumbent_input_sha256: incumbentInput ?? null,
-    rule: 'both engines must receive the same positive diagram count and byte-identical input',
+    rule:
+      'both engines must execute the same declared boundary over the same positive diagram count '
+      + 'and byte-identical input; parse mode additionally requires every revision accepted',
   };
 }
 
@@ -882,14 +1047,16 @@ function medianCiGate(claimRatio, controls, effectCi = null, effectCiRequired = 
  * median-CI floor; the slower observation is always the denominator used for the public ratio.
  */
 function fmBracket(before, after) {
+  const beforeTiming = timingStats(before);
+  const afterTiming = timingStats(after);
   const controls = [before?.null_control, after?.null_control];
   const complete =
     before?.status === 'ok' &&
     after?.status === 'ok' &&
-    Number.isFinite(before?.pipeline_ns?.p50) &&
-    before.pipeline_ns.p50 > 0 &&
-    Number.isFinite(after?.pipeline_ns?.p50) &&
-    after.pipeline_ns.p50 > 0 &&
+    Number.isFinite(beforeTiming?.p50) &&
+    beforeTiming.p50 > 0 &&
+    Number.isFinite(afterTiming?.p50) &&
+    afterTiming.p50 > 0 &&
     controls.every(
       (control) =>
         control?.sufficient === true &&
@@ -903,8 +1070,8 @@ function fmBracket(before, after) {
       rule: 'rust_pre_post_drift_inside_aa_median_ci_floor',
       cv_gate: 'never',
       reason: 'missing or insufficient bracketed Rust A/A measurement',
-      before_p50_ns: before?.pipeline_ns?.p50 ?? null,
-      after_p50_ns: after?.pipeline_ns?.p50 ?? null,
+      before_p50_ns: beforeTiming?.p50 ?? null,
+      after_p50_ns: afterTiming?.p50 ?? null,
       selected: null,
       drift_ratio: null,
       drift_magnitude: null,
@@ -912,8 +1079,8 @@ function fmBracket(before, after) {
     };
   }
 
-  const beforeP50 = before.pipeline_ns.p50;
-  const afterP50 = after.pipeline_ns.p50;
+  const beforeP50 = beforeTiming.p50;
+  const afterP50 = afterTiming.p50;
   const driftRatio = afterP50 / beforeP50;
   const driftMagnitude = Math.max(driftRatio, 1 / driftRatio);
   const nullRadius = Math.max(...controls.map((control) => control.half_width));
@@ -1203,9 +1370,49 @@ if (has('self-test')) {
   ) {
     throw new Error('incumbent actual-thread provenance validation regression');
   }
+  const validParseThreads = {
+    measurement_boundary: 'public_parse_validate',
+    worker_threads: 1,
+    thread_count_requested: 1,
+    thread_count_actually_used: 1,
+    execution_model: 'single_calling_thread',
+    batch: 4,
+    affinity_cpus: [0],
+    thread_probe: {
+      method: 'instrumented_calling_thread_id_union_over_exact_parse_workload',
+      caller_workers_observed: 1,
+      probe_batch: 4,
+      inside_timed_region: false,
+    },
+  };
+  if (
+    !validParseThreadProvenance(validParseThreads) ||
+    validParseThreadProvenance({ ...validParseThreads, thread_count_actually_used: null })
+  ) {
+    throw new Error('parse actual-thread provenance validation regression');
+  }
+  if (
+    !validRchBuildProvenance('hz1', 'a'.repeat(40), true) ||
+    validRchBuildProvenance('', 'a'.repeat(40), true) ||
+    validRchBuildProvenance('hz1', 'a'.repeat(39), true) ||
+    validRchBuildProvenance('hz1', 'a'.repeat(40), false)
+  ) {
+    throw new Error('RCH exact-base clean-overlay provenance validation regression');
+  }
   const semanticRecord = {
+    status: 'ok',
     revisions: 2_000,
     input_sha256: 'a'.repeat(64),
+    measurement_boundary:
+      measurementMode === 'parse' ? 'public_parse_validate' : 'parse_layout_render_svg',
+    parse_accepted_revisions: 2_000,
+    parse_recovery_revisions: 0,
+    parse_warning_revisions: 0,
+    parse_unsupported_revisions: 0,
+    parse_nonempty_config_revisions: 0,
+    parse_deterministic_output: true,
+    parse_diagram_types_ordered: Array.from({ length: 2_000 }, () =>
+      measurementMode === 'parse' ? 'flowchart' : null),
   };
   if (
     semanticWorkGate(semanticRecord, semanticRecord).verdict !== 'equal' ||
@@ -1216,9 +1423,83 @@ if (has('self-test')) {
   ) {
     throw new Error('semantic work-count validation regression');
   }
+  if (measurementMode === 'parse') {
+    const mismatchedTypes = {
+      ...semanticRecord,
+      parse_diagram_types_ordered: [
+        ...semanticRecord.parse_diagram_types_ordered.slice(0, -1),
+        'stateDiagram',
+      ],
+    };
+    if (
+      semanticWorkGate(semanticRecord, mismatchedTypes).verdict !== 'mismatch' ||
+      semanticWorkGate(
+        { ...semanticRecord, parse_recovery_revisions: 1 },
+        semanticRecord,
+      ).verdict !== 'mismatch' ||
+      semanticWorkGate(
+        semanticRecord,
+        { ...semanticRecord, parse_nonempty_config_revisions: 1 },
+      ).verdict !== 'mismatch' ||
+      semanticWorkGate(
+        semanticRecord,
+        { ...semanticRecord, parse_deterministic_output: false },
+      ).verdict !== 'mismatch'
+    ) {
+      throw new Error('parse semantic-equivalence validation regression');
+    }
+    const floorRecord = {
+      min_sample_ns: THREAD_SWEEP_MIN_SAMPLE_NS,
+      calibration_target_ns: THREAD_SWEEP_CALIBRATION_TARGET_NS,
+      parse_ns: { samples: [10, 11] },
+      null_control: { n: 2 },
+      effect_integrated_samples_ns: [
+        THREAD_SWEEP_MIN_SAMPLE_NS,
+        THREAD_SWEEP_MIN_SAMPLE_NS + 1,
+      ],
+      null_integrated_samples_ns: Array.from(
+        { length: 4 },
+        () => THREAD_SWEEP_MIN_SAMPLE_NS,
+      ),
+      effect_batches: [4, 4],
+      null_batches: [4, 4, 4, 4],
+    };
+    if (
+      !validParseSampleFloor(floorRecord, true) ||
+      validParseSampleFloor(
+        {
+          ...floorRecord,
+          null_integrated_samples_ns: [
+            THREAD_SWEEP_MIN_SAMPLE_NS - 1,
+            ...floorRecord.null_integrated_samples_ns.slice(1),
+          ],
+        },
+        true,
+      ) ||
+      validParseSampleFloor({ ...floorRecord, null_batches: [4] }, true)
+    ) {
+      throw new Error('parse every-arm sample-floor validation regression');
+    }
+  }
+  if (
+    comparatorDnfLowerBound(
+      { status: 'dnf', kind: 'timeout', phase: 'probe', budget_ms: 100 },
+      10_000_000,
+    ) !== 10 ||
+    comparatorDnfLowerBound(
+      { status: 'dnf', kind: 'timeout', phase: 'timed', budget_ms: 100 },
+      10_000_000,
+    ) !== null ||
+    comparatorDnfLowerBound(
+      { status: 'dnf', kind: 'failed', phase: 'probe', budget_ms: 100 },
+      10_000_000,
+    ) !== null
+  ) {
+    throw new Error('DNF exact-one-job lower-bound validation regression');
+  }
   const bracketRecord = (p50, nullControl = perfect) => ({
     status: 'ok',
-    pipeline_ns: { p50 },
+    ...(measurementMode === 'parse' ? { parse_ns: { p50 } } : { pipeline_ns: { p50 } }),
     null_control: nullControl,
   });
   const bracketCases = [
@@ -1333,6 +1614,8 @@ const threadSweep = positiveIntList(arg('thread-sweep'));
 const exclusiveHostClaim = arg('exclusive-host-claim');
 const allowOversubscription = has('allow-oversubscription');
 const fmBuilder = arg('fm-builder');
+const fmBuildBase = arg('fm-build-base');
+const fmBuildCleanOverlay = has('fm-build-clean-overlay');
 // A speedup over a render that dropped content is not a speedup. Every measured row must be backed
 // by a passing cross-engine equivalence verdict (see equivalence.mjs) produced from the SAME input,
 // the SAME Rust ELF and the SAME mermaid bundle. `--allow-unverified-output` still permits a run --
@@ -1340,6 +1623,24 @@ const fmBuilder = arg('fm-builder');
 // stamped on every affected row, so no number can later be quoted without its admission.
 const allowUnverifiedOutput = has('allow-unverified-output');
 const equivalenceDir = arg('equivalence-dir', join(REPO, '.benchmarks', 'headtohead', 'equivalence'));
+if (measurementMode === 'parse' && allowUnverifiedOutput) {
+  console.error('[run] --mode parse rejects --allow-unverified-output; linked semantic equivalence is mandatory');
+  process.exit(2);
+}
+if (measurementMode === 'parse' && threadSweep.length > 0) {
+  console.error('[run] --mode parse currently supports only the scalar public parser boundary');
+  process.exit(2);
+}
+if (
+  measurementMode === 'parse' &&
+  !validRchBuildProvenance(fmBuilder, fmBuildBase, fmBuildCleanOverlay)
+) {
+  console.error(
+    '[run] --mode parse requires --fm-builder <rch-worker-id>, --fm-build-base <40-hex commit>, '
+      + 'and --fm-build-clean-overlay',
+  );
+  process.exit(2);
+}
 if (threadSweep.length > 0) {
   if (items.length !== 1) {
     console.error('[run] --thread-sweep requires --only to select exactly one corpus item');
@@ -1395,6 +1696,9 @@ if (!fmBin) {
 }
 
 const env = fingerprint();
+env.measurement_mode = measurementMode;
+env.measurement_boundary =
+  measurementMode === 'parse' ? 'public_parse_validate' : 'parse_layout_render_svg';
 console.error(`[run] rev=${env.git_rev?.slice(0, 8)}${env.git_dirty ? '-dirty' : ''} load1=${env.loadavg_1m.toFixed(2)} cpus=${env.cpu_count}`);
 const powerPolicy = powerPolicySummary(env.power_policy);
 console.error(
@@ -1417,8 +1721,8 @@ if (
   );
   process.exit(2);
 }
-if (threadSweep.length > 0 && !validHostTopology(env)) {
-  console.error('[run] INVALID: thread sweeps require host identity, physical/logical topology, RAM, NUMA, and affinity provenance');
+if ((threadSweep.length > 0 || measurementMode === 'parse') && !validHostTopology(env)) {
+  console.error('[run] INVALID: measured parse rows and thread sweeps require host identity, physical/logical topology, RAM, NUMA, and affinity provenance');
   process.exit(2);
 }
 const maximumRequestedThreads = threadSweep.length > 0 ? Math.max(...threadSweep) : 1;
@@ -1465,6 +1769,8 @@ env.thread_sweep = threadSweep.length > 0
     }
   : null;
 env.fm_builder = fmBuilder;
+env.fm_build_base = fmBuildBase;
+env.fm_build_clean_overlay = fmBuildCleanOverlay;
 
 // CPU pinning for the frankenmermaid runner only (Chromium is multi-process; pinning it would be
 // unfair to mermaid, and we would rather understate our margin than overstate it).
@@ -1590,7 +1896,14 @@ function timedPhase(label, fn) {
 
 function runFrankenmermaidPhase(prefix, sweepOrder = threadSweep) {
   if (threadSweep.length === 0) {
-    return timedPhase(prefix, () => runJsonl(prefix, fmCmd, fmArgs));
+    return timedPhase(prefix, () =>
+      runJsonl(prefix, fmCmd, fmArgs, {
+        FM_H2H_MODE: measurementMode,
+        FM_H2H_THREAD_PROBE: measurementMode === 'parse' ? '1' : '0',
+        ...(measurementMode === 'parse'
+          ? { FM_H2H_MIN_SAMPLE_NS: String(THREAD_SWEEP_MIN_SAMPLE_NS) }
+          : {}),
+      }));
   }
   const records = [];
   let code = 0;
@@ -1603,6 +1916,7 @@ function runFrankenmermaidPhase(prefix, sweepOrder = threadSweep) {
           FM_H2H_THREADS: String(threads),
           FM_H2H_MIN_SAMPLE_NS: String(THREAD_SWEEP_MIN_SAMPLE_NS),
           FM_H2H_THREAD_PROBE: '1',
+          FM_H2H_MODE: measurementMode,
         }),
     );
     records.push(
@@ -1637,6 +1951,7 @@ const elfSelfReportBeforeValid =
   binaryRecordsBefore.every(
     (record) =>
       validElfSelfReport(record) &&
+      record.measurement_boundary === env.measurement_boundary &&
       record.elf_sha256 === binaryRecordBefore?.elf_sha256 &&
       record.elf_bytes === binaryRecordBefore?.elf_bytes &&
       (threadSweep.length === 0 ||
@@ -1648,6 +1963,11 @@ const elfSelfReportBeforeValid =
         record.min_sample_ns === THREAD_SWEEP_MIN_SAMPLE_NS) &&
       (threadSweep.length === 0 ||
         record.calibration_target_ns === THREAD_SWEEP_CALIBRATION_TARGET_NS) &&
+      (measurementMode !== 'parse' ||
+        (
+          record.min_sample_ns === THREAD_SWEEP_MIN_SAMPLE_NS &&
+          record.calibration_target_ns === THREAD_SWEEP_CALIBRATION_TARGET_NS
+        )) &&
       (threadSweep.length === 0 || threadSweep.includes(record.worker_threads)),
   );
 if (!elfSelfReportBeforeValid) {
@@ -1655,6 +1975,7 @@ if (!elfSelfReportBeforeValid) {
 }
 
 const mjsArgs = [join(HERE, 'mermaid_bench.mjs')];
+mjsArgs.push('--mode', measurementMode);
 if (only) mjsArgs.push('--only', only);
 if (repsScale !== 1) mjsArgs.push('--reps-scale', String(repsScale));
 if (budgetScale !== 1) mjsArgs.push('--js-budget-scale', String(budgetScale));
@@ -1681,6 +2002,7 @@ const elfSelfReportAfterValid =
   binaryRecordsAfter.every(
     (record) =>
       validElfSelfReport(record) &&
+      record.measurement_boundary === env.measurement_boundary &&
       record.elf_sha256 === binaryRecordBefore?.elf_sha256 &&
       record.elf_bytes === binaryRecordBefore?.elf_bytes &&
       (threadSweep.length === 0 ||
@@ -1692,6 +2014,11 @@ const elfSelfReportAfterValid =
         record.min_sample_ns === THREAD_SWEEP_MIN_SAMPLE_NS) &&
       (threadSweep.length === 0 ||
         record.calibration_target_ns === THREAD_SWEEP_CALIBRATION_TARGET_NS) &&
+      (measurementMode !== 'parse' ||
+        (
+          record.min_sample_ns === THREAD_SWEEP_MIN_SAMPLE_NS &&
+          record.calibration_target_ns === THREAD_SWEEP_CALIBRATION_TARGET_NS
+        )) &&
       (threadSweep.length === 0 || threadSweep.includes(record.worker_threads)),
   );
 const sameElf =
@@ -1918,6 +2245,14 @@ for (const { item, threads } of measurements) {
     fm_worker_threads: threads ?? fBefore?.worker_threads ?? 1,
     fm_worker_threads_requested: threads ?? fBefore?.thread_count_requested ?? 1,
     fm_builder: fmBuilder,
+    fm_build_base: fmBuildBase,
+    fm_build_clean_overlay: fmBuildCleanOverlay,
+    fm_build: {
+      tool: 'rch exec',
+      worker: fmBuilder,
+      base: fmBuildBase,
+      clean_overlay: fmBuildCleanOverlay,
+    },
     host_wide_exclusivity: rowHostWideExclusivity(threads),
     host: {
       identity: env.host_identity,
@@ -1945,6 +2280,33 @@ for (const { item, threads } of measurements) {
       status: 'host_wide_exclusivity_invalid',
       error:
         'every measured sweep phase requires clear full-host quiescence and the unchanged baseline power policy',
+    });
+    continue;
+  }
+  if (
+    measurementMode === 'parse' &&
+    [fBefore, fAfter].some((record) => !validParseSampleFloor(record))
+  ) {
+    hardFail = true;
+    rows.push({
+      ...row,
+      status: 'sample_floor_violation',
+      error:
+        `every Rust parse effect and A/A arm must integrate for at least `
+        + `${THREAD_SWEEP_MIN_SAMPLE_NS} ns`,
+    });
+    continue;
+  }
+  if (
+    measurementMode === 'parse' &&
+    (!validParseThreadProvenance(fBefore) || !validParseThreadProvenance(fAfter))
+  ) {
+    hardFail = true;
+    rows.push({
+      ...row,
+      status: 'rust_thread_provenance_invalid',
+      error:
+        'parse rows require an observed single calling thread over the exact parse workload',
     });
     continue;
   }
@@ -2001,8 +2363,11 @@ for (const { item, threads } of measurements) {
   }
   if (
     fBefore.input_sha256 !== fAfter.input_sha256 ||
-    fBefore.output_sha256 !== fAfter.output_sha256 ||
-    fBefore.output_sha256_lean !== fAfter.output_sha256_lean
+    nativeResultSha256(fBefore) !== nativeResultSha256(fAfter) ||
+    (
+      measurementMode === 'render' &&
+      fBefore.output_sha256_lean !== fAfter.output_sha256_lean
+    )
   ) {
     hardFail = true;
     rows.push({
@@ -2014,6 +2379,7 @@ for (const { item, threads } of measurements) {
   }
   const bracket = fmBracket(fBefore, fAfter);
   const f = bracket.selected === 'after' ? fAfter : fBefore;
+  const fTiming = timingStats(f);
   row.fm_bracket = bracket;
   row.fm_execution_model = f.execution_model ?? 'scalar';
   row.fm_available_parallelism = f.available_parallelism ?? null;
@@ -2036,9 +2402,14 @@ for (const { item, threads } of measurements) {
   row.fm_min_sample_ns = f.min_sample_ns ?? null;
   row.fm_calibration_target_ns = f.calibration_target_ns ?? null;
   row.fm_batch = f.batch;
-  row.fm_integrated_sample_ns = f.batch * f.pipeline_ns.p50;
-  row.fm_output_sha256 = f.output_sha256;
-  row.fm_output_sha256_lean = f.output_sha256_lean;
+  row.fm_integrated_sample_ns = medianNumber(f.effect_integrated_samples_ns);
+  row.fm_effect_integrated_samples_ns = f.effect_integrated_samples_ns ?? null;
+  row.fm_null_integrated_samples_ns = f.null_integrated_samples_ns ?? null;
+  row.fm_output_sha256 = nativeResultSha256(f);
+  row.fm_native_result_sha256 = nativeResultSha256(f);
+  row.fm_output_sha256_lean = f.output_sha256_lean ?? null;
+  row.measurement_mode = measurementMode;
+  row.measurement_boundary = f.measurement_boundary;
   row.class = item.class ?? 'single';
   // For a doc build the batch total is the size that means anything; for everything else it is the
   // largest single diagram. Both are recorded either way.
@@ -2049,26 +2420,28 @@ for (const { item, threads } of measurements) {
   row.nodes_total = f.nodes_total ?? f.nodes;
   row.edges_total = f.edges_total ?? f.edges;
   row.revisions = f.revisions;
-  row.fm_p50_ns = f.pipeline_ns.p50;
-  row.fm_min_ns = f.pipeline_ns.min;
+  row.fm_p50_ns = fTiming.p50;
+  row.fm_min_ns = fTiming.min;
   row.fm_cv_pct = f.cv_pct;
   row.fm_mad_pct = f.mad_pct;
   row.fm_null_control = f.null_control ?? null;
   row.fm_profile_ab = f.profile_ab ?? null;
-  row.fm_bytes = f.output_bytes;
-  row.fm_bytes_lean = f.output_bytes_lean;
-  row.fm_lean_p50_ns = f.pipeline_lean_ns.p50;
-  row.fm_documents_per_second = (f.revisions * 1e9) / f.pipeline_ns.p50;
+  row.fm_bytes = nativeResultBytes(f);
+  row.fm_bytes_lean = f.output_bytes_lean ?? null;
+  row.fm_lean_p50_ns = f.pipeline_lean_ns?.p50 ?? null;
+  row.fm_documents_per_second = (f.revisions * 1e9) / fTiming.p50;
   // Recorded because it is currently > 1: the lean output profile is smaller but *slower*, since
   // A11yConfig::none() drops off the streaming fast path onto the per-element Element builder.
-  row.lean_slowdown = f.pipeline_lean_ns.p50 / f.pipeline_ns.p50;
+  row.lean_slowdown = measurementMode === 'render'
+    ? f.pipeline_lean_ns.p50 / f.pipeline_ns.p50
+    : null;
 
   if (has('skip-mermaid')) {
     rows.push({ ...row, status: 'fm_only' });
     continue;
   }
   if (
-    threadSweep.length > 0 &&
+    (threadSweep.length > 0 || measurementMode === 'parse') &&
     m &&
     (
       !validIncumbentThreadProvenance(m) ||
@@ -2081,7 +2454,7 @@ for (const { item, threads } of measurements) {
       ...row,
       status: 'comparator_execution_model_mismatch',
       error:
-        'thread sweep requires the pinned mermaid-js bundle and an observed single CDP main-thread execution context',
+        'cross-engine row requires the pinned mermaid-js bundle and an observed single CDP main-thread execution context',
     });
     continue;
   }
@@ -2100,7 +2473,8 @@ for (const { item, threads } of measurements) {
         ...row,
         status: 'semantic_work_mismatch',
         error:
-          'frankenmermaid and mermaid-js must receive the same positive diagram count and byte-identical input',
+          'frankenmermaid and mermaid-js must execute the same boundary over the same accepted, '
+            + 'byte-identical diagram set',
       });
       continue;
     }
@@ -2116,12 +2490,10 @@ for (const { item, threads } of measurements) {
     row.mjs_elapsed_ms = m.elapsed_ms;
     row.mjs_dnf_phase = m.phase;
     row.error = m.error;
-    // Only a timeout bounds the ratio: mermaid was still working when the budget expired, so its
-    // render costs at least the budget. A `failed` DNF bounds nothing -- mermaid raised, and waiting
-    // longer would not have produced an SVG. Reporting a bound there would be inventing a number.
-    row.speedup_lower_bound = row.mjs_dnf_kind === 'timeout'
-      ? (m.budget_ms * 1e6) / f.pipeline_ns.p50
-      : null;
+    // Only the dedicated one-render probe can bound one job. A timed-phase deadline covers
+    // calibration, warmup, A/A and effect samples together, so dividing that whole item budget by
+    // one Rust job would invent a per-job bound. A raised failure likewise bounds nothing.
+    row.speedup_lower_bound = comparatorDnfLowerBound(m, fTiming.p50);
     // A DNF is a completion result, not a timing-ratio claim. There is no comparator median and
     // therefore no ratio for a median-CI gate to decide.
     row.median_ci_gate = {
@@ -2137,31 +2509,68 @@ for (const { item, threads } of measurements) {
     rows.push({ ...row, status: 'comparator_error', error: m?.error ?? 'no result' });
     continue;
   }
-  row.mjs_p50_ns = m.render_ns.p50;
-  row.mjs_min_ns = m.render_ns.min;
+  const mTiming = incumbentTimingStats(m);
+  if (!mTiming) {
+    hardFail = true;
+    rows.push({
+      ...row,
+      status: 'comparator_boundary_mismatch',
+      error: `mermaid-js did not report ${measurementMode} timing samples`,
+    });
+    continue;
+  }
+  if (
+    measurementMode === 'parse' &&
+    !validParseSampleFloor(m, true)
+  ) {
+    hardFail = true;
+    rows.push({
+      ...row,
+      status: 'sample_floor_violation',
+      error:
+        `every mermaid-js parse effect and A/A arm must integrate for at least `
+        + `${THREAD_SWEEP_MIN_SAMPLE_NS} ns`,
+    });
+    continue;
+  }
+  row.mjs_p50_ns = mTiming.p50;
+  row.mjs_min_ns = mTiming.min;
   row.mjs_cv_pct = m.cv_pct;
   row.mjs_mad_pct = m.mad_pct;
   row.mjs_null_control = m.null_control ?? null;
-  row.mjs_bytes = m.output_bytes;
-  row.mjs_documents_per_second = (m.revisions * 1e9) / m.render_ns.p50;
-  row.measurement_unit = 'whole_job_wall_time';
-  row.speedup = m.render_ns.p50 / f.pipeline_ns.p50;
-  row.effect_ci_required = item.effect_ci_required === true;
+  row.mjs_batch = m.batch ?? 1;
+  row.mjs_min_sample_ns = m.min_sample_ns ?? null;
+  row.mjs_calibration_target_ns = m.calibration_target_ns ?? null;
+  row.mjs_integrated_sample_ns = medianNumber(m.effect_integrated_samples_ns);
+  row.mjs_effect_integrated_samples_ns = m.effect_integrated_samples_ns ?? null;
+  row.mjs_null_integrated_samples_ns = m.null_integrated_samples_ns ?? null;
+  row.mjs_effect_batches = m.effect_batches ?? null;
+  row.mjs_null_batches = m.null_batches ?? null;
+  row.mjs_bytes = nativeResultBytes(m);
+  row.mjs_native_result_sha256 = nativeResultSha256(m);
+  row.mjs_documents_per_second = (m.revisions * 1e9) / mTiming.p50;
+  row.measurement_unit =
+    measurementMode === 'parse' ? 'whole_parse_job_wall_time' : 'whole_job_wall_time';
+  row.speedup = mTiming.p50 / fTiming.p50;
+  row.effect_ci_required =
+    measurementMode === 'parse' || item.effect_ci_required === true;
   row.effect_ci = bootstrapMedianRatioCi(
-    m.render_ns.samples,
-    f.pipeline_ns.samples,
+    mTiming.samples,
+    fTiming.samples,
   );
   // Noise is one-sided, so the min-vs-min ratio is the estimate least contaminated by preemption.
   // If it disagrees with the p50 ratio, the run was noisy and the claim is not robust.
-  row.speedup_min = m.render_ns.min / f.pipeline_ns.min;
-  row.speedup_lean = m.render_ns.p50 / f.pipeline_lean_ns.p50;
-  row.bytes_ratio = m.output_bytes / f.output_bytes;
-  row.bytes_ratio_lean = m.output_bytes / f.output_bytes_lean;
+  row.speedup_min = mTiming.min / fTiming.min;
+  row.speedup_lean =
+    measurementMode === 'render' ? mTiming.p50 / f.pipeline_lean_ns.p50 : null;
+  row.bytes_ratio = measurementMode === 'render' ? m.output_bytes / f.output_bytes : null;
+  row.bytes_ratio_lean =
+    measurementMode === 'render' ? m.output_bytes / f.output_bytes_lean : null;
   if (f.revisions > 1 && row.class !== 'doc_build') {
     // For an editing session the number that matters is the cost of one keystroke's re-render,
     // not the cost of the whole trace.
-    row.fm_ns_per_revision = f.pipeline_ns.p50 / f.revisions;
-    row.mjs_ns_per_revision = m.render_ns.p50 / m.revisions;
+    row.fm_ns_per_revision = fTiming.p50 / f.revisions;
+    row.mjs_ns_per_revision = mTiming.p50 / m.revisions;
   }
   // CV and MAD remain provenance only. The only blocking statistical decision is whether the
   // cross-runtime median ratio clears both same-invocation null-CI floors.
@@ -2220,6 +2629,12 @@ const equivalenceFailures = ok
   .map((r) => `${threadSweep.length > 0 ? `${r.id}@t${r.fm_worker_threads}` : r.id}:${r.output_equivalence.status}`);
 const speedups = ok.map((r) => r.speedup);
 const speedupsMin = ok.map((r) => r.speedup_min);
+const speedupAggregate = speedups.length
+  ? { min: Math.min(...speedups), median: pct(50, speedups), max: Math.max(...speedups) }
+  : null;
+const speedupMinAggregate = speedupsMin.length
+  ? { min: Math.min(...speedupsMin), median: pct(50, speedupsMin), max: Math.max(...speedupsMin) }
+  : null;
 const rowLabel = (row) =>
   threadSweep.length > 0 ? `${row.id}@t${row.fm_worker_threads}` : row.id;
 const measurementOrder = phaseLoad.map((phase) => phase.phase);
@@ -2235,8 +2650,13 @@ const expectedHostWidePhases = threadSweep.length === 0
 const finalHostWideChecks = expectedHostWidePhases.map((phase) =>
   hostWideQuiescenceChecks.findLast((candidate) => candidate.phase === phase));
 const summary = {
-  schema: 'frankenmermaid.headtohead.v2',
+  schema: measurementMode === 'parse'
+    ? 'frankenmermaid.headtohead.parse.v1'
+    : 'frankenmermaid.headtohead.v2',
   env,
+  measurement_mode: measurementMode,
+  measurement_boundary:
+    measurementMode === 'parse' ? 'public_parse_validate' : 'parse_layout_render_svg',
   pins: {
     mermaid: PINS.mermaid.version,
     bundle_url: PINS.mermaid.url,
@@ -2254,21 +2674,24 @@ const summary = {
   corpus_items: items.length,
   measurement_rows: rows.length,
   ok_items: ok.length,
-  // Items where mermaid produced no render inside its wall budget. Reported separately from
+  // Items where mermaid did not complete the selected public API inside its wall budget.
   // `speedup` on purpose: these carry lower bounds, not measured ratios.
   dnf_items: dnf.length,
   dnf: dnf.map((r) => ({
     id: r.id, budget_ms: r.mjs_budget_ms, phase: r.mjs_dnf_phase,
     fm_p50_ns: r.fm_p50_ns, speedup_lower_bound: r.speedup_lower_bound, error: r.error,
   })),
-  // A ratio is a claim about two renders of the same diagram. This gate is what makes that true.
+  // Rendered structural equivalence is the common semantic oracle for both modes. In parse mode it
+  // proves the native parse results feed equivalent user-visible output without forcing either
+  // engine to serialize into the other's internal AST representation.
   output_equivalence_gate: {
     verdict: equivalenceFailures.length === 0
       ? 'pass'
       : (allowUnverifiedOutput ? 'admitted_unverified' : 'fail'),
     rule: 'every measured row needs a passing cross-engine equivalence verdict from the same input, '
       + 'Rust ELF and mermaid bundle (scripts/headtohead/equivalence.mjs)',
-    method: 'svg_structural (rendered-text token containment + rendered-path edge topology '
+    method: (measurementMode === 'parse' ? 'linked_parse_semantics_via_' : '')
+      + 'svg_structural (rendered-text token containment + rendered-path edge topology '
       + 'cross-checked against input truth); not byte equality, not a rasterized perceptual diff',
     allow_unverified_output: allowUnverifiedOutput,
     failures: equivalenceFailures,
@@ -2335,12 +2758,10 @@ const summary = {
   median_ci_gate_failures: ok
     .filter((r) => r.median_ci_gate.verdict === 'fail')
     .map(rowLabel),
-  speedup: speedups.length
-    ? { min: Math.min(...speedups), median: pct(50, speedups), max: Math.max(...speedups) }
-    : null,
-  speedup_min_estimator: speedupsMin.length
-    ? { min: Math.min(...speedupsMin), median: pct(50, speedupsMin), max: Math.max(...speedupsMin) }
-    : null,
+  speedup: measurementMode === 'render' ? speedupAggregate : null,
+  parse_speedup: measurementMode === 'parse' ? speedupAggregate : null,
+  speedup_min_estimator: measurementMode === 'render' ? speedupMinAggregate : null,
+  parse_speedup_min_estimator: measurementMode === 'parse' ? speedupMinAggregate : null,
   rows,
 };
 if (
@@ -2382,10 +2803,11 @@ for (const r of rows) {
   const displayId = rowLabel(r);
   if (r.status === 'comparator_dnf') {
     const timedOut = r.mjs_dnf_kind === 'timeout';
+    const bounded = Number.isFinite(r.speedup_lower_bound);
     console.log(
       `${pad(displayId, 22)}${lpad(r.nodes, 6)}${lpad(r.edges, 7)}${lpad(ms(r.fm_p50_ns), 12)}` +
-      `${lpad(timedOut ? `DNF>${(r.mjs_budget_ms / 1000).toFixed(0)}s` : 'CANNOT', 12)}` +
-      `${lpad(timedOut ? `>${r.speedup_lower_bound.toFixed(0)}x` : 'n/a', 10)}` +
+      `${lpad(bounded ? `DNF>${(r.mjs_budget_ms / 1000).toFixed(0)}s` : (timedOut ? 'TIMEOUT' : 'CANNOT'), 12)}` +
+      `${lpad(bounded ? `>${r.speedup_lower_bound.toFixed(0)}x` : 'n/a', 10)}` +
       `${lpad('-', 10)}${lpad(r.fm_mad_pct.toFixed(1), 9)}${lpad('-', 9)}${lpad('-', 8)}  n/a`,
     );
     continue;
@@ -2403,10 +2825,13 @@ for (const r of rows) {
     console.log(`${pad(displayId, 22)}  ${r.status.toUpperCase()}: ${r.error ?? ''}`);
     continue;
   }
+  const bytesRatio = Number.isFinite(r.bytes_ratio) ? `${r.bytes_ratio.toFixed(2)}x` : '-';
+  const leanBytesRatio =
+    Number.isFinite(r.bytes_ratio_lean) ? `${r.bytes_ratio_lean.toFixed(2)}x` : '-';
   console.log(
     pad(displayId, 22) + lpad(r.nodes, 6) + lpad(r.edges, 7) + lpad(ms(r.fm_p50_ns), 12) + lpad(ms(r.mjs_p50_ns), 12) +
     lpad(`${r.speedup.toFixed(0)}x`, 10) + lpad(`${r.speedup_min.toFixed(0)}x`, 10) + lpad(r.fm_mad_pct.toFixed(1), 9) +
-    lpad(`${r.bytes_ratio.toFixed(2)}x`, 9) + lpad(`${r.bytes_ratio_lean.toFixed(2)}x`, 8) +
+    lpad(bytesRatio, 9) + lpad(leanBytesRatio, 8) +
     `  ${r.median_ci_gate.verdict}/${r.fm_bracket.verdict}`,
   );
 }
@@ -2439,9 +2864,12 @@ if (summary.thread_sweep) {
   );
   console.log('');
 }
-if (summary.speedup) {
-  console.log(`speedup vs mermaid ${PINS.mermaid.version} (p50):  min ${summary.speedup.min.toFixed(0)}x  median ${summary.speedup.median.toFixed(0)}x  max ${summary.speedup.max.toFixed(0)}x`);
-  console.log(`speedup vs mermaid ${PINS.mermaid.version} (min):  min ${summary.speedup_min_estimator.min.toFixed(0)}x  median ${summary.speedup_min_estimator.median.toFixed(0)}x  max ${summary.speedup_min_estimator.max.toFixed(0)}x`);
+const displayedSpeedup = summary.speedup ?? summary.parse_speedup;
+const displayedMinSpeedup =
+  summary.speedup_min_estimator ?? summary.parse_speedup_min_estimator;
+if (displayedSpeedup) {
+  console.log(`${measurementMode} speedup vs mermaid ${PINS.mermaid.version} (p50):  min ${displayedSpeedup.min.toFixed(0)}x  median ${displayedSpeedup.median.toFixed(0)}x  max ${displayedSpeedup.max.toFixed(0)}x`);
+  console.log(`${measurementMode} speedup vs mermaid ${PINS.mermaid.version} (min):  min ${displayedMinSpeedup.min.toFixed(0)}x  median ${displayedMinSpeedup.median.toFixed(0)}x  max ${displayedMinSpeedup.max.toFixed(0)}x`);
 }
 for (const r of ok.filter((x) => x.class === 'doc_build')) {
   console.log(
@@ -2450,23 +2878,37 @@ for (const r of ok.filter((x) => x.class === 'doc_build')) {
   );
 }
 for (const r of ok.filter((x) => x.class !== 'doc_build' && x.revisions > 1)) {
+  const unit = measurementMode === 'parse' ? 'parse' : 're-render';
   console.log(
-    `${r.class} ${r.id}: ${r.revisions} revisions -- per re-render frankenmermaid `
+    `${r.class} ${r.id}: ${r.revisions} revisions -- per ${unit} frankenmermaid `
       + `${ms(r.fm_ns_per_revision)} ms vs mermaid ${ms(r.mjs_ns_per_revision)} ms `
-      + '(a live preview redraws on every keystroke.)',
+      + (measurementMode === 'parse' ? '(equal-work public parser boundary.)' : '(a live preview redraws on every keystroke.)'),
   );
 }
 if (dnf.length) {
   console.log('');
-  console.log(`DID NOT FINISH -- mermaid ${PINS.mermaid.version} produced no render on ${dnf.length} item(s):`);
+  console.log(
+    `DID NOT FINISH -- mermaid ${PINS.mermaid.version} did not complete ${measurementMode} `
+      + `on ${dnf.length} item(s):`,
+  );
   for (const r of dnf) {
     console.log(`  ${pad(r.id, 22)} ${r.nodes} nodes / ${r.edges} edges -- ${r.mjs_dnf_phase} phase, budget ${(r.mjs_budget_ms / 1000).toFixed(0)}s`);
     if (r.mjs_dnf_kind === 'timeout') {
       console.log(`  ${' '.repeat(22)} still working when the budget expired (${r.error}).`);
-      console.log(`  ${' '.repeat(22)} frankenmermaid: ${ms(r.fm_p50_ns)} ms, so the speedup is at least ${r.speedup_lower_bound.toFixed(0)}x -- a bound, not a measurement.`);
+      if (Number.isFinite(r.speedup_lower_bound)) {
+        console.log(`  ${' '.repeat(22)} frankenmermaid: ${ms(r.fm_p50_ns)} ms, so the speedup is at least ${r.speedup_lower_bound.toFixed(0)}x -- a bound, not a measurement.`);
+      } else {
+        console.log(
+          `  ${' '.repeat(22)} this deadline covered the multi-phase measurement, not one exact `
+            + 'job; no per-job speedup bound is stated.',
+        );
+      }
     } else {
       console.log(`  ${' '.repeat(22)} FAILED after ${(r.mjs_elapsed_ms / 1000).toFixed(1)}s: ${r.error}`);
-      console.log(`  ${' '.repeat(22)} frankenmermaid: ${ms(r.fm_p50_ns)} ms. mermaid does not render this input at any budget, so there is no ratio to state.`);
+      console.log(
+        `  ${' '.repeat(22)} frankenmermaid: ${ms(r.fm_p50_ns)} ms. mermaid does not `
+          + `${measurementMode} this input at any budget, so there is no ratio to state.`,
+      );
     }
   }
 }
@@ -2489,7 +2931,9 @@ if (equivGate.verdict !== 'pass') {
       console.log(`  ${r.id}: ${e.status}${e.reason ? ` (${e.reason})` : ''} -- run scripts/headtohead/equivalence.mjs`);
     }
   }
-  console.log('  a ratio between renders of different content is not a like-for-like speedup.');
+  console.log(
+    `  a ${measurementMode} ratio without linked equivalent rendered semantics is not a like-for-like speedup.`,
+  );
 }
 if (summary.median_ci_gate_failures.length) {
   console.log(`MEDIAN-CI GATE FAIL: ${summary.median_ci_gate_failures.join(', ')}`);

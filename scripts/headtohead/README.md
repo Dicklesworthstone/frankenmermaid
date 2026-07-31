@@ -13,9 +13,10 @@ as an incumbent win. Internal frankenmermaid before/after ratios are maintenance
 #    --base/--clean-overlay pin the transferred tree to a commit plus ONLY the paths you name, so
 #    the rch project hash stops moving every time the other agent in this shared checkout saves a
 #    file. Without it the hash misses the remote target cache and every build is cold.
+FM_H2H_BUILD_BASE="$(git rev-parse HEAD)"  # capture once; reuse this exact value below
 df -h /data  # below 150G means strict-remote-only; never fall back locally
 RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec \
-  --base "$(git rev-parse HEAD)" --clean-overlay --no-overlay -- \
+  --base "${FM_H2H_BUILD_BASE}" --clean-overlay --no-overlay -- \
   cargo test --profile release -p frankenmermaid-cli --example headtohead
 
 # 2. Preserve the deterministic-overlay project identity for every build. Never mint a
@@ -24,13 +25,25 @@ RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec \
 #    also permitted by POLICY_local_perf_binaries.md only after its 150G free-space precheck.
 df -h /data
 RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec \
-  --base "$(git rev-parse HEAD)" --clean-overlay \
+  --base "${FM_H2H_BUILD_BASE}" --clean-overlay \
   --overlay-path crates/fm-cli/examples/headtohead.rs -- \
   cargo build --profile release -p frankenmermaid-cli --example headtohead
 
 # 3. run both engines over byte-identical inputs
 node scripts/headtohead/run.mjs \
   --fm-bin target/release/examples/headtohead
+
+# Equal-work public parser comparison. This is scalar-only and requires a matching full-render
+# equivalence artifact from the same ELF/input/bundle; --allow-unverified-output is forbidden.
+node scripts/headtohead/run.mjs \
+  --fm-bin target/release/examples/headtohead \
+  --mode parse \
+  --fm-builder "${FM_H2H_BUILDER}" \
+  --fm-build-base "${FM_H2H_BUILD_BASE}" \
+  --fm-build-clean-overlay \
+  --only ci_equiv_512 \
+  --equivalence-dir .benchmarks/headtohead/ci-equiv-512-equivalence \
+  --out .benchmarks/headtohead/parse-incumbent-ci-equiv-512
 
 # The 201-revision certification needs enough wall budget for nine full A/A pairs.
 node scripts/headtohead/run.mjs \
@@ -63,15 +76,28 @@ node scripts/headtohead/run.mjs \
   --pin-cpu off
 ```
 
-Useful flags: `--only <corpus_id>[,<corpus_id>…]`, `--reps-scale 0.25` (fast smoke),
+Useful flags: `--mode render|parse` (default `render`),
+`--only <corpus_id>[,<corpus_id>…]`, `--reps-scale 0.25` (fast smoke),
 `--js-budget-scale 0.1` (shrink the mermaid wall budgets for a smoke run), `--skip-mermaid`,
 `--thread-sweep 1,2,4,8,16,32,64,96,128`,
 `--allow-oversubscription` (required when requested workers exceed visible logical CPUs),
 `--fm-builder <rch-worker-id>`,
+`--fm-build-base <40-hex-commit>`, `--fm-build-clean-overlay`,
 `--exclusive-host-claim trj-booking:<claim-message-id>`, `--pin-cpu auto|N|off`,
 `--out <dir>`, `--update-pins`, `--allow-unverified-output` (permit a run whose rows have no passing
 equivalence verdict; the admission is stamped on the summary and on every affected row),
 `--equivalence-dir <dir>`.
+
+Parse mode is deliberately scalar-only, always requires the independent bootstrap effect CI, and
+rejects `--thread-sweep` and `--allow-unverified-output`. Both parser arms calibrate each integrated
+sample to at least 50 ms with a 75 ms target. Every row records the requested and actually observed
+single calling context: Rust instruments the thread ID that executes the exact parse calls, while
+the incumbent runs in the observed CDP page-main execution context. These fields do not claim to be
+a census of unrelated process/browser threads. Parse evidence also fails closed unless its row
+names the RCH worker, exact `--base` commit, and `--clean-overlay` build mode that excluded co-tenant
+edits from the executable. The durable evidence row must additionally retain that exact RCH command
+and its reported worker next to the process-self-reported ELF hash; command-line labels alone are
+not treated as a cryptographic build receipt.
 
 Set `FM_CHROMIUM_BIN=/absolute/path/to/chrome` when the pinned Chromium path is not available on the
 benchmark host. The override must be executable; every incumbent row records the selected path and
@@ -151,6 +177,20 @@ reports, and fails the run on a mismatch). `mermaid.render()` does parse + layou
 SVG string; the frankenmermaid side times exactly the same three phases into an SVG string. Neither
 side writes to disk or touches the DOM afterwards.
 
+`--mode parse` instead times the two public parser boundaries: `mermaid.parse()` and
+`fm_parser::parse()`. Browser launch, CDP transport, parse-result normalization, JSON serialization,
+and Rust reference serialization are outside the timed interval. Each mermaid sample uses one
+warmed page; the pinned implementation clears its diagram database and invokes its parser for every
+call, so one-time registration/JIT work is warmed but diagram work is not cached. Re-audit that
+boundary whenever the bundle pin changes.
+
+The native parse results are intentionally **not** byte-compared: they are different AST/IR types.
+Admission instead requires every revision accepted, zero Rust recovery/warning/unsupported
+revisions, zero nonempty Mermaid config results, and identical ordered diagram types through an
+explicit normalization table. That is still only a syntax/type oracle, so a parse ratio additionally
+requires the same-ELF/same-input/same-bundle full-render structural-equivalence artifact described
+below. The engine-local parse-result hashes prove determinism only and never become a bytes ratio.
+
 Choices that deliberately understate our margin:
 
 - `securityLevel: "strict"` is mermaid's default, with DOMPurify sanitization enabled.
@@ -180,6 +220,9 @@ Exit `0` all equivalent · `7` the gate failed · `1` an engine errored or the d
 `--allow-unverified-output` still permits the run but stamps
 `output_equivalence_gate.verdict: "admitted_unverified"` on the summary and
 `content_verified: false` on every affected row, so no number can be quoted without its admission.
+Parse mode is stricter: it rejects that override because type/acceptance equality alone does not
+prove equal AST semantics. Its ratio is admissible only when this rendered-content verdict matches
+the parse run's input SHA-256, executing Rust ELF SHA-256, and pinned Mermaid bundle SHA-256.
 
 **What is compared, and what is not.** Not byte equality: the engines emit deliberately different
 SVG (mermaid carries labels in `<foreignObject>` HTML, we emit `<text>`; different class
@@ -239,6 +282,13 @@ falls below 50 ms. Batching is a timing device only: every iteration still rende
 job and the result divides only by repeated whole jobs, never by its diagram count. Mermaid's items
 are all ≥ 30 ms, so they need no batching.
 
+Parse mode applies the 50 ms floor and 75 ms calibration target to **both** runtimes. Short parser
+jobs are otherwise dominated by timer granularity and can produce visibly biased identical-arm
+medians. Each integrated batch repeats the complete selected corpus and divides only by the number
+of complete jobs. Every record retains each effect and A/A arm's actual integrated duration plus
+its batch count; the driver fails closed if **any** timed arm is below 50 ms. A `batch × p50`
+estimate is not used as a substitute for those raw arm durations.
+
 **Same-invocation A/A.** The Rust runner factors timing into one paired routine. For every item it
 first calls that routine with `(default, default)`, then with `(default, lean)`. Both arms are timed
 back-to-back inside each round, order alternates, both calls use the same batch, and the statistic is
@@ -249,6 +299,10 @@ The cross-runtime headline is a whole-runtime comparison: Rust and JavaScript ca
 one binary. The mermaid runner therefore emits its own in-browser `(mermaid, mermaid)` paired null in
 the same Chromium invocation. The driver uses the **larger** of the Rust and mermaid A/A CI radii, so
 the claim must clear both runtimes' measured floors.
+
+In parse mode both runtimes separately run balanced identical-parser A/A pairs followed by raw
+whole-job effect samples. There is no default/lean parse profile: the only treatment is the actual
+pinned incumbent across the same driver invocation.
 
 **Same-invocation phase bracket.** The driver runs the identical self-reporting Rust ELF immediately
 before and after the Chromium phase. The two Rust outputs must be byte-identical, and their medians
@@ -323,8 +377,14 @@ Group the libc-family samples by the deepest project call site, report each call
 and compute its Amdahl ceiling before proposing a source change. “libc leaf is hot” without that
 caller attribution is incomplete profile evidence.
 
-**Determinism.** Every timed iteration's output length is checked against a reference render, and the
-full bytes are compared once outside the timed region. A nondeterministic render fails the run.
+**Determinism.** Every render iteration's output length is checked against a reference, and the full
+SVG bytes are compared once outside the timed region. Parse mode serializes each engine's own full
+native result outside timing. Both arms retain and check every complete-job repetition inside every
+calibrated batch, not merely the final repetition. Rust compares all A/A/effect results with
+pre/post references; mermaid-js compares calibration, every A/A/effect result, and a
+post-measurement result with its pre-measurement reference. The emitted engine-local SHA-256 covers
+that checked reference. A nondeterministic result fails the run; native parse hashes are never
+compared across engines.
 
 **Portable thread sweep.** `--thread-sweep` is accepted for one selected workload and must include
 the scalar `1` arm. The driver starts one Rust invocation per requested width before the incumbent
@@ -461,8 +521,10 @@ failure cannot be confused with invalid syntax, and an item that cannot be rende
 in one render rather than `warmup + reps` of them. Two outcomes are recorded, and they support
 different claims:
 
-- **`kind: "timeout"`** — mermaid was still working when the budget expired. That bounds the speedup
-  from below (`budget / fm_p50`), reported as `>Nx`, explicitly a bound and not a measurement.
+- **`kind: "timeout"`** — mermaid was still working when the budget expired. Only a timeout in the
+  dedicated one-render `probe` phase bounds one job from below (`budget / fm_p50`) and may be
+  reported as `>Nx`. A `timed`-phase deadline covers calibration, warmup, A/A, and effect work
+  together; it is recorded without a per-job bound.
 - **`kind: "failed"`** — mermaid raised: a stack overflow, its own size guardrail, an OOM. There is
   no bound to state. At that size mermaid does not render the diagram at any budget, and the table
   prints `CANNOT` rather than a ratio.
