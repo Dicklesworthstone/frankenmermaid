@@ -578,6 +578,60 @@ median-CI gates passed, all seven same-ELF brackets passed, and `cv_gate=never`.
   counts, governor/ISA/topology provenance, and bootstrap median-CI adjudication. CV remains
   provenance only.
 
+## SEMANTIC ADMISSION ONLY: four demoted class-mixed whole jobs are equivalence-clean (2026-07-31)
+
+**Bead:** `bd-jqko`. **Lane:** cod (`LavenderMill`).
+**Executing ELF SHA-256 (self-reported by process):**
+`499e4bf6b23ef6bfe4fccf9df4a086274d51f42ebe28b2f4ae5cc0c249a4eb47` (7,897,696 bytes).
+**A/A null control (same invocation):** incomplete by construction and therefore not a performance
+gate. The scalar Rust dump arms reported medians `1.016480` (`doc_build_40`), `0.989018`
+(`ci_batch_500`), `0.994573` (`docs_site_50`), and `1.009611` (`docs_site_200`), each inside the
+corrected `[0.98, 1.02]` clause. The untimed `--render-once` incumbent dump arm did not collect
+mermaid-js A/A samples, so no ratio, win, loss, or corrected-null performance verdict exists. Any
+future timed invocation must independently keep every arm's null median in `[0.98, 1.02]` and pass
+the bootstrap-CI and 2x-null-margin clauses; CV remains provenance only.
+
+- **Why this rerun was obligatory.** The older artifacts for `doc_build_40` and `ci_batch_500`
+  predated class Tier-2 adjudication, while the historical numeric rows for all four jobs were
+  demoted after the exact-output gate exposed missing class/state work. The class-member,
+  relationship-kind, state-label, and inheritance retry predicates are now closed, so the exact
+  named corpora—not filtered substitutes—were rerun through the current oracle.
+- **Exact result.** `doc_build_40` is **40/40 equivalent**, `ci_batch_500` **500/500**,
+  `docs_site_50` **50/50**, and `docs_site_200` **200/200**, with zero divergent and zero
+  unverified diagrams in every row. All 129 class diagrams received Tier-2 relationship
+  adjudication and passed. The pinned input SHA-256 values are respectively
+  `8badedbf69bc204d952af1ba780c07569b7eb1091ff5d0fdd400dd2e3f6b59d7`,
+  `65b8f69a7b2ee114cfb2fb49557b34cbc7e2c15f1414a81b7d94215a46de432f`,
+  `c8d5cf8e88c26fa8fa2d7b304fab8ed0045883677d5a929d10aaf1da0b4b1638`, and
+  `768a6657c4f0da87f0f06910cd6d93503599b126e9c502352b8a0e808d5ce90c`.
+- **Output-equivalence check.** One shared extractor processes both engines. It gates rendered-text
+  containment for every family; node IDs and rendered-path topology cross-engine and against
+  input-derived truth where declared; and class relationship kind plus owning endpoint
+  cross-engine and against source. Referenced marker definitions must encode the correct
+  diamond geometry/fill or a hollow inheritance triangle facing away from the path. Unknown or
+  undecidable required invariants never pass. This is neither SVG byte equality nor a rasterized
+  perceptual diff.
+- **Linkage and incumbent.** Artifact
+  `.benchmarks/headtohead/class-mixed-requalification-v1/equivalence-ba6d3cf7-1785486443840.json`
+  has SHA-256 `790e35d0aa5ea9a53d6f246b78bc7d50760bae995a65aa6faf5bebb5324a6011`.
+  Every engine dumped every expected revision, and each concatenated dump hash exactly matches
+  that engine's self-reported output SHA-256. The live incumbent is mermaid-js `11.15.0`, bundle
+  SHA-256 `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`,
+  through `/usr/bin/chromium-browser` (`Chrome/150.0.7871.128`).
+- **Build, thread, and host provenance.** The immutable ELF is the strict-RCH artifact already
+  built from pinned base `85fef646` with `--clean-overlay` and only the committed SVG follow-up
+  represented by `4798d977`; no co-tenant edit entered the executable. Every row requested and
+  actually observed **1** frankenmermaid scalar worker and **1** mermaid-js main execution thread.
+  Host `thinkstation1` is an AMD Ryzen Threadripper PRO 5975WX with 64 logical CPUs, complete
+  `amd-pstate-epp` provenance (`powersave` governor, `performance` EPP, boost enabled), and complete
+  ISA provenance (AVX2/FMA/BMI2/VAES present; AVX-512 absent).
+- **Disposition / next predicate.** Semantic admission is recovered, but the historical ratios
+  remain non-current because they were not measured in this invocation. No `trj` claim was taken.
+  Timing may resume only after earlier central bookings and host-wide external work clear, under a
+  fresh exclusive claim and clean census, with the same inputs/bundle/ELF identity, live incumbent,
+  actual observed threads, linked passing output artifact, complete governor/ISA/topology
+  provenance, and the corrected same-invocation A/A gate above.
+
 ## CERTIFIED INCUMBENT WIN: equivalence-clean 512-diagram concurrent CI job (2026-07-30)
 
 **Bead:** `bd-zwg6`. **Lane:** cod (`BlackThrush`).
