@@ -1176,3 +1176,65 @@ CV remains provenance only.
   same-invocation per-arm A/A controls. Each null median itself must be inside `[0.98, 1.02]`; the
   bootstrap-CI, 2x-null-margin, scalar byte-identity, actual-worker, host/governor/ISA/topology, and
   live-incumbent gates remain binding.
+
+## INCONCLUSIVE / NO CLAIM: live-typing timing lacks observed Rust worker provenance (2026-07-31)
+
+**Bead:** `bd-kn9b`. **Lane:** cod (`LavenderMill`).
+**Executing ELF SHA-256 (self-reported by process):**
+`dfd2636c4e841b18b3b24d48108e918a3b1d9aa05d1ab47c9d88ea2182397d7c` (7,897,696 bytes).
+**A/A null control (same invocation):** the corrected numeric gate passed. Rust-before used `n=20`,
+median `0.996835`, bootstrap 95% CI `[0.983725, 1.011093]`; Rust-after used `n=20`, median
+`1.001460`, CI `[0.995005, 1.026334]`; mermaid-js used `n=9`, median `0.995954`, CI
+`[0.980878, 1.024848]`. Every median itself is inside `[0.98, 1.02]`, and the raw effect clears
+twice the largest null radius. CV and MAD are provenance only. This does **not** make the row
+admissible because a separate mandatory provenance field failed.
+
+- **Observed diagnostic, not a campaign ratio.** The selected frankenmermaid whole-session median
+  was `4.201155 ms` for all 60 revisions and the live mermaid-js median was `5,122.750 ms`. The
+  resulting raw `1,219.367055x` observation passed the current numeric gate, but it is
+  **provenance-rejected and must not be quoted as an incumbent win**. Only two independent
+  incumbent effect samples were affordable under this workload pin, so the report also retains an
+  explicitly non-computable independent effect CI; that CI is not required by this pinned row.
+- **Precise failure.** Both timed Rust bracket arms record `fm_worker_threads_requested=1`,
+  `fm_worker_threads_actually_used=null`, and `fm_thread_probe=null`. The binary reports a scalar
+  execution model and was pinned to CPU 21, but neither requested width nor process affinity is an
+  observation of worker participation. Mermaid-js requested and actually observed one browser main
+  execution thread. The separate untimed equivalence invocation did observe `1/1` for both
+  engines, but evidence from a separate invocation cannot fill a missing timing-row field.
+- **Whole job and semantic work.** `typing_trace_60` is one live-preview session of 60 successive
+  full documents: 2,400 node instances and 2,340 edge instances across the session. Both engines
+  executed 60 `parse_layout_render_svg` operations over the same pinned input SHA-256
+  `1b387d42772f0e4a2e479059cbd60c002aff4451ee7b4a97bf3bd6d82c334a33`; the harness's semantic-work
+  gate reports `equal`.
+- **Output-equivalence check.** The linked artifact is **60/60 equivalent**, zero divergent and
+  zero unverified. One shared extractor gates rendered-text containment, authored node-ID equality,
+  cross-engine rendered-path topology, and each engine's topology against input-derived truth.
+  Unknown or undecidable required invariants never pass. This is neither SVG byte equality nor a
+  rasterized perceptual diff. Frankenmermaid's 60-revision dump/self-report hash is
+  `826e563060f688301cb2d188cfe3c052f5c93c902ab5733a8432265c557aba97`; mermaid-js's is
+  `6d290e8b4c68a6e951ddc3a0b072f9168df8a74f20e320ccd5100d50790320d9`.
+- **Artifacts.** Timing summary
+  `.benchmarks/headtohead/typing-trace-60-dfd2636c-timing-v1/summary-6bf64c28-1785494599542.json`
+  has SHA-256 `5af9e9d60225eb272ca127ede346cf09aad6f824b9d1660672f9c79e4f054211`;
+  its raw JSONL has SHA-256
+  `5c275508386e01ed8f3eba0a0a888e042e99552fcd260a06838ab0838f9975d7`.
+  The equivalence artifact
+  `.benchmarks/headtohead/typing-trace-60-dfd2636c-equivalence/equivalence-6bf64c28-1785494471229.json`
+  has SHA-256 `d995d969007a58ab94e441326de48a912ce3f84d8e9193ebbe1af96faf27ac85`.
+- **Incumbent, host, and isolation.** The live incumbent is mermaid-js `11.15.0`, bundle SHA-256
+  `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`,
+  through `/usr/bin/chromium-browser` (`Chrome/150.0.7871.128`). Host `thinkstation1` is an AMD
+  Ryzen Threadripper PRO 5975WX with 64 logical CPUs and kernel `6.17.0-35-generic`. All 64 cpufreq
+  policies consistently report `amd-pstate-epp`, governor `powersave`, EPP `performance`, and
+  boost enabled. ISA provenance records AVX2/FMA/BMI2/VAES present and AVX-512 absent. Worker
+  `vmi1264463` built the ELF through strict RCH from base
+  `4798d977db756bf87495174a6f962e372a4f5e89` with `--clean-overlay`; the committed clean `6bf64c28`
+  harness worktree excluded co-tenant edits. No task-specific Cargo target directory was created.
+- **Disposition / retry predicate.** Reject this invocation as campaign evidence. Reopen only
+  after the committed driver enables the binary's exact-workload thread probe for ordinary scalar
+  render, requires `actual_observed_worker_threads == requested_worker_threads == 1` in both Rust
+  bracket arms, and its self-test proves a missing probe fails closed. Then replay both the 60/60
+  linked semantic artifact and live incumbent timing with the same pinned input/bundle, a
+  process-self-reporting strict-RCH ELF, complete host/governor/ISA provenance, and the unchanged
+  corrected null gate. Never copy the untimed equivalence run's observed count into this rejected
+  timing row.
