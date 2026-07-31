@@ -1674,19 +1674,28 @@ fn parse_fast_simple_flowchart_node_borrowed(
             if !trimmed.ends_with(']') {
                 return None;
             }
-            // The remainder (label + tail) must also carry no forbidden byte.
-            if trimmed.as_bytes()[bracket + 1..].iter().any(|&b| {
-                matches!(
-                    b,
-                    b'(' | b')' | b'{' | b'}' | b'"' | b'\'' | b'`' | b'|' | b'&' | b','
-                )
-            }) {
-                return None;
-            }
             let id = trimmed[..bracket].trim_ascii();
             // `trim_fast` is byte-identical to `str::trim` but skips the `char::is_whitespace`
             // CharSearcher — this label trim fires once per bracketed node.
             let label_raw = trim_fast(trimmed[bracket + 1..].strip_suffix(']')?);
+            // Mermaid's quoted rectangular labels deliberately carry punctuation that is syntax
+            // outside the quotes (`&`, commas, braces, parentheses, apostrophes). Chumsky treats
+            // all of it as label content, then `parse_label` removes the surrounding quotes. Keep
+            // the conservative forbidden-byte gate for unquoted labels, but let the existing fast
+            // path handle a complete double-quoted label directly. This is the dominant node form
+            // in documentation batches and avoids constructing the Chumsky choice graph per node.
+            let double_quoted =
+                label_raw.len() >= 2 && label_raw.starts_with('"') && label_raw.ends_with('"');
+            if !double_quoted
+                && label_raw.as_bytes().iter().any(|&b| {
+                    matches!(
+                        b,
+                        b'(' | b')' | b'{' | b'}' | b'"' | b'\'' | b'`' | b'|' | b'&' | b','
+                    )
+                })
+            {
+                return None;
+            }
             // Byte scan for a nested `[`/`]` rather than `contains(['[', ']'])`; both are ASCII.
             if !is_fast_flow_identifier(id)
                 || label_raw.as_bytes().iter().any(|&b| b == b'[' || b == b']')
@@ -10215,6 +10224,12 @@ mod tests {
             "svc/api[Service API]",
             "db-node[fa:database Storage]",
             "stage.one[Stage One]",
+            "N0[\"Rate limit (429)\"]",
+            "N1[\"Retry & backoff\"]",
+            "N2[\"User's session\"]",
+            "N3[\"Parse <config>\"]",
+            "N4[\"Café latency\"]",
+            "N5[\"comma, braces {stay content}\"]",
         ] {
             let fast = parse_fast_simple_flowchart_statement_ast(statement);
             assert!(fast.is_some(), "fast path rejected {statement:?}");
