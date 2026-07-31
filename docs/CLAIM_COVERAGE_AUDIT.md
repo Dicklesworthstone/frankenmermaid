@@ -43,12 +43,23 @@ Contamination map, derived from the corpus generators:
 
 Ordered by how load-bearing the claim is where a user could act on it.
 
-**Tier 0 — published in README: nothing to convert.** The only numeric performance claims in
-`README.md` are the `ci_equiv_512` sweep rows, which already carry an incumbent ratio, an equivalence
-verdict, and the corrected null gate. Every other perf-shaped string in `README.md` and `CHANGELOG.md`
-is a *disclaimer* ("no speedup ratio is stated for these rows", "a renderer that omits content is not
-a faster implementation"), not a claim. **The public surface carries zero unsupported perf claims.**
-The 217 unsupported claims are all ledger-internal.
+**Tier 0 — published in README.** Two blocks of numbers reach users, and they sit in different
+categories:
+
+- The `ci_equiv_512` sweep rows already carry an incumbent ratio, an equivalence verdict, and the
+  corrected null gate. Nothing to convert.
+- The structural-weakness table (7 rows: "2,000-node flowchart | 1.43 ms | `RangeError` after 6.5 s")
+  publishes **absolute frankenmermaid timings with no ratio**. These are not unmeasured — the
+  incumbent was run and *crashed*, so no ratio is derivable. That is a third category, distinct from
+  both "measured against the incumbent" and "no incumbent arm exists": **incumbent attempted, could
+  not complete.** README already states this ("This is a crash, not a timeout, so no speedup ratio is
+  stated for these rows"). They cannot be converted, and correctly so — inventing a ratio from a
+  crash budget would be a fabricated number. None of these workloads is class-contaminated
+  (flowchart, architecture, and ER only).
+
+Every other perf-shaped string in `README.md` and `CHANGELOG.md` is a *disclaimer*, not a claim. **No
+unsupported ratio claim reaches the public surface**, and the 217 KEEP claims lacking an incumbent
+ratio are all ledger-internal.
 
 **Tier 1 — certified, incumbent-backed, and contaminated.** These rank highest because they read as
 our strongest results while comparing unequal work. They need re-measurement after `bd-4isi`, not
