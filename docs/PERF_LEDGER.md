@@ -578,28 +578,30 @@ median-CI gates passed, all seven same-ELF brackets passed, and `cv_gate=never`.
   counts, governor/ISA/topology provenance, and bootstrap median-CI adjudication. CV remains
   provenance only.
 
-## SEMANTIC ADMISSION ONLY: four demoted class-mixed whole jobs are equivalence-clean (2026-07-31)
+## SEMANTIC ADMISSION ONLY: five demoted class-mixed whole jobs are equivalence-clean (2026-07-31)
 
-**Bead:** `bd-jqko`. **Lane:** cod (`LavenderMill`).
+**Beads:** `bd-jqko`, `bd-4sc9`. **Lane:** cod (`LavenderMill`).
 **Executing ELF SHA-256 (self-reported by process):**
 `499e4bf6b23ef6bfe4fccf9df4a086274d51f42ebe28b2f4ae5cc0c249a4eb47` (7,897,696 bytes).
 **A/A null control (same invocation):** incomplete by construction and therefore not a performance
-gate. The scalar Rust dump arms reported medians `1.016480` (`doc_build_40`), `0.989018`
-(`ci_batch_500`), `0.994573` (`docs_site_50`), and `1.009611` (`docs_site_200`), each inside the
-corrected `[0.98, 1.02]` clause. The untimed `--render-once` incumbent dump arm did not collect
-mermaid-js A/A samples, so no ratio, win, loss, or corrected-null performance verdict exists. Any
-future timed invocation must independently keep every arm's null median in `[0.98, 1.02]` and pass
-the bootstrap-CI and 2x-null-margin clauses; CV remains provenance only.
+gate. The scalar Rust dump arms reported medians `0.994631` (`class_50`), `1.016480`
+(`doc_build_40`), `0.989018` (`ci_batch_500`), `0.994573` (`docs_site_50`), and `1.009611`
+(`docs_site_200`), each inside the corrected `[0.98, 1.02]` clause. The untimed `--render-once`
+incumbent dump arm did not collect mermaid-js A/A samples, so no ratio, win, loss, or corrected-null
+performance verdict exists. Any future timed invocation must independently keep every arm's null
+median in `[0.98, 1.02]` and pass the bootstrap-CI and 2x-null-margin clauses; CV remains provenance
+only.
 
-- **Why this rerun was obligatory.** The older artifacts for `doc_build_40` and `ci_batch_500`
-  predated class Tier-2 adjudication, while the historical numeric rows for all four jobs were
-  demoted after the exact-output gate exposed missing class/state work. The class-member,
+- **Why this rerun was obligatory.** Older artifacts for `doc_build_40` and `ci_batch_500` predated
+  class Tier-2 adjudication, while the historical numeric rows for all five jobs were demoted after
+  the exact-output gate exposed missing class/state work. The class-member,
   relationship-kind, state-label, and inheritance retry predicates are now closed, so the exact
   named corpora—not filtered substitutes—were rerun through the current oracle.
-- **Exact result.** `doc_build_40` is **40/40 equivalent**, `ci_batch_500` **500/500**,
-  `docs_site_50` **50/50**, and `docs_site_200` **200/200**, with zero divergent and zero
-  unverified diagrams in every row. All 129 class diagrams received Tier-2 relationship
-  adjudication and passed. The pinned input SHA-256 values are respectively
+- **Exact result.** `class_50` is **1/1 equivalent**, `doc_build_40` **40/40**,
+  `ci_batch_500` **500/500**, `docs_site_50` **50/50**, and `docs_site_200` **200/200**, with zero
+  divergent and zero unverified diagrams in every row. All 130 class diagrams received Tier-2
+  relationship adjudication and passed. The pinned input SHA-256 values are respectively
+  `d1d7ef8c8e7c8d1dab2da8fbd56565dc97148e8fb1651d23fe43140e8c4ef831`,
   `8badedbf69bc204d952af1ba780c07569b7eb1091ff5d0fdd400dd2e3f6b59d7`,
   `65b8f69a7b2ee114cfb2fb49557b34cbc7e2c15f1414a81b7d94215a46de432f`,
   `c8d5cf8e88c26fa8fa2d7b304fab8ed0045883677d5a929d10aaf1da0b4b1638`, and
@@ -614,10 +616,13 @@ the bootstrap-CI and 2x-null-margin clauses; CV remains provenance only.
 - **Linkage and incumbent.** Artifact
   `.benchmarks/headtohead/class-mixed-requalification-v1/equivalence-ba6d3cf7-1785486443840.json`
   has SHA-256 `790e35d0aa5ea9a53d6f246b78bc7d50760bae995a65aa6faf5bebb5324a6011`.
-  Every engine dumped every expected revision, and each concatenated dump hash exactly matches
-  that engine's self-reported output SHA-256. The live incumbent is mermaid-js `11.15.0`, bundle
-  SHA-256 `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`,
-  through `/usr/bin/chromium-browser` (`Chrome/150.0.7871.128`).
+  The separate `class_50` artifact
+  `.benchmarks/headtohead/class-50-requalification-v1/equivalence-3a62764a-1785486786426.json`
+  has SHA-256 `c94d77e8bd12aa73c0781abbe9b1af79e83936f91fc79654b789eeefbf883934`.
+  Every engine dumped every expected revision, and each concatenated dump hash exactly matches that
+  engine's self-reported output SHA-256. The live incumbent is mermaid-js `11.15.0`, bundle SHA-256
+  `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`, through
+  `/usr/bin/chromium-browser` (`Chrome/150.0.7871.128`).
 - **Build, thread, and host provenance.** The immutable ELF is the strict-RCH artifact already
   built from pinned base `85fef646` with `--clean-overlay` and only the committed SVG follow-up
   represented by `4798d977`; no co-tenant edit entered the executable. Every row requested and
