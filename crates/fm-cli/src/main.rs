@@ -47,7 +47,8 @@ use crossterm::{execute, queue};
 use fm_core::{
     DiagramType, MermaidBudgetLedger, MermaidDiagramIr, MermaidGlyphMode,
     MermaidLayoutDecisionExplanation, MermaidLayoutDecisionLedger, MermaidLinkMode,
-    MermaidNativePressureSignals, MermaidParseMode, MermaidTier, StructuredDiagnostic,
+    MermaidNativePressureSignals, MermaidParseMode, MermaidPressureReport, MermaidTier,
+    StructuredDiagnostic,
     capability_matrix, capability_matrix_json_pretty, mermaid_layout_guard_observability,
 };
 #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
@@ -184,6 +185,71 @@ enum Command {
         /// Optional JSON artifact path mapping rendered SVG element IDs back to input spans.
         #[arg(long)]
         source_map_out: Option<String>,
+
+        /// FNX integration mode (auto=feature-detect, enabled=force on, disabled=force off).
+        #[arg(long, value_enum, default_value = "auto")]
+        fnx_mode: FnxModeArg,
+
+        /// FNX graph projection strategy for analysis algorithms.
+        #[arg(long, value_enum, default_value = "undirected")]
+        fnx_projection: FnxProjectionArg,
+
+        /// FNX fallback behavior when analysis exceeds budget or fails.
+        #[arg(long, value_enum, default_value = "graceful")]
+        fnx_fallback: FnxFallbackArg,
+    },
+
+    /// Render many diagrams concurrently as ONE job.
+    ///
+    /// This is the capability mermaid-js structurally cannot match: it renders on a single
+    /// JavaScript main thread, so a documentation site or CI batch is serialized no matter how
+    /// many cores the machine has. Here every input is an independent pipeline, so the whole
+    /// batch scales across physical cores. Per-diagram output is byte-identical to `render`;
+    /// the only difference is that the configuration is resolved once for the batch instead of
+    /// once per process, and the diagrams run concurrently.
+    RenderBatch {
+        /// Input file paths. Every path is rendered; "-" (stdin) is not accepted here.
+        #[arg(required = true, num_args = 1..)]
+        inputs: Vec<String>,
+
+        /// Directory for rendered output. Created if missing. Each input `<stem>` becomes
+        /// `<out-dir>/<stem>.<ext>`, so input basenames must be unique.
+        #[arg(long)]
+        out_dir: String,
+
+        /// Worker threads for the batch. Defaults to available parallelism.
+        /// `1` runs the batch serially through the identical code path.
+        #[arg(long)]
+        jobs: Option<usize>,
+
+        /// Parser support contract mode.
+        #[arg(long, value_enum)]
+        parse_mode: Option<ParseModeArg>,
+
+        /// Requested layout algorithm family.
+        #[arg(long, value_enum)]
+        layout_algorithm: Option<LayoutAlgorithmArg>,
+
+        /// Output format. PNG is rejected: rasterization is not batch-safe here.
+        #[arg(short, long, value_enum)]
+        format: Option<OutputFormat>,
+
+        /// Theme name (default, dark, forest, neutral)
+        #[arg(short, long)]
+        theme: Option<String>,
+
+        /// Font size in pixels.
+        #[arg(long, value_parser = parse_positive_font_size_arg)]
+        font_size: Option<f32>,
+
+        /// Emit one JSON summary line per input to stdout (path, bytes, status).
+        #[arg(long)]
+        json: bool,
+
+        /// Continue after a failing input instead of stopping at the first error.
+        /// Failures are always reported and always set a non-zero exit status.
+        #[arg(long)]
+        keep_going: bool,
 
         /// FNX integration mode (auto=feature-detect, enabled=force on, disabled=force off).
         #[arg(long, value_enum, default_value = "auto")]
@@ -1027,6 +1093,61 @@ fn main() -> Result<()> {
                     source_map_out: source_map_out.as_deref(),
                     dimensions: (width, height),
                     json_output: json,
+                    fnx_mode,
+                    fnx_projection,
+                    fnx_fallback,
+                },
+            )
+        }
+
+        Command::RenderBatch {
+            inputs,
+            out_dir,
+            jobs,
+            parse_mode,
+            layout_algorithm,
+            format,
+            theme,
+            font_size,
+            json,
+            keep_going,
+            fnx_mode,
+            fnx_projection,
+            fnx_fallback,
+        } => {
+            let format = resolve_output_format(format, &loaded_config.file)?;
+            let layout_algorithm = resolve_layout_algorithm(layout_algorithm, &loaded_config.file)?;
+            let theme = resolve_theme_name(theme, &loaded_config.file);
+            let layout_config = build_layout_config(&loaded_config.file, font_size)?;
+            let svg_base_config = build_base_svg_render_config(&loaded_config.file)?;
+            let term_base_config = build_base_term_render_config(&loaded_config.file)?;
+            let show_back_edges = resolve_show_back_edges(&loaded_config.file);
+            let show_minimap = term_base_config.show_minimap;
+            cmd_render_batch(
+                &inputs,
+                &out_dir,
+                jobs,
+                keep_going,
+                json,
+                RenderCommandOptions {
+                    parse_mode: resolve_parse_mode(parse_mode, &loaded_config.file),
+                    parser_config,
+                    layout_algorithm,
+                    layout_config,
+                    format,
+                    theme: &theme,
+                    font_size,
+                    // Batch writes one file per input; the shared `output` slot is unused.
+                    output: None,
+                    max_input_bytes,
+                    svg_base_config,
+                    term_base_config,
+                    show_back_edges,
+                    show_minimap,
+                    embed_source_spans: format == OutputFormat::Svg,
+                    source_map_out: None,
+                    dimensions: (None, None),
+                    json_output: false,
                     fnx_mode,
                     fnx_projection,
                     fnx_fallback,
@@ -1913,6 +2034,27 @@ fn layout_float_anomalies(layout: &fm_layout::DiagramLayout) -> (usize, usize) {
 // =============================================================================
 
 fn render_source(source: &str, options: &RenderCommandOptions<'_>) -> Result<RenderOutcome> {
+    render_source_with_pressure(
+        source,
+        options,
+        &MermaidNativePressureSignals::sample().into_report(),
+    )
+}
+
+/// Render one diagram against an already-sampled host pressure report.
+///
+/// `MermaidNativePressureSignals::sample()` reads `/proc/self/status` and queries scheduler
+/// affinity. Those describe the HOST, not the diagram, so sampling them per diagram is work the
+/// output never depends on. In a batch it is also actively harmful: `/proc/self/status` is
+/// generated by the kernel on each read and takes process mm locks, so concurrent samplers
+/// serialize against each other exactly when the batch is trying to scale out. The batch path
+/// samples once and shares the report; the single-diagram path is unchanged, still sampling
+/// immediately before it renders.
+fn render_source_with_pressure(
+    source: &str,
+    options: &RenderCommandOptions<'_>,
+    pressure: &MermaidPressureReport,
+) -> Result<RenderOutcome> {
     if source.len() > options.max_input_bytes {
         anyhow::bail!(
             "Inline input is {} bytes, which exceeds core.max_input_bytes={}",
@@ -1922,8 +2064,7 @@ fn render_source(source: &str, options: &RenderCommandOptions<'_>) -> Result<Ren
     }
 
     let total_start = Instant::now();
-    let pressure = MermaidNativePressureSignals::sample().into_report();
-    let mut budget_broker = MermaidBudgetLedger::new(&pressure);
+    let mut budget_broker = MermaidBudgetLedger::new(pressure);
 
     // Parse
     let parse_start = Instant::now();
@@ -1964,7 +2105,7 @@ fn render_source(source: &str, options: &RenderCommandOptions<'_>) -> Result<Ren
     let layout_time = layout_start.elapsed();
     budget_broker.record_layout(layout_time.as_millis().min(u128::from(u64::MAX)) as u64);
     let mut guard_report =
-        build_layout_guard_report_with_pressure(&parsed.ir, &traced_layout, pressure);
+        build_layout_guard_report_with_pressure(&parsed.ir, &traced_layout, pressure.clone());
     let (_cx, observability) = mermaid_layout_guard_observability(
         "cli.render",
         source,
@@ -2369,6 +2510,153 @@ fn cmd_render(input: &str, options: RenderCommandOptions<'_>) -> Result<()> {
         _ => write_output(output, &String::from_utf8_lossy(&outcome.rendered))?,
     }
 
+    Ok(())
+}
+
+/// Extension used for a batch output file.
+fn batch_output_extension(format: OutputFormat) -> &'static str {
+    match format {
+        OutputFormat::Svg => "svg",
+        OutputFormat::Png => "png",
+        OutputFormat::Term | OutputFormat::Ascii => "txt",
+    }
+}
+
+/// Render every input concurrently as one job.
+///
+/// The incumbent renders on a single JavaScript main thread, so its cost for N diagrams is the
+/// sum of N. Each diagram here is an independent parse -> layout -> render with no shared mutable
+/// state, so the batch is shared-nothing and scales with cores rather than accumulating.
+///
+/// Determinism: work is dispatched by index and every result is written to its own file, so the
+/// output set does not depend on completion order. Per-file bytes are identical to `render`
+/// because both go through `render_source` with the same resolved options.
+fn cmd_render_batch(
+    inputs: &[String],
+    out_dir: &str,
+    jobs: Option<usize>,
+    keep_going: bool,
+    json: bool,
+    options: RenderCommandOptions<'_>,
+) -> Result<()> {
+    use rayon::prelude::*;
+
+    if options.format == OutputFormat::Png {
+        anyhow::bail!(
+            "render-batch does not support --format png; rasterization is not batch-safe here"
+        );
+    }
+    if let Some(bad) = inputs.iter().find(|i| i.as_str() == "-") {
+        anyhow::bail!(
+            "render-batch reads files, not stdin; got {bad:?}. Pass explicit paths instead."
+        );
+    }
+
+    // Unique basenames, checked before any work: two inputs mapping to one output file would
+    // make the result depend on completion order.
+    let mut stems: std::collections::BTreeMap<String, &str> = std::collections::BTreeMap::new();
+    for input in inputs {
+        let stem = Path::new(input)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .ok_or_else(|| anyhow::anyhow!("input {input:?} has no file name"))?;
+        if let Some(previous) = stems.insert(stem.clone(), input.as_str()) {
+            anyhow::bail!(
+                "inputs {previous:?} and {input:?} share basename {stem:?}; \
+                 batch output would be order-dependent"
+            );
+        }
+    }
+
+    std::fs::create_dir_all(out_dir)
+        .with_context(|| format!("cannot create output directory {out_dir}"))?;
+
+    let requested = jobs.unwrap_or_else(|| {
+        std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+    });
+    if requested == 0 {
+        anyhow::bail!("--jobs must be at least 1");
+    }
+    let extension = batch_output_extension(options.format);
+    let out_root = Path::new(out_dir);
+    // Host pressure, sampled ONCE for the batch. See `render_source_with_pressure`: this is a
+    // host property, so per-diagram sampling is work the output never depends on, and its
+    // `/proc/self/status` read serializes concurrent workers.
+    let pressure = MermaidNativePressureSignals::sample().into_report();
+
+    let render_one = |input: &String| -> Result<(String, usize)> {
+        let source = load_input(input, options.max_input_bytes)?;
+        let outcome = render_source_with_pressure(&source, &options, &pressure)?;
+        let stem = Path::new(input)
+            .file_stem()
+            .map_or_else(|| "diagram".to_owned(), |s| s.to_string_lossy().into_owned());
+        let destination = out_root.join(format!("{stem}.{extension}"));
+        std::fs::write(&destination, &outcome.rendered)
+            .with_context(|| format!("cannot write {}", destination.display()))?;
+        Ok((destination.display().to_string(), outcome.rendered.len()))
+    };
+
+    let started = Instant::now();
+    let results: Vec<Result<(String, usize)>> = if requested == 1 {
+        inputs.iter().map(render_one).collect()
+    } else {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(requested)
+            .build()
+            .map_err(|e| anyhow::anyhow!("cannot build {requested}-thread render pool: {e}"))?;
+        pool.install(|| inputs.par_iter().map(render_one).collect())
+    };
+    let elapsed = started.elapsed();
+
+    let mut rendered = 0usize;
+    let mut total_bytes = 0usize;
+    let mut failures: Vec<String> = Vec::new();
+    for (input, result) in inputs.iter().zip(results) {
+        match result {
+            Ok((path, bytes)) => {
+                rendered += 1;
+                total_bytes += bytes;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "input": input, "output": path, "bytes": bytes, "status": "ok"
+                        })
+                    );
+                }
+            }
+            Err(error) => {
+                let message = format!("{input}: {error:#}");
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "input": input, "status": "error", "error": message
+                        })
+                    );
+                }
+                failures.push(message);
+                if !keep_going {
+                    break;
+                }
+            }
+        }
+    }
+
+    if !json {
+        eprintln!(
+            "rendered {rendered}/{} diagram(s), {total_bytes} bytes, {} worker(s), {:.3} ms",
+            inputs.len(),
+            requested,
+            elapsed.as_secs_f64() * 1000.0,
+        );
+    }
+    if !failures.is_empty() {
+        for failure in &failures {
+            eprintln!("error: {failure}");
+        }
+        anyhow::bail!("{} of {} diagram(s) failed", failures.len(), inputs.len());
+    }
     Ok(())
 }
 

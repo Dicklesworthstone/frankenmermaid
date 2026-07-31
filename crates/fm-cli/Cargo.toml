@@ -41,6 +41,9 @@ fm-layout.workspace = true
 fm-parser.workspace = true
 fm-render-svg.workspace = true
 fm-render-term.workspace = true
+# Shipped dependency, not just bench scaffolding: `render-batch` runs whole diagram pipelines
+# concurrently. The incumbent renders on one JavaScript main thread and has no answer to this.
+rayon = "1.12.0"
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9.34"
@@ -68,7 +71,6 @@ mimalloc = { version = "0.1", default-features = false }
 criterion = { version = "0.8", features = ["html_reports"] }
 tempfile = "3.25"
 fm-render-canvas.workspace = true
-rayon = "1.12.0"
 
 [[bench]]
 name = "pipeline_bench"
