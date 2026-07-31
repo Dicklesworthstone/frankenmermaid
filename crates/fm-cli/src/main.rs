@@ -48,8 +48,8 @@ use fm_core::{
     DiagramType, MermaidBudgetLedger, MermaidDiagramIr, MermaidGlyphMode,
     MermaidLayoutDecisionExplanation, MermaidLayoutDecisionLedger, MermaidLinkMode,
     MermaidNativePressureSignals, MermaidParseMode, MermaidPressureReport, MermaidTier,
-    StructuredDiagnostic,
-    capability_matrix, capability_matrix_json_pretty, mermaid_layout_guard_observability,
+    StructuredDiagnostic, capability_matrix, capability_matrix_json_pretty,
+    mermaid_layout_guard_observability,
 };
 #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
 use fm_layout::fnx_diagnostics::{FnxAnalysisResults, FnxDiagnosticSeverity, analyze_structure};
@@ -59,8 +59,9 @@ use fm_layout::{
     layout_diagram_traced_with_config_and_guardrails, layout_source_map,
 };
 use fm_parser::{
-    ParserConfig, capture_format_complement, detect_type_with_confidence_and_config,
-    first_significant_line, parse_evidence_json, parse_with_mode, parse_with_mode_and_config,
+    FlowchartBatchParsePlan, ParserConfig, capture_format_complement,
+    detect_type_with_confidence_and_config, first_significant_line, parse_evidence_json,
+    parse_with_mode, parse_with_mode_and_config,
 };
 use fm_render_svg::{
     A11yConfig, SvgRenderConfig, ThemePreset, describe_diagram_with_layout, render_svg_with_layout,
@@ -1678,9 +1679,13 @@ fn load_input(input: &str, max_input_bytes: usize) -> Result<String> {
             );
         }
         Ok(buffer)
-    } else if Path::new(input).exists() && should_treat_input_as_path(input) {
-        let metadata =
-            std::fs::metadata(input).context(format!("Failed to stat input file: {input}"))?;
+    } else if let Some(file) = open_input_path(input)? {
+        // Size gate via `fstat` on the already-open handle, NOT `fs::metadata(input)`: same length
+        // and same error text, but it reads the inode we already hold instead of walking the path
+        // a third time. See `open_input_path` for why that matters in a batch.
+        let metadata = file
+            .metadata()
+            .context(format!("Failed to stat input file: {input}"))?;
         if metadata.len() > u64::try_from(max_input_bytes).unwrap_or(u64::MAX) {
             anyhow::bail!(
                 "Input file '{}' is {} bytes, which exceeds core.max_input_bytes={max_input_bytes}",
@@ -1688,7 +1693,6 @@ fn load_input(input: &str, max_input_bytes: usize) -> Result<String> {
                 metadata.len()
             );
         }
-        let file = std::fs::File::open(input).context(format!("Failed to open file: {input}"))?;
         let mut handle = file.take(
             u64::try_from(max_input_bytes)
                 .unwrap_or(u64::MAX)
@@ -1713,6 +1717,41 @@ fn load_input(input: &str, max_input_bytes: usize) -> Result<String> {
             );
         }
         Ok(input.to_string())
+    }
+}
+
+/// Open `input` as a file, or return `None` if it should be treated as inline diagram text.
+///
+/// This replaces `Path::new(input).exists()` + `fs::metadata(input)` + `File::open(input)`, which
+/// resolved the same path three times for every input. Each resolution is a full walk that takes
+/// the dentry/inode locks of every component, so in `render-batch` the walks of N inputs sharing
+/// one directory contend on that directory's locks -- precisely when the batch is trying to scale
+/// across cores. One walk per input removes two thirds of that contention and two thirds of the
+/// per-input syscalls; the bytes read are unchanged.
+///
+/// The old predicate was `exists() && should_treat_input_as_path()`, where `Path::exists()` is
+/// defined as "`fs::metadata` succeeded". `open` and `metadata` disagree on exactly one input
+/// class: a file that can be stat-ed but not opened (mode 000) versus a path under a directory
+/// that cannot be traversed. Both surface as `PermissionDenied` from `open`, and the old code sent
+/// the first to an error and the second to the inline branch. So on any error other than
+/// `NotFound` -- never on the hot path -- fall back to the original `exists()` probe and reproduce
+/// its decision. `should_treat_input_as_path` is pure string inspection, so hoisting it above the
+/// filesystem access only removes syscalls for inputs that were never going to be read as files.
+fn open_input_path(input: &str) -> Result<Option<std::fs::File>> {
+    if !should_treat_input_as_path(input) {
+        return Ok(None);
+    }
+    match std::fs::File::open(input) {
+        Ok(file) => Ok(Some(file)),
+        // Missing path: `exists()` was false, so the old code fell through to inline text.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => {
+            if Path::new(input).exists() {
+                Err(anyhow::Error::new(error)).context(format!("Failed to open file: {input}"))
+            } else {
+                Ok(None)
+            }
+        }
     }
 }
 
@@ -2072,6 +2111,31 @@ fn render_source_with_pressure(
     let parse_time = parse_start.elapsed();
     budget_broker.record_parse(u64::try_from(parse_time.as_millis()).unwrap_or(u64::MAX));
 
+    render_parsed_source_with_pressure(
+        source,
+        parsed,
+        parse_time,
+        total_start,
+        budget_broker,
+        options,
+        pressure,
+    )
+}
+
+/// Finish an already-parsed diagram through layout and rendering.
+///
+/// `render-batch` uses this boundary after its cross-diagram prefix compiler has parsed suffixes in
+/// parallel. Single-diagram rendering still enters through [`render_source_with_pressure`], so its
+/// public behavior and timing metadata are unchanged.
+fn render_parsed_source_with_pressure(
+    source: &str,
+    parsed: fm_parser::ParseResult,
+    parse_time: std::time::Duration,
+    total_start: Instant,
+    mut budget_broker: MermaidBudgetLedger,
+    options: &RenderCommandOptions<'_>,
+    pressure: &MermaidPressureReport,
+) -> Result<RenderOutcome> {
     debug!(
         "Parsed: type={:?}, nodes={}, edges={}, warnings={}",
         parsed.ir.diagram_type,
@@ -2585,9 +2649,10 @@ fn cmd_render_batch(
     let pressure = MermaidNativePressureSignals::sample().into_report();
 
     let destination_for = |input: &String| -> PathBuf {
-        let stem = Path::new(input)
-            .file_stem()
-            .map_or_else(|| "diagram".to_owned(), |s| s.to_string_lossy().into_owned());
+        let stem = Path::new(input).file_stem().map_or_else(
+            || "diagram".to_owned(),
+            |s| s.to_string_lossy().into_owned(),
+        );
         out_root.join(format!("{stem}.{extension}"))
     };
 
@@ -2610,12 +2675,13 @@ fn cmd_render_batch(
                 .map_err(|e| anyhow::anyhow!("cannot build {requested}-thread render pool: {e}"))?,
         )
     };
-    let run_all = |f: &(dyn Fn(usize) -> Result<(String, usize)> + Sync)| -> Vec<Result<(String, usize)>> {
-        match &pool {
-            None => (0..inputs.len()).map(f).collect(),
-            Some(p) => p.install(|| (0..inputs.len()).into_par_iter().map(f).collect()),
-        }
-    };
+    let run_all =
+        |f: &(dyn Fn(usize) -> Result<(String, usize)> + Sync)| -> Vec<Result<(String, usize)>> {
+            match &pool {
+                None => (0..inputs.len()).map(f).collect(),
+                Some(p) => p.install(|| (0..inputs.len()).into_par_iter().map(f).collect()),
+            }
+        };
 
     let loaded: Vec<Result<(String, String)>> = match &pool {
         None => inputs.iter().map(load_one).collect(),
@@ -2640,6 +2706,35 @@ fn cmd_render_batch(
             owner_of.entry(digest.as_str()).or_insert(index);
         }
     }
+
+    // Compile every exact, complete flowchart-prefix subgraph shared by two or more distinct
+    // owners. Each owner still gets an independent IR, layout and render; only repeated prefix
+    // tokenization/lowering/interning is removed. The plan is immutable, so suffix parsing remains
+    // shared-nothing and runs on the same Rayon pool as the rest of each diagram pipeline.
+    let owner_indices = loaded
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            let (_, digest) = entry.as_ref().ok()?;
+            (owner_of.get(digest.as_str()) == Some(&index)).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let owner_sources = owner_indices
+        .iter()
+        .filter_map(|&index| {
+            loaded[index]
+                .as_ref()
+                .ok()
+                .map(|(source, _)| source.as_str())
+        })
+        .collect::<Vec<_>>();
+    let parse_plan =
+        FlowchartBatchParsePlan::new(&owner_sources, options.parse_mode, &options.parser_config);
+    let parse_plan_stats = parse_plan.stats();
+    let mut parse_plan_position = vec![usize::MAX; inputs.len()];
+    for (position, &index) in owner_indices.iter().enumerate() {
+        parse_plan_position[index] = position;
+    }
     let reused = loaded
         .iter()
         .flatten()
@@ -2661,7 +2756,21 @@ fn cmd_render_batch(
         if owner_of.get(digest.as_str()) != Some(&index) {
             return Ok((String::new(), 0)); // not the owner; written in phase 4
         }
-        let outcome = render_source_with_pressure(source, &options, &pressure)?;
+        let total_start = Instant::now();
+        let parse_start = Instant::now();
+        let parsed = parse_plan.parse(parse_plan_position[index], source);
+        let parse_time = parse_start.elapsed();
+        let mut budget_broker = MermaidBudgetLedger::new(&pressure);
+        budget_broker.record_parse(u64::try_from(parse_time.as_millis()).unwrap_or(u64::MAX));
+        let outcome = render_parsed_source_with_pressure(
+            source,
+            parsed,
+            parse_time,
+            total_start,
+            budget_broker,
+            &options,
+            &pressure,
+        )?;
         let destination = destination_for(&inputs[index]);
         std::fs::write(&destination, &outcome.rendered)
             .with_context(|| format!("cannot write {}", destination.display()))?;
@@ -2696,7 +2805,9 @@ fn cmd_render_batch(
         };
         let Some(bytes) = bytes else {
             // Owner failed; surface that failure against this input too.
-            return Err(anyhow::anyhow!("duplicate of an input that failed to render"));
+            return Err(anyhow::anyhow!(
+                "duplicate of an input that failed to render"
+            ));
         };
         let destination = destination_for(&inputs[index]);
         std::fs::write(&destination, bytes.as_slice())
@@ -2743,9 +2854,11 @@ fn cmd_render_batch(
 
     if !json {
         eprintln!(
-            "rendered {rendered}/{} diagram(s) ({reused} reused from identical sources), \
-             {total_bytes} bytes, {} worker(s), {:.3} ms",
+            "rendered {rendered}/{} diagram(s) ({reused} identical renders reused, {} shared \
+             prefix parses reused / {} bytes), {total_bytes} bytes, {} worker(s), {:.3} ms",
             inputs.len(),
+            parse_plan_stats.reused_prefix_parses,
+            parse_plan_stats.reused_prefix_bytes,
             requested,
             elapsed.as_secs_f64() * 1000.0,
         );

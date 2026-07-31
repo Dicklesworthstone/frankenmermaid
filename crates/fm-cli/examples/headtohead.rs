@@ -16,7 +16,8 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use fm_parser::{ParseResult, parse};
+use fm_core::MermaidParseMode;
+use fm_parser::{FlowchartBatchParsePlan, ParseResult, ParserConfig, parse};
 use fm_render_svg::{A11yConfig, SvgRenderConfig, render_svg_with_layout};
 use rayon::prelude::*;
 use serde::Deserialize;
@@ -113,8 +114,7 @@ fn lean_config() -> SvgRenderConfig {
     }
 }
 
-fn full_pipeline(input: &str, cfg: &SvgRenderConfig) -> String {
-    let parsed = parse(input);
+fn full_pipeline_parsed(parsed: ParseResult, cfg: &SvgRenderConfig) -> String {
     let layout = fm_layout::layout_diagram(&parsed.ir);
     render_svg_with_layout(&parsed.ir, &layout, cfg)
 }
@@ -197,6 +197,7 @@ struct RenderExecutor {
     min_sample_ns: u64,
     calibration_target_ns: u64,
     thread_probe_enabled: bool,
+    shared_prefix_reuse: bool,
     pool: Option<rayon::ThreadPool>,
 }
 
@@ -223,6 +224,7 @@ impl RenderExecutor {
         let calibration_target_ns = min_sample_ns.saturating_add(min_sample_ns.div_ceil(2));
         let thread_probe_enabled =
             matches!(std::env::var("FM_H2H_THREAD_PROBE").as_deref(), Ok("1"));
+        let shared_prefix_reuse = std::env::var_os("FM_H2H_DISABLE_SHARED_PREFIX").is_none();
         let pool = if threads == 1 {
             None
         } else {
@@ -240,6 +242,7 @@ impl RenderExecutor {
             min_sample_ns,
             calibration_target_ns,
             thread_probe_enabled,
+            shared_prefix_reuse,
             pool,
         })
     }
@@ -276,18 +279,34 @@ impl RenderExecutor {
         workers_seen: Option<&[AtomicBool]>,
     ) {
         sink.clear();
+        let input_refs = texts.iter().map(String::as_str).collect::<Vec<_>>();
+        let parse_plan = self.shared_prefix_reuse.then(|| {
+            FlowchartBatchParsePlan::new(
+                &input_refs,
+                MermaidParseMode::Compat,
+                &ParserConfig::default(),
+            )
+        });
+        let parse_input = |input_index: usize, text: &str| match &parse_plan {
+            Some(plan) => plan.parse(input_index, text),
+            None => parse(text),
+        };
         if let Some(pool) = &self.pool {
             let rendered = pool.install(|| {
                 texts
                     .par_iter()
-                    .map(|text| {
+                    .enumerate()
+                    .map(|(input_index, text)| {
                         if let Some(workers_seen) = workers_seen
                             && let Some(index) = rayon::current_thread_index()
                             && let Some(seen) = workers_seen.get(index)
                         {
                             seen.store(true, Ordering::Relaxed);
                         }
-                        full_pipeline(std::hint::black_box(text.as_str()), cfg)
+                        full_pipeline_parsed(
+                            parse_input(input_index, std::hint::black_box(text.as_str())),
+                            cfg,
+                        )
                     })
                     .collect::<Vec<_>>()
             });
@@ -296,8 +315,11 @@ impl RenderExecutor {
             if let Some(seen) = workers_seen.and_then(|workers| workers.first()) {
                 seen.store(true, Ordering::Relaxed);
             }
-            for text in texts {
-                sink.push(full_pipeline(std::hint::black_box(text.as_str()), cfg));
+            for (input_index, text) in texts.iter().enumerate() {
+                sink.push(full_pipeline_parsed(
+                    parse_input(input_index, std::hint::black_box(text.as_str())),
+                    cfg,
+                ));
             }
         }
     }
@@ -1011,6 +1033,7 @@ fn main() {
             "min_sample_ns": executor.min_sample_ns,
             "calibration_target_ns": executor.calibration_target_ns,
             "execution_model": executor.execution_model(),
+            "shared_prefix_reuse": executor.shared_prefix_reuse,
             "measurement_mode": workload_mode.as_str(),
             "measurement_boundary": workload_mode.boundary(),
         })
@@ -1250,6 +1273,7 @@ fn main() {
                 "min_sample_ns": executor.min_sample_ns,
                 "calibration_target_ns": executor.calibration_target_ns,
                 "execution_model": executor.execution_model(),
+                "shared_prefix_reuse": executor.shared_prefix_reuse,
                 "revisions": item.texts.len(),
                 "input_sha256": sha256_hex(joined_input.as_bytes()),
                 "input_bytes": joined_input.len(),
@@ -1300,11 +1324,13 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use fm_parser::parse;
     use fm_render_svg::SvgRenderConfig;
 
     use super::{
         CorpusItem, RenderExecutor, WorkloadMode, bootstrap_median_ci, calibrated_batch,
-        measure_parse, median, parse_cpu_list, ratio_stats, rescaled_batch, stats,
+        full_pipeline_parsed, measure_parse, median, parse_cpu_list, ratio_stats, rescaled_batch,
+        stats,
     };
 
     #[test]
@@ -1349,6 +1375,36 @@ mod tests {
         scalar.render_all(&texts, &config, &mut scalar_output);
         parallel.render_all(&texts, &config, &mut parallel_output);
         assert_eq!(parallel_output, scalar_output);
+    }
+
+    #[test]
+    fn shared_subgraph_prefix_reuse_preserves_full_svg_bytes() {
+        let prefix = concat!(
+            "flowchart LR\n",
+            "  subgraph Shared[\"Shared ingestion platform\"]\n",
+            "    S0[\"Receive & validate events\"]\n",
+            "    S1[\"Normalize payload safely\"]\n",
+            "    S2[\"Publish canonical records\"]\n",
+            "    S0-->S1\n",
+            "    S1-->S2\n",
+            "  end\n",
+        );
+        let texts = (0..16)
+            .map(|index| {
+                format!("{prefix}  S2-->D{index}[\"Independent downstream consumer {index}\"]")
+            })
+            .collect::<Vec<_>>();
+        let config = SvgRenderConfig::default();
+        let expected = texts
+            .iter()
+            .map(|text| full_pipeline_parsed(parse(text), &config))
+            .collect::<Vec<_>>();
+        let executor = RenderExecutor::new(4).expect("parallel executor");
+        let mut actual = Vec::new();
+
+        executor.render_all(&texts, &config, &mut actual);
+
+        assert_eq!(actual, expected);
     }
 
     #[test]

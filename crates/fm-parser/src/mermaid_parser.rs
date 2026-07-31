@@ -1047,12 +1047,171 @@ fn flow_subgraph_lookup_key(id: &str, title: Option<&str>) -> String {
     }
 }
 
+/// Parser state after lowering a complete, closed flowchart-prefix subgraph.
+///
+/// The state is immutable after construction. Each related diagram clones it, then lowers only its
+/// suffix. Cloning the already-interned vectors and indexes is substantially cheaper than repeatedly
+/// tokenizing, classifying, normalizing, and interning the same subgraph source.
+pub(crate) struct CompiledFlowchartPrefix {
+    prefix: String,
+    builder: IrBuilder,
+    detection: DetectedType,
+    parse_mode: MermaidParseMode,
+    line_offset: usize,
+}
+
+impl CompiledFlowchartPrefix {
+    pub(crate) fn new(
+        prefix: &str,
+        parse_mode: MermaidParseMode,
+        config: &ParserConfig,
+    ) -> Option<Self> {
+        let detection = crate::detect_type_with_confidence_and_config(prefix, config);
+        if detection.diagram_type != DiagramType::Flowchart
+            || detection.method != crate::DetectionMethod::ExactKeyword
+        {
+            return None;
+        }
+
+        let input_lines = memchr::memchr_iter(b'\n', prefix.as_bytes()).count() + 1;
+        let mut builder = IrBuilder::with_capacity_hint(DiagramType::Flowchart, input_lines);
+        builder.set_parse_mode(parse_mode);
+        builder.set_parser_config(*config);
+        for warning in &detection.warnings {
+            builder.add_warning(warning.clone());
+        }
+        parse_flowchart(prefix, &mut builder);
+
+        Some(Self {
+            prefix: prefix.to_owned(),
+            builder,
+            detection,
+            parse_mode,
+            line_offset: memchr::memchr_iter(b'\n', prefix.as_bytes()).count(),
+        })
+    }
+
+    pub(crate) fn parse(&self, input: &str) -> Option<ParseResult> {
+        let suffix = input.strip_prefix(&self.prefix)?;
+        let mut builder = self.builder.clone();
+        builder.set_parse_mode(self.parse_mode);
+        parse_flowchart_with_line_offset(suffix, self.line_offset, &mut builder);
+        if builder.node_count() == 0 && builder.edge_count() == 0 {
+            builder.add_warning("No parseable nodes or edges were found");
+        }
+        Some(builder.finish(self.detection.confidence, self.detection.method))
+    }
+}
+
+/// Return the largest exact prefix containing the header followed by one or more complete,
+/// top-level subgraph blocks.
+///
+/// Global directives are deliberately excluded: their extraction happens after whole-document
+/// lowering and can refer forward into a suffix. Such inputs stay on the ordinary parser. The
+/// accepted subset is therefore an isomorphism, not a best-effort cache: prefix lowering order,
+/// interning order, source lines, warnings, and suffix semantics match a full parse exactly.
+pub(crate) fn reusable_flowchart_prefix(input: &str) -> Option<&str> {
+    let mut offset = 0usize;
+    let mut saw_header = false;
+    let mut saw_subgraph = false;
+    let mut depth = 0usize;
+    let mut last_complete_end = None;
+
+    for raw_line in input.split_inclusive('\n') {
+        let source_line = raw_line
+            .strip_suffix("\r\n")
+            .or_else(|| raw_line.strip_suffix('\n'))
+            .unwrap_or(raw_line);
+        let trimmed = trim_fast(source_line);
+        let line_end = offset + raw_line.len();
+
+        if shared_prefix_global_directive(trimmed) {
+            return None;
+        }
+
+        if !saw_header {
+            if trimmed.is_empty() || is_comment(trimmed) {
+                offset = line_end;
+                continue;
+            }
+            if !is_flowchart_header(trimmed) {
+                return None;
+            }
+            saw_header = true;
+            offset = line_end;
+            continue;
+        }
+
+        if depth == 0 {
+            if trimmed.is_empty() || is_comment(trimmed) {
+                offset = line_end;
+                continue;
+            }
+            if is_subgraph_block_start(trimmed) {
+                depth = 1;
+                saw_subgraph = true;
+                offset = line_end;
+                continue;
+            }
+            break;
+        }
+
+        if is_subgraph_block_start(trimmed) {
+            depth += 1;
+        } else if trimmed == "end" {
+            depth -= 1;
+            if depth == 0 {
+                last_complete_end = Some(line_end);
+            }
+        }
+        offset = line_end;
+    }
+
+    let end = last_complete_end?;
+    if !saw_header || !saw_subgraph || depth != 0 || end >= input.len() || end < 128 {
+        return None;
+    }
+
+    // Directives in the suffix can target prefix nodes, so the whole input must be free of the
+    // post-lowering global directive families before prefix compilation is legal.
+    if byte_lines(&input[end..])
+        .map(trim_fast)
+        .any(shared_prefix_global_directive)
+    {
+        return None;
+    }
+    Some(&input[..end])
+}
+
+fn is_subgraph_block_start(line: &str) -> bool {
+    line.strip_prefix("subgraph")
+        .is_some_and(|rest| rest.chars().next().is_some_and(char::is_whitespace))
+}
+
+fn shared_prefix_global_directive(line: &str) -> bool {
+    line.starts_with("%%{")
+        || is_non_graph_statement(line)
+        || line.starts_with("accTitle")
+        || line.starts_with("accDescr")
+}
+
 // ---------------------------------------------------------------------------
 // Top-level parse_flowchart — line-by-line with chumsky statement parser
 // ---------------------------------------------------------------------------
 
 fn parse_flowchart(input: &str, builder: &mut IrBuilder) {
-    let document = parse_flowchart_document(input, builder.parser_config());
+    parse_flowchart_with_line_offset(input, 0, builder);
+}
+
+/// Parse a flowchart fragment whose first line follows `line_offset` lines already compiled into
+/// `builder`.
+///
+/// A render batch can contain many diagrams that begin with the same complete subgraph block. The
+/// shared-prefix compiler lowers that block once, clones the interned builder state, and sends only
+/// each unique suffix through this function. Offsetting line numbers preserves the exact spans and
+/// diagnostics that a full-source parse would produce.
+fn parse_flowchart_with_line_offset(input: &str, line_offset: usize, builder: &mut IrBuilder) {
+    let document = parse_flowchart_document(input, line_offset, builder.parser_config());
     if let Some(direction) = document.header_direction {
         builder.set_direction(direction);
     }
@@ -1123,11 +1282,12 @@ fn byte_lines(input: &str) -> ByteLines<'_> {
 
 fn parse_flowchart_document<'a>(
     input: &'a str,
+    line_offset: usize,
     config: &ParserConfig,
 ) -> FlowDocumentParseResult<'a> {
     let lines: Vec<(usize, &str)> = byte_lines(input)
         .enumerate()
-        .map(|(i, line)| (i + 1, line))
+        .map(|(i, line)| (line_offset + i + 1, line))
         .collect();
     let mut next_index = 0;
     let mut warnings = Vec::new();
@@ -3193,10 +3353,7 @@ fn split_state_transition_label(statement: &str) -> (&str, Option<&str>) {
                 let label = trim_fast(&statement[idx + 1..]);
                 // An empty suffix (`S0 --> S1:`) carries no label; leave the edge unlabelled rather
                 // than attaching an empty string.
-                return (
-                    &statement[..idx],
-                    (!label.is_empty()).then_some(label),
-                );
+                return (&statement[..idx], (!label.is_empty()).then_some(label));
             }
             _ => {}
         }

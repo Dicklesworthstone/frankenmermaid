@@ -143,6 +143,100 @@ impl ParseResult {
     }
 }
 
+/// Work eliminated by a [`FlowchartBatchParsePlan`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct FlowchartBatchParseStats {
+    /// Distinct exact subgraph prefixes compiled once for two or more inputs.
+    pub shared_prefix_groups: usize,
+    /// Inputs served from a compiled prefix, including each group's compiling owner.
+    pub shared_prefix_inputs: usize,
+    /// Repeated prefix parses removed (`group_len - 1` summed across groups).
+    pub reused_prefix_parses: usize,
+    /// Source bytes that no longer pass through tokenization/lowering.
+    pub reused_prefix_bytes: usize,
+}
+
+/// Immutable batch compilation plan for diagrams with repeated prefix subgraphs.
+///
+/// The ordinary parser remains the fallback for every ungrouped input. When two or more explicit
+/// flowcharts begin with the same complete, closed subgraph block, the plan lowers that prefix once
+/// and clones its already-interned builder state before parsing each suffix. Callers may invoke
+/// [`Self::parse`] concurrently; the compiled prefixes are immutable and contain no shared mutable
+/// state.
+pub struct FlowchartBatchParsePlan {
+    compiled: Vec<mermaid_parser::CompiledFlowchartPrefix>,
+    assignment: Vec<Option<usize>>,
+    parse_mode: MermaidParseMode,
+    parser_config: ParserConfig,
+    stats: FlowchartBatchParseStats,
+}
+
+impl FlowchartBatchParsePlan {
+    #[must_use]
+    pub fn new(inputs: &[&str], parse_mode: MermaidParseMode, config: &ParserConfig) -> Self {
+        let mut groups: std::collections::BTreeMap<&str, Vec<usize>> =
+            std::collections::BTreeMap::new();
+        for (index, input) in inputs.iter().enumerate() {
+            if let Some(prefix) = mermaid_parser::reusable_flowchart_prefix(input) {
+                groups.entry(prefix).or_default().push(index);
+            }
+        }
+
+        let mut compiled = Vec::new();
+        let mut assignment = vec![None; inputs.len()];
+        let mut stats = FlowchartBatchParseStats::default();
+        for (prefix, indexes) in groups {
+            if indexes.len() < 2 {
+                continue;
+            }
+            let Some(prefix_parser) =
+                mermaid_parser::CompiledFlowchartPrefix::new(prefix, parse_mode, config)
+            else {
+                continue;
+            };
+            let compiled_index = compiled.len();
+            compiled.push(prefix_parser);
+            for &index in &indexes {
+                assignment[index] = Some(compiled_index);
+            }
+            stats.shared_prefix_groups += 1;
+            stats.shared_prefix_inputs += indexes.len();
+            stats.reused_prefix_parses += indexes.len() - 1;
+            stats.reused_prefix_bytes += prefix.len().saturating_mul(indexes.len() - 1);
+        }
+
+        Self {
+            compiled,
+            assignment,
+            parse_mode,
+            parser_config: *config,
+            stats,
+        }
+    }
+
+    /// Parse one input at the same index used to construct the plan.
+    ///
+    /// A mismatched index/input or an input outside a reusable group takes the standard full parser
+    /// path, preserving the public parser's behavior instead of turning cache eligibility into a
+    /// correctness requirement.
+    #[must_use]
+    pub fn parse(&self, index: usize, input: &str) -> ParseResult {
+        self.assignment
+            .get(index)
+            .and_then(|entry| *entry)
+            .and_then(|compiled_index| self.compiled.get(compiled_index))
+            .and_then(|compiled| compiled.parse(input))
+            .unwrap_or_else(|| {
+                parse_with_mode_and_config(input, self.parse_mode, &self.parser_config)
+            })
+    }
+
+    #[must_use]
+    pub const fn stats(&self) -> FlowchartBatchParseStats {
+        self.stats
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum MermaidLineEndingStyle {
@@ -1074,9 +1168,63 @@ mod tests {
     use std::fmt::Write;
 
     use super::{
-        MermaidLineEndingStyle, MermaidWhitespaceKind, apply_parse_lens_edit, build_parse_lens,
-        capture_format_complement, detect_type, normalize_identifier, parse, parse_with_mode,
+        FlowchartBatchParsePlan, MermaidLineEndingStyle, MermaidWhitespaceKind, ParserConfig,
+        apply_parse_lens_edit, build_parse_lens, capture_format_complement, detect_type,
+        normalize_identifier, parse, parse_with_mode,
     };
+
+    #[test]
+    fn batch_plan_reuses_complete_prefix_subgraphs_exactly() {
+        let prefix = concat!(
+            "flowchart LR\n",
+            "  subgraph Shared[\"Shared ingestion platform\"]\n",
+            "    S0[\"Receive & validate events\"]\n",
+            "    S1[\"Normalize payload safely\"]\n",
+            "    S2[\"Publish canonical records\"]\n",
+            "    S0-->S1\n",
+            "    S1-->S2\n",
+            "  end\n",
+        );
+        let inputs = [
+            format!("{prefix}  S2-->A[\"Analytics consumer\"]"),
+            format!("{prefix}  S2-->B[\"Billing consumer\"]"),
+            "flowchart TD\nX[Independent]-->Y[Diagram]".to_owned(),
+        ];
+        let refs = inputs.iter().map(String::as_str).collect::<Vec<_>>();
+        let plan =
+            FlowchartBatchParsePlan::new(&refs, MermaidParseMode::Compat, &ParserConfig::default());
+
+        assert_eq!(plan.stats().shared_prefix_groups, 1);
+        assert_eq!(plan.stats().shared_prefix_inputs, 2);
+        assert_eq!(plan.stats().reused_prefix_parses, 1);
+        assert_eq!(plan.stats().reused_prefix_bytes, prefix.len());
+        for (index, input) in inputs.iter().enumerate() {
+            assert_eq!(plan.parse(index, input), parse(input));
+        }
+    }
+
+    #[test]
+    fn batch_plan_falls_back_when_global_directives_cross_the_prefix_boundary() {
+        let prefix = concat!(
+            "flowchart LR\n",
+            "  subgraph Shared[\"Shared platform with enough source to clear the cache floor\"]\n",
+            "    S0[Receive]-->S1[Normalize]\n",
+            "    S1-->S2[Publish]\n",
+            "  end\n",
+        );
+        let inputs = [
+            format!("{prefix}  style S0 fill:#fff\n  S2-->A"),
+            format!("{prefix}  style S0 fill:#fff\n  S2-->B"),
+        ];
+        let refs = inputs.iter().map(String::as_str).collect::<Vec<_>>();
+        let plan =
+            FlowchartBatchParsePlan::new(&refs, MermaidParseMode::Compat, &ParserConfig::default());
+
+        assert_eq!(plan.stats(), super::FlowchartBatchParseStats::default());
+        for (index, input) in inputs.iter().enumerate() {
+            assert_eq!(plan.parse(index, input), parse(input));
+        }
+    }
 
     #[test]
     fn matches_keyword_header_ci_is_byte_identical() {
