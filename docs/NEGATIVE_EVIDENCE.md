@@ -19712,6 +19712,39 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
 
   Agent: cc (CobaltFern)
 
+## REJECT: fixed contiguous render shards (2026-08-01)
+
+**Bead:** `bd-zd1u`.
+**Counted mechanism:** on the exact 384-diagram job, fixed shards cut 595,588,020 instructions /
+1,320,022,781 cycles to 376,444,917 / 497,355,118, but whole-job medians regressed from 10.323 to
+10.530 ms (direct/static ratio `0.98034`) with byte-identical output.
+
+- **Decision.** Reverted. Round-robin shards and a second static load cohort lost further.
+- **Retry predicate.** Retry only with a persistent scheduler that amortizes startup and proves a
+  direct whole-job win; lower aggregate CPU work alone is insufficient.
+
+## REJECT: render-then-materialize filesystem barrier (2026-08-01)
+
+**Bead:** `bd-ju9c`.
+**Counted mechanism:** all arms rendered and wrote the same 384 files / 20,685,143 bytes; 12-run
+whole-process means were 20.7 ms for overlapped worker writes and 22.8 ms for the best deferred
+32-lane sink, with 1/2/4/8/16 lanes slower still. Output bytes were identical.
+
+- **Decision.** Reverted; removing ext4 contention did not repay lost render/write overlap.
+- **Retry predicate.** Do not retry a phase barrier. A materially different attempt must preserve
+  overlap without starting another pool.
+
+## REJECT: overlapped channel-fed writer cohort (2026-08-01)
+
+**Bead:** `bd-plbl`.
+**Counted mechanism:** all arms rendered and wrote the same 384 files / 20,685,143 bytes. The
+bounded 16-writer arm reached only a noisy tie; after producer backpressure was removed, 21-run
+means were 19.0 ms direct versus 22.6 / 23.5 / 28.7 ms for 8 / 16 / 24 writers.
+
+- **Decision.** Reverted; channel distribution and thread startup exceeded the ext4 spin removed.
+- **Retry predicate.** Retry only with an OS-native batched/asynchronous sink that adds no thread
+  cohort or producer channel to this short whole job.
+
 ### REJECT: segmented SVG batch return/streaming (2026-08-01)
 
 **A/A null control (same invocation):** each old/candidate process ran the harness's internal

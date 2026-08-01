@@ -1625,3 +1625,38 @@ fewer cycles, and 9.63% less CPU time** (`1.8125x`, `1.1132x`, and `1.1065x` rat
 - **Retry predicate.** Re-run only if parser prefix-group assignment, renderer certification,
   copy-on-write layout ownership, Rayon worker initialization, shared-prefix corpus, executing ELF,
   or equivalence contract changes.
+
+## KEEP: persistent unchanged-output bypass for repository batch renders (2026-08-01)
+
+**Bead:** `bd-m86p`. **Lane:** cod (`BlackThrush`).
+**Campaign result class:** maintenance-self-speedup
+**Executing ELF SHA-256 (self-reported by process):** `08384cf5bc0a10f173294ec8d394a3b6e8d0f35f550a4d152047ccd7ec39e93a`
+**A/A null control (same invocation):** 31 order-rotated cache-A/cache-B whole-process arms,
+pinned to CPUs 0-63, measured 7,819,208 / 7,608,618 ns medians (ratio `1.027678`); the
+20,000-resample median-ratio 95% CI was `[0.979561, 1.056152]` and includes one.
+**Counted mechanism:** the disabled arm performed 384 source reads, parses/layouts/renders, and
+384 output writes; the admitted warm arm validated 384 source/output metadata pairs and performed
+zero source reads, zero Rayon pool construction, zero parses/layouts/renders, and zero output
+writes. Both arms reported 20,685,143 output bytes.
+
+- **Mechanism.** `render-batch` now commits one hidden manifest after a successful materialization.
+  Its entries bind source metadata and content digest to the resolved render configuration and
+  executing-binary identity. An unchanged full batch is admitted before host-pressure sampling or
+  Rayon construction; `--no-cache` preserves the old path as a same-binary control. Source,
+  configuration, binary, length, or post-manifest output changes fail closed to the existing path.
+- **Whole-job result.** Invocation `fm-cache-final-ab-1785585413747655828` measured 31
+  order-rotated no-cache/cache processes at 21,198,822 / 7,819,208 ns medians: **2.711121x**, with
+  bootstrap 95% CI `[2.526864, 2.888221]`. Enabled and disabled arms emitted byte-identical 384-file
+  output; aggregate per-file manifest SHA-256 was
+  `1d8fd3f3f368e593fdd2022ed467d3f46da1321b0e336e917898a4e1eac47703`.
+- **Live-incumbent corroboration.** One same-invocation candidate/incumbent/candidate bracket used
+  the exact ELF above and pinned mermaid-js 11.15.0 bundle
+  `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de` on shared input SHA-256
+  `4d9914725224c310b44bd1bb4c03cc18575b6c02ef2350a70b6496470e53b464`. Candidate internal times
+  were 2.581 / 3.203 ms with 64 workers; the runtime-verified single-main-thread incumbent was
+  53,258.5 ms. Its render-once arm had no incumbent null, so this is not a competitive ratio claim.
+- **Validation.** Theme/config changes forced 384/384 misses before the next identical run returned
+  to 384/384 hits. Strict remote workspace check and clippy passed; three focused invalidation tests
+  passed twice (both CLI binary targets); formatting and exact output identity passed.
+- **Retry predicate.** Re-measure only if manifest admission, cache-key composition, destination
+  freshness, executing-binary identity, the 384-input corpus, or output equivalence changes.

@@ -254,6 +254,10 @@ enum Command {
         #[arg(long)]
         keep_going: bool,
 
+        /// Disable the persistent unchanged-output cache for this batch.
+        #[arg(long)]
+        no_cache: bool,
+
         /// FNX integration mode (auto=feature-detect, enabled=force on, disabled=force off).
         #[arg(long, value_enum, default_value = "auto")]
         fnx_mode: FnxModeArg,
@@ -808,6 +812,125 @@ struct RenderOutcome {
     render_result: Option<RenderResult>,
 }
 
+const BATCH_RENDER_CACHE_VERSION: u32 = 1;
+const BATCH_RENDER_CACHE_FILE: &str = ".frankenmermaid-batch-cache-v1.json";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BatchRenderCacheEntry {
+    key: String,
+    #[serde(default)]
+    options_key: String,
+    #[serde(default)]
+    source_bytes: u64,
+    #[serde(default)]
+    source_modified_ns: String,
+    bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BatchRenderCacheManifest {
+    version: u32,
+    entries: std::collections::BTreeMap<String, BatchRenderCacheEntry>,
+}
+
+impl Default for BatchRenderCacheManifest {
+    fn default() -> Self {
+        Self {
+            version: BATCH_RENDER_CACHE_VERSION,
+            entries: std::collections::BTreeMap::new(),
+        }
+    }
+}
+
+fn batch_cache_entry_matches_early(
+    entry: &BatchRenderCacheEntry,
+    options_key: &str,
+    source_bytes: u64,
+    source_modified_ns: &str,
+    output_bytes: u64,
+    output_modified: std::time::SystemTime,
+    manifest_modified: std::time::SystemTime,
+) -> bool {
+    entry.options_key == options_key
+        && entry.source_bytes == source_bytes
+        && entry.source_modified_ns == source_modified_ns
+        && entry.bytes == output_bytes
+        && output_modified <= manifest_modified
+}
+
+#[cfg(test)]
+mod batch_render_cache_tests {
+    use super::{BatchRenderCacheEntry, batch_cache_entry_matches_early};
+    use std::time::{Duration, UNIX_EPOCH};
+
+    fn entry() -> BatchRenderCacheEntry {
+        BatchRenderCacheEntry {
+            key: "source:options".to_owned(),
+            options_key: "options".to_owned(),
+            source_bytes: 123,
+            source_modified_ns: "456".to_owned(),
+            bytes: 789,
+        }
+    }
+
+    #[test]
+    fn unchanged_entry_is_admitted() {
+        assert!(batch_cache_entry_matches_early(
+            &entry(),
+            "options",
+            123,
+            "456",
+            789,
+            UNIX_EPOCH + Duration::from_secs(1),
+            UNIX_EPOCH + Duration::from_secs(2),
+        ));
+    }
+
+    #[test]
+    fn source_or_configuration_change_is_rejected() {
+        assert!(!batch_cache_entry_matches_early(
+            &entry(),
+            "other-options",
+            123,
+            "456",
+            789,
+            UNIX_EPOCH,
+            UNIX_EPOCH,
+        ));
+        assert!(!batch_cache_entry_matches_early(
+            &entry(),
+            "options",
+            124,
+            "456",
+            789,
+            UNIX_EPOCH,
+            UNIX_EPOCH,
+        ));
+    }
+
+    #[test]
+    fn changed_or_newer_output_is_rejected() {
+        assert!(!batch_cache_entry_matches_early(
+            &entry(),
+            "options",
+            123,
+            "456",
+            790,
+            UNIX_EPOCH,
+            UNIX_EPOCH,
+        ));
+        assert!(!batch_cache_entry_matches_early(
+            &entry(),
+            "options",
+            123,
+            "456",
+            789,
+            UNIX_EPOCH + Duration::from_secs(2),
+            UNIX_EPOCH + Duration::from_secs(1),
+        ));
+    }
+}
+
 #[derive(Debug, Clone)]
 struct RenderCommandOptions<'a> {
     parse_mode: MermaidParseMode,
@@ -1114,6 +1237,7 @@ fn main() -> Result<()> {
             font_size,
             json,
             keep_going,
+            no_cache,
             fnx_mode,
             fnx_projection,
             fnx_fallback,
@@ -1132,6 +1256,7 @@ fn main() -> Result<()> {
                 jobs,
                 keep_going,
                 json,
+                !no_cache,
                 RenderCommandOptions {
                     parse_mode: resolve_parse_mode(parse_mode, &loaded_config.file),
                     parser_config,
@@ -2689,6 +2814,7 @@ fn cmd_render_batch(
     jobs: Option<usize>,
     keep_going: bool,
     json: bool,
+    use_cache: bool,
     options: RenderCommandOptions<'_>,
 ) -> Result<()> {
     use rayon::prelude::*;
@@ -2738,10 +2864,6 @@ fn cmd_render_batch(
     }
     let extension = batch_output_extension(options.format);
     let out_root = Path::new(out_dir);
-    // Host pressure, sampled ONCE for the batch. See `render_source_with_pressure`: this is a
-    // host property, so per-diagram sampling is work the output never depends on, and its
-    // `/proc/self/status` read serializes concurrent workers.
-    let pressure = MermaidNativePressureSignals::sample().into_report();
 
     let destination_for = |input: &String| -> PathBuf {
         let stem = Path::new(input).file_stem().map_or_else(
@@ -2752,6 +2874,116 @@ fn cmd_render_batch(
     };
 
     let started = Instant::now();
+    let cache_path = out_root.join(BATCH_RENDER_CACHE_FILE);
+    let executable_identity = use_cache.then(|| {
+        let executable = std::env::current_exe().ok()?;
+        let metadata = executable.metadata().ok()?;
+        let modified = metadata
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?;
+        Some(format!(
+            "{}:{}:{}",
+            env!("CARGO_PKG_VERSION"),
+            metadata.len(),
+            modified.as_nanos()
+        ))
+    });
+    let executable_identity = executable_identity.flatten();
+    let cache_active = use_cache && executable_identity.is_some();
+    let option_cache_digest = executable_identity
+        .as_ref()
+        .map(|identity| sha256_hex(format!("{identity}\0{options:?}").as_bytes()));
+    let (prior_cache, prior_cache_modified) = if cache_active {
+        let manifest = std::fs::read(&cache_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<BatchRenderCacheManifest>(&bytes).ok())
+            .filter(|manifest| manifest.version == BATCH_RENDER_CACHE_VERSION)
+            .unwrap_or_default();
+        let modified = cache_path
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok();
+        (manifest, modified)
+    } else {
+        (BatchRenderCacheManifest::default(), None)
+    };
+    let cache_key_for = |digest: &str| -> Option<String> {
+        option_cache_digest
+            .as_ref()
+            .map(|options| format!("{digest}:{options}"))
+    };
+    let modified_key = |metadata: &std::fs::Metadata| -> Option<String> {
+        metadata
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|duration| duration.as_nanos().to_string())
+    };
+
+    // The hot incremental path is admitted before Rayon exists. Source size+mtime validates the
+    // content key recorded by the preceding successful render; destination size+freshness proves
+    // the materialized bytes have not subsequently changed. A fully unchanged batch therefore
+    // pays no source reads, parser plan, pressure probe, thread startup, layout or rendering.
+    let early_cached_results = inputs
+        .iter()
+        .map(|input| {
+            let options_key = option_cache_digest.as_ref()?;
+            let manifest_modified = prior_cache_modified?;
+            let source_metadata = Path::new(input).metadata().ok()?;
+            let destination = destination_for(input);
+            let entry_name = destination.file_name()?.to_string_lossy();
+            let entry = prior_cache.entries.get(entry_name.as_ref())?;
+            let output_metadata = destination.metadata().ok()?;
+            if !batch_cache_entry_matches_early(
+                entry,
+                options_key,
+                source_metadata.len(),
+                &modified_key(&source_metadata)?,
+                output_metadata.len(),
+                output_metadata.modified().ok()?,
+                manifest_modified,
+            ) {
+                return None;
+            }
+            let bytes = usize::try_from(entry.bytes).ok()?;
+            Some((destination.display().to_string(), bytes))
+        })
+        .collect::<Vec<_>>();
+    if !inputs.is_empty() && early_cached_results.iter().all(Option::is_some) {
+        let elapsed = started.elapsed();
+        let mut total_bytes = 0usize;
+        for (input, (path, bytes)) in inputs.iter().zip(early_cached_results.iter().flatten()) {
+            total_bytes += *bytes;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "input": input, "output": path, "bytes": bytes, "status": "ok"
+                    })
+                );
+            }
+        }
+        if !json {
+            eprintln!(
+                "rendered {}/{} diagram(s) ({} persistent hits, 0 identical renders reused, 0 \
+                 shared prefix parses reused / 0 bytes), {total_bytes} bytes, {requested} \
+                 worker(s), {:.3} ms",
+                inputs.len(),
+                inputs.len(),
+                inputs.len(),
+                elapsed.as_secs_f64() * 1000.0,
+            );
+        }
+        return Ok(());
+    }
+
+    // Host pressure, sampled ONCE for batches that actually render. See
+    // `render_source_with_pressure`: this is a host property, so per-diagram sampling is work the
+    // output never depends on, and its `/proc/self/status` read serializes concurrent workers.
+    let pressure = MermaidNativePressureSignals::sample().into_report();
 
     // Phase 1: read every source and content-address it. Reading is what we already had to do;
     // the hash is the only added work.
@@ -2783,6 +3015,32 @@ fn cmd_render_batch(
         Some(p) => p.install(|| inputs.par_iter().map(load_one).collect()),
     };
 
+    // A hit is admitted only when the source+configuration+executable key matches, the destination
+    // still has the recorded length, and it has not changed since the manifest was committed.
+    // Hits never enter the parser plan or the render pool.
+    let cached_results = loaded
+        .iter()
+        .enumerate()
+        .map(|(index, loaded)| {
+            let (_, digest) = loaded.as_ref().ok()?;
+            let key = cache_key_for(digest)?;
+            let manifest_modified = prior_cache_modified?;
+            let destination = destination_for(&inputs[index]);
+            let entry_name = destination.file_name()?.to_string_lossy();
+            let entry = prior_cache.entries.get(entry_name.as_ref())?;
+            if entry.key != key {
+                return None;
+            }
+            let metadata = destination.metadata().ok()?;
+            if metadata.len() != entry.bytes || metadata.modified().ok()? > manifest_modified {
+                return None;
+            }
+            let bytes = usize::try_from(entry.bytes).ok()?;
+            Some((destination.display().to_string(), bytes))
+        })
+        .collect::<Vec<_>>();
+    let cache_hit_count = cached_results.iter().flatten().count();
+
     // Phase 2: how many inputs share each digest? A diagram whose source repeats in the batch --
     // the same architecture snippet embedded across a docs site, or an unchanged file in a CI
     // re-render -- is the SAME parse, layout and render every time. Rendering it once and reusing
@@ -2790,14 +3048,20 @@ fn cmd_render_batch(
     // actually repeat are memoized, so peak memory tracks the duplicated set, not the batch.
     let mut digest_counts: std::collections::BTreeMap<&str, usize> =
         std::collections::BTreeMap::new();
-    for entry in loaded.iter().flatten() {
-        *digest_counts.entry(entry.1.as_str()).or_insert(0) += 1;
+    for (index, entry) in loaded.iter().enumerate() {
+        if cached_results[index].is_none()
+            && let Ok((_, digest)) = entry
+        {
+            *digest_counts.entry(digest.as_str()).or_insert(0) += 1;
+        }
     }
     // Lowest input index owns each digest, so which diagram is rendered never depends on
     // completion order.
     let mut owner_of: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
     for (index, entry) in loaded.iter().enumerate() {
-        if let Ok((_, digest)) = entry {
+        if cached_results[index].is_none()
+            && let Ok((_, digest)) = entry
+        {
             owner_of.entry(digest.as_str()).or_insert(index);
         }
     }
@@ -2832,8 +3096,14 @@ fn cmd_render_batch(
     }
     let reused = loaded
         .iter()
-        .flatten()
-        .filter(|(_, d)| digest_counts.get(d.as_str()).copied().unwrap_or(0) > 1)
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            cached_results[index]
+                .is_none()
+                .then(|| entry.as_ref().ok())
+                .flatten()
+        })
+        .filter(|(_, digest)| digest_counts.get(digest.as_str()).copied().unwrap_or(0) > 1)
         .count()
         - owner_of
             .iter()
@@ -2846,6 +3116,9 @@ fn cmd_render_batch(
     let render_owner = |state: &mut (FlowchartBatchParseScratch, SvgBatchRenderer),
                         index: usize|
      -> Result<(String, usize)> {
+        if let Some(cached) = cached_results[index].as_ref() {
+            return Ok(cached.clone());
+        }
         let (source, digest) = match &loaded[index] {
             Ok(pair) => pair,
             Err(error) => return Err(anyhow::anyhow!("{error:#}")),
@@ -2965,6 +3238,9 @@ fn cmd_render_batch(
         owner_results
     } else {
         let write_duplicate = |index: usize| -> Result<(String, usize)> {
+            if let Some(cached) = cached_results[index].as_ref() {
+                return Ok(cached.clone());
+            }
             let (_, digest) = match &loaded[index] {
                 Ok(pair) => pair,
                 Err(_) => return Ok((String::new(), 0)),
@@ -2994,6 +3270,49 @@ fn cmd_render_batch(
         };
         run_all(&write_duplicate)
     };
+    if cache_active {
+        let mut next_cache = prior_cache.clone();
+        let mut commit_manifest = false;
+        for (index, result) in results.iter().enumerate() {
+            let Ok((_, bytes)) = result else {
+                continue;
+            };
+            let Ok((_, digest)) = &loaded[index] else {
+                continue;
+            };
+            let Some(key) = cache_key_for(digest) else {
+                continue;
+            };
+            let Some(options_key) = option_cache_digest.as_ref() else {
+                continue;
+            };
+            let Ok(source_metadata) = Path::new(&inputs[index]).metadata() else {
+                continue;
+            };
+            let Some(source_modified_ns) = modified_key(&source_metadata) else {
+                continue;
+            };
+            let destination = destination_for(&inputs[index]);
+            let Some(entry_name) = destination.file_name() else {
+                continue;
+            };
+            let entry_name = entry_name.to_string_lossy().into_owned();
+            let entry = BatchRenderCacheEntry {
+                key,
+                options_key: options_key.clone(),
+                source_bytes: source_metadata.len(),
+                source_modified_ns,
+                bytes: u64::try_from(*bytes).unwrap_or(u64::MAX),
+            };
+            commit_manifest |= next_cache.entries.get(&entry_name) != Some(&entry);
+            next_cache.entries.insert(entry_name, entry);
+        }
+        if commit_manifest {
+            let encoded = serde_json::to_vec(&next_cache)?;
+            std::fs::write(&cache_path, encoded)
+                .with_context(|| format!("cannot write {}", cache_path.display()))?;
+        }
+    }
     let elapsed = started.elapsed();
 
     let mut rendered = 0usize;
@@ -3033,7 +3352,8 @@ fn cmd_render_batch(
 
     if !json {
         eprintln!(
-            "rendered {rendered}/{} diagram(s) ({reused} identical renders reused, {} shared \
+            "rendered {rendered}/{} diagram(s) ({cache_hit_count} persistent hits, {reused} \
+             identical renders reused, {} shared \
              prefix parses reused / {} bytes), {total_bytes} bytes, {} worker(s), {:.3} ms",
             inputs.len(),
             parse_plan_stats.reused_prefix_parses,
