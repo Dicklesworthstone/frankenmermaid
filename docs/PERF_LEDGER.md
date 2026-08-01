@@ -1706,6 +1706,104 @@ cycles, and 93.13% less CPU time** (`5.5259x`, `12.7941x`, and `14.5505x` ratios
   miss-count pool sizing, executing-binary identity, the 384-input corpus, or output equivalence
   changes.
 
+## KEEP: hoist the fixed neighbour layer out of both crossing searches — `schema_catalog_25` −40.92% instructions (2026-08-01)
+
+**Commits:** `2a8e6c01` (e-graph candidate search) and `c18bc2e0` (refinement transpose + sifting).
+
+**Campaign result class:** maintenance-self-speedup
+
+- **Profile-first attribution.** Non-LTO (`lto=false strip=false debug=true`) symbolized build,
+  `perf record -F 999 --call-graph=dwarf`, pinned core 3, 60 whole-job repetitions of
+  `schema_catalog_25` (25 bounded-context ER schemas, the repo's **worst certified incumbent
+  ratio**, 412.8x). Top self-time: `egraph_ordering::crossing_count` **16.29%**, `_mi_memset`
+  **7.14%**, `count_inversions` 5.40%, mimalloc alloc/free ~8.9%, `__memmove_avx` 3.43%. Roughly
+  41% of the whole job is crossing counting and the allocator traffic underneath it.
+- **Why this is a gap and not a shared cost.** dagre counts crossings ~8 times per graph over a
+  persistent structure. `optimize_layer_ordering` scores O(n) candidates per round for O(n) rounds
+  and every score re-entered `crossing_count_dense`, which rebuilds **seven** vectors — two position
+  maps over the node-id domain, bucket counts, offsets, a cursor, the grouped partner positions and
+  the Fenwick tree. The incumbent does not pay this shape.
+- **The ONE lever.** The neighbour layers do not move during that search, so their position map and
+  the bucketing of edges by their positions are loop invariants. `FixedLayerCrossings` computes both
+  once per search; each candidate score becomes a Fenwick sweep over a prebuilt CSR with **zero**
+  allocation. Counts are identical, not approximate: two edges cross iff `(u1-u2)(l1-l2) < 0`, which
+  is symmetric in the two layers, so bucketing by the fixed layer counts the same pairs.
+- **The same lever, widened (`c18bc2e0`).** `crossing_refinement` pays the identical cost in the
+  identical shape: transpose tries every adjacent swap in a rank and sifting tries every node at
+  every position, each trial calling `pair_crossings` twice, and each of those rebuilt two
+  domain-sized position arrays, re-sorted the pair's edges and ran a recursive merge sort that
+  allocates a `Vec` at **every level of its recursion**. Both phases perturb one rank while its two
+  neighbours stand still, so `RankNeighbourCrossings` buckets both adjacent pairs once per rank
+  visit — O(n) reuses per rank in transpose, O(n^2) in sifting. `FixedLayerCrossings` moved to plain
+  slices so one implementation serves both call sites.
+- **Byte-identity, proven BEFORE timing.** 18 corpus jobs (flowchart small/medium/large, wide
+  8x16/12x24/16x32, dense_dag_200, cyclic_scc_100, sequence_20, class_50, state_40, er_40,
+  edit_trace_60x20, arch_100x50, er_schema_1000x6, monorepo_arch_120, schema_catalog_25,
+  docs_site_50), comparing the SHA-256 of every job's concatenated per-document SVG stream:
+  **0 mismatches**. A base-vs-base self-determinism control ran in the same sweep and was clean on
+  every item, which matters here because this CLI's layout guardrail is a function of measured parse
+  wall time.
+- **Shared-checkout isolation.** A peer agent modified `crates/fm-cli/src/main.rs` at 12:29:36,
+  before the candidate build, so the first A/B conflated two changes and was discarded. The baseline
+  was rebuilt in a detached worktree as HEAD **plus the identical peer snapshot**
+  (`256f45a8d5bac6984ecbd0765eb2001588f267f509c6ee497574cd82b3b8b615`); the peer's file in the shared
+  checkout was only ever read. Both arms are frozen artifacts differing by exactly this change.
+- **A/B + A/A null, arms alternated per round, instructions (`perf stat`), pinned core, `--jobs 1`.**
+  Both ELFs self-report their own hash under `FM_SELF_REPORT_ELF_SHA256`, and both were verified to
+  match the on-disk artifact that executed:
+
+  **Executing ELF SHA-256 (self-reported by process):**
+  `6daf8cb0a0ccec1baa3cb0852f9747e08a81748dd5575deeb1fa03168cd7ecbd`
+  (end-to-end candidate at `c18bc2e0`; its baseline arm at session-start `ebc323c3` was
+  `5e8b37a79557e78d0fb293960c559ae7d81428ce9ba3974e99c93c1a38969363`).
+
+  **A/A null control (same invocation):** baseline binary against a byte-identical copy of itself,
+  alternated with the A/B arms inside the same pinned sweep — median `0.999986`, range
+  `0.999393`–`1.000532` for the end-to-end pair.
+
+  **Counted mechanism:** seven per-candidate vector allocations plus two node-id-domain-sized fills
+  removed from every crossing count in the e-graph search, and in the refinement a further two
+  domain-sized fills, one sort and an O(edges) allocating merge-sort recursion removed from every
+  transpose and sifting trial. Retained work on both paths is one Fenwick sweep over a CSR built
+  once per search or per rank visit.
+
+  | measurement | A/A null (median) | A/B (median) | verdict |
+  |---|---:|---:|---|
+  | `2a8e6c01` alone | 1.000094 (range 0.999175–1.000198) | **0.771958** | **−22.80%**, ~440x the null half-width |
+  | `c18bc2e0` on top | 0.999953 (range 0.998564–1.000896) | **0.764909** | **−23.51%**, ~195x the null half-width |
+  | **end-to-end** `ebc323c3` → `c18bc2e0` | 0.999986 (range 0.999393–1.000532) | **0.590760** | **−40.92%**, ~690x the null half-width; 1.709G → 1.010G instructions; every round outside the entire A/A range |
+  | 9 negative controls | ~0.999–1.002 | 0.9997–1.0038 | inside their own A/A null; no regression anywhere |
+
+  Wall clock corroborates in direction only. It is unusable for a verdict on this host: byte-identical
+  code measured 26.0 ms and then 17.3 ms in two sweeps at load ~30–44, while instructions held A/A at
+  0.999–1.001 across the same window.
+- **Why instructions is the gate.** Pure work removal — no ISA, allocator or layout change — so
+  instruction count measures the mechanism rather than proxying for it, and is load-immune.
+- **Correctness.** `cargo clippy -p fm-layout --all-targets -- -D warnings` clean; 444 `fm-layout`
+  tests and all `frankenmermaid-cli` suites green. A new differential test
+  `fixed_layer_crossings_match_crossing_count` checks the hoisted counter against `crossing_count`
+  over 400 pseudorandom layer pairs, from both bucketing directions, including edges naming nodes
+  absent from their layer, plus reuse of one counter across successive permutations.
+  `fnx_differential_report::differential_all_golden_cases_pass_gate` flakes roughly 1-in-6 at host
+  load 30+ on `render_time_regression` — a wall-time threshold measured in-process, on a path
+  neither commit touches. Not a functional gate.
+- **What this does NOT claim.** No live mermaid-js arm ran in these invocations, so this is
+  maintenance self-speedup and supports no competitive ratio. The 412.8x figure is the previously
+  certified ratio that identified this job as the worst one to attack; re-certifying it needs a
+  quiet host and a bracketed incumbent arm.
+- **Verdict: KEEP.** No feature flag: byte-identical and monotonically less work.
+- **Retry / re-check predicate.** Re-open if (1) the rewrite operators stop being strict
+  permutations of the layer's node set — the build-time membership filter and the reuse of one
+  position map across candidates both rest on that, (2) `should_use_egraph`'s 100-node cap moves,
+  which changes which layers enter the e-graph search at all, or (3) `crossing_refinement` starts
+  perturbing more than one rank between trials, which would invalidate rebuilding
+  `RankNeighbourCrossings` only once per rank visit.
+- **What the profile says next.** After both commits the ER-catalog profile is flat: no frame above
+  `optimize_layer_ordering` at 10.19% self, and an arena rewrite aimed squarely at that frame
+  returned only −0.96% and was reverted (see `docs/NEGATIVE_EVIDENCE.md`). The next lever on this
+  job is not another allocation removal; it needs a different workload class or a change to how many
+  candidates the search evaluates at all.
+
 ## KEEP: caller-certified change sets remove repository-wide cache validation (2026-08-01)
 
 **Bead:** `bd-nsgu`. **Lane:** cod (`BlackThrush`).

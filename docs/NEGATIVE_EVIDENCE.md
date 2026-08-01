@@ -19861,3 +19861,40 @@ SVG SHA-256 `6410d31e4b9b9e96053fe237b7f45bc13eb50a80badb35dff06fa7d09f24a6ab`.
   failure closes that environment rather than triggering repeated retries.
 
   Agent: cc (CobaltFern)
+
+### REJECT: pack the e-graph candidate set into one reusable arena (2026-08-01)
+
+**Campaign result class:** maintenance-self-speedup
+
+**A/A null control (same invocation):** baseline binary against a byte-identical copy of itself,
+alternated with the A/B arms in the same pinned sweep — median `1.000111`, range
+`0.999332`–`1.000506`.
+
+**Counted mechanism:** `candidate_orderings` allocates roughly `8n` heap `Vec<usize>` per round for
+`O(n)` rounds per layer, then lexicographically sorts them. The candidate arena wrote every
+candidate into one buffer reused across rounds and sorted a vector of `usize` indices instead,
+emitting a provably identical candidate sequence (checked against the retained reference over 300
+pseudorandom layers x 3 neighbour configurations). Output was byte-identical across all 18 corpus
+jobs.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`1b37ccd8c4d94731ed9f20417c7405eda7aa73f340905bb64279fd24be423967`
+(rejected candidate; baseline arm
+`10d8108c71494c8520dddc23ef1db17c86c12fa4b570b845488647dc81c55d91`).
+
+- **Result.** `schema_catalog_25` A/B median `0.990429` over 11 rounds, range
+  `0.989825`–`0.990889`: **−0.96% instructions**. Real and ~16x the A/A half-width, but 15x smaller
+  than the frame it was aimed at.
+- **Why the attribution was wrong.** The lever was chosen off `optimize_layer_ordering` at 10.19%
+  self-time plus `__memmove_avx` 2.75% and the candidate sort 2.49%. That self-time is the
+  **scoring loop**, not allocation, and sorting a `Vec<LayerOrdering>` permutes 24-byte struct
+  headers — it never moves the n-element orderings, so "the sort moves whole orderings" was simply
+  false. Under mimalloc the per-candidate allocations that remained are cheap.
+- **Decision.** Reverted. Below 1% does not repay permanently maintaining two parallel candidate
+  generators that must stay in lockstep; if they ever drift, rendered output changes silently. The
+  patch is preserved but not landed.
+- **Retry predicate.** Retry only if a profile shows candidate **allocation** (not
+  `optimize_layer_ordering` self-time) above 5% on some workload — which needs layers much nearer
+  the `should_use_egraph` 100-node cap than the ER catalog reaches — or if the candidate set is
+  ever consumed without materializing orderings at all, which would remove the second generator
+  rather than add one.
