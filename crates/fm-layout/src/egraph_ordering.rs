@@ -355,7 +355,10 @@ fn max_ordering_node_id(
 /// layer counts the same pairs as bucketing by the upper layer: with partners emitted in ascending
 /// fixed position and every group querying the Fenwick tree before adding to it, edges sharing a
 /// fixed position are excluded either way.
-struct FixedLayerCrossings {
+/// Takes plain slices rather than [`LayerOrdering`]/[`LayerEdges`] so `crossing_refinement`'s
+/// transpose and sifting loops -- which hold their orderings as `BTreeMap<usize, Vec<usize>>` and
+/// pay the same per-trial rebuild -- can share it without wrapping or cloning.
+pub(crate) struct FixedLayerCrossings {
     /// Moving-layer node ids grouped by the fixed layer's position, ascending.
     grouped: Vec<usize>,
     /// `grouped[offsets[p]..offsets[p + 1]]` are the partners of fixed position `p`.
@@ -372,10 +375,10 @@ impl FixedLayerCrossings {
     /// domain is too sparse to index densely — the same guard [`crossing_count_dense`] applies,
     /// so a pathological id domain still falls back to the allocating path instead of reserving a
     /// huge mostly-empty array.
-    fn new(
-        fixed: &LayerOrdering,
-        moving: &LayerOrdering,
-        edges: &LayerEdges,
+    pub(crate) fn new(
+        fixed: &[usize],
+        moving: &[usize],
+        edges: &[(usize, usize)],
         fixed_is_upper: bool,
     ) -> Option<Self> {
         const MISSING: usize = usize::MAX;
@@ -383,22 +386,22 @@ impl FixedLayerCrossings {
         let useful_slots = fixed
             .len()
             .saturating_add(moving.len())
-            .saturating_add(edges.edges.len().saturating_mul(2))
+            .saturating_add(edges.len().saturating_mul(2))
             .max(64);
         let domain_cap = useful_slots.saturating_mul(8);
 
-        let fixed_domain = fixed.order.iter().copied().max()?.checked_add(1)?;
-        let moving_domain = moving.order.iter().copied().max()?.checked_add(1)?;
+        let fixed_domain = fixed.iter().copied().max()?.checked_add(1)?;
+        let moving_domain = moving.iter().copied().max()?.checked_add(1)?;
         if fixed_domain > domain_cap || moving_domain > domain_cap {
             return None;
         }
 
         let mut fixed_pos = vec![MISSING; fixed_domain];
-        for (position, &node_id) in fixed.order.iter().enumerate() {
+        for (position, &node_id) in fixed.iter().enumerate() {
             fixed_pos[node_id] = position;
         }
         let mut positions = vec![MISSING; moving_domain];
-        for (position, &node_id) in moving.order.iter().enumerate() {
+        for (position, &node_id) in moving.iter().enumerate() {
             positions[node_id] = position;
         }
 
@@ -420,7 +423,7 @@ impl FixedLayerCrossings {
         };
 
         let mut offsets = vec![0_usize; fixed.len().saturating_add(1)];
-        for (fixed_position, _) in edges.edges.iter().filter_map(split) {
+        for (fixed_position, _) in edges.iter().filter_map(split) {
             offsets[fixed_position + 1] += 1;
         }
         for index in 0..fixed.len() {
@@ -430,7 +433,7 @@ impl FixedLayerCrossings {
         let valid_edges = offsets[fixed.len()];
         let mut grouped = vec![0_usize; valid_edges];
         let mut cursor = offsets[..fixed.len()].to_vec();
-        for (fixed_position, moving_node) in edges.edges.iter().filter_map(split) {
+        for (fixed_position, moving_node) in edges.iter().filter_map(split) {
             grouped[cursor[fixed_position]] = moving_node;
             cursor[fixed_position] += 1;
         }
@@ -444,11 +447,11 @@ impl FixedLayerCrossings {
     }
 
     /// Crossings against the fixed layer for one candidate ordering of the moving layer.
-    fn count(&mut self, moving: &LayerOrdering) -> usize {
+    pub(crate) fn count(&mut self, moving: &[usize]) -> usize {
         if self.grouped.len() < 2 {
             return 0;
         }
-        for (position, &node_id) in moving.order.iter().enumerate() {
+        for (position, &node_id) in moving.iter().enumerate() {
             self.positions[node_id] = position;
         }
 
@@ -494,26 +497,24 @@ impl<'a> LayerScorer<'a> {
         Self {
             upper,
             lower,
-            upper_fast: upper
-                .and_then(|(ordering, edges)| {
-                    FixedLayerCrossings::new(ordering, current, edges, true)
-                }),
-            lower_fast: lower
-                .and_then(|(ordering, edges)| {
-                    FixedLayerCrossings::new(ordering, current, edges, false)
-                }),
-            }
+            upper_fast: upper.and_then(|(ordering, edges)| {
+                FixedLayerCrossings::new(&ordering.order, &current.order, &edges.edges, true)
+            }),
+            lower_fast: lower.and_then(|(ordering, edges)| {
+                FixedLayerCrossings::new(&ordering.order, &current.order, &edges.edges, false)
+            }),
+        }
     }
 
     fn score(&mut self, current: &LayerOrdering) -> usize {
         let mut total = 0_usize;
         match (self.upper_fast.as_mut(), self.upper) {
-            (Some(fast), _) => total += fast.count(current),
+            (Some(fast), _) => total += fast.count(&current.order),
             (None, Some((ordering, edges))) => total += crossing_count(ordering, current, edges),
             (None, None) => {}
         }
         match (self.lower_fast.as_mut(), self.lower) {
-            (Some(fast), _) => total += fast.count(current),
+            (Some(fast), _) => total += fast.count(&current.order),
             (None, Some((ordering, edges))) => total += crossing_count(current, ordering, edges),
             (None, None) => {}
         }
@@ -1031,15 +1032,19 @@ mod tests {
             let edges = LayerEdges { edges };
 
             let expected = crossing_count(&upper, &lower, &edges);
-            let from_upper = FixedLayerCrossings::new(&upper, &lower, &edges, true)
-                .map(|mut counter| counter.count(&lower));
-            let from_lower = FixedLayerCrossings::new(&lower, &upper, &edges, false)
-                .map(|mut counter| counter.count(&upper));
+            let from_upper =
+                FixedLayerCrossings::new(&upper.order, &lower.order, &edges.edges, true)
+                    .map(|mut counter| counter.count(&lower.order));
+            let from_lower =
+                FixedLayerCrossings::new(&lower.order, &upper.order, &edges.edges, false)
+                    .map(|mut counter| counter.count(&upper.order));
             assert_eq!(from_upper, Some(expected), "case {case} bucketed by upper");
             assert_eq!(from_lower, Some(expected), "case {case} bucketed by lower");
 
             // Reusing one counter across permutations must match a fresh count every time.
-            let Some(mut counter) = FixedLayerCrossings::new(&upper, &lower, &edges, true) else {
+            let Some(mut counter) =
+                FixedLayerCrossings::new(&upper.order, &lower.order, &edges.edges, true)
+            else {
                 continue;
             };
             let mut permuted = lower.order.clone();
@@ -1049,7 +1054,7 @@ mod tests {
                 permuted.swap(i, j);
                 let candidate = LayerOrdering::new(permuted.clone());
                 assert_eq!(
-                    counter.count(&candidate),
+                    counter.count(&candidate.order),
                     crossing_count(&upper, &candidate, &edges),
                     "case {case} reused counter"
                 );

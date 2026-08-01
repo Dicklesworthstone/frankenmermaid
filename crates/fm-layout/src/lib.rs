@@ -10524,11 +10524,16 @@ fn crossing_refinement(
     // decrease is exactly equivalent to the full-total comparison, so the resulting ordering (and
     // `best_crossings`) is identical to the naive version, just far cheaper to reach.
     let pair_edges = build_pair_node_edges(ir, ranks);
-    let affected = |rank: usize, ordering: &BTreeMap<usize, Vec<usize>>| -> usize {
-        rank.checked_sub(1)
-            .map_or(0, |p| pair_crossings(p, rank, ordering, &pair_edges))
-            .saturating_add(pair_crossings(rank, rank + 1, ordering, &pair_edges))
-    };
+
+    // Both refinement phases perturb ONE rank at a time while its two neighbours stand still:
+    // transpose tries every adjacent swap in the rank, sifting tries every node at every position.
+    // Each trial called `pair_crossings` twice, and each of those rebuilt two node-id-domain-sized
+    // position arrays, re-sorted the pair's edges and ran an allocating recursive merge sort -- so
+    // the neighbour-derived half of that work was recomputed O(n) or O(n^2) times per rank for
+    // orderings that never changed. `RankNeighbourCrossings` bucket the pair's edges against the
+    // fixed neighbour once per rank visit, exactly as `FixedLayerCrossings` does for the e-graph
+    // search, leaving each trial a single allocation-free Fenwick sweep.
+    let mut neighbours = RankNeighbourCrossings::default();
 
     // Phase 1: Transpose — swap adjacent nodes in each rank if it reduces crossings.
     let mut improved = true;
@@ -10543,13 +10548,14 @@ fn crossing_refinement(
             if n < 2 {
                 continue;
             }
-            let mut current = affected(rank, &ordering_by_rank);
+            neighbours.rebuild(rank, &ordering_by_rank, &pair_edges);
+            let mut current = neighbours.count(rank, &ordering_by_rank, &pair_edges);
             for i in 0..n - 1 {
                 // Try swapping positions i and i+1 in-place.
                 if let Some(rank_order) = ordering_by_rank.get_mut(&rank) {
                     rank_order.swap(i, i + 1);
                 }
-                let trial = affected(rank, &ordering_by_rank);
+                let trial = neighbours.count(rank, &ordering_by_rank, &pair_edges);
                 if trial < current {
                     best_crossings = best_crossings.saturating_sub(current - trial);
                     current = trial;
@@ -10573,7 +10579,8 @@ fn crossing_refinement(
             _ => continue,
         };
         let n = order.len();
-        let mut current = affected(rank, &ordering_by_rank);
+        neighbours.rebuild(rank, &ordering_by_rank, &pair_edges);
+        let mut current = neighbours.count(rank, &ordering_by_rank, &pair_edges);
         for node in order {
             // Find current position of node in the (potentially modified) rank order.
             let mut current_pos = match ordering_by_rank.get(&rank) {
@@ -10595,7 +10602,7 @@ fn crossing_refinement(
                     rank_order.insert(target_pos, element);
                 }
 
-                let trial = affected(rank, &ordering_by_rank);
+                let trial = neighbours.count(rank, &ordering_by_rank, &pair_edges);
                 if trial < current {
                     best_crossings = best_crossings.saturating_sub(current - trial);
                     current = trial;
@@ -12690,6 +12697,69 @@ fn build_pair_node_edges(
             .push((source, target));
     }
     pair_edges
+}
+
+/// The two adjacent-rank-pair counters a single-rank perturbation can change.
+///
+/// [`crossing_refinement`] perturbs one rank at a time while its neighbours stand still, so the
+/// neighbour-derived half of each trial's work -- position map, edge bucketing, sort order -- is a
+/// loop invariant. Rebuilt once per rank visit and then reused by every trial in that visit.
+/// `None` on a side means that pair has no usable dense domain (or no edges at all) and the trial
+/// falls back to [`pair_crossings`], which computes the same number.
+#[derive(Default)]
+struct RankNeighbourCrossings {
+    upper: Option<crate::egraph_ordering::FixedLayerCrossings>,
+    lower: Option<crate::egraph_ordering::FixedLayerCrossings>,
+}
+
+impl RankNeighbourCrossings {
+    /// Re-bucket both pairs against `rank`'s current neighbours. Must be called whenever a rank
+    /// other than `rank` may have moved.
+    fn rebuild(
+        &mut self,
+        rank: usize,
+        ordering_by_rank: &BTreeMap<usize, Vec<usize>>,
+        pair_edges: &FxHashMap<(usize, usize), Vec<(usize, usize)>>,
+    ) {
+        let moving = ordering_by_rank.get(&rank).map_or(&[][..], Vec::as_slice);
+        self.upper = rank.checked_sub(1).and_then(|upper_rank| {
+            let fixed = ordering_by_rank.get(&upper_rank)?;
+            let edges = pair_edges.get(&(upper_rank, rank))?;
+            crate::egraph_ordering::FixedLayerCrossings::new(fixed, moving, edges, true)
+        });
+        let lower_rank = rank.saturating_add(1);
+        self.lower = ordering_by_rank.get(&lower_rank).and_then(|fixed| {
+            let edges = pair_edges.get(&(rank, lower_rank))?;
+            crate::egraph_ordering::FixedLayerCrossings::new(fixed, moving, edges, false)
+        });
+    }
+
+    /// Crossings on the `(rank - 1, rank)` and `(rank, rank + 1)` pairs — the only two a
+    /// perturbation confined to `rank` can change.
+    fn count(
+        &mut self,
+        rank: usize,
+        ordering_by_rank: &BTreeMap<usize, Vec<usize>>,
+        pair_edges: &FxHashMap<(usize, usize), Vec<(usize, usize)>>,
+    ) -> usize {
+        let moving = ordering_by_rank.get(&rank).map_or(&[][..], Vec::as_slice);
+        let upper = match self.upper.as_mut() {
+            Some(counter) => counter.count(moving),
+            None => rank.checked_sub(1).map_or(0, |upper_rank| {
+                pair_crossings(upper_rank, rank, ordering_by_rank, pair_edges)
+            }),
+        };
+        let lower = match self.lower.as_mut() {
+            Some(counter) => counter.count(moving),
+            None => pair_crossings(
+                rank,
+                rank.saturating_add(1),
+                ordering_by_rank,
+                pair_edges,
+            ),
+        };
+        upper.saturating_add(lower)
+    }
 }
 
 /// Crossings on a single adjacent rank pair for the current ordering — O(pair-edges · log).
