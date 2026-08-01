@@ -337,6 +337,190 @@ fn max_ordering_node_id(
         .max()
 }
 
+/// Crossing counter for one adjacent layer pair in which exactly one of the two layers moves.
+///
+/// `optimize_layer_ordering` scores O(n) candidate orderings per round for O(n) rounds against the
+/// *same* neighbour layers, and every one of those scores used to enter [`crossing_count_dense`]
+/// and rebuild seven vectors from scratch: two position maps over the node-id domain, bucket
+/// counts, offsets, a cursor, the grouped partner positions and the Fenwick tree. On the ER
+/// schema-catalog job that showed up as `crossing_count` at 16.3% self-time with `_mi_memset` at
+/// 7.1% and mimalloc alloc/free near 9% underneath it.
+///
+/// The neighbour layer does not move during that search. Its position map, and therefore the
+/// bucketing of edges by its positions, are loop invariants. Computed once here, each candidate
+/// score becomes a Fenwick sweep over a prebuilt CSR with no allocation at all.
+///
+/// Counts are identical to [`crossing_count`], not merely close. Two edges cross iff
+/// `(u1 - u2)(l1 - l2) < 0`, which is symmetric in the two layers, so bucketing by the *fixed*
+/// layer counts the same pairs as bucketing by the upper layer: with partners emitted in ascending
+/// fixed position and every group querying the Fenwick tree before adding to it, edges sharing a
+/// fixed position are excluded either way.
+struct FixedLayerCrossings {
+    /// Moving-layer node ids grouped by the fixed layer's position, ascending.
+    grouped: Vec<usize>,
+    /// `grouped[offsets[p]..offsets[p + 1]]` are the partners of fixed position `p`.
+    offsets: Vec<usize>,
+    /// Position map over the moving layer's node-id domain. Every candidate is a permutation of
+    /// the same node set, so this is fully overwritten per score and never needs clearing.
+    positions: Vec<usize>,
+    /// Fenwick tree over moving-layer positions; all zero between scores.
+    fenwick: Vec<usize>,
+}
+
+impl FixedLayerCrossings {
+    /// Bucket `edges` by the fixed layer's positions, or `None` when the moving layer's node-id
+    /// domain is too sparse to index densely — the same guard [`crossing_count_dense`] applies,
+    /// so a pathological id domain still falls back to the allocating path instead of reserving a
+    /// huge mostly-empty array.
+    fn new(
+        fixed: &LayerOrdering,
+        moving: &LayerOrdering,
+        edges: &LayerEdges,
+        fixed_is_upper: bool,
+    ) -> Option<Self> {
+        const MISSING: usize = usize::MAX;
+
+        let useful_slots = fixed
+            .len()
+            .saturating_add(moving.len())
+            .saturating_add(edges.edges.len().saturating_mul(2))
+            .max(64);
+        let domain_cap = useful_slots.saturating_mul(8);
+
+        let fixed_domain = fixed.order.iter().copied().max()?.checked_add(1)?;
+        let moving_domain = moving.order.iter().copied().max()?.checked_add(1)?;
+        if fixed_domain > domain_cap || moving_domain > domain_cap {
+            return None;
+        }
+
+        let mut fixed_pos = vec![MISSING; fixed_domain];
+        for (position, &node_id) in fixed.order.iter().enumerate() {
+            fixed_pos[node_id] = position;
+        }
+        let mut positions = vec![MISSING; moving_domain];
+        for (position, &node_id) in moving.order.iter().enumerate() {
+            positions[node_id] = position;
+        }
+
+        // Endpoint absent from its own layer means the edge can never cross anything here, and
+        // membership does not change across candidates, so filter once at build time.
+        let split = |&(source, target): &(usize, usize)| -> Option<(usize, usize)> {
+            let (fixed_node, moving_node) = if fixed_is_upper {
+                (source, target)
+            } else {
+                (target, source)
+            };
+            let fixed_position = fixed_pos.get(fixed_node).copied().unwrap_or(MISSING);
+            if fixed_position == MISSING
+                || positions.get(moving_node).copied().unwrap_or(MISSING) == MISSING
+            {
+                return None;
+            }
+            Some((fixed_position, moving_node))
+        };
+
+        let mut offsets = vec![0_usize; fixed.len().saturating_add(1)];
+        for (fixed_position, _) in edges.edges.iter().filter_map(split) {
+            offsets[fixed_position + 1] += 1;
+        }
+        for index in 0..fixed.len() {
+            offsets[index + 1] += offsets[index];
+        }
+
+        let valid_edges = offsets[fixed.len()];
+        let mut grouped = vec![0_usize; valid_edges];
+        let mut cursor = offsets[..fixed.len()].to_vec();
+        for (fixed_position, moving_node) in edges.edges.iter().filter_map(split) {
+            grouped[cursor[fixed_position]] = moving_node;
+            cursor[fixed_position] += 1;
+        }
+
+        Some(Self {
+            grouped,
+            offsets,
+            positions,
+            fenwick: vec![0_usize; moving.len().saturating_add(1)],
+        })
+    }
+
+    /// Crossings against the fixed layer for one candidate ordering of the moving layer.
+    fn count(&mut self, moving: &LayerOrdering) -> usize {
+        if self.grouped.len() < 2 {
+            return 0;
+        }
+        for (position, &node_id) in moving.order.iter().enumerate() {
+            self.positions[node_id] = position;
+        }
+
+        let mut seen = 0_usize;
+        let mut inversions = 0_usize;
+        for window in self.offsets.windows(2) {
+            let (Some(&start), Some(&end)) = (window.first(), window.get(1)) else {
+                continue;
+            };
+            let group = &self.grouped[start..end];
+            for &node_id in group {
+                let position = self.positions[node_id];
+                inversions += seen - fenwick_sum(&self.fenwick, position + 1);
+            }
+            for &node_id in group {
+                fenwick_add(&mut self.fenwick, self.positions[node_id] + 1);
+            }
+            seen += group.len();
+        }
+
+        self.fenwick.fill(0);
+        inversions
+    }
+}
+
+/// Scores candidate orderings of one layer against its fixed neighbours.
+///
+/// Holds a [`FixedLayerCrossings`] per side where the node-id domain allows it and falls back to
+/// [`crossing_count`] otherwise; both produce the same counts.
+struct LayerScorer<'a> {
+    upper: Option<(&'a LayerOrdering, &'a LayerEdges)>,
+    lower: Option<(&'a LayerOrdering, &'a LayerEdges)>,
+    upper_fast: Option<FixedLayerCrossings>,
+    lower_fast: Option<FixedLayerCrossings>,
+}
+
+impl<'a> LayerScorer<'a> {
+    fn new(
+        current: &LayerOrdering,
+        upper: Option<(&'a LayerOrdering, &'a LayerEdges)>,
+        lower: Option<(&'a LayerOrdering, &'a LayerEdges)>,
+    ) -> Self {
+        Self {
+            upper,
+            lower,
+            upper_fast: upper
+                .and_then(|(ordering, edges)| {
+                    FixedLayerCrossings::new(ordering, current, edges, true)
+                }),
+            lower_fast: lower
+                .and_then(|(ordering, edges)| {
+                    FixedLayerCrossings::new(ordering, current, edges, false)
+                }),
+            }
+    }
+
+    fn score(&mut self, current: &LayerOrdering) -> usize {
+        let mut total = 0_usize;
+        match (self.upper_fast.as_mut(), self.upper) {
+            (Some(fast), _) => total += fast.count(current),
+            (None, Some((ordering, edges))) => total += crossing_count(ordering, current, edges),
+            (None, None) => {}
+        }
+        match (self.lower_fast.as_mut(), self.lower) {
+            (Some(fast), _) => total += fast.count(current),
+            (None, Some((ordering, edges))) => total += crossing_count(current, ordering, edges),
+            (None, None) => {}
+        }
+        total
+    }
+}
+
 fn fenwick_sum(tree: &[usize], mut index: usize) -> usize {
     let mut sum = 0_usize;
     while index > 0 {
@@ -557,21 +741,25 @@ pub fn optimize_layer_ordering(
     lower: Option<(&LayerOrdering, &LayerEdges)>,
 ) -> LayerOptimizationResult {
     let mut best = ordering.clone();
-    let mut best_crossings = local_crossing_count(&best, upper, lower);
     if best.len() < 2 || !should_use_egraph(best.len()) {
         return LayerOptimizationResult {
+            crossing_count: local_crossing_count(&best, upper, lower),
             ordering: best,
-            crossing_count: best_crossings,
             rewrites_applied: 0,
         };
     }
+
+    // The neighbour layers are fixed for this whole search, so bucket the edges against them once
+    // instead of once per candidate. See `FixedLayerCrossings`.
+    let mut scorer = LayerScorer::new(&best, upper, lower);
+    let mut best_crossings = scorer.score(&best);
 
     let mut rewrites_applied = 0;
     let max_rounds = best.len().saturating_mul(2).max(1);
     for _ in 0..max_rounds {
         let mut best_candidate: Option<(usize, LayerOrdering)> = None;
         for candidate in candidate_orderings(&best, upper, lower) {
-            let candidate_crossings = local_crossing_count(&candidate, upper, lower);
+            let candidate_crossings = scorer.score(&candidate);
             if candidate_crossings >= best_crossings {
                 continue;
             }
@@ -805,6 +993,68 @@ mod tests {
         assert!(should_use_egraph(100));
         assert!(!should_use_egraph(101));
         assert!(!should_use_egraph(500));
+    }
+
+    /// The hoisted counter must agree with `crossing_count` exactly, from either side, including
+    /// when an edge names a node that is absent from the layer it is supposed to sit in.
+    #[test]
+    fn fixed_layer_crossings_match_crossing_count() {
+        let mut state = 0x2b1f_c0de_u64;
+        let mut next = |bound: usize| -> usize {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            usize::try_from(state >> 33).unwrap_or(0) % bound.max(1)
+        };
+
+        for case in 0..400 {
+            let upper_len = 1 + next(9);
+            let lower_len = 1 + next(9);
+            let upper = LayerOrdering::new((0..upper_len).map(|i| i * 2).collect());
+            let lower = LayerOrdering::new((0..lower_len).map(|i| 1 + i * 2).collect());
+
+            let mut edges = Vec::new();
+            for _ in 0..next(14) {
+                // A tenth of the endpoints deliberately name nodes outside both layers.
+                let source = if next(10) == 0 {
+                    900 + next(5)
+                } else {
+                    next(upper_len) * 2
+                };
+                let target = if next(10) == 0 {
+                    900 + next(5)
+                } else {
+                    1 + next(lower_len) * 2
+                };
+                edges.push((source, target));
+            }
+            let edges = LayerEdges { edges };
+
+            let expected = crossing_count(&upper, &lower, &edges);
+            let from_upper = FixedLayerCrossings::new(&upper, &lower, &edges, true)
+                .map(|mut counter| counter.count(&lower));
+            let from_lower = FixedLayerCrossings::new(&lower, &upper, &edges, false)
+                .map(|mut counter| counter.count(&upper));
+            assert_eq!(from_upper, Some(expected), "case {case} bucketed by upper");
+            assert_eq!(from_lower, Some(expected), "case {case} bucketed by lower");
+
+            // Reusing one counter across permutations must match a fresh count every time.
+            let Some(mut counter) = FixedLayerCrossings::new(&upper, &lower, &edges, true) else {
+                continue;
+            };
+            let mut permuted = lower.order.clone();
+            for _ in 0..6 {
+                let i = next(lower_len);
+                let j = next(lower_len);
+                permuted.swap(i, j);
+                let candidate = LayerOrdering::new(permuted.clone());
+                assert_eq!(
+                    counter.count(&candidate),
+                    crossing_count(&upper, &candidate, &edges),
+                    "case {case} reused counter"
+                );
+            }
+        }
     }
 
     #[test]
